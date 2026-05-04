@@ -219,8 +219,21 @@ resolve_ingress_xdp_target(struct pkt_meta *meta)
 		    !(screen_flags & SCREEN_TCP_NO_FLAG) &&
 		    !(screen_flags & SCREEN_LAND_ATTACK) &&
 		    !(meta->addr_family == AF_INET &&
-		      (screen_flags & SCREEN_IP_SOURCE_ROUTE)))
+		      (screen_flags & SCREEN_IP_SOURCE_ROUTE))) {
+			/*
+			 * #867: mark this packet as having bypassed
+			 * xdp_screen so the conntrack miss path can run
+			 * SCREEN_IP_SWEEP accounting on first-ACK flows
+			 * that evade the SYN-centric screen.  Setting the
+			 * bit here (and only here) is what makes the
+			 * post-CT helper safe under LAND/TCP_NO_FLAG/
+			 * SOURCE_ROUTE configurations: those packets
+			 * fall through to xdp_screen and never carry
+			 * the bit, so the helper bails for them.
+			 */
+			meta->meta_flags |= META_FLAG_SCREEN_SKIPPED;
 			return XDP_PROG_ZONE;
+		}
 	}
 
 	return XDP_PROG_SCREEN;
@@ -1158,6 +1171,27 @@ emit_event(struct pkt_meta *meta, __u8 event_type, __u8 action,
 	evt->pad_event = 0;
 
 	bpf_ringbuf_submit(evt, 0);
+}
+
+/*
+ * Drop a packet due to a screen check.
+ * Stores the screen flag in policy_id for event logging,
+ * increments the screen drop counter, emits a ring buffer event,
+ * and returns XDP_DROP.
+ *
+ * Promoted from xdp_screen.c so the conntrack ACK-evasion path
+ * (#867) can share the same screen-drop side effects (policy_id,
+ * GLOBAL_CTR_SCREEN_DROPS, per-screen counter, EVENT_TYPE_SCREEN_DROP).
+ * Placed AFTER emit_event() to satisfy the forward declaration.
+ */
+static __always_inline int
+screen_drop(struct pkt_meta *meta, __u32 screen_flag)
+{
+	meta->policy_id = screen_flag;
+	inc_counter(GLOBAL_CTR_SCREEN_DROPS);
+	inc_screen_counter(screen_flag);
+	emit_event(meta, EVENT_TYPE_SCREEN_DROP, ACTION_DENY, 0, 0, 0);
+	return XDP_DROP;
 }
 
 /*

@@ -733,6 +733,108 @@ handle_embedded_icmp_v6(struct xdp_md *ctx, struct pkt_meta *meta)
 	return XDP_PASS;
 }
 
+/*
+ * #867 — ACK-evasion of SCREEN_IP_SWEEP.
+ *
+ * resolve_ingress_xdp_target() bypasses xdp_screen for established
+ * TCP ACK packets when no SYN-centric screen check forces them through
+ * the screen stage. That fast path is correct for the SYN-keyed sweep
+ * heuristic, but it means an attacker who skips the SYN and starts the
+ * sweep at the ACK stage evades SCREEN_IP_SWEEP entirely.
+ *
+ * This helper runs from the conntrack miss path (CT_STATE_NEW about to
+ * be set, packet about to tail-call into xdp_policy) and re-runs the
+ * existing ip_sweep_track / scan_track logic on the SAME map and SAME
+ * src+zone key as xdp_screen.c:931-965, so legitimate-then-malicious
+ * source bursts are accounted into the same bucket. On threshold trip
+ * we call the shared screen_drop() to set policy_id, increment the
+ * GLOBAL_CTR_SCREEN_DROPS + SCREEN_IP_SWEEP counters, emit
+ * EVENT_TYPE_SCREEN_DROP, and return XDP_DROP.
+ *
+ * Gated on META_FLAG_SCREEN_SKIPPED so this runs ONLY for packets that
+ * actually bypassed xdp_screen — packets dispatched through xdp_screen
+ * (LAND / TCP_NO_FLAG / SOURCE_ROUTE configs, SYN packets, etc.) carry
+ * no flag and are skipped here, eliminating double counting.
+ *
+ * __noinline keeps this in its own verifier frame; the screen-stage
+ * algorithm fits within the 256-byte budget without competing with the
+ * conntrack hot path's stack usage.
+ *
+ * Returns:
+ *   XDP_DROP  on threshold trip (via screen_drop())
+ *   0         otherwise (caller continues to CT_STATE_NEW)
+ */
+static __noinline int
+ip_sweep_track_ack_evasion(struct pkt_meta *meta)
+{
+	if (!(meta->meta_flags & META_FLAG_SCREEN_SKIPPED))
+		return 0;
+
+	/* Defense-in-depth (Codex round-1 code review NEEDS-MINOR):
+	 * the only setter of META_FLAG_SCREEN_SKIPPED is the ACK-only
+	 * predicate in resolve_ingress_xdp_target(); a future caller
+	 * that sets the bit on a different shape would silently
+	 * misroute non-ACK packets through the sweep counter.  Cheap
+	 * re-check (predictable not-taken on production traffic). */
+	if (meta->protocol != PROTO_TCP || meta->is_fragment)
+		return 0;
+	__u8 tf = meta->tcp_flags;
+	if (!(tf & 0x10 /* ACK */) ||
+	    (tf & (0x02 /* SYN */ | 0x01 /* FIN */ |
+		   0x04 /* RST */ | 0x20 /* URG */)))
+		return 0;
+
+	__u32 zone = meta->ingress_zone;
+	struct zone_config *zc = bpf_map_lookup_elem(&zone_configs, &zone);
+	if (!zc)
+		return 0;
+
+	__u32 sp = zc->screen_profile_id;
+	struct screen_config *sc = bpf_map_lookup_elem(&screen_configs, &sp);
+	if (!sc)
+		return 0;
+	if (!(sc->flags & SCREEN_IP_SWEEP) || sc->ip_sweep_thresh == 0)
+		return 0;
+
+	/* Mirror the keying in xdp_screen.c:932-935 so screen-stage
+	 * SYN counts and ACK-evasion ACK counts share the same bucket. */
+	__u32 src = (meta->addr_family == AF_INET) ?
+		meta->src_ip.v4 :
+		(meta->src_ip.v6[0] ^ meta->src_ip.v6[4] ^
+		 meta->src_ip.v6[8] ^ meta->src_ip.v6[12]);
+
+	struct scan_track_key sk = {
+		.src_ip = src,
+		.zone_id = meta->ingress_zone,
+	};
+
+	__u64 now_sec = meta->now_sec;
+	struct scan_track_value *sv =
+		bpf_map_lookup_elem(&ip_sweep_track, &sk);
+	if (sv) {
+		__u32 window_dur = sc->syn_flood_timeout;
+		if (window_dur == 0)
+			window_dur = 1;
+		if (now_sec - sv->window_start >= window_dur) {
+			sv->count = 1;
+			sv->window_start = (__u32)now_sec;
+		} else {
+			sv->count++;
+			if (sv->count > sc->ip_sweep_thresh)
+				return screen_drop(meta, SCREEN_IP_SWEEP);
+		}
+	} else {
+		struct scan_track_value new_sv = {
+			.count = 1,
+			.window_start = (__u32)now_sec,
+		};
+		bpf_map_update_elem(&ip_sweep_track, &sk,
+				    &new_sv, BPF_ANY);
+	}
+
+	return 0;
+}
+
 SEC("xdp")
 int xdp_conntrack_prog(struct xdp_md *ctx)
 {
@@ -888,6 +990,12 @@ int xdp_conntrack_prog(struct xdp_md *ctx)
 							META_FLAG_DNS_REPLY_FASTPATH;
 				}
 
+				/* #867: account ACK-evasion sweeps that
+				 * bypassed xdp_screen via the
+				 * resolve_ingress_xdp_target ACK fast path. */
+				if (ip_sweep_track_ack_evasion(meta) == XDP_DROP)
+					return XDP_DROP;
+
 				meta->ct_state = SESS_STATE_NEW;
 				meta->ct_direction = 0;
 				TRACE_CT_MISS(meta);
@@ -964,6 +1072,12 @@ int xdp_conntrack_prog(struct xdp_md *ctx)
 						meta->meta_flags |=
 							META_FLAG_DNS_REPLY_FASTPATH;
 				}
+
+				/* #867: account ACK-evasion sweeps that
+				 * bypassed xdp_screen via the
+				 * resolve_ingress_xdp_target ACK fast path. */
+				if (ip_sweep_track_ack_evasion(meta) == XDP_DROP)
+					return XDP_DROP;
 
 				meta->ct_state = SESS_STATE_NEW;
 				meta->ct_direction = 0;

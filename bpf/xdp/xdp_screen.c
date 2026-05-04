@@ -26,20 +26,9 @@
  */
 
 /*
- * Drop a packet due to a screen check.
- * Stores the screen flag in policy_id for event logging,
- * increments the screen drop counter, emits a ring buffer event,
- * and returns XDP_DROP.
+ * screen_drop() lives in bpf/headers/xpf_helpers.h (promoted from
+ * here for #867 so xdp_conntrack.c can share the same side effects).
  */
-static __always_inline int
-screen_drop(struct pkt_meta *meta, __u32 screen_flag)
-{
-	meta->policy_id = screen_flag;
-	inc_counter(GLOBAL_CTR_SCREEN_DROPS);
-	inc_screen_counter(screen_flag);
-	emit_event(meta, EVENT_TYPE_SCREEN_DROP, ACTION_DENY, 0, 0, 0);
-	return XDP_DROP;
-}
 
 /*
  * Check flood rate limits for a given zone.
