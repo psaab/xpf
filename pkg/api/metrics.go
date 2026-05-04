@@ -92,6 +92,10 @@ type xpfCollector struct {
 	workerThreadCPUSecs *prometheus.Desc
 	workerWorkLoops     *prometheus.Desc
 	workerIdleLoops     *prometheus.Desc
+	// #925 Phase 2: liveness gauge for the supervisor's catch_unwind
+	// state. 1 = worker has panicked and the supervisor has caught it;
+	// 0 = healthy. Set-only in Phase 1 (cleared by daemon restart).
+	workerDead *prometheus.Desc
 }
 
 func newCollector(srv *Server) *xpfCollector {
@@ -339,6 +343,13 @@ func newCollector(srv *Server) *xpfCollector {
 			"Worker-loop iterations with no useful work (#869).",
 			[]string{"worker_id"}, nil,
 		),
+		workerDead: prometheus.NewDesc(
+			"xpf_userspace_worker_dead",
+			"1 if the userspace-dp worker thread has panicked and been "+
+				"caught by the supervisor; 0 otherwise. Cleared only by "+
+				"daemon restart in Phase 1 (#925).",
+			[]string{"worker_id"}, nil,
+		),
 	}
 }
 
@@ -389,6 +400,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerThreadCPUSecs
 	ch <- c.workerWorkLoops
 	ch <- c.workerIdleLoops
+	ch <- c.workerDead
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -448,6 +460,12 @@ func (c *xpfCollector) emitWorkerRuntime(ch chan<- prometheus.Metric, status dpu
 			prometheus.CounterValue, float64(w.WorkLoops), label)
 		ch <- prometheus.MustNewConstMetric(c.workerIdleLoops,
 			prometheus.CounterValue, float64(w.IdleLoops), label)
+		var deadValue float64
+		if w.Dead {
+			deadValue = 1
+		}
+		ch <- prometheus.MustNewConstMetric(c.workerDead,
+			prometheus.GaugeValue, deadValue, label)
 	}
 }
 

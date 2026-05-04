@@ -536,9 +536,12 @@ type WorkerRuntimeStatus struct {
 	ThreadCPUNS uint64 `json:"thread_cpu_ns,omitempty"`
 	WorkLoops   uint64 `json:"work_loops,omitempty"`
 	IdleLoops   uint64 `json:"idle_loops,omitempty"`
-	// #925 Phase 1 (catch+report): Dead == true means the worker_loop
-	// panicked and the supervisor caught it. Cleared only by daemon
-	// restart in Phase 1; Phase 2 (respawn) will clear on relaunch.
+	// #925 Phase 1+2 (catch+report+observe): Dead == true means the
+	// worker_loop panicked and the supervisor caught it. Set-only
+	// today — cleared only by daemon restart. Phase 2 surfaces this
+	// on Prometheus as `xpf_userspace_worker_dead` (this PR). A
+	// hypothetical Phase 3 (respawn, deferred indefinitely) would
+	// clear this by replacing WorkerRuntimeAtomics on relaunch.
 	// PanicMessage holds the rendered payload for operator diagnosis.
 	Dead         bool   `json:"dead,omitempty"`
 	PanicMessage string `json:"panic_message,omitempty"`

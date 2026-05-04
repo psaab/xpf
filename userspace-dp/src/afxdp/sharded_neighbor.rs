@@ -17,9 +17,13 @@
 //!   shard-index order. Deadlock-free as long as every other caller
 //!   that wants more than one shard also locks in ascending order.
 //! - Poison policy: `lock().unwrap_or_else(|e| e.into_inner())`.
-//!   Workers have no `catch_unwind` supervisor today (#925 deferred);
-//!   panic-then-thread-death is operationally worse than a stale MAC.
-//!   `NeighborEntry` is plain `[u8; 6]` with no invariants to corrupt.
+//!   Workers DO have a `catch_unwind` supervisor as of #925 Phase 1
+//!   (`spawn_supervised_worker` in `coordinator/mod.rs`), and #925
+//!   Phase 2 surfaces panics on Prometheus
+//!   (`xpf_userspace_worker_dead`). But a poisoned `Mutex` here is
+//!   operationally worse than a stale MAC for the *surviving* threads:
+//!   `NeighborEntry` is plain `[u8; 6]` with no invariants to corrupt,
+//!   so the safer choice is to recover-from-poison and keep forwarding.
 
 use super::types::{FastMap, NeighborEntry};
 use rustc_hash::FxHasher;
