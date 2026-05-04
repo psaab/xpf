@@ -40,9 +40,22 @@ increment.
 - **Smoke v4 AND v6.** Every test cycle hits both
   172.16.80.200 and 2001:559:8585:80::200. v4-only smoke masks
   dual-stack regressions.
+- **Smoke push AND reverse.** Every iperf3 invocation runs
+  twice: once default (push, client→server) and once with `-R`
+  (reverse, server→client). Push-only smoke once let a TX-path
+  regression cap reverse at ~2 Gbps while push still hit line
+  rate. Multi-stream `-P 12` is the canonical reproducer.
+- **Smoke CoS-disabled AND CoS-enabled.** Run the matrix twice:
+  once with CoS configuration removed (best-effort only — this
+  catches regressions in the unshaped fast path) and once with
+  the per-class CoS config applied. CoS-only smoke masks fast-
+  path regressions; best-effort-only smoke masks classifier and
+  shaper regressions.
 - **Per-class CoS smoke for refactor PRs.** Hit ports
-  5201-5206 (one per configured CoS class). Best-effort-only
-  smoke masks classifier/policer regressions.
+  5201-5206 (one per configured CoS class). Combined with
+  push+reverse, v4+v6, and CoS-disabled/enabled passes, that's
+  4 baseline + 2 multi-stream + 24 per-class = 30 measurements
+  per refactor.
 - **Never dismiss a failing test.** If any reviewer reports a
   test failed, prove it passes locally (named test 5x + full
   suite + Go suite) BEFORE merging. "Sandbox-only flake"
@@ -240,24 +253,140 @@ GOCACHE=/dev/shm/cache GOTMPDIR=/dev/shm go test ./... 2>&1 | grep -v "^ok\|^?" 
 # Deploy
 export BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env
 ./test/incus/cluster-setup.sh deploy all
+
+# === Pass A: CoS DISABLED (best-effort only) ===
+# Catches regressions in the unshaped fast path. iperf-a default 5201
+# falls through to best-effort.
+#
+# Tear down the entire CoS fixture, not just `class-of-service`. The
+# cos-iperf fixture (`test/incus/cos-iperf-config.set`) also installs
+# `firewall family inet/inet6 filter bandwidth-output` and binds it as
+# the unit-80 output filter. Deleting only `class-of-service` while
+# those bindings still reference its forwarding classes makes the
+# commit fail validation. Junos-style candidate config means the live
+# config stays unchanged on commit failure (no half-broken state on
+# the wire) — but the silent failure mode is what hurts: CoS is still
+# enabled, Pass A is invalid, and the smoke matrix reports clean
+# numbers for what's effectively still Pass B. Use the fixture-aligned
+# delete paths (mirrored from the top of `cos-iperf-config.set`):
+#   - `firewall family inet|inet6 filter bandwidth-output`
+#   - `interfaces reth0 unit 80 family inet|inet6 filter output`
+# Apply atomically with `commit check` first so we never end up in a
+# half-broken state. RG-0-primary-only.
 sg incus-admin -c "incus exec loss:xpf-userspace-fw0 -- rm -f /tmp/cos-iperf-sets.set"
+# Don't pipe `cli` through `tail`/`head` here — that masks the cli exit
+# status (pipeline returns `tail`'s status) and would silently swallow
+# `commit check` / `commit` failures, leaving CoS partially attached
+# while Pass A claims "CoS off". Use `set -o pipefail` if you must
+# pipe; the simpler option below keeps full output visible and exits
+# non-zero if the commit fails.
+sg incus-admin -c "incus exec loss:xpf-userspace-fw0 -- bash -c 'set -e; /usr/local/sbin/cli <<CLI
+configure
+delete class-of-service
+delete firewall family inet filter bandwidth-output
+delete interfaces reth0 unit 80 family inet filter output
+delete firewall family inet6 filter bandwidth-output
+delete interfaces reth0 unit 80 family inet6 filter output
+commit check
+commit and-quit
+exit
+CLI
+'" || { echo "Pass A teardown failed — aborting smoke matrix"; exit 1; }
+
+# Note on grep targets: iperf3 reports the `Retr` (retransmit) column
+# on the sender summary line for both push and reverse runs (for
+# multi-stream `-P N` runs that's `[SUM] ... sender`; for single-stream
+# runs it's `[ 5] ... sender`). We always grep the sender line — for
+# `-R` runs the sender is the iperf3 server pushing data and Retr
+# lives on its summary. Grepping `receiver` would show throughput but
+# hide retrans entirely.
+#
+# These greps are VISIBILITY FILTERS, not programmatic gates: they
+# expose the Retr column to the operator's eye so the "0 retrans"
+# pass criterion (below) can be confirmed by reading the captured
+# output. They do NOT fail on non-zero retrans by themselves. The
+# smoke harness is doc-style — verify by inspection.
+#
+# CI integration note: if you wire this into a non-interactive
+# runner, do BOTH of the following so failures surface:
+#   1. `set -o pipefail` so a non-zero exit on either side of the
+#      pipe propagates (the iperf3 binary itself returning non-zero
+#      on connection failure no longer gets masked by `grep`).
+#   2. Add explicit retrans-zero parsing. The `Retr` column on a
+#      sender summary is the token immediately before the trailing
+#      `sender` literal — robust parse:
+#        awk '/sender/ { for (i=1;i<=NF;i++) if ($i=="sender") print $(i-1) }'
+#      Field count varies between `[SUM]` (multi-stream) and `[ N]`
+#      (single-stream) lines so a fixed `$N` index is fragile;
+#      anchoring on the `sender` word avoids that.
+set -o pipefail
+echo "=== Pass A — CoS disabled, v4+v6 × push+reverse ==="
+# Targets named explicitly to avoid colon-delimited packing (IPv6
+# addresses contain colons, which makes any `${var%%:*}`-style split
+# easy to misread even though bash semantics are correct). Use -F
+# fixed-string grep so the dots in interval/timestamp tokens are
+# matched literally rather than as regex wildcards.
+declare -A TARGETS=(
+  [v4]="172.16.80.200"
+  [v6]="2001:559:8585:80::200"
+)
+# Filter strategy: don't pin the interval string ("0.00-5.00") — iperf3
+# timing drift can print "0.00-5.01" or similar, which would falsely
+# trigger the failure path. Filter on `sender` (every run prints exactly
+# one summary sender line per stream, plus one `[SUM] ... sender` for
+# `-P N`) and pick the last match. For multi-stream we further filter
+# on the literal `[SUM]` to skip the per-stream sender lines.
+for fam in v4 v6; do
+  tgt=${TARGETS[$fam]}
+  echo -n "$fam push: "; sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c $tgt -t 5 -p 5201"    2>&1 | grep -F -- "sender" | tail -1 || { echo "NO SENDER LINE — iperf3 failed"; exit 1; }
+  echo -n "$fam rev:  "; sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c $tgt -t 5 -p 5201 -R" 2>&1 | grep -F -- "sender" | tail -1 || { echo "NO SENDER LINE — iperf3 failed"; exit 1; }
+done
+
+# Multi-stream reverse-mode reproducer (canonical TX-path regression
+# catcher). A reverse cap with healthy push throughput is a TX-path
+# regression. Pick the last `[SUM] ... sender` line so the Retr column
+# stays visible without the brittle interval-string match.
+echo "=== Pass A — 12-stream reverse reproducer (CoS disabled) ==="
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 12 -t 10 -p 5201 -R"       2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 2001:559:8585:80::200 -P 12 -t 10 -p 5201 -R" 2>&1 | grep -F -- "[SUM]" | grep -F -- "sender" | tail -1 || { echo "NO SUM SENDER LINE — iperf3 failed"; exit 1; }
+
+# === Pass B: CoS ENABLED ===
 sg incus-admin -c "./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0"
 
-# v4 + v6 smoke (best-effort)
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -t 5 -p 5201" | grep "0.00-5.00.*sender"
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 2001:559:8585:80::200 -t 5 -p 5201" | grep "0.00-5.00.*sender"
-
-# Per-class CoS smoke (refactor PR rule)
-for port_class in "5201:iperf-a" "5202:iperf-b" "5203:iperf-c" "5204:iperf-d" "5205:iperf-e" "5206:iperf-f"; do
-  port=$(echo $port_class | cut -d: -f1)
-  cls=$(echo $port_class | cut -d: -f2)
-  echo "=== $port $cls ==="
-  echo -n "v4: "; sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -t 5 -p $port" 2>&1 | grep "0.00-5.00.*sender"
-  echo -n "v6: "; sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 2001:559:8585:80::200 -t 5 -p $port" 2>&1 | grep "0.00-5.00.*sender"
+# Per-class CoS smoke — v4+v6 × push+reverse × 6 ports = 24 measurements
+# Same `sender` grep convention so retrans is visible for every cell.
+echo "=== Pass B — Per-class CoS smoke ==="
+# Same fixed-string + named-array shape as Pass A — port-class pairs
+# in a `:`-packed string would be safe, but the iperf-class names use
+# `-` not `:` and TARGETS[] is already in scope, so reuse it.
+declare -A PORT_CLASS=(
+  [5201]="iperf-a" [5202]="iperf-b" [5203]="iperf-c"
+  [5204]="iperf-d" [5205]="iperf-e" [5206]="iperf-f"
+)
+for port in 5201 5202 5203 5204 5205 5206; do
+  cls=${PORT_CLASS[$port]}
+  echo "--- $port $cls ---"
+  for fam in v4 v6; do
+    tgt=${TARGETS[$fam]}
+    echo -n "$fam push: "; sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c $tgt -t 5 -p $port"    2>&1 | grep -F -- "sender" | tail -1 || { echo "NO SENDER LINE — iperf3 failed"; exit 1; }
+    echo -n "$fam rev:  "; sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c $tgt -t 5 -p $port -R" 2>&1 | grep -F -- "sender" | tail -1 || { echo "NO SENDER LINE — iperf3 failed"; exit 1; }
+  done
 done
 ```
 
-All 12 measurements must pass with 0 retrans.
+**Required pass criteria:**
+- Pass A (CoS disabled):
+  - **Single-stream baselines** (4 cells, v4/v6 × push/rev): connectivity
+    confirmed and **0 retrans**. *Single-stream throughput is NOT held to
+    line rate — on this lab it caps at ~6-7 Gbps per flow due to per-CPU
+    AF_XDP processing limits, which is normal.*
+  - **Multi-stream `-P 12 -R` reproducers** (2 cells, v4 + v6): **line
+    rate with 0 retrans.** This is where the line-rate gate lives.
+    *A reverse cap here with healthy push is a TX-path regression —
+    block on this.*
+- Pass B (CoS enabled): all 24 per-class measurements pass with 0 retrans
+  *for unshaped classes*. Shaped classes (e.g. iperf-a at 1 Gb/s) should
+  hit their shape rate cleanly with ECN marks but no buffer drops.
 
 ## Step 7: Open PR
 
@@ -284,9 +413,16 @@ Plan doc: docs/pr/<ISSUE>-<SLUG>/plan.md
 - [x] <named-test> 5/5 flake check
 - [x] Go suite: 30 packages pass
 - [x] Deploy on loss userspace cluster
-- [x] v4 smoke: <Mbps>, <retrans> retrans against 172.16.80.200
-- [x] v6 smoke: <Mbps>, <retrans> retrans against 2001:559:8585:80::200
-- [x] Per-class CoS smoke (5201-5206) v4+v6 — all 0 retrans
+- [x] **Pass A — CoS disabled** (best-effort fast path)
+  - [x] v4 push: <Mbps>, <retrans> retrans against 172.16.80.200
+  - [x] v4 reverse (`-R`): <Mbps>, <retrans> retrans
+  - [x] v6 push: <Mbps>, <retrans> retrans against 2001:559:8585:80::200
+  - [x] v6 reverse (`-R`): <Mbps>, <retrans> retrans
+  - [x] v4 multi-stream reverse: `iperf3 -P 12 -t 10 -R` — line rate, 0 retrans
+  - [x] v6 multi-stream reverse: `iperf3 -P 12 -t 10 -R` — line rate, 0 retrans
+- [x] **Pass B — CoS enabled** (per-class shaper + classifier)
+  - [x] Per-class CoS smoke (5201-5206) v4+v6 push+reverse — all 24 measurements pass
+  - [x] Shaped classes hit configured rate cleanly with ECN marks but no buffer drops
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
