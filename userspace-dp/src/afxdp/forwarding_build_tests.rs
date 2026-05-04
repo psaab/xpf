@@ -694,3 +694,575 @@ fn build_cos_state_mixed_zero_and_nonzero_shaping_rate() {
     assert!(!shaped.queues.is_empty());
     assert!(!transparent.queues.is_empty());
 }
+
+#[test]
+fn build_cos_state_skips_interface_with_no_cos_config() {
+    // An interface that is NOT participating in CoS (no scheduler-map,
+    // no classifier, no rewrite-rule, no shaping-rate) must NOT receive
+    // a CoSState entry — otherwise the per-interface owner-worker
+    // dispatch funnels every TX into one worker, collapsing throughput
+    // (regression hunted in iperf3 -P 12 -R: 22 Gbps → 2 Gbps until
+    // this gate was reinstated).
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![
+            // Forwarding-only LAN egress with no CoS at all.
+            InterfaceSnapshot {
+                ifindex: 100,
+                cos_shaping_rate_bytes_per_sec: 0,
+                cos_shaping_burst_bytes: 0,
+                cos_scheduler_map: String::new(),
+                cos_dscp_classifier: String::new(),
+                cos_ieee8021_classifier: String::new(),
+                cos_dscp_rewrite_rule: String::new(),
+                ..Default::default()
+            },
+            // Sibling that DOES participate in CoS — must still appear.
+            InterfaceSnapshot {
+                ifindex: 101,
+                cos_shaping_rate_bytes_per_sec: 0,
+                cos_scheduler_map: "wan-map".into(),
+                ..Default::default()
+            },
+        ],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            }],
+            schedulers: vec![],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "best-effort".into(),
+                    scheduler: String::new(),
+                }],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+        }),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    assert!(
+        !state.interfaces.contains_key(&100),
+        "interface with no CoS config must NOT be added to CoSState"
+    );
+    assert!(
+        state.interfaces.contains_key(&101),
+        "interface with scheduler-map but no shaping-rate must still appear (transparent root)"
+    );
+}
+
+#[test]
+fn build_cos_state_admits_each_cos_field_in_isolation() {
+    // The skip predicate is an OR over five arms (rate, scheduler-map,
+    // DSCP classifier, 802.1p classifier, DSCP rewrite). Pin every arm so
+    // a future refactor can't silently drop one — Codex review on
+    // PR #1183 flagged this as coverage debt (Q5). The sixth `InterfaceSnapshot`
+    // CoS field, `cos_shaping_burst_bytes`, is intentionally NOT a
+    // standalone arm; see the dedicated burst-only-skip test below and
+    // the gate comment in `forwarding_build.rs::build_cos_state` for
+    // rationale.
+    let cos = ClassOfServiceSnapshot {
+        forwarding_classes: vec![CoSForwardingClassSnapshot {
+            name: "best-effort".into(),
+            queue: 0,
+        }],
+        schedulers: vec![],
+        scheduler_maps: vec![CoSSchedulerMapSnapshot {
+            name: "wan-map".into(),
+            entries: vec![CoSSchedulerMapEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                scheduler: String::new(),
+            }],
+        }],
+        dscp_classifiers: vec![CoSDSCPClassifierSnapshot {
+            name: "dscp-cls".into(),
+            entries: vec![CoSDSCPClassifierEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: String::new(),
+                dscp_values: vec![0],
+            }],
+        }],
+        ieee8021_classifiers: vec![CoSIEEE8021ClassifierSnapshot {
+            name: "p8021-cls".into(),
+            entries: vec![CoSIEEE8021ClassifierEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: String::new(),
+                code_points: vec![0],
+            }],
+        }],
+        dscp_rewrite_rules: vec![CoSDSCPRewriteRuleSnapshot {
+            name: "dscp-rw".into(),
+            entries: vec![CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: String::new(),
+                dscp_value: 0,
+            }],
+        }],
+    };
+    let cases: &[(i32, &str, InterfaceSnapshot)] = &[
+        (
+            201,
+            "shaping-rate only",
+            InterfaceSnapshot {
+                ifindex: 201,
+                cos_shaping_rate_bytes_per_sec: 1_000_000,
+                ..Default::default()
+            },
+        ),
+        (
+            203,
+            "scheduler-map only",
+            InterfaceSnapshot {
+                ifindex: 203,
+                cos_scheduler_map: "wan-map".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            204,
+            "DSCP classifier only",
+            InterfaceSnapshot {
+                ifindex: 204,
+                cos_dscp_classifier: "dscp-cls".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            205,
+            "802.1p classifier only",
+            InterfaceSnapshot {
+                ifindex: 205,
+                cos_ieee8021_classifier: "p8021-cls".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            206,
+            "DSCP rewrite-rule only",
+            InterfaceSnapshot {
+                ifindex: 206,
+                cos_dscp_rewrite_rule: "dscp-rw".into(),
+                ..Default::default()
+            },
+        ),
+    ];
+    for (ifindex, label, iface) in cases {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![iface.clone()],
+            class_of_service: Some(cos.clone()),
+            ..Default::default()
+        };
+        let state = build_cos_state(&snapshot);
+        assert!(
+            state.interfaces.contains_key(ifindex),
+            "{label}: interface must be admitted to CoSState (ifindex {ifindex})"
+        );
+    }
+}
+
+#[test]
+fn build_cos_state_skips_interface_with_burst_only_no_other_cos_knobs() {
+    // The Go compiler permits a committed config to carry
+    // `BurstSizeBytes > 0` independently of `ShapingRateBytes`
+    // (`pkg/config/compiler_class_of_service.go:285-312`), so this
+    // snapshot shape IS reachable from real config. We deliberately
+    // skip it anyway: pre-f0e364d7 also skipped burst-only (the old
+    // `shaping_rate == 0` skip caught it), and admitting it would
+    // install the cross-binding owner-worker redirect that PR #1183
+    // exists to remove. The buffer-cap admission effect that admission
+    // would unlock has never been observable in production.
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 250,
+            cos_shaping_rate_bytes_per_sec: 0,
+            cos_shaping_burst_bytes: 256_000,
+            cos_scheduler_map: String::new(),
+            cos_dscp_classifier: String::new(),
+            cos_ieee8021_classifier: String::new(),
+            cos_dscp_rewrite_rule: String::new(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot::default()),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    assert!(
+        !state.interfaces.contains_key(&250),
+        "interface with burst-only (no rate, no classes, no rewrite) must NOT be in CoSState"
+    );
+}
+
+#[test]
+fn build_cos_state_skips_interface_with_unresolvable_named_references() {
+    // A typo'd scheduler-map / classifier / rewrite-rule name is
+    // non-empty but does not resolve to any entry in the CoS config.
+    // Pre-fix, an is-non-empty gate would admit such an interface and
+    // build only a default best-effort queue with rate=0, re-triggering
+    // the owner-worker redirect collapse for an interface with no
+    // effective CoS policy. The predicate must require named references
+    // to actually resolve.
+    let cos = ClassOfServiceSnapshot {
+        forwarding_classes: vec![CoSForwardingClassSnapshot {
+            name: "best-effort".into(),
+            queue: 0,
+        }],
+        schedulers: vec![],
+        scheduler_maps: vec![CoSSchedulerMapSnapshot {
+            name: "wan-map".into(),
+            entries: vec![CoSSchedulerMapEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                scheduler: String::new(),
+            }],
+        }],
+        dscp_classifiers: vec![CoSDSCPClassifierSnapshot {
+            name: "dscp-cls".into(),
+            entries: vec![CoSDSCPClassifierEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: String::new(),
+                dscp_values: vec![0],
+            }],
+        }],
+        ieee8021_classifiers: vec![CoSIEEE8021ClassifierSnapshot {
+            name: "p8021-cls".into(),
+            entries: vec![CoSIEEE8021ClassifierEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: String::new(),
+                code_points: vec![0],
+            }],
+        }],
+        dscp_rewrite_rules: vec![CoSDSCPRewriteRuleSnapshot {
+            name: "dscp-rw".into(),
+            entries: vec![CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: String::new(),
+                dscp_value: 0,
+            }],
+        }],
+    };
+    // Each typo'd reference (one CoS field non-empty but unresolvable)
+    // must NOT admit the interface to CoSState.
+    let cases: &[(i32, &str, InterfaceSnapshot)] = &[
+        (
+            301,
+            "typo'd scheduler-map",
+            InterfaceSnapshot {
+                ifindex: 301,
+                cos_scheduler_map: "wan-mapp".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            302,
+            "typo'd DSCP classifier",
+            InterfaceSnapshot {
+                ifindex: 302,
+                cos_dscp_classifier: "dscp-cls-typo".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            303,
+            "typo'd 802.1p classifier",
+            InterfaceSnapshot {
+                ifindex: 303,
+                cos_ieee8021_classifier: "p8021-cls-typo".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            304,
+            "typo'd DSCP rewrite-rule",
+            InterfaceSnapshot {
+                ifindex: 304,
+                cos_dscp_rewrite_rule: "dscp-rw-typo".into(),
+                ..Default::default()
+            },
+        ),
+    ];
+    for (ifindex, label, iface) in cases {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![iface.clone()],
+            class_of_service: Some(cos.clone()),
+            ..Default::default()
+        };
+        let state = build_cos_state(&snapshot);
+        assert!(
+            !state.interfaces.contains_key(ifindex),
+            "{label}: unresolvable name must NOT admit interface to CoSState (ifindex {ifindex})"
+        );
+    }
+}
+
+#[test]
+fn build_cos_state_skips_interface_with_resolvable_but_empty_scheduler_map() {
+    // Copilot review on PR #1183 caught this: `compileClassOfService`
+    // keeps a named scheduler-map even when it has zero entries, so
+    // a `contains_key` admission check would let a config like
+    // `set class-of-service interfaces ifd unit X scheduler-map empty-map`
+    // (with `empty-map` declared but no entries) pass the gate, then
+    // collapse downstream to a synthetic best-effort default queue —
+    // re-triggering the owner-worker redirect collapse for an interface
+    // with no effective CoS policy.
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 401,
+            cos_shaping_rate_bytes_per_sec: 0,
+            cos_scheduler_map: "empty-map".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            }],
+            schedulers: vec![],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "empty-map".into(),
+                entries: vec![], // <- the critical case: declared but empty
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+        }),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    assert!(
+        !state.interfaces.contains_key(&401),
+        "interface attached to a resolvable but empty scheduler-map must NOT enter CoSState"
+    );
+}
+
+#[test]
+fn build_cos_state_skips_interface_with_scheduler_map_all_undefined_forwarding_classes() {
+    // The Junos compiler emits a warning for scheduler-map entries that
+    // reference undefined forwarding-classes but does NOT drop the
+    // scheduler-map itself. After resolution, every entry's
+    // `class_to_queue.get` returns None, so `queues` is empty and the
+    // interface would otherwise fall through to the synthetic default
+    // best-effort queue. The post-build gate must reject this case so
+    // we don't reintroduce the owner-worker redirect on an interface
+    // with no effective CoS policy.
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 402,
+            cos_shaping_rate_bytes_per_sec: 0,
+            cos_scheduler_map: "broken-map".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            // forwarding_classes intentionally does NOT include the
+            // class names referenced by `broken-map` below, so every
+            // entry collapses at `class_to_queue.get(&entry.forwarding_class)`.
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            }],
+            schedulers: vec![],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "broken-map".into(),
+                entries: vec![
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "missing-class-a".into(),
+                        scheduler: String::new(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "missing-class-b".into(),
+                        scheduler: String::new(),
+                    },
+                ],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+        }),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    assert!(
+        !state.interfaces.contains_key(&402),
+        "scheduler-map whose entries all reference undefined forwarding-classes must NOT admit interface"
+    );
+}
+
+#[test]
+fn build_cos_state_skips_classifier_only_mapping_to_unmaterialized_queue() {
+    // An interface attaches a DSCP classifier whose entries map to
+    // forwarding-class `voice` (queue 5). The interface has NO
+    // scheduler-map, so the only queue it would materialize is the
+    // synthetic default best-effort (queue 0). The classifier maps to
+    // queue 5, which the interface won't have at runtime — packets
+    // matching the classifier would land in `resolve_cos_queue_idx`
+    // and get dropped, while the interface still installs the
+    // owner-worker redirect. Gate must skip such interfaces.
+    // (Copilot review on PR #1183 caught this.)
+    let cos = ClassOfServiceSnapshot {
+        forwarding_classes: vec![
+            CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            },
+            CoSForwardingClassSnapshot {
+                name: "voice".into(),
+                queue: 5,
+            },
+        ],
+        schedulers: vec![],
+        scheduler_maps: vec![],
+        dscp_classifiers: vec![CoSDSCPClassifierSnapshot {
+            name: "voice-cls".into(),
+            entries: vec![CoSDSCPClassifierEntrySnapshot {
+                forwarding_class: "voice".into(), // queue 5
+                loss_priority: String::new(),
+                dscp_values: vec![0x2e],
+            }],
+        }],
+        ieee8021_classifiers: vec![],
+        dscp_rewrite_rules: vec![],
+    };
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 501,
+            cos_dscp_classifier: "voice-cls".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(cos),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    assert!(
+        !state.interfaces.contains_key(&501),
+        "DSCP classifier mapping to queue the interface won't materialize (no scheduler-map) must NOT admit"
+    );
+}
+
+#[test]
+fn build_cos_state_admits_classifier_mapping_to_materialized_queue() {
+    // The opposite of the previous test: a DSCP classifier mapping to
+    // queue 0 is OK on an interface with no scheduler-map, because the
+    // synthetic default best-effort queue IS queue 0. Packets land
+    // there and the classifier IS observable, so the interface
+    // legitimately needs to be in CoSState.
+    let cos = ClassOfServiceSnapshot {
+        forwarding_classes: vec![CoSForwardingClassSnapshot {
+            name: "best-effort".into(),
+            queue: 0,
+        }],
+        schedulers: vec![],
+        scheduler_maps: vec![],
+        dscp_classifiers: vec![CoSDSCPClassifierSnapshot {
+            name: "be-cls".into(),
+            entries: vec![CoSDSCPClassifierEntrySnapshot {
+                forwarding_class: "best-effort".into(), // queue 0
+                loss_priority: String::new(),
+                dscp_values: vec![0x10],
+            }],
+        }],
+        ieee8021_classifiers: vec![],
+        dscp_rewrite_rules: vec![],
+    };
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 502,
+            cos_dscp_classifier: "be-cls".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(cos),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    assert!(
+        state.interfaces.contains_key(&502),
+        "DSCP classifier mapping to materialized queue must admit interface"
+    );
+}
+
+#[test]
+fn build_cos_state_skips_rewrite_only_mapping_to_unmaterialized_class() {
+    // A DSCP rewrite-rule whose ONLY entry is for forwarding-class
+    // `voice` is attached to an interface with no scheduler-map. The
+    // interface only has the synthetic default best-effort class —
+    // the `voice` rewrite has no queue to attach to, so no packet can
+    // ever observe it. Gate must skip.
+    let cos = ClassOfServiceSnapshot {
+        forwarding_classes: vec![
+            CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            },
+            CoSForwardingClassSnapshot {
+                name: "voice".into(),
+                queue: 5,
+            },
+        ],
+        schedulers: vec![],
+        scheduler_maps: vec![],
+        dscp_classifiers: vec![],
+        ieee8021_classifiers: vec![],
+        dscp_rewrite_rules: vec![CoSDSCPRewriteRuleSnapshot {
+            name: "voice-rw".into(),
+            entries: vec![CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "voice".into(),
+                loss_priority: String::new(),
+                dscp_value: 0x2e,
+            }],
+        }],
+    };
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 503,
+            cos_dscp_rewrite_rule: "voice-rw".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(cos),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    assert!(
+        !state.interfaces.contains_key(&503),
+        "DSCP rewrite-rule for class the interface won't materialize must NOT admit"
+    );
+}
+
+#[test]
+fn build_cos_state_admits_rewrite_only_mapping_to_materialized_class() {
+    // A DSCP rewrite-rule with a `best-effort` entry is observable on
+    // an interface with no scheduler-map, because the synthetic default
+    // best-effort queue IS the materialized class. Packets in that
+    // queue can carry the rewrite — interface should be admitted.
+    let cos = ClassOfServiceSnapshot {
+        forwarding_classes: vec![CoSForwardingClassSnapshot {
+            name: "best-effort".into(),
+            queue: 0,
+        }],
+        schedulers: vec![],
+        scheduler_maps: vec![],
+        dscp_classifiers: vec![],
+        ieee8021_classifiers: vec![],
+        dscp_rewrite_rules: vec![CoSDSCPRewriteRuleSnapshot {
+            name: "be-rw".into(),
+            entries: vec![CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: String::new(),
+                dscp_value: 0,
+            }],
+        }],
+    };
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 504,
+            cos_dscp_rewrite_rule: "be-rw".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(cos),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    assert!(
+        state.interfaces.contains_key(&504),
+        "DSCP rewrite-rule for the materialized best-effort class must admit"
+    );
+}

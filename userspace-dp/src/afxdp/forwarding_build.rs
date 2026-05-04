@@ -638,13 +638,53 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
 
     let mut state = CoSState::default();
     for iface in &snapshot.interfaces {
-        // #916: zero `cos_shaping_rate_bytes_per_sec` is a valid Junos
-        // configuration meaning "no interface-level shaping cap"
-        // (transparent root). The runtime build path handles this
-        // case (see `maybe_top_up_cos_root_lease` /
-        // `estimate_cos_queue_wakeup_tick` rate-zero fast paths).
-        // Previously this condition skipped the entire interface,
-        // causing CoS classifier to silently not apply.
+        // Skip interfaces that do not contribute any usable CoS state.
+        //
+        // f0e364d7 (#916) removed the prior `shaping_rate == 0` skip so
+        // that zero-shaping-rate-with-classes interfaces would get a
+        // transparent-root CoS runtime instead of being silently dropped.
+        // That side-effect added every interface that produced no usable
+        // CoS state to `CoSState` too — and any `CoSState` entry triggers
+        // the cross-binding redirect that funnels every TX through the
+        // per-interface owner worker, collapsing 6-worker parallelism
+        // to one CPU and capping reverse throughput at ~2 Gbps instead
+        // of ~22 Gbps on the loss userspace cluster.
+        //
+        // The fix is to gate on whether the interface PRODUCES anything
+        // useful — not on whether knob *names* are populated. We resolve
+        // the scheduler-map, DSCP classifier, 802.1p classifier, and
+        // DSCP rewrite-rule first, then only insert a `CoSState` entry
+        // when at least one of these is true:
+        //   - `cos_shaping_rate_bytes_per_sec > 0` (interface shaping cap)
+        //   - the scheduler-map resolved to ≥ 1 queue
+        //   - the DSCP classifier targets ≥ 1 queue_id this interface
+        //     will materialize (real scheduler-map queues, or the
+        //     synthetic default best-effort queue 0)
+        //   - the 802.1p classifier targets ≥ 1 materialized queue_id
+        //     (same materialization rule)
+        //   - the DSCP rewrite-rule targets ≥ 1 materialized
+        //     forwarding-class (real scheduler-map class, or synthetic
+        //     "best-effort" if the rule has a "best-effort" entry)
+        //
+        // This cleanly handles every config shape that downstream falls
+        // back to a synthetic default best-effort queue with no
+        // classification/rewrite/rate cap — including:
+        //   - forwarding-only (no CoS knobs at all)
+        //   - burst-only without rate
+        //     (`pkg/config/compiler_class_of_service.go:285-312` allows
+        //     a committed snapshot of this shape; pre-f0e364d7 also
+        //     skipped it via the rate-zero skip, so admitting it would
+        //     be the divergence)
+        //   - typo'd named references (e.g. `wan-mapp` vs `wan-map`)
+        //     where the named entity does not exist
+        //   - empty named entities (e.g. a scheduler-map declared with
+        //     no entries — `compileClassOfService` keeps these)
+        //   - scheduler-maps / classifiers whose entries all reference
+        //     undefined forwarding-classes (warning-only configs that
+        //     survive validation)
+        //
+        // f0e364d7's transparent-root runtime fast paths still apply
+        // whenever at least one resolution produces real CoS state.
         if iface.ifindex <= 0 {
             continue;
         }
@@ -694,6 +734,71 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                 });
             }
         }
+        let scheduler_map_resolved_to_queues = !queues.is_empty();
+
+        // Determine the set of (queue_id, forwarding_class) pairs that this
+        // interface will actually materialize at runtime. If the
+        // scheduler-map resolved, those are the configured queues. If not,
+        // the synthetic default best-effort queue (queue_id=0,
+        // class="best-effort") is added later — but ONLY if we admit the
+        // interface, so we model it here for the gate's purposes.
+        let (iface_queue_ids, iface_classes): (Vec<u8>, Vec<&str>) =
+            if scheduler_map_resolved_to_queues {
+                (
+                    queues.iter().map(|q| q.queue_id).collect(),
+                    queues.iter().map(|q| q.forwarding_class.as_str()).collect(),
+                )
+            } else {
+                (vec![0], vec!["best-effort"])
+            };
+
+        // A classifier arm contributes only if it maps at least one
+        // DSCP/802.1p code-point to a queue_id the interface actually
+        // materializes. A classifier mapping to queue 5 on an interface
+        // that only has queue 0 admits the interface for nothing —
+        // packets land in `resolve_cos_queue_idx` and get dropped, the
+        // owner-worker redirect engages, and no observable classification
+        // happens. Same logic for the rewrite-rule: it contributes only
+        // if it has an entry for a forwarding-class the interface
+        // materializes.
+        let dscp_classifier_targets_iface_queue = dscp_classifiers
+            .get(&iface.cos_dscp_classifier)
+            .map(|c| {
+                c.queue_by_dscp
+                    .values()
+                    .any(|q| iface_queue_ids.contains(q))
+            })
+            .unwrap_or(false);
+        let ieee8021_classifier_targets_iface_queue = ieee8021_classifiers
+            .get(&iface.cos_ieee8021_classifier)
+            .map(|c| {
+                c.queue_by_pcp
+                    .values()
+                    .any(|q| iface_queue_ids.contains(q))
+            })
+            .unwrap_or(false);
+        let dscp_rewrite_targets_iface_class = dscp_rewrite_rule
+            .map(|r| {
+                r.dscp_by_forwarding_class
+                    .keys()
+                    .any(|fc| iface_classes.contains(&fc.as_str()))
+            })
+            .unwrap_or(false);
+
+        // Post-build gate. See comment above for rationale.
+        let contributes_usable_cos_state = iface.cos_shaping_rate_bytes_per_sec > 0
+            || scheduler_map_resolved_to_queues
+            || dscp_classifier_targets_iface_queue
+            || ieee8021_classifier_targets_iface_queue
+            || dscp_rewrite_targets_iface_class;
+        if !contributes_usable_cos_state {
+            continue;
+        }
+        let dscp_queue_by_dscp =
+            build_cos_dscp_queue_table(&iface.cos_dscp_classifier, &dscp_classifiers);
+        let ieee8021_queue_by_pcp =
+            build_cos_ieee8021_queue_table(&iface.cos_ieee8021_classifier, &ieee8021_classifiers);
+
         if queues.is_empty() {
             queues.push(CoSQueueConfig {
                 queue_id: 0,
@@ -728,14 +833,8 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                 default_queue,
                 dscp_classifier: iface.cos_dscp_classifier.clone(),
                 ieee8021_classifier: iface.cos_ieee8021_classifier.clone(),
-                dscp_queue_by_dscp: build_cos_dscp_queue_table(
-                    &iface.cos_dscp_classifier,
-                    &dscp_classifiers,
-                ),
-                ieee8021_queue_by_pcp: build_cos_ieee8021_queue_table(
-                    &iface.cos_ieee8021_classifier,
-                    &ieee8021_classifiers,
-                ),
+                dscp_queue_by_dscp,
+                ieee8021_queue_by_pcp,
                 queue_by_forwarding_class,
                 queues,
             },
