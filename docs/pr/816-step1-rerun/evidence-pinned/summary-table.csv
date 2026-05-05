@@ -1,0 +1,13 @@
+cell,pool,suspect,suspect_reason,i11_pass,i12_pass,i13_pass,verdict_abcd,p_D1,D1_fire,p_D2,D2_fire,b14_15,oof_10_13_max,mode_bucket
+with-cos/p5201-fwd,fwd-with-cos,False,,True,True,True,,9.999000099990002e-05,True,1.0,False,0.0,5.565455122415603e-05,4
+with-cos/p5201-rev,rev-with-cos,False,,True,True,True,,0.020597940205979402,True,1.0,False,2.7808882628559026e-06,0.1578170709323233,9
+with-cos/p5202-fwd,fwd-with-cos,False,,True,True,True,,9.999000099990002e-05,True,0.011998800119988001,True,0.0,0.0006118956899285496,5
+with-cos/p5202-rev,rev-with-cos,False,,True,True,True,,0.9297070292970703,False,0.0240975902409759,True,6.246947612149512e-07,0.18326083212099467,9
+with-cos/p5203-fwd,fwd-with-cos,False,,True,True,True,,0.6286371362863714,False,1.0,False,0.0,0.11721649250945,9
+with-cos/p5203-rev,rev-with-cos,False,,True,True,True,,0.0354964503549645,True,0.046495350464953504,True,1.155236986241727e-06,0.18050590988181545,9
+with-cos/p5204-fwd,fwd-with-cos,True,I12,True,False,True,,nan,False,nan,False,0.0,3.6515293387341194e-05,4
+with-cos/p5204-rev,rev-with-cos,False,,True,True,True,,0.7801219878012199,False,1.0,False,3.5724697636358213e-06,0.1712599180128332,9
+no-cos/p5201-fwd,fwd-no-cos,False,,True,True,True,,0.059994000599940006,False,0.29817018298170184,False,7.008319010749624e-06,0.1799456183605594,9
+no-cos/p5202-fwd,fwd-no-cos,False,,True,True,True,,0.9682031796820318,False,1.0,False,2.6717438349110248e-06,0.221742590768979,9
+no-cos/p5203-fwd,fwd-no-cos,False,,True,True,True,,0.972002799720028,False,1.0,False,2.27668031658058e-06,0.22275151383455477,9
+no-cos/p5204-fwd,fwd-no-cos,False,,True,True,True,,0.9678032196780322,False,1.0,False,2.276637190944167e-06,0.22611713542018733,9

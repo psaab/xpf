@@ -1,0 +1,37 @@
+{
+  "cell": "no-cos/p5201-fwd",
+  "pool": "fwd-no-cos",
+  "python_version": "3.11.15",
+  "scipy_version": "1.13.1",
+  "numpy_version": "1.26.4",
+  "seed": 42,
+  "n_resamples": 10000,
+  "B_cell": 12,
+  "B_base": 60,
+  "mde_sigma_80pct": 0.79,
+  "suspect": false,
+  "suspect_reason": null,
+  "invariants": {
+    "I11": "PASS",
+    "I12": "PASS",
+    "I13": "PASS"
+  },
+  "channels": {
+    "D1": {
+      "p": 0.059994000599940006,
+      "fire": false,
+      "stat_obs": 0.007977178013072357
+    },
+    "D2": {
+      "p": 0.29817018298170184,
+      "fire": false,
+      "stat_obs": 4.8847528216982835e-09
+    }
+  },
+  "exploratory": {
+    "bucket_14_15_mass_fraction": 7.008319010749624e-06,
+    "out_of_family_bucket_10_13_max": 0.1799456183605594,
+    "bucket_mode_index": 9,
+    "per_binding_cell_dominated": false
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "cell": "with-cos/p5203-rev",
+  "pool": "rev-with-cos",
+  "python_version": "3.11.15",
+  "scipy_version": "1.13.1",
+  "numpy_version": "1.26.4",
+  "seed": 42,
+  "n_resamples": 10000,
+  "B_cell": 12,
+  "B_base": 60,
+  "mde_sigma_80pct": 0.79,
+  "suspect": false,
+  "suspect_reason": null,
+  "invariants": {
+    "I11": "PASS",
+    "I12": "PASS",
+    "I13": "PASS"
+  },
+  "channels": {
+    "D1": {
+      "p": 0.0354964503549645,
+      "fire": true,
+      "stat_obs": 0.01235113489036016
+    },
+    "D2": {
+      "p": 0.046495350464953504,
+      "fire": true,
+      "stat_obs": 2.304019432608851e-08
+    }
+  },
+  "exploratory": {
+    "bucket_14_15_mass_fraction": 1.155236986241727e-06,
+    "out_of_family_bucket_10_13_max": 0.18050590988181545,
+    "bucket_mode_index": 9,
+    "per_binding_cell_dominated": false
+  }
+}
