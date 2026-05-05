@@ -229,6 +229,22 @@ func compileExpanded(tree *ConfigTree) (*Config, error) {
 func ValidateConfig(cfg *Config) []string {
 	var warnings []string
 
+	// #653: when `services application-identification` is enabled,
+	// emit a one-line warning at commit time so operators see what
+	// the knob actually does on xpf vs Junos vSRX. The runtime is
+	// port + protocol matching only — there is NO L7 DPI / signature
+	// engine. See `show services application-identification status`
+	// and docs/services-application-identification.md for the full
+	// contract.
+	if cfg.Services.ApplicationIdentification {
+		warnings = append(warnings,
+			"services application-identification is enabled, but xpf "+
+				"AppID is port+protocol catalog matching only — no L7 "+
+				"DPI / signature engine. Run `show services "+
+				"application-identification status` for the contract; "+
+				"see docs/services-application-identification.md.")
+	}
+
 	// Collect valid zone names
 	zones := make(map[string]bool)
 	for name := range cfg.Security.Zones {

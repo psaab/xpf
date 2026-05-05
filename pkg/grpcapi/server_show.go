@@ -930,6 +930,14 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 		// #1043 Phase 12: case body extracted to server_show_security_text.go
 		s.showRPM(&buf)
 
+	case "application-identification-status":
+		// #653: surface what xpf AppID actually does today vs the
+		// vSRX `services application-identification` feature.
+		// Topic name carries `-status` so the showText topic stays
+		// consistent with the cmdtree leaf
+		// `application-identification status` (per Copilot review).
+		s.showApplicationIdentificationStatus(cfg, &buf)
+
 	case "version":
 		// #1043 Phase 7: case body extracted to server_show_system.go
 		s.showVersion(&buf)

@@ -1946,6 +1946,24 @@ func (c *CLI) handleShowServices(args []string) error {
 			return c.showRPMProbeResults()
 		}
 		return c.showRPMProbeResults()
+	case "application-identification":
+		// #653: surface what xpf AppID actually does today vs the
+		// vSRX application-identification feature. Honest contract,
+		// not the catalog-completeness illusion. Per cmdtree the
+		// only valid leaf is `application-identification status`;
+		// reject anything else so typos surface as usage errors
+		// instead of being silently swallowed.
+		rest := args[1:]
+		if len(rest) == 0 {
+			cmdtree.PrintTreeHelp("show services application-identification:",
+				operationalTree, "show", "services", "application-identification")
+			return nil
+		}
+		if rest[0] != "status" {
+			return fmt.Errorf("unknown application-identification target: %s "+
+				"(expected `status`)", rest[0])
+		}
+		return c.showApplicationIdentificationStatus()
 	default:
 		return fmt.Errorf("unknown services target: %s", args[0])
 	}

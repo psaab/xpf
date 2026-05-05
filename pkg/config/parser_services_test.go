@@ -1101,3 +1101,75 @@ func TestDynamicAddressHostnameSyntax(t *testing.T) {
 		t.Errorf("address binding = %v", ab)
 	}
 }
+
+// #653: ValidateConfig emits a one-line warning at commit time when
+// `services application-identification` is enabled, telling the
+// operator that xpf AppID is port+protocol catalog matching only —
+// no L7 DPI / signature engine — and pointing them at the runtime
+// status command + the contract doc. The warning is informational
+// (the knob is preserved, not stripped), unlike #915 surplus-sharing
+// which warn-and-strips a no-op flag.
+func TestValidateConfigAppIDWarnsWhenEnabled(t *testing.T) {
+	lines := []string{
+		"set services application-identification",
+		"set system dataplane-type userspace",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if !cfg.Services.ApplicationIdentification {
+		t.Fatal("expected ApplicationIdentification=true after parse")
+	}
+	gotWarn := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "application-identification") &&
+			strings.Contains(w, "port+protocol") {
+			gotWarn = true
+			break
+		}
+	}
+	if !gotWarn {
+		t.Fatalf("expected AppID contract warning on cfg.Warnings; got: %v",
+			cfg.Warnings)
+	}
+}
+
+// #653: ValidateConfig must NOT emit the AppID warning when
+// `services application-identification` is NOT configured. Negative
+// regression so the warning doesn't accidentally fire on every commit.
+func TestValidateConfigAppIDSilentWhenDisabled(t *testing.T) {
+	lines := []string{
+		"set system dataplane-type userspace",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "application-identification") {
+			t.Fatalf("AppID warning fired without the knob set: %v",
+				cfg.Warnings)
+		}
+	}
+}

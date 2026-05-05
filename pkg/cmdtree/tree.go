@@ -355,6 +355,9 @@ var OperationalTree = map[string]*Node{
 			"rpm": {Desc: "Show RPM probe results", Children: map[string]*Node{
 				"probe-results": {Desc: "Show RPM probe results"},
 			}},
+			"application-identification": {Desc: "Show application-identification (AppID) status", Children: map[string]*Node{
+				"status": {Desc: "Show AppID engine status and supported contract"},
+			}},
 		}},
 		"interfaces": {Desc: "Show interface information", DynamicFn: func(cfg *config.Config) []string {
 			if cfg == nil || cfg.Interfaces.Interfaces == nil {

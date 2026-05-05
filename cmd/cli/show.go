@@ -287,6 +287,22 @@ func (c *ctl) handleShowServices(args []string) error {
 	switch args[0] {
 	case "rpm":
 		return c.showText("rpm")
+	case "application-identification":
+		// #653: surface what xpf AppID actually does today. Per
+		// cmdtree the only valid leaf is `application-identification
+		// status`; reject anything else so typos surface as usage
+		// errors instead of being silently swallowed.
+		rest := args[1:]
+		if len(rest) == 0 {
+			printRemoteTreeHelp("show services application-identification:",
+				"show", "services", "application-identification")
+			return nil
+		}
+		if rest[0] != "status" {
+			return fmt.Errorf("unknown application-identification target: %s "+
+				"(expected `status`)", rest[0])
+		}
+		return c.showText("application-identification-status")
 	default:
 		return fmt.Errorf("unknown services target: %s", args[0])
 	}

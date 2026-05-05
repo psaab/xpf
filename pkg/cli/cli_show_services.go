@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/psaab/xpf/pkg/appid"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcpserver"
@@ -158,6 +159,18 @@ func (c *CLI) showRPMProbeResults() error {
 			fmt.Println()
 		}
 	}
+	return nil
+}
+
+// showApplicationIdentificationStatus delegates to the shared
+// renderer in `pkg/appid` so the local CLI and the gRPC
+// text-show surface stay byte-identical (Copilot review #5 on
+// PR #1196). #653.
+func (c *CLI) showApplicationIdentificationStatus() error {
+	cfg := c.store.ActiveConfig()
+	var buf strings.Builder
+	appid.RenderStatus(&buf, cfg)
+	fmt.Print(buf.String())
 	return nil
 }
 
