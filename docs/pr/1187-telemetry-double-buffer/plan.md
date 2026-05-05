@@ -1,217 +1,264 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: REVISED v2 — Codex round-1 PLAN-NEEDS-MAJOR + Gemini Pro 3.1 PLAN-READY (with reframe). Scope tightened, primary value reframed as DDoS resilience.
 issue: #1187
-phase: Extend existing BatchCounters to cover disposition + screen_drops + tx_errors
+phase: Extend BatchCounters via TelemetryContext to cover hot disposition counters
 ---
 
 ## 1. Issue framing
 
-Issue #1187 calls out MESI thrashing: `BindingLiveState` has ~50
-atomics that the worker writes per-packet and the coordinator reads
-on the status poll. At 14.8M pps, every counter increment on the
-worker side is an L1-d cache-line invalidation request that the
-coordinator core may be holding.
+`BindingLiveState` (`afxdp/umem/mod.rs:197`) holds ~50 atomics
+that the worker writes per-packet on disposition outcomes and the
+coordinator reads on the 1Hz status poll. At 14.8M pps, every
+direct `fetch_add(1, Ordering::Relaxed)` is a cache-line
+invalidation request that the coordinator core may be holding —
+classic MESI ping-pong on the QPI/UPI bus.
 
-**Important context the issue body does not cite:** `BatchCounters`
-(`afxdp/mod.rs:308-389`) already exists. It's a per-poll local
-struct holding 12 fast counters (`rx_packets`, `rx_bytes`,
-`rx_batches`, `metadata_packets`, `validated_packets`,
-`validated_bytes`, `forward_candidate_packets`, `session_hits`,
-`session_misses`, `session_creates`, `snat_packets`,
-`dnat_packets`). It's threaded through `telemetry.counters` and
-flushed to `BindingLiveState` at well-defined points
-(`worker/lifecycle.rs:111,150,303`). The double-buffer pattern is
-already half-shipped.
+**The real motivation (per Gemini Pro 3.1 round-1 reframe): DDoS
+resilience and congestion isolation.** Exception paths in a
+firewall *are* attack paths:
+- SYN flood → `screen_drops` fires per dropped packet
+- Volumetric attack on a blocked port → `policy_denied_packets`
+  per dropped packet
+- Misrouted traffic during reconcile → `route_miss_packets`,
+  `next_table_packets`
+- Neighbor cache stale → `neighbor_miss_packets`
 
-The gap is the *remaining* hot per-packet counters that bypass
-`BatchCounters` and write to `BindingLiveState` directly:
+If these counters write through unbatched atomics during an
+attack, the worker core continuously incurs RFO stalls from the
+coordinator's status reads, dropping the worker's processing
+capacity. Batching these counters is **mandatory for
+cross-interface congestion isolation**, not an optional
+optimization.
 
-| Site | Counters bypassed |
-|---|---|
-| `disposition.rs:87,92,104,117,130,158,166,179,192,205,218,231` | `validated_packets` (already in batch but written here too?), `exception_packets`, `config_gen_mismatches`, `fib_gen_mismatches`, `unsupported_packets`, `local_delivery_packets`, `policy_denied_packets`, `route_miss_packets`, `neighbor_miss_packets`, `discard_route_packets`, `next_table_packets` (~10 distinct counters, each fires per-packet on its disposition outcome) |
-| `poll_stages.rs:276` | `screen_drops` |
-| `tx/cos_classify.rs:803`, `worker/mod.rs:1653`, `cos/queue_service/service.rs:80,229,385,533` | `tx_errors` (6 sites) |
+**Existing infrastructure** (`afxdp/mod.rs:308-389`):
+`BatchCounters` already exists with 12 fast counters and a
+`flush()` method. Some fields (e.g., `forward_candidate_packets`)
+are *defined* in `BatchCounters` but `disposition.rs` writes
+directly to `BindingLiveState`, bypassing the batch — that's a
+pre-existing leak this PR also fixes.
 
-These all sit on the per-packet hot path and currently take the
-`fetch_add(1, Ordering::Relaxed)` MESI hit per fire.
+## 2. Honest scope/value framing — corrected per Codex round-1
 
-## 2. Honest scope/value framing
+**v1 scope was too broad.** Codex round-1 found 5 substantive
+issues, all valid:
 
-**The win:** every per-packet counter that moves from atomic
-`fetch_add` → batched local++ saves one cache-line write per
-packet for that counter. At 14.8M pps the per-counter saving is
-~14.8 Mops/s of avoided RFO. The aggregate depends on traffic
-mix:
+1. **`tx_errors` is not architecturally ready for batching.**
+   Real fan-out is much wider than 6 sites: also `umem/mod.rs`,
+   `tx/drain.rs`, `tx/transmit.rs`, `cos/queue_service/mod.rs`,
+   `worker/cos.rs`. `BatchCounters` is created *after* the first
+   `drain_pending_tx()` call in `worker/lifecycle.rs:59`, so a
+   TX-only error during early drain would be silently lost. Also
+   `tx_errors` is the generic superset of dedicated counters
+   like `tx_submit_error_drops`; partial batching makes
+   snapshots inconsistent. **DROP `tx_errors` from this PR.**
+   It needs its own design (separate ticket).
+2. **Perf model overstated.** Steady happy-path forwarding gains
+   ~0% (those counters are already batched). Real saving is
+   `14.8M × event_fraction × counters_per_event`, not
+   `14.8M × N_added_counters`. A 1% exception rate saves ~148k
+   atomic ops/sec; a 100ms config-reload window saves ~1.5M-3M
+   atomic ops total — much smaller than the issue body implies.
+3. **Size math wrong.** `BatchCounters` is currently 12 u64 +
+   bool ≈ **104 bytes** (not 108), spanning 2 cache lines.
+   Adding 11 fields → 23 u64 + bool ≈ **192 bytes**, spanning
+   **3 cache lines** (not 2). The cold lines aren't touched on
+   happy path so the cache cost is OK, but the plan must stop
+   claiming a 2-line structure.
+4. **Disposition API plan underspecified.** `record_disposition()`
+   is called from BOTH worker hot path
+   (`poll_descriptor.rs:2071`) AND cold coordinator injection
+   (`coordinator/inject.rs:43`). A mandatory `&mut BatchCounters`
+   parameter breaks the cold caller. Use existing
+   `TelemetryContext` (`types/runtime.rs:239`) for hot path,
+   split hot/cold recording functions, OR pass `Option<&mut
+   BatchCounters>`.
+5. **Site table misleading.** `validated_packets` write at
+   `disposition.rs:87` is NOT happy-path RX; happy path is at
+   `poll_descriptor.rs:58` where it's already batched. Real
+   existing hot leak is `forward_candidate_packets` at
+   `disposition.rs:161` — that field already exists in
+   `BatchCounters` (`mod.rs:316,358-361`) but disposition
+   bypasses it. **Fix this leak as part of this PR.**
 
-- For pure-forward traffic on existing sessions, *most* of the
-  counters fire 0× per packet (they're disposition-specific) — the
-  only hot ones are `validated_packets` (already batched),
-  `forward_candidate_packets` (already batched), `session_hits`
-  (already batched). The proposed extension hits packets that
-  diverge from happy-path forwarding.
-- For traffic that exercises exception paths (config gen
-  mismatch during reconcile, route miss, neighbor miss, policy
-  deny), each of those packets pays the atomic. Worst case is
-  during config reload when `config_gen_mismatches` /
-  `fib_gen_mismatches` fires every packet for the duration of the
-  reconcile.
+**v2 scope (narrowed):**
 
-**Realistic expected gain:** very small under steady-state happy-
-path forwarding (~0% — the hot counters are already batched).
-Visible during config reload windows (~50-100ms per reconcile)
-and exception-rich workloads. *If reviewers conclude the gain is
-too small to justify the churn, PLAN-KILL is acceptable.*
-
-**The architectural value:** the current code is half-batched and
-half-direct. Routing all hot per-packet counters through one
-mechanism is a net legibility win regardless of the cycle
-saving. After this PR, any new per-packet counter has one place
-to live.
+A. **Fix the existing `forward_candidate_packets` leak**: change
+   `disposition.rs:161` to write through `BatchCounters` (or
+   the new `TelemetryContext`), not directly to `live`.
+B. **Add 8 new fields to `BatchCounters`** for the disposition
+   path:
+   - `screen_drops` (DDoS-critical; SYN flood)
+   - `policy_denied_packets` (DDoS-critical; blocked port flood)
+   - `route_miss_packets` (reconcile-critical)
+   - `neighbor_miss_packets` (NDP/ARP storm-critical)
+   - `discard_route_packets` (rare but per-packet on path)
+   - `next_table_packets` (per-packet on inter-VRF leak path)
+   - `local_delivery_packets` (per-packet for slow-path)
+   - `exception_packets` (sum, fires often)
+C. **Defer**: `config_gen_mismatches`, `fib_gen_mismatches`,
+   `unsupported_packets`. These fire only during reconcile and
+   are gated by other expensive work (`record_exception()` does
+   mutex + timestamp + string + deque). Adding them is small
+   incremental win; defer to a follow-up.
+D. **Defer all of `tx_errors`.** Codex round-1 finding #1.
 
 ## 3. What's already shipped
 
-- `BatchCounters` struct with 12 fields, `flush()` method, and
-  `Default` impl (`afxdp/mod.rs:308-389`).
-- `telemetry.counters: &'a mut BatchCounters` plumbed through
-  `WorkerCtx<'a>` (`afxdp/types/runtime.rs:242`).
-- Flush points at end-of-poll-binding and on shutdown
-  (`worker/lifecycle.rs:111,150,303`).
-- Write sites at `poll_descriptor.rs:59,379,2216` for
-  `validated_packets`, `session_hits`, `rx_packets`.
+- `BatchCounters` struct and `flush()` (`afxdp/mod.rs:308-389`)
+- `TelemetryContext` (`types/runtime.rs:239`) which already
+  threads `&mut BatchCounters` through the hot path via
+  `WorkerCtx`
+- 12 fast counters batched: `rx_packets`, `rx_bytes`,
+  `rx_batches`, `metadata_packets`, `validated_packets` (RX
+  side), `validated_bytes`, `forward_candidate_packets` (the
+  leaked one), `session_hits`, `session_misses`,
+  `session_creates`, `snat_packets`, `dnat_packets`
+- Flush at `worker/lifecycle.rs:111,150,303`
 
-This PR composes with that infrastructure; it does not replace
-or rewrite it.
+This v2 PR composes with that infrastructure.
 
 ## 4. Concrete design
 
 ### 4.1 Extend `BatchCounters`
 
-Add fields for every hot counter that's currently bypassing the
-batch. Conservative selection — only counters that fire per-
-packet on the worker poll path:
+Add 8 fields:
 
 ```rust
 struct BatchCounters {
     touched: bool,
     // existing 12 fields...
 
-    // disposition.rs
-    exception_packets: u64,
-    config_gen_mismatches: u64,
-    fib_gen_mismatches: u64,
-    unsupported_packets: u64,
-    local_delivery_packets: u64,
+    // NEW (v2 narrowed scope):
+    screen_drops: u64,
     policy_denied_packets: u64,
     route_miss_packets: u64,
     neighbor_miss_packets: u64,
     discard_route_packets: u64,
     next_table_packets: u64,
-
-    // poll_stages.rs
-    screen_drops: u64,
-
-    // tx_errors fires from tx/cos_classify.rs, worker/mod.rs,
-    // cos/queue_service/service.rs (6 sites total)
-    tx_errors: u64,
+    local_delivery_packets: u64,
+    exception_packets: u64,
 }
 ```
 
-That's 12 new fields. Total `BatchCounters` size goes from
-~108 bytes (12 × `u64` + `bool` + padding) to ~204 bytes
-(24 × `u64` + bool). Stays well under one cache line worth of
-spill but *does* fit two cache lines now — call out for review.
+Total: 20 u64 + bool ≈ **168 bytes**, 3 cache lines. Hot path
+touches the first cache line; cold counters only on disposition
+divergence.
 
-### 4.2 Route writes through the batch
+### 4.2 Routing through `TelemetryContext` (Codex finding #4)
 
-`disposition.rs` currently takes `&BindingLiveState`. Change
-signatures to take `&mut BatchCounters`. Two options:
+`record_disposition()` and `record_forwarding_disposition()` are
+called from both hot and cold paths. Two-callsite split:
 
-- **Option A:** thread `&mut BatchCounters` through wherever
-  disposition is called. Caller responsibility.
-- **Option B:** add `disposition.rs` functions that take both
-  `&BindingLiveState` (for cold field reads) and
-  `&mut BatchCounters` (for the writes), and switch hot
-  `fetch_add` sites to write through the batch.
-
-Option B is the smaller diff. Pick Option B unless reviewers
-prefer Option A's stricter encapsulation.
+- **Hot path** (`poll_descriptor.rs:2071`): the worker has
+  `WorkerCtx::telemetry: TelemetryContext` in scope, which
+  wraps `&mut BatchCounters`. Add a hot variant
+  `record_disposition_hot(meta, telemetry, ...)` that writes
+  through `telemetry.counters`.
+- **Cold path** (`coordinator/inject.rs:43`): the coordinator
+  has only `&BindingLiveState`. Keep the current direct-write
+  signature; rename to `record_disposition_cold(meta, live, ...)`
+  for clarity.
+- The shared body is moved to a private helper that takes
+  whichever the caller has and a single closure for the counter
+  write.
 
 ### 4.3 Extend `flush()`
 
-Mirror the existing 12-counter flush block — `if self.X != 0 { live.X.fetch_add(...); self.X = 0; }`. The 12 added fields each get one such block.
+Mirror the existing pattern — `if self.X != 0 { live.X.fetch_add(...); self.X = 0; }`. 8 new blocks.
 
-### 4.4 Caller updates
+### 4.4 Fix the `forward_candidate_packets` leak
 
-- `disposition.rs` signatures change from `(live: &BindingLiveState, ...)` to `(live: &BindingLiveState, counters: &mut BatchCounters, ...)`. Update all callers (~5-10 sites).
-- `poll_stages.rs:276` writes `screen_drops` — switch to `counters.screen_drops += 1`.
-- `tx_errors` write sites: `tx/cos_classify.rs:803`, `worker/mod.rs:1653`, `cos/queue_service/service.rs:80,229,385,533`. These are 6 distinct call sites, each needs `&mut BatchCounters` in scope. Investigate whether `WorkerCtx` is available — if not, may need to pass through, which expands the diff.
+Change `disposition.rs:161` from direct `live.forward_candidate_packets.fetch_add(...)` to the new
+`telemetry.counters.forward_candidate_packets += ...`. This is
+the pre-existing leak Codex flagged — it's currently a dead
+field in `BatchCounters`.
+
+### 4.5 `screen_drops` site
+
+`poll_stages.rs:276` has `binding_live.screen_drops.fetch_add(1)`.
+This site has access to `binding_live: &BindingLiveState` — see
+if `TelemetryContext` is in scope. If not, either thread it in
+(small diff) or leave `screen_drops` direct (Codex acceptable
+fallback). Decision deferred to implementation phase.
 
 ## 5. Public API preservation
 
-`BindingLiveState` field types and visibilities are unchanged.
-`BatchCounters` is `struct` private to `afxdp`. No external API
-changes.
+- `BindingLiveState` field types and visibilities unchanged.
+- `BatchCounters` is `struct` private to `afxdp`.
+- `record_disposition()` callers update to either hot or cold
+  variant.
+- No external API changes.
 
 ## 6. Hidden invariants the change must preserve
 
-- **Counter monotonicity:** `flush()` only adds; it never
-  decrements. Tests / Prometheus collectors must continue to see
-  monotonically increasing values.
-- **Flush punctuality:** `flush()` fires at end of each
-  `poll_binding`. Counter delay is bounded by one poll cycle
-  (~50µs at line rate). Coordinator status poll runs once/s; can
-  always catch up.
-- **Order independence:** the existing 12 counters don't depend
-  on flush order. The new 12 are also independent (each is its
-  own atomic).
-- **Crash safety:** if a worker panics between increment and
-  flush, those counters are lost. Same as today — `BatchCounters`
-  doesn't survive a panic, the existing 12 already have this
-  behavior.
+- **Counter monotonicity:** `flush()` only adds; never decrements.
+- **Flush punctuality:** bounded by one poll cycle (~50µs at line rate).
+- **Order independence:** counters are independent atomics — no flush-order dependency.
+- **Crash safety:** worker panic between increment and flush loses those counts. Same as today for the existing 12.
+- **Cold-path consistency:** the coordinator inject path keeps
+  direct writes (rare; status correctness, not perf).
 
 ## 7. Risk assessment
 
 | Class | Level | Why |
 |---|---|---|
-| Behavioral regression | LOW | Same flush semantics as the existing 12 batched counters; counters delay bounded by one poll cycle |
-| Borrow-checker | LOW-MED | `&mut BatchCounters` adds another `&mut` parameter through disposition.rs / `tx_errors` sites; may collide with existing `&mut binding.tx_pipeline` etc. |
-| Test breakage | LOW | Existing tests read final atomic values via `live.X.load()` — those still work after flush |
-| Performance regression | LOW | 12 added fields fit in 2 cache lines; per-packet write now updates a private cache line; flush does N atomic adds per poll cycle (vs N atomic adds per packet today) |
+| Behavioral regression | LOW | Same flush semantics as existing 12 counters; coordinator inject keeps direct writes |
+| Borrow-checker | LOW-MED | Splitting hot/cold disposition recorder may force refactor of intermediate callers |
+| Test breakage | LOW | Tests read final `live.X.load()` values — unchanged after flush |
+| Perf regression | LOW | 8 new fields fit in 3 cache lines (1 hot + 2 cold) |
+| Cross-talk on attack/congestion | **the win** | Eliminates RFO storm during SYN flood / policy denial / route miss |
 
 ## 8. Test plan
 
 - `cargo build --release`: clean
 - `cargo test --release`: 974/974 pass
-- 5x flake check on a disposition-counter-touching test
+- 5x flake check on a disposition-touching test
 - Smoke matrix on loss userspace cluster: 30 cells, 0 retrans
-  (Pass A baselines + Pass B per-class CoS)
-- **Verify counter visibility**: after smoke, `show binding`
-  output should show non-zero `route_miss`, `neighbor_miss`,
-  `policy_denied`, etc. counters when the relevant disposition
-  fires (e.g., kill the route to trigger `route_miss`).
+- **Counter visibility verification**: trigger each disposition
+  (kill route → `route_miss`; flood blocked port →
+  `policy_denied`; etc.) and confirm `show binding` reflects
+  non-zero counters within 1s.
+- **DDoS isolation regression**: optional —
+  during a SYN flood targeted at an interface served by worker
+  N, verify another interface served by the same worker
+  continues to forward at line rate. (May be hard to set up;
+  defer to a follow-up validation.)
 
 ## 9. Out of scope
 
-- 64-byte padding around `BindingLiveState` (separate refactor; the issue mentions it but it's invasive — every `BindingLiveState` instance becomes 64-byte-aligned which affects allocation patterns).
-- NUMA-aware placement of `BindingLiveState` (also separate; coordinator is single-threaded today).
-- Removing cold counters from `BindingLiveState` (e.g., `bound`, `xsk_registered`, `socket_fd` — these are written once at bind, no MESI churn).
-- Per-CPU counters (would need re-aggregation in coordinator; large redesign).
+- `tx_errors` batching — separate PR with its own design (Codex finding #1).
+- `config_gen_mismatches`, `fib_gen_mismatches`, `unsupported_packets` — small incremental wins, deferred.
+- 64-byte padding around `BindingLiveState` — separate refactor; affects allocation patterns globally.
+- NUMA-aware placement.
+- Per-CPU counters (large redesign).
 
 ## 10. Open questions for adversarial review
 
-1. **Is the win measurable?** If the hot counters (`validated_packets`, `forward_candidate_packets`, `session_hits`) are already batched, what's the absolute cycle gain at 14.8M pps for the proposed extension during steady-state happy-path? If the answer is "essentially zero", PLAN-KILL is the right call.
+1. **Hot/cold split shape**: does `record_disposition_hot` /
+   `record_disposition_cold` cleanly split, or is the shared
+   body too entangled to factor? Implementation phase will tell.
 
-2. **`BatchCounters` size growth (108 → 204 bytes)**: does spilling into a second cache line on the worker's hot stack cost more than the saving from atomic→batched conversions?
+2. **Should `screen_drops` thread through `TelemetryContext`
+   too?** Cost: small diff to plumb. Benefit: DDoS-relevant
+   counter that fires on SYN flood.
 
-3. **`tx_errors` fan-out**: the 6 write sites span `tx/cos_classify.rs`, `worker/mod.rs`, and 4 `cos/queue_service/service.rs` sites. Does plumbing `&mut BatchCounters` through all these worth the diff size, or is `tx_errors` better left direct given it fires only on actual TX errors (rare)?
+3. **3 cache lines vs 2**: is it worth shaving the field count
+   to keep it at 2 cache lines? The cold lines aren't touched
+   on happy path so the answer is probably no, but call out for
+   review.
 
-4. **Disposition.rs signature change**: many callers currently pass `(meta, live, ...)`. Adding `&mut BatchCounters` to the parameter list — is there a way to bundle this with `live` into a context type, or is the explicit param the cleaner option given the rest of the codebase's style?
+4. **Should the v2 plan also fold in the Codex-deferred
+   counters** (`config_gen_mismatches` etc.) once `tx_errors`
+   is dropped from scope, so the diff size is similar to v1?
+   Or keep the strict narrow scope?
 
-5. **Should `screen_drops` even move?** It fires only on screen check rejections — fairly rare in practice. Maybe leave it direct.
+5. **Is the "DDoS isolation" framing testable in CI?** The
+   smoke matrix doesn't exercise an active SYN flood. Should
+   we add a flood-test cell to the matrix as part of this PR?
 
 ## 11. Verdict request
 
-PLAN-READY → execute the extension.
-PLAN-NEEDS-MINOR → tweak scope (e.g., drop `screen_drops`/`tx_errors` from scope).
-PLAN-NEEDS-MAJOR → revise (e.g., the size-growth concern justifies a different shape).
-PLAN-KILL → premise wrong (e.g., expected cycle gain is too small to justify the churn — happy path counters are already batched, exception-path counters fire too rarely to matter).
+PLAN-READY → execute the narrowed v2 scope.
+PLAN-NEEDS-MINOR → tweak (e.g., include or exclude specific deferred counters).
+PLAN-NEEDS-MAJOR → revise (e.g., the hot/cold split is wrong, need a different shape).
+PLAN-KILL → premise wrong (unlikely given Gemini Pro 3.1 round-1 PLAN-READY with strong DDoS-isolation reframe).
