@@ -23,6 +23,7 @@ type cosQueueView struct {
 	forwardingClass string
 	priority        string
 	exact           bool
+	surplusSharing  bool // #915: only meaningful when exact == true
 	transmitRate    uint64
 	bufferBytes     uint64
 	queuedPackets   uint64
@@ -197,6 +198,15 @@ func FormatCoSInterfaceSummary(cfg *config.Config, status *ProcessStatus, select
 				queue.admissionBufferDrops,
 				queue.admissionEcnMarked,
 			)
+			// #915: surplus-sharing visibility. Rendered only on exact
+			// queues so non-exact queues (which already participate in
+			// surplus by default) stay clean. Operators debugging an
+			// exact queue that exceeds its configured rate need this
+			// line — without it the bursting looks like a bug.
+			if queue.exact {
+				fmt.Fprintf(&b, "           Surplus sharing: %s\n",
+					yesNo(queue.surplusSharing))
+			}
 			// #709 / #751: per-queue OwnerProfile line renders only
 			// the queue-scoped drain percentiles. The binding-scoped
 			// fields (redirect_p99 / owner_pps / peer_pps) moved to
@@ -428,6 +438,7 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 				qv.forwardingClass = className
 				if sched := cfg.ClassOfService.Schedulers[entry.Scheduler]; sched != nil {
 					qv.exact = sched.TransmitRateExact
+					qv.surplusSharing = sched.SurplusSharing
 					qv.transmitRate = sched.TransmitRateBytes
 					qv.bufferBytes = sched.BufferSizeBytes
 					if sched.Priority != "" {

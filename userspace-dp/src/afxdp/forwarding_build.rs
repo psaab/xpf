@@ -717,6 +717,9 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                     exact: scheduler
                         .map(|sched| sched.transmit_rate_exact)
                         .unwrap_or(false),
+                    surplus_sharing: scheduler
+                        .map(|sched| sched.surplus_sharing)
+                        .unwrap_or(false),
                     surplus_weight: cos_surplus_weight(
                         transmit_rate_bytes.max(1),
                         iface.cos_shaping_rate_bytes_per_sec,
@@ -806,6 +809,7 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                 priority: cos_priority_rank("low"),
                 transmit_rate_bytes: iface.cos_shaping_rate_bytes_per_sec,
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: burst_bytes,
                 dscp_rewrite: dscp_rewrite_rule

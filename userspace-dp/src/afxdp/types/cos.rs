@@ -53,6 +53,13 @@ pub(in crate::afxdp) struct CoSQueueConfig {
     pub(in crate::afxdp) priority: u8,
     pub(in crate::afxdp) transmit_rate_bytes: u64,
     pub(in crate::afxdp) exact: bool,
+    /// #915: opt-in for exact queues to draw from root surplus
+    /// tokens once their own bucket is empty. See the
+    /// `CoSQueueRuntime.surplus_sharing` doc-comment for runtime
+    /// semantics. Only meaningful when `exact == true` (the Go
+    /// control plane warn-and-strips otherwise so the runtime
+    /// never sees it set on a non-exact queue).
+    pub(in crate::afxdp) surplus_sharing: bool,
     pub(in crate::afxdp) surplus_weight: u32,
     pub(in crate::afxdp) buffer_bytes: u64,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
@@ -407,6 +414,18 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     pub(in crate::afxdp) priority: u8,
     pub(in crate::afxdp) transmit_rate_bytes: u64,
     pub(in crate::afxdp) exact: bool,
+    /// #915: only meaningful when `exact == true`. When set, the
+    /// queue (1) is NOT parked on `queue.tokens < head_len` in
+    /// the exact-guarantee selector
+    /// (`select_exact_cos_guarantee_queue_with_fast_path`), and
+    /// (2) participates in `select_cos_surplus_batch` as if it
+    /// were non-exact. The combined effect is that the queue
+    /// retains its strict-priority guarantee but can also draw
+    /// from root surplus tokens once its own bucket is empty.
+    /// `tx_completion::apply_cos_*_result` phase-gates the
+    /// `shared_queue_lease` consumption to Guarantee phase only,
+    /// so surplus draws don't debit the per-queue rate cap.
+    pub(in crate::afxdp) surplus_sharing: bool,
     pub(in crate::afxdp) flow_fair: bool,
     /// #785: cached shadow of `WorkerCoSQueueFastPath.shared_exact`
     /// populated by `promote_cos_queue_flow_fair`. Under the current

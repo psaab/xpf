@@ -10,9 +10,92 @@ use crate::afxdp::cos::queue_service::{
 use crate::afxdp::cos::token_bucket::COS_MIN_BURST_BYTES;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{
-    CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing, COS_FLOW_FAIR_BUCKETS,
+    CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing, SharedCoSQueueLease,
+    COS_FLOW_FAIR_BUCKETS,
 };
 use crate::afxdp::TX_BATCH_SIZE;
+use std::sync::Arc;
+
+// #915 Codex code-review MEDIUM: direct unit tests for the
+// phase-gated `shared_queue_lease` consumption helper. Both
+// `apply_cos_send_result` and `apply_cos_prepared_result` route
+// through `maybe_consume_exact_queue_lease` (extracted helper),
+// so testing the helper covers both production paths without a
+// full BindingWorker fixture.
+//
+// The lease's `outstanding_leased_tokens` field tracks how many
+// bytes have been ACQUIRED but not yet CONSUMED. After a full
+// acquire that maxes out `max_total_leased`, no further acquire
+// can grant bytes (returns 0). Calling `consume` decrements
+// `outstanding_leased_tokens`, freeing headroom for a subsequent
+// acquire to succeed. This indirect observation lets us prove
+// whether the helper called `lease.consume()` without exposing
+// internal counters.
+
+#[test]
+fn maybe_consume_exact_queue_lease_skips_on_surplus_phase() {
+    let lease = Arc::new(SharedCoSQueueLease::new(
+        10_000_000, // 10 Mb/s lease rate (irrelevant; we mostly care about max_total)
+        128 * 1024, // burst
+        2,          // num workers
+    ));
+    // Acquire enough to fill outstanding to max_total_leased so no
+    // further acquire can succeed without consume freeing headroom.
+    let acquired = lease.acquire(0, 8 * 1024 * 1024);
+    assert!(acquired > 0, "initial acquire must grant some bytes");
+    // Drain remaining headroom — repeated acquires until 0 granted.
+    loop {
+        if lease.acquire(0, 8 * 1024 * 1024) == 0 {
+            break;
+        }
+    }
+    // Sanity: at saturation, another acquire grants 0.
+    assert_eq!(lease.acquire(0, 1500), 0,
+        "saturated lease must grant 0 bytes");
+
+    // Surplus phase: helper must NOT consume, so headroom stays at 0.
+    maybe_consume_exact_queue_lease(
+        Some(&lease),
+        CoSServicePhase::Surplus,
+        1500,
+    );
+    assert_eq!(lease.acquire(0, 1500), 0,
+        "Surplus phase must not free queue-lease headroom");
+}
+
+#[test]
+fn maybe_consume_exact_queue_lease_debits_on_guarantee_phase() {
+    let lease = Arc::new(SharedCoSQueueLease::new(
+        10_000_000,
+        128 * 1024,
+        2,
+    ));
+    let _ = lease.acquire(0, 8 * 1024 * 1024);
+    loop {
+        if lease.acquire(0, 8 * 1024 * 1024) == 0 {
+            break;
+        }
+    }
+    assert_eq!(lease.acquire(0, 1500), 0);
+
+    // Guarantee phase: helper consumes; headroom is freed.
+    maybe_consume_exact_queue_lease(
+        Some(&lease),
+        CoSServicePhase::Guarantee,
+        1500,
+    );
+    assert_eq!(lease.acquire(0, 1500), 1500,
+        "Guarantee phase must free 1500 bytes of queue-lease headroom");
+}
+
+#[test]
+fn maybe_consume_exact_queue_lease_no_lease_no_op() {
+    // When the queue has no shared lease (None), both phases must
+    // be no-ops. Defensive — covers the `if let Some` arm.
+    maybe_consume_exact_queue_lease(None, CoSServicePhase::Surplus, 1500);
+    maybe_consume_exact_queue_lease(None, CoSServicePhase::Guarantee, 1500);
+    // No assertion needed — the function must not panic on None.
+}
 
 #[test]
 fn normalize_cos_queue_state_repairs_nonempty_unparked_queue_to_runnable() {
@@ -21,6 +104,7 @@ fn normalize_cos_queue_state_repairs_nonempty_unparked_queue_to_runnable() {
         priority: 5,
         transmit_rate_bytes: 11_000_000_000 / 8,
         exact: true,
+        surplus_sharing: false,
         flow_fair: false,
         shared_exact: false,
         flow_hash_seed: 0,

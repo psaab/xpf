@@ -171,6 +171,13 @@ pub(crate) struct CoSSchedulerSnapshot {
     pub priority: String,
     #[serde(rename = "buffer_size_bytes", default)]
     pub buffer_size_bytes: u64,
+    /// #915: opt an exact queue into surplus-phase participation
+    /// so it can draw from root surplus tokens once its own bucket
+    /// is empty. Only meaningful when transmit_rate_exact == true;
+    /// the Go control plane warn-and-strips otherwise. `default` is
+    /// required so older snapshots without the field decode safely.
+    #[serde(rename = "surplus_sharing", default)]
+    pub surplus_sharing: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1972,6 +1979,46 @@ mod tests {
             status.v_min_throttle_hard_cap_overrides
         );
         assert_eq!(back.v_min_throttles, status.v_min_throttles);
+    }
+
+    // #915 forward-compat: a pre-#915 CoSSchedulerSnapshot
+    // payload (no `surplus_sharing` field) must decode with
+    // `surplus_sharing == false` so the runtime sees the field
+    // as absent = opt-out, preserving Junos `transmit-rate
+    // exact` hard-cap semantics for older snapshot writers.
+    // Codex round-1 MAJOR 3 + Gemini round-1 #7.
+    #[test]
+    fn cos_scheduler_snapshot_surplus_sharing_default_false() {
+        let legacy_json = r#"{
+            "name": "iperf-a",
+            "transmit_rate_bytes": 125000000,
+            "transmit_rate_exact": true,
+            "priority": "low",
+            "buffer_size_bytes": 65536
+        }"#;
+        let snap: CoSSchedulerSnapshot =
+            serde_json::from_str(legacy_json)
+                .expect("pre-#915 CoSSchedulerSnapshot decodes");
+        assert_eq!(snap.surplus_sharing, false,
+            "surplus_sharing must default to false for pre-#915 snapshots");
+        assert_eq!(snap.transmit_rate_exact, true);
+    }
+
+    #[test]
+    fn cos_scheduler_snapshot_surplus_sharing_round_trip_true() {
+        let snap = CoSSchedulerSnapshot {
+            name: "iperf-a".into(),
+            transmit_rate_bytes: 125_000_000,
+            transmit_rate_exact: true,
+            priority: "low".into(),
+            buffer_size_bytes: 65_536,
+            surplus_sharing: true,
+        };
+        let json = serde_json::to_string(&snap)
+            .expect("serialize");
+        let back: CoSSchedulerSnapshot = serde_json::from_str(&json)
+            .expect("deserialize");
+        assert_eq!(back.surplus_sharing, true);
     }
 
     // #943 additive-wire contract: a pre-#943 BindingStatus payload

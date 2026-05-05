@@ -92,6 +92,10 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(config: &CoSInterfaceConfig,
                 priority: queue.priority,
                 transmit_rate_bytes: queue.transmit_rate_bytes,
                 exact: queue.exact,
+                // #915: copy the opt-in flag from the intermediate
+                // CoSQueueConfig (populated in forwarding_build.rs
+                // from CoSSchedulerSnapshot.surplus_sharing).
+                surplus_sharing: queue.surplus_sharing,
                 flow_fair: false,
                 // Populated by `promote_cos_queue_flow_fair` from the
                 // live `WorkerCoSQueueFastPath.shared_exact` signal.

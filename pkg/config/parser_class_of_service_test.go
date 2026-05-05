@@ -230,6 +230,145 @@ func TestCompileClassOfServiceDecimalTransmitRateExactSyntax(t *testing.T) {
 	}
 }
 
+// #915: surplus-sharing flag set via flat-set syntax.
+func TestSchedulerSurplusSharingFlatSet(t *testing.T) {
+	lines := []string{
+		"set class-of-service forwarding-classes queue 4 iperf-a",
+		"set class-of-service schedulers iperf-a transmit-rate 1g exact",
+		"set class-of-service schedulers iperf-a surplus-sharing",
+		"set class-of-service scheduler-maps edge-map forwarding-class iperf-a scheduler iperf-a",
+		"set class-of-service interfaces ge-0/0/2 unit 80 shaping-rate 10g",
+		"set class-of-service interfaces ge-0/0/2 unit 80 scheduler-map edge-map",
+		"set system dataplane-type userspace",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile error: %v", err)
+	}
+	sched := cfg.ClassOfService.Schedulers["iperf-a"]
+	if sched == nil {
+		t.Fatal("expected iperf-a scheduler")
+	}
+	if !sched.TransmitRateExact {
+		t.Fatal("expected transmit-rate exact")
+	}
+	if !sched.SurplusSharing {
+		t.Fatal("expected surplus-sharing = true")
+	}
+}
+
+// #915: surplus-sharing flag set via hierarchical syntax.
+func TestSchedulerSurplusSharingHierarchical(t *testing.T) {
+	input := `class-of-service {
+    forwarding-classes {
+        queue 4 iperf-a;
+    }
+    schedulers {
+        iperf-a {
+            transmit-rate 1g exact;
+            surplus-sharing;
+        }
+    }
+    scheduler-maps {
+        edge-map {
+            forwarding-class iperf-a {
+                scheduler iperf-a;
+            }
+        }
+    }
+    interfaces {
+        ge-0/0/2 {
+            unit 80 {
+                shaping-rate 10g;
+                scheduler-map edge-map;
+            }
+        }
+    }
+}
+system {
+    dataplane-type userspace;
+}
+`
+	parser := NewParser(input)
+	tree, parseErrs := parser.Parse()
+	if len(parseErrs) > 0 {
+		t.Fatalf("parse: %v", parseErrs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	sched := cfg.ClassOfService.Schedulers["iperf-a"]
+	if sched == nil {
+		t.Fatal("expected iperf-a scheduler")
+	}
+	if !sched.TransmitRateExact || !sched.SurplusSharing {
+		t.Fatalf("expected exact + surplus-sharing; got exact=%v surplus_sharing=%v",
+			sched.TransmitRateExact, sched.SurplusSharing)
+	}
+}
+
+// #915: ValidateConfig warn-and-strips surplus-sharing when set
+// without transmit-rate exact (#1183 lesson — runtime never sees
+// the no-op flag).
+func TestSchedulerSurplusSharingWithoutExactWarnsAndStrips(t *testing.T) {
+	lines := []string{
+		"set class-of-service forwarding-classes queue 4 iperf-a",
+		"set class-of-service schedulers iperf-a transmit-rate 1g",
+		"set class-of-service schedulers iperf-a surplus-sharing",
+		"set class-of-service scheduler-maps edge-map forwarding-class iperf-a scheduler iperf-a",
+		"set class-of-service interfaces ge-0/0/2 unit 80 shaping-rate 10g",
+		"set class-of-service interfaces ge-0/0/2 unit 80 scheduler-map edge-map",
+		"set system dataplane-type userspace",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	// CompileConfig calls ValidateConfig internally and stores
+	// warnings on cfg.Warnings; calling ValidateConfig again is a
+	// no-op because the strip already cleared SurplusSharing.
+	gotWarn := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "surplus-sharing") &&
+			strings.Contains(w, "iperf-a") {
+			gotWarn = true
+			break
+		}
+	}
+	if !gotWarn {
+		t.Fatalf("expected warn-and-strip warning on cfg.Warnings; got: %v",
+			cfg.Warnings)
+	}
+	sched := cfg.ClassOfService.Schedulers["iperf-a"]
+	if sched == nil {
+		t.Fatal("scheduler missing")
+	}
+	if sched.SurplusSharing {
+		t.Fatal("expected SurplusSharing=false after warn-and-strip")
+	}
+}
+
 func TestValidateClassOfServiceWarnings(t *testing.T) {
 	input := `class-of-service {
     forwarding-classes {

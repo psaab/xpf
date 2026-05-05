@@ -359,6 +359,12 @@ type CoSScheduler struct {
 	TransmitRateExact bool
 	Priority          string
 	BufferSizeBytes   uint64
+	// SurplusSharing (#915) lifts the surplus-phase skip on
+	// transmit-rate exact queues so they can draw from the root
+	// shaper's surplus tokens once their own bucket is empty.
+	// Only meaningful when TransmitRateExact == true; cleared
+	// by ValidateConfig otherwise (warn-and-strip).
+	SurplusSharing bool
 }
 
 // CoSSchedulerMap binds forwarding classes to named schedulers.

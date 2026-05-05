@@ -435,6 +435,22 @@ pub(in crate::afxdp) fn select_exact_cos_guarantee_queue_with_fast_path(
                 .owner_profile
                 .drain_park_root_tokens
                 .fetch_add(1, Ordering::Relaxed);
+            // #915 (Codex code-review MAJOR): surplus-sharing exact
+            // queues stay runnable on root-token starvation too —
+            // surplus eligibility waits ONLY on root tokens, never
+            // on queue tokens. If we park here with
+            // `require_queue_tokens=true`, a low-rate
+            // surplus-sharing queue with empty queue.tokens would
+            // be put to sleep until BOTH buckets refill, even
+            // though `select_cos_surplus_batch` would have been
+            // happy to send as soon as root tokens recover (it
+            // calls `estimate_cos_queue_wakeup_tick(..., false)`).
+            // Falling through to the surplus selector lets that
+            // selector handle the root-only park with
+            // `require_queue_tokens=false`.
+            if queue.surplus_sharing {
+                continue;
+            }
             if let Some(wake_tick) = estimate_cos_queue_wakeup_tick(
                 root.tokens,
                 root.shaping_rate_bytes,
@@ -458,6 +474,19 @@ pub(in crate::afxdp) fn select_exact_cos_guarantee_queue_with_fast_path(
                 .owner_profile
                 .drain_park_queue_tokens
                 .fetch_add(1, Ordering::Relaxed);
+            // #915: surplus-sharing exact queues stay runnable when
+            // queue.tokens runs out — do NOT park. This lets the
+            // queue fall through to `select_cos_surplus_batch` on
+            // the same drain pass (root tokens permitting). The
+            // `drain_park_queue_tokens` counter still increments
+            // because the per-queue bucket DID starve; that's
+            // diagnostic parity, not a bug. Without this branch
+            // the queue would be parked here, marked
+            // `runnable = false`, and skipped by the surplus
+            // selector — defeating the whole point of #915.
+            if queue.surplus_sharing {
+                continue;
+            }
             if let Some(wake_tick) = estimate_cos_queue_wakeup_tick(
                 root.tokens,
                 root.shaping_rate_bytes,
@@ -569,7 +598,17 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(root: &mut CoSInterfaceRuntime,
             let queue_idx =
                 root.queue_indices_by_priority[priority][(start + offset) % indices_len];
             let queue = &mut root.queues[queue_idx];
-            if cos_queue_is_empty(queue) || !queue.runnable || queue.exact {
+            if cos_queue_is_empty(queue) || !queue.runnable {
+                continue;
+            }
+            // #915: exact queues are excluded from surplus by default
+            // (preserves Junos `transmit-rate exact` hard-cap
+            // semantics). When `surplus_sharing` is set, the queue
+            // is allowed to participate in surplus and consumes
+            // root.tokens + surplus_deficit + shared_root_lease only;
+            // its per-queue rate cap stays a Guarantee-phase concept
+            // (see tx_completion::apply_cos_*_result phase gate).
+            if queue.exact && !queue.surplus_sharing {
                 continue;
             }
             let Some(head) = cos_queue_front(queue) else {

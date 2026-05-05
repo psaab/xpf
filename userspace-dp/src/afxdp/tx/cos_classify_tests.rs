@@ -22,6 +22,7 @@ fn resolve_cos_queue_idx_rejects_explicit_queue_miss() {
             priority: 5,
             transmit_rate_bytes: 10_000_000,
             exact: false,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -166,6 +167,7 @@ fn cos_queue_accepts_prepared_when_queue_is_prepared_only() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -207,6 +209,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -295,6 +298,7 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -437,6 +441,7 @@ fn demote_prepared_cos_queue_to_local_skips_non_exact_queue() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: false,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -543,6 +548,7 @@ fn resolve_cos_queue_id_prefers_egress_output_filter_forwarding_class() {
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "ef-sched".into(),
@@ -550,6 +556,7 @@ fn resolve_cos_queue_id_prefers_egress_output_filter_forwarding_class() {
                     transmit_rate_exact: false,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
+                    surplus_sharing: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -665,6 +672,7 @@ fn resolve_cached_cos_tx_selection_prefers_egress_output_filter_and_keeps_counte
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "ef-sched".into(),
@@ -672,6 +680,7 @@ fn resolve_cached_cos_tx_selection_prefers_egress_output_filter_and_keeps_counte
                     transmit_rate_exact: false,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
+                    surplus_sharing: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -776,6 +785,7 @@ fn resolve_cos_queue_id_uses_ingress_input_filter_when_no_output_filter_exists()
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "ef-sched".into(),
@@ -783,6 +793,7 @@ fn resolve_cos_queue_id_uses_ingress_input_filter_when_no_output_filter_exists()
                     transmit_rate_exact: false,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
+                    surplus_sharing: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -883,6 +894,7 @@ fn resolve_cached_cos_tx_selection_uses_ingress_input_filter_when_no_output_exis
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "ef-sched".into(),
@@ -890,6 +902,7 @@ fn resolve_cached_cos_tx_selection_uses_ingress_input_filter_when_no_output_exis
                     transmit_rate_exact: false,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
+                    surplus_sharing: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -974,6 +987,7 @@ fn resolve_cached_cos_tx_selection_keeps_counter_only_output_filter_hits() {
                 transmit_rate_exact: false,
                 priority: "low".into(),
                 buffer_size_bytes: 128_000,
+                surplus_sharing: false,
             }],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
                 name: "wan-map".into(),
@@ -1051,6 +1065,7 @@ fn resolve_cos_tx_selection_counts_counter_only_output_filter_hits() {
                 transmit_rate_exact: false,
                 priority: "low".into(),
                 buffer_size_bytes: 128_000,
+                surplus_sharing: false,
             }],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
                 name: "wan-map".into(),
@@ -1155,6 +1170,7 @@ fn resolve_cos_tx_selection_uses_ingress_filter_dscp_rewrite_when_no_output_filt
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "ef-sched".into(),
@@ -1162,6 +1178,7 @@ fn resolve_cos_tx_selection_uses_ingress_filter_dscp_rewrite_when_no_output_filt
                     transmit_rate_exact: false,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
+                    surplus_sharing: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -1256,6 +1273,7 @@ fn resolve_cos_tx_selection_skips_ingress_filter_without_tx_selection_effects() 
                 transmit_rate_exact: false,
                 priority: "low".into(),
                 buffer_size_bytes: 128_000,
+                surplus_sharing: false,
             }],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
                 name: "wan-map".into(),
@@ -1396,6 +1414,7 @@ fn resolve_cos_queue_id_falls_back_to_default_queue_without_filter_match() {
                 transmit_rate_exact: false,
                 priority: "low".into(),
                 buffer_size_bytes: 128_000,
+                surplus_sharing: false,
             }],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
                 name: "wan-map".into(),
@@ -1476,6 +1495,7 @@ fn resolve_cos_queue_id_uses_dscp_classifier_when_filters_do_not_set_class() {
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "voice-sched".into(),
@@ -1483,6 +1503,7 @@ fn resolve_cos_queue_id_uses_dscp_classifier_when_filters_do_not_set_class() {
                     transmit_rate_exact: false,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
+                    surplus_sharing: false,
                 },
             ],
         }),
@@ -1564,6 +1585,7 @@ fn resolve_cos_queue_id_uses_ieee8021_classifier_when_filters_do_not_set_class()
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "voice-sched".into(),
@@ -1571,6 +1593,7 @@ fn resolve_cos_queue_id_uses_ieee8021_classifier_when_filters_do_not_set_class()
                     transmit_rate_exact: false,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
+                    surplus_sharing: false,
                 },
             ],
             ..Default::default()
@@ -1654,6 +1677,7 @@ fn resolve_cos_queue_id_does_not_use_ieee8021_classifier_for_untagged_packets() 
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "bulk-sched".into(),
@@ -1661,6 +1685,7 @@ fn resolve_cos_queue_id_does_not_use_ieee8021_classifier_for_untagged_packets() 
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
             ],
             ..Default::default()
@@ -1771,6 +1796,7 @@ fn resolve_cos_queue_id_preserves_ingress_classification_when_output_filter_has_
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "ef-sched".into(),
@@ -1778,6 +1804,7 @@ fn resolve_cos_queue_id_preserves_ingress_classification_when_output_filter_has_
                     transmit_rate_exact: false,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -1864,6 +1891,7 @@ fn resolve_cos_tx_selection_preserves_output_filter_dscp_rewrite_without_forward
                 transmit_rate_exact: false,
                 priority: "low".into(),
                 buffer_size_bytes: 128_000,
+                surplus_sharing: false,
             }],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
                 name: "wan-map".into(),

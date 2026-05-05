@@ -128,6 +128,76 @@ func TestFormatCoSInterfaceSummaryIncludesRuntimeQueueState(t *testing.T) {
 	}
 }
 
+// #915 (Copilot code-review #4): the per-queue formatter exposes
+// a new `Surplus sharing: yes/no` line under exact queues so
+// operators can see which exact queues have opted in. Pin both
+// the "yes" and "no" cases. Non-exact queues never render this
+// line (the formatter gates on `queue.exact`).
+func TestFormatCoSInterfaceSummaryRendersSurplusSharingLineOnExactQueues(t *testing.T) {
+	cfg := &config.Config{
+		ClassOfService: &config.ClassOfServiceConfig{
+			ForwardingClasses: map[string]*config.CoSForwardingClass{
+				"iperf-a": {Name: "iperf-a", Queue: 4},
+				"iperf-b": {Name: "iperf-b", Queue: 5},
+				"be":      {Name: "be", Queue: 0}, // non-exact, must NOT render line
+			},
+			Schedulers: map[string]*config.CoSScheduler{
+				"sa":   {Name: "sa", TransmitRateBytes: 125_000_000, TransmitRateExact: true, SurplusSharing: true},
+				"sb":   {Name: "sb", TransmitRateBytes: 1_250_000_000, TransmitRateExact: true, SurplusSharing: false},
+				"sbe":  {Name: "sbe", TransmitRateBytes: 12_500_000, TransmitRateExact: false, SurplusSharing: false},
+			},
+			SchedulerMaps: map[string]*config.CoSSchedulerMap{
+				"m": {
+					Name: "m",
+					Entries: map[string]*config.CoSSchedulerMapEntry{
+						"iperf-a": {ForwardingClass: "iperf-a", Scheduler: "sa"},
+						"iperf-b": {ForwardingClass: "iperf-b", Scheduler: "sb"},
+						"be":      {ForwardingClass: "be", Scheduler: "sbe"},
+					},
+				},
+			},
+			Interfaces: map[string]*config.CoSInterface{
+				"reth0": {
+					Name: "reth0",
+					Units: map[int]*config.CoSInterfaceUnit{
+						80: {Unit: 80, ShapingRateBytes: 12_500_000_000, SchedulerMap: "m"},
+					},
+				},
+			},
+		},
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"reth0": {Name: "reth0", Units: map[int]*config.InterfaceUnit{80: {Number: 80}}},
+		}},
+	}
+	owner := uint32(0)
+	status := &ProcessStatus{
+		CoSInterfaces: []CoSInterfaceStatus{{
+			InterfaceName:   "reth0.80",
+			OwnerWorkerID:   &owner,
+			WorkerInstances: 1,
+			Queues: []CoSQueueStatus{
+				{QueueID: 4, OwnerWorkerID: &owner, ForwardingClass: "iperf-a", Priority: 5, Exact: true, TransmitRateBytes: 125_000_000, BufferBytes: 65536},
+				{QueueID: 5, OwnerWorkerID: &owner, ForwardingClass: "iperf-b", Priority: 5, Exact: true, TransmitRateBytes: 1_250_000_000, BufferBytes: 65536},
+				{QueueID: 0, OwnerWorkerID: &owner, ForwardingClass: "be", Priority: 5, Exact: false, TransmitRateBytes: 12_500_000, BufferBytes: 65536},
+			},
+		}},
+	}
+	out := FormatCoSInterfaceSummary(cfg, status, "reth0.80")
+	if !strings.Contains(out, "Surplus sharing: yes") {
+		t.Fatalf("expected `Surplus sharing: yes` line for opted-in iperf-a queue:\n%s", out)
+	}
+	if !strings.Contains(out, "Surplus sharing: no") {
+		t.Fatalf("expected `Surplus sharing: no` line for hard-cap iperf-b queue:\n%s", out)
+	}
+	// Non-exact `be` queue must NOT render the line. Easiest check: count
+	// occurrences of the literal "Surplus sharing:" prefix and verify it's
+	// exactly two (one per exact queue), not three.
+	count := strings.Count(out, "Surplus sharing:")
+	if count != 2 {
+		t.Fatalf("expected exactly 2 `Surplus sharing:` lines (one per exact queue, none on non-exact be); got %d:\n%s", count, out)
+	}
+}
+
 func TestFormatCoSInterfaceSummaryShowsUnknownOwnerAsDash(t *testing.T) {
 	status := &ProcessStatus{
 		CoSInterfaces: []CoSInterfaceStatus{

@@ -7,6 +7,58 @@ use super::*;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{CoSQueueConfig, FastMap};
 
+// #915: build_cos_interface_runtime must propagate the
+// surplus_sharing flag from CoSQueueConfig to the runtime.
+// Test both true and false to catch a copy-by-default regression.
+#[test]
+fn build_cos_interface_runtime_propagates_surplus_sharing() {
+    let runtime = build_cos_interface_runtime(
+        &CoSInterfaceConfig {
+            shaping_rate_bytes: 10_000_000_000 / 8,
+            burst_bytes: 256 * 1024,
+            default_queue: 4,
+            dscp_classifier: String::new(),
+            ieee8021_classifier: String::new(),
+            dscp_queue_by_dscp: [u8::MAX; 64],
+            ieee8021_queue_by_pcp: [u8::MAX; 8],
+            queue_by_forwarding_class: FastMap::default(),
+            queues: vec![
+                CoSQueueConfig {
+                    queue_id: 4,
+                    forwarding_class: "iperf-a".into(),
+                    priority: 5,
+                    transmit_rate_bytes: 1_000_000_000 / 8,
+                    exact: true,
+                    surplus_sharing: true, // opt-in
+                    surplus_weight: 1,
+                    buffer_bytes: COS_MIN_BURST_BYTES,
+                    dscp_rewrite: None,
+                },
+                CoSQueueConfig {
+                    queue_id: 5,
+                    forwarding_class: "iperf-b".into(),
+                    priority: 5,
+                    transmit_rate_bytes: 10_000_000_000 / 8,
+                    exact: true,
+                    surplus_sharing: false, // explicit hard-cap, no opt-in
+                    surplus_weight: 1,
+                    buffer_bytes: COS_MIN_BURST_BYTES,
+                    dscp_rewrite: None,
+                },
+            ],
+        },
+        1_000_000_000,
+    );
+    let q4 = runtime.queues.iter().find(|q| q.queue_id == 4).unwrap();
+    let q5 = runtime.queues.iter().find(|q| q.queue_id == 5).unwrap();
+    assert!(q4.surplus_sharing,
+        "queue_id=4 expected surplus_sharing=true after copy");
+    assert!(!q5.surplus_sharing,
+        "queue_id=5 expected surplus_sharing=false (default) after copy");
+    // Both queues remain exact so #1183 useful-state gate doesn't strip them.
+    assert!(q4.exact && q5.exact);
+}
+
 #[test]
 fn build_cos_interface_runtime_starts_exact_queue_with_zero_local_tokens() {
     let runtime = build_cos_interface_runtime(
@@ -25,6 +77,7 @@ fn build_cos_interface_runtime_starts_exact_queue_with_zero_local_tokens() {
                 priority: 5,
                 transmit_rate_bytes: 10_000_000,
                 exact: true,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -54,6 +107,7 @@ fn build_cos_interface_runtime_leaves_flow_hash_seed_zero_until_promotion() {
                 priority: 5,
                 transmit_rate_bytes: 1_000_000_000 / 8,
                 exact: true,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -64,6 +118,7 @@ fn build_cos_interface_runtime_leaves_flow_hash_seed_zero_until_promotion() {
                 priority: 5,
                 transmit_rate_bytes: 10_000_000_000 / 8,
                 exact: true,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -98,6 +153,7 @@ fn build_cos_interface_runtime_zero_shaping_rate_starts_with_full_root_tokens() 
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -136,6 +192,7 @@ fn build_cos_interface_runtime_zero_queue_rate_starts_with_full_queue_tokens() {
                 priority: 5,
                 transmit_rate_bytes: 0, // <- transparent queue
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,

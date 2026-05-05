@@ -2683,6 +2683,47 @@ func TestBuildClassOfServiceSnapshotIncludesTransmitRateExact(t *testing.T) {
 	}
 }
 
+// #915: snapshot encoding round-trips the SurplusSharing bool.
+func TestBuildClassOfServiceSnapshotIncludesSurplusSharing(t *testing.T) {
+	cfg := &config.Config{
+		ClassOfService: &config.ClassOfServiceConfig{
+			Schedulers: map[string]*config.CoSScheduler{
+				"iperf-a": {
+					Name:              "iperf-a",
+					TransmitRateBytes: 125_000_000,
+					TransmitRateExact: true,
+					SurplusSharing:    true,
+					Priority:          "low",
+				},
+				"iperf-b": {
+					Name:              "iperf-b",
+					TransmitRateBytes: 1_250_000_000,
+					TransmitRateExact: true,
+					SurplusSharing:    false, // explicit hard-cap, no opt-in
+					Priority:          "low",
+				},
+			},
+		},
+	}
+	snap := buildClassOfServiceSnapshot(cfg)
+	if snap == nil {
+		t.Fatal("expected non-nil snapshot")
+	}
+	if len(snap.Schedulers) != 2 {
+		t.Fatalf("Schedulers len = %d, want 2", len(snap.Schedulers))
+	}
+	got := map[string]bool{}
+	for _, s := range snap.Schedulers {
+		got[s.Name] = s.SurplusSharing
+	}
+	if !got["iperf-a"] {
+		t.Errorf("expected SurplusSharing=true on iperf-a; got %v", got)
+	}
+	if got["iperf-b"] {
+		t.Errorf("expected SurplusSharing=false on iperf-b; got %v", got)
+	}
+}
+
 func TestBuildClassOfServiceSnapshotIncludesIEEE8021Classifier(t *testing.T) {
 	cfg := &config.Config{
 		ClassOfService: &config.ClassOfServiceConfig{

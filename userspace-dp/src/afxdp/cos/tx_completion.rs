@@ -8,8 +8,10 @@
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
+use std::sync::Arc;
+
 use crate::afxdp::types::{
-    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime,
+    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, SharedCoSQueueLease,
     PreparedTxRequest, TxRequest,
     COS_TIMER_WHEEL_L0_SLOTS, COS_TIMER_WHEEL_L1_SLOTS,
 };
@@ -287,6 +289,36 @@ pub(in crate::afxdp) fn prime_cos_root_for_service(
     true
 }
 
+/// #915: phase-gated `shared_queue_lease` consumption helper.
+///
+/// The per-queue lease represents the configured exact rate cap.
+/// In Surplus phase a `surplus_sharing` exact queue is drawing
+/// from root tokens (not its own bucket), so debiting the
+/// per-queue lease here would re-impose the per-queue cap on the
+/// surplus draw and defeat the point of #915. Phase-gating keeps
+/// the lease as a Guarantee-phase-only concept.
+///
+/// For non-surplus-sharing exact queues this is a no-op because
+/// they never reach Surplus phase: `select_cos_surplus_batch`
+/// skips them via `queue.exact && !queue.surplus_sharing`.
+///
+/// Extracted into a helper so the gate logic has a direct unit
+/// test (Codex code-review MEDIUM): both Local and Prepared
+/// apply paths route through this single function.
+#[inline]
+pub(in crate::afxdp) fn maybe_consume_exact_queue_lease(
+    shared_queue_lease: Option<&Arc<SharedCoSQueueLease>>,
+    phase: CoSServicePhase,
+    sent_bytes: u64,
+) {
+    if !matches!(phase, CoSServicePhase::Guarantee) {
+        return;
+    }
+    if let Some(lease) = shared_queue_lease {
+        lease.consume(sent_bytes);
+    }
+}
+
 #[inline]
 pub(in crate::afxdp) fn apply_direct_exact_send_result(
     binding: &mut BindingWorker,
@@ -446,15 +478,17 @@ pub(in crate::afxdp) fn apply_cos_send_result(
     {
         shared_root_lease.consume(sent_bytes);
     }
+    // #915: phase-gate `shared_queue_lease` consumption to the
+    // Guarantee phase only. See `maybe_consume_exact_queue_lease`
+    // for rationale.
     if let Some(queue_idx) = exact_queue_idx {
-        if let Some(shared_queue_lease) = binding
-            .cos.cos_fast_interfaces
+        let shared_queue_lease = binding
+            .cos
+            .cos_fast_interfaces
             .get(&root_ifindex)
             .and_then(|iface_fast| iface_fast.queue_fast_path.get(queue_idx))
-            .and_then(|queue_fast| queue_fast.shared_queue_lease.as_ref())
-        {
-            shared_queue_lease.consume(sent_bytes);
-        }
+            .and_then(|queue_fast| queue_fast.shared_queue_lease.as_ref());
+        maybe_consume_exact_queue_lease(shared_queue_lease, phase, sent_bytes);
     }
     refresh_cos_interface_activity(binding, root_ifindex);
 }
@@ -512,15 +546,17 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
     {
         shared_root_lease.consume(sent_bytes);
     }
+    // #915: phase-gate `shared_queue_lease` consumption to the
+    // Guarantee phase only. See `maybe_consume_exact_queue_lease`
+    // for rationale.
     if let Some(queue_idx) = exact_queue_idx {
-        if let Some(shared_queue_lease) = binding
-            .cos.cos_fast_interfaces
+        let shared_queue_lease = binding
+            .cos
+            .cos_fast_interfaces
             .get(&root_ifindex)
             .and_then(|iface_fast| iface_fast.queue_fast_path.get(queue_idx))
-            .and_then(|queue_fast| queue_fast.shared_queue_lease.as_ref())
-        {
-            shared_queue_lease.consume(sent_bytes);
-        }
+            .and_then(|queue_fast| queue_fast.shared_queue_lease.as_ref());
+        maybe_consume_exact_queue_lease(shared_queue_lease, phase, sent_bytes);
     }
     refresh_cos_interface_activity(binding, root_ifindex);
 }

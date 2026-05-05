@@ -239,6 +239,9 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
 				if v := nodeVal(child); v != "" {
 					sched.BufferSizeBytes = parseBurstSizeLimit(v)
 				}
+			case "surplus-sharing":
+				// #915: leaf with no value; presence = true.
+				sched.SurplusSharing = true
 			}
 		}
 		cos.Schedulers[sched.Name] = sched

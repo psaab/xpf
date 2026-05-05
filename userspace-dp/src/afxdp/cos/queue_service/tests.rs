@@ -48,6 +48,207 @@ fn surplus_phase_skips_exact_queue_without_guarantee_tokens() {
     assert!(select_cos_surplus_batch(&mut root, 1).is_none());
 }
 
+// #915: surplus_sharing=true on an exact queue with empty
+// queue.tokens — surplus selector picks it up because the
+// `queue.exact && !surplus_sharing` skip evaluates to false.
+#[test]
+fn surplus_phase_includes_exact_with_surplus_sharing() {
+    let mut root = test_cos_runtime_with_exact(true);
+    root.queues[0].surplus_sharing = true;
+    root.tokens = 1500;
+    root.queues[0].last_refill_ns = 1;
+    root.queues[0].tokens = 0;
+    root.queues[0].items.push_back(test_cos_item(1500));
+    root.queues[0].queued_bytes = 1500;
+    root.queues[0].runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    let batch = select_cos_surplus_batch(&mut root, 1);
+    assert!(matches!(
+        batch,
+        Some(CoSBatch::Local {
+            phase: CoSServicePhase::Surplus,
+            ..
+        })
+    ));
+}
+
+// #915 §4.5 isolation test: an exact queue with surplus_sharing
+// must NOT be parked when queue.tokens runs out in the
+// exact-guarantee selector. The drain_park_queue_tokens counter
+// still increments (diagnostic parity), but `runnable` stays
+// true and `parked` stays false so surplus phase can pick the
+// queue up on the same drain pass. Failure here catches the
+// Codex round-1 MAJOR 1 regression.
+#[test]
+fn exact_with_surplus_sharing_not_parked_on_queue_token_starvation() {
+    let mut root = test_cos_runtime_with_exact(true);
+    root.queues[0].surplus_sharing = true;
+    root.tokens = 1_000_000; // root has plenty of tokens
+    root.queues[0].last_refill_ns = 1;
+    root.queues[0].tokens = 0; // queue bucket empty
+    root.queues[0].items.push_back(test_cos_item(1500));
+    root.queues[0].queued_bytes = 1500;
+    root.queues[0].runnable = true;
+    root.queues[0].parked = false;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    let pre_park_count = root.queues[0]
+        .owner_profile
+        .drain_park_queue_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let selection =
+        select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
+    // Selector returns None because queue.tokens<head_len AND
+    // surplus_sharing skips parking.
+    assert!(selection.is_none(),
+        "exact-guarantee selector must not select a token-starved queue");
+    assert!(!root.queues[0].parked,
+        "surplus_sharing exact queue must NOT be parked");
+    assert!(root.queues[0].runnable,
+        "surplus_sharing exact queue must stay runnable");
+    let post_park_count = root.queues[0]
+        .owner_profile
+        .drain_park_queue_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(post_park_count, pre_park_count + 1,
+        "drain_park_queue_tokens must still increment for diagnostic parity");
+}
+
+// #915 Codex round-2 MINOR fix: the root-starvation branch in
+// select_exact_cos_guarantee_queue_with_fast_path is also
+// no-park'd for surplus_sharing exact queues (the §4.5 fix
+// addressed only the queue-token branch in plan v3; round-1
+// code review caught that the EARLIER root-token branch had
+// the same problem). Pin that branch directly: when both
+// root.tokens AND queue.tokens are short, a surplus_sharing
+// exact queue still must NOT be parked by the exact-guarantee
+// selector. The drain_park_root_tokens diagnostic counter
+// still increments. The same-pass surplus selector then
+// handles the root-only park with require_queue_tokens=false.
+#[test]
+fn exact_with_surplus_sharing_not_parked_on_root_token_starvation() {
+    let mut root = test_cos_runtime_with_exact(true);
+    root.queues[0].surplus_sharing = true;
+    root.tokens = 0; // root bucket empty (root-token starvation)
+    root.queues[0].last_refill_ns = 1;
+    root.queues[0].tokens = 0; // queue bucket also empty
+    root.queues[0].items.push_back(test_cos_item(1500));
+    root.queues[0].queued_bytes = 1500;
+    root.queues[0].runnable = true;
+    root.queues[0].parked = false;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    let pre_root_park = root.queues[0]
+        .owner_profile
+        .drain_park_root_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let pre_queue_park = root.queues[0]
+        .owner_profile
+        .drain_park_queue_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let selection =
+        select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
+    // Selector returns None because root.tokens<head_len; the
+    // root-starvation no-park branch fires first, so the queue
+    // is not parked.
+    assert!(selection.is_none(),
+        "exact-guarantee selector must not select a root-starved queue");
+    assert!(!root.queues[0].parked,
+        "surplus_sharing exact queue must NOT be parked on root-token starvation");
+    assert!(root.queues[0].runnable,
+        "surplus_sharing exact queue must stay runnable");
+    let post_root_park = root.queues[0]
+        .owner_profile
+        .drain_park_root_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let post_queue_park = root.queues[0]
+        .owner_profile
+        .drain_park_queue_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(post_root_park, pre_root_park + 1,
+        "drain_park_root_tokens must still increment for diagnostic parity");
+    assert_eq!(post_queue_park, pre_queue_park,
+        "queue-token branch must NOT fire (we exited via root-token branch)");
+
+    // The same-pass surplus selector is the eventual park site
+    // for root-token starvation: it uses require_queue_tokens=false
+    // so the wake_tick is bound only by root refill. Verify it
+    // parks the queue rather than leaving it spinning.
+    let surplus = select_cos_surplus_batch(&mut root, 1);
+    assert!(surplus.is_none(),
+        "surplus selector returns None when root.tokens<head_len");
+    assert!(root.queues[0].parked,
+        "surplus selector must park the queue on root-token starvation");
+}
+
+// #915 §4.5 contrast: a non-surplus-sharing exact queue still
+// parks on queue-token starvation (preserves today's behavior).
+#[test]
+fn exact_without_surplus_sharing_parks_on_queue_token_starvation() {
+    let mut root = test_cos_runtime_with_exact(true);
+    // surplus_sharing left as false (default)
+    root.tokens = 1_000_000;
+    root.queues[0].last_refill_ns = 1;
+    root.queues[0].tokens = 0;
+    root.queues[0].items.push_back(test_cos_item(1500));
+    root.queues[0].queued_bytes = 1500;
+    root.queues[0].runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    let _ = select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
+    assert!(root.queues[0].parked,
+        "non-surplus-sharing exact queue must be parked on queue-token starvation");
+}
+
+// #915 production-order end-to-end smoke (Codex round-2 MINOR 4).
+// The cleanest in-process production-order check is to call the
+// exact-guarantee selector first and then the surplus selector
+// — exactly what `drain_shaped_tx → service_exact_guarantee_*
+// → build_nonexact_cos_batch → select_cos_surplus_batch` does in
+// the real path. A surplus-sharing exact queue with empty
+// queue.tokens must NOT be picked by the exact-guarantee
+// selector AND MUST be picked by the surplus selector on the
+// same drain attempt.
+#[test]
+fn surplus_sharing_exact_reaches_surplus_through_full_drain_pass() {
+    let mut root = test_cos_runtime_with_exact(true);
+    root.queues[0].surplus_sharing = true;
+    root.tokens = 1500;
+    root.queues[0].last_refill_ns = 1;
+    root.queues[0].tokens = 0;
+    root.queues[0].items.push_back(test_cos_item(1500));
+    root.queues[0].queued_bytes = 1500;
+    root.queues[0].runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    // First: production-order exact-guarantee selector. Returns
+    // None because queue.tokens<head_len AND no parking (§4.5).
+    let exact_pick =
+        select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
+    assert!(exact_pick.is_none(),
+        "exact-guarantee selector must decline token-starved surplus_sharing queue");
+
+    // Then: surplus selector picks the queue up on the same pass.
+    let surplus_pick = select_cos_surplus_batch(&mut root, 1);
+    assert!(matches!(
+        surplus_pick,
+        Some(CoSBatch::Local {
+            phase: CoSServicePhase::Surplus,
+            ..
+        })
+    ),
+        "surplus selector must pick up surplus_sharing exact queue \
+         after exact-guarantee declines");
+}
+
 #[test]
 fn guarantee_phase_parks_non_exact_queue_on_root_only_wakeup() {
     let mut root = test_cos_runtime_with_exact(false);
@@ -75,6 +276,7 @@ fn guarantee_phase_limits_service_to_visit_quantum() {
             priority: 5,
             transmit_rate_bytes: 1_000_000,
             exact: false,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -108,6 +310,7 @@ fn guarantee_phase_allows_larger_high_rate_visit_quantum() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000u64 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 256 * 1024,
             dscp_rewrite: None,
@@ -154,6 +357,7 @@ fn guarantee_phase_quantum_scales_with_rate() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000u64 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 256 * 1024,
             dscp_rewrite: None,
@@ -167,6 +371,7 @@ fn guarantee_phase_quantum_scales_with_rate() {
             priority: 5,
             transmit_rate_bytes: 100_000_000u64 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 256 * 1024,
             dscp_rewrite: None,
@@ -191,6 +396,7 @@ fn guarantee_phase_rotates_between_backlogged_queues() {
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -201,6 +407,7 @@ fn guarantee_phase_rotates_between_backlogged_queues() {
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -375,6 +582,7 @@ fn guarantee_rr_cursors_start_at_zero_after_runtime_build() {
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -396,6 +604,7 @@ fn surplus_phase_prefers_higher_priority_queue() {
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -406,6 +615,7 @@ fn surplus_phase_prefers_higher_priority_queue() {
                 priority: 0,
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -442,6 +652,7 @@ fn surplus_phase_applies_weighted_same_priority_sharing() {
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -452,6 +663,7 @@ fn surplus_phase_applies_weighted_same_priority_sharing() {
                 priority: 5,
                 transmit_rate_bytes: 4_000_000,
                 exact: false,
+                surplus_sharing: false,
                 surplus_weight: 4,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -516,6 +728,7 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
                 priority: 5,
                 transmit_rate_bytes: 1_000_000_000 / 8,
                 exact: true,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -526,6 +739,7 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
                 priority: 5,
                 transmit_rate_bytes: 25_000_000_000 / 8,
                 exact: true,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -597,6 +811,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -680,6 +895,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -747,6 +963,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -834,6 +1051,7 @@ fn release_exact_prepared_scratch_preserves_queue_after_failed_submit() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -891,6 +1109,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -1056,6 +1275,7 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
         priority: 5,
         transmit_rate_bytes: 11_000_000_000 / 8,
         exact: true,
+        surplus_sharing: false,
         flow_fair: false,
         shared_exact: false,
         flow_hash_seed: 0,
@@ -1119,6 +1339,7 @@ fn restore_cos_prepared_items_marks_queue_runnable_after_retry() {
         priority: 5,
         transmit_rate_bytes: 11_000_000_000 / 8,
         exact: true,
+        surplus_sharing: false,
         flow_fair: false,
         shared_exact: false,
         flow_hash_seed: 0,

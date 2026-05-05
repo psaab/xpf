@@ -179,6 +179,9 @@ type CoSSchedulerSnapshot struct {
 	TransmitRateExact bool   `json:"transmit_rate_exact,omitempty"`
 	Priority          string `json:"priority,omitempty"`
 	BufferSizeBytes   uint64 `json:"buffer_size_bytes,omitempty"`
+	// SurplusSharing (#915) opts an exact queue into surplus-phase
+	// participation; only meaningful when TransmitRateExact == true.
+	SurplusSharing bool `json:"surplus_sharing,omitempty"`
 }
 
 type CoSSchedulerMapSnapshot struct {

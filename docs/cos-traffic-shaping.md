@@ -186,7 +186,10 @@ These invariants define the design:
 
 - Surplus bandwidth above active reservation guarantees is distributed by
   reservation priority and same-priority weighted DWRR.
-- `transmit-rate exact` reservations never receive surplus.
+- `transmit-rate exact` reservations never receive surplus by default.
+  Add `surplus-sharing` (#915) on the scheduler to opt the queue into
+  surplus-phase participation while keeping its per-queue rate as a
+  guarantee floor.
 
 ### First-Pass Fairness Boundary
 
@@ -778,7 +781,10 @@ Important current behavior:
     `class-of-service interfaces <if> unit <u> classifiers ieee-802.1 <name>`
 - non-`exact` scheduler `transmit-rate` values act as guarantees and may borrow
   surplus bandwidth up to the root shaper
-- `transmit-rate exact` prevents that queue from borrowing surplus
+- `transmit-rate exact` prevents that queue from borrowing surplus by default
+- adding `surplus-sharing` on the scheduler (#915) opts an `exact` queue
+  into surplus participation while keeping the per-queue rate as a
+  guarantee floor
 - `per-unit-scheduler` is not implemented
 
 For the `loss` userspace lab, the relevant path is:
@@ -1043,7 +1049,10 @@ The design is only correct if all of these pass.
 
 4. Guarantee phase gives every backlogged reservation forward progress
 5. Same-priority weighted DWRR surplus split matches configured weights
-6. `transmit-rate exact` never exceeds its guarantee
+6. `transmit-rate exact` (without `surplus-sharing`) never exceeds its
+   guarantee; with `surplus-sharing` (#915) it may borrow root surplus
+   tokens above the guarantee while still holding the per-queue rate as
+   a floor
 7. In single-shard or uncontended cases, backlogged reservations wake from the
    timer wheel within one tick plus one scheduler cycle of becoming eligible
 

@@ -606,6 +606,20 @@ func ValidateConfig(cfg *Config) []string {
 					class.Name, class.Queue))
 			}
 		}
+		// #915: surplus-sharing is meaningful only on transmit-rate
+		// exact schedulers; warn-and-strip when set without exact so
+		// the runtime never sees the no-op flag (see #1183 lesson).
+		for _, sched := range cos.Schedulers {
+			if sched == nil {
+				continue
+			}
+			if sched.SurplusSharing && !sched.TransmitRateExact {
+				warnings = append(warnings, fmt.Sprintf(
+					"class-of-service scheduler %q surplus-sharing is meaningful only with transmit-rate exact; ignored",
+					sched.Name))
+				sched.SurplusSharing = false
+			}
+		}
 		for _, schedMap := range cos.SchedulerMaps {
 			if schedMap == nil {
 				continue

@@ -26,6 +26,7 @@ fn flow_share_limit_shared_exact_scales_with_rate() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 0,
             dscp_rewrite: None,
@@ -70,6 +71,7 @@ fn flow_share_limit_shared_exact_caps_at_aggregate_for_single_flow() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 0,
             dscp_rewrite: None,
@@ -106,6 +108,7 @@ fn flow_share_limit_shared_exact_clamps_to_buffer_at_low_n() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 0,
             dscp_rewrite: None,
@@ -147,6 +150,7 @@ fn flow_share_limit_shared_exact_protects_against_dominant_flow() {
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 0,
             dscp_rewrite: None,
@@ -189,6 +193,7 @@ fn flow_share_limit_owner_local_exact_unchanged() {
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 125_000,
             dscp_rewrite: None,
@@ -959,6 +964,7 @@ fn cos_flow_aware_buffer_limit_scales_with_prospective_active_flow_count() {
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             // Decimal KB to match the operator `buffer-size 125k`
             // config, not KiB — the admission-boundary math must
@@ -1018,6 +1024,7 @@ fn cos_flow_aware_buffer_limit_matches_share_limit_at_new_flow_boundary() {
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             // Decimal KB to match the operator `buffer-size 125k`
             // config, not KiB — the admission-boundary math must
@@ -1098,6 +1105,7 @@ fn cos_flow_aware_buffer_limit_respects_non_flow_fair_queues() {
             priority: 5,
             transmit_rate_bytes: 100_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1129,6 +1137,7 @@ fn cos_queue_flow_share_limit_never_drops_below_fast_retransmit_floor() {
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             // Decimal KB to match the operator `buffer-size 125k`
             // config, not KiB — the admission-boundary math must
@@ -1184,6 +1193,7 @@ fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
             // operator `transmit-rate 1g` semantics).
             transmit_rate_bytes: 125_000_000,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             // Decimal KB to match the operator `buffer-size 125k`
             // config, not KiB.
@@ -1246,6 +1256,7 @@ fn cos_flow_aware_buffer_limit_honours_operator_base_above_delay_cap() {
             priority: 5,
             transmit_rate_bytes: 125_000_000,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             buffer_bytes: operator_base,
             dscp_rewrite: None,
@@ -1300,6 +1311,7 @@ fn cos_flow_aware_buffer_limit_preserves_non_flow_fair_path_after_clamp() {
             // 1 Gbps → delay_cap = 625 KB.
             transmit_rate_bytes: 125_000_000,
             exact: true,
+            surplus_sharing: false,
             surplus_weight: 1,
             // Operator configured 10 MB — well above delay_cap.
             // If the clamp leaks into this path, the returned cap
@@ -1336,6 +1348,7 @@ fn cos_flow_aware_buffer_limit_delay_cap_scales_linearly_with_rate() {
                 priority: 5,
                 transmit_rate_bytes: rate_bytes,
                 exact: true,
+                surplus_sharing: false,
                 surplus_weight: 1,
                 // Small operator base so the delay cap dominates.
                 buffer_bytes: COS_MIN_BURST_BYTES,
