@@ -28,6 +28,7 @@ pub(in crate::afxdp) use drain::{
 
 pub(super) mod cos_classify;
 pub(super) mod dispatch;
+pub(super) mod tcp_segmentation;
 pub(super) use cos_classify::{
     enqueue_local_into_cos, resolve_cached_cos_tx_selection, resolve_cos_queue_id,
     resolve_cos_tx_selection, CoSTxSelection,
