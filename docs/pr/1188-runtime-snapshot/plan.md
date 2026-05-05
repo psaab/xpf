@@ -1,160 +1,267 @@
 ---
-status: DRAFT v1 — pending adversarial plan review (PLAN-KILL is on the table)
+status: REVISED v2 — Codex + Gemini Pro 3.1 round-1 PLAN-KILL on the consolidation idea, but Gemini caught the REAL bug. Pivoted to the actual fix.
 issue: #1188
-phase: Investigate consolidating per-tick ArcSwap loads in worker_loop
+phase: Replace `.load_full()` with `.load()` + `Arc::as_ptr` comparison in worker tick loop
 ---
 
-## 1. Issue framing
+## 1. Issue framing — corrected
 
-Issue #1188 claims `BindingWorker` / `worker_loop` performs "up
-to 8 separate `ArcSwap` pointers on every iteration" and asserts
-this saturates the QPI/UPI bus.
+Issue #1188's headline ("up to 8 ArcSwap loads per iteration → bus
+saturation") is **substantively correct**. The original v1 plan
+(consolidate 3 fields into `ImmutableRuntime`) was wrong because:
 
-**Reality check** (`userspace-dp/src/afxdp/worker/mod.rs:445-490`):
-worker_loop has **11** `Arc<ArcSwap<...>>` parameters in its
-signature, but the per-call-frequency varies wildly:
+1. v1 inventoried only 3 per-tick `.load()` calls. Gemini Pro 3.1
+   caught the actual count: **6 per-tick `.load_full()` calls**
+   at `worker/mod.rs:725, 738, 743, 748, 757, 765`.
+2. **`.load_full()` ALWAYS clones the `Arc`**, doing one atomic
+   refcount increment on the clone and one decrement when the
+   guard drops if unchanged. That's 2 atomic RMW operations per
+   `.load_full()` per tick.
+3. The existing code already does `Arc::ptr_eq(&cached, &live)`
+   immediately after each `.load_full()` (lines 727, 739, 744,
+   749, 758, 766), so the clone is **wasted** in the common case
+   (no config change since last tick).
 
-| Arc field | When loaded | Cost |
-|---|---|---|
-| `shared_validation` | Once at init (line 488); per-tick refresh on config-gen change (line 721) | 1 cached + occasional |
-| `shared_forwarding` | Once at init via `load_full()` (line 489) | 1 cached |
-| `shared_cos_owner_worker_by_queue` | Once at init (line 490) | 1 cached |
-| `shared_cos_owner_live_by_queue` | Once at init | 1 cached |
-| `shared_cos_root_leases` | Once at init | 1 cached |
-| `shared_cos_queue_leases` | Once at init | 1 cached |
-| `shared_cos_queue_vtime_floors` | Once at init | 1 cached |
-| `ha_state` | Per-tick refresh (line 801) | 1/tick |
-| `shared_fabrics` | Per-tick refresh (line 908) | 1/tick |
-| `local_tunnel_deliveries` | Reference-only on tunnel paths | rare |
-| `cos_status` | Read by status path, not hot | rare |
+**Cycle math (corrected):**
 
-**Actual atomic load count on hot path**: ~3 `.load()` calls per
-poll tick (`shared_validation` refresh + `ha_state` + `shared_fabrics`).
-A poll tick processes a batch of ~64 packets, so per packet
-the cost is ~3/64 = **0.047 atomic loads/packet**. At 14.8M pps
-that's ~700k atomic loads/sec — not nothing but two orders of
-magnitude smaller than the issue body's "hundreds of millions
-per second" claim.
+- 6 `.load_full()` × 2 RMW ops = 12 atomic RMW ops/tick on shared
+  Arc control blocks
+- ~10K-100K worker ticks/sec per worker (depends on poll_mode and
+  load) × 8 workers
+- ≈ 0.96B–9.6B atomic RMWs/sec on the shared cache lines holding
+  the Arc control blocks
 
-The issue body's QPI/UPI saturation framing is exaggerated.
-But the underlying observation — that there are *some* per-tick
-atomic loads worth consolidating — is real.
+These atomic RMWs all hit the SAME cache line for each shared
+state's Arc, which the coordinator core also touches whenever it
+swaps. Result: MESI cache-line ping-pong on the QPI/UPI between
+worker cores (or between worker cores and coordinator core on
+the same socket) — exactly what the issue body describes.
 
 ## 2. Honest scope/value framing
 
-**Pessimistic case:** the proposed `ImmutableRuntime`
-consolidation lumps `shared_validation`, `ha_state`, and
-`shared_fabrics` into a single `Arc<ArcSwap<ImmutableRuntime>>`.
-Worker does one `.load()` per tick. That saves 2 atomic ops per
-tick. At ~10k ticks/sec per worker × 8 workers = 160k ops/sec
-saved. Trivial.
+**The fix:** replace each `.load_full()` with `.load()` (returns
+a `Guard<Arc<T>>`, no clone) + `Arc::as_ptr` comparison against
+the cached Arc. Only call `.load_full()` when the pointer
+differs (i.e., the coordinator actually rotated the Arc).
 
-**Plausible case:** the *coordinator side* cost grows. Today,
-when only HA state changes, only `ha_state` is republished. With
-consolidation, ANY change rebuilds the entire `ImmutableRuntime`
-snapshot. HA changes are rare (failover events), but config
-reload and fabric updates each force a full snapshot rebuild.
-That's net negative on coordinator CPU.
+```rust
+// before:
+let live_forwarding = shared_forwarding.load_full();   // clone always
+if !Arc::ptr_eq(&forwarding, &live_forwarding) {
+    forwarding = live_forwarding;
+    // ... refresh dependent state ...
+}
 
-**The architectural win:** consistency. Today, a worker that
-loads `ha_state` but not `shared_fabrics` in the same tick can
-see torn updates between them. Bundling them into a single
-snapshot guarantees consistency. *That* is the legitimate value
-proposition — not bus traffic.
+// after:
+let live_forwarding_guard = shared_forwarding.load();
+if !std::ptr::eq(
+    Arc::as_ptr(&forwarding),
+    Arc::as_ptr(&*live_forwarding_guard),
+) {
+    let live_forwarding = shared_forwarding.load_full();
+    forwarding = live_forwarding;
+    // ... refresh dependent state ...
+}
+```
 
-**If reviewers conclude:**
-- the per-tick atomic-load saving is too small (~2-3 ops/tick),
-- AND the consistency argument doesn't justify forcing every
-  control-plane mutation to rebuild the entire snapshot,
+**Win:**
 
-then **PLAN-KILL is the right call.** This refactor would be
-churn for negligible gain.
+- Steady state (no config change): saved 12 atomic RMW ops/tick →
+  ~0.96B–9.6B ops/sec eliminated from the QPI/UPI bus.
+- On actual config change (rare, < 1/sec normally): one
+  `.load()` cost + one `.load_full()` cost — slight overhead vs
+  current code. Negligible at ~1/sec rate.
+- No coordinator-side changes. No new types. No semantics change.
+
+**The architectural value:** matches the existing `Arc::ptr_eq`
+intent — the existing code clearly *wanted* to compare without
+cloning, but `.load_full()` semantics forced the clone first.
+This refactor expresses the intent correctly.
+
+**This v2 plan is concrete, measurable, narrow.** No PLAN-KILL
+discussion this round — the underlying problem is real and the
+fix is clear.
 
 ## 3. What's already shipped
 
-- 11 `Arc<ArcSwap<...>>` fields in worker_loop signature
-- Worker caches `forwarding`, `cos_*` states in local `mut`
-  variables at init; only reloads on explicit triggers
-  (config-gen mismatch, RG transition).
-- `ha_state` and `shared_fabrics` reload per-tick
-- `shared_validation` reloads on config-gen change
+- 6 `.load_full()` + `Arc::ptr_eq` blocks at
+  `worker/mod.rs:725-780`
+- 1 `.load()` + manual `==` comparison for `shared_validation`
+  at line 721-723 (the right pattern, only used in one place)
+- 1 `.load()` for `ha_state` at line 801 (cached as `ha_runtime`,
+  separately compared)
+- 1 `.load()` for `shared_fabrics` at line 908 (cached as
+  `live_fabrics`)
 
-## 4. Concrete design (if not killed)
+The 3 `.load()` sites are NOT the problem; they don't clone. The
+6 `.load_full()` sites are.
 
-1. Define `ImmutableRuntime` containing the 3 per-tick-loaded states:
-   ```rust
-   struct ImmutableRuntime {
-       validation: ValidationState,
-       ha_runtime: BTreeMap<i32, HAGroupRuntime>,
-       fabrics: Vec<FabricLink>,
-   }
-   ```
-2. Replace 3 separate `Arc<ArcSwap<...>>` with one `Arc<ArcSwap<ImmutableRuntime>>`.
-3. Coordinator update path: when any of the 3 states change, rebuild full snapshot, swap.
-4. Worker: single `.load()` per tick → `&ImmutableRuntime` reference passed down.
+## 4. Concrete design
 
-**The cost question:** rebuild requires cloning the unchanged 2
-states. `ValidationState` is a small struct; `BTreeMap<i32, HAGroupRuntime>`
-is bounded by # of redundancy groups (typically 1-4); `Vec<FabricLink>`
-is tiny. Cloning all three on each update is cheap, but not free.
+### 4.1 The 6 sites to fix
+
+| Line | Field | Cache var |
+|---|---|---|
+| 725 | `shared_forwarding` | `forwarding` |
+| 738 | `shared_cos_owner_worker_by_queue` | `cos_owner_worker_by_queue` |
+| 743 | `shared_cos_owner_live_by_queue` | `cos_owner_live_by_queue` |
+| 748 | `shared_cos_root_leases` | `cos_shared_root_leases` |
+| 757 | `shared_cos_queue_leases` | `cos_shared_queue_leases` |
+| 765 | `shared_cos_queue_vtime_floors` | `cos_shared_queue_vtime_floors` |
+
+### 4.2 Pattern
+
+For each of the 6 sites, transform from:
+
+```rust
+let live_X = shared_X.load_full();
+if !Arc::ptr_eq(&cached_X, &live_X) {
+    cached_X = live_X;
+    /* refresh side effects */
+}
+```
+
+to:
+
+```rust
+let live_X_guard = shared_X.load();
+if !std::ptr::eq(
+    Arc::as_ptr(&cached_X),
+    Arc::as_ptr(&*live_X_guard),
+) {
+    drop(live_X_guard);   // release guard before doing the actual reload
+    cached_X = shared_X.load_full();
+    /* refresh side effects, same as before */
+}
+```
+
+The `drop(live_X_guard)` before `.load_full()` is to avoid holding two Arc references when we don't need to. Optional — the guard goes out of scope at end of the `if` block anyway. Skip the explicit drop if it complicates the diff.
+
+### 4.3 Optional: helper macro
+
+To avoid 6 copies of the same pattern, introduce a small helper:
+
+```rust
+/// Refresh `cached` from `shared` if and only if the underlying Arc
+/// has been rotated. Returns true if a refresh occurred.
+fn refresh_arc_if_changed<T: ?Sized>(
+    cached: &mut Arc<T>,
+    shared: &ArcSwap<T>,
+) -> bool {
+    let guard = shared.load();
+    if std::ptr::eq(Arc::as_ptr(cached), Arc::as_ptr(&*guard)) {
+        return false;
+    }
+    drop(guard);
+    *cached = shared.load_full();
+    true
+}
+```
+
+Usage:
+
+```rust
+if refresh_arc_if_changed(&mut forwarding, &shared_forwarding) {
+    let cos_changed = cos_runtime_config_changed(/* ... */);
+    /* same side effects as before */
+}
+```
+
+Each of the 6 sites becomes a 1-line `if` head + the existing
+side-effect block.
+
+**Decision: ship the helper.** It makes the 6 sites uniform and
+the diff cleaner; it's also a future-proof primitive for any
+new `ArcSwap` field added to worker_loop.
 
 ## 5. Public API preservation
 
-worker_loop signature changes (3 separate params → 1 consolidated).
-Coordinator builds the snapshot. Internal-only change.
+`worker_loop` signature unchanged. No external API changes.
+The helper is a private fn or a module-local utility.
 
 ## 6. Hidden invariants the change must preserve
 
-- HA RG transitions must propagate to workers within the same
-  poll tick they fire on the coordinator side.
-- Config-gen mismatch detection must continue to trigger
-  validation refresh.
-- Fabric link changes must be visible by next tick.
+- **Visibility:** when the coordinator swaps an Arc, the next
+  worker tick must observe the change. `ArcSwap::load()` provides
+  acquire-ordered access; `Arc::as_ptr` reads the cached Arc's
+  data pointer. Pointer comparison is a value comparison, no
+  ordering issue.
+- **Refresh side effects:** each of the 6 sites does specific
+  bookkeeping when the Arc changes (rebuild cos_fast_interfaces,
+  release_all_cos_root_leases, etc.). The new pattern preserves
+  these by keeping the existing block inside the `if changed`
+  branch.
+- **No torn reads of dependent state:** the same tick that
+  observes `shared_forwarding` rotation may not yet observe a
+  related `shared_cos_*` rotation if they were swapped
+  separately. This is **the same as today** — both the old and
+  new code observe each Arc independently.
 
 ## 7. Risk assessment
 
 | Class | Level | Why |
 |---|---|---|
-| Behavioral regression | LOW | Same data, single pointer |
-| Coordinator CPU cost | **MED** | Snapshot rebuild on every state change of any of the 3 |
-| Borrow-checker | LOW | Single `Arc<ArcSwap<...>>` is cleaner than 3 |
-| Performance regression | LOW | Worker side strictly faster (1 load vs 3) |
-| Architectural mismatch | LOW-MED | Consistency win is real; bus-traffic-saturation framing is wrong |
+| Behavioral regression | **VERY LOW** | Side effects only fire on actual change; same as today |
+| Borrow-checker | LOW | The `Guard` returned by `.load()` is dropped at end of block; no lifetime issues |
+| Performance regression | **VERY LOW** (correctness side) | One extra pointer comparison per tick — negligible |
+| Correctness on rotation | LOW | If the Arc is rotated between the `.load()` ptr comparison and the subsequent `.load_full()`, we just observe the new Arc — slightly newer than the guard, but always-monotonic |
+| Test breakage | LOW | Existing tests assert config-change observation; that path is unchanged |
 
 ## 8. Test plan
 
 - `cargo build --release`: clean
 - `cargo test --release`: 974/974 pass
-- 5x flake check on `make test-failover` — HA path is most affected
+- 5x flake check on `make test-failover` (verifies HA / config
+  changes still propagate)
 - Smoke matrix on loss userspace cluster: 30 cells, 0 retrans
-- **HA stress**: rapid `request chassis cluster failover` cycle to
-  verify coordinator snapshot rebuild keeps up
+- **Perf measurement** (the critical gate): collect
+  `perf stat -e cache-misses,cache-references,LLC-load-misses`
+  on the master baseline vs the v2 build during steady-state
+  iperf3 run. Document atomic-RMW reduction.
 
 ## 9. Out of scope
 
-- The 5 `shared_cos_*` fields (loaded once at init, cached) — no
-  per-tick load reduction available
-- `local_tunnel_deliveries`, `cos_status` (not on hot path)
-- `dynamic_neighbors` — already a `ShardedNeighborMap`, not a
-  bare `ArcSwap`
-- Parameter-list cleanup of worker_loop's 30+ args (separate
-  refactor, larger scope)
+- Further consolidation of unrelated worker_loop parameters
+  (#945/#946 territory; not this PR).
+- Coordinator-side changes (none needed).
+- Adding new ArcSwap fields or replacing existing fields with
+  alternative concurrency primitives.
 
 ## 10. Open questions for adversarial review
 
-1. **Is this PLAN-KILL?** Per-packet atomic-load savings ~700k/sec. Is the consistency argument alone worth the churn, or is this churn-for-aesthetics?
+1. **Is `Arc::as_ptr` comparison sound across threads?** `ArcSwap`
+   provides acquire-ordered loads, so the `*const T` read from
+   the guard reflects a value the coordinator published with
+   release-ordered store. Pointer comparison is a value op on
+   `*const T`. The cached `Arc<T>` was the published value at
+   some prior tick. If coordinator rotates twice between two
+   ticks, we still observe a difference.
 
-2. **Coordinator rebuild cost:** the snapshot must be rebuilt on every change of any of {validation, ha_runtime, fabrics}. Concretely: under a config reload that triggers all three within a 100ms window, the coordinator does 3 rebuilds. Each rebuild clones ~3 small structs. Is this measurable?
+2. **Is the `drop(live_X_guard)` before `.load_full()` necessary?**
+   `.load()` holds a hazard-pointer-style guard internally. If
+   we hold the guard while calling `.load_full()` (which clones
+   the Arc), are we double-borrowing the inner Arc? Confirm
+   `arc_swap` semantics permit this.
 
-3. **Why NOT also consolidate the `shared_cos_*` fields?** The plan keeps them as 5 separate `Arc<ArcSwap<...>>`. Justify: they're loaded once at init, cached in mut locals, and CoS reload is rare. But if we're consolidating for consistency, why exclude these?
+3. **What if 5 of 6 fields are usually changed together?** Then
+   the `.load() + ptr_eq` short-circuit hits N times less
+   often, and we pay the `.load_full()` cost N times anyway.
+   Likelihood: low — config reloads change `forwarding`, while
+   CoS lease rotations are independent.
 
-4. **Tear semantics:** today, a config-reload + HA failover within microseconds of each other could leave a worker seeing new validation but old ha_runtime in the same tick. Does that actually cause an observable bug, or is the codepath already tolerant?
+4. **Should the `shared_validation` `.load()` site (line 721) be
+   refactored similarly for consistency?** It's already cheap
+   (no `.load_full()`) but the value-equality check (`**live != validation`) is more expensive than `Arc::as_ptr` comparison
+   would be. Borderline; if the diff is small, fold in;
+   otherwise leave for a follow-up.
 
-5. **Comparison with #946 / #945 context-object work:** is the right fix here actually a `WorkerSnapshot` parameter type that bundles all the args worker_loop takes (~30 params), rather than a narrow `ImmutableRuntime` for 3 of them?
+5. **Helper fn vs inline?** Question 4 in section 4.3. Already
+   chose helper. Confirm.
 
 ## 11. Verdict request
 
-PLAN-READY → execute consolidation as designed.
-PLAN-NEEDS-MINOR → tweak (e.g., include or exclude specific fields).
-PLAN-NEEDS-MAJOR → revise (e.g., adopt the broader WorkerSnapshot framing).
-**PLAN-KILL → premise wrong**: the cited "hundreds of millions of atomic operations per second" is wrong by ~1000×; the actual saving is ~2-3 ops/tick; the consistency argument is real but minor; the coordinator rebuild cost may even net out negative. If the cycle math doesn't justify it, kill.
+PLAN-READY → execute the 6-site refactor.
+PLAN-NEEDS-MINOR → tweak helper signature or include #4.
+PLAN-NEEDS-MAJOR → revise.
+PLAN-KILL → premise wrong (but Gemini Pro 3.1 verified the bug
+is real, so this is unlikely).
