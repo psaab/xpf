@@ -837,7 +837,7 @@ fn ring_pressure_counters_round_trip_through_snapshot() {
 fn caught_message<F: FnOnce() + std::panic::UnwindSafe>(f: F) -> String {
     let r = std::panic::catch_unwind(f);
     let payload = r.unwrap_err();
-    super::panic_payload_message(&payload)
+    super::supervisor::panic_payload_message(&payload)
 }
 
 #[test]
@@ -866,7 +866,7 @@ fn spawn_supervised_worker_catches_string_panic_and_marks_dead() {
     use std::sync::atomic::Ordering;
     let atomics = Arc::new(super::super::worker_runtime::WorkerRuntimeAtomics::new());
     let slot = Arc::new(Mutex::new(None::<String>));
-    let join = super::spawn_supervised_worker(7, atomics.clone(), slot.clone(), || {
+    let join = super::supervisor::spawn_supervised_worker(7, atomics.clone(), slot.clone(), || {
         panic!("intentional test panic")
     })
     .expect("spawn_supervised_worker");
@@ -886,7 +886,7 @@ fn spawn_supervised_worker_catches_string_panic_and_marks_dead() {
 /// catch_unwind + journald log + clean exit.
 #[test]
 fn spawn_supervised_aux_catches_string_panic_and_returns_cleanly() {
-    let join = super::spawn_supervised_aux("test-aux", || {
+    let join = super::supervisor::spawn_supervised_aux("test-aux", || {
         panic!("intentional aux test panic")
     })
     .expect("spawn_supervised_aux");
@@ -900,7 +900,7 @@ fn spawn_supervised_aux_runs_body_to_completion_when_no_panic() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let ran = Arc::new(AtomicBool::new(false));
     let ran_clone = ran.clone();
-    let join = super::spawn_supervised_aux("test-aux-noop", move || {
+    let join = super::supervisor::spawn_supervised_aux("test-aux-noop", move || {
         ran_clone.store(true, Ordering::Relaxed);
     })
     .expect("spawn_supervised_aux");
@@ -915,7 +915,7 @@ fn spawn_supervised_aux_runs_body_to_completion_when_no_panic() {
 fn spawn_supervised_aux_catches_non_string_panic_payload() {
     // Non-string payload exercises the panic_payload_message fallback
     // path, mirroring the worker_loop integration test above.
-    let join = super::spawn_supervised_aux("test-aux-i32", || {
+    let join = super::supervisor::spawn_supervised_aux("test-aux-i32", || {
         std::panic::panic_any(99_i32)
     })
     .expect("spawn_supervised_aux");
