@@ -1,5 +1,5 @@
 ---
-status: REVISED v2 — Codex + Gemini Pro 3.1 round-1 PLAN-KILL on the consolidation idea, but Gemini caught the REAL bug. Pivoted to the actual fix.
+status: REVISED v3 — Codex + Gemini Pro 3.1 round-2 PLAN-NEEDS-MINOR converged on helper signature: use `Arc::ptr_eq(cached, &*guard)` (idiomatic) + `arc_swap::Guard::into_inner(guard)` (avoids TOCTOU + second load) + drop `T: ?Sized` (minimal trait bounds; all 6 sites sized)
 issue: #1188
 phase: Replace `.load_full()` with `.load()` + `Arc::as_ptr` comparison in worker tick loop
 ---
@@ -121,21 +121,17 @@ if !Arc::ptr_eq(&cached_X, &live_X) {
 }
 ```
 
-to:
+to (using the helper from §4.3):
 
 ```rust
-let live_X_guard = shared_X.load();
-if !std::ptr::eq(
-    Arc::as_ptr(&cached_X),
-    Arc::as_ptr(&*live_X_guard),
-) {
-    drop(live_X_guard);   // release guard before doing the actual reload
-    cached_X = shared_X.load_full();
+if refresh_arc_if_changed(&mut cached_X, &shared_X) {
     /* refresh side effects, same as before */
 }
 ```
 
-The `drop(live_X_guard)` before `.load_full()` is to avoid holding two Arc references when we don't need to. Optional — the guard goes out of scope at end of the `if` block anyway. Skip the explicit drop if it complicates the diff.
+The helper consumes the observed `Guard` directly — no second
+`.load_full()` call, no TOCTOU window, no explicit `drop(guard)`
+ceremony.
 
 ### 4.3 Optional: helper macro
 
@@ -144,16 +140,26 @@ To avoid 6 copies of the same pattern, introduce a small helper:
 ```rust
 /// Refresh `cached` from `shared` if and only if the underlying Arc
 /// has been rotated. Returns true if a refresh occurred.
-fn refresh_arc_if_changed<T: ?Sized>(
+///
+/// Codex round-2: consume the observed Guard via `Guard::into_inner`
+/// instead of doing a second `.load_full()`. This preserves the
+/// exact Arc snapshot we just compared and removes a (tiny) TOCTOU
+/// window where the coordinator could swap a third Arc between our
+/// `.load()` ptr-eq and the redundant `.load_full()`.
+///
+/// Gemini Pro 3.1 round-2: use idiomatic `Arc::ptr_eq` (the `Guard`
+/// derefs to `&Arc<T>`); `T: ?Sized` is dropped — all 6 call sites
+/// are sized concrete types, and `arc-swap`'s `RefCnt` impl is
+/// cleanest with sized `T`.
+fn refresh_arc_if_changed<T>(
     cached: &mut Arc<T>,
     shared: &ArcSwap<T>,
 ) -> bool {
     let guard = shared.load();
-    if std::ptr::eq(Arc::as_ptr(cached), Arc::as_ptr(&*guard)) {
+    if Arc::ptr_eq(cached, &*guard) {
         return false;
     }
-    drop(guard);
-    *cached = shared.load_full();
+    *cached = arc_swap::Guard::into_inner(guard);
     true
 }
 ```
