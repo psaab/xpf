@@ -171,7 +171,12 @@ func (d *Daemon) applyDirectVIPOwnership(rgID int, want bool, reason string) {
 		if announce {
 			d.scheduleDirectAnnounce(rgID, reason)
 			if cfg != nil {
-				go d.resolveNeighbors(cfg)
+				// #1197: takeover must re-validate STALE entries
+				// too; resolveNeighbors skips REACHABLE/STALE/
+				// PERMANENT, so a stale snapshot would persist.
+				// Use forceProbeNeighbors instead (no skip-stale).
+				go d.forceProbeNeighbors(cfg)
+				go d.resolveNeighbors(cfg) // covers cold/missing
 			}
 		}
 		return

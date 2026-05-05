@@ -13,96 +13,14 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// preinstallSnapshotNeighbors refreshes the kernel ARP/NDP table from two
-// sources: (1) iterates each configured interface's kernel NeighList and
-// re-installs valid entries as NUD_REACHABLE via netlink.NeighSet, and
-// (2) installs snapshot-learned neighbors from the dataplane provider
-// (populated by buildNeighborSnapshots during Compile and synced from the
-// active node). The periodic neighbor-maintenance loop calls this to keep
-// the standby's neighbor table hot so failover does not depend on
-// activation-time priming.
-func (d *Daemon) preinstallSnapshotNeighbors() {
-	// Read neighbors from the snapshot via the dataplane manager.
-	// Fall back to kernel NeighList if the snapshot isn't available.
-	cfg := d.store.ActiveConfig()
-	if cfg == nil {
-		return
-	}
-	var installed int
-	// Iterate ALL interfaces and install any neighbor we know about.
-	for name, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
-		for _, unit := range ifc.Units {
-			if unit == nil {
-				continue
-			}
-			linuxName := config.LinuxIfName(name)
-			if unit.Number != 0 {
-				linuxName = fmt.Sprintf("%s.%d", linuxName, unit.Number)
-			}
-			link, err := netlink.LinkByName(linuxName)
-			if err != nil || link == nil {
-				continue
-			}
-			for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
-				neighs, err := netlink.NeighList(link.Attrs().Index, family)
-				if err != nil {
-					continue
-				}
-				for _, neigh := range neighs {
-					if neigh.HardwareAddr == nil || len(neigh.HardwareAddr) == 0 {
-						continue
-					}
-					if neigh.State == netlink.NUD_FAILED || neigh.State == netlink.NUD_NOARP {
-						continue
-					}
-					entry := netlink.Neigh{
-						LinkIndex:    link.Attrs().Index,
-						Family:       family,
-						State:        netlink.NUD_REACHABLE,
-						IP:           neigh.IP,
-						HardwareAddr: neigh.HardwareAddr,
-					}
-					if err := netlink.NeighSet(&entry); err == nil {
-						installed++
-					}
-				}
-			}
-		}
-	}
-	// Also install static route next-hop neighbors that may not be in the
-	// kernel table yet (expired while another node owned the RG). Use the
-	// config's known gateway addresses with their MACs from the snapshot.
-	if d.dp != nil {
-		type snapshotNeighborProvider interface {
-			SnapshotNeighbors() []struct {
-				Ifindex int
-				IP      net.IP
-				MAC     net.HardwareAddr
-				Family  int
-			}
-		}
-		if provider, ok := d.dp.(snapshotNeighborProvider); ok {
-			for _, sn := range provider.SnapshotNeighbors() {
-				entry := netlink.Neigh{
-					LinkIndex:    sn.Ifindex,
-					Family:       sn.Family,
-					State:        netlink.NUD_REACHABLE,
-					IP:           sn.IP,
-					HardwareAddr: sn.MAC,
-				}
-				if err := netlink.NeighSet(&entry); err == nil {
-					installed++
-				}
-			}
-		}
-	}
-	if installed > 0 {
-		slog.Info("preinstalled kernel neighbor entries from snapshot", "count", installed)
-	}
-}
+// #1197: preinstallSnapshotNeighbors was deleted. It unconditionally
+// pushed the userspace-dp's in-memory neighbor snapshot back into
+// the kernel ARP table every 15s, which would revert kernel-learned
+// fresher MACs to stale snapshot MACs and break forwarding until
+// xpfd restart. The replacement is event-driven: see
+// daemon_neighbor_listener.go for the RTM_NEWNEIGH/DELNEIGH listener
+// (kernel-as-authority) and forceProbeNeighbors for the periodic
+// proactive ARP/NS probe that keeps kernel entries fresh.
 
 // resolveNeighbors proactively triggers ARP/NDP resolution for all known
 // next-hops, gateways, NAT destinations, and address-book host entries.
@@ -118,13 +36,28 @@ func (d *Daemon) resolveNeighbors(cfg *config.Config) {
 	d.resolveNeighborsInner(cfg, true)
 }
 
-func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) {
-	type target struct {
-		neighborIP net.IP
-		linkIndex  int
-	}
-	var targets []target
+// neighborProbeTarget is the (IP, linkIndex) pair for a neighbor
+// xpfd wants to probe via ARP/NDP. Used by both resolveNeighborsInner
+// and forceProbeNeighbors (#1197).
+type neighborProbeTarget struct {
+	neighborIP net.IP
+	linkIndex  int
+}
+
+// collectNeighborProbeTargets returns the deduped target list
+// xpfd actively cares about: static-route next-hops, DHCP gateways,
+// backup router, DNAT pool addresses, static NAT translated
+// addresses, address-book host entries (/32 and /128 only).
+//
+// #1197: extracted from resolveNeighborsInner so both that
+// function and forceProbeNeighbors share one source of truth for
+// the configured-target set.
+func (d *Daemon) collectNeighborProbeTargets(cfg *config.Config) []neighborProbeTarget {
+	var targets []neighborProbeTarget
 	seen := make(map[string]bool)
+	if cfg == nil {
+		return nil
+	}
 
 	addByLink := func(ip net.IP, linkIndex int) {
 		key := fmt.Sprintf("%s@%d", ip, linkIndex)
@@ -132,10 +65,9 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 			return
 		}
 		seen[key] = true
-		targets = append(targets, target{neighborIP: ip, linkIndex: linkIndex})
+		targets = append(targets, neighborProbeTarget{neighborIP: ip, linkIndex: linkIndex})
 	}
 
-	// addByIP resolves the outgoing interface via the kernel routing table.
 	addByIP := func(ipStr string) {
 		ip := net.ParseIP(ipStr)
 		if ip == nil {
@@ -158,9 +90,6 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 			return
 		}
 		resolved := resolveJunosIfName(cfg, ifName)
-		if resolved != ifName {
-			slog.Debug("neighbor warmup: resolved interface name", "from", ifName, "to", resolved)
-		}
 		link, err := netlink.LinkByName(resolved)
 		if err != nil {
 			return
@@ -168,17 +97,11 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 		addByLink(ip, link.Attrs().Index)
 	}
 
-	// addByIPOrConfig first tries the kernel FIB (addByIP). If the kernel
-	// has no route (e.g. standby node where FRR hasn't installed the route),
-	// fall back to finding the outgoing interface from the config by matching
-	// the next-hop IP against configured interface subnets. This keeps ARP
-	// warm on standby nodes so failback doesn't lose packets to ARP delay.
 	addByIPOrConfig := func(ipStr string) {
 		ip := net.ParseIP(ipStr)
 		if ip == nil {
 			return
 		}
-		// Try kernel FIB first — this is the fast/common path on active nodes.
 		routes, err := netlink.RouteGet(ip)
 		if err == nil && len(routes) > 0 {
 			neighborIP := ip
@@ -188,7 +111,6 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 			addByLink(neighborIP, routes[0].LinkIndex)
 			return
 		}
-		// Kernel has no route — find the interface from config by subnet match.
 		for name, ifc := range cfg.Interfaces.Interfaces {
 			if ifc == nil {
 				continue
@@ -210,12 +132,8 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 					}
 					link, err := netlink.LinkByName(linuxName)
 					if err != nil {
-						slog.Debug("neighbor warmup: config subnet match could not be resolved to a linux link",
-							"nexthop", ipStr, "iface", linuxName, "subnet", addrStr, "err", err)
 						continue
 					}
-					slog.Debug("neighbor warmup: resolved next-hop via config subnet",
-						"nexthop", ipStr, "iface", linuxName, "subnet", addrStr)
 					addByLink(ip, link.Attrs().Index)
 					return
 				}
@@ -223,9 +141,7 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 		}
 	}
 
-	// 1. Static route next-hops (resolve interface via FIB if not specified).
-	// Uses addByIPOrConfig so standby nodes without the kernel route still
-	// resolve next-hops via config subnet matching (keeps ARP cache warm).
+	// 1. Static route next-hops
 	allStaticRoutes := append(cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes...)
 	for _, sr := range allStaticRoutes {
 		if sr.Discard {
@@ -274,7 +190,7 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 		addByIP(cfg.System.BackupRouter)
 	}
 
-	// 4. DNAT pool addresses (destinations that will receive forwarded traffic)
+	// 4. DNAT pool addresses
 	if cfg.Security.NAT.Destination != nil {
 		for _, pool := range cfg.Security.NAT.Destination.Pools {
 			if pool.Address != "" {
@@ -283,7 +199,7 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 		}
 	}
 
-	// 5. Static NAT translated addresses (internal hosts receiving forwarded traffic)
+	// 5. Static NAT translated addresses
 	for _, rs := range cfg.Security.NAT.Static {
 		for _, rule := range rs.Rules {
 			if rule.Then != "" {
@@ -292,9 +208,7 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 		}
 	}
 
-	// 6. Address-book host entries (known hosts referenced in policies).
-	// Only resolve host addresses (/32 for v4, /128 for v6) to avoid
-	// flooding entire subnets with ARP requests.
+	// 6. Address-book host entries (/32 and /128 only)
 	if cfg.Security.AddressBook != nil {
 		for _, addr := range cfg.Security.AddressBook.Addresses {
 			ip, ipNet, err := net.ParseCIDR(addr.Value)
@@ -307,6 +221,17 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 			}
 		}
 	}
+
+	return targets
+}
+
+func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) {
+	// #1197 v3 (Codex code-review #5): use the shared
+	// collectNeighborProbeTargets helper instead of duplicating
+	// the target-collection logic inline. This is the canonical
+	// target source — drift between resolveNeighborsInner and
+	// forceProbeNeighbors is impossible.
+	targets := d.collectNeighborProbeTargets(cfg)
 
 	// Resolve each target via ping (triggers kernel ARP/NDP resolution)
 	resolved := 0
@@ -426,6 +351,11 @@ func (d *Daemon) cleanFailedNeighbors() int {
 // Fetches fresh active config on each tick so config changes take effect.
 func (d *Daemon) runPeriodicNeighborResolution(ctx context.Context) {
 	// Immediate first run — don't wait for first tick.
+	// resolveNeighbors handles cold-start configured targets;
+	// forceProbeNeighbors handles stale snapshot keys (only
+	// useful once a snapshot exists, which it doesn't yet at
+	// startup). On the first 15s tick once snapshot is warm,
+	// both run with non-overlapping target sets.
 	if cfg := d.store.ActiveConfig(); cfg != nil {
 		d.resolveNeighbors(cfg)
 		d.maintainClusterNeighborReadiness()
@@ -449,6 +379,12 @@ func (d *Daemon) runPeriodicNeighborResolution(ctx context.Context) {
 		case <-resolveTicker.C:
 			if cfg := d.store.ActiveConfig(); cfg != nil {
 				d.resolveNeighbors(cfg)
+				// #1197: force-probe ALL monitored neighbors
+				// (including STALE/DELAY/PROBE) so kernel
+				// re-validates entries that resolveNeighbors
+				// would skip. Replies update kernel ARP →
+				// RTM_NEWNEIGH → listener regenerates snapshot.
+				d.forceProbeNeighbors(cfg)
 				d.maintainClusterNeighborReadiness()
 			}
 		}
@@ -465,7 +401,10 @@ func (d *Daemon) maintainClusterNeighborReadiness() {
 	if d.cluster == nil {
 		return
 	}
-	d.preinstallSnapshotNeighbors()
+	// #1197: preinstall removed; the listener (daemon_neighbor_listener.go)
+	// keeps the snapshot in sync with kernel via netlink events,
+	// and the periodic forceProbeNeighbors tick keeps kernel entries
+	// fresh via proactive ARP/NS.
 	if !d.neighborWarmupInFlight.CompareAndSwap(false, true) {
 		return
 	}

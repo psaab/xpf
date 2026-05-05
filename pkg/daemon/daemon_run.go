@@ -607,6 +607,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 				defer wg.Done()
 				d.runPeriodicNeighborResolution(ctx)
 			}()
+			// #1197: kernel-as-authority neighbor listener.
+			// Subscribes to RTM_NEWNEIGH/DELNEIGH and triggers
+			// snapshot regen on forwarding-relevant changes.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				d.neighborListener(ctx)
+			}()
 		}
 	}
 

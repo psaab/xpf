@@ -258,7 +258,20 @@ func (m *Manager) syncSnapshotLocked() error {
 		return nil
 	}
 	if m.lastStatus.LastSnapshotGeneration >= m.lastSnapshot.Generation {
-		m.publishedSnapshot = m.lastStatus.LastSnapshotGeneration
+		// #1197 v7 (Codex code-review v6): status-loop catch-up
+		// path. Helper has the snapshot; mirror the FULL
+		// successful-apply_snapshot bookkeeping, otherwise
+		// downstream paths see stale publishedPlanKey /
+		// lastSnapshotHash and may force unnecessary refreshes
+		// or break the same-plan-during-XSK-startup exception.
+		hash, hashOK := snapshotContentHash(m.lastSnapshot)
+		m.publishedSnapshot = m.lastSnapshot.Generation
+		m.publishedPlanKey = planKey
+		if hashOK {
+			m.lastSnapshotHash = hash
+		}
+		m.rebuildNeighborIndex()
+		m.rebuildMonitoredIfindexes()
 		return nil
 	}
 	// Publish the initial snapshot immediately so the helper can plan its
@@ -304,10 +317,20 @@ func (m *Manager) syncSnapshotLocked() error {
 		m.publishedSnapshot = m.lastSnapshot.Generation
 		return nil
 	}
+	// #1197 v5 (Codex code-review v4 #2): publishable-only filter
+	// for parity with update_neighbors path.
+	publishSnap := *m.lastSnapshot
+	publishSnap.Neighbors = filterPublishableNeighbors(m.lastSnapshot.Neighbors)
 	var status ProcessStatus
-	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: m.lastSnapshot}, &status); err != nil {
+	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
 		return fmt.Errorf("publish userspace snapshot: %w", err)
 	}
+	// #1197 v5 (Codex code-review v4 #1): rebuild listener
+	// caches AFTER successful publish on the deferred-publish
+	// path too. Compile() defers when XSK is starting up; this
+	// is where the snapshot actually lands in userspace-dp.
+	m.rebuildNeighborIndex()
+	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = m.lastSnapshot.Generation
 	m.publishedPlanKey = planKey
 	if hashOK {

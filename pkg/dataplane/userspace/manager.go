@@ -74,6 +74,12 @@ type Manager struct {
 	lastRSTAttempt          time.Time
 	lastRSTInstallOK        bool
 	lastSnapshotHash        [32]byte // content hash of last published snapshot (excludes volatile fields)
+	// #1197: O(1) neighbor lookup index for the listener hot path.
+	// Keyed by (ifindex, ip-string). Rebuilt whenever lastSnapshot.Neighbors
+	// is replaced. Read under m.mu (existing snapshot lock).
+	neighborIndex map[neighborIndexKey]*NeighborSnapshot
+	// #1197: ifindex set for listener filter; rebuilt on config commit.
+	monitoredIfindexes map[int]struct{}
 	lastBindingIndices      []uint32
 	neighborsPrewarmed      bool
 	ctrlEnableAt            time.Time
@@ -291,6 +297,11 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		samePlanRefresh = false
 	}
 	m.lastSnapshot = snap
+	// #1197 v4 (Codex code-review v3 #1+#2): rebuild listener
+	// caches ONLY after a successful apply_snapshot. Doing it
+	// here (before publish) leaves the listener thinking
+	// userspace-dp has entries it doesn't if apply_snapshot fails.
+	// Moved to the post-success path below (after line 343).
 	if pendingXSKStartup {
 		if err := m.syncIngressIfaceMapLocked(snap); err != nil {
 			return result, err
@@ -332,9 +343,22 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		snap.DeferWorkers = true
 	}
 	var status ProcessStatus
-	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, &status); err != nil {
+	// #1197 v5 (Codex code-review v4 #2): apply_snapshot must
+	// send publishable-only neighbors to match the
+	// update_neighbors path. Otherwise Rust's full-snapshot
+	// build accepts state="none" entries Go's predicate rejects,
+	// and Go can't track removal of those entries via the index.
+	publishSnap := *snap
+	publishSnap.Neighbors = filterPublishableNeighbors(snap.Neighbors)
+	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
 		return result, fmt.Errorf("publish userspace snapshot: %w", err)
 	}
+	// #1197 v4: apply_snapshot succeeded — userspace-dp has the
+	// new neighbors. NOW rebuild listener caches; before this
+	// point the index would shadow events for entries the
+	// dataplane hadn't accepted.
+	m.rebuildNeighborIndex()
+	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = snap.Generation
 	m.publishedPlanKey = newPlanKey
 	if h, ok := snapshotContentHash(snap); ok {
@@ -436,13 +460,24 @@ func (m *Manager) BumpFIBGeneration() uint32 {
 	m.generation++
 	m.lastSnapshot.Generation = m.generation
 
+	// #1197 v4 (Codex code-review v3 #1): refresh the monitored
+	// ifindex cache UNCONDITIONALLY — link recreation can happen
+	// without any neighbor diff (operator unplugs cable, kernel
+	// rebinds a VLAN, etc.), and a stale cache silently drops
+	// events on the new ifindex until the next config commit.
+	m.rebuildMonitoredIfindexes()
+
 	// Check if kernel neighbors changed — if so, push an incremental update.
+	// #1197: use forwarding-effective diff so REACHABLE↔STALE aging churn
+	// doesn't trigger unnecessary publishes; filter publish payload to
+	// publishable-only entries (matches userspace-dp accept rules).
 	newNeighbors := buildNeighborSnapshots(m.lastSnapshot.Config)
-	if !neighborsEqual(m.lastSnapshot.Neighbors, newNeighbors) {
+	if !neighborsEqualForwarding(m.lastSnapshot.Neighbors, newNeighbors) {
+		publishable := filterPublishableNeighbors(newNeighbors)
 		var status ProcessStatus
 		if err := m.requestLocked(ControlRequest{
 			Type:            "update_neighbors",
-			Neighbors:       newNeighbors,
+			Neighbors:       publishable,
 			NeighborReplace: true,
 		}, &status); err != nil {
 			slog.Warn("userspace: failed to publish neighbor update", "err", err)
@@ -450,6 +485,7 @@ func (m *Manager) BumpFIBGeneration() uint32 {
 			// Only update cached neighbors after successful publish so
 			// a transient failure doesn't suppress future retries.
 			m.lastSnapshot.Neighbors = newNeighbors
+			m.rebuildNeighborIndex() // #1197
 		}
 	}
 
@@ -464,6 +500,217 @@ func (m *Manager) BumpFIBGeneration() uint32 {
 		slog.Warn("userspace: failed to bump FIB generation", "err", err)
 	}
 	return newGen
+}
+
+// neighborIndexKey is the (ifindex, ip-string) key for the
+// O(1) neighbor lookup index used by the daemon's listener hot
+// path. ip-string is used (not net.IP) so map equality is well-
+// defined for both v4 and v6 representations.
+type neighborIndexKey struct {
+	ifindex int
+	ip      string
+}
+
+// filterPublishableNeighbors returns only the entries
+// userspace-dp will accept (per neighborSnapshotPublishable).
+func filterPublishableNeighbors(neighbors []NeighborSnapshot) []NeighborSnapshot {
+	out := make([]NeighborSnapshot, 0, len(neighbors))
+	for _, n := range neighbors {
+		if neighborSnapshotPublishable(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// rebuildNeighborIndex updates m.neighborIndex from the current
+// m.lastSnapshot.Neighbors slice. Caller MUST hold m.mu. Called
+// after every assignment to lastSnapshot.Neighbors.
+//
+// Codex code-review v2 #1: index ONLY publishable entries.
+// Indexing raw entries causes a bug: a raw failed→reachable
+// transition on the same MAC would return existing.MAC == new.MAC
+// from LookupSnapshotNeighbor → shouldTriggerRegen returns false
+// → snapshot stays out of date until 60s safety tick. By indexing
+// only publishable entries, an unpublishable→publishable
+// transition presents as "no existing entry" → trigger fires.
+func (m *Manager) rebuildNeighborIndex() {
+	if m.lastSnapshot == nil {
+		m.neighborIndex = nil
+		return
+	}
+	idx := make(map[neighborIndexKey]*NeighborSnapshot,
+		len(m.lastSnapshot.Neighbors))
+	for i := range m.lastSnapshot.Neighbors {
+		n := &m.lastSnapshot.Neighbors[i]
+		if !neighborSnapshotPublishable(*n) {
+			continue
+		}
+		idx[neighborIndexKey{n.Ifindex, n.IP}] = n
+	}
+	m.neighborIndex = idx
+}
+
+// RegenerateNeighborSnapshot rebuilds the in-memory neighbor
+// snapshot from current kernel ARP/NDP state and publishes any
+// forwarding-relevant changes to userspace-dp.
+//
+// #1197: this is the event-driven entry point used by the
+// daemon's RTM_NEWNEIGH/DELNEIGH listener (and the 60s safety
+// reconciliation tick) to keep the userspace-dp neighbor table
+// in sync with the kernel without depending on the buggy
+// preinstall mechanism.
+//
+// Forwarding-effective diff (key, MAC, publishable-bit) decides
+// whether to publish; raw NUD state (REACHABLE↔STALE) is ignored
+// to avoid republish churn.
+func (m *Manager) RegenerateNeighborSnapshot() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastSnapshot == nil || m.lastSnapshot.Config == nil {
+		return
+	}
+	if m.proc == nil || m.proc.Process == nil {
+		return
+	}
+	// #1197 v4 (Codex code-review v3 #1): refresh monitored
+	// ifindex cache unconditionally — a regen call may be
+	// triggered by the safety tick precisely because a link
+	// changed, and the listener filter must reflect that even
+	// if neighbor entries didn't diff.
+	m.rebuildMonitoredIfindexes()
+
+	newNeighbors := buildNeighborSnapshots(m.lastSnapshot.Config)
+	if neighborsEqualForwarding(m.lastSnapshot.Neighbors, newNeighbors) {
+		return
+	}
+	publishable := filterPublishableNeighbors(newNeighbors)
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{
+		Type:            "update_neighbors",
+		Neighbors:       publishable,
+		NeighborReplace: true,
+	}, &status); err != nil {
+		slog.Warn("userspace: failed to publish neighbor regeneration", "err", err)
+		return
+	}
+	m.lastSnapshot.Neighbors = newNeighbors
+	m.rebuildNeighborIndex() // #1197 (after publish success)
+	m.generation++
+	m.lastSnapshot.Generation = m.generation
+	// Copilot review: advance publishedSnapshot + refresh
+	// lastSnapshotHash. Otherwise the status loop sees the
+	// bumped generation as unpublished and may force a redundant
+	// apply_snapshot, AND any churn in filtered-out rows could
+	// leak through hash-dedup.
+	m.publishedSnapshot = m.lastSnapshot.Generation
+	if h, ok := snapshotContentHash(m.lastSnapshot); ok {
+		m.lastSnapshotHash = h
+	}
+}
+
+// LookupSnapshotNeighbor returns a copy of the snapshot's
+// current entry for (ifindex, ip), or nil if not present. The
+// returned snapshot is a value copy — safe to read after the
+// lock is released, and avoids the (currently no-op) mutation
+// hazard of returning an internal pointer.
+//
+// Codex code-review v2 #4: previous version returned a defensive
+// pointer via heap copy. Caller (shouldTriggerRegen) only reads
+// the MAC immediately while still under m.mu, so a pointer is
+// safe. But the API surface is cleaner as a value (caller can
+// hold it across other lock-acquiring calls without aliasing
+// concerns), so we keep the value-copy semantics — just skip
+// the heap-allocated *NeighborSnapshot wrapping.
+//
+// Index covers ONLY publishable entries (#1 v2 fix), so a hit
+// here means userspace-dp has been told about this entry.
+func (m *Manager) LookupSnapshotNeighbor(ifindex int, ip net.IP) *NeighborSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.neighborIndex == nil {
+		return nil
+	}
+	entry, ok := m.neighborIndex[neighborIndexKey{ifindex, ip.String()}]
+	if !ok {
+		return nil
+	}
+	out := *entry
+	return &out
+}
+
+// IsMonitoredIfindex returns true if the given link index
+// belongs to a configured interface that buildNeighborSnapshots
+// would iterate. O(1) hash-map lookup under m.mu.
+//
+// Codex code-review v2 #2: previous version returned a copy of
+// the whole map, which made the listener hot path O(configured-
+// interfaces) plus heap churn per event. This direct lookup
+// avoids both.
+func (m *Manager) IsMonitoredIfindex(ifindex int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.monitoredIfindexes == nil {
+		return false
+	}
+	_, ok := m.monitoredIfindexes[ifindex]
+	return ok
+}
+
+// rebuildMonitoredIfindexes updates m.monitoredIfindexes from
+// the active config. Caller MUST hold m.mu.
+//
+// Codex code-review v2 #3: previous version was called only on
+// full snapshot assignment. Neighbor-only updates (BumpFIBGeneration,
+// RegenerateNeighborSnapshot) didn't refresh the cache, so a
+// configured link recreated under a new ifindex could have its
+// events dropped. Now called from every neighbor-related update
+// path that may reflect a new ifindex.
+func (m *Manager) rebuildMonitoredIfindexes() {
+	if m.lastSnapshot == nil || m.lastSnapshot.Config == nil {
+		m.monitoredIfindexes = nil
+		return
+	}
+	m.monitoredIfindexes = MonitoredInterfaceLinkIndexes(m.lastSnapshot.Config)
+}
+
+// ForEachSnapshotNeighbor invokes fn for every PUBLISHABLE
+// neighbor entry in the current snapshot (i.e., entries
+// userspace-dp accepted into its forwarding table).
+//
+// #1197 (Copilot review): the existing SnapshotNeighbors() walks
+// raw lastSnapshot.Neighbors which can include filtered-out
+// entries (FAILED/INCOMPLETE/none). For force-probe target
+// collection we want only the entries the dataplane is actually
+// using, so we walk neighborIndex (publishable-only).
+func (m *Manager) ForEachSnapshotNeighbor(fn func(ifindex int, ip net.IP)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, n := range m.neighborIndex {
+		ip := net.ParseIP(n.IP)
+		if ip == nil {
+			continue
+		}
+		fn(k.ifindex, ip)
+	}
+}
+
+// SnapshotHasIfindex returns true if the current snapshot
+// contains any neighbor entry on the given ifindex. Used by the
+// daemon's listener filter as a fallback for runtime ifindex
+// drift. O(N) scan over the neighborIndex but the listener
+// already pays O(1) for the LookupSnapshotNeighbor; this fallback
+// only fires when the config-derived monitored set doesn't
+// contain the ifindex (rare, e.g., link disappeared).
+func (m *Manager) SnapshotHasIfindex(ifindex int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k := range m.neighborIndex {
+		if k.ifindex == ifindex {
+			return true
+		}
+	}
+	return false
 }
 
 func deriveUserspaceConfig(cfg *config.Config) config.UserspaceConfig {
