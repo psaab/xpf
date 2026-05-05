@@ -8,7 +8,7 @@ runs a `worker_loop` that polls XSK rings and drives the per-packet
 pipeline (#925 Phase 1).
 
 `worker_loop` is wrapped in `catch_unwind` by a supervisor helper
-(`spawn_supervised_worker` in `userspace-dp/src/afxdp/coordinator/mod.rs`).
+(`spawn_supervised_worker` in `userspace-dp/src/afxdp/coordinator/supervisor.rs`).
 If a panic escapes the loop body, the supervisor:
 
 1. Catches the panic with `catch_unwind` so it does not propagate

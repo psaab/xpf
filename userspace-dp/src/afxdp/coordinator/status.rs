@@ -182,7 +182,7 @@ impl super::Coordinator {
     }
 
     pub fn planned_counts(&self) -> (usize, usize) {
-        (self.workers.last_planned_workers, self.workers.last_planned_bindings)
+        (self.workers.last_planned_workers(), self.workers.last_planned_bindings())
     }
 
     pub fn reconcile_debug(&self) -> (u64, String) {

@@ -18,7 +18,7 @@
 //!   that wants more than one shard also locks in ascending order.
 //! - Poison policy: `lock().unwrap_or_else(|e| e.into_inner())`.
 //!   Workers DO have a `catch_unwind` supervisor as of #925 Phase 1
-//!   (`spawn_supervised_worker` in `coordinator/mod.rs`), and #925
+//!   (`spawn_supervised_worker` in `coordinator/supervisor.rs`), and #925
 //!   Phase 2 surfaces panics on Prometheus
 //!   (`xpf_userspace_worker_dead`). But a poisoned `Mutex` here is
 //!   operationally worse than a stale MAC for the *surviving* threads:
