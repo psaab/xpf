@@ -1,5 +1,5 @@
 ---
-status: REVISED v2 — Codex round-1 PLAN-NEEDS-MAJOR + Gemini Pro 3.1 PLAN-READY (with reframe). Scope tightened, primary value reframed as DDoS resilience.
+status: REVISED v3 — Codex+Gemini round-2 PLAN-NEEDS-MINOR converged on screen_drops MUST be mandatorily batched (no fallback); preserved exception_packets semantics (not a sum); fixed cache-line wording
 issue: #1187
 phase: Extend BatchCounters via TelemetryContext to cover hot disposition counters
 ---
@@ -94,7 +94,7 @@ B. **Add 8 new fields to `BatchCounters`** for the disposition
    - `discard_route_packets` (rare but per-packet on path)
    - `next_table_packets` (per-packet on inter-VRF leak path)
    - `local_delivery_packets` (per-packet for slow-path)
-   - `exception_packets` (sum, fires often)
+   - `exception_packets` (NOT a sum — fires only on metadata-disposition exceptions and HAInactive today; this PR preserves that semantics, does not extend it to count `PolicyDenied` / `NoRoute` / `MissingNeighbor` / `DiscardRoute` / `NextTableUnsupported` paths which only call `record_exception()` without bumping `exception_packets`)
 C. **Defer**: `config_gen_mismatches`, `fib_gen_mismatches`,
    `unsupported_packets`. These fire only during reconcile and
    are gated by other expensive work (`record_exception()` does
@@ -140,9 +140,13 @@ struct BatchCounters {
 }
 ```
 
-Total: 20 u64 + bool ≈ **168 bytes**, 3 cache lines. Hot path
-touches the first cache line; cold counters only on disposition
-divergence.
+Total: 20 u64 + bool ≈ **168 bytes**. Current `BatchCounters`
+already spans **2 cache lines** (104 bytes). Appending 8 new
+fields after the existing 12 grows it to **3 cache lines**.
+Critically: the existing happy-path counters live in the first
+2 lines. **No new happy-path cache line is touched.** The new
+disposition counters land in line 3, which is touched only on
+disposition divergence — not on every packet.
 
 ### 4.2 Routing through `TelemetryContext` (Codex finding #4)
 
@@ -173,13 +177,20 @@ Change `disposition.rs:161` from direct `live.forward_candidate_packets.fetch_ad
 the pre-existing leak Codex flagged — it's currently a dead
 field in `BatchCounters`.
 
-### 4.5 `screen_drops` site
+### 4.5 `screen_drops` site (MANDATORY batching, no fallback)
 
 `poll_stages.rs:276` has `binding_live.screen_drops.fetch_add(1)`.
-This site has access to `binding_live: &BindingLiveState` — see
-if `TelemetryContext` is in scope. If not, either thread it in
-(small diff) or leave `screen_drops` direct (Codex acceptable
-fallback). Decision deferred to implementation phase.
+The caller `poll_binding_process_descriptor` already has
+`telemetry: TelemetryContext` in scope. **This PR mandates
+threading `TelemetryContext` (or `&mut BatchCounters`) into
+`stage_screen_check`** so that screen_drops increments go
+through the batch.
+
+Both round-2 reviewers (Codex + Gemini Pro 3.1) explicitly
+rejected the "leave it direct" fallback because SYN flood is a
+primary attack vector — unbatched `screen_drops` increments
+during a flood would re-create the exact RFO storm this PR
+exists to eliminate.
 
 ## 5. Public API preservation
 
