@@ -1,8 +1,36 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: REVISED v2 — addressing Codex (PLAN-NEEDS-MINOR, task-mou6j4qs-48a6t6) and Gemini (PLAN-NEEDS-MINOR, task-mou6jz6b-xdep7x)
 issue: #1205
 phase: single PR — new test only; no production code
 ---
+
+## Round-1 verdict resolution
+
+Both reviewers PLAN-NEEDS-MINOR. Convergent findings:
+
+- **Blocklist is too narrow.** Codex: add `1024-bucket bookkeeping`,
+  `all 1024 SFQ buckets`, `bounded by 1024 worst case`,
+  `1024 active buckets`. Both reviewers: add `tx.rs:` line refs.
+  v2 expands the blocklist with these phrase patterns AND a
+  separate predicate for `tx.rs:N` (digit-suffix, per Codex).
+- **SCAN_DIRS too narrow.** Both flag missing `worker/cos.rs`,
+  `tx/cos_classify.rs`, `coordinator/cos_state.rs`. Gemini suggests
+  collapsing to just `src/afxdp/` + `src/session/` since `scan_dir`
+  is recursive. v2 adopts this — broader scope, simpler code.
+- **Order with #1210**: both confirm "ship #1205 with patterns
+  populated, gate merge on #1210 first". Codex: "stacking #1205 on
+  top of #1210 for validation is fine". v2 records this explicitly.
+- **Substring greediness.** Codex: for numeric stale patterns,
+  require char after `1024` to not be `[0-9_]`. Gemini: the existing
+  4 patterns are long enough to be safe via `.contains()`. v2 adopts
+  Codex's more cautious approach for the two numeric patterns
+  (`= 1024`).
+- **Same-line allow marker is sufficient** (both confirm). No
+  block markers.
+- **Don't silently ignore missing scan dirs** (Codex). v2 panics
+  loudly if a configured scan root is missing.
+
+
 
 ## 1. Issue framing
 
@@ -39,6 +67,10 @@ test level, runs as part of `cargo test --release`.
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// Substring patterns must NOT appear on a non-historical line in
+// any file under SCAN_DIRS. Each entry is (pattern, rationale).
+//
+// v2 expanded blocklist per Codex+Gemini reviews:
 const STALE_PATTERNS: &[(&str, &str)] = &[
     ("COS_FLOW_FAIR_BUCKETS = 1024",
      "value is 4096 since #785 Phase 3"),
@@ -48,11 +80,29 @@ const STALE_PATTERNS: &[(&str, &str)] = &[
      "shared_exact runs flow_fair via #917 V_min sync since #785 Phase 3"),
     ("single-FIFO-per-worker drain",
      "shared_exact uses MQFQ, not FIFO, since #785 Phase 3"),
+    ("1024-bucket bookkeeping",
+     "value is 4096 since #785 Phase 3"),
+    ("all 1024 SFQ buckets",
+     "value is 4096 since #785 Phase 3"),
+    ("bounded by 1024 worst case",
+     "value is 4096 since #785 Phase 3"),
+    ("1024 active buckets",
+     "value is 4096 since #785 Phase 3"),
 ];
 
+// Numeric-suffix patterns: blocked iff followed by a non-`[0-9_]` char.
+// Avoids false-positive on legitimate larger numerals like `1024_000`.
+const NUMERIC_STALE_PATTERNS: &[(&str, &str)] = &[
+    ("= 1024", "value is 4096 since #785 Phase 3"),
+];
+
+// `tx.rs:` followed by an ASCII digit — old line-number breadcrumbs
+// are stale across the tx.rs decomposition (#956+). Module/function
+// anchors like `tx.rs::transmit_batch` are fine.
+const TX_LINE_REF_PATTERN: &str = "tx.rs:";
+
 const SCAN_DIRS: &[&str] = &[
-    "src/afxdp/cos",
-    "src/afxdp/types",
+    "src/afxdp",   // recursive — covers cos/, types/, worker/cos.rs, tx/cos_classify.rs, coordinator/cos_state.rs, etc.
     "src/session",
 ];
 
@@ -90,10 +140,11 @@ struct Violation {
 }
 
 fn scan_dir(dir: &Path, violations: &mut Vec<Violation>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    // v2: panic loudly if a configured scan root is missing.
+    // Silent return on read_dir error converted refactor-induced
+    // path moves into false passes (Codex finding).
+    let entries = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("scan_dir({}): {} — fix SCAN_DIRS or your tree is broken", dir.display(), e));
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -113,11 +164,28 @@ fn scan_dir(dir: &Path, violations: &mut Vec<Violation>) {
             }
             for (pattern, rationale) in STALE_PATTERNS {
                 if line.contains(pattern) {
+                    violations.push(Violation { path: path.clone(), line: lineno + 1, pattern, rationale });
+                }
+            }
+            // Numeric-stale patterns: pattern hit, AND next char (if any)
+            // is NOT in [0-9_]. Avoids false-positive on `1024_000`.
+            for (pattern, rationale) in NUMERIC_STALE_PATTERNS {
+                if let Some(idx) = line.find(pattern) {
+                    let next = line.as_bytes().get(idx + pattern.len()).copied();
+                    let safe_next = next.map(|c| c.is_ascii_digit() || c == b'_').unwrap_or(false);
+                    if !safe_next {
+                        violations.push(Violation { path: path.clone(), line: lineno + 1, pattern, rationale });
+                    }
+                }
+            }
+            // tx.rs:N (digit-suffix) — line-number breadcrumb pattern.
+            if let Some(idx) = line.find(TX_LINE_REF_PATTERN) {
+                let next = line.as_bytes().get(idx + TX_LINE_REF_PATTERN.len()).copied();
+                if next.map(|c| c.is_ascii_digit()).unwrap_or(false) {
                     violations.push(Violation {
-                        path: path.clone(),
-                        line: lineno + 1,
-                        pattern,
-                        rationale,
+                        path: path.clone(), line: lineno + 1,
+                        pattern: TX_LINE_REF_PATTERN,
+                        rationale: "stale tx.rs:NNN line breadcrumb across the tx.rs decomposition (#956+); use module/function anchor instead",
                     });
                 }
             }
