@@ -1,5 +1,5 @@
 ---
-status: REVISED v3 — Codex + Gemini Pro 3.1 round-2 PLAN-NEEDS-MINOR converged on helper signature: use `Arc::ptr_eq(cached, &*guard)` (idiomatic) + `arc_swap::Guard::into_inner(guard)` (avoids TOCTOU + second load) + drop `T: ?Sized` (minimal trait bounds; all 6 sites sized)
+status: REVISED v4 — Codex round-3 PLAN-NEEDS-MAJOR caught semantic bug: v3 helper mutated `cached_X` before the side-effect block, but `worker/mod.rs:727` needs OLD forwarding to call `cos_runtime_config_changed(old, new)`. v4 changes helper to non-mutating `load_arc_if_changed -> Option<Arc<T>>` so callers control the assignment order
 issue: #1188
 phase: Replace `.load_full()` with `.load()` + `Arc::as_ptr` comparison in worker tick loop
 ---
@@ -40,9 +40,13 @@ the same socket) — exactly what the issue body describes.
 ## 2. Honest scope/value framing
 
 **The fix:** replace each `.load_full()` with `.load()` (returns
-a `Guard<Arc<T>>`, no clone) + `Arc::as_ptr` comparison against
-the cached Arc. Only call `.load_full()` when the pointer
-differs (i.e., the coordinator actually rotated the Arc).
+a `Guard<Arc<T>>`, no clone) + `Arc::ptr_eq(cached, &*guard)`
+comparison. When the comparison shows divergence, consume the
+observed `Guard` via `arc_swap::Guard::into_inner(guard)` (no
+second load, no TOCTOU window). The caller decides when to
+assign the new Arc to its cached slot — the forwarding site at
+`worker/mod.rs:727` needs to compare old vs new before the
+assignment to call `cos_runtime_config_changed(old, new)`.
 
 ```rust
 // before:
@@ -124,43 +128,61 @@ if !Arc::ptr_eq(&cached_X, &live_X) {
 to (using the helper from §4.3):
 
 ```rust
-if refresh_arc_if_changed(&mut cached_X, &shared_X) {
-    /* refresh side effects, same as before */
+if let Some(new_X) = load_arc_if_changed(&cached_X, &shared_X) {
+    /* refresh side effects can use BOTH `&cached_X` (old) and
+       `&new_X` (new) here — e.g. forwarding site at
+       worker/mod.rs:727 needs old/new for
+       cos_runtime_config_changed(old, new) */
+    cached_X = new_X;
 }
 ```
 
-The helper consumes the observed `Guard` directly — no second
-`.load_full()` call, no TOCTOU window, no explicit `drop(guard)`
-ceremony.
+**Critical (Codex round-3 catch):** the assignment of
+`cached_X = new_X` happens at the **end** of the side-effect
+block, not before it, so the forwarding site can still compare
+the old `forwarding` against the new one via
+`cos_runtime_config_changed(old, new)` at `worker/cos.rs:256`.
+The earlier v3 helper inverted this order and would have caused
+CoS runtime resets to be silently skipped on forwarding-config
+changes.
+
+The helper is non-mutating and returns the freshly observed Arc
+without assigning. No TOCTOU window, no second `.load_full()`,
+old/new comparison preserved.
 
 ### 4.3 Optional: helper macro
 
 To avoid 6 copies of the same pattern, introduce a small helper:
 
 ```rust
-/// Refresh `cached` from `shared` if and only if the underlying Arc
-/// has been rotated. Returns true if a refresh occurred.
+/// If the `ArcSwap` has been rotated since `cached` was observed,
+/// return the freshly-rotated `Arc`. Otherwise return `None`.
 ///
-/// Codex round-2: consume the observed Guard via `Guard::into_inner`
-/// instead of doing a second `.load_full()`. This preserves the
-/// exact Arc snapshot we just compared and removes a (tiny) TOCTOU
-/// window where the coordinator could swap a third Arc between our
-/// `.load()` ptr-eq and the redundant `.load_full()`.
+/// **Non-mutating by design (Codex round-3 catch):** the helper does
+/// not assign to `cached`. The caller decides when to assign,
+/// because some callers (notably the forwarding site at
+/// `worker/mod.rs:727`) need to call
+/// `cos_runtime_config_changed(old, new)` while both the old and
+/// new Arcs are accessible.
+///
+/// Codex round-2: consume the observed `Guard` via
+/// `Guard::into_inner` instead of doing a second `.load_full()`.
+/// This preserves the exact Arc snapshot we just compared and
+/// removes a (tiny) TOCTOU window.
 ///
 /// Gemini Pro 3.1 round-2: use idiomatic `Arc::ptr_eq` (the `Guard`
 /// derefs to `&Arc<T>`); `T: ?Sized` is dropped — all 6 call sites
-/// are sized concrete types, and `arc-swap`'s `RefCnt` impl is
-/// cleanest with sized `T`.
-fn refresh_arc_if_changed<T>(
-    cached: &mut Arc<T>,
+/// are sized concrete types.
+fn load_arc_if_changed<T>(
+    cached: &Arc<T>,
     shared: &ArcSwap<T>,
-) -> bool {
+) -> Option<Arc<T>> {
     let guard = shared.load();
     if Arc::ptr_eq(cached, &*guard) {
-        return false;
+        None
+    } else {
+        Some(arc_swap::Guard::into_inner(guard))
     }
-    *cached = arc_swap::Guard::into_inner(guard);
-    true
 }
 ```
 
@@ -189,9 +211,8 @@ The helper is a private fn or a module-local utility.
 
 - **Visibility:** when the coordinator swaps an Arc, the next
   worker tick must observe the change. `ArcSwap::load()` provides
-  acquire-ordered access; `Arc::as_ptr` reads the cached Arc's
-  data pointer. Pointer comparison is a value comparison, no
-  ordering issue.
+  acquire-ordered access; `Arc::ptr_eq` compares Arc identity.
+  Pointer comparison is a value comparison, no ordering issue.
 - **Refresh side effects:** each of the 6 sites does specific
   bookkeeping when the Arc changes (rebuild cos_fast_interfaces,
   release_all_cos_root_leases, etc.). The new pattern preserves
@@ -222,7 +243,7 @@ The helper is a private fn or a module-local utility.
 - Smoke matrix on loss userspace cluster: 30 cells, 0 retrans
 - **Perf measurement** (the critical gate): collect
   `perf stat -e cache-misses,cache-references,LLC-load-misses`
-  on the master baseline vs the v2 build during steady-state
+  on the master baseline vs the v4 build during steady-state
   iperf3 run. Document atomic-RMW reduction.
 
 ## 9. Out of scope
