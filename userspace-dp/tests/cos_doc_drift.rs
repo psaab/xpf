@@ -87,6 +87,7 @@ fn cos_doc_drift_guard() {
     }
 
     if !violations.is_empty() {
+        violations.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
         let report: Vec<String> = violations
             .iter()
             .map(|v| {
@@ -118,7 +119,7 @@ fn cos_doc_drift_guard() {
 struct Violation {
     path: PathBuf,
     line: usize,
-    pattern: String,
+    pattern: &'static str,
     rationale: &'static str,
 }
 
@@ -154,10 +155,13 @@ fn scan_dir(dir: &Path, violations: &mut Vec<Violation>) {
         {
             continue;
         }
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let content = fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "scan_dir: cannot read {} — {} — fix file permissions or SCAN_DIRS",
+                path.display(),
+                e
+            )
+        });
         scan_content(&path, &content, violations);
     }
 }
@@ -172,7 +176,7 @@ fn scan_content(path: &Path, content: &str, violations: &mut Vec<Violation>) {
                 violations.push(Violation {
                     path: path.to_path_buf(),
                     line: lineno + 1,
-                    pattern: (*pattern).to_string(),
+                    pattern,
                     rationale,
                 });
             }
@@ -191,7 +195,7 @@ fn scan_content(path: &Path, content: &str, violations: &mut Vec<Violation>) {
                 violations.push(Violation {
                     path: path.to_path_buf(),
                     line: lineno + 1,
-                    pattern: TX_LINE_REF_PATTERN.to_string(),
+                    pattern: TX_LINE_REF_PATTERN,
                     rationale: TX_LINE_REF_RATIONALE,
                 });
             }
