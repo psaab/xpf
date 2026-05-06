@@ -1,5 +1,5 @@
 ---
-status: REVISED v4 — Codex round-3 NEEDS-MINOR + Gemini round-3 NEEDS-MINOR (ambiguity); resolved screen_drops to TelemetryContext (not &mut BatchCounters); deleted stale open-question; fixed cache-line wording (no NEW happy-path line touched, not "1 hot + 2 cold"); reframed forward_candidate_packets as a coordinator-inject path leak, not a hot-path leak (hot path already routes through telemetry.counters)
+status: REVISED v5 — Codex round-4 NEEDS-MINOR (3 fixes), Gemini round-4 PLAN-READY. Specified `record_forwarding_disposition_hot` name explicitly (not just `record_disposition_hot`); scrubbed stale "leak" / "the leaked one" framing throughout; softened cache-line wording to acknowledge source-order-layout dependency (no #[repr(C)] guarantee added)
 issue: #1187
 phase: Extend BatchCounters via TelemetryContext to cover hot disposition counters
 ---
@@ -32,10 +32,13 @@ optimization.
 
 **Existing infrastructure** (`afxdp/mod.rs:308-389`):
 `BatchCounters` already exists with 12 fast counters and a
-`flush()` method. Some fields (e.g., `forward_candidate_packets`)
-are *defined* in `BatchCounters` but `disposition.rs` writes
-directly to `BindingLiveState`, bypassing the batch — that's a
-pre-existing leak this PR also fixes.
+`flush()` method. A few fields (e.g., `forward_candidate_packets`) are *defined*
+in `BatchCounters` AND have a separate direct-write site at
+`disposition.rs:161`. The direct-write site is on the cold
+coordinator-inject path, not the hot worker path — so it's a
+*consistency* issue, not a hot-path leak. The hot path already
+routes correctly through `telemetry.counters` at
+`poll_descriptor.rs:213,1706`.
 
 ## 2. Honest scope/value framing — corrected per Codex round-1
 
@@ -87,9 +90,10 @@ issues, all valid:
 
 **v2 scope (narrowed):**
 
-A. **Fix the existing `forward_candidate_packets` leak**: change
-   `disposition.rs:161` to write through `BatchCounters` (or
-   the new `TelemetryContext`), not directly to `live`.
+A. **No change to `disposition.rs:161`** — it's on the cold
+   coordinator-inject path. Hot path already routes correctly.
+   Section 4.4 documents the rationale (Option A: leave the
+   cold direct write).
 B. **Add 8 new fields to `BatchCounters`** for the disposition
    path:
    - `screen_drops` (DDoS-critical; SYN flood)
@@ -115,8 +119,10 @@ D. **Defer all of `tx_errors`.** Codex round-1 finding #1.
   `WorkerCtx`
 - 12 fast counters batched: `rx_packets`, `rx_bytes`,
   `rx_batches`, `metadata_packets`, `validated_packets` (RX
-  side), `validated_bytes`, `forward_candidate_packets` (the
-  leaked one), `session_hits`, `session_misses`,
+  side), `validated_bytes`, `forward_candidate_packets` (also
+  written via the cold coordinator-inject path at
+  `disposition.rs:161`; left direct in this PR — see §4.4),
+  `session_hits`, `session_misses`,
   `session_creates`, `snat_packets`, `dnat_packets`
 - Flush at `worker/lifecycle.rs:111,150,303`
 
@@ -147,32 +153,46 @@ struct BatchCounters {
 
 Total: 20 u64 + bool ≈ **168 bytes**. Current `BatchCounters`
 already spans **2 cache lines** (104 bytes). Appending 8 new
-fields after the existing 12 grows it to **3 cache lines** under
-source-order layout. The first appended fields share the
-existing line-2 with the trailing existing fields; the rest
-land in line-3. **The key invariant is: no NEW cache line is
-touched on the happy path.** Every line that's already brought
-in for the existing 12 counters stays the same; the new line-3
-is brought in only when a disposition divergence (route miss,
-policy denied, screen drop, etc.) actually fires.
+fields grows it to **~3 cache lines**.
+
+Important caveat: Rust struct layout is unspecified by default.
+We do *not* add `#[repr(C)]` here — the compiler may reorder
+fields. The intended invariant is that the existing 12 counters
+keep their happy-path access pattern unchanged and the 8 new
+counters sit in cold lines that are only touched on disposition
+divergence. **In practice** the rustc layout heuristic places
+same-type fields contiguously, so 20 `u64`s should pack
+sensibly. If this becomes a measured perf concern, a follow-up
+PR can add `#[repr(C)]` + an explicit field order — defer that
+until measurement justifies the constraint.
 
 ### 4.2 Routing through `TelemetryContext` (Codex finding #4)
 
-`record_disposition()` and `record_forwarding_disposition()` are
-called from both hot and cold paths. Two-callsite split:
+Both `record_disposition()` and `record_forwarding_disposition()`
+are called from both hot and cold paths. Each gets a hot/cold
+split:
 
-- **Hot path** (`poll_descriptor.rs:2071`): the worker has
-  `WorkerCtx::telemetry: TelemetryContext` in scope, which
-  wraps `&mut BatchCounters`. Add a hot variant
-  `record_disposition_hot(meta, telemetry, ...)` that writes
-  through `telemetry.counters`.
-- **Cold path** (`coordinator/inject.rs:43`): the coordinator
-  has only `&BindingLiveState`. Keep the current direct-write
-  signature; rename to `record_disposition_cold(meta, live, ...)`
-  for clarity.
-- The shared body is moved to a private helper that takes
-  whichever the caller has and a single closure for the counter
-  write.
+- **Hot variants** (called from `poll_descriptor.rs:2071`):
+  - `record_disposition_hot(meta, telemetry: &mut TelemetryContext, ...)`
+  - `record_forwarding_disposition_hot(meta, telemetry: &mut TelemetryContext, ...)`
+
+  Both write through `telemetry.counters` (the existing
+  `&mut BatchCounters`).
+
+- **Cold variants** (called from `coordinator/inject.rs:43`):
+  - `record_disposition_cold(meta, live: &BindingLiveState, ...)`
+  - `record_forwarding_disposition_cold(meta, live: &BindingLiveState, ...)`
+
+  Keep the current direct-write signature; the coordinator path
+  doesn't have a `TelemetryContext` to thread.
+
+- The shared body for each pair is moved to a private helper
+  that takes whichever counter target the caller has and a
+  single closure for the counter write.
+
+(§4.4 leaves the cold `record_forwarding_disposition_cold`'s
+`ForwardCandidate` arm direct — Option A — because it's not
+on the hot path.)
 
 ### 4.3 Extend `flush()`
 
@@ -244,7 +264,7 @@ exists to eliminate.
 | Behavioral regression | LOW | Same flush semantics as existing 12 counters; coordinator inject keeps direct writes |
 | Borrow-checker | LOW-MED | Splitting hot/cold disposition recorder may force refactor of intermediate callers |
 | Test breakage | LOW | Tests read final `live.X.load()` values — unchanged after flush |
-| Perf regression | LOW | 8 new fields grow `BatchCounters` from 2 → 3 cache lines, but no NEW happy-path line is touched (existing counters keep using lines 1-2; new counters bring in line-3 only on disposition divergence) |
+| Perf regression | LOW | 8 new fields grow `BatchCounters` from ~2 → ~3 cache lines. Layout is unspecified (no `#[repr(C)]`), but rustc's same-type-contiguous heuristic should keep the existing 12 counters in their happy-path lines. If measurement shows otherwise, a follow-up `#[repr(C)]` + explicit field order can pin the layout |
 | Cross-talk on attack/congestion | **the win** | Eliminates RFO storm during SYN flood / policy denial / route miss |
 
 ## 8. Test plan
