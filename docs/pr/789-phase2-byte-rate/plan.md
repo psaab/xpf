@@ -282,3 +282,55 @@ PLAN-NEEDS-MAJOR → revise (different elephant detection, different
 write site, different selection algorithm).
 PLAN-KILL → hot-path cost not worth the residual CoV win; ship
 Phase 1 as-is or close #789 with the achieved improvement.
+
+---
+
+## 12. PLAN-KILL — 2026-05-05
+
+Both reviewers verdict PLAN-KILL on plan v1. **No revision pursued.**
+The architectural premise fails for the gate workload.
+
+### Codex verdict (task-motkn4l0-ntz054)
+
+> Verdict: PLAN-KILL as written. The Rust race-free claim mostly holds, but the architecture does not justify the hot-path cost and is unlikely to clear the ≤20% CoV gate.
+
+Blocking findings:
+1. Byte counter would not count the actual hot path. Established TCP/UDP hits the flow cache before session lookup; only refreshes the session table every 64 cache hits via `sessions.touch`. Adding `bytes_total += pkt_len` next to `last_seen_ns` either undercounts elephants badly or forces a new per-cache-hit write path. The 1.5%/core estimate is invalid for accurate byte accounting.
+2. Phase 2 remains count-gated (`maxCount-minCount < 2`). After Phase 1 reaches "2 flows per queue", a "2 elephants on one queue, 2 mice elsewhere" state has zero count imbalance and Phase 2 will not act.
+3. Sticky placement directly contradicts elephant-placement goal. A flow that becomes heavy after steering cannot be corrected.
+4. With `iperf -P 12`, all streams are greedy and identical; observed byte rate is largely an outcome of queue placement, cwnd timing, and contention, not an intrinsic stable flow class. "One elephant plus one mouse" per queue does not guarantee per-flow CoV under 20% when within-queue TCP fairness is still the limiting mechanism.
+
+### Gemini Pro 3 verdict (task-motknsyz-9cyr5q)
+
+> VERDICT: PLAN-KILL. The plan fails on fundamental structural, architectural, and logical grounds.
+
+Blocking findings:
+1. **Cache-line claim is false.** `SessionEntry` is embedded in `SessionRecord` after a ~56-byte `SessionKey`. `last_seen_ns` sits in cache line 1 (offset ~120). Appending `bytes_total: u64` lands at offset ~168 — cache line 2. The hot-path write dirties a second unrelated cache line, doubling memory traffic.
+2. **The ≤20% gate is unreachable for iperf P=12.** All 12 flows are identical greedy TCP streams. The 3.5× spread is transient cwnd luck, not intrinsic flow weight. After byte-rate-aware steering places "1 elephant + 1 mouse" per queue, both flows immediately re-converge 50/50 because they're greedy. Steady state is mathematically identical to Phase 1's "2 flows per queue."
+3. **Sticky placement locks in transient luck.** Permanently fixing arbitrary lucky/unlucky assignments defeats natural rebalancing.
+4. **HA failover uint64 underflow is a logic bomb.** New active sends `bytes_total=0`; Go controller computes `uint64(0) - uint64(huge)` ≈ 1.84e19 — every migrated flow classified as super-elephant, controller corrupts its own state.
+
+### Structural finding — implications beyond Phase 2
+
+Both reviewers independently concluded that **for iperf P=12 (or any
+N-identical-greedy-flow benchmark), per-flow CoV is bounded by
+within-queue TCP fairness regardless of HW steering placement**. The
+≤20% gate is unreachable for this workload through ntuple-based
+re-steering of any flavor.
+
+If ≤20% CoV remains a requirement, the right path is one of:
+- **Per-flow rate limiting / token bucket** (different paradigm; not
+  steering)
+- **Round-robin worker scheduling** (queue-level fairness primitive,
+  not flow-level)
+- **Re-evaluate the gate.** iperf P=12 specifically tests whether
+  identical greedy flows get equal share — TCP itself doesn't
+  guarantee that on a 30s window.
+
+### Outcome
+
+- **Phase 2 closed PLAN-KILL.** No code touched on
+  `refactor/789-phase2-byte-rate`.
+- **Phase 1 (PR #1203) remains a partial win** — drives CoV from
+  62.5% to ~49-55% on the gate workload. Decision on whether to
+  ship is escalated to the user.
