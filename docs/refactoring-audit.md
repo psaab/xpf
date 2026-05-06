@@ -12,10 +12,25 @@ Tracking the modularity-discipline rule from `docs/engineering-style.md`:
 `docs/refactoring-audit-current.txt` and regenerated periodically (and at
 PR time when adding to a flagged file).
 
-LOC is total file LOC for non-test, non-generated files. Test files
-(`tests.rs`, `*_tests.rs`, `*_test.go`) and generated code (`*.pb.go`,
-`*_grpc.pb.go`, `*_bpfel.go`, `*_bpfeb.go`, `zz_generated_*`) are
-excluded by name pattern.
+LOC is total file LOC for non-test, non-generated files. The script covers
+three language families:
+
+- **Go** — `pkg/`, `cmd/`
+- **Rust** — `userspace-dp/src/`, `userspace-xdp/src/`
+- **BPF C programs** — `bpf/xdp/*.c`, `bpf/tc/*.c` (not headers;
+  shared header size is an include-time artifact, not a per-program
+  refactor unit)
+
+Test files (`tests.rs`, `*_tests.rs`, `*_test.go`) and generated code
+(`*.pb.go`, `*_grpc.pb.go`, `*_bpfel.go`, `*_bpfeb.go`, `zz_generated_*`)
+are excluded by name pattern.
+
+BPF C programs appear in the output with the same `[REFACTOR]`/`[WATCH]`
+tags, but the refactoring mechanic is different: verifier constraints
+(512-byte stack, no unbounded loops) mean splitting means tail-call
+decomposition or moving helpers to shared headers, not ordinary function
+extraction. `>2000 L` in a single BPF program file is also a verifier
+complexity hazard independent of the modularity concern.
 
 This audit deliberately does NOT strip inline `#[cfg(test)] mod tests`
 blocks. Earlier `awk` approaches were fragile (the `EOF` keyword bug
@@ -65,6 +80,8 @@ The 18-PR refactor stream that landed in early 2026 (closing #985,
 #988, #986, #1034, #1035, #957) drove most of the userspace-dp Rust
 production tree below the 2000 threshold; two Rust files (`afxdp/poll_descriptor.rs`, `protocol.rs`) remain `[REFACTOR]` candidates in the heatmap. The Go
 tree has multiple long-standing >2000 LOC files (`pkg/cluster/cluster.go`, `pkg/dataplane/dpdk/dpdk_cgo.go`, `pkg/api/handlers.go`, `pkg/dataplane/maps.go`, `pkg/routing/routing.go`, `pkg/dataplane/userspace/snapshot.go`) that have not yet
-received the same treatment.
+received the same treatment. The BPF C program `bpf/xdp/xdp_zone.c` (2215 L)
+is also `[REFACTOR]` tier; splitting it requires tail-call decomposition, not
+ordinary function extraction.
 
 See `docs/refactoring-audit-current.txt` for the current heatmap.
