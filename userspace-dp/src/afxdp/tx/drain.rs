@@ -101,10 +101,11 @@ pub(in crate::afxdp) fn drain_pending_tx(
             let bucket = bucket_index_for_ns(delta);
             if let Some(root) = binding.cos.cos_interfaces.get(&serviced.root_ifindex) {
                 if let Some(queue) = root.queues.get(serviced.queue_idx) {
-                    if queue.queue_id == serviced.queue_id {
-                        queue.owner_profile.drain_latency_hist[bucket]
+                    if queue.queue_id() == serviced.queue_id {
+                        queue.telemetry.owner_profile.drain_latency_hist[bucket]
                             .fetch_add(1, Ordering::Relaxed);
                         queue
+                            .telemetry
                             .owner_profile
                             .drain_invocations
                             .fetch_add(1, Ordering::Relaxed);
@@ -161,10 +162,11 @@ pub(in crate::afxdp) fn drain_pending_tx(
                     let bucket = bucket_index_for_ns(delta);
                     if let Some(root) = binding.cos.cos_interfaces.get(&serviced.root_ifindex) {
                         if let Some(queue) = root.queues.get(serviced.queue_idx) {
-                            if queue.queue_id == serviced.queue_id {
-                                queue.owner_profile.drain_latency_hist[bucket]
+                            if queue.queue_id() == serviced.queue_id {
+                                queue.telemetry.owner_profile.drain_latency_hist[bucket]
                                     .fetch_add(1, Ordering::Relaxed);
                                 queue
+                                    .telemetry
                                     .owner_profile
                                     .drain_invocations
                                     .fetch_add(1, Ordering::Relaxed);
@@ -245,7 +247,10 @@ pub(in crate::afxdp) fn drain_pending_tx(
     let mut retry = VecDeque::new();
     while let Some(req) = pending.pop_front() {
         retry.push_back(req);
-        if retry.len() >= TX_BATCH_SIZE || binding.tx_pipeline.free_tx_frames.is_empty() || pending.is_empty() {
+        if retry.len() >= TX_BATCH_SIZE
+            || binding.tx_pipeline.free_tx_frames.is_empty()
+            || pending.is_empty()
+        {
             match transmit_batch(binding, &mut retry, now_ns, shared_recycles) {
                 Ok((packets, bytes)) => {
                     if packets > 0 {
@@ -334,10 +339,7 @@ fn drop_cos_bound_prepared_leftovers(binding: &mut BindingWorker) {
         }
     }
     if dropped > 0 {
-        binding
-            .live
-            .tx_errors
-            .fetch_add(dropped, Ordering::Relaxed);
+        binding.live.tx_errors.fetch_add(dropped, Ordering::Relaxed);
         binding
             .live
             .owner_profile_owner
@@ -402,7 +404,9 @@ where
     let mut dropped_bytes = 0u64;
     let original_len = pending.len();
     for _ in 0..original_len {
-        let Some(req) = pending.pop_front() else { break };
+        let Some(req) = pending.pop_front() else {
+            break;
+        };
         if req.cos_queue_id.is_some() {
             let bytes_len = req.bytes.len() as u64;
             match try_rescue(req) {
@@ -428,18 +432,14 @@ fn drop_cos_bound_local_leftovers(
     // Delegate the scan to the pure helper so the mixed-head
     // invariant (Codex review on #784) is unit-testable without
     // constructing a full BindingWorker.
-    let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(
-        pending,
-        |req| match enqueue_local_into_cos(binding, forwarding, req, now_ns) {
+    let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(pending, |req| {
+        match enqueue_local_into_cos(binding, forwarding, req, now_ns) {
             Ok(()) => Ok(()),
             Err(req) => Err(req),
-        },
-    );
+        }
+    });
     if dropped > 0 {
-        binding
-            .live
-            .tx_errors
-            .fetch_add(dropped, Ordering::Relaxed);
+        binding.live.tx_errors.fetch_add(dropped, Ordering::Relaxed);
         binding
             .live
             .owner_profile_owner
@@ -718,4 +718,3 @@ fn restore_pending_tx_requests(binding: &mut BindingWorker, mut retry: VecDeque<
 #[cfg(test)]
 #[path = "drain_tests.rs"]
 mod tests;
-

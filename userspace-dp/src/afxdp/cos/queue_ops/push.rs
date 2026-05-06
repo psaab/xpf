@@ -14,7 +14,7 @@ pub(in crate::afxdp) fn cos_queue_push_back(queue: &mut CoSQueueRuntime, item: C
     // tagged enum is a single branch; far cheaper than an O(n)
     // scan at check time.
     if matches!(item, CoSPendingTxItem::Local(_)) {
-        queue.local_item_count = queue.local_item_count.saturating_add(1);
+        queue.hot.local_item_count = queue.hot.local_item_count.saturating_add(1);
     }
     // #785 Phase 3 — Codex round-3 HIGH + NEW-1: any push_back
     // invalidates every outstanding pop snapshot. A subsequent
@@ -24,18 +24,23 @@ pub(in crate::afxdp) fn cos_queue_push_back(queue: &mut CoSQueueRuntime, item: C
     // cost of a tiny Vec::clear is ~zero and the safety contract is
     // simpler: after any new enqueue, no rollback can use ANY
     // snapshot captured before it.
-    queue.pop_snapshot_stack.clear();
+    if let Some(ff) = queue.flow_fair_state.as_mut() {
+        ff.pop_snapshot_stack.clear();
+    }
     account_cos_queue_flow_enqueue(queue, flow_key, item_len);
-    if !queue.flow_fair {
-        queue.items.push_back(item);
+    if !queue.flow_fair() {
+        queue.hot.items.push_back(item);
         return;
     }
-    let bucket = cos_flow_bucket_index(queue.flow_hash_seed, flow_key);
-    let bucket_queue = &mut queue.flow_bucket_items[bucket];
+    let Some(ff) = queue.flow_fair_state.as_mut() else {
+        return;
+    };
+    let bucket = cos_flow_bucket_index(ff.flow_hash_seed, flow_key);
+    let bucket_queue = &mut ff.flow_bucket_items[bucket];
     let was_empty = bucket_queue.is_empty();
     bucket_queue.push_back(item);
     if was_empty {
-        queue.flow_rr_buckets.push_back(bucket as u16);
+        ff.flow_rr_buckets.push_back(bucket as u16);
     }
 }
 
@@ -44,14 +49,17 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
     let item_len = cos_item_len(&item);
     let flow_key = cos_item_flow_key(&item);
     if matches!(item, CoSPendingTxItem::Local(_)) {
-        queue.local_item_count = queue.local_item_count.saturating_add(1);
+        queue.hot.local_item_count = queue.hot.local_item_count.saturating_add(1);
     }
-    if !queue.flow_fair {
+    if !queue.flow_fair() {
         account_cos_queue_flow_enqueue(queue, flow_key, item_len);
-        queue.items.push_front(item);
+        queue.hot.items.push_front(item);
         return;
     }
-    let bucket = cos_flow_bucket_index(queue.flow_hash_seed, flow_key);
+    let Some(ff) = queue.flow_fair_state.as_mut() else {
+        return;
+    };
+    let bucket = cos_flow_bucket_index(ff.flow_hash_seed, flow_key);
     // #913: peek-then-pop snapshot consumption.
     //
     // Three states:
@@ -83,13 +91,10 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
     //      incremental panic risk. Cross-cutting panic
     //      supervision (catch_unwind on helper side +
     //      parent-side restart in xpfd) tracked in #925.
-    let stack_top_bucket = queue
-        .pop_snapshot_stack
-        .last()
-        .map(|s| usize::from(s.bucket));
+    let stack_top_bucket = ff.pop_snapshot_stack.last().map(|s| usize::from(s.bucket));
     let snapshot = match stack_top_bucket {
         None => None,
-        Some(top) if top == bucket => queue.pop_snapshot_stack.pop(),
+        Some(top) if top == bucket => ff.pop_snapshot_stack.pop(),
         Some(top) => {
             assert!(
                 false,
@@ -110,10 +115,10 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
     // the no-snapshot pop's `vtime += bytes`.
     match snapshot.as_ref() {
         Some(snap) => {
-            queue.queue_vtime = snap.pre_pop_queue_vtime;
+            ff.queue_vtime = snap.pre_pop_queue_vtime;
         }
         None => {
-            queue.queue_vtime = queue.queue_vtime.saturating_sub(item_len);
+            ff.queue_vtime = ff.queue_vtime.saturating_sub(item_len);
         }
     }
     // #917 Phase 3: republish the rolled-back queue_vtime so peers
@@ -121,28 +126,27 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
     // value. Without this, a peer reading mid-rollback would see
     // an inflated V_min slot for this worker — over-throttling
     // peers until the next pop fixes it.
-    if let Some(floor) = queue.vtime_floor.as_ref() {
-        if let Some(slot) = floor.slots.get(queue.worker_id as usize) {
-            slot.publish(queue.queue_vtime);
+    if let Some(floor) = queue.v_min.vtime_floor.as_ref() {
+        if let Some(slot) = floor.slots.get(queue.v_min.worker_id as usize) {
+            slot.publish(ff.queue_vtime);
         }
     }
 
-    let was_empty = queue.flow_bucket_items[bucket].is_empty();
+    let was_empty = ff.flow_bucket_items[bucket].is_empty();
     if was_empty {
         // Bucket was drained by the matching pop. Snapshot (if
         // present) holds the exact pre-pop head/tail so we can
         // restore them.
         if let Some(snap) = snapshot {
-            queue.flow_bucket_bytes[bucket] =
-                queue.flow_bucket_bytes[bucket].saturating_add(item_len);
-            queue.flow_bucket_head_finish_bytes[bucket] = snap.pre_pop_head_finish;
-            queue.flow_bucket_tail_finish_bytes[bucket] = snap.pre_pop_tail_finish;
-            queue.active_flow_buckets = queue.active_flow_buckets.saturating_add(1);
-            if queue.active_flow_buckets > queue.active_flow_buckets_peak {
-                queue.active_flow_buckets_peak = queue.active_flow_buckets;
+            ff.flow_bucket_bytes[bucket] = ff.flow_bucket_bytes[bucket].saturating_add(item_len);
+            ff.flow_bucket_head_finish_bytes[bucket] = snap.pre_pop_head_finish;
+            ff.flow_bucket_tail_finish_bytes[bucket] = snap.pre_pop_tail_finish;
+            ff.active_flow_buckets = ff.active_flow_buckets.saturating_add(1);
+            if ff.active_flow_buckets > ff.active_flow_buckets_peak {
+                ff.active_flow_buckets_peak = ff.active_flow_buckets;
             }
-            queue.flow_bucket_items[bucket].push_front(item);
-            queue.flow_rr_buckets.push_front(bucket as u16);
+            ff.flow_bucket_items[bucket].push_front(item);
+            ff.flow_rr_buckets.push_front(bucket as u16);
             return;
         }
         // No snapshot — drain_all/restore_front path or fresh-flow
@@ -150,9 +154,23 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
         // The aggregate-bytes vtime rewind above leaves vtime
         // correctly positioned for `max(tail, vtime) + bytes`
         // (see plan §3.7 walkthrough for the drain_all case).
-        account_cos_queue_flow_enqueue(queue, flow_key, item_len);
-        queue.flow_bucket_items[bucket].push_front(item);
-        queue.flow_rr_buckets.push_front(bucket as u16);
+        if ff.flow_bucket_bytes[bucket] == 0 {
+            ff.active_flow_buckets = ff.active_flow_buckets.saturating_add(1);
+            if ff.active_flow_buckets > ff.active_flow_buckets_peak {
+                ff.active_flow_buckets_peak = ff.active_flow_buckets;
+            }
+        }
+        let was_idle = ff.flow_bucket_bytes[bucket] == 0;
+        ff.flow_bucket_bytes[bucket] = ff.flow_bucket_bytes[bucket].saturating_add(item_len);
+        let new_tail = ff.flow_bucket_tail_finish_bytes[bucket]
+            .max(ff.queue_vtime)
+            .saturating_add(item_len);
+        ff.flow_bucket_tail_finish_bytes[bucket] = new_tail;
+        if was_idle {
+            ff.flow_bucket_head_finish_bytes[bucket] = new_tail;
+        }
+        ff.flow_bucket_items[bucket].push_front(item);
+        ff.flow_rr_buckets.push_front(bucket as u16);
         return;
     }
     // #785 Phase 3 — MQFQ push_front onto an ACTIVE bucket.
@@ -200,12 +218,12 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
     // reversed when its own walkthrough showed the arithmetic
     // result is needed for the post-restore-pop case. Documented
     // in §3.3 of the plan.)
-    let current_head_bytes = queue.flow_bucket_items[bucket]
+    let current_head_bytes = ff.flow_bucket_items[bucket]
         .front()
         .map(cos_item_len)
         .unwrap_or(0);
-    queue.flow_bucket_head_finish_bytes[bucket] = queue.flow_bucket_head_finish_bytes[bucket]
-        .saturating_sub(current_head_bytes);
-    queue.flow_bucket_bytes[bucket] = queue.flow_bucket_bytes[bucket].saturating_add(item_len);
-    queue.flow_bucket_items[bucket].push_front(item);
+    ff.flow_bucket_head_finish_bytes[bucket] =
+        ff.flow_bucket_head_finish_bytes[bucket].saturating_sub(current_head_bytes);
+    ff.flow_bucket_bytes[bucket] = ff.flow_bucket_bytes[bucket].saturating_add(item_len);
+    ff.flow_bucket_items[bucket].push_front(item);
 }

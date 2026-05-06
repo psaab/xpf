@@ -163,12 +163,14 @@ pub(in crate::afxdp) fn cos_queue_prospective_active_flows(
     queue: &CoSQueueRuntime,
     flow_bucket: usize,
 ) -> u64 {
-    u64::from(queue.active_flow_buckets)
-        .saturating_add(u64::from(queue.flow_bucket_bytes[flow_bucket] == 0))
+    let Some(ff) = queue.flow_fair_state.as_ref() else {
+        return 1;
+    };
+    u64::from(ff.active_flow_buckets)
+        .saturating_add(u64::from(ff.flow_bucket_bytes[flow_bucket] == 0))
         .max(1)
 }
 
 #[cfg(test)]
 #[path = "flow_hash_tests.rs"]
 mod tests;
-

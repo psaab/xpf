@@ -10,21 +10,24 @@ pub(super) fn account_cos_queue_flow_enqueue(
     flow_key: Option<&SessionKey>,
     item_len: u64,
 ) {
-    if !queue.flow_fair || item_len == 0 {
+    if !queue.flow_fair() || item_len == 0 {
         return;
     }
-    let bucket = cos_flow_bucket_index(queue.flow_hash_seed, flow_key);
-    if queue.flow_bucket_bytes[bucket] == 0 {
-        queue.active_flow_buckets = queue.active_flow_buckets.saturating_add(1);
+    let Some(ff) = queue.flow_fair_state.as_mut() else {
+        return;
+    };
+    let bucket = cos_flow_bucket_index(ff.flow_hash_seed, flow_key);
+    if ff.flow_bucket_bytes[bucket] == 0 {
+        ff.active_flow_buckets = ff.active_flow_buckets.saturating_add(1);
         // #784 diagnostic: track the peak distinct-flow count.
         // Operators can compare this to the test's -P N count to
         // detect SFQ hash collisions under real workloads.
-        if queue.active_flow_buckets > queue.active_flow_buckets_peak {
-            queue.active_flow_buckets_peak = queue.active_flow_buckets;
+        if ff.active_flow_buckets > ff.active_flow_buckets_peak {
+            ff.active_flow_buckets_peak = ff.active_flow_buckets;
         }
     }
-    let was_idle = queue.flow_bucket_bytes[bucket] == 0;
-    queue.flow_bucket_bytes[bucket] = queue.flow_bucket_bytes[bucket].saturating_add(item_len);
+    let was_idle = ff.flow_bucket_bytes[bucket] == 0;
+    ff.flow_bucket_bytes[bucket] = ff.flow_bucket_bytes[bucket].saturating_add(item_len);
     // #785 Phase 3 — MQFQ head/tail finish-time update.
     //
     // When the bucket was idle before this enqueue, the HEAD
@@ -45,12 +48,12 @@ pub(super) fn account_cos_queue_flow_enqueue(
     // rather than head-finish collapsed MQFQ to packet-count
     // fairness for equal-byte flows (A,A,B,B bursts instead of
     // A,B,A,B interleave).
-    let new_tail = queue.flow_bucket_tail_finish_bytes[bucket]
-        .max(queue.queue_vtime)
+    let new_tail = ff.flow_bucket_tail_finish_bytes[bucket]
+        .max(ff.queue_vtime)
         .saturating_add(item_len);
-    queue.flow_bucket_tail_finish_bytes[bucket] = new_tail;
+    ff.flow_bucket_tail_finish_bytes[bucket] = new_tail;
     if was_idle {
-        queue.flow_bucket_head_finish_bytes[bucket] = new_tail;
+        ff.flow_bucket_head_finish_bytes[bucket] = new_tail;
     }
 }
 
@@ -60,13 +63,17 @@ pub(super) fn account_cos_queue_flow_dequeue(
     flow_key: Option<&SessionKey>,
     item_len: u64,
 ) {
-    if !queue.flow_fair || item_len == 0 {
+    if !queue.flow_fair() || item_len == 0 {
         return;
     }
-    let bucket = cos_flow_bucket_index(queue.flow_hash_seed, flow_key);
-    let remaining = queue.flow_bucket_bytes[bucket].saturating_sub(item_len);
-    if queue.flow_bucket_bytes[bucket] > 0 && remaining == 0 {
-        queue.active_flow_buckets = queue.active_flow_buckets.saturating_sub(1);
+    let shared_exact = queue.shared_exact();
+    let Some(ff) = queue.flow_fair_state.as_mut() else {
+        return;
+    };
+    let bucket = cos_flow_bucket_index(ff.flow_hash_seed, flow_key);
+    let remaining = ff.flow_bucket_bytes[bucket].saturating_sub(item_len);
+    if ff.flow_bucket_bytes[bucket] > 0 && remaining == 0 {
+        ff.active_flow_buckets = ff.active_flow_buckets.saturating_sub(1);
         // #785 Phase 3 — MQFQ bucket-idle reset. When a bucket
         // drains to 0 its head/tail finish-times are stale
         // (they point at the virtual time when the LAST packet
@@ -76,20 +83,20 @@ pub(super) fn account_cos_queue_flow_dequeue(
         // established buckets until its stale tail converges with
         // vtime. Reset both head and tail to 0 so the next
         // enqueue re-anchors at the live `queue.vtime`.
-        queue.flow_bucket_head_finish_bytes[bucket] = 0;
-        queue.flow_bucket_tail_finish_bytes[bucket] = 0;
+        ff.flow_bucket_head_finish_bytes[bucket] = 0;
+        ff.flow_bucket_tail_finish_bytes[bucket] = 0;
         // #941 Work item A: bucket-empty vacate. When this worker's
         // last active bucket on a shared_exact queue empties, vacate
         // the V_min slot so peers don't see a phantom-participating
         // worker holding a stale-low value. Single-writer invariant
         // holds — only this worker writes its own slot.
-        if queue.shared_exact && queue.active_flow_buckets == 0 {
-            if let Some(floor) = queue.vtime_floor.as_ref() {
-                if let Some(slot) = floor.slots.get(queue.worker_id as usize) {
+        if shared_exact && ff.active_flow_buckets == 0 {
+            if let Some(floor) = queue.v_min.vtime_floor.as_ref() {
+                if let Some(slot) = floor.slots.get(queue.v_min.worker_id as usize) {
                     slot.vacate();
                 }
             }
         }
     }
-    queue.flow_bucket_bytes[bucket] = remaining;
+    ff.flow_bucket_bytes[bucket] = remaining;
 }

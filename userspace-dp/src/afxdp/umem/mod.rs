@@ -2,8 +2,8 @@ use super::*;
 
 mod mmap;
 mod profile;
-pub(in crate::afxdp) use profile::{OwnerProfileOwnerWrites, OwnerProfilePeerWrites};
 pub(in crate::afxdp) use mmap::MmapArea;
+pub(in crate::afxdp) use profile::{OwnerProfileOwnerWrites, OwnerProfilePeerWrites};
 
 pub(super) struct WorkerUmemInner {
     area: MmapArea,
@@ -783,9 +783,7 @@ impl BindingLiveState {
             // only "invariant" (sum of buckets ≈ drain_invocations)
             // holds within a single-thread read only in steady-state,
             // which is how operators consume the values anyway.
-            drain_latency_hist: Self::snapshot_hist(
-                &self.owner_profile_owner.drain_latency_hist,
-            ),
+            drain_latency_hist: Self::snapshot_hist(&self.owner_profile_owner.drain_latency_hist),
             drain_invocations: self
                 .owner_profile_owner
                 .drain_invocations
@@ -882,8 +880,7 @@ impl BindingLiveState {
         if let Some(start) = start {
             let delta = monotonic_nanos().saturating_sub(start);
             let bucket = bucket_index_for_ns(delta);
-            self.owner_profile_peer.redirect_acquire_hist[bucket]
-                .fetch_add(1, Ordering::Relaxed);
+            self.owner_profile_peer.redirect_acquire_hist[bucket].fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -994,32 +991,40 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
         return;
     }
     if binding.tx_counters.pending_direct_tx_packets != 0 {
-        binding
-            .live
-            .direct_tx_packets
-            .fetch_add(binding.tx_counters.pending_direct_tx_packets, Ordering::Relaxed);
+        binding.live.direct_tx_packets.fetch_add(
+            binding.tx_counters.pending_direct_tx_packets,
+            Ordering::Relaxed,
+        );
         binding.tx_counters.pending_direct_tx_packets = 0;
     }
     if binding.tx_counters.pending_copy_tx_packets != 0 {
-        binding
-            .live
-            .copy_tx_packets
-            .fetch_add(binding.tx_counters.pending_copy_tx_packets, Ordering::Relaxed);
+        binding.live.copy_tx_packets.fetch_add(
+            binding.tx_counters.pending_copy_tx_packets,
+            Ordering::Relaxed,
+        );
         binding.tx_counters.pending_copy_tx_packets = 0;
     }
     if binding.tx_counters.pending_in_place_tx_packets != 0 {
-        binding
-            .live
-            .in_place_tx_packets
-            .fetch_add(binding.tx_counters.pending_in_place_tx_packets, Ordering::Relaxed);
-        binding.tx_counters.pending_in_place_tx_packets = 0;
-    }
-    if binding.tx_counters.pending_direct_tx_no_frame_fallback_packets != 0 {
-        binding.live.direct_tx_no_frame_fallback_packets.fetch_add(
-            binding.tx_counters.pending_direct_tx_no_frame_fallback_packets,
+        binding.live.in_place_tx_packets.fetch_add(
+            binding.tx_counters.pending_in_place_tx_packets,
             Ordering::Relaxed,
         );
-        binding.tx_counters.pending_direct_tx_no_frame_fallback_packets = 0;
+        binding.tx_counters.pending_in_place_tx_packets = 0;
+    }
+    if binding
+        .tx_counters
+        .pending_direct_tx_no_frame_fallback_packets
+        != 0
+    {
+        binding.live.direct_tx_no_frame_fallback_packets.fetch_add(
+            binding
+                .tx_counters
+                .pending_direct_tx_no_frame_fallback_packets,
+            Ordering::Relaxed,
+        );
+        binding
+            .tx_counters
+            .pending_direct_tx_no_frame_fallback_packets = 0;
     }
     if binding.tx_counters.pending_direct_tx_build_fallback_packets != 0 {
         binding.live.direct_tx_build_fallback_packets.fetch_add(
@@ -1028,15 +1033,23 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
         );
         binding.tx_counters.pending_direct_tx_build_fallback_packets = 0;
     }
-    if binding.tx_counters.pending_direct_tx_disallowed_fallback_packets != 0 {
+    if binding
+        .tx_counters
+        .pending_direct_tx_disallowed_fallback_packets
+        != 0
+    {
         binding
             .live
             .direct_tx_disallowed_fallback_packets
             .fetch_add(
-                binding.tx_counters.pending_direct_tx_disallowed_fallback_packets,
+                binding
+                    .tx_counters
+                    .pending_direct_tx_disallowed_fallback_packets,
                 Ordering::Relaxed,
             );
-        binding.tx_counters.pending_direct_tx_disallowed_fallback_packets = 0;
+        binding
+            .tx_counters
+            .pending_direct_tx_disallowed_fallback_packets = 0;
     }
     if binding.flow.flow_cache.hits != 0 {
         binding
@@ -1064,10 +1077,10 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
     // (`collision_evictions / hits < 1 %` under 100E100M load) is
     // observable from the standard binding-counter snapshot.
     if binding.flow.flow_cache.collision_evictions != 0 {
-        binding
-            .live
-            .flow_cache_collision_evictions
-            .fetch_add(binding.flow.flow_cache.collision_evictions, Ordering::Relaxed);
+        binding.live.flow_cache_collision_evictions.fetch_add(
+            binding.flow.flow_cache.collision_evictions,
+            Ordering::Relaxed,
+        );
         binding.flow.flow_cache.collision_evictions = 0;
     }
     // #941 Work item D + #943: flush each queue's per-queue scratch
@@ -1101,17 +1114,15 @@ pub(super) fn flush_v_min_scratches_into<'a, I>(
     let mut throttles_total = 0u64;
     for root in roots {
         for queue in &mut root.queues {
-            if queue.v_min_hard_cap_overrides_scratch != 0 {
-                hard_cap_overrides_total =
-                    hard_cap_overrides_total.saturating_add(
-                        u64::from(queue.v_min_hard_cap_overrides_scratch),
-                    );
-                queue.v_min_hard_cap_overrides_scratch = 0;
+            if queue.v_min.v_min_hard_cap_overrides_scratch != 0 {
+                hard_cap_overrides_total = hard_cap_overrides_total
+                    .saturating_add(u64::from(queue.v_min.v_min_hard_cap_overrides_scratch));
+                queue.v_min.v_min_hard_cap_overrides_scratch = 0;
             }
-            if queue.v_min_throttles_scratch != 0 {
-                throttles_total = throttles_total
-                    .saturating_add(u64::from(queue.v_min_throttles_scratch));
-                queue.v_min_throttles_scratch = 0;
+            if queue.v_min.v_min_throttles_scratch != 0 {
+                throttles_total =
+                    throttles_total.saturating_add(u64::from(queue.v_min.v_min_throttles_scratch));
+                queue.v_min.v_min_throttles_scratch = 0;
             }
         }
     }

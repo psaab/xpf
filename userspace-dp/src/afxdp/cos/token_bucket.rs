@@ -73,37 +73,40 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     // refill from any rate. Mirror the transparent-root fast path:
     // fill the bucket to its buffer cap and return. Per-queue
     // exact caps with a non-zero scheduler rate are unaffected
-    // (queue.transmit_rate_bytes > 0 in that case).
-    if queue.transmit_rate_bytes == 0 {
-        queue.tokens = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-        queue.last_refill_ns = now_ns;
+    // (queue.transmit_rate_bytes() > 0 in that case).
+    if queue.transmit_rate_bytes() == 0 {
+        queue.hot.tokens = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+        queue.hot.last_refill_ns = now_ns;
         return;
     }
-    if queue.exact {
+    if queue.config.exact {
         let Some(shared_queue_lease) = shared_queue_lease else {
             return;
         };
         let lease_bytes = shared_queue_lease
             .lease_bytes()
             .max(tx_frame_capacity() as u64)
-            .min(queue.buffer_bytes.max(COS_MIN_BURST_BYTES));
-        if queue.tokens >= lease_bytes {
+            .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
+        if queue.hot.tokens >= lease_bytes {
             return;
         }
-        let grant = shared_queue_lease.acquire(now_ns, lease_bytes.saturating_sub(queue.tokens));
-        queue.tokens = queue
+        let grant =
+            shared_queue_lease.acquire(now_ns, lease_bytes.saturating_sub(queue.hot.tokens));
+        queue.hot.tokens = queue
+            .hot
             .tokens
             .saturating_add(grant)
-            .min(queue.buffer_bytes.max(COS_MIN_BURST_BYTES));
-        queue.last_refill_ns = now_ns;
+            .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
+        queue.hot.last_refill_ns = now_ns;
         return;
     }
     let Some(shared_queue_lease) = shared_queue_lease else {
+        let transmit_rate_bytes = queue.transmit_rate_bytes();
         refill_cos_tokens(
-            &mut queue.tokens,
-            queue.transmit_rate_bytes,
-            queue.buffer_bytes.max(COS_MIN_BURST_BYTES),
-            &mut queue.last_refill_ns,
+            &mut queue.hot.tokens,
+            transmit_rate_bytes,
+            queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES),
+            &mut queue.hot.last_refill_ns,
             now_ns,
         );
         return;
@@ -111,16 +114,17 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     let lease_bytes = shared_queue_lease
         .lease_bytes()
         .max(tx_frame_capacity() as u64)
-        .min(queue.buffer_bytes.max(COS_MIN_BURST_BYTES));
-    if queue.tokens >= lease_bytes {
+        .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
+    if queue.hot.tokens >= lease_bytes {
         return;
     }
-    let grant = shared_queue_lease.acquire(now_ns, lease_bytes.saturating_sub(queue.tokens));
-    queue.tokens = queue
+    let grant = shared_queue_lease.acquire(now_ns, lease_bytes.saturating_sub(queue.hot.tokens));
+    queue.hot.tokens = queue
+        .hot
         .tokens
         .saturating_add(grant)
-        .min(queue.buffer_bytes.max(COS_MIN_BURST_BYTES));
-    queue.last_refill_ns = now_ns;
+        .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
+    queue.hot.last_refill_ns = now_ns;
 }
 
 #[inline]
@@ -169,7 +173,11 @@ pub(in crate::afxdp) fn refill_cos_tokens(
 /// returning `Some(0)` because a zero return would mask
 /// "tokens=0, rate=0" as runnable, leading to a busy-loop on the
 /// caller side.
-pub(in crate::afxdp) fn cos_refill_ns_until(tokens: u64, need: u64, rate_bytes_per_sec: u64) -> Option<u64> {
+pub(in crate::afxdp) fn cos_refill_ns_until(
+    tokens: u64,
+    need: u64,
+    rate_bytes_per_sec: u64,
+) -> Option<u64> {
     if tokens >= need {
         return Some(0);
     }
@@ -183,7 +191,8 @@ pub(in crate::afxdp) fn cos_refill_ns_until(tokens: u64, need: u64, rate_bytes_p
 
 pub(in crate::afxdp) fn release_cos_root_lease(binding: &mut BindingWorker, root_ifindex: i32) {
     let released = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get_mut(&root_ifindex)
         .map(|root| core::mem::take(&mut root.tokens))
         .unwrap_or(0);
@@ -191,7 +200,8 @@ pub(in crate::afxdp) fn release_cos_root_lease(binding: &mut BindingWorker, root
         return;
     }
     if let Some(shared_root_lease) = binding
-        .cos.cos_fast_interfaces
+        .cos
+        .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_root_lease.as_ref())
     {
@@ -200,7 +210,12 @@ pub(in crate::afxdp) fn release_cos_root_lease(binding: &mut BindingWorker, root
 }
 
 pub(in crate::afxdp) fn release_all_cos_root_leases(binding: &mut BindingWorker) {
-    let root_ifindexes = binding.cos.cos_interfaces.keys().copied().collect::<Vec<_>>();
+    let root_ifindexes = binding
+        .cos
+        .cos_interfaces
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
     for root_ifindex in root_ifindexes {
         release_cos_root_lease(binding, root_ifindex);
     }
@@ -208,28 +223,31 @@ pub(in crate::afxdp) fn release_all_cos_root_leases(binding: &mut BindingWorker)
 
 pub(in crate::afxdp) fn release_all_cos_queue_leases(binding: &mut BindingWorker) {
     let queue_keys = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .iter()
         .flat_map(|(&root_ifindex, root)| {
             root.queues
                 .iter()
                 .enumerate()
-                .filter(|(_, queue)| queue.exact && queue.tokens > 0)
+                .filter(|(_, queue)| queue.config.exact && queue.hot.tokens > 0)
                 .map(move |(queue_idx, _)| (root_ifindex, queue_idx))
         })
         .collect::<Vec<_>>();
     for (root_ifindex, queue_idx) in queue_keys {
         let released = binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get_mut(&root_ifindex)
             .and_then(|root| root.queues.get_mut(queue_idx))
-            .map(|queue| core::mem::take(&mut queue.tokens))
+            .map(|queue| core::mem::take(&mut queue.hot.tokens))
             .unwrap_or(0);
         if released == 0 {
             continue;
         }
         if let Some(shared_queue_lease) = binding
-            .cos.cos_fast_interfaces
+            .cos
+            .cos_fast_interfaces
             .get(&root_ifindex)
             .and_then(|iface_fast| iface_fast.queue_fast_path.get(queue_idx))
             .and_then(|queue_fast| queue_fast.shared_queue_lease.as_ref())
@@ -242,4 +260,3 @@ pub(in crate::afxdp) fn release_all_cos_queue_leases(binding: &mut BindingWorker
 #[cfg(test)]
 #[path = "token_bucket_tests.rs"]
 mod tests;
-

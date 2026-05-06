@@ -1234,8 +1234,8 @@ fn tx_kick_latency_cross_thread_snapshot_skew_within_bound() {
 /// `BindingWorker`).
 #[test]
 fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
-    use crate::afxdp::types::CoSInterfaceConfig;
     use crate::afxdp::cos::builders::build_cos_interface_runtime;
+    use crate::afxdp::types::CoSInterfaceConfig;
 
     // Two queues so we exercise the per-queue iteration.
     let cfg = CoSInterfaceConfig {
@@ -1275,21 +1275,17 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
     let mut runtime = build_cos_interface_runtime(&cfg, 0);
 
     // Manually populate scratches as if v_min check fired.
-    runtime.queues[0].v_min_hard_cap_overrides_scratch = 3;
-    runtime.queues[0].v_min_throttles_scratch = 17;
-    runtime.queues[1].v_min_hard_cap_overrides_scratch = 5;
-    runtime.queues[1].v_min_throttles_scratch = 23;
+    runtime.queues[0].v_min.v_min_hard_cap_overrides_scratch = 3;
+    runtime.queues[0].v_min.v_min_throttles_scratch = 17;
+    runtime.queues[1].v_min.v_min_hard_cap_overrides_scratch = 5;
+    runtime.queues[1].v_min.v_min_throttles_scratch = 23;
 
     let hard_cap = std::sync::atomic::AtomicU64::new(0);
     let throttles = std::sync::atomic::AtomicU64::new(0);
     let mut interfaces = std::collections::BTreeMap::new();
     interfaces.insert(1, runtime);
 
-    crate::afxdp::umem::flush_v_min_scratches_into(
-        interfaces.values_mut(),
-        &hard_cap,
-        &throttles,
-    );
+    crate::afxdp::umem::flush_v_min_scratches_into(interfaces.values_mut(), &hard_cap, &throttles);
 
     // Atomics carry the sums.
     assert_eq!(
@@ -1305,10 +1301,10 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
 
     // Per-queue scratches reset to 0.
     let r = interfaces.get(&1).unwrap();
-    assert_eq!(r.queues[0].v_min_hard_cap_overrides_scratch, 0);
-    assert_eq!(r.queues[0].v_min_throttles_scratch, 0);
-    assert_eq!(r.queues[1].v_min_hard_cap_overrides_scratch, 0);
-    assert_eq!(r.queues[1].v_min_throttles_scratch, 0);
+    assert_eq!(r.queues[0].v_min.v_min_hard_cap_overrides_scratch, 0);
+    assert_eq!(r.queues[0].v_min.v_min_throttles_scratch, 0);
+    assert_eq!(r.queues[1].v_min.v_min_hard_cap_overrides_scratch, 0);
+    assert_eq!(r.queues[1].v_min.v_min_throttles_scratch, 0);
 }
 
 /// #943: a second flush call with all scratches zero must NOT bump
@@ -1316,8 +1312,8 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
 /// throttling occurred since the last update_binding_debug_state.
 #[test]
 fn flush_v_min_scratches_no_op_when_all_zero() {
-    use crate::afxdp::types::CoSInterfaceConfig;
     use crate::afxdp::cos::builders::build_cos_interface_runtime;
+    use crate::afxdp::types::CoSInterfaceConfig;
 
     let cfg = CoSInterfaceConfig {
         shaping_rate_bytes: 10_000_000,
@@ -1348,11 +1344,7 @@ fn flush_v_min_scratches_no_op_when_all_zero() {
     let mut interfaces = std::collections::BTreeMap::new();
     interfaces.insert(1, runtime);
 
-    crate::afxdp::umem::flush_v_min_scratches_into(
-        interfaces.values_mut(),
-        &hard_cap,
-        &throttles,
-    );
+    crate::afxdp::umem::flush_v_min_scratches_into(interfaces.values_mut(), &hard_cap, &throttles);
 
     // Atomics unchanged — the no-zero-scratch path skips the fetch_add.
     assert_eq!(hard_cap.load(std::sync::atomic::Ordering::Relaxed), 42);

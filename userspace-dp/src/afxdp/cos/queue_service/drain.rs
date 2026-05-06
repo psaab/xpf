@@ -16,7 +16,7 @@ pub(in crate::afxdp) fn drain_exact_local_fifo_items_to_scratch(
     secondary_budget: u64,
     queue_dscp_rewrite: Option<u8>,
 ) -> ExactCoSScratchBuild {
-    debug_assert!(!queue.flow_fair);
+    debug_assert!(!queue.flow_fair());
     // #942: no V_min wiring needed here. This FIFO Local variant
     // runs only on `!flow_fair` queues per the debug_assert above.
     // shared_exact queues always have `flow_fair = queue.exact`
@@ -33,7 +33,7 @@ pub(in crate::afxdp) fn drain_exact_local_fifo_items_to_scratch(
         let mut drop_error: Option<(String, u64)> = None;
         let mut built = false;
         {
-            let Some(front) = queue.items.get(index) else {
+            let Some(front) = queue.hot.items.get(index) else {
                 break;
             };
             let CoSPendingTxItem::Local(req) = front else {
@@ -86,7 +86,7 @@ pub(in crate::afxdp) fn drain_exact_local_fifo_items_to_scratch(
             // Error path only: remove the specific malformed item we just
             // examined. VecDeque::remove(index) is O(N), but this only runs for
             // oversized/out-of-range frames, never on the steady-state hot path.
-            let dropped_bytes = match queue.items.remove(index) {
+            let dropped_bytes = match queue.hot.items.remove(index) {
                 Some(CoSPendingTxItem::Local(req)) => req.bytes.len() as u64,
                 Some(CoSPendingTxItem::Prepared(_)) | None => fallback_dropped_bytes,
             };
@@ -116,13 +116,15 @@ pub(in crate::afxdp) fn drain_exact_local_items_to_scratch_flow_fair(
     // #785 Phase 3 — Codex round-3 NEW-2 / Rust reviewer LOW:
     // clear the pop-snapshot stack at batch start. The bound
     // "at most TX_BATCH_SIZE snapshots live at once" (see
-    // `CoSQueueRuntime::pop_snapshot_stack` doc) relies on each
+    // `FlowFairState::pop_snapshot_stack` doc) relies on each
     // batch drain starting from an empty stack; committed
     // submissions leave stale snapshots until some later event
     // (push_back or another rollback) happens to clear them.
     // Without this clear, drain-all teardown paths and
     // successful-commit chains can grow the stack unbounded.
-    queue.pop_snapshot_stack.clear();
+    if let Some(ff) = queue.flow_fair_state.as_mut() {
+        ff.pop_snapshot_stack.clear();
+    }
     // #941 Work item D: drain-call preflight. If no free TX frames at
     // entry, return early WITHOUT consuming a suspension slot — that
     // way TX-ring-full no-progress drains don't burn the suspension
@@ -235,7 +237,7 @@ pub(in crate::afxdp) fn drain_exact_prepared_fifo_items_to_scratch(
     secondary_budget: u64,
     queue_dscp_rewrite: Option<u8>,
 ) -> ExactCoSScratchBuild {
-    debug_assert!(!queue.flow_fair);
+    debug_assert!(!queue.flow_fair());
     // #942: no V_min wiring needed here. This FIFO Prepared variant
     // runs only on `!flow_fair` queues per the debug_assert above,
     // and shared_exact queues always have `flow_fair = queue.exact`
@@ -250,7 +252,7 @@ pub(in crate::afxdp) fn drain_exact_prepared_fifo_items_to_scratch(
         let mut drop_error: Option<(String, u64)> = None;
         let mut built = false;
         {
-            let Some(front) = queue.items.get(index) else {
+            let Some(front) = queue.hot.items.get(index) else {
                 break;
             };
             let CoSPendingTxItem::Prepared(req) = front else {
@@ -302,7 +304,7 @@ pub(in crate::afxdp) fn drain_exact_prepared_fifo_items_to_scratch(
             }
         }
         if let Some((error, fallback_dropped_bytes)) = drop_error {
-            let dropped_bytes = match queue.items.remove(index) {
+            let dropped_bytes = match queue.hot.items.remove(index) {
                 Some(CoSPendingTxItem::Prepared(req)) => {
                     recycle_cancelled_prepared_offset(
                         free_tx_frames,
@@ -346,7 +348,9 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
     // for the rationale — committed-submit chains or drain-all
     // teardowns can otherwise leave stale snapshots that violate
     // the documented TX_BATCH_SIZE bound.
-    queue.pop_snapshot_stack.clear();
+    if let Some(ff) = queue.flow_fair_state.as_mut() {
+        ff.pop_snapshot_stack.clear();
+    }
     let mut remaining_root = root_budget;
     let mut remaining_secondary = secondary_budget;
     // #942: V_min wiring on the Prepared flow-fair drain. Mirrors

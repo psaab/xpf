@@ -49,14 +49,18 @@ fn build_cos_interface_runtime_propagates_surplus_sharing() {
         },
         1_000_000_000,
     );
-    let q4 = runtime.queues.iter().find(|q| q.queue_id == 4).unwrap();
-    let q5 = runtime.queues.iter().find(|q| q.queue_id == 5).unwrap();
-    assert!(q4.surplus_sharing,
-        "queue_id=4 expected surplus_sharing=true after copy");
-    assert!(!q5.surplus_sharing,
-        "queue_id=5 expected surplus_sharing=false (default) after copy");
+    let q4 = runtime.queues.iter().find(|q| q.queue_id() == 4).unwrap();
+    let q5 = runtime.queues.iter().find(|q| q.queue_id() == 5).unwrap();
+    assert!(
+        q4.config.surplus_sharing,
+        "queue_id=4 expected surplus_sharing=true after copy"
+    );
+    assert!(
+        !q5.config.surplus_sharing,
+        "queue_id=5 expected surplus_sharing=false (default) after copy"
+    );
     // Both queues remain exact so #1183 useful-state gate doesn't strip them.
-    assert!(q4.exact && q5.exact);
+    assert!(q4.config.exact && q5.config.exact);
 }
 
 #[test]
@@ -86,8 +90,8 @@ fn build_cos_interface_runtime_starts_exact_queue_with_zero_local_tokens() {
         1_000_000_000,
     );
 
-    assert_eq!(runtime.queues[0].tokens, 0);
-    assert_eq!(runtime.queues[0].last_refill_ns, 0);
+    assert_eq!(runtime.queues[0].hot.tokens, 0);
+    assert_eq!(runtime.queues[0].hot.last_refill_ns, 0);
 }
 
 #[test]
@@ -126,8 +130,8 @@ fn build_cos_interface_runtime_leaves_flow_hash_seed_zero_until_promotion() {
         ],
     );
     for queue in &root.queues {
-        assert!(!queue.flow_fair);
-        assert_eq!(queue.flow_hash_seed, 0);
+        assert!(!queue.flow_fair());
+        assert!(queue.flow_fair_state.is_none());
     }
 }
 
@@ -202,9 +206,9 @@ fn build_cos_interface_runtime_zero_queue_rate_starts_with_full_queue_tokens() {
     );
     let queue = &runtime.queues[0];
     assert!(
-        queue.tokens >= 64 * 1500,
+        queue.hot.tokens >= 64 * 1500,
         "transparent queue must start with full bucket (>= COS_MIN_BURST_BYTES), got {}",
-        queue.tokens,
+        queue.hot.tokens,
     );
-    assert_eq!(queue.transmit_rate_bytes, 0);
+    assert_eq!(queue.transmit_rate_bytes(), 0);
 }
