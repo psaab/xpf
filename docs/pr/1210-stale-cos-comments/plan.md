@@ -1,8 +1,39 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: REVISED v2 — addressing Codex (PLAN-NEEDS-MINOR, task-mou6if9l-ih4eck) and Gemini (PLAN-NEEDS-MINOR, task-mou6jq7b-brjq3z)
 issue: #1210
 phase: single PR — pure doc/comment edits, no behavior change
 ---
+
+## Round-1 verdict resolution
+
+Both reviewers PLAN-NEEDS-MINOR. Same-shape findings:
+
+- **Inventory missed test files and other paths.** Both flag
+  `admission_tests.rs:1178,1207,1234`, `flow_hash_tests.rs:30,107,164`,
+  plus `tx.rs:NNN` line references in `tx/cos_classify.rs:571,580`,
+  `umem/mod.rs:150`, `umem/tests.rs:518,519,1031,1064,1074`,
+  `protocol.rs:1315`. **v2 widens the grep to all `userspace-dp/src/`
+  Rust files, not just `cos/` and `types/`.**
+- **types/cos.rs:81 is NOT a stale reference.** The line says "1024
+  buckets gave..." — a valid historical comparison. Original v1
+  listed it under "1024 → 4096" mass-replace. **v2 explicitly
+  preserves it.**
+- **§3.B replacement text is accurate** per both reviewers — slight
+  wording tightening to clarify V_min sync only applies to
+  shared_exact (not owner-local).
+- **`tx.rs:NNN` references**: drop the breadcrumb (Codex) or update
+  to module/function anchor (Gemini). v2 picks per-site:
+  - `queue_service/mod.rs:117` — drop (decayed review breadcrumb).
+  - `docs/userspace-capture-plan.md:118,452` — replace with
+    `userspace-dp/src/afxdp/tx/transmit.rs:transmit_batch()`.
+  - `tx/cos_classify.rs:571,580` — replace with module/function
+    anchor.
+  - `umem/mod.rs:150` — replace with module/function anchor.
+  - `umem/tests.rs:*` — replace; tests-side, low cost.
+  - `protocol.rs:1315` — replace with current path.
+  - `types/cos.rs:718` — replace with `cos/queue_service/mod.rs:drain_shaped_tx`.
+
+
 
 ## 1. Issue framing
 
@@ -85,7 +116,9 @@ Verified inventory across `userspace-dp/src/afxdp/cos/`,
 - Network ring sizes, MTU, syslog buffer sizes — orthogonal.
 - Doc files marked KILLED / WITHDRAWN — historical record by design.
 
-## 4. Concrete changes
+## 4. Concrete changes (v2)
+
+### `1024 → 4096` mass-replace
 
 | File | Line(s) | Change |
 |---|---|---|
@@ -93,13 +126,37 @@ Verified inventory across `userspace-dp/src/afxdp/cos/`,
 | `userspace-dp/src/afxdp/cos/flow_hash.rs` | 104-108 | `1024` / `10 bits wide` → `4096` / `12 bits wide` |
 | `userspace-dp/src/afxdp/cos/queue_ops/pop.rs` | 46, 135 | `1024` → `4096` |
 | `userspace-dp/src/afxdp/cos/admission.rs` | 110, 208 | `1024` → `4096` |
-| `userspace-dp/src/afxdp/types/cos.rs` | 81, 230, 564, 579 | `1024` → `4096` |
-| `userspace-dp/src/afxdp/types/cos.rs` | 99 | leave (intentional historical comparison) |
-| `userspace-dp/src/afxdp/types/cos.rs` | 432-434 | rewrite per §3.B |
-| `userspace-dp/src/afxdp/cos/queue_service/mod.rs` | 117 | replace `tx.rs:262` ref |
-| `docs/userspace-capture-plan.md` | 118 | replace `afxdp/tx.rs` ref |
+| `userspace-dp/src/afxdp/types/cos.rs` | 230, 564, 579 | `1024` → `4096` |
+| `userspace-dp/src/afxdp/cos/admission_tests.rs` | 1178, 1207, 1234 | `1024 active buckets` → `4096 active buckets` |
+| `userspace-dp/src/afxdp/cos/flow_hash_tests.rs` | 30, 107, 164 | review per-line; either update or rename adjacent test (`exact_cos_flow_bucket_distribution_at_1024`-style) |
 
-Total: ~12 lines edited across 8 files.
+### Preserved (intentional historical comparison)
+
+| File | Line(s) | Reason |
+|---|---|---|
+| `userspace-dp/src/afxdp/types/cos.rs` | 81 | "1024 buckets gave ~17.7%" — comparison frame for current 4096 |
+| `userspace-dp/src/afxdp/types/cos.rs` | 99 | "(was ~58 KB at 1024)" — structural footprint comparison |
+
+### `flow_fair = queue.exact && !shared_exact` rewrite
+
+| File | Line(s) | Change |
+|---|---|---|
+| `userspace-dp/src/afxdp/types/cos.rs` | 432-434 | rewrite per §3.B — slight wording tightening for V_min sync scope |
+
+### `tx.rs:NNN` line reference cleanup
+
+| File | Line(s) | Change |
+|---|---|---|
+| `userspace-dp/src/afxdp/cos/queue_service/mod.rs` | 117 | drop the `tx.rs:262` breadcrumb |
+| `userspace-dp/src/afxdp/types/cos.rs` | 718 | replace with `cos/queue_service/mod.rs:drain_shaped_tx` |
+| `userspace-dp/src/afxdp/tx/cos_classify.rs` | 571, 580 | replace with module/function anchor |
+| `userspace-dp/src/afxdp/umem/mod.rs` | 150 | replace `tx.rs::stamp_submits` with current module path |
+| `userspace-dp/src/afxdp/umem/tests.rs` | 518, 519, 1031, 1064, 1074 | replace with current paths |
+| `userspace-dp/src/protocol.rs` | 1315 | replace `tx.rs:289/330` with current path |
+| `docs/userspace-capture-plan.md` | 118, 452 | replace with `userspace-dp/src/afxdp/tx/transmit.rs:transmit_batch()` |
+
+Total: ~25 lines edited across ~13 files (vs original v1 estimate of
+12 lines / 8 files). v2 is wider but still pure doc.
 
 ## 5. Public API preservation
 
