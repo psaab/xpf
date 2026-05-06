@@ -147,7 +147,7 @@ const _ASSERT_TX_SUBMIT_BUCKET_COUNT_IS_16: () = assert!(TX_SUBMIT_LAT_BUCKETS =
 /// against this value means the submit stamp was never written (e.g.
 /// a surviving offset across a restart, or a `monotonic_nanos() == 0`
 /// clock-gettime failure where `stamp_submits` early-returned without
-/// touching the slot — `tx.rs::stamp_submits`). The reap path MUST
+/// touching the slot — `tx/transmit.rs::stamp_submits`). The reap path MUST
 /// skip the histogram increment for these so the tail of the
 /// distribution is not silently biased toward bucket 0 (plan §5.4).
 ///

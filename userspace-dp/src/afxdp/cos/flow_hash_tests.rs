@@ -27,10 +27,10 @@ fn exact_cos_flow_bucket_diverges_across_seeds_for_same_flow() {
     // probeable pure function of the 5-tuple. Two queues with different
     // seeds must be able to send the same flow into different buckets.
     // A deterministic hash would make this test a tautology that always
-    // fails, so we scan seeds until we find a divergence; with a 1024-
-    // bucket output, collision rate is ~1/1024 per seed pair, so 8191
-    // attempts is well below any reasonable flake tolerance (collision
-    // probability ≈ (1/1024)^8191 if the hash were uniform).
+    // fails, so we scan seeds until we find a divergence; with the
+    // 4096-bucket output, collision rate is ~1/4096 per seed pair, so
+    // 8191 attempts is well below any reasonable flake tolerance
+    // (collision probability ≈ (1/4096)^8191 if the hash were uniform).
     let flow = test_session_key(9000, 5201);
     let reference = cos_flow_bucket_index(0, Some(&flow));
     let mut saw_divergence = false;
@@ -95,19 +95,19 @@ fn exact_cos_flow_bucket_handles_missing_flow_key() {
 }
 
 #[test]
-fn exact_cos_flow_bucket_distribution_at_1024_keeps_collisions_below_budget() {
+fn exact_cos_flow_bucket_distribution_keeps_collisions_below_budget() {
     // #711 correctness pin. The whole point of growing buckets
-    // 64 → 1024 is collision reduction. A hash-mix regression can
-    // produce acceptable distribution on one seed while clustering
-    // badly under others; a single-seed test is too easy to
-    // accidentally satisfy. Exercise multiple deterministic seeds
+    // 64 → 1024 → 4096 is collision reduction. A hash-mix regression
+    // can produce acceptable distribution on one seed while
+    // clustering badly under others; a single-seed test is too easy
+    // to accidentally satisfy. Exercise multiple deterministic seeds
     // and mix v4/v6 tuples so the guarantee covers a realistic
     // traffic shape.
     //
-    // Theoretical baseline for 64 uniform flows into 1024 buckets:
-    // E[colliding pairs] ≈ 64·63/(2·1024) ≈ 1.97 — so ~62-63
+    // Theoretical baseline for 64 uniform flows into 4096 buckets:
+    // E[colliding pairs] ≈ 64·63/(2·4096) ≈ 0.49 — so ~63-64
     // distinct buckets on average. A budget of 58/64 per seed is
-    // ~2 sigma conservative under a uniform-hash null hypothesis;
+    // very conservative under a uniform-hash null hypothesis;
     // if this test fires, the hash function has become materially
     // non-uniform and the fairness guarantee is silently gone.
     use std::collections::BTreeSet;

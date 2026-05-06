@@ -61,7 +61,7 @@ pub(in crate::afxdp) fn cos_queue_len(queue: &CoSQueueRuntime) -> usize {
 /// whose ordering actually matters.
 ///
 /// Linear scan over the active ring. Size bound: `active_flow_buckets
-/// <= COS_FLOW_FAIR_BUCKETS = 1024`, typical workloads 2-16. At 12
+/// <= COS_FLOW_FAIR_BUCKETS = 4096`, typical workloads 2-16. At 12
 /// active buckets this is 12 × (u64 load + compare) ≈ 20 ns — well
 /// below NAPI batch pacing.
 ///

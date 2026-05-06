@@ -107,7 +107,7 @@ const SHARED_EXACT_BURST_HEADROOM: u64 = 2;
 ///
 /// Truncation: result truncates to 0 when `per_flow_rate <
 /// 1e9 / RTT_TARGET_NS = 100 bytes/sec`. At cluster-scale rates
-/// (≥ 1 Gbps queues with ≤ 1024 flows → ≥ 122 KB/s/flow) this is
+/// (≥ 1 Gbps queues with ≤ 4096 flows → ≥ 122 KB/s/flow) this is
 /// far from the truncation floor. On user-configured low-rate
 /// queues (e.g., 64 kbps WAN class with 100+ flows) the BDP floor
 /// silently degenerates to 0 and the `MIN_SHARE` (24 KB) clamp
@@ -205,7 +205,7 @@ pub(in crate::afxdp) fn cos_queue_flow_share_limit(
 /// on the high side by `delay_cap = transmit_rate_bytes ×
 /// COS_FLOW_FAIR_MAX_QUEUE_DELAY_NS / 1e9`, i.e. the number of bytes
 /// the queue can drain in the max tolerated residence time. Without
-/// this, at 1024 active buckets the cap reaches ~24 MB, which on a
+/// this, at 4096 active buckets the cap reaches ~24 MB, which on a
 /// 1 Gbps queue is ~190 ms of queueing — far outside the scheduler's
 /// predictable regime. The clamp is applied as
 /// `.min(delay_cap.max(base))`: it never shrinks below the operator's

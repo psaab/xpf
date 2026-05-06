@@ -1175,7 +1175,7 @@ fn cos_queue_flow_share_limit_never_drops_below_fast_retransmit_floor() {
 
 #[test]
 fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
-    // #717: at the architectural maximum of 1024 active buckets
+    // #717: at the architectural maximum of 4096 active buckets
     // the pre-clamp flow-aware expansion reaches
     // 1024 × COS_FLOW_FAIR_MIN_SHARE_BYTES ≈ 24 MB. On a 1 Gbps
     // queue that is ~190 ms of queue residence — far outside the
