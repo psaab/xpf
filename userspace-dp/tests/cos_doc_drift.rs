@@ -180,7 +180,12 @@ fn scan_content(path: &Path, content: &str, violations: &mut Vec<Violation>) {
         // tx.rs:N — digit-suffix breadcrumb. Module/function anchors
         // like `tx.rs::transmit_batch` are acceptable (only digits
         // trigger the violation).
-        if let Some(idx) = line.find(TX_LINE_REF_PATTERN) {
+        //
+        // Iterate ALL occurrences (Codex+Gemini r2 PR review): a line
+        // like `// tx.rs::transmit_batch and tx.rs:262` would only
+        // have `find()` see the first `tx.rs::` (next char `:`), miss
+        // the digit-suffix later. `match_indices` catches every match.
+        for (idx, _) in line.match_indices(TX_LINE_REF_PATTERN) {
             let next = line.as_bytes().get(idx + TX_LINE_REF_PATTERN.len()).copied();
             if next.map(|c| c.is_ascii_digit()).unwrap_or(false) {
                 violations.push(Violation {
@@ -231,6 +236,33 @@ mod self_tests {
             &mut v,
         );
         assert_eq!(v.len(), 1, "only the digit-suffix one should fire");
+    }
+
+    #[test]
+    fn detects_tx_rs_line_ref_after_module_anchor_on_same_line() {
+        // Codex+Gemini r2 PR review: line.find() saw only the first
+        // `tx.rs::` and missed the digit-suffix later. match_indices
+        // fixes this.
+        let mut v = Vec::new();
+        scan_content(
+            Path::new("test.rs"),
+            "// see tx.rs::transmit_batch and tx.rs:262 for context\n",
+            &mut v,
+        );
+        assert_eq!(v.len(), 1, "must catch tx.rs:NNN even if a tx.rs::module anchor precedes it");
+    }
+
+    #[test]
+    fn previous_line_allow_marker_does_not_suppress() {
+        // Allow marker is same-line only. A marker on the line BEFORE
+        // a stale phrase must NOT silence it.
+        let mut v = Vec::new();
+        scan_content(
+            Path::new("test.rs"),
+            "// drift-check: historical\n// COS_FLOW_FAIR_BUCKETS = 1024\n",
+            &mut v,
+        );
+        assert_eq!(v.len(), 1, "previous-line allow marker must NOT suppress next-line stale phrase");
     }
 
     #[test]
