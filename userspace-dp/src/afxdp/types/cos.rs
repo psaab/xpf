@@ -96,10 +96,12 @@ pub(in crate::afxdp) const COS_FAST_QUEUE_INDEX_MISS: u16 = u16::MAX;
 ///   `flow_bucket_tail_finish_bytes: [u64; N]` = 32 KB
 ///   `flow_bucket_items: [VecDeque; N]` = 128 KB inline headers
 ///   `flow_rr_buckets: FlowRrRing` (`[u16; N] + head + len`) = 8 KB
-/// = ~232 KB per flow-fair queue (was ~58 KB at 1024). Non-flow-fair
-/// queues pay the same inline footprint but never touch the storage;
-/// it stays cold. At 8 workers × 8 queues × 2 ifaces ≈ 30 MB total,
-/// within the per-worker memory budget for production deployments.
+/// = ~232 KB per flow-fair queue (was ~58 KB at 1024). Post-#1206 these
+/// arrays live on `FlowFairState`, behind an `Option<Box<...>>` on
+/// `CoSQueueRuntime`, so non-flow-fair queues no longer pay the inline
+/// footprint at all — the field is `None` on those queues. Flow-fair
+/// queues at 8 workers × 8 queues × 2 ifaces ≈ 30 MB total when fully
+/// populated; non-flow-fair queues hold a pointer plus 0 bytes.
 pub(in crate::afxdp) const COS_FLOW_FAIR_BUCKETS: usize = 4096;
 
 /// Pre-computed mask for `COS_FLOW_FAIR_BUCKETS`-modulo on the hot
@@ -777,7 +779,7 @@ pub(in crate::afxdp) struct CoSQueueDropCounters {
     pub(in crate::afxdp) queue_token_starvation_parks: u64,
     /// Counts `writer.insert` returning zero on the exact-drain path —
     /// i.e. the TX ring refused the batch. NOT a packet-loss event on
-    /// the exact path: FIFO variants leave items in `queue.items` and
+    /// the exact path: FIFO variants leave items in `queue.hot.items` and
     /// flow-fair variants explicitly restore them via
     /// `restore_exact_*_scratch_to_queue_head_flow_fair`. Frames copied
     /// into UMEM are released back to `free_tx_frames` by the caller;
@@ -819,8 +821,8 @@ pub(in crate::afxdp) struct CoSQueueOwnerProfile {
     /// #760 instrumentation. Bytes the shaped drain actually
     /// submitted on behalf of this queue. Divide by a scrape window
     /// to get an observed drain rate and compare against
-    /// `queue.transmit_rate_bytes`. Writer = owner worker on the
-    /// single site that also decrements `queue.tokens` after a send
+    /// `queue.transmit_rate_bytes()`. Writer = owner worker on the
+    /// single site that also decrements `queue.hot.tokens` after a send
     /// (apply_direct_exact_send_result for exact-owner-local,
     /// apply_cos_send_result for the non-exact / shared-exact paths).
     pub(in crate::afxdp) drain_sent_bytes: AtomicU64,
@@ -829,8 +831,8 @@ pub(in crate::afxdp) struct CoSQueueOwnerProfile {
     /// got parked waiting for the interface shaper to refill.
     pub(in crate::afxdp) drain_park_root_tokens: AtomicU64,
     /// #760 instrumentation. Count of drain iterations where the
-    /// per-queue token gate fired (queue.tokens < head_len) and the
-    /// queue got parked waiting for its own refill. A queue that
+    /// per-queue token gate fired (queue.hot.tokens < head_len) and
+    /// the queue got parked waiting for its own refill. A queue that
     /// sustains throughput above its configured rate with this near
     /// zero is a direct signal the gate never fired.
     pub(in crate::afxdp) drain_park_queue_tokens: AtomicU64,
