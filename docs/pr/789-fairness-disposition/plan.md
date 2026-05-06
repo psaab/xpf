@@ -92,7 +92,47 @@ This same finding was reached independently by:
 Three independent reviewers reaching the same architectural diagnosis
 is dispositive. The next move is empirical, not architectural.
 
-## Path 1 — V_min knob tuning sweep (in-flight, this session)
+## Path 1 — V_min knob tuning sweep — **COMPLETE, RESULT: NEGATIVE**
+
+Branch: `experiment/789-vmin-tuning` (env-var override scaffold; not for merge)
+Results: `vmin-sweep-results.tsv` (committed alongside this doc)
+
+24 cells × 60s iperf3 = ~30 min wall time. Matrix:
+- `lag_ns ∈ {100_000, 250_000, 1_000_000, 5_000_000}` (current default 1ms)
+- `cadence ∈ {1, 8, 16}` (current default 8)
+- ports 5203 (iperf-c, target) + 5204 (iperf-d, regression check)
+
+### Top 3 cells on iperf-c (port 5203, target):
+
+| lag_ns | cadence | CoV | aggregate | retrans |
+|---|---|---|---|---|
+| 1000000 (current default) | 8 (current default) | **25.7%** | 21.06 | 0 |
+| 5000000 | 8 | 33.6% | 23.46 | 8 |
+| 5000000 | 1 | 47.7% | 23.41 | 46 |
+
+### Bottom 3 cells:
+
+| lag_ns | cadence | CoV | retrans |
+|---|---|---|---|
+| 1000000 | 16 | 69.2% | 43 |
+| 1000000 | 1 | 65.4% | 86 |
+| 250000 | 8 | 62.2% | 53 |
+
+### Conclusion
+
+**The current defaults `lag=1ms cadence=8` are already near-optimal.**
+The best cell in the sweep (25.7% CoV) is the current defaults; every
+other configuration is meaningfully worse. Tighter throttling
+(lag=100µs/cadence=8) caused **9686 retransmits** in one cell —
+catastrophic. Wider throttling (lag=5ms) doesn't help either.
+
+**No V_min knob tuning clears the ≤20% gate for iperf-c P=12.** This
+is dispositive: the residual variance is structural, not a knob
+problem. Per the disposition decision tree, this collapses Path 1 and
+escalates to Path 3.
+
+## Path 1 OUTCOME — escalate to Path 3 (workload-aware gate)
+
 
 Branch: `experiment/789-vmin-tuning`
 
