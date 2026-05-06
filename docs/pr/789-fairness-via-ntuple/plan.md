@@ -1,5 +1,5 @@
 ---
-status: REVISED v3 — Codex round-2 PLAN-NEEDS-MAJOR (data source doesn't exist as written; SessionTable.len() counts installed sessions not ingress-active flows); Gemini Pro 3.1 round-2 PLAN-NEEDS-MINOR (ingress-only counting + transient retx monitoring); v3 specifies a real ingress-active flow inventory mechanism, restores ≤20% CoV gate, scopes byte-rate selection to Phase 2 (Phase 1 picks "any 1s-active stable flow")
+status: REVISED v4 — Codex round-3 PLAN-NEEDS-MAJOR (4 implementation blockers); Gemini Pro 3.1 round-3 PLAN-READY. v4 fixes: scrubbed v2 stale text at §4.1 (no more session_table.len() / 1MB stable-flow / byte-rate-selection contradicting §4.3); added `installed_at_ns: u64` field spec (existing `install_epoch` is a counter not nanoseconds); defined explicit worker→Coordinator publication path via new BindingLiveState fields (Coordinator only sees BindingLiveState.snapshot, not worker-local SessionTable); corrected NAT detection — NatDecision is a struct not Option, use field-identity check across rewrite_src/rewrite_dst/rewrite_src_port/rewrite_dst_port/nat64/nptv6
 issue: #789 (parent), #936 (path A — declined for aggregate hit), #937 (path B — current scope)
 phase: Single PR — closed-loop ntuple flow steering for shared_exact CoS classes (Phase 1 includes lifecycle + hysteresis + observability per round-1 review)
 ---
@@ -106,11 +106,12 @@ shared_exact CoS classes. Lifecycle:
    - Enable `ntuple-filters on` if not already.
 2. **Periodic tick** (1Hz) — `FlowSteeringController.Reconcile()`:
    - Pull `BindingStatus` from the userspace helper. Phase 1
-     extends `BindingStatus` with `active_flows_count: u64`
-     populated from `binding.flow.session_table.len()` on the
-     worker side. Codex round-1 correctly identified that
-     `per_binding` is ring-pressure, not flow inventory.
-   - Group bindings by `(ifindex, queue_id) → flow_count` for
+     extends `BindingStatus` with `active_ingress_flows_count: u32`
+     and `active_ingress_flows_sample: Vec<ActiveFlowSample>`,
+     populated from worker→BindingLiveState publication path
+     (see §4.3 — NOT from `session_table.len()`, NOT from
+     `per_binding` ring-pressure).
+   - Group bindings by `(ifindex, queue_id) → active_count` for
      each shared_exact-eligible interface.
    - Compute imbalance: `max_count - min_count`. If `< 2`, skip.
    - **Hysteresis gate (round-1 mandate):**
@@ -119,15 +120,19 @@ shared_exact CoS classes. Lifecycle:
      - A flow installed by the controller is in a 5-tick
        no-resteer window — track in
        `installed_rules: Map[FlowKey] → InstallTick`.
-   - **Stable-flow gate (round-1 acknowledgement of transient
-     aggregate hit):** only re-steer flows that have:
-     - Existed for ≥ 3 prior reconcile ticks.
-     - Accumulated ≥ 1 MB of bytes (to skip mid-handshake flows).
-   - Pick K=1-2 flows with the highest byte-rate from the hot
-     binding. Identify their wire 5-tuple per §4.2.
-   - Install ntuple rules (`ethtool --config-ntuple <iface> ...`
-     via netlink for low latency, OR shell out to `ethtool`
-     command in Phase 1 for clarity).
+   - **Stable-flow gate (Phase 1 — recency only):** select from
+     `active_ingress_flows_sample` flows with:
+     - `install_age_secs >= 3` (excludes mid-handshake; needs
+       new `installed_at_ns` field per §4.3 — `install_epoch`
+       is a counter not time and cannot serve this).
+     - `last_seen_age_ms < 1000` (excludes idle/stale).
+   - Pick K=1-2 deterministically by `hash(wire_5tuple) %
+     candidates.len()` (no byte-rate awareness in Phase 1 —
+     deferred to Phase 2 per §4.3).
+   - Install ntuple rules (shell out to `ethtool` in Phase 1
+     for clarity; native netlink is a Phase 2 perf optimization
+     per Gemini round-2/round-3 — at 1Hz × K=1-2 the fork/exec
+     cost is negligible).
    - Track installed rules in
      `installed_rules: Map[FlowKey] → (Iface, RuleLoc, InstallTime, TargetQueue)`.
 3. **On flow termination** — when SessionClose event is
@@ -171,21 +176,55 @@ counting.**
 
 Worker-side changes (`userspace-dp/src/session/mod.rs`):
 - Add `installed_on_binding_slot: u32` field to `SessionEntry`
-  (line ~111). Set at install time (`SessionTable::insert` or
-  equivalent) to the slot value of the binding whose worker is
-  currently processing the packet.
+  (existing struct at line 111). Set at install time
+  (`SessionTable::insert` paths at lines 677, 757, 815, 905) to
+  the slot value of the binding whose worker is currently
+  processing the packet.
+- Add `installed_at_ns: u64` field to `SessionEntry` (existing
+  `install_epoch` is a per-table counter at line 117 — incremented
+  via `next_epoch()` — NOT a wall-clock or monotonic time and
+  cannot yield `install_age_secs`). Set once at the same install
+  paths to `monotonic_nanos()`. Importantly: NEVER updated by
+  lookup/refresh paths (only `last_seen_ns` is bumped on lookup).
+  This gives stable install-age semantics that survive lookups.
 - New method `SessionTable::ingress_active_flows_for_binding(
   &self, slot: u32, now_ns: u64, recency_window_ns: u64) ->
   ActiveFlowInventory` returning:
   - `count: u32` — number of sessions where
     `installed_on_binding_slot == slot` AND
     `now_ns - last_seen_ns < recency_window_ns` (default 1s).
-  - `top_k: SmallVec<[(SessionKey, last_seen_ns); 16]>` — up to K
-    eligible flows for the controller to pick from. Phase 1 K=16.
+  - `top_k: SmallVec<[(SessionKey, installed_at_ns,
+    last_seen_ns); 16]>` — up to K eligible flows for the
+    controller to pick from. Phase 1 K=16.
+
+**Worker→Coordinator publication path** (Codex round-3 finding #3):
+
+`Coordinator::refresh_bindings()` reads from `BindingLiveState::snapshot()`
+at `userspace-dp/src/afxdp/umem/mod.rs:623` — it does NOT call
+worker-local `SessionTable` methods. Worker is the ONLY thread
+that touches its `SessionTable`.
+
+The publication path is therefore:
+
+1. Worker tick: at the existing periodic checkpoint
+   (`worker/lifecycle.rs` flush call site, ~1Hz cadence) the
+   worker calls `sessions.ingress_active_flows_for_binding(
+   binding.slot, monotonic_nanos(), 1_000_000_000)`.
+2. Worker writes the resulting count and sample into new fields
+   on `BindingLiveState`:
+   - `active_ingress_flows_count: AtomicU32`
+   - `active_ingress_flows_sample: Mutex<SmallVec<[ActiveFlowSample; 16]>>`
+     (writer-only worker; reader is the periodic snapshot path —
+     mutex contention is bounded by the 1Hz publish cadence).
+3. `BindingLiveState::snapshot()` projects these into
+   `BindingLiveSnapshot`, which `Coordinator::refresh_bindings`
+   already reads and projects into `BindingStatus`.
+
+This keeps the existing single-direction worker→coordinator
+publication invariant.
 
 `BindingStatus` (in `userspace-dp/src/protocol.rs:1149`) gains:
-- `active_ingress_flows_count: u32` — projected from the new
-  worker-side method.
+- `active_ingress_flows_count: u32` — published by the worker.
 - `active_ingress_flows_sample: Vec<ActiveFlowSample>` — up to 16
   recently-active ingress flow tuples with `(wire_5tuple,
   install_age_secs, last_seen_age_ms)`. Used by the controller to
@@ -212,11 +251,26 @@ CoV 3.8% with deterministic per-port-mod assignment, so even
 imperfect flow selection should deliver a large CoV win.
 
 **Phase 1 explicit limitation: only steer non-NAT flows.**
-Detect via `decision.nat.is_some()` on the SessionEntry — skip
-NAT'd flows for now. NAT-aware wire-tuple extraction
-(reconstructing the pre-NAT tuple from SessionDecision metadata)
-is Phase 3 hardening. The iperf-c shaper test case is direct
-routing without SNAT/DNAT, so non-NAT scope covers it.
+`SessionDecision.nat` is a `NatDecision` **struct** (not
+`Option`) — `.is_some()` would not compile. The non-NAT
+predicate is:
+
+```rust
+fn is_identity_nat(nat: &NatDecision) -> bool {
+    nat.rewrite_src.is_none()
+        && nat.rewrite_dst.is_none()
+        && nat.rewrite_src_port.is_none()
+        && nat.rewrite_dst_port.is_none()
+        && !nat.nat64
+        && !nat.nptv6
+}
+```
+
+The controller skips flows where `!is_identity_nat(&entry.decision.nat)`.
+NAT-aware wire-tuple extraction (reconstructing the pre-NAT tuple
+from `NatDecision` metadata) is Phase 3 hardening. The iperf-c
+shaper test case is direct routing without SNAT/DNAT, so the
+identity-NAT scope covers it.
 
 ### 4.5 Configuration knob
 
