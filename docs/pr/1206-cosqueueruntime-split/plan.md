@@ -1,8 +1,102 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: REVISED v2 — addressing Codex (PLAN-NEEDS-MINOR, task-mou6u7ou-4h4a6u) and Gemini Pro 3 (NEEDS-MINOR/MAJOR convergent, task-mou6vue9-thj49g)
 issue: #1206
 phase: pure code-motion refactor; struct shape change with byte-for-byte behavior preservation
 ---
+
+## Round-1 verdict resolution
+
+Both reviewers converged on the same architectural corrections. v2 incorporates:
+
+### Field placement corrections (Codex finding #1; Gemini #1.B)
+
+| Field | v1 placement | v2 placement | Reason |
+|---|---|---|---|
+| `queue_vtime` | `CoSQueueHotState` (wrong) | `FlowFairState` | `types/cos.rs:524` documents "Meaningful only on flow_fair queues"; `account_cos_queue_flow_enqueue` early-returns on `!queue.flow_fair` |
+| `worker_id` | `CoSQueueConfigState` (wrong) | `VMinQueueState` | tied directly to `vtime_floor.slots` indexing per `admission.rs:468` |
+| `flow_hash_seed` | `CoSQueueConfigState` (acceptable but suboptimal) | `FlowFairState` | flow-fair-only by comment + use; non-flow-fair queues keep seed=0 today and don't read it |
+| `drop_counters` + `owner_profile` | `...` ellipsis (Codex flagged) | explicit fields in `CoSQueueTelemetry` | real runtime fields at `types/cos.rs:621,636` |
+| V_min scratch counters | widened to `u64` in v1 sketch | preserve `u32` per current code | `types/cos.rs:656` ships `u32`; no reason to widen |
+
+### Critical: no double-boxing (Gemini finding #1.A)
+
+v1 had:
+```rust
+pub(in crate::afxdp) flow_fair_state: Option<Box<FlowFairState>>,
+
+struct FlowFairState {
+    pub(in crate::afxdp) flow_bucket_items: Box<[VecDeque<CoSPendingTxItem>; COS_FLOW_FAIR_BUCKETS]>,
+    // ...
+}
+```
+
+`flow_fair_state` is already heap-allocated via the outer `Box`; nesting another
+`Box` around `flow_bucket_items` adds a pointless second indirection on every
+hot-path access with **zero memory benefit** (the array is already off the
+`CoSQueueRuntime` footprint via the outer Box). v2 inlines the array:
+
+```rust
+struct FlowFairState {
+    pub(in crate::afxdp) flow_bucket_items: [VecDeque<CoSPendingTxItem>; COS_FLOW_FAIR_BUCKETS],
+    // ...
+}
+```
+
+### Box-deref hoisting discipline (both reviewers)
+
+Hot-path helpers (`pop_front_inner`, `push_front_inner`,
+`account_cos_queue_flow_enqueue`, `account_cos_queue_flow_dequeue`) bind the
+`&mut FlowFairState` once at entry to the flow-fair branch:
+
+```rust
+let Some(ff) = queue.flow_fair_state.as_mut() else {
+    return /* non-flow-fair early-return as today */;
+};
+// Use ff.flow_bucket_items[bucket], ff.flow_bucket_head_finish_bytes[bucket], etc.
+```
+
+Avoids `queue.flow_fair_state.as_mut().unwrap().flow_bucket_items[bucket]`
+repeated per field access (Codex).
+
+### Helper-method strategy (Gemini #5)
+
+Pass-through `#[inline]` methods on `CoSQueueRuntime` ONLY for immutable,
+frequently-accessed config bits (avoid diff noise):
+- `queue_id() -> u8`
+- `flow_fair() -> bool`
+- `shared_exact() -> bool`
+- `transmit_rate_bytes() -> u64`
+
+For mutable state and heavily-borrowed sub-structs (`hot`, `v_min`,
+`flow_fair_state`), expose the sub-struct directly. Helper methods on
+mutable state would create partial-borrow checker errors at hot-path call
+sites that hold one sub-struct mutably while reading another immutably.
+
+### `pop_snapshot_stack` placement (both reviewers)
+
+Moves to `FlowFairState`. Non-flow-fair callers only `.clear()` it during
+teardowns/batch aborts; those calls become:
+
+```rust
+if let Some(ff) = queue.flow_fair_state.as_mut() {
+    ff.pop_snapshot_stack.clear();
+}
+```
+
+### Single PR (both reviewers)
+
+Not staged. Compiler-enforced correctness across the workspace makes this
+safe; staging would require reviewers to look at 4-5 PRs touching the same
+~50-100 call sites for no incremental gain.
+
+### Order with #1207 / #1209 (both reviewers)
+
+**#1206 lands first**, before #1207 (service-skeleton) and #1209 (telemetry
+double-buffer). Both depend on the new struct shape; merging them first
+creates avoidable conflicts. The plan sequencing on those issues already
+documents this dependency.
+
+
 
 ## 1. Issue framing
 
@@ -66,7 +160,7 @@ The hot paths that read CoSQueueRuntime fields:
 
 ## 4. Concrete design
 
-### 4.1 Target struct shape
+### 4.1 Target struct shape (v2 — corrected per round-1 review)
 
 ```rust
 pub(in crate::afxdp) struct CoSQueueRuntime {
@@ -77,6 +171,8 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     pub(in crate::afxdp) telemetry: CoSQueueTelemetry,
 }
 
+/// Immutable-after-build config bits. All fields written exactly once
+/// in `promote_cos_queue_*` builders; never mutated on the hot path.
 pub(in crate::afxdp) struct CoSQueueConfigState {
     pub(in crate::afxdp) queue_id: u8,
     pub(in crate::afxdp) priority: u8,
@@ -88,46 +184,61 @@ pub(in crate::afxdp) struct CoSQueueConfigState {
     pub(in crate::afxdp) surplus_weight: u32,
     pub(in crate::afxdp) buffer_bytes: u64,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
-    pub(in crate::afxdp) worker_id: u32,
-    pub(in crate::afxdp) flow_hash_seed: u64,
+    // worker_id moved to VMinQueueState (tied to vtime_floor.slots indexing)
+    // flow_hash_seed moved to FlowFairState (flow-fair-only)
 }
 
+/// Hot per-pop / per-push state. Token bucket + FIFO storage +
+/// runnable bookkeeping. NOT flow-fair-specific (flow-fair fields
+/// live in FlowFairState).
 pub(in crate::afxdp) struct CoSQueueHotState {
     pub(in crate::afxdp) tokens: u64,
     pub(in crate::afxdp) last_refill_ns: u64,
     pub(in crate::afxdp) queued_bytes: u64,
     pub(in crate::afxdp) surplus_deficit: u64,
-    pub(in crate::afxdp) queue_vtime: u64,
     pub(in crate::afxdp) items: VecDeque<CoSPendingTxItem>, // FIFO storage
     pub(in crate::afxdp) local_item_count: u32,
+    // queue_vtime moved to FlowFairState (flow-fair-only;
+    // types/cos.rs:524 documents "Meaningful only on flow_fair queues")
     // ... runnable/parking flags
 }
 
+/// Flow-fair MQFQ state. Only allocated when `queue.flow_fair == true`,
+/// keeping FIFO queues' `CoSQueueRuntime` footprint small. The struct
+/// itself is the only Box — internal arrays are inline (NO double-boxing).
 pub(in crate::afxdp) struct FlowFairState {
+    pub(in crate::afxdp) queue_vtime: u64,                  // moved from hot
+    pub(in crate::afxdp) flow_hash_seed: u64,               // moved from config
     pub(in crate::afxdp) active_flow_buckets: u16,
     pub(in crate::afxdp) active_flow_buckets_peak: u16,
     pub(in crate::afxdp) flow_bucket_bytes: [u64; COS_FLOW_FAIR_BUCKETS],
     pub(in crate::afxdp) flow_bucket_head_finish_bytes: [u64; COS_FLOW_FAIR_BUCKETS],
     pub(in crate::afxdp) flow_bucket_tail_finish_bytes: [u64; COS_FLOW_FAIR_BUCKETS],
-    pub(in crate::afxdp) flow_bucket_items: Box<[VecDeque<CoSPendingTxItem>; COS_FLOW_FAIR_BUCKETS]>,
+    // CRITICAL: NOT Box<[...]> — we're already inside Option<Box<FlowFairState>>;
+    // a second Box would be pointless double-indirection on hot path.
+    pub(in crate::afxdp) flow_bucket_items: [VecDeque<CoSPendingTxItem>; COS_FLOW_FAIR_BUCKETS],
     pub(in crate::afxdp) flow_rr_buckets: FlowRrRing,
     pub(in crate::afxdp) pop_snapshot_stack: Vec<CoSQueuePopSnapshot>,
 }
 
 pub(in crate::afxdp) struct VMinQueueState {
+    pub(in crate::afxdp) worker_id: u32,                    // moved from config
     pub(in crate::afxdp) vtime_floor: Option<Arc<SharedCoSQueueVtimeFloor>>,
     pub(in crate::afxdp) v_min_suspended_remaining: u32,
     pub(in crate::afxdp) consecutive_v_min_skips: u32,
-    pub(in crate::afxdp) v_min_throttles_scratch: u64,
-    pub(in crate::afxdp) v_min_hard_cap_overrides_scratch: u64,
+    pub(in crate::afxdp) v_min_throttles_scratch: u32,        // u32 per current code (NOT u64)
+    pub(in crate::afxdp) v_min_hard_cap_overrides_scratch: u32, // u32 per current code
 }
 
 pub(in crate::afxdp) struct CoSQueueTelemetry {
-    // Owner-write scratch counters (drained on publish via
-    // existing CoSStatusInterval cadence).
+    // Owner-write scratch counters drained on publish via existing
+    // CoSStatusInterval cadence. Explicit fields per Codex round-1 —
+    // NO `...` ellipsis. Real runtime fields at types/cos.rs:621-660:
     pub(in crate::afxdp) drain_invocations_scratch: u64,
     pub(in crate::afxdp) bytes_serviced_scratch: u64,
-    // ...
+    pub(in crate::afxdp) drop_counters: CoSQueueDropCounters,
+    pub(in crate::afxdp) owner_profile: CoSOwnerProfileScratch,
+    // (final field list verified against current types/cos.rs at impl time)
 }
 ```
 
