@@ -1,8 +1,120 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: REVISED v2 — addressing Codex (PLAN-NEEDS-MAJOR, task-mou6u87v-3y6ih0) and Gemini Pro 3 (PLAN-NEEDS-MAJOR, task-mou6vz0k-2bk35b)
 issue: #1207
 phase: pure code-motion refactor; behavior preserved
 ---
+
+## Round-1 verdict resolution
+
+Both reviewers PLAN-NEEDS-MAJOR with the same headline finding: the v1
+adapter trait is underspecified. The current 4 variants differ in more
+than just drain helper and scratch shape:
+
+- **Local FIFO**: needs `free_tx_frames` for release/settle.
+- **Local flow-fair**: needs `free_tx_frames` AND restores TX frames on rollback.
+- **Prepared FIFO**: needs `pending_fill_frames` + `slot` + `in_flight_prepared_recycles`.
+- **Prepared flow-fair**: pops from queue + restores items to queue head in LIFO order; does NOT restore TX frames.
+
+v1's `settle_submission(queue, scratch, inserted)` and
+`restore_to_queue_head(queue, scratch, area)` cannot implement these
+faithfully: missing parameters for FIFO drop semantics, missing
+`free_tx_frames` for local flow-fair restore, and the skeleton can't
+iterate `A::Scratch` (opaque to it) to map descriptors or extract
+offsets for `stamp_submits`.
+
+### v2 fix: richer adapter contract
+
+The trait owns descriptor insertion + accepted-offset stamping + complete
+rollback (per both reviewers). Skeleton owns the invariant ordering:
+drain → submit → stamp-after-commit → settle → publish-V_min → apply-result.
+
+```rust
+trait ServiceAdapter {
+    type Scratch;
+
+    /// Drain stage: pop items from queue (or for FIFO, take items
+    /// already in scratch) into adapter's scratch shape. Returns
+    /// the build outcome including any rollback-relevant state.
+    fn drain_to_scratch(
+        &mut self,
+        queue: &mut CoSQueueRuntime,
+        free_tx_frames: &mut VecDeque<u64>,
+        pending_fill_frames: &mut VecDeque<u64>,            // prepared variants only
+        in_flight_prepared_recycles: &mut Vec<...>,         // prepared variants only
+        scratch: &mut Self::Scratch,
+        area: &MmapArea,
+        root_budget: u64,
+        secondary_budget: u64,
+        dscp_rewrite: Option<u8>,
+    ) -> ExactCoSScratchBuild;
+
+    /// Insert descriptors into the TX ring writer. The adapter owns
+    /// scratch iteration because the skeleton can't see `Self::Scratch`'s
+    /// internal shape. Returns the inserted count.
+    fn insert_descriptors(
+        &self,
+        scratch: &Self::Scratch,
+        writer: &mut TxRingWriter,
+    ) -> u32;
+
+    /// Stamp accepted descriptors with the post-commit submit timestamp
+    /// (#812 invariant: must be sampled AFTER writer.commit()).
+    /// Adapter owns the offset extraction from its scratch shape.
+    fn stamp_accepted(
+        &self,
+        scratch: &Self::Scratch,
+        inserted: u32,
+        ts_submit: u64,
+        tx_submit_ns: &mut TxSubmitTimestamps,
+    );
+
+    /// Unified rollback: called on Drop or inserted == 0. Per Gemini —
+    /// FIFO adapters drop/release frames; flow-fair adapters push items
+    /// back to queue head in LIFO order. Optional &mut CoSQueueRuntime
+    /// because FIFO doesn't need queue access for rollback.
+    fn cancel_submission(
+        &mut self,
+        queue: Option<&mut CoSQueueRuntime>,
+        free_tx_frames: &mut VecDeque<u64>,
+        scratch: &mut Self::Scratch,
+    );
+
+    /// Settle stage: queue accounting + partial-rollback for the
+    /// inserted prefix. Returns (sent_packets, sent_bytes).
+    fn settle_submission(
+        &mut self,
+        queue: &mut CoSQueueRuntime,
+        scratch: &mut Self::Scratch,
+        inserted: u32,
+    ) -> (u64, u64);
+}
+```
+
+Four adapters, monomorphized at call sites:
+
+- `LocalFifoAdapter` — items in scratch directly; drain re-claims items, settle accounts dropped/sent
+- `LocalFlowFairAdapter` — pops from queue's flow-fair buckets; restore_to_queue_head handles LIFO push-back AND TX frame release
+- `PreparedFifoAdapter` — handles pending_fill_frames + recycles
+- `PreparedFlowFairAdapter` — flow-fair pop; rollback does NOT touch TX frames
+
+### Other v2 changes from round-1 findings
+
+- **Plan slop fixed** (Codex): `VecDeque<u64>` (current type), not
+  `Vec<TxFrame>`. Pseudocode return is `sent_packets > 0` not
+  `!sent_packets == 0`.
+- **Generic monomorphization confirmed acceptable** (both reviewers):
+  ~4 copies of skeleton body in binary, offset by ~600 LOC source
+  reduction. No `dyn` dispatch unless the implementation introduces
+  trait objects.
+- **Hot-path inlining discipline** (Codex): use private generic fns,
+  concrete zero-sized adapters, `#[inline]` / `#[inline(always)]` on
+  tiny adapter methods. Verify generated symbols/asm with `size`/
+  `cargo bloat` if needed.
+- **Order: wait for #1206 first** (both reviewers, both plans agree).
+  v2 explicitly serializes — implement #1207 only AFTER #1206 lands
+  on master, then rebase #1207 against the new struct shape.
+
+
 
 ## 1. Issue framing
 
