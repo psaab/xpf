@@ -166,7 +166,20 @@ instead of an open issue chasing an unreachable target.
 ## Codex-suggested follow-on work (not gating fairness)
 
 Codex's findings document recommends infrastructure hygiene that would
-make any future fairness attempt cheaper. Listed in priority order:
+make any future fairness attempt cheaper. **All seven items filed as
+GitHub issues; tracked independently of #789.**
+
+| Issue | Title | Priority |
+|---|---|---|
+| [#1205](https://github.com/psaab/xpf/issues/1205) | Hygiene: doc/code drift CI check for CoS scheduler invariants | P3 |
+| [#1206](https://github.com/psaab/xpf/issues/1206) | Refactor: split CoSQueueRuntime into hot/cold/flow_fair/v_min/telemetry pieces | P3 |
+| [#1207](https://github.com/psaab/xpf/issues/1207) | Refactor: consolidate queue_service/service.rs around one monomorphized service skeleton | P4 |
+| [#1208](https://github.com/psaab/xpf/issues/1208) | Hygiene: refresh refactoring-audit.md to current module heatmap | P3 |
+| [#1209](https://github.com/psaab/xpf/issues/1209) | Refactor: finish double-buffered worker telemetry (#1187 follow-on) | P3 |
+| [#1210](https://github.com/psaab/xpf/issues/1210) | Hygiene: scrub stale CoS scheduler comments + old tx.rs line refs | P3 |
+| [#1211](https://github.com/psaab/xpf/issues/1211) | Research: AFD/CSFQ-style per-flow ECN overlay for shared_exact CoS queues | P3 |
+
+Listed in priority order:
 
 ### A. Doc/code drift check (LOW effort, HIGH value)
 
