@@ -80,7 +80,7 @@ pub(in crate::afxdp) fn publish_committed_queue_vtime(queue: Option<&CoSQueueRun
     let ff = queue
         .flow_fair_state
         .as_ref()
-        .expect("try_publish_committed_vtime: flow_fair queue without flow_fair_state");
+        .expect("publish_committed_queue_vtime: flow_fair queue without flow_fair_state");
     // vtime_floor is allocated only on shared_exact queues; non-shared
     // flow-fair queues have None and skip publish (this is the correct
     // semantic, not an invariant violation).

@@ -247,11 +247,11 @@ pub(in crate::afxdp) fn cos_flow_aware_buffer_limit(
 ///
 /// Two thresholds fire the mark, whichever trips first:
 ///
-///   * **Aggregate**: `queue.queued_bytes > buffer_limit × NUM/DEN`.
+///   * **Aggregate**: `queue.hot.queued_bytes > buffer_limit × NUM/DEN`.
 ///     This is the #718 arm — it signals congestion once the entire
 ///     queue is past the mark fraction of its operator-configured
 ///     buffer, independent of per-flow accounting.
-///   * **Per-flow**: `queue.flow_bucket_bytes[flow_bucket] >
+///   * **Per-flow**: `ff.flow_bucket_bytes[flow_bucket] >
 ///     share_cap × NUM/DEN`, where `share_cap` is the current
 ///     per-flow cap from `cos_queue_flow_share_limit`. This is the
 ///     #722 arm. On the 16-flow / 1 Gbps exact-queue live workload

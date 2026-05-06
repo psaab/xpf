@@ -14,7 +14,7 @@ Both reviewers converged on the same architectural corrections. v2 incorporates:
 |---|---|---|---|
 | `queue_vtime` | `CoSQueueHotState` (wrong) | `FlowFairState` | `types/cos.rs:524` documents "Meaningful only on flow_fair queues"; `account_cos_queue_flow_enqueue` early-returns on `!queue.flow_fair` |
 | `worker_id` | `CoSQueueConfigState` (wrong) | `VMinQueueState` | tied directly to `vtime_floor.slots` indexing per `admission.rs:468` |
-| `flow_hash_seed` | `CoSQueueConfigState` (acceptable but suboptimal) | `FlowFairState` | flow-fair-only by comment + use; non-flow-fair queues keep seed=0 today and don't read it |
+| `flow_hash_seed` | `CoSQueueConfigState` (acceptable but suboptimal) | `FlowFairState` | flow-fair-only by comment + use; non-flow-fair queues keep `flow_fair_state: None` post-this-PR (no seed exists), and historically kept seed=0 |
 | `drop_counters` + `owner_profile` | `...` ellipsis (Codex flagged) | explicit fields in `CoSQueueTelemetry` | real runtime fields at `types/cos.rs:621,636` |
 | V_min scratch counters | widened to `u64` in v1 sketch | preserve `u32` per current code | `types/cos.rs:656` ships `u32`; no reason to widen |
 

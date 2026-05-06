@@ -97,7 +97,12 @@ pub(in crate::afxdp) fn cos_queue_front(queue: &CoSQueueRuntime) -> Option<&CoSP
     if !queue.flow_fair() {
         return queue.hot.items.front();
     }
-    let ff = queue.flow_fair_state.as_ref()?;
+    // Invariant: see cos_queue_is_empty. Silent None here would cause
+    // drain callers to treat a flow_fair queue as empty and skip it.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_front: flow_fair queue without flow_fair_state");
     // #785 Phase 3 — MQFQ: return the head of the bucket with the
     // smallest virtual-finish-time, not the DRR-rotation head. This
     // is the byte-rate-fair dequeue order (classical SFQ / WFQ).
