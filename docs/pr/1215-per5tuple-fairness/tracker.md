@@ -162,6 +162,89 @@ Master tip 638c9d07. Verified this session:
 | Rate-aware admission cap | `admission.rs` | shipped #914 |
 | `COS_FLOW_FAIR_BUCKETS = 4096` | `userspace-dp/src/afxdp/cos/types/mod.rs` | shipped #785 |
 
+## Prior art digest (read before drafting plan v1)
+
+### #836 — shared MQFQ HOL-finish-time array (CLOSED 2026-04-22, no impl)
+
+Naive instinct for #1215. **DOES NOT WORK** because HOL-finish-time
+is non-commutative under concurrent writers:
+
+- Per-packet timestamp; changes non-additively on every dequeue.
+- Rollback (push_front on submit failure) needs snapshot state.
+- Concurrent writers can corrupt ordering.
+
+**Implication for #1215 v1**: a literal "shared finish-time table
+indexed by flow bucket, with each worker writing its head_finish
+on pop" reproduces #836's mistake. Plan v1 must address the
+commutativity problem head-on or pick a commutative quantity.
+
+### #838 — per-flow bytes-served counter w/ periodic reset (PLAN-ONLY, killed)
+
+5 plan rounds, 14+ HIGH cumulatively. Three known race surfaces
+that any cross-worker shared-atomic plan must answer:
+
+1. **Period reset coherence** — when one worker resets the
+   counter, others may still be writing into the old period.
+2. **Fair-share denominator staleness** — N (active flow count)
+   moves; one gate can bump for a new flow while another reads
+   stale N.
+3. **Rollback semantics** — submit failure returns items to the
+   queue but the per-flow counter has already been decremented.
+
+Plus a 4th surface found at R5 (Q9): batch-latency mismatch
+between selection (per-packet) and accounting (per-batch settle,
+TX_BATCH_SIZE up to 256). Selector can ship multiple
+periods-worth before counter reflects them.
+
+### #840 — RSS rebalance from per-binding RX signal (REVERTED)
+
+Implemented + benchmarked + reverted at commit 1c611d01. Made
+fairness WORSE: CoV 37.7% with vs 18.5% baseline. Don't do
+"shift the hash" — it's not a substitute for per-flow scheduling.
+
+### Pattern across #836/#838/#840
+
+> "We can encode fairness as additional state read/written in
+>  the existing per-binding hot path."
+
+That assumption has not held. The hot path is batch-shaped
+(TX_BATCH_SIZE ~256) so per-packet accounting has one-batch
+latency. flow_bucket_bytes is a queue-backlog counter, not a
+bytes-served counter — past plans repeatedly conflated the two.
+
+### What this means for #1215 v1
+
+Two design routes that survive the prior-art:
+
+**Route A — commutative quantity**: pick a per-flow signal that
+IS commutative under concurrent writes. Examples:
+- Per-flow byte counter via `fetch_add` (aggregates monotonically;
+  no rollback if we accept "served bytes" never decreases on
+  push_front because the bytes were actually served — submit
+  failure resets to free pool but the wire transmit may already
+  have hit nic).
+- Per-flow last-served-vtime via `fetch_max` (idempotent under
+  reordering).
+
+**Route B — message-passing not shared state**: workers publish
+their per-flow served counts to a coordinator (single writer)
+that periodically computes a global v-min view and broadcasts
+back via RCU/ArcSwap. No cross-worker writes to the same
+atomic. Costs: extra hop, snapshot epoch, periodic reset.
+
+**Reject**: any design that shares HOL-finish-time directly
+(repeats #836). Any design with cross-worker rollback semantics
+on shared atomic counters (repeats #838's #2 + #3).
+
+### #900 measurement-first finding
+
+Empirical baseline showed "streams collapse to 0 bps" symptom
+doesn't reproduce on standard test conditions. The ACTUAL
+problem reduces to per-flow throughput CoV under saturation.
+**Today's measurement (this session)**: 47% per-flow CoV on
+iperf-c P=12 t=10 -R. That's the gap #1215 closes; the
+measurement justifies algorithm work.
+
 ## Withdrawn / killed approaches (don't repeat)
 
 - **#936 v1**: per-runtime hash seed prevented cross-worker bucket
