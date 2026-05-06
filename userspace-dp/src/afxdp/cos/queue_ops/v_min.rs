@@ -63,24 +63,34 @@ pub(in crate::afxdp) fn publish_committed_queue_vtime(queue: Option<&CoSQueueRun
         return;
     };
     debug_assert!(
-        queue.vtime_floor.is_none() || queue.flow_fair,
+        queue.v_min.vtime_floor.is_none() || queue.flow_fair(),
         "publish_committed_queue_vtime: vtime_floor set on non-flow-fair queue (queue_id={})",
-        queue.queue_id,
+        queue.queue_id(),
     );
-    if !queue.flow_fair {
+    if !queue.flow_fair() {
         // Release-build escape hatch for the F4 invariant. flow_fair
         // queues are the only ones with meaningful per-pop vtime
         // advance; FIFO queues' queue_vtime stays at 0 and a publish
         // would broadcast a frozen value forever.
         return;
     }
-    let Some(floor) = queue.vtime_floor.as_ref() else {
+    // Invariant: `flow_fair() == true` ↔ `flow_fair_state.is_some()`.
+    // Silent return here would skip publish on a flow-fair queue and
+    // freeze peers' V_min view of this worker's vtime.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("publish_committed_queue_vtime: flow_fair queue without flow_fair_state");
+    // vtime_floor is allocated only on shared_exact queues; non-shared
+    // flow-fair queues have None and skip publish (this is the correct
+    // semantic, not an invariant violation).
+    let Some(floor) = queue.v_min.vtime_floor.as_ref() else {
         return;
     };
-    let Some(slot) = floor.slots.get(queue.worker_id as usize) else {
+    let Some(slot) = floor.slots.get(queue.v_min.worker_id as usize) else {
         return;
     };
-    slot.publish(queue.queue_vtime);
+    slot.publish(ff.queue_vtime);
 }
 
 #[inline]
@@ -104,8 +114,8 @@ fn compute_v_min_lag_threshold(queue_rate_bytes: u64, participating: u32) -> u64
 /// it's local to this worker's `CoSQueueRuntime`.
 #[inline]
 pub(in crate::afxdp) fn cos_queue_v_min_consume_suspension(queue: &mut CoSQueueRuntime) -> bool {
-    if queue.v_min_suspended_remaining > 0 {
-        queue.v_min_suspended_remaining -= 1;
+    if queue.v_min.v_min_suspended_remaining > 0 {
+        queue.v_min.v_min_suspended_remaining -= 1;
         return true;
     }
     false
@@ -139,7 +149,10 @@ pub(in crate::afxdp) fn cos_queue_v_min_consume_suspension(queue: &mut CoSQueueR
 /// Returns `false` (throttle) if `queue_vtime > V_min + LAG` AND
 /// hard-cap not yet reached.
 #[inline]
-pub(in crate::afxdp) fn cos_queue_v_min_continue(queue: &mut CoSQueueRuntime, pop_count: u32) -> bool {
+pub(in crate::afxdp) fn cos_queue_v_min_continue(
+    queue: &mut CoSQueueRuntime,
+    pop_count: u32,
+) -> bool {
     if pop_count != 1 && !pop_count.is_multiple_of(V_MIN_READ_CADENCE) {
         return true;
     }
@@ -152,29 +165,42 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(queue: &mut CoSQueueRuntime, po
     // gate prevents the check from firing on non-shared
     // queues. Belt-and-suspenders against future floor-
     // allocator changes.
-    if !queue.shared_exact {
+    if !queue.shared_exact() {
         return true;
     }
-    let Some(floor) = queue.vtime_floor.as_ref() else {
-        return true;
-    };
+    let transmit_rate_bytes = queue.transmit_rate_bytes();
+    // Invariant: shared_exact queues are also flow_fair (set together
+    // in promote_cos_queue_flow_fair) and therefore have flow_fair_state
+    // allocated. Silent fall-through here would skip the V_min lag
+    // check entirely and let one worker run away vs peers.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_v_min_continue: shared_exact queue without flow_fair_state");
+    // vtime_floor is allocated for shared_exact queues at promotion time.
+    // None here is structural; same panic discipline.
+    let floor = queue
+        .v_min
+        .vtime_floor
+        .as_ref()
+        .expect("cos_queue_v_min_continue: shared_exact queue without vtime_floor");
     // Single-pass snapshot of participating peers' V_min. See the
     // memory-ordering doc on `participating_v_min_snapshot` for the
     // non-atomic-across-slots contract. The replaced inline loop did
     // exactly the same iteration; preserved byte-for-byte semantics.
-    let (participating, v_min) = floor.participating_v_min_snapshot(queue.worker_id);
+    let (participating, v_min) = floor.participating_v_min_snapshot(queue.v_min.worker_id);
     let Some(v_min) = v_min else {
         // No peers — reset hard-cap counter and continue.
-        queue.consecutive_v_min_skips = 0;
+        queue.v_min.consecutive_v_min_skips = 0;
         return true;
     };
-    let lag = compute_v_min_lag_threshold(queue.transmit_rate_bytes, participating + 1);
-    let cont = queue.queue_vtime <= v_min.saturating_add(lag);
+    let lag = compute_v_min_lag_threshold(transmit_rate_bytes, participating + 1);
+    let cont = ff.queue_vtime <= v_min.saturating_add(lag);
     if cont {
         // Successful V_min check — reset the hard-cap counter so a
         // single throttled batch followed by 7 ok ones doesn't
         // accumulate.
-        queue.consecutive_v_min_skips = 0;
+        queue.v_min.consecutive_v_min_skips = 0;
         return true;
     }
     // #941 Work item D: hard-cap accounting. After
@@ -184,12 +210,14 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(queue: &mut CoSQueueRuntime, po
     // worst-case stall (N consecutive throttled batches) and recovers
     // ~99% throughput under persistent peer-vtime spread (the
     // captured #942 failure pattern).
-    queue.consecutive_v_min_skips = queue.consecutive_v_min_skips.saturating_add(1);
-    if queue.consecutive_v_min_skips >= V_MIN_CONSECUTIVE_SKIP_HARD_CAP {
-        queue.consecutive_v_min_skips = 0;
-        queue.v_min_suspended_remaining = V_MIN_SUSPENSION_BATCHES;
-        queue.v_min_hard_cap_overrides_scratch =
-            queue.v_min_hard_cap_overrides_scratch.saturating_add(1);
+    queue.v_min.consecutive_v_min_skips = queue.v_min.consecutive_v_min_skips.saturating_add(1);
+    if queue.v_min.consecutive_v_min_skips >= V_MIN_CONSECUTIVE_SKIP_HARD_CAP {
+        queue.v_min.consecutive_v_min_skips = 0;
+        queue.v_min.v_min_suspended_remaining = V_MIN_SUSPENSION_BATCHES;
+        queue.v_min.v_min_hard_cap_overrides_scratch = queue
+            .v_min
+            .v_min_hard_cap_overrides_scratch
+            .saturating_add(1);
         return true;
     }
     // #943: regular throttle path — caller will break out of the
@@ -197,7 +225,7 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(queue: &mut CoSQueueRuntime, po
     // (which fires above and returns true) so operators can tell
     // "fairness brake working as designed" from "brake too tight,
     // hard-cap rescuing throughput".
-    queue.v_min_throttles_scratch = queue.v_min_throttles_scratch.saturating_add(1);
+    queue.v_min.v_min_throttles_scratch = queue.v_min.v_min_throttles_scratch.saturating_add(1);
     false
 }
 

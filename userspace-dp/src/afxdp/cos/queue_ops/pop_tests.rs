@@ -52,13 +52,12 @@ fn flow_fair_exact_queue_limits_dominant_flow_share() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    enable_test_flow_fair(queue);
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
     let flow_a = test_session_key(1111, 5201);
     let flow_b = test_session_key(1112, 5201);
-    let bucket_a = cos_flow_bucket_index(queue.flow_hash_seed, Some(&flow_a));
-    let bucket_b = cos_flow_bucket_index(queue.flow_hash_seed, Some(&flow_b));
+    let bucket_a = cos_flow_bucket_index(test_flow_fair_state(queue).flow_hash_seed, Some(&flow_a));
+    let bucket_b = cos_flow_bucket_index(test_flow_fair_state(queue).flow_hash_seed, Some(&flow_b));
     assert_ne!(bucket_a, bucket_b);
 
     assert_eq!(
@@ -67,20 +66,29 @@ fn flow_fair_exact_queue_limits_dominant_flow_share() {
     );
     account_cos_queue_flow_enqueue(queue, Some(&flow_a), 64 * 1024);
     account_cos_queue_flow_enqueue(queue, Some(&flow_a), 32 * 1024);
-    assert_eq!(queue.active_flow_buckets, 1);
-    assert_eq!(queue.flow_bucket_bytes[bucket_a], 96 * 1024);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 1);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_a],
+        96 * 1024
+    );
 
     account_cos_queue_flow_enqueue(queue, Some(&flow_b), 16 * 1024);
-    assert_eq!(queue.active_flow_buckets, 2);
-    assert_eq!(queue.flow_bucket_bytes[bucket_b], 16 * 1024);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 2);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_b],
+        16 * 1024
+    );
 
     let share_cap = cos_queue_flow_share_limit(queue, buffer_limit, bucket_a);
     assert_eq!(share_cap, buffer_limit / 2);
-    assert!(queue.flow_bucket_bytes[bucket_a].saturating_add(16 * 1024) > share_cap);
+    assert!(
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_a].saturating_add(16 * 1024)
+            > share_cap
+    );
 
     account_cos_queue_flow_dequeue(queue, Some(&flow_b), 16 * 1024);
-    assert_eq!(queue.active_flow_buckets, 1);
-    assert_eq!(queue.flow_bucket_bytes[bucket_b], 0);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 1);
+    assert_eq!(test_flow_fair_state(queue).flow_bucket_bytes[bucket_b], 0);
 }
 
 /// #785 Phase 3 — head-keyed MQFQ ordering with equal-byte
@@ -129,8 +137,7 @@ fn flow_fair_queue_pops_in_virtual_finish_order_local() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     cos_queue_push_back(queue, test_flow_cos_item(1111, 1500));
     cos_queue_push_back(queue, test_flow_cos_item(1111, 1500));
@@ -154,8 +161,8 @@ fn flow_fair_queue_pops_in_virtual_finish_order_local() {
          MQFQ ordering is broken (e.g. TAIL-keyed selection \
          produces the A,A,B,B burst [1111, 1111, 1112, 1113]).",
     );
-    assert_eq!(queue.active_flow_buckets, 0);
-    assert!(queue.flow_rr_buckets.is_empty());
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 0);
+    assert!(test_flow_fair_state(queue).flow_rr_buckets.is_empty());
     // #913 — MQFQ served-finish semantics: vtime tracks the
     // finish time of the last served packet, not the
     // aggregate bytes drained. With pop order
@@ -165,7 +172,8 @@ fn flow_fair_queue_pops_in_virtual_finish_order_local() {
     // = 3000`. Pre-#913 (aggregate-bytes) would have given
     // Σbytes = 6000.
     assert_eq!(
-        queue.queue_vtime, 3000,
+        test_flow_fair_state(queue).queue_vtime,
+        3000,
         "vtime tracks last served packet's finish-time \
          (MQFQ served-finish), not aggregate bytes drained \
          (pre-#913 SFQ V(t))"
@@ -210,8 +218,7 @@ fn flow_fair_queue_mqfq_bytes_rate_fair_on_mixed_packet_sizes() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     cos_queue_push_back(queue, test_flow_cos_item(1111, 3000));
     cos_queue_push_back(queue, test_flow_cos_item(1112, 1500));
@@ -325,8 +332,7 @@ fn mqfq_golden_vector_pop_order_vs_drr() {
             }],
         );
         let queue = &mut root.queues[0];
-        queue.flow_fair = true;
-        queue.flow_hash_seed = 0;
+        enable_test_flow_fair(queue);
 
         for (src_port, bytes) in row.packets {
             cos_queue_push_back(queue, test_flow_cos_item(*src_port, *bytes));
@@ -394,8 +400,7 @@ fn mqfq_idle_flow_reanchors_at_frontier_not_zero() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     let flow_a = test_session_key(3301, 5201);
     let bucket_a = cos_flow_bucket_index(0, Some(&flow_a));
@@ -411,20 +416,24 @@ fn mqfq_idle_flow_reanchors_at_frontier_not_zero() {
     for _ in 0..3 {
         let _ = cos_queue_pop_front(queue);
     }
-    assert_eq!(queue.queue_vtime, 4500);
+    assert_eq!(test_flow_fair_state(queue).queue_vtime, 4500);
 
     // Flow B was idle the whole time. It now returns with a
     // 1200-byte packet. It MUST anchor at queue_vtime+bytes =
     // 4500+1200 = 5700, NOT at 0+1200 = 1200.
     cos_queue_push_back(queue, test_flow_cos_item(3302, 1200));
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_b], 5700,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_b],
+        5700,
         "#785 Phase 3: idle-returning bucket MUST re-anchor at \
          current queue_vtime, not 0. Anchoring at 0 lets the \
          returning flow sweep past all established flows for \
          several rounds (#785 CoV regression).",
     );
-    assert_eq!(queue.flow_bucket_tail_finish_bytes[bucket_b], 5700);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_b],
+        5700
+    );
 }
 
 /// #785 Phase 3 — same mixed-size byte-rate ordering on the
@@ -448,8 +457,7 @@ fn flow_fair_queue_pops_in_virtual_finish_order_prepared() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // 3000-byte packet on 1111, 1500-byte packets on 1112.
     cos_queue_push_back(queue, test_flow_prepared_cos_item(1111, 3000, 64));
@@ -496,10 +504,9 @@ fn mqfq_enqueue_bumps_finish_time_by_byte_count() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
     // Simulate the queue having already drained to vtime=5000.
-    queue.queue_vtime = 5000;
+    test_flow_fair_state_mut(queue).queue_vtime = 5000;
 
     let flow_a = test_session_key(1111, 5201);
     let flow_b = test_session_key(2222, 5201);
@@ -511,7 +518,8 @@ fn mqfq_enqueue_bumps_finish_time_by_byte_count() {
     // to queue.vtime (5000) then + 1500.
     account_cos_queue_flow_enqueue(queue, Some(&flow_a), 1500);
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_a], 6500,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        6500,
         "first packet on an idle bucket re-anchors to queue.vtime \
          + bytes (5000 + 1500 = 6500)",
     );
@@ -519,7 +527,8 @@ fn mqfq_enqueue_bumps_finish_time_by_byte_count() {
     // Packet 2 of flow A — already-active. finish advances by bytes.
     account_cos_queue_flow_enqueue(queue, Some(&flow_a), 1500);
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_a], 8000,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        8000,
         "subsequent packet on the same active bucket advances by \
          exactly bytes (6500 + 1500 = 8000)",
     );
@@ -527,7 +536,8 @@ fn mqfq_enqueue_bumps_finish_time_by_byte_count() {
     // Packet 1 of flow B — independent bucket, same re-anchor.
     account_cos_queue_flow_enqueue(queue, Some(&flow_b), 500);
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_b], 5500,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_b],
+        5500,
         "different-sized packet produces proportional finish \
          delta (5000 + 500 = 5500)",
     );
@@ -556,24 +566,25 @@ fn mqfq_bucket_drain_resets_finish_time() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     let flow = test_session_key(3333, 5201);
     let bucket = cos_flow_bucket_index(0, Some(&flow));
 
     cos_queue_push_back(queue, test_flow_cos_item(3333, 1500));
-    assert!(queue.flow_bucket_head_finish_bytes[bucket] > 0);
-    assert!(queue.flow_bucket_tail_finish_bytes[bucket] > 0);
+    assert!(test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket] > 0);
+    assert!(test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket] > 0);
 
     // Drain the only packet. Bucket is now empty.
     let _ = cos_queue_pop_front(queue);
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket], 0,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket],
+        0,
         "bucket drain to 0 MUST reset head-finish-time",
     );
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket], 0,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket],
+        0,
         "bucket drain to 0 MUST reset tail-finish-time so the \
          next enqueue re-anchors at queue.vtime, not the stale \
          lifetime finish",
@@ -614,8 +625,7 @@ fn mqfq_queue_vtime_tracks_served_finish_time() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Three packets on one flow. After enqueue, bucket_finish
     // = 4500 (the 3rd packet's finish). But queue.vtime should
@@ -624,18 +634,19 @@ fn mqfq_queue_vtime_tracks_served_finish_time() {
     cos_queue_push_back(queue, test_flow_cos_item(1111, 1500));
     cos_queue_push_back(queue, test_flow_cos_item(1111, 1500));
 
-    assert_eq!(queue.queue_vtime, 0);
+    assert_eq!(test_flow_fair_state(queue).queue_vtime, 0);
 
     let _ = cos_queue_pop_front(queue);
     assert_eq!(
-        queue.queue_vtime, 1500,
+        test_flow_fair_state(queue).queue_vtime,
+        1500,
         "first pop: vtime tracks served packet's finish_time \
          (1500 = head_finish of the 1st packet)",
     );
     let _ = cos_queue_pop_front(queue);
-    assert_eq!(queue.queue_vtime, 3000);
+    assert_eq!(test_flow_fair_state(queue).queue_vtime, 3000);
     let _ = cos_queue_pop_front(queue);
-    assert_eq!(queue.queue_vtime, 4500);
+    assert_eq!(test_flow_fair_state(queue).queue_vtime, 4500);
 }
 
 /// #913 — Distinguishing test: vtime must NOT accumulate
@@ -680,8 +691,7 @@ fn mqfq_vtime_does_not_accumulate_across_flows() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Enqueue one 1500-byte packet on each of 10 distinct
     // flows. After enqueue, every bucket has head=tail=1500.
@@ -709,8 +719,8 @@ fn mqfq_vtime_does_not_accumulate_across_flows() {
     for flow_id in accepted {
         cos_queue_push_back(queue, test_flow_cos_item(flow_id, 1500));
     }
-    assert_eq!(queue.queue_vtime, 0);
-    assert_eq!(queue.active_flow_buckets, 10);
+    assert_eq!(test_flow_fair_state(queue).queue_vtime, 0);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 10);
 
     // Pop all 10 items via MQFQ (min head_finish first).
     for _ in 0..10 {
@@ -718,7 +728,8 @@ fn mqfq_vtime_does_not_accumulate_across_flows() {
     }
 
     assert_eq!(
-        queue.queue_vtime, 1500,
+        test_flow_fair_state(queue).queue_vtime,
+        1500,
         "#913 MQFQ: vtime tracks served-packet finish, \
          not aggregate bytes drained. Each pop sees the \
          same head_finish=1500 across the 10 distinct \
@@ -726,7 +737,7 @@ fn mqfq_vtime_does_not_accumulate_across_flows() {
          Pre-#913 aggregate-bytes would have given \
          10 × 1500 = 15000."
     );
-    assert_eq!(queue.active_flow_buckets, 0);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 0);
 }
 
 /// #913 — Codex code review HIGH regression. Scratch-builder
@@ -770,8 +781,7 @@ fn mqfq_scratch_drop_preserves_vtime_for_multi_survivor_restore() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Distinct buckets X / Y / Z with mixed packet sizes so
     // each has a unique head_finish (avoids the "all-equal"
@@ -805,9 +815,9 @@ fn mqfq_scratch_drop_preserves_vtime_for_multi_survivor_restore() {
     let bucket_y = cos_flow_bucket_index(0, Some(&key_y));
     let bucket_z = cos_flow_bucket_index(0, Some(&key_z));
 
-    let pre_batch_head_x = queue.flow_bucket_head_finish_bytes[bucket_x];
-    let pre_batch_head_y = queue.flow_bucket_head_finish_bytes[bucket_y];
-    let pre_batch_head_z = queue.flow_bucket_head_finish_bytes[bucket_z];
+    let pre_batch_head_x = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_x];
+    let pre_batch_head_y = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_y];
+    let pre_batch_head_z = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_z];
     assert_eq!(pre_batch_head_x, 1500);
     assert_eq!(pre_batch_head_y, 2000);
     assert_eq!(pre_batch_head_z, 3000);
@@ -817,46 +827,48 @@ fn mqfq_scratch_drop_preserves_vtime_for_multi_survivor_restore() {
     let popped_y = cos_queue_pop_front(queue).expect("pop Y");
     let _popped_z = cos_queue_pop_front(queue).expect("pop Z");
     assert_eq!(
-        queue.queue_vtime, 3000,
+        test_flow_fair_state(queue).queue_vtime,
+        3000,
         "after X→Y→Z pops, vtime tracks served-finish frontier (max=3000)"
     );
-    assert_eq!(queue.pop_snapshot_stack.len(), 3);
+    assert_eq!(test_flow_fair_state(queue).pop_snapshot_stack.len(), 3);
 
     // Simulate Z dropped (e.g., frame too big in scratch builder).
     cos_queue_clear_orphan_snapshot_after_drop(queue);
-    assert_eq!(queue.pop_snapshot_stack.len(), 2);
+    assert_eq!(test_flow_fair_state(queue).pop_snapshot_stack.len(), 2);
     assert_eq!(
-        queue.queue_vtime, 3000,
+        test_flow_fair_state(queue).queue_vtime,
+        3000,
         "Drop preserves the committed vtime advance"
     );
 
     // Restore Y first (LIFO), then X.
     cos_queue_push_front(queue, popped_y);
     assert!(
-        queue.queue_vtime >= 3000,
+        test_flow_fair_state(queue).queue_vtime >= 3000,
         "after Y restore, vtime must NOT regress below Z's commit \
          (got {})",
-        queue.queue_vtime
+        test_flow_fair_state(queue).queue_vtime
     );
     cos_queue_push_front(queue, popped_x);
     assert!(
-        queue.queue_vtime >= 3000,
+        test_flow_fair_state(queue).queue_vtime >= 3000,
         "after X restore, vtime must NOT regress below Z's commit \
          (got {})",
-        queue.queue_vtime
+        test_flow_fair_state(queue).queue_vtime
     );
     assert!(
-        queue.pop_snapshot_stack.is_empty(),
+        test_flow_fair_state(queue).pop_snapshot_stack.is_empty(),
         "all snapshots consumed by restore"
     );
 
     // X and Y bucket head_finish restored to pre-pop values.
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_x],
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_x],
         pre_batch_head_x
     );
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_y],
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_y],
         pre_batch_head_y
     );
 
@@ -875,7 +887,7 @@ fn mqfq_scratch_drop_preserves_vtime_for_multi_survivor_restore() {
     cos_queue_push_back(queue, test_flow_cos_item(flow_w_id, 100));
     let key_w = test_session_key(flow_w_id, 5201);
     let bucket_w = cos_flow_bucket_index(0, Some(&key_w));
-    let w_head = queue.flow_bucket_head_finish_bytes[bucket_w];
+    let w_head = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_w];
 
     // CORE ASSERTION: W cannot jump ahead of the restored
     // active buckets X/Y. Pre-#913 (or pre-Drop-vtime-fix),
@@ -951,8 +963,7 @@ fn mqfq_same_bucket_multipop_drop_preserves_dropped_item_finish() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Single bucket A, 3 packets with mixed sizes.
     cos_queue_push_back(queue, test_flow_cos_item(8001, 1000));
@@ -963,23 +974,30 @@ fn mqfq_same_bucket_multipop_drop_preserves_dropped_item_finish() {
 
     // Pop A1 (1000B). head_finish advances to 3000.
     let popped_a1 = cos_queue_pop_front(queue).expect("pop A1");
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 3000);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        3000
+    );
 
     // Pop A2 (2000B). head_finish advances to 4500.
     let _popped_a2 = cos_queue_pop_front(queue).expect("pop A2");
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 4500);
-    assert_eq!(queue.pop_snapshot_stack.len(), 2);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        4500
+    );
+    assert_eq!(test_flow_fair_state(queue).pop_snapshot_stack.len(), 2);
 
     // Simulate A2 dropped via the scratch-builder Drop helper.
     cos_queue_clear_orphan_snapshot_after_drop(queue);
-    assert_eq!(queue.pop_snapshot_stack.len(), 1);
+    assert_eq!(test_flow_fair_state(queue).pop_snapshot_stack.len(), 1);
 
     // Restore A1 via push_front. Active-bucket arithmetic:
     // head=4500 - bytes(A3=1500) = 3000. This is the
     // post-A2-pop value; A2's "virtual service" is preserved.
     cos_queue_push_front(queue, popped_a1);
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], 3000,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        3000,
         "post-restore head_finish should be 3000 (post-A2-pop \
          value, preserving A2's virtual-service contribution)"
     );
@@ -991,7 +1009,8 @@ fn mqfq_same_bucket_multipop_drop_preserves_dropped_item_finish() {
     // scheduled between A2's and A3's finish times.
     let _popped_a1_again = cos_queue_pop_front(queue).expect("pop A1 again");
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], 4500,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        4500,
         "Codex R9 regression: after dropping A2 and re-popping \
          A1, A3 must remain at its original finish=4500 (not \
          2500). Otherwise A3 jumps ahead of competing buckets \
@@ -1028,8 +1047,7 @@ fn mqfq_drained_bucket_orphan_drop_preserves_served_finish() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Bucket A: [A1=1000, A2=2000]. Bucket C: [C=2500].
     // Two distinct flow keys so they hash to distinct buckets.
@@ -1048,35 +1066,56 @@ fn mqfq_drained_bucket_orphan_drop_preserves_served_finish() {
     // Pre-pop frontier:
     //   A.head=1000 (A1 finish), A.tail=3000 (A2 finish).
     //   C.head=C.tail=2500.
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 1000);
-    assert_eq!(queue.flow_bucket_tail_finish_bytes[bucket_a], 3000);
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_c], 2500);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        1000
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        3000
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_c],
+        2500
+    );
 
     // Pop A1: head_finish[A] advances to 3000 (A2 finish-time).
     let popped_a1 = cos_queue_pop_front(queue).expect("pop A1");
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 3000);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        3000
+    );
 
     // Pop C: MQFQ picks min-finish-first; with A.head=3000
     // and C.head=2500, C.head < A.head so C is the next pop.
     // After pop: bucket C empty; C.head_finish reset to 0.
     let popped_c = cos_queue_pop_front(queue).expect("pop C");
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_c], 0);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_c],
+        0
+    );
 
     // Pop A2 (last in A): bucket A drains, A.head_finish reset
     // to 0. queue_vtime reflects all three pops.
     let _popped_a2 = cos_queue_pop_front(queue).expect("pop A2");
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 0);
-    assert_eq!(queue.pop_snapshot_stack.len(), 3);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        0
+    );
+    assert_eq!(test_flow_fair_state(queue).pop_snapshot_stack.len(), 3);
 
     // Simulate A2 dropped (e.g., frame too big to transmit).
     cos_queue_clear_orphan_snapshot_after_drop(queue);
-    assert_eq!(queue.pop_snapshot_stack.len(), 2);
+    assert_eq!(test_flow_fair_state(queue).pop_snapshot_stack.len(), 2);
 
     // Restore C via push_front: bucket C is empty so the
     // `was_empty` snapshot path applies. C.head should restore
     // to snap_C.pre_pop_head_finish = 2500.
     cos_queue_push_front(queue, popped_c);
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_c], 2500);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_c],
+        2500
+    );
 
     // Restore A1 via push_front: bucket A is empty so the
     // `was_empty` snapshot path applies. WITHOUT #927, A.head
@@ -1087,14 +1126,14 @@ fn mqfq_drained_bucket_orphan_drop_preserves_served_finish() {
     // = 3000 > C.head = 2500 — MQFQ correctly picks C first.
     cos_queue_push_front(queue, popped_a1);
     assert!(
-        queue.flow_bucket_head_finish_bytes[bucket_a]
-            > queue.flow_bucket_head_finish_bytes[bucket_c],
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a]
+            > test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_c],
         "#927 regression: A.head ({}) must be strictly greater than \
          C.head ({}) so MQFQ picks C first. Without the orphan-cleanup \
          same-bucket frontier bump, A.head would restore to 1000 and \
          A1 would pop before C — inverting their original schedule.",
-        queue.flow_bucket_head_finish_bytes[bucket_a],
-        queue.flow_bucket_head_finish_bytes[bucket_c],
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_c],
     );
 }
 
@@ -1120,9 +1159,8 @@ fn mqfq_shared_exact_admission_downgrades_to_aggregate() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.shared_exact = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
+    queue.config.shared_exact = true;
 
     let target = 0usize;
     seed_sixteen_flow_buckets(queue, target, 1);
@@ -1177,8 +1215,7 @@ fn mqfq_push_front_is_finish_time_neutral_on_active_bucket() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Enqueue three packets on one flow.
     cos_queue_push_back(queue, test_flow_cos_item(4444, 1000));
@@ -1189,10 +1226,10 @@ fn mqfq_push_front_is_finish_time_neutral_on_active_bucket() {
     let bucket = cos_flow_bucket_index(0, Some(&flow));
 
     // Bucket state: head=1000, tail=4500.
-    let pre_pop_head = queue.flow_bucket_head_finish_bytes[bucket];
-    let pre_pop_tail = queue.flow_bucket_tail_finish_bytes[bucket];
-    let pre_pop_bytes = queue.flow_bucket_bytes[bucket];
-    let pre_pop_vtime = queue.queue_vtime;
+    let pre_pop_head = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket];
+    let pre_pop_tail = test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket];
+    let pre_pop_bytes = test_flow_fair_state(queue).flow_bucket_bytes[bucket];
+    let pre_pop_vtime = test_flow_fair_state(queue).queue_vtime;
     assert_eq!(pre_pop_head, 1000);
     assert_eq!(pre_pop_tail, 4500);
     assert_eq!(pre_pop_bytes, 4500);
@@ -1201,24 +1238,35 @@ fn mqfq_push_front_is_finish_time_neutral_on_active_bucket() {
     // Pop head (the 1000-byte packet). Head advances to 3000
     // (= pre_pop_head + bytes(new head = 2000)). vtime += 1000.
     let popped = cos_queue_pop_front(queue).expect("pop");
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket], 3000);
-    assert_eq!(queue.queue_vtime, 1000);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket],
+        3000
+    );
+    assert_eq!(test_flow_fair_state(queue).queue_vtime, 1000);
 
     // Push the same item back onto the front. Head-finish MUST
     // return to the pre-pop value (1000), AND queue_vtime MUST
     // return to its pre-pop value (0) — Codex round-3 HIGH.
     cos_queue_push_front(queue, popped);
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket], pre_pop_head,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket],
+        pre_pop_head,
         "#785 Phase 3 Codex HIGH: push_front must be finish-\
          time-neutral on active buckets. Regression re-opens \
          the MQFQ ordering corruption on TX-ring-full retry.",
     );
     // Tail unchanged — we didn't add at tail.
-    assert_eq!(queue.flow_bucket_tail_finish_bytes[bucket], pre_pop_tail);
-    assert_eq!(queue.flow_bucket_bytes[bucket], pre_pop_bytes);
     assert_eq!(
-        queue.queue_vtime, pre_pop_vtime,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket],
+        pre_pop_tail
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket],
+        pre_pop_bytes
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).queue_vtime,
+        pre_pop_vtime,
         "#785 Phase 3 Codex round-3 HIGH: queue_vtime must be \
          round-trip neutral on pop→push_front. Without this, \
          newly-active flows inherit an inflated vtime anchor \
@@ -1257,24 +1305,23 @@ fn mqfq_push_front_is_neutral_on_drained_bucket_round_trip() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Simulate a vtime that's already advanced (as it would
     // be mid-stream when other flows have drained), then
     // enqueue a single packet on flow A. The idle-bucket
     // re-anchor writes head=tail=max(tail=0, vtime=5000)+1500
     // = 6500.
-    queue.queue_vtime = 5000;
+    test_flow_fair_state_mut(queue).queue_vtime = 5000;
     let flow_a = test_session_key(7777, 5201);
     let bucket_a = cos_flow_bucket_index(0, Some(&flow_a));
     cos_queue_push_back(queue, test_flow_cos_item(7777, 1500));
 
-    let pre_pop_head = queue.flow_bucket_head_finish_bytes[bucket_a];
-    let pre_pop_tail = queue.flow_bucket_tail_finish_bytes[bucket_a];
-    let pre_pop_bytes = queue.flow_bucket_bytes[bucket_a];
-    let pre_pop_vtime = queue.queue_vtime;
-    let pre_pop_active = queue.active_flow_buckets;
+    let pre_pop_head = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a];
+    let pre_pop_tail = test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a];
+    let pre_pop_bytes = test_flow_fair_state(queue).flow_bucket_bytes[bucket_a];
+    let pre_pop_vtime = test_flow_fair_state(queue).queue_vtime;
+    let pre_pop_active = test_flow_fair_state(queue).active_flow_buckets;
     assert_eq!(pre_pop_head, 6500);
     assert_eq!(pre_pop_tail, 6500);
     assert_eq!(pre_pop_bytes, 1500);
@@ -1283,11 +1330,20 @@ fn mqfq_push_front_is_neutral_on_drained_bucket_round_trip() {
     // Pop the sole item. Bucket drains: head=tail=0, active
     // count -=1, vtime advances to 6500.
     let popped = cos_queue_pop_front(queue).expect("pop");
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 0);
-    assert_eq!(queue.flow_bucket_tail_finish_bytes[bucket_a], 0);
-    assert_eq!(queue.flow_bucket_bytes[bucket_a], 0);
-    assert_eq!(queue.queue_vtime, pre_pop_vtime + 1500);
-    assert!(queue.flow_bucket_items[bucket_a].is_empty());
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        0
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        0
+    );
+    assert_eq!(test_flow_fair_state(queue).flow_bucket_bytes[bucket_a], 0);
+    assert_eq!(
+        test_flow_fair_state(queue).queue_vtime,
+        pre_pop_vtime + 1500
+    );
+    assert!(test_flow_fair_state(queue).flow_bucket_items[bucket_a].is_empty());
 
     // Restore it via push_front. Without the snapshot fix this
     // re-anchors to vtime+bytes = 6500+1500 = 8000 — one packet
@@ -1296,20 +1352,34 @@ fn mqfq_push_front_is_neutral_on_drained_bucket_round_trip() {
     cos_queue_push_front(queue, popped);
 
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], pre_pop_head,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        pre_pop_head,
         "#785 Phase 3 Codex round-3 HIGH / Rust MEDIUM #1: \
          push_front on a drained bucket must restore pre-pop \
          head exactly, not re-anchor one packet past it.",
     );
-    assert_eq!(queue.flow_bucket_tail_finish_bytes[bucket_a], pre_pop_tail);
-    assert_eq!(queue.flow_bucket_bytes[bucket_a], pre_pop_bytes);
     assert_eq!(
-        queue.queue_vtime, pre_pop_vtime,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        pre_pop_tail
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_a],
+        pre_pop_bytes
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).queue_vtime,
+        pre_pop_vtime,
         "#785 Phase 3: queue_vtime must rewind to pre-pop on \
          drained-bucket round-trip too.",
     );
-    assert_eq!(queue.active_flow_buckets, pre_pop_active);
-    assert_eq!(queue.flow_bucket_items[bucket_a].len(), 1);
+    assert_eq!(
+        test_flow_fair_state(queue).active_flow_buckets,
+        pre_pop_active
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_items[bucket_a].len(),
+        1
+    );
 }
 
 /// #785 Phase 3 Codex round-2 NEW-1 — batched rollback on a
@@ -1350,15 +1420,14 @@ fn mqfq_batched_rollback_restores_queue_vtime() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Advance `queue_vtime` so that later flows anchor ahead
     // of zero (stresses the cross-bucket bug — an earlier pop
     // whose bucket drains resets head/tail to 0, then
     // `max(0, queue_vtime) + bytes` on re-enqueue overshoots
     // the pre-pop head).
-    queue.queue_vtime = 3000;
+    test_flow_fair_state_mut(queue).queue_vtime = 3000;
 
     let flow_a = test_session_key(5555, 5201);
     let bucket_a = cos_flow_bucket_index(0, Some(&flow_a));
@@ -1368,13 +1437,13 @@ fn mqfq_batched_rollback_restores_queue_vtime() {
     cos_queue_push_back(queue, test_flow_cos_item(5555, 800));
     cos_queue_push_back(queue, test_flow_cos_item(5555, 1400));
 
-    let pre_batch_head = queue.flow_bucket_head_finish_bytes[bucket_a];
-    let pre_batch_tail = queue.flow_bucket_tail_finish_bytes[bucket_a];
-    let pre_batch_bytes = queue.flow_bucket_bytes[bucket_a];
-    let pre_batch_vtime = queue.queue_vtime;
-    let pre_batch_active = queue.active_flow_buckets;
-    let pre_batch_peak = queue.active_flow_buckets_peak;
-    let pre_batch_items = queue.flow_bucket_items[bucket_a].len();
+    let pre_batch_head = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a];
+    let pre_batch_tail = test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a];
+    let pre_batch_bytes = test_flow_fair_state(queue).flow_bucket_bytes[bucket_a];
+    let pre_batch_vtime = test_flow_fair_state(queue).queue_vtime;
+    let pre_batch_active = test_flow_fair_state(queue).active_flow_buckets;
+    let pre_batch_peak = test_flow_fair_state(queue).active_flow_buckets_peak;
+    let pre_batch_items = test_flow_fair_state(queue).flow_bucket_items[bucket_a].len();
     assert_eq!(pre_batch_items, 4);
 
     // Drain all 4 into scratch. Stack grows to 4 snapshots.
@@ -1384,7 +1453,7 @@ fn mqfq_batched_rollback_restores_queue_vtime() {
     }
     assert_eq!(scratch.len(), 4);
     assert_eq!(
-        queue.pop_snapshot_stack.len(),
+        test_flow_fair_state(queue).pop_snapshot_stack.len(),
         4,
         "NEW-1: every pop must push its own snapshot onto the \
          per-queue LIFO stack",
@@ -1397,41 +1466,50 @@ fn mqfq_batched_rollback_restores_queue_vtime() {
     }
 
     assert!(
-        queue.pop_snapshot_stack.is_empty(),
+        test_flow_fair_state(queue).pop_snapshot_stack.is_empty(),
         "NEW-1: snapshot stack must be fully consumed after a \
          complete rollback",
     );
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], pre_batch_head,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        pre_batch_head,
         "#785 Phase 3 NEW-1: batched rollback must restore \
          bucket HEAD finish exactly (single-bucket case)",
     );
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_a], pre_batch_tail,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        pre_batch_tail,
         "#785 Phase 3 NEW-1: batched rollback must restore \
          bucket TAIL finish exactly (single-bucket case)",
     );
     assert_eq!(
-        queue.flow_bucket_bytes[bucket_a], pre_batch_bytes,
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_a],
+        pre_batch_bytes,
         "#785 Phase 3 NEW-1: batched rollback must restore \
          bucket byte count exactly",
     );
     assert_eq!(
-        queue.queue_vtime, pre_batch_vtime,
+        test_flow_fair_state(queue).queue_vtime,
+        pre_batch_vtime,
         "#785 Phase 3 NEW-1: batched rollback must restore \
          queue_vtime exactly — symmetric per-item rewind",
     );
     assert_eq!(
-        queue.active_flow_buckets, pre_batch_active,
+        test_flow_fair_state(queue).active_flow_buckets,
+        pre_batch_active,
         "#785 Phase 3 NEW-1: batched rollback must leave \
          active_flow_buckets unchanged",
     );
     assert_eq!(
-        queue.active_flow_buckets_peak, pre_batch_peak,
+        test_flow_fair_state(queue).active_flow_buckets_peak,
+        pre_batch_peak,
         "#785 Phase 3 NEW-1: peak counter is monotonic — \
          rollback must not bump it (no fresh high-water mark)",
     );
-    assert_eq!(queue.flow_bucket_items[bucket_a].len(), pre_batch_items);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_items[bucket_a].len(),
+        pre_batch_items
+    );
 }
 
 /// #785 Phase 3 Codex round-2 NEW-1 — batched rollback across
@@ -1484,11 +1562,10 @@ fn mqfq_batched_rollback_across_multiple_buckets() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Step 1: low vtime so A and B anchor near 0.
-    queue.queue_vtime = 100;
+    test_flow_fair_state_mut(queue).queue_vtime = 100;
 
     let flow_a = test_session_key(6001, 5201);
     let bucket_a = cos_flow_bucket_index(0, Some(&flow_a));
@@ -1498,24 +1575,30 @@ fn mqfq_batched_rollback_across_multiple_buckets() {
 
     cos_queue_push_back(queue, test_flow_cos_item(6001, 1500));
     cos_queue_push_back(queue, test_flow_cos_item(6002, 900));
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 1600);
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_b], 1000);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        1600
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_b],
+        1000
+    );
 
     // Step 2: simulate other-flow drain activity. vtime
     // advances past both buckets' head finish times. This is
     // the condition that makes the old single-Option rollback
     // overshoot on the earlier-popped bucket.
-    queue.queue_vtime = 5000;
+    test_flow_fair_state_mut(queue).queue_vtime = 5000;
 
-    let pre_batch_head_a = queue.flow_bucket_head_finish_bytes[bucket_a];
-    let pre_batch_tail_a = queue.flow_bucket_tail_finish_bytes[bucket_a];
-    let pre_batch_bytes_a = queue.flow_bucket_bytes[bucket_a];
-    let pre_batch_head_b = queue.flow_bucket_head_finish_bytes[bucket_b];
-    let pre_batch_tail_b = queue.flow_bucket_tail_finish_bytes[bucket_b];
-    let pre_batch_bytes_b = queue.flow_bucket_bytes[bucket_b];
-    let pre_batch_vtime = queue.queue_vtime;
-    let pre_batch_active = queue.active_flow_buckets;
-    let pre_batch_peak = queue.active_flow_buckets_peak;
+    let pre_batch_head_a = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a];
+    let pre_batch_tail_a = test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a];
+    let pre_batch_bytes_a = test_flow_fair_state(queue).flow_bucket_bytes[bucket_a];
+    let pre_batch_head_b = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_b];
+    let pre_batch_tail_b = test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_b];
+    let pre_batch_bytes_b = test_flow_fair_state(queue).flow_bucket_bytes[bucket_b];
+    let pre_batch_vtime = test_flow_fair_state(queue).queue_vtime;
+    let pre_batch_active = test_flow_fair_state(queue).active_flow_buckets;
+    let pre_batch_peak = test_flow_fair_state(queue).active_flow_buckets_peak;
     assert_eq!(pre_batch_head_a, 1600);
     assert_eq!(pre_batch_head_b, 1000);
     assert_eq!(pre_batch_vtime, 5000);
@@ -1529,10 +1612,16 @@ fn mqfq_batched_rollback_across_multiple_buckets() {
         scratch.push(item);
     }
     assert_eq!(scratch.len(), 2);
-    assert_eq!(queue.pop_snapshot_stack.len(), 2);
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 0);
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_b], 0);
-    assert_eq!(queue.active_flow_buckets, 0);
+    assert_eq!(test_flow_fair_state(queue).pop_snapshot_stack.len(), 2);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        0
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_b],
+        0
+    );
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 0);
 
     // Roll back LIFO. scratch.pop() returns A (popped second)
     // first, then B. Each push_front consumes its own
@@ -1542,44 +1631,58 @@ fn mqfq_batched_rollback_across_multiple_buckets() {
     }
 
     assert!(
-        queue.pop_snapshot_stack.is_empty(),
+        test_flow_fair_state(queue).pop_snapshot_stack.is_empty(),
         "NEW-1: snapshot stack must be fully consumed after a \
          complete cross-bucket rollback",
     );
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], pre_batch_head_a,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        pre_batch_head_a,
         "#785 Phase 3 NEW-1: cross-bucket rollback — A's HEAD \
          must restore from A's OWN per-pop snapshot, not re- \
          anchor off the rewound vtime (that overshoots).",
     );
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_a], pre_batch_tail_a,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        pre_batch_tail_a,
         "#785 Phase 3 NEW-1: cross-bucket rollback — A's TAIL \
          must restore exactly.",
     );
-    assert_eq!(queue.flow_bucket_bytes[bucket_a], pre_batch_bytes_a);
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_b], pre_batch_head_b,
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_a],
+        pre_batch_bytes_a
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_b],
+        pre_batch_head_b,
         "#785 Phase 3 NEW-1: cross-bucket rollback — B's HEAD \
          must restore exactly (this is the 'most recent pop' \
          case that worked with the single-snapshot impl too).",
     );
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_b],
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_b],
         pre_batch_tail_b,
     );
-    assert_eq!(queue.flow_bucket_bytes[bucket_b], pre_batch_bytes_b);
     assert_eq!(
-        queue.queue_vtime, pre_batch_vtime,
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_b],
+        pre_batch_bytes_b
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).queue_vtime,
+        pre_batch_vtime,
         "#785 Phase 3 NEW-1: vtime must rewind symmetrically \
          across a cross-bucket batch rollback.",
     );
     assert_eq!(
-        queue.active_flow_buckets, pre_batch_active,
+        test_flow_fair_state(queue).active_flow_buckets,
+        pre_batch_active,
         "#785 Phase 3 NEW-1: cross-bucket rollback must re- \
          activate both buckets.",
     );
-    assert_eq!(queue.active_flow_buckets_peak, pre_batch_peak);
+    assert_eq!(
+        test_flow_fair_state(queue).active_flow_buckets_peak,
+        pre_batch_peak
+    );
 }
 
 /// #785 Phase 3 Codex round-3 NEW-2 / Rust reviewer LOW —
@@ -1628,10 +1731,9 @@ fn mqfq_pop_snapshot_stack_bounded_to_tx_batch_size() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
-    let pre_cap = queue.pop_snapshot_stack.capacity();
+    let pre_cap = test_flow_fair_state(queue).pop_snapshot_stack.capacity();
     assert_eq!(
         pre_cap, TX_BATCH_SIZE,
         "stack must be preallocated to TX_BATCH_SIZE",
@@ -1653,13 +1755,13 @@ fn mqfq_pop_snapshot_stack_bounded_to_tx_batch_size() {
         let popped = cos_queue_pop_front(queue);
         assert!(popped.is_some(), "queue still has items");
         assert!(
-            queue.pop_snapshot_stack.len() <= TX_BATCH_SIZE,
+            test_flow_fair_state(queue).pop_snapshot_stack.len() <= TX_BATCH_SIZE,
             "NEW-2: pop_snapshot_stack must never exceed \
              TX_BATCH_SIZE during a single drain batch",
         );
     }
     assert_eq!(
-        queue.pop_snapshot_stack.len(),
+        test_flow_fair_state(queue).pop_snapshot_stack.len(),
         TX_BATCH_SIZE,
         "full-batch commit should leave exactly TX_BATCH_SIZE \
          snapshots (no push_front rollback consumed any)",
@@ -1668,7 +1770,7 @@ fn mqfq_pop_snapshot_stack_bounded_to_tx_batch_size() {
     // Simulate what `drain_exact_*_flow_fair` does at batch
     // start: clear the stack before the next batch drains.
     // This is the fix point.
-    queue.pop_snapshot_stack.clear();
+    test_flow_fair_state_mut(queue).pop_snapshot_stack.clear();
 
     // Batch 2: drain the remaining 64 items. Stack must stay
     // bounded; without the batch-start clear this would grow
@@ -1677,7 +1779,7 @@ fn mqfq_pop_snapshot_stack_bounded_to_tx_batch_size() {
         let popped = cos_queue_pop_front(queue);
         assert!(popped.is_some());
         assert!(
-            queue.pop_snapshot_stack.len() <= TX_BATCH_SIZE,
+            test_flow_fair_state(queue).pop_snapshot_stack.len() <= TX_BATCH_SIZE,
             "NEW-2: cross-batch drain must stay bounded after \
              the drain-start clear",
         );
@@ -1687,7 +1789,7 @@ fn mqfq_pop_snapshot_stack_bounded_to_tx_batch_size() {
     // TX_BATCH_SIZE exactly. A realloc would prove the bound
     // was violated at some point.
     assert_eq!(
-        queue.pop_snapshot_stack.capacity(),
+        test_flow_fair_state(queue).pop_snapshot_stack.capacity(),
         pre_cap,
         "NEW-2: stack must not realloc past TX_BATCH_SIZE",
     );
@@ -1730,10 +1832,9 @@ fn mqfq_drain_all_teardown_clears_stack() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
-    let pre_cap = queue.pop_snapshot_stack.capacity();
+    let pre_cap = test_flow_fair_state(queue).pop_snapshot_stack.capacity();
     assert_eq!(pre_cap, TX_BATCH_SIZE);
 
     // Enqueue more items than the snapshot stack could hold
@@ -1750,7 +1851,7 @@ fn mqfq_drain_all_teardown_clears_stack() {
         cos_queue_push_back(queue, test_flow_cos_item(src_port, 100));
     }
     // push_back clears the stack; confirm pre-condition.
-    assert!(queue.pop_snapshot_stack.is_empty());
+    assert!(test_flow_fair_state(queue).pop_snapshot_stack.is_empty());
 
     // Drain via the teardown helper. Must NOT grow the stack
     // and must NOT trip the pop_front debug_assert on overflow.
@@ -1761,12 +1862,12 @@ fn mqfq_drain_all_teardown_clears_stack() {
         "drain_all must yield every enqueued item",
     );
     assert!(
-        queue.pop_snapshot_stack.is_empty(),
+        test_flow_fair_state(queue).pop_snapshot_stack.is_empty(),
         "NEW-2: teardown drain path must leave the snapshot \
          stack empty — no stale snapshots resident",
     );
     assert_eq!(
-        queue.pop_snapshot_stack.capacity(),
+        test_flow_fair_state(queue).pop_snapshot_stack.capacity(),
         pre_cap,
         "NEW-2: teardown must not realloc past TX_BATCH_SIZE",
     );
@@ -1804,8 +1905,7 @@ fn mqfq_brief_idle_reentry_exercises_both_max_arms() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     let flow_a = test_session_key(1001, 5201);
     let bucket_a = cos_flow_bucket_index(0, Some(&flow_a));
@@ -1817,28 +1917,41 @@ fn mqfq_brief_idle_reentry_exercises_both_max_arms() {
     // goes idle with head/tail=0.
     cos_queue_push_back(queue, test_flow_cos_item(1001, 1500));
     let _ = cos_queue_pop_front(queue);
-    assert_eq!(queue.flow_bucket_head_finish_bytes[bucket_a], 0);
-    assert_eq!(queue.flow_bucket_tail_finish_bytes[bucket_a], 0);
-    assert_eq!(queue.queue_vtime, 1500);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        0
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        0
+    );
+    assert_eq!(test_flow_fair_state(queue).queue_vtime, 1500);
 
     // Flow B: one packet, drain it. Advances queue_vtime to
     // 1500 + 800 = 2300 (small amount vs. flow A's lifetime).
     cos_queue_push_back(queue, test_flow_cos_item(1002, 800));
     let _ = cos_queue_pop_front(queue);
-    assert_eq!(queue.queue_vtime, 2300);
-    assert_eq!(queue.flow_bucket_tail_finish_bytes[bucket_b], 0);
+    assert_eq!(test_flow_fair_state(queue).queue_vtime, 2300);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_b],
+        0
+    );
 
     // Flow A returns with a 1200-byte packet. tail_finish[A]=0,
     // queue_vtime=2300 → max picks vtime → head = tail = 2300
     // + 1200 = 3500. This is the "brief-idle" re-anchor.
     cos_queue_push_back(queue, test_flow_cos_item(1001, 1200));
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], 3500,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        3500,
         "#785 Phase 3 brief-idle re-entry: first arm of max \
          (tail_finish=0 < queue_vtime=2300) must anchor at \
          queue_vtime + bytes",
     );
-    assert_eq!(queue.flow_bucket_tail_finish_bytes[bucket_a], 3500);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        3500
+    );
 
     // Flow A appends a second 900-byte packet on its now-
     // active bucket. tail_finish=3500 > queue_vtime=2300 →
@@ -1846,13 +1959,15 @@ fn mqfq_brief_idle_reentry_exercises_both_max_arms() {
     // unchanged (head packet is still the first one, 3500).
     cos_queue_push_back(queue, test_flow_cos_item(1001, 900));
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], 3500,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        3500,
         "#785 Phase 3 brief-idle re-entry: active-bucket \
          enqueue must NOT alter head (head packet didn't \
          change)",
     );
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_a], 4400,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        4400,
         "#785 Phase 3 brief-idle re-entry: second arm of max \
          (tail_finish=3500 > queue_vtime=2300) must anchor at \
          tail_finish + bytes",

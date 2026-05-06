@@ -12,11 +12,11 @@ use crate::afxdp::PROTO_TCP;
 fn surplus_phase_selects_non_exact_queue_without_guarantee_tokens() {
     let mut root = test_cos_runtime_with_exact(false);
     root.tokens = 1500;
-    root.queues[0].last_refill_ns = 1;
-    root.queues[0].tokens = 0;
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
@@ -36,11 +36,11 @@ fn surplus_phase_selects_non_exact_queue_without_guarantee_tokens() {
 fn surplus_phase_skips_exact_queue_without_guarantee_tokens() {
     let mut root = test_cos_runtime_with_exact(true);
     root.tokens = 1500;
-    root.queues[0].last_refill_ns = 1;
-    root.queues[0].tokens = 0;
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
@@ -49,18 +49,18 @@ fn surplus_phase_skips_exact_queue_without_guarantee_tokens() {
 }
 
 // #915: surplus_sharing=true on an exact queue with empty
-// queue.tokens — surplus selector picks it up because the
-// `queue.exact && !surplus_sharing` skip evaluates to false.
+// queue.hot.tokens — surplus selector picks it up because the
+// `queue.config.exact && !surplus_sharing` skip evaluates to false.
 #[test]
 fn surplus_phase_includes_exact_with_surplus_sharing() {
     let mut root = test_cos_runtime_with_exact(true);
-    root.queues[0].surplus_sharing = true;
+    root.queues[0].config.surplus_sharing = true;
     root.tokens = 1500;
-    root.queues[0].last_refill_ns = 1;
-    root.queues[0].tokens = 0;
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
@@ -75,7 +75,7 @@ fn surplus_phase_includes_exact_with_surplus_sharing() {
 }
 
 // #915 §4.5 isolation test: an exact queue with surplus_sharing
-// must NOT be parked when queue.tokens runs out in the
+// must NOT be parked when queue.hot.tokens runs out in the
 // exact-guarantee selector. The drain_park_queue_tokens counter
 // still increments (diagnostic parity), but `runnable` stays
 // true and `parked` stays false so surplus phase can pick the
@@ -84,38 +84,48 @@ fn surplus_phase_includes_exact_with_surplus_sharing() {
 #[test]
 fn exact_with_surplus_sharing_not_parked_on_queue_token_starvation() {
     let mut root = test_cos_runtime_with_exact(true);
-    root.queues[0].surplus_sharing = true;
+    root.queues[0].config.surplus_sharing = true;
     root.tokens = 1_000_000; // root has plenty of tokens
-    root.queues[0].last_refill_ns = 1;
-    root.queues[0].tokens = 0; // queue bucket empty
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
-    root.queues[0].parked = false;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.tokens = 0; // queue bucket empty
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.queues[0].hot.parked = false;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
     let pre_park_count = root.queues[0]
+        .telemetry
         .owner_profile
         .drain_park_queue_tokens
         .load(std::sync::atomic::Ordering::Relaxed);
 
-    let selection =
-        select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
-    // Selector returns None because queue.tokens<head_len AND
+    let selection = select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
+    // Selector returns None because queue.hot.tokens<head_len AND
     // surplus_sharing skips parking.
-    assert!(selection.is_none(),
-        "exact-guarantee selector must not select a token-starved queue");
-    assert!(!root.queues[0].parked,
-        "surplus_sharing exact queue must NOT be parked");
-    assert!(root.queues[0].runnable,
-        "surplus_sharing exact queue must stay runnable");
+    assert!(
+        selection.is_none(),
+        "exact-guarantee selector must not select a token-starved queue"
+    );
+    assert!(
+        !root.queues[0].hot.parked,
+        "surplus_sharing exact queue must NOT be parked"
+    );
+    assert!(
+        root.queues[0].hot.runnable,
+        "surplus_sharing exact queue must stay runnable"
+    );
     let post_park_count = root.queues[0]
+        .telemetry
         .owner_profile
         .drain_park_queue_tokens
         .load(std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(post_park_count, pre_park_count + 1,
-        "drain_park_queue_tokens must still increment for diagnostic parity");
+    assert_eq!(
+        post_park_count,
+        pre_park_count + 1,
+        "drain_park_queue_tokens must still increment for diagnostic parity"
+    );
 }
 
 // #915 Codex round-2 MINOR fix: the root-starvation branch in
@@ -124,7 +134,7 @@ fn exact_with_surplus_sharing_not_parked_on_queue_token_starvation() {
 // addressed only the queue-token branch in plan v3; round-1
 // code review caught that the EARLIER root-token branch had
 // the same problem). Pin that branch directly: when both
-// root.tokens AND queue.tokens are short, a surplus_sharing
+// root.tokens AND queue.hot.tokens are short, a surplus_sharing
 // exact queue still must NOT be parked by the exact-guarantee
 // selector. The drain_park_root_tokens diagnostic counter
 // still increments. The same-pass surplus selector then
@@ -132,59 +142,77 @@ fn exact_with_surplus_sharing_not_parked_on_queue_token_starvation() {
 #[test]
 fn exact_with_surplus_sharing_not_parked_on_root_token_starvation() {
     let mut root = test_cos_runtime_with_exact(true);
-    root.queues[0].surplus_sharing = true;
+    root.queues[0].config.surplus_sharing = true;
     root.tokens = 0; // root bucket empty (root-token starvation)
-    root.queues[0].last_refill_ns = 1;
-    root.queues[0].tokens = 0; // queue bucket also empty
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
-    root.queues[0].parked = false;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.tokens = 0; // queue bucket also empty
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.queues[0].hot.parked = false;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
     let pre_root_park = root.queues[0]
+        .telemetry
         .owner_profile
         .drain_park_root_tokens
         .load(std::sync::atomic::Ordering::Relaxed);
     let pre_queue_park = root.queues[0]
+        .telemetry
         .owner_profile
         .drain_park_queue_tokens
         .load(std::sync::atomic::Ordering::Relaxed);
 
-    let selection =
-        select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
+    let selection = select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
     // Selector returns None because root.tokens<head_len; the
     // root-starvation no-park branch fires first, so the queue
     // is not parked.
-    assert!(selection.is_none(),
-        "exact-guarantee selector must not select a root-starved queue");
-    assert!(!root.queues[0].parked,
-        "surplus_sharing exact queue must NOT be parked on root-token starvation");
-    assert!(root.queues[0].runnable,
-        "surplus_sharing exact queue must stay runnable");
+    assert!(
+        selection.is_none(),
+        "exact-guarantee selector must not select a root-starved queue"
+    );
+    assert!(
+        !root.queues[0].hot.parked,
+        "surplus_sharing exact queue must NOT be parked on root-token starvation"
+    );
+    assert!(
+        root.queues[0].hot.runnable,
+        "surplus_sharing exact queue must stay runnable"
+    );
     let post_root_park = root.queues[0]
+        .telemetry
         .owner_profile
         .drain_park_root_tokens
         .load(std::sync::atomic::Ordering::Relaxed);
     let post_queue_park = root.queues[0]
+        .telemetry
         .owner_profile
         .drain_park_queue_tokens
         .load(std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(post_root_park, pre_root_park + 1,
-        "drain_park_root_tokens must still increment for diagnostic parity");
-    assert_eq!(post_queue_park, pre_queue_park,
-        "queue-token branch must NOT fire (we exited via root-token branch)");
+    assert_eq!(
+        post_root_park,
+        pre_root_park + 1,
+        "drain_park_root_tokens must still increment for diagnostic parity"
+    );
+    assert_eq!(
+        post_queue_park, pre_queue_park,
+        "queue-token branch must NOT fire (we exited via root-token branch)"
+    );
 
     // The same-pass surplus selector is the eventual park site
     // for root-token starvation: it uses require_queue_tokens=false
     // so the wake_tick is bound only by root refill. Verify it
     // parks the queue rather than leaving it spinning.
     let surplus = select_cos_surplus_batch(&mut root, 1);
-    assert!(surplus.is_none(),
-        "surplus selector returns None when root.tokens<head_len");
-    assert!(root.queues[0].parked,
-        "surplus selector must park the queue on root-token starvation");
+    assert!(
+        surplus.is_none(),
+        "surplus selector returns None when root.tokens<head_len"
+    );
+    assert!(
+        root.queues[0].hot.parked,
+        "surplus selector must park the queue on root-token starvation"
+    );
 }
 
 // #915 §4.5 contrast: a non-surplus-sharing exact queue still
@@ -194,17 +222,19 @@ fn exact_without_surplus_sharing_parks_on_queue_token_starvation() {
     let mut root = test_cos_runtime_with_exact(true);
     // surplus_sharing left as false (default)
     root.tokens = 1_000_000;
-    root.queues[0].last_refill_ns = 1;
-    root.queues[0].tokens = 0;
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
     let _ = select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
-    assert!(root.queues[0].parked,
-        "non-surplus-sharing exact queue must be parked on queue-token starvation");
+    assert!(
+        root.queues[0].hot.parked,
+        "non-surplus-sharing exact queue must be parked on queue-token starvation"
+    );
 }
 
 // #915 production-order end-to-end smoke (Codex round-2 MINOR 4).
@@ -213,57 +243,60 @@ fn exact_without_surplus_sharing_parks_on_queue_token_starvation() {
 // — exactly what `drain_shaped_tx → service_exact_guarantee_*
 // → build_nonexact_cos_batch → select_cos_surplus_batch` does in
 // the real path. A surplus-sharing exact queue with empty
-// queue.tokens must NOT be picked by the exact-guarantee
+// queue.hot.tokens must NOT be picked by the exact-guarantee
 // selector AND MUST be picked by the surplus selector on the
 // same drain attempt.
 #[test]
 fn surplus_sharing_exact_reaches_surplus_through_full_drain_pass() {
     let mut root = test_cos_runtime_with_exact(true);
-    root.queues[0].surplus_sharing = true;
+    root.queues[0].config.surplus_sharing = true;
     root.tokens = 1500;
-    root.queues[0].last_refill_ns = 1;
-    root.queues[0].tokens = 0;
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
     // First: production-order exact-guarantee selector. Returns
-    // None because queue.tokens<head_len AND no parking (§4.5).
-    let exact_pick =
-        select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
-    assert!(exact_pick.is_none(),
-        "exact-guarantee selector must decline token-starved surplus_sharing queue");
+    // None because queue.hot.tokens<head_len AND no parking (§4.5).
+    let exact_pick = select_exact_cos_guarantee_queue_with_fast_path(&mut root, &[], 1);
+    assert!(
+        exact_pick.is_none(),
+        "exact-guarantee selector must decline token-starved surplus_sharing queue"
+    );
 
     // Then: surplus selector picks the queue up on the same pass.
     let surplus_pick = select_cos_surplus_batch(&mut root, 1);
-    assert!(matches!(
-        surplus_pick,
-        Some(CoSBatch::Local {
-            phase: CoSServicePhase::Surplus,
-            ..
-        })
-    ),
+    assert!(
+        matches!(
+            surplus_pick,
+            Some(CoSBatch::Local {
+                phase: CoSServicePhase::Surplus,
+                ..
+            })
+        ),
         "surplus selector must pick up surplus_sharing exact queue \
-         after exact-guarantee declines");
+         after exact-guarantee declines"
+    );
 }
 
 #[test]
 fn guarantee_phase_parks_non_exact_queue_on_root_only_wakeup() {
     let mut root = test_cos_runtime_with_exact(false);
     root.tokens = 0;
-    root.queues[0].last_refill_ns = 1;
-    root.queues[0].tokens = 0;
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
     assert!(select_cos_guarantee_batch(&mut root, 1).is_none());
-    assert!(root.queues[0].parked);
-    assert_eq!(root.queues[0].next_wakeup_tick, 30);
+    assert!(root.queues[0].hot.parked);
+    assert_eq!(root.queues[0].hot.next_wakeup_tick, 30);
 }
 
 #[test]
@@ -283,12 +316,12 @@ fn guarantee_phase_limits_service_to_visit_quantum() {
         }],
     );
     root.tokens = 64 * 1024;
-    root.queues[0].tokens = 64 * 1024;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.tokens = 64 * 1024;
+    root.queues[0].hot.runnable = true;
     for _ in 0..4 {
-        root.queues[0].items.push_back(test_cos_item(1500));
+        root.queues[0].hot.items.push_back(test_cos_item(1500));
     }
-    root.queues[0].queued_bytes = 4 * 1500;
+    root.queues[0].hot.queued_bytes = 4 * 1500;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
@@ -297,7 +330,7 @@ fn guarantee_phase_limits_service_to_visit_quantum() {
         CoSBatch::Local { items, .. } => assert_eq!(items.len(), 1),
         CoSBatch::Prepared { .. } => panic!("expected local batch"),
     }
-    assert_eq!(root.queues[0].items.len(), 3);
+    assert_eq!(root.queues[0].hot.items.len(), 3);
 }
 
 #[test]
@@ -317,12 +350,12 @@ fn guarantee_phase_allows_larger_high_rate_visit_quantum() {
         }],
     );
     root.tokens = 256 * 1024;
-    root.queues[0].tokens = 256 * 1024;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.tokens = 256 * 1024;
+    root.queues[0].hot.runnable = true;
     for _ in 0..200 {
-        root.queues[0].items.push_back(test_cos_item(1500));
+        root.queues[0].hot.items.push_back(test_cos_item(1500));
     }
-    root.queues[0].queued_bytes = 200 * 1500;
+    root.queues[0].hot.queued_bytes = 200 * 1500;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
@@ -337,7 +370,7 @@ fn guarantee_phase_allows_larger_high_rate_visit_quantum() {
         CoSBatch::Local { items, .. } => assert_eq!(items.len(), TX_BATCH_SIZE),
         CoSBatch::Prepared { .. } => panic!("expected local batch"),
     }
-    assert_eq!(root.queues[0].items.len(), 200 - TX_BATCH_SIZE);
+    assert_eq!(root.queues[0].hot.items.len(), 200 - TX_BATCH_SIZE);
 }
 
 /// #920: separate from the batch-cap test above. Asserts the
@@ -416,11 +449,11 @@ fn guarantee_phase_rotates_between_backlogged_queues() {
     );
     root.tokens = 64 * 1024;
     for queue in &mut root.queues {
-        queue.tokens = 64 * 1024;
-        queue.runnable = true;
-        queue.items.push_back(test_cos_item(1500));
-        queue.items.push_back(test_cos_item(1500));
-        queue.queued_bytes = 2 * 1500;
+        queue.hot.tokens = 64 * 1024;
+        queue.hot.runnable = true;
+        queue.hot.items.push_back(test_cos_item(1500));
+        queue.hot.items.push_back(test_cos_item(1500));
+        queue.hot.queued_bytes = 2 * 1500;
     }
     root.nonempty_queues = 2;
     root.runnable_queues = 2;
@@ -489,15 +522,15 @@ fn exact_guarantee_rr_walks_exact_queues_in_order_independent_of_nonexact() {
     // queues deterministically without regard for non-exact service.
     // Helper primes eight 1500-byte items and sets `queued_bytes`
     // to match; no additional priming needed here. Only bump
-    // queue.tokens on the exact queues to make sure they never hit
+    // queue.hot.tokens on the exact queues to make sure they never hit
     // token-starvation during the four interleaved rounds below —
     // the exact selector does not refill exact-queue tokens itself
     // (that is done by the shared-lease path), so this test bypasses
     // that machinery by handing the queues a large local budget.
     let mut root = test_mixed_class_root_with_primed_queues();
     for queue in &mut root.queues {
-        if queue.exact {
-            queue.tokens = 128 * 1024;
+        if queue.config.exact {
+            queue.hot.tokens = 128 * 1024;
         }
     }
 
@@ -624,11 +657,11 @@ fn surplus_phase_prefers_higher_priority_queue() {
     );
     root.tokens = 64 * 1024;
     for queue in &mut root.queues {
-        queue.last_refill_ns = 1;
-        queue.tokens = 0;
-        queue.runnable = true;
-        queue.items.push_back(test_cos_item(1500));
-        queue.queued_bytes = 1500;
+        queue.hot.last_refill_ns = 1;
+        queue.hot.tokens = 0;
+        queue.hot.runnable = true;
+        queue.hot.items.push_back(test_cos_item(1500));
+        queue.hot.queued_bytes = 1500;
     }
     root.nonempty_queues = 2;
     root.runnable_queues = 2;
@@ -672,13 +705,13 @@ fn surplus_phase_applies_weighted_same_priority_sharing() {
     );
     root.tokens = 64 * 1024;
     for queue in &mut root.queues {
-        queue.last_refill_ns = 1;
-        queue.tokens = 0;
-        queue.runnable = true;
+        queue.hot.last_refill_ns = 1;
+        queue.hot.tokens = 0;
+        queue.hot.runnable = true;
         for _ in 0..8 {
-            queue.items.push_back(test_cos_item(1500));
+            queue.hot.items.push_back(test_cos_item(1500));
         }
-        queue.queued_bytes = 8 * 1500;
+        queue.hot.queued_bytes = 8 * 1500;
     }
     root.nonempty_queues = 2;
     root.runnable_queues = 2;
@@ -755,16 +788,16 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
     apply_cos_queue_flow_fair_promotion(&mut runtime, &fast_path, 0);
 
     assert!(
-        runtime.queues[0].flow_fair,
+        runtime.queues[0].flow_fair(),
         "queue at position 0 (iperf-a, shared_exact=false) must \
          be on the flow-fair path — #784 fairness fix depends on it",
     );
     assert!(
-        !runtime.queues[0].shared_exact,
+        !runtime.queues[0].shared_exact(),
         "queue at position 0 must get position-0's shared_exact=false",
     );
     assert!(
-        runtime.queues[1].flow_fair,
+        runtime.queues[1].flow_fair(),
         "#785 Phase 3: queue at position 1 (iperf-c, \
          shared_exact=true) must also be on the flow-fair path \
          so MQFQ VFT ordering enforces per-flow fairness. The \
@@ -773,7 +806,7 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
          aggregate-only on shared_exact queues.",
     );
     assert!(
-        runtime.queues[1].shared_exact,
+        runtime.queues[1].shared_exact(),
         "queue at position 1 must get position-1's shared_exact=true \
          — zip misalignment would silently mis-route admission policy",
     );
@@ -818,6 +851,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![1, 2, 3, 4],
@@ -830,6 +864,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![5, 6, 7, 8],
@@ -842,6 +877,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 256,
@@ -875,11 +911,11 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
     assert_eq!(area.slice(64, 4).expect("first frame"), &[1, 2, 3, 4]);
     assert_eq!(area.slice(128, 4).expect("second frame"), &[5, 6, 7, 8]);
     assert!(matches!(
-        root.queues[0].items.front(),
+        root.queues[0].hot.items.front(),
         Some(CoSPendingTxItem::Local(_))
     ));
     assert!(matches!(
-        root.queues[0].items.get(2),
+        root.queues[0].hot.items.get(2),
         Some(CoSPendingTxItem::Prepared(_))
     ));
 }
@@ -902,6 +938,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![1],
@@ -914,6 +951,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![2],
@@ -942,12 +980,12 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
     release_exact_local_scratch_frames(&mut free_tx_frames, &mut scratch_local_tx);
     assert!(scratch_local_tx.is_empty());
     assert_eq!(free_tx_frames, VecDeque::from([64, 128]));
-    assert_eq!(root.queues[0].items.len(), 2);
-    match root.queues[0].items.pop_front().expect("first queued") {
+    assert_eq!(root.queues[0].hot.items.len(), 2);
+    match root.queues[0].hot.items.pop_front().expect("first queued") {
         CoSPendingTxItem::Local(req) => assert_eq!(req.bytes, vec![1]),
         CoSPendingTxItem::Prepared(_) => panic!("unexpected prepared item"),
     }
-    match root.queues[0].items.pop_front().expect("second queued") {
+    match root.queues[0].hot.items.pop_front().expect("second queued") {
         CoSPendingTxItem::Local(req) => assert_eq!(req.bytes, vec![2]),
         CoSPendingTxItem::Prepared(_) => panic!("unexpected prepared item"),
     }
@@ -970,6 +1008,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![1],
@@ -982,6 +1021,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![2],
@@ -994,6 +1034,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![3],
@@ -1029,12 +1070,22 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
     assert_eq!(sent_bytes, 1);
     assert!(scratch_local_tx.is_empty());
     assert_eq!(free_tx_frames, VecDeque::from([128, 192]));
-    assert_eq!(root.queues[0].items.len(), 2);
-    match root.queues[0].items.pop_front().expect("first restored") {
+    assert_eq!(root.queues[0].hot.items.len(), 2);
+    match root.queues[0]
+        .hot
+        .items
+        .pop_front()
+        .expect("first restored")
+    {
         CoSPendingTxItem::Local(req) => assert_eq!(req.bytes, vec![2]),
         CoSPendingTxItem::Prepared(_) => panic!("unexpected prepared restored item"),
     }
-    match root.queues[0].items.pop_front().expect("second restored") {
+    match root.queues[0]
+        .hot
+        .items
+        .pop_front()
+        .expect("second restored")
+    {
         CoSPendingTxItem::Local(req) => assert_eq!(req.bytes, vec![3]),
         CoSPendingTxItem::Prepared(_) => panic!("unexpected prepared restored item"),
     }
@@ -1058,6 +1109,7 @@ fn release_exact_prepared_scratch_preserves_queue_after_failed_submit() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 64,
@@ -1092,8 +1144,8 @@ fn release_exact_prepared_scratch_preserves_queue_after_failed_submit() {
     assert!(matches!(build, ExactCoSScratchBuild::Ready));
     release_exact_prepared_scratch(&mut scratch_prepared_tx);
     assert!(scratch_prepared_tx.is_empty());
-    assert_eq!(root.queues[0].items.len(), 1);
-    match root.queues[0].items.front().expect("queued prepared") {
+    assert_eq!(root.queues[0].hot.items.len(), 1);
+    match root.queues[0].hot.items.front().expect("queued prepared") {
         CoSPendingTxItem::Prepared(req) => assert_eq!(req.offset, 64),
         CoSPendingTxItem::Local(_) => panic!("unexpected local item"),
     }
@@ -1116,6 +1168,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 64,
@@ -1130,6 +1183,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 128,
@@ -1144,6 +1198,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 192,
@@ -1186,12 +1241,22 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
     );
     assert!(!in_flight_prepared_recycles.contains_key(&128));
     assert!(!in_flight_prepared_recycles.contains_key(&192));
-    assert_eq!(root.queues[0].items.len(), 2);
-    match root.queues[0].items.pop_front().expect("first restored") {
+    assert_eq!(root.queues[0].hot.items.len(), 2);
+    match root.queues[0]
+        .hot
+        .items
+        .pop_front()
+        .expect("first restored")
+    {
         CoSPendingTxItem::Prepared(req) => assert_eq!(req.offset, 128),
         CoSPendingTxItem::Local(_) => panic!("unexpected local restored item"),
     }
-    match root.queues[0].items.pop_front().expect("second restored") {
+    match root.queues[0]
+        .hot
+        .items
+        .pop_front()
+        .expect("second restored")
+    {
         CoSPendingTxItem::Prepared(req) => assert_eq!(req.offset, 192),
         CoSPendingTxItem::Local(_) => panic!("unexpected local restored item"),
     }
@@ -1232,13 +1297,13 @@ fn assign_local_dscp_rewrite_preserves_existing_filter_rewrite() {
 fn estimate_cos_queue_wakeup_tick_uses_token_deficits() {
     let mut root = test_cos_interface_runtime(0);
     root.tokens = 0;
-    root.queues[0].tokens = 0;
+    root.queues[0].hot.tokens = 0;
 
     let wake_tick = estimate_cos_queue_wakeup_tick(
         root.tokens,
         root.shaping_rate_bytes,
-        root.queues[0].tokens,
-        root.queues[0].transmit_rate_bytes,
+        root.queues[0].hot.tokens,
+        root.queues[0].transmit_rate_bytes(),
         1500,
         0,
         true,
@@ -1252,13 +1317,13 @@ fn estimate_cos_queue_wakeup_tick_uses_token_deficits() {
 fn estimate_cos_queue_wakeup_tick_ignores_queue_deficit_for_surplus() {
     let mut root = test_cos_interface_runtime(0);
     root.tokens = 0;
-    root.queues[0].tokens = 0;
+    root.queues[0].hot.tokens = 0;
 
     let wake_tick = estimate_cos_queue_wakeup_tick(
         root.tokens,
         root.shaping_rate_bytes,
-        root.queues[0].tokens,
-        root.queues[0].transmit_rate_bytes,
+        root.queues[0].hot.tokens,
+        root.queues[0].transmit_rate_bytes(),
         1500,
         0,
         false,
@@ -1271,47 +1336,44 @@ fn estimate_cos_queue_wakeup_tick_ignores_queue_deficit_for_surplus() {
 #[test]
 fn restore_cos_local_items_marks_queue_runnable_after_retry() {
     let mut queue = CoSQueueRuntime {
-        queue_id: 5,
-        priority: 5,
-        transmit_rate_bytes: 11_000_000_000 / 8,
-        exact: true,
-        surplus_sharing: false,
-        flow_fair: false,
-        shared_exact: false,
-        flow_hash_seed: 0,
-        surplus_weight: 1,
-        surplus_deficit: 0,
-        buffer_bytes: COS_MIN_BURST_BYTES,
-        dscp_rewrite: None,
-        tokens: 0,
-        last_refill_ns: 0,
-        queued_bytes: 0,
-        active_flow_buckets: 0,
-        active_flow_buckets_peak: 0,
-        flow_bucket_bytes: [0; COS_FLOW_FAIR_BUCKETS],
-        flow_bucket_head_finish_bytes: [0; COS_FLOW_FAIR_BUCKETS],
-        flow_bucket_tail_finish_bytes: [0; COS_FLOW_FAIR_BUCKETS],
-        queue_vtime: 0,
-        pop_snapshot_stack: Vec::with_capacity(TX_BATCH_SIZE),
-        flow_rr_buckets: FlowRrRing::default(),
-        flow_bucket_items: std::array::from_fn(|_| VecDeque::new()),
-        runnable: false,
-        parked: false,
-        next_wakeup_tick: 0,
-        wheel_level: 0,
-        wheel_slot: 0,
-        items: VecDeque::new(),
-        local_item_count: 0,
-
-        vtime_floor: None,
-
-        worker_id: 0,
-        drop_counters: CoSQueueDropCounters::default(),
-        owner_profile: CoSQueueOwnerProfile::new(),
-        consecutive_v_min_skips: 0,
-        v_min_suspended_remaining: 0,
-        v_min_hard_cap_overrides_scratch: 0,
-                v_min_throttles_scratch: 0,
+        config: crate::afxdp::types::CoSQueueConfigState {
+            queue_id: 5,
+            priority: 5,
+            transmit_rate_bytes: 11_000_000_000 / 8,
+            exact: true,
+            surplus_sharing: false,
+            flow_fair: false,
+            shared_exact: false,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+        },
+        hot: crate::afxdp::types::CoSQueueHotState {
+            surplus_deficit: 0,
+            tokens: 0,
+            last_refill_ns: 0,
+            queued_bytes: 0,
+            runnable: false,
+            parked: false,
+            next_wakeup_tick: 0,
+            wheel_level: 0,
+            wheel_slot: 0,
+            items: VecDeque::new(),
+            local_item_count: 0,
+        },
+        flow_fair_state: None,
+        v_min: crate::afxdp::types::VMinQueueState {
+            vtime_floor: None,
+            worker_id: 0,
+            consecutive_v_min_skips: 0,
+            v_min_suspended_remaining: 0,
+            v_min_hard_cap_overrides_scratch: 0,
+            v_min_throttles_scratch: 0,
+        },
+        telemetry: crate::afxdp::types::CoSQueueTelemetry {
+            drop_counters: CoSQueueDropCounters::default(),
+            owner_profile: CoSQueueOwnerProfile::new(),
+        },
     };
     let retry = VecDeque::from([TxRequest {
         bytes: vec![0; 1500],
@@ -1326,56 +1388,53 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
 
     let retry_bytes = restore_cos_local_items_inner(&mut queue, retry);
 
-    assert_eq!(queue.items.len(), 1);
+    assert_eq!(queue.hot.items.len(), 1);
     assert_eq!(retry_bytes, 1500);
-    assert!(queue.runnable);
-    assert!(!queue.parked);
+    assert!(queue.hot.runnable);
+    assert!(!queue.hot.parked);
 }
 
 #[test]
 fn restore_cos_prepared_items_marks_queue_runnable_after_retry() {
     let mut queue = CoSQueueRuntime {
-        queue_id: 5,
-        priority: 5,
-        transmit_rate_bytes: 11_000_000_000 / 8,
-        exact: true,
-        surplus_sharing: false,
-        flow_fair: false,
-        shared_exact: false,
-        flow_hash_seed: 0,
-        surplus_weight: 1,
-        surplus_deficit: 0,
-        buffer_bytes: COS_MIN_BURST_BYTES,
-        dscp_rewrite: None,
-        tokens: 0,
-        last_refill_ns: 0,
-        queued_bytes: 0,
-        active_flow_buckets: 0,
-        active_flow_buckets_peak: 0,
-        flow_bucket_bytes: [0; COS_FLOW_FAIR_BUCKETS],
-        flow_bucket_head_finish_bytes: [0; COS_FLOW_FAIR_BUCKETS],
-        flow_bucket_tail_finish_bytes: [0; COS_FLOW_FAIR_BUCKETS],
-        queue_vtime: 0,
-        pop_snapshot_stack: Vec::with_capacity(TX_BATCH_SIZE),
-        flow_rr_buckets: FlowRrRing::default(),
-        flow_bucket_items: std::array::from_fn(|_| VecDeque::new()),
-        runnable: false,
-        parked: false,
-        next_wakeup_tick: 0,
-        wheel_level: 0,
-        wheel_slot: 0,
-        items: VecDeque::new(),
-        local_item_count: 0,
-
-        vtime_floor: None,
-
-        worker_id: 0,
-        drop_counters: CoSQueueDropCounters::default(),
-        owner_profile: CoSQueueOwnerProfile::new(),
-        consecutive_v_min_skips: 0,
-        v_min_suspended_remaining: 0,
-        v_min_hard_cap_overrides_scratch: 0,
-                v_min_throttles_scratch: 0,
+        config: crate::afxdp::types::CoSQueueConfigState {
+            queue_id: 5,
+            priority: 5,
+            transmit_rate_bytes: 11_000_000_000 / 8,
+            exact: true,
+            surplus_sharing: false,
+            flow_fair: false,
+            shared_exact: false,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+        },
+        hot: crate::afxdp::types::CoSQueueHotState {
+            surplus_deficit: 0,
+            tokens: 0,
+            last_refill_ns: 0,
+            queued_bytes: 0,
+            runnable: false,
+            parked: false,
+            next_wakeup_tick: 0,
+            wheel_level: 0,
+            wheel_slot: 0,
+            items: VecDeque::new(),
+            local_item_count: 0,
+        },
+        flow_fair_state: None,
+        v_min: crate::afxdp::types::VMinQueueState {
+            vtime_floor: None,
+            worker_id: 0,
+            consecutive_v_min_skips: 0,
+            v_min_suspended_remaining: 0,
+            v_min_hard_cap_overrides_scratch: 0,
+            v_min_throttles_scratch: 0,
+        },
+        telemetry: crate::afxdp::types::CoSQueueTelemetry {
+            drop_counters: CoSQueueDropCounters::default(),
+            owner_profile: CoSQueueOwnerProfile::new(),
+        },
     };
     let retry = VecDeque::from([PreparedTxRequest {
         offset: 64,
@@ -1392,10 +1451,10 @@ fn restore_cos_prepared_items_marks_queue_runnable_after_retry() {
 
     let retry_bytes = restore_cos_prepared_items_inner(&mut queue, retry);
 
-    assert_eq!(queue.items.len(), 1);
+    assert_eq!(queue.hot.items.len(), 1);
     assert_eq!(retry_bytes, 1500);
-    assert!(queue.runnable);
-    assert!(!queue.parked);
+    assert!(queue.hot.runnable);
+    assert!(!queue.hot.parked);
 }
 
 #[test]
@@ -1409,9 +1468,7 @@ fn estimate_cos_queue_wakeup_tick_root_rate_zero_returns_some() {
     let wake_tick = estimate_cos_queue_wakeup_tick(
         0, 0, // root: zero tokens, zero rate (transparent)
         0, 1_000_000, // queue: zero tokens, 1 Mbps rate
-        1500,
-        0,
-        true,
+        1500, 0, true,
     );
     assert!(
         wake_tick.is_some(),
@@ -1427,9 +1484,7 @@ fn estimate_cos_queue_wakeup_tick_both_rates_zero_returns_some() {
     let wake_tick = estimate_cos_queue_wakeup_tick(
         0, 0, // root: transparent
         0, 0, // queue: transparent
-        1500,
-        0,
-        true,
+        1500, 0, true,
     );
     assert!(
         wake_tick.is_some(),
@@ -1446,9 +1501,7 @@ fn estimate_cos_queue_wakeup_tick_root_rate_zero_with_require_queue_false() {
     let wake_tick = estimate_cos_queue_wakeup_tick(
         0, 0, // root: transparent
         0, 0, // queue: irrelevant when require=false
-        1500,
-        0,
-        false,
+        1500, 0, false,
     );
     assert!(wake_tick.is_some());
 }

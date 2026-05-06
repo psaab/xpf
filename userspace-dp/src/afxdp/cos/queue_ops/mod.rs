@@ -5,9 +5,7 @@
 
 use std::collections::VecDeque;
 
-use crate::afxdp::types::{
-    CoSPendingTxItem, CoSQueuePopSnapshot, CoSQueueRuntime,
-};
+use crate::afxdp::types::{CoSPendingTxItem, CoSQueuePopSnapshot, CoSQueueRuntime, FlowFairState};
 use crate::afxdp::TX_BATCH_SIZE;
 use crate::session::SessionKey;
 
@@ -16,8 +14,7 @@ use super::flow_hash::{cos_flow_bucket_index, cos_item_flow_key};
 // #1034 P1: MQFQ V_min coordination split into a sibling submodule.
 mod v_min;
 pub(in crate::afxdp) use v_min::{
-    cos_queue_v_min_consume_suspension, cos_queue_v_min_continue,
-    publish_committed_queue_vtime,
+    cos_queue_v_min_consume_suspension, cos_queue_v_min_continue, publish_committed_queue_vtime,
 };
 
 // #1034 P2: flow accounting + drain orchestration split into siblings.
@@ -36,21 +33,33 @@ pub(in crate::afxdp) use push::{cos_queue_push_back, cos_queue_push_front};
 
 #[inline]
 pub(in crate::afxdp) fn cos_queue_is_empty(queue: &CoSQueueRuntime) -> bool {
-    if !queue.flow_fair {
-        return queue.items.is_empty();
+    if !queue.flow_fair() {
+        return queue.hot.items.is_empty();
     }
-    queue.flow_rr_buckets.is_empty()
+    // Invariant: `flow_fair() == true` ↔ `flow_fair_state.is_some()`.
+    // Returning "empty" on a structural invariant violation would mask
+    // the bug and stall selection.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_is_empty: flow_fair queue without flow_fair_state");
+    ff.flow_rr_buckets.is_empty()
 }
 
 #[inline]
 pub(in crate::afxdp) fn cos_queue_len(queue: &CoSQueueRuntime) -> usize {
-    if !queue.flow_fair {
-        return queue.items.len();
+    if !queue.flow_fair() {
+        return queue.hot.items.len();
     }
-    queue
-        .flow_rr_buckets
+    // Invariant: see cos_queue_is_empty. Returning 0 on violation would
+    // mask the bug.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_len: flow_fair queue without flow_fair_state");
+    ff.flow_rr_buckets
         .iter()
-        .map(|bucket| queue.flow_bucket_items[usize::from(bucket)].len())
+        .map(|bucket| ff.flow_bucket_items[usize::from(bucket)].len())
         .sum()
 }
 
@@ -70,11 +79,11 @@ pub(in crate::afxdp) fn cos_queue_len(queue: &CoSQueueRuntime) -> usize {
 /// `flow_bucket_head_finish_bytes`. For iperf3-sized workloads the
 /// linear scan is cache-friendlier and simpler.
 #[inline]
-fn cos_queue_min_finish_bucket(queue: &CoSQueueRuntime) -> Option<u16> {
+fn cos_queue_min_finish_bucket(ff: &FlowFairState) -> Option<u16> {
     let mut best: Option<u16> = None;
     let mut best_finish = u64::MAX;
-    for bucket in queue.flow_rr_buckets.iter() {
-        let finish = queue.flow_bucket_head_finish_bytes[usize::from(bucket)];
+    for bucket in ff.flow_rr_buckets.iter() {
+        let finish = ff.flow_bucket_head_finish_bytes[usize::from(bucket)];
         if finish < best_finish {
             best_finish = finish;
             best = Some(bucket);
@@ -85,14 +94,20 @@ fn cos_queue_min_finish_bucket(queue: &CoSQueueRuntime) -> Option<u16> {
 
 #[inline]
 pub(in crate::afxdp) fn cos_queue_front(queue: &CoSQueueRuntime) -> Option<&CoSPendingTxItem> {
-    if !queue.flow_fair {
-        return queue.items.front();
+    if !queue.flow_fair() {
+        return queue.hot.items.front();
     }
+    // Invariant: see cos_queue_is_empty. Silent None here would cause
+    // drain callers to treat a flow_fair queue as empty and skip it.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_front: flow_fair queue without flow_fair_state");
     // #785 Phase 3 — MQFQ: return the head of the bucket with the
     // smallest virtual-finish-time, not the DRR-rotation head. This
     // is the byte-rate-fair dequeue order (classical SFQ / WFQ).
-    let bucket = usize::from(cos_queue_min_finish_bucket(queue)?);
-    queue.flow_bucket_items[bucket].front()
+    let bucket = usize::from(cos_queue_min_finish_bucket(ff)?);
+    ff.flow_bucket_items[bucket].front()
 }
 
 /// #917 — V_min sync throttle decision. Plan §3.3 v2 cadence:
@@ -106,7 +121,6 @@ const V_MIN_LAG_THRESHOLD_NS: u64 = 1_000_000;
 /// Floor for the lag budget so the throttle never fires below the
 /// minimum forward-progress unit (~16 MTU at 1500 B = 24 KB).
 const V_MIN_MIN_LAG_BYTES: u64 = 24_000;
-
 
 /// #941 Work item D — hard-cap escape hatch constants.
 pub(in crate::afxdp) const V_MIN_CONSECUTIVE_SKIP_HARD_CAP: u32 = 8;

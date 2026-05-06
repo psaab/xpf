@@ -67,10 +67,10 @@ fn exact_queue_without_shared_lease_does_not_locally_refill() {
         }],
     );
     root.tokens = 1500;
-    root.queues[0].tokens = 0;
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
     let queue_fast_path = vec![test_queue_fast_path(true, 0, None, None)];
@@ -82,8 +82,8 @@ fn exact_queue_without_shared_lease_does_not_locally_refill() {
         batch.is_none(),
         "exact queues must not locally refill when the shared queue lease is unavailable"
     );
-    assert_eq!(root.queues[0].tokens, 0);
-    assert_eq!(root.queues[0].last_refill_ns, 0);
+    assert_eq!(root.queues[0].hot.tokens, 0);
+    assert_eq!(root.queues[0].hot.last_refill_ns, 0);
 }
 
 use crate::afxdp::cos::queue_service::{
@@ -119,10 +119,10 @@ fn maybe_top_up_cos_root_lease_unblocks_large_frame_exceeding_lease_bytes() {
         }],
     );
     let frame_len = tx_frame_capacity();
-    root.queues[0].tokens = 64 * 1024;
-    root.queues[0].runnable = true;
-    root.queues[0].items.push_back(test_cos_item(frame_len));
-    root.queues[0].queued_bytes = frame_len as u64;
+    root.queues[0].hot.tokens = 64 * 1024;
+    root.queues[0].hot.runnable = true;
+    root.queues[0].hot.items.push_back(test_cos_item(frame_len));
+    root.queues[0].hot.queued_bytes = frame_len as u64;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
 
@@ -158,10 +158,10 @@ fn maybe_top_up_cos_queue_lease_unblocks_local_exact_queue_without_tokens() {
         }],
     );
     root.tokens = 1500;
-    root.queues[0].tokens = 0;
-    root.queues[0].items.push_back(test_cos_item(1500));
-    root.queues[0].queued_bytes = 1500;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
     root.nonempty_queues = 1;
     root.runnable_queues = 1;
     let shared_queue_lease = Arc::new(SharedCoSQueueLease::new(
@@ -183,7 +183,7 @@ fn maybe_top_up_cos_queue_lease_unblocks_local_exact_queue_without_tokens() {
     );
 
     assert!(
-        root.queues[0].tokens >= 1500,
+        root.queues[0].hot.tokens >= 1500,
         "shared exact queue lease must replenish local queue tokens"
     );
     assert!(
@@ -251,8 +251,8 @@ fn maybe_top_up_cos_queue_lease_transparent_when_queue_rate_zero_exact_no_lease(
             dscp_rewrite: None,
         }],
     );
-    root.queues[0].tokens = 0;
-    root.queues[0].last_refill_ns = 0;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.last_refill_ns = 0;
 
     // No shared queue lease — old code would early-return with
     // tokens still at 0; new code's transparent fast-path runs
@@ -260,12 +260,12 @@ fn maybe_top_up_cos_queue_lease_transparent_when_queue_rate_zero_exact_no_lease(
     maybe_top_up_cos_queue_lease(&mut root.queues[0], None, 1_000_000_000);
 
     assert!(
-        root.queues[0].tokens >= COS_MIN_BURST_BYTES,
+        root.queues[0].hot.tokens >= COS_MIN_BURST_BYTES,
         "transparent-queue + exact + no lease MUST fast-path-fill (old code would leave tokens=0); got {}",
-        root.queues[0].tokens,
+        root.queues[0].hot.tokens,
     );
     assert_eq!(
-        root.queues[0].last_refill_ns, 1_000_000_000,
+        root.queues[0].hot.last_refill_ns, 1_000_000_000,
         "last_refill_ns must be advanced to now_ns by the transparent fast path",
     );
 }
@@ -294,20 +294,20 @@ fn maybe_top_up_cos_queue_lease_transparent_non_exact_with_nonzero_last_refill()
             dscp_rewrite: None,
         }],
     );
-    root.queues[0].tokens = 0;
+    root.queues[0].hot.tokens = 0;
     // Non-zero last_refill_ns — old code's refill_cos_tokens
     // would skip refill at rate=0; new fast-path fills regardless.
-    root.queues[0].last_refill_ns = 500_000_000;
+    root.queues[0].hot.last_refill_ns = 500_000_000;
 
     maybe_top_up_cos_queue_lease(&mut root.queues[0], None, 1_000_000_000);
 
     assert!(
-        root.queues[0].tokens >= COS_MIN_BURST_BYTES,
+        root.queues[0].hot.tokens >= COS_MIN_BURST_BYTES,
         "transparent-queue + non-exact + nonzero last_refill_ns MUST fast-path-fill; got {}",
-        root.queues[0].tokens,
+        root.queues[0].hot.tokens,
     );
     assert_eq!(
-        root.queues[0].last_refill_ns, 1_000_000_000,
+        root.queues[0].hot.last_refill_ns, 1_000_000_000,
         "last_refill_ns must advance even on the non-exact transparent path",
     );
 }
@@ -339,7 +339,7 @@ fn transparent_root_preserves_per_queue_exact_cap() {
             dscp_rewrite: None,
         }],
     );
-    root.queues[0].tokens = 0;
+    root.queues[0].hot.tokens = 0;
 
     maybe_top_up_cos_queue_lease(&mut root.queues[0], Some(&lease), 1_000_000_000);
 
@@ -348,12 +348,12 @@ fn transparent_root_preserves_per_queue_exact_cap() {
     // is gated on `transmit_rate_bytes == 0` so it does NOT fire
     // here (queue rate is 1G). Per-queue cap preserved.
     assert!(
-        root.queues[0].tokens > 0,
+        root.queues[0].hot.tokens > 0,
         "per-queue lease must still grant tokens at non-zero rate"
     );
     assert!(
-        root.queues[0].tokens <= COS_MIN_BURST_BYTES,
+        root.queues[0].hot.tokens <= COS_MIN_BURST_BYTES,
         "per-queue tokens must be bounded by buffer cap (not u64::MAX); got {}",
-        root.queues[0].tokens,
+        root.queues[0].hot.tokens,
     );
 }

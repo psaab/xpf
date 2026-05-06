@@ -44,7 +44,7 @@ fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
         }],
     );
     // #774: use cos_queue_push_back so local_item_count
-    // stays in sync. Previously this test poked queue.items
+    // stays in sync. Previously this test poked queue.hot.items
     // directly, which bypassed the counter maintenance.
     cos_queue_push_back(
         &mut root.queues[0],
@@ -96,6 +96,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![1],
@@ -108,6 +109,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![2],
@@ -120,6 +122,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 256,
@@ -159,11 +162,11 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
     assert_eq!(sent_bytes, 1);
     assert_eq!(free_tx_frames, VecDeque::from([128, 192]));
     assert!(matches!(
-        root.queues[0].items.front(),
+        root.queues[0].hot.items.front(),
         Some(CoSPendingTxItem::Local(req)) if req.bytes == vec![2]
     ));
     assert!(matches!(
-        root.queues[0].items.get(1),
+        root.queues[0].hot.items.get(1),
         Some(CoSPendingTxItem::Prepared(req)) if req.offset == 256
     ));
 
@@ -181,11 +184,11 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
     assert_eq!(scratch_local_tx[0].offset, 128);
     assert_eq!(free_tx_frames, VecDeque::from([192]));
     assert!(matches!(
-        root.queues[0].items.front(),
+        root.queues[0].hot.items.front(),
         Some(CoSPendingTxItem::Local(req)) if req.bytes == vec![2]
     ));
     assert!(matches!(
-        root.queues[0].items.get(1),
+        root.queues[0].hot.items.get(1),
         Some(CoSPendingTxItem::Prepared(req)) if req.offset == 256
     ));
 }
@@ -208,6 +211,7 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 64,
@@ -247,7 +251,7 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
     assert!(scratch_prepared_tx.is_empty());
     assert!(free_tx_frames.is_empty());
     assert_eq!(pending_fill_frames, VecDeque::from([64]));
-    assert!(root.queues[0].items.is_empty());
+    assert!(root.queues[0].hot.items.is_empty());
 }
 
 #[test]
@@ -275,6 +279,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 64,
@@ -289,6 +294,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 128,
@@ -303,6 +309,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
             bytes: vec![9],
@@ -343,11 +350,11 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
     assert_eq!(sent_packets, 1);
     assert_eq!(sent_bytes, 1);
     assert!(matches!(
-        root.queues[0].items.front(),
+        root.queues[0].hot.items.front(),
         Some(CoSPendingTxItem::Prepared(req)) if req.offset == 128
     ));
     assert!(matches!(
-        root.queues[0].items.get(1),
+        root.queues[0].hot.items.get(1),
         Some(CoSPendingTxItem::Local(req)) if req.bytes == vec![9]
     ));
 
@@ -366,11 +373,11 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
     assert_eq!(scratch_prepared_tx.len(), 1);
     assert_eq!(scratch_prepared_tx[0].offset, 128);
     assert!(matches!(
-        root.queues[0].items.front(),
+        root.queues[0].hot.items.front(),
         Some(CoSPendingTxItem::Prepared(req)) if req.offset == 128
     ));
     assert!(matches!(
-        root.queues[0].items.get(1),
+        root.queues[0].hot.items.get(1),
         Some(CoSPendingTxItem::Local(req)) if req.bytes == vec![9]
     ));
 }
@@ -392,8 +399,7 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     let req_a = TxRequest {
         bytes: vec![0; 1500],
@@ -415,23 +421,38 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
     };
-    let bucket_a = cos_flow_bucket_index(queue.flow_hash_seed, req_a.flow_key.as_ref());
-    let bucket_b = cos_flow_bucket_index(queue.flow_hash_seed, req_b.flow_key.as_ref());
+    let bucket_a = cos_flow_bucket_index(
+        test_flow_fair_state(queue).flow_hash_seed,
+        req_a.flow_key.as_ref(),
+    );
+    let bucket_b = cos_flow_bucket_index(
+        test_flow_fair_state(queue).flow_hash_seed,
+        req_b.flow_key.as_ref(),
+    );
     assert_ne!(bucket_a, bucket_b);
 
     cos_queue_push_back(queue, CoSPendingTxItem::Local(req_a));
     cos_queue_push_back(queue, CoSPendingTxItem::Local(req_b));
-    assert_eq!(queue.active_flow_buckets, 2);
-    assert_eq!(queue.flow_bucket_bytes[bucket_a], 1500);
-    assert_eq!(queue.flow_bucket_bytes[bucket_b], 1500);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 2);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_a],
+        1500
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_b],
+        1500
+    );
 
     let Some(CoSPendingTxItem::Local(req)) = cos_queue_pop_front(queue) else {
         panic!("expected first queued local request");
     };
     assert_eq!(req.flow_key.as_ref().map(|flow| flow.src_port), Some(1111));
-    assert_eq!(queue.active_flow_buckets, 1);
-    assert_eq!(queue.flow_bucket_bytes[bucket_a], 0);
-    assert_eq!(queue.flow_bucket_bytes[bucket_b], 1500);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 1);
+    assert_eq!(test_flow_fair_state(queue).flow_bucket_bytes[bucket_a], 0);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_bytes[bucket_b],
+        1500
+    );
 }
 
 /// Pin that `FlowRrRing::remove` correctly de-registers a bucket
@@ -487,7 +508,7 @@ fn flow_rr_ring_remove_from_middle() {
 /// `saturating_add` for `+`, would have left this test green
 /// because the test never touched the field. This revision:
 ///
-///   1. Drives `queue.queue_vtime` to `u64::MAX - 10_000`.
+///   1. Drives `test_flow_fair_state(queue).queue_vtime` to `u64::MAX - 10_000`.
 ///   2. Enqueues a 9000-byte packet (MTU-size upper bound).
 ///   3. Asserts the bucket's head/tail finish DID NOT wrap AND
 ///      landed at exactly `u64::MAX - 10_000 + 9_000`.
@@ -515,8 +536,7 @@ fn mqfq_finish_time_u64_has_decades_of_headroom() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Largest plausible single enqueue: MTU 9000 at weight 1.
     const MAX_SINGLE_DELTA: usize = 9_000;
@@ -528,7 +548,7 @@ fn mqfq_finish_time_u64_has_decades_of_headroom() {
     // enqueue re-anchors head=tail=max(0, near_wrap)+9000 =
     // near_wrap + 9000 — well within u64 and exactly one delta
     // past queue_vtime.
-    queue.queue_vtime = near_wrap;
+    test_flow_fair_state_mut(queue).queue_vtime = near_wrap;
 
     let flow_a = test_session_key(9999, 5201);
     let bucket_a = cos_flow_bucket_index(0, Some(&flow_a));
@@ -536,17 +556,18 @@ fn mqfq_finish_time_u64_has_decades_of_headroom() {
     cos_queue_push_back(queue, test_flow_cos_item(9999, MAX_SINGLE_DELTA));
     let expected_first = near_wrap + MAX_SINGLE_DELTA as u64;
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], expected_first,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        expected_first,
         "first enqueue near u64 wrap must anchor at queue_vtime \
          + bytes; regression to u32 or non-saturating add would \
          fail here with a wrapped or truncated value",
     );
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_a],
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
         expected_first,
     );
     assert!(
-        queue.flow_bucket_head_finish_bytes[bucket_a] > near_wrap,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a] > near_wrap,
         "finish time did not advance past pre-enqueue vtime — \
          type narrowed or wrap occurred",
     );
@@ -556,7 +577,7 @@ fn mqfq_finish_time_u64_has_decades_of_headroom() {
     // With near_wrap + 2*9000 = u64::MAX - 10_000 + 18_000 =
     // u64::MAX + 8_000 — this SHOULD saturate to u64::MAX.
     cos_queue_push_back(queue, test_flow_cos_item(9999, MAX_SINGLE_DELTA));
-    let new_tail = queue.flow_bucket_tail_finish_bytes[bucket_a];
+    let new_tail = test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a];
     assert!(
         new_tail >= expected_first,
         "tail must monotonically advance; got {} < {}",
@@ -575,7 +596,8 @@ fn mqfq_finish_time_u64_has_decades_of_headroom() {
     // Head unchanged on active-bucket enqueue (head packet is
     // still the first one).
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], expected_first,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        expected_first,
         "active-bucket enqueue must not alter head",
     );
 
@@ -630,22 +652,22 @@ fn queue_flow_fair_enabled_on_shared_exact() {
             dscp_rewrite: None,
         }],
     );
-    assert!(!runtime.queues[0].flow_fair);
-    assert!(!runtime.queues[0].shared_exact);
+    assert!(!runtime.queues[0].flow_fair());
+    assert!(!runtime.queues[0].shared_exact());
 
     // Drive the full ensure_cos_interface_runtime promotion loop.
     let fast_path = vec![test_queue_fast_path_for_promotion(true)];
     apply_cos_queue_flow_fair_promotion(&mut runtime, &fast_path, 0);
 
     assert!(
-        runtime.queues[0].flow_fair,
+        runtime.queues[0].flow_fair(),
         "#785 Phase 3: shared_exact queue MUST be promoted onto \
          the flow-fair path so MQFQ virtual-finish-time ordering \
          runs in the dequeue path. Regression here re-opens the \
          CoV gap we just measured closed.",
     );
     assert!(
-        runtime.queues[0].shared_exact,
+        runtime.queues[0].shared_exact(),
         "#785 Phase 3: shared_exact shadow MUST be cached onto \
          the runtime so the admission gates in \
          cos_queue_flow_share_limit and \
@@ -655,7 +677,8 @@ fn queue_flow_fair_enabled_on_shared_exact() {
          multi-Gbps per-flow rates.",
     );
     assert_ne!(
-        runtime.queues[0].flow_hash_seed, 0,
+        test_flow_fair_state(&runtime.queues[0]).flow_hash_seed,
+        0,
         "seed must be drawn on flow-fair promotion so MQFQ \
          bucket assignment is not an externally-probeable \
          pure function of the 5-tuple",
@@ -698,18 +721,19 @@ fn queue_flow_fair_enabled_on_owner_local_exact() {
     apply_cos_queue_flow_fair_promotion(&mut runtime, &fast_path, 0);
 
     assert!(
-        runtime.queues[0].flow_fair,
+        runtime.queues[0].flow_fair(),
         "owner-local-exact queue MUST be promoted onto the SFQ \
          path — #784 fairness fix depends on it",
     );
     assert!(
-        !runtime.queues[0].shared_exact,
+        !runtime.queues[0].shared_exact(),
         "owner-local-exact queue MUST keep shared_exact=false so \
          the per-flow share cap and per-flow ECN arm continue to \
          run — #784 depends on the per-flow cap firing at 1 Gbps",
     );
     assert_ne!(
-        runtime.queues[0].flow_hash_seed, 0,
+        test_flow_fair_state(&runtime.queues[0]).flow_hash_seed,
+        0,
         "seed must be drawn on flow-fair promotion — otherwise \
          every binding hashes flows identically and one flow's \
          RSS bucket collides across the whole deployment",
@@ -748,7 +772,7 @@ fn queue_flow_fair_disabled_on_non_exact() {
     let fast_path_owner_local = vec![test_queue_fast_path_for_promotion(false)];
     apply_cos_queue_flow_fair_promotion(&mut runtime, &fast_path_owner_local, 0);
     assert!(
-        !runtime.queues[0].flow_fair,
+        !runtime.queues[0].flow_fair(),
         "non-exact queues must stay off the flow-fair path: SFQ \
          has no rate contract to enforce there, and draws an OS \
          random seed per queue",
@@ -757,7 +781,7 @@ fn queue_flow_fair_disabled_on_non_exact() {
     let fast_path_shared = vec![test_queue_fast_path_for_promotion(true)];
     apply_cos_queue_flow_fair_promotion(&mut runtime, &fast_path_shared, 0);
     assert!(
-        !runtime.queues[0].flow_fair,
+        !runtime.queues[0].flow_fair(),
         "non-exact queues must stay off the flow-fair path \
          regardless of the shared_exact signal",
     );
@@ -790,7 +814,7 @@ fn queue_flow_fair_disabled_on_non_exact() {
 //       memcpy that dominates `memmove` in the live profile),
 //       scratch Vec push, running root/secondary budget decrement.
 //   - `settle_exact_local_fifo_submission`
-//       queue.items.pop_front per sent packet, scratch Vec pop.
+//       queue.hot.items.pop_front per sent packet, scratch Vec pop.
 //   - Re-prime between iterations — simulates a steady inflow of
 //       new items from the upstream CoS enqueue path.
 //
@@ -876,8 +900,8 @@ fn cos_exact_drain_throughput_micro_bench() {
         }],
     );
     root.tokens = u64::MAX;
-    root.queues[0].tokens = u64::MAX;
-    root.queues[0].runnable = true;
+    root.queues[0].hot.tokens = u64::MAX;
+    root.queues[0].hot.runnable = true;
 
     let packet_bytes = vec![0xABu8; PACKET_LEN];
     let mut scratch = Vec::with_capacity(ITEMS_PER_BATCH);
@@ -887,20 +911,23 @@ fn cos_exact_drain_throughput_micro_bench() {
     // them all and then re-primes both the items and the free frames
     // to the same initial state.
     let prime_queue = |queue: &mut CoSQueueRuntime, packet: &[u8]| {
-        queue.items.clear();
-        queue.queued_bytes = 0;
+        queue.hot.items.clear();
+        queue.hot.queued_bytes = 0;
         for _ in 0..ITEMS_PER_BATCH {
-            queue.items.push_back(CoSPendingTxItem::Local(TxRequest {
-                bytes: packet.to_vec(),
-                expected_ports: None,
-                expected_addr_family: libc::AF_INET as u8,
-                expected_protocol: PROTO_TCP,
-                flow_key: None,
-                egress_ifindex: 80,
-                cos_queue_id: Some(5),
-                dscp_rewrite: None,
-            }));
-            queue.queued_bytes += packet.len() as u64;
+            queue
+                .hot
+                .items
+                .push_back(CoSPendingTxItem::Local(TxRequest {
+                    bytes: packet.to_vec(),
+                    expected_ports: None,
+                    expected_addr_family: libc::AF_INET as u8,
+                    expected_protocol: PROTO_TCP,
+                    flow_key: None,
+                    egress_ifindex: 80,
+                    cos_queue_id: Some(5),
+                    dscp_rewrite: None,
+                }));
+            queue.hot.queued_bytes += packet.len() as u64;
         }
     };
 
@@ -1060,12 +1087,12 @@ fn bench_pop_commit_settle_publish() {
     // Promote to flow_fair + shared_exact + attach floor to
     // exercise the V_min publish path.
     let queue = &mut root.queues[0];
-    queue.tokens = u64::MAX;
-    queue.flow_fair = true;
-    queue.exact = true;
-    queue.shared_exact = true;
+    queue.hot.tokens = u64::MAX;
+    enable_test_flow_fair(queue);
+    queue.config.exact = true;
+    queue.config.shared_exact = true;
     let _floor = attach_test_vtime_floor(queue, 4, 0);
-    queue.runnable = true;
+    queue.hot.runnable = true;
 
     let area = MmapArea::new(2 * 1024 * 1024).expect("mmap umem");
     let packet_bytes = vec![0xABu8; PACKET_LEN];
@@ -1073,17 +1100,18 @@ fn bench_pop_commit_settle_publish() {
     let mut free_frames: VecDeque<u64> = (0..ITEMS_PER_BATCH as u64).map(|i| i * 4096).collect();
 
     let prime_queue = |queue: &mut CoSQueueRuntime, packet: &[u8]| {
-        queue.items.clear();
-        queue.queued_bytes = 0;
-        queue.queue_vtime = 0;
-        queue.flow_bucket_bytes = [0; COS_FLOW_FAIR_BUCKETS];
-        queue.flow_bucket_head_finish_bytes = [0; COS_FLOW_FAIR_BUCKETS];
-        queue.flow_bucket_tail_finish_bytes = [0; COS_FLOW_FAIR_BUCKETS];
-        queue.flow_rr_buckets = FlowRrRing::default();
-        queue.flow_bucket_items = std::array::from_fn(|_| VecDeque::new());
-        queue.active_flow_buckets = 0;
-        queue.local_item_count = 0;
-        queue.pop_snapshot_stack.clear();
+        queue.hot.items.clear();
+        queue.hot.queued_bytes = 0;
+        test_flow_fair_state_mut(queue).queue_vtime = 0;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes = [0; COS_FLOW_FAIR_BUCKETS];
+        test_flow_fair_state_mut(queue).flow_bucket_head_finish_bytes = [0; COS_FLOW_FAIR_BUCKETS];
+        test_flow_fair_state_mut(queue).flow_bucket_tail_finish_bytes = [0; COS_FLOW_FAIR_BUCKETS];
+        test_flow_fair_state_mut(queue).flow_rr_buckets = FlowRrRing::default();
+        test_flow_fair_state_mut(queue).flow_bucket_items =
+            std::array::from_fn(|_| VecDeque::new());
+        test_flow_fair_state_mut(queue).active_flow_buckets = 0;
+        queue.hot.local_item_count = 0;
+        test_flow_fair_state_mut(queue).pop_snapshot_stack.clear();
         for i in 0..ITEMS_PER_BATCH {
             let mut req = TxRequest {
                 bytes: packet.to_vec(),
