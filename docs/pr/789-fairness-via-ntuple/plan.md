@@ -1,5 +1,5 @@
 ---
-status: REVISED v4 — Codex round-3 PLAN-NEEDS-MAJOR (4 implementation blockers); Gemini Pro 3.1 round-3 PLAN-READY. v4 fixes: scrubbed v2 stale text at §4.1 (no more session_table.len() / 1MB stable-flow / byte-rate-selection contradicting §4.3); added `installed_at_ns: u64` field spec (existing `install_epoch` is a counter not nanoseconds); defined explicit worker→Coordinator publication path via new BindingLiveState fields (Coordinator only sees BindingLiveState.snapshot, not worker-local SessionTable); corrected NAT detection — NatDecision is a struct not Option, use field-identity check across rewrite_src/rewrite_dst/rewrite_src_port/rewrite_dst_port/nat64/nptv6
+status: REVISED v5 — Codex round-4 PLAN-NEEDS-MAJOR (smaller text/anchor issues; design substantively correct). v5 fixes: scrubbed remaining stale "1 MB + 3 ticks" text at §6, fixed §10 question 2 (now resolved), corrected `active_flows_count` typo at §5, anchored 1 Hz publication cadence to a NEW time-gated checkpoint near `worker/mod.rs:1071` (NOT lifecycle.rs flush sites which fire per-poll), spelled out installed_at_ns write-site preservation rule (set once at true creation lines 677/757; preserved across refresh paths at 815/905 that currently rewrite `install_epoch`)
 issue: #789 (parent), #936 (path A — declined for aggregate hit), #937 (path B — current scope)
 phase: Single PR — closed-loop ntuple flow steering for shared_exact CoS classes (Phase 1 includes lifecycle + hysteresis + observability per round-1 review)
 ---
@@ -184,9 +184,20 @@ Worker-side changes (`userspace-dp/src/session/mod.rs`):
   `install_epoch` is a per-table counter at line 117 — incremented
   via `next_epoch()` — NOT a wall-clock or monotonic time and
   cannot yield `install_age_secs`). Set once at the same install
-  paths to `monotonic_nanos()`. Importantly: NEVER updated by
-  lookup/refresh paths (only `last_seen_ns` is bumped on lookup).
-  This gives stable install-age semantics that survive lookups.
+  paths to `monotonic_nanos()`.
+- **Write-site preservation rule (Codex round-4 finding):** the
+  existing refresh code at lines 815 and 905 currently rewrites
+  `install_epoch` (because that field is a counter that needs to
+  bump on every refresh for owner-RG epoch tracking).
+  `installed_at_ns` MUST NOT be touched by those refresh paths —
+  it's set ONCE at true session creation (lines 677, 757) and
+  preserved across all subsequent refresh / update / lookup /
+  HA-import paths. The implementation should preserve
+  `entry.installed_at_ns` whenever `entry.install_epoch` is
+  rewritten. This gives stable install-age semantics that survive
+  lookups, refreshes, AND HA owner-RG transitions.
+  Likewise, lookup paths bump `last_seen_ns` but MUST NOT touch
+  `installed_at_ns`.
 - New method `SessionTable::ingress_active_flows_for_binding(
   &self, slot: u32, now_ns: u64, recency_window_ns: u64) ->
   ActiveFlowInventory` returning:
@@ -206,10 +217,19 @@ that touches its `SessionTable`.
 
 The publication path is therefore:
 
-1. Worker tick: at the existing periodic checkpoint
-   (`worker/lifecycle.rs` flush call site, ~1Hz cadence) the
-   worker calls `sessions.ingress_active_flows_for_binding(
-   binding.slot, monotonic_nanos(), 1_000_000_000)`.
+1. Worker tick: add a 1 Hz time-gated checkpoint inside the main
+   `worker_loop` next to the existing periodic checkpoints around
+   `worker/mod.rs:1071` (sibling to the `COS_STATUS_INTERVAL_NS`
+   cadence — that one fires at 100 ms; the new
+   `ACTIVE_FLOWS_PUBLISH_INTERVAL_NS = 1_000_000_000` gate fires
+   at 1 s). Per-poll/per-flush call sites in
+   `worker/lifecycle.rs` are NOT a usable cadence anchor: those
+   flush sites fire per-poll-iteration which is hundreds-of-Hz
+   and would put an O(N) `SessionTable` scan on the worker hot
+   path. The 1 s gate keeps the scan O(N)·Hz cost bounded.
+   At the gate fire, the worker calls
+   `sessions.ingress_active_flows_for_binding(binding.slot,
+   monotonic_nanos(), 1_000_000_000)`.
 2. Worker writes the resulting count and sample into new fields
    on `BindingLiveState`:
    - `active_ingress_flows_count: AtomicU32`
@@ -312,7 +332,7 @@ Prometheus counters:
 
 - New CLI knob (above).
 - New CLI show command (above).
-- New `active_flows_count` field on `BindingStatus`.
+- New `active_ingress_flows_count` and `active_ingress_flows_sample` fields on `BindingStatus` (see §4.3 for the wire schema).
 - New Prometheus counters/gauges.
 - No breaking changes to existing API.
 
@@ -337,8 +357,8 @@ Prometheus counters:
   - Packet reordering (in-flight on old queue + new on new queue)
     → TCP fast retransmit → cwnd cut.
   - Conntrack cold-start on receiving worker.
-  Mitigation: stable-flow gate (1 MB + 3 ticks before re-steer)
-  AND no-resteer cooldown (5 ticks).
+  Mitigation: stable-flow gate (install_age ≥ 3s AND last_seen
+  age < 1s, per §4.3) AND no-resteer cooldown (5 ticks).
 - **Rule lifecycle on crash.** Reserved location-id range +
   startup flush ensures stale rules don't accumulate.
 
@@ -393,10 +413,10 @@ Prometheus counters:
    uses rule locs 0-32767 by default)? Or should we use a
    different reserved region?
 
-2. **active_flows_count semantics.** `binding.flow.session_table.len()`
-   includes BOTH ingress and egress sessions. For per-flow
-   fairness, should the count only include sessions where this
-   binding is the ingress side?
+2. ~~active_flows_count semantics.~~ **Resolved (v3/v4):** the
+   count is `active_ingress_flows_count` — sessions where
+   `installed_on_binding_slot == self.slot` AND `last_seen_age
+   < 1s`. See §4.3.
 
 3. **Hysteresis tuning.** 3-tick cooldown / 5-tick no-resteer
    / 1 MB stable-flow gate — are these defensible defaults?
