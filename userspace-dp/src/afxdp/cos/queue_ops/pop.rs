@@ -40,9 +40,15 @@ fn cos_queue_pop_front_inner(
     let item = if !queue.flow_fair() {
         queue.hot.items.pop_front()?
     } else {
-        let Some(ff) = queue.flow_fair_state.as_mut() else {
-            return None;
-        };
+        // Invariant: `flow_fair() == true` ↔ `flow_fair_state.is_some()`.
+        // Set together at every promotion / demotion site (admission.rs:508,
+        // tx/test_support.rs enable_/disable_test_flow_fair). Silently
+        // returning None here would make the queue look empty and stall
+        // service while masking a structural bug.
+        let ff = queue
+            .flow_fair_state
+            .as_mut()
+            .expect("cos_queue_pop_front_inner: flow_fair queue without flow_fair_state");
         // #785 Phase 3 — MQFQ: pop from the bucket whose head
         // packet has the smallest virtual-finish-time, not DRR
         // rotation order. The active set (`flow_rr_buckets`) is

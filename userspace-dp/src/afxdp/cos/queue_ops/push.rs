@@ -32,9 +32,15 @@ pub(in crate::afxdp) fn cos_queue_push_back(queue: &mut CoSQueueRuntime, item: C
         queue.hot.items.push_back(item);
         return;
     }
-    let Some(ff) = queue.flow_fair_state.as_mut() else {
-        return;
-    };
+    // Invariant: `flow_fair() == true` ↔ `flow_fair_state.is_some()`.
+    // Set together at every promotion / demotion site (admission.rs:508,
+    // tx/test_support.rs enable_/disable_test_flow_fair). A mismatch is
+    // a structural bug — silently dropping the packet would leak
+    // local_item_count and flow accounting; panic instead.
+    let ff = queue
+        .flow_fair_state
+        .as_mut()
+        .expect("cos_queue_push_back: flow_fair queue without flow_fair_state");
     let bucket = cos_flow_bucket_index(ff.flow_hash_seed, flow_key);
     let bucket_queue = &mut ff.flow_bucket_items[bucket];
     let was_empty = bucket_queue.is_empty();
@@ -56,9 +62,12 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
         queue.hot.items.push_front(item);
         return;
     }
-    let Some(ff) = queue.flow_fair_state.as_mut() else {
-        return;
-    };
+    // Invariant: see cos_queue_push_back for the same flow_fair/state
+    // pairing. Silent drop here would also corrupt the snapshot stack.
+    let ff = queue
+        .flow_fair_state
+        .as_mut()
+        .expect("cos_queue_push_front: flow_fair queue without flow_fair_state");
     let bucket = cos_flow_bucket_index(ff.flow_hash_seed, flow_key);
     // #913: peek-then-pop snapshot consumption.
     //

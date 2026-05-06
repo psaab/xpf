@@ -55,7 +55,7 @@ pub(in crate::afxdp) struct CoSQueueConfig {
     pub(in crate::afxdp) exact: bool,
     /// #915: opt-in for exact queues to draw from root surplus
     /// tokens once their own bucket is empty. See the
-    /// `CoSQueueRuntime.surplus_sharing` doc-comment for runtime
+    /// `CoSQueueConfigState.surplus_sharing` doc-comment for runtime
     /// semantics. Only meaningful when `exact == true` (the Go
     /// control plane warn-and-strips otherwise so the runtime
     /// never sees it set on a non-exact queue).
@@ -451,7 +451,7 @@ pub(in crate::afxdp) struct CoSQueueConfigState {
     pub(in crate::afxdp) transmit_rate_bytes: u64,
     pub(in crate::afxdp) exact: bool,
     /// #915: only meaningful when `exact == true`. When set, the
-    /// queue (1) is NOT parked on `queue.tokens < head_len` in
+    /// queue (1) is NOT parked on `queue.hot.tokens < head_len` in
     /// the exact-guarantee selector
     /// (`select_exact_cos_guarantee_queue_with_fast_path`), and
     /// (2) participates in `select_cos_surplus_batch` as if it
@@ -522,12 +522,21 @@ pub(in crate::afxdp) struct FlowFairState {
     /// established flows in bounded rounds).
     ///
     /// Read by `cos_queue_min_finish_bucket` (as the `max(tail, vtime)`
-    /// anchor source on idle-bucket re-entry) and updated by
-    /// `cos_queue_pop_front` (+= drained bytes) and
-    /// `cos_queue_push_front` (-= pushed bytes, symmetric rewind —
-    /// see PR #796 Codex round-3 HIGH).
+    /// anchor source on idle-bucket re-entry).
     ///
-    /// Meaningful only on `flow_fair` queues.
+    /// Hot-path advance (#913 served-finish semantics): on a snapshotting
+    /// `cos_queue_pop_front`, `vtime = max(vtime, served_finish)` where
+    /// served_finish is the popped bucket's pre-pop head_finish. The
+    /// paired `cos_queue_push_front` restores from the snapshot stack
+    /// (LIFO, per-pop) so rollback is exact. The legacy aggregate-bytes
+    /// advance (`vtime += bytes`) is retained only on
+    /// `cos_queue_pop_front_no_snapshot` (drain_all + worker teardown),
+    /// which clears the snapshot stack so the paired empty-stack
+    /// `push_front` rewinds with `vtime -= item_len`.
+    ///
+    /// Meaningful only on `flow_fair` queues; only reachable through
+    /// `queue.flow_fair_state.as_mut().unwrap().queue_vtime` once the
+    /// queue is promoted.
     pub(in crate::afxdp) queue_vtime: u64,
     // Per-queue hash salt mixed into `exact_cos_flow_bucket()` so the SFQ
     // bucket mapping is not an externally-probeable pure function of the

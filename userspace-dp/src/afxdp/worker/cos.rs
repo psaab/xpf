@@ -646,7 +646,7 @@ where
                     .saturating_add(queue.telemetry.drop_counters.tx_ring_full_submit_stalls);
                 // #751: the owner-side drain telemetry
                 // (drain_latency_hist + drain_invocations) now lives
-                // per-queue on CoSQueueRuntime.owner_profile — each
+                // per-queue on CoSQueueTelemetry.owner_profile — each
                 // exact queue gets its OWN histogram populated
                 // directly from its own atomics, with no eligibility
                 // gate. Pre-#751 these came from a binding-wide

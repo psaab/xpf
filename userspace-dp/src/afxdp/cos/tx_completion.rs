@@ -147,7 +147,7 @@ fn wake_cos_queue(root: &mut CoSInterfaceRuntime, queue_idx: usize) {
 
 // #710: count an exact-drain TX submit stall on a specific queue.
 // NOT packet loss — on the exact path, `writer.insert == 0` leaves
-// the FIFO items in `queue.items` or restores them (flow-fair path);
+// the FIFO items in `queue.hot.items` or restores them (flow-fair path);
 // frames that had been copied into UMEM are released back to
 // `free_tx_frames`, and the items get another chance next drain tick.
 // The counter signals TX-ring / completion-reap pressure, which is

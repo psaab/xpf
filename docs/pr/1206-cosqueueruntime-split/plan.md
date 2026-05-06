@@ -1,5 +1,5 @@
 ---
-status: REVISED v2 — addressing Codex (PLAN-NEEDS-MINOR, task-mou6u7ou-4h4a6u) and Gemini Pro 3 (NEEDS-MINOR/MAJOR convergent, task-mou6vue9-thj49g)
+status: PLAN-READY v3 — Codex round-3 (task-mou8wztc) PLAN-READY, Gemini Pro 3 round-3 (task-mou8x57g) PLAN-READY. v3 history: addressed Codex r2 doc inconsistencies on top of v2 (which addressed Codex r1 task-mou6u7ou-4h4a6u + Gemini r1 task-mou6vue9-thj49g convergent NEEDS-MINOR/MAJOR findings).
 issue: #1206
 phase: pure code-motion refactor; struct shape change with byte-for-byte behavior preservation
 ---

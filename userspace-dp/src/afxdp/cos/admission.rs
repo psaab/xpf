@@ -470,8 +470,9 @@ pub(in crate::afxdp) fn apply_cos_queue_flow_fair_promotion(
 /// The SFQ salt is drawn only for queues that actually use the
 /// flow-fair path — non-flow-fair queues never consult the seed
 /// (`exact_cos_flow_bucket` is only called from the flow-fair
-/// callers). Keeping them at seed=0 also preserves byte-identical
-/// legacy behavior on that path.
+/// callers). Non-flow-fair queues now keep `flow_fair_state: None`
+/// entirely (the salt lives on `FlowFairState`, not on the runtime
+/// root) so the field is unreachable on that path.
 fn promote_cos_queue_flow_fair(
     queue: &mut CoSQueueRuntime,
     queue_fast: &WorkerCoSQueueFastPath,

@@ -100,8 +100,10 @@ fn build_cos_interface_runtime_leaves_flow_hash_seed_zero_until_promotion() {
     // `build_cos_interface_runtime`. Pin this so a refactor that
     // accidentally moves the getrandom call into the builder is
     // caught: builder-time seeding would burn a syscall per non-
-    // flow-fair queue and would also drift the struct doc invariant
-    // that non-flow-fair queues keep seed=0.
+    // flow-fair queue. Non-flow-fair queues now leave
+    // `flow_fair_state: None` entirely (no FlowFairState, hence no
+    // seed at all) — the post-#1206 equivalent of the old
+    // "seed = 0" invariant.
     let root = test_cos_runtime_with_queues(
         10_000_000_000 / 8,
         vec![
