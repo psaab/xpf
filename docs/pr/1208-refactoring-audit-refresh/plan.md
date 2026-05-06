@@ -1,5 +1,5 @@
 ---
-status: REVISED v2 — addressing Codex (PLAN-NEEDS-MAJOR, task-mou6irv0-rtlyxo) and Gemini (PLAN-NEEDS-MINOR, task-mou6jusc-cbdrtj)
+status: REVISED v3 — Codex+Gemini r2 PLAN-NEEDS-MINOR (stale §5 invariant text). v3 ready to ship.
 issue: #1208
 phase: single PR — tooling + doc; no production code
 ---
@@ -149,11 +149,17 @@ None. Tooling + doc only.
 ## 5. Hidden invariants
 
 - Script must be deterministic (same output across runs at same git
-  HEAD). Use `find ... | sort` discipline.
+  HEAD). Use `find ... | sort` discipline + `LC_ALL=C` for
+  cross-platform locale-independent ordering.
 - Skip-regex must not accidentally exclude legitimate large files.
-- LOC method should match what `docs/engineering-style.md` already
-  defines as "production LOC" (existing memory note specifies "total
-  lines minus inline `#[cfg(test)] mod tests` block").
+- LOC metric is **total file LOC** for non-test, non-generated files.
+  v2 abandoned the inline test-block stripping approach: it required
+  fragile awk pattern matching, and the `EOF`-not-keyword bug caused
+  silent erasure of any production code following an inline test
+  block. The #1034 colocated-tests refactor moved most inline test
+  blocks to sibling `tests.rs` files anyway; remaining inline cases
+  are rare and the modest over-count is acceptable at 1500-2000 LOC
+  thresholds.
 
 ## 6. Risk
 
