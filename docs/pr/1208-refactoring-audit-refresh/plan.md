@@ -174,9 +174,10 @@ None. Tooling + doc only.
 - `bash scripts/refactoring-audit.sh` runs without error.
 - Output is non-empty (we have known >2K LOC files).
 - Output is sorted desc by first column.
-- Manual sanity check: top 5 entries match the user's auto-memory
-  scan from 2026-05-01 (which found "every userspace-dp Rust
-  production file under threshold after the 18-PR refactor stream").
+- Manual sanity check: heatmap matches `wc -l` on each flagged file
+  (cross-checked at PR open time; current top-8 `[REFACTOR]` entries
+  include `pkg/cluster/cluster.go`, `userspace-dp/src/afxdp/poll_descriptor.rs`,
+  `pkg/dataplane/dpdk/dpdk_cgo.go`, etc).
 - Re-running produces identical output (deterministic).
 
 ## 8. Out of scope
