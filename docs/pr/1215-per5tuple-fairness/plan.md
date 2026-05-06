@@ -1,10 +1,134 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: PLAN-KILLED v1 — Codex (task-mounv6zx) AND Gemini Pro 3 (task-mounvopl) both PLAN-KILL with consistent fatal findings; not implemented; preserved as evidence for future fairness attempts
 issue: #1215
-phase: design route + race-safety analysis; no code
+phase: KILLED — route A (cross-worker shared per-flow signal + scheduler stall) does not work; alternative paths from disposition doc remain (path 2 #937 ingress XDP_REDIRECT; path 3 workload-aware gate)
 prerequisites:
   - #1206 (CoSQueueRuntime split) merged as a1688792 — DONE
 ---
+
+## PLAN-KILL verdict (both reviewers, 2026-05-06)
+
+### Codex hostile (task-mounv6zx-i4h3r6) — verbatim top findings:
+
+> **Verdict: PLAN-KILL**
+>
+> 1. **Fatal**: the fairness mechanic does not address the 1+3 case.
+>    §4.3 compares `served_bytes` only for the same `flow_bucket` across
+>    workers and skips peers with `0` bytes. In the actual RSS-skew case,
+>    distinct 5-tuples almost always hash to distinct buckets, so worker
+>    A's lone flow sees `peer_count == 0`, worker B's three flows each
+>    see `peer_count == 0`, and no new stall fires. That leaves the
+>    exact structural limit documented in the #789 retrospective.
+>
+> 2. The rollback analysis is wrong. The plan says no rollback is needed
+>    because popped bytes were "attempted to send," but current flow-fair
+>    service restores uninserted scratch items to the queue on
+>    `inserted == 0` and partial insert. Those bytes did not hit the TX
+>    ring. Counting them permanently would overstate service.
+>    (queue_service/service.rs:298, mod.rs:740)
+>
+> 3. The #838 batch-latency claim is not proven. §4.4 says the selector
+>    is per-pop, but the existing V_min helper is cadence-gated
+>    (`pop_count == 1, 8, 16...`). If the per-flow check is added there,
+>    it is not per-pop.
+>
+> 4. Surface 6 is unbounded as written. Once a peer slot becomes nonzero
+>    and that peer slows, pauses, or dies, `min_peer` pins everyone else.
+>
+> 5. HA/fresh allocation is not established. Existing coordinator code
+>    reuses shared V_min Arcs by `(ifindex, queue_id)`; a SharedFlowTable
+>    following that pattern would retain old counters across role churn,
+>    contradicting §4.5.
+
+### Gemini Pro 3 adversarial (task-mounvopl-q1n3ge) — verbatim top findings:
+
+> **VERDICT: PLAN-KILL**
+>
+> **B. TCP-LEVEL FAIRNESS THEORY** — Fails basic network hardware realities.
+> The stall mechanism yields the *entire* worker queue. If Worker 1
+> stalls because Flow A is too fast, it completely stops popping the
+> queue, starving Flow B and Flow C which reside in the same worker
+> queue. **This is textbook Head-of-Line (HoL) blocking.**
+> Furthermore, stalling Worker 1 does **not** transfer bandwidth to
+> Worker 2. RSS hashes 5-tuples to distinct hardware RX queues. Stalling
+> Worker 1 simply causes its hardware RX ring to fill up until the NIC
+> tail-drops packets. Worker 2 operates on an entirely different hardware
+> queue and gets no spare capacity.
+>
+> **D. WORST-CASE STALL CASCADE — Catastrophic permanent deadlock.**
+> This is the fatal blow to the plan. Suppose Worker 1 serves Flow X
+> (bucket B). Worker 1 serves 10 MB, and Flow X terminates naturally.
+> Worker 1's counter for bucket B stops permanently at 10 MB. Worker 0
+> serves Flow Y (bucket B), reaches 10 MB + lag_threshold, sees peer
+> at 10 MB, stalls. Because Flow X is dead, Worker 1's counter will
+> NEVER advance. Worker 0 will stall FOREVER. The queue is completely
+> bricked until an HA role flip destroys it.
+>
+> **E. PRIOR-ART COMMUTATIVITY** — Replaces a race condition with a
+> deadlock. By making the counter monotonically infinite across the
+> lifetime of the queue to avoid the #838 period-reset race, you
+> created the deadlock described in D.
+
+### Convergent analysis
+
+Both reviewers independently reached **PLAN-KILL** with the same
+underlying physics:
+
+1. **Bucket collision misidentifies cross-worker fairness scope.**
+   In the RSS-skew case the mechanism doesn't fire because distinct
+   5-tuples typically hash to distinct buckets (Codex #1). Where it
+   DOES fire, the bucket collision is between unrelated flows on
+   different workers, not the same flow split across workers
+   (Gemini D).
+
+2. **Stalling does not redistribute hardware capacity.** Worker 1
+   stalling its queue doesn't transfer bandwidth to Worker 2 because
+   their RX hardware queues are physically independent — RSS isolates
+   the inputs (Gemini B).
+
+3. **Monotonic-without-period creates permanent deadlock** when one
+   flow on a bucket terminates and another flow on the same bucket
+   on a different worker reaches the threshold (Gemini D).
+
+4. **The rollback analysis is provably wrong** against the actual
+   service.rs:298 / mod.rs:740 restore-on-failure semantics (Codex #2).
+
+The mechanism was never going to work. The deeper truth: per-worker
+fair queueing **structurally cannot equalize** across hardware-isolated
+RSS queues without either (a) re-routing packets across workers
+(#937 / #1203's failed approach), or (b) backpressure-via-ECN-mark to
+make TCP senders slow down (#1211 / #838-AFD-lite's killed approach).
+This plan tried path (c) — local stall — which neither reviewer
+believes can equalize cross-worker rates.
+
+### Lessons for any future #1215 v2 / per-flow-fairness attempt
+
+1. **Local stall is dead.** Don't propose a v2 that stalls a worker
+   to fix cross-worker fairness. The hardware queues are independent.
+2. **Monotonic-without-period creates deadlock.** Any future shared
+   per-flow signal needs an epoch / vacate / drain mechanism for
+   when a flow on a bucket terminates while a peer is still serving.
+3. **Bucket collision is unrelated flows, not same flow.** In the
+   RSS-skew case the same flow is exclusively on one worker; the
+   peer-scan-for-same-bucket mechanic doesn't activate for the
+   actual fairness target.
+4. **The two surviving paths from the disposition doc remain:**
+   - Path 2 (#937): ingress XDP_REDIRECT before UMEM ownership
+   - Path 3: workload-aware gate (≤30% CoV for saturated workloads)
+5. **Or pivot to ECN overlay (#1211)**: AFD/CSFQ-style per-flow
+   ECN-mark that requires TCP sender response. #838-AFD-lite was
+   killed for race surfaces; a fresh attempt has to re-do the
+   race-safety analysis.
+
+---
+
+(plan body below preserved as evidence for future attempts)
+
+---
+
+## ORIGINAL PLAN (PLAN-KILLED — for reference only)
+
+
 
 ## 1. Issue framing
 
