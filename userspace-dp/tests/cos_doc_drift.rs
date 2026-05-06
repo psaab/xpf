@@ -87,7 +87,7 @@ fn cos_doc_drift_guard() {
     }
 
     if !violations.is_empty() {
-        violations.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+        violations.sort_unstable_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
         let report: Vec<String> = violations
             .iter()
             .map(|v| {
