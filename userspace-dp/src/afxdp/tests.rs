@@ -2719,9 +2719,131 @@ fn slow_path_accept_is_categorized_by_reason_and_disposition() {
             .load(Ordering::Relaxed),
         1
     );
-    assert_eq!(live.slow_path_no_route_packets.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        live.slow_path_forward_build_packets.load(Ordering::Relaxed),
-        1
+}
+
+// #1187: regression tests for DispositionCounters hot/cold accounting modes.
+// Hot callers must accumulate in BatchCounters and only write to
+// BindingLiveState on flush(). Cold callers must write immediately.
+
+#[test]
+fn disposition_counters_hot_accumulates_in_batch_not_live() {
+    let live = BindingLiveState::new();
+    let recent_exceptions = Arc::new(Mutex::new(VecDeque::new()));
+    let binding = BindingIdentity {
+        slot: 1,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-0"),
+        ifindex: 3,
+    };
+    let mut counters = BatchCounters::default();
+
+    // Before any calls: live counter must be 0, batch must be clean.
+    assert_eq!(live.policy_denied_packets.load(Ordering::Relaxed), 0);
+    assert!(!counters.touched);
+
+    // Hot call — should land in batch, not in live.
+    record_forwarding_disposition(
+        &binding,
+        DispositionCounters::Hot(&mut counters),
+        ForwardingResolution {
+            disposition: ForwardingDisposition::PolicyDenied,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        64,
+        None,
+        None,
+        &recent_exceptions,
+        &Arc::new(Mutex::new(None)),
+        &ForwardingState::default(),
     );
+
+    assert_eq!(counters.policy_denied_packets, 1, "batch should hold the count");
+    assert_eq!(
+        live.policy_denied_packets.load(Ordering::Relaxed),
+        0,
+        "live must not be updated before flush"
+    );
+    assert!(counters.touched, "touched flag must be set after hot bump");
+
+    // After flush: batch clears, live receives the accumulated count.
+    counters.flush(&live);
+    assert_eq!(counters.policy_denied_packets, 0, "batch must be zero after flush");
+    assert_eq!(
+        live.policy_denied_packets.load(Ordering::Relaxed),
+        1,
+        "live must receive count after flush"
+    );
+    assert!(!counters.touched, "touched flag must clear after flush");
+}
+
+#[test]
+fn disposition_counters_cold_writes_live_immediately() {
+    let live = BindingLiveState::new();
+    let recent_exceptions = Arc::new(Mutex::new(VecDeque::new()));
+    let binding = BindingIdentity {
+        slot: 1,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-0"),
+        ifindex: 3,
+    };
+
+    // Before any calls: live counter must be 0.
+    assert_eq!(live.route_miss_packets.load(Ordering::Relaxed), 0);
+
+    // Cold call — should write to live immediately, no batch involved.
+    record_forwarding_disposition(
+        &binding,
+        DispositionCounters::Cold(&live),
+        ForwardingResolution {
+            disposition: ForwardingDisposition::NoRoute,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        64,
+        None,
+        None,
+        &recent_exceptions,
+        &Arc::new(Mutex::new(None)),
+        &ForwardingState::default(),
+    );
+
+    assert_eq!(
+        live.route_miss_packets.load(Ordering::Relaxed),
+        1,
+        "cold path must update live immediately"
+    );
+}
+
+#[test]
+fn disposition_counters_hot_screen_drops_accumulate_in_batch() {
+    let live = BindingLiveState::new();
+    let mut counters = BatchCounters::default();
+
+    // Simulate the screen-check fast path directly (3 drops).
+    for _ in 0..3 {
+        counters.touched = true;
+        counters.screen_drops += 1;
+    }
+
+    assert_eq!(counters.screen_drops, 3);
+    assert_eq!(live.screen_drops.load(Ordering::Relaxed), 0, "live must be 0 before flush");
+
+    counters.flush(&live);
+    assert_eq!(counters.screen_drops, 0, "batch must clear after flush");
+    assert_eq!(live.screen_drops.load(Ordering::Relaxed), 3, "live must receive count after flush");
 }

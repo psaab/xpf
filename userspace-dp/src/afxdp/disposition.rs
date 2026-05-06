@@ -73,9 +73,138 @@ pub(super) fn record_exception(
     }
 }
 
+/// #1187: counter sink for `record_disposition` /
+/// `record_forwarding_disposition`. Hot callers (worker poll path)
+/// pass `Hot(&mut BatchCounters)` so per-packet increments land in
+/// the per-poll-tick batch and flush via `BatchCounters::flush()`.
+/// Cold callers (coordinator/inject.rs RPC injection) pass
+/// `Cold(&BindingLiveState)` and write directly to atomics — they're
+/// not on the worker per-packet hot path so MESI thrash is not a
+/// concern there.
+pub(super) enum DispositionCounters<'a> {
+    Hot(&'a mut BatchCounters),
+    Cold(&'a BindingLiveState),
+}
+
+impl DispositionCounters<'_> {
+    #[inline]
+    fn bump_validated(&mut self, packet_length: u32) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.validated_packets += 1;
+                c.validated_bytes += packet_length as u64;
+            }
+            Self::Cold(live) => {
+                live.validated_packets.fetch_add(1, Ordering::Relaxed);
+                live.validated_bytes
+                    .fetch_add(packet_length as u64, Ordering::Relaxed);
+            }
+        }
+    }
+    #[inline]
+    fn bump_exception(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.exception_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.exception_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    #[inline]
+    fn bump_local_delivery(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.local_delivery_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.local_delivery_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    #[inline]
+    fn bump_forward_candidate(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.forward_candidate_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.forward_candidate_packets
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    #[inline]
+    fn bump_policy_denied(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.policy_denied_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.policy_denied_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    #[inline]
+    fn bump_route_miss(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.route_miss_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.route_miss_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    #[inline]
+    fn bump_neighbor_miss(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.neighbor_miss_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.neighbor_miss_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    #[inline]
+    fn bump_discard_route(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.discard_route_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.discard_route_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    #[inline]
+    fn bump_next_table(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.next_table_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.next_table_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 pub(super) fn record_disposition(
     binding: &BindingIdentity,
     live: &BindingLiveState,
+    mut counters: DispositionCounters<'_>,
     disposition: PacketDisposition,
     packet_length: u32,
     meta: Option<UserspaceDpMeta>,
@@ -84,12 +213,10 @@ pub(super) fn record_disposition(
 ) {
     match disposition {
         PacketDisposition::Valid => {
-            live.validated_packets.fetch_add(1, Ordering::Relaxed);
-            live.validated_bytes
-                .fetch_add(packet_length as u64, Ordering::Relaxed);
+            counters.bump_validated(packet_length);
         }
         PacketDisposition::NoSnapshot => {
-            live.exception_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_exception();
             record_exception(
                 recent_exceptions,
                 binding,
@@ -101,7 +228,9 @@ pub(super) fn record_disposition(
             );
         }
         PacketDisposition::ConfigGenerationMismatch => {
-            live.exception_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_exception();
+            // config_gen_mismatches is reconcile-only; deferred from
+            // batch per plan §2. Direct atomic on `live`.
             live.config_gen_mismatches.fetch_add(1, Ordering::Relaxed);
             record_exception(
                 recent_exceptions,
@@ -114,7 +243,8 @@ pub(super) fn record_disposition(
             );
         }
         PacketDisposition::FibGenerationMismatch => {
-            live.exception_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_exception();
+            // fib_gen_mismatches is reconcile-only; deferred per plan §2.
             live.fib_gen_mismatches.fetch_add(1, Ordering::Relaxed);
             record_exception(
                 recent_exceptions,
@@ -127,7 +257,9 @@ pub(super) fn record_disposition(
             );
         }
         PacketDisposition::UnsupportedPacket => {
-            live.exception_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_exception();
+            // unsupported_packets is reconcile-/upgrade-window only;
+            // deferred per plan §2.
             live.unsupported_packets.fetch_add(1, Ordering::Relaxed);
             record_exception(
                 recent_exceptions,
@@ -144,7 +276,7 @@ pub(super) fn record_disposition(
 
 pub(super) fn record_forwarding_disposition(
     binding: &BindingIdentity,
-    live: &BindingLiveState,
+    mut counters: DispositionCounters<'_>,
     resolution: ForwardingResolution,
     packet_length: u32,
     meta: Option<UserspaceDpMeta>,
@@ -155,15 +287,14 @@ pub(super) fn record_forwarding_disposition(
 ) {
     match resolution.disposition {
         ForwardingDisposition::LocalDelivery => {
-            live.local_delivery_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_local_delivery();
         }
         ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect => {
-            live.forward_candidate_packets
-                .fetch_add(1, Ordering::Relaxed);
+            counters.bump_forward_candidate();
         }
         ForwardingDisposition::HAInactive => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
-            live.exception_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_exception();
             record_exception(
                 recent_exceptions,
                 binding,
@@ -176,7 +307,7 @@ pub(super) fn record_forwarding_disposition(
         }
         ForwardingDisposition::PolicyDenied => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
-            live.policy_denied_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_policy_denied();
             record_exception(
                 recent_exceptions,
                 binding,
@@ -189,7 +320,7 @@ pub(super) fn record_forwarding_disposition(
         }
         ForwardingDisposition::NoRoute => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
-            live.route_miss_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_route_miss();
             record_exception(
                 recent_exceptions,
                 binding,
@@ -202,7 +333,7 @@ pub(super) fn record_forwarding_disposition(
         }
         ForwardingDisposition::MissingNeighbor => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
-            live.neighbor_miss_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_neighbor_miss();
             record_exception(
                 recent_exceptions,
                 binding,
@@ -215,7 +346,7 @@ pub(super) fn record_forwarding_disposition(
         }
         ForwardingDisposition::DiscardRoute => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
-            live.discard_route_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_discard_route();
             record_exception(
                 recent_exceptions,
                 binding,
@@ -228,7 +359,7 @@ pub(super) fn record_forwarding_disposition(
         }
         ForwardingDisposition::NextTableUnsupported => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
-            live.next_table_packets.fetch_add(1, Ordering::Relaxed);
+            counters.bump_next_table();
             record_exception(
                 recent_exceptions,
                 binding,

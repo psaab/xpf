@@ -220,9 +220,11 @@ pub(super) fn stage_classify_fabric_ingress(
 /// gate). Resolves the ingress zone name (preferring the
 /// fabric-zone override from stage 9), extracts a `ScreenPacketInfo`
 /// from the packet, and runs `screen.check_packet`. On a Drop
-/// verdict, increments `binding_live.screen_drops` and returns
-/// `RecycleAndContinue` — the caller still owns the recycle push
-/// (matching the original code's pattern).
+/// verdict, bumps `counters.screen_drops` (batched, not direct
+/// to `BindingLiveState` — #1187 DDoS-resilience: SYN flood is the
+/// primary screen_drops trigger; unbatched atomics here would cause
+/// MESI ping-pong with the coordinator's status reads under
+/// volumetric attack) and returns `RecycleAndContinue`.
 #[inline]
 pub(super) fn stage_screen_check(
     flow: Option<&SessionFlow>,
@@ -231,7 +233,7 @@ pub(super) fn stage_screen_check(
     ingress_zone_override: Option<u16>,
     now_secs: u64,
     screen: &mut ScreenState,
-    binding_live: &BindingLiveState,
+    counters: &mut BatchCounters,
     worker_ctx: &WorkerContext,
 ) -> StageOutcome<()> {
     if !screen.has_profiles() {
@@ -273,7 +275,8 @@ pub(super) fn stage_screen_check(
         l3_off,
     );
     if let ScreenVerdict::Drop(_reason) = screen.check_packet(zone_name, &screen_pkt, now_secs) {
-        binding_live.screen_drops.fetch_add(1, Ordering::Relaxed);
+        counters.touched = true;
+        counters.screen_drops += 1;
         return StageOutcome::RecycleAndContinue;
     }
     StageOutcome::Continue(())

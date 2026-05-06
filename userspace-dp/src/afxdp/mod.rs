@@ -302,10 +302,10 @@ pub(crate) use self::worker::{
 
 // Lifted from `poll_binding` so the per-descriptor batch function
 // (`poll_binding_process_descriptor`) can take `&mut BatchCounters`.
-// Shape and semantics are byte-for-byte identical to the previous nested
-// definition — see #678 poll_binding split.
+// Originally byte-for-byte identical to the previous nested definition
+// (#678 poll_binding split). #1187 adds 8 disposition-path counters.
 #[derive(Default)]
-struct BatchCounters {
+pub(in crate::afxdp) struct BatchCounters {
     touched: bool,
     rx_packets: u64,
     rx_bytes: u64,
@@ -319,6 +319,18 @@ struct BatchCounters {
     session_creates: u64,
     snat_packets: u64,
     dnat_packets: u64,
+    // #1187: 8 disposition-path counters added to eliminate per-packet
+    // MESI thrash on BindingLiveState atomics during DDoS / config-
+    // reload windows. See docs/pr/1187-telemetry-double-buffer/plan.md
+    // (v7 PLAN-READY).
+    screen_drops: u64,
+    policy_denied_packets: u64,
+    route_miss_packets: u64,
+    neighbor_miss_packets: u64,
+    discard_route_packets: u64,
+    next_table_packets: u64,
+    local_delivery_packets: u64,
+    exception_packets: u64,
 }
 
 impl BatchCounters {
@@ -385,6 +397,47 @@ impl BatchCounters {
                 .fetch_add(self.dnat_packets, Ordering::Relaxed);
             self.dnat_packets = 0;
         }
+        // #1187 disposition-path counters
+        if self.screen_drops != 0 {
+            live.screen_drops
+                .fetch_add(self.screen_drops, Ordering::Relaxed);
+            self.screen_drops = 0;
+        }
+        if self.policy_denied_packets != 0 {
+            live.policy_denied_packets
+                .fetch_add(self.policy_denied_packets, Ordering::Relaxed);
+            self.policy_denied_packets = 0;
+        }
+        if self.route_miss_packets != 0 {
+            live.route_miss_packets
+                .fetch_add(self.route_miss_packets, Ordering::Relaxed);
+            self.route_miss_packets = 0;
+        }
+        if self.neighbor_miss_packets != 0 {
+            live.neighbor_miss_packets
+                .fetch_add(self.neighbor_miss_packets, Ordering::Relaxed);
+            self.neighbor_miss_packets = 0;
+        }
+        if self.discard_route_packets != 0 {
+            live.discard_route_packets
+                .fetch_add(self.discard_route_packets, Ordering::Relaxed);
+            self.discard_route_packets = 0;
+        }
+        if self.next_table_packets != 0 {
+            live.next_table_packets
+                .fetch_add(self.next_table_packets, Ordering::Relaxed);
+            self.next_table_packets = 0;
+        }
+        if self.local_delivery_packets != 0 {
+            live.local_delivery_packets
+                .fetch_add(self.local_delivery_packets, Ordering::Relaxed);
+            self.local_delivery_packets = 0;
+        }
+        if self.exception_packets != 0 {
+            live.exception_packets
+                .fetch_add(self.exception_packets, Ordering::Relaxed);
+            self.exception_packets = 0;
+        }
         self.touched = false;
     }
 }
@@ -418,7 +471,9 @@ use neighbor_dispatch::learn_dynamic_neighbor;
 // Issue 67.3: disposition / telemetry recording extracted into
 // afxdp/disposition.rs.
 mod disposition;
-use disposition::{record_disposition, record_exception, record_forwarding_disposition};
+use disposition::{
+    DispositionCounters, record_disposition, record_exception, record_forwarding_disposition,
+};
 // `update_last_resolution` is only referenced by tests in afxdp/tests.rs;
 // gate its import behind cfg(test).
 #[cfg(test)]
