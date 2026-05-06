@@ -1,5 +1,5 @@
 ---
-status: REVISED v7 — Codex round-6 NEEDS-MINOR fixes: softened `Guard::into_inner` cost-savings claim (it is NOT categorically free of atomic refcount increments — `HybridProtection::into_inner` may still call `T::inc` when the guard has debt; `load_full()` is literally `Guard::into_inner(self.load())`). The real win in this PR is the `Arc::ptr_eq` short-circuit, not an into_inner-vs-clone difference. Stale `Arc::as_ptr` references replaced with `Arc::ptr_eq` (the actual API used). Stale "v4 build" replaced with "v7 build" in §8
+status: v8 FINAL — Codex round-7 PLAN-READY after one §10 wording fix (§10 question 2 still claimed "without an atomic increment"; corrected to match §2/§4.3 caveat). Implementation shipped at commit 98c61a8e on refactor/1188-runtime-snapshot
 issue: #1188
 phase: Replace unconditional `.load_full()` with `.load()` + `Arc::ptr_eq` short-circuit in worker tick loop
 ---
@@ -308,9 +308,12 @@ The helper is a private fn or a module-local utility.
    ticks, we still observe a difference.
 
 2. ~~Is the `drop(live_X_guard)` before `.load_full()` necessary?~~
-   **Resolved (round-2/round-5):** v6 uses `Guard::into_inner`
-   which consumes the Guard, transferring ownership without an
-   atomic increment. No `drop` ceremony, no second `.load_full()`.
+   **Resolved (round-2/round-5/round-7):** v7 uses `Guard::into_inner`
+   which consumes the observed Guard and avoids a second
+   `.load_full()` (no TOCTOU window). The refcount cost on the
+   change branch may match `load_full()` (see §2 and §4.3 for the
+   `HybridProtection::into_inner` caveat) — the win is the
+   `Arc::ptr_eq` short-circuit, not the change-branch path.
 
 3. **What if 5 of 6 fields are usually changed together?** Then
    the `.load() + ptr_eq` short-circuit hits N times less
