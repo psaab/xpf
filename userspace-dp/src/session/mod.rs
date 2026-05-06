@@ -109,6 +109,16 @@ macro_rules! debug_log {
 }
 
 
+/// #789 fairness: sentinel for `installed_on_binding_slot` indicating
+/// the install path didn't yet plumb the owning binding's slot. The
+/// flow_steering controller treats `BINDING_SLOT_UNKNOWN` entries as
+/// "not steerable for now" — they don't count toward any binding's
+/// `active_ingress_flows_count` and aren't included in
+/// `active_ingress_flows_sample`. Phase 1.5 plumbs the actual slot
+/// through the install API surface; until then the sentinel keeps
+/// the mechanism opt-in-by-instrumentation.
+pub(crate) const BINDING_SLOT_UNKNOWN: u32 = u32::MAX;
+
 #[derive(Clone, Debug)]
 struct SessionEntry {
     decision: SessionDecision,
@@ -123,6 +133,19 @@ struct SessionEntry {
     /// A WheelEntry whose `scheduled_tick != entry.wheel_tick` is a
     /// stale duplicate (lazy-delete discriminator).
     wheel_tick: u64,
+    /// #789 Phase 1: monotonic nanoseconds at true session creation.
+    /// Set ONCE at insert paths; PRESERVED across refresh / update /
+    /// HA-owner-transition paths (which rewrite `install_epoch` as a
+    /// counter). Lookup paths bump `last_seen_ns` but MUST NOT touch
+    /// this field. Used by the flow-steering controller to compute
+    /// `install_age_secs` for the stable-flow gate.
+    installed_at_ns: u64,
+    /// #789 Phase 1: slot of the binding whose worker installed this
+    /// session. `BINDING_SLOT_UNKNOWN` means the install API didn't
+    /// plumb the slot (Phase 1 sentinel default; Phase 1.5 plumbs the
+    /// actual slot). Preserved across refresh paths same as
+    /// `installed_at_ns`.
+    installed_on_binding_slot: u32,
 }
 
 /// #964 Step 1: slab-resident record. Holds the canonical
@@ -173,6 +196,30 @@ pub(crate) struct SessionTable {
     /// is 4-5 increments per popped entry — sub-µs at typical loads.
     last_pop_stats: WheelPopStats,
 }
+
+/// #789 Phase 1: per-flow snapshot returned by
+/// [`SessionTable::ingress_active_flows_for_binding`]. Used by the
+/// flow-steering controller to pick stable active flows for re-steer.
+#[derive(Clone, Debug)]
+pub(crate) struct ActiveFlowSample {
+    pub(crate) key: SessionKey,
+    pub(crate) installed_at_ns: u64,
+    pub(crate) last_seen_ns: u64,
+}
+
+/// #789 Phase 1: per-binding inventory of recent ingress-active flows.
+/// `count` is the total number of sessions where
+/// `installed_on_binding_slot == requested_slot` AND
+/// `now_ns - last_seen_ns < recency_window_ns`. `sample` is up to
+/// MAX_ACTIVE_FLOW_SAMPLE entries (16) — the controller picks 1-2
+/// from this sample with the stable-flow gate.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ActiveFlowInventory {
+    pub(crate) count: u32,
+    pub(crate) sample: Vec<ActiveFlowSample>,
+}
+
+pub(crate) const MAX_ACTIVE_FLOW_SAMPLE: usize = 16;
 
 impl SessionTable {
     pub fn new() -> Self {
@@ -276,6 +323,54 @@ impl SessionTable {
         // count reflects "installed sessions" even if the slab ever
         // held an orphan record from a partial cleanup path.
         self.key_to_handle.len()
+    }
+
+    /// #789 Phase 1: snapshot of ingress-active flows belonging to a
+    /// specific binding's slot. Filters by:
+    ///   - `entry.installed_on_binding_slot == slot`
+    ///   - `now_ns - entry.last_seen_ns < recency_window_ns`
+    /// Used by the flow-steering controller (see
+    /// `docs/pr/789-fairness-via-ntuple/plan.md` §4.3) to pick
+    /// stable active flows for re-steer.
+    ///
+    /// Sessions stamped with `BINDING_SLOT_UNKNOWN` are skipped — see
+    /// the sentinel doc on `BINDING_SLOT_UNKNOWN`. Callers requesting
+    /// `slot == BINDING_SLOT_UNKNOWN` get an empty inventory by
+    /// construction.
+    ///
+    /// O(N) over `entries`. Called at 1 Hz cadence per binding by the
+    /// worker — caller is expected to gate on the time interval (see
+    /// `ACTIVE_FLOWS_PUBLISH_INTERVAL_NS` near `worker_loop`).
+    pub(crate) fn ingress_active_flows_for_binding(
+        &self,
+        slot: u32,
+        now_ns: u64,
+        recency_window_ns: u64,
+    ) -> ActiveFlowInventory {
+        let mut count: u32 = 0;
+        let mut sample: Vec<ActiveFlowSample> =
+            Vec::with_capacity(MAX_ACTIVE_FLOW_SAMPLE);
+        if slot == BINDING_SLOT_UNKNOWN {
+            return ActiveFlowInventory { count, sample };
+        }
+        for record in self.entries.iter().map(|(_handle, rec)| rec) {
+            let entry = &record.entry;
+            if entry.installed_on_binding_slot != slot {
+                continue;
+            }
+            if now_ns.saturating_sub(entry.last_seen_ns) >= recency_window_ns {
+                continue;
+            }
+            count = count.saturating_add(1);
+            if sample.len() < MAX_ACTIVE_FLOW_SAMPLE {
+                sample.push(ActiveFlowSample {
+                    key: record.key.clone(),
+                    installed_at_ns: entry.installed_at_ns,
+                    last_seen_ns: entry.last_seen_ns,
+                });
+            }
+        }
+        ActiveFlowInventory { count, sample }
     }
 
     // ── #964 Step 1 internal helpers ─────────────────────────────
@@ -679,6 +774,10 @@ impl SessionTable {
                 expires_after_ns: session_timeout_ns(protocol, tcp_flags, &self.timeouts),
                 closing: matches!(protocol, PROTO_TCP) && (tcp_flags & (TCP_FIN | TCP_RST)) != 0,
                 wheel_tick: 0,
+                // #789 Phase 1: stamped at true creation; refresh
+                // paths preserve via `restore_entry`.
+                installed_at_ns: now_ns,
+                installed_on_binding_slot: BINDING_SLOT_UNKNOWN,
             },
         };
         let raw = self.entries.insert(record);
@@ -759,6 +858,9 @@ impl SessionTable {
                 expires_after_ns: session_timeout_ns(protocol, tcp_flags, &self.timeouts),
                 closing: matches!(protocol, PROTO_TCP) && (tcp_flags & (TCP_FIN | TCP_RST)) != 0,
                 wheel_tick: 0,
+                // #789 Phase 1: stamped at true creation.
+                installed_at_ns: now_ns,
+                installed_on_binding_slot: BINDING_SLOT_UNKNOWN,
             },
         };
         let raw = self.entries.insert(record);
