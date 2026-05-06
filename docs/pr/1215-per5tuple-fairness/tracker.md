@@ -182,3 +182,5 @@ Master tip 638c9d07. Verified this session:
 | 2026-05-06 | Issue #1215 filed | Cites Codex retro + user mandate |
 | 2026-05-06 | Tracker doc created | This file |
 | 2026-05-06 | Memory entry created | `project_per5tuple_fairness_drive.md` + MEMORY.md index line |
+| 2026-05-06 | #1206 worktree rebased onto master 638c9d07 | Clean rebase of plan v3 (3 commits) |
+| 2026-05-06 | Codex dispatched for #1206 implementation | task-mouau0b5-k4xhoa; bulk migration of ~1500 field accesses |
