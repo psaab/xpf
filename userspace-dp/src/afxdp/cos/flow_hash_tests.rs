@@ -161,8 +161,8 @@ fn exact_cos_flow_bucket_distribution_keeps_collisions_below_budget() {
 /// buffer / prospective_active_flows, halved/thirded if a
 /// bucket holds 2-3 flows).
 ///
-/// Budget: for 12 narrow-input flows in 1024 buckets under a
-/// good hash, E[colliding pairs] ≈ 12*11/(2*1024) ≈ 0.06 —
+/// Budget: for 12 narrow-input flows in 4096 buckets under a
+/// good hash, E[colliding pairs] ≈ 12*11/(2*4096) ≈ 0.016 —
 /// essentially always 12 distinct buckets. Under the prior
 /// boost-style hash_combine, narrow inputs observably collapse
 /// to 3-6 distinct buckets across most seeds. Demand >=11

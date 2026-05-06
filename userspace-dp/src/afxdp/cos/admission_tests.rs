@@ -1177,8 +1177,8 @@ fn cos_queue_flow_share_limit_never_drops_below_fast_retransmit_floor() {
 fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
     // #717: at the architectural maximum of 4096 active buckets
     // the pre-clamp flow-aware expansion reaches
-    // 1024 × COS_FLOW_FAIR_MIN_SHARE_BYTES ≈ 24 MB. On a 1 Gbps
-    // queue that is ~190 ms of queue residence — far outside the
+    // 4096 × COS_FLOW_FAIR_MIN_SHARE_BYTES ≈ 98 MB. On a 1 Gbps
+    // queue that is ~786 ms of queue residence — far outside the
     // scheduler's predictable regime. The latency-envelope clamp
     // caps the aggregate at
     // `transmit_rate_bytes × COS_FLOW_FAIR_MAX_QUEUE_DELAY_NS / 1e9`
@@ -1204,7 +1204,7 @@ fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
     let queue = &mut root.queues[0];
     queue.flow_fair = true;
 
-    // Drive to the architectural maximum: 1024 populated buckets.
+    // Drive to the architectural maximum: 4096 populated buckets.
     queue.active_flow_buckets = COS_FLOW_FAIR_BUCKETS as u16;
     for bucket in 0..COS_FLOW_FAIR_BUCKETS {
         queue.flow_bucket_bytes[bucket] = 1_000;
@@ -1216,12 +1216,12 @@ fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
     let expected_delay_cap = 625_000u64;
     assert_eq!(
         cap, expected_delay_cap,
-        "flow-aware cap must be clamped to the 5 ms delay envelope, not the ~24 MB \
-         unclamped expansion"
+        "flow-aware cap must be clamped to the 5 ms delay envelope, not the ~98 MB \
+         unclamped expansion (4096 × 24 KB at the GEMINI-NEXT.md fairness bump)"
     );
 
     // Counter-factual: prove the pre-clamp formula would have
-    // returned 24 MB. Guards against a future refactor silently
+    // returned ~98 MB. Guards against a future refactor silently
     // deleting the clamp.
     let unclamped = u64::from(queue.active_flow_buckets)
         .max(1)

@@ -1028,7 +1028,7 @@ fn tx_kick_latency_sentinel_underflow_skipped_at_call_site() {
     //   (b) `record_kick_latency` itself pins to "well-formed
     //       inputs only": no in-band sentinel check inside the
     //       helper, matching `record_tx_completions_with_stamp`'s
-    //       `ts_completion >= ts_submit` pattern at tx/transmit.rs::transmit_batch.
+    //       `ts_completion >= ts_submit` pattern at tx/stats.rs::record_tx_completions_with_stamp.
     //
     // The pin: drive `record_kick_latency` with a synthetic
     // "underflow would produce this" delta and verify it DOES
@@ -1061,7 +1061,7 @@ fn tx_kick_latency_sentinel_underflow_skipped_at_call_site() {
     // Invariant pinned: if a future refactor were to add a
     // sentinel inside `record_kick_latency`, this assertion
     // would fail and flag the behavior change explicitly.
-    // The production call site at tx/transmit.rs:maybe_wake_tx uses
+    // The production call site at tx/rings.rs::maybe_wake_tx uses
     // `if kick_start != 0 && kick_end >= kick_start {
     // record_kick_latency(...) }` which is the correct guard
     // location (code-review R1 HIGH-1).
@@ -1071,7 +1071,7 @@ fn tx_kick_latency_sentinel_underflow_skipped_at_call_site() {
 fn tx_kick_retry_count_observable_via_snapshot() {
     // #825 code-review R1 MED-3: pin that the `tx_kick_retry_count`
     // field is (a) writable via the same owner-side atomic that the
-    // production call site at tx/transmit.rs:maybe_wake_tx EAGAIN branch uses
+    // production call site at tx/rings.rs::maybe_wake_tx EAGAIN branch uses
     // (`binding.live.owner_profile_owner.tx_kick_retry_count
     //   .fetch_add(1, Ordering::Relaxed)`) and (b) observable via
     // `BindingLiveState::snapshot()` with the expected value. This
