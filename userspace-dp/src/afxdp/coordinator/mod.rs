@@ -1239,6 +1239,31 @@ impl Coordinator {
                 binding.tx_kick_latency_count = snap.tx_kick_latency_count;
                 binding.tx_kick_latency_sum_ns = snap.tx_kick_latency_sum_ns;
                 binding.tx_kick_retry_count = snap.tx_kick_retry_count;
+                // #789 Phase 1: per-binding ingress-active flow inventory
+                // for the flow_steering controller. Worker publishes at
+                // 1Hz; coordinator surfaces here on each refresh.
+                binding.active_ingress_flows_count =
+                    snap.active_ingress_flows_count;
+                binding.active_ingress_flows_sample = snap
+                    .active_ingress_flows_sample
+                    .iter()
+                    .map(|s| {
+                        let now_ns = monotonic_nanos();
+                        let install_age_secs = now_ns
+                            .saturating_sub(s.installed_at_ns)
+                            .saturating_div(1_000_000_000)
+                            .min(u32::MAX as u64) as u32;
+                        let last_seen_age_ms = now_ns
+                            .saturating_sub(s.last_seen_ns)
+                            .saturating_div(1_000_000)
+                            .min(u32::MAX as u64) as u32;
+                        crate::protocol::ActiveFlowSampleStatus {
+                            wire_5tuple: format_session_key_wire(&s.key),
+                            install_age_secs,
+                            last_seen_age_ms,
+                        }
+                    })
+                    .collect();
                 binding.last_heartbeat = snap.last_heartbeat;
                 binding.last_error = snap.last_error;
                 binding.ready = binding.registered
@@ -1821,6 +1846,37 @@ fn shared_cos_owner_live_by_queue_match(
         })
 }
 
+// #789 Phase 1: render a SessionKey 5-tuple as an operator-readable
+// string for the flow_steering controller's CLI/Prometheus surface.
+// Output shapes:
+//   tcp 10.0.0.1:5201 -> 172.16.80.200:43210
+//   udp [2001:db8::1]:53 -> [2001:db8::2]:53
+//   icmp 10.0.0.1 -> 10.0.0.2
+fn format_session_key_wire(key: &crate::session::SessionKey) -> String {
+    use std::net::IpAddr;
+    let proto = match key.protocol {
+        6 => "tcp",
+        17 => "udp",
+        1 => "icmp",
+        58 => "icmpv6",
+        other => return format!("proto-{} {} -> {}", other, key.src_ip, key.dst_ip),
+    };
+    let fmt_endpoint = |ip: &IpAddr, port: u16| -> String {
+        match ip {
+            IpAddr::V4(_) => format!("{}:{}", ip, port),
+            IpAddr::V6(_) => format!("[{}]:{}", ip, port),
+        }
+    };
+    match key.protocol {
+        1 | 58 => format!("{} {} -> {}", proto, key.src_ip, key.dst_ip),
+        _ => format!(
+            "{} {} -> {}",
+            proto,
+            fmt_endpoint(&key.src_ip, key.src_port),
+            fmt_endpoint(&key.dst_ip, key.dst_port),
+        ),
+    }
+}
 
 #[cfg(test)]
 #[path = "tests.rs"]

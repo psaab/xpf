@@ -1450,10 +1450,41 @@ pub(crate) struct BindingStatus {
     pub tx_kick_latency_sum_ns: u64,
     #[serde(rename = "tx_kick_retry_count", default)]
     pub tx_kick_retry_count: u64,
+    /// #789 Phase 1: per-binding ingress-active flow count published
+    /// at 1Hz cadence by the worker. Used by the Go-side flow_steering
+    /// controller to compute imbalance across bindings within a
+    /// shared_exact CoS class.
+    #[serde(rename = "active_ingress_flows_count", default)]
+    pub active_ingress_flows_count: u32,
+    /// #789 Phase 1: companion sample (up to 16) of recently-active
+    /// ingress flow tuples on this binding. Used by the controller
+    /// to pick stable flows for re-steer.
+    #[serde(
+        rename = "active_ingress_flows_sample",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub active_ingress_flows_sample: Vec<ActiveFlowSampleStatus>,
     #[serde(rename = "last_error", default)]
     pub last_error: String,
     #[serde(rename = "last_change", skip_serializing_if = "Option::is_none")]
     pub last_change: Option<DateTime<Utc>>,
+}
+
+/// #789 Phase 1: wire form of an ingress-active flow sample for the
+/// flow_steering controller (Go side, `pkg/dataplane/userspace`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveFlowSampleStatus {
+    /// Wire-form 5-tuple, e.g. `tcp 10.0.61.102:50001 -> 172.16.80.200:5203`.
+    /// Parsed by the Go controller to build the ethtool ntuple rule.
+    #[serde(rename = "wire_5tuple", default)]
+    pub wire_5tuple: String,
+    /// Seconds since true session creation (NOT refresh).
+    #[serde(rename = "install_age_secs", default)]
+    pub install_age_secs: u32,
+    /// Milliseconds since the session was last touched on this binding.
+    #[serde(rename = "last_seen_age_ms", default)]
+    pub last_seen_age_ms: u32,
 }
 
 /// #802: focused per-binding ring-pressure snapshot surfaced on

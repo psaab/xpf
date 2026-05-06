@@ -518,6 +518,12 @@ pub(crate) fn worker_loop(
 ) {
     pin_current_thread(worker_id);
     const COS_STATUS_INTERVAL_NS: u64 = 100_000_000;
+    // #789 Phase 1: cadence for publishing per-binding ingress-active
+    // flow inventory to BindingLiveState (consumed by the
+    // flow-steering controller). 1 Hz keeps the SessionTable scan
+    // O(N)·1Hz and amortizes mutex contention on the sample.
+    const ACTIVE_FLOWS_PUBLISH_INTERVAL_NS: u64 = 1_000_000_000;
+    const ACTIVE_FLOWS_RECENCY_WINDOW_NS: u64 = 1_000_000_000;
     let ha_startup_grace_until_secs =
         (monotonic_nanos() / 1_000_000_000).saturating_add(TUNNEL_HA_STARTUP_GRACE_SECS);
     let mut validation = **shared_validation.load();
@@ -710,6 +716,7 @@ pub(crate) fn worker_loop(
         forwarding.as_ref(),
     )));
     let mut last_cos_status_ns = monotonic_nanos();
+    let mut last_active_flows_publish_ns = monotonic_nanos();
     // #869: worker-runtime telemetry.  Local counters, published to
     // `runtime_atomics` on the ~1s cadence below.
     use super::worker_runtime::{
@@ -1074,6 +1081,26 @@ pub(crate) fn worker_loop(
                 forwarding.as_ref(),
             )));
             last_cos_status_ns = loop_now_ns;
+        }
+        // #789 Phase 1: 1Hz time-gated publication of per-binding
+        // ingress-active flow inventory. Worker-only writer; readers
+        // are the periodic snapshot path consumed by the
+        // flow-steering controller. O(N) scan over SessionTable.entries
+        // amortized to 1Hz keeps the cost negligible at typical loads.
+        if loop_now_ns.saturating_sub(last_active_flows_publish_ns)
+            >= ACTIVE_FLOWS_PUBLISH_INTERVAL_NS
+        {
+            for binding in bindings.iter() {
+                let inventory = sessions.ingress_active_flows_for_binding(
+                    binding.slot,
+                    loop_now_ns,
+                    ACTIVE_FLOWS_RECENCY_WINDOW_NS,
+                );
+                binding
+                    .live
+                    .publish_active_ingress_flows(inventory.count, inventory.sample);
+            }
+            last_active_flows_publish_ns = loop_now_ns;
         }
         if !exported_sequences.is_empty() {
             while sessions.has_pending_deltas() {
@@ -1899,4 +1926,13 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) tx_kick_latency_count: u64,
     pub(crate) tx_kick_latency_sum_ns: u64,
     pub(crate) tx_kick_retry_count: u64,
+    /// #789 Phase 1: per-binding ingress-active flow inventory
+    /// published by the worker at 1Hz cadence. Used by the
+    /// flow-steering controller to compute imbalance across bindings
+    /// for shared_exact CoS classes.
+    pub(crate) active_ingress_flows_count: u32,
+    /// #789 Phase 1: companion sample (up to MAX_ACTIVE_FLOW_SAMPLE
+    /// = 16) of recently-active ingress flows on this binding.
+    pub(crate) active_ingress_flows_sample:
+        Vec<crate::session::ActiveFlowSample>,
 }

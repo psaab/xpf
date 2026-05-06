@@ -195,6 +195,16 @@ pub(crate) struct SessionTable {
     /// dropped_gone / expired / re_bucketed). Accumulator overhead
     /// is 4-5 increments per popped entry — sub-µs at typical loads.
     last_pop_stats: WheelPopStats,
+    /// #789 Phase 1: ambient "current binding slot" the worker is
+    /// processing packets for. Set by the worker via
+    /// `set_current_binding_slot` before each install batch (or
+    /// per-packet if cheaper); read by install paths to stamp
+    /// `SessionEntry.installed_on_binding_slot`. Sentinel
+    /// `BINDING_SLOT_UNKNOWN` until set; persists across worker
+    /// poll iterations because the worker re-sets it each tick. Tests
+    /// don't need to set it (sessions installed by tests get the
+    /// sentinel; the controller skips them by construction).
+    current_binding_slot: u32,
 }
 
 /// #789 Phase 1: per-flow snapshot returned by
@@ -246,7 +256,17 @@ impl SessionTable {
             delta_drained: 0,
             wheel: SessionWheel::new(),
             last_pop_stats: WheelPopStats::default(),
+            current_binding_slot: BINDING_SLOT_UNKNOWN,
         }
+    }
+
+    /// #789 Phase 1: set the ambient binding slot the worker is
+    /// currently processing packets for. New session installs stamp
+    /// this value into `SessionEntry.installed_on_binding_slot`. The
+    /// worker calls this before each install batch (in practice once
+    /// per binding loop iteration in `worker_loop`).
+    pub(crate) fn set_current_binding_slot(&mut self, slot: u32) {
+        self.current_binding_slot = slot;
     }
 
     /// #965: stats from the most-recent `expire_stale_entries` call.
@@ -777,7 +797,7 @@ impl SessionTable {
                 // #789 Phase 1: stamped at true creation; refresh
                 // paths preserve via `restore_entry`.
                 installed_at_ns: now_ns,
-                installed_on_binding_slot: BINDING_SLOT_UNKNOWN,
+                installed_on_binding_slot: self.current_binding_slot,
             },
         };
         let raw = self.entries.insert(record);
@@ -860,7 +880,7 @@ impl SessionTable {
                 wheel_tick: 0,
                 // #789 Phase 1: stamped at true creation.
                 installed_at_ns: now_ns,
-                installed_on_binding_slot: BINDING_SLOT_UNKNOWN,
+                installed_on_binding_slot: self.current_binding_slot,
             },
         };
         let raw = self.entries.insert(record);

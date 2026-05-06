@@ -411,6 +411,18 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// against the owner's drain.
     pub(super) pending_tx: MpscInbox<TxRequest>,
     pub(super) pending_session_deltas: Mutex<VecDeque<SessionDeltaInfo>>,
+    /// #789 Phase 1: per-binding count of ingress-active flows (sessions
+    /// where `installed_on_binding_slot == self.slot` AND
+    /// `last_seen_age < 1s`). Published by the worker at 1 Hz cadence
+    /// from `SessionTable::ingress_active_flows_for_binding`. The
+    /// flow-steering controller reads this via `BindingLiveSnapshot`.
+    pub(super) active_ingress_flows_count: AtomicU32,
+    /// #789 Phase 1: companion sample (up to `MAX_ACTIVE_FLOW_SAMPLE` =
+    /// 16 entries) of the ingress-active flows on this binding. Worker
+    /// is the only writer (1 Hz tick). Coordinator's status snapshot
+    /// path is the only reader.
+    pub(super) active_ingress_flows_sample:
+        Mutex<Vec<crate::session::ActiveFlowSample>>,
 }
 
 impl BindingLiveState {
@@ -521,6 +533,27 @@ impl BindingLiveState {
             last_error: Mutex::new(String::new()),
             pending_tx: MpscInbox::new(PENDING_TX_INBOX_HARD_CAP),
             pending_session_deltas: Mutex::new(VecDeque::new()),
+            // #789 Phase 1: zero / empty until first 1Hz publish tick.
+            active_ingress_flows_count: AtomicU32::new(0),
+            active_ingress_flows_sample: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// #789 Phase 1: worker-side publication. Called at 1 Hz cadence
+    /// from `worker_loop` with the inventory computed from
+    /// `SessionTable::ingress_active_flows_for_binding`. Replaces the
+    /// previously-published sample atomically (mutex contention is
+    /// bounded by the 1Hz cadence; sole reader is the status snapshot
+    /// path).
+    pub(super) fn publish_active_ingress_flows(
+        &self,
+        count: u32,
+        sample: Vec<crate::session::ActiveFlowSample>,
+    ) {
+        self.active_ingress_flows_count
+            .store(count, Ordering::Relaxed);
+        if let Ok(mut guard) = self.active_ingress_flows_sample.lock() {
+            *guard = sample;
         }
     }
 
@@ -628,6 +661,13 @@ impl BindingLiveState {
             .lock()
             .map(|pending| pending.len() as u64)
             .unwrap_or(0);
+        // #789 Phase 1: clone the sample under a lock; safe because the
+        // worker only writes at 1Hz.
+        let active_ingress_flows_sample = self
+            .active_ingress_flows_sample
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
         BindingLiveSnapshot {
             bound: self.bound.load(Ordering::Relaxed),
             xsk_registered: self.xsk_registered.load(Ordering::Relaxed),
@@ -837,6 +877,12 @@ impl BindingLiveState {
                 .owner_profile_owner
                 .tx_kick_retry_count
                 .load(Ordering::Relaxed),
+            // #789 Phase 1: ingress-active flow inventory published by
+            // the worker at 1Hz cadence.
+            active_ingress_flows_count: self
+                .active_ingress_flows_count
+                .load(Ordering::Relaxed),
+            active_ingress_flows_sample,
         }
     }
 

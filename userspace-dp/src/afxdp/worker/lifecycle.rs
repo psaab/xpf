@@ -56,6 +56,12 @@ pub(super) fn poll_binding(
     };
     let area = binding.umem.area() as *const MmapArea;
     maybe_touch_heartbeat(binding, now_ns);
+    // #789 Phase 1: stamp the current binding's slot so any session
+    // installs in this poll iteration land in `SessionEntry`s tagged
+    // with `installed_on_binding_slot == binding.slot`. The
+    // flow-steering controller uses this to compute per-binding
+    // ingress-active flow inventory.
+    sessions.set_current_binding_slot(binding.slot);
     let tx_work = drain_pending_tx(
         binding,
         now_ns,
