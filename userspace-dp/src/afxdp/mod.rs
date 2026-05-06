@@ -322,15 +322,15 @@ pub(in crate::afxdp) struct BatchCounters {
     // #1187: 8 disposition-path counters added to eliminate per-packet
     // MESI thrash on BindingLiveState atomics during DDoS / config-
     // reload windows. See docs/pr/1187-telemetry-double-buffer/plan.md
-    // (v8 PLAN-READY).
-    pub(in crate::afxdp) screen_drops: u64,
-    pub(in crate::afxdp) policy_denied_packets: u64,
-    pub(in crate::afxdp) route_miss_packets: u64,
-    pub(in crate::afxdp) neighbor_miss_packets: u64,
-    pub(in crate::afxdp) discard_route_packets: u64,
-    pub(in crate::afxdp) next_table_packets: u64,
-    pub(in crate::afxdp) local_delivery_packets: u64,
-    pub(in crate::afxdp) exception_packets: u64,
+    // (v7 PLAN-READY).
+    screen_drops: u64,
+    policy_denied_packets: u64,
+    route_miss_packets: u64,
+    neighbor_miss_packets: u64,
+    discard_route_packets: u64,
+    next_table_packets: u64,
+    local_delivery_packets: u64,
+    exception_packets: u64,
 }
 
 impl BatchCounters {

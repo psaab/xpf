@@ -87,6 +87,7 @@ pub(super) enum DispositionCounters<'a> {
 }
 
 impl DispositionCounters<'_> {
+    #[inline]
     fn bump_validated(&mut self, packet_length: u32) {
         match self {
             Self::Hot(c) => {
@@ -101,6 +102,7 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
     fn bump_exception(&mut self) {
         match self {
             Self::Hot(c) => {
@@ -112,6 +114,7 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
     fn bump_local_delivery(&mut self) {
         match self {
             Self::Hot(c) => {
@@ -123,6 +126,7 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
     fn bump_forward_candidate(&mut self) {
         match self {
             Self::Hot(c) => {
@@ -135,6 +139,7 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
     fn bump_policy_denied(&mut self) {
         match self {
             Self::Hot(c) => {
@@ -146,6 +151,7 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
     fn bump_route_miss(&mut self) {
         match self {
             Self::Hot(c) => {
@@ -157,6 +163,7 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
     fn bump_neighbor_miss(&mut self) {
         match self {
             Self::Hot(c) => {
@@ -168,6 +175,7 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
     fn bump_discard_route(&mut self) {
         match self {
             Self::Hot(c) => {
@@ -179,6 +187,7 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
     fn bump_next_table(&mut self) {
         match self {
             Self::Hot(c) => {
