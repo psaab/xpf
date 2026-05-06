@@ -1,5 +1,5 @@
 ---
-status: REVISED v4 — Codex round-3 PLAN-NEEDS-MAJOR caught semantic bug: v3 helper mutated `cached_X` before the side-effect block, but `worker/mod.rs:727` needs OLD forwarding to call `cos_runtime_config_changed(old, new)`. v4 changes helper to non-mutating `load_arc_if_changed -> Option<Arc<T>>` so callers control the assignment order
+status: REVISED v5 — Codex+Gemini round-4 caught two more bugs: (1) `arc_swap::Guard::into_inner` is hallucinated — no such method exists; use `Arc::clone(&*guard)` which still gives TOCTOU avoidance because we clone the exact observed Arc; (2) forwarding-site ordering: `screen_state.update_profiles` + `sessions.set_timeouts` at `worker/mod.rs:731-732` read `forwarding`, must use `new_forwarding` not the cached pre-assignment value. v5 specifies the full forwarding-site code template and scrubs stale prose at lines 59, 192, 234
 issue: #1188
 phase: Replace `.load_full()` with `.load()` + `Arc::as_ptr` comparison in worker tick loop
 ---
@@ -56,15 +56,13 @@ if !Arc::ptr_eq(&forwarding, &live_forwarding) {
     // ... refresh dependent state ...
 }
 
-// after:
-let live_forwarding_guard = shared_forwarding.load();
-if !std::ptr::eq(
-    Arc::as_ptr(&forwarding),
-    Arc::as_ptr(&*live_forwarding_guard),
-) {
-    let live_forwarding = shared_forwarding.load_full();
-    forwarding = live_forwarding;
-    // ... refresh dependent state ...
+// after — see helper at §4.3 and per-site templates at §4.2:
+if let Some(new_forwarding) =
+    load_arc_if_changed(&forwarding, &shared_forwarding)
+{
+    /* compare old vs new for cos_runtime_config_changed,
+       update screen_state + sessions from new_forwarding,
+       THEN assign forwarding = new_forwarding */
 }
 ```
 
@@ -73,9 +71,10 @@ if !std::ptr::eq(
 - Steady state (no config change): saved 12 atomic RMW ops/tick →
   ~0.96B–9.6B ops/sec eliminated from the QPI/UPI bus.
 - On actual config change (rare, < 1/sec normally): one
-  `.load()` cost + one `.load_full()` cost — slight overhead vs
-  current code. Negligible at ~1/sec rate.
-- No coordinator-side changes. No new types. No semantics change.
+  cheap `.load()` + one `Arc::clone` (atomic increment).
+  Negligible at ~1/sec rate.
+- No coordinator-side changes. No new types except the helper
+  fn. No semantics change.
 
 **The architectural value:** matches the existing `Arc::ptr_eq`
 intent — the existing code clearly *wanted* to compare without
@@ -115,40 +114,61 @@ The 3 `.load()` sites are NOT the problem; they don't clone. The
 
 ### 4.2 Pattern
 
-For each of the 6 sites, transform from:
+For each of the 6 sites, transform from the existing
+`load_full + ptr_eq` pattern to the helper.
+
+**Forwarding site** (the most order-sensitive — `worker/mod.rs:725-736`):
 
 ```rust
-let live_X = shared_X.load_full();
-if !Arc::ptr_eq(&cached_X, &live_X) {
-    cached_X = live_X;
-    /* refresh side effects */
+if let Some(new_forwarding) =
+    load_arc_if_changed(&forwarding, &shared_forwarding)
+{
+    // Compare BEFORE assignment — needs both old and new.
+    let cos_changed =
+        cos_runtime_config_changed(forwarding.as_ref(), new_forwarding.as_ref());
+
+    // Use NEW values for side effects (Codex round-4 catch).
+    // `screen_state.update_profiles` and `sessions.set_timeouts`
+    // must read the freshly-rotated forwarding, not the cached
+    // pre-assignment value.
+    screen_state.update_profiles(new_forwarding.screen_profiles.clone());
+    sessions.set_timeouts(new_forwarding.session_timeouts);
+
+    forwarding = new_forwarding;
+
+    if cos_changed {
+        reset_worker_cos_runtimes(&mut bindings);
+        rebuild_cos_fast_interfaces = true;
+    }
 }
 ```
 
-to (using the helper from §4.3):
+**The other 5 sites** (`shared_cos_owner_worker_by_queue`,
+`shared_cos_owner_live_by_queue`, `shared_cos_root_leases`,
+`shared_cos_queue_leases`, `shared_cos_queue_vtime_floors` —
+all simpler, no `cos_runtime_config_changed` analog):
 
 ```rust
 if let Some(new_X) = load_arc_if_changed(&cached_X, &shared_X) {
-    /* refresh side effects can use BOTH `&cached_X` (old) and
-       `&new_X` (new) here — e.g. forwarding site at
-       worker/mod.rs:727 needs old/new for
-       cos_runtime_config_changed(old, new) */
     cached_X = new_X;
+    /* same side effects as before — usually setting
+       rebuild_cos_fast_interfaces = true; or releasing leases */
 }
 ```
 
-**Critical (Codex round-3 catch):** the assignment of
-`cached_X = new_X` happens at the **end** of the side-effect
-block, not before it, so the forwarding site can still compare
-the old `forwarding` against the new one via
-`cos_runtime_config_changed(old, new)` at `worker/cos.rs:256`.
-The earlier v3 helper inverted this order and would have caused
-CoS runtime resets to be silently skipped on forwarding-config
-changes.
+For these 5 sites, the assignment can come first because the
+side effects don't read the cached value. Pattern is more
+forgiving than the forwarding site.
+
+**Both bugs caught by reviewers in earlier rounds:**
+- v3: helper mutated cached before block ran → `cos_runtime_config_changed` would skip (Codex round-3).
+- v4: helper non-mutating but `screen_state.update_profiles(forwarding.X)` would read OLD forwarding if assignment was at end (Codex round-4).
+- v5: full template above shows correct ordering; "use new_X for side effects, then assign" is the rule.
 
 The helper is non-mutating and returns the freshly observed Arc
-without assigning. No TOCTOU window, no second `.load_full()`,
-old/new comparison preserved.
+(`Arc::clone(&*guard)`). No TOCTOU window, no second `.load_full()`,
+old/new comparison and side effects all use whichever value
+is correct.
 
 ### 4.3 Optional: helper macro
 
@@ -165,10 +185,19 @@ To avoid 6 copies of the same pattern, introduce a small helper:
 /// `cos_runtime_config_changed(old, new)` while both the old and
 /// new Arcs are accessible.
 ///
-/// Codex round-2: consume the observed `Guard` via
-/// `Guard::into_inner` instead of doing a second `.load_full()`.
-/// This preserves the exact Arc snapshot we just compared and
-/// removes a (tiny) TOCTOU window.
+/// **TOCTOU avoidance (Codex round-2 / Gemini round-4 correction):**
+/// clone the exact `Arc` the `Guard` is observing — `Arc::clone(&*guard)`
+/// — instead of calling `.load_full()` a second time. Calling
+/// `.load_full()` again could return a *newer* Arc if the coordinator
+/// rotated between our `ptr_eq` check and the second load. Cloning
+/// the observed Guard pins the exact snapshot we compared.
+///
+/// **Why not `arc_swap::Guard::into_inner`?** Because that method
+/// does not exist. `arc_swap::Guard` is a hazard-pointer-style protect
+/// — it does not hold its own strong refcount. Converting a Guard
+/// to an owned `Arc<T>` requires an atomic refcount increment via
+/// `Arc::clone`. That increment cost is real and acceptable: it
+/// only fires when the configuration actually changed (rare).
 ///
 /// Gemini Pro 3.1 round-2: use idiomatic `Arc::ptr_eq` (the `Guard`
 /// derefs to `&Arc<T>`); `T: ?Sized` is dropped — all 6 call sites
@@ -181,22 +210,20 @@ fn load_arc_if_changed<T>(
     if Arc::ptr_eq(cached, &*guard) {
         None
     } else {
-        Some(arc_swap::Guard::into_inner(guard))
+        Some(Arc::clone(&*guard))
     }
 }
 ```
 
-Usage:
+Usage: see per-site templates in §4.2. The forwarding site is
+the most order-sensitive (must compare old/new and use new
+values for `screen_state` / `sessions` updates BEFORE
+assignment). The other 5 sites can assign first.
 
-```rust
-if refresh_arc_if_changed(&mut forwarding, &shared_forwarding) {
-    let cos_changed = cos_runtime_config_changed(/* ... */);
-    /* same side effects as before */
-}
-```
-
-Each of the 6 sites becomes a 1-line `if` head + the existing
-side-effect block.
+Each of the 6 sites becomes an `if let Some(new_X) = ...` head
+plus the existing side-effect block, with the assignment
+(`cached_X = new_X`) placed correctly relative to the side
+effects per the per-site templates above.
 
 **Decision: ship the helper.** It makes the 6 sites uniform and
 the diff cleaner; it's also a future-proof primitive for any
