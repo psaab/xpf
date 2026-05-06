@@ -1,5 +1,5 @@
 ---
-status: REVISED v3 — Codex+Gemini round-2 PLAN-NEEDS-MINOR converged on screen_drops MUST be mandatorily batched (no fallback); preserved exception_packets semantics (not a sum); fixed cache-line wording
+status: REVISED v4 — Codex round-3 NEEDS-MINOR + Gemini round-3 NEEDS-MINOR (ambiguity); resolved screen_drops to TelemetryContext (not &mut BatchCounters); deleted stale open-question; fixed cache-line wording (no NEW happy-path line touched, not "1 hot + 2 cold"); reframed forward_candidate_packets as a coordinator-inject path leak, not a hot-path leak (hot path already routes through telemetry.counters)
 issue: #1187
 phase: Extend BatchCounters via TelemetryContext to cover hot disposition counters
 ---
@@ -74,11 +74,16 @@ issues, all valid:
    BatchCounters>`.
 5. **Site table misleading.** `validated_packets` write at
    `disposition.rs:87` is NOT happy-path RX; happy path is at
-   `poll_descriptor.rs:58` where it's already batched. Real
-   existing hot leak is `forward_candidate_packets` at
-   `disposition.rs:161` — that field already exists in
-   `BatchCounters` (`mod.rs:316,358-361`) but disposition
-   bypasses it. **Fix this leak as part of this PR.**
+   `poll_descriptor.rs:58` where it's already batched. The
+   `forward_candidate_packets` write at `disposition.rs:161` is
+   inside `record_forwarding_disposition::ForwardCandidate`,
+   which is reached from coordinator inject (cold path), NOT
+   from the hot worker forwarding branch. The hot path already
+   routes `forward_candidate_packets` through
+   `telemetry.counters.forward_candidate_packets` at
+   `poll_descriptor.rs:213` and `:1706`. So `disposition.rs:161`
+   is a *cold* path write — fixing it is consistency cleanup,
+   not a hot-path perf fix. Update the framing accordingly.
 
 **v2 scope (narrowed):**
 
@@ -142,11 +147,14 @@ struct BatchCounters {
 
 Total: 20 u64 + bool ≈ **168 bytes**. Current `BatchCounters`
 already spans **2 cache lines** (104 bytes). Appending 8 new
-fields after the existing 12 grows it to **3 cache lines**.
-Critically: the existing happy-path counters live in the first
-2 lines. **No new happy-path cache line is touched.** The new
-disposition counters land in line 3, which is touched only on
-disposition divergence — not on every packet.
+fields after the existing 12 grows it to **3 cache lines** under
+source-order layout. The first appended fields share the
+existing line-2 with the trailing existing fields; the rest
+land in line-3. **The key invariant is: no NEW cache line is
+touched on the happy path.** Every line that's already brought
+in for the existing 12 counters stays the same; the new line-3
+is brought in only when a disposition divergence (route miss,
+policy denied, screen drop, etc.) actually fires.
 
 ### 4.2 Routing through `TelemetryContext` (Codex finding #4)
 
@@ -170,21 +178,41 @@ called from both hot and cold paths. Two-callsite split:
 
 Mirror the existing pattern — `if self.X != 0 { live.X.fetch_add(...); self.X = 0; }`. 8 new blocks.
 
-### 4.4 Fix the `forward_candidate_packets` leak
+### 4.4 Consistency fix at `disposition.rs:161` (NOT a hot-path leak)
 
-Change `disposition.rs:161` from direct `live.forward_candidate_packets.fetch_add(...)` to the new
-`telemetry.counters.forward_candidate_packets += ...`. This is
-the pre-existing leak Codex flagged — it's currently a dead
-field in `BatchCounters`.
+`disposition.rs:161` does
+`live.forward_candidate_packets.fetch_add(...)` inside
+`record_forwarding_disposition`. The hot worker forwarding
+branches DO NOT reach this site — the hot path increments
+through `telemetry.counters.forward_candidate_packets` at
+`poll_descriptor.rs:213,1706`. The `disposition.rs:161` write
+is reached only from coordinator inject (cold).
+
+Two consistency options:
+- (A) Leave `disposition.rs:161` direct; it's not on the hot
+  path. Coordinator-inject path doesn't have a
+  `TelemetryContext` to thread.
+- (B) Split `record_forwarding_disposition` into hot/cold
+  variants like §4.2 — same shape as `record_disposition`.
+
+This PR picks **option A** — fixing only what's on the hot
+path. The hot/cold disposition split is in §4.2; the cold
+write here is harmless (status-poll-only, low rate). If
+review-time measurement shows it matters, a follow-up PR can
+extend the split.
 
 ### 4.5 `screen_drops` site (MANDATORY batching, no fallback)
 
 `poll_stages.rs:276` has `binding_live.screen_drops.fetch_add(1)`.
 The caller `poll_binding_process_descriptor` already has
-`telemetry: TelemetryContext` in scope. **This PR mandates
-threading `TelemetryContext` (or `&mut BatchCounters`) into
+`telemetry: TelemetryContext` in scope. **This PR threads
+`TelemetryContext` (not `&mut BatchCounters`) into
 `stage_screen_check`** so that screen_drops increments go
 through the batch.
+
+`TelemetryContext` is the existing carrier — `&mut BatchCounters`
+would be a narrower bypass that breaks the established
+abstraction. Decision: thread `TelemetryContext`.
 
 Both round-2 reviewers (Codex + Gemini Pro 3.1) explicitly
 rejected the "leave it direct" fallback because SYN flood is a
@@ -216,7 +244,7 @@ exists to eliminate.
 | Behavioral regression | LOW | Same flush semantics as existing 12 counters; coordinator inject keeps direct writes |
 | Borrow-checker | LOW-MED | Splitting hot/cold disposition recorder may force refactor of intermediate callers |
 | Test breakage | LOW | Tests read final `live.X.load()` values — unchanged after flush |
-| Perf regression | LOW | 8 new fields fit in 3 cache lines (1 hot + 2 cold) |
+| Perf regression | LOW | 8 new fields grow `BatchCounters` from 2 → 3 cache lines, but no NEW happy-path line is touched (existing counters keep using lines 1-2; new counters bring in line-3 only on disposition divergence) |
 | Cross-talk on attack/congestion | **the win** | Eliminates RFO storm during SYN flood / policy denial / route miss |
 
 ## 8. Test plan
@@ -249,14 +277,12 @@ exists to eliminate.
    `record_disposition_cold` cleanly split, or is the shared
    body too entangled to factor? Implementation phase will tell.
 
-2. **Should `screen_drops` thread through `TelemetryContext`
-   too?** Cost: small diff to plumb. Benefit: DDoS-relevant
-   counter that fires on SYN flood.
+2. ~~Should screen_drops thread through TelemetryContext?~~
+   **Resolved (round-3): yes, mandatory; threading `TelemetryContext`
+   not `&mut BatchCounters`.** See §4.5.
 
-3. **3 cache lines vs 2**: is it worth shaving the field count
-   to keep it at 2 cache lines? The cold lines aren't touched
-   on happy path so the answer is probably no, but call out for
-   review.
+3. ~~3 cache lines vs 2?~~ **Resolved (round-3): 3 lines is
+   fine; the new line-3 isn't touched on happy path.** See §4.1.
 
 4. **Should the v2 plan also fold in the Codex-deferred
    counters** (`config_gen_mismatches` etc.) once `tx_errors`
