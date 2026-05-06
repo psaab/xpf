@@ -7,6 +7,27 @@
 
 use super::*;
 use crate::afxdp::cos::builders::build_cos_interface_runtime;
+use crate::afxdp::types::{CoSQueueRuntime, FlowFairState};
+
+pub(in crate::afxdp) fn enable_test_flow_fair(queue: &mut CoSQueueRuntime) {
+    queue.config.flow_fair = true;
+    queue.flow_fair_state = Some(Box::new(FlowFairState::new(0)));
+}
+
+pub(in crate::afxdp) fn disable_test_flow_fair(queue: &mut CoSQueueRuntime) {
+    queue.config.flow_fair = false;
+    queue.flow_fair_state = None;
+}
+
+pub(in crate::afxdp) fn test_flow_fair_state(queue: &CoSQueueRuntime) -> &FlowFairState {
+    queue.flow_fair_state.as_ref().expect("flow-fair state")
+}
+
+pub(in crate::afxdp) fn test_flow_fair_state_mut(
+    queue: &mut CoSQueueRuntime,
+) -> &mut FlowFairState {
+    queue.flow_fair_state.as_mut().expect("flow-fair state")
+}
 
 pub(in crate::afxdp) fn test_queue_fast_path(
     shared_exact: bool,
@@ -146,7 +167,11 @@ pub(in crate::afxdp) fn test_flow_cos_item(src_port: u16, len: usize) -> CoSPend
     })
 }
 
-pub(in crate::afxdp) fn test_flow_prepared_cos_item(src_port: u16, len: u32, offset: u64) -> CoSPendingTxItem {
+pub(in crate::afxdp) fn test_flow_prepared_cos_item(
+    src_port: u16,
+    len: u32,
+    offset: u64,
+) -> CoSPendingTxItem {
     CoSPendingTxItem::Prepared(PreparedTxRequest {
         offset,
         len,
@@ -238,14 +263,14 @@ pub(in crate::afxdp) fn test_mixed_class_root_with_primed_queues() -> CoSInterfa
     );
     root.tokens = 1024 * 1024;
     for queue in &mut root.queues {
-        queue.tokens = 64 * 1024;
-        queue.runnable = true;
+        queue.hot.tokens = 64 * 1024;
+        queue.hot.runnable = true;
         // Eight items per queue covers the longest rotation test below
         // without any queue draining to empty.
         for _ in 0..8 {
-            queue.items.push_back(test_cos_item(1500));
+            queue.hot.items.push_back(test_cos_item(1500));
         }
-        queue.queued_bytes = 8 * 1500;
+        queue.hot.queued_bytes = 8 * 1500;
     }
     root.nonempty_queues = 4;
     root.runnable_queues = 4;
@@ -253,7 +278,7 @@ pub(in crate::afxdp) fn test_mixed_class_root_with_primed_queues() -> CoSInterfa
 }
 
 pub(in crate::afxdp) fn snapshot_counters(queue: &CoSQueueRuntime) -> CoSQueueDropCounters {
-    queue.drop_counters
+    queue.telemetry.drop_counters
 }
 
 /// Build a minimal IPv4 packet (Ethernet + IPv4 header, no
@@ -396,8 +421,8 @@ pub(in crate::afxdp) fn test_flow_fair_exact_queue_16_flows() -> CoSInterfaceRun
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    queue.config.flow_fair = true;
+    queue.flow_fair_state = Some(Box::new(FlowFairState::new(0)));
     root
 }
 
@@ -412,17 +437,21 @@ pub(in crate::afxdp) fn seed_sixteen_flow_buckets(
     target: usize,
     target_bytes: u64,
 ) -> u64 {
-    queue.active_flow_buckets = 16;
+    let ff = queue
+        .flow_fair_state
+        .as_mut()
+        .expect("flow-fair test queue must have FlowFairState");
+    ff.active_flow_buckets = 16;
     let mut populated = 0usize;
     let mut bucket = 0usize;
     let mut sum = 0u64;
-    while populated < 16 && bucket < queue.flow_bucket_bytes.len() {
+    while populated < 16 && bucket < ff.flow_bucket_bytes.len() {
         if bucket == target {
-            queue.flow_bucket_bytes[bucket] = target_bytes;
+            ff.flow_bucket_bytes[bucket] = target_bytes;
             sum = sum.saturating_add(target_bytes);
             populated += 1;
         } else {
-            queue.flow_bucket_bytes[bucket] = 1;
+            ff.flow_bucket_bytes[bucket] = 1;
             sum = sum.saturating_add(1);
             populated += 1;
         }
@@ -437,7 +466,9 @@ pub(in crate::afxdp) fn seed_sixteen_flow_buckets(
 /// promotion path consults are populated — the rest stay at the
 /// stable defaults the live builder uses when no lease or owner
 /// live state is present.
-pub(in crate::afxdp) fn test_queue_fast_path_for_promotion(shared_exact: bool) -> WorkerCoSQueueFastPath {
+pub(in crate::afxdp) fn test_queue_fast_path_for_promotion(
+    shared_exact: bool,
+) -> WorkerCoSQueueFastPath {
     WorkerCoSQueueFastPath {
         shared_exact,
         owner_worker_id: 0,
@@ -503,11 +534,14 @@ pub(in crate::afxdp) fn attach_test_vtime_floor(
     my_worker_id: u32,
 ) -> Arc<SharedCoSQueueVtimeFloor> {
     let floor = Arc::new(SharedCoSQueueVtimeFloor::new(num_workers as usize));
-    queue.vtime_floor = Some(Arc::clone(&floor));
-    queue.worker_id = my_worker_id;
+    queue.v_min.vtime_floor = Some(Arc::clone(&floor));
+    queue.v_min.worker_id = my_worker_id;
     // V_min sync only kicks in on shared_exact; mark accordingly so
     // `cos_queue_v_min_continue` doesn't early-return.
-    queue.shared_exact = true;
-    queue.flow_fair = true;
+    queue.config.shared_exact = true;
+    queue.config.flow_fair = true;
+    if queue.flow_fair_state.is_none() {
+        queue.flow_fair_state = Some(Box::new(FlowFairState::new(0)));
+    }
     floor
 }

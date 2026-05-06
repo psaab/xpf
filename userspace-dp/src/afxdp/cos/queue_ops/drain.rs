@@ -30,13 +30,16 @@ use super::*;
 /// preserved across the rollback.
 #[inline]
 pub(in crate::afxdp) fn cos_queue_clear_orphan_snapshot_after_drop(queue: &mut CoSQueueRuntime) {
-    let Some(orphan) = queue.pop_snapshot_stack.pop() else {
+    let Some(ff) = queue.flow_fair_state.as_mut() else {
         return;
     };
-    // queue.queue_vtime here reflects the dropped item's pop
+    let Some(orphan) = ff.pop_snapshot_stack.pop() else {
+        return;
+    };
+    // ff.queue_vtime here reflects the dropped item's pop
     // advance (already applied in cos_queue_pop_front_inner).
     // Clamp remaining snapshots to preserve it across rollback.
-    let z_committed_vtime = queue.queue_vtime;
+    let z_committed_vtime = ff.queue_vtime;
     // #927: also preserve the dropped item's bucket-frontier
     // contribution. The dropped item's served_finish equals
     // `orphan.pre_pop_head_finish` (served_finish is read from
@@ -54,20 +57,20 @@ pub(in crate::afxdp) fn cos_queue_clear_orphan_snapshot_after_drop(queue: &mut C
     // monotone (only raises) and never crosses a committed
     // boundary, so it is safe across all rollback orderings.
     let orphan_served_finish = orphan.pre_pop_head_finish;
-    for snap in queue.pop_snapshot_stack.iter_mut() {
+    for snap in ff.pop_snapshot_stack.iter_mut() {
         if snap.pre_pop_queue_vtime < z_committed_vtime {
             snap.pre_pop_queue_vtime = z_committed_vtime;
         }
         if snap.bucket == orphan.bucket {
-            snap.pre_pop_head_finish =
-                snap.pre_pop_head_finish.max(orphan_served_finish);
-            snap.pre_pop_tail_finish =
-                snap.pre_pop_tail_finish.max(orphan_served_finish);
+            snap.pre_pop_head_finish = snap.pre_pop_head_finish.max(orphan_served_finish);
+            snap.pre_pop_tail_finish = snap.pre_pop_tail_finish.max(orphan_served_finish);
         }
     }
 }
 
-pub(in crate::afxdp) fn cos_queue_drain_all(queue: &mut CoSQueueRuntime) -> VecDeque<CoSPendingTxItem> {
+pub(in crate::afxdp) fn cos_queue_drain_all(
+    queue: &mut CoSQueueRuntime,
+) -> VecDeque<CoSPendingTxItem> {
     // #913 / Codex R3: clear stale snapshots from any prior
     // committed hot-path drain. Without this, a subsequent
     // `cos_queue_restore_front` would consume orphan snapshots
@@ -75,7 +78,9 @@ pub(in crate::afxdp) fn cos_queue_drain_all(queue: &mut CoSQueueRuntime) -> VecD
     // path in `demote_prepared_cos_queue_to_local`). The §3.7
     // round-trip-neutrality walkthrough relies on the stack
     // being EMPTY when restore_front begins.
-    queue.pop_snapshot_stack.clear();
+    if let Some(ff) = queue.flow_fair_state.as_mut() {
+        ff.pop_snapshot_stack.clear();
+    }
     let mut items = VecDeque::new();
     // #785 Phase 3 — Codex round-3 NEW-2 / Rust reviewer LOW:
     // drain-all is a teardown/reconfigure helper. Unlike the
@@ -92,7 +97,10 @@ pub(in crate::afxdp) fn cos_queue_drain_all(queue: &mut CoSQueueRuntime) -> VecD
 }
 
 #[inline]
-pub(in crate::afxdp) fn cos_queue_restore_front(queue: &mut CoSQueueRuntime, mut items: VecDeque<CoSPendingTxItem>) {
+pub(in crate::afxdp) fn cos_queue_restore_front(
+    queue: &mut CoSQueueRuntime,
+    mut items: VecDeque<CoSPendingTxItem>,
+) {
     while let Some(item) = items.pop_back() {
         cos_queue_push_front(queue, item);
     }

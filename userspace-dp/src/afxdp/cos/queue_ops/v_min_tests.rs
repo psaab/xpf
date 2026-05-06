@@ -105,7 +105,7 @@ fn vmin_post_settle_publish_writes_committed_vtime() {
     let floor = attach_test_vtime_floor(queue, 4, 2);
 
     // Set queue_vtime as if a drain has just committed.
-    queue.queue_vtime = 12345;
+    test_flow_fair_state_mut(queue).queue_vtime = 12345;
     publish_committed_queue_vtime(Some(&*queue));
     assert_eq!(
         floor.slots[2].read(),
@@ -115,7 +115,7 @@ fn vmin_post_settle_publish_writes_committed_vtime() {
 
     // Calling again with a higher vtime advances the slot
     // (idempotent / monotonic in normal flow).
-    queue.queue_vtime = 23456;
+    test_flow_fair_state_mut(queue).queue_vtime = 23456;
     publish_committed_queue_vtime(Some(&*queue));
     assert_eq!(
         floor.slots[2].read(),
@@ -144,13 +144,14 @@ fn vmin_publish_helper_noop_when_floor_none() {
         }],
     );
     let queue = &mut root.queues[0];
+    enable_test_flow_fair(queue);
     // No floor attached; default state.
-    assert!(queue.vtime_floor.is_none());
-    queue.queue_vtime = 99999;
+    assert!(queue.v_min.vtime_floor.is_none());
+    test_flow_fair_state_mut(queue).queue_vtime = 99999;
     // Must not panic and must not publish anywhere.
     publish_committed_queue_vtime(Some(&*queue));
     // Sanity: still no floor, no observable effect.
-    assert!(queue.vtime_floor.is_none());
+    assert!(queue.v_min.vtime_floor.is_none());
 }
 
 /// #942 (deferred): pin the cos_queue_v_min_continue throttle
@@ -182,7 +183,7 @@ fn vmin_throttle_function_fires_on_lag_breach() {
     // Peer worker 0 pegged at vtime 0. Local worker 1 has
     // queue_vtime well past LAG_THRESHOLD (~1.25 MB at 10 Gb/s).
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024; // 100 MB ahead
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024; // 100 MB ahead
 
     // V_min check at pop_count==1 must throttle (return false).
     assert!(
@@ -191,7 +192,7 @@ fn vmin_throttle_function_fires_on_lag_breach() {
     );
 
     // Reset queue_vtime to within LAG and confirm the check passes.
-    queue.queue_vtime = 0;
+    test_flow_fair_state_mut(queue).queue_vtime = 0;
     assert!(
         cos_queue_v_min_continue(queue, 1),
         "throttle MUST NOT fire when local vtime <= V_min + LAG",
@@ -223,10 +224,10 @@ fn vmin_throttle_increments_v_min_throttles_scratch() {
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024; // 100 MB ahead → throttle
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024; // 100 MB ahead → throttle
 
     assert_eq!(
-        queue.v_min_throttles_scratch, 0,
+        queue.v_min.v_min_throttles_scratch, 0,
         "scratch starts at zero"
     );
 
@@ -234,11 +235,11 @@ fn vmin_throttle_increments_v_min_throttles_scratch() {
     let cont = cos_queue_v_min_continue(queue, 1);
     assert!(!cont, "expected throttle decision");
     assert_eq!(
-        queue.v_min_throttles_scratch, 1,
+        queue.v_min.v_min_throttles_scratch, 1,
         "regular throttle MUST bump v_min_throttles_scratch by 1"
     );
     assert_eq!(
-        queue.v_min_hard_cap_overrides_scratch, 0,
+        queue.v_min.v_min_hard_cap_overrides_scratch, 0,
         "regular throttle MUST NOT bump the hard-cap counter"
     );
 
@@ -250,7 +251,7 @@ fn vmin_throttle_increments_v_min_throttles_scratch() {
     let _ = cos_queue_v_min_continue(queue, 1);
     let _ = cos_queue_v_min_continue(queue, 1);
     assert_eq!(
-        queue.v_min_throttles_scratch, 3,
+        queue.v_min.v_min_throttles_scratch, 3,
         "three throttles → scratch == 3 (not >= 2 — exact count catches off-by-one)"
     );
 }
@@ -280,7 +281,7 @@ fn vmin_hard_cap_override_does_not_double_count_throttle() {
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024;
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     // Drive the throttle counter to V_MIN_CONSECUTIVE_SKIP_HARD_CAP - 1
     // back-to-back throttle decisions. Each bumps v_min_throttles_scratch.
@@ -288,8 +289,8 @@ fn vmin_hard_cap_override_does_not_double_count_throttle() {
         let cont = cos_queue_v_min_continue(queue, 1);
         assert!(!cont, "expected throttle (not yet at hard-cap)");
     }
-    let throttles_before_cap = queue.v_min_throttles_scratch;
-    let hard_cap_before = queue.v_min_hard_cap_overrides_scratch;
+    let throttles_before_cap = queue.v_min.v_min_throttles_scratch;
+    let hard_cap_before = queue.v_min.v_min_hard_cap_overrides_scratch;
     assert_eq!(hard_cap_before, 0, "hard-cap not yet fired");
 
     // The next throttle decision triggers the hard-cap override:
@@ -298,11 +299,11 @@ fn vmin_hard_cap_override_does_not_double_count_throttle() {
     let cont = cos_queue_v_min_continue(queue, 1);
     assert!(cont, "hard-cap override force-continues");
     assert_eq!(
-        queue.v_min_hard_cap_overrides_scratch, 1,
+        queue.v_min.v_min_hard_cap_overrides_scratch, 1,
         "hard-cap counter bumps exactly once"
     );
     assert_eq!(
-        queue.v_min_throttles_scratch, throttles_before_cap,
+        queue.v_min.v_min_throttles_scratch, throttles_before_cap,
         "throttle counter MUST NOT increment on the hard-cap path"
     );
 }
@@ -334,12 +335,12 @@ fn vmin_pop_rollback_repop_postsettle_compose() {
     // Push 2 items.
     cos_queue_push_back(queue, test_cos_item(1500));
     cos_queue_push_back(queue, test_cos_item(1500));
-    let v0 = queue.queue_vtime;
+    let v0 = test_flow_fair_state(queue).queue_vtime;
     assert_eq!(floor.slots[1].read(), None, "fresh slot");
 
     // Pop 1: snapshot variant (NO publish).
     let popped1 = cos_queue_pop_front(queue);
-    let v1 = queue.queue_vtime;
+    let v1 = test_flow_fair_state(queue).queue_vtime;
     assert!(v1 > v0, "pop must advance vtime");
     assert_eq!(floor.slots[1].read(), None, "snapshot pop must not publish");
 
@@ -348,7 +349,7 @@ fn vmin_pop_rollback_repop_postsettle_compose() {
     if let Some(item) = popped1 {
         cos_queue_push_front(queue, item);
     }
-    let v_after_rollback = queue.queue_vtime;
+    let v_after_rollback = test_flow_fair_state(queue).queue_vtime;
     assert_eq!(v_after_rollback, v0, "rollback must restore vtime");
     assert_eq!(
         floor.slots[1].read(),
@@ -360,7 +361,7 @@ fn vmin_pop_rollback_repop_postsettle_compose() {
     // v0 because the snapshot pop doesn't publish.
     let _popped2 = cos_queue_pop_front(queue);
     assert!(
-        queue.queue_vtime > v_after_rollback,
+        test_flow_fair_state(queue).queue_vtime > v_after_rollback,
         "re-pop advances vtime"
     );
     assert_eq!(
@@ -373,7 +374,7 @@ fn vmin_pop_rollback_repop_postsettle_compose() {
     publish_committed_queue_vtime(Some(&*queue));
     assert_eq!(
         floor.slots[1].read(),
-        Some(queue.queue_vtime),
+        Some(test_flow_fair_state(queue).queue_vtime),
         "post-settle publish broadcasts the new committed vtime",
     );
 }
@@ -422,7 +423,7 @@ fn vmin_demote_no_drain_all_leak() {
     let floor = attach_test_vtime_floor(queue, 4, 0);
     // Set a non-zero "prior committed" vtime so we can detect
     // accidental publishes-of-zero from drain_all.
-    queue.queue_vtime = 7777;
+    test_flow_fair_state_mut(queue).queue_vtime = 7777;
     floor.slots[0].publish(7777);
     let pre_slot = floor.slots[0].read();
     assert_eq!(pre_slot, Some(7777), "fixture sanity");
@@ -456,6 +457,7 @@ fn vmin_demote_no_drain_all_leak() {
     // Re-borrow queue and floor (root was reborrowed by demote).
     let queue = &root.queues[0];
     let post_slot = queue
+        .v_min
         .vtime_floor
         .as_ref()
         .and_then(|f| f.slots.get(0))
@@ -518,7 +520,11 @@ fn vmin_vacate_on_bucket_empty() {
     account_cos_queue_flow_enqueue(queue, Some(&key), 1500);
     // Now dequeue: should fire the bucket-empty path AND vacate.
     account_cos_queue_flow_dequeue(queue, Some(&key), 1500);
-    assert_eq!(queue.active_flow_buckets, 0, "bucket count drained to 0");
+    assert_eq!(
+        test_flow_fair_state(queue).active_flow_buckets,
+        0,
+        "bucket count drained to 0"
+    );
     assert!(
         floor.slots[1].read().is_none(),
         "Work item A: slot must be vacated to NOT_PARTICIPATING when the last bucket empties",
@@ -552,7 +558,7 @@ fn vmin_vacate_only_when_last_bucket_empties() {
     let mut buckets = std::collections::HashSet::new();
     for src in 1000u16..2000 {
         let k = test_session_key(src, 5201);
-        let bkt = cos_flow_bucket_index(queue.flow_hash_seed, Some(&k));
+        let bkt = cos_flow_bucket_index(test_flow_fair_state(queue).flow_hash_seed, Some(&k));
         if buckets.insert(bkt) {
             keys.push(k);
             if keys.len() == 2 {
@@ -564,20 +570,20 @@ fn vmin_vacate_only_when_last_bucket_empties() {
     // Enqueue both flows; active_flow_buckets becomes 2.
     account_cos_queue_flow_enqueue(queue, Some(&keys[0]), 1500);
     account_cos_queue_flow_enqueue(queue, Some(&keys[1]), 1500);
-    assert_eq!(queue.active_flow_buckets, 2);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 2);
     // Establish participation by publishing.
     publish_committed_queue_vtime(Some(&*queue));
     assert!(floor.slots[1].read().is_some());
     // Dequeue first flow's bucket. active_flow_buckets goes 2→1; no vacate.
     account_cos_queue_flow_dequeue(queue, Some(&keys[0]), 1500);
-    assert_eq!(queue.active_flow_buckets, 1);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 1);
     assert!(
         floor.slots[1].read().is_some(),
         "vacate must NOT fire when other buckets are still active",
     );
     // Dequeue second flow's bucket. active_flow_buckets goes 1→0 → vacate.
     account_cos_queue_flow_dequeue(queue, Some(&keys[1]), 1500);
-    assert_eq!(queue.active_flow_buckets, 0);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 0);
     assert!(
         floor.slots[1].read().is_none(),
         "vacate must fire when the last bucket empties",
@@ -607,10 +613,10 @@ fn vmin_hard_cap_force_continue_activates_suspension() {
     let floor = attach_test_vtime_floor(queue, 4, 1);
     // Peer 0 publishes a tiny vtime — guarantees the throttle path.
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024; // 100 MB ahead, way past lag.
-                                           // Each call returns false (throttle) until consecutive_v_min_skips
-                                           // reaches HARD_CAP. The Nth call returns true (force-continue) and
-                                           // arms suspension.
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024; // 100 MB ahead, way past lag.
+                                                                     // Each call returns false (throttle) until consecutive_v_min_skips
+                                                                     // reaches HARD_CAP. The Nth call returns true (force-continue) and
+                                                                     // arms suspension.
     for n in 1..V_MIN_CONSECUTIVE_SKIP_HARD_CAP {
         let cont = cos_queue_v_min_continue(queue, 1);
         assert!(
@@ -623,15 +629,15 @@ fn vmin_hard_cap_force_continue_activates_suspension() {
     let final_cont = cos_queue_v_min_continue(queue, 1);
     assert!(final_cont, "hard-cap activation must force-continue");
     assert_eq!(
-        queue.v_min_suspended_remaining, V_MIN_SUSPENSION_BATCHES,
+        queue.v_min.v_min_suspended_remaining, V_MIN_SUSPENSION_BATCHES,
         "hard-cap must arm suspension to V_MIN_SUSPENSION_BATCHES",
     );
     assert_eq!(
-        queue.consecutive_v_min_skips, 0,
+        queue.v_min.consecutive_v_min_skips, 0,
         "hard-cap must reset consecutive skips to 0",
     );
     assert_eq!(
-        queue.v_min_hard_cap_overrides_scratch, 1,
+        queue.v_min.v_min_hard_cap_overrides_scratch, 1,
         "hard-cap activation must increment the override counter",
     );
 }
@@ -658,17 +664,17 @@ fn vmin_consume_suspension_decrements_once() {
     let _floor = attach_test_vtime_floor(queue, 4, 1);
     // No suspension active initially — returns false, no change.
     assert!(!cos_queue_v_min_consume_suspension(queue));
-    assert_eq!(queue.v_min_suspended_remaining, 0);
+    assert_eq!(queue.v_min.v_min_suspended_remaining, 0);
     // Arm suspension manually (simulating hard-cap).
-    queue.v_min_suspended_remaining = 5;
+    queue.v_min.v_min_suspended_remaining = 5;
     // Each call decrements by 1 and returns true.
     for expected_remaining in (0..5).rev() {
         assert!(cos_queue_v_min_consume_suspension(queue));
-        assert_eq!(queue.v_min_suspended_remaining, expected_remaining);
+        assert_eq!(queue.v_min.v_min_suspended_remaining, expected_remaining);
     }
     // Drained — next call returns false.
     assert!(!cos_queue_v_min_consume_suspension(queue));
-    assert_eq!(queue.v_min_suspended_remaining, 0);
+    assert_eq!(queue.v_min.v_min_suspended_remaining, 0);
 }
 
 /// #941 Work item D + Gemini Q6: the drain-call preflight must NOT
@@ -694,8 +700,8 @@ fn vmin_suspension_not_decremented_on_empty_tx_frames() {
     let queue = &mut root.queues[0];
     let _floor = attach_test_vtime_floor(queue, 4, 1);
     // Arm suspension at a known value.
-    queue.v_min_suspended_remaining = 100;
-    let initial = queue.v_min_suspended_remaining;
+    queue.v_min.v_min_suspended_remaining = 100;
+    let initial = queue.v_min.v_min_suspended_remaining;
     let area = MmapArea::new(2 * 1024 * 1024).expect("mmap");
     let mut empty_free: VecDeque<u64> = VecDeque::new();
     let mut scratch: Vec<(u64, TxRequest)> = Vec::new();
@@ -711,7 +717,7 @@ fn vmin_suspension_not_decremented_on_empty_tx_frames() {
         None,
     );
     assert_eq!(
-        queue.v_min_suspended_remaining, initial,
+        queue.v_min.v_min_suspended_remaining, initial,
         "drain with empty free_tx_frames must NOT consume a suspension slot",
     );
 }
@@ -737,17 +743,17 @@ fn vmin_hard_cap_counter_resets_on_success() {
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024;
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
     // 3 throttles increment the counter to 3.
     for _ in 0..3 {
         assert!(!cos_queue_v_min_continue(queue, 1));
     }
-    assert_eq!(queue.consecutive_v_min_skips, 3);
+    assert_eq!(queue.v_min.consecutive_v_min_skips, 3);
     // Now make the check succeed: vacate the peer, so participating==0.
     floor.slots[0].vacate();
     assert!(cos_queue_v_min_continue(queue, 1));
     assert_eq!(
-        queue.consecutive_v_min_skips, 0,
+        queue.v_min.consecutive_v_min_skips, 0,
         "successful V_min check must reset consecutive_v_min_skips",
     );
 }
@@ -812,7 +818,7 @@ fn vmin_prepared_flow_fair_throttle_and_suspension() {
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024;
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     // Push a Prepared item so the preflight passes.
     let packet = vec![0u8; 1500];
@@ -837,11 +843,11 @@ fn vmin_prepared_flow_fair_throttle_and_suspension() {
         scratch.is_empty(),
         "V_min throttle must break Prepared drain before any item is committed",
     );
-    assert_eq!(queue.consecutive_v_min_skips, 1);
+    assert_eq!(queue.v_min.consecutive_v_min_skips, 1);
 
     // Arm suspension; next drain consumes one slot and skips V_min,
     // draining the pending Prepared item.
-    queue.v_min_suspended_remaining = 5;
+    queue.v_min.v_min_suspended_remaining = 5;
     let mut scratch2: Vec<PreparedTxRequest> = Vec::new();
     let _ = drain_exact_prepared_items_to_scratch_flow_fair(
         queue,
@@ -855,7 +861,7 @@ fn vmin_prepared_flow_fair_throttle_and_suspension() {
         None,
     );
     assert_eq!(
-        queue.v_min_suspended_remaining, 4,
+        queue.v_min.v_min_suspended_remaining, 4,
         "drain MUST consume one suspension slot",
     );
     assert!(
@@ -886,8 +892,8 @@ fn vmin_prepared_no_suspension_burn_when_head_is_local() {
     );
     let queue = &mut root.queues[0];
     let _floor = attach_test_vtime_floor(queue, 4, 1);
-    queue.v_min_suspended_remaining = 100;
-    let initial = queue.v_min_suspended_remaining;
+    queue.v_min.v_min_suspended_remaining = 100;
+    let initial = queue.v_min.v_min_suspended_remaining;
 
     // Queue head is Local — preflight returns Ready early.
     cos_queue_push_back(queue, test_cos_item(1500));
@@ -907,7 +913,7 @@ fn vmin_prepared_no_suspension_burn_when_head_is_local() {
         None,
     );
     assert_eq!(
-        queue.v_min_suspended_remaining, initial,
+        queue.v_min.v_min_suspended_remaining, initial,
         "Prepared drain with non-Prepared head MUST NOT consume a suspension slot",
     );
 }
@@ -937,7 +943,7 @@ fn vmin_prepared_drain_arms_hard_cap_after_repeated_throttle() {
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024;
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     let packet = vec![0u8; 1500];
     let prepared = test_prepared_item_in_umem(&mut umem, 0, &packet, libc::AF_INET as u8);
@@ -969,12 +975,12 @@ fn vmin_prepared_drain_arms_hard_cap_after_repeated_throttle() {
             V_MIN_CONSECUTIVE_SKIP_HARD_CAP,
         );
         assert_eq!(
-            queue.consecutive_v_min_skips, n,
+            queue.v_min.consecutive_v_min_skips, n,
             "drain {}: consecutive_v_min_skips must increment",
             n,
         );
         assert_eq!(
-            queue.v_min_suspended_remaining, 0,
+            queue.v_min.v_min_suspended_remaining, 0,
             "drain {}: suspension must NOT yet be armed",
             n,
         );
@@ -999,15 +1005,15 @@ fn vmin_prepared_drain_arms_hard_cap_after_repeated_throttle() {
         "hard-cap drain must commit the head Prepared item",
     );
     assert_eq!(
-        queue.v_min_suspended_remaining, V_MIN_SUSPENSION_BATCHES,
+        queue.v_min.v_min_suspended_remaining, V_MIN_SUSPENSION_BATCHES,
         "hard-cap drain must arm suspension to V_MIN_SUSPENSION_BATCHES",
     );
     assert_eq!(
-        queue.consecutive_v_min_skips, 0,
+        queue.v_min.consecutive_v_min_skips, 0,
         "hard-cap drain must reset consecutive_v_min_skips",
     );
     assert_eq!(
-        queue.v_min_hard_cap_overrides_scratch, 1,
+        queue.v_min.v_min_hard_cap_overrides_scratch, 1,
         "hard-cap drain must increment the override counter",
     );
 }
@@ -1038,7 +1044,7 @@ fn vmin_prepared_drain_unblocks_when_peer_slot_vacates() {
     let floor = attach_test_vtime_floor(queue, 4, 1);
     // Peer 0 publishes a tiny vtime — guarantees throttle.
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024;
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     let packet = vec![0u8; 1500];
     let prepared = test_prepared_item_in_umem(&mut umem, 0, &packet, libc::AF_INET as u8);
@@ -1087,7 +1093,7 @@ fn vmin_prepared_drain_unblocks_when_peer_slot_vacates() {
         "peer vacate must clear the throttle and let drain proceed",
     );
     assert_eq!(
-        queue.v_min_suspended_remaining, 0,
+        queue.v_min.v_min_suspended_remaining, 0,
         "vacate-then-drain must NOT arm suspension (no hard-cap path)",
     );
 }
@@ -1096,7 +1102,7 @@ fn vmin_prepared_drain_unblocks_when_peer_slot_vacates() {
 /// function. If the Local drain arms suspension via hard-cap, the
 /// subsequent Prepared drain on the same queue MUST see and consume
 /// that suspension (rather than re-throttling). Validates the
-/// shared `queue.v_min_suspended_remaining` lifecycle across both
+/// shared `queue.v_min.v_min_suspended_remaining` lifecycle across both
 /// drain entry points.
 #[test]
 fn vmin_local_hard_cap_suspension_carries_into_prepared_drain() {
@@ -1118,15 +1124,15 @@ fn vmin_local_hard_cap_suspension_carries_into_prepared_drain() {
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
     floor.slots[0].publish(0);
-    queue.queue_vtime = 100 * 1024 * 1024;
+    test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     // Simulate Local hard-cap firing: arm consecutive_v_min_skips
     // to one short of cap, then call cos_queue_v_min_continue
     // directly (matching what Local drain would do at pop_count=1).
-    queue.consecutive_v_min_skips = V_MIN_CONSECUTIVE_SKIP_HARD_CAP - 1;
+    queue.v_min.consecutive_v_min_skips = V_MIN_CONSECUTIVE_SKIP_HARD_CAP - 1;
     let _ = cos_queue_v_min_continue(queue, 1);
     assert_eq!(
-        queue.v_min_suspended_remaining, V_MIN_SUSPENSION_BATCHES,
+        queue.v_min.v_min_suspended_remaining, V_MIN_SUSPENSION_BATCHES,
         "Local hard-cap path must arm queue-level suspension",
     );
 
@@ -1136,7 +1142,7 @@ fn vmin_local_hard_cap_suspension_carries_into_prepared_drain() {
     let packet = vec![0u8; 1500];
     let prepared = test_prepared_item_in_umem(&mut umem, 0, &packet, libc::AF_INET as u8);
     cos_queue_push_back(queue, prepared);
-    let suspension_before = queue.v_min_suspended_remaining;
+    let suspension_before = queue.v_min.v_min_suspended_remaining;
 
     let mut scratch: Vec<PreparedTxRequest> = Vec::new();
     let mut free_tx: VecDeque<u64> = VecDeque::new();
@@ -1157,7 +1163,7 @@ fn vmin_local_hard_cap_suspension_carries_into_prepared_drain() {
         "Prepared drain under inherited Local-armed suspension must drain",
     );
     assert_eq!(
-        queue.v_min_suspended_remaining,
+        queue.v_min.v_min_suspended_remaining,
         suspension_before - 1,
         "Prepared drain must consume exactly one queue-level suspension slot",
     );

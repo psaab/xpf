@@ -174,6 +174,7 @@ fn cos_queue_accepts_prepared_when_queue_is_prepared_only() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 64,
@@ -216,6 +217,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 64,
@@ -230,6 +232,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
             dscp_rewrite: None,
         }));
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 128,
@@ -256,6 +259,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
     ));
 
     let items = root.queues[0]
+        .hot
         .items
         .iter()
         .map(|item| match item {
@@ -305,8 +309,7 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.flow_hash_seed = 0;
+    enable_test_flow_fair(queue);
 
     // Two distinct flows, each one Prepared item. Bucket
     // indices computed under flow_hash_seed=0 for use in
@@ -352,11 +355,11 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
     );
 
     // Snapshot pre-demote MQFQ frontier.
-    let pre_vtime = queue.queue_vtime;
-    let pre_head_a = queue.flow_bucket_head_finish_bytes[bucket_a];
-    let pre_head_b = queue.flow_bucket_head_finish_bytes[bucket_b];
-    let pre_tail_a = queue.flow_bucket_tail_finish_bytes[bucket_a];
-    let pre_tail_b = queue.flow_bucket_tail_finish_bytes[bucket_b];
+    let pre_vtime = test_flow_fair_state(queue).queue_vtime;
+    let pre_head_a = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a];
+    let pre_head_b = test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_b];
+    let pre_tail_a = test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a];
+    let pre_tail_b = test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_b];
     assert!(pre_head_a > 0);
     assert!(pre_head_b > 0);
 
@@ -376,34 +379,39 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
 
     // Frontier MUST be unchanged across the success path.
     assert_eq!(
-        queue.queue_vtime, pre_vtime,
+        test_flow_fair_state(queue).queue_vtime,
+        pre_vtime,
         "#926 regression: queue_vtime must be preserved across \
          demote success path. Pre={pre_vtime} post={}",
-        queue.queue_vtime
+        test_flow_fair_state(queue).queue_vtime
     );
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_a], pre_head_a,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a],
+        pre_head_a,
         "#926: head_finish[A] must be preserved (pre={pre_head_a})"
     );
     assert_eq!(
-        queue.flow_bucket_head_finish_bytes[bucket_b], pre_head_b,
+        test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_b],
+        pre_head_b,
         "#926: head_finish[B] must be preserved (pre={pre_head_b})"
     );
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_a], pre_tail_a,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_a],
+        pre_tail_a,
         "#926: tail_finish[A] must be preserved"
     );
     assert_eq!(
-        queue.flow_bucket_tail_finish_bytes[bucket_b], pre_tail_b,
+        test_flow_fair_state(queue).flow_bucket_tail_finish_bytes[bucket_b],
+        pre_tail_b,
         "#926: tail_finish[B] must be preserved"
     );
 
     // Items now Local. flow_fair=true stores items in
     // per-bucket VecDeques at `flow_bucket_items[bucket]`,
-    // not in `queue.items`.
+    // not in `queue.hot.items`.
     let mut total_items = 0;
     for bucket in [bucket_a, bucket_b] {
-        for item in queue.flow_bucket_items[bucket].iter() {
+        for item in test_flow_fair_state(queue).flow_bucket_items[bucket].iter() {
             assert!(
                 matches!(item, CoSPendingTxItem::Local(_)),
                 "demote should convert Prepared → Local"
@@ -448,6 +456,7 @@ fn demote_prepared_cos_queue_to_local_skips_non_exact_queue() {
         }],
     );
     root.queues[0]
+        .hot
         .items
         .push_back(CoSPendingTxItem::Prepared(PreparedTxRequest {
             offset: 64,
@@ -473,7 +482,7 @@ fn demote_prepared_cos_queue_to_local_skips_non_exact_queue() {
         Some(5),
     ));
     assert!(matches!(
-        root.queues[0].items.front(),
+        root.queues[0].hot.items.front(),
         Some(CoSPendingTxItem::Prepared(_))
     ));
     assert!(free_tx_frames.is_empty());

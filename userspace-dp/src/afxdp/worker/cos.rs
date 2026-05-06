@@ -1,6 +1,3 @@
-
-
-
 // Empirical per-worker sustained exact throughput ceiling in bytes/sec. A
 // single owner worker can reliably drive an exact queue up to about this rate
 // before the drain loop backs up and throughput collapses (the collapse case
@@ -32,15 +29,6 @@
 // - The ceiling is a property of the full per-worker pipeline, not of
 //   the interface shaper — it does not scale with iface rate.
 pub(in crate::afxdp) const COS_SHARED_EXACT_MIN_RATE_BYTES: u64 = 2_500_000_000 / 8;
-
-
-
-
-
-
-
-
-
 
 /// #709: snapshot the owner-profile counter set from a `BindingLiveState`
 /// into a struct-local copy. Histograms are fixed-cap arrays on both
@@ -74,7 +62,9 @@ use super::*;
 // All fns operate on per-binding CoS state; none touch the XSK fast
 // path or HA reconciliation directly.
 
-pub(super) fn build_worker_cos_owner_live_by_tx_ifindex<I>(bindings: I) -> FastMap<i32, Arc<BindingLiveState>>
+pub(super) fn build_worker_cos_owner_live_by_tx_ifindex<I>(
+    bindings: I,
+) -> FastMap<i32, Arc<BindingLiveState>>
 where
     I: IntoIterator<Item = (i32, Arc<BindingLiveState>)>,
 {
@@ -222,20 +212,20 @@ fn unique_owner_profile_row(
                 // confirm the queue is exact from the config side, so
                 // if the runtime claims any exact queues we silence
                 // the whole binding.
-                if root.queues.iter().any(|q| q.exact) {
+                if root.queues.iter().any(|q| q.config.exact) {
                     return None;
                 }
                 continue;
             }
         };
         for queue in &root.queues {
-            if !queue.exact {
+            if !queue.config.exact {
                 continue;
             }
             let Some(config) = iface
                 .queues
                 .iter()
-                .find(|cfg| cfg.queue_id == queue.queue_id)
+                .find(|cfg| cfg.queue_id == queue.queue_id())
             else {
                 return None;
             };
@@ -245,7 +235,7 @@ fn unique_owner_profile_row(
             if queue_uses_shared_exact_service(iface, config) {
                 continue;
             }
-            if eligible.replace((ifindex, queue.queue_id)).is_some() {
+            if eligible.replace((ifindex, queue.queue_id())).is_some() {
                 return None;
             }
         }
@@ -253,7 +243,10 @@ fn unique_owner_profile_row(
     eligible
 }
 
-pub(super) fn cos_runtime_config_changed(current: &ForwardingState, next: &ForwardingState) -> bool {
+pub(super) fn cos_runtime_config_changed(
+    current: &ForwardingState,
+    next: &ForwardingState,
+) -> bool {
     current.cos != next.cos
 }
 
@@ -267,11 +260,11 @@ pub(super) fn cos_runtime_config_changed(current: &ForwardingState, next: &Forwa
 pub(super) fn vacate_all_shared_exact_slots_for_binding(binding: &BindingWorker) {
     for root in binding.cos.cos_interfaces.values() {
         for queue in &root.queues {
-            if !queue.shared_exact {
+            if !queue.shared_exact() {
                 continue;
             }
-            if let Some(floor) = queue.vtime_floor.as_ref() {
-                if let Some(slot) = floor.slots.get(queue.worker_id as usize) {
+            if let Some(floor) = queue.v_min.vtime_floor.as_ref() {
+                if let Some(slot) = floor.slots.get(queue.v_min.worker_id as usize) {
                     slot.vacate();
                 }
             }
@@ -301,10 +294,10 @@ pub(super) fn reset_binding_cos_runtime(binding: &mut BindingWorker) {
                     CoSPendingTxItem::Prepared(req) => dropped_prepared.push(req),
                 }
             }
-            queue.queued_bytes = 0;
-            queue.runnable = false;
-            queue.parked = false;
-            queue.next_wakeup_tick = 0;
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+            queue.hot.parked = false;
+            queue.hot.next_wakeup_tick = 0;
         }
         root.nonempty_queues = 0;
         root.runnable_queues = 0;
@@ -570,12 +563,12 @@ where
             let interface_config = forwarding.cos.interfaces.get(&ifindex);
             let queue_map = queue_maps.entry(ifindex).or_default();
             for queue in &root.queues {
-                let status = queue_map.entry(queue.queue_id).or_default();
-                status.queue_id = queue.queue_id;
+                let status = queue_map.entry(queue.queue_id()).or_default();
+                status.queue_id = queue.queue_id();
                 let queue_config = interface_config.and_then(|cfg| {
                     cfg.queues
                         .iter()
-                        .find(|config| config.queue_id == queue.queue_id)
+                        .find(|config| config.queue_id == queue.queue_id())
                 });
                 if let Some(config) = queue_config {
                     if status.forwarding_class.is_empty() {
@@ -583,43 +576,46 @@ where
                     }
                 }
                 if status.worker_instances == 0 {
-                    status.priority = queue.priority;
+                    status.priority = queue.config.priority;
                 }
-                status.exact = queue.exact;
+                status.exact = queue.config.exact;
                 status.transmit_rate_bytes =
-                    status.transmit_rate_bytes.max(queue.transmit_rate_bytes);
-                status.buffer_bytes = status.buffer_bytes.max(queue.buffer_bytes);
+                    status.transmit_rate_bytes.max(queue.transmit_rate_bytes());
+                status.buffer_bytes = status.buffer_bytes.max(queue.config.buffer_bytes);
                 status.worker_instances = status.worker_instances.saturating_add(1);
                 status.queued_packets = status
                     .queued_packets
                     .saturating_add(cos_queue_len(queue) as u64);
-                status.queued_bytes = status.queued_bytes.saturating_add(queue.queued_bytes);
-                if queue.runnable {
+                status.queued_bytes = status.queued_bytes.saturating_add(queue.hot.queued_bytes);
+                if queue.hot.runnable {
                     status.runnable_instances = status.runnable_instances.saturating_add(1);
                 }
-                if queue.parked {
+                if queue.hot.parked {
                     status.parked_instances = status.parked_instances.saturating_add(1);
                 }
                 if status.next_wakeup_tick == 0
-                    || (queue.next_wakeup_tick > 0
-                        && queue.next_wakeup_tick < status.next_wakeup_tick)
+                    || (queue.hot.next_wakeup_tick > 0
+                        && queue.hot.next_wakeup_tick < status.next_wakeup_tick)
                 {
-                    status.next_wakeup_tick = queue.next_wakeup_tick;
+                    status.next_wakeup_tick = queue.hot.next_wakeup_tick;
                 }
                 status.surplus_deficit_bytes = status
                     .surplus_deficit_bytes
-                    .saturating_add(queue.surplus_deficit);
+                    .saturating_add(queue.hot.surplus_deficit);
                 // #784: use MAX across worker instances (not sum) —
                 // the peak is per-worker observed; aggregating by
                 // max gives the worst-case collision visibility
                 // without inflating the number by double-counting.
-                let peak = u64::from(queue.active_flow_buckets_peak);
+                let peak = queue
+                    .flow_fair_state
+                    .as_ref()
+                    .map_or(0, |ff| u64::from(ff.active_flow_buckets_peak));
                 if peak > status.active_flow_buckets_peak {
                     status.active_flow_buckets_peak = peak;
                 }
                 // #784: surface flow_fair so we can detect queues
                 // that were expected to run SFQ but aren't.
-                if queue.flow_fair {
+                if queue.flow_fair() {
                     status.flow_fair = true;
                 }
                 // #710: aggregate drop-reason counters across worker
@@ -629,28 +625,28 @@ where
                 // summing across workers gives the cluster-wide totals.
                 status.admission_flow_share_drops = status
                     .admission_flow_share_drops
-                    .saturating_add(queue.drop_counters.admission_flow_share_drops);
+                    .saturating_add(queue.telemetry.drop_counters.admission_flow_share_drops);
                 status.admission_buffer_drops = status
                     .admission_buffer_drops
-                    .saturating_add(queue.drop_counters.admission_buffer_drops);
+                    .saturating_add(queue.telemetry.drop_counters.admission_buffer_drops);
                 // #718: aggregate ECN CE-mark counter across workers.
                 // Same single-writer invariant as the other admission
                 // counters — owner worker only.
                 status.admission_ecn_marked = status
                     .admission_ecn_marked
-                    .saturating_add(queue.drop_counters.admission_ecn_marked);
+                    .saturating_add(queue.telemetry.drop_counters.admission_ecn_marked);
                 status.root_token_starvation_parks = status
                     .root_token_starvation_parks
-                    .saturating_add(queue.drop_counters.root_token_starvation_parks);
+                    .saturating_add(queue.telemetry.drop_counters.root_token_starvation_parks);
                 status.queue_token_starvation_parks = status
                     .queue_token_starvation_parks
-                    .saturating_add(queue.drop_counters.queue_token_starvation_parks);
+                    .saturating_add(queue.telemetry.drop_counters.queue_token_starvation_parks);
                 status.tx_ring_full_submit_stalls = status
                     .tx_ring_full_submit_stalls
-                    .saturating_add(queue.drop_counters.tx_ring_full_submit_stalls);
+                    .saturating_add(queue.telemetry.drop_counters.tx_ring_full_submit_stalls);
                 // #751: the owner-side drain telemetry
                 // (drain_latency_hist + drain_invocations) now lives
-                // per-queue on CoSQueueRuntime.owner_profile — each
+                // per-queue on CoSQueueTelemetry.owner_profile — each
                 // exact queue gets its OWN histogram populated
                 // directly from its own atomics, with no eligibility
                 // gate. Pre-#751 these came from a binding-wide
@@ -684,15 +680,18 @@ where
                 //     but a ~1-count under-report from a single
                 //     reader is within the tolerance documented on
                 //     CoSQueueOwnerProfile.
-                let queue_invocations =
-                    queue.owner_profile.drain_invocations.load(Ordering::Relaxed);
+                let queue_invocations = queue
+                    .telemetry
+                    .owner_profile
+                    .drain_invocations
+                    .load(Ordering::Relaxed);
                 if queue_invocations > 0 {
                     if status.drain_latency_hist.len() < DRAIN_HIST_BUCKETS {
                         status.drain_latency_hist.resize(DRAIN_HIST_BUCKETS, 0);
                     }
                     for i in 0..DRAIN_HIST_BUCKETS {
-                        let bucket_count =
-                            queue.owner_profile.drain_latency_hist[i].load(Ordering::Relaxed);
+                        let bucket_count = queue.telemetry.owner_profile.drain_latency_hist[i]
+                            .load(Ordering::Relaxed);
                         status.drain_latency_hist[i] =
                             status.drain_latency_hist[i].saturating_add(bucket_count);
                     }
@@ -714,16 +713,22 @@ where
                 // drain_sent_bytes above rate means the gate never
                 // ran for this queue.
                 status.drain_sent_bytes = status.drain_sent_bytes.saturating_add(
-                    queue.owner_profile.drain_sent_bytes.load(Ordering::Relaxed),
+                    queue
+                        .telemetry
+                        .owner_profile
+                        .drain_sent_bytes
+                        .load(Ordering::Relaxed),
                 );
                 status.drain_park_root_tokens = status.drain_park_root_tokens.saturating_add(
                     queue
+                        .telemetry
                         .owner_profile
                         .drain_park_root_tokens
                         .load(Ordering::Relaxed),
                 );
                 status.drain_park_queue_tokens = status.drain_park_queue_tokens.saturating_add(
                     queue
+                        .telemetry
                         .owner_profile
                         .drain_park_queue_tokens
                         .load(Ordering::Relaxed),
@@ -739,7 +744,7 @@ where
                 // shared-exact, non-exact, or multi-owner-local
                 // shape keeps them at zero rather than surfacing a
                 // binding-wide mixed profile under an arbitrary row.
-                if owner_profile_row == Some((ifindex, queue.queue_id)) {
+                if owner_profile_row == Some((ifindex, queue.queue_id())) {
                     if let Some(profile) = binding_profile.as_ref() {
                         merge_binding_scoped_owner_profile(status, profile);
                     }
@@ -775,4 +780,3 @@ where
 #[cfg(test)]
 #[path = "cos_tests.rs"]
 mod tests;
-

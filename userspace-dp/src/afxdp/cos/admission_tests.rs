@@ -33,16 +33,16 @@ fn flow_share_limit_shared_exact_scales_with_rate() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.shared_exact = true;
-    queue.active_flow_buckets = 128;
+    enable_test_flow_fair(queue);
+    queue.config.shared_exact = true;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 128;
     for bucket in 0..128 {
-        queue.flow_bucket_bytes[bucket] = 1_000;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
     }
     let buffer_limit = cos_flow_aware_buffer_limit(queue, 0);
     let share = cos_queue_flow_share_limit(queue, buffer_limit, 0);
     // bdp_floor = (1.25 GB/s / 128) × 10 ms = 97_656 bytes (rounded).
-    let expected_bdp = bdp_floor_bytes(queue.transmit_rate_bytes, 128);
+    let expected_bdp = bdp_floor_bytes(queue.transmit_rate_bytes(), 128);
     assert_eq!(
         share, expected_bdp,
         "shared_exact cap should follow bdp_floor at N=128 (cap={share}, bdp={expected_bdp})"
@@ -78,10 +78,10 @@ fn flow_share_limit_shared_exact_caps_at_aggregate_for_single_flow() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.shared_exact = true;
-    queue.active_flow_buckets = 1;
-    queue.flow_bucket_bytes[0] = 1_000;
+    enable_test_flow_fair(queue);
+    queue.config.shared_exact = true;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 1;
+    test_flow_fair_state_mut(queue).flow_bucket_bytes[0] = 1_000;
     let buffer_limit = cos_flow_aware_buffer_limit(queue, 0);
     let share = cos_queue_flow_share_limit(queue, buffer_limit, 0);
     // At N=1 the bdp_floor (~12.5 MB) is way above buffer_limit,
@@ -115,17 +115,17 @@ fn flow_share_limit_shared_exact_clamps_to_buffer_at_low_n() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.shared_exact = true;
+    enable_test_flow_fair(queue);
+    queue.config.shared_exact = true;
     // N = 8: per-flow rate = 156 MB/s, bdp_floor = 1.56 MB,
     // far above buffer_limit (which at default base = 96 KB and
     // 8 × MIN_SHARE = 192 KB clamps to ~192 KB).
-    queue.active_flow_buckets = 8;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 8;
     for bucket in 0..8 {
-        queue.flow_bucket_bytes[bucket] = 1_000;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
     }
     let buffer_limit = cos_flow_aware_buffer_limit(queue, 0);
-    let bdp = bdp_floor_bytes(queue.transmit_rate_bytes, 8);
+    let bdp = bdp_floor_bytes(queue.transmit_rate_bytes(), 8);
     assert!(
         bdp > buffer_limit,
         "test premise: bdp_floor ({bdp}) must exceed buffer_limit ({buffer_limit}) at N=8"
@@ -157,11 +157,11 @@ fn flow_share_limit_shared_exact_protects_against_dominant_flow() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.shared_exact = true;
-    queue.active_flow_buckets = 128;
+    enable_test_flow_fair(queue);
+    queue.config.shared_exact = true;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 128;
     for bucket in 0..128 {
-        queue.flow_bucket_bytes[bucket] = 1_000;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
     }
     let buffer_limit = cos_flow_aware_buffer_limit(queue, 0);
     let share = cos_queue_flow_share_limit(queue, buffer_limit, 0);
@@ -200,11 +200,11 @@ fn flow_share_limit_owner_local_exact_unchanged() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
-    queue.shared_exact = false; // owner-local-exact
-    queue.active_flow_buckets = 12;
+    enable_test_flow_fair(queue);
+    queue.config.shared_exact = false; // owner-local-exact
+    test_flow_fair_state_mut(queue).active_flow_buckets = 12;
     for bucket in 0..12 {
-        queue.flow_bucket_bytes[bucket] = 1_000;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
     }
     let buffer_limit = cos_flow_aware_buffer_limit(queue, 0);
     let share = cos_queue_flow_share_limit(queue, buffer_limit, 0);
@@ -230,9 +230,9 @@ fn admission_ecn_marked_counter_increments_when_marking_above_threshold() {
     // (we run the decision in isolation, so we just assert `marked`).
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
     // Half + 1 byte — strictly above the 50% threshold.
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
     let before = snapshot_counters(queue);
 
     let mut item = test_local_ipv4_item(ECN_ECT_0);
@@ -267,13 +267,13 @@ fn admission_ecn_marked_counter_increments_when_marking_above_threshold() {
 fn admission_does_not_mark_below_threshold() {
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
     // Exactly at the mark threshold — `>` comparison must not fire.
     // Written against the constants so retuning NUM/DEN doesn't
     // silently break this pin; at any fraction < 1, an at-threshold
     // queue must stay unmarked by the `>` comparison in
     // `apply_cos_admission_ecn_policy`.
-    queue.queued_bytes = buffer_limit * COS_ECN_MARK_THRESHOLD_NUM / COS_ECN_MARK_THRESHOLD_DEN;
+    queue.hot.queued_bytes = buffer_limit * COS_ECN_MARK_THRESHOLD_NUM / COS_ECN_MARK_THRESHOLD_DEN;
     let before = snapshot_counters(queue);
 
     let mut item = test_local_ipv4_item(ECN_ECT_0);
@@ -298,8 +298,8 @@ fn admission_does_not_mark_non_ect_packets() {
     // fire and counter must not advance — RFC 3168 compliance.
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
     let before = snapshot_counters(queue);
 
     let mut item = test_local_ipv4_item(ECN_NOT_ECT);
@@ -323,8 +323,8 @@ fn admission_does_not_mark_when_drop_is_imminent() {
     // burn the mark on a packet that's about to be dropped.
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
     let before = snapshot_counters(queue);
 
     let mut item = test_local_ipv4_item(ECN_ECT_0);
@@ -373,7 +373,7 @@ fn admission_ecn_marks_when_per_flow_above_threshold_aggregate_below() {
     // retune fails the pin loudly, which is the whole point.
     let target_bucket_bytes = 15_000; // > 8 000 per-flow threshold with a generous margin
     let queued_bytes = seed_sixteen_flow_buckets(queue, target, target_bucket_bytes);
-    queue.queued_bytes = queued_bytes;
+    queue.hot.queued_bytes = queued_bytes;
     let buffer_limit = cos_flow_aware_buffer_limit(queue, target);
     assert_eq!(buffer_limit, 384_000);
     let share_cap = cos_queue_flow_share_limit(queue, buffer_limit, target);
@@ -399,11 +399,11 @@ fn admission_ecn_marks_when_per_flow_above_threshold_aggregate_below() {
     // workload — keep this pin live so a future refactor that
     // drops the per-flow arm fails here loudly.
     assert!(
-        queue.queued_bytes <= aggregate_ecn_threshold,
+        queue.hot.queued_bytes <= aggregate_ecn_threshold,
         "aggregate-only formula must fall below threshold on the #722 live state",
     );
     // And the per-flow arm must be above its threshold.
-    assert!(queue.flow_bucket_bytes[target] > flow_ecn_threshold);
+    assert!(test_flow_fair_state(queue).flow_bucket_bytes[target] > flow_ecn_threshold);
 
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
@@ -458,10 +458,10 @@ fn admission_ecn_does_not_mark_when_only_aggregate_above_threshold() {
         buffer_limit.saturating_mul(COS_ECN_MARK_THRESHOLD_NUM) / COS_ECN_MARK_THRESHOLD_DEN;
     let flow_ecn_threshold =
         share_cap.saturating_mul(COS_ECN_MARK_THRESHOLD_NUM) / COS_ECN_MARK_THRESHOLD_DEN;
-    queue.queued_bytes = aggregate_ecn_threshold + 1; // strictly above
+    queue.hot.queued_bytes = aggregate_ecn_threshold + 1; // strictly above
 
-    assert!(queue.queued_bytes > aggregate_ecn_threshold);
-    assert!(queue.flow_bucket_bytes[target] <= flow_ecn_threshold);
+    assert!(queue.hot.queued_bytes > aggregate_ecn_threshold);
+    assert!(test_flow_fair_state(queue).flow_bucket_bytes[target] <= flow_ecn_threshold);
 
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
@@ -488,15 +488,15 @@ fn admission_ecn_does_not_mark_when_both_thresholds_below() {
 
     let target_bucket_bytes = 500; // < 8 000 (per-flow threshold at NUM/DEN = 1/3)
     let queued_bytes = seed_sixteen_flow_buckets(queue, target, target_bucket_bytes);
-    queue.queued_bytes = queued_bytes; // ≪ 128 000 (aggregate threshold at 1/3)
+    queue.hot.queued_bytes = queued_bytes; // ≪ 128 000 (aggregate threshold at 1/3)
     let buffer_limit = cos_flow_aware_buffer_limit(queue, target);
     let share_cap = cos_queue_flow_share_limit(queue, buffer_limit, target);
     let aggregate_ecn_threshold =
         buffer_limit.saturating_mul(COS_ECN_MARK_THRESHOLD_NUM) / COS_ECN_MARK_THRESHOLD_DEN;
     let flow_ecn_threshold =
         share_cap.saturating_mul(COS_ECN_MARK_THRESHOLD_NUM) / COS_ECN_MARK_THRESHOLD_DEN;
-    assert!(queue.queued_bytes <= aggregate_ecn_threshold);
-    assert!(queue.flow_bucket_bytes[target] <= flow_ecn_threshold);
+    assert!(queue.hot.queued_bytes <= aggregate_ecn_threshold);
+    assert!(test_flow_fair_state(queue).flow_bucket_bytes[target] <= flow_ecn_threshold);
 
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
@@ -531,7 +531,7 @@ fn admission_ecn_does_not_mark_when_flow_share_already_exceeded() {
 
     let target_bucket_bytes = 15_000; // > 8 000 per-flow threshold (NUM/DEN = 1/3)
     let queued_bytes = seed_sixteen_flow_buckets(queue, target, target_bucket_bytes);
-    queue.queued_bytes = queued_bytes;
+    queue.hot.queued_bytes = queued_bytes;
     let buffer_limit = cos_flow_aware_buffer_limit(queue, target);
 
     let before = snapshot_counters(queue);
@@ -600,8 +600,8 @@ fn admission_ecn_per_flow_threshold_matches_share_cap_denominator() {
     // Drive the policy at a state that trips BOTH arms and
     // verify the mark fires — proves the live code path uses
     // the same fractions we computed by hand.
-    queue.queued_bytes = expected_aggregate + 1;
-    queue.flow_bucket_bytes[target] = expected_flow + 1;
+    queue.hot.queued_bytes = expected_aggregate + 1;
+    test_flow_fair_state_mut(queue).flow_bucket_bytes[target] = expected_flow + 1;
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
@@ -624,8 +624,8 @@ fn admission_ecn_marks_prepared_ipv4_ect0_packet_above_threshold() {
     //      the UMEM bytes.
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
     let before = snapshot_counters(queue);
 
     let tos = (0x28u8 << 2) | ECN_ECT_0;
@@ -686,8 +686,8 @@ fn admission_ecn_marks_prepared_ipv6_ect0_packet_above_threshold() {
     //   4. Counter bumped by exactly 1.
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
     let before = snapshot_counters(queue);
 
     let tclass = (0x2eu8 << 2) | ECN_ECT_0;
@@ -742,8 +742,8 @@ fn admission_ecn_leaves_prepared_not_ect_packet_untouched() {
     // ECN. Counter must stay put and UMEM bytes byte-identical.
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
     let before = snapshot_counters(queue);
 
     let tos = 0xb8; // DSCP 46 (EF), ECN = 00 (NOT-ECT)
@@ -783,8 +783,8 @@ fn admission_ecn_skips_prepared_when_umem_slice_out_of_range() {
     // fail here without needing to catch a UB-flavoured panic.
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
     let before = snapshot_counters(queue);
 
     let umem = test_admission_umem();
@@ -827,8 +827,8 @@ fn admission_ecn_counter_increments_for_both_local_and_prepared_in_same_queue() 
     // to +1.
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
     let before = snapshot_counters(queue);
 
     let mut umem = test_admission_umem();
@@ -886,8 +886,8 @@ fn admission_ecn_counter_increments_for_both_local_and_prepared_in_same_queue() 
 fn admission_ecn_marks_prepared_single_vlan_tagged_ipv4_packet() {
     let mut root = test_cos_runtime_with_exact(false);
     let queue = &mut root.queues[0];
-    let buffer_limit = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    queue.queued_bytes = (buffer_limit / 2) + 1;
+    let buffer_limit = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    queue.hot.queued_bytes = (buffer_limit / 2) + 1;
 
     let packet = build_ipv4_test_packet(ECN_ECT_0);
     let vid: u16 = 80;
@@ -974,29 +974,29 @@ fn cos_flow_aware_buffer_limit_scales_with_prospective_active_flow_count() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
+    enable_test_flow_fair(queue);
 
     // Base floor wins when prospective flow count × min share is
     // small. `flow_bucket = 0` is empty → prospective_active += 1.
-    queue.active_flow_buckets = 0;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 0;
     assert_eq!(
         cos_flow_aware_buffer_limit(queue, 0),
-        queue.buffer_bytes.max(COS_MIN_BURST_BYTES),
+        queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES),
         "zero active (+1 prospective) flows must stay at the operator-configured base"
     );
-    queue.active_flow_buckets = 2;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 2;
     assert_eq!(
         cos_flow_aware_buffer_limit(queue, 0),
-        queue.buffer_bytes.max(COS_MIN_BURST_BYTES),
+        queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES),
         "3 prospective × 24 KB = 72 KB stays below the 125 KB configured base, so base wins"
     );
 
     // Flow-aware floor wins past the break-even point. Now mark 16
     // buckets populated so prospective = 16 (target bucket already
     // non-empty).
-    queue.active_flow_buckets = 16;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 16;
     for bucket in 0..16 {
-        queue.flow_bucket_bytes[bucket] = 1_000;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
     }
     assert_eq!(
         cos_flow_aware_buffer_limit(queue, 0),
@@ -1034,23 +1034,26 @@ fn cos_flow_aware_buffer_limit_matches_share_limit_at_new_flow_boundary() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
+    enable_test_flow_fair(queue);
 
     // 15 active flows filled to 24 KB each. Target bucket empty →
     // prospective_active = 16. Both caps must key off 16, not 15.
-    queue.active_flow_buckets = 15;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 15;
     for bucket in 0..15 {
-        queue.flow_bucket_bytes[bucket] = COS_FLOW_FAIR_MIN_SHARE_BYTES;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = COS_FLOW_FAIR_MIN_SHARE_BYTES;
     }
     // Aggregate queued equals the pre-fix aggregate cap exactly —
     // this is the value that made the bug observable: under the
     // old formula the aggregate cap was `15 × min-share` and the
     // check `queued + 1500 > cap` tripped; under the fix the cap
     // is `16 × min-share` and the packet fits.
-    queue.queued_bytes = 15 * COS_FLOW_FAIR_MIN_SHARE_BYTES;
+    queue.hot.queued_bytes = 15 * COS_FLOW_FAIR_MIN_SHARE_BYTES;
 
     let new_flow_bucket = 100;
-    assert_eq!(queue.flow_bucket_bytes[new_flow_bucket], 0);
+    assert_eq!(
+        test_flow_fair_state(queue).flow_bucket_bytes[new_flow_bucket],
+        0
+    );
 
     let buffer_limit = cos_flow_aware_buffer_limit(queue, new_flow_bucket);
     let share_cap = cos_queue_flow_share_limit(queue, buffer_limit, new_flow_bucket);
@@ -1061,17 +1064,18 @@ fn cos_flow_aware_buffer_limit_matches_share_limit_at_new_flow_boundary() {
 
     // Per-flow gate: new bucket is empty, so +1500 is well below cap.
     assert!(
-        queue.flow_bucket_bytes[new_flow_bucket].saturating_add(1500) <= share_cap,
+        test_flow_fair_state(queue).flow_bucket_bytes[new_flow_bucket].saturating_add(1500)
+            <= share_cap,
         "per-flow share must admit the new flow's first packet"
     );
 
     // Aggregate gate: queued is at the pre-fix cap. Fix makes
     // +1500 still fit; without the fix this was a drop.
     assert!(
-        queue.queued_bytes.saturating_add(1500) <= buffer_limit,
+        queue.hot.queued_bytes.saturating_add(1500) <= buffer_limit,
         "aggregate cap must admit the new flow's first packet at the near-cap boundary \
          (queued_bytes = {}, +1500 must fit within buffer_limit = {})",
-        queue.queued_bytes,
+        queue.hot.queued_bytes,
         buffer_limit,
     );
 
@@ -1079,15 +1083,15 @@ fn cos_flow_aware_buffer_limit_matches_share_limit_at_new_flow_boundary() {
     // would have rejected the same packet. Guards against a future
     // refactor silently reverting to `active_flow_buckets` without
     // the `+1` bump.
-    let non_prospective_cap = u64::from(queue.active_flow_buckets)
+    let non_prospective_cap = u64::from(test_flow_fair_state(queue).active_flow_buckets)
         .max(1)
         .saturating_mul(COS_FLOW_FAIR_MIN_SHARE_BYTES)
-        .max(queue.buffer_bytes.max(COS_MIN_BURST_BYTES));
+        .max(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
     assert!(
-        queue.queued_bytes.saturating_add(1500) > non_prospective_cap,
+        queue.hot.queued_bytes.saturating_add(1500) > non_prospective_cap,
         "without prospective-active, the same queued state would reject the new flow \
          (queued_bytes + 1500 = {}, non-prospective cap = {})",
-        queue.queued_bytes + 1500,
+        queue.hot.queued_bytes + 1500,
         non_prospective_cap,
     );
 }
@@ -1112,13 +1116,12 @@ fn cos_flow_aware_buffer_limit_respects_non_flow_fair_queues() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = false;
-    queue.active_flow_buckets = 64; // should be ignored
+    disable_test_flow_fair(queue);
 
     // `flow_bucket` argument is irrelevant when flow_fair=false; use 0.
     assert_eq!(
         cos_flow_aware_buffer_limit(queue, 0),
-        queue.buffer_bytes.max(COS_MIN_BURST_BYTES),
+        queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES),
         "flow_fair=false must bypass the flow-count multiplier"
     );
 }
@@ -1147,12 +1150,12 @@ fn cos_queue_flow_share_limit_never_drops_below_fast_retransmit_floor() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
+    enable_test_flow_fair(queue);
 
     // Simulate 16 distinct populated flow buckets.
-    queue.active_flow_buckets = 16;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 16;
     for bucket in 0..16 {
-        queue.flow_bucket_bytes[bucket] = 1_000;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
     }
 
     let buffer_limit = cos_flow_aware_buffer_limit(queue, 0);
@@ -1202,12 +1205,12 @@ fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
+    enable_test_flow_fair(queue);
 
     // Drive to the architectural maximum: 4096 populated buckets.
-    queue.active_flow_buckets = COS_FLOW_FAIR_BUCKETS as u16;
+    test_flow_fair_state_mut(queue).active_flow_buckets = COS_FLOW_FAIR_BUCKETS as u16;
     for bucket in 0..COS_FLOW_FAIR_BUCKETS {
-        queue.flow_bucket_bytes[bucket] = 1_000;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
     }
 
     let cap = cos_flow_aware_buffer_limit(queue, 0);
@@ -1223,10 +1226,10 @@ fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
     // Counter-factual: prove the pre-clamp formula would have
     // returned ~98 MB. Guards against a future refactor silently
     // deleting the clamp.
-    let unclamped = u64::from(queue.active_flow_buckets)
+    let unclamped = u64::from(test_flow_fair_state(queue).active_flow_buckets)
         .max(1)
         .saturating_mul(COS_FLOW_FAIR_MIN_SHARE_BYTES)
-        .max(queue.buffer_bytes.max(COS_MIN_BURST_BYTES));
+        .max(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
     assert_eq!(
         unclamped,
         COS_FLOW_FAIR_BUCKETS as u64 * COS_FLOW_FAIR_MIN_SHARE_BYTES,
@@ -1263,14 +1266,14 @@ fn cos_flow_aware_buffer_limit_honours_operator_base_above_delay_cap() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = true;
+    enable_test_flow_fair(queue);
 
     // Use a middling flow count so prospective × min-share sits
     // between delay_cap and operator_base. That exercises the
     // branch where delay_cap < base < flow-aware expansion.
-    queue.active_flow_buckets = 16;
+    test_flow_fair_state_mut(queue).active_flow_buckets = 16;
     for bucket in 0..16 {
-        queue.flow_bucket_bytes[bucket] = 1_000;
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
     }
 
     let cap = cos_flow_aware_buffer_limit(queue, 0);
@@ -1321,12 +1324,11 @@ fn cos_flow_aware_buffer_limit_preserves_non_flow_fair_path_after_clamp() {
         }],
     );
     let queue = &mut root.queues[0];
-    queue.flow_fair = false;
-    queue.active_flow_buckets = 64; // should be ignored
+    disable_test_flow_fair(queue);
 
     assert_eq!(
         cos_flow_aware_buffer_limit(queue, 0),
-        queue.buffer_bytes.max(COS_MIN_BURST_BYTES),
+        queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES),
         "flow_fair=false must bypass both the flow-aware floor and the latency clamp"
     );
 }
@@ -1356,13 +1358,13 @@ fn cos_flow_aware_buffer_limit_delay_cap_scales_linearly_with_rate() {
             }],
         );
         let queue = &mut root.queues[0];
-        queue.flow_fair = true;
+        enable_test_flow_fair(queue);
         // Populate all buckets so prospective_active × min-share
         // blows past the delay cap at both rates — the clamp is
         // what's being measured.
-        queue.active_flow_buckets = COS_FLOW_FAIR_BUCKETS as u16;
+        test_flow_fair_state_mut(queue).active_flow_buckets = COS_FLOW_FAIR_BUCKETS as u16;
         for bucket in 0..COS_FLOW_FAIR_BUCKETS {
-            queue.flow_bucket_bytes[bucket] = 1_000;
+            test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
         }
         cos_flow_aware_buffer_limit(queue, 0)
     }

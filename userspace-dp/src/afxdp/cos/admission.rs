@@ -5,7 +5,7 @@
 // constant.
 
 use crate::afxdp::types::{
-    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, WorkerCoSQueueFastPath,
+    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, FlowFairState, WorkerCoSQueueFastPath,
 };
 use crate::afxdp::umem::MmapArea;
 
@@ -126,7 +126,7 @@ pub(in crate::afxdp) fn cos_queue_flow_share_limit(
     buffer_limit: u64,
     flow_bucket: usize,
 ) -> u64 {
-    if !queue.flow_fair {
+    if !queue.flow_fair() {
         return buffer_limit;
     }
     // #914 (post-#785 Phase 3): shared_exact queues now enforce a
@@ -159,7 +159,7 @@ pub(in crate::afxdp) fn cos_queue_flow_share_limit(
     // Owner-local-exact queues (low-rate, #784 workload) keep the
     // legacy aggregate/N share cap — at 1 Gbps / 12 flows the
     // 24 KB MIN floor matches TCP cwnd at 77 Mbps/flow.
-    if queue.shared_exact {
+    if queue.shared_exact() {
         let prospective = cos_queue_prospective_active_flows(queue, flow_bucket);
         // Copilot C.2: use `div_ceil` to match the legacy owner-local
         // path below. Truncating division systematically undersizes
@@ -168,7 +168,7 @@ pub(in crate::afxdp) fn cos_queue_flow_share_limit(
         // boundary-condition tail-drops. The legacy path picked
         // div_ceil for that reason; shared_exact should follow.
         let fair_share = buffer_limit.div_ceil(prospective.max(1));
-        let bdp = bdp_floor_bytes(queue.transmit_rate_bytes, prospective);
+        let bdp = bdp_floor_bytes(queue.transmit_rate_bytes(), prospective);
         return fair_share
             .saturating_mul(SHARED_EXACT_BURST_HEADROOM)
             .max(bdp)
@@ -215,15 +215,18 @@ pub(in crate::afxdp) fn cos_queue_flow_share_limit(
 /// buffer still gets it. Adds one u128 multiply + divide per admission
 /// decision, not per packet.
 #[inline]
-pub(in crate::afxdp) fn cos_flow_aware_buffer_limit(queue: &CoSQueueRuntime, flow_bucket: usize) -> u64 {
-    let base = queue.buffer_bytes.max(COS_MIN_BURST_BYTES);
-    if !queue.flow_fair {
+pub(in crate::afxdp) fn cos_flow_aware_buffer_limit(
+    queue: &CoSQueueRuntime,
+    flow_bucket: usize,
+) -> u64 {
+    let base = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    if !queue.flow_fair() {
         return base;
     }
     let prospective_active = cos_queue_prospective_active_flows(queue, flow_bucket);
     // u128 to keep the intermediate product safe at 10 Gbps × 5 ms
     // (plus any plausible operator-configured rate inflation).
-    let delay_cap = ((queue.transmit_rate_bytes as u128)
+    let delay_cap = ((queue.transmit_rate_bytes() as u128)
         * (COS_FLOW_FAIR_MAX_QUEUE_DELAY_NS as u128)
         / 1_000_000_000u128) as u64;
     base.max(prospective_active.saturating_mul(COS_FLOW_FAIR_MIN_SHARE_BYTES))
@@ -244,11 +247,11 @@ pub(in crate::afxdp) fn cos_flow_aware_buffer_limit(queue: &CoSQueueRuntime, flo
 ///
 /// Two thresholds fire the mark, whichever trips first:
 ///
-///   * **Aggregate**: `queue.queued_bytes > buffer_limit × NUM/DEN`.
+///   * **Aggregate**: `queue.hot.queued_bytes > buffer_limit × NUM/DEN`.
 ///     This is the #718 arm — it signals congestion once the entire
 ///     queue is past the mark fraction of its operator-configured
 ///     buffer, independent of per-flow accounting.
-///   * **Per-flow**: `queue.flow_bucket_bytes[flow_bucket] >
+///   * **Per-flow**: `ff.flow_bucket_bytes[flow_bucket] >
 ///     share_cap × NUM/DEN`, where `share_cap` is the current
 ///     per-flow cap from `cos_queue_flow_share_limit`. This is the
 ///     #722 arm. On the 16-flow / 1 Gbps exact-queue live workload
@@ -312,16 +315,23 @@ pub(in crate::afxdp) fn apply_cos_admission_ecn_policy(
     // (saturating_add + max + div_ceil + clamp); ~8 ns on the
     // post-#914 shared_exact path (adds one division + multiply
     // for `bdp_floor_bytes`).
-    let aggregate_ecn_threshold = buffer_limit
-        .saturating_mul(COS_ECN_MARK_THRESHOLD_NUM)
-        / COS_ECN_MARK_THRESHOLD_DEN.max(1);
+    let aggregate_ecn_threshold =
+        buffer_limit.saturating_mul(COS_ECN_MARK_THRESHOLD_NUM) / COS_ECN_MARK_THRESHOLD_DEN.max(1);
     let share_cap = cos_queue_flow_share_limit(queue, buffer_limit, flow_bucket);
-    let flow_ecn_threshold = share_cap
-        .saturating_mul(COS_ECN_MARK_THRESHOLD_NUM)
-        / COS_ECN_MARK_THRESHOLD_DEN.max(1);
+    let flow_ecn_threshold =
+        share_cap.saturating_mul(COS_ECN_MARK_THRESHOLD_NUM) / COS_ECN_MARK_THRESHOLD_DEN.max(1);
 
-    let flow_above = queue.flow_bucket_bytes[flow_bucket] > flow_ecn_threshold;
-    let aggregate_above = queue.queued_bytes > aggregate_ecn_threshold;
+    let flow_above = if queue.flow_fair() {
+        queue
+            .flow_fair_state
+            .as_ref()
+            .expect("flow_fair queue missing FlowFairState")
+            .flow_bucket_bytes[flow_bucket]
+            > flow_ecn_threshold
+    } else {
+        false
+    };
+    let aggregate_above = queue.hot.queued_bytes > aggregate_ecn_threshold;
     // Three classes:
     //   * flow_fair && !shared_exact — owner-local-exact (#784).
     //     Per-flow arm only; #784's fairness fix on 1 Gbps iperf-a
@@ -336,7 +346,7 @@ pub(in crate::afxdp) fn apply_cos_admission_ecn_policy(
     //   * !flow_fair — legacy best-effort / rate-limited queues.
     //     Aggregate arm; there is no per-flow accounting on that
     //     path.
-    let should_mark = if queue.flow_fair && !queue.shared_exact {
+    let should_mark = if queue.flow_fair() && !queue.shared_exact() {
         flow_above
     } else {
         aggregate_above
@@ -356,7 +366,8 @@ pub(in crate::afxdp) fn apply_cos_admission_ecn_policy(
         CoSPendingTxItem::Prepared(req) => maybe_mark_ecn_ce_prepared(req, umem),
     };
     if marked {
-        queue.drop_counters.admission_ecn_marked = queue
+        queue.telemetry.drop_counters.admission_ecn_marked = queue
+            .telemetry
             .drop_counters
             .admission_ecn_marked
             .wrapping_add(1);
@@ -459,14 +470,15 @@ pub(in crate::afxdp) fn apply_cos_queue_flow_fair_promotion(
 /// The SFQ salt is drawn only for queues that actually use the
 /// flow-fair path — non-flow-fair queues never consult the seed
 /// (`exact_cos_flow_bucket` is only called from the flow-fair
-/// callers). Keeping them at seed=0 also preserves byte-identical
-/// legacy behavior on that path.
+/// callers). Non-flow-fair queues now keep `flow_fair_state: None`
+/// entirely (the salt lives on `FlowFairState`, not on the runtime
+/// root) so the field is unreachable on that path.
 fn promote_cos_queue_flow_fair(
     queue: &mut CoSQueueRuntime,
     queue_fast: &WorkerCoSQueueFastPath,
     worker_id: u32,
 ) {
-    queue.shared_exact = queue_fast.shared_exact;
+    queue.config.shared_exact = queue_fast.shared_exact;
     // #917: pull V_min coordination Arc from the fast-path
     // struct. Only allocated on shared_exact queues (per
     // `build_shared_cos_queue_vtime_floors_reusing_existing`
@@ -475,8 +487,8 @@ fn promote_cos_queue_flow_fair(
     // iface_fast lookup. `worker_id` is the local thread's
     // 0-based id — used to index `vtime_floor.slots` for
     // self-publish and to skip self in V_min reads.
-    queue.vtime_floor = queue_fast.vtime_floor.clone();
-    queue.worker_id = worker_id;
+    queue.v_min.vtime_floor = queue_fast.vtime_floor.clone();
+    queue.v_min.worker_id = worker_id;
     // #785 Phase 3 — flow-fair is enabled on EVERY exact queue,
     // including shared_exact. The dequeue-ordering mechanism is
     // MQFQ virtual-finish-time (byte-rate fair), not DRR round-robin
@@ -494,10 +506,12 @@ fn promote_cos_queue_flow_fair(
     // Attempt A regression (22.3 → 16.3 Gbps).
     // `apply_cos_admission_ecn_policy` still uses the aggregate arm
     // on shared_exact (per-flow ECN remains rate-unaware).
-    queue.flow_fair = queue.exact;
-    if queue.flow_fair {
-        queue.flow_hash_seed = cos_flow_hash_seed_from_os();
-    }
+    queue.config.flow_fair = queue.config.exact;
+    queue.flow_fair_state = if queue.flow_fair() {
+        Some(Box::new(FlowFairState::new(cos_flow_hash_seed_from_os())))
+    } else {
+        None
+    };
 }
 
 #[cfg(test)]

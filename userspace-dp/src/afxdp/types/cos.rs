@@ -55,7 +55,7 @@ pub(in crate::afxdp) struct CoSQueueConfig {
     pub(in crate::afxdp) exact: bool,
     /// #915: opt-in for exact queues to draw from root surplus
     /// tokens once their own bucket is empty. See the
-    /// `CoSQueueRuntime.surplus_sharing` doc-comment for runtime
+    /// `CoSQueueConfigState.surplus_sharing` doc-comment for runtime
     /// semantics. Only meaningful when `exact == true` (the Go
     /// control plane warn-and-strips otherwise so the runtime
     /// never sees it set on a non-exact queue).
@@ -96,10 +96,12 @@ pub(in crate::afxdp) const COS_FAST_QUEUE_INDEX_MISS: u16 = u16::MAX;
 ///   `flow_bucket_tail_finish_bytes: [u64; N]` = 32 KB
 ///   `flow_bucket_items: [VecDeque; N]` = 128 KB inline headers
 ///   `flow_rr_buckets: FlowRrRing` (`[u16; N] + head + len`) = 8 KB
-/// = ~232 KB per flow-fair queue (was ~58 KB at 1024). Non-flow-fair
-/// queues pay the same inline footprint but never touch the storage;
-/// it stays cold. At 8 workers × 8 queues × 2 ifaces ≈ 30 MB total,
-/// within the per-worker memory budget for production deployments.
+/// = ~232 KB per flow-fair queue (was ~58 KB at 1024). Post-#1206 these
+/// arrays live on `FlowFairState`, behind an `Option<Box<...>>` on
+/// `CoSQueueRuntime`, so non-flow-fair queues no longer pay the inline
+/// footprint at all — the field is `None` on those queues. Flow-fair
+/// queues at 8 workers × 8 queues × 2 ifaces ≈ 30 MB total when fully
+/// populated; non-flow-fair queues hold a pointer plus 0 bytes.
 pub(in crate::afxdp) const COS_FLOW_FAIR_BUCKETS: usize = 4096;
 
 /// Pre-computed mask for `COS_FLOW_FAIR_BUCKETS`-modulo on the hot
@@ -293,7 +295,10 @@ pub(in crate::afxdp) struct WorkerCoSInterfaceFastPath {
 
 impl WorkerCoSInterfaceFastPath {
     #[inline]
-    pub(in crate::afxdp) fn effective_queue_index(&self, requested_queue_id: Option<u8>) -> Option<usize> {
+    pub(in crate::afxdp) fn effective_queue_index(
+        &self,
+        requested_queue_id: Option<u8>,
+    ) -> Option<usize> {
         if let Some(queue_id) = requested_queue_id {
             let idx = self.queue_index_by_id[usize::from(queue_id)];
             if idx != COS_FAST_QUEUE_INDEX_MISS {
@@ -401,7 +406,7 @@ pub(in crate::afxdp) struct CoSQueuePopSnapshot {
     pub(in crate::afxdp) pre_pop_head_finish: u64,
     /// Bucket's TAIL finish time BEFORE the pop-time advance.
     pub(in crate::afxdp) pre_pop_tail_finish: u64,
-    /// #913 — `queue.queue_vtime` BEFORE the pop-time advance.
+    /// #913 — flow-fair `queue_vtime` BEFORE the pop-time advance.
     /// Captured so push_front can exactly restore vtime under the
     /// new MQFQ served-finish semantics, where the advance is
     /// `max(vtime, served_finish)` (no fixed delta — symmetric
@@ -410,12 +415,45 @@ pub(in crate::afxdp) struct CoSQueuePopSnapshot {
 }
 
 pub(in crate::afxdp) struct CoSQueueRuntime {
+    pub(in crate::afxdp) config: CoSQueueConfigState,
+    pub(in crate::afxdp) hot: CoSQueueHotState,
+    pub(in crate::afxdp) flow_fair_state: Option<Box<FlowFairState>>,
+    pub(in crate::afxdp) v_min: VMinQueueState,
+    pub(in crate::afxdp) telemetry: CoSQueueTelemetry,
+}
+
+impl CoSQueueRuntime {
+    #[inline]
+    pub(in crate::afxdp) fn queue_id(&self) -> u8 {
+        self.config.queue_id
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn flow_fair(&self) -> bool {
+        self.config.flow_fair
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn shared_exact(&self) -> bool {
+        self.config.shared_exact
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn transmit_rate_bytes(&self) -> u64 {
+        self.config.transmit_rate_bytes
+    }
+}
+
+/// Immutable-after-build config bits. Written during queue construction and
+/// promotion; steady-state hot-path mutation lives in the sibling state
+/// structs.
+pub(in crate::afxdp) struct CoSQueueConfigState {
     pub(in crate::afxdp) queue_id: u8,
     pub(in crate::afxdp) priority: u8,
     pub(in crate::afxdp) transmit_rate_bytes: u64,
     pub(in crate::afxdp) exact: bool,
     /// #915: only meaningful when `exact == true`. When set, the
-    /// queue (1) is NOT parked on `queue.tokens < head_len` in
+    /// queue (1) is NOT parked on `queue.hot.tokens < head_len` in
     /// the exact-guarantee selector
     /// (`select_exact_cos_guarantee_queue_with_fast_path`), and
     /// (2) participates in `select_cos_surplus_batch` as if it
@@ -444,6 +482,64 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     /// have to thread extra interface state through admission-path
     /// call sites or add an iface_fast lookup there.
     pub(in crate::afxdp) shared_exact: bool,
+    pub(in crate::afxdp) surplus_weight: u32,
+    pub(in crate::afxdp) buffer_bytes: u64,
+    pub(in crate::afxdp) dscp_rewrite: Option<u8>,
+}
+
+/// Hot per-pop / per-push state: token bucket, FIFO storage, runnable
+/// bookkeeping, and queue-local counters that are not flow-fair-specific.
+pub(in crate::afxdp) struct CoSQueueHotState {
+    pub(in crate::afxdp) surplus_deficit: u64,
+    pub(in crate::afxdp) tokens: u64,
+    pub(in crate::afxdp) last_refill_ns: u64,
+    pub(in crate::afxdp) queued_bytes: u64,
+    pub(in crate::afxdp) runnable: bool,
+    pub(in crate::afxdp) parked: bool,
+    pub(in crate::afxdp) next_wakeup_tick: u64,
+    pub(in crate::afxdp) wheel_level: u8,
+    pub(in crate::afxdp) wheel_slot: usize,
+    pub(in crate::afxdp) items: VecDeque<CoSPendingTxItem>,
+    /// #774 optimization: cached count of `Local` items currently
+    /// resident in `items` + `flow_bucket_items`. Incremented /
+    /// decremented at every `cos_queue_push_*` and
+    /// `cos_queue_pop_front` site. Replaces an O(n) scan in
+    /// `cos_queue_accepts_prepared` that profiled at 3.25% CPU on
+    /// the hot path at line rate. Owner-only writes; no atomic
+    /// needed (same discipline as `queued_bytes`).
+    pub(in crate::afxdp) local_item_count: u32,
+}
+
+/// Flow-fair MQFQ state. Only allocated when `queue.flow_fair() == true`.
+/// This struct is the only boxed flow-fair allocation; per-bucket arrays are
+/// inline here and are not double-boxed.
+pub(in crate::afxdp) struct FlowFairState {
+    /// #785 Phase 3 — MQFQ queue virtual time. Updated on every
+    /// dequeue to `finish[bucket]` of the drained bucket. Serves
+    /// as the "catch-up anchor" in the enqueue formula:
+    /// `finish[b] = max(finish[b], queue_vtime) + bytes`. A newly
+    /// arriving flow bucket that's been idle re-anchors to
+    /// `queue_vtime` so it starts competing at the current frontier
+    /// rather than from 0 (which would let it sweep past all
+    /// established flows in bounded rounds).
+    ///
+    /// Read by `cos_queue_min_finish_bucket` (as the `max(tail, vtime)`
+    /// anchor source on idle-bucket re-entry).
+    ///
+    /// Hot-path advance (#913 served-finish semantics): on a snapshotting
+    /// `cos_queue_pop_front`, `vtime = max(vtime, served_finish)` where
+    /// served_finish is the popped bucket's pre-pop head_finish. The
+    /// paired `cos_queue_push_front` restores from the snapshot stack
+    /// (LIFO, per-pop) so rollback is exact. The legacy aggregate-bytes
+    /// advance (`vtime += bytes`) is retained only on
+    /// `cos_queue_pop_front_no_snapshot` (drain_all + worker teardown),
+    /// which clears the snapshot stack so the paired empty-stack
+    /// `push_front` rewinds with `vtime -= item_len`.
+    ///
+    /// Meaningful only on `flow_fair` queues; only reachable through
+    /// `queue.flow_fair_state.as_mut().unwrap().queue_vtime` once the
+    /// queue is promoted.
+    pub(in crate::afxdp) queue_vtime: u64,
     // Per-queue hash salt mixed into `exact_cos_flow_bucket()` so the SFQ
     // bucket mapping is not an externally-probeable pure function of the
     // 5-tuple. Drawn from getrandom(2) exactly when a queue is promoted
@@ -451,17 +547,7 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     // rotated for the lifetime of this runtime — within one instance the
     // mapping stays deterministic (required for correct enqueue/dequeue
     // bucket accounting), but is unpredictable across restarts and nodes.
-    // Non-flow-fair queues keep `flow_hash_seed: 0`; the field is not read
-    // on that path and the zero value preserves byte-identical legacy
-    // hashing for any caller that reuses the function.
     pub(in crate::afxdp) flow_hash_seed: u64,
-    pub(in crate::afxdp) surplus_weight: u32,
-    pub(in crate::afxdp) surplus_deficit: u64,
-    pub(in crate::afxdp) buffer_bytes: u64,
-    pub(in crate::afxdp) dscp_rewrite: Option<u8>,
-    pub(in crate::afxdp) tokens: u64,
-    pub(in crate::afxdp) last_refill_ns: u64,
-    pub(in crate::afxdp) queued_bytes: u64,
     pub(in crate::afxdp) active_flow_buckets: u16,
     /// #784 diagnostic: runtime-lifetime peak of
     /// `active_flow_buckets` on this queue. Monotonically
@@ -516,21 +602,15 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     /// see above. Invariants: `head[b] <= tail[b]` when bucket
     /// is active; both 0 when bucket is idle.
     pub(in crate::afxdp) flow_bucket_tail_finish_bytes: [u64; COS_FLOW_FAIR_BUCKETS],
-    /// #785 Phase 3 — MQFQ queue virtual time. Updated on every
-    /// dequeue to `finish[bucket]` of the drained bucket. Serves
-    /// as the "catch-up anchor" in the enqueue formula:
-    /// `finish[b] = max(finish[b], queue_vtime) + bytes`. A newly
-    /// arriving flow bucket that's been idle re-anchors to
-    /// `queue_vtime` so it starts competing at the current frontier
-    /// rather than from 0 (which would let it sweep past all
-    /// established flows in bounded rounds).
-    ///
-    /// Read by `cos_queue_min_finish_bucket` (as the `max(tail, vtime)`
-    /// anchor source on idle-bucket re-entry) and updated by
-    /// `cos_queue_pop_front` (+= drained bytes) and
-    /// `cos_queue_push_front` (-= pushed bytes, symmetric rewind —
-    /// see PR #796 Codex round-3 HIGH).
-    pub(in crate::afxdp) queue_vtime: u64,
+    pub(in crate::afxdp) flow_bucket_items: [VecDeque<CoSPendingTxItem>; COS_FLOW_FAIR_BUCKETS],
+    /// #785 Phase 3 — active-set tracking for flow-fair MQFQ.
+    /// Still populated on bucket 0→>0 / >0→0 transitions so that
+    /// `cos_queue_front`/`cos_queue_pop_front` can scan just the
+    /// small active set rather than all 4096 SFQ buckets to find
+    /// the minimum finish time. Semantically a set (membership),
+    /// not a DRR ring — the ordering is governed by
+    /// `flow_bucket_finish_bytes`, not ring position.
+    pub(in crate::afxdp) flow_rr_buckets: FlowRrRing,
     /// #785 Phase 3 — Codex round-3 HIGH + NEW-1: LIFO stack of
     /// bucket-state snapshots captured at each `cos_queue_pop_front`.
     /// `cos_queue_push_front` pops from the back of the stack on
@@ -576,29 +656,26 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     /// the earlier bucket's original head. Per-pop snapshots make
     /// every rollback item round-trip neutral.
     pub(in crate::afxdp) pop_snapshot_stack: Vec<CoSQueuePopSnapshot>,
-    /// #785 Phase 3 — active-set tracking for flow-fair MQFQ.
-    /// Still populated on bucket 0→>0 / >0→0 transitions so that
-    /// `cos_queue_front`/`cos_queue_pop_front` can scan just the
-    /// small active set rather than all 4096 SFQ buckets to find
-    /// the minimum finish time. Semantically a set (membership),
-    /// not a DRR ring — the ordering is governed by
-    /// `flow_bucket_finish_bytes`, not ring position.
-    pub(in crate::afxdp) flow_rr_buckets: FlowRrRing,
-    pub(in crate::afxdp) flow_bucket_items: [VecDeque<CoSPendingTxItem>; COS_FLOW_FAIR_BUCKETS],
-    pub(in crate::afxdp) runnable: bool,
-    pub(in crate::afxdp) parked: bool,
-    pub(in crate::afxdp) next_wakeup_tick: u64,
-    pub(in crate::afxdp) wheel_level: u8,
-    pub(in crate::afxdp) wheel_slot: usize,
-    pub(in crate::afxdp) items: VecDeque<CoSPendingTxItem>,
-    /// #774 optimization: cached count of `Local` items currently
-    /// resident in `items` + `flow_bucket_items`. Incremented /
-    /// decremented at every `cos_queue_push_*` and
-    /// `cos_queue_pop_front` site. Replaces an O(n) scan in
-    /// `cos_queue_accepts_prepared` that profiled at 3.25% CPU on
-    /// the hot path at line rate. Owner-only writes; no atomic
-    /// needed (same discipline as `queued_bytes`).
-    pub(in crate::afxdp) local_item_count: u32,
+}
+
+impl FlowFairState {
+    pub(in crate::afxdp) fn new(flow_hash_seed: u64) -> Self {
+        Self {
+            queue_vtime: 0,
+            flow_hash_seed,
+            active_flow_buckets: 0,
+            active_flow_buckets_peak: 0,
+            flow_bucket_bytes: [0; COS_FLOW_FAIR_BUCKETS],
+            flow_bucket_head_finish_bytes: [0; COS_FLOW_FAIR_BUCKETS],
+            flow_bucket_tail_finish_bytes: [0; COS_FLOW_FAIR_BUCKETS],
+            flow_bucket_items: std::array::from_fn(|_| VecDeque::new()),
+            flow_rr_buckets: FlowRrRing::default(),
+            pop_snapshot_stack: Vec::with_capacity(TX_BATCH_SIZE),
+        }
+    }
+}
+
+pub(in crate::afxdp) struct VMinQueueState {
     /// #917 — V_min cross-worker coordination. Set by
     /// `promote_cos_queue_flow_fair` when the queue is shared_exact
     /// (matches the queue.shared_exact policy). Each worker
@@ -614,29 +691,6 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     /// instance. Used to index into `vtime_floor.slots` for publish
     /// (this worker's own slot) and to skip self in V_min reads.
     pub(in crate::afxdp) worker_id: u32,
-    // #710: per-queue drop-reason counters. Single-writer (the owner
-    // worker is the only code path that mutates this queue's runtime),
-    // so plain `u64` is sufficient — no atomics needed on the hot path.
-    // Snapshot reads happen through the `build_worker_cos_statuses`
-    // path which copies the whole runtime into a status struct published
-    // via `ArcSwap`, so reads are consistent without ordering discipline
-    // here.
-    pub(in crate::afxdp) drop_counters: CoSQueueDropCounters,
-    // #751: per-queue owner-side drain telemetry. Lives inline on the
-    // queue runtime so each queue's drain_latency + drain_invocations
-    // are genuinely per-queue rather than a binding-wide rollup
-    // surfaced under every queue row (#732). Single-writer on the
-    // owner worker thread; atomic because the snapshot path reads
-    // from a different thread.
-    //
-    // Cross-core ping-pong: this lives on the owner worker's hot
-    // data, so it shares cache lines with the surrounding queue
-    // state (tokens, queued_bytes, etc.). Owner-only writes to all
-    // of them, so false-sharing risk is internal to the worker and
-    // already accepted by the design. The #709 cache-pad isolation
-    // on BindingLiveState was specifically for owner/peer split;
-    // here both are owner-side so no separate pad is needed.
-    pub(in crate::afxdp) owner_profile: CoSQueueOwnerProfile,
     /// #941 Work item D: counts back-to-back V_min throttle decisions
     /// (cos_queue_v_min_continue returning false → caller breaks).
     /// Resets on a successful pop (V_min check returns true). When
@@ -669,6 +723,32 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     pub(in crate::afxdp) v_min_throttles_scratch: u32,
 }
 
+pub(in crate::afxdp) struct CoSQueueTelemetry {
+    // #710: per-queue drop-reason counters. Single-writer (the owner
+    // worker is the only code path that mutates this queue's runtime),
+    // so plain `u64` is sufficient — no atomics needed on the hot path.
+    // Snapshot reads happen through the `build_worker_cos_statuses`
+    // path which copies the whole runtime into a status struct published
+    // via `ArcSwap`, so reads are consistent without ordering discipline
+    // here.
+    pub(in crate::afxdp) drop_counters: CoSQueueDropCounters,
+    // #751: per-queue owner-side drain telemetry. Lives inline on the
+    // queue runtime so each queue's drain_latency + drain_invocations
+    // are genuinely per-queue rather than a binding-wide rollup
+    // surfaced under every queue row (#732). Single-writer on the
+    // owner worker thread; atomic because the snapshot path reads
+    // from a different thread.
+    //
+    // Cross-core ping-pong: this lives on the owner worker's hot
+    // data, so it shares cache lines with the surrounding queue
+    // state (tokens, queued_bytes, etc.). Owner-only writes to all
+    // of them, so false-sharing risk is internal to the worker and
+    // already accepted by the design. The #709 cache-pad isolation
+    // on BindingLiveState was specifically for owner/peer split;
+    // here both are owner-side so no separate pad is needed.
+    pub(in crate::afxdp) owner_profile: CoSQueueOwnerProfile,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSQueueDropCounters {
     /// Flow-share admission cap exceeded; packet tail-dropped at
@@ -699,7 +779,7 @@ pub(in crate::afxdp) struct CoSQueueDropCounters {
     pub(in crate::afxdp) queue_token_starvation_parks: u64,
     /// Counts `writer.insert` returning zero on the exact-drain path —
     /// i.e. the TX ring refused the batch. NOT a packet-loss event on
-    /// the exact path: FIFO variants leave items in `queue.items` and
+    /// the exact path: FIFO variants leave items in `queue.hot.items` and
     /// flow-fair variants explicitly restore them via
     /// `restore_exact_*_scratch_to_queue_head_flow_fair`. Frames copied
     /// into UMEM are released back to `free_tx_frames` by the caller;
@@ -741,8 +821,8 @@ pub(in crate::afxdp) struct CoSQueueOwnerProfile {
     /// #760 instrumentation. Bytes the shaped drain actually
     /// submitted on behalf of this queue. Divide by a scrape window
     /// to get an observed drain rate and compare against
-    /// `queue.transmit_rate_bytes`. Writer = owner worker on the
-    /// single site that also decrements `queue.tokens` after a send
+    /// `queue.transmit_rate_bytes()`. Writer = owner worker on the
+    /// single site that also decrements `queue.hot.tokens` after a send
     /// (apply_direct_exact_send_result for exact-owner-local,
     /// apply_cos_send_result for the non-exact / shared-exact paths).
     pub(in crate::afxdp) drain_sent_bytes: AtomicU64,
@@ -751,8 +831,8 @@ pub(in crate::afxdp) struct CoSQueueOwnerProfile {
     /// got parked waiting for the interface shaper to refill.
     pub(in crate::afxdp) drain_park_root_tokens: AtomicU64,
     /// #760 instrumentation. Count of drain iterations where the
-    /// per-queue token gate fired (queue.tokens < head_len) and the
-    /// queue got parked waiting for its own refill. A queue that
+    /// per-queue token gate fired (queue.hot.tokens < head_len) and
+    /// the queue got parked waiting for its own refill. A queue that
     /// sustains throughput above its configured rate with this near
     /// zero is a direct signal the gate never fired.
     pub(in crate::afxdp) drain_park_queue_tokens: AtomicU64,

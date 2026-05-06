@@ -11,9 +11,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::afxdp::types::{
-    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, SharedCoSQueueLease,
-    PreparedTxRequest, TxRequest,
-    COS_TIMER_WHEEL_L0_SLOTS, COS_TIMER_WHEEL_L1_SLOTS,
+    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, PreparedTxRequest, SharedCoSQueueLease,
+    TxRequest, COS_TIMER_WHEEL_L0_SLOTS, COS_TIMER_WHEEL_L1_SLOTS,
 };
 use crate::afxdp::worker::BindingWorker;
 
@@ -57,13 +56,15 @@ pub(in crate::afxdp) fn count_park_reason(
     if let Some(queue) = root.queues.get_mut(queue_idx) {
         match reason {
             ParkReason::RootTokenStarvation => {
-                queue.drop_counters.root_token_starvation_parks = queue
+                queue.telemetry.drop_counters.root_token_starvation_parks = queue
+                    .telemetry
                     .drop_counters
                     .root_token_starvation_parks
                     .wrapping_add(1);
             }
             ParkReason::QueueTokenStarvation => {
-                queue.drop_counters.queue_token_starvation_parks = queue
+                queue.telemetry.drop_counters.queue_token_starvation_parks = queue
+                    .telemetry
                     .drop_counters
                     .queue_token_starvation_parks
                     .wrapping_add(1);
@@ -81,14 +82,14 @@ pub(in crate::afxdp) fn park_cos_queue(
     let Some(queue) = root.queues.get_mut(queue_idx) else {
         return;
     };
-    if queue.runnable {
+    if queue.hot.runnable {
         root.runnable_queues = root.runnable_queues.saturating_sub(1);
     }
-    queue.runnable = false;
-    queue.parked = true;
-    queue.next_wakeup_tick = wake_tick;
-    queue.wheel_level = level;
-    queue.wheel_slot = slot;
+    queue.hot.runnable = false;
+    queue.hot.parked = true;
+    queue.hot.next_wakeup_tick = wake_tick;
+    queue.hot.wheel_level = level;
+    queue.hot.wheel_slot = slot;
     if level == 0 {
         root.timer_wheel.level0[slot].push(queue_idx);
     } else {
@@ -133,12 +134,12 @@ fn wake_cos_queue(root: &mut CoSInterfaceRuntime, queue_idx: usize) {
         return;
     };
     if cos_queue_is_empty(queue) {
-        queue.runnable = false;
-        queue.parked = false;
-        queue.next_wakeup_tick = 0;
+        queue.hot.runnable = false;
+        queue.hot.parked = false;
+        queue.hot.next_wakeup_tick = 0;
         return;
     }
-    if !queue.runnable {
+    if !queue.hot.runnable {
         root.runnable_queues = root.runnable_queues.saturating_add(1);
     }
     mark_cos_queue_runnable(queue);
@@ -146,7 +147,7 @@ fn wake_cos_queue(root: &mut CoSInterfaceRuntime, queue_idx: usize) {
 
 // #710: count an exact-drain TX submit stall on a specific queue.
 // NOT packet loss — on the exact path, `writer.insert == 0` leaves
-// the FIFO items in `queue.items` or restores them (flow-fair path);
+// the FIFO items in `queue.hot.items` or restores them (flow-fair path);
 // frames that had been copied into UMEM are released back to
 // `free_tx_frames`, and the items get another chance next drain tick.
 // The counter signals TX-ring / completion-reap pressure, which is
@@ -169,7 +170,8 @@ pub(in crate::afxdp) fn count_tx_ring_full_submit_stall(
     }
     if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
         if let Some(queue) = root.queues.get_mut(queue_idx) {
-            queue.drop_counters.tx_ring_full_submit_stalls = queue
+            queue.telemetry.drop_counters.tx_ring_full_submit_stalls = queue
+                .telemetry
                 .drop_counters
                 .tx_ring_full_submit_stalls
                 .wrapping_add(stalled_packets);
@@ -183,26 +185,26 @@ fn rearm_cos_queue(root: &mut CoSInterfaceRuntime, queue_idx: usize, wake_tick: 
 
 #[inline]
 pub(in crate::afxdp) fn mark_cos_queue_runnable(queue: &mut CoSQueueRuntime) {
-    queue.runnable = true;
-    queue.parked = false;
-    queue.next_wakeup_tick = 0;
+    queue.hot.runnable = true;
+    queue.hot.parked = false;
+    queue.hot.next_wakeup_tick = 0;
 }
 
 #[inline]
 pub(in crate::afxdp) fn normalize_cos_queue_state(queue: &mut CoSQueueRuntime) {
     if cos_queue_is_empty(queue) {
-        queue.runnable = false;
-        queue.parked = false;
-        queue.next_wakeup_tick = 0;
-        queue.surplus_deficit = 0;
+        queue.hot.runnable = false;
+        queue.hot.parked = false;
+        queue.hot.next_wakeup_tick = 0;
+        queue.hot.surplus_deficit = 0;
         return;
     }
     // Non-empty queues have only two valid steady states:
     // 1. parked with a wakeup tick
     // 2. runnable immediately
     // Anything else can strand backlog forever.
-    if queue.parked && queue.next_wakeup_tick > 0 {
-        queue.runnable = false;
+    if queue.hot.parked && queue.hot.next_wakeup_tick > 0 {
+        queue.hot.runnable = false;
         return;
     }
     mark_cos_queue_runnable(queue);
@@ -229,10 +231,10 @@ fn cascade_cos_timer_wheel_level1(root: &mut CoSInterfaceRuntime) {
         let Some(queue) = root.queues.get(queue_idx) else {
             continue;
         };
-        if !queue.parked || queue.wheel_level != 1 || queue.wheel_slot != slot {
+        if !queue.hot.parked || queue.hot.wheel_level != 1 || queue.hot.wheel_slot != slot {
             continue;
         }
-        rearm.push((queue_idx, queue.next_wakeup_tick));
+        rearm.push((queue_idx, queue.hot.next_wakeup_tick));
     }
     for (queue_idx, wake_tick) in rearm {
         rearm_cos_queue(root, queue_idx, wake_tick);
@@ -248,13 +250,13 @@ fn wake_due_cos_timer_slot(root: &mut CoSInterfaceRuntime) {
         let Some(queue) = root.queues.get(queue_idx) else {
             continue;
         };
-        if !queue.parked || queue.wheel_level != 0 || queue.wheel_slot != slot {
+        if !queue.hot.parked || queue.hot.wheel_level != 0 || queue.hot.wheel_slot != slot {
             continue;
         }
-        if queue.next_wakeup_tick <= root.timer_wheel.current_tick {
+        if queue.hot.next_wakeup_tick <= root.timer_wheel.current_tick {
             wake.push(queue_idx);
         } else {
-            rearm.push((queue_idx, queue.next_wakeup_tick));
+            rearm.push((queue_idx, queue.hot.next_wakeup_tick));
         }
     }
     for queue_idx in wake {
@@ -276,7 +278,8 @@ pub(in crate::afxdp) fn prime_cos_root_for_service(
     now_ns: u64,
 ) -> bool {
     let shared_root_lease = binding
-        .cos.cos_fast_interfaces
+        .cos
+        .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_root_lease.clone());
     let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
@@ -300,7 +303,7 @@ pub(in crate::afxdp) fn prime_cos_root_for_service(
 ///
 /// For non-surplus-sharing exact queues this is a no-op because
 /// they never reach Surplus phase: `select_cos_surplus_batch`
-/// skips them via `queue.exact && !queue.surplus_sharing`.
+/// skips them via `queue.config.exact && !queue.config.surplus_sharing`.
 ///
 /// Extracted into a helper so the gate logic has a direct unit
 /// test (Codex code-review MEDIUM): both Local and Prepared
@@ -329,14 +332,15 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result(
 ) {
     if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
         if let Some(queue) = root.queues.get_mut(queue_idx) {
-            queue.queued_bytes = queue.queued_bytes.saturating_sub(sent_bytes);
-            queue.tokens = queue.tokens.saturating_sub(sent_bytes);
+            queue.hot.queued_bytes = queue.hot.queued_bytes.saturating_sub(sent_bytes);
+            queue.hot.tokens = queue.hot.tokens.saturating_sub(sent_bytes);
             // #760 instrumentation: record the exact-owner-local
             // send at the same place the token bucket decrements.
             // Divide by a scrape window to get an observed per-queue
             // drain rate and compare against
-            // `queue.transmit_rate_bytes` to detect a cap bypass.
+            // `queue.transmit_rate_bytes()` to detect a cap bypass.
             queue
+                .telemetry
                 .owner_profile
                 .drain_sent_bytes
                 .fetch_add(sent_bytes, Ordering::Relaxed);
@@ -344,14 +348,16 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result(
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }
     if let Some(shared_root_lease) = binding
-        .cos.cos_fast_interfaces
+        .cos
+        .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_root_lease.as_ref())
     {
         shared_root_lease.consume(sent_bytes);
     }
     if let Some(shared_queue_lease) = binding
-        .cos.cos_fast_interfaces
+        .cos
+        .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.queue_fast_path.get(queue_idx))
         .and_then(|queue_fast| queue_fast.shared_queue_lease.as_ref())
@@ -389,21 +395,22 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity(
     let mut new_runnable = 0usize;
     let mut released_queue_leases = Vec::<(usize, u64)>::new();
     let old_nonempty = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&root_ifindex)
         .map(|root| root.nonempty_queues)
         .unwrap_or(0);
     if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
         for (queue_idx, queue) in root.queues.iter_mut().enumerate() {
             normalize_cos_queue_state(queue);
-            if cos_queue_is_empty(queue) && queue.exact && queue.tokens > 0 {
-                released_queue_leases.push((queue_idx, core::mem::take(&mut queue.tokens)));
+            if cos_queue_is_empty(queue) && queue.config.exact && queue.hot.tokens > 0 {
+                released_queue_leases.push((queue_idx, core::mem::take(&mut queue.hot.tokens)));
             }
             if cos_queue_is_empty(queue) {
                 continue;
             }
             new_nonempty = new_nonempty.saturating_add(1);
-            if queue.runnable {
+            if queue.hot.runnable {
                 new_runnable = new_runnable.saturating_add(1);
             }
         }
@@ -445,18 +452,20 @@ pub(in crate::afxdp) fn apply_cos_send_result(
             return;
         };
         if let Some(queue) = root.queues.get_mut(queue_idx) {
-            exact_queue_idx = queue.exact.then_some(queue_idx);
+            exact_queue_idx = queue.config.exact.then_some(queue_idx);
             let retry_bytes = restore_cos_local_items_inner(queue, retry);
-            queue.queued_bytes = queue
+            queue.hot.queued_bytes = queue
+                .hot
                 .queued_bytes
                 .saturating_sub(batch_bytes)
                 .saturating_add(retry_bytes);
             match phase {
                 CoSServicePhase::Guarantee => {
-                    queue.tokens = queue.tokens.saturating_sub(sent_bytes);
+                    queue.hot.tokens = queue.hot.tokens.saturating_sub(sent_bytes);
                 }
                 CoSServicePhase::Surplus => {
-                    queue.surplus_deficit = queue.surplus_deficit.saturating_sub(sent_bytes);
+                    queue.hot.surplus_deficit =
+                        queue.hot.surplus_deficit.saturating_sub(sent_bytes);
                 }
             }
             // #760 instrumentation: record non-exact / surplus /
@@ -465,6 +474,7 @@ pub(in crate::afxdp) fn apply_cos_send_result(
             // apply_direct_exact_send_result write so the sum across
             // all sites equals the bytes the CoS scheduler accounted.
             queue
+                .telemetry
                 .owner_profile
                 .drain_sent_bytes
                 .fetch_add(sent_bytes, Ordering::Relaxed);
@@ -472,7 +482,8 @@ pub(in crate::afxdp) fn apply_cos_send_result(
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }
     if let Some(shared_root_lease) = binding
-        .cos.cos_fast_interfaces
+        .cos
+        .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_root_lease.as_ref())
     {
@@ -509,18 +520,20 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
             return;
         };
         if let Some(queue) = root.queues.get_mut(queue_idx) {
-            exact_queue_idx = queue.exact.then_some(queue_idx);
+            exact_queue_idx = queue.config.exact.then_some(queue_idx);
             let retry_bytes = restore_cos_prepared_items_inner(queue, retry);
-            queue.queued_bytes = queue
+            queue.hot.queued_bytes = queue
+                .hot
                 .queued_bytes
                 .saturating_sub(batch_bytes)
                 .saturating_add(retry_bytes);
             match phase {
                 CoSServicePhase::Guarantee => {
-                    queue.tokens = queue.tokens.saturating_sub(sent_bytes);
+                    queue.hot.tokens = queue.hot.tokens.saturating_sub(sent_bytes);
                 }
                 CoSServicePhase::Surplus => {
-                    queue.surplus_deficit = queue.surplus_deficit.saturating_sub(sent_bytes);
+                    queue.hot.surplus_deficit =
+                        queue.hot.surplus_deficit.saturating_sub(sent_bytes);
                 }
             }
             // #760 instrumentation, the FOURTH apply_* site. This is
@@ -533,6 +546,7 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
             // flowing through this path. Same Relaxed semantics as
             // the other three apply_* sites.
             queue
+                .telemetry
                 .owner_profile
                 .drain_sent_bytes
                 .fetch_add(sent_bytes, Ordering::Relaxed);
@@ -540,7 +554,8 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }
     if let Some(shared_root_lease) = binding
-        .cos.cos_fast_interfaces
+        .cos
+        .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_root_lease.as_ref())
     {
@@ -596,4 +611,3 @@ pub(in crate::afxdp) fn restore_cos_prepared_items_inner(
 #[cfg(test)]
 #[path = "tx_completion_tests.rs"]
 mod tests;
-

@@ -330,11 +330,16 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
         return Err(req);
     }
     if binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&egress_ifindex)
         .is_some_and(|root| cos_queue_accepts_prepared(root, req.cos_queue_id))
     {
-        match prepare_local_request_for_cos(binding.umem.area(), &mut binding.tx_pipeline.free_tx_frames, req) {
+        match prepare_local_request_for_cos(
+            binding.umem.area(),
+            &mut binding.tx_pipeline.free_tx_frames,
+            req,
+        ) {
             Ok(prepared_req) => {
                 let item_len = prepared_req.len as u64;
                 match enqueue_cos_item(
@@ -459,7 +464,8 @@ pub(super) fn enqueue_prepared_into_cos(
         return Err(req);
     }
     if binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&egress_ifindex)
         .is_some_and(|root| cos_queue_accepts_prepared(root, req.cos_queue_id))
     {
@@ -504,7 +510,10 @@ pub(super) fn enqueue_prepared_into_cos(
     }
 }
 
-pub(super) fn clone_prepared_request_for_cos(area: &MmapArea, req: &PreparedTxRequest) -> Option<TxRequest> {
+pub(super) fn clone_prepared_request_for_cos(
+    area: &MmapArea,
+    req: &PreparedTxRequest,
+) -> Option<TxRequest> {
     let frame = area.slice(req.offset as usize, req.len as usize)?.to_vec();
     Some(TxRequest {
         bytes: frame,
@@ -518,7 +527,10 @@ pub(super) fn clone_prepared_request_for_cos(area: &MmapArea, req: &PreparedTxRe
     })
 }
 
-pub(super) fn resolve_cos_queue_idx(root: &CoSInterfaceRuntime, requested_queue: Option<u8>) -> Option<usize> {
+pub(super) fn resolve_cos_queue_idx(
+    root: &CoSInterfaceRuntime,
+    requested_queue: Option<u8>,
+) -> Option<usize> {
     if root.queues.is_empty() {
         return None;
     }
@@ -526,11 +538,11 @@ pub(super) fn resolve_cos_queue_idx(root: &CoSInterfaceRuntime, requested_queue:
         return root
             .queues
             .iter()
-            .position(|queue| queue.queue_id == queue_id);
+            .position(|queue| queue.queue_id() == queue_id);
     }
     root.queues
         .iter()
-        .position(|queue| queue.queue_id == root.default_queue)
+        .position(|queue| queue.queue_id() == root.default_queue)
         .or_else(|| (!root.queues.is_empty()).then_some(0))
 }
 
@@ -548,10 +560,9 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
     let Some(queue) = root.queues.get_mut(queue_idx) else {
         return false;
     };
-    if !queue.exact || cos_queue_is_empty(queue) {
+    if !queue.config.exact || cos_queue_is_empty(queue) {
         return false;
     }
-
     // #926: snapshot MQFQ frontier state BEFORE drain_all so we
     // can restore on the success path. cos_queue_drain_all uses
     // the no-snapshot pop variant (aggregate-bytes vtime advance:
@@ -578,9 +589,13 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
     // bump from 1024). Both are already cache-resident in the queue;
     // demote is a rare TX-frame-exhaustion fallback called from
     // tx/cos_classify.rs::enqueue_local_into_cos, not a hot-path operation.
-    let saved_queue_vtime = queue.queue_vtime;
-    let saved_head_finish = queue.flow_bucket_head_finish_bytes;
-    let saved_tail_finish = queue.flow_bucket_tail_finish_bytes;
+    let saved_flow_fair_frontier = queue.flow_fair_state.as_ref().map(|ff| {
+        (
+            ff.queue_vtime,
+            ff.flow_bucket_head_finish_bytes,
+            ff.flow_bucket_tail_finish_bytes,
+        )
+    });
 
     let drained = cos_queue_drain_all(queue);
     let mut local_items = VecDeque::with_capacity(drained.len());
@@ -615,9 +630,13 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
     // so the saved per-bucket head/tail finish-times still
     // apply. Restoring queue_vtime alongside keeps the three
     // values internally consistent.
-    queue.queue_vtime = saved_queue_vtime;
-    queue.flow_bucket_head_finish_bytes = saved_head_finish;
-    queue.flow_bucket_tail_finish_bytes = saved_tail_finish;
+    if let (Some(ff), Some((saved_queue_vtime, saved_head_finish, saved_tail_finish))) =
+        (queue.flow_fair_state.as_mut(), saved_flow_fair_frontier)
+    {
+        ff.queue_vtime = saved_queue_vtime;
+        ff.flow_bucket_head_finish_bytes = saved_head_finish;
+        ff.flow_bucket_tail_finish_bytes = saved_tail_finish;
+    }
 
     // #940: explicit V_min publish after the demote restore. The
     // pop-time publish was removed in #940; without this hook,
@@ -650,14 +669,17 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
 /// (owner worker), same discipline as `queued_bytes` — no atomic
 /// needed.
 #[inline]
-pub(in crate::afxdp) fn cos_queue_accepts_prepared(root: &CoSInterfaceRuntime, requested_queue: Option<u8>) -> bool {
+pub(in crate::afxdp) fn cos_queue_accepts_prepared(
+    root: &CoSInterfaceRuntime,
+    requested_queue: Option<u8>,
+) -> bool {
     let Some(queue_idx) = resolve_cos_queue_idx(root, requested_queue) else {
         return false;
     };
     let Some(queue) = root.queues.get(queue_idx) else {
         return false;
     };
-    queue.local_item_count == 0
+    queue.hot.local_item_count == 0
 }
 
 pub(in crate::afxdp) fn cos_queue_dscp_rewrite(
@@ -666,10 +688,11 @@ pub(in crate::afxdp) fn cos_queue_dscp_rewrite(
     queue_idx: usize,
 ) -> Option<u8> {
     binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&root_ifindex)
         .and_then(|root| root.queues.get(queue_idx))
-        .and_then(|queue| queue.dscp_rewrite)
+        .and_then(|queue| queue.config.dscp_rewrite)
 }
 
 fn enqueue_cos_item(
@@ -709,19 +732,27 @@ fn enqueue_cos_item(
         // stuck at the boundary even when the per-flow path is trying
         // to admit it. Compute `flow_bucket` once so both gates key off
         // the same queue state snapshot.
-        let flow_bucket = if queue.flow_fair {
-            cos_flow_bucket_index(queue.flow_hash_seed, cos_item_flow_key(&item))
+        let flow_bucket = if queue.flow_fair() {
+            let ff = queue
+                .flow_fair_state
+                .as_ref()
+                .expect("flow_fair queue missing FlowFairState");
+            cos_flow_bucket_index(ff.flow_hash_seed, cos_item_flow_key(&item))
         } else {
             0
         };
         let buffer_limit = cos_flow_aware_buffer_limit(queue, flow_bucket);
-        let flow_share_exceeded = if queue.flow_fair {
-            queue.flow_bucket_bytes[flow_bucket].saturating_add(item_len)
+        let flow_share_exceeded = if queue.flow_fair() {
+            let ff = queue
+                .flow_fair_state
+                .as_ref()
+                .expect("flow_fair queue missing FlowFairState");
+            ff.flow_bucket_bytes[flow_bucket].saturating_add(item_len)
                 > cos_queue_flow_share_limit(queue, buffer_limit, flow_bucket)
         } else {
             false
         };
-        let buffer_exceeded = queue.queued_bytes.saturating_add(item_len) > buffer_limit;
+        let buffer_exceeded = queue.hot.queued_bytes.saturating_add(item_len) > buffer_limit;
         // #718 + #722: ECN CE-mark above threshold so ECN-negotiated
         // TCP flows back off smoothly rather than tail-dropping into
         // RTO. Non-ECT packets are untouched — they fall back to the
@@ -749,34 +780,38 @@ fn enqueue_cos_item(
             // buffer-cap hit is a symptom downstream of flow-share
             // admission failing to throttle the flow.
             if flow_share_exceeded {
-                queue.drop_counters.admission_flow_share_drops = queue
+                queue.telemetry.drop_counters.admission_flow_share_drops = queue
+                    .telemetry
                     .drop_counters
                     .admission_flow_share_drops
                     .wrapping_add(1);
             } else {
-                queue.drop_counters.admission_buffer_drops =
-                    queue.drop_counters.admission_buffer_drops.wrapping_add(1);
+                queue.telemetry.drop_counters.admission_buffer_drops = queue
+                    .telemetry
+                    .drop_counters
+                    .admission_buffer_drops
+                    .wrapping_add(1);
             }
             let recycle = match &item {
                 CoSPendingTxItem::Prepared(req) => Some((req.recycle, req.offset)),
                 CoSPendingTxItem::Local(_) => None,
             };
-            (false, queue.queue_id, recycle)
+            (false, queue.queue_id(), recycle)
         } else {
             let queue_was_empty = cos_queue_is_empty(queue);
-            queue.queued_bytes = queue.queued_bytes.saturating_add(item_len);
+            queue.hot.queued_bytes = queue.hot.queued_bytes.saturating_add(item_len);
             cos_queue_push_back(queue, item);
             if queue_was_empty {
                 root.nonempty_queues = root.nonempty_queues.saturating_add(1);
                 root_became_nonempty = root_was_empty;
             }
-            if !queue.parked && !queue.runnable {
+            if !queue.hot.parked && !queue.hot.runnable {
                 root.runnable_queues = root.runnable_queues.saturating_add(1);
             }
-            if !queue.parked {
+            if !queue.hot.parked {
                 mark_cos_queue_runnable(queue);
             }
-            (true, queue.queue_id, None)
+            (true, queue.queue_id(), None)
         }
     };
     if root_became_nonempty {
@@ -791,7 +826,9 @@ fn enqueue_cos_item(
             PreparedTxRecycle::FillOnSlot(slot) if slot == binding.slot => {
                 binding.tx_pipeline.pending_fill_frames.push_back(offset);
             }
-            PreparedTxRecycle::FillOnSlot(_) => binding.tx_pipeline.free_tx_frames.push_back(offset),
+            PreparedTxRecycle::FillOnSlot(_) => {
+                binding.tx_pipeline.free_tx_frames.push_back(offset)
+            }
         }
     }
     // #804: CoS admission overflow — NOT bound-pending. Pre-#804 this
@@ -811,4 +848,3 @@ fn enqueue_cos_item(
 #[cfg(test)]
 #[path = "cos_classify_tests.rs"]
 mod tests;
-

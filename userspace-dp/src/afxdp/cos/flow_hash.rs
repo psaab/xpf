@@ -163,12 +163,22 @@ pub(in crate::afxdp) fn cos_queue_prospective_active_flows(
     queue: &CoSQueueRuntime,
     flow_bucket: usize,
 ) -> u64 {
-    u64::from(queue.active_flow_buckets)
-        .saturating_add(u64::from(queue.flow_bucket_bytes[flow_bucket] == 0))
+    // Non-flow-fair queues have effectively 1 flow (the whole queue is
+    // a single FIFO from the per-flow share denominator's perspective).
+    // This is the correct semantic, not an invariant escape — the gate
+    // distinguishes it from the next branch below.
+    if !queue.flow_fair() {
+        return 1;
+    }
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_prospective_active_flows: flow_fair queue without flow_fair_state");
+    u64::from(ff.active_flow_buckets)
+        .saturating_add(u64::from(ff.flow_bucket_bytes[flow_bucket] == 0))
         .max(1)
 }
 
 #[cfg(test)]
 #[path = "flow_hash_tests.rs"]
 mod tests;
-

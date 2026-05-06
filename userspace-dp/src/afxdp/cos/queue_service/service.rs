@@ -18,10 +18,11 @@ pub(super) fn service_exact_local_queue_direct(
     shared_recycles: &mut Vec<(u32, u64)>,
 ) -> bool {
     let flow_fair = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&root_ifindex)
         .and_then(|root| root.queues.get(queue_idx))
-        .map(|queue| queue.flow_fair)
+        .map(|queue| queue.flow_fair())
         .unwrap_or(false);
     if flow_fair {
         return service_exact_local_queue_direct_flow_fair(
@@ -39,7 +40,8 @@ pub(super) fn service_exact_local_queue_direct(
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
     binding.scratch.scratch_exact_local_tx.clear();
     let root_budget = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&root_ifindex)
         .map(|root| root.tokens)
         .unwrap_or(0);
@@ -101,11 +103,18 @@ pub(super) fn service_exact_local_queue_direct(
         .xsk
         .tx
         .transmit(binding.scratch.scratch_exact_local_tx.len() as u32);
-    let inserted = writer.insert(binding.scratch.scratch_exact_local_tx.iter().map(|req| XdpDesc {
-        addr: req.offset,
-        len: req.len,
-        options: 0,
-    }));
+    let inserted =
+        writer.insert(
+            binding
+                .scratch
+                .scratch_exact_local_tx
+                .iter()
+                .map(|req| XdpDesc {
+                    addr: req.offset,
+                    len: req.len,
+                    options: 0,
+                }),
+        );
     writer.commit();
     drop(writer);
     // #812 Codex round-1 HIGH #1: sample the submit stamp AFTER
@@ -123,7 +132,8 @@ pub(super) fn service_exact_local_queue_direct(
     stamp_submits(
         &mut binding.tx_pipeline.tx_submit_ns,
         binding
-            .scratch.scratch_exact_local_tx
+            .scratch
+            .scratch_exact_local_tx
             .iter()
             .take(inserted as usize)
             .map(|req| req.offset),
@@ -144,11 +154,13 @@ pub(super) fn service_exact_local_queue_direct(
         return false;
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
-    binding.tx_pipeline.outstanding_tx = binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
+    binding.tx_pipeline.outstanding_tx =
+        binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
     let (sent_packets, sent_bytes) = settle_exact_local_fifo_submission(
         binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get_mut(&root_ifindex)
             .and_then(|root| root.queues.get_mut(queue_idx)),
         &mut binding.tx_pipeline.free_tx_frames,
@@ -160,7 +172,8 @@ pub(super) fn service_exact_local_queue_direct(
     // to shield future flow_fair-FIFO adoption.
     publish_committed_queue_vtime(
         binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get(&root_ifindex)
             .and_then(|root| root.queues.get(queue_idx)),
     );
@@ -184,7 +197,8 @@ fn service_exact_local_queue_direct_flow_fair(
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
     binding.scratch.scratch_local_tx.clear();
     let root_budget = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&root_ifindex)
         .map(|root| root.tokens)
         .unwrap_or(0);
@@ -215,7 +229,8 @@ fn service_exact_local_queue_direct_flow_fair(
         } => {
             restore_exact_local_scratch_to_queue_head_flow_fair(
                 binding
-                    .cos.cos_interfaces
+                    .cos
+                    .cos_interfaces
                     .get_mut(&root_ifindex)
                     .and_then(|root| root.queues.get_mut(queue_idx)),
                 &mut binding.tx_pipeline.free_tx_frames,
@@ -246,10 +261,14 @@ fn service_exact_local_queue_direct_flow_fair(
         return false;
     }
 
-    let mut writer = binding.xsk.tx.transmit(binding.scratch.scratch_local_tx.len() as u32);
+    let mut writer = binding
+        .xsk
+        .tx
+        .transmit(binding.scratch.scratch_local_tx.len() as u32);
     let inserted = writer.insert(
         binding
-            .scratch.scratch_local_tx
+            .scratch
+            .scratch_local_tx
             .iter()
             .map(|(offset, req)| XdpDesc {
                 addr: *offset,
@@ -268,7 +287,8 @@ fn service_exact_local_queue_direct_flow_fair(
     stamp_submits(
         &mut binding.tx_pipeline.tx_submit_ns,
         binding
-            .scratch.scratch_local_tx
+            .scratch
+            .scratch_local_tx
             .iter()
             .take(inserted as usize)
             .map(|(offset, _)| *offset),
@@ -282,7 +302,8 @@ fn service_exact_local_queue_direct_flow_fair(
         maybe_wake_tx(binding, true, now_ns);
         restore_exact_local_scratch_to_queue_head_flow_fair(
             binding
-                .cos.cos_interfaces
+                .cos
+                .cos_interfaces
                 .get_mut(&root_ifindex)
                 .and_then(|root| root.queues.get_mut(queue_idx)),
             &mut binding.tx_pipeline.free_tx_frames,
@@ -293,11 +314,13 @@ fn service_exact_local_queue_direct_flow_fair(
         return false;
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
-    binding.tx_pipeline.outstanding_tx = binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
+    binding.tx_pipeline.outstanding_tx =
+        binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
     let (sent_packets, sent_bytes) = settle_exact_local_scratch_submission_flow_fair(
         binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get_mut(&root_ifindex)
             .and_then(|root| root.queues.get_mut(queue_idx)),
         &mut binding.tx_pipeline.free_tx_frames,
@@ -306,11 +329,12 @@ fn service_exact_local_queue_direct_flow_fair(
     );
     // #940: post-settle V_min publish. Settle has already applied
     // any partial-rollback push_fronts (which republished via the
-    // rollback hook), so queue.queue_vtime now reflects only the
+    // rollback hook), so the queue's flow-fair vtime now reflects only the
     // actually-shipped frames.
     publish_committed_queue_vtime(
         binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get(&root_ifindex)
             .and_then(|root| root.queues.get(queue_idx)),
     );
@@ -328,10 +352,11 @@ pub(super) fn service_exact_prepared_queue_direct(
     now_ns: u64,
 ) -> bool {
     let flow_fair = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&root_ifindex)
         .and_then(|root| root.queues.get(queue_idx))
-        .map(|queue| queue.flow_fair)
+        .map(|queue| queue.flow_fair())
         .unwrap_or(false);
     if flow_fair {
         return service_exact_prepared_queue_direct_flow_fair(
@@ -345,7 +370,8 @@ pub(super) fn service_exact_prepared_queue_direct(
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
     binding.scratch.scratch_exact_prepared_tx.clear();
     let root_budget = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&root_ifindex)
         .map(|root| root.tokens)
         .unwrap_or(0);
@@ -416,11 +442,18 @@ pub(super) fn service_exact_prepared_queue_direct(
         .xsk
         .tx
         .transmit(binding.scratch.scratch_exact_prepared_tx.len() as u32);
-    let inserted = writer.insert(binding.scratch.scratch_exact_prepared_tx.iter().map(|req| XdpDesc {
-        addr: req.offset,
-        len: req.len,
-        options: 0,
-    }));
+    let inserted =
+        writer.insert(
+            binding
+                .scratch
+                .scratch_exact_prepared_tx
+                .iter()
+                .map(|req| XdpDesc {
+                    addr: req.offset,
+                    len: req.len,
+                    options: 0,
+                }),
+        );
     writer.commit();
     drop(writer);
     // #812 Codex round-1 HIGH #1: submit stamp AFTER commit — plan
@@ -432,7 +465,8 @@ pub(super) fn service_exact_prepared_queue_direct(
     stamp_submits(
         &mut binding.tx_pipeline.tx_submit_ns,
         binding
-            .scratch.scratch_exact_prepared_tx
+            .scratch
+            .scratch_exact_prepared_tx
             .iter()
             .take(inserted as usize)
             .map(|req| req.offset),
@@ -452,11 +486,13 @@ pub(super) fn service_exact_prepared_queue_direct(
         return false;
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
-    binding.tx_pipeline.outstanding_tx = binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
+    binding.tx_pipeline.outstanding_tx =
+        binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
     let (sent_packets, sent_bytes) = settle_exact_prepared_fifo_submission(
         binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get_mut(&root_ifindex)
             .and_then(|root| root.queues.get_mut(queue_idx)),
         &mut binding.scratch.scratch_exact_prepared_tx,
@@ -467,7 +503,8 @@ pub(super) fn service_exact_prepared_queue_direct(
     // vtime_floor=None today; no-op shield for future adoption.
     publish_committed_queue_vtime(
         binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get(&root_ifindex)
             .and_then(|root| root.queues.get(queue_idx)),
     );
@@ -487,7 +524,8 @@ fn service_exact_prepared_queue_direct_flow_fair(
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
     binding.scratch.scratch_prepared_tx.clear();
     let root_budget = binding
-        .cos.cos_interfaces
+        .cos
+        .cos_interfaces
         .get(&root_ifindex)
         .map(|root| root.tokens)
         .unwrap_or(0);
@@ -520,7 +558,8 @@ fn service_exact_prepared_queue_direct_flow_fair(
         } => {
             restore_exact_prepared_scratch_to_queue_head_flow_fair(
                 binding
-                    .cos.cos_interfaces
+                    .cos
+                    .cos_interfaces
                     .get_mut(&root_ifindex)
                     .and_then(|root| root.queues.get_mut(queue_idx)),
                 &mut binding.scratch.scratch_prepared_tx,
@@ -564,11 +603,17 @@ fn service_exact_prepared_queue_direct_flow_fair(
         .xsk
         .tx
         .transmit(binding.scratch.scratch_prepared_tx.len() as u32);
-    let inserted = writer.insert(binding.scratch.scratch_prepared_tx.iter().map(|req| XdpDesc {
-        addr: req.offset,
-        len: req.len,
-        options: 0,
-    }));
+    let inserted = writer.insert(
+        binding
+            .scratch
+            .scratch_prepared_tx
+            .iter()
+            .map(|req| XdpDesc {
+                addr: req.offset,
+                len: req.len,
+                options: 0,
+            }),
+    );
     writer.commit();
     drop(writer);
     // #812 Codex round-1 HIGH #1: submit stamp AFTER commit — plan
@@ -579,7 +624,8 @@ fn service_exact_prepared_queue_direct_flow_fair(
     stamp_submits(
         &mut binding.tx_pipeline.tx_submit_ns,
         binding
-            .scratch.scratch_prepared_tx
+            .scratch
+            .scratch_prepared_tx
             .iter()
             .take(inserted as usize)
             .map(|req| req.offset),
@@ -593,7 +639,8 @@ fn service_exact_prepared_queue_direct_flow_fair(
         maybe_wake_tx(binding, true, now_ns);
         restore_exact_prepared_scratch_to_queue_head_flow_fair(
             binding
-                .cos.cos_interfaces
+                .cos
+                .cos_interfaces
                 .get_mut(&root_ifindex)
                 .and_then(|root| root.queues.get_mut(queue_idx)),
             &mut binding.scratch.scratch_prepared_tx,
@@ -605,11 +652,13 @@ fn service_exact_prepared_queue_direct_flow_fair(
         return false;
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
-    binding.tx_pipeline.outstanding_tx = binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
+    binding.tx_pipeline.outstanding_tx =
+        binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
     let (sent_packets, sent_bytes) = settle_exact_prepared_scratch_submission_flow_fair(
         binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get_mut(&root_ifindex)
             .and_then(|root| root.queues.get_mut(queue_idx)),
         &mut binding.scratch.scratch_prepared_tx,
@@ -618,10 +667,11 @@ fn service_exact_prepared_queue_direct_flow_fair(
     );
     // #940: post-settle V_min publish. Settle has applied any
     // partial-rollback push_fronts via the rollback hook;
-    // queue.queue_vtime now reflects only actually-shipped frames.
+    // the queue's flow-fair vtime now reflects only actually-shipped frames.
     publish_committed_queue_vtime(
         binding
-            .cos.cos_interfaces
+            .cos
+            .cos_interfaces
             .get(&root_ifindex)
             .and_then(|root| root.queues.get(queue_idx)),
     );
