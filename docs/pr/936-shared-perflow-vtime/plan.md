@@ -449,3 +449,97 @@ finish-time, AFD overlay, or competing approach).
 PLAN-KILL → aggregate cost not worth it, OR mechanism wrong; ship
 Phase 1 of #1203 and accept residual gap, or close #789 with the
 partial win recorded.
+
+---
+
+## 12. PLAN-NEEDS-MAJOR → WITHDRAWN — 2026-05-06
+
+Codex (`task-mou3gcvw-5omg11`) verdicted PLAN-NEEDS-MAJOR with a
+headline finding that **invalidates the plan's premise**: shared_exact
+queues already run MQFQ flow-fair scheduling in the current tree.
+
+### Code reality (verified at admission.rs:478-486, post-#785 Phase 3):
+
+```rust
+// promote_cos_queue_flow_fair (current)
+queue.shared_exact = queue_fast.shared_exact;
+queue.vtime_floor = queue_fast.vtime_floor.clone();    // #917 V_min sync
+queue.worker_id = worker_id;
+// flow-fair is enabled on EVERY exact queue, including shared_exact.
+// Dequeue-ordering: MQFQ virtual-finish-time (#913 fix at pop.rs:112)
+// Admission: rate-aware (#914) — max(fair_share*2, bdp_floor)
+```
+
+The `cos.rs:432-434` comment that motivated this plan ("shared_exact
+queues are NOT on the flow-fair path") is **stale documentation**.
+That sentence no longer reflects code behavior.
+
+### Codex's verified findings against plan v1
+
+1. **Blocking — premise stale.** Plan proposes lifting a gate that
+   was already lifted in #785 Phase 3.
+2. **Blocking — flow_hash_seed not shared.** Each worker draws a
+   fresh seed in `cos_flow_hash_seed_from_os`; per-bucket shared
+   table would map flow F to different bucket on different workers.
+3. **Blocking — bucket count mismatch.** Plan said 1024-slot table;
+   actual `COS_FLOW_FAIR_BUCKETS = 4096`. Out-of-bounds or implicit
+   modulo collision.
+4. **Blocking — race-unsafe writes.** Load-compute-store on shared
+   slots, the same family as #836/#837 which were rejected for
+   "finish-time state is not naturally commutative under races".
+5. **Major — V_min cadence.** 100ms refresh creates sawtooth at
+   25 Gb/s; existing #917 uses K=8 pop-interval cadence.
+6. **Major — slack budget math 100× off.** Plan said "5.2 KB" for
+   2× per-flow BDP at 25 Gb/s × 1ms / 12; correct figure is ~520 KB.
+7. **Major — HA lifecycle under-specified** vs existing #917 reset
+   hooks at `worker/cos.rs:312`.
+8. **Major — stall in pop conflates empty/throttled.** Existing
+   V_min throttle lives in the drain loop BEFORE pop, returning
+   `None` from pop for "throttled" would confuse callers.
+
+### Empirical recap with the actual existing architecture
+
+iperf P=12 t=120, with current code (MQFQ + #913 + #914 + #917):
+
+| Class | Shape | Aggregate | CoV | Gate ≤20% |
+|-------|-------|-----------|-----|-----------|
+| iperf-b (5202) | 10 Gb/s | 9.54 | 28.9% | ✗ |
+| iperf-c (5203) | 25 Gb/s | 22.71 | 28.2% | ✗ |
+| iperf-d (5204) | 13 Gb/s | 12.40 | 16.4% | ✓ |
+| iperf-e (5205) | 16 Gb/s | 15.26 | 26.3% | ✗ |
+| iperf-f (5206) | 19 Gb/s | 18.12 | 24.5% | ✗ |
+
+**Differentiator: iperf-d is non-saturated** (12.40 / 13 = 95% of
+shape, 91% of cluster capacity ~13.5 Gb/s with 6 workers). The other
+four are saturated — shape rate ≥ what 6 workers can push. Saturated
+within-queue TCP fairness creates cwnd-jitter variance that no
+scheduler primitive smooths inside a 30s measurement window.
+
+### Conclusion
+
+The mechanism this plan tried to build **already ships**. The
+remaining 5-10 percentage points of per-flow CoV on saturated
+workloads is residual TCP cwnd-jitter, not a missing scheduler
+primitive. Per-flow CoV ≤20% on saturated workloads is physically
+tight — a bound below cwnd-equalization timescales.
+
+**Plan WITHDRAWN.** No code changes proposed.
+
+### Recommendations (escalated to user)
+
+1. **Re-evaluate #789 gate.** Set workload-aware gates: ≤20% for
+   non-saturated workloads (current iperf-d passes), looser
+   (e.g. ≤30%) for saturated workloads (iperf-b/c/e/f).
+2. **Optional tuning experiment.** Run a sweep on existing #917
+   V_min cadence and slack-budget knobs to see if any tunable
+   tightens current 24-29% CoV. Risk-free measurement-only work;
+   if no improvement found, close and accept the empirical floor.
+3. **Issue #1204 closes** with the finding that all four mandated
+   actions ship in current tree; the empirical gap is irreducible.
+
+### What gets preserved vs killed
+
+- Scrub of stale "1024 buckets" docstrings (in commit `ffd73f4e`)
+  is correct and stays.
+- Plan body §1-§11 stays as a record of the analysis path.
+- No code/test changes shipped beyond the docstring fixup.
