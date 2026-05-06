@@ -62,8 +62,8 @@ notes. That format went stale within weeks of every refactor. The
 generated heatmap captures current state automatically.
 
 The 18-PR refactor stream that landed in early 2026 (closing #985,
-#988, #986, #1034, #1035, #957) drove the userspace-dp Rust
-production tree below the 2000 threshold across the board. The Go
+#988, #986, #1034, #1035, #957) drove most of the userspace-dp Rust
+production tree below the 2000 threshold; two Rust files remain flagged (afxdp/poll_descriptor.rs, protocol.rs) and are tracked on the watch-list. The Go
 tree has multiple long-standing >2000 LOC files (`pkg/grpcapi/`,
 `pkg/cluster/`, `pkg/api/`, `pkg/dataplane/`) that have not yet
 received the same treatment.

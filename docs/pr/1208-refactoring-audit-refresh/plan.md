@@ -189,14 +189,14 @@ None. Tooling + doc only.
 ## 9. Open questions for adversarial review
 
 1. Should the audit also flag files in the 1500-2000 LOC "watch-list"
-   range, or only refactor candidates?
+   range, or only refactor candidates? **Resolved: yes; tagged
+   `[WATCH]` separately from `[REFACTOR]`.**
 2. Should `pkg/api/handlers.go` etc. (Go side) use raw LOC or some
-   adjusted metric?
-3. Is the `awk '/^#\[cfg(test)\] mod tests/,EOF'` pattern reliable for
-   the Rust test-block stripping? Files using `#[path = "tests.rs"]
-   mod tests;` (the colocated-tests pattern from #1034 series) have
-   no inline test block, so the awk returns 0 lines and prod LOC =
-   total LOC — which is correct.
+   adjusted metric? **Resolved: total LOC for non-test files.**
+3. ~~Is the `awk '/^#\[cfg(test)\] mod tests/,EOF'` pattern reliable~~
+   **Resolved: awk approach abandoned in v2 entirely (Gemini r1
+   caught the EOF-not-keyword bug). v2 excludes test files by name
+   pattern instead.**
 
 ## 10. Verdict request
 

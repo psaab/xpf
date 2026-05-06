@@ -33,6 +33,10 @@ SKIP_RE+='|_bpfel\.go$|_bpfeb\.go$'
 SKIP_RE+='|\.pb\.go$|_grpc\.pb\.go$'
 SKIP_RE+='|(^|/)tests\.rs$|_tests\.rs$|_test\.go$'
 SKIP_RE+='|(^|/)test_support\.rs$'
+# #1208 PR review (Codex MED-3): test_fixtures.rs and test_zone_ids.rs
+# are #[cfg(test)] modules (afxdp/mod.rs:94, main.rs:14) — exclude by
+# name even though they're under src/.
+SKIP_RE+='|(^|/)test_fixtures\.rs$|(^|/)test_zone_ids\.rs$'
 SKIP_RE+='|/_KILLED|/_WITHDRAWN'
 SKIP_RE+='|docs/pr/[^/]+/findings'
 SKIP_RE+='|\.lock$'
