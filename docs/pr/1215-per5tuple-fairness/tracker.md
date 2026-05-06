@@ -72,9 +72,9 @@ XDP_REDIRECT). #1215 commits to path 1.
       `experiment/789-vmin-tuning`). Codex retrospective embedded
       in the disposition doc.
 
-### Phase 1 — refactor foundation (next)
+### Phase 1 — refactor foundation ✓ DONE
 
-- [ ] **#1206 (CoSQueueRuntime split) merged.**
+- [x] **#1206 (CoSQueueRuntime split) merged 2026-05-06 (PR #1216, squash merge a1688792).**
       Worktree: `.claude/worktrees/1206-cosqueueruntime-split`.
       Plan v3 PLAN-READY both Codex (task-mou8wztc) and Gemini.
       Splits into:
@@ -270,3 +270,8 @@ measurement justifies algorithm work.
 | 2026-05-06 | #1206 PR #1216 opened | commit 1c60d825; smoke pass A (CoS off) 22.8/22.5 Gbps -P 12 -R 0 retrans; Pass B (CoS on) 24/24 cells 0 retrans, iperf-a shaped 960Mbps |
 | 2026-05-06 | #1206 fix commit f16a68b6 | Codex MERGE-NEEDS-MINOR (vtime comment, 6 stale field-paths) + Copilot HIGH (silent flow_fair invariant violation in pop/push) addressed; .expect() now panics on invariant break |
 | 2026-05-06 | Re-dispatched: Codex task-moujrj05-kidabk + Gemini Pro 3 task-moujr55d-kz8dl6; Copilot @-pinged | Round-2 review on f16a68b6 |
+| 2026-05-06 | Codex round-2 NEW-FINDINGS, Gemini Pro 3 MERGE-READY | 4 LOW comment fixes in 31daea5e + Copilot SWE Agent autocommit df09c8e6 |
+| 2026-05-06 | Copilot round-2: 4 comments (3 invariant + 1 dedup) | Fixed in df478df9: 7 .expect() panic sites; dedup deferred (out of pure code-motion scope) |
+| 2026-05-06 | Codex round-3 (task-moumzrae): MERGE-NEEDS-MINOR | 3 LOW (cos_queue_front silent-None, panic msg fn name, 2 stale comments) → cd0390ed |
+| 2026-05-06 | **PR #1216 squash-merged to master as a1688792** | Triple-review consensus: Gemini MERGE-READY, Codex 3 rounds converged, Copilot 8 comments addressed; smoke clean |
+| 2026-05-06 | #1206 worktree removed | feature/1215 starts #1215 plan v1 against post-merge master |
