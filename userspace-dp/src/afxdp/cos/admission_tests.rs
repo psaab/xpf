@@ -1231,7 +1231,7 @@ fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
         unclamped,
         COS_FLOW_FAIR_BUCKETS as u64 * COS_FLOW_FAIR_MIN_SHARE_BYTES,
         "unclamped formula baseline: COS_FLOW_FAIR_BUCKETS × COS_FLOW_FAIR_MIN_SHARE_BYTES \
-         (4096 × 24 KB = ~96 MB after the GEMINI-NEXT.md fairness bump from 1024)"
+         (4096 × 24 KB = ~98 MB after the GEMINI-NEXT.md fairness bump from 1024)"
     );
     assert!(
         cap < unclamped,
