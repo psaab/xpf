@@ -1,7 +1,7 @@
 ---
-status: REVISED v6 — Codex round-5 caught Gemini round-4's hallucination claim was itself wrong. Verified `arc_swap::Guard::into_inner(lease: Self) -> T` exists in arc-swap 1.8.2 (Cargo.lock-confirmed; src/lib.rs). It is strictly better than `Arc::clone(&*guard)` because it transfers ownership via `mem::forget` + raw pointer extraction, avoiding the atomic refcount increment. Reverted to `Guard::into_inner`. v5 forwarding-site ordering template kept. v6 also scrubs the remaining stale `.load_full()` / `Arc::as_ptr` prose Codex flagged at lines 261, 294, 300
+status: REVISED v7 — Codex round-6 NEEDS-MINOR fixes: softened `Guard::into_inner` cost-savings claim (it is NOT categorically free of atomic refcount increments — `HybridProtection::into_inner` may still call `T::inc` when the guard has debt; `load_full()` is literally `Guard::into_inner(self.load())`). The real win in this PR is the `Arc::ptr_eq` short-circuit, not an into_inner-vs-clone difference. Stale `Arc::as_ptr` references replaced with `Arc::ptr_eq` (the actual API used). Stale "v4 build" replaced with "v7 build" in §8
 issue: #1188
-phase: Replace `.load_full()` with `.load()` + `Arc::as_ptr` comparison in worker tick loop
+phase: Replace unconditional `.load_full()` with `.load()` + `Arc::ptr_eq` short-circuit in worker tick loop
 ---
 
 ## 1. Issue framing — corrected
@@ -71,9 +71,14 @@ if let Some(new_forwarding) =
 - Steady state (no config change): saved 12 atomic RMW ops/tick →
   ~0.96B–9.6B ops/sec eliminated from the QPI/UPI bus.
 - On actual config change (rare, < 1/sec normally): one
-  cheap `.load()` + one `Guard::into_inner` (no atomic increment;
-  ownership transfer via `mem::forget`). Negligible at ~1/sec
-  rate.
+  cheap `.load()` + one `Guard::into_inner` consume. Note:
+  `Guard::into_inner` is NOT categorically free —
+  `HybridProtection::into_inner` may still call `T::inc` when
+  the guard has debt. So in the worst case the change branch
+  pays the same as today's `.load_full()` (which is itself
+  implemented as `Guard::into_inner(self.load())`). The win
+  is the `ptr_eq` short-circuit, not the change-branch cost.
+  Negligible either way at ~1/sec change rate.
 - No coordinator-side changes. No new types except the helper
   fn. No semantics change.
 
@@ -190,15 +195,25 @@ To avoid 6 copies of the same pattern, introduce a small helper:
 /// `arc_swap::Guard::into_inner(guard)` to extract the exact Arc
 /// the Guard was observing. This avoids a second `.load_full()`
 /// (which could return a *newer* Arc if the coordinator rotated
-/// between our `ptr_eq` check and the second load) AND avoids the
-/// atomic refcount increment that `Arc::clone(&*guard)` would
-/// incur. `Guard::into_inner` uses `mem::forget` + raw pointer
-/// extraction internally — see arc-swap 1.8.2 `src/lib.rs`.
+/// between our `ptr_eq` check and the second load).
 ///
-/// Review note (rounds 4-5): Gemini Pro 3.1 round-4 erroneously
-/// claimed `into_inner` was hallucinated; Codex round-5 verified
-/// it exists in the locked arc-swap version. v6 reverts to
-/// `Guard::into_inner` — strictly better than `Arc::clone(&*guard)`.
+/// **Cost (Codex round-6 caveat):** `Guard::into_inner` is NOT
+/// categorically free of atomic refcount work —
+/// `HybridProtection::into_inner` may call `T::inc` when the
+/// guard holds a debt slot. In fact `load_full()` is literally
+/// implemented as `Guard::into_inner(self.load())` (arc-swap
+/// 1.8.2 src/lib.rs:414). So the on-change branch may cost the
+/// same as today's `.load_full()`. The win is the
+/// `Arc::ptr_eq` short-circuit, not a magical cost difference.
+///
+/// Review history (rounds 2-6):
+/// - Codex round-2: suggested `Guard::into_inner`.
+/// - Gemini round-4: claimed `into_inner` was hallucinated (it
+///   wasn't); switched to `Arc::clone(&*guard)`.
+/// - Codex round-5: verified `into_inner` exists in arc-swap
+///   1.8.2 src/lib.rs.
+/// - Codex round-6: warned the "saves the atomic increment"
+///   claim was overstated; cost may be the same as load_full().
 ///
 /// Gemini Pro 3.1 round-2: use idiomatic `Arc::ptr_eq` (the `Guard`
 /// derefs to `&Arc<T>`); `T: ?Sized` is dropped — all 6 call sites
@@ -271,7 +286,7 @@ The helper is a private fn or a module-local utility.
 - Smoke matrix on loss userspace cluster: 30 cells, 0 retrans
 - **Perf measurement** (the critical gate): collect
   `perf stat -e cache-misses,cache-references,LLC-load-misses`
-  on the master baseline vs the v4 build during steady-state
+  on the master baseline vs the v7 build during steady-state
   iperf3 run. Document atomic-RMW reduction.
 
 ## 9. Out of scope
@@ -284,7 +299,7 @@ The helper is a private fn or a module-local utility.
 
 ## 10. Open questions for adversarial review
 
-1. **Is `Arc::as_ptr` comparison sound across threads?** `ArcSwap`
+1. **Is `Arc::ptr_eq` comparison sound across threads?** `ArcSwap`
    provides acquire-ordered loads, so the `*const T` read from
    the guard reflects a value the coordinator published with
    release-ordered store. Pointer comparison is a value op on
@@ -305,7 +320,7 @@ The helper is a private fn or a module-local utility.
 
 4. **Should the `shared_validation` `.load()` site (line 721) be
    refactored similarly for consistency?** It's already cheap
-   (no `.load_full()`) but the value-equality check (`**live != validation`) is more expensive than `Arc::as_ptr` comparison
+   (no `.load_full()`) but the value-equality check (`**live != validation`) is more expensive than `Arc::ptr_eq` comparison
    would be. Borderline; if the diff is small, fold in;
    otherwise leave for a follow-up.
 
