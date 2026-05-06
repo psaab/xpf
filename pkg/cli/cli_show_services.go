@@ -108,6 +108,52 @@ func (c *CLI) showClassOfServiceInterface(selector string) error {
 	return nil
 }
 
+// showCOSFlowSteering renders the flow_steering controller state and
+// per-tick re-steer history. #789 Phase 1.
+func (c *CLI) showCOSFlowSteering() error {
+	provider, ok := c.dp.(interface {
+		FlowSteering() *dpuserspace.FlowSteeringController
+	})
+	if !ok {
+		fmt.Println("flow-steering: unavailable (dataplane is not the userspace backend)")
+		return nil
+	}
+	ctrl := provider.FlowSteering()
+	if ctrl == nil {
+		fmt.Println("flow-steering: unavailable")
+		return nil
+	}
+	m := ctrl.MetricsSnapshot()
+	state := "disabled"
+	if m.Enabled {
+		state = "enabled"
+	}
+	fmt.Printf("Flow steering controller (#789):\n")
+	fmt.Printf("  State: %s\n", state)
+	fmt.Printf("  Rules installed:    %d\n", m.RulesInstalled)
+	fmt.Printf("  Rules removed:      %d\n", m.RulesRemoved)
+	fmt.Printf("  Imbalance detected: %d\n", m.ImbalanceDetected)
+	fmt.Printf("  Install failures:   %d\n", m.InstallFailures)
+	fmt.Println()
+	hist := ctrl.HistorySnapshot()
+	if len(hist) == 0 {
+		fmt.Println("No re-steer events recorded.")
+		return nil
+	}
+	fmt.Println("Recent re-steer events:")
+	for _, ev := range hist {
+		fmt.Printf("  %s  iface=%s  loc=%d  q=%d  flow=%q  reason=%s\n",
+			ev.At.Format("15:04:05"),
+			ev.Iface,
+			ev.RuleLoc,
+			ev.TargetQueue,
+			ev.Flow,
+			ev.Reason,
+		)
+	}
+	return nil
+}
+
 func (c *CLI) showRPMProbeResults() error {
 	// Show live results if RPM manager is available
 	if c.rpmResultsFn != nil {

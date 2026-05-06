@@ -107,6 +107,13 @@ type Manager struct {
 	lastHASyncTime     time.Time     // throttle HA watchdog sync to avoid control socket contention
 	lastRGActivateTime time.Time     // wall clock of last update_ha_state; statusLoop skips HA sync for 2s
 
+	// #789 Phase 1: closed-loop NIC ntuple flow steering controller.
+	// Constructed lazily on first Compile() and cancelled in
+	// stopLocked. The enable bit is mirrored from
+	// `system services userspace-dp flow-steering enable` on every
+	// commit cycle.
+	flowSteering *FlowSteeringController
+
 	rgTransitionInFlight atomic.Bool // set before syncHAStateLocked, cleared on completion
 
 	// Counter delta tracking: previous binding counter totals for computing
@@ -148,12 +155,24 @@ func shouldAttemptRSTSuppression(
 func New() *Manager {
 	inner := dataplane.New()
 	inner.XDPEntryProg = "xdp_main_prog"
-	return &Manager{
+	m := &Manager{
 		DataPlane:      inner,
 		inner:          inner,
 		configuredMode: ModeUserspaceCompat,
 		haGroups:       make(map[int]HAGroupStatus),
 	}
+	// #789 Phase 1: instantiate the closed-loop flow-steering
+	// controller. Default disabled; operator opts in via
+	// `set system services userspace-dp flow-steering enable`.
+	m.flowSteering = NewFlowSteeringController(slog.Default(), m)
+	return m
+}
+
+// FlowSteering returns the controller for operational CLI / metrics
+// surfaces (`show cos flow-steering`, Prometheus collector). Never
+// returns nil — Manager.New always constructs the controller.
+func (m *Manager) FlowSteering() *FlowSteeringController {
+	return m.flowSteering
 }
 
 // EventStream returns the event stream instance, or nil if not available.
@@ -267,6 +286,18 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	ucfg := deriveUserspaceConfig(cfg)
 	snap := buildSnapshot(cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration())
 	m.syncInterfaceAttachments(result, snap)
+
+	// #789 Phase 1: mirror `system services userspace-dp flow-steering
+	// enable` into the closed-loop controller on every commit cycle.
+	// SetEnabled is idempotent; toggling off triggers a flush.
+	if m.flowSteering != nil {
+		fsEnabled := cfg != nil &&
+			cfg.System.Services != nil &&
+			cfg.System.Services.UserspaceDP != nil &&
+			cfg.System.Services.UserspaceDP.FlowSteering != nil &&
+			cfg.System.Services.UserspaceDP.FlowSteering.Enable
+		m.flowSteering.SetEnabled(fsEnabled)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -307,6 +307,25 @@ func compileSystem(node *Node, sys *SystemConfig) error {
 				sys.Services.DNSProxyConfigured = true
 			}
 		}
+		// #789 Phase 1: `system services userspace-dp flow-steering`
+		// — closed-loop NIC ntuple steering for shared_exact CoS
+		// classes. Default disabled; operator must opt-in.
+		if udpNode := svcNode.FindChild("userspace-dp"); udpNode != nil {
+			if sys.Services == nil {
+				sys.Services = &SystemServicesConfig{}
+			}
+			if sys.Services.UserspaceDP == nil {
+				sys.Services.UserspaceDP = &UserspaceDPServiceConfig{}
+			}
+			if fsNode := udpNode.FindChild("flow-steering"); fsNode != nil {
+				if sys.Services.UserspaceDP.FlowSteering == nil {
+					sys.Services.UserspaceDP.FlowSteering = &UserspaceDPFlowSteeringConfig{}
+				}
+				if fsNode.FindChild("enable") != nil {
+					sys.Services.UserspaceDP.FlowSteering.Enable = true
+				}
+			}
+		}
 		// Web management
 		if wmNode := svcNode.FindChild("web-management"); wmNode != nil {
 			if sys.Services == nil {

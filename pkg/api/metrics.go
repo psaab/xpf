@@ -96,6 +96,13 @@ type xpfCollector struct {
 	// state. 1 = worker has panicked and the supervisor has caught it;
 	// 0 = healthy. Set-only in Phase 1 (cleared by daemon restart).
 	workerDead *prometheus.Desc
+	// #789 Phase 1: closed-loop NIC ntuple flow-steering controller.
+	flowSteeringRulesInstalled    *prometheus.Desc
+	flowSteeringRulesRemoved      *prometheus.Desc
+	flowSteeringImbalanceDetected *prometheus.Desc
+	flowSteeringInstallFailures   *prometheus.Desc
+	flowSteeringRuleTableCapacity *prometheus.Desc
+	flowSteeringEnabled           *prometheus.Desc
 }
 
 func newCollector(srv *Server) *xpfCollector {
@@ -350,6 +357,36 @@ func newCollector(srv *Server) *xpfCollector {
 				"daemon restart in Phase 1 (#925).",
 			[]string{"worker_id"}, nil,
 		),
+		flowSteeringRulesInstalled: prometheus.NewDesc(
+			"xpf_userspace_flow_steering_rules_installed_total",
+			"Total NIC ntuple rules installed by the closed-loop flow-steering controller (#789).",
+			nil, nil,
+		),
+		flowSteeringRulesRemoved: prometheus.NewDesc(
+			"xpf_userspace_flow_steering_rules_removed_total",
+			"Total NIC ntuple rules removed by the closed-loop flow-steering controller (#789).",
+			nil, nil,
+		),
+		flowSteeringImbalanceDetected: prometheus.NewDesc(
+			"xpf_userspace_flow_steering_imbalance_detected_total",
+			"Total reconcile ticks where per-binding flow imbalance exceeded the action threshold (#789).",
+			nil, nil,
+		),
+		flowSteeringInstallFailures: prometheus.NewDesc(
+			"xpf_userspace_flow_steering_install_failures_total",
+			"Total ntuple-rule install attempts that failed (ethtool error or rule-table exhaustion) (#789).",
+			nil, nil,
+		),
+		flowSteeringRuleTableCapacity: prometheus.NewDesc(
+			"xpf_userspace_flow_steering_rule_table_capacity",
+			"Reserved ntuple rule-loc range capacity (upper - lower + 1) for #789 controller-owned rules.",
+			nil, nil,
+		),
+		flowSteeringEnabled: prometheus.NewDesc(
+			"xpf_userspace_flow_steering_enabled",
+			"1 if `system services userspace-dp flow-steering enable` is set, 0 otherwise (#789).",
+			nil, nil,
+		),
 	}
 }
 
@@ -401,6 +438,12 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerWorkLoops
 	ch <- c.workerIdleLoops
 	ch <- c.workerDead
+	ch <- c.flowSteeringRulesInstalled
+	ch <- c.flowSteeringRulesRemoved
+	ch <- c.flowSteeringImbalanceDetected
+	ch <- c.flowSteeringInstallFailures
+	ch <- c.flowSteeringRuleTableCapacity
+	ch <- c.flowSteeringEnabled
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -438,6 +481,39 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 	}
 	c.emitCoSOwnerProfile(ch, status)
 	c.emitWorkerRuntime(ch, status)
+	c.emitFlowSteering(ch, dp)
+}
+
+// #789 Phase 1: surface flow-steering controller counters. Flat
+// (no labels) since the controller is a singleton per daemon.
+func (c *xpfCollector) emitFlowSteering(ch chan<- prometheus.Metric, dp dataplane.DataPlane) {
+	provider, ok := dp.(interface {
+		FlowSteering() *dpuserspace.FlowSteeringController
+	})
+	if !ok {
+		return
+	}
+	ctrl := provider.FlowSteering()
+	if ctrl == nil {
+		return
+	}
+	m := ctrl.MetricsSnapshot()
+	var enabled float64
+	if m.Enabled {
+		enabled = 1
+	}
+	ch <- prometheus.MustNewConstMetric(c.flowSteeringEnabled,
+		prometheus.GaugeValue, enabled)
+	ch <- prometheus.MustNewConstMetric(c.flowSteeringRulesInstalled,
+		prometheus.CounterValue, float64(m.RulesInstalled))
+	ch <- prometheus.MustNewConstMetric(c.flowSteeringRulesRemoved,
+		prometheus.CounterValue, float64(m.RulesRemoved))
+	ch <- prometheus.MustNewConstMetric(c.flowSteeringImbalanceDetected,
+		prometheus.CounterValue, float64(m.ImbalanceDetected))
+	ch <- prometheus.MustNewConstMetric(c.flowSteeringInstallFailures,
+		prometheus.CounterValue, float64(m.InstallFailures))
+	ch <- prometheus.MustNewConstMetric(c.flowSteeringRuleTableCapacity,
+		prometheus.GaugeValue, float64(m.RuleTableCapacity))
 }
 
 // #869: emit per-worker busy/idle runtime counters from a cached

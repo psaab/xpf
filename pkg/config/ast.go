@@ -1417,6 +1417,14 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 				}},
 			}},
 			"dns": {children: nil},
+			// #789 Phase 1: closed-loop NIC ntuple flow steering knob.
+			// `set system services userspace-dp flow-steering enable`
+			// (default disabled — operator opt-in).
+			"userspace-dp": {desc: "Userspace dataplane operator services", children: map[string]*schemaNode{
+				"flow-steering": {desc: "Closed-loop NIC ntuple flow steering for shared_exact CoS classes (#789)", children: map[string]*schemaNode{
+					"enable": {desc: "Enable mlx5 ntuple-rule installation for fairness", children: nil},
+				}},
+			}},
 			"dhcp-local-server": {children: map[string]*schemaNode{
 				"group": {args: 1, children: map[string]*schemaNode{
 					"pool": {args: 1, children: nil},

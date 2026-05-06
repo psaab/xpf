@@ -87,6 +87,9 @@ var OperationalTree = map[string]*Node{
 		}},
 		"class-of-service": {Desc: "Show class-of-service information", Children: map[string]*Node{
 			"interface": {Desc: "Show per-interface CoS configuration"},
+			// #789 Phase 1: closed-loop NIC ntuple flow-steering
+			// controller for shared_exact CoS classes.
+			"flow-steering": {Desc: "Show NIC ntuple flow steering controller state (#789)"},
 		}},
 		"configuration": {Desc: "Show active configuration", Children: map[string]*Node{
 			"applications":       {Desc: "Application protocol definitions"},

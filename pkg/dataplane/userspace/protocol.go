@@ -748,9 +748,30 @@ type BindingStatus struct {
 	TxKickLatencyCount                uint64    `json:"tx_kick_latency_count,omitempty"`
 	TxKickLatencySumNs                uint64    `json:"tx_kick_latency_sum_ns,omitempty"`
 	TxKickRetryCount                  uint64    `json:"tx_kick_retry_count,omitempty"`
+	// #789 Phase 1: per-binding ingress-active flow inventory
+	// surfaced for the flow_steering controller. Worker publishes
+	// at 1 Hz; coordinator projects from BindingLiveSnapshot.
+	// `ActiveIngressFlowsCount` is the count of sessions where
+	// `installed_on_binding_slot == binding.slot` AND
+	// `now - last_seen_ns < 1s`. `ActiveIngressFlowsSample` is up to
+	// 16 candidate flows the controller may select for re-steer.
+	ActiveIngressFlowsCount  uint32                    `json:"active_ingress_flows_count,omitempty"`
+	ActiveIngressFlowsSample []ActiveFlowSampleStatus  `json:"active_ingress_flows_sample,omitempty"`
 	LastHeartbeat                     time.Time `json:"last_heartbeat,omitempty"`
 	LastError                         string    `json:"last_error,omitempty"`
 	LastChange                        time.Time `json:"last_change,omitempty"`
+}
+
+// ActiveFlowSampleStatus mirrors the Rust
+// `ActiveFlowSampleStatus` (userspace-dp/src/protocol.rs). It carries
+// the operator-readable wire 5-tuple plus age fields so the
+// flow_steering controller can apply the stable-flow gate
+// (install_age >= 3s AND last_seen_age < 1s) without reaching back
+// into the userspace helper.
+type ActiveFlowSampleStatus struct {
+	Wire5Tuple      string `json:"wire_5tuple"`
+	InstallAgeSecs  uint32 `json:"install_age_secs"`
+	LastSeenAgeMs   uint32 `json:"last_seen_age_ms"`
 }
 
 // BindingCountersSnapshot is the focused per-binding ring-pressure view

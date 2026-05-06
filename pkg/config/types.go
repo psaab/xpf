@@ -566,6 +566,21 @@ type SystemServicesConfig struct {
 	WebManagement      *WebManagementConfig
 	DNSEnabled         bool // system services dns
 	DNSProxyConfigured bool // system services dns dns-proxy (syntax accepted, runtime no-op)
+	UserspaceDP        *UserspaceDPServiceConfig
+}
+
+// UserspaceDPServiceConfig holds userspace-dataplane operator knobs
+// surfaced under `system services userspace-dp`. Phase 1 (#789)
+// surface is the closed-loop NIC ntuple flow_steering enable.
+type UserspaceDPServiceConfig struct {
+	FlowSteering *UserspaceDPFlowSteeringConfig
+}
+
+// UserspaceDPFlowSteeringConfig — `system services userspace-dp
+// flow-steering enable`. Default disabled. Operator must opt-in
+// because the controller programs NIC HW ntuple rules.
+type UserspaceDPFlowSteeringConfig struct {
+	Enable bool
 }
 
 // SSHServiceConfig holds SSH service settings.

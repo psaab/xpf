@@ -1923,15 +1923,25 @@ func (c *CLI) configPrompt() string {
 }
 
 func (c *CLI) handleShowClassOfService(args []string) error {
-	if len(args) == 0 || args[0] != "interface" {
+	if len(args) == 0 {
 		cmdtree.PrintTreeHelp("show class-of-service:", operationalTree, "show", "class-of-service")
 		return nil
 	}
-	selector := ""
-	if len(args) > 1 {
-		selector = args[1]
+	switch args[0] {
+	case "interface":
+		selector := ""
+		if len(args) > 1 {
+			selector = args[1]
+		}
+		return c.showClassOfServiceInterface(selector)
+	case "flow-steering":
+		// #789 Phase 1: surface controller state and per-tick re-steer
+		// activity. Goes through the gRPC client so remote CLI works.
+		return c.showCOSFlowSteering()
+	default:
+		cmdtree.PrintTreeHelp("show class-of-service:", operationalTree, "show", "class-of-service")
+		return nil
 	}
-	return c.showClassOfServiceInterface(selector)
 }
 
 func (c *CLI) handleShowServices(args []string) error {

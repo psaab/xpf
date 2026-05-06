@@ -360,6 +360,14 @@ func (m *Manager) ensureStatusLoopLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.syncCancel = cancel
 	go m.statusLoop(ctx)
+	// #789 Phase 1: start the closed-loop flow-steering controller
+	// alongside the status loop. The controller's own ticker is a
+	// no-op until SetEnabled(true) is called from Compile() — so
+	// starting it eagerly here is safe and avoids a Compile/Stop
+	// race on the first commit.
+	if m.flowSteering != nil {
+		m.flowSteering.Start(ctx)
+	}
 }
 
 func (m *Manager) statusLoop(ctx context.Context) {
@@ -495,6 +503,11 @@ func (m *Manager) stopLocked() {
 	if m.syncCancel != nil {
 		m.syncCancel()
 		m.syncCancel = nil
+	}
+	// #789 Phase 1: cancel the controller goroutine and flush
+	// owner-installed ntuple rules before the helper exits.
+	if m.flowSteering != nil {
+		m.flowSteering.Stop()
 	}
 	if m.proc == nil {
 		m.lastStatus = ProcessStatus{}
