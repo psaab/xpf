@@ -36,10 +36,14 @@ pub(in crate::afxdp) fn cos_queue_is_empty(queue: &CoSQueueRuntime) -> bool {
     if !queue.flow_fair() {
         return queue.hot.items.is_empty();
     }
-    queue
+    // Invariant: `flow_fair() == true` ↔ `flow_fair_state.is_some()`.
+    // Returning "empty" on a structural invariant violation would mask
+    // the bug and stall selection.
+    let ff = queue
         .flow_fair_state
         .as_ref()
-        .map_or(true, |ff| ff.flow_rr_buckets.is_empty())
+        .expect("cos_queue_is_empty: flow_fair queue without flow_fair_state");
+    ff.flow_rr_buckets.is_empty()
 }
 
 #[inline]
@@ -47,9 +51,12 @@ pub(in crate::afxdp) fn cos_queue_len(queue: &CoSQueueRuntime) -> usize {
     if !queue.flow_fair() {
         return queue.hot.items.len();
     }
-    let Some(ff) = queue.flow_fair_state.as_ref() else {
-        return 0;
-    };
+    // Invariant: see cos_queue_is_empty. Returning 0 on violation would
+    // mask the bug.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_len: flow_fair queue without flow_fair_state");
     ff.flow_rr_buckets
         .iter()
         .map(|bucket| ff.flow_bucket_items[usize::from(bucket)].len())

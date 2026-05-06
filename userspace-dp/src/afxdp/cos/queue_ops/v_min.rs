@@ -74,9 +74,16 @@ pub(in crate::afxdp) fn publish_committed_queue_vtime(queue: Option<&CoSQueueRun
         // would broadcast a frozen value forever.
         return;
     }
-    let Some(ff) = queue.flow_fair_state.as_ref() else {
-        return;
-    };
+    // Invariant: `flow_fair() == true` ↔ `flow_fair_state.is_some()`.
+    // Silent return here would skip publish on a flow-fair queue and
+    // freeze peers' V_min view of this worker's vtime.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("try_publish_committed_vtime: flow_fair queue without flow_fair_state");
+    // vtime_floor is allocated only on shared_exact queues; non-shared
+    // flow-fair queues have None and skip publish (this is the correct
+    // semantic, not an invariant violation).
     let Some(floor) = queue.v_min.vtime_floor.as_ref() else {
         return;
     };
@@ -162,12 +169,21 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
         return true;
     }
     let transmit_rate_bytes = queue.transmit_rate_bytes();
-    let Some(ff) = queue.flow_fair_state.as_ref() else {
-        return true;
-    };
-    let Some(floor) = queue.v_min.vtime_floor.as_ref() else {
-        return true;
-    };
+    // Invariant: shared_exact queues are also flow_fair (set together
+    // in promote_cos_queue_flow_fair) and therefore have flow_fair_state
+    // allocated. Silent fall-through here would skip the V_min lag
+    // check entirely and let one worker run away vs peers.
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_v_min_continue: shared_exact queue without flow_fair_state");
+    // vtime_floor is allocated for shared_exact queues at promotion time.
+    // None here is structural; same panic discipline.
+    let floor = queue
+        .v_min
+        .vtime_floor
+        .as_ref()
+        .expect("cos_queue_v_min_continue: shared_exact queue without vtime_floor");
     // Single-pass snapshot of participating peers' V_min. See the
     // memory-ordering doc on `participating_v_min_snapshot` for the
     // non-atomic-across-slots contract. The replaced inline loop did

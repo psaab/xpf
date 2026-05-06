@@ -13,9 +13,13 @@ pub(super) fn account_cos_queue_flow_enqueue(
     if !queue.flow_fair() || item_len == 0 {
         return;
     }
-    let Some(ff) = queue.flow_fair_state.as_mut() else {
-        return;
-    };
+    // Invariant: `flow_fair() == true` ↔ `flow_fair_state.is_some()`.
+    // Silent return here would desync per-bucket bytes / active counts
+    // from actual queue contents, breaking selection. Panic instead.
+    let ff = queue
+        .flow_fair_state
+        .as_mut()
+        .expect("account_cos_queue_flow_enqueue: flow_fair queue without flow_fair_state");
     let bucket = cos_flow_bucket_index(ff.flow_hash_seed, flow_key);
     if ff.flow_bucket_bytes[bucket] == 0 {
         ff.active_flow_buckets = ff.active_flow_buckets.saturating_add(1);
@@ -67,9 +71,13 @@ pub(super) fn account_cos_queue_flow_dequeue(
         return;
     }
     let shared_exact = queue.shared_exact();
-    let Some(ff) = queue.flow_fair_state.as_mut() else {
-        return;
-    };
+    // Invariant: see account_cos_queue_flow_enqueue. Silent return here
+    // would leave active_flow_buckets / finish-times stale and break
+    // V_min slot vacate logic.
+    let ff = queue
+        .flow_fair_state
+        .as_mut()
+        .expect("account_cos_queue_flow_dequeue: flow_fair queue without flow_fair_state");
     let bucket = cos_flow_bucket_index(ff.flow_hash_seed, flow_key);
     let remaining = ff.flow_bucket_bytes[bucket].saturating_sub(item_len);
     if ff.flow_bucket_bytes[bucket] > 0 && remaining == 0 {
