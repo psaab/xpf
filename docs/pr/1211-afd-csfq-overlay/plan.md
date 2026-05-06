@@ -1,8 +1,129 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: REVISED v2 — addressing Codex (PLAN-NEEDS-MAJOR, task-mou6uzry-lmcauh) and Gemini Pro 3 (PLAN-NEEDS-MINOR, task-mou6w83l-mkrcs9)
 issue: #1211
 phase: research only — produce a doc; no code; decide implement-vs-researched-negative
 ---
+
+## Round-1 verdict resolution
+
+Codex PLAN-NEEDS-MAJOR with 5 substantive findings; Gemini
+PLAN-NEEDS-MINOR with 3 additional design questions. v2 expands
+scope and corrects two factual errors.
+
+### 1. Why #838 died — corrected per Codex
+
+v1 Q1 said "#838 failed because multiple workers updated a shared
+Count-Min sketch with torn/lost updates". Codex (with reference to
+`docs/pr/838-afd-lite/findings.md:55`) says the actual record is
+different: cross-binding failed on **period reset coherence,
+fair-share denominator staleness, rollback semantics**; then
+single-binding died on **"selector blind during scratch-build"**
+because accounting happened at settle, one batch later.
+
+**Single-writer sharded design only addresses write/write contention.
+It does NOT close: reset epochs, read/write visibility, denominator
+staleness, rollback, or batch-latency holes.**
+
+v2's Q1 must enumerate each of these as a separate sub-question
+the design has to answer, not collapse them all into "race-safety".
+
+### 2. Scope expansion — Codex finding #2 + Gemini Q1/Q2
+
+v1 had 6 questions. v2 adds:
+
+- **Q1.5 — Sketch decay** (Gemini): how does the design age out
+  byte counts? Periodic zero (sawtooth), EMA (memory/compute
+  doubled), sliding window (double sketch buffers + extra cost).
+  This is decision-load-bearing — the wrong choice destroys
+  accuracy.
+- **Q2.5 — Token-bucket admission ordering** (Gemini): does AFD
+  fire BEFORE the existing `cos_queue_flow_share_limit` admission
+  cap or AFTER? Before = early shedder (saves token capacity for
+  conforming flows); after = double-penalty risk. Also: where
+  exactly does AFD slot in vs `cos_classify.rs:717` and
+  `queue_service/mod.rs:416`?
+- **Q3.5 — V_min double-signal** (Codex): shared_exact already
+  runs MQFQ + V_min sync. Does AFD ECN-marking / dropping interact
+  badly with V_min throttle (worker stalls because peer V_min
+  binds AND gets AFD-marked → two penalties for same condition)?
+- **Q4.5 — Stable global flow hash** (Codex): current
+  `flow_hash_seed` is per-queue-runtime (`flow_hash.rs:39`,
+  `admission.rs:497`). A shared sketch needs a globally consistent
+  hash so flow F maps to bucket B regardless of which worker hashes
+  it. Re-using `cos_flow_bucket_index(seed, flow_key)` is NOT
+  safe across workers without a coordinator-owned shared seed.
+- **Q5.5 — Active-flow denominator estimation** (Codex): "fair share"
+  needs N_active_flows. How estimated and how stale? Coupling to
+  `active_flow_buckets_peak`?
+- **Q6.5 — Per-packet sketch lookup latency** (Codex): hot-path
+  cost of N hash probes + atomic loads at 25 G+. Real budget on
+  this hardware?
+- **Q6.7 — ECN-only behavior for non-ECT traffic** (Codex): TCP
+  flows without ECN negotiation can't receive ECN signals. Does
+  AFD drop them, or fall back to bytes-counted-only?
+
+### 3. Empirical estimate — not defensible without prototype
+
+Both reviewers flagged the +5-10pp guess. Codex: "Analytical math
+can bound collision rate and CPU cost, but not CoV improvement.
+Require a runnable simulator or trace-replay harness if the result
+is decision (a). Analytical-only is acceptable only for
+researched-negative." Gemini: "TCP's reaction to probabilistic ECN
+(especially distinguishing between Cubic, Reno, BBR) is highly
+non-linear and depends heavily on concurrent flow count and RTT.
+Pure guessing will lead to a false positive for implementation."
+
+**v2 changes the deliverable scope:**
+
+- If the research direction looks like decision (a) (file
+  implementation issue), the deliverable MUST include either a
+  minimal Python simulator (simplified TCP state machine + AFD
+  marker) or a direct mapping to a published paper at the same
+  scale.
+- If it looks like (b) researched-negative, analytical-only is
+  acceptable.
+
+### 4. #936 ordering — stale (Codex finding)
+
+v1 said "defer pending #936 revisit". Codex notes #936 plan files
+are absent from current tree (only in git history); the historical
+#936 plan was withdrawn because shared_exact already had MQFQ +
+V_min. v2 reframes:
+
+> AFD is an overlay on current MQFQ + V_min sync. Any future
+> shared per-flow scheduler is a competing implementation path
+> for the same CoV gate, with AFD possibly complementary only
+> after double-signal risk (Q3.5) is modeled.
+
+### 5. CSFQ scope (Codex)
+
+v1 had CSFQ in title but only AFD in body. v2: either renames to
+AFD-only OR adds a short CSFQ evaluation. **v2 adopts the latter:**
+
+> CSFQ requires edge rate labels stamped/propagated through the
+> network. xpf does not stamp such labels and inheriting them from
+> upstream is out of scope. Therefore the feasible design here
+> is effectively AFD/no-edge — record this in the research doc
+> and drop CSFQ from active consideration.
+
+### 6. Race-safety (Gemini)
+
+v1 sketched `[u64; ...]` non-atomic with single-writer discipline.
+**Gemini correction**: in Rust, reading a plain `u64` from another
+thread while it's being written is a **data race and Undefined
+Behavior**, even single-writer. Use `AtomicU64` with
+`Ordering::Relaxed` — overhead on x86 is effectively zero (compiles
+to standard movs) but satisfies the language model. v2 records
+this as a design constraint, not a TBD.
+
+### 7. Decision criterion threshold (Gemini Q3)
+
+v1 left "what % CoV improvement justifies multi-week implementation"
+open. **v2 picks a concrete threshold:** decision (a) requires
+projected CoV improvement ≥ 8 percentage points (28% → ≤ 20%) AND
+aggregate regression ≤ 5%. Below that → (b) researched-negative.
+
+
 
 ## 1. Issue framing
 
