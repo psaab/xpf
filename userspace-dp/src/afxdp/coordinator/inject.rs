@@ -43,6 +43,7 @@ impl super::Coordinator {
             record_disposition(
                 &ident,
                 live,
+                super::DispositionCounters::Cold(live),
                 disposition,
                 packet_length,
                 Some(meta),
@@ -58,7 +59,7 @@ impl super::Coordinator {
                     );
                     record_forwarding_disposition(
                         &ident,
-                        live,
+                        super::DispositionCounters::Cold(live),
                         resolution,
                         packet_length,
                         Some(meta),

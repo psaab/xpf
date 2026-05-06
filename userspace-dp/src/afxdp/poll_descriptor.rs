@@ -116,7 +116,7 @@ pub(super) fn poll_binding_process_descriptor(
                         ingress_zone_override,
                         now_secs,
                         screen,
-                        &binding.live,
+                        telemetry.counters,
                         worker_ctx,
                     ) {
                         binding.scratch.scratch_recycle.push(desc.addr);
@@ -2070,7 +2070,7 @@ pub(super) fn poll_binding_process_descriptor(
                         }
                         record_forwarding_disposition(
                             &worker_ctx.ident,
-                            &binding.live,
+                            DispositionCounters::Hot(telemetry.counters),
                             decision.resolution,
                             desc.len as u32,
                             Some(meta),
@@ -2096,6 +2096,7 @@ pub(super) fn poll_binding_process_descriptor(
                     record_disposition(
                         &worker_ctx.ident,
                         &binding.live,
+                        DispositionCounters::Hot(telemetry.counters),
                         disposition,
                         desc.len as u32,
                         Some(meta),
