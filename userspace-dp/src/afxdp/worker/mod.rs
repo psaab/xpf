@@ -442,6 +442,40 @@ impl BindingWorker {
         }
     }
 }
+
+/// #1188: replace per-tick `.load_full() + Arc::ptr_eq` with `.load() +
+/// Arc::ptr_eq` short-circuit. Returns `Some(new_arc)` when the
+/// `ArcSwap` has been rotated since `cached` was observed; returns
+/// `None` when the cached Arc is still current.
+///
+/// Steady state (no rotation): the `Arc::ptr_eq` short-circuit avoids
+/// the unconditional Arc clone that `.load_full()` performs. At ~10K-
+/// 100K worker ticks/sec × 8 workers, this eliminates ~12 atomic RMW
+/// operations per tick (6 sites × 2 ops for clone + drop) on the
+/// shared Arc control blocks — the bus-saturation issue the ticket
+/// describes.
+///
+/// On actual change: `Guard::into_inner` consumes the observed Guard
+/// and yields the exact Arc snapshot we just compared, avoiding a
+/// second `.load_full()` (which could otherwise return a *newer* Arc
+/// if the coordinator rotated between the `ptr_eq` check and the
+/// second load — small TOCTOU window). Note: `load_full()` is itself
+/// implemented as `Guard::into_inner(self.load())` (arc-swap 1.8.2
+/// `src/lib.rs:414`), so the on-change branch may pay the same as
+/// today. The win is the steady-state short-circuit, not the
+/// on-change path.
+fn load_arc_if_changed<T>(
+    cached: &Arc<T>,
+    shared: &ArcSwap<T>,
+) -> Option<Arc<T>> {
+    let guard = shared.load();
+    if Arc::ptr_eq(cached, &*guard) {
+        None
+    } else {
+        Some(arc_swap::Guard::into_inner(guard))
+    }
+}
+
 pub(crate) fn worker_loop(
     worker_id: u32,
     binding_plans: Vec<BindingPlan>,
@@ -722,51 +756,63 @@ pub(crate) fn worker_loop(
         if **live_validation != validation {
             validation = **live_validation;
         }
-        let live_forwarding = shared_forwarding.load_full();
         let mut rebuild_cos_fast_interfaces = false;
-        if !Arc::ptr_eq(&forwarding, &live_forwarding) {
+        // #1188: per-tick Arc refresh — `.load() + Arc::ptr_eq`
+        // short-circuits the unconditional `.load_full()` clone
+        // when the coordinator hasn't rotated the Arc.
+        if let Some(new_forwarding) =
+            load_arc_if_changed(&forwarding, &shared_forwarding)
+        {
+            // Compare BEFORE assignment — needs both old and new.
             let cos_changed =
-                cos_runtime_config_changed(forwarding.as_ref(), live_forwarding.as_ref());
-            forwarding = live_forwarding;
-            screen_state.update_profiles(forwarding.screen_profiles.clone());
-            sessions.set_timeouts(forwarding.session_timeouts);
+                cos_runtime_config_changed(forwarding.as_ref(), new_forwarding.as_ref());
+
+            // Use NEW values for dependent state updates (forwarding-site
+            // ordering — old `forwarding` is stale once rotated).
+            screen_state.update_profiles(new_forwarding.screen_profiles.clone());
+            sessions.set_timeouts(new_forwarding.session_timeouts);
+
+            forwarding = new_forwarding;
+
             if cos_changed {
                 reset_worker_cos_runtimes(&mut bindings);
                 rebuild_cos_fast_interfaces = true;
             }
         }
-        let live_cos_owner_worker_by_queue = shared_cos_owner_worker_by_queue.load_full();
-        if !Arc::ptr_eq(&cos_owner_worker_by_queue, &live_cos_owner_worker_by_queue) {
-            cos_owner_worker_by_queue = live_cos_owner_worker_by_queue;
+        if let Some(new_x) =
+            load_arc_if_changed(&cos_owner_worker_by_queue, &shared_cos_owner_worker_by_queue)
+        {
+            cos_owner_worker_by_queue = new_x;
             rebuild_cos_fast_interfaces = true;
         }
-        let live_cos_owner_live_by_queue = shared_cos_owner_live_by_queue.load_full();
-        if !Arc::ptr_eq(&cos_owner_live_by_queue, &live_cos_owner_live_by_queue) {
-            cos_owner_live_by_queue = live_cos_owner_live_by_queue;
+        if let Some(new_x) =
+            load_arc_if_changed(&cos_owner_live_by_queue, &shared_cos_owner_live_by_queue)
+        {
+            cos_owner_live_by_queue = new_x;
             rebuild_cos_fast_interfaces = true;
         }
-        let live_cos_shared_root_leases = shared_cos_root_leases.load_full();
-        if !Arc::ptr_eq(&cos_shared_root_leases, &live_cos_shared_root_leases) {
+        if let Some(new_x) =
+            load_arc_if_changed(&cos_shared_root_leases, &shared_cos_root_leases)
+        {
             for binding in bindings.iter_mut() {
                 release_all_cos_root_leases(binding);
                 release_all_cos_queue_leases(binding);
             }
-            cos_shared_root_leases = live_cos_shared_root_leases;
+            cos_shared_root_leases = new_x;
             rebuild_cos_fast_interfaces = true;
         }
-        let live_cos_shared_queue_leases = shared_cos_queue_leases.load_full();
-        if !Arc::ptr_eq(&cos_shared_queue_leases, &live_cos_shared_queue_leases) {
+        if let Some(new_x) =
+            load_arc_if_changed(&cos_shared_queue_leases, &shared_cos_queue_leases)
+        {
             for binding in bindings.iter_mut() {
                 release_all_cos_queue_leases(binding);
             }
-            cos_shared_queue_leases = live_cos_shared_queue_leases;
+            cos_shared_queue_leases = new_x;
             rebuild_cos_fast_interfaces = true;
         }
-        let live_cos_shared_queue_vtime_floors = shared_cos_queue_vtime_floors.load_full();
-        if !Arc::ptr_eq(
-            &cos_shared_queue_vtime_floors,
-            &live_cos_shared_queue_vtime_floors,
-        ) {
+        if let Some(new_x) =
+            load_arc_if_changed(&cos_shared_queue_vtime_floors, &shared_cos_queue_vtime_floors)
+        {
             // #917: Arc-replacement of the V_min floors map.
             // Each shared_exact queue's per-worker slots default
             // to NOT_PARTICIPATING in the new Arc. Workers will
@@ -775,7 +821,7 @@ pub(crate) fn worker_loop(
             // this slot see "not participating" and skip it in
             // V_min reduction (per plan §3.4 / §3.7 lifecycle
             // rules).
-            cos_shared_queue_vtime_floors = live_cos_shared_queue_vtime_floors;
+            cos_shared_queue_vtime_floors = new_x;
             rebuild_cos_fast_interfaces = true;
         }
         if rebuild_cos_fast_interfaces {
