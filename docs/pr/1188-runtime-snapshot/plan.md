@@ -1,5 +1,5 @@
 ---
-status: REVISED v5 — Codex+Gemini round-4 caught two more bugs: (1) `arc_swap::Guard::into_inner` is hallucinated — no such method exists; use `Arc::clone(&*guard)` which still gives TOCTOU avoidance because we clone the exact observed Arc; (2) forwarding-site ordering: `screen_state.update_profiles` + `sessions.set_timeouts` at `worker/mod.rs:731-732` read `forwarding`, must use `new_forwarding` not the cached pre-assignment value. v5 specifies the full forwarding-site code template and scrubs stale prose at lines 59, 192, 234
+status: REVISED v6 — Codex round-5 caught Gemini round-4's hallucination claim was itself wrong. Verified `arc_swap::Guard::into_inner(lease: Self) -> T` exists in arc-swap 1.8.2 (Cargo.lock-confirmed; src/lib.rs). It is strictly better than `Arc::clone(&*guard)` because it transfers ownership via `mem::forget` + raw pointer extraction, avoiding the atomic refcount increment. Reverted to `Guard::into_inner`. v5 forwarding-site ordering template kept. v6 also scrubs the remaining stale `.load_full()` / `Arc::as_ptr` prose Codex flagged at lines 261, 294, 300
 issue: #1188
 phase: Replace `.load_full()` with `.load()` + `Arc::as_ptr` comparison in worker tick loop
 ---
@@ -71,8 +71,9 @@ if let Some(new_forwarding) =
 - Steady state (no config change): saved 12 atomic RMW ops/tick →
   ~0.96B–9.6B ops/sec eliminated from the QPI/UPI bus.
 - On actual config change (rare, < 1/sec normally): one
-  cheap `.load()` + one `Arc::clone` (atomic increment).
-  Negligible at ~1/sec rate.
+  cheap `.load()` + one `Guard::into_inner` (no atomic increment;
+  ownership transfer via `mem::forget`). Negligible at ~1/sec
+  rate.
 - No coordinator-side changes. No new types except the helper
   fn. No semantics change.
 
@@ -166,7 +167,7 @@ forgiving than the forwarding site.
 - v5: full template above shows correct ordering; "use new_X for side effects, then assign" is the rule.
 
 The helper is non-mutating and returns the freshly observed Arc
-(`Arc::clone(&*guard)`). No TOCTOU window, no second `.load_full()`,
+(`arc_swap::Guard::into_inner`). No TOCTOU window, no second `.load_full()`,
 old/new comparison and side effects all use whichever value
 is correct.
 
@@ -185,19 +186,19 @@ To avoid 6 copies of the same pattern, introduce a small helper:
 /// `cos_runtime_config_changed(old, new)` while both the old and
 /// new Arcs are accessible.
 ///
-/// **TOCTOU avoidance (Codex round-2 / Gemini round-4 correction):**
-/// clone the exact `Arc` the `Guard` is observing — `Arc::clone(&*guard)`
-/// — instead of calling `.load_full()` a second time. Calling
-/// `.load_full()` again could return a *newer* Arc if the coordinator
-/// rotated between our `ptr_eq` check and the second load. Cloning
-/// the observed Guard pins the exact snapshot we compared.
+/// **TOCTOU avoidance:** consume the observed `Guard` via
+/// `arc_swap::Guard::into_inner(guard)` to extract the exact Arc
+/// the Guard was observing. This avoids a second `.load_full()`
+/// (which could return a *newer* Arc if the coordinator rotated
+/// between our `ptr_eq` check and the second load) AND avoids the
+/// atomic refcount increment that `Arc::clone(&*guard)` would
+/// incur. `Guard::into_inner` uses `mem::forget` + raw pointer
+/// extraction internally — see arc-swap 1.8.2 `src/lib.rs`.
 ///
-/// **Why not `arc_swap::Guard::into_inner`?** Because that method
-/// does not exist. `arc_swap::Guard` is a hazard-pointer-style protect
-/// — it does not hold its own strong refcount. Converting a Guard
-/// to an owned `Arc<T>` requires an atomic refcount increment via
-/// `Arc::clone`. That increment cost is real and acceptable: it
-/// only fires when the configuration actually changed (rare).
+/// Review note (rounds 4-5): Gemini Pro 3.1 round-4 erroneously
+/// claimed `into_inner` was hallucinated; Codex round-5 verified
+/// it exists in the locked arc-swap version. v6 reverts to
+/// `Guard::into_inner` — strictly better than `Arc::clone(&*guard)`.
 ///
 /// Gemini Pro 3.1 round-2: use idiomatic `Arc::ptr_eq` (the `Guard`
 /// derefs to `&Arc<T>`); `T: ?Sized` is dropped — all 6 call sites
@@ -210,7 +211,7 @@ fn load_arc_if_changed<T>(
     if Arc::ptr_eq(cached, &*guard) {
         None
     } else {
-        Some(Arc::clone(&*guard))
+        Some(arc_swap::Guard::into_inner(guard))
     }
 }
 ```
@@ -258,7 +259,7 @@ The helper is a private fn or a module-local utility.
 | Behavioral regression | **VERY LOW** | Side effects only fire on actual change; same as today |
 | Borrow-checker | LOW | The `Guard` returned by `.load()` is dropped at end of block; no lifetime issues |
 | Performance regression | **VERY LOW** (correctness side) | One extra pointer comparison per tick — negligible |
-| Correctness on rotation | LOW | If the Arc is rotated between the `.load()` ptr comparison and the subsequent `.load_full()`, we just observe the new Arc — slightly newer than the guard, but always-monotonic |
+| Correctness on rotation | LOW | `Guard::into_inner` consumes the exact Arc the `Guard` was observing, so there's no second-load TOCTOU window |
 | Test breakage | LOW | Existing tests assert config-change observation; that path is unchanged |
 
 ## 8. Test plan
@@ -291,17 +292,16 @@ The helper is a private fn or a module-local utility.
    some prior tick. If coordinator rotates twice between two
    ticks, we still observe a difference.
 
-2. **Is the `drop(live_X_guard)` before `.load_full()` necessary?**
-   `.load()` holds a hazard-pointer-style guard internally. If
-   we hold the guard while calling `.load_full()` (which clones
-   the Arc), are we double-borrowing the inner Arc? Confirm
-   `arc_swap` semantics permit this.
+2. ~~Is the `drop(live_X_guard)` before `.load_full()` necessary?~~
+   **Resolved (round-2/round-5):** v6 uses `Guard::into_inner`
+   which consumes the Guard, transferring ownership without an
+   atomic increment. No `drop` ceremony, no second `.load_full()`.
 
 3. **What if 5 of 6 fields are usually changed together?** Then
    the `.load() + ptr_eq` short-circuit hits N times less
-   often, and we pay the `.load_full()` cost N times anyway.
-   Likelihood: low — config reloads change `forwarding`, while
-   CoS lease rotations are independent.
+   often, and we pay one `Guard::into_inner` per changed
+   field anyway. Likelihood: low — config reloads change
+   `forwarding`, while CoS lease rotations are independent.
 
 4. **Should the `shared_validation` `.load()` site (line 721) be
    refactored similarly for consistency?** It's already cheap
