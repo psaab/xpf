@@ -115,7 +115,7 @@ header, VLAN tags (if present), IP header, payload. No metadata prepended.
 
 ### 2. Egress capture
 
-**Location**: `afxdp/tx.rs:transmit_batch()`, after frame is written to
+**Location**: `userspace-dp/src/afxdp/tx/transmit.rs::transmit_batch()`, after frame is written to
 UMEM but before TX ring submission.
 
 ```rust
@@ -449,7 +449,7 @@ Could be offered as a `capture-to-file` option alongside tap interfaces.
 |------|--------|
 | `userspace-dp/src/capture.rs` | NEW: CaptureDispatcher, CaptureWriter, CaptureConfig |
 | `userspace-dp/src/afxdp.rs` | Add capture hooks in poll_binding |
-| `userspace-dp/src/afxdp/tx.rs` | Add capture hooks in transmit paths |
+| `userspace-dp/src/afxdp/tx/transmit.rs` | Add capture hooks in transmit paths |
 | `userspace-dp/src/main.rs` | Handle "capture" control requests |
 | `pkg/dataplane/userspace/protocol.go` | CaptureControlRequest struct |
 | `pkg/dataplane/userspace/manager.go` | EnableCapture, tap interface lifecycle |

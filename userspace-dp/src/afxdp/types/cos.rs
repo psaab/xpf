@@ -227,7 +227,7 @@ impl FlowRrRing {
     ///
     /// O(len) — scans the ring. `len` is bounded by the number of
     /// concurrently active flow buckets, typically 2-16 on
-    /// iperf3-style workloads, up to `COS_FLOW_FAIR_BUCKETS = 1024`
+    /// iperf3-style workloads, up to `COS_FLOW_FAIR_BUCKETS = 4096`
     /// worst case. Returns `true` if the bucket was found and
     /// removed.
     ///
@@ -429,11 +429,14 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     pub(in crate::afxdp) flow_fair: bool,
     /// #785: cached shadow of `WorkerCoSQueueFastPath.shared_exact`
     /// populated by `promote_cos_queue_flow_fair`. Under the current
-    /// promotion policy (`flow_fair = queue.exact && !shared_exact`),
-    /// shared_exact queues are NOT on the flow-fair path — they stay
-    /// on the single-FIFO-per-worker drain with no SFQ DRR ordering.
-    /// The shadow exists so future cross-worker fairness work
-    /// (tracked in issue #786) can branch on it.
+    /// promotion policy (`flow_fair = queue.exact`), shared_exact
+    /// queues ARE on the flow-fair MQFQ path with cross-worker V_min
+    /// sync via `vtime_floor: Arc<...>` (#917). The cached
+    /// `shared_exact` flag remains on `CoSQueueRuntime` so admission
+    /// paths can apply rate-aware caps differently from owner-local
+    /// exact queues — see `cos_queue_flow_share_limit` (#914), which
+    /// returns `max(fair_share*2, bdp_floor).clamp(MIN, buffer_limit)`
+    /// on shared_exact instead of the legacy MIN-floor cap.
     ///
     /// Keeping the field on the queue runtime makes the policy bit
     /// available to hot-path helpers directly from
@@ -561,7 +564,7 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     /// so no hot-path realloc occurs. Each entry is 24 bytes
     /// (`CoSQueuePopSnapshot`), so the worst-case footprint is
     /// `TX_BATCH_SIZE × 24` bytes per queue — on top of the
-    /// 1024-bucket bookkeeping arrays already resident in
+    /// 4096-bucket bookkeeping arrays already resident in
     /// `CoSQueueRuntime`. Lowered from 256 → 64 in #920 (worst-case
     /// stack ~1.5 KB).
     ///
@@ -576,7 +579,7 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     /// #785 Phase 3 — active-set tracking for flow-fair MQFQ.
     /// Still populated on bucket 0→>0 / >0→0 transitions so that
     /// `cos_queue_front`/`cos_queue_pop_front` can scan just the
-    /// small active set rather than all 1024 SFQ buckets to find
+    /// small active set rather than all 4096 SFQ buckets to find
     /// the minimum finish time. Semantically a set (membership),
     /// not a DRR ring — the ordering is governed by
     /// `flow_bucket_finish_bytes`, not ring position.
@@ -715,7 +718,7 @@ pub(in crate::afxdp) struct CoSTimerWheelRuntime {
 
 /// #751: per-queue owner-side drain telemetry. Written by the owner
 /// worker when a drain cycle services this specific queue (see
-/// `drain_shaped_tx`'s per-queue return signal in tx.rs); read via
+/// `drain_shaped_tx`'s per-queue return signal in cos/queue_service/mod.rs); read via
 /// the snapshot path published through ArcSwap to Prometheus and to
 /// `show class-of-service interface`.
 ///

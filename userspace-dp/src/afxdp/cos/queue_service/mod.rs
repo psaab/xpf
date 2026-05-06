@@ -114,7 +114,7 @@ pub(in crate::afxdp) enum ExactCoSScratchBuild {
 /// within a single drain pass, so using the idx for direct indexed
 /// access is safe and avoids the O(#queues) linear scan by
 /// `queue_id` that the first revision of this PR used (Copilot
-/// review, tx.rs:262).
+/// review).
 ///
 /// `queue_id` is retained as a stable 8-bit identifier for the
 /// snapshot and telemetry paths which key on id, not idx.
