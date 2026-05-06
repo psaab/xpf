@@ -184,3 +184,6 @@ Master tip 638c9d07. Verified this session:
 | 2026-05-06 | Memory entry created | `project_per5tuple_fairness_drive.md` + MEMORY.md index line |
 | 2026-05-06 | #1206 worktree rebased onto master 638c9d07 | Clean rebase of plan v3 (3 commits) |
 | 2026-05-06 | Codex dispatched for #1206 implementation | task-mouau0b5-k4xhoa; bulk migration of ~1500 field accesses |
+| 2026-05-06 | #1206 PR #1216 opened | commit 1c60d825; smoke pass A (CoS off) 22.8/22.5 Gbps -P 12 -R 0 retrans; Pass B (CoS on) 24/24 cells 0 retrans, iperf-a shaped 960Mbps |
+| 2026-05-06 | #1206 fix commit f16a68b6 | Codex MERGE-NEEDS-MINOR (vtime comment, 6 stale field-paths) + Copilot HIGH (silent flow_fair invariant violation in pop/push) addressed; .expect() now panics on invariant break |
+| 2026-05-06 | Re-dispatched: Codex task-moujrj05-kidabk + Gemini Pro 3 task-moujr55d-kz8dl6; Copilot @-pinged | Round-2 review on f16a68b6 |
