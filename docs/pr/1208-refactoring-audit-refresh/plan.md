@@ -1,8 +1,34 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: REVISED v2 — addressing Codex (PLAN-NEEDS-MAJOR, task-mou6irv0-rtlyxo) and Gemini (PLAN-NEEDS-MINOR, task-mou6jusc-cbdrtj)
 issue: #1208
 phase: single PR — tooling + doc; no production code
 ---
+
+## Round-1 verdict resolution
+
+Convergent findings (both reviewers):
+
+- **Awk pattern is fundamentally broken.** Codex: doesn't strip 2-line
+  `#[cfg(test)]\nmod tests {` style (e.g., `protocol.rs:1863`, which
+  becomes a false ≥2K candidate). Gemini: `EOF` is not an awk
+  keyword — evaluates to uninitialized `0` (false), so the range
+  pattern matches from start to end-of-file silently, erasing any
+  production code that comes AFTER an inline test block.
+  **v2 abandons the awk approach entirely. Test files are excluded
+  by filename pattern; non-test files use total LOC.**
+- **Skip patterns incomplete.** Both flag missing `*.pb.go`,
+  `*_grpc.pb.go`, `*_bpfel.go`, `*_bpfeb.go`, and missing relocated-
+  test exclusions like `(^|/)(tests\.rs|.*_tests\.rs)$` (the #1034
+  colocation pattern produces these files at thousands of LOC each
+  — frame/tests.rs at 4443, session_glue/tests.rs at 3570 —
+  catastrophic false-positives). **v2 expands the skip regex.**
+- **Sort determinism**: needs `LC_ALL=C sort -k1,1nr -k2,2` for
+  cross-platform reproducibility (Codex + Gemini both flag).
+- **Watch-list vs candidate categorization**: Gemini suggests
+  separate sections / labels. **v2 adds `[REFACTOR]` and `[WATCH]`
+  prefixes.**
+
+
 
 ## 1. Issue framing
 
@@ -26,30 +52,58 @@ Replace static doc with:
 
 ## 3. Concrete deliverables
 
-### `scripts/refactoring-audit.sh`
+### `scripts/refactoring-audit.sh` (v2)
 
 ```bash
 #!/usr/bin/env bash
-# Modularity audit: list files >1500 prod LOC, sorted desc.
-# "Prod LOC" = total LOC minus inline `#[cfg(test)] mod tests` blocks
-# for Rust, minus `_test.go` files for Go.
+# Modularity audit: list files >=1500 LOC, sorted desc with category
+# tags ([REFACTOR] for >=2000, [WATCH] for 1500-1999).
+#
+# Test files and generated code are excluded by name pattern. We
+# deliberately do NOT try to strip inline `#[cfg(test)] mod tests`
+# blocks — that approach is fragile (awk range patterns silently
+# erase production code that follows the test block). The #1034
+# colocated-tests refactor moved most inline test blocks to
+# `tests.rs` siblings anyway; remaining inline test blocks are rare
+# and accepting the modest over-count is simpler than a brittle
+# stripper.
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-# Skip generated code, vendor, target, plan retrospectives, large
-# evidence artifacts.
-SKIP_RE='(target/|vendor/|/zz_generated|_test\.go$|/_KILLED|/_WITHDRAWN|/findings|userspace-dp/target/|\.lock$)'
+# Skip:
+#  - target/, vendor/ (build artifacts)
+#  - generated bpf2go output (*_bpfel.go, *_bpfeb.go, also
+#    *_x86_bpfel.go via the parent pattern)
+#  - generated protobuf (*.pb.go, *_grpc.pb.go)
+#  - generated zz_generated_*
+#  - relocated/colocated tests (#1034): tests.rs, *_tests.rs, *_test.go
+#  - test_support.rs (test-only helpers)
+#  - plan retrospectives marked KILLED / WITHDRAWN
+#  - findings docs (large evidence artifacts under docs/pr/*/)
+#  - lockfiles
+SKIP_RE='(^|/)(target|vendor)/'
+SKIP_RE+='|/zz_generated'
+SKIP_RE+='|_bpfel\.go$|_bpfeb\.go$'
+SKIP_RE+='|\.pb\.go$|_grpc\.pb\.go$'
+SKIP_RE+='|(^|/)tests\.rs$|_tests\.rs$|_test\.go$'
+SKIP_RE+='|(^|/)test_support\.rs$'
+SKIP_RE+='|/_KILLED|/_WITHDRAWN'
+SKIP_RE+='|docs/pr/[^/]+/findings'
+SKIP_RE+='|\.lock$'
+
+categorize() {
+    local loc=$1
+    if [ "$loc" -ge 2000 ]; then echo "[REFACTOR]"; else echo "[WATCH]   "; fi
+}
 
 audit_rust() {
     find userspace-dp/src dpdk_worker -name '*.rs' 2>/dev/null \
         | grep -vE "$SKIP_RE" \
         | while read -r f; do
-            total=$(wc -l < "$f")
-            test_block=$(awk '/^#\[cfg\(test\)\] *mod tests/,EOF' "$f" | wc -l)
-            prod=$((total - test_block))
-            if [ "$prod" -ge 1500 ]; then
-                printf "%5d  %s\n" "$prod" "$f"
+            loc=$(wc -l < "$f")
+            if [ "$loc" -ge 1500 ]; then
+                printf "%s  %5d  %s\n" "$(categorize "$loc")" "$loc" "$f"
             fi
         done
 }
@@ -58,14 +112,15 @@ audit_go() {
     find pkg cmd dpdk_worker -name '*.go' 2>/dev/null \
         | grep -vE "$SKIP_RE" \
         | while read -r f; do
-            prod=$(wc -l < "$f")
-            if [ "$prod" -ge 1500 ]; then
-                printf "%5d  %s\n" "$prod" "$f"
+            loc=$(wc -l < "$f")
+            if [ "$loc" -ge 1500 ]; then
+                printf "%s  %5d  %s\n" "$(categorize "$loc")" "$loc" "$f"
             fi
         done
 }
 
-(audit_rust; audit_go) | sort -rn
+# LC_ALL=C + multi-key sort: descending LOC (col 2), ascending path (col 3)
+(audit_rust; audit_go) | LC_ALL=C sort -k2,2nr -k3,3
 ```
 
 ### `docs/refactoring-audit.md` (rewritten body)
