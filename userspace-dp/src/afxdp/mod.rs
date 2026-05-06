@@ -302,8 +302,8 @@ pub(crate) use self::worker::{
 
 // Lifted from `poll_binding` so the per-descriptor batch function
 // (`poll_binding_process_descriptor`) can take `&mut BatchCounters`.
-// Shape and semantics are byte-for-byte identical to the previous nested
-// definition — see #678 poll_binding split.
+// Originally byte-for-byte identical to the previous nested definition
+// (#678 poll_binding split). #1187 adds 8 disposition-path counters.
 #[derive(Default)]
 pub(in crate::afxdp) struct BatchCounters {
     touched: bool,

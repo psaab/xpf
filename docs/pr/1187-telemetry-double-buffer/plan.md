@@ -166,74 +166,69 @@ sensibly. If this becomes a measured perf concern, a follow-up
 PR can add `#[repr(C)]` + an explicit field order — defer that
 until measurement justifies the constraint.
 
-### 4.2 Routing through `TelemetryContext` (Codex finding #4)
+### 4.2 Routing through `DispositionCounters<'a>` enum (Codex finding #4)
 
 Both `record_disposition()` and `record_forwarding_disposition()`
-are called from both hot and cold paths. Each gets a hot/cold
-split:
+are called from both hot and cold paths. The implementation uses a
+single `DispositionCounters<'a>` enum to dispatch at call time:
 
-- **Hot variants** (called from `poll_descriptor.rs:2071`):
-  - `record_disposition_hot(meta, telemetry: &mut TelemetryContext, ...)`
-  - `record_forwarding_disposition_hot(meta, telemetry: &mut TelemetryContext, ...)`
+```rust
+pub(super) enum DispositionCounters<'a> {
+    Hot(&'a mut BatchCounters),
+    Cold(&'a BindingLiveState),
+}
+```
 
-  Both write through `telemetry.counters` (the existing
-  `&mut BatchCounters`).
+- **Hot callers** (`poll_descriptor.rs:2071`, `poll_descriptor.rs:2096`)
+  pass `DispositionCounters::Hot(telemetry.counters)`. Per-packet
+  counter increments land in the `BatchCounters` and flush at the
+  end of the poll tick.
 
-- **Cold variants** (called from `coordinator/inject.rs:43`):
-  - `record_disposition_cold(meta, live: &BindingLiveState, ...)`
-  - `record_forwarding_disposition_cold(meta, live: &BindingLiveState, ...)`
+- **Cold callers** (`coordinator/inject.rs:43`, `coordinator/inject.rs:59`)
+  pass `DispositionCounters::Cold(live)` and write directly to
+  `BindingLiveState` atomics. The coordinator path doesn't have a
+  `BatchCounters` in scope and fires at RPC rate, not per-packet.
 
-  Keep the current direct-write signature; the coordinator path
-  doesn't have a `TelemetryContext` to thread.
+Each `bump_*` method on `DispositionCounters` carries `#[inline]`
+so the Hot/Cold dispatch is devirtualized by the compiler at
+each call site.
 
-- The shared body for each pair is moved to a private helper
-  that takes whichever counter target the caller has and a
-  single closure for the counter write.
-
-(§4.4 leaves the cold `record_forwarding_disposition_cold`'s
-`ForwardCandidate` arm direct because it's not
-on the hot path.)
+(§4.4 leaves the cold `ForwardCandidate` arm's direct write to
+`live.forward_candidate_packets` because it's only reachable
+from coordinator inject, not the hot path.)
 
 ### 4.3 Extend `flush()`
 
 Mirror the existing pattern — `if self.X != 0 { live.X.fetch_add(...); self.X = 0; }`. 8 new blocks.
 
-### 4.4 `disposition.rs:161` cold-path write (out of scope for this PR)
+### 4.4 `disposition.rs` cold-path `ForwardCandidate` write (out of scope for this PR)
 
-`disposition.rs:161` does
-`live.forward_candidate_packets.fetch_add(...)` inside
-`record_forwarding_disposition`. The hot worker forwarding
+`record_forwarding_disposition`'s `ForwardCandidate` arm does
+`live.forward_candidate_packets.fetch_add(...)` inside the
+`DispositionCounters::Cold` branch. The hot worker forwarding
 branches DO NOT reach this site — the hot path increments
 through `telemetry.counters.forward_candidate_packets` at
-`poll_descriptor.rs:213,1706`. The `disposition.rs:161` write
-is reached only from coordinator inject (cold).
+`poll_descriptor.rs:213,1706`. The cold-branch write
+is reached only from coordinator inject.
 
-**Note (clarification — Codex round-5):** §4.2 already specifies
-both `record_forwarding_disposition_hot` and
-`record_forwarding_disposition_cold`. This §4.4 is specifically
-about whether the cold variant's `ForwardCandidate` arm — which
-includes `disposition.rs:161`'s direct write — should be
-left direct or routed through some new abstraction. The PR
-keeps the cold `ForwardCandidate` arm direct: the coordinator-
-inject caller doesn't have a `TelemetryContext`, the write
-is operator/RPC-driven (`coordinator/inject.rs`), not on the
-worker per-packet path, and there's
-no MESI-thrashing concern. If review-time measurement shows
-it matters, a follow-up PR can build a coordinator-side
-counter-batching mechanism — out of scope here.
+The PR keeps the cold `ForwardCandidate` arm direct: the
+coordinator-inject caller passes `DispositionCounters::Cold(live)`,
+the write is operator/RPC-driven, not on the worker per-packet
+path, and there's no MESI-thrashing concern. If review-time
+measurement shows it matters, a follow-up PR can build a
+coordinator-side counter-batching mechanism — out of scope here.
 
 ### 4.5 `screen_drops` site (MANDATORY batching, no fallback)
 
-`poll_stages.rs:276` has `binding_live.screen_drops.fetch_add(1)`.
-The caller `poll_binding_process_descriptor` already has
-`telemetry: TelemetryContext` in scope. **This PR threads
-`TelemetryContext` (not `&mut BatchCounters`) into
-`stage_screen_check`** so that screen_drops increments go
-through the batch.
+`poll_stages.rs` had `binding_live.screen_drops.fetch_add(1)`.
+**This PR threads `&mut BatchCounters` into `stage_screen_check`**
+so that screen_drops increments go through the batch rather than
+writing directly to `BindingLiveState`.
 
-`TelemetryContext` is the existing carrier — `&mut BatchCounters`
-would be a narrower bypass that breaks the established
-abstraction. Decision: thread `TelemetryContext`.
+`stage_screen_check` receives `counters: &mut BatchCounters`
+directly (not `TelemetryContext`) — it only needs the counter
+field, not the full telemetry context, and narrowing the
+dependency keeps the signature minimal.
 
 Both round-2 reviewers (Codex + Gemini Pro 3.1) explicitly
 rejected the "leave it direct" fallback because SYN flood is a
