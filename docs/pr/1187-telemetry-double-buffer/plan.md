@@ -1,5 +1,5 @@
 ---
-status: REVISED v6 — Codex round-5 NEEDS-MINOR (3 small text fixes); Gemini round-4 was PLAN-READY (no Gemini round-5 needed). v6 reworded §4.4 (no longer "Option A vs B" but just "out of scope for this PR"); scrubbed final "hot-path leak" residue at section 4.4 heading; updated section 10 question 3 to reflect §4.1's softened cache-line wording (no strong "no new line touched" guarantee without #[repr(C)])
+status: REVISED v7 — Codex round-6 NEEDS-MINOR fixes: scrub stale "Option A" text at lines 95 and 194 (§4.4 no longer uses Option A/B framing); correct §4.4 framing about cold-path firing rate ("operator/RPC-driven cold path, not worker per-packet" — coordinator/inject.rs is RPC injection, not 1Hz status poll)
 issue: #1187
 phase: Extend BatchCounters via TelemetryContext to cover hot disposition counters
 ---
@@ -92,7 +92,7 @@ issues, all valid:
 
 A. **No change to `disposition.rs:161`** — it's on the cold
    coordinator-inject path. Hot path already routes correctly.
-   Section 4.4 documents the rationale (Option A: leave the
+   Section 4.4 documents the rationale (leave the
    cold direct write).
 B. **Add 8 new fields to `BatchCounters`** for the disposition
    path:
@@ -191,7 +191,7 @@ split:
   single closure for the counter write.
 
 (§4.4 leaves the cold `record_forwarding_disposition_cold`'s
-`ForwardCandidate` arm direct — Option A — because it's not
+`ForwardCandidate` arm direct because it's not
 on the hot path.)
 
 ### 4.3 Extend `flush()`
@@ -216,7 +216,8 @@ includes `disposition.rs:161`'s direct write — should be
 left direct or routed through some new abstraction. The PR
 keeps the cold `ForwardCandidate` arm direct: the coordinator-
 inject caller doesn't have a `TelemetryContext`, the write
-fires at status-poll rate (1Hz, not per-packet), and there's
+is operator/RPC-driven (`coordinator/inject.rs`), not on the
+worker per-packet path, and there's
 no MESI-thrashing concern. If review-time measurement shows
 it matters, a follow-up PR can build a coordinator-side
 counter-batching mechanism — out of scope here.
