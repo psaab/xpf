@@ -101,8 +101,8 @@ pub(in crate::afxdp) fn cos_flow_hash_seed_from_os() -> u64 {
     nonzero(fallback)
 }
 
-// #711: returns `u16` (was `u8`). With `COS_FLOW_FAIR_BUCKETS = 1024`
-// the mask in `cos_flow_bucket_index` is 10 bits wide; a `u8` return
+// #711: returns `u16` (was `u8`). With `COS_FLOW_FAIR_BUCKETS = 4096`
+// the mask in `cos_flow_bucket_index` is 12 bits wide; a `u8` return
 // would silently re-collapse the hash into 256 buckets and give no
 // benefit from the bucket grow. Returning `u16` preserves the full
 // hash width through the mask step.

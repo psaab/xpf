@@ -309,7 +309,7 @@ fn build_worker_cos_statuses_sums_owner_profile_without_breaking_hist_invariant(
     first.insert(80, make_root());
     // #751: seed per-queue drain stats directly on the first
     // worker's queue runtime. This is what the TX drain loop
-    // writes in production (tx.rs line ~250); tests pin the
+    // writes in production (tx/drain.rs per-queue drain telemetry); tests pin the
     // aggregated value rather than the old binding-wide rollup.
     first.get_mut(&80).unwrap().queues[0]
         .owner_profile

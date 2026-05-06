@@ -1312,7 +1312,7 @@ pub(crate) struct BindingStatus {
     #[serde(rename = "tx_submit_error_drops", default)]
     pub tx_submit_error_drops: u64,
     // #760 instrumentation: post-CoS backup transmit bytes
-    // (drain_pending_tx fallbacks at tx.rs:289/330) that bypass
+    // (drain_pending_tx fallbacks (tx/drain.rs::drain_pending_tx)) that bypass
     // any CoS queue's token gate.
     #[serde(rename = "post_drain_backup_bytes", default)]
     pub post_drain_backup_bytes: u64,
