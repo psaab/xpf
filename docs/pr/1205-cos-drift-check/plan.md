@@ -171,7 +171,13 @@ fn scan_dir(dir: &Path, violations: &mut Vec<Violation>) {
             // v3: NUMERIC_STALE_PATTERNS dropped — `= 1024` was too broad
             // with the wider SCAN_DIRS. Prose patterns above are sufficient.
             // tx.rs:N (digit-suffix) — line-number breadcrumb pattern.
-            if let Some(idx) = line.find(TX_LINE_REF_PATTERN) {
+            // Round-2 PR review (Codex+Gemini): use match_indices to
+            // catch ALL occurrences on a line, not just the first.
+            // A line like `// tx.rs::transmit_batch and tx.rs:262`
+            // would have line.find() see only the first `tx.rs::`
+            // (next char `:`, not digit), accept it, and silently
+            // miss the digit-suffix breadcrumb later.
+            for (idx, _) in line.match_indices(TX_LINE_REF_PATTERN) {
                 let next = line.as_bytes().get(idx + TX_LINE_REF_PATTERN.len()).copied();
                 if next.map(|c| c.is_ascii_digit()).unwrap_or(false) {
                     violations.push(Violation {
@@ -181,6 +187,10 @@ fn scan_dir(dir: &Path, violations: &mut Vec<Violation>) {
                     });
                 }
             }
+            // Self-tests: detects_tx_rs_line_ref_after_module_anchor_on_same_line
+            // pins the find-vs-match_indices fix.
+            // previous_line_allow_marker_does_not_suppress pins same-line
+            // allow-marker scoping.
         }
     }
 }
