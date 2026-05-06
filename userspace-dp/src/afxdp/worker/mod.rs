@@ -464,6 +464,7 @@ impl BindingWorker {
 /// `src/lib.rs:414`), so the on-change branch may pay the same as
 /// today. The win is the steady-state short-circuit, not the
 /// on-change path.
+#[inline]
 fn load_arc_if_changed<T>(
     cached: &Arc<T>,
     shared: &ArcSwap<T>,
