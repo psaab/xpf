@@ -1,5 +1,5 @@
 ---
-status: REVISED v5 — Codex round-4 NEEDS-MINOR (3 fixes), Gemini round-4 PLAN-READY. Specified `record_forwarding_disposition_hot` name explicitly (not just `record_disposition_hot`); scrubbed stale "leak" / "the leaked one" framing throughout; softened cache-line wording to acknowledge source-order-layout dependency (no #[repr(C)] guarantee added)
+status: REVISED v6 — Codex round-5 NEEDS-MINOR (3 small text fixes); Gemini round-4 was PLAN-READY (no Gemini round-5 needed). v6 reworded §4.4 (no longer "Option A vs B" but just "out of scope for this PR"); scrubbed final "hot-path leak" residue at section 4.4 heading; updated section 10 question 3 to reflect §4.1's softened cache-line wording (no strong "no new line touched" guarantee without #[repr(C)])
 issue: #1187
 phase: Extend BatchCounters via TelemetryContext to cover hot disposition counters
 ---
@@ -198,7 +198,7 @@ on the hot path.)
 
 Mirror the existing pattern — `if self.X != 0 { live.X.fetch_add(...); self.X = 0; }`. 8 new blocks.
 
-### 4.4 Consistency fix at `disposition.rs:161` (NOT a hot-path leak)
+### 4.4 `disposition.rs:161` cold-path write (out of scope for this PR)
 
 `disposition.rs:161` does
 `live.forward_candidate_packets.fetch_add(...)` inside
@@ -208,18 +208,18 @@ through `telemetry.counters.forward_candidate_packets` at
 `poll_descriptor.rs:213,1706`. The `disposition.rs:161` write
 is reached only from coordinator inject (cold).
 
-Two consistency options:
-- (A) Leave `disposition.rs:161` direct; it's not on the hot
-  path. Coordinator-inject path doesn't have a
-  `TelemetryContext` to thread.
-- (B) Split `record_forwarding_disposition` into hot/cold
-  variants like §4.2 — same shape as `record_disposition`.
-
-This PR picks **option A** — fixing only what's on the hot
-path. The hot/cold disposition split is in §4.2; the cold
-write here is harmless (status-poll-only, low rate). If
-review-time measurement shows it matters, a follow-up PR can
-extend the split.
+**Note (clarification — Codex round-5):** §4.2 already specifies
+both `record_forwarding_disposition_hot` and
+`record_forwarding_disposition_cold`. This §4.4 is specifically
+about whether the cold variant's `ForwardCandidate` arm — which
+includes `disposition.rs:161`'s direct write — should be
+left direct or routed through some new abstraction. The PR
+keeps the cold `ForwardCandidate` arm direct: the coordinator-
+inject caller doesn't have a `TelemetryContext`, the write
+fires at status-poll rate (1Hz, not per-packet), and there's
+no MESI-thrashing concern. If review-time measurement shows
+it matters, a follow-up PR can build a coordinator-side
+counter-batching mechanism — out of scope here.
 
 ### 4.5 `screen_drops` site (MANDATORY batching, no fallback)
 
@@ -301,8 +301,11 @@ exists to eliminate.
    **Resolved (round-3): yes, mandatory; threading `TelemetryContext`
    not `&mut BatchCounters`.** See §4.5.
 
-3. ~~3 cache lines vs 2?~~ **Resolved (round-3): 3 lines is
-   fine; the new line-3 isn't touched on happy path.** See §4.1.
+3. ~~3 cache lines vs 2?~~ **Resolved (round-3+round-5):** ~3
+   lines is fine; rustc's same-type-contiguous heuristic should
+   keep the existing 12 counters in their happy-path lines. No
+   strong "no new line touched" guarantee without `#[repr(C)]`.
+   See §4.1 caveat.
 
 4. **Should the v2 plan also fold in the Codex-deferred
    counters** (`config_gen_mismatches` etc.) once `tx_errors`
