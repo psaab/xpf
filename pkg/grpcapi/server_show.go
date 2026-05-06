@@ -166,6 +166,13 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 		if strings.HasPrefix(req.Topic, "class-of-service:") {
 			selector = strings.TrimPrefix(req.Topic, "class-of-service:")
 		}
+		// #789 Phase 1: dispatch the `flow-steering` sub-topic to the
+		// controller's status renderer instead of the per-interface
+		// CoS summary.
+		if selector == "flow-steering" {
+			buf.WriteString(s.formatFlowSteering())
+			return &pb.ShowTextResponse{Output: buf.String()}, nil
+		}
 		var status *dpuserspace.ProcessStatus
 		if userspaceStatus, err := s.userspaceDataplaneStatus(); err == nil {
 			status = &userspaceStatus

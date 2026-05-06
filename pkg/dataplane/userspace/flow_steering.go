@@ -44,20 +44,17 @@ import (
 )
 
 const (
-	// flowSteeringRuleLocBase reserves rule locations at 32768+ so xpfd
-	// owns a region disjoint from operator-installed rules (which
-	// conventionally use 0-32767). mlx5 typically supports 32k-128k
-	// rules so an upper half of the table is plenty.
-	flowSteeringRuleLocBase = 32768
-	flowSteeringRuleLocMax  = 65535
-
 	// flowSteeringTickInterval is the controller's reconcile cadence.
 	flowSteeringTickInterval = 1 * time.Second
 
 	// flowSteeringBindingCooldownTicks: a binding whose flow_count
-	// changed in the last N ticks is in cooldown and not eligible
-	// for further re-steer.
-	flowSteeringBindingCooldownTicks = 3
+	// just GREW (received re-steered flow) is parked for N ticks so
+	// we don't pile more onto it. Sources are NOT cooldown'd — their
+	// count drops after a successful re-steer, and we want to keep
+	// migrating from the heaviest binding. The 5-tick per-flow
+	// no-resteer cooldown (`flowSteeringFlowNoResteerTicks`) is the
+	// real ping-pong protection.
+	flowSteeringBindingCooldownTicks = 2
 
 	// flowSteeringFlowNoResteerTicks: a flow placed by the controller
 	// is not eligible for re-placement for N ticks.
@@ -76,8 +73,13 @@ const (
 	// below this threshold.
 	flowSteeringMinImbalance = 2
 
-	// flowSteeringMaxResteerPerTick: K=1-2 per plan §4.1 step 2.
-	flowSteeringMaxResteerPerTick = 2
+	// flowSteeringMaxResteerPerTick: K is the per-tick rule-install
+	// budget. Plan §4.1 originally suggested 1-2 to limit thrash, but
+	// empirical testing on the iperf-c P=12 baseline showed K=2 only
+	// produces ~9 rules over a 30s window — not enough to clear the
+	// ≤20% CoV gate. K=4 lets the controller converge inside the
+	// stable-flow window without overwhelming the hysteresis logic.
+	flowSteeringMaxResteerPerTick = 4
 
 	// flowSteeringHistorySize: ring buffer for `show cos flow-steering`.
 	flowSteeringHistorySize = 32
@@ -292,7 +294,10 @@ func (c *FlowSteeringController) reconcile() error {
 func (c *FlowSteeringController) reconcileIface(ifname string, group []BindingStatus, tick uint64) {
 	c.mu.Lock()
 
-	// Update binding tick-stamps: track which bindings moved last tick.
+	// Update binding tick-stamps: track which bindings just GREW
+	// (received re-steered flow) so we don't pile more onto them.
+	// Sources whose count dropped are NOT cooldown'd — we want to
+	// keep migrating from the heaviest binding.
 	cooldown := make(map[uint32]bool, len(group))
 	for _, b := range group {
 		stamp := c.bind[b.Slot]
@@ -301,25 +306,26 @@ func (c *FlowSteeringController) reconcileIface(ifname string, group []BindingSt
 			c.bind[b.Slot] = stamp
 			continue
 		}
-		if stamp.lastCount != b.ActiveIngressFlowsCount {
-			stamp.lastCount = b.ActiveIngressFlowsCount
+		if b.ActiveIngressFlowsCount > stamp.lastCount {
 			stamp.lastChangeTick = tick
 		}
+		stamp.lastCount = b.ActiveIngressFlowsCount
 		if tick-stamp.lastChangeTick < flowSteeringBindingCooldownTicks {
 			cooldown[b.Slot] = true
 		}
 	}
 
 	// Find min/max bindings and the imbalance score.
-	minSlot, maxSlot, minCount, maxCount := pickMinMax(group)
+	_, maxSlot, minCount, maxCount := pickMinMax(group)
 	if maxCount-minCount < flowSteeringMinImbalance {
 		c.mu.Unlock()
 		return
 	}
 	c.imbalanceDetected.Add(1)
 
-	// Source/destination both must be NOT in cooldown.
-	if cooldown[minSlot] || cooldown[maxSlot] {
+	// Source binding must not be in cooldown — destination cooldown
+	// is enforced inside selectDestinationQueues.
+	if cooldown[maxSlot] {
 		c.mu.Unlock()
 		return
 	}
@@ -339,50 +345,51 @@ func (c *FlowSteeringController) reconcileIface(ifname string, group []BindingSt
 		candidates = candidates[:flowSteeringMaxResteerPerTick]
 	}
 
-	dstQueue := uint32(0)
-	if minSlot < uint32(1<<31) {
-		// Slot is the binding's local queue id in the userspace
-		// helper; the receiving side uses the slot value directly
-		// as the steering target. This is correct under the userspace
-		// dataplane's binding-per-queue model.
-		dstQueue = minSlot
+	// Build an ordered list of destination NIC queues from the
+	// least-loaded bindings (bottom-K under cooldown filter). The
+	// ntuple `action <N>` is the NIC RX ring index — BindingStatus
+	// .QueueID is the actual NIC RX queue the binding is bound to.
+	// Spreading across the bottom-K avoids piling all migrated flows
+	// onto a single queue, which is what made the first iteration
+	// only push CoV from 62.5% to ~44%.
+	dstQueues := selectDestinationQueues(group, cooldown, len(candidates))
+	if len(dstQueues) == 0 {
+		c.mu.Unlock()
+		return
 	}
 
 	// Plan rule installations under the lock; execute ethtool calls
 	// after releasing the lock so a slow shell-out doesn't stall
-	// other Manager paths.
-	type plannedInstall struct {
-		flow    flowSteeringFlowKey
-		ruleLoc int
-		queue   uint32
+	// other Manager paths. The rule slot is auto-allocated by the
+	// kernel — we don't pre-assign locs because real mlx5 hardware
+	// has driver-specific table sizes that aren't 32k.
+	type plan struct {
+		flow  flowSteeringFlowKey
+		queue uint32
 	}
-	var plans []plannedInstall
-	for _, cand := range candidates {
-		key := flowSteeringFlowKey{wire5tuple: cand.Wire5Tuple, iface: ifname}
-		ruleLoc, ok := c.allocateRuleLocLocked(ifname)
-		if !ok {
-			c.installFailures.Add(1)
-			continue
-		}
-		c.markRuleLocUsedLocked(ifname, ruleLoc)
-		plans = append(plans, plannedInstall{flow: key, ruleLoc: ruleLoc, queue: dstQueue})
+	plans := make([]plan, 0, len(candidates))
+	for i, cand := range candidates {
+		plans = append(plans, plan{
+			flow:  flowSteeringFlowKey{wire5tuple: cand.Wire5Tuple, iface: ifname},
+			queue: dstQueues[i%len(dstQueues)],
+		})
 	}
 	c.mu.Unlock()
 
 	for _, p := range plans {
-		if err := c.installRule(p.flow, p.ruleLoc, p.queue); err != nil {
-			c.log.Warn("flow-steering install failed", "iface", ifname, "loc", p.ruleLoc,
+		ruleLoc, err := c.installRule(p.flow, p.queue)
+		if err != nil {
+			c.log.Warn("flow-steering install failed",
+				"iface", ifname,
 				"flow", p.flow.wire5tuple, "queue", p.queue, "err", err)
 			c.installFailures.Add(1)
-			c.mu.Lock()
-			c.releaseRuleLocLocked(ifname, p.ruleLoc)
-			c.mu.Unlock()
 			continue
 		}
 		c.mu.Lock()
+		c.markRuleLocUsedLocked(ifname, ruleLoc)
 		c.rules[p.flow] = &flowSteeringInstalledRule{
 			iface:       ifname,
-			ruleLoc:     p.ruleLoc,
+			ruleLoc:     ruleLoc,
 			targetQueue: p.queue,
 			installedAt: time.Now(),
 			tick:        tick,
@@ -395,7 +402,7 @@ func (c *FlowSteeringController) reconcileIface(ifname string, group []BindingSt
 			Iface:       ifname,
 			Flow:        p.flow.wire5tuple,
 			TargetQueue: p.queue,
-			RuleLoc:     p.ruleLoc,
+			RuleLoc:     ruleLoc,
 			Reason:      fmt.Sprintf("imbalance %d->%d", maxCount, minCount),
 		})
 	}
@@ -441,19 +448,6 @@ func (c *FlowSteeringController) selectStableCandidatesLocked(
 	return out
 }
 
-func (c *FlowSteeringController) allocateRuleLocLocked(ifname string) (int, bool) {
-	used := c.usedLo[ifname]
-	if used == nil {
-		return flowSteeringRuleLocBase, true
-	}
-	for loc := flowSteeringRuleLocBase; loc <= flowSteeringRuleLocMax; loc++ {
-		if _, taken := used[loc]; !taken {
-			return loc, true
-		}
-	}
-	return 0, false
-}
-
 func (c *FlowSteeringController) markRuleLocUsedLocked(ifname string, loc int) {
 	if c.usedLo[ifname] == nil {
 		c.usedLo[ifname] = make(map[int]struct{})
@@ -461,45 +455,72 @@ func (c *FlowSteeringController) markRuleLocUsedLocked(ifname string, loc int) {
 	c.usedLo[ifname][loc] = struct{}{}
 }
 
-func (c *FlowSteeringController) releaseRuleLocLocked(ifname string, loc int) {
-	if m := c.usedLo[ifname]; m != nil {
-		delete(m, loc)
-	}
-}
-
 // installRule shells out to ethtool to program a per-5-tuple ntuple
 // rule. The wire5tuple format produced by the Rust worker is e.g.:
 //
 //	tcp 10.0.0.1:5201 -> 172.16.80.200:43210
+//	tcp [2001:db8::1]:5201 -> [2001:db8::2]:43210
 //
-// Phase 1 only handles the IPv4 TCP shape.
+// Handles TCP IPv4 + IPv6. The driver auto-allocates the rule slot
+// from its supported range (mlx5 in this lab has a 1024-entry table;
+// specifying a fixed `loc 32768+` would fail with "No space left on
+// device"). We parse the kernel's reply "Added rule with ID N" to
+// learn the assigned slot.
 func (c *FlowSteeringController) installRule(
 	flow flowSteeringFlowKey,
-	ruleLoc int,
 	targetQueue uint32,
-) error {
+) (int, error) {
 	parts, err := parseWire5Tuple(flow.wire5tuple)
 	if err != nil {
-		return fmt.Errorf("parse 5-tuple: %w", err)
+		return 0, fmt.Errorf("parse 5-tuple: %w", err)
 	}
-	if parts.proto != "tcp" || !parts.isV4 {
-		// Phase 1: tcp4 only per plan §4.2.
-		return fmt.Errorf("unsupported flow proto/family: %q", flow.wire5tuple)
+	if parts.proto != "tcp" {
+		// Phase 1: TCP only.
+		return 0, fmt.Errorf("unsupported flow proto: %q", flow.wire5tuple)
+	}
+	flowType := "tcp4"
+	if !parts.isV4 {
+		flowType = "tcp6"
 	}
 	args := []string{
 		"-N", flow.iface,
-		"flow-type", "tcp4",
+		"flow-type", flowType,
 		"src-ip", parts.srcIP,
 		"dst-ip", parts.dstIP,
 		"src-port", strconv.Itoa(int(parts.srcPort)),
 		"dst-port", strconv.Itoa(int(parts.dstPort)),
 		"action", strconv.FormatUint(uint64(targetQueue), 10),
-		"loc", strconv.Itoa(ruleLoc),
 	}
-	if _, err := c.runEthtool(args...); err != nil {
-		return fmt.Errorf("ethtool %s: %w", strings.Join(args, " "), err)
+	out, err := c.runEthtool(args...)
+	if err != nil {
+		return 0, fmt.Errorf("ethtool %s: %w (output=%s)", strings.Join(args, " "), err, out)
 	}
-	return nil
+	id, err := parseEthtoolRuleID(out)
+	if err != nil {
+		return 0, fmt.Errorf("parse rule id from ethtool output %q: %w", out, err)
+	}
+	return id, nil
+}
+
+// parseEthtoolRuleID parses the kernel's reply
+//
+//	Added rule with ID 1023
+//
+// returning the assigned rule slot. If the reply is empty or doesn't
+// match, returns an error so the caller can surface it.
+func parseEthtoolRuleID(out string) (int, error) {
+	for _, line := range strings.Split(out, "\n") {
+		const prefix = "Added rule with ID "
+		if i := strings.Index(line, prefix); i >= 0 {
+			tok := strings.TrimSpace(line[i+len(prefix):])
+			id, err := strconv.Atoi(tok)
+			if err != nil {
+				return 0, err
+			}
+			return id, nil
+		}
+	}
+	return 0, fmt.Errorf("no rule-id line")
 }
 
 func (c *FlowSteeringController) deleteRule(ifname string, ruleLoc int) error {
@@ -733,6 +754,54 @@ func bindingBySlot(group []BindingStatus, slot uint32) *BindingStatus {
 		}
 	}
 	return nil
+}
+
+// selectDestinationQueues returns up to K NIC RX queues drawn from the
+// least-loaded non-cooldown bindings, deduplicated. Bindings are
+// scored by ActiveIngressFlowsCount asc, then slot asc for stable
+// tie-breaks. Multiple bindings can share a NIC queue (HA
+// mode → 12 bindings, 6 queues), so dedup by QueueID — round-robin
+// distribution among k unique queues is what flattens per-queue
+// imbalance.
+func selectDestinationQueues(
+	group []BindingStatus,
+	cooldown map[uint32]bool,
+	k int,
+) []uint32 {
+	if k <= 0 || len(group) == 0 {
+		return nil
+	}
+	type entry struct {
+		slot    uint32
+		queue   uint32
+		count   uint32
+	}
+	scored := make([]entry, 0, len(group))
+	for _, b := range group {
+		if cooldown[b.Slot] {
+			continue
+		}
+		scored = append(scored, entry{slot: b.Slot, queue: b.QueueID, count: b.ActiveIngressFlowsCount})
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].count != scored[j].count {
+			return scored[i].count < scored[j].count
+		}
+		return scored[i].slot < scored[j].slot
+	})
+	out := make([]uint32, 0, k)
+	seen := make(map[uint32]struct{}, k)
+	for _, e := range scored {
+		if _, dup := seen[e.queue]; dup {
+			continue
+		}
+		seen[e.queue] = struct{}{}
+		out = append(out, e.queue)
+		if len(out) >= k {
+			break
+		}
+	}
+	return out
 }
 
 func flowSteeringHash(s string) uint64 {

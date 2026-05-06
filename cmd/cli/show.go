@@ -117,6 +117,10 @@ func (c *ctl) handleShow(args []string) error {
 			}
 			return c.showText(topic)
 		}
+		// #789 Phase 1: closed-loop NIC ntuple flow steering controller.
+		if len(args) >= 2 && args[1] == "flow-steering" {
+			return c.showText("class-of-service:flow-steering")
+		}
 		printRemoteTreeHelp("show class-of-service:", "show", "class-of-service")
 		return nil
 

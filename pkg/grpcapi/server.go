@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"syscall"
 	"time"
 
@@ -102,6 +103,54 @@ func (s *Server) userspaceDataplaneStatus() (dpuserspace.ProcessStatus, error) {
 		return dpuserspace.ProcessStatus{}, fmt.Errorf("userspace status unavailable")
 	}
 	return provider.Status()
+}
+
+// formatFlowSteering renders the controller status for #789
+// `show class-of-service flow-steering`. Returns a one-line
+// "unavailable" message when the dataplane is not the userspace
+// backend, so remote operators see something instead of an empty
+// response.
+func (s *Server) formatFlowSteering() string {
+	provider, ok := s.dp.(interface {
+		FlowSteering() *dpuserspace.FlowSteeringController
+	})
+	if !ok {
+		return "flow-steering: unavailable (dataplane is not the userspace backend)\n"
+	}
+	ctrl := provider.FlowSteering()
+	if ctrl == nil {
+		return "flow-steering: unavailable\n"
+	}
+	m := ctrl.MetricsSnapshot()
+	state := "disabled"
+	if m.Enabled {
+		state = "enabled"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Flow steering controller (#789):\n")
+	fmt.Fprintf(&b, "  State: %s\n", state)
+	fmt.Fprintf(&b, "  Rules installed:    %d\n", m.RulesInstalled)
+	fmt.Fprintf(&b, "  Rules removed:      %d\n", m.RulesRemoved)
+	fmt.Fprintf(&b, "  Imbalance detected: %d\n", m.ImbalanceDetected)
+	fmt.Fprintf(&b, "  Install failures:   %d\n", m.InstallFailures)
+	b.WriteString("\n")
+	hist := ctrl.HistorySnapshot()
+	if len(hist) == 0 {
+		b.WriteString("No re-steer events recorded.\n")
+		return b.String()
+	}
+	b.WriteString("Recent re-steer events:\n")
+	for _, ev := range hist {
+		fmt.Fprintf(&b, "  %s  iface=%s  loc=%d  q=%d  flow=%q  reason=%s\n",
+			ev.At.Format("15:04:05"),
+			ev.Iface,
+			ev.RuleLoc,
+			ev.TargetQueue,
+			ev.Flow,
+			ev.Reason,
+		)
+	}
+	return b.String()
 }
 
 func (s *Server) userspaceDataplaneControl() (interface {
