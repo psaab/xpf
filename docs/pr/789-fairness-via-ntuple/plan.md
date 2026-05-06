@@ -1,5 +1,5 @@
 ---
-status: REVISED v5 — Codex round-4 PLAN-NEEDS-MAJOR (smaller text/anchor issues; design substantively correct). v5 fixes: scrubbed remaining stale "1 MB + 3 ticks" text at §6, fixed §10 question 2 (now resolved), corrected `active_flows_count` typo at §5, anchored 1 Hz publication cadence to a NEW time-gated checkpoint near `worker/mod.rs:1071` (NOT lifecycle.rs flush sites which fire per-poll), spelled out installed_at_ns write-site preservation rule (set once at true creation lines 677/757; preserved across refresh paths at 815/905 that currently rewrite `install_epoch`)
+status: REVISED v6 — Codex round-5 PLAN-NEEDS-MINOR (2 wording cleanups; "no production blocker remains in the design"). v6 fixes: scrubbed final "1 MB" residue at §10 Q3 (Phase 1 has NO byte gate; selection is install_age + last_seen_age recency only); tightened §4.3 `installed_at_ns` write-site sentence — now explicit "Set ONCE at the **true creation** install paths (677, 757); refresh paths (815, 905) MUST preserve existing value"
 issue: #789 (parent), #936 (path A — declined for aggregate hit), #937 (path B — current scope)
 phase: Single PR — closed-loop ntuple flow steering for shared_exact CoS classes (Phase 1 includes lifecycle + hysteresis + observability per round-1 review)
 ---
@@ -183,8 +183,11 @@ Worker-side changes (`userspace-dp/src/session/mod.rs`):
 - Add `installed_at_ns: u64` field to `SessionEntry` (existing
   `install_epoch` is a per-table counter at line 117 — incremented
   via `next_epoch()` — NOT a wall-clock or monotonic time and
-  cannot yield `install_age_secs`). Set once at the same install
-  paths to `monotonic_nanos()`.
+  cannot yield `install_age_secs`). Set ONCE at the **true
+  creation** install paths (lines 677, 757) to `monotonic_nanos()`.
+  Refresh paths (lines 815, 905) MUST preserve the existing
+  `installed_at_ns` while they rewrite `install_epoch` — see
+  the preservation rule below.
 - **Write-site preservation rule (Codex round-4 finding):** the
   existing refresh code at lines 815 and 905 currently rewrites
   `install_epoch` (because that field is a counter that needs to
@@ -418,9 +421,15 @@ Prometheus counters:
    `installed_on_binding_slot == self.slot` AND `last_seen_age
    < 1s`. See §4.3.
 
-3. **Hysteresis tuning.** 3-tick cooldown / 5-tick no-resteer
-   / 1 MB stable-flow gate — are these defensible defaults?
-   What about a flow that bursts above 1 MB then idles?
+3. **Hysteresis tuning.** 3-tick (3s) cooldown after a binding
+   is re-steered / 5-tick (5s) no-resteer of a flow we just
+   placed / `install_age_secs >= 3` AND `last_seen_age_ms < 1000`
+   stable-flow gate per §4.3 — are these defensible defaults?
+   What about a flow that's stable for 5s then briefly idles
+   for 2s and resumes? The recency filter would drop it from
+   the candidate pool during the idle window — fine for
+   selection, but the no-resteer cooldown should still apply
+   if it had been re-steered earlier.
 
 4. **Conntrack surface area.** When a re-steered flow triggers
    `session_misses` on the new worker, the shared-map lookup
