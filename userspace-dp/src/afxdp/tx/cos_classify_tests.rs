@@ -408,7 +408,7 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
 
     // Items now Local. flow_fair=true stores items in
     // per-bucket VecDeques at `flow_bucket_items[bucket]`,
-    // not in `queue.items`.
+    // not in `queue.hot.items`.
     let mut total_items = 0;
     for bucket in [bucket_a, bucket_b] {
         for item in test_flow_fair_state(queue).flow_bucket_items[bucket].iter() {

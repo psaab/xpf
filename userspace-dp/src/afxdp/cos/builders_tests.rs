@@ -179,7 +179,7 @@ fn build_cos_interface_runtime_zero_shaping_rate_starts_with_full_root_tokens() 
 fn build_cos_interface_runtime_zero_queue_rate_starts_with_full_queue_tokens() {
     // #916: transparent queue. When transmit_rate_bytes == 0
     // (scheduler had no rate AND parent root has no shaping rate),
-    // queue.tokens MUST start at the buffer cap so the queue
+    // queue.hot.tokens MUST start at the buffer cap so the queue
     // can drain immediately. Otherwise an exact queue with rate=0
     // starts at 0 and waits forever for a refill that never arrives.
     let runtime = build_cos_interface_runtime(
