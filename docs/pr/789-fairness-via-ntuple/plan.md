@@ -1,5 +1,5 @@
 ---
-status: REVISED v2 — Codex + Gemini Pro 3.1 round-1 PLAN-NEEDS-MAJOR; both verified mlx5 ntuple is real HW redirect; major findings folded into Phase 1 (rule lifecycle, hysteresis, wire 5-tuple semantics, flow-count source, tightened #840 distinction, transient aggregate gate)
+status: REVISED v3 — Codex round-2 PLAN-NEEDS-MAJOR (data source doesn't exist as written; SessionTable.len() counts installed sessions not ingress-active flows); Gemini Pro 3.1 round-2 PLAN-NEEDS-MINOR (ingress-only counting + transient retx monitoring); v3 specifies a real ingress-active flow inventory mechanism, restores ≤20% CoV gate, scopes byte-rate selection to Phase 2 (Phase 1 picks "any 1s-active stable flow")
 issue: #789 (parent), #936 (path A — declined for aggregate hit), #937 (path B — current scope)
 phase: Single PR — closed-loop ntuple flow steering for shared_exact CoS classes (Phase 1 includes lifecycle + hysteresis + observability per round-1 review)
 ---
@@ -158,16 +158,67 @@ ntuple rules match the packet **as the NIC sees it**:
   mlx5 ntuple but deferred — the iperf-c P=12 baseline test is
   IPv4 (172.16.80.200).
 
-### 4.3 BindingStatus extension
+### 4.3 Ingress-active flow inventory (Codex round-2 critical finding)
 
-Add `active_flows_count: u64` to `BindingStatus` in
-`userspace-dp/src/protocol.rs:1149`. Populated from the
-worker's session-table size at status-poll time.
+Codex round-2 correctly identified that `binding.flow.session_table.len()`
+is the wrong surface — `binding.flow` is `WorkerFlowCacheState`,
+not a session table; `SessionTable::len()` counts installed
+sessions (not ingress-active); after a re-steer, the old worker's
+session entry persists until session timeout (typically 30s+).
 
-This is a small surface change but enables the controller to
-get accurate flow counts without subscribing to event-stream.
+**v3 mechanism: per-session binding-slot stamping + recency-filtered
+counting.**
 
-### 4.4 Configuration knob
+Worker-side changes (`userspace-dp/src/session/mod.rs`):
+- Add `installed_on_binding_slot: u32` field to `SessionEntry`
+  (line ~111). Set at install time (`SessionTable::insert` or
+  equivalent) to the slot value of the binding whose worker is
+  currently processing the packet.
+- New method `SessionTable::ingress_active_flows_for_binding(
+  &self, slot: u32, now_ns: u64, recency_window_ns: u64) ->
+  ActiveFlowInventory` returning:
+  - `count: u32` — number of sessions where
+    `installed_on_binding_slot == slot` AND
+    `now_ns - last_seen_ns < recency_window_ns` (default 1s).
+  - `top_k: SmallVec<[(SessionKey, last_seen_ns); 16]>` — up to K
+    eligible flows for the controller to pick from. Phase 1 K=16.
+
+`BindingStatus` (in `userspace-dp/src/protocol.rs:1149`) gains:
+- `active_ingress_flows_count: u32` — projected from the new
+  worker-side method.
+- `active_ingress_flows_sample: Vec<ActiveFlowSample>` — up to 16
+  recently-active ingress flow tuples with `(wire_5tuple,
+  install_age_secs, last_seen_age_ms)`. Used by the controller to
+  pick "stable" flows.
+
+Phase 1 selects flows for re-steer using:
+- Stability: `install_age_secs >= 3` (excludes mid-handshake)
+- Recency: `last_seen_age_ms < 1000` (excludes idle/stale)
+- Selection within those: deterministic by hash of 5-tuple (avoid
+  arbitrary picks; reproducible logs).
+
+**Byte-rate-based selection is DEFERRED to Phase 2** because
+`SessionEntry` has no per-session byte counter today and adding
+one to the worker hot path is non-trivial:
+- Worker per-packet hot path would write to `entry.bytes_total +=
+  packet_len` on every packet — adds 1 cache-line write per
+  packet to the existing session entry.
+- Acceptable cost (already touching the entry for `last_seen_ns`
+  update) but worth measuring before committing.
+
+For Phase 1, "any 1s-active stable ingress flow" is good enough
+to demonstrate the mechanism. The Phase 0 experiment hit
+CoV 3.8% with deterministic per-port-mod assignment, so even
+imperfect flow selection should deliver a large CoV win.
+
+**Phase 1 explicit limitation: only steer non-NAT flows.**
+Detect via `decision.nat.is_some()` on the SessionEntry — skip
+NAT'd flows for now. NAT-aware wire-tuple extraction
+(reconstructing the pre-NAT tuple from SessionDecision metadata)
+is Phase 3 hardening. The iperf-c shaper test case is direct
+routing without SNAT/DNAT, so non-NAT scope covers it.
+
+### 4.5 Configuration knob
 
 Single CLI knob:
 
@@ -182,7 +233,7 @@ the operator doesn't want HW rules installed.
 Per-class enable/disable deferred to a follow-up PR (Phase 2 in
 v1 plan terminology).
 
-### 4.5 Observability
+### 4.6 Observability
 
 New CLI command:
 ```
@@ -263,7 +314,7 @@ Prometheus counters:
   - Run iperf-c P=12 t=20 across 5 reps
   - Capture per-flow distribution, compute CoV
   - **PASS gate v2:**
-    - CoV ≤ 30% on iperf-c P=12 (interim — meaningful improvement)
+    - CoV ≤ 20% on iperf-c P=12 (the #789 gate; per Codex round-2 — Phase 0 experiment hit 3.8% with deterministic mod-8 distribution, so the closed-loop controller picking stable ingress flows should clear ≤20% comfortably)
     - Aggregate ≥ 22 Gb/s averaged (no >5% regression vs 23.46 baseline)
     - Retransmit count ≤ 100 averaged
     - `session_misses` increment per re-steer ≤ 100
