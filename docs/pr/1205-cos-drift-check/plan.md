@@ -1,5 +1,5 @@
 ---
-status: REVISED v2 — addressing Codex (PLAN-NEEDS-MINOR, task-mou6j4qs-48a6t6) and Gemini (PLAN-NEEDS-MINOR, task-mou6jz6b-xdep7x)
+status: REVISED v3 — round-2 verdict: Codex PLAN-NEEDS-MINOR (broad numeric pattern), Gemini PLAN-READY. v3 drops NUMERIC_STALE_PATTERNS; ready to ship.
 issue: #1205
 phase: single PR — new test only; no production code
 ---
@@ -90,11 +90,12 @@ const STALE_PATTERNS: &[(&str, &str)] = &[
      "value is 4096 since #785 Phase 3"),
 ];
 
-// Numeric-suffix patterns: blocked iff followed by a non-`[0-9_]` char.
-// Avoids false-positive on legitimate larger numerals like `1024_000`.
-const NUMERIC_STALE_PATTERNS: &[(&str, &str)] = &[
-    ("= 1024", "value is 4096 since #785 Phase 3"),
-];
+// v3: Codex round-2 caught that `= 1024` is too broad with the wider
+// SCAN_DIRS — flags legitimate live constants in mod.rs:201,
+// neighbor.rs:490, flow_cache.rs (unrelated buffer sizes etc).
+// The 8 prose patterns above cover the actual stale CoS-bucket
+// references unambiguously; the numeric pattern adds risk without
+// closing a real gap. Removed in v3.
 
 // `tx.rs:` followed by an ASCII digit — old line-number breadcrumbs
 // are stale across the tx.rs decomposition (#956+). Module/function
@@ -167,17 +168,8 @@ fn scan_dir(dir: &Path, violations: &mut Vec<Violation>) {
                     violations.push(Violation { path: path.clone(), line: lineno + 1, pattern, rationale });
                 }
             }
-            // Numeric-stale patterns: pattern hit, AND next char (if any)
-            // is NOT in [0-9_]. Avoids false-positive on `1024_000`.
-            for (pattern, rationale) in NUMERIC_STALE_PATTERNS {
-                if let Some(idx) = line.find(pattern) {
-                    let next = line.as_bytes().get(idx + pattern.len()).copied();
-                    let safe_next = next.map(|c| c.is_ascii_digit() || c == b'_').unwrap_or(false);
-                    if !safe_next {
-                        violations.push(Violation { path: path.clone(), line: lineno + 1, pattern, rationale });
-                    }
-                }
-            }
+            // v3: NUMERIC_STALE_PATTERNS dropped — `= 1024` was too broad
+            // with the wider SCAN_DIRS. Prose patterns above are sufficient.
             // tx.rs:N (digit-suffix) — line-number breadcrumb pattern.
             if let Some(idx) = line.find(TX_LINE_REF_PATTERN) {
                 let next = line.as_bytes().get(idx + TX_LINE_REF_PATTERN.len()).copied();
