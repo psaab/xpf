@@ -574,10 +574,10 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
     // pop's snapshot interpretation.
     //
     // Footprint: 64 KB stack memcpy of two [u64; COS_FLOW_FAIR_BUCKETS]
-    // arrays (32 KB each at 4096 buckets — the GEMINI-NEXT.md fairness
+    // arrays (32 KB each at 4096 buckets — the #785 fairness
     // bump from 1024). Both are already cache-resident in the queue;
     // demote is a rare TX-frame-exhaustion fallback called from
-    // enqueue_local_into_cos at tx/cos_classify.rs::enqueue_local_into_cos, not a hot-path operation.
+    // tx/cos_classify.rs::enqueue_local_into_cos, not a hot-path operation.
     let saved_queue_vtime = queue.queue_vtime;
     let saved_head_finish = queue.flow_bucket_head_finish_bytes;
     let saved_tail_finish = queue.flow_bucket_tail_finish_bytes;
