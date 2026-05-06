@@ -56,9 +56,6 @@ const (
 	// real ping-pong protection.
 	flowSteeringBindingCooldownTicks = 2
 
-	// flowSteeringFlowNoResteerTicks: a flow placed by the controller
-	// is not eligible for re-placement for N ticks.
-	flowSteeringFlowNoResteerTicks = 5
 
 	// flowSteeringStableInstallAgeSecs: minimum install_age_secs for a
 	// flow to be considered stable enough to re-steer (excludes
@@ -72,6 +69,13 @@ const (
 	// flowSteeringMinImbalance: skip reconcile if max-min count is
 	// below this threshold.
 	flowSteeringMinImbalance = 2
+
+	// flowSteeringRuleStaleTicks: a rule whose flow has not appeared
+	// in any worker sample for this many ticks is evicted. Bounds
+	// the rule table size — without this, sticky placement (no
+	// per-flow re-steer) would accumulate one rule per ever-seen
+	// flow as short-lived TCP connections come and go.
+	flowSteeringRuleStaleTicks = 30
 
 	// flowSteeringMaxResteerPerTick: K is the per-tick rule-install
 	// budget. Plan §4.1 originally suggested 1-2 to limit thrash, but
@@ -104,6 +108,7 @@ type flowSteeringInstalledRule struct {
 	targetQueue uint32
 	installedAt time.Time
 	tick        uint64
+	lastSeenTick uint64
 	flow        flowSteeringFlowKey
 }
 
@@ -280,11 +285,63 @@ func (c *FlowSteeringController) reconcile() error {
 		if !st.eligible {
 			continue
 		}
+		// Mark rules whose flows are still appearing in worker
+		// samples — the lastSeenTick stamp drives stale-rule eviction
+		// below. We do this BEFORE reconcileIface so eviction picks
+		// up the freshest data.
+		c.refreshRuleLastSeen(ifname, group, tick)
 		c.reconcileIface(ifname, group, tick)
 	}
 
+	c.evictStaleRules(tick)
 	c.expireBindingTickStamps(tick)
 	return nil
+}
+
+// refreshRuleLastSeen stamps lastSeenTick on every controller-owned
+// rule whose flow is currently visible in a worker sample for the
+// given interface. Anything not stamped this tick will eventually
+// age out via evictStaleRules.
+func (c *FlowSteeringController) refreshRuleLastSeen(ifname string, group []BindingStatus, tick uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, b := range group {
+		for _, f := range b.ActiveIngressFlowsSample {
+			key := flowSteeringFlowKey{wire5tuple: f.Wire5Tuple, iface: ifname}
+			if r := c.rules[key]; r != nil {
+				r.lastSeenTick = tick
+			}
+		}
+	}
+}
+
+// evictStaleRules removes controller-owned rules whose flows have
+// not appeared in a worker sample for `flowSteeringRuleStaleTicks`
+// ticks. This keeps the rule table from growing indefinitely as
+// short-lived TCP connections come and go. Sticky rules (`select`
+// permanently excludes already-steered flows) means we'd otherwise
+// accumulate one rule per ever-seen flow.
+func (c *FlowSteeringController) evictStaleRules(tick uint64) {
+	c.mu.Lock()
+	stale := make([]*flowSteeringInstalledRule, 0)
+	for key, r := range c.rules {
+		if tick-r.lastSeenTick > flowSteeringRuleStaleTicks {
+			stale = append(stale, r)
+			delete(c.rules, key)
+			if m := c.usedLo[r.iface]; m != nil {
+				delete(m, r.ruleLoc)
+			}
+		}
+	}
+	c.mu.Unlock()
+	for _, r := range stale {
+		if err := c.deleteRule(r.iface, r.ruleLoc); err != nil {
+			c.log.Warn("flow-steering evict failed",
+				"iface", r.iface, "loc", r.ruleLoc, "err", err)
+			continue
+		}
+		c.rulesRemoved.Add(1)
+	}
 }
 
 // reconcileIface runs the per-interface decision: detect imbalance
@@ -336,7 +393,7 @@ func (c *FlowSteeringController) reconcileIface(ifname string, group []BindingSt
 		c.mu.Unlock()
 		return
 	}
-	candidates := c.selectStableCandidatesLocked(ifname, src.ActiveIngressFlowsSample, tick)
+	candidates := c.selectStableCandidatesLocked(ifname, src.ActiveIngressFlowsSample)
 	if len(candidates) == 0 {
 		c.mu.Unlock()
 		return
@@ -388,12 +445,13 @@ func (c *FlowSteeringController) reconcileIface(ifname string, group []BindingSt
 		c.mu.Lock()
 		c.markRuleLocUsedLocked(ifname, ruleLoc)
 		c.rules[p.flow] = &flowSteeringInstalledRule{
-			iface:       ifname,
-			ruleLoc:     ruleLoc,
-			targetQueue: p.queue,
-			installedAt: time.Now(),
-			tick:        tick,
-			flow:        p.flow,
+			iface:        ifname,
+			ruleLoc:      ruleLoc,
+			targetQueue:  p.queue,
+			installedAt:  time.Now(),
+			tick:         tick,
+			lastSeenTick: tick,
+			flow:         p.flow,
 		}
 		c.mu.Unlock()
 		c.rulesInstalled.Add(1)
@@ -410,15 +468,24 @@ func (c *FlowSteeringController) reconcileIface(ifname string, group []BindingSt
 
 // selectStableCandidatesLocked picks flows from the sample that are
 // (a) past the install_age stability gate, (b) within the
-// last_seen recency window, (c) not already steered, (d) outside
-// the per-flow no-resteer cooldown. Selection is deterministic by
-// hash(wire_5tuple) so logs and tests are reproducible.
+// last_seen recency window, (c) NOT already steered by us. Selection
+// is deterministic by hash(wire_5tuple) so logs and tests are
+// reproducible.
+//
+// A flow that already has a controller-owned ntuple rule is
+// permanently out of the candidate pool until the rule is removed
+// (via flushAllRules on disable/Stop, or future per-flow eviction).
+// The plan v6 5-tick "no-resteer cooldown" turned out to be wrong
+// shape: it allowed the controller to ALSO re-steer the same flow
+// after the cooldown expired, leaving stale rules and inflating
+// rule count without improving fairness. Sticky placement is the
+// right invariant for closed-loop ntuple — once a flow is on a
+// queue, leave it there.
 //
 // MUST be called with c.mu held.
 func (c *FlowSteeringController) selectStableCandidatesLocked(
 	ifname string,
 	sample []ActiveFlowSampleStatus,
-	tick uint64,
 ) []ActiveFlowSampleStatus {
 	out := make([]ActiveFlowSampleStatus, 0, len(sample))
 	for _, f := range sample {
@@ -429,11 +496,9 @@ func (c *FlowSteeringController) selectStableCandidatesLocked(
 			continue
 		}
 		key := flowSteeringFlowKey{wire5tuple: f.Wire5Tuple, iface: ifname}
-		if existing := c.rules[key]; existing != nil {
-			// Per-flow no-resteer cooldown.
-			if tick-existing.tick < flowSteeringFlowNoResteerTicks {
-				continue
-			}
+		if c.rules[key] != nil {
+			// Already steered — sticky placement.
+			continue
 		}
 		out = append(out, f)
 	}
