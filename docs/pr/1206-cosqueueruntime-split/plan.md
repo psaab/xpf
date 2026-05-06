@@ -232,13 +232,13 @@ pub(in crate::afxdp) struct VMinQueueState {
 
 pub(in crate::afxdp) struct CoSQueueTelemetry {
     // Owner-write scratch counters drained on publish via existing
-    // CoSStatusInterval cadence. Explicit fields per Codex round-1 —
-    // NO `...` ellipsis. Real runtime fields at types/cos.rs:621-660:
-    pub(in crate::afxdp) drain_invocations_scratch: u64,
-    pub(in crate::afxdp) bytes_serviced_scratch: u64,
+    // CoSStatusInterval cadence. Field list mirrors current
+    // types/cos.rs:621-660 (CoSQueueDropCounters at :621,
+    // CoSQueueOwnerProfile at :636) — no `...` ellipsis.
     pub(in crate::afxdp) drop_counters: CoSQueueDropCounters,
-    pub(in crate::afxdp) owner_profile: CoSOwnerProfileScratch,
-    // (final field list verified against current types/cos.rs at impl time)
+    pub(in crate::afxdp) owner_profile: CoSQueueOwnerProfile,
+    // Other v2 telemetry fields enumerated against current types/cos.rs
+    // at implementation time (this is pure code motion; no new fields).
 }
 ```
 
@@ -309,8 +309,10 @@ ergonomic noise.
 ## 6. Hidden invariants the change must preserve
 
 - **MQFQ vtime semantics** (`pop.rs:112` served-finish, etc.) — every
-  current line referencing `queue.queue_vtime` must end up referencing
-  `queue.hot.queue_vtime`. No behavior change.
+  current line referencing `queue.queue_vtime` must end up
+  referencing the hoisted `ff.queue_vtime` (where `let Some(ff) =
+  queue.flow_fair_state.as_mut()` per §4.4) since v2 moves
+  `queue_vtime` into `FlowFairState`. No behavior change.
 - **Flow-fair bucket lifecycle** (active count, peak, head/tail
   finish times) — all bucket bookkeeping moves to FlowFairState
   intact.
@@ -357,25 +359,25 @@ ergonomic noise.
 
 ## 10. Open questions for adversarial review
 
-1. **Single PR vs staged.** §4.2 — pick which.
-2. **Box-deref cost on flow_fair hot path.** §4.4 — is one extra
-   indirection per access acceptable, or should FlowFairState live
-   inline (defeats the memory win) or behind a different
-   indirection (e.g., NonNull pointer with manual lifetime
-   management)?
-3. **Helper-method strategy.** §4.5 — pass-through methods on
-   `CoSQueueRuntime` for the most-touched fields (queue_id,
-   flow_fair, transmit_rate_bytes), or force every call site to
-   use the sub-struct chain explicitly?
-4. **Order with #1207, #1209.** Both touch the same files. This PR
-   should land first because the others depend on the new struct
-   shape — confirm.
-5. **`pop_snapshot_stack` placement.** §6 — moves to FlowFairState
-   if non-flow-fair callers don't read it. Verify by grep.
-6. **VMinQueueState scope.** Some V_min state is per-runtime
-   (vtime_floor Arc, suspended counter). Some is per-call (lag
-   threshold computed each tick). Confirm only the persistent
-   state moves.
+All round-1 questions resolved in v2:
+
+- ~~Single PR vs staged~~: **single PR** (both reviewers agreed).
+- ~~Box-deref cost on flow_fair hot path~~: **acceptable**; mitigated
+  by Box-deref hoisting (§4.4).
+- ~~Helper-method strategy~~: **pass-through `#[inline]` on immutable
+  config bits only**; mutable sub-structs exposed directly to avoid
+  partial-borrow checker errors (§4.5).
+- ~~Order with #1207/#1209~~: **#1206 lands first** (both reviewers).
+- ~~`pop_snapshot_stack` placement~~: **moves to `FlowFairState`**;
+  non-flow-fair callers wrap in `if let Some(ff) = ...`.
+
+Remaining open question for v3 review:
+
+1. **VMinQueueState scope.** Some V_min state is per-runtime
+   (`vtime_floor` Arc, `v_min_suspended_remaining`,
+   `consecutive_v_min_skips`, scratch counters). Per-call lag
+   thresholds computed each tick stay file-private to `v_min.rs`.
+   Confirm against current `types/cos.rs:640-660` at impl time.
 
 ## 11. Verdict request
 
