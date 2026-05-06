@@ -1,12 +1,136 @@
 ---
-status: DRAFT v1 — feasibility doc for #937 / Codex Path 1; pending adversarial review + verification test
+status: PLAN-KILLED v1 — Codex (task-mouozcic) AND Gemini Pro 3 (task-mouozuvq) both PLAN-KILL with citations to upstream Linux source (xsk.c xsk_rcv_check), kernel docs, and AF_XDP zero-copy architecture. The §2 queue-binding constraint is permanent; Option B (cpumap) doesn't even bypass it; §6 verification test is dispositively-negative on documentation grounds. Do not run the test; pivot.
 issue: #937
-phase: feasibility-only — NO implementation. Verification test required before any plan or code.
+phase: KILLED — pivot to Path 2 v2 (race-safe AFD redesign per Codex's constraints) OR Path 4 (workload-aware product gate). Codex/Gemini disagree on whether Path 2 v2 is viable; that decision needs its own plan-review.
 prerequisites:
-  - #1206 (CoSQueueRuntime split) merged
-  - Codex CoS findings (/tmp/codex-cos.md) endorses this as Path 1, but flags open questions about XSKMAP behavior
-  - User mandate: drive per-5-tuple fairness end-to-end through proper review discipline
+  - (no longer relevant — KILLED)
 ---
+
+## PLAN-KILL verdict (both reviewers, 2026-05-06)
+
+### Codex hostile (task-mouozcic-jsw7uh) — verbatim:
+
+> **Verdict: PLAN-KILL** for v1. Do not spend the §6 day trying to
+> prove Option D; upstream already answers Q1.
+>
+> **Q1 is dead:** XSKMAP cross-queue redirect is still not supported.
+> Current Linux docs say AF_XDP validates the target socket's
+> device/ring and drops mismatches, and current `xsk_rcv_check()`
+> still enforces `xs->dev == xdp->rxq->dev` and
+> `xs->queue_id == xdp->rxq->queue_index`. This is true in current
+> 7.1-rc docs/code and in older 5.x/6.x docs. The 2026 "leased queue"
+> patches extend validation for leased/peered queues; they do not add
+> arbitrary cross-queue delivery.
+>
+> **Option B is structurally wrong, not just expensive.** [feasibility.md:70]
+> claims cpumap makes packets "arrive" on the target CPU's RX queue.
+> It does not. CPUMAP moves an `xdp_frame` to a CPU/kthread; it does
+> not change the NIC RX queue provenance. Current `cpumap.c` even has
+> a TODO because second-stage XDP lacks proper `queue_index`
+> propagation. A later XSKMAP redirect still hits `xsk_rcv_check()`.
+>
+> **Option B's cost model is not decision-grade.** SYN-only
+> amortization is invalid: if only the SYN is redirected, subsequent
+> packets still RSS to the original queue and miss the target
+> worker/session owner. A re-owned flow needs per-packet steering, so
+> 200-300 ns would consume 40-60% of the 480 ns budget.
+>
+> **Path 2 is not automatically a valid backup.** Path 2 v2 can be
+> viable only if it is redesigned as ingress/enqueue ECN/drop with
+> sharded or epoch-published estimator state, no rollback-sensitive
+> served-byte accounting, and no global hot-path period reset.
+
+### Gemini Pro 3 adversarial (task-mouozuvq-f7j8nr) — verbatim:
+
+> **Verdict: PLAN-KILL**
+>
+> The proposed plan is fundamentally flawed, based on a
+> misunderstanding of AF_XDP zero-copy architecture, incorrect
+> performance math, and a dangerous test setup. The §6 verification
+> test is a complete waste of time. Skip Option A, abandon Option B,
+> and drop Path 2. You must pivot to Path 4 (workload-aware product
+> gate).
+>
+> **A. Permanent physics.** It is the fundamental architectural
+> basis of AF_XDP Zero-Copy. The NIC's DMA engine writes directly
+> into UMEM chunks mapped to a *specific hardware RX ring*. Cross-
+> queue would violate single-producer/single-consumer ring isolation
+> and break the zero-copy memory model. Kernel 7.0 does not change
+> physics.
+>
+> **B & C. CPUMAP overhead off by an order of magnitude.** At 64B
+> packets (35 Mpps), budget is ~28 ns per-packet. CPUMAP involves
+> IPIs, kthread wakeups, and cross-core cache transfers. Real-world
+> latency is "low microseconds". Adding a BPF hash map lookup
+> (~30-50 ns) and cross-CPU ring contention will absolutely destroy
+> your performance budget.
+>
+> **D. The test fixture is blind.** Relying on "iperf3 throughput is
+> zero" to detect dropped packets is amateur. Only valid way is
+> bpftrace on `xdp:xdp_redirect_err` and `xdp:xdp_redirect_map_err`
+> tracepoints.
+>
+> **F. Native vs Generic XDP mismatch.** virtio in skb mode may "pass"
+> the test but i40e ZC will catastrophic-fail when deployed.
+>
+> **E. Path 2 (AFD/CSFQ ECN Overlay) is a concurrency nightmare.**
+> Cross-worker shared state for AQM induces catastrophic cache-line
+> bouncing.
+
+### Convergent ground truth
+
+- **The AF_XDP queue-binding constraint is permanent**, not a kernel
+  version detail. It is dictated by the zero-copy memory model. No
+  kernel patch can remove it without abandoning ZC entirely.
+- **Cpumap doesn't bypass it.** CPU != RX queue. Subsequent XSKMAP
+  redirect still hits `xsk_rcv_check()`.
+- **The performance budget math in v1 was sloppy**. 1500B-frame
+  budget (480 ns) hides the real 64B-frame budget (~28 ns) where
+  cpumap overhead is impossible.
+- **Reviewers disagree on Path 2 (AFD)**:
+  - Codex: viable IF redesigned with sharded/epoch-published
+    estimator state, no rollback, no global period reset
+  - Gemini: cross-worker shared state is a cache-line bouncing
+    nightmare regardless of design
+  - Open: Path 2 v2 needs its own plan-review with the specific
+    Codex-prescribed constraints. Don't assume yes.
+
+### Diagnosis: the user mandate may be physically unreachable on this architecture
+
+User mandate: per-5-tuple fairness across distinct RSS queues +
+within-RSS-queue. The available levers are:
+
+| Lever | Status |
+|---|---|
+| Re-route packets across workers (#937 / Path 1) | **PERMANENTLY KILLED** — AF_XDP ZC physics |
+| Backpressure via ECN (#1211 / Path 2) | DISPUTED — Codex sees a path; Gemini sees concurrency death; needs separate plan-review |
+| Hardware n-tuple steering (#840 / #1203) | KILLED earlier — net-negative on fairness |
+| Local stall (#1215) | KILLED earlier — physics + deadlock |
+| Local exact 5-tuple (Codex Path 3) | LOCAL ONLY — doesn't address cross-worker |
+| Workload-aware product gate (Codex Path 4) | The only path with no killed prerequisites |
+
+**The honest answer to the user**: per-5-tuple fairness across
+distinct RSS queues, on AF_XDP zero-copy architecture with current
+kernel reality, is **structurally unreachable** by re-routing.
+The only paths that don't repeat killed approaches are:
+
+1. **Path 2 v2** — Codex-prescribed race-safe AFD ECN overlay.
+   Open as a research issue with strict constraints. Multi-week
+   design + measurement effort. Disputed by Gemini.
+2. **Path 4** — workload-aware product gate. Document the
+   structural limit; redefine "fairness" to be measurable on this
+   architecture (per-class CoV under non-saturated; saturation
+   gate widening; mouse p99; aggregate retention).
+3. **Architecture pivot away from AF_XDP ZC** — out of scope for
+   any near-term effort.
+
+---
+
+(original feasibility doc body preserved as evidence for future
+attempts)
+
+---
+
 
 ## 1. The hypothesis (#937 / Codex Path 1)
 
