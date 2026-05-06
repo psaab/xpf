@@ -43,7 +43,7 @@ fn cos_queue_pop_front_inner(
         // rotation order. The active set (`flow_rr_buckets`) is
         // still maintained on 0↔>0 transitions so the min-scan
         // only iterates the currently-active buckets (typically
-        // 2-16), not all 1024.
+        // 2-16), not all 4096.
         let bucket_u16 = cos_queue_min_finish_bucket(queue)?;
         let bucket = usize::from(bucket_u16);
         if push_snapshot {
@@ -132,7 +132,7 @@ fn cos_queue_pop_front_inner(
         } else {
             // Bucket drained — deregister from the active set.
             // `FlowRrRing::remove` is O(active_count), typically
-            // 2-16 compares; bounded by 1024 worst case.
+            // 2-16 compares; bounded by 4096 worst case.
             queue.flow_rr_buckets.remove(bucket_u16);
         }
         item
