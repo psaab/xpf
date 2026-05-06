@@ -1,5 +1,5 @@
 ---
-status: REVISED v2 — addressing Codex (PLAN-NEEDS-MINOR, task-mou6if9l-ih4eck) and Gemini (PLAN-NEEDS-MINOR, task-mou6jq7b-brjq3z)
+status: REVISED v3 — Codex r2 caught one more stale ref (worker/cos_tests.rs:312); both reviewers PLAN-NEEDS-MINOR rounds-1/2; v3 ready to ship
 issue: #1210
 phase: single PR — pure doc/comment edits, no behavior change
 ---
@@ -153,6 +153,7 @@ Verified inventory across `userspace-dp/src/afxdp/cos/`,
 | `userspace-dp/src/afxdp/umem/mod.rs` | 150 | replace `tx.rs::stamp_submits` with current module path |
 | `userspace-dp/src/afxdp/umem/tests.rs` | 518, 519, 1031, 1064, 1074 | replace with current paths |
 | `userspace-dp/src/protocol.rs` | 1315 | replace `tx.rs:289/330` with current path |
+| `userspace-dp/src/afxdp/worker/cos_tests.rs` | 312 | replace `tx.rs line ~250` with current path (v3 — Codex r2 catch) |
 | `docs/userspace-capture-plan.md` | 118, 452 | replace with `userspace-dp/src/afxdp/tx/transmit.rs:transmit_batch()` |
 
 Total: ~25 lines edited across ~13 files (vs original v1 estimate of
