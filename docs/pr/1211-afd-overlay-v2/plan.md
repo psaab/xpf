@@ -260,6 +260,107 @@ If the parsed metadata is not available at the AFD decision site,
 fall back to the existing slower path. The fast-path helper is an
 optimization, not a correctness requirement.
 
+### Fix #6 (v3 round-2): RFC 3168-compliant ECN marking
+
+Gemini round-2 PLAN-KILL finding #1: v2 used a binary 100% mark
+rate for ECT packets:
+
+```rust
+if delta > fair && cos_item_is_ect_fast(&item) {
+    cos_item_mark_ce_fast(&mut item);  // 100% mark on ECT, regardless of magnitude
+}
+```
+
+This violates **RFC 3168**, which mandates that CE marks be
+applied with the **same probability as the equivalent drop**.
+Otherwise ECN-capable flows get pegged at full congestion-response
+while non-ECN flows see only ~`p_drop` × loss, starving ECN flows.
+
+v3 unifies the marking probability with the drop probability:
+
+```rust
+let p = afd_drop_probability(delta, fair);   // 0..255
+if p > 0 {
+    let r = (afd_per_worker_random_byte()) as u8;  // see Fix #7
+    if r < p {
+        if cos_item_is_ect_fast(&item) {
+            cos_item_mark_ce_fast(&mut item);
+        } else {
+            return Drop;
+        }
+    }
+}
+```
+
+Both ECN-mark and drop now fire at the same probability `p`,
+satisfying RFC 3168. ECT packets get marked instead of dropped;
+non-ECT packets get dropped at the same rate.
+
+### Fix #7 (v3 round-2): per-worker non-atomic PRNG state
+
+Codex round-2 finding #2: `bpf_random_u32()` is not a Rust
+userspace primitive. The userspace dataplane runs in pure Rust
+without BPF helpers in scope.
+
+v3 uses a per-worker non-atomic PRNG state seeded once at queue
+construction from the existing `cos_flow_hash_seed_from_os()` call
+(which uses `getrandom(2)`):
+
+```rust
+// In FlowFairState (per-worker; single-writer):
+pub(in crate::afxdp) afd_prng_state: u64,
+
+#[inline]
+fn afd_per_worker_random_byte(ff: &mut FlowFairState) -> u8 {
+    // splitmix64 — fast, statistically adequate for AFD drop probability
+    ff.afd_prng_state = ff.afd_prng_state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = ff.afd_prng_state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    (z ^ (z >> 31)) as u8
+}
+```
+
+splitmix64 has acceptable statistical properties for AQM drop
+probability decisions (we're not doing crypto, just need
+uncorrelated bits across packets). No `rand` crate dependency
+needed.
+
+### Fix #8 (v3 round-2): ECN fast-path metadata sourcing
+
+Codex round-2 finding #3: `TxRequest`/`PreparedTxRequest` do NOT
+carry cached L3 offsets. The "fast-path" claim was wrong.
+
+v3 acknowledges that the AFD ECN-mark site lives in the
+**settle-time accounting path** (per Fix #1, in
+`apply_cos_send_result` family), AFTER the packet has been popped
+from the queue and submitted. At settle time, the packet has
+already been transmitted — too late to ECN-mark.
+
+This means **Fix #6's RFC 3168 unified marking moves to the
+TX-side encapsulation point, BEFORE submit**, not at settle. The
+correct hook is `tx/cos_classify.rs` or `tx/dispatch.rs` (where
+the packet is being prepared for the TX ring), where L3 offsets
+are still cached from the ingress XDP parse + flow_cache lookup.
+
+v3 design reorganization:
+- **Per-pop**: read summary's `delta` and `fair` for this bucket
+  (batch-hoisted Arc Guard, ~0.5 ns amortized per pop).
+- **Pre-submit (in TX dispatch)**: compute drop probability,
+  draw random byte, decide ECN-mark vs drop vs pass.
+- **At settle (post-TX)**: increment per-bucket served_bytes for
+  inserted prefix only (Fix #1).
+
+This keeps the ECN-mark on the cached-metadata path while
+preserving Fix #1's submit-failure correctness.
+
+### Fix #9 (v3 round-2): settle hook location
+
+Codex round-2 finding #4: settle hook is in
+`settle_exact_*_scratch_submission_flow_fair`, not
+`apply_cos_send_result`. v3 references the correct symbol path
+in the queue_service module (line ~740 in `mod.rs`).
+
 ### Fix #5: probabilistic drop curve (vs Gemini's "drop cliff" critique)
 
 Gemini round-1 finding H: a binary `if delta > 2*fair { drop } else
@@ -296,7 +397,23 @@ and avoids the bursty-drop pathology Gemini flagged.
 
 ---
 
-### 3.2 Hot path — write-only own shard, read-only published summary
+### 3.2 Hot path — read-only published summary, batch-hoisted
+
+> **NOTE (v3)**: Sections 3.2 / 3.3 / 3.4 below are SUPERSEDED
+> by the v2 fixes section above (Fixes #1-5). The text below is
+> retained for traceability of the design evolution but the
+> implementation MUST follow the v2 fixes. See "v2 — round-1
+> reviewer fixes" above. Specifically:
+>
+> - §3.2's "fetch_add at pop time" is REPLACED by Fix #1
+>   (settle-time accounting in tx_completion.rs).
+> - §3.2's "ArcSwap.load() per pop" is REPLACED by Fix #3
+>   (batch-hoist at drain entry, ~30 ns per batch amortized).
+> - §3.3 / §3.4's "cumulative aggregate_served" is REPLACED by
+>   Fix #2 (window_served_delta in published summary).
+> - §3.2's binary "drop if 2*fair" is REPLACED by Fix #5
+>   (smoothed CSFQ probability + RFC 3168 same-probability ECN
+>   marking; see v3 reconciliation in §3.8 below).
 
 On every shaped-pop on a shared_exact queue:
 
