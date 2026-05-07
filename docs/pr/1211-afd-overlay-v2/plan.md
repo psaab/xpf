@@ -1,11 +1,58 @@
 ---
-status: REVISED v2 — addresses Codex PLAN-NEEDS-MAJOR (task-moupsqds: settle-time accounting, window-delta publish, batch-hoisted ArcSwap+ECN); Gemini PLAN-KILL (task-mouptde4: cache-line/QSBR/ECN-deployment-reality concerns) acknowledged. Gemini said 'PR #1217 should be the steady-state product' — v2 keeps that path open by treating #1211 as research, not a blocker.
+status: REVISED v10 — adds the empirical merge bar from PR #1220 (fairness harness, bf87cf71, 2026-05-07). Plan now states: any prototype must clear the harness's PASS verdict on a workload that currently fails it, using fairness-harness.sh + fairness-eval as the gate. Prior v2-v9 review history retained below.
 issue: #1211
 phase: research-only — no implementation in this plan; goal is reviewer convergence on whether ANY race-safe design is feasible on AF_XDP ZC architecture
 prerequisites:
   - #1206 (CoSQueueRuntime split) merged as a1688792 ✓
-  - PR #1217 (fairness-regimes contract) — independent; this plan does NOT block #1217 shipping
+  - PR #1217 (fairness-regimes contract) MERGED as e1ec6b90 ✓
+  - PR #1220 (fairness harness) MERGED as bf87cf71 ✓ — provides the operational gate this plan is now measured against
   - Convergent finding (Codex task-mounv6zx + task-mouozcic; Gemini task-mounvopl + task-mouozuvq): cross-worker re-routing is structurally unreachable on AF_XDP ZC; AFD ECN backpressure is the only remaining algorithmic lever, IF it can be made race-safe
+---
+
+## v10 — empirical merge bar from PR #1220
+
+PR #1220 shipped the fairness harness on 2026-05-07. The harness
+measures `(observed_CoV, Cstruct, gap)` on a real iperf3 run and
+emits PASS/FAIL against `observed_CoV ≤ Cstruct + 0.05` plus
+starved-flow / saturated-only gates.
+
+**Operational baseline on master (pre-AFD)**: iperf-c P=12 -R on
+ge-0-0-2, loss userspace cluster — Cstruct ≈ 0.60, observed_CoV ≈
+0.51, gap ≈ −0.08, **verdict: PASS**. The 47% per-flow CoV that
+motivated this entire research stream is **below the structural
+ceiling for the RSS distribution the cluster produced**. There is
+no scheduler bug to fix on this workload.
+
+**Implication for v10**: the AFD prototype's merge bar is no
+longer "reduce per-flow CoV from 25-30% to ≤25%" in isolation. The
+bar is now: pick a workload where the harness's pre-AFD verdict is
+**FAIL** (i.e. observed_CoV − Cstruct > 0.05 OR a flow is starved);
+demonstrate that with AFD enabled the same workload passes.
+
+If no such workload exists on master today, the prototype has
+nothing to prove. **v10 reviewers MUST first answer**: do we have a
+workload that currently fails the harness's verdict? If not, the
+AFD design is solving a problem the harness has empirically
+declared non-existent. The honest answer may be PLAN-KILL until a
+failing workload is identified.
+
+Concrete v10 ask: before any prototype work, the proponent of #1211
+must:
+
+1. Run the harness on master against ≥4 workload classes (iperf-a/b/c
+   single-class, mixed CoS, push + reverse, varying P).
+2. Report the (cstruct, observed_cov, gap, verdict) tuple for each.
+3. Identify at least one configuration with **verdict: FAIL** that
+   the AFD prototype is meant to fix.
+4. Reviewers gate further work on the existence of that failing
+   workload.
+
+If step 3 yields no failing case, this plan is PLAN-KILL with the
+explicit rationale "harness empirically rejects the premise that a
+new fairness mechanism is needed for the workloads we run". That
+outcome is acceptable and arguably the correct one given #1220's
+empirical evidence.
+
 ---
 
 ## 1. Issue framing
