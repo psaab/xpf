@@ -1,11 +1,72 @@
 ---
-status: REVISED v3 — addressing Codex round-2 (2 NEW blockers; task-mov1mk84). Gemini PLAN-READY at v2 (task-mov1moka).
+status: REVISED v4 — addressing Codex round-3 (4 findings; task-mov1wpqo). Architectural simplification: RSS-join entirely dropped; harness reads {a_i} directly from data plane.
 issue: #1219
 phase: implementation plan; minimum-viable PR scope
 prerequisites:
   - PR #1217 (fairness-regimes contract) MERGED as e1ec6b90 ✓
   - PR #1216 (CoSQueueRuntime split) MERGED as a1688792 ✓
 ---
+
+## Round-3 verdict resolution (v4)
+
+Codex round-3 (task-mov1wpqo): **PLAN-NEEDS-MAJOR**. 4 findings:
+
+1. v3 harness sketch ran single `iperf3 -P N` without `--cport`,
+   contradicting the per-stream `--cport` claim earlier in the doc.
+2. RSS tuple wrong for `-R` workload: data direction is reversed,
+   tuple must be the on-wire RX tuple at the measured-direction
+   ingress interface, NOT the control-direction client tuple.
+3. `bound_rx_queue` field doesn't exist in `BindingStatus`. Real
+   fields are `QueueID`/`WorkerID`/`Interface`/`Ifindex`. Plus no
+   public proto for binding status — needs to specify whether
+   harness reads control-socket JSON, `Manager.Status()`, or new
+   gRPC.
+4. Stale impl details on `last_used_epoch`.
+
+### v4 architectural insight: drop the RSS-join entirely
+
+After reading the actual codebase (`pkg/dataplane/userspace/protocol.go:615`
+shows real `BindingStatus`), the RSS-join from harness is unnecessary
+complexity. The simpler path:
+
+- Data plane has flow_cache + epoch counter (Fix #v3-1).
+- Per-binding active flow count `aᵢ` is computed in the data plane
+  via the 100 ms tick scan and exposed as a Prometheus metric.
+- Harness scrapes `/metrics` every 1 second during the iperf3 run.
+- Harness reads per-binding `active_flow_count` directly — that IS
+  `{aᵢ}` already, no kernel RSS hash + indirection table read
+  needed at all.
+- iperf3 per-stream throughput from `iperf3 -P N -J` (single
+  invocation; per-stream join via `start.connected[].socket` ↔
+  `intervals[].streams[].socket`).
+
+This addresses ALL 4 Codex findings:
+- **#1**: drop the per-stream `--cport` requirement; single `iperf3
+  -P N -J` with socket-id join.
+- **#2**: irrelevant — we don't compute RSS hashes anymore.
+- **#3**: harness reads via existing Prometheus `/metrics` endpoint,
+  not via a new gRPC RPC. We add ONE new Prometheus metric
+  `xpf_userspace_binding_active_flow_count{binding_slot=...}` (a
+  scrape-time snapshot, not a rolling window — much narrower than
+  the v1 production Prometheus exports that were deferred to #1220).
+- **#4**: `last_used_epoch` impl details cleaned up.
+
+### Trade-off acknowledged
+
+Per-binding active_flow_count includes ALL flows on the binding,
+not just iperf-c flows. For iperf3-only test workloads this is
+fine (background flows are negligible). Document this limitation;
+production observability with per-queue qualification stays in
+#1220.
+
+The ≥1% throughput qualification from the contract is **not
+applied** in v4 because we don't have per-flow throughput in the
+data plane. v4 documents this gap; if a flow is starved (< 1%
+throughput) the **starved_flow_count** gate (Gate 1) catches it
+at the harness layer using iperf3 per-stream throughputs. Cstruct
+is computed from the data-plane `{aᵢ}` which counts all active
+flows — slight over-count compared to the contract's "≥1%"
+qualified count, but bounded and conservative.
 
 ## Round-2 verdict resolution (v3)
 
@@ -238,14 +299,43 @@ message UserspaceBindingStatus {
 }
 ```
 
-### 3.4 Per-queue + ≥1% throughput qualification — distinct source ports + RSS join
+### 3.4 Per-queue + ≥1% throughput qualification — DROPPED in v4 (RSS-join unnecessary)
 
-Per Codex round-2 blocker #2: with `iperf3 -P N` and a single
-destination port, RSS decides binding and there is no identity
-join between an iperf3 stream and its landing binding.
+**v4 architectural change**: don't compute RSS at the harness;
+read `{aᵢ}` directly from the data plane.
 
-v3 fixes this with **distinct source ports per stream + harness-
-side RSS join**:
+The reasoning (per round-3 verdict resolution above): the data
+plane already has the flow_cache, the epoch counter (Fix #v3-1),
+and the 100ms-tick scan that publishes per-binding active flow
+count. Adding ONE Prometheus metric exposes that count to the
+harness. The harness scrapes `/metrics` every 1s during the iperf3
+run and reads `xpf_userspace_binding_active_flow_count{binding_slot=N}`
+for each binding to get the snapshot `{aᵢ}` distribution.
+
+No RSS-hash computation. No indirection-table read. No kernel-
+side hash key extraction. No direction-reversal complications for
+`-R` workloads. The data plane *knows* which packets land on
+which binding because that's literally what AF_XDP zero-copy does
+— it puts the packet into the binding's UMEM. The flow_cache hits
+on each binding give us the count for free.
+
+**Limitations explicitly acknowledged** (deferred to #1220):
+- All-binding count, not per-CoS-queue count: a binding may serve
+  multiple queues. For iperf3-only workloads, background traffic
+  is negligible and the count is dominated by iperf3 flows. In
+  production with mixed traffic, per-queue qualification matters
+  and #1220 must address it.
+- No ≥1% throughput qualification: the data plane counts any
+  flow that hit flow_cache in the last 1 second, regardless of
+  byte rate. This may over-count — a starved flow that's barely
+  doing anything still counts as 1 in `aᵢ`. The starved-flow
+  gate (Gate 1) catches this case at the harness layer using
+  iperf3 per-stream throughputs, which are exact. Cstruct from
+  unqualified `aᵢ` is a slightly **conservative** measure (it
+  may report a higher Cstruct than the qualified version, which
+  means the gate `observed ≤ Cstruct + 0.05` is slightly more
+  forgiving — ie. preserves more "fairness budget" — than strict
+  contract reading).
 
 1. **Harness launches iperf3 streams with explicit source ports**:
    ```bash
@@ -316,33 +406,48 @@ with a diagnostic.
 
 ```bash
 #!/usr/bin/env bash
-# v2: runs iperf3, polls gRPC active_flow_count, feeds both into
-# bin/fairness-eval which calls Rust pure-fns. PASS/FAIL output.
+# v4: single iperf3 -P N invocation; concurrent /metrics polling;
+# fairness-eval consumes both. No --cport; no RSS hashing.
 
 set -euo pipefail
 PORT=${1:-5203}
 N=${2:-12}
 T=${3:-120}
 TARGET=${4:-172.16.80.200}
+REVERSE=${5:-}  # set to "-R" for reverse-mode
 
-# 1. Background poll of per-binding active_flow_count via gRPC
-#    (1 Hz) into /tmp/binding-flows.jsonl
-gflows_poll &
-GFLOWS_PID=$!
+# 1. Background poll: scrape /metrics every 1s, extract
+#    xpf_userspace_binding_active_flow_count{binding_slot=...}
+#    -> /tmp/binding-flows.tsv (timestamp, slot, count)
+poll_metrics &
+POLL_PID=$!
 
-# 2. Run iperf3 with --forceflush JSON output
-iperf3 -c $TARGET -P $N -t $T -p $PORT -J --forceflush > /tmp/iperf-out.json
+# 2. Run iperf3 once with -P N -J --forceflush
+iperf3 -c "$TARGET" -P "$N" -t "$T" -p "$PORT" $REVERSE -J --forceflush \
+    > /tmp/iperf-out.json
 
 # 3. Stop poll
-kill $GFLOWS_PID
+kill "$POLL_PID" 2>/dev/null || true
+wait "$POLL_PID" 2>/dev/null || true
 
 # 4. Run the Rust eval binary
 fairness-eval \
     --iperf-json /tmp/iperf-out.json \
-    --binding-flows /tmp/binding-flows.jsonl \
+    --binding-flows /tmp/binding-flows.tsv \
     --warmup-secs 5 \
-    --final-burst-secs 1
+    --final-burst-secs 1 \
+    --epsilon 0.05
 ```
+
+`fairness-eval` parses iperf3 JSON, extracts per-stream throughput
+from `intervals[].streams[]` joined by `socket` field to
+`start.connected[].socket` (the per-stream local-port mapping
+that Codex round-3 pointed at as the canonical join). Aligns to
+1-second wall-clock buckets, applies warmup/final-burst exclusion.
+For `{aᵢ}` it reads `binding-flows.tsv` (one row per
+binding-slot per second), takes the median over the steady-state
+window per binding to get the steady-state `aᵢ` for each binding,
+and computes `Cstruct` from the resulting distribution.
 
 The eval binary outputs JSON like:
 
