@@ -16,8 +16,8 @@ ceiling regardless of scheduler perfection — see "Structural CoV
 ceiling — worked examples" below).
 
 The userspace AF_XDP zero-copy dataplane locks each flow to the
-worker that processes its RSS-hashed RX queue (kernel
-the upstream Linux kernel enforces this in `net/xdp/xsk.c`,
+worker that processes its RSS-hashed RX queue (the upstream Linux
+kernel enforces this in `net/xdp/xsk.c`,
 where `xsk_rcv_check()` validates `xs->dev == xdp->rxq->dev` and
 `xs->queue_id == xdp->rxq->queue_index` before delivery; this
 codebase's local comment at `userspace-xdp/src/lib.rs` around
