@@ -96,6 +96,12 @@ type xpfCollector struct {
 	// state. 1 = worker has panicked and the supervisor has caught it;
 	// 0 = healthy. Set-only in Phase 1 (cleared by daemon restart).
 	workerDead *prometheus.Desc
+	// #1219: snapshot per-binding distinct active flow count for the
+	// fairness harness (read by test/incus/fairness-harness.sh ->
+	// fairness-eval to compute Cstruct + observed_CoV per
+	// docs/fairness-regimes.md). Refreshed at the helper's ~65ms
+	// debug-state tick.
+	bindingActiveFlowCount *prometheus.Desc
 }
 
 func newCollector(srv *Server) *xpfCollector {
@@ -350,6 +356,14 @@ func newCollector(srv *Server) *xpfCollector {
 				"daemon restart in Phase 1 (#925).",
 			[]string{"worker_id"}, nil,
 		),
+		bindingActiveFlowCount: prometheus.NewDesc(
+			"xpf_userspace_binding_active_flow_count",
+			"Distinct active flows observed in this binding's flow_cache "+
+				"in the last ~1s (snapshot, refreshed at the helper's "+
+				"~65ms debug-state tick). Read by the fairness harness to "+
+				"compute the structural CoV ceiling per docs/fairness-regimes.md (#1219).",
+			[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+		),
 	}
 }
 
@@ -401,6 +415,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerWorkLoops
 	ch <- c.workerIdleLoops
 	ch <- c.workerDead
+	ch <- c.bindingActiveFlowCount
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -438,6 +453,24 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 	}
 	c.emitCoSOwnerProfile(ch, status)
 	c.emitWorkerRuntime(ch, status)
+	c.emitBindingActiveFlowCount(ch, status)
+}
+
+// #1219: emit per-binding distinct active flow count for the fairness
+// harness. Reads BindingStatus.ActiveFlowCount populated by the
+// helper's ~65ms debug-state tick (see plan §3.2-3.3).
+func (c *xpfCollector) emitBindingActiveFlowCount(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, b := range status.Bindings {
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingActiveFlowCount,
+			prometheus.GaugeValue,
+			float64(b.ActiveFlowCount),
+			strconv.FormatUint(uint64(b.Slot), 10),
+			strconv.FormatUint(uint64(b.QueueID), 10),
+			strconv.FormatUint(uint64(b.WorkerID), 10),
+			b.Interface,
+		)
+	}
 }
 
 // #869: emit per-worker busy/idle runtime counters from a cached
