@@ -72,31 +72,28 @@ this gate, not against an unconditional CoV target.
 | 3 | #836 | PLAN-KILL | shared HOL queue: AF_XDP UMEM ownership prevents cross-worker descriptor sharing |
 | 4 | #840 / #1203 | PLAN-KILL | RSS steering at AF_XDP-ZC binding time is permanent physics — kernel pins flow→queue at bind |
 | 5 | #937 | PLAN-KILL | ingress XDP_REDIRECT for fairness: kernel feature support not present, would need upstream work |
+| 6 | #1211 | PLAN-KILL | Path 2 race-safe AFD overlay: closed 2026-05-07 after 8 Codex rounds + 3 Gemini rounds. PR #1220 empirical PASS on the motivating workload made the design solving a non-existent problem. See `docs/per-5-tuple/path2-archive/CLOSING-RATIONALE.md` for full rationale. |
 
-The full triage with reviewer findings lives in
-`feedback_per5tuple_fairness_killed.md`.
+The table above is the current canonical triage for killed mechanisms
+and reviewer findings.
 
 ## Surviving design options
 
-### Path 2: race-safe AFD overlay (#1211)
+### Path 2: race-safe AFD overlay (#1211) — CLOSED 2026-05-07
 
-**Status**: v9 plan in `docs/pr/1211-afd-overlay-v2/plan.md` on branch
-`refactor/1211-afd-overlay-v2`. Codex round-8 PLAN-NEEDS-MAJOR-then-
-addressed; Gemini PLAN-KILLed twice. v10 round needs the new #1220 gate
-language ("must clear observed_CoV ≤ Cstruct + 0.05 on iperf-c P=12 -R
-measured by the merged harness") to make the merge bar concrete.
+**Status**: PLAN-KILL. Issue #1211 closed 2026-05-07 after 8 Codex
+rounds + 3 Gemini rounds. v10 round added the empirical merge bar
+from PR #1220, and both reviewers converged on stop-the-prototype:
+Gemini explicit PLAN-KILL ("v10 successfully uses empirical data to
+prove its own irrelevance"), Codex tighten-the-gate-and-pause-until-
+failing-workload-exists. PR #1220's PASS verdict on the motivating
+workload made the AFD design solving a non-existent problem.
 
-**Core idea**: probabilistic ECN-mark / drop based on per-flow share
-of a sharded estimator. Race-safe by virtue of: (a) batched
-ArcSwap-loaded summary on hot path, (b) snapshot owner on cold path,
-(c) settle-time accounting (not pop-time), (d) RFC 3168-compliant ECN
-curve (not binary-100% mark).
-
-**Why Gemini PLAN-KILLed**: cache-line layout concerns, QSBR/RCU
-ordering, ECN deployment reality (TCP receivers must honor ECE).
-Codex disagreed: the deployment-reality argument is true but
-orthogonal — the contract-clearing test runs ECN-aware iperf3 and
-the production rollout is opt-in.
+**Archive**: see `docs/per-5-tuple/path2-archive/` for the v10 plan
+(with full v2-v9 review history inline) plus a CLOSING-RATIONALE.md
+covering when to revisit and how NOT to revisit. **Do not re-open
+#1211 with new arguments** — start a fresh issue if any of the
+revisit criteria fire.
 
 ### Path 4: workload-aware gate
 
@@ -117,12 +114,15 @@ If pursued, this is a smaller-than-Path-2 swing and pure userspace.
 
 - **#547 — Deterministic RSS-skew test fixture**: the harness today
   reads whatever RSS happens to produce on the cluster. A fixture
-  that injects a known per-worker distribution `{aᵢ}` and asserts
-  the harness's verdict matches a hand-computed expected verdict
-  closes the loop. Prerequisite for plan-reviewing any future fairness
-  mechanism with concrete gate values.
-- **#1211 — Path 2 v9 → v10**: re-dispatch with the #1220 gate
-  language baked into the merge bar. Gemini may PLAN-KILL again.
+  that black-box-tests `fairness-eval`'s CLI/IO/exit-code contract
+  against synthetic inputs closes one regression-coverage gap. After
+  Codex round-1 narrowed the scope (no fairness-mechanism validation
+  claim — that's at cluster harness level), v2+ plan is in flight.
+- **#1211 follow-up (only if gate flips to FAIL)**: open a fresh issue
+  using the revisit criteria in the Path 2 closure archive. Do not
+  re-open #1211 directly.
+- **Path 4** has no issue yet; consider filing one if the workload-
+  aware gate concept matures.
 
 ## How to apply
 
@@ -144,3 +144,6 @@ When considering a new fairness mechanism:
 
 - 2026-05-07: doc created; PR #1220 merged (harness shipped). Path 2
   v9 plan in flight; #547 deterministic fixture pending.
+- 2026-05-07 (later): #1211 Path 2 CLOSED as PLAN-KILL after v10
+  reviewer convergence. Archived under `path2-archive/`. #547 v2 in
+  flight after Codex MAJOR rewrite.
