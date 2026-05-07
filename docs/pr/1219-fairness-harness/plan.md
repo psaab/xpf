@@ -1,5 +1,5 @@
 ---
-status: REVISED v5 — addressing Codex round-4 (4 findings; task-mov2afuw): stale v3 RSS section deleted; Rust→Go→Prometheus pipeline path explicit; harness fail-fast guard for {a_i} sum-vs-iperf-streams; fairness-eval at canonical src/bin/ location.
+status: REVISED v6 — addressing Codex round-5 (1 minor; task-mov2ix1o): §3.3 gRPC/proto block + §4 gRPC bullet purged. The status path is helper-process control-socket JSON, NOT public gRPC.
 issue: #1219
 phase: implementation plan; minimum-viable PR scope
 prerequisites:
@@ -296,27 +296,41 @@ periodic-maintenance path. Not on the hot path.
 added entries on a brand-new binding don't count as active until
 they actually receive a hit.
 
-### 3.3 Atomic gauge published to gRPC
+### 3.3 Atomic gauge published via existing JSON status path
 
 ```rust
 // extend BindingLiveState (which is an Arc; this is a simple
-// AtomicU32 read by the gRPC status path, written by the owner
-// worker on its tick)
+// AtomicU32 read by the snapshot/status path, written by the
+// owner worker on its tick)
 pub(in crate::afxdp) active_flow_count: AtomicU32,
 ```
 
-Owner writes via `Ordering::Relaxed`; gRPC status reader reads
-`Ordering::Relaxed`. No cross-worker coordination needed.
+Owner writes via `Ordering::Relaxed`; status snapshot reader
+reads `Ordering::Relaxed`. No cross-worker coordination needed.
 
-Per-binding gRPC status response gets one new field:
+The Rust `BindingStatus` snapshot struct (the in-memory shape
+that the helper process serializes into the status-JSON the Go
+manager reads via control socket) gets one new field:
 
-```proto
-// proto/xpf/v1/dataplane.proto
-message UserspaceBindingStatus {
+```rust
+// userspace-dp/src/.../snapshot.rs (extend existing BindingStatus
+// snapshot struct used by the helper-process status JSON encoder)
+pub(in crate::afxdp) struct BindingStatus {
     // ... existing fields
-    uint32 active_flow_count = N;  // last 1s distinct-flow count from flow_cache
+    pub(in crate::afxdp) active_flow_count: u32,
 }
 ```
+
+The status JSON serializer adds `"active_flow_count": N` to each
+binding entry. The Go side
+(`pkg/dataplane/userspace/protocol.go:615`) decodes it into the
+new `ActiveFlowCount uint32 \`json:"active_flow_count,omitempty"\``
+field on `BindingStatus`.
+
+**No public gRPC / proto change.** The status surface this PR
+extends is the helper-process control-socket JSON, which is
+internal to xpfd's own daemon ↔ helper communication and not
+part of the public gRPC API.
 
 ### 3.4 Per-queue + ≥1% throughput qualification — DROPPED in v4 (RSS-join unnecessary)
 
@@ -457,8 +471,13 @@ local socket. Not in scope here.
 
 ## 4. Public API preservation
 
-- gRPC: 1 new field on per-binding status JSON
-  (`active_flow_count: u32`). Backward-compatible.
+- gRPC / public proto: **no change**. The status surface this PR
+  extends is the internal helper-process control-socket JSON
+  (xpfd ↔ Rust helper) consumed by Go `Manager.Status()` — not
+  the public gRPC API.
+- Helper-process status JSON: 1 new field on per-binding status
+  (`active_flow_count: u32`). Backward-compatible (older Go
+  consumers ignore unknown fields per `json:"...,omitempty"` etc).
 - HTTP REST: unchanged.
 - Prometheus: **1 new metric**
   `xpf_userspace_binding_active_flow_count{binding_slot=N}` —
