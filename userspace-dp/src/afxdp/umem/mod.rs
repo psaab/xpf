@@ -229,6 +229,14 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// stale-on-lookup evictions so the acceptance gate
     /// (`collision_evictions / hits < 1 %`) is observable at runtime.
     pub(super) flow_cache_collision_evictions: AtomicU64,
+    /// #1219: snapshot of distinct active flows on this binding's
+    /// flow_cache, refreshed at the existing ~65ms debug-state tick
+    /// (`update_binding_debug_state`) by counting flow_cache entries
+    /// hit within the last 10 epoch ticks (~1 second window). Read
+    /// from the helper-process status JSON; harness scrapes via
+    /// Prometheus to compute `{a_i}` for the structural CoV gate
+    /// per `docs/fairness-regimes.md`.
+    pub(super) active_flow_count: AtomicU32,
     /// #941 Work item D: count of hard-cap activations. When V_min
     /// throttle would have fired for V_MIN_CONSECUTIVE_SKIP_HARD_CAP
     /// consecutive batches, hard-cap force-continues AND arms
@@ -445,6 +453,7 @@ impl BindingLiveState {
             flow_cache_misses: AtomicU64::new(0),
             flow_cache_evictions: AtomicU64::new(0),
             flow_cache_collision_evictions: AtomicU64::new(0),
+            active_flow_count: AtomicU32::new(0),
             v_min_throttle_hard_cap_overrides: AtomicU64::new(0),
             v_min_throttles: AtomicU64::new(0),
             session_hits: AtomicU64::new(0),
@@ -1083,6 +1092,20 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
         );
         binding.flow.flow_cache.collision_evictions = 0;
     }
+    // #1219: advance the flow_cache active-flow epoch and publish
+    // the count for the harness's structural CoV gate. Single
+    // owner-side write per ~65ms tick. The 100ms-cadence claim in
+    // the plan is approximate — the actual cadence is ~65ms because
+    // this tick is itself gated on the 0xFFFF debug-state counter
+    // (and therefore inherits ~1M-call/sec / 65536 = ~15 Hz). With
+    // ACTIVE_WINDOW_EPOCHS = 10 the active-flow window is ~650ms
+    // — comfortably under the 1s the plan targets, with no risk of
+    // u16 epoch wraparound (256 ticks × 65ms = ~16.6s wraparound).
+    binding.flow.flow_cache.tick_advance_epoch();
+    binding.live.active_flow_count.store(
+        binding.flow.flow_cache.count_active_flows(),
+        Ordering::Relaxed,
+    );
     // #941 Work item D + #943: flush each queue's per-queue scratch
     // counters (hard-cap overrides AND regular V_min throttles) into
     // the binding-wide AtomicU64s. Mirrors the
