@@ -1,5 +1,11 @@
 mod afxdp;
 mod event_stream;
+// #1219: fairness pure-fns — included here only for `cargo test` so
+// `fairness.rs` tests run in the main binary's test suite. The fairness-eval
+// binary includes it directly via `#[path]`. No production code in main.rs
+// references these functions; gating on #[cfg(test)] avoids a redundant
+// production compile while preserving test coverage.
+#[cfg(test)]
 mod fairness;
 mod filter;
 mod flowexport;

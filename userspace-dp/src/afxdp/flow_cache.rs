@@ -125,11 +125,12 @@ pub(super) struct FlowCacheEntry {
     pub(super) stamp: FlowCacheStamp,
     /// #1219: per-hit recency counter. Owner-only single u16 store on every
     /// `lookup()` hit — see `FlowCache::current_epoch` for the comparison
-    /// reference. The 100ms-tick scan in `count_active_flows()` counts
-    /// entries with `(current_epoch - last_used_epoch) < 10` (1 second
-    /// window). u16 wraps every 256 epochs × 100ms = 25.6s, well past the
-    /// 1s window. Value 0 = "never touched"; freshly inserted entries
-    /// carry 0 until first lookup hit.
+    /// reference. The ~65ms-tick scan in `count_active_flows()` counts
+    /// entries with `(current_epoch - last_used_epoch) < 10` (~650ms
+    /// window). u16 wraps every 65536 epochs × 65ms ≈ 71 minutes, far
+    /// past any concern. Value 0 = "never touched" sentinel (epoch 0 is
+    /// skipped by `tick_advance_epoch`); freshly inserted entries carry
+    /// 0 until their first lookup hit.
     pub(super) last_used_epoch: u16,
 }
 
@@ -322,11 +323,11 @@ pub(super) struct FlowCache {
     /// evictions) for hot-set diagnosis.
     pub(super) collision_evictions: u64,
     /// #1219: per-binding epoch counter for the active-flow-count signal.
-    /// Owner-only state. Incremented on the existing 100ms worker tick via
+    /// Owner-only state. Incremented on the existing ~65ms worker tick via
     /// `tick_advance_epoch()`. `lookup()` writes this value into
     /// `entry.last_used_epoch` on every hit so `count_active_flows()` can
     /// distinguish entries touched within the last `ACTIVE_WINDOW_EPOCHS`
-    /// ticks (= 10 × 100ms = 1s window).
+    /// ticks (= 10 × ~65ms ≈ 650ms window).
     pub(super) current_epoch: u16,
 }
 
@@ -357,9 +358,9 @@ impl FlowCache {
     }
 
     /// #1219: count cache entries hit in the last `ACTIVE_WINDOW_EPOCHS`
-    /// ticks (= 1 second at 100ms tick cadence). Owner-only periodic
+    /// ticks (≈ 650ms at ~65ms tick cadence). Owner-only periodic
     /// scan; not on the hot path. O(N) over `FLOW_CACHE_SIZE`
-    /// (~8192 entries) ≈ ~10 µs of work per second per worker.
+    /// (~8192 entries) ≈ ~10 µs of work per ~65ms tick per worker.
     pub(super) fn count_active_flows(&self) -> u32 {
         const ACTIVE_WINDOW_EPOCHS: u16 = 10;
         let now = self.current_epoch;

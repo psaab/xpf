@@ -1095,13 +1095,10 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
     }
     // #1219: advance the flow_cache active-flow epoch and publish
     // the count for the harness's structural CoV gate. Single
-    // owner-side write per ~65ms tick. The 100ms-cadence claim in
-    // the plan is approximate — the actual cadence is ~65ms because
-    // this tick is itself gated on the 0xFFFF debug-state counter
-    // (and therefore inherits ~1M-call/sec / 65536 = ~15 Hz). With
-    // ACTIVE_WINDOW_EPOCHS = 10 the active-flow window is ~650ms
-    // — comfortably under the 1s the plan targets, with no risk of
-    // u16 epoch wraparound (256 ticks × 65ms = ~16.6s wraparound).
+    // owner-side write per ~65ms tick. With ACTIVE_WINDOW_EPOCHS = 10
+    // the active-flow window is ~650ms. u16 epoch wraparound occurs
+    // at 65536 ticks × 65ms ≈ 71 minutes; epoch 0 is reserved as the
+    // "never touched" sentinel and skipped by tick_advance_epoch.
     binding.flow.flow_cache.tick_advance_epoch();
     binding.live.active_flow_count.store(
         binding.flow.flow_cache.count_active_flows(),

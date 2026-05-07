@@ -431,7 +431,10 @@ fn read_to_string(path: &PathBuf) -> String {
         std::process::exit(2);
     });
     let mut buf = String::new();
-    f.read_to_string(&mut buf).unwrap();
+    f.read_to_string(&mut buf).unwrap_or_else(|e| {
+        eprintln!("fairness-eval: read {}: {e}", path.display());
+        std::process::exit(2);
+    });
     buf
 }
 
