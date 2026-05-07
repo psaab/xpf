@@ -138,7 +138,7 @@ A measurement run **PASSES** iff ALL of:
    cwnd-bound or application-bound; the test simply records
    `observed_aggregate` for diagnostic context but does not
    apply a fail/pass on it. Per-flow fairness (Gate 2),
-   zero-throughput (Gate 1), and mouse p99 (Gate 4) remain
+   starved-flow (Gate 1), and mouse p99 (Gate 4) remain
    active for non-saturated runs.
 
    Rationale: non-saturated runs by definition do not push
@@ -197,7 +197,7 @@ Any fairness measurement run MUST report:
 1. **Per-flow throughput**: `min, p25, median, p75, max` (Mb/s) and
    stream count `N`.
 2. **Per-flow CoV**: `stddev / mean` across the steady-state window.
-3. **Zero-throughput flow count**: per the §1 definition.
+3. **Starved flow count**: per the Gate 1 definition above.
 4. **Per-worker active-flow distribution `{aᵢ}`**: count of
    distinct 5-tuples observed on each worker's binding during
    the steady-state window. The current per-binding RX
@@ -205,7 +205,8 @@ Any fairness measurement run MUST report:
    requires per-binding **distinct-flow-count** which must be
    added by the harness work (or by a binding-side counter
    exposed via the existing `show class-of-service` /
-   `show userspace bindings` surfaces). A flow is counted as
+   `show chassis cluster data-plane interfaces` /
+   `show class-of-service interface` surfaces). A flow is counted as
    active on worker i if it contributes ≥ 1% of mean per-flow
    throughput on that worker over the window.
 5. **Computed `Cstruct`**: the structural CoV ceiling for the
@@ -275,7 +276,7 @@ For changes that should NOT affect fairness:
   points) vs prior tip on the same fixture.
 - Aggregate throughput regression `≤ 5%`.
 - Mouse p99 regression `≤ 10%`.
-- Zero-throughput flow count must not become positive.
+- Starved flow count must not become positive.
 
 For changes that explicitly target fairness improvement:
 
