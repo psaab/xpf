@@ -1,5 +1,5 @@
 ---
-status: DRAFT v1 — pending adversarial plan review; PLAN-KILL is acceptable and likely if Gemini's cache-line-bouncing concern proves binding
+status: REVISED v2 — addresses Codex PLAN-NEEDS-MAJOR (task-moupsqds: settle-time accounting, window-delta publish, batch-hoisted ArcSwap+ECN); Gemini PLAN-KILL (task-mouptde4: cache-line/QSBR/ECN-deployment-reality concerns) acknowledged. Gemini said 'PR #1217 should be the steady-state product' — v2 keeps that path open by treating #1211 as research, not a blocker.
 issue: #1211
 phase: research-only — no implementation in this plan; goal is reviewer convergence on whether ANY race-safe design is feasible on AF_XDP ZC architecture
 prerequisites:
@@ -101,6 +101,200 @@ pub(in crate::afxdp) struct AfdWindowSummary {
     active_buckets: u16,
 }
 ```
+
+## v2 — round-1 reviewer fixes (must read before §3 design)
+
+### Fix #1: AFD accounting moves from pop-time to settle-time
+
+Codex round-1 finding #1: pop-time `fetch_add` over-states served
+work because TX-failure restoration pushes items back without a
+matching `fetch_sub`. This is the same pitfall that killed #1215
+v1 — see queue_service/service.rs:298 (restore-on-failure) and
+v_min.rs:32 (existing V_min publishes only post-settle for
+exactly this reason).
+
+v2 moves AFD `fetch_add` into the settle-side helpers
+(`apply_cos_send_result` family in `tx_completion.rs`). The
+settle path receives the **inserted prefix** of the scratch slice
+— exactly the items that hit the TX ring. The accounting walks
+that prefix and increments per-bucket `served_bytes` for inserted
+items only. The flow_bucket for each item is recomputed at
+settle (cheap; same hash function used at enqueue, batch-amortized
+to ~3 ns per item).
+
+Restored items (uninserted prefix or partial-insert tail) skip
+the AFD accounting entirely. **No fetch_sub anywhere.**
+
+### Fix #2: published summary carries window DELTA, not cumulative
+
+Codex round-1 finding #2: comparing cumulative `aggregate_served`
+to a one-window `fair_share` eventually marks/drops every active
+bucket forever (since cumulative grows without bound).
+
+v2 changes the published summary to carry **per-window delta**:
+
+```rust
+pub(in crate::afxdp) struct AfdWindowSummary {
+    /// Per-bucket served-bytes DELTA over the most recent window.
+    /// Zero for buckets that had no activity. The hot path
+    /// compares this to the per-window fair_share, which has
+    /// matching units.
+    pub(in crate::afxdp) window_served_delta: [u64; AFD_BUCKETS],
+
+    /// Per-window fair-share threshold (bytes). Computed as
+    /// `(window_total_bytes / active_bucket_count)` by the
+    /// snapshot owner; published atomically with the delta array.
+    pub(in crate::afxdp) fair_share_window_bytes: u64,
+
+    /// Window duration in ns (for diagnostic only — not used by
+    /// the hot path).
+    pub(in crate::afxdp) window_duration_ns: u64,
+
+    /// Snapshot owner's window-end monotonic timestamp (ns).
+    pub(in crate::afxdp) window_end_ns: u64,
+}
+```
+
+The snapshot owner computes delta by storing the prior window's
+cumulative aggregate (in its own state, not in the published
+summary) and subtracting on every snapshot:
+
+```rust
+fn snapshot_publish(state: &mut SnapshotState, afd: &AfdQueueState) {
+    let now_ns = clock_monotonic_ns();
+    let window_duration_ns = now_ns - state.last_window_end_ns;
+    let mut current_aggregate = [0u64; AFD_BUCKETS];
+    for shard in afd.shards.iter() {
+        for b in 0..AFD_BUCKETS {
+            current_aggregate[b] += shard.shard.served_bytes[b].load(Ordering::Relaxed);
+        }
+    }
+    let mut window_delta = [0u64; AFD_BUCKETS];
+    let mut active_count = 0u32;
+    let mut window_total = 0u64;
+    for b in 0..AFD_BUCKETS {
+        let delta = current_aggregate[b].saturating_sub(state.prior_aggregate[b]);
+        window_delta[b] = delta;
+        if delta > 0 {
+            active_count += 1;
+            window_total += delta;
+        }
+    }
+    let fair_share = if active_count > 0 {
+        window_total / active_count as u64
+    } else {
+        u64::MAX
+    };
+    afd.published_summary.store(Arc::new(AfdWindowSummary {
+        window_served_delta: window_delta,
+        fair_share_window_bytes: fair_share,
+        window_duration_ns,
+        window_end_ns: now_ns,
+    }));
+    state.prior_aggregate = current_aggregate;
+    state.last_window_end_ns = now_ns;
+}
+```
+
+Hot path reads `summary.window_served_delta[bucket]` vs
+`summary.fair_share_window_bytes` — both have matching units
+(per-window bytes). A bucket whose recent-window served exceeded
+fair share gets ECN-marked / probabilistically dropped. A bucket
+that's been idle this window has `delta = 0` and is never marked.
+
+### Fix #3: batch-hoist ArcSwap.load and ECN-write costs
+
+Codex round-1 finding #3: the v1 budget claim of `~3-5 ns` for
+ArcSwap.load was wrong; the real cost is `~30 ns` per load (per
+`arc-swap` v1.8.2 docs/source). Same for ECN-write — v1 said
+`~5 ns`, but `userspace-dp/src/afxdp/cos/ecn.rs:98` parses IPv4
+and updates checksum, materially more.
+
+v2 fixes the hot path by **batch-hoisting both at the drain
+entry**, not per-pop:
+
+```rust
+// In drain_shaped_tx_for_queue (called once per drain batch):
+let afd_summary = ff.afd.as_ref().map(|afd| afd.published_summary.load());
+//                                          ^ ArcSwap.load happens ONCE per batch (~30ns)
+//                                            then we hold the Guard for all packets in batch.
+
+for packet_idx in 0..batch_size {
+    // ... existing pop logic ...
+    if let Some(summary) = afd_summary.as_ref() {
+        let bucket = bucket_u16 as usize;
+        let delta = summary.window_served_delta[bucket];  // ~2ns L1 read
+        let fair = summary.fair_share_window_bytes;       // ~2ns L1 read (cached after first)
+        if delta > fair && cos_item_is_ect_fast(&item) {
+            cos_item_mark_ce_fast(&mut item);             // tx_completion ECN cost
+        }
+        // ... probabilistic drop for non-ECT (see Fix #5 below) ...
+    }
+}
+// At drain end, the Guard is dropped — settle-time accounting handles
+// fetch_add (Fix #1).
+```
+
+Per-pop cost reduces to **2 array reads + 1 conditional write**
+on the hot path: ~10 ns per pop in the marked case, ~4 ns in
+the unmarked case. Per-batch ArcSwap cost amortizes:
+`30 ns / TX_BATCH_SIZE` — at TX_BATCH_SIZE=64 that's `0.47 ns
+per pop`.
+
+Total per-pop cost: ~10 ns marked, ~4 ns unmarked, ~0.5 ns
+ArcSwap-amortized. Within budget at 1500B/2Mpps; still tight
+at 64B/35Mpps but acceptable since AFD is shared_exact-only and
+small-packet workloads typically hit best-effort or owner-local
+queues.
+
+### Fix #4: ECN write cost — batched fast-path helper
+
+`cos_item_mark_ce_fast` is a new helper that uses the cached
+parsed offsets from the existing `ParsedPacket` metadata
+(populated by xdp_main / forward.rs) rather than re-parsing.
+Cost reduces from ~50 ns (full IPv4 parse + checksum) to ~10 ns
+(direct byte write + 16-bit checksum delta — incremental, not
+full).
+
+If the parsed metadata is not available at the AFD decision site,
+fall back to the existing slower path. The fast-path helper is an
+optimization, not a correctness requirement.
+
+### Fix #5: probabilistic drop curve (vs Gemini's "drop cliff" critique)
+
+Gemini round-1 finding H: a binary `if delta > 2*fair { drop } else
+{ keep }` creates a drop-cliff that hammers TCP harder than a
+smoothed AQM curve.
+
+v2 uses a smoothed CSFQ-style drop probability for non-ECT
+packets:
+
+```rust
+// p_drop = max(0, (delta - fair) / delta) when delta > fair, else 0
+fn afd_drop_probability(delta: u64, fair: u64) -> u8 {
+    if delta <= fair {
+        return 0;
+    }
+    let excess = delta - fair;
+    // Probability scaled to 0-255 for cheap random-byte comparison.
+    let p = ((excess as u128 * 255) / (delta as u128)).min(255) as u8;
+    p
+}
+
+// Hot path:
+let p_drop = afd_drop_probability(delta, fair);
+if p_drop > 0 && !cos_item_is_ect_fast(&item) {
+    let r = (bpf_random_u32() & 0xff) as u8;  // ~3 ns
+    if r < p_drop {
+        return Drop;
+    }
+}
+```
+
+This matches the CSFQ paper's per-flow drop probability formula
+and avoids the bursty-drop pathology Gemini flagged.
+
+---
 
 ### 3.2 Hot path — write-only own shard, read-only published summary
 
