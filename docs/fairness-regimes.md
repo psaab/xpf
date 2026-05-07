@@ -26,11 +26,17 @@ across workers have failed:
 - **#1203** (n-tuple steering / cross-binding): WITHDRAWN as
   architectural anti-pattern
 - **#1215** + **#937** (cross-worker shared per-flow signal +
-  ingress XDP_REDIRECT): both PLAN-KILLED with kernel-source
-  citations. See `docs/pr/1215-per5tuple-fairness/plan.md` and
-  `docs/pr/937-ingress-xdp-redirect/feasibility.md` (note: these
-  docs live on their respective PR branches; references here will
-  resolve once those branches merge or are otherwise accessible)
+  ingress XDP_REDIRECT): both PLAN-KILLED. The kernel constraint
+  that derails #937 is upstream Linux `xsk_rcv_check()` (see
+  `net/xdp/xsk.c` in the kernel tree, around line 327 in 7.1-rc),
+  which enforces `xs->dev == xdp->rxq->dev` AND
+  `xs->queue_id == xdp->rxq->queue_index`. This is the
+  fundamental architectural basis of AF_XDP zero-copy and is
+  permanent across kernel versions (verified against 5.x, 6.x,
+  and 7.1-rc docs). The killed plan-docs preserved on their
+  respective PR branches contain the full reviewer findings:
+  `feature/1215-per5tuple-fairness` for #1215 v1 KILL,
+  `research/937-ingress-xdp-redirect` for #937 feasibility KILL.
 
 Rather than chase an unreachable scalar gate, this contract defines
 **structural ceiling** as the reference point. xpf's fairness
@@ -69,7 +75,7 @@ For a 6-worker cluster (`Nᵥ = 6`):
 | RSS distribution `{aᵢ}` | Active workers `Nₐ` | Total flows N | Structural CoV `Cstruct` |
 |---|---|---|---|
 | 2,2,2,2,2,2 (perfectly balanced, 12 flows) | 6 | 12 | 0.00 (0%) |
-| 1,1,2,2,3,3 (mild skew, 12 flows) | 6 | 12 | 0.40 (40%) |
+| 1,1,2,2,3,3 (mild skew, 12 flows) | 6 | 12 | 0.47 (47%) |
 | 0,2,2,2,3,3 (one idle, 12 flows) | 5 | 12 | 0.20 (20%) — *with N=12 the idle-worker contribution offsets* |
 | 1,3,0,0,0,0 (severe skew, 4 flows) | 2 | 4 | 0.58 (58%) |
 | 6,0,0,0,0,6 (degenerate, 12 flows) | 2 | 12 | 0.00 (0%) — *both workers fully loaded with 6 flows each* |
@@ -116,19 +122,39 @@ cannot be met, the contract requires either a code change or a
 documented contract amendment via this file (with its own
 plan-review).
 
-### Saturation detection (numeric, not subjective)
+### Saturation detection (numeric, scaled to structural cap)
 
 A run is in the **saturated regime** iff the observed aggregate
-throughput stays `≥ 95%` of the configured per-class shaper cap
-for **at least 80% of the steady-state measurement window** (in
-1-second buckets).
+throughput stays `≥ 95%` of the **structural cap** for at least
+80% of the steady-state measurement window (in 1-second buckets).
 
-A run that is below 95% of cap is **non-saturated**. The same
-acceptance gates above apply uniformly across both regimes — there
-is no separate non-saturated CoV gate, because `Cstruct` is the
-right reference for both. Non-saturated runs typically have
-`Cstruct ≈ 0` (because cwnd-bound flows don't compete for shaper
-tokens) and the gate `≤ 0.05` is met trivially.
+The structural cap is **`(Nₐ / Nᵥ) × shaper_rate`**, NOT the raw
+shaper rate. Without this scaling, a structurally-saturated
+RSS-skewed run (e.g. `Nₐ=2, Nᵥ=6`, can only physically reach
+~33% of unscaled cap) would always be labeled non-saturated.
+Scaling makes "saturated" mean "consuming all the bandwidth
+the active workers can deliver".
+
+The same acceptance gates apply uniformly across both saturated
+and non-saturated regimes — `Cstruct` is the right reference for
+both. The two regimes differ only in *expected observed_CoV*,
+not in the gate formula:
+
+- **Saturated**: `observed_CoV` will approach `Cstruct` from
+  below as the per-worker scheduler does its job. Pass iff the
+  gap `observed_CoV - Cstruct ≤ 0.05`.
+- **Non-saturated**: flows are cwnd-bound, not shaper-bound.
+  `observed_CoV` is typically near 0 because flows aren't
+  competing for tokens. `Cstruct` for the observed `{aᵢ}`
+  may still be high (it's a pure function of `{aᵢ}` and `Nᵥ`,
+  unrelated to cwnd or saturation state). The gate passes
+  trivially because `observed_CoV << Cstruct`, leaving a
+  large negative gap.
+
+The gate formula does NOT change between regimes. Saturation
+labeling is for diagnostic context (operators can see "we're
+in saturated regime and CoV is at the structural floor") but
+does not change pass/fail.
 
 ## Required metrics — exported from the harness
 
