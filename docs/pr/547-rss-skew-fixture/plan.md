@@ -98,8 +98,9 @@ architectural problems but five cleanup items remained:
    approach (see §3.3 below) — the tempfile dep is NOT actually
    added.
 
-Codex round-2's cost/benefit verdict was clear: **the ~250 LOC is
-worth it** if `fairness-eval` remains a supported harness binary.
+Codex round-2's cost/benefit verdict was clear: **the ~600 LOC
+(test code + helper functions + comments) is worth it** if
+`fairness-eval` remains a supported harness binary.
 The shell harness `test/incus/fairness-harness.sh:98` shells out and
 relies on exit codes + stdout JSON, and unit tests do NOT cover that
 boundary. v3 keeps that scope.
@@ -160,15 +161,17 @@ harness's output. cargo's unit tests on the pure-fns would still pass
 because they don't call `main()`. The risk surface is small but
 real.
 
-#547 fills that gap with 6 black-box integration tests that invoke
-`fairness-eval` as a subprocess, feed it synthetic
-`iperf3.json` + `binding-flows.tsv` files, and assert the binary
-contract — black-box-only, no internal-helper coupling.
+#547 fills that gap with 6 black-box integration test cases plus 1
+required-keys schema test (7 tests total) that invoke `fairness-eval`
+as a subprocess, feed it synthetic `iperf3.json` + `binding-flows.tsv`
+files, and assert the binary contract — black-box-only, no
+internal-helper coupling.
 
 ## 2. Honest scope/value framing
 
-**What this PR delivers**: 6 cargo integration tests
-(`userspace-dp/tests/fairness_eval_blackbox.rs`) that exercise
+**What this PR delivers**: 6 cargo integration test cases plus 1
+required-keys schema test (7 tests total, in
+`userspace-dp/tests/fairness_eval_blackbox.rs`) that exercise
 `fairness-eval`'s external contract via subprocess + stdout JSON
 inspection only. **No** internal-helper imports.
 

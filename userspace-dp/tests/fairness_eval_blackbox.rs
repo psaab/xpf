@@ -251,6 +251,21 @@ fn verdict_emits_required_keys() {
             "required key `{key}` missing from verdict JSON: {v}"
         );
     }
+
+    // Type assertions on each required key — a contract break that
+    // changes a field's JSON type (e.g. `saturated` from bool to
+    // string) would not be caught by `contains_key` alone. Per Codex
+    // code review LOW finding #3.
+    assert!(v["distribution_a_i"].is_array(), "distribution_a_i must be array");
+    assert!(v["n_active"].is_u64(), "n_active must be unsigned integer");
+    assert!(v["cstruct"].is_f64(), "cstruct must be float");
+    assert!(v["observed_cov"].is_f64(), "observed_cov must be float");
+    assert!(v["gap"].is_f64(), "gap must be float");
+    assert!(v["saturated"].is_boolean(), "saturated must be boolean");
+    assert!(v["a_i_sum_check_ok"].is_boolean(), "a_i_sum_check_ok must be boolean");
+    assert!(v["starved_flow_count"].is_u64(), "starved_flow_count must be unsigned integer");
+    assert!(v["verdict"].is_string(), "verdict must be string");
+    assert!(v["failure_reasons"].is_array(), "failure_reasons must be array");
 }
 
 // ---------------------------------------------------------------------------
@@ -260,9 +275,9 @@ fn verdict_emits_required_keys() {
 #[test]
 fn pass_case_skew_with_iface_noise() {
     let tmp = TempGuard::new("pass");
-    // 6 sockets, each producing ~equal throughput across 5 1-second
-    // intervals (warmup 0 / final-burst 0 means all 5 intervals count
-    // as steady-state).
+    // 6 sockets, each producing ~equal throughput across 60 1-second
+    // intervals (warmup 0 / final-burst 0 means all 60 intervals count
+    // as steady-state — needed to clear MIN_STEADY_STATE_SECS=60).
     let (sockets, json_str) = make_balanced_pass_inputs(6, 60);
     // Per-worker {a_i} = [1,1,1,1,1,1] on ge-0-0-2 — single direction,
     // matching the 6 iperf3 streams. Plus noise on ge-0-0-3 with huge
@@ -377,15 +392,19 @@ fn gate1_starved_flow_fails() {
 fn gate2_cov_gap_exceeds_epsilon_fails() {
     let tmp = TempGuard::new("gate2");
     // 6 streams; per-stream throughputs heavily skewed (one stream
-    // dominates) but no flow is starved. With balanced {a_i}=[2;6],
-    // cstruct=0 and observed_cov should comfortably exceed
-    // EPSILON=0.05 → Gate 2 FAIL without Gate 1.
+    // dominates) but no flow is starved. With balanced {a_i}=[1;6]
+    // (count=1 per worker, sum=6 matches the 6 streams), cstruct=0
+    // and observed_cov should comfortably exceed EPSILON=0.05 → Gate
+    // 2 FAIL without Gate 1.
     let sockets = [5u64, 6, 7, 8, 9, 10];
     let mut intervals: Vec<Vec<StreamSample>> = Vec::new();
     for i in 0..60u64 {
         let mut iv = Vec::new();
         for (idx, &sock) in sockets.iter().enumerate() {
-            // First flow gets 10 Gbps, rest get 1 Gbps. CoV ≈ 1.41/2.5 ≈ 0.56.
+            // First flow gets 10 Gbps, rest get 1 Gbps. The per-flow
+            // arithmetic mean is (10 + 5×1)/6 ≈ 2.5 Gbps; stddev is
+            // sqrt(((10-2.5)² + 5×(1-2.5)²)/6) ≈ 3.23 Gbps; CoV ≈
+            // 3.23 / 2.5 ≈ 1.29. Far above EPSILON=0.05.
             let bps = if idx == 0 { 1.0e10 } else { 1.0e9 };
             iv.push(StreamSample {
                 socket: sock,
@@ -471,10 +490,14 @@ fn guard_sum_mismatch_fails() {
 #[test]
 fn guard_empty_tsv_fails_via_sum_guard() {
     let tmp = TempGuard::new("guard_empty");
-    // 6 healthy streams; TSV has header only (no data rows).
-    // distribution_a_i = [0,0,0,0,0,0], sum=0, expected ~6 → sum guard
-    // FAIL. observed_cov == 0 and cstruct == 0 (per Codex round-3
-    // tracing), so Gate 2 doesn't fire — only the sum guard.
+    // 6 healthy streams; TSV has header only (no data rows). With
+    // no rows present, `any_iface_label_present == false` so
+    // `iface_filter_active == false` (even though --iface is
+    // supplied), `direction_multiplier == 2`, and the harness
+    // computes expected_sum = 6 × 2 = 12. Actual sum(a_i) == 0;
+    // |0 - 12| = 12 ≫ tolerance → sum guard FAIL. observed_cov ==
+    // 0 and cstruct == 0 (per Codex round-3 + code review trace),
+    // so Gate 2 does NOT fire — only the sum guard.
     let (_sockets, json_str) = make_balanced_pass_inputs(6, 60);
     let tsv_str = "# timestamp\tbinding_slot\tqueue_id\tworker_id\tiface\tcount\n".to_string();
 
@@ -544,6 +567,15 @@ fn exit2_out_of_range_worker_id() {
         "out-of-range worker_id must exit 2; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Codex code review (MEDIUM): the parser-side `verdict` Option is
+    // `None` for any exit code other than 0/1; that does not actually
+    // PROVE no JSON was emitted. Inspect stdout directly: it must be
+    // empty (or at minimum contain no `{`) on the exit-2 error path.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains('{'),
+        "exit 2 must not emit verdict JSON; got stdout: {stdout}"
+    );
     assert!(verdict.is_none(), "exit 2 must not emit verdict JSON");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -584,8 +616,12 @@ fn timestamps_for(n: u64) -> Vec<u64> {
     (1000..(1000 + n)).collect()
 }
 
-/// Build a 6-worker balanced TSV ([2,2,2,2,2,2] = single direction
-/// flow_cache for 12 streams) on the given iface across the timestamps.
+/// Build an `n_workers`-worker balanced TSV with `count: 1` per
+/// (timestamp, worker_id) on the given iface (median per worker = 1,
+/// so `distribution_a_i = [1; n_workers]`). With 6 workers and the
+/// PASS fixture's 6 iperf streams, sum(a_i)=6 matches
+/// `n_streams × direction_multiplier=1` (iface filter active) within
+/// tolerance.
 fn make_balanced_tsv(n_workers: u32, timestamps: &[u64], iface: &'static str) -> String {
     let mut rows: Vec<TsvRow> = Vec::new();
     for &ts in timestamps {
