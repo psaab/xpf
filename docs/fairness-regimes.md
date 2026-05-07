@@ -27,16 +27,20 @@ across workers have failed:
   architectural anti-pattern
 - **#1215** + **#937** (cross-worker shared per-flow signal +
   ingress XDP_REDIRECT): both PLAN-KILLED. The kernel constraint
-  that derails #937 is upstream Linux `xsk_rcv_check()` (see
-  `net/xdp/xsk.c` in the kernel tree, around line 327 in 7.1-rc),
-  which enforces `xs->dev == xdp->rxq->dev` AND
-  `xs->queue_id == xdp->rxq->queue_index`. This is the
-  fundamental architectural basis of AF_XDP zero-copy and is
-  permanent across kernel versions (verified against 5.x, 6.x,
-  and 7.1-rc docs). The killed plan-docs preserved on their
-  respective PR branches contain the full reviewer findings:
-  `feature/1215-per5tuple-fairness` for #1215 v1 KILL,
-  `research/937-ingress-xdp-redirect` for #937 feasibility KILL.
+  that derails #937's clean form is upstream Linux's per-socket
+  device + queue validation in `net/xdp/xsk.c` (the
+  `xsk_rcv_check()` path in mainline 7.1-rc; the same predicate
+  has been refactored into helpers like `xsk_dev_queue_valid()`
+  by recent leased/peered-queue netdev patches). The
+  durable narrow claim: **arbitrary cross-queue XSKMAP delivery
+  is not supported in current Linux**; leased/peered exceptions
+  do not provide the redistribution this design needs.
+  The killed plan-docs preserved on their respective PR branches
+  contain the full reviewer findings:
+  `feature/1215-per5tuple-fairness:docs/pr/1215-per5tuple-fairness/plan.md`
+  (#1215 v1 KILL) and
+  `research/937-ingress-xdp-redirect:docs/pr/937-ingress-xdp-redirect/feasibility.md`
+  (#937 feasibility KILL).
 
 Rather than chase an unreachable scalar gate, this contract defines
 **structural ceiling** as the reference point. xpf's fairness
@@ -46,9 +50,13 @@ number.
 
 ## Vocabulary
 
-- **Per-flow throughput share `sₖ`**: the fraction of total
-  measured aggregate throughput received by flow k, over the
-  measurement window.
+- **Per-flow throughput share `sₖ`**: flow k's measured
+  throughput divided by the **mean** measured per-flow
+  throughput across the flow set during the steady-state
+  window. Equivalently `sₖ = Tₖ / mean(T)`. Defined this way
+  the shares are **dimensionless** and the sample mean is 1 by
+  construction; CoV is `stddev({sₖ})` which is also `stddev/mean`
+  on the raw `Tₖ`.
 - **Per-flow CoV**: `stddev({sₖ}) / mean({sₖ})` across the flow
   set.
 - **Per-worker active-flow distribution `aᵢ`**: the number of
@@ -58,15 +66,26 @@ number.
 - **Active worker count `Nₐ`**: count of workers with `aᵢ ≥ 1`.
 - **Total worker count `Nᵥ`**: count of workers configured for the
   shared_exact queue under test.
-- **Structural fair-share for flow k on worker i**: `1 / (Nᵥ × aᵢ)`
-  of total aggregate throughput. Each worker delivers `1/Nᵥ`
-  evenly to its `aᵢ` flows.
+- **Structural fair-share for flow k on worker i** (only
+  defined for active workers, `aᵢ ≥ 1`): under perfect per-
+  worker-fair scheduling, flow k gets `Tₖ_struct = (S/Nᵥ) / aᵢ`
+  where `S` is the cluster aggregate. Idle workers contribute
+  zero flows so they don't appear in this denominator (no
+  division by zero).
 - **Structural CoV ceiling `Cstruct`**: the population CoV
-  computed from the per-flow shares `{1/(Nᵥ × aᵢ)}` weighted by
-  flow count. This is the **best achievable CoV** under perfect
-  per-worker-fair scheduling on the observed RSS distribution. xpf
-  cannot do better than `Cstruct` regardless of scheduler
-  perfection.
+  computed from the per-flow throughputs `{Tₖ_struct}` across
+  the active flow set, normalized to mean=1 (equivalent to
+  `stddev({Tₖ_struct}) / mean({Tₖ_struct})`). This is the **best
+  achievable CoV** under perfect per-worker-fair scheduling on
+  the observed RSS distribution. xpf cannot do better than
+  `Cstruct` regardless of scheduler perfection.
+
+  Worked formula: with `Nᵥ` workers and active flow distribution
+  `{aᵢ}` (flows per active worker), expand to per-flow shares
+  `{1/aᵢ : repeated aᵢ times for each active worker i}` (after
+  factoring out the `S/Nᵥ` constant which doesn't affect CoV),
+  then compute population stddev over this multiset divided by
+  its population mean.
 
 ## Structural CoV ceiling — worked examples
 
@@ -93,23 +112,38 @@ mathematical inconsistency of fixed CoV bands.
 
 A measurement run **PASSES** iff ALL of:
 
-1. **Hard failure — zero-throughput**: `zero_throughput_flow_count == 0`,
-   where a zero-throughput flow is one that received `< 1%` of mean
-   throughput **for the entire 5+ second steady-state window**
-   (excluding warmup; see §5). A flow that's < 1% during warmup but
-   recovers does not count.
+1. **Hard failure — starved flows**: `starved_flow_count == 0`,
+   where a **starved flow** is one that received `< 1%` of mean
+   per-flow throughput across the **entire steady-state window**
+   (per §steady-state-measurement-window: 60+ second window,
+   warmup and final-burst excluded). A flow that drops below 1%
+   transiently but recovers does not count. The metric is named
+   "starved" rather than "zero-throughput" to avoid implying
+   strict 0 Mb/s.
 
 2. **Per-flow fairness**: `observed_CoV ≤ Cstruct + 0.05`, where
    `Cstruct` is computed from the per-worker active-flow
    distribution measured during the steady-state window.
 
-3. **Aggregate throughput**:
-   `observed_aggregate ≥ (Nₐ / Nᵥ) × shaper_rate × 0.95` for
-   shaped queues, where the `(Nₐ / Nᵥ)` factor reflects the
-   structural ceiling for the observed RSS distribution. For
-   non-shaped (best-effort), use the cluster's measured baseline
-   for the same `{aᵢ}` distribution from a known-good prior run
-   (within ±5%).
+3. **Aggregate throughput** (saturated regime only):
+   For runs labeled saturated (per §saturation-detection): the
+   structural-throughput gate
+   `observed_aggregate ≥ (Nₐ / Nᵥ) × shaper_rate × 0.95` applies
+   for shaped queues. For non-shaped (best-effort) saturated
+   runs: ±5% of the cluster's measured baseline for the same
+   `{aᵢ}` distribution from a known-good prior run.
+
+   For runs labeled **non-saturated**: aggregate throughput is
+   NOT gated. The contract assumes non-saturated runs are
+   cwnd-bound or application-bound; the test simply records
+   `observed_aggregate` for diagnostic context but does not
+   apply a fail/pass on it. Per-flow fairness (Gate 2),
+   zero-throughput (Gate 1), and mouse p99 (Gate 4) remain
+   active for non-saturated runs.
+
+   Rationale: non-saturated runs by definition do not push
+   enough load to fill the structural cap; failing them on a
+   throughput floor would be a category error.
 
 4. **Mouse p99** (only when mouse probes are present): mouse
    TCP-connect+echo p99 latency `≤ 2 × idle_baseline`, where
@@ -164,8 +198,16 @@ Any fairness measurement run MUST report:
    stream count `N`.
 2. **Per-flow CoV**: `stddev / mean` across the steady-state window.
 3. **Zero-throughput flow count**: per the §1 definition.
-4. **Per-worker active-flow distribution `{aᵢ}`**: derived from
-   per-binding RX-flow counters during the steady-state window.
+4. **Per-worker active-flow distribution `{aᵢ}`**: count of
+   distinct 5-tuples observed on each worker's binding during
+   the steady-state window. The current per-binding RX
+   counters report packets/bytes; this contract additionally
+   requires per-binding **distinct-flow-count** which must be
+   added by the harness work (or by a binding-side counter
+   exposed via the existing `show class-of-service` /
+   `show userspace bindings` surfaces). A flow is counted as
+   active on worker i if it contributes ≥ 1% of mean per-flow
+   throughput on that worker over the window.
 5. **Computed `Cstruct`**: the structural CoV ceiling for the
    observed `{aᵢ}`.
 6. **Saturation determination**: which regime the run is in (per
@@ -192,14 +234,20 @@ For production observability, xpf MUST export:
   computed structural CoV ceiling.
 - **`xpf_fairness_observed_cov{queue=...}`** gauge: rolling
   observed CoV for the queue.
-- **`xpf_fairness_zero_throughput_flows{queue=...}`** counter:
-  monotonic count of flows that fell below the zero-throughput
-  threshold.
+- **`xpf_fairness_starved_flows{queue=...}`** counter:
+  monotonic count of flows that fell below the starved-flow
+  threshold (< 1% of mean per-flow throughput) over their lifetime.
 
 Operators tracking this contract in production monitor the gap
-`(observed_cov - cstruct)` and the zero-throughput counter. A
+`(observed_cov - cstruct)` and the starved-flow counter. A
 healthy production system has the gap `≤ 0.05` and the counter
 flat.
+
+**These Prometheus metrics do not currently exist in the
+collector.** They are mandated by this contract and must be
+added in a follow-up PR alongside the harness work that computes
+`Cstruct` and the rolling-window inputs. Until that PR ships, the
+contract is enforced via the test harness only.
 
 ## Steady-state measurement window
 
