@@ -73,18 +73,16 @@ this gate, not against an unconditional CoV target.
 | 4 | #840 / #1203 | PLAN-KILL | RSS steering at AF_XDP-ZC binding time is permanent physics — kernel pins flow→queue at bind |
 | 5 | #937 | PLAN-KILL | ingress XDP_REDIRECT for fairness: kernel feature support not present, would need upstream work |
 
-The full triage with reviewer findings lives in
-`feedback_per5tuple_fairness_killed.md`.
+The table above is the current canonical triage for killed mechanisms
+and reviewer findings.
 
 ## Surviving design options
 
 ### Path 2: race-safe AFD overlay (#1211)
 
-**Status**: v9 plan in `docs/pr/1211-afd-overlay-v2/plan.md` on branch
-`refactor/1211-afd-overlay-v2`. Codex round-8 PLAN-NEEDS-MAJOR-then-
-addressed; Gemini PLAN-KILLed twice. v10 round needs the new #1220 gate
-language ("must clear observed_CoV ≤ Cstruct + 0.05 on iperf-c P=12 -R
-measured by the merged harness") to make the merge bar concrete.
+**Status**: CLOSED (2026-05-07). Archive:
+`docs/per-5-tuple/path2-archive/CLOSING-RATIONALE.md` and
+`docs/per-5-tuple/path2-archive/plan-v10.md`.
 
 **Core idea**: probabilistic ECN-mark / drop based on per-flow share
 of a sharded estimator. Race-safe by virtue of: (a) batched
@@ -121,8 +119,9 @@ If pursued, this is a smaller-than-Path-2 swing and pure userspace.
   the harness's verdict matches a hand-computed expected verdict
   closes the loop. Prerequisite for plan-reviewing any future fairness
   mechanism with concrete gate values.
-- **#1211 — Path 2 v9 → v10**: re-dispatch with the #1220 gate
-  language baked into the merge bar. Gemini may PLAN-KILL again.
+- **#1211 follow-up (only if gate flips to FAIL)**: open a fresh issue
+  using the revisit criteria in the Path 2 closure archive. Do not
+  re-open #1211 directly.
 
 ## How to apply
 
@@ -142,5 +141,6 @@ When considering a new fairness mechanism:
 
 ## Change log
 
-- 2026-05-07: doc created; PR #1220 merged (harness shipped). Path 2
-  v9 plan in flight; #547 deterministic fixture pending.
+- 2026-05-07: Path 2 (#1211) closed and archived under
+  `docs/per-5-tuple/path2-archive/`; #547 deterministic fixture
+  still pending.

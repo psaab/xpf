@@ -87,12 +87,13 @@ weeks per round and produces no shipped value.
 - PR #1220 (fairness harness) — bf87cf71, 2026-05-07. Empirical
   evidence that the contract is being met today.
 - `docs/per-5-tuple/state.md` — living state document for the
-  per-5-tuple drive. Path 2 entry there points here for the full
-  rationale.
-- `feedback_per5tuple_fairness_killed.md` — memory file with
-  attribution for #1215, #836, #840/#1203, #937 PLAN-KILLs.
+  per-5-tuple drive. Path 2 there is now marked CLOSED and links
+  this archive.
+- `docs/per-5-tuple/state.md` ("Killed mechanisms") — attribution
+  for #1215, #836, #840/#1203, #937 PLAN-KILLs.
 
 ## Memory hook
 
-`project_1211_killed.md` should be added to memory after this commit
-lands, summarising the closing rationale + the criteria for revisit.
+After this merges, add a project memory entry summarising this
+closing rationale and the revisit criteria (external memory system,
+not an in-repo Markdown file).
