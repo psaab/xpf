@@ -1,5 +1,6 @@
 mod afxdp;
 mod event_stream;
+mod fairness;
 mod filter;
 mod flowexport;
 mod nat;
