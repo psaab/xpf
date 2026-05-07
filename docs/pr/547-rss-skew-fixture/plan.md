@@ -1,5 +1,5 @@
 ---
-status: REVISED v4 — addresses Codex round-3 PLAN-NEEDS-MINOR (task-movp0i14: §5 invariant contradicting v3 §3.5; stale '5 cases' / '~150-200 LOC' / old open questions) AND Gemini round-1-retry PLAN-NEEDS-MINOR (task-movp199v: drop tempfile crate dep, reuse SystemTime+nanos pattern from fairness-eval.rs::tsv_tests). v4 keeps implement-now path; PLAN-KILL escape hatch documented but not taken. Pending Codex round-4 + Gemini round-2 verify.
+status: REVISED v5 — addresses Codex round-4 PLAN-NEEDS-MINOR (task-movpbbpz): 3 stale-residue text fixes (200 LOC → ~250 LOC at line 482, v3 tempfile directive at line 92 marked superseded, fairness-eval.rs line reference 539-550 → 729 + commit 9d3faf02). Gemini round-2 verdict: PLAN-READY (task-movpbwzi). One reviewer PLAN-READY; v5 awaits Codex round-5 verify.
 issue: #547
 phase: implementation plan
 prerequisites:
@@ -28,8 +28,9 @@ findings:
 finding:
 
 3. v3 added the `tempfile` crate as a dev-dep. Gemini pointed out
-   that `fairness-eval.rs::tsv_tests` (lines 539-550 at HEAD) already
-   uses `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()` +
+   that `fairness-eval.rs::tsv_tests::write_tmp` (line 729+ at HEAD,
+   commit 9d3faf02) already uses
+   `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()` +
    `process::id()` for collision-resistant tempfile naming. v4 fix:
    reuse that pattern via a 10-line `TempGuard` struct with `Drop`
    impl. No new dev-dep; workspace dependency tree unchanged.
@@ -91,8 +92,11 @@ architectural problems but five cleanup items remained:
 
 5. **Tempfile naming was fragile.** v2 used PID-based naming, which
    is not collision-proof under cargo's parallel test runner. **v3
-   fix**: add `tempfile` crate as dev-dep in
+   proposed**: add `tempfile` crate as dev-dep in
    `userspace-dp/Cargo.toml`; use `tempfile::tempdir()`.
+   **v4 superseded that** with the hand-rolled `TempGuard`
+   approach (see §3.3 below) — the tempfile dep is NOT actually
+   added.
 
 Codex round-2's cost/benefit verdict was clear: **the 200 LOC is
 worth it** if `fairness-eval` remains a supported harness binary.
@@ -278,7 +282,7 @@ spec.
 **Tempfile** (v4 fix per Gemini round-1 retry): re-use the
 `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()` +
 `process::id()` pattern that `fairness-eval.rs::tsv_tests` already
-uses (lines 539-550 at HEAD). Wrap it in a 10-line `struct
+uses (line 729+ at HEAD, commit 9d3faf02). Wrap it in a 10-line `struct
 TempGuard(PathBuf)` with a custom `Drop` impl that recursively
 removes the tempdir. No new dev-dep — keeps the workspace
 dependency tree unchanged.
@@ -479,4 +483,4 @@ exist. With #1211 archived (PLAN-KILL), Path 4 workload-aware gate
 is the only remaining mechanism candidate, and it doesn't exist as
 an issue yet. If Path 4 also PLAN-KILLs at plan time, #547's payoff
 collapses to "minor regression-coverage on a stable 600-LOC binary".
-That may not justify even 200 LOC of test code.
+That may not justify even ~250 LOC of test code.
