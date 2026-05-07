@@ -612,6 +612,7 @@ fn binding_counters_snapshot_projects_ring_pressure_fields() {
         // through the projection so a future refactor that drops
         // either assignment surfaces here.
         flow_cache_collision_evictions: 53,
+        active_flow_count: 0,
         v_min_throttle_hard_cap_overrides: 59,
         v_min_throttles: 67,
         ..Default::default()
@@ -679,6 +680,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         tx_ring_capacity: 26,
         // #918: per-set LRU collision-eviction counter.
         flow_cache_collision_evictions: 27,
+        active_flow_count: 0,
         v_min_throttle_hard_cap_overrides: 28,
         v_min_throttles: 29,
     };
@@ -814,6 +816,7 @@ fn tx_latency_hist_serialization_roundtrip() {
         tx_ring_capacity: 2_048,
         // #918: per-set LRU collision-eviction counter.
         flow_cache_collision_evictions: 17,
+        active_flow_count: 0,
         v_min_throttle_hard_cap_overrides: 18,
         v_min_throttles: 19,
     };

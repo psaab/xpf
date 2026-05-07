@@ -672,6 +672,7 @@ impl BindingLiveState {
             flow_cache_collision_evictions: self
                 .flow_cache_collision_evictions
                 .load(Ordering::Relaxed),
+            active_flow_count: self.active_flow_count.load(Ordering::Relaxed),
             v_min_throttle_hard_cap_overrides: self
                 .v_min_throttle_hard_cap_overrides
                 .load(Ordering::Relaxed),
