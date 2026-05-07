@@ -339,17 +339,21 @@ impl FlowCache {
             misses: 0,
             evictions: 0,
             collision_evictions: 0,
-            current_epoch: 0,
+            current_epoch: 1,
         }
     }
 
     /// #1219: advance the per-binding active-flow epoch counter.
-    /// Called from the worker's existing 100ms tick. Wrapping u16
+    /// Called from the worker's existing ~65ms tick. Wrapping u16
     /// arithmetic; `count_active_flows` uses `wrapping_sub` to be
-    /// safe across the wrap boundary.
-    #[inline]
+    /// safe across the wrap boundary. Epoch 0 is reserved as the
+    /// "never touched" sentinel in `FlowCacheEntry::last_used_epoch`;
+    /// skip it on wraparound so the sentinel invariant holds forever.
     pub(super) fn tick_advance_epoch(&mut self) {
-        self.current_epoch = self.current_epoch.wrapping_add(1);
+        self.current_epoch = match self.current_epoch.wrapping_add(1) {
+            0 => 1, // skip sentinel value
+            n => n,
+        };
     }
 
     /// #1219: count cache entries hit in the last `ACTIVE_WINDOW_EPOCHS`
@@ -490,11 +494,15 @@ impl FlowCache {
                 // periodic count_active_flows scan can recognize this
                 // flow as active in the last 1s window. Single u16 store
                 // on a struct already in cache from the key check above.
+                // Use a single mutable borrow: stamp the epoch and coerce
+                // to &FlowCacheEntry in one index, eliminating the
+                // redundant second `self.entries[entry_idx]` access.
                 let now = self.current_epoch;
-                if let Some(e) = &mut self.entries[entry_idx] {
-                    e.last_used_epoch = now;
-                }
-                return self.entries[entry_idx].as_ref();
+                let entry = self.entries[entry_idx]
+                    .as_mut()
+                    .expect("BUG: flow cache entry vanished at hit site");
+                entry.last_used_epoch = now;
+                return Some(entry);
             }
         }
         self.misses += 1;

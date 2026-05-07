@@ -342,9 +342,23 @@ fn parse_args() -> Args {
             }
         }
     }
+    let iperf_json = match iperf_json {
+        Some(p) => p,
+        None => {
+            eprintln!("fairness-eval: --iperf-json is required");
+            std::process::exit(2);
+        }
+    };
+    let binding_flows = match binding_flows {
+        Some(p) => p,
+        None => {
+            eprintln!("fairness-eval: --binding-flows is required");
+            std::process::exit(2);
+        }
+    };
     Args {
-        iperf_json: iperf_json.expect("--iperf-json required"),
-        binding_flows: binding_flows.expect("--binding-flows required"),
+        iperf_json,
+        binding_flows,
         warmup_secs,
         final_burst_secs,
         n_workers,

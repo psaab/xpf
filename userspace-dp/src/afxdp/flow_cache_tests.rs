@@ -1399,20 +1399,60 @@ fn count_active_flows_handles_epoch_wraparound() {
     let key = make_key();
     cache.insert(make_entry(key.clone(), stamp, 0));
     // Force current_epoch near u16::MAX so the next advance wraps.
-    cache.current_epoch = u16::MAX - 2;
-    cache.tick_advance_epoch();  // u16::MAX - 1
+    // tick_advance_epoch skips 0 (sentinel), so the sequence near the
+    // top is: MAX-1 → MAX → 1 → 2 (not 0).
+    cache.current_epoch = u16::MAX - 1;
+    cache.tick_advance_epoch();  // u16::MAX
     let lookup = FlowCacheLookup {
         ingress_ifindex: 7,
         config_generation: 1,
         fib_generation: 1,
     };
     assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
-    // Now wrap.
-    cache.tick_advance_epoch();  // u16::MAX
-    cache.tick_advance_epoch();  // wraps to 0
-    cache.tick_advance_epoch();  // 1
-    // last_used_epoch was u16::MAX-1; current is 1; wrapping_sub
-    // gives 1 - (u16::MAX-1) = 1 - 65534 wrapping to 3. Within
-    // 10-epoch window → active.
+    // Now wrap: u16::MAX → wrapping_add(1) = 0, skipped → 1 → 2.
+    cache.tick_advance_epoch();  // skips 0, becomes 1
+    cache.tick_advance_epoch();  // 2
+    // last_used_epoch was u16::MAX; current is 2; wrapping_sub
+    // gives 2 - u16::MAX wrapping = 3. Within 10-epoch window → active.
     assert_eq!(cache.count_active_flows(), 1);
+}
+
+#[test]
+fn tick_advance_epoch_skips_zero_sentinel() {
+    // Verify that tick_advance_epoch never produces epoch == 0, which
+    // is the "never touched" sentinel used by count_active_flows.
+    let mut cache = FlowCache::new();
+    cache.current_epoch = u16::MAX;
+    cache.tick_advance_epoch(); // would be 0 without the skip
+    assert_ne!(cache.current_epoch, 0, "epoch 0 is reserved sentinel; must be skipped on wraparound");
+    assert_eq!(cache.current_epoch, 1);
+}
+
+#[test]
+fn count_active_flows_entry_at_epoch_max_not_confused_with_sentinel() {
+    // An entry stamped at u16::MAX (valid epoch) must be counted as
+    // active immediately after wraparound to epoch 1 (age = 2 epochs,
+    // within the 10-epoch window). It must NOT be confused with the
+    // 0 sentinel.
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    cache.current_epoch = u16::MAX;
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    // stamp is u16::MAX, not 0 → survives the sentinel check
+    cache.tick_advance_epoch(); // skips 0 → 1
+    assert_eq!(cache.count_active_flows(), 1, "entry at epoch MAX must be active after 1-tick advance");
 }
