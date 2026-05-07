@@ -16,8 +16,9 @@ ceiling regardless of scheduler perfection — see §3).
 
 The userspace AF_XDP zero-copy dataplane locks each flow to the
 worker that processes its RSS-hashed RX queue (kernel
-`xsk_rcv_check()` enforces this — see `userspace-xdp/src/lib.rs`
-around line 1305). This is the fundamental architectural basis of
+`xsk_rcv_check()` enforces device/queue validity in `net/xdp/xsk.c`,
+with newer trees refactoring the same check behind helpers such as
+`xsk_dev_queue_valid()`). This is the fundamental architectural basis of
 AF_XDP zero-copy. Three independent attempts to redistribute work
 across workers have failed:
 
@@ -29,9 +30,9 @@ across workers have failed:
   ingress XDP_REDIRECT): both PLAN-KILLED. The kernel constraint
   that derails #937's clean form is upstream Linux's per-socket
   device + queue validation in `net/xdp/xsk.c` (the
-  `xsk_rcv_check()` path in mainline 7.1-rc; the same predicate
-  has been refactored into helpers like `xsk_dev_queue_valid()`
-  by recent leased/peered-queue netdev patches). The
+  `xsk_rcv_check()` path, with equivalent predicate refactors into
+  helpers like `xsk_dev_queue_valid()` in recent leased/peered-queue
+  netdev patches). The
   durable narrow claim: **arbitrary cross-queue XSKMAP delivery
   is not supported in current Linux**; leased/peered exceptions
   do not provide the redistribution this design needs.
@@ -138,7 +139,7 @@ A measurement run **PASSES** iff ALL of:
    cwnd-bound or application-bound; the test simply records
    `observed_aggregate` for diagnostic context but does not
    apply a fail/pass on it. Per-flow fairness (Gate 2),
-   zero-throughput (Gate 1), and mouse p99 (Gate 4) remain
+   starved-flow (Gate 1), and mouse p99 (Gate 4) remain
    active for non-saturated runs.
 
    Rationale: non-saturated runs by definition do not push
@@ -169,26 +170,22 @@ RSS-skewed run (e.g. `Nₐ=2, Nᵥ=6`, can only physically reach
 Scaling makes "saturated" mean "consuming all the bandwidth
 the active workers can deliver".
 
-The same acceptance gates apply uniformly across both saturated
-and non-saturated regimes — `Cstruct` is the right reference for
-both. The two regimes differ only in *expected observed_CoV*,
-not in the gate formula:
+Per-flow fairness gating (`observed_CoV ≤ Cstruct + 0.05`) is
+identical across saturated and non-saturated regimes. Aggregate
+throughput gating is intentionally regime-conditional (Gate 3 applies
+only when saturated):
 
 - **Saturated**: `observed_CoV` will approach `Cstruct` from
   below as the per-worker scheduler does its job. Pass iff the
-  gap `observed_CoV - Cstruct ≤ 0.05`.
+  gap `observed_CoV - Cstruct ≤ 0.05`; Gate 3 throughput floor
+  is active.
 - **Non-saturated**: flows are cwnd-bound, not shaper-bound.
   `observed_CoV` is typically near 0 because flows aren't
   competing for tokens. `Cstruct` for the observed `{aᵢ}`
   may still be high (it's a pure function of `{aᵢ}` and `Nᵥ`,
   unrelated to cwnd or saturation state). The gate passes
   trivially because `observed_CoV << Cstruct`, leaving a
-  large negative gap.
-
-The gate formula does NOT change between regimes. Saturation
-labeling is for diagnostic context (operators can see "we're
-in saturated regime and CoV is at the structural floor") but
-does not change pass/fail.
+  large negative gap; Gate 3 is diagnostic-only.
 
 ## Required metrics — exported from the harness
 
@@ -197,7 +194,7 @@ Any fairness measurement run MUST report:
 1. **Per-flow throughput**: `min, p25, median, p75, max` (Mb/s) and
    stream count `N`.
 2. **Per-flow CoV**: `stddev / mean` across the steady-state window.
-3. **Zero-throughput flow count**: per the §1 definition.
+3. **Starved-flow count**: per Gate 1 definition.
 4. **Per-worker active-flow distribution `{aᵢ}`**: count of
    distinct 5-tuples observed on each worker's binding during
    the steady-state window. The current per-binding RX
@@ -227,9 +224,8 @@ Any fairness measurement run MUST report:
 For production observability, xpf MUST export:
 
 - **`xpf_fairness_regime{queue=...}`** Prometheus gauge: enum
-  `{non_saturated, saturated_balanced, saturated_skewed,
-   low_n_degenerate}`. Computed from rolling 30-second window of
-  per-binding active-flow distribution + saturation determination.
+  `{non_saturated, saturated}`. Computed from rolling 30-second
+  window + saturation determination.
 - **`xpf_fairness_cstruct{queue=...}`** gauge: the current
   computed structural CoV ceiling.
 - **`xpf_fairness_observed_cov{queue=...}`** gauge: rolling
@@ -275,7 +271,7 @@ For changes that should NOT affect fairness:
   points) vs prior tip on the same fixture.
 - Aggregate throughput regression `≤ 5%`.
 - Mouse p99 regression `≤ 10%`.
-- Zero-throughput flow count must not become positive.
+- Starved-flow count must not become positive.
 
 For changes that explicitly target fairness improvement:
 
@@ -314,10 +310,10 @@ source of truth for the contract. Updates require:
 - Smoke matrix on the loss userspace cluster, run for fixtures
   that exercise multiple `{aᵢ}` distributions — a contract that
   doesn't measurably hold on the test bench is broken.
-- Memory entry: any change to gate values (the `ε = 0.05` margin,
-  the saturation threshold, the warmup window) updates
-  `feedback_smoke_*` memory entries that reference numeric
-  targets.
+- Documented rationale in the PR body plus `_Log.md`: any change to
+  gate values (the `ε = 0.05` margin, saturation threshold, warmup
+  window) must explicitly record the old/new values and the evidence
+  fixture used.
 
 ## Open questions for future contract iteration
 
