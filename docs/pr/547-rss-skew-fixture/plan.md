@@ -1,11 +1,47 @@
 ---
-status: REVISED v3 — addresses Codex round-2 PLAN-NEEDS-MINOR (task-movoly14): black-box boundary tightened (no internal-helper coupling), required-keys set expanded with n_active and starved_flow_count, test command uses --manifest-path userspace-dp/Cargo.toml --test fairness_eval_blackbox, empty-input semantics corrected (empty TSV is Guard FAIL not Gate 2; empty intervals not added), tempfile crate as dev-dep (not PID-based naming). Gemini round-1 (task-movo7jfk) failed at Pro 3 rate limit; re-dispatch with v3 commit hash.
+status: REVISED v4 — addresses Codex round-3 PLAN-NEEDS-MINOR (task-movp0i14: §5 invariant contradicting v3 §3.5; stale '5 cases' / '~150-200 LOC' / old open questions) AND Gemini round-1-retry PLAN-NEEDS-MINOR (task-movp199v: drop tempfile crate dep, reuse SystemTime+nanos pattern from fairness-eval.rs::tsv_tests). v4 keeps implement-now path; PLAN-KILL escape hatch documented but not taken. Pending Codex round-4 + Gemini round-2 verify.
 issue: #547
 phase: implementation plan
 prerequisites:
   - PR #1217 (fairness-regimes contract) MERGED as e1ec6b90 ✓
   - PR #1220 (fairness harness) MERGED as bf87cf71 ✓
 ---
+
+## v4 — Codex round-3 + Gemini round-1-retry findings addressed
+
+**Codex round-3 (task-movp0i14, PLAN-NEEDS-MINOR)** — 2 stale-residue
+findings:
+
+1. §5 "Hidden invariants" contradicted v3 §3.5 "Black-box discipline".
+   The former said "the fixture computes expected values via direct
+   call to `compute_cstruct`"; the latter explicitly forbade that.
+   v4 fix: §5 reworded to clarify `compute_cstruct` is the single
+   source of truth *internally* (called by `fairness-eval` itself),
+   and the integration test does NOT import it.
+
+2. Stale v2 residue: "5 cases", "~150-200 LOC", old open questions
+   referencing the now-wrong empty-TSV-Gate-2 claim. v4 fix: cleaned
+   up to "6 cases", "~250 LOC", and consolidated open questions
+   into a "resolved by review rounds" structure.
+
+**Gemini round-1-retry (task-movp199v, PLAN-NEEDS-MINOR)** — one
+finding:
+
+3. v3 added the `tempfile` crate as a dev-dep. Gemini pointed out
+   that `fairness-eval.rs::tsv_tests` (lines 539-550 at HEAD) already
+   uses `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()` +
+   `process::id()` for collision-resistant tempfile naming. v4 fix:
+   reuse that pattern via a 10-line `TempGuard` struct with `Drop`
+   impl. No new dev-dep; workspace dependency tree unchanged.
+
+Both reviewers also flagged a strategic note: with #1211 closed and
+Path 4 not yet captured as an issue, the fixture's value is
+"fairness-eval CLI/IO regression coverage" (defensible) but not
+architecturally exciting. v4 keeps the implement-now path because
+the user's standing mandate is to drive per-5-tuple fairness; the
+harness binary is already the merge bar for any future fairness PR;
+locking down its contract is standalone-valuable. The PLAN-KILL
+escape hatch is preserved if circumstances change.
 
 ## v3 — Codex round-2 findings addressed
 
@@ -180,13 +216,21 @@ inspection only. **No** internal-helper imports.
 **Concrete value**: a regression in `fairness-eval`'s argument
 parsing, file IO, exit codes, or verdict JSON shape would be caught
 locally rather than discovered when the cluster harness silently
-returns garbage. The 5 cases also serve as executable documentation
+returns garbage. The 6 cases also serve as executable documentation
 for what the binary's contract IS.
 
 If reviewers conclude that the binary contract is small enough that
 this kind of regression coverage is overkill, **PLAN-KILL is an
 acceptable verdict**. The fairness-eval binary is ~600 LOC; the
-integration tests will be ~150-200 LOC.
+integration tests will be ~250 LOC including the schema test.
+
+Both round-3 reviewers explicitly noted "if Path 4 is not going to
+ship, this is YAGNI; consider PLAN-KILL". The strategic call is:
+the user's standing mandate is to drive per-5-tuple fairness; even
+if Path 4 stalls, the harness binary is already the merge bar for
+any future fairness PR, so locking down its contract has standalone
+regression-coverage value. v4 keeps the implement-now path; the
+PLAN-KILL escape hatch is preserved if circumstances change.
 
 ## 3. Concrete design
 
@@ -231,11 +275,45 @@ TSV: 6-column format, header `# timestamp\tbinding_slot\tqueue_id\tworker_id\tif
 then rows synthesised from a `Vec<(u64, u32, u32, u32, &str, u32)>`
 spec.
 
-**Tempfile** (v3 fix per Codex round-2 finding #5): use `tempfile`
-crate as a `[dev-dependencies]` entry in `userspace-dp/Cargo.toml`.
-`tempfile::tempdir()` returns a guard whose `Drop` impl cleans up
-the dir even if the test panics. Production binary is unaffected;
-only test builds pull in the dep.
+**Tempfile** (v4 fix per Gemini round-1 retry): re-use the
+`SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()` +
+`process::id()` pattern that `fairness-eval.rs::tsv_tests` already
+uses (lines 539-550 at HEAD). Wrap it in a 10-line `struct
+TempGuard(PathBuf)` with a custom `Drop` impl that recursively
+removes the tempdir. No new dev-dep — keeps the workspace
+dependency tree unchanged.
+
+```rust
+struct TempGuard(PathBuf);
+impl TempGuard {
+    fn new(prefix: &str) -> Self {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).expect("create tempdir");
+        Self(p)
+    }
+    fn path(&self) -> &Path { &self.0 }
+}
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+```
+
+Cleanup runs even if the test panics (Drop is run during stack
+unwinding), matching the `tempfile::tempdir()` guarantee.
+
+(v3 had proposed adding the `tempfile` crate as a dev-dep; Gemini
+round-1 retry pointed out this is unnecessary bloat given an
+existing pattern is already in the codebase.)
 
 ### 3.4 Verdict JSON parsing — by required keys, not full schema
 
@@ -313,12 +391,13 @@ None. Tests-only.
   must produce well-formed rows or its black-box assertions will
   fail through subprocess output, not through internal parser
   coupling.
-- `compute_cstruct` is the single source of truth for Cstruct math;
-  the fixture computes expected values via direct call (the
-  `fairness` module is exposed in `main.rs` under `#[cfg(test)] mod
-  fairness;`).
+- `compute_cstruct` is the single source of truth for Cstruct math
+  *internally* (called by `fairness-eval` itself). v3 §3.5 forbids
+  the integration test from importing it — the fixture asserts
+  binary-contract values from the JSON, not against an
+  internally-recomputed Cstruct.
 - The legacy 3-col TSV path is NOT exercised by these tests (it's
-  exercised by the existing `tsv_tests` unit module). v2 fixture
+  exercised by the existing `tsv_tests` unit module). v3 fixture
   uses 6-col only.
 
 ## 6. Risk assessment
@@ -326,9 +405,9 @@ None. Tests-only.
 | Risk class | Level | Note |
 |---|---|---|
 | Behavioral regression risk | NONE | tests-only PR; no production code touched |
-| Lifetime / borrow-checker risk | LOW | `tempfile` crate or stdlib tempdir; no Arc/Mutex |
+| Lifetime / borrow-checker risk | LOW | hand-rolled `TempGuard` + Drop; no Arc/Mutex; no new deps |
 | Performance regression risk | NONE | not on any hot path |
-| Architectural mismatch risk | LOW | 5 test cases against a stable binary contract |
+| Architectural mismatch risk | LOW | 6 test cases against a stable binary contract |
 
 ## 7. Test plan
 
@@ -353,35 +432,36 @@ None. Tests-only.
 - Asserting `verdict == FAIL` on a saturation-only basis.
 - Validating future fairness mechanisms.
 
-## 9. Open questions for adversarial review (v2)
+## 9. Open questions resolved by review rounds
 
-1. **Is the 5-case set complete?** PASS / Gate 1 FAIL / Gate 2 FAIL /
-   Guard FAIL / Exit 2 covers the verdict-emitting paths and one
-   error path. Should we also exercise:
-   - Empty TSV (no rows at all) — does fairness-eval handle this
-     correctly? It should produce all-zero {a_i} and Gate 2 FAIL
-     because observed_cov - cstruct depends on per_stream_buckets.
-   - Empty iperf3 intervals (warmup ate the whole window) — exit
-     code 2.
-2. **Required-keys schema**: 8 required keys vs 16 total. Is the
-   split right? Should `saturated` move to "diagnostic only" since
-   it's not in failure_reasons? v2 keeps it in required because it's
-   structurally important for operators to read; reviewers may push
-   the other way.
-3. **Subprocess vs in-process**: Codex round-1 finding #3 said
-   subprocess is the right boundary because the production harness
-   shells out to the binary. If a reviewer disagrees and wants
-   in-process invocation, that requires refactoring `fairness-eval`'s
-   `main()` into a callable function — a bigger swing this PR
-   intentionally avoids.
-4. **Tempfile cleanup**: relying on `std::env::temp_dir()` plus a
-   `Drop` impl is fragile if the test panics before Drop runs.
-   Should the fixture use the `tempfile` crate instead? Adds a dep.
-5. **Race against concurrent test runs**: `cargo test` runs tests in
-   parallel by default. Each fixture run uses unique paths, but
-   shared `temp_dir()` could collide on filename if PID-based naming
-   isn't enough. Consider including the test name in the tempfile
-   prefix.
+(v1, v2, v3, v4 questions consolidated. Resolved questions removed;
+new v4-only questions kept open.)
+
+1. **Is the 6-case set complete?** PASS / Gate 1 FAIL / Gate 2 FAIL
+   / Guard FAIL — sum mismatch / Guard FAIL — empty TSV / Exit 2.
+   Codex round-3 confirmed this is the right enumeration for this
+   PR's stated scope. Empty intervals can stay out of scope (would
+   require a production-code fix to fairness-eval; not what this PR
+   is about).
+2. **Required-keys schema**: 10 required vs 6 diagnostic. Codex
+   round-3 + Gemini round-1 retry both confirmed the split is
+   correct, including `saturated` in required because it's
+   operator-visible per `docs/fairness-regimes.md:240`.
+3. **Subprocess vs in-process**: resolved in round-1 — subprocess
+   is the right boundary because the production harness shells out
+   to the binary. cargo's `CARGO_BIN_EXE_<name>` env var is auto-set
+   for same-package bin targets; no dev-dep on bin needed
+   (Codex round-3 + Gemini round-1 retry confirmed).
+4. **Tempfile cleanup**: resolved in v4 — hand-rolled `TempGuard`
+   with `Drop` impl, reusing `fairness-eval.rs::tsv_tests`'s
+   `SystemTime::now().as_nanos()` + `process::id()` pattern. No new
+   dep. Drop fires during stack unwinding so test-panic cleanup is
+   covered.
+5. **Race against concurrent test runs**: resolved by the same
+   `nanos + pid` pattern in #4. nanos provides per-test-run
+   uniqueness; pid provides cross-test-binary uniqueness. v4
+   includes the test function name in the prefix as additional
+   defense.
 
 ## 10. Methodology
 
