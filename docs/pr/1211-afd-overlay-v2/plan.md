@@ -380,12 +380,36 @@ explicitly call out.
 v4 makes the prerequisite explicit. **Implementation work is
 phased**:
 
-- **Phase 0 (prerequisite)**: extend `TxRequest` and
-  `PreparedTxRequest` (`userspace-dp/src/afxdp/types/tx.rs:12`
-  + `:54`) to include cached L3 + L4 offsets and IP version.
-  These offsets are produced by ingress XDP parse + flow_cache
-  lookup; piping them through the request types is mechanical
-  but touches every TX item construction site.
+- **Phase 0 (prerequisite)**: ECN-marking happens at the
+  pre-submit point in TX dispatch, where the TX-frame **after
+  rewrite** is what we actually mark. Ingress-side L3 offsets
+  cannot be reused directly because egress VLAN add/remove,
+  tunnel encapsulation, and L3 rewrite paths all change the
+  offset (the existing `cos/ecn.rs:179` ECN code re-parses the
+  outgoing wire bytes precisely because sideband metadata
+  drifts; `frame/mod.rs:245` computes output `eth_len` from
+  `tx_vlan_id` so the offset is rewrite-time-known).
+
+  Phase 0 has two viable sub-options:
+  - **0a (lower invasive)**: do not pipe metadata through
+    TxRequest at all. Re-parse the post-rewrite TX-frame at
+    the AFD ECN-mark site (same as the existing
+    `cos/ecn.rs:179` path). Per-mark cost: ~50 ns (existing
+    measurement). Acceptable for the saturated-RSS-skewed
+    target workload (large-packet TCP at 2 Mpps where 50 ns
+    is ~10% of budget).
+  - **0b (lower runtime cost)**: extend `TxRequest` and
+    `PreparedTxRequest` (`userspace-dp/src/afxdp/types/tx.rs:12`
+    + `:54`) to carry post-rewrite L3 + L4 offsets and IP
+    version, computed at the rewrite site itself
+    (`frame/mod.rs:245` is the natural producer). Per-mark
+    cost: ~10 ns. Touches every TX construction site and the
+    rewrite path. Larger diff.
+
+  Recommendation: ship 0a first (zero metadata diff; reuses
+  existing parse), then evaluate 0b if budget pressure shows
+  up empirically. Either choice is structurally compatible
+  with the AFD design; the implementation PR picks one.
 
 - **Phase 1**: add the AFD module (`userspace-dp/src/afxdp/cos/afd.rs`)
   with `AfdQueueState`, `SharedFlowSlot` types, and the snapshot
@@ -633,20 +657,34 @@ relevant one.
 
 ## 4. Concrete prototype scope (if reviewers PLAN-READY)
 
-A separate plan-and-PR after this plan is approved would deliver:
+A separate plan-and-PR after this plan is approved would deliver
+the phased Fix #10 implementation:
 
 1. New module `userspace-dp/src/afxdp/cos/afd.rs` (~400 LOC).
-2. Hook into `cos/queue_ops/pop.rs` after the existing vtime
-   advance — single ECN-mark site.
-3. Snapshot owner thread piggybacked on existing coordinator
+2. **Pre-submit ECN-mark hook** in TX dispatch (see Fix #10
+   for hook location options 0a vs 0b). NOT in
+   `cos/queue_ops/pop.rs` — that runs before TX rewrite, so
+   the L3 offset isn't yet stable and we'd be marking the
+   pre-rewrite frame, not the wire frame. The hook lives
+   wherever the post-rewrite frame is available immediately
+   before TX submit:
+   - 0a: re-parse path inside `cos/ecn.rs`-style helper
+     called at the AFD decision site
+   - 0b: cached-offset path consuming `TxRequest`/`PreparedTxRequest`
+     metadata produced at `frame/mod.rs:245` rewrite time
+3. **Settle-time `served_bytes` accounting** (per Fix #1) in
+   `settle_exact_*_scratch_submission_flow_fair`
+   (queue_service/mod.rs:740 + :795) — counts only the inserted
+   prefix.
+4. **Snapshot owner thread** piggybacked on existing coordinator
    1Hz status poll, OR as a new dedicated 100Hz thread (window
    boundary cadence TBD by §6 Q3).
-4. `AfdQueueState` allocated alongside `vtime_floor` and
+5. **`AfdQueueState`** allocated alongside `vtime_floor` and
    `flow_fair_state` at queue promotion time.
-5. Feature flag (off by default) to enable AFD per shared_exact
-   queue.
-6. Telemetry: per-bucket marks, drops, fair-share-window — pin to
-   #1209 telemetry double-buffer.
+6. **Feature flag** (off by default) to enable AFD per
+   shared_exact queue.
+7. **Telemetry**: per-bucket marks, drops, fair-share-window —
+   pin to #1209 telemetry double-buffer.
 
 ## 5. Risk assessment
 
