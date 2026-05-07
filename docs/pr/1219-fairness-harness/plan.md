@@ -1,5 +1,5 @@
 ---
-status: REVISED v6 — addressing Codex round-5 (1 minor; task-mov2ix1o): §3.3 gRPC/proto block + §4 gRPC bullet purged. The status path is helper-process control-socket JSON, NOT public gRPC.
+status: REVISED v7 — addressing Codex round-6 (6 stale gRPC refs; task-mov2qck7): purged all remaining gRPC mentions in scope-bullets, snapshot-doc-comments, test plan, open questions, verdict request. Path consistently named "helper-process control-socket JSON" / "status JSON" / "Manager.Status()" throughout.
 issue: #1219
 phase: implementation plan; minimum-viable PR scope
 prerequisites:
@@ -173,7 +173,7 @@ Production Prometheus observability is a separate follow-up
   - **Rust live state**: `BindingLiveState.active_flow_count:
     AtomicU32` (per §3.3); written from owner-only 100ms tick.
   - **Rust snapshot**: `BindingStatus.active_flow_count` field
-    in the snapshot struct copied to gRPC status.
+    in the snapshot struct copied to the helper-process status JSON.
   - **Status JSON**: serialized field `active_flow_count` in
     the helper-process control-socket JSON consumed by the Go
     `Manager.Status()` path.
@@ -237,7 +237,7 @@ pub(in crate::afxdp) struct FlowCacheEntry {
     /// u16 wraps every 256 × 100 ms = 25.6 s — plenty of headroom
     /// vs the 1 s window. Single-writer (the owner worker is the
     /// only code path that mutates this entry), Relaxed-equivalent
-    /// (the snapshot reader reads via the gRPC status surface
+    /// (the snapshot reader reads via the helper-process status JSON surface
     /// which already copies the cache for sharding).
     last_used_epoch: u16,
 }
@@ -521,8 +521,9 @@ local socket. Not in scope here.
   rows from the contract's table within 0.005
 - 5×flake on `fairness::tests::*`
 - `go test ./...`: clean (no Go changes in v2)
-- `make test-deploy` to standalone test VM — verify gRPC field is
-  populated
+- `make test-deploy` to standalone test VM — verify the new
+  `active_flow_count` field is populated in the helper-process
+  status JSON (and surfaced through `Manager.Status()`)
 - Smoke matrix on loss userspace cluster:
   - Pass A (CoS off) — connectivity + 12-stream `-R` line rate
   - Pass B (CoS on) — 24 cells per-class + harness output for each
@@ -560,7 +561,8 @@ local socket. Not in scope here.
    layer. The harness gets `{aᵢ}` from xpf, not from iperf3 port
    mapping — so this is fine. Confirmed in §3.4.
 
-4. **gRPC poll cadence**. Harness polls 1 Hz; on a 60s steady-state
+4. **Prometheus scrape cadence**. Harness scrapes `/metrics` 1 Hz;
+   on a 60s steady-state
    window that's 60 samples per binding. Sufficient for `{aᵢ}`?
 
 5. **fairness-eval as a separate binary vs library**. A binary is
@@ -575,12 +577,12 @@ local socket. Not in scope here.
 
 7. **HA failover during harness run**. If a role flip happens
    mid-run, the secondary's `active_flow_count` rebuilds from 0.
-   The harness should detect this (gRPC reports `role_change_at`
+   The harness should detect this (status JSON reports `role_change_at`
    timestamp) and fail-fast rather than report bogus Cstruct.
 
 ## 10. Verdict request
 
-PLAN-READY → execute (Rust pure-fns + flow_cache scan + gRPC field
+PLAN-READY → execute (Rust pure-fns + flow_cache scan + helper-process status JSON field
 + fairness-eval binary + harness script, all in one PR).
 PLAN-NEEDS-MINOR → tighten cache scan strategy / harness input
 formats / failover handling.
