@@ -1,5 +1,5 @@
 ---
-status: REVISED v5 — addresses Codex round-4 PLAN-NEEDS-MINOR (task-movpbbpz): 3 stale-residue text fixes (200 LOC → ~250 LOC at line 482, v3 tempfile directive at line 92 marked superseded, fairness-eval.rs line reference 539-550 → 729 + commit 9d3faf02). Gemini round-2 verdict: PLAN-READY (task-movpbwzi). One reviewer PLAN-READY; v5 awaits Codex round-5 verify.
+status: REVISED v6 — addresses Codex round-5 PLAN-NEEDS-MINOR (task-movpjn74): 2 final stale-residue fixes ('200 LOC' at line 101 → '~250 LOC'; 'v3 added the tempfile crate' at line 30 → 'v3 proposed adding...'). Gemini round-2 PLAN-READY (task-movpbwzi); Codex round-6 verify pending. Implementation begins in parallel — text-only cleanup does not block code work.
 issue: #547
 phase: implementation plan
 prerequisites:
@@ -27,7 +27,7 @@ findings:
 **Gemini round-1-retry (task-movp199v, PLAN-NEEDS-MINOR)** — one
 finding:
 
-3. v3 added the `tempfile` crate as a dev-dep. Gemini pointed out
+3. v3 proposed adding the `tempfile` crate as a dev-dep. Gemini pointed out
    that `fairness-eval.rs::tsv_tests::write_tmp` (line 729+ at HEAD,
    commit 9d3faf02) already uses
    `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()` +
@@ -98,7 +98,7 @@ architectural problems but five cleanup items remained:
    approach (see §3.3 below) — the tempfile dep is NOT actually
    added.
 
-Codex round-2's cost/benefit verdict was clear: **the 200 LOC is
+Codex round-2's cost/benefit verdict was clear: **the ~250 LOC is
 worth it** if `fairness-eval` remains a supported harness binary.
 The shell harness `test/incus/fairness-harness.sh:98` shells out and
 relies on exit codes + stdout JSON, and unit tests do NOT cover that
