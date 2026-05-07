@@ -1424,7 +1424,7 @@ fn tick_advance_epoch_skips_zero_sentinel() {
     let mut cache = FlowCache::new();
     cache.current_epoch = u16::MAX;
     cache.tick_advance_epoch(); // would be 0 without the skip
-    assert_ne!(cache.current_epoch, 0, "epoch 0 is reserved sentinel; must be skipped on wraparound");
+    assert_ne!(cache.current_epoch, 0, "epoch 0 is reserved sentinel and must never be produced by tick_advance_epoch");
     assert_eq!(cache.current_epoch, 1);
 }
 

@@ -500,7 +500,7 @@ impl FlowCache {
                 let now = self.current_epoch;
                 let entry = self.entries[entry_idx]
                     .as_mut()
-                    .expect("BUG: flow cache entry vanished at hit site");
+                    .expect("BUG: entry at entry_idx is None after key match — impossible cache state");
                 entry.last_used_epoch = now;
                 return Some(entry);
             }
