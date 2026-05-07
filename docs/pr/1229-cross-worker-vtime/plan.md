@@ -1,300 +1,232 @@
 ---
-status: DRAFT v1 — pending Codex hostile + Gemini adversarial review (with explicit mandate to push past Gemini PLAN-KILL if the kill rationale is empirically wrong)
-issue: TBD (fresh issue, NOT a re-open of #1211)
-phase: design proposal — substantive cross-worker fairness mechanism
+status: REVISED v2 — adopts Gemini round-1 alternative (per-worker local max-min using existing SharedCoSQueueLease + per-worker active_flow_count from #1219) AFTER verifying Gemini's three architectural claims against xpf code. v1's RWND/ArcSwap/single-writer design was wrong; v2 is a cleaner mechanism that leverages existing infrastructure.
+issue: #1229 (filed)
+phase: design proposal — substantive cross-worker fairness via per-worker max-min + existing shared CoS lease propagation
 prerequisites:
-  - PR #1217 fairness contract (e1ec6b90) ✓
-  - PR #1220 harness (bf87cf71) ✓ — provides the empirical gate this plan must clear
-  - master 5cc09320 — even-flows recipe + sym-key + daemon-pin landed
-  - #1211 PLAN-KILL archived under docs/per-5-tuple/path2-archive/
+  - PR #1217 contract ✓
+  - PR #1220 harness ✓ (provides active_flow_count gauge per binding)
+  - PR #1228 ✓ (sym key + daemon pin merged on master)
+  - #1211 archived (PLAN-KILL)
 ---
 
-## 0. User-stated requirements (restated, cannot be relaxed)
+## v2 — adoption of Gemini PLAN-KILL alternative
 
-- **No workload-side knobs.** Customer traffic uses whatever 5-tuples and
-  rates it has. `--cport`/`-b`-style fixes are NOT acceptable.
-- **The firewall must even out flows automatically.** Per-flow CoV at
-  saturation should approach the structural ceiling regardless of
-  RSS-imposed flow-distribution skew.
-- **Reviewer pushback is welcome but not authoritative.** PLAN-KILL
-  verdicts are reviewed adversarially by the operator; if a kill
-  rationale is empirically wrong it does not block the work.
+Gemini round-1 (task-mow2x47y) PLAN-KILL of v1 with three substantive
+findings, each verified against the codebase:
 
-## 1. Why #1211 was killed and why the kill may be wrong
+1. **Bidirectional flow ≠ single-writer.** `enqueue_tx_owned` at
+   `userspace-dp/src/afxdp/tx/dispatch.rs:52` is the cross-binding
+   TX handoff. For a TCP flow, data and ACKs traverse different
+   bindings → different workers. v1's "single-writer per-flow vtime"
+   claim was empirically wrong.
+2. **RFC 1122 §4.2.2.16** prohibits mid-stream window shrinkage. F5/A10
+   industry technique is SYN-time RWND clamping (window-scale
+   negotiation), NOT mid-stream rewriting. v1 cited the wrong RFCs.
+3. **ArcSwap<FxHashMap<FiveTuple, …>> O(N) clone-on-insert.**
+   At 1M flows × 10K inserts/sec → 400 GB/s memory bandwidth on
+   cloning alone. Catastrophic.
 
-#1211 v2–v9 proposed AFD-style per-flow ECN-mark/drop with batched
-ArcSwap-loaded summary state. Codex round-1–8 went PLAN-NEEDS-MAJOR
-and ultimately got to a defensible design. Gemini PLAN-KILLed three
-times citing:
+Codex round-1 (task-mow2wczw) PLAN-NEEDS-MAJOR converged on the same
+fixes plus 5 additional findings: ArcSwap insert race, RTT-from-
+conntrack false premise, BindingPlan vs RSS asymmetry, RWND control
+sawtooth, window-scale shift-vs-divide bug.
 
-1. **Cache-line bouncing in shared per-flow accounting.** Argument:
-   per-packet RMW on a shared atomic across 6 workers saturates QPI.
-2. **QSBR/RCU ordering complexity.** Argument: cross-worker shared
-   state requires ordering guarantees that are hard to get right.
-3. **ECN deployment reality.** Argument: TCP receivers must honor
-   ECE; many don't on real internet.
+**Operator mandate**: "keep pushing even when others give kill
+feedback, they could also be wrong." Both reviewers' grounds checked
+against `userspace-dp/src/afxdp/coordinator/cos_state.rs:7,13`,
+`tx/dispatch.rs:52`, and RFC 1122 §4.2.2.16. **They are right.** v2
+adopts the better alternative.
 
-#1220's harness now lets us empirically check (1) and (2). For (3),
-this proposal sidesteps ECN entirely.
+## 1. v2 design — per-worker local max-min + cross-worker share via existing CoS lease
 
-### 1.1 Cache-line bouncing rationale is empirically wrong for THIS architecture
+### 1.1 What's already in xpf (verified)
 
-AF_XDP zero-copy pins flow → queue → worker permanently. Codex's
-post-v2 design — which Gemini did not engage with — has a critical
-property:
+- **Per-worker active flow count** (PR #1219, master):
+  `xpf_userspace_binding_active_flow_count` gauge, refreshed every
+  ~65ms at the umem debug-publish tick. Read directly from
+  flow_cache state by the owning worker (single-reader, single-
+  writer pattern that does work).
+- **SharedCoSQueueLease** at
+  `userspace-dp/src/afxdp/coordinator/cos_state.rs:7`: per-worker
+  per-class lease that enforces total class throughput across
+  workers (V_min throttle infrastructure, hardened by #915 #940
+  #944).
+- **VMinQueueState** at
+  `userspace-dp/src/afxdp/cos/builders.rs:142`: per-worker
+  per-queue state tracking `consecutive_v_min_skips`,
+  `v_min_suspended_remaining`, etc.
+- **Per-worker MQFQ** in `tx.rs` with PR #928's
+  `max(vtime, served_finish)` semantics — already correct
+  byte-fairness within a worker.
 
-> **Per-flow virtual-time accounting is single-writer.** Each
-> per-flow vtime entry is owned by exactly one worker (the worker
-> that owns the queue this flow's RSS-hash maps to). Other workers
-> read this entry but never write to it.
+### 1.2 The gap
 
-Single-writer means:
-- The vtime entry stays in the writer's L1 cache (no write-write
-  bouncing).
-- Reader workers fetch from L2/L3 if they need to compare; but reads
-  don't cause cache-line invalidation on the writer.
-- QPI traffic for the per-flow vtime table is bounded by the rate of
-  per-flow entry CREATION (slow path on first packet), not per-packet
-  updates.
+Per-worker MQFQ gives equal BYTES per flow over time within a
+worker. At saturation, each flow on Worker A (with 4 flows) gets
+worker_capacity / 4. Worker B (with 1 flow) gives that flow
+worker_capacity / 1 = 4× more.
 
-Gemini's PLAN-KILL on cache-line was a generic warning about shared
-mutable state; the actual cache behavior under AF_XDP queue-pinning is
-fundamentally different. **PR #1220's empirical data quantified
-inter-worker speed variance at 21% under no contention** — meaning
-the WORKERS THEMSELVES are not bottlenecked on memory bandwidth.
-Adding a per-flow vtime read cost (one cache line per cross-worker
-comparison, batched at TX dispatch) would not move the 21% needle.
+To even out, Worker B's flow must be throttled to match Worker A's
+per-flow rate. Currently nothing does this.
 
-### 1.2 QSBR/RCU complexity is solvable via standard Rust pattern
+### 1.3 The fix
 
-`ArcSwap<HashMap<FiveTuple, AtomicU64>>` is the published-and-proven
-RCU-equivalent for read-heavy maps in Rust. The pattern:
-
-- Cold path (per-flow first packet): clone the HashMap, insert,
-  `ArcSwap::store`. Old map drops when all readers finish.
-- Hot path: `ArcSwap::load_full()` once per batch (NOT per packet),
-  read multiple flow vtimes from the same loaded snapshot.
-- TX dispatch: compare per-flow virtual time against the per-worker
-  TX schedule.
-
-PR #1188's worker-loop short-circuit (master 9d3faf02 + ArcSwap
-optimization in PR #1201) demonstrates this exact pattern in
-production.
-
-### 1.3 ECN deployment is sidestepped
-
-This proposal does NOT use ECN. Instead it uses **TCP RWND
-manipulation on egress ACKs**. The firewall, as a stateful TCP
-inspector, sees both directions of every flow. On the receiver →
-sender ACK packet, the firewall rewrites the TCP window field
-(and patches the L4 checksum delta). The sender's `cwnd` is bounded
-by `min(cwnd, swnd)` where `swnd` is the receiver-advertised window.
-Reduce `swnd` → sender backs off.
-
-This is a well-known transparent-shaper technique used by F5 BIG-IP,
-A10 Thunder, and other production firewalls. It does not require
-sender or receiver opt-in. It is RFC 793 and RFC 7323 compliant
-(window can shrink as long as it doesn't go negative or violate
-SWS-rfc1122 prohibitions).
-
-## 2. Mechanism — per-flow max-min fair share via cross-worker vtime + RWND
-
-### 2.1 Per-flow virtual-time table
+**Per-worker max-min cap from a global per-flow target**, computed
+from per-worker active flow counts. No ArcSwap map, no RWND, no
+RTT estimation, no cross-worker per-packet writes.
 
 ```rust
-// userspace-dp/src/afxdp/fairness/mod.rs (NEW)
+// userspace-dp/src/afxdp/cos/queue_service/service.rs
+// (extension to existing MQFQ in the per-class queue service)
 
-pub(crate) struct PerFlowVtime {
-    bytes_served: AtomicU64,  // monotonic, single writer = owning worker
-    last_update_ns: AtomicU64, // for drift / stale detection
-    owner_worker: u32,         // which worker owns this entry
+// Read by all workers; written by each worker for its own slot.
+struct PerClassFairnessState {
+    // 6 entries × 4 bytes = 24 bytes = 1 cache line read per batch
+    per_worker_active_flows: [AtomicU32; MAX_WORKERS],
+    // Sum of all per_worker_active_flows, recomputed at each
+    // ~65ms publish tick. No cross-worker writes per packet.
+    total_active_flows: AtomicU32,
 }
 
-pub(crate) struct CrossWorkerFairness {
-    // ArcSwap'd map: cold-path inserts replace the inner Arc; hot path
-    // reads via load_full() once per batch.
-    flow_table: ArcSwap<FxHashMap<FiveTuple, PerFlowVtime>>,
-    // Per-worker view: what's MY worker's median per-flow byte-rate
-    // among my owned flows. Computed at the umem debug-publish tick.
-    per_worker_target_rate: [AtomicU64; MAX_WORKERS],
+// Each worker, in its TX dispatch hot path:
+fn target_per_flow_bps(&self) -> u64 {
+    let class_rate = self.shared_cos_lease.current_rate_bps();
+    let total_flows = self.fairness.total_active_flows.load(Relaxed);
+    if total_flows == 0 { return u64::MAX; }
+    class_rate / total_flows as u64
+}
+
+// In the MQFQ scheduler when picking the next flow to send:
+fn next_flow_under_cap(&self, candidate_flow: FlowKey) -> bool {
+    let observed = candidate_flow.observed_bps();  // existing flow-cache state
+    observed < self.target_per_flow_bps()
 }
 ```
 
-### 2.2 Per-batch fairness check at TX dispatch
+**Throttle mechanism**: when a flow exceeds the target rate, the MQFQ
+scheduler defers it (not drops; not ECN-marks; not RWND). Other
+flows on the same worker get scheduled instead. If no other local
+flows are eligible, the worker's TX ring gets shorter. The class's
+SharedCoSQueueLease redistributes: if Worker B's lonely flow is
+throttled, Worker B uses fewer tokens, freeing tokens for Worker A.
 
-```rust
-// On TX dispatch in afxdp/tx/dispatch.rs
-let snapshot = fairness.flow_table.load_full();  // 1 ArcSwap read per batch
-for tx_pkt in tx_batch.iter() {
-    let key = tx_pkt.flow_key();
-    if let Some(entry) = snapshot.get(&key) {
-        let my_vtime = entry.bytes_served.load(Relaxed);
-        // Compare to global median (precomputed): if I'm > 10% ahead,
-        // mark this flow as "throttle candidate".
-        if my_vtime > global_median * 110 / 100 {
-            tx_pkt.mark_throttle();
-        }
-    }
-}
-```
+This is **work-conserving in the local sense** (Worker B never goes
+idle while it has a packet to send below cap) and **non-work-
+conserving in the global sense** (the system intentionally caps
+total throughput to enforce per-flow fairness).
 
-### 2.3 RWND throttle on ACK egress
+### 1.4 Cross-worker coordination cost
 
-```rust
-// On ACK packet egress (per-packet, owner worker)
-if flow.throttle_armed {
-    let target_rwnd = compute_rwnd_for_target_rate(flow.target_rate);
-    rewrite_tcp_window(pkt, target_rwnd);
-    patch_tcp_checksum_delta(pkt);
-}
-```
+Per packet (hot path):
+- 1 atomic_load of `total_active_flows` (cached, batchable per batch).
+- 1 read of own flow's `observed_bps` from local flow_cache state.
+- 0 cross-worker writes.
 
-`compute_rwnd_for_target_rate`: BDP = target_rate × RTT. RWND in
-bytes is `BDP / WS` where `WS` is the window scaling factor (already
-in flow state). For target_rate = global_median_per_flow_rate,
-RWND = (median_rate × RTT_estimate) / WS.
+Per ~65ms tick (slow path, owner only):
+- For each of 6 workers: store own active flow count to per-class array.
+- 1 sum across 6 entries → store to total_active_flows.
 
-RTT estimate: from the existing TCP conntrack timestamp tracking.
+Total hot-path cost: ~5 ns per packet for the cap check. No memory
+bandwidth concerns. No QPI saturation.
 
-### 2.4 Cross-worker coordination
+## 2. Acceptance criteria
 
-The per-worker target-rate publication tick (~65 ms) updates
-`per_worker_target_rate[N]` with the median per-flow byte-rate
-observed by that worker. Other workers read the array (single
-read, 6 entries = 48 bytes, fits in one cache line) and compute
-the global median.
+Same as v1 (and operator mandate):
 
-**No per-packet cross-worker write.** All cross-worker reads are
-to the small fixed-size array, not the per-flow table.
+- **Workload**: `iperf3 -c <target> -P 12 -t 90 -p 5205 -R` (no
+  `--cport`, no `-b`).
+- **Pre-mechanism baseline**: per-flow CoV ≥ 0.50.
+- **Post-mechanism**: per-flow CoV ≤ Cstruct + 0.10.
+- **No aggregate regression** > 5% (per the existing fairness contract).
+- **Pathological case explicit guard**: when `n_active_workers == 1`
+  (single fat flow, others idle), the cap is `class_rate / 1 = full`
+  → no throttle. Work-conserving in the single-flow case.
 
-The per-flow table is updated only by:
-- The owning worker's TX path (per-packet bytes_served increment).
-- Flow eviction (cold-path slow tick).
+## 3. What v2 does NOT do (compared to v1)
 
-## 3. Performance budget
+- ❌ No ArcSwap<FxHashMap<FiveTuple, …>> — single fixed-size 24-byte
+  cross-worker array.
+- ❌ No RWND manipulation — pure dataplane scheduling, no TCP header
+  rewrites.
+- ❌ No RTT estimation — class_rate / total_flows is enough.
+- ❌ No window-scale arithmetic — RWND is gone.
+- ❌ No cross-worker shared mutable state per packet — only the
+  fixed-size flat array.
 
-| Item | Per-packet cost | Per-batch cost | Per-tick cost |
-|---|---|---|---|
-| TX-side vtime increment (own flow) | 1 atomic_add (cached) | 0 | 0 |
-| Cross-worker target-rate read | 0 | 1 atomic_load × 6 | 0 |
-| Median computation | 0 | 1 quickselect_6 | 0 |
-| RWND rewrite (throttled flows only) | 1 16-bit write + 1 csum patch | 0 | 0 |
-| ArcSwap snapshot | 0 | 1 load_full() | 0 |
-| Slow-path: insert new flow | 0 | 0 | 1 clone + ArcSwap::store |
+## 4. Risks (revised)
 
-Hot-path cost: ~5 ns per-packet for non-throttled flows (just the
-local atomic_add); ~30 ns for throttled flows (atomic_add +
-RWND/csum on egress ACKs only).
+- **Convergence speed**: per-worker active_flow_count is sampled at
+  ~65ms ticks. New flows take up to 65ms to reflect in the global
+  cap. Existing flows are throttled within 1 batch (~10 µs).
+  Acceptable.
+- **Pathological case: fat flow on idle worker**: Codex/Gemini's
+  shared finding. v2 mitigates via the explicit
+  `n_active_workers == 1` guard above. If the lonely flow's
+  worker has 1 active flow but other workers have multiple, the
+  flow is still throttled (intentional — that's the fairness
+  goal). The user accepted this trade in the standing mandate
+  ("user accepts aggregate regression on degenerate RSS
+  distributions").
+- **Codex finding #5 — window-scale**: N/A in v2; no RWND.
+- **Codex finding #4 — RWND sawtooth**: N/A.
+- **Codex finding #2 — RTT premise false**: N/A.
+- **Codex finding #1 — ArcSwap insert race**: N/A; no map.
 
-Comparable to the AFD ECN proposal's budget; lower in practice
-because no per-flow ECN lookup table.
+## 5. Why this addresses the operator's hard requirement
 
-## 4. Race surfaces
+- ✓ No `--cport` workload-side knob required.
+- ✓ Applies to all flows, all 5-tuples, all RSS distributions.
+- ✓ Convergence in ~65ms after flow-table change.
+- ✓ Built on existing infrastructure (PR #1219 + SharedCoSQueueLease).
+- ✓ No new TCP-level mechanisms; no RFC compliance concerns.
+- ✓ No QPI saturation; no clone-on-write storms.
 
-- **Per-flow vtime read by non-owning worker**: read can be stale by
-  one update (not torn — u64 atomic_load). Acceptable; median is
-  approximate.
-- **Map replacement during read**: ArcSwap handles via Arc refcount.
-  Reader holds Arc until deref dropped.
-- **First-packet flow insert**: cold path. Slow tick or first-packet
-  dispatch under a per-worker mutex. Bounded race: a flow could be
-  inserted twice (both workers see "absent"); de-dup via `entry().or_insert()`.
-- **RWND rewrite on TX-direction ACK**: ACK is RX from server's
-  perspective, TX from firewall's perspective. The firewall sees
-  it as ingress on WAN-binding; egress on LAN-binding. Per-flow state
-  is on LAN-binding's owner worker.
+## 6. Implementation outline
 
-## 5. Why this is feasible NOW (vs #1211 v9)
+Stages:
+1. **`PerClassFairnessState` struct** added to per-class state.
+   Per-worker active_flow_count slots already exist via #1219;
+   wire them into a per-class aggregator.
+2. **Cap check in MQFQ scheduler**: extend the per-class queue
+   service in `cos/queue_service/service.rs` to defer flows
+   exceeding the target rate.
+3. **Per-flow observed_bps tracking**: leverage existing flow_cache
+   state. Add a field `observed_bps: u64` updated by the owner
+   worker on TX completion (single-writer, no contention).
+4. **65ms publish tick extension**: at the existing
+   `update_binding_debug_state` call site, also update the
+   per-class total_active_flows.
+5. **Test**: harness validation against the user's exact command.
+6. **Smoke**: full CoS-on/off + push/reverse + v4/v6 matrix per
+   project standard.
 
-1. **Empirical evidence**: PR #1220's harness measured the inter-
-   worker variance at 21%. AFD ECN's PLAN-KILL on cache-line was a
-   prediction; the measurement now bounds the actual cost we're
-   working against.
-2. **Single-writer pattern**: codified above. Gemini's cache-line
-   objection was about generic shared-mutable state, not the
-   AF_XDP-pinned-queue pattern.
-3. **RWND not ECN**: the deployment-reality kill point doesn't apply
-   to RWND manipulation. Industry-standard technique.
-4. **Smaller surface**: this is a TX-side enhancement to an existing
-   path, not a full per-flow rolling-window scheduler rewrite.
+## 7. Open questions for adversarial review (v2)
 
-## 6. Out of scope (this plan)
+1. Is `class_rate / total_flows` the right target, or should it be
+   `worker_capacity / per_worker_flow_count` (per-worker fair
+   share)? The latter is what V_min already enforces; the former
+   is what we want for global per-flow fairness. Subtle but
+   important.
+2. Does the per-class aggregator need to be per (egress_ifindex,
+   queue_id) or just per (forwarding_class)? CoS queues can be
+   shared across interfaces.
+3. What's the right behavior when `class_rate` is configured as
+   "transmit-rate exact" vs "transmit-rate"? The exact flag
+   changes whether unused tokens are surplus-sharable.
+4. How does this interact with PR #1206 / #1216's
+   CoSQueueRuntime split? Specifically, the FairnessState would
+   live in the ColdState (cross-worker visibility) or the FlowFair
+   sub-struct?
 
-- Active measurement of RTT (use existing conntrack-timestamp delta).
-- Cwnd manipulation directly (RWND only — TCP cwnd reacts).
-- Per-class fairness coordination with CoS shaper. The per-flow
-  fairness operates within a single forwarding class. Cross-class
-  interactions are the existing CoS scheduler's job.
-- ECN-marking as a fallback. If RWND fails for a flow (e.g.
-  large-MSS bulk transfers don't honor RWND quickly), the flow is
-  best-effort; no fallback drop.
+## 8. Methodology (v2)
 
-## 7. Acceptance criteria — empirical
-
-The mechanism is acceptance-passing iff, on the loss userspace
-cluster (master + this PR):
-
-- **Workload**: `iperf3 -c <target> -P 12 -t 90 -p 5205 -R` (the
-  user's exact command, no `--cport`, no `-b`, no other flags).
-- **Pre-mechanism baseline**: per-flow CoV ≥ 0.50 (current state
-  per the user's screen capture earlier in this thread: 478 →
-  3132 Mbps, CoV ≈ 0.6).
-- **Post-mechanism**: per-flow CoV ≤ Cstruct + 0.10 where Cstruct
-  is computed per the contract from #1217. (Looser than the
-  contract's 0.05 because RWND is approximate.)
-- **No aggregate regression**: aggregate throughput within ±5% of
-  pre-mechanism aggregate.
-
-## 8. Risks
-
-- **Pathological RWND interaction with TCP_NODELAY / small writes**:
-  RWND throttling primarily affects bulk transfers. For small-write
-  flows, cwnd is the constraint and RWND has no effect. Acceptable
-  scope: this mechanism targets the saturation case; mouse flows
-  are unaffected.
-- **TCP receivers with broken window-update logic**: rare but
-  exists. The CWND-based AIMD provides a safety net (sender doesn't
-  fully trust RWND).
-- **Reviewer PLAN-KILL on novel-mechanism grounds**: Codex/Gemini
-  may push back on the RWND novelty. **Plan: respond with industry
-  precedent (F5, A10) and the empirical data from PR #1220.**
-
-## 9. Open questions for adversarial review
-
-1. Is the single-writer per-flow vtime claim actually true in the
-   userspace-dp architecture? Specifically, can the same flow's
-   packets ever arrive on two different workers (e.g. during a
-   binding rebind, or a brief RSS reconfiguration)?
-2. Is `ArcSwap<FxHashMap>` actually the right structure? Per-flow
-   inserts are infrequent but at multi-megaflow scale the clone-
-   on-write cost grows. Should we use a sharded Mutex<HashMap>
-   instead?
-3. Is RWND throttling effective at the Mbps scale we care about
-   (1–5 Gbps per flow)? Worst case: a flow with cwnd = 4 MB
-   already in flight when RWND drops to 1 MB — receiver may stall
-   the sender for a full RTT before accepting more bytes. RTT in
-   the lab is ≪1 ms so this is ≪1 ms hiccup.
-4. What's the RTT estimate accuracy? If the timestamp-delta
-   estimate is off by 2× the BDP calculation is off by 2×, which
-   over-or-under-throttles. Acceptable?
-5. Are there fairness-violating workloads where this makes things
-   WORSE? E.g. a single fat flow on an idle worker — RWND throttle
-   would slow it without any benefit because no other flow on
-   that worker is getting starved.
-
-## 10. Methodology
-
-- v1 plan committed.
-- Triple-review: Codex hostile + Gemini adversarial in parallel.
-- **Explicit mandate to operator**: if Gemini PLAN-KILLs again
-  citing a rationale that contradicts §1's empirical data, the
-  operator (psaab) reviews and overrides. The plan does not stall
-  on a single PLAN-KILL.
-- Iterate to PLAN-READY consensus or operator override.
-- Implement in stages: (a) per-flow vtime table + reader path,
-  (b) RWND rewrite on egress, (c) cross-worker target-rate
-  publication.
-- Validate on the harness with the user's exact command.
-- If empirical CoV drops below 0.10 on iperf3 -P 12 -p 5205, ship.
-- If it doesn't drop, the mechanism is wrong; document why and
-  return to design.
+- v2 plan committed.
+- Re-dispatch Codex + Gemini with explicit "addresses your prior
+  PLAN-KILL/PLAN-NEEDS-MAJOR via the per-worker local max-min
+  alternative you yourself suggested".
+- If Codex + Gemini both PLAN-READY → implementation phase.
+- If Gemini PLAN-KILLs again on grounds we haven't engaged with →
+  evaluate; per operator mandate may override.
+- v2 incorporates substantive feedback; this is "we listened" not
+  "we capitulated". The mandate is to push past WRONG kill verdicts,
+  not all kill verdicts.
