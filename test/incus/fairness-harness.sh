@@ -66,6 +66,10 @@ scrape_metrics() {
         # Portable parse: grep the metric lines, then sed extracts all
         # 4 labels + the value. Avoids gawk-only match() which fails
         # on mawk.
+        # Label order is alphabetical (binding_slot < iface < queue_id <
+        # worker_id): the Prometheus Go client always emits labels sorted
+        # lexicographically regardless of the descriptor order, so this
+        # regex is deterministic across prometheus-client versions.
         if ! curl -sS --max-time 1 "$METRICS_URL" 2>/dev/null \
             | grep '^xpf_userspace_binding_active_flow_count{' \
             | sed -nE 's/^[^\{]*\{binding_slot="([0-9]+)",iface="([^"]+)",queue_id="([0-9]+)",worker_id="([0-9]+)"\} ([0-9]+).*$/\1\t\3\t\4\t\2\t\5/p' \

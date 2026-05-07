@@ -682,8 +682,10 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         tx_ring_capacity: 26,
         // #918: per-set LRU collision-eviction counter.
         flow_cache_collision_evictions: 27,
-        // #1219: non-zero so the wire-key assertion below covers
-        // it (omitempty would skip a 0 value).
+        // #1219: non-zero fixture so the wire-key assertion below also covers
+        // this field explicitly. Note: active_flow_count has no
+        // skip_serializing_if and serializes even when 0; the non-zero
+        // value here is chosen to make the test intent obvious.
         active_flow_count: 31,
         v_min_throttle_hard_cap_overrides: 28,
         v_min_throttles: 29,
@@ -726,10 +728,9 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         // #918: per-set LRU collision-eviction counter wire key.
         "flow_cache_collision_evictions",
         // #1219: distinct active flow count wire key — absence breaks
-        // the fairness harness's Cstruct computation. Note the
-        // serialized snapshot uses #[serde(omitempty)]: the test
-        // fixture below sets active_flow_count != 0 so the key
-        // appears in the JSON object even with omitempty.
+        // the fairness harness's Cstruct computation. The field is
+        // always serialized (no skip_serializing_if); the non-zero
+        // fixture value makes the assertion intent clear.
         "active_flow_count",
         // #941 Work item D / #943: V_min throttle counter wire keys.
         // Absence breaks the binding-counter snapshot consumer that

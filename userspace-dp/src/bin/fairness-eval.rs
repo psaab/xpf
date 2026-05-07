@@ -124,6 +124,11 @@ struct AggregateResult {
 /// - return one entry per `0..n_total_workers` (workers with no
 ///   matching samples report 0).
 ///
+/// Returns `Err(msg)` immediately if any in-window, in-iface row
+/// carries `worker_id >= n_total_workers`. Silently dropping such
+/// rows would skew `{a_i}` and produce a false PASS if `--n-workers`
+/// is misconfigured; failing fast forces the operator to correct it.
+///
 /// Returns `iface_filter_active=true` only when the user supplied an
 /// iface AND at least one TSV row carried a non-empty iface label.
 /// Legacy 3-column input (all `iface == ""`) collapses the filter to
@@ -135,7 +140,7 @@ fn aggregate_per_worker(
     n_total_workers: u32,
     warmup_secs: u64,
     final_burst_secs: u64,
-) -> AggregateResult {
+) -> Result<AggregateResult, String> {
     let any_iface_label_present = binding_flows.iter().any(|r| !r.iface.is_empty());
     if !iface_arg.is_empty() && !any_iface_label_present && !binding_flows.is_empty() {
         eprintln!(
@@ -166,6 +171,15 @@ fn aggregate_per_worker(
         if iface_filter_active && row.iface != iface_arg {
             continue;
         }
+        if row.worker_id >= n_total_workers {
+            // Silently dropping out-of-range worker IDs would skew {a_i}
+            // and produce a false PASS if --n-workers is misconfigured.
+            return Err(format!(
+                "worker_id={} in TSV exceeds --n-workers={n_total_workers}; \
+                 re-run with the correct --n-workers value",
+                row.worker_id
+            ));
+        }
         *per_ts_worker
             .entry((row.timestamp, row.worker_id))
             .or_insert(0) += row.count;
@@ -188,10 +202,10 @@ fn aggregate_per_worker(
         })
         .collect();
 
-    AggregateResult {
+    Ok(AggregateResult {
         distribution_a_i,
         iface_filter_active,
-    }
+    })
 }
 
 /// Codex round-4 finding (#1): direction multiplier resolves to 1
@@ -223,6 +237,17 @@ fn main() -> ExitCode {
         eprintln!(
             "fairness-eval: test duration {total_dur}s ≤ warmup {} + final-burst {}",
             args.warmup_secs, args.final_burst_secs
+        );
+        return ExitCode::from(2);
+    }
+    let ss_dur = total_dur - args.warmup_secs - args.final_burst_secs;
+    // The fairness contract requires a ≥60s steady-state window to
+    // produce a statistically meaningful CoV measurement. Shorter
+    // runs would give a verdict on too few per-second buckets.
+    const MIN_STEADY_STATE_SECS: u64 = 60;
+    if ss_dur < MIN_STEADY_STATE_SECS {
+        eprintln!(
+            "fairness-eval: steady-state window {ss_dur}s < {MIN_STEADY_STATE_SECS}s minimum; use a longer -t or reduce --warmup-secs/--final-burst-secs"
         );
         return ExitCode::from(2);
     }
@@ -292,13 +317,19 @@ fn main() -> ExitCode {
     // produced a meaningless 18-element distribution. The contract's
     // {a_i} is per-worker on the bottleneck-direction interface; this
     // is what fairness-eval now computes.
-    let agg = aggregate_per_worker(
+    let agg = match aggregate_per_worker(
         &binding_flows,
         &args.iface,
         n_total_workers,
         args.warmup_secs,
         args.final_burst_secs,
-    );
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("fairness-eval: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let iface_filter_active = agg.iface_filter_active;
     let distribution_a_i = agg.distribution_a_i;
 
@@ -587,7 +618,7 @@ mod aggregation_tests {
                 rows.push(row(ts, 100 + w, 0, w, "ge-0-0-3", 999));
             }
         }
-        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0).unwrap();
         assert!(r.iface_filter_active);
         assert_eq!(r.distribution_a_i, vec![1, 2, 3, 4, 5, 6]);
     }
@@ -606,7 +637,7 @@ mod aggregation_tests {
                 rows.push(row(ts, w + 1, 0, w, "ge-0-0-2", 1));
             }
         }
-        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0).unwrap();
         assert_eq!(r.distribution_a_i, vec![5, 1, 1, 1, 1, 1]);
     }
 
@@ -620,7 +651,7 @@ mod aggregation_tests {
                 (1000u64..1003).map(move |ts| row(ts, w, 0, w, "", 7))
             })
             .collect();
-        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0).unwrap();
         assert!(!r.iface_filter_active, "legacy 3-col must collapse filter");
         // Each worker still appears at its slot/wid index with count 7.
         assert_eq!(r.distribution_a_i, vec![7, 7, 7, 7, 7, 7]);
@@ -637,7 +668,7 @@ mod aggregation_tests {
                     .map(move |&w| row(ts, w, 0, w, "ge-0-0-2", 4))
             })
             .collect();
-        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0).unwrap();
         assert_eq!(r.distribution_a_i, vec![4, 0, 4, 0, 4, 0]);
     }
 
@@ -654,8 +685,29 @@ mod aggregation_tests {
             row(1001, 1, 0, 1, "ge-0-0-2", 1),
             row(1002, 1, 0, 1, "ge-0-0-2", 1),
         ];
-        let r = aggregate_per_worker(&rows, "ge-0-0-2", 2, 0, 0);
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 2, 0, 0).unwrap();
         assert_eq!(r.distribution_a_i, vec![5, 1]);
+    }
+
+    #[test]
+    fn aggregate_per_worker_rejects_out_of_range_worker_id() {
+        // A row with worker_id >= n_total_workers must produce Err, not
+        // silently produce a zero entry. Silently ignoring would allow a
+        // misconfigured --n-workers to yield a false PASS verdict.
+        let rows = vec![
+            row(1000, 0, 0, 0, "ge-0-0-2", 3),
+            row(1000, 1, 0, 6, "ge-0-0-2", 5), // worker_id=6 out of range for n=6
+        ];
+        let result = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        assert!(
+            result.is_err(),
+            "out-of-range worker_id should return Err"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("worker_id=6"),
+            "error should mention the bad worker_id: {msg}"
+        );
     }
 
     #[test]

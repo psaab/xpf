@@ -359,10 +359,9 @@ func newCollector(srv *Server) *xpfCollector {
 		bindingActiveFlowCount: prometheus.NewDesc(
 			"xpf_userspace_binding_active_flow_count",
 			"Distinct active flows observed in this binding's flow_cache "+
-				"in the last ~650 ms (snapshot, refreshed at the helper's "+
-				"~65ms debug-state tick — 10 epochs of ~65 ms each). Read "+
-				"by the fairness harness to compute the structural CoV "+
-				"ceiling per docs/fairness-regimes.md (#1219).",
+				"in the last ~650ms (10 epoch ticks × ~65ms debug-state tick; "+
+				"snapshot refreshed on each tick). Read by the fairness harness to "+
+				"compute the structural CoV ceiling per docs/fairness-regimes.md (#1219).",
 			[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 		),
 	}
