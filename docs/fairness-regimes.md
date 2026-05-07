@@ -1,149 +1,235 @@
 # xpf Fairness Regimes — Product Contract
 
 This document defines what xpf promises about per-flow fairness on the
-userspace AF_XDP dataplane. It is the answer to "is xpf fair?" — and
-the answer is regime-dependent, not a single number.
+userspace AF_XDP dataplane. The contract is **structural**: it holds
+xpf accountable to the best fairness physically achievable on its
+architecture, not to a fixed CoV number that has no mapping to the
+underlying constraints.
 
-## Why a regimes contract
+## Why a structural contract
 
-A single per-flow CoV gate (e.g. ≤20%) is not satisfiable across all
-operating regimes simultaneously on this architecture. The userspace
-AF_XDP zero-copy dataplane locks each flow to the worker that
-processes its RSS-hashed RX queue (kernel `xsk_rcv_check()` enforces
-this; see `userspace-xdp/src/lib.rs:1305-1312`). This is not a bug —
-it is the fundamental architectural basis of AF_XDP zero-copy.
+A single per-flow CoV gate (e.g. ≤20%) is not satisfiable across
+workloads on this architecture, and a fixed-per-regime CoV gate
+(e.g. ≤30% on saturated-RSS-skewed) is mathematically inconsistent
+with the structural ceilings (a 1+3 distribution has a ~58% CoV
+ceiling regardless of scheduler perfection — see §3).
 
-Three independent attempts to redistribute work across workers have
-failed:
+The userspace AF_XDP zero-copy dataplane locks each flow to the
+worker that processes its RSS-hashed RX queue (kernel
+`xsk_rcv_check()` enforces this — see `userspace-xdp/src/lib.rs`
+around line 1305). This is the fundamental architectural basis of
+AF_XDP zero-copy. Three independent attempts to redistribute work
+across workers have failed:
 
-- **#840 (RSS rebalance)** — implemented and reverted. Net-negative
-  on fairness (CoV 37.7% with vs 18.5% baseline).
-- **#1203 (n-tuple steering / cross-binding)** — withdrawn as
-  architectural anti-pattern.
-- **#1215 + #937 (cross-worker shared per-flow signal + ingress
-  XDP_REDIRECT)** — both PLAN-KILLED with kernel-source citations.
-  See `docs/pr/1215-per5tuple-fairness/plan.md` and
-  `docs/pr/937-ingress-xdp-redirect/feasibility.md`.
+- **#840** (RSS rebalance): IMPLEMENTED + REVERTED — net-negative
+  on fairness (CoV 37.7% with vs 18.5% baseline)
+- **#1203** (n-tuple steering / cross-binding): WITHDRAWN as
+  architectural anti-pattern
+- **#1215** + **#937** (cross-worker shared per-flow signal +
+  ingress XDP_REDIRECT): both PLAN-KILLED with kernel-source
+  citations. See `docs/pr/1215-per5tuple-fairness/plan.md` and
+  `docs/pr/937-ingress-xdp-redirect/feasibility.md` (note: these
+  docs live on their respective PR branches; references here will
+  resolve once those branches merge or are otherwise accessible)
 
-Rather than chase an unsatisfiable scalar gate, this contract defines
-five operating regimes and the per-regime guarantee. Operators get
-honest expectations; engineers get measurable acceptance criteria;
-future fairness work has a baseline to improve against.
+Rather than chase an unreachable scalar gate, this contract defines
+**structural ceiling** as the reference point. xpf's fairness
+quality is measured by **how close it gets to the best possible
+fairness for the observed RSS distribution**, not by a fixed CoV
+number.
 
-## Fairness regimes
+## Vocabulary
 
-| Regime | Definition | Per-flow CoV target |
-|---|---|---|
-| **non-saturated** | Offered load < cluster capability; per-class shaper not at cap | ≤ 20% |
-| **saturated balanced RSS** | At per-class shaper cap; flows distributed roughly evenly across workers (max-worker / min-worker active-flow count ≤ 1.5×) | ≤ 25% |
-| **saturated RSS-skewed** | At cap; flow distribution skewed (max-worker / min-worker ratio > 1.5×; e.g. 1+3 across 2 workers, or 0/2/2/2/3/3 across 6) | ≤ 30% **OR** explicitly flagged as RSS-skewed regime in the report |
-| **low-N degenerate** | Flow count N ≤ worker count; one or more workers idle | Per-active-flow CoV ≤ 25%; idle-worker count flagged |
-| **high-fan-in** | N ≥ 4× worker count (e.g. P=128 on 6 workers) | Aggregate-throughput gate (≥ 90% of cluster line rate) takes precedence; per-flow CoV expected to widen due to per-worker SFQ bucket collision and TCP cwnd jitter |
+- **Per-flow throughput share `sₖ`**: the fraction of total
+  measured aggregate throughput received by flow k, over the
+  measurement window.
+- **Per-flow CoV**: `stddev({sₖ}) / mean({sₖ})` across the flow
+  set.
+- **Per-worker active-flow distribution `aᵢ`**: the number of
+  active flows on worker i during the measurement window. Active
+  means `≥ 1` flow contributing measurable throughput on that
+  worker.
+- **Active worker count `Nₐ`**: count of workers with `aᵢ ≥ 1`.
+- **Total worker count `Nᵥ`**: count of workers configured for the
+  shared_exact queue under test.
+- **Structural fair-share for flow k on worker i**: `1 / (Nᵥ × aᵢ)`
+  of total aggregate throughput. Each worker delivers `1/Nᵥ`
+  evenly to its `aᵢ` flows.
+- **Structural CoV ceiling `Cstruct`**: the population CoV
+  computed from the per-flow shares `{1/(Nᵥ × aᵢ)}` weighted by
+  flow count. This is the **best achievable CoV** under perfect
+  per-worker-fair scheduling on the observed RSS distribution. xpf
+  cannot do better than `Cstruct` regardless of scheduler
+  perfection.
 
-The differentiator between regimes is **regime detection by the
-test harness**, not regime selection by xpf. xpf's behavior is
-unchanged; the harness identifies which regime a workload is in via
-per-binding RX flow counts and labels the run.
+## Structural CoV ceiling — worked examples
 
-## Required metrics
+For a 6-worker cluster (`Nᵥ = 6`):
 
-Any fairness measurement run must report at minimum:
+| RSS distribution `{aᵢ}` | Active workers `Nₐ` | Total flows N | Structural CoV `Cstruct` |
+|---|---|---|---|
+| 2,2,2,2,2,2 (perfectly balanced, 12 flows) | 6 | 12 | 0.00 (0%) |
+| 1,1,2,2,3,3 (mild skew, 12 flows) | 6 | 12 | 0.40 (40%) |
+| 0,2,2,2,3,3 (one idle, 12 flows) | 5 | 12 | 0.20 (20%) — *with N=12 the idle-worker contribution offsets* |
+| 1,3,0,0,0,0 (severe skew, 4 flows) | 2 | 4 | 0.58 (58%) |
+| 6,0,0,0,0,6 (degenerate, 12 flows) | 2 | 12 | 0.00 (0%) — *both workers fully loaded with 6 flows each* |
 
-1. **Per-flow throughput distribution**: min, p25, median, p75, max
-   in Mb/s. Stream count (N).
-2. **Per-flow CoV**: stddev / mean across the flow set.
-3. **Zero-throughput flow count**: number of streams that received
-   < 1% of mean throughput. **This is a hard failure** — any run with
-   `zero-throughput-flow-count > 0` fails regardless of other gates.
-4. **Aggregate retransmits**: total retransmits across all senders
-   during the measurement window. Diagnostic; not a hard gate.
-5. **ECN marks/drops**: total CE marks and AQM drops if ECN is in use.
-   Diagnostic for AFD-style work; not a hard gate today.
-6. **Mouse p99 latency** (for runs that include mouse-flow probes
-   alongside elephants): TCP-connect+echo p99 latency on a paced
-   probe stream. **Separate SLA gate**, not subsumed by per-flow CoV.
-7. **Per-worker active-flow distribution**: max/min/median active
-   flows per worker, derived from per-binding RX counters. Required
-   to label the regime (balanced vs skewed RSS).
-8. **Aggregate throughput**: total Mb/s across all flows.
+The contract gate is **observed CoV ≤ Cstruct + ε** where `ε` is
+the implementation-quality margin (set to `0.05` = 5 percentage
+points).
+
+The harness must compute `Cstruct` from the observed `{aᵢ}` and
+then check `observed_CoV ≤ Cstruct + 0.05`. This makes the gate
+**meaningful for any RSS distribution** and rules out the
+mathematical inconsistency of fixed CoV bands.
 
 ## Acceptance gates
 
-A measurement run **PASSES** iff:
+A measurement run **PASSES** iff ALL of:
 
-| Gate | Condition |
-|---|---|
-| **Zero-throughput** | `zero_throughput_flow_count == 0` (hard failure on any positive count) |
-| **Per-flow CoV** | Within the regime's target (see table above) OR run is explicitly labeled as RSS-skewed regime with per-worker distribution attached |
-| **Mouse p99** | Within ±15% of idle-baseline (separate gate; only applies when mouse probes are present in the run) |
-| **Aggregate throughput** | ≥ 90% of cluster line rate for the configured per-class shaper, OR documented regression with cause attached |
+1. **Hard failure — zero-throughput**: `zero_throughput_flow_count == 0`,
+   where a zero-throughput flow is one that received `< 1%` of mean
+   throughput **for the entire 5+ second steady-state window**
+   (excluding warmup; see §5). A flow that's < 1% during warmup but
+   recovers does not count.
 
-A run that satisfies the per-flow CoV target trivially because it ran
-the **wrong regime** for the workload (e.g., reports ≤20% CoV but
-ran in non-saturated mode when the workload was meant to be saturated)
-**does not pass** — the regime label is part of the gate. The test
-harness must detect the regime from the per-worker active-flow
-distribution and apply the matching target.
+2. **Per-flow fairness**: `observed_CoV ≤ Cstruct + 0.05`, where
+   `Cstruct` is computed from the per-worker active-flow
+   distribution measured during the steady-state window.
 
-### Regression bounds
+3. **Aggregate throughput**:
+   `observed_aggregate ≥ (Nₐ / Nᵥ) × shaper_rate × 0.95` for
+   shaped queues, where the `(Nₐ / Nᵥ)` factor reflects the
+   structural ceiling for the observed RSS distribution. For
+   non-shaped (best-effort), use the cluster's measured baseline
+   for the same `{aᵢ}` distribution from a known-good prior run
+   (within ±5%).
 
-For changes that should not affect fairness:
+4. **Mouse p99** (only when mouse probes are present): mouse
+   TCP-connect+echo p99 latency `≤ 2 × idle_baseline`, where
+   `idle_baseline` is the same probe against the cluster with no
+   elephant traffic.
 
-- Per-flow CoV must not regress more than 2 percentage points vs the
-  prior tip in the same regime.
-- Aggregate throughput must not regress more than 5%.
-- Mouse p99 must not regress more than 10%.
-- Zero-throughput-flow-count must not become positive.
+A run that satisfies any single gate while failing another **does
+not pass**. There is no "OR flagged" escape clause; if a gate
+cannot be met, the contract requires either a code change or a
+documented contract amendment via this file (with its own
+plan-review).
+
+### Saturation detection (numeric, not subjective)
+
+A run is in the **saturated regime** iff the observed aggregate
+throughput stays `≥ 95%` of the configured per-class shaper cap
+for **at least 80% of the steady-state measurement window** (in
+1-second buckets).
+
+A run that is below 95% of cap is **non-saturated**. The same
+acceptance gates above apply uniformly across both regimes — there
+is no separate non-saturated CoV gate, because `Cstruct` is the
+right reference for both. Non-saturated runs typically have
+`Cstruct ≈ 0` (because cwnd-bound flows don't compete for shaper
+tokens) and the gate `≤ 0.05` is met trivially.
+
+## Required metrics — exported from the harness
+
+Any fairness measurement run MUST report:
+
+1. **Per-flow throughput**: `min, p25, median, p75, max` (Mb/s) and
+   stream count `N`.
+2. **Per-flow CoV**: `stddev / mean` across the steady-state window.
+3. **Zero-throughput flow count**: per the §1 definition.
+4. **Per-worker active-flow distribution `{aᵢ}`**: derived from
+   per-binding RX-flow counters during the steady-state window.
+5. **Computed `Cstruct`**: the structural CoV ceiling for the
+   observed `{aᵢ}`.
+6. **Saturation determination**: which regime the run is in (per
+   §4) and the supporting time-series.
+7. **Aggregate throughput** in Mb/s.
+8. **Aggregate retransmits**: total retransmits across all senders.
+   Diagnostic; not a hard gate.
+9. **ECN marks/drops** (if AQM is enabled): total CE marks and
+   AQM drops. Diagnostic for future Path 2 v2 work.
+10. **Mouse p99 latency** (when mouse probes are present).
+11. **Steady-state window**: explicit start/end timestamps,
+    excluding the first 5 seconds (warmup) and any final
+    sender-shutdown bursts.
+
+## Required metrics — exported in production via gRPC/Prometheus
+
+For production observability, xpf MUST export:
+
+- **`xpf_fairness_regime{queue=...}`** Prometheus gauge: enum
+  `{non_saturated, saturated_balanced, saturated_skewed,
+   low_n_degenerate}`. Computed from rolling 30-second window of
+  per-binding active-flow distribution + saturation determination.
+- **`xpf_fairness_cstruct{queue=...}`** gauge: the current
+  computed structural CoV ceiling.
+- **`xpf_fairness_observed_cov{queue=...}`** gauge: rolling
+  observed CoV for the queue.
+- **`xpf_fairness_zero_throughput_flows{queue=...}`** counter:
+  monotonic count of flows that fell below the zero-throughput
+  threshold.
+
+Operators tracking this contract in production monitor the gap
+`(observed_cov - cstruct)` and the zero-throughput counter. A
+healthy production system has the gap `≤ 0.05` and the counter
+flat.
+
+## Steady-state measurement window
+
+Every measurement run requires:
+
+- **Warmup**: discard the first 5 seconds. TCP cwnd ramp and ARP/
+  ND resolution distort early samples.
+- **Window length**: at least 60 seconds. Shorter windows are
+  dominated by TCP cwnd jitter and produce noisy CoV.
+- **Bucket size**: 1-second buckets for saturation determination
+  and for time-series-based regime detection.
+- **Final-burst exclusion**: discard the last 1 second to avoid
+  sender-side shutdown artifacts.
+
+A run shorter than 60 seconds steady-state cannot pass the per-flow
+fairness gate (insufficient samples for stable CoV). The harness
+must reject such runs with an explicit error, not pass them
+trivially.
+
+## Regression bounds
+
+For changes that should NOT affect fairness:
+
+- `(observed_cov - cstruct)` regression `≤ 0.02` (2 percentage
+  points) vs prior tip on the same fixture.
+- Aggregate throughput regression `≤ 5%`.
+- Mouse p99 regression `≤ 10%`.
+- Zero-throughput flow count must not become positive.
 
 For changes that explicitly target fairness improvement:
 
-- The PR body must declare the targeted regime(s).
-- Improvement is measured per-regime. A change that improves
-  saturated-RSS-skewed CoV but regresses non-saturated CoV is a
-  trade-off the reviewer must accept explicitly.
+- The PR body must declare the targeted RSS distribution(s).
+- Improvement is measured as **reduction in `(observed_cov -
+  cstruct)`**, not as absolute CoV. A change that reduces the gap
+  on `{1,3}` distribution from `+0.20` to `+0.05` is a clear win;
+  a change that drops absolute CoV from 30% to 25% is meaningless
+  if the RSS distribution changed too.
 
 ## Non-goals
 
-xpf does **not** claim, and this contract does **not** require:
+xpf does NOT claim, and this contract does NOT require:
 
 - **Global per-5-tuple equality across arbitrary RSS placement.**
   Without hardware steering, cross-worker arbitration, or sender
-  backpressure (ECN response), this is structurally unreachable on
-  AF_XDP zero-copy. See the killed approaches at
-  `docs/pr/1215-per5tuple-fairness/plan.md`,
-  `docs/pr/937-ingress-xdp-redirect/feasibility.md`.
-- **Equal per-flow throughput within a single RSS-skewed deployment**
-  beyond what per-worker MQFQ scheduling can achieve. The
-  worst-case 1+3 distribution gives the lone-worker flow at most
-  1/2 share and the 3-flow worker's flows 1/6 share each, regardless
-  of per-worker scheduler perfection.
+  ECN backpressure, this is structurally unreachable on AF_XDP
+  zero-copy. The structural CoV ceiling `Cstruct` is a hard
+  physical limit set by the per-worker scheduler's ability to
+  divide its share equally among its flows.
+- **Equal per-flow throughput within a single RSS-skewed
+  deployment** beyond what `Cstruct` permits. The 1+3 example
+  has a structural minimum CoV of ~58%; xpf cannot do better.
 - **A single CoV number that holds across all workloads.** The
-  table above replaces this aspiration with per-regime gates.
-- **Mouse latency p99 inside the per-flow CoV gate.** Mouse latency
-  is a separate SLA; mixing it in the CoV gate is a category error.
-
-## How operators interpret this contract
-
-The contract is a measurement framework, not a tuning manual.
-Operators should not need to do anything to "achieve fairness." The
-contract tells xpf engineers and reviewers when a fairness change
-is acceptable to ship.
-
-Operators do see per-worker / per-flow statistics in the gRPC and
-Prometheus surfaces (existing `show class-of-service` family of
-commands). These are the same metrics this contract requires, so an
-operator running iperf3 against the cluster can compute CoV and zero-
-throughput counts directly.
-
-## Future research (non-binding)
-
-The killed-approaches list above identifies one mechanism that may
-in the future allow tightening saturated-RSS-skewed gate toward the
-non-saturated target: a **race-safe AFD/CSFQ-style ECN overlay** with
-per-worker-sharded estimators and epoch-published windows. This is
-tracked separately as #1211 and is **not part of this contract**. If
-that work succeeds, this document gets a regime gate update; if it
-doesn't, this document is the steady-state contract.
+  structural ceiling is workload-dependent; the gate is
+  workload-relative (`observed_cov ≤ Cstruct + ε`).
+- **Mouse latency p99 inside the per-flow CoV gate.** Mouse
+  latency is a separate SLA in §1.
 
 ## Document location and update policy
 
@@ -151,8 +237,25 @@ This file lives at `docs/fairness-regimes.md` and is the single
 source of truth for the contract. Updates require:
 
 - Plan-review (triple-review per the standard methodology).
-- Smoke matrix on the loss userspace cluster, run for each regime
-  this contract names — a contract that doesn't measurably hold on
-  the test bench is broken.
-- Memory entry: any change to the gate values updates
-  `feedback_smoke_*` memory entries that reference numeric targets.
+- Smoke matrix on the loss userspace cluster, run for fixtures
+  that exercise multiple `{aᵢ}` distributions — a contract that
+  doesn't measurably hold on the test bench is broken.
+- Memory entry: any change to gate values (the `ε = 0.05` margin,
+  the saturation threshold, the warmup window) updates
+  `feedback_smoke_*` memory entries that reference numeric
+  targets.
+
+## Open questions for future contract iteration
+
+- Is `ε = 0.05` (5 percentage points implementation margin) the
+  right value? Tighter (e.g. 0.02) would push for better
+  scheduler fidelity; looser (e.g. 0.10) accepts more
+  implementation noise.
+- Should the gate scale `ε` by the structural ceiling itself
+  (e.g. `ε = max(0.05, 0.10 × Cstruct)`)? Currently a flat 0.05.
+- Should mouse p99 SLA include separate gates for ECN-capable vs
+  ECN-stripped flows?
+- Is the harness's `{aᵢ}` measurement (per-binding RX flow count)
+  trustable, or does it need more scrutiny when a flow's packets
+  hash across multiple workers due to cwnd-related RSS
+  reordering? (Believed not to happen for TCP, but unverified.)
