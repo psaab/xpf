@@ -651,6 +651,12 @@ type BindingStatus struct {
 	// LRU displacement vs stale-on-lookup eviction). Acceptance gate
 	// watches collision_evictions / hits under load.
 	FlowCacheCollisionEvictions       uint64    `json:"flow_cache_collision_evictions,omitempty"`
+	// #1219: snapshot count of distinct active flows on this binding's
+	// flow_cache, refreshed at the helper's ~65ms debug-state tick. The
+	// fairness harness reads this via the xpf_userspace_binding_active_flow_count
+	// Prometheus metric to compute {a_i} for the structural CoV gate
+	// per docs/fairness-regimes.md.
+	ActiveFlowCount                   uint32    `json:"active_flow_count,omitempty"`
 	// #941 Work item D / #943: V_min throttle counters. Hard-cap is
 	// the escape-hatch firing when fairness brake (regular throttle)
 	// has thrown V_MIN_CONSECUTIVE_SKIP_HARD_CAP back-to-back times.
@@ -811,6 +817,9 @@ type BindingCountersSnapshot struct {
 	// to the lean snapshot for fast-poll consumers that need the
 	// flow-cache thrash signal. Default keeps pre-#918 helpers parseable.
 	FlowCacheCollisionEvictions uint64 `json:"flow_cache_collision_evictions,omitempty"`
+	// #1219: distinct active flow count snapshot for fairness harness.
+	// See BindingStatus.ActiveFlowCount.
+	ActiveFlowCount uint32 `json:"active_flow_count,omitempty"`
 	// #941 Work item D / #943: V_min throttle counters. The lean
 	// per_binding view is what fast-poll consumers (mouse-latency
 	// orchestrator, MQFQ diagnostics) read; without these here, V_min

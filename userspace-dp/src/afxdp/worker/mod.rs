@@ -1776,6 +1776,9 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) flow_cache_misses: u64,
     pub(crate) flow_cache_evictions: u64,
     pub(crate) flow_cache_collision_evictions: u64,
+    /// #1219: snapshot count of distinct active flows on this binding's
+    /// flow_cache (refreshed at the ~65ms debug-state tick).
+    pub(crate) active_flow_count: u32,
     /// #941 Work item D: count of V_min hard-cap activations on this
     /// binding (per `update_binding_debug_state` flush of each queue's
     /// scratch counter). Acceptance gate: under normal load, the

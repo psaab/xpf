@@ -99,6 +99,7 @@ fn make_entry(
         decision: make_decision(ForwardingDisposition::ForwardCandidate),
         metadata: make_metadata(owner_rg_id),
         stamp,
+        last_used_epoch: 0,
     }
 }
 
@@ -1298,4 +1299,160 @@ fn flow_cache_4way_lru_permutation_invariant_holds() {
         [0u8, 1, 2, 3],
         "lru row must be a permutation of [0,1,2,3], got {row:?}"
     );
+}
+
+// ----------------------------------------------------------------
+// (#1219) Active-flow epoch counter + count_active_flows
+// ----------------------------------------------------------------
+
+#[test]
+fn count_active_flows_starts_at_zero() {
+    let cache = FlowCache::new();
+    assert_eq!(cache.count_active_flows(), 0);
+}
+
+#[test]
+fn count_active_flows_excludes_never_touched_entries() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    // Insert without lookup → last_used_epoch stays 0 → not active.
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    let _ = &rg_epochs; // silence unused warning if scoping shifts
+    assert_eq!(cache.count_active_flows(), 0);
+}
+
+#[test]
+fn count_active_flows_marks_recently_hit() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    // Advance to epoch 1 so a hit stamps with 1, not 0.
+    cache.tick_advance_epoch();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    // Same epoch → active.
+    assert_eq!(cache.count_active_flows(), 1);
+}
+
+#[test]
+fn count_active_flows_ages_out_after_window() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    cache.tick_advance_epoch();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    assert_eq!(cache.count_active_flows(), 1);
+    // Advance 10 epochs → outside window → entry no longer active.
+    for _ in 0..10 {
+        cache.tick_advance_epoch();
+    }
+    assert_eq!(cache.count_active_flows(), 0);
+    // One more lookup re-stamps and reactivates.
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    assert_eq!(cache.count_active_flows(), 1);
+}
+
+#[test]
+fn count_active_flows_handles_epoch_wraparound() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    // Force current_epoch near u16::MAX so the next advance wraps.
+    // tick_advance_epoch skips 0 (sentinel), so the sequence near the
+    // top is: MAX-1 → MAX → 1 → 2 (not 0).
+    cache.current_epoch = u16::MAX - 1;
+    cache.tick_advance_epoch();  // u16::MAX
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    // Now wrap: u16::MAX → wrapping_add(1) = 0, skipped → 1 → 2.
+    cache.tick_advance_epoch();  // skips 0, becomes 1
+    cache.tick_advance_epoch();  // 2
+    // last_used_epoch was u16::MAX; current is 2; wrapping_sub
+    // gives 2 - u16::MAX wrapping = 3. Within 10-epoch window → active.
+    assert_eq!(cache.count_active_flows(), 1);
+}
+
+#[test]
+fn tick_advance_epoch_skips_zero_sentinel() {
+    // Verify that tick_advance_epoch never produces epoch == 0, which
+    // is the "never touched" sentinel used by count_active_flows.
+    let mut cache = FlowCache::new();
+    cache.current_epoch = u16::MAX;
+    cache.tick_advance_epoch(); // would be 0 without the skip
+    assert_ne!(cache.current_epoch, 0, "epoch 0 is reserved sentinel and must never be produced by tick_advance_epoch");
+    assert_eq!(cache.current_epoch, 1);
+}
+
+#[test]
+fn count_active_flows_entry_at_epoch_max_not_confused_with_sentinel() {
+    // An entry stamped at u16::MAX (valid epoch) must be counted as
+    // active immediately after wraparound to epoch 1 (age = 2 epochs,
+    // within the 10-epoch window). It must NOT be confused with the
+    // 0 sentinel.
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    cache.current_epoch = u16::MAX;
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    // stamp is u16::MAX, not 0 → survives the sentinel check
+    cache.tick_advance_epoch(); // skips 0 → 1
+    assert_eq!(cache.count_active_flows(), 1, "entry at epoch MAX must be active after 1-tick advance");
 }

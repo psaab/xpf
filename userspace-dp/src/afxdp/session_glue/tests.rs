@@ -1813,6 +1813,7 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
             owner_rg_epoch: 0,
             owner_rg_lease_until: 0,
         },
+        last_used_epoch: 0,
     });
 
     // Before epoch bump, lookup should hit.
@@ -1892,6 +1893,7 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
             owner_rg_epoch: 0,
             owner_rg_lease_until: 0,
         },
+        last_used_epoch: 0,
     });
 
     // Bump epoch for RG 2 (unrelated).
