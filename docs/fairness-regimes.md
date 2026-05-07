@@ -12,12 +12,18 @@ A single per-flow CoV gate (e.g. ≤20%) is not satisfiable across
 workloads on this architecture, and a fixed-per-regime CoV gate
 (e.g. ≤30% on saturated-RSS-skewed) is mathematically inconsistent
 with the structural ceilings (a 1+3 distribution has a ~58% CoV
-ceiling regardless of scheduler perfection — see §3).
+ceiling regardless of scheduler perfection — see "Structural CoV
+ceiling — worked examples" below).
 
 The userspace AF_XDP zero-copy dataplane locks each flow to the
 worker that processes its RSS-hashed RX queue (kernel
-`xsk_rcv_check()` enforces this — see `userspace-xdp/src/lib.rs`
-around line 1305). This is the fundamental architectural basis of
+the upstream Linux kernel enforces this in `net/xdp/xsk.c`,
+where `xsk_rcv_check()` validates `xs->dev == xdp->rxq->dev` and
+`xs->queue_id == xdp->rxq->queue_index` before delivery; this
+codebase's local comment at `userspace-xdp/src/lib.rs` around
+line 1305 records the empirical effect of that validation —
+namely that hashing to a different userspace queue silently
+strands packets). This is the fundamental architectural basis of
 AF_XDP zero-copy. Three independent attempts to redistribute work
 across workers have failed:
 
@@ -95,7 +101,7 @@ For a 6-worker cluster (`Nᵥ = 6`):
 |---|---|---|---|
 | 2,2,2,2,2,2 (perfectly balanced, 12 flows) | 6 | 12 | 0.00 (0%) |
 | 1,1,2,2,3,3 (mild skew, 12 flows) | 6 | 12 | 0.47 (47%) |
-| 0,2,2,2,3,3 (one idle, 12 flows) | 5 | 12 | 0.20 (20%) — *with N=12 the idle-worker contribution offsets* |
+| 0,2,2,2,3,3 (one idle, 12 flows) | 5 | 12 | 0.20 (20%) — *lower than 1,1,2,2,3,3 because the {1,1} flows (which had the highest per-flow share, 1/1 = 1.0) are absent; only 1/2 and 1/3 shares remain, narrowing the spread* |
 | 1,3,0,0,0,0 (severe skew, 4 flows) | 2 | 4 | 0.58 (58%) |
 | 6,0,0,0,0,6 (degenerate, 12 flows) | 2 | 12 | 0.00 (0%) — *both workers fully loaded with 6 flows each* |
 
@@ -115,7 +121,7 @@ A measurement run **PASSES** iff ALL of:
 1. **Hard failure — starved flows**: `starved_flow_count == 0`,
    where a **starved flow** is one that received `< 1%` of mean
    per-flow throughput across the **entire steady-state window**
-   (per §steady-state-measurement-window: 60+ second window,
+   (per "Steady-state measurement window" below: 60+ second window,
    warmup and final-burst excluded). A flow that drops below 1%
    transiently but recovers does not count. The metric is named
    "starved" rather than "zero-throughput" to avoid implying
@@ -126,7 +132,7 @@ A measurement run **PASSES** iff ALL of:
    distribution measured during the steady-state window.
 
 3. **Aggregate throughput** (saturated regime only):
-   For runs labeled saturated (per §saturation-detection): the
+   For runs labeled saturated (per "Saturation detection" below): the
    structural-throughput gate
    `observed_aggregate ≥ (Nₐ / Nᵥ) × shaper_rate × 0.95` applies
    for shaped queues. For non-shaped (best-effort) saturated
@@ -212,7 +218,8 @@ Any fairness measurement run MUST report:
 5. **Computed `Cstruct`**: the structural CoV ceiling for the
    observed `{aᵢ}`.
 6. **Saturation determination**: which regime the run is in (per
-   §4) and the supporting time-series.
+   the "Saturation detection" section) and the supporting
+   time-series.
 7. **Aggregate throughput** in Mb/s.
 8. **Aggregate retransmits**: total retransmits across all senders.
    Diagnostic; not a hard gate.
@@ -227,10 +234,19 @@ Any fairness measurement run MUST report:
 
 For production observability, xpf MUST export:
 
-- **`xpf_fairness_regime{queue=...}`** Prometheus gauge: enum
-  `{non_saturated, saturated_balanced, saturated_skewed,
-   low_n_degenerate}`. Computed from rolling 30-second window of
-  per-binding active-flow distribution + saturation determination.
+- **`xpf_fairness_saturated{queue=...}`** Prometheus gauge: 0 or
+  1. Computed from rolling 30-second window of aggregate
+  throughput vs structural cap (per "Saturation detection").
+  Diagnostic only — saturation does not change pass/fail of the
+  Cstruct gate, but operators may want to know whether their
+  workload is actually hitting the shaper. The original v3 enum
+  with `{non_saturated, saturated_balanced, saturated_skewed,
+  low_n_degenerate}` labels is dropped: with the structural-
+  ceiling gate replacing fixed regime bands, distinguishing
+  balanced/skewed/degenerate is not load-bearing on pass/fail —
+  the per-worker active-flow distribution `{aᵢ}` is the
+  underlying signal and is exported separately if the harness
+  needs it for context.
 - **`xpf_fairness_cstruct{queue=...}`** gauge: the current
   computed structural CoV ceiling.
 - **`xpf_fairness_observed_cov{queue=...}`** gauge: rolling
@@ -304,7 +320,7 @@ xpf does NOT claim, and this contract does NOT require:
   structural ceiling is workload-dependent; the gate is
   workload-relative (`observed_cov ≤ Cstruct + ε`).
 - **Mouse latency p99 inside the per-flow CoV gate.** Mouse
-  latency is a separate SLA in §1.
+  latency is a separate SLA in the "Acceptance gates" Gate 4.
 
 ## Document location and update policy
 
