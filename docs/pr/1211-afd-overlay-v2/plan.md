@@ -680,9 +680,9 @@ the phased Fix #10 implementation:
 
 1. New module `userspace-dp/src/afxdp/cos/afd.rs` (~400 LOC).
 2. **Pre-submit ECN-mark hook** in the shared-exact pre-submit
-   path: `cos/queue_service/service.rs:186-260` (prepared
-   variant) and `:517-617` (prepared variant), immediately before
-   the TX-ring submit. These call sites have:
+   path: `cos/queue_service/service.rs:186-260` (local variant)
+   and `:517-617` (prepared variant), immediately before the
+   TX-ring submit. These call sites have:
    - binding/UMEM context (needed to access the wire frame),
    - the post-rewrite frame layout (any VLAN/tunnel/L3 rewrite
      done by the TX dispatch pipeline has already happened),
