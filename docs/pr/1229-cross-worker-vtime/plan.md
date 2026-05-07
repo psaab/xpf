@@ -1,232 +1,212 @@
 ---
-status: REVISED v2 — adopts Gemini round-1 alternative (per-worker local max-min using existing SharedCoSQueueLease + per-worker active_flow_count from #1219) AFTER verifying Gemini's three architectural claims against xpf code. v1's RWND/ArcSwap/single-writer design was wrong; v2 is a cleaner mechanism that leverages existing infrastructure.
-issue: #1229 (filed)
-phase: design proposal — substantive cross-worker fairness via per-worker max-min + existing shared CoS lease propagation
+status: REVISED v3 — addresses Codex round-2 (task-mow38bom, PLAN-NEEDS-MAJOR with 5 findings) AND Gemini round-2 (task-mow3904l, PLAN-KILL on the narrow-but-valid observed_bps-via-flow_cache point + concrete v3 alternative). Both reviewers converged on the same fix: rate-tracking belongs in FlowFairState.flow_bucket_bytes (verified at types/cos.rs:563), aggregator belongs in CoSQueueConfigState, denominator is per-(egress_ifindex,queue_id) not binding-wide.
+issue: #1229
+phase: design proposal — per-worker local max-min using existing FlowFair buckets + CoSQueueConfigState placement
 prerequisites:
   - PR #1217 contract ✓
-  - PR #1220 harness ✓ (provides active_flow_count gauge per binding)
-  - PR #1228 ✓ (sym key + daemon pin merged on master)
-  - #1211 archived (PLAN-KILL)
+  - PR #1220 harness ✓
+  - PR #1228 ✓ (sym key + daemon pin merged)
+  - #1211 archived
 ---
 
-## v2 — adoption of Gemini PLAN-KILL alternative
+## v3 — adopt both reviewers' constructive feedback
 
-Gemini round-1 (task-mow2x47y) PLAN-KILL of v1 with three substantive
-findings, each verified against the codebase:
+Round-2 reviewers converged. Codex: PLAN-NEEDS-MAJOR (right direction,
+wiring gaps). Gemini: PLAN-KILL on the specific `observed_bps` via
+flow_cache path (would re-introduce cross-worker write contention)
+plus concrete v3 alternative.
 
-1. **Bidirectional flow ≠ single-writer.** `enqueue_tx_owned` at
-   `userspace-dp/src/afxdp/tx/dispatch.rs:52` is the cross-binding
-   TX handoff. For a TCP flow, data and ACKs traverse different
-   bindings → different workers. v1's "single-writer per-flow vtime"
-   claim was empirically wrong.
-2. **RFC 1122 §4.2.2.16** prohibits mid-stream window shrinkage. F5/A10
-   industry technique is SYN-time RWND clamping (window-scale
-   negotiation), NOT mid-stream rewriting. v1 cited the wrong RFCs.
-3. **ArcSwap<FxHashMap<FiveTuple, …>> O(N) clone-on-insert.**
-   At 1M flows × 10K inserts/sec → 400 GB/s memory bandwidth on
-   cloning alone. Catastrophic.
+Both reviewers' grounds verified against the code:
+- `flow_bucket_bytes: [u64; COS_FLOW_FAIR_BUCKETS]` already exists on
+  `FlowFairState` at `userspace-dp/src/afxdp/types/cos.rs:563` —
+  exactly the field Gemini named.
+- `CoSQueueConfigState` at `cos.rs:450` is per-(egress_ifindex,queue_id)
+  shared state — exactly where `PerClassFairnessState` belongs.
+- Active flow count today is binding-wide (Codex finding #1), per
+  `umem/mod.rs:232` and `flow_cache.rs:365`. Need a per-queue derivation.
 
-Codex round-1 (task-mow2wczw) PLAN-NEEDS-MAJOR converged on the same
-fixes plus 5 additional findings: ArcSwap insert race, RTT-from-
-conntrack false premise, BindingPlan vs RSS asymmetry, RWND control
-sawtooth, window-scale shift-vs-divide bug.
+User mandate ("gemini can be wrong a lot"): calibration applied.
+This Gemini PLAN-KILL is the substantive case — narrow, code-cited,
+with a concrete fix proposed. Adopted, not capitulated to.
 
-**Operator mandate**: "keep pushing even when others give kill
-feedback, they could also be wrong." Both reviewers' grounds checked
-against `userspace-dp/src/afxdp/coordinator/cos_state.rs:7,13`,
-`tx/dispatch.rs:52`, and RFC 1122 §4.2.2.16. **They are right.** v2
-adopts the better alternative.
+## v3 design — per-worker rate tracking via existing FlowFair buckets
 
-## 1. v2 design — per-worker local max-min + cross-worker share via existing CoS lease
-
-### 1.1 What's already in xpf (verified)
-
-- **Per-worker active flow count** (PR #1219, master):
-  `xpf_userspace_binding_active_flow_count` gauge, refreshed every
-  ~65ms at the umem debug-publish tick. Read directly from
-  flow_cache state by the owning worker (single-reader, single-
-  writer pattern that does work).
-- **SharedCoSQueueLease** at
-  `userspace-dp/src/afxdp/coordinator/cos_state.rs:7`: per-worker
-  per-class lease that enforces total class throughput across
-  workers (V_min throttle infrastructure, hardened by #915 #940
-  #944).
-- **VMinQueueState** at
-  `userspace-dp/src/afxdp/cos/builders.rs:142`: per-worker
-  per-queue state tracking `consecutive_v_min_skips`,
-  `v_min_suspended_remaining`, etc.
-- **Per-worker MQFQ** in `tx.rs` with PR #928's
-  `max(vtime, served_finish)` semantics — already correct
-  byte-fairness within a worker.
-
-### 1.2 The gap
-
-Per-worker MQFQ gives equal BYTES per flow over time within a
-worker. At saturation, each flow on Worker A (with 4 flows) gets
-worker_capacity / 4. Worker B (with 1 flow) gives that flow
-worker_capacity / 1 = 4× more.
-
-To even out, Worker B's flow must be throttled to match Worker A's
-per-flow rate. Currently nothing does this.
-
-### 1.3 The fix
-
-**Per-worker max-min cap from a global per-flow target**, computed
-from per-worker active flow counts. No ArcSwap map, no RWND, no
-RTT estimation, no cross-worker per-packet writes.
+### 1. State placement (Codex finding #1, #5; Gemini Q-F)
 
 ```rust
-// userspace-dp/src/afxdp/cos/queue_service/service.rs
-// (extension to existing MQFQ in the per-class queue service)
-
-// Read by all workers; written by each worker for its own slot.
-struct PerClassFairnessState {
-    // 6 entries × 4 bytes = 24 bytes = 1 cache line read per batch
+// userspace-dp/src/afxdp/types/cos.rs — extend CoSQueueConfigState
+pub(in crate::afxdp) struct PerClassFairnessState {
+    /// Per-worker active flow count for this (egress_ifindex, queue_id).
+    /// Each worker writes its own slot at the ~65ms tick (single-writer
+    /// per slot); other workers read for sum.
     per_worker_active_flows: [AtomicU32; MAX_WORKERS],
-    // Sum of all per_worker_active_flows, recomputed at each
-    // ~65ms publish tick. No cross-worker writes per packet.
+    /// Cached sum, recomputed at the same tick. Read by hot path.
     total_active_flows: AtomicU32,
 }
 
-// Each worker, in its TX dispatch hot path:
-fn target_per_flow_bps(&self) -> u64 {
-    let class_rate = self.shared_cos_lease.current_rate_bps();
-    let total_flows = self.fairness.total_active_flows.load(Relaxed);
-    if total_flows == 0 { return u64::MAX; }
-    class_rate / total_flows as u64
-}
-
-// In the MQFQ scheduler when picking the next flow to send:
-fn next_flow_under_cap(&self, candidate_flow: FlowKey) -> bool {
-    let observed = candidate_flow.observed_bps();  // existing flow-cache state
-    observed < self.target_per_flow_bps()
+pub(in crate::afxdp) struct CoSQueueConfigState {
+    // ... existing fields ...
+    /// New: cross-worker per-queue fairness state. Arc so workers
+    /// share. Written only at ~65ms tick.
+    pub(in crate::afxdp) fairness: Arc<PerClassFairnessState>,
 }
 ```
 
-**Throttle mechanism**: when a flow exceeds the target rate, the MQFQ
-scheduler defers it (not drops; not ECN-marks; not RWND). Other
-flows on the same worker get scheduled instead. If no other local
-flows are eligible, the worker's TX ring gets shorter. The class's
-SharedCoSQueueLease redistributes: if Worker B's lonely flow is
-throttled, Worker B uses fewer tokens, freeing tokens for Worker A.
+### 2. Per-flow rate tracking — no flow_cache touch (Gemini PLAN-KILL fix)
 
-This is **work-conserving in the local sense** (Worker B never goes
-idle while it has a packet to send below cap) and **non-work-
-conserving in the global sense** (the system intentionally caps
-total throughput to enforce per-flow fairness).
+```rust
+// FlowFairState already has flow_bucket_bytes at cos.rs:563
+// Track per-bucket rate via difference + local timestamp.
+//
+// On TX enqueue (existing path): bucket_bytes += pkt_size  (already done)
+// On periodic local tick (per worker, per queue):
+fn refresh_bucket_rates(&mut self, now_ns: u64) {
+    let dt_ns = now_ns - self.last_rate_sample_ns;
+    if dt_ns < MIN_RATE_SAMPLE_NS { return; }  // 10ms minimum
+    for b in 0..COS_FLOW_FAIR_BUCKETS {
+        let cur_bytes = self.flow_bucket_bytes[b];
+        let dbytes = cur_bytes - self.last_rate_sample_bytes[b];
+        self.bucket_observed_bps[b] = (dbytes * 8 * 1_000_000_000) / dt_ns;
+        self.last_rate_sample_bytes[b] = cur_bytes;
+    }
+    self.last_rate_sample_ns = now_ns;
+}
+```
 
-### 1.4 Cross-worker coordination cost
+This adds `bucket_observed_bps: [u64; COS_FLOW_FAIR_BUCKETS]` and
+`last_rate_sample_bytes: [u64; COS_FLOW_FAIR_BUCKETS]` plus
+`last_rate_sample_ns: u64` to FlowFairState. All single-writer per
+worker. No cross-worker state.
 
-Per packet (hot path):
-- 1 atomic_load of `total_active_flows` (cached, batchable per batch).
-- 1 read of own flow's `observed_bps` from local flow_cache state.
-- 0 cross-worker writes.
+### 3. Cap-aware MQFQ selector (Codex finding #2)
 
-Per ~65ms tick (slow path, owner only):
-- For each of 6 workers: store own active flow count to per-class array.
-- 1 sum across 6 entries → store to total_active_flows.
+```rust
+// userspace-dp/src/afxdp/cos/queue_service/drain.rs
+// Replace the simple cos_queue_front + pop with eligible-bucket scan.
 
-Total hot-path cost: ~5 ns per packet for the cap check. No memory
-bandwidth concerns. No QPI saturation.
+fn next_eligible_bucket(state: &mut FlowFairState, target_bps: u64) -> Option<usize> {
+    // Scan active buckets in finish-time order (existing MQFQ semantics);
+    // skip buckets where bucket_observed_bps > target_bps.
+    // O(COS_FLOW_FAIR_BUCKETS) which is small (typ. 32-64).
+    let mut min_finish = u64::MAX;
+    let mut chosen = None;
+    for b in 0..COS_FLOW_FAIR_BUCKETS {
+        if state.flow_bucket_bytes[b] == 0 { continue; }  // empty
+        if state.bucket_observed_bps[b] > target_bps { continue; }  // capped
+        if state.bucket_finish[b] < min_finish {
+            min_finish = state.bucket_finish[b];
+            chosen = Some(b);
+        }
+    }
+    chosen
+}
+```
 
-## 2. Acceptance criteria
+If all buckets are over-cap (rare but possible during transient
+overshoot), fall back to the lowest-finish-time bucket regardless
+of cap to avoid stall.
 
-Same as v1 (and operator mandate):
+### 4. Per-queue active_flow_count (Codex finding #1)
 
-- **Workload**: `iperf3 -c <target> -P 12 -t 90 -p 5205 -R` (no
-  `--cport`, no `-b`).
-- **Pre-mechanism baseline**: per-flow CoV ≥ 0.50.
-- **Post-mechanism**: per-flow CoV ≤ Cstruct + 0.10.
-- **No aggregate regression** > 5% (per the existing fairness contract).
-- **Pathological case explicit guard**: when `n_active_workers == 1`
-  (single fat flow, others idle), the cap is `class_rate / 1 = full`
-  → no throttle. Work-conserving in the single-flow case.
+The existing `count_active_flows()` at `flow_cache.rs:365` scans the
+binding-wide flow cache. To get per-queue counts:
 
-## 3. What v2 does NOT do (compared to v1)
+Option A: extend `count_active_flows()` to return a per-queue
+breakdown, computed from each entry's `egress_queue_id` field.
+flow_cache entries should already have this for routing.
 
-- ❌ No ArcSwap<FxHashMap<FiveTuple, …>> — single fixed-size 24-byte
-  cross-worker array.
-- ❌ No RWND manipulation — pure dataplane scheduling, no TCP header
-  rewrites.
-- ❌ No RTT estimation — class_rate / total_flows is enough.
-- ❌ No window-scale arithmetic — RWND is gone.
-- ❌ No cross-worker shared mutable state per packet — only the
-  fixed-size flat array.
+Option B: maintain a per-(queue_id) active flow count incrementally
+on lookup hit / eviction.
 
-## 4. Risks (revised)
+**v3 picks A** — single-writer extension of an existing scan, no
+new write paths.
 
-- **Convergence speed**: per-worker active_flow_count is sampled at
-  ~65ms ticks. New flows take up to 65ms to reflect in the global
-  cap. Existing flows are throttled within 1 batch (~10 µs).
-  Acceptable.
-- **Pathological case: fat flow on idle worker**: Codex/Gemini's
-  shared finding. v2 mitigates via the explicit
-  `n_active_workers == 1` guard above. If the lonely flow's
-  worker has 1 active flow but other workers have multiple, the
-  flow is still throttled (intentional — that's the fairness
-  goal). The user accepted this trade in the standing mandate
-  ("user accepts aggregate regression on degenerate RSS
-  distributions").
-- **Codex finding #5 — window-scale**: N/A in v2; no RWND.
-- **Codex finding #4 — RWND sawtooth**: N/A.
-- **Codex finding #2 — RTT premise false**: N/A.
-- **Codex finding #1 — ArcSwap insert race**: N/A; no map.
+### 5. class_rate definition (Codex finding #5)
 
-## 5. Why this addresses the operator's hard requirement
+`class_rate` for the cap = the queue's effective transmit rate
+under the SharedCoSQueueLease, considering surplus-sharing phase:
 
-- ✓ No `--cport` workload-side knob required.
-- ✓ Applies to all flows, all 5-tuples, all RSS distributions.
-- ✓ Convergence in ~65ms after flow-table change.
-- ✓ Built on existing infrastructure (PR #1219 + SharedCoSQueueLease).
-- ✓ No new TCP-level mechanisms; no RFC compliance concerns.
-- ✓ No QPI saturation; no clone-on-write storms.
+```rust
+fn class_rate_for_cap(queue: &CoSQueueConfigState) -> u64 {
+    if queue.surplus_phase_active() {
+        // Exact-rate queue in surplus phase: cap at root_shaping_rate
+        // share, not exact rate.
+        queue.root_shaping_rate * queue.shared_lease.local_share()
+    } else {
+        // Exact phase: each worker's share is queue.transmit_rate / N_workers
+        queue.transmit_rate / queue.shared_lease.n_active_workers()
+    }
+}
+```
 
-## 6. Implementation outline
+This explicitly distinguishes surplus vs exact phase — addresses
+Codex's PR #915 surplus-sharing concern.
 
-Stages:
-1. **`PerClassFairnessState` struct** added to per-class state.
-   Per-worker active_flow_count slots already exist via #1219;
-   wire them into a per-class aggregator.
-2. **Cap check in MQFQ scheduler**: extend the per-class queue
-   service in `cos/queue_service/service.rs` to defer flows
-   exceeding the target rate.
-3. **Per-flow observed_bps tracking**: leverage existing flow_cache
-   state. Add a field `observed_bps: u64` updated by the owner
-   worker on TX completion (single-writer, no contention).
-4. **65ms publish tick extension**: at the existing
-   `update_binding_debug_state` call site, also update the
-   per-class total_active_flows.
-5. **Test**: harness validation against the user's exact command.
-6. **Smoke**: full CoS-on/off + push/reverse + v4/v6 matrix per
-   project standard.
+### 6. SharedCoSQueueLease nonempty-queue token retention (Codex finding #4)
 
-## 7. Open questions for adversarial review (v2)
+Codex correctly noted that `SharedCoSQueueLease` doesn't auto-free
+held tokens while a worker's queue is nonempty. v3 mitigation:
 
-1. Is `class_rate / total_flows` the right target, or should it be
-   `worker_capacity / per_worker_flow_count` (per-worker fair
-   share)? The latter is what V_min already enforces; the former
-   is what we want for global per-flow fairness. Subtle but
-   important.
-2. Does the per-class aggregator need to be per (egress_ifindex,
-   queue_id) or just per (forwarding_class)? CoS queues can be
-   shared across interfaces.
-3. What's the right behavior when `class_rate` is configured as
-   "transmit-rate exact" vs "transmit-rate"? The exact flag
-   changes whether unused tokens are surplus-sharable.
-4. How does this interact with PR #1206 / #1216's
-   CoSQueueRuntime split? Specifically, the FairnessState would
-   live in the ColdState (cross-worker visibility) or the FlowFair
-   sub-struct?
+When the cap-aware selector skips ALL buckets in the local queue
+(all over-cap) for `EXACT_QUEUE_FORCE_RELEASE_TICKS` (e.g. 10
+consecutive batches ≈ 1 ms), invoke
+`shared_lease.release_local_tokens()` to return tokens to the pool
+explicitly. Existing helper at `tx_completion.rs:403`.
 
-## 8. Methodology (v2)
+This is a CONDITIONAL early-release, not unconditional. Avoids
+gratuitous lease churning during normal operation.
 
-- v2 plan committed.
-- Re-dispatch Codex + Gemini with explicit "addresses your prior
-  PLAN-KILL/PLAN-NEEDS-MAJOR via the per-worker local max-min
-  alternative you yourself suggested".
-- If Codex + Gemini both PLAN-READY → implementation phase.
-- If Gemini PLAN-KILLs again on grounds we haven't engaged with →
-  evaluate; per operator mandate may override.
-- v2 incorporates substantive feedback; this is "we listened" not
-  "we capitulated". The mandate is to push past WRONG kill verdicts,
-  not all kill verdicts.
+## 7. v3 acceptance criteria (unchanged from v2)
+
+- Workload: `iperf3 -c <target> -P 12 -t 90 -p 5205 -R` (no `--cport`,
+  no `-b`).
+- Pre-mechanism baseline: per-flow CoV ≥ 0.50.
+- Post-mechanism: per-flow CoV ≤ Cstruct + 0.10.
+- No aggregate regression > 5%.
+
+## 8. v3 risks (revised)
+
+| Risk | Mitigation |
+|------|------------|
+| Cap-aware selector skips all buckets → stall | §3 fall-through to lowest-finish unconditional |
+| Bucket-rate sample period (10ms) too coarse for fast cwnd ramp | §2 EWMA smoothing or per-batch increment alongside the periodic refresh |
+| Per-queue active_flow_count computation cost (Codex finding #1 Option A) | §4 acceptable: existing `count_active_flows` is owner-only periodic scan, ~63K loads/sec/worker. Extension is one extra pass. |
+| `class_rate` definition rare-corner-case (transmit-rate not configured, etc.) | §5: when shaper is unconfigured, fall back to no-cap (preserves baseline behavior) |
+| Per-bucket rate state grows FlowFairState size | each [u64; COS_FLOW_FAIR_BUCKETS] adds 256-512 bytes per queue. Small. |
+
+## 9. What v3 DOESN'T do (intentionally)
+
+- ❌ No flow_cache modification (Gemini Q-C fatal flaw avoided).
+- ❌ No cross-worker writes per packet (only ~65ms tick + opt-in token
+  release).
+- ❌ No RWND, no RTT, no ECN.
+- ❌ No new TCP-level mechanisms.
+
+## 10. Implementation outline (revised)
+
+1. **Add `PerClassFairnessState` to `CoSQueueConfigState`**.
+   Single field; init at queue creation.
+2. **Extend FlowFairState with rate-sample fields**.
+   `bucket_observed_bps` + `last_rate_sample_bytes` + `last_rate_sample_ns`.
+3. **Add `refresh_bucket_rates` invocation** in the existing per-worker
+   tick path (alongside `update_binding_debug_state`).
+4. **Replace simple front-check with `next_eligible_bucket`** in
+   `cos/queue_service/drain.rs:161`.
+5. **Per-queue active_flow_count derivation** in `count_active_flows`.
+6. **Aggregator update** at the ~65ms tick: each worker writes own
+   slot to `PerClassFairnessState.per_worker_active_flows[worker_id]`,
+   sum recomputed.
+7. **`class_rate_for_cap` helper** integrating SharedCoSQueueLease state.
+8. **Conditional token release** when locally-capped for N batches.
+
+## 11. Methodology
+
+- v3 plan committed.
+- Re-dispatch Codex + Gemini round-3 with explicit answers to each
+  prior finding.
+- If Gemini round-3 PLAN-KILLs again: per operator calibration
+  ("gemini can be wrong a lot"), evaluate the NEW grounds carefully.
+  If they're empirically valid → iterate. If they're a re-issue of
+  prior already-addressed points or generic → flag as bad-faith and
+  override.
+- Implement on PLAN-READY consensus or operator override.
