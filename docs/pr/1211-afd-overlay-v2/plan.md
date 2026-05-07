@@ -354,9 +354,16 @@ already been transmitted — too late to ECN-mark.
 
 This means **Fix #6's RFC 3168 unified marking moves to the
 TX-side encapsulation point, BEFORE submit**, not at settle. The
-correct hook is `tx/cos_classify.rs` or `tx/dispatch.rs` (where
-the packet is being prepared for the TX ring), where L3 offsets
-are still cached from the ingress XDP parse + flow_cache lookup.
+correct hook is the **shared-exact pre-submit path** in
+`userspace-dp/src/afxdp/cos/queue_service/service.rs:214-279`
+(prepared variant) and `:541-617` (local variant), immediately
+before the TX-ring submit. These call sites have access to the
+binding/UMEM context AND see the post-rewrite frame layout (per
+Codex round-4 finding: the offsets are stable here, after any
+VLAN/tunnel/L3 rewrite has been applied by the TX dispatch
+pipeline). `tx/dispatch.rs` is too early — it builds/enqueues
+the `TxRequest`/`PreparedTxRequest` but does not own the
+shared-exact submit decision.
 
 v3 design reorganization:
 - **Per-pop**: read summary's `delta` and `fair` for this bucket
@@ -416,7 +423,10 @@ phased**:
   owner logic.
 
 - **Phase 2**: wire the pre-submit AFD decision in
-  `tx/cos_classify.rs` or `tx/dispatch.rs` using the cached
+  the shared-exact pre-submit path
+  (`cos/queue_service/service.rs:214-279` prepared variant +
+  `:541-617` local variant) using the post-rewrite frame
+  metadata (0a reparse) or the cached
   offsets from Phase 0. RFC 3168-compliant unified mark/drop
   probability per Fix #6.
 
@@ -661,17 +671,31 @@ A separate plan-and-PR after this plan is approved would deliver
 the phased Fix #10 implementation:
 
 1. New module `userspace-dp/src/afxdp/cos/afd.rs` (~400 LOC).
-2. **Pre-submit ECN-mark hook** in TX dispatch (see Fix #10
-   for hook location options 0a vs 0b). NOT in
-   `cos/queue_ops/pop.rs` — that runs before TX rewrite, so
-   the L3 offset isn't yet stable and we'd be marking the
-   pre-rewrite frame, not the wire frame. The hook lives
-   wherever the post-rewrite frame is available immediately
-   before TX submit:
-   - 0a: re-parse path inside `cos/ecn.rs`-style helper
-     called at the AFD decision site
-   - 0b: cached-offset path consuming `TxRequest`/`PreparedTxRequest`
-     metadata produced at `frame/mod.rs:245` rewrite time
+2. **Pre-submit ECN-mark hook** in the shared-exact pre-submit
+   path: `cos/queue_service/service.rs:214-279` (prepared
+   variant) and `:541-617` (local variant), immediately before
+   the TX-ring submit. These call sites have:
+   - binding/UMEM context (needed to access the wire frame),
+   - the post-rewrite frame layout (any VLAN/tunnel/L3 rewrite
+     done by the TX dispatch pipeline has already happened),
+   - the AFD `AfdQueueState` Arc on the queue runtime.
+
+   NOT in `cos/queue_ops/pop.rs` — pop runs at the queue-
+   abstraction level with no binding/UMEM/submit context. NOT
+   in `tx/dispatch.rs` — that's where `TxRequest` /
+   `PreparedTxRequest` are first BUILT, before the shared-exact
+   submit decision and before any post-rewrite parse is
+   meaningful.
+
+   At the shared-exact pre-submit hook, the AFD code uses
+   either:
+   - 0a: re-parse path inside `cos/ecn.rs`-style helper called
+     on the wire frame (~50 ns/mark; reuses `cos/ecn.rs:179`
+     existing logic; recommended initial path)
+   - 0b: cached-offset path consuming post-rewrite metadata
+     produced at `frame/mod.rs:245` rewrite time (~10 ns/mark;
+     larger diff to thread offsets through; defer until
+     measured budget pressure justifies)
 3. **Settle-time `served_bytes` accounting** (per Fix #1) in
    `settle_exact_*_scratch_submission_flow_fair`
    (queue_service/mod.rs:740 + :795) — counts only the inserted
