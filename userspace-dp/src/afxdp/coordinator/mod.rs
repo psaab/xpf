@@ -1129,6 +1129,9 @@ impl Coordinator {
                 binding.flow_cache_misses = snap.flow_cache_misses;
                 binding.flow_cache_evictions = snap.flow_cache_evictions;
                 binding.flow_cache_collision_evictions = snap.flow_cache_collision_evictions;
+                // #1219: bridge active_flow_count from BindingLiveSnapshot
+                // into BindingStatus so it reaches the wire-visible status.
+                binding.active_flow_count = snap.active_flow_count;
                 // #941 Work item D / #943: bridge V_min counters from
                 // BindingLiveSnapshot through to BindingStatus so the
                 // wire surface (BindingCountersSnapshot) sees them.

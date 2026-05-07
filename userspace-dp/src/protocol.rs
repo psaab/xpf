@@ -1221,6 +1221,12 @@ pub(crate) struct BindingStatus {
     /// under load.
     #[serde(rename = "flow_cache_collision_evictions", default)]
     pub flow_cache_collision_evictions: u64,
+    /// #1219: snapshot count of distinct active flows on this binding's
+    /// flow_cache, refreshed at the ~65ms debug-state tick. Per
+    /// `docs/fairness-regimes.md`, the harness reads this via
+    /// Prometheus to compute `{a_i}` for the structural CoV gate.
+    #[serde(rename = "active_flow_count", default)]
+    pub active_flow_count: u32,
     /// #941 Work item D / #943: count of V_min hard-cap activations
     /// on this binding. Hard-cap is the escape hatch that fires
     /// after V_MIN_CONSECUTIVE_SKIP_HARD_CAP back-to-back throttle
@@ -1567,6 +1573,10 @@ pub(crate) struct BindingCountersSnapshot {
     /// consumers parseable — the field simply deserializes as 0.
     #[serde(rename = "flow_cache_collision_evictions", default)]
     pub flow_cache_collision_evictions: u64,
+    /// #1219: snapshot count of distinct active flows. See
+    /// BindingStatus.active_flow_count for full doc.
+    #[serde(rename = "active_flow_count", default)]
+    pub active_flow_count: u32,
     /// #941 Work item D / #943: V_min hard-cap activation count.
     /// Default keeps pre-#943 consumers parseable.
     #[serde(rename = "v_min_throttle_hard_cap_overrides", default)]
@@ -1644,6 +1654,8 @@ impl From<&BindingStatus> for BindingCountersSnapshot {
             // #918: flow under by-value u64; same Send/'static
             // discipline as the other counters.
             flow_cache_collision_evictions: b.flow_cache_collision_evictions,
+            // #1219: active flow count snapshot. By-value u32.
+            active_flow_count: b.active_flow_count,
             // #941 Work item D / #943: V_min counters propagate from
             // BindingDebugSnapshot through to the wire-visible
             // BindingCountersSnapshot. By-value u64, no Send concerns.

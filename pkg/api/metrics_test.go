@@ -178,3 +178,71 @@ func collectFromEmitWorkerRuntime(
 	}
 	return got
 }
+
+// #1219: emitBindingActiveFlowCount must surface the per-binding
+// xpf_userspace_binding_active_flow_count gauge with labels
+// {binding_slot, queue_id, worker_id, iface}. Mirrors the
+// emitWorkerRuntime test pattern; pins the wire shape so a
+// future refactor can't silently drop the metric the fairness
+// harness depends on.
+func TestEmitBindingActiveFlowCount_LabelsAndValue(t *testing.T) {
+	c := &xpfCollector{
+		bindingActiveFlowCount: prometheus.NewDesc(
+			"xpf_userspace_binding_active_flow_count",
+			"test desc",
+			[]string{"binding_slot", "queue_id", "worker_id", "iface"},
+			nil,
+		),
+	}
+
+	status := dpuserspace.ProcessStatus{
+		Bindings: []dpuserspace.BindingStatus{
+			{Slot: 0, QueueID: 0, WorkerID: 0, Interface: "ge-0-0-1", ActiveFlowCount: 5},
+			{Slot: 1, QueueID: 0, WorkerID: 0, Interface: "ge-0-0-2", ActiveFlowCount: 0},
+			{Slot: 2, QueueID: 0, WorkerID: 0, Interface: "ge-0-0-0", ActiveFlowCount: 3},
+		},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitBindingActiveFlowCount(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+
+	if len(got) != 3 {
+		t.Fatalf("emitBindingActiveFlowCount: want 3 metrics for 3 bindings, got %d", len(got))
+	}
+
+	// Verify the slot=0 series has value 5 with correct labels.
+	var found bool
+	for _, m := range got {
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("write metric: %v", err)
+		}
+		labels := map[string]string{}
+		for _, lp := range pb.Label {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["binding_slot"] != "0" {
+			continue
+		}
+		found = true
+		if labels["queue_id"] != "0" || labels["worker_id"] != "0" || labels["iface"] != "ge-0-0-1" {
+			t.Errorf("slot=0 wrong labels: %v", labels)
+		}
+		if pb.Gauge == nil {
+			t.Fatalf("slot=0 metric has no gauge")
+		}
+		if got := pb.Gauge.GetValue(); got != 5 {
+			t.Errorf("slot=0 ActiveFlowCount=5 → want gauge value 5, got %v", got)
+		}
+	}
+	if !found {
+		t.Fatalf("slot=0 series missing from emitBindingActiveFlowCount output")
+	}
+}
