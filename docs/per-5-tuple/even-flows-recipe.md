@@ -237,7 +237,8 @@ removed the per-worker speed variance from daemon contention.
 |---------------|-----------|--------------|
 | Default (asymmetric Toeplitz, daemon shared on all CPUs) | ~17 Gbps | 0.91 |
 | + Symmetric Toeplitz key | ~17 Gbps | 0.19 |
-| + Daemon pinned to CPU 0 | **22.7 Gbps** | 0.21 |
+| + Daemon pinned to CPU 0 (saturated) | **22.7 Gbps** | 0.21 |
+| + Daemon pinned + `-b 1.5G` per-flow cap (sub-saturation) | **17.95 Gbps** | **0.006** |
 
 The **observed_cov stuck at ~21%** after pinning, NOT because of
 worker speed variance (that's now uniform on CPUs 1-5) but because
@@ -295,6 +296,35 @@ For a customer deployment:
 
 These three together get the firewall to its hardware-limited best
 on the loss cluster.
+
+### Sub-saturation with all knobs combined — verified 0.6% CoV
+
+Putting all three together produced the cleanest result of the
+entire drive:
+
+```
+ethtool -X ge-0-0-2 hkey 6d:5a:6d:5a:...        # round 2 sym key
+taskset -pc 0 <every xpfd / xpf-userspace-d helper thread>  # round 3 pin
+iperf3 -c <target> -P 12 -t 90 -p 5203 --cport 30000 -b 1.5G   # this round
+```
+
+Per-stream Mbps:
+```
+1476 1476 1499 1499 1499 1499 1499 1499 1499 1499 1499 1499
+```
+
+10 flows at exactly 1499 Mbps, 2 at 1476 — **observed_cov = 0.0058
+(0.58%)**. Aggregate 17.95 Gbps. The 2 outliers are the rate-limit
+truncation (1.5e9 / 8 = 1.5GBps inscribed; iperf3's pacing rounds
+to 1499 Mbps).
+
+This is the **firewall delivering 12 flows that are within 1.5%
+of each other at 79% of capacity**. The user's literal "even out
+the flows" goal is met.
+
+Above this load (saturation), the iperf3 sender CPU saturates first
+(73% host_system) and the firewall's perfect fairness gets
+masked by sender-side TCP/scheduler unevenness.
 
 ## What does NOT solve this — verified or memory-confirmed
 
