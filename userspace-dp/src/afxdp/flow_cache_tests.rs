@@ -99,6 +99,7 @@ fn make_entry(
         decision: make_decision(ForwardingDisposition::ForwardCandidate),
         metadata: make_metadata(owner_rg_id),
         stamp,
+        last_used_epoch: 0,
     }
 }
 
@@ -1298,4 +1299,120 @@ fn flow_cache_4way_lru_permutation_invariant_holds() {
         [0u8, 1, 2, 3],
         "lru row must be a permutation of [0,1,2,3], got {row:?}"
     );
+}
+
+// ----------------------------------------------------------------
+// (#1219) Active-flow epoch counter + count_active_flows
+// ----------------------------------------------------------------
+
+#[test]
+fn count_active_flows_starts_at_zero() {
+    let cache = FlowCache::new();
+    assert_eq!(cache.count_active_flows(), 0);
+}
+
+#[test]
+fn count_active_flows_excludes_never_touched_entries() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    // Insert without lookup → last_used_epoch stays 0 → not active.
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    let _ = &rg_epochs; // silence unused warning if scoping shifts
+    assert_eq!(cache.count_active_flows(), 0);
+}
+
+#[test]
+fn count_active_flows_marks_recently_hit() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    // Advance to epoch 1 so a hit stamps with 1, not 0.
+    cache.tick_advance_epoch();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    // Same epoch → active.
+    assert_eq!(cache.count_active_flows(), 1);
+}
+
+#[test]
+fn count_active_flows_ages_out_after_window() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    cache.tick_advance_epoch();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    assert_eq!(cache.count_active_flows(), 1);
+    // Advance 10 epochs → outside window → entry no longer active.
+    for _ in 0..10 {
+        cache.tick_advance_epoch();
+    }
+    assert_eq!(cache.count_active_flows(), 0);
+    // One more lookup re-stamps and reactivates.
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    assert_eq!(cache.count_active_flows(), 1);
+}
+
+#[test]
+fn count_active_flows_handles_epoch_wraparound() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    // Force current_epoch near u16::MAX so the next advance wraps.
+    cache.current_epoch = u16::MAX - 2;
+    cache.tick_advance_epoch();  // u16::MAX - 1
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    // Now wrap.
+    cache.tick_advance_epoch();  // u16::MAX
+    cache.tick_advance_epoch();  // wraps to 0
+    cache.tick_advance_epoch();  // 1
+    // last_used_epoch was u16::MAX-1; current is 1; wrapping_sub
+    // gives 1 - (u16::MAX-1) = 1 - 65534 wrapping to 3. Within
+    // 10-epoch window → active.
+    assert_eq!(cache.count_active_flows(), 1);
 }

@@ -123,6 +123,14 @@ pub(super) struct FlowCacheEntry {
     /// Validation stamp captured at insert time. Stale entries are treated as
     /// misses without requiring per-entry scans at RG transition.
     pub(super) stamp: FlowCacheStamp,
+    /// #1219: per-hit recency counter. Owner-only single u16 store on every
+    /// `lookup()` hit — see `FlowCache::current_epoch` for the comparison
+    /// reference. The 100ms-tick scan in `count_active_flows()` counts
+    /// entries with `(current_epoch - last_used_epoch) < 10` (1 second
+    /// window). u16 wraps every 256 epochs × 100ms = 25.6s, well past the
+    /// 1s window. Value 0 = "never touched"; freshly inserted entries
+    /// carry 0 until first lookup hit.
+    pub(super) last_used_epoch: u16,
 }
 
 /// #963 PR-A: defense-in-depth check for `from_forward_decision`.
@@ -285,6 +293,9 @@ impl FlowCacheEntry {
                 ha_state,
                 rg_epochs,
             ),
+            // #1219: 0 = "never touched"; first lookup hit will stamp
+            // it with the current epoch.
+            last_used_epoch: 0,
         })
     }
 }
@@ -310,6 +321,13 @@ pub(super) struct FlowCache {
     /// separately from `evictions` (which also counts stale-on-lookup
     /// evictions) for hot-set diagnosis.
     pub(super) collision_evictions: u64,
+    /// #1219: per-binding epoch counter for the active-flow-count signal.
+    /// Owner-only state. Incremented on the existing 100ms worker tick via
+    /// `tick_advance_epoch()`. `lookup()` writes this value into
+    /// `entry.last_used_epoch` on every hit so `count_active_flows()` can
+    /// distinguish entries touched within the last `ACTIVE_WINDOW_EPOCHS`
+    /// ticks (= 10 × 100ms = 1s window).
+    pub(super) current_epoch: u16,
 }
 
 impl FlowCache {
@@ -321,7 +339,40 @@ impl FlowCache {
             misses: 0,
             evictions: 0,
             collision_evictions: 0,
+            current_epoch: 0,
         }
+    }
+
+    /// #1219: advance the per-binding active-flow epoch counter.
+    /// Called from the worker's existing 100ms tick. Wrapping u16
+    /// arithmetic; `count_active_flows` uses `wrapping_sub` to be
+    /// safe across the wrap boundary.
+    #[inline]
+    pub(super) fn tick_advance_epoch(&mut self) {
+        self.current_epoch = self.current_epoch.wrapping_add(1);
+    }
+
+    /// #1219: count cache entries hit in the last `ACTIVE_WINDOW_EPOCHS`
+    /// ticks (= 1 second at 100ms tick cadence). Owner-only periodic
+    /// scan; not on the hot path. O(N) over `FLOW_CACHE_SIZE`
+    /// (~8192 entries) ≈ ~10 µs of work per second per worker.
+    pub(super) fn count_active_flows(&self) -> u32 {
+        const ACTIVE_WINDOW_EPOCHS: u16 = 10;
+        let now = self.current_epoch;
+        let mut active = 0u32;
+        for slot in self.entries.iter() {
+            if let Some(entry) = slot {
+                // last_used_epoch == 0 marks "never touched"; skip.
+                if entry.last_used_epoch == 0 {
+                    continue;
+                }
+                let age = now.wrapping_sub(entry.last_used_epoch);
+                if age < ACTIVE_WINDOW_EPOCHS {
+                    active = active.saturating_add(1);
+                }
+            }
+        }
+        active
     }
 
     /// Set index = low bits of the FxHasher-produced flow hash.
@@ -435,6 +486,14 @@ impl FlowCache {
                 // Fresh hit.
                 self.promote_lru(set, way as u8);
                 self.hits += 1;
+                // #1219: stamp the entry with the current epoch so the
+                // periodic count_active_flows scan can recognize this
+                // flow as active in the last 1s window. Single u16 store
+                // on a struct already in cache from the key check above.
+                let now = self.current_epoch;
+                if let Some(e) = &mut self.entries[entry_idx] {
+                    e.last_used_epoch = now;
+                }
                 return self.entries[entry_idx].as_ref();
             }
         }
