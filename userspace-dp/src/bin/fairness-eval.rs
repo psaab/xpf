@@ -230,13 +230,17 @@ fn main() -> ExitCode {
     };
 
     // Harness fail-fast guard: sum(a_i) vs non-starved iperf stream count.
+    // Each TCP flow creates flow_cache entries on BOTH ingress and egress
+    // bindings (a forward flow + a reverse flow), so the data-plane sum is
+    // expected to be ~2 × n_streams. Tolerance is per-stream-direction
+    // (i.e. ± max(2, 0.10 × 2N)).
     let a_i_sum: u32 = distribution_a_i.iter().sum();
     let n_iperf_streams = iperf.start.test_start.num_streams;
     let n_non_starved = n_iperf_streams.saturating_sub(starved);
-    let tolerance =
-        ((GUARD_RELATIVE * n_iperf_streams as f64) as u32).max(GUARD_ABSOLUTE);
+    let expected_sum = n_non_starved.saturating_mul(2);
+    let tolerance = ((GUARD_RELATIVE * expected_sum as f64) as u32).max(GUARD_ABSOLUTE);
     let a_i_sum_check_ok =
-        (a_i_sum as i64 - n_non_starved as i64).unsigned_abs() as u32 <= tolerance;
+        (a_i_sum as i64 - expected_sum as i64).unsigned_abs() as u32 <= tolerance;
 
     let mut failure_reasons: Vec<String> = Vec::new();
     if starved > 0 {

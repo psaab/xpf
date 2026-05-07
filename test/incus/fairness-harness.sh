@@ -49,19 +49,17 @@ fi
 
 scrape_metrics() {
     local out=$1
-    echo "# timestamp	binding_slot	count" > "$out"
+    printf '# timestamp\tbinding_slot\tcount\n' > "$out"
     while true; do
         local ts
         ts=$(date +%s)
+        # Portable parse: grep the metric lines, then sed extracts
+        # binding_slot=N and the trailing value. Avoids gawk-only
+        # match($0, /re/, arr) which fails on mawk.
         if ! curl -sS --max-time 1 "$METRICS_URL" 2>/dev/null \
-            | awk -v ts="$ts" '
-                /^xpf_userspace_binding_active_flow_count\{/ {
-                    # Extract binding_slot label and the value.
-                    match($0, /binding_slot="([0-9]+)"/, m);
-                    slot = m[1];
-                    val = $NF;
-                    printf "%s\t%s\t%d\n", ts, slot, val;
-                }' >> "$out"; then
+            | grep '^xpf_userspace_binding_active_flow_count{' \
+            | sed -nE 's/^[^\{]*\{[^}]*binding_slot="([0-9]+)"[^}]*\} ([0-9]+).*$/\1\t\2/p' \
+            | awk -v ts="$ts" -F'\t' '{ printf "%s\t%s\t%s\n", ts, $1, $2 }' >> "$out"; then
             : # network glitch; keep going
         fi
         sleep 1
