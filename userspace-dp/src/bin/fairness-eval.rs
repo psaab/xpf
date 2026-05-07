@@ -123,9 +123,17 @@ fn main() -> ExitCode {
     let ss_start = args.warmup_secs as f64;
     let ss_end = (total_dur - args.final_burst_secs) as f64;
 
-    // Per-stream per-bucket throughput in bytes/sec (so starved_flow_count
-    // can compare in absolute units and tolerate float quantization).
+    // Per-stream per-bucket throughput in bytes/sec. Seed the map from
+    // `start.connected[]` so streams that contributed zero throughput
+    // for the entire steady-state window are still represented (with
+    // an empty bucket vec) and correctly counted as starved by
+    // starved_flow_count. Without this seeding, streams that sent no
+    // data after warmup are silently invisible — Codex round-1+round-2
+    // finding #1.
     let mut per_stream_buckets: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for c in &iperf.start.connected {
+        per_stream_buckets.entry(c.socket).or_default();
+    }
     let mut aggregate_buckets_bps: Vec<u64> = Vec::new();
 
     for interval in &iperf.intervals {
@@ -235,7 +243,17 @@ fn main() -> ExitCode {
     // expected to be ~2 × n_streams. Tolerance is per-stream-direction
     // (i.e. ± max(2, 0.10 × 2N)).
     let a_i_sum: u32 = distribution_a_i.iter().sum();
-    let n_iperf_streams = iperf.start.test_start.num_streams;
+    // Stream count: prefer start.connected[].len() (concrete stream
+    // sockets observed at iperf3 setup time) over test_start.num_streams
+    // (a self-reported integer). The seeded map sees every connected
+    // socket; any not present in steady-state intervals are starved
+    // candidates. Codex round-2 finding: don't trust interval presence
+    // alone — derive expected count from connected[].
+    let n_iperf_streams = if iperf.start.connected.is_empty() {
+        iperf.start.test_start.num_streams
+    } else {
+        iperf.start.connected.len() as u32
+    };
     let n_non_starved = n_iperf_streams.saturating_sub(starved);
     let expected_sum = n_non_starved.saturating_mul(2);
     let tolerance = ((GUARD_RELATIVE * expected_sum as f64) as u32).max(GUARD_ABSOLUTE);

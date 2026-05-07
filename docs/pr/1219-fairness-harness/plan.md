@@ -78,7 +78,7 @@ blockers v2 missed:
 
 1. **`flow_cache` does NOT have `last_used_ns`** as v2 assumed.
    `FlowCacheEntry` has no timestamp field; `lookup()` only
-   validates/promotes/hits — it does NOT update recency. The 100ms
+   validates/promotes/hits — it does NOT update recency. The ~65ms
    scan as v2 specified is unimplementable.
 2. **Per-queue + ≥1% throughput qualification still uncomputable**.
    v2 deferred this to harness time, but `iperf3 -P N` uses the
@@ -91,7 +91,7 @@ v3 addresses both:
 - **Fix #v3-1**: add a `last_used_epoch: u16` field to
   `FlowCacheEntry`. Owner-only writes the current epoch in
   `lookup()` on hit. Worker tick increments the per-binding
-  epoch counter every 100ms. To check "active in last 1s",
+  epoch counter every ~65ms. To check "active in last 1s",
   count entries with `(current_epoch - entry.last_used_epoch) <= 10`.
   Cost: ~1-2 ns/lookup (single u16 store on a struct already
   loaded in the hot path).
@@ -124,7 +124,7 @@ Both reviewers PLAN-NEEDS-MAJOR with convergent fatal findings:
 
 **Gemini fatals**:
 B. HashMap on hot path = 6% CPU. Suggestion: embed `last_seen_ns`
-   in existing flow_cache entries; aggregate at 100ms tick.
+   in existing flow_cache entries; aggregate at ~65ms gate (call-rate dependent).
 C. `MAX_TRACKED_FLOWS=1024` silent saturation → false-pass on
    high-fan-in skewed.
 D. Rust↔Go formula drift. Suggestion: CGo / single source of truth.
@@ -171,7 +171,7 @@ Production Prometheus observability is a separate follow-up
 - New `active_flow_count: u32` field through the
   Rust→Go→Prometheus pipeline (per Codex round-4 finding #2):
   - **Rust live state**: `BindingLiveState.active_flow_count:
-    AtomicU32` (per §3.3); written from owner-only 100ms tick.
+    AtomicU32` (per §3.3); written from owner-only ~65ms gate (call-rate dependent).
   - **Rust snapshot**: `BindingStatus.active_flow_count` field
     in the snapshot struct copied to the helper-process status JSON.
   - **Status JSON**: serialized field `active_flow_count` in
@@ -270,7 +270,7 @@ pub(in crate::afxdp) active_flow_count: AtomicU32,
 Worker's existing 100 ms tick:
 
 ```rust
-// at the worker's existing 100ms periodic tick
+// at the worker's existing ~65ms periodic tick
 let new_epoch = state.flow_cache_epoch
     .load(Ordering::Relaxed)
     .wrapping_add(1);
@@ -288,7 +288,7 @@ let count = flow_cache.entries.iter()
 state.active_flow_count.store(count, Ordering::Relaxed);
 ```
 
-Tick-side scan: O(N) over flow_cache cap (8192 entries) every
+Tick-side scan: O(N) over flow_cache cap (4096 entries) every
 100 ms = 80K loads/sec/worker = ~10 µs of work per second on the
 periodic-maintenance path. Not on the hot path.
 
@@ -339,7 +339,7 @@ read `{aᵢ}` directly from the data plane.
 
 The reasoning (per round-3 verdict resolution above): the data
 plane already has the flow_cache, the epoch counter (Fix #v3-1),
-and the 100ms-tick scan that publishes per-binding active flow
+and the ~65ms-tick scan that publishes per-binding active flow
 count. Adding ONE Prometheus metric exposes that count to the
 harness. The harness scrapes `/metrics` every 1s during the iperf3
 run and reads `xpf_userspace_binding_active_flow_count{binding_slot=N}`
@@ -505,7 +505,7 @@ local socket. Not in scope here.
 | Class | Level | Why |
 |---|---|---|
 | Behavioral regression on FIFO/owner-local | NONE | Code path unchanged |
-| Behavioral regression on shared_exact | NONE | Hot path unchanged; only periodic 100ms scan added |
+| Behavioral regression on shared_exact | NONE | Hot path unchanged; only periodic ~65ms scan added |
 | Hot-path perf cost | NONE | No per-packet write; periodic scan only |
 | Per-tick perf cost | LOW | ~10 µs/sec/worker on a path that has spare time |
 | Rust↔Go drift | NONE in v2 | Only Rust does the math |
@@ -548,7 +548,7 @@ local socket. Not in scope here.
    stays in L1/L2? If not, the scan could be more expensive than
    estimated.
 
-2. **flow_cache cap**. Cache cap is 8192 entries (verify exact).
+2. **flow_cache cap**. Cache cap is 4096 entries (verify exact).
    At extremely high fan-in the cache itself becomes the bottleneck
    for distinctness measurement, but the cap exposed to the harness
    is documented and predictable (unlike the v1 1024 cap which was
