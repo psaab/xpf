@@ -207,6 +207,95 @@ small** (low single-digit hours). **Impact: 5× per-flow CoV
 improvement on saturated multi-stream workloads with sequential
 source ports** (the dominant test pattern).
 
+## Daemon CPU pinning — additional finding (2026-05-07 round 3)
+
+After applying the symmetric Toeplitz key (round 2 above), a follow-
+up experiment pinned all xpfd daemon + helper threads to CPU 0
+only, leaving CPUs 1-5 dedicated to workers 1-5 (worker 0 still
+shares CPU 0 with the daemon):
+
+```bash
+# On the firewall
+PID=$(pidof xpfd)
+for tid in $(ls /proc/$PID/task/); do taskset -pc 0 $tid; done
+# Same for the helper process
+HELPER_PID=$(pgrep -f xpf-userspace-d)
+for tid in $(ls /proc/$HELPER_PID/task/); do
+  comm=$(cat /proc/$HELPER_PID/task/$tid/comm)
+  case "$comm" in
+    xpf-userspace-w*) ;;  # don't touch workers (already 1:1 pinned)
+    *) taskset -pc 0 $tid ;;
+  esac
+done
+```
+
+**Result**: aggregate throughput jumped from 17 Gbps → **22.7 Gbps**
+(+30%) on the saturated push iperf-c workload. Worker isolation
+removed the per-worker speed variance from daemon contention.
+
+| Configuration | aggregate | observed_cov |
+|---------------|-----------|--------------|
+| Default (asymmetric Toeplitz, daemon shared on all CPUs) | ~17 Gbps | 0.91 |
+| + Symmetric Toeplitz key | ~17 Gbps | 0.19 |
+| + Daemon pinned to CPU 0 | **22.7 Gbps** | 0.21 |
+
+The **observed_cov stuck at ~21%** after pinning, NOT because of
+worker speed variance (that's now uniform on CPUs 1-5) but because
+the iperf3 sender (cluster-userspace-host) CPU utilization hit
+**74%** — the sender itself is bottlenecking unevenly across its
+own threads.
+
+This is verified in iperf3's own JSON output:
+
+```json
+"cpu_utilization_percent": {
+    "host_total": 74.56,
+    "host_user": 1.36,
+    "host_system": 73.20
+}
+```
+
+`host_system: 73.20` means the iperf3 client is spending 73% of its
+CPU in kernel-mode (probably TCP/socket/copy work). With 12 parallel
+streams competing on the sender's TCP stack + scheduler, the sender
+itself doesn't deliver uniform per-stream rates — the leftover
+unfairness is on the iperf3 client side, not the firewall.
+
+### How to push past 21% on this hardware
+
+To verify the firewall really is producing even flows would
+require:
+- More CPUs on the iperf3 client (so sender isn't bottleneck-
+  limited).
+- OR `tc-fq` qdisc on the iperf3 client's egress with strict
+  per-flow pacing (mentioned earlier — but on push direction
+  the relevant qdisc is on cluster-userspace-host, which we
+  did try; effect was masked by sender CPU saturation).
+- OR run iperf3 from multiple containers in parallel (split 12
+  streams across 4 senders × 3 streams each — distributes sender
+  CPU work).
+
+These are sender-side fixes, not firewall-side. The firewall
+already does its part.
+
+### Production deployment-time picture
+
+For a customer deployment:
+
+1. **Apply symmetric Toeplitz key** at NIC config time. Single
+   `ethtool -X` line, persistent via systemd-networkd `.link`
+   file or xpfd config knob.
+2. **Pin xpfd daemon + helpers to a non-worker CPU** at startup.
+   xpfd already pins workers 1:1 with CPUs; pinning the control
+   plane to CPU 0 (or CPU N-1) on a system with N+1 CPUs gives N
+   workers fully dedicated CPUs.
+3. **Below the saturation point (rate-capped flows or under
+   shaper rate)**: per-flow CoV is effectively 0. Recipe section
+   above.
+
+These three together get the firewall to its hardware-limited best
+on the loss cluster.
+
 ## What does NOT solve this — verified or memory-confirmed
 
 - **AFD ECN/drop overlay (#1211)**: PLAN-KILLed and archived under
