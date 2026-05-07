@@ -229,7 +229,8 @@ for what the binary's contract IS.
 If reviewers conclude that the binary contract is small enough that
 this kind of regression coverage is overkill, **PLAN-KILL is an
 acceptable verdict**. The fairness-eval binary is ~600 LOC; the
-integration tests will be ~250 LOC including the schema test.
+integration tests are ~640 LOC including helpers and schema test
+(measured on the v6+ implementation).
 
 Both round-3 reviewers explicitly noted "if Path 4 is not going to
 ship, this is YAGNI; consider PLAN-KILL". The strategic call is:
@@ -486,4 +487,4 @@ exist. With #1211 archived (PLAN-KILL), Path 4 workload-aware gate
 is the only remaining mechanism candidate, and it doesn't exist as
 an issue yet. If Path 4 also PLAN-KILLs at plan time, #547's payoff
 collapses to "minor regression-coverage on a stable 600-LOC binary".
-That may not justify even ~250 LOC of test code.
+That may not justify even ~640 LOC of test code.
