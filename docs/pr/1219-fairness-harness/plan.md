@@ -92,8 +92,8 @@ v3 addresses both:
 - **Fix #v3-1**: add a `last_used_epoch: u16` field to
   `FlowCacheEntry`. Owner-only writes the current epoch in
   `lookup()` on hit. Worker tick increments the per-binding
-  epoch counter every ~65ms. To check "active in last 1s",
-  count entries with `(current_epoch - entry.last_used_epoch) <= 10`.
+  epoch counter every ~65ms. To check "active in last ~650 ms",
+  count entries with `(current_epoch - entry.last_used_epoch) < ACTIVE_WINDOW_EPOCHS` (= 10).
   Cost: ~1-2 ns/lookup (single u16 store on a struct already
   loaded in the hot path).
 
