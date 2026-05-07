@@ -1,5 +1,11 @@
 # Action Log
 
+## 2026-05-07
+
+- **Timestamp**: 2026-05-07T16:13:00Z
+  - **Action**: PR #1211 archive doc follow-up — fixed stale/missing cross-references in closure docs, updated per-5-tuple state to mark Path 2 closed with archive links, and clarified memory-hook wording as external memory (not an in-repo file).
+  - **File(s)**: `docs/per-5-tuple/path2-archive/CLOSING-RATIONALE.md`, `docs/per-5-tuple/state.md`
+
 ## 2026-04-19 — #812 plan R1 (fold Codex round-1 hostile review)
 - **Timestamp**: 2026-04-19
 - **Action**: Fold Codex round-1 review into the Architect plan. Close 3 HIGH findings: small-batch amortization collapse (§3.1 per-commit stamping with honest `inserted == 1` worst-case), relaxed-atomic cross-CPU visibility (§3.6.a Relaxed+documented, invariants 6/7 rewritten, §8 hard-stop #4 uses bounded-skew delta), sidecar false-sharing (§3.3 per-binding single-writer confirmed by `Rc<WorkerUmemInner>` + `shared_umem=false` in code). Rewrite §3.4 overhead budget with three operating-point numbers (`inserted=256/64/1`) and a correct per-queue denominator (481 ns/pkt at 25 Gbps), not per-worker. Rewrite §11.3 Bonferroni family to match actual composite tests (3/cell × 12 cells = 36, not 192). Close MED #5 (sentinel vs clock-0), MED #6 (sidecar size 192 KiB, not 64 KiB), MED #7 (wire-size growth), MED #8 (Bonferroni family), MED #9 (two-thread test replaced by partial-batch / retry-unwind / bounded-skew tests). Close LOW #10 (no `now_ns` reuse), LOW #13 (named const asserts + boundary test).
