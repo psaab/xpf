@@ -41,6 +41,7 @@ struct Iperf3Start {
 #[derive(Debug, Deserialize)]
 struct Iperf3Connected {
     socket: u64,
+    #[allow(dead_code)] // diagnostic only; useful for future per-stream debugging
     #[serde(default)]
     local_port: u32,
 }
@@ -70,7 +71,15 @@ struct Iperf3StreamInterval {
 struct BindingFlowsRow {
     /// Wall-clock-aligned 1s timestamp (seconds since epoch, integer).
     timestamp: u64,
+    #[allow(dead_code)] // diagnostic only; kept for traceability
     binding_slot: u32,
+    #[allow(dead_code)] // not used in aggregation; iface filter is the discriminator
+    queue_id: u32,
+    /// Owner worker id; the contract's `{a_i}` is keyed on this, not
+    /// binding_slot (multiple bindings per worker, one per interface).
+    worker_id: u32,
+    /// Interface name; used to filter to a single direction.
+    iface: String,
     count: u32,
 }
 
@@ -174,11 +183,18 @@ fn main() -> ExitCode {
         &per_stream_buckets.values().cloned().collect::<Vec<_>>(),
     );
 
-    // {a_i}: per-binding active flow count, taken as the median over the
-    // steady-state window from the binding_flows TSV. The TSV rows are
-    // (timestamp, binding_slot, count) — group by slot, restrict to the
-    // steady-state window, take median.
-    let mut per_slot_samples: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    // {a_i}: per-WORKER active flow count for the test's data-
+    // direction interface. The TSV has 6 columns (timestamp,
+    // binding_slot, queue_id, worker_id, iface, count); we filter to
+    // --iface and aggregate by worker_id at each timestamp before
+    // taking the median over the steady-state window.
+    //
+    // This addresses Codex round-3 + Gemini round-1 fatal: per-binding
+    // counts spread across multiple interfaces (each TCP flow generates
+    // entries on BOTH ingress AND egress bindings, plus one per queue)
+    // produced a meaningless 18-element distribution. The contract's
+    // {a_i} is per-worker on the bottleneck-direction interface; this
+    // is what fairness-eval now computes.
     let ss_start_ts = binding_flows
         .iter()
         .map(|r| r.timestamp)
@@ -191,18 +207,34 @@ fn main() -> ExitCode {
         .max()
         .unwrap_or(0)
         .saturating_sub(args.final_burst_secs);
+    // Per-(timestamp, worker_id) accumulator: sum of counts across
+    // bindings on the filtered iface for the same worker. (In a
+    // typical loss-cluster topology each worker has one binding per
+    // queue per iface; the sum collapses to that single binding's
+    // count, but written as a sum to handle multi-queue-per-worker
+    // configs cleanly.)
+    let mut per_ts_worker: BTreeMap<(u64, u32), u32> = BTreeMap::new();
     for row in &binding_flows {
-        if row.timestamp >= ss_start_ts && row.timestamp <= ss_end_ts {
-            per_slot_samples
-                .entry(row.binding_slot)
-                .or_default()
-                .push(row.count);
+        if row.timestamp < ss_start_ts || row.timestamp > ss_end_ts {
+            continue;
         }
+        if !args.iface.is_empty() && row.iface != args.iface {
+            continue;
+        }
+        *per_ts_worker
+            .entry((row.timestamp, row.worker_id))
+            .or_insert(0) += row.count;
+    }
+    // For each worker, collect its time-series of summed counts then
+    // take the median. Workers with no samples report 0.
+    let mut per_worker_samples: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for ((_ts, w), c) in per_ts_worker {
+        per_worker_samples.entry(w).or_default().push(c);
     }
     let distribution_a_i: Vec<u32> = (0..n_total_workers)
-        .map(|slot| {
-            per_slot_samples
-                .get(&slot)
+        .map(|w| {
+            per_worker_samples
+                .get(&w)
                 .map(|samples| {
                     let mut s = samples.clone();
                     s.sort_unstable();
@@ -314,6 +346,10 @@ fn main() -> ExitCode {
 struct Args {
     iperf_json: PathBuf,
     binding_flows: PathBuf,
+    /// Filter binding-flows rows to this interface name. Empty string =
+    /// no filter (sum across all interfaces — only correct if your
+    /// topology has just one). Defaults blank; harness script sets it.
+    iface: String,
     warmup_secs: u64,
     final_burst_secs: u64,
     n_workers: u32,
@@ -323,6 +359,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut iperf_json: Option<PathBuf> = None;
     let mut binding_flows: Option<PathBuf> = None;
+    let mut iface: String = String::new();
     let mut warmup_secs: u64 = 5;
     let mut final_burst_secs: u64 = 1;
     let mut n_workers: u32 = 6;
@@ -335,6 +372,9 @@ fn parse_args() -> Args {
             }
             "--binding-flows" => {
                 binding_flows = args.next().map(PathBuf::from);
+            }
+            "--iface" => {
+                iface = args.next().unwrap_or_default();
             }
             "--warmup-secs" => {
                 warmup_secs = args.next().and_then(|s| s.parse().ok()).unwrap_or(5);
@@ -350,7 +390,7 @@ fn parse_args() -> Args {
             }
             "-h" | "--help" => {
                 eprintln!(
-                    "Usage: fairness-eval --iperf-json PATH --binding-flows PATH \\\n  [--warmup-secs N] [--final-burst-secs N] [--n-workers N] [--shaper-rate-bps N]"
+                    "Usage: fairness-eval --iperf-json PATH --binding-flows PATH \\\n  [--iface NAME] [--warmup-secs N] [--final-burst-secs N] \\\n  [--n-workers N] [--shaper-rate-bps N]\n\n--iface NAME: filter binding-flows rows to this interface (recommended; without it, sums across all interfaces)."
                 );
                 std::process::exit(0);
             }
@@ -377,6 +417,7 @@ fn parse_args() -> Args {
     Args {
         iperf_json,
         binding_flows,
+        iface,
         warmup_secs,
         final_burst_secs,
         n_workers,
@@ -395,8 +436,11 @@ fn read_to_string(path: &PathBuf) -> String {
 }
 
 fn parse_binding_flows_tsv(path: &PathBuf) -> Vec<BindingFlowsRow> {
-    // Format: timestamp\tbinding_slot\tcount per line. Skip header /
-    // comment lines starting with '#'.
+    // Format: timestamp\tbinding_slot\tqueue_id\tworker_id\tiface\tcount.
+    // Skip header / comment lines starting with '#'. For backward
+    // compatibility with the legacy 3-column format (older harness
+    // versions), if only 3 columns are present, the iface filter is
+    // treated as no-filter and worker_id defaults to binding_slot.
     let s = read_to_string(path);
     let mut rows: Vec<BindingFlowsRow> = Vec::new();
     for line in s.lines() {
@@ -404,24 +448,31 @@ fn parse_binding_flows_tsv(path: &PathBuf) -> Vec<BindingFlowsRow> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let mut parts = line.split_whitespace();
-        let ts: u64 = match parts.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        let slot: u32 = match parts.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        let count: u32 = match parts.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        rows.push(BindingFlowsRow {
-            timestamp: ts,
-            binding_slot: slot,
-            count,
-        });
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() == 6 {
+            let ts: u64 = match parts[0].parse() { Ok(v) => v, Err(_) => continue };
+            let slot: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => continue };
+            let qid: u32 = match parts[2].parse() { Ok(v) => v, Err(_) => continue };
+            let wid: u32 = match parts[3].parse() { Ok(v) => v, Err(_) => continue };
+            let iface = parts[4].to_string();
+            let count: u32 = match parts[5].parse() { Ok(v) => v, Err(_) => continue };
+            rows.push(BindingFlowsRow {
+                timestamp: ts, binding_slot: slot, queue_id: qid,
+                worker_id: wid, iface, count,
+            });
+        } else if parts.len() == 3 {
+            // Legacy 3-column format: timestamp, binding_slot, count.
+            // Pretend slot==worker_id and iface=="" so it still works
+            // (caller responsible for ensuring single-iface workload).
+            let ts: u64 = match parts[0].parse() { Ok(v) => v, Err(_) => continue };
+            let slot: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => continue };
+            let count: u32 = match parts[2].parse() { Ok(v) => v, Err(_) => continue };
+            rows.push(BindingFlowsRow {
+                timestamp: ts, binding_slot: slot, queue_id: 0,
+                worker_id: slot, iface: String::new(), count,
+            });
+        }
+        // Other formats: silently skipped.
     }
     rows
 }

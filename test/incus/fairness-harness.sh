@@ -23,6 +23,11 @@ N=${3:-12}
 T=${4:-120}
 REVERSE=${5:--R}
 METRICS_URL=${6:-http://127.0.0.1:8080/metrics}
+# IFACE filters per-binding samples to one interface so {a_i} reflects
+# per-worker counts for the test's data direction, not bidirectional
+# entries summed across all interfaces (Codex round-3 + Gemini round-1
+# fatal: aggregating across WAN+LAN+FABRIC produces fictitious Cstruct).
+IFACE=${IFACE:-ge-0-0-2}
 N_WORKERS=${N_WORKERS:-6}
 SHAPER_RATE_BPS=${SHAPER_RATE_BPS:-25000000000}
 WARMUP=${WARMUP:-5}
@@ -49,17 +54,22 @@ fi
 
 scrape_metrics() {
     local out=$1
-    printf '# timestamp\tbinding_slot\tcount\n' > "$out"
+    # Columns: timestamp, binding_slot, queue_id, worker_id, iface, count.
+    # The harness needs all labels so fairness-eval can filter by iface
+    # and aggregate by worker_id (NOT by binding_slot — that confuses
+    # the contract's per-worker {a_i} with per-binding counts spread
+    # across multiple interfaces).
+    printf '# timestamp\tbinding_slot\tqueue_id\tworker_id\tiface\tcount\n' > "$out"
     while true; do
         local ts
         ts=$(date +%s)
-        # Portable parse: grep the metric lines, then sed extracts
-        # binding_slot=N and the trailing value. Avoids gawk-only
-        # match($0, /re/, arr) which fails on mawk.
+        # Portable parse: grep the metric lines, then sed extracts all
+        # 4 labels + the value. Avoids gawk-only match() which fails
+        # on mawk.
         if ! curl -sS --max-time 1 "$METRICS_URL" 2>/dev/null \
             | grep '^xpf_userspace_binding_active_flow_count{' \
-            | sed -nE 's/^[^\{]*\{[^}]*binding_slot="([0-9]+)"[^}]*\} ([0-9]+).*$/\1\t\2/p' \
-            | awk -v ts="$ts" -F'\t' '{ printf "%s\t%s\t%s\n", ts, $1, $2 }' >> "$out"; then
+            | sed -nE 's/^[^\{]*\{binding_slot="([0-9]+)",iface="([^"]+)",queue_id="([0-9]+)",worker_id="([0-9]+)"\} ([0-9]+).*$/\1\t\3\t\4\t\2\t\5/p' \
+            | awk -v ts="$ts" -F'\t' '{ printf "%s\t%s\t%s\t%s\t%s\t%s\n", ts, $1, $2, $3, $4, $5 }' >> "$out"; then
             : # network glitch; keep going
         fi
         sleep 1
@@ -84,6 +94,7 @@ echo "fairness-harness: evaluating..."
 "$FAIRNESS_EVAL" \
     --iperf-json "$IPERF_OUT" \
     --binding-flows "$BINDING_TSV" \
+    --iface "$IFACE" \
     --warmup-secs "$WARMUP" \
     --final-burst-secs "$FINAL_BURST" \
     --n-workers "$N_WORKERS" \
