@@ -1,11 +1,68 @@
 ---
-status: REVISED v2 — addresses Codex round-1 PLAN-NEEDS-MAJOR (task-movo6xm1): scope rewritten as 5 black-box cases (not 5 distribution-duplicating cases), saturation negative dropped (saturated is diagnostic, not in failure_reasons), subprocess uses CARGO_BIN_EXE_fairness-eval, value claim narrowed (does NOT validate future fairness mechanisms — validates fairness-eval CLI/IO contract only), Verdict JSON parsed by required keys not full schema. Pending Gemini round-1 (task-movo7jfk-ncvw9n still running).
+status: REVISED v3 — addresses Codex round-2 PLAN-NEEDS-MINOR (task-movoly14): black-box boundary tightened (no internal-helper coupling), required-keys set expanded with n_active and starved_flow_count, test command uses --manifest-path userspace-dp/Cargo.toml --test fairness_eval_blackbox, empty-input semantics corrected (empty TSV is Guard FAIL not Gate 2; empty intervals not added), tempfile crate as dev-dep (not PID-based naming). Gemini round-1 (task-movo7jfk) failed at Pro 3 rate limit; re-dispatch with v3 commit hash.
 issue: #547
 phase: implementation plan
 prerequisites:
   - PR #1217 (fairness-regimes contract) MERGED as e1ec6b90 ✓
   - PR #1220 (fairness harness) MERGED as bf87cf71 ✓
 ---
+
+## v3 — Codex round-2 findings addressed
+
+Codex round-2 (task-movoly14) PLAN-NEEDS-MINOR. v2 fixed the round-1
+architectural problems but five cleanup items remained:
+
+1. **Black-box boundary still violated.** v2 said the fixture would
+   compute expected Cstruct via direct call to `compute_cstruct`,
+   citing `#[cfg(test)] mod fairness;` in `main.rs`. That module is
+   not available to an integration test in `userspace-dp/tests/`
+   because `userspace-dp` has bin targets, not a lib target.
+   Re-adding `#[path = "../src/fairness.rs"] mod fairness;` would
+   compile but reintroduces the internal math coupling v2 was
+   trying to remove. **v3 fix**: assert subprocess-visible contract
+   only — exit code, verdict string, failure_reasons class
+   membership, required JSON keys, distribution_a_i values from the
+   TSV, broad numeric relationships like `gap <= epsilon` /
+   `gap > epsilon`. **No** equality check against an internally-
+   computed Cstruct.
+
+2. **Required-key set was inconsistent.** PASS case asserted
+   `n_active`, but `n_active` was not in the required-keys set.
+   **v3 fix**: required keys are {distribution_a_i, n_active,
+   cstruct, observed_cov, gap, saturated, a_i_sum_check_ok,
+   starved_flow_count, verdict, failure_reasons} = **10 keys**.
+   `saturated` stays because the contract calls it operator-visible
+   (`docs/fairness-regimes.md:240`). The remaining 6 fields
+   (n_total_workers, epsilon, aggregate_mbps, a_i_sum,
+   iperf_non_starved_streams, a_i_sum_tolerance) are diagnostic.
+
+3. **Test command was wrong.** v2 said `cargo test --release`, but
+   the repo has no root Cargo.toml. **v3 fix**: documented as
+   `cargo test --manifest-path userspace-dp/Cargo.toml --release`
+   for the full suite and `cargo test --manifest-path
+   userspace-dp/Cargo.toml --release --test fairness_eval_blackbox`
+   for the focused integration test.
+
+4. **Empty-input semantics were wrong.** v2 said empty TSV would
+   be Gate 2 FAIL. Codex pointed out: with equal iperf streams,
+   `observed_cov == 0` and `cstruct == 0`, so it's actually the
+   **sum guard** that fires (Guard FAIL). Empty intervals are
+   worse — current code can emit PASS if `test_start.duration` is
+   long enough and the sum guard happens to hold. **v3 fix**:
+   empty-TSV case is added to the Guard FAIL branch, not Gate 2.
+   Empty-intervals case is **not** added; that would require a
+   production-code fix and is out of scope.
+
+5. **Tempfile naming was fragile.** v2 used PID-based naming, which
+   is not collision-proof under cargo's parallel test runner. **v3
+   fix**: add `tempfile` crate as dev-dep in
+   `userspace-dp/Cargo.toml`; use `tempfile::tempdir()`.
+
+Codex round-2's cost/benefit verdict was clear: **the 200 LOC is
+worth it** if `fairness-eval` remains a supported harness binary.
+The shell harness `test/incus/fairness-harness.sh:98` shells out and
+relies on exit codes + stdout JSON, and unit tests do NOT cover that
+boundary. v3 keeps that scope.
 
 ## v2 — Codex round-1 findings addressed
 
@@ -63,21 +120,26 @@ harness's output. cargo's unit tests on the pure-fns would still pass
 because they don't call `main()`. The risk surface is small but
 real.
 
-#547 fills that gap with 5 black-box integration tests that invoke
+#547 fills that gap with 6 black-box integration tests that invoke
 `fairness-eval` as a subprocess, feed it synthetic
 `iperf3.json` + `binding-flows.tsv` files, and assert the binary
-contract.
+contract — black-box-only, no internal-helper coupling.
 
 ## 2. Honest scope/value framing
 
-**What this PR delivers**: 5 cargo integration tests
+**What this PR delivers**: 6 cargo integration tests
 (`userspace-dp/tests/fairness_eval_blackbox.rs`) that exercise
-`fairness-eval`'s external contract:
+`fairness-eval`'s external contract via subprocess + stdout JSON
+inspection only. **No** internal-helper imports.
 
 1. **PASS case**: skewed but contract-clearing distribution with
    iface noise on a different iface. Asserts `distribution_a_i`,
-   `n_active`, `observed_cov`, `gap`, exit code 0,
-   `verdict == "PASS"`.
+   `n_active > 0`, `gap <= epsilon`, exit code 0,
+   `verdict == "PASS"`. Numeric values like `cstruct` and
+   `observed_cov` are read from the JSON but checked only against
+   broad relationships (e.g. `gap = observed_cov - cstruct`,
+   `cstruct >= 0`); not against an internally-computed expected
+   value.
 2. **Gate 1 FAIL** (starved): one persistently starved connected
    stream throughout the steady-state window. Asserts
    `failure_reasons` contains a "starved" message,
@@ -86,11 +148,17 @@ contract.
    per-flow throughput skew exceeds the structural CoV ceiling by
    more than `EPSILON = 0.05`. Asserts `failure_reasons` contains a
    "Gate 2" message, `verdict == "FAIL"`, exit code 1.
-4. **Guard FAIL** (sum mismatch): `sum(a_i)` differs from
+4. **Guard FAIL — sum mismatch**: `sum(a_i)` differs from
    non-starved iperf streams by more than tolerance, isolated from
    Gate 1/2. Asserts `failure_reasons` contains a "Harness guard"
    message, `verdict == "FAIL"`, exit code 1.
-5. **Exit 2 case** (operational error): malformed input — out-of-range
+5. **Guard FAIL — empty TSV**: TSV with header only, no rows. With
+   equal iperf streams, `observed_cov == 0` and `cstruct == 0`, so
+   Gate 2 doesn't fire — but the sum guard does (`sum(a_i) == 0`
+   vs non-starved streams > 0). Asserts `failure_reasons` contains
+   "Harness guard", verdict FAIL, exit code 1. (Codex round-2
+   finding #4: this is the correct branch for empty TSV, not Gate 2.)
+6. **Exit 2 case** (operational error): malformed input — out-of-range
    `worker_id` (≥ `--n-workers`). Asserts exit code 2 with the
    current `Err`-on-out-of-range behavior at HEAD. (No verdict JSON
    is emitted.)
@@ -163,40 +231,75 @@ TSV: 6-column format, header `# timestamp\tbinding_slot\tqueue_id\tworker_id\tif
 then rows synthesised from a `Vec<(u64, u32, u32, u32, &str, u32)>`
 spec.
 
-Tempfile via `std::env::temp_dir()` + unique-name pattern. Cleanup
-via `Drop` impl on a small `TempPaths` struct.
+**Tempfile** (v3 fix per Codex round-2 finding #5): use `tempfile`
+crate as a `[dev-dependencies]` entry in `userspace-dp/Cargo.toml`.
+`tempfile::tempdir()` returns a guard whose `Drop` impl cleans up
+the dir even if the test panics. Production binary is unaffected;
+only test builds pull in the dep.
 
 ### 3.4 Verdict JSON parsing — by required keys, not full schema
 
-**Codex round-1 finding #5**: the Verdict struct has 16 fields. A
-fixture that pattern-matches on all 16 would silently fail any
-future additive change. v2 parses by required keys only:
+**Codex round-1 finding #5 (and round-2 follow-up #2)**: the Verdict
+struct has 16 fields. A fixture that pattern-matches on all 16 would
+silently fail any future additive change. v3 parses by required keys
+only — expanded from 8 in v2 to 10 in v3 because round-2 caught that
+`n_active` (asserted by the PASS case) and `starved_flow_count`
+(structurally important) were missing:
 
 ```rust
 #[derive(Deserialize)]
 struct VerdictRequiredFields {
     distribution_a_i: Vec<u32>,
+    n_active: u32,
     cstruct: f64,
     observed_cov: f64,
     gap: f64,
     saturated: bool,
     a_i_sum_check_ok: bool,
+    starved_flow_count: u32,
     verdict: String,
     failure_reasons: Vec<String>,
 }
 ```
 
-The fixture asserts on these 8 keys. The remaining 8 fields (n_active,
-n_total_workers, epsilon, aggregate_mbps, starved_flow_count, a_i_sum,
+The fixture asserts on these 10 keys. The remaining 6 fields
+(n_total_workers, epsilon, aggregate_mbps, a_i_sum,
 iperf_non_starved_streams, a_i_sum_tolerance) are diagnostic; future
 additions/removals don't break the fixture. If a *new* gate appears
 that adds a failure_reasons string class, the corresponding fixture
 case will need updating — and that's the right boundary.
 
 A separate one-line test (`verdict_emits_required_keys`) inspects
-the raw JSON object to confirm the 8 required keys are present, so
+the raw JSON object to confirm all 10 required keys are present, so
 a rename of any required key (which IS a contract break) fails the
 fixture loudly.
+
+### 3.5 Black-box discipline (v3 — Codex round-2 finding #1)
+
+The fixture must NOT import `userspace_dp::fairness::*` or any other
+internal-helper symbol. Specifically:
+
+- **No** `compute_cstruct(...)` call from the test to compute an
+  expected value to compare against.
+- **No** `#[path = "../src/fairness.rs"] mod fairness;` shortcut.
+- **No** assertion of internal-math equality (`assert_eq!(verdict.cstruct,
+  fairness::compute_cstruct(&dist))`).
+
+Instead the fixture asserts:
+
+- **Exit code**: 0 PASS / 1 FAIL / 2 error.
+- **Verdict string**: `verdict == "PASS"` or `"FAIL"`.
+- **Failure-class membership**: `failure_reasons.iter().any(|r|
+  r.contains("starved"))` etc.
+- **Distribution from input**: the `distribution_a_i` JSON value
+  matches the `{a_i}` the fixture wrote into the TSV.
+- **Numeric relationships**: `gap = observed_cov - cstruct` (within
+  fp tolerance), `cstruct >= 0`, `observed_cov >= 0`,
+  `gap > epsilon ⇔ Gate-2 in failure_reasons`, etc.
+
+This keeps the fixture as a true black-box harness for the binary's
+contract, which is the only coverage gap unit tests don't already
+fill.
 
 ## 4. Public API preservation
 
@@ -229,10 +332,13 @@ None. Tests-only.
 
 ## 7. Test plan
 
-- [ ] `cargo test --release` — all 1006+31+8 existing tests pass + 5
-  new integration tests + 1 required-keys schema test (target: 6 new).
-- [ ] `cargo test --release fairness_eval_blackbox` — named
-  integration test passes 5/5 in a row (flake check).
+- [ ] `cargo test --manifest-path userspace-dp/Cargo.toml --release`
+  — all 1006+31+8 existing tests pass + 6 new integration tests + 1
+  required-keys schema test (target: 7 new). v3 fix per Codex
+  round-2 finding #3 (no root Cargo.toml at repo root).
+- [ ] `cargo test --manifest-path userspace-dp/Cargo.toml --release
+  --test fairness_eval_blackbox` — focused integration test passes
+  5/5 in a row (flake check).
 - [ ] `go test ./...` — unchanged; tests-only PR.
 - [ ] No CoS smoke matrix needed — this PR doesn't touch dataplane.
 
