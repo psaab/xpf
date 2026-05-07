@@ -442,11 +442,16 @@ phased**:
   `settle_exact_*_scratch_submission_flow_fair`
   (queue_service/mod.rs:740 + :795) per Fix #1 + #9.
 
-If Phase 0's TxRequest extension is judged too invasive on its
-own, the ECN-mark falls back to the existing reparse path in
-enqueue_cos_item (with worse per-pop budget — ~50 ns instead of
-~10 ns). This fallback may push 64B/35Mpps workloads out of
-spec; document the trade-off explicitly in the implementation
+If Phase 0b's TxRequest extension is judged too invasive on its
+own, fall back to Phase 0a: reparse the post-rewrite frame at the
+`cos/queue_service/service.rs:186-260`/`:517-617` pre-submit
+hook using a `cos/ecn.rs:179`-style helper invoked there (NOT in
+`enqueue_cos_item`, which is the wrong layer — that helper runs
+on the enqueue path and reparses for a different purpose). 0a's
+per-mark cost is ~50 ns vs 0b's ~10 ns; this may push 64B/35Mpps
+workloads out of spec, but the saturated-RSS-skewed target
+workload is large-packet TCP at 2 Mpps where 50 ns is ~10% of
+budget. Document the trade-off explicitly in the implementation
 PR.
 
 ### Fix #9 (v3 round-2): settle hook location
