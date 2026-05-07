@@ -1,11 +1,48 @@
 ---
-status: REVISED v2 — addressing Codex (4 blockers, 2 majors; task-mouz959b) + Gemini Pro 3 (3 fatals; task-mouz99mo)
+status: REVISED v3 — addressing Codex round-2 (2 NEW blockers; task-mov1mk84). Gemini PLAN-READY at v2 (task-mov1moka).
 issue: #1219
 phase: implementation plan; minimum-viable PR scope
 prerequisites:
   - PR #1217 (fairness-regimes contract) MERGED as e1ec6b90 ✓
   - PR #1216 (CoSQueueRuntime split) MERGED as a1688792 ✓
 ---
+
+## Round-2 verdict resolution (v3)
+
+Gemini round-2 (task-mov1moka): **PLAN-READY** — all v1 fatals
+resolved; "well-scoped, the implementation path is clear". ✓
+
+Codex round-2 (task-mov1mk84): **PLAN-NEEDS-MAJOR** — 2 new
+blockers v2 missed:
+
+1. **`flow_cache` does NOT have `last_used_ns`** as v2 assumed.
+   `FlowCacheEntry` has no timestamp field; `lookup()` only
+   validates/promotes/hits — it does NOT update recency. The 100ms
+   scan as v2 specified is unimplementable.
+2. **Per-queue + ≥1% throughput qualification still uncomputable**.
+   v2 deferred this to harness time, but `iperf3 -P N` uses the
+   same destination port for all N streams; RSS decides binding;
+   there's no identity join between "stream X had ≥1% throughput"
+   and "stream X landed on binding Y".
+
+v3 addresses both:
+
+- **Fix #v3-1**: add a `last_used_epoch: u16` field to
+  `FlowCacheEntry`. Owner-only writes the current epoch in
+  `lookup()` on hit. Worker tick increments the per-binding
+  epoch counter every 100ms. To check "active in last 1s",
+  count entries with `(current_epoch - entry.last_used_epoch) <= 10`.
+  Cost: ~1-2 ns/lookup (single u16 store on a struct already
+  loaded in the hot path).
+
+- **Fix #v3-2**: harness uses **distinct source ports per
+  iperf3 stream** (`iperf3 --cport <base+i>` per-stream).
+  Harness computes the kernel RSS hash + indirection table
+  (read via `ethtool -x <iface>`) to deterministically map
+  each stream's 5-tuple to an RX queue, then maps RX queue →
+  xpf binding via the existing per-binding status surface.
+  Per-stream throughput from iperf3 JSON is then known per
+  binding; ≥1% threshold is applied at the harness layer.
 
 ## Round-1 verdict resolution — fundamental rescope
 
@@ -104,42 +141,80 @@ measurement if the harness PR doesn't ship.**
 functions. Unit-tested against the contract's 5-row worked-example
 table. See v1 plan §3.1 for the full code; v2 keeps it byte-identical.
 
-### 3.2 Per-binding active flow count — leverage existing flow_cache
+### 3.2 Per-binding active flow count — epoch counter + tick scan
 
-Per Gemini's remediation: don't add a parallel HashMap. The
-existing `flow_cache` (in `userspace-dp/src/afxdp/flow_cache.rs`)
-already has per-flow entries with `last_used_ns`. Add a single
-helper that scans the cache and counts entries with
-`now - last_used_ns ≤ 1s`:
+Per Codex round-2 finding: `FlowCacheEntry` doesn't currently have
+a recency timestamp. v3 adds the cheapest possible recency signal:
 
 ```rust
-// userspace-dp/src/afxdp/flow_cache.rs (extend existing module)
-
-const ACTIVE_FLOW_AGE_NS: u64 = 1_000_000_000;
+// userspace-dp/src/afxdp/flow_cache.rs — extend FlowCacheEntry
+pub(in crate::afxdp) struct FlowCacheEntry {
+    // ... existing fields
+    /// #1219: last_used_epoch — u16 set on every successful
+    /// lookup() hit. Compared to the per-binding `current_epoch`
+    /// that the worker tick increments at 100 ms cadence to count
+    /// active flows in the last N epochs (N=10 → 1 s window).
+    /// u16 wraps every 256 × 100 ms = 25.6 s — plenty of headroom
+    /// vs the 1 s window. Single-writer (the owner worker is the
+    /// only code path that mutates this entry), Relaxed-equivalent
+    /// (the snapshot reader reads via the gRPC status surface
+    /// which already copies the cache for sharding).
+    last_used_epoch: u16,
+}
 
 impl FlowCache {
-    /// Count flow_cache entries that have been touched within the
-    /// last 1 second. Owner-only; called from the periodic worker
-    /// tick (100ms cadence). Result is published to an atomic
-    /// gauge that the gRPC status reader can sample.
-    pub(in crate::afxdp) fn count_active_flows(&self, now_ns: u64) -> u32 {
-        let cutoff = now_ns.saturating_sub(ACTIVE_FLOW_AGE_NS);
-        self.entries.iter()
-            .filter(|e| e.last_used_ns >= cutoff && e.last_used_ns > 0)
-            .count() as u32
+    /// Owner-only call from `lookup()` on hit. Single u16 store;
+    /// no atomic; same single-writer discipline as the rest of the
+    /// flow_cache mutation path.
+    #[inline]
+    pub(in crate::afxdp) fn note_hit(entry: &mut FlowCacheEntry, current_epoch: u16) {
+        entry.last_used_epoch = current_epoch;
     }
 }
 ```
 
-Cost: O(N) scan over flow_cache. Current cache cap is 8192 entries;
-at 100 ms tick cadence that's 80K loads/sec/worker = ~10 µs of
-work per second per worker. **Not on the hot path; not affected by
-line rate.**
+Cost on the hot path: **single u16 store** on a struct already
+loaded into a register from the lookup. Estimated ~1-2 ns/lookup,
+or ~2-4 ms/sec/core at 2 Mpps. Order-of-magnitude smaller than v1's
+HashMap-insert proposal (60 ms/sec/core) and acceptable at the
+hot-path budget.
 
-The worker's existing 100 ms tick already runs other periodic
-maintenance (timer wheel processing, V_min publish). This adds one
-more O(N) scan; verified small enough to not regress per-tick
-budget.
+The `current_epoch: AtomicU16` per-binding counter:
+
+```rust
+// extend BindingLiveState (Arc-shared status state)
+pub(in crate::afxdp) flow_cache_epoch: AtomicU16,
+pub(in crate::afxdp) active_flow_count: AtomicU32,
+```
+
+Worker's existing 100 ms tick:
+
+```rust
+// at the worker's existing 100ms periodic tick
+let new_epoch = state.flow_cache_epoch
+    .load(Ordering::Relaxed)
+    .wrapping_add(1);
+state.flow_cache_epoch.store(new_epoch, Ordering::Relaxed);
+
+// Count entries within the last 10 epochs (1 second window)
+const ACTIVE_WINDOW_EPOCHS: u16 = 10;
+let count = flow_cache.entries.iter()
+    .filter(|e| {
+        // Wrap-safe: difference within the wraparound window.
+        let age = new_epoch.wrapping_sub(e.last_used_epoch);
+        age < ACTIVE_WINDOW_EPOCHS && e.last_used_epoch != 0
+    })
+    .count() as u32;
+state.active_flow_count.store(count, Ordering::Relaxed);
+```
+
+Tick-side scan: O(N) over flow_cache cap (8192 entries) every
+100 ms = 80K loads/sec/worker = ~10 µs of work per second on the
+periodic-maintenance path. Not on the hot path.
+
+`last_used_epoch == 0` is treated as "uninitialized" so freshly
+added entries on a brand-new binding don't count as active until
+they actually receive a hit.
 
 ### 3.3 Atomic gauge published to gRPC
 
@@ -163,31 +238,79 @@ message UserspaceBindingStatus {
 }
 ```
 
-### 3.4 Per-queue qualification — at harness time, NOT data plane
+### 3.4 Per-queue + ≥1% throughput qualification — distinct source ports + RSS join
 
-Per Codex blocker #3: the contract wants per-queue active flows with
-≥1% throughput qualification.
+Per Codex round-2 blocker #2: with `iperf3 -P N` and a single
+destination port, RSS decides binding and there is no identity
+join between an iperf3 stream and its landing binding.
 
-**v2's approach: do this AT THE HARNESS, not in the data plane.**
-The data plane only exposes per-binding active-flow count (which is
-trivially per-queue when bindings are per-queue). The harness reads
-iperf3 per-stream throughput directly and applies the ≥1% filter
-across the test's flow set.
+v3 fixes this with **distinct source ports per stream + harness-
+side RSS join**:
 
-This avoids the data-plane complexity entirely:
-- Test harness has FULL per-flow throughput from iperf3 JSON
-- It knows the streams' destination port and can map each to a
-  queue (the iperf3 fixture already configures port-per-class)
-- It computes `{aᵢ}` as "active iperf3 streams per binding" using
-  the per-binding active_flow_count cross-referenced with the
-  per-stream throughput threshold
-- Cstruct, observed_CoV, starved_flows all computed from the
-  iperf3 output directly
+1. **Harness launches iperf3 streams with explicit source ports**:
+   ```bash
+   for i in $(seq 0 $((N-1))); do
+       iperf3 -c $TARGET -p $PORT --cport $((CPORT_BASE+i)) -t $T -J ... &
+   done
+   ```
+   Each stream now has a unique 5-tuple
+   `(client_ip, CPORT_BASE+i, target_ip, PORT, TCP)`.
 
-The data-plane signal is a sanity check — it should agree with the
-iperf3-derived count to within ±2 (allowing for transient cache
-churn). Disagreement flags either a flow_cache bug or test
-fixture mismatch.
+2. **Harness reads kernel RSS configuration** via
+   `ethtool -x <iface>` (indirection table) and
+   `ethtool -u <iface>` (n-tuple rules, if any) and the RSS hash
+   key (also from `ethtool`). Standard Linux Toeplitz hash; key
+   typically 40 bytes.
+
+3. **Harness computes the destination RX queue** for each iperf3
+   stream's 5-tuple by running the same Toeplitz hash + lookup
+   in the indirection table that the kernel does. This is a
+   well-known algorithm:
+   ```rust
+   // bin/fairness-eval.rs — uses standard Toeplitz hash impl
+   fn compute_rx_queue(
+       five_tuple: FiveTuple,
+       rss_key: &[u8; 40],
+       indirection_table: &[u8],
+   ) -> u32 {
+       let hash = toeplitz_hash(rss_key, &five_tuple.bytes());
+       indirection_table[hash as usize % indirection_table.len()] as u32
+   }
+   ```
+   This is read-only and identical to what the kernel does at
+   packet receive time. No kernel changes needed.
+
+4. **Harness maps RX queue → xpf binding** via the existing per-
+   binding status surface, which exposes `bound_rx_queue: u32`
+   per binding (already there in `BindingStatus`; verify in
+   `pkg/dataplane/userspace/protocol.go`).
+
+5. **Apply ≥1% throughput qualification at harness layer**:
+   for each binding, sum the per-stream throughputs of streams
+   that mapped to that binding via RSS. A stream is "active" iff
+   its measured throughput is ≥ 1% of the across-flow mean.
+   `aᵢ` for binding i = count of active streams that landed on
+   binding i.
+
+6. **Data-plane `active_flow_count` is now a sanity check**, not
+   the source of truth for `{aᵢ}`. The harness reports both
+   numbers and flags disagreement > ±2 (allowing for cache churn
+   + non-iperf3 background flows).
+
+This works **only** because the harness controls the source ports
+of iperf3 streams. If the workload were not test-controlled, the
+harness couldn't compute the RSS mapping. v3 documents this
+limitation; production observability (#1220) will need a different
+approach.
+
+**Risk**: the kernel's RSS hash + indirection table is
+configurable per-NIC, and some NICs apply additional steering
+(flow director, ATR, etc). The harness must read the actual NIC
+state, not assume defaults. Implementation must include a self-
+test: launch a single iperf3 stream, observe which binding it
+lands on (via per-binding TX bytes), verify it matches the
+harness's RSS prediction. If mismatch, the harness fail-fasts
+with a diagnostic.
 
 ### 3.5 Test harness `test/incus/fairness-harness.sh` (~80 LOC bash)
 
