@@ -1,5 +1,5 @@
 ---
-status: REVISED v4 — addressing Codex round-3 (4 findings; task-mov1wpqo). Architectural simplification: RSS-join entirely dropped; harness reads {a_i} directly from data plane.
+status: REVISED v5 — addressing Codex round-4 (4 findings; task-mov2afuw): stale v3 RSS section deleted; Rust→Go→Prometheus pipeline path explicit; harness fail-fast guard for {a_i} sum-vs-iperf-streams; fairness-eval at canonical src/bin/ location.
 issue: #1219
 phase: implementation plan; minimum-viable PR scope
 prerequisites:
@@ -168,13 +168,32 @@ Production Prometheus observability is a separate follow-up
 - New per-binding **active flow count** read from EXISTING flow_cache
   state at the worker's existing 100 ms tick. NO new HashMap. NO new
   per-packet writes. Just an atomic gauge + reader. ~30 LOC.
-- New gRPC field on per-binding status: `active_flow_count: u32`.
-  ~20 LOC of plumbing.
+- New `active_flow_count: u32` field through the
+  Rust→Go→Prometheus pipeline (per Codex round-4 finding #2):
+  - **Rust live state**: `BindingLiveState.active_flow_count:
+    AtomicU32` (per §3.3); written from owner-only 100ms tick.
+  - **Rust snapshot**: `BindingStatus.active_flow_count` field
+    in the snapshot struct copied to gRPC status.
+  - **Status JSON**: serialized field `active_flow_count` in
+    the helper-process control-socket JSON consumed by the Go
+    `Manager.Status()` path.
+  - **Go BindingStatus**: new field
+    `ActiveFlowCount uint32 \`json:"active_flow_count,omitempty"\``
+    on the existing `pkg/dataplane/userspace/protocol.go:615`
+    `BindingStatus` struct.
+  - **Prometheus**: new metric descriptor + emitter in
+    `pkg/api/metrics.go` (per the existing `/metrics` Go-side
+    machinery at `pkg/api/metrics.go:424`).
+  - **Test**: a new `metrics_test.go` case verifies the metric
+    emits with the expected label and value path from a
+    synthetic `ProcessStatus`.
 - Test harness `test/incus/fairness-harness.sh` (~80 LOC bash) that:
   - runs iperf3 with `-J --forceflush` for per-second JSON buckets
-  - polls gRPC once per second for per-binding `active_flow_count`
-  - feeds buckets into a thin Rust binary `bin/fairness-eval` that
-    calls the pure-fns and outputs {Cstruct, observed_CoV, regime,
+  - scrapes `/metrics` once per second for per-binding
+    `xpf_userspace_binding_active_flow_count{binding_slot=N}`
+  - feeds buckets into a thin Rust binary
+    `userspace-dp/src/bin/fairness-eval.rs` that calls the
+    pure-fns and outputs {Cstruct, observed_CoV, regime,
     PASS/FAIL}
 
 **Out of scope for v2** (deferred to #1220):
@@ -337,70 +356,19 @@ on each binding give us the count for free.
   forgiving — ie. preserves more "fairness budget" — than strict
   contract reading).
 
-1. **Harness launches iperf3 streams with explicit source ports**:
-   ```bash
-   for i in $(seq 0 $((N-1))); do
-       iperf3 -c $TARGET -p $PORT --cport $((CPORT_BASE+i)) -t $T -J ... &
-   done
-   ```
-   Each stream now has a unique 5-tuple
-   `(client_ip, CPORT_BASE+i, target_ip, PORT, TCP)`.
+  v5 additionally requires a **harness fail-fast guard** (Codex
+  round-4 finding #3): during the steady-state window, compute
+  `sum(per_binding_active_flow_count)` from the data plane and
+  the count of non-starved iperf3 streams from the iperf3 JSON
+  output. If they disagree by more than `max(2, 0.10 × N)` the
+  harness exits with diagnostic. This prevents background-flow
+  pollution from silently moving `Cstruct` either direction.
 
-2. **Harness reads kernel RSS configuration** via
-   `ethtool -x <iface>` (indirection table) and
-   `ethtool -u <iface>` (n-tuple rules, if any) and the RSS hash
-   key (also from `ethtool`). Standard Linux Toeplitz hash; key
-   typically 40 bytes.
+### 3.4.1 (DELETED) v3 RSS-join steps removed
 
-3. **Harness computes the destination RX queue** for each iperf3
-   stream's 5-tuple by running the same Toeplitz hash + lookup
-   in the indirection table that the kernel does. This is a
-   well-known algorithm:
-   ```rust
-   // bin/fairness-eval.rs — uses standard Toeplitz hash impl
-   fn compute_rx_queue(
-       five_tuple: FiveTuple,
-       rss_key: &[u8; 40],
-       indirection_table: &[u8],
-   ) -> u32 {
-       let hash = toeplitz_hash(rss_key, &five_tuple.bytes());
-       indirection_table[hash as usize % indirection_table.len()] as u32
-   }
-   ```
-   This is read-only and identical to what the kernel does at
-   packet receive time. No kernel changes needed.
-
-4. **Harness maps RX queue → xpf binding** via the existing per-
-   binding status surface, which exposes `bound_rx_queue: u32`
-   per binding (already there in `BindingStatus`; verify in
-   `pkg/dataplane/userspace/protocol.go`).
-
-5. **Apply ≥1% throughput qualification at harness layer**:
-   for each binding, sum the per-stream throughputs of streams
-   that mapped to that binding via RSS. A stream is "active" iff
-   its measured throughput is ≥ 1% of the across-flow mean.
-   `aᵢ` for binding i = count of active streams that landed on
-   binding i.
-
-6. **Data-plane `active_flow_count` is now a sanity check**, not
-   the source of truth for `{aᵢ}`. The harness reports both
-   numbers and flags disagreement > ±2 (allowing for cache churn
-   + non-iperf3 background flows).
-
-This works **only** because the harness controls the source ports
-of iperf3 streams. If the workload were not test-controlled, the
-harness couldn't compute the RSS mapping. v3 documents this
-limitation; production observability (#1220) will need a different
-approach.
-
-**Risk**: the kernel's RSS hash + indirection table is
-configurable per-NIC, and some NICs apply additional steering
-(flow director, ATR, etc). The harness must read the actual NIC
-state, not assume defaults. Implementation must include a self-
-test: launch a single iperf3 stream, observe which binding it
-lands on (via per-binding TX bytes), verify it matches the
-harness's RSS prediction. If mismatch, the harness fail-fasts
-with a diagnostic.
+v3 contained a 6-step RSS-hash + indirection-table + harness
+self-test design. v4 dropped that approach. v5 explicitly
+deletes the stale text per Codex round-4 finding #1.
 
 ### 3.5 Test harness `test/incus/fairness-harness.sh` (~80 LOC bash)
 
@@ -466,9 +434,14 @@ The eval binary outputs JSON like:
 }
 ```
 
-### 3.6 `bin/fairness-eval` Rust binary
+### 3.6 `fairness-eval` Rust binary
 
-A small (~120 LOC) Rust binary in `userspace-dp/bin/fairness-eval.rs`
+A small (~120 LOC) Rust binary at
+`userspace-dp/src/bin/fairness-eval.rs` (Cargo's auto-discovered
+`src/bin/` subdirectory; no `[[bin]]` entry needed in
+`Cargo.toml`). Codex round-4 finding #4: `userspace-dp/bin/`
+doesn't exist; the crate has only `src/main.rs` today, so the
+binary lives under `src/bin/` per Cargo conventions.
 that:
 - Parses iperf3 JSON intervals
 - Aligns to wall-clock 1-second buckets
@@ -484,11 +457,16 @@ local socket. Not in scope here.
 
 ## 4. Public API preservation
 
-- gRPC: 1 new field on per-binding status (`active_flow_count: u32`).
-  Backward-compatible (proto field number reserved).
+- gRPC: 1 new field on per-binding status JSON
+  (`active_flow_count: u32`). Backward-compatible.
 - HTTP REST: unchanged.
-- Prometheus: **unchanged** in v2. (Production observability deferred
-  to #1220.)
+- Prometheus: **1 new metric**
+  `xpf_userspace_binding_active_flow_count{binding_slot=N}` —
+  scrape-time snapshot, not a rolling window. Emitted from the
+  existing `pkg/api/metrics.go:424` machinery via the new
+  `BindingStatus.ActiveFlowCount` Go field. Production rolling-
+  window observability remains deferred to #1220; v5's metric is
+  the minimum needed for the harness to scrape.
 - CLI: unchanged.
 
 ## 5. Hidden invariants the change must preserve
