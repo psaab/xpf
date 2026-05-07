@@ -41,12 +41,15 @@ across workers have failed:
   durable narrow claim: **arbitrary cross-queue XSKMAP delivery
   is not supported in current Linux**; leased/peered exceptions
   do not provide the redistribution this design needs.
-  The killed plan-docs preserved on their respective PR branches
-  contain the full reviewer findings:
-  `feature/1215-per5tuple-fairness:docs/pr/1215-per5tuple-fairness/plan.md`
-  (#1215 v1 KILL) and
-  `research/937-ingress-xdp-redirect:docs/pr/937-ingress-xdp-redirect/feasibility.md`
-  (#937 feasibility KILL).
+  The killed plan-docs are evidence trail only — they live on
+  their respective non-merged PR branches, not on master, so a
+  fresh checkout of this contract's branch will not show those
+  paths. They are linked here for engineers tracing the kill
+  rationale; they do not gate the contract:
+  - `feature/1215-per5tuple-fairness:docs/pr/1215-per5tuple-fairness/plan.md`
+    (#1215 v1 KILL with Codex `task-mounv6zx` + Gemini `task-mounvopl`)
+  - `research/937-ingress-xdp-redirect:docs/pr/937-ingress-xdp-redirect/feasibility.md`
+    (#937 feasibility KILL with Codex `task-mouozcic` + Gemini `task-mouozuvq`)
 
 Rather than chase an unreachable scalar gate, this contract defines
 **structural ceiling** as the reference point. xpf's fairness
@@ -101,7 +104,7 @@ For a 6-worker cluster (`Nᵥ = 6`):
 |---|---|---|---|
 | 2,2,2,2,2,2 (perfectly balanced, 12 flows) | 6 | 12 | 0.00 (0%) |
 | 1,1,2,2,3,3 (mild skew, 12 flows) | 6 | 12 | 0.47 (47%) |
-| 0,2,2,2,3,3 (one idle, 12 flows) | 5 | 12 | 0.20 (20%) — *lower than 1,1,2,2,3,3 because the {1,1} flows (which had the highest per-flow share, 1/1 = 1.0) are absent; only 1/2 and 1/3 shares remain, narrowing the spread* |
+| 0,2,2,2,3,3 (one idle, 12 flows) | 5 | 12 | 0.20 (20%) — *the per-flow share set is {1/2 × 6, 1/3 × 6}; spread narrower than 1,1,2,2,3,3 because the high-share 1/1 flows from the {1,1} workers are absent. The idle worker is excluded from the per-flow set (it has zero flows), not "compensating" for anything.* |
 | 1,3,0,0,0,0 (severe skew, 4 flows) | 2 | 4 | 0.58 (58%) |
 | 6,0,0,0,0,6 (degenerate, 12 flows) | 2 | 12 | 0.00 (0%) — *both workers fully loaded with 6 flows each* |
 
