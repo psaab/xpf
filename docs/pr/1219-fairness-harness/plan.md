@@ -31,7 +31,8 @@ complexity. The simpler path:
 
 - Data plane has flow_cache + epoch counter (Fix #v3-1).
 - Per-binding active flow count `aᵢ` is computed in the data plane
-  via the 100 ms tick scan and exposed as a Prometheus metric.
+  via the ~65 ms umem debug-publish tick scan (every 0xFFFF poll
+  ticks ≈ 65 ms in steady state) and exposed as a Prometheus metric.
 - Harness scrapes `/metrics` every 1 second during the iperf3 run.
 - Harness reads per-binding `active_flow_count` directly — that IS
   `{aᵢ}` already, no kernel RSS hash + indirection table read
@@ -166,7 +167,7 @@ Production Prometheus observability is a separate follow-up
   ~150 LOC + tests). Purely computational; identical to v1's
   pure-fn module which Codex independently verified is correct.
 - New per-binding **active flow count** read from EXISTING flow_cache
-  state at the worker's existing 100 ms tick. NO new HashMap. NO new
+  state at the worker's existing ~65 ms umem debug-publish tick. NO new HashMap. NO new
   per-packet writes. Just an atomic gauge + reader. ~30 LOC.
 - New `active_flow_count: u32` field through the
   Rust→Go→Prometheus pipeline (per Codex round-4 finding #2):
@@ -232,10 +233,11 @@ pub(in crate::afxdp) struct FlowCacheEntry {
     // ... existing fields
     /// #1219: last_used_epoch — u16 set on every successful
     /// lookup() hit. Compared to the per-binding `current_epoch`
-    /// that the worker tick increments at 100 ms cadence to count
-    /// active flows in the last N epochs (N=10 → 1 s window).
-    /// u16 wraps every 256 × 100 ms = 25.6 s — plenty of headroom
-    /// vs the 1 s window. Single-writer (the owner worker is the
+    /// that the worker tick increments at ~65 ms cadence (umem
+    /// debug-publish gate, every 0xFFFF poll ticks) to count
+    /// active flows in the last N epochs (N=10 → ~650 ms window).
+    /// u16 wraps every 65536 × ~65 ms ≈ 71 minutes — plenty of headroom
+    /// vs the ~650 ms window. Single-writer (the owner worker is the
     /// only code path that mutates this entry), Relaxed-equivalent
     /// (the snapshot reader reads via the helper-process status JSON surface
     /// which already copies the cache for sharding).
@@ -267,7 +269,7 @@ pub(in crate::afxdp) flow_cache_epoch: AtomicU16,
 pub(in crate::afxdp) active_flow_count: AtomicU32,
 ```
 
-Worker's existing 100 ms tick:
+Worker's existing ~65 ms umem debug-publish tick:
 
 ```rust
 // at the worker's existing ~65ms periodic tick
@@ -492,9 +494,10 @@ local socket. Not in scope here.
 
 ## 5. Hidden invariants the change must preserve
 
-- Worker 100 ms tick already runs periodic maintenance; adding the
-  flow_cache scan must not regress per-tick budget (verify: 80K
-  loads/sec is a small fraction of one worker's idle time at 100 Hz).
+- Worker ~65 ms umem debug-publish tick already runs periodic
+  maintenance; adding the flow_cache scan must not regress per-tick
+  budget (verify: ~63K loads/sec/worker is a small fraction of one
+  worker's idle time at ~15 Hz publish rate).
 - `active_flow_count` is `Relaxed` atomic; no cross-worker coherence
   required (single writer, many readers).
 - HA failover: `BindingLiveState` is fresh on role flip; counter
@@ -545,10 +548,10 @@ local socket. Not in scope here.
 
 ## 9. Open questions for adversarial review
 
-1. **Flow_cache scan cost validation**. 80K loads/sec/worker on the
-   100 ms tick — is the cache layout cache-friendly enough that this
-   stays in L1/L2? If not, the scan could be more expensive than
-   estimated.
+1. **Flow_cache scan cost validation**. ~63K loads/sec/worker on the
+   ~65 ms umem debug-publish tick — is the cache layout cache-friendly
+   enough that this stays in L1/L2? If not, the scan could be more
+   expensive than estimated.
 
 2. **flow_cache cap**. Cache cap is 4096 entries (verify exact).
    At extremely high fan-in the cache itself becomes the bottleneck

@@ -105,6 +105,103 @@ struct Verdict {
     failure_reasons: Vec<String>,
 }
 
+/// Output of `aggregate_per_worker`. Codex round-5 finding #1: the
+/// helper is factored out of `main()` so the per-worker aggregation
+/// logic (filter, group-by, sum, median, defaulting) and the
+/// iface_filter_active gate are unit-testable in isolation rather
+/// than only via end-to-end integration.
+#[cfg_attr(test, derive(Debug))]
+struct AggregateResult {
+    distribution_a_i: Vec<u32>,
+    iface_filter_active: bool,
+}
+
+/// Per-worker {a_i} aggregation over the steady-state window.
+///
+/// - filter rows by `iface_arg` when iface labels are present;
+/// - sum counts per `(timestamp, worker_id)`;
+/// - take the median of those sums per worker over the window;
+/// - return one entry per `0..n_total_workers` (workers with no
+///   matching samples report 0).
+///
+/// Returns `iface_filter_active=true` only when the user supplied an
+/// iface AND at least one TSV row carried a non-empty iface label.
+/// Legacy 3-column input (all `iface == ""`) collapses the filter to
+/// inactive even when `iface_arg` is non-empty, matching the
+/// bidirectional-2× guard fall-through in `main()`.
+fn aggregate_per_worker(
+    binding_flows: &[BindingFlowsRow],
+    iface_arg: &str,
+    n_total_workers: u32,
+    warmup_secs: u64,
+    final_burst_secs: u64,
+) -> AggregateResult {
+    let any_iface_label_present = binding_flows.iter().any(|r| !r.iface.is_empty());
+    if !iface_arg.is_empty() && !any_iface_label_present && !binding_flows.is_empty() {
+        eprintln!(
+            "fairness-eval: WARNING — --iface={iface_arg} supplied but TSV rows have no iface label \
+             (legacy 3-column input). Filter will drop ALL rows; treating --iface as unset.",
+        );
+    }
+    let iface_filter_active = !iface_arg.is_empty() && any_iface_label_present;
+
+    let ss_start_ts = binding_flows
+        .iter()
+        .map(|r| r.timestamp)
+        .min()
+        .unwrap_or(0)
+        .saturating_add(warmup_secs);
+    let ss_end_ts = binding_flows
+        .iter()
+        .map(|r| r.timestamp)
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(final_burst_secs);
+
+    let mut per_ts_worker: BTreeMap<(u64, u32), u32> = BTreeMap::new();
+    for row in binding_flows {
+        if row.timestamp < ss_start_ts || row.timestamp > ss_end_ts {
+            continue;
+        }
+        if iface_filter_active && row.iface != iface_arg {
+            continue;
+        }
+        *per_ts_worker
+            .entry((row.timestamp, row.worker_id))
+            .or_insert(0) += row.count;
+    }
+
+    let mut per_worker_samples: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for ((_ts, w), c) in per_ts_worker {
+        per_worker_samples.entry(w).or_default().push(c);
+    }
+    let distribution_a_i: Vec<u32> = (0..n_total_workers)
+        .map(|w| {
+            per_worker_samples
+                .get(&w)
+                .map(|samples| {
+                    let mut s = samples.clone();
+                    s.sort_unstable();
+                    s[s.len() / 2]
+                })
+                .unwrap_or(0)
+        })
+        .collect();
+
+    AggregateResult {
+        distribution_a_i,
+        iface_filter_active,
+    }
+}
+
+/// Codex round-4 finding (#1): direction multiplier resolves to 1
+/// when the iface filter is in effect (single-direction flow_cache)
+/// and 2 otherwise (legacy bidirectional input). Factored out so
+/// the same helper is tested directly by `aggregation_tests` below.
+fn direction_multiplier(iface_filter_active: bool) -> u32 {
+    if iface_filter_active { 1 } else { 2 }
+}
+
 fn main() -> ExitCode {
     let args: Args = parse_args();
 
@@ -195,67 +292,15 @@ fn main() -> ExitCode {
     // produced a meaningless 18-element distribution. The contract's
     // {a_i} is per-worker on the bottleneck-direction interface; this
     // is what fairness-eval now computes.
-    let ss_start_ts = binding_flows
-        .iter()
-        .map(|r| r.timestamp)
-        .min()
-        .unwrap_or(0)
-        .saturating_add(args.warmup_secs);
-    let ss_end_ts = binding_flows
-        .iter()
-        .map(|r| r.timestamp)
-        .max()
-        .unwrap_or(0)
-        .saturating_sub(args.final_burst_secs);
-    // Per-(timestamp, worker_id) accumulator: sum of counts across
-    // bindings on the filtered iface for the same worker. (In a
-    // typical loss-cluster topology each worker has one binding per
-    // queue per iface; the sum collapses to that single binding's
-    // count, but written as a sum to handle multi-queue-per-worker
-    // configs cleanly.)
-    let mut per_ts_worker: BTreeMap<(u64, u32), u32> = BTreeMap::new();
-    // Codex round-4 finding (minor): if rows have iface="" (legacy
-    // 3-column TSV) AND --iface is supplied, the filter would silently
-    // drop every row. Detect that and warn loudly — silent zeros from
-    // a misconfigured input are worse than a noisy fail.
-    let any_iface_label_present = binding_flows.iter().any(|r| !r.iface.is_empty());
-    if !args.iface.is_empty() && !any_iface_label_present && !binding_flows.is_empty() {
-        eprintln!(
-            "fairness-eval: WARNING — --iface={} supplied but TSV rows have no iface label \
-             (legacy 3-column input). Filter will drop ALL rows; treating --iface as unset.",
-            args.iface
-        );
-    }
-    let iface_filter_active = !args.iface.is_empty() && any_iface_label_present;
-    for row in &binding_flows {
-        if row.timestamp < ss_start_ts || row.timestamp > ss_end_ts {
-            continue;
-        }
-        if iface_filter_active && row.iface != args.iface {
-            continue;
-        }
-        *per_ts_worker
-            .entry((row.timestamp, row.worker_id))
-            .or_insert(0) += row.count;
-    }
-    // For each worker, collect its time-series of summed counts then
-    // take the median. Workers with no samples report 0.
-    let mut per_worker_samples: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-    for ((_ts, w), c) in per_ts_worker {
-        per_worker_samples.entry(w).or_default().push(c);
-    }
-    let distribution_a_i: Vec<u32> = (0..n_total_workers)
-        .map(|w| {
-            per_worker_samples
-                .get(&w)
-                .map(|samples| {
-                    let mut s = samples.clone();
-                    s.sort_unstable();
-                    s[s.len() / 2]
-                })
-                .unwrap_or(0)
-        })
-        .collect();
+    let agg = aggregate_per_worker(
+        &binding_flows,
+        &args.iface,
+        n_total_workers,
+        args.warmup_secs,
+        args.final_burst_secs,
+    );
+    let iface_filter_active = agg.iface_filter_active;
+    let distribution_a_i = agg.distribution_a_i;
 
     let cstruct = compute_cstruct(&distribution_a_i);
     let n_active: u32 = distribution_a_i.iter().filter(|&&a| a > 0).count() as u32;
@@ -311,8 +356,8 @@ fn main() -> ExitCode {
     // ~2× for bidirectional (both ingress and egress) entries. Use
     // iface_filter_active (not raw args.iface) so the legacy-input
     // fallback path uses the bidirectional multiplier as well.
-    let direction_multiplier: u32 = if iface_filter_active { 1 } else { 2 };
-    let expected_sum = n_non_starved.saturating_mul(direction_multiplier);
+    let dir_mult = direction_multiplier(iface_filter_active);
+    let expected_sum = n_non_starved.saturating_mul(dir_mult);
     let tolerance = ((GUARD_RELATIVE * expected_sum as f64) as u32).max(GUARD_ABSOLUTE);
     let a_i_sum_check_ok =
         (a_i_sum as i64 - expected_sum as i64).unsigned_abs() as u32 <= tolerance;
@@ -503,6 +548,125 @@ fn parse_binding_flows_tsv(path: &PathBuf) -> Vec<BindingFlowsRow> {
         // Other formats: silently skipped.
     }
     rows
+}
+
+#[cfg(test)]
+mod aggregation_tests {
+    //! Codex round-5 finding #1: these tests exercise the
+    //! production aggregation helper and the direction multiplier
+    //! gate end-to-end, not just the parser shape. They will
+    //! catch:
+    //!   - per-worker grouping replaced by per-binding grouping;
+    //!   - direction_multiplier reverted from 1 → 2 when iface
+    //!     filter is active;
+    //!   - iface_filter_active misclassifying legacy 3-col input;
+    //!   - sum-then-median replaced by raw count.
+    use super::*;
+
+    fn row(ts: u64, slot: u32, qid: u32, wid: u32, iface: &str, count: u32) -> BindingFlowsRow {
+        BindingFlowsRow {
+            timestamp: ts,
+            binding_slot: slot,
+            queue_id: qid,
+            worker_id: wid,
+            iface: iface.to_string(),
+            count,
+        }
+    }
+
+    #[test]
+    fn aggregate_per_worker_filters_iface_and_groups_by_worker() {
+        // 3 timestamps × 6 workers, one row per worker per ts on
+        // ge-0-0-2 with count = worker_id+1, plus noise on ge-0-0-3
+        // with very large counts that MUST NOT contaminate the
+        // filtered distribution.
+        let mut rows = Vec::new();
+        for ts in 1000u64..1003 {
+            for w in 0u32..6 {
+                rows.push(row(ts, w, 0, w, "ge-0-0-2", w + 1));
+                rows.push(row(ts, 100 + w, 0, w, "ge-0-0-3", 999));
+            }
+        }
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        assert!(r.iface_filter_active);
+        assert_eq!(r.distribution_a_i, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn aggregate_per_worker_sums_multiple_queues_per_worker() {
+        // Same worker has 2 queue bindings on the same iface — the
+        // per-(ts,worker) accumulator must SUM those, not replace.
+        let mut rows = Vec::new();
+        for ts in 1000u64..1003 {
+            // worker 0: q0 contributes 2, q1 contributes 3 → expect 5
+            rows.push(row(ts, 0, 0, 0, "ge-0-0-2", 2));
+            rows.push(row(ts, 1, 1, 0, "ge-0-0-2", 3));
+            // workers 1..5: single queue, count=1
+            for w in 1u32..6 {
+                rows.push(row(ts, w + 1, 0, w, "ge-0-0-2", 1));
+            }
+        }
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        assert_eq!(r.distribution_a_i, vec![5, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn aggregate_per_worker_legacy_3col_disables_filter() {
+        // Legacy parser produces iface="" and worker_id == binding_slot.
+        // Even with --iface set, iface_filter_active should be false
+        // because no row carries a non-empty iface label.
+        let rows: Vec<_> = (0u32..6)
+            .flat_map(|w| {
+                (1000u64..1003).map(move |ts| row(ts, w, 0, w, "", 7))
+            })
+            .collect();
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        assert!(!r.iface_filter_active, "legacy 3-col must collapse filter");
+        // Each worker still appears at its slot/wid index with count 7.
+        assert_eq!(r.distribution_a_i, vec![7, 7, 7, 7, 7, 7]);
+    }
+
+    #[test]
+    fn aggregate_per_worker_missing_workers_default_to_zero() {
+        // Only workers 0, 2, 4 produce samples; workers 1, 3, 5 are
+        // expected to report 0 in the output Vec at indices 1, 3, 5.
+        let rows: Vec<_> = (1000u64..1003)
+            .flat_map(|ts| {
+                [0u32, 2, 4]
+                    .iter()
+                    .map(move |&w| row(ts, w, 0, w, "ge-0-0-2", 4))
+            })
+            .collect();
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 6, 0, 0);
+        assert_eq!(r.distribution_a_i, vec![4, 0, 4, 0, 4, 0]);
+    }
+
+    #[test]
+    fn aggregate_per_worker_median_smooths_jitter() {
+        // worker 0 sees counts 1, 5, 5 over 3 ts → median 5.
+        // worker 1 sees 5, 1, 1 → median 1. (Filters out single
+        // outliers on either side.)
+        let rows = vec![
+            row(1000, 0, 0, 0, "ge-0-0-2", 1),
+            row(1001, 0, 0, 0, "ge-0-0-2", 5),
+            row(1002, 0, 0, 0, "ge-0-0-2", 5),
+            row(1000, 1, 0, 1, "ge-0-0-2", 5),
+            row(1001, 1, 0, 1, "ge-0-0-2", 1),
+            row(1002, 1, 0, 1, "ge-0-0-2", 1),
+        ];
+        let r = aggregate_per_worker(&rows, "ge-0-0-2", 2, 0, 0);
+        assert_eq!(r.distribution_a_i, vec![5, 1]);
+    }
+
+    #[test]
+    fn direction_multiplier_iface_filter_active_is_one() {
+        assert_eq!(direction_multiplier(true), 1);
+    }
+
+    #[test]
+    fn direction_multiplier_no_iface_filter_is_two() {
+        assert_eq!(direction_multiplier(false), 2);
+    }
 }
 
 #[cfg(test)]

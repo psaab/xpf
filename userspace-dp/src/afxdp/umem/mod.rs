@@ -232,7 +232,7 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// #1219: snapshot of distinct active flows on this binding's
     /// flow_cache, refreshed at the existing ~65ms debug-state tick
     /// (`update_binding_debug_state`) by counting flow_cache entries
-    /// hit within the last 10 epoch ticks (~1 second window). Read
+    /// hit within the last 10 epoch ticks (~650 ms window). Read
     /// from the helper-process status JSON; harness scrapes via
     /// Prometheus to compute `{a_i}` for the structural CoV gate
     /// per `docs/fairness-regimes.md`.

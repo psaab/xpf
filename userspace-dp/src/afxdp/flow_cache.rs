@@ -494,7 +494,7 @@ impl FlowCache {
                 self.hits += 1;
                 // #1219: stamp the entry with the current epoch so the
                 // periodic count_active_flows scan can recognize this
-                // flow as active in the last 1s window. Single u16 store
+                // flow as active in the last ~650 ms window. Single u16 store
                 // on a struct already in cache from the key check above.
                 // Use a single mutable borrow: stamp the epoch and coerce
                 // to &FlowCacheEntry in one index, eliminating the
