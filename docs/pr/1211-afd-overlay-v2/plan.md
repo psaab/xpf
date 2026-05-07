@@ -355,8 +355,8 @@ already been transmitted — too late to ECN-mark.
 This means **Fix #6's RFC 3168 unified marking moves to the
 TX-side encapsulation point, BEFORE submit**, not at settle. The
 correct hook is the **shared-exact pre-submit path** in
-`userspace-dp/src/afxdp/cos/queue_service/service.rs:214-279`
-(prepared variant) and `:541-617` (local variant), immediately
+`userspace-dp/src/afxdp/cos/queue_service/service.rs:186-260`
+(local variant) and `:517-617` (prepared variant), immediately
 before the TX-ring submit. These call sites have access to the
 binding/UMEM context AND see the post-rewrite frame layout (per
 Codex round-4 finding: the offsets are stable here, after any
@@ -368,13 +368,17 @@ shared-exact submit decision.
 v3 design reorganization:
 - **Per-pop**: read summary's `delta` and `fair` for this bucket
   (batch-hoisted Arc Guard, ~0.5 ns amortized per pop).
-- **Pre-submit (in TX dispatch)**: compute drop probability,
-  draw random byte, decide ECN-mark vs drop vs pass.
+- **Pre-submit** (in `cos/queue_service/service.rs:186-260`
+  local variant or `:517-617` prepared variant — see Fix #8 for
+  the canonical hook location): compute drop probability, draw
+  random byte, decide ECN-mark vs drop vs pass.
 - **At settle (post-TX)**: increment per-bucket served_bytes for
   inserted prefix only (Fix #1).
 
-This keeps the ECN-mark on the cached-metadata path while
-preserving Fix #1's submit-failure correctness.
+This keeps the ECN-mark on the post-rewrite frame while
+preserving Fix #1's submit-failure correctness. Whether the
+mark site uses 0a (reparse) or 0b (cached post-rewrite metadata)
+is the implementation-PR decision — see Phase 0 in Fix #10.
 
 ### Fix #10 (v4 round-3): TxRequest metadata prerequisite
 
@@ -388,7 +392,9 @@ v4 makes the prerequisite explicit. **Implementation work is
 phased**:
 
 - **Phase 0 (prerequisite)**: ECN-marking happens at the
-  pre-submit point in TX dispatch, where the TX-frame **after
+  shared-exact pre-submit hook in
+  `cos/queue_service/service.rs:186-260` (local variant) and
+  `:517-617` (prepared variant), where the TX-frame **after
   rewrite** is what we actually mark. Ingress-side L3 offsets
   cannot be reused directly because egress VLAN add/remove,
   tunnel encapsulation, and L3 rewrite paths all change the
@@ -424,11 +430,13 @@ phased**:
 
 - **Phase 2**: wire the pre-submit AFD decision in
   the shared-exact pre-submit path
-  (`cos/queue_service/service.rs:214-279` prepared variant +
-  `:541-617` local variant) using the post-rewrite frame
-  metadata (0a reparse) or the cached
-  offsets from Phase 0. RFC 3168-compliant unified mark/drop
-  probability per Fix #6.
+  (`cos/queue_service/service.rs:186-260` local variant +
+  `:517-617` prepared variant). The mark site reads the
+  post-rewrite frame either by re-parsing it on the spot
+  (Phase 0a; reuses `cos/ecn.rs:179`-style parse) or by
+  consuming cached offsets that Phase 0b would have threaded
+  through `TxRequest`/`PreparedTxRequest`. RFC 3168-compliant
+  unified mark/drop probability per Fix #6.
 
 - **Phase 3**: wire settle-time `served_bytes` accounting in
   `settle_exact_*_scratch_submission_flow_fair`
@@ -672,8 +680,8 @@ the phased Fix #10 implementation:
 
 1. New module `userspace-dp/src/afxdp/cos/afd.rs` (~400 LOC).
 2. **Pre-submit ECN-mark hook** in the shared-exact pre-submit
-   path: `cos/queue_service/service.rs:214-279` (prepared
-   variant) and `:541-617` (local variant), immediately before
+   path: `cos/queue_service/service.rs:186-260` (prepared
+   variant) and `:517-617` (prepared variant), immediately before
    the TX-ring submit. These call sites have:
    - binding/UMEM context (needed to access the wire frame),
    - the post-rewrite frame layout (any VLAN/tunnel/L3 rewrite
