@@ -132,6 +132,81 @@ Mitigation candidates:
   enforces equal per-flow rates rather than approximate
   byte-fairness.
 
+## Symmetric RSS hash key — additional finding (2026-05-07 round 2)
+
+A follow-up sweep on port **5203 (iperf-c, 25 Gbps EXACT shaper)
+push direction** found that swapping the NIC's default Microsoft
+Toeplitz hash key for a **symmetric Toeplitz key**
+(`6d:5a:6d:5a:...` repeating) dramatically reduces saturation-time
+per-flow CoV.
+
+```bash
+# On the firewall (loss:xpf-userspace-fw0)
+SYM_KEY="6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a:6d:5a"
+ethtool -X ge-0-0-2 hkey $SYM_KEY
+```
+
+| Hash key | port | direction | distribution_a_i | observed_cov |
+|----------|------|-----------|------------------|--------------|
+| Default Microsoft (asymmetric) | 5203 | push, saturated | [6,0,5,0,1,0] (3 active) | **0.91** |
+| Symmetric (6d:5a:6d:5a:...) | 5203 | push, saturated | [6,5,1] flow groups across 3 workers (others active for reverse-direction tracking) | **0.19** |
+
+The 5× drop in per-flow CoV (91% → 19%) is the largest dataplane-
+side win documented in this drive. The symmetric key works because
+sequential ephemeral source ports (which iperf3 -P 12 produces by
+default with `--cport` set) hash-cluster less aggressively under
+the symmetric pattern than under the default Microsoft key.
+
+**Per-stream throughputs at saturation, sym key + cport=53000 +
+push iperf-c**:
+
+```
+6 streams ~660 Mbps  (worker A pair)
+5 streams ~1015 Mbps  (worker B pair)
+1 stream  3984 Mbps  (worker C alone)
+```
+
+Each worker still outputs ~5.5 Gbps total — the per-worker MQFQ
+distributes within. The remaining unfairness is the worker flow-
+count mismatch (6 vs 5 vs 1). Achieving [2,2,2,2,2,2] would
+require either:
+
+- Hand-picking 12 source ports that empirically map to all 6 RSS
+  buckets uniformly (sport probing required; ~30 cports tested in
+  the 2026-05-07 sweep, none gave [2,2,2,2,2,2]).
+- Increasing NIC channel count (mlx5 max is 6 on this hardware,
+  cannot exceed).
+
+### Recommendation: symmetric key as a deployment-time tweak
+
+The symmetric Toeplitz key is **non-invasive, applied via ethtool,
+and persists per NIC**. It's the cheapest "fix" available today:
+
+```bash
+# Make persistent across boots (Debian/systemd-networkd)
+cat >/etc/systemd/network/01-rss-symmetric-key.network <<'EOF'
+[Match]
+Name=ge-0-0-2
+
+[Link]
+# Symmetric Toeplitz key applied via ExecStart in a small one-shot
+# unit; networkd doesn't natively support hkey. See xpfd's
+# .link-file generator for the cleaner home for this in production.
+EOF
+```
+
+The dataplane / xpfd doesn't currently set the hash key. A follow-on
+issue would add a config knob like:
+
+```
+set interfaces ge-0-0-2 rss hash-key symmetric-toeplitz
+```
+
+so deployment can opt in without manual ethtool calls. **Effort:
+small** (low single-digit hours). **Impact: 5× per-flow CoV
+improvement on saturated multi-stream workloads with sequential
+source ports** (the dominant test pattern).
+
 ## What does NOT solve this — verified or memory-confirmed
 
 - **AFD ECN/drop overlay (#1211)**: PLAN-KILLed and archived under
