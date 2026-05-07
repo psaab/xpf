@@ -92,8 +92,8 @@ v3 addresses both:
 - **Fix #v3-1**: add a `last_used_epoch: u16` field to
   `FlowCacheEntry`. Owner-only writes the current epoch in
   `lookup()` on hit. Worker tick increments the per-binding
-  epoch counter every ~65ms. To check "active in last 1s",
-  count entries with `(current_epoch - entry.last_used_epoch) <= 10`.
+  epoch counter every ~65ms. To check "active in last ~650 ms",
+  count entries with `(current_epoch - entry.last_used_epoch) < ACTIVE_WINDOW_EPOCHS` (= 10).
   Cost: ~1-2 ns/lookup (single u16 store on a struct already
   loaded in the hot path).
 
@@ -278,7 +278,7 @@ let new_epoch = state.flow_cache_epoch
     .wrapping_add(1);
 state.flow_cache_epoch.store(new_epoch, Ordering::Relaxed);
 
-// Count entries within the last 10 epochs (1 second window)
+// Count entries within the last 10 epochs (~650 ms window at ~65 ms tick)
 const ACTIVE_WINDOW_EPOCHS: u16 = 10;
 let count = flow_cache.entries.iter()
     .filter(|e| {
@@ -363,7 +363,7 @@ on each binding give us the count for free.
   production with mixed traffic, per-queue qualification matters
   and #1220 must address it.
 - No ≥1% throughput qualification: the data plane counts any
-  flow that hit flow_cache in the last 1 second, regardless of
+  flow that hit flow_cache in the last ~650 ms, regardless of
   byte rate. This may over-count — a starved flow that's barely
   doing anything still counts as 1 in `aᵢ`. The starved-flow
   gate (Gate 1) catches this case at the harness layer using
