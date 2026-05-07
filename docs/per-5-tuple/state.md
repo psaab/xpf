@@ -112,17 +112,58 @@ If pursued, this is a smaller-than-Path-2 swing and pure userspace.
 
 ## Open work
 
-- **#547 — Deterministic RSS-skew test fixture**: the harness today
-  reads whatever RSS happens to produce on the cluster. A fixture
-  that black-box-tests `fairness-eval`'s CLI/IO/exit-code contract
-  against synthetic inputs closes one regression-coverage gap. After
-  Codex round-1 narrowed the scope (no fairness-mechanism validation
-  claim — that's at cluster harness level), v2+ plan is in flight.
-- **#1211 follow-up (only if gate flips to FAIL)**: open a fresh issue
-  using the revisit criteria in the Path 2 closure archive. Do not
-  re-open #1211 directly.
-- **Path 4** has no issue yet; consider filing one if the workload-
-  aware gate concept matures.
+- **#547 — Deterministic RSS-skew test fixture**: SHIPPED as PR #1223
+  (92b3b62d, 2026-05-07). 7 black-box integration tests pin the
+  `fairness-eval` binary's CLI/IO/exit-code contract.
+- **#1224 — Harness sum-guard sensitivity at low N**: filed
+  2026-05-07 from the empirical sweep below. P=2 toggles between
+  PASS and Guard FAIL depending on RSS placement; tolerance floor
+  `GUARD_ABSOLUTE = 2` is too tight at small expected_sum. Small
+  follow-up; not a fairness mechanism.
+- **#1211 follow-up (only if gate flips to FAIL on a real workload)**:
+  open a fresh issue using the revisit criteria in the Path 2
+  closure archive. Do not re-open #1211 directly. As of the
+  2026-05-07 sweep below, NO empirically failing workload exists.
+- **Path 4** has no issue and per the empirical sweep no concrete
+  motivation. Consider filing only if a workload-aware gate
+  becomes operationally desirable.
+
+## Empirical sweep across workload classes (2026-05-07)
+
+After PR #1220 (harness) and #1223 (fixture) shipped, the harness
+was run end-to-end on the loss userspace cluster across the 4
+workload classes Codex round-1 enumerated for #1211 v10 (P-class
+sweep × push/reverse × CoS-default). Cluster: master commit
+92b3b62d. Method: iperf3 -P N -t 90 from `loss:cluster-userspace-host`
+to 172.16.80.200; 1Hz `xpf_userspace_binding_active_flow_count`
+scrape from firewall via incus exec; fed to `fairness-eval --iface
+ge-0-0-2 --n-workers 6 --warmup-secs 5 --final-burst-secs 1
+--shaper-rate-bps 25e9`.
+
+| Workload | cstruct | observed_cov | gap | starved | guard | verdict |
+|----------|---------|--------------|-----|---------|-------|---------|
+| P=12 -R (canonical) | 0.63 | 0.54 | -0.09 | 0 | OK | **PASS** |
+| P=2 -R | 0.0–0.65 | ~0.03 | varies | 0 | flaky | flaky |
+| P=6 -R | 0.28 | 0.27 | -0.01 | 0 | OK | **PASS** |
+| P=24 -R | 0.21 | 0.18 | -0.03 | 0 | OK | **PASS** |
+| P=12 push | 0.49 | 0.45 | -0.04 | 0 | OK | **PASS** |
+
+**Key findings**:
+
+1. **No Gate 1 (starvation) or Gate 2 (CoV gap > ε) FAIL** on any
+   workload class. Every PASS verdict has gap well below ε=0.05.
+2. **PUSH and REVERSE differ structurally.** P=12 push has
+   cstruct=0.49 while P=12 reverse cstruct=0.63 — different RSS
+   distributions for the two TX-direction binding sets. Both PASS
+   independently.
+3. **n_active varies with P.** P=2 → 3 active workers (RSS
+   spread); P=6 → 6; P=12 → 5; P=24 → 6.
+4. **Harness sum-guard is flaky at P=2** (filed as #1224). Not an
+   AFD justification; a small harness tolerance fix.
+5. **#1211 PLAN-KILL stands.** No workload tested produces an
+   AFD-actionable FAIL. The drive's empirical premise — that the
+   harness PASSes the production workloads — extends beyond the
+   canonical iperf-c P=12 -R measurement.
 
 ## How to apply
 
@@ -147,3 +188,12 @@ When considering a new fairness mechanism:
 - 2026-05-07 (later): #1211 Path 2 CLOSED as PLAN-KILL after v10
   reviewer convergence. Archived under `path2-archive/`. #547 v2 in
   flight after Codex MAJOR rewrite.
+- 2026-05-07 (end of day): PR #1223 #547 fixture MERGED. Empirical
+  4-workload-class sweep performed; no Gate 1/2 FAIL. #1224 filed
+  for a low-N harness sensitivity nit. **The per-5-tuple drive's
+  standalone foundations are now empirically settled.** Future
+  fairness-mechanism work should start with: (a) read this doc;
+  (b) re-measure the harness against the targeted workload; (c)
+  if it FAILs, file a fresh issue citing #1217+#1220+the sweep
+  table above; (d) if it PASSes, the drive remains empirically
+  closed and a new mechanism is solving a non-existent problem.
