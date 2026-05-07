@@ -1,5 +1,5 @@
 ---
-status: REVISED v6 — addresses Codex round-5 (task-mow4h6y5, PLAN-NEEDS-MAJOR with 5 findings) AND Gemini round-5 (task-mow4ht14, PLAN-KILL convergent on the same F3 fix). Both reviewers converged on the same elegant solution: DROP flow_bucket_flow_count (can't be tracked accurately on hot path) and use active_flow_buckets (existing field at accounting.rs:23/81) as the cap denominator. Math: bucket_target_bps = Queue_BW / max(1, active_flow_buckets). Correct at all scales via existing state.
+status: REVISED v7 — Codex round-6 returned **PLAN-READY**; Gemini round-6 returned PLAN-NEEDS-MAJOR with 2 substantive plan-text issues now fixed: (1) §1.1/§1.3 contradiction — monotonic_nanos sampled ONCE per batch commit at the apply-cos-* call site, NOT per packet inside the loop (would have been syscall/VDSO per packet); (2) CoSPendingTxItem is an enum, not struct — sidecar built as Vec<(u16, u64)> in submit_cos_batch BEFORE transmit_batch, sliced by returned sent_packets count.
 issue: #1229
 phase: design proposal — v6 final-pass; both reviewers explicitly said this fix → PLAN-READY
 prerequisites:
@@ -59,60 +59,91 @@ fn bucket_eligible(state: &FlowFairState, bucket: u16, target_bps: u64) -> bool 
 
 ### C-MINOR-1: commit-boundary audit (incomplete in v5)
 
-v5 listed `service.rs:320` and `tx_completion.rs:440`. Codex found
-more:
+v5 listed `service.rs:320` and `tx_completion.rs:440`. Codex round-5
+found more, and Gemini round-6 confirmed the function signatures.
+The 4 flow-fair commit paths are:
 - `service.rs:320` (Local exact flow-fair direct path)
 - `service.rs:658` (Prepared peer commit path)
 - `tx_completion.rs:440` (`apply_cos_send_result` — surplus/shared
   batch settle)
 - `tx_completion.rs:508` (`apply_cos_prepared_result`)
 
-Plus: `apply_cos_*` paths currently don't retain committed-bucket
-identity after `transmit_batch` / `transmit_prepared_queue` drain.
-v6 specifies a "**committed bucket/bytes sidecar**" carried through
-the apply path:
+The FIFO direct paths at `service.rs:160`/`:492` also commit but
+have NO bucket state (non-flow-fair). The backup `tx/transmit.rs`
+paths are NOT CoS commit boundaries.
+
+**Sidecar mechanism (v7 — Gemini round-6 correction)**:
+
+`CoSPendingTxItem` is an **enum** wrapping `TxRequest` and
+`PreparedTxRequest`, not a struct. We can't add `flow_bucket`
+directly. v7 picks the cleaner path: **build a `Vec<(u16, u64)>`
+sidecar (bucket, bytes) BEFORE `transmit_batch`** in
+`submit_cos_batch`, then slice by returned `sent_packets` after the
+transmit consumes items in-place.
 
 ```rust
-// In CoSPendingTxItem (existing struct):
-pub(in crate::afxdp) struct CoSPendingTxItem {
-    // ... existing fields ...
-    pub(in crate::afxdp) flow_bucket: u16,  // already present? if not, add
-}
+// In submit_cos_batch (or its flow-fair equivalent):
+let pending_sidecar: Vec<(u16, u64)> = batch.iter()
+    .map(|item| (item.flow_bucket(), item.bytes()))
+    .collect();
 
-// settle_* accumulates a Vec<(u16, u64, u64)> of (bucket, bytes, now_ns)
-// for committed items. apply_cos_*_result iterates this on accept.
-fn apply_cos_send_result(/* ... */, committed: &[(u16, u64, u64)]) {
-    for (bucket, bytes, now_ns) in committed {
-        account_flow_bucket_tx(state, *bucket, *bytes, *now_ns);
-    }
+let (sent_packets, sent_bytes) = transmit_batch(/* ... */);
+
+// Apply only the prefix that actually committed.
+let now_ns = monotonic_nanos();  // ONCE per batch
+let committed = &pending_sidecar[..sent_packets];
+for &(bucket, bytes) in committed {
+    account_flow_bucket_tx(state, bucket, bytes, now_ns);
 }
 ```
 
+`item.flow_bucket()` lives on the underlying `TxRequest` /
+`PreparedTxRequest` (added there as a `u16` field), or computed
+on-the-fly from `flow_key` via existing bucket-hash. Either works;
+implementation chooses based on per-packet hot-path cost.
+
 (Demote, teardown, restore, retry paths are NOT commit boundaries —
-they correctly bypass `settle_*` and skip accounting. Codex
-confirmed.)
+they correctly bypass `settle_*` and skip accounting.)
 
 ### C-MINOR-2: flow_bucket_flow_count drop (both reviewers)
 
 v6 drops this field entirely. See above.
 
-### C-MINOR-3: fresh monotonic_nanos in accounting
+### C-MINOR-3: fresh monotonic_nanos sampled ONCE per batch (v7 — Gemini round-6 correction)
 
-v5's `now_ns` came from caller. Drain reuses caller's `now_ns`
-across loops — `dt_ns` can stay below threshold across multiple
-real commit batches. v6 fix:
+v5's `now_ns` came from caller and was re-used across drain loops —
+`dt_ns` could stay below threshold across multiple real commit
+batches. v6 first proposed sampling `monotonic_nanos()` *inside*
+`account_flow_bucket_tx`, but Gemini round-6 caught that this would
+be a syscall/VDSO read per packet (millions/sec) — unacceptable
+hot-path cost.
+
+**v7 fix**: sample `monotonic_nanos()` **ONCE per batch commit** at
+the apply-cos-* call site (just before iterating the committed
+sidecar), pass the timestamp into `account_flow_bucket_tx` as an
+arg.
 
 ```rust
+// Per batch commit:
+let now_ns = monotonic_nanos();  // sampled ONCE
+let committed = &pending_sidecar[..sent_packets];
+for &(bucket, bytes) in committed {
+    account_flow_bucket_tx(state, bucket, bytes, now_ns);
+}
+
+// account_flow_bucket_tx takes now_ns by argument (NOT sampled inside):
 fn account_flow_bucket_tx(
     state: &mut FlowFairState,
     bucket: u16,
     bytes: u64,
-    /* now_ns removed; sampled fresh below */
+    now_ns: u64,  // arg, not sampled inside
 ) {
-    let now_ns = monotonic_nanos();  // fresh sample, not stale caller value
-    // ... rest as in v5 §1.2
+    // ... EWMA logic from v5 §1.2 ...
 }
 ```
+
+This invariant — "sample time once per batch commit, not per
+packet" — must be preserved by reviewers and implementation.
 
 ### C-MINOR-4: capped-batch reset contract expanded
 
