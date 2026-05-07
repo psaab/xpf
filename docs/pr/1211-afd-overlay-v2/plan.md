@@ -102,6 +102,18 @@ pub(in crate::afxdp) struct AfdWindowSummary {
 }
 ```
 
+## User directive (v4)
+
+User explicitly accepted complexity tradeoff 2026-05-07: "Complexity
+is ok". Gemini's round-2 + round-3 PLAN-KILL on
+complexity-vs-value grounds is therefore overridden by user
+direction. Technical fixes (Codex's PLAN-NEEDS-MAJOR findings)
+are still required and v4 addresses them.
+
+PR #1217 (fairness-regimes contract) ships in parallel and is
+NOT gated on this plan. If implementation work on this plan
+hits a wall, #1217 is still the steady-state product.
+
 ## v2 — round-1 reviewer fixes (must read before §3 design)
 
 ### Fix #1: AFD accounting moves from pop-time to settle-time
@@ -114,7 +126,9 @@ v_min.rs:32 (existing V_min publishes only post-settle for
 exactly this reason).
 
 v2 moves AFD `fetch_add` into the settle-side helpers
-(`apply_cos_send_result` family in `tx_completion.rs`). The
+(`settle_exact_*_scratch_submission_flow_fair` family in
+`userspace-dp/src/afxdp/cos/queue_service/mod.rs` around lines
+740 + 795 — see Fix #9). The
 settle path receives the **inserted prefix** of the scratch slice
 — exactly the items that hit the TX ring. The accounting walks
 that prefix and increments per-bucket `served_bytes` for inserted
@@ -333,7 +347,8 @@ carry cached L3 offsets. The "fast-path" claim was wrong.
 
 v3 acknowledges that the AFD ECN-mark site lives in the
 **settle-time accounting path** (per Fix #1, in
-`apply_cos_send_result` family), AFTER the packet has been popped
+`settle_exact_*_scratch_submission_flow_fair` family in
+queue_service/mod.rs:740+795 — see Fix #9), AFTER the packet has been popped
 from the queue and submitted. At settle time, the packet has
 already been transmitted — too late to ECN-mark.
 
@@ -354,11 +369,49 @@ v3 design reorganization:
 This keeps the ECN-mark on the cached-metadata path while
 preserving Fix #1's submit-failure correctness.
 
+### Fix #10 (v4 round-3): TxRequest metadata prerequisite
+
+Codex round-3 verified that `TxRequest` and `PreparedTxRequest`
+do not currently carry cached L3 offsets, and the existing ECN
+path in `enqueue_cos_item` re-parses bytes/UMEM. So Fix #8's
+"cached metadata" claim required a prerequisite that v3 did not
+explicitly call out.
+
+v4 makes the prerequisite explicit. **Implementation work is
+phased**:
+
+- **Phase 0 (prerequisite)**: extend `TxRequest` and
+  `PreparedTxRequest` (`userspace-dp/src/afxdp/types/tx.rs:12`
+  + `:54`) to include cached L3 + L4 offsets and IP version.
+  These offsets are produced by ingress XDP parse + flow_cache
+  lookup; piping them through the request types is mechanical
+  but touches every TX item construction site.
+
+- **Phase 1**: add the AFD module (`userspace-dp/src/afxdp/cos/afd.rs`)
+  with `AfdQueueState`, `SharedFlowSlot` types, and the snapshot
+  owner logic.
+
+- **Phase 2**: wire the pre-submit AFD decision in
+  `tx/cos_classify.rs` or `tx/dispatch.rs` using the cached
+  offsets from Phase 0. RFC 3168-compliant unified mark/drop
+  probability per Fix #6.
+
+- **Phase 3**: wire settle-time `served_bytes` accounting in
+  `settle_exact_*_scratch_submission_flow_fair`
+  (queue_service/mod.rs:740 + :795) per Fix #1 + #9.
+
+If Phase 0's TxRequest extension is judged too invasive on its
+own, the ECN-mark falls back to the existing reparse path in
+enqueue_cos_item (with worse per-pop budget — ~50 ns instead of
+~10 ns). This fallback may push 64B/35Mpps workloads out of
+spec; document the trade-off explicitly in the implementation
+PR.
+
 ### Fix #9 (v3 round-2): settle hook location
 
 Codex round-2 finding #4: settle hook is in
 `settle_exact_*_scratch_submission_flow_fair`, not
-`apply_cos_send_result`. v3 references the correct symbol path
+`apply_cos_send_result`. v3+v4 reference the correct symbol path
 in the queue_service module (line ~740 in `mod.rs`).
 
 ### Fix #5: probabilistic drop curve (vs Gemini's "drop cliff" critique)
@@ -385,7 +438,7 @@ fn afd_drop_probability(delta: u64, fair: u64) -> u8 {
 // Hot path:
 let p_drop = afd_drop_probability(delta, fair);
 if p_drop > 0 && !cos_item_is_ect_fast(&item) {
-    let r = (bpf_random_u32() & 0xff) as u8;  // ~3 ns
+    let r = afd_per_worker_random_byte(ff);  // splitmix64 per-worker; see Fix #7
     if r < p_drop {
         return Drop;
     }
@@ -406,7 +459,7 @@ and avoids the bursty-drop pathology Gemini flagged.
 > reviewer fixes" above. Specifically:
 >
 > - §3.2's "fetch_add at pop time" is REPLACED by Fix #1
->   (settle-time accounting in tx_completion.rs).
+>   (settle-time accounting in queue_service/mod.rs:740+795).
 > - §3.2's "ArcSwap.load() per pop" is REPLACED by Fix #3
 >   (batch-hoist at drain entry, ~30 ns per batch amortized).
 > - §3.3 / §3.4's "cumulative aggregate_served" is REPLACED by
