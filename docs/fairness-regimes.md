@@ -34,13 +34,12 @@ across workers have failed:
 - **#1215** + **#937** (cross-worker shared per-flow signal +
   ingress XDP_REDIRECT): both PLAN-KILLED. The kernel constraint
   that derails #937's clean form is upstream Linux's per-socket
-  device + queue validation in `net/xdp/xsk.c` (the
-  `xsk_rcv_check()` path in mainline 7.1-rc; the same predicate
-  has been refactored into helpers like `xsk_dev_queue_valid()`
-  by recent leased/peered-queue netdev patches). The
-  durable narrow claim: **arbitrary cross-queue XSKMAP delivery
-  is not supported in current Linux**; leased/peered exceptions
-  do not provide the redistribution this design needs.
+  device + queue validation in `net/xdp/xsk.c`:
+  `xsk_rcv_check()` verifies `xs->dev == xdp->rxq->dev` and
+  `xs->queue_id == xdp->rxq->queue_index` before delivery.
+  The durable narrow claim: **arbitrary cross-queue XSKMAP
+  delivery is not supported in current Linux**; leased/peered
+  exceptions do not provide the redistribution this design needs.
   The killed plan-docs are evidence trail only — they live on
   their respective non-merged PR branches, not on master, so a
   fresh checkout of this contract's branch will not show those
@@ -178,10 +177,11 @@ RSS-skewed run (e.g. `Nₐ=2, Nᵥ=6`, can only physically reach
 Scaling makes "saturated" mean "consuming all the bandwidth
 the active workers can deliver".
 
-The same acceptance gates apply uniformly across both saturated
-and non-saturated regimes — `Cstruct` is the right reference for
-both. The two regimes differ only in *expected observed_CoV*,
-not in the gate formula:
+Gates 1, 2, and 4 apply to **all** runs (saturated and
+non-saturated). Gate 3 (aggregate throughput) applies to
+**saturated runs only** (see Gate 3 above). The two regimes
+differ only in *expected observed_CoV*, not in the CoV gate
+formula:
 
 - **Saturated**: `observed_CoV` will approach `Cstruct` from
   below as the per-worker scheduler does its job. Pass iff the
