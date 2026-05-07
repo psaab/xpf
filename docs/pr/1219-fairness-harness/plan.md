@@ -289,8 +289,10 @@ state.active_flow_count.store(count, Ordering::Relaxed);
 ```
 
 Tick-side scan: O(N) over flow_cache cap (4096 entries) every
-100 ms = 80K loads/sec/worker = ~10 µs of work per second on the
-periodic-maintenance path. Not on the hot path.
+~65 ms (the umem debug-publish gate fires every 0xFFFF poll
+ticks, which is approximately 65 ms in steady state) ≈ ~63K
+loads/sec/worker = ~8 µs of work per second on the periodic-
+maintenance path. Not on the hot path.
 
 `last_used_epoch == 0` is treated as "uninitialized" so freshly
 added entries on a brand-new binding don't count as active until

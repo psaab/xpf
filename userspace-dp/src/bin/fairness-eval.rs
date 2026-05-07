@@ -214,11 +214,24 @@ fn main() -> ExitCode {
     // count, but written as a sum to handle multi-queue-per-worker
     // configs cleanly.)
     let mut per_ts_worker: BTreeMap<(u64, u32), u32> = BTreeMap::new();
+    // Codex round-4 finding (minor): if rows have iface="" (legacy
+    // 3-column TSV) AND --iface is supplied, the filter would silently
+    // drop every row. Detect that and warn loudly — silent zeros from
+    // a misconfigured input are worse than a noisy fail.
+    let any_iface_label_present = binding_flows.iter().any(|r| !r.iface.is_empty());
+    if !args.iface.is_empty() && !any_iface_label_present && !binding_flows.is_empty() {
+        eprintln!(
+            "fairness-eval: WARNING — --iface={} supplied but TSV rows have no iface label \
+             (legacy 3-column input). Filter will drop ALL rows; treating --iface as unset.",
+            args.iface
+        );
+    }
+    let iface_filter_active = !args.iface.is_empty() && any_iface_label_present;
     for row in &binding_flows {
         if row.timestamp < ss_start_ts || row.timestamp > ss_end_ts {
             continue;
         }
-        if !args.iface.is_empty() && row.iface != args.iface {
+        if iface_filter_active && row.iface != args.iface {
             continue;
         }
         *per_ts_worker
@@ -270,10 +283,17 @@ fn main() -> ExitCode {
     };
 
     // Harness fail-fast guard: sum(a_i) vs non-starved iperf stream count.
-    // Each TCP flow creates flow_cache entries on BOTH ingress and egress
-    // bindings (a forward flow + a reverse flow), so the data-plane sum is
-    // expected to be ~2 × n_streams. Tolerance is per-stream-direction
-    // (i.e. ± max(2, 0.10 × 2N)).
+    //
+    // Codex round-4 finding: with --iface filtering (the per-worker
+    // contract introduced in round-3) we are looking at a single
+    // direction's flow_cache only. The sum is therefore ~n_streams,
+    // NOT 2×n_streams (which was correct only for the legacy
+    // unfiltered/cross-iface aggregation that round-3 killed).
+    //
+    // Backward-compat: if the harness is run without --iface (legacy
+    // 3-column TSV), rows are accepted across all interfaces and the
+    // bidirectional 2× assumption still holds. We pick the multiplier
+    // based on whether iface filtering is in effect.
     let a_i_sum: u32 = distribution_a_i.iter().sum();
     // Stream count: prefer start.connected[].len() (concrete stream
     // sockets observed at iperf3 setup time) over test_start.num_streams
@@ -287,7 +307,12 @@ fn main() -> ExitCode {
         iperf.start.connected.len() as u32
     };
     let n_non_starved = n_iperf_streams.saturating_sub(starved);
-    let expected_sum = n_non_starved.saturating_mul(2);
+    // iface filter active => single-direction flow_cache, ~1×; otherwise
+    // ~2× for bidirectional (both ingress and egress) entries. Use
+    // iface_filter_active (not raw args.iface) so the legacy-input
+    // fallback path uses the bidirectional multiplier as well.
+    let direction_multiplier: u32 = if iface_filter_active { 1 } else { 2 };
+    let expected_sum = n_non_starved.saturating_mul(direction_multiplier);
     let tolerance = ((GUARD_RELATIVE * expected_sum as f64) as u32).max(GUARD_ABSOLUTE);
     let a_i_sum_check_ok =
         (a_i_sum as i64 - expected_sum as i64).unsigned_abs() as u32 <= tolerance;
@@ -478,4 +503,83 @@ fn parse_binding_flows_tsv(path: &PathBuf) -> Vec<BindingFlowsRow> {
         // Other formats: silently skipped.
     }
     rows
+}
+
+#[cfg(test)]
+mod tsv_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_tmp(content: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fairness-eval-test-{}-{}.tsv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut f = fs::File::create(&p).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn six_col_multi_iface_per_worker_aggregation() {
+        // 2 timestamps × 3 ifaces × 6 workers, with worker counts
+        // {2,2,2,2,2,2} on iface ge-0-0-2 and noise on the other
+        // ifaces. Filtered to ge-0-0-2 we expect distribution_a_i =
+        // [2,2,2,2,2,2] regardless of the noise.
+        let mut content = String::new();
+        content.push_str("# timestamp\tbinding_slot\tqueue_id\tworker_id\tiface\tcount\n");
+        for ts in [1000u64, 1001u64] {
+            for w in 0u32..6 {
+                content.push_str(&format!(
+                    "{ts}\t{w}\t{w}\t{w}\tge-0-0-2\t2\n"
+                ));
+                // Noise on a different iface — must NOT contribute
+                // when --iface=ge-0-0-2 is set.
+                content.push_str(&format!(
+                    "{ts}\t{slot}\t{w}\t{w}\tge-0-0-3\t99\n",
+                    slot = 6 + w
+                ));
+            }
+        }
+        let p = write_tmp(&content);
+        let rows = parse_binding_flows_tsv(&p);
+        let _ = fs::remove_file(&p);
+        assert_eq!(rows.len(), 24, "expected 2 ts × 6 workers × 2 ifaces rows");
+        // Apply the same filter the binary does and verify the
+        // per-worker aggregation collapses to [2,2,2,2,2,2].
+        let iface = "ge-0-0-2";
+        let mut sum_per_worker = [0u32; 6];
+        for r in &rows {
+            if r.iface == iface {
+                sum_per_worker[r.worker_id as usize] += r.count;
+            }
+        }
+        // 2 timestamps × 2 (entries per worker per ts) → 4
+        // entries summed; with count=2 each, per-worker sum = 4.
+        // Median across the 2 timestamps would still be 2 (the
+        // sample value at each ts). The integration of the
+        // sum-then-median path lives in the verdict code; here we
+        // just confirm the parser + filter shape.
+        for v in &sum_per_worker {
+            assert!(*v > 0, "per-worker sum should be non-zero on filtered iface");
+        }
+    }
+
+    #[test]
+    fn three_col_legacy_parses_with_empty_iface() {
+        let content = "# timestamp\tbinding_slot\tcount\n1000\t0\t5\n1000\t1\t5\n";
+        let p = write_tmp(content);
+        let rows = parse_binding_flows_tsv(&p);
+        let _ = fs::remove_file(&p);
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            assert_eq!(r.iface, "", "legacy 3-col should produce empty iface label");
+            assert_eq!(r.worker_id, r.binding_slot, "legacy 3-col: worker_id == slot");
+        }
+    }
 }

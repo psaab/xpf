@@ -358,9 +358,10 @@ impl FlowCache {
     }
 
     /// #1219: count cache entries hit in the last `ACTIVE_WINDOW_EPOCHS`
-    /// ticks (≈ 650ms at ~65ms tick cadence). Owner-only periodic
-    /// scan; not on the hot path. O(N) over `FLOW_CACHE_SIZE`
-    /// (~8192 entries) ≈ ~10 µs of work per ~65ms tick per worker.
+    /// ticks. Epoch advance is driven by the umem debug-publish gate
+    /// (every 0xFFFF poll calls, ≈ 65 ms in steady state), so 10
+    /// epochs ≈ 650 ms. Owner-only periodic scan; not on the hot path.
+    /// O(N) over `FLOW_CACHE_SIZE` (4096 entries, see top of this file).
     pub(super) fn count_active_flows(&self) -> u32 {
         const ACTIVE_WINDOW_EPOCHS: u16 = 10;
         let now = self.current_epoch;
