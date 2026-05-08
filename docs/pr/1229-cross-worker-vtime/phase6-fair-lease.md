@@ -40,7 +40,95 @@ v2 below redrafts against these constraints.
 
 ## Status (v2)
 
-**Status:** DRAFT v2 — pending adversarial plan review
+**Status:** v2 PLAN-KILLED 2026-05-07 — second consecutive convergent
+kill from Codex ([task-mowhk86b-m1hjem](#)) and Gemini Pro 3
+([task-mowhkc6j-wx5jmq](#)).
+
+## v2 KILL summary
+
+Convergent fatal findings (both reviewers):
+
+1. **Polling skew still wins**: `max_reserve = 2×lease_bytes` is too
+   narrow. Slow-polling worker spills accumulated share to
+   redistribution pool; fast poller steals from there. v1 polling-rate
+   problem reintroduced with extra steps.
+2. **Aggregate cap broken**: per-worker pools grant tokens
+   independently of `max_total_leased`; cap is checked AFTER grant
+   via `bump_outstanding_leased`. Cap violation possible.
+3. **Token leak**: redistribution pool is unbounded. CPU-bound peers
+   cause indefinite accumulation. Later, when CPU frees, workers
+   drain at burst rate violating the shaper (Gemini's "infinite
+   accumulation" finding).
+4. **Sparse-worker-id panic**: `last_planned_workers` (Codex F4) is
+   `workers.len()`, not `max(worker_id)+1`. Sparse IDs starve
+   permanently when bounds-checked. Also `last_planned_workers`
+   mutates at runtime via reconcile passes (`coordinator/mod.rs:553`).
+5. **Surplus-sharing / root / transparent-rate bypasses** (Codex F6):
+   scope as written ("flow-fair queues only call v2") is too broad —
+   v2 only applies to Guarantee-phase exact queues; other paths
+   already bypass queue lease and v2 doesn't cover them.
+6. **`my_count == 0` fallback** still effectively greedy: workers
+   with no per-worker credits unconditionally drain the
+   redistribution pool, defeating fairness.
+7. **Counter rehydration race**: explicit init in
+   `enable_test_flow_fair` doesn't cover production
+   queue-lease-Arc replacement at `worker/mod.rs:805`.
+
+Codex-only: epoch CAS publish-before-distribute stall window if
+winner is preempted.
+
+Gemini-only: `max_reserve = 2×lease_bytes` per-worker × N workers =
+2N×lease_bytes total → silently breaks aggregate burst cap by 2N.
+TCP sender-side floor (~25%) on iperf-c saturation will dominate
+even after dataplane fairness is fixed → complexity unjustified by
+win.
+
+## Architectural insight: the tri-lemma
+
+The v1 → v2 progression revealed a structural tension:
+
+| Property | v1 | v2 |
+|----------|----|----|
+| Aggregate cap respected | yes | NO |
+| Per-worker fairness | NO (residual-balance) | NO (max_reserve cap) |
+| Work conservation | yes (greedy = wins) | partial (bounded spill) |
+
+Achieving all three (per-worker fair share + strict aggregate cap +
+work-conserving redistribution) is the hard tri-lemma. The classical
+solution is **hierarchical token bucket** (HFSC / CBQ): parent rate
+limiter + per-class child shares + borrow chains across the
+hierarchy. That's a multi-week architectural rebuild at the dataplane
+layer — and #1211 went 8 Codex + 3 Gemini rounds before PLAN-KILL on
+a similar-scope rework.
+
+## Status
+
+**STOPPED — pending user decision.**
+
+Per the project's triple-review methodology, two convergent
+PLAN-KILLs is a STOP signal. The fairness drive is at the same
+architectural inflection that closed #1211: AF_XDP UMEM ownership +
+per-worker queue lease + aggregate cap form a tri-lemma that's not
+solvable with stateless fractional caps or bounded credit pools.
+
+Options for the user to choose:
+
+1. **Accept the structural ceiling.** Recipe doc empirically shows
+   sub-saturation iperf-e at 0.6% CoV with `-b 1.5G` (workload-side
+   rate cap). Saturation has 8-21% structural CoV from sender-side
+   TCP unfairness + inter-worker CPU asymmetry; firewall is at its
+   hardware limit. PR #1230 ships Phases 1-5 as useful infra
+   (cap-aware MQFQ + monotonic per-bucket TX-rate tracking) that
+   benefits the sub-saturation case.
+
+2. **Hierarchical token bucket (option A)**: multi-week rebuild,
+   against #1211's PLAN-KILL precedent. High risk that another
+   8+3 round review converges on the same kill.
+
+3. **Different direction entirely** (option C): time-window sharing
+   instead of token pools — per-worker sliding-window quota with
+   global virtual-time; no token accumulation. Not yet explored;
+   would need fresh plan + reviewer rounds.
 
 ## v2 redesign: per-worker credits + work-conserving redistribution
 
