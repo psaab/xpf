@@ -1,20 +1,28 @@
-// #1229 Phase 6 v8: centralized helpers for `active_flow_buckets`
+// #1229 Phase 6 v8: reference helpers for `active_flow_buckets`
 // transitions. Plan §v8.1 / docs/pr/1229-cross-worker-vtime/phase6-fair-lease.md.
 //
-// Every production site that mutates `flow_fair_state.active_flow_buckets`
-// MUST go through `bump_active_flow_buckets` / `unbump_active_flow_buckets`.
-// The helpers atomically update both the queue-local count AND the v8
-// lease's per-worker counter (when `queue_lease_v8` is `Some`).
+// **Status**: helpers are NOT currently called by the four production
+// mutation sites. Plan v8 specified centralization; the implementation
+// instead inlines the same delta logic at each site because all four
+// callers already hold `&mut FlowFairState` for adjacent finish-time
+// math, and re-acquiring `&mut CoSQueueRuntime` through these helpers
+// would conflict with the existing borrow. The inlined logic is
+// byte-for-byte equivalent to the helpers (with the inlined `unbump`
+// also asserting `active_flow_buckets > 0` before saturating_sub, per
+// Codex 2026-05-08 code review note #2).
 //
-// Why centralized: pre-v8, transitions happened in
-// `accounting.rs::account_cos_queue_flow_enqueue/dequeue` AND in
-// `push.rs:153` (rollback-with-snapshot path) AND `push.rs:167`
-// (idle-bucket rebuild on a fresh-flow push). If the v8 lease delta
-// were only wired into `accounting.rs`, the rollback paths would
-// undercount; eventually `fetch_sub` on the lease counter would wrap
-// `AtomicU32` to `u32::MAX`, poisoning the per-worker fair-share
-// denominator. Codex flagged this in v7 review; v8 fixes by funneling
-// every site through here.
+// The helpers exist as:
+// (1) **single source of truth** for the canonical bump/unbump pattern
+//     — any future call site that does NOT have an existing
+//     `as_mut` borrow MUST call these helpers rather than re-inlining;
+// (2) **documentation** of the invariants (single-writer-per-slot,
+//     defensive lease-counter underflow protection, peak tracking).
+//
+// Pre-v8 transition sites (also documented inline at each call site):
+// - `accounting.rs::account_cos_queue_flow_enqueue` (bucket 0→nonzero)
+// - `accounting.rs::account_cos_queue_flow_dequeue` (bucket nonzero→0)
+// - `push.rs:cos_queue_push_front` rollback-with-snapshot path
+// - `push.rs:cos_queue_push_front` idle-bucket-rebuild path
 //
 // Single-writer-per-slot invariant: `worker_active_flow_buckets[id]`
 // on the v8 lease is written ONLY by worker `id` (the lease's
@@ -33,14 +41,10 @@ use std::sync::atomic::Ordering;
 /// to the v8 lease's per-worker counter (if attached). Updates the
 /// peak counter for telemetry. No-op if the queue has no flow_fair_state.
 ///
-/// **Currently inlined at all four migration sites** (accounting.rs:25,
-/// accounting.rs:84, push.rs ~153, push.rs ~167) — those callers
-/// already have an `&mut FlowFairState` borrow active for adjacent
-/// finish-time math, and re-acquiring `&mut CoSQueueRuntime` through
-/// this helper would conflict. The standalone helper exists for
-/// FUTURE call sites that emerge without an in-flight `as_mut` borrow,
-/// and as a single-source-of-truth comment block describing the
-/// canonical bump pattern.
+/// See the module-level doc for why this helper is dead-code today
+/// (the four production mutation sites inline the same logic to
+/// share their existing `as_mut` borrow). Future call sites without
+/// such a borrow MUST use this helper.
 #[allow(dead_code)]
 #[inline]
 pub(in crate::afxdp) fn bump_active_flow_buckets(queue: &mut CoSQueueRuntime) {
@@ -72,7 +76,7 @@ pub(in crate::afxdp) fn bump_active_flow_buckets(queue: &mut CoSQueueRuntime) {
 /// the slot is currently > 0. The local count uses `saturating_sub`.
 /// No-op if the queue has no flow_fair_state.
 ///
-/// See `bump_active_flow_buckets` for the dead-code rationale.
+/// See module-level doc for the dead-code rationale.
 #[allow(dead_code)]
 #[inline]
 pub(in crate::afxdp) fn unbump_active_flow_buckets(queue: &mut CoSQueueRuntime) {

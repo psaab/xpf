@@ -238,14 +238,77 @@ fn v8_legacy_lease_telemetry_returns_zero() {
 }
 
 #[test]
-fn v8_rehydrate_worker_active_count_idempotent() {
+fn v8_rehydrate_worker_active_count_is_additive() {
+    // #1229 Phase 6 v8 Codex code-review finding #1 (2026-05-08):
+    // rehydrate uses fetch_add so multi-runtime / multi-binding
+    // installs on the same worker thread contribute additively to
+    // the per-worker slot. A `store` would have clobbered prior
+    // runtimes' contributions; verify the additive contract.
     let lease = SharedCoSQueueLease::new_v8(10_000_000, 64 * 1024, 2, 3);
     lease.rehydrate_worker_active_count(2, 7);
     let slot = lease.worker_active_flow_buckets_for(2).unwrap();
     assert_eq!(slot.load(Ordering::Relaxed), 7);
-    // Re-rehydrate to a different value (covers lease-replacement install).
+    // Second runtime on same worker rehydrates with its own count;
+    // additive semantics → total is sum across runtimes.
     lease.rehydrate_worker_active_count(2, 3);
-    assert_eq!(slot.load(Ordering::Relaxed), 3);
+    assert_eq!(slot.load(Ordering::Relaxed), 10);
+    // Zero count is a no-op (prevents fetch_add(0) from being a memory
+    // barrier we don't need).
+    lease.rehydrate_worker_active_count(2, 0);
+    assert_eq!(slot.load(Ordering::Relaxed), 10);
+}
+
+#[test]
+fn v8_rehydrate_multiple_workers_isolated() {
+    // Different workers' slots are independent — additive within a
+    // slot, isolated across slots. Defends against a regression where
+    // rehydrate accidentally writes the wrong slot or sums across
+    // workers.
+    let lease = SharedCoSQueueLease::new_v8(10_000_000, 64 * 1024, 4, 3);
+    lease.rehydrate_worker_active_count(0, 2);
+    lease.rehydrate_worker_active_count(1, 5);
+    lease.rehydrate_worker_active_count(2, 1);
+    lease.rehydrate_worker_active_count(3, 4);
+    assert_eq!(
+        lease.worker_active_flow_buckets_for(0).unwrap().load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        lease.worker_active_flow_buckets_for(1).unwrap().load(Ordering::Relaxed),
+        5
+    );
+    assert_eq!(
+        lease.worker_active_flow_buckets_for(2).unwrap().load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        lease.worker_active_flow_buckets_for(3).unwrap().load(Ordering::Relaxed),
+        4
+    );
+}
+
+#[test]
+fn v8_rehydrate_multi_binding_same_worker_summation() {
+    // #1229 Phase 6 v8 Codex code-review finding #1: 'multi-binding
+    // same-worker rehydration case'. Two runtimes on the same worker
+    // for the same (ifindex, queue_id) lease, each rehydrating their
+    // own active count. Total slot value = sum.
+    let lease = SharedCoSQueueLease::new_v8(10_000_000, 64 * 1024, 2, 1);
+    // Runtime A on worker 0 has 4 active flow buckets; runtime B
+    // (different binding, same worker, same lease) has 3.
+    lease.rehydrate_worker_active_count(0, 4); // A
+    lease.rehydrate_worker_active_count(0, 3); // B
+    let slot = lease.worker_active_flow_buckets_for(0).unwrap();
+    assert_eq!(
+        slot.load(Ordering::Relaxed),
+        7,
+        "multi-binding additive total = sum, not clobbered"
+    );
+    // Subsequent transitions on either runtime delta normally.
+    slot.fetch_add(1, Ordering::Relaxed); // A's bucket goes 0→1
+    assert_eq!(slot.load(Ordering::Relaxed), 8);
+    slot.fetch_sub(1, Ordering::Relaxed); // B's bucket goes 1→0
+    assert_eq!(slot.load(Ordering::Relaxed), 7);
 }
 
 #[test]

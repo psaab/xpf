@@ -105,6 +105,16 @@ pub(super) fn account_cos_queue_flow_dequeue(
     let remaining = ff.flow_bucket_bytes[bucket].saturating_sub(item_len);
     let bucket_drained = ff.flow_bucket_bytes[bucket] > 0 && remaining == 0;
     if bucket_drained {
+        // Codex 2026-05-08 code-review note #2: parity with the
+        // dead-code helper `unbump_active_flow_buckets` (which has
+        // a `debug_assert!(active_flow_buckets > 0)`). saturating_sub
+        // hides the bug in release; assert in debug to catch any
+        // future caller that decrements past zero.
+        debug_assert!(
+            ff.active_flow_buckets > 0,
+            "active_flow_buckets dequeue past 0 (bucket {})",
+            bucket
+        );
         ff.active_flow_buckets = ff.active_flow_buckets.saturating_sub(1);
         // #785 Phase 3 — MQFQ bucket-idle reset. When a bucket
         // drains to 0 its head/tail finish-times are stale
@@ -143,6 +153,13 @@ pub(super) fn account_cos_queue_flow_dequeue(
                 let prev = slot.load(Ordering::Relaxed);
                 if prev > 0 {
                     slot.fetch_sub(1, Ordering::Relaxed);
+                } else {
+                    // Codex code-review note #2: parity with helper.
+                    debug_assert!(
+                        false,
+                        "v8 lease counter dequeue past 0 (worker {})",
+                        worker_id
+                    );
                 }
             }
         }
