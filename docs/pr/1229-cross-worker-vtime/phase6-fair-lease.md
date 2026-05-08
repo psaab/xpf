@@ -103,6 +103,449 @@ a similar-scope rework.
 
 ## Status
 
+**v3 dispatched 2026-05-07 — user picked time-window sharing.**
+
+---
+
+## v3 design: per-epoch fair share (time-window sharing)
+
+User chose option C from the v2 stop-and-report. v3 abandons token
+accumulation entirely and uses epoch-bounded per-worker grant
+counters that reset every epoch. This addresses every convergent
+kill point from v1+v2 because there is no pool to leak, no balance
+to steal share from, and no accumulating credit to violate the cap.
+
+### v3.1 Core insight
+
+Rate is `class_rate_bytes_per_sec`. Pick an epoch duration (e.g.
+200µs to match current refill cadence). Per-epoch grant cap:
+
+```
+epoch_total_grant_cap = class_rate_bytes_per_sec × epoch_duration_sec
+                      = 16e9/8 × 200e-6 = 400 KB per epoch (16G class)
+```
+
+Each worker's fair share within an epoch:
+
+```
+my_fair_share = epoch_total_grant_cap / epoch_active_workers
+              = 400 KB / 4 = 100 KB per worker per epoch (4 active workers)
+```
+
+Within an epoch, a worker can grant from its **primary share** (up
+to `my_fair_share`); once exhausted, it can claim **surplus**
+(epoch grant cap minus sum of all per-worker grants). At epoch
+boundary, all grant counters reset. Slow workers don't carry their
+unused share forward; fast workers don't carry surplus.
+
+### v3.2 State layout
+
+```rust
+pub(in crate::afxdp) struct SharedCoSQueueLease {
+    // existing config + state retained for legacy callers
+    config: SharedCoSLeaseConfig,
+    state: SharedCoSLeaseState,
+
+    // NEW v3: epoch state
+    epoch: SharedCoSEpochState,
+
+    // NEW v3: dense per-worker active-flow-bucket counters
+    // (used for fair-share computation at epoch start). Sized
+    // by max_worker_id+1 (sourced from coordinator's
+    // dense-worker-id map; see §v3.6).
+    worker_active_flow_buckets: Box<[AtomicU32]>,
+
+    // NEW v3: per-worker grants this epoch. Reset to 0 by
+    // whichever worker rotates the epoch.
+    worker_epoch_grants: Box<[AtomicU64]>,
+}
+
+#[repr(align(64))]
+struct SharedCoSEpochState {
+    // Monotonic ns when current epoch started. Workers compare
+    // now_ns against this to decide when to rotate.
+    epoch_start_ns: AtomicU64,
+    // Total bytes that may be granted in this epoch
+    // (= rate × epoch_duration). Set at epoch rotation.
+    epoch_total_grant_cap: AtomicU64,
+    // Active worker count snapshotted at epoch rotation
+    // (workers with active_flow_buckets > 0). Used for
+    // primary-share denominator.
+    epoch_active_worker_count: AtomicU32,
+    // Sequence number for epoch rotation; CAS-serialized so
+    // exactly one worker runs the rotation per boundary.
+    epoch_seq: AtomicU64,
+}
+
+const EPOCH_DURATION_NS: u64 = 200_000; // 200µs
+```
+
+### v3.3 Acquire path
+
+```rust
+fn shared_cos_lease_acquire_for_worker_v3(
+    lease: &SharedCoSQueueLease,
+    worker_id: usize,
+    now_ns: u64,
+    requested: u64,
+) -> u64 {
+    if requested == 0 {
+        return 0;
+    }
+
+    // Bounds: out-of-range worker_id returns 0 (not panic).
+    // matches_config check on lease replacement ensures this only
+    // fires on programming bug.
+    if worker_id >= lease.worker_epoch_grants.len() {
+        debug_assert!(false, "worker_id out of range");
+        return 0;
+    }
+
+    // 1) Maybe-rotate epoch.
+    maybe_rotate_epoch_v3(lease, now_ns);
+
+    let total_cap = lease.epoch.epoch_total_grant_cap.load(Acquire);
+    let n_active = lease.epoch.epoch_active_worker_count.load(Acquire).max(1) as u64;
+    let my_fair_share = total_cap / n_active; // floor; remainder
+                                               // accessible via surplus
+
+    // 2) Try primary share first.
+    let my_grant = &lease.worker_epoch_grants[worker_id];
+    let mut total_granted: u64 = 0;
+    let mut still_needed = requested;
+    loop {
+        let curr = my_grant.load(Acquire);
+        if curr >= my_fair_share || still_needed == 0 {
+            break;
+        }
+        let take = still_needed.min(my_fair_share - curr);
+        if my_grant.compare_exchange_weak(
+            curr, curr + take, AcqRel, Acquire).is_ok()
+        {
+            total_granted += take;
+            still_needed -= take;
+        }
+    }
+
+    // 3) If still needed, claim surplus (sum of all worker grants
+    //    must remain ≤ total_cap). Surplus is the running sum of
+    //    every other worker's UNCLAIMED primary share + the
+    //    floor-division remainder.
+    while still_needed > 0 {
+        let total_granted_class: u64 = lease.worker_epoch_grants
+            .iter()
+            .map(|g| g.load(Acquire))
+            .sum();
+        if total_granted_class >= total_cap {
+            break;  // class-wide grant cap reached this epoch
+        }
+        let surplus_avail = total_cap - total_granted_class;
+        let take = still_needed.min(surplus_avail);
+        // Atomically bump THIS worker's grant counter. The
+        // class-wide sum check above is a snapshot; if a peer
+        // bumped concurrently, our take could overshoot by ≤
+        // requested per acquire. Bound: per-acquire request
+        // size (≤ TX_BATCH_SIZE × MTU). At 32 × 1500 = 48 KB,
+        // overshoot bounded to one batch — acceptable transient.
+        let curr = my_grant.load(Acquire);
+        if my_grant.compare_exchange_weak(
+            curr, curr + take, AcqRel, Acquire).is_ok()
+        {
+            total_granted += take;
+            still_needed -= take;
+        }
+        // CAS retry on contention with peer increments;
+        // re-snapshot total_granted_class on next iteration.
+    }
+
+    total_granted
+}
+```
+
+### v3.4 Epoch rotation
+
+```rust
+fn maybe_rotate_epoch_v3(
+    lease: &SharedCoSQueueLease,
+    now_ns: u64,
+) {
+    let start = lease.epoch.epoch_start_ns.load(Acquire);
+    if now_ns < start.saturating_add(EPOCH_DURATION_NS) {
+        return; // current epoch still valid
+    }
+
+    // CAS the seq to claim rotation. Only one winner runs reset.
+    let seq = lease.epoch.epoch_seq.load(Acquire);
+    let new_seq = seq + 1;
+    if lease.epoch.epoch_seq.compare_exchange(
+        seq, new_seq, AcqRel, Acquire).is_err()
+    {
+        return; // peer rotated; we proceed against fresh state
+    }
+
+    // We won the rotation. Reset all per-worker grants to 0.
+    for grant in lease.worker_epoch_grants.iter() {
+        grant.store(0, Release);
+    }
+
+    // Recompute active worker count from per-worker active-flow-
+    // bucket counters. This gives the next epoch's denominator.
+    let active_count = lease.worker_active_flow_buckets
+        .iter()
+        .filter(|c| c.load(Relaxed) > 0)
+        .count() as u32;
+    lease.epoch.epoch_active_worker_count.store(active_count, Release);
+
+    // Compute new epoch total cap.
+    let elapsed_ns = now_ns - start; // typically ≈ EPOCH_DURATION_NS
+                                      // but may be longer on jitter
+    let new_cap = ((lease.config.rate_bytes as u128)
+        * (elapsed_ns as u128)
+        / 1_000_000_000u128) as u64;
+    lease.epoch.epoch_total_grant_cap.store(new_cap, Release);
+
+    // Advance epoch_start_ns LAST so peers entering acquire see
+    // the new state once they observe new start.
+    lease.epoch.epoch_start_ns.store(now_ns, Release);
+}
+```
+
+### v3.5 No tokens, no cap-after-grant violation
+
+The acquire path enforces:
+- Primary grant ≤ `my_fair_share`.
+- Total class-wide grants ≤ `total_cap` (sum check before each
+  surplus take).
+- Per-acquire surplus overshoot bounded by batch size (≤ 48 KB).
+
+There is NO `state.credits` accumulator that can be violated.
+There is NO `outstanding_leased_tokens` that can drift. There is
+NO redistribution pool that can leak.
+
+### v3.6 Dense worker-id mapping (Codex F4 / Gemini #5 fix)
+
+The plan requires `worker_epoch_grants.len() ==
+worker_active_flow_buckets.len() == max_worker_id + 1`. Construction:
+
+- Coordinator computes `max_worker_id` from the worker map at
+  config compile time.
+- `SharedCoSQueueLease::new(config, max_worker_id)` sizes both
+  arrays to `max_worker_id + 1`.
+- `matches_config` is extended to include `max_worker_id`; if
+  the dense space changes (HA failover, worker addition), the
+  lease is rebuilt during normal config-change reconcile.
+- Sparse IDs: gaps stay at 0 forever (workers not bound to this
+  lease never request).
+
+This explicitly does NOT use `last_planned_workers`. That value
+mutates at runtime (Codex F4) and is `workers.len()` not
+`max(worker_id)+1` (Gemini #5).
+
+### v3.7 No `my_count == 0` fallback (Codex F6 / Gemini #10 Bypass 2 fix)
+
+Acquire never falls through to a greedy path. If a worker has
+no active flow buckets:
+- Its `epoch_active_worker_count` contribution is 0 (filtered out
+  in §v3.4).
+- Its `my_fair_share` is `total_cap / n_active` where `n_active`
+  excludes it; it can still claim surplus via §v3.3 step 3 to
+  participate in work-conservation.
+- This is intentional and bounded: surplus claiming is capped by
+  `total_cap - total_granted_class`, so non-flow-fair workers
+  can only consume what flow-fair workers haven't.
+
+Root lease, surplus-sharing exact queues, and transparent-rate
+queues use a SEPARATE code path (`shared_cos_lease_acquire_legacy`,
+the existing pre-v3 function, retained verbatim). v3 scope is
+"Guarantee-phase exact queue lease only" — explicit narrowing per
+Codex F6.
+
+### v3.8 Counter rehydration (Codex F5 / Gemini #6 fix)
+
+`worker_active_flow_buckets` is read AT EPOCH ROTATION (§v3.4),
+not on every acquire. This eliminates the rehydration race window
+to one epoch (200µs). On lease replacement (queue-lease-Arc swap
+at `worker/mod.rs:805`), the new lease inherits zeroed counters;
+they re-fill via the existing `account_cos_queue_flow_enqueue`
+path within the first epoch.
+
+If the lease replacement fires DURING an epoch, the stale-count
+window is bounded by `EPOCH_DURATION_NS = 200µs`. Within that
+window, surplus claiming preserves work conservation; nobody
+starves.
+
+## Public API preservation (v3)
+
+- `SharedCoSQueueLease::new` signature CHANGES: gains
+  `max_worker_id: usize` parameter (from coordinator).
+- `SharedCoSQueueLease::acquire` signature CHANGES: gains
+  `worker_id: usize` parameter. Caller in `cos/token_bucket.rs:64`
+  passes `runtime.worker_id`.
+- `SharedCoSQueueLease::consume` (release-side): unchanged.
+  v3 doesn't track outstanding leased tokens, so consume is a
+  no-op for v3 callers. Existing legacy callers continue to use
+  the old consume.
+- `SharedCoSRootLease::acquire`: unchanged (separate path).
+- `matches_config` extended to include `max_worker_id`.
+
+## Hidden invariants (v3)
+
+1. **Aggregate cap**: enforced at every grant. Sum of all
+   per-worker grants this epoch ≤ `total_cap` (≤ rate ×
+   elapsed_ns). Per-acquire surplus overshoot ≤ batch size,
+   bounded.
+2. **No long-term token state**: epoch_grants reset every 200µs.
+   No accumulating pools. No leaks.
+3. **Polling skew protection**: fast poller hits its
+   `my_fair_share` cap within an epoch, can only claim surplus.
+   Slow poller's primary share is preserved until epoch close;
+   surplus available only for the slow poller's UNCLAIMED slice
+   (= `my_fair_share - my_grant.load`), bounded.
+4. **Work conservation**: within an epoch, fast worker can claim
+   slow worker's unclaimed primary share via surplus. Aggregate
+   throughput at saturation: sum of (each worker's actual TX) ≤
+   `total_cap`, but fast workers get the unused share of slow
+   workers. iperf-c case: workers A/B slightly throttled to
+   fair share; worker C (1 flow, ~4 Gbps) takes its 1/12 = 0.33
+   primary + claims surplus from A/B's unconsumed quota up to
+   the 4 Gbps it actually produces. Aggregate preserved.
+5. **No fairness bypass**: my_count==0 doesn't fall through to
+   greedy; it falls through to surplus, which is capped by
+   class total.
+6. **Bounds safety**: `worker_id >= len()` returns 0, not panic.
+
+## Risk assessment (v3)
+
+| Class | Severity | Notes |
+|-------|----------|-------|
+| Behavioral regression | LOW | No long-term state; epoch reset every 200µs preserves Junos shaper expectations. |
+| Lifetime / borrow-checker | LOW | `Box<[AtomicU64]>` and `Box<[AtomicU32]>` owned by lease. Workers access via `Arc` deref. |
+| Performance regression | MED | Primary acquire: 1 CAS loop on `worker_epoch_grants[id]`. Surplus acquire: O(N) sum + 1 CAS. At 5K acquires/sec/worker, primary path is 5K CAS/sec/worker; surplus path triggers only when primary share exhausted (saturation). Profile required; if surplus path becomes hot, alternative is a class-wide running counter incremented atomically per grant. |
+| Architectural mismatch | LOW | Time-window sharing is canonical (e.g. AVB Credit-Based Shaper, ATM TM 4.1 GCRA, Linux htb borrow). Distinct from #1211 AFD overlay. |
+| Saturated workload regression | LOW | Work conservation explicit via surplus; CPU-bound peer's unconsumed share goes to faster peer within the same epoch. iperf-c 22.7G expected to hold. |
+
+## Test plan (v3)
+
+- Cargo build clean.
+- Cargo test --release: 1065+ tests pass.
+- New tests in shared_cos_lease v3:
+  - **Two-worker primary share equal demand**: each gets 50%.
+  - **Asymmetric flow counts [4,1]**: A primary 4/5 × cap, B 1/5
+    × cap when both fully demand.
+  - **Polling skew test**: A polls 10× B; each gets primary 50%
+    of cap with occasional surplus from B's unclaimed slice.
+    Total NEVER exceeds class cap. Critical anti-regression.
+  - **CPU-bound peer surplus claim**: B serves below primary
+    share; A claims B's unclaimed share via surplus. Aggregate
+    preserved.
+  - **Aggregate cap preserved under contention**: 6 workers each
+    requesting more than total cap; sum of grants ≤ total_cap.
+  - **Epoch rotation correctness**: at boundary, grants reset;
+    fair share recomputed; previous epoch's unconsumed share
+    does NOT carry forward.
+  - **Sparse worker_id**: bound check, no panic.
+  - **Out-of-range `worker_id`**: returns 0, no panic.
+  - **Counter rehydration on lease swap**: after Arc replacement,
+    first epoch may have stale counts; surplus-claim preserves
+    work conservation; aggregate within 5% of steady-state.
+  - **Concurrent acquire** (loom or quickcheck): no overshoot
+    > batch size, no underflow, no negative grants.
+- 5x flake check on `shared_cos_lease_v3_polling_skew_protection`.
+- Go suite: 30 packages pass.
+- Cluster smoke matrix (CoS off + CoS on, v4+v6, push+reverse,
+  per-class 5201-5206).
+- **Targeted iperf-e measurement** (16G EXACT, sub-saturation):
+  per-flow CoV target <10% (currently 60%).
+- **Targeted iperf-c saturation measurement** (25G shaper, push):
+  aggregate ≥22.0 Gbps; observed_cov no worse than 0.21.
+- **Targeted CoS-disabled measurement**: root lease path → master
+  baseline (Phase 6 only touches Guarantee-phase exact queue lease).
+
+## Open questions for adversarial review (v3)
+
+1. **Polling skew, again**: critique fires only if a fast poller
+   can drain MORE than `my_fair_share` in primary. v3 explicitly
+   blocks this via `curr >= my_fair_share` check. Verify the
+   surplus path can't be abused: a fast poller could keep
+   spinning the surplus loop and snapping every byte that any
+   slow peer hasn't claimed yet. Bound: `total_granted_class ≤
+   total_cap`, so per-epoch upper bound is `total_cap` — but a
+   fast poller could approach 100% of surplus = 100% of
+   `total_cap - my_fair_share × N`. Is that an issue?
+
+2. **Per-acquire O(N) sum of grants**: surplus-path requires
+   summing all `worker_epoch_grants[*]` per surplus acquire.
+   At 6 workers and surplus-rate acquires ~5K/sec, that's ~30K
+   atomic loads/sec/worker. Manageable, but if surplus is the
+   common path under sustained saturation, this could become a
+   hot fn. Alternative: maintain `class_total_granted` atomic
+   updated on each primary/surplus grant. Trade: extra atomic
+   per grant vs. O(N) sum per surplus acquire. Which is right?
+
+3. **Epoch rotation jitter**: when the rotation winner is
+   preempted between `compare_exchange` (claims rotation) and
+   `epoch_start_ns.store` (publishes), peers see the new seq
+   but old start_ns and might attempt second rotation. Bounded
+   by the seq CAS — only one winner per seq increment — but
+   what's the steady-state behavior under contention? Worst
+   case: peers spin on `seq` mismatch waiting for `start_ns`
+   publish. Probably fine; verify.
+
+4. **Surplus overshoot bound**: stated as "bounded by per-
+   acquire request size ≤ 48 KB". Is that actually true under
+   N peers concurrently grabbing surplus? Worst case: all 6
+   workers see `surplus_avail > 0` simultaneously, each grabs
+   48 KB → 288 KB total grant for one acquire round. Bounded by
+   one batch, but is the aggregate cap violated for ONE epoch
+   before resetting?
+
+5. **Work conservation argument**: "fast worker claims slow
+   worker's unclaimed share via surplus". Verify the math:
+   if A=fast and B=slow each have 50% share, and B serves only
+   30% of share, A's surplus opportunity is 20% extra of share
+   = 20% of total_cap × 0.5 = 10% of total_cap. So A serves
+   60% of total_cap, B serves 30%, aggregate 90%. Or do we
+   allow A to keep claiming surplus up to (total - sum), giving
+   A = 70%, B = 30%, aggregate 100%? Both behaviors have
+   merit; pick one and document.
+
+6. **`max_worker_id` from the coordinator**: extending
+   `matches_config` to include max_worker_id triggers lease
+   rebuild on worker count change. What's the rebuild cost?
+   Is rebuilding-during-traffic safe (frame inflight, queue
+   non-empty)?
+
+7. **Inter-worker time skew**: workers read `now_ns` at slightly
+   different times (CLOCK_MONOTONIC RAW). Two workers could
+   simultaneously see "epoch expired" and try to rotate. The
+   seq CAS handles it. But could `epoch_start_ns` from worker
+   A's perspective be "later" than worker B's perspective,
+   leading to disagreement on which epoch's grants to use?
+   Bounded by clock skew (~ns), but does it matter at 200µs
+   epoch granularity?
+
+8. **No `state.credits` for v3 callers**: v3 doesn't update
+   `state.credits` or `outstanding_leased_tokens`. Existing
+   `release_unused` calls (`token_bucket.rs:224`) become no-ops
+   for v3 callers. Is that a leak? Or is `release_unused` only
+   relevant for the legacy path?
+
+9. **Window duration choice (200µs)**: matches existing refill
+   cadence. At 16G class rate, that's 400 KB per epoch. Is
+   that fine-grained enough for fairness signal? Or should it
+   be 50µs (100 KB cap) for sharper convergence?
+
+10. **TCP sender-side floor**: same caveat as v1/v2 reviews.
+    iperf-c CoV expected ~21% (sender-side). v3's value is
+    sub-saturation iperf-e style. Honestly disclosed.
+
+---
+
+## STOPPED state retained for reference
+
+(The pre-v3 STOPPED status from 2026-05-07 is preserved below
+for context. v3 supersedes.)
+
 **STOPPED — pending user decision.**
 
 Per the project's triple-review methodology, two convergent
