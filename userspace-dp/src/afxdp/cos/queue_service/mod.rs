@@ -989,23 +989,34 @@ fn submit_cos_batch(
             // the successful prefix in-place; we slice the sidecar by
             // returned `packets` to account only the bytes actually
             // shipped (not retries).
-            let local_flow_hash_seed = binding
+            //
+            // Stack-allocated array (TX_BATCH_SIZE × 10 bytes = 640 B)
+            // avoids per-batch heap allocation on the hot path. The
+            // Option<u64> seed acts as a presence flag: None means no
+            // flow_fair state → sidecar_len stays 0 and accounting is
+            // skipped entirely (no iteration, no branch inside the
+            // success block).
+            let local_seed_opt = binding
                 .cos
                 .cos_interfaces
                 .get(&root_ifindex)
                 .and_then(|root| root.queues.get(queue_idx))
                 .and_then(|q| q.flow_fair_state.as_ref())
-                .map(|ff| ff.flow_hash_seed)
-                .unwrap_or(0);
-            let sidecar: Vec<(u16, u64)> = items
-                .iter()
-                .map(|req| {
-                    (
-                        cos_flow_bucket_index(local_flow_hash_seed, req.flow_key.as_ref()) as u16,
+                .map(|ff| ff.flow_hash_seed);
+            let mut sidecar = [(0u16, 0u64); TX_BATCH_SIZE];
+            let sidecar_len = if let Some(seed) = local_seed_opt {
+                let mut n = 0usize;
+                for req in items.iter().take(TX_BATCH_SIZE) {
+                    sidecar[n] = (
+                        cos_flow_bucket_index(seed, req.flow_key.as_ref()) as u16,
                         req.bytes.len() as u64,
-                    )
-                })
-                .collect();
+                    );
+                    n += 1;
+                }
+                n
+            } else {
+                0
+            };
             match transmit_batch(binding, &mut items, now_ns, shared_recycles) {
                 Ok((packets, bytes)) => {
                     apply_cos_send_result(
@@ -1017,10 +1028,9 @@ fn submit_cos_batch(
                         bytes,
                         items,
                     );
-                    // #1229 v7: account per-bucket bytes for the
-                    // sent prefix. now_ns sampled ONCE per batch
-                    // (the surrounding fn arg).
-                    if packets > 0 {
+                    // #1229 v7: account per-bucket bytes for the sent
+                    // prefix. sidecar_len > 0 ↔ flow_fair is active.
+                    if packets > 0 && sidecar_len > 0 {
                         if let Some(ff) = binding
                             .cos
                             .cos_interfaces
@@ -1082,25 +1092,29 @@ fn submit_cos_batch(
             );
             // #1229 v7: pre-transmit sidecar (same shape as Local
             // path above — transmit_prepared_queue consumes the
-            // successful prefix in-place).
-            let prepared_flow_hash_seed = binding
+            // successful prefix in-place). Stack array avoids
+            // per-batch allocation; only populated for flow-fair queues.
+            let prepared_seed_opt = binding
                 .cos
                 .cos_interfaces
                 .get(&root_ifindex)
                 .and_then(|root| root.queues.get(queue_idx))
                 .and_then(|q| q.flow_fair_state.as_ref())
-                .map(|ff| ff.flow_hash_seed)
-                .unwrap_or(0);
-            let sidecar: Vec<(u16, u64)> = items
-                .iter()
-                .map(|req| {
-                    (
-                        cos_flow_bucket_index(prepared_flow_hash_seed, req.flow_key.as_ref())
-                            as u16,
+                .map(|ff| ff.flow_hash_seed);
+            let mut sidecar = [(0u16, 0u64); TX_BATCH_SIZE];
+            let sidecar_len = if let Some(seed) = prepared_seed_opt {
+                let mut n = 0usize;
+                for req in items.iter().take(TX_BATCH_SIZE) {
+                    sidecar[n] = (
+                        cos_flow_bucket_index(seed, req.flow_key.as_ref()) as u16,
                         req.len as u64,
-                    )
-                })
-                .collect();
+                    );
+                    n += 1;
+                }
+                n
+            } else {
+                0
+            };
             match transmit_prepared_queue(binding, &mut items, now_ns) {
                 Ok((packets, bytes)) => {
                     apply_cos_prepared_result(
@@ -1112,7 +1126,7 @@ fn submit_cos_batch(
                         bytes,
                         items,
                     );
-                    if packets > 0 {
+                    if packets > 0 && sidecar_len > 0 {
                         if let Some(ff) = binding
                             .cos
                             .cos_interfaces
