@@ -1,8 +1,8 @@
 //! #1229 v7 per-bucket TX rate accounting + threshold-gated EWMA.
 //!
-//! Tracks observed bytes/sec per FlowFair bucket so the cap-aware MQFQ
+//! Tracks observed bits/sec per FlowFair bucket so the cap-aware MQFQ
 //! selector can compare against a per-class target rate
-//! (`Queue_BW / max(1, active_flow_buckets)`). The bucket whose
+//! (`Queue_BW_bps / max(1, active_flow_buckets)`). The bucket whose
 //! observed rate is over the cap is deferred in favor of a less-served
 //! bucket; if all buckets are over-cap, the selector falls back to
 //! standard min-finish MQFQ to avoid stall.

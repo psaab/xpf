@@ -665,16 +665,20 @@ pub(in crate::afxdp) struct FlowFairState {
     /// the earlier bucket's original head. Per-pop snapshots make
     /// every rollback item round-trip neutral.
     pub(in crate::afxdp) pop_snapshot_stack: Vec<CoSQueuePopSnapshot>,
-    /// #1229 v7 per-bucket monotonic TX byte counter. Updated only at
-    /// settle/commit (apply_cos_send_result, apply_cos_prepared_result),
-    /// never on speculative pop or restore. Single-writer per FlowFairState
-    /// (the owning worker for this queue runtime). u64 wraps in ~5e9
-    /// seconds at 100 Gbps — practically unreachable.
+    /// #1229 v7 per-bucket monotonic TX byte counter. Updated at all
+    /// settle/commit paths (apply_cos_send_result, apply_cos_prepared_result,
+    /// and the settle_exact_*_scratch_submission_flow_fair direct paths).
+    /// Never updated on speculative pop or restore. Single-writer per
+    /// FlowFairState (the owning worker for this queue runtime). u64
+    /// wraps in ~1.5e9 seconds (~47 years) at 100 Gbps — practically
+    /// unreachable.
     pub(in crate::afxdp) flow_bucket_tx_bytes: [u64; COS_FLOW_FAIR_BUCKETS],
-    /// #1229 v7 per-bucket EWMA-smoothed observed bytes/sec. u64 to
-    /// avoid the v4-era u32 truncation above 4.29 Gbps. Updated by
+    /// #1229 v7 per-bucket EWMA-smoothed observed rate in bits/sec. u64
+    /// to avoid the v4-era u32 truncation above 4.29 Gbps. Updated by
     /// `account_flow_bucket_tx` at settle. Read by the cap-aware MQFQ
-    /// selector when comparing against the per-class target rate.
+    /// selector when comparing against the per-class target rate
+    /// (also in bits/sec). Note: the field name `*_bps` and the selector
+    /// comparison (`observed_bps <= target_bps`) are both in bits/sec.
     pub(in crate::afxdp) flow_bucket_observed_bps: [u64; COS_FLOW_FAIR_BUCKETS],
     /// #1229 v7 per-bucket last-commit timestamp (CLOCK_MONOTONIC ns,
     /// sampled once per batch commit at the apply_cos_*_result call

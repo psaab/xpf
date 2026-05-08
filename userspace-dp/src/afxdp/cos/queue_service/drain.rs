@@ -27,8 +27,11 @@ fn compute_drain_target_bps(queue: &CoSQueueRuntime) -> u64 {
         return u64::MAX;
     }
     // Convert bytes/sec → bits/sec. u128 intermediate avoids overflow
-    // at 100+ Gbps configured rates.
-    let queue_bw_bps = (rate_bytes as u128).saturating_mul(8) as u64;
+    // at 100+ Gbps configured rates; clamp to u64::MAX before narrowing
+    // so extreme configured rates saturate rather than silently wrap.
+    let queue_bw_bps = (rate_bytes as u128)
+        .saturating_mul(8)
+        .min(u64::MAX as u128) as u64;
     let denom = ff.active_flow_buckets.max(1) as u64;
     queue_bw_bps / denom
 }
