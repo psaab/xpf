@@ -1,7 +1,207 @@
 # #1231 — 'all peers CPU-bound' detector to fix iperf-c push -15% regression
 
-**Status:** DRAFT v4 — incorporates Codex v3 PLAN-NEEDS-MAJOR fixes
-(task-moxd44lk-0tthoz).
+**Status:** DRAFT v5 — incorporates Codex v4 PLAN-NEEDS-MAJOR fix
+(task-moxdchi8-tlyhf6).
+
+## v4 PLAN-NEEDS-MAJOR summary (preserved)
+
+Codex (task-moxdchi8-tlyhf6): "v4 fixes the v3 signal self-
+suppression and the event-slot reset race, but the rotation
+aggregate snapshot is not race-safe as written."
+
+**Blocker:** v4 Step 1 reads `prev_packed_granted` via `load`,
+then defers reset to Step 5. Between those, an in-flight acquire
+from an old snapshot can still successfully CAS `packed_granted`
+(tag-checked CAS only checks tag, not `epoch_seq`). So
+`prev_granted` is not linearized — corrupts `aggregate_underuse`.
+
+**Fix per Codex verbatim**: at Step 1, do
+`packed_granted.0.swap(pack(new_tag, 0), AcqRel)` instead of
+`load`. Returned old value is the prior-epoch `prev_granted`.
+Old-tag in-flight CAS after the swap fails (tag mismatches
+new_tag). Old-tag CAS before the swap is captured in the
+returned value. Same proof pattern as event slots.
+
+Plus minor: probe F's "1ms / 30s = 0.003% CoV bound" is invalid
+for repeated bursts. Need to weaken the claim or validate
+empirically.
+
+---
+
+## v5 design — apply swap pattern to packed_granted
+
+### v5.1 Updated rotation order (Codex v4 fix)
+
+```rust
+fn maybe_rotate_epoch_v8_with_v5_bypass(now_ns: u64) {
+    // STEP 0: existing seqlock-claim CAS (EVEN→ODD).
+    let seq = v8.epoch.epoch_seq.load(Acquire);
+    if seq & 1 == 1 { return; }
+    let start = v8.epoch.epoch_start_ns.load(Acquire);
+    if start != 0 && now_ns < start.saturating_add(EPOCH_DURATION_NS) {
+        return;
+    }
+    if v8.epoch.epoch_seq
+        .compare_exchange(seq, seq + 1, AcqRel, Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let new_tag = ((seq >> 1) + 1) as u32;
+    let new_packed_zero = PackedEpochGrant::pack(new_tag, 0);
+
+    // STEP 1: ATOMIC-SWAP packed_granted to capture prior-epoch grant
+    // AND publish the new-tag/0 reset in one operation.
+    // Old-tag CAS after this swap sees the new tag and fails.
+    // Old-tag CAS before this swap is captured in the returned old.
+    let prev_packed_granted = v8.epoch
+        .packed_granted.0
+        .swap(new_packed_zero, AcqRel);
+    let (_prev_class_tag, prev_granted) =
+        PackedEpochGrant::unpack(prev_packed_granted);
+    let prev_cap = v8.epoch.epoch_total_grant_cap.load(Acquire);
+
+    // STEP 2: ATOMIC-SWAP each event slot. Same swap pattern.
+    let mut any_active_worker_signaled = false;
+    for (worker_id, pg) in v8.worker_starvation_events.iter().enumerate() {
+        let old = pg.0.swap(new_packed_zero, AcqRel);
+        let (_old_tag, old_count) = PackedEpochGrant::unpack(old);
+        let active = v8.worker_active_flow_buckets
+            .get(worker_id)
+            .map(|c| c.load(Relaxed) > 0)
+            .unwrap_or(false);
+        if active && old_count > 0 {
+            any_active_worker_signaled = true;
+        }
+    }
+
+    // STEP 3: ATOMIC-SWAP each per-worker grant slot.
+    // (Existing v8 logic resets these via store_for_new_epoch; v5
+    // changes that to swap so old-tag worker_grant_bump CAS after
+    // rotation fails as well.)
+    for grant in v8.worker_grants.iter() {
+        let _ = grant.0.swap(new_packed_zero, AcqRel);
+    }
+
+    // STEP 4: aggregate-underuse condition.
+    let underuse_slack = prev_cap / 20;
+    let aggregate_underuse =
+        (prev_granted as u64).saturating_add(underuse_slack) < prev_cap;
+
+    // STEP 5: arm or decay bypass.
+    if any_active_worker_signaled && aggregate_underuse {
+        v8.epoch.bypass_grace_rotations_remaining.store(5, Release);
+        v8.epoch.bypass_grace_arm_count.fetch_add(1, Relaxed);
+    } else {
+        let curr = v8.epoch.bypass_grace_rotations_remaining.load(Acquire);
+        if curr > 0 {
+            v8.epoch.bypass_grace_rotations_remaining.store(curr - 1, Release);
+        }
+    }
+
+    // STEP 6: existing publication of total_flows / fair_share / cap /
+    // grace_expires_ns / start_ns / seq EVEN bump (unchanged from v8).
+    // ...
+}
+```
+
+Key change: Steps 1, 2, 3 all use atomic swap, ensuring that any
+in-flight old-tag CAS either succeeds (counted in old return) or
+fails (because target now has new_tag). No window of corruption.
+
+The existing v8 `store_for_new_epoch` in `maybe_rotate_epoch_v8`
+becomes unused; remove it from rotation path. Construction-time
+initialization stays (PackedEpochGrant::new() defaults to (0,0)).
+
+### v5.2 Probe F revision (Codex v4 minor)
+
+Replace the "1ms / 30s = 0.003% CoV bound" claim with empirical
+validation:
+
+> The 5-rotation hysteresis bounds **per-arm leak duration** to
+> 1ms. If iperf-e produces sustained bursts that re-arm bypass
+> every ~5 epochs, bypass can be effectively continuously
+> armed, and the CoV impact depends on bytes shifted during
+> burst windows. Empirical validation is required:
+>
+> - Smoke matrix runs unchanged from v8 (Pass A + Pass B per-class)
+> - iperf-e canonical reproducer (12-stream sub-saturation): per-flow
+>   CoV must remain ≤ 15%
+> - iperf-c push saturated: aggregate must recover to ≥ 22.0 Gbps
+>
+> If iperf-e CoV degrades, fallback options (out of scope here):
+> require N% quorum (e.g., 30% of active workers) instead of any-
+> worker trigger; lengthen hysteresis to 10 rotations (2ms).
+
+### v5.3 Probe A revision (Codex v4 mostly-yes caveat)
+
+Codex noted "implementation must do tag-checked reads for
+`my_consumed_after_primary` and `class_granted_after_primary`".
+
+Concrete: in acquire_v8 PRIMARY path, the loop already loads
+both `my_pg` and class `packed_granted.0`. The narrow-signal
+check happens AFTER primary loop exit. The "class_granted at
+loop exit" can be re-read once for the signal check (one extra
+load):
+
+```rust
+// At narrow-signal check site:
+let class_curr = v8.epoch.packed_granted.0.load(Acquire);
+let (class_curr_tag, class_curr_granted) =
+    PackedEpochGrant::unpack(class_curr);
+let my_curr = my_pg.0.load(Acquire);
+let (my_curr_tag, my_consumed) = PackedEpochGrant::unpack(my_curr);
+
+if still_needed > 0
+    && my_curr_tag == my_tag
+    && class_curr_tag == my_tag
+    && (my_consumed as u64) >= my_fair_share
+    && (class_curr_granted as u64) < epoch_total_grant_cap
+    && now_ns < grace_expires_ns
+    && active
+{
+    bump_starvation_event(&v8.worker_starvation_events[worker_id], my_tag);
+}
+```
+
+Tag mismatch on either read means rotation happened mid-primary;
+signal is moot for this acquire (next acquire on new tag will
+fire cleanly if regime persists).
+
+### v5.4 LOC + telemetry (no change from v4)
+
+~120 prod + ~180 test, including bypass_grace_arm_count and
+bypass_grace_use_count surfacing.
+
+### v5.5 Open questions for adversarial review (v5)
+
+1. **Triple atomic-swap per rotation cost**: 1 + max_worker_id + max_worker_id =
+   ~13 swaps for typical 6-worker config. ~50ns each on x86 = ~650ns
+   per rotation. At rotation rate ~5K/sec = 3.25ms/sec total =
+   0.3% CPU. Acceptable.
+
+2. **Old-tag CAS after swap proof**: pg.0.swap(new_pack, AcqRel)
+   atomically replaces. Concurrent acquire that loaded the OLD
+   packed value sees its tag (E). Tries CAS with old_packed →
+   new_packed_with_take. CAS compares to currently-stored value
+   (now new_packed_zero with tag E+1). Mismatch → CAS fails.
+   ✓.
+
+3. **Old-tag CAS before swap proof**: concurrent acquire loaded
+   old_packed (tag E, count C0), CASed successfully to (tag E,
+   count C0 + take), THEN rotation runs swap. Swap returns
+   (tag E, count C0 + take) — the bump is captured. ✓.
+
+4. **Empirical validation only**: probe F revision says we'll
+   validate via smoke matrix. Acceptable empirical gate.
+
+5. **Round 5 readiness**: spine sound; all four v3/v4 blockers
+   addressed mechanically. Should be PLAN-READY.
+
+---
+
+## DEPRECATED v4 — superseded by v5 above
 
 ## v3 PLAN-NEEDS-MAJOR summary (preserved)
 
