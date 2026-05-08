@@ -762,8 +762,24 @@ impl SharedCoSQueueLease {
 
     /// #1229 Phase 6 v8: worker-side rehydration at lease install.
     /// Called by the worker after observing the new lease Arc, with
-    /// `count` = sum of active_flow_buckets across the worker's
-    /// queues bound to this lease. Single-writer-per-slot.
+    /// `count` = the calling runtime's `active_flow_buckets` for this
+    /// `(ifindex, queue_id)` lease.
+    ///
+    /// **Additive semantics** (Codex code-review finding #1, 2026-05-08):
+    /// uses `fetch_add` so multiple runtimes sharing the same worker
+    /// thread + lease (e.g. multiple BindingWorkers, see worker/mod.rs)
+    /// each contribute additively to the per-worker slot. A `store`
+    /// would have clobbered the prior runtime's contribution, leaving
+    /// the slot under-counted and eventually allowing decrements to
+    /// drive it to zero while other runtimes still have active flows.
+    ///
+    /// Plan §v5.3 specified "worker-level aggregate rehydration"; the
+    /// additive form delivers that without requiring the install path
+    /// to walk every runtime on the worker. Per-runtime install + Arc-
+    /// swap detection (token_bucket.rs `ensure_v8_lease_attached`)
+    /// guarantees this fires exactly once per (runtime, lease-Arc)
+    /// pair — so the sum is correct after all runtimes complete their
+    /// first top-up against the new lease.
     pub(in crate::afxdp) fn rehydrate_worker_active_count(
         &self,
         worker_id: usize,
@@ -772,8 +788,11 @@ impl SharedCoSQueueLease {
         let Some(v8) = self.v8.as_ref() else {
             return;
         };
+        if count == 0 {
+            return;
+        }
         if let Some(slot) = v8.worker_active_flow_buckets.get(worker_id) {
-            slot.store(count, Ordering::Relaxed);
+            slot.fetch_add(count, Ordering::Relaxed);
         }
     }
 
