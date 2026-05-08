@@ -1001,9 +1001,15 @@ impl SharedCoSQueueLease {
         let prev_granted = prev_granted_u32 as u64;
         let prev_cap = v8.epoch.epoch_total_grant_cap.load(Ordering::Acquire);
 
-        // #1231 v5 STEP 2: ATOMIC-SWAP each starvation event slot.
-        // Same swap pattern; returned old count is the prior-epoch
-        // value. Track if any active worker signaled.
+        // #1231 v5.5 stack scratch for per-worker swap captures.
+        const MAX_WORKERS_SCRATCH: usize = 32;
+        let n_workers = v8.worker_grants.len().min(MAX_WORKERS_SCRATCH);
+        debug_assert!(v8.worker_grants.len() <= MAX_WORKERS_SCRATCH);
+        let mut signaled_by_worker = [false; MAX_WORKERS_SCRATCH];
+        let mut prev_grants = [0u32; MAX_WORKERS_SCRATCH];
+        let mut active_by_worker = [false; MAX_WORKERS_SCRATCH];
+
+        // STEP 2: swap event slots, track per-worker signal flags.
         let mut any_active_worker_signaled = false;
         for (id, pg) in v8.worker_starvation_events.iter().enumerate() {
             let old = pg.0.swap(new_packed_zero, Ordering::AcqRel);
@@ -1013,21 +1019,56 @@ impl SharedCoSQueueLease {
                 .get(id)
                 .map(|c| c.load(Ordering::Relaxed) > 0)
                 .unwrap_or(false);
-            if active && old_count > 0 {
+            if id < n_workers {
+                active_by_worker[id] = active;
+                if active && old_count > 0 {
+                    signaled_by_worker[id] = true;
+                    any_active_worker_signaled = true;
+                }
+            } else if active && old_count > 0 {
                 any_active_worker_signaled = true;
             }
         }
 
-        // #1231 v5 STEP 3: ATOMIC-SWAP each per-worker grant slot.
-        // Replaces v8's store_for_new_epoch — closing the same
-        // in-flight-CAS race that Codex flagged for packed_granted.
-        for grant in v8.worker_grants.iter() {
-            let _ = grant.0.swap(new_packed_zero, Ordering::AcqRel);
+        // STEP 3: swap worker_grants, capture prev_grant for peer-util.
+        for (id, grant) in v8.worker_grants.iter().enumerate() {
+            let old = grant.0.swap(new_packed_zero, Ordering::AcqRel);
+            if id < n_workers {
+                let (_, prev) = PackedEpochGrant::unpack(old);
+                prev_grants[id] = prev;
+            }
         }
 
-        // #1231 v5 STEP 4: aggregate-underuse condition. Triggers
-        // when prior epoch's class-wide grant was sub-cap by ≥5%.
-        let underuse_slack = prev_cap / 20;
+        // #1231 v5.5 STEP 3.5: peer-utilization gate. iperf-c
+        // saturation has CPU-bound peers consuming <60% of share;
+        // iperf-e shaper-bound peers consume ~90%. Discriminator.
+        let mut any_peer_under_util = false;
+        for id in 0..n_workers {
+            if !active_by_worker[id] || signaled_by_worker[id] {
+                continue;
+            }
+            let share = v8
+                .worker_fair_share
+                .get(id)
+                .map(|s| s.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            if share == 0 {
+                continue;
+            }
+            // util < 60%: 5 * prev_grant < 3 * share
+            if (prev_grants[id] as u64).saturating_mul(5) < share.saturating_mul(3) {
+                any_peer_under_util = true;
+                break;
+            }
+        }
+
+        // #1231 v5.1 STEP 4: aggregate-underuse condition. Tightened
+        // from 5% to 14% slack (cap / 7) per empirical comparison:
+        // - iperf-e at ~89% of cap (14.2G/16G) → 11% under cap →
+        //   does NOT fire (margin 3pp).
+        // - iperf-c push at ~80% of cap (20.2G/25G) → 20% under cap →
+        //   fires (margin 6pp).
+        let underuse_slack = prev_cap / 7;
         let aggregate_underuse =
             prev_granted.saturating_add(underuse_slack) < prev_cap;
 
@@ -1035,7 +1076,7 @@ impl SharedCoSQueueLease {
         // must hold to arm: any active worker signaled starvation
         // AND the class was sub-cap (room was available — grace
         // gating was the cause of stranded primary share).
-        if any_active_worker_signaled && aggregate_underuse {
+        if any_active_worker_signaled && aggregate_underuse && any_peer_under_util {
             v8.epoch
                 .bypass_grace_rotations_remaining
                 .store(5, Ordering::Release);
