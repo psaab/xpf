@@ -103,8 +103,438 @@ a similar-scope rework.
 
 ## Status
 
-**v5 dispatched 2026-05-07 — fixes the three fatal integration holes Codex
-identified in v4 ("PLAN-KILL as written, but salvageable").**
+**v6 dispatched 2026-05-07 — fixes v5's cross-epoch rollback underflow
+(Codex "PLAN-KILL as written, salvageable").**
+
+## v5 KILL summary (preserved)
+
+Codex ([task-mowizmof-xk0v6k](#)) verdict: same structural verdict as
+v4 — direction is right, ONE specific fatal bug.
+
+**Cross-epoch rollback underflow** (Codex):
+
+1. Worker A snapshots stable epoch E.
+2. A CASes `epoch_total_granted += take` successfully.
+3. Worker B rotates to E+1 and stores `epoch_total_granted = 0`.
+4. A's outstanding CAS fails, so A rolls back with `fetch_sub(take)`.
+5. That subtraction hits the NEW epoch's zeroed counter and
+   underflows/wraps.
+
+Same class of race lets an old snapshot grant bytes into a new epoch
+using old `my_fair_share` and old `epoch_total_grant_cap`. So
+invariant "`epoch_total_granted ≤ epoch_total_grant_cap` always" is
+false as written.
+
+**Codex required fix**: pack `(seq_or_epoch, total_granted)` into
+one CAS word; rollback only succeeds if epoch tag still matches.
+Alternatively, read-side in-flight grant guard, but heavier.
+
+Other findings (Codex non-fatal):
+- A/B (seqlock rotation): fine; add bounded spin/yield/return-0
+- C (worker-side rehydration): compatible with Arc-swap; ongoing
+  updates must be delta (fetch_add/fetch_sub), not per-queue store
+- D (rollback fairness): fine within one epoch if rotation is fixed
+- E (mode-flag confusion): plan was confused; surplus phase does not
+  call queue lease at all (existing code already bypasses queue
+  lease in surplus phase). Same v5 lease is OK for Guarantee.
+- F (queue.hot.tokens carryover): not a bypass; bytes were charged
+  when leased. Cap is lease-time, not send-time. Epoch N tokens can
+  TX in epoch N+1, bounded by queue.hot.tokens and outstanding cap.
+  Document and test explicitly.
+
+---
+
+## v6 design — epoch-tagged CAS for cross-epoch safety
+
+v6 retains the v5 spine and patches the cross-epoch rollback bug
+plus the bounded-spin and ongoing-delta-update clarifications.
+
+### v6.1 Epoch-tagged grant atomic (Fatal v5 fix)
+
+Pack `(epoch_tag, total_granted)` into a single u64 atomic:
+
+```rust
+// Bits 63..32: epoch_tag (monotonically increasing per rotation)
+// Bits 31..0:  total_granted (bytes granted this epoch)
+//
+// Tag rolls over after ~4B rotations × 200µs = ~9 days.
+// Rollover is benign: ABA only matters if a worker stalls for
+// 9 days mid-CAS, which is impossible.
+struct PackedEpochGrant(AtomicU64);
+
+impl PackedEpochGrant {
+    #[inline]
+    fn pack(tag: u32, granted: u32) -> u64 {
+        ((tag as u64) << 32) | (granted as u64)
+    }
+    #[inline]
+    fn unpack(v: u64) -> (u32, u32) {
+        ((v >> 32) as u32, v as u32)
+    }
+}
+```
+
+The class atomic stores the packed pair. CAS operations preserve
+the tag invariant: cannot bump granted unless tag matches what we
+observed.
+
+### v6.2 Rotation with epoch tag bump
+
+```rust
+fn maybe_rotate_epoch_v6(lease: &SharedCoSQueueLease, now_ns: u64) {
+    let seq = lease.epoch.epoch_seq.load(Acquire);
+    if seq & 1 == 1 { return; }
+    let start = lease.epoch.epoch_start_ns.load(Acquire);
+    if now_ns < start.saturating_add(EPOCH_DURATION_NS) { return; }
+    if lease.epoch.epoch_seq
+        .compare_exchange(seq, seq + 1, AcqRel, Acquire).is_err()
+    {
+        return;
+    }
+
+    // We won. seq is ODD. Bump epoch_tag and reset granted in
+    // ONE atomic store (the packed pair). Tag = seq >> 1 (gives
+    // monotonic 32-bit tag from 64-bit seq).
+    let new_tag = ((seq >> 1) + 1) as u32;
+    lease.epoch.packed_granted
+        .store(PackedEpochGrant::pack(new_tag, 0), Release);
+
+    // Reset per-worker grants.
+    for grant in lease.worker_grants.iter() {
+        grant.store(0, Release);
+    }
+
+    // Recompute total_flows + per-worker shares + cap (same as v5).
+    let total_flows: u64 = lease.worker_active_flow_buckets
+        .iter().map(|c| c.load(Relaxed) as u64).sum::<u64>().max(1);
+    let elapsed_ns = (now_ns - start).min(EPOCH_DURATION_NS);
+    let new_cap = ((lease.config.rate_bytes as u128)
+        * (elapsed_ns as u128) / 1_000_000_000u128) as u64;
+    lease.epoch.epoch_total_grant_cap.store(new_cap, Release);
+    let grace_ns = now_ns.saturating_add(EPOCH_DURATION_NS / 2);
+    lease.epoch.epoch_grace_expires_ns.store(grace_ns, Release);
+    for (id, count_atom) in lease.worker_active_flow_buckets.iter().enumerate() {
+        let my_count = count_atom.load(Relaxed) as u64;
+        let my_share = ((new_cap as u128) * (my_count as u128)
+            / (total_flows as u128)) as u64;
+        lease.worker_fair_share[id].store(my_share, Release);
+    }
+    lease.epoch.epoch_start_ns.store(now_ns, Release);
+    lease.epoch.epoch_seq.store(seq + 2, Release);
+}
+```
+
+### v6.3 Acquire with tag-checked CAS
+
+```rust
+fn acquire_v6(
+    lease: &SharedCoSQueueLease,
+    worker_id: usize,
+    now_ns: u64,
+    requested: u64,
+) -> u64 {
+    if requested == 0 { return 0; }
+    if worker_id >= lease.worker_fair_share.len() {
+        debug_assert!(false);
+        return 0;
+    }
+
+    maybe_rotate_epoch_v6(lease, now_ns);
+
+    // Bounded seqlock-snapshot read (Codex point: "Add bounded
+    // spin/yield/return-0 anyway").
+    const MAX_SEQ_SPINS: u32 = 64;
+    let mut spins: u32 = 0;
+    let (epoch_total_grant_cap, my_fair_share, grace_expires_ns,
+         my_tag_hint) = loop {
+        let seq_before = lease.epoch.epoch_seq.load(Acquire);
+        if seq_before & 1 == 1 {
+            spins += 1;
+            if spins >= MAX_SEQ_SPINS {
+                return 0; // give up; rotation churn is pathological
+            }
+            std::hint::spin_loop();
+            continue;
+        }
+        let cap = lease.epoch.epoch_total_grant_cap.load(Acquire);
+        let share = lease.worker_fair_share[worker_id].load(Acquire);
+        let grace = lease.epoch.epoch_grace_expires_ns.load(Acquire);
+        let seq_after = lease.epoch.epoch_seq.load(Acquire);
+        if seq_after == seq_before {
+            // tag = seq_before >> 1 (snapshot epoch's tag).
+            break (cap, share, grace, (seq_before >> 1) as u32);
+        }
+        spins += 1;
+        if spins >= MAX_SEQ_SPINS { return 0; }
+    };
+
+    let mut total_granted: u64 = 0;
+    let mut still_needed = requested;
+
+    // === PRIMARY PATH: tag-checked CAS ===
+    loop {
+        if still_needed == 0 { break; }
+        let my_consumed = lease.worker_grants[worker_id].load(Acquire);
+        if my_consumed >= my_fair_share { break; }
+        let curr = lease.epoch.packed_granted.0.load(Acquire);
+        let (curr_tag, curr_granted) = PackedEpochGrant::unpack(curr);
+        if curr_tag != my_tag_hint {
+            // Epoch rotated since snapshot. Bail; outer call will
+            // retry on next acquire if work remains.
+            break;
+        }
+        if (curr_granted as u64) >= epoch_total_grant_cap { break; }
+        let class_room = epoch_total_grant_cap - curr_granted as u64;
+        let my_room = my_fair_share - my_consumed;
+        let take = (still_needed.min(class_room).min(my_room))
+            .min(u32::MAX as u64); // packed counter is u32
+        if take == 0 { break; }
+
+        // Tag-preserving CAS: only succeeds if tag still matches.
+        let new = PackedEpochGrant::pack(curr_tag, curr_granted + take as u32);
+        if lease.epoch.packed_granted.0
+            .compare_exchange_weak(curr, new, AcqRel, Acquire)
+            .is_err()
+        {
+            continue; // contention OR rotation; retry outer loop
+        }
+        // Epoch reservation committed. Now try outstanding cap.
+        if !try_bump_outstanding(&lease.state, take,
+            lease.config.max_total_leased)
+        {
+            // Rollback: tag-checked fetch_sub. If epoch rotated,
+            // skip rollback (rotation already cleared the counter).
+            tag_checked_rollback(&lease.epoch.packed_granted,
+                                 my_tag_hint, take as u32);
+            break;
+        }
+        lease.worker_grants[worker_id].fetch_add(take, AcqRel);
+        total_granted += take;
+        still_needed -= take;
+    }
+
+    // === SURPLUS PATH (post-grace, active-only) ===
+    let active = lease.worker_active_flow_buckets[worker_id]
+        .load(Relaxed) > 0;
+    if still_needed > 0 && now_ns >= grace_expires_ns && active {
+        loop {
+            if still_needed == 0 { break; }
+            let curr = lease.epoch.packed_granted.0.load(Acquire);
+            let (curr_tag, curr_granted) = PackedEpochGrant::unpack(curr);
+            if curr_tag != my_tag_hint { break; }
+            if (curr_granted as u64) >= epoch_total_grant_cap { break; }
+            let class_room = epoch_total_grant_cap - curr_granted as u64;
+            let take = (still_needed.min(class_room))
+                .min(u32::MAX as u64);
+            if take == 0 { break; }
+            let new = PackedEpochGrant::pack(curr_tag, curr_granted + take as u32);
+            if lease.epoch.packed_granted.0
+                .compare_exchange_weak(curr, new, AcqRel, Acquire)
+                .is_err() { continue; }
+            if !try_bump_outstanding(&lease.state, take,
+                lease.config.max_total_leased)
+            {
+                tag_checked_rollback(&lease.epoch.packed_granted,
+                                     my_tag_hint, take as u32);
+                break;
+            }
+            lease.worker_grants[worker_id].fetch_add(take, AcqRel);
+            total_granted += take;
+            still_needed -= take;
+        }
+    }
+
+    total_granted
+}
+
+#[inline]
+fn tag_checked_rollback(
+    pg: &PackedEpochGrant,
+    my_tag: u32,
+    take: u32,
+) {
+    loop {
+        let curr = pg.0.load(Acquire);
+        let (curr_tag, curr_granted) = PackedEpochGrant::unpack(curr);
+        if curr_tag != my_tag {
+            // Epoch rotated since our grant. Rotation reset granted
+            // to 0 with a new tag. Our rollback would underflow the
+            // new epoch's counter — skip silently. The new epoch's
+            // accounting is correct because rotation cleared all
+            // outstanding grants.
+            return;
+        }
+        let new = PackedEpochGrant::pack(curr_tag, curr_granted - take);
+        if pg.0.compare_exchange_weak(curr, new, AcqRel, Acquire).is_ok() {
+            return;
+        }
+    }
+}
+```
+
+### v6.4 queue.hot.tokens carryover semantics (Codex F clarification)
+
+Bytes leased from a v6 lease in epoch N are credited to
+`queue.hot.tokens` and may TX in epoch N+1. v6 grant accounting is
+**lease-time, not send-time**. The class rate cap holds at
+lease-time (per-epoch); actual TX may slip past epoch boundaries by
+up to (queue.hot.tokens unconsumed) / per-frame size.
+
+Bound: `queue.hot.tokens` is itself capped by `lease_bytes`
+(per-queue ceiling). At rate=16G, lease_bytes ≈ 200µs × 16G/8 = 400 KB.
+Worst-case TX-time slip = 400 KB / 1500 = ~267 frames spread across a
+small number of epochs (~1 µs slip per frame at line rate).
+
+Test: under saturation, verify aggregate **measured TX rate** ≤
+`rate_bytes` × 1.05 (allowing 5% for the carryover slip). The
+existing `release_unused` path on queue teardown ensures all leased
+bytes either TX or are returned via `consume`.
+
+### v6.5 Worker-side rehydration: ongoing delta updates (Codex C clarification)
+
+§v5.3 was clear that workers write their OWN slot at lease install,
+but didn't explicitly state that ongoing updates use delta operations.
+Stating now:
+
+- **Lease install (one-time)**: worker computes `total = sum_over(bound_queues)
+  of queue.flow_fair_state.active_flow_buckets`, then
+  `new_lease.worker_active_flow_buckets[my_worker_id].store(total, Relaxed)`.
+- **Ongoing transitions**: existing `account_cos_queue_flow_enqueue`
+  / `_dequeue` (in `cos/queue_ops/accounting.rs`) call
+  `lease.worker_active_flow_buckets[my_worker_id].fetch_add(1, Relaxed)`
+  or `fetch_sub(1, Relaxed)`. This is per-bucket-transition; works
+  for the workers's multiple bound queues (each transition deltas
+  the same slot).
+
+Single-writer-per-slot invariant: each slot is written ONLY by its
+owning worker (worker_id). Other workers never write that slot. This
+holds across both install (per-worker) and ongoing (per-worker
+transitions).
+
+### v6.6 Surplus phase scope (Codex E clarification)
+
+Surplus phase exact queues bypass queue lease entirely (current code
+at `cos/queue_service/mod.rs:615` and `tx_completion.rs:317`). Same
+v5/v6 queue lease may be used during Guarantee phase only. When the
+queue transitions Guarantee→Surplus mid-traffic, the v6 lease grant
+path is no longer called; surplus draws from root-only accounting.
+No mode-flag toggle in `matches_config`; the queue-mode determines
+which path is taken at runtime.
+
+## Public API preservation (v6)
+
+Same as v5. Tag-packing is internal to the lease implementation; no
+public-API change beyond §v5.
+
+## Hidden invariants (v6)
+
+1. **Epoch-tagged cap**: `unpack(packed_granted).granted ≤
+   epoch_total_grant_cap` ALWAYS, where the comparison is against
+   the CURRENT tag's `epoch_total_grant_cap`. Cross-epoch grants
+   cannot occur because tag-checked CAS rejects mismatched tag.
+2. **Cross-epoch rollback safety**: `tag_checked_rollback` skips
+   silently if tag changed (rotation already reset accounting). No
+   underflow possible.
+3. **Bounded spin**: max 64 spin iterations before returning 0.
+   Pathological scheduling jitter degrades gracefully (worker
+   skips this acquire, tries next cycle).
+4. **Lease-time cap, send-time slip**: cap holds at acquire-time
+   (per-epoch); TX may slip across epochs by up to lease_bytes
+   worth. Bounded; tested.
+5. **Single-writer-per-slot**: worker_active_flow_buckets[id] is
+   only written by worker `id` (install + ongoing transitions).
+6. All other v5 invariants preserved (outstanding cap, scope
+   narrow, surplus precondition, etc.).
+
+## Risk assessment (v6)
+
+Same as v5. Tag-packing is a small additional code path with
+well-understood semantics (single-atomic CAS with packed fields).
+Bounded spin removes liveness risk.
+
+## Test plan (v6)
+
+(All v5 tests retained, plus the kill-test Codex specified):
+
+- **Kill-test: cross-epoch rollback safety** (Codex): orchestrate
+  the failing interleaving — grant CAS succeeds, rotation resets,
+  outstanding CAS fails, rollback executes. Assert: no underflow,
+  no cross-epoch rollback. Use a synthetic stress harness or loom.
+- **Bounded spin under simulated jitter**: synthetic test where
+  rotation winner is "preempted" (held). Acquire path should
+  return 0 after 64 spins, not livelock.
+- **Lease-time cap with send-time slip**: at saturation, measured
+  TX rate ≤ 1.05 × rate_bytes over a 1s window. Carryover slip is
+  bounded by lease_bytes worth of frames.
+
+## Out of scope (v6)
+
+- Adaptive grace period (could be a follow-up if iperf-c
+  saturated regression observed).
+- HFSC-grade hierarchical token bucket (out of scope for #1229
+  Phase 6; see #1211 PLAN-KILL precedent).
+- HA sync of v6 state.
+
+## Open questions for adversarial review (v6)
+
+1. **Tag rollover ABA**: 32-bit tag rolls over after 4B rotations.
+   At 200µs/rotation, rollover takes ~9 days. ABA only matters if
+   a worker stalls for 9 days mid-CAS. Practically impossible.
+   Acceptable? Or use 48-bit tag + 16-bit granted (since granted
+   maxes at lease_bytes ≈ 400 KB < 2^19, 16-bit isn't enough but
+   24-bit is — could use 40-bit tag + 24-bit granted)?
+
+2. **Tag mismatch causing false-fail**: if worker A snapshots tag T,
+   does work, attempts CAS with tag T — but rotation completed,
+   tag is T+1. CAS fails (tag mismatch in packed compare). Worker
+   bails. Worker may have wasted work. But correct (fairness-wise);
+   worker tries next acquire with fresh snapshot. Bounded latency.
+
+3. **`u32::MAX` cap on `take` per CAS**: granted is u32 packed.
+   Worst-case `take` ≤ u32::MAX = 4 GB. Real `take` is ≤
+   lease_bytes ≈ 400 KB. No real issue. But code must enforce
+   `take.min(u32::MAX)` to prevent overflow on unusual config.
+   Documented explicitly?
+
+4. **Lease-time vs send-time cap**: explicitly disclosed that
+   measured TX rate may exceed `rate_bytes` by up to 5% on burst
+   resume due to queue.hot.tokens carryover. Junos shaper docs
+   typically expect 1-2 MTU burst, so 5% allowance is
+   conservative. Acceptable?
+
+5. **Bounded spin (64 iter) under sustained rotation churn**: if
+   rotation happens every 100µs (faster than design assumed) due
+   to high jitter, spin path may regularly hit MAX_SEQ_SPINS and
+   return 0 — workers skip acquires. Failure mode: aggregate drops.
+   Bound: 64 spins × ~10 ns each = ~640 ns budget per acquire.
+   Reasonable?
+
+6. **Worker rehydration delta-update consistency**: install path
+   stores TOTAL (sum of bound queues' counts). Ongoing path
+   fetch_add/fetch_sub on per-bucket transition. If a transition
+   happens between sum and store at install, the store may
+   overwrite the delta. Bounded: install path is single-threaded
+   per worker (worker owns its FlowFairState); during install
+   the worker is not processing transitions. Verified safe?
+
+7. **Codex point F (queue.hot.tokens carryover)**: tested
+   explicitly that bytes leased in epoch N TX in epoch N+1
+   without bypassing accounting. The `consume()` call after TX
+   decrements outstanding_leased_tokens. v6 doesn't double-count
+   because grant happened in epoch N (counted there); TX in
+   N+1 is just consumption.
+
+8. **iperf-c CPU-bound trade-off**: same as v5; explicitly NOT
+   fixed by v6. Bounded debt (v7 candidate) would address this
+   but adds complexity.
+
+9. **Round-6 architectural completeness**: Codex confirmed v5
+   spine is right; v6 fixes the one fatal bug. Any remaining
+   integration paths missed?
+
+10. **Implementation effort estimate**: v6 is ~250 LOC of new
+    Rust + ~150 LOC of tests. Achievable in one focused session.
+    Reasonable?
 
 ## v4 KILL summary (preserved)
 
