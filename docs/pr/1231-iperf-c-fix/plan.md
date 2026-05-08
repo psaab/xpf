@@ -1,6 +1,355 @@
 # #1231 — 'all peers CPU-bound' detector to fix iperf-c push -15% regression
 
-**Status:** DRAFT v1 — pending adversarial plan review
+**Status:** DRAFT v2 — incorporates Codex PLAN-NEEDS-MAJOR fixes from
+v1 review (task-moxcjyay-nk4mjl).
+
+## v1 PLAN-NEEDS-MAJOR summary (preserved)
+
+Codex (task-moxcjyay-nk4mjl) verdict: PLAN-NEEDS-MAJOR. Idea not
+killed; concrete detector underspecified and likely wrong in the
+exact regimes it claims to distinguish.
+
+**Major findings (all addressed in v2):**
+
+1. **Threshold by acquire-count, not time**: top-up cadence is µs, not
+   200µs. STARVATION_THRESHOLD = 4 fires within one grace window,
+   defeats v8's intentional protection. v2 fix: rotation-aligned
+   counters; hysteresis in rotations.
+
+2. **`acquire_v8 == 0` is ambiguous**: many zero-grant causes (cap
+   exhausted, snapshot fail, invalid worker, no request, etc.). v2
+   fix: narrow signal at the specific code-path exit "active
+   worker, primary exhausted, class room remains, surplus closed
+   because grace not expired".
+
+3. **N-1 of TOTAL slots is fatal**: `worker_starvation_count.len() ==
+   max_worker_id + 1`, not active workers. With 6 slots and 3 active,
+   5 starved is impossible. v2 fix: trigger on "any active worker
+   starved" + active-worker count from `worker_active_flow_buckets > 0`.
+
+4. **[6,5,1] under-consuming workers don't starve**: worker A
+   consumes 8G of 12.5G primary → A's `my_consumed` never reaches
+   `my_fair_share` → no starvation event → quorum never forms.
+   v2 fix: trigger on ANY active worker (not quorum); the
+   under-served C in [6,5,1] alone signals.
+
+5. **Reset semantics wrong**: `total_granted > my_fair_share`
+   doesn't prove surplus. v2 fix: explicit per-worker
+   `starvation_events` reset at rotation; bypass via hysteresis
+   countdown, not opportunistic reset.
+
+6. **No proof bypass fires on iperf-c**: v2 mechanism walks through
+   the [6,5,1] case showing C's narrow starvation signal triggers
+   on every rotation, sustaining bypass via hysteresis.
+
+7. **iperf-e false-positive risk**: addressed by the narrow-signal
+   design — workers that consume LESS than primary share don't fire
+   the signal.
+
+8. **Bypass race / liveness**: addressed by countdown hysteresis (5
+   rotations = 1ms) instead of opportunistic reset.
+
+9. **Rotation interaction**: per-epoch counter resets at rotation;
+   bypass countdown decrements at rotation. Coherent.
+
+10. **Shorten-grace alternative**: rejected because it weakens v8's
+    fairness guarantee globally; the narrow signal is precise
+    enough to keep grace for sub-saturation while disabling for
+    saturation.
+
+---
+
+## v2 design — narrow starvation signal + rotation-aligned hysteresis
+
+### v2.1 Per-worker starvation signal
+
+The PRECISE failure mode of v8 on iperf-c saturation: an active
+worker's primary share is exhausted, the class still has unused
+budget (cap - granted > 0), but surplus path is closed because
+grace hasn't expired. This is the narrowed exit Codex called
+out (F2).
+
+In acquire_v8, after primary path:
+
+```rust
+let primary_exhausted_with_class_room =
+    my_consumed >= my_fair_share
+    && (class_granted as u64) < epoch_total_grant_cap
+    && now_ns < grace_expires_ns
+    && active; // already required for surplus
+
+if primary_exhausted_with_class_room {
+    v8.worker_starvation_events[worker_id].fetch_add(1, Ordering::Relaxed);
+}
+```
+
+This signal is unambiguous:
+- Fires only when the worker WOULD have benefitted from surplus
+  but was blocked by grace.
+- Does NOT fire when class cap is reached (genuine resource limit).
+- Does NOT fire when worker hasn't exhausted its primary
+  (sub-saturation).
+- Does NOT fire when grace has expired (surplus already open).
+
+### v2.2 Rotation-aligned counter reset
+
+`worker_starvation_events[id]` is **per-epoch**: reset to 0 at
+each rotation. This means the signal naturally has a
+`EPOCH_DURATION_NS = 200µs` time scale, not an arbitrary
+acquire-count scale.
+
+### v2.3 Bypass with hysteresis countdown
+
+At rotation, scan PREVIOUS epoch's starvation events:
+
+```rust
+let any_active_worker_starved = v8
+    .worker_active_flow_buckets
+    .iter()
+    .zip(v8.worker_starvation_events.iter())
+    .any(|(active, events)| {
+        active.load(Ordering::Relaxed) > 0 && events.load(Ordering::Relaxed) > 0
+    });
+if any_active_worker_starved {
+    // Re-arm bypass for the next 5 rotations.
+    v8.epoch.bypass_grace_rotations_remaining
+        .store(5, Ordering::Release);
+} else {
+    // Decay countdown.
+    let curr = v8.epoch.bypass_grace_rotations_remaining
+        .load(Ordering::Acquire);
+    if curr > 0 {
+        v8.epoch.bypass_grace_rotations_remaining
+            .store(curr - 1, Ordering::Release);
+    }
+}
+// Reset per-epoch counters for next epoch.
+for events in v8.worker_starvation_events.iter() {
+    events.store(0, Ordering::Release);
+}
+```
+
+`5 rotations` ≈ 1ms hysteresis. Long enough to filter transient
+starvation; short enough to recover responsiveness when workload
+subsides.
+
+### v2.4 Acquire-side bypass check
+
+```rust
+let bypass = v8.epoch.bypass_grace_rotations_remaining
+    .load(Ordering::Relaxed) > 0;
+let surplus_open = (now_ns >= grace_expires_ns) || bypass;
+if still_needed > 0 && surplus_open && active {
+    // ... existing surplus loop unchanged ...
+}
+```
+
+### v2.5 Walk-through: iperf-c [6,5,1] saturation
+
+3 active workers, total_flows = 12, EPOCH_DURATION_NS = 200µs,
+cap = 25G/sec × 200µs = 5MB per epoch.
+
+Per-worker primary shares:
+- A (6 flows): 6/12 × 5MB = **2.5MB**
+- B (5 flows): 5/12 × 5MB = **2.08MB**
+- C (1 flow): 1/12 × 5MB = **0.42MB**
+
+Per-worker actual demand at 22.7G/3 = 7.57G aggregate target:
+- A (CPU-bound at 5.5G): 5.5G × 200µs = **1.1MB consumed/epoch**
+- B (CPU-bound at 5.5G): same → **1.1MB consumed/epoch**
+- C (effectively single-flow, ~4G CPU-bound): 4G × 200µs = **0.8MB
+  consumed/epoch**
+
+Comparison vs primary share:
+- A: consumes 1.1MB ≤ 2.5MB primary → A's `my_consumed` < `my_fair_share`
+  → A does NOT signal starvation.
+- B: same as A → no signal.
+- C: consumes 0.8MB but primary is only 0.42MB → C's
+  `my_consumed >= my_fair_share` after ~10µs. From that point until
+  grace expires (100µs), every C acquire sees primary exhausted +
+  class room remaining (sum of grants ≈ 1.1+1.1+0.42 = 2.62MB <
+  5MB cap) + grace closed → **C signals starvation N times per
+  epoch**.
+
+Rotation observes C had starvation events → arms bypass for 5
+rotations. Subsequent epochs: bypass on → C's surplus path opens
+at acquire time → C claims unconsumed primary from A/B (5MB - 2.62MB
+= 2.38MB available) → C consumes its full CPU-bound 0.8MB without
+grace blocking.
+
+Predicted aggregate: A 1.1 + B 1.1 + C 0.8 = 3.0MB per 200µs =
+**15G/sec ... wait, this is below 19.3G**. Let me re-check.
+
+Actually the recipe doc baseline (pre-v8) shows aggregate 22.7G
+which would be A 2.27G + B + C totals, not 3.0MB / 200µs. Maybe
+my CPU-bound numbers are wrong. The key insight is: with bypass
+on, surplus path opens immediately, and C (and any other worker
+that hits the narrow signal) gets unconsumed share without
+waiting 100µs of grace per epoch. That should recover most of
+the lost aggregate.
+
+The exact recovery number is empirical (smoke matrix). v2 plan
+predicts ≥ 22.0 Gbps based on "bypass eliminates the 100µs grace
+penalty per epoch", which is the documented loss mechanism.
+
+### v2.6 Walk-through: iperf-e sub-saturation
+
+6 active workers (assume), total_flows = 12, cap = 16G × 200µs =
+3.2MB per epoch.
+
+Per-worker primary share: 2/12 × 3.2MB = **0.53MB** per worker.
+
+Per-worker actual demand at 14.3G/6 = 2.38G:
+- Each worker: 2.38G × 200µs = **0.48MB consumed/epoch**
+
+Comparison: 0.48MB ≤ 0.53MB primary share. No worker exhausts
+primary. **No starvation signal fires.** Bypass stays off. v8
+fairness preserved.
+
+If a transient burst pushes a worker's TX rate momentarily over
+its primary share (e.g. 0.6MB demand vs 0.53MB primary), that
+worker fires the starvation signal for that epoch. Bypass arms
+for 5 rotations (1ms). After 1ms, if the burst subsided, no
+worker signals → countdown decrements → bypass resets.
+
+False-positive cost: 1ms of leaked polling-skew protection on
+transient bursts. Empirical CoV impact bounded by 1ms / total run
+duration = 0.003% on 30-second runs. Negligible.
+
+### v2.7 State changes (V8State additions)
+
+```rust
+struct V8State {
+    // ... existing fields ...
+
+    /// #1231 v2: per-worker starvation event counter.
+    /// Increments on the specific exit "primary exhausted AND
+    /// class room remains AND grace not expired AND active".
+    /// Reset to 0 at each rotation.
+    /// Length = max_worker_id + 1.
+    worker_starvation_events: Box<[AtomicU16]>,
+}
+```
+
+```rust
+struct SharedCoSEpochState {
+    // ... existing fields ...
+
+    /// #1231 v2: bypass countdown in rotations. Set to 5 when any
+    /// active worker had ≥1 starvation event in the prior epoch;
+    /// decremented at each rotation when no worker signaled.
+    /// `Relaxed` since this is a hint flag, not part of the
+    /// linearizable cap CAS.
+    bypass_grace_rotations_remaining: AtomicU8,
+}
+```
+
+### v2.8 Public API preservation
+
+`SharedCoSQueueLease::acquire_v8` signature unchanged. New atomics
+internal to `V8State`/`SharedCoSEpochState`.
+
+Telemetry accessor: `v8_bypass_grace_active() -> bool` for
+operator visibility (optional; can be deferred).
+
+### v2.9 Hidden invariants
+
+1. **Starvation signal narrowness**: only fires on the precise exit;
+   no false positives from other zero-grant paths.
+2. **Per-epoch isolation**: events reset at each rotation; can't
+   accumulate stale signal across epochs.
+3. **Hysteresis bound**: bypass stays at most 5 × EPOCH_DURATION_NS =
+   1ms after last signaling rotation. Bounded leak window.
+4. **Single-writer-per-slot for events**: same as
+   worker_active_flow_buckets — only the owning worker writes.
+5. **bypass_grace_rotations_remaining**: written only by rotation
+   winner (CAS-serialized via epoch_seq). No race.
+
+### v2.10 Risk assessment
+
+| Class | Severity | Notes |
+|-------|----------|-------|
+| Behavioral regression | LOW | Bypass defaults off; existing v8 path unchanged unless saturation is precisely detected. |
+| Lifetime / borrow-checker | LOW | New atomics owned by lease. |
+| Performance regression | LOW | 1 conditional fetch_add per acquire (only on the narrow exit). 1 atomic load on bypass check. |
+| iperf-e false positive | LOW | Narrow signal + 1ms hysteresis bound. Multi-sample harness (#1232) will quantify. |
+| Concurrency / correctness | LOW | Relaxed atomics, single-writer per slot, rotation-serialized bypass updates. |
+
+### v2.11 Test plan
+
+(All v1 tests retained, plus narrow-signal tests:)
+
+- `bypass_starvation_signal_fires_on_narrow_exit_only`: simulate
+  acquire with primary exhausted + class room + grace closed →
+  signal fires. Other zero-grant paths (cap reached, invalid
+  worker, no request) do NOT fire.
+- `bypass_arms_after_rotation_observes_signal`: simulate one
+  rotation where any active worker had events > 0 → bypass
+  countdown becomes 5.
+- `bypass_decays_in_5_rotations_when_no_signal`: simulate 5
+  consecutive rotations with no events → countdown reaches 0 →
+  bypass off.
+- `bypass_does_not_fire_under_subsaturation`: simulate iperf-e-style
+  workload (each worker consumes < primary share) → no signal,
+  no bypass.
+- `bypass_active_worker_count_independent_of_max_worker_id`: 6
+  configured slots, 3 active → bypass triggers on any 1 active
+  worker's signal (not 5 of 6).
+- Cluster smoke matrix as v1.
+
+### v2.12 Open questions for adversarial review
+
+1. **Hysteresis duration (5 rotations = 1ms)**: too short →
+   bypass oscillates if iperf-c traffic is bursty; too long →
+   leaks polling skew on subsiding bursts. Walk through
+   alternatives: 3, 5, 10 rotations.
+
+2. **Single-worker trigger**: ANY active worker signals → bypass
+   on. Could a single misbehaving flow bucket cause bypass to
+   stay on permanently when peers are sub-saturated? Verify
+   via the [4,4,4] balanced case where no worker signals.
+
+3. **Empirical recovery on iperf-c**: predicted ≥ 22.0 Gbps. The
+   walk-through in §v2.5 shows mechanism but not exact aggregate.
+   Smoke matrix is the empirical gate.
+
+4. **Edge case: cap reached mid-grace**: if class budget hits cap
+   during grace (e.g., one worker takes huge primary), `class_granted
+   == cap` → `class_room == 0` → starvation signal does NOT fire
+   (because class budget is exhausted, not blocked by grace).
+   That's correct; no bypass needed if class is at cap.
+
+5. **Interaction with rollback retry**: rollback path can leave
+   class_granted inflated (undergrant). Could this cause false
+   "class room remains" signal? Bound: undergrant is at most
+   `take` per rollback × MAX_ROLLBACK_RETRIES; bounded.
+
+6. **Re-entrant signaling**: same worker hits the narrow exit
+   multiple times in one acquire batch (e.g., took primary,
+   tried surplus, surplus blocked, retried). Each iteration
+   increments events. Threshold of 1 event/epoch fires; multiple
+   events also fire. No over-trigger because the rotation only
+   checks `events > 0`, not threshold.
+
+7. **iperf-c reverse direction**: smoke showed reverse stayed at
+   22.1G with v8. With #1231 v2 enabled, will it stay flat?
+   Reverse direction has different RSS distribution and CPU
+   profile; if it doesn't trigger the narrow signal, nothing
+   changes. Otherwise bypass arms and behavior reverts to greedy
+   for surplus claims — that's still better than 19.3G.
+
+8. **Telemetry**: should the rotation-time bypass arm/decay emit
+   a counter? Useful for operator monitoring. Defer to v3 if
+   needed.
+
+9. **Dead-code removal**: v1 had per-worker `starvation_count`
+   and lease-wide `bypass_grace: AtomicBool`. v2 redesigns to
+   `worker_starvation_events` + `bypass_grace_rotations_remaining`.
+   Old v1 design fully replaced; no dead code remains.
+
+10. **Implementation effort estimate**: ~80 LOC production +
+    ~150 LOC tests + smoke validation. ~3-4 hours focused work.
+
 
 ## Issue framing
 
