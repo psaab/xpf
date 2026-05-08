@@ -1055,7 +1055,13 @@ impl SharedCoSQueueLease {
             if share == 0 {
                 continue;
             }
-            // util < 60%: 5 * prev_grant < 3 * share
+            // util < 60%: 5 * prev_grant < 3 * share. Empirical
+            // sweep:
+            // - 75% threshold (v5.6) caused iperf-d 5-flow worker
+            //   to drop to 770 Mbps/flow (other workers claimed its
+            //   surplus too aggressively, starving its 5 flows).
+            // - 60% threshold (v5.5) leaves moderately-utilized
+            //   peers alone; only fires on CPU-bound regimes.
             if (prev_grants[id] as u64).saturating_mul(5) < share.saturating_mul(3) {
                 any_peer_under_util = true;
                 break;
