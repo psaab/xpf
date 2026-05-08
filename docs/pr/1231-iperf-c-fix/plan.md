@@ -1,7 +1,346 @@
 # #1231 — 'all peers CPU-bound' detector to fix iperf-c push -15% regression
 
-**Status:** DRAFT v2 — incorporates Codex PLAN-NEEDS-MAJOR fixes from
-v1 review (task-moxcjyay-nk4mjl).
+**Status:** DRAFT v3 — incorporates Codex PLAN-NEEDS-MAJOR fixes from
+v2 review (task-moxcusww-thgqy7).
+
+## v2 PLAN-NEEDS-MAJOR summary (preserved)
+
+Codex (task-moxcusww-thgqy7) — "v2 is not a kill. Spine is
+salvageable. Three blockers."
+
+1. **Signal still too broad**: early-polling worker in balanced
+   saturated epoch can exhaust its primary BEFORE peers acquire
+   (class room remains simply because peers haven't shown up
+   yet). Reintroduces polling skew. Must AND with aggregate
+   condition + `still_needed > 0`.
+
+2. **Reset race**: rotation winner resets `AtomicU16`
+   worker_starvation_events while in-flight acquire from old
+   snapshot may bump it. Loses the bump or carries stale event
+   into new epoch. Need epoch-tagged events (PackedEpochGrant
+   pattern, not plain counter).
+
+3. **Wrong iperf-e distribution**: v2 walk-through used
+   [2,2,2,2,2,2] (6 active, balanced). Real iperf-e is
+   [4,3,4,1] on 4 active workers per recipe doc. The 1-flow
+   worker's primary share is 1.33G; ≥1.33G TX would trigger
+   bypass even at sub-saturated aggregate.
+
+Plus 2 minor:
+- 5 rotations / 1ms hysteresis: acceptable after trigger fix.
+- Single-worker trigger: defensible only with epoch-end aggregate
+  guard; percentage quorum would miss [6,5,1] case.
+
+## v3 design — narrow signal + aggregate-underuse AND-gate +
+## epoch-tagged events
+
+### v3.1 Signal narrowing (Codex F1 fix)
+
+The starvation signal must require ALL of:
+- `still_needed > 0` (worker actually wants more — wasn't the
+  end of a finished batch)
+- `my_consumed >= my_fair_share` (primary exhausted)
+- `class_granted as u64 < epoch_total_grant_cap` (class still
+  has budget — not at cap)
+- `now_ns < grace_expires_ns` (grace closed)
+- `active` (worker has flow buckets queued)
+
+Critically, the bypass arm condition at rotation requires LOCAL
+signal AND aggregate-underuse:
+
+```rust
+let any_active_worker_signaled = /* event > 0 on any active slot */;
+let prev_cap = epoch.epoch_total_grant_cap.load(Acquire);
+let prev_packed = epoch.packed_granted.0.load(Acquire);
+let (_, prev_granted) = PackedEpochGrant::unpack(prev_packed);
+// Aggregate-underuse: prior epoch granted less than ~95% of cap.
+// If at or near cap, system was operating at hardware limit — no
+// 'lost capacity' from grace gating; bypass would only leak
+// fairness without recovery.
+let underuse_slack = prev_cap / 20; // 5% slack
+let aggregate_underuse = (prev_granted as u64) + underuse_slack < prev_cap;
+
+if any_active_worker_signaled && aggregate_underuse {
+    epoch.bypass_grace_rotations_remaining.store(5, Release);
+} else {
+    let curr = epoch.bypass_grace_rotations_remaining.load(Acquire);
+    if curr > 0 {
+        epoch.bypass_grace_rotations_remaining.store(curr - 1, Release);
+    }
+}
+```
+
+Why aggregate-underuse?
+- iperf-c saturated post-v8: aggregate 19.3G vs cap 25G ≈ 77%
+  ≪ 95% slack → underuse fires AND C signals → bypass arms.
+- iperf-c saturated pre-v8 / hardware limit: aggregate 22.7G vs
+  cap 25G ≈ 91% ≪ 95% → underuse fires. If C still signals,
+  bypass arms; this is actually fine because eliminating grace
+  delay would let C's stranded primary be claimed faster
+  without harming the aggregate (already at hardware limit).
+- iperf-e sub-saturation balanced: aggregate 14.3G vs cap 16G
+  ≈ 89% < 95% → underuse fires. BUT no worker exhausts primary
+  in balanced [4,3,4,1] (per §v3.5 walk-through with REAL
+  numbers). So no signal → no bypass.
+- iperf-e degenerate [10,1,1,0]: dominant worker A might exhaust
+  primary; signal fires; aggregate is under cap; bypass arms;
+  v8 fairness leaks momentarily until distribution balances.
+  Mitigated by 1ms hysteresis duration; bypass decays once
+  signal stops.
+
+### v3.2 Epoch-tagged events (Codex F2 fix)
+
+Replace `worker_starvation_events: Box<[AtomicU16]>` with
+`Box<[PackedEpochGrant]>` (reusing the existing tagged-CAS
+pattern). Slot is `(epoch_tag << 32) | event_count`.
+
+- **Bump**: tag-checked CAS. If tag mismatches (rotation since
+  snapshot), abandon — the new epoch starts fresh anyway.
+- **Reset at rotation**: store `(new_tag, 0)` for every slot.
+  Atomic store — no lost increments because old-tag bumps
+  observe the new tag and abandon their CAS.
+
+Acquire-path bump:
+
+```rust
+// After primary path, after surplus path, signal check:
+if still_needed > 0
+    && /* my_consumed >= my_fair_share */
+    && /* class_granted < epoch_total_grant_cap */
+    && now_ns < grace_expires_ns
+    && active
+{
+    // Tag-checked CAS bump. Failure (tag mismatch) means rotation
+    // happened — silent skip; the new epoch starts at events=0
+    // and the next acquire will signal cleanly if the regime
+    // persists.
+    let pg = &v8.worker_starvation_events[worker_id];
+    let curr = pg.0.load(Ordering::Acquire);
+    let (curr_tag, curr_count) = PackedEpochGrant::unpack(curr);
+    if curr_tag == my_tag && curr_count < u32::MAX {
+        let new = PackedEpochGrant::pack(curr_tag, curr_count + 1);
+        let _ = pg.0.compare_exchange_weak(
+            curr, new, Ordering::AcqRel, Ordering::Acquire);
+        // CAS failure: contention or rotation; not retried — one
+        // missed signal in N is fine (rotation-time aggregator
+        // only checks for ANY signal).
+    }
+}
+```
+
+Rotation reset:
+
+```rust
+let new_tag = ((seq >> 1) + 1) as u32;
+// ... existing reset of packed_granted, worker_grants ...
+
+// NEW: scan PREVIOUS epoch's events (current tag = old_tag) before
+// resetting them.
+let any_active_signaled = v8.worker_active_flow_buckets.iter()
+    .zip(v8.worker_starvation_events.iter())
+    .any(|(active_atom, pg)| {
+        active_atom.load(Ordering::Relaxed) > 0 && {
+            let v = pg.0.load(Ordering::Acquire);
+            let (_tag, count) = PackedEpochGrant::unpack(v);
+            count > 0
+        }
+    });
+
+// Aggregate-underuse check (BEFORE resetting packed_granted).
+let prev_packed = v8.epoch.packed_granted.0.load(Ordering::Acquire);
+let (_, prev_granted) = PackedEpochGrant::unpack(prev_packed);
+let prev_cap = v8.epoch.epoch_total_grant_cap.load(Ordering::Acquire);
+let underuse_slack = prev_cap / 20;
+let aggregate_underuse = (prev_granted as u64) + underuse_slack < prev_cap;
+
+if any_active_signaled && aggregate_underuse {
+    v8.epoch.bypass_grace_rotations_remaining.store(5, Ordering::Release);
+    v8.epoch.bypass_grace_arm_count.fetch_add(1, Ordering::Relaxed);
+} else {
+    let curr = v8.epoch.bypass_grace_rotations_remaining.load(Ordering::Acquire);
+    if curr > 0 {
+        v8.epoch.bypass_grace_rotations_remaining.store(curr - 1, Ordering::Release);
+    }
+}
+
+// Reset events for the NEW epoch (atomic store with new tag).
+for pg in v8.worker_starvation_events.iter() {
+    pg.0.store(PackedEpochGrant::pack(new_tag, 0), Ordering::Release);
+}
+```
+
+### v3.3 Telemetry counters (Codex F5 prescription)
+
+Add to `SharedCoSEpochState`:
+
+```rust
+struct SharedCoSEpochState {
+    // ... existing ...
+    /// #1231 v3: incremented at each rotation that arms bypass.
+    /// Diagnostic; visible via Prometheus.
+    bypass_grace_arm_count: AtomicU64,
+    /// #1231 v3: incremented at each acquire that benefits from
+    /// bypass (took surplus that was opened by bypass, not by
+    /// grace expiry).
+    bypass_grace_use_count: AtomicU64,
+}
+```
+
+Telemetry accessor:
+
+```rust
+pub(in crate::afxdp) fn v8_bypass_grace_arms(&self) -> u64 { ... }
+pub(in crate::afxdp) fn v8_bypass_grace_uses(&self) -> u64 { ... }
+pub(in crate::afxdp) fn v8_bypass_grace_active(&self) -> bool { ... }
+```
+
+### v3.4 Real iperf-e walk-through with [4,3,4,1] (Codex F3 fix)
+
+Per recipe doc and PR #1230 smoke results, iperf-e canonical
+12-stream reproducer post-v8 distribution: [4,3,4,1] across 4
+active workers. Aggregate 14.3G vs 16G shaper.
+
+Per-epoch values at 200µs:
+- cap = 16G/8 × 200µs = 400 KB
+- A primary (4/12): 133 KB
+- B primary (3/12): 100 KB
+- D primary (4/12): 133 KB
+- E primary (1/12): 33 KB
+
+Per-flow rate (post-v8): 1196 Mbps mean (per smoke results).
+Per-worker bytes per epoch:
+- A (4 flows × 1.196 G/sec × 200µs ÷ 8) = 4 × 30 KB = **120 KB**
+- B (3 × 30 KB) = **90 KB**
+- D (4 × 30 KB) = **120 KB**
+- E (1 × 30 KB) = **30 KB**
+
+Comparison vs primary:
+- A: 120 < 133 → no signal
+- B: 90 < 100 → no signal
+- D: 120 < 133 → no signal
+- E: 30 < 33 → no signal
+
+**Result:** zero workers signal. Bypass stays off. v8 CoV
+preserved. ✓
+
+Edge case [10,1,1,0]: 3 active workers, 12 flows.
+- W0 primary (10/12): 333 KB; per-epoch consume at 10 flows ×
+  per-flow rate. If per-flow rate stays 1.2G → 10 × 30 KB = 300
+  KB. 300 < 333 → no signal. Even degenerate distribution is
+  resilient as long as per-flow rates stay stable.
+
+Riskier edge case [12,0,0,0]: 1 active worker, 12 flows on
+single worker. Per-flow rate would drop to ~0.5G under CPU-bound
+saturation. Worker primary (12/12): 400 KB; consumes 12 × 0.5G ×
+200µs ÷ 8 = 12 × 12.5 KB = 150 KB. 150 < 400 → no signal.
+
+OK across realistic distributions, balanced + degenerate +
+extreme, the narrow signal stays quiescent on iperf-e.
+
+### v3.5 Real iperf-c walk-through with [6,5,1]
+
+Per recipe doc, iperf-c canonical push 12-stream distribution:
+[6,5,1] across 3 active workers. Pre-v8 aggregate 22.7G; post-v8
+19.3G.
+
+Per-epoch values at 200µs, cap = 25G/8 × 200µs = 625 KB:
+- A primary (6/12): 313 KB
+- B primary (5/12): 260 KB
+- C primary (1/12): 52 KB
+
+Pre-v8 per-flow rate (saturation): mean ≈ 1.89G (22.7G / 12).
+- A: 6 × 47 KB = 283 KB ≤ 313 → no signal (close though)
+- B: 5 × 47 KB = 237 KB ≤ 260 → no signal
+- C: 1 × 47 KB = 47 KB ≤ 52 → no signal
+
+Hmm — pre-v8 saturated DIDN'T signal either. Let me reconsider.
+
+Post-v8 the per-flow rate dropped because v8 throttled. So
+pre-v8 numbers don't show the failure.
+
+Post-v8 per-flow rate: 19.3G / 12 = 1.61G mean. But the
+distribution was uneven; specifically C's flow ran at ~3.19G
+in user's pre-v8 sample (one big flow, no neighbors).
+
+Wait — recipe doc says C had 1 flow at ~3.98G post-sym-key-pin
+(at 22.7G aggregate). Pre-v8 in the user's sample C's 1 flow was
+at 3190 Mbps.
+
+Post-v8 with bypass off and grace gating, C's flow effectively
+gets capped at primary share + half-epoch surplus. C primary
+share = 52 KB/200µs = 0.26 GB/sec = 2.08 G/sec. C's CPU can do
+~4G; v8 caps at primary plus surplus only after 100µs grace,
+effectively halving C's throughput → ~2.5-3G observed.
+
+Per-epoch C consumes whatever its CPU + grace allows ≈ 0.0001s × 3G
+= 75 KB. C's primary is 52 KB. C exhausts primary AT the rate it
+can consume but the lookups happen in granular acquire calls.
+
+The mechanism: C calls acquire_v8 hundreds of times per epoch (each
+batch top-up). Some calls get primary (up to 52 KB total). After
+that, every C acquire returns 0 (primary exhausted, class room
+exists, grace not expired) → signal fires.
+
+So C signals reliably under post-v8 saturation. ✓
+
+Aggregate post-v8 = 19.3G < 95% × 25G = 23.75G → underuse fires.
+Bypass arms.
+
+### v3.6 Public API preservation (v3)
+
+Same as v2: `acquire_v8` signature unchanged. New atomics
+internal to V8State / SharedCoSEpochState. Three new accessor
+methods for telemetry.
+
+### v3.7 Hidden invariants (v3)
+
+1. Same as v2 plus:
+2. Tag-checked event bump: rotation-safe.
+3. Aggregate-underuse check: rotation-time only, after both
+   prev_granted and prev_cap are read but BEFORE reset.
+4. Single-writer-per-slot for events: still holds, but writes
+   use tag-checked CAS so concurrent same-slot writes from old-
+   tag context fail naturally.
+
+### v3.8 Risk assessment (v3)
+
+| Class | Severity | Notes |
+|-------|----------|-------|
+| Behavioral regression | LOW | Bypass requires LOCAL signal AND aggregate-underuse — both conditions must hold. |
+| Lifetime / borrow-checker | LOW | New atomics owned by lease. |
+| Performance regression | LOW | 1 conditional tag-checked CAS per acquire (only on the narrow exit). 1 atomic load on bypass check. Aggregate-underuse computed once per rotation. |
+| iperf-e false positive | LOW | Narrow signal + aggregate gate + 1ms hysteresis. Real distribution walk-throughs [4,3,4,1], [10,1,1,0], [12,0,0,0] all show zero signal. |
+| Concurrency / correctness | LOW | Tag-checked CAS for events; rotation-serialized bypass updates; Relaxed for non-CAS paths. |
+
+### v3.9 Test plan (v3)
+
+(All v2 tests retained, plus:)
+- `bypass_signal_requires_still_needed_gt_zero`: simulate end-of-batch
+  acquire with `still_needed == 0` → no signal even if other
+  conditions hold.
+- `bypass_aggregate_underuse_gates_arming`: simulate prev epoch
+  granted == cap (no slack) → bypass does NOT arm even if signal
+  present.
+- `bypass_event_tag_check_drops_old_epoch_writes`: simulate
+  acquire with stale tag → CAS fails, no inflight bump leaks.
+- `bypass_telemetry_counters_increment`: cover arm/use counters.
+- iperf-e [10,1,1,0] simulated walk-through: no signal across
+  workers.
+- iperf-c [6,5,1] simulated walk-through: C signals; bypass arms.
+
+### v3.10 Out of scope (v3)
+
+- Adaptive hysteresis duration (5 rotations is fixed).
+- Cross-class bypass coordination (per-class only).
+- Bypass-arm rate-limiting (acceptable to arm every rotation
+  under sustained saturation).
+
+---
+
+(Original v2 spec preserved below for diff-readability; v3
+supersedes.)
+
+## DEPRECATED v2 — superseded by v3 above
 
 ## v1 PLAN-NEEDS-MAJOR summary (preserved)
 
