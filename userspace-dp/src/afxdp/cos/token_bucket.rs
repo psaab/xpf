@@ -60,6 +60,64 @@ pub(in crate::afxdp) fn maybe_top_up_cos_root_lease(
         .min(root.burst_bytes.max(COS_MIN_BURST_BYTES));
 }
 
+/// #1229 Phase 6 v8: dispatch lease acquisition between v8 (per-worker
+/// fair-share) and legacy (greedy aggregate) paths. Caller's queue
+/// must already be lazy-installed via `ensure_v8_lease_attached`.
+#[inline]
+fn acquire_via_lease(
+    lease: &SharedCoSQueueLease,
+    queue: &CoSQueueRuntime,
+    now_ns: u64,
+    requested: u64,
+) -> u64 {
+    if lease.is_v8() {
+        let worker_id = queue.v_min.worker_id as usize;
+        lease.acquire_v8(worker_id, now_ns, requested)
+    } else {
+        lease.acquire(now_ns, requested)
+    }
+}
+
+/// #1229 Phase 6 v8: lazy worker-side install of v8 lease back-reference
+/// onto the queue runtime + initial rehydration of the lease's
+/// per-worker active-flow-bucket counter.
+///
+/// Plan §v5.3 "worker-side rehydration at lease install" + Codex
+/// review note F (steps 9 and 10 must land together): this is the
+/// single point that makes a v8 lease usable for a worker. After this
+/// runs, future bucket transitions in `accounting.rs` and `push.rs`
+/// will deltas the lease's per-worker counter (plan §v8.1, commit
+/// 22f195aa).
+///
+/// The rehydration uses THIS runtime's local `active_flow_buckets`
+/// — Codex probe answer F (v7 review): "one lease per queue, summed
+/// across workers, correct." Per-worker per-queue runtime; no
+/// cross-queue summation needed.
+#[inline]
+fn ensure_v8_lease_attached(queue: &mut CoSQueueRuntime, lease: &Arc<SharedCoSQueueLease>) {
+    if !lease.is_v8() {
+        return;
+    }
+    let needs_install = match queue.queue_lease_v8.as_ref() {
+        Some(curr) => !Arc::ptr_eq(curr, lease),
+        None => true,
+    };
+    if !needs_install {
+        return;
+    }
+    let count: u32 = queue
+        .flow_fair_state
+        .as_ref()
+        .map(|ff| u32::from(ff.active_flow_buckets))
+        .unwrap_or(0);
+    let worker_id = queue.v_min.worker_id as usize;
+    queue.queue_lease_v8 = Some(Arc::clone(lease));
+    // Rehydrate AFTER attaching so the slot reflects current state
+    // before any transitions land via the helpers (which are gated on
+    // `queue.queue_lease_v8.is_some()`).
+    lease.rehydrate_worker_active_count(worker_id, count);
+}
+
 #[inline]
 pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     queue: &mut CoSQueueRuntime,
@@ -79,6 +137,14 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
         queue.hot.last_refill_ns = now_ns;
         return;
     }
+    // #1229 Phase 6 v8: lazy-install lease back-reference + rehydrate
+    // per-worker counter on first sight of a v8 lease. Idempotent:
+    // skip if already attached to the same lease Arc. Replacement
+    // (HA failover, config change) triggers re-attach + re-rehydrate
+    // because the new Arc fails ptr_eq.
+    if let Some(lease) = shared_queue_lease {
+        ensure_v8_lease_attached(queue, lease);
+    }
     if queue.config.exact {
         let Some(shared_queue_lease) = shared_queue_lease else {
             return;
@@ -90,8 +156,12 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
         if queue.hot.tokens >= lease_bytes {
             return;
         }
-        let grant =
-            shared_queue_lease.acquire(now_ns, lease_bytes.saturating_sub(queue.hot.tokens));
+        let grant = acquire_via_lease(
+            shared_queue_lease,
+            queue,
+            now_ns,
+            lease_bytes.saturating_sub(queue.hot.tokens),
+        );
         queue.hot.tokens = queue
             .hot
             .tokens
@@ -118,7 +188,12 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     if queue.hot.tokens >= lease_bytes {
         return;
     }
-    let grant = shared_queue_lease.acquire(now_ns, lease_bytes.saturating_sub(queue.hot.tokens));
+    let grant = acquire_via_lease(
+        shared_queue_lease,
+        queue,
+        now_ns,
+        lease_bytes.saturating_sub(queue.hot.tokens),
+    );
     queue.hot.tokens = queue
         .hot
         .tokens

@@ -1031,19 +1031,23 @@ impl Coordinator {
             &active_shards_by_egress_ifindex,
             current_leases.as_ref(),
         );
-        let current_queue_leases = self.cos.queue_leases.load();
-        let next_queue_leases = build_shared_cos_queue_leases_reusing_existing(
-            &self.forwarding,
-            &active_shards_by_egress_ifindex,
-            current_queue_leases.as_ref(),
-        );
         // #917: V_min coordination Arcs sized by worker count.
         // workers.last_planned_workers is set in apply_planned_workers
         // before this reconcile fires; defaults to 0 at first
         // boot which produces zero-slot floors (the reconcile
         // re-fires once workers are planned).
+        // #1229 Phase 6 v8: lease construction also needs num_workers
+        // for max_worker_id sizing of per-worker arrays. Hoisted
+        // ahead of the queue_leases build site.
         let current_queue_vtime_floors = self.cos.queue_vtime_floors.load();
         let num_workers = self.workers.last_planned_workers().max(1);
+        let current_queue_leases = self.cos.queue_leases.load();
+        let next_queue_leases = build_shared_cos_queue_leases_reusing_existing(
+            &self.forwarding,
+            &active_shards_by_egress_ifindex,
+            num_workers,
+            current_queue_leases.as_ref(),
+        );
         let next_queue_vtime_floors = build_shared_cos_queue_vtime_floors_reusing_existing(
             &self.forwarding,
             num_workers,
@@ -1706,8 +1710,16 @@ fn build_shared_cos_root_leases_reusing_existing(
 fn build_shared_cos_queue_leases_reusing_existing(
     forwarding: &ForwardingState,
     active_shards_by_egress_ifindex: &BTreeMap<i32, usize>,
+    num_workers: usize,
     existing: &BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>,
 ) -> BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>> {
+    // #1229 Phase 6 v8: max_worker_id = num_workers - 1 under the
+    // current topology where worker IDs are dense from 0 to N-1.
+    // If sparse worker IDs are ever introduced, this needs to flip
+    // to true `max(worker_id)` over the worker map. last_planned_workers
+    // is the same source V_min floors size against
+    // (build_shared_cos_queue_vtime_floors_reusing_existing).
+    let max_worker_id = num_workers.saturating_sub(1);
     let mut out = BTreeMap::new();
     for (&ifindex, iface) in &forwarding.cos.interfaces {
         let active_shards = active_shards_by_egress_ifindex
@@ -1721,18 +1733,27 @@ fn build_shared_cos_queue_leases_reusing_existing(
             }
             let burst_bytes = queue.buffer_bytes.max(64 * 1500);
             let key = (ifindex, queue.queue_id);
+            // #1229 Phase 6 v8: emit v8 leases for guarantee-phase
+            // exact queues. Reuse existing lease only if v8 mode AND
+            // max_worker_id matches (otherwise rebuild).
             if let Some(lease) = existing.get(&key).filter(|lease| {
-                lease.matches_config(queue.transmit_rate_bytes, burst_bytes, active_shards)
+                lease.matches_config_v8(
+                    queue.transmit_rate_bytes,
+                    burst_bytes,
+                    active_shards,
+                    max_worker_id,
+                )
             }) {
                 out.insert(key, lease.clone());
                 continue;
             }
             out.insert(
                 key,
-                Arc::new(SharedCoSQueueLease::new(
+                Arc::new(SharedCoSQueueLease::new_v8(
                     queue.transmit_rate_bytes,
                     burst_bytes,
                     active_shards,
+                    max_worker_id,
                 )),
             );
         }
