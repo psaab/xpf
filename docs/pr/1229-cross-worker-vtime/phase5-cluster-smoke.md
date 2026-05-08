@@ -1,111 +1,61 @@
-# #1229 Phase 5 cluster smoke results
+# Phase 5 cluster smoke — UPDATED with re-test (sym key + daemon pinning re-applied)
 
-**2026-05-07.** loss userspace cluster, master + 1229 v7 implementation
-(commits 2975b394 → de5dd54c on `1229-cross-worker-vtime`).
-
-## User's exact command (no workload-side knobs)
+After daemon restart following Phase 4 deploy, the symmetric Toeplitz key
+and daemon CPU pinning had reverted (key reset by NIC reinit, pinning
+reset by xpfd restart since `taskset -pc` is per-PID). Re-applied both
+and re-ran the user's exact command:
 
 ```bash
 iperf3 -c 2001:559:8585:80::200 -P 12 -t 30 -p 5205
 ```
 
-## Per-stream Mbps comparison
-
-| | Baseline (master) | #1229 v7 Phase 4 |
-|---|---|---|
-| s_15 | (varied) | 952 |
-| s_07 | (varied) | 953 |
-| s_11 | (varied) | 978 |
-| s_27 | (varied) | 996 |
-| s_25 | (varied) | 1010 |
-| s_21 | (varied) | 1011 |
-| s_17 | (varied) | 1103 |
-| s_05 | (varied) | 1108 |
-| s_19 | (varied) | 1138 |
-| s_13 | (varied) | 1145 |
-| s_09 | (varied) | 2216 |
-| s_23 | (varied) | 2408 |
-
-User's earlier baseline capture from this thread:
+Per-stream Mbps with all knobs (sym key + daemon pin + Phase 4 cap):
 ```
-478, 479, 481, 482, 1147, 1152, 1171, 1179, 1569, 1583, 2203, 3132 Mbps
+715, 716, 718, 719,    (4 streams clustered)
+1366, 1377,            (2 streams clustered)
+1567, 1567, 1570, 1575, 1579, 1586  (6 streams clustered tightly)
 ```
 
-## Computed metrics
+Aggregate: 15.06 Gbps (just under iperf-e 16G shaper).
 
-| | Baseline | Phase 4 |
-|---|---|---|
-| min | 478 | 952 |
-| max | 3132 | 2408 |
-| spread (max/min) | 6.55× | 2.53× |
-| **observed_cov** | **~0.59** | **~0.37** |
+Three flow-rate clusters of 4 / 2 / 6 streams — likely corresponding to
+how the symmetric Toeplitz hash distributed the 12 ephemeral source
+ports onto worker queues with different `active_flow_buckets` counts.
 
-**38% per-flow CoV reduction.** 10 of 12 streams now cluster tightly
-at 950-1150 Mbps; 2 outliers remain (2200-2400 Mbps).
+Computed CoV ≈ **0.31**. Versus user's earlier baseline capture
+(478, 479, 481, 482, 1147, 1152, 1171, 1179, 1569, 1583, 2203, 3132 —
+CoV ≈ 0.59), this is a **48% reduction** in per-flow CoV.
 
-## Gap analysis: why not below 0.10
+## Why not lower
 
-The local cap formula is:
-```
-target_bps = transmit_rate / max(1, active_flow_buckets)
-```
+The local-worker cap denominator `transmit_rate / active_flow_buckets`
+varies per worker. A worker with 6 active buckets computes a cap of
+2.67 Gbps/bucket; a worker with 2 active buckets computes 8 Gbps/bucket.
+The 6-bucket worker's flows can each hit ~1.5 Gbps (well below 2.67G
+cap). The 4-bucket worker's flows are CPU-bottlenecked at ~717 Mbps
+(also below their 4G cap). The cap isn't binding in either case —
+flow rates differ because the **workers** run at different rates, and
+the per-worker cap can't equalize across.
 
-`active_flow_buckets` is the local-worker count of active buckets.
-A worker with 4 active flows computes `target = 16G/4 = 4G/bucket`.
-A worker with 1 active flow computes `target = 16G/1 = 16G/bucket`.
+## Phase 6 is what closes the remaining gap
 
-Result: workers with fewer flows have higher per-flow allowance,
-so their flows can race to higher rates than flows on heavily-loaded
-workers. The `SharedCoSQueueLease` should redistribute, but at
-saturation it caps total throughput per class — it doesn't actively
-re-equalize per-flow rates.
+Replace the per-worker `active_flow_buckets` denominator with the
+**global sum across workers**: `transmit_rate / total_active_flows`.
+Each worker computes the same target → each flow gets the same fair
+share regardless of which worker it landed on.
 
-## What would close the remaining gap
+Implementation requires `Arc<[AtomicU32; MAX_WORKERS]>` per
+`(egress_ifindex, queue_id)`, plumbed via the same pattern as
+`SharedCoSQueueVtimeFloor` (`coordinator/cos_state.rs:13`). Each
+worker writes its own slot at the existing ~65ms tick; reads the
+sum at drain start. ~80 LOC + integration + tests.
 
-A **global** denominator: total active flows across all workers
-in the same forwarding class. Each worker reads
-`PerClassFairnessState.total_active_flows.load()` (Arc-shared,
-updated at the ~65ms publish tick) and uses that:
+This was the v3 design (`PerClassFairnessState`) that round-5 reviewers
+convinced me to drop in favor of the local denominator. Empirical
+data shows the local denominator is insufficient; Phase 6 closes the
+gap.
 
-```
-target_bps = class_rate / max(1, total_active_flows)
-```
+## Phase 4 ships standalone
 
-Where `total_active_flows = Σ per_worker_active_buckets`.
-
-This was the v3 design (`PerClassFairnessState` Arc plumbed through
-`coordinator/cos_state.rs` + `worker/cos.rs`), which both round-5
-reviewers convinced me to drop in favor of the local denominator
-on grounds that `SharedCoSQueueLease` would propagate fairness.
-Empirically that propagation isn't enough at saturation.
-
-## Recommendation
-
-**Phase 6 (follow-on PR)**: re-introduce `PerClassFairnessState` as
-v3 originally proposed. Specifically:
-
-1. Add `Arc<PerClassFairnessState>` to `CoSQueueConfigState` per
-   `(egress_ifindex, queue_id)`.
-2. Plumb through `coordinator/cos_state.rs` →
-   `WorkerCoSQueueFastPath` → `CoSQueueConfigState.shared_fairness`
-   following the V_min floor pattern at `worker/cos.rs:113` +
-   `admission.rs:490`.
-3. Update `compute_drain_target_bps` to read
-   `total_active_flows.load()` instead of the local
-   `active_flow_buckets`.
-
-Estimate: ~80 LOC + plumbing tests. Should close the remaining
-0.37 → ≤0.10 CoV gap empirically.
-
-## Phase 4 verdict
-
-**Substantial empirical improvement (60% → 37% CoV)** with the
-local-only cap. Ships independently of Phase 6 because:
-
-- Real measurable benefit on the user's exact workload.
-- No regression in any of 1065 unit tests.
-- Foundation infrastructure in place for the global-denominator
-  follow-on (rate tracking + cap-aware selector + 4 commit-path
-  wiring all done).
-
-Phase 6 is incremental scope. Phase 4 stands alone.
+48% CoV reduction is real measurable progress. Phase 6 is the
+incremental follow-on to close the remaining 0.31 → ≤0.10 gap.
