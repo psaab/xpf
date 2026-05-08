@@ -110,6 +110,7 @@ fn build_worker_cos_statuses_aggregates_runtime_by_interface_and_queue() {
                     drop_counters,
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             }],
             queue_indices_by_priority: std::array::from_fn(|_| Vec::new()),
             rr_index_by_priority: [0; COS_PRIORITY_LEVELS],
@@ -257,6 +258,7 @@ fn build_worker_cos_statuses_sums_owner_profile_without_breaking_hist_invariant(
                 drop_counters: CoSQueueDropCounters::default(),
                 owner_profile: CoSQueueOwnerProfile::new(),
             },
+            queue_lease_v8: None,
         }],
         queue_indices_by_priority: std::array::from_fn(|_| Vec::new()),
         rr_index_by_priority: [0; COS_PRIORITY_LEVELS],
@@ -463,6 +465,7 @@ fn build_worker_cos_statuses_owner_profile_only_surfaces_on_unambiguous_owner_lo
                     drop_counters: CoSQueueDropCounters::default(),
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             },
             CoSQueueRuntime {
                 config: crate::afxdp::types::CoSQueueConfigState {
@@ -503,6 +506,7 @@ fn build_worker_cos_statuses_owner_profile_only_surfaces_on_unambiguous_owner_lo
                     drop_counters: CoSQueueDropCounters::default(),
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             },
             CoSQueueRuntime {
                 config: crate::afxdp::types::CoSQueueConfigState {
@@ -543,6 +547,7 @@ fn build_worker_cos_statuses_owner_profile_only_surfaces_on_unambiguous_owner_lo
                     drop_counters: CoSQueueDropCounters::default(),
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             },
         ],
         queue_indices_by_priority: std::array::from_fn(|_| Vec::new()),
@@ -711,6 +716,7 @@ fn build_worker_cos_statuses_owner_profile_stays_zero_for_ambiguous_multi_exact_
                     drop_counters: CoSQueueDropCounters::default(),
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             },
             CoSQueueRuntime {
                 config: crate::afxdp::types::CoSQueueConfigState {
@@ -751,6 +757,7 @@ fn build_worker_cos_statuses_owner_profile_stays_zero_for_ambiguous_multi_exact_
                     drop_counters: CoSQueueDropCounters::default(),
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             },
         ],
         queue_indices_by_priority: std::array::from_fn(|_| Vec::new()),
@@ -882,6 +889,7 @@ fn build_worker_cos_statuses_owner_profile_stays_zero_for_ambiguous_multi_interf
                 drop_counters: CoSQueueDropCounters::default(),
                 owner_profile: CoSQueueOwnerProfile::new(),
             },
+            queue_lease_v8: None,
         }],
         queue_indices_by_priority: std::array::from_fn(|_| Vec::new()),
         rr_index_by_priority: [0; COS_PRIORITY_LEVELS],
@@ -1059,6 +1067,7 @@ fn build_worker_cos_statuses_surfaces_distinct_per_queue_drain_telemetry() {
                     drop_counters: CoSQueueDropCounters::default(),
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             },
             CoSQueueRuntime {
                 config: crate::afxdp::types::CoSQueueConfigState {
@@ -1099,6 +1108,7 @@ fn build_worker_cos_statuses_surfaces_distinct_per_queue_drain_telemetry() {
                     drop_counters: CoSQueueDropCounters::default(),
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             },
         ],
         queue_indices_by_priority: std::array::from_fn(|_| Vec::new()),

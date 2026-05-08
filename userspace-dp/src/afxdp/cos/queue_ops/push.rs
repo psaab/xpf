@@ -62,6 +62,15 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
         queue.hot.items.push_front(item);
         return;
     }
+    // #1229 Phase 6 v8: capture v8 lease + worker_id BEFORE the
+    // flow_fair_state mutable borrow. The two rollback paths below
+    // (matched-snapshot at line ~153 and idle-bucket rebuild at
+    // line ~167) re-increment `active_flow_buckets`, which under
+    // v8 must mirror to the lease's per-worker counter. Capturing
+    // here keeps the borrow checker quiet on the disjoint-field
+    // access. Plan §v8.1.
+    let v8_lease = queue.queue_lease_v8.clone();
+    let worker_id = queue.v_min.worker_id as usize;
     // Invariant: see cos_queue_push_back for the same flow_fair/state
     // pairing. Silent drop here would also corrupt the snapshot stack.
     let ff = queue
@@ -154,6 +163,14 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
             if ff.active_flow_buckets > ff.active_flow_buckets_peak {
                 ff.active_flow_buckets_peak = ff.active_flow_buckets;
             }
+            // #1229 Phase 6 v8: mirror to lease per-worker counter
+            // on this rollback re-increment. Codex v7 review caught
+            // that omitting this leaks the asymmetry until u32 wrap.
+            if let Some(lease) = v8_lease.as_ref() {
+                if let Some(slot) = lease.worker_active_flow_buckets_for(worker_id) {
+                    slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             ff.flow_bucket_items[bucket].push_front(item);
             ff.flow_rr_buckets.push_front(bucket as u16);
             return;
@@ -167,6 +184,14 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
             ff.active_flow_buckets = ff.active_flow_buckets.saturating_add(1);
             if ff.active_flow_buckets > ff.active_flow_buckets_peak {
                 ff.active_flow_buckets_peak = ff.active_flow_buckets;
+            }
+            // #1229 Phase 6 v8: idle-bucket-rebuild rollback path.
+            // Same rationale as the matched-snapshot site above —
+            // mirror the local re-increment to the lease counter.
+            if let Some(lease) = v8_lease.as_ref() {
+                if let Some(slot) = lease.worker_active_flow_buckets_for(worker_id) {
+                    slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
         let was_idle = ff.flow_bucket_bytes[bucket] == 0;

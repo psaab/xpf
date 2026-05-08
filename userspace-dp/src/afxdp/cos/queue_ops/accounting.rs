@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::Ordering;
 
 // Flow accounting helpers — increment / decrement the per-flow byte
 // counters that the MQFQ queue uses to compute virtual finish times.
@@ -13,6 +14,13 @@ pub(super) fn account_cos_queue_flow_enqueue(
     if !queue.flow_fair() || item_len == 0 {
         return;
     }
+    // #1229 Phase 6 v8: capture v8 lease + worker_id BEFORE the
+    // flow_fair_state mutable borrow, so the borrow checker doesn't
+    // reject the disjoint-field access. Arc clone is cheap (one
+    // atomic increment per call); both helpers (enqueue/dequeue)
+    // do this once per call. See plan §v8.1 / active_buckets.rs.
+    let v8_lease = queue.queue_lease_v8.clone();
+    let worker_id = queue.v_min.worker_id as usize;
     // Invariant: `flow_fair() == true` ↔ `flow_fair_state.is_some()`.
     // Silent return here would desync per-bucket bytes / active counts
     // from actual queue contents, breaking selection. Panic instead.
@@ -28,6 +36,14 @@ pub(super) fn account_cos_queue_flow_enqueue(
         // detect SFQ hash collisions under real workloads.
         if ff.active_flow_buckets > ff.active_flow_buckets_peak {
             ff.active_flow_buckets_peak = ff.active_flow_buckets;
+        }
+        // v8 lease delta: bump per-worker active counter on bucket
+        // 0→nonzero transition. Single-writer-per-slot invariant
+        // (this worker_id never seen on any peer's queue runtime).
+        if let Some(lease) = v8_lease.as_ref() {
+            if let Some(slot) = lease.worker_active_flow_buckets_for(worker_id) {
+                slot.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
     let was_idle = ff.flow_bucket_bytes[bucket] == 0;
@@ -71,6 +87,9 @@ pub(super) fn account_cos_queue_flow_dequeue(
         return;
     }
     let shared_exact = queue.shared_exact();
+    // #1229 Phase 6 v8: same Arc-clone pattern as enqueue.
+    let v8_lease = queue.queue_lease_v8.clone();
+    let worker_id = queue.v_min.worker_id as usize;
     // Invariant: see account_cos_queue_flow_enqueue. Silent return here
     // would leave active_flow_buckets / finish-times stale and break
     // V_min slot vacate logic.
@@ -82,6 +101,19 @@ pub(super) fn account_cos_queue_flow_dequeue(
     let remaining = ff.flow_bucket_bytes[bucket].saturating_sub(item_len);
     if ff.flow_bucket_bytes[bucket] > 0 && remaining == 0 {
         ff.active_flow_buckets = ff.active_flow_buckets.saturating_sub(1);
+        // v8 lease delta: unbump per-worker counter on bucket nonzero→0
+        // transition. Defensive underflow protection: only fetch_sub
+        // if slot is currently > 0 (single-writer guarantee makes
+        // load-then-fetch_sub safe; defends against any local/lease
+        // count divergence).
+        if let Some(lease) = v8_lease.as_ref() {
+            if let Some(slot) = lease.worker_active_flow_buckets_for(worker_id) {
+                let prev = slot.load(Ordering::Relaxed);
+                if prev > 0 {
+                    slot.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
         // #785 Phase 3 — MQFQ bucket-idle reset. When a bucket
         // drains to 0 its head/tail finish-times are stale
         // (they point at the virtual time when the LAST packet

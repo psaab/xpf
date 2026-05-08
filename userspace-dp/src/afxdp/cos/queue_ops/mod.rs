@@ -20,6 +20,11 @@ pub(in crate::afxdp) use v_min::{
 // #1034 P2: flow accounting + drain orchestration split into siblings.
 mod accounting;
 mod drain;
+// #1229 Phase 6 v8: centralized active-bucket transition helpers.
+// Plan §v8.1. Every site that mutates `active_flow_buckets` MUST go
+// through these helpers so the v8 lease's per-worker counter stays
+// in sync.
+pub(in crate::afxdp) mod active_buckets;
 use accounting::{account_cos_queue_flow_dequeue, account_cos_queue_flow_enqueue};
 pub(in crate::afxdp) use drain::{
     cos_queue_clear_orphan_snapshot_after_drop, cos_queue_drain_all, cos_queue_restore_front,

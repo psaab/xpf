@@ -135,6 +135,7 @@ fn normalize_cos_queue_state_repairs_nonempty_unparked_queue_to_runnable() {
             drop_counters: CoSQueueDropCounters::default(),
             owner_profile: CoSQueueOwnerProfile::new(),
         },
+        queue_lease_v8: None,
     };
 
     normalize_cos_queue_state(&mut queue);
