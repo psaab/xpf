@@ -1,7 +1,212 @@
 # #1231 — 'all peers CPU-bound' detector to fix iperf-c push -15% regression
 
-**Status:** DRAFT v3 — incorporates Codex PLAN-NEEDS-MAJOR fixes from
-v2 review (task-moxcusww-thgqy7).
+**Status:** DRAFT v4 — incorporates Codex v3 PLAN-NEEDS-MAJOR fixes
+(task-moxd44lk-0tthoz).
+
+## v3 PLAN-NEEDS-MAJOR summary (preserved)
+
+Codex (task-moxd44lk-0tthoz): "Spine is sound: narrow local signal +
+aggregate-underuse AND gate + epoch-tagged events is the right
+shape. Two concurrency/liveness details + one ordering ambiguity."
+
+**Fixes (all addressed in v4 §below):**
+
+1. Signal placement: under active bypass, surplus consumes
+   `still_needed` → no signal fires → bypass decays after 5
+   rotations → grace re-closes → starvation resumes → bypass
+   re-arms. **Oscillator.** Fix: signal on "would have been
+   blocked by grace" check immediately after primary exhaustion,
+   BEFORE bypass surplus path runs.
+
+2. Event reset race: scan-then-store reset can lose an old-tag
+   CAS that succeeds between scan and store. Bounded missed
+   boolean, but proof needs fixing. **Fix:** atomic
+   `swap(pack(new_tag, 0))` per slot at rotation; old returned
+   count is reliably the prior epoch's value.
+
+3. Rotation order ambiguity: pseudocode contradicts itself.
+   **Fix:** explicit ordered pseudocode in §v4.2.
+
+Plus minor: probe F typo (75 KB derivation), LOC estimate
+closer to 100-140 prod (status/protocol surfacing).
+
+---
+
+## v4 design — fix signal placement, atomic-swap reset,
+## explicit rotation order
+
+### v4.1 Signal placement (Codex v3 fix #1)
+
+The narrow signal must fire at the precise point where the worker's
+primary share is exhausted AND grace is still closed AND class
+room remains AND `still_needed > 0`, REGARDLESS of whether bypass
+opens surplus immediately after. The signal records that "this
+worker would have been blocked by grace if bypass were not active",
+which is the regime-detection question we want to answer.
+
+```rust
+// PRIMARY PATH (existing logic, unchanged) ...
+// At end of primary path, check the narrow signal exit:
+let primary_exhausted_with_class_room =
+    still_needed > 0
+    && my_consumed_after_primary >= my_fair_share
+    && (class_granted_after_primary as u64) < epoch_total_grant_cap
+    && now_ns < grace_expires_ns
+    && active;
+
+if primary_exhausted_with_class_room {
+    // Tag-checked CAS bump on starvation events (v3.2).
+    bump_starvation_event(&v8.worker_starvation_events[worker_id], my_tag);
+}
+
+// SURPLUS PATH: open if grace expired OR bypass active.
+// (existing v3 logic unchanged) ...
+```
+
+The signal is a "would have been blocked by grace" probe. Even
+when bypass turns surplus open and the worker proceeds to claim
+surplus successfully, the SIGNAL was registered first — so the
+rotation observer sees that a worker hit the regime. Bypass is
+sustained as long as the regime persists.
+
+When the regime ends (workload subsides, primary becomes
+sufficient), no worker hits the narrow exit → no signal → bypass
+decays in 5 rotations.
+
+### v4.2 Atomic-swap reset + explicit rotation order (Codex v3 fixes #2, #3)
+
+Rotation pseudocode, ordered:
+
+```rust
+fn maybe_rotate_epoch_v8_with_v4_bypass(now_ns: u64) {
+    // STEP 0: existing seqlock-claim CAS (EVEN→ODD).
+    let seq = v8.epoch.epoch_seq.load(Acquire);
+    if seq & 1 == 1 { return; }
+    let start = v8.epoch.epoch_start_ns.load(Acquire);
+    if start != 0 && now_ns < start.saturating_add(EPOCH_DURATION_NS) {
+        return;
+    }
+    if v8.epoch.epoch_seq.compare_exchange(seq, seq + 1, AcqRel, Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    // STEP 1: read prior-epoch aggregate state BEFORE resetting.
+    let prev_packed_granted = v8.epoch.packed_granted.0.load(Acquire);
+    let (_prev_class_tag, prev_granted) =
+        PackedEpochGrant::unpack(prev_packed_granted);
+    let prev_cap = v8.epoch.epoch_total_grant_cap.load(Acquire);
+
+    // STEP 2: atomic-swap each event slot to new_tag/0; collect
+    // returned old (tag, count) pairs to determine which active
+    // workers signaled.
+    let new_tag = ((seq >> 1) + 1) as u32;
+    let new_packed = PackedEpochGrant::pack(new_tag, 0);
+    let mut any_active_worker_signaled = false;
+    for (worker_id, pg) in v8.worker_starvation_events.iter().enumerate() {
+        let old = pg.0.swap(new_packed, AcqRel);
+        let (_old_tag, old_count) = PackedEpochGrant::unpack(old);
+        // Only count if this worker was active in the prior epoch.
+        let active = v8
+            .worker_active_flow_buckets
+            .get(worker_id)
+            .map(|c| c.load(Relaxed) > 0)
+            .unwrap_or(false);
+        if active && old_count > 0 {
+            any_active_worker_signaled = true;
+        }
+        // After this swap, any old-tag CAS attempt by an in-flight
+        // acquire fails naturally (its observed pre-swap value no
+        // longer matches the post-swap value AND the tag mismatches
+        // even if it did). No event leak.
+    }
+
+    // STEP 3: aggregate-underuse condition.
+    let underuse_slack = prev_cap / 20; // 5%
+    let aggregate_underuse =
+        (prev_granted as u64).saturating_add(underuse_slack) < prev_cap;
+
+    // STEP 4: arm or decay bypass.
+    if any_active_worker_signaled && aggregate_underuse {
+        v8.epoch
+            .bypass_grace_rotations_remaining
+            .store(5, Release);
+        v8.epoch.bypass_grace_arm_count.fetch_add(1, Relaxed);
+    } else {
+        let curr = v8.epoch
+            .bypass_grace_rotations_remaining
+            .load(Acquire);
+        if curr > 0 {
+            v8.epoch
+                .bypass_grace_rotations_remaining
+                .store(curr - 1, Release);
+        }
+    }
+
+    // STEP 5: reset class grant counter (existing v8 logic).
+    v8.epoch.packed_granted.store_for_new_epoch(new_tag);
+    for grant in v8.worker_grants.iter() {
+        grant.store_for_new_epoch(new_tag);
+    }
+
+    // STEP 6+: existing rotation publication (cap, grace, fair_share,
+    // start_ns), seq EVEN bump.
+    // ... unchanged ...
+}
+```
+
+Key invariants this ordering guarantees:
+- prev_granted/prev_cap reads see the actual prior-epoch
+  values (Step 1, before Step 5 reset).
+- Event swap (Step 2) atomically captures-or-rejects in-flight
+  bumps. No lost or stale signal.
+- Bypass decision (Step 4) uses both prior-epoch aggregate
+  state AND prior-epoch signal state. Coherent decision.
+
+### v4.3 Cost adjustment (Codex v3 LOC note)
+
+Updated estimate: ~120 prod LOC (including Prometheus/status
+surfacing for the two telemetry counters), ~180 test LOC. ~5
+hours focused work.
+
+### v4.4 Open questions for adversarial review (v4)
+
+1. **Step 2 swap semantics**: `swap` returns the old packed
+   value before atomically replacing. If an in-flight acquire
+   has loaded the old value but not yet CASed, the swap stores
+   new_tag/0 first; the in-flight CAS sees old value (mismatch
+   with current swap-stored value) → fails. So no double-count.
+   Verify this behavior against `compare_exchange_weak`
+   semantics.
+
+2. **Bypass decay race**: rotation winner reads
+   `bypass_grace_rotations_remaining` (Step 4 Acquire), decrements,
+   stores. Another rotation can't run concurrently (epoch_seq CAS
+   serializes), so no race.
+
+3. **Hot-path cost**: signal-bump path is one tag-checked CAS
+   (cold; only fires on the narrow exit). Bypass-load is one
+   Relaxed read per acquire. Existing CAS cost unchanged.
+
+4. **Iperf-c regression validation**: predicted recovery to ≥
+   22.0 Gbps. Walk-through in v3 §5 (with v4 typo fix:
+   `200µs × 3G/sec ÷ 8 = 75 KB`). Bypass arms continuously
+   under saturation; surplus opens immediately; aggregate
+   matches greedy minus class CAS contention.
+
+5. **Iperf-e [4,3,4,1] revalidation**: per-worker consumption
+   below primary share for all workers (per v3.4 walk-through).
+   No signal. Bypass off. v8 fairness preserved. ✓.
+
+6. **Round 4 readiness**: spine sound, three Codex v3
+   blockers all addressed mechanically. Should be PLAN-READY.
+
+---
+
+## DEPRECATED v3 — superseded by v4 above
+
+(v3 spec preserved below for diff readability; v4 supersedes.)
 
 ## v2 PLAN-NEEDS-MAJOR summary (preserved)
 
