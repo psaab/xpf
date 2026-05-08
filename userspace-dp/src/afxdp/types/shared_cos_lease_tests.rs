@@ -368,3 +368,169 @@ fn v8_lease_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SharedCoSQueueLease>();
 }
+
+// === #1231 v5 'all peers CPU-bound' bypass-grace tests ===
+
+#[test]
+fn bypass_telemetry_starts_zero() {
+    let lease = SharedCoSQueueLease::new_v8(10_000_000, 64 * 1024, 2, 5);
+    assert!(!lease.v8_bypass_grace_active());
+    assert_eq!(lease.v8_bypass_grace_arms(), 0);
+    assert_eq!(lease.v8_bypass_grace_uses(), 0);
+}
+
+#[test]
+fn bypass_telemetry_legacy_lease_returns_zero() {
+    let lease = SharedCoSQueueLease::new(10_000_000, 64 * 1024, 2);
+    assert!(!lease.v8_bypass_grace_active());
+    assert_eq!(lease.v8_bypass_grace_arms(), 0);
+    assert_eq!(lease.v8_bypass_grace_uses(), 0);
+}
+
+#[test]
+fn bypass_does_not_arm_under_subsaturation() {
+    // iperf-e style: workers consume below their primary share. No
+    // narrow signal fires; bypass stays off across multiple rotations.
+    let lease = SharedCoSQueueLease::new_v8(2_000_000_000, 64 * 1024, 4, 3);
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 3);
+    lease.rehydrate_worker_active_count(2, 4);
+    lease.rehydrate_worker_active_count(3, 1);
+
+    let mut now_ns = EPOCH_DURATION_NS;
+    for _epoch in 0..10 {
+        for worker_id in 0..4 {
+            let _ = lease.acquire_v8(worker_id, now_ns, 1_000);
+        }
+        now_ns += EPOCH_DURATION_NS;
+    }
+    assert_eq!(
+        lease.v8_bypass_grace_arms(),
+        0,
+        "sub-saturation should not arm bypass"
+    );
+    assert!(!lease.v8_bypass_grace_active());
+}
+
+#[test]
+fn bypass_decays_over_rotations_when_no_signal() {
+    // Once forced-on, bypass decays one rotation at a time when no
+    // worker fires the narrow exit.
+    let lease = SharedCoSQueueLease::new_v8(2_000_000_000, 64 * 1024, 1, 0);
+    lease.rehydrate_worker_active_count(0, 1);
+
+    // Establish initial epoch with a rotation.
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 1);
+
+    // Force-arm via direct field access (bypassing the arming logic
+    // to exercise decay independently).
+    lease
+        .v8
+        .as_ref()
+        .unwrap()
+        .epoch
+        .bypass_grace_rotations_remaining
+        .store(5, Ordering::Release);
+    assert!(lease.v8_bypass_grace_active());
+
+    // Trigger 6 successive rotations with NO narrow-exit signal
+    // (workers consume below primary share).
+    for i in 0..6 {
+        let now = (i as u64 + 2) * EPOCH_DURATION_NS;
+        let _ = lease.acquire_v8(0, now, 1);
+    }
+    assert!(
+        !lease.v8_bypass_grace_active(),
+        "bypass should decay to off after ≥5 no-signal rotations"
+    );
+}
+
+#[test]
+fn bypass_does_not_arm_at_class_cap_saturation() {
+    // Edge case: when prior epoch's class_granted == cap exactly
+    // (no underuse slack), bypass MUST NOT arm even if a worker
+    // signaled — there's no stranded primary share to recover.
+    // Verify the aggregate-underuse condition gates correctly.
+    //
+    // To force this state we'd need a worker to consume at the cap;
+    // mocking it directly is simpler and more deterministic.
+    let lease = SharedCoSQueueLease::new_v8(2_000_000_000, 64 * 1024, 1, 0);
+    lease.rehydrate_worker_active_count(0, 1);
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 1); // initial rotation
+
+    // Force packed_granted to == cap (no underuse). Tag from current
+    // epoch.
+    {
+        let v8 = lease.v8.as_ref().unwrap();
+        let cap = v8.epoch.epoch_total_grant_cap.load(Ordering::Acquire);
+        let curr = v8.epoch.packed_granted.0.load(Ordering::Acquire);
+        let (tag, _) = PackedEpochGrant::unpack(curr);
+        // Set packed_granted to (tag, cap as u32) — saturated.
+        v8.epoch
+            .packed_granted
+            .0
+            .store(PackedEpochGrant::pack(tag, cap as u32), Ordering::Release);
+        // Inject a starvation event for worker 0.
+        v8.worker_starvation_events[0]
+            .0
+            .store(PackedEpochGrant::pack(tag, 1), Ordering::Release);
+    }
+
+    // Trigger next rotation. With prev_granted == cap, underuse is
+    // false → bypass MUST NOT arm even though signal is present.
+    let arms_before = lease.v8_bypass_grace_arms();
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 1);
+    let arms_after = lease.v8_bypass_grace_arms();
+    assert_eq!(
+        arms_after, arms_before,
+        "saturation at cap (no underuse) must NOT arm bypass"
+    );
+}
+
+#[test]
+fn bypass_atomic_swap_resets_packed_granted() {
+    // Verify Codex v5 fix: rotation uses atomic swap on packed_granted
+    // (not load+store). After rotation, the value is (new_tag, 0).
+    let lease = SharedCoSQueueLease::new_v8(2_000_000_000, 64 * 1024, 1, 0);
+    lease.rehydrate_worker_active_count(0, 1);
+
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 1_000);
+
+    // Read packed_granted post-rotation; should reflect new_tag.
+    let v8 = lease.v8.as_ref().unwrap();
+    let curr = v8.epoch.packed_granted.0.load(Ordering::Acquire);
+    let (tag, _) = PackedEpochGrant::unpack(curr);
+    assert_eq!(tag, 1, "first rotation publishes tag=1");
+
+    // Trigger another rotation.
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 1_000);
+    let curr = v8.epoch.packed_granted.0.load(Ordering::Acquire);
+    let (tag, _) = PackedEpochGrant::unpack(curr);
+    assert_eq!(tag, 2, "second rotation publishes tag=2");
+}
+
+#[test]
+fn bypass_starvation_events_swap_at_rotation() {
+    // Verify worker_starvation_events also uses atomic-swap reset.
+    // After rotation, prior epoch's events are reset to (new_tag, 0).
+    let lease = SharedCoSQueueLease::new_v8(2_000_000_000, 64 * 1024, 1, 0);
+    lease.rehydrate_worker_active_count(0, 1);
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 1); // initial epoch
+
+    let v8 = lease.v8.as_ref().unwrap();
+    // Inject an event for worker 0 in the current epoch.
+    let curr = v8.worker_starvation_events[0].0.load(Ordering::Acquire);
+    let (tag, _) = PackedEpochGrant::unpack(curr);
+    v8.worker_starvation_events[0]
+        .0
+        .store(PackedEpochGrant::pack(tag, 5), Ordering::Release);
+
+    // Trigger next rotation.
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 1);
+
+    // After rotation, slot should be (new_tag, 0).
+    let curr = v8.worker_starvation_events[0].0.load(Ordering::Acquire);
+    let (new_tag, count) = PackedEpochGrant::unpack(curr);
+    assert!(new_tag > tag, "rotation incremented tag");
+    assert_eq!(count, 0, "rotation reset count to 0");
+}
