@@ -1374,6 +1374,7 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
             drop_counters: CoSQueueDropCounters::default(),
             owner_profile: CoSQueueOwnerProfile::new(),
         },
+        queue_lease_v8: None,
     };
     let retry = VecDeque::from([TxRequest {
         bytes: vec![0; 1500],
@@ -1435,6 +1436,7 @@ fn restore_cos_prepared_items_marks_queue_runnable_after_retry() {
             drop_counters: CoSQueueDropCounters::default(),
             owner_profile: CoSQueueOwnerProfile::new(),
         },
+        queue_lease_v8: None,
     };
     let retry = VecDeque::from([PreparedTxRequest {
         offset: 64,
