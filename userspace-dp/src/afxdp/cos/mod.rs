@@ -2,6 +2,7 @@ pub(super) mod admission;
 pub(super) mod builders;
 pub(super) mod cross_binding;
 pub(super) mod ecn;
+pub(super) mod fairness;
 pub(super) mod flow_hash;
 pub(super) mod queue_ops;
 pub(super) mod queue_service;

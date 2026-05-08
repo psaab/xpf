@@ -656,6 +656,32 @@ pub(in crate::afxdp) struct FlowFairState {
     /// the earlier bucket's original head. Per-pop snapshots make
     /// every rollback item round-trip neutral.
     pub(in crate::afxdp) pop_snapshot_stack: Vec<CoSQueuePopSnapshot>,
+    /// #1229 v7 per-bucket monotonic TX byte counter. Updated only at
+    /// settle/commit (apply_cos_send_result, apply_cos_prepared_result),
+    /// never on speculative pop or restore. Single-writer per FlowFairState
+    /// (the owning worker for this queue runtime). u64 wraps in ~5e9
+    /// seconds at 100 Gbps — practically unreachable.
+    pub(in crate::afxdp) flow_bucket_tx_bytes: [u64; COS_FLOW_FAIR_BUCKETS],
+    /// #1229 v7 per-bucket EWMA-smoothed observed bytes/sec. u64 to
+    /// avoid the v4-era u32 truncation above 4.29 Gbps. Updated by
+    /// `account_flow_bucket_tx` at settle. Read by the cap-aware MQFQ
+    /// selector when comparing against the per-class target rate.
+    pub(in crate::afxdp) flow_bucket_observed_bps: [u64; COS_FLOW_FAIR_BUCKETS],
+    /// #1229 v7 per-bucket last-commit timestamp (CLOCK_MONOTONIC ns,
+    /// sampled once per batch commit at the apply_cos_*_result call
+    /// site, NOT inside the per-packet loop — Gemini round-6 fix).
+    /// Used as the EWMA dt reference: dt_ns = now_ns - last_tx_ns.
+    /// 0 sentinel = "never committed"; first commit initializes
+    /// observed_bps directly from inst (skip-ramp).
+    pub(in crate::afxdp) flow_bucket_last_tx_ns: [u64; COS_FLOW_FAIR_BUCKETS],
+    /// #1229 v7 sub-threshold byte accumulator. When dt_ns since the
+    /// last EWMA roll is below `EWMA_MIN_DT_NS` (100 µs), bytes
+    /// accumulate here and the EWMA defers. When dt finally crosses
+    /// the threshold the accumulated total is divided by the elapsed
+    /// dt for a true average rate, neutralizing the back-to-back
+    /// packet "100+ Gbps over 100 ns" microspike Gemini round-4
+    /// flagged.
+    pub(in crate::afxdp) flow_bucket_pending_bytes: [u32; COS_FLOW_FAIR_BUCKETS],
 }
 
 impl FlowFairState {
@@ -671,6 +697,10 @@ impl FlowFairState {
             flow_bucket_items: std::array::from_fn(|_| VecDeque::new()),
             flow_rr_buckets: FlowRrRing::default(),
             pop_snapshot_stack: Vec::with_capacity(TX_BATCH_SIZE),
+            flow_bucket_tx_bytes: [0; COS_FLOW_FAIR_BUCKETS],
+            flow_bucket_observed_bps: [0; COS_FLOW_FAIR_BUCKETS],
+            flow_bucket_last_tx_ns: [0; COS_FLOW_FAIR_BUCKETS],
+            flow_bucket_pending_bytes: [0; COS_FLOW_FAIR_BUCKETS],
         }
     }
 }
