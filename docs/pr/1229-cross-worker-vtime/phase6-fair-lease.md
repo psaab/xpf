@@ -103,7 +103,503 @@ a similar-scope rework.
 
 ## Status
 
-**v4 dispatched 2026-05-07 — incorporates convergent v3 KILL fixes.**
+**v5 dispatched 2026-05-07 — fixes the three fatal integration holes Codex
+identified in v4 ("PLAN-KILL as written, but salvageable").**
+
+## v4 KILL summary (preserved)
+
+Codex ([task-mowiijtx-pn6u07](#)) verdict: "PLAN-KILL as written. The
+core direction is no longer obviously wrong: flow-proportional shares
+plus a single class reservation atomic is the right spine. But v4
+still has fatal integration holes."
+
+Three fatal integration holes (Codex-prioritized):
+
+1. **Epoch rotation is unsafe** — pseudocode CASes `epoch_seq` from
+   whatever value just loaded, so peers entering before
+   `epoch_start_ns` is published can also "win" rotation. Even with
+   a single winner, peers can acquire while `epoch_total_granted`
+   has been reset but `epoch_start_ns`, cap, shares, and grace are
+   stale. Publishing start last does NOT create a coherent snapshot.
+   Required fix: seqlock/odd-even rotating state, or CAS
+   `epoch_start_ns` as the rotation claim and make acquirers spin
+   while rotation is in progress.
+
+2. **Token lifecycle hand-waved**: acquire CASes
+   `epoch_total_granted` (new); legacy `state.credits` is a
+   separate packed CAS for `(available, outstanding)`. Two
+   independent commit points with no rollback story. If class CAS
+   succeeds and credits CAS fails: leak epoch budget. Vice versa:
+   leak outstanding/tokens. Required fix: linearized two-CAS-with-
+   rollback OR single packed state.
+
+3. **Rehydration "zero race" is false**: coordinator currently
+   builds leases from forwarding config, NOT worker-local
+   `FlowFairState`. `active_flow_buckets` lives inside worker-owned
+   state. A coordinator walk would be impossible, stale, or racy
+   without a worker snapshot protocol. Required fix: rehydrate
+   worker-side at lease install, under that worker's single-
+   threaded ownership.
+
+Other findings (Codex):
+- Surplus-sharing exact queues, transparent queues, non-exact
+  refill, and root lease all bypass v4. Scope must explicitly say
+  "Guarantee-phase exact queue lease only".
+- `worker_id > 0` precondition required for surplus path (zero-
+  active workers should not drain class budget).
+- `max_worker_id` must be TRUE max id, not `workers.len()`.
+
+Gemini ([task-mowiinqd-lze4io](#)) reached a similar fatal-list but
+recommended STOP. **Per user calibration ("discount Gemini, wrong a
+lot"), Codex's "salvageable, redesign v5" is the operative signal.**
+
+---
+
+## v5 design — three fatal-hole fixes
+
+v5 retains the v4 spine (flow-proportional share, linearizable
+class CAS, capped elapsed, grace period) and patches the three
+fatal integration holes.
+
+### v5.1 Seqlock-style epoch rotation (Fatal #1 fix)
+
+Use odd-even seqlock pattern. `epoch_seq` increments to ODD when
+rotation starts; all updates happen; increments to EVEN when done.
+Acquire path snapshots epoch state with seqlock-read pattern.
+
+```rust
+// Per-class state (renamed from v4's loose atomics):
+struct SharedCoSEpochState {
+    // Bit 0 of seq: 0=stable, 1=rotating. Increments by 2 per
+    // rotation (so the upper bits double as a generation counter).
+    epoch_seq: AtomicU64,
+    // The following are "snapshot" fields; readers must verify
+    // seq stability across read.
+    epoch_start_ns: AtomicU64,
+    epoch_total_grant_cap: AtomicU64,
+    epoch_grace_expires_ns: AtomicU64,
+    // Grant atomic — written by every acquire, reset by rotation.
+    // NOT part of the seqlock snapshot; readers may CAS this
+    // freely (see v5.2 for cap enforcement).
+    epoch_total_granted: AtomicU64,
+}
+
+fn maybe_rotate_epoch_v5(lease: &SharedCoSQueueLease, now_ns: u64) {
+    // Try to claim rotation by transitioning seq from EVEN→ODD.
+    // Loop until either we win or someone else's odd seq is
+    // visible (in-progress rotation).
+    let seq = lease.epoch.epoch_seq.load(Acquire);
+    if seq & 1 == 1 {
+        return; // peer rotating; we'll proceed against fresh state
+                // after spinning in acquire if needed
+    }
+    // Check if rotation is even DUE.
+    let start = lease.epoch.epoch_start_ns.load(Acquire);
+    if now_ns < start.saturating_add(EPOCH_DURATION_NS) {
+        return;
+    }
+    // Atomically transition seq to ODD; only one winner per cycle.
+    if lease.epoch.epoch_seq
+        .compare_exchange(seq, seq + 1, AcqRel, Acquire).is_err()
+    {
+        return; // peer claimed
+    }
+    // We are the rotation winner. seq is now ODD; acquire-path
+    // readers will spin or treat us as in-progress until we
+    // publish EVEN.
+
+    // Reset class-wide grant atomic FIRST (no readers depend on
+    // this for snapshot consistency; cap CAS path is independent).
+    lease.epoch.epoch_total_granted.store(0, Release);
+
+    // Reset per-worker grants.
+    for grant in lease.worker_grants.iter() {
+        grant.store(0, Release);
+    }
+
+    // Recompute class-wide flow total + per-worker fair shares.
+    let total_flows: u64 = lease.worker_active_flow_buckets
+        .iter()
+        .map(|c| c.load(Relaxed) as u64)
+        .sum::<u64>()
+        .max(1);
+    let elapsed_ns = (now_ns - start).min(EPOCH_DURATION_NS);
+    let new_cap = ((lease.config.rate_bytes as u128)
+        * (elapsed_ns as u128) / 1_000_000_000u128) as u64;
+
+    // Publish snapshot fields. ORDER does not matter here because
+    // readers verify seq stability after reading; seqlock semantics
+    // make these stores together effectively atomic.
+    lease.epoch.epoch_total_grant_cap.store(new_cap, Release);
+    let grace_ns = now_ns.saturating_add(EPOCH_DURATION_NS / 2);
+    lease.epoch.epoch_grace_expires_ns.store(grace_ns, Release);
+    for (id, count_atom) in lease.worker_active_flow_buckets.iter().enumerate() {
+        let my_count = count_atom.load(Relaxed) as u64;
+        let my_share = ((new_cap as u128) * (my_count as u128) / (total_flows as u128)) as u64;
+        lease.worker_fair_share[id].store(my_share, Release);
+    }
+    // epoch_start_ns is part of the snapshot.
+    lease.epoch.epoch_start_ns.store(now_ns, Release);
+
+    // FINALLY transition seq to EVEN (publish completion).
+    // This release-store synchronizes with acquire-loads of seq
+    // in the read snapshot path.
+    lease.epoch.epoch_seq.store(seq + 2, Release);
+}
+```
+
+### v5.2 Seqlock-read snapshot at acquire start
+
+Acquire reads coherent snapshot of (start, cap, grace, my_share)
+across the seqlock; class CAS and per-worker CAS use independent
+linearization (they don't need the snapshot, just the CURRENT cap
+value which the snapshot provides).
+
+```rust
+fn acquire_v5(
+    lease: &SharedCoSQueueLease,
+    worker_id: usize,
+    now_ns: u64,
+    requested: u64,
+) -> u64 {
+    if requested == 0 { return 0; }
+    if worker_id >= lease.worker_fair_share.len() {
+        debug_assert!(false);
+        return 0;
+    }
+
+    // Phase 1: maybe rotate (claim if eligible).
+    maybe_rotate_epoch_v5(lease, now_ns);
+
+    // Phase 2: seqlock snapshot of stable epoch state.
+    let (epoch_total_grant_cap, my_fair_share, grace_expires_ns) = loop {
+        let seq_before = lease.epoch.epoch_seq.load(Acquire);
+        if seq_before & 1 == 1 {
+            // Rotation in progress. Spin briefly.
+            std::hint::spin_loop();
+            continue;
+        }
+        let cap = lease.epoch.epoch_total_grant_cap.load(Acquire);
+        let share = lease.worker_fair_share[worker_id].load(Acquire);
+        let grace = lease.epoch.epoch_grace_expires_ns.load(Acquire);
+        let seq_after = lease.epoch.epoch_seq.load(Acquire);
+        if seq_after == seq_before {
+            break (cap, share, grace);
+        }
+        // Rotation occurred during read; retry.
+    };
+
+    let mut total_granted: u64 = 0;
+    let mut still_needed = requested;
+
+    // === PRIMARY PATH: bounded by per-worker fair share ===
+    loop {
+        if still_needed == 0 { break; }
+        let my_consumed = lease.worker_grants[worker_id].load(Acquire);
+        if my_consumed >= my_fair_share { break; }
+        let class_granted = lease.epoch.epoch_total_granted.load(Acquire);
+        if class_granted >= epoch_total_grant_cap { break; }
+
+        let class_room = epoch_total_grant_cap - class_granted;
+        let my_room = my_fair_share - my_consumed;
+        let take = still_needed.min(class_room).min(my_room);
+        if take == 0 { break; }
+
+        // Two-CAS with rollback (Codex Fatal #2 fix).
+        // Order: epoch_total_granted FIRST (cap enforcement),
+        // outstanding SECOND (in-flight cap).
+        if lease.epoch.epoch_total_granted
+            .compare_exchange_weak(class_granted, class_granted + take,
+                AcqRel, Acquire).is_err()
+        {
+            continue; // contention; retry outer loop
+        }
+        // Epoch CAS won. Now CAS legacy state.credits to enforce
+        // outstanding-leased cap.
+        if !try_bump_outstanding(&lease.state, take, lease.config.max_total_leased) {
+            // Rollback epoch reservation we just made. fetch_sub
+            // is safe because we own the increment.
+            lease.epoch.epoch_total_granted.fetch_sub(take, AcqRel);
+            break; // outstanding cap reached; can't take more this epoch
+        }
+        // Both CASes succeeded; commit per-worker counter.
+        lease.worker_grants[worker_id].fetch_add(take, AcqRel);
+        total_granted += take;
+        still_needed -= take;
+    }
+
+    // === SURPLUS PATH: only after grace AND only for active workers ===
+    let active = lease.worker_active_flow_buckets[worker_id]
+        .load(Relaxed) > 0;
+    if still_needed > 0 && now_ns >= grace_expires_ns && active {
+        loop {
+            if still_needed == 0 { break; }
+            let class_granted = lease.epoch.epoch_total_granted.load(Acquire);
+            if class_granted >= epoch_total_grant_cap { break; }
+            let class_room = epoch_total_grant_cap - class_granted;
+            let take = still_needed.min(class_room);
+            if take == 0 { break; }
+            if lease.epoch.epoch_total_granted
+                .compare_exchange_weak(class_granted, class_granted + take,
+                    AcqRel, Acquire).is_err()
+            {
+                continue;
+            }
+            if !try_bump_outstanding(&lease.state, take, lease.config.max_total_leased) {
+                lease.epoch.epoch_total_granted.fetch_sub(take, AcqRel);
+                break;
+            }
+            lease.worker_grants[worker_id].fetch_add(take, AcqRel);
+            total_granted += take;
+            still_needed -= take;
+        }
+    }
+
+    total_granted
+}
+
+#[inline]
+fn try_bump_outstanding(
+    state: &SharedCoSLeaseState,
+    take: u64,
+    max_total_leased: u64,
+) -> bool {
+    loop {
+        let credits = state.credits.load(Acquire);
+        let (available, outstanding) = unpack_shared_cos_lease_credits(credits);
+        if outstanding.saturating_add(take) > max_total_leased {
+            return false;
+        }
+        // Note: `available` is unused in v5 path — rate is enforced
+        // by epoch_total_granted, NOT by available. We keep available
+        // accounting for legacy callers (root lease etc.) but don't
+        // decrement it here. See v5.4.
+        let new_credits = pack_shared_cos_lease_credits(
+            available,
+            outstanding + take,
+        );
+        if state.credits.compare_exchange_weak(credits, new_credits,
+            AcqRel, Acquire).is_ok()
+        {
+            return true;
+        }
+    }
+}
+```
+
+### v5.3 Worker-side rehydration (Fatal #3 fix)
+
+`SharedCoSQueueLease::new` no longer takes
+`initial_active_flow_buckets`. Instead, when a worker installs a new
+lease (post-Arc-swap), it walks its OWN `FlowFairState` queues bound
+to the lease and writes its current count to
+`new_lease.worker_active_flow_buckets[my_worker_id]`. This is
+single-threaded per worker (worker owns its FlowFairState) — no race.
+
+```rust
+// In worker_loop's lease-install path (worker/mod.rs:805 area):
+fn rehydrate_lease_for_worker(
+    new_lease: &SharedCoSQueueLease,
+    my_worker_id: usize,
+    my_queues_bound_to_lease: &[&CoSQueueRuntime],
+) {
+    let total: u32 = my_queues_bound_to_lease.iter()
+        .filter_map(|q| q.flow_fair_state.as_ref())
+        .map(|ff| ff.active_flow_buckets)
+        .sum();
+    new_lease.worker_active_flow_buckets[my_worker_id]
+        .store(total, Relaxed);
+}
+```
+
+Until ALL workers have rehydrated, the lease's
+`worker_active_flow_buckets` is partially populated. During this
+window, total_flows in the new lease is too low; per-worker fair
+shares are correspondingly skewed. Bound: rehydration completes
+within a few µs of lease swap (per-worker walk is fast and
+single-threaded). Transient over-grant is bounded by the rehydration
+duration × rate.
+
+### v5.4 Token lifecycle: legacy state.credits is now SEPARATE accounting
+
+The relationship between v5's `epoch_total_granted` and legacy
+`state.credits` is now made explicit:
+
+- **`epoch_total_granted`** enforces the per-epoch RATE cap
+  (linearizable, all v5 grants CAS against it).
+- **`state.credits.outstanding_leased_tokens`** enforces the
+  outstanding-leased cap (max in-flight bytes from this lease,
+  drained by `consume()` after TX completion).
+- **`state.credits.available_tokens`** and the legacy refill path
+  are NO-OPS for v5 callers — v5 doesn't read or decrement them.
+  Legacy callers (root lease, transparent-rate, surplus-sharing
+  exact post-Guarantee phase) continue using them via the legacy
+  `shared_cos_lease_acquire` function.
+
+This means v5 and legacy callers MUST NOT share a
+`SharedCoSQueueLease` instance. The class-of-service compiler must
+allocate v5 leases for Guarantee-phase exact queues only; legacy
+leases for everything else. `matches_config` includes the v5/legacy
+mode flag.
+
+### v5.5 Explicit scope (Codex point 4 fix)
+
+v5 path applies ONLY to:
+- Guarantee-phase exact queue lease acquisition for queues that
+  have flow-fair state enabled.
+
+Everything else uses legacy:
+- Root lease (`SharedCoSRootLease`) — unchanged, uses
+  `state.credits` directly.
+- Surplus-sharing exact queues in surplus phase — bypass queue
+  lease (per `cos/queue_service/mod.rs:616`). Unchanged.
+- Transparent-rate queues — bypass queue lease. Unchanged.
+- Non-exact (excess-sharing) queues — use legacy refill path.
+
+The compiler distinguishes v5 vs legacy lease at config-compile
+time. `SharedCoSQueueLease::new_v5(...)` creates a v5-mode lease;
+`SharedCoSQueueLease::new(...)` (legacy) is unchanged. v5 leases
+expose the new `acquire_v5` entry; legacy leases expose the old
+`acquire` (unchanged).
+
+### v5.6 max_worker_id sourcing
+
+Coordinator computes `max_worker_id` as TRUE maximum worker_id
+seen across the worker map (NOT `workers.len()` which is the
+count). Coordinator passes it to `SharedCoSQueueLease::new_v5(...,
+max_worker_id)`.
+
+For HA failover or runtime config changes that grow `max_worker_id`,
+the lease is rebuilt via existing config-change reconcile;
+`matches_config` includes `max_worker_id`. Rebuild happens at the
+queue-lease Arc swap point; workers rehydrate their own slots
+(§v5.3) and the lease becomes immediately usable.
+
+### v5.7 Surplus precondition (Codex point 7 fix)
+
+The surplus path is gated on `active_flow_buckets[id] > 0`. Workers
+with no active flow buckets cannot drain surplus (they have no
+flow-fair traffic; if they have OTHER traffic, that uses legacy
+path).
+
+## Public API preservation (v5)
+
+- `SharedCoSQueueLease::new` (legacy) — UNCHANGED.
+- `SharedCoSQueueLease::new_v5(config, max_worker_id, ...)` — NEW.
+- `SharedCoSQueueLease::acquire` (legacy) — UNCHANGED.
+- `SharedCoSQueueLease::acquire_v5(worker_id, now_ns, requested)` — NEW.
+- `SharedCoSQueueLease::consume(bytes)` — unchanged. Decrements
+  `outstanding_leased_tokens`. v5 callers also call this.
+- `SharedCoSRootLease::*` — UNCHANGED.
+- `matches_config` extended to include v5/legacy mode flag and
+  `max_worker_id`.
+
+## Hidden invariants (v5)
+
+1. **Linearizable cap**: `epoch_total_granted ≤ epoch_total_grant_cap`
+   always. CAS-enforced.
+2. **Outstanding-leased cap**: `outstanding_leased_tokens ≤
+   max_total_leased` always. Two-CAS with rollback ensures atomic
+   commit.
+3. **Seqlock snapshot consistency**: acquire reads (start, cap,
+   grace, share) under seqlock-read; verifies seq stability before
+   using values. Stale reads are retried.
+4. **Worker-side rehydration**: each worker writes its OWN slot at
+   lease install. Single-writer-per-slot invariant preserved.
+5. **Bounded burst**: `elapsed_ns ≤ EPOCH_DURATION_NS` capped.
+6. **Scope**: v5 path enforces v5 invariants; legacy path enforces
+   legacy invariants. They do not share state, so neither violates
+   the other's invariants.
+
+## Risk assessment (v5)
+
+| Class | Severity | Notes |
+|-------|----------|-------|
+| Behavioral regression | LOW | v5 scope strictly Guarantee-phase exact queue lease. Legacy paths unchanged. |
+| Lifetime / borrow-checker | LOW | All new state is `Box<[Atomic]>` owned by lease. |
+| Performance regression | MED | Acquire is 2 CASes (epoch + outstanding) plus per-worker increment. ~5K acquires/sec/worker = ~10K CAS/sec/worker on shared atomics. Acceptable. Seqlock-read adds 3 atomic loads at acquire start; negligible. |
+| Concurrency / correctness | MED-LOW | Seqlock pattern is well-established. Two-CAS-with-rollback is straightforward. Worker-side rehydration is single-writer per slot. The principal residual risk is rare timing edge cases in epoch rotation; covered by tests. |
+| Saturated workload regression | LOW | Same as v4. Grace period bounds polling skew; doesn't help CPU-bound workers (acknowledged trade-off). iperf-c expected to maintain ~22.7G aggregate. |
+
+## Test plan (v5)
+
+(All v4 tests retained, plus:)
+- **Seqlock rotation snapshot consistency**: concurrent acquire +
+  rotation; verify acquirer never observes torn (start, cap, grace,
+  share) tuple.
+- **Two-CAS rollback**: synthetic stress test that forces
+  outstanding-cap to be reached mid-acquire; verify epoch counter is
+  rolled back exactly (no over-allocation, no leak).
+- **Worker-side rehydration on lease swap**: install new lease while
+  6 workers are mid-acquire; verify final
+  `worker_active_flow_buckets` matches sum-of-FlowFairState counts.
+- **Mode-isolation**: test that v5 lease doesn't grant against
+  legacy `state.credits.available_tokens` and vice versa.
+- **Inactive worker no-surplus**: worker with `active_flow_buckets[id]
+  = 0` post-grace cannot drain surplus.
+
+## Open questions for adversarial review (v5)
+
+1. **Seqlock pattern correctness under preemption**: rotation winner
+   advances seq EVEN→ODD, then is preempted for milliseconds. Acquire
+   path spins on `seq & 1 == 1` indefinitely. Does the spin have a
+   timeout? Should it return 0 after N spins to avoid livelock under
+   pathological scheduling?
+
+2. **Two-CAS rollback overshoot under concurrency**: 6 peers all CAS
+   epoch_total_granted simultaneously, all succeed (each CASing
+   different observed values), then all 6 try outstanding_leased CAS.
+   If outstanding cap allows only 2 of 6, the other 4 rollback. Net:
+   correct. But the 4 rollbacks each consumed one CAS attempt. Worst-
+   case acquire latency? Bounded by max-retries.
+
+3. **Worker-side rehydration correctness**: each worker writes its
+   OWN slot. But workers share the lease's
+   `worker_active_flow_buckets` Box. If two workers happen to install
+   the new lease concurrently (different slots), is the
+   single-writer-per-slot guarantee actually held by the lease swap
+   protocol? Need to verify against `worker/mod.rs:805` Arc-swap
+   semantics.
+
+4. **iperf-c saturated CPU-bound case**: explicitly NOT fixed by
+   grace period (acknowledged limitation). Aggregate at 22.7G with
+   [6,5,1] distribution: A and B are CPU-bound at ~5.5G each; their
+   primary share is 12.5G/10.42G respectively. They can't consume
+   that much. Surplus opens at grace; C tries to claim. Net
+   aggregate may DROP if C's CPU is also bound. What's the realistic
+   prediction? Test must validate or invalidate.
+
+5. **Mode flag in `matches_config`**: v5 vs legacy at compile time.
+   What about an exact queue with surplus_sharing enabled? Surplus-
+   sharing post-Guarantee uses legacy path; is the SAME lease
+   instance OK for both modes? If so, the lease must support
+   acquire_v5 AND legacy acquire — which contradicts §v5.4 "v5 and
+   legacy callers must NOT share a lease instance". Which is
+   correct?
+
+6. **available_tokens semantics for v5 leases**: §v5.4 says v5
+   doesn't read/decrement available_tokens. But available_tokens
+   refill at rate × elapsed continues. So available_tokens grows
+   without bound for v5 leases. Is that just a memory leak (no, it's
+   capped at u32::MAX), or does it affect anything?
+
+7. **try_bump_outstanding semantics**: rolls back if outstanding cap
+   reached. But if outstanding is high because many in-flight grants
+   haven't been consumed, the v5 grant fails. Workers may stall
+   waiting for consume(). Is the worst-case latency acceptable?
+   Bounded by TX completion time.
+
+8. **Grace period and CPU-bound workers**: explicitly disclosed as
+   not fixed by v5. Acceptable scope?
+
+9. **Sender-side TCP floor**: same as before. iperf-c saturated
+   observed_cov stays ~21% from sender side. v5's value is on
+   shaper-bound workloads (iperf-e style).
+
+10. **Round-5 architectural completeness**: any token paths v5
+    misses? Surplus-sharing post-Guarantee, transparent-rate, root
+    lease, non-exact — all explicitly scoped to legacy. Anything
+    else?
 
 ## v3 KILL summary (preserved)
 
