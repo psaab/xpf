@@ -180,17 +180,17 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
         // The aggregate-bytes vtime rewind above leaves vtime
         // correctly positioned for `max(tail, vtime) + bytes`
         // (see plan §3.7 walkthrough for the drain_all case).
-        // #1229 Phase 6 v8: capture the bump-needed flag here so
-        // the lease update can happen after all `ff` mutations, once
-        // NLL ends the borrow (avoids Arc clone on the rollback path).
-        let idle_rebump = ff.flow_bucket_bytes[bucket] == 0;
-        if idle_rebump {
+        // #1229 Phase 6 v8: `was_idle` serves as both the push-front
+        // anchor flag AND the v8 lease bump gate. Captured once here
+        // (before any byte mutations) to avoid a redundant re-check
+        // after the active_flow_buckets increment below.
+        let was_idle = ff.flow_bucket_bytes[bucket] == 0;
+        if was_idle {
             ff.active_flow_buckets = ff.active_flow_buckets.saturating_add(1);
             if ff.active_flow_buckets > ff.active_flow_buckets_peak {
                 ff.active_flow_buckets_peak = ff.active_flow_buckets;
             }
         }
-        let was_idle = ff.flow_bucket_bytes[bucket] == 0;
         ff.flow_bucket_bytes[bucket] = ff.flow_bucket_bytes[bucket].saturating_add(item_len);
         let new_tail = ff.flow_bucket_tail_finish_bytes[bucket]
             .max(ff.queue_vtime)
@@ -203,9 +203,11 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
         ff.flow_rr_buckets.push_front(bucket as u16);
         // `ff` borrow ends here (NLL: last use above).
         // #1229 Phase 6 v8: idle-bucket-rebuild rollback path.
-        // Mirror the re-increment to the lease counter.
-        if idle_rebump {
-            if let Some(lease) = queue.queue_lease_v8.as_ref() {
+        // Mirror the re-increment to the lease counter. Hoist lease
+        // check outside `was_idle` so non-v8 queues (lease None)
+        // short-circuit immediately without evaluating `was_idle`.
+        if let Some(lease) = queue.queue_lease_v8.as_ref() {
+            if was_idle {
                 if let Some(slot) = lease.worker_active_flow_buckets_for(worker_id) {
                     slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
