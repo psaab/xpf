@@ -1,6 +1,436 @@
 # #1229 Phase 6: per-worker fair lease (weighted share)
 
-**Status:** DRAFT v1 — pending adversarial plan review
+**Status:** v1 PLAN-KILLED 2026-05-07 — convergent kill from Codex
+([task-mowh7owm-4n7xbp](#)) and Gemini Pro 3
+([task-mowh8abt-rwy571](#)). Pursuing v2 with redesigned mechanism.
+
+## v1 KILL summary (preserved for reference)
+
+Both reviewers independently identified the same architectural defect:
+the formula `granted = available_tokens × my_count / total` allocates
+share of **residual balance**, not share of **arrival rate**. This
+preserves first-acquirer advantage:
+
+- Codex geometric proof: with [4,3,4,1] flows acquiring in order,
+  steady-state limit is ~48% / 24% / 24% / 4%, not the claimed
+  5.33/4.00/5.33/1.33.
+- Gemini polling-rate proof: worker A at 1ms acquire vs B at 10ms,
+  equal share → A gets 90%, B gets 10%.
+
+Other convergent fatal findings (preserved as v2 input requirements):
+- `active_shards` is per-interface bound count; `worker_id` is global
+  daemon index. Direct `arr[worker_id]` panics on sparse bindings.
+- `my_count == 0` legacy fallback is a fairness bypass during
+  accounting transitions, lease replacement, worker restart.
+- iperf-c saturation: throttling the 1-flow worker (running ~4 Gbps
+  in [6,5,1] saturated config per recipe doc) to 1/12 share strips
+  ~2 Gbps that CPU-bound peer workers cannot absorb. Aggregate drops
+  from 22.7G — violates "no throughput loss" claim.
+- `SharedCoSRootLease::acquire` shares the same function. v1 missed
+  this bypass path.
+
+The redesign direction (Codex verbatim): "A replacement plan needs
+per-worker credits, dense worker-slot mapping, no greedy zero-count
+fallback, counter rehydration on lease replacement, and an explicit
+root-lease story."
+
+v2 below redrafts against these constraints.
+
+---
+
+## Status (v2)
+
+**Status:** DRAFT v2 — pending adversarial plan review
+
+## v2 redesign: per-worker credits + work-conserving redistribution
+
+The v1 formula was a stateless fractional cap on a shrinking shared
+bucket; that preserves first-acquirer advantage. v2 implements **real
+per-worker credit pools** with **weighted refill** and a **work-
+conserving redistribution pool** to preserve aggregate throughput on
+saturated CPU-bound workloads.
+
+### v2.1 State layout
+
+```rust
+pub(in crate::afxdp) struct SharedCoSQueueLease {
+    config: SharedCoSLeaseConfig,
+    // Existing shared aggregate state — stays for legacy callers
+    // (e.g., SharedCoSRootLease takes a separate code path that does
+    // NOT use per-worker credits). Continued use for root traffic.
+    state: SharedCoSLeaseState,
+
+    // NEW v2: dense per-worker credit pools, indexed by worker_id.
+    // Length = max_worker_id + 1 (NOT active_shards). Sized at lease
+    // construction from the daemon's worker count, queried via
+    // `coordinator/mod.rs::last_planned_workers` (existing source of
+    // truth for the per-worker indexing space, also used by V_min
+    // floor sizing). Sparse interface bindings leave gaps; gaps stay
+    // at 0 forever (workers not bound to this lease never request).
+    worker_credits: Box<[AtomicU64]>,
+
+    // NEW v2: per-worker active flow bucket count, indexed by
+    // worker_id. Same length as worker_credits.
+    worker_active_flow_buckets: Box<[AtomicU32]>,
+
+    // NEW v2: redistribution pool — surplus from CPU-bound workers
+    // flows here at refill, available to lease-starved workers.
+    redistribution_pool: AtomicU64,
+
+    // NEW v2: per-refill epoch counter — used for credit reset
+    // boundary detection.
+    refill_epoch: AtomicU64,
+}
+```
+
+### v2.2 Refill path (epoch boundary)
+
+`refill_shared_cos_lease_state` is called on each `acquire`. v2
+augments it with a per-worker credit refresh that runs at most once
+per refill epoch (~200 us under default config):
+
+```rust
+fn refill_shared_cos_lease_state_v2(
+    config: SharedCoSLeaseConfig,
+    state: &SharedCoSLeaseState,
+    worker_credits: &[AtomicU64],
+    worker_active_flow_buckets: &[AtomicU32],
+    redistribution_pool: &AtomicU64,
+    refill_epoch: &AtomicU64,
+    now_ns: u64,
+) {
+    // Existing aggregate-bucket refill stays — refill_amount is
+    // computed from rate × elapsed.
+    let refill_amount = compute_refill_amount(config, state, now_ns);
+    if refill_amount == 0 {
+        return;
+    }
+    // Atomic CAS to advance epoch. Only one worker thread runs the
+    // distribution path per epoch; others see the new epoch and skip.
+    let old_epoch = refill_epoch.load(Ordering::Acquire);
+    let new_epoch = old_epoch + 1;
+    if refill_epoch
+        .compare_exchange_weak(old_epoch, new_epoch,
+            Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return; // another worker won the epoch race; they distribute
+    }
+
+    // Compute total active flow buckets across workers.
+    let total_count: u64 = worker_active_flow_buckets
+        .iter()
+        .map(|c| c.load(Ordering::Relaxed) as u64)
+        .sum();
+    if total_count == 0 {
+        // No flow-fair traffic on any worker. Drop refill into
+        // redistribution pool — root lease and control traffic
+        // can pull from there if needed.
+        redistribution_pool.fetch_add(refill_amount, Ordering::AcqRel);
+        return;
+    }
+
+    // Distribute refill_amount proportionally to per-worker counts.
+    // Surplus from CPU-bound workers (credits > MAX_RESERVE) spills
+    // into redistribution_pool — work-conserving.
+    let max_reserve = config.lease_bytes.saturating_mul(2);
+    let mut remainder = refill_amount;
+    for (worker_id, count_atom) in worker_active_flow_buckets.iter().enumerate() {
+        let my_count = count_atom.load(Ordering::Relaxed) as u64;
+        if my_count == 0 {
+            continue; // worker has no flow-fair demand
+        }
+        let my_share = (refill_amount as u128)
+            .saturating_mul(my_count as u128)
+            .checked_div(total_count as u128)
+            .unwrap_or(0) as u64;
+        let credits_atom = &worker_credits[worker_id];
+        let new_credits = credits_atom
+            .fetch_add(my_share, Ordering::AcqRel)
+            .saturating_add(my_share);
+        // Surplus spill: if a worker accumulated > max_reserve, it
+        // is CPU-bound (not consuming as fast as it's earning).
+        // Trim its credits back to max_reserve and spill the excess.
+        if new_credits > max_reserve {
+            let excess = new_credits - max_reserve;
+            // Try to subtract excess; if a concurrent acquire
+            // dropped credits below max_reserve, abandon the spill.
+            if credits_atom
+                .compare_exchange(new_credits, max_reserve,
+                    Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                redistribution_pool.fetch_add(excess, Ordering::AcqRel);
+            }
+        }
+        remainder = remainder.saturating_sub(my_share);
+    }
+    // Floor-division remainder spills to redistribution pool —
+    // bounded by total_count - 1 bytes per refill (~6 bytes max).
+    if remainder > 0 {
+        redistribution_pool.fetch_add(remainder, Ordering::AcqRel);
+    }
+}
+```
+
+### v2.3 Acquire path (per-worker first, then redistribution)
+
+```rust
+fn shared_cos_lease_acquire_for_worker_v2(
+    config: SharedCoSLeaseConfig,
+    state: &SharedCoSLeaseState,
+    worker_credits: &[AtomicU64],
+    redistribution_pool: &AtomicU64,
+    worker_id: usize,
+    now_ns: u64,
+    requested: u64,
+) -> u64 {
+    if requested == 0 {
+        return 0;
+    }
+    // Refill (idempotent within an epoch).
+    refill_shared_cos_lease_state_v2(/* ... */, now_ns);
+
+    // Bounds check: out-of-range worker_id is a bug — panic in
+    // debug, fall to legacy in release for safety.
+    if worker_id >= worker_credits.len() {
+        debug_assert!(false, "worker_id out of range: {}", worker_id);
+        return 0;
+    }
+
+    // First: drain own credits.
+    let my_credits = &worker_credits[worker_id];
+    let mut total_granted: u64 = 0;
+    let mut still_needed = requested;
+    loop {
+        let curr = my_credits.load(Ordering::Acquire);
+        if curr == 0 || still_needed == 0 {
+            break;
+        }
+        let take = still_needed.min(curr);
+        if my_credits
+            .compare_exchange_weak(curr, curr - take,
+                Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            total_granted += take;
+            still_needed -= take;
+        }
+    }
+
+    // If still need more, dip into redistribution pool. This is the
+    // work-conserving step: CPU-bound peers' surplus flows to the
+    // workers that can use it.
+    while still_needed > 0 {
+        let curr = redistribution_pool.load(Ordering::Acquire);
+        if curr == 0 {
+            break;
+        }
+        let take = still_needed.min(curr);
+        if redistribution_pool
+            .compare_exchange_weak(curr, curr - take,
+                Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            total_granted += take;
+            still_needed -= take;
+        }
+    }
+
+    // Update outstanding leased tokens for cap enforcement.
+    if total_granted > 0 {
+        // The shared aggregate state still tracks total outstanding
+        // tokens against max_total_leased — this preserves the
+        // existing cap and the root-lease compatibility.
+        bump_outstanding_leased(state, total_granted);
+    }
+    total_granted
+}
+```
+
+### v2.4 Root lease — no change
+
+`SharedCoSRootLease::acquire` and the existing
+`shared_cos_lease_acquire` (now renamed `_legacy`) stay unchanged.
+Root lease pre-empts queue lease for control traffic — it acquires
+from the shared bucket directly, bypassing per-worker credits. v1's
+"my_count == 0 fallback" is removed entirely; flow-fair queues NEVER
+fall through to legacy. Only `SharedCoSRootLease` uses the legacy
+greedy path.
+
+### v2.5 Counter rehydration on lease replacement
+
+When a CoSQueueRuntime promotes from non-flow-fair to flow-fair (or
+the lease is recreated due to config change), the bucket transition
+events that would re-populate `worker_active_flow_buckets` may be
+missed. v2 adds an explicit init step in
+`enable_test_flow_fair`/`disable_test_flow_fair` and the production
+promotion path: snapshot the queue's current bucket population and
+emit the corresponding fetch_add/fetch_sub on the lease's worker
+slot. This eliminates the stale-counter race that v1's legacy
+fallback was masking.
+
+### v2.6 max_worker_id sizing
+
+`SharedCoSQueueLease::new` accepts `max_worker_id: usize` from the
+constructor (passed by the coordinator from `last_planned_workers`,
+the existing per-worker indexing source — coordinator/mod.rs:1040
+already uses this for V_min floor sizing). `worker_credits.len()
+== worker_active_flow_buckets.len() == max_worker_id + 1`. Sparse
+bindings leave gaps; gaps stay at 0 (no fill, no leak).
+
+## Public API preservation (v2)
+
+- `SharedCoSQueueLease::new` signature CHANGES: gains
+  `max_worker_id: usize` parameter. Caller in coordinator/mod.rs is
+  the only construction site; trivial migration.
+- `SharedCoSQueueLease::acquire` signature CHANGES: gains
+  `worker_id: usize` parameter. Caller in `cos/token_bucket.rs:64`
+  is the only flow-fair acquisition site; passes
+  `runtime.worker_id`.
+- `SharedCoSQueueLease::consume` (release-side) unchanged.
+- `SharedCoSRootLease::acquire` unchanged.
+- New private helpers: `refill_shared_cos_lease_state_v2`,
+  `shared_cos_lease_acquire_for_worker_v2`. Old `_legacy` retained
+  only for root lease internal use.
+
+## Hidden invariants (v2)
+
+1. **Aggregate cap unchanged**: outstanding_leased_tokens still
+   enforced against `max_total_leased` via the shared `state`.
+   Per-worker credits add up to the refill amount; redistribution
+   pool absorbs surplus. Total tokens granted per refill window
+   ≤ refill_amount.
+
+2. **Work conservation**: when worker A is CPU-bound, its surplus
+   flows to redistribution. Worker B that requests more than its
+   share gets the surplus. Aggregate throughput is preserved as
+   long as ANY worker has unmet demand.
+
+3. **No fairness bypass**: flow-fair queues only call
+   `acquire_for_worker_v2`. There is no `my_count == 0 fallback`;
+   if a worker has no per-worker credits, it gets 0 from its pool
+   and may pull from redistribution (work-conserving). Root traffic
+   uses a separate path.
+
+4. **Convergence under flow churn**: epoch CAS serializes
+   distribution; each refill window has a single distribution
+   pass. Mid-acquire reads of stale counts at most affect one
+   refill window's allocation — bounded.
+
+5. **Bounds safety**: `worker_id >= worker_credits.len()` is a bug.
+   debug_assert + 0-grant in release. No panic in production.
+
+## Risk assessment (v2)
+
+| Class | Severity | Notes |
+|-------|----------|-------|
+| Behavioral regression | LOW | Aggregate cap preserved by shared `state.credits`. Work conservation preserves aggregate when peers are CPU-bound. |
+| Lifetime / borrow-checker | LOW | `Box<[AtomicU64]>` and `Box<[AtomicU32]>` owned by lease. Workers access via existing `Arc` deref. |
+| Performance regression | MED | Acquire is now 2 CAS loops (own pool + redistribution pool). Worst case: 4-5 atomic ops per acquire. Refill is one CAS for epoch + ~6 atomic adds for distribution. At 5K acquires/sec/worker = ~30K atomic ops/sec total. Profile required to confirm; if measurable, fall back to single-pool acquire and weight only the refill. |
+| Architectural mismatch | LOW | This is canonical weighted fair queueing as in HFSC / DRR / WFQ literature. The redistribution pool is the parent-class borrow mechanism. Distinction from #1211 (AFD ECN overlay) is sharp. |
+| Saturated workload regression | LOW (NEW) | Work conservation explicitly addresses iperf-c case: CPU-bound workers spill surplus, fast workers absorb. Predicted aggregate at 22.7G saturated: equal to current (no scheduler-side throttle when surplus is available). |
+
+## Test plan (v2)
+
+- Cargo build clean.
+- Cargo test --release: 1065+ tests pass.
+- New tests in shared_cos_lease unit tests:
+  - **Two-worker fair share** (equal demand): each gets ~50% of refill.
+  - **Asymmetric flow counts** [4,1]: A gets 80% of refill, B gets 20%.
+  - **CPU-bound peer redistribution**: worker B doesn't consume its
+    credits; on next refill, B's surplus spills to redistribution;
+    worker A pulls from both pools and consumes effectively beyond
+    its base share.
+  - **Aggregate cap preservation**: 4 workers each requesting more
+    than total cap; sum of grants ≤ refill_amount; outstanding_leased
+    enforced.
+  - **Out-of-range worker_id**: returns 0, no panic.
+  - **Sparse worker bindings**: workers 3,4,5 only; workers 0,1,2
+    slots stay zero; lease doesn't underrun.
+  - **Counter rehydration on flow_fair toggle**: enable/disable cycles
+    don't leak counts.
+  - **Concurrent acquire** (loom or quickcheck): no underflow on
+    state.credits or worker_credits.
+- 5x flake check on `shared_cos_lease_v2_two_worker_fair`.
+- Go suite: 30 packages pass.
+- Cluster smoke matrix: CoS disabled baseline + CoS enabled per-class
+  (5201-5206), v4+v6, push+reverse.
+- **Targeted iperf-e measurement** (16G EXACT, sub-saturation):
+  per-flow CoV target <10% (currently 60%).
+- **Targeted iperf-c saturation measurement** (25G shaper, push):
+  aggregate target ≥22.0 Gbps (currently 22.7G; allow 3% margin for
+  redistribution overhead). observed_cov no worse than 0.21 (recipe
+  doc baseline).
+- **Targeted CoS-disabled measurement**: per-class CoS off → root
+  lease path → must be unchanged from master (Phase 6 only touches
+  flow-fair queue lease).
+
+## Out of scope (explicitly)
+
+- Cross-binding redirect (UMEM ownership unchanged).
+- Hierarchical CoS parent/child shares.
+- Dynamic adjustment of `max_reserve` (the per-worker credit cap).
+- HA sync of credit state — strictly per-process, ephemeral.
+
+## Open questions for adversarial review (v2)
+
+1. **Is the math actually fair now?** Per-refill weighted distribution
+   into per-worker pools, then drain-own-then-redistribution. Verify
+   the limit behavior under sustained acquire skew (Codex's geometric
+   series and Gemini's polling-rate examples both apply to v1; do
+   they apply to v2?).
+
+2. **Redistribution pool starvation**: can the redistribution pool
+   become a hot CAS contention point if many workers are
+   simultaneously short on their own credits? At 6 workers × 5K
+   acquires/sec = 30K CAS loops/sec on one atomic. Manageable, or
+   does this need sharding?
+
+3. **Epoch CAS for refill distribution**: only one worker runs the
+   distribution path per epoch. If that worker is the slowest one,
+   does the others' refill get delayed? Should ALL workers race the
+   distribution but only one wins, with the losers proceeding to
+   acquire immediately?
+
+4. **Surplus detection threshold** (`max_reserve = lease_bytes × 2`):
+   is this the right boundary? Too low → overactive spilling
+   (work loss to redistribution latency). Too high → CPU-bound
+   workers hoard credits, redistribution is slow to feed lease-
+   starved workers. Empirical tuning likely needed.
+
+5. **Counter rehydration race**: explicit init on
+   enable_test_flow_fair / production promotion. Is there a window
+   where `acquire_for_worker_v2` is called before the bucket count
+   is rehydrated, getting 0 from own pool, dipping into
+   redistribution? Bounded by promotion duration (~us) but could
+   feel like a brief greedy moment.
+
+6. **Iperf-c saturated regression assumption**: v2 claims work
+   conservation preserves aggregate. The recipe doc shows worker
+   throttling at 22.7G is sender-side TCP, not scheduler. If
+   observed_cov stays at ~21% (sender floor) AND aggregate stays
+   at 22.7G, mechanism is sound but value is reduced (only iperf-
+   e-class shaper-bound workloads see the win). Acceptable scope?
+
+7. **Root lease still greedy**: control / unclassified traffic
+   uses the legacy greedy path. Could a misconfiguration or
+   protocol mismatch cause flow-fair traffic to fall onto the
+   root path and bypass v2 fairness? cos/admission.rs eligibility
+   check needs verification.
+
+8. **Worker ID sourced from `last_planned_workers`**: per
+   coordinator/mod.rs:1040, this sizes V_min floors. v2 reuses it
+   for credit array sizing. Safe? Or does
+   `last_planned_workers` change at runtime (e.g., HA failover),
+   leaving credit arrays stale-sized?
+
+9. **Memory cost**: 6 workers × 16 bytes × 7 classes = 672 bytes
+   per lease. Plus redistribution pool. Trivial. Confirmed?
+
+10. **HA sync**: v1 review confirmed CoS lease is per-process. v2
+    adds new fields but stays per-process. Re-confirm against
+    pkg/cluster session/state sync paths.
 
 ## Issue framing
 
