@@ -420,6 +420,15 @@ pub(in crate::afxdp) struct CoSQueueRuntime {
     pub(in crate::afxdp) flow_fair_state: Option<Box<FlowFairState>>,
     pub(in crate::afxdp) v_min: VMinQueueState,
     pub(in crate::afxdp) telemetry: CoSQueueTelemetry,
+    /// #1229 Phase 6 v8: per-worker fair-share lease back-reference.
+    /// `Some` for guarantee-phase exact queues bound to a v8 lease.
+    /// Active-bucket helpers (`cos/queue_ops/active_buckets.rs`) read
+    /// this to delta-update the lease's per-worker counter on
+    /// transitions. `None` for non-flow-fair, non-exact, transparent,
+    /// surplus-sharing-only, or root-only queues — those don't
+    /// participate in v8 fair scheduling and incur zero overhead from
+    /// the helpers' optional path.
+    pub(in crate::afxdp) queue_lease_v8: Option<Arc<SharedCoSQueueLease>>,
 }
 
 impl CoSQueueRuntime {

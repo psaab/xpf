@@ -151,6 +151,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
                     drop_counters: CoSQueueDropCounters::default(),
                     owner_profile: CoSQueueOwnerProfile::new(),
                 },
+                queue_lease_v8: None,
             })
             .collect(),
         queue_indices_by_priority,
