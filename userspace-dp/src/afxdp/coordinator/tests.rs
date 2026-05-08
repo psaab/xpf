@@ -521,11 +521,13 @@ fn build_shared_cos_queue_leases_reuses_existing_matching_lease_arc() {
     let existing = build_shared_cos_queue_leases_reusing_existing(
         &forwarding,
         &active_shards_by_egress_ifindex,
+        2,
         &BTreeMap::new(),
     );
     let reused = build_shared_cos_queue_leases_reusing_existing(
         &forwarding,
         &active_shards_by_egress_ifindex,
+        2,
         &existing,
     );
 

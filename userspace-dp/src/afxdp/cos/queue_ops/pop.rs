@@ -37,6 +37,25 @@ fn cos_queue_pop_front_inner(
     queue: &mut CoSQueueRuntime,
     push_snapshot: bool,
 ) -> Option<CoSPendingTxItem> {
+    cos_queue_pop_front_inner_with_cap(queue, push_snapshot, u64::MAX)
+}
+
+/// #1229 v7: cap-aware variant. `target_bps = u64::MAX` is the
+/// no-cap default (existing behavior). Drain loops compute the
+/// per-bucket fair-share target and pass it here so over-cap
+/// buckets are deferred in favor of cooler ones.
+pub(in crate::afxdp) fn cos_queue_pop_front_with_cap(
+    queue: &mut CoSQueueRuntime,
+    target_bps: u64,
+) -> Option<CoSPendingTxItem> {
+    cos_queue_pop_front_inner_with_cap(queue, true, target_bps)
+}
+
+fn cos_queue_pop_front_inner_with_cap(
+    queue: &mut CoSQueueRuntime,
+    push_snapshot: bool,
+    target_bps: u64,
+) -> Option<CoSPendingTxItem> {
     let item = if !queue.flow_fair() {
         queue.hot.items.pop_front()?
     } else {
@@ -55,7 +74,11 @@ fn cos_queue_pop_front_inner(
         // still maintained on 0↔>0 transitions so the min-scan
         // only iterates the currently-active buckets (typically
         // 2-16), not all 4096.
-        let bucket_u16 = cos_queue_min_finish_bucket(ff)?;
+        //
+        // #1229 v7: scan now skips buckets whose EWMA-observed bps
+        // exceeds `target_bps`, falling back to the lowest-finish
+        // bucket if all are over-cap (work-conserving).
+        let bucket_u16 = cos_queue_min_finish_bucket(ff, target_bps)?;
         let bucket = usize::from(bucket_u16);
         if push_snapshot {
             // #785 Phase 3 — Codex round-3 HIGH + NEW-1: snapshot

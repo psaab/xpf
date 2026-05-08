@@ -7,6 +7,35 @@ use super::*;
 // _flow_fair variants implement MQFQ ordering across the per-flow
 // buckets within a queue.
 
+/// #1229 v7: per-bucket fair-share target for the cap-aware MQFQ
+/// selector. `bucket_target = queue_bw / max(1, active_flow_buckets)`.
+///
+/// For non-flow-fair queues or queues without a configured
+/// transmit_rate, returns u64::MAX (no cap, work-conserving fallback).
+///
+/// Sampled ONCE at drain-batch start; same value used for every
+/// pop in the batch so the eligible-set is stable.
+#[inline]
+fn compute_drain_target_bps(queue: &CoSQueueRuntime) -> u64 {
+    let Some(ff) = queue.flow_fair_state.as_ref() else {
+        return u64::MAX;
+    };
+    // transmit_rate_bytes = 0 means "no shape configured"; preserve
+    // the existing work-conserving behavior by disabling the cap.
+    let rate_bytes = queue.config.transmit_rate_bytes;
+    if rate_bytes == 0 {
+        return u64::MAX;
+    }
+    // Convert bytes/sec → bits/sec. u128 intermediate avoids overflow
+    // at 100+ Gbps configured rates; clamp to u64::MAX before narrowing
+    // so extreme configured rates saturate rather than silently wrap.
+    let queue_bw_bps = (rate_bytes as u128)
+        .saturating_mul(8)
+        .min(u64::MAX as u128) as u64;
+    let denom = ff.active_flow_buckets.max(1) as u64;
+    queue_bw_bps / denom
+}
+
 pub(in crate::afxdp) fn drain_exact_local_fifo_items_to_scratch(
     queue: &mut CoSQueueRuntime,
     free_tx_frames: &mut VecDeque<u64>,
@@ -125,6 +154,14 @@ pub(in crate::afxdp) fn drain_exact_local_items_to_scratch_flow_fair(
     if let Some(ff) = queue.flow_fair_state.as_mut() {
         ff.pop_snapshot_stack.clear();
     }
+    // #1229 v7: per-bucket fair-share cap = queue_bw / max(1,
+    // active_flow_buckets). At iperf3 -P 12 scale (collisions rare,
+    // ~12 active buckets), each bucket gets queue_bw/12 = per-flow
+    // share. At 100K-flow scale, ~4096 active buckets each get
+    // queue_bw/4096; per-flow share via TCP cwnd within bucket.
+    // Pass to the cap-aware front/pop helpers so over-cap buckets
+    // are deferred in favor of cooler ones.
+    let target_bps = compute_drain_target_bps(queue);
     // #941 Work item D: drain-call preflight. If no free TX frames at
     // entry, return early WITHOUT consuming a suspension slot — that
     // way TX-ring-full no-progress drains don't burn the suspension
@@ -158,7 +195,10 @@ pub(in crate::afxdp) fn drain_exact_local_items_to_scratch_flow_fair(
         if !suspended && !cos_queue_v_min_continue(queue, v_min_pop_count) {
             break;
         }
-        let Some(front) = cos_queue_front(queue) else {
+        // #1229 v7: cap-aware front/pop. target_bps was sampled
+        // once at drain-batch start; same value used for every
+        // pop in the batch so the eligible-set is stable.
+        let Some(front) = cos_queue_front_with_cap(queue, target_bps) else {
             break;
         };
         let len = match front {
@@ -168,7 +208,9 @@ pub(in crate::afxdp) fn drain_exact_local_items_to_scratch_flow_fair(
         if remaining_root < len || remaining_secondary < len {
             break;
         }
-        let Some(CoSPendingTxItem::Local(mut req)) = cos_queue_pop_front(queue) else {
+        let Some(CoSPendingTxItem::Local(mut req)) =
+            cos_queue_pop_front_with_cap(queue, target_bps)
+        else {
             break;
         };
         remaining_root = remaining_root.saturating_sub(len);
@@ -351,6 +393,9 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
     if let Some(ff) = queue.flow_fair_state.as_mut() {
         ff.pop_snapshot_stack.clear();
     }
+    // #1229 v7: per-bucket fair-share cap (same compute as the Local
+    // flow-fair drain above; mirror).
+    let target_bps = compute_drain_target_bps(queue);
     let mut remaining_root = root_budget;
     let mut remaining_secondary = secondary_budget;
     // #942: V_min wiring on the Prepared flow-fair drain. Mirrors
@@ -368,7 +413,7 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
     // return early WITHOUT consuming a suspension slot. This prevents
     // a no-progress Prepared drain (e.g. queue head is Local) from
     // eroding the hard-cap suspension window.
-    match cos_queue_front(queue) {
+    match cos_queue_front_with_cap(queue, target_bps) {
         Some(CoSPendingTxItem::Prepared(_)) => {}
         _ => return ExactCoSScratchBuild::Ready,
     }
@@ -388,7 +433,7 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
         if !suspended && !cos_queue_v_min_continue(queue, v_min_pop_count) {
             break;
         }
-        let Some(front) = cos_queue_front(queue) else {
+        let Some(front) = cos_queue_front_with_cap(queue, target_bps) else {
             break;
         };
         let len = match front {
@@ -398,7 +443,9 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
         if remaining_root < len || remaining_secondary < len {
             break;
         }
-        let Some(CoSPendingTxItem::Prepared(mut req)) = cos_queue_pop_front(queue) else {
+        let Some(CoSPendingTxItem::Prepared(mut req)) =
+            cos_queue_pop_front_with_cap(queue, target_bps)
+        else {
             break;
         };
         remaining_root = remaining_root.saturating_sub(len);

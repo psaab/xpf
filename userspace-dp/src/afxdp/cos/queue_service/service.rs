@@ -326,6 +326,7 @@ fn service_exact_local_queue_direct_flow_fair(
         &mut binding.tx_pipeline.free_tx_frames,
         &mut binding.scratch.scratch_local_tx,
         inserted as usize,
+        now_ns,
     );
     // #940: post-settle V_min publish. Settle has already applied
     // any partial-rollback push_fronts (which republished via the
@@ -664,6 +665,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
         &mut binding.scratch.scratch_prepared_tx,
         &mut binding.tx_pipeline.in_flight_prepared_recycles,
         inserted as usize,
+        now_ns,
     );
     // #940: post-settle V_min publish. Settle has applied any
     // partial-rollback push_fronts via the rollback hook;

@@ -28,11 +28,15 @@ use crate::afxdp::{tx_frame_capacity, FastMap, TX_BATCH_SIZE};
 use crate::xsk_ffi::xdp::XdpDesc;
 
 use super::{
-    cos_item_len, cos_queue_clear_orphan_snapshot_after_drop, cos_queue_front, cos_queue_is_empty,
-    cos_queue_pop_front, cos_queue_push_front, cos_queue_v_min_consume_suspension,
-    cos_queue_v_min_continue, cos_refill_ns_until, maybe_top_up_cos_queue_lease,
-    publish_committed_queue_vtime, refill_cos_tokens, COS_MIN_BURST_BYTES,
+    cos_item_len, cos_queue_clear_orphan_snapshot_after_drop, cos_queue_front,
+    cos_queue_front_with_cap, cos_queue_is_empty, cos_queue_pop_front, cos_queue_pop_front_with_cap,
+    cos_queue_push_front, cos_queue_v_min_consume_suspension, cos_queue_v_min_continue,
+    cos_refill_ns_until, maybe_top_up_cos_queue_lease, publish_committed_queue_vtime,
+    refill_cos_tokens, COS_MIN_BURST_BYTES,
 };
+// #1229 v7 per-bucket TX accounting + threshold-gated EWMA.
+use super::fairness::account_flow_bucket_tx;
+use super::flow_hash::cos_flow_bucket_index;
 
 // #1035 P2: drain stage of the queue service pipeline split into
 // a sibling submodule.
@@ -742,11 +746,20 @@ pub(in crate::afxdp) fn settle_exact_local_scratch_submission_flow_fair(
     free_tx_frames: &mut VecDeque<u64>,
     scratch_local_tx: &mut Vec<(u64, TxRequest)>,
     inserted: usize,
+    now_ns: u64,
 ) -> (u64, u64) {
     let Some(queue) = queue else {
         scratch_local_tx.clear();
         return (0, 0);
     };
+    // #1229 v7: per-bucket TX rate accounting. Capture the
+    // FlowFair seed once; we'll need it to map each committed
+    // packet's flow_key to its bucket.
+    let flow_hash_seed = queue
+        .flow_fair_state
+        .as_ref()
+        .map(|ff| ff.flow_hash_seed)
+        .unwrap_or(0);
     let mut sent_packets = 0u64;
     let mut sent_bytes = 0u64;
     while let Some((offset, req)) = scratch_local_tx.pop() {
@@ -754,8 +767,17 @@ pub(in crate::afxdp) fn settle_exact_local_scratch_submission_flow_fair(
             free_tx_frames.push_front(offset);
             cos_queue_push_front(queue, CoSPendingTxItem::Local(req));
         } else {
+            // Committed: account the TX bytes against the bucket
+            // BEFORE moving the request out (req still owned).
+            // now_ns is sampled once per batch by the caller; this
+            // scope reuses that single value for every packet.
+            let bytes = req.bytes.len() as u64;
+            if let Some(ff) = queue.flow_fair_state.as_mut() {
+                let bucket = cos_flow_bucket_index(flow_hash_seed, req.flow_key.as_ref()) as u16;
+                account_flow_bucket_tx(ff, bucket, bytes, now_ns);
+            }
             sent_packets += 1;
-            sent_bytes += req.bytes.len() as u64;
+            sent_bytes += bytes;
         }
     }
     (sent_packets, sent_bytes)
@@ -797,20 +819,33 @@ fn settle_exact_prepared_scratch_submission_flow_fair(
     scratch_prepared_tx: &mut Vec<PreparedTxRequest>,
     in_flight_prepared_recycles: &mut FastMap<u64, PreparedTxRecycle>,
     inserted: usize,
+    now_ns: u64,
 ) -> (u64, u64) {
     let Some(queue) = queue else {
         scratch_prepared_tx.clear();
         return (0, 0);
     };
+    // #1229 v7: per-bucket TX rate accounting on the prepared-peer
+    // commit path (same shape as the local exact path above).
+    let flow_hash_seed = queue
+        .flow_fair_state
+        .as_ref()
+        .map(|ff| ff.flow_hash_seed)
+        .unwrap_or(0);
     let mut sent_packets = 0u64;
     let mut sent_bytes = 0u64;
     while let Some(req) = scratch_prepared_tx.pop() {
         if scratch_prepared_tx.len() >= inserted {
             cos_queue_push_front(queue, CoSPendingTxItem::Prepared(req));
         } else {
+            let bytes = req.len as u64;
+            if let Some(ff) = queue.flow_fair_state.as_mut() {
+                let bucket = cos_flow_bucket_index(flow_hash_seed, req.flow_key.as_ref()) as u16;
+                account_flow_bucket_tx(ff, bucket, bytes, now_ns);
+            }
             remember_prepared_recycle(in_flight_prepared_recycles, &req);
             sent_packets += 1;
-            sent_bytes += req.len as u64;
+            sent_bytes += bytes;
         }
     }
     (sent_packets, sent_bytes)
@@ -949,6 +984,39 @@ fn submit_cos_batch(
                 &mut items,
                 cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx),
             );
+            // #1229 v7: pre-transmit sidecar — record (bucket, bytes)
+            // for each item in submit order. transmit_batch consumes
+            // the successful prefix in-place; we slice the sidecar by
+            // returned `packets` to account only the bytes actually
+            // shipped (not retries).
+            //
+            // Stack-allocated array (TX_BATCH_SIZE × 10 bytes = 640 B)
+            // avoids per-batch heap allocation on the hot path. The
+            // Option<u64> seed acts as a presence flag: None means no
+            // flow_fair state → sidecar_len stays 0 and accounting is
+            // skipped entirely (no iteration, no branch inside the
+            // success block).
+            let local_seed_opt = binding
+                .cos
+                .cos_interfaces
+                .get(&root_ifindex)
+                .and_then(|root| root.queues.get(queue_idx))
+                .and_then(|q| q.flow_fair_state.as_ref())
+                .map(|ff| ff.flow_hash_seed);
+            let mut sidecar = [(0u16, 0u64); TX_BATCH_SIZE];
+            let sidecar_len = if let Some(seed) = local_seed_opt {
+                let mut n = 0usize;
+                for req in items.iter().take(TX_BATCH_SIZE) {
+                    sidecar[n] = (
+                        cos_flow_bucket_index(seed, req.flow_key.as_ref()) as u16,
+                        req.bytes.len() as u64,
+                    );
+                    n += 1;
+                }
+                n
+            } else {
+                0
+            };
             match transmit_batch(binding, &mut items, now_ns, shared_recycles) {
                 Ok((packets, bytes)) => {
                     apply_cos_send_result(
@@ -960,6 +1028,21 @@ fn submit_cos_batch(
                         bytes,
                         items,
                     );
+                    // #1229 v7: account per-bucket bytes for the sent
+                    // prefix. sidecar_len > 0 ↔ flow_fair is active.
+                    if packets > 0 && sidecar_len > 0 {
+                        if let Some(ff) = binding
+                            .cos
+                            .cos_interfaces
+                            .get_mut(&root_ifindex)
+                            .and_then(|root| root.queues.get_mut(queue_idx))
+                            .and_then(|q| q.flow_fair_state.as_mut())
+                        {
+                            for &(bucket, bytes) in &sidecar[..packets as usize] {
+                                account_flow_bucket_tx(ff, bucket, bytes, now_ns);
+                            }
+                        }
+                    }
                     if packets > 0 {
                         binding
                             .live
@@ -1007,6 +1090,31 @@ fn submit_cos_batch(
                 &mut items,
                 cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx),
             );
+            // #1229 v7: pre-transmit sidecar (same shape as Local
+            // path above — transmit_prepared_queue consumes the
+            // successful prefix in-place). Stack array avoids
+            // per-batch allocation; only populated for flow-fair queues.
+            let prepared_seed_opt = binding
+                .cos
+                .cos_interfaces
+                .get(&root_ifindex)
+                .and_then(|root| root.queues.get(queue_idx))
+                .and_then(|q| q.flow_fair_state.as_ref())
+                .map(|ff| ff.flow_hash_seed);
+            let mut sidecar = [(0u16, 0u64); TX_BATCH_SIZE];
+            let sidecar_len = if let Some(seed) = prepared_seed_opt {
+                let mut n = 0usize;
+                for req in items.iter().take(TX_BATCH_SIZE) {
+                    sidecar[n] = (
+                        cos_flow_bucket_index(seed, req.flow_key.as_ref()) as u16,
+                        req.len as u64,
+                    );
+                    n += 1;
+                }
+                n
+            } else {
+                0
+            };
             match transmit_prepared_queue(binding, &mut items, now_ns) {
                 Ok((packets, bytes)) => {
                     apply_cos_prepared_result(
@@ -1018,6 +1126,19 @@ fn submit_cos_batch(
                         bytes,
                         items,
                     );
+                    if packets > 0 && sidecar_len > 0 {
+                        if let Some(ff) = binding
+                            .cos
+                            .cos_interfaces
+                            .get_mut(&root_ifindex)
+                            .and_then(|root| root.queues.get_mut(queue_idx))
+                            .and_then(|q| q.flow_fair_state.as_mut())
+                        {
+                            for &(bucket, bytes) in &sidecar[..packets as usize] {
+                                account_flow_bucket_tx(ff, bucket, bytes, now_ns);
+                            }
+                        }
+                    }
                     if packets > 0 {
                         binding
                             .live

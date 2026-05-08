@@ -20,6 +20,15 @@ pub(in crate::afxdp) use v_min::{
 // #1034 P2: flow accounting + drain orchestration split into siblings.
 mod accounting;
 mod drain;
+// #1229 Phase 6 v8: centralized active-bucket transition helpers.
+// Plan §v8.1. The canonical pattern for mutating `active_flow_buckets`
+// is in `active_buckets.rs` — it handles both the local count and the
+// v8 lease's per-worker counter atomically. Existing call sites
+// (accounting.rs, push.rs) inline the equivalent logic directly because
+// they already hold an `&mut FlowFairState` borrow for adjacent
+// finish-time math; the helpers are available for future call sites
+// that don't have an active `ff` borrow.
+pub(in crate::afxdp) mod active_buckets;
 use accounting::{account_cos_queue_flow_dequeue, account_cos_queue_flow_enqueue};
 pub(in crate::afxdp) use drain::{
     cos_queue_clear_orphan_snapshot_after_drop, cos_queue_drain_all, cos_queue_restore_front,
@@ -28,7 +37,9 @@ pub(in crate::afxdp) use drain::{
 // #1034 P3: push + pop ops split into siblings.
 mod pop;
 mod push;
-pub(in crate::afxdp) use pop::{cos_queue_pop_front, cos_queue_pop_front_no_snapshot};
+pub(in crate::afxdp) use pop::{
+    cos_queue_pop_front, cos_queue_pop_front_no_snapshot, cos_queue_pop_front_with_cap,
+};
 pub(in crate::afxdp) use push::{cos_queue_push_back, cos_queue_push_front};
 
 #[inline]
@@ -74,22 +85,38 @@ pub(in crate::afxdp) fn cos_queue_len(queue: &CoSQueueRuntime) -> usize {
 /// active buckets this is 12 × (u64 load + compare) ≈ 20 ns — well
 /// below NAPI batch pacing.
 ///
+/// #1229 v7: when `target_bps < u64::MAX`, skip buckets whose
+/// EWMA-observed rate exceeds the per-bucket fair-share target. If
+/// all buckets are over-cap we fall back to the lowest-finish bucket
+/// unconditionally (work-conserving — same behavior as standard
+/// MQFQ). With `target_bps = u64::MAX` (the default for callers that
+/// don't compute a cap), the eligibility check is a no-op:
+/// `observed_bps <= u64::MAX` always holds.
+///
 /// If we ever profile this as hot (e.g. with thousands of active
 /// flows on a single queue), the replacement is a min-heap keyed by
 /// `flow_bucket_head_finish_bytes`. For iperf3-sized workloads the
 /// linear scan is cache-friendlier and simpler.
 #[inline]
-fn cos_queue_min_finish_bucket(ff: &FlowFairState) -> Option<u16> {
-    let mut best: Option<u16> = None;
-    let mut best_finish = u64::MAX;
+fn cos_queue_min_finish_bucket(ff: &FlowFairState, target_bps: u64) -> Option<u16> {
+    let mut eligible: Option<u16> = None;
+    let mut eligible_finish = u64::MAX;
+    let mut fallback: Option<u16> = None;
+    let mut fallback_finish = u64::MAX;
     for bucket in ff.flow_rr_buckets.iter() {
-        let finish = ff.flow_bucket_head_finish_bytes[usize::from(bucket)];
-        if finish < best_finish {
-            best_finish = finish;
-            best = Some(bucket);
+        let b = usize::from(bucket);
+        let finish = ff.flow_bucket_head_finish_bytes[b];
+        if finish < fallback_finish {
+            fallback_finish = finish;
+            fallback = Some(bucket);
+        }
+        let observed = ff.flow_bucket_observed_bps[b];
+        if observed <= target_bps && finish < eligible_finish {
+            eligible_finish = finish;
+            eligible = Some(bucket);
         }
     }
-    best
+    eligible.or(fallback)
 }
 
 #[inline]
@@ -106,7 +133,29 @@ pub(in crate::afxdp) fn cos_queue_front(queue: &CoSQueueRuntime) -> Option<&CoSP
     // #785 Phase 3 — MQFQ: return the head of the bucket with the
     // smallest virtual-finish-time, not the DRR-rotation head. This
     // is the byte-rate-fair dequeue order (classical SFQ / WFQ).
-    let bucket = usize::from(cos_queue_min_finish_bucket(ff)?);
+    let bucket = usize::from(cos_queue_min_finish_bucket(ff, u64::MAX)?);
+    ff.flow_bucket_items[bucket].front()
+}
+
+/// #1229 v7: cap-aware variant of `cos_queue_front` for the drain
+/// path. Skips over-cap buckets when `target_bps` is finite; falls
+/// back to the lowest-finish bucket if all are over-cap. Used by
+/// `drain_exact_local_items_to_scratch_flow_fair` to throttle hot
+/// flows so cooler flows on the same queue (or other workers via
+/// the shared CoS lease) get bandwidth.
+#[inline]
+pub(in crate::afxdp) fn cos_queue_front_with_cap(
+    queue: &CoSQueueRuntime,
+    target_bps: u64,
+) -> Option<&CoSPendingTxItem> {
+    if !queue.flow_fair() {
+        return queue.hot.items.front();
+    }
+    let ff = queue
+        .flow_fair_state
+        .as_ref()
+        .expect("cos_queue_front_with_cap: flow_fair queue without flow_fair_state");
+    let bucket = usize::from(cos_queue_min_finish_bucket(ff, target_bps)?);
     ff.flow_bucket_items[bucket].front()
 }
 

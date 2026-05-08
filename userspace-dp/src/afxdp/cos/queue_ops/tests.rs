@@ -1148,6 +1148,7 @@ fn bench_pop_commit_settle_publish() {
             &mut free_frames,
             &mut scratch,
             inserted,
+            0, // now_ns: tests don't depend on EWMA accounting
         );
         publish_committed_queue_vtime(Some(&root.queues[0]));
     }
@@ -1176,6 +1177,7 @@ fn bench_pop_commit_settle_publish() {
             &mut free_frames,
             &mut scratch,
             inserted,
+            0, // now_ns: tests don't depend on EWMA accounting
         );
         publish_committed_queue_vtime(Some(&root.queues[0]));
         measured += iter_start.elapsed();

@@ -62,6 +62,12 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
         queue.hot.items.push_front(item);
         return;
     }
+    // #1229 Phase 6 v8: capture worker_id BEFORE the flow_fair_state
+    // mutable borrow. NLL ends each `ff` borrow at its last use in
+    // each early-return branch; `queue.queue_lease_v8.as_ref()`
+    // (disjoint field) is then accessed without an Arc clone. See
+    // accounting.rs for the same pattern; plan §v8.1.
+    let worker_id = queue.v_min.worker_id as usize;
     // Invariant: see cos_queue_push_back for the same flow_fair/state
     // pairing. Silent drop here would also corrupt the snapshot stack.
     let ff = queue
@@ -154,8 +160,19 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
             if ff.active_flow_buckets > ff.active_flow_buckets_peak {
                 ff.active_flow_buckets_peak = ff.active_flow_buckets;
             }
+            // Finish the `ff` mutations first so NLL ends the borrow
+            // before the lease update below (no Arc clone needed).
             ff.flow_bucket_items[bucket].push_front(item);
             ff.flow_rr_buckets.push_front(bucket as u16);
+            // `ff` borrow ends here (NLL: last use above).
+            // #1229 Phase 6 v8: mirror to lease per-worker counter
+            // on this rollback re-increment. Codex v7 review caught
+            // that omitting this leaks the asymmetry until u32 wrap.
+            if let Some(lease) = queue.queue_lease_v8.as_ref() {
+                if let Some(slot) = lease.worker_active_flow_buckets_for(worker_id) {
+                    slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             return;
         }
         // No snapshot — drain_all/restore_front path or fresh-flow
@@ -163,13 +180,17 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
         // The aggregate-bytes vtime rewind above leaves vtime
         // correctly positioned for `max(tail, vtime) + bytes`
         // (see plan §3.7 walkthrough for the drain_all case).
-        if ff.flow_bucket_bytes[bucket] == 0 {
+        // #1229 Phase 6 v8: `was_idle` serves as both the push-front
+        // anchor flag AND the v8 lease bump gate. Captured once here
+        // (before any byte mutations) to avoid a redundant re-check
+        // after the active_flow_buckets increment below.
+        let was_idle = ff.flow_bucket_bytes[bucket] == 0;
+        if was_idle {
             ff.active_flow_buckets = ff.active_flow_buckets.saturating_add(1);
             if ff.active_flow_buckets > ff.active_flow_buckets_peak {
                 ff.active_flow_buckets_peak = ff.active_flow_buckets;
             }
         }
-        let was_idle = ff.flow_bucket_bytes[bucket] == 0;
         ff.flow_bucket_bytes[bucket] = ff.flow_bucket_bytes[bucket].saturating_add(item_len);
         let new_tail = ff.flow_bucket_tail_finish_bytes[bucket]
             .max(ff.queue_vtime)
@@ -180,6 +201,18 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
         }
         ff.flow_bucket_items[bucket].push_front(item);
         ff.flow_rr_buckets.push_front(bucket as u16);
+        // `ff` borrow ends here (NLL: last use above).
+        // #1229 Phase 6 v8: idle-bucket-rebuild rollback path.
+        // Mirror the re-increment to the lease counter. Hoist lease
+        // check outside `was_idle` so non-v8 queues (lease None)
+        // short-circuit immediately without evaluating `was_idle`.
+        if let Some(lease) = queue.queue_lease_v8.as_ref() {
+            if was_idle {
+                if let Some(slot) = lease.worker_active_flow_buckets_for(worker_id) {
+                    slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         return;
     }
     // #785 Phase 3 — MQFQ push_front onto an ACTIVE bucket.
