@@ -103,8 +103,368 @@ a similar-scope rework.
 
 ## Status
 
-**v6 dispatched 2026-05-07 — fixes v5's cross-epoch rollback underflow
-(Codex "PLAN-KILL as written, salvageable").**
+**v7 dispatched 2026-05-07 — addresses Codex PLAN-NEEDS-MAJOR on v6
+(architectural spine APPROVED; remaining MAJOR fixes converged).**
+
+## v6 NEEDS-MAJOR summary (preserved)
+
+Codex ([task-mowjagid-3yoire](#)) verdict: "PLAN-NEEDS-MAJOR, not
+PLAN-KILL. v6 fixes the fatal v5 aggregate-counter underflow: packed
+(tag, granted) makes old-epoch rollback skip instead of subtracting
+from the new epoch. **The spine is implementable.**"
+
+**Remaining MAJOR fixes** (Codex):
+
+1. **`worker_grants[id]` is still untagged**: same cross-epoch race
+   as packed_granted before v6's fix. Old-epoch acquire path:
+   - Snapshots epoch E.
+   - Packed class CAS succeeds in E.
+   - Rotation to E+1; resets packed class grant AND `worker_grants[id]`.
+   - `try_bump_outstanding` succeeds after rotation.
+   - `worker_grants[id].fetch_add(take)` lands in E+1.
+   Result: old-epoch lease bytes debited against next epoch's
+   per-worker share. Cross-epoch accounting contamination.
+
+2. **Packed-add overflow proof**: `take.min(u32::MAX as u64)` alone
+   doesn't prove `curr_granted + take` fits in u32. Add
+   `packed_room = u32::MAX - curr_granted` clamp, or clamp
+   `epoch_total_grant_cap` to u32::MAX at rotation.
+
+3. **Bounded rollback retries**: `tag_checked_rollback` loops
+   unboundedly. Add max-retry cap + metric. If exceeded with tag
+   still matching → undergrant (not overshoot, so safe but must
+   be explicit).
+
+4. **Add successful-outstanding-CAS-across-rotation test**: v6
+   plan covered the failed case but not the successful case.
+
+5. **LOC estimate low**: realistic 400-600 prod + 250-400 test.
+   Legacy `acquire(now, requested)` in `token_bucket.rs:93` and
+   legacy lease construction in `coordinator/mod.rs:1732` need
+   migration. accounting.rs:8 currently doesn't do atomic lease
+   deltas; implementation must add them.
+
+**Probe answers (Codex non-fatal)**:
+- A: mostly sound; need explicit overflow proof.
+- B: 32/32 tag/grant split is fine; 9.94-day ABA window.
+- C: rollback unbounded — add cap + metric.
+- D: 64-spin seqlock cap acceptable; jitter makes rotations late
+  not early.
+- E: failed outstanding trace is consistent; successful trace is
+  the issue (#1 above).
+- F: active-flow install fine; accounting.rs needs lease delta wire-up.
+- G: queue.hot.tokens carryover is a token gate; per-flow order
+  remains MQFQ. Add deterministic carryover unit test.
+- H: LOC estimate revised (above).
+
+---
+
+## v7 design — tag-packed worker_grants + overflow safety + bounded rollback
+
+v7 retains v6's spine and patches the four mechanical fixes Codex
+identified. No new design choices; pure incremental safety fixes.
+
+### v7.1 Tag-pack `worker_grants[id]` (Major fix #1)
+
+`worker_grants[id]` becomes a `PackedEpochGrant` (same struct as
+`packed_granted`): `(epoch_tag, worker_granted)` u64 atomic.
+
+```rust
+struct SharedCoSQueueLease {
+    // ...existing fields...
+    // CHANGED v7: packed (tag, granted) per-worker, not raw u64.
+    worker_grants: Box<[PackedEpochGrant]>,
+}
+```
+
+Acquire path: tag-checked CAS on `worker_grants[id]` instead of
+`fetch_add`:
+
+```rust
+// Replace `worker_grants[id].fetch_add(take, AcqRel)` (v6) with
+// tag-checked CAS:
+fn worker_grant_bump(
+    pg: &PackedEpochGrant,
+    my_tag: u32,
+    take: u32,
+) -> bool {
+    loop {
+        let curr = pg.0.load(Acquire);
+        let (curr_tag, curr_granted) = PackedEpochGrant::unpack(curr);
+        if curr_tag != my_tag {
+            return false; // rotation occurred; abandon worker bump
+        }
+        // Overflow proof: curr_granted + take must fit in u32.
+        // Bounded by my_fair_share which is ≤ epoch_total_grant_cap
+        // ≤ u32::MAX (clamped at rotation; see §v7.2).
+        let new_granted = curr_granted.checked_add(take);
+        let Some(new_granted) = new_granted else {
+            debug_assert!(false, "worker_grants overflow");
+            return false;
+        };
+        let new = PackedEpochGrant::pack(curr_tag, new_granted);
+        if pg.0.compare_exchange_weak(curr, new, AcqRel, Acquire).is_ok() {
+            return true;
+        }
+    }
+}
+```
+
+Rotation path: `worker_grants[id].store(pack(new_tag, 0))` for every
+slot (instead of `store(0)`).
+
+Acquire-path read of my_consumed: `unpack(worker_grants[id].load()).1`
+if tag matches; treat tag mismatch as 0 (or force snapshot retry).
+
+### v7.2 `epoch_total_grant_cap` clamped to u32::MAX (Major fix #2)
+
+At rotation:
+
+```rust
+let new_cap_raw = ((lease.config.rate_bytes as u128)
+    * (elapsed_ns as u128) / 1_000_000_000u128) as u64;
+let new_cap = new_cap_raw.min(u32::MAX as u64);
+lease.epoch.epoch_total_grant_cap.store(new_cap, Release);
+```
+
+Justification: at rate=16G, elapsed=200µs → cap = 400 KB ≪ u32::MAX
+(4 GB). Clamp only fires for absurdly long elapsed (24+ days at
+16G). Bounded.
+
+Acquire-path overflow safety: derived from cap ≤ u32::MAX:
+- `class_room = epoch_total_grant_cap - curr_granted` ≤ u32::MAX
+- `my_room = my_fair_share - my_consumed` ≤ my_fair_share ≤ cap ≤ u32::MAX
+- `take = still_needed.min(class_room).min(my_room)` ≤ u32::MAX
+
+So `curr_granted + take ≤ epoch_total_grant_cap ≤ u32::MAX`; no
+overflow. Add a `debug_assert!(curr_granted + take ≤ u32::MAX as u64)`
+for in-development safety.
+
+### v7.3 Bounded rollback retries (Major fix #3)
+
+`tag_checked_rollback` gains a max-retry cap (default 16) and a
+metric counter for exceeded cases:
+
+```rust
+fn tag_checked_rollback(
+    pg: &PackedEpochGrant,
+    my_tag: u32,
+    take: u32,
+    metrics: &SharedCoSLeaseMetrics, // for monitoring
+) {
+    const MAX_ROLLBACK_RETRIES: u32 = 16;
+    for retry in 0..MAX_ROLLBACK_RETRIES {
+        let curr = pg.0.load(Acquire);
+        let (curr_tag, curr_granted) = PackedEpochGrant::unpack(curr);
+        if curr_tag != my_tag {
+            return; // rotation occurred; rollback unnecessary
+        }
+        let new_granted = curr_granted.saturating_sub(take);
+        let new = PackedEpochGrant::pack(curr_tag, new_granted);
+        if pg.0.compare_exchange_weak(curr, new, AcqRel, Acquire).is_ok() {
+            return;
+        }
+    }
+    // Exceeded retry cap. Tag still matched (otherwise we'd have
+    // returned). Failure mode: undergrant — class_total_granted
+    // stays slightly inflated until next epoch rotation. NOT an
+    // overshoot. Bump metric for monitoring.
+    metrics.rollback_retry_exceeded.fetch_add(1, Relaxed);
+}
+```
+
+`SharedCoSLeaseMetrics` is a new lightweight struct exposed via
+existing Prometheus collector; counter is per-lease.
+
+### v7.4 LOC estimate revised + legacy migration scope
+
+Per Codex H: realistic prod LOC 400-600, test LOC 250-400.
+
+**Production code:**
+- `types/shared_cos_lease.rs`: PackedEpochGrant, SharedCoSEpochState,
+  acquire_v6/v7 path, maybe_rotate_epoch_v7, worker_grant_bump,
+  tag_checked_rollback. ~250 LOC.
+- `cos/token_bucket.rs:93` legacy `acquire` migration: route
+  Guarantee-phase exact queue lease calls to acquire_v7;
+  route everything else to legacy. ~50 LOC.
+- `coordinator/mod.rs:1732` lease construction migration: pass
+  max_worker_id; emit v7 lease for Guarantee-phase exact queues.
+  ~50 LOC.
+- `cos/queue_ops/accounting.rs:8` add lease delta hooks:
+  `account_cos_queue_flow_enqueue`/`_dequeue` now call
+  `lease.worker_active_flow_buckets[id].fetch_add/sub(1, Relaxed)`
+  on bucket 0↔nonzero transitions. ~30 LOC.
+- `worker/mod.rs:805` install rehydration: walk bound queues,
+  store sum into v7 lease. ~30 LOC.
+- Metrics + Prometheus wire: ~20 LOC.
+
+**Test code:**
+- Unit tests for PackedEpochGrant pack/unpack/CAS: ~30 LOC.
+- Worker-grant tag-mismatch behavior: ~50 LOC.
+- Rollback retry cap + metric: ~40 LOC.
+- Cross-epoch races (v7's headline test):
+  - Failed outstanding-CAS rolling forward into new epoch — both
+    grant counter and worker counter unaffected by old-epoch
+    rollback attempt.
+  - Successful outstanding-CAS rolling forward into new epoch —
+    new-epoch worker_grants[id] not contaminated by old-epoch take.
+  - ~150 LOC.
+- Polling-skew across grace period: ~50 LOC.
+- iperf-c saturated work-conservation harness: ~60 LOC.
+
+**Total estimate: ~430 prod + ~330 test = ~760 LOC.**
+
+### v7.5 accounting.rs lease-delta wire-up
+
+`cos/queue_ops/accounting.rs:8` (`account_cos_queue_flow_enqueue`)
+and `account_cos_queue_flow_dequeue` currently update only the
+queue's local `flow_fair_state.active_flow_buckets`. v7 adds a
+parallel update on the lease's `worker_active_flow_buckets[id]`:
+
+```rust
+fn account_cos_queue_flow_enqueue(
+    queue: &mut CoSQueueRuntime,
+    flow_key: u64,
+    item_len: u64,
+) {
+    let Some(ff) = queue.flow_fair_state.as_mut() else { return; };
+    let bucket = cos_flow_bucket_index(flow_key, ff.flow_hash_seed);
+    let was_empty = ff.flow_bucket_items[bucket].is_empty();
+    ff.flow_bucket_items[bucket].push_back(/* ... */);
+    if was_empty {
+        ff.active_flow_buckets += 1;
+        // v7 NEW: also bump lease's per-worker counter.
+        if let Some(lease) = queue.queue_lease_v7.as_ref() {
+            lease.worker_active_flow_buckets[queue.worker_id]
+                .fetch_add(1, Relaxed);
+        }
+    }
+    // ... rest unchanged
+}
+```
+
+Symmetric: `account_cos_queue_flow_dequeue` does `fetch_sub(1, Relaxed)`
+on bucket-becomes-empty transition.
+
+`queue_lease_v7: Option<Arc<SharedCoSQueueLease>>` is a new field on
+`CoSQueueRuntime`, populated when the lease is installed (Guarantee-
+phase exact queues only). For non-v7 queues, this field is `None` and
+no delta update happens (legacy lease has no per-worker counter).
+
+## Public API preservation (v7)
+
+Same as v5/v6. PackedEpochGrant pack/unpack helpers are private.
+worker_grant_bump and tag_checked_rollback are private. Metrics
+struct is exposed via existing Prometheus collector.
+
+## Hidden invariants (v7)
+
+All v6 invariants, plus:
+
+7. **Worker-grant tag consistency**: `worker_grants[id]` is updated
+   only by tag-checked CAS, only when tag matches snapshot. Cross-
+   epoch contamination impossible.
+8. **u32 overflow safety**: `epoch_total_grant_cap ≤ u32::MAX` at
+   rotation. All grant arithmetic stays within u32.
+9. **Bounded rollback latency**: max 16 retries → max ~160 ns
+   rollback budget. Beyond → metric increment, undergrant (not
+   overshoot).
+
+## Risk assessment (v7)
+
+Same as v6. Tag-packing `worker_grants` is the same well-understood
+pattern as `packed_granted`. Bounded rollback removes liveness risk.
+LOC revised; effort estimate ~1 focused implementation session.
+
+## Test plan (v7)
+
+(All v6 tests retained, plus Codex's required cases:)
+
+- **Successful outstanding-CAS across rotation** (Codex E):
+  ```
+  - Worker A snapshots epoch E.
+  - A's class CAS succeeds in E (granted += take with tag=E).
+  - Rotation to E+1; resets packed_granted to (E+1, 0); resets
+    worker_grants[id] to (E+1, 0).
+  - A's outstanding CAS succeeds.
+  - A's tag-checked worker_grant_bump tries (E, take). Tag mismatch
+    (worker_grants[id] now has tag E+1). worker_grant_bump returns
+    false. take is NOT credited to E+1's worker_grants[id].
+  - A's caller-side total_granted is incremented (correct — bytes
+    were granted to queue.hot.tokens).
+  - Net: outstanding correctly reflects the grant; epoch_total_granted
+    correctly reflects (E lost the bytes per packed CAS rollback,
+    E+1 is fresh); worker_grants[id] correctly reflects no
+    contamination.
+  ```
+  Verify via synthetic stress harness or loom.
+- **Bounded rollback retry cap**: synthetic CAS-contention test
+  forcing 16+ retries; assert metric increments; assert no panic.
+- **u32 overflow safety**: synthetic test with epoch_total_grant_cap
+  set to u32::MAX, take requests near the boundary; assert no
+  wraparound.
+- **Carryover unit test**: bytes leased in epoch N TX in N+1;
+  assert per-flow MQFQ order preserved (not coalesced FIFO).
+
+## Out of scope (v7)
+
+Same as v6.
+
+## Open questions for adversarial review (v7)
+
+1. **Worker-grant snapshot consistency**: acquire-path snapshot
+   reads `my_consumed` from `worker_grants[id]`. Should this read
+   also be tag-checked, or is it OK to use a stale value (which
+   would just cause us to TRY a CAS that fails)? Bounded retries
+   anyway.
+
+2. **PackedEpochGrant initialization**: at lease creation, all
+   `worker_grants[id]` slots and `packed_granted` should be
+   initialized to (0, 0) — tag=0. First rotation bumps to tag=1.
+   Acquire path: tag mismatch on first acquire (worker observes
+   seq=0, even, snapshot tag=0; first packed_granted has tag=0;
+   tags match). Wait — actually first rotation hasn't happened
+   yet, so tag is still 0 throughout. Initial state should permit
+   acquire. Verify.
+
+3. **Worker-grant rotation cost**: rotation iterates over all
+   `worker_grants` slots and stores `pack(new_tag, 0)`. With
+   `max_worker_id = 8` (typical), that's 8 stores per rotation.
+   At 5K rotations/sec = 40K stores/sec. Trivial. Confirmed?
+
+4. **Metrics exposure**: `rollback_retry_exceeded` counter shows
+   up in Prometheus as a gauge per lease. Operator-relevant?
+   Should it be aggregated across all leases for a class?
+
+5. **accounting.rs delta-update cost**: per-bucket transition
+   adds `lease.worker_active_flow_buckets[id].fetch_add(1, Relaxed)`.
+   In MQFQ workloads with frequent bucket churn, this could be
+   measurable. Profile required; expect <1% overhead.
+
+6. **Same v7 lease shared across queues**: a worker may have N
+   queues bound to one Guarantee-phase exact lease. Each queue's
+   transitions update the same `worker_active_flow_buckets[id]`
+   slot (worker_id is the same for all the worker's queues). This
+   is correct (sum across queues = total active flow buckets for
+   the worker on this lease). Verified?
+
+7. **Round 7 architectural completeness**: any remaining bypass
+   paths? Codex confirmed v6 spine is right; v7 adds tag-pack
+   safety. Should be ready.
+
+8. **Implementation start**: if PLAN-READY, proceed immediately
+   to implementation in this worktree. Sequence:
+   1. PackedEpochGrant struct + pack/unpack helpers (~30 LOC)
+   2. SharedCoSEpochState struct extension (~20 LOC)
+   3. SharedCoSQueueLease v7 fields (~30 LOC)
+   4. acquire_v7 + worker_grant_bump + tag_checked_rollback (~150 LOC)
+   5. maybe_rotate_epoch_v7 (~80 LOC)
+   6. accounting.rs delta hooks (~30 LOC)
+   7. coordinator/mod.rs lease construction (~50 LOC)
+   8. token_bucket.rs migration (~50 LOC)
+   9. worker/mod.rs install hook (~30 LOC)
+   10. Tests (~330 LOC).
+   Total ~770 LOC; ~6-8 hours focused work.
 
 ## v5 KILL summary (preserved)
 
