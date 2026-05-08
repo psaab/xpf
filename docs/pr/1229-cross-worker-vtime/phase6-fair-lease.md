@@ -103,8 +103,255 @@ a similar-scope rework.
 
 ## Status
 
-**v7 dispatched 2026-05-07 — addresses Codex PLAN-NEEDS-MAJOR on v6
-(architectural spine APPROVED; remaining MAJOR fixes converged).**
+**v8 dispatched 2026-05-07 — addresses Codex PLAN-NEEDS-MAJOR on v7
+(spine still sound; centralize active-bucket hook + fix u32 clamp
+justification + tighten lease scope wording).**
+
+## v7 NEEDS-MAJOR summary (preserved)
+
+Codex ([task-mowjk6qk-w2ndtt](#)) verdict: "**PLAN-NEEDS-MAJOR.**
+Not PLAN-KILL: the tag-packed grant spine is sound. But v7 is not
+ready as written because one required accounting path is missing."
+
+**Findings**:
+
+1. **MAJOR — missing active-bucket hook coverage**: v7 wires lease
+   deltas only in `accounting.rs` (enqueue/dequeue paths). But
+   production active-bucket transitions ALSO happen at:
+   - `cos/queue_ops/push.rs:153` — rollback path after
+     `cos_queue_pop_front` drained a bucket; snapshot restore
+     re-increments active_flow_buckets.
+   - `cos/queue_ops/push.rs:167` — idle-bucket rebuild path; fresh
+     enqueue without snapshot.
+
+   These already ran `account_cos_queue_flow_dequeue` (via the
+   prior pop) but the corresponding lease decrement happened. Now
+   the bucket is being re-incremented — without the matching lease
+   bump, the lease counter undercounts. Eventually the
+   asymmetry causes a `fetch_sub` to wrap u32 → poisoned
+   denominator.
+
+   Fix: centralize active-bucket inc/dec helpers and call them at
+   every production mutation site (3+ sites, not just 2).
+
+2. **Minor but real — wrong u32 justification**: plan claimed
+   "clamp only fires for elapsed ≥ 24+ days at 16G". Wrong. At
+   16 Gbps, `u32::MAX` bytes = ~2.15 sec. At 100 Gbps, ~0.34 sec.
+   The clamp is safe ONLY if v6's `elapsed_ns.min(EPOCH_DURATION_NS)`
+   cap is preserved. It IS preserved in §v6.2; v7 didn't change
+   it; but v7 plan text gave wrong justification.
+
+3. **Minor — lease scope wording**: plan §v7.6 implied "same v7
+   lease shared across queues per worker". Wrong. Current code
+   builds queue leases per `(ifindex, queue_id)` in
+   `coordinator/mod.rs:1706`. Cross-queue lease sharing would mix
+   shaper rates / priorities. Correct scope: one lease per
+   `(ifindex, queue_id)`; aggregates worker instances of THAT
+   queue only.
+
+**Probe answers** (Codex):
+- A: tag-packed worker_grants correct.
+- B: overflow safe with elapsed cap retained (24-day justification
+  is wrong).
+- C: bounded rollback fine.
+- D: relaxed races tolerable; missing hook sites NOT tolerable.
+- E: (tag=0, grant=0) init fine.
+- F: per-queue-per-worker correct; cross-queue sharing wrong.
+- G: not ready until hook coverage fixed.
+- H: implementation order: fields → rotation → helpers → acquire →
+  plumbing. Step 4 before step 5 only safe behind stubs.
+
+---
+
+## v8 design — centralized active-bucket helper + correct justifications
+
+v8 retains v7's spine entirely. Three mechanical fixes only.
+
+### v8.1 Centralized active-bucket helpers (Major fix #1)
+
+Add a sibling module `cos/queue_ops/active_buckets.rs` with the
+inc/dec helpers. Every site that mutates `active_flow_buckets`
+calls these helpers, which atomically update both the local count
+AND the lease counter (when v7 lease is present).
+
+```rust
+// cos/queue_ops/active_buckets.rs
+
+#[inline]
+pub(in crate::afxdp) fn bump_active_flow_buckets(
+    queue: &mut CoSQueueRuntime,
+) {
+    let Some(ff) = queue.flow_fair_state.as_mut() else { return; };
+    ff.active_flow_buckets = ff.active_flow_buckets.saturating_add(1);
+    if ff.active_flow_buckets > ff.active_flow_buckets_peak {
+        ff.active_flow_buckets_peak = ff.active_flow_buckets;
+    }
+    if let Some(lease) = queue.queue_lease_v7.as_ref() {
+        lease.worker_active_flow_buckets[queue.worker_id]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[inline]
+pub(in crate::afxdp) fn unbump_active_flow_buckets(
+    queue: &mut CoSQueueRuntime,
+) {
+    let Some(ff) = queue.flow_fair_state.as_mut() else { return; };
+    debug_assert!(ff.active_flow_buckets > 0,
+        "unbump_active_flow_buckets called with zero count");
+    ff.active_flow_buckets = ff.active_flow_buckets.saturating_sub(1);
+    if let Some(lease) = queue.queue_lease_v7.as_ref() {
+        // Defensive: never underflow the lease counter. If the
+        // local was already zero (shouldn't happen with the assert),
+        // skip the lease update so it doesn't wrap to u32::MAX.
+        let prev = lease.worker_active_flow_buckets[queue.worker_id]
+            .load(Ordering::Relaxed);
+        if prev > 0 {
+            lease.worker_active_flow_buckets[queue.worker_id]
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+```
+
+**Call-site migration** (every `active_flow_buckets` mutation):
+
+| Site | Before | After |
+|------|--------|-------|
+| `accounting.rs:23` (enqueue) | `ff.active_flow_buckets += 1` | `bump_active_flow_buckets(queue)` |
+| `accounting.rs:84` (dequeue) | `ff.active_flow_buckets -= 1` | `unbump_active_flow_buckets(queue)` |
+| `push.rs:153` (rollback w/ snapshot) | `ff.active_flow_buckets += 1` | `bump_active_flow_buckets(queue)` |
+| `push.rs:167` (rollback no snapshot) | `ff.active_flow_buckets += 1` | `bump_active_flow_buckets(queue)` |
+
+(Plus any others discovered during implementation; grep
+`active_flow_buckets *=` should cover all sites.)
+
+The helpers borrow `&mut CoSQueueRuntime` so they can update both
+the local count and the optional v7 lease via the queue's
+`queue_lease_v7: Option<Arc<SharedCoSQueueLease>>` back-reference
+(installed at lease attach time).
+
+### v8.2 elapsed_ns cap retention + corrected u32 justification (Minor #2 fix)
+
+`maybe_rotate_epoch_v8` retains v6's `elapsed_ns.min(EPOCH_DURATION_NS)`
+clamp explicitly:
+
+```rust
+let elapsed_ns = (now_ns - start).min(EPOCH_DURATION_NS);
+let new_cap_raw = ((lease.config.rate_bytes as u128)
+    * (elapsed_ns as u128) / 1_000_000_000u128) as u64;
+let new_cap = new_cap_raw.min(u32::MAX as u64);
+lease.epoch.epoch_total_grant_cap.store(new_cap, Release);
+```
+
+**Corrected u32 justification**: at the highest realistic class
+rate (assume 100 Gbps for future-proofing), one EPOCH_DURATION_NS
+= 200µs of bytes is `100e9 / 8 × 200e-6 = 2.5 MB` = 0.058% of u32::MAX.
+The 200µs cap on elapsed_ns ensures `new_cap_raw` is bounded by
+class rate × 200µs, far below u32::MAX. The `.min(u32::MAX as u64)`
+clamp is defensive-only; never fires on realistic configs.
+
+(Ignoring the clamp's existence: at 16 Gbps without elapsed cap,
+u32::MAX = ~2.15 sec; at 100 Gbps, ~0.34 sec. So the elapsed cap
+is the actual safety guarantee, not the u32 clamp.)
+
+### v8.3 Lease scope: per-(ifindex, queue_id) only (Minor #3 fix)
+
+Updated wording throughout plan: a SharedCoSQueueLease v7/v8
+instance is identified by `(ifindex, queue_id)`. It aggregates the
+multiple worker INSTANCES of that queue (each worker has its own
+local `CoSQueueRuntime` for the same logical queue, all bound to
+the same lease).
+
+`worker_active_flow_buckets[worker_id]` therefore counts the
+active flow buckets in worker `worker_id`'s local runtime of THIS
+specific (ifindex, queue_id) queue. NOT summed across different
+queues — different queues get different leases.
+
+**`matches_config`** keys on `(ifindex, queue_id, max_worker_id,
+mode_v7_or_legacy)`. Lease rebuild fires on any of these changing.
+
+## Public API preservation (v8)
+
+Same as v6/v7. New private helpers in `active_buckets.rs`. No
+public-API change.
+
+## Hidden invariants (v8)
+
+All v6/v7 invariants, plus:
+
+10. **Active-bucket hook completeness**: every production mutation
+    of `active_flow_buckets` calls
+    `bump_active_flow_buckets`/`unbump_active_flow_buckets`. No
+    direct mutations remain. Enforced by code review +
+    `forbid(active_flow_buckets *= )` style lint or
+    `cargo-clippy` custom rule (out of scope; review-only enforcement).
+11. **Defensive lease underflow protection**: unbump only fires
+    `fetch_sub` if the lease counter is currently > 0. Prevents
+    u32 wrap if call-site count diverges from lease count.
+
+## Risk assessment (v8)
+
+Same as v7. The centralized helpers eliminate the v7 hook-coverage
+risk (the only MAJOR finding). Defensive underflow protection
+adds belt-and-suspenders.
+
+## Test plan (v8)
+
+(All v7 tests retained, plus:)
+
+- **Hook coverage by inspection**: `grep -rn 'active_flow_buckets *[+-]' src/` returns ONLY the helper definitions. No direct mutations elsewhere. Enforced as a part of code review.
+- **Rollback site bug regression**: synthetic test that exercises
+  `cos_queue_pop_front` followed by `cos_queue_push_front` with snapshot
+  on a v7-leased queue. Assert lease counter matches local count after.
+- **Idle-bucket rebuild**: synthetic test that exercises `cos_queue_pop_front`
+  on a fresh-flow path (no snapshot). Assert lease counter
+  matches local count after.
+- **u32 clamp not-firing under realistic config**: at 100 Gbps, 200µs cap, verify
+  cap is well below u32::MAX.
+
+## Out of scope (v8)
+
+Same as v6/v7.
+
+## Open questions for adversarial review (v8)
+
+1. **Helper module placement**: `cos/queue_ops/active_buckets.rs`
+   sibling. Is `cos/queue_ops/` the right location? Or should it
+   be at `cos/active_buckets.rs` for visibility from
+   non-queue-ops sites (if any)?
+
+2. **Defensive underflow protection**: load-then-CAS isn't
+   strictly atomic (load could see >0; concurrent decrement; our
+   fetch_sub goes anyway). But the only writer to a worker's slot
+   is that worker (single-writer-per-slot), so concurrent
+   decrement on the same slot is impossible. The load-then-fetch_sub
+   is safe because we're the only writer. Verified?
+
+3. **Helper call-site ergonomics**: every active_flow_buckets
+   mutation site now has to call a helper, not inline. Code
+   review will catch direct mutations; any compile-time
+   enforcement option?
+
+4. **Round 8 readiness**: spine sound (Codex), v7 hook coverage
+   was the only MAJOR. Anything else?
+
+5. **Implementation ordering** (Codex H): plan §v7.10 listed steps
+   1-10. Codex suggested: fields → rotation → helpers → acquire →
+   plumbing. Reordered:
+   1. PackedEpochGrant struct + pack/unpack helpers (~30 LOC)
+   2. SharedCoSEpochState struct (~20 LOC)
+   3. SharedCoSQueueLease v7/v8 fields (~30 LOC)
+   4. maybe_rotate_epoch_v8 (~80 LOC)
+   5. active_buckets.rs helpers (~50 LOC)
+   6. Migrate all active_flow_buckets call sites to helpers (~30 LOC across 4-6 sites)
+   7. acquire_v8 + worker_grant_bump + tag_checked_rollback (~150 LOC)
+   8. coordinator/mod.rs lease construction (~50 LOC)
+   9. token_bucket.rs migration (~50 LOC)
+   10. worker/mod.rs install hook (~30 LOC)
+   11. Tests (~330 LOC).
+   Each step compiles cleanly before next; step 7 needs steps
+   1-6 stable. Right ordering?
 
 ## v6 NEEDS-MAJOR summary (preserved)
 
