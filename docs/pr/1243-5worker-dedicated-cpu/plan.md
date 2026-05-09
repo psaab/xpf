@@ -1,8 +1,79 @@
 ---
-status: DRAFT v1 — pending adversarial plan review
+status: PLAN-KILLED 2026-05-08 — both reviewers convergent KILL on plan v1
 issue: 1243
 scope: 5-worker dedicated CPU mode — drop worker on CPU 0, dedicate it to daemon
 ---
+
+# KILL RECORD (2026-05-08)
+
+Plan v1 PLAN-KILLED unanimously by Codex (task-moxwluoc-z7p3qi) and Gemini Pro 3
+(task-moxwms88-2cybx0). Convergent findings:
+
+## Convergent fatal findings
+
+1. **The fairness gain mathematically cancels out.** Multinomial(12, 5)
+   variance with uniform bins ≈ multinomial(12, 6) variance with one
+   ~70% bin. Gemini computed: 6-bin/skew CoV ~55.5% vs 5-bin/uniform
+   CoV ~55.8% — within rounding. Codex confirmed via exact enumeration
+   for 12 flows. **The argued "per-binding capacity uniformity"
+   benefit cancels exactly with the multinomial worsening.** Zero
+   quantitative CoV improvement to justify -17% saturation throughput.
+
+2. **CoV ≤ 12% acceptance criterion is structurally unsound.** Codex
+   pointed out: this repo already shipped PR #1217 fairness-regimes
+   contract — `observed_CoV ≤ Cstruct + 0.05`, not absolute scalar.
+   Plan's fixed CoV target conflicts with the project's own published
+   structural fairness model.
+
+3. **Single-CPU control-plane pinning is a real HA risk.** VRRP
+   advertises every 30 ms; masterDownInterval ~97 ms. Daemon CPU 0 hosts
+   gRPC, FRR reload, HA sync, configstore commits, Prometheus, AND VRRP.
+   A 100 ms FRR reload spike on CPU 0 starves VRRP → false split-brain.
+   `make test-failover` doesn't exercise CPU 0 saturation.
+
+4. **`-L`/`-X` ordering is wrong AND reviewers disagree on what's right.**
+   - Gemini: `-X equal N` then `-L combined N` (else `-L` rejects with
+     EINVAL while indirection still references queue 5).
+   - Codex: `-L combined N` then `-X equal N` (channel change recomputes
+     RSS sizing on i40e, can clear user LUT/key).
+   - **The fact that two expert reviewers disagree on the canonical
+     order is itself proof the plan is underspecified and needs an
+     actual i40e lab transcript before review.**
+
+5. **Helper affinity via parent SchedSetaffinity after `cmd.Start()`
+   is racy and thread-scoped.** Per-thread mask on Linux; worker
+   threads spawned before parent's syscall completes inherit unpinned
+   mask. Helper must self-pin at top of Rust main, OR via pre-exec
+   wrapper / cpuset boundary.
+
+6. **`queue_count == workers` invariant fallback masks the feature.**
+   `helpers.rs:439` does `queue_id % workers.max(1)`. With workers=5
+   and queue_count=6, queue 0 and queue 5 both map to worker 0 —
+   destroys the "uniform per-worker capacity" premise. Plan's
+   "fall back with warning" silently disables the feature instead of
+   hard-failing.
+
+## What it would take to revisit
+
+The plan would need:
+- Same-workload A/B data: 6-worker-with-recipe-knob vs 5-worker-dedicated,
+  with **structural CoV** computed (not just mean CoV).
+- Real i40e lab transcript proving `combined 5` + RSS table 0..4 with
+  the canonical ethtool order.
+- Hard-failure semantics on RSS reshape mismatch (not silent fallback).
+- HA jitter/failover validation under sustained CPU 0 load.
+- Acceptance criterion rewritten against PR #1217 fairness-regimes
+  contract.
+
+Without those, do not re-open. The "trivial config knob" framing was
+wrong — the plan has 4+ load-bearing assumptions that need empirical
+proof, and one that's mathematically null.
+
+---
+
+# Original plan v1 follows
+
+
 
 # Plan: 5-worker dedicated CPU mode (#1243)
 
