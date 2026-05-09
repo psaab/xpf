@@ -1,3 +1,63 @@
+## v1 PLAN-KILLED 2026-05-09 — convergent Codex + Gemini
+
+Both reviewers convergent kill with mathematical proof.
+
+### The "shrinking pie" bug (decisive)
+
+Gemini's worked example: cap=100, 2 workers @ 1 flow each.
+1. W1 enters surplus first. class_room=100. Quota = 100×1/2 = 50. Takes 50. class_room→50.
+2. W2 enters. class_room=50. Quota = 50×1/2 = 25. Takes 25. class_room→25.
+3. W1 re-enters. class_room=25. Quota = 12.5. my_already_granted=50. remaining=0.
+4. W2 re-enters. class_room=25. Quota = 12.5. my_already_granted=25. remaining=0.
+
+**25 units stranded.** Work conservation broken; per-flow equality
+biased toward first-acquirer.
+
+Codex confirmed: [4,3,2,3] strands 31.25% of initial surplus;
+[6,5,1] strands 26.7%.
+
+### Unfixable: surplus pool unknowable in advance
+
+Cannot do proportional surplus correctly because the total surplus
+for an epoch is **literally unknowable** until the epoch finishes —
+primary consumption happens concurrently with surplus claiming.
+Static quotas can't be computed against a dynamic pool.
+
+### The trilemma (concluded after 3 PLAN-KILL rounds)
+
+After v6 (global cap), v7 (reactive share), and #1239 (proportional
+surplus) all PLAN-KILLED, the fundamental constraint is now visible:
+
+You can pick at most 2 of:
+- **Strict per-flow rate equality**
+- **Work conservation** (no class budget wasted)
+- **No Harrison Bergeron** (don't throttle fast workers below their share)
+
+v8 + #1231 v5.5 currently picks: work conservation + no Harrison
+Bergeron. Per-flow equality is the corner sacrificed.
+
+Within the AF_XDP UMEM-bound architecture (workers own RSS-bound
+flows; cross-binding redirect impossible per #937), the trilemma
+cannot be escaped by any pure dataplane scheduler mechanism.
+
+### Recommendation
+
+Stop iterating on dataplane-only fairness mechanisms. Three
+consecutive triple-review PLAN-KILLs with mathematical proof
+confirm the design space is exhausted within current architecture.
+
+Pursue one of:
+1. **Sender-side fixes** (#1233 sender TCP head-start) — actually
+   fixes the upstream cause of cwnd asymmetry.
+2. **Multi-receiver test methodology** — eliminate receiver-side
+   rate ceiling.
+3. **Accept the structural ceiling** — document.
+4. **5-worker mode** (#1243) — system-level workaround for
+   daemon-on-shared-CPU effect.
+
+
+---
+
 # #1239 v1: Surplus claim proportional to flow count
 
 **Status:** DRAFT v1 — pending Codex hostile + Gemini Pro 3 adversarial review
