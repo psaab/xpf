@@ -1,3 +1,30 @@
+## v1 PLAN-KILLED 2026-05-09 — convergent Codex + Gemini
+
+Both reviewers convergent kill with sharp arguments:
+
+1. **Causality inversion** (Gemini): worker at 72% of primary means
+   primary is NOT the bottleneck. Boosting share doesn't help; just
+   steals from healthy peers via normalization.
+2. **Bang-bang oscillation** (Gemini): high-demand worker capped at
+   0.8× nominal next epoch reads as below target → boost to 1.2× →
+   over → cut → cycle.
+3. **Aggregate regression via normalization** (both): worst case 3
+   slow + 1 fast → fast worker crushed to 0.72× nominal.
+4. **CPU-bound case fatal** (Codex): boosting CPU-bound worker
+   wastes budget; cuts healthy peers.
+5. **Bypass interaction NOT independent** (Codex): #1231 v5.5
+   uses my_share in starvation signal; v7 modifying my_share
+   masks under-utilization, strangles bypass.
+6. **Root cause not established** (Codex): low CPU doesn't prove
+   TCP cwnd; could be RX queue, TX completion, etc.
+
+**Convergent recommendation from both reviewers: pivot to #1239
+(surplus per-flow proportional).** Per-flow primary is already
+equal in v8 (cap/total per flow). Variance comes from per-worker
+surplus distribution. Fix surplus to flow-proportional → per-flow
+rate = (cap + surplus) / total = EQUAL by construction.
+
+
 # #1237 v1: Per-worker reactive lease share — closed-loop adjustment
 
 **Status:** DRAFT v1 — pending Codex hostile + Gemini Pro 3 adversarial review
