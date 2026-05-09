@@ -1,6 +1,80 @@
 # #1236 v1: Global per-flow rate cap for shaped multi-stream workloads
 
-**Status:** DRAFT v1 — pending Codex hostile + Gemini Pro 3 adversarial review
+**Status:** PLAN-KILLED 2026-05-09 — convergent kill from Codex
+([task-moxlcafa-4irpzd](#)) + Gemini Pro 3
+([task-moxlcebd-agdrzk](#)).
+
+## v1 KILL summary
+
+Both reviewers independently identified fatal flaws:
+
+1. **MQFQ fallback loophole**: `cos_queue_min_finish_bucket` falls
+   back to lowest-finish bucket when ALL buckets are over-cap. v1's
+   "global cap" is therefore a no-op in exactly the cases (iperf-d,
+   iperf-e, iperf-c outliers) it claims to fix — Worker D with 2
+   over-cap flows hits fallback and drains both at full speed.
+
+2. **Hard-cap version has catastrophic worst case**: Gemini's
+   scenario: 10 flows, [9 on slow CPU-bound worker at 100M/flow,
+   1 on fast worker]. Hard global cap = 1 G/flow throttles fast
+   worker to 1 G; total = 9×100M + 1×1G = **1.9 G out of 10 G
+   shaper (81% loss)**. Codex's worst case at iperf-d: 31% loss.
+
+3. **CoV math optimistic**: even with hard cap on [720×5, 950×3,
+   1083×4] distribution: population CoV is ~17.7%, not the claimed
+   13-15%. Misses the proposed gate.
+
+4. **Architectural mismatch with #1229 v8**: v8 is hierarchical
+   (SharedCoSQueueLease distributes class budget per-worker via
+   weighted lease; local MQFQ distributes within). v6 injects a
+   global cap into local MQFQ — breaks the hierarchy and causes
+   token pile-up when local lease > global per-flow allowance.
+
+5. **"Harrison Bergeron" pattern (Gemini)**: doesn't fix slow
+   Worker A (CPU-bound at 720, stays at 720). Just hard-caps fast
+   Worker D to match. Per-flow rate equalization at cost of
+   aggregate, with the slowest worker still being the bottleneck.
+
+## Real problem (and why v6 can't fix it)
+
+Worker 0 shares CPU 0 with the daemon control-plane threads.
+Worker 0 runs slower than workers 1-5. Per-flow rate within
+Worker 0 is bounded by Worker 0's CPU rate ÷ flow count.
+
+**No dataplane scheduler can speed up Worker 0.** Cap-based
+mechanisms only slow others down to match.
+
+## Alternative paths (out of scope for this issue)
+
+A. **Run only 5 workers on CPUs 1-5**, dedicate CPU 0 to daemon.
+   Loses 1/6 of parallelism (insignificant for shaped workloads
+   well below per-worker CPU rate). All workers serve at similar
+   rates → per-flow rate equalizes by topology.
+
+B. **Kernel `isolcpus=0`**: dedicate CPU 0 to nothing; daemon
+   threads scheduled on CPUs 1-5 sharing with workers; worker 0
+   absent. Same effect as (A) at the kernel level.
+
+C. **Cross-worker steering**: PLAN-KILLED #937 (AF_XDP UMEM
+   ownership).
+
+D. **RSS indirection retuning**: PLAN-KILLED #840 (can't fix
+   cross-binding skew with long-lived flows).
+
+E. **Accept structural ceiling**: cluster's 6-CPU 6-worker
+   topology with daemon on shared CPU 0 fundamentally limits
+   per-flow CoV on shaped multi-flow workloads.
+
+## Recommendation
+
+Close #1236 as PLAN-KILLED. Open new issue (#1237) for
+"5-worker mode + dedicated daemon CPU" if pursuing per-flow
+equalization is still a priority. Otherwise document the
+structural ceiling.
+
+---
+(Original v1 plan preserved below for context.)
+---
 
 ## Problem framing
 
