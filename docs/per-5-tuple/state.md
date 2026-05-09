@@ -127,9 +127,9 @@ rate CoV":
 
 | Configuration | CoV mean | CoV stdev | Gap to floor |
 |---------------|----------|-----------|--------------|
-| Multinomial(12, 6) theoretical floor | **53.2%** | 15.5% | — |
-| Microsoft standard Toeplitz key (current) | 53.2% | 15.3% | +0.1pp |
-| Symmetric Toeplitz key (recipe knob target) | 53.5% | 15.2% | +0.3pp |
+| Multinomial(12, 6) theoretical floor | **53.17%** | 15.5% | — |
+| Microsoft standard Toeplitz key (current) | 53.23% | 15.3% | +0.07pp |
+| Symmetric Toeplitz key (recipe knob target) | 53.49% | 15.2% | +0.33pp |
 
 The current key is statistically indistinguishable from a perfect
 uniform hash. Cross-check against production CoS-off iperf-d 12-stream
@@ -144,11 +144,16 @@ reduce the 12-flow per-run CoV mean below ~53% in the unshaped case.
 Specifically ruled out by the bound:
 
 - **Better RSS hash key** (#1244 — already at floor)
-- **Reducing worker count** (#1243 — multinomial(N, K-1) is *worse*
-  than multinomial(N, K) for fixed N; the current K=6 was chosen
-  because it is already optimal for this hardware. Adding workers
-  beyond the current K is a different premise — see "Increase K"
-  below.)
+- **Reducing worker count from K=6 to K=5** (#1243 — empirically
+  measured: multinomial(12, 5) with uniform per-bin capacity
+  produces ~55.8% CoV, vs multinomial(12, 6) with one ~70%-capacity
+  bin at ~55.5% — the two effects cancel within rounding. The
+  monotonic claim "K-1 is always worse than K" is **not generally
+  true** (at K=1, all flows land on one worker → uniform per-flow
+  rate → CoV=0; the variance is non-monotonic in K). What is true
+  for the specific N=12, K=6 → K=5 case on this hardware is what
+  #1243 measured: zero net CoV gain. Adding workers beyond the
+  current K is a different premise — see "Increase K" below.)
 - **Per-worker scheduler tuning** (#1236, #1237, #1239 — affects
   within-worker fairness, but multinomial draws *between* workers
   dominate variance)
