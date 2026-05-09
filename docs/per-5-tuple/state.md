@@ -1,6 +1,6 @@
 # Per-5-Tuple Fairness Drive — State
 
-**As of 2026-05-07.** This document records the standing mandate, the
+**As of 2026-05-09.** This document records the standing mandate, the
 shipped foundations, the killed mechanisms, and the surviving design
 options for cross-worker per-(dip,dport,sip,sport) fairness on the
 xpf userspace AF_XDP dataplane. It is a living state file — update
@@ -95,18 +95,27 @@ per-flow CoV" pitch must clear this bar:
 
 For a test that opens N TCP flows from one source to one destination
 through K AF_XDP workers (one per RSS queue), with random ephemeral
-source ports drawn uniformly from the Linux ephemeral range, and with
+source ports drawn uniformly from the Linux ephemeral range, with
 within-worker fairness already perfect (each worker shares its
-capacity equally across its assigned flows), the per-flow rate
-coefficient of variation is bounded below by the **multinomial(N, K)
-sampling variance**:
+capacity equally across its assigned flows), and **assuming uniform
+per-worker capacity** (call it C — the test workload measurement
+target uses a single shaped flow class so this holds in practice),
+the per-flow rate coefficient of variation is bounded below by the
+**multinomial(N, K) sampling variance**:
 
 ```
 CoV_floor(N, K) = E[stdev(rate_i) / mean(rate_i)]
 ```
 
-where `rate_i = 1/count_i` for flow `i` in a queue with `count_i`
-flows, and `(count_1, ..., count_K) ~ Multinomial(N, 1/K, ..., 1/K)`.
+where `rate_i = C / count_w` for flow `i` in worker `w` with
+`count_w` flows, and `(count_1, ..., count_K) ~ Multinomial(N, 1/K,
+..., 1/K)`. The `C` factor cancels in CoV because both the
+numerator and denominator scale linearly with capacity, so the
+ceiling is reported as `rate_i = 1/count_w` for cleanliness — but
+note the cancellation only holds under uniform per-worker capacity.
+With heterogeneous capacity, the bound increases, so this is a
+*lower* bound on what the dataplane can achieve, not a description
+of every workload.
 
 For fixed N and K this bound has nothing to do with the scheduler,
 the hash key choice, the surplus algorithm, or the lease
