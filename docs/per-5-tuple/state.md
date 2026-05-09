@@ -107,12 +107,14 @@ CoV_floor(N, K) = E[stdev(rate_i) / mean(rate_i)]
 where `rate_i = 1/count_i` for flow `i` in a queue with `count_i`
 flows, and `(count_1, ..., count_K) ~ Multinomial(N, 1/K, ..., 1/K)`.
 
-This bound has nothing to do with the scheduler, the hash key, the
-worker count, the surplus algorithm, or the lease implementation. It
-comes from the **statistics of throwing N balls into K bins** — the
-probability that any single trial lands a ball in bin `i` is `1/K`,
-giving a Bin(N, 1/K) marginal per bin and a standard deviation of
-`sqrt(N (K-1) / K²)` for each bin's count.
+For fixed N and K this bound has nothing to do with the scheduler,
+the hash key choice, the surplus algorithm, or the lease
+implementation. It comes from the **statistics of throwing N balls
+into K bins** — the probability that any single trial lands a ball in
+bin `i` is `1/K`, giving a Bin(N, 1/K) marginal per bin and a
+standard deviation of `sqrt(N (K-1) / K²)` for each bin's count.
+Changing N or K changes the bound; changing any scheduler or hash
+detail within fixed N and K cannot.
 
 ### Empirical confirmation (2026-05-08)
 
@@ -141,12 +143,15 @@ reduce the 12-flow per-run CoV mean below ~53% in the unshaped case.
 Specifically ruled out by the bound:
 
 - **Better RSS hash key** (#1244 — already at floor)
-- **Different worker count** (#1243 — multinomial(N, K-1) is *worse*
-  than multinomial(N, K) for fixed N)
+- **Reducing worker count** (#1243 — multinomial(N, K-1) is *worse*
+  than multinomial(N, K) for fixed N; the current K=6 was chosen
+  because it is already optimal for this hardware. Adding workers
+  beyond the current K is a different premise — see "Increase K"
+  below.)
 - **Per-worker scheduler tuning** (#1236, #1237, #1239 — affects
   within-worker fairness, but multinomial draws *between* workers
   dominate variance)
-- **Cross-worker shared finish-time** (#937 — needs kernel
+- **Cross-worker ingress redirect** (#937 — requires kernel
   XDP_REDIRECT support that doesn't exist; even if it did, the
   AF_XDP UMEM-ownership physics prevents the descriptor sharing
   the design requires)
@@ -156,8 +161,8 @@ Specifically ruled out by the bound:
 Only attacks that change the bound's *premises* can move the floor:
 
 1. **Increase N (more flows).** Multinomial variance shrinks like
-   `1/sqrt(N)`. A 120-flow test has ~10× lower expected CoV than a
-   12-flow test. Test methodology, not dataplane.
+   `1/sqrt(N)`. A 120-flow test has ~3.2× lower expected CoV than a
+   12-flow test (sqrt(10) ≈ 3.16). Test methodology, not dataplane.
 2. **Change the input distribution.** Random ephemeral ports give
    the multinomial bound. **Sequential ports / fixed source ports**
    could in principle be hashed deterministically into evenly-spread
@@ -316,12 +321,12 @@ When considering a new fairness mechanism:
 - 2026-05-08: Five consecutive kills on dataplane-only fairness
   mechanisms documented (#1236 v6 global cap, #1237 v7 reactive
   share, #1239 surplus-proportional, #1243 5-worker dedicated CPU,
-  #1245 multi-receiver test methodology). #1244 RSS Toeplitz
-  auto-tune empirically killed via direct simulation: current
-  Microsoft standard key sits at the multinomial(12, 6) floor
-  (53.2% empirical vs 53.2% theoretical, +0.1pp gap). The
-  multinomial fairness ceiling is now the project's formal prior;
-  see "## Multinomial fairness ceiling" above. Future fairness
-  pitches must clear the bar stated there at plan v1 — name the
-  premise being attacked (N, K, or input distribution), quantify
-  the new bound, simulate before implementing.
+  #1244 RSS Toeplitz auto-tune empirical kill). #1244 empirically
+  killed via direct simulation: current Microsoft standard key sits
+  at the multinomial(12, 6) floor (53.2% empirical vs 53.2%
+  theoretical, +0.1pp gap). The multinomial fairness ceiling is now
+  the project's formal prior; see "## Multinomial fairness ceiling"
+  above. Future fairness pitches must clear the bar stated there at
+  plan v1 — name the premise being attacked (N, K, or input
+  distribution), quantify the new bound, simulate before
+  implementing.
