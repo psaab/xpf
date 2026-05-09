@@ -1,6 +1,6 @@
 # Per-5-Tuple Fairness Drive — State
 
-**As of 2026-05-07.** This document records the standing mandate, the
+**As of 2026-05-09.** This document records the standing mandate, the
 shipped foundations, the killed mechanisms, and the surviving design
 options for cross-worker per-(dip,dport,sip,sport) fairness on the
 xpf userspace AF_XDP dataplane. It is a living state file — update
@@ -73,9 +73,145 @@ this gate, not against an unconditional CoV target.
 | 4 | #840 / #1203 | PLAN-KILL | RSS steering at AF_XDP-ZC binding time is permanent physics — kernel pins flow→queue at bind |
 | 5 | #937 | PLAN-KILL | ingress XDP_REDIRECT for fairness: kernel feature support not present, would need upstream work |
 | 6 | #1211 | PLAN-KILL | Path 2 race-safe AFD overlay: closed 2026-05-07 after 8 Codex rounds + 3 Gemini rounds. PR #1220 empirical PASS on the motivating workload made the design solving a non-existent problem. See `docs/per-5-tuple/path2-archive/CLOSING-RATIONALE.md` for full rationale. |
+| 7 | #1236 | PLAN-KILL | v6 global per-flow cap: MQFQ fallback loophole — `cos_queue_min_finish_bucket` falls back to lowest-finish bucket when all over-cap, so the cap is silently ignored. Plan-killed 2026-05-08. |
+| 8 | #1237 | PLAN-KILL | v7 reactive-share: causality inversion. A worker at 72% of its share has plenty of headroom; the primary worker's share isn't the one limiting it. Plan-killed 2026-05-08. |
+| 9 | #1239 | PLAN-KILL | Surplus-proportional: shrinking-pie math bug. Quota against a shrinking pool strands 25-31% of `class_room` in pathological splits ([4,3,2,3] → 31.25%, [6,5,1] → 26.7%). Plan-killed 2026-05-08. |
+| 10 | #1243 | PLAN-KILL | 5-worker dedicated CPU mode: multinomial(12, 5)+uniform vs (12, 6)+skew CoV cancels exactly (~55.5% vs ~55.8%). Zero quantitative gain to justify -17% saturation throughput. Plus single-CPU control-plane VRRP-starvation risk + i40e ethtool-order disagreement between reviewers. Plan-killed 2026-05-08. |
+| 11 | #1244 | EMPIRICAL-KILL | RSS Toeplitz auto-tune: direct simulation proved current Microsoft standard key is **already at the multinomial floor** — see `## Multinomial fairness ceiling` below. Empirically killed 2026-05-08, no triple-review needed. |
+| 12 | #1245 | EMPIRICAL-KILL | Multi-receiver test methodology: 5-sample CoS-off comparison (12 streams to 1 port vs 12 streams across 6 ports each running its own iperf3 -s) showed CoV mean delta of 2.2pp (51.7% vs 49.5%) — within sample noise. Receiver-side TCP coupling is NOT the variance source. Test-methodology kill, not a dataplane-mechanism kill. |
 
 The table above is the current canonical triage for killed mechanisms
 and reviewer findings.
+
+## Multinomial fairness ceiling
+
+After five consecutive kills (#1236, #1237, #1239, #1243, #1244) on
+distinct dataplane-only fairness mechanisms, the architectural ceiling
+within AF_XDP UMEM-bound design is now empirically confirmed. Any
+future "let's tune the dataplane scheduler / NIC parameter for better
+per-flow CoV" pitch must clear this bar:
+
+### The bound
+
+For a test that opens N TCP flows from one source to one destination
+through K AF_XDP workers (one per RSS queue), with random ephemeral
+source ports drawn uniformly from the Linux ephemeral range, with
+within-worker fairness already perfect (each worker shares its
+capacity equally across its assigned flows), and **assuming uniform
+per-worker capacity** (call it C — the test workload measurement
+target uses a single shaped flow class so this holds in practice),
+the per-flow rate coefficient of variation is bounded below by the
+**multinomial(N, K) sampling variance**:
+
+```
+CoV_floor(N, K) = E[stdev(rate_i) / mean(rate_i)]
+```
+
+where `rate_i = C / count_w` for flow `i` in worker `w` with
+`count_w` flows, and `(count_1, ..., count_K) ~ Multinomial(N, 1/K,
+..., 1/K)`. The `C` factor cancels in CoV because both the
+numerator and denominator scale linearly with capacity, so the
+ceiling is reported as `rate_i = 1/count_w` for cleanliness — but
+note the cancellation only holds under uniform per-worker capacity.
+With heterogeneous capacity, the bound increases, so this is a
+*lower* bound on what the dataplane can achieve, not a description
+of every workload.
+
+For fixed N and K this bound has nothing to do with the scheduler,
+the hash key choice, the surplus algorithm, or the lease
+implementation. It comes from the **statistics of throwing N balls
+into K bins** — the probability that any single trial lands a ball in
+bin `i` is `1/K`, giving a Bin(N, 1/K) marginal per bin and a
+standard deviation of `sqrt(N (K-1) / K²)` for each bin's count.
+Changing N or K changes the bound; changing any scheduler or hash
+detail within fixed N and K cannot.
+
+### Empirical confirmation (2026-05-08)
+
+Direct Python simulation of the Toeplitz hash on the actual ephemeral
+port range (32768-60999) with two candidate keys, mapped through the
+i40e 128-entry indirection table at `equal 6`. 10,000 trials of
+"draw 12 random ports, hash each, group by queue, compute per-flow
+rate CoV":
+
+| Configuration | CoV mean | CoV stdev | Gap to floor |
+|---------------|----------|-----------|--------------|
+| Multinomial(12, 6) theoretical floor | **53.17%** | 15.5% | — |
+| Microsoft standard Toeplitz key (current) | 53.23% | 15.3% | +0.07pp |
+| Symmetric Toeplitz key (recipe knob target) | 53.49% | 15.2% | +0.33pp |
+
+The current key is statistically indistinguishable from a perfect
+uniform hash. Cross-check against production CoS-off iperf-d 12-stream
+measured CoV: 51.7% mean (5 samples) — within sampling noise of the
+53.2% theoretical floor.
+
+### What this rules out
+
+Any mechanism that operates entirely within the AF_XDP UMEM-bound
+dataplane and accepts the same flow input distribution **cannot**
+reduce the 12-flow per-run CoV mean below ~53% in the unshaped case.
+Specifically ruled out by the bound:
+
+- **Better RSS hash key** (#1244 — already at floor)
+- **Reducing worker count from K=6 to K=5** (#1243 — empirically
+  measured: multinomial(12, 5) with uniform per-bin capacity
+  produces ~55.8% CoV, vs multinomial(12, 6) with one ~70%-capacity
+  bin at ~55.5% — the two effects cancel within rounding. The
+  monotonic claim "K-1 is always worse than K" is **not generally
+  true** (at K=1, all flows land on one worker → uniform per-flow
+  rate → CoV=0; the variance is non-monotonic in K). What is true
+  for the specific N=12, K=6 → K=5 case on this hardware is what
+  #1243 measured: zero net CoV gain. Adding workers beyond the
+  current K is a different premise — see "Increase K" below.)
+- **Per-worker scheduler tuning** (#1236, #1237, #1239 — affects
+  within-worker fairness, but multinomial draws *between* workers
+  dominate variance)
+- **Cross-worker ingress redirect** (#937 — requires kernel
+  XDP_REDIRECT support that doesn't exist; even if it did, the
+  AF_XDP UMEM-ownership physics prevents the descriptor sharing
+  the design requires)
+
+### What's left in scope
+
+Only attacks that change the bound's *premises* can move the floor:
+
+1. **Increase N (more flows).** Multinomial variance shrinks like
+   `1/sqrt(N)`. A 120-flow test has ~3.2× lower expected CoV than a
+   12-flow test (sqrt(10) ≈ 3.16). Test methodology, not dataplane.
+2. **Change the input distribution.** Random ephemeral ports give
+   the multinomial bound. **Sequential ports / fixed source ports**
+   could in principle be hashed deterministically into evenly-spread
+   bins. #1233 (sender-side TCP head-start) is in this category;
+   ports are still random but cwnd asymmetry is fixed at sender,
+   not at firewall. Workload-side change.
+3. **Increase K (more workers).** Limited by physical CPUs and by
+   each worker's per-binding capacity. Trades aggregate throughput
+   for fairness — see #1243's tradeoff for why the current K=6 was
+   already chosen optimally for this hardware.
+4. **Accept the ceiling and clip with shaping.** CoS-on iperf-d
+   12-stream CoV mean is 16.6% — far below the 53% multinomial
+   floor — because shapers cap each flow's rate, dragging the
+   distribution toward the shaped value. The fairness contract
+   already accommodates this: `Cstruct` is computed from `{aᵢ}`,
+   not from a fixed CoV.
+
+### Bar for future fairness pitches
+
+Any new fairness issue that targets per-flow CoV reduction on the
+12-stream test workload must, at plan v1:
+
+1. State explicitly which premise of the multinomial bound it is
+   attacking (N, K, or the input distribution).
+2. Quantify the expected CoV reduction against the multinomial floor
+   for the *new* premise. ("Reduces CoV from 53% to X% by changing
+   N from 12 to 120" is fine. "Reduces CoV by improving the
+   scheduler" is not — that's what the five killed mechanisms
+   already tried.)
+3. Include a Python simulation or back-of-envelope calculation
+   showing the new bound BEFORE proposing implementation.
+
+If the pitch can't clear (1) and (2), it's a sixth-attempt repeat of
+the same dead-end. Close at plan time.
 
 ## Surviving design options
 
@@ -197,3 +333,19 @@ When considering a new fairness mechanism:
   if it FAILs, file a fresh issue citing #1217+#1220+the sweep
   table above; (d) if it PASSes, the drive remains empirically
   closed and a new mechanism is solving a non-existent problem.
+- 2026-05-08: Five consecutive kills on dataplane-only fairness
+  mechanisms documented (#1236 v6 global cap, #1237 v7 reactive
+  share, #1239 surplus-proportional, #1243 5-worker dedicated CPU,
+  #1244 RSS Toeplitz auto-tune empirical kill). #1244 empirically
+  killed via direct simulation: current Microsoft standard key sits
+  at the multinomial(12, 6) floor (53.2% empirical vs 53.2%
+  theoretical, +0.1pp gap). The multinomial fairness ceiling is now
+  the project's formal prior; see "## Multinomial fairness ceiling"
+  above. Future fairness pitches must clear the bar stated there at
+  plan v1 — name the premise being attacked (N, K, or input
+  distribution), quantify the new bound, simulate before
+  implementing.
+  - #1245 (test-methodology kill, separate from the five mechanism
+    kills): multi-receiver comparison showed 2.2pp CoV delta
+    (51.7% vs 49.5%) — within sample noise; receiver-side TCP
+    coupling ruled out as a variance source.
