@@ -78,6 +78,7 @@ this gate, not against an unconditional CoV target.
 | 9 | #1239 | PLAN-KILL | Surplus-proportional: shrinking-pie math bug. Quota against a shrinking pool strands 25-31% of `class_room` in pathological splits ([4,3,2,3] → 31.25%, [6,5,1] → 26.7%). Plan-killed 2026-05-08. |
 | 10 | #1243 | PLAN-KILL | 5-worker dedicated CPU mode: multinomial(12, 5)+uniform vs (12, 6)+skew CoV cancels exactly (~55.5% vs ~55.8%). Zero quantitative gain to justify -17% saturation throughput. Plus single-CPU control-plane VRRP-starvation risk + i40e ethtool-order disagreement between reviewers. Plan-killed 2026-05-08. |
 | 11 | #1244 | EMPIRICAL-KILL | RSS Toeplitz auto-tune: direct simulation proved current Microsoft standard key is **already at the multinomial floor** — see `## Multinomial fairness ceiling` below. Empirically killed 2026-05-08, no triple-review needed. |
+| 12 | #1245 | EMPIRICAL-KILL | Multi-receiver test methodology: 5-sample CoS-off comparison (12 streams to 1 port vs 12 streams across 6 ports each running its own iperf3 -s) showed CoV mean delta of 2.2pp (51.7% vs 49.5%) — within sample noise. Receiver-side TCP coupling is NOT the variance source. Test-methodology kill, not a dataplane-mechanism kill. |
 
 The table above is the current canonical triage for killed mechanisms
 and reviewer findings.
