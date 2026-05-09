@@ -330,4 +330,7 @@ When considering a new fairness mechanism:
   above. Future fairness pitches must clear the bar stated there at
   plan v1 — name the premise being attacked (N, K, or input
   distribution), quantify the new bound, simulate before
-  implementing.
+  implementing. Also documented: #1245 multi-receiver test
+  methodology — empirical test-methodology kill (not a
+  dataplane-mechanism kill); receiver-side TCP coupling ruled out as
+  a variance source (2.2pp CoV delta, within sample noise).
