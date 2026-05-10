@@ -38,20 +38,21 @@ pair. The Rust planner does:
 binding.worker_id = (queue_id % workers.max(1)) as u32;
 ```
 
-so a clean 1:1 queue→worker mapping requires `queue_count ==
-workers`. The Go side's `pkg/daemon/rss_indirection.go` reshapes
-RSS indirection only on **mlx5** drivers and only when `workers >
-1 && workers < queues`. With `workers == 1` it leaves the live RSS
-table untouched (single worker drains all queues), and on non-mlx5
-drivers (i40e, etc.) it doesn't reshape at all. The default RSS
-table is restored either when the kill switch fires
+so modulo assignment can map multiple queues onto the same worker
+when `queues > workers`. The Go side's
+`pkg/daemon/rss_indirection.go` reshapes RSS indirection only on
+**mlx5** drivers and only when `workers > 1 && workers < queues`,
+concentrating traffic onto queues `0..workers-1` (it does not change
+the Rust planner's `queue_count`). With `workers == 1` it leaves the
+live RSS table untouched (single worker drains all queues), and on
+non-mlx5 drivers (i40e, etc.) it doesn't reshape at all. The default
+RSS table is restored either when the kill switch fires
 (`enabled == false`), or via `maybeRestoreDefault()` on the
 `workers > 1 && workers >= queues > 1` path — there to undo a
-concentrated table written by an earlier `workers < queues`
+concentrated table left by an earlier `workers < queues`
 configuration (#805). On non-mlx5 + `workers > 1 && workers <
-queues`, the modulo collision can leave one worker bound to
-multiple queues. See PR #1243's kill record for why i40e doesn't
-reshape.
+queues`, modulo collision can leave one worker bound to multiple
+queues. See PR #1243's kill record for why i40e doesn't reshape.
 
 ## Gotchas
 
