@@ -16,10 +16,10 @@ of.
 - `TunnelStatus` — `routing.go`.
 - `RouteEntry` — `routing.go`.
 - `InterfaceMonitorStatus` — `routing.go`.
-- `New()` — `routing.go`.
-- `ApplyTunnels(cfg)` — `routing.go`.
-- `ReconcileVRFs(cfg)` — `routing.go`.
-- `ApplyXfrmi(cfg)` — `routing.go`.
+- `New() (*Manager, error)` — `routing.go`.
+- `ApplyTunnels(tunnels []*config.TunnelConfig) error` — `routing.go`.
+- `ReconcileVRFs(desired []VRFSpec) error` — `routing.go`.
+- `ApplyXfrmi(vpns map[string]*config.IPsecVPN) error` — `routing.go`.
 
 ## Callers
 

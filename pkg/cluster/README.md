@@ -12,9 +12,11 @@ sync.
   readiness/transferReady tracking.
 - `Manager` — `cluster.go`. Election logic, weight calculation, event
   history.
-- `ClusterEvent` — `cluster.go`. State-change notifications consumed
-  by VRRP, the dataplane, and the syslog/SNMP trap senders. (Type
-  defined in `cluster.go`; the consumer lives in `reth.go`.)
+- `ClusterEvent` — `cluster.go`. State-change notifications. The
+  primary consumer of the `Manager.Events()` channel is
+  `pkg/daemon/daemon_ha.go`, which fans events out (HA sync, status
+  publish, etc.). `pkg/cluster/reth.go::HandleStateChange` is a
+  state-handler method, not the event-channel consumer.
 
 ## Callers
 

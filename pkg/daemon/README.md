@@ -14,7 +14,7 @@ every other internal package.
 - `Daemon` — `daemon.go`.
 - `Options` — `daemon.go`. `ConfigPath`, `NoDataplane`, `APIAddr`,
   `GRPCAddr`, `Version`.
-- `New(opts) *Daemon` — `daemon.go`.
+- `New(opts Options) *Daemon` — `daemon.go`.
 - `CompileHealth` — `daemon.go`. Snapshot of the most recent compile
   outcome; `pkg/api` consumes it for the `/health` endpoint.
 

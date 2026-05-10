@@ -9,6 +9,11 @@ during specific windows.
 ## Entry points
 
 - `Scheduler` — `scheduler.go`.
+- `New(schedulers map[string]*config.SchedulerConfig, updateFn func(map[string]bool)) *Scheduler` — `scheduler.go`.
+- `Run(ctx context.Context)` — `scheduler.go`.
+- `IsActive(name string) bool` — `scheduler.go`.
+- `ActiveState() map[string]bool` — `scheduler.go`.
+- `Update(schedulers map[string]*config.SchedulerConfig)` — `scheduler.go`.
 - `New(cfgs, updateFn)` — `scheduler.go`. The callback fires only on
   state change, not every tick.
 - `Run(ctx)` — `scheduler.go`.

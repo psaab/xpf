@@ -42,8 +42,9 @@ decision → forwarding build → enqueue TX or recycle.
 - **AF_XDP rings** (kernel ↔ userspace): RX/TX/fill/completion.
 - **BPF maps** (shared with the XDP shim): session table mirror,
   conntrack, NAT pools, heartbeat.
-- **Sysctl tuning**: raises `SO_RCVBUF`, enables NAPI busy-poll in
-  `BusyPoll` mode.
+- **Sysctl tuning**: writes `/proc/sys/net/core/rmem_default` and
+  `rmem_max` (see `userspace-dp/src/server/lifecycle.rs`); enables
+  NAPI busy-poll in `BusyPoll` mode.
 
 ## Critical invariants
 
@@ -68,10 +69,12 @@ logging rules, not these specific hot-path constants.
 - Generic-XDP fallback consumes UMEM frames permanently on mlx5; the
   XDP shim redirects `XDP_PASS` to a cpumap stage that frees the frame
   immediately.
-- `HEARTBEAT_GRACE_PERIOD_NS = 6 s` in `userspace-dp/src/afxdp/mod.rs` —
-  during the bootstrap window the XDP shim falls back to `XDP_PASS` so
-  the kernel bootstraps NAPI. After 6 s the userspace heartbeat keeps
-  the redirect alive.
+- `HEARTBEAT_GRACE_PERIOD_NS = 6 s` is defined in
+  `userspace-dp/src/afxdp/mod.rs` but currently `#[allow(dead_code)]`
+  — reserved for future XDP-shim heartbeat gating logic. Workers
+  write the heartbeat immediately on bind today
+  (`userspace-dp/src/afxdp/worker/mod.rs`), so there is no live
+  6-second grace window.
 
 ## Subdir READMEs
 

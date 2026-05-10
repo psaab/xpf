@@ -14,7 +14,7 @@ changed.
 - `New()` — `networkd.go`.
 - `Apply(...)` — `networkd.go`.
 - `Clear()` — `networkd.go`.
-- `FindExternallyManaged()` — `networkd.go`. Detects networkd files
+- `FindExternallyManaged(dir string) map[string]bool` — `networkd.go`. Detects networkd files
   the daemon doesn't own.
 
 ## Callers

@@ -19,8 +19,10 @@ fixed-width table.
 
 ## Dependencies
 
-None internal. Pure formatting on top of the standard library — kept
-dependency-free to avoid a circular import via `pkg/cli` or `pkg/grpcapi`.
+`pkg/dataplane` and `pkg/dataplane/userspace` (used by `Sampler` and
+`builder.go` for live BPF map / userspace-helper stats). The package
+deliberately avoids importing `pkg/cli` or `pkg/grpcapi` to prevent
+circular imports — those are the consumers, not dependencies.
 
 ## Gotchas
 

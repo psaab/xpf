@@ -24,6 +24,7 @@ buffers and batches before forwarding to syslog / NetFlow.
 
 - The sequence number is monotonic across reconnects; the daemon ACKs
   the highest seen so the helper can prune its retransmit buffer.
-- If the daemon is slow to drain, the helper's send queue fills and
-  blocks the worker thread that produced the event. That's intentional
-  back-pressure — there is no silent drop.
+- The default `push_delta()` path is **non-blocking** (`try_send`) and
+  **silently drops** when the channel is full — the count is exposed as
+  `frames_dropped`. Use `push_delta_lossless()` only when correctness
+  requires every frame and the producer can tolerate back-pressure.

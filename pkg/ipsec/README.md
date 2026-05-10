@@ -10,7 +10,7 @@ interface IDs) and queries SA/SP state via `swanctl`.
 - `New()` — `ipsec.go`. Default swanctl conf dir
   `/etc/swanctl/conf.d`.
 - `Apply(ipsecCfg *config.IPsecConfig) error` — `ipsec.go`. Generate config and reload strongSwan.
-- `Clear()` — `ipsec.go`.
+- `Clear() error` — `ipsec.go`.
 - `SAStatus`, `TerminateAllSAs`, `InitiateConnection`.
 
 ## Callers

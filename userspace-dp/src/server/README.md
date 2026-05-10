@@ -36,9 +36,13 @@ pair. The Rust planner does:
 binding.worker_id = (queue_id % workers.max(1)) as u32;
 ```
 
-so a clean 1:1 queue→worker mapping requires `queue_count == workers`.
-The Go side ensures that via `pkg/daemon/rss_indirection.go` (mlx5
-today; see #1243 kill record for why i40e doesn't reshape).
+so a clean 1:1 queue→worker mapping requires `queue_count ==
+workers`. The Go side reshapes RSS indirection in
+`pkg/daemon/rss_indirection.go` only on **mlx5** drivers and only
+when `workers < queues`; on i40e and other drivers the modulo
+collision can happen, with one worker bound to multiple queues.
+See PR #1243's kill record for why i40e doesn't reshape and the
+trade-offs that left.
 
 ## Gotchas
 

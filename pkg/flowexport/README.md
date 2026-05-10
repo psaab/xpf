@@ -9,13 +9,13 @@ callback. No per-packet sampling path.
 ## Entry points
 
 - `Exporter` — `exporter.go`.
-- `NewExporter(cfg)` — `exporter.go`.
-- `Run(ctx)` — `exporter.go`. Main export loop.
+- `NewExporter(cfg ExportConfig) (*Exporter, error)` — `exporter.go`.
+- `Run(ctx context.Context)` — `exporter.go`. Main export loop.
 - `ExportConfig` — `exporter.go`. Resolved per-collector config.
-- `BuildExportConfig(cfg)` — `exporter.go`.
+- `BuildExportConfig(svc *config.ServicesConfig, fo *config.ForwardingOptionsConfig) *ExportConfig` — `exporter.go`.
 - `SamplingDir` — `exporter.go`. Direction enum.
-- `SessionCloseData` — wire shape consumed from `pkg/conntrack` delete
-  callbacks.
+- `SessionCloseData` — wire shape built from `logging.EventReader` SESSION_CLOSE records (in `pkg/daemon/daemon_flow.go`), not from `pkg/conntrack`
+  records.
 
 ## Callers
 

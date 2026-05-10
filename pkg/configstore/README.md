@@ -16,7 +16,7 @@ master password is set.
   (`maybeEncryptTreeJSON`, `maybeDecryptTreeJSON`,
   `deriveEncryptionKey`). No public type; the encryption hooks are
   methods on `*DB`. Key material is derived from a master password
-  via PBKDF2.
+  via HKDF (`xpf-configstore-master-password` info string) over a master.key on disk.
 
 ## Callers
 
