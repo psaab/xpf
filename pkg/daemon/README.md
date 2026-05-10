@@ -11,12 +11,12 @@ every other internal package.
 
 ## Entry points
 
-- `Daemon` — `daemon.go:59`.
-- `Options` — `daemon.go:44`. `ConfigPath`, `NoDataplane`, `APIAddr`,
+- `Daemon` — `daemon.go`.
+- `Options` — `daemon.go`. `ConfigPath`, `NoDataplane`, `APIAddr`,
   `GRPCAddr`, `Version`.
-- `New(opts) *Daemon` — `daemon.go:296`.
-- `CompileHealth` — `daemon.go:286`. Snapshot of the most recent compile
-  outcome; `pkg/api` consumes it for `/readyz`.
+- `New(opts Options) *Daemon` — `daemon.go`.
+- `CompileHealth` — `daemon.go`. Snapshot of the most recent compile
+  outcome; `pkg/api` consumes it for the `/health` endpoint.
 
 ## Cluster mode
 

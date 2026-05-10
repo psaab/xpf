@@ -6,15 +6,23 @@ and resolves session display names from the dataplane's assigned `app_id`.
 
 ## Entry points
 
-- `CatalogNames(cfg, includeAll) []string` — `runtime.go:42`. Returns the
-  list of application names the BPF compiler must lower into the policy
-  `app_id` table. `includeAll=false` returns only apps referenced by
-  policies; `true` returns every defined app.
-- `ResolveSessionName(appNames, cfg, proto, dstPort, appID) string` —
-  `runtime.go:95`. Three-tier lookup: dataplane `app_id` (authoritative
-  from BPF) → exact `(proto, dstPort)` match → narrow built-in fallback
-  (`junos-http`, `junos-ssh`, …). Used for session display, NetFlow
-  records, and syslog session-close events.
+- `CatalogNames(cfg *config.Config, includeAll bool) ([]string, error)` — `runtime.go`.
+  Returns the list of application names the BPF compiler must lower
+  into the policy `app_id` table. `includeAll=false` returns only
+  apps referenced by policies; `true` returns every defined app.
+  Returns an error if application-set expansion fails — callers must
+  handle it.
+- `ResolveSessionName(appNames map[uint16]string, cfg *config.Config, proto uint8, dstPort uint16, appID uint16) string` —
+  `runtime.go`. Lookup order: dataplane `app_id` (authoritative from
+  BPF) → exact `(proto, dstPort)` match → narrow built-in fallback
+  (`junos-http`, `junos-ssh`, …). When AppID is **enabled** in
+  `services.application-identification` and the dataplane has not
+  assigned an `app_id` for the session (`appID == 0`), the function
+  returns `UNKNOWN` rather than guessing from port heuristics. Used
+  for session display in the CLI and gRPC paths. (`pkg/logging`
+  resolves app names through its own `EventReader.resolveAppName`,
+  and `pkg/flowexport` does not call this function — the wiring
+  isn't shared with NetFlow / syslog.)
 
 ## Callers
 
@@ -32,5 +40,5 @@ and resolves session display names from the dataplane's assigned `app_id`.
   contract (`show services application-identification status` plus a
   commit warning that flags policies relying on AppID matches that the
   runtime won't actually evaluate).
-- `application-set` aliasing must already be expanded in `cfg` before
-  calling either function. This package does not flatten sets.
+- `CatalogNames` calls `config.ExpandApplicationSet` internally to
+  flatten `application-set` aliases. Callers don't need to pre-expand.

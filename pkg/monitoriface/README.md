@@ -7,14 +7,14 @@ packets, bytes, delta, rate.
 
 ## Entry points
 
-- `Snapshot` — `monitor.go:35`. Kernel counters (Rx/TxBytes, errors,
+- `Snapshot` — `monitor.go`. Kernel counters (Rx/TxBytes, errors,
   collisions, etc.).
-- `UserspaceSnapshot` — `monitor.go:53`. Per-binding XSK stats.
-- `CounterReader` interface — `monitor.go:18`. Abstracts BPF map access
+- `UserspaceSnapshot` — `monitor.go`. Per-binding XSK stats.
+- `CounterReader` interface — `monitor.go`. Abstracts BPF map access
   so tests can inject a fake.
-- `ReadSnapshot()` — `monitor.go:465`.
-- `RenderSingleInterface()` — `monitor.go:536`.
-- `RenderTrafficSummary()` — `monitor.go:714`.
+- `ReadSnapshot(counterReader CounterReader, statusReader StatusReader, kernelName string) (Snapshot, error)` — `monitor.go`.
+- `RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string, snap, prev, baseline *Snapshot, startTime time.Time)` — `monitor.go`.
+- `RenderTrafficSummary(w io.Writer, hostname string, names []string, kernelNames map[string]string, snaps, prevSnaps map[string]*Snapshot, mode SummaryMode, startTime time.Time)` — `monitor.go`.
 
 ## Callers
 

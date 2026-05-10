@@ -7,7 +7,9 @@ this surface over a Unix socket using a newline-delimited text protocol.
 
 - `mod.rs` — module root, public API surface.
 - `lifecycle.rs` — `run()` is the daemon entry called from `main.rs`.
-  Argv parsing (`--workers N`, `--socket PATH`, etc.), socket setup,
+  Argv parsing (`--workers N`, `--control-socket PATH`, etc.),
+  socket setup (control + a derived dedicated session-install
+  socket so session installs don't share the control channel),
   sysctl tuning, signal handling.
 - `state.rs` — `ServerState`: coordinator handle, latest config
   snapshot, session-table handle, policy state.
@@ -36,15 +38,30 @@ pair. The Rust planner does:
 binding.worker_id = (queue_id % workers.max(1)) as u32;
 ```
 
-so a clean 1:1 queue→worker mapping requires `queue_count == workers`.
-The Go side ensures that via `pkg/daemon/rss_indirection.go` (mlx5
-today; see #1243 kill record for why i40e doesn't reshape).
+so modulo assignment can map multiple queues onto the same worker
+when `queues > workers`. The Go side's
+`pkg/daemon/rss_indirection.go` reshapes RSS indirection only on
+**mlx5** drivers and only when `workers > 1 && workers < queues`,
+concentrating traffic onto queues `0..workers-1` (it does not change
+the Rust planner's `queue_count`). With `workers == 1` it leaves the
+live RSS table untouched (single worker drains all queues), and on
+non-mlx5 drivers (i40e, etc.) it doesn't reshape at all. The default
+RSS table is restored either when the kill switch fires
+(`enabled == false`), or via `maybeRestoreDefault()` on the
+`workers > 1 && workers >= queues > 1` path — there to undo a
+concentrated table left by an earlier `workers < queues`
+configuration (#805). On non-mlx5 + `workers > 1 && workers <
+queues`, modulo collision can leave one worker bound to multiple
+queues. See PR #1243's kill record for why i40e doesn't reshape.
 
 ## Gotchas
 
 - `defer_workers=true` requests skip the worker spawn until the next
   reconcile. Used during RETH MAC programming so workers don't bind to
   an interface that's about to drop and re-add its MAC.
-- The control socket is shared with status poll, HA sync, session
-  installs, snapshot sync, and forwarding sync. Adding a new caller at
-  >1 Hz starves session installs during bulk sync.
+- Session installs run on a **dedicated** session-install socket
+  (`derive_session_socket_path` next to the control socket), so they
+  do not share the control-channel queue with status poll, HA sync,
+  snapshot sync, and forwarding sync. The control channel is still
+  shared by those other callers; adding a new caller there at >1 Hz
+  can still starve the other low-frequency control operations.

@@ -8,10 +8,10 @@ moment of takeover, killing the user-visible TCP session.
 
 ## Entry points
 
-- `InstallRSTSuppression()` — `rst_suppress.go:36`. Atomic
+- `InstallRSTSuppression()` — `rst_suppress.go`. Atomic
   delete-then-create within a single netlink batch, so there is no
   window where the old table is gone but the new one isn't installed.
-- `RemoveRSTSuppression()` — `rst_suppress.go:60`.
+- `RemoveRSTSuppression()` — `rst_suppress.go`.
 
 ## Callers
 

@@ -1,8 +1,9 @@
 # pkg/routing
 
 Manages static routes, GRE tunnels, VRFs, XFRM interfaces, and tunnel
-keepalive probes via netlink. Tracks link state for monitored interfaces
-and exposes per-tunnel RTT/loss metrics for weight-based failover.
+keepalive probes via netlink. Tracks link state for monitored
+interfaces and exposes per-tunnel up/down state via `KeepaliveState`
+for weight-based failover.
 
 This package owns netlink object lifecycles. FRR (`pkg/frr`) owns the
 kernel route table; this package owns the *interfaces* routes hang off
@@ -10,16 +11,16 @@ of.
 
 ## Entry points
 
-- `Manager` — `routing.go:43`.
-- `VRFSpec` — `routing.go:71`.
-- `KeepaliveState` — `routing.go:24`. Per-tunnel probe status.
-- `TunnelStatus` — `routing.go:959`.
-- `RouteEntry` — `routing.go:1032`.
-- `InterfaceMonitorStatus` — `routing.go:36`.
-- `New()` — `routing.go:89`.
-- `ApplyTunnels(cfg)` — `routing.go:494`.
-- `ReconcileVRFs(cfg)` — `routing.go:190`.
-- `ApplyXfrmi(cfg)` — `routing.go:863`.
+- `Manager` — `routing.go`.
+- `VRFSpec` — `routing.go`.
+- `KeepaliveState` — `routing.go`. Per-tunnel probe status.
+- `TunnelStatus` — `routing.go`.
+- `RouteEntry` — `routing.go`.
+- `InterfaceMonitorStatus` — `routing.go`.
+- `New() (*Manager, error)` — `routing.go`.
+- `ApplyTunnels(tunnels []*config.TunnelConfig) error` — `routing.go`.
+- `ReconcileVRFs(desired []VRFSpec) error` — `routing.go`.
+- `ApplyXfrmi(vpns map[string]*config.IPsecVPN) error` — `routing.go`.
 
 ## Callers
 
@@ -31,9 +32,15 @@ of.
 
 ## ip-rule priorities
 
-- 33000–33099: rib-group inter-VRF leaking (`from all lookup <table>`).
-- 34000–34999: PBR (firewall-filter `routing-instance` action).
-- main table at 32766 — both ranges sit after main intentionally.
+- `100–199`: next-table inter-VRF leaking (static routes with
+  `next-table` directive). `nextTableRulePriority` in `routing.go`.
+- `31000–31999`: PBR (firewall-filter `routing-instance` action).
+  `pbrRulePriority` in `routing.go`.
+- `33000–33099`: rib-group inter-VRF leaking (`from all lookup
+  <table>`).
+- main table at `32766`. The next-table range sits **before** main
+  (lower priority value = higher priority). PBR sits before main as
+  well; rib-group sits after.
 
 ## Gotchas
 

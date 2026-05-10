@@ -37,7 +37,7 @@ RX dispatch via a function table:
 
 ## Shared memory
 
-`struct shared_memory` (defined in `tables.h`) lives in a DPDK memzone.
+`struct shared_memory` (defined in `shared_mem.h`) lives in a DPDK memzone.
 The Go side (`pkg/dataplane/dpdk`) opens the same memzone and reads /
 writes the same structs:
 

@@ -6,11 +6,11 @@ Manages Kea DHCPv4/v6 server config and lifecycle. Generates
 
 ## Entry points
 
-- `Manager` — `dhcpserver.go:23`.
-- `New()` — `dhcpserver.go:29`.
-- `Apply(cfg)` — `dhcpserver.go:34`. Regenerates config and restarts.
-- `Clear()` — `dhcpserver.go:76`. Stops Kea and removes config files.
-- `Lease` — `dhcpserver.go:95`. Surfaced to the CLI for `show dhcp
+- `Manager` — `dhcpserver.go`.
+- `New()` — `dhcpserver.go`.
+- `Apply(cfg *config.DHCPServerConfig) error` — `dhcpserver.go`. Regenerates config and restarts.
+- `Clear()` — `dhcpserver.go`. Stops Kea and removes config files.
+- `Lease` — `dhcpserver.go`. Surfaced to the CLI for `show dhcp
   server leases`.
 
 ## Callers
@@ -28,5 +28,7 @@ Manages Kea DHCPv4/v6 server config and lifecycle. Generates
 - If the typed config drops the DHCP server entirely, `Apply()` stops the
   service and removes the config file. Running Kea processes are not
   killed via SIGKILL — systemd manages the lifecycle.
-- Lease queries shell out to Kea's lease-database control channel; if the
-  socket is missing the call returns an empty list (not an error).
+- Lease queries read Kea's CSV lease backends directly:
+  `/var/lib/kea/kea-leases4.csv` and `kea-leases6.csv`. No control
+  channel / socket call. Missing files yield an empty list, not an
+  error.

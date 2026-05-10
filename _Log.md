@@ -2,6 +2,14 @@
 
 ## 2026-05-10
 
+- **Timestamp**: 2026-05-10T15:24:00Z
+  - **Action**: PR #1253 review follow-up — corrected `userspace-dp/src/server/README.md` RSS-indirection behavior to match `pkg/daemon/rss_indirection.go` (reshape conditions, workers>=queues stale-table cleanup restore path, and queue concentration semantics).
+  - **File(s)**: `userspace-dp/src/server/README.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-10T15:05:00Z
+  - **Action**: PR #1253 review pass — corrected `pkg/configstore/README.md` encryption-key location wording to match `master.key` under the configstore DB directory (`db.dir`) and removed stale `/etc/xpf/config-key` path guidance.
+  - **File(s)**: `pkg/configstore/README.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-10T04:06:32Z
   - **Action**: PR comment follow-up review for `docs/per-5-tuple/state.md` — replaced a non-existent memory-file reference with in-repo issue/table references (#836/#937/#1215) to keep the fairness section self-contained and verifiable.
   - **File(s)**: `docs/per-5-tuple/state.md`, `_Log.md`
@@ -328,3 +336,12 @@
 - **Timestamp**: 2026-05-10T03:24:56Z
   - **Action**: Correct stale filename references in module READMEs (`eventengine.go`/`dhcprelay.go` -> `engine.go`/`relay.go`) so entry-point file:line links resolve.
   - **File(s)**: `pkg/eventengine/README.md`, `pkg/dhcprelay/README.md`
+
+## 2026-05-10 — docs README wiring/source corrections
+
+- **Timestamp**: 2026-05-10T05:18:20Z
+  - **Action**: Correct `SessionCloseData` attribution to `logging.EventReader` session-close records (not conntrack GC delete callbacks).
+  - **File(s)**: `pkg/flowexport/README.md`
+- **Timestamp**: 2026-05-10T05:18:20Z
+  - **Action**: Correct configstore encryption note to match implementation (`master.key` + HKDF with configured PRF).
+  - **File(s)**: `pkg/configstore/README.md`

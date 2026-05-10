@@ -8,13 +8,13 @@ changed.
 
 ## Entry points
 
-- `Manager` — `networkd.go:51`.
-- `InterfaceConfig` — `networkd.go:22`. MAC, addresses, bonding, VLAN
+- `Manager` — `networkd.go`.
+- `InterfaceConfig` — `networkd.go`. MAC, addresses, bonding, VLAN
   parent, VRF binding, description.
-- `New()` — `networkd.go:56`.
-- `Apply(...)` — `networkd.go:66`.
-- `Clear()` — `networkd.go:201`.
-- `FindExternallyManaged()` — `networkd.go:225`. Detects networkd files
+- `New()` — `networkd.go`.
+- `Apply(...)` — `networkd.go`.
+- `Clear()` — `networkd.go`.
+- `FindExternallyManaged(dir string) map[string]bool` — `networkd.go`. Detects networkd files
   the daemon doesn't own.
 
 ## Callers

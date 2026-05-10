@@ -9,17 +9,23 @@ This is the package that drives chassis-cluster failover.
 
 ## Entry points
 
-- `Manager` — `manager.go:25`. Owns every `Instance` goroutine, the event
+- `Manager` — `manager.go`. Owns every `Instance` goroutine, the event
   channel, and sync-hold state.
-- `Instance` — `vrrp.go:13`. Per-RG config: interface, group ID, VIPs,
+- `Instance` — `vrrp.go`. Per-RG config: interface, group ID, VIPs,
   priority, preempt, timers.
-- `VRRPEvent` — `instance.go:44`. INIT / BACKUP / MASTER transitions.
-- `NewManager()` — `manager.go:47`.
-- `Start()` — `manager.go:55`.
-- `Stop()` — `manager.go:62`.
-- `UpdateInstances(cfg)` — `manager.go:169`.
-- `ReleaseSyncHold(rg)` — `manager.go:120`.
-- `ResignRG(rg)` — `manager.go:256`.
+- `VRRPEvent` — `instance.go`. INIT / BACKUP / MASTER transitions.
+- `NewManager()` — `manager.go`.
+- `Start(ctx context.Context) error` — `manager.go`. **Returns
+  immediately** after wiring `m.cancel`. Per-instance goroutines run
+  independently and observe their own `stopCh`, **not** the parent
+  context. Stop them via `Stop()`, which closes each instance's
+  `stopCh`.
+- `Stop()` — `manager.go`.
+- `UpdateInstances(desired []*Instance) error` — `manager.go`.
+- `ReleaseSyncHold()` — `manager.go`. No-arg; releases hold for all
+  instances.
+- `ResignRG(rgID int)` — `manager.go`. Forces this node out of master
+  for the given redundancy group ID.
 
 ## Callers
 
