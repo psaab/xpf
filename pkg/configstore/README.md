@@ -7,8 +7,13 @@ master password is set.
 
 ## Entry points
 
-- `Store` — high-level API: `Candidate`, `Active`, `Commit`,
-  `CommitConfirmed`, `Rollback`, `History`.
+- `Store` — high-level API. Public methods include `ShowCandidate`,
+  `ShowActive`, `ActiveConfig`, `ActiveTree`, `Commit`,
+  `CommitCheck`, `CommitConfirmed`, `Rollback`, `ListHistory`,
+  `EnterConfigure`, `EnterConfigureSession`,
+  `EnterConfigureExclusive`, `ExitConfigure`, `SyncApply`. (See
+  `store.go` for the full surface — there's no shorthand
+  `Candidate()` or `History()`; use the `Show*` / `List*` forms.)
 - `DB` — `db.go`. Low-level atomic file I/O.
 - `History` — `history.go`. Bounded ring of recent commits.
 - `Journal` — `journal.go`. Append-only JSONL audit trail.
@@ -31,16 +36,21 @@ master password is set.
 
 ## Gotchas
 
-- Atomic write protocol: write temp file → fsync → rename. If the daemon
-  is killed mid-fsync the previous file survives intact, and subsequent
-  reads can fall back to a rollback slot.
-- `Candidate` may be dirty (uncommitted edits accumulating). `Commit`
-  atomically promotes candidate → active and bumps the rollback ring.
-- Rollback slots are 0..49 (FIFO). Oldest is silently discarded when the
-  ring is full.
-- The encryption key path is fixed at `/etc/xpf/config-key`. If the file
-  is missing on a node that previously committed encrypted state, the
-  daemon refuses to start — there is no plaintext fallback.
+- Atomic write protocol: write temp file → `os.Rename` (POSIX-atomic
+  on the same filesystem). The previous file survives an interrupted
+  rename intact, and subsequent reads can fall back to a rollback
+  slot. Note: `db.go` does not call `f.Sync()` between write and
+  rename — durability against power-loss within the rename window
+  relies on the filesystem journal, not on an explicit `fsync`.
+- The candidate (in-memory) tree may be dirty (uncommitted edits
+  accumulating). `Commit` atomically promotes candidate → active
+  and bumps the rollback ring.
+- Rollback slots are 0..49 (FIFO). Oldest is silently discarded when
+  the ring is full.
+- The encryption key lives at `<db.dir>/master.key` (mode 0600,
+  generated on first encrypted commit). If the file is missing on a
+  node that previously committed encrypted state, decryption fails —
+  there is no plaintext fallback.
 - Commit atomicity (#846): `pkg/daemon` wraps `Commit()` together with
   `applyConfig()` under a single semaphore. Bypassing the daemon (e.g.
   using `Store` directly) loses that serialization, so concurrent CLI +

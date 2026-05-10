@@ -1,8 +1,9 @@
 # pkg/routing
 
 Manages static routes, GRE tunnels, VRFs, XFRM interfaces, and tunnel
-keepalive probes via netlink. Tracks link state for monitored interfaces
-and exposes per-tunnel RTT/loss metrics for weight-based failover.
+keepalive probes via netlink. Tracks link state for monitored
+interfaces and exposes per-tunnel up/down state via `KeepaliveState`
+for weight-based failover.
 
 This package owns netlink object lifecycles. FRR (`pkg/frr`) owns the
 kernel route table; this package owns the *interfaces* routes hang off

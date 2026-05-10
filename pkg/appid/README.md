@@ -15,8 +15,10 @@ and resolves session display names from the dataplane's assigned `app_id`.
 - `ResolveSessionName(appNames map[uint16]string, cfg *config.Config, proto uint8, dstPort uint16, appID uint16) string` —
   `runtime.go`. Three-tier lookup: dataplane `app_id` (authoritative
   from BPF) → exact `(proto, dstPort)` match → narrow built-in fallback
-  (`junos-http`, `junos-ssh`, …). Used for session display, NetFlow
-  records, and syslog session-close events.
+  (`junos-http`, `junos-ssh`, …). Used for session display in the CLI
+  and gRPC paths. (`pkg/logging` resolves app names through its own
+  `EventReader.resolveAppName`, and `pkg/flowexport` does not call
+  this function — the wiring isn't shared with NetFlow / syslog.)
 
 ## Callers
 
@@ -34,5 +36,5 @@ and resolves session display names from the dataplane's assigned `app_id`.
   contract (`show services application-identification status` plus a
   commit warning that flags policies relying on AppID matches that the
   runtime won't actually evaluate).
-- `application-set` aliasing must already be expanded in `cfg` before
-  calling either function. This package does not flatten sets.
+- `CatalogNames` calls `config.ExpandApplicationSet` internally to
+  flatten `application-set` aliases. Callers don't need to pre-expand.

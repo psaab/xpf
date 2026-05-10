@@ -35,8 +35,9 @@ callback. No per-packet sampling path.
 - NetFlow v9 templates refresh every 60 s. If a collector restarts and
   misses a refresh it sees opaque records until the next cycle —
   configure the collector to handle template re-resolution.
-- Per-zone batches flush on either timeout or batch-full, whichever
-  fires first.
+- Two batches are maintained: `batchV4` and `batchV6` (split by
+  family, not by zone). Both flush on a 100 ms ticker or on
+  shutdown.
 - `ExportSessionClose` builds the flow record synchronously from the
   event-reader callback. The export goroutine (started in `Run(ctx)`)
   is what actually transmits and refreshes templates; record assembly

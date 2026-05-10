@@ -10,8 +10,9 @@ reports.
 
 - `SyslogSlogHandler` — `slog_handler.go`. Slog handler that
   fans events out to configured syslog clients.
-- `EventBuffer` — `eventbuf.go`. Bounded ring buffer (256 entries
-  default).
+- `EventBuffer` — `eventbuf.go`. `NewEventBuffer(size int)` — the
+  caller picks the size; `pkg/daemon/daemon_run.go` constructs it
+  with 1000. Bounded ring; full → drops the oldest entry.
 - `Subscription` — `eventbuf.go`. A consumer of the event ring.
 - `LocalLogWriter` — `locallog.go`. File-based writer with
   facility/severity filters.

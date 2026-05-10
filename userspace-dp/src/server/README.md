@@ -7,7 +7,9 @@ this surface over a Unix socket using a newline-delimited text protocol.
 
 - `mod.rs` — module root, public API surface.
 - `lifecycle.rs` — `run()` is the daemon entry called from `main.rs`.
-  Argv parsing (`--workers N`, `--socket PATH`, etc.), socket setup,
+  Argv parsing (`--workers N`, `--control-socket PATH`, etc.),
+  socket setup (control + a derived dedicated session-install
+  socket so session installs don't share the control channel),
   sysctl tuning, signal handling.
 - `state.rs` — `ServerState`: coordinator handle, latest config
   snapshot, session-table handle, policy state.
@@ -53,6 +55,9 @@ why i40e doesn't reshape and the trade-offs that left.
 - `defer_workers=true` requests skip the worker spawn until the next
   reconcile. Used during RETH MAC programming so workers don't bind to
   an interface that's about to drop and re-add its MAC.
-- The control socket is shared with status poll, HA sync, session
-  installs, snapshot sync, and forwarding sync. Adding a new caller at
-  >1 Hz starves session installs during bulk sync.
+- Session installs run on a **dedicated** session-install socket
+  (`derive_session_socket_path` next to the control socket), so they
+  do not share the control-channel queue with status poll, HA sync,
+  snapshot sync, and forwarding sync. The control channel is still
+  shared by those other callers; adding a new caller there at >1 Hz
+  can still starve the other low-frequency control operations.

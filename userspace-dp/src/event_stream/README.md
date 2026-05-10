@@ -9,9 +9,11 @@ periodic ACK from the daemon.
 
 - `mod.rs` — `EventStreamSender` owns its own I/O thread, connects to
   the daemon's listener, sends frames, handles reconnect on EPIPE.
-- `codec.rs` — frame layout: `(op, seq, payload_len, payload)` where
-  `op` ∈ `OPEN`, `UPDATE`, `CLOSE`, `ACK`. Little-endian, fixed-width
-  header.
+- `codec.rs` — frame layout: 16-byte header
+  `[length:u32 LE][type:u8][reserved:3][seq:u64 LE]` followed by the
+  payload. Message types: `MSG_SESSION_OPEN`, `MSG_SESSION_CLOSE`,
+  `MSG_SESSION_UPDATE`, `MSG_ACK`, `MSG_PAUSE`, `MSG_RESUME`,
+  `MSG_DRAIN_REQUEST`, `MSG_DRAIN_COMPLETE` (1..8).
 - `codec_tests.rs`, `tests.rs` — co-located.
 
 ## Why push
