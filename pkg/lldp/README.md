@@ -10,7 +10,7 @@ entries by TTL.
 - `Neighbor` — `lldp.go`. Chassis ID, port ID, TTL, system name and
   description.
 - `New()` — `lldp.go`.
-- `Apply(cfg)` — `lldp.go`.
+- `Apply(ctx context.Context, cfg *LLDPConfig)` — `lldp.go`.
 - `Stop()` — `lldp.go`.
 - `Neighbors()` — `lldp.go`. Snapshot consumed by `show lldp
   neighbors`.

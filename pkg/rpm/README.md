@@ -11,7 +11,7 @@ to VRFs via `SO_BINDTODEVICE` when configured.
   success/fail counters).
 - `Event` — `rpm.go`. `test_failed`, `probe_failed`, `test_completed`.
 - `New()` — `rpm.go`.
-- `Apply(cfg)` — `rpm.go`.
+- `Apply(ctx context.Context, cfg *config.RPMConfig)` — `rpm.go`.
 - `StopAll()` — `rpm.go`.
 - `Results()` — `rpm.go`.
 - `SetEventCallback(fn)` — `rpm.go`.

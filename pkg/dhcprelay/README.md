@@ -8,7 +8,7 @@ to the interface name.
 
 - `Manager` — `relay.go`.
 - `NewManager()` — `relay.go`.
-- `Apply(cfg)` — `relay.go`. Starts/stops per-interface relay
+- `Apply(ctx context.Context, cfg *config.DHCPRelayConfig)` — `relay.go`. Starts/stops per-interface relay
   goroutines.
 - `Stats()` — `relay.go`. Per-interface counters.
 - `RelayStats` — `relay.go`.

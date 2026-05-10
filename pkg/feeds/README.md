@@ -7,7 +7,7 @@ feed servers and triggers config recompile when the resolved set changes.
 
 - `Manager` — `feeds.go`.
 - `New(updateFn)` — `feeds.go`.
-- `Apply(cfg)` — `feeds.go`. Starts/stops per-feed refresh goroutines.
+- `Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)` — `feeds.go`. Starts/stops per-feed refresh goroutines.
 - `StopAll()`, `FeedInfo` — surfaced to `show security dynamic-address`.
 
 ## Callers

@@ -12,7 +12,11 @@ restarts so the same client identifier returns to the same lease.
   when any client's lease changes.
 - `Lease` — `dhcp.go`. Result of one DHCP negotiation.
 - `DelegatedPrefix` — `dhcp.go`. From DHCPv6 PD.
-- `Start()`, `Renew()`, `StopAll()`, `DelegatedPrefixes()`.
+- `Start(ctx context.Context, ifaceName string, af AddressFamily)` —
+  `dhcp.go`. Spawn a per-interface client goroutine.
+- `Renew(ifaceName string) error` — `dhcp.go`.
+- `StopAll()` — `dhcp.go`.
+- `DelegatedPrefixes() []DelegatedPrefix` — `dhcp.go`.
 
 ## Callers
 

@@ -15,7 +15,7 @@ This is the package that drives chassis-cluster failover.
   priority, preempt, timers.
 - `VRRPEvent` — `instance.go`. INIT / BACKUP / MASTER transitions.
 - `NewManager()` — `manager.go`.
-- `Start()` — `manager.go`.
+- `Start(ctx context.Context) error` — `manager.go`. Blocks until ctx cancelled.
 - `Stop()` — `manager.go`.
 - `UpdateInstances(desired []*Instance) error` — `manager.go`.
 - `ReleaseSyncHold()` — `manager.go`. No-arg; releases hold for all

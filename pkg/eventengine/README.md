@@ -8,7 +8,7 @@ temporal `within` windows) and triggers commit-and-apply actions.
 
 - `Engine` — `engine.go`.
 - `New(store, commitFn)` — `engine.go`.
-- `Apply(cfg)` — `engine.go`. Loads policies, resets temporal
+- `Apply(policies []*config.EventPolicy)` — `engine.go`. Loads policies, resets temporal
   state.
 - `HandleEvent(evt)` — `engine.go`. Called by the RPM event
   callback.

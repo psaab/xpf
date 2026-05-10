@@ -11,7 +11,7 @@ link-down traps. ASN.1 BER encoding is hand-coded, no external library.
   admin/oper status, octets, errors, drops).
 - `V3UserDisplay` — `v3.go`.
 - `NewAgent(cfg *config.SNMPConfig) *Agent` — `agent.go`.
-- `Start()` — `agent.go`.
+- `Start(ctx context.Context) error` — `agent.go`. Blocks until ctx cancelled.
 - `Stop()` — `agent.go`.
 - `SetIfDataFn(fn)` — `agent.go`. Caller-supplied accessor for live
   interface data.
