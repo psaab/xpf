@@ -234,8 +234,9 @@ Recognized levers:
    workers cooperate to fair-share a *global* per-flow allocation
    (rather than each fair-sharing locally), the within-worker
    premise breaks and the bound no longer applies. The known
-   blockers are AF_XDP ZC physics (#937) and the trilemma documented
-   in `project_per5tuple_fairness_killed.md` (memory).
+   blockers are AF_XDP ZC physics (#937) and the queue-ownership
+   constraints already documented by the #836 / #937 / #1215
+   plan-kills in the table above.
 6. **Non-work-conserving / shaped (premise 4 / 5).** CoS-on iperf-d
    12-stream CoV mean is 16.6%, well below the 51% multinomial
    floor — because shapers clip each flow's rate, dragging the

@@ -1,5 +1,11 @@
 # Action Log
 
+## 2026-05-10
+
+- **Timestamp**: 2026-05-10T04:06:32Z
+  - **Action**: PR comment follow-up review for `docs/per-5-tuple/state.md` — replaced a non-existent memory-file reference with in-repo issue/table references (#836/#937/#1215) to keep the fairness section self-contained and verifiable.
+  - **File(s)**: `docs/per-5-tuple/state.md`, `_Log.md`
+
 ## 2026-05-07
 
 - **Timestamp**: 2026-05-07T16:13:00Z
