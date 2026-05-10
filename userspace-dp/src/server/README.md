@@ -41,14 +41,17 @@ binding.worker_id = (queue_id % workers.max(1)) as u32;
 so a clean 1:1 queue→worker mapping requires `queue_count ==
 workers`. The Go side's `pkg/daemon/rss_indirection.go` reshapes
 RSS indirection only on **mlx5** drivers and only when `workers >
-1` and `workers < queues`. With `workers == 1` it leaves the
-default RSS spread alone (single worker drains all queues), and on
-non-mlx5 drivers (i40e, etc.) it doesn't reshape at all. The
-default RSS table is **only** restored when the kill switch fires
-(`enabled == false`) — not on the `workers == 1` path. On non-mlx5
-+ `workers > 1 && workers < queues`, the modulo collision can
-leave one worker bound to multiple queues. See PR #1243's kill
-record for why i40e doesn't reshape and the trade-offs that left.
+1 && workers < queues`. With `workers == 1` it leaves the live RSS
+table untouched (single worker drains all queues), and on non-mlx5
+drivers (i40e, etc.) it doesn't reshape at all. The default RSS
+table is restored either when the kill switch fires
+(`enabled == false`), or via `maybeRestoreDefault()` on the
+`workers > 1 && workers >= queues > 1` path — there to undo a
+concentrated table written by an earlier `workers < queues`
+configuration (#805). On non-mlx5 + `workers > 1 && workers <
+queues`, the modulo collision can leave one worker bound to
+multiple queues. See PR #1243's kill record for why i40e doesn't
+reshape.
 
 ## Gotchas
 

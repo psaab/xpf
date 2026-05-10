@@ -16,9 +16,10 @@ This is the package that drives chassis-cluster failover.
 - `VRRPEvent` — `instance.go`. INIT / BACKUP / MASTER transitions.
 - `NewManager()` — `manager.go`.
 - `Start(ctx context.Context) error` — `manager.go`. **Returns
-  immediately** after wiring `m.cancel`; per-instance goroutines run
-  independently. Doesn't block. Stop them via `Stop()` or by
-  cancelling the parent context.
+  immediately** after wiring `m.cancel`. Per-instance goroutines run
+  independently and observe their own `stopCh`, **not** the parent
+  context. Stop them via `Stop()`, which closes each instance's
+  `stopCh`.
 - `Stop()` — `manager.go`.
 - `UpdateInstances(desired []*Instance) error` — `manager.go`.
 - `ReleaseSyncHold()` — `manager.go`. No-arg; releases hold for all
