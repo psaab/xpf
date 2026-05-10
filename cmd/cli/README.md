@@ -27,7 +27,6 @@ here and in the daemon-local CLI without changes here.
   authentication is by gRPC peer credentials.
 - `| match <pattern>` filtering is client-side; the server sends full
   output. (Junos pipes are simulated this way.)
-- Per memory `feedback_cli_binary_path.md`: some VMs have a stale
-  `/usr/local/sbin/cli` that shadows the current `/usr/local/bin/cli`
-  via PATH. Delete the sbin copy after a deploy if you see weird
-  behavior.
+- Some lab VMs have a stale `/usr/local/sbin/cli` that shadows the
+  current `/usr/local/bin/cli` via `PATH`. If a deploy looks correct
+  but the CLI behavior is stale, delete the `sbin` copy.

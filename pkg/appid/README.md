@@ -28,7 +28,9 @@ and resolves session display names from the dataplane's assigned `app_id`.
 
 - The built-in fallback table is intentionally narrow. There is no L7 DPI
   in this package — real identifications come from the dataplane's
-  `app_id` field on the session. See `project_653_done.md` (memory) for
-  why the operator-facing contract was made explicit.
+  `app_id` field on the session. See PR #1196 for the operator-facing
+  contract (`show services application-identification status` plus a
+  commit warning that flags policies relying on AppID matches that the
+  runtime won't actually evaluate).
 - `application-set` aliasing must already be expanded in `cfg` before
   calling either function. This package does not flatten sets.

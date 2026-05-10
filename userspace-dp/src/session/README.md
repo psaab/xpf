@@ -43,5 +43,5 @@ because they were re-bucketed mid-sweep).
 Pre-#964 the table was `HashMap<Key, Arc<SessionEntry>>`. Reverse-NAT
 and alias lookups now run 2.2–2.3× faster because integer handles are
 cheap to compare and the slab layout fits more entries per cache line.
-The owner-RG export path got a 2× regression on a rare HA codepath
-that's documented in `project_964_step1_done.md` (memory).
+The owner-RG export path took a 2× regression on a rare HA codepath
+that's known and accepted; see PR #1182 for the trade-off.

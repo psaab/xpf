@@ -15,8 +15,9 @@ today; ~48 RPCs.
 PATH=$PATH:$HOME/go/bin make proto
 ```
 
-Regenerates the Go stubs into `proto/xpf/v1/*.pb.go`. The generator is
-in PATH after a Go install of `protoc-gen-go` and `protoc-gen-go-grpc`.
+Regenerates the Go stubs into `pkg/grpcapi/xpfv1/` (`xpf.pb.go`,
+`xpf_grpc.pb.go`). The generator is in PATH after a Go install of
+`protoc-gen-go` and `protoc-gen-go-grpc`.
 
 ## RPC categories
 
