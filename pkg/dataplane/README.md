@@ -15,10 +15,11 @@ Go interface is the only thing every caller sees.
 - `Manager` — `loader.go`. eBPF implementation.
 - `New() *Manager` — `loader.go`.
 - `Compile(cfg *config.Config) (*CompileResult, error)` — multi-phase
-  lowering to BPF map entries. Phases live in `compiler.go` (zones,
-  screen profiles, address book, applications, policies, NAT,
-  static NAT, NAT64 prefixes, NPTv6, screen profiles, default
-  policy, flow timeouts).
+  lowering to BPF map entries. Phases live in `compiler.go`: zone IDs,
+  screen profile IDs, zones, address book, applications, policies,
+  NAT, static NAT, NAT64 prefixes, NPTv6, screen profiles, default
+  policy, flow timeouts, firewall filters, flow config, port
+  mirroring.
 - `CompileResult` — `compiler.go`. Zone/policy/NAT/app IDs and the
   per-interface networkd configs.
 - Session iteration: `IterateSessions`, `BatchIterateSessions`,

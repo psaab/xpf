@@ -15,8 +15,14 @@ nothing internal.
 - `ParseSetCommand(line) (*Node, error)` — for **one** flat-set line.
 - `ConfigTree` — `ast.go`. Hierarchical node tree built by both shapes.
 - `Config` — `types.go`. The fully typed result every consumer wants.
-- The compiler — `compiler/` (~30 files, ~11K LOC) across six phases:
-  interfaces → zones → routing → NAT → firewall → filters.
+- The compiler — eleven `compiler*.go` files in `pkg/config/`
+  (`compiler.go` plus per-area files: interfaces, routing, security,
+  services, system, firewall, NAT, IPsec, protocols,
+  class-of-service, plus `compiler.go` itself), ~7.6K LOC total.
+  Phase dispatch in `compiler.go` runs zone IDs → screen profile IDs
+  → zones → address book → applications → policies → NAT (incl.
+  static, NAT64, NPTv6) → screen profiles → default policy → flow
+  timeouts → firewall filters → flow config → port mirroring.
 
 ## Callers
 

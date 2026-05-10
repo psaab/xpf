@@ -18,8 +18,10 @@ This is the package that drives chassis-cluster failover.
 - `Start()` — `manager.go`.
 - `Stop()` — `manager.go`.
 - `UpdateInstances(cfg)` — `manager.go`.
-- `ReleaseSyncHold(rg)` — `manager.go`.
-- `ResignRG(rg)` — `manager.go`.
+- `ReleaseSyncHold()` — `manager.go`. No-arg; releases hold for all
+  instances.
+- `ResignRG(rgID int)` — `manager.go`. Forces this node out of master
+  for the given redundancy group ID.
 
 ## Callers
 
