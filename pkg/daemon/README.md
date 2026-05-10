@@ -16,7 +16,7 @@ every other internal package.
   `GRPCAddr`, `Version`.
 - `New(opts) *Daemon` — `daemon.go`.
 - `CompileHealth` — `daemon.go`. Snapshot of the most recent compile
-  outcome; `pkg/api` consumes it for `/readyz`.
+  outcome; `pkg/api` consumes it for the `/health` endpoint.
 
 ## Cluster mode
 

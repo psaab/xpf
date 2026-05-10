@@ -2,9 +2,9 @@
 
 NetFlow v9 exporter. Exports session-close events to remote
 collectors with per-zone direction filters and 1-in-N session
-sampling. (Wired only from session close — `pkg/daemon` calls
-`Exporter.ExportSessionClose` from the GC delete callback. No
-per-packet sampling path.)
+sampling. Wired off `pkg/logging.EventReader` SESSION_CLOSE events
+in `pkg/daemon/daemon_flow.go`, not the conntrack GC delete
+callback. No per-packet sampling path.
 
 ## Entry points
 
@@ -19,7 +19,9 @@ per-packet sampling path.)
 
 ## Callers
 
-`pkg/daemon` calls `ExportSessionClose()` from the session-close hook.
+`pkg/daemon/daemon_flow.go::startFlowExporter` and
+`startIPFIXExporter` call `Exporter.ExportSessionClose()` from the
+`logging.EventReader` SESSION_CLOSE callback.
 
 ## Dependencies
 
@@ -35,5 +37,7 @@ per-packet sampling path.)
   configure the collector to handle template re-resolution.
 - Per-zone batches flush on either timeout or batch-full, whichever
   fires first.
-- The package never blocks the GC loop — record assembly is offloaded to
-  the exporter's own goroutine.
+- `ExportSessionClose` builds the flow record synchronously from the
+  event-reader callback. The export goroutine (started in `Run(ctx)`)
+  is what actually transmits and refreshes templates; record assembly
+  itself isn't offloaded.

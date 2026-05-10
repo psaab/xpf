@@ -31,9 +31,15 @@ of.
 
 ## ip-rule priorities
 
-- 33000–33099: rib-group inter-VRF leaking (`from all lookup <table>`).
-- 34000–34999: PBR (firewall-filter `routing-instance` action).
-- main table at 32766 — both ranges sit after main intentionally.
+- `100–199`: next-table inter-VRF leaking (static routes with
+  `next-table` directive). `nextTableRulePriority` in `routing.go`.
+- `31000–31999`: PBR (firewall-filter `routing-instance` action).
+  `pbrRulePriority` in `routing.go`.
+- `33000–33099`: rib-group inter-VRF leaking (`from all lookup
+  <table>`).
+- main table at `32766`. The next-table range sits **before** main
+  (lower priority value = higher priority). PBR sits before main as
+  well; rib-group sits after.
 
 ## Gotchas
 

@@ -15,14 +15,17 @@ nothing internal.
 - `ParseSetCommand(line) (*Node, error)` — for **one** flat-set line.
 - `ConfigTree` — `ast.go`. Hierarchical node tree built by both shapes.
 - `Config` — `types.go`. The fully typed result every consumer wants.
-- The compiler — eleven `compiler*.go` files in `pkg/config/`
-  (`compiler.go` plus per-area files: interfaces, routing, security,
-  services, system, firewall, NAT, IPsec, protocols,
-  class-of-service, plus `compiler.go` itself), ~7.6K LOC total.
-  Phase dispatch in `compiler.go` runs zone IDs → screen profile IDs
-  → zones → address book → applications → policies → NAT (incl.
-  static, NAT64, NPTv6) → screen profiles → default policy → flow
-  timeouts → firewall filters → flow config → port mirroring.
+- `CompileConfig(tree) (*Config, error)` — `compiler.go`. AST-to-typed-
+  struct walker. Clones the tree, expands `apply-groups` (with
+  `${node}` fallback for cluster mode), then dispatches over AST
+  nodes via a switch statement to fill the typed `Config`. Eleven
+  `compiler*.go` files in this package, ~7.6K LOC total
+  (`compiler.go` + `compiler_interfaces.go`, `_routing.go`,
+  `_security.go`, `_services.go`, `_system.go`, `_firewall.go`,
+  `_nat.go`, `_ipsec.go`, `_protocols.go`, `_class_of_service.go`).
+  Note: this is the **AST → typed Go struct** stage; the BPF-map
+  compilation (zones, policies, NAT IDs, etc.) happens later in
+  `pkg/dataplane.Manager.Compile`.
 
 ## Callers
 

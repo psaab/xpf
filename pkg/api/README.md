@@ -13,14 +13,15 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
 
 ## Surface
 
-- `/healthz`, `/readyz` — liveness, readiness. `CompileHealthFn` (#758) lets
-  the daemon downgrade `/readyz` to 503 when a recent compile failed
-  silently; without the callback `/readyz` defaults to 200.
-- `/metrics` — Prometheus exposition.
-- `/v1/...` — REST mirrors of the gRPC API: sessions, routes, NAT, DHCP,
-  IPsec, VRRP, etc.
-- `/events` — Server-Sent Events stream of dataplane events. Backed by the
-  `pkg/logging` event ring buffer; long-lived consumers must drain.
+- `GET /health` — liveness/readiness. `CompileHealthFn` (#758) lets the
+  daemon downgrade `/health` to 503 when a recent compile failed
+  silently; without the callback it defaults to 200.
+- `GET /metrics` — Prometheus exposition.
+- `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
+  NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.
+- `GET /api/v1/events/stream` — Server-Sent Events stream of dataplane
+  events. Backed by the `pkg/logging` event ring buffer; long-lived
+  consumers must drain.
 
 ## Callers
 
