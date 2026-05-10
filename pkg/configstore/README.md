@@ -15,8 +15,11 @@ master password is set.
 - `crypto.go` — AES-256-GCM at-rest encryption helpers
   (`maybeEncryptTreeJSON`, `maybeDecryptTreeJSON`,
   `deriveEncryptionKey`). No public type; the encryption hooks are
-  methods on `*DB`. Key material is derived from a master password
-  via HKDF (`xpf-configstore-master-password` info string) over a master.key on disk.
+  methods on `*DB`. The encryption key is derived via HKDF
+  (info string `xpf-configstore-master-password`, mode 0600 random
+  bytes) from a randomly-generated `master.key` file in the
+  configstore directory. The "master-password" naming is an HKDF
+  info string only — it isn't a user-supplied password.
 
 ## Callers
 

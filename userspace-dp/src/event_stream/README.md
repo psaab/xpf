@@ -25,6 +25,9 @@ buffers and batches before forwarding to syslog / NetFlow.
 - The sequence number is monotonic across reconnects; the daemon ACKs
   the highest seen so the helper can prune its retransmit buffer.
 - The default `push_delta()` path is **non-blocking** (`try_send`) and
-  **silently drops** when the channel is full — the count is exposed as
-  `frames_dropped`. Use `push_delta_lossless()` only when correctness
-  requires every frame and the producer can tolerate back-pressure.
+  **silently drops** when the channel is full. The internal counter
+  is `EventStreamShared.frames_dropped` (`mod.rs`); the surface
+  exported through the daemon status JSON is `event_stream_dropped`
+  (see `protocol.rs`). Use `push_delta_lossless()` only when
+  correctness requires every frame and the producer can tolerate
+  back-pressure.
