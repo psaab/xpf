@@ -2,13 +2,9 @@
 
 ## 2026-05-10
 
-- **Timestamp**: 2026-05-10T04:16:52Z
-  - **Action**: Addressed Copilot PR review follow-up in `userspace-dp/README.md` by narrowing invariant attribution: UMEM ceiling points to `docs/per-5-tuple/state.md`; hot-path constants now explicitly attributed to `userspace-dp/src/afxdp/mod.rs`.
-  - **File(s)**: `userspace-dp/README.md`
-
-- **Timestamp**: 2026-05-10T04:06:34Z
-  - **Action**: PR #1251 follow-up adversarial doc review — fixed two remaining stale path references in module READMEs (`xdp_forward.c` now fully qualified, and userspace single-file module refs now consistently `src/*.rs`).
-  - **File(s)**: `pkg/dataplane/README.md`, `userspace-dp/README.md`
+- **Timestamp**: 2026-05-10T04:06:32Z
+  - **Action**: PR comment follow-up review for `docs/per-5-tuple/state.md` — replaced a non-existent memory-file reference with in-repo issue/table references (#836/#937/#1215) to keep the fairness section self-contained and verifiable.
+  - **File(s)**: `docs/per-5-tuple/state.md`, `_Log.md`
 
 ## 2026-05-07
 
