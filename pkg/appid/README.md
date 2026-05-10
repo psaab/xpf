@@ -13,12 +13,16 @@ and resolves session display names from the dataplane's assigned `app_id`.
   Returns an error if application-set expansion fails — callers must
   handle it.
 - `ResolveSessionName(appNames map[uint16]string, cfg *config.Config, proto uint8, dstPort uint16, appID uint16) string` —
-  `runtime.go`. Three-tier lookup: dataplane `app_id` (authoritative
-  from BPF) → exact `(proto, dstPort)` match → narrow built-in fallback
-  (`junos-http`, `junos-ssh`, …). Used for session display in the CLI
-  and gRPC paths. (`pkg/logging` resolves app names through its own
-  `EventReader.resolveAppName`, and `pkg/flowexport` does not call
-  this function — the wiring isn't shared with NetFlow / syslog.)
+  `runtime.go`. Lookup order: dataplane `app_id` (authoritative from
+  BPF) → exact `(proto, dstPort)` match → narrow built-in fallback
+  (`junos-http`, `junos-ssh`, …). When AppID is **enabled** in
+  `services.application-identification` and the dataplane has not
+  assigned an `app_id` for the session (`appID == 0`), the function
+  returns `UNKNOWN` rather than guessing from port heuristics. Used
+  for session display in the CLI and gRPC paths. (`pkg/logging`
+  resolves app names through its own `EventReader.resolveAppName`,
+  and `pkg/flowexport` does not call this function — the wiring
+  isn't shared with NetFlow / syslog.)
 
 ## Callers
 

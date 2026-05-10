@@ -13,7 +13,8 @@ periodic ACK from the daemon.
   `[length:u32 LE][type:u8][reserved:3][seq:u64 LE]` followed by the
   payload. Message types: `MSG_SESSION_OPEN`, `MSG_SESSION_CLOSE`,
   `MSG_SESSION_UPDATE`, `MSG_ACK`, `MSG_PAUSE`, `MSG_RESUME`,
-  `MSG_DRAIN_REQUEST`, `MSG_DRAIN_COMPLETE` (1..8).
+  `MSG_DRAIN_REQUEST`, `MSG_DRAIN_COMPLETE`, `MSG_FULL_RESYNC`,
+  `MSG_KEEPALIVE` (1..10).
 - `codec_tests.rs`, `tests.rs` — co-located.
 
 ## Why push
