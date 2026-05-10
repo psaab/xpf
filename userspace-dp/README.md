@@ -22,7 +22,7 @@ opt-in AF_XDP zero-copy backend used on hardware that benefits from it.
 | `src/filter/` | Junos-style firewall filter compiler + engine + policer. |
 | `src/event_stream/` | Push-based binary session-delta stream to the daemon. |
 | `src/bin/` | Helper binaries (`fairness-eval`). |
-| `src/nat.rs`, `nat64.rs`, `nptv6.rs`, `policy.rs`, `screen.rs`, `slowpath.rs`, `fairness.rs`, `flowexport.rs` | Single-file feature modules consumed by the worker hot path. |
+| `src/nat.rs`, `src/nat64.rs`, `src/nptv6.rs`, `src/policy.rs`, `src/screen.rs`, `src/slowpath.rs`, `src/fairness.rs`, `src/flowexport.rs` | Single-file feature modules consumed by the worker hot path. |
 
 ## Architecture
 

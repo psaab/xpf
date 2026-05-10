@@ -59,7 +59,7 @@ authoritative list; quick recap:
   i40e/ice on the PF have native XDP.
 - `bpf_redirect_map` requires `ndo_xdp_xmit` on the target. Mixing native
   + generic interfaces in a redirect set silently drops.
-- Workaround: per-interface `redirect_capable` flag in `xdp_forward.c`.
+- Workaround: per-interface `redirect_capable` flag in `bpf/xdp/xdp_forward.c`.
   Non-native interfaces fall back to `XDP_PASS` (kernel forwarding).
 - The lab uses PF passthrough (i40e) on the WAN interface; all other
   interfaces are virtio with native XDP. Per-VF passthrough would need

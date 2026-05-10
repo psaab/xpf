@@ -1,5 +1,11 @@
 # Action Log
 
+## 2026-05-10
+
+- **Timestamp**: 2026-05-10T04:06:34Z
+  - **Action**: PR #1251 follow-up adversarial doc review — fixed two remaining stale path references in module READMEs (`xdp_forward.c` now fully qualified, and userspace single-file module refs now consistently `src/*.rs`).
+  - **File(s)**: `pkg/dataplane/README.md`, `userspace-dp/README.md`
+
 ## 2026-05-07
 
 - **Timestamp**: 2026-05-07T16:13:00Z
