@@ -1,8 +1,10 @@
 # pkg/flowexport
 
-NetFlow v9 exporter. Exports session-close events (and optional
-per-packet samples) to remote collectors with per-zone direction filters
-and 1-in-N sampling.
+NetFlow v9 exporter. Exports session-close events to remote
+collectors with per-zone direction filters and 1-in-N session
+sampling. (Wired only from session close — `pkg/daemon` calls
+`Exporter.ExportSessionClose` from the GC delete callback. No
+per-packet sampling path.)
 
 ## Entry points
 

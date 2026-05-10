@@ -16,7 +16,7 @@ FRR, which then owns the kernel route table.
 - `ApplyFull(cfg)` — apply full config (idempotent diff against on-disk).
 - `FullConfig` — `frr.go`.
 - `InstanceConfig` — `frr.go`. One per-VRF.
-- State queries (vtysh): `GetRIPRoutes` (frr.go:141), `GetISISAdjacency`,
+- State queries (vtysh): `GetRIPRoutes` (frr.go), `GetISISAdjacency`,
   `GetBGPNeighbors`, …
 
 ## Callers

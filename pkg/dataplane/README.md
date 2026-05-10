@@ -14,11 +14,15 @@ Go interface is the only thing every caller sees.
 - `DataPlane` — `dataplane.go`. Abstract interface.
 - `Manager` — `loader.go`. eBPF implementation.
 - `New() *Manager` — `loader.go`.
-- `Compile(cfg *config.Config) (*CompileResult, error)` — six-phase
-  lowering to BPF map entries.
+- `Compile(cfg *config.Config) (*CompileResult, error)` — multi-phase
+  lowering to BPF map entries. Phases live in `compiler.go` (zones,
+  screen profiles, address book, applications, policies, NAT,
+  static NAT, NAT64 prefixes, NPTv6, screen profiles, default
+  policy, flow timeouts).
 - `CompileResult` — `compiler.go`. Zone/policy/NAT/app IDs and the
   per-interface networkd configs.
-- Session iteration: `IterateSessions`, `IterateSessionsByZonePair`, etc.
+- Session iteration: `IterateSessions`, `BatchIterateSessions`,
+  `IterateSessionsV6`, `BatchIterateSessionsV6`.
 
 ## Callers
 

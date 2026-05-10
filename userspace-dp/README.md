@@ -48,8 +48,10 @@ decision → forwarding build → enqueue TX or recycle.
 ## Critical invariants
 
 These invariants are enforced in code (`const_assert`s and runtime
-checks) and documented in `docs/per-5-tuple/state.md` — they are *not*
-in CLAUDE.md, which only covers Go-side concerns.
+checks) and discussed in `docs/per-5-tuple/state.md`. They aren't
+mirrored into CLAUDE.md — that file's authoritative content covers
+Go, BPF, and Rust-helper logging rules, but not these specific
+hot-path constants.
 
 - AF_XDP UMEM ownership is per-queue. A flow that hashes to queue N is
   *physically tied* to worker N — there is no cross-worker descriptor
