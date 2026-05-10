@@ -2,6 +2,10 @@
 
 ## 2026-05-10
 
+- **Timestamp**: 2026-05-10T15:24:00Z
+  - **Action**: PR #1253 review follow-up — corrected `userspace-dp/src/server/README.md` RSS-indirection behavior to match `pkg/daemon/rss_indirection.go` (reshape conditions, workers>=queues stale-table cleanup restore path, and queue concentration semantics).
+  - **File(s)**: `userspace-dp/src/server/README.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-10T15:05:00Z
   - **Action**: PR #1253 review pass — corrected `pkg/configstore/README.md` encryption-key location wording to match `master.key` under the configstore DB directory (`db.dir`) and removed stale `/etc/xpf/config-key` path guidance.
   - **File(s)**: `pkg/configstore/README.md`, `_Log.md`
