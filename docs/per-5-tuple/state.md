@@ -175,21 +175,25 @@ number as ballpark consistency, not proof.
 ### What this rules out
 
 Any mechanism that preserves all five load-bearing premises and
-accepts the same `(N, K, input distribution)` triple **cannot**
-reduce the 12-flow per-run CoV below the multinomial floor (~51% for
-N=12, K=6, premises 1–5). Specifically ruled out under those
-premises:
+accepts the same `(N, K)` and input distribution **cannot** reduce
+the **expected** per-flow CoV below the multinomial floor — `51.06%`
+for N=12, K=6, premises 1–5. Note this is an expectation over random
+port draws: any individual run can be below the floor (e.g. a `(2,
+2, 2, 2, 2, 2)` partition gives CoV 0; `P(per-run CoV < 51.06%) ≈
+59%` by exact enumeration). What's bounded is the long-run average
+across repeated trials. Specifically ruled out under those premises:
 
 - **Better RSS hash key** (#1244 — already at floor).
-- **Reducing K from 6 to 5** (#1243 — empirically measured:
-  multinomial(12, 5) with uniform per-bin capacity produces ~55.8%
-  CoV, vs multinomial(12, 6) with one ~70%-capacity bin at ~55.5%
-  — the two effects cancel within rounding. The monotonic claim
-  "K-1 is always worse than K" is **not generally true** (at K=1,
-  all flows land on one worker → uniform per-flow rate → CoV=0;
-  the variance is non-monotonic in K). What is true for the
-  specific N=12, K=6 → K=5 case on this hardware is what #1243
-  measured: zero net CoV gain.)
+- **Reducing K from 6 to 5** (#1243 — under population CoV the exact
+  uniform floors are K=6: 51.06%, K=5: 51.17% (close, with K=6
+  slightly better). #1243's empirical numbers were on heterogeneous
+  hardware: K=5 with uniform per-bin capacity produced ~55.5% CoV,
+  vs K=6 with one ~70%-capacity bin at ~55.8% — the two effects
+  cancel within rounding. The monotonic claim "K-1 is always worse
+  than K" is **not generally true** (at K=1, all flows land on one
+  worker → uniform per-flow rate → CoV=0; variance is non-monotonic
+  in K). What's true for the specific N=12, K=6 → K=5 case on this
+  hardware is what #1243 measured: zero net CoV gain.)
 - **Per-worker scheduler tuning** (#1236, #1237, #1239 — affects
   within-worker fairness, but multinomial draws *between* workers
   dominate variance under premises 1–5).
@@ -234,8 +238,11 @@ Recognized levers:
    workers cooperate to fair-share a *global* per-flow allocation
    (rather than each fair-sharing locally), the within-worker
    premise breaks and the bound no longer applies. The known
-   blockers are AF_XDP ZC physics (#937) and the trilemma documented
-   in `project_per5tuple_fairness_killed.md` (memory).
+   blockers are AF_XDP ZC physics (#937) and the per-flow rate
+   equality / work conservation / no-Harrison-Bergeron trilemma:
+   any global-fair scheme has to give up at least one of them, and
+   the four prior mechanism kills (#1236, #1237, #1239, #1243)
+   each found a different way to prove that.
 6. **Non-work-conserving / shaped (premise 4 / 5).** CoS-on iperf-d
    12-stream CoV mean is 16.6%, well below the 51% multinomial
    floor — because shapers clip each flow's rate, dragging the
@@ -248,9 +255,10 @@ Recognized levers:
 Any new fairness issue that targets per-flow CoV reduction on the
 12-stream test workload must, at plan v1:
 
-1. **Name the load-bearing premise being attacked** (one or more of
-   the five in the bound table). Pitches that don't attack any
-   premise cannot move the floor — they should not be plan-reviewed.
+1. **Name the bound input being changed** — one or more of: the
+   parameters `N` or `K`, or one or more of the five load-bearing
+   premises in the bound table. Pitches that change none of these
+   cannot move the floor — they should not be plan-reviewed.
 2. **Quantify the expected CoV reduction** against the bound *under
    the new premise*. ("Reduces CoV from 51% to X% by attacking
    premise 1 with asymmetric `p_w`" is fine. "Reduces CoV by
