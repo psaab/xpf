@@ -33,6 +33,13 @@ drop-in for xdpilone), and tracks frame budgets per binding.
   doesn't cross thread boundaries within the worker. The cross-binding
   redirect path in `cos/cross_binding.rs` *copies* frames into the
   destination binding's UMEM rather than sharing.
-- Generic-XDP fallback consumes UMEM frames permanently on mlx5.
-  The XDP shim redirects `XDP_PASS` to a cpumap stage that frees the
-  frame immediately to avoid draining the ring.
+- In **zero-copy mode on mlx5**, an `XDP_PASS` action permanently
+  consumes a fill-ring frame: the kernel holds the UMEM buffer in
+  an SKB and never returns it. Sustained traffic drains all 12K+ RX
+  frames within seconds. The mitigation (#209): the XDP shim
+  replaces every `XDP_PASS` path with a cpumap redirect
+  (`USERSPACE_CPUMAP`), which frees the XSK frame immediately while
+  still delivering the packet to the kernel stack. Bind flags try
+  zero-copy first and fall back to copy mode if the driver doesn't
+  support it; copy mode is unaffected because `XDP_PASS` there
+  operates on kernel DMA buffers, not UMEM frames.

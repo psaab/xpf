@@ -8,8 +8,11 @@ Most files are definitions only, but `shared_cos_lease.rs` is an
 exception: it owns the hot-path lease acquisition / release / epoch
 rotation algorithm (tag-checked CAS, two-CAS-with-rollback) for the
 shared CoS lease. That algorithm lives with the type because it's
-the contract for safe coordination across workers; siblings reach
-into it through the `pub(in crate::afxdp)` re-exports below.
+the contract for safe coordination across workers. Visibility is
+deliberately narrower than the rest: shared_cos_lease items are
+re-exported with `pub(super)` (afxdp-internal only), while the cos
+/ forwarding / tx / runtime sub-modules use `pub(in crate::afxdp)`
+globs.
 
 ## Files
 

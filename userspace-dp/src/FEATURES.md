@@ -6,13 +6,17 @@ flat: each owns one feature's lookup tables and decision logic, with
 no internal sub-modules. Test layout is mixed: most feature modules
 have a sibling `<feature>_tests.rs` (`nat`, `nat64`, `nptv6`,
 `policy`, `screen`, `prefix_set`, `flowexport`); some keep their tests
-inline (`fairness`, `slowpath`, `protocol`); and a few have neither
-(`state_writer`, `xsk_ffi`).
+inline (`fairness`, `slowpath`, `protocol`, `prefix`); and a few have
+neither (`state_writer`, `xsk_ffi`).
 
 ## Stages mirroring the BPF pipeline
 
-These mirror the BPF-side stages in `bpf/xdp/` and `bpf/tc/`. The
-worker hot path runs them in the same order.
+These mirror the BPF-side stage modules in `bpf/xdp/` and `bpf/tc/`.
+The table is a simplified map of feature areas — the actual order
+the worker hot path runs them in is interleaved across the
+session-hit and session-miss branches in
+`afxdp/poll_descriptor.rs`. Read that file for the authoritative
+ordering.
 
 | File | Stage | What it does |
 |------|-------|--------------|
@@ -26,7 +30,7 @@ worker hot path runs them in the same order.
 
 | File | What it does |
 |------|--------------|
-| `slowpath.rs` | TUN device injection for firewall-local packets (TCP retransmits, ICMP errors). Built on `io_uring` for batched submit. Rate-limited with `DEFAULT_RATE_LIMIT_PACKETS_PER_SEC = 1M`, `DEFAULT_RATE_LIMIT_BYTES_PER_SEC = 4GB`. |
+| `slowpath.rs` | TUN device injection for firewall-local packets (TCP retransmits, ICMP errors). Built on `io_uring` for batched submit. Rate-limited with `DEFAULT_RATE_LIMIT_PACKETS_PER_SEC = 1_000_000` and `DEFAULT_RATE_LIMIT_BYTES_PER_SEC = 4 * 1024 * 1024 * 1024` (4 GiB). |
 | `flowexport.rs` | NetFlow v9 flow export. Samples every Nth session creation, buffers records, periodically flushes as UDP packets to the configured collectors. Template fields enumerated at the top of the file. |
 | `fairness.rs` | Pure functions for the fairness-regimes contract (`compute_cstruct`, `compute_observed_cov`, `starved_flow_count`). Consumed by the `fairness-eval` binary and by the contract's pinned worked-example tests. See `docs/fairness-regimes.md` and `docs/per-5-tuple/state.md`. |
 
