@@ -38,9 +38,10 @@ master password is set.
   atomically promotes candidate → active and bumps the rollback ring.
 - Rollback slots are 0..49 (FIFO). Oldest is silently discarded when the
   ring is full.
-- The encryption key path is fixed at `/etc/xpf/config-key`. If the file
-  is missing on a node that previously committed encrypted state, the
-  daemon refuses to start — there is no plaintext fallback.
+- The encryption key material lives in `master.key` inside the configstore
+  DB directory (`db.dir`). If that file is missing on a node that previously
+  committed encrypted state, the daemon refuses to start — there is no
+  plaintext fallback.
 - Commit atomicity (#846): `pkg/daemon` wraps `Commit()` together with
   `applyConfig()` under a single semaphore. Bypassing the daemon (e.g.
   using `Store` directly) loses that serialization, so concurrent CLI +

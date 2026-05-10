@@ -2,6 +2,10 @@
 
 ## 2026-05-10
 
+- **Timestamp**: 2026-05-10T15:05:00Z
+  - **Action**: PR #1253 review pass — corrected `pkg/configstore/README.md` encryption-key location wording to match `master.key` under the configstore DB directory (`db.dir`) and removed stale `/etc/xpf/config-key` path guidance.
+  - **File(s)**: `pkg/configstore/README.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-10T04:06:32Z
   - **Action**: PR comment follow-up review for `docs/per-5-tuple/state.md` — replaced a non-existent memory-file reference with in-repo issue/table references (#836/#937/#1215) to keep the fairness section self-contained and verifiable.
   - **File(s)**: `docs/per-5-tuple/state.md`, `_Log.md`
