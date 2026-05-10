@@ -6,16 +6,16 @@ link-down traps. ASN.1 BER encoding is hand-coded, no external library.
 
 ## Entry points
 
-- `Agent` — `agent.go:122`.
-- `IfData` — `agent.go:96`. Per-interface metrics (name, MTU, speed,
+- `Agent` — `agent.go`.
+- `IfData` — `agent.go`. Per-interface metrics (name, MTU, speed,
   admin/oper status, octets, errors, drops).
-- `V3UserDisplay` — `v3.go:732`.
-- `NewAgent()` — `agent.go:136`.
-- `Start()` — `agent.go:180`.
-- `Stop()` — `agent.go:226`.
-- `SetIfDataFn(fn)` — `agent.go:164`. Caller-supplied accessor for live
+- `V3UserDisplay` — `v3.go`.
+- `NewAgent(cfg *config.SNMPConfig) *Agent` — `agent.go`.
+- `Start(ctx context.Context) error` — `agent.go`. Blocks until ctx cancelled.
+- `Stop()` — `agent.go`.
+- `SetIfDataFn(fn)` — `agent.go`. Caller-supplied accessor for live
   interface data.
-- `NotifyLinkUp` / `NotifyLinkDown` — `traps.go:123,128`.
+- `NotifyLinkUp` / `NotifyLinkDown` — `traps.go`.
 
 ## Callers
 

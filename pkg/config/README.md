@@ -10,13 +10,25 @@ nothing internal.
 
 ## Entry points
 
-- `Lexer` — `lexer.go:63`.
-- `Parser` — `parser.go:17`. **Hierarchical** input.
-- `ParseSetCommand(line) (*Node, error)` — for **one** flat-set line.
+- `Lexer` — `lexer.go`.
+- `Parser` — `parser.go`. **Hierarchical** input.
+- `ParseSetCommand(input string) ([]string, error)` — `parser.go`.
+  Parses one flat-set line into the path components. The caller then
+  applies that path with `tree.SetPath()` to build the AST.
 - `ConfigTree` — `ast.go`. Hierarchical node tree built by both shapes.
 - `Config` — `types.go`. The fully typed result every consumer wants.
-- The compiler — `compiler/` (~30 files, ~11K LOC) across six phases:
-  interfaces → zones → routing → NAT → firewall → filters.
+- `CompileConfig(tree) (*Config, error)` — `compiler.go`. AST-to-typed-
+  struct walker. Clones the tree, expands `apply-groups` (with
+  `${node}` fallback for cluster mode), then dispatches over AST
+  nodes via a switch statement to fill the typed `Config`. Eleven
+  `compiler*.go` files in this package, ~7.6K LOC total
+  (`compiler.go` + `compiler_interfaces.go`, `compiler_routing.go`,
+  `compiler_security.go`, `compiler_services.go`, `compiler_system.go`,
+  `compiler_firewall.go`, `compiler_nat.go`, `compiler_ipsec.go`,
+  `compiler_protocols.go`, `compiler_class_of_service.go`).
+  Note: this is the **AST → typed Go struct** stage; the BPF-map
+  compilation (zones, policies, NAT IDs, etc.) happens later in
+  `pkg/dataplane.Manager.Compile`.
 
 ## Callers
 

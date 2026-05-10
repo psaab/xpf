@@ -11,14 +11,19 @@ Go interface is the only thing every caller sees.
 
 ## Entry points
 
-- `DataPlane` — `dataplane.go:104`. Abstract interface.
-- `Manager` — `loader.go:39`. eBPF implementation.
-- `New() *Manager` — `loader.go:66`.
-- `Compile(cfg *config.Config) (*CompileResult, error)` — six-phase
-  lowering to BPF map entries.
-- `CompileResult` — `compiler.go:23`. Zone/policy/NAT/app IDs and the
+- `DataPlane` — `dataplane.go`. Abstract interface.
+- `Manager` — `loader.go`. eBPF implementation.
+- `New() *Manager` — `loader.go`.
+- `Compile(cfg *config.Config) (*CompileResult, error)` — multi-phase
+  lowering to BPF map entries. Phases live in `compiler.go`: zone IDs,
+  screen profile IDs, zones, address book, applications, policies,
+  NAT, static NAT, NAT64 prefixes, NPTv6, screen profiles, default
+  policy, flow timeouts, firewall filters, flow config, port
+  mirroring.
+- `CompileResult` — `compiler.go`. Zone/policy/NAT/app IDs and the
   per-interface networkd configs.
-- Session iteration: `IterateSessions`, `IterateSessionsByZonePair`, etc.
+- Session iteration: `IterateSessions`, `BatchIterateSessions`,
+  `IterateSessionsV6`, `BatchIterateSessionsV6`.
 
 ## Callers
 
@@ -55,7 +60,7 @@ authoritative list; quick recap:
   i40e/ice on the PF have native XDP.
 - `bpf_redirect_map` requires `ndo_xdp_xmit` on the target. Mixing native
   + generic interfaces in a redirect set silently drops.
-- Workaround: per-interface `redirect_capable` flag in `xdp_forward.c`.
+- Workaround: per-interface `redirect_capable` flag in `bpf/xdp/xdp_forward.c`.
   Non-native interfaces fall back to `XDP_PASS` (kernel forwarding).
 - The lab uses PF passthrough (i40e) on the WAN interface; all other
   interfaces are virtio with native XDP. Per-VF passthrough would need

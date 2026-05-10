@@ -22,7 +22,7 @@ opt-in AF_XDP zero-copy backend used on hardware that benefits from it.
 | `src/filter/` | Junos-style firewall filter compiler + engine + policer. |
 | `src/event_stream/` | Push-based binary session-delta stream to the daemon. |
 | `src/bin/` | Helper binaries (`fairness-eval`). |
-| `src/nat.rs`, `nat64.rs`, `nptv6.rs`, `policy.rs`, `screen.rs`, `slowpath.rs`, `fairness.rs`, `flowexport.rs` | Single-file feature modules consumed by the worker hot path. |
+| `src/nat.rs`, `src/nat64.rs`, `src/nptv6.rs`, `src/policy.rs`, `src/screen.rs`, `src/slowpath.rs`, `src/fairness.rs`, `src/flowexport.rs` | Single-file feature modules consumed by the worker hot path. |
 
 ## Architecture
 
@@ -42,10 +42,18 @@ decision → forwarding build → enqueue TX or recycle.
 - **AF_XDP rings** (kernel ↔ userspace): RX/TX/fill/completion.
 - **BPF maps** (shared with the XDP shim): session table mirror,
   conntrack, NAT pools, heartbeat.
-- **Sysctl tuning**: raises `SO_RCVBUF`, enables NAPI busy-poll in
-  `BusyPoll` mode.
+- **Sysctl tuning**: writes `/proc/sys/net/core/rmem_default` and
+  `rmem_max` (see `userspace-dp/src/server/lifecycle.rs`); enables
+  NAPI busy-poll in `BusyPoll` mode.
 
-## Critical invariants (CLAUDE.md authoritative)
+## Critical invariants
+
+These invariants are enforced in code (`const_assert`s and runtime
+checks). `docs/per-5-tuple/state.md` documents the AF_XDP UMEM ownership
+ceiling; the batch and heartbeat constants are pinned in
+`userspace-dp/src/afxdp/mod.rs`. They aren't mirrored into CLAUDE.md —
+that file's authoritative content covers Go, BPF, and Rust-helper
+logging rules, not these specific hot-path constants.
 
 - AF_XDP UMEM ownership is per-queue. A flow that hashes to queue N is
   *physically tied* to worker N — there is no cross-worker descriptor
@@ -53,16 +61,20 @@ decision → forwarding build → enqueue TX or recycle.
   has been plan-killed; see `docs/per-5-tuple/state.md` for the formal
   ceiling.
 - `RX_BATCH_SIZE = 64` is paired with the L1d footprint (≤14 KB
-  working set per batch). A `const_assert` enforces it; don't bump it
-  without re-validating.
+  working set per batch) in `userspace-dp/src/afxdp/mod.rs`. A
+  `const_assert` enforces it; don't bump it without re-validating.
 - `TX_BATCH_SIZE = 64` is paired with the CoS guarantee quantum in
-  `tx/`. Changing requires re-running the `guarantee_phase_*` tests.
+  `userspace-dp/src/afxdp/mod.rs`. Changing requires re-running the
+  `guarantee_phase_*` tests.
 - Generic-XDP fallback consumes UMEM frames permanently on mlx5; the
   XDP shim redirects `XDP_PASS` to a cpumap stage that frees the frame
   immediately.
-- `HEARTBEAT_GRACE_PERIOD_NS = 6 s` — during the bootstrap window the
-  XDP shim falls back to `XDP_PASS` so the kernel bootstraps NAPI.
-  After 6 s the userspace heartbeat keeps the redirect alive.
+- `HEARTBEAT_GRACE_PERIOD_NS = 6 s` is defined in
+  `userspace-dp/src/afxdp/mod.rs` but currently `#[allow(dead_code)]`
+  — reserved for future XDP-shim heartbeat gating logic. Workers
+  write the heartbeat immediately on bind today
+  (`userspace-dp/src/afxdp/worker/mod.rs`), so there is no live
+  6-second grace window.
 
 ## Subdir READMEs
 

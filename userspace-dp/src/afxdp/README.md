@@ -11,9 +11,9 @@ sync.
   receives lifecycle commands from the control socket. `mod.rs` is the
   single entry that owns shared state Arcs; `worker_manager.rs` keeps
   the per-worker handle table.
-- `worker/` — the per-worker poll loop. `mod.rs` runs the dispatch;
-  `poll_stages.rs` (extracted in #946 Phase 1) holds the per-packet
-  pipeline stages.
+- `worker/` — the per-worker poll loop (`mod.rs` runs the dispatch).
+- `poll_stages.rs` — sibling of `worker/`, not inside it. Holds the
+  per-packet pipeline stages extracted in #946 Phase 1.
 - `frame/` — packet parsing (L2 / L3 / L4), checksum helpers, TCP MSS
   clamp. `tests.rs` was relocated out of `mod.rs` in #1046 Phase 1.
 - `umem/` — UMEM allocator, fill ring, completion ring. Frames are
@@ -52,5 +52,5 @@ it explicitly.
 ## Reading order
 
 `coordinator/mod.rs` for ownership and lifecycle, then
-`worker/mod.rs` for the dispatch, then `worker/poll_stages.rs` for the
-per-packet stages, then peer modules as needed.
+`worker/mod.rs` for the dispatch, then the sibling `poll_stages.rs`
+for the per-packet stages, then peer modules as needed.

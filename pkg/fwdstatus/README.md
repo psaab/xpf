@@ -7,11 +7,11 @@ fixed-width table.
 
 ## Entry points
 
-- `ForwardingStatus` — `fwdstatus.go:39`. Flat status struct.
-- `Format(s ForwardingStatus) string` — `fwdstatus.go:74`. Junos-style
+- `ForwardingStatus` — `fwdstatus.go`. Flat status struct.
+- `Format(fs *ForwardingStatus) string` — `fwdstatus.go`. Junos-style
   one-screen render.
-- `State` — `fwdstatus.go:14`. Online / Degraded / Unknown.
-- `CPUMode` — `fwdstatus.go:24`. Workers vs. eBPF.
+- `State` — `fwdstatus.go`. Online / Degraded / Unknown.
+- `CPUMode` — `fwdstatus.go`. Workers vs. eBPF.
 
 ## Callers
 
@@ -19,19 +19,23 @@ fixed-width table.
 
 ## Dependencies
 
-None internal. Pure formatting on top of the standard library — kept
-dependency-free to avoid a circular import via `pkg/cli` or `pkg/grpcapi`.
+`pkg/dataplane` and `pkg/dataplane/userspace` (used by `Sampler` and
+`builder.go` for live BPF map / userspace-helper stats). The package
+deliberately avoids importing `pkg/cli` or `pkg/grpcapi` to prevent
+circular imports — those are the consumers, not dependencies.
 
 ## Gotchas
 
-- The CPU windows are tracked externally by a `Sampler` (a ring buffer
-  the caller maintains). This package consumes already-windowed values
-  and renders them; it doesn't sample.
-- The eBPF mode renders the worker-thread row as `N/A — eBPF path has no
-  worker threads`. Don't add code that fakes a worker entry there; the
-  N/A is informative.
+- CPU samples are collected by `Sampler` (`sampler.go`), which owns
+  its own ring buffer and timer goroutine started via
+  `Sampler.Start(ctx)`. The renderer consumes already-windowed
+  values from the Sampler.
+- The eBPF mode renders the worker-thread row as `N/A — eBPF path
+  has no worker threads`. Don't add code that fakes a worker entry
+  there; the N/A is informative.
 - Daemon CPU is per-core percent (can exceed 100 on a multi-core
-  daemon); worker CPU is `Σ(thread_cpu_ns) / Σ(wall_ns)` and is bounded
-  to `n_workers * 100`.
+  daemon); worker CPU is computed as `Σ(thread_cpu_ns) / Σ(wall_ns)`,
+  i.e. a per-worker average effectively bounded around 100%, not a
+  multi-core sum.
 - Windows shorter than the daemon uptime render as `-` to avoid lying
   about a 5 m average that hasn't elapsed yet.

@@ -6,9 +6,9 @@ rate-limiting, and fires delete callbacks (used by HA delete-sync).
 
 ## Entry points
 
-- `GC` — `gc.go:34`.
-- `NewGC(dp dataplane.DataPlane, interval time.Duration)` — `gc.go:86`.
-- `GCStats` — `gc.go:17`. Last-sweep metrics surfaced to `show system
+- `GC` — `gc.go`.
+- `NewGC(dp dataplane.DataPlane, interval time.Duration) *GC` — `gc.go`.
+- `GCStats` — `gc.go`. Last-sweep metrics surfaced to `show system
   buffers`.
 - `OnDeleteV4`, `OnDeleteV6` — per-deleted-session callbacks; HA wires
   these to the session-sync delete path.

@@ -7,14 +7,14 @@ three frontends.
 
 ## Entry points
 
-- `Node` — `tree.go:23`. Tree node: description, static children,
+- `Node` — `tree.go`. Tree node: description, static children,
   `DynamicFn`/`ContextDynamicFn` for config-aware completions.
-- `Candidate` — `tree.go:49`. `(name, desc)` pair surfaced during tab
+- `Candidate` — `tree.go`. `(name, desc)` pair surfaced during tab
   completion.
-- `OperationalTree` — `tree.go:56`. Canonical root for `show`, `clear`,
+- `OperationalTree` — `tree.go`. Canonical root for `show`, `clear`,
   `request`, `monitor`, `ping`, `traceroute`, etc.
 - `ConfigTopLevel` — root for the `set`/`delete` configuration grammar.
-- `KeysFromTree(tree)` — `tree.go:927`. Used by `pkg/cli` and `pkg/grpcapi`
+- `KeysFromTree(tree)` — `tree.go`. Used by `pkg/cli` and `pkg/grpcapi`
   for Junos-style prefix matching.
 - `WriteHelp`, `LookupDesc`, `PrintTreeHelp`, `CompleteFromTree` — the
   helper API the three frontends consume.

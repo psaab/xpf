@@ -6,12 +6,12 @@ to the interface name.
 
 ## Entry points
 
-- `Manager` — `relay.go:49`.
-- `NewManager()` — `relay.go:55`.
-- `Apply(cfg)` — `relay.go:63`. Starts/stops per-interface relay
+- `Manager` — `relay.go`.
+- `NewManager()` — `relay.go`.
+- `Apply(ctx context.Context, cfg *config.DHCPRelayConfig)` — `relay.go`. Starts/stops per-interface relay
   goroutines.
-- `Stats()` — `relay.go:131`. Per-interface counters.
-- `RelayStats` — `relay.go:33`.
+- `Stats()` — `relay.go`. Per-interface counters.
+- `RelayStats` — `relay.go`.
 
 ## Callers
 
@@ -27,5 +27,7 @@ to the interface name.
   IPv4 address — that's what fills `giaddr`.
 - Option 82 sub-option 1 (`circuit-id`) is set to the interface name; on
   the reply path it's stripped before forwarding to the client.
-- Server addresses are resolved once at `Apply()` time; if a server's DNS
-  changes you need a config reload.
+- Server addresses must be **literal IPs**. `Apply()` calls
+  `net.ParseIP` and rejects hostnames; there is no DNS resolution
+  path. To target a hostname, the operator must resolve it externally
+  and put the IP in the config.

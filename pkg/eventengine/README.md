@@ -6,13 +6,13 @@ temporal `within` windows) and triggers commit-and-apply actions.
 
 ## Entry points
 
-- `Engine` — `engine.go:25`.
-- `New(store, commitFn)` — `engine.go:45`.
-- `Apply(cfg)` — `engine.go:55`. Loads policies, resets temporal
+- `Engine` — `engine.go`.
+- `New(store, commitFn)` — `engine.go`.
+- `Apply(policies []*config.EventPolicy)` — `engine.go`. Loads policies, resets temporal
   state.
-- `HandleEvent(evt)` — `engine.go:64`. Called by the RPM event
+- `HandleEvent(evt)` — `engine.go`. Called by the RPM event
   callback.
-- `CommitFn` — `engine.go:22`. The atomic commit-and-apply hook.
+- `CommitFn` — `engine.go`. The atomic commit-and-apply hook.
 
 ## Callers
 
@@ -24,7 +24,7 @@ temporal `within` windows) and triggers commit-and-apply actions.
 
 ## Gotchas
 
-- 30 s policy cooldown (`engine.go:39`). The same policy will not
+- 30 s policy cooldown (`engine.go`). The same policy will not
   trigger more than once in any 30 s window.
 - Temporal `within` clauses keep a sliding window of timestamps per
   (policy, event) pair. Old timestamps are pruned on every evaluation so

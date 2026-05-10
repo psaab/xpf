@@ -6,15 +6,18 @@ burst, goodbye RAs, and re-burst recovery after RETH MAC link-cycle.
 
 ## Entry points
 
-- `Manager` — `ra.go:17`.
-- `New()` — `ra.go:23`.
-- `Apply(cfg)` — `ra.go:31`. Starts/stops per-interface senders.
-- `Withdraw(ifname)` — `ra.go:100`. Stop sending on one interface.
-- `ResendBurst(ifname)` — `ra.go:117`. Re-send the startup burst (used
-  after a link cycle).
-- `WithdrawOnce(ifname)` — `ra.go:150`. Send a single goodbye RA
-  (lifetime=0).
-- `Status()` — `ra.go:210`. Per-interface SenderInfo.
+- `Manager` — `ra.go`.
+- `New()` — `ra.go`.
+- `Apply(configs []*config.RAInterfaceConfig) error` — `ra.go`.
+  Starts/stops per-interface senders.
+- `Withdraw() error` — `ra.go`. Stops every sender.
+- `ResendBurst()` — `ra.go`. Re-sends the startup burst (used after a
+  link cycle) on every active sender.
+- `WithdrawInterfaces(names []string)` — `ra.go`. Stops senders by
+  interface name.
+- `WithdrawOnce(configs []*config.RAInterfaceConfig)` — `ra.go`.
+  Sends a single goodbye RA (lifetime=0) on each listed interface.
+- `Status()` — `ra.go`. Per-interface SenderInfo.
 
 ## Callers
 
