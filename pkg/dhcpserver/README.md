@@ -6,11 +6,11 @@ Manages Kea DHCPv4/v6 server config and lifecycle. Generates
 
 ## Entry points
 
-- `Manager` — `dhcpserver.go:23`.
-- `New()` — `dhcpserver.go:29`.
-- `Apply(cfg)` — `dhcpserver.go:34`. Regenerates config and restarts.
-- `Clear()` — `dhcpserver.go:76`. Stops Kea and removes config files.
-- `Lease` — `dhcpserver.go:95`. Surfaced to the CLI for `show dhcp
+- `Manager` — `dhcpserver.go`.
+- `New()` — `dhcpserver.go`.
+- `Apply(cfg)` — `dhcpserver.go`. Regenerates config and restarts.
+- `Clear()` — `dhcpserver.go`. Stops Kea and removes config files.
+- `Lease` — `dhcpserver.go`. Surfaced to the CLI for `show dhcp
   server leases`.
 
 ## Callers

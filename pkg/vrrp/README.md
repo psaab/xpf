@@ -9,17 +9,17 @@ This is the package that drives chassis-cluster failover.
 
 ## Entry points
 
-- `Manager` — `manager.go:25`. Owns every `Instance` goroutine, the event
+- `Manager` — `manager.go`. Owns every `Instance` goroutine, the event
   channel, and sync-hold state.
-- `Instance` — `vrrp.go:13`. Per-RG config: interface, group ID, VIPs,
+- `Instance` — `vrrp.go`. Per-RG config: interface, group ID, VIPs,
   priority, preempt, timers.
-- `VRRPEvent` — `instance.go:44`. INIT / BACKUP / MASTER transitions.
-- `NewManager()` — `manager.go:47`.
-- `Start()` — `manager.go:55`.
-- `Stop()` — `manager.go:62`.
-- `UpdateInstances(cfg)` — `manager.go:169`.
-- `ReleaseSyncHold(rg)` — `manager.go:120`.
-- `ResignRG(rg)` — `manager.go:256`.
+- `VRRPEvent` — `instance.go`. INIT / BACKUP / MASTER transitions.
+- `NewManager()` — `manager.go`.
+- `Start()` — `manager.go`.
+- `Stop()` — `manager.go`.
+- `UpdateInstances(cfg)` — `manager.go`.
+- `ReleaseSyncHold(rg)` — `manager.go`.
+- `ResignRG(rg)` — `manager.go`.
 
 ## Callers
 

@@ -6,10 +6,10 @@ restarts so the same client identifier returns to the same lease.
 
 ## Entry points
 
-- `Manager` — `dhcp.go:85`.
-- `New(stateDir)` — `dhcp.go:103`.
-- `Lease` — `dhcp.go:36`. Result of one DHCP negotiation.
-- `DelegatedPrefix` — `dhcp.go:76`. From DHCPv6 PD.
+- `Manager` — `dhcp.go`.
+- `New(stateDir)` — `dhcp.go`.
+- `Lease` — `dhcp.go`. Result of one DHCP negotiation.
+- `DelegatedPrefix` — `dhcp.go`. From DHCPv6 PD.
 - `Start()`, `Renew()`, `StopAll()`, `DelegatedPrefixes()`.
 
 ## Callers

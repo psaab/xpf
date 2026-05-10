@@ -6,12 +6,12 @@ and 1-in-N sampling.
 
 ## Entry points
 
-- `Exporter` — `exporter.go:106`.
-- `NewExporter(cfg)` — `exporter.go:109`.
-- `Run(ctx)` — `exporter.go:111`. Main export loop.
-- `ExportConfig` — `exporter.go:23`. Resolved per-collector config.
-- `BuildExportConfig(cfg)` — `exporter.go:42`.
-- `SamplingDir` — `exporter.go:17`. Direction enum.
+- `Exporter` — `exporter.go`.
+- `NewExporter(cfg)` — `exporter.go`.
+- `Run(ctx)` — `exporter.go`. Main export loop.
+- `ExportConfig` — `exporter.go`. Resolved per-collector config.
+- `BuildExportConfig(cfg)` — `exporter.go`.
+- `SamplingDir` — `exporter.go`. Direction enum.
 - `SessionCloseData` — wire shape consumed from `pkg/conntrack` delete
   callbacks.
 

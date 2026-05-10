@@ -6,9 +6,9 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
 
 ## Entry points
 
-- `Server` — `server.go:74`
-- `NewServer(cfg Config)` — `server.go:93`
-- `Config` — `server.go:44`. All dependencies (configstore, dataplane, frr,
+- `Server` — `server.go`
+- `NewServer(cfg Config)` — `server.go`
+- `Config` — `server.go`. All dependencies (configstore, dataplane, frr,
   vrrp, etc.) injected here; the package has no global state.
 
 ## Surface

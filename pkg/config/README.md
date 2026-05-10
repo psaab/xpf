@@ -10,8 +10,8 @@ nothing internal.
 
 ## Entry points
 
-- `Lexer` — `lexer.go:63`.
-- `Parser` — `parser.go:17`. **Hierarchical** input.
+- `Lexer` — `lexer.go`.
+- `Parser` — `parser.go`. **Hierarchical** input.
 - `ParseSetCommand(line) (*Node, error)` — for **one** flat-set line.
 - `ConfigTree` — `ast.go`. Hierarchical node tree built by both shapes.
 - `Config` — `types.go`. The fully typed result every consumer wants.

@@ -6,12 +6,12 @@ and resolves session display names from the dataplane's assigned `app_id`.
 
 ## Entry points
 
-- `CatalogNames(cfg, includeAll) []string` — `runtime.go:42`. Returns the
+- `CatalogNames(cfg, includeAll) []string` — `runtime.go`. Returns the
   list of application names the BPF compiler must lower into the policy
   `app_id` table. `includeAll=false` returns only apps referenced by
   policies; `true` returns every defined app.
 - `ResolveSessionName(appNames, cfg, proto, dstPort, appID) string` —
-  `runtime.go:95`. Three-tier lookup: dataplane `app_id` (authoritative
+  `runtime.go`. Three-tier lookup: dataplane `app_id` (authoritative
   from BPF) → exact `(proto, dstPort)` match → narrow built-in fallback
   (`junos-http`, `junos-ssh`, …). Used for session display, NetFlow
   records, and syslog session-close events.

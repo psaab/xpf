@@ -6,15 +6,15 @@ to VRFs via `SO_BINDTODEVICE` when configured.
 
 ## Entry points
 
-- `Manager` — `rpm.go:76`.
-- `ProbeResult` — `rpm.go:48`. Per-test metrics (RTT, jitter,
+- `Manager` — `rpm.go`.
+- `ProbeResult` — `rpm.go`. Per-test metrics (RTT, jitter,
   success/fail counters).
-- `Event` — `rpm.go:66`. `test_failed`, `probe_failed`, `test_completed`.
-- `New()` — `rpm.go:101`.
-- `Apply(cfg)` — `rpm.go:108`.
-- `StopAll()` — `rpm.go:141`.
-- `Results()` — `rpm.go:153`.
-- `SetEventCallback(fn)` — `rpm.go:85`.
+- `Event` — `rpm.go`. `test_failed`, `probe_failed`, `test_completed`.
+- `New()` — `rpm.go`.
+- `Apply(cfg)` — `rpm.go`.
+- `StopAll()` — `rpm.go`.
+- `Results()` — `rpm.go`.
+- `SetEventCallback(fn)` — `rpm.go`.
 
 ## Callers
 

@@ -8,9 +8,9 @@ tab completion. The wire schema is `proto/xpf/v1`.
 
 ## Entry points
 
-- `Server` — `server.go:69`.
-- `Config` — `server.go:38`. Dependency injection point.
-- `NewServer(cfg)` — `server.go:83`.
+- `Server` — `server.go`.
+- `Config` — `server.go`. Dependency injection point.
+- `NewServer(cfg)` — `server.go`.
 - `Run(ctx)` — starts the listener.
 - Tab completion: `Complete` RPC, backed by `pkg/cmdtree`.
 

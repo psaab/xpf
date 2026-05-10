@@ -8,14 +8,14 @@ during specific windows.
 
 ## Entry points
 
-- `Scheduler` — `scheduler.go:14`.
-- `New(cfgs, updateFn)` — `scheduler.go:24`. The callback fires only on
+- `Scheduler` — `scheduler.go`.
+- `New(cfgs, updateFn)` — `scheduler.go`. The callback fires only on
   state change, not every tick.
-- `Run(ctx)` — `scheduler.go:37`.
-- `IsActive(name)` — `scheduler.go:54`.
-- `ActiveState()` — `scheduler.go:61`. Snapshot of every scheduler's
+- `Run(ctx)` — `scheduler.go`.
+- `IsActive(name)` — `scheduler.go`.
+- `ActiveState()` — `scheduler.go`. Snapshot of every scheduler's
   active flag.
-- `Update(cfgs)` — `scheduler.go:72`.
+- `Update(cfgs)` — `scheduler.go`.
 
 ## Callers
 

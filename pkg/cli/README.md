@@ -7,8 +7,8 @@ both the daemon-local CLI (xpfd in TTY mode) and the remote CLI
 
 ## Entry points
 
-- `CLI` — `cli.go:47`. The REPL engine.
-- `New(...)` — `cli.go:108`. Takes ~10 injected managers (configstore,
+- `CLI` — `cli.go`. The REPL engine.
+- `New(...)` — `cli.go`. Takes ~10 injected managers (configstore,
   dataplane, cluster, frr, dhcp, …). The package has no globals.
 - `Build()` — compiles the readline command tree from `pkg/cmdtree`. Add a
   new command in `pkg/cmdtree/tree.go` and it shows up here, in the remote

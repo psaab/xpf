@@ -8,14 +8,14 @@ reports.
 
 ## Entry points
 
-- `SyslogSlogHandler` — `slog_handler.go:13`. Slog handler that
+- `SyslogSlogHandler` — `slog_handler.go`. Slog handler that
   fans events out to configured syslog clients.
-- `EventBuffer` — `eventbuf.go:38`. Bounded ring buffer (256 entries
+- `EventBuffer` — `eventbuf.go`. Bounded ring buffer (256 entries
   default).
-- `Subscription` — `eventbuf.go:51`. A consumer of the event ring.
-- `LocalLogWriter` — `locallog.go:14`. File-based writer with
+- `Subscription` — `eventbuf.go`. A consumer of the event ring.
+- `LocalLogWriter` — `locallog.go`. File-based writer with
   facility/severity filters.
-- `SessionAggregator` — `aggregator.go:14`. Top-N per-IP rollups.
+- `SessionAggregator` — `aggregator.go`. Top-N per-IP rollups.
 
 ## Callers
 

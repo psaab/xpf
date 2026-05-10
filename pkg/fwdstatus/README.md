@@ -7,11 +7,11 @@ fixed-width table.
 
 ## Entry points
 
-- `ForwardingStatus` — `fwdstatus.go:39`. Flat status struct.
-- `Format(s ForwardingStatus) string` — `fwdstatus.go:74`. Junos-style
+- `ForwardingStatus` — `fwdstatus.go`. Flat status struct.
+- `Format(s ForwardingStatus) string` — `fwdstatus.go`. Junos-style
   one-screen render.
-- `State` — `fwdstatus.go:14`. Online / Degraded / Unknown.
-- `CPUMode` — `fwdstatus.go:24`. Workers vs. eBPF.
+- `State` — `fwdstatus.go`. Online / Degraded / Unknown.
+- `CPUMode` — `fwdstatus.go`. Workers vs. eBPF.
 
 ## Callers
 

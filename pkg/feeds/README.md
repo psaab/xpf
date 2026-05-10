@@ -5,9 +5,9 @@ feed servers and triggers config recompile when the resolved set changes.
 
 ## Entry points
 
-- `Manager` — `feeds.go:19`.
-- `New(updateFn)` — `feeds.go:36`.
-- `Apply(cfg)` — `feeds.go:62`. Starts/stops per-feed refresh goroutines.
+- `Manager` — `feeds.go`.
+- `New(updateFn)` — `feeds.go`.
+- `Apply(cfg)` — `feeds.go`. Starts/stops per-feed refresh goroutines.
 - `StopAll()`, `FeedInfo` — surfaced to `show security dynamic-address`.
 
 ## Callers

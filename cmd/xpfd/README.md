@@ -40,5 +40,5 @@ machine.
 
 ## Read order
 
-Start at `pkg/daemon/daemon.go:296` (`New`) for the assembly. From
+Start at `pkg/daemon/daemon.go` (`New`) for the assembly. From
 there, every imported `pkg/*` has its own README.

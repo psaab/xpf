@@ -10,16 +10,16 @@ of.
 
 ## Entry points
 
-- `Manager` — `routing.go:43`.
-- `VRFSpec` — `routing.go:71`.
-- `KeepaliveState` — `routing.go:24`. Per-tunnel probe status.
-- `TunnelStatus` — `routing.go:959`.
-- `RouteEntry` — `routing.go:1032`.
-- `InterfaceMonitorStatus` — `routing.go:36`.
-- `New()` — `routing.go:89`.
-- `ApplyTunnels(cfg)` — `routing.go:494`.
-- `ReconcileVRFs(cfg)` — `routing.go:190`.
-- `ApplyXfrmi(cfg)` — `routing.go:863`.
+- `Manager` — `routing.go`.
+- `VRFSpec` — `routing.go`.
+- `KeepaliveState` — `routing.go`. Per-tunnel probe status.
+- `TunnelStatus` — `routing.go`.
+- `RouteEntry` — `routing.go`.
+- `InterfaceMonitorStatus` — `routing.go`.
+- `New()` — `routing.go`.
+- `ApplyTunnels(cfg)` — `routing.go`.
+- `ReconcileVRFs(cfg)` — `routing.go`.
+- `ApplyXfrmi(cfg)` — `routing.go`.
 
 ## Callers
 

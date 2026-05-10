@@ -6,13 +6,13 @@ entries by TTL.
 
 ## Entry points
 
-- `Manager` — `lldp.go:84`.
-- `Neighbor` — `lldp.go:55`. Chassis ID, port ID, TTL, system name and
+- `Manager` — `lldp.go`.
+- `Neighbor` — `lldp.go`. Chassis ID, port ID, TTL, system name and
   description.
-- `New()` — `lldp.go:92`.
-- `Apply(cfg)` — `lldp.go:99`.
-- `Stop()` — `lldp.go:159`.
-- `Neighbors()` — `lldp.go:171`. Snapshot consumed by `show lldp
+- `New()` — `lldp.go`.
+- `Apply(cfg)` — `lldp.go`.
+- `Stop()` — `lldp.go`.
+- `Neighbors()` — `lldp.go`. Snapshot consumed by `show lldp
   neighbors`.
 
 ## Callers

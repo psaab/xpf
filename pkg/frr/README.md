@@ -11,11 +11,11 @@ FRR, which then owns the kernel route table.
 
 ## Entry points
 
-- `Manager` — `frr.go:29`.
-- `New()` — `frr.go:34`. Defaults to `/etc/frr/frr.conf`.
+- `Manager` — `frr.go`.
+- `New()` — `frr.go`. Defaults to `/etc/frr/frr.conf`.
 - `ApplyFull(cfg)` — apply full config (idempotent diff against on-disk).
-- `FullConfig` — `frr.go:60`.
-- `InstanceConfig` — `frr.go:41`. One per-VRF.
+- `FullConfig` — `frr.go`.
+- `InstanceConfig` — `frr.go`. One per-VRF.
 - State queries (vtysh): `GetRIPRoutes` (frr.go:141), `GetISISAdjacency`,
   `GetBGPNeighbors`, …
 

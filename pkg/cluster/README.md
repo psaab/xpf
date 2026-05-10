@@ -7,13 +7,14 @@ sync.
 
 ## Entry points
 
-- `NodeState` — `cluster.go:20`. State enum constants.
-- `RedundancyGroupState` — `cluster.go:47`. Per-RG state with
+- `NodeState` — `cluster.go`. State enum constants.
+- `RedundancyGroupState` — `cluster.go`. Per-RG state with
   readiness/transferReady tracking.
-- `Manager` — `cluster.go:~100`. Election logic, weight calculation, event
+- `Manager` — `cluster.go`. Election logic, weight calculation, event
   history.
-- `ClusterEvent` — `events.go:80`. State-change notifications consumed by
-  VRRP, the dataplane, and the syslog/SNMP trap senders.
+- `ClusterEvent` — `cluster.go`. State-change notifications consumed
+  by VRRP, the dataplane, and the syslog/SNMP trap senders. (Type
+  defined in `cluster.go`; the consumer lives in `reth.go`.)
 
 ## Callers
 

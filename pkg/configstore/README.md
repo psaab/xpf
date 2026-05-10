@@ -9,7 +9,7 @@ master password is set.
 
 - `Store` — high-level API: `Candidate`, `Active`, `Commit`,
   `CommitConfirmed`, `Rollback`, `History`.
-- `DB` — `db.go:15`. Low-level atomic file I/O.
+- `DB` — `db.go`. Low-level atomic file I/O.
 - `History` — `history.go`. Bounded ring of recent commits.
 - `Journal` — `journal.go`. Append-only JSONL audit trail.
 - `Crypto` — `crypto.go`. AES-256-GCM key derivation from

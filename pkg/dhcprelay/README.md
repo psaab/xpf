@@ -6,12 +6,12 @@ to the interface name.
 
 ## Entry points
 
-- `Manager` — `relay.go:49`.
-- `NewManager()` — `relay.go:55`.
-- `Apply(cfg)` — `relay.go:63`. Starts/stops per-interface relay
+- `Manager` — `relay.go`.
+- `NewManager()` — `relay.go`.
+- `Apply(cfg)` — `relay.go`. Starts/stops per-interface relay
   goroutines.
-- `Stats()` — `relay.go:131`. Per-interface counters.
-- `RelayStats` — `relay.go:33`.
+- `Stats()` — `relay.go`. Per-interface counters.
+- `RelayStats` — `relay.go`.
 
 ## Callers
 
