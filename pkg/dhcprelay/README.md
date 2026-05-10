@@ -6,12 +6,12 @@ to the interface name.
 
 ## Entry points
 
-- `Manager` — `dhcprelay.go:49`.
-- `NewManager()` — `dhcprelay.go:55`.
-- `Apply(cfg)` — `dhcprelay.go:63`. Starts/stops per-interface relay
+- `Manager` — `relay.go:49`.
+- `NewManager()` — `relay.go:55`.
+- `Apply(cfg)` — `relay.go:63`. Starts/stops per-interface relay
   goroutines.
-- `Stats()` — `dhcprelay.go:131`. Per-interface counters.
-- `RelayStats` — `dhcprelay.go:33`.
+- `Stats()` — `relay.go:131`. Per-interface counters.
+- `RelayStats` — `relay.go:33`.
 
 ## Callers
 

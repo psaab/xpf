@@ -316,3 +316,9 @@
   - **Action**: pyshell M2 — `reduce_events` docstring moved to first statement per PEP 257
     - **File(s)**: `test/incus/step2-sched-switch-reduce.py`
   - **Result**: `python3 -m py_compile` OK on all 4 modified `.py` files; reducer tests 13/13 green (was 10, +3 new); classifier tests 11/11 green (was 8, +3 new); V8 non-regression preserved (`step1-histogram-classify.py` unchanged)
+
+## 2026-05-10 — docs README reference fix
+
+- **Timestamp**: 2026-05-10T03:24:56Z
+  - **Action**: Correct stale filename references in module READMEs (`eventengine.go`/`dhcprelay.go` -> `engine.go`/`relay.go`) so entry-point file:line links resolve.
+  - **File(s)**: `pkg/eventengine/README.md`, `pkg/dhcprelay/README.md`
