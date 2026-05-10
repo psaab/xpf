@@ -10,9 +10,12 @@ both the daemon-local CLI (xpfd in TTY mode) and the remote CLI
 - `CLI` — `cli.go`. The REPL engine.
 - `New(...)` — `cli.go`. Takes ~10 injected managers (configstore,
   dataplane, cluster, frr, dhcp, …). The package has no globals.
-- `Build()` — compiles the readline command tree from `pkg/cmdtree`. Add a
-  new command in `pkg/cmdtree/tree.go` and it shows up here, in the remote
-  CLI, and in gRPC tab completion automatically.
+- The readline command tree is compiled from `pkg/cmdtree` at REPL
+  start; add a new command in `pkg/cmdtree/tree.go` and it shows up
+  here, in the remote CLI, and in gRPC tab completion automatically.
+- Per-injection setters: `SetForwardingSampler`, `SetRPMResultsFn`,
+  `SetFeedsFn`, `SetLLDPNeighborsFn`, `SetVRRPManager`,
+  `SetApplyConfigFn`, `SetCommitFns`, …. All on `*CLI`.
 
 ## Callers
 

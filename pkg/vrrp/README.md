@@ -17,7 +17,7 @@ This is the package that drives chassis-cluster failover.
 - `NewManager()` — `manager.go`.
 - `Start()` — `manager.go`.
 - `Stop()` — `manager.go`.
-- `UpdateInstances(cfg)` — `manager.go`.
+- `UpdateInstances(desired []*Instance) error` — `manager.go`.
 - `ReleaseSyncHold()` — `manager.go`. No-arg; releases hold for all
   instances.
 - `ResignRG(rgID int)` — `manager.go`. Forces this node out of master

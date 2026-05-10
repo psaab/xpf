@@ -12,9 +12,9 @@ packets, bytes, delta, rate.
 - `UserspaceSnapshot` — `monitor.go`. Per-binding XSK stats.
 - `CounterReader` interface — `monitor.go`. Abstracts BPF map access
   so tests can inject a fake.
-- `ReadSnapshot()` — `monitor.go`.
-- `RenderSingleInterface()` — `monitor.go`.
-- `RenderTrafficSummary()` — `monitor.go`.
+- `ReadSnapshot(counterReader CounterReader, statusReader StatusReader, kernelName string) (Snapshot, error)` — `monitor.go`.
+- `RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string, snap, prev, baseline *Snapshot, startTime time.Time)` — `monitor.go`.
+- `RenderTrafficSummary(w io.Writer, hostname string, names []string, kernelNames map[string]string, snaps, prevSnaps map[string]*Snapshot, mode SummaryMode, startTime time.Time)` — `monitor.go`.
 
 ## Callers
 

@@ -7,7 +7,9 @@ restarts so the same client identifier returns to the same lease.
 ## Entry points
 
 - `Manager` — `dhcp.go`.
-- `New(stateDir)` — `dhcp.go`.
+- `New(stateDir string, onAddressChange func()) (*Manager, error)` —
+  `dhcp.go`. The `onAddressChange` callback fires (debounced 2 s)
+  when any client's lease changes.
 - `Lease` — `dhcp.go`. Result of one DHCP negotiation.
 - `DelegatedPrefix` — `dhcp.go`. From DHCPv6 PD.
 - `Start()`, `Renew()`, `StopAll()`, `DelegatedPrefixes()`.

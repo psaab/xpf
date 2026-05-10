@@ -12,8 +12,11 @@ master password is set.
 - `DB` — `db.go`. Low-level atomic file I/O.
 - `History` — `history.go`. Bounded ring of recent commits.
 - `Journal` — `journal.go`. Append-only JSONL audit trail.
-- `Crypto` — `crypto.go`. AES-256-GCM key derivation from
-  `/etc/xpf/config-key`.
+- `crypto.go` — AES-256-GCM at-rest encryption helpers
+  (`maybeEncryptTreeJSON`, `maybeDecryptTreeJSON`,
+  `deriveEncryptionKey`). No public type; the encryption hooks are
+  methods on `*DB`. Key material is derived from a master password
+  via PBKDF2.
 
 ## Callers
 

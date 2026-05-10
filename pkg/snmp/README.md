@@ -10,7 +10,7 @@ link-down traps. ASN.1 BER encoding is hand-coded, no external library.
 - `IfData` — `agent.go`. Per-interface metrics (name, MTU, speed,
   admin/oper status, octets, errors, drops).
 - `V3UserDisplay` — `v3.go`.
-- `NewAgent()` — `agent.go`.
+- `NewAgent(cfg *config.SNMPConfig) *Agent` — `agent.go`.
 - `Start()` — `agent.go`.
 - `Stop()` — `agent.go`.
 - `SetIfDataFn(fn)` — `agent.go`. Caller-supplied accessor for live
