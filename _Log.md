@@ -328,3 +328,12 @@
 - **Timestamp**: 2026-05-10T03:24:56Z
   - **Action**: Correct stale filename references in module READMEs (`eventengine.go`/`dhcprelay.go` -> `engine.go`/`relay.go`) so entry-point file:line links resolve.
   - **File(s)**: `pkg/eventengine/README.md`, `pkg/dhcprelay/README.md`
+
+## 2026-05-10 — docs README wiring/source corrections
+
+- **Timestamp**: 2026-05-10T05:18:20Z
+  - **Action**: Correct `SessionCloseData` attribution to `logging.EventReader` session-close records (not conntrack GC delete callbacks).
+  - **File(s)**: `pkg/flowexport/README.md`
+- **Timestamp**: 2026-05-10T05:18:20Z
+  - **Action**: Correct configstore encryption note to match implementation (`master.key` + HKDF with configured PRF).
+  - **File(s)**: `pkg/configstore/README.md`

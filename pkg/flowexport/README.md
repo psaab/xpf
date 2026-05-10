@@ -14,8 +14,8 @@ callback. No per-packet sampling path.
 - `ExportConfig` — `exporter.go`. Resolved per-collector config.
 - `BuildExportConfig(cfg)` — `exporter.go`.
 - `SamplingDir` — `exporter.go`. Direction enum.
-- `SessionCloseData` — wire shape consumed from `pkg/conntrack` delete
-  callbacks.
+- `SessionCloseData` — parsed session-close payload assembled from
+  `logging.EventReader` records before export.
 
 ## Callers
 

@@ -15,8 +15,8 @@ master password is set.
 - `crypto.go` — AES-256-GCM at-rest encryption helpers
   (`maybeEncryptTreeJSON`, `maybeDecryptTreeJSON`,
   `deriveEncryptionKey`). No public type; the encryption hooks are
-  methods on `*DB`. Key material is derived from a master password
-  via PBKDF2.
+  methods on `*DB`. A random 32-byte `master.key` is generated/stored
+  on disk, then HKDF (with the configured PRF) derives the AES-GCM key.
 
 ## Callers
 
