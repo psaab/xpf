@@ -1,0 +1,52 @@
+# userspace-dp/src/ feature modules
+
+The single-file feature modules sit at the crate root and are
+consumed by the per-worker hot path in `afxdp/`. They're intentionally
+flat: each owns one feature's lookup tables and decision logic, with
+no internal sub-modules. Tests live next door as `<feature>_tests.rs`.
+
+## Stages mirroring the BPF pipeline
+
+These mirror the BPF-side stages in `bpf/xdp/` and `bpf/tc/`. The
+worker hot path runs them in the same order.
+
+| File | Stage | What it does |
+|------|-------|--------------|
+| `screen.rs` | screen | Pre-session attack-protection checks (land, TCP SYN+FIN, no-flag, FIN-without-ACK, ICMP frag, plus rate-limits). Mirrors `bpf/xdp/xdp_screen.c`. |
+| `policy.rs` | policy | Zone-pair → permit/deny + forwarding-class + DSCP-rewrite + filter chaining. `ZonePairKey` is a `u32` (`from_id << 16 \| to_id`); `JUNOS_GLOBAL_ZONE_ID = u16::MAX` is the sentinel for the global zone. |
+| `nat.rs` | NAT44 | Source / destination / static NAT decisions. `NatDecision` carries `rewrite_src` and `rewrite_dst` Options the TX path consumes. |
+| `nat64.rs` | NAT64 | RFC 6052 IPv4↔IPv6 translation. `Nat64Prefix` is the 96-bit + IPv4-pool config; `Nat64ReverseInfo` carries the original IPv6 tuple for reverse translation. |
+| `nptv6.rs` | NPTv6 | RFC 6296 stateless IPv6-to-IPv6 prefix translation. Each rule maps an internal /48 or /64 to an external prefix; a precomputed adjustment value keeps the L4 checksum neutral so no checksum update is needed after rewrite. |
+
+## Cross-cutting helpers
+
+| File | What it does |
+|------|--------------|
+| `slowpath.rs` | TUN device injection for firewall-local packets (TCP retransmits, ICMP errors). Built on `io_uring` for batched submit. Rate-limited with `DEFAULT_RATE_LIMIT_PACKETS_PER_SEC = 1M`, `DEFAULT_RATE_LIMIT_BYTES_PER_SEC = 4GB`. |
+| `flowexport.rs` | NetFlow v9 flow export. Samples every Nth session creation, buffers records, periodically flushes as UDP packets to the configured collectors. Template fields enumerated at the top of the file. |
+| `fairness.rs` | Pure functions for the fairness-regimes contract (`compute_cstruct`, `compute_observed_cov`, `count_starved_flows`). Consumed by the `fairness-eval` binary and by the contract's pinned worked-example tests. See `docs/fairness-regimes.md` and `docs/per-5-tuple/state.md`. |
+
+## Lookup-structure helpers
+
+| File | What it does |
+|------|--------------|
+| `prefix.rs` | `PrefixV4` / `PrefixV6` — the canonical IP-prefix value type. |
+| `prefix_set.rs` | `PrefixSetV4` / `PrefixSetV6` — adaptive 3-variant enum (#923): `MatchAny`, linear scan, and trie variants. The compiler picks based on the input prefix list. |
+
+## Wire / transport / state
+
+| File | What it does |
+|------|--------------|
+| `protocol.rs` | Control request / response and snapshot schema types shared between the control socket server (`server/`) and the AF_XDP coordinator. The JSON tags ARE the wire contract — changing them without updating the Go side (`pkg/dataplane/userspace/protocol.go`) breaks the helper. |
+| `state_writer.rs` | `io_uring`-backed atomic writer for the daemon's state snapshot file. |
+| `xsk_ffi.rs` | Drop-in replacement for `xdpilone` using libxdp's XSK helpers via a C bridge. Provides the same type names (`Umem`, `UmemConfig`, `UmemChunk`, `IfInfo`, `Socket`, `DeviceQueue`, `RingRx`, `RingTx`, `ReadRx`, `WriteTx`, `WriteFill`, `ReadComplete`, `XdpDesc`) so the rest of the crate compiles unchanged. |
+| `test_zone_ids.rs` | Test-only zone-id constants used across `_tests.rs` files. |
+| `main.rs` / `main_tests.rs` | Crate `main()` — argv handling and dispatch into `server::lifecycle::run()`. Tests live next door. |
+
+## Where these are called from
+
+The worker poll loop in `afxdp/worker/lifecycle.rs::poll_binding` is
+the single caller for the per-packet stages (screen → policy → nat
+→ nat64 → nptv6 → forwarding). `flowexport` and `fairness` are
+auxiliary surfaces consumed by the daemon control plane and the
+fairness-eval binary.
