@@ -4,9 +4,12 @@ Shared type definitions for the AF_XDP dataplane. Every long-lived
 struct that crosses module boundaries lives here so siblings can
 import them without circular module dependencies.
 
-The module is thin by design — definitions only, no algorithms.
-Hot-path logic lives in `cos/`, `worker/`, `tx/`, etc., and reaches
-into these types through `pub(in crate::afxdp)` re-exports.
+Most files are definitions only, but `shared_cos_lease.rs` is an
+exception: it owns the hot-path lease acquisition / release / epoch
+rotation algorithm (tag-checked CAS, two-CAS-with-rollback) for the
+shared CoS lease. That algorithm lives with the type because it's
+the contract for safe coordination across workers; siblings reach
+into it through the `pub(in crate::afxdp)` re-exports below.
 
 ## Files
 
@@ -26,6 +29,11 @@ into these types through `pub(in crate::afxdp)` re-exports.
   cross-worker writes — readers compute against the floor; only the
   V_min owner advances it. See `docs/per-5-tuple/state.md` for why
   this matters for fairness mechanism design.
-- The `pub(in crate::afxdp) use *::*;` glob in `mod.rs` is
-  deliberate — these types are infrastructure shared across the
-  whole dataplane.
+- The `mod.rs` re-exports are explicit per-sub-module globs:
+  `pub(in crate::afxdp) use cos::*;`,
+  `pub(in crate::afxdp) use forwarding::*;`,
+  `pub(in crate::afxdp) use tx::*;`,
+  `pub(in crate::afxdp) use runtime::*;`. Plus a narrower
+  `pub(super) use shared_cos_lease::{...}` and a wider
+  `pub(crate) use forwarding::{ForwardingDisposition, ForwardingResolution}`
+  for the two forwarding types that have callers outside `afxdp/`.

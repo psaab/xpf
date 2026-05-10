@@ -12,7 +12,8 @@ inspect or rewrite a packet sitting in a UMEM frame.
 | `byte_writes.rs` | In-place IP and L4 port rewrites (`write_ipv4_dst`, `write_ipv4_src`, `write_ipv6_dst`, `write_ipv6_src`, `write_l4_dst_port`, `write_l4_src_port`). |
 | `checksum.rs` | IPv4 header + L4 checksum incremental adjust + recompute. Owns the `checksum16_*` family. |
 | `inspect.rs` | Read-only parsers / matchers used by screen, policy, conntrack hot paths. |
-| `tcp.rs` | TCP-specific helpers (flags, MSS clamp, segmentation source). |
+| `tcp.rs` | TCP-specific inspection + mutation kernels (#989) — flags, MSS clamp, header munging. |
+| `tcp_segmentation.rs` | TCP segmentation for forwarded over-MSS frames. `#[cold]` — slow path; line-rate flows don't enter it. (Re-exported from `mod.rs`.) |
 | `tests.rs` | Co-located unit tests; relocated out of `mod.rs` in #1046 Phase 1. |
 
 ## Where it sits
@@ -35,4 +36,5 @@ inspect or rewrite a packet sitting in a UMEM frame.
 - IPv4 checksum is incrementally adjusted (`adjust_*`) on each
   per-field rewrite. The `recompute_*` helpers exist for the rare
   case where the previous checksum is unknown (e.g. NAT64 from
-  scratch in generic XDP — see CLAUDE.md `CHECKSUM_PARTIAL`).
+  scratch in generic XDP — the BPF-side handling of this case is
+  documented in `bpf/headers/` and the `xdp_nat64.c` source).

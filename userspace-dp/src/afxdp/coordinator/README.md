@@ -17,7 +17,7 @@ the workers share.
 | `mod.rs` | `Coordinator` struct + worker-spawn + reconcile entry. |
 | `bpf_maps.rs` | `BpfMaps` — pinned BPF map FDs (XSK map, heartbeat, session, conntrack v4/v6) opened once and shared with every worker. |
 | `cos_state.rs` | `SharedCoSState` — Arcs that workers consult to find owner-by-queue, live owner, root/queue leases, vtime floors. |
-| `ha_state.rs` | HA snapshot, shared fabrics, RG epoch counters; readable by all workers. |
+| `ha_state.rs` | `HaState`: HA snapshot, shared fabrics, forwarding state. (RG epoch counters live on `Coordinator` itself in `mod.rs`, not here.) |
 | `inject.rs` | `request inject-packet` RPC handler — synthesizes a packet against the live state, reports disposition. |
 | `neighbor_manager.rs` | `NeighborManager` — sharded ARP/NDP cache + netlink monitor for incremental updates. |
 | `session_manager.rs` | Cross-thread session-table state shared between coordinator, HA worker, and packet workers via `Arc<Mutex<...>>`. Holds the synced + nat + forward-wire tables together because they're written and queried as a unit. |

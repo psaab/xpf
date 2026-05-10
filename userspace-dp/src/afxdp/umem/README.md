@@ -2,7 +2,8 @@
 
 UMEM (User-space Memory) management — the per-binding shared-memory
 region where AF_XDP zero-copy frames live. Owns the `mmap` region,
-wraps `xdpilone::Umem`, and tracks frame budgets per binding.
+wraps the crate-local `Umem` type from `xsk_ffi` (a libxdp-backed
+drop-in for xdpilone), and tracks frame budgets per binding.
 
 ## Files
 

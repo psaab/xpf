@@ -1,4 +1,4 @@
-# userspace-dp/src/ feature modules
+# userspace-dp/src/ — feature modules
 
 The single-file feature modules sit at the crate root and are
 consumed by the per-worker hot path in `afxdp/`. They're intentionally
@@ -24,7 +24,7 @@ worker hot path runs them in the same order.
 |------|--------------|
 | `slowpath.rs` | TUN device injection for firewall-local packets (TCP retransmits, ICMP errors). Built on `io_uring` for batched submit. Rate-limited with `DEFAULT_RATE_LIMIT_PACKETS_PER_SEC = 1M`, `DEFAULT_RATE_LIMIT_BYTES_PER_SEC = 4GB`. |
 | `flowexport.rs` | NetFlow v9 flow export. Samples every Nth session creation, buffers records, periodically flushes as UDP packets to the configured collectors. Template fields enumerated at the top of the file. |
-| `fairness.rs` | Pure functions for the fairness-regimes contract (`compute_cstruct`, `compute_observed_cov`, `count_starved_flows`). Consumed by the `fairness-eval` binary and by the contract's pinned worked-example tests. See `docs/fairness-regimes.md` and `docs/per-5-tuple/state.md`. |
+| `fairness.rs` | Pure functions for the fairness-regimes contract (`compute_cstruct`, `compute_observed_cov`, `starved_flow_count`). Consumed by the `fairness-eval` binary and by the contract's pinned worked-example tests. See `docs/fairness-regimes.md` and `docs/per-5-tuple/state.md`. |
 
 ## Lookup-structure helpers
 

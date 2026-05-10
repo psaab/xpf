@@ -35,8 +35,8 @@ each cluster has a clear ownership boundary.
 - Reads/writes to all the AF_XDP sub-modules (`umem/`, `tx/`,
   `frame/`, `cos/`, `forwarding/`, `session_glue/`).
 - After #959, fields are accessed via the sub-struct prefix
-  (`binding.cos.cos_X`, `binding.scratch.scratch_X`, etc.) — see the
-  memory note `959_done` for the field-access map.
+  (`binding.cos.cos_X`, `binding.scratch.scratch_X`, etc.). The
+  per-phase top-of-file comments name which field cluster moved.
 
 ## Notable invariants
 
@@ -49,5 +49,10 @@ each cluster has a clear ownership boundary.
   layout as load-bearing for the cache-line story.
 - `worker_loop` polls every binding once per tick in
   `RX_BATCH_SIZE = 64`-sized batches up to
-  `MAX_RX_BATCHES_PER_POLL = 4` per tick; both constants pinned by
-  `const_assert` in the parent module.
+  `MAX_RX_BATCHES_PER_POLL = 4` per tick. `RX_BATCH_SIZE` and
+  `TX_BATCH_SIZE` carry compile-time `const_assert`s in
+  `afxdp/mod.rs`; `MAX_RX_BATCHES_PER_POLL` is a plain `const`
+  there, with a runtime `assert!(MAX_RX_BATCHES_PER_POLL >= 1)` in
+  `worker/lifecycle.rs`. There is no compile-time pin on the value
+  4 — change it deliberately and re-run the
+  `guarantee_phase_*_visit_quantum` tests.
