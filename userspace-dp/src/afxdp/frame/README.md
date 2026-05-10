@@ -13,7 +13,7 @@ inspect or rewrite a packet sitting in a UMEM frame.
 | `checksum.rs` | IPv4 header + L4 checksum incremental adjust + recompute. Owns the `checksum16_*` family. |
 | `inspect.rs` | Read-only parsers / matchers used by screen, policy, conntrack hot paths. |
 | `tcp.rs` | TCP-specific inspection + mutation kernels (#989) — flags, MSS clamp, header munging. |
-| `tcp_segmentation.rs` | TCP segmentation for forwarded over-MSS frames. `#[cold]` — slow path; line-rate flows don't enter it. (Re-exported from `mod.rs`.) |
+| `tcp_segmentation.rs` | TCP segmentation kernels for forwarded over-MSS frames; re-exported from `mod.rs`. The `#[cold]` annotation is on the TX-side wrapper in `tx/tcp_segmentation.rs` that calls into these kernels, not on the kernels themselves. |
 | `tests.rs` | Co-located unit tests; relocated out of `mod.rs` in #1046 Phase 1. |
 
 ## Where it sits

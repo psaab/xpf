@@ -3,7 +3,11 @@
 The single-file feature modules sit at the crate root and are
 consumed by the per-worker hot path in `afxdp/`. They're intentionally
 flat: each owns one feature's lookup tables and decision logic, with
-no internal sub-modules. Tests live next door as `<feature>_tests.rs`.
+no internal sub-modules. Test layout is mixed: most feature modules
+have a sibling `<feature>_tests.rs` (`nat`, `nat64`, `nptv6`,
+`policy`, `screen`, `prefix_set`, `flowexport`); some keep their tests
+inline (`fairness`, `slowpath`, `protocol`); and a few have neither
+(`state_writer`, `xsk_ffi`).
 
 ## Stages mirroring the BPF pipeline
 
@@ -45,8 +49,14 @@ worker hot path runs them in the same order.
 
 ## Where these are called from
 
-The worker poll loop in `afxdp/worker/lifecycle.rs::poll_binding` is
-the single caller for the per-packet stages (screen → policy → nat
-→ nat64 → nptv6 → forwarding). `flowexport` and `fairness` are
-auxiliary surfaces consumed by the daemon control plane and the
-fairness-eval binary.
+The worker poll loop drives the per-packet stages from
+`afxdp/worker/lifecycle.rs::poll_binding` and the per-descriptor
+dispatch in `afxdp/poll_descriptor.rs`. The stages above approximate
+the "session-hit" fast path; the real session-miss order interleaves
+DNAT, NPTv6 inbound, NAT64, FIB / forwarding resolution, policy, and
+SNAT decisions across multiple branches in `poll_descriptor.rs`. Read
+that file for the authoritative order — the tabular pipeline above is
+intentionally simplified.
+
+`flowexport` and `fairness` are auxiliary surfaces consumed by the
+daemon control plane and the `fairness-eval` binary.

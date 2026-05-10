@@ -17,7 +17,7 @@ into it through the `pub(in crate::afxdp)` re-exports below.
 |------|---------|
 | `mod.rs` | Re-export hub for the per-area type files below. |
 | `cos.rs` | CoS shaper / queue / flow-fair / runtime types (`CoSInterfaceRuntime`, `CoSQueueRuntime`, `CoSPendingTxItem`, `FlowFairState`, `WorkerCoSQueueFastPath`, etc.). Issue 68.1 split. |
-| `forwarding.rs` | Routing / forwarding types (`ForwardingResolution`, `ForwardingDisposition`, `PacketDisposition`, `ValidationState`, etc.). Issue 68.2 split. Three forwarding types had wider-than-`pub(super)` visibility in the original `mod.rs` and stay re-exported at their original surface. |
+| `forwarding.rs` | Routing / forwarding types (`ForwardingResolution`, `ForwardingDisposition`, `NeighborEntry`, etc.). Issue 68.2 split. Three forwarding types had wider-than-`pub(super)` visibility in the original `mod.rs` and stay re-exported at their original surface. (`PacketDisposition` is in `mod.rs`; `ValidationState` is in `runtime.rs`.) |
 | `runtime.rs` | Per-worker runtime atomics and shared status types. |
 | `shared_cos_lease.rs` | Shared per-CoS lease + V_min coordination types (#1035 P4): `SharedCoSQueueLease`, `SharedCoSRootLease`, `SharedCoSQueueVtimeFloor`, `PaddedVtimeSlot`, `NOT_PARTICIPATING` sentinel. |
 | `tx.rs` | TX request / prepared-request shapes (`TxRequest`, `PreparedTxRequest`, etc.). |
@@ -34,6 +34,8 @@ into it through the `pub(in crate::afxdp)` re-exports below.
   `pub(in crate::afxdp) use forwarding::*;`,
   `pub(in crate::afxdp) use tx::*;`,
   `pub(in crate::afxdp) use runtime::*;`. Plus a narrower
-  `pub(super) use shared_cos_lease::{...}` and a wider
-  `pub(crate) use forwarding::{ForwardingDisposition, ForwardingResolution}`
-  for the two forwarding types that have callers outside `afxdp/`.
+  `pub(super) use shared_cos_lease::{...}`, a `pub(crate) use
+  forwarding::{ForwardingDisposition, ForwardingResolution}` for
+  callers in `crate::*` outside `afxdp/`, and the widest one,
+  `pub use forwarding::NeighborEntry`, used by `server/handlers.rs`
+  to construct `afxdp::NeighborEntry` from outside the module.

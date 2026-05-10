@@ -14,7 +14,7 @@ each cluster has a clear ownership boundary.
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | `worker_loop`, `BindingWorker` struct, `pin_current_thread`. |
+| `mod.rs` | `worker_loop` + `BindingWorker` struct. (Calls `pin_current_thread`, which is defined in `afxdp/neighbor.rs`.) |
 | `lifecycle.rs` | `poll_binding` — the per-poll RX/TX orchestrator. The "central function" extracted in Issue 73 step 2. |
 | `cos.rs` | Per-worker CoS runtime helpers + shared-exact threshold (the empirical sustained per-worker exact throughput ceiling — see comment block in the file for the evidence basis). |
 | `cos_state.rs` | `WorkerCos` (#959 Phase 3) — per-binding CoS-engine state. |
@@ -51,8 +51,9 @@ each cluster has a clear ownership boundary.
   `RX_BATCH_SIZE = 64`-sized batches up to
   `MAX_RX_BATCHES_PER_POLL = 4` per tick. `RX_BATCH_SIZE` and
   `TX_BATCH_SIZE` carry compile-time `const_assert`s in
-  `afxdp/mod.rs`; `MAX_RX_BATCHES_PER_POLL` is a plain `const`
-  there, with a runtime `assert!(MAX_RX_BATCHES_PER_POLL >= 1)` in
-  `worker/lifecycle.rs`. There is no compile-time pin on the value
-  4 — change it deliberately and re-run the
+  `afxdp/mod.rs`; `MAX_RX_BATCHES_PER_POLL = 4` is a plain `const`
+  there with a `const _: () = assert!(MAX_RX_BATCHES_PER_POLL >= 1);`
+  compile-time guard in `worker/lifecycle.rs`. The guard pins the
+  lower bound only — there is no compile-time pin on the value 4
+  itself; change it deliberately and re-run the
   `guarantee_phase_*_visit_quantum` tests.
