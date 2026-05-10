@@ -48,10 +48,11 @@ decision → forwarding build → enqueue TX or recycle.
 ## Critical invariants
 
 These invariants are enforced in code (`const_assert`s and runtime
-checks) and discussed in `docs/per-5-tuple/state.md`. They aren't
-mirrored into CLAUDE.md — that file's authoritative content covers
-Go, BPF, and Rust-helper logging rules, but not these specific
-hot-path constants.
+checks). `docs/per-5-tuple/state.md` documents the AF_XDP UMEM ownership
+ceiling; the batch and heartbeat constants are pinned in
+`userspace-dp/src/afxdp/mod.rs`. They aren't mirrored into CLAUDE.md —
+that file's authoritative content covers Go, BPF, and Rust-helper
+logging rules, not these specific hot-path constants.
 
 - AF_XDP UMEM ownership is per-queue. A flow that hashes to queue N is
   *physically tied* to worker N — there is no cross-worker descriptor
@@ -59,16 +60,18 @@ hot-path constants.
   has been plan-killed; see `docs/per-5-tuple/state.md` for the formal
   ceiling.
 - `RX_BATCH_SIZE = 64` is paired with the L1d footprint (≤14 KB
-  working set per batch). A `const_assert` enforces it; don't bump it
-  without re-validating.
+  working set per batch) in `userspace-dp/src/afxdp/mod.rs`. A
+  `const_assert` enforces it; don't bump it without re-validating.
 - `TX_BATCH_SIZE = 64` is paired with the CoS guarantee quantum in
-  `tx/`. Changing requires re-running the `guarantee_phase_*` tests.
+  `userspace-dp/src/afxdp/mod.rs`. Changing requires re-running the
+  `guarantee_phase_*` tests.
 - Generic-XDP fallback consumes UMEM frames permanently on mlx5; the
   XDP shim redirects `XDP_PASS` to a cpumap stage that frees the frame
   immediately.
-- `HEARTBEAT_GRACE_PERIOD_NS = 6 s` — during the bootstrap window the
-  XDP shim falls back to `XDP_PASS` so the kernel bootstraps NAPI.
-  After 6 s the userspace heartbeat keeps the redirect alive.
+- `HEARTBEAT_GRACE_PERIOD_NS = 6 s` in `userspace-dp/src/afxdp/mod.rs` —
+  during the bootstrap window the XDP shim falls back to `XDP_PASS` so
+  the kernel bootstraps NAPI. After 6 s the userspace heartbeat keeps
+  the redirect alive.
 
 ## Subdir READMEs
 
