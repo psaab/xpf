@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type RSSExpectationKind string
@@ -55,7 +56,7 @@ func ParseRSSExpectation(raw string) (RSSExpectation, error) {
 	}
 
 	compact := strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+		if unicode.IsSpace(r) {
 			return -1
 		}
 		return r
@@ -128,6 +129,9 @@ func EvaluateRSSExpectation(
 	case RSSExpectationAny:
 		return RSSExpectationResult{Pass: true, Reason: "any: no RSS/workload expectation configured"}
 	}
+	if !knownRSSExpectationKind(expectation.Kind) {
+		return RSSExpectationResult{Pass: false, Reason: fmt.Sprintf("unknown RSS expectation kind %q", expectation.Kind)}
+	}
 	if total == 0 {
 		return RSSExpectationResult{Pass: false, Reason: fmt.Sprintf("%s: no active flows observed", expectation.Kind)}
 	}
@@ -160,6 +164,19 @@ func EvaluateRSSExpectation(
 		return RSSExpectationResult{Pass: false, Reason: fmt.Sprintf("balanced: active_workers=%d expected %d, min=%d, max=%d", activeWorkers, expectedActive, minActive, maxActive)}
 	default:
 		return RSSExpectationResult{Pass: false, Reason: fmt.Sprintf("unknown RSS expectation kind %q", expectation.Kind)}
+	}
+}
+
+func knownRSSExpectationKind(kind RSSExpectationKind) bool {
+	switch kind {
+	case RSSExpectationAny,
+		RSSExpectationBalanced,
+		RSSExpectationAtLeastActiveWorkers,
+		RSSExpectationMaxWorkerFlowShare,
+		RSSExpectationCstructMax:
+		return true
+	default:
+		return false
 	}
 }
 
