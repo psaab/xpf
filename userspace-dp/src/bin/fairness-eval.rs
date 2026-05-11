@@ -83,9 +83,38 @@ struct BindingFlowsRow {
     count: u32,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct CosFlowsRow {
+    timestamp: u64,
+    ifindex: i32,
+    queue_id: u32,
+    worker_id: u32,
+    count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RssExpectation {
+    Any,
+    Balanced,
+    AtLeastActiveWorkers(u32),
+    MaxWorkerFlowShare(f64),
+    CstructMax(f64),
+}
+
 #[derive(Debug, Serialize)]
 struct Verdict {
+    cstruct_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cos_ifindex: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cos_queue_id: Option<u32>,
     distribution_a_i: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binding_distribution_a_i: Option<Vec<u32>>,
+    rss_expectation: String,
+    rss_expectation_pass: bool,
+    rss_expectation_reason: String,
+    max_worker_flow_share: f64,
     n_active: u32,
     n_total_workers: u32,
     cstruct: f64,
@@ -208,6 +237,235 @@ fn aggregate_per_worker(
     })
 }
 
+fn aggregate_cos_per_worker(
+    cos_flows: &[CosFlowsRow],
+    cos_ifindex: i32,
+    cos_queue_id: u32,
+    n_total_workers: u32,
+    warmup_secs: u64,
+    final_burst_secs: u64,
+) -> Result<Vec<u32>, String> {
+    let ss_start_ts = cos_flows
+        .iter()
+        .map(|r| r.timestamp)
+        .min()
+        .unwrap_or(0)
+        .saturating_add(warmup_secs);
+    let ss_end_ts = cos_flows
+        .iter()
+        .map(|r| r.timestamp)
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(final_burst_secs);
+
+    let mut per_ts_worker: BTreeMap<(u64, u32), u32> = BTreeMap::new();
+    for row in cos_flows {
+        if row.timestamp < ss_start_ts || row.timestamp > ss_end_ts {
+            continue;
+        }
+        if row.ifindex != cos_ifindex || row.queue_id != cos_queue_id {
+            continue;
+        }
+        if row.worker_id >= n_total_workers {
+            return Err(format!(
+                "worker_id={} in CoS TSV exceeds --n-workers={n_total_workers}; \
+                 re-run with the correct --n-workers value",
+                row.worker_id
+            ));
+        }
+        *per_ts_worker
+            .entry((row.timestamp, row.worker_id))
+            .or_insert(0) += row.count;
+    }
+
+    let mut per_worker_samples: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for ((_ts, w), c) in per_ts_worker {
+        per_worker_samples.entry(w).or_default().push(c);
+    }
+    Ok((0..n_total_workers)
+        .map(|w| {
+            per_worker_samples
+                .get(&w)
+                .map(|samples| {
+                    let mut s = samples.clone();
+                    s.sort_unstable();
+                    s[s.len() / 2]
+                })
+                .unwrap_or(0)
+        })
+        .collect())
+}
+
+fn parse_rss_expectation(raw: &str) -> Result<RssExpectation, String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("any") {
+        return Ok(RssExpectation::Any);
+    }
+    if raw.eq_ignore_ascii_case("balanced") {
+        return Ok(RssExpectation::Balanced);
+    }
+
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let normalized = compact
+        .replace("<=", ":")
+        .replace(">=", ":")
+        .replace('=', ":");
+    let mut parts = normalized.splitn(2, ':');
+    let key = parts.next().unwrap_or_default();
+    let value = parts.next().unwrap_or_default();
+    match key {
+        "at-least-active-workers" | "active-workers" => {
+            let n = value.parse::<u32>().map_err(|_| {
+                format!("invalid --rss-expectation active worker count: {raw}")
+            })?;
+            Ok(RssExpectation::AtLeastActiveWorkers(n))
+        }
+        "max-worker-flow-share" => {
+            let share = parse_fraction_or_percent(value).map_err(|e| {
+                format!("invalid --rss-expectation max-worker-flow-share: {e}")
+            })?;
+            Ok(RssExpectation::MaxWorkerFlowShare(share))
+        }
+        "cstruct-max" | "cstruct" => {
+            let max = parse_nonnegative_number_or_percent(value).map_err(|e| {
+                format!("invalid --rss-expectation cstruct threshold: {e}")
+            })?;
+            Ok(RssExpectation::CstructMax(max))
+        }
+        _ => Err(format!(
+            "unknown --rss-expectation {raw}; expected any, balanced, \
+             at-least-active-workers:N, max-worker-flow-share:X, or cstruct-max:X"
+        )),
+    }
+}
+
+fn parse_number_or_percent(raw: &str) -> Result<f64, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("missing value".to_string());
+    }
+    let value = if let Some(percent) = raw.strip_suffix('%') {
+        percent
+            .parse::<f64>()
+            .map_err(|_| format!("{raw} is not a number"))?
+            / 100.0
+    } else {
+        raw.parse::<f64>()
+            .map_err(|_| format!("{raw} is not a number"))?
+    };
+    if !value.is_finite() {
+        return Err(format!("{raw} is not a finite number"));
+    }
+    Ok(value)
+}
+
+fn parse_fraction_or_percent(raw: &str) -> Result<f64, String> {
+    let value = parse_number_or_percent(raw)?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err(format!("{raw} must be between 0 and 1 or 0% and 100%"));
+    }
+    Ok(value)
+}
+
+fn parse_nonnegative_number_or_percent(raw: &str) -> Result<f64, String> {
+    let value = parse_number_or_percent(raw)?;
+    if value < 0.0 {
+        return Err(format!("{raw} must be non-negative"));
+    }
+    Ok(value)
+}
+
+fn max_worker_flow_share(distribution_a_i: &[u32]) -> f64 {
+    let total: u32 = distribution_a_i.iter().sum();
+    if total == 0 {
+        return 0.0;
+    }
+    let max = distribution_a_i.iter().copied().max().unwrap_or(0);
+    max as f64 / total as f64
+}
+
+fn evaluate_rss_expectation(
+    expectation: &RssExpectation,
+    distribution_a_i: &[u32],
+    cstruct: f64,
+    n_total_workers: u32,
+) -> (bool, String) {
+    let total: u32 = distribution_a_i.iter().sum();
+    let active_workers = distribution_a_i.iter().filter(|&&a| a > 0).count() as u32;
+    let max_share = max_worker_flow_share(distribution_a_i);
+    match expectation {
+        RssExpectation::Any => (true, "any: no RSS/workload expectation configured".to_string()),
+        RssExpectation::AtLeastActiveWorkers(min) => {
+            if active_workers >= *min {
+                (
+                    true,
+                    format!("active_workers={active_workers} >= expected {min}"),
+                )
+            } else {
+                (
+                    false,
+                    format!("active_workers={active_workers} < expected {min}"),
+                )
+            }
+        }
+        RssExpectation::MaxWorkerFlowShare(max_allowed) => {
+            if max_share <= *max_allowed {
+                (
+                    true,
+                    format!("max_worker_flow_share={max_share:.4} <= expected {max_allowed:.4}"),
+                )
+            } else {
+                (
+                    false,
+                    format!("max_worker_flow_share={max_share:.4} > expected {max_allowed:.4}"),
+                )
+            }
+        }
+        RssExpectation::CstructMax(max_allowed) => {
+            if cstruct <= *max_allowed {
+                (
+                    true,
+                    format!("cstruct={cstruct:.4} <= expected {max_allowed:.4}"),
+                )
+            } else {
+                (
+                    false,
+                    format!("cstruct={cstruct:.4} > expected {max_allowed:.4}"),
+                )
+            }
+        }
+        RssExpectation::Balanced => {
+            if total == 0 {
+                return (false, "balanced: no active flows observed".to_string());
+            }
+            let expected_active = n_total_workers.min(total);
+            let active_counts: Vec<u32> = distribution_a_i
+                .iter()
+                .copied()
+                .filter(|&a| a > 0)
+                .collect();
+            let min = active_counts.iter().copied().min().unwrap_or(0);
+            let max = active_counts.iter().copied().max().unwrap_or(0);
+            let pass = active_workers == expected_active && max.saturating_sub(min) <= 1;
+            if pass {
+                (
+                    true,
+                    format!(
+                        "balanced: active_workers={active_workers}, min={min}, max={max}"
+                    ),
+                )
+            } else {
+                (
+                    false,
+                    format!(
+                        "balanced: active_workers={active_workers} expected {expected_active}, min={min}, max={max}"
+                    ),
+                )
+            }
+        }
+    }
+}
+
 /// Codex round-4 finding (#1): direction multiplier resolves to 1
 /// when the iface filter is in effect (single-direction flow_cache)
 /// and 2 otherwise (legacy bidirectional input). Factored out so
@@ -229,6 +487,7 @@ fn main() -> ExitCode {
     };
 
     let binding_flows: Vec<BindingFlowsRow> = parse_binding_flows_tsv(&args.binding_flows);
+    let cos_flows = args.cos_flows.as_ref().map(parse_cos_flows_tsv);
 
     // Determine the steady-state window: skip first warmup_secs and
     // last final_burst_secs of iperf3 intervals.
@@ -330,11 +589,64 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let iface_filter_active = agg.iface_filter_active;
-    let distribution_a_i = agg.distribution_a_i;
+    let binding_distribution_a_i = agg.distribution_a_i;
+    let mut iface_filter_active = agg.iface_filter_active;
+    let mut distribution_a_i = binding_distribution_a_i.clone();
+    let mut cstruct_source = "binding";
+    let mut selected_cos_ifindex = None;
+    let mut selected_cos_queue_id = None;
+
+    if let Some(cos_flows) = &cos_flows {
+        let cos_ifindex = match args.cos_ifindex {
+            Some(v) => v,
+            None => {
+                eprintln!("fairness-eval: --cos-flows requires --cos-ifindex");
+                return ExitCode::from(2);
+            }
+        };
+        let cos_queue_id = match args.cos_queue_id {
+            Some(v) => v,
+            None => {
+                eprintln!("fairness-eval: --cos-flows requires --cos-queue-id");
+                return ExitCode::from(2);
+            }
+        };
+        distribution_a_i = match aggregate_cos_per_worker(
+            cos_flows,
+            cos_ifindex,
+            cos_queue_id,
+            n_total_workers,
+            args.warmup_secs,
+            args.final_burst_secs,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("fairness-eval: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        iface_filter_active = true;
+        cstruct_source = "cos_queue";
+        selected_cos_ifindex = Some(cos_ifindex);
+        selected_cos_queue_id = Some(cos_queue_id);
+    }
 
     let cstruct = compute_cstruct(&distribution_a_i);
     let n_active: u32 = distribution_a_i.iter().filter(|&&a| a > 0).count() as u32;
+    let rss_expectation = match parse_rss_expectation(&args.rss_expectation) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("fairness-eval: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let max_worker_flow_share = max_worker_flow_share(&distribution_a_i);
+    let (rss_expectation_pass, rss_expectation_reason) = evaluate_rss_expectation(
+        &rss_expectation,
+        &distribution_a_i,
+        cstruct,
+        n_total_workers,
+    );
 
     let gap = observed_cov - cstruct;
 
@@ -371,6 +683,7 @@ fn main() -> ExitCode {
     // bidirectional 2× assumption still holds. We pick the multiplier
     // based on whether iface filtering is in effect.
     let a_i_sum: u32 = distribution_a_i.iter().sum();
+    let binding_a_i_sum: u32 = binding_distribution_a_i.iter().sum();
     // Stream count: prefer start.connected[].len() (concrete stream
     // sockets observed at iperf3 setup time) over test_start.num_streams
     // (a self-reported integer). The seeded map sees every connected
@@ -409,6 +722,16 @@ fn main() -> ExitCode {
             "Harness guard: sum(a_i)={a_i_sum} vs iperf non-starved streams={n_non_starved} differ by more than tolerance={tolerance}"
         ));
     }
+    if !rss_expectation_pass {
+        failure_reasons.push(format!(
+            "RSS expectation: {rss_expectation_reason}"
+        ));
+    }
+    if cstruct_source == "cos_queue" && binding_a_i_sum + tolerance < a_i_sum {
+        failure_reasons.push(format!(
+            "Harness guard: selected CoS sum(a_i)={a_i_sum} exceeds binding sum(a_i)={binding_a_i_sum} by more than tolerance={tolerance}; check --iface/--cos-ifindex/--cos-queue-id"
+        ));
+    }
 
     let verdict = if failure_reasons.is_empty() {
         "PASS"
@@ -417,7 +740,16 @@ fn main() -> ExitCode {
     };
 
     let v = Verdict {
+        cstruct_source,
+        cos_ifindex: selected_cos_ifindex,
+        cos_queue_id: selected_cos_queue_id,
         distribution_a_i,
+        binding_distribution_a_i: (cstruct_source == "cos_queue")
+            .then_some(binding_distribution_a_i),
+        rss_expectation: args.rss_expectation,
+        rss_expectation_pass,
+        rss_expectation_reason,
+        max_worker_flow_share,
         n_active,
         n_total_workers,
         cstruct,
@@ -447,6 +779,9 @@ fn main() -> ExitCode {
 struct Args {
     iperf_json: PathBuf,
     binding_flows: PathBuf,
+    cos_flows: Option<PathBuf>,
+    cos_ifindex: Option<i32>,
+    cos_queue_id: Option<u32>,
     /// Filter binding-flows rows to this interface name. Empty string =
     /// no filter (sum across all interfaces — only correct if your
     /// topology has just one). Defaults blank; harness script sets it.
@@ -455,16 +790,21 @@ struct Args {
     final_burst_secs: u64,
     n_workers: u32,
     shaper_rate_bps: u64,
+    rss_expectation: String,
 }
 
 fn parse_args() -> Args {
     let mut iperf_json: Option<PathBuf> = None;
     let mut binding_flows: Option<PathBuf> = None;
+    let mut cos_flows: Option<PathBuf> = None;
+    let mut cos_ifindex: Option<i32> = None;
+    let mut cos_queue_id: Option<u32> = None;
     let mut iface: String = String::new();
     let mut warmup_secs: u64 = 5;
     let mut final_burst_secs: u64 = 1;
     let mut n_workers: u32 = 6;
     let mut shaper_rate_bps: u64 = 0;
+    let mut rss_expectation: String = "any".to_string();
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -473,6 +813,18 @@ fn parse_args() -> Args {
             }
             "--binding-flows" => {
                 binding_flows = args.next().map(PathBuf::from);
+            }
+            "--cos-flows" => {
+                cos_flows = Some(PathBuf::from(parse_required_string_arg(
+                    "--cos-flows",
+                    args.next(),
+                )));
+            }
+            "--cos-ifindex" => {
+                cos_ifindex = Some(parse_required_numeric_arg("--cos-ifindex", args.next()));
+            }
+            "--cos-queue-id" => {
+                cos_queue_id = Some(parse_required_numeric_arg("--cos-queue-id", args.next()));
             }
             "--iface" => {
                 iface = args.next().unwrap_or_default();
@@ -489,9 +841,12 @@ fn parse_args() -> Args {
             "--shaper-rate-bps" => {
                 shaper_rate_bps = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
             }
+            "--rss-expectation" => {
+                rss_expectation = parse_required_string_arg("--rss-expectation", args.next());
+            }
             "-h" | "--help" => {
                 eprintln!(
-                    "Usage: fairness-eval --iperf-json PATH --binding-flows PATH \\\n  [--iface NAME] [--warmup-secs N] [--final-burst-secs N] \\\n  [--n-workers N] [--shaper-rate-bps N]\n\n--iface NAME: filter binding-flows rows to this interface (recommended; without it, sums across all interfaces)."
+                    "Usage: fairness-eval --iperf-json PATH --binding-flows PATH \\\n  [--cos-flows PATH --cos-ifindex N --cos-queue-id N] \\\n  [--iface NAME] [--warmup-secs N] [--final-burst-secs N] \\\n  [--n-workers N] [--shaper-rate-bps N] [--rss-expectation EXPR]\n\n--iface NAME: filter binding-flows rows to this interface (recommended for legacy per-binding mode).\n--cos-flows: class-specific CoS active-flow TSV; when present, Cstruct uses the selected CoS queue.\n--rss-expectation: any, balanced, at-least-active-workers:N, max-worker-flow-share:X, or cstruct-max:X."
                 );
                 std::process::exit(0);
             }
@@ -518,12 +873,57 @@ fn parse_args() -> Args {
     Args {
         iperf_json,
         binding_flows,
+        cos_flows,
+        cos_ifindex,
+        cos_queue_id,
         iface,
         warmup_secs,
         final_burst_secs,
         n_workers,
         shaper_rate_bps,
+        rss_expectation,
     }
+}
+
+fn parse_required_numeric_arg<T>(flag: &str, raw: Option<String>) -> T
+where
+    T: std::str::FromStr,
+{
+    match parse_required_numeric_value(flag, raw) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("fairness-eval: {err}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_required_string_arg(flag: &str, raw: Option<String>) -> String {
+    match parse_required_string_value(flag, raw) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("fairness-eval: {err}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_required_string_value(flag: &str, raw: Option<String>) -> Result<String, String> {
+    let value = raw.ok_or_else(|| format!("{flag} requires a value"))?;
+    if value.starts_with("--") {
+        return Err(format!("{flag} requires a value, got {value:?}"));
+    }
+    Ok(value)
+}
+
+fn parse_required_numeric_value<T>(flag: &str, raw: Option<String>) -> Result<T, String>
+where
+    T: std::str::FromStr,
+{
+    let value = raw.ok_or_else(|| format!("{flag} requires a value"))?;
+    value
+        .parse::<T>()
+        .map_err(|_| format!("{flag} must be numeric, got {value:?}"))
 }
 
 fn read_to_string(path: &PathBuf) -> String {
@@ -581,6 +981,36 @@ fn parse_binding_flows_tsv(path: &PathBuf) -> Vec<BindingFlowsRow> {
     rows
 }
 
+fn parse_cos_flows_tsv(path: &PathBuf) -> Vec<CosFlowsRow> {
+    // Format: timestamp\tifindex\tqueue_id\tworker_id\tcount.
+    // Source metric: xpf_userspace_cos_active_flow_count.
+    let s = read_to_string(path);
+    let mut rows: Vec<CosFlowsRow> = Vec::new();
+    for line in s.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 5 {
+            continue;
+        }
+        let ts: u64 = match parts[0].parse() { Ok(v) => v, Err(_) => continue };
+        let ifindex: i32 = match parts[1].parse() { Ok(v) => v, Err(_) => continue };
+        let qid: u32 = match parts[2].parse() { Ok(v) => v, Err(_) => continue };
+        let wid: u32 = match parts[3].parse() { Ok(v) => v, Err(_) => continue };
+        let count: u32 = match parts[4].parse() { Ok(v) => v, Err(_) => continue };
+        rows.push(CosFlowsRow {
+            timestamp: ts,
+            ifindex,
+            queue_id: qid,
+            worker_id: wid,
+            count,
+        });
+    }
+    rows
+}
+
 #[cfg(test)]
 mod aggregation_tests {
     //! Codex round-5 finding #1: these tests exercise the
@@ -601,6 +1031,16 @@ mod aggregation_tests {
             queue_id: qid,
             worker_id: wid,
             iface: iface.to_string(),
+            count,
+        }
+    }
+
+    fn cos_row(ts: u64, ifindex: i32, qid: u32, wid: u32, count: u32) -> CosFlowsRow {
+        CosFlowsRow {
+            timestamp: ts,
+            ifindex,
+            queue_id: qid,
+            worker_id: wid,
             count,
         }
     }
@@ -711,6 +1151,112 @@ mod aggregation_tests {
     }
 
     #[test]
+    fn aggregate_cos_per_worker_filters_ifindex_and_queue() {
+        let mut rows = Vec::new();
+        for ts in 1000u64..1003 {
+            rows.push(cos_row(ts, 80, 4, 0, 3));
+            rows.push(cos_row(ts, 80, 4, 1, 5));
+            rows.push(cos_row(ts, 80, 5, 0, 99));
+            rows.push(cos_row(ts, 81, 4, 1, 99));
+        }
+        let r = aggregate_cos_per_worker(&rows, 80, 4, 3, 0, 0).unwrap();
+        assert_eq!(r, vec![3, 5, 0]);
+    }
+
+    #[test]
+    fn rss_expectation_balanced_accepts_even_integer_distribution() {
+        let expectation = parse_rss_expectation("balanced").unwrap();
+        let (pass, reason) =
+            evaluate_rss_expectation(&expectation, &[2, 2, 2, 2, 2, 2], 0.0, 6);
+        assert!(pass, "expected balanced pass: {reason}");
+    }
+
+    #[test]
+    fn rss_expectation_balanced_rejects_skewed_distribution() {
+        let expectation = parse_rss_expectation("balanced").unwrap();
+        let (pass, reason) =
+            evaluate_rss_expectation(&expectation, &[9, 1, 1, 1, 0, 0], 0.0, 6);
+        assert!(!pass, "expected balanced failure");
+        assert!(reason.contains("active_workers=4"), "reason: {reason}");
+    }
+
+    #[test]
+    fn rss_expectation_max_share_accepts_percent_syntax() {
+        let expectation = parse_rss_expectation("max-worker-flow-share:50%").unwrap();
+        assert_eq!(expectation, RssExpectation::MaxWorkerFlowShare(0.5));
+        let (pass, _reason) = evaluate_rss_expectation(&expectation, &[2, 2, 1, 1], 0.0, 4);
+        assert!(pass);
+    }
+
+    #[test]
+    fn rss_expectation_cstruct_max_rejects_high_structural_ceiling() {
+        let expectation = parse_rss_expectation("cstruct<=25%").unwrap();
+        let cstruct = compute_cstruct(&[9, 1, 1, 1]);
+        assert!(cstruct > 1.0, "fixture must exercise CoV > 1.0");
+        let (pass, reason) = evaluate_rss_expectation(&expectation, &[9, 1, 1, 1], cstruct, 4);
+        assert!(!pass);
+        assert!(reason.contains("cstruct=1."), "reason: {reason}");
+    }
+
+    #[test]
+    fn rss_expectation_cstruct_max_accepts_whitespace_around_operator() {
+        let expectation = parse_rss_expectation("cstruct <= 25%").unwrap();
+        assert_eq!(expectation, RssExpectation::CstructMax(0.25));
+    }
+
+    #[test]
+    fn rss_expectation_cstruct_max_accepts_values_above_one() {
+        let expectation = parse_rss_expectation("cstruct-max:150%").unwrap();
+        assert_eq!(expectation, RssExpectation::CstructMax(1.5));
+
+        let expectation = parse_rss_expectation("cstruct<=1.2").unwrap();
+        assert_eq!(expectation, RssExpectation::CstructMax(1.2));
+    }
+
+    #[test]
+    fn rss_expectation_cstruct_max_rejects_negative_values() {
+        let err = parse_rss_expectation("cstruct-max:-0.1").unwrap_err();
+        assert!(err.contains("non-negative"), "err: {err}");
+    }
+
+    #[test]
+    fn parse_cos_numeric_flags_reports_bad_values() {
+        let parsed: i32 = parse_required_numeric_value("--cos-ifindex", Some("12".to_string()))
+            .expect("valid ifindex");
+        assert_eq!(parsed, 12);
+
+        let err =
+            parse_required_numeric_value::<u32>("--cos-queue-id", Some("bad".to_string()))
+                .unwrap_err();
+        assert!(
+            err.contains("--cos-queue-id") && err.contains("bad"),
+            "err: {err}"
+        );
+
+        let err = parse_required_numeric_value::<i32>("--cos-ifindex", None).unwrap_err();
+        assert!(err.contains("requires a value"), "err: {err}");
+    }
+
+    #[test]
+    fn parse_required_string_flags_report_missing_values() {
+        let err = parse_required_string_value("--rss-expectation", None).unwrap_err();
+        assert!(err.contains("requires a value"), "err: {err}");
+
+        let err =
+            parse_required_string_value("--cos-flows", Some("--cos-ifindex".to_string()))
+                .unwrap_err();
+        assert!(err.contains("--cos-flows"), "err: {err}");
+    }
+
+    #[test]
+    fn rss_expectation_at_least_active_workers_rejects_too_few_workers() {
+        let expectation = parse_rss_expectation("at-least-active-workers:5").unwrap();
+        let (pass, reason) = evaluate_rss_expectation(&expectation, &[4, 4, 0, 0, 0, 0], 0.0, 6);
+        assert!(!pass);
+        assert!(reason.contains("active_workers=2"), "reason: {reason}");
+    }
+
+    #[test]
     fn direction_multiplier_iface_filter_active_is_one() {
         assert_eq!(direction_multiplier(true), 1);
     }
@@ -797,5 +1343,19 @@ mod tsv_tests {
             assert_eq!(r.iface, "", "legacy 3-col should produce empty iface label");
             assert_eq!(r.worker_id, r.binding_slot, "legacy 3-col: worker_id == slot");
         }
+    }
+
+    #[test]
+    fn five_col_cos_flow_tsv_parses() {
+        let content = "# timestamp\tifindex\tqueue_id\tworker_id\tcount\n1000\t80\t4\t1\t7\n";
+        let p = write_tmp(content);
+        let rows = parse_cos_flows_tsv(&p);
+        let _ = fs::remove_file(&p);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].timestamp, 1000);
+        assert_eq!(rows[0].ifindex, 80);
+        assert_eq!(rows[0].queue_id, 4);
+        assert_eq!(rows[0].worker_id, 1);
+        assert_eq!(rows[0].count, 7);
     }
 }

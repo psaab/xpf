@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# Re-apply the CoS iperf test config (cos-iperf-config.set) to a cluster
-# VM after a deploy that wiped it. Usage:
+# Re-apply a CoS iperf test config to a cluster VM after a deploy
+# that wiped it. Usage:
 #
 #   ./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0
+#   ./test/incus/apply-cos-config.sh --symmetric loss:xpf-userspace-fw0
 #   ./test/incus/apply-cos-config.sh                     # defaults to xpf-userspace-fw0
 #
 # Only the RG0 primary needs the config applied — it replicates to the
@@ -27,20 +28,28 @@
 #
 set -euo pipefail
 
-# #929: --same-class flag selects the same-class iperf-b CoS
-# fixture (cos-iperf-same-class.set), which adds term 4 mapping
-# destination-port 7 → iperf-b (overriding port 7's default
-# best-effort classification). Default stays cross-class. Flag
-# must be parsed BEFORE the positional TARGET argument so it
-# isn't silently treated as a hostname.
+# #929: --same-class selects the same-class iperf-b fixture
+# (cos-iperf-same-class.set), which adds term 4 mapping
+# destination-port 7 → iperf-b. #1250: --symmetric selects
+# cos-iperf-symmetric.set, which also shapes reverse iperf3 -R
+# traffic on ge-0-0-1 using source-port terms. Flags must be
+# parsed BEFORE the positional TARGET argument so they are not
+# silently treated as hostnames.
 SAME_CLASS=0
+SYMMETRIC=0
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --same-class) SAME_CLASS=1; shift ;;
+        --symmetric) SYMMETRIC=1; shift ;;
         --) shift; break ;;
         *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
 done
+
+if [[ "$SAME_CLASS" -eq 1 && "$SYMMETRIC" -eq 1 ]]; then
+	echo "error: --same-class and --symmetric select different fixtures; use one at a time" >&2
+	exit 2
+fi
 
 TARGET="${1:-loss:xpf-userspace-fw0}"
 # Copilot D.2: shift past TARGET and reject extra positional
@@ -54,6 +63,8 @@ TARGET="${1:-loss:xpf-userspace-fw0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$SAME_CLASS" -eq 1 ]]; then
     CONFIG_FILE="${SCRIPT_DIR}/cos-iperf-same-class.set"
+elif [[ "$SYMMETRIC" -eq 1 ]]; then
+    CONFIG_FILE="${SCRIPT_DIR}/cos-iperf-symmetric.set"
 else
     CONFIG_FILE="${SCRIPT_DIR}/cos-iperf-config.set"
 fi
@@ -98,6 +109,10 @@ delete firewall family inet filter bandwidth-output
 delete interfaces reth0 unit 80 family inet filter output
 delete firewall family inet6 filter bandwidth-output
 delete interfaces reth0 unit 80 family inet6 filter output
+delete firewall family inet filter bandwidth-output-reverse
+delete interfaces ge-0-0-1 unit 0 family inet filter output
+delete firewall family inet6 filter bandwidth-output-reverse
+delete interfaces ge-0-0-1 unit 0 family inet6 filter output
 load merge ${REMOTE_SETS}
 commit check
 exit
@@ -126,6 +141,10 @@ delete firewall family inet filter bandwidth-output
 delete interfaces reth0 unit 80 family inet filter output
 delete firewall family inet6 filter bandwidth-output
 delete interfaces reth0 unit 80 family inet6 filter output
+delete firewall family inet filter bandwidth-output-reverse
+delete interfaces ge-0-0-1 unit 0 family inet filter output
+delete firewall family inet6 filter bandwidth-output-reverse
+delete interfaces ge-0-0-1 unit 0 family inet6 filter output
 load merge ${REMOTE_SETS}
 commit
 exit

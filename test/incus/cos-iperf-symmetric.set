@@ -1,0 +1,210 @@
+# Symmetric CoS iperf fixture.
+#
+# Forward iperf traffic (client -> server) exits reth0.80 with
+# destination-port 5201..5207, so the forward output filter matches
+# destination-port.
+#
+# Reverse iperf3 -R data (server -> client) exits ge-0-0-1 with
+# source-port 5201..5207 and an ephemeral destination port, so the
+# reverse output filter MUST match source-port. Reusing the forward
+# destination-port terms on ge-0-0-1 would leave reverse data unshaped.
+
+delete class-of-service
+delete firewall family inet filter bandwidth-output
+delete interfaces reth0 unit 80 family inet filter output
+delete firewall family inet6 filter bandwidth-output
+delete interfaces reth0 unit 80 family inet6 filter output
+delete firewall family inet filter bandwidth-output-reverse
+delete interfaces ge-0-0-1 unit 0 family inet filter output
+delete firewall family inet6 filter bandwidth-output-reverse
+delete interfaces ge-0-0-1 unit 0 family inet6 filter output
+
+set class-of-service forwarding-classes queue 0 best-effort
+set class-of-service forwarding-classes queue 1 iperf-d
+set class-of-service forwarding-classes queue 2 iperf-e
+set class-of-service forwarding-classes queue 3 iperf-f
+set class-of-service forwarding-classes queue 4 iperf-a
+set class-of-service forwarding-classes queue 5 iperf-b
+set class-of-service forwarding-classes queue 6 iperf-c
+
+set class-of-service schedulers scheduler-be transmit-rate 100m
+set class-of-service schedulers scheduler-be transmit-rate exact
+
+set class-of-service schedulers scheduler-iperf-a transmit-rate 1.0g
+set class-of-service schedulers scheduler-iperf-a transmit-rate exact
+
+set class-of-service schedulers scheduler-iperf-b transmit-rate 10.0g
+set class-of-service schedulers scheduler-iperf-b transmit-rate exact
+
+set class-of-service schedulers scheduler-iperf-c transmit-rate 25.0g
+set class-of-service schedulers scheduler-iperf-c transmit-rate exact
+
+set class-of-service schedulers scheduler-iperf-d transmit-rate 13.0g
+set class-of-service schedulers scheduler-iperf-d transmit-rate exact
+
+set class-of-service schedulers scheduler-iperf-e transmit-rate 16.0g
+set class-of-service schedulers scheduler-iperf-e transmit-rate exact
+
+set class-of-service schedulers scheduler-iperf-f transmit-rate 19.0g
+set class-of-service schedulers scheduler-iperf-f transmit-rate exact
+
+set class-of-service scheduler-maps bandwidth-limit forwarding-class best-effort scheduler scheduler-be
+set class-of-service scheduler-maps bandwidth-limit forwarding-class iperf-a scheduler scheduler-iperf-a
+set class-of-service scheduler-maps bandwidth-limit forwarding-class iperf-b scheduler scheduler-iperf-b
+set class-of-service scheduler-maps bandwidth-limit forwarding-class iperf-c scheduler scheduler-iperf-c
+set class-of-service scheduler-maps bandwidth-limit forwarding-class iperf-d scheduler scheduler-iperf-d
+set class-of-service scheduler-maps bandwidth-limit forwarding-class iperf-e scheduler scheduler-iperf-e
+set class-of-service scheduler-maps bandwidth-limit forwarding-class iperf-f scheduler scheduler-iperf-f
+
+set class-of-service interfaces reth0 unit 80 scheduler-map bandwidth-limit
+set class-of-service interfaces reth0 unit 80 shaping-rate 25g
+set class-of-service interfaces ge-0-0-1 unit 0 scheduler-map bandwidth-limit
+set class-of-service interfaces ge-0-0-1 unit 0 shaping-rate 25g
+
+set firewall family inet filter bandwidth-output term 0 from destination-port 5201
+set firewall family inet filter bandwidth-output term 0 then forwarding-class iperf-a
+set firewall family inet filter bandwidth-output term 0 then count iperf-a
+set firewall family inet filter bandwidth-output term 0 then accept
+
+set firewall family inet filter bandwidth-output term 1 from destination-port 5202
+set firewall family inet filter bandwidth-output term 1 then forwarding-class iperf-b
+set firewall family inet filter bandwidth-output term 1 then count iperf-b
+set firewall family inet filter bandwidth-output term 1 then accept
+
+set firewall family inet filter bandwidth-output term 2 from destination-port 5203
+set firewall family inet filter bandwidth-output term 2 then forwarding-class iperf-c
+set firewall family inet filter bandwidth-output term 2 then count iperf-c
+set firewall family inet filter bandwidth-output term 2 then accept
+
+set firewall family inet filter bandwidth-output term 3 from destination-port 5204
+set firewall family inet filter bandwidth-output term 3 then forwarding-class iperf-d
+set firewall family inet filter bandwidth-output term 3 then count iperf-d
+set firewall family inet filter bandwidth-output term 3 then accept
+
+set firewall family inet filter bandwidth-output term 4 from destination-port 5205
+set firewall family inet filter bandwidth-output term 4 then forwarding-class iperf-e
+set firewall family inet filter bandwidth-output term 4 then count iperf-e
+set firewall family inet filter bandwidth-output term 4 then accept
+
+set firewall family inet filter bandwidth-output term 5 from destination-port 5206
+set firewall family inet filter bandwidth-output term 5 then forwarding-class iperf-f
+set firewall family inet filter bandwidth-output term 5 then count iperf-f
+set firewall family inet filter bandwidth-output term 5 then accept
+
+set firewall family inet filter bandwidth-output term 6 from destination-port 5207
+set firewall family inet filter bandwidth-output term 6 then forwarding-class best-effort
+set firewall family inet filter bandwidth-output term 6 then count best-effort
+set firewall family inet filter bandwidth-output term 6 then accept
+
+set interfaces reth0 unit 80 family inet filter output bandwidth-output
+
+set firewall family inet6 filter bandwidth-output term 0 from destination-port 5201
+set firewall family inet6 filter bandwidth-output term 0 then forwarding-class iperf-a
+set firewall family inet6 filter bandwidth-output term 0 then count iperf-a
+set firewall family inet6 filter bandwidth-output term 0 then accept
+
+set firewall family inet6 filter bandwidth-output term 1 from destination-port 5202
+set firewall family inet6 filter bandwidth-output term 1 then forwarding-class iperf-b
+set firewall family inet6 filter bandwidth-output term 1 then count iperf-b
+set firewall family inet6 filter bandwidth-output term 1 then accept
+
+set firewall family inet6 filter bandwidth-output term 2 from destination-port 5203
+set firewall family inet6 filter bandwidth-output term 2 then forwarding-class iperf-c
+set firewall family inet6 filter bandwidth-output term 2 then count iperf-c
+set firewall family inet6 filter bandwidth-output term 2 then accept
+
+set firewall family inet6 filter bandwidth-output term 3 from destination-port 5204
+set firewall family inet6 filter bandwidth-output term 3 then forwarding-class iperf-d
+set firewall family inet6 filter bandwidth-output term 3 then count iperf-d
+set firewall family inet6 filter bandwidth-output term 3 then accept
+
+set firewall family inet6 filter bandwidth-output term 4 from destination-port 5205
+set firewall family inet6 filter bandwidth-output term 4 then forwarding-class iperf-e
+set firewall family inet6 filter bandwidth-output term 4 then count iperf-e
+set firewall family inet6 filter bandwidth-output term 4 then accept
+
+set firewall family inet6 filter bandwidth-output term 5 from destination-port 5206
+set firewall family inet6 filter bandwidth-output term 5 then forwarding-class iperf-f
+set firewall family inet6 filter bandwidth-output term 5 then count iperf-f
+set firewall family inet6 filter bandwidth-output term 5 then accept
+
+set firewall family inet6 filter bandwidth-output term 6 from destination-port 5207
+set firewall family inet6 filter bandwidth-output term 6 then forwarding-class best-effort
+set firewall family inet6 filter bandwidth-output term 6 then count best-effort
+set firewall family inet6 filter bandwidth-output term 6 then accept
+
+set interfaces reth0 unit 80 family inet6 filter output bandwidth-output
+
+set firewall family inet filter bandwidth-output-reverse term 0 from source-port 5201
+set firewall family inet filter bandwidth-output-reverse term 0 then forwarding-class iperf-a
+set firewall family inet filter bandwidth-output-reverse term 0 then count iperf-a-reverse
+set firewall family inet filter bandwidth-output-reverse term 0 then accept
+
+set firewall family inet filter bandwidth-output-reverse term 1 from source-port 5202
+set firewall family inet filter bandwidth-output-reverse term 1 then forwarding-class iperf-b
+set firewall family inet filter bandwidth-output-reverse term 1 then count iperf-b-reverse
+set firewall family inet filter bandwidth-output-reverse term 1 then accept
+
+set firewall family inet filter bandwidth-output-reverse term 2 from source-port 5203
+set firewall family inet filter bandwidth-output-reverse term 2 then forwarding-class iperf-c
+set firewall family inet filter bandwidth-output-reverse term 2 then count iperf-c-reverse
+set firewall family inet filter bandwidth-output-reverse term 2 then accept
+
+set firewall family inet filter bandwidth-output-reverse term 3 from source-port 5204
+set firewall family inet filter bandwidth-output-reverse term 3 then forwarding-class iperf-d
+set firewall family inet filter bandwidth-output-reverse term 3 then count iperf-d-reverse
+set firewall family inet filter bandwidth-output-reverse term 3 then accept
+
+set firewall family inet filter bandwidth-output-reverse term 4 from source-port 5205
+set firewall family inet filter bandwidth-output-reverse term 4 then forwarding-class iperf-e
+set firewall family inet filter bandwidth-output-reverse term 4 then count iperf-e-reverse
+set firewall family inet filter bandwidth-output-reverse term 4 then accept
+
+set firewall family inet filter bandwidth-output-reverse term 5 from source-port 5206
+set firewall family inet filter bandwidth-output-reverse term 5 then forwarding-class iperf-f
+set firewall family inet filter bandwidth-output-reverse term 5 then count iperf-f-reverse
+set firewall family inet filter bandwidth-output-reverse term 5 then accept
+
+set firewall family inet filter bandwidth-output-reverse term 6 from source-port 5207
+set firewall family inet filter bandwidth-output-reverse term 6 then forwarding-class best-effort
+set firewall family inet filter bandwidth-output-reverse term 6 then count best-effort-reverse
+set firewall family inet filter bandwidth-output-reverse term 6 then accept
+
+set interfaces ge-0-0-1 unit 0 family inet filter output bandwidth-output-reverse
+
+set firewall family inet6 filter bandwidth-output-reverse term 0 from source-port 5201
+set firewall family inet6 filter bandwidth-output-reverse term 0 then forwarding-class iperf-a
+set firewall family inet6 filter bandwidth-output-reverse term 0 then count iperf-a-reverse
+set firewall family inet6 filter bandwidth-output-reverse term 0 then accept
+
+set firewall family inet6 filter bandwidth-output-reverse term 1 from source-port 5202
+set firewall family inet6 filter bandwidth-output-reverse term 1 then forwarding-class iperf-b
+set firewall family inet6 filter bandwidth-output-reverse term 1 then count iperf-b-reverse
+set firewall family inet6 filter bandwidth-output-reverse term 1 then accept
+
+set firewall family inet6 filter bandwidth-output-reverse term 2 from source-port 5203
+set firewall family inet6 filter bandwidth-output-reverse term 2 then forwarding-class iperf-c
+set firewall family inet6 filter bandwidth-output-reverse term 2 then count iperf-c-reverse
+set firewall family inet6 filter bandwidth-output-reverse term 2 then accept
+
+set firewall family inet6 filter bandwidth-output-reverse term 3 from source-port 5204
+set firewall family inet6 filter bandwidth-output-reverse term 3 then forwarding-class iperf-d
+set firewall family inet6 filter bandwidth-output-reverse term 3 then count iperf-d-reverse
+set firewall family inet6 filter bandwidth-output-reverse term 3 then accept
+
+set firewall family inet6 filter bandwidth-output-reverse term 4 from source-port 5205
+set firewall family inet6 filter bandwidth-output-reverse term 4 then forwarding-class iperf-e
+set firewall family inet6 filter bandwidth-output-reverse term 4 then count iperf-e-reverse
+set firewall family inet6 filter bandwidth-output-reverse term 4 then accept
+
+set firewall family inet6 filter bandwidth-output-reverse term 5 from source-port 5206
+set firewall family inet6 filter bandwidth-output-reverse term 5 then forwarding-class iperf-f
+set firewall family inet6 filter bandwidth-output-reverse term 5 then count iperf-f-reverse
+set firewall family inet6 filter bandwidth-output-reverse term 5 then accept
+
+set firewall family inet6 filter bandwidth-output-reverse term 6 from source-port 5207
+set firewall family inet6 filter bandwidth-output-reverse term 6 then forwarding-class best-effort
+set firewall family inet6 filter bandwidth-output-reverse term 6 then count best-effort-reverse
+set firewall family inet6 filter bandwidth-output-reverse term 6 then accept
+
+set interfaces ge-0-0-1 unit 0 family inet6 filter output bandwidth-output-reverse

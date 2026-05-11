@@ -235,3 +235,88 @@ func TestBindingCountersSnapshotVMinThrottleRoundTrip(t *testing.T) {
 		t.Fatalf("VMinThrottles: got %d, want 67", back.VMinThrottles)
 	}
 }
+
+func TestProcessStatusFlowWorkerMapRoundTrip(t *testing.T) {
+	cosQueueID := uint8(4)
+	in := ProcessStatus{
+		FlowWorkerMapTruncated:       true,
+		CoSActiveFlowCountsTruncated: true,
+		CoSActiveFlowCounts: []CoSActiveFlowCountStatus{{
+			Ifindex:         80,
+			QueueID:         4,
+			WorkerID:        1,
+			ActiveFlowCount: 7,
+		}},
+		FlowWorkerMap: []FlowWorkerStatus{{
+			Slot:           2,
+			QueueID:        1,
+			WorkerID:       1,
+			Interface:      "ge-0-0-1.0",
+			Ifindex:        17,
+			IngressIfindex: 17,
+			EgressIfindex:  80,
+			TxIfindex:      80,
+			SessionKey: FlowTupleStatus{
+				AddrFamily: 2,
+				Protocol:   6,
+				SrcIP:      "10.0.61.100",
+				DstIP:      "172.16.80.200",
+				SrcPort:    5201,
+				DstPort:    49152,
+			},
+			ForwardWireKey: FlowTupleStatus{
+				AddrFamily: 2,
+				Protocol:   6,
+				SrcIP:      "10.0.61.100",
+				DstIP:      "172.16.80.200",
+				SrcPort:    5201,
+				DstPort:    49152,
+			},
+			ReverseCanonicalKey: FlowTupleStatus{
+				AddrFamily: 2,
+				Protocol:   6,
+				SrcIP:      "172.16.80.200",
+				DstIP:      "10.0.61.100",
+				SrcPort:    49152,
+				DstPort:    5201,
+			},
+			CoSQueueID: &cosQueueID,
+			AgeEpochs:  3,
+		}},
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range []string{
+		"flow_worker_map",
+		"flow_worker_map_truncated",
+		"cos_active_flow_counts",
+		"cos_active_flow_counts_truncated",
+	} {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from ProcessStatus JSON: %s", key, string(raw))
+		}
+	}
+
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if !reflect.DeepEqual(back.FlowWorkerMap, in.FlowWorkerMap) {
+		t.Fatalf("FlowWorkerMap mismatch: got %+v, want %+v", back.FlowWorkerMap, in.FlowWorkerMap)
+	}
+	if !back.FlowWorkerMapTruncated {
+		t.Fatal("FlowWorkerMapTruncated must round-trip true")
+	}
+	if !reflect.DeepEqual(back.CoSActiveFlowCounts, in.CoSActiveFlowCounts) {
+		t.Fatalf("CoSActiveFlowCounts mismatch: got %+v, want %+v", back.CoSActiveFlowCounts, in.CoSActiveFlowCounts)
+	}
+	if !back.CoSActiveFlowCountsTruncated {
+		t.Fatal("CoSActiveFlowCountsTruncated must round-trip true")
+	}
+}

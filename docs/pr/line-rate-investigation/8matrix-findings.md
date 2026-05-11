@@ -46,13 +46,30 @@ This is a CONFIG limitation, not an xpfd code bug. But it means
 any "line-rate" evaluation that uses `-R` on the current config is
 measuring forwarding capacity, not shaper enforcement.
 
-### Two options to shape both directions
+### Follow-up: symmetric fixture
 
-1. **Symmetric output filters**: apply `bandwidth-output` (or a
-   peer filter with the same port-to-FC logic) to `ge-0-0-1 unit 0
-   family inet filter output`. Then reverse traffic would be
-   classified at its egress. Requires reth0 being bondless or
-   dual-RETH coordination.
+Issue #1250 adds `test/incus/cos-iperf-symmetric.set` as the
+operator-supported fixture for both directions.
+
+Important detail: reverse iperf3 `-R` data has **source-port**
+5201/5202/5204 and an ephemeral destination port. A literal copy of
+the forward `destination-port` terms onto `ge-0-0-1` would still leave
+the reverse data unclassified. The symmetric fixture therefore uses:
+
+- `bandwidth-output` on `reth0.80` output, matching
+  `destination-port 5201..5207` for client → server data.
+- `bandwidth-output-reverse` on `ge-0-0-1.0` output, matching
+  `source-port 5201..5207` for server → client data.
+
+The historical table above remains valid for the original
+forward-only fixture. Do not use its reverse cells as scheduler-fairness
+evidence.
+
+### Remaining architecture options
+
+1. **Symmetric output filters**: the #1250 fixture path. It is the
+   lowest-risk validation fixture because each direction is classified
+   at the egress interface that owns the shaper.
 
 2. **Input filter on the WAN side**: apply an input filter on
    reth0.80 that does the same port-to-FC classification at
@@ -98,10 +115,11 @@ changes what "line rate on all ports" means.
    for shaped ports + BOTH directions for whatever path matches
    at 25 G or the underlying link speed).
 
-2. **Separate issue**: the "reverse-direction CoS not applied"
-   behaviour is a config-side reality, not an xpfd bug. If the
-   operator expects symmetric shaping, a new feature request /
-   config pattern is required.
+2. **Use #1250's symmetric fixture for reverse fairness work**:
+   apply `test/incus/cos-iperf-symmetric.set` (or
+   `apply-cos-config.sh --symmetric`) and require filter counters on
+   `bandwidth-output-reverse` before treating reverse CoV as a
+   scheduler signal.
 
 3. **Forward-direction retr on p5204**: 62 retr/s on the 100M
    shaper is on the high side — worth a separate look if

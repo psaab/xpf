@@ -208,16 +208,17 @@ Any fairness measurement run MUST report:
 2. **Per-flow CoV**: `stddev / mean` across the steady-state window.
 3. **Starved flow count**: per the Gate 1 definition above.
 4. **Per-worker active-flow distribution `{aᵢ}`**: count of
-   distinct 5-tuples observed on each worker's binding during
-   the steady-state window. The current per-binding RX
-   counters report packets/bytes; this contract additionally
-   requires per-binding **distinct-flow-count** which must be
-   added by the harness work (or by a binding-side counter
-   exposed via the existing `show class-of-service` /
-   `show chassis cluster data-plane interfaces` /
-   `show class-of-service interface` surfaces). A flow is counted as
-   active on worker i if it contributes ≥ 1% of mean per-flow
-   throughput on that worker over the window.
+   distinct 5-tuples observed on each worker during the steady-state
+   window. Single-class harness runs can use
+   `xpf_userspace_binding_active_flow_count{binding_slot, queue_id,
+   worker_id, iface}` filtered to the bottleneck direction. Mixed
+   workload and production class-specific runs should use
+   `xpf_userspace_cos_active_flow_count{ifindex, queue_id, worker_id}`
+   for the selected egress CoS queue. These live metrics define
+   "active" as a flow-cache entry touched within the active-flow
+   recency window, currently 10 debug epochs (about 650 ms), so `{a_i}`
+   is an operational proxy for worker/RSS placement rather than a
+   throughput-derived ≥1% cutoff.
 5. **Computed `Cstruct`**: the structural CoV ceiling for the
    observed `{aᵢ}`.
 6. **Saturation determination**: which regime the run is in (per
@@ -232,6 +233,25 @@ Any fairness measurement run MUST report:
 11. **Steady-state window**: explicit start/end timestamps,
     excluding the first 5 seconds (warmup) and any final
     sender-shutdown bursts.
+
+Mixed-workload CoS validation MUST run at least two classes
+concurrently under one metrics scrape so class-specific `{a_i}` cannot
+silently collapse back to the per-binding aggregate. The canonical
+harness command is:
+
+```bash
+COS_IFINDEX=<egress-ifindex> ./test/incus/fairness-harness.sh --mixed-cos
+```
+
+With the default symmetric CoS fixture this runs port 5201
+(`iperf-a`, queue 4) and port 5202 (`iperf-b`, queue 5) concurrently,
+then invokes `fairness-eval` twice against the same
+`xpf_userspace_cos_active_flow_count` scrape: once for queue 4 and
+once for queue 5. Non-canonical fixtures must set `COS_QUEUE_ID` and
+`MIXED_COS_QUEUE_ID` explicitly. `MIXED_RSS_EXPECTATION` defaults to
+`RSS_EXPECTATION`, so one expectation gate applies to both classes
+unless the operator explicitly sets `MIXED_RSS_EXPECTATION=any` or a
+different mixed-class expression.
 
 ## Required metrics — exported in production via gRPC/Prometheus
 

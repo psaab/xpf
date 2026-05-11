@@ -246,3 +246,60 @@ func TestEmitBindingActiveFlowCount_LabelsAndValue(t *testing.T) {
 		t.Fatalf("slot=0 series missing from emitBindingActiveFlowCount output")
 	}
 }
+
+func TestEmitCoSActiveFlowCount_LabelsAndValue(t *testing.T) {
+	c := &xpfCollector{
+		cosActiveFlowCount: prometheus.NewDesc(
+			"xpf_userspace_cos_active_flow_count",
+			"test desc",
+			[]string{"ifindex", "queue_id", "worker_id"},
+			nil,
+		),
+	}
+
+	status := dpuserspace.ProcessStatus{
+		CoSActiveFlowCounts: []dpuserspace.CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: 4, WorkerID: 1, ActiveFlowCount: 7},
+			{Ifindex: 80, QueueID: 5, WorkerID: 2, ActiveFlowCount: 3},
+		},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitCoSActiveFlowCount(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("emitCoSActiveFlowCount: want 2 metrics, got %d", len(got))
+	}
+
+	var found bool
+	for _, m := range got {
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("write metric: %v", err)
+		}
+		labels := map[string]string{}
+		for _, lp := range pb.Label {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["ifindex"] != "80" || labels["queue_id"] != "4" || labels["worker_id"] != "1" {
+			continue
+		}
+		found = true
+		if pb.Gauge == nil {
+			t.Fatalf("cos active metric has no gauge")
+		}
+		if got := pb.Gauge.GetValue(); got != 7 {
+			t.Errorf("cos active flow count=7 -> want gauge value 7, got %v", got)
+		}
+	}
+	if !found {
+		t.Fatalf("queue 4 worker 1 series missing from emitCoSActiveFlowCount output")
+	}
+}
