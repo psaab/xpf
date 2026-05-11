@@ -343,7 +343,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	return b.String()
 }
 
-func FormatFairnessRSS(status ProcessStatus) string {
+func FormatFairnessRSS(status ProcessStatus, expectations []FairnessRSSExpectation) string {
 	var b strings.Builder
 	rows := CoSFairnessRSSSummaries(status)
 	fmt.Fprintln(&b, "Userspace fairness RSS structure:")
@@ -352,20 +352,38 @@ func FormatFairnessRSS(status ProcessStatus) string {
 	}
 	if len(rows) == 0 {
 		fmt.Fprintln(&b, "  none")
-		return b.String()
+	} else {
+		fmt.Fprintf(&b, "  %-8s %-7s %-11s %-13s %-10s %-10s\n",
+			"Ifindex", "Queue", "ActiveFlows", "ActiveWorkers", "Cstruct", "MaxShare")
+		for _, row := range rows {
+			maxShare := fmt.Sprintf("%.2f%%", 100.0*row.MaxWorkerFlowShare)
+			fmt.Fprintf(&b, "  %-8d %-7d %-11d %-13d %-10.6f %-10s\n",
+				row.Ifindex,
+				row.QueueID,
+				row.ActiveFlows,
+				row.ActiveWorkers,
+				row.Cstruct,
+				maxShare,
+			)
+		}
 	}
-	fmt.Fprintf(&b, "  %-8s %-7s %-11s %-13s %-10s %-10s\n",
-		"Ifindex", "Queue", "ActiveFlows", "ActiveWorkers", "Cstruct", "MaxShare")
-	for _, row := range rows {
-		maxShare := fmt.Sprintf("%.2f%%", 100.0*row.MaxWorkerFlowShare)
-		fmt.Fprintf(&b, "  %-8d %-7d %-11d %-13d %-10.6f %-10s\n",
-			row.Ifindex,
-			row.QueueID,
-			row.ActiveFlows,
-			row.ActiveWorkers,
-			row.Cstruct,
-			maxShare,
-		)
+	if results := EvaluateFairnessRSSExpectations(status, expectations); len(results) > 0 {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "RSS expectations:")
+		fmt.Fprintf(&b, "  %-8s %-7s %-28s %-6s %-11s %-13s %-10s %s\n",
+			"Ifindex", "Queue", "Expectation", "Pass", "ActiveFlows", "ActiveWorkers", "Cstruct", "Reason")
+		for _, result := range results {
+			fmt.Fprintf(&b, "  %-8d %-7d %-28s %-6t %-11d %-13d %-10.6f %s\n",
+				result.Ifindex,
+				result.QueueID,
+				result.Expectation,
+				result.Pass,
+				result.ActiveFlows,
+				result.ActiveWorkers,
+				result.Cstruct,
+				result.Reason,
+			)
+		}
 	}
 	return b.String()
 }

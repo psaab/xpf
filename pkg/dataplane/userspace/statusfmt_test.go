@@ -127,7 +127,10 @@ func TestFormatFairnessRSS(t *testing.T) {
 		},
 	}
 
-	out := FormatFairnessRSS(status)
+	out := FormatFairnessRSS(status, []FairnessRSSExpectation{
+		{Ifindex: 80, QueueID: 4, RSSExpectation: "balanced"},
+		{Ifindex: 80, QueueID: 5, RSSExpectation: "max-worker-flow-share:50%"},
+	})
 	for _, want := range []string{
 		"Userspace fairness RSS structure:",
 		"warning: CoS active-flow snapshot truncated",
@@ -137,6 +140,28 @@ func TestFormatFairnessRSS(t *testing.T) {
 		"Cstruct",
 		"80       4       4           2             0.577350   75.00%",
 		"80       5       4           2             0.000000   50.00%",
+		"RSS expectations:",
+		"80       4       balanced                     false",
+		"balanced: active_workers=2 expected",
+		"80       5       max-worker-flow-share:0.5    true",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("fairness output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatFairnessRSSShowsExpectationsWithoutRows(t *testing.T) {
+	out := FormatFairnessRSS(ProcessStatus{Workers: 4}, []FairnessRSSExpectation{
+		{Ifindex: 80, QueueID: 4, RSSExpectation: "cstruct-max:0.25"},
+	})
+	for _, want := range []string{
+		"Userspace fairness RSS structure:",
+		"  none",
+		"RSS expectations:",
+		"80       4       cstruct-max:0.25",
+		"false",
+		"cstruct-max: no active flows observed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("fairness output missing %q:\n%s", want, out)
