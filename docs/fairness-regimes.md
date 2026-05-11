@@ -234,6 +234,22 @@ Any fairness measurement run MUST report:
     excluding the first 5 seconds (warmup) and any final
     sender-shutdown bursts.
 
+Mixed-workload CoS validation MUST run at least two classes
+concurrently under one metrics scrape so class-specific `{a_i}` cannot
+silently collapse back to the per-binding aggregate. The canonical
+harness command is:
+
+```bash
+COS_IFINDEX=<egress-ifindex> ./test/incus/fairness-harness.sh --mixed-cos
+```
+
+With the default symmetric CoS fixture this runs port 5201
+(`iperf-a`, queue 4) and port 5202 (`iperf-b`, queue 5) concurrently,
+then invokes `fairness-eval` twice against the same
+`xpf_userspace_cos_active_flow_count` scrape: once for queue 4 and
+once for queue 5. Non-canonical fixtures must set `COS_QUEUE_ID` and
+`MIXED_COS_QUEUE_ID` explicitly.
+
 ## Required metrics — exported in production via gRPC/Prometheus
 
 For production observability, xpf MUST export:
