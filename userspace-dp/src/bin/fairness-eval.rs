@@ -327,7 +327,7 @@ fn parse_rss_expectation(raw: &str) -> Result<RssExpectation, String> {
             Ok(RssExpectation::MaxWorkerFlowShare(share))
         }
         "cstruct-max" | "cstruct" => {
-            let max = parse_fraction_or_percent(value).map_err(|e| {
+            let max = parse_nonnegative_number_or_percent(value).map_err(|e| {
                 format!("invalid --rss-expectation cstruct threshold: {e}")
             })?;
             Ok(RssExpectation::CstructMax(max))
@@ -339,7 +339,7 @@ fn parse_rss_expectation(raw: &str) -> Result<RssExpectation, String> {
     }
 }
 
-fn parse_fraction_or_percent(raw: &str) -> Result<f64, String> {
+fn parse_number_or_percent(raw: &str) -> Result<f64, String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err("missing value".to_string());
@@ -353,8 +353,24 @@ fn parse_fraction_or_percent(raw: &str) -> Result<f64, String> {
         raw.parse::<f64>()
             .map_err(|_| format!("{raw} is not a number"))?
     };
+    if !value.is_finite() {
+        return Err(format!("{raw} is not a finite number"));
+    }
+    Ok(value)
+}
+
+fn parse_fraction_or_percent(raw: &str) -> Result<f64, String> {
+    let value = parse_number_or_percent(raw)?;
     if !(0.0..=1.0).contains(&value) {
         return Err(format!("{raw} must be between 0 and 1 or 0% and 100%"));
+    }
+    Ok(value)
+}
+
+fn parse_nonnegative_number_or_percent(raw: &str) -> Result<f64, String> {
+    let value = parse_number_or_percent(raw)?;
+    if value < 0.0 {
+        return Err(format!("{raw} must be non-negative"));
     }
     Ok(value)
 }
@@ -802,10 +818,10 @@ fn parse_args() -> Args {
                 cos_flows = args.next().map(PathBuf::from);
             }
             "--cos-ifindex" => {
-                cos_ifindex = args.next().and_then(|s| s.parse().ok());
+                cos_ifindex = Some(parse_required_numeric_arg("--cos-ifindex", args.next()));
             }
             "--cos-queue-id" => {
-                cos_queue_id = args.next().and_then(|s| s.parse().ok());
+                cos_queue_id = Some(parse_required_numeric_arg("--cos-queue-id", args.next()));
             }
             "--iface" => {
                 iface = args.next().unwrap_or_default();
@@ -864,6 +880,29 @@ fn parse_args() -> Args {
         shaper_rate_bps,
         rss_expectation,
     }
+}
+
+fn parse_required_numeric_arg<T>(flag: &str, raw: Option<String>) -> T
+where
+    T: std::str::FromStr,
+{
+    match parse_required_numeric_value(flag, raw) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("fairness-eval: {err}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_required_numeric_value<T>(flag: &str, raw: Option<String>) -> Result<T, String>
+where
+    T: std::str::FromStr,
+{
+    let value = raw.ok_or_else(|| format!("{flag} requires a value"))?;
+    value
+        .parse::<T>()
+        .map_err(|_| format!("{flag} must be numeric, got {value:?}"))
 }
 
 fn read_to_string(path: &PathBuf) -> String {
@@ -1131,9 +1170,44 @@ mod aggregation_tests {
     #[test]
     fn rss_expectation_cstruct_max_rejects_high_structural_ceiling() {
         let expectation = parse_rss_expectation("cstruct<=25%").unwrap();
-        let (pass, reason) = evaluate_rss_expectation(&expectation, &[9, 1, 1, 1], 0.50, 4);
+        let cstruct = compute_cstruct(&[9, 1, 1, 1]);
+        assert!(cstruct > 1.0, "fixture must exercise CoV > 1.0");
+        let (pass, reason) = evaluate_rss_expectation(&expectation, &[9, 1, 1, 1], cstruct, 4);
         assert!(!pass);
-        assert!(reason.contains("cstruct=0.5000"), "reason: {reason}");
+        assert!(reason.contains("cstruct=1."), "reason: {reason}");
+    }
+
+    #[test]
+    fn rss_expectation_cstruct_max_accepts_values_above_one() {
+        let expectation = parse_rss_expectation("cstruct-max:150%").unwrap();
+        assert_eq!(expectation, RssExpectation::CstructMax(1.5));
+
+        let expectation = parse_rss_expectation("cstruct<=1.2").unwrap();
+        assert_eq!(expectation, RssExpectation::CstructMax(1.2));
+    }
+
+    #[test]
+    fn rss_expectation_cstruct_max_rejects_negative_values() {
+        let err = parse_rss_expectation("cstruct-max:-0.1").unwrap_err();
+        assert!(err.contains("non-negative"), "err: {err}");
+    }
+
+    #[test]
+    fn parse_cos_numeric_flags_reports_bad_values() {
+        let parsed: i32 = parse_required_numeric_value("--cos-ifindex", Some("12".to_string()))
+            .expect("valid ifindex");
+        assert_eq!(parsed, 12);
+
+        let err =
+            parse_required_numeric_value::<u32>("--cos-queue-id", Some("bad".to_string()))
+                .unwrap_err();
+        assert!(
+            err.contains("--cos-queue-id") && err.contains("bad"),
+            "err: {err}"
+        );
+
+        let err = parse_required_numeric_value::<i32>("--cos-ifindex", None).unwrap_err();
+        assert!(err.contains("requires a value"), "err: {err}");
     }
 
     #[test]

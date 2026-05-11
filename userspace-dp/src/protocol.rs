@@ -1088,7 +1088,7 @@ pub(crate) struct FlowWorkerStatus {
     #[serde(rename = "worker_id", default)]
     pub worker_id: u32,
     #[serde(default)]
-    pub interface: String,
+    pub interface: std::sync::Arc<str>,
     #[serde(default)]
     pub ifindex: i32,
     #[serde(rename = "ingress_ifindex", default)]
