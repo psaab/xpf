@@ -30,15 +30,32 @@
 # an RSS/workload expectation.
 #
 # --mixed-cos-isolated keeps the mixed-CoS evaluator but requires explicit
-# generator placement knobs so the two classes can be separated for hostile
-# reviews. Supported knobs:
-#   IPERF_NETNS / MIXED_IPERF_NETNS         optional `ip netns exec` namespaces
-#   IPERF_CPUSET / MIXED_IPERF_CPUSET       optional `taskset -c` CPU lists
-#   IPERF_CMD_PREFIX / MIXED_IPERF_CMD_PREFIX
-#                                           optional command prefix words
+# compute AND network isolation so the two classes can be separated for
+# hostile reviews. Supported knobs:
+#   IPERF_CPUSET / MIXED_IPERF_CPUSET       generator `taskset -c` CPU lists;
+#                                           required and must not overlap
+#   CPUSET_MAX_CPU_ID                       optional max generator CPU id;
+#                                           defaults to local CPU topology
+#   IPERF_NETNS / MIXED_IPERF_NETNS         generator-context netns names;
+#                                           distinct names count as network
+#                                           isolation
+#   IPERF_NETWORK_ID / MIXED_IPERF_NETWORK_ID
+#                                           explicit network/RSS/NIC domains;
+#                                           distinct values count as network
+#                                           isolation
+#   IPERF_LAUNCH_ARG_0..N / MIXED_IPERF_LAUNCH_ARG_0..N
+#                                           local launcher argv, e.g.
+#                                           incus exec host --
+#   IPERF_GENERATOR_ARG_0..N / MIXED_IPERF_GENERATOR_ARG_0..N
+#                                           generator-context argv before
+#                                           iperf3, e.g. numactl args
+#   IPERF_LAUNCH_NETNS / MIXED_IPERF_LAUNCH_NETNS
+#                                           optional local launcher netns
+#   IPERF_LAUNCH_CPUSET / MIXED_IPERF_LAUNCH_CPUSET
+#                                           optional local launcher cpuset
 #   IPERF_BIN / MIXED_IPERF_BIN             generator binary, default iperf3
 #   PRIMARY_RSS_STEERING / MIXED_RSS_STEERING
-#                                           free-form NIC/RSS assumption notes
+#                                           free-form NIC/RSS audit notes
 #   ARTIFACT_DIR                            placement artifact directory
 #
 # Defaults match the existing iperf-c P=12 -R workload that produced the
@@ -89,16 +106,29 @@ FINAL_BURST=${FINAL_BURST:-1}
 ARTIFACT_DIR=${ARTIFACT_DIR:-}
 IPERF_BIN=${IPERF_BIN:-iperf3}
 MIXED_IPERF_BIN=${MIXED_IPERF_BIN:-$IPERF_BIN}
+IPERF_LAUNCH_NETNS=${IPERF_LAUNCH_NETNS:-}
+MIXED_IPERF_LAUNCH_NETNS=${MIXED_IPERF_LAUNCH_NETNS:-}
+IPERF_LAUNCH_CPUSET=${IPERF_LAUNCH_CPUSET:-}
+MIXED_IPERF_LAUNCH_CPUSET=${MIXED_IPERF_LAUNCH_CPUSET:-}
 IPERF_NETNS=${IPERF_NETNS:-}
 MIXED_IPERF_NETNS=${MIXED_IPERF_NETNS:-}
 IPERF_CPUSET=${IPERF_CPUSET:-}
 MIXED_IPERF_CPUSET=${MIXED_IPERF_CPUSET:-}
+CPUSET_MAX_CPU_ID=${CPUSET_MAX_CPU_ID:-}
+CPUSET_HARD_MAX_CPU_ID=${CPUSET_HARD_MAX_CPU_ID:-8191}
 IPERF_CMD_PREFIX=${IPERF_CMD_PREFIX:-}
 MIXED_IPERF_CMD_PREFIX=${MIXED_IPERF_CMD_PREFIX:-}
+IPERF_NETWORK_ID=${IPERF_NETWORK_ID:-}
+MIXED_IPERF_NETWORK_ID=${MIXED_IPERF_NETWORK_ID:-}
 PRIMARY_RSS_STEERING=${PRIMARY_RSS_STEERING:-unspecified}
 MIXED_RSS_STEERING=${MIXED_RSS_STEERING:-unspecified}
 PRIMARY_GENERATOR_LABEL=${PRIMARY_GENERATOR_LABEL:-primary}
 MIXED_GENERATOR_LABEL=${MIXED_GENERATOR_LABEL:-mixed}
+
+if [[ -n "$IPERF_CMD_PREFIX" || -n "$MIXED_IPERF_CMD_PREFIX" ]]; then
+    echo "fairness-harness: IPERF_CMD_PREFIX is deprecated; use IPERF_LAUNCH_ARG_N and IPERF_GENERATOR_ARG_N" >&2
+    exit 2
+fi
 
 WORK_DIR=$(mktemp -d -t fairness-harness.XXXXXX)
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -187,20 +217,52 @@ format_command() {
     done
 }
 
-append_prefix_words() {
-    local -n cmd_ref=$1
-    local prefix=$2
+collect_numbered_args() {
+    local prefix=$1
+    local -n out_ref=$2
+    local i=0
+    local name
+    local suffix
+    local max_i=-1
+    local -A seen=()
+    out_ref=()
 
-    if [[ -n "$prefix" ]]; then
-        local words=()
-        # Intentionally word-split test-harness prefixes such as:
-        #   incus exec loss:cluster-userspace-host --
-        #   ip vrf exec blue
-        # Prefixes that need shell quoting should be wrapped by a small
-        # script and passed as IPERF_BIN instead.
-        # shellcheck disable=SC2206
-        words=( $prefix )
-        cmd_ref+=("${words[@]}")
+    while IFS= read -r name; do
+        suffix=${name#"${prefix}_"}
+        if [[ ! "$suffix" =~ ^(0|[1-9][0-9]*)$ ]]; then
+            echo "fairness-harness: invalid numbered argv variable $name; expected canonical ${prefix}_N" >&2
+            exit 2
+        fi
+        i=$((10#$suffix))
+        if [[ "$i" != "$suffix" ]]; then
+            echo "fairness-harness: invalid numbered argv variable $name; index exceeds shell arithmetic range" >&2
+            exit 2
+        fi
+        seen["$i"]=$name
+        (( i > max_i )) && max_i=$i
+    done < <(compgen -v "${prefix}_" || true)
+
+    (( max_i >= 0 )) || return 0
+    for ((i = 0; i <= max_i; i++)); do
+        if [[ ! ${seen[$i]+x} ]]; then
+            echo "fairness-harness: missing ${prefix}_${i}; numbered argv variables must be contiguous from ${prefix}_0" >&2
+            exit 2
+        fi
+        name=${seen[$i]}
+        out_ref+=("${!name}")
+    done
+}
+
+append_optional_netns_and_cpuset() {
+    local -n cmd_ref=$1
+    local netns=$2
+    local cpuset=$3
+
+    if [[ -n "$netns" ]]; then
+        cmd_ref+=(ip netns exec "$netns")
+    fi
+    if [[ -n "$cpuset" ]]; then
+        cmd_ref+=(taskset -c "$cpuset")
     fi
 }
 
@@ -210,27 +272,186 @@ build_iperf_cmd() {
     local port=$2
     local streams=$3
     local reverse_flag=$4
-    local netns=$5
-    local cpuset=$6
-    local cmd_prefix=$7
-    local iperf_bin=$8
+    local launch_netns=$5
+    local launch_cpuset=$6
+    local launch_arg_prefix=$7
+    local generator_netns=$8
+    local generator_cpuset=$9
+    local generator_arg_prefix=${10}
+    local iperf_bin=${11}
+    local launch_args=()
+    local generator_args=()
 
     cmd_ref=()
-    if [[ -n "$netns" ]]; then
-        cmd_ref+=(ip netns exec "$netns")
-    fi
-    if [[ -n "$cpuset" ]]; then
-        cmd_ref+=(taskset -c "$cpuset")
-    fi
-    append_prefix_words "$cmd_name" "$cmd_prefix"
+    collect_numbered_args "$launch_arg_prefix" launch_args
+    collect_numbered_args "$generator_arg_prefix" generator_args
+
+    append_optional_netns_and_cpuset "$cmd_name" "$launch_netns" "$launch_cpuset"
+    cmd_ref+=("${launch_args[@]}")
+    append_optional_netns_and_cpuset "$cmd_name" "$generator_netns" "$generator_cpuset"
+    cmd_ref+=("${generator_args[@]}")
     cmd_ref+=("$iperf_bin" -c "$TARGET" -P "$streams" -t "$T" -p "$port")
-    append_prefix_words "$cmd_name" "$reverse_flag"
+    if [[ -n "$reverse_flag" ]]; then
+        cmd_ref+=("$reverse_flag")
+    fi
     cmd_ref+=(-J --forceflush)
 }
 
-generator_signature() {
-    printf 'netns=%s|cpuset=%s|prefix=%s|bin=%s|rss=%s' \
-        "$1" "$2" "$3" "$4" "$5"
+max_cpu_from_possible_spec() {
+    local spec=$1
+    local clean
+    local part
+    local -a parts
+    local start
+    local end
+    local max=-1
+
+    clean=${spec//[[:space:]]/}
+    [[ -z "$clean" ]] && return 1
+    IFS=',' read -r -a parts <<< "$clean"
+    for part in "${parts[@]}"; do
+        if [[ "$part" =~ ^([0-9]+)$ ]]; then
+            start=$((10#${BASH_REMATCH[1]}))
+            (( start > max )) && max=$start
+        elif [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            start=$((10#${BASH_REMATCH[1]}))
+            end=$((10#${BASH_REMATCH[2]}))
+            (( start > end )) && return 1
+            (( end > max )) && max=$end
+        else
+            return 1
+        fi
+    done
+    (( max >= 0 )) || return 1
+    printf '%s\n' "$max"
+}
+
+discover_cpuset_max_cpu_id() {
+    local max
+    local hard_max
+    local nproc_count
+
+    if [[ ! "$CPUSET_HARD_MAX_CPU_ID" =~ ^[0-9]+$ ]]; then
+        echo "fairness-harness: CPUSET_HARD_MAX_CPU_ID must be a non-negative integer" >&2
+        return 1
+    fi
+    hard_max=$((10#$CPUSET_HARD_MAX_CPU_ID))
+
+    if [[ -n "$CPUSET_MAX_CPU_ID" ]]; then
+        if [[ ! "$CPUSET_MAX_CPU_ID" =~ ^[0-9]+$ ]]; then
+            echo "fairness-harness: CPUSET_MAX_CPU_ID must be a non-negative integer" >&2
+            return 1
+        fi
+        max=$((10#$CPUSET_MAX_CPU_ID))
+    elif [[ -r /sys/devices/system/cpu/possible ]] && max=$(max_cpu_from_possible_spec "$(cat /sys/devices/system/cpu/possible)"); then
+        :
+    elif nproc_count=$(nproc --all 2>/dev/null) && [[ "$nproc_count" =~ ^[0-9]+$ ]] && (( nproc_count > 0 )); then
+        max=$((10#$nproc_count - 1))
+    else
+        echo "fairness-harness: cannot discover CPU topology; set CPUSET_MAX_CPU_ID explicitly" >&2
+        return 1
+    fi
+
+    if (( max > hard_max )); then
+        echo "fairness-harness: CPUSET_MAX_CPU_ID=$max exceeds CPUSET_HARD_MAX_CPU_ID=$hard_max" >&2
+        return 1
+    fi
+    printf '%s\n' "$max"
+}
+
+cpuset_to_bitmap() {
+    local spec=$1
+    local label=$2
+    local -n out_ref=$3
+    local max_cpu_id=$4
+    local clean
+    local part
+    local -a parts
+    local start
+    local end
+    local cpu
+    local value
+
+    out_ref=()
+    clean=${spec//[[:space:]]/}
+    if [[ -z "$clean" ]]; then
+        echo "fairness-harness: empty CPU set for $label" >&2
+        return 1
+    fi
+    IFS=',' read -r -a parts <<< "$clean"
+    for part in "${parts[@]}"; do
+        if [[ "$part" =~ ^([0-9]+)$ ]]; then
+            value=${BASH_REMATCH[1]}
+            cpu=$((10#$value))
+            if (( cpu > max_cpu_id )); then
+                echo "fairness-harness: CPU $cpu in $label exceeds max CPU id $max_cpu_id" >&2
+                return 1
+            fi
+            out_ref["$cpu"]=1
+        elif [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            start=$((10#${BASH_REMATCH[1]}))
+            end=$((10#${BASH_REMATCH[2]}))
+            if (( start > end )); then
+                echo "fairness-harness: invalid CPU range $part for $label" >&2
+                return 1
+            fi
+            if (( end > max_cpu_id )); then
+                echo "fairness-harness: CPU range $part in $label exceeds max CPU id $max_cpu_id" >&2
+                return 1
+            fi
+            for ((cpu = start; cpu <= end; cpu++)); do
+                out_ref["$cpu"]=1
+            done
+        else
+            echo "fairness-harness: invalid CPU set token $part for $label" >&2
+            return 1
+        fi
+    done
+}
+
+cpuset_overlap() {
+    local -n left_ref=$1
+    local -n right_ref=$2
+    local cpu
+    local overlap=()
+
+    for cpu in "${!left_ref[@]}"; do
+        if [[ ${right_ref[$cpu]+x} ]]; then
+            overlap+=("$cpu")
+        fi
+    done
+    if ((${#overlap[@]} > 0)); then
+        local joined
+        joined=$(IFS=','; printf '%s' "${overlap[*]}")
+        printf '%s\n' "$joined"
+        return 0
+    fi
+    return 1
+}
+
+network_domain() {
+    local explicit_id=$1
+
+    if [[ -n "$explicit_id" ]]; then
+        printf '%s\n' "$explicit_id"
+    fi
+    return 0
+}
+
+append_runtime_artifact() {
+    [[ -n "$ARTIFACT_DIR" ]] || return 0
+    local label=$1
+    local pid=$2
+    local artifact="$ARTIFACT_DIR/generator-placement.txt"
+    local taskset_out
+    {
+        printf '%s.launcher_pid=%s\n' "$label" "$pid"
+        if taskset_out=$(taskset -pc "$pid" 2>/dev/null); then
+            printf '%s.launcher_pid_cpuset=%s\n' "$label" "$taskset_out"
+        else
+            printf '%s.launcher_pid_cpuset=unavailable\n' "$label"
+        fi
+    } >> "$artifact"
 }
 
 validate_isolated_generators() {
@@ -239,35 +460,40 @@ validate_isolated_generators() {
         echo "fairness-harness: isolated generator mode requires mixed CoS mode" >&2
         exit 2
     fi
+    if [[ -z "$IPERF_CPUSET" || -z "$MIXED_IPERF_CPUSET" ]]; then
+        echo "fairness-harness: --mixed-cos-isolated requires IPERF_CPUSET and MIXED_IPERF_CPUSET" >&2
+        exit 2
+    fi
 
-    local has_isolation=0
-    for value in \
-        "$IPERF_NETNS" "$MIXED_IPERF_NETNS" \
-        "$IPERF_CPUSET" "$MIXED_IPERF_CPUSET" \
-        "$IPERF_CMD_PREFIX" "$MIXED_IPERF_CMD_PREFIX" \
-        "$PRIMARY_RSS_STEERING" "$MIXED_RSS_STEERING"
-    do
-        if [[ -n "$value" && "$value" != "unspecified" ]]; then
-            has_isolation=1
-            break
+    local -A primary_cpus=()
+    local -A mixed_cpus=()
+    local max_cpu_id
+    local overlap
+    if ! max_cpu_id=$(discover_cpuset_max_cpu_id); then
+        exit 2
+    fi
+    if ! cpuset_to_bitmap "$IPERF_CPUSET" "IPERF_CPUSET" primary_cpus "$max_cpu_id"; then
+        exit 2
+    fi
+    if ! cpuset_to_bitmap "$MIXED_IPERF_CPUSET" "MIXED_IPERF_CPUSET" mixed_cpus "$max_cpu_id"; then
+        exit 2
+    fi
+    if overlap=$(cpuset_overlap primary_cpus mixed_cpus); then
+        echo "fairness-harness: isolated mode CPU sets overlap: $overlap" >&2
+        exit 2
+    fi
+
+    local primary_network
+    local mixed_network
+    primary_network=$(network_domain "$IPERF_NETWORK_ID")
+    mixed_network=$(network_domain "$MIXED_IPERF_NETWORK_ID")
+    if [[ -n "$IPERF_NETNS" || -n "$MIXED_IPERF_NETNS" ]]; then
+        if [[ -z "$IPERF_NETNS" || -z "$MIXED_IPERF_NETNS" || "$IPERF_NETNS" == "$MIXED_IPERF_NETNS" ]]; then
+            echo "fairness-harness: isolated mode generator netns values must both be set and distinct" >&2
+            exit 2
         fi
-    done
-    if [[ "$has_isolation" -ne 1 ]]; then
-        echo "fairness-harness: --mixed-cos-isolated requires CPU, netns, prefix, or RSS steering placement metadata" >&2
-        exit 2
-    fi
-
-    if [[ -n "$IPERF_CPUSET" && -n "$MIXED_IPERF_CPUSET" && "$IPERF_CPUSET" == "$MIXED_IPERF_CPUSET" ]]; then
-        echo "fairness-harness: isolated mode requires distinct IPERF_CPUSET and MIXED_IPERF_CPUSET when both are set" >&2
-        exit 2
-    fi
-
-    local primary_sig
-    local mixed_sig
-    primary_sig=$(generator_signature "$IPERF_NETNS" "$IPERF_CPUSET" "$IPERF_CMD_PREFIX" "$IPERF_BIN" "$PRIMARY_RSS_STEERING")
-    mixed_sig=$(generator_signature "$MIXED_IPERF_NETNS" "$MIXED_IPERF_CPUSET" "$MIXED_IPERF_CMD_PREFIX" "$MIXED_IPERF_BIN" "$MIXED_RSS_STEERING")
-    if [[ "$primary_sig" == "$mixed_sig" ]]; then
-        echo "fairness-harness: isolated mode primary and mixed generator placement are identical" >&2
+    elif [[ -z "$primary_network" || -z "$mixed_network" || "$primary_network" == "$mixed_network" ]]; then
+        echo "fairness-harness: --mixed-cos-isolated requires distinct generator netns or distinct IPERF_NETWORK_ID domains" >&2
         exit 2
     fi
 }
@@ -286,9 +512,27 @@ write_placement_artifact() {
 
     local primary_cmd=()
     local mixed_cmd=()
-    build_iperf_cmd primary_cmd "$PORT" "$N" "$REVERSE" "$IPERF_NETNS" "$IPERF_CPUSET" "$IPERF_CMD_PREFIX" "$IPERF_BIN"
+    local primary_launch_args=()
+    local mixed_launch_args=()
+    local primary_generator_args=()
+    local mixed_generator_args=()
+    local primary_network
+    local mixed_network
+
+    collect_numbered_args IPERF_LAUNCH_ARG primary_launch_args
+    collect_numbered_args IPERF_GENERATOR_ARG primary_generator_args
+    primary_network=$(network_domain "$IPERF_NETWORK_ID")
+
+    build_iperf_cmd primary_cmd "$PORT" "$N" "$REVERSE" \
+        "$IPERF_LAUNCH_NETNS" "$IPERF_LAUNCH_CPUSET" IPERF_LAUNCH_ARG \
+        "$IPERF_NETNS" "$IPERF_CPUSET" IPERF_GENERATOR_ARG "$IPERF_BIN"
     if [[ "$MIXED_COS" -eq 1 ]]; then
-        build_iperf_cmd mixed_cmd "$MIXED_PORT" "$MIXED_N" "$MIXED_REVERSE" "$MIXED_IPERF_NETNS" "$MIXED_IPERF_CPUSET" "$MIXED_IPERF_CMD_PREFIX" "$MIXED_IPERF_BIN"
+        collect_numbered_args MIXED_IPERF_LAUNCH_ARG mixed_launch_args
+        collect_numbered_args MIXED_IPERF_GENERATOR_ARG mixed_generator_args
+        mixed_network=$(network_domain "$MIXED_IPERF_NETWORK_ID")
+        build_iperf_cmd mixed_cmd "$MIXED_PORT" "$MIXED_N" "$MIXED_REVERSE" \
+            "$MIXED_IPERF_LAUNCH_NETNS" "$MIXED_IPERF_LAUNCH_CPUSET" MIXED_IPERF_LAUNCH_ARG \
+            "$MIXED_IPERF_NETNS" "$MIXED_IPERF_CPUSET" MIXED_IPERF_GENERATOR_ARG "$MIXED_IPERF_BIN"
     fi
 
     local artifact="$ARTIFACT_DIR/generator-placement.txt"
@@ -311,12 +555,16 @@ write_placement_artifact() {
         printf 'primary.cos_ifindex=%s\n' "${COS_IFINDEX:-}"
         printf 'primary.cos_queue_id=%s\n' "${COS_QUEUE_ID:-}"
         printf 'primary.shaper_rate_bps=%s\n' "${SHAPER_RATE_BPS:-}"
-        printf 'primary.netns=%s\n' "$IPERF_NETNS"
-        printf 'primary.cpuset=%s\n' "$IPERF_CPUSET"
-        printf 'primary.cmd_prefix=%s\n' "$IPERF_CMD_PREFIX"
+        printf 'primary.launch_netns=%s\n' "$IPERF_LAUNCH_NETNS"
+        printf 'primary.launch_cpuset=%s\n' "$IPERF_LAUNCH_CPUSET"
+        printf 'primary.launch_args=%s\n' "$(format_command "${primary_launch_args[@]}")"
+        printf 'primary.generator_netns=%s\n' "$IPERF_NETNS"
+        printf 'primary.generator_cpuset=%s\n' "$IPERF_CPUSET"
+        printf 'primary.generator_args=%s\n' "$(format_command "${primary_generator_args[@]}")"
+        printf 'primary.network_id=%s\n' "$primary_network"
         printf 'primary.bin=%s\n' "$IPERF_BIN"
         printf 'primary.rss_steering=%s\n' "$PRIMARY_RSS_STEERING"
-        printf 'primary.command=%s\n' "$(format_command "${primary_cmd[@]}")"
+        printf 'primary.command_intent=%s\n' "$(format_command "${primary_cmd[@]}")"
         if [[ "$MIXED_COS" -eq 1 ]]; then
             printf 'mixed.label=%s\n' "$MIXED_GENERATOR_LABEL"
             printf 'mixed.port=%s\n' "$MIXED_PORT"
@@ -325,13 +573,18 @@ write_placement_artifact() {
             printf 'mixed.cos_ifindex=%s\n' "${COS_IFINDEX:-}"
             printf 'mixed.cos_queue_id=%s\n' "${MIXED_COS_QUEUE_ID:-}"
             printf 'mixed.shaper_rate_bps=%s\n' "${MIXED_SHAPER_RATE_BPS:-}"
-            printf 'mixed.netns=%s\n' "$MIXED_IPERF_NETNS"
-            printf 'mixed.cpuset=%s\n' "$MIXED_IPERF_CPUSET"
-            printf 'mixed.cmd_prefix=%s\n' "$MIXED_IPERF_CMD_PREFIX"
+            printf 'mixed.launch_netns=%s\n' "$MIXED_IPERF_LAUNCH_NETNS"
+            printf 'mixed.launch_cpuset=%s\n' "$MIXED_IPERF_LAUNCH_CPUSET"
+            printf 'mixed.launch_args=%s\n' "$(format_command "${mixed_launch_args[@]}")"
+            printf 'mixed.generator_netns=%s\n' "$MIXED_IPERF_NETNS"
+            printf 'mixed.generator_cpuset=%s\n' "$MIXED_IPERF_CPUSET"
+            printf 'mixed.generator_args=%s\n' "$(format_command "${mixed_generator_args[@]}")"
+            printf 'mixed.network_id=%s\n' "$mixed_network"
             printf 'mixed.bin=%s\n' "$MIXED_IPERF_BIN"
             printf 'mixed.rss_steering=%s\n' "$MIXED_RSS_STEERING"
-            printf 'mixed.command=%s\n' "$(format_command "${mixed_cmd[@]}")"
+            printf 'mixed.command_intent=%s\n' "$(format_command "${mixed_cmd[@]}")"
         fi
+        printf 'runtime_probe=launcher_pid_and_cpuset_only; generator-context proof must come from the launch target or wrapper\n'
     } > "$artifact"
     echo "fairness-harness: wrote generator placement artifact: $artifact"
 }
@@ -385,13 +638,18 @@ run_iperf() {
     local port=$3
     local streams=$4
     local reverse_flag=$5
-    local netns=${6:-}
-    local cpuset=${7:-}
-    local cmd_prefix=${8:-}
-    local iperf_bin=${9:-iperf3}
+    local launch_netns=${6:-}
+    local launch_cpuset=${7:-}
+    local launch_arg_prefix=${8:-}
+    local generator_netns=${9:-}
+    local generator_cpuset=${10:-}
+    local generator_arg_prefix=${11:-}
+    local iperf_bin=${12:-iperf3}
     local cmd=()
 
-    build_iperf_cmd cmd "$port" "$streams" "$reverse_flag" "$netns" "$cpuset" "$cmd_prefix" "$iperf_bin"
+    build_iperf_cmd cmd "$port" "$streams" "$reverse_flag" \
+        "$launch_netns" "$launch_cpuset" "$launch_arg_prefix" \
+        "$generator_netns" "$generator_cpuset" "$generator_arg_prefix" "$iperf_bin"
     echo "fairness-harness: running ${label}: $(format_command "${cmd[@]}")for ${T}s"
     "${cmd[@]}" > "$out"
 }
@@ -434,10 +692,16 @@ cleanup() {
 trap 'cleanup; rm -rf "$WORK_DIR"' EXIT
 
 if [[ "$MIXED_COS" -eq 1 ]]; then
-    run_iperf "primary port $PORT queue $COS_QUEUE_ID" "$IPERF_OUT" "$PORT" "$N" "$REVERSE" "$IPERF_NETNS" "$IPERF_CPUSET" "$IPERF_CMD_PREFIX" "$IPERF_BIN" &
+    run_iperf "primary port $PORT queue $COS_QUEUE_ID" "$IPERF_OUT" "$PORT" "$N" "$REVERSE" \
+        "$IPERF_LAUNCH_NETNS" "$IPERF_LAUNCH_CPUSET" IPERF_LAUNCH_ARG \
+        "$IPERF_NETNS" "$IPERF_CPUSET" IPERF_GENERATOR_ARG "$IPERF_BIN" &
     PRIMARY_PID=$!
-    run_iperf "mixed port $MIXED_PORT queue $MIXED_COS_QUEUE_ID" "$MIXED_IPERF_OUT" "$MIXED_PORT" "$MIXED_N" "$MIXED_REVERSE" "$MIXED_IPERF_NETNS" "$MIXED_IPERF_CPUSET" "$MIXED_IPERF_CMD_PREFIX" "$MIXED_IPERF_BIN" &
+    append_runtime_artifact primary "$PRIMARY_PID"
+    run_iperf "mixed port $MIXED_PORT queue $MIXED_COS_QUEUE_ID" "$MIXED_IPERF_OUT" "$MIXED_PORT" "$MIXED_N" "$MIXED_REVERSE" \
+        "$MIXED_IPERF_LAUNCH_NETNS" "$MIXED_IPERF_LAUNCH_CPUSET" MIXED_IPERF_LAUNCH_ARG \
+        "$MIXED_IPERF_NETNS" "$MIXED_IPERF_CPUSET" MIXED_IPERF_GENERATOR_ARG "$MIXED_IPERF_BIN" &
     MIXED_PID=$!
+    append_runtime_artifact mixed "$MIXED_PID"
 
     IPERF_STATUS=0
     if wait "$PRIMARY_PID"; then :; else IPERF_STATUS=$?; fi
@@ -454,7 +718,9 @@ if [[ "$MIXED_COS" -eq 1 ]]; then
         exit "$IPERF_STATUS"
     fi
 else
-    run_iperf "single" "$IPERF_OUT" "$PORT" "$N" "$REVERSE" "$IPERF_NETNS" "$IPERF_CPUSET" "$IPERF_CMD_PREFIX" "$IPERF_BIN"
+    run_iperf "single" "$IPERF_OUT" "$PORT" "$N" "$REVERSE" \
+        "$IPERF_LAUNCH_NETNS" "$IPERF_LAUNCH_CPUSET" IPERF_LAUNCH_ARG \
+        "$IPERF_NETNS" "$IPERF_CPUSET" IPERF_GENERATOR_ARG "$IPERF_BIN"
 fi
 
 cleanup
