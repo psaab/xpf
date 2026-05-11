@@ -298,13 +298,14 @@ type SchedulerConfig struct {
 // ClassOfServiceConfig holds CoS forwarding classes, schedulers,
 // scheduler-maps, and per-interface shaping configuration.
 type ClassOfServiceConfig struct {
-	ForwardingClasses   map[string]*CoSForwardingClass
-	DSCPClassifiers     map[string]*CoSDSCPClassifier
-	IEEE8021Classifiers map[string]*CoSIEEE8021Classifier
-	DSCPRewriteRules    map[string]*CoSDSCPRewriteRule
-	Schedulers          map[string]*CoSScheduler
-	SchedulerMaps       map[string]*CoSSchedulerMap
-	Interfaces          map[string]*CoSInterface
+	ForwardingClasses    map[string]*CoSForwardingClass
+	DSCPClassifiers      map[string]*CoSDSCPClassifier
+	IEEE8021Classifiers  map[string]*CoSIEEE8021Classifier
+	DSCPRewriteRules     map[string]*CoSDSCPRewriteRule
+	Schedulers           map[string]*CoSScheduler
+	SchedulerMaps        map[string]*CoSSchedulerMap
+	Interfaces           map[string]*CoSInterface
+	FairnessExpectations []*CoSFairnessExpectation
 }
 
 // CoSForwardingClass maps a forwarding-class name to a queue number.
@@ -394,6 +395,15 @@ type CoSInterfaceUnit struct {
 	DSCPClassifier     string
 	IEEE8021Classifier string
 	DSCPRewriteRule    string
+}
+
+// CoSFairnessExpectation declares an opt-in RSS/workload expectation for
+// one egress CoS queue. Ifindex is used intentionally because the
+// userspace status snapshot reports the same kernel identity.
+type CoSFairnessExpectation struct {
+	Ifindex        int
+	QueueID        uint8
+	RSSExpectation string
 }
 
 // SystemConfig holds system-level configuration.

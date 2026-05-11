@@ -113,6 +113,8 @@ type xpfCollector struct {
 	fairnessActiveFlows        *prometheus.Desc
 	fairnessMaxWorkerFlowShare *prometheus.Desc
 	fairnessCoSCountsTruncated *prometheus.Desc
+	fairnessRSSExpectation     *prometheus.Desc
+	fairnessRSSSkewViolation   *prometheus.Desc
 }
 
 func newCollector(srv *Server) *xpfCollector {
@@ -408,6 +410,16 @@ func newCollector(srv *Server) *xpfCollector {
 			"1 when the userspace CoS active-flow snapshot was truncated before fairness RSS gauges were derived; 0 otherwise (#1247).",
 			nil, nil,
 		),
+		fairnessRSSExpectation: prometheus.NewDesc(
+			"xpf_fairness_rss_expectation_configured",
+			"1 for each configured opt-in RSS/workload expectation evaluated against this egress CoS queue (#1247).",
+			[]string{"ifindex", "queue_id", "expectation"}, nil,
+		),
+		fairnessRSSSkewViolation: prometheus.NewDesc(
+			"xpf_fairness_rss_skew_violation",
+			"1 when the configured RSS/workload expectation fails for this egress CoS queue; 0 when it passes (#1247).",
+			[]string{"ifindex", "queue_id", "expectation"}, nil,
+		),
 	}
 }
 
@@ -466,6 +478,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fairnessActiveFlows
 	ch <- c.fairnessMaxWorkerFlowShare
 	ch <- c.fairnessCoSCountsTruncated
+	ch <- c.fairnessRSSExpectation
+	ch <- c.fairnessRSSSkewViolation
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -587,6 +601,45 @@ func (c *xpfCollector) emitFairnessRSSGauges(ch chan<- prometheus.Metric, status
 			row.MaxWorkerFlowShare,
 			ifindexLabel,
 			queueLabel,
+		)
+	}
+	c.emitFairnessRSSExpectationGauges(ch, status, c.configuredFairnessRSSExpectations())
+}
+
+func (c *xpfCollector) configuredFairnessRSSExpectations() []dpuserspace.FairnessRSSExpectation {
+	if c == nil || c.srv == nil || c.srv.store == nil {
+		return nil
+	}
+	return dpuserspace.FairnessRSSExpectationsFromConfig(c.srv.store.ActiveConfig())
+}
+
+func (c *xpfCollector) emitFairnessRSSExpectationGauges(
+	ch chan<- prometheus.Metric,
+	status dpuserspace.ProcessStatus,
+	expectations []dpuserspace.FairnessRSSExpectation,
+) {
+	for _, result := range dpuserspace.EvaluateFairnessRSSExpectations(status, expectations) {
+		ifindexLabel := strconv.Itoa(result.Ifindex)
+		queueLabel := strconv.FormatUint(uint64(result.QueueID), 10)
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessRSSExpectation,
+			prometheus.GaugeValue,
+			1,
+			ifindexLabel,
+			queueLabel,
+			result.Expectation,
+		)
+		violation := 1.0
+		if result.Pass {
+			violation = 0
+		}
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessRSSSkewViolation,
+			prometheus.GaugeValue,
+			violation,
+			ifindexLabel,
+			queueLabel,
+			result.Expectation,
 		)
 	}
 }

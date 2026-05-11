@@ -173,7 +173,7 @@ func (s *Server) showChassisClusterDataPlaneFairness(buf *strings.Builder) {
 		fmt.Fprintf(buf, "Userspace status unavailable: %v\n", err)
 		return
 	}
-	buf.WriteString(dpuserspace.FormatFairnessRSS(status))
+	buf.WriteString(dpuserspace.FormatFairnessRSS(status, dpuserspace.FairnessRSSExpectationsFromConfig(s.store.ActiveConfig())))
 }
 
 // showChassisClusterDataPlaneFlows renders the bounded active
