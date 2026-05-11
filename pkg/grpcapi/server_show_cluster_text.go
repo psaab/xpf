@@ -161,6 +161,41 @@ func (s *Server) showChassisClusterDataPlaneInterfaces(buf *strings.Builder) {
 	}
 }
 
+// showChassisClusterDataPlaneFairness renders the userspace per-CoS
+// fairness RSS structure snapshot.
+func (s *Server) showChassisClusterDataPlaneFairness(buf *strings.Builder) {
+	if s.cluster == nil {
+		fmt.Fprintln(buf, "Cluster not configured")
+		return
+	}
+	status, err := s.userspaceDataplaneStatus()
+	if err != nil {
+		fmt.Fprintf(buf, "Userspace status unavailable: %v\n", err)
+		return
+	}
+	buf.WriteString(dpuserspace.FormatFairnessRSS(status))
+}
+
+// showChassisClusterDataPlaneFlows renders the bounded active
+// flow-to-worker diagnostic map.
+func (s *Server) showChassisClusterDataPlaneFlows(filter string, buf *strings.Builder) {
+	if s.cluster == nil {
+		fmt.Fprintln(buf, "Cluster not configured")
+		return
+	}
+	limit, err := dpuserspace.ParseFlowWorkerMapLimitSpec(filter)
+	if err != nil {
+		fmt.Fprintf(buf, "syntax error: %v\n", err)
+		return
+	}
+	status, err := s.userspaceDataplaneStatus()
+	if err != nil {
+		fmt.Fprintf(buf, "Userspace status unavailable: %v\n", err)
+		return
+	}
+	buf.WriteString(dpuserspace.FormatFlowWorkerMap(status, limit))
+}
+
 // showChassisClusterIPMonitoringStatus renders the IP-monitoring
 // (RPM-driven RG transition) status table.
 func (s *Server) showChassisClusterIPMonitoringStatus(buf *strings.Builder) {

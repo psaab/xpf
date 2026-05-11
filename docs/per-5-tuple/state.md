@@ -330,6 +330,16 @@ snapshots. These make structural skew visible in Prometheus without
 adding packet-path state. Opt-in config/alerting for expectation
 violations remains separate follow-up work.
 
+The operator text surface mirrors the same data:
+`show chassis cluster data-plane fairness` prints per-CoS active flows,
+active workers, Cstruct, and max-worker share, while
+`show chassis cluster data-plane flows` prints the bounded active
+flow-to-worker map with session, wire, and reverse-canonical tuples.
+Operators can request `show chassis cluster data-plane flows all` for
+the full helper-reported snapshot, or
+`show chassis cluster data-plane flows limit <rows>` for an explicit row
+cap.
+
 ## Open work
 
 - **#547 — Deterministic RSS-skew test fixture**: SHIPPED as PR #1223
@@ -346,8 +356,9 @@ violations remains separate follow-up work.
   2026-05-07 sweep below, NO empirically failing workload exists.
 - **#1247 — Path 4 workload/RSS expectation gate**: first harness
   slice shipped in this work; production RSS-structure gauges are now
-  exported from Prometheus. Runtime config/alerting remains the
-  follow-up if operators want opt-in paging on structural skew.
+  exported from Prometheus and the userspace status text. Runtime
+  config/alerting remains the follow-up if operators want opt-in paging
+  on structural skew.
 
 ## Empirical sweep across workload classes (2026-05-07)
 
