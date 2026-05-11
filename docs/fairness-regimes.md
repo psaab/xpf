@@ -259,22 +259,63 @@ suspect, use the opt-in isolated mode:
 ```bash
 COS_IFINDEX=<egress-ifindex> \
 IPERF_CPUSET=0-3 MIXED_IPERF_CPUSET=4-7 \
-PRIMARY_RSS_STEERING="vf0/rss-context-a" \
-MIXED_RSS_STEERING="vf1/rss-context-b" \
+IPERF_NETWORK_ID=vf0-rss-a MIXED_IPERF_NETWORK_ID=vf1-rss-b \
 ARTIFACT_DIR=/tmp/fairness-isolated \
 ./test/incus/fairness-harness.sh --mixed-cos-isolated
 ```
 
 `--mixed-cos-isolated` still evaluates both classes from one metrics
-scrape, but it requires explicit placement metadata and writes
-`generator-placement.txt` under `ARTIFACT_DIR` (or a generated `/tmp`
-artifact directory). The placement file records per-class ports,
-streams, reverse flag, CoS ifindex/queue, shaper rates, CPU sets,
-network namespaces, command prefixes, generator binaries, RSS/NIC
-steering notes, and the exact iperf command line. This mode is for
-separating scheduler behavior from test-generator cross-talk and
-RSS/NIC placement assumptions; the lightweight `--mixed-cos` mode
-remains the default for routine runs.
+scrape, but it requires both compute isolation and explicit network/RSS
+isolation. Compute isolation is enforced by parsing
+`IPERF_CPUSET` / `MIXED_IPERF_CPUSET` as CPU bitmaps and rejecting any
+overlap. Network isolation is enforced by distinct generator netns
+values or distinct `IPERF_NETWORK_ID` / `MIXED_IPERF_NETWORK_ID`
+domains. `PRIMARY_RSS_STEERING` and `MIXED_RSS_STEERING` are free-form
+audit notes only; they are never accepted as proof of isolation.
+
+CPU-set validation rejects CPU IDs above the local host's discovered
+CPU topology (`/sys/devices/system/cpu/possible`, then `nproc --all`).
+If the topology cannot be discovered, the harness fails before expanding
+CPU ranges; set `CPUSET_MAX_CPU_ID=<max-cpu-id>` explicitly in that
+environment. When the generator runs on a remote host with a different
+CPU topology, set `CPUSET_MAX_CPU_ID=<max-remote-cpu-id>` explicitly. A
+hard safety ceiling of `CPUSET_HARD_MAX_CPU_ID=8191` prevents typo
+ranges from expanding indefinitely; raise it only for deliberately
+larger systems.
+
+For remote generators, use numbered argv variables instead of a shell
+prefix string. Launcher args run on the local host before entering the
+generator context; generator args run after the launcher and before
+`iperf3`. Numbered argv variables must be contiguous from `_0`; a gap
+such as `IPERF_LAUNCH_ARG_0` plus `IPERF_LAUNCH_ARG_2` is rejected
+instead of silently dropping the later argument. Indices must use
+canonical decimal spelling (`_0`, `_1`, `_2`); leading-zero forms such
+as `_01` and values outside the shell arithmetic range are rejected.
+
+```bash
+COS_IFINDEX=5 \
+IPERF_CPUSET=0-3 MIXED_IPERF_CPUSET=4-7 \
+IPERF_NETWORK_ID=lan-vf-rss-a MIXED_IPERF_NETWORK_ID=lan-vf-rss-b \
+IPERF_LAUNCH_ARG_0=/usr/bin/incus \
+IPERF_LAUNCH_ARG_1=exec \
+IPERF_LAUNCH_ARG_2=loss:cluster-userspace-host \
+IPERF_LAUNCH_ARG_3=-- \
+MIXED_IPERF_LAUNCH_ARG_0=/usr/bin/incus \
+MIXED_IPERF_LAUNCH_ARG_1=exec \
+MIXED_IPERF_LAUNCH_ARG_2=loss:cluster-userspace-host \
+MIXED_IPERF_LAUNCH_ARG_3=-- \
+ARTIFACT_DIR=/tmp/fairness-isolated \
+./test/incus/fairness-harness.sh --mixed-cos-isolated
+```
+
+The placement file records per-class ports, streams, reverse flag, CoS
+ifindex/queue, shaper rates, launcher args, generator CPU sets, network
+domains, generator netns, generator args, binaries, RSS/NIC steering
+notes, and the exact command intent. It also appends best-effort local
+launcher PID/affinity data; generator-context proof must come from the
+launch target or wrapper because remote launchers such as `incus exec`
+do not expose the remote iperf PID to this local script. The
+lightweight `--mixed-cos` mode remains the default for routine runs.
 
 ## Required metrics — exported in production via gRPC/Prometheus
 
