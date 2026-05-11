@@ -432,6 +432,16 @@ type ProcessStatus struct {
 	// #802: focused per-binding ring-pressure view. Projected from
 	// Bindings by the Rust helper; parallel rather than replacement.
 	PerBinding             []BindingCountersSnapshot         `json:"per_binding,omitempty"`
+	// #1249: bounded low-frequency diagnostic map from active flow-cache
+	// entries to the worker/RX queue that currently owns them. This is
+	// status/debug data only, not a production metric or scheduler input.
+	FlowWorkerMap          []FlowWorkerStatus                `json:"flow_worker_map,omitempty"`
+	FlowWorkerMapTruncated bool                              `json:"flow_worker_map_truncated,omitempty"`
+	// #1248: per-CoS-queue active flow distribution by egress ifindex,
+	// queue, and worker. This is the class-specific {a_i} source for
+	// mixed-workload fairness diagnostics.
+	CoSActiveFlowCounts          []CoSActiveFlowCountStatus `json:"cos_active_flow_counts,omitempty"`
+	CoSActiveFlowCountsTruncated bool                       `json:"cos_active_flow_counts_truncated,omitempty"`
 	RecentSessionDeltas    []SessionDeltaInfo                `json:"recent_session_deltas,omitempty"`
 	RecentExceptions       []ExceptionStatus                 `json:"recent_exceptions,omitempty"`
 	CoSInterfaces          []CoSInterfaceStatus              `json:"cos_interfaces,omitempty"`
@@ -584,6 +594,39 @@ type PacketResolution struct {
 	DstPort        uint16 `json:"dst_port,omitempty"`
 	FromZone       string `json:"from_zone,omitempty"`
 	ToZone         string `json:"to_zone,omitempty"`
+}
+
+type FlowTupleStatus struct {
+	AddrFamily uint8  `json:"addr_family,omitempty"`
+	Protocol   uint8  `json:"protocol,omitempty"`
+	SrcIP      string `json:"src_ip,omitempty"`
+	DstIP      string `json:"dst_ip,omitempty"`
+	SrcPort    uint16 `json:"src_port,omitempty"`
+	DstPort    uint16 `json:"dst_port,omitempty"`
+}
+
+type FlowWorkerStatus struct {
+	Slot                uint32          `json:"slot,omitempty"`
+	QueueID             uint32          `json:"queue_id,omitempty"`
+	WorkerID            uint32          `json:"worker_id,omitempty"`
+	Interface           string          `json:"interface,omitempty"`
+	Ifindex             int             `json:"ifindex,omitempty"`
+	IngressIfindex      int             `json:"ingress_ifindex,omitempty"`
+	EgressIfindex       int             `json:"egress_ifindex,omitempty"`
+	TxIfindex           int             `json:"tx_ifindex,omitempty"`
+	SessionKey          FlowTupleStatus `json:"session_key,omitempty"`
+	ForwardWireKey      FlowTupleStatus `json:"forward_wire_key,omitempty"`
+	ReverseCanonicalKey FlowTupleStatus `json:"reverse_canonical_key,omitempty"`
+	CoSQueueID          *uint8          `json:"cos_queue_id,omitempty"`
+	DSCPRewrite         *uint8          `json:"dscp_rewrite,omitempty"`
+	AgeEpochs           uint16          `json:"age_epochs,omitempty"`
+}
+
+type CoSActiveFlowCountStatus struct {
+	Ifindex         int    `json:"ifindex,omitempty"`
+	QueueID         uint8  `json:"queue_id,omitempty"`
+	WorkerID        uint32 `json:"worker_id,omitempty"`
+	ActiveFlowCount uint32 `json:"active_flow_count,omitempty"`
 }
 
 type ForwardingControlRequest struct {

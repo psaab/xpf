@@ -237,6 +237,16 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// Prometheus to compute `{a_i}` for the structural CoV gate
     /// per `docs/fairness-regimes.md`.
     pub(super) active_flow_count: AtomicU32,
+    /// #1249: bounded active flow-cache rows published by the owning
+    /// worker on the same debug cadence as `active_flow_count`. Stored
+    /// as an owned ArcSwap snapshot so the control thread can aggregate
+    /// tuple->worker mappings without taking a worker-local lock.
+    pub(super) flow_worker_map: ArcSwap<Vec<crate::protocol::FlowWorkerStatus>>,
+    pub(super) flow_worker_map_truncated: AtomicBool,
+    /// #1248: bounded per-binding active-flow counts by egress CoS
+    /// `(ifindex, queue_id)`, published by the owning worker on the
+    /// debug cadence and later aggregated by coordinator status.
+    pub(super) cos_active_flow_counts: ArcSwap<Vec<crate::protocol::CoSActiveFlowCountStatus>>,
     /// #941 Work item D: count of hard-cap activations. When V_min
     /// throttle would have fired for V_MIN_CONSECUTIVE_SKIP_HARD_CAP
     /// consecutive batches, hard-cap force-continues AND arms
@@ -454,6 +464,9 @@ impl BindingLiveState {
             flow_cache_evictions: AtomicU64::new(0),
             flow_cache_collision_evictions: AtomicU64::new(0),
             active_flow_count: AtomicU32::new(0),
+            flow_worker_map: ArcSwap::from_pointee(Vec::new()),
+            flow_worker_map_truncated: AtomicBool::new(false),
+            cos_active_flow_counts: ArcSwap::from_pointee(Vec::new()),
             v_min_throttle_hard_cap_overrides: AtomicU64::new(0),
             v_min_throttles: AtomicU64::new(0),
             session_hits: AtomicU64::new(0),
@@ -580,6 +593,38 @@ impl BindingLiveState {
     pub(super) fn set_max_pending_tx(&self, max_pending: usize) {
         self.max_pending_tx
             .store(max_pending.min(u32::MAX as usize) as u32, Ordering::Relaxed);
+    }
+
+    pub(super) fn publish_flow_worker_map(
+        &self,
+        rows: Vec<crate::protocol::FlowWorkerStatus>,
+        truncated: bool,
+    ) {
+        self.flow_worker_map_truncated
+            .store(truncated, Ordering::Relaxed);
+        self.flow_worker_map.store(Arc::new(rows));
+    }
+
+    pub(in crate::afxdp) fn flow_worker_map_snapshot(
+        &self,
+    ) -> (Vec<crate::protocol::FlowWorkerStatus>, bool) {
+        (
+            self.flow_worker_map.load().as_ref().clone(),
+            self.flow_worker_map_truncated.load(Ordering::Relaxed),
+        )
+    }
+
+    pub(super) fn publish_cos_active_flow_counts(
+        &self,
+        rows: Vec<crate::protocol::CoSActiveFlowCountStatus>,
+    ) {
+        self.cos_active_flow_counts.store(Arc::new(rows));
+    }
+
+    pub(in crate::afxdp) fn cos_active_flow_counts_snapshot(
+        &self,
+    ) -> Vec<crate::protocol::CoSActiveFlowCountStatus> {
+        self.cos_active_flow_counts.load().as_ref().clone()
     }
 
     pub(super) fn clear_error(&self) {
@@ -1100,9 +1145,46 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
     // at 65536 ticks × 65ms ≈ 71 minutes; epoch 0 is reserved as the
     // "never touched" sentinel and skipped by tick_advance_epoch.
     binding.flow.flow_cache.tick_advance_epoch();
-    binding.live.active_flow_count.store(
-        binding.flow.flow_cache.count_active_flows(),
-        Ordering::Relaxed,
+    let (active_flow_count, flow_debug_entries, cos_counts, flow_map_truncated) = binding
+        .flow
+        .flow_cache
+        .active_flow_debug_entries(FLOW_WORKER_MAP_MAX_PER_BINDING);
+    binding
+        .live
+        .active_flow_count
+        .store(active_flow_count, Ordering::Relaxed);
+    binding.live.publish_flow_worker_map(
+        flow_debug_entries
+            .into_iter()
+            .map(|entry| crate::protocol::FlowWorkerStatus {
+                slot: binding.slot,
+                queue_id: binding.queue_id,
+                worker_id: binding.worker_id,
+                interface: binding.interface.to_string(),
+                ifindex: binding.ifindex,
+                ingress_ifindex: entry.ingress_ifindex,
+                egress_ifindex: entry.egress_ifindex,
+                tx_ifindex: entry.tx_ifindex,
+                session_key: entry.session_key,
+                forward_wire_key: entry.forward_wire_key,
+                reverse_canonical_key: entry.reverse_canonical_key,
+                cos_queue_id: entry.cos_queue_id,
+                dscp_rewrite: entry.dscp_rewrite,
+                age_epochs: entry.age_epochs,
+            })
+            .collect(),
+        flow_map_truncated,
+    );
+    binding.live.publish_cos_active_flow_counts(
+        cos_counts
+            .into_iter()
+            .map(|entry| crate::protocol::CoSActiveFlowCountStatus {
+                ifindex: entry.ifindex,
+                queue_id: entry.queue_id,
+                worker_id: binding.worker_id,
+                active_flow_count: entry.active_flow_count,
+            })
+            .collect(),
     );
     // #941 Work item D + #943: flush each queue's per-queue scratch
     // counters (hard-cap overrides AND regular V_min throttles) into

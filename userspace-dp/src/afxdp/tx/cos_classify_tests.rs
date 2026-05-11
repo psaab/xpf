@@ -613,6 +613,125 @@ fn resolve_cos_queue_id_prefers_egress_output_filter_forwarding_class() {
 }
 
 #[test]
+fn resolve_cos_queue_id_uses_reverse_output_source_port_filter() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0-0-1.0".into(),
+            ifindex: 202,
+            hardware_addr: "02:bf:72:00:61:01".into(),
+            filter_output_v4: "bandwidth-output-reverse".into(),
+            cos_shaping_rate_bytes_per_sec: 25_000_000_000,
+            cos_shaping_burst_bytes: 256_000,
+            cos_scheduler_map: "bandwidth-limit".into(),
+            ..Default::default()
+        }],
+        filters: vec![FirewallFilterSnapshot {
+            name: "bandwidth-output-reverse".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "iperf-a-reverse".into(),
+                protocols: vec!["tcp".into()],
+                source_ports: vec!["5201".into()],
+                action: "accept".into(),
+                count: "iperf-a-reverse".into(),
+                forwarding_class: "iperf-a".into(),
+                ..Default::default()
+            }],
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![
+                CoSForwardingClassSnapshot {
+                    name: "best-effort".into(),
+                    queue: 0,
+                },
+                CoSForwardingClassSnapshot {
+                    name: "iperf-a".into(),
+                    queue: 4,
+                },
+            ],
+            schedulers: vec![
+                CoSSchedulerSnapshot {
+                    name: "scheduler-be".into(),
+                    transmit_rate_bytes: 100_000_000,
+                    transmit_rate_exact: true,
+                    priority: "low".into(),
+                    buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
+                },
+                CoSSchedulerSnapshot {
+                    name: "scheduler-iperf-a".into(),
+                    transmit_rate_bytes: 1_000_000_000,
+                    transmit_rate_exact: true,
+                    priority: "low".into(),
+                    buffer_size_bytes: 128_000,
+                    surplus_sharing: false,
+                },
+            ],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "bandwidth-limit".into(),
+                entries: vec![
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        scheduler: "scheduler-be".into(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "iperf-a".into(),
+                        scheduler: "scheduler-iperf-a".into(),
+                    },
+                ],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+        }),
+        ..Default::default()
+    };
+
+    let forwarding = build_forwarding_state(&snapshot);
+    let reverse_data = resolve_cos_queue_id(
+        &forwarding,
+        202,
+        UserspaceDpMeta {
+            ingress_ifindex: 80,
+            ingress_vlan_id: 80,
+            addr_family: libc::AF_INET as u8,
+            dscp: 0,
+            ..Default::default()
+        },
+        Some(&SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+            src_port: 5201,
+            dst_port: 49152,
+        }),
+    );
+    let forward_shape_on_reverse_egress = resolve_cos_queue_id(
+        &forwarding,
+        202,
+        UserspaceDpMeta {
+            ingress_ifindex: 80,
+            ingress_vlan_id: 80,
+            addr_family: libc::AF_INET as u8,
+            dscp: 0,
+            ..Default::default()
+        },
+        Some(&SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+            src_port: 49152,
+            dst_port: 5201,
+        }),
+    );
+
+    assert_eq!(reverse_data, Some(4));
+    assert_eq!(forward_shape_on_reverse_egress, Some(0));
+}
+
+#[test]
 fn resolve_cached_cos_tx_selection_prefers_egress_output_filter_and_keeps_counter() {
     let snapshot = ConfigSnapshot {
         interfaces: vec![

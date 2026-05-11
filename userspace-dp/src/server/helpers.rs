@@ -77,6 +77,13 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.recent_exceptions = state.afxdp.recent_exceptions();
     state.status.cos_interfaces = state.afxdp.cos_statuses();
     state.status.filter_term_counters = state.afxdp.filter_term_counters();
+    let (flow_worker_map, flow_worker_map_truncated) = state.afxdp.flow_worker_map();
+    state.status.flow_worker_map = flow_worker_map;
+    state.status.flow_worker_map_truncated = flow_worker_map_truncated;
+    let (cos_active_flow_counts, cos_active_flow_counts_truncated) =
+        state.afxdp.cos_active_flow_counts();
+    state.status.cos_active_flow_counts = cos_active_flow_counts;
+    state.status.cos_active_flow_counts_truncated = cos_active_flow_counts_truncated;
     state.status.last_resolution = state.afxdp.last_resolution();
     state.status.slow_path = state.afxdp.slow_path_status().into();
     if let Some(es_stats) = state.afxdp.event_stream_stats() {

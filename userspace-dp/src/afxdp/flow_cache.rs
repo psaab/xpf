@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
@@ -13,6 +14,8 @@ const FLOW_CACHE_SIZE: usize = 4096;
 const FLOW_CACHE_WAYS: usize = 4;
 const FLOW_CACHE_SETS: usize = FLOW_CACHE_SIZE / FLOW_CACHE_WAYS;
 const FLOW_CACHE_SET_MASK: usize = FLOW_CACHE_SETS - 1;
+const ACTIVE_WINDOW_EPOCHS: u16 = 10;
+pub(super) const FLOW_WORKER_MAP_MAX_PER_BINDING: usize = 256;
 const _: () = assert!(FLOW_CACHE_SETS.is_power_of_two());
 const _: () = assert!(FLOW_CACHE_WAYS == 4);
 const _: () = assert!(FLOW_CACHE_SETS * FLOW_CACHE_WAYS == FLOW_CACHE_SIZE);
@@ -132,6 +135,26 @@ pub(super) struct FlowCacheEntry {
     /// skipped by `tick_advance_epoch`); freshly inserted entries carry
     /// 0 until their first lookup hit.
     pub(super) last_used_epoch: u16,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct FlowCacheDebugEntry {
+    pub(super) ingress_ifindex: i32,
+    pub(super) egress_ifindex: i32,
+    pub(super) tx_ifindex: i32,
+    pub(super) session_key: crate::protocol::FlowTupleStatus,
+    pub(super) forward_wire_key: crate::protocol::FlowTupleStatus,
+    pub(super) reverse_canonical_key: crate::protocol::FlowTupleStatus,
+    pub(super) cos_queue_id: Option<u8>,
+    pub(super) dscp_rewrite: Option<u8>,
+    pub(super) age_epochs: u16,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CoSActiveFlowCount {
+    pub(super) ifindex: i32,
+    pub(super) queue_id: u8,
+    pub(super) active_flow_count: u32,
 }
 
 /// #963 PR-A: defense-in-depth check for `from_forward_decision`.
@@ -362,23 +385,87 @@ impl FlowCache {
     /// (every 0xFFFF poll calls, ≈ 65 ms in steady state), so 10
     /// epochs ≈ 650 ms. Owner-only periodic scan; not on the hot path.
     /// O(N) over `FLOW_CACHE_SIZE` (4096 entries, see top of this file).
+    #[cfg(test)]
     pub(super) fn count_active_flows(&self) -> u32 {
-        const ACTIVE_WINDOW_EPOCHS: u16 = 10;
-        let now = self.current_epoch;
         let mut active = 0u32;
         for slot in self.entries.iter() {
             if let Some(entry) = slot {
-                // last_used_epoch == 0 marks "never touched"; skip.
-                if entry.last_used_epoch == 0 {
-                    continue;
-                }
-                let age = now.wrapping_sub(entry.last_used_epoch);
-                if age < ACTIVE_WINDOW_EPOCHS {
+                if self.active_entry_age(entry).is_some() {
                     active = active.saturating_add(1);
                 }
             }
         }
         active
+    }
+
+    fn active_entry_age(&self, entry: &FlowCacheEntry) -> Option<u16> {
+        // last_used_epoch == 0 marks "never touched"; skip.
+        if entry.last_used_epoch == 0 {
+            return None;
+        }
+        let age = self.current_epoch.wrapping_sub(entry.last_used_epoch);
+        (age < ACTIVE_WINDOW_EPOCHS).then_some(age)
+    }
+
+    /// #1249: return a bounded active-flow debug map from the same
+    /// owner-only scan that backs `count_active_flows`. This runs on
+    /// the worker's debug/status cadence, not in the packet path.
+    pub(super) fn active_flow_debug_entries(
+        &self,
+        limit: usize,
+    ) -> (
+        u32,
+        Vec<FlowCacheDebugEntry>,
+        Vec<CoSActiveFlowCount>,
+        bool,
+    ) {
+        let limit = limit.min(FLOW_CACHE_SIZE);
+        let mut active = 0u32;
+        let mut truncated = false;
+        let mut rows = Vec::with_capacity(limit.min(64));
+        let mut cos_counts = BTreeMap::<(i32, u8), u32>::new();
+        for slot in self.entries.iter() {
+            let Some(entry) = slot else {
+                continue;
+            };
+            let Some(age_epochs) = self.active_entry_age(entry) else {
+                continue;
+            };
+            active = active.saturating_add(1);
+            if let Some(queue_id) = entry.descriptor.tx_selection.queue_id {
+                let key = (entry.descriptor.egress_ifindex, queue_id);
+                let count = cos_counts.entry(key).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+            if rows.len() >= limit {
+                truncated = true;
+                continue;
+            }
+            let forward_wire = forward_wire_key(&entry.key, entry.decision.nat);
+            let reverse_canonical = reverse_canonical_key(&entry.key, entry.decision.nat);
+            rows.push(FlowCacheDebugEntry {
+                ingress_ifindex: entry.ingress_ifindex,
+                egress_ifindex: entry.descriptor.egress_ifindex,
+                tx_ifindex: entry.descriptor.tx_ifindex,
+                session_key: crate::protocol::FlowTupleStatus::from_session_key(&entry.key),
+                forward_wire_key: crate::protocol::FlowTupleStatus::from_session_key(&forward_wire),
+                reverse_canonical_key: crate::protocol::FlowTupleStatus::from_session_key(
+                    &reverse_canonical,
+                ),
+                cos_queue_id: entry.descriptor.tx_selection.queue_id,
+                dscp_rewrite: entry.descriptor.tx_selection.dscp_rewrite,
+                age_epochs,
+            });
+        }
+        let cos_counts = cos_counts
+            .into_iter()
+            .map(|((ifindex, queue_id), active_flow_count)| CoSActiveFlowCount {
+                ifindex,
+                queue_id,
+                active_flow_count,
+            })
+            .collect();
+        (active, rows, cos_counts, truncated)
     }
 
     /// Set index = low bits of the FxHasher-produced flow hash.

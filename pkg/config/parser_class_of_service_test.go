@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -159,6 +161,102 @@ func TestCompileClassOfServiceSetSyntax(t *testing.T) {
 	}
 	if got := rewriteRule.Entries[0].DSCPValue; got != 46 {
 		t.Fatalf("wan-rewrite code-point = %d, want 46", got)
+	}
+}
+
+func TestCoSIperfSymmetricFixtureCompilesReverseSourcePortOutputFilter(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "test", "incus", "cos-iperf-symmetric.set"))
+	if err != nil {
+		t.Fatalf("read symmetric fixture: %v", err)
+	}
+	tree := &ConfigTree{}
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "set ") {
+			continue
+		}
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile symmetric fixture: %v", err)
+	}
+
+	reth0Cos := cfg.ClassOfService.Interfaces["reth0"].Units[80]
+	if reth0Cos == nil {
+		t.Fatal("expected forward CoS shaper on reth0 unit 80")
+	}
+	if got := reth0Cos.SchedulerMap; got != "bandwidth-limit" {
+		t.Fatalf("reth0.80 scheduler-map = %q, want bandwidth-limit", got)
+	}
+
+	geCos := cfg.ClassOfService.Interfaces["ge-0-0-1"].Units[0]
+	if geCos == nil {
+		t.Fatal("expected reverse CoS shaper on ge-0-0-1 unit 0")
+	}
+	if got := geCos.ShapingRateBytes; got != parseBandwidthLimit("25g") {
+		t.Fatalf("ge-0-0-1.0 shaping-rate = %d, want %d", got, parseBandwidthLimit("25g"))
+	}
+	if got := geCos.SchedulerMap; got != "bandwidth-limit" {
+		t.Fatalf("ge-0-0-1.0 scheduler-map = %q, want bandwidth-limit", got)
+	}
+
+	fwdUnit := cfg.Interfaces.Interfaces["reth0"].Units[80]
+	if fwdUnit == nil {
+		t.Fatal("expected reth0 unit 80 interface config")
+	}
+	if got := fwdUnit.FilterOutputV4; got != "bandwidth-output" {
+		t.Fatalf("reth0.80 inet output filter = %q, want bandwidth-output", got)
+	}
+	if got := fwdUnit.FilterOutputV6; got != "bandwidth-output" {
+		t.Fatalf("reth0.80 inet6 output filter = %q, want bandwidth-output", got)
+	}
+
+	revUnit := cfg.Interfaces.Interfaces["ge-0-0-1"].Units[0]
+	if revUnit == nil {
+		t.Fatal("expected ge-0-0-1 unit 0 interface config")
+	}
+	if got := revUnit.FilterOutputV4; got != "bandwidth-output-reverse" {
+		t.Fatalf("ge-0-0-1.0 inet output filter = %q, want bandwidth-output-reverse", got)
+	}
+	if got := revUnit.FilterOutputV6; got != "bandwidth-output-reverse" {
+		t.Fatalf("ge-0-0-1.0 inet6 output filter = %q, want bandwidth-output-reverse", got)
+	}
+
+	revFilter := cfg.Firewall.FiltersInet["bandwidth-output-reverse"]
+	if revFilter == nil {
+		t.Fatal("expected inet bandwidth-output-reverse filter")
+	}
+	if len(revFilter.Terms) == 0 {
+		t.Fatal("expected reverse filter terms")
+	}
+	term := revFilter.Terms[0]
+	if got := strings.Join(term.SourcePorts, ","); got != "5201" {
+		t.Fatalf("reverse term 0 source ports = %q, want 5201", got)
+	}
+	if len(term.DestinationPorts) != 0 {
+		t.Fatalf("reverse term 0 must not match destination-port; got %v", term.DestinationPorts)
+	}
+	if got := term.ForwardingClass; got != "iperf-a" {
+		t.Fatalf("reverse term 0 forwarding-class = %q, want iperf-a", got)
+	}
+
+	rev6Filter := cfg.Firewall.FiltersInet6["bandwidth-output-reverse"]
+	if rev6Filter == nil || len(rev6Filter.Terms) < 4 {
+		t.Fatal("expected inet6 bandwidth-output-reverse filter with at least 4 terms")
+	}
+	term = rev6Filter.Terms[3]
+	if got := strings.Join(term.SourcePorts, ","); got != "5204" {
+		t.Fatalf("reverse inet6 term 3 source ports = %q, want 5204", got)
+	}
+	if got := term.ForwardingClass; got != "iperf-d" {
+		t.Fatalf("reverse inet6 term 3 forwarding-class = %q, want iperf-d", got)
 	}
 }
 
