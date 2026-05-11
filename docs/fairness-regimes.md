@@ -253,6 +253,29 @@ once for queue 5. Non-canonical fixtures must set `COS_QUEUE_ID` and
 unless the operator explicitly sets `MIXED_RSS_EXPECTATION=any` or a
 different mixed-class expression.
 
+For hostile qualification runs where generator placement itself is a
+suspect, use the opt-in isolated mode:
+
+```bash
+COS_IFINDEX=<egress-ifindex> \
+IPERF_CPUSET=0-3 MIXED_IPERF_CPUSET=4-7 \
+PRIMARY_RSS_STEERING="vf0/rss-context-a" \
+MIXED_RSS_STEERING="vf1/rss-context-b" \
+ARTIFACT_DIR=/tmp/fairness-isolated \
+./test/incus/fairness-harness.sh --mixed-cos-isolated
+```
+
+`--mixed-cos-isolated` still evaluates both classes from one metrics
+scrape, but it requires explicit placement metadata and writes
+`generator-placement.txt` under `ARTIFACT_DIR` (or a generated `/tmp`
+artifact directory). The placement file records per-class ports,
+streams, reverse flag, CoS ifindex/queue, shaper rates, CPU sets,
+network namespaces, command prefixes, generator binaries, RSS/NIC
+steering notes, and the exact iperf command line. This mode is for
+separating scheduler behavior from test-generator cross-talk and
+RSS/NIC placement assumptions; the lightweight `--mixed-cos` mode
+remains the default for routine runs.
+
 ## Required metrics — exported in production via gRPC/Prometheus
 
 For production observability, xpf MUST export:
