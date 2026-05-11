@@ -99,6 +99,7 @@ fn make_entry(
         decision: make_decision(ForwardingDisposition::ForwardCandidate),
         metadata: make_metadata(owner_rg_id),
         stamp,
+        observed_bytes: 0,
         last_used_epoch: 0,
     }
 }
@@ -133,6 +134,37 @@ fn cache_hit_with_matching_stamp() {
     assert!(hit.is_some(), "expected cache hit with matching stamp");
     assert_eq!(cache.hits, 1);
     assert_eq!(cache.misses, 0);
+}
+
+#[test]
+fn cache_hit_accumulates_observed_bytes() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let key = make_key();
+    let stamp = FlowCacheStamp {
+        config_generation: 5,
+        fib_generation: 3,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    cache.insert(make_entry(key.clone(), stamp, 0));
+
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 5,
+        fib_generation: 3,
+    };
+    assert!(cache
+        .lookup_counted(&key, lookup, 0, &rg_epochs, 1500)
+        .is_some());
+    assert!(cache
+        .lookup_counted(&key, lookup, 0, &rg_epochs, 900)
+        .is_some());
+
+    let (_active_count, rows, _cos_counts, _truncated) = cache.active_flow_debug_entries(8);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].observed_bytes, 2400);
 }
 
 // ----------------------------------------------------------------
@@ -1401,6 +1433,7 @@ fn active_flow_debug_entries_include_worker_join_keys() {
     assert_eq!(row.cos_queue_id, Some(4));
     assert_eq!(row.dscp_rewrite, Some(46));
     assert_eq!(row.age_epochs, 0);
+    assert_eq!(row.observed_bytes, 0);
 }
 
 #[test]

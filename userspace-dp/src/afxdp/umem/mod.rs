@@ -1179,6 +1179,7 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
                 cos_queue_id: entry.cos_queue_id,
                 dscp_rewrite: entry.dscp_rewrite,
                 age_epochs: entry.age_epochs,
+                observed_bytes: entry.observed_bytes,
             })
             .collect(),
         flow_map_truncated,
