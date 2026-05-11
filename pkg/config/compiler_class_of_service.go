@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	fairnesscontract "github.com/psaab/xpf/pkg/fairness"
 )
 
 func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
@@ -31,7 +33,6 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
 	if cos.Interfaces == nil {
 		cos.Interfaces = make(map[string]*CoSInterface)
 	}
-
 	if fcNode := node.FindChild("forwarding-classes"); fcNode != nil {
 		// Enforce the FC ↔ queue bijection. Junos semantics give
 		// each queue ID one forwarding class, and each FC one
@@ -320,7 +321,100 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
 		}
 	}
 
+	if fairnessNode := node.FindChild("fairness"); fairnessNode != nil {
+		if rssNode := fairnessNode.FindChild("rss-expectation"); rssNode != nil {
+			seen := make(map[string]string)
+			for _, ifindexNode := range rssNode.FindChildren("ifindex") {
+				if len(ifindexNode.Keys) < 2 {
+					continue
+				}
+				ifindex, err := strconv.Atoi(ifindexNode.Keys[1])
+				if err != nil || ifindex <= 0 {
+					return fmt.Errorf("class-of-service fairness rss-expectation ifindex %q: expected positive integer", ifindexNode.Keys[1])
+				}
+				for _, queueNode := range ifindexNode.FindChildren("queue") {
+					if len(queueNode.Keys) < 2 {
+						continue
+					}
+					queue, err := strconv.Atoi(queueNode.Keys[1])
+					if err != nil || queue < 0 || queue > 255 {
+						return fmt.Errorf("class-of-service fairness rss-expectation ifindex %d queue %q: expected queue 0..255", ifindex, queueNode.Keys[1])
+					}
+					expr, err := collectCoSFairnessRSSExpectation(queueNode)
+					if err != nil {
+						return fmt.Errorf("class-of-service fairness rss-expectation ifindex %d queue %d: %w", ifindex, queue, err)
+					}
+					parsed, err := fairnesscontract.ParseRSSExpectation(expr)
+					if err != nil {
+						return fmt.Errorf("class-of-service fairness rss-expectation ifindex %d queue %d: %w", ifindex, queue, err)
+					}
+					key := fmt.Sprintf("%d/%d", ifindex, queue)
+					canonical := parsed.Canonical()
+					if existing, ok := seen[key]; ok {
+						if existing == canonical {
+							continue
+						}
+						return fmt.Errorf("class-of-service fairness rss-expectation ifindex %d queue %d: duplicate expectation %q conflicts with %q", ifindex, queue, canonical, existing)
+					}
+					seen[key] = canonical
+					cos.FairnessExpectations = append(cos.FairnessExpectations, &CoSFairnessExpectation{
+						Ifindex:        ifindex,
+						QueueID:        uint8(queue),
+						RSSExpectation: canonical,
+					})
+				}
+			}
+		}
+	}
+
 	return nil
+}
+
+func collectCoSFairnessRSSExpectation(queueNode *Node) (string, error) {
+	var expr string
+	set := func(next string) error {
+		if next == "" {
+			return nil
+		}
+		if expr != "" && expr != next {
+			return fmt.Errorf("multiple expectations configured: %q and %q", expr, next)
+		}
+		expr = next
+		return nil
+	}
+	if queueNode.FindChild("any") != nil {
+		if err := set("any"); err != nil {
+			return "", err
+		}
+	}
+	if queueNode.FindChild("balanced") != nil {
+		if err := set("balanced"); err != nil {
+			return "", err
+		}
+	}
+	for _, key := range []string{"active-workers", "at-least-active-workers"} {
+		if n := queueNode.FindChild(key); n != nil {
+			if err := set("at-least-active-workers:" + nodeVal(n)); err != nil {
+				return "", err
+			}
+		}
+	}
+	if n := queueNode.FindChild("max-worker-flow-share"); n != nil {
+		if err := set("max-worker-flow-share:" + nodeVal(n)); err != nil {
+			return "", err
+		}
+	}
+	for _, key := range []string{"cstruct", "cstruct-max"} {
+		if n := queueNode.FindChild(key); n != nil {
+			if err := set("cstruct-max:" + nodeVal(n)); err != nil {
+				return "", err
+			}
+		}
+	}
+	if expr == "" {
+		return "", fmt.Errorf("missing expectation; expected any, balanced, at-least-active-workers, max-worker-flow-share, or cstruct-max")
+	}
+	return expr, nil
 }
 
 func parseCoSTransmitRate(node *Node) (uint64, bool) {

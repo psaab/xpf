@@ -164,6 +164,73 @@ func TestCompileClassOfServiceSetSyntax(t *testing.T) {
 	}
 }
 
+func TestCompileClassOfServiceFairnessRSSExpectations(t *testing.T) {
+	lines := []string{
+		"set class-of-service fairness rss-expectation ifindex 5 queue 4 balanced",
+		"set class-of-service fairness rss-expectation ifindex 5 queue 5 max-worker-flow-share 0.5",
+		"set class-of-service fairness rss-expectation ifindex 6 queue 7 cstruct-max 0.25",
+		"set system dataplane-type userspace",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile error: %v", err)
+	}
+	got := cfg.ClassOfService.FairnessExpectations
+	if len(got) != 3 {
+		t.Fatalf("FairnessExpectations len = %d, want 3: %#v", len(got), got)
+	}
+	tests := []struct {
+		idx     int
+		ifindex int
+		queueID uint8
+		expect  string
+	}{
+		{idx: 0, ifindex: 5, queueID: 4, expect: "balanced"},
+		{idx: 1, ifindex: 5, queueID: 5, expect: "max-worker-flow-share:0.5"},
+		{idx: 2, ifindex: 6, queueID: 7, expect: "cstruct-max:0.25"},
+	}
+	for _, tt := range tests {
+		row := got[tt.idx]
+		if row.Ifindex != tt.ifindex || row.QueueID != tt.queueID || row.RSSExpectation != tt.expect {
+			t.Fatalf("expectation[%d] = ifindex=%d queue=%d expectation=%q, want ifindex=%d queue=%d expectation=%q",
+				tt.idx, row.Ifindex, row.QueueID, row.RSSExpectation, tt.ifindex, tt.queueID, tt.expect)
+		}
+	}
+}
+
+func TestCompileClassOfServiceFairnessRSSExpectationRejectsDuplicateConflict(t *testing.T) {
+	tree := &ConfigTree{}
+	for _, line := range []string{
+		"set class-of-service fairness rss-expectation ifindex 5 queue 4 balanced",
+		"set class-of-service fairness rss-expectation ifindex 5 queue 4 cstruct-max 0.25",
+	} {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig succeeded, want duplicate fairness expectation error")
+	}
+	if !strings.Contains(err.Error(), "multiple expectations configured") {
+		t.Fatalf("CompileConfig error = %v, want multiple expectations configured", err)
+	}
+}
+
 func TestCoSIperfSymmetricFixtureCompilesReverseSourcePortOutputFilter(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "test", "incus", "cos-iperf-symmetric.set"))
 	if err != nil {

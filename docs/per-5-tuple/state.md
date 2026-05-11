@@ -327,8 +327,7 @@ gauges from the existing userspace status snapshot:
 `xpf_fairness_max_worker_flow_share`, plus
 `xpf_fairness_cos_active_flow_counts_truncated` to mark capped source
 snapshots. These make structural skew visible in Prometheus without
-adding packet-path state. Opt-in config/alerting for expectation
-violations remains separate follow-up work.
+adding packet-path state.
 
 The operator text surface mirrors the same data:
 `show chassis cluster data-plane fairness` prints per-CoS active flows,
@@ -339,6 +338,18 @@ Operators can request `show chassis cluster data-plane flows all` for
 the full helper-reported snapshot, or
 `show chassis cluster data-plane flows limit <rows>` for an explicit row
 cap.
+
+The runtime expectation slice adds opt-in production evaluation via
+`class-of-service fairness rss-expectation ifindex <n> queue <q>
+<expectation>`, where `<expectation>` uses the same vocabulary as
+`fairness-eval` in Junos-style set syntax (`balanced`,
+`at-least-active-workers <N>`, `max-worker-flow-share <X>`, or
+`cstruct-max <X>`; threshold values use fractions such as `0.5` in
+set syntax). Configured expectations are rendered under
+`show chassis cluster data-plane fairness` and exported as:
+
+- `xpf_fairness_rss_expectation_configured{ifindex,queue_id,expectation}`
+- `xpf_fairness_rss_skew_violation{ifindex,queue_id,expectation}`
 
 ## Open work
 
@@ -357,8 +368,8 @@ cap.
 - **#1247 — Path 4 workload/RSS expectation gate**: first harness
   slice shipped in this work; production RSS-structure gauges are now
   exported from Prometheus and the userspace status text. Runtime
-  config/alerting remains the follow-up if operators want opt-in paging
-  on structural skew.
+  expectation config and skew-violation gauges are available; alert
+  routing remains deployment policy.
 
 ## Empirical sweep across workload classes (2026-05-07)
 

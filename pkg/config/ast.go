@@ -1189,6 +1189,21 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 				"scheduler-map": {args: 1, children: nil},
 			}},
 		}},
+		"fairness": {children: map[string]*schemaNode{
+			"rss-expectation": {children: map[string]*schemaNode{
+				"ifindex": {args: 1, multi: true, children: map[string]*schemaNode{
+					"queue": {args: 1, multi: true, children: map[string]*schemaNode{
+						"any":                     {children: nil},
+						"balanced":                {children: nil},
+						"active-workers":          {args: 1, children: nil},
+						"at-least-active-workers": {args: 1, children: nil},
+						"max-worker-flow-share":   {args: 1, children: nil},
+						"cstruct":                 {args: 1, children: nil},
+						"cstruct-max":             {args: 1, children: nil},
+					}},
+				}},
+			}},
+		}},
 	}},
 	"firewall": {children: map[string]*schemaNode{
 		"policer": {args: 1, multi: true, children: map[string]*schemaNode{
@@ -1368,15 +1383,15 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 		}},
 		"dataplane-type": {args: 1, children: nil},
 		"dataplane": {desc: "Dataplane configuration", children: map[string]*schemaNode{
-			"cores":          {args: 1, desc: "Number of dataplane cores", children: nil},
-			"memory":         {args: 1, desc: "Dataplane memory allocation", children: nil},
-			"socket-mem":     {args: 1, desc: "DPDK socket memory", children: nil},
-			"binary":         {args: 1, desc: "Userspace dataplane helper binary path", children: nil},
-			"control-socket": {args: 1, desc: "Unix control socket path", children: nil},
-			"state-file":     {args: 1, desc: "Helper state file path", children: nil},
-			"workers":        {args: 1, desc: "Worker thread count", children: nil},
-			"ring-entries":   {args: 1, desc: "AF_XDP ring entries per queue", children: nil},
-			"poll-mode":      {args: 1, desc: "Worker poll mode (busy-poll or interrupt)", children: nil},
+			"cores":               {args: 1, desc: "Number of dataplane cores", children: nil},
+			"memory":              {args: 1, desc: "Dataplane memory allocation", children: nil},
+			"socket-mem":          {args: 1, desc: "DPDK socket memory", children: nil},
+			"binary":              {args: 1, desc: "Userspace dataplane helper binary path", children: nil},
+			"control-socket":      {args: 1, desc: "Unix control socket path", children: nil},
+			"state-file":          {args: 1, desc: "Helper state file path", children: nil},
+			"workers":             {args: 1, desc: "Worker thread count", children: nil},
+			"ring-entries":        {args: 1, desc: "AF_XDP ring entries per queue", children: nil},
+			"poll-mode":           {args: 1, desc: "Worker poll mode (busy-poll or interrupt)", children: nil},
 			"rss-indirection":     {args: 1, desc: "mlx5 RSS indirection reshaping (enable|disable)", children: nil},
 			"claim-host-tunables": {args: 1, desc: "Allow xpfd to write host-scope tunables (true|false, default false)", children: nil},
 			"cpu-governor":        {args: 1, desc: "Host cpufreq governor (performance|schedutil|default)", children: nil},

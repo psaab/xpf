@@ -410,6 +410,64 @@ func TestEmitFairnessRSSGauges_EmptyDistributionOnlyReportsTruncation(t *testing
 	assertGaugeClose(t, got, c.fairnessCoSCountsTruncated, nil, 0)
 }
 
+func TestEmitFairnessRSSExpectationGauges(t *testing.T) {
+	c := &xpfCollector{
+		fairnessRSSExpectation: prometheus.NewDesc(
+			"xpf_fairness_rss_expectation_configured",
+			"test desc",
+			[]string{"ifindex", "queue_id", "expectation"},
+			nil,
+		),
+		fairnessRSSSkewViolation: prometheus.NewDesc(
+			"xpf_fairness_rss_skew_violation",
+			"test desc",
+			[]string{"ifindex", "queue_id", "expectation"},
+			nil,
+		),
+	}
+	status := dpuserspace.ProcessStatus{
+		Workers: 4,
+		CoSActiveFlowCounts: []dpuserspace.CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: 4, WorkerID: 0, ActiveFlowCount: 3},
+			{Ifindex: 80, QueueID: 4, WorkerID: 1, ActiveFlowCount: 1},
+			{Ifindex: 80, QueueID: 4, WorkerID: 2, ActiveFlowCount: 0},
+			{Ifindex: 80, QueueID: 4, WorkerID: 3, ActiveFlowCount: 0},
+			{Ifindex: 80, QueueID: 5, WorkerID: 0, ActiveFlowCount: 2},
+			{Ifindex: 80, QueueID: 5, WorkerID: 1, ActiveFlowCount: 2},
+			{Ifindex: 80, QueueID: 5, WorkerID: 2, ActiveFlowCount: 2},
+			{Ifindex: 80, QueueID: 5, WorkerID: 3, ActiveFlowCount: 2},
+		},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitFairnessRSSExpectationGauges(ch, status, []dpuserspace.FairnessRSSExpectation{
+			{Ifindex: 80, QueueID: 4, RSSExpectation: "balanced"},
+			{Ifindex: 80, QueueID: 5, RSSExpectation: "balanced"},
+			{Ifindex: 80, QueueID: 6, RSSExpectation: "cstruct-max:0.25"},
+		})
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 6 {
+		t.Fatalf("expected 6 expectation metrics, got %d", len(got))
+	}
+	labelsQ4 := map[string]string{"ifindex": "80", "queue_id": "4", "expectation": "balanced"}
+	assertGaugeClose(t, got, c.fairnessRSSExpectation, labelsQ4, 1)
+	assertGaugeClose(t, got, c.fairnessRSSSkewViolation, labelsQ4, 1)
+
+	labelsQ5 := map[string]string{"ifindex": "80", "queue_id": "5", "expectation": "balanced"}
+	assertGaugeClose(t, got, c.fairnessRSSExpectation, labelsQ5, 1)
+	assertGaugeClose(t, got, c.fairnessRSSSkewViolation, labelsQ5, 0)
+
+	labelsQ6 := map[string]string{"ifindex": "80", "queue_id": "6", "expectation": "cstruct-max:0.25"}
+	assertGaugeClose(t, got, c.fairnessRSSExpectation, labelsQ6, 1)
+	assertGaugeClose(t, got, c.fairnessRSSSkewViolation, labelsQ6, 1)
+}
+
 func TestCoSFairnessRSSSummaries_EdgeCases(t *testing.T) {
 	tests := []struct {
 		name string
@@ -475,6 +533,8 @@ func collectFromEmitFairnessRSSGauges(
 		c.fairnessActiveFlows:        {},
 		c.fairnessMaxWorkerFlowShare: {},
 		c.fairnessCoSCountsTruncated: {},
+		c.fairnessRSSExpectation:     {},
+		c.fairnessRSSSkewViolation:   {},
 	}
 	for _, m := range got {
 		if _, ok := expected[m.Desc()]; !ok {
