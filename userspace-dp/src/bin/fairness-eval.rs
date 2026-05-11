@@ -305,11 +305,11 @@ fn parse_rss_expectation(raw: &str) -> Result<RssExpectation, String> {
         return Ok(RssExpectation::Balanced);
     }
 
-    let normalized = raw
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let normalized = compact
         .replace("<=", ":")
         .replace(">=", ":")
-        .replace('=', ":")
-        .replace(' ', ":");
+        .replace('=', ":");
     let mut parts = normalized.splitn(2, ':');
     let key = parts.next().unwrap_or_default();
     let value = parts.next().unwrap_or_default();
@@ -815,7 +815,10 @@ fn parse_args() -> Args {
                 binding_flows = args.next().map(PathBuf::from);
             }
             "--cos-flows" => {
-                cos_flows = args.next().map(PathBuf::from);
+                cos_flows = Some(PathBuf::from(parse_required_string_arg(
+                    "--cos-flows",
+                    args.next(),
+                )));
             }
             "--cos-ifindex" => {
                 cos_ifindex = Some(parse_required_numeric_arg("--cos-ifindex", args.next()));
@@ -839,7 +842,7 @@ fn parse_args() -> Args {
                 shaper_rate_bps = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
             }
             "--rss-expectation" => {
-                rss_expectation = args.next().unwrap_or_else(|| "any".to_string());
+                rss_expectation = parse_required_string_arg("--rss-expectation", args.next());
             }
             "-h" | "--help" => {
                 eprintln!(
@@ -893,6 +896,24 @@ where
             std::process::exit(2);
         }
     }
+}
+
+fn parse_required_string_arg(flag: &str, raw: Option<String>) -> String {
+    match parse_required_string_value(flag, raw) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("fairness-eval: {err}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_required_string_value(flag: &str, raw: Option<String>) -> Result<String, String> {
+    let value = raw.ok_or_else(|| format!("{flag} requires a value"))?;
+    if value.starts_with("--") {
+        return Err(format!("{flag} requires a value, got {value:?}"));
+    }
+    Ok(value)
 }
 
 fn parse_required_numeric_value<T>(flag: &str, raw: Option<String>) -> Result<T, String>
@@ -1178,6 +1199,12 @@ mod aggregation_tests {
     }
 
     #[test]
+    fn rss_expectation_cstruct_max_accepts_whitespace_around_operator() {
+        let expectation = parse_rss_expectation("cstruct <= 25%").unwrap();
+        assert_eq!(expectation, RssExpectation::CstructMax(0.25));
+    }
+
+    #[test]
     fn rss_expectation_cstruct_max_accepts_values_above_one() {
         let expectation = parse_rss_expectation("cstruct-max:150%").unwrap();
         assert_eq!(expectation, RssExpectation::CstructMax(1.5));
@@ -1208,6 +1235,17 @@ mod aggregation_tests {
 
         let err = parse_required_numeric_value::<i32>("--cos-ifindex", None).unwrap_err();
         assert!(err.contains("requires a value"), "err: {err}");
+    }
+
+    #[test]
+    fn parse_required_string_flags_report_missing_values() {
+        let err = parse_required_string_value("--rss-expectation", None).unwrap_err();
+        assert!(err.contains("requires a value"), "err: {err}");
+
+        let err =
+            parse_required_string_value("--cos-flows", Some("--cos-ifindex".to_string()))
+                .unwrap_err();
+        assert!(err.contains("--cos-flows"), "err: {err}");
     }
 
     #[test]

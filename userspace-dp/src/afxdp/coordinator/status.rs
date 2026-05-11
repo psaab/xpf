@@ -101,6 +101,10 @@ impl super::Coordinator {
         let mut out = Vec::new();
         let mut truncated = false;
         for live in self.workers.live.values() {
+            if out.len() >= FLOW_WORKER_MAP_MAX_ROWS {
+                truncated = true;
+                break;
+            }
             let (rows, binding_truncated) = live.flow_worker_map_snapshot();
             truncated |= binding_truncated;
             for row in rows {
