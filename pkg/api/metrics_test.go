@@ -1,6 +1,7 @@
 package api
 
 import (
+	"math"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -302,4 +303,220 @@ func TestEmitCoSActiveFlowCount_LabelsAndValue(t *testing.T) {
 	if !found {
 		t.Fatalf("queue 4 worker 1 series missing from emitCoSActiveFlowCount output")
 	}
+}
+
+func TestEmitFairnessRSSGauges_DerivesStructuralCeiling(t *testing.T) {
+	c := &xpfCollector{
+		fairnessCstruct: prometheus.NewDesc(
+			"xpf_fairness_cstruct",
+			"test desc",
+			[]string{"ifindex", "queue_id"},
+			nil,
+		),
+		fairnessActiveWorkers: prometheus.NewDesc(
+			"xpf_fairness_active_workers",
+			"test desc",
+			[]string{"ifindex", "queue_id"},
+			nil,
+		),
+		fairnessActiveFlows: prometheus.NewDesc(
+			"xpf_fairness_active_flows",
+			"test desc",
+			[]string{"ifindex", "queue_id"},
+			nil,
+		),
+		fairnessMaxWorkerFlowShare: prometheus.NewDesc(
+			"xpf_fairness_max_worker_flow_share",
+			"test desc",
+			[]string{"ifindex", "queue_id"},
+			nil,
+		),
+		fairnessCoSCountsTruncated: prometheus.NewDesc(
+			"xpf_fairness_cos_active_flow_counts_truncated",
+			"test desc",
+			nil,
+			nil,
+		),
+	}
+
+	status := dpuserspace.ProcessStatus{
+		CoSActiveFlowCountsTruncated: true,
+		CoSActiveFlowCounts: []dpuserspace.CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: 4, WorkerID: 0, ActiveFlowCount: 1},
+			{Ifindex: 80, QueueID: 4, WorkerID: 1, ActiveFlowCount: 3},
+			{Ifindex: 80, QueueID: 4, WorkerID: 2, ActiveFlowCount: 0},
+			{Ifindex: 80, QueueID: 5, WorkerID: 0, ActiveFlowCount: 2},
+			{Ifindex: 80, QueueID: 5, WorkerID: 1, ActiveFlowCount: 2},
+		},
+	}
+
+	got := collectFromEmitFairnessRSSGauges(t, c, status)
+	if len(got) != 9 {
+		t.Fatalf("emitFairnessRSSGauges: want 9 metrics (truncation + 4 per active queue), got %d", len(got))
+	}
+
+	assertGaugeClose(t, got, c.fairnessCoSCountsTruncated, nil, 1)
+	labelsQ4 := map[string]string{"ifindex": "80", "queue_id": "4"}
+	assertGaugeClose(t, got, c.fairnessCstruct, labelsQ4, 0.577350269)
+	assertGaugeClose(t, got, c.fairnessActiveWorkers, labelsQ4, 2)
+	assertGaugeClose(t, got, c.fairnessActiveFlows, labelsQ4, 4)
+	assertGaugeClose(t, got, c.fairnessMaxWorkerFlowShare, labelsQ4, 0.75)
+
+	labelsQ5 := map[string]string{"ifindex": "80", "queue_id": "5"}
+	assertGaugeClose(t, got, c.fairnessCstruct, labelsQ5, 0)
+	assertGaugeClose(t, got, c.fairnessActiveWorkers, labelsQ5, 2)
+	assertGaugeClose(t, got, c.fairnessActiveFlows, labelsQ5, 4)
+	assertGaugeClose(t, got, c.fairnessMaxWorkerFlowShare, labelsQ5, 0.5)
+}
+
+func TestEmitFairnessRSSGauges_EmptyDistributionOnlyReportsTruncation(t *testing.T) {
+	c := &xpfCollector{
+		fairnessCstruct: prometheus.NewDesc(
+			"xpf_fairness_cstruct",
+			"test desc",
+			[]string{"ifindex", "queue_id"},
+			nil,
+		),
+		fairnessActiveWorkers: prometheus.NewDesc(
+			"xpf_fairness_active_workers",
+			"test desc",
+			[]string{"ifindex", "queue_id"},
+			nil,
+		),
+		fairnessActiveFlows: prometheus.NewDesc(
+			"xpf_fairness_active_flows",
+			"test desc",
+			[]string{"ifindex", "queue_id"},
+			nil,
+		),
+		fairnessMaxWorkerFlowShare: prometheus.NewDesc(
+			"xpf_fairness_max_worker_flow_share",
+			"test desc",
+			[]string{"ifindex", "queue_id"},
+			nil,
+		),
+		fairnessCoSCountsTruncated: prometheus.NewDesc(
+			"xpf_fairness_cos_active_flow_counts_truncated",
+			"test desc",
+			nil,
+			nil,
+		),
+	}
+
+	got := collectFromEmitFairnessRSSGauges(t, c, dpuserspace.ProcessStatus{})
+	if len(got) != 1 {
+		t.Fatalf("empty fairness distribution should emit only truncation gauge, got %d metrics", len(got))
+	}
+	assertGaugeClose(t, got, c.fairnessCoSCountsTruncated, nil, 0)
+}
+
+func TestFairnessRSSAggregateCstruct_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name string
+		dist []uint32
+		want float64
+	}{
+		{name: "single one-flow worker", dist: []uint32{1}, want: 0},
+		{name: "single multi-flow worker", dist: []uint32{5}, want: 0},
+		{name: "uniform multi-worker", dist: []uint32{3, 3, 3}, want: 0},
+		{name: "severe skew", dist: []uint32{1, 99}, want: 4.92468529477},
+		{
+			name: "near-uniform billion-scale counts stay nonzero",
+			dist: []uint32{1_000_000_000, 1_000_000_001},
+			want: 4.9999999975e-10,
+		},
+		{
+			name: "near-uniform uint32-max counts stay nonzero",
+			dist: []uint32{4_294_967_294, 4_294_967_295},
+			want: 1.16415321868e-10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var agg fairnessRSSAggregate
+			for _, active := range tt.dist {
+				agg.add(active)
+			}
+			if got := agg.cstruct(); math.Abs(got-tt.want) > 1e-12 {
+				t.Fatalf("cstruct(%v) = %.15g, want %.15g", tt.dist, got, tt.want)
+			}
+		})
+	}
+}
+
+func collectFromEmitFairnessRSSGauges(
+	t *testing.T,
+	c *xpfCollector,
+	status dpuserspace.ProcessStatus,
+) []prometheus.Metric {
+	t.Helper()
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitFairnessRSSGauges(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	expected := map[*prometheus.Desc]struct{}{
+		c.fairnessCstruct:            {},
+		c.fairnessActiveWorkers:      {},
+		c.fairnessActiveFlows:        {},
+		c.fairnessMaxWorkerFlowShare: {},
+		c.fairnessCoSCountsTruncated: {},
+	}
+	for _, m := range got {
+		if _, ok := expected[m.Desc()]; !ok {
+			t.Fatalf("unexpected metric leaked from emitFairnessRSSGauges: %s", m.Desc())
+		}
+	}
+	return got
+}
+
+func assertGaugeClose(
+	t *testing.T,
+	metrics []prometheus.Metric,
+	desc *prometheus.Desc,
+	wantLabels map[string]string,
+	want float64,
+) {
+	t.Helper()
+	for _, m := range metrics {
+		if m.Desc() != desc {
+			continue
+		}
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("write metric: %v", err)
+		}
+		if !metricHasLabels(&pb, wantLabels) {
+			continue
+		}
+		if pb.Gauge == nil {
+			t.Fatalf("metric %s has no gauge", desc)
+		}
+		if got := pb.Gauge.GetValue(); math.Abs(got-want) > 0.000001 {
+			t.Fatalf("metric %s labels=%v got %v, want %v", desc, wantLabels, got, want)
+		}
+		return
+	}
+	t.Fatalf("metric %s labels=%v not found", desc, wantLabels)
+}
+
+func metricHasLabels(pb *dto.Metric, want map[string]string) bool {
+	if len(want) == 0 {
+		return len(pb.GetLabel()) == 0
+	}
+	got := map[string]string{}
+	for _, label := range pb.GetLabel() {
+		got[label.GetName()] = label.GetValue()
+	}
+	for name, value := range want {
+		if got[name] != value {
+			return false
+		}
+	}
+	return true
 }
