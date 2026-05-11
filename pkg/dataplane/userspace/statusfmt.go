@@ -2,9 +2,14 @@ package userspace
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
+
+const defaultFlowWorkerMapLimit = 128
+const flowWorkerMapAllLimit = -1
 
 func localHAForwardingRole(status ProcessStatus) string {
 	if len(status.HAGroups) == 0 {
@@ -338,6 +343,149 @@ func FormatStatusSummary(status ProcessStatus) string {
 	return b.String()
 }
 
+func FormatFairnessRSS(status ProcessStatus) string {
+	var b strings.Builder
+	rows := CoSFairnessRSSSummaries(status)
+	fmt.Fprintln(&b, "Userspace fairness RSS structure:")
+	if status.CoSActiveFlowCountsTruncated {
+		fmt.Fprintln(&b, "  warning: CoS active-flow snapshot truncated; derived values are partial")
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(&b, "  none")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "  %-8s %-7s %-11s %-13s %-10s %-10s\n",
+		"Ifindex", "Queue", "ActiveFlows", "ActiveWorkers", "Cstruct", "MaxShare")
+	for _, row := range rows {
+		maxShare := fmt.Sprintf("%.2f%%", 100.0*row.MaxWorkerFlowShare)
+		fmt.Fprintf(&b, "  %-8d %-7d %-11d %-13d %-10.6f %-10s\n",
+			row.Ifindex,
+			row.QueueID,
+			row.ActiveFlows,
+			row.ActiveWorkers,
+			row.Cstruct,
+			maxShare,
+		)
+	}
+	return b.String()
+}
+
+func FormatFlowWorkerMap(status ProcessStatus, limit int) string {
+	var b strings.Builder
+	rows := append([]FlowWorkerStatus(nil), status.FlowWorkerMap...)
+	sort.Slice(rows, func(i, j int) bool { return flowWorkerStatusLess(rows[i], rows[j]) })
+	if limit == 0 {
+		limit = defaultFlowWorkerMapLimit
+	}
+
+	fmt.Fprintln(&b, "Userspace flow-worker map:")
+	if status.FlowWorkerMapTruncated {
+		fmt.Fprintln(&b, "  warning: helper flow-worker snapshot truncated before daemon formatting")
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(&b, "  none")
+		return b.String()
+	}
+	if limit > 0 && len(rows) > limit {
+		fmt.Fprintf(&b, "  showing first %d of %d rows\n", limit, len(rows))
+		rows = rows[:limit]
+	}
+	fmt.Fprintf(&b, "  %-6s %-6s %-5s %-12s %-7s %-11s %-11s %-7s %-5s %s\n",
+		"Worker", "Queue", "Slot", "Interface", "Ifidx", "Ingress", "Egress", "TxIf", "CoS", "Session")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "  %-6d %-6d %-5d %-12s %-7d %-11d %-11d %-7d %-5s %s",
+			row.WorkerID,
+			row.QueueID,
+			row.Slot,
+			orDash(row.Interface),
+			row.Ifindex,
+			row.IngressIfindex,
+			row.EgressIfindex,
+			row.TxIfindex,
+			formatOptionalUint8(row.CoSQueueID),
+			formatFlowTuple(row.SessionKey),
+		)
+		if wire := formatFlowTuple(row.ForwardWireKey); wire != "-" {
+			fmt.Fprintf(&b, " wire=%s", wire)
+		}
+		if rev := formatFlowTuple(row.ReverseCanonicalKey); rev != "-" {
+			fmt.Fprintf(&b, " reverse=%s", rev)
+		}
+		if row.AgeEpochs > 0 {
+			fmt.Fprintf(&b, " age-epochs=%d", row.AgeEpochs)
+		}
+		if row.DSCPRewrite != nil {
+			fmt.Fprintf(&b, " dscp-rewrite=%d", *row.DSCPRewrite)
+		}
+		fmt.Fprintln(&b)
+	}
+	return b.String()
+}
+
+func ParseFlowWorkerMapLimitSpec(spec string) (int, error) {
+	fields := strings.Fields(spec)
+	switch len(fields) {
+	case 0:
+		return 0, nil
+	case 1:
+		field := strings.ToLower(fields[0])
+		if field == "all" {
+			return flowWorkerMapAllLimit, nil
+		}
+		if field == "limit" {
+			return 0, fmt.Errorf("missing flow-worker map limit after limit")
+		}
+		if value, ok := strings.CutPrefix(field, "limit="); ok {
+			return parsePositiveFlowWorkerMapLimit(value)
+		}
+		return parsePositiveFlowWorkerMapLimit(field)
+	case 2:
+		if strings.ToLower(fields[0]) != "limit" {
+			return 0, fmt.Errorf("invalid flow-worker map selector %q: expected all or limit <rows>", spec)
+		}
+		return parsePositiveFlowWorkerMapLimit(fields[1])
+	default:
+		return 0, fmt.Errorf("invalid flow-worker map selector %q: expected all or limit <rows>", spec)
+	}
+}
+
+func parsePositiveFlowWorkerMapLimit(value string) (int, error) {
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit <= 0 {
+		return 0, fmt.Errorf("invalid flow-worker map limit %q: expected a positive integer", value)
+	}
+	return limit, nil
+}
+
+func flowWorkerStatusLess(a, b FlowWorkerStatus) bool {
+	if a.WorkerID != b.WorkerID {
+		return a.WorkerID < b.WorkerID
+	}
+	if a.QueueID != b.QueueID {
+		return a.QueueID < b.QueueID
+	}
+	if a.Slot != b.Slot {
+		return a.Slot < b.Slot
+	}
+	return flowTupleLess(a.SessionKey, b.SessionKey)
+}
+
+func flowTupleLess(a, b FlowTupleStatus) bool {
+	if a.Protocol != b.Protocol {
+		return a.Protocol < b.Protocol
+	}
+	if a.SrcIP != b.SrcIP {
+		return a.SrcIP < b.SrcIP
+	}
+	if a.SrcPort != b.SrcPort {
+		return a.SrcPort < b.SrcPort
+	}
+	if a.DstIP != b.DstIP {
+		return a.DstIP < b.DstIP
+	}
+	return a.DstPort < b.DstPort
+}
+
 func FormatBindings(status ProcessStatus) string {
 	var b strings.Builder
 
@@ -428,6 +576,62 @@ func FormatBindings(status ProcessStatus) string {
 		}
 	}
 	return b.String()
+}
+
+func formatOptionalUint8(value *uint8) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+func formatFlowTuple(tuple FlowTupleStatus) string {
+	if tuple.SrcIP == "" && tuple.DstIP == "" && tuple.SrcPort == 0 && tuple.DstPort == 0 && tuple.Protocol == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%s %s->%s",
+		protocolName(tuple.Protocol),
+		formatTupleEndpoint(tuple.SrcIP, tuple.SrcPort),
+		formatTupleEndpoint(tuple.DstIP, tuple.DstPort),
+	)
+}
+
+func formatTupleEndpoint(ip string, port uint16) string {
+	if ip == "" {
+		ip = "?"
+	}
+	if port == 0 {
+		return ip
+	}
+	if strings.Contains(ip, ":") {
+		return fmt.Sprintf("[%s]:%d", ip, port)
+	}
+	return fmt.Sprintf("%s:%d", ip, port)
+}
+
+func protocolName(protocol uint8) string {
+	switch protocol {
+	case 1:
+		return "icmp"
+	case 6:
+		return "tcp"
+	case 17:
+		return "udp"
+	case 58:
+		return "icmp6"
+	default:
+		if protocol == 0 {
+			return "proto0"
+		}
+		return fmt.Sprintf("proto%d", protocol)
+	}
+}
+
+func orDash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func formatStatusAge(d time.Duration) string {

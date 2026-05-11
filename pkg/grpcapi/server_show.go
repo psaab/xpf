@@ -1056,6 +1056,12 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 		// #1043 Phase 11: case body extracted to server_show_cluster_text.go
 		s.showChassisClusterDataPlaneInterfaces(&buf)
 
+	case "chassis-cluster-data-plane-fairness":
+		s.showChassisClusterDataPlaneFairness(&buf)
+
+	case "chassis-cluster-data-plane-flows":
+		s.showChassisClusterDataPlaneFlows(req.Filter, &buf)
+
 	case "chassis-cluster-ip-monitoring-status":
 		// #1043 Phase 11: case body extracted to server_show_cluster_text.go
 		s.showChassisClusterIPMonitoringStatus(&buf)

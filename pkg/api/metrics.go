@@ -2,7 +2,6 @@ package api
 
 import (
 	"bufio"
-	"math"
 	"net"
 	"os"
 	"runtime"
@@ -543,56 +542,6 @@ func (c *xpfCollector) emitCoSActiveFlowCount(ch chan<- prometheus.Metric, statu
 	}
 }
 
-type fairnessRSSKey struct {
-	ifindex int
-	queueID uint8
-}
-
-type fairnessRSSAggregate struct {
-	totalActiveFlows uint64
-	activeWorkers    uint64
-	maxWorkerFlows   uint32
-	weightedMean     float64
-	weightedM2       float64
-}
-
-func (a *fairnessRSSAggregate) add(active uint32) {
-	if active == 0 {
-		return
-	}
-	weight := float64(active)
-	value := 1.0 / weight
-	oldTotal := float64(a.totalActiveFlows)
-	newTotal := oldTotal + weight
-	delta := value - a.weightedMean
-	a.weightedMean += (weight / newTotal) * delta
-	a.weightedM2 += weight * delta * (value - a.weightedMean)
-
-	a.totalActiveFlows += uint64(active)
-	a.activeWorkers++
-	if active > a.maxWorkerFlows {
-		a.maxWorkerFlows = active
-	}
-}
-
-func (a fairnessRSSAggregate) cstruct() float64 {
-	if a.totalActiveFlows == 0 || a.weightedMean == 0 {
-		return 0
-	}
-	variance := a.weightedM2 / float64(a.totalActiveFlows)
-	if variance <= 0 {
-		return 0
-	}
-	return math.Sqrt(variance) / a.weightedMean
-}
-
-func (a fairnessRSSAggregate) maxWorkerFlowShare() float64 {
-	if a.totalActiveFlows == 0 {
-		return 0
-	}
-	return float64(a.maxWorkerFlows) / float64(a.totalActiveFlows)
-}
-
 // #1247: expose production RSS/workload health gauges from the same
 // per-CoS active-flow distribution used by the fairness harness. This
 // remains a status-snapshot calculation; it does not feed scheduling and
@@ -608,60 +557,34 @@ func (c *xpfCollector) emitFairnessRSSGauges(ch chan<- prometheus.Metric, status
 		truncated,
 	)
 
-	byQueue := make(map[fairnessRSSKey]*fairnessRSSAggregate)
-	for _, row := range status.CoSActiveFlowCounts {
-		key := fairnessRSSKey{ifindex: row.Ifindex, queueID: row.QueueID}
-		agg := byQueue[key]
-		if agg == nil {
-			agg = &fairnessRSSAggregate{}
-			byQueue[key] = agg
-		}
-		agg.add(row.ActiveFlowCount)
-	}
-
-	keys := make([]fairnessRSSKey, 0, len(byQueue))
-	for key := range byQueue {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].ifindex != keys[j].ifindex {
-			return keys[i].ifindex < keys[j].ifindex
-		}
-		return keys[i].queueID < keys[j].queueID
-	})
-
-	for _, key := range keys {
-		agg := byQueue[key]
-		if agg == nil || agg.totalActiveFlows == 0 {
-			continue
-		}
-		ifindexLabel := strconv.Itoa(key.ifindex)
-		queueLabel := strconv.FormatUint(uint64(key.queueID), 10)
+	for _, row := range dpuserspace.CoSFairnessRSSSummaries(status) {
+		ifindexLabel := strconv.Itoa(row.Ifindex)
+		queueLabel := strconv.FormatUint(uint64(row.QueueID), 10)
 		ch <- prometheus.MustNewConstMetric(
 			c.fairnessCstruct,
 			prometheus.GaugeValue,
-			agg.cstruct(),
+			row.Cstruct,
 			ifindexLabel,
 			queueLabel,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			c.fairnessActiveWorkers,
 			prometheus.GaugeValue,
-			float64(agg.activeWorkers),
+			float64(row.ActiveWorkers),
 			ifindexLabel,
 			queueLabel,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			c.fairnessActiveFlows,
 			prometheus.GaugeValue,
-			float64(agg.totalActiveFlows),
+			float64(row.ActiveFlows),
 			ifindexLabel,
 			queueLabel,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			c.fairnessMaxWorkerFlowShare,
 			prometheus.GaugeValue,
-			agg.maxWorkerFlowShare(),
+			row.MaxWorkerFlowShare,
 			ifindexLabel,
 			queueLabel,
 		)
