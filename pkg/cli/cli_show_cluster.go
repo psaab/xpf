@@ -232,7 +232,7 @@ func (c *CLI) showChassisClusterDataPlaneFairness() error {
 	if err != nil {
 		return err
 	}
-	fmt.Print(dpuserspace.FormatFairnessRSS(status))
+	fmt.Print(dpuserspace.FormatFairnessRSS(status, dpuserspace.FairnessRSSExpectationsFromConfig(c.store.ActiveConfig())))
 	return nil
 }
 
