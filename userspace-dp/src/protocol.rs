@@ -1117,6 +1117,8 @@ pub(crate) struct FlowWorkerStatus {
     pub dscp_rewrite: Option<u8>,
     #[serde(rename = "age_epochs", default)]
     pub age_epochs: u16,
+    #[serde(rename = "observed_bytes", default)]
+    pub observed_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]

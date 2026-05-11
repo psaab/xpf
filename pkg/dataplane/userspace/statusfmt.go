@@ -435,6 +435,9 @@ func FormatFlowWorkerMap(status ProcessStatus, limit int) string {
 		if row.DSCPRewrite != nil {
 			fmt.Fprintf(&b, " dscp-rewrite=%d", *row.DSCPRewrite)
 		}
+		if row.ObservedBytes > 0 {
+			fmt.Fprintf(&b, " observed-bytes=%d", row.ObservedBytes)
+		}
 		fmt.Fprintln(&b)
 	}
 	return b.String()
