@@ -614,6 +614,11 @@ impl BindingLiveState {
         )
     }
 
+    /// Publish this binding's per-CoS active-flow counts.
+    ///
+    /// Unlike `flow_worker_map`, this per-binding snapshot has no local
+    /// truncation bit; the coordinator reports truncation only when its
+    /// aggregate status row cap is exceeded.
     pub(super) fn publish_cos_active_flow_counts(
         &self,
         rows: Vec<crate::protocol::CoSActiveFlowCountStatus>,
@@ -1153,6 +1158,7 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
         .live
         .active_flow_count
         .store(active_flow_count, Ordering::Relaxed);
+    let interface = binding.interface.clone();
     binding.live.publish_flow_worker_map(
         flow_debug_entries
             .into_iter()
@@ -1160,7 +1166,7 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
                 slot: binding.slot,
                 queue_id: binding.queue_id,
                 worker_id: binding.worker_id,
-                interface: binding.interface.to_string(),
+                interface: interface.clone(),
                 ifindex: binding.ifindex,
                 ingress_ifindex: entry.ingress_ifindex,
                 egress_ifindex: entry.egress_ifindex,

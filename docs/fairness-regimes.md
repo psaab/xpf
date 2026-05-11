@@ -214,9 +214,11 @@ Any fairness measurement run MUST report:
    worker_id, iface}` filtered to the bottleneck direction. Mixed
    workload and production class-specific runs should use
    `xpf_userspace_cos_active_flow_count{ifindex, queue_id, worker_id}`
-   for the selected egress CoS queue. A flow is counted as
-   active on worker i if it contributes ≥ 1% of mean per-flow
-   throughput on that worker over the window.
+   for the selected egress CoS queue. These live metrics define
+   "active" as a flow-cache entry touched within the active-flow
+   recency window, currently 10 debug epochs (about 650 ms), so `{a_i}`
+   is an operational proxy for worker/RSS placement rather than a
+   throughput-derived ≥1% cutoff.
 5. **Computed `Cstruct`**: the structural CoV ceiling for the
    observed `{aᵢ}`.
 6. **Saturation determination**: which regime the run is in (per
