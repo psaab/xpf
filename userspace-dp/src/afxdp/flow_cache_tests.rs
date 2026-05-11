@@ -1355,6 +1355,123 @@ fn count_active_flows_marks_recently_hit() {
 }
 
 #[test]
+fn active_flow_debug_entries_include_worker_join_keys() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    let mut entry = make_entry(key.clone(), stamp, 0);
+    entry.decision.nat.rewrite_src = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)));
+    entry.decision.nat.rewrite_src_port = Some(62000);
+    entry.descriptor.tx_selection.queue_id = Some(4);
+    entry.descriptor.tx_selection.dscp_rewrite = Some(46);
+    cache.insert(entry);
+    cache.tick_advance_epoch();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+
+    let (active_count, rows, cos_counts, truncated) = cache.active_flow_debug_entries(8);
+    assert_eq!(active_count, 1);
+    assert!(!truncated);
+    assert_eq!(cos_counts.len(), 1);
+    assert_eq!(cos_counts[0].ifindex, 6);
+    assert_eq!(cos_counts[0].queue_id, 4);
+    assert_eq!(cos_counts[0].active_flow_count, 1);
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.ingress_ifindex, 7);
+    assert_eq!(row.egress_ifindex, 6);
+    assert_eq!(row.tx_ifindex, 6);
+    assert_eq!(row.session_key.src_port, 45678);
+    assert_eq!(row.session_key.dst_port, 443);
+    assert_eq!(row.forward_wire_key.src_ip, "198.51.100.10");
+    assert_eq!(row.forward_wire_key.src_port, 62000);
+    assert_eq!(row.reverse_canonical_key.src_port, 443);
+    assert_eq!(row.reverse_canonical_key.dst_port, 45678);
+    assert_eq!(row.cos_queue_id, Some(4));
+    assert_eq!(row.dscp_rewrite, Some(46));
+    assert_eq!(row.age_epochs, 0);
+}
+
+#[test]
+fn active_flow_debug_entries_report_truncation_without_losing_count() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    cache.tick_advance_epoch();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+
+    let (active_count, rows, cos_counts, truncated) = cache.active_flow_debug_entries(0);
+    assert_eq!(active_count, 1);
+    assert!(rows.is_empty());
+    assert!(cos_counts.is_empty());
+    assert!(truncated);
+}
+
+#[test]
+fn active_flow_debug_entries_count_cos_queues_without_row_limit_loss() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+
+    for (idx, queue_id) in [4u8, 4, 5].into_iter().enumerate() {
+        let mut key = make_key();
+        key.src_port = 45678 + idx as u16;
+        let mut entry = make_entry(key.clone(), stamp, 0);
+        entry.descriptor.tx_selection.queue_id = Some(queue_id);
+        cache.insert(entry);
+        cache.tick_advance_epoch();
+        let lookup = FlowCacheLookup {
+            ingress_ifindex: 7,
+            config_generation: 1,
+            fib_generation: 1,
+        };
+        assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    }
+
+    let (active_count, rows, cos_counts, truncated) = cache.active_flow_debug_entries(1);
+    assert_eq!(active_count, 3);
+    assert_eq!(rows.len(), 1, "debug rows obey the requested limit");
+    assert!(truncated);
+    assert_eq!(cos_counts.len(), 2);
+    assert_eq!(cos_counts[0].ifindex, 6);
+    assert_eq!(cos_counts[0].queue_id, 4);
+    assert_eq!(cos_counts[0].active_flow_count, 2);
+    assert_eq!(cos_counts[1].ifindex, 6);
+    assert_eq!(cos_counts[1].queue_id, 5);
+    assert_eq!(cos_counts[1].active_flow_count, 1);
+}
+
+#[test]
 fn count_active_flows_ages_out_after_window() {
     let rg_epochs = default_rg_epochs();
     let mut cache = FlowCache::new();
