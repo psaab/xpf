@@ -40,10 +40,10 @@ pub(in crate::afxdp) fn checksum16_add_bytes(sum: u32, bytes: &[u8]) -> u32 {
 fn checksum16_add_bytes_scalar(mut sum: u32, bytes: &[u8]) -> u32 {
     let mut chunks = bytes.chunks_exact(2);
     for chunk in &mut chunks {
-        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        sum = sum.wrapping_add(u16::from_be_bytes([chunk[0], chunk[1]]) as u32);
     }
     if let Some(last) = chunks.remainder().first() {
-        sum += (*last as u32) << 8;
+        sum = sum.wrapping_add((*last as u32) << 8);
     }
     sum
 }
