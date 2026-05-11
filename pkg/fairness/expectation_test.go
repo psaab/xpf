@@ -16,6 +16,7 @@ func TestParseRSSExpectation(t *testing.T) {
 		{name: "active workers", raw: "active-workers:4", want: "at-least-active-workers:4"},
 		{name: "max share percent", raw: "max-worker-flow-share:50%", want: "max-worker-flow-share:0.5"},
 		{name: "cstruct operator", raw: "cstruct <= 25%", want: "cstruct-max:0.25"},
+		{name: "cstruct unicode whitespace", raw: "cstruct\u00a0<=\u00a025%", want: "cstruct-max:0.25"},
 		{name: "cstruct above one", raw: "cstruct-max:1.2", want: "cstruct-max:1.2"},
 	}
 
@@ -117,6 +118,14 @@ func TestEvaluateRSSExpectation(t *testing.T) {
 			wantReason: "cstruct-max: no active flows observed",
 		},
 		{
+			name:       "balanced no traffic fails",
+			raw:        "balanced",
+			dist:       []uint32{0, 0, 0, 0},
+			workers:    4,
+			wantPass:   false,
+			wantReason: "balanced: no active flows observed",
+		},
+		{
 			name:       "active workers no traffic fails",
 			raw:        "at-least-active-workers:0",
 			dist:       []uint32{0, 0, 0, 0},
@@ -140,5 +149,15 @@ func TestEvaluateRSSExpectation(t *testing.T) {
 				t.Fatalf("EvaluateRSSExpectation reason = %q, want substring %q", got.Reason, tt.wantReason)
 			}
 		})
+	}
+}
+
+func TestEvaluateRSSExpectationRejectsUnknownKindBeforeNoTraffic(t *testing.T) {
+	got := EvaluateRSSExpectation(RSSExpectation{Kind: "bogus"}, []uint32{0, 0}, 0, 2)
+	if got.Pass {
+		t.Fatalf("EvaluateRSSExpectation passed unknown kind: %+v", got)
+	}
+	if !strings.Contains(got.Reason, `unknown RSS expectation kind "bogus"`) {
+		t.Fatalf("EvaluateRSSExpectation reason = %q, want unknown-kind error", got.Reason)
 	}
 }
