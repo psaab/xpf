@@ -320,6 +320,16 @@ checked at runtime, not just in test.
 violates that expectation. Runtime config/alerting can build on the
 same expectation language.
 
+The second production-observability slice exports per-CoS RSS structure
+gauges from the existing userspace status snapshot:
+`xpf_fairness_cstruct`, `xpf_fairness_active_flows`,
+`xpf_fairness_active_workers`, and
+`xpf_fairness_max_worker_flow_share`, plus
+`xpf_fairness_cos_active_flow_counts_truncated` to mark capped source
+snapshots. These make structural skew visible in Prometheus without
+adding packet-path state. Opt-in config/alerting for expectation
+violations remains separate follow-up work.
+
 ## Open work
 
 - **#547 — Deterministic RSS-skew test fixture**: SHIPPED as PR #1223
@@ -335,9 +345,9 @@ same expectation language.
   closure archive. Do not re-open #1211 directly. As of the
   2026-05-07 sweep below, NO empirically failing workload exists.
 - **#1247 — Path 4 workload/RSS expectation gate**: first harness
-  slice shipped in this work; runtime config/alerting remains the
-  production follow-up if operators want opt-in paging on structural
-  skew.
+  slice shipped in this work; production RSS-structure gauges are now
+  exported from Prometheus. Runtime config/alerting remains the
+  follow-up if operators want opt-in paging on structural skew.
 
 ## Empirical sweep across workload classes (2026-05-07)
 
