@@ -73,6 +73,11 @@ var OperationalTree = map[string]*Node{
 				"data-plane": {Desc: "Show data-plane information", Children: map[string]*Node{
 					"statistics": {Desc: "Show data-plane statistics"},
 					"interfaces": {Desc: "Show data-plane interfaces"},
+					"fairness":   {Desc: "Show userspace fairness RSS structure"},
+					"flows": {Desc: "Show userspace flow-to-worker diagnostics", Children: map[string]*Node{
+						"all":   {Desc: "Show all helper-reported flow-to-worker rows"},
+						"limit": {Desc: "Limit flow-to-worker rows"},
+					}},
 				}},
 				"ip-monitoring": {Desc: "Show IP monitoring information", Children: map[string]*Node{
 					"status": {Desc: "Show IP monitoring status"},

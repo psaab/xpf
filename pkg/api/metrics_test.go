@@ -410,7 +410,7 @@ func TestEmitFairnessRSSGauges_EmptyDistributionOnlyReportsTruncation(t *testing
 	assertGaugeClose(t, got, c.fairnessCoSCountsTruncated, nil, 0)
 }
 
-func TestFairnessRSSAggregateCstruct_EdgeCases(t *testing.T) {
+func TestCoSFairnessRSSSummaries_EdgeCases(t *testing.T) {
 	tests := []struct {
 		name string
 		dist []uint32
@@ -434,11 +434,20 @@ func TestFairnessRSSAggregateCstruct_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var agg fairnessRSSAggregate
-			for _, active := range tt.dist {
-				agg.add(active)
+			status := dpuserspace.ProcessStatus{}
+			for workerID, active := range tt.dist {
+				status.CoSActiveFlowCounts = append(status.CoSActiveFlowCounts, dpuserspace.CoSActiveFlowCountStatus{
+					Ifindex:         80,
+					QueueID:         4,
+					WorkerID:        uint32(workerID),
+					ActiveFlowCount: active,
+				})
 			}
-			if got := agg.cstruct(); math.Abs(got-tt.want) > 1e-12 {
+			rows := dpuserspace.CoSFairnessRSSSummaries(status)
+			if len(rows) != 1 {
+				t.Fatalf("CoSFairnessRSSSummaries(%v) returned %d rows, want 1", tt.dist, len(rows))
+			}
+			if got := rows[0].Cstruct; math.Abs(got-tt.want) > 1e-12 {
 				t.Fatalf("cstruct(%v) = %.15g, want %.15g", tt.dist, got, tt.want)
 			}
 		})

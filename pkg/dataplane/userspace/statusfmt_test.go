@@ -115,6 +115,160 @@ func TestFormatStatusSummaryReportsStandbyArmedRole(t *testing.T) {
 	}
 }
 
+func TestFormatFairnessRSS(t *testing.T) {
+	status := ProcessStatus{
+		CoSActiveFlowCountsTruncated: true,
+		CoSActiveFlowCounts: []CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: 4, WorkerID: 0, ActiveFlowCount: 1},
+			{Ifindex: 80, QueueID: 4, WorkerID: 1, ActiveFlowCount: 3},
+			{Ifindex: 80, QueueID: 4, WorkerID: 2, ActiveFlowCount: 0},
+			{Ifindex: 80, QueueID: 5, WorkerID: 0, ActiveFlowCount: 2},
+			{Ifindex: 80, QueueID: 5, WorkerID: 1, ActiveFlowCount: 2},
+		},
+	}
+
+	out := FormatFairnessRSS(status)
+	for _, want := range []string{
+		"Userspace fairness RSS structure:",
+		"warning: CoS active-flow snapshot truncated",
+		"Ifindex",
+		"Queue",
+		"ActiveFlows",
+		"Cstruct",
+		"80       4       4           2             0.577350   75.00%",
+		"80       5       4           2             0.000000   50.00%",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("fairness output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatFlowWorkerMap(t *testing.T) {
+	cosQueue := uint8(4)
+	dscpRewrite := uint8(46)
+	status := ProcessStatus{
+		FlowWorkerMapTruncated: true,
+		FlowWorkerMap: []FlowWorkerStatus{
+			{
+				Slot:           3,
+				QueueID:        2,
+				WorkerID:       1,
+				Interface:      "ge-0-0-2",
+				Ifindex:        80,
+				IngressIfindex: 70,
+				EgressIfindex:  80,
+				TxIfindex:      80,
+				CoSQueueID:     &cosQueue,
+				DSCPRewrite:    &dscpRewrite,
+				AgeEpochs:      7,
+				SessionKey: FlowTupleStatus{
+					Protocol: 6,
+					SrcIP:    "172.16.80.10",
+					SrcPort:  40000,
+					DstIP:    "172.16.80.200",
+					DstPort:  5201,
+				},
+				ForwardWireKey: FlowTupleStatus{
+					Protocol: 6,
+					SrcIP:    "172.16.80.10",
+					SrcPort:  40000,
+					DstIP:    "172.16.80.200",
+					DstPort:  5201,
+				},
+				ReverseCanonicalKey: FlowTupleStatus{
+					Protocol: 6,
+					SrcIP:    "172.16.80.200",
+					SrcPort:  5201,
+					DstIP:    "172.16.80.10",
+					DstPort:  40000,
+				},
+			},
+			{
+				Slot:     1,
+				QueueID:  1,
+				WorkerID: 0,
+				SessionKey: FlowTupleStatus{
+					Protocol: 17,
+					SrcIP:    "2001:db8::1",
+					SrcPort:  12345,
+					DstIP:    "2001:db8::2",
+					DstPort:  5201,
+				},
+			},
+		},
+	}
+
+	out := FormatFlowWorkerMap(status, 1)
+	for _, want := range []string{
+		"Userspace flow-worker map:",
+		"warning: helper flow-worker snapshot truncated",
+		"showing first 1 of 2 rows",
+		"Worker",
+		"Queue",
+		"Session",
+		"0      1      1",
+		"udp [2001:db8::1]:12345->[2001:db8::2]:5201",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("flow-worker output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "172.16.80.10") {
+		t.Fatalf("flow-worker output exceeded limit:\n%s", out)
+	}
+
+	allOut := FormatFlowWorkerMap(status, flowWorkerMapAllLimit)
+	if strings.Contains(allOut, "showing first") {
+		t.Fatalf("flow-worker all output should not be bounded:\n%s", allOut)
+	}
+	for _, want := range []string{
+		"172.16.80.10:40000->172.16.80.200:5201",
+		"wire=tcp 172.16.80.10:40000->172.16.80.200:5201",
+		"reverse=tcp 172.16.80.200:5201->172.16.80.10:40000",
+	} {
+		if !strings.Contains(allOut, want) {
+			t.Fatalf("flow-worker all output missing %q:\n%s", want, allOut)
+		}
+	}
+}
+
+func TestParseFlowWorkerMapLimitSpec(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    string
+		want    int
+		wantErr bool
+	}{
+		{name: "default", spec: "", want: 0},
+		{name: "all", spec: "all", want: flowWorkerMapAllLimit},
+		{name: "bare limit", spec: "256", want: 256},
+		{name: "limit keyword", spec: "limit 4096", want: 4096},
+		{name: "limit equals", spec: "limit=1024", want: 1024},
+		{name: "zero", spec: "limit 0", wantErr: true},
+		{name: "negative", spec: "-1", wantErr: true},
+		{name: "extra", spec: "limit 1 extra", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseFlowWorkerMapLimitSpec(tt.spec)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseFlowWorkerMapLimitSpec(%q) succeeded, want error", tt.spec)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseFlowWorkerMapLimitSpec(%q) error = %v", tt.spec, err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseFlowWorkerMapLimitSpec(%q) = %d, want %d", tt.spec, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatBindings(t *testing.T) {
 	status := ProcessStatus{
 		Fabrics: []FabricSnapshot{

@@ -65,6 +65,14 @@ func (c *CLI) showChassisCluster(args []string) error {
 					return c.showChassisClusterDataPlaneStats()
 				case "interfaces":
 					return c.showChassisClusterDataPlaneInterfaces()
+				case "fairness":
+					return c.showChassisClusterDataPlaneFairness()
+				case "flows":
+					limit, err := dpuserspace.ParseFlowWorkerMapLimitSpec(strings.Join(args[2:], " "))
+					if err != nil {
+						return err
+					}
+					return c.showChassisClusterDataPlaneFlows(limit)
 				}
 			}
 			cmdtree.PrintTreeHelp("show chassis cluster data-plane:", operationalTree, "show", "chassis", "cluster", "data-plane")
@@ -212,6 +220,32 @@ func (c *CLI) showChassisClusterDataPlaneInterfaces() error {
 		fmt.Println()
 		fmt.Print(dpuserspace.FormatBindings(status))
 	}
+	return nil
+}
+
+func (c *CLI) showChassisClusterDataPlaneFairness() error {
+	if c.cluster == nil {
+		fmt.Println("Cluster not configured")
+		return nil
+	}
+	status, err := c.userspaceDataplaneStatus()
+	if err != nil {
+		return err
+	}
+	fmt.Print(dpuserspace.FormatFairnessRSS(status))
+	return nil
+}
+
+func (c *CLI) showChassisClusterDataPlaneFlows(limit int) error {
+	if c.cluster == nil {
+		fmt.Println("Cluster not configured")
+		return nil
+	}
+	status, err := c.userspaceDataplaneStatus()
+	if err != nil {
+		return err
+	}
+	fmt.Print(dpuserspace.FormatFlowWorkerMap(status, limit))
 	return nil
 }
 
