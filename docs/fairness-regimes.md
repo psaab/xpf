@@ -248,7 +248,10 @@ With the default symmetric CoS fixture this runs port 5201
 then invokes `fairness-eval` twice against the same
 `xpf_userspace_cos_active_flow_count` scrape: once for queue 4 and
 once for queue 5. Non-canonical fixtures must set `COS_QUEUE_ID` and
-`MIXED_COS_QUEUE_ID` explicitly.
+`MIXED_COS_QUEUE_ID` explicitly. `MIXED_RSS_EXPECTATION` defaults to
+`RSS_EXPECTATION`, so one expectation gate applies to both classes
+unless the operator explicitly sets `MIXED_RSS_EXPECTATION=any` or a
+different mixed-class expression.
 
 ## Required metrics — exported in production via gRPC/Prometheus
 

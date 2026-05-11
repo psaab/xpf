@@ -24,6 +24,9 @@
 # MIXED_COS_QUEUE_ID only for non-canonical fixtures. In mixed mode the
 # harness infers SHAPER_RATE_BPS / MIXED_SHAPER_RATE_BPS from canonical
 # fixture ports; set them explicitly for non-canonical fixtures.
+# MIXED_RSS_EXPECTATION inherits RSS_EXPECTATION by default; set
+# MIXED_RSS_EXPECTATION=any when only the primary class should enforce
+# an RSS/workload expectation.
 #
 # Defaults match the existing iperf-c P=12 -R workload that produced the
 # 47% per-flow CoV measurement that motivates the harness.
