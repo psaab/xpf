@@ -193,6 +193,13 @@ pub(super) fn bucket_index_for_ns(ns: u64) -> usize {
     b.min(DRAIN_HIST_BUCKETS - 1)
 }
 
+/// Atomically published flow-worker diagnostic payload.
+#[derive(Default)]
+pub(super) struct FlowWorkerMapSnapshot {
+    rows: Vec<crate::protocol::FlowWorkerStatus>,
+    truncated: bool,
+}
+
 /// Raw ring state: (rxP, rxC, frP, frC, txP, txC, crP, crC)
 pub(in crate::afxdp) struct BindingLiveState {
     pub(super) bound: AtomicBool,
@@ -241,8 +248,7 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// worker on the same debug cadence as `active_flow_count`. Stored
     /// as an owned ArcSwap snapshot so the control thread can aggregate
     /// tuple->worker mappings without taking a worker-local lock.
-    pub(super) flow_worker_map: ArcSwap<Vec<crate::protocol::FlowWorkerStatus>>,
-    pub(super) flow_worker_map_truncated: AtomicBool,
+    pub(super) flow_worker_map: ArcSwap<FlowWorkerMapSnapshot>,
     /// #1248: bounded per-binding active-flow counts by egress CoS
     /// `(ifindex, queue_id)`, published by the owning worker on the
     /// debug cadence and later aggregated by coordinator status.
@@ -464,8 +470,7 @@ impl BindingLiveState {
             flow_cache_evictions: AtomicU64::new(0),
             flow_cache_collision_evictions: AtomicU64::new(0),
             active_flow_count: AtomicU32::new(0),
-            flow_worker_map: ArcSwap::from_pointee(Vec::new()),
-            flow_worker_map_truncated: AtomicBool::new(false),
+            flow_worker_map: ArcSwap::from_pointee(FlowWorkerMapSnapshot::default()),
             cos_active_flow_counts: ArcSwap::from_pointee(Vec::new()),
             v_min_throttle_hard_cap_overrides: AtomicU64::new(0),
             v_min_throttles: AtomicU64::new(0),
@@ -600,18 +605,15 @@ impl BindingLiveState {
         rows: Vec<crate::protocol::FlowWorkerStatus>,
         truncated: bool,
     ) {
-        self.flow_worker_map_truncated
-            .store(truncated, Ordering::Relaxed);
-        self.flow_worker_map.store(Arc::new(rows));
+        self.flow_worker_map
+            .store(Arc::new(FlowWorkerMapSnapshot { rows, truncated }));
     }
 
     pub(in crate::afxdp) fn flow_worker_map_snapshot(
         &self,
     ) -> (Vec<crate::protocol::FlowWorkerStatus>, bool) {
-        (
-            self.flow_worker_map.load().as_ref().clone(),
-            self.flow_worker_map_truncated.load(Ordering::Relaxed),
-        )
+        let snapshot = self.flow_worker_map.load();
+        (snapshot.rows.clone(), snapshot.truncated)
     }
 
     /// Publish this binding's per-CoS active-flow counts.

@@ -21,7 +21,9 @@
 # and 5202 (queue 5) and evaluates each class separately from the
 # same live xpf_userspace_cos_active_flow_count scrape. Set COS_IFINDEX
 # to the shaped egress ifindex. Override COS_QUEUE_ID /
-# MIXED_COS_QUEUE_ID only for non-canonical fixtures.
+# MIXED_COS_QUEUE_ID only for non-canonical fixtures. In mixed mode the
+# harness infers SHAPER_RATE_BPS / MIXED_SHAPER_RATE_BPS from canonical
+# fixture ports; set them explicitly for non-canonical fixtures.
 #
 # Defaults match the existing iperf-c P=12 -R workload that produced the
 # 47% per-flow CoV measurement that motivates the harness.
@@ -60,7 +62,8 @@ MIXED_N=${MIXED_N:-$N}
 MIXED_REVERSE=${MIXED_REVERSE:-$REVERSE}
 MIXED_COS_QUEUE_ID=${MIXED_COS_QUEUE_ID:-}
 N_WORKERS=${N_WORKERS:-6}
-SHAPER_RATE_BPS=${SHAPER_RATE_BPS:-25000000000}
+SHAPER_RATE_BPS=${SHAPER_RATE_BPS:-}
+MIXED_SHAPER_RATE_BPS=${MIXED_SHAPER_RATE_BPS:-}
 RSS_EXPECTATION=${RSS_EXPECTATION:-any}
 MIXED_RSS_EXPECTATION=${MIXED_RSS_EXPECTATION:-$RSS_EXPECTATION}
 WARMUP=${WARMUP:-5}
@@ -100,6 +103,19 @@ canonical_cos_queue_for_port() {
     esac
 }
 
+canonical_shaper_rate_for_port() {
+    case "$1" in
+        5201) printf '1000000000\n' ;;
+        5202) printf '10000000000\n' ;;
+        5203) printf '25000000000\n' ;;
+        5204) printf '13000000000\n' ;;
+        5205) printf '16000000000\n' ;;
+        5206) printf '19000000000\n' ;;
+        5207) printf '100000000\n' ;;
+        *) return 1 ;;
+    esac
+}
+
 if [[ "$MIXED_COS" -eq 1 ]]; then
     if [[ -z "$COS_IFINDEX" ]]; then
         echo "fairness-harness: --mixed-cos requires COS_IFINDEX for the shaped egress interface" >&2
@@ -117,6 +133,20 @@ if [[ "$MIXED_COS" -eq 1 ]]; then
             exit 2
         fi
     fi
+    if [[ -z "$SHAPER_RATE_BPS" ]]; then
+        if ! SHAPER_RATE_BPS=$(canonical_shaper_rate_for_port "$PORT"); then
+            echo "fairness-harness: cannot infer SHAPER_RATE_BPS for PORT=$PORT; set SHAPER_RATE_BPS explicitly" >&2
+            exit 2
+        fi
+    fi
+    if [[ -z "$MIXED_SHAPER_RATE_BPS" ]]; then
+        if ! MIXED_SHAPER_RATE_BPS=$(canonical_shaper_rate_for_port "$MIXED_PORT"); then
+            echo "fairness-harness: cannot infer MIXED_SHAPER_RATE_BPS for MIXED_PORT=$MIXED_PORT; set MIXED_SHAPER_RATE_BPS explicitly" >&2
+            exit 2
+        fi
+    fi
+else
+    SHAPER_RATE_BPS=${SHAPER_RATE_BPS:-25000000000}
 fi
 
 scrape_metrics() {
@@ -174,6 +204,7 @@ run_eval() {
     local iperf_out=$2
     local cos_queue_id=${3:-}
     local rss_expectation=${4:-$RSS_EXPECTATION}
+    local shaper_rate_bps=${5:-$SHAPER_RATE_BPS}
 
     echo "fairness-harness: evaluating ${label}..."
     local eval_args=(
@@ -183,7 +214,7 @@ run_eval() {
         --warmup-secs "$WARMUP"
         --final-burst-secs "$FINAL_BURST"
         --n-workers "$N_WORKERS"
-        --shaper-rate-bps "$SHAPER_RATE_BPS"
+        --shaper-rate-bps "$shaper_rate_bps"
         --rss-expectation "$rss_expectation"
     )
     if [[ -n "$COS_IFINDEX" && -n "$cos_queue_id" ]]; then
@@ -233,11 +264,14 @@ cleanup
 
 if [[ "$MIXED_COS" -eq 1 ]]; then
     set +e
-    run_eval "primary port $PORT queue $COS_QUEUE_ID" "$IPERF_OUT" "$COS_QUEUE_ID" "$RSS_EXPECTATION"
+    run_eval "primary port $PORT queue $COS_QUEUE_ID" "$IPERF_OUT" "$COS_QUEUE_ID" "$RSS_EXPECTATION" "$SHAPER_RATE_BPS"
     PRIMARY_EVAL_STATUS=$?
-    run_eval "mixed port $MIXED_PORT queue $MIXED_COS_QUEUE_ID" "$MIXED_IPERF_OUT" "$MIXED_COS_QUEUE_ID" "$MIXED_RSS_EXPECTATION"
+    run_eval "mixed port $MIXED_PORT queue $MIXED_COS_QUEUE_ID" "$MIXED_IPERF_OUT" "$MIXED_COS_QUEUE_ID" "$MIXED_RSS_EXPECTATION" "$MIXED_SHAPER_RATE_BPS"
     MIXED_EVAL_STATUS=$?
     set -e
+    if [[ "$PRIMARY_EVAL_STATUS" -eq 2 || "$MIXED_EVAL_STATUS" -eq 2 ]]; then
+        exit 2
+    fi
     if [[ "$PRIMARY_EVAL_STATUS" -ne 0 ]]; then
         exit "$PRIMARY_EVAL_STATUS"
     fi
