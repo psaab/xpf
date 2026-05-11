@@ -41,6 +41,10 @@ func (c *ctl) handleShow(args []string) error {
 								return c.showText("chassis-cluster-data-plane-statistics")
 							case "interfaces":
 								return c.showText("chassis-cluster-data-plane-interfaces")
+							case "fairness":
+								return c.showText("chassis-cluster-data-plane-fairness")
+							case "flows":
+								return c.showTextFiltered("chassis-cluster-data-plane-flows", strings.Join(args[4:], " "))
 							}
 						}
 						return c.showText("chassis-cluster-data-plane-statistics")
