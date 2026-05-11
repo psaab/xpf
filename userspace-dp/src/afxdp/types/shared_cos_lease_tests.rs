@@ -147,12 +147,22 @@ fn v8_acquire_zero_when_no_active_flows() {
     assert_eq!(granted, 0, "no active flows → no grants");
 }
 
+#[cfg(debug_assertions)]
 #[test]
-fn v8_acquire_returns_zero_for_out_of_range_worker_id() {
+#[should_panic(expected = "worker_id 2 out of range")]
+fn v8_acquire_debug_panics_for_out_of_range_worker_id() {
     let lease = SharedCoSQueueLease::new_v8(10_000_000, 64 * 1024, 2, 1);
     // max_worker_id = 1, so worker_id 0 and 1 are valid; 2+ are out of range.
-    // debug_assert in production fires; release-mode returns 0.
-    // Since cargo test --release skips debug_assert, this returns 0 cleanly.
+    // Debug builds should fail loudly for this caller bug.
+    let _ = lease.acquire_v8(2, 1_000_000, 4_096);
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn v8_acquire_release_returns_zero_for_out_of_range_worker_id() {
+    let lease = SharedCoSQueueLease::new_v8(10_000_000, 64 * 1024, 2, 1);
+    // max_worker_id = 1, so worker_id 0 and 1 are valid; 2+ are out of range.
+    // Release-mode skips debug_assert, so this returns 0 cleanly.
     let granted = lease.acquire_v8(2, 1_000_000, 4_096);
     assert_eq!(granted, 0, "out-of-range worker_id → 0 grant");
 }
