@@ -321,7 +321,24 @@ lightweight `--mixed-cos` mode remains the default for routine runs.
 
 For production observability, xpf MUST export:
 
-- **`xpf_fairness_saturated{queue=...}`** Prometheus gauge: 0 or
+- **`xpf_fairness_active_flows{ifindex=..., queue_id=...}`** gauge:
+  total active flows observed for the egress CoS queue in the current
+  userspace status snapshot.
+- **`xpf_fairness_active_workers{ifindex=..., queue_id=...}`** gauge:
+  workers with at least one active flow for the egress CoS queue.
+- **`xpf_fairness_max_worker_flow_share{ifindex=..., queue_id=...}`**
+  gauge: largest fraction of the queue's active flows owned by one
+  worker. This is the production-facing `max-worker-flow-share`
+  signal from #1247.
+- **`xpf_fairness_cstruct{ifindex=..., queue_id=...}`** gauge: the
+  current computed structural CoV ceiling for the egress CoS queue.
+  It is derived from
+  `xpf_userspace_cos_active_flow_count{ifindex,queue_id,worker_id}`;
+  no packet-path state or global atomics are added.
+- **`xpf_fairness_cos_active_flow_counts_truncated`** gauge: 1 when
+  the status snapshot was truncated before the fairness RSS gauges
+  were derived; 0 otherwise.
+- **`xpf_fairness_saturated{ifindex=..., queue_id=...}`** Prometheus gauge: 0 or
   1. Computed from rolling 30-second window of aggregate
   throughput vs structural cap (per "Saturation detection").
   Diagnostic only — saturation does not change pass/fail of the
@@ -331,14 +348,12 @@ For production observability, xpf MUST export:
   low_n_degenerate}` labels is dropped: with the structural-
   ceiling gate replacing fixed regime bands, distinguishing
   balanced/skewed/degenerate is not load-bearing on pass/fail —
-  the per-worker active-flow distribution `{aᵢ}` is the
-  underlying signal and is exported separately if the harness
-  needs it for context.
-- **`xpf_fairness_cstruct{queue=...}`** gauge: the current
-  computed structural CoV ceiling.
-- **`xpf_fairness_observed_cov{queue=...}`** gauge: rolling
+  the per-worker active-flow distribution `{a_i}` is the underlying
+  signal and is exported separately if the harness needs it for
+  context.
+- **`xpf_fairness_observed_cov{ifindex=..., queue_id=...}`** gauge: rolling
   observed CoV for the queue.
-- **`xpf_fairness_starved_flows{queue=...}`** counter:
+- **`xpf_fairness_starved_flows{ifindex=..., queue_id=...}`** counter:
   monotonic count of flows that fell below the starved-flow
   threshold (< 1% of mean per-flow throughput) over their lifetime.
 
@@ -347,11 +362,12 @@ Operators tracking this contract in production monitor the gap
 healthy production system has the gap `≤ 0.05` and the counter
 flat.
 
-**These Prometheus metrics do not currently exist in the
-collector.** They are mandated by this contract and must be
-added in a follow-up PR alongside the harness work that computes
-`Cstruct` and the rolling-window inputs. Until that PR ships, the
-contract is enforced via the test harness only.
+The RSS-structure gauges above are exported from the production
+Prometheus collector. The rolling throughput metrics
+(`xpf_fairness_saturated`, `xpf_fairness_observed_cov`, and
+`xpf_fairness_starved_flows`) still require a follow-up runtime window;
+until that ships, observed CoV and starved-flow gates are enforced via
+the test harness.
 
 ## Steady-state measurement window
 
