@@ -66,12 +66,12 @@ type xpfCollector struct {
 	dhcpLeasesActive *prometheus.Desc
 
 	// System metrics
-	sysCPUUser    *prometheus.Desc
-	sysCPUSystem  *prometheus.Desc
-	sysMemTotal   *prometheus.Desc
-	sysMemAvail   *prometheus.Desc
-	daemonUptime  *prometheus.Desc
-	daemonMemRSS  *prometheus.Desc
+	sysCPUUser   *prometheus.Desc
+	sysCPUSystem *prometheus.Desc
+	sysMemTotal  *prometheus.Desc
+	sysMemAvail  *prometheus.Desc
+	daemonUptime *prometheus.Desc
+	daemonMemRSS *prometheus.Desc
 
 	// #709: CoS owner-profile telemetry (userspace dataplane only).
 	// Cardinality estimate per plan §5: num_queues (≤ 64) × num_interfaces
@@ -102,6 +102,9 @@ type xpfCollector struct {
 	// docs/fairness-regimes.md). Refreshed at the helper's ~65ms
 	// debug-state tick.
 	bindingActiveFlowCount *prometheus.Desc
+	// #1248: class-specific active flow distribution by egress CoS
+	// queue. This is the production/mixed-workload {a_i} source.
+	cosActiveFlowCount *prometheus.Desc
 }
 
 func newCollector(srv *Server) *xpfCollector {
@@ -364,6 +367,13 @@ func newCollector(srv *Server) *xpfCollector {
 				"compute the structural CoV ceiling per docs/fairness-regimes.md (#1219).",
 			[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 		),
+		cosActiveFlowCount: prometheus.NewDesc(
+			"xpf_userspace_cos_active_flow_count",
+			"Distinct active flows observed for this egress CoS queue on this worker "+
+				"in the last ~650ms. This class-specific distribution is the preferred "+
+				"fairness harness input for mixed workloads (#1248).",
+			[]string{"ifindex", "queue_id", "worker_id"}, nil,
+		),
 	}
 }
 
@@ -416,6 +426,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerIdleLoops
 	ch <- c.workerDead
 	ch <- c.bindingActiveFlowCount
+	ch <- c.cosActiveFlowCount
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -454,6 +465,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 	c.emitCoSOwnerProfile(ch, status)
 	c.emitWorkerRuntime(ch, status)
 	c.emitBindingActiveFlowCount(ch, status)
+	c.emitCoSActiveFlowCount(ch, status)
 }
 
 // #1219: emit per-binding distinct active flow count for the fairness
@@ -469,6 +481,23 @@ func (c *xpfCollector) emitBindingActiveFlowCount(ch chan<- prometheus.Metric, s
 			strconv.FormatUint(uint64(b.QueueID), 10),
 			strconv.FormatUint(uint64(b.WorkerID), 10),
 			b.Interface,
+		)
+	}
+}
+
+// #1248: emit class-specific active flow counts for each egress CoS
+// `(ifindex, queue_id, worker_id)` tuple. This is intentionally a
+// gauge snapshot from userspace-dp's debug cadence, not a line-rate
+// packet counter.
+func (c *xpfCollector) emitCoSActiveFlowCount(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, row := range status.CoSActiveFlowCounts {
+		ch <- prometheus.MustNewConstMetric(
+			c.cosActiveFlowCount,
+			prometheus.GaugeValue,
+			float64(row.ActiveFlowCount),
+			strconv.Itoa(row.Ifindex),
+			strconv.FormatUint(uint64(row.QueueID), 10),
+			strconv.FormatUint(uint64(row.WorkerID), 10),
 		)
 	}
 }
@@ -946,4 +975,3 @@ func parseMemInfoKB(line string) uint64 {
 	v, _ := strconv.ParseUint(fields[1], 10, 64)
 	return v
 }
-

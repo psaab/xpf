@@ -57,6 +57,17 @@ structural ceiling, or is there a scheduler bug?"
   iperf3 -J + 6-col TSV, aggregates per-worker on filtered iface,
   emits PASS/FAIL verdict JSON.
 
+### PR #1248 — Per-CoS-queue active-flow distribution (2026-05-10)
+
+The PR #1220 per-binding `{a_i}` source is correct for single-class
+harness runs, but it is polluted by unrelated classes in mixed
+workloads. The class-specific source is now
+`xpf_userspace_cos_active_flow_count{ifindex, queue_id, worker_id}`,
+computed from the same owner-local flow-cache scan and aggregated by
+egress CoS interface/queue. `fairness-eval` uses this source when
+given `--cos-flows --cos-ifindex --cos-queue-id`; otherwise it falls
+back to the legacy per-binding path.
+
 Operational measurement (iperf-c P=12 -R, ge-0-0-2): observed_CoV
 ≈ 47% **is below** the structural ceiling for the RSS distribution
 the cluster produced. **No scheduler bug; structurally skew-bound
@@ -291,7 +302,7 @@ revisit criteria fire.
 
 ### Path 4: workload-aware gate
 
-**Status**: not yet captured in an issue. Concept is to gate the
+**Status**: tracked by #1247. Concept is to gate the
 harness's verdict on the workload class rather than blindly applying
 the CoV+0.05 contract — e.g. for trivially-skewed RSS (one worker has
 all flows), the contract correctly returns PASS because Cstruct is
@@ -302,7 +313,12 @@ allowed to declare "I expect balanced RSS and want to be paged on
 structural skew" — a declarative fairness expectation that gets
 checked at runtime, not just in test.
 
-If pursued, this is a smaller-than-Path-2 swing and pure userspace.
+#1247's first slice is pure userspace: `fairness-eval` accepts
+`--rss-expectation` (`any`, `balanced`,
+`at-least-active-workers:N`, `max-worker-flow-share:X`, or
+`cstruct-max:X`) and fails the verdict when the observed `{a_i}`
+violates that expectation. Runtime config/alerting can build on the
+same expectation language.
 
 ## Open work
 
@@ -318,9 +334,10 @@ If pursued, this is a smaller-than-Path-2 swing and pure userspace.
   open a fresh issue using the revisit criteria in the Path 2
   closure archive. Do not re-open #1211 directly. As of the
   2026-05-07 sweep below, NO empirically failing workload exists.
-- **Path 4** has no issue and per the empirical sweep no concrete
-  motivation. Consider filing only if a workload-aware gate
-  becomes operationally desirable.
+- **#1247 — Path 4 workload/RSS expectation gate**: first harness
+  slice shipped in this work; runtime config/alerting remains the
+  production follow-up if operators want opt-in paging on structural
+  skew.
 
 ## Empirical sweep across workload classes (2026-05-07)
 

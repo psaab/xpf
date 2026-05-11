@@ -96,6 +96,52 @@ impl super::Coordinator {
         out
     }
 
+    pub fn flow_worker_map(&self) -> (Vec<crate::protocol::FlowWorkerStatus>, bool) {
+        const FLOW_WORKER_MAP_MAX_ROWS: usize = 4096;
+        let mut out = Vec::new();
+        let mut truncated = false;
+        for live in self.workers.live.values() {
+            let (rows, binding_truncated) = live.flow_worker_map_snapshot();
+            truncated |= binding_truncated;
+            for row in rows {
+                if out.len() >= FLOW_WORKER_MAP_MAX_ROWS {
+                    truncated = true;
+                    break;
+                }
+                out.push(row);
+            }
+        }
+        (out, truncated)
+    }
+
+    pub fn cos_active_flow_counts(
+        &self,
+    ) -> (Vec<crate::protocol::CoSActiveFlowCountStatus>, bool) {
+        const COS_ACTIVE_FLOW_COUNT_MAX_ROWS: usize = 4096;
+        let mut counts = std::collections::BTreeMap::<(i32, u8, u32), u32>::new();
+        for live in self.workers.live.values() {
+            for row in live.cos_active_flow_counts_snapshot() {
+                let key = (row.ifindex, row.queue_id, row.worker_id);
+                let count = counts.entry(key).or_insert(0);
+                *count = count.saturating_add(row.active_flow_count);
+            }
+        }
+        let truncated = counts.len() > COS_ACTIVE_FLOW_COUNT_MAX_ROWS;
+        let out = counts
+            .into_iter()
+            .take(COS_ACTIVE_FLOW_COUNT_MAX_ROWS)
+            .map(|((ifindex, queue_id, worker_id), active_flow_count)| {
+                crate::protocol::CoSActiveFlowCountStatus {
+                    ifindex,
+                    queue_id,
+                    worker_id,
+                    active_flow_count,
+                }
+            })
+            .collect();
+        (out, truncated)
+    }
+
     pub fn drain_session_deltas(&self, max: usize) -> Vec<SessionDeltaInfo> {
         let mut remaining = max.max(1);
         let mut out = Vec::new();

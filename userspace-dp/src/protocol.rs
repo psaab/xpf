@@ -734,6 +734,22 @@ pub(crate) struct ProcessStatus {
     /// its poll path without deserializing every field on `BindingStatus`.
     #[serde(rename = "per_binding", default, skip_serializing_if = "Vec::is_empty")]
     pub per_binding: Vec<BindingCountersSnapshot>,
+    /// #1249: low-frequency debug snapshot mapping active flow-cache
+    /// entries to the worker/RX queue that currently owns them. This
+    /// is a diagnostic/status surface, not a scheduler input; workers
+    /// publish bounded owned snapshots from their existing debug tick.
+    #[serde(rename = "flow_worker_map", default)]
+    pub flow_worker_map: Vec<FlowWorkerStatus>,
+    #[serde(rename = "flow_worker_map_truncated", default)]
+    pub flow_worker_map_truncated: bool,
+    /// #1248: class-specific active-flow distribution for CoS
+    /// fairness. Aggregated as `(ifindex, queue_id, worker_id) ->
+    /// active distinct cached flows` from the same worker debug tick
+    /// that publishes `active_flow_count`.
+    #[serde(rename = "cos_active_flow_counts", default)]
+    pub cos_active_flow_counts: Vec<CoSActiveFlowCountStatus>,
+    #[serde(rename = "cos_active_flow_counts_truncated", default)]
+    pub cos_active_flow_counts_truncated: bool,
     #[serde(rename = "ha_groups", default)]
     pub ha_groups: Vec<HAGroupStatus>,
     #[serde(default)]
@@ -1032,6 +1048,88 @@ pub(crate) struct PacketResolution {
     pub from_zone: String,
     #[serde(rename = "to_zone", default)]
     pub to_zone: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct FlowTupleStatus {
+    #[serde(rename = "addr_family", default)]
+    pub addr_family: u8,
+    #[serde(default)]
+    pub protocol: u8,
+    #[serde(rename = "src_ip", default)]
+    pub src_ip: String,
+    #[serde(rename = "dst_ip", default)]
+    pub dst_ip: String,
+    #[serde(rename = "src_port", default)]
+    pub src_port: u16,
+    #[serde(rename = "dst_port", default)]
+    pub dst_port: u16,
+}
+
+impl FlowTupleStatus {
+    pub(crate) fn from_session_key(key: &crate::session::SessionKey) -> Self {
+        Self {
+            addr_family: key.addr_family,
+            protocol: key.protocol,
+            src_ip: key.src_ip.to_string(),
+            dst_ip: key.dst_ip.to_string(),
+            src_port: key.src_port,
+            dst_port: key.dst_port,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct FlowWorkerStatus {
+    #[serde(default)]
+    pub slot: u32,
+    #[serde(rename = "queue_id", default)]
+    pub queue_id: u32,
+    #[serde(rename = "worker_id", default)]
+    pub worker_id: u32,
+    #[serde(default)]
+    pub interface: String,
+    #[serde(default)]
+    pub ifindex: i32,
+    #[serde(rename = "ingress_ifindex", default)]
+    pub ingress_ifindex: i32,
+    #[serde(rename = "egress_ifindex", default)]
+    pub egress_ifindex: i32,
+    #[serde(rename = "tx_ifindex", default)]
+    pub tx_ifindex: i32,
+    #[serde(rename = "session_key", default)]
+    pub session_key: FlowTupleStatus,
+    #[serde(rename = "forward_wire_key", default)]
+    pub forward_wire_key: FlowTupleStatus,
+    #[serde(rename = "reverse_canonical_key", default)]
+    pub reverse_canonical_key: FlowTupleStatus,
+    #[serde(
+        rename = "cos_queue_id",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cos_queue_id: Option<u8>,
+    #[serde(
+        rename = "dscp_rewrite",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dscp_rewrite: Option<u8>,
+    #[serde(rename = "age_epochs", default)]
+    pub age_epochs: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct CoSActiveFlowCountStatus {
+    /// Egress CoS interface ifindex.
+    #[serde(default)]
+    pub ifindex: i32,
+    #[serde(rename = "queue_id", default)]
+    pub queue_id: u8,
+    #[serde(rename = "worker_id", default)]
+    pub worker_id: u32,
+    #[serde(rename = "active_flow_count", default)]
+    pub active_flow_count: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
