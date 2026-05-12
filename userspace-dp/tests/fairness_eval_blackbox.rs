@@ -480,11 +480,128 @@ fn guard_sum_mismatch_fails() {
     assert_eq!(v["verdict"], "FAIL");
     assert_eq!(v["a_i_sum_check_ok"], false);
     let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
-    assert!(
-        reasons.iter().any(|r| r.as_str().unwrap_or("").contains("Harness guard")),
-        "failure_reasons must contain a Harness guard entry; got: {:?}",
-        reasons
+    let guard_reason = reasons
+        .iter()
+        .filter_map(|r| r.as_str())
+        .find(|r| r.contains("Harness guard"))
+        .unwrap_or_else(|| panic!("failure_reasons must contain a Harness guard entry; got: {reasons:?}"));
+    assert!(guard_reason.contains("expected=6"), "guard reason missing expected_sum: {guard_reason}");
+    assert!(guard_reason.contains("non-starved=6"), "guard reason missing non-starved: {guard_reason}");
+    assert!(guard_reason.contains("dir_mult=1"), "guard reason missing dir_mult: {guard_reason}");
+}
+
+#[test]
+fn guard_low_n_legacy_input_rejects_p2_undercount() {
+    let tmp = TempGuard::new("guard_low_n_legacy");
+    let sockets = [5u64, 6];
+    let mut intervals: Vec<Vec<StreamSample>> = Vec::new();
+    for i in 0..60u64 {
+        intervals.push(vec![
+            StreamSample {
+                socket: sockets[0],
+                start: i as f64,
+                end: i as f64 + 1.0,
+                bits_per_second: 1.0e9,
+            },
+            StreamSample {
+                socket: sockets[1],
+                start: i as f64,
+                end: i as f64 + 1.0,
+                bits_per_second: 1.0e9,
+            },
+        ]);
+    }
+    let json_str = synth_iperf3_json(60, &sockets, intervals);
+    let mut tsv_str = String::from("# timestamp\tbinding_slot\tcount\n");
+    for ts in timestamps_for(60) {
+        tsv_str.push_str(&format!("{ts}\t0\t1\n"));
+    }
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "legacy P=2 undercount should fail the bidirectional harness guard; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let v = verdict.expect("verdict JSON on low-N legacy FAIL");
+    assert_eq!(v["verdict"], "FAIL");
+    assert_eq!(v["a_i_sum_check_ok"], false);
+    assert_eq!(v["a_i_sum"], 1);
+    assert_eq!(v["iperf_non_starved_streams"], 2);
+    assert_eq!(v["a_i_sum_tolerance"], 2);
+    let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
+    let guard_reason = reasons
+        .iter()
+        .filter_map(|r| r.as_str())
+        .find(|r| r.contains("Harness guard"))
+        .unwrap_or_else(|| panic!("failure_reasons must contain a Harness guard entry; got: {reasons:?}"));
+    assert!(guard_reason.contains("expected=4"), "guard reason missing expected_sum: {guard_reason}");
+    assert!(guard_reason.contains("non-starved=2"), "guard reason missing non-starved: {guard_reason}");
+    assert!(guard_reason.contains("dir_mult=2"), "guard reason missing dir_mult: {guard_reason}");
+}
+
+#[test]
+fn guard_low_n_iface_input_accepts_absolute_floor_p2_gap1() {
+    let tmp = TempGuard::new("guard_low_n_iface");
+    let sockets = [5u64, 6];
+    let mut intervals: Vec<Vec<StreamSample>> = Vec::new();
+    for i in 0..60u64 {
+        intervals.push(vec![
+            StreamSample {
+                socket: sockets[0],
+                start: i as f64,
+                end: i as f64 + 1.0,
+                bits_per_second: 1.0e9,
+            },
+            StreamSample {
+                socket: sockets[1],
+                start: i as f64,
+                end: i as f64 + 1.0,
+                bits_per_second: 1.0e9,
+            },
+        ]);
+    }
+    let json_str = synth_iperf3_json(60, &sockets, intervals);
+    let mut rows: Vec<TsvRow> = Vec::new();
+    for ts in timestamps_for(60) {
+        rows.push(TsvRow {
+            timestamp: ts,
+            binding_slot: 0,
+            queue_id: 0,
+            worker_id: 0,
+            iface: "ge-0-0-2",
+            count: 1,
+        });
+    }
+    let tsv_str = synth_tsv_6col(&rows);
+
+    // P=2 streams, --iface active → dir_mult=1 → expected_sum=2.
+    // Only one binding slot reports count=1 (the other is absent →
+    // median=0). a_i_sum=1, gap=|1-2|=1, tolerance=max(0,2)=2.
+    // 1 ≤ 2 → sum guard PASS (absolute floor is the operative gate).
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "iface-filtered P=2 gap=1 should stay inside the absolute floor (tolerance=2); stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on low-N iface PASS");
+    assert_eq!(v["verdict"], "PASS");
+    assert_eq!(v["a_i_sum_check_ok"], true);
+    assert_eq!(v["a_i_sum"], 1);
+    assert_eq!(v["iperf_non_starved_streams"], 2);
+    assert_eq!(v["a_i_sum_tolerance"], 2);
 }
 
 #[test]

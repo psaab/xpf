@@ -74,6 +74,57 @@ func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation u
 	}
 }
 
+const (
+	// Keep logical-only synthetic ifindexes in a high private range so
+	// they do not collide with kernel-assigned ifindexes in practical
+	// deployments, while remaining positive int32 values for protocol
+	// compatibility.
+	syntheticInterfaceIfindexMin = 1 << 30
+	syntheticInterfaceIfindexMax = syntheticInterfaceIfindexMin + (1 << 20) - 1
+)
+
+func syntheticLogicalIfindex(name string, vlanID int, used map[int]struct{}) int {
+	if used == nil {
+		used = make(map[int]struct{})
+	}
+	const fnvOffset = uint32(2166136261)
+	const fnvPrime = uint32(16777619)
+	hash := fnvOffset
+	for _, b := range []byte(fmt.Sprintf("%s/%d", name, vlanID)) {
+		hash ^= uint32(b)
+		hash *= fnvPrime
+	}
+	span := syntheticInterfaceIfindexMax - syntheticInterfaceIfindexMin + 1
+	start := syntheticInterfaceIfindexMin + int(hash%uint32(span))
+	for offset := 0; offset < span; offset++ {
+		candidate := syntheticInterfaceIfindexMin + ((start - syntheticInterfaceIfindexMin + offset) % span)
+		if _, exists := used[candidate]; exists {
+			continue
+		}
+		used[candidate] = struct{}{}
+		return candidate
+	}
+	panic(fmt.Sprintf(
+		"userspace snapshot: exhausted synthetic ifindex range for %q (vlan=%d hash=%d tried=%d range=[%d,%d]); check for hash collisions or excessive logical-only VLAN units",
+		name,
+		vlanID,
+		hash,
+		span,
+		syntheticInterfaceIfindexMin,
+		syntheticInterfaceIfindexMax,
+	))
+}
+
+func shouldUseLogicalOnlyParentBoundRethVLAN(cfg *config.Config, ifName string, unit *config.InterfaceUnit, childIfindex int, parentIfindex int) bool {
+	if cfg == nil || unit == nil || childIfindex > 0 || parentIfindex <= 0 || unit.VlanID <= 0 {
+		return false
+	}
+	if !strings.HasPrefix(ifName, "reth") {
+		return false
+	}
+	return config.LinuxIfName(cfg.ResolveReth(ifName)) != config.LinuxIfName(ifName)
+}
+
 // UserspaceBoundLinuxInterfaces returns the deduplicated, sorted set of
 // Linux interface names that the userspace dataplane will bind AF_XDP
 // sockets to for the given compiled config. This is the authoritative
@@ -187,7 +238,10 @@ func neighborsEqual(a, b []NeighborSnapshot) bool {
 // or transition to unusable state (which removes a key from the
 // publishable set).
 func neighborsEqualForwarding(a, b []NeighborSnapshot) bool {
-	type keyMac struct{ ifindex int; ip, mac string }
+	type keyMac struct {
+		ifindex int
+		ip, mac string
+	}
 	publishable := func(ns []NeighborSnapshot) map[keyMac]struct{} {
 		out := make(map[keyMac]struct{}, len(ns))
 		for _, n := range ns {
@@ -213,10 +267,10 @@ func neighborsEqualForwarding(a, b []NeighborSnapshot) bool {
 // should be pushed to userspace-dp. Must mirror userspace-dp's
 // accept rules at userspace-dp/src/afxdp/forwarding/mod.rs:45:
 //
-//   pub(super) fn neighbor_state_usable(state: &str) -> bool {
-//       let normalized = state.to_ascii_lowercase();
-//       !(normalized.contains("failed") || normalized.contains("incomplete"))
-//   }
+//	pub(super) fn neighbor_state_usable(state: &str) -> bool {
+//	    let normalized = state.to_ascii_lowercase();
+//	    !(normalized.contains("failed") || normalized.contains("incomplete"))
+//	}
 //
 // Codex code-review #3: Rust uses SUBSTRING match after
 // lowercasing; previous Go did EXACT match — drift. Fixed to
@@ -423,6 +477,7 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 		return nil
 	}
 	zoneByInterface := buildInterfaceZoneMap(cfg)
+	usedSyntheticIfindexes := make(map[int]struct{})
 	// Build RETH RG lookup: physical member → RETH's RedundancyGroup.
 	// Physical members have RedundantParent set but RedundancyGroup=0;
 	// the RG is on the RETH. Without this, flow cache HA checks on
@@ -492,9 +547,29 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 			}
 			unitName := fmt.Sprintf("%s.%d", name, unitNum)
 			parentLinux := snapshotLinuxName(cfg, name, iface, nil)
-			parentIfindex, _, _, _ := buildLinkSnapshot(parentLinux)
+			parentIfindex, parentMTU, parentHardwareAddr, _ := buildLinkSnapshot(parentLinux)
+			parentRXQueues := userspaceRXQueueCount(parentLinux)
 			linuxUnit := snapshotLinuxName(cfg, name, iface, unit)
 			ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxUnit)
+			rxQueues := userspaceRXQueueCount(linuxUnit)
+			logicalOnly := false
+			// Bondless RETH VLAN units can transmit through the parent
+			// AF_XDP netdev without a Linux VLAN child. Keep a unique
+			// logical ifindex for Rust FIB/filter/CoS state, while the
+			// existing ParentIfindex path remains the socket bind target.
+			if shouldUseLogicalOnlyParentBoundRethVLAN(cfg, name, unit, ifindex, parentIfindex) {
+				ifindex = syntheticLogicalIfindex(unitName, unit.VlanID, usedSyntheticIfindexes)
+				logicalOnly = true
+				if mtu == 0 {
+					mtu = parentMTU
+				}
+				if hardwareAddr == "" {
+					hardwareAddr = parentHardwareAddr
+				}
+				if rxQueues == 0 {
+					rxQueues = parentRXQueues
+				}
+			}
 			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses))
 			out = append(out, InterfaceSnapshot{
 				Name:                      unitName,
@@ -503,7 +578,8 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 				ParentLinuxName:           parentLinux,
 				Ifindex:                   ifindex,
 				ParentIfindex:             parentIfindex,
-				RXQueues:                  userspaceRXQueueCount(linuxUnit),
+				LogicalOnly:               logicalOnly,
+				RXQueues:                  rxQueues,
 				VLANID:                    unit.VlanID,
 				LocalFabric:               iface.LocalFabricMember,
 				RedundancyGroup:           rg, // inherit resolved RG (RETH parent or own)
