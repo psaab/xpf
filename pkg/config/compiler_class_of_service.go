@@ -372,7 +372,6 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
 
 func collectCoSFairnessRSSExpectation(queueNode *Node) (string, error) {
 	var expr string
-	seenKinds := make(map[string]struct{})
 	set := func(kind string, nodes []*Node, next func(*Node) string) error {
 		if len(nodes) == 0 {
 			return nil
@@ -380,14 +379,7 @@ func collectCoSFairnessRSSExpectation(queueNode *Node) (string, error) {
 		if len(nodes) > 1 {
 			return fmt.Errorf("duplicate %s expectation leaf", kind)
 		}
-		if _, ok := seenKinds[kind]; ok {
-			return fmt.Errorf("duplicate %s expectation leaf", kind)
-		}
-		seenKinds[kind] = struct{}{}
 		value := next(nodes[0])
-		if value == "" {
-			return nil
-		}
 		if expr != "" && expr != value {
 			return fmt.Errorf("multiple expectations configured: %q and %q", expr, value)
 		}
