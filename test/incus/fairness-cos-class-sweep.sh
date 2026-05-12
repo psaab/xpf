@@ -26,6 +26,7 @@ CAPTURE_DATAPLANE=${CAPTURE_DATAPLANE:-1}
 DATAPLANE_VM=${DATAPLANE_VM:-loss:xpf-userspace-fw0}
 DATAPLANE_STATUS_PATH=${DATAPLANE_STATUS_PATH:-/run/xpf/userspace-dp.json}
 DATAPLANE_STATS_CMD=${DATAPLANE_STATS_CMD:-"cli -c 'show chassis cluster data-plane statistics'"}
+DATAPLANE_CAPTURE_TIMEOUT_SEC=${DATAPLANE_CAPTURE_TIMEOUT_SEC:-20}
 
 if [[ -z "$COS_IFINDEX" ]]; then
     echo "fairness-cos-class-sweep: COS_IFINDEX is required for the shaped egress interface" >&2
@@ -57,6 +58,7 @@ fi
 SUMMARY_TSV="$ARTIFACT_ROOT/summary.tsv"
 SUMMARY_MD="$ARTIFACT_ROOT/summary.md"
 DATAPLANE_SUMMARY_TSV="$ARTIFACT_ROOT/dataplane-summary.tsv"
+rm -f "$DATAPLANE_SUMMARY_TSV"
 
 cat > "$SUMMARY_TSV" <<'HEADER'
 class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_cov	stdev_observed_cov	avg_mbps	avg_cstruct	avg_gap	starved_flows	per_run_verdicts
@@ -100,6 +102,18 @@ capture_dataplane_enabled() {
     esac
 }
 
+run_dataplane_cmd() {
+    local stderr=$1
+    shift
+
+    if ! command -v timeout >/dev/null 2>&1; then
+        echo "timeout command not found; dataplane capture cannot be bounded" > "$stderr"
+        return 127
+    fi
+
+    timeout --kill-after=5s "$DATAPLANE_CAPTURE_TIMEOUT_SEC" "$@" 2> "$stderr"
+}
+
 capture_dataplane_snapshot() {
     local phase=$1
     local root=$2
@@ -115,14 +129,16 @@ capture_dataplane_snapshot() {
         return 0
     fi
 
-    if ! incus exec "$DATAPLANE_VM" -- sh -lc "cat \"$DATAPLANE_STATUS_PATH\"" \
-        > "$dir/status-$phase.json" 2> "$dir/status-$phase.stderr"; then
+    if ! run_dataplane_cmd "$dir/status-$phase.stderr" \
+        incus exec "$DATAPLANE_VM" -- sh -lc "cat \"$DATAPLANE_STATUS_PATH\"" \
+        > "$dir/status-$phase.json"; then
         echo "failed to capture $DATAPLANE_STATUS_PATH from $DATAPLANE_VM" >> "$dir/status-$phase.stderr"
         mark_dataplane_error
     fi
 
-    if ! incus exec "$DATAPLANE_VM" -- sh -lc "$DATAPLANE_STATS_CMD" \
-        > "$dir/cli-$phase.txt" 2> "$dir/cli-$phase.stderr"; then
+    if ! run_dataplane_cmd "$dir/cli-$phase.stderr" \
+        incus exec "$DATAPLANE_VM" -- sh -lc "$DATAPLANE_STATS_CMD" \
+        > "$dir/cli-$phase.txt"; then
         echo "failed to run dataplane stats command on $DATAPLANE_VM" >> "$dir/cli-$phase.stderr"
         mark_dataplane_error
     fi
@@ -142,8 +158,9 @@ capture_dataplane_journal() {
         return 0
     fi
 
-    if ! incus exec "$DATAPLANE_VM" -- sh -lc "journalctl -u xpfd --since \"$since\" --no-pager -o short-iso" \
-        > "$dir/journal-since.txt" 2> "$dir/journal-since.stderr"; then
+    if ! run_dataplane_cmd "$dir/journal-since.stderr" \
+        incus exec "$DATAPLANE_VM" -- sh -lc "journalctl -u xpfd --since \"$since\" --no-pager -o short-iso" \
+        > "$dir/journal-since.txt"; then
         echo "failed to capture xpfd journal from $DATAPLANE_VM" >> "$dir/journal-since.stderr"
         mark_dataplane_error
     fi
@@ -282,7 +299,7 @@ append_dataplane_class_summary() {
 
     if [[ ! -f "$DATAPLANE_SUMMARY_TSV" ]]; then
         cat > "$DATAPLANE_SUMMARY_TSV" <<'HEADER'
-class	tx_errors_delta	tx_submit_error_drops_delta	pending_tx_local_overflow_drops_delta	dbg_tx_ring_full_delta	dbg_sendto_enobufs_delta	dbg_bound_pending_overflow_delta	dbg_cos_queue_overflow_delta	redirect_inbox_overflow_drops_delta	admission_flow_share_drops_delta	admission_buffer_drops_delta	admission_ecn_marked_delta	tx_ring_full_submit_stalls_delta	post_drain_backup_cos_drops_delta
+class	tx_errors_delta	tx_submit_error_drops_delta	pending_tx_local_overflow_drops_delta	dbg_tx_ring_full_delta	dbg_sendto_enobufs_delta	dbg_bound_pending_overflow_delta	dbg_cos_queue_overflow_delta	redirect_inbox_overflow_drops_delta	admission_flow_share_drops_delta	admission_buffer_drops_delta	admission_ecn_marked_delta	tx_ring_full_submit_stalls_delta	binding_post_drain_backup_cos_drops_delta
 HEADER
     fi
 
@@ -302,7 +319,7 @@ HEADER
             ($d.admission_buffer_drops // 0),
             ($d.admission_ecn_marked // 0),
             ($d.tx_ring_full_submit_stalls // 0),
-            ($d.cos_post_drain_backup_cos_drops // 0)
+            ($d.binding_post_drain_backup_cos_drops // 0)
           ]
         | @tsv
     ' "$delta_json" >> "$DATAPLANE_SUMMARY_TSV" 2> "${delta_json%.json}-summary.stderr"; then
