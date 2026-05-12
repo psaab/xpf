@@ -200,51 +200,53 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
     let (participating, v_min, total_peer_flows) =
         floor.participating_v_min_snapshot(queue.v_min.worker_id);
     let Some(v_min) = v_min else {
-        // No peers — reset hard-cap counter and continue.
         queue.v_min.consecutive_v_min_skips = 0;
         return true;
     };
 
-    // #1287 Tier 1: Flow-aware fairness check. If this worker has
-    // disproportionately many flows vs peers, throttle to allow
-    // peers to catch up. This complements the vtime lag check.
-    let my_flows = ff.active_flow_buckets as u32;
-    if my_flows > 0 && total_peer_flows > 0 {
-        let total_flows = total_peer_flows + my_flows;
-        // Compute my fair share of queue rate based on flow count
-        let my_fair_share_bps =
-            (transmit_rate_bytes as u128 * 8 * my_flows as u128 / total_flows as u128) as u64;
-        
-        // #1287 Fix: Use delta-rate from total_bytes_served, not sum of averages.
-        // Sum-of-averages lags reality by ~100ms window. Delta method gives
-        // true instantaneous rate.
-        let now_ns = monotonic_nanos();
-        let dt_ns = now_ns.saturating_sub(queue.v_min.last_publish_ns);
-        let my_observed_bps = if dt_ns > 0 && queue.v_min.last_publish_ns > 0 {
-            let bytes_delta = queue.v_min.bytes_served.saturating_sub(queue.v_min.last_published_bytes);
-            ((bytes_delta as u128) * 8 * 1_000_000_000u128 / dt_ns as u128) as u64
-        } else {
-            // First measurement or no time elapsed, fall back to sum of averages
-            // (will be 0 on first call, which is safe)
-            ff.flow_bucket_observed_bps.iter().sum()
-        };
-        
-        // Throttle if exceeding fair share by >10% (headroom for burst)
-        // Hysteresis: only unthrottle when below 90% to prevent thundering herd
-        let should_throttle = my_observed_bps > my_fair_share_bps.saturating_mul(11) / 10;
-        let should_unthrottle = my_observed_bps < my_fair_share_bps.saturating_mul(9) / 10;
-        
-        // Track if we were throttling last time (simple hysteresis via skip counter)
-        // If we throttled recently and still above 90%, keep throttling
-        if should_throttle || (queue.v_min.consecutive_v_min_skips > 0 && !should_unthrottle) {
-            queue.v_min.v_min_flow_throttles_scratch =
-                queue.v_min.v_min_flow_throttles_scratch.saturating_add(1);
-            return false;
-        }
-    }
-
     let lag = compute_v_min_lag_threshold(transmit_rate_bytes, participating + 1);
-    let cont = ff.queue_vtime <= v_min.saturating_add(lag);
+    let vtime_lag_exceeded = ff.queue_vtime > v_min.saturating_add(lag);
+    
+    // #1287 Tier 1: Flow-aware fairness check gated on link saturation.
+    // Only apply flow-aware brake when link is actually congested (vtime lag),
+    // otherwise we're work-conserving and shouldn't throttle.
+    let flow_throttle = if vtime_lag_exceeded {
+        let my_flows = ff.active_flow_buckets as u32;
+        if my_flows > 0 && total_peer_flows > 0 {
+            let total_flows = total_peer_flows + my_flows;
+            let my_fair_share_bps = (transmit_rate_bytes as u128 * 8 * my_flows as u128 
+                / total_flows as u128) as u64;
+            
+            // Use delta-rate from total_bytes_served for accuracy
+            let now_ns = monotonic_nanos();
+            let dt_ns = now_ns.saturating_sub(queue.v_min.last_publish_ns).max(1_000_000);
+            let my_observed_bps = if queue.v_min.last_publish_ns > 0 {
+                let bytes_delta = queue.v_min.bytes_served
+                    .saturating_sub(queue.v_min.last_published_bytes);
+                ((bytes_delta as u128) * 8 * 1_000_000_000u128 / dt_ns as u128) as u64
+            } else {
+                ff.flow_bucket_observed_bps.iter().sum()
+            };
+            
+            // Hysteresis: throttle at 110%, unthrottle at 90%
+            let should_throttle = my_observed_bps > my_fair_share_bps.saturating_mul(11) / 10;
+            let should_unthrottle = my_observed_bps < my_fair_share_bps.saturating_mul(9) / 10;
+            
+            if should_throttle || (queue.v_min.consecutive_v_min_skips > 0 && !should_unthrottle) {
+                queue.v_min.v_min_flow_throttles_scratch =
+                    queue.v_min.v_min_flow_throttles_scratch.saturating_add(1);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    
+    let cont = !flow_throttle && ff.queue_vtime <= v_min.saturating_add(lag);
     if cont {
         // Successful V_min check — reset the hard-cap counter so a
         // single throttled batch followed by 7 ok ones doesn't
