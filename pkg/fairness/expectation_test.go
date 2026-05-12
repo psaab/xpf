@@ -50,6 +50,35 @@ func TestParseRSSExpectationRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestRSSExpectationMetricShape(t *testing.T) {
+	tests := []struct {
+		raw      string
+		wantKind string
+		wantVal  float64
+		wantHas  bool
+	}{
+		{raw: "balanced", wantKind: "balanced"},
+		{raw: "at-least-active-workers:3", wantKind: "at-least-active-workers", wantVal: 3, wantHas: true},
+		{raw: "max-worker-flow-share:50%", wantKind: "max-worker-flow-share", wantVal: 0.5, wantHas: true},
+		{raw: "cstruct-max:0.25", wantKind: "cstruct-max", wantVal: 0.25, wantHas: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := ParseRSSExpectation(tt.raw)
+			if err != nil {
+				t.Fatalf("ParseRSSExpectation(%q): %v", tt.raw, err)
+			}
+			if got.MetricKind() != tt.wantKind {
+				t.Fatalf("MetricKind() = %q, want %q", got.MetricKind(), tt.wantKind)
+			}
+			value, ok := got.MetricValue()
+			if ok != tt.wantHas || value != tt.wantVal {
+				t.Fatalf("MetricValue() = (%v, %t), want (%v, %t)", value, ok, tt.wantVal, tt.wantHas)
+			}
+		})
+	}
+}
+
 func TestEvaluateRSSExpectation(t *testing.T) {
 	tests := []struct {
 		name       string

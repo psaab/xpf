@@ -231,6 +231,61 @@ func TestCompileClassOfServiceFairnessRSSExpectationRejectsDuplicateConflict(t *
 	}
 }
 
+func TestCompileClassOfServiceFairnessRSSExpectationSetDuplicateSameValueDedupes(t *testing.T) {
+	tree := &ConfigTree{}
+	for _, line := range []string{
+		"set class-of-service fairness rss-expectation ifindex 5 queue 4 balanced",
+		"set class-of-service fairness rss-expectation ifindex 5 queue 4 balanced",
+	} {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig error = %v", err)
+	}
+	if got := cfg.ClassOfService.FairnessExpectations; len(got) != 1 || got[0].RSSExpectation != "balanced" {
+		t.Fatalf("FairnessExpectations = %#v, want one balanced row", got)
+	}
+}
+
+func TestCompileClassOfServiceFairnessRSSExpectationRejectsHierarchicalDuplicateLeaf(t *testing.T) {
+	raw := `
+class-of-service {
+    fairness {
+        rss-expectation {
+            ifindex 5 {
+                queue 4 {
+                    balanced;
+                    balanced;
+                }
+            }
+        }
+    }
+}
+system {
+    dataplane-type userspace;
+}
+`
+	parser := NewParser(raw)
+	tree, errs := parser.Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig succeeded, want duplicate hierarchical fairness expectation error")
+	}
+	if !strings.Contains(err.Error(), "duplicate balanced expectation leaf") {
+		t.Fatalf("CompileConfig error = %v, want duplicate balanced expectation leaf", err)
+	}
+}
+
 func TestCoSIperfSymmetricFixtureCompilesReverseSourcePortOutputFilter(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "test", "incus", "cos-iperf-symmetric.set"))
 	if err != nil {

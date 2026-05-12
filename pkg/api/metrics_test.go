@@ -415,13 +415,19 @@ func TestEmitFairnessRSSExpectationGauges(t *testing.T) {
 		fairnessRSSExpectation: prometheus.NewDesc(
 			"xpf_fairness_rss_expectation_configured",
 			"test desc",
-			[]string{"ifindex", "queue_id", "expectation"},
+			[]string{"ifindex", "queue_id", "kind"},
+			nil,
+		),
+		fairnessRSSExpectationValue: prometheus.NewDesc(
+			"xpf_fairness_rss_expectation_value",
+			"test desc",
+			[]string{"ifindex", "queue_id", "kind"},
 			nil,
 		),
 		fairnessRSSSkewViolation: prometheus.NewDesc(
 			"xpf_fairness_rss_skew_violation",
 			"test desc",
-			[]string{"ifindex", "queue_id", "expectation"},
+			[]string{"ifindex", "queue_id", "kind"},
 			nil,
 		),
 	}
@@ -452,19 +458,20 @@ func TestEmitFairnessRSSExpectationGauges(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	if len(got) != 6 {
-		t.Fatalf("expected 6 expectation metrics, got %d", len(got))
+	if len(got) != 7 {
+		t.Fatalf("expected 7 expectation metrics, got %d", len(got))
 	}
-	labelsQ4 := map[string]string{"ifindex": "80", "queue_id": "4", "expectation": "balanced"}
+	labelsQ4 := map[string]string{"ifindex": "80", "queue_id": "4", "kind": "balanced"}
 	assertGaugeClose(t, got, c.fairnessRSSExpectation, labelsQ4, 1)
 	assertGaugeClose(t, got, c.fairnessRSSSkewViolation, labelsQ4, 1)
 
-	labelsQ5 := map[string]string{"ifindex": "80", "queue_id": "5", "expectation": "balanced"}
+	labelsQ5 := map[string]string{"ifindex": "80", "queue_id": "5", "kind": "balanced"}
 	assertGaugeClose(t, got, c.fairnessRSSExpectation, labelsQ5, 1)
 	assertGaugeClose(t, got, c.fairnessRSSSkewViolation, labelsQ5, 0)
 
-	labelsQ6 := map[string]string{"ifindex": "80", "queue_id": "6", "expectation": "cstruct-max:0.25"}
+	labelsQ6 := map[string]string{"ifindex": "80", "queue_id": "6", "kind": "cstruct-max"}
 	assertGaugeClose(t, got, c.fairnessRSSExpectation, labelsQ6, 1)
+	assertGaugeClose(t, got, c.fairnessRSSExpectationValue, labelsQ6, 0.25)
 	assertGaugeClose(t, got, c.fairnessRSSSkewViolation, labelsQ6, 1)
 }
 
@@ -528,13 +535,14 @@ func collectFromEmitFairnessRSSGauges(
 		got = append(got, m)
 	}
 	expected := map[*prometheus.Desc]struct{}{
-		c.fairnessCstruct:            {},
-		c.fairnessActiveWorkers:      {},
-		c.fairnessActiveFlows:        {},
-		c.fairnessMaxWorkerFlowShare: {},
-		c.fairnessCoSCountsTruncated: {},
-		c.fairnessRSSExpectation:     {},
-		c.fairnessRSSSkewViolation:   {},
+		c.fairnessCstruct:             {},
+		c.fairnessActiveWorkers:       {},
+		c.fairnessActiveFlows:         {},
+		c.fairnessMaxWorkerFlowShare:  {},
+		c.fairnessCoSCountsTruncated:  {},
+		c.fairnessRSSExpectation:      {},
+		c.fairnessRSSExpectationValue: {},
+		c.fairnessRSSSkewViolation:    {},
 	}
 	for _, m := range got {
 		if _, ok := expected[m.Desc()]; !ok {
