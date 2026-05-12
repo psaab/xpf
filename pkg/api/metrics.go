@@ -87,13 +87,15 @@ type xpfCollector struct {
 	cosOwnerPPS              *prometheus.Desc
 	cosPeerPPS               *prometheus.Desc
 	// #869: per-worker busy/idle runtime counters.
-	workerWallSecs      *prometheus.Desc
-	workerActiveSecs    *prometheus.Desc
-	workerIdleSpinSecs  *prometheus.Desc
-	workerIdleBlockSecs *prometheus.Desc
-	workerThreadCPUSecs *prometheus.Desc
-	workerWorkLoops     *prometheus.Desc
-	workerIdleLoops     *prometheus.Desc
+	workerWallSecs                           *prometheus.Desc
+	workerActiveSecs                         *prometheus.Desc
+	workerIdleSpinSecs                       *prometheus.Desc
+	workerIdleBlockSecs                      *prometheus.Desc
+	workerThreadCPUSecs                      *prometheus.Desc
+	workerWorkLoops                          *prometheus.Desc
+	workerIdleLoops                          *prometheus.Desc
+	workerCoSQueueLeaseAcquireV8Calls        *prometheus.Desc
+	workerCoSQueueLeaseAcquireV8GrantedBytes *prometheus.Desc
 	// #925 Phase 2: liveness gauge for the supervisor's catch_unwind
 	// state. 1 = worker has panicked and the supervisor has caught it;
 	// 0 = healthy. Set-only in Phase 1 (cleared by daemon restart).
@@ -369,6 +371,16 @@ func newCollector(srv *Server) *xpfCollector {
 			"Worker-loop iterations with no useful work (#869).",
 			[]string{"worker_id"}, nil,
 		),
+		workerCoSQueueLeaseAcquireV8Calls: prometheus.NewDesc(
+			"xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total",
+			"V8 CoS queue-lease acquire calls made by this worker (#1240).",
+			[]string{"worker_id"}, nil,
+		),
+		workerCoSQueueLeaseAcquireV8GrantedBytes: prometheus.NewDesc(
+			"xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total",
+			"Bytes granted by v8 CoS queue-lease acquire calls for this worker (#1240).",
+			[]string{"worker_id"}, nil,
+		),
 		workerDead: prometheus.NewDesc(
 			"xpf_userspace_worker_dead",
 			"1 if the userspace-dp worker thread has panicked and been "+
@@ -498,6 +510,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerThreadCPUSecs
 	ch <- c.workerWorkLoops
 	ch <- c.workerIdleLoops
+	ch <- c.workerCoSQueueLeaseAcquireV8Calls
+	ch <- c.workerCoSQueueLeaseAcquireV8GrantedBytes
 	ch <- c.workerDead
 	ch <- c.bindingActiveFlowCount
 	ch <- c.cosActiveFlowCount
@@ -749,6 +763,10 @@ func (c *xpfCollector) emitWorkerRuntime(ch chan<- prometheus.Metric, status dpu
 			prometheus.CounterValue, float64(w.WorkLoops), label)
 		ch <- prometheus.MustNewConstMetric(c.workerIdleLoops,
 			prometheus.CounterValue, float64(w.IdleLoops), label)
+		ch <- prometheus.MustNewConstMetric(c.workerCoSQueueLeaseAcquireV8Calls,
+			prometheus.CounterValue, float64(w.CoSQueueLeaseAcquireV8Calls), label)
+		ch <- prometheus.MustNewConstMetric(c.workerCoSQueueLeaseAcquireV8GrantedBytes,
+			prometheus.CounterValue, float64(w.CoSQueueLeaseAcquireV8GrantedBytes), label)
 		var deadValue float64
 		if w.Dead {
 			deadValue = 1

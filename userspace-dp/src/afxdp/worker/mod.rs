@@ -367,6 +367,8 @@ impl BindingWorker {
                 cos_interface_order: Vec::new(),
                 cos_interface_rr: 0,
                 cos_nonempty_interfaces: 0,
+                cos_queue_lease_acquire_v8_calls: 0,
+                cos_queue_lease_acquire_v8_granted_bytes: 0,
             },
             scratch: WorkerScratch {
                 scratch_recycle: Vec::with_capacity(RX_BATCH_SIZE as usize),
@@ -475,6 +477,22 @@ fn load_arc_if_changed<T>(
     } else {
         Some(arc_swap::Guard::into_inner(guard))
     }
+}
+
+#[inline]
+fn refresh_worker_cos_queue_lease_runtime_counters(
+    counters: &mut super::worker_runtime::WorkerRuntimeCounters,
+    bindings: &[BindingWorker],
+) {
+    let mut calls = 0u64;
+    let mut granted_bytes = 0u64;
+    for binding in bindings {
+        calls = calls.wrapping_add(binding.cos.cos_queue_lease_acquire_v8_calls);
+        granted_bytes = granted_bytes
+            .wrapping_add(binding.cos.cos_queue_lease_acquire_v8_granted_bytes);
+    }
+    counters.cos_queue_lease_acquire_v8_calls = calls;
+    counters.cos_queue_lease_acquire_v8_granted_bytes = granted_bytes;
 }
 
 pub(crate) fn worker_loop(
@@ -748,6 +766,7 @@ pub(crate) fn worker_loop(
                 if sampled_cpu_ns != 0 {
                     wr_counters.thread_cpu_ns = sampled_cpu_ns;
                 }
+                refresh_worker_cos_queue_lease_runtime_counters(&mut wr_counters, &bindings);
                 runtime_atomics.publish(&wr_counters);
                 wr_last_publish_ns = loop_now_ns;
             }

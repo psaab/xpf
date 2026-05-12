@@ -176,7 +176,7 @@ fn maybe_top_up_cos_queue_lease_unblocks_local_exact_queue_without_tokens() {
         Some(shared_queue_lease.clone()),
     )];
 
-    maybe_top_up_cos_queue_lease(
+    let _ = maybe_top_up_cos_queue_lease(
         &mut root.queues[0],
         Some(&shared_queue_lease),
         1_000_000_000,
@@ -190,6 +190,42 @@ fn maybe_top_up_cos_queue_lease_unblocks_local_exact_queue_without_tokens() {
         select_cos_guarantee_batch_with_fast_path(&mut root, &queue_fast_path, 1_000_000_000,)
             .is_some()
     );
+}
+
+#[test]
+fn maybe_top_up_cos_queue_lease_reports_v8_acquire_calls_and_grants() {
+    let mut root = test_cos_runtime_with_queues(
+        100_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "iperf-a".into(),
+            priority: 5,
+            transmit_rate_bytes: 100_000_000 / 8,
+            exact: true,
+            surplus_sharing: false,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+        }],
+    );
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].v_min.worker_id = 0;
+    let lease = Arc::new(SharedCoSQueueLease::new_v8(
+        100_000_000 / 8,
+        COS_MIN_BURST_BYTES,
+        1,
+        0,
+    ));
+    lease.rehydrate_worker_active_count(0, 1);
+
+    let telemetry = maybe_top_up_cos_queue_lease(&mut root.queues[0], Some(&lease), 200_000);
+
+    assert_eq!(telemetry.v8_calls, 1);
+    assert!(
+        telemetry.v8_granted_bytes > 0,
+        "active v8 worker should receive a nonzero grant"
+    );
+    assert_eq!(telemetry.v8_granted_bytes, root.queues[0].hot.tokens);
 }
 
 #[test]
@@ -257,7 +293,7 @@ fn maybe_top_up_cos_queue_lease_transparent_when_queue_rate_zero_exact_no_lease(
     // No shared queue lease — old code would early-return with
     // tokens still at 0; new code's transparent fast-path runs
     // before the exact branch and fills to the buffer cap.
-    maybe_top_up_cos_queue_lease(&mut root.queues[0], None, 1_000_000_000);
+    let _ = maybe_top_up_cos_queue_lease(&mut root.queues[0], None, 1_000_000_000);
 
     assert!(
         root.queues[0].hot.tokens >= COS_MIN_BURST_BYTES,
@@ -299,7 +335,7 @@ fn maybe_top_up_cos_queue_lease_transparent_non_exact_with_nonzero_last_refill()
     // would skip refill at rate=0; new fast-path fills regardless.
     root.queues[0].hot.last_refill_ns = 500_000_000;
 
-    maybe_top_up_cos_queue_lease(&mut root.queues[0], None, 1_000_000_000);
+    let _ = maybe_top_up_cos_queue_lease(&mut root.queues[0], None, 1_000_000_000);
 
     assert!(
         root.queues[0].hot.tokens >= COS_MIN_BURST_BYTES,
@@ -341,7 +377,7 @@ fn transparent_root_preserves_per_queue_exact_cap() {
     );
     root.queues[0].hot.tokens = 0;
 
-    maybe_top_up_cos_queue_lease(&mut root.queues[0], Some(&lease), 1_000_000_000);
+    let _ = maybe_top_up_cos_queue_lease(&mut root.queues[0], Some(&lease), 1_000_000_000);
 
     // Per-queue tokens populated by lease.acquire — bounded by the
     // lease size and buffer cap. The transparent-queue fast-path

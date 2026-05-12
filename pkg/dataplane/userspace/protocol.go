@@ -549,6 +549,11 @@ type WorkerRuntimeStatus struct {
 	ThreadCPUNS uint64 `json:"thread_cpu_ns,omitempty"`
 	WorkLoops   uint64 `json:"work_loops,omitempty"`
 	IdleLoops   uint64 `json:"idle_loops,omitempty"`
+	// #1240: cumulative v8 per-worker queue-lease acquire calls and
+	// granted bytes. Scrape with rate() and compare against per-worker
+	// TX throughput to diagnose token-acquisition imbalance.
+	CoSQueueLeaseAcquireV8Calls        uint64 `json:"cos_queue_lease_acquire_v8_calls,omitempty"`
+	CoSQueueLeaseAcquireV8GrantedBytes uint64 `json:"cos_queue_lease_acquire_v8_granted_bytes,omitempty"`
 	// #925 Phase 1+2 (catch+report+observe): Dead == true means the
 	// worker_loop panicked and the supervisor caught it. Set-only
 	// today — cleared only by daemon restart. Phase 2 surfaces this
