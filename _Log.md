@@ -351,3 +351,14 @@
 - **Timestamp**: 2026-05-10T05:18:20Z
   - **Action**: Correct configstore encryption note to match implementation (`master.key` + HKDF with configured PRF).
   - **File(s)**: `pkg/configstore/README.md`
+
+## 2026-05-12 fairness_multi_sample round-2 HIGH fixes
+
+- **Timestamp**: 2026-05-12T06:29:25Z
+  - **Action**: HIGH1 - Tighten extract_verdict_objects to require verdict+observed_cov+discriminator field
+  - **Action**: HIGH2 - Replace subprocess.run with Popen(start_new_session=True)+os.killpg for process-group cleanup on timeout
+  - **Action**: MINOR - Replace statistics.fmean with statistics.mean; remove dead timeout_stream_text
+  - **Action**: Docs - Add fresh-iperf3 requirement and threshold derivation to v8-multi-sample.md
+  - **Action**: Tests - Add schema-incomplete and process-group tests; move import time to top
+  - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md
+  - **Result**: 12/12 tests green (was 10)
