@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import os
+import signal
 from pathlib import Path
 import statistics
 import subprocess
@@ -58,7 +59,12 @@ def extract_json_objects(text: str) -> list[dict[str, Any]]:
 
 
 def extract_verdict_objects(text: str) -> list[dict[str, Any]]:
-    return [obj for obj in extract_json_objects(text) if "verdict" in obj]
+    _required = {"verdict", "observed_cov"}
+    _discriminators = {"cstruct", "gap", "failure_reasons"}
+    return [
+        obj for obj in extract_json_objects(text)
+        if _required.issubset(obj) and bool(_discriminators & obj.keys())
+    ]
 
 
 def numeric_field(verdict: dict[str, Any], key: str) -> float:
@@ -71,14 +77,6 @@ def numeric_field(verdict: dict[str, Any], key: str) -> float:
     if number < 0:
         raise MultiSampleError(f"verdict JSON field {key!r} is negative")
     return number
-
-
-def timeout_stream_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
 
 
 def sample_record(index: int, sample_dir: Path, exit_code: int, verdict: dict[str, Any]) -> dict[str, Any]:
@@ -104,7 +102,7 @@ def summarize(
     max_run_cov: float,
 ) -> dict[str, Any]:
     observed_covs = [float(s["observed_cov"]) for s in samples]
-    mean_cov = statistics.fmean(observed_covs)
+    mean_cov = statistics.mean(observed_covs)
     stdev_cov = statistics.stdev(observed_covs) if len(observed_covs) > 1 else 0.0
     max_cov = max(observed_covs)
     min_cov = min(observed_covs)
@@ -145,6 +143,21 @@ def summarize(
     }
 
 
+def _kill_process_group(pgid: int) -> None:
+    """Send SIGTERM then SIGKILL to a process group to clean up all descendants.
+
+    SIGTERM is sent first as a courtesy, then SIGKILL immediately follows.
+    There is no grace-period delay between them because this function is only
+    called on a CI timeout abort — the harness has already exceeded its time
+    budget and we need it dead fast to avoid tying up ports for subsequent runs.
+    """
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+
+
 def run_samples(args: argparse.Namespace) -> dict[str, Any]:
     harness_args = list(args.harness_args)
     if harness_args and harness_args[0] == "--":
@@ -166,24 +179,29 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
         env = os.environ.copy()
         env["ARTIFACT_DIR"] = str(artifact_dir)
         cmd = [str(args.harness), *harness_args]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+        timed_out = False
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                check=False,
-                timeout=args.per_run_timeout_sec,
-            )
-        except subprocess.TimeoutExpired as exc:
-            (sample_dir / "stdout.log").write_text(
-                timeout_stream_text(exc.stdout),
-                encoding="utf-8",
-            )
-            (sample_dir / "stderr.log").write_text(
-                timeout_stream_text(exc.stderr),
-                encoding="utf-8",
-            )
+            stdout_text, stderr_text = proc.communicate(timeout=args.per_run_timeout_sec)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                _kill_process_group(os.getpgid(proc.pid))
+            except ProcessLookupError:
+                pass
+            stdout_text, stderr_text = proc.communicate()
+        exit_code = proc.returncode
+
+        (sample_dir / "stdout.log").write_text(stdout_text, encoding="utf-8")
+        (sample_dir / "stderr.log").write_text(stderr_text, encoding="utf-8")
+        if timed_out:
             (sample_dir / "command.json").write_text(
                 json.dumps(
                     {
@@ -200,15 +218,12 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
             raise MultiSampleError(
                 f"sample {index} harness timed out after {args.per_run_timeout_sec}s; "
                 f"see {sample_dir}"
-            ) from exc
-
-        (sample_dir / "stdout.log").write_text(proc.stdout, encoding="utf-8")
-        (sample_dir / "stderr.log").write_text(proc.stderr, encoding="utf-8")
+            )
         (sample_dir / "command.json").write_text(
             json.dumps(
                 {
                     "argv": cmd,
-                    "exit_code": proc.returncode,
+                    "exit_code": exit_code,
                     "timeout_sec": args.per_run_timeout_sec,
                 },
                 indent=2,
@@ -217,12 +232,12 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
             encoding="utf-8",
         )
 
-        if proc.returncode not in (0, 1):
+        if exit_code not in (0, 1):
             raise MultiSampleError(
-                f"sample {index} harness exited {proc.returncode}; see {sample_dir}"
+                f"sample {index} harness exited {exit_code}; see {sample_dir}"
             )
 
-        objects = extract_verdict_objects(proc.stdout)
+        objects = extract_verdict_objects(stdout_text)
         if len(objects) != 1:
             raise MultiSampleError(
                 f"sample {index} expected exactly one verdict JSON, found {len(objects)}; "
@@ -233,7 +248,7 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
             json.dumps(verdict, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        samples.append(sample_record(index, sample_dir, proc.returncode, verdict))
+        samples.append(sample_record(index, sample_dir, exit_code, verdict))
 
     summary = summarize(
         samples,

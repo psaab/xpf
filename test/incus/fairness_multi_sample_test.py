@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 
@@ -30,10 +31,17 @@ class FairnessMultiSampleTest(unittest.TestCase):
     def test_extract_verdict_objects_ignores_log_json(self) -> None:
         text = (
             'log {"event":"progress","observed_cov":999}\n'
-            '{"verdict":"PASS","observed_cov":0.1}\n'
+            '{"verdict":"PASS","observed_cov":0.1,"failure_reasons":[]}\n'
         )
         objects = fairness_multi_sample.extract_verdict_objects(text)
-        self.assertEqual(objects, [{"verdict": "PASS", "observed_cov": 0.1}])
+        self.assertEqual(objects, [{"verdict": "PASS", "observed_cov": 0.1, "failure_reasons": []}])
+
+    def test_extract_verdict_objects_rejects_schema_incomplete_object(self) -> None:
+        # An object with verdict+observed_cov but no discriminator field must be rejected.
+        # This prevents a two-field log line from being misidentified as a fairness-eval result.
+        text = '{"verdict":"PASS","observed_cov":0.01}\n'
+        objects = fairness_multi_sample.extract_verdict_objects(text)
+        self.assertEqual(objects, [])
 
     def test_numeric_field_rejects_non_finite_negative_and_bool(self) -> None:
         for value in [True, False, math.nan, math.inf, -math.inf, -0.1, "0.1"]:
@@ -124,7 +132,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/usr/bin/env bash
-                    printf '{"verdict":"PASS","observed_cov":NaN}\\n'
+                    printf '{"verdict":"PASS","observed_cov":NaN,"cstruct":0.0,"gap":0.0,"failure_reasons":[]}\\n'
                     """
                 ),
                 encoding="utf-8",
@@ -186,6 +194,58 @@ class FairnessMultiSampleTest(unittest.TestCase):
             self.assertIn("timed out", result.stderr)
             command = json.loads((out_dir / "sample-1" / "command.json").read_text(encoding="utf-8"))
             self.assertTrue(command["timed_out"])
+
+    def test_cli_timeout_kills_process_group(self) -> None:
+        # Verify that process-group kill cleans up descendant processes, not just the shell.
+        # The harness spawns a background child that writes a sentinel file after 3 s.
+        # With a 1-second timeout the wrapper should kill the whole group before
+        # the sentinel is written; the sentinel must be absent after the run.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sentinel = tmp_path / "child_ran"
+            harness = tmp_path / "fake-harness.sh"
+            harness.write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/usr/bin/env bash
+                    (sleep 3 && touch {sentinel}) &
+                    sleep 3
+                    """
+                ),
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            out_dir = tmp_path / "out"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--samples",
+                    "2",
+                    "--per-run-timeout-sec",
+                    "1",
+                    "--out-dir",
+                    str(out_dir),
+                    "--harness",
+                    str(harness),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("timed out", result.stderr)
+            # Poll for up to 2s to confirm the sentinel is never written.
+            # SIGKILL is unblockable so it cannot appear after killpg completes,
+            # but poll briefly to catch any kernel-scheduling latency.
+            sentinel_written = False
+            for _ in range(4):
+                if sentinel.exists():
+                    sentinel_written = True
+                    break
+                time.sleep(0.5)
+            self.assertFalse(sentinel_written, "descendant child was not killed by process-group kill")
 
     def test_cli_rejects_samples_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
