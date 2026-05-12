@@ -2653,15 +2653,29 @@ func TestBuildInterfaceSnapshotIncludesInputAndOutputFilters(t *testing.T) {
 	}
 }
 
-func TestBuildInterfaceSnapshotFallsBackToParentIfindexForMissingRethVLAN(t *testing.T) {
+func missingLoopbackVLANID(t *testing.T) int {
+	t.Helper()
+	for vlan := 4094; vlan >= 2; vlan-- {
+		if _, err := net.InterfaceByName(fmt.Sprintf("lo.%d", vlan)); err != nil {
+			return vlan
+		}
+	}
+	t.Skip("all loopback VLAN names are present")
+	return 0
+}
+
+func TestBuildInterfaceSnapshotSynthesizesLogicalIfindexForMissingRethVLAN(t *testing.T) {
 	parent, err := net.InterfaceByName("lo")
 	if err != nil {
 		t.Skipf("loopback interface unavailable: %v", err)
 	}
+	vlanID := missingLoopbackVLANID(t)
+	unitName := fmt.Sprintf("reth0.%d", vlanID)
+	linuxUnitName := fmt.Sprintf("lo.%d", vlanID)
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			Zones: map[string]*config.ZoneConfig{
-				"wan": {Name: "wan", Interfaces: []string{"reth0.80"}},
+				"wan": {Name: "wan", Interfaces: []string{unitName}},
 			},
 		},
 		ClassOfService: &config.ClassOfServiceConfig{
@@ -2669,8 +2683,8 @@ func TestBuildInterfaceSnapshotFallsBackToParentIfindexForMissingRethVLAN(t *tes
 				"reth0": {
 					Name: "reth0",
 					Units: map[int]*config.CoSInterfaceUnit{
-						80: {
-							Unit:               80,
+						vlanID: {
+							Unit:               vlanID,
 							SchedulerMap:       "bandwidth-limit",
 							ShapingRateBytes:   25_000_000_000 / 8,
 							BurstSizeBytes:     64 * 1024 * 1024,
@@ -2691,9 +2705,9 @@ func TestBuildInterfaceSnapshotFallsBackToParentIfindexForMissingRethVLAN(t *tes
 				"reth0": {
 					Name: "reth0",
 					Units: map[int]*config.InterfaceUnit{
-						80: {
-							Number:         80,
-							VlanID:         80,
+						vlanID: {
+							Number:         vlanID,
+							VlanID:         vlanID,
 							FilterOutputV4: "bandwidth-output",
 							FilterOutputV6: "bandwidth-output",
 						},
@@ -2706,28 +2720,34 @@ func TestBuildInterfaceSnapshotFallsBackToParentIfindexForMissingRethVLAN(t *tes
 	snaps := buildInterfaceSnapshots(cfg)
 	var unitSnap *InterfaceSnapshot
 	for i := range snaps {
-		if snaps[i].Name == "reth0.80" {
+		if snaps[i].Name == unitName {
 			unitSnap = &snaps[i]
 			break
 		}
 	}
 	if unitSnap == nil {
-		t.Fatal("reth0.80 snapshot not found")
+		t.Fatalf("%s snapshot not found", unitName)
 	}
-	if unitSnap.Ifindex != parent.Index {
-		t.Fatalf("Ifindex = %d, want parent loopback ifindex %d", unitSnap.Ifindex, parent.Index)
+	if unitSnap.Ifindex <= 0 || unitSnap.Ifindex == parent.Index {
+		t.Fatalf("Ifindex = %d, want unique logical ifindex distinct from parent %d", unitSnap.Ifindex, parent.Index)
+	}
+	if unitSnap.Ifindex < syntheticInterfaceIfindexMin || unitSnap.Ifindex > syntheticInterfaceIfindexMax {
+		t.Fatalf("Ifindex = %d, want synthetic range [%d,%d]", unitSnap.Ifindex, syntheticInterfaceIfindexMin, syntheticInterfaceIfindexMax)
+	}
+	if !unitSnap.LogicalOnly {
+		t.Fatal("LogicalOnly = false, want true for missing parent-bound RETH VLAN")
 	}
 	if unitSnap.ParentIfindex != parent.Index {
 		t.Fatalf("ParentIfindex = %d, want %d", unitSnap.ParentIfindex, parent.Index)
 	}
-	if unitSnap.LinuxName != "lo.80" {
-		t.Fatalf("LinuxName = %q, want lo.80 logical child name", unitSnap.LinuxName)
+	if unitSnap.LinuxName != linuxUnitName {
+		t.Fatalf("LinuxName = %q, want %s logical child name", unitSnap.LinuxName, linuxUnitName)
 	}
 	if unitSnap.ParentLinuxName != "lo" {
 		t.Fatalf("ParentLinuxName = %q, want lo", unitSnap.ParentLinuxName)
 	}
-	if unitSnap.VLANID != 80 {
-		t.Fatalf("VLANID = %d, want 80", unitSnap.VLANID)
+	if unitSnap.VLANID != vlanID {
+		t.Fatalf("VLANID = %d, want %d", unitSnap.VLANID, vlanID)
 	}
 	if unitSnap.Zone != "wan" {
 		t.Fatalf("Zone = %q, want wan", unitSnap.Zone)
@@ -2741,9 +2761,64 @@ func TestBuildInterfaceSnapshotFallsBackToParentIfindexForMissingRethVLAN(t *tes
 	if unitSnap.CoSShapingRateBytesPerSec == 0 {
 		t.Fatal("CoSShapingRateBytesPerSec = 0, want configured shaper")
 	}
-	aliases := buildUserspaceIngressBindingAliases(&ConfigSnapshot{Interfaces: []InterfaceSnapshot{*unitSnap}})
-	if _, ok := aliases[uint32(parent.Index)]; ok {
-		t.Fatalf("self alias for parent-bound VLAN should be suppressed: %v", aliases)
+	snapshot := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{*unitSnap}}
+	aliases := buildUserspaceIngressBindingAliases(snapshot)
+	if len(aliases) != 0 {
+		t.Fatalf("logical-only VLAN should not create XSK binding aliases: %v", aliases)
+	}
+	ifindexes := buildUserspaceIngressIfindexes(snapshot)
+	if len(ifindexes) != 1 || ifindexes[0] != uint32(parent.Index) {
+		t.Fatalf("ingress ifindexes = %v, want only parent %d", ifindexes, parent.Index)
+	}
+}
+
+func TestBuildInterfaceSnapshotDoesNotSynthesizeLogicalIfindexForGenericMissingVLAN(t *testing.T) {
+	parent, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback interface unavailable: %v", err)
+	}
+	vlanID := missingLoopbackVLANID(t)
+	unitName := fmt.Sprintf("lo.%d", vlanID)
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Zones: map[string]*config.ZoneConfig{
+				"wan": {Name: "wan", Interfaces: []string{unitName}},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"lo": {
+					Name: "lo",
+					Units: map[int]*config.InterfaceUnit{
+						vlanID: {
+							Number: vlanID,
+							VlanID: vlanID,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	snaps := buildInterfaceSnapshots(cfg)
+	var unitSnap *InterfaceSnapshot
+	for i := range snaps {
+		if snaps[i].Name == unitName {
+			unitSnap = &snaps[i]
+			break
+		}
+	}
+	if unitSnap == nil {
+		t.Fatalf("%s snapshot not found", unitName)
+	}
+	if unitSnap.Ifindex != 0 {
+		t.Fatalf("Ifindex = %d, want 0 for generic missing VLAN child", unitSnap.Ifindex)
+	}
+	if unitSnap.LogicalOnly {
+		t.Fatal("LogicalOnly = true, want false for generic missing VLAN child")
+	}
+	if unitSnap.ParentIfindex != parent.Index {
+		t.Fatalf("ParentIfindex = %d, want %d", unitSnap.ParentIfindex, parent.Index)
 	}
 }
 
