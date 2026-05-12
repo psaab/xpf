@@ -65,6 +65,70 @@ func TestFairnessThroughputWindowCountsStarvedFlowsOnce(t *testing.T) {
 	}
 }
 
+func TestFairnessThroughputWindowAdvancesDuringIdleScrapes(t *testing.T) {
+	window := NewFairnessThroughputWindow(30 * time.Second)
+	now := time.Unix(100, 0)
+	queueID := uint8(4)
+	status := throughputStatus(queueID, 1_000, 1_000)
+
+	window.Update(now, status)
+	status.FlowWorkerMap[0].ObservedBytes = 6_000
+	got := window.Update(now.Add(10*time.Second), status)
+	if len(got) != 1 {
+		t.Fatalf("second update produced %d summaries, want 1", len(got))
+	}
+	if !got[0].Saturated {
+		t.Fatalf("Saturated after 500 B/s sample = false, want true: %+v", got[0])
+	}
+
+	status.FlowWorkerMap = nil
+	got = window.Update(now.Add(20*time.Second), status)
+	if len(got) != 1 {
+		t.Fatalf("idle update produced %d summaries, want 1", len(got))
+	}
+	if got[0].Saturated {
+		t.Fatalf("Saturated after idle wall-clock advance = true, want false: %+v", got[0])
+	}
+	if got[0].WindowSeconds != 20 {
+		t.Fatalf("WindowSeconds after idle update = %.1f, want 20", got[0].WindowSeconds)
+	}
+}
+
+func TestFairnessThroughputWindowTruncationResetsWindow(t *testing.T) {
+	window := NewFairnessThroughputWindow(30 * time.Second)
+	now := time.Unix(100, 0)
+	queueID := uint8(4)
+	status := throughputStatus(queueID, 1_000, 1_000)
+
+	window.Update(now, status)
+	status.FlowWorkerMap[0].ObservedBytes = 6_000
+	got := window.Update(now.Add(10*time.Second), status)
+	if len(got) != 1 {
+		t.Fatalf("second update produced %d summaries, want 1", len(got))
+	}
+
+	truncated := status
+	truncated.FlowWorkerMapTruncated = true
+	if got := window.Update(now.Add(20*time.Second), truncated); len(got) != 0 {
+		t.Fatalf("truncated update produced %d summaries, want 0", len(got))
+	}
+
+	status.FlowWorkerMap[0].ObservedBytes = 7_000
+	got = window.Update(now.Add(30*time.Second), status)
+	if len(got) != 0 {
+		t.Fatalf("post-truncation baseline update produced stale summaries: %+v", got)
+	}
+
+	status.FlowWorkerMap[0].ObservedBytes = 8_000
+	got = window.Update(now.Add(40*time.Second), status)
+	if len(got) != 1 {
+		t.Fatalf("post-truncation delta update produced %d summaries, want 1", len(got))
+	}
+	if got[0].WindowSeconds != 10 {
+		t.Fatalf("post-truncation WindowSeconds = %.1f, want 10", got[0].WindowSeconds)
+	}
+}
+
 func TestFairnessThroughputWindowPrunesStarvedFlowDedup(t *testing.T) {
 	window := NewFairnessThroughputWindow(5 * time.Second)
 	now := time.Unix(100, 0)

@@ -84,43 +84,51 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 	}
 	w.lastUpdate = now
 
+	if status.FlowWorkerMapTruncated {
+		w.resetWindowState()
+		return nil
+	}
+
 	queueRates := fairnessQueueTransmitRates(status)
 	seen := make(map[fairnessFlowThroughputKey]uint64)
+	sampleQueues := make(map[fairnessQueueKey]struct{}, len(w.queues))
+	for queue := range w.queues {
+		sampleQueues[queue] = struct{}{}
+	}
 	sampleDeltas := make(map[fairnessQueueKey]map[fairnessFlowThroughputKey]uint64)
-	if !status.FlowWorkerMapTruncated {
-		for _, row := range status.FlowWorkerMap {
-			if row.CoSQueueID == nil || row.EgressIfindex == 0 {
-				continue
-			}
-			key := fairnessFlowThroughputKey{
-				queue: fairnessQueueKey{ifindex: row.EgressIfindex, queueID: *row.CoSQueueID},
-				tuple: row.ForwardWireKey,
-			}
-			if key.tuple == (FlowTupleStatus{}) {
-				key.tuple = row.SessionKey
-			}
-			seen[key] = row.ObservedBytes
-			previous, ok := w.prev[key]
-			w.prev[key] = row.ObservedBytes
-			if duration <= 0 || !ok {
-				continue
-			}
-			delta := uint64(0)
-			if row.ObservedBytes >= previous {
-				delta = row.ObservedBytes - previous
-			} else {
-				delta = row.ObservedBytes
-			}
-			if delta == 0 {
-				continue
-			}
-			deltas := sampleDeltas[key.queue]
-			if deltas == nil {
-				deltas = make(map[fairnessFlowThroughputKey]uint64)
-				sampleDeltas[key.queue] = deltas
-			}
-			deltas[key] += delta
+	for _, row := range status.FlowWorkerMap {
+		if row.CoSQueueID == nil || row.EgressIfindex == 0 {
+			continue
 		}
+		key := fairnessFlowThroughputKey{
+			queue: fairnessQueueKey{ifindex: row.EgressIfindex, queueID: *row.CoSQueueID},
+			tuple: row.ForwardWireKey,
+		}
+		if key.tuple == (FlowTupleStatus{}) {
+			key.tuple = row.SessionKey
+		}
+		sampleQueues[key.queue] = struct{}{}
+		seen[key] = row.ObservedBytes
+		previous, ok := w.prev[key]
+		w.prev[key] = row.ObservedBytes
+		if duration <= 0 || !ok {
+			continue
+		}
+		delta := uint64(0)
+		if row.ObservedBytes >= previous {
+			delta = row.ObservedBytes - previous
+		} else {
+			delta = row.ObservedBytes
+		}
+		if delta == 0 {
+			continue
+		}
+		deltas := sampleDeltas[key.queue]
+		if deltas == nil {
+			deltas = make(map[fairnessFlowThroughputKey]uint64)
+			sampleDeltas[key.queue] = deltas
+		}
+		deltas[key] += delta
 	}
 	for key := range w.prev {
 		if _, ok := seen[key]; !ok {
@@ -128,13 +136,15 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 		}
 	}
 
-	for queue, deltas := range sampleDeltas {
-		state := w.queueState(queue)
-		state.addSample(fairnessThroughputSample{
-			at:       now,
-			duration: duration,
-			deltas:   deltas,
-		})
+	if duration > 0 {
+		for queue := range sampleQueues {
+			state := w.queueState(queue)
+			state.addSample(fairnessThroughputSample{
+				at:       now,
+				duration: duration,
+				deltas:   sampleDeltas[queue],
+			})
+		}
 	}
 	for _, state := range w.queues {
 		state.prune(now.Add(-w.window))
@@ -157,11 +167,20 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 		if state == nil || len(state.bytesByFlow) == 0 {
 			continue
 		}
-		summary := state.summary(key, queueRates[key])
-		summary.SourceTruncated = status.FlowWorkerMapTruncated
+		summary := state.summary(key, queueRates[key], w.window)
 		out = append(out, summary)
 	}
 	return out
+}
+
+func (w *FairnessThroughputWindow) resetWindowState() {
+	w.lastUpdate = time.Time{}
+	clear(w.prev)
+	for _, state := range w.queues {
+		state.samples = nil
+		clear(state.bytesByFlow)
+		clear(state.starvedFlows)
+	}
 }
 
 func (w *FairnessThroughputWindow) queueState(key fairnessQueueKey) *fairnessQueueThroughputWindow {
@@ -212,7 +231,7 @@ func (q *fairnessQueueThroughputWindow) prune(cutoff time.Time) {
 	}
 }
 
-func (q *fairnessQueueThroughputWindow) summary(key fairnessQueueKey, transmitRateBytes uint64) FairnessThroughputSummary {
+func (q *fairnessQueueThroughputWindow) summary(key fairnessQueueKey, transmitRateBytes uint64, window time.Duration) FairnessThroughputSummary {
 	var totalBytes uint64
 	values := make([]float64, 0, len(q.bytesByFlow))
 	for _, bytes := range q.bytesByFlow {
@@ -223,6 +242,9 @@ func (q *fairnessQueueThroughputWindow) summary(key fairnessQueueKey, transmitRa
 		values = append(values, float64(bytes))
 	}
 	windowSeconds := q.windowSeconds()
+	if limit := window.Seconds(); limit > 0 && windowSeconds > limit {
+		windowSeconds = limit
+	}
 	observedCoV := coefficientOfVariation(values)
 	saturated := false
 	if transmitRateBytes > 0 && windowSeconds > 0 {
