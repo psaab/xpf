@@ -2653,6 +2653,100 @@ func TestBuildInterfaceSnapshotIncludesInputAndOutputFilters(t *testing.T) {
 	}
 }
 
+func TestBuildInterfaceSnapshotFallsBackToParentIfindexForMissingRethVLAN(t *testing.T) {
+	parent, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback interface unavailable: %v", err)
+	}
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Zones: map[string]*config.ZoneConfig{
+				"wan": {Name: "wan", Interfaces: []string{"reth0.80"}},
+			},
+		},
+		ClassOfService: &config.ClassOfServiceConfig{
+			Interfaces: map[string]*config.CoSInterface{
+				"reth0": {
+					Name: "reth0",
+					Units: map[int]*config.CoSInterfaceUnit{
+						80: {
+							Unit:               80,
+							SchedulerMap:       "bandwidth-limit",
+							ShapingRateBytes:   25_000_000_000 / 8,
+							BurstSizeBytes:     64 * 1024 * 1024,
+							DSCPRewriteRule:    "wan-rewrite",
+							DSCPClassifier:     "wan-classifier",
+							IEEE8021Classifier: "wan-pcp",
+						},
+					},
+				},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"lo": {
+					Name:            "lo",
+					RedundantParent: "reth0",
+				},
+				"reth0": {
+					Name: "reth0",
+					Units: map[int]*config.InterfaceUnit{
+						80: {
+							Number:         80,
+							VlanID:         80,
+							FilterOutputV4: "bandwidth-output",
+							FilterOutputV6: "bandwidth-output",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	snaps := buildInterfaceSnapshots(cfg)
+	var unitSnap *InterfaceSnapshot
+	for i := range snaps {
+		if snaps[i].Name == "reth0.80" {
+			unitSnap = &snaps[i]
+			break
+		}
+	}
+	if unitSnap == nil {
+		t.Fatal("reth0.80 snapshot not found")
+	}
+	if unitSnap.Ifindex != parent.Index {
+		t.Fatalf("Ifindex = %d, want parent loopback ifindex %d", unitSnap.Ifindex, parent.Index)
+	}
+	if unitSnap.ParentIfindex != parent.Index {
+		t.Fatalf("ParentIfindex = %d, want %d", unitSnap.ParentIfindex, parent.Index)
+	}
+	if unitSnap.LinuxName != "lo.80" {
+		t.Fatalf("LinuxName = %q, want lo.80 logical child name", unitSnap.LinuxName)
+	}
+	if unitSnap.ParentLinuxName != "lo" {
+		t.Fatalf("ParentLinuxName = %q, want lo", unitSnap.ParentLinuxName)
+	}
+	if unitSnap.VLANID != 80 {
+		t.Fatalf("VLANID = %d, want 80", unitSnap.VLANID)
+	}
+	if unitSnap.Zone != "wan" {
+		t.Fatalf("Zone = %q, want wan", unitSnap.Zone)
+	}
+	if unitSnap.FilterOutputV4 != "bandwidth-output" || unitSnap.FilterOutputV6 != "bandwidth-output" {
+		t.Fatalf("output filters not preserved: v4=%q v6=%q", unitSnap.FilterOutputV4, unitSnap.FilterOutputV6)
+	}
+	if unitSnap.CoSSchedulerMap != "bandwidth-limit" {
+		t.Fatalf("CoSSchedulerMap = %q, want bandwidth-limit", unitSnap.CoSSchedulerMap)
+	}
+	if unitSnap.CoSShapingRateBytesPerSec == 0 {
+		t.Fatal("CoSShapingRateBytesPerSec = 0, want configured shaper")
+	}
+	aliases := buildUserspaceIngressBindingAliases(&ConfigSnapshot{Interfaces: []InterfaceSnapshot{*unitSnap}})
+	if _, ok := aliases[uint32(parent.Index)]; ok {
+		t.Fatalf("self alias for parent-bound VLAN should be suppressed: %v", aliases)
+	}
+}
+
 func TestBuildClassOfServiceSnapshotIncludesTransmitRateExact(t *testing.T) {
 	cfg := &config.Config{
 		ClassOfService: &config.ClassOfServiceConfig{
