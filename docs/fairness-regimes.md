@@ -338,6 +338,16 @@ For production observability, xpf MUST export:
 - **`xpf_fairness_cos_active_flow_counts_truncated`** gauge: 1 when
   the status snapshot was truncated before the fairness RSS gauges
   were derived; 0 otherwise.
+- **`xpf_fairness_rss_expectation_configured{ifindex=..., queue_id=..., kind=...}`**
+  gauge: 1 for each configured opt-in RSS/workload expectation. The
+  label is the stable expectation kind, not the full threshold string.
+- **`xpf_fairness_rss_expectation_value{ifindex=..., queue_id=..., kind=...}`**
+  gauge: configured numeric value for expectation kinds that take a
+  value, such as active-worker count or `max-worker-flow-share`
+  threshold.
+- **`xpf_fairness_rss_skew_violation{ifindex=..., queue_id=..., kind=...}`**
+  gauge: 1 when the configured RSS/workload expectation fails for the
+  egress CoS queue; 0 when it passes.
 - **`xpf_fairness_saturated{ifindex=..., queue_id=...}`** Prometheus gauge: 0 or
   1. Computed from the daemon's rolling 30-second per-flow byte
   window as aggregate queue throughput vs the configured CoS queue

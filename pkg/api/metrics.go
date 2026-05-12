@@ -110,17 +110,18 @@ type xpfCollector struct {
 	// #1247: production RSS/workload health gauges derived from the
 	// same per-CoS {a_i} snapshot. These expose the structural ceiling
 	// without adding packet-path state or global atomics.
-	fairnessCstruct            *prometheus.Desc
-	fairnessActiveWorkers      *prometheus.Desc
-	fairnessActiveFlows        *prometheus.Desc
-	fairnessMaxWorkerFlowShare *prometheus.Desc
-	fairnessCoSCountsTruncated *prometheus.Desc
-	fairnessRSSExpectation     *prometheus.Desc
-	fairnessRSSSkewViolation   *prometheus.Desc
-	fairnessSaturated          *prometheus.Desc
-	fairnessObservedCoV        *prometheus.Desc
-	fairnessStarvedFlows       *prometheus.Desc
-	fairnessThroughputWindow   *dpuserspace.FairnessThroughputWindow
+	fairnessCstruct             *prometheus.Desc
+	fairnessActiveWorkers       *prometheus.Desc
+	fairnessActiveFlows         *prometheus.Desc
+	fairnessMaxWorkerFlowShare  *prometheus.Desc
+	fairnessCoSCountsTruncated  *prometheus.Desc
+	fairnessRSSExpectation      *prometheus.Desc
+	fairnessRSSExpectationValue *prometheus.Desc
+	fairnessRSSSkewViolation    *prometheus.Desc
+	fairnessSaturated           *prometheus.Desc
+	fairnessObservedCoV         *prometheus.Desc
+	fairnessStarvedFlows        *prometheus.Desc
+	fairnessThroughputWindow    *dpuserspace.FairnessThroughputWindow
 }
 
 func newCollector(srv *Server) *xpfCollector {
@@ -419,12 +420,17 @@ func newCollector(srv *Server) *xpfCollector {
 		fairnessRSSExpectation: prometheus.NewDesc(
 			"xpf_fairness_rss_expectation_configured",
 			"1 for each configured opt-in RSS/workload expectation evaluated against this egress CoS queue (#1247).",
-			[]string{"ifindex", "queue_id", "expectation"}, nil,
+			[]string{"ifindex", "queue_id", "kind"}, nil,
+		),
+		fairnessRSSExpectationValue: prometheus.NewDesc(
+			"xpf_fairness_rss_expectation_value",
+			"Configured numeric value for RSS/workload expectation kinds that take one, such as active-worker count or threshold (#1265).",
+			[]string{"ifindex", "queue_id", "kind"}, nil,
 		),
 		fairnessRSSSkewViolation: prometheus.NewDesc(
 			"xpf_fairness_rss_skew_violation",
 			"1 when the configured RSS/workload expectation fails for this egress CoS queue; 0 when it passes (#1247).",
-			[]string{"ifindex", "queue_id", "expectation"}, nil,
+			[]string{"ifindex", "queue_id", "kind"}, nil,
 		),
 		fairnessSaturated: prometheus.NewDesc(
 			"xpf_fairness_saturated",
@@ -501,6 +507,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fairnessMaxWorkerFlowShare
 	ch <- c.fairnessCoSCountsTruncated
 	ch <- c.fairnessRSSExpectation
+	ch <- c.fairnessRSSExpectationValue
 	ch <- c.fairnessRSSSkewViolation
 	ch <- c.fairnessSaturated
 	ch <- c.fairnessObservedCoV
@@ -653,8 +660,18 @@ func (c *xpfCollector) emitFairnessRSSExpectationGauges(
 			1,
 			ifindexLabel,
 			queueLabel,
-			result.Expectation,
+			result.ExpectationKind,
 		)
+		if result.HasExpectationValue {
+			ch <- prometheus.MustNewConstMetric(
+				c.fairnessRSSExpectationValue,
+				prometheus.GaugeValue,
+				result.ExpectationValue,
+				ifindexLabel,
+				queueLabel,
+				result.ExpectationKind,
+			)
+		}
 		violation := 1.0
 		if result.Pass {
 			violation = 0
@@ -665,7 +682,7 @@ func (c *xpfCollector) emitFairnessRSSExpectationGauges(
 			violation,
 			ifindexLabel,
 			queueLabel,
-			result.Expectation,
+			result.ExpectationKind,
 		)
 	}
 }

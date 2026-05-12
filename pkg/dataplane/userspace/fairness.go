@@ -30,14 +30,17 @@ type FairnessRSSExpectation struct {
 }
 
 type FairnessRSSExpectationResult struct {
-	Ifindex       int
-	QueueID       uint8
-	Expectation   string
-	Pass          bool
-	Reason        string
-	ActiveFlows   uint64
-	ActiveWorkers uint64
-	Cstruct       float64
+	Ifindex             int
+	QueueID             uint8
+	Expectation         string
+	ExpectationKind     string
+	ExpectationValue    float64
+	HasExpectationValue bool
+	Pass                bool
+	Reason              string
+	ActiveFlows         uint64
+	ActiveWorkers       uint64
+	Cstruct             float64
 }
 
 type cosFairnessRSSKey struct {
@@ -226,8 +229,13 @@ func EvaluateFairnessRSSExpectations(
 		}
 		result := fairnesscontract.RSSExpectationResult{Pass: false, Reason: errString(err)}
 		canonical := expectation.RSSExpectation
+		kind := "invalid"
+		var value float64
+		hasValue := false
 		if err == nil {
 			canonical = parsed.Canonical()
+			kind = parsed.MetricKind()
+			value, hasValue = parsed.MetricValue()
 			result = fairnesscontract.EvaluateRSSExpectation(
 				parsed,
 				summary.WorkerFlowCounts,
@@ -236,14 +244,17 @@ func EvaluateFairnessRSSExpectations(
 			)
 		}
 		out = append(out, FairnessRSSExpectationResult{
-			Ifindex:       expectation.Ifindex,
-			QueueID:       expectation.QueueID,
-			Expectation:   canonical,
-			Pass:          result.Pass,
-			Reason:        result.Reason,
-			ActiveFlows:   summary.ActiveFlows,
-			ActiveWorkers: summary.ActiveWorkers,
-			Cstruct:       summary.Cstruct,
+			Ifindex:             expectation.Ifindex,
+			QueueID:             expectation.QueueID,
+			Expectation:         canonical,
+			ExpectationKind:     kind,
+			ExpectationValue:    value,
+			HasExpectationValue: hasValue,
+			Pass:                result.Pass,
+			Reason:              result.Reason,
+			ActiveFlows:         summary.ActiveFlows,
+			ActiveWorkers:       summary.ActiveWorkers,
+			Cstruct:             summary.Cstruct,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

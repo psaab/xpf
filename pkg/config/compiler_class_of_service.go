@@ -372,44 +372,44 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
 
 func collectCoSFairnessRSSExpectation(queueNode *Node) (string, error) {
 	var expr string
-	set := func(next string) error {
-		if next == "" {
+	set := func(kind string, nodes []*Node, next func(*Node) string) error {
+		if len(nodes) == 0 {
 			return nil
 		}
-		if expr != "" && expr != next {
-			return fmt.Errorf("multiple expectations configured: %q and %q", expr, next)
+		if len(nodes) > 1 {
+			return fmt.Errorf("duplicate %s expectation leaf", kind)
 		}
-		expr = next
+		value := next(nodes[0])
+		if expr != "" && expr != value {
+			return fmt.Errorf("multiple expectations configured: %q and %q", expr, value)
+		}
+		expr = value
 		return nil
 	}
-	if queueNode.FindChild("any") != nil {
-		if err := set("any"); err != nil {
-			return "", err
-		}
+	setFlag := func(kind string) error {
+		return set(kind, queueNode.FindChildren(kind), func(*Node) string { return kind })
 	}
-	if queueNode.FindChild("balanced") != nil {
-		if err := set("balanced"); err != nil {
-			return "", err
+	setValue := func(kind string, names ...string) error {
+		var nodes []*Node
+		for _, name := range names {
+			nodes = append(nodes, queueNode.FindChildren(name)...)
 		}
+		return set(kind, nodes, func(n *Node) string { return kind + ":" + nodeVal(n) })
 	}
-	for _, key := range []string{"active-workers", "at-least-active-workers"} {
-		if n := queueNode.FindChild(key); n != nil {
-			if err := set("at-least-active-workers:" + nodeVal(n)); err != nil {
-				return "", err
-			}
-		}
+	if err := setFlag("any"); err != nil {
+		return "", err
 	}
-	if n := queueNode.FindChild("max-worker-flow-share"); n != nil {
-		if err := set("max-worker-flow-share:" + nodeVal(n)); err != nil {
-			return "", err
-		}
+	if err := setFlag("balanced"); err != nil {
+		return "", err
 	}
-	for _, key := range []string{"cstruct", "cstruct-max"} {
-		if n := queueNode.FindChild(key); n != nil {
-			if err := set("cstruct-max:" + nodeVal(n)); err != nil {
-				return "", err
-			}
-		}
+	if err := setValue("at-least-active-workers", "active-workers", "at-least-active-workers"); err != nil {
+		return "", err
+	}
+	if err := setValue("max-worker-flow-share", "max-worker-flow-share"); err != nil {
+		return "", err
+	}
+	if err := setValue("cstruct-max", "cstruct", "cstruct-max"); err != nil {
+		return "", err
 	}
 	if expr == "" {
 		return "", fmt.Errorf("missing expectation; expected any, balanced, at-least-active-workers, max-worker-flow-share, or cstruct-max")
