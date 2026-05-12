@@ -27,17 +27,26 @@ func TestEmitWorkerRuntime_DeadGaugeReflectsDeadFlag(t *testing.T) {
 	// Mixed fixture: 3 workers, only the middle one dead.
 	status := dpuserspace.ProcessStatus{
 		WorkerRuntime: []dpuserspace.WorkerRuntimeStatus{
-			{WorkerID: 0, Dead: false},
-			{WorkerID: 1, Dead: true},
-			{WorkerID: 2, Dead: false},
+			{
+				WorkerID: 0, CoSQueueLeaseAcquireV8Calls: 7,
+				CoSQueueLeaseAcquireV8GrantedBytes: 4096, Dead: false,
+			},
+			{
+				WorkerID: 1, CoSQueueLeaseAcquireV8Calls: 11,
+				CoSQueueLeaseAcquireV8GrantedBytes: 0, Dead: true,
+			},
+			{
+				WorkerID: 2, CoSQueueLeaseAcquireV8Calls: 13,
+				CoSQueueLeaseAcquireV8GrantedBytes: 8192, Dead: false,
+			},
 		},
 	}
 
 	got := collectFromEmitWorkerRuntime(t, c, status)
 
-	// Each worker emits 7 counters + 1 dead gauge = 8 metrics. 3 workers = 24.
-	if len(got) != 3*8 {
-		t.Fatalf("emitWorkerRuntime: want 24 metrics for 3 workers (7 counters + 1 dead gauge), got %d", len(got))
+	// Each worker emits 9 counters + 1 dead gauge = 10 metrics. 3 workers = 30.
+	if len(got) != 3*10 {
+		t.Fatalf("emitWorkerRuntime: want 30 metrics for 3 workers (9 counters + 1 dead gauge), got %d", len(got))
 	}
 
 	// Gather just the dead-gauge entries, keyed by worker_id label.
@@ -81,6 +90,25 @@ func TestEmitWorkerRuntime_DeadGaugeReflectsDeadFlag(t *testing.T) {
 			t.Errorf("xpf_userspace_worker_dead{worker_id=%q} = %v, want %v", wid, got, want)
 		}
 	}
+
+	leaseCallsByWorker := metricValuesByWorker(t, got, c.workerCoSQueueLeaseAcquireV8Calls, true)
+	if len(leaseCallsByWorker) != 3 {
+		t.Fatalf("expected one lease-acquire-calls emission per worker (3), got %d", len(leaseCallsByWorker))
+	}
+	for wid, want := range map[string]float64{"0": 7, "1": 11, "2": 13} {
+		if got := leaseCallsByWorker[wid]; got != want {
+			t.Errorf("xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id=%q} = %v, want %v", wid, got, want)
+		}
+	}
+	leaseBytesByWorker := metricValuesByWorker(t, got, c.workerCoSQueueLeaseAcquireV8GrantedBytes, true)
+	if len(leaseBytesByWorker) != 3 {
+		t.Fatalf("expected one lease-acquire-bytes emission per worker (3), got %d", len(leaseBytesByWorker))
+	}
+	for wid, want := range map[string]float64{"0": 4096, "1": 0, "2": 8192} {
+		if got := leaseBytesByWorker[wid]; got != want {
+			t.Errorf("xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total{worker_id=%q} = %v, want %v", wid, got, want)
+		}
+	}
 }
 
 // All-healthy fixture: dead gauge must be 0 for every worker, never absent.
@@ -118,21 +146,23 @@ func TestEmitWorkerRuntime_DeadGaugeZeroForHealthyWorkers(t *testing.T) {
 }
 
 func newCollectorWithWorkerDescsOnly() *xpfCollector {
-	// Only the seven worker counter descriptors plus the new dead gauge
+	// Only the worker counter descriptors plus the dead gauge
 	// are needed by emitWorkerRuntime; the rest stay nil and are not
 	// exercised by this test.
 	mk := func(name string) *prometheus.Desc {
 		return prometheus.NewDesc(name, name, []string{"worker_id"}, nil)
 	}
 	return &xpfCollector{
-		workerWallSecs:      mk("xpf_userspace_worker_wall_seconds_total"),
-		workerActiveSecs:    mk("xpf_userspace_worker_active_seconds_total"),
-		workerIdleSpinSecs:  mk("xpf_userspace_worker_idle_spin_seconds_total"),
-		workerIdleBlockSecs: mk("xpf_userspace_worker_idle_block_seconds_total"),
-		workerThreadCPUSecs: mk("xpf_userspace_worker_thread_cpu_seconds_total"),
-		workerWorkLoops:     mk("xpf_userspace_worker_work_loops_total"),
-		workerIdleLoops:     mk("xpf_userspace_worker_idle_loops_total"),
-		workerDead:          mk("xpf_userspace_worker_dead"),
+		workerWallSecs:                           mk("xpf_userspace_worker_wall_seconds_total"),
+		workerActiveSecs:                         mk("xpf_userspace_worker_active_seconds_total"),
+		workerIdleSpinSecs:                       mk("xpf_userspace_worker_idle_spin_seconds_total"),
+		workerIdleBlockSecs:                      mk("xpf_userspace_worker_idle_block_seconds_total"),
+		workerThreadCPUSecs:                      mk("xpf_userspace_worker_thread_cpu_seconds_total"),
+		workerWorkLoops:                          mk("xpf_userspace_worker_work_loops_total"),
+		workerIdleLoops:                          mk("xpf_userspace_worker_idle_loops_total"),
+		workerCoSQueueLeaseAcquireV8Calls:        mk("xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total"),
+		workerCoSQueueLeaseAcquireV8GrantedBytes: mk("xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total"),
+		workerDead:                               mk("xpf_userspace_worker_dead"),
 	}
 }
 
@@ -163,14 +193,16 @@ func collectFromEmitWorkerRuntime(
 	// descriptors we initialized. Pointer-equality is stable across
 	// prometheus/client_golang versions.
 	expected := map[*prometheus.Desc]struct{}{
-		c.workerWallSecs:      {},
-		c.workerActiveSecs:    {},
-		c.workerIdleSpinSecs:  {},
-		c.workerIdleBlockSecs: {},
-		c.workerThreadCPUSecs: {},
-		c.workerWorkLoops:     {},
-		c.workerIdleLoops:     {},
-		c.workerDead:          {},
+		c.workerWallSecs:                           {},
+		c.workerActiveSecs:                         {},
+		c.workerIdleSpinSecs:                       {},
+		c.workerIdleBlockSecs:                      {},
+		c.workerThreadCPUSecs:                      {},
+		c.workerWorkLoops:                          {},
+		c.workerIdleLoops:                          {},
+		c.workerCoSQueueLeaseAcquireV8Calls:        {},
+		c.workerCoSQueueLeaseAcquireV8GrantedBytes: {},
+		c.workerDead:                               {},
 	}
 	for _, m := range got {
 		if _, ok := expected[m.Desc()]; !ok {
@@ -178,6 +210,46 @@ func collectFromEmitWorkerRuntime(
 		}
 	}
 	return got
+}
+
+func metricValuesByWorker(
+	t *testing.T,
+	metrics []prometheus.Metric,
+	desc *prometheus.Desc,
+	counter bool,
+) map[string]float64 {
+	t.Helper()
+	out := make(map[string]float64)
+	for _, m := range metrics {
+		if m.Desc() != desc {
+			continue
+		}
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("metric.Write: %v", err)
+		}
+		var workerID string
+		for _, lp := range pb.GetLabel() {
+			if lp.GetName() == "worker_id" {
+				workerID = lp.GetValue()
+			}
+		}
+		if workerID == "" {
+			t.Fatalf("worker metric missing worker_id label: %+v", &pb)
+		}
+		if counter {
+			if pb.Counter == nil {
+				t.Fatalf("worker metric must be a Counter: %+v", &pb)
+			}
+			out[workerID] = pb.Counter.GetValue()
+		} else {
+			if pb.Gauge == nil {
+				t.Fatalf("worker metric must be a Gauge: %+v", &pb)
+			}
+			out[workerID] = pb.Gauge.GetValue()
+		}
+	}
+	return out
 }
 
 // #1219: emitBindingActiveFlowCount must surface the per-binding

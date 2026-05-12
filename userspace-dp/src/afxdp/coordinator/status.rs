@@ -216,6 +216,9 @@ impl super::Coordinator {
                     thread_cpu_ns: s.thread_cpu_ns,
                     work_loops: s.work_loops,
                     idle_loops: s.idle_loops,
+                    cos_queue_lease_acquire_v8_calls: s.cos_queue_lease_acquire_v8_calls,
+                    cos_queue_lease_acquire_v8_granted_bytes: s
+                        .cos_queue_lease_acquire_v8_granted_bytes,
                     dead,
                     panic_message,
                 }
