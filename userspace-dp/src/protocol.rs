@@ -1356,6 +1356,12 @@ pub(crate) struct BindingStatus {
     /// hatch rescued throughput". Ratio is the LAG_THRESHOLD diagnostic.
     #[serde(rename = "v_min_throttles", default)]
     pub v_min_throttles: u64,
+    /// #1287: count of flow-aware V_min throttle decisions
+    /// (worker throttled because its observed rate exceeded its
+    /// flow-proportional fair share). Distinct from vtime-based
+    /// throttles; measures effectiveness of flow-aware fairness.
+    #[serde(rename = "v_min_flow_throttles", default)]
+    pub v_min_flow_throttles: u64,
     #[serde(rename = "session_hits", default)]
     pub session_hits: u64,
     #[serde(rename = "session_misses", default)]
@@ -1714,6 +1720,9 @@ pub(crate) struct BindingCountersSnapshot {
     /// pre-#943 consumers parseable.
     #[serde(rename = "v_min_throttles", default)]
     pub v_min_throttles: u64,
+    /// #1287: flow-aware V_min throttle decisions.
+    #[serde(rename = "v_min_flow_throttles", default)]
+    pub v_min_flow_throttles: u64,
 }
 
 // #812 (plan §3.5a / §6.1 test #8): compile-time assertion that
@@ -1792,6 +1801,7 @@ impl From<&BindingStatus> for BindingCountersSnapshot {
             // BindingCountersSnapshot. By-value u64, no Send concerns.
             v_min_throttle_hard_cap_overrides: b.v_min_throttle_hard_cap_overrides,
             v_min_throttles: b.v_min_throttles,
+            v_min_flow_throttles: b.v_min_flow_throttles,
         }
     }
 }

@@ -691,6 +691,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         active_flow_count: 31,
         v_min_throttle_hard_cap_overrides: 28,
         v_min_throttles: 29,
+        v_min_flow_throttles: 33,
     };
     let value: serde_json::Value =
         serde_json::to_value(&snap).expect("serialize snapshot to Value");
@@ -745,6 +746,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         // gates fairness diagnostics on these fields.
         "v_min_throttle_hard_cap_overrides",
         "v_min_throttles",
+        "v_min_flow_throttles",
     ] {
         assert!(
             obj.contains_key(key),
@@ -840,6 +842,7 @@ fn tx_latency_hist_serialization_roundtrip() {
         active_flow_count: 0,
         v_min_throttle_hard_cap_overrides: 18,
         v_min_throttles: 19,
+        v_min_flow_throttles: 20,
     };
     let json = serde_json::to_string(&snap).expect("serialize snapshot");
     let back: BindingCountersSnapshot =

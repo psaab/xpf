@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 // #1035 P4: shared CoS lease + MQFQ V_min coordination types extracted
 // from types.rs. Implements the cross-worker virtual-time floor
@@ -177,7 +177,13 @@ pub(in crate::afxdp) struct SharedCoSRootLease {
 #[repr(align(64))]
 pub(in crate::afxdp) struct PaddedVtimeSlot {
     pub(in crate::afxdp) vtime: AtomicU64,
-    _pad: [u8; 56],
+    /// #1287: active flow count for this worker on this queue.
+    /// Updated by owning worker on flow bucket enter/exit.
+    /// Read by peers during V_min check to compute flow-proportional
+    /// fair share. Relaxed ordering sufficient — flow count is a hint,
+    /// not hard sync; staleness of few drain cycles acceptable.
+    pub(in crate::afxdp) flow_count: AtomicU16,
+    _pad: [u8; 54],
 }
 
 pub(in crate::afxdp) const NOT_PARTICIPATING: u64 = u64::MAX;
@@ -186,7 +192,8 @@ impl PaddedVtimeSlot {
     pub(in crate::afxdp) const fn not_participating() -> Self {
         Self {
             vtime: AtomicU64::new(NOT_PARTICIPATING),
-            _pad: [0; 56],
+            flow_count: AtomicU16::new(0),
+            _pad: [0; 54],
         }
     }
 
@@ -220,11 +227,12 @@ impl PaddedVtimeSlot {
     /// NOT correspond to committed work, falsely throttling peers.
     /// The test `vmin_no_first_enqueue_publish` enforces this
     /// invariant.
-    pub(in crate::afxdp) fn publish(&self, vtime: u64) {
+    pub(in crate::afxdp) fn publish(&self, vtime: u64, flow_count: u16) {
         debug_assert_ne!(
             vtime, NOT_PARTICIPATING,
             "live vtime must not equal sentinel"
         );
+        self.flow_count.store(flow_count, Ordering::Relaxed);
         self.vtime.store(vtime, Ordering::Release);
     }
 
@@ -232,6 +240,7 @@ impl PaddedVtimeSlot {
     /// for this worker — i.e., the worker has no more
     /// flows on this queue.
     pub(in crate::afxdp) fn vacate(&self) {
+        self.flow_count.store(0, Ordering::Relaxed);
         self.vtime.store(NOT_PARTICIPATING, Ordering::Release);
     }
 
@@ -299,9 +308,10 @@ impl SharedCoSQueueVtimeFloor {
     pub(in crate::afxdp) fn participating_v_min_snapshot(
         &self,
         worker_id: u32,
-    ) -> (u32, Option<u64>) {
+    ) -> (u32, Option<u64>, u32) {
         let mut participating = 0u32;
         let mut v_min = u64::MAX;
+        let mut total_flows = 0u32;
         for (idx, slot) in self.slots.iter().enumerate() {
             if idx == worker_id as usize {
                 continue;
@@ -309,12 +319,13 @@ impl SharedCoSQueueVtimeFloor {
             if let Some(peer) = slot.read() {
                 participating += 1;
                 v_min = v_min.min(peer);
+                total_flows += slot.flow_count.load(Ordering::Relaxed) as u32;
             }
         }
         if participating == 0 {
-            (0, None)
+            (0, None, 0)
         } else {
-            (participating, Some(v_min))
+            (participating, Some(v_min), total_flows)
         }
     }
 }

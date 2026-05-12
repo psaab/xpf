@@ -90,7 +90,8 @@ pub(in crate::afxdp) fn publish_committed_queue_vtime(queue: Option<&CoSQueueRun
     let Some(slot) = floor.slots.get(queue.v_min.worker_id as usize) else {
         return;
     };
-    slot.publish(ff.queue_vtime);
+    let flow_count = ff.active_flow_buckets;
+    slot.publish(ff.queue_vtime, flow_count);
 }
 
 #[inline]
@@ -188,12 +189,33 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
     // memory-ordering doc on `participating_v_min_snapshot` for the
     // non-atomic-across-slots contract. The replaced inline loop did
     // exactly the same iteration; preserved byte-for-byte semantics.
-    let (participating, v_min) = floor.participating_v_min_snapshot(queue.v_min.worker_id);
+    let (participating, v_min, total_peer_flows) =
+        floor.participating_v_min_snapshot(queue.v_min.worker_id);
     let Some(v_min) = v_min else {
         // No peers — reset hard-cap counter and continue.
         queue.v_min.consecutive_v_min_skips = 0;
         return true;
     };
+
+    // #1287 Tier 1: Flow-aware fairness check. If this worker has
+    // disproportionately many flows vs peers, throttle to allow
+    // peers to catch up. This complements the vtime lag check.
+    let my_flows = ff.active_flow_buckets as u32;
+    if my_flows > 0 && total_peer_flows > 0 {
+        let total_flows = total_peer_flows + my_flows;
+        // Compute my fair share of queue rate based on flow count
+        let my_fair_share_bps =
+            (transmit_rate_bytes as u128 * 8 * my_flows as u128 / total_flows as u128) as u64;
+        // Sum observed bps across all my flow buckets
+        let my_observed_bps: u64 = ff.flow_bucket_observed_bps.iter().sum();
+        // Throttle if exceeding fair share by >10% (headroom for burst)
+        if my_observed_bps > my_fair_share_bps.saturating_mul(11) / 10 {
+            queue.v_min.v_min_throttles_scratch =
+                queue.v_min.v_min_throttles_scratch.saturating_add(1);
+            return false;
+        }
+    }
+
     let lag = compute_v_min_lag_threshold(transmit_rate_bytes, participating + 1);
     let cont = ff.queue_vtime <= v_min.saturating_add(lag);
     if cont {

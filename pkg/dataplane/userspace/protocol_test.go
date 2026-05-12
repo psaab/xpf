@@ -239,6 +239,7 @@ func TestBindingStatusVMinThrottleRoundTrip(t *testing.T) {
 		FlowCacheCollisionEvictions:  53,
 		VMinThrottleHardCapOverrides: 59,
 		VMinThrottles:                67,
+		VMinFlowThrottles:            71,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {
@@ -248,7 +249,7 @@ func TestBindingStatusVMinThrottleRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		t.Fatalf("unmarshal obj: %v", err)
 	}
-	for _, key := range []string{"flow_cache_collision_evictions", "v_min_throttle_hard_cap_overrides", "v_min_throttles"} {
+	for _, key := range []string{"flow_cache_collision_evictions", "v_min_throttle_hard_cap_overrides", "v_min_throttles", "v_min_flow_throttles"} {
 		if _, ok := obj[key]; !ok {
 			t.Fatalf("wire key %q missing from BindingStatus JSON: %s", key, string(raw))
 		}
@@ -277,6 +278,7 @@ func TestBindingCountersSnapshotVMinThrottleRoundTrip(t *testing.T) {
 		FlowCacheCollisionEvictions:  53,
 		VMinThrottleHardCapOverrides: 59,
 		VMinThrottles:                67,
+		VMinFlowThrottles:            71,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {
@@ -286,7 +288,7 @@ func TestBindingCountersSnapshotVMinThrottleRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		t.Fatalf("unmarshal obj: %v", err)
 	}
-	for _, key := range []string{"flow_cache_collision_evictions", "v_min_throttle_hard_cap_overrides", "v_min_throttles"} {
+	for _, key := range []string{"flow_cache_collision_evictions", "v_min_throttle_hard_cap_overrides", "v_min_throttles", "v_min_flow_throttles"} {
 		if _, ok := obj[key]; !ok {
 			t.Fatalf("wire key %q missing from BindingCountersSnapshot JSON: %s", key, string(raw))
 		}

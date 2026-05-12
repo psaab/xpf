@@ -715,6 +715,7 @@ type BindingStatus struct {
 	// rescued throughput". Ratio is the LAG_THRESHOLD diagnostic.
 	VMinThrottleHardCapOverrides      uint64    `json:"v_min_throttle_hard_cap_overrides,omitempty"`
 	VMinThrottles                     uint64    `json:"v_min_throttles,omitempty"`
+	VMinFlowThrottles                 uint64    `json:"v_min_flow_throttles,omitempty"`
 	SessionHits                       uint64    `json:"session_hits,omitempty"`
 	SessionMisses                     uint64    `json:"session_misses,omitempty"`
 	SessionCreates                    uint64    `json:"session_creates,omitempty"`
@@ -887,6 +888,7 @@ type BindingCountersSnapshot struct {
 	// projects zeros even when the atomics flushed real values.
 	VMinThrottleHardCapOverrides uint64 `json:"v_min_throttle_hard_cap_overrides,omitempty"`
 	VMinThrottles                uint64 `json:"v_min_throttles,omitempty"`
+	VMinFlowThrottles            uint64 `json:"v_min_flow_throttles,omitempty"`
 }
 
 type ExceptionStatus struct {
