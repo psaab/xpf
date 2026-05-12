@@ -167,7 +167,7 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 		if state == nil || len(state.bytesByFlow) == 0 {
 			continue
 		}
-		summary := state.summary(key, queueRates[key], w.window)
+		summary := state.summary(key, queueRates[key])
 		out = append(out, summary)
 	}
 	return out
@@ -210,7 +210,7 @@ func (q *fairnessQueueThroughputWindow) addSample(sample fairnessThroughputSampl
 
 func (q *fairnessQueueThroughputWindow) prune(cutoff time.Time) {
 	keepFrom := 0
-	for keepFrom < len(q.samples) && q.samples[keepFrom].at.Before(cutoff) {
+	for keepFrom < len(q.samples) && !q.samples[keepFrom].at.After(cutoff) {
 		for flow, delta := range q.samples[keepFrom].deltas {
 			if q.bytesByFlow[flow] <= delta {
 				delete(q.bytesByFlow, flow)
@@ -231,7 +231,7 @@ func (q *fairnessQueueThroughputWindow) prune(cutoff time.Time) {
 	}
 }
 
-func (q *fairnessQueueThroughputWindow) summary(key fairnessQueueKey, transmitRateBytes uint64, window time.Duration) FairnessThroughputSummary {
+func (q *fairnessQueueThroughputWindow) summary(key fairnessQueueKey, transmitRateBytes uint64) FairnessThroughputSummary {
 	var totalBytes uint64
 	values := make([]float64, 0, len(q.bytesByFlow))
 	for _, bytes := range q.bytesByFlow {
@@ -242,9 +242,6 @@ func (q *fairnessQueueThroughputWindow) summary(key fairnessQueueKey, transmitRa
 		values = append(values, float64(bytes))
 	}
 	windowSeconds := q.windowSeconds()
-	if limit := window.Seconds(); limit > 0 && windowSeconds > limit {
-		windowSeconds = limit
-	}
 	observedCoV := coefficientOfVariation(values)
 	saturated := false
 	if transmitRateBytes > 0 && windowSeconds > 0 {
