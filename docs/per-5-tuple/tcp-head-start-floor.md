@@ -2,9 +2,11 @@
 
 Issue #1233 asks whether xpf should add a dataplane-only mechanism to
 mask the iperf3 sender's TCP head-start effect. Current answer:
-**do not implement ECN or receive-window clamping in the dataplane
-unless a fresh, multi-sample harness run produces an actionable
-fairness failure.**
+**do not add a new AFD-style leader-selective ECN/drop overlay or
+receive-window clamping mechanism unless a fresh, multi-sample harness
+run produces an actionable fairness failure.** This does not change
+xpf's existing CoS-admission/AQM ECN behavior; it rejects a new
+per-flow TCP head-start policing loop in the forwarding path.
 
 ## Evidence
 
@@ -22,10 +24,11 @@ delivered 12 flows within about 1.5% of each other. That makes the
 head-start effect a sender/TCP behavior, not proof of an xpf scheduler
 defect.
 
-## Option A: Per-Flow ECN Marking
+## Option A: Per-Flow AFD ECN/Drop Overlay
 
-Per-flow ECN marking is the #1211 AFD design under a narrower name.
-It requires:
+Per-flow ECN marking for TCP head-start correction is the #1211
+Approximate Fair Dropping (AFD) design under a narrower name. It
+requires:
 
 - ECN-capable TCP endpoints that negotiated ECN on the flow.
 - A per-flow lead/lag estimator in the forwarding path.
@@ -38,9 +41,11 @@ It also acts late: by the time xpf can observe a head-start leader,
 that flow already has a larger cwnd. If the sender does not react to
 CE marks, the mechanism is inert; if it does react, convergence is
 sender-algorithm dependent. Reopen this class only under the archived
-#1211 revisit criteria: a real harness FAIL, ECN-responsive senders,
-no app/server bottleneck, and a prototype that avoids hot-path shared
-atomics.
+#1211 revisit criteria in
+`docs/per-5-tuple/path2-archive/CLOSING-RATIONALE.md` and
+`docs/per-5-tuple/path2-archive/plan-v10.md`: a real harness FAIL,
+ECN-responsive senders, no app/server bottleneck, and a prototype that
+avoids contended shared per-packet writes.
 
 ## Option B: Receive-Window Clamping
 
@@ -77,10 +82,13 @@ For measurements whose purpose is to isolate dataplane fairness:
   mean/stdev/max CoV.
 
 For production traffic, xpf's fairness contract remains
-workload-relative: PASS means `observed_cov <= Cstruct + epsilon` with
-no starved flows. A saturated TCP sender that creates unequal offered
-load is outside what a transparent AF_XDP firewall can fix without
-becoming an endpoint-side pacing or TCP-policing device.
+workload-relative. The PR #1217/#1220 gate passes only when there are
+no starved flows, `observed_cov <= Cstruct + epsilon`, any configured
+RSS/workload expectation is satisfied, saturated runs clear the
+aggregate-throughput gate, and optional mouse probes stay within the
+p99 SLA. A saturated TCP sender that creates unequal offered load is
+outside what a transparent AF_XDP firewall can fix without becoming an
+endpoint-side pacing or TCP-policing device.
 
 ## Revisit Criteria
 
@@ -93,5 +101,14 @@ Open a new implementation issue only if all of these are true:
 3. Sender and receiver CPU are not the bottleneck.
 4. The endpoints are known to be responsive to the proposed signal
    (ECN for ECN marking, receive-window limiting for RWND clamping).
-5. The proposal includes a hot-path design with no shared per-packet
-   atomic counter or cross-NUMA cache-line bounce.
+5. The proposal includes a hot-path design with no contended shared
+   per-packet writes, such as a shared atomic counter or cross-NUMA
+   cache-line bounce in the forwarding loop.
+
+## Resolution for #1233
+
+Issue #1233 is resolved as documentation and measurement policy, not a
+dataplane feature. The accepted mitigation is sender-side pacing/source
+port control for test workloads, plus the multi-sample fairness gate
+from PR #1220. Any future dataplane ECN/drop or RWND proposal must open
+a new issue and satisfy the revisit criteria above.
