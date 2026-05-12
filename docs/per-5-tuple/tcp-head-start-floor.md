@@ -2,7 +2,7 @@
 
 Issue #1233 asks whether xpf should add a dataplane-only mechanism to
 mask the iperf3 sender's TCP head-start effect. Current answer:
-**do not add a new AFD-style leader-selective ECN/drop overlay or
+**do not add a new Approximate Fair Dropping (AFD)-style leader-selective ECN/drop overlay or
 receive-window clamping mechanism unless a fresh, multi-sample harness
 run produces an actionable fairness failure.** This does not change
 xpf's existing CoS-admission/AQM ECN behavior; it rejects a new
@@ -83,7 +83,7 @@ For measurements whose purpose is to isolate dataplane fairness:
 
 For production traffic, xpf's fairness contract remains
 workload-relative. The PR #1217/#1220 gate passes only when there are
-no starved flows, `observed_cov <= Cstruct + epsilon`, any configured
+no starved flows, `observed_CoV ≤ Cstruct + epsilon` (epsilon = 0.05), any configured
 RSS/workload expectation is satisfied, saturated runs clear the
 aggregate-throughput gate, and optional mouse probes stay within the
 p99 SLA. A saturated TCP sender that creates unequal offered load is
@@ -96,7 +96,7 @@ Open a new implementation issue only if all of these are true:
 
 1. The current userspace dataplane fails the harness on a real
    workload after multi-sample measurement.
-2. The failure is `observed_cov - Cstruct > 0.05` or starvation, not
+2. The failure is `observed_CoV - Cstruct > 0.05` or starvation, not
    merely a high absolute CoV caused by RSS structure.
 3. Sender and receiver CPU are not the bottleneck.
 4. The endpoints are known to be responsive to the proposed signal

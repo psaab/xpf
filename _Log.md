@@ -2,6 +2,10 @@
 
 ## 2026-05-12
 
+- **Timestamp**: 2026-05-12T06:29:27Z
+  - **Action**: PR round-2 review follow-up — expanded AFD acronym at first use (line 5), changed `observed_cov` to `observed_CoV` in prose formulas (lines 86, 99), made epsilon explicit as 0.05.
+  - **File(s)**: `docs/per-5-tuple/tcp-head-start-floor.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-12T00:30:00Z
   - **Action**: PR #1267 round-2 review follow-up — fixed fairness throughput window boundary pruning/rate denominator coupling to prevent false-positive saturation at steady sub-cap traffic, and added a regression test for the 10s-scrape/30s-window boundary case.
   - **File(s)**: `pkg/dataplane/userspace/fairness_throughput.go`, `pkg/dataplane/userspace/fairness_throughput_test.go`, `_Log.md`
