@@ -620,6 +620,7 @@ type FlowWorkerStatus struct {
 	CoSQueueID          *uint8          `json:"cos_queue_id,omitempty"`
 	DSCPRewrite         *uint8          `json:"dscp_rewrite,omitempty"`
 	AgeEpochs           uint16          `json:"age_epochs,omitempty"`
+	ObservedBytes       uint64          `json:"observed_bytes,omitempty"`
 }
 
 type CoSActiveFlowCountStatus struct {

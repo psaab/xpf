@@ -143,11 +143,12 @@ pub(super) fn poll_binding_process_descriptor(
                     if FlowCacheEntry::packet_eligible(meta)
                         && let Some(flow) = flow.as_ref()
                     {
-                        if let Some(cached) = binding.flow.flow_cache.lookup(
+                        if let Some(cached) = binding.flow.flow_cache.lookup_counted(
                             &flow.forward_key,
                             FlowCacheLookup::for_packet(meta, validation),
                             now_secs,
                             &worker_ctx.rg_epochs,
+                            meta.pkt_len,
                         ) {
                             if !cached_flow_decision_valid(
                                 worker_ctx.forwarding,

@@ -280,8 +280,9 @@ func TestProcessStatusFlowWorkerMapRoundTrip(t *testing.T) {
 				SrcPort:    49152,
 				DstPort:    5201,
 			},
-			CoSQueueID: &cosQueueID,
-			AgeEpochs:  3,
+			CoSQueueID:    &cosQueueID,
+			AgeEpochs:     3,
+			ObservedBytes: 123456,
 		}},
 	}
 	raw, err := json.Marshal(&in)

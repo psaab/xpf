@@ -187,6 +187,7 @@ func TestFormatFlowWorkerMap(t *testing.T) {
 				CoSQueueID:     &cosQueue,
 				DSCPRewrite:    &dscpRewrite,
 				AgeEpochs:      7,
+				ObservedBytes:  123456,
 				SessionKey: FlowTupleStatus{
 					Protocol: 6,
 					SrcIP:    "172.16.80.10",
@@ -251,6 +252,7 @@ func TestFormatFlowWorkerMap(t *testing.T) {
 		"172.16.80.10:40000->172.16.80.200:5201",
 		"wire=tcp 172.16.80.10:40000->172.16.80.200:5201",
 		"reverse=tcp 172.16.80.200:5201->172.16.80.10:40000",
+		"observed-bytes=123456",
 	} {
 		if !strings.Contains(allOut, want) {
 			t.Fatalf("flow-worker all output missing %q:\n%s", want, allOut)

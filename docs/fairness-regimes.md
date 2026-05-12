@@ -339,8 +339,13 @@ For production observability, xpf MUST export:
   the status snapshot was truncated before the fairness RSS gauges
   were derived; 0 otherwise.
 - **`xpf_fairness_saturated{ifindex=..., queue_id=...}`** Prometheus gauge: 0 or
-  1. Computed from rolling 30-second window of aggregate
-  throughput vs structural cap (per "Saturation detection").
+  1. Computed from the daemon's rolling 30-second per-flow byte
+  window as aggregate queue throughput vs the configured CoS queue
+  transmit rate (per "Saturation detection"). If a queue does not
+  report an explicit `transmit_rate_bytes`, the daemon falls back to
+  the interface shaping rate; on a multi-queue interface this means
+  `saturated=1` requires that queue to approach the interface-level
+  cap.
   Diagnostic only — saturation does not change pass/fail of the
   Cstruct gate, but operators may want to know whether their
   workload is actually hitting the shaper. The original v3 enum
@@ -352,10 +357,11 @@ For production observability, xpf MUST export:
   signal and is exported separately if the harness needs it for
   context.
 - **`xpf_fairness_observed_cov{ifindex=..., queue_id=...}`** gauge: rolling
-  observed CoV for the queue.
+  observed CoV across per-flow byte totals for the queue.
 - **`xpf_fairness_starved_flows{ifindex=..., queue_id=...}`** counter:
-  monotonic count of flows that fell below the starved-flow
-  threshold (< 1% of mean per-flow throughput) over their lifetime.
+  monotonic count of flows that enter the starved-flow threshold
+  (< 1% of mean per-flow throughput), de-duplicated while the flow
+  remains in the rolling window.
 
 Operators tracking this contract in production monitor the gap
 `(observed_cov - cstruct)` and the starved-flow counter. A
@@ -365,9 +371,13 @@ flat.
 The RSS-structure gauges above are exported from the production
 Prometheus collector. The rolling throughput metrics
 (`xpf_fairness_saturated`, `xpf_fairness_observed_cov`, and
-`xpf_fairness_starved_flows`) still require a follow-up runtime window;
-until that ships, observed CoV and starved-flow gates are enforced via
-the test harness.
+`xpf_fairness_starved_flows`) are derived from worker-owned
+flow-cache byte counters surfaced through the bounded flow-worker
+status snapshot. The daemon keeps the 30-second window in collector
+state and advances the wall-clock window on every healthy scrape, even
+when no flow byte counter moved. Truncated flow-worker snapshots reset
+the runtime window and suppress metric emission rather than reporting
+a false-healthy queue from stale samples.
 
 ## Steady-state measurement window
 
