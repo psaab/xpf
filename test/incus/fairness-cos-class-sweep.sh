@@ -58,7 +58,10 @@ fi
 SUMMARY_TSV="$ARTIFACT_ROOT/summary.tsv"
 SUMMARY_MD="$ARTIFACT_ROOT/summary.md"
 DATAPLANE_SUMMARY_TSV="$ARTIFACT_ROOT/dataplane-summary.tsv"
-rm -f "$DATAPLANE_SUMMARY_TSV"
+if ! rm -f "$DATAPLANE_SUMMARY_TSV"; then
+    echo "fairness-cos-class-sweep: failed to remove stale dataplane summary: $DATAPLANE_SUMMARY_TSV" >&2
+    exit 2
+fi
 
 cat > "$SUMMARY_TSV" <<'HEADER'
 class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_cov	stdev_observed_cov	avg_mbps	avg_cstruct	avg_gap	starved_flows	per_run_verdicts
@@ -112,6 +115,13 @@ run_dataplane_cmd() {
     fi
 
     timeout --kill-after=5s "$DATAPLANE_CAPTURE_TIMEOUT_SEC" "$@" 2> "$stderr"
+    local rc=$?
+    if (( rc == 124 || rc == 137 )); then
+        echo "dataplane capture command timed out after ${DATAPLANE_CAPTURE_TIMEOUT_SEC}s (exit $rc): $*" >> "$stderr"
+    elif (( rc != 0 )); then
+        echo "dataplane capture command failed (exit $rc): $*" >> "$stderr"
+    fi
+    return "$rc"
 }
 
 capture_dataplane_snapshot() {
