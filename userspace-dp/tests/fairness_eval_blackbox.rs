@@ -313,10 +313,14 @@ fn verdict_emits_iperf_end_diagnostics() {
     assert_eq!(v["iperf_retransmits"], 17);
     assert_eq!(v["iperf_reverse"], true);
     assert_eq!(v["iperf_cpu_host_total_percent"].as_f64(), Some(10.0));
+    assert_eq!(v["iperf_cpu_host_user_percent"].as_f64(), Some(1.5));
     assert_eq!(v["iperf_cpu_host_system_percent"].as_f64(), Some(8.5));
     assert_eq!(v["iperf_cpu_remote_total_percent"].as_f64(), Some(74.5));
+    assert_eq!(v["iperf_cpu_remote_user_percent"].as_f64(), Some(2.0));
     assert_eq!(v["iperf_cpu_remote_system_percent"].as_f64(), Some(72.5));
+    // reverse mode: sender is the remote endpoint
     assert_eq!(v["iperf_sender_cpu_total_percent"].as_f64(), Some(74.5));
+    assert_eq!(v["iperf_sender_cpu_user_percent"].as_f64(), Some(2.0));
     assert_eq!(v["iperf_sender_cpu_system_percent"].as_f64(), Some(72.5));
 }
 
@@ -358,10 +362,14 @@ fn verdict_maps_forward_sender_cpu_to_host() {
     assert_eq!(v["iperf_retransmits"], 3);
     assert_eq!(v["iperf_reverse"], false);
     assert_eq!(v["iperf_cpu_host_total_percent"].as_f64(), Some(81.25));
+    assert_eq!(v["iperf_cpu_host_user_percent"].as_f64(), Some(4.25));
     assert_eq!(v["iperf_cpu_host_system_percent"].as_f64(), Some(77.0));
     assert_eq!(v["iperf_cpu_remote_total_percent"].as_f64(), Some(12.5));
+    assert_eq!(v["iperf_cpu_remote_user_percent"].as_f64(), Some(1.0));
     assert_eq!(v["iperf_cpu_remote_system_percent"].as_f64(), Some(11.5));
+    // forward mode: sender is the host endpoint
     assert_eq!(v["iperf_sender_cpu_total_percent"].as_f64(), Some(81.25));
+    assert_eq!(v["iperf_sender_cpu_user_percent"].as_f64(), Some(4.25));
     assert_eq!(v["iperf_sender_cpu_system_percent"].as_f64(), Some(77.0));
 }
 
