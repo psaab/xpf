@@ -153,6 +153,34 @@ func TestFairnessThroughputWindowTruncationResetsWindow(t *testing.T) {
 	}
 }
 
+func TestFairnessThroughputWindowDoesNotInflateSaturationAtWindowBoundary(t *testing.T) {
+	window := NewFairnessThroughputWindow(30 * time.Second)
+	now := time.Unix(100, 0)
+	queueID := uint8(4)
+	status := throughputStatus(queueID, 0, 0)
+
+	window.Update(now, status)
+
+	var got []FairnessThroughputSummary
+	for i := 1; i <= 4; i++ {
+		status.FlowWorkerMap[0].ObservedBytes += 2_000
+		status.FlowWorkerMap[1].ObservedBytes += 2_000
+		got = window.Update(now.Add(time.Duration(i)*10*time.Second), status)
+	}
+	if len(got) != 1 {
+		t.Fatalf("boundary update produced %d summaries, want 1", len(got))
+	}
+	if got[0].Saturated {
+		t.Fatalf("Saturated at steady 400 B/s = true, want false: %+v", got[0])
+	}
+	if got[0].ObservedBytes != 12_000 {
+		t.Fatalf("ObservedBytes at boundary = %d, want 12000", got[0].ObservedBytes)
+	}
+	if got[0].WindowSeconds != 30 {
+		t.Fatalf("WindowSeconds at boundary = %.1f, want 30", got[0].WindowSeconds)
+	}
+}
+
 func TestFairnessThroughputWindowPrunesStarvedFlowDedup(t *testing.T) {
 	window := NewFairnessThroughputWindow(5 * time.Second)
 	now := time.Unix(100, 0)
