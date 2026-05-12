@@ -23,7 +23,8 @@ const EPSILON: f64 = 0.05;
 // finding #3: sum(per_binding_active_flow_count) ≈ expected_sum
 // within `max(2, floor(10% × expected_sum))`, where
 // expected_sum = non-starved_streams × direction_multiplier
-// (direction_multiplier=1 with --iface, 2 for legacy/bidirectional).
+// (direction_multiplier=1 when iface_filter_active=true, 2 for
+// legacy/bidirectional input).
 const GUARD_RELATIVE: f64 = 0.10;
 const GUARD_ABSOLUTE: u32 = 2;
 

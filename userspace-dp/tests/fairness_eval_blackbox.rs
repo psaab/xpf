@@ -480,11 +480,14 @@ fn guard_sum_mismatch_fails() {
     assert_eq!(v["verdict"], "FAIL");
     assert_eq!(v["a_i_sum_check_ok"], false);
     let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
-    assert!(
-        reasons.iter().any(|r| r.as_str().unwrap_or("").contains("Harness guard")),
-        "failure_reasons must contain a Harness guard entry; got: {:?}",
-        reasons
-    );
+    let guard_reason = reasons
+        .iter()
+        .filter_map(|r| r.as_str())
+        .find(|r| r.contains("Harness guard"))
+        .unwrap_or_else(|| panic!("failure_reasons must contain a Harness guard entry; got: {reasons:?}"));
+    assert!(guard_reason.contains("expected=6"), "guard reason missing expected_sum: {guard_reason}");
+    assert!(guard_reason.contains("non-starved=6"), "guard reason missing non-starved: {guard_reason}");
+    assert!(guard_reason.contains("dir_mult=1"), "guard reason missing dir_mult: {guard_reason}");
 }
 
 #[test]
@@ -532,11 +535,14 @@ fn guard_low_n_legacy_input_rejects_p2_undercount() {
     assert_eq!(v["iperf_non_starved_streams"], 2);
     assert_eq!(v["a_i_sum_tolerance"], 2);
     let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
-    assert!(
-        reasons.iter().any(|r| r.as_str().unwrap_or("").contains("Harness guard")),
-        "failure_reasons must contain a Harness guard entry; got: {:?}",
-        reasons
-    );
+    let guard_reason = reasons
+        .iter()
+        .filter_map(|r| r.as_str())
+        .find(|r| r.contains("Harness guard"))
+        .unwrap_or_else(|| panic!("failure_reasons must contain a Harness guard entry; got: {reasons:?}"));
+    assert!(guard_reason.contains("expected=4"), "guard reason missing expected_sum: {guard_reason}");
+    assert!(guard_reason.contains("non-starved=2"), "guard reason missing non-starved: {guard_reason}");
+    assert!(guard_reason.contains("dir_mult=2"), "guard reason missing dir_mult: {guard_reason}");
 }
 
 #[test]
