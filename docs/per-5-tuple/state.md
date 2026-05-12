@@ -345,11 +345,25 @@ The runtime expectation slice adds opt-in production evaluation via
 `fairness-eval` in Junos-style set syntax (`balanced`,
 `at-least-active-workers <N>`, `max-worker-flow-share <X>`, or
 `cstruct-max <X>`; threshold values use fractions such as `0.5` in
-set syntax). Configured expectations are rendered under
+set syntax). The key is intentionally ifindex-only: the userspace
+status snapshot and Prometheus labels are keyed by kernel ifindex, and
+interface names can be renamed or absent during dataplane restarts.
+Configured expectations are rendered under
 `show chassis cluster data-plane fairness` and exported as:
 
-- `xpf_fairness_rss_expectation_configured{ifindex,queue_id,expectation}`
-- `xpf_fairness_rss_skew_violation{ifindex,queue_id,expectation}`
+- `xpf_fairness_rss_expectation_configured{ifindex,queue_id,kind}`
+- `xpf_fairness_rss_expectation_value{ifindex,queue_id,kind}`
+- `xpf_fairness_rss_skew_violation{ifindex,queue_id,kind}`
+
+The `kind` label is one of the stable expectation kinds (`any`,
+`balanced`, `at-least-active-workers`, `max-worker-flow-share`, or
+`cstruct-max`). Numeric knobs such as active-worker count and
+thresholds are exported as metric values rather than labels. This is
+a compatibility break from the initial #1247/#1263 metric shape, which
+used the full canonical expectation string as a label and therefore
+made arbitrary thresholds part of the Prometheus label cardinality.
+Duplicate expectation leaves are rejected at compile time; repeated
+identical `set` commands remain idempotent.
 
 The runtime throughput slice exports the remaining observed-workload
 metrics from a rolling 30-second daemon window:
