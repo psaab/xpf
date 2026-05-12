@@ -1196,6 +1196,8 @@ impl Coordinator {
                 binding.debug_pending_tx_prepared = snap.debug_pending_tx_prepared;
                 binding.debug_pending_tx_local = snap.debug_pending_tx_local;
                 binding.debug_outstanding_tx = snap.debug_outstanding_tx;
+                binding.tx_completion_ring_available = snap.tx_completion_ring_available;
+                binding.tx_completion_ring_available_max = snap.tx_completion_ring_available_max;
                 binding.debug_in_flight_recycles = snap.debug_in_flight_recycles;
                 // #878: per-binding capacities + in-flight gauge flow
                 // into BindingStatus so the daemon's fwdstatus
@@ -1327,6 +1329,8 @@ impl Coordinator {
                 binding.debug_pending_tx_prepared = 0;
                 binding.debug_pending_tx_local = 0;
                 binding.debug_outstanding_tx = 0;
+                binding.tx_completion_ring_available = 0;
+                binding.tx_completion_ring_available_max = 0;
                 binding.debug_in_flight_recycles = 0;
                 // #878: capacities + in-flight gauge zero when the
                 // binding has no live state (slot unregistered). The

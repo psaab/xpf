@@ -106,6 +106,12 @@ type xpfCollector struct {
 	// docs/fairness-regimes.md). Refreshed at the helper's ~65ms
 	// debug-state tick.
 	bindingActiveFlowCount *prometheus.Desc
+	// #1241: per-binding AF_XDP TX completion service telemetry.
+	// These signals let fairness measurements distinguish scheduler/RSS
+	// skew from per-queue completion-ring service asymmetry.
+	bindingTXCompletions                *prometheus.Desc
+	bindingTXCompletionRingAvailable    *prometheus.Desc
+	bindingTXCompletionRingAvailableMax *prometheus.Desc
 	// #1248: class-specific active flow distribution by egress CoS
 	// queue. This is the production/mixed-workload {a_i} source.
 	cosActiveFlowCount *prometheus.Desc
@@ -396,6 +402,21 @@ func newCollector(srv *Server) *xpfCollector {
 				"compute the structural CoV ceiling per docs/fairness-regimes.md (#1219).",
 			[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 		),
+		bindingTXCompletions: prometheus.NewDesc(
+			"xpf_userspace_binding_tx_completions_total",
+			"Cumulative AF_XDP TX completions reaped by this binding's owner worker (#1241).",
+			[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+		),
+		bindingTXCompletionRingAvailable: prometheus.NewDesc(
+			"xpf_userspace_binding_tx_completion_ring_available",
+			"Last sampled AF_XDP TX completion-ring descriptors available before the owner worker drained completions (#1241).",
+			[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+		),
+		bindingTXCompletionRingAvailableMax: prometheus.NewDesc(
+			"xpf_userspace_binding_tx_completion_ring_available_max",
+			"Maximum sampled AF_XDP TX completion-ring descriptors available in the last debug window (#1241).",
+			[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+		),
 		cosActiveFlowCount: prometheus.NewDesc(
 			"xpf_userspace_cos_active_flow_count",
 			"Distinct active flows observed for this egress CoS queue on this worker "+
@@ -514,6 +535,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerCoSQueueLeaseAcquireV8GrantedBytes
 	ch <- c.workerDead
 	ch <- c.bindingActiveFlowCount
+	ch <- c.bindingTXCompletions
+	ch <- c.bindingTXCompletionRingAvailable
+	ch <- c.bindingTXCompletionRingAvailableMax
 	ch <- c.cosActiveFlowCount
 	ch <- c.fairnessCstruct
 	ch <- c.fairnessActiveWorkers
@@ -564,6 +588,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 	c.emitCoSOwnerProfile(ch, status)
 	c.emitWorkerRuntime(ch, status)
 	c.emitBindingActiveFlowCount(ch, status)
+	c.emitBindingTXCompletionTelemetry(ch, status)
 	c.emitCoSActiveFlowCount(ch, status)
 	c.emitFairnessRSSGauges(ch, status)
 	c.emitFairnessThroughputGauges(ch, status)
@@ -582,6 +607,37 @@ func (c *xpfCollector) emitBindingActiveFlowCount(ch chan<- prometheus.Metric, s
 			strconv.FormatUint(uint64(b.QueueID), 10),
 			strconv.FormatUint(uint64(b.WorkerID), 10),
 			b.Interface,
+		)
+	}
+}
+
+// #1241: emit per-binding AF_XDP TX completion service telemetry for
+// flow-fairness qualification runs. `tx_completions_total` gives the
+// per-queue completion rate via Prometheus `rate()`. The two gauges
+// expose latest and peak completion-ring backlog observed by the owner
+// worker before drain, without introducing a hot-path shared counter.
+func (c *xpfCollector) emitBindingTXCompletionTelemetry(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, b := range status.Bindings {
+		slot := strconv.FormatUint(uint64(b.Slot), 10)
+		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
+		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingTXCompletions,
+			prometheus.CounterValue,
+			float64(b.TXCompletions),
+			slot, queueID, workerID, b.Interface,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingTXCompletionRingAvailable,
+			prometheus.GaugeValue,
+			float64(b.TXCompletionRingAvailable),
+			slot, queueID, workerID, b.Interface,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingTXCompletionRingAvailableMax,
+			prometheus.GaugeValue,
+			float64(b.TXCompletionRingAvailableMax),
+			slot, queueID, workerID, b.Interface,
 		)
 	}
 }
