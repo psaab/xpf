@@ -94,6 +94,30 @@ func TestFairnessThroughputWindowAdvancesDuringIdleScrapes(t *testing.T) {
 	}
 }
 
+func TestFairnessThroughputWindowPrunesBoundarySampleWithoutCapping(t *testing.T) {
+	window := NewFairnessThroughputWindow(30 * time.Second)
+	now := time.Unix(100, 0)
+	queueID := uint8(4)
+	status := throughputStatus(queueID, 1_000, 1_000)
+
+	window.Update(now, status)
+	for step := 1; step <= 4; step++ {
+		status.FlowWorkerMap[0].ObservedBytes += 5_000
+		got := window.Update(now.Add(time.Duration(step)*10*time.Second), status)
+		if len(got) != 1 {
+			t.Fatalf("step %d produced %d summaries, want 1", step, len(got))
+		}
+		if step == 4 {
+			if got[0].ObservedBytes != 15_000 {
+				t.Fatalf("ObservedBytes after boundary prune = %d, want 15000", got[0].ObservedBytes)
+			}
+			if got[0].WindowSeconds != 30 {
+				t.Fatalf("WindowSeconds after boundary prune = %.1f, want 30", got[0].WindowSeconds)
+			}
+		}
+	}
+}
+
 func TestFairnessThroughputWindowTruncationResetsWindow(t *testing.T) {
 	window := NewFairnessThroughputWindow(30 * time.Second)
 	now := time.Unix(100, 0)
