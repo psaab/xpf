@@ -1170,6 +1170,18 @@ pub struct WorkerRuntimeStatus {
     pub work_loops: u64,
     #[serde(rename = "idle_loops", default)]
     pub idle_loops: u64,
+    /// #1240: cumulative v8 per-worker queue-lease acquire calls
+    /// observed by this worker across its bindings. Operators should
+    /// compare `rate()` against per-worker TX rate to diagnose lease-
+    /// request frequency imbalance.
+    #[serde(rename = "cos_queue_lease_acquire_v8_calls", default)]
+    pub cos_queue_lease_acquire_v8_calls: u64,
+    /// #1240: cumulative bytes granted by v8 queue-lease acquire calls.
+    #[serde(
+        rename = "cos_queue_lease_acquire_v8_granted_bytes",
+        default
+    )]
+    pub cos_queue_lease_acquire_v8_granted_bytes: u64,
     /// #925: true if the worker_loop thread panicked and the supervisor
     /// caught it. Set once on first panic; never cleared in Phase 1.
     /// Operators see DEAD in `cli show chassis forwarding` and must

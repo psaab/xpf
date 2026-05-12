@@ -32,7 +32,7 @@ use super::{
     cos_queue_front_with_cap, cos_queue_is_empty, cos_queue_pop_front, cos_queue_pop_front_with_cap,
     cos_queue_push_front, cos_queue_v_min_consume_suspension, cos_queue_v_min_continue,
     cos_refill_ns_until, maybe_top_up_cos_queue_lease, publish_committed_queue_vtime,
-    refill_cos_tokens, COS_MIN_BURST_BYTES,
+    refill_cos_tokens, CoSQueueLeaseAcquireTelemetry, COS_MIN_BURST_BYTES,
 };
 // #1229 v7 per-bucket TX accounting + threshold-gated EWMA.
 use super::fairness::account_flow_bucket_tx;
@@ -123,6 +123,21 @@ pub(in crate::afxdp) struct DrainedQueueRef {
 }
 
 #[inline]
+fn record_cos_queue_lease_acquire(
+    binding: &mut BindingWorker,
+    telemetry: CoSQueueLeaseAcquireTelemetry,
+) {
+    binding.cos.cos_queue_lease_acquire_v8_calls = binding
+        .cos
+        .cos_queue_lease_acquire_v8_calls
+        .wrapping_add(telemetry.v8_calls);
+    binding.cos.cos_queue_lease_acquire_v8_granted_bytes = binding
+        .cos
+        .cos_queue_lease_acquire_v8_granted_bytes
+        .wrapping_add(telemetry.v8_granted_bytes);
+}
+
+#[inline]
 pub(in crate::afxdp) fn drain_shaped_tx(
     binding: &mut BindingWorker,
     now_ns: u64,
@@ -144,16 +159,20 @@ pub(in crate::afxdp) fn drain_shaped_tx(
         if !prime_cos_root_for_service(binding, root_ifindex, now_ns) {
             continue;
         }
+        let mut lease_telemetry = CoSQueueLeaseAcquireTelemetry::default();
         if let Some(serviced) = service_exact_guarantee_queue_direct_with_info(
             binding,
             root_ifindex,
             now_ns,
             shared_recycles,
+            &mut lease_telemetry,
         ) {
+            record_cos_queue_lease_acquire(binding, lease_telemetry);
             binding.cos.cos_interface_rr =
                 (start + offset + 1) % binding.cos.cos_interface_order.len();
             return serviced;
         }
+        record_cos_queue_lease_acquire(binding, lease_telemetry);
         let Some(batch) = build_nonexact_cos_batch(binding, root_ifindex, now_ns) else {
             continue;
         };
@@ -218,8 +237,17 @@ fn service_exact_guarantee_queue_direct(
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
 ) -> Option<bool> {
-    service_exact_guarantee_queue_direct_with_info(binding, root_ifindex, now_ns, shared_recycles)
-        .map(|slot| slot.is_some())
+    let mut lease_telemetry = CoSQueueLeaseAcquireTelemetry::default();
+    let ret = service_exact_guarantee_queue_direct_with_info(
+        binding,
+        root_ifindex,
+        now_ns,
+        shared_recycles,
+        &mut lease_telemetry,
+    )
+    .map(|slot| slot.is_some());
+    record_cos_queue_lease_acquire(binding, lease_telemetry);
+    ret
 }
 
 /// #751: variant that additionally reports which queue was actually
@@ -237,6 +265,7 @@ fn service_exact_guarantee_queue_direct_with_info(
     root_ifindex: i32,
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
+    lease_telemetry: &mut CoSQueueLeaseAcquireTelemetry,
 ) -> Option<Option<DrainedQueueRef>> {
     let queue_fast_path = binding
         .cos
@@ -246,7 +275,12 @@ fn service_exact_guarantee_queue_direct_with_info(
         .as_slice();
     let selection = {
         let root = binding.cos.cos_interfaces.get_mut(&root_ifindex)?;
-        select_exact_cos_guarantee_queue_with_fast_path(root, queue_fast_path, now_ns)?
+        select_exact_cos_guarantee_queue_with_lease_telemetry(
+            root,
+            queue_fast_path,
+            now_ns,
+            lease_telemetry,
+        )?
     };
 
     let queue_id = binding
@@ -322,7 +356,7 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
             continue;
         }
         if queue.config.exact {
-            maybe_top_up_cos_queue_lease(
+            let _ = maybe_top_up_cos_queue_lease(
                 queue,
                 queue_fast_path
                     .get(queue_idx)
@@ -399,11 +433,28 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
 // independently of the non-exact pass via `exact_guarantee_rr` — the two
 // classes are scheduled with strict-priority exact-over-nonexact and
 // class-independent RR within each class.
+#[cfg(test)]
 #[inline]
 pub(in crate::afxdp) fn select_exact_cos_guarantee_queue_with_fast_path(
     root: &mut CoSInterfaceRuntime,
     queue_fast_path: &[WorkerCoSQueueFastPath],
     now_ns: u64,
+) -> Option<ExactCoSQueueSelection> {
+    let mut lease_telemetry = CoSQueueLeaseAcquireTelemetry::default();
+    select_exact_cos_guarantee_queue_with_lease_telemetry(
+        root,
+        queue_fast_path,
+        now_ns,
+        &mut lease_telemetry,
+    )
+}
+
+#[inline]
+fn select_exact_cos_guarantee_queue_with_lease_telemetry(
+    root: &mut CoSInterfaceRuntime,
+    queue_fast_path: &[WorkerCoSQueueFastPath],
+    now_ns: u64,
+    lease_telemetry: &mut CoSQueueLeaseAcquireTelemetry,
 ) -> Option<ExactCoSQueueSelection> {
     let queue_count = root.queues.len();
     if queue_count == 0 {
@@ -416,13 +467,14 @@ pub(in crate::afxdp) fn select_exact_cos_guarantee_queue_with_fast_path(
         if cos_queue_is_empty(queue) || !queue.hot.runnable || !queue.config.exact {
             continue;
         }
-        maybe_top_up_cos_queue_lease(
+        let top_up = maybe_top_up_cos_queue_lease(
             queue,
             queue_fast_path
                 .get(queue_idx)
                 .and_then(|queue_fast| queue_fast.shared_queue_lease.as_ref()),
             now_ns,
         );
+        lease_telemetry.add_assign(top_up);
         let Some(head) = cos_queue_front(queue) else {
             continue;
         };
