@@ -2,11 +2,12 @@
 
 Issue #1233 asks whether xpf should add a dataplane-only mechanism to
 mask the iperf3 sender's TCP head-start effect. Current answer:
-**do not add a new Approximate Fair Dropping (AFD)-style leader-selective ECN/drop overlay or
-receive-window clamping mechanism unless a fresh, multi-sample harness
-run produces an actionable fairness failure.** This does not change
-xpf's existing CoS-admission/AQM ECN behavior; it rejects a new
-per-flow TCP head-start policing loop in the forwarding path.
+**do not add a new Approximate Fair Dropping (AFD)-style
+leader-selective ECN/drop overlay or receive-window clamping mechanism
+unless a fresh, multi-sample harness run produces an actionable fairness
+failure.** This does not change xpf's existing CoS-admission/AQM ECN
+behavior; it rejects a new per-flow TCP head-start policing loop in the
+forwarding path.
 
 ## Evidence
 
@@ -77,18 +78,18 @@ For measurements whose purpose is to isolate dataplane fairness:
   `-b`) when the test intent is equal per-flow offered load.
 - Use fixed or swept source ports when the test intent is a known RSS
   distribution.
-- Publish `observed_cov`, `Cstruct`, `gap`, starved-flow count,
-  aggregate throughput, sender CPU utilization, and the multi-sample
-  mean/stdev/max CoV.
+- Publish observed CoV (`observed_cov` in verdict JSON), `Cstruct`,
+  `gap`, starved-flow count, aggregate throughput, sender CPU
+  utilization, and the multi-sample mean/stdev/max CoV.
 
 For production traffic, xpf's fairness contract remains
 workload-relative. The PR #1217/#1220 gate passes only when there are
-no starved flows, `observed_CoV ≤ Cstruct + epsilon` (epsilon = 0.05), any configured
-RSS/workload expectation is satisfied, saturated runs clear the
-aggregate-throughput gate, and optional mouse probes stay within the
-p99 SLA. A saturated TCP sender that creates unequal offered load is
-outside what a transparent AF_XDP firewall can fix without becoming an
-endpoint-side pacing or TCP-policing device.
+no starved flows, `observed_CoV ≤ Cstruct + epsilon` (`epsilon = 0.05`),
+any configured RSS/workload expectation is satisfied, saturated runs
+clear the aggregate-throughput gate, and optional mouse probes stay
+within the p99 SLA. A saturated TCP sender that creates unequal offered
+load is outside what a transparent AF_XDP firewall can fix without
+becoming an endpoint-side pacing or TCP-policing device.
 
 ## Revisit Criteria
 
