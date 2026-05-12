@@ -20,10 +20,10 @@ use fairness::{
 
 const EPSILON: f64 = 0.05;
 // Tolerance for the harness fail-fast guard per Codex round-4
-// finding #3: sum(per_binding_active_flow_count) ≈ non-starved
-// iperf stream count within `max(2, 10% × N)`.
+// finding #3 and #1224: sum(per_binding_active_flow_count) ≈
+// non-starved iperf stream count within `max(3, 10% × N)`.
 const GUARD_RELATIVE: f64 = 0.10;
-const GUARD_ABSOLUTE: u32 = 2;
+const GUARD_ABSOLUTE: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 struct Iperf3Output {

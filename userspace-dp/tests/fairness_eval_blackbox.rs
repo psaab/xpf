@@ -488,6 +488,52 @@ fn guard_sum_mismatch_fails() {
 }
 
 #[test]
+fn guard_low_n_legacy_input_accepts_p2_recency_undercount() {
+    let tmp = TempGuard::new("guard_low_n");
+    let sockets = [5u64, 6];
+    let mut intervals: Vec<Vec<StreamSample>> = Vec::new();
+    for i in 0..60u64 {
+        intervals.push(vec![
+            StreamSample {
+                socket: sockets[0],
+                start: i as f64,
+                end: i as f64 + 1.0,
+                bits_per_second: 1.0e9,
+            },
+            StreamSample {
+                socket: sockets[1],
+                start: i as f64,
+                end: i as f64 + 1.0,
+                bits_per_second: 1.0e9,
+            },
+        ]);
+    }
+    let json_str = synth_iperf3_json(60, &sockets, intervals);
+    let mut tsv_str = String::from("# timestamp\tbinding_slot\tcount\n");
+    for ts in timestamps_for(60) {
+        tsv_str.push_str(&format!("{ts}\t0\t1\n"));
+    }
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "P=2 low-N recency undercount should stay inside the harness guard; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on low-N PASS");
+    assert_eq!(v["verdict"], "PASS");
+    assert_eq!(v["a_i_sum_check_ok"], true);
+    assert_eq!(v["a_i_sum"], 1);
+    assert_eq!(v["iperf_non_starved_streams"], 2);
+    assert_eq!(v["a_i_sum_tolerance"], 3);
+}
+
+#[test]
 fn guard_empty_tsv_fails_via_sum_guard() {
     let tmp = TempGuard::new("guard_empty");
     // 6 healthy streams; TSV has header only (no data rows). With
