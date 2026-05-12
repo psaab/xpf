@@ -78,9 +78,9 @@ For measurements whose purpose is to isolate dataplane fairness:
   `-b`) when the test intent is equal per-flow offered load.
 - Use fixed or swept source ports when the test intent is a known RSS
   distribution.
-- Publish observed CoV (`observed_cov` in verdict JSON), `Cstruct`,
-  `gap`, starved-flow count, aggregate throughput, sender CPU
-  utilization, and the multi-sample mean/stdev/max CoV.
+- Publish verdict JSON keys `observed_cov`, `cstruct`, `gap`,
+  `starved_flow_count`, `aggregate_mbps`, and the iperf CPU fields,
+  plus the multi-sample mean/stdev/max CoV.
 
 For production traffic, xpf's fairness contract remains
 workload-relative. The PR #1217/#1220 gate passes only when there are
