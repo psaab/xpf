@@ -442,6 +442,66 @@ fn build_forwarding_state_prefers_logical_unit_for_ingress_lookup() {
     let state = build_forwarding_state(&snapshot);
     assert_eq!(state.ingress_logical_ifindex.get(&(10, 0)), Some(&11));
 }
+
+#[test]
+fn build_forwarding_state_keeps_parent_bound_vlan_units_distinct() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "wan".into(),
+                id: 11,
+            },
+            ZoneSnapshot {
+                name: "dmz".into(),
+                id: 12,
+            },
+        ],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.80".into(),
+                zone: "wan".into(),
+                ifindex: 20080,
+                parent_ifindex: 6,
+                vlan_id: 80,
+                hardware_addr: "02:00:00:00:00:06".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.81".into(),
+                zone: "dmz".into(),
+                ifindex: 20081,
+                parent_ifindex: 6,
+                vlan_id: 81,
+                hardware_addr: "02:00:00:00:00:06".into(),
+                cos_shaping_rate_bytes_per_sec: 20_000_000,
+                ..Default::default()
+            },
+        ],
+        class_of_service: Some(ClassOfServiceSnapshot::default()),
+        ..Default::default()
+    };
+
+    let state = build_forwarding_state(&snapshot);
+
+    assert_eq!(state.ingress_logical_ifindex.get(&(6, 80)), Some(&20080));
+    assert_eq!(state.ingress_logical_ifindex.get(&(6, 81)), Some(&20081));
+    assert_eq!(state.ifindex_to_zone_id.get(&20080).copied(), Some(11));
+    assert_eq!(state.ifindex_to_zone_id.get(&20081).copied(), Some(12));
+    assert_eq!(
+        state.egress.get(&20080).expect("wan egress").bind_ifindex,
+        6
+    );
+    assert_eq!(
+        state.egress.get(&20081).expect("dmz egress").bind_ifindex,
+        6
+    );
+    assert!(state.cos.interfaces.contains_key(&20080));
+    assert!(state.cos.interfaces.contains_key(&20081));
+}
+
 #[test]
 fn build_forwarding_state_disables_tx_selection_when_no_cos_or_filters_exist() {
     let state = build_forwarding_state(&ConfigSnapshot::default());
