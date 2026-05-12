@@ -105,6 +105,7 @@ type InterfaceSnapshot struct {
 	ParentLinuxName           string                     `json:"parent_linux_name,omitempty"`
 	Ifindex                   int                        `json:"ifindex,omitempty"`
 	ParentIfindex             int                        `json:"parent_ifindex,omitempty"`
+	LogicalOnly               bool                       `json:"logical_only,omitempty"`
 	RXQueues                  int                        `json:"rx_queues,omitempty"`
 	VLANID                    int                        `json:"vlan_id,omitempty"`
 	LocalFabric               string                     `json:"local_fabric_member,omitempty"`
