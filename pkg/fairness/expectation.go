@@ -41,6 +41,24 @@ func (e RSSExpectation) Canonical() string {
 	}
 }
 
+func (e RSSExpectation) MetricKind() string {
+	if !knownRSSExpectationKind(e.Kind) {
+		return "unknown"
+	}
+	return string(e.Kind)
+}
+
+func (e RSSExpectation) MetricValue() (float64, bool) {
+	switch e.Kind {
+	case RSSExpectationAtLeastActiveWorkers:
+		return float64(e.ActiveWorkers), true
+	case RSSExpectationMaxWorkerFlowShare, RSSExpectationCstructMax:
+		return e.Threshold, true
+	default:
+		return 0, false
+	}
+}
+
 type RSSExpectationResult struct {
 	Pass   bool
 	Reason string
