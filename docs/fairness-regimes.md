@@ -225,12 +225,17 @@ Any fairness measurement run MUST report:
    the "Saturation detection" section) and the supporting
    time-series.
 7. **Aggregate throughput** in Mb/s.
-8. **Aggregate retransmits**: total retransmits across all senders.
-   Diagnostic; not a hard gate.
-9. **ECN marks/drops** (if AQM is enabled): total CE marks and
+8. **Aggregate retransmits**: total retransmits across all senders
+   (`iperf_retransmits` in `fairness-eval`). Diagnostic; not a hard
+   gate.
+9. **iperf CPU utilization**: host/remote totals plus the derived
+   sender-side total/user/system percentages from iperf3's
+   `cpu_utilization_percent`. Diagnostic; not a hard gate, but needed
+   to separate dataplane unfairness from sender or receiver saturation.
+10. **ECN marks/drops** (if AQM is enabled): total CE marks and
    AQM drops. Diagnostic for future Path 2 v2 work.
-10. **Mouse p99 latency** (when mouse probes are present).
-11. **Steady-state window**: explicit start/end timestamps,
+11. **Mouse p99 latency** (when mouse probes are present).
+12. **Steady-state window**: explicit start/end timestamps,
     excluding the first 5 seconds (warmup) and any final
     sender-shutdown bursts.
 
