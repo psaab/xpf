@@ -92,6 +92,31 @@ fn forwarded_tcp_may_need_segmentation_skips_mtu_sized_frame() {
 }
 
 #[test]
+fn forwarded_tcp_may_need_segmentation_uses_frame_vlan_offset_over_stale_meta() {
+    let forwarding = test_forwarding_with_egress_mtu(1500);
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        // Stale metadata shape observed in #1282: the live frame is VLAN
+        // tagged, but metadata still points at a 14-byte Ethernet header.
+        l3_offset: 14,
+        ..UserspaceDpMeta::default()
+    };
+    let mut frame = vec![0u8; 18 + 1500];
+    frame[12] = 0x81;
+    frame[13] = 0x00;
+    frame[16] = 0x08;
+    frame[17] = 0x00;
+
+    assert!(!forwarded_tcp_may_need_segmentation(
+        &frame,
+        meta,
+        &test_decision(),
+        &forwarding,
+    ));
+}
+
+#[test]
 fn forwarded_tcp_may_need_segmentation_flags_oversized_frame() {
     let forwarding = test_forwarding_with_egress_mtu(1500);
     let meta = UserspaceDpMeta {
