@@ -362,8 +362,10 @@ Workers account bytes on the owner-local flow-cache entry already
 touched by established TCP/UDP cache hits and publish the cumulative
 byte count in the bounded flow-worker snapshot. The Go collector
 converts successive snapshots into per-flow byte deltas, maintains the
-rolling window, and suppresses the observed metrics while the source
-flow-worker snapshot is truncated.
+rolling window, and advances that window on healthy scrapes even when
+no flow byte counter moved. Truncated flow-worker snapshots reset the
+window and suppress the observed metrics until a fresh baseline is
+available.
 
 ## Open work
 
