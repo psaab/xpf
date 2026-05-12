@@ -221,18 +221,25 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
             env=env,
             start_new_session=True,
         )
+        # Capture pgid immediately after Popen while proc.pid is guaranteed
+        # alive. We cannot use proc.pid later because Python's communicate()
+        # loop may internally reap the leader via waitpid(WNOHANG) before
+        # TimeoutExpired fires (e.g. when the shell exits early but a child
+        # keeps the pipe open). The pgid remains valid for os.killpg as long
+        # as any group member is alive, which is exactly our target.
+        pgid = os.getpgid(proc.pid)
         timed_out = False
         try:
             stdout_text, stderr_text = proc.communicate(timeout=args.per_run_timeout_sec)
         except subprocess.TimeoutExpired:
             timed_out = True
-            _kill_process_group(proc.pid)
+            _kill_process_group(pgid)
             try:
                 stdout_text, stderr_text = proc.communicate(
                     timeout=POST_KILL_COMMUNICATE_TIMEOUT_SEC
                 )
             except subprocess.TimeoutExpired as exc:
-                _kill_process_group(proc.pid)
+                _kill_process_group(pgid)
                 stdout_text = stream_text(exc.stdout)
                 stderr_text = stream_text(exc.stderr)
         exit_code = proc.returncode

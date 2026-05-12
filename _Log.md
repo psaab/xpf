@@ -370,3 +370,10 @@
   - **Action**: Tests - Add schema-incomplete and process-group tests; move import time to top
   - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md
   - **Result**: 12/12 tests green (was 10)
+
+## 2026-05-12 fairness_multi_sample round-3 fix
+
+- **Timestamp**: 2026-05-12T07:02:16Z
+  - **Action**: Fix pgid capture race - capture os.getpgid(proc.pid) immediately after Popen before communicate() can reap the leader; use cached pgid in both _kill_process_group() calls.
+  - **File(s)**: test/incus/fairness_multi_sample.py
+  - **Result**: 14/14 tests green
