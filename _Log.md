@@ -14,6 +14,26 @@
   - **Action**: PR round-2 review follow-up — expanded AFD acronym at first use (line 5), changed `observed_cov` to `observed_CoV` in prose formulas (lines 86, 99), made epsilon explicit as 0.05.
   - **File(s)**: `docs/per-5-tuple/tcp-head-start-floor.md`, `_Log.md`
 
+- **Timestamp**: 2026-05-12T07:35:00Z
+  - **Action**: PR #1271 round-3 follow-up — add same-VLAN/different-RETH synthetic-ifindex regressions so `reth0.N` and `reth1.N` cannot collapse into one logical Rust dataplane state key.
+  - **File(s)**: `pkg/dataplane/userspace/manager_test.go`, `_Log.md`
+
+- **Timestamp**: 2026-05-12T07:20:00Z
+  - **Action**: PR #1271 cleanup — removed unrelated `go.mod` direct/indirect dependency churn introduced by local test tooling to keep the diff scoped to synthetic-ifindex changes.
+  - **File(s)**: `go.mod`, `_Log.md`
+
+- **Timestamp**: 2026-05-12T07:16:00Z
+  - **Action**: PR #1271 validation follow-up — documented synthetic-ifindex range rationale, improved exhaustion panic guidance, deduplicated VLAN test constants, and reverted unrelated `go.mod` drift from local test tooling.
+  - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `go.mod`, `_Log.md`
+
+- **Timestamp**: 2026-05-12T07:08:00Z
+  - **Action**: PR #1271 follow-up — enriched synthetic-ifindex exhaustion panic diagnostics and replaced test magic VLAN bound with named constants during validation pass.
+  - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `_Log.md`
+
+- **Timestamp**: 2026-05-12T06:55:00Z
+  - **Action**: PR #1271 round-2 follow-up — made parent-bound RETH VLAN synthetic ifindex allocation deterministic/config-derived, removed kernel-ifindex seeding, switched to high synthetic range with hard-fail on exhaustion, and added sibling-VLAN determinism regression coverage.
+  - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `_Log.md`
+
 - **Timestamp**: 2026-05-12T00:30:00Z
   - **Action**: PR #1267 round-2 review follow-up — fixed fairness throughput window boundary pruning/rate denominator coupling to prevent false-positive saturation at steady sub-cap traffic, and added a regression test for the 10s-scrape/30s-window boundary case.
   - **File(s)**: `pkg/dataplane/userspace/fairness_throughput.go`, `pkg/dataplane/userspace/fairness_throughput_test.go`, `_Log.md`
@@ -363,3 +383,42 @@
 - **Timestamp**: 2026-05-10T05:18:20Z
   - **Action**: Correct configstore encryption note to match implementation (`master.key` + HKDF with configured PRF).
   - **File(s)**: `pkg/configstore/README.md`
+
+## 2026-05-12 fairness_multi_sample round-2 HIGH fixes
+
+- **Timestamp**: 2026-05-12T06:50:50Z
+  - **Action**: Round-3 follow-up — tighten verdict JSON detection to the canonical fairness-eval verdict-key set; remove the `os.getpgid` timeout race by using the process-group leader PID directly; add a bounded post-kill `communicate()`; remove a stale threshold-source reference.
+  - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md
+
+- **Timestamp**: 2026-05-12T07:45:00Z
+  - **Action**: PR #1273 Copilot follow-up — align multi-sample verdict filtering with the canonical 10-key fairness-eval schema and validate summary numeric fields (`cstruct`, `gap`, optional `aggregate_mbps`, and integer `starved_flow_count`) instead of only `observed_cov`.
+  - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md, docs/per-5-tuple/state.md, _Log.md
+
+- **Timestamp**: 2026-05-12T06:29:25Z
+  - **Action**: HIGH1 - Tighten extract_verdict_objects to require verdict+observed_cov+discriminator field
+  - **Action**: HIGH2 - Replace subprocess.run with Popen(start_new_session=True)+os.killpg for process-group cleanup on timeout
+  - **Action**: MINOR - Replace statistics.fmean with statistics.mean; remove dead timeout_stream_text
+  - **Action**: Docs - Add fresh-iperf3 requirement and threshold derivation to v8-multi-sample.md
+  - **Action**: Tests - Add schema-incomplete and process-group tests; move import time to top
+  - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md
+  - **Result**: 12/12 tests green (was 10)
+
+## 2026-05-12 fairness_multi_sample round-3 fix
+
+- **Timestamp**: 2026-05-12T07:02:16Z
+  - **Action**: Fix pgid capture race - capture os.getpgid(proc.pid) immediately after Popen before communicate() can reap the leader; use cached pgid in both _kill_process_group() calls.
+  - **File(s)**: test/incus/fairness_multi_sample.py
+  - **Result**: 14/14 tests green
+
+## 2026-05-12 — fairness-eval diagnostic message + test rename
+
+- **Timestamp**: 2026-05-12T06:52:27Z
+  - **Action**: PR #1272 round-3 review follow-up — clarify the top-level guard comment to reference `iface_filter_active`, and pin guard failure tests on `expected`, `non-starved`, and `dir_mult` substrings.
+  - **File(s)**: `userspace-dp/src/bin/fairness-eval.rs`, `userspace-dp/tests/fairness_eval_blackbox.rs`
+
+- **Timestamp**: 2026-05-12T06:29:24Z
+  - **Action**: Fix Harness guard failure message to print `expected_sum` and `dir_mult` alongside `n_non_starved` so operators can see the bidirectional expansion factor. Update block comment to correctly describe `max(2, floor(10% × expected_sum))` formula.
+  - **File(s)**: `userspace-dp/src/bin/fairness-eval.rs`
+- **Timestamp**: 2026-05-12T06:29:24Z
+  - **Action**: Rename `guard_low_n_iface_input_accepts_p2_single_direction_recency_undercount` → `guard_low_n_iface_input_accepts_absolute_floor_p2_gap1`; add inline math comment explaining why absolute floor (not recency) is the operative gate. Drop misleading "recency" claim from assertion messages.
+  - **File(s)**: `userspace-dp/tests/fairness_eval_blackbox.rs`

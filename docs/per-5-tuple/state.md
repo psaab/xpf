@@ -412,6 +412,15 @@ MQFQ, v8 lease selection, or admission.
   PASS and Guard FAIL depending on RSS placement; tolerance floor
   `GUARD_ABSOLUTE = 2` is too tight at small expected_sum. Small
   follow-up; not a fairness mechanism.
+- **#1232 — v8 multi-sample CoV stability**: use
+  `test/incus/fairness_multi_sample.py` and
+  `docs/per-5-tuple/v8-multi-sample.md` before publishing a new
+  iperf-e headline. The gate is mean observed CoV, sample standard
+  deviation, max run CoV, and every per-run fairness verdict. The
+  wrapper requires at least two samples, filters stdout to top-level
+  fairness-eval verdict JSON objects, rejects non-finite or negative
+  threshold fields, enforces non-negative integer `starved_flow_count`,
+  and fails closed on harness timeout.
 - **#1211 follow-up (only if gate flips to FAIL on a real workload)**:
   open a fresh issue using the revisit criteria in the Path 2
   closure archive. Do not re-open #1211 directly. As of the
