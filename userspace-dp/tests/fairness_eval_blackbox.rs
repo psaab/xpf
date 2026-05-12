@@ -688,6 +688,52 @@ fn guard_p12_allows_bounded_stale_overcount() {
 }
 
 #[test]
+fn rss_expectation_uses_observed_distribution_not_cstruct_normalized_copy() {
+    let tmp = TempGuard::new("rss_observed_not_normalized");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    let tsv_str = make_distribution_tsv(&[4, 4, 4, 3, 0, 0], &timestamps_for(60), "ge-0-0-2");
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+        "--rss-expectation", "max-worker-flow-share:25%",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "RSS expectation must fail against observed [4,4,4,3,0,0], not pass against normalized [3,3,3,3,0,0]; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on RSS expectation FAIL");
+    assert_eq!(v["verdict"], "FAIL");
+    assert_eq!(v["a_i_sum_check_ok"], true);
+    assert_eq!(
+        v["distribution_a_i"],
+        serde_json::json!([4, 4, 4, 3, 0, 0])
+    );
+    assert_eq!(
+        v["cstruct_distribution_a_i"],
+        serde_json::json!([3, 3, 3, 3, 0, 0])
+    );
+    assert_eq!(v["cstruct_adjusted_for_a_i_overcount"], true);
+    assert!(
+        v["max_worker_flow_share"].as_f64().unwrap() > 0.25,
+        "max_worker_flow_share must reflect observed distribution: {v}"
+    );
+    let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
+    assert!(
+        reasons.iter().any(|r| r
+            .as_str()
+            .unwrap_or("")
+            .contains("max_worker_flow_share")),
+        "failure_reasons must contain the observed RSS max-share failure; got: {:?}",
+        reasons
+    );
+}
+
+#[test]
 fn guard_p12_rejects_overcount_beyond_stale_window() {
     let tmp = TempGuard::new("guard_p12_overcount_fail");
     let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);

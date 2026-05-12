@@ -842,12 +842,12 @@ fn main() -> ExitCode {
     let cstruct_adjusted_for_a_i_overcount = cstruct_distribution_a_i != distribution_a_i;
 
     let cstruct = compute_cstruct(&cstruct_distribution_a_i);
-    let n_active: u32 = cstruct_distribution_a_i.iter().filter(|&&a| a > 0).count() as u32;
-    let max_worker_flow_share = max_worker_flow_share(&cstruct_distribution_a_i);
+    let n_active: u32 = distribution_a_i.iter().filter(|&&a| a > 0).count() as u32;
+    let max_worker_flow_share = max_worker_flow_share(&distribution_a_i);
     let (rss_expectation_pass, rss_expectation_reason) = evaluate_rss_expectation(
         &rss_expectation,
-        &cstruct_distribution_a_i,
-        cstruct,
+        &distribution_a_i,
+        compute_cstruct(&distribution_a_i),
         n_total_workers,
     );
     let gap = observed_cov - cstruct;
