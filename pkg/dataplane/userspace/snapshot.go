@@ -492,9 +492,28 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 			}
 			unitName := fmt.Sprintf("%s.%d", name, unitNum)
 			parentLinux := snapshotLinuxName(cfg, name, iface, nil)
-			parentIfindex, _, _, _ := buildLinkSnapshot(parentLinux)
+			parentIfindex, parentMTU, parentHardwareAddr, _ := buildLinkSnapshot(parentLinux)
+			parentRXQueues := userspaceRXQueueCount(parentLinux)
 			linuxUnit := snapshotLinuxName(cfg, name, iface, unit)
 			ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxUnit)
+			rxQueues := userspaceRXQueueCount(linuxUnit)
+			// Bondless RETH VLAN units can transmit through the parent
+			// AF_XDP netdev without a Linux VLAN child. Keep the logical
+			// unit name/VLAN metadata, but key runtime filter and CoS
+			// state by the real parent ifindex so the userspace dataplane
+			// can attach output filters and queue owners.
+			if ifindex <= 0 && parentIfindex > 0 && unit.VlanID > 0 {
+				ifindex = parentIfindex
+				if mtu == 0 {
+					mtu = parentMTU
+				}
+				if hardwareAddr == "" {
+					hardwareAddr = parentHardwareAddr
+				}
+				if rxQueues == 0 {
+					rxQueues = parentRXQueues
+				}
+			}
 			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses))
 			out = append(out, InterfaceSnapshot{
 				Name:                      unitName,
@@ -503,7 +522,7 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 				ParentLinuxName:           parentLinux,
 				Ifindex:                   ifindex,
 				ParentIfindex:             parentIfindex,
-				RXQueues:                  userspaceRXQueueCount(linuxUnit),
+				RXQueues:                  rxQueues,
 				VLANID:                    unit.VlanID,
 				LocalFabric:               iface.LocalFabricMember,
 				RedundancyGroup:           rg, // inherit resolved RG (RETH parent or own)

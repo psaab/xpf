@@ -1253,7 +1253,7 @@ func buildUserspaceIngressBindingAliases(snapshot *ConfigSnapshot) map[uint32]ui
 		if iface.Zone == "" || userspaceSkipsIngressInterface(iface) {
 			continue
 		}
-		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 {
+		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 || iface.Ifindex == iface.ParentIfindex {
 			continue
 		}
 		out[uint32(iface.Ifindex)] = uint32(iface.ParentIfindex)
