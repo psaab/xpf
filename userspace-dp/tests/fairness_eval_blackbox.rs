@@ -266,10 +266,57 @@ fn verdict_emits_required_keys() {
     assert!(v["starved_flow_count"].is_u64(), "starved_flow_count must be unsigned integer");
     assert!(v["verdict"].is_string(), "verdict must be string");
     assert!(v["failure_reasons"].is_array(), "failure_reasons must be array");
+    assert!(v["iperf_retransmits"].is_u64(), "iperf_retransmits must be unsigned integer");
+    assert!(v["iperf_reverse"].is_boolean(), "iperf_reverse must be boolean");
+}
+
+#[test]
+fn verdict_emits_iperf_end_diagnostics() {
+    let tmp = TempGuard::new("iperf_diag");
+    let (_sockets, json_str) = make_balanced_pass_inputs(6, 60);
+    let mut iperf: Value = serde_json::from_str(&json_str).expect("fixture JSON");
+    iperf["start"]["test_start"]["reverse"] = serde_json::json!(1);
+    iperf["end"] = serde_json::json!({
+        "sum_sent": {
+            "retransmits": 17,
+        },
+        "cpu_utilization_percent": {
+            "host_total": 10.0,
+            "host_user": 1.5,
+            "host_system": 8.5,
+            "remote_total": 74.5,
+            "remote_user": 2.0,
+            "remote_system": 72.5,
+        },
+    });
+    let json_str = serde_json::to_string(&iperf).expect("serialize fixture JSON");
+    let tsv_str = make_balanced_tsv(6, &timestamps_for(60), "ge-0-0-2");
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert!(
+        output.status.success(),
+        "iperf diagnostics fixture must PASS — stderr={}\nstdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let v = verdict.expect("verdict JSON");
+    assert_eq!(v["iperf_retransmits"], 17);
+    assert_eq!(v["iperf_reverse"], true);
+    assert_eq!(v["iperf_cpu_host_total_percent"].as_f64(), Some(10.0));
+    assert_eq!(v["iperf_cpu_host_system_percent"].as_f64(), Some(8.5));
+    assert_eq!(v["iperf_cpu_remote_total_percent"].as_f64(), Some(74.5));
+    assert_eq!(v["iperf_cpu_remote_system_percent"].as_f64(), Some(72.5));
+    assert_eq!(v["iperf_sender_cpu_total_percent"].as_f64(), Some(74.5));
+    assert_eq!(v["iperf_sender_cpu_system_percent"].as_f64(), Some(72.5));
 }
 
 // ---------------------------------------------------------------------------
-// 6 black-box cases.
+// Black-box cases.
 // ---------------------------------------------------------------------------
 
 #[test]
