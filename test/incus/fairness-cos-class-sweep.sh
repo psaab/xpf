@@ -80,6 +80,8 @@ append_error_row() {
 
     printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\n' \
         "$label" "$port" "$queue" "$rate" "$status" >> "$SUMMARY_TSV"
+    printf "summary class=%s wrapper_status=%s verdict=ERROR mean_cov=- max_cov=-\n" \
+        "$label" "$status"
 }
 
 overall_status=0
