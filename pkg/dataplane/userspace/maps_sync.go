@@ -1170,7 +1170,7 @@ func buildUserspaceIngressIfindexes(snapshot *ConfigSnapshot) []uint32 {
 			continue
 		}
 		if iface.ParentIfindex > 0 {
-			if iface.Ifindex > 0 {
+			if iface.Ifindex > 0 && !iface.LogicalOnly {
 				key := uint32(iface.Ifindex)
 				if !seen[key] {
 					seen[key] = true
@@ -1222,12 +1222,13 @@ func snapshotBindingPlanKey(snapshot *ConfigSnapshot) string {
 		}
 		fmt.Fprintf(
 			&b,
-			"iface=%s/%s/%d/%d/%d/%t;",
+			"iface=%s/%s/%d/%d/%d/%t/%t;",
 			iface.Name,
 			iface.LinuxName,
 			iface.Ifindex,
 			iface.ParentIfindex,
 			iface.RXQueues,
+			iface.LogicalOnly,
 			iface.Tunnel,
 		)
 	}
@@ -1253,7 +1254,7 @@ func buildUserspaceIngressBindingAliases(snapshot *ConfigSnapshot) map[uint32]ui
 		if iface.Zone == "" || userspaceSkipsIngressInterface(iface) {
 			continue
 		}
-		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 {
+		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 || iface.Ifindex == iface.ParentIfindex || iface.LogicalOnly {
 			continue
 		}
 		out[uint32(iface.Ifindex)] = uint32(iface.ParentIfindex)

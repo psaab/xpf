@@ -20,8 +20,11 @@ use fairness::{
 
 const EPSILON: f64 = 0.05;
 // Tolerance for the harness fail-fast guard per Codex round-4
-// finding #3: sum(per_binding_active_flow_count) ≈ non-starved
-// iperf stream count within `max(2, 10% × N)`.
+// finding #3: sum(per_binding_active_flow_count) ≈ expected_sum
+// within `max(2, floor(10% × expected_sum))`, where
+// expected_sum = non-starved_streams × direction_multiplier
+// (direction_multiplier=1 when iface_filter_active=true, 2 for
+// legacy/bidirectional input).
 const GUARD_RELATIVE: f64 = 0.10;
 const GUARD_ABSOLUTE: u32 = 2;
 
@@ -719,7 +722,9 @@ fn main() -> ExitCode {
     }
     if !a_i_sum_check_ok {
         failure_reasons.push(format!(
-            "Harness guard: sum(a_i)={a_i_sum} vs iperf non-starved streams={n_non_starved} differ by more than tolerance={tolerance}"
+            "Harness guard: sum(a_i)={a_i_sum} vs expected={expected_sum} \
+             (non-starved={n_non_starved} × dir_mult={dir_mult}) \
+             differ by more than tolerance={tolerance}"
         ));
     }
     if !rss_expectation_pass {

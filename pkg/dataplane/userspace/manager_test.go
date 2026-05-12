@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -2650,6 +2651,403 @@ func TestBuildInterfaceSnapshotIncludesInputAndOutputFilters(t *testing.T) {
 	}
 	if unitSnap.FilterOutputV6 != "egress-v6" {
 		t.Fatalf("FilterOutputV6 = %q, want egress-v6", unitSnap.FilterOutputV6)
+	}
+}
+
+const maxTestVLANID = 4094
+
+func missingLoopbackVLANID(t *testing.T) int {
+	t.Helper()
+	for vlan := maxTestVLANID; vlan >= 2; vlan-- {
+		if _, err := net.InterfaceByName(fmt.Sprintf("lo.%d", vlan)); err != nil {
+			return vlan
+		}
+	}
+	t.Skip("all loopback VLAN names are present")
+	return 0
+}
+
+func missingLoopbackVLANIDs(t *testing.T, count int) []int {
+	t.Helper()
+	out := make([]int, 0, count)
+	for vlan := maxTestVLANID; vlan >= 2 && len(out) < count; vlan-- {
+		if _, err := net.InterfaceByName(fmt.Sprintf("lo.%d", vlan)); err != nil {
+			out = append(out, vlan)
+		}
+	}
+	if len(out) < count {
+		t.Skipf("need %d missing loopback VLAN names, found %d", count, len(out))
+	}
+	return out
+}
+
+func missingVLANIDForParents(t *testing.T, parentNames ...string) int {
+	t.Helper()
+	for vlan := maxTestVLANID; vlan >= 2; vlan-- {
+		missing := true
+		for _, parentName := range parentNames {
+			if _, err := net.InterfaceByName(fmt.Sprintf("%s.%d", parentName, vlan)); err == nil {
+				missing = false
+				break
+			}
+		}
+		if missing {
+			return vlan
+		}
+	}
+	t.Skipf("no VLAN ID is missing for parent interfaces %v", parentNames)
+	return 0
+}
+
+func liveSnapshotParentInterfaces(t *testing.T, count int) []net.Interface {
+	t.Helper()
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Skipf("cannot enumerate interfaces: %v", err)
+	}
+	out := make([]net.Interface, 0, count)
+	for _, iface := range interfaces {
+		if iface.Index <= 0 || iface.Name == "" || strings.Contains(iface.Name, ".") || strings.HasPrefix(iface.Name, "reth") {
+			continue
+		}
+		out = append(out, iface)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	if len(out) < count {
+		t.Skipf("need %d live parent interfaces, found %d", count, len(out))
+	}
+	return out[:count]
+}
+
+func TestSyntheticLogicalIfindexDistinguishesSameVIDDifferentReth(t *testing.T) {
+	vlanID := maxTestVLANID
+	unitA := fmt.Sprintf("reth0.%d", vlanID)
+	unitB := fmt.Sprintf("reth1.%d", vlanID)
+	firstUsed := make(map[int]struct{})
+	firstA := syntheticLogicalIfindex(unitA, vlanID, firstUsed)
+	firstB := syntheticLogicalIfindex(unitB, vlanID, firstUsed)
+	secondUsed := make(map[int]struct{})
+	secondA := syntheticLogicalIfindex(unitA, vlanID, secondUsed)
+	secondB := syntheticLogicalIfindex(unitB, vlanID, secondUsed)
+	if firstA != secondA || firstB != secondB {
+		t.Fatalf("synthetic ifindex allocation changed across builds: first=(%d,%d) second=(%d,%d)", firstA, firstB, secondA, secondB)
+	}
+	if firstA == firstB {
+		t.Fatalf("same-VLAN RETH units collapsed to one synthetic ifindex: %s=%d %s=%d", unitA, firstA, unitB, firstB)
+	}
+}
+
+func TestBuildInterfaceSnapshotSynthesizesLogicalIfindexForMissingRethVLAN(t *testing.T) {
+	parent, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback interface unavailable: %v", err)
+	}
+	vlanID := missingLoopbackVLANID(t)
+	unitName := fmt.Sprintf("reth0.%d", vlanID)
+	linuxUnitName := fmt.Sprintf("lo.%d", vlanID)
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Zones: map[string]*config.ZoneConfig{
+				"wan": {Name: "wan", Interfaces: []string{unitName}},
+			},
+		},
+		ClassOfService: &config.ClassOfServiceConfig{
+			Interfaces: map[string]*config.CoSInterface{
+				"reth0": {
+					Name: "reth0",
+					Units: map[int]*config.CoSInterfaceUnit{
+						vlanID: {
+							Unit:               vlanID,
+							SchedulerMap:       "bandwidth-limit",
+							ShapingRateBytes:   25_000_000_000 / 8,
+							BurstSizeBytes:     64 * 1024 * 1024,
+							DSCPRewriteRule:    "wan-rewrite",
+							DSCPClassifier:     "wan-classifier",
+							IEEE8021Classifier: "wan-pcp",
+						},
+					},
+				},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"lo": {
+					Name:            "lo",
+					RedundantParent: "reth0",
+				},
+				"reth0": {
+					Name: "reth0",
+					Units: map[int]*config.InterfaceUnit{
+						vlanID: {
+							Number:         vlanID,
+							VlanID:         vlanID,
+							FilterOutputV4: "bandwidth-output",
+							FilterOutputV6: "bandwidth-output",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	snaps := buildInterfaceSnapshots(cfg)
+	var unitSnap *InterfaceSnapshot
+	for i := range snaps {
+		if snaps[i].Name == unitName {
+			unitSnap = &snaps[i]
+			break
+		}
+	}
+	if unitSnap == nil {
+		t.Fatalf("%s snapshot not found", unitName)
+	}
+	if unitSnap.Ifindex <= 0 || unitSnap.Ifindex == parent.Index {
+		t.Fatalf("Ifindex = %d, want unique logical ifindex distinct from parent %d", unitSnap.Ifindex, parent.Index)
+	}
+	if unitSnap.Ifindex < syntheticInterfaceIfindexMin || unitSnap.Ifindex > syntheticInterfaceIfindexMax {
+		t.Fatalf("Ifindex = %d, want synthetic range [%d,%d]", unitSnap.Ifindex, syntheticInterfaceIfindexMin, syntheticInterfaceIfindexMax)
+	}
+	if !unitSnap.LogicalOnly {
+		t.Fatal("LogicalOnly = false, want true for missing parent-bound RETH VLAN")
+	}
+	if unitSnap.ParentIfindex != parent.Index {
+		t.Fatalf("ParentIfindex = %d, want %d", unitSnap.ParentIfindex, parent.Index)
+	}
+	if unitSnap.LinuxName != linuxUnitName {
+		t.Fatalf("LinuxName = %q, want %s logical child name", unitSnap.LinuxName, linuxUnitName)
+	}
+	if unitSnap.ParentLinuxName != "lo" {
+		t.Fatalf("ParentLinuxName = %q, want lo", unitSnap.ParentLinuxName)
+	}
+	if unitSnap.VLANID != vlanID {
+		t.Fatalf("VLANID = %d, want %d", unitSnap.VLANID, vlanID)
+	}
+	if unitSnap.Zone != "wan" {
+		t.Fatalf("Zone = %q, want wan", unitSnap.Zone)
+	}
+	if unitSnap.FilterOutputV4 != "bandwidth-output" || unitSnap.FilterOutputV6 != "bandwidth-output" {
+		t.Fatalf("output filters not preserved: v4=%q v6=%q", unitSnap.FilterOutputV4, unitSnap.FilterOutputV6)
+	}
+	if unitSnap.CoSSchedulerMap != "bandwidth-limit" {
+		t.Fatalf("CoSSchedulerMap = %q, want bandwidth-limit", unitSnap.CoSSchedulerMap)
+	}
+	if unitSnap.CoSShapingRateBytesPerSec == 0 {
+		t.Fatal("CoSShapingRateBytesPerSec = 0, want configured shaper")
+	}
+	snapshot := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{*unitSnap}}
+	aliases := buildUserspaceIngressBindingAliases(snapshot)
+	if len(aliases) != 0 {
+		t.Fatalf("logical-only VLAN should not create XSK binding aliases: %v", aliases)
+	}
+	ifindexes := buildUserspaceIngressIfindexes(snapshot)
+	if len(ifindexes) != 1 || ifindexes[0] != uint32(parent.Index) {
+		t.Fatalf("ingress ifindexes = %v, want only parent %d", ifindexes, parent.Index)
+	}
+}
+
+func TestBuildInterfaceSnapshotSynthesizesDeterministicLogicalIfindexForSiblingRethVLANs(t *testing.T) {
+	parent, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback interface unavailable: %v", err)
+	}
+	vlans := missingLoopbackVLANIDs(t, 2)
+	unitA := fmt.Sprintf("reth0.%d", vlans[0])
+	unitB := fmt.Sprintf("reth0.%d", vlans[1])
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Zones: map[string]*config.ZoneConfig{
+				"wan": {Name: "wan", Interfaces: []string{unitA}},
+				"dmz": {Name: "dmz", Interfaces: []string{unitB}},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"lo": {
+					Name:            "lo",
+					RedundantParent: "reth0",
+				},
+				"reth0": {
+					Name: "reth0",
+					Units: map[int]*config.InterfaceUnit{
+						vlans[0]: {Number: vlans[0], VlanID: vlans[0]},
+						vlans[1]: {Number: vlans[1], VlanID: vlans[1]},
+					},
+				},
+			},
+		},
+	}
+	readUnits := func() map[string]InterfaceSnapshot {
+		byName := make(map[string]InterfaceSnapshot)
+		for _, snap := range buildInterfaceSnapshots(cfg) {
+			if snap.Name == unitA || snap.Name == unitB {
+				byName[snap.Name] = snap
+			}
+		}
+		return byName
+	}
+	first := readUnits()
+	second := readUnits()
+	if len(first) != 2 || len(second) != 2 {
+		t.Fatalf("missing sibling RETH VLAN snapshots: first=%d second=%d", len(first), len(second))
+	}
+	for _, name := range []string{unitA, unitB} {
+		a := first[name]
+		b := second[name]
+		if a.Ifindex != b.Ifindex {
+			t.Fatalf("%s Ifindex changed across builds: first=%d second=%d", name, a.Ifindex, b.Ifindex)
+		}
+		if a.Ifindex <= 0 {
+			t.Fatalf("%s Ifindex = %d, want >0 synthetic logical ifindex", name, a.Ifindex)
+		}
+		if a.Ifindex < syntheticInterfaceIfindexMin || a.Ifindex > syntheticInterfaceIfindexMax {
+			t.Fatalf("%s Ifindex = %d, want synthetic range [%d,%d]", name, a.Ifindex, syntheticInterfaceIfindexMin, syntheticInterfaceIfindexMax)
+		}
+		if a.Ifindex == parent.Index {
+			t.Fatalf("%s Ifindex = parent ifindex %d, want unique logical ifindex", name, parent.Index)
+		}
+		if !a.LogicalOnly {
+			t.Fatalf("%s LogicalOnly = false, want true", name)
+		}
+		if a.ParentIfindex != parent.Index {
+			t.Fatalf("%s ParentIfindex = %d, want %d", name, a.ParentIfindex, parent.Index)
+		}
+	}
+	if first[unitA].Ifindex == first[unitB].Ifindex {
+		t.Fatalf("sibling VLANs collapsed to same synthetic ifindex: %d", first[unitA].Ifindex)
+	}
+}
+
+func TestBuildInterfaceSnapshotSynthesizesDistinctLogicalIfindexesForSameVLANDifferentReth(t *testing.T) {
+	parents := liveSnapshotParentInterfaces(t, 2)
+	vlanID := missingVLANIDForParents(t, parents[0].Name, parents[1].Name)
+	unitA := fmt.Sprintf("reth0.%d", vlanID)
+	unitB := fmt.Sprintf("reth1.%d", vlanID)
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Zones: map[string]*config.ZoneConfig{
+				"wan": {Name: "wan", Interfaces: []string{unitA}},
+				"dmz": {Name: "dmz", Interfaces: []string{unitB}},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				parents[0].Name: {
+					Name:            parents[0].Name,
+					RedundantParent: "reth0",
+				},
+				parents[1].Name: {
+					Name:            parents[1].Name,
+					RedundantParent: "reth1",
+				},
+				"reth0": {
+					Name: "reth0",
+					Units: map[int]*config.InterfaceUnit{
+						vlanID: {Number: vlanID, VlanID: vlanID},
+					},
+				},
+				"reth1": {
+					Name: "reth1",
+					Units: map[int]*config.InterfaceUnit{
+						vlanID: {Number: vlanID, VlanID: vlanID},
+					},
+				},
+			},
+		},
+	}
+	readUnits := func() map[string]InterfaceSnapshot {
+		byName := make(map[string]InterfaceSnapshot)
+		for _, snap := range buildInterfaceSnapshots(cfg) {
+			if snap.Name == unitA || snap.Name == unitB {
+				byName[snap.Name] = snap
+			}
+		}
+		return byName
+	}
+	first := readUnits()
+	second := readUnits()
+	if len(first) != 2 || len(second) != 2 {
+		t.Fatalf("missing same-VLAN RETH snapshots: first=%d second=%d", len(first), len(second))
+	}
+	for _, tc := range []struct {
+		name   string
+		parent net.Interface
+		zone   string
+	}{
+		{name: unitA, parent: parents[0], zone: "wan"},
+		{name: unitB, parent: parents[1], zone: "dmz"},
+	} {
+		a := first[tc.name]
+		b := second[tc.name]
+		if a.Ifindex != b.Ifindex {
+			t.Fatalf("%s Ifindex changed across builds: first=%d second=%d", tc.name, a.Ifindex, b.Ifindex)
+		}
+		if a.Ifindex < syntheticInterfaceIfindexMin || a.Ifindex > syntheticInterfaceIfindexMax {
+			t.Fatalf("%s Ifindex = %d, want synthetic range [%d,%d]", tc.name, a.Ifindex, syntheticInterfaceIfindexMin, syntheticInterfaceIfindexMax)
+		}
+		if !a.LogicalOnly {
+			t.Fatalf("%s LogicalOnly = false, want true", tc.name)
+		}
+		if a.ParentIfindex != tc.parent.Index {
+			t.Fatalf("%s ParentIfindex = %d, want %d", tc.name, a.ParentIfindex, tc.parent.Index)
+		}
+		if a.Zone != tc.zone {
+			t.Fatalf("%s Zone = %q, want %q", tc.name, a.Zone, tc.zone)
+		}
+	}
+	if first[unitA].Ifindex == first[unitB].Ifindex {
+		t.Fatalf("same-VLAN RETH units collapsed to same synthetic ifindex: %s=%d %s=%d", unitA, first[unitA].Ifindex, unitB, first[unitB].Ifindex)
+	}
+}
+
+func TestBuildInterfaceSnapshotDoesNotSynthesizeLogicalIfindexForGenericMissingVLAN(t *testing.T) {
+	parent, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback interface unavailable: %v", err)
+	}
+	vlanID := missingLoopbackVLANID(t)
+	unitName := fmt.Sprintf("lo.%d", vlanID)
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Zones: map[string]*config.ZoneConfig{
+				"wan": {Name: "wan", Interfaces: []string{unitName}},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"lo": {
+					Name: "lo",
+					Units: map[int]*config.InterfaceUnit{
+						vlanID: {
+							Number: vlanID,
+							VlanID: vlanID,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	snaps := buildInterfaceSnapshots(cfg)
+	var unitSnap *InterfaceSnapshot
+	for i := range snaps {
+		if snaps[i].Name == unitName {
+			unitSnap = &snaps[i]
+			break
+		}
+	}
+	if unitSnap == nil {
+		t.Fatalf("%s snapshot not found", unitName)
+	}
+	if unitSnap.Ifindex != 0 {
+		t.Fatalf("Ifindex = %d, want 0 for generic missing VLAN child", unitSnap.Ifindex)
+	}
+	if unitSnap.LogicalOnly {
+		t.Fatal("LogicalOnly = true, want false for generic missing VLAN child")
+	}
+	if unitSnap.ParentIfindex != parent.Index {
+		t.Fatalf("ParentIfindex = %d, want %d", unitSnap.ParentIfindex, parent.Index)
 	}
 }
 
