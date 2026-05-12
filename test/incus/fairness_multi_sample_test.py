@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -25,6 +26,20 @@ class FairnessMultiSampleTest(unittest.TestCase):
         text = 'log {not json}\n{"verdict":"PASS","observed_cov":0.1}\n'
         objects = fairness_multi_sample.extract_json_objects(text)
         self.assertEqual(objects, [{"verdict": "PASS", "observed_cov": 0.1}])
+
+    def test_extract_verdict_objects_ignores_log_json(self) -> None:
+        text = (
+            'log {"event":"progress","observed_cov":999}\n'
+            '{"verdict":"PASS","observed_cov":0.1}\n'
+        )
+        objects = fairness_multi_sample.extract_verdict_objects(text)
+        self.assertEqual(objects, [{"verdict": "PASS", "observed_cov": 0.1}])
+
+    def test_numeric_field_rejects_non_finite_negative_and_bool(self) -> None:
+        for value in [True, False, math.nan, math.inf, -math.inf, -0.1, "0.1"]:
+            with self.subTest(value=value):
+                with self.assertRaises(fairness_multi_sample.MultiSampleError):
+                    fairness_multi_sample.numeric_field({"observed_cov": value}, "observed_cov")
 
     def test_summary_fails_thresholds(self) -> None:
         summary = fairness_multi_sample.summarize(
@@ -67,6 +82,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                       *) cov=0.11 ;;
                     esac
                     echo "harness log line"
+                    echo '{"event":"progress","observed_cov":99}'
                     printf '{"verdict":"PASS","observed_cov":%s,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[]}\\n' "$cov"
                     """
                 ),
@@ -99,6 +115,162 @@ class FairnessMultiSampleTest(unittest.TestCase):
             self.assertAlmostEqual(summary["observed_cov"]["mean"], 0.11)
             self.assertTrue((out_dir / "sample-1" / "verdict.json").exists())
             self.assertTrue((out_dir / "sample-2" / "artifacts").is_dir())
+
+    def test_cli_rejects_nan_observed_cov(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "fake-harness.sh"
+            harness.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    printf '{"verdict":"PASS","observed_cov":NaN}\\n'
+                    """
+                ),
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--samples",
+                    "2",
+                    "--out-dir",
+                    str(tmp_path / "out"),
+                    "--harness",
+                    str(harness),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("not finite", result.stderr)
+
+    def test_cli_times_out_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "fake-harness.sh"
+            harness.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    sleep 2
+                    """
+                ),
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            out_dir = tmp_path / "out"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--samples",
+                    "2",
+                    "--per-run-timeout-sec",
+                    "1",
+                    "--out-dir",
+                    str(out_dir),
+                    "--harness",
+                    str(harness),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("timed out", result.stderr)
+            command = json.loads((out_dir / "sample-1" / "command.json").read_text(encoding="utf-8"))
+            self.assertTrue(command["timed_out"])
+
+    def test_cli_rejects_samples_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "fake-harness.sh"
+            harness.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            harness.chmod(0o755)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--samples",
+                    "1",
+                    "--out-dir",
+                    str(tmp_path / "out"),
+                    "--harness",
+                    str(harness),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--samples must be >= 2", result.stderr)
+
+    def test_cli_rejects_harness_exit_two(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "fake-harness.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\necho before-error\nexit 2\n",
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            out_dir = tmp_path / "out"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--samples",
+                    "2",
+                    "--out-dir",
+                    str(out_dir),
+                    "--harness",
+                    str(harness),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("harness exited 2", result.stderr)
+            self.assertIn(
+                "before-error",
+                (out_dir / "sample-1" / "stdout.log").read_text(encoding="utf-8"),
+            )
+
+    def test_cli_rejects_existing_out_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "fake-harness.sh"
+            harness.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            harness.chmod(0o755)
+            out_dir = tmp_path / "out"
+            out_dir.mkdir()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--samples",
+                    "2",
+                    "--out-dir",
+                    str(out_dir),
+                    "--harness",
+                    str(harness),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--out-dir already exists", result.stderr)
 
 
 if __name__ == "__main__":

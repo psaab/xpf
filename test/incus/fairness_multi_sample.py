@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import statistics
@@ -17,6 +18,7 @@ DEFAULT_SAMPLES = 5
 DEFAULT_MAX_MEAN_COV = 0.15
 DEFAULT_MAX_STDEV_COV = 0.03
 DEFAULT_MAX_RUN_COV = 0.25
+DEFAULT_PER_RUN_TIMEOUT_SEC = 600
 
 
 class MultiSampleError(RuntimeError):
@@ -26,8 +28,14 @@ class MultiSampleError(RuntimeError):
 def parse_ratio(raw: str) -> float:
     raw = raw.strip()
     if raw.endswith("%"):
-        return float(raw[:-1]) / 100.0
-    return float(raw)
+        value = float(raw[:-1]) / 100.0
+    else:
+        value = float(raw)
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"ratio is not finite: {raw!r}")
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"ratio must be non-negative: {raw!r}")
+    return value
 
 
 def extract_json_objects(text: str) -> list[dict[str, Any]]:
@@ -49,11 +57,28 @@ def extract_json_objects(text: str) -> list[dict[str, Any]]:
     return objects
 
 
+def extract_verdict_objects(text: str) -> list[dict[str, Any]]:
+    return [obj for obj in extract_json_objects(text) if "verdict" in obj]
+
+
 def numeric_field(verdict: dict[str, Any], key: str) -> float:
     value = verdict.get(key)
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise MultiSampleError(f"verdict JSON missing numeric field {key!r}")
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number):
+        raise MultiSampleError(f"verdict JSON field {key!r} is not finite")
+    if number < 0:
+        raise MultiSampleError(f"verdict JSON field {key!r} is negative")
+    return number
+
+
+def timeout_stream_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def sample_record(index: int, sample_dir: Path, exit_code: int, verdict: dict[str, Any]) -> dict[str, Any]:
@@ -141,12 +166,54 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
         env = os.environ.copy()
         env["ARTIFACT_DIR"] = str(artifact_dir)
         cmd = [str(args.harness), *harness_args]
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+                timeout=args.per_run_timeout_sec,
+            )
+        except subprocess.TimeoutExpired as exc:
+            (sample_dir / "stdout.log").write_text(
+                timeout_stream_text(exc.stdout),
+                encoding="utf-8",
+            )
+            (sample_dir / "stderr.log").write_text(
+                timeout_stream_text(exc.stderr),
+                encoding="utf-8",
+            )
+            (sample_dir / "command.json").write_text(
+                json.dumps(
+                    {
+                        "argv": cmd,
+                        "exit_code": None,
+                        "timeout_sec": args.per_run_timeout_sec,
+                        "timed_out": True,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            raise MultiSampleError(
+                f"sample {index} harness timed out after {args.per_run_timeout_sec}s; "
+                f"see {sample_dir}"
+            ) from exc
 
         (sample_dir / "stdout.log").write_text(proc.stdout, encoding="utf-8")
         (sample_dir / "stderr.log").write_text(proc.stderr, encoding="utf-8")
         (sample_dir / "command.json").write_text(
-            json.dumps({"argv": cmd, "exit_code": proc.returncode}, indent=2) + "\n",
+            json.dumps(
+                {
+                    "argv": cmd,
+                    "exit_code": proc.returncode,
+                    "timeout_sec": args.per_run_timeout_sec,
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -155,11 +222,11 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
                 f"sample {index} harness exited {proc.returncode}; see {sample_dir}"
             )
 
-        objects = extract_json_objects(proc.stdout)
+        objects = extract_verdict_objects(proc.stdout)
         if len(objects) != 1:
             raise MultiSampleError(
                 f"sample {index} expected exactly one verdict JSON, found {len(objects)}; "
-                f"mixed-CoS output is not supported by this wrapper yet"
+                f"mixed-CoS or missing-verdict output is not supported by this wrapper yet"
             )
         verdict = objects[0]
         (sample_dir / "verdict.json").write_text(
@@ -194,13 +261,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-stdev-cov", type=parse_ratio, default=DEFAULT_MAX_STDEV_COV)
     parser.add_argument("--max-run-cov", type=parse_ratio, default=DEFAULT_MAX_RUN_COV)
     parser.add_argument(
+        "--per-run-timeout-sec",
+        type=int,
+        default=DEFAULT_PER_RUN_TIMEOUT_SEC,
+        help="Hard timeout for each fairness-harness run.",
+    )
+    parser.add_argument(
         "harness_args",
         nargs=argparse.REMAINDER,
         help="Arguments passed to fairness-harness.sh. Prefix with -- to separate.",
     )
     args = parser.parse_args(argv)
-    if args.samples < 1:
-        parser.error("--samples must be >= 1")
+    if args.samples < 2:
+        parser.error("--samples must be >= 2")
+    if args.per_run_timeout_sec <= 0:
+        parser.error("--per-run-timeout-sec must be > 0")
     if not args.harness.exists():
         parser.error(f"--harness does not exist: {args.harness}")
     if not os.access(args.harness, os.X_OK):
