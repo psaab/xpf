@@ -143,6 +143,30 @@ fn segmentation_miss_counter_skips_mtu_sized_vlan_frame_with_stale_meta() {
 }
 
 #[test]
+fn segmentation_miss_counter_truth_table() {
+    let cases = [
+        (false, true, true, 1),
+        (true, true, false, 0),
+        (true, false, false, 0),
+        (false, false, false, 0),
+    ];
+
+    for (copied_source_frame, tcp_segmentation_needed, expected_counted, expected_counter) in cases {
+        let mut dbg = DebugPollCounters::default();
+
+        assert_eq!(
+            count_forwarded_tcp_segmentation_miss_if_needed(
+                &mut dbg,
+                copied_source_frame,
+                tcp_segmentation_needed,
+            ),
+            expected_counted,
+        );
+        assert_eq!(dbg.seg_needed_but_none, expected_counter);
+    }
+}
+
+#[test]
 fn forwarded_tcp_may_need_segmentation_flags_oversized_frame() {
     let forwarding = test_forwarding_with_egress_mtu(1500);
     let meta = UserspaceDpMeta {
