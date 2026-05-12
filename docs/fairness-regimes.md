@@ -225,14 +225,32 @@ Any fairness measurement run MUST report:
    the "Saturation detection" section) and the supporting
    time-series.
 7. **Aggregate throughput** in Mb/s.
-8. **Aggregate retransmits**: total retransmits across all senders.
-   Diagnostic; not a hard gate.
-9. **ECN marks/drops** (if AQM is enabled): total CE marks and
+8. **Aggregate retransmits**: total retransmits across all senders
+   (`iperf_retransmits` in `fairness-eval`). Diagnostic; not a hard
+   gate.
+9. **iperf CPU utilization, when present in iperf3 JSON**:
+   host/remote totals plus the derived sender-side total/user/system
+   percentages from iperf3's `cpu_utilization_percent`. Diagnostic;
+   not a hard gate, but needed to separate dataplane unfairness from
+   sender or receiver saturation. Absence of these optional fields means
+   missing diagnostic context, not proof that CPU was healthy.
+10. **ECN marks/drops** (if AQM is enabled): total CE marks and
    AQM drops. Diagnostic for future Path 2 v2 work.
-10. **Mouse p99 latency** (when mouse probes are present).
-11. **Steady-state window**: explicit start/end timestamps,
+11. **Mouse p99 latency** (when mouse probes are present).
+12. **Steady-state window**: explicit start/end timestamps,
     excluding the first 5 seconds (warmup) and any final
     sender-shutdown bursts.
+
+The `fairness-eval` verdict always includes `iperf_retransmits` and
+`iperf_reverse`. When iperf3 exports `end.cpu_utilization_percent`, the
+verdict also includes `iperf_cpu_host_total_percent`,
+`iperf_cpu_host_user_percent`, `iperf_cpu_host_system_percent`,
+`iperf_cpu_remote_total_percent`, `iperf_cpu_remote_user_percent`,
+`iperf_cpu_remote_system_percent`, `iperf_sender_cpu_total_percent`,
+`iperf_sender_cpu_user_percent`, and
+`iperf_sender_cpu_system_percent`. In reverse mode, the sender-derived
+fields map to the remote iperf endpoint; in forward mode, they map to
+the host endpoint.
 
 Mixed-workload CoS validation MUST run at least two classes
 concurrently under one metrics scrape so class-specific `{a_i}` cannot
