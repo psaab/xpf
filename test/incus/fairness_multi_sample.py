@@ -20,6 +20,19 @@ DEFAULT_MAX_MEAN_COV = 0.15
 DEFAULT_MAX_STDEV_COV = 0.03
 DEFAULT_MAX_RUN_COV = 0.25
 DEFAULT_PER_RUN_TIMEOUT_SEC = 600
+POST_KILL_COMMUNICATE_TIMEOUT_SEC = 5
+FAIRNESS_EVAL_VERDICT_KEYS = {
+    "verdict",
+    "observed_cov",
+    "cstruct",
+    "gap",
+    "failure_reasons",
+    "distribution_a_i",
+    "n_active",
+    "aggregate_mbps",
+    "saturated",
+    "starved_flow_count",
+}
 
 
 class MultiSampleError(RuntimeError):
@@ -59,12 +72,18 @@ def extract_json_objects(text: str) -> list[dict[str, Any]]:
 
 
 def extract_verdict_objects(text: str) -> list[dict[str, Any]]:
-    _required = {"verdict", "observed_cov"}
-    _discriminators = {"cstruct", "gap", "failure_reasons"}
     return [
         obj for obj in extract_json_objects(text)
-        if _required.issubset(obj) and bool(_discriminators & obj.keys())
+        if FAIRNESS_EVAL_VERDICT_KEYS.issubset(obj)
     ]
+
+
+def stream_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def numeric_field(verdict: dict[str, Any], key: str) -> float:
@@ -192,11 +211,15 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
             stdout_text, stderr_text = proc.communicate(timeout=args.per_run_timeout_sec)
         except subprocess.TimeoutExpired:
             timed_out = True
+            _kill_process_group(proc.pid)
             try:
-                _kill_process_group(os.getpgid(proc.pid))
-            except ProcessLookupError:
-                pass
-            stdout_text, stderr_text = proc.communicate()
+                stdout_text, stderr_text = proc.communicate(
+                    timeout=POST_KILL_COMMUNICATE_TIMEOUT_SEC
+                )
+            except subprocess.TimeoutExpired as exc:
+                _kill_process_group(proc.pid)
+                stdout_text = stream_text(exc.stdout)
+                stderr_text = stream_text(exc.stderr)
         exit_code = proc.returncode
 
         (sample_dir / "stdout.log").write_text(stdout_text, encoding="utf-8")

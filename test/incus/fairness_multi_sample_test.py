@@ -29,17 +29,30 @@ class FairnessMultiSampleTest(unittest.TestCase):
         self.assertEqual(objects, [{"verdict": "PASS", "observed_cov": 0.1}])
 
     def test_extract_verdict_objects_ignores_log_json(self) -> None:
+        verdict = {
+            "verdict": "PASS",
+            "observed_cov": 0.1,
+            "cstruct": 0.0,
+            "gap": 0.0,
+            "aggregate_mbps": 1.0,
+            "starved_flow_count": 0,
+            "failure_reasons": [],
+            "distribution_a_i": [1],
+            "n_active": 1,
+            "saturated": True,
+        }
         text = (
             'log {"event":"progress","observed_cov":999}\n'
-            '{"verdict":"PASS","observed_cov":0.1,"failure_reasons":[]}\n'
+            + json.dumps(verdict)
+            + "\n"
         )
         objects = fairness_multi_sample.extract_verdict_objects(text)
-        self.assertEqual(objects, [{"verdict": "PASS", "observed_cov": 0.1, "failure_reasons": []}])
+        self.assertEqual(objects, [verdict])
 
     def test_extract_verdict_objects_rejects_schema_incomplete_object(self) -> None:
-        # An object with verdict+observed_cov but no discriminator field must be rejected.
-        # This prevents a two-field log line from being misidentified as a fairness-eval result.
-        text = '{"verdict":"PASS","observed_cov":0.01}\n'
+        # A log object that looks verdict-like but lacks the full fairness-eval
+        # schema must not be accepted as a measurement result.
+        text = '{"verdict":"PASS","observed_cov":0.01,"failure_reasons":[]}\n'
         objects = fairness_multi_sample.extract_verdict_objects(text)
         self.assertEqual(objects, [])
 
@@ -91,7 +104,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                     esac
                     echo "harness log line"
                     echo '{"event":"progress","observed_cov":99}'
-                    printf '{"verdict":"PASS","observed_cov":%s,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[]}\\n' "$cov"
+                    printf '{"verdict":"PASS","observed_cov":%s,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[],"distribution_a_i":[1],"n_active":1,"saturated":true}\\n' "$cov"
                     """
                 ),
                 encoding="utf-8",
@@ -132,7 +145,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/usr/bin/env bash
-                    printf '{"verdict":"PASS","observed_cov":NaN,"cstruct":0.0,"gap":0.0,"failure_reasons":[]}\\n'
+                    printf '{"verdict":"PASS","observed_cov":NaN,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[],"distribution_a_i":[1],"n_active":1,"saturated":true}\\n'
                     """
                 ),
                 encoding="utf-8",
@@ -246,6 +259,46 @@ class FairnessMultiSampleTest(unittest.TestCase):
                     break
                 time.sleep(0.5)
             self.assertFalse(sentinel_written, "descendant child was not killed by process-group kill")
+
+    def test_cli_timeout_after_leader_exit_does_not_hang(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "fake-harness.sh"
+            harness.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    (sleep 10 && echo child-still-running) &
+                    exit 0
+                    """
+                ),
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            out_dir = tmp_path / "out"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--samples",
+                    "2",
+                    "--per-run-timeout-sec",
+                    "1",
+                    "--out-dir",
+                    str(out_dir),
+                    "--harness",
+                    str(harness),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=4,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("timed out", result.stderr)
+            command = json.loads((out_dir / "sample-1" / "command.json").read_text(encoding="utf-8"))
+            self.assertTrue(command["timed_out"])
 
     def test_cli_rejects_samples_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

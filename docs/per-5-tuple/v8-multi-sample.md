@@ -35,9 +35,10 @@ is the headline stability gate, `--max-stdev-cov 3%` rejects unstable
 run-to-run RSS/placement variance, and `--max-run-cov 25%` prevents one
 bad run from being hidden by the mean.
 
-The wrapper reads stdout JSON objects that pass a schema check
-(`verdict`, `observed_cov`, and at least one of `cstruct`, `gap`,
-`failure_reasons` must be present) and ignores all other structured
+The wrapper reads stdout JSON objects that match the fairness-eval
+verdict schema (`verdict`, `observed_cov`, `cstruct`, `gap`,
+`failure_reasons`, `distribution_a_i`, `n_active`, `aggregate_mbps`,
+`saturated`, and `starved_flow_count`) and ignores all other structured
 logs. Each sample must emit exactly one verdict object with finite,
 non-negative numeric fields. Every harness run has a 600-second default
 timeout; on timeout the wrapper kills the entire process group
@@ -52,18 +53,15 @@ placement draws. Do not invoke `fairness_multi_sample.py` against a
 pre-captured static snapshot — every run would produce identical
 `observed_cov` and the stdev would be trivially 0.
 
-**Threshold derivation**: `--max-mean-cov 15%` comes from the v8
-userspace dataplane baseline measured in
-`feedback_smoke_loss_userspace_only.md`, where the median observed CoV
-across production-shaped flow sets was ≈0.13–0.14; 0.15 is a 1-sigma
-guard margin. `--max-run-cov 25%` approximates the multinomial-floor
-CoV for the worst-case RSS skew distribution seen in that same run
-history (one-in-five runs landing on an unfavorable hash bucket
-distribution). `--max-stdev-cov 3%` allows for ≈±0.03 of run-to-run
-noise (ephemeral-port entropy changes the RSS assignment per run); a
-stdev above 0.03 indicates structural instability rather than sampling
-noise. These thresholds should be updated if the dataplane or NIC
-configuration changes materially.
+**Threshold derivation**: `--max-mean-cov 15%` is a conservative
+stability gate for production-shaped v8 flow sets whose observed CoV is
+expected to sit in the low-to-mid teens when the dataplane is healthy.
+`--max-run-cov 25%` bounds one unfavorable RSS placement draw from being
+hidden by the mean. `--max-stdev-cov 3%` allows for about ±0.03 of
+run-to-run noise from ephemeral-port RSS entropy; a stdev above 0.03
+indicates structural instability rather than sampling noise. These
+thresholds should be updated if the dataplane or NIC configuration
+changes materially.
 
 The wrapper exits:
 
