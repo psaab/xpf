@@ -2,6 +2,10 @@
 
 ## 2026-05-12
 
+- **Timestamp**: 2026-05-12T07:20:00Z
+  - **Action**: PR #1271 cleanup — removed unrelated `go.mod` direct/indirect dependency churn introduced by local test tooling to keep the diff scoped to synthetic-ifindex changes.
+  - **File(s)**: `go.mod`, `_Log.md`
+
 - **Timestamp**: 2026-05-12T07:16:00Z
   - **Action**: PR #1271 validation follow-up — documented synthetic-ifindex range rationale, improved exhaustion panic guidance, deduplicated VLAN test constants, and reverted unrelated `go.mod` drift from local test tooling.
   - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `go.mod`, `_Log.md`
