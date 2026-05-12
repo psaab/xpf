@@ -1,5 +1,11 @@
 # Action Log
 
+## 2026-05-12
+
+- **Timestamp**: 2026-05-12T00:30:00Z
+  - **Action**: PR #1267 round-2 review follow-up — fixed fairness throughput window boundary pruning/rate denominator coupling to prevent false-positive saturation at steady sub-cap traffic, and added a regression test for the 10s-scrape/30s-window boundary case.
+  - **File(s)**: `pkg/dataplane/userspace/fairness_throughput.go`, `pkg/dataplane/userspace/fairness_throughput_test.go`, `_Log.md`
+
 ## 2026-05-10
 
 - **Timestamp**: 2026-05-10T15:24:00Z

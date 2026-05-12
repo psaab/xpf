@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,6 +21,7 @@ import (
 // xpfCollector implements prometheus.Collector, reading BPF maps on each scrape.
 type xpfCollector struct {
 	srv *Server
+	mu  sync.Mutex
 
 	// Global counters
 	packetsTotal         *prometheus.Desc
@@ -115,6 +117,10 @@ type xpfCollector struct {
 	fairnessCoSCountsTruncated *prometheus.Desc
 	fairnessRSSExpectation     *prometheus.Desc
 	fairnessRSSSkewViolation   *prometheus.Desc
+	fairnessSaturated          *prometheus.Desc
+	fairnessObservedCoV        *prometheus.Desc
+	fairnessStarvedFlows       *prometheus.Desc
+	fairnessThroughputWindow   *dpuserspace.FairnessThroughputWindow
 }
 
 func newCollector(srv *Server) *xpfCollector {
@@ -420,6 +426,22 @@ func newCollector(srv *Server) *xpfCollector {
 			"1 when the configured RSS/workload expectation fails for this egress CoS queue; 0 when it passes (#1247).",
 			[]string{"ifindex", "queue_id", "expectation"}, nil,
 		),
+		fairnessSaturated: prometheus.NewDesc(
+			"xpf_fairness_saturated",
+			"1 when the rolling per-flow byte window is at or above 95% of the configured egress CoS queue transmit rate (#1264).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessObservedCoV: prometheus.NewDesc(
+			"xpf_fairness_observed_cov",
+			"Rolling observed coefficient of variation across per-flow byte totals for this egress CoS queue (#1264).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessStarvedFlows: prometheus.NewDesc(
+			"xpf_fairness_starved_flows",
+			"Monotonic count of flows that enter below 1% of the rolling mean per-flow bytes for this egress CoS queue, de-duplicated while the flow remains in the rolling window (#1264).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessThroughputWindow: dpuserspace.NewFairnessThroughputWindow(30 * time.Second),
 	}
 }
 
@@ -480,6 +502,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fairnessCoSCountsTruncated
 	ch <- c.fairnessRSSExpectation
 	ch <- c.fairnessRSSSkewViolation
+	ch <- c.fairnessSaturated
+	ch <- c.fairnessObservedCoV
+	ch <- c.fairnessStarvedFlows
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -520,6 +545,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 	c.emitBindingActiveFlowCount(ch, status)
 	c.emitCoSActiveFlowCount(ch, status)
 	c.emitFairnessRSSGauges(ch, status)
+	c.emitFairnessThroughputGauges(ch, status)
 }
 
 // #1219: emit per-binding distinct active flow count for the fairness
@@ -640,6 +666,48 @@ func (c *xpfCollector) emitFairnessRSSExpectationGauges(
 			ifindexLabel,
 			queueLabel,
 			result.Expectation,
+		)
+	}
+}
+
+func (c *xpfCollector) emitFairnessThroughputGauges(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	c.mu.Lock()
+	if c.fairnessThroughputWindow == nil {
+		c.fairnessThroughputWindow = dpuserspace.NewFairnessThroughputWindow(30 * time.Second)
+	}
+	summaries := c.fairnessThroughputWindow.Update(time.Now(), status)
+	c.mu.Unlock()
+
+	for _, row := range summaries {
+		if row.SourceTruncated || row.FlowCount == 0 || row.WindowSeconds <= 0 {
+			continue
+		}
+		ifindexLabel := strconv.Itoa(row.Ifindex)
+		queueLabel := strconv.FormatUint(uint64(row.QueueID), 10)
+		saturated := 0.0
+		if row.Saturated {
+			saturated = 1
+		}
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessSaturated,
+			prometheus.GaugeValue,
+			saturated,
+			ifindexLabel,
+			queueLabel,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessObservedCoV,
+			prometheus.GaugeValue,
+			row.ObservedCoV,
+			ifindexLabel,
+			queueLabel,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessStarvedFlows,
+			prometheus.CounterValue,
+			float64(row.StarvedFlowsTotal),
+			ifindexLabel,
+			queueLabel,
 		)
 	}
 }

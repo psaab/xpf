@@ -126,6 +126,11 @@ pub(super) struct FlowCacheEntry {
     /// Validation stamp captured at insert time. Stale entries are treated as
     /// misses without requiring per-entry scans at RG transition.
     pub(super) stamp: FlowCacheStamp,
+    /// #1264: cumulative bytes observed for this cached flow by the
+    /// worker-owned flow cache. Updated only while the entry is already
+    /// mutably borrowed on cache insert/hit, so the telemetry adds no shared
+    /// atomics and no cross-worker cache-line traffic.
+    pub(super) observed_bytes: u64,
     /// #1219: per-hit recency counter. Owner-only single u16 store on every
     /// `lookup()` hit — see `FlowCache::current_epoch` for the comparison
     /// reference. The ~65ms-tick scan in `count_active_flows()` counts
@@ -148,6 +153,7 @@ pub(super) struct FlowCacheDebugEntry {
     pub(super) cos_queue_id: Option<u8>,
     pub(super) dscp_rewrite: Option<u8>,
     pub(super) age_epochs: u16,
+    pub(super) observed_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +323,7 @@ impl FlowCacheEntry {
                 ha_state,
                 rg_epochs,
             ),
+            observed_bytes: u64::from(meta.pkt_len),
             // #1219: 0 = "never touched"; first lookup hit will stamp
             // it with the current epoch.
             last_used_epoch: 0,
@@ -455,6 +462,7 @@ impl FlowCache {
                 cos_queue_id: entry.descriptor.tx_selection.queue_id,
                 dscp_rewrite: entry.descriptor.tx_selection.dscp_rewrite,
                 age_epochs,
+                observed_bytes: entry.observed_bytes,
             });
         }
         let cos_counts = cos_counts
@@ -525,6 +533,7 @@ impl FlowCache {
         row[FLOW_CACHE_WAYS - 1] = way;
     }
 
+    #[cfg(test)]
     #[inline]
     pub(super) fn lookup(
         &mut self,
@@ -532,6 +541,30 @@ impl FlowCache {
         lookup: FlowCacheLookup,
         now_secs: u64,
         rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
+    ) -> Option<&FlowCacheEntry> {
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0)
+    }
+
+    #[inline]
+    pub(super) fn lookup_counted(
+        &mut self,
+        key: &crate::session::SessionKey,
+        lookup: FlowCacheLookup,
+        now_secs: u64,
+        rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
+        packet_len: u16,
+    ) -> Option<&FlowCacheEntry> {
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, u64::from(packet_len))
+    }
+
+    #[inline]
+    fn lookup_with_observed_bytes(
+        &mut self,
+        key: &crate::session::SessionKey,
+        lookup: FlowCacheLookup,
+        now_secs: u64,
+        rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
+        observed_bytes: u64,
     ) -> Option<&FlowCacheEntry> {
         let set = Self::set_index(key, lookup.ingress_ifindex);
         let base = set * FLOW_CACHE_WAYS;
@@ -591,6 +624,7 @@ impl FlowCache {
                     .as_mut()
                     .expect("BUG: entry at entry_idx is None after key match — impossible cache state");
                 entry.last_used_epoch = now;
+                entry.observed_bytes = entry.observed_bytes.saturating_add(observed_bytes);
                 return Some(entry);
             }
         }

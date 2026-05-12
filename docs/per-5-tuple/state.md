@@ -351,6 +351,22 @@ set syntax). Configured expectations are rendered under
 - `xpf_fairness_rss_expectation_configured{ifindex,queue_id,expectation}`
 - `xpf_fairness_rss_skew_violation{ifindex,queue_id,expectation}`
 
+The runtime throughput slice exports the remaining observed-workload
+metrics from a rolling 30-second daemon window:
+
+- `xpf_fairness_saturated{ifindex,queue_id}`
+- `xpf_fairness_observed_cov{ifindex,queue_id}`
+- `xpf_fairness_starved_flows{ifindex,queue_id}`
+
+Workers account bytes on the owner-local flow-cache entry already
+touched by established TCP/UDP cache hits and publish the cumulative
+byte count in the bounded flow-worker snapshot. The Go collector
+converts successive snapshots into per-flow byte deltas, maintains the
+rolling window, and advances that window on healthy scrapes even when
+no flow byte counter moved. Truncated flow-worker snapshots reset the
+window and suppress the observed metrics until a fresh baseline is
+available.
+
 ## Open work
 
 - **#547 — Deterministic RSS-skew test fixture**: SHIPPED as PR #1223
