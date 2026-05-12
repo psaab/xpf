@@ -372,6 +372,32 @@
   - **Action**: Correct configstore encryption note to match implementation (`master.key` + HKDF with configured PRF).
   - **File(s)**: `pkg/configstore/README.md`
 
+## 2026-05-12 fairness_multi_sample round-2 HIGH fixes
+
+- **Timestamp**: 2026-05-12T06:50:50Z
+  - **Action**: Round-3 follow-up — tighten verdict JSON detection to the canonical fairness-eval verdict-key set; remove the `os.getpgid` timeout race by using the process-group leader PID directly; add a bounded post-kill `communicate()`; remove a stale threshold-source reference.
+  - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md
+
+- **Timestamp**: 2026-05-12T07:45:00Z
+  - **Action**: PR #1273 Copilot follow-up — align multi-sample verdict filtering with the canonical 10-key fairness-eval schema and validate summary numeric fields (`cstruct`, `gap`, optional `aggregate_mbps`, and integer `starved_flow_count`) instead of only `observed_cov`.
+  - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md, docs/per-5-tuple/state.md, _Log.md
+
+- **Timestamp**: 2026-05-12T06:29:25Z
+  - **Action**: HIGH1 - Tighten extract_verdict_objects to require verdict+observed_cov+discriminator field
+  - **Action**: HIGH2 - Replace subprocess.run with Popen(start_new_session=True)+os.killpg for process-group cleanup on timeout
+  - **Action**: MINOR - Replace statistics.fmean with statistics.mean; remove dead timeout_stream_text
+  - **Action**: Docs - Add fresh-iperf3 requirement and threshold derivation to v8-multi-sample.md
+  - **Action**: Tests - Add schema-incomplete and process-group tests; move import time to top
+  - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md
+  - **Result**: 12/12 tests green (was 10)
+
+## 2026-05-12 fairness_multi_sample round-3 fix
+
+- **Timestamp**: 2026-05-12T07:02:16Z
+  - **Action**: Fix pgid capture race - capture os.getpgid(proc.pid) immediately after Popen before communicate() can reap the leader; use cached pgid in both _kill_process_group() calls.
+  - **File(s)**: test/incus/fairness_multi_sample.py
+  - **Result**: 14/14 tests green
+
 ## 2026-05-12 — fairness-eval diagnostic message + test rename
 
 - **Timestamp**: 2026-05-12T06:52:27Z
