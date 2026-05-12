@@ -540,7 +540,7 @@ fn guard_low_n_legacy_input_rejects_p2_undercount() {
 }
 
 #[test]
-fn guard_low_n_iface_input_accepts_p2_single_direction_recency_undercount() {
+fn guard_low_n_iface_input_accepts_absolute_floor_p2_gap1() {
     let tmp = TempGuard::new("guard_low_n_iface");
     let sockets = [5u64, 6];
     let mut intervals: Vec<Vec<StreamSample>> = Vec::new();
@@ -574,6 +574,10 @@ fn guard_low_n_iface_input_accepts_p2_single_direction_recency_undercount() {
     }
     let tsv_str = synth_tsv_6col(&rows);
 
+    // P=2 streams, --iface active → dir_mult=1 → expected_sum=2.
+    // Only one binding slot reports count=1 (the other is absent →
+    // median=0). a_i_sum=1, gap=|1-2|=1, tolerance=max(0,2)=2.
+    // 1 ≤ 2 → sum guard PASS (absolute floor is the operative gate).
     let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
         "--iface", "ge-0-0-2",
         "--n-workers", "6",
@@ -583,7 +587,7 @@ fn guard_low_n_iface_input_accepts_p2_single_direction_recency_undercount() {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "iface-filtered P=2 single-direction undercount should stay inside the guard; stderr={}",
+        "iface-filtered P=2 gap=1 should stay inside the absolute floor (tolerance=2); stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
     let v = verdict.expect("verdict JSON on low-N iface PASS");
