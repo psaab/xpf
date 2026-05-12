@@ -29,8 +29,8 @@ FAIRNESS_EVAL_VERDICT_KEYS = {
     "failure_reasons",
     "distribution_a_i",
     "n_active",
-    "aggregate_mbps",
     "saturated",
+    "a_i_sum_check_ok",
     "starved_flow_count",
 }
 
@@ -98,6 +98,21 @@ def numeric_field(verdict: dict[str, Any], key: str) -> float:
     return number
 
 
+def optional_numeric_field(verdict: dict[str, Any], key: str) -> float | None:
+    if key not in verdict or verdict[key] is None:
+        return None
+    return numeric_field(verdict, key)
+
+
+def integer_field(verdict: dict[str, Any], key: str) -> int:
+    value = verdict.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MultiSampleError(f"verdict JSON missing integer field {key!r}")
+    if value < 0:
+        raise MultiSampleError(f"verdict JSON field {key!r} is negative")
+    return value
+
+
 def sample_record(index: int, sample_dir: Path, exit_code: int, verdict: dict[str, Any]) -> dict[str, Any]:
     return {
         "sample": index,
@@ -105,10 +120,10 @@ def sample_record(index: int, sample_dir: Path, exit_code: int, verdict: dict[st
         "exit_code": exit_code,
         "verdict": verdict.get("verdict"),
         "observed_cov": numeric_field(verdict, "observed_cov"),
-        "cstruct": verdict.get("cstruct"),
-        "gap": verdict.get("gap"),
-        "aggregate_mbps": verdict.get("aggregate_mbps"),
-        "starved_flow_count": verdict.get("starved_flow_count"),
+        "cstruct": numeric_field(verdict, "cstruct"),
+        "gap": numeric_field(verdict, "gap"),
+        "aggregate_mbps": optional_numeric_field(verdict, "aggregate_mbps"),
+        "starved_flow_count": integer_field(verdict, "starved_flow_count"),
         "failure_reasons": verdict.get("failure_reasons", []),
     }
 

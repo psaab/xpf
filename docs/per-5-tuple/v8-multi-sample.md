@@ -37,13 +37,15 @@ bad run from being hidden by the mean.
 
 The wrapper reads stdout JSON objects that match the fairness-eval
 verdict schema (`verdict`, `observed_cov`, `cstruct`, `gap`,
-`failure_reasons`, `distribution_a_i`, `n_active`, `aggregate_mbps`,
-`saturated`, and `starved_flow_count`) and ignores all other structured
-logs. Each sample must emit exactly one verdict object with finite,
-non-negative numeric fields. Every harness run has a 600-second default
-timeout; on timeout the wrapper kills the entire process group
-(including iperf3 and scraper descendants) before writing the partial
-stdout/stderr and `command.json` with `timed_out: true`.
+`failure_reasons`, `distribution_a_i`, `n_active`, `saturated`,
+`a_i_sum_check_ok`, and `starved_flow_count`) and ignores all other
+structured logs. Each sample must emit exactly one verdict object with
+finite, non-negative `observed_cov`, `cstruct`, and `gap`; if
+`aggregate_mbps` is present, it is also finite/non-negative validated.
+`starved_flow_count` must be a non-negative integer. Every harness run
+has a 600-second default timeout; on timeout the wrapper kills the entire
+process group (including iperf3 and scraper descendants) before writing
+the partial stdout/stderr and `command.json` with `timed_out: true`.
 
 **Important**: each sample must exercise a fresh iperf3 measurement
 with a new ephemeral source-port set, not a replay of a fixed snapshot.

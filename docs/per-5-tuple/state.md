@@ -417,8 +417,9 @@ MQFQ, v8 lease selection, or admission.
   iperf-e headline. The gate is mean observed CoV, sample standard
   deviation, max run CoV, and every per-run fairness verdict. The
   wrapper requires at least two samples, filters stdout to top-level
-  `verdict` JSON objects, rejects non-finite or negative numeric verdict
-  fields, and fails closed on harness timeout.
+  fairness-eval verdict JSON objects, rejects non-finite or negative
+  threshold fields, enforces non-negative integer `starved_flow_count`,
+  and fails closed on harness timeout.
 - **#1211 follow-up (only if gate flips to FAIL on a real workload)**:
   open a fresh issue using the revisit criteria in the Path 2
   closure archive. Do not re-open #1211 directly. As of the

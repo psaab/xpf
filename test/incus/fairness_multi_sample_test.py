@@ -40,6 +40,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
             "distribution_a_i": [1],
             "n_active": 1,
             "saturated": True,
+            "a_i_sum_check_ok": True,
         }
         text = (
             'log {"event":"progress","observed_cov":999}\n'
@@ -61,6 +62,34 @@ class FairnessMultiSampleTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(fairness_multi_sample.MultiSampleError):
                     fairness_multi_sample.numeric_field({"observed_cov": value}, "observed_cov")
+
+    def test_sample_record_validates_numeric_summary_fields(self) -> None:
+        base_verdict = {
+            "verdict": "PASS",
+            "observed_cov": 0.1,
+            "cstruct": 0.0,
+            "gap": 0.0,
+            "aggregate_mbps": 1.0,
+            "starved_flow_count": 0,
+            "failure_reasons": [],
+            "distribution_a_i": [1],
+            "n_active": 1,
+            "saturated": True,
+            "a_i_sum_check_ok": True,
+        }
+        for key, value in [
+            ("cstruct", -0.1),
+            ("gap", math.nan),
+            ("aggregate_mbps", math.inf),
+            ("starved_flow_count", -1),
+            ("starved_flow_count", 1.5),
+            ("starved_flow_count", True),
+        ]:
+            verdict = dict(base_verdict)
+            verdict[key] = value
+            with self.subTest(key=key, value=value):
+                with self.assertRaises(fairness_multi_sample.MultiSampleError):
+                    fairness_multi_sample.sample_record(1, Path("sample-1"), 0, verdict)
 
     def test_summary_fails_thresholds(self) -> None:
         summary = fairness_multi_sample.summarize(
@@ -104,7 +133,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                     esac
                     echo "harness log line"
                     echo '{"event":"progress","observed_cov":99}'
-                    printf '{"verdict":"PASS","observed_cov":%s,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[],"distribution_a_i":[1],"n_active":1,"saturated":true}\\n' "$cov"
+                    printf '{"verdict":"PASS","observed_cov":%s,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[],"distribution_a_i":[1],"n_active":1,"saturated":true,"a_i_sum_check_ok":true}\\n' "$cov"
                     """
                 ),
                 encoding="utf-8",
@@ -145,7 +174,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/usr/bin/env bash
-                    printf '{"verdict":"PASS","observed_cov":NaN,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[],"distribution_a_i":[1],"n_active":1,"saturated":true}\\n'
+                    printf '{"verdict":"PASS","observed_cov":NaN,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[],"distribution_a_i":[1],"n_active":1,"saturated":true,"a_i_sum_check_ok":true}\\n'
                     """
                 ),
                 encoding="utf-8",
