@@ -596,6 +596,71 @@ fn guard_sum_mismatch_fails() {
 }
 
 #[test]
+fn guard_p12_allows_bounded_stale_overcount() {
+    let tmp = TempGuard::new("guard_p12_overcount_pass");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    // Canonical CoS sweep shape from #1281: 12 healthy streams, but
+    // active-flow snapshots can retain three stale/recently-active
+    // entries. sum(a_i)=15 vs expected=12 is a bounded overcount and
+    // should not false-fail the run.
+    let tsv_str = make_distribution_tsv(&[4, 4, 4, 3, 0, 0], &timestamps_for(60), "ge-0-0-2");
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "P=12 sum(a_i)=15 stale-overcount window should PASS; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on P=12 overcount PASS");
+    assert_eq!(v["verdict"], "PASS");
+    assert_eq!(v["a_i_sum_check_ok"], true);
+    assert_eq!(v["a_i_sum"], 15);
+    assert_eq!(v["iperf_non_starved_streams"], 12);
+    assert_eq!(v["a_i_sum_under_tolerance"], 2);
+    assert_eq!(v["a_i_sum_over_tolerance"], 3);
+    assert_eq!(v["a_i_sum_tolerance"], 3);
+}
+
+#[test]
+fn guard_p12_rejects_overcount_beyond_stale_window() {
+    let tmp = TempGuard::new("guard_p12_overcount_fail");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    let tsv_str = make_distribution_tsv(&[4, 4, 4, 4, 0, 0], &timestamps_for(60), "ge-0-0-2");
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "P=12 sum(a_i)=16 should exceed the overcount window; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on P=12 overcount FAIL");
+    assert_eq!(v["verdict"], "FAIL");
+    assert_eq!(v["a_i_sum_check_ok"], false);
+    assert_eq!(v["a_i_sum"], 16);
+    assert_eq!(v["a_i_sum_over_tolerance"], 3);
+    let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
+    let guard_reason = reasons
+        .iter()
+        .filter_map(|r| r.as_str())
+        .find(|r| r.contains("Harness guard"))
+        .unwrap_or_else(|| panic!("failure_reasons must contain a Harness guard entry; got: {reasons:?}"));
+    assert!(guard_reason.contains("expected=12"), "guard reason missing expected_sum: {guard_reason}");
+    assert!(guard_reason.contains("over_tolerance=3"), "guard reason missing over_tolerance: {guard_reason}");
+}
+
+#[test]
 fn guard_low_n_legacy_input_rejects_p2_undercount() {
     let tmp = TempGuard::new("guard_low_n_legacy");
     let sockets = [5u64, 6];
@@ -845,16 +910,21 @@ fn timestamps_for(n: u64) -> Vec<u64> {
 /// `n_streams × direction_multiplier=1` (iface filter active) within
 /// tolerance.
 fn make_balanced_tsv(n_workers: u32, timestamps: &[u64], iface: &'static str) -> String {
+    let counts = vec![1; n_workers as usize];
+    make_distribution_tsv(&counts, timestamps, iface)
+}
+
+fn make_distribution_tsv(counts: &[u32], timestamps: &[u64], iface: &'static str) -> String {
     let mut rows: Vec<TsvRow> = Vec::new();
     for &ts in timestamps {
-        for w in 0..n_workers {
+        for (w, &count) in counts.iter().enumerate() {
             rows.push(TsvRow {
                 timestamp: ts,
-                binding_slot: w,
+                binding_slot: w as u32,
                 queue_id: 0,
-                worker_id: w,
+                worker_id: w as u32,
                 iface,
-                count: 1, // sum across 6 workers = 6, matches 6 streams (1× single-direction)
+                count,
             });
         }
     }
