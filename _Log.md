@@ -2,6 +2,18 @@
 
 ## 2026-05-12
 
+- **Timestamp**: 2026-05-12T07:50:00Z
+  - **Action**: PR #1274 Copilot follow-up — use verdict JSON key names consistently in the Accepted Path publish list.
+  - **File(s)**: `docs/per-5-tuple/tcp-head-start-floor.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-12T06:46:48Z
+  - **Action**: PR #1274 review follow-up — wrapped TCP head-start policy prose and made the observed CoV prose/JSON-field distinction explicit.
+  - **File(s)**: `docs/per-5-tuple/tcp-head-start-floor.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-12T06:29:27Z
+  - **Action**: PR round-2 review follow-up — expanded AFD acronym at first use (line 5), changed `observed_cov` to `observed_CoV` in prose formulas (lines 86, 99), made epsilon explicit as 0.05.
+  - **File(s)**: `docs/per-5-tuple/tcp-head-start-floor.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-12T07:35:00Z
   - **Action**: PR #1271 round-3 follow-up — add same-VLAN/different-RETH synthetic-ifindex regressions so `reth0.N` and `reth1.N` cannot collapse into one logical Rust dataplane state key.
   - **File(s)**: `pkg/dataplane/userspace/manager_test.go`, `_Log.md`
