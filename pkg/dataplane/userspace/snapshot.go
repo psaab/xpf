@@ -75,32 +75,18 @@ func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation u
 }
 
 const (
-	syntheticInterfaceIfindexMin = 16384
-	syntheticInterfaceIfindexMax = 32767
+	syntheticInterfaceIfindexMin = 1 << 30
+	syntheticInterfaceIfindexMax = syntheticInterfaceIfindexMin + (1 << 20) - 1
 )
 
-func currentKernelIfindexes() map[int]struct{} {
-	out := make(map[int]struct{})
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return out
-	}
-	for _, iface := range ifaces {
-		if iface.Index > 0 {
-			out[iface.Index] = struct{}{}
-		}
-	}
-	return out
-}
-
-func syntheticLogicalIfindex(name string, parentIfindex int, vlanID int, used map[int]struct{}) int {
+func syntheticLogicalIfindex(name string, vlanID int, used map[int]struct{}) int {
 	if used == nil {
 		used = make(map[int]struct{})
 	}
 	const fnvOffset = uint32(2166136261)
 	const fnvPrime = uint32(16777619)
 	hash := fnvOffset
-	for _, b := range []byte(fmt.Sprintf("%s/%d/%d", name, parentIfindex, vlanID)) {
+	for _, b := range []byte(fmt.Sprintf("%s/%d", name, vlanID)) {
 		hash ^= uint32(b)
 		hash *= fnvPrime
 	}
@@ -114,7 +100,7 @@ func syntheticLogicalIfindex(name string, parentIfindex int, vlanID int, used ma
 		used[candidate] = struct{}{}
 		return candidate
 	}
-	return 0
+	panic(fmt.Sprintf("userspace snapshot: exhausted synthetic ifindex range for %q", name))
 }
 
 func shouldUseLogicalOnlyParentBoundRethVLAN(cfg *config.Config, ifName string, unit *config.InterfaceUnit, childIfindex int, parentIfindex int) bool {
@@ -479,7 +465,7 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 		return nil
 	}
 	zoneByInterface := buildInterfaceZoneMap(cfg)
-	usedIfindexes := currentKernelIfindexes()
+	usedSyntheticIfindexes := make(map[int]struct{})
 	// Build RETH RG lookup: physical member → RETH's RedundancyGroup.
 	// Physical members have RedundantParent set but RedundancyGroup=0;
 	// the RG is on the RETH. Without this, flow cache HA checks on
@@ -506,9 +492,6 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 		}
 		linuxName := snapshotLinuxName(cfg, name, iface, nil)
 		ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxName)
-		if ifindex > 0 {
-			usedIfindexes[ifindex] = struct{}{}
-		}
 		// Use the interface's own RG, or inherit from RETH parent.
 		rg := iface.RedundancyGroup
 		if rg <= 0 {
@@ -553,15 +536,9 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 			unitName := fmt.Sprintf("%s.%d", name, unitNum)
 			parentLinux := snapshotLinuxName(cfg, name, iface, nil)
 			parentIfindex, parentMTU, parentHardwareAddr, _ := buildLinkSnapshot(parentLinux)
-			if parentIfindex > 0 {
-				usedIfindexes[parentIfindex] = struct{}{}
-			}
 			parentRXQueues := userspaceRXQueueCount(parentLinux)
 			linuxUnit := snapshotLinuxName(cfg, name, iface, unit)
 			ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxUnit)
-			if ifindex > 0 {
-				usedIfindexes[ifindex] = struct{}{}
-			}
 			rxQueues := userspaceRXQueueCount(linuxUnit)
 			logicalOnly := false
 			// Bondless RETH VLAN units can transmit through the parent
@@ -569,8 +546,8 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 			// logical ifindex for Rust FIB/filter/CoS state, while the
 			// existing ParentIfindex path remains the socket bind target.
 			if shouldUseLogicalOnlyParentBoundRethVLAN(cfg, name, unit, ifindex, parentIfindex) {
-				ifindex = syntheticLogicalIfindex(unitName, parentIfindex, unit.VlanID, usedIfindexes)
-				logicalOnly = ifindex > 0
+				ifindex = syntheticLogicalIfindex(unitName, unit.VlanID, usedSyntheticIfindexes)
+				logicalOnly = true
 				if mtu == 0 {
 					mtu = parentMTU
 				}

@@ -2,6 +2,10 @@
 
 ## 2026-05-12
 
+- **Timestamp**: 2026-05-12T06:55:00Z
+  - **Action**: PR #1271 round-2 follow-up — made parent-bound RETH VLAN synthetic ifindex allocation deterministic/config-derived, removed kernel-ifindex seeding, switched to high synthetic range with hard-fail on exhaustion, and added sibling-VLAN determinism regression coverage.
+  - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `_Log.md`
+
 - **Timestamp**: 2026-05-12T00:30:00Z
   - **Action**: PR #1267 round-2 review follow-up — fixed fairness throughput window boundary pruning/rate denominator coupling to prevent false-positive saturation at steady sub-cap traffic, and added a regression test for the 10s-scrape/30s-window boundary case.
   - **File(s)**: `pkg/dataplane/userspace/fairness_throughput.go`, `pkg/dataplane/userspace/fairness_throughput_test.go`, `_Log.md`
