@@ -351,3 +351,12 @@
 - **Timestamp**: 2026-05-10T05:18:20Z
   - **Action**: Correct configstore encryption note to match implementation (`master.key` + HKDF with configured PRF).
   - **File(s)**: `pkg/configstore/README.md`
+
+## 2026-05-12 — fairness-eval diagnostic message + test rename
+
+- **Timestamp**: 2026-05-12T06:29:24Z
+  - **Action**: Fix Harness guard failure message to print `expected_sum` and `dir_mult` alongside `n_non_starved` so operators can see the bidirectional expansion factor. Update block comment to correctly describe `max(2, floor(10% × expected_sum))` formula.
+  - **File(s)**: `userspace-dp/src/bin/fairness-eval.rs`
+- **Timestamp**: 2026-05-12T06:29:24Z
+  - **Action**: Rename `guard_low_n_iface_input_accepts_p2_single_direction_recency_undercount` → `guard_low_n_iface_input_accepts_absolute_floor_p2_gap1`; add inline math comment explaining why absolute floor (not recency) is the operative gate. Drop misleading "recency" claim from assertion messages.
+  - **File(s)**: `userspace-dp/tests/fairness_eval_blackbox.rs`
