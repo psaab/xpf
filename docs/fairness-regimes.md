@@ -353,8 +353,10 @@ The sweep runs ports 5201..5207 through `fairness_multi_sample.py`,
 preserves per-class artifacts, writes `summary.tsv` and `summary.md`,
 and returns non-zero after completing all classes if any class misses
 its thresholds. For the symmetric reverse fixture on the loss cluster,
-`COS_IFINDEX=5` selects the `ge-0-0-1` egress; forward-path sweeps use
-the corresponding shaped egress ifindex for `reth0.80`.
+`COS_IFINDEX=5` selects the `ge-0-0-1` egress. For forward-path sweeps,
+do not hardcode the RETH unit's displayed name into the harness; use
+the ifindex emitted by `xpf_userspace_cos_active_flow_count` for the
+actual shaped egress in that run.
 
 ## Required metrics — exported in production via gRPC/Prometheus
 

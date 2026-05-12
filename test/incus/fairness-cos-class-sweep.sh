@@ -18,7 +18,7 @@ IFACE=${IFACE:-ge-0-0-2}
 COS_IFINDEX=${COS_IFINDEX:-}
 SAMPLES=${SAMPLES:-3}
 PER_RUN_TIMEOUT_SEC=${PER_RUN_TIMEOUT_SEC:-180}
-ARTIFACT_ROOT=${ARTIFACT_ROOT:-/tmp/cos-fairness-all-$(date +%Y%m%d-%H%M%S)}
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
 HARNESS=${HARNESS:-$ROOT_DIR/test/incus/fairness-harness.sh}
 WRAPPER=${WRAPPER:-$ROOT_DIR/test/incus/fairness_multi_sample.py}
 FAIRNESS_EVAL=${FAIRNESS_EVAL:-$ROOT_DIR/userspace-dp/target/release/fairness-eval}
@@ -45,7 +45,11 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 2
 fi
 
-mkdir -p "$ARTIFACT_ROOT"
+if [[ -z "$ARTIFACT_ROOT" ]]; then
+    ARTIFACT_ROOT=$(mktemp -d -t cos-fairness-all.XXXXXX)
+else
+    mkdir -p "$ARTIFACT_ROOT"
+fi
 SUMMARY_TSV="$ARTIFACT_ROOT/summary.tsv"
 SUMMARY_MD="$ARTIFACT_ROOT/summary.md"
 
@@ -62,6 +66,21 @@ classes=(
     "q3-iperf-f-19g 5206 3 19000000000"
     "q6-iperf-c-25g 5203 6 25000000000"
 )
+
+mark_parse_error() {
+    overall_status=2
+}
+
+append_error_row() {
+    local label=$1
+    local port=$2
+    local queue=$3
+    local rate=$4
+    local status=$5
+
+    printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\n' \
+        "$label" "$port" "$queue" "$rate" "$status" >> "$SUMMARY_TSV"
+}
 
 overall_status=0
 for spec in "${classes[@]}"; do
@@ -92,32 +111,57 @@ for spec in "${classes[@]}"; do
 
     summary_json="$out/samples/summary.json"
     if [[ -f "$summary_json" ]]; then
-        jq -r \
+        row_file="$out/summary-row.tsv"
+        jq_err="$out/summary-jq.stderr"
+        if jq -er \
             --arg class "$label" \
             --arg port "$port" \
             --arg queue "$queue" \
             --arg rate "$rate" \
             --arg status "$status" \
-            '[
+            '
+            def require_samples:
+                if (.samples | type) != "array" or (.samples | length) == 0 then
+                    error("summary.json has no samples")
+                else
+                    .
+                end;
+            def avg_numeric(key):
+                ([.samples[] | .[key] | select(type == "number")]) as $values
+                | if ($values | length) == 0 then null else (($values | add) / ($values | length)) end;
+            def sum_numeric(key):
+                ([.samples[] | .[key] | select(type == "number")]) as $values
+                | if ($values | length) == 0 then null else ($values | add) end;
+            def text_or_dash:
+                if . == null then "-" else tostring end;
+            require_samples
+            | [
                 $class,
                 $port,
                 $queue,
                 $rate,
                 $status,
-                .verdict,
-                (.observed_cov.mean | tostring),
-                (.observed_cov.max | tostring),
-                (.observed_cov.sample_stdev | tostring),
-                (([.samples[].aggregate_mbps] | add / length) | tostring),
-                (([.samples[].cstruct] | add / length) | tostring),
-                (([.samples[].gap] | add / length) | tostring),
-                (([.samples[].starved_flow_count] | add) | tostring),
+                (.verdict // "ERROR"),
+                (.observed_cov.mean | text_or_dash),
+                (.observed_cov.max | text_or_dash),
+                (.observed_cov.sample_stdev | text_or_dash),
+                (avg_numeric("aggregate_mbps") | text_or_dash),
+                (avg_numeric("cstruct") | text_or_dash),
+                (avg_numeric("gap") | text_or_dash),
+                (sum_numeric("starved_flow_count") | text_or_dash),
                 ([.samples[].verdict] | join(","))
-            ] | @tsv' "$summary_json" >> "$SUMMARY_TSV"
-        jq '{verdict, observed_cov, samples: [.samples[] | {sample, verdict, aggregate_mbps, observed_cov, cstruct, gap, starved_flow_count}]}' "$summary_json"
+            ] | @tsv' "$summary_json" > "$row_file" 2> "$jq_err"; then
+            cat "$row_file" >> "$SUMMARY_TSV"
+            awk -F'\t' '{printf "summary class=%s wrapper_status=%s verdict=%s mean_cov=%s max_cov=%s\n", $1, $5, $6, $7, $8}' "$row_file"
+        else
+            mark_parse_error
+            append_error_row "$label" "$port" "$queue" "$rate" "$status"
+            echo "fairness-cos-class-sweep: invalid summary for $label: $summary_json" >&2
+            sed -n '1,80p' "$jq_err" >&2
+        fi
     else
-        printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\n' \
-            "$label" "$port" "$queue" "$rate" "$status" >> "$SUMMARY_TSV"
+        mark_parse_error
+        append_error_row "$label" "$port" "$queue" "$rate" "$status"
         sed -n '1,80p' "$out/wrapper.stderr" >&2
     fi
 done
