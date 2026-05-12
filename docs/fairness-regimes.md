@@ -335,6 +335,29 @@ launch target or wrapper because remote launchers such as `incus exec`
 do not expose the remote iperf PID to this local script. The
 lightweight `--mixed-cos` mode remains the default for routine runs.
 
+Single-class CoS validation MUST NOT stop at the low-rate fixture
+classes. The 100M and 1G classes are mostly shaper-dominated and can
+produce very low CoV even when high-rate classes remain unfair. Use the
+class sweep harness to exercise every canonical fixture port:
+
+```bash
+COS_IFINDEX=<egress-ifindex> \
+IPERF_LAUNCH_ARG_0=/usr/bin/incus \
+IPERF_LAUNCH_ARG_1=exec \
+IPERF_LAUNCH_ARG_2=loss:cluster-userspace-host \
+IPERF_LAUNCH_ARG_3=-- \
+./test/incus/fairness-cos-class-sweep.sh
+```
+
+The sweep runs ports 5201..5207 through `fairness_multi_sample.py`,
+preserves per-class artifacts, writes `summary.tsv` and `summary.md`,
+and returns non-zero after completing all classes if any class misses
+its thresholds. For the symmetric reverse fixture on the loss cluster,
+`COS_IFINDEX=5` selects the `ge-0-0-1` egress. For forward-path sweeps,
+do not hardcode the RETH unit's displayed name into the harness; use
+the ifindex emitted by `xpf_userspace_cos_active_flow_count` for the
+actual shaped egress in that run.
+
 ## Required metrics — exported in production via gRPC/Prometheus
 
 For production observability, xpf MUST export:
