@@ -1583,6 +1583,7 @@ pub(crate) fn worker_loop(
                     b.live
                         .debug_outstanding_tx
                         .store(b.tx_pipeline.outstanding_tx, Ordering::Relaxed);
+                    publish_tx_completion_ring_telemetry(&b.live, &mut b.telemetry);
                     // #878: publish UMEM in-flight gauge as a single atomic
                     // so the daemon's `show chassis forwarding` Buffer% can
                     // divide by `umem_total_frames` without torn-load risk.
@@ -1764,6 +1765,30 @@ pub(crate) fn push_recent_session_delta(
     recent_session_deltas.push_back(delta);
 }
 
+fn publish_tx_completion_ring_telemetry(
+    live: &BindingLiveState,
+    telemetry: &mut WorkerTelemetry,
+) {
+    // #1241: publish owner-local AF_XDP TX completion-ring availability
+    // samples on the same low-frequency debug cadence as the existing
+    // ring-pressure gauges. These are gauges, not counters: current is
+    // the last sampled CQ depth before a reap, max is the peak in this
+    // debug window. Reset happens only after both stores so current and
+    // max are published from the same telemetry window; a future reorder
+    // must not clear either local sample before both live gauges are
+    // updated.
+    live.tx_completion_ring_available.store(
+        telemetry.dbg_tx_completion_ring_available,
+        Ordering::Relaxed,
+    );
+    live.tx_completion_ring_available_max.store(
+        telemetry.dbg_tx_completion_ring_available_max,
+        Ordering::Relaxed,
+    );
+    telemetry.dbg_tx_completion_ring_available = 0;
+    telemetry.dbg_tx_completion_ring_available_max = 0;
+}
+
 pub(crate) struct BindingLiveSnapshot {
     pub(crate) bound: bool,
     pub(crate) xsk_registered: bool,
@@ -1870,6 +1895,12 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) debug_pending_tx_prepared: u32,
     pub(crate) debug_pending_tx_local: u32,
     pub(crate) debug_outstanding_tx: u32,
+    /// #1241: last sampled AF_XDP TX completion-ring availability
+    /// before the owner worker drained completions.
+    pub(crate) tx_completion_ring_available: u32,
+    /// #1241: maximum sampled completion-ring availability in the
+    /// last debug window.
+    pub(crate) tx_completion_ring_available_max: u32,
     pub(crate) debug_in_flight_recycles: u32,
     /// #878: per-binding UMEM total frames (set once at worker
     /// construction). Used as the denominator for the `show chassis
@@ -1921,4 +1952,32 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) tx_kick_latency_count: u64,
     pub(crate) tx_kick_latency_sum_ns: u64,
     pub(crate) tx_kick_retry_count: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publish_tx_completion_ring_telemetry_stores_before_reset() {
+        let live = BindingLiveState::new();
+        let mut telemetry = WorkerTelemetry {
+            dbg_tx_completion_ring_available: 5,
+            dbg_tx_completion_ring_available_max: 9,
+            ..Default::default()
+        };
+
+        publish_tx_completion_ring_telemetry(&live, &mut telemetry);
+
+        assert_eq!(
+            live.tx_completion_ring_available.load(Ordering::Relaxed),
+            5
+        );
+        assert_eq!(
+            live.tx_completion_ring_available_max.load(Ordering::Relaxed),
+            9
+        );
+        assert_eq!(telemetry.dbg_tx_completion_ring_available, 0);
+        assert_eq!(telemetry.dbg_tx_completion_ring_available_max, 0);
+    }
 }

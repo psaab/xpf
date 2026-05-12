@@ -753,6 +753,12 @@ type BindingStatus struct {
 	DebugPendingTXPrepared            uint32    `json:"debug_pending_tx_prepared,omitempty"`
 	DebugPendingTXLocal               uint32    `json:"debug_pending_tx_local,omitempty"`
 	DebugOutstandingTX                uint32    `json:"debug_outstanding_tx,omitempty"`
+	// #1241: low-frequency AF_XDP TX completion-ring availability
+	// samples, published from owner-local worker telemetry. Current is
+	// the last sampled CQ depth before a reap; Max is the peak in the
+	// last debug window.
+	TXCompletionRingAvailable         uint32    `json:"tx_completion_ring_available,omitempty"`
+	TXCompletionRingAvailableMax      uint32    `json:"tx_completion_ring_available_max,omitempty"`
 	DebugInFlightRecycles             uint32    `json:"debug_in_flight_recycles,omitempty"`
 	// #802/#804: ring-pressure instrumentation mirror fields. See the
 	// Rust `BindingStatus` for semantics and write sites. The #804
@@ -833,6 +839,10 @@ type BindingCountersSnapshot struct {
 	DbgCoSQueueOverflow         uint64 `json:"dbg_cos_queue_overflow,omitempty"`
 	RxFillRingEmptyDescs        uint64 `json:"rx_fill_ring_empty_descs,omitempty"`
 	OutstandingTX               uint32 `json:"outstanding_tx,omitempty"`
+	// #1241: low-frequency AF_XDP TX completion-ring availability
+	// gauges mirrored from BindingStatus for fast-poll consumers.
+	TXCompletionRingAvailable    uint32 `json:"tx_completion_ring_available,omitempty"`
+	TXCompletionRingAvailableMax uint32 `json:"tx_completion_ring_available_max,omitempty"`
 	// #878: per-binding capacities pulled through to the leaner
 	// snapshot so the daemon's fast poller can compute Buffer%
 	// without joining the full BindingStatus. See BindingStatus

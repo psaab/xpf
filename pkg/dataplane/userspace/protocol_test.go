@@ -24,6 +24,11 @@ var tx_kick_latency_wire_keys = []string{
 	"tx_kick_retry_count",
 }
 
+var tx_completion_ring_wire_keys = []string{
+	"tx_completion_ring_available",
+	"tx_completion_ring_available_max",
+}
+
 func TestBindingStatusTxKickLatencyRoundTrip(t *testing.T) {
 	// Encode a Go BindingStatus with non-trivial values on the
 	// four kick-latency fields; decode the JSON back; assert
@@ -151,6 +156,72 @@ func TestBindingCountersSnapshotTxKickLatencyBackwardCompat(t *testing.T) {
 	if back.TxKickRetryCount != 0 {
 		t.Fatalf("pre-#825 TxKickRetryCount must be 0, got %d",
 			back.TxKickRetryCount)
+	}
+}
+
+func TestBindingStatusTXCompletionRingRoundTrip(t *testing.T) {
+	in := BindingStatus{
+		WorkerID:                     3,
+		Slot:                         7,
+		Ifindex:                      11,
+		QueueID:                      2,
+		TXCompletionRingAvailable:    17,
+		TXCompletionRingAvailableMax: 29,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range tx_completion_ring_wire_keys {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from BindingStatus JSON: %s", key, string(raw))
+		}
+	}
+
+	var back BindingStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal BindingStatus: %v", err)
+	}
+	if back.TXCompletionRingAvailable != 17 {
+		t.Fatalf("TXCompletionRingAvailable: got %d, want 17", back.TXCompletionRingAvailable)
+	}
+	if back.TXCompletionRingAvailableMax != 29 {
+		t.Fatalf("TXCompletionRingAvailableMax: got %d, want 29", back.TXCompletionRingAvailableMax)
+	}
+}
+
+func TestBindingCountersSnapshotTXCompletionRingRoundTrip(t *testing.T) {
+	in := BindingCountersSnapshot{
+		WorkerID:                     3,
+		Ifindex:                      11,
+		QueueID:                      2,
+		TXCompletionRingAvailable:    31,
+		TXCompletionRingAvailableMax: 47,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range tx_completion_ring_wire_keys {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from BindingCountersSnapshot JSON: %s", key, string(raw))
+		}
+	}
+
+	var back BindingCountersSnapshot
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal BindingCountersSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
 	}
 }
 

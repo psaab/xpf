@@ -381,6 +381,26 @@ no flow byte counter moved. Truncated flow-worker snapshots reset the
 window and suppress the observed metrics until a fresh baseline is
 available.
 
+### PR #1241 — TX completion uniformity telemetry
+
+Before the next full fairness measurement, the dataplane must expose
+whether one AF_XDP binding is falling behind in TX completion service.
+The readiness slice adds:
+
+- `xpf_userspace_binding_tx_completions_total{binding_slot,queue_id,worker_id,iface}`
+- `xpf_userspace_binding_tx_completion_ring_available{binding_slot,queue_id,worker_id,iface}`
+- `xpf_userspace_binding_tx_completion_ring_available_max{binding_slot,queue_id,worker_id,iface}`
+
+The completion counter gives per-binding completion rate via
+Prometheus `rate()`. The two ring gauges are owner-local samples
+published on the existing debug cadence: last observed CQ depth before
+drain and the debug-window peak. The worker resets both local samples
+after publishing, so a zero gauge can mean either no completion backlog
+or no TX work in that debug window; pair it with
+`rate(xpf_userspace_binding_tx_completions_total[...])` before treating
+the queue as idle. These are diagnostic signals only; they do not feed
+MQFQ, v8 lease selection, or admission.
+
 ## Open work
 
 - **#547 — Deterministic RSS-skew test fixture**: SHIPPED as PR #1223
