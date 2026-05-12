@@ -55,7 +55,8 @@ structural ceiling, or is there a scheduler bug?"
 - Harness: `test/incus/fairness-harness.sh` runs iperf3 + 1 Hz
   /metrics scrape; `userspace-dp/src/bin/fairness-eval` parses
   iperf3 -J + 6-col TSV, aggregates per-worker on filtered iface,
-  emits PASS/FAIL verdict JSON.
+  emits PASS/FAIL verdict JSON, and includes iperf retransmit plus
+  optional host/remote/sender CPU diagnostics when iperf3 exports them.
 
 ### PR #1248 — Per-CoS-queue active-flow distribution (2026-05-10)
 

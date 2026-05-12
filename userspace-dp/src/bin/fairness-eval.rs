@@ -32,6 +32,8 @@ const GUARD_ABSOLUTE: u32 = 2;
 struct Iperf3Output {
     start: Iperf3Start,
     intervals: Vec<Iperf3Interval>,
+    #[serde(default)]
+    end: Option<Iperf3End>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +57,8 @@ struct Iperf3TestStart {
     duration: u64,
     #[serde(default, rename = "num_streams")]
     num_streams: u32,
+    #[serde(default)]
+    reverse: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +72,36 @@ struct Iperf3StreamInterval {
     start: f64,
     end: f64,
     bits_per_second: f64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Iperf3End {
+    #[serde(default)]
+    sum_sent: Iperf3EndSum,
+    #[serde(default)]
+    cpu_utilization_percent: Option<Iperf3CpuUtilization>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Iperf3EndSum {
+    #[serde(default)]
+    retransmits: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Iperf3CpuUtilization {
+    #[serde(default)]
+    host_total: f64,
+    #[serde(default)]
+    host_user: f64,
+    #[serde(default)]
+    host_system: f64,
+    #[serde(default)]
+    remote_total: f64,
+    #[serde(default)]
+    remote_user: f64,
+    #[serde(default)]
+    remote_system: f64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -126,6 +160,26 @@ struct Verdict {
     epsilon: f64,
     saturated: bool,
     aggregate_mbps: f64,
+    iperf_retransmits: u64,
+    iperf_reverse: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_cpu_host_total_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_cpu_host_user_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_cpu_host_system_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_cpu_remote_total_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_cpu_remote_user_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_cpu_remote_system_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_sender_cpu_total_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_sender_cpu_user_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iperf_sender_cpu_system_percent: Option<f64>,
     starved_flow_count: u32,
     /// Harness fail-fast guard result: sum(a_i) vs non-starved iperf streams.
     a_i_sum_check_ok: bool,
@@ -661,6 +715,56 @@ fn main() -> ExitCode {
                 / aggregate_buckets_bps.len() as f64)
                 / 1_000_000.0
         };
+    let iperf_retransmits = iperf
+        .end
+        .as_ref()
+        .map(|end| end.sum_sent.retransmits)
+        .unwrap_or(0);
+    let iperf_reverse = iperf.start.test_start.reverse != 0;
+    let iperf_cpu = iperf
+        .end
+        .as_ref()
+        .and_then(|end| end.cpu_utilization_percent.as_ref());
+    let (
+        iperf_cpu_host_total_percent,
+        iperf_cpu_host_user_percent,
+        iperf_cpu_host_system_percent,
+        iperf_cpu_remote_total_percent,
+        iperf_cpu_remote_user_percent,
+        iperf_cpu_remote_system_percent,
+        iperf_sender_cpu_total_percent,
+        iperf_sender_cpu_user_percent,
+        iperf_sender_cpu_system_percent,
+    ) = if let Some(cpu) = iperf_cpu {
+        let sender_total = if iperf_reverse {
+            cpu.remote_total
+        } else {
+            cpu.host_total
+        };
+        let sender_user = if iperf_reverse {
+            cpu.remote_user
+        } else {
+            cpu.host_user
+        };
+        let sender_system = if iperf_reverse {
+            cpu.remote_system
+        } else {
+            cpu.host_system
+        };
+        (
+            Some(cpu.host_total),
+            Some(cpu.host_user),
+            Some(cpu.host_system),
+            Some(cpu.remote_total),
+            Some(cpu.remote_user),
+            Some(cpu.remote_system),
+            Some(sender_total),
+            Some(sender_user),
+            Some(sender_system),
+        )
+    } else {
+        (None, None, None, None, None, None, None, None, None)
+    };
 
     // Saturation: structural cap = (n_active / n_total_workers) × shaper_rate.
     // shaper_rate provided via --shaper-rate-bps; if zero, skip the saturated check.
@@ -763,6 +867,17 @@ fn main() -> ExitCode {
         epsilon: EPSILON,
         saturated,
         aggregate_mbps,
+        iperf_retransmits,
+        iperf_reverse,
+        iperf_cpu_host_total_percent,
+        iperf_cpu_host_user_percent,
+        iperf_cpu_host_system_percent,
+        iperf_cpu_remote_total_percent,
+        iperf_cpu_remote_user_percent,
+        iperf_cpu_remote_system_percent,
+        iperf_sender_cpu_total_percent,
+        iperf_sender_cpu_user_percent,
+        iperf_sender_cpu_system_percent,
         starved_flow_count: starved,
         a_i_sum_check_ok,
         a_i_sum,
