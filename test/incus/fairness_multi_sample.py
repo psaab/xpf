@@ -86,14 +86,14 @@ def stream_text(value: Any) -> str:
     return str(value)
 
 
-def numeric_field(verdict: dict[str, Any], key: str) -> float:
+def numeric_field(verdict: dict[str, Any], key: str, *, allow_negative: bool = False) -> float:
     value = verdict.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise MultiSampleError(f"verdict JSON missing numeric field {key!r}")
     number = float(value)
     if not math.isfinite(number):
         raise MultiSampleError(f"verdict JSON field {key!r} is not finite")
-    if number < 0:
+    if not allow_negative and number < 0:
         raise MultiSampleError(f"verdict JSON field {key!r} is negative")
     return number
 
@@ -121,7 +121,7 @@ def sample_record(index: int, sample_dir: Path, exit_code: int, verdict: dict[st
         "verdict": verdict.get("verdict"),
         "observed_cov": numeric_field(verdict, "observed_cov"),
         "cstruct": numeric_field(verdict, "cstruct"),
-        "gap": numeric_field(verdict, "gap"),
+        "gap": numeric_field(verdict, "gap", allow_negative=True),
         "aggregate_mbps": optional_numeric_field(verdict, "aggregate_mbps"),
         "starved_flow_count": integer_field(verdict, "starved_flow_count"),
         "failure_reasons": verdict.get("failure_reasons", []),
