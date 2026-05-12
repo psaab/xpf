@@ -87,6 +87,12 @@ under shared bottleneck — the leading flow's cwnd never re-converges
 once the others arrive.
 
 This is a **TCP-level** effect, not a dataplane scheduling issue.
+The dataplane-only ECN/RWND mitigation analysis is recorded in
+`docs/per-5-tuple/tcp-head-start-floor.md`; do not reopen the AFD
+path unless a fresh multi-sample harness run satisfies that document's
+revisit criteria. This does not disable the existing CoS-admission ECN
+path; it only rejects a new leader-selective TCP head-start policing
+loop as the default answer.
 
 Mitigation:
 - `tc-fq` (fair queueing qdisc) on the iperf3 sender's egress.

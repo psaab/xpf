@@ -104,6 +104,7 @@ because both ship signal to a future reader, but they fail in
 | # | Issue | Killed | Reason |
 |---|-------|--------|--------|
 | C1 | #1245 | EMPIRICAL-KILL | Multi-receiver test methodology: 5-sample CoS-off comparison (12 streams to 1 port vs 12 streams across 6 ports each running its own iperf3 -s) showed CoV mean delta 2.2pp (51.7% vs 49.5%) — within sample noise. Receiver-side TCP coupling is NOT the variance source. Confounds-only, not a dataplane-mechanism kill. |
+| C2 | #1233 | DOC-RESOLVED | TCP cwnd head-start is a sender/test-workload artifact documented in `docs/per-5-tuple/tcp-head-start-floor.md`. xpf keeps existing CoS-admission ECN, but does not add a new leader-selective AFD ECN/drop or RWND clamp loop unless the multi-sample harness produces an actionable FAIL under the documented revisit criteria. |
 
 ## Multinomial fairness ceiling
 
