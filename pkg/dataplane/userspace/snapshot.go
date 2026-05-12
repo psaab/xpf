@@ -75,6 +75,10 @@ func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation u
 }
 
 const (
+	// Keep logical-only synthetic ifindexes in a high private range so
+	// they do not collide with kernel-assigned ifindexes in practical
+	// deployments, while remaining positive int32 values for protocol
+	// compatibility.
 	syntheticInterfaceIfindexMin = 1 << 30
 	syntheticInterfaceIfindexMax = syntheticInterfaceIfindexMin + (1 << 20) - 1
 )
@@ -100,7 +104,15 @@ func syntheticLogicalIfindex(name string, vlanID int, used map[int]struct{}) int
 		used[candidate] = struct{}{}
 		return candidate
 	}
-	panic(fmt.Sprintf("userspace snapshot: exhausted synthetic ifindex range for %q", name))
+	panic(fmt.Sprintf(
+		"userspace snapshot: exhausted synthetic ifindex range for %q (vlan=%d hash=%d tried=%d range=[%d,%d]); check for hash collisions or excessive logical-only VLAN units",
+		name,
+		vlanID,
+		hash,
+		span,
+		syntheticInterfaceIfindexMin,
+		syntheticInterfaceIfindexMax,
+	))
 }
 
 func shouldUseLogicalOnlyParentBoundRethVLAN(cfg *config.Config, ifName string, unit *config.InterfaceUnit, childIfindex int, parentIfindex int) bool {

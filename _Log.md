@@ -2,6 +2,14 @@
 
 ## 2026-05-12
 
+- **Timestamp**: 2026-05-12T07:16:00Z
+  - **Action**: PR #1271 validation follow-up — documented synthetic-ifindex range rationale, improved exhaustion panic guidance, deduplicated VLAN test constants, and reverted unrelated `go.mod` drift from local test tooling.
+  - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `go.mod`, `_Log.md`
+
+- **Timestamp**: 2026-05-12T07:08:00Z
+  - **Action**: PR #1271 follow-up — enriched synthetic-ifindex exhaustion panic diagnostics and replaced test magic VLAN bound with named constants during validation pass.
+  - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `_Log.md`
+
 - **Timestamp**: 2026-05-12T06:55:00Z
   - **Action**: PR #1271 round-2 follow-up — made parent-bound RETH VLAN synthetic ifindex allocation deterministic/config-derived, removed kernel-ifindex seeding, switched to high synthetic range with hard-fail on exhaustion, and added sibling-VLAN determinism regression coverage.
   - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `_Log.md`

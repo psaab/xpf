@@ -2653,9 +2653,11 @@ func TestBuildInterfaceSnapshotIncludesInputAndOutputFilters(t *testing.T) {
 	}
 }
 
+const maxTestVLANID = 4094
+
 func missingLoopbackVLANID(t *testing.T) int {
 	t.Helper()
-	for vlan := 4094; vlan >= 2; vlan-- {
+	for vlan := maxTestVLANID; vlan >= 2; vlan-- {
 		if _, err := net.InterfaceByName(fmt.Sprintf("lo.%d", vlan)); err != nil {
 			return vlan
 		}
@@ -2667,7 +2669,7 @@ func missingLoopbackVLANID(t *testing.T) int {
 func missingLoopbackVLANIDs(t *testing.T, count int) []int {
 	t.Helper()
 	out := make([]int, 0, count)
-	for vlan := 4094; vlan >= 2 && len(out) < count; vlan-- {
+	for vlan := maxTestVLANID; vlan >= 2 && len(out) < count; vlan-- {
 		if _, err := net.InterfaceByName(fmt.Sprintf("lo.%d", vlan)); err != nil {
 			out = append(out, vlan)
 		}
