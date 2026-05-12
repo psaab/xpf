@@ -355,8 +355,12 @@
 ## 2026-05-12 fairness_multi_sample round-2 HIGH fixes
 
 - **Timestamp**: 2026-05-12T06:50:50Z
-  - **Action**: Round-3 follow-up — tighten verdict JSON detection to the full fairness-eval schema; remove the `os.getpgid` timeout race by using the process-group leader PID directly; add a bounded post-kill `communicate()`; remove a stale threshold-source reference.
+  - **Action**: Round-3 follow-up — tighten verdict JSON detection to the canonical fairness-eval verdict-key set; remove the `os.getpgid` timeout race by using the process-group leader PID directly; add a bounded post-kill `communicate()`; remove a stale threshold-source reference.
   - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md
+
+- **Timestamp**: 2026-05-12T07:45:00Z
+  - **Action**: PR #1273 Copilot follow-up — align multi-sample verdict filtering with the canonical 10-key fairness-eval schema and validate summary numeric fields (`cstruct`, `gap`, optional `aggregate_mbps`, and integer `starved_flow_count`) instead of only `observed_cov`.
+  - **File(s)**: test/incus/fairness_multi_sample.py, test/incus/fairness_multi_sample_test.py, docs/per-5-tuple/v8-multi-sample.md, docs/per-5-tuple/state.md, _Log.md
 
 - **Timestamp**: 2026-05-12T06:29:25Z
   - **Action**: HIGH1 - Tighten extract_verdict_objects to require verdict+observed_cov+discriminator field
