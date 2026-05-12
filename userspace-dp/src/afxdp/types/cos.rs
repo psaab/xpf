@@ -463,8 +463,7 @@ pub(in crate::afxdp) struct CoSQueueConfigState {
     pub(in crate::afxdp) exact: bool,
     /// #915: only meaningful when `exact == true`. When set, the
     /// queue (1) is NOT parked on `queue.hot.tokens < head_len` in
-    /// the exact-guarantee selector
-    /// (`select_exact_cos_guarantee_queue_with_fast_path`), and
+    /// the exact-guarantee selector, and
     /// (2) participates in `select_cos_surplus_batch` as if it
     /// were non-exact. The combined effect is that the queue
     /// retains its strict-priority guarantee but can also draw

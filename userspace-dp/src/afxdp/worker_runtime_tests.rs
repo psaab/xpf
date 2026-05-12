@@ -16,6 +16,8 @@ fn snapshot_roundtrip() {
         thread_cpu_ns: 9_950_000_000,
         work_loops: 1_234_567,
         idle_loops: 1_234,
+        cos_queue_lease_acquire_v8_calls: 55,
+        cos_queue_lease_acquire_v8_granted_bytes: 123_456,
     };
     atomics.publish(&c);
     let s = atomics.snapshot();
@@ -26,6 +28,14 @@ fn snapshot_roundtrip() {
     assert_eq!(s.thread_cpu_ns, c.thread_cpu_ns);
     assert_eq!(s.work_loops, c.work_loops);
     assert_eq!(s.idle_loops, c.idle_loops);
+    assert_eq!(
+        s.cos_queue_lease_acquire_v8_calls,
+        c.cos_queue_lease_acquire_v8_calls
+    );
+    assert_eq!(
+        s.cos_queue_lease_acquire_v8_granted_bytes,
+        c.cos_queue_lease_acquire_v8_granted_bytes
+    );
 }
 
 #[test]
@@ -38,6 +48,8 @@ fn counters_default_zero() {
     assert_eq!(c.thread_cpu_ns, 0);
     assert_eq!(c.work_loops, 0);
     assert_eq!(c.idle_loops, 0);
+    assert_eq!(c.cos_queue_lease_acquire_v8_calls, 0);
+    assert_eq!(c.cos_queue_lease_acquire_v8_granted_bytes, 0);
 }
 
 #[test]

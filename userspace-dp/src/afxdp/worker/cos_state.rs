@@ -30,4 +30,9 @@ pub(crate) struct WorkerCos {
     pub(crate) cos_interface_order: Vec<i32>,
     pub(crate) cos_interface_rr: usize,
     pub(crate) cos_nonempty_interfaces: usize,
+    /// #1240: cumulative worker-owned v8 queue-lease acquire calls
+    /// observed while draining this binding's CoS queues.
+    pub(crate) cos_queue_lease_acquire_v8_calls: u64,
+    /// #1240: cumulative bytes granted by v8 queue-lease acquire calls.
+    pub(crate) cos_queue_lease_acquire_v8_granted_bytes: u64,
 }

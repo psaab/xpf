@@ -51,6 +51,8 @@ pub(crate) struct WorkerRuntimeCounters {
     pub thread_cpu_ns: u64,
     pub work_loops: u64,
     pub idle_loops: u64,
+    pub cos_queue_lease_acquire_v8_calls: u64,
+    pub cos_queue_lease_acquire_v8_granted_bytes: u64,
 }
 
 /// Cacheline-isolated atomic publish slot.  The worker copies its local
@@ -67,6 +69,8 @@ pub(crate) struct WorkerRuntimeAtomics {
     pub thread_cpu_ns: AtomicU64,
     pub work_loops: AtomicU64,
     pub idle_loops: AtomicU64,
+    pub cos_queue_lease_acquire_v8_calls: AtomicU64,
+    pub cos_queue_lease_acquire_v8_granted_bytes: AtomicU64,
     pub tid: AtomicU64,
     /// #925 Phase 1+2 (catch+report+observe): set to true exactly once
     /// when the supervisor catches a worker_loop panic. Set-only today —
@@ -94,6 +98,8 @@ impl WorkerRuntimeAtomics {
             thread_cpu_ns: AtomicU64::new(0),
             work_loops: AtomicU64::new(0),
             idle_loops: AtomicU64::new(0),
+            cos_queue_lease_acquire_v8_calls: AtomicU64::new(0),
+            cos_queue_lease_acquire_v8_granted_bytes: AtomicU64::new(0),
             tid: AtomicU64::new(0),
             dead: AtomicBool::new(false),
             _pad: [],
@@ -110,6 +116,12 @@ impl WorkerRuntimeAtomics {
         self.thread_cpu_ns.store(c.thread_cpu_ns, Ordering::Relaxed);
         self.work_loops.store(c.work_loops, Ordering::Relaxed);
         self.idle_loops.store(c.idle_loops, Ordering::Relaxed);
+        self.cos_queue_lease_acquire_v8_calls
+            .store(c.cos_queue_lease_acquire_v8_calls, Ordering::Relaxed);
+        self.cos_queue_lease_acquire_v8_granted_bytes.store(
+            c.cos_queue_lease_acquire_v8_granted_bytes,
+            Ordering::Relaxed,
+        );
     }
 
     /// Snapshot for status readers.  Not atomic across fields — each
@@ -123,6 +135,12 @@ impl WorkerRuntimeAtomics {
             thread_cpu_ns: self.thread_cpu_ns.load(Ordering::Relaxed),
             work_loops: self.work_loops.load(Ordering::Relaxed),
             idle_loops: self.idle_loops.load(Ordering::Relaxed),
+            cos_queue_lease_acquire_v8_calls: self
+                .cos_queue_lease_acquire_v8_calls
+                .load(Ordering::Relaxed),
+            cos_queue_lease_acquire_v8_granted_bytes: self
+                .cos_queue_lease_acquire_v8_granted_bytes
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -174,4 +192,3 @@ pub(crate) fn current_tid() -> u64 {
 #[cfg(test)]
 #[path = "worker_runtime_tests.rs"]
 mod tests;
-

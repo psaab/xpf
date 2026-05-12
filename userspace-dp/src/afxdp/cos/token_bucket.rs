@@ -24,6 +24,32 @@ use crate::afxdp::worker::BindingWorker;
 /// the buffer-limit gate.
 pub(in crate::afxdp) const COS_MIN_BURST_BYTES: u64 = 64 * 1500;
 
+/// Worker-local observation of v8 queue-lease acquisitions. The hot path
+/// accumulates this in `WorkerCos`, not in the shared lease, so the
+/// diagnostic path does not add cross-worker atomics to `acquire_v8`.
+#[must_use = "queue-lease acquire telemetry must be accumulated by the caller"]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(in crate::afxdp) struct CoSQueueLeaseAcquireTelemetry {
+    pub(in crate::afxdp) v8_calls: u64,
+    pub(in crate::afxdp) v8_granted_bytes: u64,
+}
+
+impl CoSQueueLeaseAcquireTelemetry {
+    #[inline]
+    pub(in crate::afxdp) fn add_assign(&mut self, other: Self) {
+        self.v8_calls = self.v8_calls.wrapping_add(other.v8_calls);
+        self.v8_granted_bytes = self
+            .v8_granted_bytes
+            .wrapping_add(other.v8_granted_bytes);
+    }
+
+    #[inline]
+    fn record_v8_grant(&mut self, granted: u64) {
+        self.v8_calls = self.v8_calls.wrapping_add(1);
+        self.v8_granted_bytes = self.v8_granted_bytes.wrapping_add(granted);
+    }
+}
+
 #[inline]
 pub(in crate::afxdp) fn maybe_top_up_cos_root_lease(
     root: &mut CoSInterfaceRuntime,
@@ -69,12 +95,18 @@ fn acquire_via_lease(
     queue: &CoSQueueRuntime,
     now_ns: u64,
     requested: u64,
-) -> u64 {
+) -> (u64, CoSQueueLeaseAcquireTelemetry) {
     if lease.is_v8() {
         let worker_id = queue.v_min.worker_id as usize;
-        lease.acquire_v8(worker_id, now_ns, requested)
+        let granted = lease.acquire_v8(worker_id, now_ns, requested);
+        let mut telemetry = CoSQueueLeaseAcquireTelemetry::default();
+        telemetry.record_v8_grant(granted);
+        (granted, telemetry)
     } else {
-        lease.acquire(now_ns, requested)
+        (
+            lease.acquire(now_ns, requested),
+            CoSQueueLeaseAcquireTelemetry::default(),
+        )
     }
 }
 
@@ -123,7 +155,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     queue: &mut CoSQueueRuntime,
     shared_queue_lease: Option<&Arc<SharedCoSQueueLease>>,
     now_ns: u64,
-) {
+) -> CoSQueueLeaseAcquireTelemetry {
     // #916: transparent queue. When `transmit_rate_bytes == 0`
     // (scheduler had no `transmit-rate` configured AND the parent
     // root has no `shaping-rate`, see the fallback in
@@ -135,7 +167,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     if queue.transmit_rate_bytes() == 0 {
         queue.hot.tokens = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
         queue.hot.last_refill_ns = now_ns;
-        return;
+        return CoSQueueLeaseAcquireTelemetry::default();
     }
     // #1229 Phase 6 v8: lazy-install lease back-reference + rehydrate
     // per-worker counter on first sight of a v8 lease. Idempotent:
@@ -147,16 +179,16 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     }
     if queue.config.exact {
         let Some(shared_queue_lease) = shared_queue_lease else {
-            return;
+            return CoSQueueLeaseAcquireTelemetry::default();
         };
         let lease_bytes = shared_queue_lease
             .lease_bytes()
             .max(tx_frame_capacity() as u64)
             .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
         if queue.hot.tokens >= lease_bytes {
-            return;
+            return CoSQueueLeaseAcquireTelemetry::default();
         }
-        let grant = acquire_via_lease(
+        let (grant, telemetry) = acquire_via_lease(
             shared_queue_lease,
             queue,
             now_ns,
@@ -168,7 +200,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
             .saturating_add(grant)
             .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
         queue.hot.last_refill_ns = now_ns;
-        return;
+        return telemetry;
     }
     let Some(shared_queue_lease) = shared_queue_lease else {
         let transmit_rate_bytes = queue.transmit_rate_bytes();
@@ -179,16 +211,16 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
             &mut queue.hot.last_refill_ns,
             now_ns,
         );
-        return;
+        return CoSQueueLeaseAcquireTelemetry::default();
     };
     let lease_bytes = shared_queue_lease
         .lease_bytes()
         .max(tx_frame_capacity() as u64)
         .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
     if queue.hot.tokens >= lease_bytes {
-        return;
+        return CoSQueueLeaseAcquireTelemetry::default();
     }
-    let grant = acquire_via_lease(
+    let (grant, telemetry) = acquire_via_lease(
         shared_queue_lease,
         queue,
         now_ns,
@@ -200,6 +232,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
         .saturating_add(grant)
         .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
     queue.hot.last_refill_ns = now_ns;
+    telemetry
 }
 
 #[inline]

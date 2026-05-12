@@ -372,6 +372,16 @@ For production observability, xpf MUST export:
   monotonic count of flows that enter the starved-flow threshold
   (< 1% of mean per-flow throughput), de-duplicated while the flow
   remains in the rolling window.
+- **`xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id=...}`**
+  counter: cumulative v8 CoS queue-lease acquire calls made by the
+  worker. Use `rate()` over the same scrape window as worker TX
+  throughput to test the #1240 hypothesis that some workers request
+  queue tokens more frequently.
+- **`xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total{worker_id=...}`**
+  counter: cumulative bytes granted by those v8 acquire calls. Compare
+  per-worker grant rate with per-worker TX byte rate and active-flow
+  distribution to separate lease acquisition imbalance from TCP/NIC
+  effects.
 
 Operators tracking this contract in production monitor the gap
 `(observed_cov - cstruct)` and the starved-flow counter. A
