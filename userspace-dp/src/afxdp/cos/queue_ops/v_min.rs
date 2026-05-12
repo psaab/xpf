@@ -1,4 +1,5 @@
 use super::*;
+use crate::afxdp::neighbor::monotonic_nanos;
 
 // MQFQ V_min coordination split out of queue_ops/mod.rs per #1034 P1.
 // These fns coordinate the per-queue virtual-time floor (`vtime_floor`)
@@ -58,7 +59,7 @@ use super::*;
 /// rather than broadcast a frozen `queue_vtime` that would mislead
 /// peers' V_min calculations as garbage telemetry.
 #[inline]
-pub(in crate::afxdp) fn publish_committed_queue_vtime(queue: Option<&CoSQueueRuntime>) {
+pub(in crate::afxdp) fn publish_committed_queue_vtime(queue: Option<&mut CoSQueueRuntime>) {
     let Some(queue) = queue else {
         return;
     };
@@ -91,7 +92,14 @@ pub(in crate::afxdp) fn publish_committed_queue_vtime(queue: Option<&CoSQueueRun
         return;
     };
     let flow_count = ff.active_flow_buckets;
-    slot.publish(ff.queue_vtime, flow_count);
+    // #1287: Track total bytes served for delta-rate calculation.
+    // This gives peers accurate instantaneous rate vs sum-of-averages lag.
+    let now_ns = monotonic_nanos();
+    let bytes_served = queue.v_min.bytes_served;
+    slot.publish(ff.queue_vtime, flow_count, bytes_served);
+    // Update last publish tracking for next delta calculation
+    queue.v_min.last_published_bytes = bytes_served;
+    queue.v_min.last_publish_ns = now_ns;
 }
 
 #[inline]
@@ -206,12 +214,31 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
         // Compute my fair share of queue rate based on flow count
         let my_fair_share_bps =
             (transmit_rate_bytes as u128 * 8 * my_flows as u128 / total_flows as u128) as u64;
-        // Sum observed bps across all my flow buckets
-        let my_observed_bps: u64 = ff.flow_bucket_observed_bps.iter().sum();
+        
+        // #1287 Fix: Use delta-rate from total_bytes_served, not sum of averages.
+        // Sum-of-averages lags reality by ~100ms window. Delta method gives
+        // true instantaneous rate.
+        let now_ns = monotonic_nanos();
+        let dt_ns = now_ns.saturating_sub(queue.v_min.last_publish_ns);
+        let my_observed_bps = if dt_ns > 0 && queue.v_min.last_publish_ns > 0 {
+            let bytes_delta = queue.v_min.bytes_served.saturating_sub(queue.v_min.last_published_bytes);
+            ((bytes_delta as u128) * 8 * 1_000_000_000u128 / dt_ns as u128) as u64
+        } else {
+            // First measurement or no time elapsed, fall back to sum of averages
+            // (will be 0 on first call, which is safe)
+            ff.flow_bucket_observed_bps.iter().sum()
+        };
+        
         // Throttle if exceeding fair share by >10% (headroom for burst)
-        if my_observed_bps > my_fair_share_bps.saturating_mul(11) / 10 {
-            queue.v_min.v_min_throttles_scratch =
-                queue.v_min.v_min_throttles_scratch.saturating_add(1);
+        // Hysteresis: only unthrottle when below 90% to prevent thundering herd
+        let should_throttle = my_observed_bps > my_fair_share_bps.saturating_mul(11) / 10;
+        let should_unthrottle = my_observed_bps < my_fair_share_bps.saturating_mul(9) / 10;
+        
+        // Track if we were throttling last time (simple hysteresis via skip counter)
+        // If we throttled recently and still above 90%, keep throttling
+        if should_throttle || (queue.v_min.consecutive_v_min_skips > 0 && !should_unthrottle) {
+            queue.v_min.v_min_flow_throttles_scratch =
+                queue.v_min.v_min_flow_throttles_scratch.saturating_add(1);
             return false;
         }
     }

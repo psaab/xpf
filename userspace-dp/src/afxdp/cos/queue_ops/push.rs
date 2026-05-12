@@ -144,7 +144,8 @@ pub(in crate::afxdp) fn cos_queue_push_front(queue: &mut CoSQueueRuntime, item: 
     if let Some(floor) = queue.v_min.vtime_floor.as_ref() {
         if let Some(slot) = floor.slots.get(queue.v_min.worker_id as usize) {
             let flow_count = ff.active_flow_buckets;
-            slot.publish(ff.queue_vtime, flow_count);
+            let total_bytes = queue.v_min.bytes_served;
+            slot.publish(ff.queue_vtime, flow_count, total_bytes);
         }
     }
 

@@ -1150,7 +1150,7 @@ fn bench_pop_commit_settle_publish() {
             inserted,
             0, // now_ns: tests don't depend on EWMA accounting
         );
-        publish_committed_queue_vtime(Some(&root.queues[0]));
+        publish_committed_queue_vtime(Some(&mut root.queues[0]));
     }
 
     let mut measured = std::time::Duration::ZERO;
@@ -1179,7 +1179,7 @@ fn bench_pop_commit_settle_publish() {
             inserted,
             0, // now_ns: tests don't depend on EWMA accounting
         );
-        publish_committed_queue_vtime(Some(&root.queues[0]));
+        publish_committed_queue_vtime(Some(&mut root.queues[0]));
         measured += iter_start.elapsed();
         total_packets += inserted as u64;
     }

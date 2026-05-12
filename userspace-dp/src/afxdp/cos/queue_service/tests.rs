@@ -1369,6 +1369,10 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
             v_min_suspended_remaining: 0,
             v_min_hard_cap_overrides_scratch: 0,
             v_min_throttles_scratch: 0,
+            v_min_flow_throttles_scratch: 0,
+            bytes_served: 0,
+            last_publish_ns: 0,
+            last_published_bytes: 0,
         },
         telemetry: crate::afxdp::types::CoSQueueTelemetry {
             drop_counters: CoSQueueDropCounters::default(),
@@ -1431,6 +1435,10 @@ fn restore_cos_prepared_items_marks_queue_runnable_after_retry() {
             v_min_suspended_remaining: 0,
             v_min_hard_cap_overrides_scratch: 0,
             v_min_throttles_scratch: 0,
+            v_min_flow_throttles_scratch: 0,
+            bytes_served: 0,
+            last_publish_ns: 0,
+            last_published_bytes: 0,
         },
         telemetry: crate::afxdp::types::CoSQueueTelemetry {
             drop_counters: CoSQueueDropCounters::default(),

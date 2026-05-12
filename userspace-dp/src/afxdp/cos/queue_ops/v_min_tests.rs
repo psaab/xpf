@@ -106,7 +106,7 @@ fn vmin_post_settle_publish_writes_committed_vtime() {
 
     // Set queue_vtime as if a drain has just committed.
     test_flow_fair_state_mut(queue).queue_vtime = 12345;
-    publish_committed_queue_vtime(Some(&*queue));
+    publish_committed_queue_vtime(Some(queue));
     assert_eq!(
         floor.slots[2].read(),
         Some(12345),
@@ -116,7 +116,7 @@ fn vmin_post_settle_publish_writes_committed_vtime() {
     // Calling again with a higher vtime advances the slot
     // (idempotent / monotonic in normal flow).
     test_flow_fair_state_mut(queue).queue_vtime = 23456;
-    publish_committed_queue_vtime(Some(&*queue));
+    publish_committed_queue_vtime(Some(queue));
     assert_eq!(
         floor.slots[2].read(),
         Some(23456),
@@ -149,7 +149,7 @@ fn vmin_publish_helper_noop_when_floor_none() {
     assert!(queue.v_min.vtime_floor.is_none());
     test_flow_fair_state_mut(queue).queue_vtime = 99999;
     // Must not panic and must not publish anywhere.
-    publish_committed_queue_vtime(Some(&*queue));
+    publish_committed_queue_vtime(Some(queue));
     // Sanity: still no floor, no observable effect.
     assert!(queue.v_min.vtime_floor.is_none());
 }
@@ -182,7 +182,7 @@ fn vmin_throttle_function_fires_on_lag_breach() {
 
     // Peer worker 0 pegged at vtime 0. Local worker 1 has
     // queue_vtime well past LAG_THRESHOLD (~1.25 MB at 10 Gb/s).
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024; // 100 MB ahead
 
     // V_min check at pop_count==1 must throttle (return false).
@@ -223,7 +223,7 @@ fn vmin_throttle_increments_v_min_throttles_scratch() {
     );
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024; // 100 MB ahead → throttle
 
     assert_eq!(
@@ -280,7 +280,7 @@ fn vmin_hard_cap_override_does_not_double_count_throttle() {
     );
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     // Drive the throttle counter to V_MIN_CONSECUTIVE_SKIP_HARD_CAP - 1
@@ -371,7 +371,7 @@ fn vmin_pop_rollback_repop_postsettle_compose() {
     );
 
     // Post-settle publish: slot reflects the new committed vtime.
-    publish_committed_queue_vtime(Some(&*queue));
+    publish_committed_queue_vtime(Some(queue));
     assert_eq!(
         floor.slots[1].read(),
         Some(test_flow_fair_state(queue).queue_vtime),
@@ -424,7 +424,7 @@ fn vmin_demote_no_drain_all_leak() {
     // Set a non-zero "prior committed" vtime so we can detect
     // accidental publishes-of-zero from drain_all.
     test_flow_fair_state_mut(queue).queue_vtime = 7777;
-    floor.slots[0].publish(7777, 0);
+    floor.slots[0].publish(7777, 0, 0);
     let pre_slot = floor.slots[0].read();
     assert_eq!(pre_slot, Some(7777), "fixture sanity");
 
@@ -504,7 +504,7 @@ fn vmin_vacate_on_bucket_empty() {
     let item = test_flow_cos_item(1234, 1500);
     cos_queue_push_back(queue, item);
     let _ = cos_queue_pop_front(queue);
-    publish_committed_queue_vtime(Some(&*queue));
+    publish_committed_queue_vtime(Some(queue));
     assert!(
         floor.slots[1].read().is_some(),
         "slot should be participating after publish",
@@ -572,7 +572,7 @@ fn vmin_vacate_only_when_last_bucket_empties() {
     account_cos_queue_flow_enqueue(queue, Some(&keys[1]), 1500);
     assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 2);
     // Establish participation by publishing.
-    publish_committed_queue_vtime(Some(&*queue));
+    publish_committed_queue_vtime(Some(queue));
     assert!(floor.slots[1].read().is_some());
     // Dequeue first flow's bucket. active_flow_buckets goes 2→1; no vacate.
     account_cos_queue_flow_dequeue(queue, Some(&keys[0]), 1500);
@@ -612,7 +612,7 @@ fn vmin_hard_cap_force_continue_activates_suspension() {
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
     // Peer 0 publishes a tiny vtime — guarantees the throttle path.
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024; // 100 MB ahead, way past lag.
                                                                      // Each call returns false (throttle) until consecutive_v_min_skips
                                                                      // reaches HARD_CAP. The Nth call returns true (force-continue) and
@@ -742,7 +742,7 @@ fn vmin_hard_cap_counter_resets_on_success() {
     );
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
     // 3 throttles increment the counter to 3.
     for _ in 0..3 {
@@ -817,7 +817,7 @@ fn vmin_prepared_flow_fair_throttle_and_suspension() {
     );
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     // Push a Prepared item so the preflight passes.
@@ -942,7 +942,7 @@ fn vmin_prepared_drain_arms_hard_cap_after_repeated_throttle() {
     );
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     let packet = vec![0u8; 1500];
@@ -1043,7 +1043,7 @@ fn vmin_prepared_drain_unblocks_when_peer_slot_vacates() {
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
     // Peer 0 publishes a tiny vtime — guarantees throttle.
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     let packet = vec![0u8; 1500];
@@ -1123,7 +1123,7 @@ fn vmin_local_hard_cap_suspension_carries_into_prepared_drain() {
     );
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
-    floor.slots[0].publish(0, 0);
+    floor.slots[0].publish(0, 0, 0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024;
 
     // Simulate Local hard-cap firing: arm consecutive_v_min_skips

@@ -832,6 +832,8 @@ pub(in crate::afxdp) fn settle_exact_local_scratch_submission_flow_fair(
             sent_bytes += bytes;
         }
     }
+    // #1287: Update total bytes served for flow-aware V_min
+    queue.v_min.bytes_served = queue.v_min.bytes_served.saturating_add(sent_bytes);
     (sent_packets, sent_bytes)
 }
 

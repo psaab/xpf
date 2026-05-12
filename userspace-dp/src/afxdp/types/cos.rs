@@ -763,6 +763,19 @@ pub(in crate::afxdp) struct VMinQueueState {
     /// (working-as-designed fairness brake) and the hard-cap
     /// override path (escape hatch when the brake is too tight).
     pub(in crate::afxdp) v_min_throttles_scratch: u32,
+    /// #1287: per-queue scratch counter for flow-aware V_min throttle
+    /// decisions (worker throttled because observed rate exceeded
+    /// flow-proportional fair share). Flushed to
+    /// `BindingLiveState::v_min_flow_throttles`.
+    pub(in crate::afxdp) v_min_flow_throttles_scratch: u32,
+    /// #1287: per-worker bytes served tracking for delta-rate calculation.
+    /// Updated on each publish. Peers read this to compute our rate
+    /// via delta, avoiding sum-of-averages inaccuracy.
+    pub(in crate::afxdp) bytes_served: u64,
+    /// Last publish timestamp for rate calculation (CLOCK_MONOTONIC ns).
+    pub(in crate::afxdp) last_publish_ns: u64,
+    /// Last published bytes value for delta calculation.
+    pub(in crate::afxdp) last_published_bytes: u64,
 }
 
 pub(in crate::afxdp) struct CoSQueueTelemetry {

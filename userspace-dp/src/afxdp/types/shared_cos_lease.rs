@@ -179,11 +179,15 @@ pub(in crate::afxdp) struct PaddedVtimeSlot {
     pub(in crate::afxdp) vtime: AtomicU64,
     /// #1287: active flow count for this worker on this queue.
     /// Updated by owning worker on flow bucket enter/exit.
-    /// Read by peers during V_min check to compute flow-proportional
-    /// fair share. Relaxed ordering sufficient — flow count is a hint,
-    /// not hard sync; staleness of few drain cycles acceptable.
+    /// Published with Release ordering alongside vtime to ensure
+    /// peers see consistent (vtime, flow_count) pair.
     pub(in crate::afxdp) flow_count: AtomicU16,
-    _pad: [u8; 54],
+    /// #1287: total bytes served by this worker on this queue.
+    /// Monotonically increasing counter, used by peers to compute
+    /// delta-rate for flow-aware fairness. Updated on each publish
+    /// with Release ordering.
+    pub(in crate::afxdp) total_bytes: AtomicU64,
+    _pad: [u8; 46],
 }
 
 pub(in crate::afxdp) const NOT_PARTICIPATING: u64 = u64::MAX;
@@ -193,7 +197,8 @@ impl PaddedVtimeSlot {
         Self {
             vtime: AtomicU64::new(NOT_PARTICIPATING),
             flow_count: AtomicU16::new(0),
-            _pad: [0; 54],
+            total_bytes: AtomicU64::new(0),
+            _pad: [0; 46],
         }
     }
 
@@ -227,12 +232,13 @@ impl PaddedVtimeSlot {
     /// NOT correspond to committed work, falsely throttling peers.
     /// The test `vmin_no_first_enqueue_publish` enforces this
     /// invariant.
-    pub(in crate::afxdp) fn publish(&self, vtime: u64, flow_count: u16) {
+    pub(in crate::afxdp) fn publish(&self, vtime: u64, flow_count: u16, total_bytes: u64) {
         debug_assert_ne!(
             vtime, NOT_PARTICIPATING,
             "live vtime must not equal sentinel"
         );
         self.flow_count.store(flow_count, Ordering::Relaxed);
+        self.total_bytes.store(total_bytes, Ordering::Relaxed);
         self.vtime.store(vtime, Ordering::Release);
     }
 
@@ -241,6 +247,7 @@ impl PaddedVtimeSlot {
     /// flows on this queue.
     pub(in crate::afxdp) fn vacate(&self) {
         self.flow_count.store(0, Ordering::Relaxed);
+        self.total_bytes.store(0, Ordering::Relaxed);
         self.vtime.store(NOT_PARTICIPATING, Ordering::Release);
     }
 

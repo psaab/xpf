@@ -20,7 +20,7 @@ pub(super) fn service_exact_local_queue_direct(
     let flow_fair = binding
         .cos
         .cos_interfaces
-        .get(&root_ifindex)
+        .get_mut(&root_ifindex)
         .and_then(|root| root.queues.get(queue_idx))
         .map(|queue| queue.flow_fair())
         .unwrap_or(false);
@@ -42,7 +42,7 @@ pub(super) fn service_exact_local_queue_direct(
     let root_budget = binding
         .cos
         .cos_interfaces
-        .get(&root_ifindex)
+        .get_mut(&root_ifindex)
         .map(|root| root.tokens)
         .unwrap_or(0);
     let build = {
@@ -174,8 +174,8 @@ pub(super) fn service_exact_local_queue_direct(
         binding
             .cos
             .cos_interfaces
-            .get(&root_ifindex)
-            .and_then(|root| root.queues.get(queue_idx)),
+            .get_mut(&root_ifindex)
+            .and_then(|root| root.queues.get_mut(queue_idx)),
     );
     apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
     maybe_wake_tx(binding, true, now_ns);
@@ -199,7 +199,7 @@ fn service_exact_local_queue_direct_flow_fair(
     let root_budget = binding
         .cos
         .cos_interfaces
-        .get(&root_ifindex)
+        .get_mut(&root_ifindex)
         .map(|root| root.tokens)
         .unwrap_or(0);
     let build = {
@@ -336,8 +336,8 @@ fn service_exact_local_queue_direct_flow_fair(
         binding
             .cos
             .cos_interfaces
-            .get(&root_ifindex)
-            .and_then(|root| root.queues.get(queue_idx)),
+            .get_mut(&root_ifindex)
+            .and_then(|root| root.queues.get_mut(queue_idx)),
     );
     apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
     maybe_wake_tx(binding, true, now_ns);
@@ -355,7 +355,7 @@ pub(super) fn service_exact_prepared_queue_direct(
     let flow_fair = binding
         .cos
         .cos_interfaces
-        .get(&root_ifindex)
+        .get_mut(&root_ifindex)
         .and_then(|root| root.queues.get(queue_idx))
         .map(|queue| queue.flow_fair())
         .unwrap_or(false);
@@ -373,7 +373,7 @@ pub(super) fn service_exact_prepared_queue_direct(
     let root_budget = binding
         .cos
         .cos_interfaces
-        .get(&root_ifindex)
+        .get_mut(&root_ifindex)
         .map(|root| root.tokens)
         .unwrap_or(0);
     let build = {
@@ -506,8 +506,8 @@ pub(super) fn service_exact_prepared_queue_direct(
         binding
             .cos
             .cos_interfaces
-            .get(&root_ifindex)
-            .and_then(|root| root.queues.get(queue_idx)),
+            .get_mut(&root_ifindex)
+            .and_then(|root| root.queues.get_mut(queue_idx)),
     );
     apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
     maybe_wake_tx(binding, true, now_ns);
@@ -527,7 +527,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
     let root_budget = binding
         .cos
         .cos_interfaces
-        .get(&root_ifindex)
+        .get_mut(&root_ifindex)
         .map(|root| root.tokens)
         .unwrap_or(0);
     let build = {
@@ -674,8 +674,8 @@ fn service_exact_prepared_queue_direct_flow_fair(
         binding
             .cos
             .cos_interfaces
-            .get(&root_ifindex)
-            .and_then(|root| root.queues.get(queue_idx)),
+            .get_mut(&root_ifindex)
+            .and_then(|root| root.queues.get_mut(queue_idx)),
     );
     apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
     maybe_wake_tx(binding, true, now_ns);

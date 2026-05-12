@@ -657,7 +657,7 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
     // because the worker's per-iteration rx-then-tx ordering
     // serializes demote (rx path) before the in-flight tx batch's
     // settle.
-    publish_committed_queue_vtime(Some(&*queue));
+    publish_committed_queue_vtime(Some(queue));
 
     true
 }
