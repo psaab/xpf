@@ -57,11 +57,21 @@ class FairnessMultiSampleTest(unittest.TestCase):
         objects = fairness_multi_sample.extract_verdict_objects(text)
         self.assertEqual(objects, [])
 
-    def test_numeric_field_rejects_non_finite_negative_and_bool(self) -> None:
+    def test_numeric_field_rejects_non_finite_negative_and_bool_by_default(self) -> None:
         for value in [True, False, math.nan, math.inf, -math.inf, -0.1, "0.1"]:
             with self.subTest(value=value):
                 with self.assertRaises(fairness_multi_sample.MultiSampleError):
                     fairness_multi_sample.numeric_field({"observed_cov": value}, "observed_cov")
+
+    def test_numeric_field_allows_negative_gap_when_requested(self) -> None:
+        self.assertEqual(
+            fairness_multi_sample.numeric_field(
+                {"gap": -0.25},
+                "gap",
+                allow_negative=True,
+            ),
+            -0.25,
+        )
 
     def test_sample_record_validates_numeric_summary_fields(self) -> None:
         base_verdict = {
@@ -90,6 +100,25 @@ class FairnessMultiSampleTest(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 with self.assertRaises(fairness_multi_sample.MultiSampleError):
                     fairness_multi_sample.sample_record(1, Path("sample-1"), 0, verdict)
+
+    def test_sample_record_accepts_negative_gap(self) -> None:
+        verdict = {
+            "verdict": "PASS",
+            "observed_cov": 0.01,
+            "cstruct": 0.5,
+            "gap": -0.49,
+            "aggregate_mbps": 1.0,
+            "starved_flow_count": 0,
+            "failure_reasons": [],
+            "distribution_a_i": [1],
+            "n_active": 1,
+            "saturated": True,
+            "a_i_sum_check_ok": True,
+        }
+
+        record = fairness_multi_sample.sample_record(1, Path("sample-1"), 0, verdict)
+
+        self.assertEqual(record["gap"], -0.49)
 
     def test_summary_fails_thresholds(self) -> None:
         summary = fairness_multi_sample.summarize(
