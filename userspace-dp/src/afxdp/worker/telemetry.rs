@@ -27,6 +27,8 @@ pub(crate) struct WorkerTelemetry {
     pub(crate) dbg_tx_ring_submitted: u64,
     pub(crate) dbg_tx_ring_full: u64,
     pub(crate) dbg_completions_reaped: u64,
+    pub(crate) dbg_tx_completion_ring_available: u32,
+    pub(crate) dbg_tx_completion_ring_available_max: u32,
     pub(crate) dbg_sendto_calls: u64,
     pub(crate) dbg_sendto_err: u64,
     pub(crate) dbg_sendto_eagain: u64,

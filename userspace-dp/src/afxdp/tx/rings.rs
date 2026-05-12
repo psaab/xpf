@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 
 use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::PreparedTxRecycle;
-use crate::afxdp::worker::BindingWorker;
+use crate::afxdp::worker::{BindingWorker, WorkerTelemetry};
 use crate::afxdp::{
     FILL_BATCH_SIZE, FILL_WAKE_SAFETY_INTERVAL_NS,
     RX_WAKE_IDLE_POLLS, RX_WAKE_MIN_INTERVAL_NS,
@@ -24,10 +24,12 @@ pub(in crate::afxdp) fn reap_tx_completions(
     if binding.tx_pipeline.outstanding_tx == 0 {
         return 0;
     }
-    let available = binding.xsk.device.available();
-    if available == 0 {
+    let Some(available) = record_tx_completion_ring_available_for_reap(
+        &mut binding.telemetry,
+        binding.xsk.device.available(),
+    ) else {
         return 0;
-    }
+    };
     let mut reaped = 0u32;
     binding.scratch.scratch_completed_offsets.clear();
     let mut completed = binding.xsk.device.complete(available);
@@ -66,6 +68,26 @@ pub(in crate::afxdp) fn reap_tx_completions(
         .fetch_add(reaped as u64, Ordering::Relaxed);
     update_binding_debug_state(binding);
     reaped
+}
+
+fn record_tx_completion_ring_available(telemetry: &mut WorkerTelemetry, available: u32) {
+    telemetry.dbg_tx_completion_ring_available = available;
+    telemetry.dbg_tx_completion_ring_available_max = telemetry
+        .dbg_tx_completion_ring_available_max
+        .max(available);
+}
+
+#[must_use]
+fn record_tx_completion_ring_available_for_reap(
+    telemetry: &mut WorkerTelemetry,
+    available: u32,
+) -> Option<u32> {
+    record_tx_completion_ring_available(telemetry, available);
+    if available == 0 {
+        None
+    } else {
+        Some(available)
+    }
 }
 
 pub(in crate::afxdp) fn drain_pending_fill(binding: &mut BindingWorker, now_ns: u64) -> bool {
@@ -330,6 +352,51 @@ mod tests {
 
         assert_eq!(free_tx_frames, VecDeque::from(vec![41]));
         assert_eq!(shared_recycles, vec![(7, 42)]);
+    }
+
+    #[test]
+    fn record_tx_completion_ring_available_tracks_zero_current_and_window_max() {
+        let mut telemetry = WorkerTelemetry::default();
+
+        record_tx_completion_ring_available(&mut telemetry, 8);
+        assert_eq!(telemetry.dbg_tx_completion_ring_available, 8);
+        assert_eq!(telemetry.dbg_tx_completion_ring_available_max, 8);
+
+        record_tx_completion_ring_available(&mut telemetry, 0);
+        assert_eq!(telemetry.dbg_tx_completion_ring_available, 0);
+        assert_eq!(
+            telemetry.dbg_tx_completion_ring_available_max, 8,
+            "available == 0 must still publish the current idle sample without clearing the debug-window peak"
+        );
+
+        record_tx_completion_ring_available(&mut telemetry, 13);
+        assert_eq!(telemetry.dbg_tx_completion_ring_available, 13);
+        assert_eq!(telemetry.dbg_tx_completion_ring_available_max, 13);
+    }
+
+    #[test]
+    fn record_tx_completion_ring_available_for_reap_records_before_zero_decision() {
+        let mut telemetry = WorkerTelemetry {
+            dbg_tx_completion_ring_available_max: 8,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            record_tx_completion_ring_available_for_reap(&mut telemetry, 0),
+            None
+        );
+        assert_eq!(telemetry.dbg_tx_completion_ring_available, 0);
+        assert_eq!(
+            telemetry.dbg_tx_completion_ring_available_max, 8,
+            "zero-available reap decisions must preserve the debug-window peak"
+        );
+
+        assert_eq!(
+            record_tx_completion_ring_available_for_reap(&mut telemetry, 13),
+            Some(13)
+        );
+        assert_eq!(telemetry.dbg_tx_completion_ring_available, 13);
+        assert_eq!(telemetry.dbg_tx_completion_ring_available_max, 13);
     }
 
 }

@@ -320,6 +320,64 @@ func TestEmitBindingActiveFlowCount_LabelsAndValue(t *testing.T) {
 	}
 }
 
+func TestEmitBindingTXCompletionTelemetry_LabelsAndValues(t *testing.T) {
+	c := &xpfCollector{
+		bindingTXCompletions: prometheus.NewDesc(
+			"xpf_userspace_binding_tx_completions_total",
+			"test desc",
+			[]string{"binding_slot", "queue_id", "worker_id", "iface"},
+			nil,
+		),
+		bindingTXCompletionRingAvailable: prometheus.NewDesc(
+			"xpf_userspace_binding_tx_completion_ring_available",
+			"test desc",
+			[]string{"binding_slot", "queue_id", "worker_id", "iface"},
+			nil,
+		),
+		bindingTXCompletionRingAvailableMax: prometheus.NewDesc(
+			"xpf_userspace_binding_tx_completion_ring_available_max",
+			"test desc",
+			[]string{"binding_slot", "queue_id", "worker_id", "iface"},
+			nil,
+		),
+	}
+
+	status := dpuserspace.ProcessStatus{
+		Bindings: []dpuserspace.BindingStatus{{
+			Slot:                         2,
+			QueueID:                      5,
+			WorkerID:                     7,
+			Interface:                    "ge-0-0-1",
+			TXCompletions:                1234,
+			TXCompletionRingAvailable:    17,
+			TXCompletionRingAvailableMax: 29,
+		}},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitBindingTXCompletionTelemetry(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 3 {
+		t.Fatalf("emitBindingTXCompletionTelemetry: want 3 metrics, got %d", len(got))
+	}
+
+	labels := map[string]string{
+		"binding_slot": "2",
+		"queue_id":     "5",
+		"worker_id":    "7",
+		"iface":        "ge-0-0-1",
+	}
+	assertCounterClose(t, got, c.bindingTXCompletions, labels, 1234)
+	assertGaugeClose(t, got, c.bindingTXCompletionRingAvailable, labels, 17)
+	assertGaugeClose(t, got, c.bindingTXCompletionRingAvailableMax, labels, 29)
+}
+
 func TestEmitCoSActiveFlowCount_LabelsAndValue(t *testing.T) {
 	c := &xpfCollector{
 		cosActiveFlowCount: prometheus.NewDesc(
@@ -647,6 +705,36 @@ func assertGaugeClose(
 			t.Fatalf("metric %s has no gauge", desc)
 		}
 		if got := pb.Gauge.GetValue(); math.Abs(got-want) > 0.000001 {
+			t.Fatalf("metric %s labels=%v got %v, want %v", desc, wantLabels, got, want)
+		}
+		return
+	}
+	t.Fatalf("metric %s labels=%v not found", desc, wantLabels)
+}
+
+func assertCounterClose(
+	t *testing.T,
+	metrics []prometheus.Metric,
+	desc *prometheus.Desc,
+	wantLabels map[string]string,
+	want float64,
+) {
+	t.Helper()
+	for _, m := range metrics {
+		if m.Desc() != desc {
+			continue
+		}
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("write metric: %v", err)
+		}
+		if !metricHasLabels(&pb, wantLabels) {
+			continue
+		}
+		if pb.Counter == nil {
+			t.Fatalf("metric %s has no counter", desc)
+		}
+		if got := pb.Counter.GetValue(); math.Abs(got-want) > 0.000001 {
 			t.Fatalf("metric %s labels=%v got %v, want %v", desc, wantLabels, got, want)
 		}
 		return

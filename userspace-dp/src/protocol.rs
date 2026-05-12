@@ -1491,6 +1491,16 @@ pub(crate) struct BindingStatus {
     pub debug_pending_tx_local: u32,
     #[serde(rename = "debug_outstanding_tx", default)]
     pub debug_outstanding_tx: u32,
+    /// #1241: last sampled AF_XDP TX completion-ring availability
+    /// before completion drain. This is a low-frequency status gauge
+    /// published from owner-local worker telemetry; it is not read by
+    /// the scheduler.
+    #[serde(rename = "tx_completion_ring_available", default)]
+    pub tx_completion_ring_available: u32,
+    /// #1241: maximum sampled completion-ring availability in the last
+    /// debug window.
+    #[serde(rename = "tx_completion_ring_available_max", default)]
+    pub tx_completion_ring_available_max: u32,
     #[serde(rename = "debug_in_flight_recycles", default)]
     pub debug_in_flight_recycles: u32,
     // #802: ring-pressure instrumentation. Operator-facing cumulative
@@ -1638,6 +1648,13 @@ pub(crate) struct BindingCountersSnapshot {
     pub rx_fill_ring_empty_descs: u64,
     #[serde(rename = "outstanding_tx", default)]
     pub outstanding_tx: u32,
+    /// #1241: last sampled AF_XDP TX completion-ring availability.
+    #[serde(rename = "tx_completion_ring_available", default)]
+    pub tx_completion_ring_available: u32,
+    /// #1241: maximum sampled completion-ring availability in the last
+    /// debug window.
+    #[serde(rename = "tx_completion_ring_available_max", default)]
+    pub tx_completion_ring_available_max: u32,
     /// #878: per-binding UMEM total frames. Mirror of BindingStatus.
     #[serde(rename = "umem_total_frames", default)]
     pub umem_total_frames: u32,
@@ -1738,6 +1755,8 @@ impl From<&BindingStatus> for BindingCountersSnapshot {
             dbg_cos_queue_overflow: b.dbg_cos_queue_overflow,
             rx_fill_ring_empty_descs: b.rx_fill_ring_empty_descs,
             outstanding_tx: b.outstanding_tx,
+            tx_completion_ring_available: b.tx_completion_ring_available,
+            tx_completion_ring_available_max: b.tx_completion_ring_available_max,
             // #878: capacities + in-flight gauge flow into the
             // leaner snapshot so a step1-capture consumer reading
             // PerBinding (not the full BindingStatus) still sees
@@ -2065,6 +2084,56 @@ mod tests {
         assert_eq!(snap.tx_kick_latency_count, status.tx_kick_latency_count);
         assert_eq!(snap.tx_kick_latency_sum_ns, status.tx_kick_latency_sum_ns);
         assert_eq!(snap.tx_kick_retry_count, status.tx_kick_retry_count);
+    }
+
+    // #1241: pin the TX completion-ring availability wire keys at the
+    // rich BindingStatus layer and the lean BindingCountersSnapshot
+    // projection. Missing keys would decode as zeros on the Go side,
+    // exactly the failure mode this telemetry is meant to avoid before
+    // full fairness measurements.
+    #[test]
+    fn tx_completion_ring_binding_status_wire_roundtrip() {
+        let status = BindingStatus {
+            worker_id: 3,
+            slot: 7,
+            ifindex: 11,
+            queue_id: 2,
+            tx_completion_ring_available: 17,
+            tx_completion_ring_available_max: 29,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&status).expect("serialize BindingStatus");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("deserialize BindingStatus JSON");
+        assert_eq!(value["tx_completion_ring_available"], 17);
+        assert_eq!(value["tx_completion_ring_available_max"], 29);
+
+        let back: BindingStatus =
+            serde_json::from_str(&json).expect("deserialize BindingStatus");
+        assert_eq!(back.tx_completion_ring_available, 17);
+        assert_eq!(back.tx_completion_ring_available_max, 29);
+    }
+
+    #[test]
+    fn tx_completion_ring_from_binding_status_propagates() {
+        let status = BindingStatus {
+            worker_id: 5,
+            queue_id: 3,
+            tx_completion_ring_available: 31,
+            tx_completion_ring_available_max: 47,
+            ..Default::default()
+        };
+
+        let snap: BindingCountersSnapshot = (&status).into();
+        assert_eq!(
+            snap.tx_completion_ring_available,
+            status.tx_completion_ring_available
+        );
+        assert_eq!(
+            snap.tx_completion_ring_available_max,
+            status.tx_completion_ring_available_max
+        );
     }
 
     // #943 Copilot round-2 finding #3: the rich BindingStatus wire

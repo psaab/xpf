@@ -371,6 +371,15 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) debug_pending_tx_prepared: AtomicU32,
     pub(super) debug_pending_tx_local: AtomicU32,
     pub(super) debug_outstanding_tx: AtomicU32,
+    /// #1241: last sampled AF_XDP TX completion-ring availability
+    /// before the owner worker drained completions. Published on the
+    /// existing debug tick from owner-local telemetry so the forwarding
+    /// hot path does not introduce cross-worker cacheline traffic.
+    pub(super) tx_completion_ring_available: AtomicU32,
+    /// #1241: maximum sampled completion-ring availability during the
+    /// last debug window. This catches short CQ buildup that a latest
+    /// sample can miss when the owner drains quickly.
+    pub(super) tx_completion_ring_available_max: AtomicU32,
     pub(super) debug_in_flight_recycles: AtomicU32,
     /// #878: total UMEM frames allocated to this binding. Set once
     /// at worker construction (after `binding_frame_count_for_driver`)
@@ -525,6 +534,8 @@ impl BindingLiveState {
             debug_pending_tx_prepared: AtomicU32::new(0),
             debug_pending_tx_local: AtomicU32::new(0),
             debug_outstanding_tx: AtomicU32::new(0),
+            tx_completion_ring_available: AtomicU32::new(0),
+            tx_completion_ring_available_max: AtomicU32::new(0),
             debug_in_flight_recycles: AtomicU32::new(0),
             // #878: capacities are stored once by the worker at
             // construction time (in worker.rs after
@@ -809,6 +820,10 @@ impl BindingLiveState {
             debug_pending_tx_prepared: self.debug_pending_tx_prepared.load(Ordering::Relaxed),
             debug_pending_tx_local: self.debug_pending_tx_local.load(Ordering::Relaxed),
             debug_outstanding_tx: self.debug_outstanding_tx.load(Ordering::Relaxed),
+            tx_completion_ring_available: self.tx_completion_ring_available.load(Ordering::Relaxed),
+            tx_completion_ring_available_max: self
+                .tx_completion_ring_available_max
+                .load(Ordering::Relaxed),
             debug_in_flight_recycles: self.debug_in_flight_recycles.load(Ordering::Relaxed),
             // #878: per-binding UMEM/TX-ring capacities (set once at
             // worker startup) and current in-flight frames

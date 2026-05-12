@@ -382,6 +382,23 @@ For production observability, xpf MUST export:
   per-worker grant rate with per-worker TX byte rate and active-flow
   distribution to separate lease acquisition imbalance from TCP/NIC
   effects.
+- **`xpf_userspace_binding_tx_completions_total{binding_slot=..., queue_id=..., worker_id=..., iface=...}`**
+  counter: cumulative AF_XDP TX completions reaped by each binding's
+  owner worker. Use `rate()` during fairness runs to detect per-RX-queue
+  completion-service asymmetry.
+- **`xpf_userspace_binding_tx_completion_ring_available{binding_slot=..., queue_id=..., worker_id=..., iface=...}`**
+  gauge: last sampled AF_XDP TX completion-ring descriptors available
+  before the owner worker drained completions. This is a diagnostic
+  status sample, not a scheduler input. The worker resets the local
+  sample after publishing; a zero value can mean either no completion
+  backlog or no TX work in the last debug window, so disambiguate with
+  `rate(xpf_userspace_binding_tx_completions_total[...])`.
+- **`xpf_userspace_binding_tx_completion_ring_available_max{binding_slot=..., queue_id=..., worker_id=..., iface=...}`**
+  gauge: maximum sampled completion-ring availability in the last
+  debug window. Non-zero skew here distinguishes TX completion backlog
+  from pure RSS/flow-placement skew. Like the current-value gauge, this
+  is reset after each publish and should be interpreted alongside the
+  per-binding completion rate.
 
 Operators tracking this contract in production monitor the gap
 `(observed_cov - cstruct)` and the starved-flow counter. A

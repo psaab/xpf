@@ -661,6 +661,8 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         dbg_cos_queue_overflow: 12,
         rx_fill_ring_empty_descs: 7,
         outstanding_tx: 8,
+        tx_completion_ring_available: 30,
+        tx_completion_ring_available_max: 32,
         tx_errors: 9,
         tx_submit_error_drops: 10,
         pending_tx_local_overflow_drops: 11,
@@ -705,6 +707,12 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         "dbg_cos_queue_overflow",
         "rx_fill_ring_empty_descs",
         "outstanding_tx",
+        // #1241: TX completion-ring uniformity wire keys. These
+        // are required before full flow-fairness measurements so
+        // step1/fairness consumers can separate CQ backlog from
+        // RSS-placement skew.
+        "tx_completion_ring_available",
+        "tx_completion_ring_available_max",
         "tx_errors",
         "tx_submit_error_drops",
         "pending_tx_local_overflow_drops",
@@ -807,6 +815,8 @@ fn tx_latency_hist_serialization_roundtrip() {
         dbg_cos_queue_overflow: 0,
         rx_fill_ring_empty_descs: 0,
         outstanding_tx: 0,
+        tx_completion_ring_available: 0,
+        tx_completion_ring_available_max: 0,
         tx_errors: 0,
         tx_submit_error_drops: 0,
         pending_tx_local_overflow_drops: 0,
