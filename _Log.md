@@ -2,6 +2,10 @@
 
 ## 2026-05-12
 
+- **Timestamp**: 2026-05-12T07:50:00Z
+  - **Action**: PR #1274 Copilot follow-up — use verdict JSON key names consistently in the Accepted Path publish list.
+  - **File(s)**: `docs/per-5-tuple/tcp-head-start-floor.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-12T06:46:48Z
   - **Action**: PR #1274 review follow-up — wrapped TCP head-start policy prose and made the observed CoV prose/JSON-field distinction explicit.
   - **File(s)**: `docs/per-5-tuple/tcp-head-start-floor.md`, `_Log.md`
