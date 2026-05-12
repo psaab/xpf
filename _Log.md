@@ -2,6 +2,10 @@
 
 ## 2026-05-12
 
+- **Timestamp**: 2026-05-12T07:35:00Z
+  - **Action**: PR #1271 round-3 follow-up — add same-VLAN/different-RETH synthetic-ifindex regressions so `reth0.N` and `reth1.N` cannot collapse into one logical Rust dataplane state key.
+  - **File(s)**: `pkg/dataplane/userspace/manager_test.go`, `_Log.md`
+
 - **Timestamp**: 2026-05-12T07:20:00Z
   - **Action**: PR #1271 cleanup — removed unrelated `go.mod` direct/indirect dependency churn introduced by local test tooling to keep the diff scoped to synthetic-ifindex changes.
   - **File(s)**: `go.mod`, `_Log.md`
