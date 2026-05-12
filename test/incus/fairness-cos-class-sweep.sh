@@ -107,6 +107,14 @@ for spec in "${classes[@]}"; do
     status=$?
     if (( status == 2 )); then
         overall_status=2
+        append_error_row "$label" "$port" "$queue" "$rate" "$status"
+        sed -n '1,80p' "$out/wrapper.stderr" >&2
+        continue
+    elif (( status != 0 && status != 1 )); then
+        overall_status=2
+        append_error_row "$label" "$port" "$queue" "$rate" "$status"
+        sed -n '1,80p' "$out/wrapper.stderr" >&2
+        continue
     elif (( status != 0 && overall_status == 0 )); then
         overall_status=1
     fi
@@ -128,30 +136,55 @@ for spec in "${classes[@]}"; do
                 else
                     .
                 end;
-            def avg_numeric(key):
-                ([.samples[] | .[key] | select(type == "number")]) as $values
-                | if ($values | length) == 0 then null else (($values | add) / ($values | length)) end;
-            def sum_numeric(key):
-                ([.samples[] | .[key] | select(type == "number")]) as $values
-                | if ($values | length) == 0 then null else ($values | add) end;
-            def text_or_dash:
-                if . == null then "-" else tostring end;
+            def required_number(path; field_name):
+                getpath(path) as $value
+                | if ($value | type) == "number" then
+                    $value
+                else
+                    error("summary.json missing numeric " + field_name)
+                end;
+            def required_string(path; field_name):
+                getpath(path) as $value
+                | if ($value | type) == "string" and ($value | length) > 0 then
+                    $value
+                else
+                    error("summary.json missing string " + field_name)
+                end;
+            def sample_numbers(key):
+                ([.samples[] | .[key]]) as $values
+                | if any($values[]; (type != "number")) then
+                    error("summary.json sample missing numeric " + key)
+                else
+                    $values
+                end;
+            def sample_verdicts:
+                ([.samples[] | .verdict]) as $values
+                | if any($values[]; (type != "string" or length == 0)) then
+                    error("summary.json sample missing string verdict")
+                else
+                    $values
+                end;
             require_samples
+            | sample_numbers("aggregate_mbps") as $aggregate_mbps
+            | sample_numbers("cstruct") as $cstruct
+            | sample_numbers("gap") as $gap
+            | sample_numbers("starved_flow_count") as $starved
+            | sample_verdicts as $sample_verdicts
             | [
                 $class,
                 $port,
                 $queue,
                 $rate,
                 $status,
-                (.verdict // "ERROR"),
-                (.observed_cov.mean | text_or_dash),
-                (.observed_cov.max | text_or_dash),
-                (.observed_cov.sample_stdev | text_or_dash),
-                (avg_numeric("aggregate_mbps") | text_or_dash),
-                (avg_numeric("cstruct") | text_or_dash),
-                (avg_numeric("gap") | text_or_dash),
-                (sum_numeric("starved_flow_count") | text_or_dash),
-                ([.samples[].verdict] | join(","))
+                required_string(["verdict"]; "verdict"),
+                (required_number(["observed_cov", "mean"]; "observed_cov.mean") | tostring),
+                (required_number(["observed_cov", "max"]; "observed_cov.max") | tostring),
+                (required_number(["observed_cov", "sample_stdev"]; "observed_cov.sample_stdev") | tostring),
+                (($aggregate_mbps | add / length) | tostring),
+                (($cstruct | add / length) | tostring),
+                (($gap | add / length) | tostring),
+                ($starved | add | tostring),
+                ($sample_verdicts | join(","))
             ] | @tsv' "$summary_json" > "$row_file" 2> "$jq_err"; then
             cat "$row_file" >> "$SUMMARY_TSV"
             awk -F'\t' '{printf "summary class=%s wrapper_status=%s verdict=%s mean_cov=%s max_cov=%s\n", $1, $5, $6, $7, $8}' "$row_file"
