@@ -20,12 +20,18 @@ use fairness::{
 
 const EPSILON: f64 = 0.05;
 // Tolerance for the harness fail-fast guard per Codex round-4
-// finding #3: sum(per_binding_active_flow_count) ≈ expected_sum
-// within `max(2, floor(10% × expected_sum))`, where
+// finding #3: sum(per_binding_active_flow_count) should stay near
+// expected_sum, where
 // expected_sum = non-starved_streams × direction_multiplier
 // (direction_multiplier=1 when iface_filter_active=true, 2 for
 // legacy/bidirectional input).
+//
+// #1281: active-flow gauges are low-frequency snapshots and can retain
+// recently-active/stale flows for a short window. Preserve the stricter
+// undercount guard because missing telemetry masks real flow loss, but
+// allow a bounded one-sided overcount window for stale entries.
 const GUARD_RELATIVE: f64 = 0.10;
+const GUARD_OVERCOUNT_DIVISOR: u32 = 4;
 const GUARD_ABSOLUTE: u32 = 2;
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +191,8 @@ struct Verdict {
     a_i_sum_check_ok: bool,
     a_i_sum: u32,
     iperf_non_starved_streams: u32,
+    a_i_sum_under_tolerance: u32,
+    a_i_sum_over_tolerance: u32,
     a_i_sum_tolerance: u32,
     /// PASS unless any gate fails.
     verdict: &'static str,
@@ -531,6 +539,14 @@ fn direction_multiplier(iface_filter_active: bool) -> u32 {
     if iface_filter_active { 1 } else { 2 }
 }
 
+fn guard_sum_tolerances(expected_sum: u32) -> (u32, u32) {
+    let under = ((GUARD_RELATIVE * expected_sum as f64) as u32).max(GUARD_ABSOLUTE);
+    let over = expected_sum
+        .saturating_add(GUARD_OVERCOUNT_DIVISOR - 1)
+        / GUARD_OVERCOUNT_DIVISOR;
+    (under, over.max(GUARD_ABSOLUTE))
+}
+
 fn main() -> ExitCode {
     let args: Args = parse_args();
 
@@ -809,9 +825,15 @@ fn main() -> ExitCode {
     // fallback path uses the bidirectional multiplier as well.
     let dir_mult = direction_multiplier(iface_filter_active);
     let expected_sum = n_non_starved.saturating_mul(dir_mult);
-    let tolerance = ((GUARD_RELATIVE * expected_sum as f64) as u32).max(GUARD_ABSOLUTE);
-    let a_i_sum_check_ok =
-        (a_i_sum as i64 - expected_sum as i64).unsigned_abs() as u32 <= tolerance;
+    let (under_tolerance, over_tolerance) = guard_sum_tolerances(expected_sum);
+    let a_i_delta = a_i_sum as i64 - expected_sum as i64;
+    let a_i_abs_delta = a_i_delta.unsigned_abs() as u32;
+    let tolerance = if a_i_delta > 0 {
+        over_tolerance
+    } else {
+        under_tolerance
+    };
+    let a_i_sum_check_ok = a_i_abs_delta <= tolerance;
 
     let mut failure_reasons: Vec<String> = Vec::new();
     if starved > 0 {
@@ -825,10 +847,12 @@ fn main() -> ExitCode {
         ));
     }
     if !a_i_sum_check_ok {
+        let direction = if a_i_delta > 0 { "above" } else { "below" };
         failure_reasons.push(format!(
             "Harness guard: sum(a_i)={a_i_sum} vs expected={expected_sum} \
              (non-starved={n_non_starved} × dir_mult={dir_mult}) \
-             differ by more than tolerance={tolerance}"
+             is {a_i_abs_delta} {direction} expected, exceeding tolerance={tolerance} \
+             (under_tolerance={under_tolerance}, over_tolerance={over_tolerance})"
         ));
     }
     if !rss_expectation_pass {
@@ -882,6 +906,8 @@ fn main() -> ExitCode {
         a_i_sum_check_ok,
         a_i_sum,
         iperf_non_starved_streams: n_non_starved,
+        a_i_sum_under_tolerance: under_tolerance,
+        a_i_sum_over_tolerance: over_tolerance,
         a_i_sum_tolerance: tolerance,
         verdict,
         failure_reasons,
@@ -1384,6 +1410,13 @@ mod aggregation_tests {
     #[test]
     fn direction_multiplier_no_iface_filter_is_two() {
         assert_eq!(direction_multiplier(false), 2);
+    }
+
+    #[test]
+    fn guard_sum_tolerances_are_asymmetric_for_stale_overcount() {
+        assert_eq!(guard_sum_tolerances(12), (2, 3));
+        assert_eq!(guard_sum_tolerances(2), (2, 2));
+        assert_eq!(guard_sum_tolerances(40), (4, 10));
     }
 }
 
