@@ -251,12 +251,13 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
         let mut retained_source_frame = false;
         let mut flow_key = request.flow_key.take();
         {
-            if forwarded_tcp_may_need_segmentation(
+            let tcp_segmentation_needed = forwarded_tcp_may_need_segmentation(
                 source_frame,
                 request.meta,
                 &request.decision,
                 forwarding,
-            ) {
+            );
+            if tcp_segmentation_needed {
                 if let Some((segments, bytes, max_frame)) =
                     segment_forwarded_tcp_frames_into_prepared(
                         target_binding,
@@ -364,9 +365,12 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     }
                 }
             }
-            // Track when segmentation was needed but returned None
-            if !copied_source_frame && source_frame.len() > 1514 {
-                dbg.seg_needed_but_none += 1;
+            // Track when segmentation was needed but both builders returned None.
+            if count_forwarded_tcp_segmentation_miss_if_needed(
+                dbg,
+                copied_source_frame,
+                tcp_segmentation_needed,
+            ) {
                 thread_local! {
                     static SEG_MISS_LOG: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
                 }
@@ -1203,6 +1207,18 @@ pub(in crate::afxdp) fn extract_l3_packet_with_nat(
     Some(packet)
 }
 
+#[inline(always)]
+fn count_forwarded_tcp_segmentation_miss_if_needed(
+    dbg: &mut DebugPollCounters,
+    copied_source_frame: bool,
+    tcp_segmentation_needed: bool,
+) -> bool {
+    if copied_source_frame || !tcp_segmentation_needed {
+        return false;
+    }
+    dbg.seg_needed_but_none += 1;
+    true
+}
 
 #[inline(always)]
 fn forwarded_tcp_may_need_segmentation(
@@ -1228,7 +1244,7 @@ fn forwarded_tcp_may_need_segmentation(
     // `l3_offset=14` as authoritative falsely flags it as needing TCP
     // segmentation. The segmentation builders already re-derive L3 from
     // the frame, so keep this predicate aligned with them.
-    let l3 = frame_l3_offset(frame).or(match meta.l3_offset {
+    let l3 = frame_l3_offset(frame).or_else(|| match meta.l3_offset {
         14 | 18 => Some(meta.l3_offset as usize),
         _ => None,
     });
