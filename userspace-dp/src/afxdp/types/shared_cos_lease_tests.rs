@@ -374,6 +374,150 @@ fn v8_acquire_proportional_share_with_asymmetric_flow_counts() {
 }
 
 #[test]
+fn v8_post_grace_does_not_grant_unarmed_surplus_beyond_fair_share() {
+    // Two workers, A has 4 flows and B has 1. B's primary share is
+    // 1/5 of the epoch cap. Once B has consumed that share, merely
+    // waiting past the grace point must not let it claim A's reserved
+    // primary share. That would preserve RSS-placement unfairness by
+    // allowing low-flow-count workers to overrun their proportional
+    // budget during normal shaper-bound traffic.
+    let lease = SharedCoSQueueLease::new_v8(50_000_000, 256 * 1024, 2, 1);
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+
+    let first = lease.acquire_v8(1, EPOCH_DURATION_NS, 2_000);
+    assert_eq!(first, 2_000, "B gets its 1/5 primary share");
+
+    let after_grace_same_epoch = EPOCH_DURATION_NS + (EPOCH_DURATION_NS / 2) + 1;
+    let second = lease.acquire_v8(1, after_grace_same_epoch, u64::MAX);
+    assert_eq!(
+        second, 0,
+        "unarmed post-grace surplus must not exceed B's fair share"
+    );
+
+    let v8 = lease.v8.as_ref().unwrap();
+    let curr = v8.worker_starvation_events[1].0.load(Ordering::Acquire);
+    let (_tag, events) = PackedEpochGrant::unpack(curr);
+    assert_eq!(
+        events, 1,
+        "post-grace denial must still feed the bypass detector"
+    );
+}
+
+#[test]
+fn v8_explicit_bypass_still_allows_surplus_beyond_fair_share() {
+    // The strict path only removes unconditional post-grace surplus.
+    // The explicit CPU-bound bypass remains available for the
+    // work-conservation case where rotation detected prior-epoch
+    // starvation, aggregate underuse, and an under-utilized peer.
+    let lease = SharedCoSQueueLease::new_v8(50_000_000, 256 * 1024, 2, 1);
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+
+    let first = lease.acquire_v8(1, EPOCH_DURATION_NS, 2_000);
+    assert_eq!(first, 2_000, "B gets its 1/5 primary share");
+
+    lease
+        .v8
+        .as_ref()
+        .unwrap()
+        .epoch
+        .bypass_grace_rotations_remaining
+        .store(1, Ordering::Release);
+
+    let before_grace_same_epoch = EPOCH_DURATION_NS + 1;
+    let second = lease.acquire_v8(1, before_grace_same_epoch, u64::MAX);
+    assert!(
+        second > 0,
+        "explicit bypass should still open surplus when armed"
+    );
+}
+
+#[test]
+fn bypass_does_not_arm_from_underutil_peer_without_demand() {
+    // A quiet peer with a nonzero active-flow count must not be
+    // treated as CPU-bound merely because it consumed less than its
+    // primary share. Otherwise strict exact CoS would immediately
+    // defeat itself in asymmetric normal-traffic placements.
+    let lease = SharedCoSQueueLease::new_v8(50_000_000, 256 * 1024, 2, 1);
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+
+    let _ = lease.acquire_v8(1, EPOCH_DURATION_NS, 1);
+    {
+        let v8 = lease.v8.as_ref().unwrap();
+        let cap = v8.epoch.epoch_total_grant_cap.load(Ordering::Acquire);
+        assert_eq!(cap, 10_000);
+        let curr = v8.epoch.packed_granted.0.load(Ordering::Acquire);
+        let (tag, _) = PackedEpochGrant::unpack(curr);
+        v8.epoch
+            .packed_granted
+            .0
+            .store(PackedEpochGrant::pack(tag, 3_000), Ordering::Release);
+        v8.worker_grants[0]
+            .0
+            .store(PackedEpochGrant::pack(tag, 1_000), Ordering::Release);
+        v8.worker_starvation_events[1]
+            .0
+            .store(PackedEpochGrant::pack(tag, 1), Ordering::Release);
+        v8.worker_demand_events[0]
+            .0
+            .store(PackedEpochGrant::pack(tag, 0), Ordering::Release);
+    }
+
+    let arms_before = lease.v8_bypass_grace_arms();
+    let _ = lease.acquire_v8(1, 2 * EPOCH_DURATION_NS, 1);
+    assert_eq!(
+        lease.v8_bypass_grace_arms(),
+        arms_before,
+        "underutilized peer without demand must not arm bypass"
+    );
+    assert!(!lease.v8_bypass_grace_active());
+}
+
+#[test]
+fn bypass_arms_for_underutil_peer_with_demand() {
+    // Positive control for the demand-qualified peer-underutil gate:
+    // a signaled worker plus aggregate underuse plus an active peer
+    // that both requested lease credit and consumed <60% of share
+    // still arms the explicit CPU-bound bypass.
+    let lease = SharedCoSQueueLease::new_v8(50_000_000, 256 * 1024, 2, 1);
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+
+    let _ = lease.acquire_v8(1, EPOCH_DURATION_NS, 1);
+    {
+        let v8 = lease.v8.as_ref().unwrap();
+        let cap = v8.epoch.epoch_total_grant_cap.load(Ordering::Acquire);
+        assert_eq!(cap, 10_000);
+        let curr = v8.epoch.packed_granted.0.load(Ordering::Acquire);
+        let (tag, _) = PackedEpochGrant::unpack(curr);
+        v8.epoch
+            .packed_granted
+            .0
+            .store(PackedEpochGrant::pack(tag, 3_000), Ordering::Release);
+        v8.worker_grants[0]
+            .0
+            .store(PackedEpochGrant::pack(tag, 1_000), Ordering::Release);
+        v8.worker_starvation_events[1]
+            .0
+            .store(PackedEpochGrant::pack(tag, 1), Ordering::Release);
+        v8.worker_demand_events[0]
+            .0
+            .store(PackedEpochGrant::pack(tag, 1), Ordering::Release);
+    }
+
+    let arms_before = lease.v8_bypass_grace_arms();
+    let _ = lease.acquire_v8(1, 2 * EPOCH_DURATION_NS, 1);
+    assert_eq!(
+        lease.v8_bypass_grace_arms(),
+        arms_before + 1,
+        "demand-qualified underutilized peer should arm bypass"
+    );
+    assert!(lease.v8_bypass_grace_active());
+}
+
+#[test]
 fn v8_lease_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SharedCoSQueueLease>();

@@ -38,6 +38,12 @@ observed CoV exceeds the structural ceiling. Operators can still add
 deliberately balanced-RSS fixture, but those are opt-in diagnostics, not
 the product fairness gate.
 
+For strict exact-CoS lease experiments, keep the default Cstruct gap
+thresholds and add explicit absolute-CoV observations to the report.
+Those experiments intentionally allow a shaped queue to leave unarmed
+surplus idle, so a useful result must show both lower absolute per-flow
+spread and the aggregate-throughput cost paid to get it.
+
 The wrapper reads stdout JSON objects that match the fairness-eval
 verdict schema (`verdict`, `observed_cov`, `cstruct`, `gap`,
 `failure_reasons`, `distribution_a_i`, `n_active`, `saturated`,
