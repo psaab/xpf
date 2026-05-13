@@ -2801,6 +2801,17 @@ func TestUserspaceDataplaneSharedUMEMRejectsArtifactKeyCollision(t *testing.T) {
 	}
 }
 
+func TestUserspaceDataplaneSharedUMEMRejectsArtifactArrayCollision(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	if err := os.WriteFile(artifact, []byte(`{"passed":true,"selected_interfaces":["ge-0/0/1","ge-0-0-1"]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readSharedUMEMPhase0Artifact(artifact)
+	if err == nil || !strings.Contains(err.Error(), "duplicate selected_interfaces entry after Linux interface-name normalization: ge-0-0-1") {
+		t.Fatalf("readSharedUMEMPhase0Artifact error = %v, want normalized-array collision", err)
+	}
+}
+
 func TestUserspaceDataplaneSharedUMEMGroupMergesWithBaseDataplane(t *testing.T) {
 	artifact := t.TempDir() + "/phase0.json"
 	if err := os.WriteFile(artifact, []byte(`{"passed":true}`), 0644); err != nil {

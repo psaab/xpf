@@ -367,11 +367,13 @@ fn write_canonical_json(value: &serde_json::Value, out: &mut String) {
     match value {
         serde_json::Value::Array(values) => {
             out.push('[');
-            for (idx, value) in values.iter().enumerate() {
+            let mut items = values.iter().map(canonical_json_key).collect::<Vec<_>>();
+            items.sort();
+            for (idx, item) in items.iter().enumerate() {
                 if idx > 0 {
                     out.push(',');
                 }
-                write_canonical_json(value, out);
+                out.push_str(item);
             }
             out.push(']');
         }

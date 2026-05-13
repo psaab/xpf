@@ -71,6 +71,9 @@ impl SharedUmemPolicy {
         if self.mode == SharedUmemMode::CrossNic && self.interfaces.is_empty() {
             return Some("cross-NIC shared UMEM requires explicit interfaces".to_string());
         }
+        if self.mode == SharedUmemMode::SameDeviceDebug && self.interfaces.is_empty() {
+            return Some("same-device-debug shared UMEM requires explicit interfaces".to_string());
+        }
         None
     }
 }
@@ -173,8 +176,7 @@ fn apply_same_device_debug_groups(
         let mut by_device: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for idx in 0..plans.len() {
             let plan = &plans[idx];
-            if !policy.interfaces.is_empty() && !policy.interfaces.contains(&plan.status.interface)
-            {
+            if !policy.interfaces.contains(&plan.status.interface) {
                 continue;
             }
             match shared_umem_interface_info(&plan.status.interface) {
@@ -645,6 +647,18 @@ mod tests {
     }
 
     #[test]
+    fn artifact_string_by_interface_reads_non_empty_driver_name_map() {
+        let interfaces = BTreeSet::from(["lan0".to_string()]);
+        assert_eq!(
+            artifact_string_by_interface(&json!({"lan0": "mlx5_core"}), &interfaces),
+            Some(BTreeMap::from([(
+                "lan0".to_string(),
+                "mlx5_core".to_string()
+            )]))
+        );
+    }
+
+    #[test]
     fn complete_phase0_artifact_reaches_cross_nic_interface_gate() {
         let snapshot = ConfigSnapshot {
             userspace: json!({
@@ -660,6 +674,25 @@ mod tests {
         assert_eq!(
             policy.gate_reason().as_deref(),
             Some("cross-NIC shared UMEM requires explicit interfaces")
+        );
+    }
+
+    #[test]
+    fn complete_phase0_artifact_reaches_same_device_interface_gate() {
+        let snapshot = ConfigSnapshot {
+            userspace: json!({
+                "shared_umem": {
+                    "mode": "same-device-debug",
+                    "interfaces": [],
+                    "phase0_artifact": empty_interface_phase0_artifact()
+                }
+            }),
+            ..ConfigSnapshot::default()
+        };
+        let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+        assert_eq!(
+            policy.gate_reason().as_deref(),
+            Some("same-device-debug shared UMEM requires explicit interfaces")
         );
     }
 

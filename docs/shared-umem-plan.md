@@ -274,6 +274,7 @@ Same-device-debug eligibility:
 - `mlx5_core`
 - same non-empty PCI device path
 - at least two bindings in the group
+- explicit operator/config selection of which interfaces participate
 - only used to isolate shared bridge/ring/drop-order bugs before cross-NIC
   rollout
 

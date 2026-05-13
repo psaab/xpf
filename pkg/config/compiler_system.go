@@ -604,7 +604,9 @@ func readSharedUMEMPhase0Artifact(path string) (map[string]interface{}, error) {
 
 func normalizeSharedUMEMArtifactInterfaces(artifact map[string]interface{}) error {
 	for _, key := range []string{"selected_interfaces", "interfaces"} {
-		normalizeSharedUMEMArtifactInterfaceArray(artifact, key)
+		if err := normalizeSharedUMEMArtifactInterfaceArray(artifact, key); err != nil {
+			return err
+		}
 	}
 	for _, key := range []string{
 		"driver",
@@ -623,18 +625,25 @@ func normalizeSharedUMEMArtifactInterfaces(artifact map[string]interface{}) erro
 	return nil
 }
 
-func normalizeSharedUMEMArtifactInterfaceArray(artifact map[string]interface{}, key string) {
+func normalizeSharedUMEMArtifactInterfaceArray(artifact map[string]interface{}, key string) error {
 	values, ok := artifact[key].([]interface{})
 	if !ok {
-		return
+		return nil
 	}
+	seen := make(map[string]struct{}, len(values))
 	for i, value := range values {
 		name, ok := value.(string)
 		if !ok {
 			continue
 		}
-		values[i] = LinuxIfName(name)
+		linuxName := LinuxIfName(name)
+		if _, exists := seen[linuxName]; exists {
+			return fmt.Errorf("duplicate %s entry after Linux interface-name normalization: %s", key, linuxName)
+		}
+		seen[linuxName] = struct{}{}
+		values[i] = linuxName
 	}
+	return nil
 }
 
 func normalizeSharedUMEMArtifactInterfaceMap(artifact map[string]interface{}, key string) error {
