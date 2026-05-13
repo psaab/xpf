@@ -2687,6 +2687,47 @@ func TestUserspaceDataplaneConfig(t *testing.T) {
 	}
 }
 
+func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	if err := os.WriteFile(artifact, []byte(`{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		"set system dataplane-type userspace",
+		"set system dataplane shared-umem mode cross-nic",
+		"set system dataplane shared-umem interface ge-0/0/1",
+		"set system dataplane shared-umem interface ge-0/0/2",
+		"set system dataplane shared-umem phase0-artifact-file " + artifact,
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%v): %v", path, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dp := cfg.System.UserspaceDataplane
+	if dp == nil || dp.SharedUMEM == nil {
+		t.Fatal("SharedUMEM config not compiled")
+	}
+	if dp.SharedUMEM.Mode != "cross-nic" {
+		t.Fatalf("SharedUMEM.Mode = %q, want cross-nic", dp.SharedUMEM.Mode)
+	}
+	if got := strings.Join(dp.SharedUMEM.Interfaces, ","); got != "ge-0/0/1,ge-0/0/2" {
+		t.Fatalf("SharedUMEM.Interfaces = %q", got)
+	}
+	if passed, ok := dp.SharedUMEM.Phase0Artifact["passed"].(bool); !ok || !passed {
+		t.Fatalf("SharedUMEM.Phase0Artifact[passed] = %#v", dp.SharedUMEM.Phase0Artifact["passed"])
+	}
+}
+
 // #797 HIGH/MEDIUM: operator must be able to toggle D3 RSS indirection
 // via a first-class config knob. Setting `rss-indirection disable`
 // must compile to RSSIndirectionDisabled=true; `enable` (or anything

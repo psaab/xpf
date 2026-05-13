@@ -1,6 +1,11 @@
 package config
 
-import "strconv"
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+)
 
 func compileSystem(node *Node, sys *SystemConfig) error {
 	for _, child := range node.Children {
@@ -468,6 +473,12 @@ func compileUserspaceDataplane(node *Node, cfg *UserspaceConfig) error {
 			if v := nodeVal(child); v == "interrupt" || v == "busy-poll" {
 				cfg.PollMode = v
 			}
+		case "shared-umem":
+			shared, err := compileSharedUMEMConfig(child)
+			if err != nil {
+				return err
+			}
+			cfg.SharedUMEM = shared
 		case "rss-indirection":
 			// Defaults to enabled; only the string "disable" flips it off.
 			// Anything else (including "enable" and empty) leaves the
@@ -529,6 +540,35 @@ func compileUserspaceDataplane(node *Node, cfg *UserspaceConfig) error {
 		}
 	}
 	return nil
+}
+
+func compileSharedUMEMConfig(node *Node) (*SharedUMEMConfig, error) {
+	cfg := &SharedUMEMConfig{}
+	for _, child := range node.Children {
+		switch child.Name() {
+		case "mode":
+			cfg.Mode = nodeVal(child)
+		case "interface":
+			if v := nodeVal(child); v != "" {
+				cfg.Interfaces = append(cfg.Interfaces, v)
+			}
+		case "phase0-artifact-file", "artifact-file":
+			path := nodeVal(child)
+			if path == "" {
+				continue
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("read shared-umem artifact %s: %w", path, err)
+			}
+			var artifact map[string]interface{}
+			if err := json.Unmarshal(data, &artifact); err != nil {
+				return nil, fmt.Errorf("decode shared-umem artifact %s: %w", path, err)
+			}
+			cfg.Phase0Artifact = artifact
+		}
+	}
+	return cfg, nil
 }
 
 func compileSNMP(node *Node, sys *SystemConfig) error {
