@@ -608,6 +608,7 @@ func normalizeSharedUMEMArtifactInterfaces(artifact map[string]interface{}) erro
 	}
 	for _, key := range []string{
 		"driver",
+		"driver_name",
 		"driver_version",
 		"firmware",
 		"firmware_version",

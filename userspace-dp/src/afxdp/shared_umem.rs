@@ -604,6 +604,66 @@ mod tests {
     }
 
     #[test]
+    fn phase0_environment_gate_rejects_missing_selected_device_pair() {
+        let mut artifact = empty_interface_phase0_artifact();
+        artifact
+            .as_object_mut()
+            .expect("artifact object")
+            .remove("selected_device_pair");
+
+        assert_eq!(
+            phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new()).as_deref(),
+            Some("Phase 0 artifact missing selected_device_pair")
+        );
+    }
+
+    #[test]
+    fn phase0_environment_gate_rejects_missing_driver() {
+        let mut artifact = empty_interface_phase0_artifact();
+        artifact
+            .as_object_mut()
+            .expect("artifact object")
+            .remove("driver");
+
+        assert_eq!(
+            phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new()).as_deref(),
+            Some("Phase 0 artifact missing driver")
+        );
+    }
+
+    #[test]
+    fn phase0_environment_gate_accepts_driver_name_alias() {
+        let mut artifact = empty_interface_phase0_artifact();
+        let object = artifact.as_object_mut().expect("artifact object");
+        object.remove("driver");
+        object.insert("driver_name".to_string(), json!({}));
+
+        assert_eq!(
+            phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn complete_phase0_artifact_reaches_cross_nic_interface_gate() {
+        let snapshot = ConfigSnapshot {
+            userspace: json!({
+                "shared_umem": {
+                    "mode": "cross-nic",
+                    "interfaces": [],
+                    "phase0_artifact": empty_interface_phase0_artifact()
+                }
+            }),
+            ..ConfigSnapshot::default()
+        };
+        let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+        assert_eq!(
+            policy.gate_reason().as_deref(),
+            Some("cross-NIC shared UMEM requires explicit interfaces")
+        );
+    }
+
+    #[test]
     fn off_policy_clears_stale_shared_status() {
         let mut status = BindingStatus {
             slot: 7,
@@ -644,5 +704,18 @@ mod tests {
             workers.get(&0).unwrap()[0].shared_umem,
             SharedUmemBindingPlan::private()
         );
+    }
+
+    fn empty_interface_phase0_artifact() -> serde_json::Value {
+        json!({
+            "passed": true,
+            "kernel_release": current_kernel_release().expect("kernel release"),
+            "selected_interfaces": [],
+            "selected_nic_pci_ids": [],
+            "selected_device_pair": [],
+            "driver": {},
+            "mtu": {},
+            "queue_topology": {}
+        })
     }
 }

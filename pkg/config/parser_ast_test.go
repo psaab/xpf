@@ -2689,7 +2689,7 @@ func TestUserspaceDataplaneConfig(t *testing.T) {
 
 func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
 	artifact := t.TempDir() + "/phase0.json"
-	if err := os.WriteFile(artifact, []byte(`{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"],"mtu":{"ge-0/0/1":1500,"ge-0/0/2":1500}}`), 0644); err != nil {
+	if err := os.WriteFile(artifact, []byte(`{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"],"driver_name":{"ge-0/0/1":"mlx5_core","ge-0/0/2":"mlx5_core"},"mtu":{"ge-0/0/1":1500,"ge-0/0/2":1500}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	lines := []string{
@@ -2736,6 +2736,13 @@ func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
 	if _, ok := mtu["ge-0-0-1"]; !ok {
 		t.Fatalf("SharedUMEM.Phase0Artifact[mtu] was not Linux-name normalized: %#v", mtu)
 	}
+	driverName, ok := dp.SharedUMEM.Phase0Artifact["driver_name"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SharedUMEM.Phase0Artifact[driver_name] = %#v", dp.SharedUMEM.Phase0Artifact["driver_name"])
+	}
+	if _, ok := driverName["ge-0-0-1"]; !ok {
+		t.Fatalf("SharedUMEM.Phase0Artifact[driver_name] was not Linux-name normalized: %#v", driverName)
+	}
 }
 
 func TestUserspaceDataplaneSharedUMEMRejectsNullArtifact(t *testing.T) {
@@ -2780,6 +2787,17 @@ func TestUserspaceDataplaneSharedUMEMRejectsOversizedArtifact(t *testing.T) {
 	_, err = readSharedUMEMPhase0Artifact(artifact)
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("readSharedUMEMPhase0Artifact error = %v, want size rejection", err)
+	}
+}
+
+func TestUserspaceDataplaneSharedUMEMRejectsArtifactKeyCollision(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	if err := os.WriteFile(artifact, []byte(`{"passed":true,"driver_name":{"ge-0/0/1":"mlx5_core","ge-0-0-1":"mlx5_core"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readSharedUMEMPhase0Artifact(artifact)
+	if err == nil || !strings.Contains(err.Error(), "duplicate driver_name key after Linux interface-name normalization: ge-0-0-1") {
+		t.Fatalf("readSharedUMEMPhase0Artifact error = %v, want normalized-key collision", err)
 	}
 }
 
