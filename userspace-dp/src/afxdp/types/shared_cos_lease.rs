@@ -31,8 +31,10 @@ pub(in crate::afxdp) struct SharedCoSQueueLease {
 // cross-epoch fetch_add contamination. Two-CAS-with-rollback for
 // outstanding-leased cap (legacy state.credits accounting). Bounded
 // rollback retries. Seqlock-style rotation: epoch_seq EVEN→ODD→EVEN.
-// 100µs grace period before surplus claiming opens. Rate-cap clamped
-// via elapsed_ns.min(EPOCH_DURATION_NS).
+// Surplus claiming opens only when the CPU-bound bypass detector arms;
+// the 100µs grace timestamp remains part of the bypass telemetry and
+// legacy detector history. Rate-cap clamped via
+// elapsed_ns.min(EPOCH_DURATION_NS).
 
 /// Epoch duration. Picked to match existing refill cadence.
 pub(in crate::afxdp) const EPOCH_DURATION_NS: u64 = 200_000;
@@ -91,8 +93,10 @@ struct SharedCoSEpochState {
     /// set to N > 0 by rotation, the next N rotations open the surplus
     /// path immediately (no grace-period gate) for active workers.
     /// Rotation arms it when ANY active worker had a starvation event
-    /// in the prior epoch AND aggregate grant was sub-cap by ≥5%.
-    /// Decays one rotation at a time when no worker signals.
+    /// in the prior epoch, aggregate grant was materially sub-cap, and
+    /// at least one active non-signaling peer was both under-utilized
+    /// and had queue-lease demand in that epoch. Decays one rotation
+    /// at a time when the full detector does not fire.
     bypass_grace_rotations_remaining: AtomicU32,
     /// #1231 v5: telemetry — count of rotations where the bypass was
     /// armed. Operator-visible via Prometheus.
@@ -136,11 +140,17 @@ struct V8State {
     /// #1231 v5: per-worker starvation events this epoch. Each slot is
     /// packed (epoch_tag, event_count). Bumped via tag-checked CAS at
     /// the narrow-signal exit in acquire_v8: "primary exhausted AND
-    /// class room remains AND grace not expired AND active AND
-    /// still_needed > 0". Reset at rotation via atomic swap (returned
-    /// old captures any in-flight bumps; tag mismatch on subsequent
-    /// in-flight CAS naturally rejects them). Length = max_worker_id + 1.
+    /// class room remains AND active AND still_needed > 0". Reset at
+    /// rotation via atomic swap (returned old captures any in-flight
+    /// bumps; tag mismatch on subsequent in-flight CAS naturally
+    /// rejects them). Length = max_worker_id + 1.
     worker_starvation_events: Box<[PackedEpochGrant]>,
+    /// #1290 round-2: per-worker queue-lease demand events this epoch.
+    /// Bumped once per active acquire_v8 call before granting. Rotation
+    /// uses this to distinguish a genuinely backlogged under-utilized
+    /// peer from a naturally quiet peer whose active-flow counter is
+    /// merely nonzero. Length = max_worker_id + 1.
+    worker_demand_events: Box<[PackedEpochGrant]>,
 }
 
 pub(in crate::afxdp) struct SharedCoSRootLease {
@@ -579,6 +589,10 @@ impl SharedCoSQueueLease {
             .map(|_| PackedEpochGrant::new())
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let worker_demand_events = (0..len)
+            .map(|_| PackedEpochGrant::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self {
             config,
             state: SharedCoSLeaseState {
@@ -591,6 +605,7 @@ impl SharedCoSQueueLease {
                 worker_active_flow_buckets,
                 worker_fair_share,
                 worker_starvation_events,
+                worker_demand_events,
             }),
         }
     }
@@ -668,6 +683,15 @@ impl SharedCoSQueueLease {
             return 0;
         }
 
+        let active = v8
+            .worker_active_flow_buckets
+            .get(worker_id)
+            .map(|a| a.load(Ordering::Relaxed) > 0)
+            .unwrap_or(false);
+        if active {
+            bump_epoch_event(&v8.worker_demand_events[worker_id], my_tag);
+        }
+
         let mut total_granted: u64 = 0;
         let mut still_needed = requested;
 
@@ -732,13 +756,7 @@ impl SharedCoSQueueLease {
             still_needed -= take;
         }
 
-        // === SURPLUS PATH: post-grace OR bypass; active workers only ===
-        let active = v8
-            .worker_active_flow_buckets
-            .get(worker_id)
-            .map(|a| a.load(Ordering::Relaxed) > 0)
-            .unwrap_or(false);
-
+        // === SURPLUS PATH: bypass only; active workers only ===
         // #1231 v5: bypass-grace flag set by rotation when 'all peers
         // CPU-bound' regime detected. Cheap-predicate-gated narrow-signal
         // bump (per Codex v5 probe F): only do the expensive tag-checked
@@ -748,10 +766,12 @@ impl SharedCoSQueueLease {
             .bypass_grace_rotations_remaining
             .load(Ordering::Relaxed)
             > 0;
-        if still_needed > 0 && active && now_ns < grace {
+        if still_needed > 0 && active {
             // Cheap predicates passed; do the expensive tag-checked reads
             // to confirm the narrow exit "primary exhausted AND class
-            // room remains AND grace closed AND active AND still_needed>0".
+            // room remains AND active AND still_needed>0". This signal
+            // deliberately remains live after grace because strict exact
+            // CoS no longer opens unarmed post-grace surplus.
             let my_curr = v8.worker_grants[worker_id].0.load(Ordering::Acquire);
             let (my_curr_tag, my_consumed_now) = PackedEpochGrant::unpack(my_curr);
             let class_curr = v8.epoch.packed_granted.0.load(Ordering::Acquire);
@@ -766,19 +786,20 @@ impl SharedCoSQueueLease {
                 // naturally; bounded retry is unnecessary because one
                 // missed bump per epoch is fine (rotation only checks
                 // count > 0).
-                let pg = &v8.worker_starvation_events[worker_id];
-                let curr = pg.0.load(Ordering::Acquire);
-                let (curr_tag, curr_count) = PackedEpochGrant::unpack(curr);
-                if curr_tag == my_tag && curr_count < u32::MAX {
-                    let new = PackedEpochGrant::pack(curr_tag, curr_count + 1);
-                    let _ = pg
-                        .0
-                        .compare_exchange_weak(curr, new, Ordering::AcqRel, Ordering::Acquire);
-                }
+                bump_epoch_event(&v8.worker_starvation_events[worker_id], my_tag);
             }
         }
 
-        let surplus_open = (now_ns >= grace) || bypass;
+        // Strict per-flow fairness path: do not automatically let
+        // faster workers claim peer primary-share slack just because
+        // half the epoch elapsed. That old post-grace behavior was
+        // work-conserving, but it also let workers with fewer active
+        // flows exceed their active-flow-proportional share during
+        // normal shaper-bound traffic. Keep surplus available only
+        // when the explicit CPU-bound bypass has armed; that path is
+        // already gated by prior-epoch starvation + aggregate underuse
+        // + peer-utilization checks at rotation.
+        let surplus_open = bypass;
         // #1231 v5: telemetry — track if any surplus byte was granted
         // while bypass was the reason (now_ns < grace AND bypass).
         let bypass_was_reason = bypass && now_ns < grace;
@@ -1006,14 +1027,22 @@ impl SharedCoSQueueLease {
         let n_workers = v8.worker_grants.len().min(MAX_WORKERS_SCRATCH);
         debug_assert!(v8.worker_grants.len() <= MAX_WORKERS_SCRATCH);
         let mut signaled_by_worker = [false; MAX_WORKERS_SCRATCH];
+        let mut demanded_by_worker = [false; MAX_WORKERS_SCRATCH];
         let mut prev_grants = [0u32; MAX_WORKERS_SCRATCH];
         let mut active_by_worker = [false; MAX_WORKERS_SCRATCH];
 
-        // STEP 2: swap event slots, track per-worker signal flags.
+        // STEP 2: swap event slots, track per-worker signal/demand flags.
         let mut any_active_worker_signaled = false;
-        for (id, pg) in v8.worker_starvation_events.iter().enumerate() {
-            let old = pg.0.swap(new_packed_zero, Ordering::AcqRel);
-            let (_old_tag, old_count) = PackedEpochGrant::unpack(old);
+        for id in 0..v8.worker_starvation_events.len() {
+            let old_starvation = v8.worker_starvation_events[id]
+                .0
+                .swap(new_packed_zero, Ordering::AcqRel);
+            let (_old_starvation_tag, old_starvation_count) =
+                PackedEpochGrant::unpack(old_starvation);
+            let old_demand = v8.worker_demand_events[id]
+                .0
+                .swap(new_packed_zero, Ordering::AcqRel);
+            let (_old_demand_tag, old_demand_count) = PackedEpochGrant::unpack(old_demand);
             let active = v8
                 .worker_active_flow_buckets
                 .get(id)
@@ -1021,11 +1050,12 @@ impl SharedCoSQueueLease {
                 .unwrap_or(false);
             if id < n_workers {
                 active_by_worker[id] = active;
-                if active && old_count > 0 {
+                demanded_by_worker[id] = old_demand_count > 0;
+                if active && old_starvation_count > 0 {
                     signaled_by_worker[id] = true;
                     any_active_worker_signaled = true;
                 }
-            } else if active && old_count > 0 {
+            } else if active && old_starvation_count > 0 {
                 any_active_worker_signaled = true;
             }
         }
@@ -1039,12 +1069,18 @@ impl SharedCoSQueueLease {
             }
         }
 
-        // #1231 v5.5 STEP 3.5: peer-utilization gate. iperf-c
-        // saturation has CPU-bound peers consuming <60% of share;
-        // iperf-e shaper-bound peers consume ~90%. Discriminator.
-        let mut any_peer_under_util = false;
+        // #1231 v5.5 + #1290 round-2 STEP 3.5: peer-utilization
+        // gate. iperf-c saturation has CPU-bound peers consuming
+        // <60% of share; iperf-e shaper-bound peers consume ~90%.
+        // #1290 adds the demand flag so a naturally quiet peer whose
+        // active-flow counter is merely nonzero cannot be mistaken
+        // for a CPU-bound peer with stranded capacity.
+        let mut any_peer_cpu_bound_under_util = false;
         for id in 0..n_workers {
             if !active_by_worker[id] || signaled_by_worker[id] {
+                continue;
+            }
+            if !demanded_by_worker[id] {
                 continue;
             }
             let share = v8
@@ -1063,7 +1099,7 @@ impl SharedCoSQueueLease {
             // - 60% threshold (v5.5) leaves moderately-utilized
             //   peers alone; only fires on CPU-bound regimes.
             if (prev_grants[id] as u64).saturating_mul(5) < share.saturating_mul(3) {
-                any_peer_under_util = true;
+                any_peer_cpu_bound_under_util = true;
                 break;
             }
         }
@@ -1078,11 +1114,13 @@ impl SharedCoSQueueLease {
         let aggregate_underuse =
             prev_granted.saturating_add(underuse_slack) < prev_cap;
 
-        // #1231 v5 STEP 5: arm or decay bypass. Both conditions
-        // must hold to arm: any active worker signaled starvation
-        // AND the class was sub-cap (room was available — grace
-        // gating was the cause of stranded primary share).
-        if any_active_worker_signaled && aggregate_underuse && any_peer_under_util {
+        // #1231 v5 + #1290 round-2 STEP 5: arm or decay bypass.
+        // All conditions must hold: some active worker hit its
+        // primary share while class room remained, aggregate grants
+        // were materially sub-cap, and at least one active
+        // non-signaling peer both requested queue-lease credit and
+        // consumed <60% of its primary share.
+        if any_active_worker_signaled && aggregate_underuse && any_peer_cpu_bound_under_util {
             v8.epoch
                 .bypass_grace_rotations_remaining
                 .store(5, Ordering::Release);
@@ -1156,6 +1194,18 @@ fn try_bump_outstanding(
         {
             return true;
         }
+    }
+}
+
+#[inline]
+fn bump_epoch_event(pg: &PackedEpochGrant, my_tag: u32) {
+    let curr = pg.0.load(Ordering::Acquire);
+    let (curr_tag, curr_count) = PackedEpochGrant::unpack(curr);
+    if curr_tag == my_tag && curr_count < u32::MAX {
+        let new = PackedEpochGrant::pack(curr_tag, curr_count + 1);
+        let _ = pg
+            .0
+            .compare_exchange_weak(curr, new, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -1260,4 +1310,3 @@ impl SharedCoSRootLease {
 #[cfg(test)]
 #[path = "shared_cos_lease_tests.rs"]
 mod tests;
-
