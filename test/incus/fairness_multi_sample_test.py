@@ -13,10 +13,12 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("fairness_multi_sample.py")
 HARNESS_PATH = Path(__file__).with_name("fairness-harness.sh")
+CLASS_SWEEP_PATH = Path(__file__).with_name("fairness-cos-class-sweep.sh")
 SPEC = importlib.util.spec_from_file_location("fairness_multi_sample", MODULE_PATH)
 assert SPEC is not None
 fairness_multi_sample = importlib.util.module_from_spec(SPEC)
@@ -151,6 +153,41 @@ class FairnessMultiSampleTest(unittest.TestCase):
         self.assertEqual(summary["verdict"], "PASS")
         self.assertAlmostEqual(summary["gap"]["mean"], -0.20)
         self.assertAlmostEqual(summary["cstruct"]["mean"], 0.55)
+        self.assertIsNone(summary["aggregate_mbps"])
+
+    def test_summary_reports_aggregate_mbps_stats_when_present(self) -> None:
+        summary = fairness_multi_sample.summarize(
+            [
+                {
+                    "sample": 1,
+                    "verdict": "PASS",
+                    "observed_cov": 0.10,
+                    "cstruct": 0.50,
+                    "gap": -0.40,
+                    "aggregate_mbps": 900.0,
+                    "exit_code": 0,
+                },
+                {
+                    "sample": 2,
+                    "verdict": "PASS",
+                    "observed_cov": 0.20,
+                    "cstruct": 0.50,
+                    "gap": -0.30,
+                    "aggregate_mbps": 1100.0,
+                    "exit_code": 0,
+                },
+            ],
+            max_mean_gap=0.05,
+            max_run_gap=0.05,
+            max_mean_cov=None,
+            max_stdev_cov=None,
+            max_run_cov=None,
+        )
+
+        self.assertEqual(summary["verdict"], "PASS")
+        self.assertEqual(summary["aggregate_mbps"]["mean"], 1000.0)
+        self.assertEqual(summary["aggregate_mbps"]["min"], 900.0)
+        self.assertEqual(summary["aggregate_mbps"]["max"], 1100.0)
 
     def test_summary_fails_gap_thresholds(self) -> None:
         summary = fairness_multi_sample.summarize(
@@ -263,6 +300,43 @@ class FairnessMultiSampleTest(unittest.TestCase):
             self.assertTrue((out_dir / "sample-1" / "verdict.json").exists())
             self.assertTrue((out_dir / "sample-2" / "artifacts").is_dir())
 
+    def test_run_samples_sleeps_between_samples_when_cooldown_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "fake-harness.sh"
+            harness.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    printf '{"verdict":"PASS","observed_cov":0.1,"cstruct":0.0,"gap":0.0,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[],"distribution_a_i":[1],"n_active":1,"saturated":true,"a_i_sum_check_ok":true}\\n'
+                    """
+                ),
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            out_dir = tmp_path / "out"
+            args = fairness_multi_sample.parse_args(
+                [
+                    "--samples",
+                    "3",
+                    "--sample-cooldown-sec",
+                    "0.25",
+                    "--out-dir",
+                    str(out_dir),
+                    "--harness",
+                    str(harness),
+                ]
+            )
+
+            with mock.patch.object(fairness_multi_sample.time, "sleep") as sleep:
+                summary = fairness_multi_sample.run_samples(args)
+
+            self.assertEqual(summary["verdict"], "PASS")
+            sleep.assert_has_calls([mock.call(0.25), mock.call(0.25)])
+            self.assertEqual(sleep.call_count, 2)
+            command = json.loads((out_dir / "sample-2" / "command.json").read_text(encoding="utf-8"))
+            self.assertEqual(command["sample_cooldown_sec"], 0.25)
+
     def test_cli_rejects_nan_observed_cov(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -334,6 +408,33 @@ class FairnessMultiSampleTest(unittest.TestCase):
             iperf_args = (tmp_path / "iperf-argv.txt").read_text(encoding="utf-8").splitlines()
             self.assertNotIn("-R", iperf_args)
 
+    def test_fairness_harness_preserves_raw_sample_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            metrics = tmp_path / "metrics.prom"
+            metrics.write_text(
+                textwrap.dedent(
+                    """\
+                    xpf_userspace_binding_active_flow_count{binding_slot="0",iface="ge-0-0-2",queue_id="6",worker_id="0"} 1
+                    xpf_userspace_cos_active_flow_count{ifindex="5",queue_id="6",worker_id="0"} 1
+                    """
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_fake_harness_with_metrics(tmp_path, metrics)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            artifact_dir = tmp_path / "artifacts"
+            self.assertEqual((artifact_dir / "iperf-single.json").read_text(encoding="utf-8"), "{}\n")
+            self.assertIn(
+                'ge-0-0-2\t1',
+                (artifact_dir / "binding-flows.tsv").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                '5\t6\t0\t1',
+                (artifact_dir / "cos-flows.tsv").read_text(encoding="utf-8"),
+            )
+
     def test_fairness_harness_omitted_reverse_arg_defaults_to_reverse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -379,6 +480,75 @@ class FairnessMultiSampleTest(unittest.TestCase):
             )
             self.assertFalse((tmp_path / "eval-called").exists())
 
+    def test_class_sweep_filter_and_rate_utilization_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake_wrapper = tmp_path / "fake-wrapper.sh"
+            fake_harness = tmp_path / "fake-harness.sh"
+            fake_eval = tmp_path / "fake-eval"
+            out_root = tmp_path / "sweep"
+            fake_wrapper.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    out_dir=
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --out-dir) out_dir=$2; shift 2 ;;
+                            --) shift; break ;;
+                            *) shift ;;
+                        esac
+                    done
+                    mkdir -p "$out_dir"
+                    cat > "$out_dir/summary.json" <<'JSON'
+                    {
+                      "verdict": "PASS",
+                      "observed_cov": {"mean": 0.1, "max": 0.2, "sample_stdev": 0.01},
+                      "cstruct": {"mean": 0.3},
+                      "gap": {"mean": -0.2, "max": -0.1},
+                      "samples": [
+                        {"verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0},
+                        {"verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0}
+                      ]
+                    }
+                    JSON
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_harness.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_eval.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            for path in (fake_wrapper, fake_harness, fake_eval):
+                path.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "ARTIFACT_ROOT": str(out_root),
+                "CAPTURE_DATAPLANE": "0",
+                "CLASS_FILTER": "q2",
+                "COS_IFINDEX": "14",
+                "WRAPPER": str(fake_wrapper),
+                "HARNESS": str(fake_harness),
+                "FAIRNESS_EVAL": str(fake_eval),
+            }
+            result = subprocess.run(
+                [str(CLASS_SWEEP_PATH)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary_lines = (out_root / "summary.tsv").read_text(encoding="utf-8").splitlines()
+            self.assertIn("avg_rate_utilization", summary_lines[0])
+            self.assertEqual(len(summary_lines), 2)
+            row = summary_lines[1].split("\t")
+            self.assertEqual(row[0], "q2-iperf-e-16g")
+            self.assertEqual(row[10], "0.5")
+
     def run_fake_harness_with_metrics(
         self,
         tmp_path: Path,
@@ -406,10 +576,11 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 #!/usr/bin/env bash
                 set -euo pipefail
                 printf '%s\\n' "$@" > "$IPERF_ARGV_PATH"
-                for _ in {1..50}; do
+                for _ in {1..100}; do
                     [[ -e "$CURL_SENTINEL" ]] && break
                     sleep 0.02
                 done
+                sleep 0.1
                 printf '{}\\n'
                 """
             ),
@@ -440,6 +611,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
             "EVAL_SENTINEL": str(tmp_path / "eval-called"),
             "FAKE_METRICS": str(metrics),
             "IPERF_ARGV_PATH": str(tmp_path / "iperf-argv.txt"),
+            "ARTIFACT_DIR": str(tmp_path / "artifacts"),
         }
         if harness_args is None:
             harness_args = [

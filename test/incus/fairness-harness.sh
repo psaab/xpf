@@ -511,6 +511,31 @@ setup_artifact_dir() {
     fi
 }
 
+copy_artifact_file() {
+    local src=$1
+    local dst=$2
+
+    [[ -n "$ARTIFACT_DIR" ]] || return 0
+    [[ -e "$src" ]] || return 0
+    if ! cp "$src" "$ARTIFACT_DIR/$dst"; then
+        echo "fairness-harness: failed to preserve artifact $src -> $ARTIFACT_DIR/$dst" >&2
+        exit 2
+    fi
+}
+
+persist_harness_artifacts() {
+    [[ -n "$ARTIFACT_DIR" ]] || return 0
+
+    copy_artifact_file "$BINDING_TSV" binding-flows.tsv
+    copy_artifact_file "$COS_TSV" cos-flows.tsv
+    if [[ "$MIXED_COS" -eq 1 ]]; then
+        copy_artifact_file "$IPERF_OUT" iperf-primary.json
+        copy_artifact_file "$MIXED_IPERF_OUT" iperf-mixed.json
+    else
+        copy_artifact_file "$IPERF_OUT" iperf-single.json
+    fi
+}
+
 write_placement_artifact() {
     [[ -n "$ARTIFACT_DIR" ]] || return 0
 
@@ -726,6 +751,7 @@ cleanup() {
 }
 trap 'cleanup; rm -rf "$WORK_DIR"' EXIT
 
+IPERF_STATUS=0
 if [[ "$MIXED_COS" -eq 1 ]]; then
     run_iperf "primary port $PORT queue $COS_QUEUE_ID" "$IPERF_OUT" "$PORT" "$N" "$REVERSE" \
         "$IPERF_LAUNCH_NETNS" "$IPERF_LAUNCH_CPUSET" IPERF_LAUNCH_ARG \
@@ -738,7 +764,6 @@ if [[ "$MIXED_COS" -eq 1 ]]; then
     MIXED_PID=$!
     append_runtime_artifact mixed "$MIXED_PID"
 
-    IPERF_STATUS=0
     if wait "$PRIMARY_PID"; then :; else IPERF_STATUS=$?; fi
     if wait "$MIXED_PID"; then
         :
@@ -748,17 +773,21 @@ if [[ "$MIXED_COS" -eq 1 ]]; then
             IPERF_STATUS=$MIXED_WAIT_STATUS
         fi
     fi
-    if [[ "$IPERF_STATUS" -ne 0 ]]; then
-        cleanup
-        exit "$IPERF_STATUS"
-    fi
 else
+    set +e
     run_iperf "single" "$IPERF_OUT" "$PORT" "$N" "$REVERSE" \
         "$IPERF_LAUNCH_NETNS" "$IPERF_LAUNCH_CPUSET" IPERF_LAUNCH_ARG \
         "$IPERF_NETNS" "$IPERF_CPUSET" IPERF_GENERATOR_ARG "$IPERF_BIN"
+    IPERF_STATUS=$?
+    set -e
 fi
 
 cleanup
+persist_harness_artifacts
+
+if [[ "$IPERF_STATUS" -ne 0 ]]; then
+    exit "$IPERF_STATUS"
+fi
 
 if [[ "$MIXED_COS" -eq 1 ]]; then
     set +e
