@@ -634,6 +634,19 @@ mod tests {
     }
 
     #[test]
+    fn phase0_environment_gate_rejects_kernel_release_mismatch() {
+        let mut artifact = empty_interface_phase0_artifact();
+        artifact.as_object_mut().expect("artifact object").insert(
+            "kernel_release".to_string(),
+            json!("not-the-current-kernel"),
+        );
+
+        let reason = phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new())
+            .expect("kernel release mismatch");
+        assert!(reason.starts_with("Phase 0 artifact kernel_release"));
+    }
+
+    #[test]
     fn phase0_environment_gate_rejects_interface_mismatch() {
         let mut artifact = empty_interface_phase0_artifact();
         artifact
@@ -675,10 +688,8 @@ mod tests {
 
     #[test]
     fn phase0_environment_gate_rejects_driver_mismatch() {
-        let Some((interfaces, mut artifact)) = live_interface_phase0_artifact() else {
-            eprintln!("skipping: no sysfs-backed netdev with driver/device/mtu/queues");
-            return;
-        };
+        let (interfaces, mut artifact) = live_interface_phase0_artifact()
+            .expect("test host must expose a sysfs-backed netdev with driver/device/mtu/queues");
         let ifname = interfaces.iter().next().expect("interface").clone();
         artifact.as_object_mut().expect("artifact object").insert(
             "driver".to_string(),
@@ -692,10 +703,8 @@ mod tests {
 
     #[test]
     fn phase0_environment_gate_rejects_mtu_mismatch() {
-        let Some((interfaces, mut artifact)) = live_interface_phase0_artifact() else {
-            eprintln!("skipping: no sysfs-backed netdev with driver/device/mtu/queues");
-            return;
-        };
+        let (interfaces, mut artifact) = live_interface_phase0_artifact()
+            .expect("test host must expose a sysfs-backed netdev with driver/device/mtu/queues");
         let ifname = interfaces.iter().next().expect("interface").clone();
         let live_mtu = interface_mtu_by_name(&interfaces)
             .expect("live mtu")
@@ -714,10 +723,8 @@ mod tests {
 
     #[test]
     fn phase0_environment_gate_rejects_queue_topology_mismatch() {
-        let Some((interfaces, mut artifact)) = live_interface_phase0_artifact() else {
-            eprintln!("skipping: no sysfs-backed netdev with driver/device/mtu/queues");
-            return;
-        };
+        let (interfaces, mut artifact) = live_interface_phase0_artifact()
+            .expect("test host must expose a sysfs-backed netdev with driver/device/mtu/queues");
         let ifname = interfaces.iter().next().expect("interface").clone();
         let live_queues = interface_rx_queue_count_by_name(&interfaces)
             .expect("live queues")
@@ -854,8 +861,13 @@ mod tests {
     }
 
     fn live_interface_phase0_artifact() -> Option<(BTreeSet<String>, serde_json::Value)> {
-        for entry in std::fs::read_dir("/sys/class/net").ok()? {
-            let ifname = entry.ok()?.file_name().to_str()?.to_string();
+        for entry in std::fs::read_dir("/sys/class/net")
+            .ok()?
+            .filter_map(Result::ok)
+        {
+            let Some(ifname) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
             let interfaces = BTreeSet::from([ifname]);
             let Some(pci_ids) = interface_pci_ids(&interfaces) else {
                 continue;

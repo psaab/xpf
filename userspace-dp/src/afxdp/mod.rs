@@ -114,7 +114,8 @@ use self::bind::{
 #[cfg(test)]
 use self::bind::{
     AfXdpBinder, alternate_bind_strategy, bind_flag_candidates_for_socket_role,
-    bind_strategy_for_driver, binder_for_strategy, shared_umem_group_key_for_device,
+    bind_strategy_for_driver, binder_for_strategy, describe_bind_flags,
+    shared_umem_group_key_for_device,
 };
 use self::bpf_map::*;
 use self::checksum::*;
@@ -538,4 +539,3 @@ fn find_target_binding_mut<'a>(
     )?;
     binding_by_index_mut(left, current_index, ingress_binding, right, target_index)
 }
-

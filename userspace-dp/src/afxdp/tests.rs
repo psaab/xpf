@@ -59,6 +59,7 @@ fn shared_umem_socket_roles_use_kernel_legal_bind_flags() {
     assert_eq!(secondary[0] & SocketConfig::XDP_BIND_COPY, 0);
     assert_eq!(secondary[0] & SocketConfig::XDP_BIND_ZEROCOPY, 0);
     assert_eq!(secondary[0] & SocketConfig::XDP_BIND_NEED_WAKEUP, 0);
+    assert_eq!(describe_bind_flags(secondary[0]), "shared-umem");
 }
 
 #[test]

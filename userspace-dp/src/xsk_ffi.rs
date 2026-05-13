@@ -483,11 +483,58 @@ fn reserve_up_to(ring: &mut XskRingProd, max: u32, idx: &mut u32) -> u32 {
 
 // ── DeviceQueue ──────────────────────────────────────────────────────
 
+enum DeviceQueueRings {
+    /// Shared UMEM sockets get socket-local fill/completion rings from
+    /// `xsk_socket__create_shared`.
+    Owned {
+        fill: Box<XskRingProd>,
+        comp: Box<XskRingCons>,
+    },
+    /// Private UMEM sockets use the fill/completion rings owned by `Umem`.
+    ///
+    /// `DeviceQueue` must still drop before `Umem` so the XSK is deleted before
+    /// the UMEM, but it must not own these boxes. `xsk_umem__delete` may inspect
+    /// the UMEM ring structs during teardown.
+    BorrowedPrivateUmem {
+        fill: NonNull<XskRingProd>,
+        comp: NonNull<XskRingCons>,
+    },
+}
+
+impl DeviceQueueRings {
+    fn fill(&self) -> &XskRingProd {
+        match self {
+            Self::Owned { fill, .. } => fill,
+            Self::BorrowedPrivateUmem { fill, .. } => unsafe { fill.as_ref() },
+        }
+    }
+
+    fn fill_mut(&mut self) -> &mut XskRingProd {
+        match self {
+            Self::Owned { fill, .. } => fill,
+            Self::BorrowedPrivateUmem { fill, .. } => unsafe { fill.as_mut() },
+        }
+    }
+
+    fn comp(&self) -> &XskRingCons {
+        match self {
+            Self::Owned { comp, .. } => comp,
+            Self::BorrowedPrivateUmem { comp, .. } => unsafe { comp.as_ref() },
+        }
+    }
+
+    fn comp_mut(&mut self) -> &mut XskRingCons {
+        match self {
+            Self::Owned { comp, .. } => comp,
+            Self::BorrowedPrivateUmem { comp, .. } => unsafe { comp.as_mut() },
+        }
+    }
+}
+
 /// Fill/completion ring pair + the underlying libxdp socket handle.
 pub struct DeviceQueue {
     xsk: *mut XskSocketOpaque,
-    fill: Box<XskRingProd>,
-    comp: Box<XskRingCons>,
+    rings: DeviceQueueRings,
     fd: c_int,
 }
 
@@ -502,9 +549,10 @@ impl DeviceQueue {
     /// 0 whenever `free < max`, starving the fill ring and stalling TX.
     pub fn fill(&mut self, max: u32) -> WriteFill<'_> {
         let mut idx: u32 = 0;
-        let reserved = reserve_up_to(&mut *self.fill, max, &mut idx);
+        let ring = self.rings.fill_mut();
+        let reserved = reserve_up_to(ring, max, &mut idx);
         WriteFill {
-            ring: &mut *self.fill,
+            ring,
             base_idx: idx,
             reserved,
             written: 0,
@@ -514,9 +562,10 @@ impl DeviceQueue {
     /// Reap completed TX buffers from the completion ring.
     pub fn complete(&mut self, n: u32) -> ReadComplete<'_> {
         let mut idx: u32 = 0;
-        let peeked = unsafe { bridge_xsk_ring_cons_peek(&mut *self.comp, n, &mut idx) };
+        let ring = self.rings.comp_mut();
+        let peeked = unsafe { bridge_xsk_ring_cons_peek(ring, n, &mut idx) };
         ReadComplete {
-            ring: &mut *self.comp,
+            ring,
             base_idx: idx,
             peeked,
             read_count: 0,
@@ -527,15 +576,17 @@ impl DeviceQueue {
     pub fn available(&self) -> u32 {
         // Use cached_prod - cached_cons (relaxed reads via the C struct fields).
         // This matches xdpilone's DeviceQueue::available() which calls count_pending().
-        let prod = unsafe { bridge_xsk_ring_cons_producer(&*self.comp) };
-        let cons = unsafe { bridge_xsk_ring_cons_consumer(&*self.comp) };
+        let comp = self.rings.comp();
+        let prod = unsafe { bridge_xsk_ring_cons_producer(comp) };
+        let cons = unsafe { bridge_xsk_ring_cons_consumer(comp) };
         prod.wrapping_sub(cons)
     }
 
     /// Fill ring entries pending (produced - consumed by kernel).
     pub fn pending(&self) -> u32 {
-        let prod = unsafe { bridge_xsk_ring_prod_producer(&*self.fill) };
-        let cons = unsafe { bridge_xsk_ring_prod_consumer(&*self.fill) };
+        let fill = self.rings.fill();
+        let prod = unsafe { bridge_xsk_ring_prod_producer(fill) };
+        let cons = unsafe { bridge_xsk_ring_prod_consumer(fill) };
         prod.wrapping_sub(cons)
     }
 
@@ -546,7 +597,7 @@ impl DeviceQueue {
 
     /// Query if the fill ring needs wakeup.
     pub fn needs_wakeup(&self) -> bool {
-        unsafe { bridge_xsk_ring_prod_needs_wakeup(&*self.fill) != 0 }
+        unsafe { bridge_xsk_ring_prod_needs_wakeup(self.rings.fill()) != 0 }
     }
 
     /// Get XDP statistics (v2).
@@ -1067,28 +1118,58 @@ fn create_xsk_binding_impl(
 
     let tx = RingTx { ring: tx_ring, fd };
 
-    let (fill, comp) = match private_umem.as_deref_mut() {
+    let rings = match private_umem.as_deref_mut() {
         Some(umem) => {
-            // Private create uses the UMEM's fill/comp rings (not the
-            // per-socket boxes passed to the bridge).
-            (
-                std::mem::replace(&mut umem.fill, fill_ring),
-                std::mem::replace(&mut umem.comp, comp_ring),
-            )
+            // Private create uses the UMEM's fill/comp rings. Keep ownership
+            // with `Umem`; the per-socket boxes passed to the bridge are not
+            // part of the private socket's live ring state.
+            drop(fill_ring);
+            drop(comp_ring);
+            DeviceQueueRings::BorrowedPrivateUmem {
+                fill: NonNull::from(&mut *umem.fill),
+                comp: NonNull::from(&mut *umem.comp),
+            }
         }
         None => {
             // Shared create uses the per-socket fill/comp rings returned by
             // xsk_socket__create_shared.
-            (fill_ring, comp_ring)
+            DeviceQueueRings::Owned {
+                fill: fill_ring,
+                comp: comp_ring,
+            }
         }
     };
 
     let device = DeviceQueue {
         xsk: xsk_ptr,
-        fill,
-        comp,
+        rings,
         fd,
     };
 
     Ok((user, rx, tx, device))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_device_queue_rings_borrow_umem_ring_boxes() {
+        let mut fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+        let mut comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+        let fill_addr = (&*fill) as *const XskRingProd;
+        let comp_addr = (&*comp) as *const XskRingCons;
+
+        {
+            let rings = DeviceQueueRings::BorrowedPrivateUmem {
+                fill: NonNull::from(&mut *fill),
+                comp: NonNull::from(&mut *comp),
+            };
+            assert_eq!(rings.fill() as *const XskRingProd, fill_addr);
+            assert_eq!(rings.comp() as *const XskRingCons, comp_addr);
+        }
+
+        assert_eq!((&*fill) as *const XskRingProd, fill_addr);
+        assert_eq!((&*comp) as *const XskRingCons, comp_addr);
+    }
 }

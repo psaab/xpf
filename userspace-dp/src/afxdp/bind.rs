@@ -205,9 +205,11 @@ fn interface_uses_generic_xdp(ifindex: u32) -> bool {
     opts.attach_mode == libbpf_sys::XDP_ATTACHED_SKB as u8
 }
 
-fn describe_bind_flags(flags: u16) -> &'static str {
+pub(super) fn describe_bind_flags(flags: u16) -> &'static str {
     if flags == 0 {
         "auto-mode"
+    } else if (flags & SocketConfig::XDP_BIND_SHARED_UMEM) != 0 {
+        "shared-umem"
     } else if (flags & SocketConfig::XDP_BIND_ZEROCOPY) != 0 {
         "zero-copy"
     } else {
