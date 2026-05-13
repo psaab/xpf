@@ -81,6 +81,8 @@ pub(super) fn apply_shared_umem_policy_to_workers(
 ) {
     let policy = SharedUmemPolicy::from_snapshot(snapshot);
     if policy.mode == SharedUmemMode::Off {
+        mark_all_private(workers);
+        publish_shared_umem_plan_to_status(workers);
         return;
     }
     if let Some(reason) = policy.gate_reason() {
@@ -94,6 +96,14 @@ pub(super) fn apply_shared_umem_policy_to_workers(
         SharedUmemMode::CrossNic => apply_cross_nic_groups(workers, &policy),
     }
     publish_shared_umem_plan_to_status(workers);
+}
+
+fn mark_all_private(workers: &mut BTreeMap<u32, Vec<BindingPlan>>) {
+    for plans in workers.values_mut() {
+        for plan in plans {
+            plan.shared_umem = SharedUmemBindingPlan::private();
+        }
+    }
 }
 
 fn apply_cross_nic_groups(
@@ -496,6 +506,7 @@ fn read_u32_file(path: impl AsRef<Path>) -> Option<u32> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn policy_defaults_off() {
@@ -543,6 +554,49 @@ mod tests {
         assert_eq!(
             policy.gate_reason().as_deref(),
             Some("Phase 0 artifact selected interfaces do not match config")
+        );
+    }
+
+    #[test]
+    fn off_policy_clears_stale_shared_status() {
+        let mut status = BindingStatus {
+            slot: 7,
+            queue_id: 1,
+            worker_id: 0,
+            interface: "lan0".to_string(),
+            shared_umem_mode: "cross-nic".to_string(),
+            shared_umem_group: "cross-nic:w0:lan0,wan0".to_string(),
+            shared_umem_socket_role: "owner".to_string(),
+            ..BindingStatus::default()
+        };
+        status.ready = true;
+        let plan = BindingPlan {
+            status,
+            live: Arc::new(BindingLiveState::new()),
+            xsk_map_fd: -1,
+            heartbeat_map_fd: -1,
+            session_map_fd: -1,
+            conntrack_v4_fd: -1,
+            conntrack_v6_fd: -1,
+            ring_entries: 256,
+            bind_strategy: AfXdpBindStrategy::UmemOwnerSocket,
+            poll_mode: crate::PollMode::Interrupt,
+            shared_umem: SharedUmemBindingPlan::shared(
+                SharedUmemMode::CrossNic,
+                "cross-nic:w0:lan0,wan0".to_string(),
+                SharedUmemSocketRole::Owner,
+            ),
+        };
+        let mut workers = BTreeMap::from([(0, vec![plan])]);
+        apply_shared_umem_policy_to_workers(&ConfigSnapshot::default(), &mut workers);
+        let status = &workers.get(&0).unwrap()[0].status;
+        assert_eq!(status.shared_umem_mode, "");
+        assert_eq!(status.shared_umem_group, "");
+        assert_eq!(status.shared_umem_socket_role, "");
+        assert_eq!(status.shared_umem_disabled_reason, "");
+        assert_eq!(
+            workers.get(&0).unwrap()[0].shared_umem,
+            SharedUmemBindingPlan::private()
         );
     }
 }

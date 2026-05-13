@@ -2728,6 +2728,46 @@ func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
 	}
 }
 
+func TestUserspaceDataplaneSharedUMEMGroupMergesWithBaseDataplane(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	if err := os.WriteFile(artifact, []byte(`{"passed":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		"set groups node0 system dataplane shared-umem mode cross-nic",
+		"set groups node0 system dataplane shared-umem interface ge-0/0/1",
+		"set groups node0 system dataplane shared-umem phase0-artifact-file " + artifact,
+		"set apply-groups node0",
+		"set system dataplane-type userspace",
+		"set system dataplane binary /usr/local/bin/xpf-userspace-dp",
+		"set system dataplane workers 6",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%v): %v", path, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dp := cfg.System.UserspaceDataplane
+	if dp == nil {
+		t.Fatal("UserspaceDataplane is nil")
+	}
+	if dp.Binary != "/usr/local/bin/xpf-userspace-dp" || dp.Workers != 6 {
+		t.Fatalf("base dataplane fields were not compiled: binary=%q workers=%d", dp.Binary, dp.Workers)
+	}
+	if dp.SharedUMEM == nil || dp.SharedUMEM.Mode != "cross-nic" {
+		t.Fatalf("group shared-umem was overwritten: %#v", dp.SharedUMEM)
+	}
+}
+
 // #797 HIGH/MEDIUM: operator must be able to toggle D3 RSS indirection
 // via a first-class config knob. Setting `rss-indirection disable`
 // must compile to RSSIndirectionDisabled=true; `enable` (or anything

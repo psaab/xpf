@@ -225,12 +225,16 @@ func compileSystem(node *Node, sys *SystemConfig) error {
 		case "dataplane":
 			switch sys.DataplaneType {
 			case "userspace":
-				sys.UserspaceDataplane = &UserspaceConfig{}
+				if sys.UserspaceDataplane == nil {
+					sys.UserspaceDataplane = &UserspaceConfig{}
+				}
 				if err := compileUserspaceDataplane(child, sys.UserspaceDataplane); err != nil {
 					return err
 				}
 			default:
-				sys.DPDKDataplane = &DPDKConfig{}
+				if sys.DPDKDataplane == nil {
+					sys.DPDKDataplane = &DPDKConfig{}
+				}
 				if err := compileDPDKDataplane(child, sys.DPDKDataplane); err != nil {
 					return err
 				}
