@@ -399,6 +399,7 @@ impl BindingWorker {
             timers: WorkerTimers {
                 last_heartbeat_update_ns: init_now,
                 debug_state_counter: 0,
+                last_idle_debug_publish_ns: init_now,
                 last_rx_wake_ns: init_now,
                 last_tx_wake_ns: init_now,
                 empty_rx_polls: 0,

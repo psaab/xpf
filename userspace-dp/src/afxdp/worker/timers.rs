@@ -25,6 +25,7 @@
 pub(crate) struct WorkerTimers {
     pub(crate) last_heartbeat_update_ns: u64,
     pub(crate) debug_state_counter: u32,
+    pub(crate) last_idle_debug_publish_ns: u64,
     pub(crate) last_rx_wake_ns: u64,
     pub(crate) last_tx_wake_ns: u64,
     pub(crate) empty_rx_polls: u32,
