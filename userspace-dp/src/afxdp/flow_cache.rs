@@ -135,10 +135,12 @@ pub(super) struct FlowCacheEntry {
     /// `lookup()` hit — see `FlowCache::current_epoch` for the comparison
     /// reference. The ~65ms-tick scan in `count_active_flows()` counts
     /// entries with `(current_epoch - last_used_epoch) < 10` (~650ms
-    /// window). u16 wraps every 65536 epochs × 65ms ≈ 71 minutes, far
-    /// past any concern. Value 0 = "never touched" sentinel (epoch 0 is
-    /// skipped by `tick_advance_epoch`); freshly inserted entries carry
-    /// 0 until their first lookup hit.
+    /// window). The hot path reaches that cadence by poll counter; the idle
+    /// RX-empty path uses a wall-clock cadence so active-flow telemetry also
+    /// ages while traffic is quiet. u16 wraps every 65536 epochs × 65ms ≈ 71
+    /// minutes, far past any concern. Value 0 = "never touched" sentinel
+    /// (epoch 0 is skipped by `tick_advance_epoch`); freshly inserted entries
+    /// carry 0 until their first lookup hit.
     pub(super) last_used_epoch: u16,
 }
 
@@ -388,9 +390,10 @@ impl FlowCache {
     }
 
     /// #1219: count cache entries hit in the last `ACTIVE_WINDOW_EPOCHS`
-    /// ticks. Epoch advance is driven by the umem debug-publish gate
-    /// (every 0xFFFF poll calls, ≈ 65 ms in steady state), so 10
-    /// epochs ≈ 650 ms. Owner-only periodic scan; not on the hot path.
+    /// ticks. Epoch advance is driven by the umem debug-publish gate:
+    /// hot polling uses the 0xFFFF-call counter, while RX-empty idle polling
+    /// uses a ~65ms wall-clock cadence. 10 epochs ≈ 650 ms. Owner-only
+    /// periodic scan; not on the hot path.
     /// O(N) over `FLOW_CACHE_SIZE` (4096 entries, see top of this file).
     #[cfg(test)]
     pub(super) fn count_active_flows(&self) -> u32 {

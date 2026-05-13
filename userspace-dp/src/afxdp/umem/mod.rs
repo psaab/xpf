@@ -1,4 +1,5 @@
 use super::*;
+use crate::afxdp::worker::WorkerTimers;
 
 mod mmap;
 mod profile;
@@ -1060,13 +1061,49 @@ impl BindingLiveState {
     }
 }
 
+const DEBUG_STATE_PUBLISH_MASK: u32 = 0xFFFF;
+const IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS: u64 = 65_000_000;
+
+fn advance_debug_state_publish_counter(timers: &mut WorkerTimers) -> bool {
+    timers.debug_state_counter = timers.debug_state_counter.wrapping_add(1);
+    timers.debug_state_counter & DEBUG_STATE_PUBLISH_MASK == 0
+}
+
+fn idle_debug_state_publish_due(timers: &mut WorkerTimers, now_ns: u64) -> bool {
+    if now_ns.saturating_sub(timers.last_idle_debug_publish_ns)
+        < IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS
+    {
+        return false;
+    }
+    timers.last_idle_debug_publish_ns = now_ns;
+    true
+}
+
 pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
-    // Use a simple modular counter to avoid 7 atomic stores on every call.
-    // At ~1M calls/sec, checking every 65536 calls ~= every 65ms.
-    binding.timers.debug_state_counter = binding.timers.debug_state_counter.wrapping_add(1);
-    if binding.timers.debug_state_counter & 0xFFFF != 0 {
+    // Use a simple modular counter to avoid repeated atomic stores on every
+    // hot-path call. At ~1M calls/sec, checking every 65536 calls ~= every 65ms.
+    if !advance_debug_state_publish_counter(&mut binding.timers) {
         return;
     }
+    publish_binding_debug_state(binding);
+}
+
+pub(super) fn update_binding_idle_debug_state(binding: &mut BindingWorker, now_ns: u64) {
+    // #1294: the hot-path counter's ~65ms assumption only holds while a
+    // binding is polling hot. In interrupt/idle loops, 65536 empty polls can
+    // take seconds to minutes, leaving stale active-flow snapshots visible
+    // long after traffic stops. The RX-empty path already has `now_ns`, so
+    // use a wall-clock-equivalent cadence there without adding per-packet
+    // clock reads or atomics to active forwarding.
+    let regular_publish = advance_debug_state_publish_counter(&mut binding.timers);
+    let idle_publish = idle_debug_state_publish_due(&mut binding.timers, now_ns);
+    if !(regular_publish || idle_publish) {
+        return;
+    }
+    publish_binding_debug_state(binding);
+}
+
+fn publish_binding_debug_state(binding: &mut BindingWorker) {
     if binding.tx_counters.pending_direct_tx_packets != 0 {
         binding.live.direct_tx_packets.fetch_add(
             binding.tx_counters.pending_direct_tx_packets,
@@ -1160,12 +1197,13 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
         );
         binding.flow.flow_cache.collision_evictions = 0;
     }
-    // #1219: advance the flow_cache active-flow epoch and publish
-    // the count for the harness's structural CoV gate. Single
-    // owner-side write per ~65ms tick. With ACTIVE_WINDOW_EPOCHS = 10
-    // the active-flow window is ~650ms. u16 epoch wraparound occurs
-    // at 65536 ticks × 65ms ≈ 71 minutes; epoch 0 is reserved as the
-    // "never touched" sentinel and skipped by tick_advance_epoch.
+    // #1219/#1294: advance the flow_cache active-flow epoch and publish
+    // the count for the harness's structural CoV gate. Hot polling uses the
+    // debug counter; RX-empty idle polling uses the wall-clock cadence in
+    // `update_binding_idle_debug_state`. With ACTIVE_WINDOW_EPOCHS = 10 the
+    // active-flow window is ~650ms. u16 epoch wraparound occurs at 65536
+    // ticks × 65ms ≈ 71 minutes; epoch 0 is reserved as the "never touched"
+    // sentinel and skipped by tick_advance_epoch.
     binding.flow.flow_cache.tick_advance_epoch();
     let (active_flow_count, flow_debug_entries, cos_counts, flow_map_truncated) = binding
         .flow

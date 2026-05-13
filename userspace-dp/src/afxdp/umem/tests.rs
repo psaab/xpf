@@ -1350,3 +1350,60 @@ fn flush_v_min_scratches_no_op_when_all_zero() {
     assert_eq!(hard_cap.load(std::sync::atomic::Ordering::Relaxed), 42);
     assert_eq!(throttles.load(std::sync::atomic::Ordering::Relaxed), 99);
 }
+
+fn debug_state_test_timers() -> WorkerTimers {
+    WorkerTimers {
+        last_heartbeat_update_ns: 0,
+        debug_state_counter: 0,
+        last_idle_debug_publish_ns: 0,
+        last_rx_wake_ns: 0,
+        last_tx_wake_ns: 0,
+        empty_rx_polls: 0,
+    }
+}
+
+#[test]
+fn idle_debug_state_publish_cadence_is_wall_clock_based() {
+    let mut timers = debug_state_test_timers();
+
+    assert!(
+        !idle_debug_state_publish_due(&mut timers, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS - 1),
+        "idle cadence should not publish before the 65ms boundary"
+    );
+    assert_eq!(
+        timers.last_idle_debug_publish_ns, 0,
+        "non-publish must leave the last-publish timestamp unchanged"
+    );
+
+    assert!(
+        idle_debug_state_publish_due(&mut timers, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS),
+        "idle cadence must publish on the 65ms boundary"
+    );
+    assert_eq!(
+        timers.last_idle_debug_publish_ns,
+        IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS
+    );
+    assert!(
+        !idle_debug_state_publish_due(
+            &mut timers,
+            IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS * 2 - 1
+        ),
+        "subsequent idle publishes must also respect the interval"
+    );
+}
+
+#[test]
+fn non_idle_debug_state_keeps_hot_counter_cadence() {
+    let mut timers = debug_state_test_timers();
+
+    for _ in 0..DEBUG_STATE_PUBLISH_MASK {
+        assert!(
+            !advance_debug_state_publish_counter(&mut timers),
+            "hot cadence should not publish before the 65536-call boundary"
+        );
+    }
+
+    assert!(advance_debug_state_publish_counter(&mut timers));
+    assert_eq!(timers.debug_state_counter, DEBUG_STATE_PUBLISH_MASK + 1);
+    assert_eq!(timers.last_idle_debug_publish_ns, 0);
+}

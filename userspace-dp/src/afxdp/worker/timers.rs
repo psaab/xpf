@@ -2,11 +2,12 @@
 //! fields out of `BindingWorker` into a dedicated `WorkerTimers`
 //! sub-struct.
 //!
-//! These five fields gate per-binding pacing decisions: when to
+//! These six fields gate per-binding pacing decisions: when to
 //! send a TX wake-up syscall (last_tx_wake_ns), when to RX wake
 //! (last_rx_wake_ns), when to update the BPF heartbeat map
-//! (last_heartbeat_update_ns), and the per-second debug-tick
-//! counter (debug_state_counter / empty_rx_polls).
+//! (last_heartbeat_update_ns), when to publish idle debug state
+//! (last_idle_debug_publish_ns), and the debug-state cadence
+//! counters (debug_state_counter / empty_rx_polls).
 //!
 //! Pure structural extraction: capacities and access semantics
 //! unchanged from master pre-Phase-6. Field names preserved so
@@ -25,6 +26,7 @@
 pub(crate) struct WorkerTimers {
     pub(crate) last_heartbeat_update_ns: u64,
     pub(crate) debug_state_counter: u32,
+    pub(crate) last_idle_debug_publish_ns: u64,
     pub(crate) last_rx_wake_ns: u64,
     pub(crate) last_tx_wake_ns: u64,
     pub(crate) empty_rx_polls: u32,

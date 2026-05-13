@@ -148,7 +148,7 @@ pub(super) fn poll_binding(
                 unsafe { &*(binding.umem.area() as *const MmapArea) },
             );
             counters.flush(&binding.live);
-            update_binding_debug_state(binding);
+            update_binding_idle_debug_state(binding, now_ns);
             return did_work;
         }
         binding.timers.empty_rx_polls = 0;
