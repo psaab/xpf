@@ -118,7 +118,7 @@ pub(crate) struct BindingWorker {
     /// #959 Phase 5: 4 BPF map FDs extracted into `WorkerBpfMaps`.
     /// Field semantics unchanged; access via `binding.bpf_maps.X_fd`.
     pub(crate) bpf_maps: WorkerBpfMaps,
-    /// #959 Phase 6: 5 timing / wake-pacing fields extracted into
+    /// #959 Phase 6: 6 timing / wake-pacing fields extracted into
     /// `WorkerTimers`. Field semantics unchanged; access via
     /// `binding.timers.last_X_ns` etc.
     pub(crate) timers: WorkerTimers,
