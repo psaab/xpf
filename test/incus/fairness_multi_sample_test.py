@@ -315,6 +315,48 @@ class FairnessMultiSampleTest(unittest.TestCase):
             self.assertIn('"verdict":"PASS"', result.stdout)
             self.assertTrue((tmp_path / "eval-called").exists())
 
+    def test_fairness_harness_empty_reverse_arg_means_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            metrics = tmp_path / "metrics.prom"
+            metrics.write_text(
+                textwrap.dedent(
+                    """\
+                    xpf_userspace_binding_active_flow_count{binding_slot="0",iface="ge-0-0-2",queue_id="6",worker_id="0"} 1
+                    xpf_userspace_cos_active_flow_count{ifindex="5",queue_id="6",worker_id="0"} 1
+                    """
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_fake_harness_with_metrics(tmp_path, metrics)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            iperf_args = (tmp_path / "iperf-argv.txt").read_text(encoding="utf-8").splitlines()
+            self.assertNotIn("-R", iperf_args)
+
+    def test_fairness_harness_omitted_reverse_arg_defaults_to_reverse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            metrics = tmp_path / "metrics.prom"
+            metrics.write_text(
+                textwrap.dedent(
+                    """\
+                    xpf_userspace_binding_active_flow_count{binding_slot="0",iface="ge-0-0-2",queue_id="6",worker_id="0"} 1
+                    xpf_userspace_cos_active_flow_count{ifindex="5",queue_id="6",worker_id="0"} 1
+                    """
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_fake_harness_with_metrics(
+                tmp_path,
+                metrics,
+                harness_args=["127.0.0.1", "5203", "1", "1"],
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            iperf_args = (tmp_path / "iperf-argv.txt").read_text(encoding="utf-8").splitlines()
+            self.assertIn("-R", iperf_args)
+
     def test_fairness_harness_rejects_scrape_rows_for_wrong_cos_queue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -341,6 +383,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
         self,
         tmp_path: Path,
         metrics: Path,
+        harness_args: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         sentinel = tmp_path / "curl-called"
         fake_curl = tmp_path / "curl"
@@ -362,6 +405,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 """\
                 #!/usr/bin/env bash
                 set -euo pipefail
+                printf '%s\\n' "$@" > "$IPERF_ARGV_PATH"
                 for _ in {1..50}; do
                     [[ -e "$CURL_SENTINEL" ]] && break
                     sleep 0.02
@@ -395,17 +439,19 @@ class FairnessMultiSampleTest(unittest.TestCase):
             "CURL_SENTINEL": str(sentinel),
             "EVAL_SENTINEL": str(tmp_path / "eval-called"),
             "FAKE_METRICS": str(metrics),
+            "IPERF_ARGV_PATH": str(tmp_path / "iperf-argv.txt"),
         }
-        return subprocess.run(
-            [
-                str(HARNESS_PATH),
+        if harness_args is None:
+            harness_args = [
                 "127.0.0.1",
                 "5203",
                 "1",
                 "1",
                 "",
                 "http://example.invalid/metrics",
-            ],
+            ]
+        return subprocess.run(
+            [str(HARNESS_PATH), *harness_args],
             capture_output=True,
             text=True,
             check=False,
