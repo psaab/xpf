@@ -634,6 +634,107 @@ mod tests {
     }
 
     #[test]
+    fn phase0_environment_gate_rejects_interface_mismatch() {
+        let mut artifact = empty_interface_phase0_artifact();
+        artifact
+            .as_object_mut()
+            .expect("artifact object")
+            .insert("selected_interfaces".to_string(), json!(["dmz0"]));
+
+        assert_eq!(
+            phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new()).as_deref(),
+            Some("Phase 0 artifact selected interfaces do not match config")
+        );
+    }
+
+    #[test]
+    fn phase0_environment_gate_rejects_pci_mismatch() {
+        let mut artifact = empty_interface_phase0_artifact();
+        artifact
+            .as_object_mut()
+            .expect("artifact object")
+            .insert("selected_nic_pci_ids".to_string(), json!(["0000:00:00.0"]));
+
+        let reason = phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new())
+            .expect("PCI mismatch");
+        assert!(reason.starts_with("Phase 0 artifact PCI IDs"));
+    }
+
+    #[test]
+    fn phase0_environment_gate_rejects_selected_device_pair_mismatch() {
+        let mut artifact = empty_interface_phase0_artifact();
+        artifact
+            .as_object_mut()
+            .expect("artifact object")
+            .insert("selected_device_pair".to_string(), json!(["0000:00:00.0"]));
+
+        let reason = phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new())
+            .expect("device-pair mismatch");
+        assert!(reason.starts_with("Phase 0 artifact selected_device_pair"));
+    }
+
+    #[test]
+    fn phase0_environment_gate_rejects_driver_mismatch() {
+        let Some((interfaces, mut artifact)) = live_interface_phase0_artifact() else {
+            eprintln!("skipping: no sysfs-backed netdev with driver/device/mtu/queues");
+            return;
+        };
+        let ifname = interfaces.iter().next().expect("interface").clone();
+        artifact.as_object_mut().expect("artifact object").insert(
+            "driver".to_string(),
+            json!({ ifname: "not_the_live_driver" }),
+        );
+
+        let reason =
+            phase0_artifact_environment_mismatch(&artifact, &interfaces).expect("driver mismatch");
+        assert!(reason.starts_with("Phase 0 artifact driver"));
+    }
+
+    #[test]
+    fn phase0_environment_gate_rejects_mtu_mismatch() {
+        let Some((interfaces, mut artifact)) = live_interface_phase0_artifact() else {
+            eprintln!("skipping: no sysfs-backed netdev with driver/device/mtu/queues");
+            return;
+        };
+        let ifname = interfaces.iter().next().expect("interface").clone();
+        let live_mtu = interface_mtu_by_name(&interfaces)
+            .expect("live mtu")
+            .get(&ifname)
+            .copied()
+            .expect("interface mtu");
+        artifact.as_object_mut().expect("artifact object").insert(
+            "mtu".to_string(),
+            json!({ ifname: live_mtu.saturating_add(1) }),
+        );
+
+        let reason =
+            phase0_artifact_environment_mismatch(&artifact, &interfaces).expect("MTU mismatch");
+        assert!(reason.starts_with("Phase 0 artifact MTU"));
+    }
+
+    #[test]
+    fn phase0_environment_gate_rejects_queue_topology_mismatch() {
+        let Some((interfaces, mut artifact)) = live_interface_phase0_artifact() else {
+            eprintln!("skipping: no sysfs-backed netdev with driver/device/mtu/queues");
+            return;
+        };
+        let ifname = interfaces.iter().next().expect("interface").clone();
+        let live_queues = interface_rx_queue_count_by_name(&interfaces)
+            .expect("live queues")
+            .get(&ifname)
+            .copied()
+            .expect("interface queue count");
+        artifact.as_object_mut().expect("artifact object").insert(
+            "queue_topology".to_string(),
+            json!({ ifname: live_queues.saturating_add(1) }),
+        );
+
+        let reason = phase0_artifact_environment_mismatch(&artifact, &interfaces)
+            .expect("queue topology mismatch");
+        assert!(reason.starts_with("Phase 0 artifact queue_topology"));
+    }
+
+    #[test]
     fn phase0_environment_gate_accepts_driver_name_alias() {
         let mut artifact = empty_interface_phase0_artifact();
         let object = artifact.as_object_mut().expect("artifact object");
@@ -750,5 +851,36 @@ mod tests {
             "mtu": {},
             "queue_topology": {}
         })
+    }
+
+    fn live_interface_phase0_artifact() -> Option<(BTreeSet<String>, serde_json::Value)> {
+        for entry in std::fs::read_dir("/sys/class/net").ok()? {
+            let ifname = entry.ok()?.file_name().to_str()?.to_string();
+            let interfaces = BTreeSet::from([ifname]);
+            let Some(pci_ids) = interface_pci_ids(&interfaces) else {
+                continue;
+            };
+            let Some(driver) = interface_driver_by_name(&interfaces) else {
+                continue;
+            };
+            let Some(mtu) = interface_mtu_by_name(&interfaces) else {
+                continue;
+            };
+            let Some(queue_topology) = interface_rx_queue_count_by_name(&interfaces) else {
+                continue;
+            };
+            let artifact = json!({
+                "passed": true,
+                "kernel_release": current_kernel_release()?,
+                "selected_interfaces": interfaces,
+                "selected_nic_pci_ids": pci_ids,
+                "selected_device_pair": pci_ids,
+                "driver": driver,
+                "mtu": mtu,
+                "queue_topology": queue_topology
+            });
+            return Some((interfaces, artifact));
+        }
+        None
     }
 }
