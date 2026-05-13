@@ -207,38 +207,31 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
     let lag = compute_v_min_lag_threshold(transmit_rate_bytes, participating + 1);
     let vtime_ok = ff.queue_vtime <= v_min.saturating_add(lag);
     
-    // #1287 Tier 1: Flow-aware fairness check gated on link saturation.
-    // Only apply flow-aware brake when link is actually congested (vtime lag),
-    // otherwise we're work-conserving and shouldn't throttle.
-    let flow_ok = if !vtime_ok {
-        let my_flows = ff.active_flow_buckets as u32;
-        if my_flows > 0 && total_peer_flows > 0 {
-            let total_flows = total_peer_flows + my_flows;
-            let my_fair_share_bps = (transmit_rate_bytes as u128 * 8 * my_flows as u128 
-                / total_flows as u128) as u64;
-            
-            // Use delta-rate from total_bytes_served for accuracy
-            let now_ns = monotonic_nanos();
-            let dt_ns = now_ns.saturating_sub(queue.v_min.last_publish_ns).max(1_000_000);
-            let my_observed_bps = if queue.v_min.last_publish_ns > 0 {
-                let bytes_delta = queue.v_min.bytes_served
-                    .saturating_sub(queue.v_min.last_published_bytes);
-                ((bytes_delta as u128) * 8 * 1_000_000_000u128 / dt_ns as u128) as u64
-            } else {
-                ff.flow_bucket_observed_bps.iter().sum()
-            };
-            
-            // Hysteresis: throttle at 110%, unthrottle at 90%
-            let should_throttle = my_observed_bps > my_fair_share_bps.saturating_mul(11) / 10;
-            let should_unthrottle = my_observed_bps < my_fair_share_bps.saturating_mul(9) / 10;
-            
-            if should_throttle || (queue.v_min.consecutive_v_min_skips > 0 && !should_unthrottle) {
-                queue.v_min.v_min_flow_throttles_scratch =
-                    queue.v_min.v_min_flow_throttles_scratch.saturating_add(1);
-                false
-            } else {
-                true
-            }
+    // #1287 Tier 1: Flow-aware fairness check.
+    // Compute flow fairness independently, then combine with vtime check.
+    // We throttle if EITHER condition fails (vtime lag OR flow unfairness).
+    let my_flows = ff.active_flow_buckets as u32;
+    let flow_ok = if my_flows > 0 && total_peer_flows > 0 {
+        let total_flows = total_peer_flows + my_flows;
+        let my_fair_share_bps = (transmit_rate_bytes as u128 * 8 * my_flows as u128 
+            / total_flows as u128) as u64;
+        
+        // Use sum of per-bucket observed rates.
+        // Note: This is a windowed average and lags by ~100ms, but it's
+        // what we have available during drain (bytes_served is updated
+        // after settle, which happens after drain). For more accurate
+        // instantaneous rate, we'd need to track bytes in current batch
+        // separately.
+        let my_observed_bps: u64 = ff.flow_bucket_observed_bps.iter().sum();
+        
+        // Hysteresis: throttle at 110%, unthrottle at 90%
+        let should_throttle = my_observed_bps > my_fair_share_bps.saturating_mul(11) / 10;
+        let should_unthrottle = my_observed_bps < my_fair_share_bps.saturating_mul(9) / 10;
+        
+        if should_throttle || (queue.v_min.consecutive_v_min_skips > 0 && !should_unthrottle) {
+            queue.v_min.v_min_flow_throttles_scratch =
+                queue.v_min.v_min_flow_throttles_scratch.saturating_add(1);
+            false
         } else {
             true
         }
@@ -246,6 +239,7 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
         true
     };
     
+    // Throttle if EITHER vtime lag OR flow unfairness
     let cont = vtime_ok && flow_ok;
     if cont {
         // Successful V_min check — reset the hard-cap counter so a
