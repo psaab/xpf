@@ -83,7 +83,9 @@ fi
 PORT=${2:-$DEFAULT_PORT}
 N=${3:-12}
 T=${4:-120}
-REVERSE=${5:--R}
+# Default to the historical reverse fixture only when the argument is
+# absent. An explicit empty fifth argument selects forward mode.
+REVERSE=${5--R}
 METRICS_URL=${6:-http://127.0.0.1:8080/metrics}
 # IFACE filters per-binding samples to one interface so {a_i} reflects
 # per-worker counts for the test's data direction, not bidirectional
@@ -94,7 +96,9 @@ COS_IFINDEX=${COS_IFINDEX:-}
 COS_QUEUE_ID=${COS_QUEUE_ID:-}
 MIXED_PORT=${MIXED_PORT:-5202}
 MIXED_N=${MIXED_N:-$N}
-MIXED_REVERSE=${MIXED_REVERSE:-$REVERSE}
+# Preserve an explicit empty MIXED_REVERSE so mixed forward fixtures do
+# not silently inherit reverse mode.
+MIXED_REVERSE=${MIXED_REVERSE-$REVERSE}
 MIXED_COS_QUEUE_ID=${MIXED_COS_QUEUE_ID:-}
 N_WORKERS=${N_WORKERS:-6}
 SHAPER_RATE_BPS=${SHAPER_RATE_BPS:-}
