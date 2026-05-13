@@ -44,6 +44,83 @@ pub(in crate::afxdp) struct BindingPlan {
     pub(in crate::afxdp) ring_entries: u32,
     pub(in crate::afxdp) bind_strategy: AfXdpBindStrategy,
     pub(in crate::afxdp) poll_mode: crate::PollMode,
+    pub(in crate::afxdp) shared_umem: SharedUmemBindingPlan,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) enum SharedUmemMode {
+    #[default]
+    Off,
+    SameDeviceDebug,
+    CrossNic,
+}
+
+impl SharedUmemMode {
+    pub(in crate::afxdp) fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::SameDeviceDebug => "same-device-debug",
+            Self::CrossNic => "cross-nic",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) enum SharedUmemSocketRole {
+    #[default]
+    Private,
+    Owner,
+    Secondary,
+}
+
+impl SharedUmemSocketRole {
+    pub(in crate::afxdp) fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Owner => "owner",
+            Self::Secondary => "secondary",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct SharedUmemBindingPlan {
+    pub(in crate::afxdp) mode: SharedUmemMode,
+    pub(in crate::afxdp) group_key: String,
+    pub(in crate::afxdp) socket_role: SharedUmemSocketRole,
+    pub(in crate::afxdp) disabled_reason: String,
+}
+
+impl SharedUmemBindingPlan {
+    pub(in crate::afxdp) fn private() -> Self {
+        Self::default()
+    }
+
+    pub(in crate::afxdp) fn shared(
+        mode: SharedUmemMode,
+        group_key: String,
+        socket_role: SharedUmemSocketRole,
+    ) -> Self {
+        Self {
+            mode,
+            group_key,
+            socket_role,
+            disabled_reason: String::new(),
+        }
+    }
+
+    pub(in crate::afxdp) fn disabled(mode: SharedUmemMode, reason: String) -> Self {
+        Self {
+            mode,
+            group_key: String::new(),
+            socket_role: SharedUmemSocketRole::Private,
+            disabled_reason: reason,
+        }
+    }
+
+    pub(in crate::afxdp) fn is_shared(&self) -> bool {
+        self.socket_role != SharedUmemSocketRole::Private && !self.group_key.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,7 +151,10 @@ pub(in crate::afxdp) struct HAGroupRuntime {
 }
 
 impl HAGroupRuntime {
-    pub(in crate::afxdp) fn active_lease_until(watchdog_timestamp: u64, now_secs: u64) -> HAForwardingLease {
+    pub(in crate::afxdp) fn active_lease_until(
+        watchdog_timestamp: u64,
+        now_secs: u64,
+    ) -> HAForwardingLease {
         HAForwardingLease::ActiveUntil(
             watchdog_timestamp
                 .max(now_secs)
@@ -127,9 +207,16 @@ pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),
-    DemoteOwnerRGS { owner_rgs: Vec<i32> },
-    RefreshOwnerRGS { owner_rgs: Vec<i32> },
-    ExportOwnerRGSessions { sequence: u64, owner_rgs: Vec<i32> },
+    DemoteOwnerRGS {
+        owner_rgs: Vec<i32>,
+    },
+    RefreshOwnerRGS {
+        owner_rgs: Vec<i32>,
+    },
+    ExportOwnerRGSessions {
+        sequence: u64,
+        owner_rgs: Vec<i32>,
+    },
     EnqueueShapedLocal(TxRequest),
     /// #941 Work item C: vacate ALL V_min slots owned by this worker
     /// across every binding's shared_exact queues. Enqueued by the
@@ -222,7 +309,8 @@ pub(in crate::afxdp) struct WorkerContext<'a> {
     pub(in crate::afxdp) ha_state: &'a BTreeMap<i32, HAGroupRuntime>,
     pub(in crate::afxdp) dynamic_neighbors: &'a Arc<super::sharded_neighbor::ShardedNeighborMap>,
     pub(in crate::afxdp) shared_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    pub(in crate::afxdp) shared_nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    pub(in crate::afxdp) shared_nat_sessions:
+        &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub(in crate::afxdp) shared_forward_wire_sessions:
         &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub(in crate::afxdp) shared_owner_rg_indexes: &'a SharedSessionOwnerRgIndexes,

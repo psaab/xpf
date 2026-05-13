@@ -90,7 +90,6 @@ pub(crate) struct BindingWorker {
     pub(crate) worker_id: u32,
     pub(crate) interface: Arc<str>,
     pub(crate) ifindex: i32,
-    pub(crate) umem: WorkerUmem,
     pub(crate) live: Arc<BindingLiveState>,
     #[allow(dead_code)]
     pub(crate) user: User,
@@ -98,6 +97,10 @@ pub(crate) struct BindingWorker {
     /// `WorkerXskRings`. Field semantics unchanged; access via
     /// `binding.xsk.device`, `binding.xsk.rx`, `binding.xsk.tx`.
     pub(crate) xsk: WorkerXskRings,
+    /// Keep UMEM after the XSK handles in declaration order. Rust drops
+    /// struct fields in declaration order, and libxdp sockets must be deleted
+    /// before the backing UMEM can be deleted in shared mode.
+    pub(crate) umem: WorkerUmem,
     /// #959 Phase 7 + Phase 10: 8 TX pipeline fields extracted into
     /// `WorkerTxPipeline` (Phase 7 brought 7; Phase 10 added
     /// `outstanding_tx` once the BindingStatus mirror collision was
@@ -240,10 +243,12 @@ impl BindingWorker {
         conntrack_v6_fd: c_int,
         live: Arc<BindingLiveState>,
         bind_strategy: AfXdpBindStrategy,
+        socket_role: XskSocketRole,
         poll_mode: crate::PollMode,
         mut worker_umem: WorkerUmem,
         frame_pool: &mut VecDeque<u64>,
         shared_umem: bool,
+        register_xsk_now: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let driver_name = interface_driver_name(&binding.interface);
         let total_frames =
@@ -276,16 +281,18 @@ impl BindingWorker {
             initial_fill_frames.push(offset);
         }
         let info = ifinfo_from_binding(binding)?;
-        let (user, rx, tx, bind_mode, actual_bind_strategy, device) = open_binding_worker_rings(
-            &mut worker_umem,
-            &info,
-            ring_entries,
-            bind_strategy,
-            driver_name.as_deref(),
-            poll_mode,
-            Some(&initial_fill_frames),
-        )
-        .map_err(|err| format!("configure AF_XDP rings: {err}"))?;
+        let (user, rx, tx, bind_mode, bind_flags, actual_bind_strategy, device) =
+            open_binding_worker_rings(
+                &mut worker_umem,
+                &info,
+                ring_entries,
+                bind_strategy,
+                socket_role,
+                driver_name.as_deref(),
+                poll_mode,
+                Some(&initial_fill_frames),
+            )
+            .map_err(|err| format!("configure AF_XDP rings: {err}"))?;
 
         let user_fd = user.as_raw_fd();
         live.set_bound(user_fd);
@@ -293,7 +300,7 @@ impl BindingWorker {
         // getsockname() returns ENOTSUP on AF_XDP sockets (kernel doesn't
         // implement it for this family).  Use the binding plan's expected
         // ifindex/queue_id directly — umem.bind() already validated these.
-        live.set_socket_binding(binding.ifindex, binding.queue_id, 0);
+        live.set_socket_binding(binding.ifindex, binding.queue_id, u32::from(bind_flags));
         // #878: publish per-binding capacities so the snapshot path can
         // expose them via the wire BindingStatus. These are write-once
         // (set here at worker construction) and read-many.
@@ -302,29 +309,17 @@ impl BindingWorker {
         live.tx_ring_capacity
             .store(ring_entries, std::sync::atomic::Ordering::Relaxed);
         eprintln!(
-            "xpf-userspace-dp: binding slot={} fd={} strategy={} bound if{}q{} mode={:?} shared_umem={}",
+            "xpf-userspace-dp: binding slot={} fd={} strategy={} role={} bound if{}q{} mode={:?} flags=0x{:04x} shared_umem={}",
             binding.slot,
             user_fd,
             actual_bind_strategy.describe(),
+            socket_role.describe(),
             binding.ifindex,
             binding.queue_id,
             bind_mode,
+            bind_flags,
             shared_umem,
         );
-        if let Err(err) = register_xsk_slot(xsk_map_fd, binding.slot, user_fd) {
-            eprintln!(
-                "xpf-userspace-dp: ERROR register_xsk_slot slot={} fd={}: {}",
-                binding.slot, user_fd, err,
-            );
-            live.set_error(format!("register XSK slot: {err}"));
-        } else {
-            eprintln!(
-                "xpf-userspace-dp: registered slot={} fd={} in XSKMAP",
-                binding.slot, user_fd,
-            );
-            live.set_xsk_registered(true);
-            live.clear_error();
-        }
         let init_now = monotonic_nanos();
         let max_pending_tx = pending_tx_capacity(ring_entries);
         if let Err(err) = touch_heartbeat(heartbeat_map_fd, binding.slot, &live, init_now) {
@@ -431,6 +426,9 @@ impl BindingWorker {
                 xsk_rx_confirmed: false,
             },
         };
+        if register_xsk_now {
+            register_binding_xsk(&binding, xsk_map_fd)?;
+        }
         update_binding_debug_state(&mut binding);
         Ok(binding)
     }
@@ -444,6 +442,170 @@ impl BindingWorker {
             ifindex: self.ifindex,
         }
     }
+}
+
+fn register_binding_xsk(
+    binding: &BindingWorker,
+    xsk_map_fd: c_int,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let user_fd = binding.user.as_raw_fd();
+    if let Err(err) = register_xsk_slot(xsk_map_fd, binding.slot, user_fd) {
+        eprintln!(
+            "xpf-userspace-dp: ERROR register_xsk_slot slot={} fd={}: {}",
+            binding.slot, user_fd, err,
+        );
+        binding.live.set_error(format!("register XSK slot: {err}"));
+        return Err(format!("register XSK slot {} fd {}: {err}", binding.slot, user_fd).into());
+    }
+    eprintln!(
+        "xpf-userspace-dp: registered slot={} fd={} in XSKMAP",
+        binding.slot, user_fd,
+    );
+    binding.live.set_xsk_registered(true);
+    binding.live.clear_error();
+    Ok(())
+}
+
+fn xsk_role_for_shared_plan(plan: &SharedUmemBindingPlan) -> XskSocketRole {
+    match plan.socket_role {
+        SharedUmemSocketRole::Private => XskSocketRole::Private,
+        SharedUmemSocketRole::Owner => XskSocketRole::SharedOwner,
+        SharedUmemSocketRole::Secondary => XskSocketRole::SharedSecondary,
+    }
+}
+
+fn partition_binding_plans(
+    binding_plans: Vec<BindingPlan>,
+) -> (Vec<BindingPlan>, BTreeMap<String, Vec<BindingPlan>>) {
+    let mut private = Vec::new();
+    let mut shared = BTreeMap::new();
+    for plan in binding_plans {
+        if plan.shared_umem.is_shared() {
+            shared
+                .entry(plan.shared_umem.group_key.clone())
+                .or_insert_with(Vec::new)
+                .push(plan);
+        } else {
+            private.push(plan);
+        }
+    }
+    (private, shared)
+}
+
+fn create_private_binding_from_plan(
+    plan: BindingPlan,
+) -> Result<BindingWorker, Box<dyn std::error::Error + Send + Sync>> {
+    let driver_name = interface_driver_name(&plan.status.interface);
+    let total_frames =
+        binding_frame_count_for_driver(driver_name.as_deref(), plan.ring_entries).max(1);
+    match WorkerUmemPool::new(total_frames).map_err(|err| format!("create binding umem: {err}")) {
+        Ok(WorkerUmemPool {
+            umem,
+            mut free_frames,
+        }) => BindingWorker::create(
+            &plan.status,
+            plan.ring_entries,
+            plan.xsk_map_fd,
+            plan.heartbeat_map_fd,
+            plan.session_map_fd,
+            plan.conntrack_v4_fd,
+            plan.conntrack_v6_fd,
+            plan.live.clone(),
+            plan.bind_strategy,
+            XskSocketRole::Private,
+            plan.poll_mode,
+            umem,
+            &mut free_frames,
+            false,
+            true,
+        ),
+        Err(err) => Err(err.to_string().into()),
+    }
+}
+
+fn create_shared_binding_group(
+    group_key: &str,
+    mut plans: Vec<BindingPlan>,
+) -> Result<Vec<BindingWorker>, Box<dyn std::error::Error + Send + Sync>> {
+    plans.sort_by_key(|plan| (plan.status.queue_id, plan.status.ifindex, plan.status.slot));
+    let group_lives = plans
+        .iter()
+        .map(|plan| plan.live.clone())
+        .collect::<Vec<_>>();
+    let total_frames = plans.iter().fold(0u32, |acc, plan| {
+        let driver_name = interface_driver_name(&plan.status.interface);
+        acc.saturating_add(
+            binding_frame_count_for_driver(driver_name.as_deref(), plan.ring_entries).max(1),
+        )
+    });
+    let WorkerUmemPool {
+        umem,
+        mut free_frames,
+    } = WorkerUmemPool::new(total_frames)
+        .map_err(|err| format!("create shared UMEM group {group_key}: {err}"))?;
+
+    let mut created: Vec<(BindingWorker, c_int)> = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let planned_role = xsk_role_for_shared_plan(&plan.shared_umem);
+        let socket_role = if created.is_empty() {
+            XskSocketRole::SharedOwner
+        } else {
+            XskSocketRole::SharedSecondary
+        };
+        if socket_role != planned_role {
+            eprintln!(
+                "xpf-userspace-dp: shared UMEM group {group_key} corrected planned role for slot={} from {} to {}",
+                plan.status.slot,
+                planned_role.describe(),
+                socket_role.describe(),
+            );
+        }
+        match BindingWorker::create(
+            &plan.status,
+            plan.ring_entries,
+            plan.xsk_map_fd,
+            plan.heartbeat_map_fd,
+            plan.session_map_fd,
+            plan.conntrack_v4_fd,
+            plan.conntrack_v6_fd,
+            plan.live.clone(),
+            plan.bind_strategy,
+            socket_role,
+            plan.poll_mode,
+            umem.clone(),
+            &mut free_frames,
+            true,
+            false,
+        ) {
+            Ok(binding) => created.push((binding, plan.xsk_map_fd)),
+            Err(err) => {
+                let msg = format!("shared UMEM group {group_key} bind failed: {err}");
+                for live in &group_lives {
+                    live.clear_socket_state();
+                    live.set_error(msg.clone());
+                }
+                return Err(msg.into());
+            }
+        }
+    }
+
+    let mut registered = Vec::new();
+    for (binding, xsk_map_fd) in &created {
+        if let Err(err) = register_binding_xsk(binding, *xsk_map_fd) {
+            let msg = format!("shared UMEM group {group_key} XSKMAP registration failed: {err}");
+            for (map_fd, slot) in registered {
+                let _ = delete_xsk_slot(map_fd, slot);
+            }
+            for live in &group_lives {
+                live.clear_socket_state();
+                live.set_error(msg.clone());
+            }
+            return Err(msg.into());
+        }
+        registered.push((*xsk_map_fd, binding.slot));
+    }
+
+    Ok(created.into_iter().map(|(binding, _)| binding).collect())
 }
 
 /// #1188: replace per-tick `.load_full() + Arc::ptr_eq` with `.load() +
@@ -551,38 +713,34 @@ pub(crate) fn worker_loop(
     screen_state.update_profiles(forwarding.screen_profiles.clone());
     sessions.set_timeouts(forwarding.session_timeouts);
     let mut bindings = Vec::with_capacity(binding_plans.len());
-    for plan in binding_plans {
-        let driver_name = interface_driver_name(&plan.status.interface);
-        let total_frames =
-            binding_frame_count_for_driver(driver_name.as_deref(), plan.ring_entries).max(1);
-        let binding = match WorkerUmemPool::new(total_frames)
-            .map_err(|err| format!("create binding umem: {err}"))
-        {
-            Ok(WorkerUmemPool {
-                umem,
-                mut free_frames,
-            }) => BindingWorker::create(
-                &plan.status,
-                plan.ring_entries,
-                plan.xsk_map_fd,
-                plan.heartbeat_map_fd,
-                plan.session_map_fd,
-                plan.conntrack_v4_fd,
-                plan.conntrack_v6_fd,
-                plan.live.clone(),
-                plan.bind_strategy,
-                plan.poll_mode,
-                umem,
-                &mut free_frames,
-                false,
-            ),
-            Err(err) => Err(err.to_string().into()),
-        };
-        match binding {
+    let (private_plans, shared_groups) = partition_binding_plans(binding_plans);
+    for plan in private_plans {
+        let live = plan.live.clone();
+        match create_private_binding_from_plan(plan) {
             Ok(binding) => bindings.push(binding),
-            Err(err) => plan.live.set_error(err.to_string()),
+            Err(err) => {
+                eprintln!("xpf-userspace-dp: private binding creation failed: {err}");
+                live.set_error(err.to_string());
+            }
         }
     }
+    for (group_key, plans) in shared_groups {
+        let lives = plans
+            .iter()
+            .map(|plan| plan.live.clone())
+            .collect::<Vec<_>>();
+        match create_shared_binding_group(&group_key, plans) {
+            Ok(mut group_bindings) => bindings.append(&mut group_bindings),
+            Err(err) => {
+                let msg = err.to_string();
+                eprintln!("xpf-userspace-dp: {msg}");
+                for live in lives {
+                    live.set_error(msg.clone());
+                }
+            }
+        }
+    }
+    bindings.sort_by_key(|binding| (binding.queue_id, binding.ifindex, binding.slot));
     let binding_lookup = WorkerBindingLookup::from_bindings(&bindings);
     let cos_owner_live_by_tx_ifindex = build_worker_cos_owner_live_by_tx_ifindex(
         bindings
@@ -1744,7 +1902,6 @@ fn apply_worker_shaped_tx_requests(
         }
     }
 }
-
 
 pub(crate) fn push_recent_exception(
     recent_exceptions: &mut VecDeque<ExceptionStatus>,

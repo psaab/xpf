@@ -59,6 +59,10 @@ impl WorkerUmem {
             .umem_mut()
     }
 
+    pub(super) fn as_raw_umem_ptr(&self) -> *mut crate::xsk_ffi::XskUmemOpaque {
+        self.inner.umem.as_raw_ptr()
+    }
+
     pub(super) fn total_frames(&self) -> u32 {
         self.inner.total_frames
     }
@@ -601,6 +605,17 @@ impl BindingLiveState {
 
     pub(super) fn set_bind_mode(&self, mode: XskBindMode) {
         self.bind_mode.store(mode.as_u8(), Ordering::Relaxed);
+    }
+
+    pub(super) fn clear_socket_state(&self) {
+        self.bound.store(false, Ordering::Relaxed);
+        self.xsk_registered.store(false, Ordering::Relaxed);
+        self.bind_mode
+            .store(XskBindMode::Unknown.as_u8(), Ordering::Relaxed);
+        self.socket_fd.store(0, Ordering::Relaxed);
+        self.socket_ifindex.store(0, Ordering::Relaxed);
+        self.socket_queue_id.store(0, Ordering::Relaxed);
+        self.socket_bind_flags.store(0, Ordering::Relaxed);
     }
 
     pub(super) fn set_last_heartbeat_at(&self, now_ns: u64) {

@@ -329,6 +329,10 @@ pub(crate) fn snapshot_binding_plan_key(snapshot: &ConfigSnapshot) -> String {
         .and_then(|v| v.as_u64())
         .unwrap_or_default();
     out.push_str(&format!("workers={workers};ring={ring_entries};"));
+    if let Some(shared_umem) = snapshot.userspace.get("shared_umem") {
+        let shared_key = serde_json::to_string(shared_umem).unwrap_or_default();
+        out.push_str(&format!("shared_umem={shared_key};"));
+    }
     for iface in snapshot
         .interfaces
         .iter()

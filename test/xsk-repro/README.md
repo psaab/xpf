@@ -16,6 +16,9 @@ A standalone test with its own XDP program (not xpfd's XDP shim) to:
 - Confirm xdpilone zero-copy works at all on this NIC
 - Confirm whether link DOWN/UP breaks the receive path
 - Compare xdpilone vs libbpf xsk_socket__create
+- Confirm the shared-UMEM owner/secondary bind contract:
+  owner sockets may request copy/zero-copy, while secondary sockets must pass
+  exactly `XDP_SHARED_UMEM` and verify `XDP_OPTIONS_ZEROCOPY` after bind.
 
 The current test binary coexists with xpfd but the daemon's status
 loop overwrites the xskmap and bindings entries, invalidating results.

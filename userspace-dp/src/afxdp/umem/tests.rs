@@ -830,6 +830,7 @@ fn tx_submit_ns_sidecar_single_writer_ownership_is_rc_not_arc() {
     // access) — a loud failure, not silent drift.
     let _: fn(&WorkerUmem, &WorkerUmem) -> bool = WorkerUmem::shares_allocation_with;
     let _: fn(&WorkerUmem) -> *const WorkerUmemInner = WorkerUmem::allocation_ptr;
+    let _: fn(&WorkerUmem) -> *mut crate::xsk_ffi::XskUmemOpaque = WorkerUmem::as_raw_umem_ptr;
 }
 
 #[test]

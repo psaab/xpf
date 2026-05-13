@@ -5,6 +5,8 @@ use std::path::Path;
 const AUTO_BIND_FLAGS: [u16; 1] = [0];
 const COPY_ONLY_BIND_FLAGS: [u16; 1] = [XSK_BIND_FLAGS_COPY];
 const EXPLICIT_MODE_BIND_FLAGS: [u16; 2] = [XSK_BIND_FLAGS_ZEROCOPY, XSK_BIND_FLAGS_COPY];
+const SHARED_OWNER_BIND_FLAGS: [u16; 1] = [XSK_BIND_FLAGS_ZEROCOPY];
+const SHARED_SECONDARY_BIND_FLAGS: [u16; 1] = [SocketConfig::XDP_BIND_SHARED_UMEM];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AfXdpBindStrategy {
@@ -32,6 +34,34 @@ impl AfXdpBindStrategy {
 pub(super) enum AfXdpBinder {
     Umem,
     DeviceQueue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum XskSocketRole {
+    Private,
+    SharedOwner,
+    SharedSecondary,
+}
+
+impl XskSocketRole {
+    pub(super) fn describe(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::SharedOwner => "shared-owner",
+            Self::SharedSecondary => "shared-secondary",
+        }
+    }
+
+    fn create_mode(self) -> xsk_ffi::XskCreateMode {
+        match self {
+            Self::Private => xsk_ffi::XskCreateMode::PrivateUmem,
+            Self::SharedOwner | Self::SharedSecondary => xsk_ffi::XskCreateMode::SharedUmem,
+        }
+    }
+
+    fn requires_zerocopy(self) -> bool {
+        !matches!(self, Self::Private)
+    }
 }
 
 /// Total UMEM frames per binding: reserved TX + 2×ring_entries for RX fill.
@@ -62,6 +92,7 @@ pub(super) fn open_binding_worker_rings(
     info: &IfInfo,
     ring_entries: u32,
     bind_strategy: AfXdpBindStrategy,
+    socket_role: XskSocketRole,
     driver_name: Option<&str>,
     poll_mode: crate::PollMode,
     pre_bind_fill_offsets: Option<&[u64]>,
@@ -71,12 +102,13 @@ pub(super) fn open_binding_worker_rings(
         RingRx,
         RingTx,
         XskBindMode,
+        u16,
         AfXdpBindStrategy,
         DeviceQueue,
     ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let bind_flag_candidates = bind_flag_candidates_for_interface(info, driver_name);
+    let bind_flag_candidates = bind_flag_candidates_for_socket_role(info, driver_name, socket_role);
     let mut strategies = vec![bind_strategy];
     if let Some(fallback_strategy) = alternate_bind_strategy(driver_name, bind_strategy) {
         strategies.push(fallback_strategy);
@@ -89,11 +121,12 @@ pub(super) fn open_binding_worker_rings(
                 info,
                 ring_entries,
                 flags,
+                socket_role,
                 poll_mode,
                 pre_bind_fill_offsets,
             ) {
-                Ok((user, rx, tx, bind_mode, device)) => {
-                    return Ok((user, rx, tx, bind_mode, strategy, device));
+                Ok((user, rx, tx, bind_mode, actual_flags, device)) => {
+                    return Ok((user, rx, tx, bind_mode, actual_flags, strategy, device));
                 }
                 Err(err) => {
                     last_err = Some(err);
@@ -135,6 +168,18 @@ pub(super) fn bind_flag_candidates_for_interface(
         };
     }
     bind_flag_candidates_for_driver(driver)
+}
+
+pub(super) fn bind_flag_candidates_for_socket_role(
+    info: &IfInfo,
+    driver: Option<&str>,
+    socket_role: XskSocketRole,
+) -> &'static [u16] {
+    match socket_role {
+        XskSocketRole::Private => bind_flag_candidates_for_interface(info, driver),
+        XskSocketRole::SharedOwner => &SHARED_OWNER_BIND_FLAGS,
+        XskSocketRole::SharedSecondary => &SHARED_SECONDARY_BIND_FLAGS,
+    }
 }
 
 pub(super) fn bind_flag_candidates_for_driver(driver: Option<&str>) -> &'static [u16] {
@@ -304,14 +349,31 @@ fn try_open_bind(
     info: &IfInfo,
     ring_entries: u32,
     bind_flags: u16,
+    socket_role: XskSocketRole,
     poll_mode: crate::PollMode,
     pre_bind_fill_offsets: Option<&[u64]>,
 ) -> Result<
-    (User, RingRx, RingTx, XskBindMode, DeviceQueue),
+    (User, RingRx, RingTx, XskBindMode, u16, DeviceQueue),
     Box<dyn std::error::Error + Send + Sync>,
 > {
     for attempt in 0..BIND_RETRY_ATTEMPTS {
-        match xsk_ffi::create_xsk_binding(worker_umem.umem_mut(), info, ring_entries, bind_flags) {
+        let create_result = match socket_role.create_mode() {
+            xsk_ffi::XskCreateMode::PrivateUmem => xsk_ffi::create_xsk_binding_private(
+                worker_umem.umem_mut(),
+                info,
+                ring_entries,
+                bind_flags,
+            ),
+            xsk_ffi::XskCreateMode::SharedUmem => unsafe {
+                xsk_ffi::create_xsk_binding_shared(
+                    worker_umem.as_raw_umem_ptr(),
+                    info,
+                    ring_entries,
+                    bind_flags,
+                )
+            },
+        };
+        match create_result {
             Ok((user, rx, tx, mut device)) => {
                 let user_fd = user.as_raw_fd();
 
@@ -323,13 +385,25 @@ fn try_open_bind(
                 }
 
                 let bind_mode = query_bound_xsk_mode(user_fd).unwrap_or(XskBindMode::Copy);
+                if socket_role.requires_zerocopy() && !bind_mode.is_zerocopy() {
+                    return Err(format!(
+                        "{} bind(fd={}) did not report XDP_OPTIONS_ZEROCOPY after bind",
+                        socket_role.describe(),
+                        user_fd
+                    )
+                    .into());
+                }
                 set_busy_poll_opts(user_fd, poll_mode);
                 eprintln!(
-                    "xpf-userspace-dp: libxdp bind(fd={}) OK on attempt {} mode={:?} flags=0x{:04x}",
-                    user_fd, attempt, bind_mode, bind_flags,
+                    "xpf-userspace-dp: libxdp bind(fd={}) OK on attempt {} role={} mode={:?} flags=0x{:04x}",
+                    user_fd,
+                    attempt,
+                    socket_role.describe(),
+                    bind_mode,
+                    bind_flags,
                 );
 
-                return Ok((user, rx, tx, bind_mode, device));
+                return Ok((user, rx, tx, bind_mode, bind_flags, device));
             }
             Err(err) => {
                 let msg = err.to_string();
@@ -338,7 +412,8 @@ fn try_open_bind(
                     continue;
                 }
                 return Err(format!(
-                    "libxdp xsk_socket__create_shared(flags=0x{:04x}): {msg}",
+                    "libxdp {} bind(flags=0x{:04x}): {msg}",
+                    socket_role.describe(),
                     bind_flags,
                 )
                 .into());

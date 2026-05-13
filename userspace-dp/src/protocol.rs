@@ -1479,6 +1479,16 @@ pub(crate) struct BindingStatus {
     pub socket_queue_id: u32,
     #[serde(rename = "socket_bind_flags", default)]
     pub socket_bind_flags: u32,
+    /// Experimental shared-UMEM bind plan selected by the coordinator.
+    /// Empty/default means the binding is using the normal private UMEM path.
+    #[serde(rename = "shared_umem_mode", default)]
+    pub shared_umem_mode: String,
+    #[serde(rename = "shared_umem_group", default)]
+    pub shared_umem_group: String,
+    #[serde(rename = "shared_umem_socket_role", default)]
+    pub shared_umem_socket_role: String,
+    #[serde(rename = "shared_umem_disabled_reason", default)]
+    pub shared_umem_disabled_reason: String,
     #[serde(rename = "debug_pending_fill_frames", default)]
     pub debug_pending_fill_frames: u32,
     #[serde(rename = "debug_spare_fill_frames", default)]
