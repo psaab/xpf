@@ -790,6 +790,8 @@ pub(in crate::afxdp) fn settle_exact_local_fifo_submission(
         free_tx_frames.push_front(req.offset);
     }
     scratch_local_tx.clear();
+    // #1287: Update total bytes served for flow-aware V_min
+    queue.v_min.bytes_served = queue.v_min.bytes_served.saturating_add(sent_bytes);
     (sent_packets, sent_bytes)
 }
 
@@ -865,6 +867,8 @@ pub(in crate::afxdp) fn settle_exact_prepared_fifo_submission(
         }
     }
     scratch_prepared_tx.clear();
+    // #1287: Update total bytes served for flow-aware V_min
+    queue.v_min.bytes_served = queue.v_min.bytes_served.saturating_add(sent_bytes);
     (sent_packets, sent_bytes)
 }
 

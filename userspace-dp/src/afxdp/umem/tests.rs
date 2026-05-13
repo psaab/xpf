@@ -1282,10 +1282,11 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
 
     let hard_cap = std::sync::atomic::AtomicU64::new(0);
     let throttles = std::sync::atomic::AtomicU64::new(0);
+    let flow_throttles = std::sync::atomic::AtomicU64::new(0);
     let mut interfaces = std::collections::BTreeMap::new();
     interfaces.insert(1, runtime);
 
-    crate::afxdp::umem::flush_v_min_scratches_into(interfaces.values_mut(), &hard_cap, &throttles);
+    crate::afxdp::umem::flush_v_min_scratches_into(interfaces.values_mut(), &hard_cap, &throttles, &flow_throttles);
 
     // Atomics carry the sums.
     assert_eq!(
@@ -1341,10 +1342,11 @@ fn flush_v_min_scratches_no_op_when_all_zero() {
     // doesn't accidentally store-zero.
     let hard_cap = std::sync::atomic::AtomicU64::new(42);
     let throttles = std::sync::atomic::AtomicU64::new(99);
+    let flow_throttles = std::sync::atomic::AtomicU64::new(77);
     let mut interfaces = std::collections::BTreeMap::new();
     interfaces.insert(1, runtime);
 
-    crate::afxdp::umem::flush_v_min_scratches_into(interfaces.values_mut(), &hard_cap, &throttles);
+    crate::afxdp::umem::flush_v_min_scratches_into(interfaces.values_mut(), &hard_cap, &throttles, &flow_throttles);
 
     // Atomics unchanged — the no-zero-scratch path skips the fetch_add.
     assert_eq!(hard_cap.load(std::sync::atomic::Ordering::Relaxed), 42);

@@ -276,6 +276,8 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// Flushed from each queue's `v_min_throttles_scratch` in
     /// `update_binding_debug_state` (mirrors flow_cache_collision_evictions).
     pub(super) v_min_throttles: AtomicU64,
+    /// #1287: count of flow-aware V_min throttle decisions.
+    pub(super) v_min_flow_throttles: AtomicU64,
     pub(super) session_hits: AtomicU64,
     pub(super) session_misses: AtomicU64,
     pub(super) session_creates: AtomicU64,
@@ -483,6 +485,7 @@ impl BindingLiveState {
             cos_active_flow_counts: ArcSwap::from_pointee(Vec::new()),
             v_min_throttle_hard_cap_overrides: AtomicU64::new(0),
             v_min_throttles: AtomicU64::new(0),
+            v_min_flow_throttles: AtomicU64::new(0),
             session_hits: AtomicU64::new(0),
             session_misses: AtomicU64::new(0),
             session_creates: AtomicU64::new(0),
@@ -1221,6 +1224,7 @@ pub(super) fn update_binding_debug_state(binding: &mut BindingWorker) {
         binding.cos.cos_interfaces.values_mut(),
         &binding.live.v_min_throttle_hard_cap_overrides,
         &binding.live.v_min_throttles,
+        &binding.live.v_min_flow_throttles,
     );
 }
 
@@ -1234,11 +1238,13 @@ pub(super) fn flush_v_min_scratches_into<'a, I>(
     roots: I,
     hard_cap_target: &AtomicU64,
     throttles_target: &AtomicU64,
+    flow_throttles_target: &AtomicU64,
 ) where
     I: IntoIterator<Item = &'a mut crate::afxdp::types::CoSInterfaceRuntime>,
 {
     let mut hard_cap_overrides_total = 0u64;
     let mut throttles_total = 0u64;
+    let mut flow_throttles_total = 0u64;
     for root in roots {
         for queue in &mut root.queues {
             if queue.v_min.v_min_hard_cap_overrides_scratch != 0 {
@@ -1251,6 +1257,11 @@ pub(super) fn flush_v_min_scratches_into<'a, I>(
                     throttles_total.saturating_add(u64::from(queue.v_min.v_min_throttles_scratch));
                 queue.v_min.v_min_throttles_scratch = 0;
             }
+            if queue.v_min.v_min_flow_throttles_scratch != 0 {
+                flow_throttles_total = flow_throttles_total
+                    .saturating_add(u64::from(queue.v_min.v_min_flow_throttles_scratch));
+                queue.v_min.v_min_flow_throttles_scratch = 0;
+            }
         }
     }
     if hard_cap_overrides_total != 0 {
@@ -1258,6 +1269,9 @@ pub(super) fn flush_v_min_scratches_into<'a, I>(
     }
     if throttles_total != 0 {
         throttles_target.fetch_add(throttles_total, Ordering::Relaxed);
+    }
+    if flow_throttles_total != 0 {
+        flow_throttles_target.fetch_add(flow_throttles_total, Ordering::Relaxed);
     }
 }
 

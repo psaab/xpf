@@ -205,12 +205,12 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
     };
 
     let lag = compute_v_min_lag_threshold(transmit_rate_bytes, participating + 1);
-    let vtime_lag_exceeded = ff.queue_vtime > v_min.saturating_add(lag);
+    let vtime_ok = ff.queue_vtime <= v_min.saturating_add(lag);
     
     // #1287 Tier 1: Flow-aware fairness check gated on link saturation.
     // Only apply flow-aware brake when link is actually congested (vtime lag),
     // otherwise we're work-conserving and shouldn't throttle.
-    let flow_throttle = if vtime_lag_exceeded {
+    let flow_ok = if !vtime_ok {
         let my_flows = ff.active_flow_buckets as u32;
         if my_flows > 0 && total_peer_flows > 0 {
             let total_flows = total_peer_flows + my_flows;
@@ -235,18 +235,18 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
             if should_throttle || (queue.v_min.consecutive_v_min_skips > 0 && !should_unthrottle) {
                 queue.v_min.v_min_flow_throttles_scratch =
                     queue.v_min.v_min_flow_throttles_scratch.saturating_add(1);
-                true
-            } else {
                 false
+            } else {
+                true
             }
         } else {
-            false
+            true
         }
     } else {
-        false
+        true
     };
     
-    let cont = !flow_throttle && ff.queue_vtime <= v_min.saturating_add(lag);
+    let cont = vtime_ok && flow_ok;
     if cont {
         // Successful V_min check — reset the hard-cap counter so a
         // single throttled batch followed by 7 ok ones doesn't
