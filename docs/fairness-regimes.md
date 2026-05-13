@@ -498,11 +498,20 @@ For changes that should NOT affect fairness:
 For changes that explicitly target fairness improvement:
 
 - The PR body must declare the targeted RSS distribution(s).
-- Improvement is measured as **reduction in `(observed_cov -
-  cstruct)`**, not as absolute CoV. A change that reduces the gap
-  on `{1,3}` distribution from `+0.20` to `+0.05` is a clear win;
-  a change that drops absolute CoV from 30% to 25% is meaningless
-  if the RSS distribution changed too.
+- The PR body must say whether the mechanism is intended to stay
+  work-conserving or to intentionally slow a shaped CoS queue for
+  stricter per-flow equality.
+- Work-conserving improvements are measured as **reduction in
+  `(observed_cov - cstruct)`**, not as absolute CoV. A change that
+  reduces the gap on `{1,3}` distribution from `+0.20` to `+0.05` is a
+  clear win; a change that drops absolute CoV from 30% to 25% is
+  meaningless if the RSS distribution changed too.
+- Non-work-conserving exact-CoS improvements, such as strict
+  active-flow-proportional shared-lease budgeting, must report both
+  the Cstruct gap and the absolute per-flow spread on the declared
+  RSS distribution. These changes are allowed to buy a lower absolute
+  CoV by leaving unclaimed worker share idle, but the PR must also
+  report aggregate throughput impact.
 
 ## Non-goals
 
@@ -514,9 +523,14 @@ xpf does NOT claim, and this contract does NOT require:
   zero-copy. The structural CoV ceiling `Cstruct` is a hard
   physical limit set by the per-worker scheduler's ability to
   divide its share equally among its flows.
-- **Equal per-flow throughput within a single RSS-skewed
-  deployment** beyond what `Cstruct` permits. The 1+3 example
-  has a structural minimum CoV of ~58%; xpf cannot do better.
+- **Work-conserving equal per-flow throughput within a single
+  RSS-skewed deployment** beyond what `Cstruct` permits. The 1+3
+  example has a structural minimum CoV of ~58% if every worker is
+  allowed to consume its full share. Exact shaped CoS queues may
+  deliberately step outside that premise by reserving per-worker
+  budget in proportion to active flows and withholding unarmed
+  surplus; that is a throughput tradeoff, not a general AF_XDP
+  load-balancing guarantee.
 - **A single CoV number that holds across all workloads.** The
   structural ceiling is workload-dependent; the gate is
   workload-relative (`observed_cov ≤ Cstruct + ε`).

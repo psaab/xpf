@@ -21,6 +21,13 @@ where `Cstruct` is computed from the per-worker active-flow distribution
 
 The user accepts aggregate throughput regression on degenerate RSS
 distributions if it buys per-flow fairness on the realistic ones.
+For exact shaped CoS queues, the current v8 shared-lease direction is
+strict active-flow-proportional budgeting: reserve each worker's queue
+budget in proportion to its active flow count, and open surplus only
+when the explicit CPU-bound bypass has armed. That intentionally drops
+the work-conservation premise for the shaped queue, so absolute
+per-flow spread is a valid target metric alongside the Cstruct
+compatibility gate.
 
 ## Shipped foundations
 
@@ -130,7 +137,7 @@ this is what makes the future-pitch gate non-trivial.
 | 1 | **Random ephemeral source ports** hashed uniformly into RSS queues. | Sets the multinomial draw with `p_w = 1/K`. |
 | 2 | **Uniform per-worker capacity** `C_w = C` for every active worker. | Lets `C` cancel in CoV; with heterogeneous capacity the bound is strictly larger. |
 | 3 | **Within-worker fair share** — each worker splits its capacity equally across its assigned flows. | Without it, a worker can favor some of its own flows and the formula doesn't apply. |
-| 4 | **Work conservation** — workers never idle below their share. | A non-work-conserving scheduler can clip the heaviest flows ("Harrison-Bergeron") and reduce CoV at the cost of aggregate throughput. CoS-on shaping is exactly this case (CoV mean 16.6% on iperf-d, well below the multinomial floor). |
+| 4 | **Work conservation** — workers never idle below their share. | A non-work-conserving scheduler can clip the heaviest flows ("Harrison-Bergeron") and reduce CoV at the cost of aggregate throughput. CoS-on shaping is exactly this case (CoV mean 16.6% on iperf-d, well below the multinomial floor), and the strict v8 shared-lease path uses the same premise break by withholding unarmed surplus. |
 | 5 | **All admitted, no rate-cap** — every flow is served, none rejected or rate-limited. | Same caveat as #4: admission policy can move CoV in either direction. |
 
 Under all five premises, the **population** CoV (matching production
@@ -251,18 +258,21 @@ Recognized levers:
    workers cooperate to fair-share a *global* per-flow allocation
    (rather than each fair-sharing locally), the within-worker
    premise breaks and the bound no longer applies. The known
-   blockers are AF_XDP ZC physics (queue-ownership: see #836, #937,
-   #1215) and the per-flow rate equality / work conservation /
-   no-Harrison-Bergeron trilemma: any global-fair scheme has to give
-   up at least one of them, and the four prior mechanism kills
-   (#1236, #1237, #1239, #1243) each found a different way to prove
-   that.
+   blockers for moving packets or work are AF_XDP ZC physics
+   (queue-ownership: see #836, #937, #1215) and the per-flow rate
+   equality / work conservation / no-Harrison-Bergeron trilemma. The
+   strict shared-lease path does not move packets across AF_XDP
+   queues; it gives up work conservation inside an exact shaped CoS
+   queue by refusing unarmed surplus.
 6. **Non-work-conserving / shaped (premise 4 / 5).** CoS-on iperf-d
    12-stream CoV mean is 16.6%, well below the 51% multinomial
    floor — because shapers clip each flow's rate, dragging the
-   distribution toward the shaped value. The fairness contract
-   already accommodates this: `Cstruct` is computed from `{aᵢ}`,
-   not from a fixed CoV.
+   distribution toward the shaped value. The strict v8 shared-lease
+   path is the per-worker analogue: it can leave a worker's unused
+   reserved share idle unless the explicit CPU-bound bypass opens
+   surplus. The fairness contract still reports `Cstruct` from
+   `{aᵢ}`, but strict-CoS experiments must also report absolute CoV
+   and aggregate-throughput impact.
 
 ### Bar for future fairness pitches
 
