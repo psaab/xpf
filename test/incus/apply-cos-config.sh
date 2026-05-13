@@ -5,6 +5,7 @@
 #
 #   ./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0
 #   ./test/incus/apply-cos-config.sh --symmetric loss:xpf-userspace-fw0
+#   ./test/incus/apply-cos-config.sh --surplus-sharing loss:xpf-userspace-fw0
 #   ./test/incus/apply-cos-config.sh                     # defaults to xpf-userspace-fw0
 #
 # Only the RG0 primary needs the config applied — it replicates to the
@@ -37,10 +38,12 @@ set -euo pipefail
 # silently treated as hostnames.
 SAME_CLASS=0
 SYMMETRIC=0
+SURPLUS_SHARING=0
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --same-class) SAME_CLASS=1; shift ;;
         --symmetric) SYMMETRIC=1; shift ;;
+        --surplus-sharing) SURPLUS_SHARING=1; shift ;;
         --) shift; break ;;
         *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
@@ -81,7 +84,27 @@ fi
 SETS_TMP="$(mktemp)"
 trap "rm -f '$SETS_TMP'" EXIT
 grep -E '^set ' "$CONFIG_FILE" > "$SETS_TMP"
+if [[ "$SURPLUS_SHARING" -eq 1 ]]; then
+	awk '
+		$1 == "set" &&
+		$2 == "class-of-service" &&
+		$3 == "schedulers" &&
+		$5 == "transmit-rate" &&
+		$NF == "exact" {
+			exact[$4] = 1
+		}
+		END {
+			for (sched in exact) {
+				printf "set class-of-service schedulers %s surplus-sharing\n", sched
+			}
+		}
+	' "$SETS_TMP" | sort >> "$SETS_TMP"
+fi
 
+# Re-runs can leave a root-owned temp file behind on the VM. Remove it
+# before pushing so repeated strict/surplus diagnostic applies do not
+# fail with a stale permission error.
+incus exec "$TARGET" -- rm -f "$REMOTE_SETS" >/dev/null 2>&1 || true
 incus file push --mode 0644 "$SETS_TMP" "${TARGET}/${REMOTE_SETS}" >/dev/null
 
 # Deletes that may or may not exist depending on whether this is a

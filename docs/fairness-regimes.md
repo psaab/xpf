@@ -358,6 +358,30 @@ observed CoV for context, but absolute CoV is not the default pass/fail
 gate; use the wrapper's opt-in `--max-*cov` flags only for deliberately
 balanced-RSS fixtures.
 
+For throughput-headroom investigations, narrow the sweep to the high-rate
+classes and preserve the raw iperf/flow artifacts from each sample:
+
+```bash
+COS_IFINDEX=<egress-ifindex> \
+REVERSE= \
+METRICS_URL=http://127.0.0.1:8080/metrics \
+./test/incus/fairness-cos-throughput-headroom.sh
+```
+
+By default this wrapper runs `CLASS_FILTER=q2,q3,q6` under the strict
+exact fixture, then applies a diagnostic `surplus-sharing` fixture and
+runs the same class set again before restoring the strict fixture. The
+surplus-sharing leg is a headroom diagnostic, not the product fairness
+contract: it shows whether the dataplane can recover aggregate throughput
+when exact queues are allowed to borrow root surplus. Each harness sample
+now preserves `iperf-single.json` (or `iperf-primary.json` /
+`iperf-mixed.json`) plus `binding-flows.tsv` and `cos-flows.tsv` under
+the sample artifact directory, so per-stream rates and active-flow
+placement can be audited after the wrapper exits. The class sweep passes
+`--sample-cooldown-sec` to the multi-sample wrapper (`10` seconds by
+default) so back-to-back iperf runs do not reuse stale CoS active-flow
+buckets as current-run RSS evidence.
+
 For the symmetric reverse fixture on the loss cluster, `COS_IFINDEX=5`
 selects the `ge-0-0-1` egress. For forward-path sweeps, do not hardcode
 the RETH unit's displayed name into the harness; use the ifindex emitted

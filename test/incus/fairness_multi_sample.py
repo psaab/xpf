@@ -12,6 +12,7 @@ from pathlib import Path
 import statistics
 import subprocess
 import sys
+import time
 from typing import Any
 
 
@@ -22,6 +23,7 @@ DEFAULT_MAX_MEAN_COV: float | None = None
 DEFAULT_MAX_STDEV_COV: float | None = None
 DEFAULT_MAX_RUN_COV: float | None = None
 DEFAULT_PER_RUN_TIMEOUT_SEC = 600
+DEFAULT_SAMPLE_COOLDOWN_SEC = 0
 POST_KILL_COMMUNICATE_TIMEOUT_SEC = 5
 FAIRNESS_EVAL_VERDICT_KEYS = {
     "verdict",
@@ -167,6 +169,14 @@ def summarize(
     max_gap = max(gaps)
     min_gap = min(gaps)
 
+    aggregate_mbps_values: list[float] | None = []
+    for sample in samples:
+        value = sample.get("aggregate_mbps")
+        if value is None:
+            aggregate_mbps_values = None
+            break
+        aggregate_mbps_values.append(float(value))
+
     failure_reasons: list[str] = []
     failing_samples = [s["sample"] for s in samples if s.get("verdict") != "PASS"]
     if failing_samples:
@@ -192,7 +202,7 @@ def summarize(
             f"max observed_cov {max_cov:.6f} exceeds threshold {max_run_cov:.6f}"
         )
 
-    return {
+    summary = {
         "verdict": "PASS" if not failure_reasons else "FAIL",
         "sample_count": len(samples),
         "thresholds": {
@@ -223,6 +233,20 @@ def summarize(
         "samples": samples,
         "failure_reasons": failure_reasons,
     }
+    if aggregate_mbps_values is None:
+        summary["aggregate_mbps"] = None
+    else:
+        summary["aggregate_mbps"] = {
+            "mean": statistics.mean(aggregate_mbps_values),
+            "sample_stdev": (
+                statistics.stdev(aggregate_mbps_values)
+                if len(aggregate_mbps_values) > 1
+                else 0.0
+            ),
+            "min": min(aggregate_mbps_values),
+            "max": max(aggregate_mbps_values),
+        }
+    return summary
 
 
 def _kill_process_group(pgid: int) -> None:
@@ -318,6 +342,7 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
                     "argv": cmd,
                     "exit_code": exit_code,
                     "timeout_sec": args.per_run_timeout_sec,
+                    "sample_cooldown_sec": args.sample_cooldown_sec,
                 },
                 indent=2,
             )
@@ -342,6 +367,8 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
             encoding="utf-8",
         )
         samples.append(sample_record(index, sample_dir, exit_code, verdict))
+        if index < args.samples and args.sample_cooldown_sec > 0:
+            time.sleep(args.sample_cooldown_sec)
 
     summary = summarize(
         samples,
@@ -404,6 +431,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Hard timeout for each fairness-harness run.",
     )
     parser.add_argument(
+        "--sample-cooldown-sec",
+        type=float,
+        default=DEFAULT_SAMPLE_COOLDOWN_SEC,
+        help="Seconds to sleep between samples so dataplane active-flow snapshots can age out.",
+    )
+    parser.add_argument(
         "harness_args",
         nargs=argparse.REMAINDER,
         help="Arguments passed to fairness-harness.sh. Prefix with -- to separate.",
@@ -413,6 +446,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--samples must be >= 2")
     if args.per_run_timeout_sec <= 0:
         parser.error("--per-run-timeout-sec must be > 0")
+    if args.sample_cooldown_sec < 0:
+        parser.error("--sample-cooldown-sec must be >= 0")
     if not args.harness.exists():
         parser.error(f"--harness does not exist: {args.harness}")
     if not os.access(args.harness, os.X_OK):

@@ -18,7 +18,9 @@ REVERSE=${REVERSE--R}
 METRICS_URL=${METRICS_URL:-http://127.0.0.1:8080/metrics}
 IFACE=${IFACE:-ge-0-0-2}
 COS_IFINDEX=${COS_IFINDEX:-}
+CLASS_FILTER=${CLASS_FILTER:-}
 SAMPLES=${SAMPLES:-3}
+SAMPLE_COOLDOWN_SEC=${SAMPLE_COOLDOWN_SEC:-10}
 PER_RUN_TIMEOUT_SEC=${PER_RUN_TIMEOUT_SEC:-180}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
 HARNESS=${HARNESS:-$ROOT_DIR/test/incus/fairness-harness.sh}
@@ -66,7 +68,7 @@ if ! rm -f "$DATAPLANE_SUMMARY_TSV"; then
 fi
 
 cat > "$SUMMARY_TSV" <<'HEADER'
-class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_cov	stdev_observed_cov	avg_mbps	avg_cstruct	mean_gap	max_gap	starved_flows	per_run_verdicts
+class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_cov	stdev_observed_cov	avg_mbps	avg_rate_utilization	avg_cstruct	mean_gap	max_gap	starved_flows	per_run_verdicts
 HEADER
 
 classes=(
@@ -79,6 +81,29 @@ classes=(
     "q6-iperf-c-25g 5203 6 25000000000"
 )
 
+class_selected() {
+    local label=$1
+    local port=$2
+    local queue=$3
+    local raw
+    local filter
+    local -a filters
+
+    [[ -n "$CLASS_FILTER" ]] || return 0
+    IFS=',' read -r -a filters <<< "$CLASS_FILTER"
+    for raw in "${filters[@]}"; do
+        filter=${raw//[[:space:]]/}
+        [[ -n "$filter" ]] || continue
+        if [[ "$filter" == "$label" || "$filter" == "$port" || "$filter" == "$queue" ]]; then
+            return 0
+        fi
+        if [[ "$filter" =~ ^q[0-9]+$ && "$label" == "$filter"-* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 mark_parse_error() {
     overall_status=2
 }
@@ -90,7 +115,7 @@ append_error_row() {
     local rate=$4
     local status=$5
 
-    printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\t-\n' \
+    printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\n' \
         "$label" "$port" "$queue" "$rate" "$status" >> "$SUMMARY_TSV"
     printf "summary class=%s wrapper_status=%s verdict=ERROR mean_cov=- max_cov=-\n" \
         "$label" "$status"
@@ -342,8 +367,19 @@ HEADER
 overall_status=0
 dataplane_status=0
 SWEEP_START_ISO=$(date -Is)
-capture_dataplane_snapshot before "$ARTIFACT_ROOT"
+selected_classes=()
 for spec in "${classes[@]}"; do
+    read -r label port queue rate <<< "$spec"
+    if class_selected "$label" "$port" "$queue"; then
+        selected_classes+=("$spec")
+    fi
+done
+if [[ "${#selected_classes[@]}" -eq 0 ]]; then
+    echo "fairness-cos-class-sweep: CLASS_FILTER selected no classes: $CLASS_FILTER" >&2
+    exit 2
+fi
+capture_dataplane_snapshot before "$ARTIFACT_ROOT"
+for spec in "${selected_classes[@]}"; do
     read -r label port queue rate <<< "$spec"
     out="$ARTIFACT_ROOT/$label"
     mkdir -p "$out"
@@ -360,6 +396,7 @@ for spec in "${classes[@]}"; do
             --samples "$SAMPLES" \
             --out-dir "$out/samples" \
             --per-run-timeout-sec "$PER_RUN_TIMEOUT_SEC" \
+            --sample-cooldown-sec "$SAMPLE_COOLDOWN_SEC" \
             --harness "$HARNESS" \
             -- "$TARGET" "$port" "$N" "$DURATION" "$REVERSE" "$METRICS_URL" \
         > "$out/wrapper.stdout" 2> "$out/wrapper.stderr"
@@ -427,9 +464,11 @@ for spec in "${classes[@]}"; do
                     $values
                 end;
             require_samples
+            | ($rate | tonumber) as $rate_bps
             | sample_numbers("aggregate_mbps") as $aggregate_mbps
             | sample_numbers("starved_flow_count") as $starved
             | sample_verdicts as $sample_verdicts
+            | (($aggregate_mbps | add / length)) as $avg_mbps
             | [
                 $class,
                 $port,
@@ -440,7 +479,8 @@ for spec in "${classes[@]}"; do
                 (required_number(["observed_cov", "mean"]; "observed_cov.mean") | tostring),
                 (required_number(["observed_cov", "max"]; "observed_cov.max") | tostring),
                 (required_number(["observed_cov", "sample_stdev"]; "observed_cov.sample_stdev") | tostring),
-                (($aggregate_mbps | add / length) | tostring),
+                ($avg_mbps | tostring),
+                (if $rate_bps > 0 then (($avg_mbps * 1000000 / $rate_bps) | tostring) else "-" end),
                 (required_number(["cstruct", "mean"]; "cstruct.mean") | tostring),
                 (required_number(["gap", "mean"]; "gap.mean") | tostring),
                 (required_number(["gap", "max"]; "gap.max") | tostring),
@@ -474,11 +514,14 @@ fi
     printf 'Artifacts: `%s`\n\n' "$ARTIFACT_ROOT"
     printf 'Target: `%s`, streams: `%s`, duration: `%s`, reverse: `%s`, metrics: `%s`, cos_ifindex: `%s`\n\n' \
         "$TARGET" "$N" "$DURATION" "$REVERSE" "$METRICS_URL" "$COS_IFINDEX"
-    printf '| Class | Port | Queue | Verdict | Mean CoV | Max CoV | Stdev CoV | Avg Mbps | Avg Cstruct | Mean Gap | Max Gap | Starved | Per-run |\n'
-    printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n'
-    tail -n +2 "$SUMMARY_TSV" | while IFS=$'\t' read -r class port queue _rate _status verdict mean max stdev mbps cstruct mean_gap max_gap starved per_run; do
-        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
-            "$class" "$port" "$queue" "$verdict" "$mean" "$max" "$stdev" "$mbps" "$cstruct" "$mean_gap" "$max_gap" "$starved" "$per_run"
+    if [[ -n "$CLASS_FILTER" ]]; then
+        printf 'Class filter: `%s`\n\n' "$CLASS_FILTER"
+    fi
+    printf '| Class | Port | Queue | Verdict | Mean CoV | Max CoV | Stdev CoV | Avg Mbps | Avg rate utilization | Avg Cstruct | Mean Gap | Max Gap | Starved | Per-run |\n'
+    printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n'
+    tail -n +2 "$SUMMARY_TSV" | while IFS=$'\t' read -r class port queue _rate _status verdict mean max stdev mbps util cstruct mean_gap max_gap starved per_run; do
+        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+            "$class" "$port" "$queue" "$verdict" "$mean" "$max" "$stdev" "$mbps" "$util" "$cstruct" "$mean_gap" "$max_gap" "$starved" "$per_run"
     done
     if capture_dataplane_enabled; then
         printf '\n## Dataplane Counter Deltas\n\n'
