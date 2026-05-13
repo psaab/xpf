@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run fairness-harness repeatedly and summarize per-run CoV variance."""
+"""Run fairness-harness repeatedly and summarize per-run fairness contract."""
 
 from __future__ import annotations
 
@@ -16,9 +16,11 @@ from typing import Any
 
 
 DEFAULT_SAMPLES = 5
-DEFAULT_MAX_MEAN_COV = 0.15
-DEFAULT_MAX_STDEV_COV = 0.03
-DEFAULT_MAX_RUN_COV = 0.25
+DEFAULT_MAX_MEAN_GAP = 0.05
+DEFAULT_MAX_RUN_GAP = 0.05
+DEFAULT_MAX_MEAN_COV: float | None = None
+DEFAULT_MAX_STDEV_COV: float | None = None
+DEFAULT_MAX_RUN_COV: float | None = None
 DEFAULT_PER_RUN_TIMEOUT_SEC = 600
 POST_KILL_COMMUNICATE_TIMEOUT_SEC = 5
 FAIRNESS_EVAL_VERDICT_KEYS = {
@@ -50,6 +52,12 @@ def parse_ratio(raw: str) -> float:
     if value < 0:
         raise argparse.ArgumentTypeError(f"ratio must be non-negative: {raw!r}")
     return value
+
+
+def optional_ratio(raw: str) -> float | None:
+    if raw.strip().lower() in {"none", "off", "disabled"}:
+        return None
+    return parse_ratio(raw)
 
 
 def extract_json_objects(text: str) -> list[dict[str, Any]]:
@@ -131,29 +139,55 @@ def sample_record(index: int, sample_dir: Path, exit_code: int, verdict: dict[st
 def summarize(
     samples: list[dict[str, Any]],
     *,
-    max_mean_cov: float,
-    max_stdev_cov: float,
-    max_run_cov: float,
+    max_mean_gap: float,
+    max_run_gap: float,
+    max_mean_cov: float | None,
+    max_stdev_cov: float | None,
+    max_run_cov: float | None,
 ) -> dict[str, Any]:
+    if not samples:
+        raise MultiSampleError("no samples")
+
     observed_covs = [float(s["observed_cov"]) for s in samples]
+    cstructs = [float(s["cstruct"]) for s in samples]
+    gaps = [float(s["gap"]) for s in samples]
+
     mean_cov = statistics.mean(observed_covs)
     stdev_cov = statistics.stdev(observed_covs) if len(observed_covs) > 1 else 0.0
     max_cov = max(observed_covs)
     min_cov = min(observed_covs)
 
+    mean_cstruct = statistics.mean(cstructs)
+    stdev_cstruct = statistics.stdev(cstructs) if len(cstructs) > 1 else 0.0
+    max_cstruct = max(cstructs)
+    min_cstruct = min(cstructs)
+
+    mean_gap = statistics.mean(gaps)
+    stdev_gap = statistics.stdev(gaps) if len(gaps) > 1 else 0.0
+    max_gap = max(gaps)
+    min_gap = min(gaps)
+
     failure_reasons: list[str] = []
     failing_samples = [s["sample"] for s in samples if s.get("verdict") != "PASS"]
     if failing_samples:
         failure_reasons.append(f"sample verdicts failed: {failing_samples}")
-    if mean_cov > max_mean_cov:
+    if mean_gap > max_mean_gap:
+        failure_reasons.append(
+            f"mean gap {mean_gap:.6f} exceeds threshold {max_mean_gap:.6f}"
+        )
+    if max_gap > max_run_gap:
+        failure_reasons.append(
+            f"max gap {max_gap:.6f} exceeds threshold {max_run_gap:.6f}"
+        )
+    if max_mean_cov is not None and mean_cov > max_mean_cov:
         failure_reasons.append(
             f"mean observed_cov {mean_cov:.6f} exceeds threshold {max_mean_cov:.6f}"
         )
-    if stdev_cov > max_stdev_cov:
+    if max_stdev_cov is not None and stdev_cov > max_stdev_cov:
         failure_reasons.append(
             f"sample stdev observed_cov {stdev_cov:.6f} exceeds threshold {max_stdev_cov:.6f}"
         )
-    if max_cov > max_run_cov:
+    if max_run_cov is not None and max_cov > max_run_cov:
         failure_reasons.append(
             f"max observed_cov {max_cov:.6f} exceeds threshold {max_run_cov:.6f}"
         )
@@ -162,6 +196,8 @@ def summarize(
         "verdict": "PASS" if not failure_reasons else "FAIL",
         "sample_count": len(samples),
         "thresholds": {
+            "max_mean_gap": max_mean_gap,
+            "max_run_gap": max_run_gap,
             "max_mean_cov": max_mean_cov,
             "max_sample_stdev_cov": max_stdev_cov,
             "max_run_cov": max_run_cov,
@@ -171,6 +207,18 @@ def summarize(
             "sample_stdev": stdev_cov,
             "min": min_cov,
             "max": max_cov,
+        },
+        "cstruct": {
+            "mean": mean_cstruct,
+            "sample_stdev": stdev_cstruct,
+            "min": min_cstruct,
+            "max": max_cstruct,
+        },
+        "gap": {
+            "mean": mean_gap,
+            "sample_stdev": stdev_gap,
+            "min": min_gap,
+            "max": max_gap,
         },
         "samples": samples,
         "failure_reasons": failure_reasons,
@@ -297,6 +345,8 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
 
     summary = summarize(
         samples,
+        max_mean_gap=args.max_mean_gap,
+        max_run_gap=args.max_run_gap,
         max_mean_cov=args.max_mean_cov,
         max_stdev_cov=args.max_stdev_cov,
         max_run_cov=args.max_run_cov,
@@ -312,14 +362,41 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     default_harness = Path(__file__).with_name("fairness-harness.sh")
     parser = argparse.ArgumentParser(
-        description="Run fairness-harness N times and summarize observed CoV stability.",
+        description="Run fairness-harness N times and summarize Cstruct-aware fairness.",
     )
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--harness", type=Path, default=default_harness)
-    parser.add_argument("--max-mean-cov", type=parse_ratio, default=DEFAULT_MAX_MEAN_COV)
-    parser.add_argument("--max-stdev-cov", type=parse_ratio, default=DEFAULT_MAX_STDEV_COV)
-    parser.add_argument("--max-run-cov", type=parse_ratio, default=DEFAULT_MAX_RUN_COV)
+    parser.add_argument(
+        "--max-mean-gap",
+        type=parse_ratio,
+        default=DEFAULT_MAX_MEAN_GAP,
+        help="Maximum allowed mean observed_cov-cstruct gap across samples.",
+    )
+    parser.add_argument(
+        "--max-run-gap",
+        type=parse_ratio,
+        default=DEFAULT_MAX_RUN_GAP,
+        help="Maximum allowed observed_cov-cstruct gap in any sample.",
+    )
+    parser.add_argument(
+        "--max-mean-cov",
+        type=optional_ratio,
+        default=DEFAULT_MAX_MEAN_COV,
+        help="Optional absolute mean observed_cov gate; default disabled.",
+    )
+    parser.add_argument(
+        "--max-stdev-cov",
+        type=optional_ratio,
+        default=DEFAULT_MAX_STDEV_COV,
+        help="Optional absolute observed_cov sample-stdev gate; default disabled.",
+    )
+    parser.add_argument(
+        "--max-run-cov",
+        type=optional_ratio,
+        default=DEFAULT_MAX_RUN_COV,
+        help="Optional absolute per-run observed_cov gate; default disabled.",
+    )
     parser.add_argument(
         "--per-run-timeout-sec",
         type=int,

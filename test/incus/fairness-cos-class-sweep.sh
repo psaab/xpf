@@ -3,7 +3,7 @@
 #
 # This is intentionally a sequential qualification harness: each class gets its
 # own sample directory and verdict, then the script emits an aggregate summary
-# and returns non-zero if any class fails its multi-sample thresholds.
+# and returns non-zero if any class fails its multi-sample gap contract.
 
 set -uo pipefail
 
@@ -64,7 +64,7 @@ if ! rm -f "$DATAPLANE_SUMMARY_TSV"; then
 fi
 
 cat > "$SUMMARY_TSV" <<'HEADER'
-class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_cov	stdev_observed_cov	avg_mbps	avg_cstruct	avg_gap	starved_flows	per_run_verdicts
+class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_cov	stdev_observed_cov	avg_mbps	avg_cstruct	mean_gap	max_gap	starved_flows	per_run_verdicts
 HEADER
 
 classes=(
@@ -88,7 +88,7 @@ append_error_row() {
     local rate=$4
     local status=$5
 
-    printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\n' \
+    printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\t-\n' \
         "$label" "$port" "$queue" "$rate" "$status" >> "$SUMMARY_TSV"
     printf "summary class=%s wrapper_status=%s verdict=ERROR mean_cov=- max_cov=-\n" \
         "$label" "$status"
@@ -426,8 +426,6 @@ for spec in "${classes[@]}"; do
                 end;
             require_samples
             | sample_numbers("aggregate_mbps") as $aggregate_mbps
-            | sample_numbers("cstruct") as $cstruct
-            | sample_numbers("gap") as $gap
             | sample_numbers("starved_flow_count") as $starved
             | sample_verdicts as $sample_verdicts
             | [
@@ -441,8 +439,9 @@ for spec in "${classes[@]}"; do
                 (required_number(["observed_cov", "max"]; "observed_cov.max") | tostring),
                 (required_number(["observed_cov", "sample_stdev"]; "observed_cov.sample_stdev") | tostring),
                 (($aggregate_mbps | add / length) | tostring),
-                (($cstruct | add / length) | tostring),
-                (($gap | add / length) | tostring),
+                (required_number(["cstruct", "mean"]; "cstruct.mean") | tostring),
+                (required_number(["gap", "mean"]; "gap.mean") | tostring),
+                (required_number(["gap", "max"]; "gap.max") | tostring),
                 ($starved | add | tostring),
                 ($sample_verdicts | join(","))
             ] | @tsv' "$summary_json" > "$row_file" 2> "$jq_err"; then
@@ -473,11 +472,11 @@ fi
     printf 'Artifacts: `%s`\n\n' "$ARTIFACT_ROOT"
     printf 'Target: `%s`, streams: `%s`, duration: `%s`, reverse: `%s`, metrics: `%s`, cos_ifindex: `%s`\n\n' \
         "$TARGET" "$N" "$DURATION" "$REVERSE" "$METRICS_URL" "$COS_IFINDEX"
-    printf '| Class | Port | Queue | Verdict | Mean CoV | Max CoV | Stdev CoV | Avg Mbps | Avg Cstruct | Avg Gap | Starved | Per-run |\n'
-    printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n'
-    tail -n +2 "$SUMMARY_TSV" | while IFS=$'\t' read -r class port queue _rate _status verdict mean max stdev mbps cstruct gap starved per_run; do
-        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
-            "$class" "$port" "$queue" "$verdict" "$mean" "$max" "$stdev" "$mbps" "$cstruct" "$gap" "$starved" "$per_run"
+    printf '| Class | Port | Queue | Verdict | Mean CoV | Max CoV | Stdev CoV | Avg Mbps | Avg Cstruct | Mean Gap | Max Gap | Starved | Per-run |\n'
+    printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n'
+    tail -n +2 "$SUMMARY_TSV" | while IFS=$'\t' read -r class port queue _rate _status verdict mean max stdev mbps cstruct mean_gap max_gap starved per_run; do
+        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+            "$class" "$port" "$queue" "$verdict" "$mean" "$max" "$stdev" "$mbps" "$cstruct" "$mean_gap" "$max_gap" "$starved" "$per_run"
     done
     if capture_dataplane_enabled; then
         printf '\n## Dataplane Counter Deltas\n\n'
