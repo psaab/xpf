@@ -118,7 +118,7 @@ pub(crate) struct BindingWorker {
     /// #959 Phase 5: 4 BPF map FDs extracted into `WorkerBpfMaps`.
     /// Field semantics unchanged; access via `binding.bpf_maps.X_fd`.
     pub(crate) bpf_maps: WorkerBpfMaps,
-    /// #959 Phase 6: 5 timing / wake-pacing fields extracted into
+    /// #959 Phase 6: 6 timing / wake-pacing fields extracted into
     /// `WorkerTimers`. Field semantics unchanged; access via
     /// `binding.timers.last_X_ns` etc.
     pub(crate) timers: WorkerTimers,
@@ -399,6 +399,7 @@ impl BindingWorker {
             timers: WorkerTimers {
                 last_heartbeat_update_ns: init_now,
                 debug_state_counter: 0,
+                last_idle_debug_publish_ns: init_now,
                 last_rx_wake_ns: init_now,
                 last_tx_wake_ns: init_now,
                 empty_rx_polls: 0,
