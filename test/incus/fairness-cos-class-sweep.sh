@@ -22,6 +22,11 @@ ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
 HARNESS=${HARNESS:-$ROOT_DIR/test/incus/fairness-harness.sh}
 WRAPPER=${WRAPPER:-$ROOT_DIR/test/incus/fairness_multi_sample.py}
 FAIRNESS_EVAL=${FAIRNESS_EVAL:-$ROOT_DIR/userspace-dp/target/release/fairness-eval}
+CAPTURE_DATAPLANE=${CAPTURE_DATAPLANE:-1}
+DATAPLANE_VM=${DATAPLANE_VM:-loss:xpf-userspace-fw0}
+DATAPLANE_STATUS_PATH=${DATAPLANE_STATUS_PATH:-/run/xpf/userspace-dp.json}
+DATAPLANE_STATS_CMD=${DATAPLANE_STATS_CMD:-"cli -c 'show chassis cluster data-plane statistics'"}
+DATAPLANE_CAPTURE_TIMEOUT_SEC=${DATAPLANE_CAPTURE_TIMEOUT_SEC:-20}
 
 if [[ -z "$COS_IFINDEX" ]]; then
     echo "fairness-cos-class-sweep: COS_IFINDEX is required for the shaped egress interface" >&2
@@ -52,6 +57,11 @@ else
 fi
 SUMMARY_TSV="$ARTIFACT_ROOT/summary.tsv"
 SUMMARY_MD="$ARTIFACT_ROOT/summary.md"
+DATAPLANE_SUMMARY_TSV="$ARTIFACT_ROOT/dataplane-summary.tsv"
+if ! rm -f "$DATAPLANE_SUMMARY_TSV"; then
+    echo "fairness-cos-class-sweep: failed to remove stale dataplane summary: $DATAPLANE_SUMMARY_TSV" >&2
+    exit 2
+fi
 
 cat > "$SUMMARY_TSV" <<'HEADER'
 class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_cov	stdev_observed_cov	avg_mbps	avg_cstruct	avg_gap	starved_flows	per_run_verdicts
@@ -84,13 +94,260 @@ append_error_row() {
         "$label" "$status"
 }
 
+mark_dataplane_error() {
+    dataplane_status=2
+}
+
+capture_dataplane_enabled() {
+    case "${CAPTURE_DATAPLANE,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+run_dataplane_cmd() {
+    local stderr=$1
+    shift
+
+    if ! command -v timeout >/dev/null 2>&1; then
+        echo "timeout command not found; dataplane capture cannot be bounded" > "$stderr"
+        return 127
+    fi
+
+    timeout --kill-after=5s "$DATAPLANE_CAPTURE_TIMEOUT_SEC" "$@" 2> "$stderr"
+    local rc=$?
+    if (( rc == 124 || rc == 137 )); then
+        echo "dataplane capture command timed out after ${DATAPLANE_CAPTURE_TIMEOUT_SEC}s (exit $rc): $*" >> "$stderr"
+    elif (( rc != 0 )); then
+        echo "dataplane capture command failed (exit $rc): $*" >> "$stderr"
+    fi
+    return "$rc"
+}
+
+capture_dataplane_snapshot() {
+    local phase=$1
+    local root=$2
+    local dir="$root/dataplane"
+
+    capture_dataplane_enabled || return 0
+    mkdir -p "$dir"
+    date -Is > "$dir/captured-$phase.txt"
+
+    if ! command -v incus >/dev/null 2>&1; then
+        echo "incus command not found; dataplane snapshot skipped" > "$dir/skipped-$phase.txt"
+        mark_dataplane_error
+        return 0
+    fi
+
+    if ! run_dataplane_cmd "$dir/status-$phase.stderr" \
+        incus exec "$DATAPLANE_VM" -- sh -lc "cat \"$DATAPLANE_STATUS_PATH\"" \
+        > "$dir/status-$phase.json"; then
+        echo "failed to capture $DATAPLANE_STATUS_PATH from $DATAPLANE_VM" >> "$dir/status-$phase.stderr"
+        mark_dataplane_error
+    fi
+
+    if ! run_dataplane_cmd "$dir/cli-$phase.stderr" \
+        incus exec "$DATAPLANE_VM" -- sh -lc "$DATAPLANE_STATS_CMD" \
+        > "$dir/cli-$phase.txt"; then
+        echo "failed to run dataplane stats command on $DATAPLANE_VM" >> "$dir/cli-$phase.stderr"
+        mark_dataplane_error
+    fi
+}
+
+capture_dataplane_journal() {
+    local root=$1
+    local since=$2
+    local dir="$root/dataplane"
+
+    capture_dataplane_enabled || return 0
+    mkdir -p "$dir"
+
+    if ! command -v incus >/dev/null 2>&1; then
+        echo "incus command not found; dataplane journal skipped" > "$dir/journal-skipped.txt"
+        mark_dataplane_error
+        return 0
+    fi
+
+    if ! run_dataplane_cmd "$dir/journal-since.stderr" \
+        incus exec "$DATAPLANE_VM" -- sh -lc "journalctl -u xpfd --since \"$since\" --no-pager -o short-iso" \
+        > "$dir/journal-since.txt"; then
+        echo "failed to capture xpfd journal from $DATAPLANE_VM" >> "$dir/journal-since.stderr"
+        mark_dataplane_error
+    fi
+
+    if [[ -f "$dir/journal-since.txt" ]]; then
+        grep -c 'DBG SEG_MISS' "$dir/journal-since.txt" > "$dir/seg-miss-count.txt" || echo 0 > "$dir/seg-miss-count.txt"
+    fi
+}
+
+write_dataplane_delta() {
+    local before_json=$1
+    local after_json=$2
+    local dir=$3
+
+    capture_dataplane_enabled || return 0
+    mkdir -p "$dir"
+
+    if [[ ! -s "$before_json" || ! -s "$after_json" ]]; then
+        printf 'missing status snapshots: before=%s after=%s\n' "$before_json" "$after_json" > "$dir/counter-delta.skipped"
+        mark_dataplane_error
+        return 0
+    fi
+
+    if ! jq -s '
+        def st: .status // .;
+        def sum_bind($s; $f): [($s.bindings // [])[]? | .[$f] // 0] | add // 0;
+        def sum_per($s; $f): [($s.per_binding // [])[]? | .[$f] // empty] | add;
+        def sum_counter($s; $f):
+            (sum_per($s; $f)) as $p
+            | if $p == null then sum_bind($s; $f) else $p end;
+        def sum_cos($s; $f): [($s.cos_interfaces // [])[]? | (.queues // [])[]? | .[$f] // 0] | add // 0;
+        def counters($s): {
+            tx_errors: sum_counter($s; "tx_errors"),
+            tx_submit_error_drops: sum_counter($s; "tx_submit_error_drops"),
+            pending_tx_local_overflow_drops: sum_counter($s; "pending_tx_local_overflow_drops"),
+            dbg_tx_ring_full: sum_counter($s; "dbg_tx_ring_full"),
+            dbg_sendto_enobufs: sum_counter($s; "dbg_sendto_enobufs"),
+            dbg_bound_pending_overflow: sum_counter($s; "dbg_bound_pending_overflow"),
+            dbg_cos_queue_overflow: sum_counter($s; "dbg_cos_queue_overflow"),
+            redirect_inbox_overflow_drops: sum_counter($s; "redirect_inbox_overflow_drops"),
+            cos_no_owner_binding_drops_total: ($s.cos_no_owner_binding_drops_total // 0),
+            binding_post_drain_backup_bytes: sum_counter($s; "post_drain_backup_bytes"),
+            binding_drain_sent_bytes_shaped_unconditional: sum_counter($s; "drain_sent_bytes_shaped_unconditional"),
+            binding_post_drain_backup_cos_drops: sum_counter($s; "post_drain_backup_cos_drops"),
+            binding_post_drain_backup_cos_drop_bytes: sum_counter($s; "post_drain_backup_cos_drop_bytes"),
+            admission_flow_share_drops: sum_cos($s; "admission_flow_share_drops"),
+            admission_buffer_drops: sum_cos($s; "admission_buffer_drops"),
+            admission_ecn_marked: sum_cos($s; "admission_ecn_marked"),
+            tx_ring_full_submit_stalls: sum_cos($s; "tx_ring_full_submit_stalls"),
+            cos_post_drain_backup_bytes: sum_cos($s; "post_drain_backup_bytes"),
+            cos_drain_sent_bytes_shaped_unconditional: sum_cos($s; "drain_sent_bytes_shaped_unconditional"),
+            cos_post_drain_backup_cos_drops: sum_cos($s; "post_drain_backup_cos_drops"),
+            cos_post_drain_backup_cos_drop_bytes: sum_cos($s; "post_drain_backup_cos_drop_bytes")
+        };
+        (.[0] | st) as $before_s
+        | (.[1] | st) as $after_s
+        | (counters($before_s)) as $before
+        | (counters($after_s)) as $after
+        | {
+            before: $before,
+            after: $after,
+            delta: ($after | with_entries(.value = (.value - ($before[.key] // 0))))
+        }
+    ' "$before_json" "$after_json" > "$dir/counter-delta.json" 2> "$dir/counter-delta.stderr"; then
+        mark_dataplane_error
+        return 0
+    fi
+
+    if ! jq -r '
+        (["metric", "before", "after", "delta"] | @tsv),
+        (.delta as $delta
+         | .before as $before
+         | .after as $after
+         | $delta
+         | to_entries[]
+         | [.key, ($before[.key] // 0), ($after[.key] // 0), .value]
+         | @tsv)
+    ' "$dir/counter-delta.json" > "$dir/counter-delta.tsv" 2> "$dir/counter-delta-tsv.stderr"; then
+        mark_dataplane_error
+    fi
+
+    if ! jq -sr '
+        def st: .status // .;
+        def cos_rows($s):
+            [($s.cos_interfaces // [])[]? as $iface
+             | ($iface.queues // [])[]?
+             | {
+                key: (($iface.ifindex // 0 | tostring) + "\t" + (.queue_id // 0 | tostring)),
+                ifindex: ($iface.ifindex // 0),
+                interface: ($iface.interface_name // "-"),
+                queue_id: (.queue_id // 0),
+                class: (.forwarding_class // "-"),
+                admission_flow_share_drops: (.admission_flow_share_drops // 0),
+                admission_buffer_drops: (.admission_buffer_drops // 0),
+                admission_ecn_marked: (.admission_ecn_marked // 0),
+                tx_ring_full_submit_stalls: (.tx_ring_full_submit_stalls // 0),
+                post_drain_backup_bytes: (.post_drain_backup_bytes // 0),
+                drain_sent_bytes_shaped_unconditional: (.drain_sent_bytes_shaped_unconditional // 0),
+                post_drain_backup_cos_drops: (.post_drain_backup_cos_drops // 0),
+                post_drain_backup_cos_drop_bytes: (.post_drain_backup_cos_drop_bytes // 0)
+             }];
+        def cos_map($s): reduce cos_rows($s)[] as $r ({}; .[$r.key] = $r);
+        (.[0] | st) as $before
+        | (.[1] | st) as $after
+        | (cos_map($before)) as $bm
+        | (["ifindex", "interface", "queue_id", "class", "admission_flow_share_drops_delta", "admission_buffer_drops_delta", "admission_ecn_marked_delta", "tx_ring_full_submit_stalls_delta", "post_drain_backup_bytes_delta", "drain_sent_bytes_shaped_unconditional_delta", "post_drain_backup_cos_drops_delta", "post_drain_backup_cos_drop_bytes_delta"] | @tsv),
+        (cos_rows($after)[] as $r
+         | ($bm[$r.key] // {}) as $b
+         | [
+            $r.ifindex,
+            $r.interface,
+            $r.queue_id,
+            $r.class,
+            ($r.admission_flow_share_drops - ($b.admission_flow_share_drops // 0)),
+            ($r.admission_buffer_drops - ($b.admission_buffer_drops // 0)),
+            ($r.admission_ecn_marked - ($b.admission_ecn_marked // 0)),
+            ($r.tx_ring_full_submit_stalls - ($b.tx_ring_full_submit_stalls // 0)),
+            ($r.post_drain_backup_bytes - ($b.post_drain_backup_bytes // 0)),
+            ($r.drain_sent_bytes_shaped_unconditional - ($b.drain_sent_bytes_shaped_unconditional // 0)),
+            ($r.post_drain_backup_cos_drops - ($b.post_drain_backup_cos_drops // 0)),
+            ($r.post_drain_backup_cos_drop_bytes - ($b.post_drain_backup_cos_drop_bytes // 0))
+           ]
+         | select((.[4:] | map(select(. != 0)) | length) > 0)
+         | @tsv)
+    ' "$before_json" "$after_json" > "$dir/cos-queue-delta.tsv" 2> "$dir/cos-queue-delta.stderr"; then
+        mark_dataplane_error
+    fi
+}
+
+append_dataplane_class_summary() {
+    local label=$1
+    local delta_json=$2
+
+    capture_dataplane_enabled || return 0
+    [[ -s "$delta_json" ]] || return 0
+
+    if [[ ! -f "$DATAPLANE_SUMMARY_TSV" ]]; then
+        cat > "$DATAPLANE_SUMMARY_TSV" <<'HEADER'
+class	tx_errors_delta	tx_submit_error_drops_delta	pending_tx_local_overflow_drops_delta	dbg_tx_ring_full_delta	dbg_sendto_enobufs_delta	dbg_bound_pending_overflow_delta	dbg_cos_queue_overflow_delta	redirect_inbox_overflow_drops_delta	admission_flow_share_drops_delta	admission_buffer_drops_delta	admission_ecn_marked_delta	tx_ring_full_submit_stalls_delta	binding_post_drain_backup_cos_drops_delta
+HEADER
+    fi
+
+    if ! jq -r --arg class "$label" '
+        .delta as $d
+        | [
+            $class,
+            ($d.tx_errors // 0),
+            ($d.tx_submit_error_drops // 0),
+            ($d.pending_tx_local_overflow_drops // 0),
+            ($d.dbg_tx_ring_full // 0),
+            ($d.dbg_sendto_enobufs // 0),
+            ($d.dbg_bound_pending_overflow // 0),
+            ($d.dbg_cos_queue_overflow // 0),
+            ($d.redirect_inbox_overflow_drops // 0),
+            ($d.admission_flow_share_drops // 0),
+            ($d.admission_buffer_drops // 0),
+            ($d.admission_ecn_marked // 0),
+            ($d.tx_ring_full_submit_stalls // 0),
+            ($d.binding_post_drain_backup_cos_drops // 0)
+          ]
+        | @tsv
+    ' "$delta_json" >> "$DATAPLANE_SUMMARY_TSV" 2> "${delta_json%.json}-summary.stderr"; then
+        mark_dataplane_error
+    fi
+}
+
 overall_status=0
+dataplane_status=0
+SWEEP_START_ISO=$(date -Is)
+capture_dataplane_snapshot before "$ARTIFACT_ROOT"
 for spec in "${classes[@]}"; do
     read -r label port queue rate <<< "$spec"
     out="$ARTIFACT_ROOT/$label"
     mkdir -p "$out"
 
     echo "=== $(date -Is) class=$label port=$port queue=$queue rate=$rate ==="
+    capture_dataplane_snapshot before "$out"
     env \
         FAIRNESS_EVAL="$FAIRNESS_EVAL" \
         COS_IFINDEX="$COS_IFINDEX" \
@@ -105,6 +362,9 @@ for spec in "${classes[@]}"; do
             -- "$TARGET" "$port" "$N" "$DURATION" "$REVERSE" "$METRICS_URL" \
         > "$out/wrapper.stdout" 2> "$out/wrapper.stderr"
     status=$?
+    capture_dataplane_snapshot after "$out"
+    write_dataplane_delta "$out/dataplane/status-before.json" "$out/dataplane/status-after.json" "$out/dataplane"
+    append_dataplane_class_summary "$label" "$out/dataplane/counter-delta.json"
     if (( status == 2 )); then
         overall_status=2
         append_error_row "$label" "$port" "$queue" "$rate" "$status"
@@ -201,6 +461,13 @@ for spec in "${classes[@]}"; do
     fi
 done
 
+capture_dataplane_snapshot after "$ARTIFACT_ROOT"
+capture_dataplane_journal "$ARTIFACT_ROOT" "$SWEEP_START_ISO"
+write_dataplane_delta "$ARTIFACT_ROOT/dataplane/status-before.json" "$ARTIFACT_ROOT/dataplane/status-after.json" "$ARTIFACT_ROOT/dataplane"
+if (( dataplane_status != 0 )); then
+    overall_status=2
+fi
+
 {
     printf '# CoS Fairness Class Sweep\n\n'
     printf 'Artifacts: `%s`\n\n' "$ARTIFACT_ROOT"
@@ -212,6 +479,42 @@ done
         printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
             "$class" "$port" "$queue" "$verdict" "$mean" "$max" "$stdev" "$mbps" "$cstruct" "$gap" "$starved" "$per_run"
     done
+    if capture_dataplane_enabled; then
+        printf '\n## Dataplane Counter Deltas\n\n'
+        printf 'VM: `%s`, status: `%s`\n\n' "$DATAPLANE_VM" "$DATAPLANE_STATUS_PATH"
+        if [[ -f "$ARTIFACT_ROOT/dataplane/seg-miss-count.txt" ]]; then
+            printf 'DBG SEG_MISS log lines since sweep start: `%s`\n\n' "$(tr -d '\n' < "$ARTIFACT_ROOT/dataplane/seg-miss-count.txt")"
+        fi
+        if [[ -f "$ARTIFACT_ROOT/dataplane/counter-delta.tsv" ]]; then
+            printf '### Sweep Total\n\n'
+            printf '| Metric | Before | After | Delta |\n'
+            printf '|---|---:|---:|---:|\n'
+            tail -n +2 "$ARTIFACT_ROOT/dataplane/counter-delta.tsv" | while IFS=$'\t' read -r metric before after delta; do
+                printf '| %s | %s | %s | %s |\n' "$metric" "$before" "$after" "$delta"
+            done
+            printf '\n'
+        fi
+        if [[ -f "$DATAPLANE_SUMMARY_TSV" ]]; then
+            printf '### Per-Class TX Attribution\n\n'
+            printf '| Class | TX errors | Submit drops | Pending overflow | TX ring full | ENOBUFS | Bound overflow | CoS overflow | Redirect overflow | Flow-share drops | Buffer drops | ECN marked | TX-ring stalls | Post-drain CoS drops |\n'
+            printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n'
+            tail -n +2 "$DATAPLANE_SUMMARY_TSV" | while IFS=$'\t' read -r class tx submit pending ring enobufs bound cos redirect flow buffer ecn stalls post_drain; do
+                printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+                    "$class" "$tx" "$submit" "$pending" "$ring" "$enobufs" "$bound" "$cos" "$redirect" "$flow" "$buffer" "$ecn" "$stalls" "$post_drain"
+            done
+            printf '\n'
+        fi
+        if [[ -f "$ARTIFACT_ROOT/dataplane/cos-queue-delta.tsv" ]]; then
+            printf '### Nonzero CoS Queue Deltas\n\n'
+            printf '| Ifindex | Interface | Queue | Class | Flow-share drops | Buffer drops | ECN marked | TX-ring stalls | Post-drain bytes | Shaped unconditional bytes | Post-drain CoS drops | Post-drain CoS drop bytes |\n'
+            printf '|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n'
+            tail -n +2 "$ARTIFACT_ROOT/dataplane/cos-queue-delta.tsv" | while IFS=$'\t' read -r ifindex iface queue class flow buffer ecn stalls backup shaped drops drop_bytes; do
+                printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+                    "$ifindex" "$iface" "$queue" "$class" "$flow" "$buffer" "$ecn" "$stalls" "$backup" "$shaped" "$drops" "$drop_bytes"
+            done
+            printf '\n'
+        fi
+    fi
 } > "$SUMMARY_MD"
 
 echo "fairness-cos-class-sweep: wrote $SUMMARY_TSV"
