@@ -12,7 +12,9 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TARGET=${TARGET:-172.16.80.200}
 N=${N:-12}
 DURATION=${DURATION:-75}
-REVERSE=${REVERSE:--R}
+# Default to reverse only when REVERSE is unset. REVERSE= selects a
+# forward sweep.
+REVERSE=${REVERSE--R}
 METRICS_URL=${METRICS_URL:-http://127.0.0.1:8080/metrics}
 IFACE=${IFACE:-ge-0-0-2}
 COS_IFINDEX=${COS_IFINDEX:-}
