@@ -1835,6 +1835,8 @@ pub(crate) struct BindingLiveSnapshot {
     /// so operators can tell the fairness brake is engaged from the
     /// escape-hatch firing.
     pub(crate) v_min_throttles: u64,
+    /// #1287: flow-aware V_min throttle decisions.
+    pub(crate) v_min_flow_throttles: u64,
     pub(crate) session_hits: u64,
     pub(crate) session_misses: u64,
     pub(crate) session_creates: u64,

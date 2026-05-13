@@ -216,23 +216,30 @@ pub(in crate::afxdp) fn cos_queue_v_min_continue(
         let my_fair_share_bps = (transmit_rate_bytes as u128 * 8 * my_flows as u128 
             / total_flows as u128) as u64;
         
-        // Use sum of per-bucket observed rates.
-        // Note: This is a windowed average and lags by ~100ms, but it's
-        // what we have available during drain (bytes_served is updated
-        // after settle, which happens after drain). For more accurate
-        // instantaneous rate, we'd need to track bytes in current batch
-        // separately.
-        let my_observed_bps: u64 = ff.flow_bucket_observed_bps.iter().sum();
+        // Sum only active buckets to avoid stale rate inflation.
+        // When a bucket drains, flow_bucket_bytes is reset to 0 but
+        // observed_bps retains old value until next commit. Summing all
+        // buckets would include departed flows.
+        let my_observed_bps: u64 = ff.flow_bucket_observed_bps
+            .iter()
+            .zip(ff.flow_bucket_bytes.iter())
+            .filter(|(_, bytes)| **bytes > 0)
+            .map(|(bps, _)| *bps)
+            .sum();
         
         // Hysteresis: throttle at 110%, unthrottle at 90%
+        // Use separate counter from vtime to avoid interference
         let should_throttle = my_observed_bps > my_fair_share_bps.saturating_mul(11) / 10;
         let should_unthrottle = my_observed_bps < my_fair_share_bps.saturating_mul(9) / 10;
         
-        if should_throttle || (queue.v_min.consecutive_v_min_skips > 0 && !should_unthrottle) {
+        if should_throttle || (queue.v_min.consecutive_flow_skips > 0 && !should_unthrottle) {
             queue.v_min.v_min_flow_throttles_scratch =
                 queue.v_min.v_min_flow_throttles_scratch.saturating_add(1);
+            queue.v_min.consecutive_flow_skips =
+                queue.v_min.consecutive_flow_skips.saturating_add(1);
             false
         } else {
+            queue.v_min.consecutive_flow_skips = 0;
             true
         }
     } else {

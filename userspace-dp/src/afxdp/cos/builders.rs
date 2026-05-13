@@ -147,6 +147,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
                     v_min_hard_cap_overrides_scratch: 0,
                     v_min_throttles_scratch: 0,
                     v_min_flow_throttles_scratch: 0,
+            consecutive_flow_skips: 0,
                     bytes_served: 0,
                     last_publish_ns: 0,
                     last_published_bytes: 0,

@@ -743,6 +743,7 @@ impl BindingLiveState {
                 .v_min_throttle_hard_cap_overrides
                 .load(Ordering::Relaxed),
             v_min_throttles: self.v_min_throttles.load(Ordering::Relaxed),
+            v_min_flow_throttles: self.v_min_flow_throttles.load(Ordering::Relaxed),
             session_hits: self.session_hits.load(Ordering::Relaxed),
             session_misses: self.session_misses.load(Ordering::Relaxed),
             session_creates: self.session_creates.load(Ordering::Relaxed),

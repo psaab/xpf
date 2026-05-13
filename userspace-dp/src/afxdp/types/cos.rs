@@ -768,6 +768,10 @@ pub(in crate::afxdp) struct VMinQueueState {
     /// flow-proportional fair share). Flushed to
     /// `BindingLiveState::v_min_flow_throttles`.
     pub(in crate::afxdp) v_min_flow_throttles_scratch: u32,
+    /// #1287: consecutive flow-aware throttle decisions for hysteresis.
+    /// Separate from vtime consecutive_skips to avoid interference.
+    /// Reset when flow rate drops below 90% threshold.
+    pub(in crate::afxdp) consecutive_flow_skips: u32,
     /// #1287: per-worker bytes served tracking for delta-rate calculation.
     /// Updated on each publish. Peers read this to compute our rate
     /// via delta, avoiding sum-of-averages inaccuracy.

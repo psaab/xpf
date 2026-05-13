@@ -1141,6 +1141,7 @@ impl Coordinator {
                 // wire surface (BindingCountersSnapshot) sees them.
                 binding.v_min_throttle_hard_cap_overrides = snap.v_min_throttle_hard_cap_overrides;
                 binding.v_min_throttles = snap.v_min_throttles;
+                binding.v_min_flow_throttles = snap.v_min_flow_throttles;
                 binding.session_hits = snap.session_hits;
                 binding.session_misses = snap.session_misses;
                 binding.session_creates = snap.session_creates;
