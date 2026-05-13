@@ -356,7 +356,8 @@ fn phase0_artifact_environment_mismatch(
     }
 
     let Some(artifact_interfaces) = string_set_from_array(artifact.get("selected_interfaces"))
-        .or_else(|| string_set_from_array(artifact.get("interfaces"))) else {
+        .or_else(|| string_set_from_array(artifact.get("interfaces")))
+    else {
         return Some("Phase 0 artifact missing selected_interfaces".to_string());
     };
     if &artifact_interfaces != interfaces {
@@ -364,7 +365,8 @@ fn phase0_artifact_environment_mismatch(
     }
 
     let Some(artifact_pci_ids) = string_set_from_array(artifact.get("selected_nic_pci_ids"))
-        .or_else(|| string_set_from_array(artifact.get("pci_ids"))) else {
+        .or_else(|| string_set_from_array(artifact.get("pci_ids")))
+    else {
         return Some("Phase 0 artifact missing selected_nic_pci_ids".to_string());
     };
     let Some(current_pci_ids) = interface_pci_ids(interfaces) else {
@@ -377,15 +379,35 @@ fn phase0_artifact_environment_mismatch(
         ));
     }
 
-    if let Some(artifact_device_pair) =
-        string_set_from_array(artifact.get("selected_device_pair"))
-    {
-        if artifact_device_pair != current_pci_ids {
-            return Some(format!(
-                "Phase 0 artifact selected_device_pair {:?} != current {:?}",
-                artifact_device_pair, current_pci_ids
-            ));
-        }
+    let Some(artifact_device_pair) = string_set_from_array(artifact.get("selected_device_pair"))
+    else {
+        return Some("Phase 0 artifact missing selected_device_pair".to_string());
+    };
+    if artifact_device_pair != current_pci_ids {
+        return Some(format!(
+            "Phase 0 artifact selected_device_pair {:?} != current {:?}",
+            artifact_device_pair, current_pci_ids
+        ));
+    }
+
+    let Some(artifact_driver_value) = artifact
+        .get("driver")
+        .or_else(|| artifact.get("driver_name"))
+    else {
+        return Some("Phase 0 artifact missing driver".to_string());
+    };
+    let Some(artifact_driver) = artifact_string_by_interface(artifact_driver_value, interfaces)
+    else {
+        return Some("Phase 0 artifact driver must be a string or interface map".to_string());
+    };
+    let Some(current_driver) = interface_driver_by_name(interfaces) else {
+        return Some("unable to read current interface driver for shared UMEM gate".to_string());
+    };
+    if artifact_driver != current_driver {
+        return Some(format!(
+            "Phase 0 artifact driver {:?} != current {:?}",
+            artifact_driver, current_driver
+        ));
     }
 
     let Some(artifact_mtu_value) = artifact.get("mtu") else {
@@ -407,8 +429,7 @@ fn phase0_artifact_environment_mismatch(
     let Some(artifact_queues_value) = artifact.get("queue_topology") else {
         return Some("Phase 0 artifact missing queue_topology".to_string());
     };
-    let Some(artifact_queues) =
-        artifact_u32_by_interface(artifact_queues_value, interfaces) else {
+    let Some(artifact_queues) = artifact_u32_by_interface(artifact_queues_value, interfaces) else {
         return Some(
             "Phase 0 artifact queue_topology must be a number or interface map".to_string(),
         );
@@ -427,11 +448,7 @@ fn phase0_artifact_environment_mismatch(
 }
 
 fn current_kernel_release() -> Option<String> {
-    let output = std::process::Command::new("uname").arg("-r").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -443,6 +460,35 @@ fn interface_pci_ids(interfaces: &BTreeSet<String>) -> Option<BTreeSet<String>> 
         let device_path = interface_device_path(ifname)?;
         let pci_id = Path::new(&device_path).file_name()?.to_str()?.to_string();
         out.insert(pci_id);
+    }
+    Some(out)
+}
+
+fn artifact_string_by_interface(
+    value: &serde_json::Value,
+    interfaces: &BTreeSet<String>,
+) -> Option<BTreeMap<String, String>> {
+    if let Some(single) = value.as_str() {
+        return Some(
+            interfaces
+                .iter()
+                .map(|ifname| (ifname.clone(), single.to_string()))
+                .collect(),
+        );
+    }
+    let object = value.as_object()?;
+    let mut out = BTreeMap::new();
+    for ifname in interfaces {
+        let value = object.get(ifname)?.as_str()?;
+        out.insert(ifname.clone(), value.to_string());
+    }
+    Some(out)
+}
+
+fn interface_driver_by_name(interfaces: &BTreeSet<String>) -> Option<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for ifname in interfaces {
+        out.insert(ifname.clone(), interface_driver_name(ifname)?);
     }
     Some(out)
 }

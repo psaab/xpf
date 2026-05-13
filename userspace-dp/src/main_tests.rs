@@ -93,6 +93,48 @@ fn same_binding_plan_ignores_runtime_only_snapshot_changes() {
 }
 
 #[test]
+fn same_binding_plan_canonicalizes_shared_umem_json_object_order() {
+    let current = ConfigSnapshot {
+        userspace: serde_json::from_str(
+            r#"{
+                "workers": 2,
+                "ring_entries": 2048,
+                "shared_umem": {
+                    "mode": "cross-nic",
+                    "interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                    "phase0_artifact": {
+                        "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                        "mtu": {"ge-0-0-1": 1500, "ge-0-0-2": 1500}
+                    }
+                }
+            }"#,
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+    let next = ConfigSnapshot {
+        userspace: serde_json::from_str(
+            r#"{
+                "shared_umem": {
+                    "phase0_artifact": {
+                        "mtu": {"ge-0-0-2": 1500, "ge-0-0-1": 1500},
+                        "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"]
+                    },
+                    "interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                    "mode": "cross-nic"
+                },
+                "ring_entries": 2048,
+                "workers": 2
+            }"#,
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+
+    assert!(same_binding_plan(&current, &next));
+}
+
+#[test]
 fn same_binding_plan_detects_binding_topology_change() {
     let current = ConfigSnapshot {
         userspace: serde_json::json!({

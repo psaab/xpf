@@ -2689,7 +2689,7 @@ func TestUserspaceDataplaneConfig(t *testing.T) {
 
 func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
 	artifact := t.TempDir() + "/phase0.json"
-	if err := os.WriteFile(artifact, []byte(`{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"]}`), 0644); err != nil {
+	if err := os.WriteFile(artifact, []byte(`{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"],"mtu":{"ge-0/0/1":1500,"ge-0/0/2":1500}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	lines := []string{
@@ -2720,11 +2720,66 @@ func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
 	if dp.SharedUMEM.Mode != "cross-nic" {
 		t.Fatalf("SharedUMEM.Mode = %q, want cross-nic", dp.SharedUMEM.Mode)
 	}
-	if got := strings.Join(dp.SharedUMEM.Interfaces, ","); got != "ge-0/0/1,ge-0/0/2" {
+	if got := strings.Join(dp.SharedUMEM.Interfaces, ","); got != "ge-0-0-1,ge-0-0-2" {
 		t.Fatalf("SharedUMEM.Interfaces = %q", got)
 	}
 	if passed, ok := dp.SharedUMEM.Phase0Artifact["passed"].(bool); !ok || !passed {
 		t.Fatalf("SharedUMEM.Phase0Artifact[passed] = %#v", dp.SharedUMEM.Phase0Artifact["passed"])
+	}
+	if got := strings.Join(sharedUMEMArtifactStringArray(t, dp.SharedUMEM.Phase0Artifact, "selected_interfaces"), ","); got != "ge-0-0-1,ge-0-0-2" {
+		t.Fatalf("SharedUMEM.Phase0Artifact[selected_interfaces] = %q", got)
+	}
+	mtu, ok := dp.SharedUMEM.Phase0Artifact["mtu"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("SharedUMEM.Phase0Artifact[mtu] = %#v", dp.SharedUMEM.Phase0Artifact["mtu"])
+	}
+	if _, ok := mtu["ge-0-0-1"]; !ok {
+		t.Fatalf("SharedUMEM.Phase0Artifact[mtu] was not Linux-name normalized: %#v", mtu)
+	}
+}
+
+func TestUserspaceDataplaneSharedUMEMRejectsNullArtifact(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	if err := os.WriteFile(artifact, []byte(`null`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		"set system dataplane-type userspace",
+		"set system dataplane shared-umem mode cross-nic",
+		"set system dataplane shared-umem interface ge-0/0/1",
+		"set system dataplane shared-umem phase0-artifact-file " + artifact,
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%v): %v", path, err)
+		}
+	}
+	_, err := CompileConfig(tree)
+	if err == nil || !strings.Contains(err.Error(), "top-level value must be a JSON object") {
+		t.Fatalf("CompileConfig error = %v, want null artifact rejection", err)
+	}
+}
+
+func TestUserspaceDataplaneSharedUMEMRejectsOversizedArtifact(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	file, err := os.Create(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(sharedUMEMPhase0ArtifactMaxBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = readSharedUMEMPhase0Artifact(artifact)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("readSharedUMEMPhase0Artifact error = %v, want size rejection", err)
 	}
 }
 
@@ -2766,6 +2821,26 @@ func TestUserspaceDataplaneSharedUMEMGroupMergesWithBaseDataplane(t *testing.T) 
 	if dp.SharedUMEM == nil || dp.SharedUMEM.Mode != "cross-nic" {
 		t.Fatalf("group shared-umem was overwritten: %#v", dp.SharedUMEM)
 	}
+	if got := strings.Join(dp.SharedUMEM.Interfaces, ","); got != "ge-0-0-1" {
+		t.Fatalf("SharedUMEM.Interfaces = %q", got)
+	}
+}
+
+func sharedUMEMArtifactStringArray(t *testing.T, artifact map[string]interface{}, key string) []string {
+	t.Helper()
+	values, ok := artifact[key].([]interface{})
+	if !ok {
+		t.Fatalf("SharedUMEM.Phase0Artifact[%s] = %#v", key, artifact[key])
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		s, ok := value.(string)
+		if !ok {
+			t.Fatalf("SharedUMEM.Phase0Artifact[%s] contains non-string %#v", key, value)
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // #797 HIGH/MEDIUM: operator must be able to toggle D3 RSS indirection

@@ -454,6 +454,7 @@ fn register_binding_xsk(
             "xpf-userspace-dp: ERROR register_xsk_slot slot={} fd={}: {}",
             binding.slot, user_fd, err,
         );
+        binding.live.clear_socket_state();
         binding.live.set_error(format!("register XSK slot: {err}"));
         return Err(format!("register XSK slot {} fd {}: {err}", binding.slot, user_fd).into());
     }

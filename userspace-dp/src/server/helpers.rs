@@ -330,7 +330,7 @@ pub(crate) fn snapshot_binding_plan_key(snapshot: &ConfigSnapshot) -> String {
         .unwrap_or_default();
     out.push_str(&format!("workers={workers};ring={ring_entries};"));
     if let Some(shared_umem) = snapshot.userspace.get("shared_umem") {
-        let shared_key = serde_json::to_string(shared_umem).unwrap_or_default();
+        let shared_key = canonical_json_key(shared_umem);
         out.push_str(&format!("shared_umem={shared_key};"));
     }
     for iface in snapshot
@@ -355,6 +355,42 @@ pub(crate) fn snapshot_binding_plan_key(snapshot: &ConfigSnapshot) -> String {
         ));
     }
     out
+}
+
+fn canonical_json_key(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_canonical_json(value, &mut out);
+    out
+}
+
+fn write_canonical_json(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Array(values) => {
+            out.push('[');
+            for (idx, value) in values.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                write_canonical_json(value, out);
+            }
+            out.push(']');
+        }
+        serde_json::Value::Object(values) => {
+            out.push('{');
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (idx, (key, value)) in entries.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).unwrap_or_default());
+                out.push(':');
+                write_canonical_json(value, out);
+            }
+            out.push('}');
+        }
+        _ => out.push_str(&serde_json::to_string(value).unwrap_or_default()),
+    }
 }
 
 pub(crate) fn include_userspace_binding_interface(iface: &InterfaceSnapshot) -> bool {

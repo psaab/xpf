@@ -3,9 +3,12 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 )
+
+const sharedUMEMPhase0ArtifactMaxBytes = 16 << 20
 
 func compileSystem(node *Node, sys *SystemConfig) error {
 	for _, child := range node.Children {
@@ -554,25 +557,100 @@ func compileSharedUMEMConfig(node *Node) (*SharedUMEMConfig, error) {
 			cfg.Mode = nodeVal(child)
 		case "interface":
 			if v := nodeVal(child); v != "" {
-				cfg.Interfaces = append(cfg.Interfaces, v)
+				cfg.Interfaces = append(cfg.Interfaces, LinuxIfName(v))
 			}
 		case "phase0-artifact-file", "artifact-file":
 			path := nodeVal(child)
 			if path == "" {
 				continue
 			}
-			data, err := os.ReadFile(path)
+			artifact, err := readSharedUMEMPhase0Artifact(path)
 			if err != nil {
-				return nil, fmt.Errorf("read shared-umem artifact %s: %w", path, err)
-			}
-			var artifact map[string]interface{}
-			if err := json.Unmarshal(data, &artifact); err != nil {
-				return nil, fmt.Errorf("decode shared-umem artifact %s: %w", path, err)
+				return nil, err
 			}
 			cfg.Phase0Artifact = artifact
 		}
 	}
 	return cfg, nil
+}
+
+func readSharedUMEMPhase0Artifact(path string) (map[string]interface{}, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read shared-umem artifact %s: %w", path, err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, sharedUMEMPhase0ArtifactMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read shared-umem artifact %s: %w", path, err)
+	}
+	if len(data) > sharedUMEMPhase0ArtifactMaxBytes {
+		return nil, fmt.Errorf("read shared-umem artifact %s: exceeds %d bytes", path, sharedUMEMPhase0ArtifactMaxBytes)
+	}
+
+	var artifact map[string]interface{}
+	if err := json.Unmarshal(data, &artifact); err != nil {
+		return nil, fmt.Errorf("decode shared-umem artifact %s: %w", path, err)
+	}
+	if artifact == nil {
+		return nil, fmt.Errorf("decode shared-umem artifact %s: top-level value must be a JSON object", path)
+	}
+	if err := normalizeSharedUMEMArtifactInterfaces(artifact); err != nil {
+		return nil, fmt.Errorf("decode shared-umem artifact %s: %w", path, err)
+	}
+	return artifact, nil
+}
+
+func normalizeSharedUMEMArtifactInterfaces(artifact map[string]interface{}) error {
+	for _, key := range []string{"selected_interfaces", "interfaces"} {
+		normalizeSharedUMEMArtifactInterfaceArray(artifact, key)
+	}
+	for _, key := range []string{
+		"driver",
+		"driver_version",
+		"firmware",
+		"firmware_version",
+		"mtu",
+		"nic_firmware_versions",
+		"queue_topology",
+	} {
+		if err := normalizeSharedUMEMArtifactInterfaceMap(artifact, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeSharedUMEMArtifactInterfaceArray(artifact map[string]interface{}, key string) {
+	values, ok := artifact[key].([]interface{})
+	if !ok {
+		return
+	}
+	for i, value := range values {
+		name, ok := value.(string)
+		if !ok {
+			continue
+		}
+		values[i] = LinuxIfName(name)
+	}
+}
+
+func normalizeSharedUMEMArtifactInterfaceMap(artifact map[string]interface{}, key string) error {
+	values, ok := artifact[key].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	normalized := make(map[string]interface{}, len(values))
+	for ifname, value := range values {
+		linuxName := LinuxIfName(ifname)
+		if _, exists := normalized[linuxName]; exists {
+			return fmt.Errorf("duplicate %s key after Linux interface-name normalization: %s", key, linuxName)
+		}
+		normalized[linuxName] = value
+	}
+	artifact[key] = normalized
+	return nil
 }
 
 func compileSNMP(node *Node, sys *SystemConfig) error {

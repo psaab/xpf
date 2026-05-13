@@ -305,11 +305,19 @@ alone.
 
 Deployment scoping is part of the runtime contract, not just documentation.
 The policy builder must compare the configured shared-UMEM group against the
-validated Phase 0 artifact for the current node class. If kernel release, mlx5
-driver name/version, selected interface names, selected NIC PCI IDs, selected
-NIC firmware versions, libxdp/libbpf versions, IOMMU mode, MTU, queue topology,
-or selected device pair do not match the artifact, the group stays private and
-the reason is reported in telemetry.
+locally observable portion of the validated Phase 0 artifact for the current
+node class. At daemon startup this means the gate enforces the top-level
+success result plus kernel release, mlx5 driver name, selected interface names,
+selected NIC PCI IDs, selected device pair, MTU, and RX queue topology. If any
+of those fields are missing or do not match the live node, the group stays
+private and the reason is reported in telemetry.
+
+Driver version, selected NIC firmware versions, libxdp/libbpf versions, IOMMU
+mode, and the per-cell repro rows remain required Phase 0 audit evidence, but
+they are not daemon-startup comparators until the project has a first-class
+collector for each field. The runtime must not silently imply that those
+evidence fields were compared when only the locally observable subset was
+enforced.
 
 ### Phase 5: Use shared allocation for forwarding
 
