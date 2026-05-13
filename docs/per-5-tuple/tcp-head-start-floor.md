@@ -80,7 +80,7 @@ For measurements whose purpose is to isolate dataplane fairness:
   distribution.
 - Publish verdict JSON keys `observed_cov`, `cstruct`, `gap`,
   `starved_flow_count`, `aggregate_mbps`, and the iperf CPU fields,
-  plus the multi-sample mean/stdev/max CoV.
+  plus the multi-sample mean/max gap and contextual mean/stdev/max CoV.
 
 For production traffic, xpf's fairness contract remains
 workload-relative. The PR #1217/#1220 gate passes only when there are
