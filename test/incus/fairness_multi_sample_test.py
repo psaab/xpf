@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import unittest
 
 
 MODULE_PATH = Path(__file__).with_name("fairness_multi_sample.py")
+HARNESS_PATH = Path(__file__).with_name("fairness-harness.sh")
 SPEC = importlib.util.spec_from_file_location("fairness_multi_sample", MODULE_PATH)
 assert SPEC is not None
 fairness_multi_sample = importlib.util.module_from_spec(SPEC)
@@ -120,22 +122,88 @@ class FairnessMultiSampleTest(unittest.TestCase):
 
         self.assertEqual(record["gap"], -0.49)
 
-    def test_summary_fails_thresholds(self) -> None:
+    def test_summary_defaults_to_cstruct_aware_gap_contract(self) -> None:
+        summary = fairness_multi_sample.summarize(
+            [
+                {
+                    "sample": 1,
+                    "verdict": "PASS",
+                    "observed_cov": 0.30,
+                    "cstruct": 0.60,
+                    "gap": -0.30,
+                    "exit_code": 0,
+                },
+                {
+                    "sample": 2,
+                    "verdict": "PASS",
+                    "observed_cov": 0.40,
+                    "cstruct": 0.50,
+                    "gap": -0.10,
+                    "exit_code": 0,
+                },
+            ],
+            max_mean_gap=0.05,
+            max_run_gap=0.05,
+            max_mean_cov=None,
+            max_stdev_cov=None,
+            max_run_cov=None,
+        )
+        self.assertEqual(summary["verdict"], "PASS")
+        self.assertAlmostEqual(summary["gap"]["mean"], -0.20)
+        self.assertAlmostEqual(summary["cstruct"]["mean"], 0.55)
+
+    def test_summary_fails_gap_thresholds(self) -> None:
+        summary = fairness_multi_sample.summarize(
+            [
+                {
+                    "sample": 1,
+                    "verdict": "PASS",
+                    "observed_cov": 0.20,
+                    "cstruct": 0.12,
+                    "gap": 0.08,
+                    "exit_code": 0,
+                },
+                {
+                    "sample": 2,
+                    "verdict": "PASS",
+                    "observed_cov": 0.19,
+                    "cstruct": 0.12,
+                    "gap": 0.07,
+                    "exit_code": 0,
+                },
+            ],
+            max_mean_gap=0.05,
+            max_run_gap=0.05,
+            max_mean_cov=None,
+            max_stdev_cov=None,
+            max_run_cov=None,
+        )
+        self.assertEqual(summary["verdict"], "FAIL")
+        self.assertGreater(summary["gap"]["mean"], 0.05)
+        self.assertGreater(summary["gap"]["max"], 0.05)
+
+    def test_summary_optional_cov_thresholds_fail_when_enabled(self) -> None:
         summary = fairness_multi_sample.summarize(
             [
                 {
                     "sample": 1,
                     "verdict": "PASS",
                     "observed_cov": 0.10,
+                    "cstruct": 0.50,
+                    "gap": -0.40,
                     "exit_code": 0,
                 },
                 {
                     "sample": 2,
                     "verdict": "PASS",
                     "observed_cov": 0.30,
+                    "cstruct": 0.50,
+                    "gap": -0.20,
                     "exit_code": 0,
                 },
             ],
+            max_mean_gap=0.05,
+            max_run_gap=0.05,
             max_mean_cov=0.15,
             max_stdev_cov=0.03,
             max_run_cov=0.25,
@@ -227,6 +295,123 @@ class FairnessMultiSampleTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 2)
             self.assertIn("not finite", result.stderr)
+
+    def test_fairness_harness_accepts_scrape_rows_matching_iface_and_cos_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            metrics = tmp_path / "metrics.prom"
+            metrics.write_text(
+                textwrap.dedent(
+                    """\
+                    xpf_userspace_binding_active_flow_count{binding_slot="0",iface="ge-0-0-2",queue_id="6",worker_id="0"} 1
+                    xpf_userspace_cos_active_flow_count{ifindex="5",queue_id="6",worker_id="0"} 1
+                    """
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_fake_harness_with_metrics(tmp_path, metrics)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('"verdict":"PASS"', result.stdout)
+            self.assertTrue((tmp_path / "eval-called").exists())
+
+    def test_fairness_harness_rejects_scrape_rows_for_wrong_cos_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            metrics = tmp_path / "metrics.prom"
+            metrics.write_text(
+                textwrap.dedent(
+                    """\
+                    xpf_userspace_binding_active_flow_count{binding_slot="0",iface="ge-0-0-2",queue_id="6",worker_id="0"} 1
+                    xpf_userspace_cos_active_flow_count{ifindex="5",queue_id="4",worker_id="0"} 1
+                    """
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_fake_harness_with_metrics(tmp_path, metrics)
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(
+                "no CoS active-flow metric rows for ifindex 5 queue 6",
+                result.stderr,
+            )
+            self.assertFalse((tmp_path / "eval-called").exists())
+
+    def run_fake_harness_with_metrics(
+        self,
+        tmp_path: Path,
+        metrics: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        sentinel = tmp_path / "curl-called"
+        fake_curl = tmp_path / "curl"
+        fake_iperf = tmp_path / "fake-iperf"
+        fake_eval = tmp_path / "fake-eval"
+        fake_curl.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                touch "$CURL_SENTINEL"
+                cat "$FAKE_METRICS"
+                """
+            ),
+            encoding="utf-8",
+        )
+        fake_iperf.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                for _ in {1..50}; do
+                    [[ -e "$CURL_SENTINEL" ]] && break
+                    sleep 0.02
+                done
+                printf '{}\\n'
+                """
+            ),
+            encoding="utf-8",
+        )
+        fake_eval.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                touch "$EVAL_SENTINEL"
+                printf '{"verdict":"PASS","observed_cov":0.1,"cstruct":0.2,"gap":-0.1,"aggregate_mbps":1.0,"starved_flow_count":0,"failure_reasons":[],"distribution_a_i":[1],"n_active":1,"saturated":true,"a_i_sum_check_ok":true}\\n'
+                """
+            ),
+            encoding="utf-8",
+        )
+        for path in (fake_curl, fake_iperf, fake_eval):
+            path.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "IPERF_BIN": str(fake_iperf),
+            "FAIRNESS_EVAL": str(fake_eval),
+            "COS_IFINDEX": "5",
+            "COS_QUEUE_ID": "6",
+            "CURL_SENTINEL": str(sentinel),
+            "EVAL_SENTINEL": str(tmp_path / "eval-called"),
+            "FAKE_METRICS": str(metrics),
+        }
+        return subprocess.run(
+            [
+                str(HARNESS_PATH),
+                "127.0.0.1",
+                "5203",
+                "1",
+                "1",
+                "",
+                "http://example.invalid/metrics",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=5,
+        )
 
     def test_cli_times_out_harness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

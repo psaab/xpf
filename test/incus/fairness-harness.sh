@@ -632,6 +632,32 @@ scrape_metrics() {
     done
 }
 
+require_binding_scrape_rows() {
+    if awk -F'\t' -v iface="$IFACE" '
+        $0 !~ /^#/ && NF >= 6 && $5 == iface { seen = 1 }
+        END { exit seen ? 0 : 1 }
+    ' "$BINDING_TSV"; then
+        return 0
+    fi
+    echo "fairness-harness: no binding active-flow metric rows for iface $IFACE from $METRICS_URL" >&2
+    echo "fairness-harness: check METRICS_URL reachability from the harness host" >&2
+    return 2
+}
+
+require_cos_scrape_rows() {
+    local cos_queue_id=$1
+
+    if awk -F'\t' -v ifindex="$COS_IFINDEX" -v queue_id="$cos_queue_id" '
+        $0 !~ /^#/ && NF >= 5 && $2 == ifindex && $3 == queue_id { seen = 1 }
+        END { exit seen ? 0 : 1 }
+    ' "$COS_TSV"; then
+        return 0
+    fi
+    echo "fairness-harness: no CoS active-flow metric rows for ifindex $COS_IFINDEX queue $cos_queue_id from $METRICS_URL" >&2
+    echo "fairness-harness: check METRICS_URL reachability and COS_IFINDEX/COS_QUEUE_ID" >&2
+    return 2
+}
+
 run_iperf() {
     local label=$1
     local out=$2
@@ -662,6 +688,11 @@ run_eval() {
     local shaper_rate_bps=${5:-$SHAPER_RATE_BPS}
 
     echo "fairness-harness: evaluating ${label}..."
+    require_binding_scrape_rows || return 2
+    if [[ -n "$COS_IFINDEX" && -n "$cos_queue_id" ]]; then
+        require_cos_scrape_rows "$cos_queue_id" || return 2
+    fi
+
     local eval_args=(
         --iperf-json "$iperf_out"
         --binding-flows "$BINDING_TSV"

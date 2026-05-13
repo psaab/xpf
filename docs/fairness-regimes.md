@@ -352,11 +352,21 @@ IPERF_LAUNCH_ARG_3=-- \
 The sweep runs ports 5201..5207 through `fairness_multi_sample.py`,
 preserves per-class artifacts, writes `summary.tsv` and `summary.md`,
 and returns non-zero after completing all classes if any class misses
-its thresholds. For the symmetric reverse fixture on the loss cluster,
-`COS_IFINDEX=5` selects the `ge-0-0-1` egress. For forward-path sweeps,
-do not hardcode the RETH unit's displayed name into the harness; use
-the ifindex emitted by `xpf_userspace_cos_active_flow_count` for the
-actual shaped egress in that run.
+the Cstruct-aware multi-sample contract (`mean_gap ≤ 0.05` and
+`max_gap ≤ 0.05` by default). The summary still reports mean/max/stdev
+observed CoV for context, but absolute CoV is not the default pass/fail
+gate; use the wrapper's opt-in `--max-*cov` flags only for deliberately
+balanced-RSS fixtures.
+
+For the symmetric reverse fixture on the loss cluster, `COS_IFINDEX=5`
+selects the `ge-0-0-1` egress. For forward-path sweeps, do not hardcode
+the RETH unit's displayed name into the harness; use the ifindex emitted
+by `xpf_userspace_cos_active_flow_count` for the actual shaped egress in
+that run. `METRICS_URL` must be reachable from the harness host. If the
+dataplane only exposes Prometheus on the firewall VM loopback, expose a
+temporary host-local proxy or run the harness in a context that can reach
+that endpoint; an unreachable metrics URL is an environment error, not a
+fairness result.
 
 ## Required metrics — exported in production via gRPC/Prometheus
 
