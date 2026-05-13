@@ -140,6 +140,16 @@ struct TsvRow {
     count: u32,
 }
 
+/// A single 5-column class-specific CoS active-flow TSV row.
+#[derive(Debug, Clone)]
+struct CosTsvRow {
+    timestamp: u64,
+    ifindex: i32,
+    queue_id: u32,
+    worker_id: u32,
+    count: u32,
+}
+
 /// Build the 6-column TSV (timestamp, binding_slot, queue_id, worker_id,
 /// iface, count) with a leading comment-header line that matches what
 /// `test/incus/fairness-harness.sh` emits on the cluster.
@@ -149,6 +159,17 @@ fn synth_tsv_6col(rows: &[TsvRow]) -> String {
         s.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\n",
             r.timestamp, r.binding_slot, r.queue_id, r.worker_id, r.iface, r.count
+        ));
+    }
+    s
+}
+
+fn synth_cos_tsv_5col(rows: &[CosTsvRow]) -> String {
+    let mut s = String::from("# timestamp\tifindex\tqueue_id\tworker_id\tcount\n");
+    for r in rows {
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            r.timestamp, r.ifindex, r.queue_id, r.worker_id, r.count
         ));
     }
     s
@@ -195,6 +216,35 @@ fn run_with_inputs(
         // PASS / FAIL emit verdict JSON to stdout.
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Find the first '{' so any leading log lines don't break parsing.
+        if let Some(brace) = stdout.find('{') {
+            serde_json::from_str(&stdout[brace..]).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    (output, json)
+}
+
+fn run_with_inputs_and_cos(
+    tmp: &TempGuard,
+    iperf_json_str: &str,
+    tsv_str: &str,
+    cos_tsv_str: &str,
+    extra_args: &[&str],
+) -> (Output, Option<Value>) {
+    let iperf_path = tmp.path().join("iperf3.json");
+    let tsv_path = tmp.path().join("binding-flows.tsv");
+    let cos_tsv_path = tmp.path().join("cos-flows.tsv");
+    fs::write(&iperf_path, iperf_json_str).expect("write iperf3.json");
+    fs::write(&tsv_path, tsv_str).expect("write tsv");
+    fs::write(&cos_tsv_path, cos_tsv_str).expect("write cos tsv");
+    let mut args = vec!["--cos-flows", cos_tsv_path.to_str().unwrap()];
+    args.extend_from_slice(extra_args);
+    let output = run_eval(&iperf_path, &tsv_path, &args);
+    let json = if output.status.code() == Some(0) || output.status.code() == Some(1) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(brace) = stdout.find('{') {
             serde_json::from_str(&stdout[brace..]).ok()
         } else {
@@ -596,6 +646,212 @@ fn guard_sum_mismatch_fails() {
 }
 
 #[test]
+fn guard_p12_allows_bounded_stale_overcount() {
+    let tmp = TempGuard::new("guard_p12_overcount_pass");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    // Canonical CoS sweep shape from #1281: 12 healthy streams, but
+    // active-flow snapshots can retain three stale/recently-active
+    // entries. sum(a_i)=15 vs expected=12 is a bounded overcount and
+    // should not false-fail the run.
+    let tsv_str = make_distribution_tsv(&[4, 4, 4, 3, 0, 0], &timestamps_for(60), "ge-0-0-2");
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "P=12 sum(a_i)=15 stale-overcount window should PASS; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on P=12 overcount PASS");
+    assert_eq!(v["verdict"], "PASS");
+    assert_eq!(v["a_i_sum_check_ok"], true);
+    assert_eq!(v["a_i_sum"], 15);
+    assert_eq!(v["iperf_non_starved_streams"], 12);
+    assert_eq!(v["a_i_sum_under_tolerance"], 2);
+    assert_eq!(v["a_i_sum_over_tolerance"], 3);
+    assert_eq!(v["a_i_sum_tolerance"], 3);
+    assert_eq!(
+        v["distribution_a_i"],
+        serde_json::json!([4, 4, 4, 3, 0, 0])
+    );
+    assert_eq!(
+        v["cstruct_distribution_a_i"],
+        serde_json::json!([3, 3, 3, 3, 0, 0])
+    );
+    assert_eq!(v["cstruct_adjusted_for_a_i_overcount"], true);
+    assert_eq!(v["cstruct"].as_f64(), Some(0.0));
+}
+
+#[test]
+fn rss_expectation_uses_observed_distribution_not_cstruct_normalized_copy() {
+    let tmp = TempGuard::new("rss_observed_not_normalized");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    let tsv_str = make_distribution_tsv(&[4, 4, 4, 3, 0, 0], &timestamps_for(60), "ge-0-0-2");
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+        "--rss-expectation", "max-worker-flow-share:25%",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "RSS expectation must fail against observed [4,4,4,3,0,0], not pass against normalized [3,3,3,3,0,0]; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on RSS expectation FAIL");
+    assert_eq!(v["verdict"], "FAIL");
+    assert_eq!(v["a_i_sum_check_ok"], true);
+    assert_eq!(
+        v["distribution_a_i"],
+        serde_json::json!([4, 4, 4, 3, 0, 0])
+    );
+    assert_eq!(
+        v["cstruct_distribution_a_i"],
+        serde_json::json!([3, 3, 3, 3, 0, 0])
+    );
+    assert_eq!(v["cstruct_adjusted_for_a_i_overcount"], true);
+    assert!(
+        v["max_worker_flow_share"].as_f64().unwrap() > 0.25,
+        "max_worker_flow_share must reflect observed distribution: {v}"
+    );
+    let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
+    assert!(
+        reasons.iter().any(|r| r
+            .as_str()
+            .unwrap_or("")
+            .contains("max_worker_flow_share")),
+        "failure_reasons must contain the observed RSS max-share failure; got: {:?}",
+        reasons
+    );
+}
+
+#[test]
+fn guard_p12_rejects_overcount_beyond_stale_window() {
+    let tmp = TempGuard::new("guard_p12_overcount_fail");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    let tsv_str = make_distribution_tsv(&[4, 4, 4, 4, 0, 0], &timestamps_for(60), "ge-0-0-2");
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "P=12 sum(a_i)=16 should exceed the overcount window; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on P=12 overcount FAIL");
+    assert_eq!(v["verdict"], "FAIL");
+    assert_eq!(v["a_i_sum_check_ok"], false);
+    assert_eq!(v["a_i_sum"], 16);
+    assert_eq!(v["a_i_sum_over_tolerance"], 3);
+    assert_eq!(
+        v["cstruct_distribution_a_i"],
+        serde_json::json!([4, 4, 4, 4, 0, 0])
+    );
+    assert_eq!(v["cstruct_adjusted_for_a_i_overcount"], false);
+    let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
+    let guard_reason = reasons
+        .iter()
+        .filter_map(|r| r.as_str())
+        .find(|r| r.contains("Harness guard"))
+        .unwrap_or_else(|| panic!("failure_reasons must contain a Harness guard entry; got: {reasons:?}"));
+    assert!(guard_reason.contains("expected=12"), "guard reason missing expected_sum: {guard_reason}");
+    assert!(guard_reason.contains("over_tolerance=3"), "guard reason missing over_tolerance: {guard_reason}");
+}
+
+#[test]
+fn cos_path_uses_normalized_distribution_for_bounded_stale_overcount() {
+    let tmp = TempGuard::new("cos_p12_overcount_pass");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    let binding_tsv = make_distribution_tsv(&[3, 3, 3, 3, 0, 0], &timestamps_for(60), "ge-0-0-2");
+    let cos_tsv = make_cos_distribution_tsv(&[4, 4, 4, 3, 0, 0], &timestamps_for(60), 80, 4);
+
+    let (output, verdict) = run_with_inputs_and_cos(&tmp, &json_str, &binding_tsv, &cos_tsv, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+        "--cos-ifindex", "80",
+        "--cos-queue-id", "4",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "CoS P=12 bounded stale-overcount window should PASS; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on CoS overcount PASS");
+    assert_eq!(v["verdict"], "PASS");
+    assert_eq!(v["cstruct_source"], "cos_queue");
+    assert_eq!(v["distribution_a_i"], serde_json::json!([4, 4, 4, 3, 0, 0]));
+    assert_eq!(
+        v["binding_distribution_a_i"],
+        serde_json::json!([3, 3, 3, 3, 0, 0])
+    );
+    assert_eq!(
+        v["cstruct_distribution_a_i"],
+        serde_json::json!([3, 3, 3, 3, 0, 0])
+    );
+    assert_eq!(v["cstruct_adjusted_for_a_i_overcount"], true);
+    assert_eq!(v["a_i_sum_check_ok"], true);
+    assert_eq!(v["a_i_sum"], 15);
+    assert_eq!(v["a_i_sum_over_tolerance"], 3);
+    assert_eq!(v["cstruct"].as_f64(), Some(0.0));
+}
+
+#[test]
+fn cos_path_rejects_selected_queue_sum_that_exceeds_binding_sum() {
+    let tmp = TempGuard::new("cos_binding_guard");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    let binding_tsv = make_distribution_tsv(&[1, 1, 1, 1, 1, 1], &timestamps_for(60), "ge-0-0-2");
+    let cos_tsv = make_cos_distribution_tsv(&[3, 3, 3, 3, 0, 0], &timestamps_for(60), 80, 4);
+
+    let (output, verdict) = run_with_inputs_and_cos(&tmp, &json_str, &binding_tsv, &cos_tsv, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+        "--cos-ifindex", "80",
+        "--cos-queue-id", "4",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "selected CoS sum far above binding sum should FAIL; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on CoS binding guard FAIL");
+    assert_eq!(v["verdict"], "FAIL");
+    assert_eq!(v["cstruct_source"], "cos_queue");
+    assert_eq!(v["a_i_sum"], 12);
+    assert_eq!(
+        v["binding_distribution_a_i"],
+        serde_json::json!([1, 1, 1, 1, 1, 1])
+    );
+    let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
+    assert!(
+        reasons.iter().any(|r| r
+            .as_str()
+            .unwrap_or("")
+            .contains("selected CoS sum(a_i)=12 exceeds binding sum(a_i)=6")),
+        "failure_reasons must contain the selected-CoS-vs-binding guard; got: {:?}",
+        reasons
+    );
+}
+
+#[test]
 fn guard_low_n_legacy_input_rejects_p2_undercount() {
     let tmp = TempGuard::new("guard_low_n_legacy");
     let sockets = [5u64, 6];
@@ -845,18 +1101,44 @@ fn timestamps_for(n: u64) -> Vec<u64> {
 /// `n_streams × direction_multiplier=1` (iface filter active) within
 /// tolerance.
 fn make_balanced_tsv(n_workers: u32, timestamps: &[u64], iface: &'static str) -> String {
+    let counts = vec![1; n_workers as usize];
+    make_distribution_tsv(&counts, timestamps, iface)
+}
+
+fn make_distribution_tsv(counts: &[u32], timestamps: &[u64], iface: &'static str) -> String {
     let mut rows: Vec<TsvRow> = Vec::new();
     for &ts in timestamps {
-        for w in 0..n_workers {
+        for (w, &count) in counts.iter().enumerate() {
             rows.push(TsvRow {
                 timestamp: ts,
-                binding_slot: w,
+                binding_slot: w as u32,
                 queue_id: 0,
-                worker_id: w,
+                worker_id: w as u32,
                 iface,
-                count: 1, // sum across 6 workers = 6, matches 6 streams (1× single-direction)
+                count,
             });
         }
     }
     synth_tsv_6col(&rows)
+}
+
+fn make_cos_distribution_tsv(
+    counts: &[u32],
+    timestamps: &[u64],
+    ifindex: i32,
+    queue_id: u32,
+) -> String {
+    let mut rows: Vec<CosTsvRow> = Vec::new();
+    for &ts in timestamps {
+        for (w, &count) in counts.iter().enumerate() {
+            rows.push(CosTsvRow {
+                timestamp: ts,
+                ifindex,
+                queue_id,
+                worker_id: w as u32,
+                count,
+            });
+        }
+    }
+    synth_cos_tsv_5col(&rows)
 }
