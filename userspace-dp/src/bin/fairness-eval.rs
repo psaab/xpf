@@ -20,12 +20,19 @@ use fairness::{
 
 const EPSILON: f64 = 0.05;
 // Tolerance for the harness fail-fast guard per Codex round-4
-// finding #3: sum(per_binding_active_flow_count) ≈ expected_sum
-// within `max(2, floor(10% × expected_sum))`, where
+// finding #3: sum(per_binding_active_flow_count) should stay near
+// expected_sum, where
 // expected_sum = non-starved_streams × direction_multiplier
 // (direction_multiplier=1 when iface_filter_active=true, 2 for
 // legacy/bidirectional input).
+//
+// #1281: active-flow gauges can report recently-active/stale flow-cache
+// entries persistently enough to survive the steady-state median. Preserve
+// the stricter undercount guard because missing telemetry masks real flow
+// loss, but allow a bounded one-sided overcount window and normalize that
+// accepted overcount before computing Cstruct.
 const GUARD_RELATIVE: f64 = 0.10;
+const GUARD_OVERCOUNT_DIVISOR: u32 = 4;
 const GUARD_ABSOLUTE: u32 = 2;
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +155,8 @@ struct Verdict {
     distribution_a_i: Vec<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     binding_distribution_a_i: Option<Vec<u32>>,
+    cstruct_distribution_a_i: Vec<u32>,
+    cstruct_adjusted_for_a_i_overcount: bool,
     rss_expectation: String,
     rss_expectation_pass: bool,
     rss_expectation_reason: String,
@@ -185,6 +194,8 @@ struct Verdict {
     a_i_sum_check_ok: bool,
     a_i_sum: u32,
     iperf_non_starved_streams: u32,
+    a_i_sum_under_tolerance: u32,
+    a_i_sum_over_tolerance: u32,
     a_i_sum_tolerance: u32,
     /// PASS unless any gate fails.
     verdict: &'static str,
@@ -531,6 +542,32 @@ fn direction_multiplier(iface_filter_active: bool) -> u32 {
     if iface_filter_active { 1 } else { 2 }
 }
 
+fn guard_sum_tolerances(expected_sum: u32) -> (u32, u32) {
+    let under = ((GUARD_RELATIVE * expected_sum as f64) as u32).max(GUARD_ABSOLUTE);
+    let over = expected_sum
+        .saturating_add(GUARD_OVERCOUNT_DIVISOR - 1)
+        / GUARD_OVERCOUNT_DIVISOR;
+    (under, over.max(GUARD_ABSOLUTE))
+}
+
+fn trim_distribution_to_sum(distribution: &[u32], target_sum: u32) -> Vec<u32> {
+    let mut trimmed = distribution.to_vec();
+    let mut excess = trimmed.iter().sum::<u32>().saturating_sub(target_sum);
+    while excess > 0 {
+        let Some((idx, _)) = trimmed
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .max_by_key(|(_, count)| **count)
+        else {
+            break;
+        };
+        trimmed[idx] -= 1;
+        excess -= 1;
+    }
+    trimmed
+}
+
 fn main() -> ExitCode {
     let args: Args = parse_args();
 
@@ -688,8 +725,6 @@ fn main() -> ExitCode {
         selected_cos_queue_id = Some(cos_queue_id);
     }
 
-    let cstruct = compute_cstruct(&distribution_a_i);
-    let n_active: u32 = distribution_a_i.iter().filter(|&&a| a > 0).count() as u32;
     let rss_expectation = match parse_rss_expectation(&args.rss_expectation) {
         Ok(v) => v,
         Err(e) => {
@@ -697,15 +732,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let max_worker_flow_share = max_worker_flow_share(&distribution_a_i);
-    let (rss_expectation_pass, rss_expectation_reason) = evaluate_rss_expectation(
-        &rss_expectation,
-        &distribution_a_i,
-        cstruct,
-        n_total_workers,
-    );
-
-    let gap = observed_cov - cstruct;
 
     let aggregate_mbps =
         if aggregate_buckets_bps.is_empty() {
@@ -766,17 +792,6 @@ fn main() -> ExitCode {
         (None, None, None, None, None, None, None, None, None)
     };
 
-    // Saturation: structural cap = (n_active / n_total_workers) × shaper_rate.
-    // shaper_rate provided via --shaper-rate-bps; if zero, skip the saturated check.
-    let saturated = if args.shaper_rate_bps > 0 && n_total_workers > 0 {
-        let structural_cap_bps = (args.shaper_rate_bps as u128
-            * n_active as u128
-            / n_total_workers as u128) as u64;
-        is_saturated(&aggregate_buckets_bps, structural_cap_bps)
-    } else {
-        false
-    };
-
     // Harness fail-fast guard: sum(a_i) vs non-starved iperf stream count.
     //
     // Codex round-4 finding: with --iface filtering (the per-worker
@@ -809,9 +824,44 @@ fn main() -> ExitCode {
     // fallback path uses the bidirectional multiplier as well.
     let dir_mult = direction_multiplier(iface_filter_active);
     let expected_sum = n_non_starved.saturating_mul(dir_mult);
-    let tolerance = ((GUARD_RELATIVE * expected_sum as f64) as u32).max(GUARD_ABSOLUTE);
-    let a_i_sum_check_ok =
-        (a_i_sum as i64 - expected_sum as i64).unsigned_abs() as u32 <= tolerance;
+    let (under_tolerance, over_tolerance) = guard_sum_tolerances(expected_sum);
+    let a_i_delta = a_i_sum as i64 - expected_sum as i64;
+    let a_i_abs_delta = a_i_delta.unsigned_abs() as u32;
+    let tolerance = if a_i_delta > 0 {
+        over_tolerance
+    } else {
+        under_tolerance
+    };
+    let a_i_sum_check_ok = a_i_abs_delta <= tolerance;
+
+    let cstruct_distribution_a_i = if a_i_delta > 0 && a_i_sum_check_ok {
+        trim_distribution_to_sum(&distribution_a_i, expected_sum)
+    } else {
+        distribution_a_i.clone()
+    };
+    let cstruct_adjusted_for_a_i_overcount = cstruct_distribution_a_i != distribution_a_i;
+
+    let cstruct = compute_cstruct(&cstruct_distribution_a_i);
+    let n_active: u32 = distribution_a_i.iter().filter(|&&a| a > 0).count() as u32;
+    let max_worker_flow_share = max_worker_flow_share(&distribution_a_i);
+    let (rss_expectation_pass, rss_expectation_reason) = evaluate_rss_expectation(
+        &rss_expectation,
+        &distribution_a_i,
+        compute_cstruct(&distribution_a_i),
+        n_total_workers,
+    );
+    let gap = observed_cov - cstruct;
+
+    // Saturation: structural cap = (n_active / n_total_workers) × shaper_rate.
+    // shaper_rate provided via --shaper-rate-bps; if zero, skip the saturated check.
+    let saturated = if args.shaper_rate_bps > 0 && n_total_workers > 0 {
+        let structural_cap_bps = (args.shaper_rate_bps as u128
+            * n_active as u128
+            / n_total_workers as u128) as u64;
+        is_saturated(&aggregate_buckets_bps, structural_cap_bps)
+    } else {
+        false
+    };
 
     let mut failure_reasons: Vec<String> = Vec::new();
     if starved > 0 {
@@ -825,10 +875,12 @@ fn main() -> ExitCode {
         ));
     }
     if !a_i_sum_check_ok {
+        let direction = if a_i_delta > 0 { "above" } else { "below" };
         failure_reasons.push(format!(
             "Harness guard: sum(a_i)={a_i_sum} vs expected={expected_sum} \
              (non-starved={n_non_starved} × dir_mult={dir_mult}) \
-             differ by more than tolerance={tolerance}"
+             is {a_i_abs_delta} {direction} expected, exceeding tolerance={tolerance} \
+             (under_tolerance={under_tolerance}, over_tolerance={over_tolerance})"
         ));
     }
     if !rss_expectation_pass {
@@ -855,6 +907,8 @@ fn main() -> ExitCode {
         distribution_a_i,
         binding_distribution_a_i: (cstruct_source == "cos_queue")
             .then_some(binding_distribution_a_i),
+        cstruct_distribution_a_i,
+        cstruct_adjusted_for_a_i_overcount,
         rss_expectation: args.rss_expectation,
         rss_expectation_pass,
         rss_expectation_reason,
@@ -882,6 +936,8 @@ fn main() -> ExitCode {
         a_i_sum_check_ok,
         a_i_sum,
         iperf_non_starved_streams: n_non_starved,
+        a_i_sum_under_tolerance: under_tolerance,
+        a_i_sum_over_tolerance: over_tolerance,
         a_i_sum_tolerance: tolerance,
         verdict,
         failure_reasons,
@@ -1384,6 +1440,24 @@ mod aggregation_tests {
     #[test]
     fn direction_multiplier_no_iface_filter_is_two() {
         assert_eq!(direction_multiplier(false), 2);
+    }
+
+    #[test]
+    fn guard_sum_tolerances_are_asymmetric_for_stale_overcount() {
+        assert_eq!(guard_sum_tolerances(12), (2, 3));
+        assert_eq!(guard_sum_tolerances(2), (2, 2));
+        assert_eq!(guard_sum_tolerances(40), (4, 10));
+    }
+
+    #[test]
+    fn trim_distribution_to_sum_removes_accepted_overcount_from_largest_buckets() {
+        assert_eq!(
+            trim_distribution_to_sum(&[4, 4, 4, 3, 0, 0], 12),
+            vec![3, 3, 3, 3, 0, 0]
+        );
+        assert_eq!(trim_distribution_to_sum(&[1, 2, 3], 3), vec![1, 1, 1]);
+        assert_eq!(trim_distribution_to_sum(&[1, 2, 3], 10), vec![1, 2, 3]);
+        assert_eq!(trim_distribution_to_sum(&[0, 0, 0], 0), vec![0, 0, 0]);
     }
 }
 
