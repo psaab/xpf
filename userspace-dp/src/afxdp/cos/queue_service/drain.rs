@@ -275,6 +275,7 @@ pub(in crate::afxdp) fn drain_exact_prepared_fifo_items_to_scratch(
     free_tx_frames: &mut VecDeque<u64>,
     pending_fill_frames: &mut VecDeque<u64>,
     slot: u32,
+    shared_recycles: &mut Vec<(u32, u64)>,
     root_budget: u64,
     secondary_budget: u64,
     queue_dscp_rewrite: Option<u8>,
@@ -348,9 +349,10 @@ pub(in crate::afxdp) fn drain_exact_prepared_fifo_items_to_scratch(
         if let Some((error, fallback_dropped_bytes)) = drop_error {
             let dropped_bytes = match queue.hot.items.remove(index) {
                 Some(CoSPendingTxItem::Prepared(req)) => {
-                    recycle_cancelled_prepared_offset(
+                    recycle_cancelled_prepared_offset_with_shared(
                         free_tx_frames,
                         pending_fill_frames,
+                        Some(shared_recycles),
                         slot,
                         req.recycle,
                         req.offset,
@@ -380,6 +382,7 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
     free_tx_frames: &mut VecDeque<u64>,
     pending_fill_frames: &mut VecDeque<u64>,
     slot: u32,
+    shared_recycles: &mut Vec<(u32, u64)>,
     root_budget: u64,
     secondary_budget: u64,
     queue_dscp_rewrite: Option<u8>,
@@ -455,9 +458,10 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
             req.dscp_rewrite = req.dscp_rewrite.or(Some(dscp_rewrite));
         }
         if req.len as usize > tx_frame_capacity() {
-            recycle_cancelled_prepared_offset(
+            recycle_cancelled_prepared_offset_with_shared(
                 free_tx_frames,
                 pending_fill_frames,
+                Some(shared_recycles),
                 slot,
                 req.recycle,
                 req.offset,
@@ -487,9 +491,10 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
             area.slice(req.offset as usize, req.len as usize).is_some()
         };
         if !valid {
-            recycle_cancelled_prepared_offset(
+            recycle_cancelled_prepared_offset_with_shared(
                 free_tx_frames,
                 pending_fill_frames,
+                Some(shared_recycles),
                 slot,
                 req.recycle,
                 req.offset,

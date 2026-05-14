@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(super) fn resolution_target_for_session(
     flow: &SessionFlow,
     decision: SessionDecision,
@@ -664,6 +663,7 @@ pub(super) fn teardown_tcp_rst_flow(
     forward_key: &SessionKey,
     nat: NatDecision,
     pending_forwards: &mut Vec<PendingForwardRequest>,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     let reverse_key = reverse_session_key(forward_key, nat);
     sessions.delete(forward_key);
@@ -697,7 +697,14 @@ pub(super) fn teardown_tcp_rst_flow(
     replicate_session_delete(peer_worker_commands, forward_key);
     replicate_session_delete(peer_worker_commands, &reverse_key);
     cancel_pending_forwards(current, pending_forwards, forward_key, &reverse_key);
-    cancel_queued_flow(left, current, right, forward_key, &reverse_key);
+    cancel_queued_flow(
+        left,
+        current,
+        right,
+        forward_key,
+        &reverse_key,
+        shared_recycles,
+    );
 }
 
 pub(super) fn cancel_queued_flow(
@@ -706,13 +713,42 @@ pub(super) fn cancel_queued_flow(
     right: &mut [BindingWorker],
     forward_key: &SessionKey,
     reverse_key: &SessionKey,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     for binding in left.iter_mut() {
-        cancel_queued_flow_on_binding(binding, forward_key, reverse_key);
+        cancel_queued_flow_on_binding(binding, forward_key, reverse_key, Some(shared_recycles));
     }
-    cancel_queued_flow_on_binding(current, forward_key, reverse_key);
+    cancel_queued_flow_on_binding(current, forward_key, reverse_key, Some(shared_recycles));
     for binding in right.iter_mut() {
-        cancel_queued_flow_on_binding(binding, forward_key, reverse_key);
+        cancel_queued_flow_on_binding(binding, forward_key, reverse_key, Some(shared_recycles));
+    }
+    route_cancelled_shared_recycles(left, current, right, shared_recycles);
+}
+
+fn route_cancelled_shared_recycles(
+    left: &mut [BindingWorker],
+    current: &mut BindingWorker,
+    right: &mut [BindingWorker],
+    shared_recycles: &mut Vec<(u32, u64)>,
+) {
+    if shared_recycles.is_empty() {
+        return;
+    }
+    for (slot, offset) in shared_recycles.drain(..) {
+        if let Some(binding) = left
+            .iter_mut()
+            .chain(core::iter::once(&mut *current))
+            .chain(right.iter_mut())
+            .find(|binding| binding.slot == slot)
+        {
+            binding.tx_pipeline.pending_fill_frames.push_back(offset);
+        } else {
+            eprintln!(
+                "xpf-userspace-dp: dropping shared UMEM recycle for unknown slot {} offset {}",
+                slot, offset
+            );
+            current.live.tx_errors.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -720,7 +756,9 @@ pub(super) fn cancel_queued_flow_on_binding(
     binding: &mut BindingWorker,
     forward_key: &SessionKey,
     reverse_key: &SessionKey,
+    shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) {
+    let mut shared_recycles = shared_recycles;
     let mut kept_local = VecDeque::with_capacity(binding.tx_pipeline.pending_tx_local.len());
     while let Some(req) = binding.tx_pipeline.pending_tx_local.pop_front() {
         if tx_request_matches_flow(&req, forward_key, reverse_key) {
@@ -733,7 +771,7 @@ pub(super) fn cancel_queued_flow_on_binding(
     let mut kept_prepared = VecDeque::with_capacity(binding.tx_pipeline.pending_tx_prepared.len());
     while let Some(req) = binding.tx_pipeline.pending_tx_prepared.pop_front() {
         if prepared_request_matches_flow(&req, forward_key, reverse_key) {
-            recycle_cancelled_prepared(binding, &req);
+            recycle_cancelled_prepared(binding, &req, shared_recycles.as_deref_mut());
             continue;
         }
         kept_prepared.push_back(req);
@@ -763,7 +801,10 @@ pub(super) fn cancel_pending_forwards(
     let mut kept = Vec::with_capacity(pending_forwards.len());
     for req in pending_forwards.drain(..) {
         if pending_forward_matches_flow(&req, forward_key, reverse_key) {
-            binding.tx_pipeline.pending_fill_frames.push_back(req.desc.addr);
+            binding
+                .tx_pipeline
+                .pending_fill_frames
+                .push_back(req.desc.addr);
             continue;
         }
         kept.push(req);
@@ -771,14 +812,19 @@ pub(super) fn cancel_pending_forwards(
     *pending_forwards = kept;
 }
 
-pub(super) fn recycle_cancelled_prepared(binding: &mut BindingWorker, req: &PreparedTxRequest) {
-    match req.recycle {
-        PreparedTxRecycle::FreeTxFrame => binding.tx_pipeline.free_tx_frames.push_back(req.offset),
-        PreparedTxRecycle::FillOnSlot(slot) if slot == binding.slot => {
-            binding.tx_pipeline.pending_fill_frames.push_back(req.offset);
-        }
-        PreparedTxRecycle::FillOnSlot(_) => binding.tx_pipeline.free_tx_frames.push_back(req.offset),
-    }
+pub(super) fn recycle_cancelled_prepared(
+    binding: &mut BindingWorker,
+    req: &PreparedTxRequest,
+    shared_recycles: Option<&mut Vec<(u32, u64)>>,
+) {
+    recycle_cancelled_prepared_offset_with_shared(
+        &mut binding.tx_pipeline.free_tx_frames,
+        &mut binding.tx_pipeline.pending_fill_frames,
+        shared_recycles,
+        binding.slot,
+        req.recycle,
+        req.offset,
+    );
 }
 
 pub(super) fn tx_request_matches_flow(

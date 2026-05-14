@@ -33,6 +33,7 @@ pub(in crate::afxdp) struct LocalTunnelSourceHandle {
     pub(in crate::afxdp) join: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
 pub(in crate::afxdp) struct BindingPlan {
     pub(in crate::afxdp) status: BindingStatus,
     pub(in crate::afxdp) live: Arc<BindingLiveState>,

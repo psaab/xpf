@@ -207,9 +207,13 @@ fn apply_prepared_recycle(
     recycle: PreparedTxRecycle,
     offset: u64,
 ) {
+    let recycle_offset = recycle.recycle_offset(offset);
     match recycle {
-        PreparedTxRecycle::FreeTxFrame => free_tx_frames.push_back(offset),
-        PreparedTxRecycle::FillOnSlot(slot) => shared_recycles.push((slot, offset)),
+        PreparedTxRecycle::FreeTxFrame => free_tx_frames.push_back(recycle_offset),
+        PreparedTxRecycle::FillOnSlot(slot)
+        | PreparedTxRecycle::FillOnSlotWithOffset { slot, .. } => {
+            shared_recycles.push((slot, recycle_offset));
+        }
     }
 }
 
@@ -349,9 +353,18 @@ mod tests {
             PreparedTxRecycle::FillOnSlot(7),
             42,
         );
+        apply_prepared_recycle(
+            &mut free_tx_frames,
+            &mut shared_recycles,
+            PreparedTxRecycle::FillOnSlotWithOffset {
+                slot: 8,
+                offset: 40,
+            },
+            44,
+        );
 
         assert_eq!(free_tx_frames, VecDeque::from(vec![41]));
-        assert_eq!(shared_recycles, vec![(7, 42)]);
+        assert_eq!(shared_recycles, vec![(7, 42), (8, 40)]);
     }
 
     #[test]

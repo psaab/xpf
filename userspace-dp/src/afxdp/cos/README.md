@@ -16,7 +16,7 @@ where every recent fairness mechanism kill happened (#1236, #1237,
 | `mod.rs` | Re-export hub for the sub-modules. |
 | `admission.rs` | Per-flow admission gates (share / buffer caps, ECN CE-marking) + flow-fair (SFQ) queue promotion. |
 | `builders.rs` | CoS interface-runtime construction. `ensure_cos_interface_runtime` sits on the steady-state enqueue path (every enqueue checks whether the runtime exists for the egress ifindex) and is `#[inline]`. |
-| `cross_binding.rs` | Cross-binding redirect: routes a TX request to the owner binding of the egress, for both `Local` and `Prepared` variants. Has a back-edge to `tx::recycle_prepared_immediately` to release the source UMEM frame after copying. |
+| `cross_binding.rs` | Cross-binding redirect: routes a TX request to the owner binding of the egress, for both `Local` and `Prepared` variants. Prepared redirects release source UMEM frames through the TX shared-recycle accumulator so foreign-slot frames return to their owning fill rings. |
 | `ecn.rs` | ECN CE-marking + Ethernet L3 parser. Threshold constants and the `apply_cos_admission_ecn_policy` gate live in `admission.rs` (a byte-mutation module shouldn't own admission tuning). |
 | `fairness.rs` | #1229 v7 per-bucket TX rate accounting + threshold-gated EWMA. Tracks observed bits/sec per FlowFair bucket so the cap-aware MQFQ selector can compare against `Queue_BW_bps / max(1, active_flow_buckets)`. Single-writer per `FlowFairState`. |
 | `flow_hash.rs` | Per-queue flow-hash machinery for SFQ admission + promotion. |
@@ -42,6 +42,11 @@ mod.rs for further file-level breakdown.
   binding is the same worker that owns the queue's
   `FlowFairState`; therefore `observed_bps` updates and reads do not
   need atomic synchronization.
+- Prepared CoS items may carry frames from another binding in the same
+  shared-UMEM group. Queue overflow, capacity rejection, local
+  demotion, cross-binding copy, and runtime reset must thread the
+  worker shared-recycle accumulator to avoid returning a foreign slot's
+  frame to the current binding.
 - Hot-path constants pinned in code: `RX_BATCH_SIZE = 64`,
   `TX_BATCH_SIZE = 64` (the latter paired with the CoS guarantee
   quantum). See `userspace-dp/README.md`.

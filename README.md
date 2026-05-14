@@ -332,7 +332,7 @@ See `docs/` for detailed design documents:
 - `userspace-dataplane-architecture.md` — Comprehensive userspace AF_XDP dataplane architecture
 - `userspace-debug-map.md` — Active file/function map for userspace forwarding and debugging
 - `xdp-io-uring-userspace-dataplane.md` — Original userspace dataplane design document
-- `shared-umem-plan.md` — Shared UMEM investigation (cross-NIC infeasibility analysis)
+- `shared-umem-plan.md` — Cross-NIC shared UMEM design and validation plan
 - `userspace-ha-validation.md` — HA failover validation procedures
 - `userspace-perf-compare.md` — Throughput benchmarking methodology
 - `userspace-dnat-plan.md` — Destination NAT implementation plan for userspace dataplane

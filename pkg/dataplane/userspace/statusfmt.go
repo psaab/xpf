@@ -44,6 +44,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	boundBindings := 0
 	xskBindings := 0
 	zeroCopyBindings := 0
+	sharedUMEMBindings := 0
 	var rxPackets uint64
 	var validatedPackets uint64
 	var forwardCandidates uint64
@@ -73,6 +74,10 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var directTXPackets uint64
 	var copyTXPackets uint64
 	var inPlaceTXPackets uint64
+	var inPlaceVLANPushDescPackets uint64
+	var inPlaceVLANPopDescPackets uint64
+	var inPlaceVLANPushNoHeadroomPackets uint64
+	var inPlaceL2MemmoveFallbackPackets uint64
 	var directTXNoFrameFallbackPackets uint64
 	var directTXBuildFallbackPackets uint64
 	var directTXDisallowedFallbackPackets uint64
@@ -106,6 +111,9 @@ func FormatStatusSummary(status ProcessStatus) string {
 		if binding.ZeroCopy {
 			zeroCopyBindings++
 		}
+		if binding.SharedUMEMMode != "" && binding.SharedUMEMSocketRole != "" && binding.SharedUMEMDisabledReason == "" {
+			sharedUMEMBindings++
+		}
 		rxPackets += binding.RXPackets
 		validatedPackets += binding.ValidatedPackets
 		forwardCandidates += binding.ForwardCandidatePkts
@@ -135,6 +143,10 @@ func FormatStatusSummary(status ProcessStatus) string {
 		directTXPackets += binding.DirectTXPackets
 		copyTXPackets += binding.CopyTXPackets
 		inPlaceTXPackets += binding.InPlaceTXPackets
+		inPlaceVLANPushDescPackets += binding.InPlaceVLANPushDescPackets
+		inPlaceVLANPopDescPackets += binding.InPlaceVLANPopDescPackets
+		inPlaceVLANPushNoHeadroomPackets += binding.InPlaceVLANPushNoHeadroomPackets
+		inPlaceL2MemmoveFallbackPackets += binding.InPlaceL2MemmoveFallbackPackets
 		directTXNoFrameFallbackPackets += binding.DirectTXNoFrameFallbackPackets
 		directTXBuildFallbackPackets += binding.DirectTXBuildFallbackPackets
 		directTXDisallowedFallbackPackets += binding.DirectTXDisallowedFallbackPackets
@@ -236,6 +248,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  Bound bindings:            %d/%d\n", boundBindings, len(status.Bindings))
 	fmt.Fprintf(&b, "  XSK-registered bindings:   %d/%d\n", xskBindings, len(status.Bindings))
 	fmt.Fprintf(&b, "  Zerocopy bindings:         %d/%d\n", zeroCopyBindings, len(status.Bindings))
+	fmt.Fprintf(&b, "  Shared UMEM bindings:      %d/%d\n", sharedUMEMBindings, len(status.Bindings))
 	fmt.Fprintf(&b, "  Armed queues:              %d/%d\n", armedQueues, len(status.Queues))
 	fmt.Fprintf(&b, "  Ready queues:              %d/%d\n", readyQueues, len(status.Queues))
 	fmt.Fprintf(&b, "  Armed bindings:            %d/%d\n", armedBindings, len(status.Bindings))
@@ -269,6 +282,10 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  Direct TX packets:         %d\n", directTXPackets)
 	fmt.Fprintf(&b, "  Copy-path TX packets:      %d\n", copyTXPackets)
 	fmt.Fprintf(&b, "  In-place TX packets:       %d\n", inPlaceTXPackets)
+	fmt.Fprintf(&b, "  In-place VLAN push desc:   %d\n", inPlaceVLANPushDescPackets)
+	fmt.Fprintf(&b, "  In-place VLAN pop desc:    %d\n", inPlaceVLANPopDescPackets)
+	fmt.Fprintf(&b, "  In-place VLAN no-headroom: %d\n", inPlaceVLANPushNoHeadroomPackets)
+	fmt.Fprintf(&b, "  In-place L2 memmove fb:    %d\n", inPlaceL2MemmoveFallbackPackets)
 	fmt.Fprintf(&b, "  Direct TX no-frame fb:     %d\n", directTXNoFrameFallbackPackets)
 	fmt.Fprintf(&b, "  Direct TX build-none fb:   %d\n", directTXBuildFallbackPackets)
 	fmt.Fprintf(&b, "  Direct TX disallowed fb:   %d\n", directTXDisallowedFallbackPackets)
@@ -552,6 +569,18 @@ func FormatBindings(status ProcessStatus) string {
 		}
 		fmt.Fprintf(&b, "  %-6d %-7d %-8d %-10t %-7t %-7t %-7t %-5t %-8s %-8d %-9d %-9d %-8d %-8d %-8d %-9d %-9d %-9d %-9d %s",
 			binding.Slot, binding.QueueID, binding.WorkerID, binding.Registered, binding.Armed, binding.Ready, binding.Bound, binding.XSKRegistered, mode, binding.Ifindex, binding.RXPackets, binding.TXPackets, binding.DirectTXPackets, binding.CopyTXPackets, binding.InPlaceTXPackets, binding.SessionHits, binding.SlowPathPackets, binding.ExceptionPackets, binding.RouteMissPackets, binding.Interface)
+		if binding.SharedUMEMMode != "" {
+			fmt.Fprintf(&b, " shared=%s", binding.SharedUMEMMode)
+		}
+		if binding.SharedUMEMSocketRole != "" {
+			fmt.Fprintf(&b, " role=%s", binding.SharedUMEMSocketRole)
+		}
+		if binding.SharedUMEMGroup != "" {
+			fmt.Fprintf(&b, " group=%s", binding.SharedUMEMGroup)
+		}
+		if binding.SharedUMEMDisabledReason != "" {
+			fmt.Fprintf(&b, " shared-disabled=%q", binding.SharedUMEMDisabledReason)
+		}
 		if binding.LastError != "" {
 			fmt.Fprintf(&b, " (%s)", binding.LastError)
 		}

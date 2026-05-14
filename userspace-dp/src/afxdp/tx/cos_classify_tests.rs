@@ -256,6 +256,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
         7,
         &mut root,
         Some(5),
+        None,
     ));
 
     let items = root.queues[0]
@@ -373,6 +374,7 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
         7,
         &mut root,
         Some(4),
+        None,
     ));
 
     let queue = &mut root.queues[0];
@@ -480,6 +482,7 @@ fn demote_prepared_cos_queue_to_local_skips_non_exact_queue() {
         7,
         &mut root,
         Some(5),
+        None,
     ));
     assert!(matches!(
         root.queues[0].hot.items.front(),

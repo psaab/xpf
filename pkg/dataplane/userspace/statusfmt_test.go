@@ -40,8 +40,8 @@ func TestFormatStatusSummary(t *testing.T) {
 			{QueueID: 1, Armed: false, Ready: false},
 		},
 		Bindings: []BindingStatus{
-			{Slot: 0, Armed: false, Ready: true, Bound: true, XSKRegistered: true, XSKBindMode: "zerocopy", ZeroCopy: true, RXPackets: 10, ValidatedPackets: 8, ExceptionPackets: 1, TXPackets: 3, TXBytes: 420, TXCompletions: 2, KernelRXDropped: 9, KernelRXInvalidDescs: 1, DirectTXPackets: 2, InPlaceTXPackets: 1, DirectTXNoFrameFallbackPackets: 5, DirectTXBuildFallbackPackets: 6, DebugPendingFillFrames: 10, DebugSpareFillFrames: 11, DebugFreeTXFrames: 12, DebugPendingTXPrepared: 13, DebugPendingTXLocal: 14, DebugOutstandingTX: 15, DebugInFlightRecycles: 16},
-			{Slot: 1, Armed: false, Ready: false, Bound: true, XSKRegistered: false, RXPackets: 5, ValidatedPackets: 4, ExceptionPackets: 2, TXErrors: 1, TXCompletions: 3, KernelRXDropped: 4, KernelRXInvalidDescs: 2, CopyTXPackets: 4, DirectTXDisallowedFallbackPackets: 7, DebugPendingFillFrames: 20, DebugSpareFillFrames: 21, DebugFreeTXFrames: 22, DebugPendingTXPrepared: 23, DebugPendingTXLocal: 24, DebugOutstandingTX: 25, DebugInFlightRecycles: 26},
+			{Slot: 0, Armed: false, Ready: true, Bound: true, XSKRegistered: true, XSKBindMode: "zerocopy", ZeroCopy: true, SharedUMEMMode: "cross-nic", SharedUMEMSocketRole: "owner", SharedUMEMGroup: "cross-nic:w0:ge-0-0-1,ge-0-0-2", RXPackets: 10, ValidatedPackets: 8, ExceptionPackets: 1, TXPackets: 3, TXBytes: 420, TXCompletions: 2, KernelRXDropped: 9, KernelRXInvalidDescs: 1, DirectTXPackets: 2, InPlaceTXPackets: 1, InPlaceVLANPushDescPackets: 8, InPlaceVLANPopDescPackets: 9, InPlaceVLANPushNoHeadroomPackets: 10, InPlaceL2MemmoveFallbackPackets: 11, DirectTXNoFrameFallbackPackets: 5, DirectTXBuildFallbackPackets: 6, DebugPendingFillFrames: 10, DebugSpareFillFrames: 11, DebugFreeTXFrames: 12, DebugPendingTXPrepared: 13, DebugPendingTXLocal: 14, DebugOutstandingTX: 15, DebugInFlightRecycles: 16},
+			{Slot: 1, Armed: false, Ready: false, Bound: true, XSKRegistered: false, RXPackets: 5, ValidatedPackets: 4, ExceptionPackets: 2, TXErrors: 1, TXCompletions: 3, KernelRXDropped: 4, KernelRXInvalidDescs: 2, CopyTXPackets: 4, InPlaceVLANPushDescPackets: 3, InPlaceVLANPopDescPackets: 4, InPlaceVLANPushNoHeadroomPackets: 5, InPlaceL2MemmoveFallbackPackets: 6, DirectTXDisallowedFallbackPackets: 7, DebugPendingFillFrames: 20, DebugSpareFillFrames: 21, DebugFreeTXFrames: 22, DebugPendingTXPrepared: 23, DebugPendingTXLocal: 24, DebugOutstandingTX: 25, DebugInFlightRecycles: 26},
 		},
 		RecentExceptions: []ExceptionStatus{
 			{Timestamp: now, Slot: 1, QueueID: 0, Interface: "ge-0-0-2", Reason: "metadata_parse", PacketLength: 128},
@@ -64,6 +64,7 @@ func TestFormatStatusSummary(t *testing.T) {
 		"Bound bindings:            2/2",
 		"XSK-registered bindings:   1/2",
 		"Zerocopy bindings:         1/2",
+		"Shared UMEM bindings:      1/2",
 		"Armed queues:              0/2",
 		"Ready queues:              1/2",
 		"Armed bindings:            0/2",
@@ -80,6 +81,10 @@ func TestFormatStatusSummary(t *testing.T) {
 		"Direct TX packets:         2",
 		"Copy-path TX packets:      4",
 		"In-place TX packets:       1",
+		"In-place VLAN push desc:   11",
+		"In-place VLAN pop desc:    13",
+		"In-place VLAN no-headroom: 15",
+		"In-place L2 memmove fb:    17",
 		"Direct TX no-frame fb:     5",
 		"Direct TX build-none fb:   6",
 		"Direct TX disallowed fb:   7",
@@ -112,6 +117,27 @@ func TestFormatStatusSummaryReportsStandbyArmedRole(t *testing.T) {
 	out := FormatStatusSummary(status)
 	if !strings.Contains(out, "Local HA forwarding role:  standby (armed for failover)") {
 		t.Fatalf("summary missing standby armed role:\n%s", out)
+	}
+}
+
+func TestFormatStatusSummaryDoesNotCountDisabledSharedUMEMFallback(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{
+				SharedUMEMMode:           "cross-nic",
+				SharedUMEMSocketRole:     "owner",
+				SharedUMEMDisabledReason: "shared UMEM bind failed; using private UMEM",
+			},
+			{
+				SharedUMEMMode:       "cross-nic",
+				SharedUMEMSocketRole: "secondary",
+			},
+		},
+	}
+
+	out := FormatStatusSummary(status)
+	if !strings.Contains(out, "Shared UMEM bindings:      1/2") {
+		t.Fatalf("summary counted disabled shared UMEM fallback:\n%s", out)
 	}
 }
 
@@ -305,7 +331,7 @@ func TestFormatBindings(t *testing.T) {
 			{QueueID: 0, WorkerID: 0, Interfaces: []string{"ge-0-0-1", "ge-0-0-2"}, Registered: true, Armed: false, Ready: false},
 		},
 		Bindings: []BindingStatus{
-			{Slot: 0, QueueID: 0, WorkerID: 0, Registered: true, Armed: false, Ready: false, Bound: true, XSKRegistered: true, XSKBindMode: "zerocopy", ZeroCopy: true, Ifindex: 5, Interface: "ge-0-0-1", RXPackets: 99, TXPackets: 7, DirectTXPackets: 5, CopyTXPackets: 1, InPlaceTXPackets: 1, ExceptionPackets: 3},
+			{Slot: 0, QueueID: 0, WorkerID: 0, Registered: true, Armed: false, Ready: false, Bound: true, XSKRegistered: true, XSKBindMode: "zerocopy", ZeroCopy: true, Ifindex: 5, Interface: "ge-0-0-1", SharedUMEMMode: "cross-nic", SharedUMEMSocketRole: "owner", SharedUMEMGroup: "cross-nic:w0:ge-0-0-1,ge-0-0-2", RXPackets: 99, TXPackets: 7, DirectTXPackets: 5, CopyTXPackets: 1, InPlaceTXPackets: 1, ExceptionPackets: 3},
 			{Slot: 1, QueueID: 0, WorkerID: 0, Registered: true, Armed: false, Ready: false, Bound: true, XSKRegistered: false, Ifindex: 6, Interface: "ge-0-0-2", ExceptionPackets: 1, LastError: "xsk map update failed"},
 		},
 		RecentExceptions: []ExceptionStatus{
@@ -327,6 +353,9 @@ func TestFormatBindings(t *testing.T) {
 		"DirTx",
 		"CopyTx",
 		"InPlTx",
+		"shared=cross-nic",
+		"role=owner",
+		"group=cross-nic:w0:ge-0-0-1,ge-0-0-2",
 		"xsk map update failed",
 		"Recent userspace exceptions:",
 		"fib_generation_mismatch",

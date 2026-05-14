@@ -676,6 +676,10 @@ type BindingStatus struct {
 	XSKBindMode                       string    `json:"xsk_bind_mode,omitempty"`
 	ZeroCopy                          bool      `json:"zero_copy,omitempty"`
 	SocketFD                          int       `json:"socket_fd,omitempty"`
+	SharedUMEMMode                    string    `json:"shared_umem_mode,omitempty"`
+	SharedUMEMGroup                   string    `json:"shared_umem_group,omitempty"`
+	SharedUMEMSocketRole              string    `json:"shared_umem_socket_role,omitempty"`
+	SharedUMEMDisabledReason          string    `json:"shared_umem_disabled_reason,omitempty"`
 	RXPackets                         uint64    `json:"rx_packets,omitempty"`
 	RXBytes                           uint64    `json:"rx_bytes,omitempty"`
 	RXBatches                         uint64    `json:"rx_batches,omitempty"`
@@ -745,6 +749,10 @@ type BindingStatus struct {
 	DirectTXPackets                   uint64    `json:"direct_tx_packets,omitempty"`
 	CopyTXPackets                     uint64    `json:"copy_tx_packets,omitempty"`
 	InPlaceTXPackets                  uint64    `json:"in_place_tx_packets,omitempty"`
+	InPlaceVLANPushDescPackets        uint64    `json:"in_place_vlan_push_desc_packets,omitempty"`
+	InPlaceVLANPopDescPackets         uint64    `json:"in_place_vlan_pop_desc_packets,omitempty"`
+	InPlaceVLANPushNoHeadroomPackets  uint64    `json:"in_place_vlan_push_no_headroom_packets,omitempty"`
+	InPlaceL2MemmoveFallbackPackets   uint64    `json:"in_place_l2_memmove_fallback_packets,omitempty"`
 	DirectTXNoFrameFallbackPackets    uint64    `json:"direct_tx_no_frame_fallback_packets,omitempty"`
 	DirectTXBuildFallbackPackets      uint64    `json:"direct_tx_build_fallback_packets,omitempty"`
 	DirectTXDisallowedFallbackPackets uint64    `json:"direct_tx_disallowed_fallback_packets,omitempty"`
