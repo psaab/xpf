@@ -90,6 +90,8 @@ mod session_glue;
 mod cos;
 #[path = "shared_ops.rs"]
 mod shared_ops;
+#[path = "shared_umem.rs"]
+mod shared_umem;
 #[cfg(test)]
 #[path = "test_fixtures.rs"]
 mod test_fixtures;
@@ -105,13 +107,14 @@ mod umem;
 #[cfg(test)]
 use self::bind::bind_flag_candidates_for_driver;
 use self::bind::{
-    AfXdpBindStrategy, binding_frame_count_for_driver, ifinfo_from_binding, interface_driver_name,
-    open_binding_worker_rings, preferred_bind_strategy, reserved_tx_frames_for_driver,
-    umem_ring_size,
+    AfXdpBindStrategy, XskSocketRole, binding_frame_count_for_driver, ifinfo_from_binding,
+    interface_driver_name, open_binding_worker_rings, preferred_bind_strategy,
+    reserved_tx_frames_for_driver, umem_ring_size,
 };
 #[cfg(test)]
 use self::bind::{
-    AfXdpBinder, alternate_bind_strategy, bind_strategy_for_driver, binder_for_strategy,
+    AfXdpBinder, alternate_bind_strategy, bind_flag_candidates_for_socket_role,
+    bind_strategy_for_driver, binder_for_strategy, describe_bind_flags,
     shared_umem_group_key_for_device,
 };
 use self::bpf_map::*;
@@ -143,6 +146,7 @@ use self::sharded_neighbor::ShardedNeighborMap;
 use self::rst::*;
 use self::session_glue::*;
 use self::shared_ops::*;
+use self::shared_umem::*;
 use self::tunnel::*;
 use self::mpsc_inbox::MpscInbox;
 use self::tx::*;
@@ -535,5 +539,3 @@ fn find_target_binding_mut<'a>(
     )?;
     binding_by_index_mut(left, current_index, ingress_binding, right, target_index)
 }
-
-

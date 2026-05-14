@@ -465,13 +465,14 @@ type DPDKPort struct {
 
 // UserspaceConfig holds separate-process userspace dataplane configuration.
 type UserspaceConfig struct {
-	Binary        string `json:"binary"`                 // helper process path
-	ControlSocket string `json:"control_socket"`         // unix control socket path
-	EventSocket   string `json:"event_socket,omitempty"` // event stream socket path (auto-derived if empty)
-	StateFile     string `json:"state_file"`             // helper state file path
-	Workers       int    `json:"workers"`                // worker thread count
-	RingEntries   int    `json:"ring_entries"`           // planned AF_XDP ring entries
-	PollMode      string `json:"poll_mode"`              // "busy-poll" (default) or "interrupt"
+	Binary        string            `json:"binary"`                 // helper process path
+	ControlSocket string            `json:"control_socket"`         // unix control socket path
+	EventSocket   string            `json:"event_socket,omitempty"` // event stream socket path (auto-derived if empty)
+	StateFile     string            `json:"state_file"`             // helper state file path
+	Workers       int               `json:"workers"`                // worker thread count
+	RingEntries   int               `json:"ring_entries"`           // planned AF_XDP ring entries
+	PollMode      string            `json:"poll_mode"`              // "busy-poll" (default) or "interrupt"
+	SharedUMEM    *SharedUMEMConfig `json:"shared_umem,omitempty"`
 
 	// RSSIndirectionDisabled, when true, disables D3 RSS indirection
 	// reshaping (#785 / #797). Default is enabled — operators opt out
@@ -541,6 +542,14 @@ type UserspaceConfig struct {
 	// these values dynamically and writes are a waste.
 	CoalescenceRXUsecs int `json:"coalescence_rx_usecs,omitempty"`
 	CoalescenceTXUsecs int `json:"coalescence_tx_usecs,omitempty"`
+}
+
+// SharedUMEMConfig is the operator-gated AF_XDP shared-UMEM experiment
+// contract passed through to the userspace helper.
+type SharedUMEMConfig struct {
+	Mode           string                 `json:"mode,omitempty"`
+	Interfaces     []string               `json:"interfaces,omitempty"`
+	Phase0Artifact map[string]interface{} `json:"phase0_artifact,omitempty"`
 }
 
 // RootAuthConfig holds root-authentication settings.
