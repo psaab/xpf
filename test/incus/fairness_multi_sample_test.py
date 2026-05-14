@@ -767,6 +767,33 @@ class FairnessMultiSampleTest(unittest.TestCase):
         ):
             fairness_equal_flow_capture.split_scrapes(raw)
 
+    def test_equal_flow_capture_fails_on_nested_begin_marker(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_begin timestamp=100
+            xpf_fairness_equal_flow_estimate_valid{ifindex="5",queue_id="6"} 1
+            # xpf_fairness_scrape_begin timestamp=101
+            # xpf_fairness_scrape_end timestamp=101
+            """
+        )
+        with self.assertRaisesRegex(
+            fairness_equal_flow_capture.CaptureError,
+            "scrape 100 missing end marker before scrape 101",
+        ):
+            fairness_equal_flow_capture.split_scrapes(raw)
+
+    def test_equal_flow_capture_fails_on_end_without_begin_marker(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_end timestamp=100
+            """
+        )
+        with self.assertRaisesRegex(
+            fairness_equal_flow_capture.CaptureError,
+            "scrape end marker without begin marker at 100",
+        ):
+            fairness_equal_flow_capture.split_scrapes(raw)
+
     def test_equal_flow_capture_fails_when_sampled_workers_is_fractional(self) -> None:
         raw = textwrap.dedent(
             """\

@@ -402,58 +402,58 @@ type UserspaceCapabilities struct {
 }
 
 type ProcessStatus struct {
-	PID                    int                               `json:"pid"`
-	StartedAt              time.Time                         `json:"started_at"`
-	ControlSocket          string                            `json:"control_socket"`
-	StateFile              string                            `json:"state_file"`
-	Workers                int                               `json:"workers"`
-	RingEntries            int                               `json:"ring_entries"`
-	HelperMode             string                            `json:"helper_mode"`
-	IOUringPlanned         bool                              `json:"io_uring_planned"`
-	IOUringActive          bool                              `json:"io_uring_active,omitempty"`
-	IOUringMode            string                            `json:"io_uring_mode,omitempty"`
-	IOUringLastError       string                            `json:"io_uring_last_error,omitempty"`
-	Enabled                bool                              `json:"enabled"`
-	ForwardingArmed        bool                              `json:"forwarding_armed,omitempty"`
-	Capabilities           UserspaceCapabilities             `json:"capabilities"`
-	LastSnapshotGeneration uint64                            `json:"last_snapshot_generation"`
-	LastFIBGeneration      uint32                            `json:"last_fib_generation,omitempty"`
-	LastSnapshotAt         time.Time                         `json:"last_snapshot_at,omitempty"`
-	InterfaceAddresses     int                               `json:"interface_addresses,omitempty"`
-	NeighborEntries        int                               `json:"neighbor_entries,omitempty"`
-	NeighborGeneration     uint64                            `json:"neighbor_generation,omitempty"`
-	RouteEntries           int                               `json:"route_entries,omitempty"`
-	WorkerHeartbeats       []time.Time                       `json:"worker_heartbeats,omitempty"`
+	PID                    int                   `json:"pid"`
+	StartedAt              time.Time             `json:"started_at"`
+	ControlSocket          string                `json:"control_socket"`
+	StateFile              string                `json:"state_file"`
+	Workers                int                   `json:"workers"`
+	RingEntries            int                   `json:"ring_entries"`
+	HelperMode             string                `json:"helper_mode"`
+	IOUringPlanned         bool                  `json:"io_uring_planned"`
+	IOUringActive          bool                  `json:"io_uring_active,omitempty"`
+	IOUringMode            string                `json:"io_uring_mode,omitempty"`
+	IOUringLastError       string                `json:"io_uring_last_error,omitempty"`
+	Enabled                bool                  `json:"enabled"`
+	ForwardingArmed        bool                  `json:"forwarding_armed,omitempty"`
+	Capabilities           UserspaceCapabilities `json:"capabilities"`
+	LastSnapshotGeneration uint64                `json:"last_snapshot_generation"`
+	LastFIBGeneration      uint32                `json:"last_fib_generation,omitempty"`
+	LastSnapshotAt         time.Time             `json:"last_snapshot_at,omitempty"`
+	InterfaceAddresses     int                   `json:"interface_addresses,omitempty"`
+	NeighborEntries        int                   `json:"neighbor_entries,omitempty"`
+	NeighborGeneration     uint64                `json:"neighbor_generation,omitempty"`
+	RouteEntries           int                   `json:"route_entries,omitempty"`
+	WorkerHeartbeats       []time.Time           `json:"worker_heartbeats,omitempty"`
 	// #869: per-worker busy/idle runtime telemetry.
-	WorkerRuntime          []WorkerRuntimeStatus             `json:"worker_runtime,omitempty"`
-	HAGroups               []HAGroupStatus                   `json:"ha_groups,omitempty"`
-	Fabrics                []FabricSnapshot                  `json:"fabrics,omitempty"`
-	Queues                 []QueueStatus                     `json:"queues,omitempty"`
-	Bindings               []BindingStatus                   `json:"bindings,omitempty"`
+	WorkerRuntime []WorkerRuntimeStatus `json:"worker_runtime,omitempty"`
+	HAGroups      []HAGroupStatus       `json:"ha_groups,omitempty"`
+	Fabrics       []FabricSnapshot      `json:"fabrics,omitempty"`
+	Queues        []QueueStatus         `json:"queues,omitempty"`
+	Bindings      []BindingStatus       `json:"bindings,omitempty"`
 	// #802: focused per-binding ring-pressure view. Projected from
 	// Bindings by the Rust helper; parallel rather than replacement.
-	PerBinding             []BindingCountersSnapshot         `json:"per_binding,omitempty"`
+	PerBinding []BindingCountersSnapshot `json:"per_binding,omitempty"`
 	// #1249: bounded low-frequency diagnostic map from active flow-cache
 	// entries to the worker/RX queue that currently owns them. This is
 	// status/debug data only, not a production metric or scheduler input.
-	FlowWorkerMap          []FlowWorkerStatus                `json:"flow_worker_map,omitempty"`
-	FlowWorkerMapTruncated bool                              `json:"flow_worker_map_truncated,omitempty"`
+	FlowWorkerMap          []FlowWorkerStatus `json:"flow_worker_map,omitempty"`
+	FlowWorkerMapTruncated bool               `json:"flow_worker_map_truncated,omitempty"`
 	// #1248: per-CoS-queue active flow distribution by egress ifindex,
 	// queue, and worker. This is the class-specific {a_i} source for
 	// mixed-workload fairness diagnostics.
-	CoSActiveFlowCounts          []CoSActiveFlowCountStatus `json:"cos_active_flow_counts,omitempty"`
-	CoSActiveFlowCountsTruncated bool                       `json:"cos_active_flow_counts_truncated,omitempty"`
-	RecentSessionDeltas    []SessionDeltaInfo                `json:"recent_session_deltas,omitempty"`
-	RecentExceptions       []ExceptionStatus                 `json:"recent_exceptions,omitempty"`
-	CoSInterfaces          []CoSInterfaceStatus              `json:"cos_interfaces,omitempty"`
-	FilterTermCounters     []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
-	LastResolution         *PacketResolution                 `json:"last_resolution,omitempty"`
-	SlowPath               SlowPathStatus                    `json:"slow_path,omitempty"`
-	LastCacheFlushAt       uint64                            `json:"last_cache_flush_at,omitempty"` // monotonic secs (#312)
-	DataplaneMode          string                            `json:"dataplane_mode,omitempty"`      // Current active mode: "ebpf_only", "userspace_compat", "userspace_strict"
-	ConfiguredMode         string                            `json:"configured_mode,omitempty"`     // Desired mode from config
-	EntryPrograms          map[int]string                    `json:"entry_programs,omitempty"`      // ifindex -> attached XDP program name
-	FallbackCounters       map[string]uint64                 `json:"fallback_counters,omitempty"`   // reason_name -> count
+	CoSActiveFlowCounts          []CoSActiveFlowCountStatus        `json:"cos_active_flow_counts,omitempty"`
+	CoSActiveFlowCountsTruncated bool                              `json:"cos_active_flow_counts_truncated,omitempty"`
+	RecentSessionDeltas          []SessionDeltaInfo                `json:"recent_session_deltas,omitempty"`
+	RecentExceptions             []ExceptionStatus                 `json:"recent_exceptions,omitempty"`
+	CoSInterfaces                []CoSInterfaceStatus              `json:"cos_interfaces,omitempty"`
+	FilterTermCounters           []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
+	LastResolution               *PacketResolution                 `json:"last_resolution,omitempty"`
+	SlowPath                     SlowPathStatus                    `json:"slow_path,omitempty"`
+	LastCacheFlushAt             uint64                            `json:"last_cache_flush_at,omitempty"` // monotonic secs (#312)
+	DataplaneMode                string                            `json:"dataplane_mode,omitempty"`      // Current active mode: "ebpf_only", "userspace_compat", "userspace_strict"
+	ConfiguredMode               string                            `json:"configured_mode,omitempty"`     // Desired mode from config
+	EntryPrograms                map[int]string                    `json:"entry_programs,omitempty"`      // ifindex -> attached XDP program name
+	FallbackCounters             map[string]uint64                 `json:"fallback_counters,omitempty"`   // reason_name -> count
 }
 
 type CoSInterfaceStatus struct {
@@ -504,24 +504,24 @@ type CoSQueueStatus struct {
 	// >= 2^24 ns (~16 ms).
 	ActiveFlowBucketsPeak uint64   `json:"active_flow_buckets_peak,omitempty"`
 	FlowFair              bool     `json:"flow_fair,omitempty"`
-	DrainLatencyHist     []uint64 `json:"drain_latency_hist,omitempty"`
-	DrainInvocations     uint64   `json:"drain_invocations,omitempty"`
-	DrainNoopInvocations uint64   `json:"drain_noop_invocations,omitempty"`
-	RedirectAcquireHist  []uint64 `json:"redirect_acquire_hist,omitempty"`
-	OwnerPPS             uint64   `json:"owner_pps,omitempty"`
-	PeerPPS              uint64   `json:"peer_pps,omitempty"`
+	DrainLatencyHist      []uint64 `json:"drain_latency_hist,omitempty"`
+	DrainInvocations      uint64   `json:"drain_invocations,omitempty"`
+	DrainNoopInvocations  uint64   `json:"drain_noop_invocations,omitempty"`
+	RedirectAcquireHist   []uint64 `json:"redirect_acquire_hist,omitempty"`
+	OwnerPPS              uint64   `json:"owner_pps,omitempty"`
+	PeerPPS               uint64   `json:"peer_pps,omitempty"`
 	// #760 overshoot-hunt instrumentation. DrainSentBytes /
 	// DrainParkRootTokens / DrainParkQueueTokens are queue-scoped.
 	// PostDrainBackupBytes is binding-scoped (same row as
 	// OwnerPPS/PeerPPS). See Rust `CoSQueueStatus` for field
 	// semantics and write-site locations.
-	DrainSentBytes        uint64 `json:"drain_sent_bytes,omitempty"`
-	DrainParkRootTokens   uint64 `json:"drain_park_root_tokens,omitempty"`
-	DrainParkQueueTokens  uint64 `json:"drain_park_queue_tokens,omitempty"`
-	PostDrainBackupBytes                uint64 `json:"post_drain_backup_bytes,omitempty"`
-	DrainSentBytesShapedUnconditional   uint64 `json:"drain_sent_bytes_shaped_unconditional,omitempty"`
-	PostDrainBackupCosDrops             uint64 `json:"post_drain_backup_cos_drops,omitempty"`
-	PostDrainBackupCosDropBytes         uint64 `json:"post_drain_backup_cos_drop_bytes,omitempty"`
+	DrainSentBytes                    uint64 `json:"drain_sent_bytes,omitempty"`
+	DrainParkRootTokens               uint64 `json:"drain_park_root_tokens,omitempty"`
+	DrainParkQueueTokens              uint64 `json:"drain_park_queue_tokens,omitempty"`
+	PostDrainBackupBytes              uint64 `json:"post_drain_backup_bytes,omitempty"`
+	DrainSentBytesShapedUnconditional uint64 `json:"drain_sent_bytes_shaped_unconditional,omitempty"`
+	PostDrainBackupCosDrops           uint64 `json:"post_drain_backup_cos_drops,omitempty"`
+	PostDrainBackupCosDropBytes       uint64 `json:"post_drain_backup_cos_drop_bytes,omitempty"`
 }
 
 type FirewallFilterTermCounterStatus struct {
@@ -663,113 +663,113 @@ type QueueStatus struct {
 }
 
 type BindingStatus struct {
-	Slot                              uint32    `json:"slot"`
-	QueueID                           uint32    `json:"queue_id"`
-	WorkerID                          uint32    `json:"worker_id"`
-	Interface                         string    `json:"interface,omitempty"`
-	Ifindex                           int       `json:"ifindex,omitempty"`
-	Registered                        bool      `json:"registered"`
-	Armed                             bool      `json:"armed"`
-	Ready                             bool      `json:"ready"`
-	Bound                             bool      `json:"bound"`
-	XSKRegistered                     bool      `json:"xsk_registered"`
-	XSKBindMode                       string    `json:"xsk_bind_mode,omitempty"`
-	ZeroCopy                          bool      `json:"zero_copy,omitempty"`
-	SocketFD                          int       `json:"socket_fd,omitempty"`
-	SharedUMEMMode                    string    `json:"shared_umem_mode,omitempty"`
-	SharedUMEMGroup                   string    `json:"shared_umem_group,omitempty"`
-	SharedUMEMSocketRole              string    `json:"shared_umem_socket_role,omitempty"`
-	SharedUMEMDisabledReason          string    `json:"shared_umem_disabled_reason,omitempty"`
-	RXPackets                         uint64    `json:"rx_packets,omitempty"`
-	RXBytes                           uint64    `json:"rx_bytes,omitempty"`
-	RXBatches                         uint64    `json:"rx_batches,omitempty"`
-	RXWakeups                         uint64    `json:"rx_wakeups,omitempty"`
-	MetadataPackets                   uint64    `json:"metadata_packets,omitempty"`
-	MetadataErrors                    uint64    `json:"metadata_errors,omitempty"`
-	ValidatedPackets                  uint64    `json:"validated_packets,omitempty"`
-	ValidatedBytes                    uint64    `json:"validated_bytes,omitempty"`
-	LocalDeliveryPackets              uint64    `json:"local_delivery_packets,omitempty"`
-	ForwardCandidatePkts              uint64    `json:"forward_candidate_packets,omitempty"`
-	RouteMissPackets                  uint64    `json:"route_miss_packets,omitempty"`
-	NeighborMissPackets               uint64    `json:"neighbor_miss_packets,omitempty"`
-	DiscardRoutePackets               uint64    `json:"discard_route_packets,omitempty"`
-	NextTablePackets                  uint64    `json:"next_table_packets,omitempty"`
-	ExceptionPackets                  uint64    `json:"exception_packets,omitempty"`
-	ConfigGenMismatches               uint64    `json:"config_gen_mismatches,omitempty"`
-	FIBGenMismatches                  uint64    `json:"fib_gen_mismatches,omitempty"`
-	UnsupportedPackets                uint64    `json:"unsupported_packets,omitempty"`
-	FlowCacheHits                     uint64    `json:"flow_cache_hits,omitempty"`
-	FlowCacheMisses                   uint64    `json:"flow_cache_misses,omitempty"`
-	FlowCacheEvictions                uint64    `json:"flow_cache_evictions,omitempty"`
+	Slot                     uint32 `json:"slot"`
+	QueueID                  uint32 `json:"queue_id"`
+	WorkerID                 uint32 `json:"worker_id"`
+	Interface                string `json:"interface,omitempty"`
+	Ifindex                  int    `json:"ifindex,omitempty"`
+	Registered               bool   `json:"registered"`
+	Armed                    bool   `json:"armed"`
+	Ready                    bool   `json:"ready"`
+	Bound                    bool   `json:"bound"`
+	XSKRegistered            bool   `json:"xsk_registered"`
+	XSKBindMode              string `json:"xsk_bind_mode,omitempty"`
+	ZeroCopy                 bool   `json:"zero_copy,omitempty"`
+	SocketFD                 int    `json:"socket_fd,omitempty"`
+	SharedUMEMMode           string `json:"shared_umem_mode,omitempty"`
+	SharedUMEMGroup          string `json:"shared_umem_group,omitempty"`
+	SharedUMEMSocketRole     string `json:"shared_umem_socket_role,omitempty"`
+	SharedUMEMDisabledReason string `json:"shared_umem_disabled_reason,omitempty"`
+	RXPackets                uint64 `json:"rx_packets,omitempty"`
+	RXBytes                  uint64 `json:"rx_bytes,omitempty"`
+	RXBatches                uint64 `json:"rx_batches,omitempty"`
+	RXWakeups                uint64 `json:"rx_wakeups,omitempty"`
+	MetadataPackets          uint64 `json:"metadata_packets,omitempty"`
+	MetadataErrors           uint64 `json:"metadata_errors,omitempty"`
+	ValidatedPackets         uint64 `json:"validated_packets,omitempty"`
+	ValidatedBytes           uint64 `json:"validated_bytes,omitempty"`
+	LocalDeliveryPackets     uint64 `json:"local_delivery_packets,omitempty"`
+	ForwardCandidatePkts     uint64 `json:"forward_candidate_packets,omitempty"`
+	RouteMissPackets         uint64 `json:"route_miss_packets,omitempty"`
+	NeighborMissPackets      uint64 `json:"neighbor_miss_packets,omitempty"`
+	DiscardRoutePackets      uint64 `json:"discard_route_packets,omitempty"`
+	NextTablePackets         uint64 `json:"next_table_packets,omitempty"`
+	ExceptionPackets         uint64 `json:"exception_packets,omitempty"`
+	ConfigGenMismatches      uint64 `json:"config_gen_mismatches,omitempty"`
+	FIBGenMismatches         uint64 `json:"fib_gen_mismatches,omitempty"`
+	UnsupportedPackets       uint64 `json:"unsupported_packets,omitempty"`
+	FlowCacheHits            uint64 `json:"flow_cache_hits,omitempty"`
+	FlowCacheMisses          uint64 `json:"flow_cache_misses,omitempty"`
+	FlowCacheEvictions       uint64 `json:"flow_cache_evictions,omitempty"`
 	// #918: collision-driven subset of flow_cache_evictions (full-set
 	// LRU displacement vs stale-on-lookup eviction). Acceptance gate
 	// watches collision_evictions / hits under load.
-	FlowCacheCollisionEvictions       uint64    `json:"flow_cache_collision_evictions,omitempty"`
+	FlowCacheCollisionEvictions uint64 `json:"flow_cache_collision_evictions,omitempty"`
 	// #1219: snapshot count of distinct active flows on this binding's
 	// flow_cache, refreshed at the helper's ~65ms debug-state tick. The
 	// fairness harness reads this via the xpf_userspace_binding_active_flow_count
 	// Prometheus metric to compute {a_i} for the structural CoV gate
 	// per docs/fairness-regimes.md.
-	ActiveFlowCount                   uint32    `json:"active_flow_count,omitempty"`
+	ActiveFlowCount uint32 `json:"active_flow_count,omitempty"`
 	// #941 Work item D / #943: V_min throttle counters. Hard-cap is
 	// the escape-hatch firing when fairness brake (regular throttle)
 	// has thrown V_MIN_CONSECUTIVE_SKIP_HARD_CAP back-to-back times.
 	// Together: VMinThrottles = "fairness brake fired",
 	// VMinThrottleHardCapOverrides = "brake too tight, escape hatch
 	// rescued throughput". Ratio is the LAG_THRESHOLD diagnostic.
-	VMinThrottleHardCapOverrides      uint64    `json:"v_min_throttle_hard_cap_overrides,omitempty"`
-	VMinThrottles                     uint64    `json:"v_min_throttles,omitempty"`
-	SessionHits                       uint64    `json:"session_hits,omitempty"`
-	SessionMisses                     uint64    `json:"session_misses,omitempty"`
-	SessionCreates                    uint64    `json:"session_creates,omitempty"`
-	SessionExpires                    uint64    `json:"session_expires,omitempty"`
-	SessionDeltaPending               uint64    `json:"session_delta_pending,omitempty"`
-	SessionDeltaGenerated             uint64    `json:"session_delta_generated,omitempty"`
-	SessionDeltaDropped               uint64    `json:"session_delta_dropped,omitempty"`
-	SessionDeltaDrained               uint64    `json:"session_delta_drained,omitempty"`
-	PolicyDeniedPackets               uint64    `json:"policy_denied_packets,omitempty"`
-	ScreenDrops                       uint64    `json:"screen_drops,omitempty"`
-	SNATPackets                       uint64    `json:"snat_packets,omitempty"`
-	DNATPackets                       uint64    `json:"dnat_packets,omitempty"`
-	SlowPathPackets                   uint64    `json:"slow_path_packets,omitempty"`
-	SlowPathBytes                     uint64    `json:"slow_path_bytes,omitempty"`
-	SlowPathLocalDeliveryPackets      uint64    `json:"slow_path_local_delivery_packets,omitempty"`
-	SlowPathMissingNeighborPackets    uint64    `json:"slow_path_missing_neighbor_packets,omitempty"`
-	SlowPathNoRoutePackets            uint64    `json:"slow_path_no_route_packets,omitempty"`
-	SlowPathNextTablePackets          uint64    `json:"slow_path_next_table_packets,omitempty"`
-	SlowPathForwardBuildPackets       uint64    `json:"slow_path_forward_build_packets,omitempty"`
-	SlowPathDrops                     uint64    `json:"slow_path_drops,omitempty"`
-	SlowPathRateLimited               uint64    `json:"slow_path_rate_limited,omitempty"`
-	KernelRXDropped                   uint64    `json:"kernel_rx_dropped,omitempty"`
-	KernelRXInvalidDescs              uint64    `json:"kernel_rx_invalid_descs,omitempty"`
-	TXPackets                         uint64    `json:"tx_packets,omitempty"`
-	TXBytes                           uint64    `json:"tx_bytes,omitempty"`
-	TXErrors                          uint64    `json:"tx_errors,omitempty"`
-	TXSharedRecycleUnknownSlotDrops   uint64    `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
-	TXCompletions                     uint64    `json:"tx_completions,omitempty"`
-	DirectTXPackets                   uint64    `json:"direct_tx_packets,omitempty"`
-	CopyTXPackets                     uint64    `json:"copy_tx_packets,omitempty"`
-	InPlaceTXPackets                  uint64    `json:"in_place_tx_packets,omitempty"`
-	InPlaceVLANPushDescPackets        uint64    `json:"in_place_vlan_push_desc_packets,omitempty"`
-	InPlaceVLANPopDescPackets         uint64    `json:"in_place_vlan_pop_desc_packets,omitempty"`
-	InPlaceVLANPushNoHeadroomPackets  uint64    `json:"in_place_vlan_push_no_headroom_packets,omitempty"`
-	InPlaceL2MemmoveFallbackPackets   uint64    `json:"in_place_l2_memmove_fallback_packets,omitempty"`
-	DirectTXNoFrameFallbackPackets    uint64    `json:"direct_tx_no_frame_fallback_packets,omitempty"`
-	DirectTXBuildFallbackPackets      uint64    `json:"direct_tx_build_fallback_packets,omitempty"`
-	DirectTXDisallowedFallbackPackets uint64    `json:"direct_tx_disallowed_fallback_packets,omitempty"`
-	DebugPendingFillFrames            uint32    `json:"debug_pending_fill_frames,omitempty"`
-	DebugSpareFillFrames              uint32    `json:"debug_spare_fill_frames,omitempty"`
-	DebugFreeTXFrames                 uint32    `json:"debug_free_tx_frames,omitempty"`
-	DebugPendingTXPrepared            uint32    `json:"debug_pending_tx_prepared,omitempty"`
-	DebugPendingTXLocal               uint32    `json:"debug_pending_tx_local,omitempty"`
-	DebugOutstandingTX                uint32    `json:"debug_outstanding_tx,omitempty"`
+	VMinThrottleHardCapOverrides      uint64 `json:"v_min_throttle_hard_cap_overrides,omitempty"`
+	VMinThrottles                     uint64 `json:"v_min_throttles,omitempty"`
+	SessionHits                       uint64 `json:"session_hits,omitempty"`
+	SessionMisses                     uint64 `json:"session_misses,omitempty"`
+	SessionCreates                    uint64 `json:"session_creates,omitempty"`
+	SessionExpires                    uint64 `json:"session_expires,omitempty"`
+	SessionDeltaPending               uint64 `json:"session_delta_pending,omitempty"`
+	SessionDeltaGenerated             uint64 `json:"session_delta_generated,omitempty"`
+	SessionDeltaDropped               uint64 `json:"session_delta_dropped,omitempty"`
+	SessionDeltaDrained               uint64 `json:"session_delta_drained,omitempty"`
+	PolicyDeniedPackets               uint64 `json:"policy_denied_packets,omitempty"`
+	ScreenDrops                       uint64 `json:"screen_drops,omitempty"`
+	SNATPackets                       uint64 `json:"snat_packets,omitempty"`
+	DNATPackets                       uint64 `json:"dnat_packets,omitempty"`
+	SlowPathPackets                   uint64 `json:"slow_path_packets,omitempty"`
+	SlowPathBytes                     uint64 `json:"slow_path_bytes,omitempty"`
+	SlowPathLocalDeliveryPackets      uint64 `json:"slow_path_local_delivery_packets,omitempty"`
+	SlowPathMissingNeighborPackets    uint64 `json:"slow_path_missing_neighbor_packets,omitempty"`
+	SlowPathNoRoutePackets            uint64 `json:"slow_path_no_route_packets,omitempty"`
+	SlowPathNextTablePackets          uint64 `json:"slow_path_next_table_packets,omitempty"`
+	SlowPathForwardBuildPackets       uint64 `json:"slow_path_forward_build_packets,omitempty"`
+	SlowPathDrops                     uint64 `json:"slow_path_drops,omitempty"`
+	SlowPathRateLimited               uint64 `json:"slow_path_rate_limited,omitempty"`
+	KernelRXDropped                   uint64 `json:"kernel_rx_dropped,omitempty"`
+	KernelRXInvalidDescs              uint64 `json:"kernel_rx_invalid_descs,omitempty"`
+	TXPackets                         uint64 `json:"tx_packets,omitempty"`
+	TXBytes                           uint64 `json:"tx_bytes,omitempty"`
+	TXErrors                          uint64 `json:"tx_errors,omitempty"`
+	TXSharedRecycleUnknownSlotDrops   uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
+	TXCompletions                     uint64 `json:"tx_completions,omitempty"`
+	DirectTXPackets                   uint64 `json:"direct_tx_packets,omitempty"`
+	CopyTXPackets                     uint64 `json:"copy_tx_packets,omitempty"`
+	InPlaceTXPackets                  uint64 `json:"in_place_tx_packets,omitempty"`
+	InPlaceVLANPushDescPackets        uint64 `json:"in_place_vlan_push_desc_packets,omitempty"`
+	InPlaceVLANPopDescPackets         uint64 `json:"in_place_vlan_pop_desc_packets,omitempty"`
+	InPlaceVLANPushNoHeadroomPackets  uint64 `json:"in_place_vlan_push_no_headroom_packets,omitempty"`
+	InPlaceL2MemmoveFallbackPackets   uint64 `json:"in_place_l2_memmove_fallback_packets,omitempty"`
+	DirectTXNoFrameFallbackPackets    uint64 `json:"direct_tx_no_frame_fallback_packets,omitempty"`
+	DirectTXBuildFallbackPackets      uint64 `json:"direct_tx_build_fallback_packets,omitempty"`
+	DirectTXDisallowedFallbackPackets uint64 `json:"direct_tx_disallowed_fallback_packets,omitempty"`
+	DebugPendingFillFrames            uint32 `json:"debug_pending_fill_frames,omitempty"`
+	DebugSpareFillFrames              uint32 `json:"debug_spare_fill_frames,omitempty"`
+	DebugFreeTXFrames                 uint32 `json:"debug_free_tx_frames,omitempty"`
+	DebugPendingTXPrepared            uint32 `json:"debug_pending_tx_prepared,omitempty"`
+	DebugPendingTXLocal               uint32 `json:"debug_pending_tx_local,omitempty"`
+	DebugOutstandingTX                uint32 `json:"debug_outstanding_tx,omitempty"`
 	// #1241: low-frequency AF_XDP TX completion-ring availability
 	// samples, published from owner-local worker telemetry. Current is
 	// the last sampled CQ depth before a reap; Max is the peak in the
 	// last debug window.
-	TXCompletionRingAvailable         uint32    `json:"tx_completion_ring_available,omitempty"`
-	TXCompletionRingAvailableMax      uint32    `json:"tx_completion_ring_available_max,omitempty"`
-	DebugInFlightRecycles             uint32    `json:"debug_in_flight_recycles,omitempty"`
+	TXCompletionRingAvailable    uint32 `json:"tx_completion_ring_available,omitempty"`
+	TXCompletionRingAvailableMax uint32 `json:"tx_completion_ring_available_max,omitempty"`
+	DebugInFlightRecycles        uint32 `json:"debug_in_flight_recycles,omitempty"`
 	// #802/#804: ring-pressure instrumentation mirror fields. See the
 	// Rust `BindingStatus` for semantics and write sites. The #804
 	// split replaces the pre-#804 `dbg_pending_overflow` field with
@@ -779,12 +779,12 @@ type BindingStatus struct {
 	// overflow in `enqueue_cos_item`. A snapshot from a pre-#804
 	// helper deserializes both as 0 (standard Go json zero-value),
 	// which is the right backward-compat behavior.
-	DbgTxRingFull                     uint64    `json:"dbg_tx_ring_full,omitempty"`
-	DbgSendtoENOBUFS                  uint64    `json:"dbg_sendto_enobufs,omitempty"`
-	DbgBoundPendingOverflow           uint64    `json:"dbg_bound_pending_overflow,omitempty"`
-	DbgCoSQueueOverflow               uint64    `json:"dbg_cos_queue_overflow,omitempty"`
-	RxFillRingEmptyDescs              uint64    `json:"rx_fill_ring_empty_descs,omitempty"`
-	OutstandingTX                     uint32    `json:"outstanding_tx,omitempty"`
+	DbgTxRingFull           uint64 `json:"dbg_tx_ring_full,omitempty"`
+	DbgSendtoENOBUFS        uint64 `json:"dbg_sendto_enobufs,omitempty"`
+	DbgBoundPendingOverflow uint64 `json:"dbg_bound_pending_overflow,omitempty"`
+	DbgCoSQueueOverflow     uint64 `json:"dbg_cos_queue_overflow,omitempty"`
+	RxFillRingEmptyDescs    uint64 `json:"rx_fill_ring_empty_descs,omitempty"`
+	OutstandingTX           uint32 `json:"outstanding_tx,omitempty"`
 	// #878: per-binding UMEM total frames and TX-ring depth (set
 	// once at worker construction) plus in-flight gauge (republished
 	// each ~1s by the worker as a single atomic store from local
@@ -794,9 +794,9 @@ type BindingStatus struct {
 	// aggregated as max across bindings. Zero on UmemTotalFrames
 	// means "not yet published" — fwdstatus falls back to the legacy
 	// "unknown" display.
-	UmemTotalFrames                   uint32    `json:"umem_total_frames,omitempty"`
-	TxRingCapacity                    uint32    `json:"tx_ring_capacity,omitempty"`
-	UmemInflightFrames                uint32    `json:"umem_inflight_frames,omitempty"`
+	UmemTotalFrames    uint32 `json:"umem_total_frames,omitempty"`
+	TxRingCapacity     uint32 `json:"tx_ring_capacity,omitempty"`
+	UmemInflightFrames uint32 `json:"umem_inflight_frames,omitempty"`
 	// #812: per-queue TX submit→completion latency telemetry. 16 log2-
 	// spaced buckets (see Rust `DRAIN_HIST_BUCKETS` wire contract), plus
 	// a total completion count and running sum-ns. Emitted on the rich
@@ -805,9 +805,9 @@ type BindingStatus struct {
 	// distributions without a second join. omitempty keeps forward-
 	// compat — a pre-#812 helper that lacks these fields decodes into
 	// empty slice / zero u64.
-	TxSubmitLatencyHist               []uint64  `json:"tx_submit_latency_hist,omitempty"`
-	TxSubmitLatencyCount              uint64    `json:"tx_submit_latency_count,omitempty"`
-	TxSubmitLatencySumNs              uint64    `json:"tx_submit_latency_sum_ns,omitempty"`
+	TxSubmitLatencyHist  []uint64 `json:"tx_submit_latency_hist,omitempty"`
+	TxSubmitLatencyCount uint64   `json:"tx_submit_latency_count,omitempty"`
+	TxSubmitLatencySumNs uint64   `json:"tx_submit_latency_sum_ns,omitempty"`
 	// #825: per-kick `sendto` latency telemetry. 16 log2 buckets
 	// (wire-compatible with `tx_submit_latency_hist` /
 	// `drain_latency_hist`), plus count, sum-ns, and the
@@ -815,13 +815,13 @@ type BindingStatus struct {
 	// #819 §4.1). omitempty keeps forward-compat — a pre-#825
 	// helper that lacks these fields decodes into empty slice /
 	// zero uint64.
-	TxKickLatencyHist                 []uint64  `json:"tx_kick_latency_hist,omitempty"`
-	TxKickLatencyCount                uint64    `json:"tx_kick_latency_count,omitempty"`
-	TxKickLatencySumNs                uint64    `json:"tx_kick_latency_sum_ns,omitempty"`
-	TxKickRetryCount                  uint64    `json:"tx_kick_retry_count,omitempty"`
-	LastHeartbeat                     time.Time `json:"last_heartbeat,omitempty"`
-	LastError                         string    `json:"last_error,omitempty"`
-	LastChange                        time.Time `json:"last_change,omitempty"`
+	TxKickLatencyHist  []uint64  `json:"tx_kick_latency_hist,omitempty"`
+	TxKickLatencyCount uint64    `json:"tx_kick_latency_count,omitempty"`
+	TxKickLatencySumNs uint64    `json:"tx_kick_latency_sum_ns,omitempty"`
+	TxKickRetryCount   uint64    `json:"tx_kick_retry_count,omitempty"`
+	LastHeartbeat      time.Time `json:"last_heartbeat,omitempty"`
+	LastError          string    `json:"last_error,omitempty"`
+	LastChange         time.Time `json:"last_change,omitempty"`
 }
 
 // BindingCountersSnapshot is the focused per-binding ring-pressure view
@@ -832,9 +832,9 @@ type BindingStatus struct {
 //
 // #802.
 type BindingCountersSnapshot struct {
-	WorkerID uint32 `json:"worker_id"`
-	Ifindex  int    `json:"ifindex,omitempty"`
-	QueueID  uint32 `json:"queue_id"`
+	WorkerID         uint32 `json:"worker_id"`
+	Ifindex          int    `json:"ifindex,omitempty"`
+	QueueID          uint32 `json:"queue_id"`
 	DbgTxRingFull    uint64 `json:"dbg_tx_ring_full,omitempty"`
 	DbgSendtoENOBUFS uint64 `json:"dbg_sendto_enobufs,omitempty"`
 	// #804: split from the pre-#804 `dbg_pending_overflow` field. Two
@@ -845,10 +845,10 @@ type BindingCountersSnapshot struct {
 	// zero-value — there is no silent re-attribution of the legacy
 	// counter. Consumers that want a total across either path should
 	// sum these two explicitly.
-	DbgBoundPendingOverflow     uint64 `json:"dbg_bound_pending_overflow,omitempty"`
-	DbgCoSQueueOverflow         uint64 `json:"dbg_cos_queue_overflow,omitempty"`
-	RxFillRingEmptyDescs        uint64 `json:"rx_fill_ring_empty_descs,omitempty"`
-	OutstandingTX               uint32 `json:"outstanding_tx,omitempty"`
+	DbgBoundPendingOverflow uint64 `json:"dbg_bound_pending_overflow,omitempty"`
+	DbgCoSQueueOverflow     uint64 `json:"dbg_cos_queue_overflow,omitempty"`
+	RxFillRingEmptyDescs    uint64 `json:"rx_fill_ring_empty_descs,omitempty"`
+	OutstandingTX           uint32 `json:"outstanding_tx,omitempty"`
 	// #1241: low-frequency AF_XDP TX completion-ring availability
 	// gauges mirrored from BindingStatus for fast-poll consumers.
 	TXCompletionRingAvailable    uint32 `json:"tx_completion_ring_available,omitempty"`
@@ -857,13 +857,13 @@ type BindingCountersSnapshot struct {
 	// snapshot so the daemon's fast poller can compute Buffer%
 	// without joining the full BindingStatus. See BindingStatus
 	// for full semantics.
-	UmemTotalFrames             uint32 `json:"umem_total_frames,omitempty"`
-	TxRingCapacity              uint32 `json:"tx_ring_capacity,omitempty"`
-	UmemInflightFrames          uint32 `json:"umem_inflight_frames,omitempty"`
-	TXErrors                    uint64 `json:"tx_errors,omitempty"`
+	UmemTotalFrames                 uint32 `json:"umem_total_frames,omitempty"`
+	TxRingCapacity                  uint32 `json:"tx_ring_capacity,omitempty"`
+	UmemInflightFrames              uint32 `json:"umem_inflight_frames,omitempty"`
+	TXErrors                        uint64 `json:"tx_errors,omitempty"`
 	TXSharedRecycleUnknownSlotDrops uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
-	TxSubmitErrorDrops          uint64 `json:"tx_submit_error_drops,omitempty"`
-	PendingTxLocalOverflowDrops uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
+	TxSubmitErrorDrops              uint64 `json:"tx_submit_error_drops,omitempty"`
+	PendingTxLocalOverflowDrops     uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
 	// #812: per-queue TX submit→completion latency histogram, pulled
 	// through from BindingStatus so step1-capture consumers can
 	// compute per-queue latency distributions without a second
@@ -872,17 +872,17 @@ type BindingCountersSnapshot struct {
 	// preserves forward-compat — a pre-#812 helper that lacks these
 	// fields decodes into empty slice / zero u64 without the daemon
 	// erroring.
-	TxSubmitLatencyHist    []uint64 `json:"tx_submit_latency_hist,omitempty"`
-	TxSubmitLatencyCount   uint64   `json:"tx_submit_latency_count,omitempty"`
-	TxSubmitLatencySumNs   uint64   `json:"tx_submit_latency_sum_ns,omitempty"`
+	TxSubmitLatencyHist  []uint64 `json:"tx_submit_latency_hist,omitempty"`
+	TxSubmitLatencyCount uint64   `json:"tx_submit_latency_count,omitempty"`
+	TxSubmitLatencySumNs uint64   `json:"tx_submit_latency_sum_ns,omitempty"`
 	// #825: per-kick `sendto` latency telemetry, pulled through
 	// from BindingStatus so step1-capture / P3 consumers can
 	// compute per-queue kick-latency distributions without a
 	// second query. omitempty on all four preserves forward-compat.
-	TxKickLatencyHist    []uint64 `json:"tx_kick_latency_hist,omitempty"`
-	TxKickLatencyCount   uint64   `json:"tx_kick_latency_count,omitempty"`
-	TxKickLatencySumNs   uint64   `json:"tx_kick_latency_sum_ns,omitempty"`
-	TxKickRetryCount     uint64   `json:"tx_kick_retry_count,omitempty"`
+	TxKickLatencyHist  []uint64 `json:"tx_kick_latency_hist,omitempty"`
+	TxKickLatencyCount uint64   `json:"tx_kick_latency_count,omitempty"`
+	TxKickLatencySumNs uint64   `json:"tx_kick_latency_sum_ns,omitempty"`
+	TxKickRetryCount   uint64   `json:"tx_kick_retry_count,omitempty"`
 	// #918: per-set LRU collision-eviction counter, brought through
 	// to the lean snapshot for fast-poll consumers that need the
 	// flow-cache thrash signal. Default keeps pre-#918 helpers parseable.
@@ -943,15 +943,15 @@ type SessionExportRequest struct {
 }
 
 type SessionSyncRequest struct {
-	Operation        string `json:"operation,omitempty"`
-	AddrFamily       uint8  `json:"addr_family,omitempty"`
-	Protocol         uint8  `json:"protocol,omitempty"`
-	SrcIP            string `json:"src_ip,omitempty"`
-	DstIP            string `json:"dst_ip,omitempty"`
-	SrcPort          uint16 `json:"src_port,omitempty"`
-	DstPort          uint16 `json:"dst_port,omitempty"`
-	IngressZone      string `json:"ingress_zone,omitempty"`
-	EgressZone       string `json:"egress_zone,omitempty"`
+	Operation   string `json:"operation,omitempty"`
+	AddrFamily  uint8  `json:"addr_family,omitempty"`
+	Protocol    uint8  `json:"protocol,omitempty"`
+	SrcIP       string `json:"src_ip,omitempty"`
+	DstIP       string `json:"dst_ip,omitempty"`
+	SrcPort     uint16 `json:"src_port,omitempty"`
+	DstPort     uint16 `json:"dst_port,omitempty"`
+	IngressZone string `json:"ingress_zone,omitempty"`
+	EgressZone  string `json:"egress_zone,omitempty"`
 	// #919/#922: u16 zone-id mirrors. Additive — the Rust daemon
 	// prefers the IDs when nonzero and falls back to the legacy
 	// name strings otherwise. Old peers without these fields
@@ -975,43 +975,43 @@ type SessionSyncRequest struct {
 }
 
 type SessionDeltaInfo struct {
-	Timestamp        time.Time `json:"timestamp"`
-	Slot             uint32    `json:"slot"`
-	QueueID          uint32    `json:"queue_id"`
-	WorkerID         uint32    `json:"worker_id"`
-	Interface        string    `json:"interface,omitempty"`
-	Ifindex          int       `json:"ifindex,omitempty"`
-	Event            string    `json:"event"`
-	AddrFamily       uint8     `json:"addr_family,omitempty"`
-	Protocol         uint8     `json:"protocol,omitempty"`
-	SrcIP            string    `json:"src_ip,omitempty"`
-	DstIP            string    `json:"dst_ip,omitempty"`
-	SrcPort          uint16    `json:"src_port,omitempty"`
-	DstPort          uint16    `json:"dst_port,omitempty"`
-	IngressZone      string    `json:"ingress_zone,omitempty"`
-	EgressZone       string    `json:"egress_zone,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
+	Slot        uint32    `json:"slot"`
+	QueueID     uint32    `json:"queue_id"`
+	WorkerID    uint32    `json:"worker_id"`
+	Interface   string    `json:"interface,omitempty"`
+	Ifindex     int       `json:"ifindex,omitempty"`
+	Event       string    `json:"event"`
+	AddrFamily  uint8     `json:"addr_family,omitempty"`
+	Protocol    uint8     `json:"protocol,omitempty"`
+	SrcIP       string    `json:"src_ip,omitempty"`
+	DstIP       string    `json:"dst_ip,omitempty"`
+	SrcPort     uint16    `json:"src_port,omitempty"`
+	DstPort     uint16    `json:"dst_port,omitempty"`
+	IngressZone string    `json:"ingress_zone,omitempty"`
+	EgressZone  string    `json:"egress_zone,omitempty"`
 	// #919/#922: u16 zone-id mirrors decoded directly from the binary
 	// event-stream payload (bytes [21],[22] u8 → u16 here for symmetry
 	// with SessionSyncRequest). The HA delta path prefers these IDs;
 	// the legacy strings stay populated when JSON callers fill them.
-	IngressZoneID    uint16    `json:"ingress_zone_id,omitempty"`
-	EgressZoneID     uint16    `json:"egress_zone_id,omitempty"`
-	OwnerRGID        int       `json:"owner_rg_id,omitempty"`
-	Disposition      string    `json:"disposition,omitempty"`
-	Origin           string    `json:"origin,omitempty"`
-	EgressIfindex    int       `json:"egress_ifindex,omitempty"`
-	TXIfindex        int       `json:"tx_ifindex,omitempty"`
-	TunnelEndpointID uint16    `json:"tunnel_endpoint_id,omitempty"`
-	TXVLANID         uint16    `json:"tx_vlan_id,omitempty"`
-	NextHop          string    `json:"next_hop,omitempty"`
-	NeighborMAC      string    `json:"neighbor_mac,omitempty"`
-	SrcMAC           string    `json:"src_mac,omitempty"`
-	NATSrcIP         string    `json:"nat_src_ip,omitempty"`
-	NATDstIP         string    `json:"nat_dst_ip,omitempty"`
-	NATSrcPort       uint16    `json:"nat_src_port,omitempty"`
-	NATDstPort       uint16    `json:"nat_dst_port,omitempty"`
-	FabricRedirect   bool      `json:"fabric_redirect,omitempty"`
-	FabricIngress    bool      `json:"fabric_ingress,omitempty"`
+	IngressZoneID    uint16 `json:"ingress_zone_id,omitempty"`
+	EgressZoneID     uint16 `json:"egress_zone_id,omitempty"`
+	OwnerRGID        int    `json:"owner_rg_id,omitempty"`
+	Disposition      string `json:"disposition,omitempty"`
+	Origin           string `json:"origin,omitempty"`
+	EgressIfindex    int    `json:"egress_ifindex,omitempty"`
+	TXIfindex        int    `json:"tx_ifindex,omitempty"`
+	TunnelEndpointID uint16 `json:"tunnel_endpoint_id,omitempty"`
+	TXVLANID         uint16 `json:"tx_vlan_id,omitempty"`
+	NextHop          string `json:"next_hop,omitempty"`
+	NeighborMAC      string `json:"neighbor_mac,omitempty"`
+	SrcMAC           string `json:"src_mac,omitempty"`
+	NATSrcIP         string `json:"nat_src_ip,omitempty"`
+	NATDstIP         string `json:"nat_dst_ip,omitempty"`
+	NATSrcPort       uint16 `json:"nat_src_port,omitempty"`
+	NATDstPort       uint16 `json:"nat_dst_port,omitempty"`
+	FabricRedirect   bool   `json:"fabric_redirect,omitempty"`
+	FabricIngress    bool   `json:"fabric_ingress,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
