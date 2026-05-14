@@ -975,7 +975,12 @@ impl Drop for ReadComplete<'_> {
 /// handles needed by the worker.
 ///
 /// `bind_flags` is the raw XDP bind flags (copy/zerocopy/need_wakeup).
-pub fn create_xsk_binding_private(
+///
+/// # Safety
+/// The returned `DeviceQueue` borrows this private UMEM's fill/completion ring
+/// structs. It must be dropped before `umem`, so the XSK socket is deleted
+/// while the UMEM ring structs are still live and before `xsk_umem__delete`.
+pub(crate) unsafe fn create_xsk_binding_private(
     umem: &mut Umem,
     info: &IfInfo,
     ring_entries: u32,
@@ -998,7 +1003,7 @@ pub fn create_xsk_binding_private(
 /// `umem_ptr` must be a live libxdp UMEM pointer owned by a `WorkerUmem` that
 /// outlives the returned `DeviceQueue`. The socket must be deleted before the
 /// UMEM is deleted.
-pub unsafe fn create_xsk_binding_shared(
+pub(crate) unsafe fn create_xsk_binding_shared(
     umem_ptr: *mut XskUmemOpaque,
     info: &IfInfo,
     ring_entries: u32,
@@ -1018,13 +1023,18 @@ pub unsafe fn create_xsk_binding_shared(
 }
 
 /// Backward-compatible private-UMEM constructor.
-pub fn create_xsk_binding(
+///
+/// # Safety
+/// The returned `DeviceQueue` must be dropped before `umem`; see
+/// [`create_xsk_binding_private`].
+#[allow(dead_code)]
+pub(crate) unsafe fn create_xsk_binding(
     umem: &mut Umem,
     info: &IfInfo,
     ring_entries: u32,
     bind_flags: u16,
 ) -> Result<(User, RingRx, RingTx, DeviceQueue), Errno> {
-    create_xsk_binding_private(umem, info, ring_entries, bind_flags)
+    unsafe { create_xsk_binding_private(umem, info, ring_entries, bind_flags) }
 }
 
 fn create_xsk_binding_impl(
@@ -1118,27 +1128,10 @@ fn create_xsk_binding_impl(
 
     let tx = RingTx { ring: tx_ring, fd };
 
-    let rings = match private_umem.as_deref_mut() {
-        Some(umem) => {
-            // Private create uses the UMEM's fill/comp rings. Keep ownership
-            // with `Umem`; the per-socket boxes passed to the bridge are not
-            // part of the private socket's live ring state.
-            drop(fill_ring);
-            drop(comp_ring);
-            DeviceQueueRings::BorrowedPrivateUmem {
-                fill: NonNull::from(&mut *umem.fill),
-                comp: NonNull::from(&mut *umem.comp),
-            }
-        }
-        None => {
-            // Shared create uses the per-socket fill/comp rings returned by
-            // xsk_socket__create_shared.
-            DeviceQueueRings::Owned {
-                fill: fill_ring,
-                comp: comp_ring,
-            }
-        }
-    };
+    let private_rings = private_umem
+        .as_deref_mut()
+        .map(|umem| (&mut umem.fill, &mut umem.comp));
+    let rings = device_queue_rings_for_create(private_rings, fill_ring, comp_ring);
 
     let device = DeviceQueue {
         xsk: xsk_ptr,
@@ -1149,27 +1142,60 @@ fn create_xsk_binding_impl(
     Ok((user, rx, tx, device))
 }
 
+fn device_queue_rings_for_create(
+    private_umem_rings: Option<(&mut Box<XskRingProd>, &mut Box<XskRingCons>)>,
+    fill_ring: Box<XskRingProd>,
+    comp_ring: Box<XskRingCons>,
+) -> DeviceQueueRings {
+    match private_umem_rings {
+        Some((umem_fill, umem_comp)) => {
+            // Private create uses the UMEM's fill/comp rings. Keep ownership
+            // with `Umem`; the per-socket boxes passed to the bridge are not
+            // part of the private socket's live ring state.
+            drop(fill_ring);
+            drop(comp_ring);
+            DeviceQueueRings::BorrowedPrivateUmem {
+                fill: NonNull::from(&mut **umem_fill),
+                comp: NonNull::from(&mut **umem_comp),
+            }
+        }
+        None => {
+            // Shared create uses the per-socket fill/comp rings returned by
+            // xsk_socket__create_shared.
+            DeviceQueueRings::Owned {
+                fill: fill_ring,
+                comp: comp_ring,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn private_device_queue_rings_borrow_umem_ring_boxes() {
-        let mut fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
-        let mut comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
-        let fill_addr = (&*fill) as *const XskRingProd;
-        let comp_addr = (&*comp) as *const XskRingCons;
+    fn private_constructor_rings_borrow_umem_ring_boxes() {
+        let mut umem_fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+        let mut umem_comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+        let socket_fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+        let socket_comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+        let umem_fill_addr = (&*umem_fill) as *const XskRingProd;
+        let umem_comp_addr = (&*umem_comp) as *const XskRingCons;
+        let socket_fill_addr = (&*socket_fill) as *const XskRingProd;
+        let socket_comp_addr = (&*socket_comp) as *const XskRingCons;
 
-        {
-            let rings = DeviceQueueRings::BorrowedPrivateUmem {
-                fill: NonNull::from(&mut *fill),
-                comp: NonNull::from(&mut *comp),
-            };
-            assert_eq!(rings.fill() as *const XskRingProd, fill_addr);
-            assert_eq!(rings.comp() as *const XskRingCons, comp_addr);
-        }
+        let rings = device_queue_rings_for_create(
+            Some((&mut umem_fill, &mut umem_comp)),
+            socket_fill,
+            socket_comp,
+        );
 
-        assert_eq!((&*fill) as *const XskRingProd, fill_addr);
-        assert_eq!((&*comp) as *const XskRingCons, comp_addr);
+        assert_eq!(rings.fill() as *const XskRingProd, umem_fill_addr);
+        assert_eq!(rings.comp() as *const XskRingCons, umem_comp_addr);
+        assert_ne!(rings.fill() as *const XskRingProd, socket_fill_addr);
+        assert_ne!(rings.comp() as *const XskRingCons, socket_comp_addr);
+        assert_eq!((&*umem_fill) as *const XskRingProd, umem_fill_addr);
+        assert_eq!((&*umem_comp) as *const XskRingCons, umem_comp_addr);
     }
 }

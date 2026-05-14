@@ -360,12 +360,14 @@ fn try_open_bind(
 > {
     for attempt in 0..BIND_RETRY_ATTEMPTS {
         let create_result = match socket_role.create_mode() {
-            xsk_ffi::XskCreateMode::PrivateUmem => xsk_ffi::create_xsk_binding_private(
-                worker_umem.umem_mut(),
-                info,
-                ring_entries,
-                bind_flags,
-            ),
+            xsk_ffi::XskCreateMode::PrivateUmem => unsafe {
+                xsk_ffi::create_xsk_binding_private(
+                    worker_umem.umem_mut(),
+                    info,
+                    ring_entries,
+                    bind_flags,
+                )
+            },
             xsk_ffi::XskCreateMode::SharedUmem => unsafe {
                 xsk_ffi::create_xsk_binding_shared(
                     worker_umem.as_raw_umem_ptr(),
