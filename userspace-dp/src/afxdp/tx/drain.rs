@@ -294,6 +294,10 @@ pub(in crate::afxdp) fn drain_pending_tx(
                 }
                 Err(TxError::Drop(err)) => {
                     binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
+                    binding
+                        .live
+                        .tx_submit_error_drops
+                        .fetch_add(1, Ordering::Relaxed);
                     binding.live.set_error(err);
                 }
             }

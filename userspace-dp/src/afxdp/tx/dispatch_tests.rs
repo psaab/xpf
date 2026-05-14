@@ -282,6 +282,11 @@ fn shared_recycle_unknown_slot_drop_increments_tx_errors() {
     record_shared_recycle_unknown_slot_drops(None, 5);
 
     assert_eq!(live.tx_errors.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        live.tx_shared_recycle_unknown_slot_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
 }
 
 #[test]

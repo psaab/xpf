@@ -29,6 +29,66 @@ var tx_completion_ring_wire_keys = []string{
 	"tx_completion_ring_available_max",
 }
 
+func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
+	in := BindingStatus{
+		WorkerID:                        3,
+		Slot:                            7,
+		Ifindex:                         11,
+		QueueID:                         2,
+		TXErrors:                        9,
+		TXSharedRecycleUnknownSlotDrops: 4,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["tx_shared_recycle_unknown_slot_drops"]; !ok {
+		t.Fatalf("wire key missing from BindingStatus JSON: %s", string(raw))
+	}
+
+	var back BindingStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal BindingStatus: %v", err)
+	}
+	if back.TXSharedRecycleUnknownSlotDrops != in.TXSharedRecycleUnknownSlotDrops {
+		t.Fatalf("TXSharedRecycleUnknownSlotDrops: got %d, want %d",
+			back.TXSharedRecycleUnknownSlotDrops, in.TXSharedRecycleUnknownSlotDrops)
+	}
+}
+
+func TestBindingCountersSnapshotTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
+	in := BindingCountersSnapshot{
+		WorkerID:                        3,
+		Ifindex:                         11,
+		QueueID:                         2,
+		TXErrors:                        9,
+		TXSharedRecycleUnknownSlotDrops: 4,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["tx_shared_recycle_unknown_slot_drops"]; !ok {
+		t.Fatalf("wire key missing from BindingCountersSnapshot JSON: %s", string(raw))
+	}
+
+	var back BindingCountersSnapshot
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal BindingCountersSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
+	}
+}
+
 func TestBindingStatusTxKickLatencyRoundTrip(t *testing.T) {
 	// Encode a Go BindingStatus with non-trivial values on the
 	// four kick-latency fields; decode the JSON back; assert
