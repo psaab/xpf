@@ -92,7 +92,9 @@ def split_scrapes(raw: str) -> tuple[list[dict[str, Any]], list[str], list[str]]
         begin = BEGIN_RE.match(line)
         if begin is not None:
             if current is not None:
-                scrapes.append(current)
+                raise CaptureError(
+                    f"scrape {current['timestamp']} missing end marker before scrape {begin.group(1)}"
+                )
             saw_markers = True
             current = {"timestamp": begin.group(1), "lines": [], "empty": False}
             continue
@@ -100,9 +102,10 @@ def split_scrapes(raw: str) -> tuple[list[dict[str, Any]], list[str], list[str]]
         end = END_RE.match(line)
         if end is not None:
             saw_markers = True
-            if current is not None:
-                scrapes.append(current)
-                current = None
+            if current is None:
+                raise CaptureError(f"scrape end marker without begin marker at {end.group(1)}")
+            scrapes.append(current)
+            current = None
             continue
 
         empty = EMPTY_RE.match(line)
@@ -121,10 +124,16 @@ def split_scrapes(raw: str) -> tuple[list[dict[str, Any]], list[str], list[str]]
             current["lines"].append(line)
 
     if current is not None:
-        scrapes.append(current)
+        raise CaptureError(f"scrape {current['timestamp']} missing end marker")
     if not saw_markers and raw.strip():
         scrapes.append({"timestamp": "unknown", "lines": raw.splitlines(), "empty": False})
     return scrapes, empty_timestamps, error_timestamps
+
+
+def require_count_metric(value: float, field_name: str, timestamp: str) -> int:
+    if not value.is_integer() or value < 0:
+        raise CaptureError(f"{timestamp}: {field_name} must be a non-negative integer, got {value:g}")
+    return int(value)
 
 
 def parse_equal_flow_line(line: str) -> tuple[str, dict[str, str], float] | None:
@@ -188,12 +197,17 @@ def reduce_scrapes(scrapes: list[dict[str, Any]], ifindex: str, queue_id: str) -
         if missing:
             missing_by_timestamp.append(f"{scrape['timestamp']}: missing {','.join(missing)}")
             continue
+        sampled_count = require_count_metric(
+            aggregate["sampled_active_workers"], "sampled_active_workers", scrape["timestamp"]
+        )
+        require_count_metric(
+            aggregate["unsampled_active_workers"], "unsampled_active_workers", scrape["timestamp"]
+        )
         if not valid:
             continue
-        sampled = aggregate.get("sampled_active_workers")
-        if sampled is not None and sampled.is_integer() and len(complete_workers) != int(sampled):
+        if len(complete_workers) != sampled_count:
             missing_by_timestamp.append(
-                f"{scrape['timestamp']}: worker row count {len(complete_workers)} != sampled_active_workers {int(sampled)}"
+                f"{scrape['timestamp']}: worker row count {len(complete_workers)} != sampled_active_workers {sampled_count}"
             )
             continue
         row["workers"] = complete_workers

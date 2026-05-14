@@ -2,6 +2,10 @@
 
 ## 2026-05-14
 
+- **Timestamp**: 2026-05-14T19:19:32Z
+  - **Action**: PR #1308 round-1 review follow-up — made equal-flow capture reduction fail closed on SIGTERM-truncated marked scrapes and non-integer active-worker counts, and made sweep summary rows report infrastructure exit status `2` when equal-flow capture fails after the wrapper succeeds.
+  - **File(s)**: `test/incus/fairness_equal_flow_capture.py`, `test/incus/fairness-cos-class-sweep.sh`, `test/incus/fairness_multi_sample_test.py`, `docs/fairness-regimes.md`, `docs/per-5-tuple/state.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-14T18:35:00Z
   - **Action**: Issue #1306 — add first-class per-class equal-flow estimator capture to the CoS class sweep harness. The sweep now brackets each wrapper run with continuous Prometheus scraping, preserves raw scrapes, reduces target-class equal-flow aggregate/worker rows, appends equal-flow evidence to `summary.md`, and fails closed on empty/missing/invalid estimator captures.
   - **File(s)**: `test/incus/fairness-cos-class-sweep.sh`, `test/incus/fairness_equal_flow_capture.py`, `test/incus/fairness_multi_sample_test.py`, `docs/fairness-regimes.md`, `docs/per-5-tuple/state.md`, `_Log.md`

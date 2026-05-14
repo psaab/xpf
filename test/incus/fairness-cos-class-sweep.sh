@@ -557,7 +557,7 @@ for spec in "${selected_classes[@]}"; do
     append_dataplane_class_summary "$label" "$out/dataplane/counter-delta.json"
     if (( equal_flow_status != 0 )); then
         overall_status=2
-        append_error_row "$label" "$port" "$queue" "$rate" "$status"
+        append_error_row "$label" "$port" "$queue" "$rate" 2
         echo "fairness-cos-class-sweep: invalid equal-flow estimator capture for $label: $equal_flow_dir" >&2
         [[ -f "$equal_flow_dir/reducer.stderr" ]] && sed -n '1,80p' "$equal_flow_dir/reducer.stderr" >&2
         [[ -f "$equal_flow_dir/summary-row.stderr" ]] && sed -n '1,80p' "$equal_flow_dir/summary-row.stderr" >&2
