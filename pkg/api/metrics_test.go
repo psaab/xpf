@@ -605,6 +605,69 @@ func TestEmitFairnessRSSExpectationGauges(t *testing.T) {
 	assertGaugeClose(t, got, c.fairnessRSSSkewViolation, labelsQ6, 1)
 }
 
+func TestEmitFairnessEqualFlowEstimateGauges(t *testing.T) {
+	c := newCollector(nil)
+	row := dpuserspace.FairnessThroughputSummary{
+		EqualFlowEstimate: dpuserspace.FairnessEqualFlowEstimate{
+			Valid:                  true,
+			TargetPerFlowBPS:       3_200,
+			ObservedBPS:            16_000,
+			CappedBPS:              12_800,
+			SuppressedBPS:          3_200,
+			ThroughputLossRatio:    0.2,
+			ActiveWorkers:          2,
+			SampledActiveWorkers:   2,
+			UnsampledActiveWorkers: 0,
+			Workers: []dpuserspace.FairnessEqualFlowWorkerEstimate{
+				{
+					WorkerID:        0,
+					ActiveFlows:     3,
+					ObservedBPS:     9_600,
+					ObservedPerFlow: 3_200,
+					CapBPS:          9_600,
+				},
+				{
+					WorkerID:        1,
+					ActiveFlows:     1,
+					ObservedBPS:     6_400,
+					ObservedPerFlow: 6_400,
+					CapBPS:          3_200,
+					SuppressedBPS:   3_200,
+				},
+			},
+		},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitFairnessEqualFlowEstimateGauges(ch, row, "80", "4")
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 16 {
+		t.Fatalf("emitFairnessEqualFlowEstimateGauges: want 16 metrics, got %d", len(got))
+	}
+
+	queueLabels := map[string]string{"ifindex": "80", "queue_id": "4"}
+	assertGaugeClose(t, got, c.fairnessEqualFlowEstimateValid, queueLabels, 1)
+	assertGaugeClose(t, got, c.fairnessEqualFlowSampledActiveWorkers, queueLabels, 2)
+	assertGaugeClose(t, got, c.fairnessEqualFlowUnsampledActiveWorkers, queueLabels, 0)
+	assertGaugeClose(t, got, c.fairnessEqualFlowTargetPerFlowBPS, queueLabels, 3_200)
+	assertGaugeClose(t, got, c.fairnessEqualFlowObservedBPS, queueLabels, 16_000)
+	assertGaugeClose(t, got, c.fairnessEqualFlowCappedBPS, queueLabels, 12_800)
+	assertGaugeClose(t, got, c.fairnessEqualFlowSuppressedBPS, queueLabels, 3_200)
+	assertGaugeClose(t, got, c.fairnessEqualFlowThroughputLossRatio, queueLabels, 0.2)
+
+	workerOneLabels := map[string]string{"ifindex": "80", "queue_id": "4", "worker_id": "1"}
+	assertGaugeClose(t, got, c.fairnessEqualFlowWorkerObservedBPS, workerOneLabels, 6_400)
+	assertGaugeClose(t, got, c.fairnessEqualFlowWorkerObservedPerFlowBPS, workerOneLabels, 6_400)
+	assertGaugeClose(t, got, c.fairnessEqualFlowWorkerCapBPS, workerOneLabels, 3_200)
+	assertGaugeClose(t, got, c.fairnessEqualFlowWorkerSuppressedBPS, workerOneLabels, 3_200)
+}
+
 func TestCoSFairnessRSSSummaries_EdgeCases(t *testing.T) {
 	tests := []struct {
 		name string

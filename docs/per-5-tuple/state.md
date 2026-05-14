@@ -1,6 +1,6 @@
 # Per-5-Tuple Fairness Drive — State
 
-**As of 2026-05-09.** This document records the standing mandate, the
+**As of 2026-05-14.** This document records the standing mandate, the
 shipped foundations, the killed mechanisms, and the surviving design
 options for cross-worker per-(dip,dport,sip,sport) fairness on the
 xpf userspace AF_XDP dataplane. It is a living state file — update
@@ -393,6 +393,40 @@ no flow byte counter moved. Truncated flow-worker snapshots reset the
 window and suppress the observed metrics until a fresh baseline is
 available.
 
+### Issue #1304 — Equal-flow rate-suppression estimator (active)
+
+The surviving non-work-conserving path is explicit rate suppression
+inside an exact shaped CoS queue: if RSS assigns different numbers of
+backlogged flows to different workers, the queue can intentionally
+withhold excess worker-local throughput so every flow converges toward
+the slowest sampled per-flow rate. That can reduce absolute per-flow
+spread below the work-conserving `Cstruct` floor, but only by giving up
+aggregate throughput.
+
+The first slice is measurement-only. It extends the rolling throughput
+collector to model the cap a future suppressor would apply, without
+feeding any scheduler path:
+
+- `xpf_fairness_equal_flow_estimate_valid{ifindex,queue_id}`
+- `xpf_fairness_equal_flow_sampled_active_workers{ifindex,queue_id}`
+- `xpf_fairness_equal_flow_unsampled_active_workers{ifindex,queue_id}`
+- `xpf_fairness_equal_flow_target_per_flow_bps{ifindex,queue_id}`
+- `xpf_fairness_equal_flow_observed_bps{ifindex,queue_id}`
+- `xpf_fairness_equal_flow_capped_bps{ifindex,queue_id}`
+- `xpf_fairness_equal_flow_suppressed_bps{ifindex,queue_id}`
+- `xpf_fairness_equal_flow_throughput_loss_ratio{ifindex,queue_id}`
+- `xpf_fairness_equal_flow_worker_observed_bps{ifindex,queue_id,worker_id}`
+- `xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex,queue_id,worker_id}`
+- `xpf_fairness_equal_flow_worker_cap_bps{ifindex,queue_id,worker_id}`
+- `xpf_fairness_equal_flow_worker_suppressed_bps{ifindex,queue_id,worker_id}`
+
+The estimator requires untruncated flow-worker byte telemetry and
+untruncated per-CoS active-flow counts. It is valid only when at least
+two active workers have non-zero rolling byte samples. This keeps the
+metric honest: it answers "what throughput would strict equal-flow
+suppression cost on this queue right now?" before any enforcement mode
+is designed.
+
 ### PR #1241 — TX completion uniformity telemetry
 
 Before the next full fairness measurement, the dataplane must expose
@@ -443,6 +477,10 @@ MQFQ, v8 lease selection, or admission.
   exported from Prometheus and the userspace status text. Runtime
   expectation config and skew-violation gauges are available; alert
   routing remains deployment policy.
+- **#1304 — Equal-flow rate-suppression mode**: active. Phase 0 adds
+  measurement-only suppression-cost telemetry. Do not wire enforcement
+  until live class-sweep data shows the estimator is stable and the
+  throughput loss is an acceptable product tradeoff.
 
 ## Empirical sweep across workload classes (2026-05-07)
 

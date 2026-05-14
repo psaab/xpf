@@ -18,6 +18,35 @@ type FairnessThroughputSummary struct {
 	WindowSeconds     float64
 	ObservedBytes     uint64
 	SourceTruncated   bool
+	EqualFlowEstimate FairnessEqualFlowEstimate
+}
+
+// FairnessEqualFlowEstimate is a measurement-only model for #1304's
+// equal-flow mode. It computes the per-worker caps that would align
+// delivered per-flow rates to the slowest sampled active worker in the
+// current rolling window. The result is telemetry only; no scheduler
+// path reads it.
+type FairnessEqualFlowEstimate struct {
+	Valid                  bool
+	TargetPerFlowBPS       float64
+	ObservedBPS            float64
+	CappedBPS              float64
+	SuppressedBPS          float64
+	ThroughputLossRatio    float64
+	ActiveWorkers          int
+	SampledActiveWorkers   int
+	UnsampledActiveWorkers int
+	Workers                []FairnessEqualFlowWorkerEstimate
+}
+
+type FairnessEqualFlowWorkerEstimate struct {
+	WorkerID        uint32
+	ActiveFlows     uint32
+	ObservedBytes   uint64
+	ObservedBPS     float64
+	ObservedPerFlow float64
+	CapBPS          float64
+	SuppressedBPS   float64
 }
 
 type FairnessThroughputWindow struct {
@@ -38,16 +67,18 @@ type fairnessFlowThroughputKey struct {
 }
 
 type fairnessThroughputSample struct {
-	at       time.Time
-	duration time.Duration
-	deltas   map[fairnessFlowThroughputKey]uint64
+	at           time.Time
+	duration     time.Duration
+	deltas       map[fairnessFlowThroughputKey]uint64
+	workerDeltas map[uint32]uint64
 }
 
 type fairnessQueueThroughputWindow struct {
-	samples      []fairnessThroughputSample
-	bytesByFlow  map[fairnessFlowThroughputKey]uint64
-	starvedFlows map[fairnessFlowThroughputKey]struct{}
-	starvedTotal uint64
+	samples       []fairnessThroughputSample
+	bytesByFlow   map[fairnessFlowThroughputKey]uint64
+	bytesByWorker map[uint32]uint64
+	starvedFlows  map[fairnessFlowThroughputKey]struct{}
+	starvedTotal  uint64
 }
 
 func NewFairnessThroughputWindow(window time.Duration) *FairnessThroughputWindow {
@@ -90,12 +121,18 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 	}
 
 	queueRates := fairnessQueueTransmitRates(status)
+	workerSlots := uint32(boundedFairnessRSSWorkerSlots(status.Workers, maxFairnessRSSWorkerSlots))
+	var activeWorkerFlows map[fairnessQueueKey]map[uint32]uint32
+	if !status.CoSActiveFlowCountsTruncated {
+		activeWorkerFlows = fairnessQueueActiveWorkerFlows(status, workerSlots)
+	}
 	seen := make(map[fairnessFlowThroughputKey]uint64)
 	sampleQueues := make(map[fairnessQueueKey]struct{}, len(w.queues))
 	for queue := range w.queues {
 		sampleQueues[queue] = struct{}{}
 	}
 	sampleDeltas := make(map[fairnessQueueKey]map[fairnessFlowThroughputKey]uint64)
+	sampleWorkerDeltas := make(map[fairnessQueueKey]map[uint32]uint64)
 	for _, row := range status.FlowWorkerMap {
 		if row.CoSQueueID == nil || row.EgressIfindex == 0 {
 			continue
@@ -129,6 +166,14 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 			sampleDeltas[key.queue] = deltas
 		}
 		deltas[key] += delta
+		if row.WorkerID < workerSlots {
+			workerDeltas := sampleWorkerDeltas[key.queue]
+			if workerDeltas == nil {
+				workerDeltas = make(map[uint32]uint64)
+				sampleWorkerDeltas[key.queue] = workerDeltas
+			}
+			workerDeltas[row.WorkerID] += delta
+		}
 	}
 	for key := range w.prev {
 		if _, ok := seen[key]; !ok {
@@ -140,9 +185,10 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 		for queue := range sampleQueues {
 			state := w.queueState(queue)
 			state.addSample(fairnessThroughputSample{
-				at:       now,
-				duration: duration,
-				deltas:   sampleDeltas[queue],
+				at:           now,
+				duration:     duration,
+				deltas:       sampleDeltas[queue],
+				workerDeltas: sampleWorkerDeltas[queue],
 			})
 		}
 	}
@@ -167,7 +213,7 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 		if state == nil || len(state.bytesByFlow) == 0 {
 			continue
 		}
-		summary := state.summary(key, queueRates[key])
+		summary := state.summary(key, queueRates[key], activeWorkerFlows[key])
 		out = append(out, summary)
 	}
 	return out
@@ -179,6 +225,7 @@ func (w *FairnessThroughputWindow) resetWindowState() {
 	for _, state := range w.queues {
 		state.samples = nil
 		clear(state.bytesByFlow)
+		clear(state.bytesByWorker)
 		clear(state.starvedFlows)
 	}
 }
@@ -187,8 +234,9 @@ func (w *FairnessThroughputWindow) queueState(key fairnessQueueKey) *fairnessQue
 	state := w.queues[key]
 	if state == nil {
 		state = &fairnessQueueThroughputWindow{
-			bytesByFlow:  make(map[fairnessFlowThroughputKey]uint64),
-			starvedFlows: make(map[fairnessFlowThroughputKey]struct{}),
+			bytesByFlow:   make(map[fairnessFlowThroughputKey]uint64),
+			bytesByWorker: make(map[uint32]uint64),
+			starvedFlows:  make(map[fairnessFlowThroughputKey]struct{}),
 		}
 		w.queues[key] = state
 	}
@@ -199,12 +247,18 @@ func (q *fairnessQueueThroughputWindow) addSample(sample fairnessThroughputSampl
 	if q.bytesByFlow == nil {
 		q.bytesByFlow = make(map[fairnessFlowThroughputKey]uint64)
 	}
+	if q.bytesByWorker == nil {
+		q.bytesByWorker = make(map[uint32]uint64)
+	}
 	if q.starvedFlows == nil {
 		q.starvedFlows = make(map[fairnessFlowThroughputKey]struct{})
 	}
 	q.samples = append(q.samples, sample)
 	for flow, delta := range sample.deltas {
 		q.bytesByFlow[flow] += delta
+	}
+	for workerID, delta := range sample.workerDeltas {
+		q.bytesByWorker[workerID] += delta
 	}
 }
 
@@ -216,6 +270,13 @@ func (q *fairnessQueueThroughputWindow) prune(cutoff time.Time) {
 				delete(q.bytesByFlow, flow)
 			} else {
 				q.bytesByFlow[flow] -= delta
+			}
+		}
+		for workerID, delta := range q.samples[keepFrom].workerDeltas {
+			if q.bytesByWorker[workerID] <= delta {
+				delete(q.bytesByWorker, workerID)
+			} else {
+				q.bytesByWorker[workerID] -= delta
 			}
 		}
 		keepFrom++
@@ -231,7 +292,11 @@ func (q *fairnessQueueThroughputWindow) prune(cutoff time.Time) {
 	}
 }
 
-func (q *fairnessQueueThroughputWindow) summary(key fairnessQueueKey, transmitRateBytes uint64) FairnessThroughputSummary {
+func (q *fairnessQueueThroughputWindow) summary(
+	key fairnessQueueKey,
+	transmitRateBytes uint64,
+	activeWorkerFlows map[uint32]uint32,
+) FairnessThroughputSummary {
 	var totalBytes uint64
 	values := make([]float64, 0, len(q.bytesByFlow))
 	for _, bytes := range q.bytesByFlow {
@@ -258,7 +323,79 @@ func (q *fairnessQueueThroughputWindow) summary(key fairnessQueueKey, transmitRa
 		StarvedFlowsTotal: q.starvedTotal,
 		WindowSeconds:     windowSeconds,
 		ObservedBytes:     totalBytes,
+		EqualFlowEstimate: q.equalFlowEstimate(windowSeconds, activeWorkerFlows),
 	}
+}
+
+func (q *fairnessQueueThroughputWindow) equalFlowEstimate(
+	windowSeconds float64,
+	activeWorkerFlows map[uint32]uint32,
+) FairnessEqualFlowEstimate {
+	if windowSeconds <= 0 || len(activeWorkerFlows) == 0 {
+		return FairnessEqualFlowEstimate{}
+	}
+
+	workerIDs := make([]uint32, 0, len(activeWorkerFlows))
+	for workerID, activeFlows := range activeWorkerFlows {
+		if activeFlows > 0 {
+			workerIDs = append(workerIDs, workerID)
+		}
+	}
+	sort.Slice(workerIDs, func(i, j int) bool { return workerIDs[i] < workerIDs[j] })
+	if len(workerIDs) == 0 {
+		return FairnessEqualFlowEstimate{}
+	}
+
+	estimate := FairnessEqualFlowEstimate{
+		ActiveWorkers: len(workerIDs),
+		Workers:       make([]FairnessEqualFlowWorkerEstimate, 0, len(workerIDs)),
+	}
+	targetPerFlowBPS := 0.0
+	for _, workerID := range workerIDs {
+		activeFlows := activeWorkerFlows[workerID]
+		observedBytes := q.bytesByWorker[workerID]
+		observedBPS := float64(observedBytes) * 8.0 / windowSeconds
+		estimate.ObservedBPS += observedBPS
+		worker := FairnessEqualFlowWorkerEstimate{
+			WorkerID:      workerID,
+			ActiveFlows:   activeFlows,
+			ObservedBytes: observedBytes,
+			ObservedBPS:   observedBPS,
+		}
+		if observedBytes == 0 {
+			estimate.UnsampledActiveWorkers++
+			estimate.Workers = append(estimate.Workers, worker)
+			continue
+		}
+		worker.ObservedPerFlow = observedBPS / float64(activeFlows)
+		if estimate.SampledActiveWorkers == 0 || worker.ObservedPerFlow < targetPerFlowBPS {
+			targetPerFlowBPS = worker.ObservedPerFlow
+		}
+		estimate.SampledActiveWorkers++
+		estimate.Workers = append(estimate.Workers, worker)
+	}
+	if estimate.SampledActiveWorkers < 2 || targetPerFlowBPS <= 0 {
+		return estimate
+	}
+
+	estimate.Valid = true
+	estimate.TargetPerFlowBPS = targetPerFlowBPS
+	for i := range estimate.Workers {
+		worker := &estimate.Workers[i]
+		if worker.ActiveFlows == 0 {
+			continue
+		}
+		worker.CapBPS = targetPerFlowBPS * float64(worker.ActiveFlows)
+		if worker.ObservedBPS > worker.CapBPS {
+			worker.SuppressedBPS = worker.ObservedBPS - worker.CapBPS
+		}
+		estimate.SuppressedBPS += worker.SuppressedBPS
+		estimate.CappedBPS += worker.ObservedBPS - worker.SuppressedBPS
+	}
+	if estimate.ObservedBPS > 0 {
+		estimate.ThroughputLossRatio = estimate.SuppressedBPS / estimate.ObservedBPS
+	}
+	return estimate
 }
 
 func (q *fairnessQueueThroughputWindow) windowSeconds() float64 {
@@ -327,6 +464,23 @@ func fairnessQueueTransmitRates(status ProcessStatus) map[fairnessQueueKey]uint6
 			}
 			out[fairnessQueueKey{ifindex: iface.Ifindex, queueID: uint8(queue.QueueID)}] = rate
 		}
+	}
+	return out
+}
+
+func fairnessQueueActiveWorkerFlows(status ProcessStatus, workerSlots uint32) map[fairnessQueueKey]map[uint32]uint32 {
+	out := make(map[fairnessQueueKey]map[uint32]uint32)
+	for _, row := range status.CoSActiveFlowCounts {
+		if row.ActiveFlowCount == 0 || row.WorkerID >= workerSlots {
+			continue
+		}
+		key := fairnessQueueKey{ifindex: row.Ifindex, queueID: row.QueueID}
+		workers := out[key]
+		if workers == nil {
+			workers = make(map[uint32]uint32)
+			out[key] = workers
+		}
+		workers[row.WorkerID] += row.ActiveFlowCount
 	}
 	return out
 }
