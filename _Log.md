@@ -2,6 +2,10 @@
 
 ## 2026-05-14
 
+- **Timestamp**: 2026-05-14T04:01:00Z
+  - **Action**: PR #1301 review follow-up — removed power-of-two UMEM frame-size assumption in memmove fallback bounds calculation by switching to modulo-based in-frame offset math.
+  - **File(s)**: `userspace-dp/src/afxdp/frame/mod.rs`, `_Log.md`
+
 - **Timestamp**: 2026-05-14T03:52:00Z
   - **Action**: PR #1301 review follow-up — tightened in-frame memmove fallback slice bounds to the current UMEM chunk and added regression coverage for `FillOnSlotWithOffset` recycle tracking.
   - **File(s)**: `userspace-dp/src/afxdp/frame/mod.rs`, `userspace-dp/src/afxdp/tx/transmit_tests.rs`, `_Log.md`
