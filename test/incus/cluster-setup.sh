@@ -157,8 +157,8 @@ shared_umem_phase0_artifact_for_node() {
 	esac
 }
 
-cluster_config_requests_shared_umem() {
-	[[ -f "$CLUSTER_CONF" ]] && grep -q 'shared-umem' "$CLUSTER_CONF"
+cluster_config_requests_shared_umem_phase0_artifact() {
+	[[ -f "$CLUSTER_CONF" ]] && grep -Eq 'phase0-artifact-file|artifact-file' "$CLUSTER_CONF"
 }
 
 push_shared_umem_phase0_artifact() {
@@ -167,11 +167,11 @@ push_shared_umem_phase0_artifact() {
 	local artifact
 	artifact=$(shared_umem_phase0_artifact_for_node "$idx")
 
-	if ! cluster_config_requests_shared_umem; then
+	if ! cluster_config_requests_shared_umem_phase0_artifact; then
 		return
 	fi
 	if [[ ! -f "$artifact" ]]; then
-		die "Shared-UMEM config is enabled but Phase 0 artifact is missing for node${idx}: $artifact"
+		die "Shared-UMEM Phase 0 artifact is configured but missing for node${idx}: $artifact"
 	fi
 
 	info "Pushing shared-UMEM Phase 0 artifact to node${idx}..."

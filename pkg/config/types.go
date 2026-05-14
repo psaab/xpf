@@ -544,8 +544,10 @@ type UserspaceConfig struct {
 	CoalescenceTXUsecs int `json:"coalescence_tx_usecs,omitempty"`
 }
 
-// SharedUMEMConfig is the operator-gated AF_XDP shared-UMEM experiment
-// contract passed through to the userspace helper.
+// SharedUMEMConfig is an optional AF_XDP shared-UMEM policy override passed
+// through to the userspace helper. Omission lets the helper attempt
+// opportunistic cross-NIC shared UMEM and fall back per binding when the live
+// device/kernel path cannot support it.
 type SharedUMEMConfig struct {
 	Mode           string                 `json:"mode,omitempty"`
 	Interfaces     []string               `json:"interfaces,omitempty"`

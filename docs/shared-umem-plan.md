@@ -105,7 +105,8 @@ after shared bind is proven.
 
 ## Design Principles
 
-1. Default runtime remains private UMEM until validation proves shared UMEM.
+1. Default runtime attempts cross-NIC shared UMEM on supported dataplane NICs;
+   private UMEM is the per-group fallback when live bind validation fails.
 2. The bridge must expose private and shared socket creation explicitly.
 3. Shared groups are worker-local; no UMEM crosses worker threads.
 4. Frame offsets in a shared group are partitioned once at startup, then
@@ -118,13 +119,17 @@ after shared bind is proven.
 
 ## Proposed Implementation
 
-### Phase 0: Repro and Guardrails
+### Phase 0: Repro and Audit Evidence
 
-This is a hard gate. No production xpf worker-startup change may land until
-the direct repro proves the exact deployment environment can run the intended
-shared-UMEM shape. The artifact is scoped to the node class and software stack
-that produced it. A passing artifact from one lab or node class does not
-enable shared UMEM on a different deployment environment.
+Phase 0 is bring-up evidence, not a production startup gate. The production
+rule is simpler: xpf should try to use cross-NIC shared UMEM by default on
+supported dataplane NICs, validate the actual bind result at runtime, and fall
+back to private UMEM when the live kernel/driver path rejects the group.
+
+The artifact remains useful as audit evidence for a lab or release note, but
+operators should not need to keep `/run/xpf/shared-umem-phase0.json` in sync
+just to get copy-free forwarding. Live runtime capability and post-bind
+zero-copy validation decide whether a group is used.
 
 The Phase 0 artifact must be machine-readable and include:
 
@@ -246,16 +251,18 @@ can delete `xsk_umem`.
 ### Phase 4: Build worker-local cross-NIC UMEM groups
 
 Replace the same-device-only grouping helper with an explicit policy builder
-that can construct firewall-relevant cross-NIC groups. The policy must be
-operator-gated and default off.
+that can construct firewall-relevant cross-NIC groups. Cross-NIC shared UMEM is
+the default policy because the firewall normally forwards across NICs and the
+copy-free path should be used whenever the device/kernel combination proves it
+can support it. The only production knob that should normally matter is the
+debug escape hatch that disables shared UMEM.
 
 Modes:
 
 ```text
-off -> private UMEM only
+cross-nic/auto/default -> group worker-local eligible cross-NIC bindings
+off -> private UMEM only, for debugging or bisecting shared-UMEM issues
 same-device-debug -> group by (driver, device_path), only for bring-up tests
-cross-nic -> group the firewall transit bindings that intentionally forward
-             between NICs
 ```
 
 Cross-NIC eligibility:
@@ -263,11 +270,10 @@ Cross-NIC eligibility:
 - `mlx5_core`
 - non-empty PCI device path
 - at least two NICs in the group
-- selected interfaces come from the Phase 0 artifact by default; an explicit
-  operator/config interface list is an optional override and must exactly match
-  the artifact
-- Phase 0 artifact matches the deployment environment for this node class and
-  selected device set
+- selected interfaces are optional; when omitted, xpf discovers all eligible
+  worker-local dataplane bindings and groups the distinct NICs automatically
+- an explicit interface list may narrow the candidate set for debugging, but
+  it is not required for normal operation
 - all participating bindings are owned by the same worker
 - no `virtio_net`
 - zero-copy is required; copy-mode fallback disables the group
@@ -277,9 +283,8 @@ Same-device-debug eligibility:
 - `mlx5_core`
 - same non-empty PCI device path
 - at least two bindings in the group
-- selected interfaces come from the Phase 0 artifact by default; an explicit
-  operator/config interface list is an optional override and must exactly match
-  the artifact
+- selected interfaces are optional; an empty list means all eligible same-device
+  candidates are considered
 - only used to isolate shared bridge/ring/drop-order bugs before cross-NIC
   rollout
 
@@ -304,29 +309,16 @@ Shared-group construction must be atomic from the worker's point of view:
 - only after the full group succeeds may the worker move the bindings into the
   live `bindings` vector and register their XSKMAP slots
 
-The Phase 0 artifact is the normal source of truth for the cross-NIC group
-because NUMA locality, IOMMU mode, and NIC placement determine whether the
-result is useful even when the kernel supports the bind. Do not infer cross-NIC
-grouping from driver name alone. Operators may still configure an explicit
-interface list as a narrow override, but production startup must reject it
-unless it exactly matches the artifact's selected interfaces.
-
-Deployment scoping is part of the runtime contract, not just documentation.
-The policy builder must compare the selected shared-UMEM group against the
-locally observable portion of the validated Phase 0 artifact for the current
-node class. If the config omits interface names, the artifact's selected
-interfaces define the group. At daemon startup this means the gate enforces
-the top-level success result plus kernel release, mlx5 driver name, selected
-interface names, selected NIC PCI IDs, selected device set, MTU, and RX queue
-topology. If any of those fields are missing or do not match the live node,
-the group stays private and the reason is reported in telemetry.
+Runtime bind validation is the deployment contract. An optional Phase 0
+artifact is audit material only; runtime selection must not require it, use it
+as a hidden knob, or block copy-free forwarding because an audit file is absent
+or stale. If the live bind path fails, the group stays private and the reason
+is reported in telemetry. If the bind succeeds but post-bind
+`XDP_OPTIONS_ZEROCOPY` is false, the group is rejected.
 
 Driver version, selected NIC firmware versions, libxdp/libbpf versions, IOMMU
-mode, and the per-cell repro rows remain required Phase 0 audit evidence, but
-they are not daemon-startup comparators until the project has a first-class
-collector for each field. The runtime must not silently imply that those
-evidence fields were compared when only the locally observable subset was
-enforced.
+mode, and the per-cell repro rows remain useful Phase 0 evidence, but the
+runtime source of truth is the actual worker-local bind result.
 
 ### Phase 5: Use shared allocation for forwarding
 
@@ -365,10 +357,10 @@ matrix is green.
 
 Unit tests:
 
-- Phase 0/prod-startup guard: cross-NIC shared mode cannot be enabled unless
-  the direct repro artifact records success for the requested deployment
-  environment and device pair
-- shared-UMEM policy selection for off, same-device-debug, and cross-nic modes
+- shared-UMEM policy selection for default-auto, off, same-device-debug, and
+  cross-nic modes
+- default-auto mode does not require an artifact or explicit interface list
+- explicit `off` clears shared-UMEM status and keeps private UMEM
 - private bindings never share allocation
 - shared groups partition offsets without duplicates
 - shared socket creation returns per-socket FQ/CQ rings
@@ -393,7 +385,8 @@ Direct AF_XDP repro:
 xpf lab validation:
 
 - deploy with shared mode off: no behavior change
-- deploy with cross-nic mode: all participating bindings bound/ready, no EBUSY
+- deploy with default-auto cross-nic mode: all participating bindings
+  bound/ready, no EBUSY
 - link-cycle and rolling deploy do not fault
 - no frame leak, no ring-full steady-state failure
 - cross-NIC firewall transit shows `pending_in_place_tx_packets` rising
@@ -412,22 +405,16 @@ can answer "does our bridge call the right libxdp function and drive the right
 per-socket FQ/CQ rings?" It cannot answer "did the firewall get faster?" unless
 the measured path actually stays on one NIC.
 
-Cross-NIC mode remains behind an explicit gate until xpf proves:
-
-- the lab kernel/libxdp path binds both NICs in zero-copy
-- teardown and link-cycle handling are stable
-- the performance win beats the private-UMEM copy path on the real HA topology
+Cross-NIC mode is the normal runtime policy. It remains safe because the bind
+path is atomic per group: either every socket in the group binds and reports
+zero-copy, or the whole group falls back to private UMEM.
 
 ## Loss Lab Deployment Contract
 
-The loss userspace HA config now enables `system dataplane shared-umem mode
-cross-nic` without hardcoding interface names. The matching node-local Phase 0
-artifact selects the real LAN/WAN mlx5 pair on each node, and the deploy script
-pushes that artifact to
-`/run/xpf/shared-umem-phase0.json` before xpfd starts. If the artifact no
-longer matches the live kernel, PCI IDs, driver, MTU, or RX queue topology,
-the helper must fall back to private UMEM and publish the disabled reason in
-binding status.
+The loss userspace HA config does not need a shared-UMEM stanza for normal
+operation. Cross-NIC shared UMEM is attempted by default for eligible
+worker-local mlx5 dataplane bindings. Operators can set shared UMEM `mode off`
+only when they need a private-UMEM debug/bisect run.
 
 Operational success is not "AF_XDP bind says zerocopy". It is the full chain:
 

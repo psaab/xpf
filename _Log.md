@@ -441,3 +441,6 @@
 - **Timestamp**: 2026-05-13T20:44:00-07:00
   - **Action**: Make cross-NIC shared-UMEM selection artifact-driven by default so the HA config no longer hardcodes interface names; add `selected_device_set` as the generic artifact key while keeping `selected_device_pair` as a legacy alias.
   - **File(s)**: `userspace-dp/src/afxdp/shared_umem.rs`, `docs/ha-cluster-userspace.conf`, `docs/shared-umem-plan.md`, `test/incus/loss-userspace-shared-umem-phase0-node0.json`, `test/incus/loss-userspace-shared-umem-phase0-node1.json`, `_Log.md`
+- **Timestamp**: 2026-05-13T20:49:00-07:00
+  - **Action**: Make cross-NIC shared UMEM opportunistic by default: no config stanza or Phase 0 artifact is required for normal copy-free forwarding, `mode off` remains the debug kill switch, and Phase 0 artifacts are audit-only instead of production gates.
+  - **File(s)**: `userspace-dp/src/afxdp/shared_umem.rs`, `docs/ha-cluster-userspace.conf`, `docs/shared-umem-plan.md`, `pkg/config/ast.go`, `pkg/config/types.go`, `test/incus/cluster-setup.sh`, `README.md`, `_Log.md`
