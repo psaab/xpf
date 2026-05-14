@@ -10,6 +10,8 @@
 // Pure relocation. Bodies byte-for-byte identical.
 
 use super::super::*;
+use sha2::{Digest, Sha256};
+use std::io::{self, Write};
 
 pub(crate) fn refresh_status(state: &mut ServerState) {
     state.afxdp.refresh_bindings(&mut state.status.bindings);
@@ -317,7 +319,13 @@ pub(crate) fn same_binding_plan(current: &ConfigSnapshot, next: &ConfigSnapshot)
 }
 
 pub(crate) fn snapshot_binding_plan_key(snapshot: &ConfigSnapshot) -> String {
-    let mut out = String::new();
+    let mut hasher = Sha256::new();
+    update_snapshot_binding_plan_key(&mut hasher, snapshot);
+    let digest = hasher.finalize();
+    format!("sha256:{digest:x}")
+}
+
+fn update_snapshot_binding_plan_key(hasher: &mut Sha256, snapshot: &ConfigSnapshot) {
     let workers = snapshot
         .userspace
         .get("workers")
@@ -328,13 +336,18 @@ pub(crate) fn snapshot_binding_plan_key(snapshot: &ConfigSnapshot) -> String {
         .get("ring_entries")
         .and_then(|v| v.as_u64())
         .unwrap_or_default();
-    out.push_str(&format!("workers={workers};ring={ring_entries};"));
+    hash_update(hasher, &format!("workers={workers};ring={ring_entries};"));
+    if let Some(shared_umem) = snapshot.userspace.get("shared_umem") {
+        hash_update(hasher, "shared_umem=");
+        update_canonical_json_hash(hasher, shared_umem);
+        hash_update(hasher, ";");
+    }
     for iface in snapshot
         .interfaces
         .iter()
         .filter(|iface| include_userspace_binding_interface(iface))
     {
-        out.push_str(&format!(
+        hash_update(hasher, &format!(
             "iface={}/{}/{}/{}/{}/{};",
             iface.name,
             iface.linux_name,
@@ -345,12 +358,103 @@ pub(crate) fn snapshot_binding_plan_key(snapshot: &ConfigSnapshot) -> String {
         ));
     }
     for fab in &snapshot.fabrics {
-        out.push_str(&format!(
+        hash_update(hasher, &format!(
             "fabric={}/{}/{}/{};",
             fab.name, fab.parent_linux_name, fab.parent_ifindex, fab.rx_queues
         ));
     }
+}
+
+fn hash_update(hasher: &mut Sha256, input: &str) {
+    hasher.update(input.as_bytes());
+}
+
+struct Sha256Writer<'a>(&'a mut Sha256);
+
+impl Write for Sha256Writer<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn update_json_encoded<T: serde::Serialize + ?Sized>(hasher: &mut Sha256, value: &T) {
+    serde_json::to_writer(Sha256Writer(hasher), value)
+        .expect("canonical JSON hashing uses an infallible writer");
+}
+
+fn update_canonical_json_hash(hasher: &mut Sha256, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            hash_update(hasher, "[");
+            let mut items = values.iter().map(canonical_json_key).collect::<Vec<_>>();
+            items.sort();
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    hash_update(hasher, ",");
+                }
+                hash_update(hasher, item);
+            }
+            hash_update(hasher, "]");
+        }
+        serde_json::Value::Object(values) => {
+            hash_update(hasher, "{");
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (idx, (key, value)) in entries.into_iter().enumerate() {
+                if idx > 0 {
+                    hash_update(hasher, ",");
+                }
+                update_json_encoded(hasher, key);
+                hash_update(hasher, ":");
+                update_canonical_json_hash(hasher, value);
+            }
+            hash_update(hasher, "}");
+        }
+        _ => update_json_encoded(hasher, value),
+    }
+}
+
+fn canonical_json_key(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_canonical_json(value, &mut out);
     out
+}
+
+fn write_canonical_json(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Array(values) => {
+            out.push('[');
+            let mut items = values.iter().map(canonical_json_key).collect::<Vec<_>>();
+            items.sort();
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(item);
+            }
+            out.push(']');
+        }
+        serde_json::Value::Object(values) => {
+            out.push('{');
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (idx, (key, value)) in entries.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).unwrap_or_default());
+                out.push(':');
+                write_canonical_json(value, out);
+            }
+            out.push('}');
+        }
+        _ => out.push_str(&serde_json::to_string(value).unwrap_or_default()),
+    }
 }
 
 pub(crate) fn include_userspace_binding_interface(iface: &InterfaceSnapshot) -> bool {

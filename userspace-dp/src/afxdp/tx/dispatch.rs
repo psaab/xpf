@@ -416,7 +416,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                  * and submit it to the target binding's TX ring without copying.
                  * This is valid whenever ingress and egress bindings share the same
                  * UMEM allocation. That includes same-binding hairpin and the narrow
-                 * same-device shared-UMEM prototype.
+                 * shared-UMEM groups.
                  */
                 let can_rewrite_in_place = target_binding.umem.allocation_ptr() == ingress_umem_ptr
                     && !is_nat64

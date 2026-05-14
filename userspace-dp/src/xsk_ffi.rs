@@ -69,7 +69,23 @@ unsafe extern "C" {
     fn bridge_xsk_umem_delete(umem: *mut XskUmemOpaque) -> c_int;
     fn bridge_xsk_umem_fd(umem: *const XskUmemOpaque) -> c_int;
 
-    fn bridge_xsk_socket_create(
+    fn bridge_xsk_socket_create_private(
+        xsk_out: *mut *mut XskSocketOpaque,
+        ifname: *const c_char,
+        queue_id: u32,
+        umem: *mut XskUmemOpaque,
+        rx: *mut XskRingCons,
+        tx: *mut XskRingProd,
+        fill: *mut XskRingProd,
+        comp: *mut XskRingCons,
+        rx_size: u32,
+        tx_size: u32,
+        libxdp_flags: u32,
+        xdp_flags: u32,
+        bind_flags: u16,
+    ) -> c_int;
+
+    fn bridge_xsk_socket_create_shared(
         xsk_out: *mut *mut XskSocketOpaque,
         ifname: *const c_char,
         queue_id: u32,
@@ -223,6 +239,21 @@ impl SocketConfig {
     pub const XDP_BIND_COPY: u16 = 1 << 1;
     pub const XDP_BIND_ZEROCOPY: u16 = 1 << 2;
     pub const XDP_BIND_NEED_WAKEUP: u16 = 1 << 3;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum XskCreateMode {
+    PrivateUmem,
+    SharedUmem,
+}
+
+impl XskCreateMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PrivateUmem => "private",
+            Self::SharedUmem => "shared",
+        }
+    }
 }
 
 // ── IfInfo ───────────────────────────────────────────────────────────
@@ -452,11 +483,58 @@ fn reserve_up_to(ring: &mut XskRingProd, max: u32, idx: &mut u32) -> u32 {
 
 // ── DeviceQueue ──────────────────────────────────────────────────────
 
+enum DeviceQueueRings {
+    /// Shared UMEM sockets get socket-local fill/completion rings from
+    /// `xsk_socket__create_shared`.
+    Owned {
+        fill: Box<XskRingProd>,
+        comp: Box<XskRingCons>,
+    },
+    /// Private UMEM sockets use the fill/completion rings owned by `Umem`.
+    ///
+    /// `DeviceQueue` must still drop before `Umem` so the XSK is deleted before
+    /// the UMEM, but it must not own these boxes. `xsk_umem__delete` may inspect
+    /// the UMEM ring structs during teardown.
+    BorrowedPrivateUmem {
+        fill: NonNull<XskRingProd>,
+        comp: NonNull<XskRingCons>,
+    },
+}
+
+impl DeviceQueueRings {
+    fn fill(&self) -> &XskRingProd {
+        match self {
+            Self::Owned { fill, .. } => fill,
+            Self::BorrowedPrivateUmem { fill, .. } => unsafe { fill.as_ref() },
+        }
+    }
+
+    fn fill_mut(&mut self) -> &mut XskRingProd {
+        match self {
+            Self::Owned { fill, .. } => fill,
+            Self::BorrowedPrivateUmem { fill, .. } => unsafe { fill.as_mut() },
+        }
+    }
+
+    fn comp(&self) -> &XskRingCons {
+        match self {
+            Self::Owned { comp, .. } => comp,
+            Self::BorrowedPrivateUmem { comp, .. } => unsafe { comp.as_ref() },
+        }
+    }
+
+    fn comp_mut(&mut self) -> &mut XskRingCons {
+        match self {
+            Self::Owned { comp, .. } => comp,
+            Self::BorrowedPrivateUmem { comp, .. } => unsafe { comp.as_mut() },
+        }
+    }
+}
+
 /// Fill/completion ring pair + the underlying libxdp socket handle.
 pub struct DeviceQueue {
     xsk: *mut XskSocketOpaque,
-    fill: Box<XskRingProd>,
-    comp: Box<XskRingCons>,
+    rings: DeviceQueueRings,
     fd: c_int,
 }
 
@@ -471,9 +549,10 @@ impl DeviceQueue {
     /// 0 whenever `free < max`, starving the fill ring and stalling TX.
     pub fn fill(&mut self, max: u32) -> WriteFill<'_> {
         let mut idx: u32 = 0;
-        let reserved = reserve_up_to(&mut *self.fill, max, &mut idx);
+        let ring = self.rings.fill_mut();
+        let reserved = reserve_up_to(ring, max, &mut idx);
         WriteFill {
-            ring: &mut *self.fill,
+            ring,
             base_idx: idx,
             reserved,
             written: 0,
@@ -483,9 +562,10 @@ impl DeviceQueue {
     /// Reap completed TX buffers from the completion ring.
     pub fn complete(&mut self, n: u32) -> ReadComplete<'_> {
         let mut idx: u32 = 0;
-        let peeked = unsafe { bridge_xsk_ring_cons_peek(&mut *self.comp, n, &mut idx) };
+        let ring = self.rings.comp_mut();
+        let peeked = unsafe { bridge_xsk_ring_cons_peek(ring, n, &mut idx) };
         ReadComplete {
-            ring: &mut *self.comp,
+            ring,
             base_idx: idx,
             peeked,
             read_count: 0,
@@ -496,15 +576,17 @@ impl DeviceQueue {
     pub fn available(&self) -> u32 {
         // Use cached_prod - cached_cons (relaxed reads via the C struct fields).
         // This matches xdpilone's DeviceQueue::available() which calls count_pending().
-        let prod = unsafe { bridge_xsk_ring_cons_producer(&*self.comp) };
-        let cons = unsafe { bridge_xsk_ring_cons_consumer(&*self.comp) };
+        let comp = self.rings.comp();
+        let prod = unsafe { bridge_xsk_ring_cons_producer(comp) };
+        let cons = unsafe { bridge_xsk_ring_cons_consumer(comp) };
         prod.wrapping_sub(cons)
     }
 
     /// Fill ring entries pending (produced - consumed by kernel).
     pub fn pending(&self) -> u32 {
-        let prod = unsafe { bridge_xsk_ring_prod_producer(&*self.fill) };
-        let cons = unsafe { bridge_xsk_ring_prod_consumer(&*self.fill) };
+        let fill = self.rings.fill();
+        let prod = unsafe { bridge_xsk_ring_prod_producer(fill) };
+        let cons = unsafe { bridge_xsk_ring_prod_consumer(fill) };
         prod.wrapping_sub(cons)
     }
 
@@ -515,7 +597,7 @@ impl DeviceQueue {
 
     /// Query if the fill ring needs wakeup.
     pub fn needs_wakeup(&self) -> bool {
-        unsafe { bridge_xsk_ring_prod_needs_wakeup(&*self.fill) != 0 }
+        unsafe { bridge_xsk_ring_prod_needs_wakeup(self.rings.fill()) != 0 }
     }
 
     /// Get XDP statistics (v2).
@@ -885,23 +967,90 @@ impl Drop for ReadComplete<'_> {
 //   4. user.map_rx() / user.map_tx()
 //   5. umem.bind(&user)
 //
-// With libxdp, `xsk_socket__create_shared` does ALL of this in one call.
+// With libxdp, xsk_socket__create or xsk_socket__create_shared does all of
+// this in one call. The private and shared entry points stay explicit because
+// their fill/completion ring ownership differs.
 
 /// Create an XSK socket bound to `ifname:queue_id`, returning all ring
 /// handles needed by the worker.
 ///
 /// `bind_flags` is the raw XDP bind flags (copy/zerocopy/need_wakeup).
-pub fn create_xsk_binding(
+///
+/// # Safety
+/// The returned `DeviceQueue` borrows this private UMEM's fill/completion ring
+/// structs. It must be dropped before `umem`, so the XSK socket is deleted
+/// while the UMEM ring structs are still live and before `xsk_umem__delete`.
+pub(crate) unsafe fn create_xsk_binding_private(
     umem: &mut Umem,
     info: &IfInfo,
     ring_entries: u32,
     bind_flags: u16,
 ) -> Result<(User, RingRx, RingTx, DeviceQueue), Errno> {
+    let umem_ptr = umem.as_raw_ptr();
+    create_xsk_binding_impl(
+        Some(umem),
+        umem_ptr,
+        info,
+        ring_entries,
+        bind_flags,
+        XskCreateMode::PrivateUmem,
+    )
+}
+
+/// Create a shared-UMEM XSK socket using per-socket fill/completion rings.
+///
+/// # Safety
+/// `umem_ptr` must be a live libxdp UMEM pointer owned by a `WorkerUmem` that
+/// outlives the returned `DeviceQueue`. The socket must be deleted before the
+/// UMEM is deleted.
+pub(crate) unsafe fn create_xsk_binding_shared(
+    umem_ptr: *mut XskUmemOpaque,
+    info: &IfInfo,
+    ring_entries: u32,
+    bind_flags: u16,
+) -> Result<(User, RingRx, RingTx, DeviceQueue), Errno> {
+    if umem_ptr.is_null() {
+        return Err(Errno(libc::EINVAL));
+    }
+    create_xsk_binding_impl(
+        None,
+        umem_ptr,
+        info,
+        ring_entries,
+        bind_flags,
+        XskCreateMode::SharedUmem,
+    )
+}
+
+/// Backward-compatible private-UMEM constructor.
+///
+/// # Safety
+/// The returned `DeviceQueue` must be dropped before `umem`; see
+/// [`create_xsk_binding_private`].
+#[allow(dead_code)]
+pub(crate) unsafe fn create_xsk_binding(
+    umem: &mut Umem,
+    info: &IfInfo,
+    ring_entries: u32,
+    bind_flags: u16,
+) -> Result<(User, RingRx, RingTx, DeviceQueue), Errno> {
+    unsafe { create_xsk_binding_private(umem, info, ring_entries, bind_flags) }
+}
+
+fn create_xsk_binding_impl(
+    mut private_umem: Option<&mut Umem>,
+    umem_ptr: *mut XskUmemOpaque,
+    info: &IfInfo,
+    ring_entries: u32,
+    bind_flags: u16,
+    mode: XskCreateMode,
+) -> Result<(User, RingRx, RingTx, DeviceQueue), Errno> {
     let ifname = info.ifname_cstring();
 
     let mut rx_ring: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
     let mut tx_ring: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
-    // libxdp allocates per-socket fill/comp rings in create_shared.
+    // Shared create uses these per-socket fill/comp rings. Private create
+    // ignores them and uses the UMEM's original fill/comp rings instead.
     let mut fill_ring: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
     let mut comp_ring: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
     let mut xsk_ptr: *mut XskSocketOpaque = core::ptr::null_mut();
@@ -911,21 +1060,38 @@ pub fn create_xsk_binding(
     let libxdp_flags: u32 = 1;
 
     let rc = unsafe {
-        bridge_xsk_socket_create(
-            &mut xsk_ptr,
-            ifname.as_ptr(),
-            info.queue_id,
-            umem.as_raw_ptr(),
-            &mut *rx_ring,
-            &mut *tx_ring,
-            &mut *fill_ring,
-            &mut *comp_ring,
-            ring_entries,
-            ring_entries,
-            libxdp_flags,
-            0,
-            bind_flags,
-        )
+        match mode {
+            XskCreateMode::PrivateUmem => bridge_xsk_socket_create_private(
+                &mut xsk_ptr,
+                ifname.as_ptr(),
+                info.queue_id,
+                umem_ptr,
+                &mut *rx_ring,
+                &mut *tx_ring,
+                &mut *fill_ring,
+                &mut *comp_ring,
+                ring_entries,
+                ring_entries,
+                libxdp_flags,
+                0,
+                bind_flags,
+            ),
+            XskCreateMode::SharedUmem => bridge_xsk_socket_create_shared(
+                &mut xsk_ptr,
+                ifname.as_ptr(),
+                info.queue_id,
+                umem_ptr,
+                &mut *rx_ring,
+                &mut *tx_ring,
+                &mut *fill_ring,
+                &mut *comp_ring,
+                ring_entries,
+                ring_entries,
+                libxdp_flags,
+                0,
+                bind_flags,
+            ),
+        }
     };
 
     if rc != 0 {
@@ -937,9 +1103,10 @@ pub fn create_xsk_binding(
     // Diagnostic: verify ring structs were populated by create_shared.
     // If any pointer is null or size/mask is 0, the ring wasn't initialised.
     eprintln!(
-        "xpf-xsk-ffi: create_xsk_binding fd={} rx_ring=[mask={:#x} size={} \
+        "xpf-xsk-ffi: create_xsk_binding mode={} fd={} rx_ring=[mask={:#x} size={} \
          producer={:?} consumer={:?} ring={:?} flags={:?} cached_prod={} cached_cons={}] \
          fill_ring=[mask={:#x} size={} cached_prod={} cached_cons={}]",
+        mode.as_str(),
         fd,
         rx_ring.mask,
         rx_ring.size,
@@ -961,14 +1128,74 @@ pub fn create_xsk_binding(
 
     let tx = RingTx { ring: tx_ring, fd };
 
-    // Non-shared create uses the UMEM's fill/comp rings (not per-socket).
-    // Take ownership from the umem to use in DeviceQueue.
+    let private_rings = private_umem
+        .as_deref_mut()
+        .map(|umem| (&mut umem.fill, &mut umem.comp));
+    let rings = device_queue_rings_for_create(private_rings, fill_ring, comp_ring);
+
     let device = DeviceQueue {
         xsk: xsk_ptr,
-        fill: std::mem::replace(&mut umem.fill, fill_ring),
-        comp: std::mem::replace(&mut umem.comp, comp_ring),
+        rings,
         fd,
     };
 
     Ok((user, rx, tx, device))
+}
+
+fn device_queue_rings_for_create(
+    private_umem_rings: Option<(&mut Box<XskRingProd>, &mut Box<XskRingCons>)>,
+    fill_ring: Box<XskRingProd>,
+    comp_ring: Box<XskRingCons>,
+) -> DeviceQueueRings {
+    match private_umem_rings {
+        Some((umem_fill, umem_comp)) => {
+            // Private create uses the UMEM's fill/comp rings. Keep ownership
+            // with `Umem`; the per-socket boxes passed to the bridge are not
+            // part of the private socket's live ring state.
+            drop(fill_ring);
+            drop(comp_ring);
+            DeviceQueueRings::BorrowedPrivateUmem {
+                fill: NonNull::from(&mut **umem_fill),
+                comp: NonNull::from(&mut **umem_comp),
+            }
+        }
+        None => {
+            // Shared create uses the per-socket fill/comp rings returned by
+            // xsk_socket__create_shared.
+            DeviceQueueRings::Owned {
+                fill: fill_ring,
+                comp: comp_ring,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_constructor_rings_borrow_umem_ring_boxes() {
+        let mut umem_fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+        let mut umem_comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+        let socket_fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+        let socket_comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+        let umem_fill_addr = (&*umem_fill) as *const XskRingProd;
+        let umem_comp_addr = (&*umem_comp) as *const XskRingCons;
+        let socket_fill_addr = (&*socket_fill) as *const XskRingProd;
+        let socket_comp_addr = (&*socket_comp) as *const XskRingCons;
+
+        let rings = device_queue_rings_for_create(
+            Some((&mut umem_fill, &mut umem_comp)),
+            socket_fill,
+            socket_comp,
+        );
+
+        assert_eq!(rings.fill() as *const XskRingProd, umem_fill_addr);
+        assert_eq!(rings.comp() as *const XskRingCons, umem_comp_addr);
+        assert_ne!(rings.fill() as *const XskRingProd, socket_fill_addr);
+        assert_ne!(rings.comp() as *const XskRingCons, socket_comp_addr);
+        assert_eq!((&*umem_fill) as *const XskRingProd, umem_fill_addr);
+        assert_eq!((&*umem_comp) as *const XskRingCons, umem_comp_addr);
+    }
 }

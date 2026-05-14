@@ -93,6 +93,121 @@ fn same_binding_plan_ignores_runtime_only_snapshot_changes() {
 }
 
 #[test]
+fn same_binding_plan_canonicalizes_shared_umem_json_set_order() {
+    let current = ConfigSnapshot {
+        userspace: serde_json::from_str(
+            r#"{
+                "workers": 2,
+                "ring_entries": 2048,
+                "shared_umem": {
+                    "mode": "cross-nic",
+                    "interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                    "phase0_artifact": {
+                        "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                        "selected_nic_pci_ids": ["0000:08:00.0", "0000:09:00.0"],
+                        "selected_device_pair": ["0000:08:00.0", "0000:09:00.0"],
+                        "mtu": {"ge-0-0-1": 1500, "ge-0-0-2": 1500}
+                    }
+                }
+            }"#,
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+    let next = ConfigSnapshot {
+        userspace: serde_json::from_str(
+            r#"{
+                "shared_umem": {
+                    "phase0_artifact": {
+                        "mtu": {"ge-0-0-2": 1500, "ge-0-0-1": 1500},
+                        "selected_device_pair": ["0000:09:00.0", "0000:08:00.0"],
+                        "selected_nic_pci_ids": ["0000:09:00.0", "0000:08:00.0"],
+                        "selected_interfaces": ["ge-0-0-2", "ge-0-0-1"]
+                    },
+                    "interfaces": ["ge-0-0-2", "ge-0-0-1"],
+                    "mode": "cross-nic"
+                },
+                "ring_entries": 2048,
+                "workers": 2
+            }"#,
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+
+    assert!(same_binding_plan(&current, &next));
+}
+
+#[test]
+fn same_binding_plan_detects_shared_umem_json_set_membership_change() {
+    let current = ConfigSnapshot {
+        userspace: serde_json::from_str(
+            r#"{
+                "workers": 2,
+                "ring_entries": 2048,
+                "shared_umem": {
+                    "mode": "cross-nic",
+                    "interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                    "phase0_artifact": {
+                        "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                        "selected_nic_pci_ids": ["0000:08:00.0", "0000:09:00.0"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+    let next = ConfigSnapshot {
+        userspace: serde_json::from_str(
+            r#"{
+                "workers": 2,
+                "ring_entries": 2048,
+                "shared_umem": {
+                    "mode": "cross-nic",
+                    "interfaces": ["ge-0-0-1", "ge-0-0-3"],
+                    "phase0_artifact": {
+                        "selected_interfaces": ["ge-0-0-1", "ge-0-0-3"],
+                        "selected_nic_pci_ids": ["0000:08:00.0", "0000:0a:00.0"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+
+    assert!(!same_binding_plan(&current, &next));
+}
+
+#[test]
+fn binding_plan_key_hashes_large_shared_umem_artifact() {
+    let huge_note = "x".repeat(1024 * 1024);
+    let snapshot = ConfigSnapshot {
+        userspace: serde_json::json!({
+            "workers": 2,
+            "ring_entries": 2048,
+            "shared_umem": {
+                "mode": "cross-nic",
+                "interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                "phase0_artifact": {
+                    "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                    "selected_nic_pci_ids": ["0000:08:00.0", "0000:09:00.0"],
+                    "diagnostic_note": huge_note
+                }
+            }
+        }),
+        ..Default::default()
+    };
+
+    let key = crate::server::helpers::snapshot_binding_plan_key(&snapshot);
+    assert!(key.starts_with("sha256:"));
+    assert_eq!(key.len(), "sha256:".len() + 64);
+    assert!(!key.contains("diagnostic_note"));
+    assert!(!key.contains('x'));
+}
+
+#[test]
 fn same_binding_plan_detects_binding_topology_change() {
     let current = ConfigSnapshot {
         userspace: serde_json::json!({

@@ -544,10 +544,37 @@ impl Coordinator {
                     ring_entries,
                     bind_strategy: preferred_bind_strategy(binding),
                     poll_mode: self.poll_mode,
+                    shared_umem: SharedUmemBindingPlan::private(),
                 });
         }
         for plans in workers.values_mut() {
             plans.sort_by_key(|plan| (plan.status.queue_id, plan.status.ifindex, plan.status.slot));
+        }
+        apply_shared_umem_policy_to_workers(snapshot, &mut workers);
+        let shared_umem_status_by_slot = workers
+            .values()
+            .flat_map(|plans| plans.iter())
+            .map(|plan| {
+                (
+                    plan.status.slot,
+                    (
+                        plan.status.shared_umem_mode.clone(),
+                        plan.status.shared_umem_group.clone(),
+                        plan.status.shared_umem_socket_role.clone(),
+                        plan.status.shared_umem_disabled_reason.clone(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for binding in bindings.iter_mut() {
+            if let Some((mode, group, role, reason)) =
+                shared_umem_status_by_slot.get(&binding.slot)
+            {
+                binding.shared_umem_mode.clone_from(mode);
+                binding.shared_umem_group.clone_from(group);
+                binding.shared_umem_socket_role.clone_from(role);
+                binding.shared_umem_disabled_reason.clone_from(reason);
+            }
         }
         let planned_bindings: usize = workers.values().map(|group| group.len()).sum();
         self.workers.last_planned_workers = workers.len();

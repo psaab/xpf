@@ -1,6 +1,7 @@
 use super::test_fixtures::*;
 use super::*;
 use crate::test_zone_ids::*;
+use crate::xsk_ffi::IfInfo;
 use crate::{
     DestinationNATRuleSnapshot, InterfaceAddressSnapshot, PolicyRuleSnapshot,
     SourceNATRuleSnapshot, StaticNATRuleSnapshot,
@@ -37,6 +38,28 @@ fn virtio_uses_auto_mode_umem_owner_strategy() {
         bind_flag_candidates_for_driver(Some("mlx5_core")),
         &[XSK_BIND_FLAGS_ZEROCOPY, XSK_BIND_FLAGS_COPY]
     );
+}
+
+#[test]
+fn shared_umem_socket_roles_use_kernel_legal_bind_flags() {
+    let mut info = IfInfo::invalid();
+    info.set_queue(0);
+
+    assert_eq!(
+        bind_flag_candidates_for_socket_role(&info, Some("mlx5_core"), XskSocketRole::SharedOwner),
+        &[XSK_BIND_FLAGS_ZEROCOPY]
+    );
+
+    let secondary = bind_flag_candidates_for_socket_role(
+        &info,
+        Some("mlx5_core"),
+        XskSocketRole::SharedSecondary,
+    );
+    assert_eq!(secondary, &[SocketConfig::XDP_BIND_SHARED_UMEM]);
+    assert_eq!(secondary[0] & SocketConfig::XDP_BIND_COPY, 0);
+    assert_eq!(secondary[0] & SocketConfig::XDP_BIND_ZEROCOPY, 0);
+    assert_eq!(secondary[0] & SocketConfig::XDP_BIND_NEED_WAKEUP, 0);
+    assert_eq!(describe_bind_flags(secondary[0]), "shared-umem");
 }
 
 #[test]

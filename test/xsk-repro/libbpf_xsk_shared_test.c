@@ -6,7 +6,10 @@
  * Build: cc -O2 -o libbpf-xsk-shared-test libbpf_xsk_shared_test.c \
  *        -Wl,-Bstatic -lxdp -lbpf -lelf -lz -lzstd -Wl,-Bdynamic -lpthread
  *
- * Usage: ./libbpf-xsk-shared-test <interface> <queue> [copy|zerocopy]
+ * Usage:
+ *   ./libbpf-xsk-shared-test <owner-iface> <owner-queue> [copy|zerocopy]
+ *   ./libbpf-xsk-shared-test <owner-iface> <owner-queue> \
+ *       <secondary-iface> <secondary-queue> [copy|zerocopy]
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -18,8 +21,10 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <net/if.h>
 #include <linux/if_link.h>
+#include <linux/if_xdp.h>
 #include <linux/bpf.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -28,6 +33,16 @@
 #define FRAME_SIZE  4096
 #define NUM_FRAMES  4096
 #define BATCH_SIZE  64
+
+static int xsk_reports_zerocopy(int fd)
+{
+    struct xdp_options opts;
+    socklen_t optlen = sizeof(opts);
+    memset(&opts, 0, sizeof(opts));
+    if (getsockopt(fd, SOL_XDP, XDP_OPTIONS, &opts, &optlen) != 0)
+        return -1;
+    return (opts.flags & XDP_OPTIONS_ZEROCOPY) != 0;
+}
 
 static int load_xdp(int ifindex, int *map_fd_out)
 {
@@ -46,11 +61,14 @@ static int load_xdp(int ifindex, int *map_fd_out)
 }
 
 static unsigned long test_phase(const char *label, const char *iface,
-    int queue, int map_fd, int use_copy, struct xsk_umem *umem,
+    int queue, const char *secondary_iface, int secondary_queue,
+    int map_fd, int use_copy, struct xsk_umem *umem,
     struct xsk_ring_prod *umem_fill, struct xsk_ring_cons *umem_comp,
     void *umem_area)
 {
     printf("\n=== %s ===\n", label);
+    (void)umem_comp;
+    (void)umem_area;
 
     /* Per-socket rings for create_shared */
     struct xsk_ring_cons rx;
@@ -58,6 +76,11 @@ static unsigned long test_phase(const char *label, const char *iface,
     struct xsk_ring_prod fill;
     struct xsk_ring_cons comp;
     struct xsk_socket *xsk = NULL;
+    struct xsk_ring_cons secondary_rx;
+    struct xsk_ring_prod secondary_tx;
+    struct xsk_ring_prod secondary_fill;
+    struct xsk_ring_cons secondary_comp;
+    struct xsk_socket *secondary_xsk = NULL;
 
     struct xsk_socket_config cfg = {
         .rx_size = NUM_FRAMES,
@@ -75,6 +98,49 @@ static unsigned long test_phase(const char *label, const char *iface,
     }
     int xsk_fd = xsk_socket__fd(xsk);
     printf("  create_shared ok, fd=%d %s\n", xsk_fd, use_copy ? "copy" : "zerocopy");
+    int zc = xsk_reports_zerocopy(xsk_fd);
+    printf("  owner XDP_OPTIONS_ZEROCOPY=%d\n", zc);
+    if (!use_copy && zc != 1) {
+        fprintf(stderr, "  owner did not report zero-copy after bind\n");
+        xsk_socket__delete(xsk);
+        return 0;
+    }
+
+    if (secondary_iface) {
+        struct xsk_socket_config secondary_cfg = {
+            .rx_size = NUM_FRAMES,
+            .tx_size = 256,
+            .bind_flags = XDP_SHARED_UMEM,
+            .libxdp_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
+            .xdp_flags = 0,
+        };
+        err = xsk_socket__create_shared(&secondary_xsk, secondary_iface,
+                                        secondary_queue, umem,
+                                        &secondary_rx, &secondary_tx,
+                                        &secondary_fill, &secondary_comp,
+                                        &secondary_cfg);
+        if (err) {
+            fprintf(stderr,
+                    "  secondary create_shared(flags=XDP_SHARED_UMEM) failed: %s (rc=%d)\n",
+                    strerror(-err), err);
+            xsk_socket__delete(xsk);
+            return 0;
+        }
+        int secondary_fd = xsk_socket__fd(secondary_xsk);
+        int secondary_zc = xsk_reports_zerocopy(secondary_fd);
+        printf("  secondary create_shared ok iface=%s queue=%d fd=%d flags=0x%x zerocopy=%d\n",
+               secondary_iface, secondary_queue, secondary_fd, XDP_SHARED_UMEM,
+               secondary_zc);
+        printf("  secondary rings rx_size=%u tx_size=%u fill_size=%u comp_size=%u\n",
+               secondary_rx.size, secondary_tx.size, secondary_fill.size,
+               secondary_comp.size);
+        if (!use_copy && secondary_zc != 1) {
+            fprintf(stderr, "  secondary did not report zero-copy after bind\n");
+            xsk_socket__delete(secondary_xsk);
+            xsk_socket__delete(xsk);
+            return 0;
+        }
+    }
 
     /* Register in xskmap */
     __u32 key = queue, val = xsk_fd;
@@ -142,6 +208,8 @@ static unsigned long test_phase(const char *label, const char *iface,
 
     /* Cleanup */
     bpf_map_delete_elem(map_fd, &key);
+    if (secondary_xsk)
+        xsk_socket__delete(secondary_xsk);
     xsk_socket__delete(xsk);
     return total;
 }
@@ -149,17 +217,30 @@ static unsigned long test_phase(const char *label, const char *iface,
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <iface> <queue> [copy|zerocopy]\n", argv[0]);
+        fprintf(stderr,
+                "Usage: %s <owner-iface> <owner-queue> [secondary-iface secondary-queue] [copy|zerocopy]\n",
+                argv[0]);
         return 1;
     }
     const char *iface = argv[1];
     int queue = atoi(argv[2]);
-    int use_copy = (argc > 3 && strcmp(argv[3], "copy") == 0);
+    const char *secondary_iface = NULL;
+    int secondary_queue = queue;
+    int mode_arg = 3;
+    if (argc > 4 && strcmp(argv[3], "copy") != 0 && strcmp(argv[3], "zerocopy") != 0) {
+        secondary_iface = argv[3];
+        secondary_queue = atoi(argv[4]);
+        mode_arg = 5;
+    }
+    int use_copy = (argc > mode_arg && strcmp(argv[mode_arg], "copy") == 0);
     int ifindex = if_nametoindex(iface);
 
     printf("=== xsk_socket__create_shared test ===\n");
     printf("interface=%s queue=%d mode=%s\n", iface, queue,
            use_copy ? "copy" : "zerocopy");
+    if (secondary_iface)
+        printf("secondary_interface=%s secondary_queue=%d secondary_flags=XDP_SHARED_UMEM\n",
+               secondary_iface, secondary_queue);
 
     /* Load XDP program */
     int map_fd;
@@ -196,7 +277,8 @@ int main(int argc, char **argv)
 
     /* Phase 1: create_shared */
     unsigned long rx1 = test_phase("Phase 1: create_shared (initial)",
-        iface, queue, map_fd, use_copy, umem, &umem_fill, &umem_comp, umem_area);
+        iface, queue, secondary_iface, secondary_queue, map_fd, use_copy, umem,
+        &umem_fill, &umem_comp, umem_area);
 
     kill(child, 9);
     waitpid(child, NULL, 0);
