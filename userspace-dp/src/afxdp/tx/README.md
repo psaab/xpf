@@ -40,10 +40,12 @@ writer to synchronize against.
   mode. Any path that drops, demotes, bounds, cancels, or rejects a
   `PreparedTxRequest` must call the `_with_shared` recycle helper while
   carrying the worker's shared recycle accumulator, then route the
-  `(slot, offset)` records back through the binding lookup. Unknown
-  recycle slots must fail closed and increment `tx_errors` on the worker
-  status surface; never push a foreign offset into an arbitrary binding's
-  fill ring.
+  `(slot, offset)` records back through the shared slot-resolution helper.
+  The split-slice path used while holding the ingress binding and the
+  all-bindings cleanup path must share this resolver so stale lookup entries
+  are handled identically. Unknown recycle slots must fail closed and
+  increment `tx_errors` on the worker status surface; never push a foreign
+  offset into an arbitrary binding's fill ring.
 - `Ordering::Relaxed` is intentional and correct given the
   single-writer invariant. Don't promote without proving a second
   writer exists.

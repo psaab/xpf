@@ -461,3 +461,6 @@
 - **Timestamp**: 2026-05-14T07:10:00Z
   - **Action**: Harden the userspace HA smoke validator after live PR #1301 smoke: retry preferred-node failover while XSK liveness propagates into RG readiness, set the default throughput shape to `PARALLEL=6` so the smoke covers the six-worker RSS set, and document the IPv6 external-`mtr` warning semantics.
   - **File(s)**: `scripts/userspace-ha-validation.sh`, `docs/userspace-ha-validation.md`, `.codex/skills/userspace-ha-validation/SKILL.md`, `_Log.md`
+- **Timestamp**: 2026-05-14T07:35:00Z
+  - **Action**: PR #1301 round-6 minor follow-up: make the split-slice shared-recycle router use the same slot-resolution helper as the all-bindings cleanup path and add split-slice stale/unknown lookup regression coverage.
+  - **File(s)**: `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/dispatch_tests.rs`, `userspace-dp/src/afxdp/tx/README.md`, `_Log.md`

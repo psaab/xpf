@@ -1014,41 +1014,57 @@ fn route_shared_recycle_by_slot(
     slot: u32,
     offset: u64,
 ) -> bool {
-    if let Some(target_index) = binding_lookup.slot_index(slot) {
-        if target_index == current_index {
-            if current.slot == slot {
-                current.tx_pipeline.pending_fill_frames.push_back(offset);
-                return true;
-            }
-        } else if target_index < current_index {
-            if let Some(binding) = left
-                .get_mut(target_index)
-                .filter(|binding| binding.slot == slot)
-            {
-                binding.tx_pipeline.pending_fill_frames.push_back(offset);
-                return true;
-            }
-        } else if let Some(binding) = right
-            .get_mut(target_index.saturating_sub(current_index + 1))
-            .filter(|binding| binding.slot == slot)
-        {
-            binding.tx_pipeline.pending_fill_frames.push_back(offset);
-            return true;
-        }
-    }
-    if current.slot == slot {
-        current.tx_pipeline.pending_fill_frames.push_back(offset);
-        return true;
-    }
-    if let Some(binding) = left
-        .iter_mut()
-        .chain(right.iter_mut())
-        .find(|binding| binding.slot == slot)
+    let target_index = shared_recycle_target_index_for_split(
+        left.len(),
+        right.len(),
+        binding_lookup,
+        slot,
+        |idx| split_binding_slot_at(left, current_index, current, right, idx),
+    );
+    if let Some(target_index) = target_index
+        && let Some(binding) =
+            binding_by_index_mut(left, current_index, current, right, target_index)
     {
         binding.tx_pipeline.pending_fill_frames.push_back(offset);
         return true;
     }
     false
+}
+
+fn shared_recycle_target_index_for_split<F>(
+    left_len: usize,
+    right_len: usize,
+    binding_lookup: &WorkerBindingLookup,
+    slot: u32,
+    slot_at: F,
+) -> Option<usize>
+where
+    F: FnMut(usize) -> Option<u32>,
+{
+    shared_recycle_target_index(
+        left_len.saturating_add(1).saturating_add(right_len),
+        binding_lookup,
+        slot,
+        slot_at,
+    )
+}
+
+fn split_binding_slot_at(
+    left: &[BindingWorker],
+    current_index: usize,
+    current: &BindingWorker,
+    right: &[BindingWorker],
+    target_index: usize,
+) -> Option<u32> {
+    if target_index == current_index {
+        return Some(current.slot);
+    }
+    if target_index < current_index {
+        return left.get(target_index).map(|binding| binding.slot);
+    }
+    right
+        .get(target_index.saturating_sub(current_index + 1))
+        .map(|binding| binding.slot)
 }
 
 fn shared_recycle_target_index<F>(
