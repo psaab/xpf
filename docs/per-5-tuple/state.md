@@ -427,6 +427,14 @@ metric honest: it answers "what throughput would strict equal-flow
 suppression cost on this queue right now?" before any enforcement mode
 is designed.
 
+Issue #1306 makes the class sweep preserve that evidence directly:
+each class artifact gets an `equal-flow/` directory with the raw
+Prometheus scrape stream plus reduced aggregate and worker TSV/JSON
+summaries for the target `COS_IFINDEX` and queue. The sweep fails closed
+with exit `2` if those required estimator rows are absent, the scrape
+stream is empty or truncated, or the active-worker-count gauges are not
+integer counts.
+
 ### PR #1241 — TX completion uniformity telemetry
 
 Before the next full fairness measurement, the dataplane must expose

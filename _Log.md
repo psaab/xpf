@@ -2,6 +2,18 @@
 
 ## 2026-05-14
 
+- **Timestamp**: 2026-05-14T19:33:03Z
+  - **Action**: PR #1308 round-2 review follow-up — added explicit equal-flow scrape framing tests for nested begin and end-without-begin paths, added the missing `BindingCountersSnapshot` round-trip pin for `tx_shared_recycle_unknown_slot_drops`, applied `gofmt` to `protocol.go`, and renamed sweep progress output from `wrapper_status` to `exit_status` with a named infrastructure-exit constant.
+  - **File(s)**: `test/incus/fairness_multi_sample_test.py`, `test/incus/fairness-cos-class-sweep.sh`, `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/protocol_test.go`, `_Log.md`
+
+- **Timestamp**: 2026-05-14T19:19:32Z
+  - **Action**: PR #1308 round-1 review follow-up — made equal-flow capture reduction fail closed on SIGTERM-truncated marked scrapes and non-integer active-worker counts, and made sweep summary rows report infrastructure exit status `2` when equal-flow capture fails after the wrapper succeeds.
+  - **File(s)**: `test/incus/fairness_equal_flow_capture.py`, `test/incus/fairness-cos-class-sweep.sh`, `test/incus/fairness_multi_sample_test.py`, `docs/fairness-regimes.md`, `docs/per-5-tuple/state.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-14T18:35:00Z
+  - **Action**: Issue #1306 — add first-class per-class equal-flow estimator capture to the CoS class sweep harness. The sweep now brackets each wrapper run with continuous Prometheus scraping, preserves raw scrapes, reduces target-class equal-flow aggregate/worker rows, appends equal-flow evidence to `summary.md`, and fails closed on empty/missing/invalid estimator captures.
+  - **File(s)**: `test/incus/fairness-cos-class-sweep.sh`, `test/incus/fairness_equal_flow_capture.py`, `test/incus/fairness_multi_sample_test.py`, `docs/fairness-regimes.md`, `docs/per-5-tuple/state.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-14T17:53:10Z
   - **Action**: PR #1305 round-3 review follow-up — extended artifact-warning wording to the equal-flow capped-bps, worker-cap-bps, and throughput-loss-ratio Prometheus help strings.
   - **File(s)**: `pkg/api/metrics.go`, `_Log.md`
@@ -468,6 +480,9 @@
   - **Action**: Close PR #1301 round-4 recycle-routing and mixed-mode safety blockers: thread the shared recycle accumulator through close-delta purge, pending TX bound/drop, CoS enqueue demotion, cross-binding prepared redirect, queue-service prepared rejection, neighbor retry, CoS runtime reset, and worker-shaped request paths; remove local-only prepared recycle exports; remove arbitrary-binding fallback for unknown shared recycle slots.
   - **File(s)**: `userspace-dp/src/afxdp/tx/transmit.rs`, `userspace-dp/src/afxdp/tx/mod.rs`, `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/drain.rs`, `userspace-dp/src/afxdp/tx/cos_classify.rs`, `userspace-dp/src/afxdp/tx/tcp_segmentation.rs`, `userspace-dp/src/afxdp/cos/cross_binding.rs`, `userspace-dp/src/afxdp/cos/queue_service/mod.rs`, `userspace-dp/src/afxdp/cos/queue_service/service.rs`, `userspace-dp/src/afxdp/cos/queue_service/drain.rs`, `userspace-dp/src/afxdp/session_glue/mod.rs`, `userspace-dp/src/afxdp/session_delta.rs`, `userspace-dp/src/afxdp/neighbor_dispatch.rs`, `userspace-dp/src/afxdp/worker/cos.rs`, `userspace-dp/src/afxdp/worker/lifecycle.rs`, `userspace-dp/src/afxdp/worker/mod.rs`, `userspace-dp/src/afxdp/tx/README.md`, `userspace-dp/src/afxdp/cos/README.md`, `docs/shared-umem-plan.md`, `_Log.md`
   - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml cancelled_prepared --no-run`; `cargo test --manifest-path userspace-dp/Cargo.toml shared_umem -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml cancelled_prepared -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml drain_exact_prepared -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml demote_prepared -- --nocapture`; `go test ./pkg/dataplane/userspace ./pkg/config`; `git diff --check`
+- **Timestamp**: 2026-05-14T18:55:40Z
+  - **Action**: #1307 minimal TX-error attribution: add `tx_shared_recycle_unknown_slot_drops` as a per-binding subset of `tx_errors` for shared-UMEM unknown-slot recycle drops, mirror it through Rust/Go status, and make the local fallback `TxError::Drop` path increment `tx_submit_error_drops`.
+  - **File(s)**: `userspace-dp/src/afxdp/umem/mod.rs`, `userspace-dp/src/afxdp/worker/mod.rs`, `userspace-dp/src/afxdp/coordinator/mod.rs`, `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/session_glue/mod.rs`, `userspace-dp/src/afxdp/tx/drain.rs`, `userspace-dp/src/protocol.rs`, `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/statusfmt.go`, `userspace-dp/src/afxdp/tx/README.md`, `docs/shared-umem-plan.md`, `_Log.md`
 - **Timestamp**: 2026-05-14T06:05:00Z
   - **Action**: Fix shared-UMEM live-status publication discovered during cluster smoke: the shared bind path now publishes the selected mode/group/role into `BindingLiveState` before worker refresh so status snapshots match the kernel bind result instead of reporting `Shared UMEM bindings: 0/N`.
   - **File(s)**: `userspace-dp/src/afxdp/worker/mod.rs`, `userspace-dp/src/afxdp/worker/README.md`, `_Log.md`

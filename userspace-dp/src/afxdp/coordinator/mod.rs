@@ -1183,6 +1183,8 @@ impl Coordinator {
                 binding.tx_bytes = snap.tx_bytes;
                 binding.tx_completions = snap.tx_completions;
                 binding.tx_errors = snap.tx_errors;
+                binding.tx_shared_recycle_unknown_slot_drops =
+                    snap.tx_shared_recycle_unknown_slot_drops;
                 binding.redirect_inbox_overflow_drops = snap.redirect_inbox_overflow_drops;
                 binding.pending_tx_local_overflow_drops = snap.pending_tx_local_overflow_drops;
                 binding.tx_submit_error_drops = snap.tx_submit_error_drops;
@@ -1333,6 +1335,7 @@ impl Coordinator {
                 binding.tx_bytes = 0;
                 binding.tx_completions = 0;
                 binding.tx_errors = 0;
+                binding.tx_shared_recycle_unknown_slot_drops = 0;
                 binding.post_drain_backup_bytes = 0;
                 binding.drain_sent_bytes_shaped_unconditional = 0;
                 binding.post_drain_backup_cos_drops = 0;

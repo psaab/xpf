@@ -26,11 +26,13 @@ ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
 HARNESS=${HARNESS:-$ROOT_DIR/test/incus/fairness-harness.sh}
 WRAPPER=${WRAPPER:-$ROOT_DIR/test/incus/fairness_multi_sample.py}
 FAIRNESS_EVAL=${FAIRNESS_EVAL:-$ROOT_DIR/userspace-dp/target/release/fairness-eval}
+EQUAL_FLOW_CAPTURE=${EQUAL_FLOW_CAPTURE:-$ROOT_DIR/test/incus/fairness_equal_flow_capture.py}
 CAPTURE_DATAPLANE=${CAPTURE_DATAPLANE:-1}
 DATAPLANE_VM=${DATAPLANE_VM:-loss:xpf-userspace-fw0}
 DATAPLANE_STATUS_PATH=${DATAPLANE_STATUS_PATH:-/run/xpf/userspace-dp.json}
 DATAPLANE_STATS_CMD=${DATAPLANE_STATS_CMD:-"cli -c 'show chassis cluster data-plane statistics'"}
 DATAPLANE_CAPTURE_TIMEOUT_SEC=${DATAPLANE_CAPTURE_TIMEOUT_SEC:-20}
+readonly INFRA_EXIT_STATUS=2
 
 if [[ -z "$COS_IFINDEX" ]]; then
     echo "fairness-cos-class-sweep: COS_IFINDEX is required for the shaped egress interface" >&2
@@ -49,6 +51,18 @@ if [[ ! -x "$FAIRNESS_EVAL" ]]; then
     echo "  build with: cargo build --manifest-path userspace-dp/Cargo.toml --release --bin fairness-eval" >&2
     exit 2
 fi
+if [[ ! -f "$EQUAL_FLOW_CAPTURE" ]]; then
+    echo "fairness-cos-class-sweep: equal-flow capture reducer not found: $EQUAL_FLOW_CAPTURE" >&2
+    exit 2
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "fairness-cos-class-sweep: python3 is required for equal-flow estimator capture" >&2
+    exit 2
+fi
+if ! command -v curl >/dev/null 2>&1; then
+    echo "fairness-cos-class-sweep: curl is required for Prometheus metrics capture" >&2
+    exit 2
+fi
 if ! command -v jq >/dev/null 2>&1; then
     echo "fairness-cos-class-sweep: jq is required to build the aggregate summary" >&2
     exit 2
@@ -62,8 +76,13 @@ fi
 SUMMARY_TSV="$ARTIFACT_ROOT/summary.tsv"
 SUMMARY_MD="$ARTIFACT_ROOT/summary.md"
 DATAPLANE_SUMMARY_TSV="$ARTIFACT_ROOT/dataplane-summary.tsv"
+EQUAL_FLOW_SUMMARY_TSV="$ARTIFACT_ROOT/equal-flow-summary.tsv"
 if ! rm -f "$DATAPLANE_SUMMARY_TSV"; then
     echo "fairness-cos-class-sweep: failed to remove stale dataplane summary: $DATAPLANE_SUMMARY_TSV" >&2
+    exit 2
+fi
+if ! rm -f "$EQUAL_FLOW_SUMMARY_TSV"; then
+    echo "fairness-cos-class-sweep: failed to remove stale equal-flow summary: $EQUAL_FLOW_SUMMARY_TSV" >&2
     exit 2
 fi
 
@@ -105,7 +124,7 @@ class_selected() {
 }
 
 mark_parse_error() {
-    overall_status=2
+    overall_status=$INFRA_EXIT_STATUS
 }
 
 append_error_row() {
@@ -117,12 +136,132 @@ append_error_row() {
 
     printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\n' \
         "$label" "$port" "$queue" "$rate" "$status" >> "$SUMMARY_TSV"
-    printf "summary class=%s wrapper_status=%s verdict=ERROR mean_cov=- max_cov=-\n" \
+    printf "summary class=%s exit_status=%s verdict=ERROR mean_cov=- max_cov=-\n" \
         "$label" "$status"
 }
 
 mark_dataplane_error() {
     dataplane_status=2
+}
+
+scrape_equal_flow_metrics() {
+    local dir=$1
+    local raw="$dir/metrics-raw.prom"
+    local stderr="$dir/metrics-scrape.stderr"
+
+    : > "$raw"
+    : > "$stderr"
+    while true; do
+        local ts
+        local metrics
+        local curl_status=0
+        ts=$(date +%s)
+        if metrics=$(curl -sS --max-time 1 "$METRICS_URL" 2>>"$stderr"); then
+            curl_status=0
+        else
+            curl_status=$?
+            metrics=
+        fi
+        {
+            printf '# xpf_fairness_scrape_begin timestamp=%s\n' "$ts"
+            if [[ "$curl_status" -ne 0 ]]; then
+                printf '# xpf_fairness_scrape_error timestamp=%s status=%s\n' "$ts" "$curl_status"
+            fi
+            if [[ -z "$metrics" ]]; then
+                printf '# xpf_fairness_scrape_empty timestamp=%s\n' "$ts"
+            else
+                printf '%s\n' "$metrics"
+            fi
+            printf '# xpf_fairness_scrape_end timestamp=%s\n' "$ts"
+        } >> "$raw"
+        sleep 1
+    done
+}
+
+start_equal_flow_class_capture() {
+    local dir=$1
+
+    mkdir -p "$dir"
+    scrape_equal_flow_metrics "$dir" &
+    EQUAL_FLOW_CAPTURE_PID=$!
+}
+
+stop_equal_flow_class_capture() {
+    local pid=$1
+
+    [[ -n "$pid" ]] || return 0
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
+analyze_equal_flow_class_capture() {
+    local dir=$1
+    local queue=$2
+
+    python3 "$EQUAL_FLOW_CAPTURE" \
+        --raw "$dir/metrics-raw.prom" \
+        --ifindex "$COS_IFINDEX" \
+        --queue-id "$queue" \
+        --summary-json "$dir/summary.json" \
+        --aggregate-tsv "$dir/aggregate.tsv" \
+        --worker-tsv "$dir/worker.tsv" \
+        2> "$dir/reducer.stderr"
+}
+
+append_equal_flow_class_summary() {
+    local label=$1
+    local port=$2
+    local queue=$3
+    local rate=$4
+    local summary_json=$5
+    local class_summary_tsv=$6
+    local row_file="${class_summary_tsv}.row"
+
+    if [[ ! -f "$EQUAL_FLOW_SUMMARY_TSV" ]]; then
+        cat > "$EQUAL_FLOW_SUMMARY_TSV" <<'HEADER'
+class	port	queue_id	rate_bps	scrape_count	target_scrape_count	valid_scrape_count	target_per_flow_bps_mean	observed_bps_mean	capped_bps_mean	suppressed_bps_mean	throughput_loss_ratio_mean	unsampled_active_workers_max	worker_count_latest
+HEADER
+    fi
+    cat > "$class_summary_tsv" <<'HEADER'
+class	port	queue_id	rate_bps	scrape_count	target_scrape_count	valid_scrape_count	target_per_flow_bps_mean	observed_bps_mean	capped_bps_mean	suppressed_bps_mean	throughput_loss_ratio_mean	unsampled_active_workers_max	worker_count_latest
+HEADER
+
+    if ! jq -er \
+        --arg class "$label" \
+        --arg port "$port" \
+        --arg queue "$queue" \
+        --arg rate "$rate" \
+        '
+        def required_number(path; field_name):
+            getpath(path) as $value
+            | if ($value | type) == "number" then
+                $value
+            else
+                error("equal-flow summary missing numeric " + field_name)
+            end;
+        [
+            $class,
+            $port,
+            $queue,
+            $rate,
+            (required_number(["scrape_count"]; "scrape_count") | tostring),
+            (required_number(["target_scrape_count"]; "target_scrape_count") | tostring),
+            (required_number(["complete_scrape_count"]; "complete_scrape_count") | tostring),
+            (required_number(["series", "target_per_flow_bps", "mean"]; "series.target_per_flow_bps.mean") | tostring),
+            (required_number(["series", "observed_bps", "mean"]; "series.observed_bps.mean") | tostring),
+            (required_number(["series", "capped_bps", "mean"]; "series.capped_bps.mean") | tostring),
+            (required_number(["series", "suppressed_bps", "mean"]; "series.suppressed_bps.mean") | tostring),
+            (required_number(["series", "throughput_loss_ratio", "mean"]; "series.throughput_loss_ratio.mean") | tostring),
+            (required_number(["series", "unsampled_active_workers", "max"]; "series.unsampled_active_workers.max") | tostring),
+            (required_number(["latest", "worker_count"]; "latest.worker_count") | tostring)
+        ] | @tsv
+        ' "$summary_json" > "$row_file"; then
+        rm -f "$row_file"
+        return 1
+    fi
+    cat "$row_file" >> "$EQUAL_FLOW_SUMMARY_TSV" || return 1
+    cat "$row_file" >> "$class_summary_tsv" || return 1
+    rm -f "$row_file"
 }
 
 capture_dataplane_enabled() {
@@ -231,6 +370,7 @@ write_dataplane_delta() {
         def sum_cos($s; $f): [($s.cos_interfaces // [])[]? | (.queues // [])[]? | .[$f] // 0] | add // 0;
         def counters($s): {
             tx_errors: sum_counter($s; "tx_errors"),
+            tx_shared_recycle_unknown_slot_drops: sum_counter($s; "tx_shared_recycle_unknown_slot_drops"),
             tx_submit_error_drops: sum_counter($s; "tx_submit_error_drops"),
             pending_tx_local_overflow_drops: sum_counter($s; "pending_tx_local_overflow_drops"),
             dbg_tx_ring_full: sum_counter($s; "dbg_tx_ring_full"),
@@ -336,7 +476,7 @@ append_dataplane_class_summary() {
 
     if [[ ! -f "$DATAPLANE_SUMMARY_TSV" ]]; then
         cat > "$DATAPLANE_SUMMARY_TSV" <<'HEADER'
-class	tx_errors_delta	tx_submit_error_drops_delta	pending_tx_local_overflow_drops_delta	dbg_tx_ring_full_delta	dbg_sendto_enobufs_delta	dbg_bound_pending_overflow_delta	dbg_cos_queue_overflow_delta	redirect_inbox_overflow_drops_delta	admission_flow_share_drops_delta	admission_buffer_drops_delta	admission_ecn_marked_delta	tx_ring_full_submit_stalls_delta	binding_post_drain_backup_cos_drops_delta
+class	tx_errors_delta	tx_shared_recycle_unknown_slot_drops_delta	tx_submit_error_drops_delta	pending_tx_local_overflow_drops_delta	dbg_tx_ring_full_delta	dbg_sendto_enobufs_delta	dbg_bound_pending_overflow_delta	dbg_cos_queue_overflow_delta	redirect_inbox_overflow_drops_delta	admission_flow_share_drops_delta	admission_buffer_drops_delta	admission_ecn_marked_delta	tx_ring_full_submit_stalls_delta	binding_post_drain_backup_cos_drops_delta
 HEADER
     fi
 
@@ -345,6 +485,7 @@ HEADER
         | [
             $class,
             ($d.tx_errors // 0),
+            ($d.tx_shared_recycle_unknown_slot_drops // 0),
             ($d.tx_submit_error_drops // 0),
             ($d.pending_tx_local_overflow_drops // 0),
             ($d.dbg_tx_ring_full // 0),
@@ -386,6 +527,9 @@ for spec in "${selected_classes[@]}"; do
 
     echo "=== $(date -Is) class=$label port=$port queue=$queue rate=$rate ==="
     capture_dataplane_snapshot before "$out"
+    equal_flow_dir="$out/equal-flow"
+    EQUAL_FLOW_CAPTURE_PID=
+    start_equal_flow_class_capture "$equal_flow_dir"
     env \
         FAIRNESS_EVAL="$FAIRNESS_EVAL" \
         COS_IFINDEX="$COS_IFINDEX" \
@@ -401,16 +545,35 @@ for spec in "${selected_classes[@]}"; do
             -- "$TARGET" "$port" "$N" "$DURATION" "$REVERSE" "$METRICS_URL" \
         > "$out/wrapper.stdout" 2> "$out/wrapper.stderr"
     status=$?
+    stop_equal_flow_class_capture "$EQUAL_FLOW_CAPTURE_PID"
+    analyze_equal_flow_class_capture "$equal_flow_dir" "$queue"
+    equal_flow_status=$?
+    if (( equal_flow_status == 0 )); then
+        append_equal_flow_class_summary "$label" "$port" "$queue" "$rate" "$equal_flow_dir/summary.json" "$equal_flow_dir/summary.tsv" \
+            2> "$equal_flow_dir/summary-row.stderr"
+        equal_flow_status=$?
+    fi
     capture_dataplane_snapshot after "$out"
     write_dataplane_delta "$out/dataplane/status-before.json" "$out/dataplane/status-after.json" "$out/dataplane"
     append_dataplane_class_summary "$label" "$out/dataplane/counter-delta.json"
-    if (( status == 2 )); then
-        overall_status=2
+    if (( equal_flow_status != 0 )); then
+        overall_status=$INFRA_EXIT_STATUS
+        append_error_row "$label" "$port" "$queue" "$rate" "$INFRA_EXIT_STATUS"
+        echo "fairness-cos-class-sweep: invalid equal-flow estimator capture for $label: $equal_flow_dir" >&2
+        [[ -f "$equal_flow_dir/reducer.stderr" ]] && sed -n '1,80p' "$equal_flow_dir/reducer.stderr" >&2
+        [[ -f "$equal_flow_dir/summary-row.stderr" ]] && sed -n '1,80p' "$equal_flow_dir/summary-row.stderr" >&2
+        if (( status == INFRA_EXIT_STATUS || (status != 0 && status != 1) )); then
+            sed -n '1,80p' "$out/wrapper.stderr" >&2
+        fi
+        continue
+    fi
+    if (( status == INFRA_EXIT_STATUS )); then
+        overall_status=$INFRA_EXIT_STATUS
         append_error_row "$label" "$port" "$queue" "$rate" "$status"
         sed -n '1,80p' "$out/wrapper.stderr" >&2
         continue
     elif (( status != 0 && status != 1 )); then
-        overall_status=2
+        overall_status=$INFRA_EXIT_STATUS
         append_error_row "$label" "$port" "$queue" "$rate" "$status"
         sed -n '1,80p' "$out/wrapper.stderr" >&2
         continue
@@ -488,7 +651,7 @@ for spec in "${selected_classes[@]}"; do
                 ($sample_verdicts | join(","))
             ] | @tsv' "$summary_json" > "$row_file" 2> "$jq_err"; then
             cat "$row_file" >> "$SUMMARY_TSV"
-            awk -F'\t' '{printf "summary class=%s wrapper_status=%s verdict=%s mean_cov=%s max_cov=%s\n", $1, $5, $6, $7, $8}' "$row_file"
+            awk -F'\t' '{printf "summary class=%s exit_status=%s verdict=%s mean_cov=%s max_cov=%s\n", $1, $5, $6, $7, $8}' "$row_file"
         else
             mark_parse_error
             append_error_row "$label" "$port" "$queue" "$rate" "$status"
@@ -506,7 +669,7 @@ capture_dataplane_snapshot after "$ARTIFACT_ROOT"
 capture_dataplane_journal "$ARTIFACT_ROOT" "$SWEEP_START_ISO"
 write_dataplane_delta "$ARTIFACT_ROOT/dataplane/status-before.json" "$ARTIFACT_ROOT/dataplane/status-after.json" "$ARTIFACT_ROOT/dataplane"
 if (( dataplane_status != 0 )); then
-    overall_status=2
+    overall_status=$INFRA_EXIT_STATUS
 fi
 
 {
@@ -523,6 +686,15 @@ fi
         printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
             "$class" "$port" "$queue" "$verdict" "$mean" "$max" "$stdev" "$mbps" "$util" "$cstruct" "$mean_gap" "$max_gap" "$starved" "$per_run"
     done
+    if [[ -f "$EQUAL_FLOW_SUMMARY_TSV" ]]; then
+        printf '\n## Equal-Flow Estimator Capture\n\n'
+        printf '| Class | Port | Queue | Scrapes | Target scrapes | Valid scrapes | Target per-flow bps mean | Observed bps mean | Capped bps mean | Suppressed bps mean | Loss ratio mean | Unsampled active workers max | Worker rows latest |\n'
+        printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n'
+        tail -n +2 "$EQUAL_FLOW_SUMMARY_TSV" | while IFS=$'\t' read -r class port queue _rate scrapes target_scrapes valid_scrapes target_bps observed_bps capped_bps suppressed_bps loss_ratio unsampled_max worker_count; do
+            printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+                "$class" "$port" "$queue" "$scrapes" "$target_scrapes" "$valid_scrapes" "$target_bps" "$observed_bps" "$capped_bps" "$suppressed_bps" "$loss_ratio" "$unsampled_max" "$worker_count"
+        done
+    fi
     if capture_dataplane_enabled; then
         printf '\n## Dataplane Counter Deltas\n\n'
         printf 'VM: `%s`, status: `%s`\n\n' "$DATAPLANE_VM" "$DATAPLANE_STATUS_PATH"
@@ -540,11 +712,11 @@ fi
         fi
         if [[ -f "$DATAPLANE_SUMMARY_TSV" ]]; then
             printf '### Per-Class TX Attribution\n\n'
-            printf '| Class | TX errors | Submit drops | Pending overflow | TX ring full | ENOBUFS | Bound overflow | CoS overflow | Redirect overflow | Flow-share drops | Buffer drops | ECN marked | TX-ring stalls | Post-drain CoS drops |\n'
-            printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n'
-            tail -n +2 "$DATAPLANE_SUMMARY_TSV" | while IFS=$'\t' read -r class tx submit pending ring enobufs bound cos redirect flow buffer ecn stalls post_drain; do
-                printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
-                    "$class" "$tx" "$submit" "$pending" "$ring" "$enobufs" "$bound" "$cos" "$redirect" "$flow" "$buffer" "$ecn" "$stalls" "$post_drain"
+            printf '| Class | TX errors | Shared recycle unknown-slot | Submit drops | Pending overflow | TX ring full | ENOBUFS | Bound overflow | CoS overflow | Redirect overflow | Flow-share drops | Buffer drops | ECN marked | TX-ring stalls | Post-drain CoS drops |\n'
+            printf '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n'
+            tail -n +2 "$DATAPLANE_SUMMARY_TSV" | while IFS=$'\t' read -r class tx shared_unknown submit pending ring enobufs bound cos redirect flow buffer ecn stalls post_drain; do
+                printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+                    "$class" "$tx" "$shared_unknown" "$submit" "$pending" "$ring" "$enobufs" "$bound" "$cos" "$redirect" "$flow" "$buffer" "$ecn" "$stalls" "$post_drain"
             done
             printf '\n'
         fi

@@ -414,12 +414,15 @@ fn binding_live_snapshot_propagates_710_drop_counters() {
     live.pending_tx_local_overflow_drops
         .store(5, Ordering::Relaxed);
     live.tx_submit_error_drops.store(7, Ordering::Relaxed);
+    live.tx_shared_recycle_unknown_slot_drops
+        .store(13, Ordering::Relaxed);
     live.no_owner_binding_drops.store(11, Ordering::Relaxed);
 
     let snap = live.snapshot();
     assert_eq!(snap.redirect_inbox_overflow_drops, 3);
     assert_eq!(snap.pending_tx_local_overflow_drops, 5);
     assert_eq!(snap.tx_submit_error_drops, 7);
+    assert_eq!(snap.tx_shared_recycle_unknown_slot_drops, 13);
     // `no_owner_binding_drops` has no per-binding protocol surface;
     // it is read directly from the atomic by
     // `Coordinator::cos_no_owner_binding_drops_total()`.

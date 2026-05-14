@@ -17,6 +17,7 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("fairness_multi_sample.py")
+EQUAL_FLOW_CAPTURE_PATH = Path(__file__).with_name("fairness_equal_flow_capture.py")
 HARNESS_PATH = Path(__file__).with_name("fairness-harness.sh")
 CLASS_SWEEP_PATH = Path(__file__).with_name("fairness-cos-class-sweep.sh")
 SPEC = importlib.util.spec_from_file_location("fairness_multi_sample", MODULE_PATH)
@@ -24,6 +25,14 @@ assert SPEC is not None
 fairness_multi_sample = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(fairness_multi_sample)
+EQUAL_FLOW_SPEC = importlib.util.spec_from_file_location(
+    "fairness_equal_flow_capture",
+    EQUAL_FLOW_CAPTURE_PATH,
+)
+assert EQUAL_FLOW_SPEC is not None
+fairness_equal_flow_capture = importlib.util.module_from_spec(EQUAL_FLOW_SPEC)
+assert EQUAL_FLOW_SPEC.loader is not None
+EQUAL_FLOW_SPEC.loader.exec_module(fairness_equal_flow_capture)
 
 
 class FairnessMultiSampleTest(unittest.TestCase):
@@ -486,6 +495,8 @@ class FairnessMultiSampleTest(unittest.TestCase):
             fake_wrapper = tmp_path / "fake-wrapper.sh"
             fake_harness = tmp_path / "fake-harness.sh"
             fake_eval = tmp_path / "fake-eval"
+            fake_curl = tmp_path / "curl"
+            curl_sentinel = tmp_path / "curl-called"
             out_root = tmp_path / "sweep"
             fake_wrapper.write_text(
                 textwrap.dedent(
@@ -499,6 +510,10 @@ class FairnessMultiSampleTest(unittest.TestCase):
                             --) shift; break ;;
                             *) shift ;;
                         esac
+                    done
+                    for _ in {1..100}; do
+                        [[ -e "$CURL_SENTINEL" ]] && break
+                        sleep 0.02
                     done
                     mkdir -p "$out_dir"
                     cat > "$out_dir/summary.json" <<'JSON'
@@ -519,15 +534,45 @@ class FairnessMultiSampleTest(unittest.TestCase):
             )
             fake_harness.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             fake_eval.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-            for path in (fake_wrapper, fake_harness, fake_eval):
+            fake_curl.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    touch "$CURL_SENTINEL"
+                    cat <<'PROM'
+                    xpf_fairness_equal_flow_estimate_valid{ifindex="14",queue_id="2"} 1
+                    xpf_fairness_equal_flow_sampled_active_workers{ifindex="14",queue_id="2"} 2
+                    xpf_fairness_equal_flow_unsampled_active_workers{ifindex="14",queue_id="2"} 0
+                    xpf_fairness_equal_flow_target_per_flow_bps{ifindex="14",queue_id="2"} 1000
+                    xpf_fairness_equal_flow_observed_bps{ifindex="14",queue_id="2"} 3000
+                    xpf_fairness_equal_flow_capped_bps{ifindex="14",queue_id="2"} 2000
+                    xpf_fairness_equal_flow_suppressed_bps{ifindex="14",queue_id="2"} 1000
+                    xpf_fairness_equal_flow_throughput_loss_ratio{ifindex="14",queue_id="2"} 0.3333333333
+                    xpf_fairness_equal_flow_worker_observed_bps{ifindex="14",queue_id="2",worker_id="0"} 1000
+                    xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="14",queue_id="2",worker_id="0"} 1000
+                    xpf_fairness_equal_flow_worker_cap_bps{ifindex="14",queue_id="2",worker_id="0"} 1000
+                    xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="14",queue_id="2",worker_id="0"} 0
+                    xpf_fairness_equal_flow_worker_observed_bps{ifindex="14",queue_id="2",worker_id="1"} 2000
+                    xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="14",queue_id="2",worker_id="1"} 2000
+                    xpf_fairness_equal_flow_worker_cap_bps{ifindex="14",queue_id="2",worker_id="1"} 1000
+                    xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="14",queue_id="2",worker_id="1"} 1000
+                    PROM
+                    """
+                ),
+                encoding="utf-8",
+            )
+            for path in (fake_wrapper, fake_harness, fake_eval, fake_curl):
                 path.chmod(0o755)
 
             env = {
                 **os.environ,
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
                 "ARTIFACT_ROOT": str(out_root),
                 "CAPTURE_DATAPLANE": "0",
                 "CLASS_FILTER": "q2",
                 "COS_IFINDEX": "14",
+                "CURL_SENTINEL": str(curl_sentinel),
                 "WRAPPER": str(fake_wrapper),
                 "HARNESS": str(fake_harness),
                 "FAIRNESS_EVAL": str(fake_eval),
@@ -548,6 +593,240 @@ class FairnessMultiSampleTest(unittest.TestCase):
             row = summary_lines[1].split("\t")
             self.assertEqual(row[0], "q2-iperf-e-16g")
             self.assertEqual(row[10], "0.5")
+            equal_flow_lines = (
+                out_root / "equal-flow-summary.tsv"
+            ).read_text(encoding="utf-8").splitlines()
+            self.assertIn("target_per_flow_bps_mean", equal_flow_lines[0])
+            equal_flow_row = equal_flow_lines[1].split("\t")
+            self.assertEqual(equal_flow_row[0], "q2-iperf-e-16g")
+            self.assertEqual(equal_flow_row[6], "1")
+            self.assertEqual(equal_flow_row[7], "1000.0")
+            self.assertTrue((out_root / "q2-iperf-e-16g" / "equal-flow" / "metrics-raw.prom").exists())
+            self.assertTrue((out_root / "q2-iperf-e-16g" / "equal-flow" / "summary.tsv").exists())
+
+    def test_class_sweep_equal_flow_failure_reports_infra_exit_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake_wrapper = tmp_path / "fake-wrapper.sh"
+            fake_harness = tmp_path / "fake-harness.sh"
+            fake_eval = tmp_path / "fake-eval"
+            fake_curl = tmp_path / "curl"
+            curl_sentinel = tmp_path / "curl-called"
+            out_root = tmp_path / "sweep"
+            fake_wrapper.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    for _ in {1..100}; do
+                        [[ -e "$CURL_SENTINEL" ]] && break
+                        sleep 0.02
+                    done
+                    exit 0
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_harness.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_eval.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_curl.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    touch "$CURL_SENTINEL"
+                    cat <<'PROM'
+                    xpf_fairness_equal_flow_estimate_valid{ifindex="14",queue_id="2"} 1
+                    xpf_fairness_equal_flow_sampled_active_workers{ifindex="14",queue_id="2"} 1.5
+                    xpf_fairness_equal_flow_unsampled_active_workers{ifindex="14",queue_id="2"} 0
+                    xpf_fairness_equal_flow_target_per_flow_bps{ifindex="14",queue_id="2"} 1000
+                    xpf_fairness_equal_flow_observed_bps{ifindex="14",queue_id="2"} 3000
+                    xpf_fairness_equal_flow_capped_bps{ifindex="14",queue_id="2"} 2000
+                    xpf_fairness_equal_flow_suppressed_bps{ifindex="14",queue_id="2"} 1000
+                    xpf_fairness_equal_flow_throughput_loss_ratio{ifindex="14",queue_id="2"} 0.3333333333
+                    PROM
+                    """
+                ),
+                encoding="utf-8",
+            )
+            for path in (fake_wrapper, fake_harness, fake_eval, fake_curl):
+                path.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "ARTIFACT_ROOT": str(out_root),
+                "CAPTURE_DATAPLANE": "0",
+                "CLASS_FILTER": "q2",
+                "COS_IFINDEX": "14",
+                "CURL_SENTINEL": str(curl_sentinel),
+                "WRAPPER": str(fake_wrapper),
+                "HARNESS": str(fake_harness),
+                "FAIRNESS_EVAL": str(fake_eval),
+            }
+            result = subprocess.run(
+                [str(CLASS_SWEEP_PATH)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("sampled_active_workers must be a non-negative integer", result.stderr)
+            summary_lines = (out_root / "summary.tsv").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(summary_lines), 2)
+            row = summary_lines[1].split("\t")
+            self.assertEqual(row[0], "q2-iperf-e-16g")
+            self.assertEqual(row[4], "2")
+            self.assertEqual(row[5], "ERROR")
+
+    def test_equal_flow_capture_reduces_complete_target_rows(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_begin timestamp=100
+            xpf_fairness_equal_flow_estimate_valid{ifindex="5",queue_id="6"} 1
+            xpf_fairness_equal_flow_sampled_active_workers{ifindex="5",queue_id="6"} 2
+            xpf_fairness_equal_flow_unsampled_active_workers{ifindex="5",queue_id="6"} 0
+            xpf_fairness_equal_flow_target_per_flow_bps{ifindex="5",queue_id="6"} 100
+            xpf_fairness_equal_flow_observed_bps{ifindex="5",queue_id="6"} 300
+            xpf_fairness_equal_flow_capped_bps{ifindex="5",queue_id="6"} 200
+            xpf_fairness_equal_flow_suppressed_bps{ifindex="5",queue_id="6"} 100
+            xpf_fairness_equal_flow_throughput_loss_ratio{ifindex="5",queue_id="6"} 0.333333
+            xpf_fairness_equal_flow_worker_observed_bps{ifindex="5",queue_id="6",worker_id="0"} 100
+            xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="5",queue_id="6",worker_id="0"} 100
+            xpf_fairness_equal_flow_worker_cap_bps{ifindex="5",queue_id="6",worker_id="0"} 100
+            xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="5",queue_id="6",worker_id="0"} 0
+            xpf_fairness_equal_flow_worker_observed_bps{ifindex="5",queue_id="6",worker_id="1"} 200
+            xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="5",queue_id="6",worker_id="1"} 200
+            xpf_fairness_equal_flow_worker_cap_bps{ifindex="5",queue_id="6",worker_id="1"} 100
+            xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="5",queue_id="6",worker_id="1"} 100
+            # xpf_fairness_scrape_end timestamp=100
+            """
+        )
+        scrapes, empty, errors = fairness_equal_flow_capture.split_scrapes(raw)
+        self.assertEqual(empty, [])
+        self.assertEqual(errors, [])
+        reduced = fairness_equal_flow_capture.reduce_scrapes(scrapes, "5", "6")
+        self.assertEqual(reduced["complete_scrape_count"], 1)
+        self.assertEqual(reduced["latest"]["worker_count"], 2)
+        self.assertEqual(reduced["series"]["suppressed_bps"]["mean"], 100)
+
+    def test_equal_flow_capture_fails_when_target_class_rows_missing(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_begin timestamp=100
+            xpf_fairness_equal_flow_estimate_valid{ifindex="5",queue_id="4"} 1
+            # xpf_fairness_scrape_end timestamp=100
+            """
+        )
+        scrapes, _, _ = fairness_equal_flow_capture.split_scrapes(raw)
+        with self.assertRaisesRegex(
+            fairness_equal_flow_capture.CaptureError,
+            "no equal-flow estimator rows for ifindex 5 queue 6",
+        ):
+            fairness_equal_flow_capture.reduce_scrapes(scrapes, "5", "6")
+
+    def test_equal_flow_capture_fails_when_worker_rows_are_partial(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_begin timestamp=100
+            xpf_fairness_equal_flow_estimate_valid{ifindex="5",queue_id="6"} 1
+            xpf_fairness_equal_flow_sampled_active_workers{ifindex="5",queue_id="6"} 2
+            xpf_fairness_equal_flow_unsampled_active_workers{ifindex="5",queue_id="6"} 0
+            xpf_fairness_equal_flow_target_per_flow_bps{ifindex="5",queue_id="6"} 100
+            xpf_fairness_equal_flow_observed_bps{ifindex="5",queue_id="6"} 300
+            xpf_fairness_equal_flow_capped_bps{ifindex="5",queue_id="6"} 200
+            xpf_fairness_equal_flow_suppressed_bps{ifindex="5",queue_id="6"} 100
+            xpf_fairness_equal_flow_throughput_loss_ratio{ifindex="5",queue_id="6"} 0.333333
+            xpf_fairness_equal_flow_worker_observed_bps{ifindex="5",queue_id="6",worker_id="0"} 100
+            xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="5",queue_id="6",worker_id="0"} 100
+            xpf_fairness_equal_flow_worker_cap_bps{ifindex="5",queue_id="6",worker_id="0"} 100
+            xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="5",queue_id="6",worker_id="0"} 0
+            # xpf_fairness_scrape_end timestamp=100
+            """
+        )
+        scrapes, _, _ = fairness_equal_flow_capture.split_scrapes(raw)
+        with self.assertRaisesRegex(
+            fairness_equal_flow_capture.CaptureError,
+            "worker row count 1 != sampled_active_workers 2",
+        ):
+            fairness_equal_flow_capture.reduce_scrapes(scrapes, "5", "6")
+
+    def test_equal_flow_capture_fails_on_truncated_marked_scrape(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_begin timestamp=100
+            xpf_fairness_equal_flow_estimate_valid{ifindex="5",queue_id="6"} 1
+            """
+        )
+        with self.assertRaisesRegex(
+            fairness_equal_flow_capture.CaptureError,
+            "scrape 100 missing end marker",
+        ):
+            fairness_equal_flow_capture.split_scrapes(raw)
+
+    def test_equal_flow_capture_fails_on_nested_begin_marker(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_begin timestamp=100
+            xpf_fairness_equal_flow_estimate_valid{ifindex="5",queue_id="6"} 1
+            # xpf_fairness_scrape_begin timestamp=101
+            # xpf_fairness_scrape_end timestamp=101
+            """
+        )
+        with self.assertRaisesRegex(
+            fairness_equal_flow_capture.CaptureError,
+            "scrape 100 missing end marker before scrape 101",
+        ):
+            fairness_equal_flow_capture.split_scrapes(raw)
+
+    def test_equal_flow_capture_fails_on_end_without_begin_marker(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_end timestamp=100
+            """
+        )
+        with self.assertRaisesRegex(
+            fairness_equal_flow_capture.CaptureError,
+            "scrape end marker without begin marker at 100",
+        ):
+            fairness_equal_flow_capture.split_scrapes(raw)
+
+    def test_equal_flow_capture_fails_when_sampled_workers_is_fractional(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_begin timestamp=100
+            xpf_fairness_equal_flow_estimate_valid{ifindex="5",queue_id="6"} 1
+            xpf_fairness_equal_flow_sampled_active_workers{ifindex="5",queue_id="6"} 1.5
+            xpf_fairness_equal_flow_unsampled_active_workers{ifindex="5",queue_id="6"} 0
+            xpf_fairness_equal_flow_target_per_flow_bps{ifindex="5",queue_id="6"} 100
+            xpf_fairness_equal_flow_observed_bps{ifindex="5",queue_id="6"} 300
+            xpf_fairness_equal_flow_capped_bps{ifindex="5",queue_id="6"} 200
+            xpf_fairness_equal_flow_suppressed_bps{ifindex="5",queue_id="6"} 100
+            xpf_fairness_equal_flow_throughput_loss_ratio{ifindex="5",queue_id="6"} 0.333333
+            # xpf_fairness_scrape_end timestamp=100
+            """
+        )
+        scrapes, _, _ = fairness_equal_flow_capture.split_scrapes(raw)
+        with self.assertRaisesRegex(
+            fairness_equal_flow_capture.CaptureError,
+            "sampled_active_workers must be a non-negative integer",
+        ):
+            fairness_equal_flow_capture.reduce_scrapes(scrapes, "5", "6")
+
+    def test_equal_flow_capture_reports_empty_scrape_marker(self) -> None:
+        raw = textwrap.dedent(
+            """\
+            # xpf_fairness_scrape_begin timestamp=100
+            # xpf_fairness_scrape_empty timestamp=100
+            # xpf_fairness_scrape_end timestamp=100
+            """
+        )
+        _scrapes, empty, errors = fairness_equal_flow_capture.split_scrapes(raw)
+        self.assertEqual(empty, ["100"])
+        self.assertEqual(errors, [])
 
     def run_fake_harness_with_metrics(
         self,
