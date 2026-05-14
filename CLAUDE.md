@@ -6,6 +6,10 @@
 - Prefer editing over rewriting whole files.
 - Do not re-read files you have already read.
 - Test your code before declaring done.
+- When modifying code or changing behavior, update the relevant module
+  documentation in the corresponding Markdown files as part of the same work.
+  Treat README/design/state/operator docs as part of the module contract; if no
+  docs change is needed, say why in the review notes.
 - No sycophantic openers or closing fluff.
 - Keep solutions simple and direct.
 - When working with many teams, don't let the context windows get too large.
