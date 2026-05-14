@@ -83,6 +83,9 @@ if [[ -z "${NET_CLAN+x}" ]]; then NET_CLAN="xpf-clan"; fi
 
 # Config file path
 CLUSTER_CONF="${CLUSTER_CONF:-${PROJECT_ROOT}/docs/ha-cluster.conf}"
+SHARED_UMEM_PHASE0_ARTIFACT_DEST="${SHARED_UMEM_PHASE0_ARTIFACT_DEST:-/run/xpf/shared-umem-phase0.json}"
+SHARED_UMEM_PHASE0_ARTIFACT_NODE0="${SHARED_UMEM_PHASE0_ARTIFACT_NODE0:-${PROJECT_ROOT}/test/incus/loss-userspace-shared-umem-phase0-node0.json}"
+SHARED_UMEM_PHASE0_ARTIFACT_NODE1="${SHARED_UMEM_PHASE0_ARTIFACT_NODE1:-${PROJECT_ROOT}/test/incus/loss-userspace-shared-umem-phase0-node1.json}"
 
 # Network definitions: name:subnet:nat (only for networks we manage)
 NETWORKS=()
@@ -144,6 +147,36 @@ vm_name() {
 		1) echo "$VM1" ;;
 		*) die "Invalid node index: $1 (must be 0 or 1)" ;;
 	esac
+}
+
+shared_umem_phase0_artifact_for_node() {
+	case "$1" in
+		0) echo "$SHARED_UMEM_PHASE0_ARTIFACT_NODE0" ;;
+		1) echo "$SHARED_UMEM_PHASE0_ARTIFACT_NODE1" ;;
+		*) die "Invalid node index: $1 (must be 0 or 1)" ;;
+	esac
+}
+
+cluster_config_requests_shared_umem() {
+	[[ -f "$CLUSTER_CONF" ]] && grep -q 'shared-umem' "$CLUSTER_CONF"
+}
+
+push_shared_umem_phase0_artifact() {
+	local idx="$1"
+	local rinst="$2"
+	local artifact
+	artifact=$(shared_umem_phase0_artifact_for_node "$idx")
+
+	if ! cluster_config_requests_shared_umem; then
+		return
+	fi
+	if [[ ! -f "$artifact" ]]; then
+		die "Shared-UMEM config is enabled but Phase 0 artifact is missing for node${idx}: $artifact"
+	fi
+
+	info "Pushing shared-UMEM Phase 0 artifact to node${idx}..."
+	incus exec "$rinst" -- mkdir -p "$(dirname "$SHARED_UMEM_PHASE0_ARTIFACT_DEST")"
+	incus file push "$artifact" "${rinst}${SHARED_UMEM_PHASE0_ARTIFACT_DEST}" --mode 0644
 }
 
 # Wait for incus agent to be ready inside a VM
@@ -655,6 +688,7 @@ deploy_vm() {
 		info "Pushing unified HA config to $vm..."
 		incus exec "$rinst" -- mkdir -p /etc/xpf
 		incus file push "$CLUSTER_CONF" "${rinst}/etc/xpf/xpf.conf"
+		push_shared_umem_phase0_artifact "$idx" "$rinst"
 		# Clear configstore DB so daemon bootstraps from the new text file.
 		# Without this, the daemon loads the OLD config from active.json.
 		incus exec "$rinst" -- rm -rf /etc/xpf/.configdb

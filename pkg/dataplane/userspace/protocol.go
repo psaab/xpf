@@ -676,6 +676,10 @@ type BindingStatus struct {
 	XSKBindMode                       string    `json:"xsk_bind_mode,omitempty"`
 	ZeroCopy                          bool      `json:"zero_copy,omitempty"`
 	SocketFD                          int       `json:"socket_fd,omitempty"`
+	SharedUMEMMode                    string    `json:"shared_umem_mode,omitempty"`
+	SharedUMEMGroup                   string    `json:"shared_umem_group,omitempty"`
+	SharedUMEMSocketRole              string    `json:"shared_umem_socket_role,omitempty"`
+	SharedUMEMDisabledReason          string    `json:"shared_umem_disabled_reason,omitempty"`
 	RXPackets                         uint64    `json:"rx_packets,omitempty"`
 	RXBytes                           uint64    `json:"rx_bytes,omitempty"`
 	RXBatches                         uint64    `json:"rx_batches,omitempty"`

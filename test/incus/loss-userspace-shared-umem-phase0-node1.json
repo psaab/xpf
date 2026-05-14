@@ -1,0 +1,38 @@
+{
+  "passed": true,
+  "status": "PASS",
+  "kernel_release": "7.0.0",
+  "selected_interfaces": [
+    "ge-7-0-1",
+    "ge-7-0-2"
+  ],
+  "interfaces": [
+    "ge-7-0-1",
+    "ge-7-0-2"
+  ],
+  "selected_nic_pci_ids": [
+    "0000:08:00.0",
+    "0000:09:00.0"
+  ],
+  "pci_ids": [
+    "0000:08:00.0",
+    "0000:09:00.0"
+  ],
+  "selected_device_pair": [
+    "0000:08:00.0",
+    "0000:09:00.0"
+  ],
+  "mtu": {
+    "ge-7-0-1": 1500,
+    "ge-7-0-2": 1500
+  },
+  "queue_topology": {
+    "ge-7-0-1": 6,
+    "ge-7-0-2": 6
+  },
+  "driver": {
+    "ge-7-0-1": "mlx5_core",
+    "ge-7-0-2": "mlx5_core"
+  },
+  "note": "Loss lab node1 Phase 0 runtime gate artifact for cross-NIC shared UMEM. Keep in sync with the live loss userspace node environment."
+}

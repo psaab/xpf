@@ -422,3 +422,9 @@
 - **Timestamp**: 2026-05-12T06:29:24Z
   - **Action**: Rename `guard_low_n_iface_input_accepts_p2_single_direction_recency_undercount` → `guard_low_n_iface_input_accepts_absolute_floor_p2_gap1`; add inline math comment explaining why absolute floor (not recency) is the operative gate. Drop misleading "recency" claim from assertion messages.
   - **File(s)**: `userspace-dp/tests/fairness_eval_blackbox.rs`
+
+## 2026-05-13 — PR #1301 cross-NIC shared-UMEM validation path
+
+- **Timestamp**: 2026-05-13T20:22:00-07:00
+  - **Action**: Enable cross-NIC shared UMEM in the loss userspace HA config, add node-local Phase 0 artifacts, push artifacts during deploy when the config requests shared UMEM, surface shared-UMEM binding mode/role in userspace status, and document the perf/counter contract for copy-free validation.
+  - **File(s)**: `docs/ha-cluster-userspace.conf`, `test/incus/cluster-setup.sh`, `test/incus/loss-userspace-shared-umem-phase0-node0.json`, `test/incus/loss-userspace-shared-umem-phase0-node1.json`, `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/statusfmt.go`, `pkg/dataplane/userspace/statusfmt_test.go`, `docs/shared-umem-plan.md`, `docs/userspace-perf-compare.md`, `_Log.md`

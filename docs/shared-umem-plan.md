@@ -410,6 +410,27 @@ Cross-NIC mode remains behind an explicit gate until xpf proves:
 - teardown and link-cycle handling are stable
 - the performance win beats the private-UMEM copy path on the real HA topology
 
+## Loss Lab Deployment Contract
+
+The loss userspace HA config now enables `system dataplane shared-umem mode
+cross-nic` for the real LAN/WAN mlx5 pair on each node. The deploy script
+pushes the matching node-local Phase 0 artifact to
+`/run/xpf/shared-umem-phase0.json` before xpfd starts. If the artifact no
+longer matches the live kernel, PCI IDs, driver, MTU, or RX queue topology,
+the helper must fall back to private UMEM and publish the disabled reason in
+binding status.
+
+Operational success is not "AF_XDP bind says zerocopy". It is the full chain:
+
+- shared owner sockets bind with zero-copy and normal owner flags
+- shared secondary sockets bind with exactly `XDP_SHARED_UMEM`
+- the active firewall reports shared-UMEM binding roles for LAN/WAN bindings
+- `In-place TX packets` increases during LAN<->WAN forwarding
+- `In-place VLAN push desc` / `pop desc` increase for VLAN transitions
+- `In-place L2 memmove fb` stays flat
+- perf no longer shows `build_forwarded_frame_into_from_frame` as the
+  dominant `__memmove_evex_unaligned_erms` caller
+
 If cross-NIC sharing works, it removes the current userspace memcpy from the HA
 transit path. If it does not outperform private UMEM in this lab, the failure
 should be recorded as an xpf/lab/driver result, not as a general AF_XDP kernel

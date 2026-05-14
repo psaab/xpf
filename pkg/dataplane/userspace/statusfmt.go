@@ -44,6 +44,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	boundBindings := 0
 	xskBindings := 0
 	zeroCopyBindings := 0
+	sharedUMEMBindings := 0
 	var rxPackets uint64
 	var validatedPackets uint64
 	var forwardCandidates uint64
@@ -109,6 +110,9 @@ func FormatStatusSummary(status ProcessStatus) string {
 		}
 		if binding.ZeroCopy {
 			zeroCopyBindings++
+		}
+		if binding.SharedUMEMMode != "" && binding.SharedUMEMSocketRole != "" {
+			sharedUMEMBindings++
 		}
 		rxPackets += binding.RXPackets
 		validatedPackets += binding.ValidatedPackets
@@ -244,6 +248,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  Bound bindings:            %d/%d\n", boundBindings, len(status.Bindings))
 	fmt.Fprintf(&b, "  XSK-registered bindings:   %d/%d\n", xskBindings, len(status.Bindings))
 	fmt.Fprintf(&b, "  Zerocopy bindings:         %d/%d\n", zeroCopyBindings, len(status.Bindings))
+	fmt.Fprintf(&b, "  Shared UMEM bindings:      %d/%d\n", sharedUMEMBindings, len(status.Bindings))
 	fmt.Fprintf(&b, "  Armed queues:              %d/%d\n", armedQueues, len(status.Queues))
 	fmt.Fprintf(&b, "  Ready queues:              %d/%d\n", readyQueues, len(status.Queues))
 	fmt.Fprintf(&b, "  Armed bindings:            %d/%d\n", armedBindings, len(status.Bindings))
@@ -564,6 +569,18 @@ func FormatBindings(status ProcessStatus) string {
 		}
 		fmt.Fprintf(&b, "  %-6d %-7d %-8d %-10t %-7t %-7t %-7t %-5t %-8s %-8d %-9d %-9d %-8d %-8d %-8d %-9d %-9d %-9d %-9d %s",
 			binding.Slot, binding.QueueID, binding.WorkerID, binding.Registered, binding.Armed, binding.Ready, binding.Bound, binding.XSKRegistered, mode, binding.Ifindex, binding.RXPackets, binding.TXPackets, binding.DirectTXPackets, binding.CopyTXPackets, binding.InPlaceTXPackets, binding.SessionHits, binding.SlowPathPackets, binding.ExceptionPackets, binding.RouteMissPackets, binding.Interface)
+		if binding.SharedUMEMMode != "" {
+			fmt.Fprintf(&b, " shared=%s", binding.SharedUMEMMode)
+		}
+		if binding.SharedUMEMSocketRole != "" {
+			fmt.Fprintf(&b, " role=%s", binding.SharedUMEMSocketRole)
+		}
+		if binding.SharedUMEMGroup != "" {
+			fmt.Fprintf(&b, " group=%s", binding.SharedUMEMGroup)
+		}
+		if binding.SharedUMEMDisabledReason != "" {
+			fmt.Fprintf(&b, " shared-disabled=%q", binding.SharedUMEMDisabledReason)
+		}
 		if binding.LastError != "" {
 			fmt.Fprintf(&b, " (%s)", binding.LastError)
 		}
