@@ -87,7 +87,15 @@ pub(super) fn preferred_bind_strategy(binding: &BindingStatus) -> AfXdpBindStrat
     bind_strategy_for_driver(interface_driver_name(&binding.interface).as_deref())
 }
 
-pub(super) fn open_binding_worker_rings(
+/// Open the AF_XDP socket/ring handles for one binding.
+///
+/// # Safety
+/// For private UMEM bindings, the returned `DeviceQueue` borrows
+/// `worker_umem`'s fill/completion ring structs. The caller must store/drop
+/// the returned XSK handles before `worker_umem`, so `xsk_socket__delete`
+/// runs while the UMEM ring structs are still live and before
+/// `xsk_umem__delete`.
+pub(super) unsafe fn open_binding_worker_rings(
     worker_umem: &mut WorkerUmem,
     info: &IfInfo,
     ring_entries: u32,

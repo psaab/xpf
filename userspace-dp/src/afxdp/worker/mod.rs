@@ -281,7 +281,10 @@ impl BindingWorker {
             initial_fill_frames.push(offset);
         }
         let info = ifinfo_from_binding(binding)?;
-        let (user, rx, tx, bind_mode, bind_flags, actual_bind_strategy, device) =
+        // Safety: `BindingWorker` declares `xsk` before `umem`, so Rust drops
+        // the socket/ring handles before the UMEM. That satisfies the private
+        // UMEM ring-borrow contract enforced by `open_binding_worker_rings`.
+        let (user, rx, tx, bind_mode, bind_flags, actual_bind_strategy, device) = unsafe {
             open_binding_worker_rings(
                 &mut worker_umem,
                 &info,
@@ -292,7 +295,8 @@ impl BindingWorker {
                 poll_mode,
                 Some(&initial_fill_frames),
             )
-            .map_err(|err| format!("configure AF_XDP rings: {err}"))?;
+        }
+        .map_err(|err| format!("configure AF_XDP rings: {err}"))?;
 
         let user_fd = user.as_raw_fd();
         live.set_bound(user_fd);

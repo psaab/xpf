@@ -181,6 +181,33 @@ fn same_binding_plan_detects_shared_umem_json_set_membership_change() {
 }
 
 #[test]
+fn binding_plan_key_hashes_large_shared_umem_artifact() {
+    let huge_note = "x".repeat(1024 * 1024);
+    let snapshot = ConfigSnapshot {
+        userspace: serde_json::json!({
+            "workers": 2,
+            "ring_entries": 2048,
+            "shared_umem": {
+                "mode": "cross-nic",
+                "interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                "phase0_artifact": {
+                    "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"],
+                    "selected_nic_pci_ids": ["0000:08:00.0", "0000:09:00.0"],
+                    "diagnostic_note": huge_note
+                }
+            }
+        }),
+        ..Default::default()
+    };
+
+    let key = crate::server::helpers::snapshot_binding_plan_key(&snapshot);
+    assert!(key.starts_with("sha256:"));
+    assert_eq!(key.len(), "sha256:".len() + 64);
+    assert!(!key.contains("diagnostic_note"));
+    assert!(!key.contains('x'));
+}
+
+#[test]
 fn same_binding_plan_detects_binding_topology_change() {
     let current = ConfigSnapshot {
         userspace: serde_json::json!({

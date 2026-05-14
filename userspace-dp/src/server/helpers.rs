@@ -10,6 +10,7 @@
 // Pure relocation. Bodies byte-for-byte identical.
 
 use super::super::*;
+use sha2::{Digest, Sha256};
 
 pub(crate) fn refresh_status(state: &mut ServerState) {
     state.afxdp.refresh_bindings(&mut state.status.bindings);
@@ -317,6 +318,12 @@ pub(crate) fn same_binding_plan(current: &ConfigSnapshot, next: &ConfigSnapshot)
 }
 
 pub(crate) fn snapshot_binding_plan_key(snapshot: &ConfigSnapshot) -> String {
+    let material = snapshot_binding_plan_key_material(snapshot);
+    let digest = Sha256::digest(material.as_bytes());
+    format!("sha256:{digest:x}")
+}
+
+fn snapshot_binding_plan_key_material(snapshot: &ConfigSnapshot) -> String {
     let mut out = String::new();
     let workers = snapshot
         .userspace
