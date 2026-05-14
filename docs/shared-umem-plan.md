@@ -1,6 +1,8 @@
 # Shared UMEM Implementation Plan
 
-Status: Revised plan, branch-only until live validation passes
+Status: PR #1301 implementation update; supersedes the hard-gated rollout
+contract from PR #1297 after live loss-lab validation proved cross-NIC
+zero-copy shared UMEM works on the target mlx5 path.
 
 ## Summary
 
@@ -105,8 +107,12 @@ after shared bind is proven.
 
 ## Design Principles
 
-1. Default runtime attempts cross-NIC shared UMEM on supported dataplane NICs;
-   private UMEM is the per-group fallback when live bind validation fails.
+1. Default runtime attempts cross-NIC shared UMEM on supported dataplane NICs.
+   This is an intentional PR #1301 contract change from PR #1297's
+   default-private, artifact-gated rollout: the firewall's normal forwarding
+   path is cross-NIC, and avoiding the private-UMEM payload copy is the
+   product target. Private UMEM is the per-group fallback when live bind
+   validation fails.
 2. The bridge must expose private and shared socket creation explicitly.
 3. Shared groups are worker-local; no UMEM crosses worker threads.
 4. Frame offsets in a shared group are partitioned once at startup, then
@@ -121,15 +127,19 @@ after shared bind is proven.
 
 ### Phase 0: Repro and Audit Evidence
 
-Phase 0 is bring-up evidence, not a production startup gate. The production
-rule is simpler: xpf should try to use cross-NIC shared UMEM by default on
-supported dataplane NICs, validate the actual bind result at runtime, and fall
-back to private UMEM when the live kernel/driver path rejects the group.
+Phase 0 is bring-up evidence, not a production startup gate. This intentionally
+replaces PR #1297's hard gate. The production rule is simpler: xpf should try
+to use cross-NIC shared UMEM by default on supported dataplane NICs, validate
+the actual bind result at runtime, and fall back to private UMEM when the live
+kernel/driver path rejects the group.
 
-The artifact remains useful as audit evidence for a lab or release note, but
-operators should not need to keep `/run/xpf/shared-umem-phase0.json` in sync
-just to get copy-free forwarding. Live runtime capability and post-bind
-zero-copy validation decide whether a group is used.
+The artifact remains useful as audit evidence for a lab or release note. When
+configured, xpf parses it and logs whether the artifact still matches the
+running kernel, PCI IDs, driver, MTU, and queue topology. Audit failure is
+visible but non-blocking. Operators should not need to keep
+`/run/xpf/shared-umem-phase0.json` in sync just to get copy-free forwarding.
+Live runtime capability and post-bind zero-copy validation decide whether a
+group is used.
 
 The Phase 0 artifact must be machine-readable and include:
 
@@ -305,16 +315,18 @@ Shared-group construction must be atomic from the worker's point of view:
   post-bind zero-copy validation passes
 - if any socket bind or validation fails, delete every socket already created
   for that group, drop the shared `WorkerUmemPool`, mark every binding in the
-  group with the same error, and do not leave a partially shared group active
+  group with the same disabled reason, retry every binding in that group with
+  private UMEM, and do not leave a partially shared group active
 - only after the full group succeeds may the worker move the bindings into the
   live `bindings` vector and register their XSKMAP slots
 
 Runtime bind validation is the deployment contract. An optional Phase 0
 artifact is audit material only; runtime selection must not require it, use it
 as a hidden knob, or block copy-free forwarding because an audit file is absent
-or stale. If the live bind path fails, the group stays private and the reason
-is reported in telemetry. If the bind succeeds but post-bind
-`XDP_OPTIONS_ZEROCOPY` is false, the group is rejected.
+or stale. If the live bind path fails, the worker retries the whole group as
+private UMEM and reports the shared-bind failure reason in telemetry. If the
+bind succeeds but post-bind `XDP_OPTIONS_ZEROCOPY` is false, the group is
+rejected and retried privately.
 
 Driver version, selected NIC firmware versions, libxdp/libbpf versions, IOMMU
 mode, and the per-cell repro rows remain useful Phase 0 evidence, but the

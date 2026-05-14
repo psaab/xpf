@@ -8,12 +8,12 @@ mod session_manager;
 mod status;
 mod supervisor;
 mod worker_manager;
-use supervisor::{spawn_supervised_aux, spawn_supervised_worker};
 pub(crate) use bpf_maps::BpfMaps;
 pub(crate) use cos_state::SharedCoSState;
 pub(in crate::afxdp) use ha_state::HaState;
 pub(crate) use neighbor_manager::NeighborManager;
 pub(in crate::afxdp) use session_manager::SessionManager;
+use supervisor::{spawn_supervised_aux, spawn_supervised_worker};
 pub(in crate::afxdp) use worker_manager::WorkerManager;
 
 pub struct Coordinator {
@@ -135,7 +135,8 @@ impl Coordinator {
         neighbors: &[(i32, IpAddr, NeighborEntry)],
     ) {
         let old_manager_keys = if replace {
-            self.neighbors.manager_keys
+            self.neighbors
+                .manager_keys
                 .lock()
                 .map(|manager_keys| manager_keys.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default()
@@ -178,13 +179,10 @@ impl Coordinator {
             // infrequently (only when kernel ARP/NDP changes, gated by
             // neighborsEqual in the Go manager). The clone cost is
             // negligible vs packet processing.
-            self.ha.forwarding
-                .store(Arc::new(self.forwarding.clone()));
+            self.ha.forwarding.store(Arc::new(self.forwarding.clone()));
         }
         self.neighbors.generation.fetch_add(1, Ordering::Relaxed);
     }
-
-
 
     pub(crate) fn stop_inner(&mut self, clear_synced_state: bool) {
         if let Some(stop) = self.neighbors.monitor_stop.take() {
@@ -210,15 +208,15 @@ impl Coordinator {
         // through many worker-id sets doesn't accumulate stale slots.
         self.worker_panics.clear();
         self.cos_owner_worker_by_queue.clear();
-        self.cos.owner_worker_by_queue
+        self.cos
+            .owner_worker_by_queue
             .store(Arc::new(BTreeMap::new()));
-        self.cos.owner_live_by_queue
+        self.cos
+            .owner_live_by_queue
             .store(Arc::new(BTreeMap::new()));
         self.cos.root_leases.store(Arc::new(BTreeMap::new()));
-        self.cos.queue_leases
-            .store(Arc::new(BTreeMap::new()));
-        self.cos.queue_vtime_floors
-            .store(Arc::new(BTreeMap::new()));
+        self.cos.queue_leases.store(Arc::new(BTreeMap::new()));
+        self.cos.queue_vtime_floors.store(Arc::new(BTreeMap::new()));
         self.last_slow_path_status = self
             .slow_path
             .as_ref()
@@ -233,7 +231,8 @@ impl Coordinator {
         self.bpf_maps.dnat_table_fd = None;
         self.bpf_maps.dnat_table_v6_fd = None;
         self.forwarding = ForwardingState::default();
-        self.ha.forwarding
+        self.ha
+            .forwarding
             .store(Arc::new(ForwardingState::default()));
         self.shared_validation
             .store(Arc::new(ValidationState::default()));
@@ -276,7 +275,8 @@ impl Coordinator {
     }
 
     pub(crate) fn snapshot_shared_session_entries(&self) -> Vec<SyncedSessionEntry> {
-        self.sessions.synced
+        self.sessions
+            .synced
             .lock()
             .map(|sessions| sessions.values().cloned().collect())
             .unwrap_or_default()
@@ -396,8 +396,7 @@ impl Coordinator {
         };
         self.forwarding = build_forwarding_state(snapshot);
         self.shared_validation.store(Arc::new(self.validation));
-        self.ha.forwarding
-            .store(Arc::new(self.forwarding.clone()));
+        self.ha.forwarding.store(Arc::new(self.forwarding.clone()));
         self.slow_path = if let Some(slow_path) = preserved_slow_path {
             self.last_slow_path_status = slow_path.status();
             Some(slow_path)
@@ -418,7 +417,8 @@ impl Coordinator {
         };
         self.local_tunnel_deliveries
             .store(Arc::new(BTreeMap::new()));
-        self.ha.fabrics
+        self.ha
+            .fabrics
             .store(Arc::new(self.forwarding.fabrics.clone()));
         if snapshot.map_pins.xsk.is_empty() {
             self.last_reconcile_stage = "missing_xsk_pin".to_string();
@@ -567,8 +567,7 @@ impl Coordinator {
             })
             .collect::<BTreeMap<_, _>>();
         for binding in bindings.iter_mut() {
-            if let Some((mode, group, role, reason)) =
-                shared_umem_status_by_slot.get(&binding.slot)
+            if let Some((mode, group, role, reason)) = shared_umem_status_by_slot.get(&binding.slot)
             {
                 binding.shared_umem_mode.clone_from(mode);
                 binding.shared_umem_group.clone_from(group);
@@ -893,13 +892,6 @@ impl Coordinator {
             .store(Arc::new(local_tunnel_deliveries));
     }
 
-
-
-
-
-
-
-
     /// Refresh fabric link info from updated snapshots. Called when the
     /// Go daemon's refreshFabricFwd resolves a peer MAC that wasn't
     /// available at initial snapshot build time.
@@ -920,8 +912,7 @@ impl Coordinator {
             // links for fabric redirect resolution. Without this, workers
             // use the snapshot's forwarding state which may have empty fabrics
             // if the peer MAC wasn't resolved at snapshot time.
-            self.ha.forwarding
-                .store(Arc::new(self.forwarding.clone()));
+            self.ha.forwarding.store(Arc::new(self.forwarding.clone()));
         }
     }
 
@@ -985,10 +976,10 @@ impl Coordinator {
             }
         }
         self.shared_validation.store(Arc::new(self.validation));
-        self.ha.forwarding
-            .store(Arc::new(self.forwarding.clone()));
+        self.ha.forwarding.store(Arc::new(self.forwarding.clone()));
         self.refresh_cos_owner_worker_map_from_identities();
-        self.ha.fabrics
+        self.ha
+            .fabrics
             .store(Arc::new(self.forwarding.fabrics.clone()));
     }
 
@@ -1082,25 +1073,25 @@ impl Coordinator {
         );
         if owner_changed {
             self.cos_owner_worker_by_queue = owner_map.clone();
-            self.cos.owner_worker_by_queue
-                .store(Arc::new(owner_map));
+            self.cos.owner_worker_by_queue.store(Arc::new(owner_map));
         }
         if !shared_cos_owner_live_by_queue_match(current_owner_live.as_ref(), &next_owner_live) {
-            self.cos.owner_live_by_queue
+            self.cos
+                .owner_live_by_queue
                 .store(Arc::new(next_owner_live));
         }
         if !shared_cos_root_leases_match(current_leases.as_ref(), &next_leases) {
             self.cos.root_leases.store(Arc::new(next_leases));
         }
         if !shared_cos_queue_leases_match(current_queue_leases.as_ref(), &next_queue_leases) {
-            self.cos.queue_leases
-                .store(Arc::new(next_queue_leases));
+            self.cos.queue_leases.store(Arc::new(next_queue_leases));
         }
         if !shared_cos_queue_vtime_floors_match(
             current_queue_vtime_floors.as_ref(),
             &next_queue_vtime_floors,
         ) {
-            self.cos.queue_vtime_floors
+            self.cos
+                .queue_vtime_floors
                 .store(Arc::new(next_queue_vtime_floors));
         }
     }
@@ -1111,14 +1102,6 @@ impl Coordinator {
         self.validation.fib_generation = fib_generation;
         self.shared_validation.store(Arc::new(self.validation));
     }
-
-
-
-
-
-
-
-
 
     pub fn refresh_bindings(&mut self, bindings: &mut [BindingStatus]) {
         for binding in bindings.iter_mut() {
@@ -1138,6 +1121,10 @@ impl Coordinator {
                 binding.socket_ifindex = snap.socket_ifindex;
                 binding.socket_queue_id = snap.socket_queue_id;
                 binding.socket_bind_flags = snap.socket_bind_flags;
+                binding.shared_umem_mode = snap.shared_umem_mode;
+                binding.shared_umem_group = snap.shared_umem_group;
+                binding.shared_umem_socket_role = snap.shared_umem_socket_role;
+                binding.shared_umem_disabled_reason = snap.shared_umem_disabled_reason;
                 binding.rx_packets = snap.rx_packets;
                 binding.rx_bytes = snap.rx_bytes;
                 binding.rx_batches = snap.rx_batches;
@@ -1212,8 +1199,7 @@ impl Coordinator {
                 binding.direct_tx_packets = snap.direct_tx_packets;
                 binding.copy_tx_packets = snap.copy_tx_packets;
                 binding.in_place_tx_packets = snap.in_place_tx_packets;
-                binding.in_place_vlan_push_desc_packets =
-                    snap.in_place_vlan_push_desc_packets;
+                binding.in_place_vlan_push_desc_packets = snap.in_place_vlan_push_desc_packets;
                 binding.in_place_vlan_pop_desc_packets = snap.in_place_vlan_pop_desc_packets;
                 binding.in_place_vlan_push_no_headroom_packets =
                     snap.in_place_vlan_push_no_headroom_packets;
@@ -1860,10 +1846,9 @@ fn shared_cos_queue_vtime_floors_match(
     next: &BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>,
 ) -> bool {
     current.len() == next.len()
-        && current.iter().all(|(key, floor)| {
-            next.get(key)
-                .is_some_and(|next| Arc::ptr_eq(floor, next))
-        })
+        && current
+            .iter()
+            .all(|(key, floor)| next.get(key).is_some_and(|next| Arc::ptr_eq(floor, next)))
 }
 
 fn shared_cos_queue_leases_match(
@@ -1886,7 +1871,6 @@ fn shared_cos_owner_live_by_queue_match(
                 .is_some_and(|next_live| Arc::ptr_eq(live, next_live))
         })
 }
-
 
 #[cfg(test)]
 #[path = "tests.rs"]

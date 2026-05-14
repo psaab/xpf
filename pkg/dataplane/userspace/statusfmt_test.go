@@ -120,6 +120,27 @@ func TestFormatStatusSummaryReportsStandbyArmedRole(t *testing.T) {
 	}
 }
 
+func TestFormatStatusSummaryDoesNotCountDisabledSharedUMEMFallback(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{
+				SharedUMEMMode:           "cross-nic",
+				SharedUMEMSocketRole:     "owner",
+				SharedUMEMDisabledReason: "shared UMEM bind failed; using private UMEM",
+			},
+			{
+				SharedUMEMMode:       "cross-nic",
+				SharedUMEMSocketRole: "secondary",
+			},
+		},
+	}
+
+	out := FormatStatusSummary(status)
+	if !strings.Contains(out, "Shared UMEM bindings:      1/2") {
+		t.Fatalf("summary counted disabled shared UMEM fallback:\n%s", out)
+	}
+}
+
 func TestFormatFairnessRSS(t *testing.T) {
 	status := ProcessStatus{
 		CoSActiveFlowCountsTruncated: true,

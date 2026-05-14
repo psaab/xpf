@@ -62,16 +62,16 @@ pub(crate) use xsk_rings::WorkerXskRings;
 // submodule. Note this module is `worker::cos`, separate from the
 // `afxdp::cos` directory module imported below as `super::cos`.
 mod cos;
+pub(in crate::afxdp) use cos::COS_SHARED_EXACT_MIN_RATE_BYTES;
+pub(crate) use cos::merge_cos_queue_owner_profile_sum;
+pub(in crate::afxdp) use cos::{
+    OwnerProfileSnapshot, merge_binding_scoped_owner_profile, merge_owner_profile_sum,
+    owner_profile_snapshot,
+};
 use cos::{
     build_worker_cos_fast_interfaces, build_worker_cos_owner_live_by_tx_ifindex,
     build_worker_cos_statuses, cos_runtime_config_changed, reset_binding_cos_runtime,
     reset_worker_cos_runtimes, vacate_all_shared_exact_slots_for_binding,
-};
-pub(crate) use cos::merge_cos_queue_owner_profile_sum;
-pub(in crate::afxdp) use cos::COS_SHARED_EXACT_MIN_RATE_BYTES;
-pub(in crate::afxdp) use cos::{
-    OwnerProfileSnapshot, merge_binding_scoped_owner_profile, merge_owner_profile_sum,
-    owner_profile_snapshot,
 };
 
 // #956 Phase 4-5: explicit imports for items that moved out of tx.rs into
@@ -501,9 +501,19 @@ fn partition_binding_plans(
     (private, shared)
 }
 
+fn publish_plan_shared_umem_status(live: &BindingLiveState, status: &BindingStatus) {
+    live.set_shared_umem_status(
+        status.shared_umem_mode.clone(),
+        status.shared_umem_group.clone(),
+        status.shared_umem_socket_role.clone(),
+        status.shared_umem_disabled_reason.clone(),
+    );
+}
+
 fn create_private_binding_from_plan(
     plan: BindingPlan,
 ) -> Result<BindingWorker, Box<dyn std::error::Error + Send + Sync>> {
+    publish_plan_shared_umem_status(&plan.live, &plan.status);
     let driver_name = interface_driver_name(&plan.status.interface);
     let total_frames =
         binding_frame_count_for_driver(driver_name.as_deref(), plan.ring_entries).max(1);
@@ -532,10 +542,48 @@ fn create_private_binding_from_plan(
     }
 }
 
+struct SharedGroupBindError {
+    group_key: String,
+    plans: Vec<BindingPlan>,
+    reason: String,
+}
+
+impl SharedGroupBindError {
+    fn new(group_key: &str, plans: Vec<BindingPlan>, reason: String) -> Self {
+        Self {
+            group_key: group_key.to_string(),
+            plans,
+            reason,
+        }
+    }
+}
+
+impl std::fmt::Display for SharedGroupBindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "shared UMEM group {} failed: {}",
+            self.group_key, self.reason
+        )
+    }
+}
+
+impl std::fmt::Debug for SharedGroupBindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedGroupBindError")
+            .field("group_key", &self.group_key)
+            .field("plan_count", &self.plans.len())
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+impl std::error::Error for SharedGroupBindError {}
+
 fn create_shared_binding_group(
     group_key: &str,
     mut plans: Vec<BindingPlan>,
-) -> Result<Vec<BindingWorker>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<BindingWorker>, SharedGroupBindError> {
     plans.sort_by_key(|plan| (plan.status.queue_id, plan.status.ifindex, plan.status.slot));
     let group_lives = plans
         .iter()
@@ -550,11 +598,12 @@ fn create_shared_binding_group(
     let WorkerUmemPool {
         umem,
         mut free_frames,
-    } = WorkerUmemPool::new(total_frames)
-        .map_err(|err| format!("create shared UMEM group {group_key}: {err}"))?;
+    } = WorkerUmemPool::new(total_frames).map_err(|err| {
+        SharedGroupBindError::new(group_key, plans.clone(), format!("create UMEM: {err}"))
+    })?;
 
     let mut created: Vec<(BindingWorker, c_int)> = Vec::with_capacity(plans.len());
-    for plan in plans {
+    for plan in plans.iter().cloned() {
         let planned_role = xsk_role_for_shared_plan(&plan.shared_umem);
         let socket_role = if created.is_empty() {
             XskSocketRole::SharedOwner
@@ -593,7 +642,7 @@ fn create_shared_binding_group(
                     live.clear_socket_state();
                     live.set_error(msg.clone());
                 }
-                return Err(msg.into());
+                return Err(SharedGroupBindError::new(group_key, plans, msg));
             }
         }
     }
@@ -609,12 +658,37 @@ fn create_shared_binding_group(
                 live.clear_socket_state();
                 live.set_error(msg.clone());
             }
-            return Err(msg.into());
+            return Err(SharedGroupBindError::new(group_key, plans, msg));
         }
         registered.push((*xsk_map_fd, binding.slot));
     }
 
     Ok(created.into_iter().map(|(binding, _)| binding).collect())
+}
+
+fn fallback_shared_group_to_private(err: SharedGroupBindError, bindings: &mut Vec<BindingWorker>) {
+    let SharedGroupBindError {
+        group_key,
+        plans,
+        reason,
+    } = err;
+    let fallback_reason =
+        format!("shared UMEM group {group_key} failed; using private UMEM: {reason}");
+    eprintln!("xpf-userspace-dp: {fallback_reason}");
+    for mut plan in plans {
+        let live = plan.live.clone();
+        let mode = plan.shared_umem.mode;
+        plan.shared_umem = SharedUmemBindingPlan::disabled(mode, fallback_reason.clone());
+        publish_shared_umem_plan_to_binding_status(&mut plan.status, &plan.shared_umem);
+        match create_private_binding_from_plan(plan) {
+            Ok(binding) => bindings.push(binding),
+            Err(err) => {
+                let msg = format!("private fallback after shared UMEM failure failed: {err}");
+                eprintln!("xpf-userspace-dp: {msg}");
+                live.set_error(msg);
+            }
+        }
+    }
 }
 
 /// #1188: replace per-tick `.load_full() + Arc::ptr_eq` with `.load() +
@@ -639,10 +713,7 @@ fn create_shared_binding_group(
 /// today. The win is the steady-state short-circuit, not the
 /// on-change path.
 #[inline]
-fn load_arc_if_changed<T>(
-    cached: &Arc<T>,
-    shared: &ArcSwap<T>,
-) -> Option<Arc<T>> {
+fn load_arc_if_changed<T>(cached: &Arc<T>, shared: &ArcSwap<T>) -> Option<Arc<T>> {
     let guard = shared.load();
     if Arc::ptr_eq(cached, &*guard) {
         None
@@ -660,8 +731,8 @@ fn refresh_worker_cos_queue_lease_runtime_counters(
     let mut granted_bytes = 0u64;
     for binding in bindings {
         calls = calls.wrapping_add(binding.cos.cos_queue_lease_acquire_v8_calls);
-        granted_bytes = granted_bytes
-            .wrapping_add(binding.cos.cos_queue_lease_acquire_v8_granted_bytes);
+        granted_bytes =
+            granted_bytes.wrapping_add(binding.cos.cos_queue_lease_acquire_v8_granted_bytes);
     }
     counters.cos_queue_lease_acquire_v8_calls = calls;
     counters.cos_queue_lease_acquire_v8_granted_bytes = granted_bytes;
@@ -698,9 +769,7 @@ pub(crate) fn worker_loop(
     shared_cos_owner_live_by_queue: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<BindingLiveState>>>>,
     shared_cos_root_leases: Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSRootLease>>>>,
     shared_cos_queue_leases: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>>>,
-    shared_cos_queue_vtime_floors: Arc<
-        ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>>,
-    >,
+    shared_cos_queue_vtime_floors: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>>>,
     cos_status: Arc<ArcSwap<Vec<crate::protocol::CoSInterfaceStatus>>>,
     // #869: worker-runtime telemetry publish slot.  Worker writes its
     // local counters here on a ~1s cadence; coordinator reads for status.
@@ -734,19 +803,9 @@ pub(crate) fn worker_loop(
         }
     }
     for (group_key, plans) in shared_groups {
-        let lives = plans
-            .iter()
-            .map(|plan| plan.live.clone())
-            .collect::<Vec<_>>();
         match create_shared_binding_group(&group_key, plans) {
             Ok(mut group_bindings) => bindings.append(&mut group_bindings),
-            Err(err) => {
-                let msg = err.to_string();
-                eprintln!("xpf-userspace-dp: {msg}");
-                for live in lives {
-                    live.set_error(msg.clone());
-                }
-            }
+            Err(err) => fallback_shared_group_to_private(err, &mut bindings),
         }
     }
     bindings.sort_by_key(|binding| (binding.queue_id, binding.ifindex, binding.slot));
@@ -948,9 +1007,7 @@ pub(crate) fn worker_loop(
         // #1188: per-tick Arc refresh — `.load() + Arc::ptr_eq`
         // short-circuits the unconditional `.load_full()` clone
         // when the coordinator hasn't rotated the Arc.
-        if let Some(new_forwarding) =
-            load_arc_if_changed(&forwarding, &shared_forwarding)
-        {
+        if let Some(new_forwarding) = load_arc_if_changed(&forwarding, &shared_forwarding) {
             // Compare BEFORE assignment — needs both old and new.
             let cos_changed =
                 cos_runtime_config_changed(forwarding.as_ref(), new_forwarding.as_ref());
@@ -967,9 +1024,10 @@ pub(crate) fn worker_loop(
                 rebuild_cos_fast_interfaces = true;
             }
         }
-        if let Some(new_x) =
-            load_arc_if_changed(&cos_owner_worker_by_queue, &shared_cos_owner_worker_by_queue)
-        {
+        if let Some(new_x) = load_arc_if_changed(
+            &cos_owner_worker_by_queue,
+            &shared_cos_owner_worker_by_queue,
+        ) {
             cos_owner_worker_by_queue = new_x;
             rebuild_cos_fast_interfaces = true;
         }
@@ -979,9 +1037,7 @@ pub(crate) fn worker_loop(
             cos_owner_live_by_queue = new_x;
             rebuild_cos_fast_interfaces = true;
         }
-        if let Some(new_x) =
-            load_arc_if_changed(&cos_shared_root_leases, &shared_cos_root_leases)
-        {
+        if let Some(new_x) = load_arc_if_changed(&cos_shared_root_leases, &shared_cos_root_leases) {
             for binding in bindings.iter_mut() {
                 release_all_cos_root_leases(binding);
                 release_all_cos_queue_leases(binding);
@@ -989,8 +1045,7 @@ pub(crate) fn worker_loop(
             cos_shared_root_leases = new_x;
             rebuild_cos_fast_interfaces = true;
         }
-        if let Some(new_x) =
-            load_arc_if_changed(&cos_shared_queue_leases, &shared_cos_queue_leases)
+        if let Some(new_x) = load_arc_if_changed(&cos_shared_queue_leases, &shared_cos_queue_leases)
         {
             for binding in bindings.iter_mut() {
                 release_all_cos_queue_leases(binding);
@@ -998,9 +1053,10 @@ pub(crate) fn worker_loop(
             cos_shared_queue_leases = new_x;
             rebuild_cos_fast_interfaces = true;
         }
-        if let Some(new_x) =
-            load_arc_if_changed(&cos_shared_queue_vtime_floors, &shared_cos_queue_vtime_floors)
-        {
+        if let Some(new_x) = load_arc_if_changed(
+            &cos_shared_queue_vtime_floors,
+            &shared_cos_queue_vtime_floors,
+        ) {
             // #917: Arc-replacement of the V_min floors map.
             // Each shared_exact queue's per-worker slots default
             // to NOT_PARTICIPATING in the new Arc. Workers will
@@ -1084,8 +1140,13 @@ pub(crate) fn worker_loop(
         if !cancelled_keys.is_empty() {
             for key in &cancelled_keys {
                 for binding in bindings.iter_mut() {
-                    cancel_queued_flow_on_binding(binding, key, key);
+                    cancel_queued_flow_on_binding(binding, key, key, Some(&mut shared_recycles));
                 }
+                apply_shared_recycles_to_bindings(
+                    &mut bindings,
+                    &binding_lookup,
+                    &mut shared_recycles,
+                );
                 if let Some((decision, metadata, origin)) = sessions.entry_with_origin(key) {
                     // Demotion keeps the session in the standby table, but the
                     // stale owner must stop advertising local XSK redirect
@@ -1932,10 +1993,7 @@ pub(crate) fn push_recent_session_delta(
     recent_session_deltas.push_back(delta);
 }
 
-fn publish_tx_completion_ring_telemetry(
-    live: &BindingLiveState,
-    telemetry: &mut WorkerTelemetry,
-) {
+fn publish_tx_completion_ring_telemetry(live: &BindingLiveState, telemetry: &mut WorkerTelemetry) {
     // #1241: publish owner-local AF_XDP TX completion-ring availability
     // samples on the same low-frequency debug cadence as the existing
     // ring-pressure gauges. These are gauges, not counters: current is
@@ -1965,6 +2023,10 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) socket_ifindex: i32,
     pub(crate) socket_queue_id: u32,
     pub(crate) socket_bind_flags: u32,
+    pub(crate) shared_umem_mode: String,
+    pub(crate) shared_umem_group: String,
+    pub(crate) shared_umem_socket_role: String,
+    pub(crate) shared_umem_disabled_reason: String,
     pub(crate) rx_packets: u64,
     pub(crate) rx_bytes: u64,
     pub(crate) rx_batches: u64,
@@ -2140,12 +2202,10 @@ mod tests {
 
         publish_tx_completion_ring_telemetry(&live, &mut telemetry);
 
+        assert_eq!(live.tx_completion_ring_available.load(Ordering::Relaxed), 5);
         assert_eq!(
-            live.tx_completion_ring_available.load(Ordering::Relaxed),
-            5
-        );
-        assert_eq!(
-            live.tx_completion_ring_available_max.load(Ordering::Relaxed),
+            live.tx_completion_ring_available_max
+                .load(Ordering::Relaxed),
             9
         );
         assert_eq!(telemetry.dbg_tx_completion_ring_available, 0);

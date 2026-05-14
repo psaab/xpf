@@ -6,6 +6,12 @@ use std::path::Path;
 struct SharedUmemPolicy {
     mode: SharedUmemMode,
     interfaces: BTreeSet<String>,
+    phase0_audit: Option<Phase0Audit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Phase0Audit {
+    reason: Option<String>,
 }
 
 impl SharedUmemPolicy {
@@ -21,13 +27,33 @@ impl SharedUmemPolicy {
         let interfaces = string_set_from_array(shared.get("interfaces"))
             .or_else(|| string_set_from_array(shared.get("interface_names")))
             .unwrap_or_default();
-        Self { mode, interfaces }
+        let artifact = shared
+            .get("phase0_artifact")
+            .or_else(|| shared.get("artifact"));
+        let phase0_audit = artifact.map(|artifact| {
+            let audit_interfaces = if interfaces.is_empty() {
+                string_set_from_array(artifact.get("selected_interfaces"))
+                    .or_else(|| string_set_from_array(artifact.get("interfaces")))
+                    .unwrap_or_default()
+            } else {
+                interfaces.clone()
+            };
+            Phase0Audit {
+                reason: phase0_artifact_audit_reason(artifact, &audit_interfaces),
+            }
+        });
+        Self {
+            mode,
+            interfaces,
+            phase0_audit,
+        }
     }
 
     fn auto() -> Self {
         Self {
             mode: SharedUmemMode::CrossNic,
             interfaces: BTreeSet::new(),
+            phase0_audit: None,
         }
     }
 
@@ -41,6 +67,7 @@ pub(super) fn apply_shared_umem_policy_to_workers(
     workers: &mut BTreeMap<u32, Vec<BindingPlan>>,
 ) {
     let policy = SharedUmemPolicy::from_snapshot(snapshot);
+    log_phase0_audit(&policy);
     if policy.mode == SharedUmemMode::Off {
         mark_all_private(workers);
         publish_shared_umem_plan_to_status(workers);
@@ -189,22 +216,27 @@ where
 fn publish_shared_umem_plan_to_status(workers: &mut BTreeMap<u32, Vec<BindingPlan>>) {
     for plans in workers.values_mut() {
         for plan in plans {
-            let shared = &plan.shared_umem;
-            plan.status.shared_umem_mode = if shared.mode == SharedUmemMode::Off {
-                String::new()
-            } else {
-                shared.mode.as_str().to_string()
-            };
-            plan.status.shared_umem_group = shared.group_key.clone();
-            plan.status.shared_umem_socket_role =
-                if shared.socket_role == SharedUmemSocketRole::Private {
-                    String::new()
-                } else {
-                    shared.socket_role.as_str().to_string()
-                };
-            plan.status.shared_umem_disabled_reason = shared.disabled_reason.clone();
+            publish_shared_umem_plan_to_binding_status(&mut plan.status, &plan.shared_umem);
         }
     }
+}
+
+pub(super) fn publish_shared_umem_plan_to_binding_status(
+    status: &mut BindingStatus,
+    shared: &SharedUmemBindingPlan,
+) {
+    status.shared_umem_mode = if shared.mode == SharedUmemMode::Off {
+        String::new()
+    } else {
+        shared.mode.as_str().to_string()
+    };
+    status.shared_umem_group = shared.group_key.clone();
+    status.shared_umem_socket_role = if shared.socket_role == SharedUmemSocketRole::Private {
+        String::new()
+    } else {
+        shared.socket_role.as_str().to_string()
+    };
+    status.shared_umem_disabled_reason = shared.disabled_reason.clone();
 }
 
 #[derive(Clone, Debug)]
@@ -269,6 +301,257 @@ fn string_set_from_array(value: Option<&serde_json::Value>) -> Option<BTreeSet<S
     )
 }
 
+fn log_phase0_audit(policy: &SharedUmemPolicy) {
+    let Some(audit) = &policy.phase0_audit else {
+        return;
+    };
+    match &audit.reason {
+        Some(reason) => eprintln!(
+            "xpf-userspace-dp: shared UMEM Phase 0 audit mismatch (non-blocking): {reason}"
+        ),
+        None => eprintln!("xpf-userspace-dp: shared UMEM Phase 0 audit passed"),
+    }
+}
+
+fn phase0_artifact_audit_reason(
+    artifact: &serde_json::Value,
+    interfaces: &BTreeSet<String>,
+) -> Option<String> {
+    if !phase0_artifact_passed(artifact) {
+        return Some("Phase 0 artifact did not pass".to_string());
+    }
+    if interfaces.is_empty() {
+        return Some("Phase 0 artifact has no selected interfaces to audit".to_string());
+    }
+    phase0_artifact_environment_mismatch(artifact, interfaces)
+}
+
+fn phase0_artifact_passed(value: &serde_json::Value) -> bool {
+    value.get("passed").and_then(|v| v.as_bool()) == Some(true)
+        || matches!(
+            value.get("status").and_then(|v| v.as_str()),
+            Some("pass" | "passed" | "PASS")
+        )
+}
+
+fn phase0_artifact_environment_mismatch(
+    artifact: &serde_json::Value,
+    interfaces: &BTreeSet<String>,
+) -> Option<String> {
+    let Some(artifact_kernel) = artifact.get("kernel_release").and_then(|v| v.as_str()) else {
+        return Some("Phase 0 artifact missing kernel_release".to_string());
+    };
+    let Some(current_kernel) = current_kernel_release() else {
+        return Some("unable to read current kernel_release for shared UMEM audit".to_string());
+    };
+    if artifact_kernel != current_kernel {
+        return Some(format!(
+            "Phase 0 artifact kernel_release {artifact_kernel} != current {current_kernel}"
+        ));
+    }
+
+    let Some(artifact_interfaces) = string_set_from_array(artifact.get("selected_interfaces"))
+        .or_else(|| string_set_from_array(artifact.get("interfaces")))
+    else {
+        return Some("Phase 0 artifact missing selected_interfaces".to_string());
+    };
+    if &artifact_interfaces != interfaces {
+        return Some(
+            "Phase 0 artifact selected interfaces do not match audit interfaces".to_string(),
+        );
+    }
+
+    let Some(artifact_pci_ids) = string_set_from_array(artifact.get("selected_nic_pci_ids"))
+        .or_else(|| string_set_from_array(artifact.get("pci_ids")))
+    else {
+        return Some("Phase 0 artifact missing selected_nic_pci_ids".to_string());
+    };
+    let Some(current_pci_ids) = interface_pci_ids(interfaces) else {
+        return Some("unable to read current NIC PCI IDs for shared UMEM audit".to_string());
+    };
+    if artifact_pci_ids != current_pci_ids {
+        return Some(format!(
+            "Phase 0 artifact PCI IDs {:?} != current {:?}",
+            artifact_pci_ids, current_pci_ids
+        ));
+    }
+
+    let Some(artifact_device_set) = artifact_selected_device_ids(artifact) else {
+        return Some(
+            "Phase 0 artifact missing selected_device_set/selected_device_pair".to_string(),
+        );
+    };
+    if artifact_device_set != current_pci_ids {
+        return Some(format!(
+            "Phase 0 artifact selected device set {:?} != current {:?}",
+            artifact_device_set, current_pci_ids
+        ));
+    }
+
+    let Some(artifact_driver_value) = artifact
+        .get("driver")
+        .or_else(|| artifact.get("driver_name"))
+    else {
+        return Some("Phase 0 artifact missing driver".to_string());
+    };
+    let Some(artifact_driver) = artifact_string_by_interface(artifact_driver_value, interfaces)
+    else {
+        return Some("Phase 0 artifact driver must be a string or interface map".to_string());
+    };
+    let Some(current_driver) = interface_driver_by_name(interfaces) else {
+        return Some("unable to read current interface driver for shared UMEM audit".to_string());
+    };
+    if artifact_driver != current_driver {
+        return Some(format!(
+            "Phase 0 artifact driver {:?} != current {:?}",
+            artifact_driver, current_driver
+        ));
+    }
+
+    let Some(artifact_mtu_value) = artifact.get("mtu") else {
+        return Some("Phase 0 artifact missing mtu".to_string());
+    };
+    let Some(artifact_mtu) = artifact_u32_by_interface(artifact_mtu_value, interfaces) else {
+        return Some("Phase 0 artifact mtu must be a number or interface map".to_string());
+    };
+    let Some(current_mtu) = interface_mtu_by_name(interfaces) else {
+        return Some("unable to read current interface MTU for shared UMEM audit".to_string());
+    };
+    if artifact_mtu != current_mtu {
+        return Some(format!(
+            "Phase 0 artifact MTU {:?} != current {:?}",
+            artifact_mtu, current_mtu
+        ));
+    }
+
+    let Some(artifact_queues_value) = artifact.get("queue_topology") else {
+        return Some("Phase 0 artifact missing queue_topology".to_string());
+    };
+    let Some(artifact_queues) = artifact_u32_by_interface(artifact_queues_value, interfaces) else {
+        return Some(
+            "Phase 0 artifact queue_topology must be a number or interface map".to_string(),
+        );
+    };
+    let Some(current_queues) = interface_rx_queue_count_by_name(interfaces) else {
+        return Some("unable to read current RX queue topology for shared UMEM audit".to_string());
+    };
+    if artifact_queues != current_queues {
+        return Some(format!(
+            "Phase 0 artifact queue_topology {:?} != current {:?}",
+            artifact_queues, current_queues
+        ));
+    }
+
+    None
+}
+
+fn artifact_selected_device_ids(artifact: &serde_json::Value) -> Option<BTreeSet<String>> {
+    string_set_from_array(artifact.get("selected_device_set"))
+        .or_else(|| string_set_from_array(artifact.get("selected_devices")))
+        .or_else(|| string_set_from_array(artifact.get("selected_device_pair")))
+}
+
+fn current_kernel_release() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn interface_pci_ids(interfaces: &BTreeSet<String>) -> Option<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for ifname in interfaces {
+        let device_path = interface_device_path(ifname)?;
+        let pci_id = Path::new(&device_path).file_name()?.to_str()?.to_string();
+        out.insert(pci_id);
+    }
+    Some(out)
+}
+
+fn artifact_string_by_interface(
+    value: &serde_json::Value,
+    interfaces: &BTreeSet<String>,
+) -> Option<BTreeMap<String, String>> {
+    if let Some(single) = value.as_str() {
+        return Some(
+            interfaces
+                .iter()
+                .map(|ifname| (ifname.clone(), single.to_string()))
+                .collect(),
+        );
+    }
+    let object = value.as_object()?;
+    let mut out = BTreeMap::new();
+    for ifname in interfaces {
+        let value = object.get(ifname)?.as_str()?;
+        out.insert(ifname.clone(), value.to_string());
+    }
+    Some(out)
+}
+
+fn interface_driver_by_name(interfaces: &BTreeSet<String>) -> Option<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for ifname in interfaces {
+        out.insert(ifname.clone(), interface_driver_name(ifname)?);
+    }
+    Some(out)
+}
+
+fn artifact_u32_by_interface(
+    value: &serde_json::Value,
+    interfaces: &BTreeSet<String>,
+) -> Option<BTreeMap<String, u32>> {
+    if let Some(single) = value.as_u64().and_then(|v| u32::try_from(v).ok()) {
+        return Some(
+            interfaces
+                .iter()
+                .map(|ifname| (ifname.clone(), single))
+                .collect(),
+        );
+    }
+    let object = value.as_object()?;
+    let mut out = BTreeMap::new();
+    for ifname in interfaces {
+        let value = object.get(ifname)?.as_u64()?;
+        out.insert(ifname.clone(), u32::try_from(value).ok()?);
+    }
+    Some(out)
+}
+
+fn interface_mtu_by_name(interfaces: &BTreeSet<String>) -> Option<BTreeMap<String, u32>> {
+    let mut out = BTreeMap::new();
+    for ifname in interfaces {
+        let path = Path::new("/sys/class/net").join(ifname).join("mtu");
+        out.insert(ifname.clone(), read_u32_file(path)?);
+    }
+    Some(out)
+}
+
+fn interface_rx_queue_count_by_name(
+    interfaces: &BTreeSet<String>,
+) -> Option<BTreeMap<String, u32>> {
+    let mut out = BTreeMap::new();
+    for ifname in interfaces {
+        let path = Path::new("/sys/class/net").join(ifname).join("queues");
+        let count = std::fs::read_dir(path)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("rx-"))
+            })
+            .count();
+        out.insert(ifname.clone(), u32::try_from(count).ok()?);
+    }
+    Some(out)
+}
+
+fn read_u32_file(path: impl AsRef<Path>) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +564,7 @@ mod tests {
         let policy = SharedUmemPolicy::from_snapshot(&snapshot);
         assert_eq!(policy.mode, SharedUmemMode::CrossNic);
         assert!(policy.interfaces.is_empty());
+        assert!(policy.phase0_audit.is_none());
     }
 
     #[test]
@@ -334,6 +618,13 @@ mod tests {
         let policy = SharedUmemPolicy::from_snapshot(&snapshot);
         assert!(policy.interfaces.is_empty());
         assert!(policy.selects_interface("dmz0"));
+        assert_eq!(
+            policy
+                .phase0_audit
+                .as_ref()
+                .and_then(|audit| audit.reason.as_deref()),
+            Some("Phase 0 artifact missing kernel_release")
+        );
     }
 
     #[test]
@@ -355,6 +646,13 @@ mod tests {
         assert_eq!(
             policy.interfaces,
             BTreeSet::from(["lan0".to_string(), "wan0".to_string()])
+        );
+        assert_eq!(
+            policy
+                .phase0_audit
+                .as_ref()
+                .and_then(|audit| audit.reason.as_deref()),
+            Some("Phase 0 artifact did not pass")
         );
     }
 

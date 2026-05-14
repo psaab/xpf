@@ -73,3 +73,46 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
     );
     assert!(!in_flight_prepared_recycles.contains_key(&41));
 }
+
+#[test]
+fn cancelled_prepared_foreign_fill_routes_to_shared_recycles() {
+    let mut free_tx_frames = VecDeque::new();
+    let mut pending_fill_frames = VecDeque::new();
+    let mut shared_recycles = Vec::new();
+
+    recycle_cancelled_prepared_offset_with_shared(
+        &mut free_tx_frames,
+        &mut pending_fill_frames,
+        Some(&mut shared_recycles),
+        7,
+        PreparedTxRecycle::FillOnSlotWithOffset {
+            slot: 8,
+            offset: 1234,
+        },
+        42,
+    );
+
+    assert!(free_tx_frames.is_empty());
+    assert!(pending_fill_frames.is_empty());
+    assert_eq!(shared_recycles, vec![(8, 1234)]);
+}
+
+#[test]
+fn cancelled_prepared_local_fill_stays_on_pending_fill() {
+    let mut free_tx_frames = VecDeque::new();
+    let mut pending_fill_frames = VecDeque::new();
+    let mut shared_recycles = Vec::new();
+
+    recycle_cancelled_prepared_offset_with_shared(
+        &mut free_tx_frames,
+        &mut pending_fill_frames,
+        Some(&mut shared_recycles),
+        7,
+        PreparedTxRecycle::FillOnSlot(7),
+        42,
+    );
+
+    assert!(free_tx_frames.is_empty());
+    assert_eq!(pending_fill_frames, VecDeque::from([42]));
+    assert!(shared_recycles.is_empty());
+}

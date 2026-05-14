@@ -18,21 +18,21 @@ use std::sync::atomic::Ordering;
 use crate::afxdp::frame::{apply_dscp_rewrite_to_frame, frame_has_tcp_rst};
 use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::{
-    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, ExactLocalScratchTxRequest,
-    ExactPreparedScratchTxRequest, PreparedTxRecycle, PreparedTxRequest, TxRequest,
-    WorkerCoSQueueFastPath, COS_PRIORITY_LEVELS,
+    COS_PRIORITY_LEVELS, CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime,
+    ExactLocalScratchTxRequest, ExactPreparedScratchTxRequest, PreparedTxRecycle,
+    PreparedTxRequest, TxRequest, WorkerCoSQueueFastPath,
 };
 use crate::afxdp::umem::MmapArea;
 use crate::afxdp::worker::BindingWorker;
-use crate::afxdp::{tx_frame_capacity, FastMap, TX_BATCH_SIZE};
+use crate::afxdp::{FastMap, TX_BATCH_SIZE, tx_frame_capacity};
 use crate::xsk_ffi::xdp::XdpDesc;
 
 use super::{
-    cos_item_len, cos_queue_clear_orphan_snapshot_after_drop, cos_queue_front,
-    cos_queue_front_with_cap, cos_queue_is_empty, cos_queue_pop_front, cos_queue_pop_front_with_cap,
-    cos_queue_push_front, cos_queue_v_min_consume_suspension, cos_queue_v_min_continue,
-    cos_refill_ns_until, maybe_top_up_cos_queue_lease, publish_committed_queue_vtime,
-    refill_cos_tokens, CoSQueueLeaseAcquireTelemetry, COS_MIN_BURST_BYTES,
+    COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_item_len,
+    cos_queue_clear_orphan_snapshot_after_drop, cos_queue_front, cos_queue_front_with_cap,
+    cos_queue_is_empty, cos_queue_pop_front, cos_queue_pop_front_with_cap, cos_queue_push_front,
+    cos_queue_v_min_consume_suspension, cos_queue_v_min_continue, cos_refill_ns_until,
+    maybe_top_up_cos_queue_lease, publish_committed_queue_vtime, refill_cos_tokens,
 };
 // #1229 v7 per-bucket TX accounting + threshold-gated EWMA.
 use super::fairness::account_flow_bucket_tx;
@@ -52,19 +52,20 @@ mod service;
 use service::{service_exact_local_queue_direct, service_exact_prepared_queue_direct};
 
 use super::tx_completion::{
-    apply_cos_prepared_result, apply_cos_send_result, apply_direct_exact_send_result,
-    cos_tick_for_ns, count_park_reason, count_tx_ring_full_submit_stall, park_cos_queue,
-    prime_cos_root_for_service, refresh_cos_interface_activity, restore_cos_local_items_inner,
-    restore_cos_prepared_items_inner, CoSServicePhase, ParkReason,
+    CoSServicePhase, ParkReason, apply_cos_prepared_result, apply_cos_send_result,
+    apply_direct_exact_send_result, cos_tick_for_ns, count_park_reason,
+    count_tx_ring_full_submit_stall, park_cos_queue, prime_cos_root_for_service,
+    refresh_cos_interface_activity, restore_cos_local_items_inner,
+    restore_cos_prepared_items_inner,
 };
 // Back-edges to crate::afxdp::tx are XSK-ring / worker-binding /
 // prepared-frame primitives — primitives that own the kernel ring
 // state and are hosted there for that reason.
 use crate::afxdp::tx::{
-    cos_queue_dscp_rewrite, maybe_wake_tx, reap_tx_completions, recycle_cancelled_prepared_offset,
-    remember_prepared_recycle, stamp_submits, transmit_batch, transmit_prepared_queue, TxError,
     COS_GUARANTEE_QUANTUM_MAX_BYTES, COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS,
-    COS_SURPLUS_ROUND_QUANTUM_BYTES,
+    COS_SURPLUS_ROUND_QUANTUM_BYTES, TxError, cos_queue_dscp_rewrite, maybe_wake_tx,
+    reap_tx_completions, recycle_cancelled_prepared_offset, remember_prepared_recycle,
+    stamp_submits, transmit_batch, transmit_prepared_queue,
 };
 
 pub(in crate::afxdp) enum CoSBatch {
@@ -1167,7 +1168,7 @@ fn submit_cos_batch(
             } else {
                 0
             };
-            match transmit_prepared_queue(binding, &mut items, now_ns) {
+            match transmit_prepared_queue(binding, &mut items, now_ns, shared_recycles) {
                 Ok((packets, bytes)) => {
                     apply_cos_prepared_result(
                         binding,

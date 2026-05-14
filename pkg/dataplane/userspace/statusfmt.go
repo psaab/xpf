@@ -111,7 +111,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 		if binding.ZeroCopy {
 			zeroCopyBindings++
 		}
-		if binding.SharedUMEMMode != "" && binding.SharedUMEMSocketRole != "" {
+		if binding.SharedUMEMMode != "" && binding.SharedUMEMSocketRole != "" && binding.SharedUMEMDisabledReason == "" {
 			sharedUMEMBindings++
 		}
 		rxPackets += binding.RXPackets

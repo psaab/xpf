@@ -59,7 +59,10 @@ fn enqueue_local_request_to_target_or_owner(
 
 #[inline]
 fn recycle_ingress_frame(ingress_binding: &mut BindingWorker, source_offset: u64, now_ns: u64) {
-    ingress_binding.tx_pipeline.pending_fill_frames.push_back(source_offset);
+    ingress_binding
+        .tx_pipeline
+        .pending_fill_frames
+        .push_back(source_offset);
     if ingress_binding.tx_pipeline.pending_fill_frames.len() >= FILL_BATCH_SIZE {
         let _ = drain_pending_fill(ingress_binding, now_ns);
     }
@@ -240,7 +243,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 request.desc.len,
                 None,
                 None,
-            forwarding,
+                forwarding,
             );
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
@@ -324,23 +327,26 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     frame.len() as u32,
                                     Some(request.meta.into()),
                                     None,
-                                forwarding,
+                                    forwarding,
                                 );
                                 build_failed = true;
                                 break;
                             }
                         }
                         let seg_frame_len = frame.len();
-                        target_binding.tx_pipeline.pending_tx_local.push_back(TxRequest {
-                            bytes: frame,
-                            expected_ports,
-                            expected_addr_family: request.meta.addr_family,
-                            expected_protocol: request.meta.protocol,
-                            flow_key: flow_key.clone(),
-                            egress_ifindex: request.decision.resolution.egress_ifindex,
-                            cos_queue_id: request.cos_queue_id,
-                            dscp_rewrite: request.dscp_rewrite,
-                        });
+                        target_binding
+                            .tx_pipeline
+                            .pending_tx_local
+                            .push_back(TxRequest {
+                                bytes: frame,
+                                expected_ports,
+                                expected_addr_family: request.meta.addr_family,
+                                expected_protocol: request.meta.protocol,
+                                flow_key: flow_key.clone(),
+                                egress_ifindex: request.decision.resolution.egress_ifindex,
+                                cos_queue_id: request.cos_queue_id,
+                                dscp_rewrite: request.dscp_rewrite,
+                            });
                         bound_pending_tx_local(target_binding);
                         dbg.enqueue_ok += 1;
                         dbg.enqueue_copy += 1;
@@ -433,9 +439,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                         expected_ports,
                     ) {
                         Some(rewrite_result) => {
-                            target_binding
-                                .tx_pipeline.pending_tx_prepared
-                                .push_back(PreparedTxRequest {
+                            target_binding.tx_pipeline.pending_tx_prepared.push_back(
+                                PreparedTxRequest {
                                     offset: rewrite_result.offset,
                                     len: rewrite_result.len,
                                     recycle: PreparedTxRecycle::fill_on_slot(
@@ -450,7 +455,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     egress_ifindex: request.decision.resolution.egress_ifindex,
                                     cos_queue_id: request.cos_queue_id,
                                     dscp_rewrite: request.dscp_rewrite,
-                                });
+                                },
+                            );
                             bound_pending_tx_prepared(target_binding);
                             target_binding.tx_counters.pending_in_place_tx_packets += 1;
                             target_binding
@@ -502,7 +508,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                             frame.len() as u32,
                                             Some(request.meta.into()),
                                             None,
-                                        forwarding,
+                                            forwarding,
                                         );
                                         // Don't continue — the frame was built successfully,
                                         // forward it anyway. Mismatch is diagnostic only.
@@ -517,7 +523,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         cp1_len as u32,
                                         Some(request.meta.into()),
                                         None,
-                                    forwarding,
+                                        forwarding,
                                     );
                                     continue;
                                 }
@@ -563,7 +569,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     // intermediate Vec allocation and one memcpy.
                     // NAT64 cannot use direct TX (header size changes), so
                     // it falls through to the copy path below.
-                    let mut direct_tx_offset = target_binding.tx_pipeline.free_tx_frames.pop_front();
+                    let mut direct_tx_offset =
+                        target_binding.tx_pipeline.free_tx_frames.pop_front();
                     if direct_tx_offset.is_none()
                         && (target_binding.tx_pipeline.outstanding_tx > 0
                             || !target_binding.tx_pipeline.pending_tx_prepared.is_empty()
@@ -646,7 +653,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     expected_ports,
                                     built_ports,
                                 ) {
-                                    target_binding.tx_pipeline.free_tx_frames.push_front(tx_offset);
+                                    target_binding
+                                        .tx_pipeline
+                                        .free_tx_frames
+                                        .push_front(tx_offset);
                                     record_exception(
                                         recent_exceptions,
                                         ingress_ident,
@@ -654,16 +664,22 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         written as u32,
                                         Some(request.meta.into()),
                                         None,
-                                    forwarding,
+                                        forwarding,
                                     );
                                     build_failed = true;
                                 }
                             }
                             if build_failed {
-                                target_binding.tx_pipeline.free_tx_frames.push_front(tx_offset);
+                                target_binding
+                                    .tx_pipeline
+                                    .free_tx_frames
+                                    .push_front(tx_offset);
                                 true
                             } else if written > tx_frame_capacity() {
-                                target_binding.tx_pipeline.free_tx_frames.push_front(tx_offset);
+                                target_binding
+                                    .tx_pipeline
+                                    .free_tx_frames
+                                    .push_front(tx_offset);
                                 record_exception(
                                     recent_exceptions,
                                     ingress_ident,
@@ -671,13 +687,12 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     written as u32,
                                     Some(request.meta.into()),
                                     None,
-                                forwarding,
+                                    forwarding,
                                 );
                                 true
                             } else {
-                                target_binding
-                                    .tx_pipeline.pending_tx_prepared
-                                    .push_back(PreparedTxRequest {
+                                target_binding.tx_pipeline.pending_tx_prepared.push_back(
+                                    PreparedTxRequest {
                                         offset: tx_offset,
                                         len: written as u32,
                                         recycle: PreparedTxRecycle::FreeTxFrame,
@@ -688,7 +703,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         egress_ifindex: request.decision.resolution.egress_ifindex,
                                         cos_queue_id: request.cos_queue_id,
                                         dscp_rewrite: request.dscp_rewrite,
-                                    });
+                                    },
+                                );
                                 bound_pending_tx_prepared(target_binding);
                                 dbg.enqueue_ok += 1;
                                 dbg.enqueue_direct += 1;
@@ -700,7 +716,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                 true
                             }
                         } else {
-                            target_binding.tx_pipeline.free_tx_frames.push_front(tx_offset);
+                            target_binding
+                                .tx_pipeline
+                                .free_tx_frames
+                                .push_front(tx_offset);
                             direct_tx_fallback_reason =
                                 Some(DirectTxFallbackReason::BuildReturnedNone);
                             false
@@ -713,13 +732,19 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     if !direct_built {
                         match direct_tx_fallback_reason {
                             Some(DirectTxFallbackReason::NoFreeTxFrame) => {
-                                target_binding.tx_counters.pending_direct_tx_no_frame_fallback_packets += 1;
+                                target_binding
+                                    .tx_counters
+                                    .pending_direct_tx_no_frame_fallback_packets += 1;
                             }
                             Some(DirectTxFallbackReason::BuildReturnedNone) => {
-                                target_binding.tx_counters.pending_direct_tx_build_fallback_packets += 1;
+                                target_binding
+                                    .tx_counters
+                                    .pending_direct_tx_build_fallback_packets += 1;
                             }
                             Some(DirectTxFallbackReason::DisallowedByRewriteMode) => {
-                                target_binding.tx_counters.pending_direct_tx_disallowed_fallback_packets += 1;
+                                target_binding
+                                    .tx_counters
+                                    .pending_direct_tx_disallowed_fallback_packets += 1;
                             }
                             None => {}
                         }
@@ -761,7 +786,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                             frame.len() as u32,
                                             Some(request.meta.into()),
                                             None,
-                                        forwarding,
+                                            forwarding,
                                         );
                                         // Don't continue — the frame was built successfully,
                                         // forward it anyway. Mismatch is diagnostic only.
@@ -776,7 +801,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         cp2_len as u32,
                                         Some(request.meta.into()),
                                         None,
-                                    forwarding,
+                                        forwarding,
                                     );
                                     continue;
                                 }
@@ -931,7 +956,7 @@ pub(in crate::afxdp) fn handle_forward_build_failure(
         packet_length,
         Some(meta),
         None,
-    forwarding,
+        forwarding,
     );
     if fallback_to_slow_path {
         maybe_reinject_slow_path_from_frame(
@@ -972,7 +997,31 @@ pub(in crate::afxdp) fn apply_shared_recycles(
     }
 }
 
-pub(in crate::afxdp) fn resolve_tx_binding_ifindex(forwarding: &ForwardingState, egress_ifindex: i32) -> i32 {
+pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
+    bindings: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    shared_recycles: &mut Vec<(u32, u64)>,
+) {
+    if shared_recycles.is_empty() {
+        return;
+    }
+    for (slot, offset) in shared_recycles.drain(..) {
+        if let Some(target_index) = binding_lookup.slot_index(slot)
+            && let Some(binding) = bindings.get_mut(target_index)
+        {
+            binding.tx_pipeline.pending_fill_frames.push_back(offset);
+            continue;
+        }
+        if let Some(binding) = bindings.first_mut() {
+            binding.tx_pipeline.pending_fill_frames.push_back(offset);
+        }
+    }
+}
+
+pub(in crate::afxdp) fn resolve_tx_binding_ifindex(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+) -> i32 {
     if let Some(fabric) = forwarding
         .fabrics
         .iter()
@@ -1031,7 +1080,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path(
             desc.len as u32,
             Some(meta),
             None,
-        forwarding,
+            forwarding,
         );
         return;
     };
@@ -1071,7 +1120,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
             frame.len() as u32,
             Some(meta),
             None,
-        forwarding,
+            forwarding,
         );
         return;
     };
@@ -1100,7 +1149,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                     frame.len() as u32,
                     Some(meta),
                     None,
-                forwarding,
+                    forwarding,
                 );
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
@@ -1112,7 +1161,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                     frame.len() as u32,
                     Some(meta),
                     None,
-                forwarding,
+                    forwarding,
                 );
             }
         }
@@ -1128,7 +1177,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
             frame.len() as u32,
             Some(meta),
             None,
-        forwarding,
+            forwarding,
         );
         return;
     };
@@ -1146,7 +1195,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                 frame.len() as u32,
                 Some(meta),
                 None,
-            forwarding,
+                forwarding,
             );
         }
         Ok(EnqueueOutcome::QueueFull) => {
@@ -1158,7 +1207,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                 frame.len() as u32,
                 Some(meta),
                 None,
-            forwarding,
+                forwarding,
             );
         }
         Err(err) => {
@@ -1171,7 +1220,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                 frame.len() as u32,
                 Some(meta),
                 None,
-            forwarding,
+                forwarding,
             );
         }
     }

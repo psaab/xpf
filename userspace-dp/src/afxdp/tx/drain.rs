@@ -192,7 +192,7 @@ pub(in crate::afxdp) fn drain_pending_tx(
         drop_cos_bound_prepared_leftovers(binding);
     }
     while !binding.tx_pipeline.pending_tx_prepared.is_empty() {
-        match transmit_prepared_batch(binding, now_ns) {
+        match transmit_prepared_batch(binding, now_ns, shared_recycles) {
             Ok((packets, bytes)) => {
                 if packets == 0 {
                     break;

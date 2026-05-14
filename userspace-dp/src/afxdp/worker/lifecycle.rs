@@ -10,7 +10,6 @@
 
 use super::*;
 
-
 // Pins the invariant that `poll_binding` relies on: the RX batch loop
 // must run at least once. Cheap compile-time guard.
 const _: () = assert!(MAX_RX_BATCHES_PER_POLL >= 1);
@@ -49,7 +48,6 @@ pub(super) fn poll_binding(
     cos_owner_worker_by_queue: &BTreeMap<(i32, u8), u32>,
     cos_owner_live_by_queue: &BTreeMap<(i32, u8), Arc<BindingLiveState>>,
 ) -> bool {
-
     let (left, rest) = bindings.split_at_mut(binding_index);
     let Some((binding, right)) = rest.split_first_mut() else {
         return false;
@@ -82,7 +80,8 @@ pub(super) fn poll_binding(
     for _ in 0..MAX_RX_BATCHES_PER_POLL {
         // Backpressure: skip RX when TX queues are heavily loaded to prevent
         // fill ring exhaustion. The NIC holds packets until we refill (#201).
-        let tx_backlog = binding.tx_pipeline.pending_tx_local.len() + binding.tx_pipeline.pending_tx_prepared.len();
+        let tx_backlog = binding.tx_pipeline.pending_tx_local.len()
+            + binding.tx_pipeline.pending_tx_prepared.len();
         if tx_backlog >= binding.tx_pipeline.max_pending_tx {
             binding.telemetry.dbg_backpressure += 1;
             // Try to drain TX first — completions free frames for both TX and fill.
@@ -211,7 +210,8 @@ pub(super) fn poll_binding(
             // #918: 4-way set-associative cache requires walking the set
             // for the matching key — `invalidate_slot` does that.
             binding
-                .flow.flow_cache
+                .flow
+                .flow_cache
                 .invalidate_slot(&forward_key, binding.ifindex);
             teardown_tcp_rst_flow(
                 left,
@@ -226,6 +226,7 @@ pub(super) fn poll_binding(
                 &forward_key,
                 nat,
                 &mut pending_forwards,
+                shared_recycles,
             );
         }
         binding.scratch.scratch_rst_teardowns = rst_teardowns;
@@ -235,7 +236,8 @@ pub(super) fn poll_binding(
             // binding is borrowed mutably by enqueue_pending_forwards but
             // ingress_live is only used for read-only error logging inside it.
             let ingress_live: *const BindingLiveState = &*binding.live;
-            let mut scratch_post_recycles = core::mem::take(&mut binding.scratch.scratch_post_recycles);
+            let mut scratch_post_recycles =
+                core::mem::take(&mut binding.scratch.scratch_post_recycles);
             enqueue_pending_forwards(
                 left,
                 binding_index,
@@ -282,7 +284,8 @@ pub(super) fn poll_binding(
         );
         if !binding.scratch.scratch_recycle.is_empty() {
             binding
-                .tx_pipeline.pending_fill_frames
+                .tx_pipeline
+                .pending_fill_frames
                 .extend(binding.scratch.scratch_recycle.drain(..));
         }
         let _ = drain_pending_fill(binding, now_ns);

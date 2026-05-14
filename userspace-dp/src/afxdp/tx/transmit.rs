@@ -4,15 +4,11 @@
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
-use crate::afxdp::frame::{
-    apply_dscp_rewrite_to_frame, decode_frame_summary, frame_has_tcp_rst,
-};
+use crate::afxdp::frame::{apply_dscp_rewrite_to_frame, decode_frame_summary, frame_has_tcp_rst};
 use crate::afxdp::neighbor::monotonic_nanos;
-use crate::afxdp::types::{
-    FastMap, PreparedTxRecycle, PreparedTxRequest, TxRequest,
-};
+use crate::afxdp::types::{FastMap, PreparedTxRecycle, PreparedTxRequest, TxRequest};
 use crate::afxdp::worker::BindingWorker;
-use crate::afxdp::{tx_frame_capacity, TX_BATCH_SIZE};
+use crate::afxdp::{TX_BATCH_SIZE, tx_frame_capacity};
 use crate::xsk_ffi::xdp::XdpDesc;
 
 use super::rings::{maybe_wake_tx, reap_tx_completions};
@@ -30,6 +26,24 @@ pub(in crate::afxdp) fn recycle_cancelled_prepared_offset(
     recycle: PreparedTxRecycle,
     offset: u64,
 ) {
+    recycle_cancelled_prepared_offset_with_shared(
+        free_tx_frames,
+        pending_fill_frames,
+        None,
+        slot,
+        recycle,
+        offset,
+    );
+}
+
+pub(in crate::afxdp) fn recycle_cancelled_prepared_offset_with_shared(
+    free_tx_frames: &mut VecDeque<u64>,
+    pending_fill_frames: &mut VecDeque<u64>,
+    mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
+    slot: u32,
+    recycle: PreparedTxRecycle,
+    offset: u64,
+) {
     let recycle_offset = recycle.recycle_offset(offset);
     match recycle {
         PreparedTxRecycle::FreeTxFrame => free_tx_frames.push_back(recycle_offset),
@@ -40,27 +54,33 @@ pub(in crate::afxdp) fn recycle_cancelled_prepared_offset(
             pending_fill_frames.push_back(recycle_offset);
         }
         PreparedTxRecycle::FillOnSlot(_) | PreparedTxRecycle::FillOnSlotWithOffset { .. } => {
+            if let Some(shared_recycles) = shared_recycles.as_deref_mut() {
+                if let Some(fill_slot) = recycle.fill_slot() {
+                    shared_recycles.push((fill_slot, recycle_offset));
+                    return;
+                }
+            }
             free_tx_frames.push_back(recycle_offset);
         }
     }
 }
 
-pub(in crate::afxdp) fn recycle_prepared_immediately(binding: &mut BindingWorker, req: &PreparedTxRequest) {
-    // #760 / Codex review note: when `req.recycle` is
-    // `FillOnSlot(fill_slot)` with `fill_slot != binding.slot`,
-    // `recycle_cancelled_prepared_offset` routes the frame to THIS
-    // binding's `free_tx_frames`, not the source slot's fill ring.
-    // This is the same behavior as the pre-existing cancel path
-    // used by `restore_cos_prepared_items` etc., and is latent in
-    // practice because `FillOnSlot(other_slot)` only arises in the
-    // same-device shared-UMEM prototype, which is unused on the
-    // current test topologies. A proper cross-slot fill-credit
-    // routing would need a `shared_recycles` channel from this
-    // drop site back to the source worker; deferred until the
-    // shared-UMEM prototype is activated.
-    recycle_cancelled_prepared_offset(
+pub(in crate::afxdp) fn recycle_prepared_immediately(
+    binding: &mut BindingWorker,
+    req: &PreparedTxRequest,
+) {
+    recycle_prepared_immediately_with_shared(binding, req, None);
+}
+
+pub(in crate::afxdp) fn recycle_prepared_immediately_with_shared(
+    binding: &mut BindingWorker,
+    req: &PreparedTxRequest,
+    shared_recycles: Option<&mut Vec<(u32, u64)>>,
+) {
+    recycle_cancelled_prepared_offset_with_shared(
         &mut binding.tx_pipeline.free_tx_frames,
         &mut binding.tx_pipeline.pending_fill_frames,
+        shared_recycles,
         binding.slot,
         req.recycle,
         req.offset,
@@ -179,10 +199,14 @@ pub(in crate::afxdp) fn transmit_batch(
         return Err(TxError::Retry("no prepared TX frame available".to_string()));
     }
 
-    let mut writer = binding.xsk.tx.transmit(binding.scratch.scratch_local_tx.len() as u32);
+    let mut writer = binding
+        .xsk
+        .tx
+        .transmit(binding.scratch.scratch_local_tx.len() as u32);
     let inserted = writer.insert(
         binding
-            .scratch.scratch_local_tx
+            .scratch
+            .scratch_local_tx
             .iter()
             .map(|(offset, req)| XdpDesc {
                 addr: *offset,
@@ -206,7 +230,8 @@ pub(in crate::afxdp) fn transmit_batch(
     stamp_submits(
         &mut binding.tx_pipeline.tx_submit_ns,
         binding
-            .scratch.scratch_local_tx
+            .scratch
+            .scratch_local_tx
             .iter()
             .take(inserted as usize)
             .map(|(offset, _)| *offset),
@@ -223,7 +248,8 @@ pub(in crate::afxdp) fn transmit_batch(
         return Err(TxError::Retry("tx ring insert failed".to_string()));
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
-    binding.tx_pipeline.outstanding_tx = binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
+    binding.tx_pipeline.outstanding_tx =
+        binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
     let mut sent_packets = 0u64;
     let mut sent_bytes = 0u64;
@@ -250,9 +276,10 @@ pub(in crate::afxdp) fn transmit_batch(
 pub(super) fn transmit_prepared_batch(
     binding: &mut BindingWorker,
     now_ns: u64,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) -> Result<(u64, u64), TxError> {
     let mut pending = core::mem::take(&mut binding.tx_pipeline.pending_tx_prepared);
-    let result = transmit_prepared_queue(binding, &mut pending, now_ns);
+    let result = transmit_prepared_queue(binding, &mut pending, now_ns, shared_recycles);
     binding.tx_pipeline.pending_tx_prepared = pending;
     result
 }
@@ -261,6 +288,7 @@ pub(in crate::afxdp) fn transmit_prepared_queue(
     binding: &mut BindingWorker,
     pending: &mut VecDeque<PreparedTxRequest>,
     now_ns: u64,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) -> Result<(u64, u64), TxError> {
     if pending.is_empty() {
         return Ok((0, 0));
@@ -273,9 +301,9 @@ pub(in crate::afxdp) fn transmit_prepared_queue(
         };
         if req.len as usize > tx_frame_capacity() {
             let orphaned: Vec<_> = binding.scratch.scratch_prepared_tx.drain(..).collect();
-            recycle_prepared_immediately(binding, &req);
+            recycle_prepared_immediately_with_shared(binding, &req, Some(shared_recycles));
             for r in &orphaned {
-                recycle_prepared_immediately(binding, r);
+                recycle_prepared_immediately_with_shared(binding, r, Some(shared_recycles));
             }
             // #710: each orphan is a silently-recycled packet that will
             // not reach the TX ring. The caller's post-return `+= 1`
@@ -317,7 +345,7 @@ pub(in crate::afxdp) fn transmit_prepared_queue(
             let err_len = req.len;
             let orphaned: Vec<_> = binding.scratch.scratch_prepared_tx.drain(..).collect();
             for r in &orphaned {
-                recycle_prepared_immediately(binding, r);
+                recycle_prepared_immediately_with_shared(binding, r, Some(shared_recycles));
             }
             // #710: each orphan is a silently-recycled packet. Caller
             // will `+= 1` for the offender; this accounts for the rest.
@@ -350,7 +378,7 @@ pub(in crate::afxdp) fn transmit_prepared_queue(
             let err_len = req.len;
             let orphaned: Vec<_> = binding.scratch.scratch_prepared_tx.drain(..).collect();
             for r in &orphaned {
-                recycle_prepared_immediately(binding, r);
+                recycle_prepared_immediately_with_shared(binding, r, Some(shared_recycles));
             }
             // #710: same shape as the slice_mut_unchecked site above —
             // `orphaned` drains EVERY entry including the offender.
@@ -420,11 +448,17 @@ pub(in crate::afxdp) fn transmit_prepared_queue(
         .xsk
         .tx
         .transmit(binding.scratch.scratch_prepared_tx.len() as u32);
-    let inserted = writer.insert(binding.scratch.scratch_prepared_tx.iter().map(|req| XdpDesc {
-        addr: req.offset,
-        len: req.len,
-        options: 0,
-    }));
+    let inserted = writer.insert(
+        binding
+            .scratch
+            .scratch_prepared_tx
+            .iter()
+            .map(|req| XdpDesc {
+                addr: req.offset,
+                len: req.len,
+                options: 0,
+            }),
+    );
     writer.commit();
     drop(writer);
     // #940: NO V_min publish here. transmit_prepared_queue is the
@@ -440,7 +474,8 @@ pub(in crate::afxdp) fn transmit_prepared_queue(
     stamp_submits(
         &mut binding.tx_pipeline.tx_submit_ns,
         binding
-            .scratch.scratch_prepared_tx
+            .scratch
+            .scratch_prepared_tx
             .iter()
             .take(inserted as usize)
             .map(|req| req.offset),
@@ -456,7 +491,8 @@ pub(in crate::afxdp) fn transmit_prepared_queue(
         return Err(TxError::Retry("prepared tx ring insert failed".to_string()));
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
-    binding.tx_pipeline.outstanding_tx = binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
+    binding.tx_pipeline.outstanding_tx =
+        binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
     let mut sent_packets = 0u64;
     let mut sent_bytes = 0u64;
