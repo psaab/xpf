@@ -367,6 +367,10 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) direct_tx_packets: AtomicU64,
     pub(super) copy_tx_packets: AtomicU64,
     pub(super) in_place_tx_packets: AtomicU64,
+    pub(super) in_place_vlan_push_desc_packets: AtomicU64,
+    pub(super) in_place_vlan_pop_desc_packets: AtomicU64,
+    pub(super) in_place_vlan_push_no_headroom_packets: AtomicU64,
+    pub(super) in_place_l2_memmove_fallback_packets: AtomicU64,
     pub(super) direct_tx_no_frame_fallback_packets: AtomicU64,
     pub(super) direct_tx_build_fallback_packets: AtomicU64,
     pub(super) direct_tx_disallowed_fallback_packets: AtomicU64,
@@ -530,6 +534,10 @@ impl BindingLiveState {
             direct_tx_packets: AtomicU64::new(0),
             copy_tx_packets: AtomicU64::new(0),
             in_place_tx_packets: AtomicU64::new(0),
+            in_place_vlan_push_desc_packets: AtomicU64::new(0),
+            in_place_vlan_pop_desc_packets: AtomicU64::new(0),
+            in_place_vlan_push_no_headroom_packets: AtomicU64::new(0),
+            in_place_l2_memmove_fallback_packets: AtomicU64::new(0),
             direct_tx_no_frame_fallback_packets: AtomicU64::new(0),
             direct_tx_build_fallback_packets: AtomicU64::new(0),
             direct_tx_disallowed_fallback_packets: AtomicU64::new(0),
@@ -821,6 +829,18 @@ impl BindingLiveState {
             direct_tx_packets: self.direct_tx_packets.load(Ordering::Relaxed),
             copy_tx_packets: self.copy_tx_packets.load(Ordering::Relaxed),
             in_place_tx_packets: self.in_place_tx_packets.load(Ordering::Relaxed),
+            in_place_vlan_push_desc_packets: self
+                .in_place_vlan_push_desc_packets
+                .load(Ordering::Relaxed),
+            in_place_vlan_pop_desc_packets: self
+                .in_place_vlan_pop_desc_packets
+                .load(Ordering::Relaxed),
+            in_place_vlan_push_no_headroom_packets: self
+                .in_place_vlan_push_no_headroom_packets
+                .load(Ordering::Relaxed),
+            in_place_l2_memmove_fallback_packets: self
+                .in_place_l2_memmove_fallback_packets
+                .load(Ordering::Relaxed),
             direct_tx_no_frame_fallback_packets: self
                 .direct_tx_no_frame_fallback_packets
                 .load(Ordering::Relaxed),
@@ -1139,6 +1159,50 @@ fn publish_binding_debug_state(binding: &mut BindingWorker) {
             Ordering::Relaxed,
         );
         binding.tx_counters.pending_in_place_tx_packets = 0;
+    }
+    if binding.tx_counters.pending_in_place_vlan_push_desc_packets != 0 {
+        binding.live.in_place_vlan_push_desc_packets.fetch_add(
+            binding.tx_counters.pending_in_place_vlan_push_desc_packets,
+            Ordering::Relaxed,
+        );
+        binding.tx_counters.pending_in_place_vlan_push_desc_packets = 0;
+    }
+    if binding.tx_counters.pending_in_place_vlan_pop_desc_packets != 0 {
+        binding.live.in_place_vlan_pop_desc_packets.fetch_add(
+            binding.tx_counters.pending_in_place_vlan_pop_desc_packets,
+            Ordering::Relaxed,
+        );
+        binding.tx_counters.pending_in_place_vlan_pop_desc_packets = 0;
+    }
+    if binding
+        .tx_counters
+        .pending_in_place_vlan_push_no_headroom_packets
+        != 0
+    {
+        binding.live.in_place_vlan_push_no_headroom_packets.fetch_add(
+            binding
+                .tx_counters
+                .pending_in_place_vlan_push_no_headroom_packets,
+            Ordering::Relaxed,
+        );
+        binding
+            .tx_counters
+            .pending_in_place_vlan_push_no_headroom_packets = 0;
+    }
+    if binding
+        .tx_counters
+        .pending_in_place_l2_memmove_fallback_packets
+        != 0
+    {
+        binding.live.in_place_l2_memmove_fallback_packets.fetch_add(
+            binding
+                .tx_counters
+                .pending_in_place_l2_memmove_fallback_packets,
+            Ordering::Relaxed,
+        );
+        binding
+            .tx_counters
+            .pending_in_place_l2_memmove_fallback_packets = 0;
     }
     if binding
         .tx_counters

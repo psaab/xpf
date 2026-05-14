@@ -1212,6 +1212,13 @@ impl Coordinator {
                 binding.direct_tx_packets = snap.direct_tx_packets;
                 binding.copy_tx_packets = snap.copy_tx_packets;
                 binding.in_place_tx_packets = snap.in_place_tx_packets;
+                binding.in_place_vlan_push_desc_packets =
+                    snap.in_place_vlan_push_desc_packets;
+                binding.in_place_vlan_pop_desc_packets = snap.in_place_vlan_pop_desc_packets;
+                binding.in_place_vlan_push_no_headroom_packets =
+                    snap.in_place_vlan_push_no_headroom_packets;
+                binding.in_place_l2_memmove_fallback_packets =
+                    snap.in_place_l2_memmove_fallback_packets;
                 binding.direct_tx_no_frame_fallback_packets =
                     snap.direct_tx_no_frame_fallback_packets;
                 binding.direct_tx_build_fallback_packets = snap.direct_tx_build_fallback_packets;
@@ -1347,6 +1354,10 @@ impl Coordinator {
                 binding.direct_tx_packets = 0;
                 binding.copy_tx_packets = 0;
                 binding.in_place_tx_packets = 0;
+                binding.in_place_vlan_push_desc_packets = 0;
+                binding.in_place_vlan_pop_desc_packets = 0;
+                binding.in_place_vlan_push_no_headroom_packets = 0;
+                binding.in_place_l2_memmove_fallback_packets = 0;
                 binding.direct_tx_no_frame_fallback_packets = 0;
                 binding.direct_tx_build_fallback_packets = 0;
                 binding.direct_tx_disallowed_fallback_packets = 0;

@@ -68,6 +68,22 @@ pub(in crate::afxdp) struct PreparedTxRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum InPlaceL2Rewrite {
+    SameLength,
+    VlanPushDescriptor,
+    VlanPopDescriptor,
+    VlanPushMemmoveNoHeadroom,
+    UnsupportedMemmove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct InPlaceRewriteResult {
+    pub(in crate::afxdp) offset: u64,
+    pub(in crate::afxdp) len: u32,
+    pub(in crate::afxdp) l2_rewrite: InPlaceL2Rewrite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct ExactLocalScratchTxRequest {
     pub(in crate::afxdp) offset: u64,
     pub(in crate::afxdp) len: u32,
@@ -83,6 +99,37 @@ pub(in crate::afxdp) struct ExactPreparedScratchTxRequest {
 pub(in crate::afxdp) enum PreparedTxRecycle {
     FreeTxFrame,
     FillOnSlot(u32),
+    FillOnSlotWithOffset { slot: u32, offset: u64 },
+}
+
+impl PreparedTxRecycle {
+    #[inline]
+    pub(in crate::afxdp) fn recycle_offset(self, tx_offset: u64) -> u64 {
+        match self {
+            Self::FreeTxFrame | Self::FillOnSlot(_) => tx_offset,
+            Self::FillOnSlotWithOffset { offset, .. } => offset,
+        }
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn fill_slot(self) -> Option<u32> {
+        match self {
+            Self::FreeTxFrame => None,
+            Self::FillOnSlot(slot) | Self::FillOnSlotWithOffset { slot, .. } => Some(slot),
+        }
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn fill_on_slot(slot: u32, tx_offset: u64, recycle_offset: u64) -> Self {
+        if tx_offset == recycle_offset {
+            Self::FillOnSlot(slot)
+        } else {
+            Self::FillOnSlotWithOffset {
+                slot,
+                offset: recycle_offset,
+            }
+        }
+    }
 }
 
 #[derive(Debug)]

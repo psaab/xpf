@@ -30,12 +30,18 @@ pub(in crate::afxdp) fn recycle_cancelled_prepared_offset(
     recycle: PreparedTxRecycle,
     offset: u64,
 ) {
+    let recycle_offset = recycle.recycle_offset(offset);
     match recycle {
-        PreparedTxRecycle::FreeTxFrame => free_tx_frames.push_back(offset),
-        PreparedTxRecycle::FillOnSlot(fill_slot) if fill_slot == slot => {
-            pending_fill_frames.push_back(offset);
+        PreparedTxRecycle::FreeTxFrame => free_tx_frames.push_back(recycle_offset),
+        PreparedTxRecycle::FillOnSlot(fill_slot)
+        | PreparedTxRecycle::FillOnSlotWithOffset {
+            slot: fill_slot, ..
+        } if fill_slot == slot => {
+            pending_fill_frames.push_back(recycle_offset);
         }
-        PreparedTxRecycle::FillOnSlot(_) => free_tx_frames.push_back(offset),
+        PreparedTxRecycle::FillOnSlot(_) | PreparedTxRecycle::FillOnSlotWithOffset { .. } => {
+            free_tx_frames.push_back(recycle_offset);
+        }
     }
 }
 
@@ -65,7 +71,7 @@ pub(in crate::afxdp) fn remember_prepared_recycle(
     in_flight_prepared_recycles: &mut FastMap<u64, PreparedTxRecycle>,
     req: &PreparedTxRequest,
 ) {
-    if let PreparedTxRecycle::FillOnSlot(_) = req.recycle {
+    if req.recycle.fill_slot().is_some() {
         in_flight_prepared_recycles.insert(req.offset, req.recycle);
     }
 }
@@ -476,4 +482,3 @@ pub(in crate::afxdp) fn transmit_prepared_queue(
 #[cfg(test)]
 #[path = "transmit_tests.rs"]
 mod tests;
-

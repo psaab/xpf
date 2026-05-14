@@ -432,13 +432,17 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                         request.apply_nat_on_fabric,
                         expected_ports,
                     ) {
-                        Some(frame_len) => {
+                        Some(rewrite_result) => {
                             target_binding
                                 .tx_pipeline.pending_tx_prepared
                                 .push_back(PreparedTxRequest {
-                                    offset: source_offset,
-                                    len: frame_len,
-                                    recycle: PreparedTxRecycle::FillOnSlot(ingress_slot),
+                                    offset: rewrite_result.offset,
+                                    len: rewrite_result.len,
+                                    recycle: PreparedTxRecycle::fill_on_slot(
+                                        ingress_slot,
+                                        rewrite_result.offset,
+                                        source_offset,
+                                    ),
                                     expected_ports,
                                     expected_addr_family: request.meta.addr_family,
                                     expected_protocol: request.meta.protocol,
@@ -449,11 +453,14 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                 });
                             bound_pending_tx_prepared(target_binding);
                             target_binding.tx_counters.pending_in_place_tx_packets += 1;
+                            target_binding
+                                .tx_counters
+                                .record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
                             dbg.enqueue_ok += 1;
                             dbg.enqueue_inplace += 1;
-                            dbg.tx_bytes_total += frame_len as u64;
-                            if frame_len > dbg.tx_max_frame {
-                                dbg.tx_max_frame = frame_len;
+                            dbg.tx_bytes_total += rewrite_result.len as u64;
+                            if rewrite_result.len > dbg.tx_max_frame {
+                                dbg.tx_max_frame = rewrite_result.len;
                             }
                             retained_source_frame = true;
                         }

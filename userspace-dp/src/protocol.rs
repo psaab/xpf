@@ -1463,6 +1463,14 @@ pub(crate) struct BindingStatus {
     pub copy_tx_packets: u64,
     #[serde(rename = "in_place_tx_packets", default)]
     pub in_place_tx_packets: u64,
+    #[serde(rename = "in_place_vlan_push_desc_packets", default)]
+    pub in_place_vlan_push_desc_packets: u64,
+    #[serde(rename = "in_place_vlan_pop_desc_packets", default)]
+    pub in_place_vlan_pop_desc_packets: u64,
+    #[serde(rename = "in_place_vlan_push_no_headroom_packets", default)]
+    pub in_place_vlan_push_no_headroom_packets: u64,
+    #[serde(rename = "in_place_l2_memmove_fallback_packets", default)]
+    pub in_place_l2_memmove_fallback_packets: u64,
     #[serde(rename = "direct_tx_no_frame_fallback_packets", default)]
     pub direct_tx_no_frame_fallback_packets: u64,
     #[serde(rename = "direct_tx_build_fallback_packets", default)]

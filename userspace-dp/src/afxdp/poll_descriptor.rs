@@ -263,7 +263,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // Try descriptor-based straight-line rewrite first (no branches
                                         // for AF, NAT type, or checksum recomputation).  Falls back to
                                         // generic rewrite on port mismatch, NAT64, or NPTv6.
-                                        let frame_len = apply_rewrite_descriptor(
+                                        let rewrite_result = apply_rewrite_descriptor(
                                             unsafe { &*area },
                                             desc,
                                             meta,
@@ -280,13 +280,15 @@ pub(super) fn poll_binding_process_descriptor(
                                                 expected_ports,
                                             )
                                         });
-                                        if let Some(frame_len) = frame_len {
+                                        if let Some(rewrite_result) = rewrite_result {
                                             binding.tx_pipeline.pending_tx_prepared.push_back(
                                                 PreparedTxRequest {
-                                                    offset: desc.addr,
-                                                    len: frame_len,
-                                                    recycle: PreparedTxRecycle::FillOnSlot(
+                                                    offset: rewrite_result.offset,
+                                                    len: rewrite_result.len,
+                                                    recycle: PreparedTxRecycle::fill_on_slot(
                                                         ingress_slot,
+                                                        rewrite_result.offset,
+                                                        desc.addr,
                                                     ),
                                                     expected_ports,
                                                     expected_addr_family: meta.addr_family,
@@ -304,6 +306,9 @@ pub(super) fn poll_binding_process_descriptor(
                                                 },
                                             );
                                             binding.tx_counters.pending_in_place_tx_packets += 1;
+                                            binding.tx_counters.record_in_place_l2_rewrite(
+                                                rewrite_result.l2_rewrite,
+                                            );
                                             telemetry.dbg.forward += 1;
                                             telemetry.dbg.tx += 1;
                                             recycle_now = false;

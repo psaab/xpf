@@ -40,8 +40,8 @@ func TestFormatStatusSummary(t *testing.T) {
 			{QueueID: 1, Armed: false, Ready: false},
 		},
 		Bindings: []BindingStatus{
-			{Slot: 0, Armed: false, Ready: true, Bound: true, XSKRegistered: true, XSKBindMode: "zerocopy", ZeroCopy: true, RXPackets: 10, ValidatedPackets: 8, ExceptionPackets: 1, TXPackets: 3, TXBytes: 420, TXCompletions: 2, KernelRXDropped: 9, KernelRXInvalidDescs: 1, DirectTXPackets: 2, InPlaceTXPackets: 1, DirectTXNoFrameFallbackPackets: 5, DirectTXBuildFallbackPackets: 6, DebugPendingFillFrames: 10, DebugSpareFillFrames: 11, DebugFreeTXFrames: 12, DebugPendingTXPrepared: 13, DebugPendingTXLocal: 14, DebugOutstandingTX: 15, DebugInFlightRecycles: 16},
-			{Slot: 1, Armed: false, Ready: false, Bound: true, XSKRegistered: false, RXPackets: 5, ValidatedPackets: 4, ExceptionPackets: 2, TXErrors: 1, TXCompletions: 3, KernelRXDropped: 4, KernelRXInvalidDescs: 2, CopyTXPackets: 4, DirectTXDisallowedFallbackPackets: 7, DebugPendingFillFrames: 20, DebugSpareFillFrames: 21, DebugFreeTXFrames: 22, DebugPendingTXPrepared: 23, DebugPendingTXLocal: 24, DebugOutstandingTX: 25, DebugInFlightRecycles: 26},
+			{Slot: 0, Armed: false, Ready: true, Bound: true, XSKRegistered: true, XSKBindMode: "zerocopy", ZeroCopy: true, RXPackets: 10, ValidatedPackets: 8, ExceptionPackets: 1, TXPackets: 3, TXBytes: 420, TXCompletions: 2, KernelRXDropped: 9, KernelRXInvalidDescs: 1, DirectTXPackets: 2, InPlaceTXPackets: 1, InPlaceVLANPushDescPackets: 8, InPlaceVLANPopDescPackets: 9, InPlaceVLANPushNoHeadroomPackets: 10, InPlaceL2MemmoveFallbackPackets: 11, DirectTXNoFrameFallbackPackets: 5, DirectTXBuildFallbackPackets: 6, DebugPendingFillFrames: 10, DebugSpareFillFrames: 11, DebugFreeTXFrames: 12, DebugPendingTXPrepared: 13, DebugPendingTXLocal: 14, DebugOutstandingTX: 15, DebugInFlightRecycles: 16},
+			{Slot: 1, Armed: false, Ready: false, Bound: true, XSKRegistered: false, RXPackets: 5, ValidatedPackets: 4, ExceptionPackets: 2, TXErrors: 1, TXCompletions: 3, KernelRXDropped: 4, KernelRXInvalidDescs: 2, CopyTXPackets: 4, InPlaceVLANPushDescPackets: 3, InPlaceVLANPopDescPackets: 4, InPlaceVLANPushNoHeadroomPackets: 5, InPlaceL2MemmoveFallbackPackets: 6, DirectTXDisallowedFallbackPackets: 7, DebugPendingFillFrames: 20, DebugSpareFillFrames: 21, DebugFreeTXFrames: 22, DebugPendingTXPrepared: 23, DebugPendingTXLocal: 24, DebugOutstandingTX: 25, DebugInFlightRecycles: 26},
 		},
 		RecentExceptions: []ExceptionStatus{
 			{Timestamp: now, Slot: 1, QueueID: 0, Interface: "ge-0-0-2", Reason: "metadata_parse", PacketLength: 128},
@@ -80,6 +80,10 @@ func TestFormatStatusSummary(t *testing.T) {
 		"Direct TX packets:         2",
 		"Copy-path TX packets:      4",
 		"In-place TX packets:       1",
+		"In-place VLAN push desc:   11",
+		"In-place VLAN pop desc:    13",
+		"In-place VLAN no-headroom: 15",
+		"In-place L2 memmove fb:    17",
 		"Direct TX no-frame fb:     5",
 		"Direct TX build-none fb:   6",
 		"Direct TX disallowed fb:   7",

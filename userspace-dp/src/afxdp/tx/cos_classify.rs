@@ -821,13 +821,17 @@ fn enqueue_cos_item(
         return Ok(());
     }
     if let Some((recycle, offset)) = recycle {
+        let recycle_offset = recycle.recycle_offset(offset);
         match recycle {
-            PreparedTxRecycle::FreeTxFrame => binding.tx_pipeline.free_tx_frames.push_back(offset),
-            PreparedTxRecycle::FillOnSlot(slot) if slot == binding.slot => {
-                binding.tx_pipeline.pending_fill_frames.push_back(offset);
+            PreparedTxRecycle::FreeTxFrame => binding.tx_pipeline.free_tx_frames.push_back(recycle_offset),
+            PreparedTxRecycle::FillOnSlot(slot)
+            | PreparedTxRecycle::FillOnSlotWithOffset { slot, .. }
+                if slot == binding.slot =>
+            {
+                binding.tx_pipeline.pending_fill_frames.push_back(recycle_offset);
             }
-            PreparedTxRecycle::FillOnSlot(_) => {
-                binding.tx_pipeline.free_tx_frames.push_back(offset)
+            PreparedTxRecycle::FillOnSlot(_) | PreparedTxRecycle::FillOnSlotWithOffset { .. } => {
+                binding.tx_pipeline.free_tx_frames.push_back(recycle_offset)
             }
         }
     }

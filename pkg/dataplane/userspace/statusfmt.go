@@ -73,6 +73,10 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var directTXPackets uint64
 	var copyTXPackets uint64
 	var inPlaceTXPackets uint64
+	var inPlaceVLANPushDescPackets uint64
+	var inPlaceVLANPopDescPackets uint64
+	var inPlaceVLANPushNoHeadroomPackets uint64
+	var inPlaceL2MemmoveFallbackPackets uint64
 	var directTXNoFrameFallbackPackets uint64
 	var directTXBuildFallbackPackets uint64
 	var directTXDisallowedFallbackPackets uint64
@@ -135,6 +139,10 @@ func FormatStatusSummary(status ProcessStatus) string {
 		directTXPackets += binding.DirectTXPackets
 		copyTXPackets += binding.CopyTXPackets
 		inPlaceTXPackets += binding.InPlaceTXPackets
+		inPlaceVLANPushDescPackets += binding.InPlaceVLANPushDescPackets
+		inPlaceVLANPopDescPackets += binding.InPlaceVLANPopDescPackets
+		inPlaceVLANPushNoHeadroomPackets += binding.InPlaceVLANPushNoHeadroomPackets
+		inPlaceL2MemmoveFallbackPackets += binding.InPlaceL2MemmoveFallbackPackets
 		directTXNoFrameFallbackPackets += binding.DirectTXNoFrameFallbackPackets
 		directTXBuildFallbackPackets += binding.DirectTXBuildFallbackPackets
 		directTXDisallowedFallbackPackets += binding.DirectTXDisallowedFallbackPackets
@@ -269,6 +277,10 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  Direct TX packets:         %d\n", directTXPackets)
 	fmt.Fprintf(&b, "  Copy-path TX packets:      %d\n", copyTXPackets)
 	fmt.Fprintf(&b, "  In-place TX packets:       %d\n", inPlaceTXPackets)
+	fmt.Fprintf(&b, "  In-place VLAN push desc:   %d\n", inPlaceVLANPushDescPackets)
+	fmt.Fprintf(&b, "  In-place VLAN pop desc:    %d\n", inPlaceVLANPopDescPackets)
+	fmt.Fprintf(&b, "  In-place VLAN no-headroom: %d\n", inPlaceVLANPushNoHeadroomPackets)
+	fmt.Fprintf(&b, "  In-place L2 memmove fb:    %d\n", inPlaceL2MemmoveFallbackPackets)
 	fmt.Fprintf(&b, "  Direct TX no-frame fb:     %d\n", directTXNoFrameFallbackPackets)
 	fmt.Fprintf(&b, "  Direct TX build-none fb:   %d\n", directTXBuildFallbackPackets)
 	fmt.Fprintf(&b, "  Direct TX disallowed fb:   %d\n", directTXDisallowedFallbackPackets)

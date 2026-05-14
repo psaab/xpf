@@ -478,43 +478,155 @@ pub(super) fn build_forwarded_frame_into(
     )
 }
 
-/// Common preamble for `rewrite_forwarded_frame_in_place`: validate
-/// L3 offset, compute payload_len, resolve src_mac/vlan_id/apply_nat,
-/// SHIFT the payload to its new position FIRST, then write the
-/// Ethernet header.
+/// Common preamble for in-place rewrite: validate L3 offset, compute
+/// payload length, pick the TX descriptor view, then write the Ethernet
+/// header.
 ///
-/// Order matters: when VLAN tag is added (eth_len 14 → 18) the
-/// payload shifts forward by 4 bytes. If we wrote the new Ethernet
-/// header first, the `copy_within(14.., 18)` payload shift would
-/// read from bytes that have just been overwritten by the VLAN tag
-/// and corrupt the IP header.
+/// For VLAN push/pop we avoid moving the L3 payload. AF_XDP lets the TX
+/// descriptor point at any byte inside the UMEM chunk; for a push we
+/// transmit from `rx_addr - 4`, and for a pop from `rx_addr + 4`. The
+/// payload remains at the same physical address, so the rewrite avoids a
+/// 1500-byte `memmove` on the common cross-NIC VLAN-transition path.
+///
+/// If the shifted descriptor would leave the current UMEM frame, fall back
+/// to the old copy-within path. That preserves correctness for malformed or
+/// unusual descriptors while making the normal 256-byte-headroom path copy-free.
 struct RewritePrep {
+    #[cfg_attr(not(feature = "debug-log"), allow(dead_code))]
     eth_len: usize,
     ip_start: usize,
     frame_len: usize,
+    tx_offset: u64,
+    l2_rewrite: InPlaceL2Rewrite,
     apply_nat: bool,
     skip_ttl: bool,
+    #[cfg_attr(not(feature = "debug-log"), allow(dead_code))]
     vlan_id: u16, // for the cfg-gated debug-log block
+}
+
+struct RewriteEthParams {
+    dst_mac: [u8; 6],
+    src_mac: [u8; 6],
+    vlan_id: u16,
+    ether_type: u16,
+    apply_nat: bool,
+}
+
+#[inline]
+fn descriptor_view_in_same_umem_frame(rx_addr: u64, tx_addr: u64, len: usize) -> bool {
+    let frame_mask = (UMEM_FRAME_SIZE as u64).saturating_sub(1);
+    let frame_base = rx_addr & !frame_mask;
+    let frame_end = frame_base.saturating_add(UMEM_FRAME_SIZE as u64);
+    tx_addr >= frame_base
+        && tx_addr
+            .checked_add(len as u64)
+            .is_some_and(|end| end <= frame_end)
+}
+
+#[inline]
+fn classify_in_place_l2_rewrite(
+    rx_addr: u64,
+    current_l3: usize,
+    target_eth_len: usize,
+    frame_len: usize,
+) -> Option<(u64, InPlaceL2Rewrite)> {
+    if target_eth_len == current_l3 {
+        return Some((rx_addr, InPlaceL2Rewrite::SameLength));
+    }
+    if current_l3 == 14 && target_eth_len == 18 {
+        let Some(tx_addr) = rx_addr.checked_sub(4) else {
+            return Some((rx_addr, InPlaceL2Rewrite::VlanPushMemmoveNoHeadroom));
+        };
+        if descriptor_view_in_same_umem_frame(rx_addr, tx_addr, frame_len) {
+            return Some((tx_addr, InPlaceL2Rewrite::VlanPushDescriptor));
+        }
+        return Some((rx_addr, InPlaceL2Rewrite::VlanPushMemmoveNoHeadroom));
+    }
+    if current_l3 == 18 && target_eth_len == 14 {
+        let tx_addr = rx_addr.checked_add(4)?;
+        if descriptor_view_in_same_umem_frame(rx_addr, tx_addr, frame_len) {
+            return Some((tx_addr, InPlaceL2Rewrite::VlanPopDescriptor));
+        }
+    }
+    Some((rx_addr, InPlaceL2Rewrite::UnsupportedMemmove))
+}
+
+#[inline]
+fn rewrite_prepare_eth_from_parts(
+    area: &MmapArea,
+    desc: XdpDesc,
+    meta: ForwardPacketMeta,
+    params: RewriteEthParams,
+) -> Option<RewritePrep> {
+    let current_len = desc.len as usize;
+    let (l3, payload_len) = {
+        let frame = area.slice(desc.addr as usize, current_len)?;
+        let l3 = match meta.l3_offset {
+            14 | 18 => meta.l3_offset as usize,
+            _ => frame_l3_offset(frame)?,
+        };
+        if l3 >= current_len {
+            return None;
+        }
+        (l3, trim_l3_payload(&frame[l3..current_len], meta).len())
+    };
+    let eth_len = if params.vlan_id > 0 { 18usize } else { 14usize };
+    let frame_len = eth_len.checked_add(payload_len)?;
+    let (tx_offset, l2_rewrite) =
+        classify_in_place_l2_rewrite(desc.addr, l3, eth_len, frame_len)?;
+
+    if matches!(
+        l2_rewrite,
+        InPlaceL2Rewrite::VlanPushMemmoveNoHeadroom | InPlaceL2Rewrite::UnsupportedMemmove
+    ) {
+        let frame =
+            unsafe { area.slice_mut_unchecked(desc.addr as usize, UMEM_FRAME_SIZE as usize)? };
+        let source_end = l3.checked_add(payload_len)?;
+        if frame_len > frame.len() || source_end > frame.len() {
+            return None;
+        }
+        frame.copy_within(l3..source_end, eth_len);
+        write_eth_header_slice(
+            frame.get_mut(..eth_len)?,
+            params.dst_mac,
+            params.src_mac,
+            params.vlan_id,
+            params.ether_type,
+        )?;
+    } else {
+        let packet = unsafe { area.slice_mut_unchecked(tx_offset as usize, frame_len)? };
+        write_eth_header_slice(
+            packet.get_mut(..eth_len)?,
+            params.dst_mac,
+            params.src_mac,
+            params.vlan_id,
+            params.ether_type,
+        )?;
+    }
+    // Fabric-ingress packets already had TTL decremented by the
+    // sending peer (FABRIC_INGRESS_FLAG = 0x80).
+    let skip_ttl = (meta.meta_flags & 0x80) != 0;
+    Some(RewritePrep {
+        eth_len,
+        ip_start: eth_len,
+        frame_len,
+        tx_offset,
+        l2_rewrite,
+        apply_nat: params.apply_nat,
+        skip_ttl,
+        vlan_id: params.vlan_id,
+    })
 }
 
 #[inline]
 fn rewrite_prepare_eth(
-    frame: &mut [u8],
+    area: &MmapArea,
     desc: XdpDesc,
     meta: ForwardPacketMeta,
     decision: &SessionDecision,
     apply_nat_on_fabric: bool,
 ) -> Option<RewritePrep> {
     let dst_mac = decision.resolution.neighbor_mac?;
-    let current_len = desc.len as usize;
-    let l3 = match meta.l3_offset {
-        14 | 18 => meta.l3_offset as usize,
-        _ => frame_l3_offset(&frame[..current_len])?,
-    };
-    if l3 >= current_len {
-        return None;
-    }
-    let payload_len = trim_l3_payload(&frame[l3..current_len], meta).len();
     let (src_mac, vlan_id, apply_nat) =
         if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
             (
@@ -529,39 +641,23 @@ fn rewrite_prepare_eth(
                 true,
             )
         };
-    let eth_len = if vlan_id > 0 { 18usize } else { 14usize };
     let ether_type = match meta.addr_family as i32 {
         libc::AF_INET => 0x0800,
         libc::AF_INET6 => 0x86dd,
         _ => return None,
     };
-    let frame_len = eth_len.checked_add(payload_len)?;
-    if frame_len > frame.len() {
-        return None;
-    }
-    // Shift payload BEFORE writing the new Ethernet header (see
-    // doc-comment above for why the order matters on VLAN push).
-    if eth_len != l3 {
-        frame.copy_within(l3..l3 + payload_len, eth_len);
-    }
-    write_eth_header_slice(
-        frame.get_mut(..eth_len)?,
-        dst_mac,
-        src_mac,
-        vlan_id,
-        ether_type,
-    )?;
-    // Fabric-ingress packets already had TTL decremented by the
-    // sending peer (FABRIC_INGRESS_FLAG = 0x80).
-    let skip_ttl = (meta.meta_flags & 0x80) != 0;
-    Some(RewritePrep {
-        eth_len,
-        ip_start: eth_len,
-        frame_len,
-        apply_nat,
-        skip_ttl,
-        vlan_id,
-    })
+    rewrite_prepare_eth_from_parts(
+        area,
+        desc,
+        meta,
+        RewriteEthParams {
+            dst_mac,
+            src_mac,
+            vlan_id,
+            ether_type,
+            apply_nat,
+        },
+    )
 }
 
 #[inline]
@@ -665,11 +761,10 @@ pub(super) fn rewrite_forwarded_frame_in_place(
     decision: &SessionDecision,
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
-) -> Option<u32> {
+) -> Option<InPlaceRewriteResult> {
     let meta = meta.into();
-    let frame = unsafe { area.slice_mut_unchecked(desc.addr as usize, UMEM_FRAME_SIZE as usize)? };
-    let prep = rewrite_prepare_eth(frame, desc, meta, decision, apply_nat_on_fabric)?;
-    let packet = &mut frame[..prep.frame_len];
+    let prep = rewrite_prepare_eth(area, desc, meta, decision, apply_nat_on_fabric)?;
+    let packet = unsafe { area.slice_mut_unchecked(prep.tx_offset as usize, prep.frame_len)? };
     match meta.addr_family as i32 {
         libc::AF_INET => rewrite_apply_v4(
             packet,
@@ -730,7 +825,11 @@ pub(super) fn rewrite_forwarded_frame_in_place(
     if cfg!(feature = "debug-log") {
         verify_built_frame_checksums(&packet[..prep.frame_len]);
     }
-    Some(prep.frame_len as u32)
+    Some(InPlaceRewriteResult {
+        offset: prep.tx_offset,
+        len: prep.frame_len as u32,
+        l2_rewrite: prep.l2_rewrite,
+    })
 }
 
 #[inline(always)]
@@ -797,67 +896,29 @@ pub(super) fn apply_rewrite_descriptor(
     meta: UserspaceDpMeta,
     rd: &super::RewriteDescriptor,
     expected_ports: Option<(u16, u16)>,
-) -> Option<u32> {
+) -> Option<InPlaceRewriteResult> {
     // NAT64 and NPTv6 use the generic path — they need special handling.
     if rd.nat64 || rd.nptv6 {
         return None;
     }
 
-    let frame = unsafe { area.slice_mut_unchecked(desc.addr as usize, UMEM_FRAME_SIZE as usize)? };
-    let current_len = desc.len as usize;
-
-    // L3 offset: trust XDP shim metadata when it's a standard value.
-    let l3 = match meta.l3_offset {
-        14 | 18 => meta.l3_offset as usize,
-        _ => frame_l3_offset(&frame[..current_len])?,
-    };
-    if l3 >= current_len {
-        return None;
-    }
-
-    // Trim Ethernet padding using IP total length.
-    let mut payload_len = current_len.checked_sub(l3)?;
-    if payload_len >= 4 {
-        let ip_version = frame[l3] >> 4;
-        if ip_version == 4 {
-            let ip_total_len = u16::from_be_bytes([frame[l3 + 2], frame[l3 + 3]]) as usize;
-            if ip_total_len > 0 && ip_total_len < payload_len {
-                payload_len = ip_total_len;
-            }
-        } else if ip_version == 6 && payload_len >= 40 {
-            let ipv6_payload_len = u16::from_be_bytes([frame[l3 + 4], frame[l3 + 5]]) as usize;
-            let ip6_total = 40 + ipv6_payload_len;
-            if ip6_total > 0 && ip6_total < payload_len {
-                payload_len = ip6_total;
-            }
-        }
-    }
-
-    // Target Ethernet header length (14 = no VLAN, 18 = 802.1Q).
-    let eth_len = if rd.tx_vlan_id > 0 { 18usize } else { 14usize };
-    let frame_len = eth_len.checked_add(payload_len)?;
-    if frame_len > frame.len() {
-        return None;
-    }
-
-    // Shift payload if L3 offset changes (adding/removing VLAN tag).
-    if eth_len != l3 {
-        frame.copy_within(l3..l3 + payload_len, eth_len);
-    }
-
-    // Write Ethernet header — precomputed MACs, VLAN, ether_type.
-    write_eth_header_slice(
-        frame.get_mut(..eth_len)?,
-        rd.dst_mac,
-        rd.src_mac,
-        rd.tx_vlan_id,
-        rd.ether_type,
+    let prep = rewrite_prepare_eth_from_parts(
+        area,
+        desc,
+        meta.into(),
+        RewriteEthParams {
+            dst_mac: rd.dst_mac,
+            src_mac: rd.src_mac,
+            vlan_id: rd.tx_vlan_id,
+            ether_type: rd.ether_type,
+            apply_nat: !rd.fabric_redirect || rd.apply_nat_on_fabric,
+        },
     )?;
-
-    let packet = &mut frame[..frame_len];
-    let ip = eth_len;
-    let skip_ttl = (meta.meta_flags & 0x80) != 0;
-    let apply_nat = !rd.fabric_redirect || rd.apply_nat_on_fabric;
+    let packet = unsafe { area.slice_mut_unchecked(prep.tx_offset as usize, prep.frame_len)? };
+    let frame_len = prep.frame_len;
+    let ip = prep.ip_start;
+    let skip_ttl = prep.skip_ttl;
+    let apply_nat = prep.apply_nat;
 
     match rd.ether_type {
         0x0800 => {
@@ -1046,7 +1107,11 @@ pub(super) fn apply_rewrite_descriptor(
     if cfg!(feature = "debug-log") {
         verify_built_frame_checksums(&packet[..frame_len]);
     }
-    Some(frame_len as u32)
+    Some(InPlaceRewriteResult {
+        offset: prep.tx_offset,
+        len: frame_len as u32,
+        l2_rewrite: prep.l2_rewrite,
+    })
 }
 
 pub(super) fn apply_nat_ipv4(packet: &mut [u8], protocol: u8, nat: NatDecision) -> Option<()> {

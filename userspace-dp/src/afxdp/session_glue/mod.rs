@@ -772,12 +772,18 @@ pub(super) fn cancel_pending_forwards(
 }
 
 pub(super) fn recycle_cancelled_prepared(binding: &mut BindingWorker, req: &PreparedTxRequest) {
+    let recycle_offset = req.recycle.recycle_offset(req.offset);
     match req.recycle {
-        PreparedTxRecycle::FreeTxFrame => binding.tx_pipeline.free_tx_frames.push_back(req.offset),
-        PreparedTxRecycle::FillOnSlot(slot) if slot == binding.slot => {
-            binding.tx_pipeline.pending_fill_frames.push_back(req.offset);
+        PreparedTxRecycle::FreeTxFrame => binding.tx_pipeline.free_tx_frames.push_back(recycle_offset),
+        PreparedTxRecycle::FillOnSlot(slot)
+        | PreparedTxRecycle::FillOnSlotWithOffset { slot, .. }
+            if slot == binding.slot =>
+        {
+            binding.tx_pipeline.pending_fill_frames.push_back(recycle_offset);
         }
-        PreparedTxRecycle::FillOnSlot(_) => binding.tx_pipeline.free_tx_frames.push_back(req.offset),
+        PreparedTxRecycle::FillOnSlot(_) | PreparedTxRecycle::FillOnSlotWithOffset { .. } => {
+            binding.tx_pipeline.free_tx_frames.push_back(recycle_offset);
+        }
     }
 }
 

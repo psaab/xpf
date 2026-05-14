@@ -1177,7 +1177,7 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_checksum_valid_after_snat() {
             ..NatDecision::default()
         },
     };
-    let frame_len = rewrite_forwarded_frame_in_place(
+    let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
             addr: 0,
@@ -1190,7 +1190,7 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_checksum_valid_after_snat() {
         None,
     )
     .expect("in-place v6 forward");
-    let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
     assert_eq!(&out[0..6], &[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
     assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]);
     assert_eq!(out[25], 63);
@@ -1199,6 +1199,184 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_checksum_valid_after_snat() {
         "2001:559:8585:80::8".parse::<Ipv6Addr>().unwrap()
     );
     assert!(icmpv6_checksum_ok(&out[18..]));
+}
+
+fn l2_rewrite_test_decision(vlan_id: u16) -> SessionDecision {
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: vlan_id,
+        },
+        nat: NatDecision::default(),
+    }
+}
+
+#[test]
+fn rewrite_forwarded_frame_in_place_pushes_vlan_by_shifting_tx_descriptor() {
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 1, 1),
+        Ipv4Addr::new(172, 16, 80, 200),
+        64,
+    );
+    let rx_addr = 256usize;
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(rx_addr, frame.len())
+        .unwrap()
+        .copy_from_slice(&frame);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+
+    let rewrite_result = rewrite_forwarded_frame_in_place(
+        &area,
+        XdpDesc {
+            addr: rx_addr as u64,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        &l2_rewrite_test_decision(80),
+        false,
+        None,
+    )
+    .expect("vlan push");
+
+    assert_eq!(rewrite_result.offset, (rx_addr - 4) as u64);
+    assert_eq!(rewrite_result.len, frame.len() as u32 + 4);
+    assert_eq!(
+        rewrite_result.l2_rewrite,
+        InPlaceL2Rewrite::VlanPushDescriptor
+    );
+    let out = area
+        .slice(rewrite_result.offset as usize, rewrite_result.len as usize)
+        .expect("out");
+    assert_eq!(&out[0..6], &[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
+    assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]);
+    assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x8100);
+    assert_eq!(u16::from_be_bytes([out[14], out[15]]) & 0x0fff, 80);
+    assert_eq!(u16::from_be_bytes([out[16], out[17]]), 0x0800);
+    assert_eq!(out[18], 0x45);
+    assert_eq!(
+        area.slice(rx_addr + 14, 1).expect("ip-at-original-address")[0],
+        0x45
+    );
+}
+
+#[test]
+fn rewrite_forwarded_frame_in_place_pops_vlan_by_shifting_tx_descriptor() {
+    let frame = build_icmp_echo_frame_v4_vlan(
+        Ipv4Addr::new(10, 0, 1, 1),
+        Ipv4Addr::new(172, 16, 80, 200),
+        64,
+        80,
+    );
+    let rx_addr = 256usize;
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(rx_addr, frame.len())
+        .unwrap()
+        .copy_from_slice(&frame);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 18,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+
+    let rewrite_result = rewrite_forwarded_frame_in_place(
+        &area,
+        XdpDesc {
+            addr: rx_addr as u64,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        &l2_rewrite_test_decision(0),
+        false,
+        None,
+    )
+    .expect("vlan pop");
+
+    assert_eq!(rewrite_result.offset, (rx_addr + 4) as u64);
+    assert_eq!(rewrite_result.len, frame.len() as u32 - 4);
+    assert_eq!(
+        rewrite_result.l2_rewrite,
+        InPlaceL2Rewrite::VlanPopDescriptor
+    );
+    let out = area
+        .slice(rewrite_result.offset as usize, rewrite_result.len as usize)
+        .expect("out");
+    assert_eq!(&out[0..6], &[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
+    assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]);
+    assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x0800);
+    assert_eq!(out[14], 0x45);
+    assert_eq!(
+        area.slice(rx_addr + 18, 1).expect("ip-at-original-address")[0],
+        0x45
+    );
+}
+
+#[test]
+fn rewrite_forwarded_frame_in_place_pushes_vlan_with_memmove_without_headroom() {
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 1, 1),
+        Ipv4Addr::new(172, 16, 80, 200),
+        64,
+    );
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(0, frame.len())
+        .unwrap()
+        .copy_from_slice(&frame);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+
+    let rewrite_result = rewrite_forwarded_frame_in_place(
+        &area,
+        XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        &l2_rewrite_test_decision(80),
+        false,
+        None,
+    )
+    .expect("vlan push fallback");
+
+    assert_eq!(rewrite_result.offset, 0);
+    assert_eq!(
+        rewrite_result.l2_rewrite,
+        InPlaceL2Rewrite::VlanPushMemmoveNoHeadroom
+    );
+    let out = area
+        .slice(rewrite_result.offset as usize, rewrite_result.len as usize)
+        .expect("out");
+    assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x8100);
+    assert_eq!(u16::from_be_bytes([out[16], out[17]]), 0x0800);
+    assert_eq!(out[18], 0x45);
 }
 
 #[test]
@@ -1281,7 +1459,7 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_echo_identifier_and_sequence() 
         },
     };
 
-    let frame_len = rewrite_forwarded_frame_in_place(
+    let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
             addr: 0,
@@ -1294,7 +1472,7 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_echo_identifier_and_sequence() 
         None,
     )
     .expect("in-place v6 echo forward");
-    let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
 
     let packet = &out[18..];
     assert_eq!(packet[40], 128);
@@ -1452,7 +1630,7 @@ fn rewrite_forwarded_frame_in_place_keeps_ipv6_tcp_ports_after_vlan_snat() {
             ..NatDecision::default()
         },
     };
-    let frame_len = rewrite_forwarded_frame_in_place(
+    let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
             addr: 0,
@@ -1465,7 +1643,7 @@ fn rewrite_forwarded_frame_in_place_keeps_ipv6_tcp_ports_after_vlan_snat() {
         Some((54688, 5201)),
     )
     .expect("rewrite in place");
-    let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
     assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x8100);
     assert_eq!(u16::from_be_bytes([out[14], out[15]]) & 0x0fff, 80);
     assert_eq!(u16::from_be_bytes([out[16], out[17]]), 0x86dd);
@@ -3427,7 +3605,7 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_snat() {
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = rewrite_forwarded_frame_in_place(
+    let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
             addr: 0,
@@ -3458,7 +3636,7 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_snat() {
     )
     .expect("rewrite in place");
 
-    let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
     assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x8100);
     assert_eq!(u16::from_be_bytes([out[14], out[15]]) & 0x0fff, 80);
     assert_eq!(u16::from_be_bytes([out[16], out[17]]), 0x0800);
@@ -3502,7 +3680,7 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_dnat() {
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = rewrite_forwarded_frame_in_place(
+    let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
             addr: 0,
@@ -3533,7 +3711,7 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_dnat() {
     )
     .expect("rewrite in place");
 
-    let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
     assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x0800);
     assert_eq!(&out[30..34], &[10, 0, 61, 102]);
     assert_eq!(out[22], 63);
@@ -3569,7 +3747,7 @@ fn rewrite_forwarded_frame_in_place_applies_nat_for_fabric_redirect_when_enabled
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = rewrite_forwarded_frame_in_place(
+    let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
             addr: 0,
@@ -3599,7 +3777,7 @@ fn rewrite_forwarded_frame_in_place_applies_nat_for_fabric_redirect_when_enabled
     )
     .expect("rewrite in place");
 
-    let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
     assert_eq!(&out[0..6], &[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
     assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     assert_eq!(&out[26..30], &[172, 16, 80, 8]);
@@ -3643,7 +3821,7 @@ fn rewrite_forwarded_frame_in_place_skips_nat_for_fabric_redirect_when_disabled(
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = rewrite_forwarded_frame_in_place(
+    let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
             addr: 0,
@@ -3673,7 +3851,7 @@ fn rewrite_forwarded_frame_in_place_skips_nat_for_fabric_redirect_when_disabled(
     )
     .expect("rewrite in place");
 
-    let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
     // Source IP MUST be the original 10.0.61.102, not the SNAT'd
     // 198.51.100.99. This validates that apply_nat=false is
     // correctly threaded through the dispatch into rewrite_apply_v4.
@@ -3770,7 +3948,7 @@ fn rewrite_forwarded_frame_in_place_skips_ttl_when_fabric_ingress_flag_set() {
             meta_flags: 0x80, // FABRIC_INGRESS_FLAG — peer already decremented TTL
             ..UserspaceDpMeta::default()
         };
-        let frame_len = rewrite_forwarded_frame_in_place(
+        let rewrite_result = rewrite_forwarded_frame_in_place(
             &area,
             XdpDesc {
                 addr: 0,
@@ -3797,7 +3975,7 @@ fn rewrite_forwarded_frame_in_place_skips_ttl_when_fabric_ingress_flag_set() {
         )
         .unwrap_or_else(|| panic!("[{}] rewrite_in_place returned None", label));
 
-        let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+        let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
         let post_ttl = out[14 + ttl_rel_offset];
         assert_eq!(
             pre_ttl, post_ttl,
@@ -3892,8 +4070,9 @@ fn apply_descriptor_ipv4_no_nat_ttl_and_checksum() {
     };
     let rd = test_descriptor(&flow, &decision, 0, 0x0800);
 
+    let rx_addr = 256u64;
     let mut area = MmapArea::new(4096).expect("mmap");
-    area.slice_mut(0, frame.len())
+    area.slice_mut(rx_addr as usize, frame.len())
         .unwrap()
         .copy_from_slice(&frame);
     let meta = UserspaceDpMeta {
@@ -3905,10 +4084,10 @@ fn apply_descriptor_ipv4_no_nat_ttl_and_checksum() {
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = apply_rewrite_descriptor(
+    let rewrite_result = apply_rewrite_descriptor(
         &area,
         XdpDesc {
-            addr: 0,
+            addr: rx_addr,
             len: frame.len() as u32,
             options: 0,
         },
@@ -3918,7 +4097,7 @@ fn apply_descriptor_ipv4_no_nat_ttl_and_checksum() {
     )
     .expect("descriptor rewrite");
 
-    let out = area.slice(0, frame_len as usize).expect("out");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("out");
     // Ethernet header
     assert_eq!(&out[0..6], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
     assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
@@ -3982,8 +4161,9 @@ fn apply_descriptor_ipv4_snat_with_vlan() {
     };
     let rd = test_descriptor(&flow, &decision, 80, 0x0800);
 
+    let rx_addr = 256u64;
     let mut area = MmapArea::new(4096).expect("mmap");
-    area.slice_mut(0, frame.len())
+    area.slice_mut(rx_addr as usize, frame.len())
         .unwrap()
         .copy_from_slice(&frame);
     let meta = UserspaceDpMeta {
@@ -3995,10 +4175,10 @@ fn apply_descriptor_ipv4_snat_with_vlan() {
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = apply_rewrite_descriptor(
+    let rewrite_result = apply_rewrite_descriptor(
         &area,
         XdpDesc {
-            addr: 0,
+            addr: rx_addr,
             len: frame.len() as u32,
             options: 0,
         },
@@ -4008,7 +4188,9 @@ fn apply_descriptor_ipv4_snat_with_vlan() {
     )
     .expect("descriptor snat rewrite");
 
-    let out = area.slice(0, frame_len as usize).expect("out");
+    assert_eq!(rewrite_result.offset, rx_addr - 4);
+    assert_eq!(rewrite_result.l2_rewrite, InPlaceL2Rewrite::VlanPushDescriptor);
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("out");
     // VLAN tag added
     assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x8100);
     assert_eq!(u16::from_be_bytes([out[14], out[15]]) & 0x0fff, 80);
@@ -4085,7 +4267,7 @@ fn apply_descriptor_fabric_redirect_skips_nat_when_flag_is_false() {
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = apply_rewrite_descriptor(
+    let rewrite_result = apply_rewrite_descriptor(
         &area,
         XdpDesc {
             addr: 0,
@@ -4098,7 +4280,7 @@ fn apply_descriptor_fabric_redirect_skips_nat_when_flag_is_false() {
     )
     .expect("descriptor fabric rewrite");
 
-    let out = area.slice(0, frame_len as usize).expect("out");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("out");
     assert_eq!(&out[0..6], &[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
     assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     assert_eq!(&out[26..30], &[10, 0, 61, 102]);
@@ -4170,7 +4352,7 @@ fn apply_descriptor_ipv4_dnat_removes_vlan() {
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = apply_rewrite_descriptor(
+    let rewrite_result = apply_rewrite_descriptor(
         &area,
         XdpDesc {
             addr: 0,
@@ -4183,7 +4365,9 @@ fn apply_descriptor_ipv4_dnat_removes_vlan() {
     )
     .expect("descriptor dnat rewrite");
 
-    let out = area.slice(0, frame_len as usize).expect("out");
+    assert_eq!(rewrite_result.offset, 4);
+    assert_eq!(rewrite_result.l2_rewrite, InPlaceL2Rewrite::VlanPopDescriptor);
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("out");
     // No VLAN
     assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x0800);
     // DNAT applied
@@ -4262,7 +4446,7 @@ fn apply_descriptor_ipv6_no_nat_hop_limit() {
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = apply_rewrite_descriptor(
+    let rewrite_result = apply_rewrite_descriptor(
         &area,
         XdpDesc {
             addr: 0,
@@ -4275,7 +4459,7 @@ fn apply_descriptor_ipv6_no_nat_hop_limit() {
     )
     .expect("descriptor ipv6 rewrite");
 
-    let out = area.slice(0, frame_len as usize).expect("out");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("out");
     assert_eq!(&out[0..6], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
     assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x86dd);
     // Hop limit decremented

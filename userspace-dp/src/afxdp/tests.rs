@@ -648,7 +648,7 @@ fn rewrite_forwarded_frame_in_place_reuses_rx_frame() {
         addr_family: libc::AF_INET as u8,
         ..UserspaceDpMeta::default()
     };
-    let frame_len = rewrite_forwarded_frame_in_place(
+    let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
             addr: 0,
@@ -664,7 +664,7 @@ fn rewrite_forwarded_frame_in_place_reuses_rx_frame() {
         None,
     )
     .expect("in-place forward");
-    let out = area.slice(0, frame_len as usize).expect("rewritten frame");
+    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
     assert_eq!(&out[0..6], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
     assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
     assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x0800);

@@ -745,6 +745,10 @@ type BindingStatus struct {
 	DirectTXPackets                   uint64    `json:"direct_tx_packets,omitempty"`
 	CopyTXPackets                     uint64    `json:"copy_tx_packets,omitempty"`
 	InPlaceTXPackets                  uint64    `json:"in_place_tx_packets,omitempty"`
+	InPlaceVLANPushDescPackets        uint64    `json:"in_place_vlan_push_desc_packets,omitempty"`
+	InPlaceVLANPopDescPackets         uint64    `json:"in_place_vlan_pop_desc_packets,omitempty"`
+	InPlaceVLANPushNoHeadroomPackets  uint64    `json:"in_place_vlan_push_no_headroom_packets,omitempty"`
+	InPlaceL2MemmoveFallbackPackets   uint64    `json:"in_place_l2_memmove_fallback_packets,omitempty"`
 	DirectTXNoFrameFallbackPackets    uint64    `json:"direct_tx_no_frame_fallback_packets,omitempty"`
 	DirectTXBuildFallbackPackets      uint64    `json:"direct_tx_build_fallback_packets,omitempty"`
 	DirectTXDisallowedFallbackPackets uint64    `json:"direct_tx_disallowed_fallback_packets,omitempty"`
