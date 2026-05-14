@@ -118,18 +118,30 @@ type xpfCollector struct {
 	// #1247: production RSS/workload health gauges derived from the
 	// same per-CoS {a_i} snapshot. These expose the structural ceiling
 	// without adding packet-path state or global atomics.
-	fairnessCstruct             *prometheus.Desc
-	fairnessActiveWorkers       *prometheus.Desc
-	fairnessActiveFlows         *prometheus.Desc
-	fairnessMaxWorkerFlowShare  *prometheus.Desc
-	fairnessCoSCountsTruncated  *prometheus.Desc
-	fairnessRSSExpectation      *prometheus.Desc
-	fairnessRSSExpectationValue *prometheus.Desc
-	fairnessRSSSkewViolation    *prometheus.Desc
-	fairnessSaturated           *prometheus.Desc
-	fairnessObservedCoV         *prometheus.Desc
-	fairnessStarvedFlows        *prometheus.Desc
-	fairnessThroughputWindow    *dpuserspace.FairnessThroughputWindow
+	fairnessCstruct                           *prometheus.Desc
+	fairnessActiveWorkers                     *prometheus.Desc
+	fairnessActiveFlows                       *prometheus.Desc
+	fairnessMaxWorkerFlowShare                *prometheus.Desc
+	fairnessCoSCountsTruncated                *prometheus.Desc
+	fairnessRSSExpectation                    *prometheus.Desc
+	fairnessRSSExpectationValue               *prometheus.Desc
+	fairnessRSSSkewViolation                  *prometheus.Desc
+	fairnessSaturated                         *prometheus.Desc
+	fairnessObservedCoV                       *prometheus.Desc
+	fairnessStarvedFlows                      *prometheus.Desc
+	fairnessEqualFlowEstimateValid            *prometheus.Desc
+	fairnessEqualFlowSampledActiveWorkers     *prometheus.Desc
+	fairnessEqualFlowUnsampledActiveWorkers   *prometheus.Desc
+	fairnessEqualFlowTargetPerFlowBPS         *prometheus.Desc
+	fairnessEqualFlowObservedBPS              *prometheus.Desc
+	fairnessEqualFlowCappedBPS                *prometheus.Desc
+	fairnessEqualFlowSuppressedBPS            *prometheus.Desc
+	fairnessEqualFlowThroughputLossRatio      *prometheus.Desc
+	fairnessEqualFlowWorkerObservedBPS        *prometheus.Desc
+	fairnessEqualFlowWorkerObservedPerFlowBPS *prometheus.Desc
+	fairnessEqualFlowWorkerCapBPS             *prometheus.Desc
+	fairnessEqualFlowWorkerSuppressedBPS      *prometheus.Desc
+	fairnessThroughputWindow                  *dpuserspace.FairnessThroughputWindow
 }
 
 func newCollector(srv *Server) *xpfCollector {
@@ -480,6 +492,66 @@ func newCollector(srv *Server) *xpfCollector {
 			"Monotonic count of flows that enter below 1% of the rolling mean per-flow bytes for this egress CoS queue, de-duplicated while the flow remains in the rolling window (#1264).",
 			[]string{"ifindex", "queue_id"}, nil,
 		),
+		fairnessEqualFlowEstimateValid: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_estimate_valid",
+			"1 when the measurement-only equal-flow suppression estimator has at least two currently-active-flow workers with rolling byte samples for this egress CoS queue (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessEqualFlowSampledActiveWorkers: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_sampled_active_workers",
+			"Currently-active-flow workers with non-zero rolling byte samples in the measurement-only equal-flow suppression estimator (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessEqualFlowUnsampledActiveWorkers: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_unsampled_active_workers",
+			"Currently-active-flow workers with no rolling byte samples in the measurement-only equal-flow suppression estimator (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessEqualFlowTargetPerFlowBPS: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_target_per_flow_bps",
+			"Slowest sampled currently-active worker's observed per-flow bit rate used as the measurement-only equal-flow suppression target for this egress CoS queue; low values may reflect source artifacts such as idle or receiver-limited flows, not only dataplane unfairness (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessEqualFlowObservedBPS: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_observed_bps",
+			"Observed aggregate bits per second across currently-active-flow workers in the rolling estimator window before hypothetical equal-flow suppression (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessEqualFlowCappedBPS: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_capped_bps",
+			"Estimated aggregate bits per second across currently-active-flow workers after applying the measurement-only equal-flow suppression cap; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessEqualFlowSuppressedBPS: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_suppressed_bps",
+			"Estimated currently-active-flow worker bits per second that would be withheld by the measurement-only equal-flow suppression cap; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessEqualFlowThroughputLossRatio: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_throughput_loss_ratio",
+			"Estimated suppressed_bps / observed_bps ratio for the measurement-only equal-flow suppression cap; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		fairnessEqualFlowWorkerObservedBPS: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_worker_observed_bps",
+			"Observed bits per second for one currently-active-flow worker in the rolling equal-flow suppression estimator (#1304).",
+			[]string{"ifindex", "queue_id", "worker_id"}, nil,
+		),
+		fairnessEqualFlowWorkerObservedPerFlowBPS: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_worker_observed_per_flow_bps",
+			"Observed per-flow bits per second for one currently-active-flow worker in the rolling equal-flow suppression estimator (#1304).",
+			[]string{"ifindex", "queue_id", "worker_id"}, nil,
+		),
+		fairnessEqualFlowWorkerCapBPS: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_worker_cap_bps",
+			"Estimated bits-per-second cap for one currently-active-flow worker under measurement-only equal-flow suppression; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).",
+			[]string{"ifindex", "queue_id", "worker_id"}, nil,
+		),
+		fairnessEqualFlowWorkerSuppressedBPS: prometheus.NewDesc(
+			"xpf_fairness_equal_flow_worker_suppressed_bps",
+			"Estimated bits per second withheld from one currently-active-flow worker by measurement-only equal-flow suppression; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).",
+			[]string{"ifindex", "queue_id", "worker_id"}, nil,
+		),
 		fairnessThroughputWindow: dpuserspace.NewFairnessThroughputWindow(30 * time.Second),
 	}
 }
@@ -550,6 +622,18 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fairnessSaturated
 	ch <- c.fairnessObservedCoV
 	ch <- c.fairnessStarvedFlows
+	ch <- c.fairnessEqualFlowEstimateValid
+	ch <- c.fairnessEqualFlowSampledActiveWorkers
+	ch <- c.fairnessEqualFlowUnsampledActiveWorkers
+	ch <- c.fairnessEqualFlowTargetPerFlowBPS
+	ch <- c.fairnessEqualFlowObservedBPS
+	ch <- c.fairnessEqualFlowCappedBPS
+	ch <- c.fairnessEqualFlowSuppressedBPS
+	ch <- c.fairnessEqualFlowThroughputLossRatio
+	ch <- c.fairnessEqualFlowWorkerObservedBPS
+	ch <- c.fairnessEqualFlowWorkerObservedPerFlowBPS
+	ch <- c.fairnessEqualFlowWorkerCapBPS
+	ch <- c.fairnessEqualFlowWorkerSuppressedBPS
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -795,6 +879,117 @@ func (c *xpfCollector) emitFairnessThroughputGauges(ch chan<- prometheus.Metric,
 			float64(row.StarvedFlowsTotal),
 			ifindexLabel,
 			queueLabel,
+		)
+		c.emitFairnessEqualFlowEstimateGauges(ch, row, ifindexLabel, queueLabel)
+	}
+}
+
+func (c *xpfCollector) emitFairnessEqualFlowEstimateGauges(
+	ch chan<- prometheus.Metric,
+	row dpuserspace.FairnessThroughputSummary,
+	ifindexLabel string,
+	queueLabel string,
+) {
+	estimate := row.EqualFlowEstimate
+	if estimate.ActiveWorkers == 0 {
+		return
+	}
+	valid := 0.0
+	if estimate.Valid {
+		valid = 1
+	}
+	ch <- prometheus.MustNewConstMetric(
+		c.fairnessEqualFlowEstimateValid,
+		prometheus.GaugeValue,
+		valid,
+		ifindexLabel,
+		queueLabel,
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.fairnessEqualFlowSampledActiveWorkers,
+		prometheus.GaugeValue,
+		float64(estimate.SampledActiveWorkers),
+		ifindexLabel,
+		queueLabel,
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.fairnessEqualFlowUnsampledActiveWorkers,
+		prometheus.GaugeValue,
+		float64(estimate.UnsampledActiveWorkers),
+		ifindexLabel,
+		queueLabel,
+	)
+	if !estimate.Valid {
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(
+		c.fairnessEqualFlowTargetPerFlowBPS,
+		prometheus.GaugeValue,
+		estimate.TargetPerFlowBPS,
+		ifindexLabel,
+		queueLabel,
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.fairnessEqualFlowObservedBPS,
+		prometheus.GaugeValue,
+		estimate.ObservedBPS,
+		ifindexLabel,
+		queueLabel,
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.fairnessEqualFlowCappedBPS,
+		prometheus.GaugeValue,
+		estimate.CappedBPS,
+		ifindexLabel,
+		queueLabel,
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.fairnessEqualFlowSuppressedBPS,
+		prometheus.GaugeValue,
+		estimate.SuppressedBPS,
+		ifindexLabel,
+		queueLabel,
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.fairnessEqualFlowThroughputLossRatio,
+		prometheus.GaugeValue,
+		estimate.ThroughputLossRatio,
+		ifindexLabel,
+		queueLabel,
+	)
+	for _, worker := range estimate.Workers {
+		workerLabel := strconv.FormatUint(uint64(worker.WorkerID), 10)
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessEqualFlowWorkerObservedBPS,
+			prometheus.GaugeValue,
+			worker.ObservedBPS,
+			ifindexLabel,
+			queueLabel,
+			workerLabel,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessEqualFlowWorkerObservedPerFlowBPS,
+			prometheus.GaugeValue,
+			worker.ObservedPerFlow,
+			ifindexLabel,
+			queueLabel,
+			workerLabel,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessEqualFlowWorkerCapBPS,
+			prometheus.GaugeValue,
+			worker.CapBPS,
+			ifindexLabel,
+			queueLabel,
+			workerLabel,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessEqualFlowWorkerSuppressedBPS,
+			prometheus.GaugeValue,
+			worker.SuppressedBPS,
+			ifindexLabel,
+			queueLabel,
+			workerLabel,
 		)
 	}
 }
