@@ -985,6 +985,8 @@ pub(in crate::afxdp) fn apply_shared_recycles(
     if shared_recycles.is_empty() {
         return;
     }
+    let mut dropped = 0u64;
+    let mut first_drop = None;
     for (slot, offset) in shared_recycles.drain(..) {
         if route_shared_recycle_by_slot(
             left,
@@ -997,12 +999,11 @@ pub(in crate::afxdp) fn apply_shared_recycles(
         ) {
             continue;
         }
-        eprintln!(
-            "xpf-userspace-dp: dropping shared UMEM recycle for unknown slot {} offset {}",
-            slot, offset
-        );
-        current.live.tx_errors.fetch_add(1, Ordering::Relaxed);
+        first_drop.get_or_insert((slot, offset));
+        dropped = dropped.saturating_add(1);
     }
+    log_shared_recycle_unknown_slot_drops(dropped, first_drop);
+    record_shared_recycle_unknown_slot_drops(Some(&current.live), dropped);
 }
 
 fn route_shared_recycle_by_slot(
@@ -1094,6 +1095,24 @@ fn record_shared_recycle_unknown_slot_drops(error_live: Option<&BindingLiveState
     }
 }
 
+fn log_shared_recycle_unknown_slot_drops(dropped: u64, first_drop: Option<(u32, u64)>) {
+    if dropped == 0 {
+        return;
+    }
+    if let Some((slot, offset)) = first_drop {
+        eprintln!(
+            "xpf-userspace-dp: dropping {} shared UMEM recycles for unknown slots \
+             (first slot {} offset {})",
+            dropped, slot, offset
+        );
+    } else {
+        eprintln!(
+            "xpf-userspace-dp: dropping {} shared UMEM recycles for unknown slots",
+            dropped
+        );
+    }
+}
+
 pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
     bindings: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
@@ -1103,6 +1122,7 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
         return 0;
     }
     let mut dropped = 0u64;
+    let mut first_drop = None;
     for (slot, offset) in shared_recycles.drain(..) {
         let target_index =
             shared_recycle_target_index(bindings.len(), binding_lookup, slot, |idx| {
@@ -1114,12 +1134,10 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
             continue;
         }
-        eprintln!(
-            "xpf-userspace-dp: dropping shared UMEM recycle for unknown slot {} offset {}",
-            slot, offset
-        );
+        first_drop.get_or_insert((slot, offset));
         dropped = dropped.saturating_add(1);
     }
+    log_shared_recycle_unknown_slot_drops(dropped, first_drop);
     record_shared_recycle_unknown_slot_drops(
         bindings.first().map(|binding| binding.live.as_ref()),
         dropped,
