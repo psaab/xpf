@@ -579,8 +579,11 @@ fn rewrite_prepare_eth_from_parts(
         l2_rewrite,
         InPlaceL2Rewrite::VlanPushMemmoveNoHeadroom | InPlaceL2Rewrite::UnsupportedMemmove
     ) {
-        let frame =
-            unsafe { area.slice_mut_unchecked(desc.addr as usize, UMEM_FRAME_SIZE as usize)? };
+        let frame_mask = (UMEM_FRAME_SIZE as u64).saturating_sub(1);
+        let frame_offset = desc.addr & frame_mask;
+        let frame_len_in_chunk = (UMEM_FRAME_SIZE as u64).saturating_sub(frame_offset);
+        let frame_len_in_chunk = usize::try_from(frame_len_in_chunk).ok()?;
+        let frame = unsafe { area.slice_mut_unchecked(desc.addr as usize, frame_len_in_chunk)? };
         let source_end = l3.checked_add(payload_len)?;
         if frame_len > frame.len() || source_end > frame.len() {
             return None;

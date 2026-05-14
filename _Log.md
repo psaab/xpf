@@ -1,5 +1,11 @@
 # Action Log
 
+## 2026-05-14
+
+- **Timestamp**: 2026-05-14T03:52:00Z
+  - **Action**: PR #1301 review follow-up — tightened in-frame memmove fallback slice bounds to the current UMEM chunk and added regression coverage for `FillOnSlotWithOffset` recycle tracking.
+  - **File(s)**: `userspace-dp/src/afxdp/frame/mod.rs`, `userspace-dp/src/afxdp/tx/transmit_tests.rs`, `_Log.md`
+
 ## 2026-05-12
 
 - **Timestamp**: 2026-05-12T07:50:00Z
