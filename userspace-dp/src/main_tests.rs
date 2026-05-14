@@ -721,6 +721,7 @@ fn binding_counters_snapshot_projects_ring_pressure_fields() {
         rx_fill_ring_empty_descs: 19,
         outstanding_tx: 23,
         tx_errors: 29,
+        tx_shared_recycle_unknown_slot_drops: 43,
         tx_submit_error_drops: 31,
         pending_tx_local_overflow_drops: 37,
         // #918 / #943: pin per-set LRU collision and V_min telemetry
@@ -747,6 +748,7 @@ fn binding_counters_snapshot_projects_ring_pressure_fields() {
     assert_eq!(snap.rx_fill_ring_empty_descs, 19);
     assert_eq!(snap.outstanding_tx, 23);
     assert_eq!(snap.tx_errors, 29);
+    assert_eq!(snap.tx_shared_recycle_unknown_slot_drops, 43);
     assert_eq!(snap.tx_submit_error_drops, 31);
     assert_eq!(snap.pending_tx_local_overflow_drops, 37);
     assert_eq!(snap.flow_cache_collision_evictions, 53);
@@ -779,6 +781,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         tx_completion_ring_available: 30,
         tx_completion_ring_available_max: 32,
         tx_errors: 9,
+        tx_shared_recycle_unknown_slot_drops: 14,
         tx_submit_error_drops: 10,
         pending_tx_local_overflow_drops: 11,
         // #812: populated so wire-key assertions below also cover
@@ -829,6 +832,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         "tx_completion_ring_available",
         "tx_completion_ring_available_max",
         "tx_errors",
+        "tx_shared_recycle_unknown_slot_drops",
         "tx_submit_error_drops",
         "pending_tx_local_overflow_drops",
         // #812: new wire keys — absence from BindingCountersSnapshot
@@ -933,6 +937,7 @@ fn tx_latency_hist_serialization_roundtrip() {
         tx_completion_ring_available: 0,
         tx_completion_ring_available_max: 0,
         tx_errors: 0,
+        tx_shared_recycle_unknown_slot_drops: 0,
         tx_submit_error_drops: 0,
         pending_tx_local_overflow_drops: 0,
         // Hand-built plausible histogram — bucket 0 heavy,

@@ -1092,6 +1092,8 @@ fn record_shared_recycle_unknown_slot_drops(error_live: Option<&BindingLiveState
     }
     if let Some(live) = error_live {
         live.tx_errors.fetch_add(dropped, Ordering::Relaxed);
+        live.tx_shared_recycle_unknown_slot_drops
+            .fetch_add(dropped, Ordering::Relaxed);
     }
 }
 

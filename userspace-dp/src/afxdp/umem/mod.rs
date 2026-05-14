@@ -316,6 +316,9 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) tx_bytes: AtomicU64,
     pub(super) tx_completions: AtomicU64,
     pub(super) tx_errors: AtomicU64,
+    /// #1307: subset of `tx_errors` for shared-UMEM recycle drops whose
+    /// target slot no longer maps to a live binding.
+    pub(super) tx_shared_recycle_unknown_slot_drops: AtomicU64,
     /// #710: counts packets that hit the redirect-inbox overflow path
     /// in `enqueue_tx` / `enqueue_tx_owned`. Multi-writer (every
     /// redirecting worker writes; the owner reads). Atomic because
@@ -528,6 +531,7 @@ impl BindingLiveState {
             tx_bytes: AtomicU64::new(0),
             tx_completions: AtomicU64::new(0),
             tx_errors: AtomicU64::new(0),
+            tx_shared_recycle_unknown_slot_drops: AtomicU64::new(0),
             redirect_inbox_overflow_drops: AtomicU64::new(0),
             pending_tx_local_overflow_drops: AtomicU64::new(0),
             tx_submit_error_drops: AtomicU64::new(0),
@@ -833,6 +837,9 @@ impl BindingLiveState {
             tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
             tx_completions: self.tx_completions.load(Ordering::Relaxed),
             tx_errors: self.tx_errors.load(Ordering::Relaxed),
+            tx_shared_recycle_unknown_slot_drops: self
+                .tx_shared_recycle_unknown_slot_drops
+                .load(Ordering::Relaxed),
             redirect_inbox_overflow_drops: self
                 .redirect_inbox_overflow_drops
                 .load(Ordering::Relaxed),

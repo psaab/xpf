@@ -482,6 +482,18 @@ For production observability, xpf MUST export:
   gauges: per-worker breakdown of the same hypothetical cap. These are
   intended to answer "which worker would we slow, by how much?" before
   any enforcement mode is introduced.
+
+The all-class CoS sweep harness captures this estimator as first-class
+run evidence. For each class, `fairness-cos-class-sweep.sh` starts a
+continuous Prometheus scrape before invoking the multi-sample wrapper
+and stops it after the wrapper exits. Raw scrapes are preserved under
+`<artifact>/<class>/equal-flow/metrics-raw.prom`; reducer output is
+written beside it as `summary.json`, `aggregate.tsv`, and `worker.tsv`.
+The sweep also writes `<artifact>/equal-flow-summary.tsv` and appends an
+equal-flow section to `summary.md`. Missing or empty scrapes, parse
+errors, or missing required aggregate estimator rows for the target
+`COS_IFINDEX` and class queue are infrastructure failures and make the
+sweep exit `2`; they do not produce a false-green fairness verdict.
 - **`xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id=...}`**
   counter: cumulative v8 CoS queue-lease acquire calls made by the
   worker. Use `rate()` over the same scrape window as worker TX

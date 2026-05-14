@@ -68,6 +68,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var txPackets uint64
 	var txBytes uint64
 	var txErrors uint64
+	var txSharedRecycleUnknownSlotDrops uint64
 	var txCompletions uint64
 	var kernelRXDropped uint64
 	var kernelRXInvalidDescs uint64
@@ -137,6 +138,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 		txPackets += binding.TXPackets
 		txBytes += binding.TXBytes
 		txErrors += binding.TXErrors
+		txSharedRecycleUnknownSlotDrops += binding.TXSharedRecycleUnknownSlotDrops
 		txCompletions += binding.TXCompletions
 		kernelRXDropped += binding.KernelRXDropped
 		kernelRXInvalidDescs += binding.KernelRXInvalidDescs
@@ -276,6 +278,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  TX packets:                %d\n", txPackets)
 	fmt.Fprintf(&b, "  TX bytes:                  %d\n", txBytes)
 	fmt.Fprintf(&b, "  TX errors:                 %d\n", txErrors)
+	fmt.Fprintf(&b, "  TX shared recycle unk:     %d\n", txSharedRecycleUnknownSlotDrops)
 	fmt.Fprintf(&b, "  TX completions:            %d\n", txCompletions)
 	fmt.Fprintf(&b, "  Kernel RX dropped:         %d\n", kernelRXDropped)
 	fmt.Fprintf(&b, "  Kernel RX invalid descs:   %d\n", kernelRXInvalidDescs)
