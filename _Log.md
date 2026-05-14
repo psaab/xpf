@@ -428,3 +428,6 @@
 - **Timestamp**: 2026-05-13T20:22:00-07:00
   - **Action**: Enable cross-NIC shared UMEM in the loss userspace HA config, add node-local Phase 0 artifacts, push artifacts during deploy when the config requests shared UMEM, surface shared-UMEM binding mode/role in userspace status, and document the perf/counter contract for copy-free validation.
   - **File(s)**: `docs/ha-cluster-userspace.conf`, `test/incus/cluster-setup.sh`, `test/incus/loss-userspace-shared-umem-phase0-node0.json`, `test/incus/loss-userspace-shared-umem-phase0-node1.json`, `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/statusfmt.go`, `pkg/dataplane/userspace/statusfmt_test.go`, `docs/shared-umem-plan.md`, `docs/userspace-perf-compare.md`, `_Log.md`
+- **Timestamp**: 2026-05-13T20:44:00-07:00
+  - **Action**: Make cross-NIC shared-UMEM selection artifact-driven by default so the HA config no longer hardcodes interface names; add `selected_device_set` as the generic artifact key while keeping `selected_device_pair` as a legacy alias.
+  - **File(s)**: `userspace-dp/src/afxdp/shared_umem.rs`, `docs/ha-cluster-userspace.conf`, `docs/shared-umem-plan.md`, `test/incus/loss-userspace-shared-umem-phase0-node0.json`, `test/incus/loss-userspace-shared-umem-phase0-node1.json`, `_Log.md`

@@ -136,7 +136,8 @@ The Phase 0 artifact must be machine-readable and include:
 - IOMMU mode
 - MTU
 - queue topology
-- selected device pair
+- selected device set (`selected_device_set`; legacy `selected_device_pair`
+  artifacts remain accepted as an alias)
 - same-queue, same-netdev/different-queue, and different-netdev result rows
 - owner bind flags, secondary bind flags, and post-bind
   `XDP_OPTIONS_ZEROCOPY` result per socket
@@ -262,9 +263,11 @@ Cross-NIC eligibility:
 - `mlx5_core`
 - non-empty PCI device path
 - at least two NICs in the group
-- explicit operator/config selection of which interfaces participate
+- selected interfaces come from the Phase 0 artifact by default; an explicit
+  operator/config interface list is an optional override and must exactly match
+  the artifact
 - Phase 0 artifact matches the deployment environment for this node class and
-  selected device pair
+  selected device set
 - all participating bindings are owned by the same worker
 - no `virtio_net`
 - zero-copy is required; copy-mode fallback disables the group
@@ -274,7 +277,9 @@ Same-device-debug eligibility:
 - `mlx5_core`
 - same non-empty PCI device path
 - at least two bindings in the group
-- explicit operator/config selection of which interfaces participate
+- selected interfaces come from the Phase 0 artifact by default; an explicit
+  operator/config interface list is an optional override and must exactly match
+  the artifact
 - only used to isolate shared bridge/ring/drop-order bugs before cross-NIC
   rollout
 
@@ -299,19 +304,22 @@ Shared-group construction must be atomic from the worker's point of view:
 - only after the full group succeeds may the worker move the bindings into the
   live `bindings` vector and register their XSKMAP slots
 
-The operator-provided cross-NIC group is mandatory because NUMA locality, IOMMU
-mode, and NIC placement determine whether the result is useful even when the
-kernel supports the bind. Do not infer cross-NIC grouping from driver name
-alone.
+The Phase 0 artifact is the normal source of truth for the cross-NIC group
+because NUMA locality, IOMMU mode, and NIC placement determine whether the
+result is useful even when the kernel supports the bind. Do not infer cross-NIC
+grouping from driver name alone. Operators may still configure an explicit
+interface list as a narrow override, but production startup must reject it
+unless it exactly matches the artifact's selected interfaces.
 
 Deployment scoping is part of the runtime contract, not just documentation.
-The policy builder must compare the configured shared-UMEM group against the
+The policy builder must compare the selected shared-UMEM group against the
 locally observable portion of the validated Phase 0 artifact for the current
-node class. At daemon startup this means the gate enforces the top-level
-success result plus kernel release, mlx5 driver name, selected interface names,
-selected NIC PCI IDs, selected device pair, MTU, and RX queue topology. If any
-of those fields are missing or do not match the live node, the group stays
-private and the reason is reported in telemetry.
+node class. If the config omits interface names, the artifact's selected
+interfaces define the group. At daemon startup this means the gate enforces
+the top-level success result plus kernel release, mlx5 driver name, selected
+interface names, selected NIC PCI IDs, selected device set, MTU, and RX queue
+topology. If any of those fields are missing or do not match the live node,
+the group stays private and the reason is reported in telemetry.
 
 Driver version, selected NIC firmware versions, libxdp/libbpf versions, IOMMU
 mode, and the per-cell repro rows remain required Phase 0 audit evidence, but
@@ -413,8 +421,9 @@ Cross-NIC mode remains behind an explicit gate until xpf proves:
 ## Loss Lab Deployment Contract
 
 The loss userspace HA config now enables `system dataplane shared-umem mode
-cross-nic` for the real LAN/WAN mlx5 pair on each node. The deploy script
-pushes the matching node-local Phase 0 artifact to
+cross-nic` without hardcoding interface names. The matching node-local Phase 0
+artifact selects the real LAN/WAN mlx5 pair on each node, and the deploy script
+pushes that artifact to
 `/run/xpf/shared-umem-phase0.json` before xpfd starts. If the artifact no
 longer matches the live kernel, PCI IDs, driver, MTU, or RX queue topology,
 the helper must fall back to private UMEM and publish the disabled reason in
