@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${BPFRX_CLUSTER_ENV:-${PROJECT_ROOT}/test/incus/loss-userspace-cluster.env}"
 RUNS="${RUNS:-3}"
 DURATION="${DURATION:-5}"
-PARALLEL="${PARALLEL:-4}"
+PARALLEL="${PARALLEL:-6}"
 MIN_GBPS_V4="${MIN_GBPS_V4:-18.0}"
 MIN_GBPS_V6="${MIN_GBPS_V6:-18.0}"
 MARGINAL_GBPS_EPSILON="${MARGINAL_GBPS_EPSILON:-0.25}"
@@ -163,14 +163,6 @@ ensure_preferred_active_node() {
 	fi
 	info "pinning userspace validation to ${preferred_name} for RGs:${PREFERRED_ACTIVE_RGS}"
 	run_host 'sysctl -qw net.ipv6.conf.eth0.accept_ra=2 || true'
-	for rg in $PREFERRED_ACTIVE_RGS; do
-		local current=""
-		current="$(rg_primary_node "$FW0" "$rg" || true)"
-		if [[ "$current" == "$preferred_name" ]]; then
-			continue
-		fi
-		run_vm "$FW0" "cli -c \"request chassis cluster failover redundancy-group ${rg} node ${PREFERRED_ACTIVE_NODE}\" >/tmp/userspace-failover-rg${rg}.out"
-	done
 	local tries=45
 	while (( tries > 0 )); do
 		local all_good=1
@@ -178,8 +170,11 @@ ensure_preferred_active_node() {
 			local current=""
 			current="$(rg_primary_node "$FW0" "$rg" || true)"
 			if [[ "$current" != "$preferred_name" ]]; then
+				local failover_cmd
 				all_good=0
-				break
+				failover_cmd="cli -c \"request chassis cluster failover redundancy-group ${rg} node ${PREFERRED_ACTIVE_NODE}\""
+				failover_cmd+=" >/tmp/userspace-failover-rg${rg}.out 2>&1 || true"
+				run_vm "$FW0" "$failover_cmd"
 			fi
 		done
 		if (( all_good == 1 )); then

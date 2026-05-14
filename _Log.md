@@ -458,3 +458,6 @@
 - **Timestamp**: 2026-05-14T06:45:00Z
   - **Action**: PR #1301 round-5 minor follow-up: add regression coverage for stale/wrong/unknown shared-recycle slot routing, increment `tx_errors` when the all-bindings shared-recycle router drops an unknown slot, and downgrade the external IPv6 `mtr` final-hop miss to a warning after the controlled IPv6 dataplane checks pass.
   - **File(s)**: `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/dispatch_tests.rs`, `userspace-dp/src/afxdp/tx/README.md`, `docs/shared-umem-plan.md`, `scripts/userspace-ha-validation.sh`, `_Log.md`
+- **Timestamp**: 2026-05-14T07:10:00Z
+  - **Action**: Harden the userspace HA smoke validator after live PR #1301 smoke: retry preferred-node failover while XSK liveness propagates into RG readiness, set the default throughput shape to `PARALLEL=6` so the smoke covers the six-worker RSS set, and document the IPv6 external-`mtr` warning semantics.
+  - **File(s)**: `scripts/userspace-ha-validation.sh`, `docs/userspace-ha-validation.md`, `.codex/skills/userspace-ha-validation/SKILL.md`, `_Log.md`
