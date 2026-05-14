@@ -44,9 +44,10 @@ writer to synchronize against.
   The split-slice path used while holding the ingress binding and the
   all-bindings cleanup path must share this resolver so stale lookup entries
   are handled identically. Unknown recycle slots must fail closed and
-  increment `tx_errors` on the worker status surface with bounded one-line
-  logging per drain; never push a foreign offset into an arbitrary binding's
-  fill ring.
+  increment both aggregate `tx_errors` and the subset
+  `tx_shared_recycle_unknown_slot_drops` on the worker status surface with
+  bounded one-line logging per drain; never push a foreign offset into an
+  arbitrary binding's fill ring.
 - `Ordering::Relaxed` is intentional and correct given the
   single-writer invariant. Don't promote without proving a second
   writer exists.

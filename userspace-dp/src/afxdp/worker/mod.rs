@@ -2144,6 +2144,7 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) tx_bytes: u64,
     pub(crate) tx_completions: u64,
     pub(crate) tx_errors: u64,
+    pub(crate) tx_shared_recycle_unknown_slot_drops: u64,
     pub(crate) redirect_inbox_overflow_drops: u64,
     pub(crate) pending_tx_local_overflow_drops: u64,
     pub(crate) tx_submit_error_drops: u64,

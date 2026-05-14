@@ -748,6 +748,10 @@ fn route_cancelled_shared_recycles(
                 slot, offset
             );
             current.live.tx_errors.fetch_add(1, Ordering::Relaxed);
+            current
+                .live
+                .tx_shared_recycle_unknown_slot_drops
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
