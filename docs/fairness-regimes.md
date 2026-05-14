@@ -491,7 +491,8 @@ and stops it after the wrapper exits. Raw scrapes are preserved under
 written beside it as `summary.json`, `aggregate.tsv`, and `worker.tsv`.
 The sweep also writes `<artifact>/equal-flow-summary.tsv` and appends an
 equal-flow section to `summary.md`. Missing or empty scrapes, parse
-errors, or missing required aggregate estimator rows for the target
+errors, missing scrape-end markers, non-integer active-worker counts,
+or missing required aggregate estimator rows for the target
 `COS_IFINDEX` and class queue are infrastructure failures and make the
 sweep exit `2`; they do not produce a false-green fairness verdict.
 - **`xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id=...}`**
