@@ -12,8 +12,8 @@ pub(in crate::afxdp) use rings::{maybe_wake_tx, reap_tx_completions};
 pub(super) mod transmit;
 use transmit::transmit_prepared_batch;
 pub(in crate::afxdp) use transmit::{
-    TxError, recycle_cancelled_prepared_offset, recycle_cancelled_prepared_offset_with_shared,
-    recycle_prepared_immediately, remember_prepared_recycle, transmit_batch,
+    TxError, recycle_cancelled_prepared_offset_with_shared,
+    recycle_prepared_immediately_with_shared, remember_prepared_recycle, transmit_batch,
     transmit_prepared_queue,
 };
 

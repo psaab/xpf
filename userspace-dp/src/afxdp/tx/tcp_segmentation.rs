@@ -279,6 +279,6 @@ pub(super) fn segment_forwarded_tcp_frames_into_prepared(
     for req in prepared {
         target_binding.tx_pipeline.pending_tx_prepared.push_back(req);
     }
-    bound_pending_tx_prepared(target_binding);
+    bound_pending_tx_prepared(target_binding, Some(post_recycles));
     Some((segment_count as u32, total_bytes, max_frame))
 }

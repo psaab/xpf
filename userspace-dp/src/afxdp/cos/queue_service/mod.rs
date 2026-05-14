@@ -64,7 +64,7 @@ use super::tx_completion::{
 use crate::afxdp::tx::{
     COS_GUARANTEE_QUANTUM_MAX_BYTES, COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS,
     COS_SURPLUS_ROUND_QUANTUM_BYTES, TxError, cos_queue_dscp_rewrite, maybe_wake_tx,
-    reap_tx_completions, recycle_cancelled_prepared_offset, remember_prepared_recycle,
+    reap_tx_completions, recycle_cancelled_prepared_offset_with_shared, remember_prepared_recycle,
     stamp_submits, transmit_batch, transmit_prepared_queue,
 };
 
@@ -306,6 +306,7 @@ fn service_exact_guarantee_queue_direct_with_info(
             selection.queue_idx,
             selection.secondary_budget,
             now_ns,
+            shared_recycles,
         ),
     };
 

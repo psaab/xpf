@@ -54,6 +54,7 @@ pub(super) fn retry_pending_neigh(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     now_ns: u64,
     area: &MmapArea,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     if binding.pending_neigh.is_empty() {
         return;
@@ -214,7 +215,7 @@ pub(super) fn retry_pending_neigh(
             binding_by_index_mut(left, binding_index, binding, right, target_idx)
         {
             target.tx_pipeline.pending_tx_prepared.push_back(req);
-            bound_pending_tx_prepared(target);
+            bound_pending_tx_prepared(target, Some(shared_recycles));
             target.tx_counters.pending_in_place_tx_packets += 1;
             target
                 .tx_counters
@@ -223,6 +224,7 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
         }
     }
+    apply_shared_recycles(left, binding_index, binding, right, binding_lookup, shared_recycles);
 }
 
 pub(super) fn learn_dynamic_neighbor_from_packet(

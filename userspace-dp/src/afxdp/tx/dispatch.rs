@@ -457,7 +457,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     dscp_rewrite: request.dscp_rewrite,
                                 },
                             );
-                            bound_pending_tx_prepared(target_binding);
+                            bound_pending_tx_prepared(target_binding, Some(post_recycles));
                             target_binding.tx_counters.pending_in_place_tx_packets += 1;
                             target_binding
                                 .tx_counters
@@ -705,7 +705,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         dscp_rewrite: request.dscp_rewrite,
                                     },
                                 );
-                                bound_pending_tx_prepared(target_binding);
+                                bound_pending_tx_prepared(target_binding, Some(post_recycles));
                                 dbg.enqueue_ok += 1;
                                 dbg.enqueue_direct += 1;
                                 target_binding.tx_counters.pending_direct_tx_packets += 1;
@@ -986,15 +986,69 @@ pub(in crate::afxdp) fn apply_shared_recycles(
         return;
     }
     for (slot, offset) in shared_recycles.drain(..) {
-        if let Some(target_index) = binding_lookup.slot_index(slot)
-            && let Some(binding) =
-                binding_by_index_mut(left, current_index, current, right, target_index)
-        {
-            binding.tx_pipeline.pending_fill_frames.push_back(offset);
+        if route_shared_recycle_by_slot(
+            left,
+            current_index,
+            current,
+            right,
+            binding_lookup,
+            slot,
+            offset,
+        ) {
             continue;
         }
-        current.tx_pipeline.pending_fill_frames.push_back(offset);
+        eprintln!(
+            "xpf-userspace-dp: dropping shared UMEM recycle for unknown slot {} offset {}",
+            slot, offset
+        );
+        current.live.tx_errors.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+fn route_shared_recycle_by_slot(
+    left: &mut [BindingWorker],
+    current_index: usize,
+    current: &mut BindingWorker,
+    right: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    slot: u32,
+    offset: u64,
+) -> bool {
+    if let Some(target_index) = binding_lookup.slot_index(slot) {
+        if target_index == current_index {
+            if current.slot == slot {
+                current.tx_pipeline.pending_fill_frames.push_back(offset);
+                return true;
+            }
+        } else if target_index < current_index {
+            if let Some(binding) = left
+                .get_mut(target_index)
+                .filter(|binding| binding.slot == slot)
+            {
+                binding.tx_pipeline.pending_fill_frames.push_back(offset);
+                return true;
+            }
+        } else if let Some(binding) = right
+            .get_mut(target_index.saturating_sub(current_index + 1))
+            .filter(|binding| binding.slot == slot)
+        {
+            binding.tx_pipeline.pending_fill_frames.push_back(offset);
+            return true;
+        }
+    }
+    if current.slot == slot {
+        current.tx_pipeline.pending_fill_frames.push_back(offset);
+        return true;
+    }
+    if let Some(binding) = left
+        .iter_mut()
+        .chain(right.iter_mut())
+        .find(|binding| binding.slot == slot)
+    {
+        binding.tx_pipeline.pending_fill_frames.push_back(offset);
+        return true;
+    }
+    false
 }
 
 pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
@@ -1008,13 +1062,19 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
     for (slot, offset) in shared_recycles.drain(..) {
         if let Some(target_index) = binding_lookup.slot_index(slot)
             && let Some(binding) = bindings.get_mut(target_index)
+            && binding.slot == slot
         {
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
             continue;
         }
-        if let Some(binding) = bindings.first_mut() {
+        if let Some(binding) = bindings.iter_mut().find(|binding| binding.slot == slot) {
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
+            continue;
         }
+        eprintln!(
+            "xpf-userspace-dp: dropping shared UMEM recycle for unknown slot {} offset {}",
+            slot, offset
+        );
     }
 }
 

@@ -743,7 +743,11 @@ fn route_cancelled_shared_recycles(
         {
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
         } else {
-            current.tx_pipeline.pending_fill_frames.push_back(offset);
+            eprintln!(
+                "xpf-userspace-dp: dropping shared UMEM recycle for unknown slot {} offset {}",
+                slot, offset
+            );
+            current.live.tx_errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

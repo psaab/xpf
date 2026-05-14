@@ -145,6 +145,7 @@ pub(super) fn poll_binding(
                 dynamic_neighbors,
                 now_ns,
                 unsafe { &*(binding.umem.area() as *const MmapArea) },
+                shared_recycles,
             );
             counters.flush(&binding.live);
             update_binding_idle_debug_state(binding, now_ns);
@@ -302,6 +303,7 @@ pub(super) fn poll_binding(
         dynamic_neighbors,
         now_ns,
         unsafe { &*area },
+        shared_recycles,
     );
     counters.flush(&binding.live);
     update_binding_debug_state(binding);

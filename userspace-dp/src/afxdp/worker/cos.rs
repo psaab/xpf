@@ -272,7 +272,10 @@ pub(super) fn vacate_all_shared_exact_slots_for_binding(binding: &BindingWorker)
     }
 }
 
-pub(super) fn reset_binding_cos_runtime(binding: &mut BindingWorker) {
+pub(super) fn reset_binding_cos_runtime(
+    binding: &mut BindingWorker,
+    mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
+) {
     release_all_cos_root_leases(binding);
     release_all_cos_queue_leases(binding);
     let mut dropped_local = 0u64;
@@ -326,13 +329,20 @@ pub(super) fn reset_binding_cos_runtime(binding: &mut BindingWorker) {
             .fetch_add(dropped_total, Ordering::Relaxed);
     }
     for req in dropped_prepared {
-        recycle_prepared_immediately(binding, &req);
+        recycle_prepared_immediately_with_shared(
+            binding,
+            &req,
+            shared_recycles.as_deref_mut(),
+        );
     }
 }
 
-pub(super) fn reset_worker_cos_runtimes(bindings: &mut [BindingWorker]) {
+pub(super) fn reset_worker_cos_runtimes(
+    bindings: &mut [BindingWorker],
+    shared_recycles: &mut Vec<(u32, u64)>,
+) {
     for binding in bindings {
-        reset_binding_cos_runtime(binding);
+        reset_binding_cos_runtime(binding, Some(shared_recycles));
     }
 }
 

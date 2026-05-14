@@ -19,23 +19,6 @@ pub(in crate::afxdp) enum TxError {
     Drop(String),
 }
 
-pub(in crate::afxdp) fn recycle_cancelled_prepared_offset(
-    free_tx_frames: &mut VecDeque<u64>,
-    pending_fill_frames: &mut VecDeque<u64>,
-    slot: u32,
-    recycle: PreparedTxRecycle,
-    offset: u64,
-) {
-    recycle_cancelled_prepared_offset_with_shared(
-        free_tx_frames,
-        pending_fill_frames,
-        None,
-        slot,
-        recycle,
-        offset,
-    );
-}
-
 pub(in crate::afxdp) fn recycle_cancelled_prepared_offset_with_shared(
     free_tx_frames: &mut VecDeque<u64>,
     pending_fill_frames: &mut VecDeque<u64>,
@@ -63,13 +46,6 @@ pub(in crate::afxdp) fn recycle_cancelled_prepared_offset_with_shared(
             free_tx_frames.push_back(recycle_offset);
         }
     }
-}
-
-pub(in crate::afxdp) fn recycle_prepared_immediately(
-    binding: &mut BindingWorker,
-    req: &PreparedTxRequest,
-) {
-    recycle_prepared_immediately_with_shared(binding, req, None);
 }
 
 pub(in crate::afxdp) fn recycle_prepared_immediately_with_shared(

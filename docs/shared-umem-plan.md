@@ -116,7 +116,12 @@ after shared bind is proven.
 2. The bridge must expose private and shared socket creation explicitly.
 3. Shared groups are worker-local; no UMEM crosses worker threads.
 4. Frame offsets in a shared group are partitioned once at startup, then
-   recycled through the existing prepared-TX completion model.
+   recycled through the prepared-TX completion model. Every prepared drop,
+   cancellation, queue overflow, demotion, and TX completion records the
+   source slot and routes the frame back to that slot's fill ring. If the slot
+   is no longer present in the worker binding lookup, the recycle record is
+   dropped with an operator log instead of being returned to an arbitrary
+   binding.
 5. Cross-NIC sharing is the primary implementation target because the firewall
    forwards between NICs. Same-device sharing is optional scaffolding for
    isolating bridge/ring bugs.
@@ -344,6 +349,8 @@ Enable same-allocation in-place forwarding only when:
 - CoS ownership checks still pass
 - the target TX completion path recycles the original offset only after TX
   completion
+- every non-completion prepared discard path uses the same slot-routed recycle
+  accumulator as the completion path
 
 `tx/dispatch.rs` already has most of this predicate. After bind validation,
 extend the flow-cache fast path in `poll_descriptor.rs` from "same binding"

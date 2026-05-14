@@ -324,6 +324,7 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
     forwarding: &ForwardingState,
     req: TxRequest,
     now_ns: u64,
+    mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(), TxRequest> {
     let egress_ifindex = req.egress_ifindex;
     if !ensure_cos_interface_runtime(binding, forwarding, egress_ifindex, now_ns) {
@@ -348,13 +349,18 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
                     prepared_req.cos_queue_id,
                     item_len,
                     CoSPendingTxItem::Prepared(prepared_req),
+                    shared_recycles.as_deref_mut(),
                 ) {
                     Ok(()) => return Ok(()),
                     Err(CoSPendingTxItem::Prepared(prepared_req)) => {
                         let req =
                             clone_prepared_request_for_cos(binding.umem.area(), &prepared_req)
                                 .expect("prepared CoS fallback clone");
-                        recycle_prepared_immediately(binding, &prepared_req);
+                        recycle_prepared_immediately_with_shared(
+                            binding,
+                            &prepared_req,
+                            shared_recycles.as_deref_mut(),
+                        );
                         let item_len = req.bytes.len() as u64;
                         return match enqueue_cos_item(
                             binding,
@@ -362,6 +368,7 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
                             req.cos_queue_id,
                             item_len,
                             CoSPendingTxItem::Local(req),
+                            shared_recycles.as_deref_mut(),
                         ) {
                             Ok(()) => Ok(()),
                             Err(CoSPendingTxItem::Local(req)) => Err(req),
@@ -388,6 +395,7 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
                         slot,
                         root,
                         req.cos_queue_id,
+                        shared_recycles.as_deref_mut(),
                     );
                 }
                 let req = req;
@@ -398,6 +406,7 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
                     req.cos_queue_id,
                     item_len,
                     CoSPendingTxItem::Local(req),
+                    shared_recycles.as_deref_mut(),
                 ) {
                     Ok(()) => Ok(()),
                     Err(CoSPendingTxItem::Local(req)) => Err(req),
@@ -415,6 +424,7 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
         req.cos_queue_id,
         item_len,
         CoSPendingTxItem::Local(req),
+        shared_recycles.as_deref_mut(),
     ) {
         Ok(()) => Ok(()),
         Err(CoSPendingTxItem::Local(req)) => Err(req),
@@ -458,6 +468,7 @@ pub(super) fn enqueue_prepared_into_cos(
     forwarding: &ForwardingState,
     req: PreparedTxRequest,
     now_ns: u64,
+    mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(), PreparedTxRequest> {
     let egress_ifindex = req.egress_ifindex;
     if !ensure_cos_interface_runtime(binding, forwarding, egress_ifindex, now_ns) {
@@ -476,6 +487,7 @@ pub(super) fn enqueue_prepared_into_cos(
             req.cos_queue_id,
             item_len,
             CoSPendingTxItem::Prepared(req),
+            shared_recycles.as_deref_mut(),
         ) {
             Ok(()) => return Ok(()),
             Err(CoSPendingTxItem::Prepared(req)) => return Err(req),
@@ -498,9 +510,14 @@ pub(super) fn enqueue_prepared_into_cos(
         local_req.cos_queue_id,
         item_len,
         CoSPendingTxItem::Local(local_req),
+        shared_recycles.as_deref_mut(),
     ) {
         Ok(()) => {
-            recycle_prepared_immediately(binding, &req);
+            recycle_prepared_immediately_with_shared(
+                binding,
+                &req,
+                shared_recycles.as_deref_mut(),
+            );
             Ok(())
         }
         Err(CoSPendingTxItem::Local(_)) => Err(req),
@@ -553,6 +570,7 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
     slot: u32,
     root: &mut CoSInterfaceRuntime,
     requested_queue: Option<u8>,
+    mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> bool {
     let Some(queue_idx) = resolve_cos_queue_idx(root, requested_queue) else {
         return false;
@@ -616,9 +634,10 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
         cos_queue_push_back(queue, item);
     }
     for (recycle, offset) in recycles {
-        recycle_cancelled_prepared_offset(
+        recycle_cancelled_prepared_offset_with_shared(
             free_tx_frames,
             pending_fill_frames,
+            shared_recycles.as_deref_mut(),
             slot,
             recycle,
             offset,
@@ -701,6 +720,7 @@ fn enqueue_cos_item(
     requested_queue: Option<u8>,
     item_len: u64,
     mut item: CoSPendingTxItem,
+    mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(), CoSPendingTxItem> {
     let mut root_became_nonempty = false;
     let (accepted, queue_id, recycle) = {
@@ -821,19 +841,14 @@ fn enqueue_cos_item(
         return Ok(());
     }
     if let Some((recycle, offset)) = recycle {
-        let recycle_offset = recycle.recycle_offset(offset);
-        match recycle {
-            PreparedTxRecycle::FreeTxFrame => binding.tx_pipeline.free_tx_frames.push_back(recycle_offset),
-            PreparedTxRecycle::FillOnSlot(slot)
-            | PreparedTxRecycle::FillOnSlotWithOffset { slot, .. }
-                if slot == binding.slot =>
-            {
-                binding.tx_pipeline.pending_fill_frames.push_back(recycle_offset);
-            }
-            PreparedTxRecycle::FillOnSlot(_) | PreparedTxRecycle::FillOnSlotWithOffset { .. } => {
-                binding.tx_pipeline.free_tx_frames.push_back(recycle_offset)
-            }
-        }
+        recycle_cancelled_prepared_offset_with_shared(
+            &mut binding.tx_pipeline.free_tx_frames,
+            &mut binding.tx_pipeline.pending_fill_frames,
+            shared_recycles.as_deref_mut(),
+            binding.slot,
+            recycle,
+            offset,
+        );
     }
     // #804: CoS admission overflow — NOT bound-pending. Pre-#804 this
     // site incremented `dbg_pending_overflow` which conflated it with

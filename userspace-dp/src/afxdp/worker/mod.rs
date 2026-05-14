@@ -1020,7 +1020,12 @@ pub(crate) fn worker_loop(
             forwarding = new_forwarding;
 
             if cos_changed {
-                reset_worker_cos_runtimes(&mut bindings);
+                reset_worker_cos_runtimes(&mut bindings, &mut shared_recycles);
+                apply_shared_recycles_to_bindings(
+                    &mut bindings,
+                    &binding_lookup,
+                    &mut shared_recycles,
+                );
                 rebuild_cos_fast_interfaces = true;
             }
         }
@@ -1135,6 +1140,12 @@ pub(crate) fn worker_loop(
                 &binding_lookup,
                 loop_now_ns,
                 shaped_tx_requests,
+                &mut shared_recycles,
+            );
+            apply_shared_recycles_to_bindings(
+                &mut bindings,
+                &binding_lookup,
+                &mut shared_recycles,
             );
         }
         if !cancelled_keys.is_empty() {
@@ -1326,7 +1337,12 @@ pub(crate) fn worker_loop(
         if !exported_sequences.is_empty() {
             while sessions.has_pending_deltas() {
                 let deltas = sessions.drain_deltas(256);
-                purge_queued_flows_for_closed_deltas(&mut bindings, &deltas);
+                purge_queued_flows_for_closed_deltas(
+                    &mut bindings,
+                    &binding_lookup,
+                    &mut shared_recycles,
+                    &deltas,
+                );
                 if let Some(binding) = bindings.first() {
                     let ident = binding.identity();
                     flush_session_deltas(
@@ -1352,7 +1368,12 @@ pub(crate) fn worker_loop(
             }
         } else if sessions.has_pending_deltas() {
             let deltas = sessions.drain_deltas(256);
-            purge_queued_flows_for_closed_deltas(&mut bindings, &deltas);
+            purge_queued_flows_for_closed_deltas(
+                &mut bindings,
+                &binding_lookup,
+                &mut shared_recycles,
+                &deltas,
+            );
             if let Some(binding) = bindings.first() {
                 let ident = binding.identity();
                 flush_session_deltas(
@@ -1929,6 +1950,7 @@ fn apply_worker_shaped_tx_requests(
     binding_lookup: &WorkerBindingLookup,
     now_ns: u64,
     requests: Vec<TxRequest>,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     for req in requests {
         let binding_index = bindings
@@ -1963,7 +1985,13 @@ fn apply_worker_shaped_tx_requests(
             }
             continue;
         };
-        match enqueue_local_into_cos(binding, forwarding, req, now_ns) {
+        match enqueue_local_into_cos(
+            binding,
+            forwarding,
+            req,
+            now_ns,
+            Some(&mut *shared_recycles),
+        ) {
             Ok(()) => {}
             Err(req) => {
                 binding.tx_pipeline.pending_tx_local.push_back(req);

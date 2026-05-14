@@ -351,6 +351,7 @@ pub(super) fn service_exact_prepared_queue_direct(
     queue_idx: usize,
     secondary_budget: u64,
     now_ns: u64,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) -> bool {
     let flow_fair = binding
         .cos
@@ -366,6 +367,7 @@ pub(super) fn service_exact_prepared_queue_direct(
             queue_idx,
             secondary_budget,
             now_ns,
+            shared_recycles,
         );
     }
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
@@ -392,6 +394,7 @@ pub(super) fn service_exact_prepared_queue_direct(
             &mut binding.tx_pipeline.free_tx_frames,
             &mut binding.tx_pipeline.pending_fill_frames,
             binding.slot,
+            shared_recycles,
             root_budget,
             secondary_budget,
             queue_dscp_rewrite,
@@ -521,6 +524,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
     queue_idx: usize,
     secondary_budget: u64,
     now_ns: u64,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) -> bool {
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
     binding.scratch.scratch_prepared_tx.clear();
@@ -546,6 +550,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
             &mut binding.tx_pipeline.free_tx_frames,
             &mut binding.tx_pipeline.pending_fill_frames,
             binding.slot,
+            shared_recycles,
             root_budget,
             secondary_budget,
             queue_dscp_rewrite,
