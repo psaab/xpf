@@ -32,6 +32,7 @@ DATAPLANE_VM=${DATAPLANE_VM:-loss:xpf-userspace-fw0}
 DATAPLANE_STATUS_PATH=${DATAPLANE_STATUS_PATH:-/run/xpf/userspace-dp.json}
 DATAPLANE_STATS_CMD=${DATAPLANE_STATS_CMD:-"cli -c 'show chassis cluster data-plane statistics'"}
 DATAPLANE_CAPTURE_TIMEOUT_SEC=${DATAPLANE_CAPTURE_TIMEOUT_SEC:-20}
+readonly INFRA_EXIT_STATUS=2
 
 if [[ -z "$COS_IFINDEX" ]]; then
     echo "fairness-cos-class-sweep: COS_IFINDEX is required for the shaped egress interface" >&2
@@ -123,7 +124,7 @@ class_selected() {
 }
 
 mark_parse_error() {
-    overall_status=2
+    overall_status=$INFRA_EXIT_STATUS
 }
 
 append_error_row() {
@@ -135,7 +136,7 @@ append_error_row() {
 
     printf '%s\t%s\t%s\t%s\t%s\tERROR\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\n' \
         "$label" "$port" "$queue" "$rate" "$status" >> "$SUMMARY_TSV"
-    printf "summary class=%s wrapper_status=%s verdict=ERROR mean_cov=- max_cov=-\n" \
+    printf "summary class=%s exit_status=%s verdict=ERROR mean_cov=- max_cov=-\n" \
         "$label" "$status"
 }
 
@@ -556,23 +557,23 @@ for spec in "${selected_classes[@]}"; do
     write_dataplane_delta "$out/dataplane/status-before.json" "$out/dataplane/status-after.json" "$out/dataplane"
     append_dataplane_class_summary "$label" "$out/dataplane/counter-delta.json"
     if (( equal_flow_status != 0 )); then
-        overall_status=2
-        append_error_row "$label" "$port" "$queue" "$rate" 2
+        overall_status=$INFRA_EXIT_STATUS
+        append_error_row "$label" "$port" "$queue" "$rate" "$INFRA_EXIT_STATUS"
         echo "fairness-cos-class-sweep: invalid equal-flow estimator capture for $label: $equal_flow_dir" >&2
         [[ -f "$equal_flow_dir/reducer.stderr" ]] && sed -n '1,80p' "$equal_flow_dir/reducer.stderr" >&2
         [[ -f "$equal_flow_dir/summary-row.stderr" ]] && sed -n '1,80p' "$equal_flow_dir/summary-row.stderr" >&2
-        if (( status == 2 || (status != 0 && status != 1) )); then
+        if (( status == INFRA_EXIT_STATUS || (status != 0 && status != 1) )); then
             sed -n '1,80p' "$out/wrapper.stderr" >&2
         fi
         continue
     fi
-    if (( status == 2 )); then
-        overall_status=2
+    if (( status == INFRA_EXIT_STATUS )); then
+        overall_status=$INFRA_EXIT_STATUS
         append_error_row "$label" "$port" "$queue" "$rate" "$status"
         sed -n '1,80p' "$out/wrapper.stderr" >&2
         continue
     elif (( status != 0 && status != 1 )); then
-        overall_status=2
+        overall_status=$INFRA_EXIT_STATUS
         append_error_row "$label" "$port" "$queue" "$rate" "$status"
         sed -n '1,80p' "$out/wrapper.stderr" >&2
         continue
@@ -650,7 +651,7 @@ for spec in "${selected_classes[@]}"; do
                 ($sample_verdicts | join(","))
             ] | @tsv' "$summary_json" > "$row_file" 2> "$jq_err"; then
             cat "$row_file" >> "$SUMMARY_TSV"
-            awk -F'\t' '{printf "summary class=%s wrapper_status=%s verdict=%s mean_cov=%s max_cov=%s\n", $1, $5, $6, $7, $8}' "$row_file"
+            awk -F'\t' '{printf "summary class=%s exit_status=%s verdict=%s mean_cov=%s max_cov=%s\n", $1, $5, $6, $7, $8}' "$row_file"
         else
             mark_parse_error
             append_error_row "$label" "$port" "$queue" "$rate" "$status"
@@ -668,7 +669,7 @@ capture_dataplane_snapshot after "$ARTIFACT_ROOT"
 capture_dataplane_journal "$ARTIFACT_ROOT" "$SWEEP_START_ISO"
 write_dataplane_delta "$ARTIFACT_ROOT/dataplane/status-before.json" "$ARTIFACT_ROOT/dataplane/status-after.json" "$ARTIFACT_ROOT/dataplane"
 if (( dataplane_status != 0 )); then
-    overall_status=2
+    overall_status=$INFRA_EXIT_STATUS
 fi
 
 {

@@ -2,6 +2,10 @@
 
 ## 2026-05-14
 
+- **Timestamp**: 2026-05-14T19:33:03Z
+  - **Action**: PR #1308 round-2 review follow-up — added explicit equal-flow scrape framing tests for nested begin and end-without-begin paths, added the missing `BindingCountersSnapshot` round-trip pin for `tx_shared_recycle_unknown_slot_drops`, applied `gofmt` to `protocol.go`, and renamed sweep progress output from `wrapper_status` to `exit_status` with a named infrastructure-exit constant.
+  - **File(s)**: `test/incus/fairness_multi_sample_test.py`, `test/incus/fairness-cos-class-sweep.sh`, `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/protocol_test.go`, `_Log.md`
+
 - **Timestamp**: 2026-05-14T19:19:32Z
   - **Action**: PR #1308 round-1 review follow-up — made equal-flow capture reduction fail closed on SIGTERM-truncated marked scrapes and non-integer active-worker counts, and made sweep summary rows report infrastructure exit status `2` when equal-flow capture fails after the wrapper succeeds.
   - **File(s)**: `test/incus/fairness_equal_flow_capture.py`, `test/incus/fairness-cos-class-sweep.sh`, `test/incus/fairness_multi_sample_test.py`, `docs/fairness-regimes.md`, `docs/per-5-tuple/state.md`, `_Log.md`
