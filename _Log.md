@@ -2,6 +2,22 @@
 
 ## 2026-05-14
 
+- **Timestamp**: 2026-05-14T17:53:10Z
+  - **Action**: PR #1305 round-3 review follow-up — extended artifact-warning wording to the equal-flow capped-bps, worker-cap-bps, and throughput-loss-ratio Prometheus help strings.
+  - **File(s)**: `pkg/api/metrics.go`, `_Log.md`
+
+- **Timestamp**: 2026-05-14T17:38:10Z
+  - **Action**: PR #1305 round-2 review follow-up — made the out-of-range worker test assert directly against `bytesByWorker` so the worker-delta cap is independently covered, and added artifact warnings to the equal-flow target/suppression metric help strings.
+  - **File(s)**: `pkg/dataplane/userspace/fairness_throughput_test.go`, `pkg/api/metrics.go`, `_Log.md`
+
+- **Timestamp**: 2026-05-14T16:49:39Z
+  - **Action**: PR #1305 review follow-up — bounded equal-flow estimator worker IDs with the existing fairness RSS worker-slot cap, sharpened Prometheus help strings, and added validity boundary tests for single-worker, unsampled, zero-window, and out-of-range-worker cases.
+  - **File(s)**: `pkg/dataplane/userspace/fairness_throughput.go`, `pkg/dataplane/userspace/fairness_throughput_test.go`, `pkg/api/metrics.go`, `docs/pr/1304-equal-flow-estimator/plan.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-14T14:51:46Z
+  - **Action**: Issue #1304 Phase 0 — add measurement-only equal-flow rate-suppression estimator telemetry for exact CoS queues, document its invariants, and pin estimator math/Prometheus emission tests.
+  - **File(s)**: `pkg/dataplane/userspace/fairness_throughput.go`, `pkg/dataplane/userspace/fairness_throughput_test.go`, `pkg/api/metrics.go`, `pkg/api/metrics_test.go`, `docs/fairness-regimes.md`, `docs/per-5-tuple/state.md`, `docs/pr/1304-equal-flow-estimator/plan.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-14T04:01:00Z
   - **Action**: PR #1301 review follow-up — removed power-of-two UMEM frame-size assumption in memmove fallback bounds calculation by switching to modulo-based in-frame offset math.
   - **File(s)**: `userspace-dp/src/afxdp/frame/mod.rs`, `_Log.md`

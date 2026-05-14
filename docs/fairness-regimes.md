@@ -447,6 +447,41 @@ For production observability, xpf MUST export:
   monotonic count of flows that enter the starved-flow threshold
   (< 1% of mean per-flow throughput), de-duplicated while the flow
   remains in the rolling window.
+- **`xpf_fairness_equal_flow_estimate_valid{ifindex=..., queue_id=...}`**
+  gauge: 1 when the measurement-only equal-flow suppression estimator
+  has enough untruncated source data to model this queue. A valid
+  estimate requires an untruncated flow-worker byte source, an
+  untruncated CoS active-flow source, and at least two active workers
+  with non-zero rolling byte samples.
+- **`xpf_fairness_equal_flow_sampled_active_workers{ifindex=..., queue_id=...}`**
+  gauge: active workers that also have non-zero rolling byte samples in
+  the estimator window.
+- **`xpf_fairness_equal_flow_unsampled_active_workers{ifindex=..., queue_id=...}`**
+  gauge: workers with active flows in the CoS snapshot but no rolling
+  byte samples in the estimator window. Non-zero here means the
+  equal-flow estimate is using a partial traffic sample.
+- **`xpf_fairness_equal_flow_target_per_flow_bps{ifindex=..., queue_id=...}`**
+  gauge: the slowest sampled active worker's observed per-flow bit rate.
+  This is the strict equal-flow target a future non-work-conserving
+  suppressor would use if it chose to trade aggregate throughput for
+  lower absolute per-flow spread.
+- **`xpf_fairness_equal_flow_observed_bps{ifindex=..., queue_id=...}`**,
+  **`xpf_fairness_equal_flow_capped_bps{ifindex=..., queue_id=...}`**,
+  **`xpf_fairness_equal_flow_suppressed_bps{ifindex=..., queue_id=...}`**,
+  and
+  **`xpf_fairness_equal_flow_throughput_loss_ratio{ifindex=..., queue_id=...}`**
+  gauges: measurement-only aggregate model of current throughput,
+  throughput after strict equal-flow suppression, withheld throughput,
+  and withheld/current ratio. These metrics do **not** feed the
+  scheduler and do **not** change the Cstruct pass/fail contract.
+- **`xpf_fairness_equal_flow_worker_observed_bps{ifindex=..., queue_id=..., worker_id=...}`**,
+  **`xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex=..., queue_id=..., worker_id=...}`**,
+  **`xpf_fairness_equal_flow_worker_cap_bps{ifindex=..., queue_id=..., worker_id=...}`**,
+  and
+  **`xpf_fairness_equal_flow_worker_suppressed_bps{ifindex=..., queue_id=..., worker_id=...}`**
+  gauges: per-worker breakdown of the same hypothetical cap. These are
+  intended to answer "which worker would we slow, by how much?" before
+  any enforcement mode is introduced.
 - **`xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id=...}`**
   counter: cumulative v8 CoS queue-lease acquire calls made by the
   worker. Use `rate()` over the same scrape window as worker TX
@@ -483,13 +518,18 @@ flat.
 The RSS-structure gauges above are exported from the production
 Prometheus collector. The rolling throughput metrics
 (`xpf_fairness_saturated`, `xpf_fairness_observed_cov`, and
-`xpf_fairness_starved_flows`) are derived from worker-owned
-flow-cache byte counters surfaced through the bounded flow-worker
-status snapshot. The daemon keeps the 30-second window in collector
-state and advances the wall-clock window on every healthy scrape, even
-when no flow byte counter moved. Truncated flow-worker snapshots reset
-the runtime window and suppress metric emission rather than reporting
-a false-healthy queue from stale samples.
+`xpf_fairness_starved_flows`) and the #1304 equal-flow estimator are
+derived from worker-owned flow-cache byte counters surfaced through the
+bounded flow-worker status snapshot. The daemon keeps the 30-second
+window in collector state and advances the wall-clock window on every
+healthy scrape, even when no flow byte counter moved. Truncated
+flow-worker snapshots reset the runtime window and suppress metric
+emission rather than reporting a false-healthy queue from stale samples.
+Truncated CoS active-flow snapshots suppress only the equal-flow
+estimator because the estimator needs both per-worker byte rates and
+per-worker active-flow counts. The estimator is advisory telemetry for
+future rate-suppression work; the dataplane remains work-conserving
+unless a later PR explicitly wires an enforcement mode.
 
 ## Steady-state measurement window
 

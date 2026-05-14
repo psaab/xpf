@@ -243,8 +243,200 @@ func TestFairnessThroughputWindowPrunesOldSamples(t *testing.T) {
 	}
 }
 
+func TestFairnessThroughputWindowEqualFlowEstimate(t *testing.T) {
+	window := NewFairnessThroughputWindow(30 * time.Second)
+	now := time.Unix(100, 0)
+	queueID := uint8(4)
+	status := throughputStatus(queueID, 0, 0)
+	status.CoSActiveFlowCounts = []CoSActiveFlowCountStatus{
+		{Ifindex: 80, QueueID: queueID, WorkerID: 0, ActiveFlowCount: 3},
+		{Ifindex: 80, QueueID: queueID, WorkerID: 1, ActiveFlowCount: 1},
+	}
+
+	window.Update(now, status)
+	status.FlowWorkerMap[0].ObservedBytes = 12_000
+	status.FlowWorkerMap[1].ObservedBytes = 8_000
+	got := window.Update(now.Add(10*time.Second), status)
+	if len(got) != 1 {
+		t.Fatalf("second update produced %d summaries, want 1", len(got))
+	}
+	estimate := got[0].EqualFlowEstimate
+	if !estimate.Valid {
+		t.Fatalf("EqualFlowEstimate.Valid = false, want true: %+v", estimate)
+	}
+	if estimate.ActiveWorkers != 2 || estimate.SampledActiveWorkers != 2 || estimate.UnsampledActiveWorkers != 0 {
+		t.Fatalf("worker counts = active %d sampled %d unsampled %d, want 2/2/0",
+			estimate.ActiveWorkers, estimate.SampledActiveWorkers, estimate.UnsampledActiveWorkers)
+	}
+	if math.Abs(estimate.TargetPerFlowBPS-3_200) > 0.0001 {
+		t.Fatalf("TargetPerFlowBPS = %.3f, want 3200", estimate.TargetPerFlowBPS)
+	}
+	if math.Abs(estimate.ObservedBPS-16_000) > 0.0001 {
+		t.Fatalf("ObservedBPS = %.3f, want 16000", estimate.ObservedBPS)
+	}
+	if math.Abs(estimate.CappedBPS-12_800) > 0.0001 {
+		t.Fatalf("CappedBPS = %.3f, want 12800", estimate.CappedBPS)
+	}
+	if math.Abs(estimate.SuppressedBPS-3_200) > 0.0001 {
+		t.Fatalf("SuppressedBPS = %.3f, want 3200", estimate.SuppressedBPS)
+	}
+	if math.Abs(estimate.ThroughputLossRatio-0.2) > 0.0001 {
+		t.Fatalf("ThroughputLossRatio = %.6f, want 0.2", estimate.ThroughputLossRatio)
+	}
+	if got := estimate.Workers[0].CapBPS; math.Abs(got-9_600) > 0.0001 {
+		t.Fatalf("worker 0 CapBPS = %.3f, want 9600", got)
+	}
+	if got := estimate.Workers[1].CapBPS; math.Abs(got-3_200) > 0.0001 {
+		t.Fatalf("worker 1 CapBPS = %.3f, want 3200", got)
+	}
+	if got := estimate.Workers[1].SuppressedBPS; math.Abs(got-3_200) > 0.0001 {
+		t.Fatalf("worker 1 SuppressedBPS = %.3f, want 3200", got)
+	}
+}
+
+func TestFairnessThroughputWindowEqualFlowEstimateRequiresUntruncatedActiveCounts(t *testing.T) {
+	window := NewFairnessThroughputWindow(30 * time.Second)
+	now := time.Unix(100, 0)
+	queueID := uint8(4)
+	status := throughputStatus(queueID, 0, 0)
+
+	window.Update(now, status)
+	status.FlowWorkerMap[0].ObservedBytes = 12_000
+	status.FlowWorkerMap[1].ObservedBytes = 8_000
+	status.CoSActiveFlowCountsTruncated = true
+	got := window.Update(now.Add(10*time.Second), status)
+	if len(got) != 1 {
+		t.Fatalf("second update produced %d summaries, want 1", len(got))
+	}
+	if got[0].EqualFlowEstimate.Valid {
+		t.Fatalf("EqualFlowEstimate.Valid = true with truncated CoS active-flow counts: %+v", got[0].EqualFlowEstimate)
+	}
+	if got[0].EqualFlowEstimate.ActiveWorkers != 0 {
+		t.Fatalf("ActiveWorkers = %d with truncated CoS active-flow counts, want 0", got[0].EqualFlowEstimate.ActiveWorkers)
+	}
+}
+
+func TestFairnessThroughputWindowEqualFlowEstimateValidityBoundaries(t *testing.T) {
+	t.Run("single sampled worker is invalid", func(t *testing.T) {
+		window := NewFairnessThroughputWindow(30 * time.Second)
+		now := time.Unix(100, 0)
+		queueID := uint8(4)
+		status := throughputStatus(queueID, 0, 0)
+		status.FlowWorkerMap = status.FlowWorkerMap[:1]
+		status.CoSActiveFlowCounts = []CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: queueID, WorkerID: 0, ActiveFlowCount: 1},
+		}
+
+		window.Update(now, status)
+		status.FlowWorkerMap[0].ObservedBytes = 12_000
+		got := window.Update(now.Add(10*time.Second), status)
+		if len(got) != 1 {
+			t.Fatalf("second update produced %d summaries, want 1", len(got))
+		}
+		estimate := got[0].EqualFlowEstimate
+		if estimate.Valid {
+			t.Fatalf("EqualFlowEstimate.Valid = true for single sampled worker: %+v", estimate)
+		}
+		if estimate.ActiveWorkers != 1 || estimate.SampledActiveWorkers != 1 {
+			t.Fatalf("worker counts = active %d sampled %d, want 1/1", estimate.ActiveWorkers, estimate.SampledActiveWorkers)
+		}
+	})
+
+	t.Run("all active workers unsampled is invalid", func(t *testing.T) {
+		window := NewFairnessThroughputWindow(30 * time.Second)
+		now := time.Unix(100, 0)
+		queueID := uint8(4)
+		status := throughputStatus(queueID, 0, 0)
+		status.Workers = 4
+		status.CoSActiveFlowCounts = []CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: queueID, WorkerID: 2, ActiveFlowCount: 1},
+			{Ifindex: 80, QueueID: queueID, WorkerID: 3, ActiveFlowCount: 1},
+		}
+
+		window.Update(now, status)
+		status.FlowWorkerMap[0].ObservedBytes = 12_000
+		status.FlowWorkerMap[1].ObservedBytes = 8_000
+		got := window.Update(now.Add(10*time.Second), status)
+		if len(got) != 1 {
+			t.Fatalf("second update produced %d summaries, want 1", len(got))
+		}
+		estimate := got[0].EqualFlowEstimate
+		if estimate.Valid {
+			t.Fatalf("EqualFlowEstimate.Valid = true when all active workers are unsampled: %+v", estimate)
+		}
+		if estimate.ActiveWorkers != 2 || estimate.SampledActiveWorkers != 0 || estimate.UnsampledActiveWorkers != 2 {
+			t.Fatalf("worker counts = active %d sampled %d unsampled %d, want 2/0/2",
+				estimate.ActiveWorkers, estimate.SampledActiveWorkers, estimate.UnsampledActiveWorkers)
+		}
+	})
+
+	t.Run("zero window seconds is invalid", func(t *testing.T) {
+		q := &fairnessQueueThroughputWindow{
+			bytesByFlow: map[fairnessFlowThroughputKey]uint64{
+				{queue: fairnessQueueKey{ifindex: 80, queueID: 4}, tuple: FlowTupleStatus{AddrFamily: 2, Protocol: 6, SrcIP: "10.0.0.1", DstIP: "198.51.100.1", SrcPort: 10001, DstPort: 5201}}: 12_000,
+			},
+			bytesByWorker: map[uint32]uint64{0: 12_000, 1: 8_000},
+			starvedFlows:  make(map[fairnessFlowThroughputKey]struct{}),
+		}
+		summary := q.summary(fairnessQueueKey{ifindex: 80, queueID: 4}, 0, map[uint32]uint32{0: 1, 1: 1})
+		if summary.WindowSeconds != 0 {
+			t.Fatalf("WindowSeconds = %.3f, want 0", summary.WindowSeconds)
+		}
+		if summary.EqualFlowEstimate.Valid {
+			t.Fatalf("EqualFlowEstimate.Valid = true with zero window seconds: %+v", summary.EqualFlowEstimate)
+		}
+	})
+}
+
+func TestFairnessThroughputWindowEqualFlowEstimateCapsWorkerIDs(t *testing.T) {
+	window := NewFairnessThroughputWindow(30 * time.Second)
+	now := time.Unix(100, 0)
+	queueID := uint8(4)
+	status := throughputStatus(queueID, 0, 0)
+	status.Workers = 2
+	status.FlowWorkerMap[1].WorkerID = 4_096
+	status.CoSActiveFlowCounts = append(status.CoSActiveFlowCounts,
+		CoSActiveFlowCountStatus{Ifindex: 80, QueueID: queueID, WorkerID: 4_096, ActiveFlowCount: 1},
+	)
+
+	window.Update(now, status)
+	status.FlowWorkerMap[0].ObservedBytes = 12_000
+	status.FlowWorkerMap[1].ObservedBytes = 8_000
+	got := window.Update(now.Add(10*time.Second), status)
+	if len(got) != 1 {
+		t.Fatalf("second update produced %d summaries, want 1", len(got))
+	}
+	queueState := window.queues[fairnessQueueKey{ifindex: 80, queueID: queueID}]
+	if queueState == nil {
+		t.Fatalf("queue state missing after update")
+	}
+	if got := queueState.bytesByWorker[0]; got != 12_000 {
+		t.Fatalf("bytesByWorker[0] = %d, want 12000", got)
+	}
+	if _, ok := queueState.bytesByWorker[4_096]; ok {
+		t.Fatalf("out-of-range worker ID leaked into bytesByWorker: %+v", queueState.bytesByWorker)
+	}
+	if len(queueState.bytesByWorker) != 1 {
+		t.Fatalf("bytesByWorker length = %d, want 1: %+v", len(queueState.bytesByWorker), queueState.bytesByWorker)
+	}
+	estimate := got[0].EqualFlowEstimate
+	if estimate.Valid {
+		t.Fatalf("EqualFlowEstimate.Valid = true after out-of-range worker was ignored: %+v", estimate)
+	}
+	if estimate.ActiveWorkers != 2 || estimate.SampledActiveWorkers != 1 || estimate.UnsampledActiveWorkers != 1 {
+		t.Fatalf("worker counts = active %d sampled %d unsampled %d, want 2/1/1",
+			estimate.ActiveWorkers, estimate.SampledActiveWorkers, estimate.UnsampledActiveWorkers)
+	}
+	for _, worker := range estimate.Workers {
+		if worker.WorkerID >= 2 {
+			t.Fatalf("out-of-range worker ID leaked into estimate: %+v", estimate.Workers)
+		}
+	}
+}
+
 func throughputStatus(queueID uint8, firstBytes uint64, secondBytes uint64) ProcessStatus {
 	return ProcessStatus{
+		Workers: 2,
 		CoSInterfaces: []CoSInterfaceStatus{{
 			Ifindex: 80,
 			Queues: []CoSQueueStatus{{
@@ -256,6 +448,7 @@ func throughputStatus(queueID uint8, firstBytes uint64, secondBytes uint64) Proc
 			{
 				EgressIfindex: 80,
 				CoSQueueID:    &queueID,
+				WorkerID:      0,
 				ForwardWireKey: FlowTupleStatus{
 					AddrFamily: 2,
 					Protocol:   6,
@@ -269,6 +462,7 @@ func throughputStatus(queueID uint8, firstBytes uint64, secondBytes uint64) Proc
 			{
 				EgressIfindex: 80,
 				CoSQueueID:    &queueID,
+				WorkerID:      1,
 				ForwardWireKey: FlowTupleStatus{
 					AddrFamily: 2,
 					Protocol:   6,
@@ -279,6 +473,10 @@ func throughputStatus(queueID uint8, firstBytes uint64, secondBytes uint64) Proc
 				},
 				ObservedBytes: secondBytes,
 			},
+		},
+		CoSActiveFlowCounts: []CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: queueID, WorkerID: 0, ActiveFlowCount: 1},
+			{Ifindex: 80, QueueID: queueID, WorkerID: 1, ActiveFlowCount: 1},
 		},
 	}
 }
