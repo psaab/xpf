@@ -90,11 +90,12 @@ pub(super) fn preferred_bind_strategy(binding: &BindingStatus) -> AfXdpBindStrat
 /// Open the AF_XDP socket/ring handles for one binding.
 ///
 /// # Safety
-/// For private UMEM bindings, the returned `DeviceQueue` borrows
-/// `worker_umem`'s fill/completion ring structs. The caller must store/drop
-/// the returned XSK handles before `worker_umem`, so `xsk_socket__delete`
-/// runs while the UMEM ring structs are still live and before
-/// `xsk_umem__delete`.
+/// The returned XSK handles must be stored/dropped before `worker_umem`, so
+/// `xsk_socket__delete` runs while the UMEM state is still live and before
+/// `xsk_umem__delete`. Private UMEM sockets borrow `worker_umem`'s
+/// fill/completion ring structs directly. Shared UMEM sockets own
+/// socket-local fill/completion rings but still depend on the live shared UMEM
+/// pointer passed through `worker_umem`.
 pub(super) unsafe fn open_binding_worker_rings(
     worker_umem: &mut WorkerUmem,
     info: &IfInfo,

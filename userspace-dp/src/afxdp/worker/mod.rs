@@ -282,8 +282,8 @@ impl BindingWorker {
         }
         let info = ifinfo_from_binding(binding)?;
         // Safety: `BindingWorker` declares `xsk` before `umem`, so Rust drops
-        // the socket/ring handles before the UMEM. That satisfies the private
-        // UMEM ring-borrow contract enforced by `open_binding_worker_rings`.
+        // the socket/ring handles before the UMEM. That satisfies the UMEM
+        // lifetime/drop-order contract enforced by `open_binding_worker_rings`.
         let (user, rx, tx, bind_mode, bind_flags, actual_bind_strategy, device) = unsafe {
             open_binding_worker_rings(
                 &mut worker_umem,
