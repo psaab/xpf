@@ -54,6 +54,7 @@ pub(super) fn retry_pending_neigh(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     now_ns: u64,
     area: &MmapArea,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     if binding.pending_neigh.is_empty() {
         return;
@@ -157,7 +158,7 @@ pub(super) fn retry_pending_neigh(
         decision.resolution.neighbor_mac = Some(neighbor_mac);
         decision.resolution.disposition = ForwardingDisposition::ForwardCandidate;
         let expected_ports = None;
-        let Some(frame_len) = rewrite_forwarded_frame_in_place(
+        let Some(rewrite_result) = rewrite_forwarded_frame_in_place(
             &*area,
             pkt.desc,
             pkt.meta,
@@ -189,9 +190,13 @@ pub(super) fn retry_pending_neigh(
             None,
         );
         let req = PreparedTxRequest {
-            offset: pkt.desc.addr,
-            len: frame_len,
-            recycle: PreparedTxRecycle::FillOnSlot(ingress_slot),
+            offset: rewrite_result.offset,
+            len: rewrite_result.len,
+            recycle: PreparedTxRecycle::fill_on_slot(
+                ingress_slot,
+                rewrite_result.offset,
+                pkt.desc.addr,
+            ),
             expected_ports: None,
             expected_addr_family: pkt.meta.addr_family,
             expected_protocol: pkt.meta.protocol,
@@ -202,15 +207,24 @@ pub(super) fn retry_pending_neigh(
         };
         if target_idx == binding_index {
             binding.tx_pipeline.pending_tx_prepared.push_back(req);
+            binding.tx_counters.pending_in_place_tx_packets += 1;
+            binding
+                .tx_counters
+                .record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
         } else if let Some(target) =
             binding_by_index_mut(left, binding_index, binding, right, target_idx)
         {
             target.tx_pipeline.pending_tx_prepared.push_back(req);
-            bound_pending_tx_prepared(target);
+            bound_pending_tx_prepared(target, Some(shared_recycles));
+            target.tx_counters.pending_in_place_tx_packets += 1;
+            target
+                .tx_counters
+                .record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
         } else {
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
         }
     }
+    apply_shared_recycles(left, binding_index, binding, right, binding_lookup, shared_recycles);
 }
 
 pub(super) fn learn_dynamic_neighbor_from_packet(

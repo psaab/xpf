@@ -20,7 +20,7 @@ writer to synchronize against.
 | `rings.rs` | XSK kernel-ring discipline: completion drain, fill submit, RX/TX kernel wake. |
 | `stats.rs` | Per-frame counters and submit-latency histogram bucketing. The sidecar `&mut [u64]` is non-atomic since it's owner-only. |
 | `tcp_segmentation.rs` | TCP segmentation for forwarded frames (extracted in PR #1199). `#[cold]` — segmentation is the slow path; line-rate flows don't enter it. |
-| `transmit.rs` | XSK TX-ring submit + per-frame recycle. Owns `transmit_batch`, `transmit_prepared_queue`, and the `TxError` enum. |
+| `transmit.rs` | XSK TX-ring submit + per-frame recycle. Owns `transmit_batch`, `transmit_prepared_queue`, shared-UMEM-aware prepared recycle helpers, and the `TxError` enum. |
 | `test_support.rs` | Test helpers for the per-file unit tests. |
 
 ## Where it sits
@@ -34,8 +34,19 @@ writer to synchronize against.
 - Single-writer per binding: every TX path here runs on the binding's
   owner worker. Cross-binding redirect (the only legitimate
   cross-worker writer) lives in `cos/cross_binding.rs` and uses an
-  MPSC inbox + the back-edge to `tx::recycle_prepared_immediately`
-  to release UMEM frames after copy.
+  MPSC inbox plus slot-routed prepared recycle records to release
+  source UMEM frames after copy.
+- Prepared-frame discard paths are not local by default in shared-UMEM
+  mode. Any path that drops, demotes, bounds, cancels, or rejects a
+  `PreparedTxRequest` must call the `_with_shared` recycle helper while
+  carrying the worker's shared recycle accumulator, then route the
+  `(slot, offset)` records back through the shared slot-resolution helper.
+  The split-slice path used while holding the ingress binding and the
+  all-bindings cleanup path must share this resolver so stale lookup entries
+  are handled identically. Unknown recycle slots must fail closed and
+  increment `tx_errors` on the worker status surface with bounded one-line
+  logging per drain; never push a foreign offset into an arbitrary binding's
+  fill ring.
 - `Ordering::Relaxed` is intentional and correct given the
   single-writer invariant. Don't promote without proving a second
   writer exists.

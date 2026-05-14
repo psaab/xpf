@@ -1392,10 +1392,10 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 			"workers":        {args: 1, desc: "Worker thread count", children: nil},
 			"ring-entries":   {args: 1, desc: "AF_XDP ring entries per queue", children: nil},
 			"poll-mode":      {args: 1, desc: "Worker poll mode (busy-poll or interrupt)", children: nil},
-			"shared-umem": {desc: "AF_XDP shared-UMEM experimental gate", children: map[string]*schemaNode{
-				"mode":                 {args: 1, desc: "Shared UMEM mode (off|same-device-debug|cross-nic)", children: nil},
-				"interface":            {args: 1, multi: true, desc: "Participating Linux interface", children: nil},
-				"phase0-artifact-file": {args: 1, desc: "Machine-readable Phase 0 validation artifact", children: nil},
+			"shared-umem": {desc: "AF_XDP shared-UMEM policy override", children: map[string]*schemaNode{
+				"mode":                 {args: 1, desc: "Shared UMEM mode override (auto|off|same-device-debug|cross-nic)", children: nil},
+				"interface":            {args: 1, multi: true, desc: "Optional participating Linux interface filter", children: nil},
+				"phase0-artifact-file": {args: 1, desc: "Optional machine-readable Phase 0 audit artifact", children: nil},
 				"artifact-file":        {args: 1, desc: "Alias for phase0-artifact-file", children: nil},
 			}},
 			"rss-indirection":     {args: 1, desc: "mlx5 RSS indirection reshaping (enable|disable)", children: nil},

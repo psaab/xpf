@@ -205,6 +205,14 @@ pub(super) struct FlowWorkerMapSnapshot {
     truncated: bool,
 }
 
+#[derive(Clone, Default)]
+pub(super) struct SharedUmemLiveStatus {
+    mode: String,
+    group: String,
+    socket_role: String,
+    disabled_reason: String,
+}
+
 /// Raw ring state: (rxP, rxC, frP, frC, txP, txC, crP, crC)
 pub(in crate::afxdp) struct BindingLiveState {
     pub(super) bound: AtomicBool,
@@ -214,6 +222,7 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) socket_ifindex: AtomicI32,
     pub(super) socket_queue_id: AtomicU32,
     pub(super) socket_bind_flags: AtomicU32,
+    pub(super) shared_umem_status: Mutex<SharedUmemLiveStatus>,
     pub(super) rx_packets: AtomicU64,
     pub(super) rx_bytes: AtomicU64,
     pub(super) rx_batches: AtomicU64,
@@ -367,6 +376,10 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) direct_tx_packets: AtomicU64,
     pub(super) copy_tx_packets: AtomicU64,
     pub(super) in_place_tx_packets: AtomicU64,
+    pub(super) in_place_vlan_push_desc_packets: AtomicU64,
+    pub(super) in_place_vlan_pop_desc_packets: AtomicU64,
+    pub(super) in_place_vlan_push_no_headroom_packets: AtomicU64,
+    pub(super) in_place_l2_memmove_fallback_packets: AtomicU64,
     pub(super) direct_tx_no_frame_fallback_packets: AtomicU64,
     pub(super) direct_tx_build_fallback_packets: AtomicU64,
     pub(super) direct_tx_disallowed_fallback_packets: AtomicU64,
@@ -461,6 +474,7 @@ impl BindingLiveState {
             socket_ifindex: AtomicI32::new(0),
             socket_queue_id: AtomicU32::new(0),
             socket_bind_flags: AtomicU32::new(0),
+            shared_umem_status: Mutex::new(SharedUmemLiveStatus::default()),
             rx_packets: AtomicU64::new(0),
             rx_bytes: AtomicU64::new(0),
             rx_batches: AtomicU64::new(0),
@@ -530,6 +544,10 @@ impl BindingLiveState {
             direct_tx_packets: AtomicU64::new(0),
             copy_tx_packets: AtomicU64::new(0),
             in_place_tx_packets: AtomicU64::new(0),
+            in_place_vlan_push_desc_packets: AtomicU64::new(0),
+            in_place_vlan_pop_desc_packets: AtomicU64::new(0),
+            in_place_vlan_push_no_headroom_packets: AtomicU64::new(0),
+            in_place_l2_memmove_fallback_packets: AtomicU64::new(0),
             direct_tx_no_frame_fallback_packets: AtomicU64::new(0),
             direct_tx_build_fallback_packets: AtomicU64::new(0),
             direct_tx_disallowed_fallback_packets: AtomicU64::new(0),
@@ -597,6 +615,23 @@ impl BindingLiveState {
         self.socket_ifindex.store(ifindex, Ordering::Relaxed);
         self.socket_queue_id.store(queue_id, Ordering::Relaxed);
         self.socket_bind_flags.store(flags, Ordering::Relaxed);
+    }
+
+    pub(super) fn set_shared_umem_status(
+        &self,
+        mode: String,
+        group: String,
+        socket_role: String,
+        disabled_reason: String,
+    ) {
+        if let Ok(mut status) = self.shared_umem_status.lock() {
+            *status = SharedUmemLiveStatus {
+                mode,
+                group,
+                socket_role,
+                disabled_reason,
+            };
+        }
     }
 
     pub(super) fn set_xsk_registered(&self, value: bool) {
@@ -716,6 +751,11 @@ impl BindingLiveState {
             .lock()
             .map(|pending| pending.len() as u64)
             .unwrap_or(0);
+        let shared_umem_status = self
+            .shared_umem_status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default();
         BindingLiveSnapshot {
             bound: self.bound.load(Ordering::Relaxed),
             xsk_registered: self.xsk_registered.load(Ordering::Relaxed),
@@ -727,6 +767,10 @@ impl BindingLiveState {
             socket_ifindex: self.socket_ifindex.load(Ordering::Relaxed),
             socket_queue_id: self.socket_queue_id.load(Ordering::Relaxed),
             socket_bind_flags: self.socket_bind_flags.load(Ordering::Relaxed),
+            shared_umem_mode: shared_umem_status.mode,
+            shared_umem_group: shared_umem_status.group,
+            shared_umem_socket_role: shared_umem_status.socket_role,
+            shared_umem_disabled_reason: shared_umem_status.disabled_reason,
             rx_packets: self.rx_packets.load(Ordering::Relaxed),
             rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
             rx_batches: self.rx_batches.load(Ordering::Relaxed),
@@ -821,6 +865,18 @@ impl BindingLiveState {
             direct_tx_packets: self.direct_tx_packets.load(Ordering::Relaxed),
             copy_tx_packets: self.copy_tx_packets.load(Ordering::Relaxed),
             in_place_tx_packets: self.in_place_tx_packets.load(Ordering::Relaxed),
+            in_place_vlan_push_desc_packets: self
+                .in_place_vlan_push_desc_packets
+                .load(Ordering::Relaxed),
+            in_place_vlan_pop_desc_packets: self
+                .in_place_vlan_pop_desc_packets
+                .load(Ordering::Relaxed),
+            in_place_vlan_push_no_headroom_packets: self
+                .in_place_vlan_push_no_headroom_packets
+                .load(Ordering::Relaxed),
+            in_place_l2_memmove_fallback_packets: self
+                .in_place_l2_memmove_fallback_packets
+                .load(Ordering::Relaxed),
             direct_tx_no_frame_fallback_packets: self
                 .direct_tx_no_frame_fallback_packets
                 .load(Ordering::Relaxed),
@@ -1139,6 +1195,53 @@ fn publish_binding_debug_state(binding: &mut BindingWorker) {
             Ordering::Relaxed,
         );
         binding.tx_counters.pending_in_place_tx_packets = 0;
+    }
+    if binding.tx_counters.pending_in_place_vlan_push_desc_packets != 0 {
+        binding.live.in_place_vlan_push_desc_packets.fetch_add(
+            binding.tx_counters.pending_in_place_vlan_push_desc_packets,
+            Ordering::Relaxed,
+        );
+        binding.tx_counters.pending_in_place_vlan_push_desc_packets = 0;
+    }
+    if binding.tx_counters.pending_in_place_vlan_pop_desc_packets != 0 {
+        binding.live.in_place_vlan_pop_desc_packets.fetch_add(
+            binding.tx_counters.pending_in_place_vlan_pop_desc_packets,
+            Ordering::Relaxed,
+        );
+        binding.tx_counters.pending_in_place_vlan_pop_desc_packets = 0;
+    }
+    if binding
+        .tx_counters
+        .pending_in_place_vlan_push_no_headroom_packets
+        != 0
+    {
+        binding
+            .live
+            .in_place_vlan_push_no_headroom_packets
+            .fetch_add(
+                binding
+                    .tx_counters
+                    .pending_in_place_vlan_push_no_headroom_packets,
+                Ordering::Relaxed,
+            );
+        binding
+            .tx_counters
+            .pending_in_place_vlan_push_no_headroom_packets = 0;
+    }
+    if binding
+        .tx_counters
+        .pending_in_place_l2_memmove_fallback_packets
+        != 0
+    {
+        binding.live.in_place_l2_memmove_fallback_packets.fetch_add(
+            binding
+                .tx_counters
+                .pending_in_place_l2_memmove_fallback_packets,
+            Ordering::Relaxed,
+        );
+        binding
+            .tx_counters
+            .pending_in_place_l2_memmove_fallback_packets = 0;
     }
     if binding
         .tx_counters

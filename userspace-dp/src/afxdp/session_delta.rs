@@ -11,15 +11,26 @@
 
 use super::*;
 
-pub(super) fn purge_queued_flows_for_closed_deltas(bindings: &mut [BindingWorker], deltas: &[SessionDelta]) {
+pub(super) fn purge_queued_flows_for_closed_deltas(
+    bindings: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    shared_recycles: &mut Vec<(u32, u64)>,
+    deltas: &[SessionDelta],
+) {
     for delta in deltas {
         if delta.kind != SessionDeltaKind::Close {
             continue;
         }
         let reverse_key = reverse_session_key(&delta.key, delta.decision.nat);
         for binding in bindings.iter_mut() {
-            cancel_queued_flow_on_binding(binding, &delta.key, &reverse_key);
+            cancel_queued_flow_on_binding(
+                binding,
+                &delta.key,
+                &reverse_key,
+                Some(shared_recycles),
+            );
         }
+        apply_shared_recycles_to_bindings(bindings, binding_lookup, shared_recycles);
     }
 }
 

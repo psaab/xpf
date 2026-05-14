@@ -52,7 +52,10 @@ Interpretation rule:
 Current expected hotspot categories:
 - `xpf_userspace_dp::afxdp::poll_binding`
 - `xpf_userspace_dp::afxdp::drain_pending_tx`
-- `xpf_userspace_dp::afxdp::build_forwarded_frame_into`
+- `xpf_userspace_dp::afxdp::build_forwarded_frame_into` only when the run is
+  private-UMEM direct TX or an explicit copy fallback. With cross-NIC
+  shared-UMEM enabled, the normal LAN/WAN path should instead increment
+  `In-place TX packets` and keep this builder out of the top profile.
 - `xpf_userspace_dp::afxdp::apply_nat_ipv6`
 - kernel AF_XDP copy or queue work such as `mlx5e_xsk_*`
 - remaining lookup cost from route, neighbor, or session structures such as B-tree search
@@ -60,6 +63,9 @@ Current expected hotspot categories:
 When interpreting the saved profile:
 
 - compare IPv4 and IPv6 on the same active userspace node
+- record `Direct TX`, `Copy-path TX`, `In-place TX`, and the in-place VLAN
+  descriptor counters before and after the run; perf without those counters
+  cannot distinguish private-UMEM direct TX from copy-free shared-UMEM TX
 - treat forwarding failures or connect-then-stall runs as correctness bugs first,
   not as throughput numbers
 - use the interval summary in `summary.md` to distinguish:

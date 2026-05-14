@@ -30,7 +30,10 @@ pub(in crate::afxdp) fn bound_pending_tx_local(binding: &mut BindingWorker) {
     }
 }
 
-pub(in crate::afxdp) fn bound_pending_tx_prepared(binding: &mut BindingWorker) {
+pub(in crate::afxdp) fn bound_pending_tx_prepared(
+    binding: &mut BindingWorker,
+    mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
+) {
     let limit = binding.tx_pipeline.max_pending_tx;
     while binding.tx_pipeline.pending_tx_prepared.len() > limit {
         if let Some(req) = binding.tx_pipeline.pending_tx_prepared.pop_front() {
@@ -38,7 +41,11 @@ pub(in crate::afxdp) fn bound_pending_tx_prepared(binding: &mut BindingWorker) {
             // semantic bucket as `bound_pending_tx_local` — internal
             // prepared/local distinction is irrelevant to operators.
             binding.telemetry.dbg_bound_pending_overflow += 1;
-            recycle_prepared_immediately(binding, &req);
+            recycle_prepared_immediately_with_shared(
+                binding,
+                &req,
+                shared_recycles.as_deref_mut(),
+            );
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: same drop category — prepared vs local FIFO is an
             // internal distinction irrelevant to the operator.
@@ -89,6 +96,7 @@ pub(in crate::afxdp) fn drain_pending_tx(
         now_ns,
         worker_id,
         worker_commands_by_id,
+        shared_recycles,
     );
     // Original #751 drain loop: service shaped queues until noop.
     // Each shaped drain attributes latency + invocations to the
@@ -152,6 +160,7 @@ pub(in crate::afxdp) fn drain_pending_tx(
                 worker_id,
                 worker_commands_by_id,
                 false,
+                shared_recycles,
             );
             let mut serviced_in_inner = false;
             loop {
@@ -189,10 +198,10 @@ pub(in crate::afxdp) fn drain_pending_tx(
     // CoS is configured (no possible cos_queue_id.is_some() on
     // any item) — keeps the non-CoS hot path allocation-free.
     if !forwarding.cos.interfaces.is_empty() {
-        drop_cos_bound_prepared_leftovers(binding);
+        drop_cos_bound_prepared_leftovers(binding, shared_recycles);
     }
     while !binding.tx_pipeline.pending_tx_prepared.is_empty() {
-        match transmit_prepared_batch(binding, now_ns) {
+        match transmit_prepared_batch(binding, now_ns, shared_recycles) {
             Ok((packets, bytes)) => {
                 if packets == 0 {
                     break;
@@ -242,7 +251,13 @@ pub(in crate::afxdp) fn drain_pending_tx(
     // configured at all — saves the O(n) scan + reallocation on
     // the non-CoS hot path.
     if !forwarding.cos.interfaces.is_empty() {
-        drop_cos_bound_local_leftovers(binding, forwarding, now_ns, &mut pending);
+        drop_cos_bound_local_leftovers(
+            binding,
+            forwarding,
+            now_ns,
+            &mut pending,
+            shared_recycles,
+        );
     }
     let mut retry = VecDeque::new();
     while let Some(req) = pending.pop_front() {
@@ -307,7 +322,10 @@ pub(in crate::afxdp) fn drain_pending_tx(
 /// counter should be interpreted as a leftover-after-reingest
 /// defense rather than only a narrow redirect-to-owner +
 /// local-enqueue failure.
-fn drop_cos_bound_prepared_leftovers(binding: &mut BindingWorker) {
+fn drop_cos_bound_prepared_leftovers(
+    binding: &mut BindingWorker,
+    shared_recycles: &mut Vec<(u32, u64)>,
+) {
     if binding.tx_pipeline.pending_tx_prepared.is_empty() {
         return;
     }
@@ -333,7 +351,7 @@ fn drop_cos_bound_prepared_leftovers(binding: &mut BindingWorker) {
         if req.cos_queue_id.is_some() {
             dropped = dropped.saturating_add(1);
             dropped_bytes = dropped_bytes.saturating_add(req.len as u64);
-            recycle_prepared_immediately(binding, &req);
+            recycle_prepared_immediately_with_shared(binding, &req, Some(shared_recycles));
         } else {
             binding.tx_pipeline.pending_tx_prepared.push_back(req);
         }
@@ -428,12 +446,19 @@ fn drop_cos_bound_local_leftovers(
     forwarding: &ForwardingState,
     now_ns: u64,
     pending: &mut VecDeque<TxRequest>,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     // Delegate the scan to the pure helper so the mixed-head
     // invariant (Codex review on #784) is unit-testable without
     // constructing a full BindingWorker.
     let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(pending, |req| {
-        match enqueue_local_into_cos(binding, forwarding, req, now_ns) {
+        match enqueue_local_into_cos(
+            binding,
+            forwarding,
+            req,
+            now_ns,
+            Some(&mut *shared_recycles),
+        ) {
             Ok(()) => Ok(()),
             Err(req) => Err(req),
         }
@@ -489,6 +514,7 @@ fn ingest_cos_pending_tx(
     now_ns: u64,
     worker_id: u32,
     worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     ingest_cos_pending_tx_with_provenance(
         binding,
@@ -497,6 +523,7 @@ fn ingest_cos_pending_tx(
         worker_id,
         worker_commands_by_id,
         true,
+        shared_recycles,
     );
 }
 
@@ -520,6 +547,7 @@ fn ingest_cos_pending_tx_with_provenance(
     worker_id: u32,
     worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
     count_pps: bool,
+    shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     if forwarding.cos.interfaces.is_empty() {
         return;
@@ -533,15 +561,26 @@ fn ingest_cos_pending_tx_with_provenance(
                 req,
                 worker_id,
                 worker_commands_by_id,
+                Some(&mut *shared_recycles),
             ) {
                 Ok(()) => return Ok(()),
                 Err(req) => req,
             };
-            let req = match redirect_prepared_cos_request_to_owner_binding(binding, req) {
+            let req = match redirect_prepared_cos_request_to_owner_binding(
+                binding,
+                req,
+                Some(&mut *shared_recycles),
+            ) {
                 Ok(()) => return Ok(()),
                 Err(req) => req,
             };
-            match enqueue_prepared_into_cos(binding, forwarding, req, now_ns) {
+            match enqueue_prepared_into_cos(
+                binding,
+                forwarding,
+                req,
+                now_ns,
+                Some(&mut *shared_recycles),
+            ) {
                 Ok(()) => Ok(()),
                 Err(req) => Err(req),
             }
@@ -670,7 +709,13 @@ fn ingest_cos_pending_tx_with_provenance(
             None => req,
         };
         // Fallthrough to Step 3 (EnqueueLocal).
-        match enqueue_local_into_cos(binding, forwarding, req, now_ns) {
+        match enqueue_local_into_cos(
+            binding,
+            forwarding,
+            req,
+            now_ns,
+            Some(&mut *shared_recycles),
+        ) {
             Ok(()) => Ok(()),
             Err(req) => Err(req),
         }

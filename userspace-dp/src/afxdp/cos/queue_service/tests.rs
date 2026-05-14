@@ -1136,6 +1136,7 @@ fn release_exact_prepared_scratch_preserves_queue_after_failed_submit() {
         &mut free_tx_frames,
         &mut pending_fill_frames,
         7,
+        &mut Vec::new(),
         u64::MAX,
         u64::MAX,
         None,

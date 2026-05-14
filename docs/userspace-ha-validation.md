@@ -124,24 +124,29 @@ The validator does this in order:
 1. uses the tracked env/config in the repo, not `/tmp`
 2. waits for CLI availability on both firewalls
 3. checks whether the runtime settled into supported userspace forwarding or legacy fallback
-4. forces `cluster-userspace-host` to keep accepting IPv6 RAs (`accept_ra=2`)
-5. verifies an IPv6 default route on `cluster-userspace-host`
-6. if needed, runs repeated `rdisc6 -1 eth0` to force fresh RA convergence
-7. derives the active WAN test interface from the current primary node's route table
-8. runs deterministic TTL-expired probes to:
+4. pins the validation RGs to the preferred node, retrying transient failover
+   precondition failures while userspace XSK liveness propagates into RG
+   readiness
+5. forces `cluster-userspace-host` to keep accepting IPv6 RAs (`accept_ra=2`)
+6. verifies an IPv6 default route on `cluster-userspace-host`
+7. if needed, runs repeated `rdisc6 -1 eth0` to force fresh RA convergence
+8. derives the active WAN test interface from the current primary node's route table
+9. runs deterministic TTL-expired probes to:
    - IPv4 `1.1.1.1`
    - IPv6 `2607:f8b0:4005:814::200e`
    - the validator treats `ping` exit status `1` as expected for these probes
      when the returned output contains the native time-exceeded response
-9. records one-cycle `mtr` reports to those same public IPv4/IPv6 targets
-10. fails if the first hop is unresolved or the destination hop is unresolved
-11. runs one unmeasured warm-up `iperf3` pass for IPv4 and IPv6
-12. runs repeated IPv4 `iperf3` to `172.16.80.200`
-13. runs repeated IPv6 `iperf3` to `2001:559:8585:80::200`
-14. pulls `iperf3 -J` JSON back to the repo host, parses it locally, and fails
+10. records one-cycle `mtr` reports to those same public IPv4/IPv6 targets
+11. fails if the first hop is unresolved; IPv4 also requires the final public
+    destination hop to resolve, while IPv6 records an unresolved final
+    internet hop as a warning after the deterministic IPv6 TTL probe has passed
+12. runs one unmeasured warm-up `iperf3` pass for IPv4 and IPv6
+13. runs repeated IPv4 `iperf3` to `172.16.80.200`
+14. runs repeated IPv6 `iperf3` to `2001:559:8585:80::200`
+15. pulls `iperf3 -J` JSON back to the repo host, parses it locally, and fails
     if throughput cliffs after startup
-15. retries one marginal near-threshold miss once
-16. optionally records `perf` data on the active firewall
+16. retries one marginal near-threshold miss once
+17. optionally records `perf` data on the active firewall
 
 The dedicated RG failover validator now adds two stricter HA gates:
 
@@ -174,10 +179,15 @@ a failover-survivability regression.
 
 Validation target for the active userspace forwarding path:
 
-- IPv4 `iperf3 -P 4 -t 5`: `22-23 Gbps`
-- IPv6 `iperf3 -P 4 -t 5`: `22-23 Gbps`
+- IPv4 `iperf3 -P 6 -t 5`: `22-23 Gbps`
+- IPv6 `iperf3 -P 6 -t 5`: `22-23 Gbps`
 - Retransmits: `0`
 - Sustained transfer: no “fast first second, then collapse to 0 bps” interval pattern
+
+The default `PARALLEL=6` is intentional for the six-worker AF_XDP lab shape:
+the smoke test should cover the worker/RSS set. Use an explicit lower
+`PARALLEL` value when studying low-flow RSS behavior; do not treat a
+worker-underdriven run as the dataplane ceiling.
 
 That is the target, not a guarantee of the current tree state.
 
@@ -215,9 +225,10 @@ The validator also treats traceroute visibility as a standard correctness gate.
 It does not require every internet hop to answer. It does require:
 
 - the firewall hop to answer TTL-expired probes
-- the final destination hop in `mtr` to resolve for both:
-  - `1.1.1.1`
-  - `2607:f8b0:4005:814::200e`
+- the final destination hop in IPv4 `mtr` to resolve for `1.1.1.1`
+- IPv6 `mtr` to have a resolved first hop; an unresolved final public IPv6
+  hop to `2607:f8b0:4005:814::200e` is reported as a warning after the
+  deterministic IPv6 TTL-expired probe has passed
 
 For the TTL / hop-limit probes, a non-zero `ping` exit code is not itself a
 failure. The validator accepts the probe when the returned output contains the

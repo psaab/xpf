@@ -46,7 +46,9 @@ What the script enforces:
     contains the native time-exceeded response
 - one-cycle `mtr` reports to those two targets must show:
   - a resolved first hop
-  - a resolved destination hop
+- a resolved IPv4 destination hop
+- for IPv6, an unresolved final public internet hop is a warning after the
+  deterministic IPv6 TTL-expired probe has passed
 - one unmeasured warm-up `iperf3` pass is run for each address family
 - repeated IPv4 `iperf3` to `172.16.80.200` must stay above threshold
 - repeated IPv6 `iperf3` to `2001:559:8585:80::200` must stay above threshold
@@ -69,6 +71,8 @@ The current tree reality is:
 - the validator must distinguish between intentional fallback and real userspace forwarding
 - the legacy XDP dataplane is still the correctness and performance reference
 - `22-23 Gbps` is the target, not the guaranteed result of every current tree state
+- the default `PARALLEL=6` is intentional for the six-worker AF_XDP lab shape;
+  use a lower explicit `PARALLEL` only when studying low-flow/RSS behavior
 
 If the script fails on IPv6 route state:
 

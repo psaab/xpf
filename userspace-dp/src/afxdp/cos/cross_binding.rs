@@ -2,14 +2,14 @@
 // of the egress (or hands off via MPSC inbox) for both Local and
 // Prepared variants.
 //
-// Back-edge to `tx::recycle_prepared_immediately`: prepared
+// Back-edge to `tx::recycle_prepared_immediately_with_shared`: prepared
 // redirects copy the frame into the owner binding and then release
 // the source UMEM frame on this binding.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use crate::afxdp::tx::recycle_prepared_immediately;
+use crate::afxdp::tx::recycle_prepared_immediately_with_shared;
 use crate::afxdp::types::{
     PreparedTxRequest, TxRequest, WorkerCommand, WorkerCoSInterfaceFastPath,
     WorkerCoSQueueFastPath,
@@ -177,6 +177,7 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner(
     req: PreparedTxRequest,
     current_worker_id: u32,
     worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(), PreparedTxRequest> {
     let Some((iface_fast, queue_fast)) = cos_fast_queue(
         &binding.cos.cos_fast_interfaces,
@@ -218,7 +219,7 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner(
     )
     .is_ok()
     {
-        recycle_prepared_immediately(binding, &req);
+        recycle_prepared_immediately_with_shared(binding, &req, shared_recycles);
         return Ok(());
     }
     Err(req)
@@ -228,6 +229,7 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner(
 pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner_binding(
     binding: &mut BindingWorker,
     req: PreparedTxRequest,
+    shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(), PreparedTxRequest> {
     let Some((iface_fast, queue_fast)) = cos_fast_queue(
         &binding.cos.cos_fast_interfaces,
@@ -267,7 +269,7 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner_binding(
         dscp_rewrite: req.dscp_rewrite,
     };
     if owner_live.enqueue_tx(local_req).is_ok() {
-        recycle_prepared_immediately(binding, &req);
+        recycle_prepared_immediately_with_shared(binding, &req, shared_recycles);
         return Ok(());
     }
     Err(req)

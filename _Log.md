@@ -1,5 +1,15 @@
 # Action Log
 
+## 2026-05-14
+
+- **Timestamp**: 2026-05-14T04:01:00Z
+  - **Action**: PR #1301 review follow-up — removed power-of-two UMEM frame-size assumption in memmove fallback bounds calculation by switching to modulo-based in-frame offset math.
+  - **File(s)**: `userspace-dp/src/afxdp/frame/mod.rs`, `_Log.md`
+
+- **Timestamp**: 2026-05-14T03:52:00Z
+  - **Action**: PR #1301 review follow-up — tightened in-frame memmove fallback slice bounds to the current UMEM chunk and added regression coverage for `FillOnSlotWithOffset` recycle tracking.
+  - **File(s)**: `userspace-dp/src/afxdp/frame/mod.rs`, `userspace-dp/src/afxdp/tx/transmit_tests.rs`, `_Log.md`
+
 ## 2026-05-12
 
 - **Timestamp**: 2026-05-12T07:50:00Z
@@ -422,3 +432,38 @@
 - **Timestamp**: 2026-05-12T06:29:24Z
   - **Action**: Rename `guard_low_n_iface_input_accepts_p2_single_direction_recency_undercount` → `guard_low_n_iface_input_accepts_absolute_floor_p2_gap1`; add inline math comment explaining why absolute floor (not recency) is the operative gate. Drop misleading "recency" claim from assertion messages.
   - **File(s)**: `userspace-dp/tests/fairness_eval_blackbox.rs`
+
+## 2026-05-13 — PR #1301 cross-NIC shared-UMEM validation path
+
+- **Timestamp**: 2026-05-13T20:22:00-07:00
+  - **Action**: Enable cross-NIC shared UMEM in the loss userspace HA config, add node-local Phase 0 artifacts, push artifacts during deploy when the config requests shared UMEM, surface shared-UMEM binding mode/role in userspace status, and document the perf/counter contract for copy-free validation.
+  - **File(s)**: `docs/ha-cluster-userspace.conf`, `test/incus/cluster-setup.sh`, `test/incus/loss-userspace-shared-umem-phase0-node0.json`, `test/incus/loss-userspace-shared-umem-phase0-node1.json`, `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/statusfmt.go`, `pkg/dataplane/userspace/statusfmt_test.go`, `docs/shared-umem-plan.md`, `docs/userspace-perf-compare.md`, `_Log.md`
+- **Timestamp**: 2026-05-13T20:44:00-07:00
+  - **Action**: Make cross-NIC shared-UMEM selection artifact-driven by default so the HA config no longer hardcodes interface names; add `selected_device_set` as the generic artifact key while keeping `selected_device_pair` as a legacy alias.
+  - **File(s)**: `userspace-dp/src/afxdp/shared_umem.rs`, `docs/ha-cluster-userspace.conf`, `docs/shared-umem-plan.md`, `test/incus/loss-userspace-shared-umem-phase0-node0.json`, `test/incus/loss-userspace-shared-umem-phase0-node1.json`, `_Log.md`
+- **Timestamp**: 2026-05-13T20:49:00-07:00
+  - **Action**: Make cross-NIC shared UMEM opportunistic by default: no config stanza or Phase 0 artifact is required for normal copy-free forwarding, `mode off` remains the debug kill switch, and Phase 0 artifacts are audit-only instead of production gates.
+  - **File(s)**: `userspace-dp/src/afxdp/shared_umem.rs`, `docs/ha-cluster-userspace.conf`, `docs/shared-umem-plan.md`, `pkg/config/ast.go`, `pkg/config/types.go`, `test/incus/cluster-setup.sh`, `README.md`, `_Log.md`
+- **Timestamp**: 2026-05-13T22:30:00-07:00
+  - **Action**: Close PR #1301 round-3 blockers: document the intentional PR #1297 contract change, restore Phase 0 as non-blocking runtime audit, retry failed shared-UMEM groups as private UMEM, publish fallback status through live binding snapshots, and route cancellable foreign-slot prepared recycles through the shared recycle queue when worker context is available.
+  - **File(s)**: `userspace-dp/src/afxdp/shared_umem.rs`, `userspace-dp/src/afxdp/worker/mod.rs`, `userspace-dp/src/afxdp/umem/mod.rs`, `userspace-dp/src/afxdp/types/runtime.rs`, `userspace-dp/src/afxdp/tx/transmit.rs`, `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/drain.rs`, `userspace-dp/src/afxdp/session_glue/mod.rs`, `userspace-dp/src/afxdp/session_delta.rs`, `userspace-dp/src/afxdp/worker/lifecycle.rs`, `pkg/dataplane/userspace/statusfmt.go`, `pkg/dataplane/userspace/statusfmt_test.go`, `pkg/config/types.go`, `docs/shared-umem-plan.md`, `_Log.md`
+  - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml shared_umem -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml remember_prepared_recycle -- --nocapture`; `go test ./pkg/dataplane/userspace ./pkg/config`
+- **Timestamp**: 2026-05-13T23:35:00-07:00
+  - **Action**: Close PR #1301 round-4 recycle-routing and mixed-mode safety blockers: thread the shared recycle accumulator through close-delta purge, pending TX bound/drop, CoS enqueue demotion, cross-binding prepared redirect, queue-service prepared rejection, neighbor retry, CoS runtime reset, and worker-shaped request paths; remove local-only prepared recycle exports; remove arbitrary-binding fallback for unknown shared recycle slots.
+  - **File(s)**: `userspace-dp/src/afxdp/tx/transmit.rs`, `userspace-dp/src/afxdp/tx/mod.rs`, `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/drain.rs`, `userspace-dp/src/afxdp/tx/cos_classify.rs`, `userspace-dp/src/afxdp/tx/tcp_segmentation.rs`, `userspace-dp/src/afxdp/cos/cross_binding.rs`, `userspace-dp/src/afxdp/cos/queue_service/mod.rs`, `userspace-dp/src/afxdp/cos/queue_service/service.rs`, `userspace-dp/src/afxdp/cos/queue_service/drain.rs`, `userspace-dp/src/afxdp/session_glue/mod.rs`, `userspace-dp/src/afxdp/session_delta.rs`, `userspace-dp/src/afxdp/neighbor_dispatch.rs`, `userspace-dp/src/afxdp/worker/cos.rs`, `userspace-dp/src/afxdp/worker/lifecycle.rs`, `userspace-dp/src/afxdp/worker/mod.rs`, `userspace-dp/src/afxdp/tx/README.md`, `userspace-dp/src/afxdp/cos/README.md`, `docs/shared-umem-plan.md`, `_Log.md`
+  - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml cancelled_prepared --no-run`; `cargo test --manifest-path userspace-dp/Cargo.toml shared_umem -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml cancelled_prepared -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml drain_exact_prepared -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml demote_prepared -- --nocapture`; `go test ./pkg/dataplane/userspace ./pkg/config`; `git diff --check`
+- **Timestamp**: 2026-05-14T06:05:00Z
+  - **Action**: Fix shared-UMEM live-status publication discovered during cluster smoke: the shared bind path now publishes the selected mode/group/role into `BindingLiveState` before worker refresh so status snapshots match the kernel bind result instead of reporting `Shared UMEM bindings: 0/N`.
+  - **File(s)**: `userspace-dp/src/afxdp/worker/mod.rs`, `userspace-dp/src/afxdp/worker/README.md`, `_Log.md`
+- **Timestamp**: 2026-05-14T06:45:00Z
+  - **Action**: PR #1301 round-5 minor follow-up: add regression coverage for stale/wrong/unknown shared-recycle slot routing, increment `tx_errors` when the all-bindings shared-recycle router drops an unknown slot, and downgrade the external IPv6 `mtr` final-hop miss to a warning after the controlled IPv6 dataplane checks pass.
+  - **File(s)**: `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/dispatch_tests.rs`, `userspace-dp/src/afxdp/tx/README.md`, `docs/shared-umem-plan.md`, `scripts/userspace-ha-validation.sh`, `_Log.md`
+- **Timestamp**: 2026-05-14T07:10:00Z
+  - **Action**: Harden the userspace HA smoke validator after live PR #1301 smoke: retry preferred-node failover while XSK liveness propagates into RG readiness, set the default throughput shape to `PARALLEL=6` so the smoke covers the six-worker RSS set, and document the IPv6 external-`mtr` warning semantics.
+  - **File(s)**: `scripts/userspace-ha-validation.sh`, `docs/userspace-ha-validation.md`, `.codex/skills/userspace-ha-validation/SKILL.md`, `_Log.md`
+- **Timestamp**: 2026-05-14T07:35:00Z
+  - **Action**: PR #1301 round-6 minor follow-up: make the split-slice shared-recycle router use the same slot-resolution helper as the all-bindings cleanup path and add split-slice helper coverage for stale/unknown lookup behavior.
+  - **File(s)**: `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/dispatch_tests.rs`, `userspace-dp/src/afxdp/tx/README.md`, `_Log.md`
+- **Timestamp**: 2026-05-14T08:05:00Z
+  - **Action**: PR #1301 round-7 polish: aggregate unknown-slot shared-recycle stderr diagnostics to one bounded line per drain while preserving full `tx_errors` accounting.
+  - **File(s)**: `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/README.md`, `_Log.md`

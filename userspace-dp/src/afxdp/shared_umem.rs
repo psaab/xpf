@@ -6,75 +6,59 @@ use std::path::Path;
 struct SharedUmemPolicy {
     mode: SharedUmemMode,
     interfaces: BTreeSet<String>,
-    artifact_passed: bool,
-    artifact_interfaces_match: bool,
-    artifact_environment_reason: Option<String>,
+    phase0_audit: Option<Phase0Audit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Phase0Audit {
+    reason: Option<String>,
 }
 
 impl SharedUmemPolicy {
     fn from_snapshot(snapshot: &ConfigSnapshot) -> Self {
         let Some(shared) = snapshot.userspace.get("shared_umem") else {
-            return Self::off();
+            return Self::auto();
         };
         let mode = shared
             .get("mode")
             .and_then(|v| v.as_str())
             .map(parse_shared_umem_mode)
-            .unwrap_or(SharedUmemMode::Off);
+            .unwrap_or(SharedUmemMode::CrossNic);
         let interfaces = string_set_from_array(shared.get("interfaces"))
             .or_else(|| string_set_from_array(shared.get("interface_names")))
             .unwrap_or_default();
         let artifact = shared
             .get("phase0_artifact")
             .or_else(|| shared.get("artifact"));
-        let artifact_passed = artifact.is_some_and(phase0_artifact_passed);
-        let artifact_interfaces_match = artifact
-            .and_then(|a| {
-                string_set_from_array(a.get("selected_interfaces"))
-                    .or_else(|| string_set_from_array(a.get("interfaces")))
-            })
-            .is_none_or(|artifact_interfaces| artifact_interfaces == interfaces);
-        let artifact_environment_reason =
-            artifact.and_then(|a| phase0_artifact_environment_mismatch(a, &interfaces));
+        let phase0_audit = artifact.map(|artifact| {
+            let audit_interfaces = if interfaces.is_empty() {
+                string_set_from_array(artifact.get("selected_interfaces"))
+                    .or_else(|| string_set_from_array(artifact.get("interfaces")))
+                    .unwrap_or_default()
+            } else {
+                interfaces.clone()
+            };
+            Phase0Audit {
+                reason: phase0_artifact_audit_reason(artifact, &audit_interfaces),
+            }
+        });
         Self {
             mode,
             interfaces,
-            artifact_passed,
-            artifact_interfaces_match,
-            artifact_environment_reason,
+            phase0_audit,
         }
     }
 
-    fn off() -> Self {
+    fn auto() -> Self {
         Self {
-            mode: SharedUmemMode::Off,
+            mode: SharedUmemMode::CrossNic,
             interfaces: BTreeSet::new(),
-            artifact_passed: false,
-            artifact_interfaces_match: false,
-            artifact_environment_reason: None,
+            phase0_audit: None,
         }
     }
 
-    fn gate_reason(&self) -> Option<String> {
-        if self.mode == SharedUmemMode::Off {
-            return Some("shared UMEM mode is off".to_string());
-        }
-        if !self.artifact_passed {
-            return Some("missing passing Phase 0 shared-UMEM artifact".to_string());
-        }
-        if !self.artifact_interfaces_match {
-            return Some("Phase 0 artifact selected interfaces do not match config".to_string());
-        }
-        if let Some(reason) = &self.artifact_environment_reason {
-            return Some(reason.clone());
-        }
-        if self.mode == SharedUmemMode::CrossNic && self.interfaces.is_empty() {
-            return Some("cross-NIC shared UMEM requires explicit interfaces".to_string());
-        }
-        if self.mode == SharedUmemMode::SameDeviceDebug && self.interfaces.is_empty() {
-            return Some("same-device-debug shared UMEM requires explicit interfaces".to_string());
-        }
-        None
+    fn selects_interface(&self, ifname: &str) -> bool {
+        self.interfaces.is_empty() || self.interfaces.contains(ifname)
     }
 }
 
@@ -83,13 +67,9 @@ pub(super) fn apply_shared_umem_policy_to_workers(
     workers: &mut BTreeMap<u32, Vec<BindingPlan>>,
 ) {
     let policy = SharedUmemPolicy::from_snapshot(snapshot);
+    log_phase0_audit(&policy);
     if policy.mode == SharedUmemMode::Off {
         mark_all_private(workers);
-        publish_shared_umem_plan_to_status(workers);
-        return;
-    }
-    if let Some(reason) = policy.gate_reason() {
-        mark_selected_private(workers, policy.mode, &policy.interfaces, reason);
         publish_shared_umem_plan_to_status(workers);
         return;
     }
@@ -117,7 +97,7 @@ fn apply_cross_nic_groups(
         let mut eligible = Vec::new();
         for idx in 0..plans.len() {
             let plan = &plans[idx];
-            if !policy.interfaces.contains(&plan.status.interface) {
+            if !policy.selects_interface(&plan.status.interface) {
                 continue;
             }
             match shared_umem_interface_info(&plan.status.interface) {
@@ -176,7 +156,7 @@ fn apply_same_device_debug_groups(
         let mut by_device: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for idx in 0..plans.len() {
             let plan = &plans[idx];
-            if !policy.interfaces.contains(&plan.status.interface) {
+            if !policy.selects_interface(&plan.status.interface) {
                 continue;
             }
             match shared_umem_interface_info(&plan.status.interface) {
@@ -236,41 +216,27 @@ where
 fn publish_shared_umem_plan_to_status(workers: &mut BTreeMap<u32, Vec<BindingPlan>>) {
     for plans in workers.values_mut() {
         for plan in plans {
-            let shared = &plan.shared_umem;
-            plan.status.shared_umem_mode = if shared.mode == SharedUmemMode::Off {
-                String::new()
-            } else {
-                shared.mode.as_str().to_string()
-            };
-            plan.status.shared_umem_group = shared.group_key.clone();
-            plan.status.shared_umem_socket_role =
-                if shared.socket_role == SharedUmemSocketRole::Private {
-                    String::new()
-                } else {
-                    shared.socket_role.as_str().to_string()
-                };
-            plan.status.shared_umem_disabled_reason = shared.disabled_reason.clone();
+            publish_shared_umem_plan_to_binding_status(&mut plan.status, &plan.shared_umem);
         }
     }
 }
 
-fn mark_selected_private(
-    workers: &mut BTreeMap<u32, Vec<BindingPlan>>,
-    mode: SharedUmemMode,
-    interfaces: &BTreeSet<String>,
-    reason: String,
+pub(super) fn publish_shared_umem_plan_to_binding_status(
+    status: &mut BindingStatus,
+    shared: &SharedUmemBindingPlan,
 ) {
-    for plans in workers.values_mut() {
-        for plan in plans {
-            if interfaces.is_empty() || interfaces.contains(&plan.status.interface) {
-                eprintln!(
-                    "xpf-userspace-dp: shared UMEM disabled for {} if{}q{}: {}",
-                    plan.status.interface, plan.status.ifindex, plan.status.queue_id, reason
-                );
-                plan.shared_umem = SharedUmemBindingPlan::disabled(mode, reason.clone());
-            }
-        }
-    }
+    status.shared_umem_mode = if shared.mode == SharedUmemMode::Off {
+        String::new()
+    } else {
+        shared.mode.as_str().to_string()
+    };
+    status.shared_umem_group = shared.group_key.clone();
+    status.shared_umem_socket_role = if shared.socket_role == SharedUmemSocketRole::Private {
+        String::new()
+    } else {
+        shared.socket_role.as_str().to_string()
+    };
+    status.shared_umem_disabled_reason = shared.disabled_reason.clone();
 }
 
 #[derive(Clone, Debug)]
@@ -316,8 +282,10 @@ fn interface_device_path(ifname: &str) -> Option<String> {
 
 fn parse_shared_umem_mode(value: &str) -> SharedUmemMode {
     match value {
+        "auto" | "on" | "enable" | "enabled" => SharedUmemMode::CrossNic,
         "same-device-debug" | "same_device_debug" => SharedUmemMode::SameDeviceDebug,
         "cross-nic" | "cross_nic" => SharedUmemMode::CrossNic,
+        "off" | "disable" | "disabled" => SharedUmemMode::Off,
         _ => SharedUmemMode::Off,
     }
 }
@@ -331,6 +299,31 @@ fn string_set_from_array(value: Option<&serde_json::Value>) -> Option<BTreeSet<S
             .map(str::to_string)
             .collect(),
     )
+}
+
+fn log_phase0_audit(policy: &SharedUmemPolicy) {
+    let Some(audit) = &policy.phase0_audit else {
+        return;
+    };
+    match &audit.reason {
+        Some(reason) => eprintln!(
+            "xpf-userspace-dp: shared UMEM Phase 0 audit mismatch (non-blocking): {reason}"
+        ),
+        None => eprintln!("xpf-userspace-dp: shared UMEM Phase 0 audit passed"),
+    }
+}
+
+fn phase0_artifact_audit_reason(
+    artifact: &serde_json::Value,
+    interfaces: &BTreeSet<String>,
+) -> Option<String> {
+    if !phase0_artifact_passed(artifact) {
+        return Some("Phase 0 artifact did not pass".to_string());
+    }
+    if interfaces.is_empty() {
+        return Some("Phase 0 artifact has no selected interfaces to audit".to_string());
+    }
+    phase0_artifact_environment_mismatch(artifact, interfaces)
 }
 
 fn phase0_artifact_passed(value: &serde_json::Value) -> bool {
@@ -349,7 +342,7 @@ fn phase0_artifact_environment_mismatch(
         return Some("Phase 0 artifact missing kernel_release".to_string());
     };
     let Some(current_kernel) = current_kernel_release() else {
-        return Some("unable to read current kernel_release for shared UMEM gate".to_string());
+        return Some("unable to read current kernel_release for shared UMEM audit".to_string());
     };
     if artifact_kernel != current_kernel {
         return Some(format!(
@@ -363,7 +356,9 @@ fn phase0_artifact_environment_mismatch(
         return Some("Phase 0 artifact missing selected_interfaces".to_string());
     };
     if &artifact_interfaces != interfaces {
-        return Some("Phase 0 artifact selected interfaces do not match config".to_string());
+        return Some(
+            "Phase 0 artifact selected interfaces do not match audit interfaces".to_string(),
+        );
     }
 
     let Some(artifact_pci_ids) = string_set_from_array(artifact.get("selected_nic_pci_ids"))
@@ -372,7 +367,7 @@ fn phase0_artifact_environment_mismatch(
         return Some("Phase 0 artifact missing selected_nic_pci_ids".to_string());
     };
     let Some(current_pci_ids) = interface_pci_ids(interfaces) else {
-        return Some("unable to read current NIC PCI IDs for shared UMEM gate".to_string());
+        return Some("unable to read current NIC PCI IDs for shared UMEM audit".to_string());
     };
     if artifact_pci_ids != current_pci_ids {
         return Some(format!(
@@ -381,14 +376,15 @@ fn phase0_artifact_environment_mismatch(
         ));
     }
 
-    let Some(artifact_device_pair) = string_set_from_array(artifact.get("selected_device_pair"))
-    else {
-        return Some("Phase 0 artifact missing selected_device_pair".to_string());
+    let Some(artifact_device_set) = artifact_selected_device_ids(artifact) else {
+        return Some(
+            "Phase 0 artifact missing selected_device_set/selected_device_pair".to_string(),
+        );
     };
-    if artifact_device_pair != current_pci_ids {
+    if artifact_device_set != current_pci_ids {
         return Some(format!(
-            "Phase 0 artifact selected_device_pair {:?} != current {:?}",
-            artifact_device_pair, current_pci_ids
+            "Phase 0 artifact selected device set {:?} != current {:?}",
+            artifact_device_set, current_pci_ids
         ));
     }
 
@@ -403,7 +399,7 @@ fn phase0_artifact_environment_mismatch(
         return Some("Phase 0 artifact driver must be a string or interface map".to_string());
     };
     let Some(current_driver) = interface_driver_by_name(interfaces) else {
-        return Some("unable to read current interface driver for shared UMEM gate".to_string());
+        return Some("unable to read current interface driver for shared UMEM audit".to_string());
     };
     if artifact_driver != current_driver {
         return Some(format!(
@@ -419,7 +415,7 @@ fn phase0_artifact_environment_mismatch(
         return Some("Phase 0 artifact mtu must be a number or interface map".to_string());
     };
     let Some(current_mtu) = interface_mtu_by_name(interfaces) else {
-        return Some("unable to read current interface MTU for shared UMEM gate".to_string());
+        return Some("unable to read current interface MTU for shared UMEM audit".to_string());
     };
     if artifact_mtu != current_mtu {
         return Some(format!(
@@ -437,7 +433,7 @@ fn phase0_artifact_environment_mismatch(
         );
     };
     let Some(current_queues) = interface_rx_queue_count_by_name(interfaces) else {
-        return Some("unable to read current RX queue topology for shared UMEM gate".to_string());
+        return Some("unable to read current RX queue topology for shared UMEM audit".to_string());
     };
     if artifact_queues != current_queues {
         return Some(format!(
@@ -447,6 +443,12 @@ fn phase0_artifact_environment_mismatch(
     }
 
     None
+}
+
+fn artifact_selected_device_ids(artifact: &serde_json::Value) -> Option<BTreeSet<String>> {
+    string_set_from_array(artifact.get("selected_device_set"))
+        .or_else(|| string_set_from_array(artifact.get("selected_devices")))
+        .or_else(|| string_set_from_array(artifact.get("selected_device_pair")))
 }
 
 fn current_kernel_release() -> Option<String> {
@@ -557,16 +559,30 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn policy_defaults_off() {
+    fn policy_defaults_to_cross_nic_auto() {
         let snapshot = ConfigSnapshot::default();
-        assert_eq!(
-            SharedUmemPolicy::from_snapshot(&snapshot).mode,
-            SharedUmemMode::Off
-        );
+        let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+        assert_eq!(policy.mode, SharedUmemMode::CrossNic);
+        assert!(policy.interfaces.is_empty());
+        assert!(policy.phase0_audit.is_none());
     }
 
     #[test]
-    fn cross_nic_requires_phase0_artifact() {
+    fn explicit_off_disables_shared_umem() {
+        let snapshot = ConfigSnapshot {
+            userspace: json!({
+                "shared_umem": {
+                    "mode": "off"
+                }
+            }),
+            ..ConfigSnapshot::default()
+        };
+        let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+        assert_eq!(policy.mode, SharedUmemMode::Off);
+    }
+
+    #[test]
+    fn explicit_interfaces_limit_policy_candidates() {
         let snapshot = ConfigSnapshot {
             userspace: json!({
                 "shared_umem": {
@@ -578,21 +594,49 @@ mod tests {
         };
         let policy = SharedUmemPolicy::from_snapshot(&snapshot);
         assert_eq!(
-            policy.gate_reason().as_deref(),
-            Some("missing passing Phase 0 shared-UMEM artifact")
+            policy.interfaces,
+            BTreeSet::from(["lan0".to_string(), "wan0".to_string()])
+        );
+        assert!(policy.selects_interface("lan0"));
+        assert!(!policy.selects_interface("dmz0"));
+    }
+
+    #[test]
+    fn artifact_interfaces_do_not_gate_or_select_runtime_policy() {
+        let snapshot = ConfigSnapshot {
+            userspace: json!({
+                "shared_umem": {
+                    "mode": "cross-nic",
+                    "phase0_artifact": {
+                        "passed": true,
+                        "selected_interfaces": ["lan0", "wan0"]
+                    }
+                }
+            }),
+            ..ConfigSnapshot::default()
+        };
+        let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+        assert!(policy.interfaces.is_empty());
+        assert!(policy.selects_interface("dmz0"));
+        assert_eq!(
+            policy
+                .phase0_audit
+                .as_ref()
+                .and_then(|audit| audit.reason.as_deref()),
+            Some("Phase 0 artifact missing kernel_release")
         );
     }
 
     #[test]
-    fn artifact_interface_mismatch_blocks_policy() {
+    fn explicit_config_filter_is_not_blocked_by_stale_artifact() {
         let snapshot = ConfigSnapshot {
             userspace: json!({
                 "shared_umem": {
                     "mode": "cross-nic",
                     "interfaces": ["lan0", "wan0"],
                     "phase0_artifact": {
-                        "passed": true,
-                        "selected_interfaces": ["lan0", "dmz0"]
+                        "passed": false,
+                        "selected_interfaces": ["dmz0"]
                     }
                 }
             }),
@@ -600,208 +644,31 @@ mod tests {
         };
         let policy = SharedUmemPolicy::from_snapshot(&snapshot);
         assert_eq!(
-            policy.gate_reason().as_deref(),
-            Some("Phase 0 artifact selected interfaces do not match config")
+            policy.interfaces,
+            BTreeSet::from(["lan0".to_string(), "wan0".to_string()])
         );
-    }
-
-    #[test]
-    fn phase0_environment_gate_rejects_missing_selected_device_pair() {
-        let mut artifact = empty_interface_phase0_artifact();
-        artifact
-            .as_object_mut()
-            .expect("artifact object")
-            .remove("selected_device_pair");
-
         assert_eq!(
-            phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new()).as_deref(),
-            Some("Phase 0 artifact missing selected_device_pair")
+            policy
+                .phase0_audit
+                .as_ref()
+                .and_then(|audit| audit.reason.as_deref()),
+            Some("Phase 0 artifact did not pass")
         );
     }
 
     #[test]
-    fn phase0_environment_gate_rejects_missing_driver() {
-        let mut artifact = empty_interface_phase0_artifact();
-        artifact
-            .as_object_mut()
-            .expect("artifact object")
-            .remove("driver");
-
-        assert_eq!(
-            phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new()).as_deref(),
-            Some("Phase 0 artifact missing driver")
-        );
-    }
-
-    #[test]
-    fn phase0_environment_gate_rejects_kernel_release_mismatch() {
-        let mut artifact = empty_interface_phase0_artifact();
-        artifact.as_object_mut().expect("artifact object").insert(
-            "kernel_release".to_string(),
-            json!("not-the-current-kernel"),
-        );
-
-        let reason = phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new())
-            .expect("kernel release mismatch");
-        assert!(reason.starts_with("Phase 0 artifact kernel_release"));
-    }
-
-    #[test]
-    fn phase0_environment_gate_rejects_interface_mismatch() {
-        let mut artifact = empty_interface_phase0_artifact();
-        artifact
-            .as_object_mut()
-            .expect("artifact object")
-            .insert("selected_interfaces".to_string(), json!(["dmz0"]));
-
-        assert_eq!(
-            phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new()).as_deref(),
-            Some("Phase 0 artifact selected interfaces do not match config")
-        );
-    }
-
-    #[test]
-    fn phase0_environment_gate_rejects_pci_mismatch() {
-        let mut artifact = empty_interface_phase0_artifact();
-        artifact
-            .as_object_mut()
-            .expect("artifact object")
-            .insert("selected_nic_pci_ids".to_string(), json!(["0000:00:00.0"]));
-
-        let reason = phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new())
-            .expect("PCI mismatch");
-        assert!(reason.starts_with("Phase 0 artifact PCI IDs"));
-    }
-
-    #[test]
-    fn phase0_environment_gate_rejects_selected_device_pair_mismatch() {
-        let mut artifact = empty_interface_phase0_artifact();
-        artifact
-            .as_object_mut()
-            .expect("artifact object")
-            .insert("selected_device_pair".to_string(), json!(["0000:00:00.0"]));
-
-        let reason = phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new())
-            .expect("device-pair mismatch");
-        assert!(reason.starts_with("Phase 0 artifact selected_device_pair"));
-    }
-
-    #[test]
-    fn phase0_environment_gate_rejects_driver_mismatch() {
-        let (interfaces, mut artifact) = live_interface_phase0_artifact()
-            .expect("test host must expose a sysfs-backed netdev with driver/device/mtu/queues");
-        let ifname = interfaces.iter().next().expect("interface").clone();
-        artifact.as_object_mut().expect("artifact object").insert(
-            "driver".to_string(),
-            json!({ ifname: "not_the_live_driver" }),
-        );
-
-        let reason =
-            phase0_artifact_environment_mismatch(&artifact, &interfaces).expect("driver mismatch");
-        assert!(reason.starts_with("Phase 0 artifact driver"));
-    }
-
-    #[test]
-    fn phase0_environment_gate_rejects_mtu_mismatch() {
-        let (interfaces, mut artifact) = live_interface_phase0_artifact()
-            .expect("test host must expose a sysfs-backed netdev with driver/device/mtu/queues");
-        let ifname = interfaces.iter().next().expect("interface").clone();
-        let live_mtu = interface_mtu_by_name(&interfaces)
-            .expect("live mtu")
-            .get(&ifname)
-            .copied()
-            .expect("interface mtu");
-        artifact.as_object_mut().expect("artifact object").insert(
-            "mtu".to_string(),
-            json!({ ifname: live_mtu.saturating_add(1) }),
-        );
-
-        let reason =
-            phase0_artifact_environment_mismatch(&artifact, &interfaces).expect("MTU mismatch");
-        assert!(reason.starts_with("Phase 0 artifact MTU"));
-    }
-
-    #[test]
-    fn phase0_environment_gate_rejects_queue_topology_mismatch() {
-        let (interfaces, mut artifact) = live_interface_phase0_artifact()
-            .expect("test host must expose a sysfs-backed netdev with driver/device/mtu/queues");
-        let ifname = interfaces.iter().next().expect("interface").clone();
-        let live_queues = interface_rx_queue_count_by_name(&interfaces)
-            .expect("live queues")
-            .get(&ifname)
-            .copied()
-            .expect("interface queue count");
-        artifact.as_object_mut().expect("artifact object").insert(
-            "queue_topology".to_string(),
-            json!({ ifname: live_queues.saturating_add(1) }),
-        );
-
-        let reason = phase0_artifact_environment_mismatch(&artifact, &interfaces)
-            .expect("queue topology mismatch");
-        assert!(reason.starts_with("Phase 0 artifact queue_topology"));
-    }
-
-    #[test]
-    fn phase0_environment_gate_accepts_driver_name_alias() {
-        let mut artifact = empty_interface_phase0_artifact();
-        let object = artifact.as_object_mut().expect("artifact object");
-        object.remove("driver");
-        object.insert("driver_name".to_string(), json!({}));
-
-        assert_eq!(
-            phase0_artifact_environment_mismatch(&artifact, &BTreeSet::new()),
-            None
-        );
-    }
-
-    #[test]
-    fn artifact_string_by_interface_reads_non_empty_driver_name_map() {
-        let interfaces = BTreeSet::from(["lan0".to_string()]);
-        assert_eq!(
-            artifact_string_by_interface(&json!({"lan0": "mlx5_core"}), &interfaces),
-            Some(BTreeMap::from([(
-                "lan0".to_string(),
-                "mlx5_core".to_string()
-            )]))
-        );
-    }
-
-    #[test]
-    fn complete_phase0_artifact_reaches_cross_nic_interface_gate() {
+    fn same_device_debug_auto_selects_all_interfaces() {
         let snapshot = ConfigSnapshot {
             userspace: json!({
                 "shared_umem": {
-                    "mode": "cross-nic",
-                    "interfaces": [],
-                    "phase0_artifact": empty_interface_phase0_artifact()
+                    "mode": "same-device-debug"
                 }
             }),
             ..ConfigSnapshot::default()
         };
         let policy = SharedUmemPolicy::from_snapshot(&snapshot);
-        assert_eq!(
-            policy.gate_reason().as_deref(),
-            Some("cross-NIC shared UMEM requires explicit interfaces")
-        );
-    }
-
-    #[test]
-    fn complete_phase0_artifact_reaches_same_device_interface_gate() {
-        let snapshot = ConfigSnapshot {
-            userspace: json!({
-                "shared_umem": {
-                    "mode": "same-device-debug",
-                    "interfaces": [],
-                    "phase0_artifact": empty_interface_phase0_artifact()
-                }
-            }),
-            ..ConfigSnapshot::default()
-        };
-        let policy = SharedUmemPolicy::from_snapshot(&snapshot);
-        assert_eq!(
-            policy.gate_reason().as_deref(),
-            Some("same-device-debug shared UMEM requires explicit interfaces")
-        );
+        assert_eq!(policy.mode, SharedUmemMode::SameDeviceDebug);
+        assert!(policy.selects_interface("lan0"));
     }
 
     #[test]
@@ -835,7 +702,15 @@ mod tests {
             ),
         };
         let mut workers = BTreeMap::from([(0, vec![plan])]);
-        apply_shared_umem_policy_to_workers(&ConfigSnapshot::default(), &mut workers);
+        let snapshot = ConfigSnapshot {
+            userspace: json!({
+                "shared_umem": {
+                    "mode": "off"
+                }
+            }),
+            ..ConfigSnapshot::default()
+        };
+        apply_shared_umem_policy_to_workers(&snapshot, &mut workers);
         let status = &workers.get(&0).unwrap()[0].status;
         assert_eq!(status.shared_umem_mode, "");
         assert_eq!(status.shared_umem_group, "");
@@ -845,54 +720,5 @@ mod tests {
             workers.get(&0).unwrap()[0].shared_umem,
             SharedUmemBindingPlan::private()
         );
-    }
-
-    fn empty_interface_phase0_artifact() -> serde_json::Value {
-        json!({
-            "passed": true,
-            "kernel_release": current_kernel_release().expect("kernel release"),
-            "selected_interfaces": [],
-            "selected_nic_pci_ids": [],
-            "selected_device_pair": [],
-            "driver": {},
-            "mtu": {},
-            "queue_topology": {}
-        })
-    }
-
-    fn live_interface_phase0_artifact() -> Option<(BTreeSet<String>, serde_json::Value)> {
-        for entry in std::fs::read_dir("/sys/class/net")
-            .ok()?
-            .filter_map(Result::ok)
-        {
-            let Some(ifname) = entry.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            let interfaces = BTreeSet::from([ifname]);
-            let Some(pci_ids) = interface_pci_ids(&interfaces) else {
-                continue;
-            };
-            let Some(driver) = interface_driver_by_name(&interfaces) else {
-                continue;
-            };
-            let Some(mtu) = interface_mtu_by_name(&interfaces) else {
-                continue;
-            };
-            let Some(queue_topology) = interface_rx_queue_count_by_name(&interfaces) else {
-                continue;
-            };
-            let artifact = json!({
-                "passed": true,
-                "kernel_release": current_kernel_release()?,
-                "selected_interfaces": interfaces,
-                "selected_nic_pci_ids": pci_ids,
-                "selected_device_pair": pci_ids,
-                "driver": driver,
-                "mtu": mtu,
-                "queue_topology": queue_topology
-            });
-            return Some((interfaces, artifact));
-        }
-        None
     }
 }
