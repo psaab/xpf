@@ -57,3 +57,9 @@ each cluster has a clear ownership boundary.
   lower bound only — there is no compile-time pin on the value 4
   itself; change it deliberately and re-run the
   `guarantee_phase_*_visit_quantum` tests.
+- Binding creation must publish the selected shared-UMEM mode/group/role
+  into `BindingLiveState` for both private and shared paths before the
+  first coordinator refresh. The coordinator treats the live snapshot as
+  authoritative after worker start, so a bind path that only logs the
+  kernel role but does not update live status will make the CLI report
+  `Shared UMEM bindings: 0/N` even when the sockets are actually shared.

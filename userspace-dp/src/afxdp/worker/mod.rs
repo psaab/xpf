@@ -510,6 +510,39 @@ fn publish_plan_shared_umem_status(live: &BindingLiveState, status: &BindingStat
     );
 }
 
+fn shared_umem_socket_role_for_xsk_role(socket_role: XskSocketRole) -> SharedUmemSocketRole {
+    match socket_role {
+        XskSocketRole::Private => SharedUmemSocketRole::Private,
+        XskSocketRole::SharedOwner => SharedUmemSocketRole::Owner,
+        XskSocketRole::SharedSecondary => SharedUmemSocketRole::Secondary,
+    }
+}
+
+fn prepare_shared_binding_plan_for_create(
+    group_key: &str,
+    mut plan: BindingPlan,
+    socket_role: XskSocketRole,
+) -> BindingPlan {
+    let planned_role = xsk_role_for_shared_plan(&plan.shared_umem);
+    let actual_role = shared_umem_socket_role_for_xsk_role(socket_role);
+    if plan.shared_umem.socket_role != actual_role {
+        eprintln!(
+            "xpf-userspace-dp: shared UMEM group {group_key} corrected planned role for slot={} from {} to {}",
+            plan.status.slot,
+            planned_role.describe(),
+            socket_role.describe(),
+        );
+        plan.shared_umem = SharedUmemBindingPlan::shared(
+            plan.shared_umem.mode,
+            plan.shared_umem.group_key.clone(),
+            actual_role,
+        );
+        publish_shared_umem_plan_to_binding_status(&mut plan.status, &plan.shared_umem);
+    }
+    publish_plan_shared_umem_status(&plan.live, &plan.status);
+    plan
+}
+
 fn create_private_binding_from_plan(
     plan: BindingPlan,
 ) -> Result<BindingWorker, Box<dyn std::error::Error + Send + Sync>> {
@@ -604,20 +637,12 @@ fn create_shared_binding_group(
 
     let mut created: Vec<(BindingWorker, c_int)> = Vec::with_capacity(plans.len());
     for plan in plans.iter().cloned() {
-        let planned_role = xsk_role_for_shared_plan(&plan.shared_umem);
         let socket_role = if created.is_empty() {
             XskSocketRole::SharedOwner
         } else {
             XskSocketRole::SharedSecondary
         };
-        if socket_role != planned_role {
-            eprintln!(
-                "xpf-userspace-dp: shared UMEM group {group_key} corrected planned role for slot={} from {} to {}",
-                plan.status.slot,
-                planned_role.describe(),
-                socket_role.describe(),
-            );
-        }
+        let plan = prepare_shared_binding_plan_for_create(group_key, plan, socket_role);
         match BindingWorker::create(
             &plan.status,
             plan.ring_entries,
@@ -2218,6 +2243,51 @@ pub(crate) struct BindingLiveSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_binding_plan_create_publishes_live_status() {
+        let live = Arc::new(BindingLiveState::new());
+        let group = "cross-nic:w0:ge-0-0-1,ge-0-0-2".to_string();
+        let shared = SharedUmemBindingPlan::shared(
+            SharedUmemMode::CrossNic,
+            group.clone(),
+            SharedUmemSocketRole::Secondary,
+        );
+        let mut status = BindingStatus {
+            slot: 1,
+            queue_id: 0,
+            worker_id: 0,
+            interface: "ge-0-0-2".to_string(),
+            ifindex: 6,
+            ..Default::default()
+        };
+        publish_shared_umem_plan_to_binding_status(&mut status, &shared);
+        let plan = BindingPlan {
+            status,
+            live: live.clone(),
+            xsk_map_fd: -1,
+            heartbeat_map_fd: -1,
+            session_map_fd: -1,
+            conntrack_v4_fd: -1,
+            conntrack_v6_fd: -1,
+            ring_entries: 2048,
+            bind_strategy: AfXdpBindStrategy::UmemOwnerSocket,
+            poll_mode: crate::PollMode::Interrupt,
+            shared_umem: shared,
+        };
+
+        let plan =
+            prepare_shared_binding_plan_for_create(&group, plan, XskSocketRole::SharedOwner);
+        let snap = live.snapshot();
+
+        assert_eq!(plan.status.shared_umem_mode, "cross-nic");
+        assert_eq!(plan.status.shared_umem_group, group);
+        assert_eq!(plan.status.shared_umem_socket_role, "owner");
+        assert_eq!(snap.shared_umem_mode, "cross-nic");
+        assert_eq!(snap.shared_umem_group, plan.status.shared_umem_group);
+        assert_eq!(snap.shared_umem_socket_role, "owner");
+        assert_eq!(snap.shared_umem_disabled_reason, "");
+    }
 
     #[test]
     fn publish_tx_completion_ring_telemetry_stores_before_reset() {
