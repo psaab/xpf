@@ -443,6 +443,9 @@ Operational success is not "AF_XDP bind says zerocopy". It is the full chain:
 - `In-place TX packets` increases during LAN<->WAN forwarding
 - `In-place VLAN push desc` / `pop desc` increase for VLAN transitions
 - `In-place L2 memmove fb` stays flat
+- unknown shared-recycle slots fail closed, log the dropped `(slot, offset)`,
+  and increment `TX errors` instead of pushing the offset into any fallback
+  binding
 - perf no longer shows `build_forwarded_frame_into_from_frame` as the
   dominant `__memmove_evex_unaligned_erms` caller
 

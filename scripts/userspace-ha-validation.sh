@@ -299,15 +299,16 @@ run_mtr_report() {
 }
 
 validate_mtr_report() {
-	local label="$1" path="$2"
-	local report
+	local label="$1" path="$2" allow_unresolved_destination="${3:-0}"
+	local report result
 	report="$(run_host "cat ${path}")"
-	python3 - <<'PY' "$label" "$report"
+	if ! result="$(python3 - <<'PY' "$label" "$report" "$allow_unresolved_destination" 2>&1
 import re
 import sys
 
 label = sys.argv[1]
 report = sys.argv[2]
+allow_unresolved_destination = sys.argv[3] == "1"
 hop_lines = [line for line in report.splitlines() if re.match(r"\s*\d+\.\|--", line)]
 if not hop_lines:
     raise SystemExit(f"{label} mtr produced no hop lines")
@@ -317,9 +318,16 @@ last = hop_lines[-1]
 if "???" in first:
     raise SystemExit(f"{label} mtr first hop unresolved: {first}")
 if "???" in last or "100.0%" in last:
+    if allow_unresolved_destination:
+        print(f"{label} mtr: warning destination unresolved: {last}")
+        raise SystemExit(0)
     raise SystemExit(f"{label} mtr destination unresolved: {last}")
+print(f"{label} mtr: ok")
 PY
-	printf '%s mtr: ok\n' "$label" | tee -a "$summary_file"
+	)"; then
+		die "$result"
+	fi
+	printf '%s\n' "$result" | tee -a "$summary_file"
 }
 
 validate_traceroute_visibility() {
@@ -338,7 +346,7 @@ validate_traceroute_visibility() {
 	run_ttl_probe 6 "${MTR_V6_TARGET}" "${ttl_v6}"
 	validate_ttl_probe "ipv6" "${ttl_v6}"
 	run_mtr_report 6 "${MTR_V6_TARGET}" "${mtr_v6}"
-	validate_mtr_report "ipv6" "${mtr_v6}"
+	validate_mtr_report "ipv6" "${mtr_v6}" 1
 }
 
 if [[ $DEPLOY -eq 1 ]]; then

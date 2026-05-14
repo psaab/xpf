@@ -41,8 +41,9 @@ writer to synchronize against.
   `PreparedTxRequest` must call the `_with_shared` recycle helper while
   carrying the worker's shared recycle accumulator, then route the
   `(slot, offset)` records back through the binding lookup. Unknown
-  recycle slots must fail closed; never push a foreign offset into an
-  arbitrary binding's fill ring.
+  recycle slots must fail closed and increment `tx_errors` on the worker
+  status surface; never push a foreign offset into an arbitrary binding's
+  fill ring.
 - `Ordering::Relaxed` is intentional and correct given the
   single-writer invariant. Don't promote without proving a second
   writer exists.

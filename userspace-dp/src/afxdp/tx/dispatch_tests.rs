@@ -185,6 +185,56 @@ fn forwarded_tcp_may_need_segmentation_flags_oversized_frame() {
 }
 
 #[test]
+fn shared_recycle_target_uses_lookup_when_slot_matches() {
+    let mut lookup = WorkerBindingLookup::default();
+    lookup.by_slot.insert(20, 1);
+    let slots = [10, 20, 30];
+
+    assert_eq!(
+        shared_recycle_target_index(slots.len(), &lookup, 20, |idx| slots.get(idx).copied()),
+        Some(1)
+    );
+}
+
+#[test]
+fn shared_recycle_target_scans_when_lookup_is_stale_or_wrong_slot() {
+    let mut lookup = WorkerBindingLookup::default();
+    lookup.by_slot.insert(20, 1);
+    let slots = [10, 99, 20];
+
+    assert_eq!(
+        shared_recycle_target_index(slots.len(), &lookup, 20, |idx| slots.get(idx).copied()),
+        Some(2)
+    );
+}
+
+#[test]
+fn shared_recycle_target_drops_unknown_or_out_of_range_slot() {
+    let mut lookup = WorkerBindingLookup::default();
+    lookup.by_slot.insert(20, 99);
+    let slots = [10, 30];
+
+    assert_eq!(
+        shared_recycle_target_index(slots.len(), &lookup, 20, |idx| slots.get(idx).copied()),
+        None
+    );
+}
+
+#[test]
+fn shared_recycle_unknown_slot_drop_increments_tx_errors() {
+    let live = BindingLiveState::new();
+
+    record_shared_recycle_unknown_slot_drops(Some(&live), 2);
+    record_shared_recycle_unknown_slot_drops(Some(&live), 0);
+    record_shared_recycle_unknown_slot_drops(None, 5);
+
+    assert_eq!(
+        live.tx_errors.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+}
+
+#[test]
 fn shared_exact_queue_lease_uses_requested_queue_id() {
     let cos_fast_interfaces = test_cos_fast_interfaces(80, 5, &[(5, true)]);
 

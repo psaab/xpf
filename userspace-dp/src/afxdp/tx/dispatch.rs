@@ -1051,23 +1051,50 @@ fn route_shared_recycle_by_slot(
     false
 }
 
+fn shared_recycle_target_index<F>(
+    binding_count: usize,
+    binding_lookup: &WorkerBindingLookup,
+    slot: u32,
+    mut slot_at: F,
+) -> Option<usize>
+where
+    F: FnMut(usize) -> Option<u32>,
+{
+    if let Some(target_index) = binding_lookup.slot_index(slot)
+        && target_index < binding_count
+        && slot_at(target_index) == Some(slot)
+    {
+        return Some(target_index);
+    }
+    (0..binding_count).find(|&idx| slot_at(idx) == Some(slot))
+}
+
+fn record_shared_recycle_unknown_slot_drops(error_live: Option<&BindingLiveState>, dropped: u64) {
+    if dropped == 0 {
+        return;
+    }
+    if let Some(live) = error_live {
+        live.tx_errors.fetch_add(dropped, Ordering::Relaxed);
+    }
+}
+
 pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
     bindings: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
     shared_recycles: &mut Vec<(u32, u64)>,
-) {
+) -> u64 {
     if shared_recycles.is_empty() {
-        return;
+        return 0;
     }
+    let mut dropped = 0u64;
     for (slot, offset) in shared_recycles.drain(..) {
-        if let Some(target_index) = binding_lookup.slot_index(slot)
+        let target_index =
+            shared_recycle_target_index(bindings.len(), binding_lookup, slot, |idx| {
+                bindings.get(idx).map(|binding| binding.slot)
+            });
+        if let Some(target_index) = target_index
             && let Some(binding) = bindings.get_mut(target_index)
-            && binding.slot == slot
         {
-            binding.tx_pipeline.pending_fill_frames.push_back(offset);
-            continue;
-        }
-        if let Some(binding) = bindings.iter_mut().find(|binding| binding.slot == slot) {
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
             continue;
         }
@@ -1075,7 +1102,13 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
             "xpf-userspace-dp: dropping shared UMEM recycle for unknown slot {} offset {}",
             slot, offset
         );
+        dropped = dropped.saturating_add(1);
     }
+    record_shared_recycle_unknown_slot_drops(
+        bindings.first().map(|binding| binding.live.as_ref()),
+        dropped,
+    );
+    dropped
 }
 
 pub(in crate::afxdp) fn resolve_tx_binding_ifindex(

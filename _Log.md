@@ -455,3 +455,6 @@
 - **Timestamp**: 2026-05-14T06:05:00Z
   - **Action**: Fix shared-UMEM live-status publication discovered during cluster smoke: the shared bind path now publishes the selected mode/group/role into `BindingLiveState` before worker refresh so status snapshots match the kernel bind result instead of reporting `Shared UMEM bindings: 0/N`.
   - **File(s)**: `userspace-dp/src/afxdp/worker/mod.rs`, `userspace-dp/src/afxdp/worker/README.md`, `_Log.md`
+- **Timestamp**: 2026-05-14T06:45:00Z
+  - **Action**: PR #1301 round-5 minor follow-up: add regression coverage for stale/wrong/unknown shared-recycle slot routing, increment `tx_errors` when the all-bindings shared-recycle router drops an unknown slot, and downgrade the external IPv6 `mtr` final-hop miss to a warning after the controlled IPv6 dataplane checks pass.
+  - **File(s)**: `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/tx/dispatch_tests.rs`, `userspace-dp/src/afxdp/tx/README.md`, `docs/shared-umem-plan.md`, `scripts/userspace-ha-validation.sh`, `_Log.md`
