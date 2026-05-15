@@ -329,13 +329,20 @@ func FormatStatusSummary(status ProcessStatus) string {
 		}
 		fmt.Fprintf(&b, "  Worker %d heartbeat age:    %s\n", i, formatStatusAge(now.Sub(hb)))
 	}
-	// #869: worker runtime table.  Percentages are cumulative since
-	// process start — operators derive live rates with Prometheus
-	// counters via rate().
+	// #869: worker runtime table. Cumulative columns are since worker
+	// start; the trailing CPU%60s column is a rolling ~60s window
+	// (under the normal ~1 Hz worker publish cadence the rotated
+	// window is ~60-61s wide; a stalled publisher widens it, but the
+	// % is divided by the exact WindowNS the worker measured so the
+	// displayed rate stays honest) for live operator load visibility
+	// — operators no longer have to mentally subtract two
+	// cumulative-since-boot CPU samples to see "current load". The
+	// matching Prometheus gauge is
+	// xpf_userspace_worker_thread_cpu_seconds_last_60s.
 	if len(status.WorkerRuntime) > 0 {
-		fmt.Fprintln(&b, "Worker runtime (cumulative since worker start):")
-		fmt.Fprintf(&b, "  %-6s %-8s %-8s %-10s %-11s %-8s %-12s %-12s\n",
-			"Worker", "TID", "Active%", "SpinIdle%", "BlockIdle%", "CPU%", "WorkLoops", "IdleLoops")
+		fmt.Fprintln(&b, "Worker runtime (cumulative since worker start; last column is rolling ~60s CPU window):")
+		fmt.Fprintf(&b, "  %-6s %-8s %-8s %-10s %-11s %-8s %-8s %-12s %-12s\n",
+			"Worker", "TID", "Active%", "SpinIdle%", "BlockIdle%", "CPU%", "CPU%60s", "WorkLoops", "IdleLoops")
 		for _, w := range status.WorkerRuntime {
 			// #925 Phase 1: dead workers replace the runtime row with
 			// a DEAD marker + the rendered panic payload. Operator
@@ -347,7 +354,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 			}
 			wall := float64(w.WallNS)
 			if wall <= 0 {
-				fmt.Fprintf(&b, "  %-6d %-8d    -        -          -        -   %-12d %-12d\n",
+				fmt.Fprintf(&b, "  %-6d %-8d    -        -          -        -        -    %-12d %-12d\n",
 					w.WorkerID, w.TID, w.WorkLoops, w.IdleLoops)
 				continue
 			}
@@ -355,8 +362,12 @@ func FormatStatusSummary(status ProcessStatus) string {
 			spinPct := 100.0 * float64(w.IdleSpinNS) / wall
 			blockPct := 100.0 * float64(w.IdleBlockNS) / wall
 			cpuPct := 100.0 * float64(w.ThreadCPUNS) / wall
-			fmt.Fprintf(&b, "  %-6d %-8d %-8.1f %-8.1f %-10.1f %-8.1f %-12d %-12d\n",
-				w.WorkerID, w.TID, activePct, spinPct, blockPct, cpuPct,
+			cpu60sStr := "-"
+			if w.WindowNS > 0 {
+				cpu60sStr = fmt.Sprintf("%.1f", 100.0*float64(w.ThreadCPUNS60s)/float64(w.WindowNS))
+			}
+			fmt.Fprintf(&b, "  %-6d %-8d %-8.1f %-8.1f %-10.1f %-8.1f %-8s %-12d %-12d\n",
+				w.WorkerID, w.TID, activePct, spinPct, blockPct, cpuPct, cpu60sStr,
 				w.WorkLoops, w.IdleLoops)
 		}
 	}

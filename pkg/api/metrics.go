@@ -103,6 +103,8 @@ type xpfCollector struct {
 	workerIdleSpinSecs                       *prometheus.Desc
 	workerIdleBlockSecs                      *prometheus.Desc
 	workerThreadCPUSecs                      *prometheus.Desc
+	workerThreadCPUSecsLast60s               *prometheus.Desc
+	workerThreadCPUWindowSecs                *prometheus.Desc
 	workerWorkLoops                          *prometheus.Desc
 	workerIdleLoops                          *prometheus.Desc
 	workerCoSQueueLeaseAcquireV8Calls        *prometheus.Desc
@@ -430,6 +432,16 @@ func newCollector(srv *Server) *xpfCollector {
 			"CLOCK_THREAD_CPUTIME_ID sample for the userspace-dp worker thread (#869).",
 			[]string{"worker_id"}, nil,
 		),
+		workerThreadCPUSecsLast60s: prometheus.NewDesc(
+			"xpf_userspace_worker_thread_cpu_seconds_last_60s",
+			"CLOCK_THREAD_CPUTIME_ID consumed by the worker thread over the most recent rolling ~60s window (gauge, not counter; 0 until ~60s after worker start).",
+			[]string{"worker_id"}, nil,
+		),
+		workerThreadCPUWindowSecs: prometheus.NewDesc(
+			"xpf_userspace_worker_thread_cpu_window_seconds",
+			"Wall-clock width of the rolling thread-CPU window matching xpf_userspace_worker_thread_cpu_seconds_last_60s; 0 until ~60s after worker start. Operators compute live CPU% as last_60s / this gauge.",
+			[]string{"worker_id"}, nil,
+		),
 		workerWorkLoops: prometheus.NewDesc(
 			"xpf_userspace_worker_work_loops_total",
 			"Worker-loop iterations that did useful packet/ring work (#869).",
@@ -660,6 +672,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerIdleSpinSecs
 	ch <- c.workerIdleBlockSecs
 	ch <- c.workerThreadCPUSecs
+	ch <- c.workerThreadCPUSecsLast60s
+	ch <- c.workerThreadCPUWindowSecs
 	ch <- c.workerWorkLoops
 	ch <- c.workerIdleLoops
 	ch <- c.workerCoSQueueLeaseAcquireV8Calls
@@ -1070,6 +1084,10 @@ func (c *xpfCollector) emitWorkerRuntime(ch chan<- prometheus.Metric, status dpu
 			prometheus.CounterValue, toSecs(w.IdleBlockNS), label)
 		ch <- prometheus.MustNewConstMetric(c.workerThreadCPUSecs,
 			prometheus.CounterValue, toSecs(w.ThreadCPUNS), label)
+		ch <- prometheus.MustNewConstMetric(c.workerThreadCPUSecsLast60s,
+			prometheus.GaugeValue, toSecs(w.ThreadCPUNS60s), label)
+		ch <- prometheus.MustNewConstMetric(c.workerThreadCPUWindowSecs,
+			prometheus.GaugeValue, toSecs(w.WindowNS), label)
 		ch <- prometheus.MustNewConstMetric(c.workerWorkLoops,
 			prometheus.CounterValue, float64(w.WorkLoops), label)
 		ch <- prometheus.MustNewConstMetric(c.workerIdleLoops,
