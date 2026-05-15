@@ -1,6 +1,36 @@
 ## Status
 
-DRAFT v3 — incorporates round-2 review feedback (Codex PLAN-NEEDS-MAJOR with 2 real semantic errors I introduced; Gemini PLAN-READY missed both).
+DRAFT v4 — incorporates round-3 review feedback (Codex PLAN-NEEDS-MINOR with 6 additional ordering invariants I missed + a bad line citation; Gemini PLAN-READY with strong round-2 calibration autopsy).
+
+### v4 changes vs v3
+
+1. **Expanded the ordering-invariants enumeration from 6 to 12.**
+   Codex round-3 correctly caught that the 6-item list missed
+   critical pass/fail-affecting constraints. Added:
+   - CoS override block at L686-726 (mutates
+     `distribution_a_i` + forces `iface_filter_active = true`;
+     must precede all downstream computation; preserves
+     `binding_distribution_a_i` for the CoS sum guard)
+   - `n_iperf_streams` derivation at L815-819 (prefers
+     `connected[].len()` over `num_streams`)
+   - Stream-count chain at L820-826 (`n_non_starved`, `dir_mult`,
+     `expected_sum` order; uses POST-CoS `iface_filter_active`)
+   - Conditional overcount trim at L837-841 (only when
+     `a_i_delta > 0 && a_i_sum_check_ok`; not unconditional)
+   - **Dual Cstruct usage at L844 + L850** — verdict uses
+     trimmed `cstruct_distribution_a_i`, RSS uses untrimmed
+     `distribution_a_i`. THE refactor MUST NOT share one
+     Cstruct across submodules.
+   - L845-846 `n_active` + `max_worker_flow_share` both use
+     untrimmed `distribution_a_i`
+
+2. **Fixed bad line citation.** v3 said "L795:
+   trim_distribution_to_sum runs BEFORE Cstruct compute
+   (L850)". Codex round-3 correctly caught that L795 is the
+   harness-guard comment block; actual trim is at L837-841
+   and the verdict Cstruct is at L844 (RSS Cstruct at L850).
+   v4 splits this into the conditional-trim invariant
+   (L837-841) and the dual-Cstruct invariant (L844 + L850).
 
 ### v3 changes vs v2
 
@@ -469,10 +499,53 @@ a deviation, stop and revise the plan) is the mitigation.
      deltas (L250), NOT iperf-relative seconds. Submodule
      boundary must preserve the epoch-vs-iperf-relative
      distinction.
-   - L795: trim_distribution_to_sum runs BEFORE Cstruct compute
-     (L850).
+   - **L686-726 CoS override block**: when `--cos-flows` is
+     given, `distribution_a_i` is reassigned from binding-
+     derived to `aggregate_cos_per_worker(...)` output AND
+     `iface_filter_active` is forced to `true` AND
+     `cstruct_source` flips from `"binding"` to `"cos_queue"`.
+     `binding_distribution_a_i` remains the original
+     binding-derived snapshot. This block MUST run before any
+     downstream computation that reads `distribution_a_i` or
+     `iface_filter_active` (i.e. before a_i_sum, expected_sum,
+     Cstruct, RSS evaluation, saturation, failure_reasons).
+     The CoS sum guard at L891-895 specifically needs
+     `binding_distribution_a_i` to remain available for the
+     `binding_a_i_sum + tolerance < a_i_sum` comparison.
+   - **L815-819 `n_iperf_streams` derivation**: prefer
+     `iperf.start.connected[].len()` (concrete observed sockets)
+     over `iperf.start.test_start.num_streams` (self-reported).
+     Codex round-2 historical fix — moving this would resurrect
+     a real bug.
+   - **L820-826 stream-count chain**: `n_non_starved =
+     n_iperf_streams.saturating_sub(starved)`; `dir_mult =
+     direction_multiplier(iface_filter_active)`; `expected_sum
+     = n_non_starved.saturating_mul(dir_mult)`. The
+     `iface_filter_active` value used here MUST be the
+     post-CoS-override value (true under CoS mode), not the
+     binding-derived original.
+   - **L837-841 conditional overcount trim**:
+     `cstruct_distribution_a_i = trim_distribution_to_sum(...)`
+     **only if** `a_i_delta > 0 && a_i_sum_check_ok`.
+     Otherwise `cstruct_distribution_a_i =
+     distribution_a_i.clone()` (untrimmed pass-through).
+     Do NOT trim unconditionally.
+   - **L844 + L850 dual Cstruct usage** — IMPORTANT:
+     - `verdict.rs` Cstruct (the gap-vs-EPSILON gate) uses
+       `compute_cstruct(&cstruct_distribution_a_i)` at L844
+       (TRIMMED).
+     - `rss.rs` Cstruct (passed into `evaluate_rss_expectation`)
+       uses `compute_cstruct(&distribution_a_i)` at L850
+       (UNTRIMMED).
+     The refactor MUST preserve this — there is no single
+     Cstruct value shared across submodules. Each submodule
+     gets its own input.
+   - **L845-846 untrimmed inputs for n_active and
+     max_worker_flow_share**: both use `distribution_a_i`
+     (untrimmed). Do not pass `cstruct_distribution_a_i` here.
    - L857-864: `saturated` is REPORTING ONLY (in Verdict at
      L922). It is NOT in `failure_reasons` (L866-895). Do not
      introduce a saturation gate.
    - L866-895: failure_reasons composition order matters for
-     diagnostic output; preserve order.
+     diagnostic output (Gate 1 starved → Gate 2 CoV → harness
+     guard → RSS → CoS sum guard). Preserve order.
