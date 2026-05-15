@@ -196,6 +196,7 @@ impl super::Coordinator {
             .iter()
             .map(|(worker_id, handle)| {
                 let s = handle.runtime_atomics.snapshot();
+                let w = handle.runtime_atomics.snapshot_window();
                 let dead = handle
                     .runtime_atomics
                     .dead
@@ -226,6 +227,10 @@ impl super::Coordinator {
                         .cos_queue_lease_acquire_v8_granted_bytes,
                     dead,
                     panic_message,
+                    thread_cpu_ns_60s: w.thread_cpu_ns,
+                    wall_ns_60s: w.wall_ns,
+                    active_ns_60s: w.active_ns,
+                    window_ns: w.window_ns,
                 }
             })
             .collect()

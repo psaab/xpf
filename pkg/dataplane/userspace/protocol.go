@@ -579,6 +579,17 @@ type WorkerRuntimeStatus struct {
 	// PanicMessage holds the rendered payload for operator diagnosis.
 	Dead         bool   `json:"dead,omitempty"`
 	PanicMessage string `json:"panic_message,omitempty"`
+	// Rolling last-window delta for CPU/wall/active counters. Under
+	// the normal ~1 Hz worker publish cadence the rotated window is
+	// ~60-61s wide (one publish-tick of overshoot past the 60s
+	// threshold); a stalled publisher can widen it further. WindowNS
+	// carries the exact measured width so consumers should always
+	// divide by it rather than assuming a fixed denominator. All
+	// zero until ~60s after worker start.
+	ThreadCPUNS60s uint64 `json:"thread_cpu_ns_60s,omitempty"`
+	WallNS60s      uint64 `json:"wall_ns_60s,omitempty"`
+	ActiveNS60s    uint64 `json:"active_ns_60s,omitempty"`
+	WindowNS       uint64 `json:"window_ns,omitempty"`
 }
 
 type HAGroupStatus struct {

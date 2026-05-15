@@ -1221,6 +1221,21 @@ pub struct WorkerRuntimeStatus {
     /// worker alive (no panic) → empty.
     #[serde(rename = "panic_message", default)]
     pub panic_message: String,
+    /// Rolling last-window delta for `thread_cpu_ns`. Under the normal
+    /// ~1 Hz worker publish cadence the rotated window is ~60–61s wide
+    /// (one publish-tick of overshoot past `WR_WINDOW_INTERVAL_NS`); a
+    /// stalled publisher can widen it further. `window_ns` carries the
+    /// exact measured width so rate math is honest regardless of
+    /// cadence. Both fields are zero until the first rotation has
+    /// fired (~60s after worker start).
+    #[serde(rename = "thread_cpu_ns_60s", default)]
+    pub thread_cpu_ns_60s: u64,
+    #[serde(rename = "wall_ns_60s", default)]
+    pub wall_ns_60s: u64,
+    #[serde(rename = "active_ns_60s", default)]
+    pub active_ns_60s: u64,
+    #[serde(rename = "window_ns", default)]
+    pub window_ns: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
