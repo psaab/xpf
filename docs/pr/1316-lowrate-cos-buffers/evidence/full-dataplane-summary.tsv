@@ -1,0 +1,8 @@
+class	tx_errors_delta	tx_shared_recycle_unknown_slot_drops_delta	tx_submit_error_drops_delta	pending_tx_local_overflow_drops_delta	dbg_tx_ring_full_delta	dbg_sendto_enobufs_delta	dbg_bound_pending_overflow_delta	dbg_cos_queue_overflow_delta	redirect_inbox_overflow_drops_delta	admission_flow_share_drops_delta	admission_buffer_drops_delta	admission_ecn_marked_delta	tx_ring_full_submit_stalls_delta	binding_post_drain_backup_cos_drops_delta
+q0-best-effort-100m	2010	0	0	0	0	0	0	2010	0	2010	0	1464400	0	0
+q4-iperf-a-1g	52	0	0	0	0	0	0	12	40	12	0	174229	0	0
+q5-iperf-b-10g	0	0	0	0	0	0	0	0	0	0	0	0	0	0
+q1-iperf-d-13g	0	0	0	0	0	0	0	0	0	0	0	0	0	0
+q2-iperf-e-16g	0	0	0	0	0	0	0	0	0	0	0	0	0	0
+q3-iperf-f-19g	0	0	0	0	0	0	0	0	0	0	0	0	0	0
+q6-iperf-c-25g	0	0	0	0	0	0	0	0	0	0	0	0	0	0
