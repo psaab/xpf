@@ -1,0 +1,3 @@
+class	port	queue_id	rate_bps	scrape_count	target_scrape_count	valid_scrape_count	target_per_flow_bps_mean	observed_bps_mean	capped_bps_mean	suppressed_bps_mean	throughput_loss_ratio_mean	unsampled_active_workers_max	worker_count_latest
+q0-best-effort-100m	5207	0	100000000	113	113	113	6532204.03248623	80270151.77052692	78386448.38983476	1883703.380692151	0.023277659739986148	0.0	6
+q4-iperf-a-1g	5201	4	1000000000	113	113	113	67241961.16003484	812174631.1791769	806903533.920418	5271097.258758835	0.006546290122008381	0.0	5
