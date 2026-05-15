@@ -323,6 +323,29 @@ pub(in crate::afxdp) fn maybe_consume_exact_queue_lease(
 }
 
 #[inline]
+pub(in crate::afxdp) fn apply_direct_exact_queue_accounting(
+    root: &mut CoSInterfaceRuntime,
+    queue_idx: usize,
+    sent_bytes: u64,
+) {
+    if let Some(queue) = root.queues.get_mut(queue_idx) {
+        queue.hot.queued_bytes = queue.hot.queued_bytes.saturating_sub(sent_bytes);
+        queue.hot.tokens = queue.hot.tokens.saturating_sub(sent_bytes);
+        // #760 instrumentation: record the exact-owner-local send at
+        // the same place the token bucket decrements. Divide by a
+        // scrape window to get an observed per-queue drain rate and
+        // compare against `queue.transmit_rate_bytes()` to detect a
+        // cap bypass.
+        queue
+            .telemetry
+            .owner_profile
+            .drain_sent_bytes
+            .fetch_add(sent_bytes, Ordering::Relaxed);
+    }
+    root.tokens = root.tokens.saturating_sub(sent_bytes);
+}
+
+#[inline]
 pub(in crate::afxdp) fn apply_direct_exact_send_result(
     binding: &mut BindingWorker,
     root_ifindex: i32,
@@ -331,21 +354,7 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result(
     sent_bytes: u64,
 ) {
     if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
-        if let Some(queue) = root.queues.get_mut(queue_idx) {
-            queue.hot.queued_bytes = queue.hot.queued_bytes.saturating_sub(sent_bytes);
-            queue.hot.tokens = queue.hot.tokens.saturating_sub(sent_bytes);
-            // #760 instrumentation: record the exact-owner-local
-            // send at the same place the token bucket decrements.
-            // Divide by a scrape window to get an observed per-queue
-            // drain rate and compare against
-            // `queue.transmit_rate_bytes()` to detect a cap bypass.
-            queue
-                .telemetry
-                .owner_profile
-                .drain_sent_bytes
-                .fetch_add(sent_bytes, Ordering::Relaxed);
-        }
-        root.tokens = root.tokens.saturating_sub(sent_bytes);
+        apply_direct_exact_queue_accounting(root, queue_idx, sent_bytes);
     }
     if let Some(shared_root_lease) = binding
         .cos

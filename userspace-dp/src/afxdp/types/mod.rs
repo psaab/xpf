@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod shared_cos_lease;
 pub(super) use shared_cos_lease::{
     NOT_PARTICIPATING, PaddedVtimeSlot, SharedCoSQueueLease, SharedCoSQueueVtimeFloor,
-    SharedCoSRootLease,
+    SharedCoSRootLease, V8RateMode,
 };
 
 // Issue 68.1: CoS shaper / queue / flow-fair / runtime types extracted

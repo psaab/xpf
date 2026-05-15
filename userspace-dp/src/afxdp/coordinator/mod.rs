@@ -1764,15 +1764,21 @@ fn build_shared_cos_queue_leases_reusing_existing(
             }
             let burst_bytes = queue.buffer_bytes.max(64 * 1500);
             let key = (ifindex, queue.queue_id);
+            let rate_mode = if queue.equal_flow_enforcement {
+                V8RateMode::EqualFlowSuppress
+            } else {
+                V8RateMode::CstructDefault
+            };
             // #1229 Phase 6 v8: emit v8 leases for guarantee-phase
             // exact queues. Reuse existing lease only if v8 mode AND
-            // max_worker_id matches (otherwise rebuild).
+            // max_worker_id/mode match (otherwise rebuild).
             if let Some(lease) = existing.get(&key).filter(|lease| {
                 lease.matches_config_v8(
                     queue.transmit_rate_bytes,
                     burst_bytes,
                     active_shards,
                     max_worker_id,
+                    rate_mode,
                 )
             }) {
                 out.insert(key, lease.clone());
@@ -1780,11 +1786,12 @@ fn build_shared_cos_queue_leases_reusing_existing(
             }
             out.insert(
                 key,
-                Arc::new(SharedCoSQueueLease::new_v8(
+                Arc::new(SharedCoSQueueLease::new_v8_with_rate_mode(
                     queue.transmit_rate_bytes,
                     burst_bytes,
                     active_shards,
                     max_worker_id,
+                    rate_mode,
                 )),
             );
         }

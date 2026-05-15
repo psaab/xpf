@@ -5,8 +5,14 @@
 
 use super::*;
 use crate::afxdp::cos::admission::apply_cos_queue_flow_fair_promotion;
+use crate::afxdp::cos::queue_ops::cos_queue_push_back;
 use crate::afxdp::tx::test_support::*;
+use crate::afxdp::types::{SharedCoSQueueLease, V8RateMode};
+use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::PROTO_TCP;
+use std::sync::Arc;
+
+const TEST_EPOCH_DURATION_NS: u64 = 200_000;
 
 #[test]
 fn surplus_phase_selects_non_exact_queue_without_guarantee_tokens() {
@@ -310,6 +316,7 @@ fn guarantee_phase_limits_service_to_visit_quantum() {
             transmit_rate_bytes: 1_000_000,
             exact: false,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -344,6 +351,7 @@ fn guarantee_phase_allows_larger_high_rate_visit_quantum() {
             transmit_rate_bytes: 10_000_000_000u64 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 256 * 1024,
             dscp_rewrite: None,
@@ -391,6 +399,7 @@ fn guarantee_phase_quantum_scales_with_rate() {
             transmit_rate_bytes: 10_000_000_000u64 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 256 * 1024,
             dscp_rewrite: None,
@@ -405,6 +414,7 @@ fn guarantee_phase_quantum_scales_with_rate() {
             transmit_rate_bytes: 100_000_000u64 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 256 * 1024,
             dscp_rewrite: None,
@@ -430,6 +440,7 @@ fn guarantee_phase_rotates_between_backlogged_queues() {
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -441,6 +452,7 @@ fn guarantee_phase_rotates_between_backlogged_queues() {
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -616,6 +628,7 @@ fn guarantee_rr_cursors_start_at_zero_after_runtime_build() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -638,6 +651,7 @@ fn surplus_phase_prefers_higher_priority_queue() {
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -649,6 +663,7 @@ fn surplus_phase_prefers_higher_priority_queue() {
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -686,6 +701,7 @@ fn surplus_phase_applies_weighted_same_priority_sharing() {
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -697,6 +713,7 @@ fn surplus_phase_applies_weighted_same_priority_sharing() {
                 transmit_rate_bytes: 4_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 4,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -762,6 +779,7 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
                 transmit_rate_bytes: 1_000_000_000 / 8,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -773,6 +791,7 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
                 transmit_rate_bytes: 25_000_000_000 / 8,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -812,6 +831,104 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
     );
 }
 
+#[test]
+fn equal_flow_cap_reaches_drain_shaped_tx_entry_path() {
+    let mut root = test_cos_runtime_with_queues(
+        100_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 4,
+            forwarding_class: "iperf-a".into(),
+            priority: 5,
+            transmit_rate_bytes: 100_000_000 / 8,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: true,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+        }],
+    );
+    root.tokens = 100_000;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.runnable = true;
+    root.queues[0].v_min.worker_id = 0;
+    enable_test_flow_fair(&mut root.queues[0]);
+    while test_flow_fair_state(&root.queues[0]).active_flow_buckets < 4 {
+        let port = 10_000 + root.queues[0].hot.local_item_count as u16;
+        cos_queue_push_back(&mut root.queues[0], test_flow_cos_item(port, 1500));
+    }
+
+    let lease = Arc::new(SharedCoSQueueLease::new_v8_with_rate_mode(
+        50_000_000,
+        256 * 1024,
+        8,
+        1,
+        V8RateMode::EqualFlowSuppress,
+    ));
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+    root.queues[0].queue_lease_v8 = Some(lease.clone());
+    let _ = lease.acquire_v8(0, TEST_EPOCH_DURATION_NS, 8_000);
+    let _ = lease.acquire_v8(1, TEST_EPOCH_DURATION_NS, 1_800);
+    let _ = lease.acquire_v8(0, 2 * TEST_EPOCH_DURATION_NS, 8_000);
+    let _ = lease.acquire_v8(1, 2 * TEST_EPOCH_DURATION_NS, 1_800);
+    let _ = lease.acquire_v8(1, 3 * TEST_EPOCH_DURATION_NS, 1);
+    assert!(lease.v8_equal_flow_enforced());
+
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        4,
+        vec![(4, test_queue_fast_path(true, 0, None, Some(lease.clone())))],
+        None,
+        None,
+    );
+    let queued_before = root.queues[0].hot.queued_bytes;
+    let root_tokens_before = root.tokens;
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    let mut shared_recycles = Vec::new();
+
+    let drained = drain_shaped_tx(
+        &mut binding,
+        3 * TEST_EPOCH_DURATION_NS,
+        &mut shared_recycles,
+    )
+    .expect("drain_shaped_tx must service the exact equal-flow queue");
+
+    assert_eq!(drained.root_ifindex, 42);
+    assert_eq!(drained.queue_idx, 0);
+    assert_eq!(drained.queue_id, 4);
+    let sent_bytes = binding
+        .live
+        .tx_bytes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(sent_bytes > 0);
+    assert!(sent_bytes <= 7_200);
+    assert!(
+        lease.v8_equal_flow_cap_hit_events() > 0,
+        "drain_shaped_tx must route through equal-flow lease top-up"
+    );
+    assert_eq!(binding.cos.cos_queue_lease_acquire_v8_calls, 1);
+    assert_eq!(binding.cos.cos_queue_lease_acquire_v8_granted_bytes, 7_200);
+    let root = binding.cos.cos_interfaces.get(&42).expect("cos root");
+    assert_eq!(
+        root.queues[0].hot.queued_bytes,
+        queued_before.saturating_sub(sent_bytes)
+    );
+    assert_eq!(root.tokens, root_tokens_before.saturating_sub(sent_bytes));
+    assert_eq!(
+        root.queues[0]
+            .telemetry
+            .owner_profile
+            .drain_sent_bytes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        sent_bytes
+    );
+}
+
 use crate::afxdp::types::{
     CoSQueueConfig, CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing, COS_FLOW_FAIR_BUCKETS,
 };
@@ -845,6 +962,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -932,6 +1050,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -1002,6 +1121,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -1103,6 +1223,7 @@ fn release_exact_prepared_scratch_preserves_queue_after_failed_submit() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -1163,6 +1284,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -1343,6 +1465,7 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
             transmit_rate_bytes: 11_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             flow_fair: false,
             shared_exact: false,
             surplus_weight: 1,
@@ -1405,6 +1528,7 @@ fn restore_cos_prepared_items_marks_queue_runnable_after_retry() {
             transmit_rate_bytes: 11_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             flow_fair: false,
             shared_exact: false,
             surplus_weight: 1,

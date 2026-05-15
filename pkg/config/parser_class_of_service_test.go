@@ -95,6 +95,7 @@ func TestCompileClassOfServiceSetSyntax(t *testing.T) {
 		"set class-of-service schedulers be-sched transmit-rate exact",
 		"set class-of-service schedulers be-sched priority low",
 		"set class-of-service schedulers be-sched buffer-size 8m",
+		"set class-of-service schedulers be-sched equal-flow-enforcement",
 		"set class-of-service scheduler-maps edge-map forwarding-class best-effort scheduler be-sched",
 		"set class-of-service interfaces ge-0/0/2 unit 80 shaping-rate 9g",
 		"set class-of-service interfaces ge-0/0/2 unit 80 shaping-rate burst-size 64m",
@@ -141,6 +142,9 @@ func TestCompileClassOfServiceSetSyntax(t *testing.T) {
 	if !cfg.ClassOfService.Schedulers["be-sched"].TransmitRateExact {
 		t.Fatal("expected be-sched transmit-rate exact")
 	}
+	if !cfg.ClassOfService.Schedulers["be-sched"].EqualFlowEnforcement {
+		t.Fatal("expected be-sched equal-flow-enforcement")
+	}
 	classifier := cfg.ClassOfService.DSCPClassifiers["wan-classifier"]
 	if classifier == nil || len(classifier.Entries) != 1 {
 		t.Fatalf("expected wan-classifier entry, got %#v", classifier)
@@ -161,6 +165,82 @@ func TestCompileClassOfServiceSetSyntax(t *testing.T) {
 	}
 	if got := rewriteRule.Entries[0].DSCPValue; got != 46 {
 		t.Fatalf("wan-rewrite code-point = %d, want 46", got)
+	}
+}
+
+func TestCompileClassOfServiceEqualFlowEnforcementRequiresPositiveExactRate(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+	}{
+		{
+			name: "no transmit rate",
+			lines: []string{
+				"set class-of-service schedulers ef-sched equal-flow-enforcement",
+			},
+		},
+		{
+			name: "non exact transmit rate",
+			lines: []string{
+				"set class-of-service schedulers ef-sched transmit-rate 10m",
+				"set class-of-service schedulers ef-sched equal-flow-enforcement",
+			},
+		},
+		{
+			name: "exact without positive rate",
+			lines: []string{
+				"set class-of-service schedulers ef-sched transmit-rate exact",
+				"set class-of-service schedulers ef-sched equal-flow-enforcement",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := &ConfigTree{}
+			for _, line := range tc.lines {
+				path, err := ParseSetCommand(line)
+				if err != nil {
+					t.Fatalf("ParseSetCommand(%q): %v", line, err)
+				}
+				if err := tree.SetPath(path); err != nil {
+					t.Fatalf("SetPath(%q): %v", line, err)
+				}
+			}
+			_, err := CompileConfig(tree)
+			if err == nil {
+				t.Fatal("CompileConfig succeeded, want equal-flow-enforcement validation error")
+			}
+			if !strings.Contains(err.Error(), "equal-flow-enforcement requires positive transmit-rate exact") {
+				t.Fatalf("CompileConfig error = %v, want equal-flow-enforcement validation", err)
+			}
+		})
+	}
+}
+
+func TestCompileClassOfServiceEqualFlowEnforcementRejectsSurplusSharing(t *testing.T) {
+	lines := []string{
+		"set class-of-service schedulers ef-sched transmit-rate 10m exact",
+		"set class-of-service schedulers ef-sched surplus-sharing",
+		"set class-of-service schedulers ef-sched equal-flow-enforcement",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig succeeded, want equal-flow/surplus-sharing validation error")
+	}
+	if !strings.Contains(err.Error(), "equal-flow-enforcement cannot be combined with surplus-sharing") {
+		t.Fatalf("CompileConfig error = %v, want equal-flow/surplus-sharing validation", err)
 	}
 }
 

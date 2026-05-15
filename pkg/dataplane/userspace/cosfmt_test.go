@@ -198,6 +198,50 @@ func TestFormatCoSInterfaceSummaryRendersSurplusSharingLineOnExactQueues(t *test
 	}
 }
 
+func TestFormatCoSInterfaceSummaryRendersEqualFlowEnforcementLine(t *testing.T) {
+	cfg := testCoSConfig()
+	cfg.ClassOfService.Schedulers["10mb"].EqualFlowEnforcement = true
+	owner := uint32(7)
+	status := &ProcessStatus{
+		CoSInterfaces: []CoSInterfaceStatus{{
+			InterfaceName:   "reth0.80",
+			OwnerWorkerID:   &owner,
+			WorkerInstances: 1,
+			Queues: []CoSQueueStatus{{
+				QueueID:                       4,
+				OwnerWorkerID:                 &owner,
+				ForwardingClass:               "bandwidth-10mb",
+				Priority:                      1,
+				Exact:                         true,
+				EqualFlowEnforcement:          true,
+				EqualFlowEnforced:             false,
+				EqualFlowTargetPerFlowBPS:     8_000_000,
+				EqualFlowMaxWorkerCapBytes:    7_200,
+				EqualFlowCapHitEvents:         3,
+				EqualFlowSuppressedGrantBytes: 4096,
+				EqualFlowFailOpenReason:       "low_demand_worker",
+				TransmitRateBytes:             1_250_000,
+				BufferBytes:                   32 * 1024,
+			}},
+		}},
+	}
+
+	out := FormatCoSInterfaceSummary(cfg, status, "reth0.80")
+	for _, want := range []string{
+		"Equal-flow:",
+		"enforced=no",
+		"target=8.00 Mb/s",
+		"max_worker_cap=7.03 KiB",
+		"cap_hits=3",
+		"suppressed_bytes=4096",
+		"fail_open=low_demand_worker",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in equal-flow output:\n%s", want, out)
+		}
+	}
+}
+
 func TestFormatCoSInterfaceSummaryShowsUnknownOwnerAsDash(t *testing.T) {
 	status := &ProcessStatus{
 		CoSInterfaces: []CoSInterfaceStatus{

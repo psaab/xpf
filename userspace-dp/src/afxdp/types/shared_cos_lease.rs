@@ -126,6 +126,7 @@ impl SharedCoSEpochState {
 
 struct V8State {
     epoch: SharedCoSEpochState,
+    rate_mode: V8RateMode,
     /// Per-worker grants this epoch. Length = max_worker_id + 1.
     /// Each slot is packed (epoch_tag, worker_granted_this_epoch).
     /// Single-writer-per-slot: only worker `id` writes worker_grants[id].
@@ -151,7 +152,147 @@ struct V8State {
     /// peer from a naturally quiet peer whose active-flow counter is
     /// merely nonzero. Length = max_worker_id + 1.
     worker_demand_events: Box<[PackedEpochGrant]>,
+    equal_flow: V8EqualFlowSuppressState,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum V8RateMode {
+    /// Existing v8/Cstruct behavior: active-flow-proportional primary
+    /// share, with explicit CPU-bound bypass allowed to claim surplus.
+    CstructDefault,
+    /// Opt-in prototype for #1304. Rotation samples the prior epoch and
+    /// publishes a per-flow cap only after every active worker has been
+    /// sampled for a short valid streak. Acquire stays O(1) by loading
+    /// that already-published cap.
+    EqualFlowSuppress,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum V8EqualFlowFailOpenReason {
+    None = 0,
+    Disabled = 1,
+    InsufficientSampledWorkers = 2,
+    UnsampledActiveWorker = 3,
+    ZeroTarget = 4,
+    NoActiveFlows = 5,
+    NotEnoughValidStreak = 6,
+    StaleOrTagMismatch = 7,
+    ArithmeticInvalid = 8,
+    LowDemandWorker = 9,
+}
+
+impl V8EqualFlowFailOpenReason {
+    fn from_u32(v: u32) -> Self {
+        match v {
+            0 => Self::None,
+            1 => Self::Disabled,
+            2 => Self::InsufficientSampledWorkers,
+            3 => Self::UnsampledActiveWorker,
+            4 => Self::ZeroTarget,
+            5 => Self::NoActiveFlows,
+            6 => Self::NotEnoughValidStreak,
+            7 => Self::StaleOrTagMismatch,
+            8 => Self::ArithmeticInvalid,
+            9 => Self::LowDemandWorker,
+            _ => Self::ArithmeticInvalid,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Disabled => "disabled",
+            Self::InsufficientSampledWorkers => "insufficient_sampled_workers",
+            Self::UnsampledActiveWorker => "unsampled_active_worker",
+            Self::ZeroTarget => "zero_target",
+            Self::NoActiveFlows => "no_active_flows",
+            Self::NotEnoughValidStreak => "not_enough_valid_streak",
+            Self::StaleOrTagMismatch => "stale_or_tag_mismatch",
+            Self::ArithmeticInvalid => "arithmetic_invalid",
+            Self::LowDemandWorker => "low_demand_worker",
+        }
+    }
+}
+
+struct V8EqualFlowSuppressState {
+    epoch_tag: AtomicU32,
+    enforced: AtomicU32,
+    valid_streak: AtomicU32,
+    current_target_per_flow: AtomicU64,
+    current_worker_cap: AtomicU64,
+    smoothed_target_per_flow: AtomicU64,
+    cap_hit_events: AtomicU64,
+    suppressed_grant_bytes: AtomicU64,
+    stale_or_tag_mismatch_events: AtomicU64,
+    fail_open_reason: AtomicU32,
+    fail_open_count: AtomicU64,
+}
+
+impl V8EqualFlowSuppressState {
+    fn new() -> Self {
+        Self {
+            epoch_tag: AtomicU32::new(0),
+            enforced: AtomicU32::new(0),
+            valid_streak: AtomicU32::new(0),
+            current_target_per_flow: AtomicU64::new(0),
+            current_worker_cap: AtomicU64::new(0),
+            smoothed_target_per_flow: AtomicU64::new(0),
+            cap_hit_events: AtomicU64::new(0),
+            suppressed_grant_bytes: AtomicU64::new(0),
+            stale_or_tag_mismatch_events: AtomicU64::new(0),
+            fail_open_reason: AtomicU32::new(V8EqualFlowFailOpenReason::Disabled as u32),
+            fail_open_count: AtomicU64::new(0),
+        }
+    }
+
+    fn fail_open(&self, new_tag: u32, reason: V8EqualFlowFailOpenReason) {
+        // Publish the payload first and the tag last. Readers acquire
+        // `epoch_tag` before consulting these fields; seeing `new_tag`
+        // must therefore imply seeing this fail-open payload, not the
+        // previous enforced epoch's cap.
+        self.enforced.store(0, Ordering::Release);
+        self.current_target_per_flow.store(0, Ordering::Release);
+        self.current_worker_cap.store(0, Ordering::Release);
+        self.fail_open_reason
+            .store(reason as u32, Ordering::Release);
+        self.fail_open_count.fetch_add(1, Ordering::Relaxed);
+        if reason != V8EqualFlowFailOpenReason::NotEnoughValidStreak {
+            self.valid_streak.store(0, Ordering::Release);
+            self.smoothed_target_per_flow.store(0, Ordering::Release);
+        }
+        self.epoch_tag.store(new_tag, Ordering::Release);
+    }
+
+    fn disable_for_epoch(&self, new_tag: u32) {
+        self.enforced.store(0, Ordering::Release);
+        self.current_target_per_flow.store(0, Ordering::Release);
+        self.current_worker_cap.store(0, Ordering::Release);
+        self.fail_open_reason.store(
+            V8EqualFlowFailOpenReason::Disabled as u32,
+            Ordering::Release,
+        );
+        self.valid_streak.store(0, Ordering::Release);
+        self.smoothed_target_per_flow.store(0, Ordering::Release);
+        self.epoch_tag.store(new_tag, Ordering::Release);
+    }
+
+    fn enforce_epoch(&self, new_tag: u32, target_per_flow: u64, max_worker_cap: u64) {
+        self.current_target_per_flow
+            .store(target_per_flow, Ordering::Release);
+        self.current_worker_cap
+            .store(max_worker_cap, Ordering::Release);
+        self.fail_open_reason
+            .store(V8EqualFlowFailOpenReason::None as u32, Ordering::Release);
+        self.enforced.store(1, Ordering::Release);
+        // Last-store publication barrier. `equal_flow_cap_v8` loads this
+        // with Acquire before using the payload above.
+        self.epoch_tag.store(new_tag, Ordering::Release);
+    }
+}
+
+const EQUAL_FLOW_VALID_STREAK_REQUIRED: u32 = 2;
+const EQUAL_FLOW_MIN_WORKER_UTIL_NUM: u64 = 4;
+const EQUAL_FLOW_MIN_WORKER_UTIL_DEN: u64 = 5;
 
 pub(in crate::afxdp) struct SharedCoSRootLease {
     config: SharedCoSLeaseConfig,
@@ -569,6 +710,22 @@ impl SharedCoSQueueLease {
         active_shards: usize,
         max_worker_id: usize,
     ) -> Self {
+        Self::new_v8_with_rate_mode(
+            rate_bytes,
+            burst_bytes,
+            active_shards,
+            max_worker_id,
+            V8RateMode::CstructDefault,
+        )
+    }
+
+    pub(in crate::afxdp) fn new_v8_with_rate_mode(
+        rate_bytes: u64,
+        burst_bytes: u64,
+        active_shards: usize,
+        max_worker_id: usize,
+        rate_mode: V8RateMode,
+    ) -> Self {
         let config = compute_shared_cos_lease_config(rate_bytes, burst_bytes, active_shards);
         let len = max_worker_id + 1;
         let worker_grants = (0..len)
@@ -601,11 +758,13 @@ impl SharedCoSQueueLease {
             },
             v8: Some(V8State {
                 epoch: SharedCoSEpochState::new(),
+                rate_mode,
                 worker_grants,
                 worker_active_flow_buckets,
                 worker_fair_share,
                 worker_starvation_events,
                 worker_demand_events,
+                equal_flow: V8EqualFlowSuppressState::new(),
             }),
         }
     }
@@ -637,12 +796,14 @@ impl SharedCoSQueueLease {
         burst_bytes: u64,
         active_shards: usize,
         max_worker_id: usize,
+        rate_mode: V8RateMode,
     ) -> bool {
         let Some(v8) = self.v8.as_ref() else {
             return false;
         };
         self.config == compute_shared_cos_lease_config(rate_bytes, burst_bytes, active_shards)
             && v8.worker_grants.len() == max_worker_id + 1
+            && v8.rate_mode == rate_mode
     }
 
     pub(in crate::afxdp) fn acquire(&self, now_ns: u64, requested: u64) -> u64 {
@@ -667,8 +828,12 @@ impl SharedCoSQueueLease {
             return 0;
         }
         if v8.worker_grants.get(worker_id).is_none() {
-            debug_assert!(false, "worker_id {} out of range (len {})",
-                worker_id, v8.worker_grants.len());
+            debug_assert!(
+                false,
+                "worker_id {} out of range (len {})",
+                worker_id,
+                v8.worker_grants.len()
+            );
             return 0;
         }
 
@@ -691,6 +856,11 @@ impl SharedCoSQueueLease {
         if active {
             bump_epoch_event(&v8.worker_demand_events[worker_id], my_tag);
         }
+        let equal_flow_cap = self.equal_flow_cap_v8(v8, worker_id, my_tag);
+        let equal_flow_enforced = equal_flow_cap.is_some();
+        let my_effective_share = equal_flow_cap
+            .map(|cap| my_share.min(cap))
+            .unwrap_or(my_share);
 
         let mut total_granted: u64 = 0;
         let mut still_needed = requested;
@@ -707,7 +877,7 @@ impl SharedCoSQueueLease {
             if my_curr_tag != my_tag {
                 break; // rotation happened; abandon primary
             }
-            if (my_consumed as u64) >= my_share {
+            if (my_consumed as u64) >= my_effective_share {
                 break; // primary share exhausted
             }
             let class_curr = v8.epoch.packed_granted.0.load(Ordering::Acquire);
@@ -719,7 +889,7 @@ impl SharedCoSQueueLease {
                 break;
             }
             let class_room = cap - class_granted as u64;
-            let my_room = my_share - my_consumed as u64;
+            let my_room = my_effective_share - my_consumed as u64;
             let take = still_needed
                 .min(class_room)
                 .min(my_room)
@@ -730,7 +900,10 @@ impl SharedCoSQueueLease {
 
             // Step A: bump class total via tag-checked CAS.
             let class_new = PackedEpochGrant::pack(class_tag, class_granted + take as u32);
-            if v8.epoch.packed_granted.0
+            if v8
+                .epoch
+                .packed_granted
+                .0
                 .compare_exchange_weak(class_curr, class_new, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
             {
@@ -778,7 +951,7 @@ impl SharedCoSQueueLease {
             let (class_curr_tag, class_granted_now) = PackedEpochGrant::unpack(class_curr);
             if my_curr_tag == my_tag
                 && class_curr_tag == my_tag
-                && (my_consumed_now as u64) >= my_share
+                && (my_consumed_now as u64) >= my_effective_share
                 && (class_granted_now as u64) < cap
             {
                 // Narrow signal: bump starvation event for this worker.
@@ -787,6 +960,16 @@ impl SharedCoSQueueLease {
                 // missed bump per epoch is fine (rotation only checks
                 // count > 0).
                 bump_epoch_event(&v8.worker_starvation_events[worker_id], my_tag);
+                if equal_flow_enforced {
+                    v8.equal_flow.cap_hit_events.fetch_add(1, Ordering::Relaxed);
+                    let suppressed =
+                        still_needed.min((cap - class_granted_now as u64).min(u32::MAX as u64));
+                    if suppressed > 0 {
+                        v8.equal_flow
+                            .suppressed_grant_bytes
+                            .fetch_add(suppressed, Ordering::Relaxed);
+                    }
+                }
             }
         }
 
@@ -799,7 +982,7 @@ impl SharedCoSQueueLease {
         // when the explicit CPU-bound bypass has armed; that path is
         // already gated by prior-epoch starvation + aggregate underuse
         // + peer-utilization checks at rotation.
-        let surplus_open = bypass;
+        let surplus_open = bypass && !equal_flow_enforced;
         // #1231 v5: telemetry — track if any surplus byte was granted
         // while bypass was the reason (now_ns < grace AND bypass).
         let bypass_was_reason = bypass && now_ns < grace;
@@ -823,8 +1006,16 @@ impl SharedCoSQueueLease {
                     break;
                 }
                 let class_new = PackedEpochGrant::pack(class_tag, class_granted + take as u32);
-                if v8.epoch.packed_granted.0
-                    .compare_exchange_weak(class_curr, class_new, Ordering::AcqRel, Ordering::Acquire)
+                if v8
+                    .epoch
+                    .packed_granted
+                    .0
+                    .compare_exchange_weak(
+                        class_curr,
+                        class_new,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
                     .is_err()
                 {
                     continue;
@@ -884,11 +1075,7 @@ impl SharedCoSQueueLease {
     /// guarantees this fires exactly once per (runtime, lease-Arc)
     /// pair — so the sum is correct after all runtimes complete their
     /// first top-up against the new lease.
-    pub(in crate::afxdp) fn rehydrate_worker_active_count(
-        &self,
-        worker_id: usize,
-        count: u32,
-    ) {
+    pub(in crate::afxdp) fn rehydrate_worker_active_count(&self, worker_id: usize, count: u32) {
         let Some(v8) = self.v8.as_ref() else {
             return;
         };
@@ -915,7 +1102,12 @@ impl SharedCoSQueueLease {
     pub(in crate::afxdp) fn v8_bypass_grace_active(&self) -> bool {
         self.v8
             .as_ref()
-            .map(|v| v.epoch.bypass_grace_rotations_remaining.load(Ordering::Relaxed) > 0)
+            .map(|v| {
+                v.epoch
+                    .bypass_grace_rotations_remaining
+                    .load(Ordering::Relaxed)
+                    > 0
+            })
             .unwrap_or(false)
     }
 
@@ -933,6 +1125,90 @@ impl SharedCoSQueueLease {
         self.v8
             .as_ref()
             .map(|v| v.epoch.bypass_grace_use_count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_active(&self) -> bool {
+        self.v8
+            .as_ref()
+            .map(|v| v.rate_mode == V8RateMode::EqualFlowSuppress)
+            .unwrap_or(false)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_enforced(&self) -> bool {
+        self.v8
+            .as_ref()
+            .map(|v| v.equal_flow.enforced.load(Ordering::Relaxed) != 0)
+            .unwrap_or(false)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_target_per_flow(&self) -> u64 {
+        self.v8
+            .as_ref()
+            .map(|v| v.equal_flow.current_target_per_flow.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_target_per_flow_bps(&self) -> u64 {
+        let bytes_per_epoch = self.v8_equal_flow_target_per_flow() as u128;
+        let bits_per_sec = bytes_per_epoch
+            .saturating_mul(8)
+            .saturating_mul(1_000_000_000u128)
+            / (EPOCH_DURATION_NS as u128);
+        bits_per_sec.min(u64::MAX as u128) as u64
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_worker_cap(&self) -> u64 {
+        self.v8
+            .as_ref()
+            .map(|v| v.equal_flow.current_worker_cap.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_cap_hit_events(&self) -> u64 {
+        self.v8
+            .as_ref()
+            .map(|v| v.equal_flow.cap_hit_events.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_suppressed_grant_bytes(&self) -> u64 {
+        self.v8
+            .as_ref()
+            .map(|v| v.equal_flow.suppressed_grant_bytes.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_stale_or_tag_mismatch_events(&self) -> u64 {
+        self.v8
+            .as_ref()
+            .map(|v| {
+                v.equal_flow
+                    .stale_or_tag_mismatch_events
+                    .load(Ordering::Relaxed)
+            })
+            .unwrap_or(0)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_fail_open_reason(&self) -> V8EqualFlowFailOpenReason {
+        self.v8
+            .as_ref()
+            .map(|v| {
+                V8EqualFlowFailOpenReason::from_u32(
+                    v.equal_flow.fail_open_reason.load(Ordering::Relaxed),
+                )
+            })
+            .unwrap_or(V8EqualFlowFailOpenReason::Disabled)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_fail_open_reason_label(&self) -> &'static str {
+        self.v8_equal_flow_fail_open_reason().as_str()
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_fail_open_count(&self) -> u64 {
+        self.v8
+            .as_ref()
+            .map(|v| v.equal_flow.fail_open_count.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
 
@@ -978,6 +1254,42 @@ impl SharedCoSQueueLease {
         }
     }
 
+    fn equal_flow_cap_v8(&self, v8: &V8State, worker_id: usize, epoch_tag: u32) -> Option<u64> {
+        if v8.rate_mode != V8RateMode::EqualFlowSuppress {
+            return None;
+        }
+        // Acquire-side cap evaluation is intentionally read-only. Epoch
+        // rotation owns fail-open publication; stale acquirers must not
+        // overwrite the freshly-published payload for a new epoch. Keep
+        // the transient stale-tag signal on a separate monotonic side
+        // channel so operators still see the fail-open class.
+        if v8.equal_flow.epoch_tag.load(Ordering::Acquire) != epoch_tag {
+            v8.equal_flow
+                .stale_or_tag_mismatch_events
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        if v8.equal_flow.enforced.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let target = v8
+            .equal_flow
+            .current_target_per_flow
+            .load(Ordering::Acquire);
+        if target == 0 {
+            return None;
+        }
+        let active_flows = v8
+            .worker_active_flow_buckets
+            .get(worker_id)
+            .map(|a| a.load(Ordering::Relaxed) as u64)
+            .unwrap_or(0);
+        if active_flows == 0 {
+            return Some(0);
+        }
+        target.checked_mul(active_flows)
+    }
+
     /// #1229 Phase 6 v8: rotate epoch when current epoch has expired.
     /// Seqlock pattern: CAS seq EVEN→ODD claims rotation; updates
     /// state; CAS seq ODD→EVEN publishes completion.
@@ -997,7 +1309,9 @@ impl SharedCoSQueueLease {
             return;
         }
         // Try EVEN→ODD CAS to claim rotation. Only one winner per cycle.
-        if v8.epoch.epoch_seq
+        if v8
+            .epoch
+            .epoch_seq
             .compare_exchange(seq, seq + 1, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
@@ -1013,12 +1327,12 @@ impl SharedCoSQueueLease {
         // operation. Old-tag CAS after this swap fails (tag mismatch);
         // old-tag CAS before this swap is captured in the returned
         // old value. This is the linearization point for prev_granted.
-        let prev_packed_granted = v8.epoch.packed_granted.0.swap(
-            new_packed_zero,
-            Ordering::AcqRel,
-        );
-        let (_prev_class_tag, prev_granted_u32) =
-            PackedEpochGrant::unpack(prev_packed_granted);
+        let prev_packed_granted = v8
+            .epoch
+            .packed_granted
+            .0
+            .swap(new_packed_zero, Ordering::AcqRel);
+        let (_prev_class_tag, prev_granted_u32) = PackedEpochGrant::unpack(prev_packed_granted);
         let prev_granted = prev_granted_u32 as u64;
         let prev_cap = v8.epoch.epoch_total_grant_cap.load(Ordering::Acquire);
 
@@ -1030,6 +1344,8 @@ impl SharedCoSQueueLease {
         let mut demanded_by_worker = [false; MAX_WORKERS_SCRATCH];
         let mut prev_grants = [0u32; MAX_WORKERS_SCRATCH];
         let mut active_by_worker = [false; MAX_WORKERS_SCRATCH];
+        let mut active_flows_by_worker = [0u32; MAX_WORKERS_SCRATCH];
+        let mut active_outside_scratch = false;
 
         // STEP 2: swap event slots, track per-worker signal/demand flags.
         let mut any_active_worker_signaled = false;
@@ -1046,17 +1362,21 @@ impl SharedCoSQueueLease {
             let active = v8
                 .worker_active_flow_buckets
                 .get(id)
-                .map(|c| c.load(Ordering::Relaxed) > 0)
-                .unwrap_or(false);
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0);
             if id < n_workers {
-                active_by_worker[id] = active;
+                active_by_worker[id] = active > 0;
+                active_flows_by_worker[id] = active;
                 demanded_by_worker[id] = old_demand_count > 0;
-                if active && old_starvation_count > 0 {
+                if active > 0 && old_starvation_count > 0 {
                     signaled_by_worker[id] = true;
                     any_active_worker_signaled = true;
                 }
-            } else if active && old_starvation_count > 0 {
-                any_active_worker_signaled = true;
+            } else if active > 0 {
+                active_outside_scratch = true;
+                if old_starvation_count > 0 {
+                    any_active_worker_signaled = true;
+                }
             }
         }
 
@@ -1067,6 +1387,21 @@ impl SharedCoSQueueLease {
                 let (_, prev) = PackedEpochGrant::unpack(old);
                 prev_grants[id] = prev;
             }
+        }
+
+        if v8.rate_mode == V8RateMode::EqualFlowSuppress {
+            publish_equal_flow_epoch_v8(
+                v8,
+                new_tag,
+                n_workers,
+                active_outside_scratch,
+                &active_by_worker,
+                &active_flows_by_worker,
+                &demanded_by_worker,
+                &prev_grants,
+            );
+        } else {
+            v8.equal_flow.disable_for_epoch(new_tag);
         }
 
         // #1231 v5.5 + #1290 round-2 STEP 3.5: peer-utilization
@@ -1111,8 +1446,7 @@ impl SharedCoSQueueLease {
         // - iperf-c push at ~80% of cap (20.2G/25G) → 20% under cap →
         //   fires (margin 6pp).
         let underuse_slack = prev_cap / 7;
-        let aggregate_underuse =
-            prev_granted.saturating_add(underuse_slack) < prev_cap;
+        let aggregate_underuse = prev_granted.saturating_add(underuse_slack) < prev_cap;
 
         // #1231 v5 + #1290 round-2 STEP 5: arm or decay bypass.
         // All conditions must hold: some active worker hit its
@@ -1152,16 +1486,19 @@ impl SharedCoSQueueLease {
         } else {
             (now_ns - start).min(EPOCH_DURATION_NS)
         };
-        let new_cap_raw = ((self.config.rate_bytes as u128) * (elapsed_ns as u128)
-            / 1_000_000_000u128) as u64;
+        let new_cap_raw =
+            ((self.config.rate_bytes as u128) * (elapsed_ns as u128) / 1_000_000_000u128) as u64;
         let new_cap = new_cap_raw.min(u32::MAX as u64);
-        v8.epoch.epoch_total_grant_cap.store(new_cap, Ordering::Release);
+        v8.epoch
+            .epoch_total_grant_cap
+            .store(new_cap, Ordering::Release);
         let grace_ns = now_ns.saturating_add(EPOCH_DURATION_NS / 2);
-        v8.epoch.epoch_grace_expires_ns.store(grace_ns, Ordering::Release);
+        v8.epoch
+            .epoch_grace_expires_ns
+            .store(grace_ns, Ordering::Release);
         for (id, count_atom) in v8.worker_active_flow_buckets.iter().enumerate() {
             let my_count = count_atom.load(Ordering::Relaxed) as u64;
-            let my_share = ((new_cap as u128) * (my_count as u128)
-                / (total_flows as u128)) as u64;
+            let my_share = ((new_cap as u128) * (my_count as u128) / (total_flows as u128)) as u64;
             if let Some(share_atom) = v8.worker_fair_share.get(id) {
                 share_atom.store(my_share, Ordering::Release);
             }
@@ -1172,14 +1509,153 @@ impl SharedCoSQueueLease {
     }
 }
 
+fn publish_equal_flow_epoch_v8(
+    v8: &V8State,
+    new_tag: u32,
+    n_workers: usize,
+    active_outside_scratch: bool,
+    active_by_worker: &[bool],
+    active_flows_by_worker: &[u32],
+    demanded_by_worker: &[bool],
+    prev_grants: &[u32],
+) {
+    if active_outside_scratch {
+        v8.equal_flow
+            .fail_open(new_tag, V8EqualFlowFailOpenReason::UnsampledActiveWorker);
+        return;
+    }
+
+    let mut active_workers = 0u32;
+    let mut sampled_workers = 0u32;
+    for id in 0..n_workers {
+        if !active_by_worker[id] {
+            continue;
+        }
+        active_workers = active_workers.saturating_add(1);
+        if !demanded_by_worker[id] || prev_grants[id] == 0 {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::UnsampledActiveWorker);
+            return;
+        }
+        sampled_workers = sampled_workers.saturating_add(1);
+    }
+
+    if active_workers == 0 {
+        v8.equal_flow
+            .fail_open(new_tag, V8EqualFlowFailOpenReason::NoActiveFlows);
+        return;
+    }
+    if sampled_workers < 2 {
+        v8.equal_flow.fail_open(
+            new_tag,
+            V8EqualFlowFailOpenReason::InsufficientSampledWorkers,
+        );
+        return;
+    }
+
+    let mut candidate_target = u64::MAX;
+    let mut max_worker_cap = 0u64;
+
+    for id in 0..n_workers {
+        if !active_by_worker[id] {
+            continue;
+        }
+        let active_flows = active_flows_by_worker[id] as u64;
+        if active_flows == 0 {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::ArithmeticInvalid);
+            return;
+        }
+        let per_flow = (prev_grants[id] as u64) / active_flows;
+        if per_flow == 0 {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::ZeroTarget);
+            return;
+        }
+        let prior_share = v8
+            .worker_fair_share
+            .get(id)
+            .map(|share| share.load(Ordering::Acquire))
+            .unwrap_or(0);
+        if prior_share == 0 {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::UnsampledActiveWorker);
+            return;
+        }
+        // Equal-flow suppression is safe only when the sample is demand
+        // saturated enough to represent a real slow per-flow rate. A
+        // quiet worker, or a rotation-boundary worker-grant sample that
+        // missed enough old-epoch grants, must fail open instead of
+        // dragging the whole queue down to an artificial low target.
+        if (prev_grants[id] as u64).saturating_mul(EQUAL_FLOW_MIN_WORKER_UTIL_DEN)
+            < prior_share.saturating_mul(EQUAL_FLOW_MIN_WORKER_UTIL_NUM)
+        {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::LowDemandWorker);
+            return;
+        }
+        candidate_target = candidate_target.min(per_flow);
+    }
+
+    if candidate_target == u64::MAX || candidate_target == 0 {
+        v8.equal_flow
+            .fail_open(new_tag, V8EqualFlowFailOpenReason::ZeroTarget);
+        return;
+    }
+
+    let prev_smoothed = v8
+        .equal_flow
+        .smoothed_target_per_flow
+        .load(Ordering::Acquire);
+    let smoothed = if prev_smoothed == 0 {
+        candidate_target
+    } else {
+        prev_smoothed
+            .saturating_mul(3)
+            .saturating_add(candidate_target)
+            / 4
+    };
+    if smoothed == 0 {
+        v8.equal_flow
+            .fail_open(new_tag, V8EqualFlowFailOpenReason::ZeroTarget);
+        return;
+    }
+    for id in 0..n_workers {
+        if !active_by_worker[id] {
+            continue;
+        }
+        let Some(worker_cap) = smoothed.checked_mul(active_flows_by_worker[id] as u64) else {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::ArithmeticInvalid);
+            return;
+        };
+        max_worker_cap = max_worker_cap.max(worker_cap);
+    }
+
+    let streak = v8
+        .equal_flow
+        .valid_streak
+        .load(Ordering::Acquire)
+        .saturating_add(1);
+    v8.equal_flow.valid_streak.store(streak, Ordering::Release);
+    v8.equal_flow
+        .smoothed_target_per_flow
+        .store(smoothed, Ordering::Release);
+
+    if streak < EQUAL_FLOW_VALID_STREAK_REQUIRED {
+        v8.equal_flow
+            .fail_open(new_tag, V8EqualFlowFailOpenReason::NotEnoughValidStreak);
+        return;
+    }
+
+    v8.equal_flow
+        .enforce_epoch(new_tag, smoothed, max_worker_cap);
+}
+
 /// #1229 Phase 6 v8: try to bump outstanding_leased_tokens by `take`.
 /// Returns `true` if successful; `false` if cap reached (caller must
 /// rollback the corresponding epoch grant).
-fn try_bump_outstanding(
-    state: &SharedCoSLeaseState,
-    take: u64,
-    max_total_leased: u64,
-) -> bool {
+fn try_bump_outstanding(state: &SharedCoSLeaseState, take: u64, max_total_leased: u64) -> bool {
     loop {
         let credits = state.credits.load(Ordering::Acquire);
         let (available, outstanding) = unpack_shared_cos_lease_credits(credits);
@@ -1203,9 +1679,8 @@ fn bump_epoch_event(pg: &PackedEpochGrant, my_tag: u32) {
     let (curr_tag, curr_count) = PackedEpochGrant::unpack(curr);
     if curr_tag == my_tag && curr_count < u32::MAX {
         let new = PackedEpochGrant::pack(curr_tag, curr_count + 1);
-        let _ = pg
-            .0
-            .compare_exchange_weak(curr, new, Ordering::AcqRel, Ordering::Acquire);
+        let _ =
+            pg.0.compare_exchange_weak(curr, new, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -1222,12 +1697,16 @@ fn worker_grant_bump(pg: &PackedEpochGrant, my_tag: u32, take: u32) -> bool {
             return false;
         }
         let Some(new_granted) = curr_granted.checked_add(take) else {
-            debug_assert!(false, "worker_grants overflow: tag={} curr={} take={}",
-                curr_tag, curr_granted, take);
+            debug_assert!(
+                false,
+                "worker_grants overflow: tag={} curr={} take={}",
+                curr_tag, curr_granted, take
+            );
             return false;
         };
         let new = PackedEpochGrant::pack(curr_tag, new_granted);
-        if pg.0
+        if pg
+            .0
             .compare_exchange_weak(curr, new, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
@@ -1243,12 +1722,7 @@ fn worker_grant_bump(pg: &PackedEpochGrant, my_tag: u32, take: u32) -> bool {
 /// and bail; failure mode is undergrant (extra outstanding bytes
 /// stay debited until next rotation), NOT overshoot.
 #[inline]
-fn tag_checked_rollback(
-    pg: &PackedEpochGrant,
-    my_tag: u32,
-    take: u32,
-    metric: &AtomicU64,
-) {
+fn tag_checked_rollback(pg: &PackedEpochGrant, my_tag: u32, take: u32, metric: &AtomicU64) {
     for _retry in 0..MAX_ROLLBACK_RETRIES {
         let curr = pg.0.load(Ordering::Acquire);
         let (curr_tag, curr_granted) = PackedEpochGrant::unpack(curr);
@@ -1257,7 +1731,8 @@ fn tag_checked_rollback(
         }
         let new_granted = curr_granted.saturating_sub(take);
         let new = PackedEpochGrant::pack(curr_tag, new_granted);
-        if pg.0
+        if pg
+            .0
             .compare_exchange_weak(curr, new, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
@@ -1268,7 +1743,11 @@ fn tag_checked_rollback(
 }
 
 impl SharedCoSRootLease {
-    pub(in crate::afxdp) fn new(shaping_rate_bytes: u64, burst_bytes: u64, active_shards: usize) -> Self {
+    pub(in crate::afxdp) fn new(
+        shaping_rate_bytes: u64,
+        burst_bytes: u64,
+        active_shards: usize,
+    ) -> Self {
         let config =
             compute_shared_cos_lease_config(shaping_rate_bytes, burst_bytes, active_shards);
         Self {

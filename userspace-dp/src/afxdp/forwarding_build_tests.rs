@@ -40,6 +40,7 @@ fn build_cos_state_translates_scheduler_map_entries() {
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "ef-sched".into(),
@@ -48,6 +49,7 @@ fn build_cos_state_translates_scheduler_map_entries() {
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -113,8 +115,14 @@ fn build_cos_state_propagates_surplus_sharing_from_snapshot() {
         }],
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
-                CoSForwardingClassSnapshot { name: "iperf-a".into(), queue: 4 },
-                CoSForwardingClassSnapshot { name: "iperf-b".into(), queue: 5 },
+                CoSForwardingClassSnapshot {
+                    name: "iperf-a".into(),
+                    queue: 4,
+                },
+                CoSForwardingClassSnapshot {
+                    name: "iperf-b".into(),
+                    queue: 5,
+                },
             ],
             schedulers: vec![
                 CoSSchedulerSnapshot {
@@ -124,6 +132,7 @@ fn build_cos_state_propagates_surplus_sharing_from_snapshot() {
                     priority: "low".into(),
                     buffer_size_bytes: 128 * 1024,
                     surplus_sharing: true, // opt-in
+                    equal_flow_enforcement: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "iperf-b".into(),
@@ -132,6 +141,7 @@ fn build_cos_state_propagates_surplus_sharing_from_snapshot() {
                     priority: "low".into(),
                     buffer_size_bytes: 128 * 1024,
                     surplus_sharing: false, // explicit hard-cap
+                    equal_flow_enforcement: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -158,12 +168,16 @@ fn build_cos_state_propagates_surplus_sharing_from_snapshot() {
     let iface = state.interfaces.get(&42).expect("missing CoS interface");
     let q4 = iface.queues.iter().find(|q| q.queue_id == 4).unwrap();
     let q5 = iface.queues.iter().find(|q| q.queue_id == 5).unwrap();
-    assert!(q4.surplus_sharing,
+    assert!(
+        q4.surplus_sharing,
         "snapshot scheduler iperf-a (surplus_sharing=true) must reach \
-         CoSQueueConfig.surplus_sharing on queue 4");
-    assert!(!q5.surplus_sharing,
+         CoSQueueConfig.surplus_sharing on queue 4"
+    );
+    assert!(
+        !q5.surplus_sharing,
         "snapshot scheduler iperf-b (surplus_sharing=false) must reach \
-         CoSQueueConfig.surplus_sharing=false on queue 5");
+         CoSQueueConfig.surplus_sharing=false on queue 5"
+    );
     // Sanity: both still exact (so the strip-on-non-exact rule wouldn't have
     // fired even if it had been at this layer).
     assert!(q4.exact && q5.exact);
@@ -224,6 +238,7 @@ fn build_cos_state_derives_exact_queue_default_burst_from_queue_rate() {
                 priority: "low".into(),
                 buffer_size_bytes: 0,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
             }],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
                 name: "wan-map".into(),
@@ -282,6 +297,7 @@ fn build_cos_state_uses_effective_transmit_rate_for_surplus_weight() {
                 priority: "low".into(),
                 buffer_size_bytes: 0,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
             }],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
                 name: "test-map".into(),
@@ -363,6 +379,7 @@ fn build_cos_state_binds_dscp_classifier_to_usable_interface_queue_ids() {
                     priority: "low".into(),
                     buffer_size_bytes: 0,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                 },
                 CoSSchedulerSnapshot {
                     name: "voice".into(),
@@ -371,6 +388,7 @@ fn build_cos_state_binds_dscp_classifier_to_usable_interface_queue_ids() {
                     priority: "high".into(),
                     buffer_size_bytes: 0,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                 },
             ],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
@@ -757,6 +775,7 @@ fn build_cos_state_zero_shaping_rate_queue_inherits_transparent() {
                 priority: "low".into(),
                 buffer_size_bytes: 0,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
             }],
             scheduler_maps: vec![CoSSchedulerMapSnapshot {
                 name: "wan-map".into(),
@@ -772,7 +791,10 @@ fn build_cos_state_zero_shaping_rate_queue_inherits_transparent() {
         ..Default::default()
     };
     let state = build_cos_state(&snapshot);
-    let iface = state.interfaces.get(&42).expect("transparent iface present");
+    let iface = state
+        .interfaces
+        .get(&42)
+        .expect("transparent iface present");
     let queue = iface
         .queues
         .iter()
@@ -824,10 +846,7 @@ fn build_cos_state_mixed_zero_and_nonzero_shaping_rate() {
         ..Default::default()
     };
     let state = build_cos_state(&snapshot);
-    let shaped = state
-        .interfaces
-        .get(&42)
-        .expect("shaped iface in CoSState");
+    let shaped = state.interfaces.get(&42).expect("shaped iface in CoSState");
     let transparent = state
         .interfaces
         .get(&43)

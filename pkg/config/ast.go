@@ -1165,9 +1165,10 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 			"transmit-rate": {args: 1, children: map[string]*schemaNode{
 				"exact": {children: nil},
 			}},
-			"priority":        {args: 1, children: nil},
-			"buffer-size":     {args: 1, children: nil},
-			"surplus-sharing": {children: nil}, // #915
+			"priority":               {args: 1, children: nil},
+			"buffer-size":            {args: 1, children: nil},
+			"surplus-sharing":        {children: nil}, // #915
+			"equal-flow-enforcement": {children: nil},
 		}},
 		"scheduler-maps": {args: 1, multi: true, children: map[string]*schemaNode{
 			"forwarding-class": {args: 1, multi: true, children: map[string]*schemaNode{

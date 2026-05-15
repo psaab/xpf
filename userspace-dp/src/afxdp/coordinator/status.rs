@@ -25,7 +25,8 @@ impl super::Coordinator {
     /// worker's "first binding" the increments landed on. This is the
     /// only operator-facing surface for this counter.
     pub fn cos_no_owner_binding_drops_total(&self) -> u64 {
-        self.workers.live
+        self.workers
+            .live
             .values()
             .map(|live| live.no_owner_binding_drops.load(Ordering::Relaxed))
             .sum()
@@ -66,7 +67,11 @@ impl super::Coordinator {
             .values()
             .map(|worker| worker.cos_status.load().iter().cloned().collect())
             .collect();
-        aggregate_cos_statuses_across_workers(&snapshots, &self.cos_owner_worker_by_queue)
+        let mut statuses =
+            aggregate_cos_statuses_across_workers(&snapshots, &self.cos_owner_worker_by_queue);
+        let queue_leases = self.cos.queue_leases.load();
+        overlay_shared_cos_queue_lease_statuses(&mut statuses, queue_leases.as_ref());
+        statuses
     }
 
     pub fn filter_term_counters(&self) -> Vec<crate::protocol::FirewallFilterTermCounterStatus> {
@@ -118,9 +123,7 @@ impl super::Coordinator {
         (out, truncated)
     }
 
-    pub fn cos_active_flow_counts(
-        &self,
-    ) -> (Vec<crate::protocol::CoSActiveFlowCountStatus>, bool) {
+    pub fn cos_active_flow_counts(&self) -> (Vec<crate::protocol::CoSActiveFlowCountStatus>, bool) {
         const COS_ACTIVE_FLOW_COUNT_MAX_ROWS: usize = 4096;
         let mut counts = std::collections::BTreeMap::<(i32, u8, u32), u32>::new();
         for live in self.workers.live.values() {
@@ -163,7 +166,8 @@ impl super::Coordinator {
     pub fn worker_heartbeats(&self) -> Vec<chrono::DateTime<Utc>> {
         let now_wall = Utc::now();
         let now_mono = monotonic_nanos();
-        self.workers.handles
+        self.workers
+            .handles
             .iter()
             .map(|(_, handle)| {
                 monotonic_timestamp_to_datetime(
@@ -187,7 +191,8 @@ impl super::Coordinator {
     /// supervisor catches a worker_loop panic) and the rendered panic
     /// payload from the per-worker slot in `worker_panics`.
     pub fn worker_runtime_snapshots(&self) -> Vec<crate::protocol::WorkerRuntimeStatus> {
-        self.workers.handles
+        self.workers
+            .handles
             .iter()
             .map(|(worker_id, handle)| {
                 let s = handle.runtime_atomics.snapshot();
@@ -235,10 +240,95 @@ impl super::Coordinator {
     }
 
     pub fn planned_counts(&self) -> (usize, usize) {
-        (self.workers.last_planned_workers(), self.workers.last_planned_bindings())
+        (
+            self.workers.last_planned_workers(),
+            self.workers.last_planned_bindings(),
+        )
     }
 
     pub fn reconcile_debug(&self) -> (u64, String) {
         (self.reconcile_calls, self.last_reconcile_stage.clone())
+    }
+}
+
+fn overlay_shared_cos_queue_lease_statuses(
+    statuses: &mut [crate::protocol::CoSInterfaceStatus],
+    queue_leases: &BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>,
+) {
+    for iface in statuses {
+        for queue in &mut iface.queues {
+            let Some(lease) = queue_leases.get(&(iface.ifindex, queue.queue_id)) else {
+                continue;
+            };
+            if !lease.v8_equal_flow_active() {
+                continue;
+            }
+            queue.equal_flow_enforcement = true;
+            queue.equal_flow_enforced = lease.v8_equal_flow_enforced();
+            queue.equal_flow_target_per_flow_bps = lease.v8_equal_flow_target_per_flow_bps();
+            queue.equal_flow_max_worker_cap_bytes = lease.v8_equal_flow_worker_cap();
+            queue.equal_flow_cap_hit_events = lease.v8_equal_flow_cap_hit_events();
+            queue.equal_flow_suppressed_grant_bytes = lease.v8_equal_flow_suppressed_grant_bytes();
+            queue.equal_flow_stale_or_tag_mismatch_events =
+                lease.v8_equal_flow_stale_or_tag_mismatch_events();
+            queue.equal_flow_fail_open_reason =
+                lease.v8_equal_flow_fail_open_reason_label().to_string();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::afxdp::types::V8RateMode;
+    use crate::protocol::{CoSInterfaceStatus, CoSQueueStatus};
+
+    #[test]
+    fn equal_flow_overlay_skips_non_equal_flow_v8_leases() {
+        let mut statuses = vec![CoSInterfaceStatus {
+            ifindex: 80,
+            queues: vec![CoSQueueStatus {
+                queue_id: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let leases = BTreeMap::from([(
+            (80, 4),
+            Arc::new(SharedCoSQueueLease::new_v8(50_000_000, 256 * 1024, 8, 1)),
+        )]);
+
+        overlay_shared_cos_queue_lease_statuses(&mut statuses, &leases);
+
+        let queue = &statuses[0].queues[0];
+        assert!(!queue.equal_flow_enforcement);
+        assert!(queue.equal_flow_fail_open_reason.is_empty());
+    }
+
+    #[test]
+    fn equal_flow_overlay_populates_active_equal_flow_leases() {
+        let mut statuses = vec![CoSInterfaceStatus {
+            ifindex: 80,
+            queues: vec![CoSQueueStatus {
+                queue_id: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let lease = Arc::new(SharedCoSQueueLease::new_v8_with_rate_mode(
+            50_000_000,
+            256 * 1024,
+            8,
+            1,
+            V8RateMode::EqualFlowSuppress,
+        ));
+        let leases = BTreeMap::from([((80, 4), lease)]);
+
+        overlay_shared_cos_queue_lease_statuses(&mut statuses, &leases);
+
+        let queue = &statuses[0].queues[0];
+        assert!(queue.equal_flow_enforcement);
+        assert_eq!(queue.equal_flow_fail_open_reason, "disabled");
+        assert_eq!(queue.equal_flow_stale_or_tag_mismatch_events, 0);
     }
 }

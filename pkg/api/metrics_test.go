@@ -252,6 +252,133 @@ func metricValuesByWorker(
 	return out
 }
 
+func TestEmitCoSEqualFlowEnforcement_LabelsAndValues(t *testing.T) {
+	c := &xpfCollector{
+		cosEqualFlowEnforcementEnabled: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_enforcement_enabled",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowEnforced: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_enforced",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowTargetPerFlowBPS: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_target_per_flow_bps",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowMaxWorkerCapBytes: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_max_worker_cap_bytes",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowCapHitEvents: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_cap_hit_events_total",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowSuppressedGrantBytes: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowStaleOrTagMismatchEvents: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowFailOpen: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_fail_open",
+			"test desc",
+			[]string{"ifindex", "queue_id", "reason"}, nil,
+		),
+	}
+	status := dpuserspace.ProcessStatus{
+		CoSInterfaces: []dpuserspace.CoSInterfaceStatus{{
+			Ifindex: 80,
+			Queues: []dpuserspace.CoSQueueStatus{
+				{
+					QueueID:                           4,
+					EqualFlowEnforcement:              true,
+					EqualFlowEnforced:                 true,
+					EqualFlowTargetPerFlowBPS:         8_000_000,
+					EqualFlowMaxWorkerCapBytes:        4096,
+					EqualFlowCapHitEvents:             7,
+					EqualFlowSuppressedGrantBytes:     8192,
+					EqualFlowStaleOrTagMismatchEvents: 3,
+					EqualFlowFailOpenReason:           "none",
+				},
+				{QueueID: 5},
+			},
+		}},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitCoSEqualFlowEnforcement(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 8 {
+		t.Fatalf("emitCoSEqualFlowEnforcement: want 8 metrics for one enabled queue, got %d", len(got))
+	}
+	values := map[*prometheus.Desc]float64{
+		c.cosEqualFlowEnforcementEnabled:       1,
+		c.cosEqualFlowEnforced:                 1,
+		c.cosEqualFlowTargetPerFlowBPS:         8_000_000,
+		c.cosEqualFlowMaxWorkerCapBytes:        4096,
+		c.cosEqualFlowCapHitEvents:             7,
+		c.cosEqualFlowSuppressedGrantBytes:     8192,
+		c.cosEqualFlowStaleOrTagMismatchEvents: 3,
+		c.cosEqualFlowFailOpen:                 1,
+	}
+	counters := map[*prometheus.Desc]bool{
+		c.cosEqualFlowCapHitEvents:             true,
+		c.cosEqualFlowSuppressedGrantBytes:     true,
+		c.cosEqualFlowStaleOrTagMismatchEvents: true,
+	}
+	for _, m := range got {
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("metric.Write: %v", err)
+		}
+		labels := map[string]string{}
+		for _, lp := range pb.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["ifindex"] != "80" || labels["queue_id"] != "4" {
+			t.Fatalf("wrong equal-flow metric labels: %v", labels)
+		}
+		if m.Desc() == c.cosEqualFlowFailOpen && labels["reason"] != "none" {
+			t.Fatalf("wrong fail-open reason label: %v", labels)
+		}
+		want, ok := values[m.Desc()]
+		if !ok {
+			t.Fatalf("unexpected equal-flow metric descriptor: %s", m.Desc())
+		}
+		var value float64
+		if counters[m.Desc()] {
+			if pb.Counter == nil {
+				t.Fatalf("equal-flow metric %s must be a counter: %+v", m.Desc(), &pb)
+			}
+			value = pb.Counter.GetValue()
+		} else {
+			if pb.Gauge == nil {
+				t.Fatalf("equal-flow metric %s must be a gauge: %+v", m.Desc(), &pb)
+			}
+			value = pb.Gauge.GetValue()
+		}
+		if value != want {
+			t.Fatalf("equal-flow metric %s = %v, want %v", m.Desc(), value, want)
+		}
+	}
+}
+
 // #1219: emitBindingActiveFlowCount must surface the per-binding
 // xpf_userspace_binding_active_flow_count gauge with labels
 // {binding_slot, queue_id, worker_id, iface}. Mirrors the

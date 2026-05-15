@@ -63,3 +63,8 @@ each cluster has a clear ownership boundary.
   authoritative after worker start, so a bind path that only logs the
   kernel role but does not update live status will make the CLI report
   `Shared UMEM bindings: 0/N` even when the sockets are actually shared.
+- `BindingWorker::new_for_cos_drain_test` is test-only scaffolding for
+  hermetic CoS service-path tests. It uses in-memory AF_XDP ring fixtures
+  and must not become a production construction path; production workers
+  still go through `BindingWorker::create`, which performs the real bind
+  and seeds ring/UMEM ownership from the binding plan.

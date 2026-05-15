@@ -18,20 +18,22 @@ type cosInterfaceView struct {
 }
 
 type cosQueueView struct {
-	queueID         int
-	ownerWorker     *uint32
-	forwardingClass string
-	priority        string
-	exact           bool
-	surplusSharing  bool // #915: only meaningful when exact == true
-	transmitRate    uint64
-	bufferBytes     uint64
-	queuedPackets   uint64
-	queuedBytes     uint64
-	runnable        int
-	parked          int
-	nextWakeupTick  uint64
-	surplusDeficit  uint64
+	queueID              int
+	ownerWorker          *uint32
+	forwardingClass      string
+	priority             string
+	exact                bool
+	surplusSharing       bool // #915: only meaningful when exact == true
+	equalFlowEnforcement bool
+	equalFlowEnforced    bool
+	transmitRate         uint64
+	bufferBytes          uint64
+	queuedPackets        uint64
+	queuedBytes          uint64
+	runnable             int
+	parked               int
+	nextWakeupTick       uint64
+	surplusDeficit       uint64
 	// #710/#718: admission-path counters sourced from runtime. Zero values
 	// are still rendered — operators need to see the counter exists.
 	admissionFlowShareDrops uint64
@@ -52,10 +54,15 @@ type cosQueueView struct {
 	// drainParkRootTokens / drainParkQueueTokens are queue-scoped.
 	// postDrainBackupBytes is binding-scoped (one-per-binding Rust
 	// attribution; summed across queues here for rendering).
-	drainSentBytes        uint64
-	drainParkRootTokens   uint64
-	drainParkQueueTokens  uint64
-	postDrainBackupBytes  uint64
+	drainSentBytes                uint64
+	drainParkRootTokens           uint64
+	drainParkQueueTokens          uint64
+	postDrainBackupBytes          uint64
+	equalFlowTargetPerFlowBPS     uint64
+	equalFlowMaxWorkerCapBytes    uint64
+	equalFlowCapHitEvents         uint64
+	equalFlowSuppressedGrantBytes uint64
+	equalFlowFailOpenReason       string
 }
 
 func FormatCoSInterfaceSummary(cfg *config.Config, status *ProcessStatus, selector string) string {
@@ -206,6 +213,18 @@ func FormatCoSInterfaceSummary(cfg *config.Config, status *ProcessStatus, select
 			if queue.exact {
 				fmt.Fprintf(&b, "           Surplus sharing: %s\n",
 					yesNo(queue.surplusSharing))
+				if queue.equalFlowEnforcement {
+					fmt.Fprintf(
+						&b,
+						"           Equal-flow:     enforced=%s  target=%s  max_worker_cap=%s  cap_hits=%d  suppressed_bytes=%d  fail_open=%s\n",
+						yesNo(queue.equalFlowEnforced),
+						formatBitsPerSecond(queue.equalFlowTargetPerFlowBPS),
+						formatCoSBytes(queue.equalFlowMaxWorkerCapBytes),
+						queue.equalFlowCapHitEvents,
+						queue.equalFlowSuppressedGrantBytes,
+						emptyDash(queue.equalFlowFailOpenReason),
+					)
+				}
 			}
 			// #709 / #751: per-queue OwnerProfile line renders only
 			// the queue-scoped drain percentiles. The binding-scoped
@@ -315,10 +334,10 @@ func renderBindingScopedTelemetry(b *strings.Builder, view cosInterfaceView, que
 		return
 	}
 	var (
-		ownerPPS      uint64
-		peerPPS       uint64
-		redirectHist  []uint64
-		backupBytes   uint64
+		ownerPPS     uint64
+		peerPPS      uint64
+		redirectHist []uint64
+		backupBytes  uint64
 	)
 	for _, q := range queues {
 		ownerPPS = saturatingAddU64(ownerPPS, q.ownerPPS)
@@ -439,6 +458,7 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 				if sched := cfg.ClassOfService.Schedulers[entry.Scheduler]; sched != nil {
 					qv.exact = sched.TransmitRateExact
 					qv.surplusSharing = sched.SurplusSharing
+					qv.equalFlowEnforcement = sched.EqualFlowEnforcement
 					qv.transmitRate = sched.TransmitRateBytes
 					qv.bufferBytes = sched.BufferSizeBytes
 					if sched.Priority != "" {
@@ -459,6 +479,8 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 			}
 			qv.priority = fmt.Sprintf("%d", runtimeQueue.Priority)
 			qv.exact = runtimeQueue.Exact
+			qv.equalFlowEnforcement = runtimeQueue.EqualFlowEnforcement
+			qv.equalFlowEnforced = runtimeQueue.EqualFlowEnforced
 			if runtimeQueue.TransmitRateBytes > 0 {
 				qv.transmitRate = runtimeQueue.TransmitRateBytes
 			}
@@ -493,6 +515,11 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 			qv.drainParkRootTokens = runtimeQueue.DrainParkRootTokens
 			qv.drainParkQueueTokens = runtimeQueue.DrainParkQueueTokens
 			qv.postDrainBackupBytes = runtimeQueue.PostDrainBackupBytes
+			qv.equalFlowTargetPerFlowBPS = runtimeQueue.EqualFlowTargetPerFlowBPS
+			qv.equalFlowMaxWorkerCapBytes = runtimeQueue.EqualFlowMaxWorkerCapBytes
+			qv.equalFlowCapHitEvents = runtimeQueue.EqualFlowCapHitEvents
+			qv.equalFlowSuppressedGrantBytes = runtimeQueue.EqualFlowSuppressedGrantBytes
+			qv.equalFlowFailOpenReason = runtimeQueue.EqualFlowFailOpenReason
 			queueViews[qv.queueID] = qv
 		}
 	}
@@ -511,14 +538,24 @@ func formatCoSRate(bytesPerSecond uint64) string {
 	if bytesPerSecond == 0 {
 		return "-"
 	}
-	bitsPerSecond := float64(bytesPerSecond) * 8
+	return formatBitsPerSecondFloat(float64(bytesPerSecond) * 8)
+}
+
+func formatBitsPerSecond(bitsPerSecond uint64) string {
+	if bitsPerSecond == 0 {
+		return "-"
+	}
+	return formatBitsPerSecondFloat(float64(bitsPerSecond))
+}
+
+func formatBitsPerSecondFloat(value float64) string {
 	units := []string{"b/s", "Kb/s", "Mb/s", "Gb/s", "Tb/s"}
 	unitIdx := 0
-	for bitsPerSecond >= 1000 && unitIdx < len(units)-1 {
-		bitsPerSecond /= 1000
+	for value >= 1000 && unitIdx < len(units)-1 {
+		value /= 1000
 		unitIdx++
 	}
-	return fmt.Sprintf("%.2f %s", bitsPerSecond, units[unitIdx])
+	return fmt.Sprintf("%.2f %s", value, units[unitIdx])
 }
 
 func formatOptionalWorkerID(workerID *uint32) string {

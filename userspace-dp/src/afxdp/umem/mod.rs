@@ -45,6 +45,29 @@ impl WorkerUmem {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn new_for_test(
+        total_frames: u32,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let area = MmapArea::new((total_frames as usize) * (UMEM_FRAME_SIZE as usize))?;
+        let ring_size = umem_ring_size(total_frames);
+        let umem_cfg = UmemConfig {
+            fill_size: ring_size,
+            complete_size: ring_size,
+            frame_size: UMEM_FRAME_SIZE,
+            headroom: UMEM_HEADROOM,
+            flags: 0,
+        };
+        let umem = Umem::new_for_test(umem_cfg, area.as_nonnull_slice());
+        Ok(Self {
+            inner: Rc::new(WorkerUmemInner {
+                area,
+                umem,
+                total_frames,
+            }),
+        })
+    }
+
     pub(super) fn area(&self) -> &MmapArea {
         &self.inner.area
     }
