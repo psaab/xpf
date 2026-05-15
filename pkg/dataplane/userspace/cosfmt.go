@@ -517,7 +517,7 @@ func cosRuntimeCandidateNames(ifName, logicalName string, unitNum int, unit *con
 		add(ifName)
 		add(config.LinuxIfName(ifName))
 	}
-	if hasVLANBindingName {
+	if unitNum != 0 && hasVLANBindingName {
 		vlanName := fmt.Sprintf("%s.%d", ifName, unit.VlanID)
 		add(vlanName)
 		add(config.LinuxIfName(vlanName))

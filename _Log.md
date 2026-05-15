@@ -2,6 +2,11 @@
 
 ## 2026-05-15
 
+- **Timestamp**: 2026-05-15T22:52:00Z
+  - **Action**: Round-1 follow-up cleanup — remove duplicate VLAN candidate append path in CoS runtime candidate generation while preserving VLAN-first ordering for unit-zero lookups.
+  - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `_Log.md`
+  - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
+
 - **Timestamp**: 2026-05-15T22:45:00Z
   - **Action**: Round-1 review hardening for issue #1278 — fix unit-zero candidate ordering so VLAN binding ifindex is preferred over parent binding when both exist, preventing wrong runtime CoS counters from being shown.
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `_Log.md`
