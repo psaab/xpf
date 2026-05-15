@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import math
@@ -515,16 +516,23 @@ class FairnessMultiSampleTest(unittest.TestCase):
                         [[ -e "$CURL_SENTINEL" ]] && break
                         sleep 0.02
                     done
-                    mkdir -p "$out_dir"
-                    cat > "$out_dir/summary.json" <<'JSON'
+                    ts=$(($(date +%s) - 5))
+                    for sample in 1 2; do
+                        sample_dir="$out_dir/sample-$sample"
+                        mkdir -p "$sample_dir/artifacts"
+                        cat > "$sample_dir/artifacts/iperf-single.json" <<JSON
+                    {"start":{"timestamp":{"timesecs":$ts},"test_start":{"duration":120}}}
+                    JSON
+                    done
+                    cat > "$out_dir/summary.json" <<JSON
                     {
                       "verdict": "PASS",
                       "observed_cov": {"mean": 0.1, "max": 0.2, "sample_stdev": 0.01},
                       "cstruct": {"mean": 0.3},
                       "gap": {"mean": -0.2, "max": -0.1},
                       "samples": [
-                        {"verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0},
-                        {"verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0}
+                        {"sample": 1, "sample_dir": "$out_dir/sample-1", "verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0},
+                        {"sample": 2, "sample_dir": "$out_dir/sample-2", "verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0}
                       ]
                     }
                     JSON
@@ -576,6 +584,9 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 "WRAPPER": str(fake_wrapper),
                 "HARNESS": str(fake_harness),
                 "FAIRNESS_EVAL": str(fake_eval),
+                "WARMUP": "0",
+                "EQUAL_FLOW_ESTIMATOR_WINDOW_SECS": "0",
+                "FINAL_BURST": "0",
             }
             result = subprocess.run(
                 [str(CLASS_SWEEP_PATH)],
@@ -618,10 +629,35 @@ class FairnessMultiSampleTest(unittest.TestCase):
                     """\
                     #!/usr/bin/env bash
                     set -euo pipefail
+                    out_dir=
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --out-dir) out_dir=$2; shift 2 ;;
+                            --) shift; break ;;
+                            *) shift ;;
+                        esac
+                    done
                     for _ in {1..100}; do
                         [[ -e "$CURL_SENTINEL" ]] && break
                         sleep 0.02
                     done
+                    ts=$(($(date +%s) - 5))
+                    sample_dir="$out_dir/sample-1"
+                    mkdir -p "$sample_dir/artifacts"
+                    cat > "$sample_dir/artifacts/iperf-single.json" <<JSON
+                    {"start":{"timestamp":{"timesecs":$ts},"test_start":{"duration":120}}}
+                    JSON
+                    cat > "$out_dir/summary.json" <<JSON
+                    {
+                      "verdict": "PASS",
+                      "observed_cov": {"mean": 0.1, "max": 0.2, "sample_stdev": 0.01},
+                      "cstruct": {"mean": 0.3},
+                      "gap": {"mean": -0.2, "max": -0.1},
+                      "samples": [
+                        {"sample": 1, "sample_dir": "$sample_dir", "verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0}
+                      ]
+                    }
+                    JSON
                     exit 0
                     """
                 ),
@@ -663,6 +699,9 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 "WRAPPER": str(fake_wrapper),
                 "HARNESS": str(fake_harness),
                 "FAIRNESS_EVAL": str(fake_eval),
+                "WARMUP": "0",
+                "EQUAL_FLOW_ESTIMATOR_WINDOW_SECS": "0",
+                "FINAL_BURST": "0",
             }
             result = subprocess.run(
                 [str(CLASS_SWEEP_PATH)],
@@ -712,6 +751,262 @@ class FairnessMultiSampleTest(unittest.TestCase):
         self.assertEqual(reduced["complete_scrape_count"], 1)
         self.assertEqual(reduced["latest"]["worker_count"], 2)
         self.assertEqual(reduced["series"]["suppressed_bps"]["mean"], 100)
+
+    def test_equal_flow_capture_filters_to_sample_steady_windows(self) -> None:
+        def metric_block(timestamp: int, observed_bps: int) -> str:
+            return textwrap.dedent(
+                f"""\
+                # xpf_fairness_scrape_begin timestamp={timestamp}
+                xpf_fairness_equal_flow_estimate_valid{{ifindex="5",queue_id="6"}} 1
+                xpf_fairness_equal_flow_sampled_active_workers{{ifindex="5",queue_id="6"}} 1
+                xpf_fairness_equal_flow_unsampled_active_workers{{ifindex="5",queue_id="6"}} 0
+                xpf_fairness_equal_flow_target_per_flow_bps{{ifindex="5",queue_id="6"}} 100
+                xpf_fairness_equal_flow_observed_bps{{ifindex="5",queue_id="6"}} {observed_bps}
+                xpf_fairness_equal_flow_capped_bps{{ifindex="5",queue_id="6"}} 100
+                xpf_fairness_equal_flow_suppressed_bps{{ifindex="5",queue_id="6"}} {observed_bps - 100}
+                xpf_fairness_equal_flow_throughput_loss_ratio{{ifindex="5",queue_id="6"}} 0.5
+                xpf_fairness_equal_flow_worker_observed_bps{{ifindex="5",queue_id="6",worker_id="0"}} {observed_bps}
+                xpf_fairness_equal_flow_worker_observed_per_flow_bps{{ifindex="5",queue_id="6",worker_id="0"}} {observed_bps}
+                xpf_fairness_equal_flow_worker_cap_bps{{ifindex="5",queue_id="6",worker_id="0"}} 100
+                xpf_fairness_equal_flow_worker_suppressed_bps{{ifindex="5",queue_id="6",worker_id="0"}} {observed_bps - 100}
+                # xpf_fairness_scrape_end timestamp={timestamp}
+                """
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sample_dir = tmp_path / "sample-1"
+            artifact_dir = sample_dir / "artifacts"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "iperf-single.json").write_text(
+                json.dumps(
+                    {
+                        "start": {
+                            "timestamp": {"timesecs": 100},
+                            "test_start": {"duration": 20},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            summary_path = tmp_path / "summary.json"
+            summary_path.write_text(
+                json.dumps({"samples": [{"sample": 1, "sample_dir": str(sample_dir)}]}) + "\n",
+                encoding="utf-8",
+            )
+            raw = metric_block(103, 1000) + metric_block(106, 3000) + metric_block(119, 9000)
+
+            scrapes, empty, errors = fairness_equal_flow_capture.split_scrapes(raw)
+            self.assertEqual(empty, [])
+            self.assertEqual(errors, [])
+            windows = fairness_equal_flow_capture.load_steady_windows(
+                summary_path,
+                warmup_secs=5,
+                estimator_window_secs=0,
+                final_burst_secs=1,
+            )
+            filtered = fairness_equal_flow_capture.filter_scrapes_to_steady_windows(
+                scrapes,
+                windows,
+            )
+            self.assertEqual([row["timestamp"] for row in filtered], ["106"])
+            reduced = fairness_equal_flow_capture.reduce_scrapes(filtered, "5", "6")
+            self.assertEqual(reduced["series"]["observed_bps"]["mean"], 3000)
+
+    def test_equal_flow_capture_applies_estimator_window_flush(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sample_dir = tmp_path / "sample-1"
+            artifact_dir = sample_dir / "artifacts"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "iperf-single.json").write_text(
+                json.dumps(
+                    {
+                        "start": {
+                            "timestamp": {"timesecs": 100},
+                            "test_start": {"duration": 75},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            summary_path = tmp_path / "summary.json"
+            summary_path.write_text(
+                json.dumps({"samples": [{"sample": 1, "sample_dir": str(sample_dir)}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            windows = fairness_equal_flow_capture.load_steady_windows(
+                summary_path,
+                warmup_secs=5,
+                estimator_window_secs=30,
+                final_burst_secs=1,
+            )
+            self.assertEqual(windows[0]["start_epoch"], 135)
+            self.assertEqual(windows[0]["end_epoch"], 174)
+
+            raw = (
+                "# xpf_fairness_scrape_begin timestamp=134\n"
+                "# xpf_fairness_scrape_end timestamp=134\n"
+                "# xpf_fairness_scrape_begin timestamp=135\n"
+                "# xpf_fairness_scrape_end timestamp=135\n"
+                "# xpf_fairness_scrape_begin timestamp=174\n"
+                "# xpf_fairness_scrape_end timestamp=174\n"
+            )
+            scrapes, _, _ = fairness_equal_flow_capture.split_scrapes(raw)
+            filtered = fairness_equal_flow_capture.filter_scrapes_to_steady_windows(
+                scrapes,
+                windows,
+            )
+            self.assertEqual([row["timestamp"] for row in filtered], ["135"])
+
+    def test_equal_flow_capture_rejects_too_short_for_estimator_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sample_dir = tmp_path / "sample-1"
+            artifact_dir = sample_dir / "artifacts"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "iperf-single.json").write_text(
+                json.dumps(
+                    {
+                        "start": {
+                            "timestamp": {"timesecs": 100},
+                            "test_start": {"duration": 36},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            summary_path = tmp_path / "summary.json"
+            summary_path.write_text(
+                json.dumps({"samples": [{"sample": 1, "sample_dir": str(sample_dir)}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                fairness_equal_flow_capture.CaptureError,
+                r"duration 36s <= warmup 5s \+ estimator-window 30s \+ final-burst 1s",
+            ):
+                fairness_equal_flow_capture.load_steady_windows(
+                    summary_path,
+                    warmup_secs=5,
+                    estimator_window_secs=30,
+                    final_burst_secs=1,
+                )
+
+    def test_equal_flow_capture_includes_exact_steady_start_boundary(self) -> None:
+        def metric_block(timestamp: int, observed_bps: int) -> str:
+            return textwrap.dedent(
+                f"""\
+                # xpf_fairness_scrape_begin timestamp={timestamp}
+                xpf_fairness_equal_flow_estimate_valid{{ifindex="5",queue_id="6"}} 1
+                xpf_fairness_equal_flow_sampled_active_workers{{ifindex="5",queue_id="6"}} 1
+                xpf_fairness_equal_flow_unsampled_active_workers{{ifindex="5",queue_id="6"}} 0
+                xpf_fairness_equal_flow_target_per_flow_bps{{ifindex="5",queue_id="6"}} 100
+                xpf_fairness_equal_flow_observed_bps{{ifindex="5",queue_id="6"}} {observed_bps}
+                xpf_fairness_equal_flow_capped_bps{{ifindex="5",queue_id="6"}} 100
+                xpf_fairness_equal_flow_suppressed_bps{{ifindex="5",queue_id="6"}} {observed_bps - 100}
+                xpf_fairness_equal_flow_throughput_loss_ratio{{ifindex="5",queue_id="6"}} 0.5
+                xpf_fairness_equal_flow_worker_observed_bps{{ifindex="5",queue_id="6",worker_id="0"}} {observed_bps}
+                xpf_fairness_equal_flow_worker_observed_per_flow_bps{{ifindex="5",queue_id="6",worker_id="0"}} {observed_bps}
+                xpf_fairness_equal_flow_worker_cap_bps{{ifindex="5",queue_id="6",worker_id="0"}} 100
+                xpf_fairness_equal_flow_worker_suppressed_bps{{ifindex="5",queue_id="6",worker_id="0"}} {observed_bps - 100}
+                # xpf_fairness_scrape_end timestamp={timestamp}
+                """
+            )
+
+        raw = metric_block(104, 1000) + metric_block(105, 2000) + metric_block(119, 9000)
+        scrapes, _, _ = fairness_equal_flow_capture.split_scrapes(raw)
+        filtered = fairness_equal_flow_capture.filter_scrapes_to_steady_windows(
+            scrapes,
+            [{"start_epoch": 105, "end_epoch": 119}],
+        )
+        self.assertEqual([row["timestamp"] for row in filtered], ["105"])
+
+    def test_equal_flow_capture_rejects_fractional_second_args(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError):
+            fairness_equal_flow_capture.parse_nonnegative_seconds_arg("0.5")
+
+    def test_equal_flow_capture_selects_mixed_artifact_role_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sample_dir = tmp_path / "sample-1"
+            artifact_dir = sample_dir / "artifacts"
+            artifact_dir.mkdir(parents=True)
+            for name, start in (("iperf-primary.json", 100), ("iperf-mixed.json", 200)):
+                (artifact_dir / name).write_text(
+                    json.dumps(
+                        {
+                            "start": {
+                                "timestamp": {"timesecs": start},
+                                "test_start": {"duration": 20},
+                            }
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            summary_path = tmp_path / "summary.json"
+            summary_path.write_text(
+                json.dumps({"samples": [{"sample": 1, "sample_dir": str(sample_dir)}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(fairness_equal_flow_capture.CaptureError, "multiple iperf JSON artifacts"):
+                fairness_equal_flow_capture.load_steady_windows(
+                    summary_path,
+                    warmup_secs=5,
+                    estimator_window_secs=0,
+                    final_burst_secs=1,
+                )
+            windows = fairness_equal_flow_capture.load_steady_windows(
+                summary_path,
+                warmup_secs=5,
+                estimator_window_secs=0,
+                final_burst_secs=1,
+                iperf_artifact_role="mixed",
+            )
+            self.assertEqual(windows[0]["iperf_json"], str(artifact_dir / "iperf-mixed.json"))
+            self.assertEqual(windows[0]["start_epoch"], 205)
+
+    def test_equal_flow_capture_single_role_rejects_primary_only_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sample_dir = tmp_path / "sample-1"
+            artifact_dir = sample_dir / "artifacts"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "iperf-primary.json").write_text(
+                json.dumps(
+                    {
+                        "start": {
+                            "timestamp": {"timesecs": 100},
+                            "test_start": {"duration": 20},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            summary_path = tmp_path / "summary.json"
+            summary_path.write_text(
+                json.dumps({"samples": [{"sample": 1, "sample_dir": str(sample_dir)}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                fairness_equal_flow_capture.CaptureError,
+                "missing iperf-single.json for --iperf-artifact-role single",
+            ):
+                fairness_equal_flow_capture.load_steady_windows(
+                    summary_path,
+                    warmup_secs=5,
+                    estimator_window_secs=0,
+                    final_burst_secs=1,
+                    iperf_artifact_role="single",
+                )
 
     def test_equal_flow_capture_fails_when_target_class_rows_missing(self) -> None:
         raw = textwrap.dedent(

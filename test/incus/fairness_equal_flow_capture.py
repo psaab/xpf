@@ -34,6 +34,16 @@ WORKER_METRICS = {
 
 AGGREGATE_FIELDS = tuple(AGGREGATE_METRICS.values())
 WORKER_FIELDS = tuple(WORKER_METRICS.values())
+IPERF_ARTIFACT_CANDIDATES = (
+    "iperf-single.json",
+    "iperf-primary.json",
+    "iperf-mixed.json",
+)
+IPERF_ARTIFACT_BY_ROLE = {
+    "single": "iperf-single.json",
+    "primary": "iperf-primary.json",
+    "mixed": "iperf-mixed.json",
+}
 PROM_SAMPLE_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+(\S+)(?:\s+\d+)?$")
 LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"')
 BEGIN_RE = re.compile(r"^# xpf_fairness_scrape_begin timestamp=(\S+)$")
@@ -136,6 +146,25 @@ def require_count_metric(value: float, field_name: str, timestamp: str) -> int:
     return int(value)
 
 
+def require_nonnegative_number(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CaptureError(f"{field_name} must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise CaptureError(f"{field_name} must be a non-negative finite number")
+    return number
+
+
+def parse_nonnegative_seconds_arg(raw: str) -> int:
+    try:
+        value = int(raw, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{raw!r} must be a non-negative integer second count") from exc
+    if str(value) != raw or value < 0:
+        raise argparse.ArgumentTypeError(f"{raw!r} must be a non-negative integer second count")
+    return value
+
+
 def parse_equal_flow_line(line: str) -> tuple[str, dict[str, str], float] | None:
     if not line or line.startswith("#"):
         return None
@@ -148,6 +177,120 @@ def parse_equal_flow_line(line: str) -> tuple[str, dict[str, str], float] | None
     if metric not in AGGREGATE_METRICS and metric not in WORKER_METRICS:
         raise CaptureError(f"unknown equal-flow metric name: {metric}")
     return metric, parse_labels(match.group(2)), parse_number(match.group(3))
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CaptureError(f"{path}: invalid JSON: {exc}") from exc
+    except OSError as exc:
+        raise CaptureError(f"{path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise CaptureError(f"{path}: expected JSON object")
+    return value
+
+
+def _find_iperf_artifact(sample_dir: Path, role: str) -> Path:
+    artifact_dir = sample_dir / "artifacts"
+    if role != "auto":
+        path = artifact_dir / IPERF_ARTIFACT_BY_ROLE[role]
+        if path.is_file():
+            return path
+        raise CaptureError(f"{sample_dir}: missing {path.name} for --iperf-artifact-role {role}")
+
+    found = [artifact_dir / name for name in IPERF_ARTIFACT_CANDIDATES if (artifact_dir / name).is_file()]
+    if len(found) != 1:
+        candidates = ", ".join(str(artifact_dir / name) for name in IPERF_ARTIFACT_CANDIDATES)
+        if not found:
+            raise CaptureError(f"{sample_dir}: no iperf JSON artifact found; expected one of {candidates}")
+        raise CaptureError(
+            f"{sample_dir}: multiple iperf JSON artifacts found: {', '.join(str(p) for p in found)}; "
+            "pass --iperf-artifact-role primary or --iperf-artifact-role mixed"
+        )
+    return found[0]
+
+
+def load_steady_windows(
+    sample_summary_path: Path,
+    *,
+    warmup_secs: int,
+    final_burst_secs: int,
+    estimator_window_secs: int,
+    iperf_artifact_role: str = "auto",
+) -> list[dict[str, Any]]:
+    summary = _read_json_object(sample_summary_path)
+    samples = summary.get("samples")
+    if not isinstance(samples, list) or not samples:
+        raise CaptureError(f"{sample_summary_path}: samples must be a non-empty array")
+
+    windows: list[dict[str, Any]] = []
+    for position, sample in enumerate(samples, start=1):
+        if not isinstance(sample, dict):
+            raise CaptureError(f"{sample_summary_path}: sample {position} must be an object")
+        sample_dir_raw = sample.get("sample_dir")
+        if not isinstance(sample_dir_raw, str) or not sample_dir_raw:
+            raise CaptureError(f"{sample_summary_path}: sample {position} missing sample_dir")
+        sample_dir = Path(sample_dir_raw)
+        iperf_path = _find_iperf_artifact(sample_dir, iperf_artifact_role)
+        iperf = _read_json_object(iperf_path)
+        try:
+            start_epoch = require_nonnegative_number(
+                iperf["start"]["timestamp"]["timesecs"],
+                f"{iperf_path}: start.timestamp.timesecs",
+            )
+            duration_secs = require_nonnegative_number(
+                iperf["start"]["test_start"]["duration"],
+                f"{iperf_path}: start.test_start.duration",
+            )
+        except KeyError as exc:
+            raise CaptureError(f"{iperf_path}: missing iperf start timestamp or duration field") from exc
+
+        if duration_secs <= warmup_secs + estimator_window_secs + final_burst_secs:
+            raise CaptureError(
+                f"{iperf_path}: duration {duration_secs:g}s <= warmup {warmup_secs:g}s + "
+                f"estimator-window {estimator_window_secs:g}s + final-burst {final_burst_secs:g}s"
+            )
+        steady_start = start_epoch + warmup_secs + estimator_window_secs
+        steady_end = start_epoch + duration_secs - final_burst_secs
+        windows.append(
+            {
+                "sample": sample.get("sample", position),
+                "sample_dir": str(sample_dir),
+                "iperf_json": str(iperf_path),
+                "start_epoch": steady_start,
+                "end_epoch": steady_end,
+            }
+        )
+    return windows
+
+
+def filter_scrapes_to_steady_windows(
+    scrapes: list[dict[str, Any]],
+    windows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not windows:
+        return scrapes
+    selected: list[dict[str, Any]] = []
+    for scrape in scrapes:
+        timestamp_raw = scrape["timestamp"]
+        try:
+            timestamp = float(timestamp_raw)
+        except ValueError as exc:
+            raise CaptureError(f"scrape timestamp is not numeric and cannot be steady-window filtered: {timestamp_raw}") from exc
+        if not math.isfinite(timestamp):
+            raise CaptureError(f"scrape timestamp is not finite and cannot be steady-window filtered: {timestamp_raw}")
+        if any(window["start_epoch"] <= timestamp < window["end_epoch"] for window in windows):
+            selected.append(scrape)
+    if not selected:
+        first = windows[0]
+        last = windows[-1]
+        raise CaptureError(
+            "steady-window filter selected no scrapes "
+            f"(first={first['start_epoch']:g}-{first['end_epoch']:g}, "
+            f"last={last['start_epoch']:g}-{last['end_epoch']:g})"
+        )
+    return selected
 
 
 def reduce_scrapes(scrapes: list[dict[str, Any]], ifindex: str, queue_id: str) -> dict[str, Any]:
@@ -285,6 +428,34 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--raw", type=Path, required=True)
     parser.add_argument("--ifindex", required=True)
     parser.add_argument("--queue-id", required=True)
+    parser.add_argument(
+        "--sample-summary",
+        type=Path,
+        help=(
+            "fairness_multi_sample.py summary.json. When set, equal-flow "
+            "scrapes are reduced only inside each sample's iperf steady-state window."
+        ),
+    )
+    parser.add_argument("--warmup-secs", type=parse_nonnegative_seconds_arg, default=5)
+    parser.add_argument(
+        "--estimator-window-secs",
+        type=parse_nonnegative_seconds_arg,
+        default=0,
+        help=(
+            "Additional seconds after warmup to exclude so rolling equal-flow "
+            "gauges no longer include pre-steady traffic. The class sweep passes 30s."
+        ),
+    )
+    parser.add_argument("--final-burst-secs", type=parse_nonnegative_seconds_arg, default=1)
+    parser.add_argument(
+        "--iperf-artifact-role",
+        choices=("auto", "single", "primary", "mixed"),
+        default="auto",
+        help=(
+            "Which preserved iperf JSON artifact defines the timing window. "
+            "Use primary or mixed when a future mixed-mode wrapper preserves both."
+        ),
+    )
     parser.add_argument("--summary-json", type=Path, required=True)
     parser.add_argument("--aggregate-tsv", type=Path, required=True)
     parser.add_argument("--worker-tsv", type=Path, required=True)
@@ -304,7 +475,24 @@ def main(argv: list[str]) -> int:
             raise CaptureError(
                 "metrics scrape curl failure(s): " + ", ".join(error_timestamps[:5])
             )
+        raw_scrape_count = len(scrapes)
+        steady_windows: list[dict[str, Any]] = []
+        if args.sample_summary is not None:
+            steady_windows = load_steady_windows(
+                args.sample_summary,
+                warmup_secs=args.warmup_secs,
+                final_burst_secs=args.final_burst_secs,
+                estimator_window_secs=args.estimator_window_secs,
+                iperf_artifact_role=args.iperf_artifact_role,
+            )
+            scrapes = filter_scrapes_to_steady_windows(scrapes, steady_windows)
         reduced = reduce_scrapes(scrapes, args.ifindex, args.queue_id)
+        reduced["raw_scrape_count"] = raw_scrape_count
+        reduced["steady_window_scrape_count"] = len(scrapes)
+        reduced["steady_windows"] = steady_windows
+        reduced["warmup_secs"] = args.warmup_secs
+        reduced["estimator_window_secs"] = args.estimator_window_secs
+        reduced["final_burst_secs"] = args.final_burst_secs
         args.summary_json.write_text(
             json.dumps(public_summary(reduced), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
