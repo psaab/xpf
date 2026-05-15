@@ -990,12 +990,11 @@ var ConfigSetDataplaneKnobs = map[string]*Node{
 // ConfigClassOfServiceSchedulers is the per-leaf typed-value schema for
 // `set class-of-service schedulers <name> { ... }` (#1319 Phase 2).
 //
-// It defines the value semantics for the four scheduler leaves the
+// It defines the value semantics for the three scheduler leaves the
 // compiler actually consumes today (see
 // pkg/config/compiler_class_of_service.go around lines 227-251):
 // transmit-rate (rate, optional `exact` modifier), priority (enum),
-// buffer-size (byte-size or percent, with optional `temporal` modifier
-// per Junos), and shaping-rate (rate).
+// and buffer-size (byte-size with optional `temporal` modifier per Junos).
 //
 // The set-mode tab/`?` completer uses these via SchemaValidate's
 // walker — the existing pkg/config/ast.go schemaNode tree still
@@ -1013,7 +1012,7 @@ var ConfigClassOfServiceSchedulers = &Node{
 		"transmit-rate": {
 			Desc:          "Transmit rate (bandwidth allocated to this scheduler)",
 			ValueType:     ValueRate,
-			ValueDesc:     "Bandwidth (e.g. 100k, 10m, 1g) or bps integer; > 0",
+			ValueDesc:     "Bandwidth (e.g. 100k, 10m, 1g) or bps integer; >= 8 bps",
 			ValueExamples: []string{"100k", "10m", "1g", "10g"},
 			Validator:     config.ValidateRate,
 			Children: map[string]*Node{
@@ -1030,21 +1029,14 @@ var ConfigClassOfServiceSchedulers = &Node{
 			}),
 		},
 		"buffer-size": {
-			Desc:          "Buffer allocation for this scheduler (bytes or percent)",
+			Desc:          "Byte buffer allocation for this scheduler",
 			ValueType:     ValueByteSize,
-			ValueDesc:     "Byte-size (e.g. 16m, 256k) or bare integer 0..100 for percent",
-			ValueExamples: []string{"16m", "256k", "50"},
-			Validator:     config.ValidateByteSizeOrPercent,
+			ValueDesc:     "Byte-size with explicit k/m/g suffix (e.g. 16m, 256k)",
+			ValueExamples: []string{"16m", "256k", "1g"},
+			Validator:     config.ValidateByteSize,
 			Children: map[string]*Node{
 				"temporal": {Desc: "Temporal buffer interpretation (Junos)"},
 			},
-		},
-		"shaping-rate": {
-			Desc:          "Shaping rate (peak rate cap for this scheduler)",
-			ValueType:     ValueRate,
-			ValueDesc:     "Bandwidth cap (e.g. 100k, 10m, 1g); > 0",
-			ValueExamples: []string{"100k", "10m", "1g"},
-			Validator:     config.ValidateRate,
 		},
 		// `surplus-sharing` (#915) and `equal-flow-enforcement` are
 		// presence-only flags — no value to validate. We list them for

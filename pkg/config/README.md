@@ -30,7 +30,7 @@ nothing internal.
   compilation (zones, policies, NAT IDs, etc.) happens later in
   `pkg/dataplane.Manager.Compile`.
 - `Validate*` functions — `schema_validators.go`. Stateless string
-  validators (`ValidateRate`, `ValidateByteSizeOrPercent`,
+  validators (`ValidateRate`, `ValidateByteSize`,
   `ValidateInteger(min,max)`, `ValidateEnum(allowed)`,
   `ValidatePercent(min,max)`) for the #1319 typed-leaf gate. Attached
   to `cmdtree.Node.Validator` fields and dispatched by

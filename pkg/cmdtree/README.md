@@ -39,12 +39,15 @@ exactly one value of the declared kind at the next slot.
   sees what's accepted instead of an empty cursor.
 - `SchemaValidate` invokes the leaf's `Validator` at commit-check.
   Validators are stateless string-checkers (`config.ValidateRate`,
-  `config.ValidateByteSizeOrPercent`, ...) declared in `pkg/config` so
-  they share the same parsers the compiler uses.
+  `config.ValidateByteSize`, ...) declared in `pkg/config` so they
+  share the same parsers the compiler uses.
 
 This PR ships typed leaves only for `class-of-service schedulers`
-(`transmit-rate`, `priority`, `buffer-size`, `shaping-rate`). Every
-other Node remains on `ValueAny` (zero value) — no behaviour change.
+(`transmit-rate`, `priority`, `buffer-size`). Every other Node remains
+on `ValueAny` (zero value) — no behaviour change. Leaves are only typed
+when the compiler consumes them today; scheduler-level `shaping-rate`
+is intentionally not listed because shaping is implemented under
+`class-of-service interfaces ... unit ... shaping-rate`.
 Adding a new typed subtree means:
 
 1. populate `ValueType` + `Validator` on the relevant Node(s);

@@ -26,7 +26,10 @@ type LeafValidator func(raw string, cfg *Config) error
 
 // validateRate accepts a Junos bandwidth value (bits/sec) like
 // "100k", "10m", "1g", or a bare positive integer. Empty input is
-// rejected — a typed leaf with no value is meaningless.
+// rejected — a typed leaf with no value is meaningless. Values below
+// 8 bps are rejected because the compiler stores scheduler rates in
+// bytes/sec; accepting 1..7 bps would round-trip as 0 and silently
+// disable the configured rate.
 func ValidateRate(raw string, _ *Config) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected bandwidth, e.g. 100k, 10m, 1g)")
@@ -35,31 +38,28 @@ func ValidateRate(raw string, _ *Config) error {
 	if err != nil {
 		return fmt.Errorf("not a valid bandwidth (expected k/m/g suffix, e.g. 10m): %w", err)
 	}
-	if bps == 0 {
-		return fmt.Errorf("bandwidth must be > 0 (got %q)", raw)
+	if bps < 8 {
+		return fmt.Errorf("bandwidth must be at least 8 bps so it compiles to a non-zero byte/sec rate (got %q)", raw)
 	}
 	return nil
 }
 
-// validateByteSizeOrPercent accepts either:
-//   - a byte-count with optional k/m/g suffix (e.g. "16m"); or
-//   - a bare integer 0..100 interpreted as a percent of buffer.
-//
-// Junos `buffer-size` accepts both forms; we don't try to disambiguate
-// here, only validate that the string parses as one or the other.
-func ValidateByteSizeOrPercent(raw string, _ *Config) error {
-	if strings.TrimSpace(raw) == "" {
-		return fmt.Errorf("missing value (expected byte-size like 16m, or percent 0..100)")
+// validateByteSize accepts the byte-size form the current CoS compiler
+// actually consumes. Junos also has percent-shaped buffer-size syntax,
+// but xpf has no percent representation yet and parseBurstSizeLimit
+// treats a bare integer as bytes. Reject bare integers here so
+// `buffer-size 50` cannot pass validation and compile as a 50-byte
+// queue.
+func ValidateByteSize(raw string, _ *Config) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fmt.Errorf("missing value (expected byte-size with k/m/g suffix, e.g. 16m)")
 	}
-	// Try percent first (bare integer 0..100).
-	if pct, err := strconv.Atoi(raw); err == nil {
-		if pct < 0 || pct > 100 {
-			return fmt.Errorf("percent must be in 0..100 (got %d)", pct)
-		}
-		return nil
+	if _, err := strconv.ParseUint(trimmed, 10, 64); err == nil {
+		return fmt.Errorf("bare byte-size %q is ambiguous; use an explicit suffix like 50k or 16m", raw)
 	}
-	if _, err := parseBurstSizeLimitStrict(raw); err != nil {
-		return fmt.Errorf("not a valid byte-size or percent (expected 16m, 256k, or 0..100): %w", err)
+	if _, err := parseBurstSizeLimitStrict(trimmed); err != nil {
+		return fmt.Errorf("not a valid byte-size (expected 16m, 256k, or 1g): %w", err)
 	}
 	return nil
 }

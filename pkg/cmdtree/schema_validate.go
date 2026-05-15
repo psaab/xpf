@@ -145,9 +145,27 @@ func validateSchedulerLeaf(schedName string, leaf *config.Node, schemaSchedRoot 
 func validateValueTokens(schedName, leafName string, schemaNode *Node, values []string, cfg *config.Config) error {
 	cur := schemaNode
 	consumedTypedValue := false
+	typedLeaf := schemaNode != nil && schemaNode.IsTypedLeaf() && schemaNode.Validator != nil
+	if typedLeaf && len(values) == 0 {
+		return fmt.Errorf(
+			"class-of-service schedulers %s %s: missing value",
+			schedName, leafName)
+	}
 	for _, tok := range values {
 		if cur == nil {
+			if typedLeaf {
+				return fmt.Errorf(
+					"class-of-service schedulers %s %s: unknown modifier %q",
+					schedName, leafName, tok)
+			}
 			return nil
+		}
+		if allowsModifierOnlyTypedLeaf(leafName, tok) && cur == schemaNode && !consumedTypedValue {
+			if next, ok := cur.Children[tok]; ok {
+				cur = next
+				consumedTypedValue = false
+				continue
+			}
 		}
 		if cur.IsTypedLeaf() && cur.Validator != nil && !consumedTypedValue {
 			if err := cur.Validator(tok, cfg); err != nil {
@@ -160,16 +178,30 @@ func validateValueTokens(schedName, leafName string, schemaNode *Node, values []
 		}
 		// Not a typed value slot — token must be a child keyword.
 		if cur.Children == nil {
+			if typedLeaf {
+				return fmt.Errorf(
+					"class-of-service schedulers %s %s: unknown modifier %q",
+					schedName, leafName, tok)
+			}
 			return nil
 		}
 		next, ok := cur.Children[tok]
 		if !ok {
-			// Token doesn't match a known modifier — leave reporting
-			// to the existing compiler; not our job to flag typos.
+			if typedLeaf {
+				return fmt.Errorf(
+					"class-of-service schedulers %s %s: unknown modifier %q",
+					schedName, leafName, tok)
+			}
+			// Token doesn't match a known modifier on an untyped leaf —
+			// leave reporting to the existing compiler.
 			return nil
 		}
 		cur = next
 		consumedTypedValue = false
 	}
 	return nil
+}
+
+func allowsModifierOnlyTypedLeaf(leafName, tok string) bool {
+	return leafName == "transmit-rate" && tok == "exact"
 }
