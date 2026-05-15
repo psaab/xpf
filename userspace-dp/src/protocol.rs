@@ -180,8 +180,8 @@ pub(crate) struct CoSSchedulerSnapshot {
     pub surplus_sharing: bool,
     /// Explicit opt-in for shared flow-aware enforcement on positive
     /// `transmit-rate exact` schedulers. Defaults false for older
-    /// snapshots and is only carried as config until coordinator
-    /// integration wires the lease algorithm.
+    /// snapshots. The coordinator maps this onto shared v8 queue-lease
+    /// equal-flow suppression.
     #[serde(rename = "equal_flow_enforcement", default)]
     pub equal_flow_enforcement: bool,
 }
