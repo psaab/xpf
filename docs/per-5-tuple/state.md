@@ -519,6 +519,13 @@ MQFQ, v8 lease selection, or admission.
   slice adds Rust shared-v8 enforcement telemetry and fail-open guarded
   rate suppression for positive exact-rate CoS schedulers without
   `surplus-sharing`.
+- **#1312 — Low-rate exact-class buffer sizing**: active follow-up.
+  Reverse q0/q4 retransmits reproduced with equal-flow disabled, so the
+  equal-flow suppressor was not causal. The canonical iperf fixtures now
+  pin `scheduler-be buffer-size 500k` and
+  `scheduler-iperf-a buffer-size 4m`; the May 15 q0/q4 rerun reduced
+  retransmits from ~74k/~35k per run to ~650/~222 and reduced CoS
+  admission drops from ~222k/~104k to ~1.9k/~527.
 
 ## Empirical sweep across workload classes (2026-05-07)
 
