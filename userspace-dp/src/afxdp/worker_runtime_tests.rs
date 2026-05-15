@@ -258,27 +258,38 @@ fn snapshot_window_never_observes_torn_tuple_under_concurrent_writer() {
         std::hint::spin_loop();
     }
 
+    // Record the first invariant violation rather than panicking inline.
+    // Panicking inside the for loop would skip the stop+join cleanup below
+    // and leave the writer thread spinning for the rest of the libtest
+    // process — exactly the cleanup class round-1 fixed for the bounded
+    // wait, just on the actual torn-tuple regression path.
     let mut nonzero_snapshots: u64 = 0;
+    let mut tear_violation: Option<String> = None;
     for _ in 0..100_000 {
         let w = atomics.snapshot_window();
         if w.window_ns > 0 {
             nonzero_snapshots = nonzero_snapshots.saturating_add(1);
-            assert!(
-                w.thread_cpu_ns <= w.window_ns,
-                "torn tuple: thread_cpu_ns={} > window_ns={}",
-                w.thread_cpu_ns,
-                w.window_ns,
-            );
-            assert!(
-                w.active_ns <= w.window_ns,
-                "torn tuple: active_ns={} > window_ns={}",
-                w.active_ns,
-                w.window_ns,
-            );
+            if w.thread_cpu_ns > w.window_ns {
+                tear_violation = Some(format!(
+                    "torn tuple: thread_cpu_ns={} > window_ns={}",
+                    w.thread_cpu_ns, w.window_ns,
+                ));
+                break;
+            }
+            if w.active_ns > w.window_ns {
+                tear_violation = Some(format!(
+                    "torn tuple: active_ns={} > window_ns={}",
+                    w.active_ns, w.window_ns,
+                ));
+                break;
+            }
         }
     }
     stop.store(true, Ordering::Relaxed);
     writer.join().unwrap();
+    if let Some(msg) = tear_violation {
+        panic!("{}", msg);
+    }
 
     // Guard against a broken reader returning all zeros (window_ns=0
     // skips the asserts above): require a non-trivial number of real
