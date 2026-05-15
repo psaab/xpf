@@ -1,6 +1,47 @@
 ## Status
 
-DRAFT v2 — incorporates round-1 review feedback (Codex MAJOR + Gemini MINOR, both converged on the same architectural correction).
+DRAFT v3 — incorporates round-2 review feedback (Codex PLAN-NEEDS-MAJOR with 2 real semantic errors I introduced; Gemini PLAN-READY missed both).
+
+### v3 changes vs v2
+
+1. **Dropped the prescriptive narrow-input signature sketch.** v2
+   listed signatures like `windowing::extract_window(intervals,
+   test_start, warmup_secs, final_burst_secs) -> Window` that I
+   wrote from imagination without verifying against the actual
+   call chain in `fn main()`. Codex round-2 correctly caught
+   that the sketch dropped required data (e.g. `extract_window`
+   omitted `start.connected[]` which is needed for the
+   PR-r1+r2-fixed starved-flow seeding at L610; `rss::evaluate`
+   omitted `cstruct` and `n_total_workers`; `verdict::evaluate`
+   was underspecified vs the ~15 inputs the actual decision
+   tree reads at L866-895). v3 replaces the sketch with a
+   discipline statement: submodule fn signatures will be
+   derived directly from the existing call-site data
+   dependencies at implementation time. No data flow change;
+   pure code motion means the inputs are whatever the existing
+   block already reads.
+
+2. **Corrected "saturated-only aggregate gate" claim.** v2
+   described `verdict.rs` as owning a "saturated-only aggregate
+   gate." Codex round-2 correctly caught that the current code
+   at L857-864 computes `saturated` as a reporting field stored
+   in the `Verdict` struct (L922), but does NOT include it in
+   `failure_reasons`. There is no saturation gate today.
+   Implementing one would be a behavior change. v3 corrects
+   the verdict.rs description to "the actual current failure
+   reasons (starved>0, gap>EPSILON, !a_i_sum_check_ok,
+   !rss_expectation_pass, cos_queue sum guard) + the saturated
+   *reporting* field."
+
+3. **Fixed stale "7 tests" in risk-assessment table.**
+   Test count is 16 throughout the doc now.
+
+4. **Removed crate-root/lib fallback residue.** v2 Hidden
+   Invariant #6 committed to `#[path]` correctly, but the
+   out-of-scope and open-questions sections still mentioned
+   "elevation to `pub mod fairness;`" as a possible option.
+   v3 deletes that residue — there is one architecture, not
+   two.
 
 ### v2 changes vs v1
 
@@ -134,11 +175,16 @@ userspace-dp/src/
                                guard_sum_tolerances, trim_distribution_to_sum
     rss.rs                     evaluate_rss_expectation + RssExpectation
                                (currently L367–540, ~170 LOC)
-    verdict.rs                 the pass/fail decision tree at the bottom of
-                               main: Cstruct + 0.05 ceiling, starved-flow
-                               hard fail, saturated-only aggregate gate,
-                               GUARD_RELATIVE / GUARD_OVERCOUNT_DIVISOR /
-                               GUARD_ABSOLUTE consts
+    verdict.rs                 the actual pass/fail decision tree at L866-895
+                               of main: starved-flow hard fail (Gate 1),
+                               per-flow CoV gap > EPSILON (Gate 2),
+                               !a_i_sum_check_ok harness guard,
+                               !rss_expectation_pass, and the cos_queue
+                               sum-mismatch guard. Owns the GUARD_RELATIVE /
+                               GUARD_OVERCOUNT_DIVISOR / GUARD_ABSOLUTE /
+                               EPSILON consts. The `saturated` field at L857
+                               is computed here as a REPORTING value
+                               (in Verdict struct at L922), NOT a gate.
     report.rs                  Report struct + JSON/TSV emission for
                                autoresearch pipelines
 ```
@@ -275,7 +321,7 @@ byte-for-byte identical. Verified by:
 
 | Class | Level | Rationale |
 |---|---|---|
-| Behavioral regression risk | LOW | Pure code motion. 1144-LOC black-box test suite (7 tests) gates the binary's external behavior. CLI surface unchanged. Numeric constants explicitly preserved. |
+| Behavioral regression risk | LOW | Pure code motion. 1144-LOC black-box test suite (16 tests) gates the binary's external behavior. CLI surface unchanged. Numeric constants explicitly preserved. |
 | Lifetime / borrow-checker risk | LOW | All current ownership is `&str` / `Vec<...>` / `BTreeMap<u64, Vec<u64>>` — no `Arc`, no async, no `&mut self` across closures. Moving fns to sibling modules doesn't introduce new lifetime constraints. |
 | Performance regression risk | NIL | Build-time-only binary. Off the dataplane. No worker, no per-packet path, no shared atomic. |
 | Architectural mismatch risk (#961 / #946 Phase 2 dead-end pattern) | LOW | This refactor doesn't propose a new architecture; it splits an existing fn into siblings. There's no premise that could fail — either the file split is mechanical and clean, or it isn't and the PR doesn't go in. |
@@ -313,9 +359,9 @@ a deviation, stop and revise the plan) is the mitigation.
   starved_flow_count, aggregate_per_worker semantics all stay).
 - No new dependencies (no `clap`, no `serde_yaml`, no `tempfile`
   — preserve the hand-rolled style PR #547 settled on).
-- No touching `src/fairness.rs` beyond possibly elevating it to
-  `pub mod fairness;` at crate root for cleaner submodule
-  imports (see Hidden Invariant #6).
+- No touching `src/fairness.rs`. The four primitives stay where
+  they are. The submodules under `fairness_eval/` reach them via
+  the `#[path]` chain documented in Hidden Invariant #6.
 - No touching `tests/fairness_eval_blackbox.rs` — the black-box
   contract is the gate; touching it during the refactor would
   make verification circular.
@@ -337,17 +383,9 @@ a deviation, stop and revise the plan) is the mitigation.
    may not actually predict review velocity. **Reviewer call:
    PLAN-KILL is acceptable if the win is too theoretical.**
 
-2. **Is the `#[path]` redirection from `bin/` into
-   `src/fairness_eval/` idiomatic?** The existing pattern
-   (`#[path = "../fairness.rs"] mod fairness;` in the binary)
-   suggests yes, but a cleaner Rust idiom is to make
-   `fairness_eval` a proper crate-root module (added via `pub
-   mod fairness_eval;` in `lib.rs` if it exists, or `main.rs`)
-   and have the binary import it as `use
-   xpf_userspace_dp::fairness_eval;`. Does this crate even
-   have a `lib.rs`? If not, can it grow one without
-   destabilizing other binaries (xpf-userspace-dp main, xpf-ha,
-   etc.)? Worth confirming before write-up.
+2. *Settled by v2/v3.* This crate has no `lib.rs` and growing
+   one is out of scope. The `#[path]` chain documented in
+   Hidden Invariant #6 is the chosen approach.
 
 3. **Module size after the split.** 1555 prod LOC across 8
    submodules averages ~190 LOC per submodule. Is that the
@@ -388,22 +426,53 @@ a deviation, stop and revise the plan) is the mitigation.
    submodule call sites. Plus a manual diff smoke (Test #5
    above) comparing pre/post output on a canonical fixture.
 
-7. **`Args` struct as a parameter-passing vehicle.** v2
-   revised: pass `&Args` only at the orchestrator entry points
-   (`run_evaluation`, `inputs::load`, `report::emit`). Lower-
-   level submodules take narrow typed inputs:
+7. **`Args` struct as a parameter-passing vehicle.** v3
+   discipline: pass `&Args` only at the orchestrator entry
+   points (`run_evaluation`, `inputs::load`, `report::emit`).
+   Lower-level submodules take narrow typed inputs that match
+   what the existing code block at that responsibility already
+   reads.
 
-   - `windowing::extract_window(intervals: &[Iperf3Interval],
-     test_start: &Iperf3TestStart, warmup_secs: u64,
-     final_burst_secs: u64) -> Result<Window, WindowError>`
-   - `per_worker::aggregate(flows: &[BindingFlowsRow], iface: &str,
-     ss_start: f64, ss_end: f64, n_workers: u32) -> WorkerCounts`
-   - `verdict::evaluate(observed_cov: f64, cstruct: f64,
-     starved: u32, guard_ratio: f64) -> Verdict`
-   - `rss::evaluate(distribution: &[u32], expectation:
-     &RssExpectation) -> RssOutcome`
+   v3 deliberately does NOT prescribe the per-fn signatures
+   here. Codex round-2 correctly caught that v2's prescriptive
+   sketches dropped required data (e.g. omitting
+   `start.connected[]` from a proposed `extract_window` would
+   silently regress the PR-r1+r2 starved-flow seeding fix at
+   `bin/fairness-eval.rs:610`). The honest plan-time commitment
+   is:
 
-   This makes each submodule directly unit-testable without
-   constructing a synthetic `Args`, addresses Codex round-1
-   "passing `&Args` everywhere is too blunt", and keeps the
-   submodule dependencies explicit in the function signature.
+   - Submodule fn signatures will be derived **directly from
+     the existing call-site data dependencies** during
+     implementation. Whatever the corresponding L571-L972 block
+     in current `fn main()` reads is what the new fn takes as
+     parameters.
+   - Pure code motion preserves the data flow byte-for-byte;
+     the new types (`Window`, `WorkerCounts`, `RssOutcome`,
+     etc.) are output containers for what each block already
+     produces, NOT new input filters.
+   - Reviewers should focus on the boundary placement (which
+     fns belong in which submodule) and ordering invariant
+     preservation (Hidden Invariants #1 + #6, plus the
+     additional ordering invariants enumerated below in v3),
+     NOT on signature speculation.
+
+   **Code-motion ordering invariants enumerated** (from
+   `bin/fairness-eval.rs` at master `fa456ccc`):
+
+   - L610-620: `per_stream_buckets` MUST be seeded from
+     `iperf.start.connected[]` BEFORE the interval walk; this
+     is the PR-r1+r2 fix for silently-invisible starved flows.
+   - L645-653: `per_flow_throughputs` MUST be derived AFTER
+     the full interval walk, never during.
+   - L661-680: per-binding flow aggregation at `aggregate_per_worker`
+     uses TSV epoch timestamps converted via warmup/final_burst
+     deltas (L250), NOT iperf-relative seconds. Submodule
+     boundary must preserve the epoch-vs-iperf-relative
+     distinction.
+   - L795: trim_distribution_to_sum runs BEFORE Cstruct compute
+     (L850).
+   - L857-864: `saturated` is REPORTING ONLY (in Verdict at
+     L922). It is NOT in `failure_reasons` (L866-895). Do not
+     introduce a saturation gate.
+   - L866-895: failure_reasons composition order matters for
+     diagnostic output; preserve order.
