@@ -184,7 +184,6 @@ trade latency headroom for retransmit suppression (`500k` at 100M ≈ 40 ms
 residence; `4m` at 1G ≈ 32 ms at full queue). Treat changes to these
 fixture values as admission-policy changes and rerun the q0/q4 reverse
 sweep before trusting low-rate fairness evidence.
-
 ## Current dominant failure mode on this workload
 
 **Observed 2026-04-17, post-#728.** This is a dated snapshot, not

@@ -36,8 +36,8 @@
   - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
 
 - **Timestamp**: 2026-05-15T20:33:36Z
-  - **Action**: PR #1312 hostile-review follow-up — clarified low-rate CoS fixture docs with the actual implicit base/cap pipeline (`rate/100` + 96 KB floor, flow-share expansion, #717 delay clamp), documented the queue-residence tradeoff for q0/q4 overrides, and added a regression test pin that 1 Gbps q4 `buffer-size 4m` remains above delay-cap clamping.
-  - **File(s)**: `docs/cos-validation-notes.md`, `docs/fairness-regimes.md`, `userspace-dp/src/afxdp/cos/admission_tests.rs`, `_Log.md`
+  - **Action**: PR #1316 / issue #1312 hostile-review follow-up — clarified low-rate CoS fixture docs with the actual implicit base/cap pipeline (`rate/100` + 96 KB floor, flow-share expansion, #717 delay clamp), documented the queue-residence tradeoff for q0/q4 overrides, added a regression test pin that 1 Gbps q4 `buffer-size 4m` remains above delay-cap clamping, updated canonical fixture buffers, and committed durable validation evidence.
+  - **File(s)**: `test/incus/cos-iperf-config.set`, `test/incus/cos-iperf-symmetric.set`, `test/incus/cos-iperf-same-class.set`, `docs/cos-validation-notes.md`, `docs/fairness-regimes.md`, `docs/per-5-tuple/state.md`, `docs/pr/README.md`, `docs/pr/1316-lowrate-cos-buffers/validation.md`, `docs/pr/line-rate-investigation/full-cos.set`, `userspace-dp/src/afxdp/cos/admission_tests.rs`, `_Log.md`
 
 ## 2026-05-14
 

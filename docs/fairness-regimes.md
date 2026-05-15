@@ -356,6 +356,13 @@ residence for retransmit suppression (q0 500k@100M ≈ 40 ms, q4 4m@1G
 rerunning at least the q0/q4 reverse sweep and checking retransmits plus
 CoS admission drop deltas.
 
+Those values are an explicit validation-fixture tradeoff, not a general
+low-latency recommendation. The extra headroom stabilizes the `-P 12`
+reverse fairness workload, but it can add bufferbloat for
+latency-sensitive traffic. Production configs that care about tail
+latency should size these buffers from the service SLO rather than
+copying the validation fixture blindly.
+
 ```bash
 COS_IFINDEX=<egress-ifindex> \
 IPERF_LAUNCH_ARG_0=/usr/bin/incus \
