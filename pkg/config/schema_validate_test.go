@@ -26,6 +26,21 @@ func schemaCheck(t *testing.T, input string) error {
 	return cmdtree.SchemaValidate(tree, nil)
 }
 
+func flatSchemaCheck(t *testing.T, cmds ...string) error {
+	t.Helper()
+	tree := &config.ConfigTree{}
+	for _, cmd := range cmds {
+		path, err := config.ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", cmd, err)
+		}
+	}
+	return cmdtree.SchemaValidate(tree, nil)
+}
+
 func TestSchemaValidate_TransmitRate_RejectsGarbage(t *testing.T) {
 	err := schemaCheck(t, `class-of-service {
     schedulers {
@@ -59,8 +74,8 @@ func TestSchemaValidate_TransmitRate_AcceptsValid(t *testing.T) {
 
 func TestSchemaValidate_TransmitRate_AcceptsExactModifier(t *testing.T) {
 	if err := schemaCheck(t, `class-of-service {
-    schedulers {
-        be {
+	    schedulers {
+	        be {
             transmit-rate 1g {
                 exact;
             }
@@ -71,9 +86,51 @@ func TestSchemaValidate_TransmitRate_AcceptsExactModifier(t *testing.T) {
 	}
 }
 
+func TestSchemaValidate_TransmitRate_AcceptsSplitExactModifier(t *testing.T) {
+	if err := flatSchemaCheck(t,
+		"set class-of-service schedulers be transmit-rate 1g",
+		"set class-of-service schedulers be transmit-rate exact",
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSchemaValidate_TransmitRate_RejectsTooSmall(t *testing.T) {
+	err := schemaCheck(t, `class-of-service {
+    schedulers {
+        be {
+            transmit-rate 1;
+        }
+    }
+}`)
+	if err == nil {
+		t.Fatal("expected error for transmit-rate 1, got nil")
+	}
+}
+
+func TestSchemaValidate_TransmitRate_RejectsMissingValue(t *testing.T) {
+	err := flatSchemaCheck(t, "set class-of-service schedulers be transmit-rate")
+	if err == nil {
+		t.Fatal("expected error for transmit-rate with no value, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing value") {
+		t.Fatalf("error should describe missing value: %v", err)
+	}
+}
+
+func TestSchemaValidate_TransmitRate_RejectsUnknownModifier(t *testing.T) {
+	err := flatSchemaCheck(t, "set class-of-service schedulers be transmit-rate 1g typo")
+	if err == nil {
+		t.Fatal("expected error for unknown transmit-rate modifier, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown modifier") {
+		t.Fatalf("error should describe unknown modifier: %v", err)
+	}
+}
+
 func TestSchemaValidate_Priority_AcceptsStrictHigh(t *testing.T) {
 	if err := schemaCheck(t, `class-of-service {
-    schedulers {
+	    schedulers {
         be {
             priority strict-high;
         }
@@ -111,15 +168,16 @@ func TestSchemaValidate_BufferSize_AcceptsBytes(t *testing.T) {
 	}
 }
 
-func TestSchemaValidate_BufferSize_AcceptsPercent(t *testing.T) {
-	if err := schemaCheck(t, `class-of-service {
+func TestSchemaValidate_BufferSize_RejectsBareInteger(t *testing.T) {
+	err := schemaCheck(t, `class-of-service {
     schedulers {
         be {
             buffer-size 50;
         }
     }
-}`); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+}`)
+	if err == nil {
+		t.Fatal("expected error for ambiguous bare-integer buffer-size 50, got nil")
 	}
 }
 
@@ -136,29 +194,33 @@ func TestSchemaValidate_BufferSize_RejectsGarbage(t *testing.T) {
 	}
 }
 
-func TestSchemaValidate_BufferSize_RejectsPercentOver100(t *testing.T) {
+func TestSchemaValidate_BufferSize_RejectsUnknownModifier(t *testing.T) {
+	err := flatSchemaCheck(t, "set class-of-service schedulers be buffer-size 16m typo")
+	if err == nil {
+		t.Fatal("expected error for unknown buffer-size modifier, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown modifier") {
+		t.Fatalf("error should describe unknown modifier: %v", err)
+	}
+}
+
+func TestSchemaValidate_BufferSize_RejectsMissingValue(t *testing.T) {
+	err := flatSchemaCheck(t, "set class-of-service schedulers be buffer-size")
+	if err == nil {
+		t.Fatal("expected error for buffer-size with no value, got nil")
+	}
+}
+
+func TestSchemaValidate_BufferSize_RejectsBareIntegerGreaterThan100(t *testing.T) {
 	err := schemaCheck(t, `class-of-service {
     schedulers {
         be {
             buffer-size 150;
         }
     }
-}`)
+	}`)
 	if err == nil {
-		t.Fatal("expected error for buffer-size 150 (out of 0..100), got nil")
-	}
-}
-
-func TestSchemaValidate_ShapingRate_RejectsGarbage(t *testing.T) {
-	err := schemaCheck(t, `class-of-service {
-    schedulers {
-        be {
-            shaping-rate not-a-rate;
-        }
-    }
-}`)
-	if err == nil {
-		t.Fatal("expected error for shaping-rate not-a-rate, got nil")
+		t.Fatal("expected error for ambiguous bare-integer buffer-size 150, got nil")
 	}
 }
 
@@ -166,20 +228,7 @@ func TestSchemaValidate_ShapingRate_RejectsGarbage(t *testing.T) {
 // + tree.SetPath produces: Keys=["schedulers","be","transmit-rate","1g"]
 // (when input is `set class-of-service schedulers be transmit-rate 1g`).
 func TestSchemaValidate_FlatSetSyntax_RejectsGarbage(t *testing.T) {
-	tree := &config.ConfigTree{}
-	cmds := []string{
-		"set class-of-service schedulers be transmit-rate asd",
-	}
-	for _, cmd := range cmds {
-		path, err := config.ParseSetCommand(cmd)
-		if err != nil {
-			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
-		}
-		if err := tree.SetPath(path); err != nil {
-			t.Fatalf("SetPath(%q): %v", cmd, err)
-		}
-	}
-	err := cmdtree.SchemaValidate(tree, nil)
+	err := flatSchemaCheck(t, "set class-of-service schedulers be transmit-rate asd")
 	if err == nil {
 		t.Fatal("expected error for flat-set transmit-rate asd, got nil")
 	}
@@ -189,12 +238,22 @@ func TestSchemaValidate_FlatSetSyntax_RejectsGarbage(t *testing.T) {
 }
 
 func TestSchemaValidate_FlatSetSyntax_AcceptsValid(t *testing.T) {
-	tree := &config.ConfigTree{}
 	cmds := []string{
 		"set class-of-service schedulers be transmit-rate 1g",
 		"set class-of-service schedulers be priority strict-high",
 		"set class-of-service schedulers be buffer-size 16m",
-		"set class-of-service schedulers ef shaping-rate 5g",
+	}
+	if err := flatSchemaCheck(t, cmds...); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestSchemaValidate_AcceptedSchedulerValuesCompileAsValidated(t *testing.T) {
+	tree := &config.ConfigTree{}
+	cmds := []string{
+		"set class-of-service schedulers be transmit-rate 8",
+		"set class-of-service schedulers be transmit-rate exact",
+		"set class-of-service schedulers be buffer-size 16m",
 	}
 	for _, cmd := range cmds {
 		path, err := config.ParseSetCommand(cmd)
@@ -206,7 +265,24 @@ func TestSchemaValidate_FlatSetSyntax_AcceptsValid(t *testing.T) {
 		}
 	}
 	if err := cmdtree.SchemaValidate(tree, nil); err != nil {
-		t.Fatalf("expected no error, got %v", err)
+		t.Fatalf("schema validate: %v", err)
+	}
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	sched := cfg.ClassOfService.Schedulers["be"]
+	if sched == nil {
+		t.Fatal("expected be scheduler")
+	}
+	if got := sched.TransmitRateBytes; got != 1 {
+		t.Fatalf("transmit-rate bytes/sec = %d, want 1", got)
+	}
+	if !sched.TransmitRateExact {
+		t.Fatal("expected transmit-rate exact")
+	}
+	if got := sched.BufferSizeBytes; got != 16000000 {
+		t.Fatalf("buffer-size bytes = %d, want 16000000", got)
 	}
 }
 
@@ -241,7 +317,7 @@ func TestValidateRate(t *testing.T) {
 			t.Errorf("ValidateRate(%q): unexpected error %v", g, err)
 		}
 	}
-	bad := []string{"", "asd", "-1", "1x", "1.0z"}
+	bad := []string{"", "1", "7", "asd", "-1", "1x", "1.0z"}
 	for _, b := range bad {
 		if err := config.ValidateRate(b, nil); err == nil {
 			t.Errorf("ValidateRate(%q): expected error", b)
@@ -249,17 +325,17 @@ func TestValidateRate(t *testing.T) {
 	}
 }
 
-func TestValidateByteSizeOrPercent(t *testing.T) {
-	good := []string{"0", "50", "100", "16m", "256k", "1g"}
+func TestValidateByteSize(t *testing.T) {
+	good := []string{"16m", "256k", "1g"}
 	for _, g := range good {
-		if err := config.ValidateByteSizeOrPercent(g, nil); err != nil {
-			t.Errorf("ValidateByteSizeOrPercent(%q): unexpected error %v", g, err)
+		if err := config.ValidateByteSize(g, nil); err != nil {
+			t.Errorf("ValidateByteSize(%q): unexpected error %v", g, err)
 		}
 	}
-	bad := []string{"", "purple", "150", "-5", "1.5"}
+	bad := []string{"", "0", "50", "100", "150", "purple", "-5", "1.5"}
 	for _, b := range bad {
-		if err := config.ValidateByteSizeOrPercent(b, nil); err == nil {
-			t.Errorf("ValidateByteSizeOrPercent(%q): expected error", b)
+		if err := config.ValidateByteSize(b, nil); err == nil {
+			t.Errorf("ValidateByteSize(%q): expected error", b)
 		}
 	}
 }
