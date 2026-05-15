@@ -11,8 +11,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::afxdp::types::{
-    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, PreparedTxRequest, SharedCoSQueueLease,
-    TxRequest, COS_TIMER_WHEEL_L0_SLOTS, COS_TIMER_WHEEL_L1_SLOTS,
+    COS_TIMER_WHEEL_L0_SLOTS, COS_TIMER_WHEEL_L1_SLOTS, CoSInterfaceRuntime, CoSPendingTxItem,
+    CoSQueueRuntime, PreparedTxRequest, SharedCoSQueueLease, TxRequest,
 };
 use crate::afxdp::worker::BindingWorker;
 
@@ -265,6 +265,32 @@ fn wake_due_cos_timer_slot(root: &mut CoSInterfaceRuntime) {
     for (queue_idx, wake_tick) in rearm {
         rearm_cos_queue(root, queue_idx, wake_tick);
     }
+}
+
+/// Conservative pre-prime gate for `drain_shaped_tx`.
+///
+/// Runnable queues still need priming because root leases and the timer
+/// wheel may make a token-starved queue serviceable on this pass. Parked
+/// queues with a future wake tick cannot service on this pass, so callers
+/// can skip the root prime until a wake tick is due.
+#[inline]
+pub(in crate::afxdp) fn cos_root_can_service_after_prime(
+    root: &CoSInterfaceRuntime,
+    now_ns: u64,
+) -> bool {
+    if root.nonempty_queues == 0 {
+        return false;
+    }
+    if root.runnable_queues > 0 {
+        return true;
+    }
+    let now_tick = cos_tick_for_ns(now_ns);
+    root.queues.iter().any(|queue| {
+        !cos_queue_is_empty(queue)
+            && queue.hot.parked
+            && queue.hot.next_wakeup_tick > 0
+            && queue.hot.next_wakeup_tick <= now_tick
+    })
 }
 
 // ============================================================================

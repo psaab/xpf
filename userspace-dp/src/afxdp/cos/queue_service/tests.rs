@@ -4,12 +4,13 @@
 // `#[path = "tests.rs"]` from mod.rs.
 
 use super::*;
+use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::admission::apply_cos_queue_flow_fair_promotion;
 use crate::afxdp::cos::queue_ops::cos_queue_push_back;
+use crate::afxdp::cos::tx_completion::COS_TIMER_WHEEL_TICK_NS;
 use crate::afxdp::tx::test_support::*;
-use crate::afxdp::types::{SharedCoSQueueLease, V8RateMode};
+use crate::afxdp::types::{SharedCoSQueueLease, SharedCoSRootLease, V8RateMode};
 use crate::afxdp::worker::BindingWorker;
-use crate::afxdp::PROTO_TCP;
 use std::sync::Arc;
 
 const TEST_EPOCH_DURATION_NS: u64 = 200_000;
@@ -929,8 +930,107 @@ fn equal_flow_cap_reaches_drain_shaped_tx_entry_path() {
     );
 }
 
+#[test]
+fn drain_shaped_tx_skips_root_prime_for_parked_not_due_queue() {
+    let mut root = test_cos_interface_runtime(0);
+    root.tokens = 0;
+    root.queues[0].hot.tokens = 1500;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+    park_cos_queue(&mut root, 0, 10);
+
+    let root_lease = Arc::new(SharedCoSRootLease::new(
+        root.shaping_rate_bytes,
+        root.burst_bytes,
+        1,
+    ));
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        Some(root_lease),
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    let mut shared_recycles = Vec::new();
+
+    let drained = drain_shaped_tx(
+        &mut binding,
+        9 * COS_TIMER_WHEEL_TICK_NS,
+        &mut shared_recycles,
+    );
+
+    assert!(drained.is_none());
+    let root = binding.cos.cos_interfaces.get(&42).expect("cos root");
+    assert_eq!(
+        root.timer_wheel.current_tick, 0,
+        "not-yet-due parked queues must not advance the timer wheel"
+    );
+    assert_eq!(
+        root.tokens, 0,
+        "not-yet-due parked queues must not top up the root lease"
+    );
+    assert!(root.queues[0].hot.parked);
+    assert!(!root.queues[0].hot.runnable);
+}
+
+#[test]
+fn drain_shaped_tx_primes_and_services_due_parked_queue() {
+    let mut root = test_cos_interface_runtime(0);
+    root.tokens = 0;
+    root.queues[0].hot.tokens = 1500;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+    park_cos_queue(&mut root, 0, 10);
+
+    let root_lease = Arc::new(SharedCoSRootLease::new(
+        root.shaping_rate_bytes,
+        root.burst_bytes,
+        1,
+    ));
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        Some(root_lease),
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    let mut shared_recycles = Vec::new();
+
+    let drained = drain_shaped_tx(
+        &mut binding,
+        10 * COS_TIMER_WHEEL_TICK_NS,
+        &mut shared_recycles,
+    )
+    .expect("due parked queue must wake and service");
+
+    assert_eq!(drained.root_ifindex, 42);
+    assert_eq!(drained.queue_idx, 0);
+    assert_eq!(drained.queue_id, 0);
+    assert!(
+        binding
+            .live
+            .tx_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+    );
+}
+
 use crate::afxdp::types::{
-    CoSQueueConfig, CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing, COS_FLOW_FAIR_BUCKETS,
+    COS_FLOW_FAIR_BUCKETS, CoSQueueConfig, CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing,
 };
 
 #[test]
