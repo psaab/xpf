@@ -2,6 +2,11 @@
 
 ## 2026-05-15
 
+- **Timestamp**: 2026-05-15T23:00:00Z
+  - **Action**: Restored `go.mod` to pre-PR state after an unintended direct/indirect dependency classification flip during automation-only progress updates.
+  - **File(s)**: `go.mod`, `_Log.md`
+  - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
+
 - **Timestamp**: 2026-05-15T22:56:00Z
   - **Action**: Reverted unintended `go.mod` direct/indirect dependency reorder so round-1 fix remains scoped to CoS runtime lookup logic and tests.
   - **File(s)**: `go.mod`, `_Log.md`
