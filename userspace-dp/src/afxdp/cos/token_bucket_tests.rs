@@ -5,7 +5,9 @@
 
 use super::*;
 use crate::afxdp::tx::test_support::*;
-use crate::afxdp::types::CoSQueueConfig;
+use crate::afxdp::types::{CoSQueueConfig, V8RateMode};
+
+const TEST_EPOCH_DURATION_NS: u64 = 200_000;
 
 #[test]
 fn shared_cos_root_lease_bounds_total_outstanding_credit() {
@@ -230,6 +232,64 @@ fn maybe_top_up_cos_queue_lease_reports_v8_acquire_calls_and_grants() {
         "active v8 worker should receive a nonzero grant"
     );
     assert_eq!(telemetry.v8_granted_bytes, root.queues[0].hot.tokens);
+}
+
+#[test]
+fn maybe_top_up_cos_queue_lease_enforces_equal_flow_cap() {
+    let mut root = test_cos_runtime_with_queues(
+        100_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "iperf-a".into(),
+            priority: 5,
+            transmit_rate_bytes: 100_000_000 / 8,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: true,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+        }],
+    );
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].v_min.worker_id = 0;
+    enable_test_flow_fair(&mut root.queues[0]);
+    test_flow_fair_state_mut(&mut root.queues[0]).active_flow_buckets = 4;
+    let lease = Arc::new(SharedCoSQueueLease::new_v8_with_rate_mode(
+        50_000_000,
+        256 * 1024,
+        8,
+        1,
+        V8RateMode::EqualFlowSuppress,
+    ));
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+    root.queues[0].queue_lease_v8 = Some(lease.clone());
+
+    // Seed two valid skewed epochs through the real v8 lease. Worker 1's
+    // slower 1-flow grant establishes a 1,800 B/flow target; worker 0 has
+    // four active flow buckets, so the next epoch must cap it at 7,200 B.
+    let _ = lease.acquire_v8(0, TEST_EPOCH_DURATION_NS, 8_000);
+    let _ = lease.acquire_v8(1, TEST_EPOCH_DURATION_NS, 1_800);
+    let _ = lease.acquire_v8(0, 2 * TEST_EPOCH_DURATION_NS, 8_000);
+    let _ = lease.acquire_v8(1, 2 * TEST_EPOCH_DURATION_NS, 1_800);
+    let _ = lease.acquire_v8(1, 3 * TEST_EPOCH_DURATION_NS, 1);
+    assert!(lease.v8_equal_flow_enforced());
+
+    let telemetry =
+        maybe_top_up_cos_queue_lease(&mut root.queues[0], Some(&lease), 3 * TEST_EPOCH_DURATION_NS);
+
+    assert_eq!(telemetry.v8_calls, 1);
+    assert_eq!(telemetry.v8_granted_bytes, 7_200);
+    assert_eq!(root.queues[0].hot.tokens, 7_200);
+    assert!(
+        lease.v8_equal_flow_cap_hit_events() > 0,
+        "production top-up path must fire the equal-flow cap"
+    );
+    assert!(
+        lease.v8_equal_flow_suppressed_grant_bytes() > 0,
+        "production top-up path must report withheld grant bytes"
+    );
 }
 
 #[test]

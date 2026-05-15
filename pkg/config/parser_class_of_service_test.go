@@ -218,6 +218,32 @@ func TestCompileClassOfServiceEqualFlowEnforcementRequiresPositiveExactRate(t *t
 	}
 }
 
+func TestCompileClassOfServiceEqualFlowEnforcementRejectsSurplusSharing(t *testing.T) {
+	lines := []string{
+		"set class-of-service schedulers ef-sched transmit-rate 10m exact",
+		"set class-of-service schedulers ef-sched surplus-sharing",
+		"set class-of-service schedulers ef-sched equal-flow-enforcement",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig succeeded, want equal-flow/surplus-sharing validation error")
+	}
+	if !strings.Contains(err.Error(), "equal-flow-enforcement cannot be combined with surplus-sharing") {
+		t.Fatalf("CompileConfig error = %v, want equal-flow/surplus-sharing validation", err)
+	}
+}
+
 func TestCompileClassOfServiceFairnessRSSExpectations(t *testing.T) {
 	lines := []string{
 		"set class-of-service fairness rss-expectation ifindex 5 queue 4 balanced",

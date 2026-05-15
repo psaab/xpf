@@ -789,14 +789,16 @@ Important current behavior:
   guarantee floor
 - adding `equal-flow-enforcement` on the scheduler is an explicit opt-in for
   shared flow-aware exact enforcement. The knob is accepted only with a
-  positive `transmit-rate <rate> exact`; commits fail closed when the rate is
-  missing, zero, or non-`exact`. The Rust v8 queue lease then caps each active
-  worker to the slowest sampled per-flow grant rate once every active worker is
-  sampled, every active sampled worker is materially utilizing its prior fair
-  share, and the target has survived the valid-streak guard. When the sample
-  is incomplete, low-demand, or stale, the mode fails open to the normal
-  work-conserving v8 behavior and reports the bounded fail-open reason in
-  status/Prometheus.
+  positive `transmit-rate <rate> exact` and cannot be combined with
+  `surplus-sharing`; commits fail closed when the rate is missing, zero,
+  non-`exact`, or surplus-enabled. The Rust v8 queue lease then caps each
+  active worker to the slowest sampled per-active-SFQ-bucket grant rate once
+  every active worker is sampled, every active sampled worker is materially
+  utilizing its prior fair share, and the target has survived the valid-streak
+  guard. If multiple 5-tuples hash into one SFQ bucket they are counted as one
+  bucket for this cap. When the sample is incomplete, low-demand, or stale, the
+  mode fails open to the normal work-conserving v8 behavior and reports the
+  bounded fail-open reason in status/Prometheus.
 - `per-unit-scheduler` is not implemented
 
 For the `loss` userspace lab, the relevant path is:
@@ -860,10 +862,14 @@ Notes for this specific test:
 - use `set class-of-service schedulers <name> transmit-rate <rate> exact` for
   queues that must stay capped at their guarantee instead of borrowing surplus
 - use `set class-of-service schedulers <name> equal-flow-enforcement` only on
-  positive exact-rate schedulers; it is intentionally non-work-conserving and
-  should be used only when lower absolute per-flow spread is worth giving up
-  aggregate throughput under RSS skew. The suppressor fails open when an
-  active worker looks merely quiet rather than demand-saturated.
+  positive exact-rate schedulers that do not use `surplus-sharing`; it is
+  intentionally non-work-conserving and should be used only when lower
+  absolute per-active-bucket spread is worth giving up aggregate throughput
+  under RSS skew. In the worst case it may withhold every byte above
+  `slowest_sampled_per_bucket_rate * active_buckets_on_worker`, so aggregate
+  throughput can drop substantially when one active worker is much slower than
+  its peers. The suppressor fails open when an active worker looks merely quiet
+  rather than demand-saturated.
 - `loss-priority` on CoS DSCP / 802.1p classifiers is accepted for syntax
   compatibility but is not enforced yet
 - `loss-priority` on CoS DSCP rewrite-rules is accepted for syntax
@@ -1069,7 +1075,9 @@ The design is only correct if all of these pass.
 6. `transmit-rate exact` (without `surplus-sharing`) never exceeds its
    guarantee; with `surplus-sharing` (#915) it may borrow root surplus
    tokens above the guarantee while still holding the per-queue rate as
-   a floor
+   a floor. `equal-flow-enforcement` is mutually exclusive with
+   `surplus-sharing` because the surplus phase intentionally bypasses the
+   per-queue lease cap that equal-flow suppression depends on.
 7. In single-shard or uncontended cases, backlogged reservations wake from the
    timer wheel within one tick plus one scheduler cycle of becoming eligible
 

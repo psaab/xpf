@@ -241,6 +241,11 @@ func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {
 				"class-of-service scheduler %q equal-flow-enforcement requires positive transmit-rate exact",
 				sched.Name)
 		}
+		if sched.EqualFlowEnforcement && sched.SurplusSharing {
+			return fmt.Errorf(
+				"class-of-service scheduler %q equal-flow-enforcement cannot be combined with surplus-sharing",
+				sched.Name)
+		}
 	}
 	return nil
 }

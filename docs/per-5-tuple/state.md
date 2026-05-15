@@ -428,7 +428,10 @@ suppression cost on this queue right now?" independently from any
 configured enforcement mode.
 
 The opt-in enforcement slice is separate Rust dataplane telemetry
-under `xpf_userspace_cos_equal_flow_*`:
+under `xpf_userspace_cos_equal_flow_*`. It is valid only on positive
+exact-rate schedulers without `surplus-sharing`; the cap is computed per
+active SFQ bucket, so multiple 5-tuples that collide into one bucket are
+counted as one active unit for suppression:
 
 - `xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex,queue_id}`
 - `xpf_userspace_cos_equal_flow_enforced{ifindex,queue_id}`
@@ -511,7 +514,8 @@ MQFQ, v8 lease selection, or admission.
 - **#1304 — Equal-flow rate-suppression mode**: active. Phase 0 adds
   measurement-only suppression-cost telemetry; the opt-in dataplane
   slice adds Rust shared-v8 enforcement telemetry and fail-open guarded
-  rate suppression for positive exact-rate CoS schedulers.
+  rate suppression for positive exact-rate CoS schedulers without
+  `surplus-sharing`.
 
 ## Empirical sweep across workload classes (2026-05-07)
 

@@ -367,10 +367,11 @@ type CoSScheduler struct {
 	// by ValidateConfig otherwise (warn-and-strip).
 	SurplusSharing bool
 	// EqualFlowEnforcement opts a positive transmit-rate exact
-	// scheduler into shared flow-aware exact enforcement. The
-	// runtime lease algorithm is wired separately; validation
-	// fails closed unless the scheduler has transmit-rate exact
-	// with a positive rate.
+	// scheduler into shared v8 queue-lease equal-flow suppression.
+	// Validation fails closed unless the scheduler has transmit-rate
+	// exact with a positive rate and does not also opt into
+	// SurplusSharing, whose surplus phase intentionally bypasses the
+	// per-queue lease cap.
 	EqualFlowEnforcement bool
 }
 

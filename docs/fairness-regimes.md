@@ -484,8 +484,8 @@ For production observability, xpf MUST export:
   depending on whether an opt-in enforcement mode is configured.
 
 When `class-of-service schedulers <name> equal-flow-enforcement` is
-enabled on a positive exact-rate scheduler, the Rust shared-v8 CoS lease
-exports actual enforcement telemetry through
+enabled on a positive exact-rate scheduler without `surplus-sharing`, the
+Rust shared-v8 CoS lease exports actual enforcement telemetry through
 `xpf_userspace_cos_equal_flow_*` metrics. These are intentionally
 separate from the measurement-only estimator above: the estimator models
 the observed traffic window, while the Rust metrics report whether the
