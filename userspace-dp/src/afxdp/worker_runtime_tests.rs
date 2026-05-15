@@ -218,6 +218,18 @@ fn snapshot_window_never_observes_torn_tuple_under_concurrent_writer() {
         }
     });
 
+    // Wait for the writer to publish at least one rotation before counting.
+    // Without this guard, OS thread-spawn latency (1-5ms under load) can
+    // cause the reader's 100k Relaxed-read loop (<1ms) to finish before
+    // the writer publishes its first rotation, making the
+    // nonzero_snapshots > 1_000 assertion below false-fail with 0
+    // nonzero observations. The seed publish() at t=unit doesn't enter
+    // the rotation branch, so window_ns stays 0 until the spawned
+    // writer's first publish.
+    while atomics.snapshot_window().window_ns == 0 {
+        std::hint::spin_loop();
+    }
+
     let mut nonzero_snapshots: u64 = 0;
     for _ in 0..100_000 {
         let w = atomics.snapshot_window();
