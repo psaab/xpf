@@ -227,23 +227,34 @@ fn snapshot_window_never_observes_torn_tuple_under_concurrent_writer() {
     // the rotation branch, so window_ns stays 0 until the spawned
     // writer's first publish.
     //
-    // Bound the spin so a future writer regression that panics before the
-    // first publish() fails the test cleanly via writer.join().unwrap()
+    // Bound the spin so a future writer regression fails the test cleanly
     // instead of hanging on the CI runner timeout. 10M iterations is ~1s
     // on a typical x86_64 CPU; the writer normally publishes within a
-    // few ms.
+    // few ms. Two failure paths:
+    //   - writer thread exited before publishing → `is_finished()` aborts
+    //   - writer alive but stuck before first publish → bounded cap fires
+    // Both paths stop the writer and join() before panicking so the test
+    // doesn't leave a detached spinning thread alive until process exit.
     let mut waited: u64 = 0;
     while atomics.snapshot_window().window_ns == 0 {
         waited = waited.saturating_add(1);
-        assert!(
-            waited < 10_000_000,
-            "writer never published first rotation in {} iterations",
-            waited,
-        );
-        assert!(
-            !writer.is_finished(),
-            "writer thread exited before publishing first rotation",
-        );
+        if waited >= 10_000_000 {
+            stop.store(true, Ordering::Relaxed);
+            let _ = writer.join();
+            panic!(
+                "writer never published first rotation in {} iterations",
+                waited,
+            );
+        }
+        if writer.is_finished() {
+            // Writer thread exited before any publish — surface the
+            // writer's panic message if any, otherwise a clear failure.
+            let panic_payload = writer.join();
+            panic!(
+                "writer thread exited before publishing first rotation: {:?}",
+                panic_payload.err(),
+            );
+        }
         std::hint::spin_loop();
     }
 
