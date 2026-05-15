@@ -178,6 +178,7 @@ pub(in crate::afxdp) enum V8EqualFlowFailOpenReason {
     NotEnoughValidStreak = 6,
     StaleOrTagMismatch = 7,
     ArithmeticInvalid = 8,
+    LowDemandWorker = 9,
 }
 
 impl V8EqualFlowFailOpenReason {
@@ -192,7 +193,23 @@ impl V8EqualFlowFailOpenReason {
             6 => Self::NotEnoughValidStreak,
             7 => Self::StaleOrTagMismatch,
             8 => Self::ArithmeticInvalid,
+            9 => Self::LowDemandWorker,
             _ => Self::ArithmeticInvalid,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Disabled => "disabled",
+            Self::InsufficientSampledWorkers => "insufficient_sampled_workers",
+            Self::UnsampledActiveWorker => "unsampled_active_worker",
+            Self::ZeroTarget => "zero_target",
+            Self::NoActiveFlows => "no_active_flows",
+            Self::NotEnoughValidStreak => "not_enough_valid_streak",
+            Self::StaleOrTagMismatch => "stale_or_tag_mismatch",
+            Self::ArithmeticInvalid => "arithmetic_invalid",
+            Self::LowDemandWorker => "low_demand_worker",
         }
     }
 }
@@ -236,11 +253,14 @@ impl V8EqualFlowSuppressState {
         self.fail_open_count.fetch_add(1, Ordering::Relaxed);
         if reason != V8EqualFlowFailOpenReason::NotEnoughValidStreak {
             self.valid_streak.store(0, Ordering::Release);
+            self.smoothed_target_per_flow.store(0, Ordering::Release);
         }
     }
 }
 
 const EQUAL_FLOW_VALID_STREAK_REQUIRED: u32 = 2;
+const EQUAL_FLOW_MIN_WORKER_UTIL_NUM: u64 = 4;
+const EQUAL_FLOW_MIN_WORKER_UTIL_DEN: u64 = 5;
 
 pub(in crate::afxdp) struct SharedCoSRootLease {
     config: SharedCoSLeaseConfig,
@@ -744,12 +764,14 @@ impl SharedCoSQueueLease {
         burst_bytes: u64,
         active_shards: usize,
         max_worker_id: usize,
+        rate_mode: V8RateMode,
     ) -> bool {
         let Some(v8) = self.v8.as_ref() else {
             return false;
         };
         self.config == compute_shared_cos_lease_config(rate_bytes, burst_bytes, active_shards)
             && v8.worker_grants.len() == max_worker_id + 1
+            && v8.rate_mode == rate_mode
     }
 
     pub(in crate::afxdp) fn acquire(&self, now_ns: u64, requested: u64) -> u64 {
@@ -1095,6 +1117,15 @@ impl SharedCoSQueueLease {
             .unwrap_or(0)
     }
 
+    pub(in crate::afxdp) fn v8_equal_flow_target_per_flow_bps(&self) -> u64 {
+        let bytes_per_epoch = self.v8_equal_flow_target_per_flow() as u128;
+        let bits_per_sec = bytes_per_epoch
+            .saturating_mul(8)
+            .saturating_mul(1_000_000_000u128)
+            / (EPOCH_DURATION_NS as u128);
+        bits_per_sec.min(u64::MAX as u128) as u64
+    }
+
     pub(in crate::afxdp) fn v8_equal_flow_worker_cap(&self) -> u64 {
         self.v8
             .as_ref()
@@ -1125,6 +1156,10 @@ impl SharedCoSQueueLease {
                 )
             })
             .unwrap_or(V8EqualFlowFailOpenReason::Disabled)
+    }
+
+    pub(in crate::afxdp) fn v8_equal_flow_fail_open_reason_label(&self) -> &'static str {
+        self.v8_equal_flow_fail_open_reason().as_str()
     }
 
     pub(in crate::afxdp) fn v8_equal_flow_fail_open_count(&self) -> u64 {
@@ -1472,33 +1507,17 @@ fn publish_equal_flow_epoch_v8(
 
     let mut active_workers = 0u32;
     let mut sampled_workers = 0u32;
-    let mut candidate_target = u64::MAX;
-    let mut max_worker_cap = 0u64;
-
     for id in 0..n_workers {
         if !active_by_worker[id] {
             continue;
         }
         active_workers = active_workers.saturating_add(1);
-        let active_flows = active_flows_by_worker[id] as u64;
-        if active_flows == 0 {
-            v8.equal_flow
-                .fail_open(new_tag, V8EqualFlowFailOpenReason::ArithmeticInvalid);
-            return;
-        }
         if !demanded_by_worker[id] || prev_grants[id] == 0 {
             v8.equal_flow
                 .fail_open(new_tag, V8EqualFlowFailOpenReason::UnsampledActiveWorker);
             return;
         }
         sampled_workers = sampled_workers.saturating_add(1);
-        let per_flow = (prev_grants[id] as u64) / active_flows;
-        if per_flow == 0 {
-            v8.equal_flow
-                .fail_open(new_tag, V8EqualFlowFailOpenReason::ZeroTarget);
-            return;
-        }
-        candidate_target = candidate_target.min(per_flow);
     }
 
     if active_workers == 0 {
@@ -1513,6 +1532,51 @@ fn publish_equal_flow_epoch_v8(
         );
         return;
     }
+
+    let mut candidate_target = u64::MAX;
+    let mut max_worker_cap = 0u64;
+
+    for id in 0..n_workers {
+        if !active_by_worker[id] {
+            continue;
+        }
+        let active_flows = active_flows_by_worker[id] as u64;
+        if active_flows == 0 {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::ArithmeticInvalid);
+            return;
+        }
+        let per_flow = (prev_grants[id] as u64) / active_flows;
+        if per_flow == 0 {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::ZeroTarget);
+            return;
+        }
+        let prior_share = v8
+            .worker_fair_share
+            .get(id)
+            .map(|share| share.load(Ordering::Acquire))
+            .unwrap_or(0);
+        if prior_share == 0 {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::UnsampledActiveWorker);
+            return;
+        }
+        // Equal-flow suppression is safe only when the sample is demand
+        // saturated enough to represent a real slow per-flow rate. A
+        // quiet worker, or a rotation-boundary worker-grant sample that
+        // missed enough old-epoch grants, must fail open instead of
+        // dragging the whole queue down to an artificial low target.
+        if (prev_grants[id] as u64).saturating_mul(EQUAL_FLOW_MIN_WORKER_UTIL_DEN)
+            < prior_share.saturating_mul(EQUAL_FLOW_MIN_WORKER_UTIL_NUM)
+        {
+            v8.equal_flow
+                .fail_open(new_tag, V8EqualFlowFailOpenReason::LowDemandWorker);
+            return;
+        }
+        candidate_target = candidate_target.min(per_flow);
+    }
+
     if candidate_target == u64::MAX || candidate_target == 0 {
         v8.equal_flow
             .fail_open(new_tag, V8EqualFlowFailOpenReason::ZeroTarget);

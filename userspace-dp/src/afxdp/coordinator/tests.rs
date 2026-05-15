@@ -549,6 +549,65 @@ fn build_shared_cos_queue_leases_reuses_existing_matching_lease_arc() {
 }
 
 #[test]
+fn build_shared_cos_queue_leases_rebuilds_when_equal_flow_mode_toggles() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.cos.interfaces.insert(
+        80,
+        CoSInterfaceConfig {
+            shaping_rate_bytes: 100_000_000,
+            burst_bytes: 256 * 1024,
+            default_queue: 0,
+            dscp_classifier: String::new(),
+            ieee8021_classifier: String::new(),
+            dscp_queue_by_dscp: [u8::MAX; 64],
+            ieee8021_queue_by_pcp: [u8::MAX; 8],
+            queue_by_forwarding_class: FastMap::default(),
+            queues: vec![CoSQueueConfig {
+                queue_id: 4,
+                forwarding_class: "iperf-b".into(),
+                priority: 5,
+                transmit_rate_bytes: 50_000_000,
+                exact: true,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+                surplus_weight: 1,
+                buffer_bytes: 128 * 1024,
+                dscp_rewrite: None,
+            }],
+        },
+    );
+    let active_shards_by_egress_ifindex = BTreeMap::from([(80, 2usize)]);
+
+    let existing = build_shared_cos_queue_leases_reusing_existing(
+        &forwarding,
+        &active_shards_by_egress_ifindex,
+        2,
+        &BTreeMap::new(),
+    );
+    forwarding
+        .cos
+        .interfaces
+        .get_mut(&80)
+        .expect("iface")
+        .queues[0]
+        .equal_flow_enforcement = true;
+    let rebuilt = build_shared_cos_queue_leases_reusing_existing(
+        &forwarding,
+        &active_shards_by_egress_ifindex,
+        2,
+        &existing,
+    );
+
+    let old = existing.get(&(80, 4)).expect("existing queue lease");
+    let new = rebuilt.get(&(80, 4)).expect("rebuilt queue lease");
+    assert!(
+        !Arc::ptr_eq(old, new),
+        "equal-flow mode toggle must rebuild the lease Arc"
+    );
+    assert!(new.v8_equal_flow_active());
+}
+
+#[test]
 fn refresh_cos_owner_worker_map_from_binding_statuses_keeps_shared_arcs_when_unchanged() {
     let mut coordinator = Coordinator::new();
     coordinator.forwarding.cos.interfaces.insert(

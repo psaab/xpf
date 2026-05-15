@@ -905,6 +905,24 @@ pub(crate) struct CoSQueueStatus {
     pub queue_token_starvation_parks: u64,
     #[serde(rename = "tx_ring_full_submit_stalls", default)]
     pub tx_ring_full_submit_stalls: u64,
+    /// #1304: true when the shared v8 queue lease for this exact queue
+    /// was constructed in opt-in equal-flow suppression mode. This is
+    /// config/mode state; `equal_flow_enforced` reports whether the
+    /// current epoch is actually being capped rather than failed open.
+    #[serde(rename = "equal_flow_enforcement", default)]
+    pub equal_flow_enforcement: bool,
+    #[serde(rename = "equal_flow_enforced", default)]
+    pub equal_flow_enforced: bool,
+    #[serde(rename = "equal_flow_target_per_flow_bps", default)]
+    pub equal_flow_target_per_flow_bps: u64,
+    #[serde(rename = "equal_flow_max_worker_cap_bytes", default)]
+    pub equal_flow_max_worker_cap_bytes: u64,
+    #[serde(rename = "equal_flow_cap_hit_events", default)]
+    pub equal_flow_cap_hit_events: u64,
+    #[serde(rename = "equal_flow_suppressed_grant_bytes", default)]
+    pub equal_flow_suppressed_grant_bytes: u64,
+    #[serde(rename = "equal_flow_fail_open_reason", default)]
+    pub equal_flow_fail_open_reason: String,
     // #709 / #751: owner-profile telemetry for exact queues with an
     // unambiguous single owner-local binding snapshot. These fields are
     // populated only when exactly one owner-local exact queue can

@@ -790,8 +790,13 @@ Important current behavior:
 - adding `equal-flow-enforcement` on the scheduler is an explicit opt-in for
   shared flow-aware exact enforcement. The knob is accepted only with a
   positive `transmit-rate <rate> exact`; commits fail closed when the rate is
-  missing, zero, or non-`exact`. This branch only carries the knob through the
-  snapshot and Rust queue config so later coordinator lease code can consume it.
+  missing, zero, or non-`exact`. The Rust v8 queue lease then caps each active
+  worker to the slowest sampled per-flow grant rate once every active worker is
+  sampled, every active sampled worker is materially utilizing its prior fair
+  share, and the target has survived the valid-streak guard. When the sample
+  is incomplete, low-demand, or stale, the mode fails open to the normal
+  work-conserving v8 behavior and reports the bounded fail-open reason in
+  status/Prometheus.
 - `per-unit-scheduler` is not implemented
 
 For the `loss` userspace lab, the relevant path is:
@@ -855,9 +860,10 @@ Notes for this specific test:
 - use `set class-of-service schedulers <name> transmit-rate <rate> exact` for
   queues that must stay capped at their guarantee instead of borrowing surplus
 - use `set class-of-service schedulers <name> equal-flow-enforcement` only on
-  positive exact-rate schedulers; it is an opt-in config surface for the
-  forthcoming shared equal-flow lease algorithm, not a standalone scheduler
-  behavior in this branch
+  positive exact-rate schedulers; it is intentionally non-work-conserving and
+  should be used only when lower absolute per-flow spread is worth giving up
+  aggregate throughput under RSS skew. The suppressor fails open when an
+  active worker looks merely quiet rather than demand-saturated.
 - `loss-priority` on CoS DSCP / 802.1p classifiers is accepted for syntax
   compatibility but is not enforced yet
 - `loss-priority` on CoS DSCP rewrite-rules is accepted for syntax

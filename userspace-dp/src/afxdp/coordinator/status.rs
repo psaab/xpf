@@ -66,7 +66,11 @@ impl super::Coordinator {
             .values()
             .map(|worker| worker.cos_status.load().iter().cloned().collect())
             .collect();
-        aggregate_cos_statuses_across_workers(&snapshots, &self.cos_owner_worker_by_queue)
+        let mut statuses =
+            aggregate_cos_statuses_across_workers(&snapshots, &self.cos_owner_worker_by_queue);
+        let queue_leases = self.cos.queue_leases.load();
+        overlay_shared_cos_queue_lease_statuses(&mut statuses, queue_leases.as_ref());
+        statuses
     }
 
     pub fn filter_term_counters(&self) -> Vec<crate::protocol::FirewallFilterTermCounterStatus> {
@@ -240,5 +244,26 @@ impl super::Coordinator {
 
     pub fn reconcile_debug(&self) -> (u64, String) {
         (self.reconcile_calls, self.last_reconcile_stage.clone())
+    }
+}
+
+fn overlay_shared_cos_queue_lease_statuses(
+    statuses: &mut [crate::protocol::CoSInterfaceStatus],
+    queue_leases: &BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>,
+) {
+    for iface in statuses {
+        for queue in &mut iface.queues {
+            let Some(lease) = queue_leases.get(&(iface.ifindex, queue.queue_id)) else {
+                continue;
+            };
+            queue.equal_flow_enforcement = lease.v8_equal_flow_active();
+            queue.equal_flow_enforced = lease.v8_equal_flow_enforced();
+            queue.equal_flow_target_per_flow_bps = lease.v8_equal_flow_target_per_flow_bps();
+            queue.equal_flow_max_worker_cap_bytes = lease.v8_equal_flow_worker_cap();
+            queue.equal_flow_cap_hit_events = lease.v8_equal_flow_cap_hit_events();
+            queue.equal_flow_suppressed_grant_bytes = lease.v8_equal_flow_suppressed_grant_bytes();
+            queue.equal_flow_fail_open_reason =
+                lease.v8_equal_flow_fail_open_reason_label().to_string();
+        }
     }
 }

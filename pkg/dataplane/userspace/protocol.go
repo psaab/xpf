@@ -494,6 +494,16 @@ type CoSQueueStatus struct {
 	AdmissionFlowShareDrops uint64 `json:"admission_flow_share_drops,omitempty"`
 	AdmissionBufferDrops    uint64 `json:"admission_buffer_drops,omitempty"`
 	AdmissionEcnMarked      uint64 `json:"admission_ecn_marked,omitempty"`
+	// #1304: Rust-owned equal-flow enforcement telemetry. The
+	// measurement-only xpf_fairness_equal_flow_* gauges remain advisory;
+	// these fields describe the opt-in shared v8 queue-lease suppressor.
+	EqualFlowEnforcement          bool   `json:"equal_flow_enforcement,omitempty"`
+	EqualFlowEnforced             bool   `json:"equal_flow_enforced,omitempty"`
+	EqualFlowTargetPerFlowBPS     uint64 `json:"equal_flow_target_per_flow_bps,omitempty"`
+	EqualFlowMaxWorkerCapBytes    uint64 `json:"equal_flow_max_worker_cap_bytes,omitempty"`
+	EqualFlowCapHitEvents         uint64 `json:"equal_flow_cap_hit_events,omitempty"`
+	EqualFlowSuppressedGrantBytes uint64 `json:"equal_flow_suppressed_grant_bytes,omitempty"`
+	EqualFlowFailOpenReason       string `json:"equal_flow_fail_open_reason,omitempty"`
 	// #709 / #751: owner-profile telemetry. Populated only when an
 	// exact queue can inherit a binding-scoped owner profile
 	// unambiguously; zero for shared_exact, non-exact, and ambiguous
