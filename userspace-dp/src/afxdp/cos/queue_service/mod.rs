@@ -53,8 +53,8 @@ use service::{service_exact_local_queue_direct, service_exact_prepared_queue_dir
 
 use super::tx_completion::{
     CoSServicePhase, ParkReason, apply_cos_prepared_result, apply_cos_send_result,
-    apply_direct_exact_send_result, cos_tick_for_ns, count_park_reason,
-    count_tx_ring_full_submit_stall, park_cos_queue, prime_cos_root_for_service,
+    apply_direct_exact_send_result, cos_root_can_service_after_prime, cos_tick_for_ns,
+    count_park_reason, count_tx_ring_full_submit_stall, park_cos_queue, prime_cos_root_for_service,
     refresh_cos_interface_activity, restore_cos_local_items_inner,
     restore_cos_prepared_items_inner,
 };
@@ -155,6 +155,9 @@ pub(in crate::afxdp) fn drain_shaped_tx(
             continue;
         };
         if root.nonempty_queues == 0 {
+            continue;
+        }
+        if !cos_root_can_service_after_prime(root, now_ns) {
             continue;
         }
         if !prime_cos_root_for_service(binding, root_ifindex, now_ns) {
