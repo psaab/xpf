@@ -18,6 +18,52 @@ func newTestStore(t *testing.T) *Store {
 	return New(path)
 }
 
+// #1319: end-to-end gate — CommitCheck/Commit must reject typed-leaf
+// garbage like `set class-of-service schedulers x transmit-rate asd`
+// BEFORE the existing compiler tries to parse it (and silently writes 0).
+//
+// SetFromInput prepends the `set ` keyword internally, so the test
+// strings must NOT include it.
+func TestCommitCheck_RejectsInvalidTransmitRate(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := s.SetFromInput("class-of-service schedulers be transmit-rate asd"); err != nil {
+		t.Fatalf("SetFromInput: %v", err)
+	}
+	_, err := s.CommitCheck()
+	if err == nil {
+		t.Fatal("expected CommitCheck to reject transmit-rate asd, got nil")
+	}
+	if !strings.Contains(err.Error(), "transmit-rate") {
+		t.Fatalf("CommitCheck error should reference transmit-rate: %v", err)
+	}
+	// Commit should refuse the same way.
+	if _, err := s.Commit(); err == nil {
+		t.Fatal("expected Commit to reject transmit-rate asd, got nil")
+	}
+}
+
+func TestCommitCheck_AcceptsValidScheduler(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	for _, cmd := range []string{
+		"class-of-service schedulers be transmit-rate 1g",
+		"class-of-service schedulers be priority low",
+		"class-of-service schedulers be buffer-size 16m",
+	} {
+		if err := s.SetFromInput(cmd); err != nil {
+			t.Fatalf("SetFromInput(%q): %v", cmd, err)
+		}
+	}
+	if _, err := s.CommitCheck(); err != nil {
+		t.Fatalf("CommitCheck: unexpected error: %v", err)
+	}
+}
+
 func TestEnterExitConfigure(t *testing.T) {
 	s := newTestStore(t)
 

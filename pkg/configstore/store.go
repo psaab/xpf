@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -137,7 +138,18 @@ func (s *Store) SetNodeID(id int) {
 
 // compileTree compiles a config tree using the appropriate method based on
 // whether the store is in cluster mode (nodeID >= 0) or standalone.
+//
+// Order of operations (#1319): the typed-leaf SchemaValidate gate runs
+// BEFORE compile. We do this at the candidate-tree level rather than at
+// `set` time so the candidate-edit flow stays permissive — operators can
+// stage half-typed values without each `set` line being rejected — and
+// `commit check` is the one place that fails loud on garbage like
+// `transmit-rate asd`. cfg is nil at this point because we haven't
+// compiled yet; the schedulers validators don't need it.
 func (s *Store) compileTree(tree *config.ConfigTree) (*config.Config, error) {
+	if err := cmdtree.SchemaValidate(tree, nil); err != nil {
+		return nil, err
+	}
 	if s.nodeID >= 0 {
 		return config.CompileConfigForNode(tree, s.nodeID)
 	}
