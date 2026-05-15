@@ -4,6 +4,11 @@
 // `#[path = "cos_tests.rs"]` from cos.rs.
 
 use super::*;
+use crate::afxdp::cos::queue_ops::cos_queue_push_back;
+use crate::afxdp::tx::test_support::{
+    test_cos_fast_interfaces, test_cos_runtime_with_queues, test_flow_cos_item,
+    test_queue_fast_path,
+};
 use crate::test_zone_ids::*;
 
 // Rates used to force owner-local vs shared-exact classification in
@@ -26,6 +31,54 @@ fn test_tx_request(ifindex: i32) -> TxRequest {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
     }
+}
+
+#[test]
+fn reset_binding_cos_runtime_mirrors_drops_to_binding_cos_counter() {
+    let mut root = test_cos_runtime_with_queues(
+        25_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 4,
+            forwarding_class: "iperf-a".into(),
+            priority: 5,
+            transmit_rate_bytes: 125_000_000,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            surplus_weight: 1,
+            buffer_bytes: 4_000_000,
+            dscp_rewrite: None,
+        }],
+    );
+    cos_queue_push_back(&mut root.queues[0], test_flow_cos_item(5201, 128));
+    cos_queue_push_back(&mut root.queues[0], test_flow_cos_item(5202, 256));
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        4,
+        vec![(4, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    reset_binding_cos_runtime(&mut binding, None);
+
+    assert_eq!(
+        binding.live.tx_errors.load(Ordering::Relaxed),
+        2,
+        "reset-time CoS queue drains still count as TX errors",
+    );
+    assert_eq!(
+        binding.live.dbg_cos_queue_overflow.load(Ordering::Relaxed),
+        2,
+        "reset-time CoS queue drains must mirror into the lifetime-matched CoS subset counter",
+    );
+    assert!(binding.cos.cos_interfaces.is_empty());
 }
 
 #[test]

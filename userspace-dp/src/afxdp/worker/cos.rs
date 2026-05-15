@@ -323,9 +323,15 @@ pub(super) fn reset_binding_cos_runtime(
 
     let dropped_total = dropped_local.saturating_add(dropped_prepared.len() as u64);
     if dropped_total > 0 {
+        // Keep the CoS subset counter lifetime-matched with tx_errors:
+        // reset-time queue drains are CoS-owned TX drops too.
         binding
             .live
             .tx_errors
+            .fetch_add(dropped_total, Ordering::Relaxed);
+        binding
+            .live
+            .dbg_cos_queue_overflow
             .fetch_add(dropped_total, Ordering::Relaxed);
     }
     for req in dropped_prepared {
