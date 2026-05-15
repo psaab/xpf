@@ -408,13 +408,7 @@ func bucketLowerBoundMicros(bucket int) string {
 }
 
 func configuredCoSInterfaceViews(cfg *config.Config, status *ProcessStatus, selector string) []cosInterfaceView {
-	runtimeByName := make(map[string]*CoSInterfaceStatus)
-	if status != nil {
-		for i := range status.CoSInterfaces {
-			iface := &status.CoSInterfaces[i]
-			runtimeByName[iface.InterfaceName] = iface
-		}
-	}
+	runtimeIndex := buildCoSRuntimeIndex(status)
 	selector = strings.TrimSpace(selector)
 	views := make([]cosInterfaceView, 0)
 	for ifName, iface := range cfg.ClassOfService.Interfaces {
@@ -434,12 +428,94 @@ func configuredCoSInterfaceViews(cfg *config.Config, status *ProcessStatus, sele
 				unit:           unitNum,
 				cosUnit:        cosUnit,
 				interfaceUnit:  interfaceUnit,
-				interfaceState: runtimeByName[logicalName],
+				interfaceState: runtimeIndex.lookup(ifName, logicalName, unitNum, interfaceUnit),
 			})
 		}
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].name < views[j].name })
 	return views
+}
+
+type cosRuntimeIndex struct {
+	byName               map[string]*CoSInterfaceStatus
+	byIfindex            map[int]*CoSInterfaceStatus
+	bindingIfindexByName map[string]int
+}
+
+func buildCoSRuntimeIndex(status *ProcessStatus) cosRuntimeIndex {
+	idx := cosRuntimeIndex{
+		byName:               make(map[string]*CoSInterfaceStatus),
+		byIfindex:            make(map[int]*CoSInterfaceStatus),
+		bindingIfindexByName: make(map[string]int),
+	}
+	if status == nil {
+		return idx
+	}
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
+		if iface.InterfaceName != "" {
+			idx.byName[iface.InterfaceName] = iface
+			idx.byName[config.LinuxIfName(iface.InterfaceName)] = iface
+		}
+		if iface.Ifindex > 0 {
+			idx.byIfindex[iface.Ifindex] = iface
+		}
+	}
+	for _, binding := range status.Bindings {
+		if binding.Interface == "" || binding.Ifindex <= 0 {
+			continue
+		}
+		idx.bindingIfindexByName[binding.Interface] = binding.Ifindex
+		idx.bindingIfindexByName[config.LinuxIfName(binding.Interface)] = binding.Ifindex
+	}
+	return idx
+}
+
+func (idx cosRuntimeIndex) lookup(ifName, logicalName string, unitNum int, unit *config.InterfaceUnit) *CoSInterfaceStatus {
+	candidates := cosRuntimeCandidateNames(ifName, logicalName, unitNum, unit)
+	for _, name := range candidates {
+		if runtime := idx.byName[name]; runtime != nil {
+			return runtime
+		}
+	}
+	// #1278: Rust CoS runtime and metrics are keyed by egress ifindex. A
+	// logical unit-zero CoS config can display as ge-0-0-1.0 while runtime
+	// labels the same ifindex with another snapshot alias, hiding the row
+	// from a name-only join.
+	for _, name := range candidates {
+		if ifindex := idx.bindingIfindexByName[name]; ifindex > 0 {
+			if runtime := idx.byIfindex[ifindex]; runtime != nil {
+				return runtime
+			}
+		}
+	}
+	return nil
+}
+
+func cosRuntimeCandidateNames(ifName, logicalName string, unitNum int, unit *config.InterfaceUnit) []string {
+	var names []string
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		for _, existing := range names {
+			if existing == name {
+				return
+			}
+		}
+		names = append(names, name)
+	}
+	add(logicalName)
+	add(config.LinuxIfName(logicalName))
+	if unitNum == 0 {
+		add(ifName)
+		add(config.LinuxIfName(ifName))
+	}
+	if unit != nil && unit.VlanID > 0 {
+		add(fmt.Sprintf("%s.%d", ifName, unit.VlanID))
+		add(config.LinuxIfName(fmt.Sprintf("%s.%d", ifName, unit.VlanID)))
+	}
+	return names
 }
 
 func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueView {
