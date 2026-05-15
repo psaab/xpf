@@ -128,6 +128,188 @@ func TestFormatCoSInterfaceSummaryIncludesRuntimeQueueState(t *testing.T) {
 	}
 }
 
+func TestFormatCoSInterfaceSummaryJoinsUnitZeroRuntimeByIfindex(t *testing.T) {
+	owner := uint32(1)
+	cfg := &config.Config{
+		ClassOfService: &config.ClassOfServiceConfig{
+			ForwardingClasses: map[string]*config.CoSForwardingClass{
+				"iperf-b": {Name: "iperf-b", Queue: 5},
+			},
+			Schedulers: map[string]*config.CoSScheduler{
+				"iperf-b": {Name: "iperf-b", TransmitRateBytes: 1_250_000_000, TransmitRateExact: true},
+			},
+			SchedulerMaps: map[string]*config.CoSSchedulerMap{
+				"bandwidth-limit": {
+					Name: "bandwidth-limit",
+					Entries: map[string]*config.CoSSchedulerMapEntry{
+						"iperf-b": {ForwardingClass: "iperf-b", Scheduler: "iperf-b"},
+					},
+				},
+			},
+			Interfaces: map[string]*config.CoSInterface{
+				"ge-0-0-1": {
+					Name: "ge-0-0-1",
+					Units: map[int]*config.CoSInterfaceUnit{
+						0: {
+							Unit:             0,
+							ShapingRateBytes: 3_125_000_000,
+							SchedulerMap:     "bandwidth-limit",
+						},
+					},
+				},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"ge-0-0-1": {
+					Name: "ge-0-0-1",
+					Units: map[int]*config.InterfaceUnit{
+						0: {Number: 0, FilterOutputV4: "bandwidth-output-reverse"},
+					},
+				},
+			},
+		},
+	}
+	status := &ProcessStatus{
+		Bindings: []BindingStatus{
+			{Interface: "ge-0-0-1", Ifindex: 5, Bound: true},
+		},
+		CoSInterfaces: []CoSInterfaceStatus{{
+			Ifindex:             5,
+			InterfaceName:       "reth0.80",
+			OwnerWorkerID:       &owner,
+			WorkerInstances:     6,
+			NonemptyQueues:      1,
+			RunnableQueues:      1,
+			TimerLevel0Sleepers: 2,
+			Queues: []CoSQueueStatus{{
+				QueueID:                 5,
+				OwnerWorkerID:           &owner,
+				ForwardingClass:         "iperf-b",
+				Priority:                5,
+				Exact:                   true,
+				TransmitRateBytes:       1_250_000_000,
+				BufferBytes:             64 * 1024,
+				QueuedPackets:           12,
+				AdmissionFlowShareDrops: 7,
+			}},
+		}},
+	}
+
+	out := FormatCoSInterfaceSummary(cfg, status, "ge-0-0-1.0")
+	for _, want := range []string{
+		"Interface: ge-0-0-1.0",
+		"Output filter (inet):     bandwidth-output-reverse",
+		"Owner worker:             1",
+		"Runtime workers:          6",
+		"Runtime queues:           nonempty=1 runnable=1",
+		"iperf-b",
+		"Drops: flow_share=7  buffer=0  ecn_marked=0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Runtime:                  unavailable") {
+		t.Fatalf("runtime unexpectedly hidden for ge-0-0-1.0:\n%s", out)
+	}
+}
+
+func TestFormatCoSInterfaceSummaryPrefersVLANBindingIfindexForUnitZero(t *testing.T) {
+	parentOwner := uint32(3)
+	vlanOwner := uint32(9)
+	cfg := &config.Config{
+		ClassOfService: &config.ClassOfServiceConfig{
+			ForwardingClasses: map[string]*config.CoSForwardingClass{
+				"iperf-b": {Name: "iperf-b", Queue: 5},
+			},
+			Schedulers: map[string]*config.CoSScheduler{
+				"iperf-b": {Name: "iperf-b", TransmitRateBytes: 1_250_000_000, TransmitRateExact: true},
+			},
+			SchedulerMaps: map[string]*config.CoSSchedulerMap{
+				"bandwidth-limit": {
+					Name: "bandwidth-limit",
+					Entries: map[string]*config.CoSSchedulerMapEntry{
+						"iperf-b": {ForwardingClass: "iperf-b", Scheduler: "iperf-b"},
+					},
+				},
+			},
+			Interfaces: map[string]*config.CoSInterface{
+				"ge-0-0-1": {
+					Name: "ge-0-0-1",
+					Units: map[int]*config.CoSInterfaceUnit{
+						0: {
+							Unit:             0,
+							ShapingRateBytes: 3_125_000_000,
+							SchedulerMap:     "bandwidth-limit",
+						},
+					},
+				},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"ge-0-0-1": {
+					Name: "ge-0-0-1",
+					Units: map[int]*config.InterfaceUnit{
+						0: {Number: 0, VlanID: 80},
+					},
+				},
+			},
+		},
+	}
+	status := &ProcessStatus{
+		Bindings: []BindingStatus{
+			{Interface: "ge-0-0-1", Ifindex: 5, Bound: true},
+			{Interface: "ge-0-0-1.80", Ifindex: 10, Bound: true},
+		},
+		CoSInterfaces: []CoSInterfaceStatus{
+			{
+				Ifindex:       5,
+				InterfaceName: "reth-parent",
+				OwnerWorkerID: &parentOwner,
+				Queues: []CoSQueueStatus{{
+					QueueID:              5,
+					OwnerWorkerID:        &parentOwner,
+					ForwardingClass:      "wrong-parent",
+					Priority:             5,
+					Exact:                true,
+					TransmitRateBytes:    100_000_000,
+					AdmissionBufferDrops: 99,
+				}},
+			},
+			{
+				Ifindex:       10,
+				InterfaceName: "reth-vlan",
+				OwnerWorkerID: &vlanOwner,
+				Queues: []CoSQueueStatus{{
+					QueueID:                 5,
+					OwnerWorkerID:           &vlanOwner,
+					ForwardingClass:         "iperf-b",
+					Priority:                5,
+					Exact:                   true,
+					TransmitRateBytes:       1_250_000_000,
+					AdmissionFlowShareDrops: 7,
+				}},
+			},
+		},
+	}
+
+	out := FormatCoSInterfaceSummary(cfg, status, "ge-0-0-1.0")
+	if !strings.Contains(out, "Owner worker:             9") {
+		t.Fatalf("expected VLAN binding runtime owner in output:\n%s", out)
+	}
+	if strings.Contains(out, "Owner worker:             3") {
+		t.Fatalf("unexpected parent-binding runtime selected:\n%s", out)
+	}
+	if !strings.Contains(out, "Drops: flow_share=7  buffer=0  ecn_marked=0") {
+		t.Fatalf("expected VLAN runtime queue counters in output:\n%s", out)
+	}
+	if strings.Contains(out, "Drops: flow_share=0  buffer=99  ecn_marked=0") {
+		t.Fatalf("unexpected parent runtime queue counters selected:\n%s", out)
+	}
+}
+
 // #915 (Copilot code-review #4): the per-queue formatter exposes
 // a new `Surplus sharing: yes/no` line under exact queues so
 // operators can see which exact queues have opted in. Pin both
@@ -142,9 +324,9 @@ func TestFormatCoSInterfaceSummaryRendersSurplusSharingLineOnExactQueues(t *test
 				"be":      {Name: "be", Queue: 0}, // non-exact, must NOT render line
 			},
 			Schedulers: map[string]*config.CoSScheduler{
-				"sa":   {Name: "sa", TransmitRateBytes: 125_000_000, TransmitRateExact: true, SurplusSharing: true},
-				"sb":   {Name: "sb", TransmitRateBytes: 1_250_000_000, TransmitRateExact: true, SurplusSharing: false},
-				"sbe":  {Name: "sbe", TransmitRateBytes: 12_500_000, TransmitRateExact: false, SurplusSharing: false},
+				"sa":  {Name: "sa", TransmitRateBytes: 125_000_000, TransmitRateExact: true, SurplusSharing: true},
+				"sb":  {Name: "sb", TransmitRateBytes: 1_250_000_000, TransmitRateExact: true, SurplusSharing: false},
+				"sbe": {Name: "sbe", TransmitRateBytes: 12_500_000, TransmitRateExact: false, SurplusSharing: false},
 			},
 			SchedulerMaps: map[string]*config.CoSSchedulerMap{
 				"m": {
