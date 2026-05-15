@@ -629,6 +629,51 @@ fn equal_flow_bypass_cannot_exceed_cap() {
 }
 
 #[test]
+fn equal_flow_acquire_side_cap_check_is_read_only_on_inconsistent_snapshot() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+    let v8 = lease.v8.as_ref().expect("v8 lease");
+    let tag = v8.equal_flow.epoch_tag.load(Ordering::Acquire);
+    let target = v8
+        .equal_flow
+        .current_target_per_flow
+        .load(Ordering::Acquire);
+    let reason_before = lease.v8_equal_flow_fail_open_reason();
+    let count_before = lease.v8_equal_flow_fail_open_count();
+
+    assert_eq!(
+        lease.equal_flow_cap_v8(v8, 0, tag.wrapping_add(1)),
+        None,
+        "stale acquirer must fail open without publishing telemetry"
+    );
+
+    v8.equal_flow
+        .current_target_per_flow
+        .store(0, Ordering::Release);
+    assert_eq!(
+        lease.equal_flow_cap_v8(v8, 0, tag),
+        None,
+        "transient zero target must be read-only on acquire"
+    );
+
+    v8.equal_flow
+        .current_target_per_flow
+        .store(u64::MAX, Ordering::Release);
+    assert_eq!(
+        lease.equal_flow_cap_v8(v8, 0, tag),
+        None,
+        "overflow while reading a transient payload must be read-only"
+    );
+
+    v8.equal_flow
+        .current_target_per_flow
+        .store(target, Ordering::Release);
+    assert!(lease.v8_equal_flow_enforced());
+    assert_eq!(lease.v8_equal_flow_fail_open_reason(), reason_before);
+    assert_eq!(lease.v8_equal_flow_fail_open_count(), count_before);
+}
+
+#[test]
 fn equal_flow_fail_open_after_enforcement_does_not_reuse_stale_cap() {
     let lease = new_equal_flow_lease();
     seed_two_valid_skewed_equal_flow_epochs(&lease);

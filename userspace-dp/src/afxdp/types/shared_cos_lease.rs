@@ -1245,14 +1245,10 @@ impl SharedCoSQueueLease {
         if v8.rate_mode != V8RateMode::EqualFlowSuppress {
             return None;
         }
+        // Acquire-side cap evaluation is intentionally read-only. Epoch
+        // rotation owns fail-open publication; stale acquirers must not
+        // overwrite the freshly-published payload for a new epoch.
         if v8.equal_flow.epoch_tag.load(Ordering::Acquire) != epoch_tag {
-            v8.equal_flow.fail_open_reason.store(
-                V8EqualFlowFailOpenReason::StaleOrTagMismatch as u32,
-                Ordering::Release,
-            );
-            v8.equal_flow
-                .fail_open_count
-                .fetch_add(1, Ordering::Relaxed);
             return None;
         }
         if v8.equal_flow.enforced.load(Ordering::Acquire) == 0 {
@@ -1263,13 +1259,6 @@ impl SharedCoSQueueLease {
             .current_target_per_flow
             .load(Ordering::Acquire);
         if target == 0 {
-            v8.equal_flow.fail_open_reason.store(
-                V8EqualFlowFailOpenReason::ZeroTarget as u32,
-                Ordering::Release,
-            );
-            v8.equal_flow
-                .fail_open_count
-                .fetch_add(1, Ordering::Relaxed);
             return None;
         }
         let active_flows = v8
@@ -1280,19 +1269,7 @@ impl SharedCoSQueueLease {
         if active_flows == 0 {
             return Some(0);
         }
-        match target.checked_mul(active_flows) {
-            Some(cap) => Some(cap),
-            None => {
-                v8.equal_flow.fail_open_reason.store(
-                    V8EqualFlowFailOpenReason::ArithmeticInvalid as u32,
-                    Ordering::Release,
-                );
-                v8.equal_flow
-                    .fail_open_count
-                    .fetch_add(1, Ordering::Relaxed);
-                None
-            }
-        }
+        target.checked_mul(active_flows)
     }
 
     /// #1229 Phase 6 v8: rotate epoch when current epoch has expired.
