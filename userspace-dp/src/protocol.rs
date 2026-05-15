@@ -921,7 +921,11 @@ pub(crate) struct CoSQueueStatus {
     pub equal_flow_cap_hit_events: u64,
     #[serde(rename = "equal_flow_suppressed_grant_bytes", default)]
     pub equal_flow_suppressed_grant_bytes: u64,
-    #[serde(rename = "equal_flow_fail_open_reason", default)]
+    #[serde(
+        rename = "equal_flow_fail_open_reason",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub equal_flow_fail_open_reason: String,
     // #709 / #751: owner-profile telemetry for exact queues with an
     // unambiguous single owner-local binding snapshot. These fields are

@@ -244,7 +244,10 @@ impl V8EqualFlowSuppressState {
     }
 
     fn fail_open(&self, new_tag: u32, reason: V8EqualFlowFailOpenReason) {
-        self.epoch_tag.store(new_tag, Ordering::Release);
+        // Publish the payload first and the tag last. Readers acquire
+        // `epoch_tag` before consulting these fields; seeing `new_tag`
+        // must therefore imply seeing this fail-open payload, not the
+        // previous enforced epoch's cap.
         self.enforced.store(0, Ordering::Release);
         self.current_target_per_flow.store(0, Ordering::Release);
         self.current_worker_cap.store(0, Ordering::Release);
@@ -255,6 +258,33 @@ impl V8EqualFlowSuppressState {
             self.valid_streak.store(0, Ordering::Release);
             self.smoothed_target_per_flow.store(0, Ordering::Release);
         }
+        self.epoch_tag.store(new_tag, Ordering::Release);
+    }
+
+    fn disable_for_epoch(&self, new_tag: u32) {
+        self.enforced.store(0, Ordering::Release);
+        self.current_target_per_flow.store(0, Ordering::Release);
+        self.current_worker_cap.store(0, Ordering::Release);
+        self.fail_open_reason.store(
+            V8EqualFlowFailOpenReason::Disabled as u32,
+            Ordering::Release,
+        );
+        self.valid_streak.store(0, Ordering::Release);
+        self.smoothed_target_per_flow.store(0, Ordering::Release);
+        self.epoch_tag.store(new_tag, Ordering::Release);
+    }
+
+    fn enforce_epoch(&self, new_tag: u32, target_per_flow: u64, max_worker_cap: u64) {
+        self.current_target_per_flow
+            .store(target_per_flow, Ordering::Release);
+        self.current_worker_cap
+            .store(max_worker_cap, Ordering::Release);
+        self.fail_open_reason
+            .store(V8EqualFlowFailOpenReason::None as u32, Ordering::Release);
+        self.enforced.store(1, Ordering::Release);
+        // Last-store publication barrier. `equal_flow_cap_v8` loads this
+        // with Acquire before using the payload above.
+        self.epoch_tag.store(new_tag, Ordering::Release);
     }
 }
 
@@ -1215,9 +1245,6 @@ impl SharedCoSQueueLease {
         if v8.rate_mode != V8RateMode::EqualFlowSuppress {
             return None;
         }
-        if v8.equal_flow.enforced.load(Ordering::Acquire) == 0 {
-            return None;
-        }
         if v8.equal_flow.epoch_tag.load(Ordering::Acquire) != epoch_tag {
             v8.equal_flow.fail_open_reason.store(
                 V8EqualFlowFailOpenReason::StaleOrTagMismatch as u32,
@@ -1226,6 +1253,9 @@ impl SharedCoSQueueLease {
             v8.equal_flow
                 .fail_open_count
                 .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        if v8.equal_flow.enforced.load(Ordering::Acquire) == 0 {
             return None;
         }
         let target = v8
@@ -1376,12 +1406,7 @@ impl SharedCoSQueueLease {
                 &prev_grants,
             );
         } else {
-            v8.equal_flow.epoch_tag.store(new_tag, Ordering::Release);
-            v8.equal_flow.enforced.store(0, Ordering::Release);
-            v8.equal_flow.fail_open_reason.store(
-                V8EqualFlowFailOpenReason::Disabled as u32,
-                Ordering::Release,
-            );
+            v8.equal_flow.disable_for_epoch(new_tag);
         }
 
         // #1231 v5.5 + #1290 round-2 STEP 3.5: peer-utilization
@@ -1628,17 +1653,8 @@ fn publish_equal_flow_epoch_v8(
         return;
     }
 
-    v8.equal_flow.epoch_tag.store(new_tag, Ordering::Release);
     v8.equal_flow
-        .current_target_per_flow
-        .store(smoothed, Ordering::Release);
-    v8.equal_flow
-        .current_worker_cap
-        .store(max_worker_cap, Ordering::Release);
-    v8.equal_flow
-        .fail_open_reason
-        .store(V8EqualFlowFailOpenReason::None as u32, Ordering::Release);
-    v8.equal_flow.enforced.store(1, Ordering::Release);
+        .enforce_epoch(new_tag, smoothed, max_worker_cap);
 }
 
 /// #1229 Phase 6 v8: try to bump outstanding_leased_tokens by `take`.

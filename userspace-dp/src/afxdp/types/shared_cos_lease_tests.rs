@@ -629,6 +629,24 @@ fn equal_flow_bypass_cannot_exceed_cap() {
 }
 
 #[test]
+fn equal_flow_fail_open_after_enforcement_does_not_reuse_stale_cap() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+
+    // Epoch 3 was enforced with a 7,200-byte cap for worker 0. Worker 0
+    // then has no epoch-3 sample, so rotating into epoch 4 must fail open
+    // and grant the ordinary active-flow-proportional 8,000-byte share,
+    // never the stale enforced cap from epoch 3.
+    let granted = lease.acquire_v8(0, 4 * EPOCH_DURATION_NS, 10_000);
+    assert_eq!(granted, 8_000);
+    assert!(!lease.v8_equal_flow_enforced());
+    assert_eq!(
+        lease.v8_equal_flow_fail_open_reason(),
+        V8EqualFlowFailOpenReason::UnsampledActiveWorker
+    );
+}
+
+#[test]
 fn equal_flow_fail_open_for_one_sampled_worker() {
     let lease = new_equal_flow_lease();
     lease.rehydrate_worker_active_count(0, 1);
