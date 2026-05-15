@@ -24,11 +24,17 @@
 //      monotonic counters where cross-field tearing is acceptable. The
 //      rolling-window fields (`wall_ns_60s`, `active_ns_60s`,
 //      `thread_cpu_ns_60s`, `window_ns`) are an exception: they are
-//      published as a coherent tuple guarded by a `window_gen` seqlock
-//      (`AcqRel`/`Release` writes; bracketing `Acquire` reads with a
-//      `fence(Acquire)` between data loads and the `s2` re-check). See
-//      the struct doc on `WorkerRuntimeAtomics` for the publication
-//      invariant.
+//      published as a coherent tuple guarded by a `window_gen` seqlock.
+//      Writers `fetch_add(AcqRel)` to enter the odd publishing state,
+//      Relaxed-store the four window fields, then `fetch_add(Release)`
+//      back to an even committed state. Readers `Acquire`-load
+//      `window_gen` (s1), Relaxed-load the four data fields, issue a
+//      `fence(Acquire)` to seal those loads, then Relaxed-load
+//      `window_gen` again (s2). If `s2 == s1` and even, the four data
+//      fields were observed within a single committed epoch; on retry
+//      exhaustion the reader returns `default()` so `statusfmt`
+//      renders `-`. See the struct doc on `WorkerRuntimeAtomics` for
+//      the publication invariant.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -87,15 +93,19 @@ pub(crate) struct WorkerRuntimeWindow {
 ///
 /// The rolling-window fields (`wall_ns_60s`, `active_ns_60s`,
 /// `thread_cpu_ns_60s`, `window_ns`) are published as a seqlock-style
-/// atomic tuple guarded by `window_gen`. Writers bump `window_gen` to
-/// an odd value before storing the four window fields, then bump it
-/// back to an even value with Release ordering. Readers Acquire-load
-/// `window_gen` before and after reading the four fields; they retry
-/// (or render "-") if the generation is odd or changed between loads.
-/// This is necessary because `store(Release)` does NOT prevent
-/// subsequent Relaxed stores from being hoisted above it (PR #1311
-/// round-2 finding); a single Release-store fence is insufficient to
-/// publish multiple Relaxed values as a coherent tuple.
+/// atomic tuple guarded by `window_gen`. Writers `fetch_add(AcqRel)`
+/// to enter the odd publishing state, Relaxed-store the four window
+/// fields, then `fetch_add(Release)` back to an even committed state.
+/// Readers `Acquire`-load `window_gen` (s1), Relaxed-load the four
+/// data fields, issue a `fence(Acquire)` to seal those loads, then
+/// Relaxed-load `window_gen` again (s2). If `s2 == s1` and even, the
+/// four data fields were observed within a single committed epoch;
+/// on retry exhaustion the reader returns `default()` so `statusfmt`
+/// renders `-`. This is necessary because `store(Release)` does NOT
+/// prevent subsequent Relaxed stores from being hoisted above it (PR
+/// #1311 round-2 finding); a single Release-store fence is
+/// insufficient to publish multiple Relaxed values as a coherent
+/// tuple.
 #[repr(align(64))]
 pub(crate) struct WorkerRuntimeAtomics {
     pub wall_ns: AtomicU64,
@@ -286,9 +296,10 @@ impl WorkerRuntimeAtomics {
         // Relaxed data loads below could migrate past s2's load in the
         // CPU's out-of-order execution, allowing a torn snapshot to
         // escape the s1==s2 guard. The fence(Acquire) between the data
-        // loads and s2 emits `dmb ish` on ARM (a full bidirectional
-        // barrier), ensuring all four Relaxed loads complete before s2
-        // is observed. Two orthogonal guarantees work together: s1's
+        // loads and s2 emits `dmb ishld` on ARM (a load-load barrier;
+        // bidirectional for loads but does not order stores), ensuring
+        // all four Relaxed loads complete before s2 is observed. Two
+        // orthogonal guarantees work together: s1's
         // Acquire provides visibility of data written before the
         // writer's Release that produced s1's value; the fence prevents
         // those data loads from physically executing after s2 in the
