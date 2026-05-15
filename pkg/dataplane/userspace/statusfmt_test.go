@@ -216,7 +216,7 @@ func TestFormatStatusSummaryAttributesCoSAdmissionTXErrors(t *testing.T) {
 	for _, want := range []string{
 		"TX errors:                 100",
 		"TX errors non-admission:   50",
-		"CoS queue overflow drops:  50",
+		"CoS queue drops lifetime:  50",
 		"CoS admission drops:       10",
 		"CoS flow-share drops:      4",
 		"CoS buffer drops:          6",
@@ -246,7 +246,7 @@ func TestFormatStatusSummaryUsesBindingLifetimeForCoSErrorResidual(t *testing.T)
 	for _, want := range []string{
 		"TX errors:                 100",
 		"TX errors non-admission:   20",
-		"CoS queue overflow drops:  80",
+		"CoS queue drops lifetime:  80",
 		"CoS admission drops:       10",
 	} {
 		if !strings.Contains(out, want) {
@@ -275,7 +275,7 @@ func TestFormatStatusSummarySaturatesCoSAdmissionAttribution(t *testing.T) {
 	out := FormatStatusSummary(status)
 	for _, want := range []string{
 		"TX errors non-admission:   0",
-		"CoS queue overflow drops:  2",
+		"CoS queue drops lifetime:  2",
 		"CoS admission drops:       18446744073709551615",
 		"CoS flow-share drops:      18446744073709551614",
 		"CoS buffer drops:          10",
