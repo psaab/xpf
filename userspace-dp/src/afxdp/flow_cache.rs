@@ -14,7 +14,7 @@ const FLOW_CACHE_SIZE: usize = 4096;
 const FLOW_CACHE_WAYS: usize = 4;
 const FLOW_CACHE_SETS: usize = FLOW_CACHE_SIZE / FLOW_CACHE_WAYS;
 const FLOW_CACHE_SET_MASK: usize = FLOW_CACHE_SETS - 1;
-const ACTIVE_WINDOW_EPOCHS: u16 = 10;
+pub(super) const ACTIVE_WINDOW_EPOCHS: u16 = 10;
 pub(super) const FLOW_WORKER_MAP_MAX_PER_BINDING: usize = 256;
 const _: () = assert!(FLOW_CACHE_SETS.is_power_of_two());
 const _: () = assert!(FLOW_CACHE_WAYS == 4);

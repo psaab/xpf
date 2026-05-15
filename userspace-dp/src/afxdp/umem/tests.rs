@@ -3,6 +3,7 @@
 // LOC threshold. Loaded as a sibling submodule via
 // `#[path = "tests.rs"]` from umem/mod.rs.
 
+use super::super::flow_cache::ACTIVE_WINDOW_EPOCHS;
 use super::*;
 
 #[test]
@@ -1549,7 +1550,7 @@ fn non_idle_debug_state_keeps_hot_counter_cadence() {
 }
 
 #[test]
-fn idle_debug_state_ages_active_flow_snapshots_without_rx() {
+fn idle_debug_updater_ages_active_flow_snapshots() {
     let mut binding = active_flow_debug_test_binding();
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let stamp = FlowCacheStamp {
@@ -1593,7 +1594,7 @@ fn idle_debug_state_ages_active_flow_snapshots_without_rx() {
     assert_eq!(cos_rows[0].worker_id, 3);
     assert_eq!(cos_rows[0].active_flow_count, 1);
 
-    for _ in 0..9 {
+    for _ in 0..ACTIVE_WINDOW_EPOCHS.saturating_sub(1) {
         now_ns = now_ns.saturating_add(IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS);
         update_binding_idle_debug_state(&mut binding, now_ns);
     }
