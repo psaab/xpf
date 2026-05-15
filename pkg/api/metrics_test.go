@@ -337,6 +337,11 @@ func TestEmitCoSEqualFlowEnforcement_LabelsAndValues(t *testing.T) {
 		c.cosEqualFlowStaleOrTagMismatchEvents: 3,
 		c.cosEqualFlowFailOpen:                 1,
 	}
+	counters := map[*prometheus.Desc]bool{
+		c.cosEqualFlowCapHitEvents:             true,
+		c.cosEqualFlowSuppressedGrantBytes:     true,
+		c.cosEqualFlowStaleOrTagMismatchEvents: true,
+	}
 	for _, m := range got {
 		var pb dto.Metric
 		if err := m.Write(&pb); err != nil {
@@ -357,12 +362,16 @@ func TestEmitCoSEqualFlowEnforcement_LabelsAndValues(t *testing.T) {
 			t.Fatalf("unexpected equal-flow metric descriptor: %s", m.Desc())
 		}
 		var value float64
-		if pb.Counter != nil {
+		if counters[m.Desc()] {
+			if pb.Counter == nil {
+				t.Fatalf("equal-flow metric %s must be a counter: %+v", m.Desc(), &pb)
+			}
 			value = pb.Counter.GetValue()
-		} else if pb.Gauge != nil {
-			value = pb.Gauge.GetValue()
 		} else {
-			t.Fatalf("equal-flow metric has neither counter nor gauge: %+v", &pb)
+			if pb.Gauge == nil {
+				t.Fatalf("equal-flow metric %s must be a gauge: %+v", m.Desc(), &pb)
+			}
+			value = pb.Gauge.GetValue()
 		}
 		if value != want {
 			t.Fatalf("equal-flow metric %s = %v, want %v", m.Desc(), value, want)

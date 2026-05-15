@@ -567,9 +567,11 @@ flow-worker snapshots reset the runtime window and suppress metric
 emission rather than reporting a false-healthy queue from stale samples.
 Truncated CoS active-flow snapshots suppress only the equal-flow
 estimator because the estimator needs both per-worker byte rates and
-per-worker active-flow counts. The estimator is advisory telemetry for
-future rate-suppression work; the dataplane remains work-conserving
-unless a later PR explicitly wires an enforcement mode.
+per-worker active-flow counts. The estimator remains advisory
+telemetry. The #1304 shared-v8 equal-flow enforcement mode is opt-in
+and intentionally non-work-conserving when configured; its actual
+dataplane state is reported by the `xpf_userspace_cos_equal_flow_*`
+metrics above.
 
 ## Steady-state measurement window
 
