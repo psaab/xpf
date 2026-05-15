@@ -4,16 +4,16 @@
 // `#[path = "tx_completion_tests.rs"]` from tx_completion.rs.
 
 use super::*;
+use crate::afxdp::TX_BATCH_SIZE;
 use crate::afxdp::cos::queue_service::{
     select_cos_guarantee_batch, select_exact_cos_guarantee_queue_with_fast_path,
 };
 use crate::afxdp::cos::token_bucket::COS_MIN_BURST_BYTES;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{
-    CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing, SharedCoSQueueLease,
-    COS_FLOW_FAIR_BUCKETS,
+    COS_FLOW_FAIR_BUCKETS, CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing,
+    SharedCoSQueueLease,
 };
-use crate::afxdp::TX_BATCH_SIZE;
 use std::sync::Arc;
 
 // #915 Codex code-review MEDIUM: direct unit tests for the
@@ -103,6 +103,7 @@ fn normalize_cos_queue_state_repairs_nonempty_unparked_queue_to_runnable() {
             transmit_rate_bytes: 11_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             flow_fair: false,
             shared_exact: false,
             surplus_weight: 1,

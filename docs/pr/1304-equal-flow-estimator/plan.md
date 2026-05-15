@@ -74,8 +74,13 @@ The estimate is valid only when:
 
 ## Non-Goals
 
-- No Rust dataplane enforcement.
-- No token-bucket or lease-budget change.
+- Phase 0 had no Rust dataplane enforcement. The follow-on enforcement
+  slice is explicit opt-in via
+  `class-of-service schedulers <name> equal-flow-enforcement` and lives
+  inside the shared v8 exact queue lease, not in the Go rolling estimator.
+- No Go collector feedback loop into the scheduler. The Go estimator remains
+  measurement-only; Rust enforcement uses prior-epoch shared-lease grant
+  samples with fail-open guards.
 - No CLI command for the rolling estimator; the CLI status path is
   stateless across invocations, while the estimator needs a daemon-owned
   rolling window.
@@ -83,6 +88,31 @@ The estimate is valid only when:
   naturally quiet flows. Phase 0 intentionally measures the strict
   equalize-to-slowest-sampled outcome so reviewers can quantify its
   throughput cost first.
+
+## Enforcement Slice
+
+The opt-in Rust slice deliberately trades throughput for lower absolute
+per-flow spread under RSS skew:
+
+- only positive `transmit-rate exact` schedulers may enable it;
+- `surplus-sharing` is rejected with `equal-flow-enforcement`, because surplus
+  service intentionally bypasses the per-queue lease cap that the suppressor
+  uses to withhold faster-worker grants;
+- queue-lease acquire remains O(1), loading a cap published by the existing
+  200 us v8 rotation;
+- rotation samples workers that were active, demanded lease credit, and
+  received prior-epoch grants;
+- every active sampled worker must have consumed a material fraction of its
+  prior fair share, so a merely low-traffic worker cannot become the global
+  equal-flow target;
+- any active unsampled worker, zero target, stale epoch, or insufficient valid
+  streak fails open to the default v8 behavior; a low-demand sampled worker
+  fails open for the same reason;
+- when active, bypass cannot grant beyond the equal-flow cap, because that
+  would defeat suppression;
+- status and Prometheus distinguish configured mode, actively enforced epochs,
+  target, cap-hit events, suppressed grant bytes, and the bounded fail-open
+  reason.
 
 ## Validation
 

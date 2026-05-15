@@ -86,6 +86,17 @@ type xpfCollector struct {
 	cosRedirectAcquireBucket *prometheus.Desc
 	cosOwnerPPS              *prometheus.Desc
 	cosPeerPPS               *prometheus.Desc
+	// #1304: Rust-owned opt-in equal-flow enforcement telemetry for
+	// shared v8 CoS queue leases. Kept separate from the
+	// measurement-only xpf_fairness_equal_flow_* estimator gauges.
+	cosEqualFlowEnforcementEnabled       *prometheus.Desc
+	cosEqualFlowEnforced                 *prometheus.Desc
+	cosEqualFlowTargetPerFlowBPS         *prometheus.Desc
+	cosEqualFlowMaxWorkerCapBytes        *prometheus.Desc
+	cosEqualFlowCapHitEvents             *prometheus.Desc
+	cosEqualFlowSuppressedGrantBytes     *prometheus.Desc
+	cosEqualFlowStaleOrTagMismatchEvents *prometheus.Desc
+	cosEqualFlowFailOpen                 *prometheus.Desc
 	// #869: per-worker busy/idle runtime counters.
 	workerWallSecs                           *prometheus.Desc
 	workerActiveSecs                         *prometheus.Desc
@@ -353,6 +364,46 @@ func newCollector(srv *Server) *xpfCollector {
 			"CoS peer-redirected pps (window accumulator, cleared by operator) (#709).",
 			[]string{"ifindex", "queue_id"}, nil,
 		),
+		cosEqualFlowEnforcementEnabled: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_enforcement_enabled",
+			"1 when this exact CoS queue's shared v8 lease is configured for opt-in equal-flow suppression (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowEnforced: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_enforced",
+			"1 when this exact CoS queue's current shared v8 lease epoch is actively applying equal-flow suppression; 0 when configured but failed open (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowTargetPerFlowBPS: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_target_per_flow_bps",
+			"Current Rust-enforced equal-flow per-flow target in bits per second, derived from shared v8 lease grants rather than the measurement-only Go estimator (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowMaxWorkerCapBytes: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_max_worker_cap_bytes",
+			"Maximum per-worker bytes-per-epoch cap currently published by the shared v8 equal-flow suppressor (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowCapHitEvents: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_cap_hit_events_total",
+			"Acquire calls denied by the opt-in shared v8 equal-flow cap while class capacity remained (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowSuppressedGrantBytes: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total",
+			"Requested queue-lease bytes withheld by the opt-in shared v8 equal-flow suppressor while class capacity remained (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowStaleOrTagMismatchEvents: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total",
+			"Acquire-side stale/tag-mismatch equal-flow cap reads that failed open without overwriting the rotation-published epoch reason (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosEqualFlowFailOpen: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_fail_open",
+			"1 for the current bounded fail-open reason on an opt-in shared v8 equal-flow queue; absent for queues without equal-flow enforcement (#1304).",
+			[]string{"ifindex", "queue_id", "reason"}, nil,
+		),
 		// #869: per-worker busy/idle runtime counters.
 		workerWallSecs: prometheus.NewDesc(
 			"xpf_userspace_worker_wall_seconds_total",
@@ -596,6 +647,14 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.cosRedirectAcquireBucket
 	ch <- c.cosOwnerPPS
 	ch <- c.cosPeerPPS
+	ch <- c.cosEqualFlowEnforcementEnabled
+	ch <- c.cosEqualFlowEnforced
+	ch <- c.cosEqualFlowTargetPerFlowBPS
+	ch <- c.cosEqualFlowMaxWorkerCapBytes
+	ch <- c.cosEqualFlowCapHitEvents
+	ch <- c.cosEqualFlowSuppressedGrantBytes
+	ch <- c.cosEqualFlowStaleOrTagMismatchEvents
+	ch <- c.cosEqualFlowFailOpen
 	ch <- c.workerWallSecs
 	ch <- c.workerActiveSecs
 	ch <- c.workerIdleSpinSecs
@@ -670,6 +729,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 		return
 	}
 	c.emitCoSOwnerProfile(ch, status)
+	c.emitCoSEqualFlowEnforcement(ch, status)
 	c.emitWorkerRuntime(ch, status)
 	c.emitBindingActiveFlowCount(ch, status)
 	c.emitBindingTXCompletionTelemetry(ch, status)
@@ -1056,6 +1116,74 @@ func (c *xpfCollector) emitCoSOwnerProfile(ch chan<- prometheus.Metric, status d
 			ch <- prometheus.MustNewConstMetric(c.cosPeerPPS,
 				prometheus.GaugeValue, float64(queue.PeerPPS),
 				ifindexLabel, queueLabel)
+		}
+	}
+}
+
+func (c *xpfCollector) emitCoSEqualFlowEnforcement(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, iface := range status.CoSInterfaces {
+		ifindexLabel := strconv.Itoa(iface.Ifindex)
+		for _, queue := range iface.Queues {
+			if !queue.EqualFlowEnforcement {
+				continue
+			}
+			queueLabel := strconv.Itoa(queue.QueueID)
+			enforced := 0.0
+			if queue.EqualFlowEnforced {
+				enforced = 1.0
+			}
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowEnforcementEnabled,
+				prometheus.GaugeValue,
+				1,
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowEnforced,
+				prometheus.GaugeValue,
+				enforced,
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowTargetPerFlowBPS,
+				prometheus.GaugeValue,
+				float64(queue.EqualFlowTargetPerFlowBPS),
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowMaxWorkerCapBytes,
+				prometheus.GaugeValue,
+				float64(queue.EqualFlowMaxWorkerCapBytes),
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowCapHitEvents,
+				prometheus.CounterValue,
+				float64(queue.EqualFlowCapHitEvents),
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowSuppressedGrantBytes,
+				prometheus.CounterValue,
+				float64(queue.EqualFlowSuppressedGrantBytes),
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowStaleOrTagMismatchEvents,
+				prometheus.CounterValue,
+				float64(queue.EqualFlowStaleOrTagMismatchEvents),
+				ifindexLabel, queueLabel,
+			)
+			reason := queue.EqualFlowFailOpenReason
+			if reason == "" {
+				reason = "none"
+			}
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowFailOpen,
+				prometheus.GaugeValue,
+				1,
+				ifindexLabel, queueLabel, reason,
+			)
 		}
 	}
 }

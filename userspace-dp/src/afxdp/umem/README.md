@@ -33,6 +33,11 @@ drop-in for xdpilone), and tracks frame budgets per binding.
   doesn't cross thread boundaries within the worker. The cross-binding
   redirect path in `cos/cross_binding.rs` *copies* frames into the
   destination binding's UMEM rather than sharing.
+- `WorkerUmem::new_for_test` is hermetic test scaffolding paired with
+  the in-memory ring fixtures in `xsk_ffi.rs`. It exists so CoS and TX
+  unit tests can exercise worker-owned drain paths without creating
+  kernel AF_XDP sockets; production UMEM construction remains
+  `WorkerUmem::new`.
 - In **zero-copy mode on mlx5**, an `XDP_PASS` action permanently
   consumes a fill-ring frame: the kernel holds the UMEM buffer in
   an SKB and never returns it. Sustained traffic drains all 12K+ RX

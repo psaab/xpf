@@ -5,13 +5,13 @@
 
 use std::collections::VecDeque;
 
+use super::COS_MIN_BURST_BYTES;
 use super::admission::apply_cos_queue_flow_fair_promotion;
 use super::tx_completion::cos_tick_for_ns;
-use super::COS_MIN_BURST_BYTES;
 use crate::afxdp::types::{
-    CoSInterfaceConfig, CoSInterfaceRuntime, CoSQueueConfigState, CoSQueueDropCounters,
-    CoSQueueHotState, CoSQueueOwnerProfile, CoSQueueRuntime, CoSQueueTelemetry,
-    CoSTimerWheelRuntime, ForwardingState, VMinQueueState, COS_PRIORITY_LEVELS,
+    COS_PRIORITY_LEVELS, CoSInterfaceConfig, CoSInterfaceRuntime, CoSQueueConfigState,
+    CoSQueueDropCounters, CoSQueueHotState, CoSQueueOwnerProfile, CoSQueueRuntime,
+    CoSQueueTelemetry, CoSTimerWheelRuntime, ForwardingState, VMinQueueState,
 };
 use crate::afxdp::worker::BindingWorker;
 
@@ -103,6 +103,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
                     // CoSQueueConfig (populated in forwarding_build.rs
                     // from CoSSchedulerSnapshot.surplus_sharing).
                     surplus_sharing: queue.surplus_sharing,
+                    equal_flow_enforcement: queue.equal_flow_enforcement,
                     flow_fair: false,
                     // Populated by `promote_cos_queue_flow_fair` from the
                     // live `WorkerCoSQueueFastPath.shared_exact` signal.

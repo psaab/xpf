@@ -404,8 +404,8 @@ spread below the work-conserving `Cstruct` floor, but only by giving up
 aggregate throughput.
 
 The first slice is measurement-only. It extends the rolling throughput
-collector to model the cap a future suppressor would apply, without
-feeding any scheduler path:
+collector to model the cap an equal-flow suppressor would apply,
+without feeding any scheduler path:
 
 - `xpf_fairness_equal_flow_estimate_valid{ifindex,queue_id}`
 - `xpf_fairness_equal_flow_sampled_active_workers{ifindex,queue_id}`
@@ -424,8 +424,31 @@ The estimator requires untruncated flow-worker byte telemetry and
 untruncated per-CoS active-flow counts. It is valid only when at least
 two active workers have non-zero rolling byte samples. This keeps the
 metric honest: it answers "what throughput would strict equal-flow
-suppression cost on this queue right now?" before any enforcement mode
-is designed.
+suppression cost on this queue right now?" independently from any
+configured enforcement mode.
+
+The opt-in enforcement slice is separate Rust dataplane telemetry
+under `xpf_userspace_cos_equal_flow_*`. It is valid only on positive
+exact-rate schedulers without `surplus-sharing`; the cap is computed per
+active SFQ bucket, so multiple 5-tuples that collide into one bucket are
+counted as one active unit for suppression:
+
+- `xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex,queue_id}`
+- `xpf_userspace_cos_equal_flow_enforced{ifindex,queue_id}`
+- `xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex,queue_id}`
+- `xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex,queue_id}`
+- `xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex,queue_id}`
+- `xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex,queue_id}`
+- `xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex,queue_id}`
+- `xpf_userspace_cos_equal_flow_fail_open{ifindex,queue_id,reason}`
+
+Those metrics report the shared v8 queue lease's actual mode and
+current epoch state. The suppressor fails open when the active-worker
+sample is incomplete, stale, low-demand, zero-target, or still below
+the valid-streak guard, so a quiet worker cannot become the global
+rate-suppression target. Acquire-side stale/tag mismatches are counted
+on a separate monotonic counter rather than by rewriting the current
+epoch's `reason`, because the rotation winner owns the epoch payload.
 
 Issue #1306 makes the class sweep preserve that evidence directly:
 each class artifact gets an `equal-flow/` directory with the raw
@@ -492,9 +515,10 @@ MQFQ, v8 lease selection, or admission.
   expectation config and skew-violation gauges are available; alert
   routing remains deployment policy.
 - **#1304 — Equal-flow rate-suppression mode**: active. Phase 0 adds
-  measurement-only suppression-cost telemetry. Do not wire enforcement
-  until live class-sweep data shows the estimator is stable and the
-  throughput loss is an acceptable product tradeoff.
+  measurement-only suppression-cost telemetry; the opt-in dataplane
+  slice adds Rust shared-v8 enforcement telemetry and fail-open guarded
+  rate suppression for positive exact-rate CoS schedulers without
+  `surplus-sharing`.
 
 ## Empirical sweep across workload classes (2026-05-07)
 

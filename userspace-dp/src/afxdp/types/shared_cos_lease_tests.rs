@@ -112,12 +112,16 @@ fn v8_new_v8_advertises_v8_mode() {
 fn v8_matches_config_v8_distinguishes_max_worker_id() {
     let lease = SharedCoSQueueLease::new_v8(10_000_000, 64 * 1024, 2, 5);
     assert!(
-        lease.matches_config_v8(10_000_000, 64 * 1024, 2, 5),
+        lease.matches_config_v8(10_000_000, 64 * 1024, 2, 5, V8RateMode::CstructDefault),
         "same config matches"
     );
     assert!(
-        !lease.matches_config_v8(10_000_000, 64 * 1024, 2, 6),
+        !lease.matches_config_v8(10_000_000, 64 * 1024, 2, 6, V8RateMode::CstructDefault),
         "max_worker_id change does NOT match (forces rebuild)"
+    );
+    assert!(
+        !lease.matches_config_v8(10_000_000, 64 * 1024, 2, 5, V8RateMode::EqualFlowSuppress),
+        "rate-mode change does NOT match (forces rebuild)"
     );
     assert!(
         !lease.matches_config(10_000_000, 64 * 1024, 2),
@@ -130,7 +134,7 @@ fn v8_legacy_lease_matches_legacy_only() {
     let lease = SharedCoSQueueLease::new(10_000_000, 64 * 1024, 2);
     assert!(lease.matches_config(10_000_000, 64 * 1024, 2));
     assert!(
-        !lease.matches_config_v8(10_000_000, 64 * 1024, 2, 0),
+        !lease.matches_config_v8(10_000_000, 64 * 1024, 2, 0, V8RateMode::CstructDefault),
         "legacy lease must NOT match matches_config_v8"
     );
 }
@@ -280,19 +284,31 @@ fn v8_rehydrate_multiple_workers_isolated() {
     lease.rehydrate_worker_active_count(2, 1);
     lease.rehydrate_worker_active_count(3, 4);
     assert_eq!(
-        lease.worker_active_flow_buckets_for(0).unwrap().load(Ordering::Relaxed),
+        lease
+            .worker_active_flow_buckets_for(0)
+            .unwrap()
+            .load(Ordering::Relaxed),
         2
     );
     assert_eq!(
-        lease.worker_active_flow_buckets_for(1).unwrap().load(Ordering::Relaxed),
+        lease
+            .worker_active_flow_buckets_for(1)
+            .unwrap()
+            .load(Ordering::Relaxed),
         5
     );
     assert_eq!(
-        lease.worker_active_flow_buckets_for(2).unwrap().load(Ordering::Relaxed),
+        lease
+            .worker_active_flow_buckets_for(2)
+            .unwrap()
+            .load(Ordering::Relaxed),
         1
     );
     assert_eq!(
-        lease.worker_active_flow_buckets_for(3).unwrap().load(Ordering::Relaxed),
+        lease
+            .worker_active_flow_buckets_for(3)
+            .unwrap()
+            .load(Ordering::Relaxed),
         4
     );
 }
@@ -515,6 +531,309 @@ fn bypass_arms_for_underutil_peer_with_demand() {
         "demand-qualified underutilized peer should arm bypass"
     );
     assert!(lease.v8_bypass_grace_active());
+}
+
+// === #1304 equal-flow suppression prototype tests ===
+
+fn new_equal_flow_lease() -> SharedCoSQueueLease {
+    SharedCoSQueueLease::new_v8_with_rate_mode(
+        50_000_000,
+        256 * 1024,
+        8,
+        1,
+        V8RateMode::EqualFlowSuppress,
+    )
+}
+
+fn seed_two_valid_skewed_equal_flow_epochs(lease: &SharedCoSQueueLease) {
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 8_000);
+    let _ = lease.acquire_v8(1, EPOCH_DURATION_NS, 1_800);
+    assert!(!lease.v8_equal_flow_enforced());
+
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 8_000);
+    let _ = lease.acquire_v8(1, 2 * EPOCH_DURATION_NS, 1_800);
+    assert!(!lease.v8_equal_flow_enforced());
+
+    let _ = lease.acquire_v8(1, 3 * EPOCH_DURATION_NS, 1);
+    assert!(lease.v8_equal_flow_enforced());
+    assert_eq!(lease.v8_equal_flow_target_per_flow(), 1_800);
+    assert_eq!(lease.v8_equal_flow_worker_cap(), 7_200);
+}
+
+#[test]
+fn equal_flow_default_new_v8_behavior_unchanged() {
+    let lease = SharedCoSQueueLease::new_v8(50_000_000, 256 * 1024, 2, 1);
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+    assert!(!lease.v8_equal_flow_active());
+
+    let g0 = lease.acquire_v8(0, EPOCH_DURATION_NS, 8_000);
+    let g1 = lease.acquire_v8(1, EPOCH_DURATION_NS, 2_000);
+    assert_eq!(g0, 8_000);
+    assert_eq!(g1, 2_000);
+    assert_eq!(lease.v8_equal_flow_fail_open_count(), 0);
+}
+
+#[test]
+fn equal_flow_caps_ahead_worker_after_prior_skew() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+
+    let granted = lease.acquire_v8(0, 3 * EPOCH_DURATION_NS, 10_000);
+    assert_eq!(
+        granted, 7_200,
+        "4-flow worker is capped at lagging prior per-flow target"
+    );
+    assert!(lease.v8_equal_flow_cap_hit_events() > 0);
+    assert!(lease.v8_equal_flow_suppressed_grant_bytes() > 0);
+}
+
+#[test]
+fn equal_flow_intentionally_leaves_class_capacity_unused() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+
+    let g0 = lease.acquire_v8(0, 3 * EPOCH_DURATION_NS, 10_000);
+    let g1 = lease.acquire_v8(1, 3 * EPOCH_DURATION_NS, 10_000);
+    assert_eq!(g0, 7_200);
+    assert_eq!(
+        g1, 1_799,
+        "worker 1 already consumed one byte in this epoch"
+    );
+    assert!(
+        g0 + g1 < 10_000,
+        "equal-flow enforcement suppresses ahead workers instead of filling cap"
+    );
+}
+
+#[test]
+fn equal_flow_bypass_cannot_exceed_cap() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+    lease
+        .v8
+        .as_ref()
+        .unwrap()
+        .epoch
+        .bypass_grace_rotations_remaining
+        .store(1, Ordering::Release);
+
+    let first = lease.acquire_v8(0, 3 * EPOCH_DURATION_NS, 10_000);
+    let second = lease.acquire_v8(0, 3 * EPOCH_DURATION_NS, 10_000);
+    assert_eq!(first, 7_200);
+    assert_eq!(second, 0, "bypass must not grant beyond equal-flow cap");
+    assert_eq!(lease.v8_bypass_grace_uses(), 0);
+}
+
+#[test]
+fn equal_flow_acquire_side_cap_check_is_read_only_on_inconsistent_snapshot() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+    let v8 = lease.v8.as_ref().expect("v8 lease");
+    let tag = v8.equal_flow.epoch_tag.load(Ordering::Acquire);
+    let target = v8
+        .equal_flow
+        .current_target_per_flow
+        .load(Ordering::Acquire);
+    let reason_before = lease.v8_equal_flow_fail_open_reason();
+    let count_before = lease.v8_equal_flow_fail_open_count();
+    let stale_before = lease.v8_equal_flow_stale_or_tag_mismatch_events();
+
+    assert_eq!(
+        lease.equal_flow_cap_v8(v8, 0, tag.wrapping_add(1)),
+        None,
+        "stale acquirer must fail open without publishing telemetry"
+    );
+    assert_eq!(
+        lease.v8_equal_flow_stale_or_tag_mismatch_events(),
+        stale_before + 1
+    );
+
+    v8.equal_flow
+        .current_target_per_flow
+        .store(0, Ordering::Release);
+    assert_eq!(
+        lease.equal_flow_cap_v8(v8, 0, tag),
+        None,
+        "transient zero target must be read-only on acquire"
+    );
+
+    v8.equal_flow
+        .current_target_per_flow
+        .store(u64::MAX, Ordering::Release);
+    assert_eq!(
+        lease.equal_flow_cap_v8(v8, 0, tag),
+        None,
+        "overflow while reading a transient payload must be read-only"
+    );
+
+    v8.equal_flow
+        .current_target_per_flow
+        .store(target, Ordering::Release);
+    assert!(lease.v8_equal_flow_enforced());
+    assert_eq!(lease.v8_equal_flow_fail_open_reason(), reason_before);
+    assert_eq!(lease.v8_equal_flow_fail_open_count(), count_before);
+    assert_eq!(
+        lease.v8_equal_flow_stale_or_tag_mismatch_events(),
+        stale_before + 1,
+        "only stale/tag mismatch increments the transient side channel"
+    );
+}
+
+#[test]
+fn equal_flow_epoch_payload_is_visible_after_tag_under_concurrent_readers() {
+    let lease = new_equal_flow_lease();
+    let v8 = lease.v8.as_ref().expect("v8 lease");
+    let ack = std::sync::atomic::AtomicU32::new(0);
+    let start = std::sync::Barrier::new(2);
+    const ITERS: u32 = 1_000;
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            start.wait();
+            for tag in 1..=ITERS {
+                if tag % 2 == 0 {
+                    v8.equal_flow
+                        .enforce_epoch(tag, tag as u64 + 10, tag as u64 + 20);
+                } else {
+                    v8.equal_flow
+                        .fail_open(tag, V8EqualFlowFailOpenReason::NoActiveFlows);
+                }
+                while ack.load(Ordering::Acquire) < tag {
+                    std::hint::spin_loop();
+                }
+            }
+        });
+
+        start.wait();
+        for tag in 1..=ITERS {
+            loop {
+                let seen_tag = v8.equal_flow.epoch_tag.load(Ordering::Acquire);
+                if seen_tag >= tag {
+                    assert_eq!(seen_tag, tag, "writer must wait for reader ack");
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+
+            let enforced = v8.equal_flow.enforced.load(Ordering::Acquire);
+            let target = v8
+                .equal_flow
+                .current_target_per_flow
+                .load(Ordering::Acquire);
+            let worker_cap = v8.equal_flow.current_worker_cap.load(Ordering::Acquire);
+            let reason = V8EqualFlowFailOpenReason::from_u32(
+                v8.equal_flow.fail_open_reason.load(Ordering::Acquire),
+            );
+
+            if tag % 2 == 0 {
+                assert_eq!(enforced, 1, "tag {tag} must publish enforced payload");
+                assert_eq!(target, tag as u64 + 10);
+                assert_eq!(worker_cap, tag as u64 + 20);
+                assert_eq!(reason, V8EqualFlowFailOpenReason::None);
+            } else {
+                assert_eq!(enforced, 0, "tag {tag} must publish fail-open payload");
+                assert_eq!(target, 0);
+                assert_eq!(worker_cap, 0);
+                assert_eq!(reason, V8EqualFlowFailOpenReason::NoActiveFlows);
+            }
+
+            ack.store(tag, Ordering::Release);
+        }
+    });
+}
+
+#[test]
+fn equal_flow_fail_open_after_enforcement_does_not_reuse_stale_cap() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+
+    // Epoch 3 was enforced with a 7,200-byte cap for worker 0. Worker 0
+    // then has no epoch-3 sample, so rotating into epoch 4 must fail open
+    // and grant the ordinary active-flow-proportional 8,000-byte share,
+    // never the stale enforced cap from epoch 3.
+    let granted = lease.acquire_v8(0, 4 * EPOCH_DURATION_NS, 10_000);
+    assert_eq!(granted, 8_000);
+    assert!(!lease.v8_equal_flow_enforced());
+    assert_eq!(
+        lease.v8_equal_flow_fail_open_reason(),
+        V8EqualFlowFailOpenReason::UnsampledActiveWorker
+    );
+}
+
+#[test]
+fn equal_flow_fail_open_for_one_sampled_worker() {
+    let lease = new_equal_flow_lease();
+    lease.rehydrate_worker_active_count(0, 1);
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 1_000);
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 1_000);
+    assert!(!lease.v8_equal_flow_enforced());
+    assert_eq!(
+        lease.v8_equal_flow_fail_open_reason(),
+        V8EqualFlowFailOpenReason::InsufficientSampledWorkers
+    );
+}
+
+#[test]
+fn equal_flow_fail_open_for_unsampled_active_worker() {
+    let lease = new_equal_flow_lease();
+    lease.rehydrate_worker_active_count(0, 1);
+    lease.rehydrate_worker_active_count(1, 1);
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 1_000);
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 1_000);
+    assert!(!lease.v8_equal_flow_enforced());
+    assert_eq!(
+        lease.v8_equal_flow_fail_open_reason(),
+        V8EqualFlowFailOpenReason::UnsampledActiveWorker
+    );
+}
+
+#[test]
+fn equal_flow_fail_open_for_zero_or_tiny_target() {
+    let lease = new_equal_flow_lease();
+    lease.rehydrate_worker_active_count(0, 2_000);
+    lease.rehydrate_worker_active_count(1, 2_000);
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 1);
+    let _ = lease.acquire_v8(1, EPOCH_DURATION_NS, 1);
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 1);
+    assert!(!lease.v8_equal_flow_enforced());
+    assert_eq!(
+        lease.v8_equal_flow_fail_open_reason(),
+        V8EqualFlowFailOpenReason::ZeroTarget
+    );
+}
+
+#[test]
+fn equal_flow_fail_open_for_quiet_active_worker_without_demand_or_grant() {
+    let lease = new_equal_flow_lease();
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 8_000);
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 8_000);
+    assert!(!lease.v8_equal_flow_enforced());
+    assert_eq!(
+        lease.v8_equal_flow_fail_open_reason(),
+        V8EqualFlowFailOpenReason::UnsampledActiveWorker
+    );
+}
+
+#[test]
+fn equal_flow_fail_open_for_nonzero_low_demand_worker() {
+    let lease = new_equal_flow_lease();
+    lease.rehydrate_worker_active_count(0, 4);
+    lease.rehydrate_worker_active_count(1, 1);
+
+    let _ = lease.acquire_v8(0, EPOCH_DURATION_NS, 8_000);
+    let _ = lease.acquire_v8(1, EPOCH_DURATION_NS, 1);
+    let _ = lease.acquire_v8(0, 2 * EPOCH_DURATION_NS, 8_000);
+    assert!(!lease.v8_equal_flow_enforced());
+    assert_eq!(
+        lease.v8_equal_flow_fail_open_reason(),
+        V8EqualFlowFailOpenReason::LowDemandWorker
+    );
 }
 
 #[test]

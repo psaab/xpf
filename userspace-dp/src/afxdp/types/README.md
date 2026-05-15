@@ -32,6 +32,13 @@ globs.
   cross-worker writes — readers compute against the floor; only the
   V_min owner advances it. See `docs/per-5-tuple/state.md` for why
   this matters for fairness mechanism design.
+- Equal-flow suppression follows the same ownership rule: epoch
+  rotation publishes `fail_open_reason`, `fail_open_count`, and the
+  enforced cap payload; acquire-side helpers are read-only against
+  those fields so stale workers cannot overwrite the current epoch's
+  operator-visible state. Acquire-side stale/tag mismatches use a
+  separate monotonic counter because they are transient read failures,
+  not a new epoch-level fail-open reason.
 - The `mod.rs` re-exports are explicit per-sub-module globs:
   `pub(in crate::afxdp) use cos::*;`,
   `pub(in crate::afxdp) use forwarding::*;`,

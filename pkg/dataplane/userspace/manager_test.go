@@ -3122,6 +3122,42 @@ func TestBuildClassOfServiceSnapshotIncludesSurplusSharing(t *testing.T) {
 	}
 }
 
+func TestBuildClassOfServiceSnapshotIncludesEqualFlowEnforcement(t *testing.T) {
+	cfg := &config.Config{
+		ClassOfService: &config.ClassOfServiceConfig{
+			Schedulers: map[string]*config.CoSScheduler{
+				"iperf-a": {
+					Name:                 "iperf-a",
+					TransmitRateBytes:    125_000_000,
+					TransmitRateExact:    true,
+					EqualFlowEnforcement: true,
+					Priority:             "low",
+				},
+				"iperf-b": {
+					Name:              "iperf-b",
+					TransmitRateBytes: 1_250_000_000,
+					TransmitRateExact: true,
+					Priority:          "low",
+				},
+			},
+		},
+	}
+	snap := buildClassOfServiceSnapshot(cfg)
+	if snap == nil {
+		t.Fatal("expected non-nil snapshot")
+	}
+	got := map[string]bool{}
+	for _, s := range snap.Schedulers {
+		got[s.Name] = s.EqualFlowEnforcement
+	}
+	if !got["iperf-a"] {
+		t.Errorf("expected EqualFlowEnforcement=true on iperf-a; got %v", got)
+	}
+	if got["iperf-b"] {
+		t.Errorf("expected EqualFlowEnforcement=false on iperf-b; got %v", got)
+	}
+}
+
 func TestBuildClassOfServiceSnapshotIncludesIEEE8021Classifier(t *testing.T) {
 	cfg := &config.Config{
 		ClassOfService: &config.ClassOfServiceConfig{

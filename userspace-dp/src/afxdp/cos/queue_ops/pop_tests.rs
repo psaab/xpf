@@ -9,6 +9,7 @@
 // these tests pin its invariants. Moved here from queue_ops/mod.rs
 // per #1034 P5.
 use super::*;
+use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::admission::{
     apply_cos_queue_flow_fair_promotion, cos_flow_aware_buffer_limit, cos_queue_flow_share_limit,
 };
@@ -18,10 +19,10 @@ use crate::afxdp::cos::queue_ops::{
     cos_queue_restore_front,
 };
 use crate::afxdp::cos::queue_service::{
-    drain_exact_local_fifo_items_to_scratch, drain_exact_local_items_to_scratch_flow_fair,
-    drain_exact_prepared_fifo_items_to_scratch, drain_exact_prepared_items_to_scratch_flow_fair,
-    settle_exact_local_fifo_submission, settle_exact_local_scratch_submission_flow_fair,
-    settle_exact_prepared_fifo_submission, ExactCoSScratchBuild,
+    ExactCoSScratchBuild, drain_exact_local_fifo_items_to_scratch,
+    drain_exact_local_items_to_scratch_flow_fair, drain_exact_prepared_fifo_items_to_scratch,
+    drain_exact_prepared_items_to_scratch_flow_fair, settle_exact_local_fifo_submission,
+    settle_exact_local_scratch_submission_flow_fair, settle_exact_prepared_fifo_submission,
 };
 use crate::afxdp::cos::token_bucket::COS_MIN_BURST_BYTES;
 use crate::afxdp::tx::cos_classify::{
@@ -30,10 +31,9 @@ use crate::afxdp::tx::cos_classify::{
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::tx_frame_capacity;
 use crate::afxdp::types::{
-    CoSQueueConfig, FastMap, PreparedTxRecycle, PreparedTxRequest, TxRequest, COS_FLOW_FAIR_BUCKETS,
+    COS_FLOW_FAIR_BUCKETS, CoSQueueConfig, FastMap, PreparedTxRecycle, PreparedTxRequest, TxRequest,
 };
 use crate::afxdp::umem::MmapArea;
-use crate::afxdp::PROTO_TCP;
 
 #[test]
 fn flow_fair_exact_queue_limits_dominant_flow_share() {
@@ -46,6 +46,7 @@ fn flow_fair_exact_queue_limits_dominant_flow_share() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -131,6 +132,7 @@ fn flow_fair_queue_pops_in_virtual_finish_order_local() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -212,6 +214,7 @@ fn flow_fair_queue_mqfq_bytes_rate_fair_on_mixed_packet_sizes() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -326,6 +329,7 @@ fn mqfq_golden_vector_pop_order_vs_drr() {
                 transmit_rate_bytes: 1_000_000_000 / 8,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -394,6 +398,7 @@ fn mqfq_idle_flow_reanchors_at_frontier_not_zero() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -451,6 +456,7 @@ fn flow_fair_queue_pops_in_virtual_finish_order_prepared() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -498,6 +504,7 @@ fn mqfq_enqueue_bumps_finish_time_by_byte_count() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -560,6 +567,7 @@ fn mqfq_bucket_drain_resets_finish_time() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -619,6 +627,7 @@ fn mqfq_queue_vtime_tracks_served_finish_time() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -685,6 +694,7 @@ fn mqfq_vtime_does_not_accumulate_across_flows() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -775,6 +785,7 @@ fn mqfq_scratch_drop_preserves_vtime_for_multi_survivor_restore() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -957,6 +968,7 @@ fn mqfq_same_bucket_multipop_drop_preserves_dropped_item_finish() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1041,6 +1053,7 @@ fn mqfq_drained_bucket_orphan_drop_preserves_served_finish() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1153,6 +1166,7 @@ fn mqfq_shared_exact_admission_downgrades_to_aggregate() {
             transmit_rate_bytes: 25_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1209,6 +1223,7 @@ fn mqfq_push_front_is_finish_time_neutral_on_active_bucket() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1299,6 +1314,7 @@ fn mqfq_push_front_is_neutral_on_drained_bucket_round_trip() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1414,6 +1430,7 @@ fn mqfq_batched_rollback_restores_queue_vtime() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1556,6 +1573,7 @@ fn mqfq_batched_rollback_across_multiple_buckets() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1725,6 +1743,7 @@ fn mqfq_pop_snapshot_stack_bounded_to_tx_batch_size() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 8 * 1024 * 1024,
             dscp_rewrite: None,
@@ -1826,6 +1845,7 @@ fn mqfq_drain_all_teardown_clears_stack() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 8 * 1024 * 1024,
             dscp_rewrite: None,
@@ -1899,6 +1919,7 @@ fn mqfq_brief_idle_reentry_exercises_both_max_arms() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,

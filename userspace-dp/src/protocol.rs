@@ -178,6 +178,12 @@ pub(crate) struct CoSSchedulerSnapshot {
     /// required so older snapshots without the field decode safely.
     #[serde(rename = "surplus_sharing", default)]
     pub surplus_sharing: bool,
+    /// Explicit opt-in for shared flow-aware enforcement on positive
+    /// `transmit-rate exact` schedulers. Defaults false for older
+    /// snapshots. The coordinator maps this onto shared v8 queue-lease
+    /// equal-flow suppression.
+    #[serde(rename = "equal_flow_enforcement", default)]
+    pub equal_flow_enforcement: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -899,6 +905,30 @@ pub(crate) struct CoSQueueStatus {
     pub queue_token_starvation_parks: u64,
     #[serde(rename = "tx_ring_full_submit_stalls", default)]
     pub tx_ring_full_submit_stalls: u64,
+    /// #1304: true when the shared v8 queue lease for this exact queue
+    /// was constructed in opt-in equal-flow suppression mode. This is
+    /// config/mode state; `equal_flow_enforced` reports whether the
+    /// current epoch is actually being capped rather than failed open.
+    #[serde(rename = "equal_flow_enforcement", default)]
+    pub equal_flow_enforcement: bool,
+    #[serde(rename = "equal_flow_enforced", default)]
+    pub equal_flow_enforced: bool,
+    #[serde(rename = "equal_flow_target_per_flow_bps", default)]
+    pub equal_flow_target_per_flow_bps: u64,
+    #[serde(rename = "equal_flow_max_worker_cap_bytes", default)]
+    pub equal_flow_max_worker_cap_bytes: u64,
+    #[serde(rename = "equal_flow_cap_hit_events", default)]
+    pub equal_flow_cap_hit_events: u64,
+    #[serde(rename = "equal_flow_suppressed_grant_bytes", default)]
+    pub equal_flow_suppressed_grant_bytes: u64,
+    #[serde(rename = "equal_flow_stale_or_tag_mismatch_events", default)]
+    pub equal_flow_stale_or_tag_mismatch_events: u64,
+    #[serde(
+        rename = "equal_flow_fail_open_reason",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub equal_flow_fail_open_reason: String,
     // #709 / #751: owner-profile telemetry for exact queues with an
     // unambiguous single owner-local binding snapshot. These fields are
     // populated only when exactly one owner-local exact queue can
@@ -1177,10 +1207,7 @@ pub struct WorkerRuntimeStatus {
     #[serde(rename = "cos_queue_lease_acquire_v8_calls", default)]
     pub cos_queue_lease_acquire_v8_calls: u64,
     /// #1240: cumulative bytes granted by v8 queue-lease acquire calls.
-    #[serde(
-        rename = "cos_queue_lease_acquire_v8_granted_bytes",
-        default
-    )]
+    #[serde(rename = "cos_queue_lease_acquire_v8_granted_bytes", default)]
     pub cos_queue_lease_acquire_v8_granted_bytes: u64,
     /// #925: true if the worker_loop thread panicked and the supervisor
     /// caught it. Set once on first panic; never cleared in Phase 1.
@@ -2055,8 +2082,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&status).expect("serialize BindingStatus");
-        let back: BindingStatus =
-            serde_json::from_str(&json).expect("deserialize BindingStatus");
+        let back: BindingStatus = serde_json::from_str(&json).expect("deserialize BindingStatus");
         assert_eq!(back.tx_kick_latency_hist, status.tx_kick_latency_hist);
         assert_eq!(back.tx_kick_latency_count, status.tx_kick_latency_count);
         assert_eq!(back.tx_kick_latency_sum_ns, status.tx_kick_latency_sum_ns);
@@ -2135,8 +2161,7 @@ mod tests {
         assert_eq!(value["tx_completion_ring_available"], 17);
         assert_eq!(value["tx_completion_ring_available_max"], 29);
 
-        let back: BindingStatus =
-            serde_json::from_str(&json).expect("deserialize BindingStatus");
+        let back: BindingStatus = serde_json::from_str(&json).expect("deserialize BindingStatus");
         assert_eq!(back.tx_completion_ring_available, 17);
         assert_eq!(back.tx_completion_ring_available_max, 29);
     }
@@ -2191,8 +2216,7 @@ mod tests {
             );
         }
         let json = serde_json::to_string(&status).expect("serialize BindingStatus");
-        let back: BindingStatus =
-            serde_json::from_str(&json).expect("deserialize BindingStatus");
+        let back: BindingStatus = serde_json::from_str(&json).expect("deserialize BindingStatus");
         assert_eq!(
             back.v_min_throttle_hard_cap_overrides,
             status.v_min_throttle_hard_cap_overrides
@@ -2216,10 +2240,15 @@ mod tests {
             "buffer_size_bytes": 65536
         }"#;
         let snap: CoSSchedulerSnapshot =
-            serde_json::from_str(legacy_json)
-                .expect("pre-#915 CoSSchedulerSnapshot decodes");
-        assert_eq!(snap.surplus_sharing, false,
-            "surplus_sharing must default to false for pre-#915 snapshots");
+            serde_json::from_str(legacy_json).expect("pre-#915 CoSSchedulerSnapshot decodes");
+        assert_eq!(
+            snap.surplus_sharing, false,
+            "surplus_sharing must default to false for pre-#915 snapshots"
+        );
+        assert_eq!(
+            snap.equal_flow_enforcement, false,
+            "equal_flow_enforcement must default to false for older snapshots"
+        );
         assert_eq!(snap.transmit_rate_exact, true);
     }
 
@@ -2232,12 +2261,27 @@ mod tests {
             priority: "low".into(),
             buffer_size_bytes: 65_536,
             surplus_sharing: true,
+            equal_flow_enforcement: false,
         };
-        let json = serde_json::to_string(&snap)
-            .expect("serialize");
-        let back: CoSSchedulerSnapshot = serde_json::from_str(&json)
-            .expect("deserialize");
+        let json = serde_json::to_string(&snap).expect("serialize");
+        let back: CoSSchedulerSnapshot = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.surplus_sharing, true);
+    }
+
+    #[test]
+    fn cos_scheduler_snapshot_equal_flow_enforcement_round_trip_true() {
+        let snap = CoSSchedulerSnapshot {
+            name: "iperf-a".into(),
+            transmit_rate_bytes: 125_000_000,
+            transmit_rate_exact: true,
+            priority: "low".into(),
+            buffer_size_bytes: 65_536,
+            surplus_sharing: false,
+            equal_flow_enforcement: true,
+        };
+        let json = serde_json::to_string(&snap).expect("serialize");
+        let back: CoSSchedulerSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.equal_flow_enforcement, true);
     }
 
     // #943 additive-wire contract: a pre-#943 BindingStatus payload
