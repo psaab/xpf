@@ -226,7 +226,24 @@ fn snapshot_window_never_observes_torn_tuple_under_concurrent_writer() {
     // nonzero observations. The seed publish() at t=unit doesn't enter
     // the rotation branch, so window_ns stays 0 until the spawned
     // writer's first publish.
+    //
+    // Bound the spin so a future writer regression that panics before the
+    // first publish() fails the test cleanly via writer.join().unwrap()
+    // instead of hanging on the CI runner timeout. 10M iterations is ~1s
+    // on a typical x86_64 CPU; the writer normally publishes within a
+    // few ms.
+    let mut waited: u64 = 0;
     while atomics.snapshot_window().window_ns == 0 {
+        waited = waited.saturating_add(1);
+        assert!(
+            waited < 10_000_000,
+            "writer never published first rotation in {} iterations",
+            waited,
+        );
+        assert!(
+            !writer.is_finished(),
+            "writer thread exited before publishing first rotation",
+        );
         std::hint::spin_loop();
     }
 
