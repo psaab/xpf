@@ -45,11 +45,11 @@ Committed raw summaries copied from that run:
 |-------|------|------|---------|----------|-------------|----------|---------|--------------------|----------------------|
 | q0 | 5207 | 100 Mbps | PASS | 82.40 | 82.4% | 0.0226 | 0.0678 | 666, 662, 688 | 2010 CoS admission drops; 0 residual TX-path drops |
 | q4 | 5201 | 1 Gbps | PASS | 839.68 | 84.0% | 0.0010 | 0.0011 | 38, 15, 26 | 12 CoS admission drops; 40 redirect inbox drops |
-| q5 | 5202 | 10 Gbps | PASS | 8405.88 | 84.1% | 0.0171 | - | 0, 0, 0 | 0 CoS admission / TX-path drops |
-| q1 | 5204 | 13 Gbps | PASS | 10824.65 | 83.3% | 0.0197 | - | 0, 0, 0 | 0 CoS admission / TX-path drops |
-| q2 | 5205 | 16 Gbps | PASS | 12808.41 | 80.1% | 0.0615 | - | 0, 0, 0 | 0 CoS admission / TX-path drops |
-| q3 | 5206 | 19 Gbps | PASS | 14518.60 | 76.4% | 0.1133 | - | 38, 0, 0 | 0 dataplane drops |
-| q6 | 5203 | 25 Gbps | PASS | 17396.98 | 69.6% | 0.1361 | - | 1113, 0, 0 | 0 dataplane drops |
+| q5 | 5202 | 10 Gbps | PASS | 8405.88 | 84.1% | 0.0171 | 0.0198 | 0, 0, 0 | 0 CoS admission / TX-path drops |
+| q1 | 5204 | 13 Gbps | PASS | 10824.65 | 83.3% | 0.0197 | 0.0226 | 0, 0, 0 | 0 CoS admission / TX-path drops |
+| q2 | 5205 | 16 Gbps | PASS | 12808.41 | 80.1% | 0.0615 | 0.0921 | 0, 0, 0 | 0 CoS admission / TX-path drops |
+| q3 | 5206 | 19 Gbps | PASS | 14518.60 | 76.4% | 0.1133 | 0.1965 | 38, 0, 0 | 0 dataplane drops |
+| q6 | 5203 | 25 Gbps | PASS | 17396.98 | 69.6% | 0.1361 | 0.2008 | 1113, 0, 0 | 0 dataplane drops |
 
 All seven canonical classes passed after q0/q4 were buffered. The raw TSVs
 are checked in so reviewers can audit the Markdown table without access to the
