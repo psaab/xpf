@@ -462,8 +462,8 @@ For production observability, xpf MUST export:
   equal-flow estimate is using a partial traffic sample.
 - **`xpf_fairness_equal_flow_target_per_flow_bps{ifindex=..., queue_id=...}`**
   gauge: the slowest sampled active worker's observed per-flow bit rate.
-  This is the strict equal-flow target a future non-work-conserving
-  suppressor would use if it chose to trade aggregate throughput for
+  This is the strict equal-flow target a non-work-conserving suppressor
+  would use if it chose to trade aggregate throughput for
   lower absolute per-flow spread.
 - **`xpf_fairness_equal_flow_observed_bps{ifindex=..., queue_id=...}`**,
   **`xpf_fairness_equal_flow_capped_bps{ifindex=..., queue_id=...}`**,
@@ -480,8 +480,17 @@ For production observability, xpf MUST export:
   and
   **`xpf_fairness_equal_flow_worker_suppressed_bps{ifindex=..., queue_id=..., worker_id=...}`**
   gauges: per-worker breakdown of the same hypothetical cap. These are
-  intended to answer "which worker would we slow, by how much?" before
-  any enforcement mode is introduced.
+  intended to answer "which worker would we slow, by how much?" without
+  depending on whether an opt-in enforcement mode is configured.
+
+When `class-of-service schedulers <name> equal-flow-enforcement` is
+enabled on a positive exact-rate scheduler, the Rust shared-v8 CoS lease
+exports actual enforcement telemetry through
+`xpf_userspace_cos_equal_flow_*` metrics. These are intentionally
+separate from the measurement-only estimator above: the estimator models
+the observed traffic window, while the Rust metrics report whether the
+current lease epoch is configured, enforced, capped, suppressed, or
+failed open with a bounded reason.
 
 The all-class CoS sweep harness captures this estimator as first-class
 run evidence. For each class, `fairness-cos-class-sweep.sh` starts a
