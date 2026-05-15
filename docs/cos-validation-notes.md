@@ -68,6 +68,13 @@ expected shaper backpressure. Those two counters share the same lifetime and
 survive CoS config resets. The binding-scoped CoS subset includes admission
 rejects and reset-time CoS queue drains.
 
+The formatter deliberately does not subtract the current-runtime
+`CoS admission drops` reason split from `TX errors`; those reason counters live
+on the active CoS runtime and reset on CoS config commits. If the
+binding-scoped CoS subset briefly appears larger than `TX errors` during a
+publication window, the formatter clamps `TX errors non-admission` to zero.
+Treat that as sample skew unless it persists across later snapshots.
+
 The summary `CoS admission drops`, `CoS flow-share drops`, `CoS buffer drops`,
 and `CoS ECN marked` lines are aggregate sums across the current CoS runtime's
 interfaces and queues. They are useful for explaining the active scheduler
