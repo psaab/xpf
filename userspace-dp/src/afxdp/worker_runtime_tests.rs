@@ -218,27 +218,78 @@ fn snapshot_window_never_observes_torn_tuple_under_concurrent_writer() {
         }
     });
 
+    // Wait for the writer to publish at least one rotation before counting.
+    // Without this guard, OS thread-spawn latency (1-5ms under load) can
+    // cause the reader's 100k Relaxed-read loop (<1ms) to finish before
+    // the writer publishes its first rotation, making the
+    // nonzero_snapshots > 1_000 assertion below false-fail with 0
+    // nonzero observations. The seed publish() at t=unit doesn't enter
+    // the rotation branch, so window_ns stays 0 until the spawned
+    // writer's first publish.
+    //
+    // Bound the spin so a future writer regression fails the test cleanly
+    // instead of hanging on the CI runner timeout. 10M iterations is ~1s
+    // on a typical x86_64 CPU; the writer normally publishes within a
+    // few ms. Two failure paths:
+    //   - writer thread exited before publishing → `is_finished()` aborts
+    //   - writer alive but stuck before first publish → bounded cap fires
+    // Both paths stop the writer and join() before panicking so the test
+    // doesn't leave a detached spinning thread alive until process exit.
+    let mut waited: u64 = 0;
+    while atomics.snapshot_window().window_ns == 0 {
+        waited = waited.saturating_add(1);
+        if waited >= 10_000_000 {
+            stop.store(true, Ordering::Relaxed);
+            let _ = writer.join();
+            panic!(
+                "writer never published first rotation in {} iterations",
+                waited,
+            );
+        }
+        if writer.is_finished() {
+            // Writer thread exited before any publish — surface the
+            // writer's panic message if any, otherwise a clear failure.
+            let panic_payload = writer.join();
+            panic!(
+                "writer thread exited before publishing first rotation: {:?}",
+                panic_payload.err(),
+            );
+        }
+        std::hint::spin_loop();
+    }
+
+    // Record the first invariant violation rather than panicking inline.
+    // Panicking inside the for loop would skip the stop+join cleanup below
+    // and leave the writer thread spinning for the rest of the libtest
+    // process — exactly the cleanup class round-1 fixed for the bounded
+    // wait, just on the actual torn-tuple regression path.
     let mut nonzero_snapshots: u64 = 0;
+    let mut tear_violation: Option<String> = None;
     for _ in 0..100_000 {
         let w = atomics.snapshot_window();
         if w.window_ns > 0 {
             nonzero_snapshots = nonzero_snapshots.saturating_add(1);
-            assert!(
-                w.thread_cpu_ns <= w.window_ns,
-                "torn tuple: thread_cpu_ns={} > window_ns={}",
-                w.thread_cpu_ns,
-                w.window_ns,
-            );
-            assert!(
-                w.active_ns <= w.window_ns,
-                "torn tuple: active_ns={} > window_ns={}",
-                w.active_ns,
-                w.window_ns,
-            );
+            if w.thread_cpu_ns > w.window_ns {
+                tear_violation = Some(format!(
+                    "torn tuple: thread_cpu_ns={} > window_ns={}",
+                    w.thread_cpu_ns, w.window_ns,
+                ));
+                break;
+            }
+            if w.active_ns > w.window_ns {
+                tear_violation = Some(format!(
+                    "torn tuple: active_ns={} > window_ns={}",
+                    w.active_ns, w.window_ns,
+                ));
+                break;
+            }
         }
     }
     stop.store(true, Ordering::Relaxed);
     writer.join().unwrap();
+    if let Some(msg) = tear_violation {
+        panic!("{}", msg);
+    }
 
     // Guard against a broken reader returning all zeros (window_ns=0
     // skips the asserts above): require a non-trivial number of real
