@@ -68,7 +68,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var txPackets uint64
 	var txBytes uint64
 	var txErrors uint64
-	var bindingCoSAdmissionDrops uint64
+	var bindingLifetimeCoSQueueDrops uint64
 	var txSharedRecycleUnknownSlotDrops uint64
 	var txCompletions uint64
 	var currentRuntimeCoSFlowShareDrops uint64
@@ -142,7 +142,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 		txPackets += binding.TXPackets
 		txBytes += binding.TXBytes
 		txErrors += binding.TXErrors
-		bindingCoSAdmissionDrops = saturatingAddU64(bindingCoSAdmissionDrops, binding.DbgCoSQueueOverflow)
+		bindingLifetimeCoSQueueDrops = saturatingAddU64(bindingLifetimeCoSQueueDrops, binding.DbgCoSQueueOverflow)
 		txSharedRecycleUnknownSlotDrops += binding.TXSharedRecycleUnknownSlotDrops
 		txCompletions += binding.TXCompletions
 		kernelRXDropped += binding.KernelRXDropped
@@ -183,7 +183,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	// The residual must use the binding-lifetime CoS subset counter, not
 	// current-runtime queue reason counters; CoS runtimes reset on config
 	// changes while BindingStatus.TXErrors does not.
-	nonAdmissionTXErrors := saturatingSubU64(txErrors, bindingCoSAdmissionDrops)
+	nonAdmissionTXErrors := saturatingSubU64(txErrors, bindingLifetimeCoSQueueDrops)
 
 	fmt.Fprintln(&b, "Userspace dataplane helper:")
 	fmt.Fprintf(&b, "  PID:                       %d\n", status.PID)
@@ -297,7 +297,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  TX errors:                 %d\n", txErrors)
 	if len(status.CoSInterfaces) > 0 {
 		fmt.Fprintf(&b, "  TX errors non-admission:   %d\n", nonAdmissionTXErrors)
-		fmt.Fprintf(&b, "  CoS queue overflow drops:  %d\n", bindingCoSAdmissionDrops)
+		fmt.Fprintf(&b, "  CoS queue drops lifetime:  %d\n", bindingLifetimeCoSQueueDrops)
 		fmt.Fprintf(&b, "  CoS admission drops:       %d\n", currentRuntimeCoSAdmissionDrops)
 		fmt.Fprintf(&b, "  CoS flow-share drops:      %d\n", currentRuntimeCoSFlowShareDrops)
 		fmt.Fprintf(&b, "  CoS buffer drops:          %d\n", currentRuntimeCoSBufferDrops)

@@ -801,8 +801,9 @@ type BindingStatus struct {
 	// split replaces the pre-#804 `dbg_pending_overflow` field with
 	// two distinct wire keys — `dbg_bound_pending_overflow` for the
 	// `bound_pending` FIFO evict sites in `tx.rs`, and
-	// `dbg_cos_queue_overflow` for the class-of-service admission
-	// overflow in `enqueue_cos_item`. A snapshot from a pre-#804
+	// `dbg_cos_queue_overflow` for binding-lifetime CoS queue drops:
+	// admission rejects in `enqueue_cos_item` plus reset-time CoS queue
+	// drains. The wire key is historical. A snapshot from a pre-#804
 	// helper deserializes both as 0 (standard Go json zero-value),
 	// which is the right backward-compat behavior.
 	DbgTxRingFull           uint64 `json:"dbg_tx_ring_full,omitempty"`
