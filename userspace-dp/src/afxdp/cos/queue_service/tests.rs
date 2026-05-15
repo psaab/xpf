@@ -6,11 +6,10 @@
 use super::*;
 use crate::afxdp::cos::admission::apply_cos_queue_flow_fair_promotion;
 use crate::afxdp::cos::queue_ops::cos_queue_push_back;
-use crate::afxdp::cos::tx_completion::apply_direct_exact_queue_accounting;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{SharedCoSQueueLease, V8RateMode};
+use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::PROTO_TCP;
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 const TEST_EPOCH_DURATION_NS: u64 = 200_000;
@@ -833,7 +832,7 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
 }
 
 #[test]
-fn equal_flow_cap_reaches_select_drain_settle_apply_path() {
+fn equal_flow_cap_reaches_drain_shaped_tx_entry_path() {
     let mut root = test_cos_runtime_with_queues(
         100_000_000 / 8,
         vec![CoSQueueConfig {
@@ -878,62 +877,46 @@ fn equal_flow_cap_reaches_select_drain_settle_apply_path() {
     let _ = lease.acquire_v8(1, 3 * TEST_EPOCH_DURATION_NS, 1);
     assert!(lease.v8_equal_flow_enforced());
 
-    let queue_fast_path = vec![test_queue_fast_path(true, 0, None, Some(lease.clone()))];
-    let selection = select_exact_cos_guarantee_queue_with_fast_path(
-        &mut root,
-        &queue_fast_path,
-        3 * TEST_EPOCH_DURATION_NS,
-    )
-    .expect("equal-flow exact queue selection");
-    assert_eq!(selection.queue_idx, 0);
-    assert_eq!(root.queues[0].hot.tokens, 7_200);
-    assert!(
-        lease.v8_equal_flow_cap_hit_events() > 0,
-        "selector top-up must hit the equal-flow cap before drain"
-    );
-
-    let mut umem = test_admission_umem();
-    let mut free_tx_frames = VecDeque::from([0]);
-    let mut scratch = Vec::new();
-    let queued_before = root.queues[0].hot.queued_bytes;
-    let tokens_before = root.queues[0].hot.tokens;
-    let root_tokens_before = root.tokens;
-    let root_budget = root.tokens;
-    let build = drain_exact_local_items_to_scratch_flow_fair(
-        &mut root.queues[0],
-        &mut free_tx_frames,
-        &mut scratch,
-        &mut umem,
-        root_budget,
-        selection.secondary_budget,
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        4,
+        vec![(4, test_queue_fast_path(true, 0, None, Some(lease.clone())))],
+        None,
         None,
     );
-    assert!(matches!(build, ExactCoSScratchBuild::Ready));
-    assert!(
-        !scratch.is_empty(),
-        "equal-flow capped budget must still allow forward progress"
-    );
+    let queued_before = root.queues[0].hot.queued_bytes;
+    let root_tokens_before = root.tokens;
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    let mut shared_recycles = Vec::new();
 
-    let inserted = scratch.len();
-    let (sent_packets, sent_bytes) = settle_exact_local_scratch_submission_flow_fair(
-        Some(&mut root.queues[0]),
-        &mut free_tx_frames,
-        &mut scratch,
-        inserted,
+    let drained = drain_shaped_tx(
+        &mut binding,
         3 * TEST_EPOCH_DURATION_NS,
-    );
-    assert!(sent_packets > 0);
+        &mut shared_recycles,
+    )
+    .expect("drain_shaped_tx must service the exact equal-flow queue");
+
+    assert_eq!(drained.root_ifindex, 42);
+    assert_eq!(drained.queue_idx, 0);
+    assert_eq!(drained.queue_id, 4);
+    let sent_bytes = binding
+        .live
+        .tx_bytes
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(sent_bytes > 0);
     assert!(sent_bytes <= 7_200);
-    apply_direct_exact_queue_accounting(&mut root, selection.queue_idx, sent_bytes);
-
+    assert!(
+        lease.v8_equal_flow_cap_hit_events() > 0,
+        "drain_shaped_tx must route through equal-flow lease top-up"
+    );
+    assert_eq!(binding.cos.cos_queue_lease_acquire_v8_calls, 1);
+    assert_eq!(binding.cos.cos_queue_lease_acquire_v8_granted_bytes, 7_200);
+    let root = binding.cos.cos_interfaces.get(&42).expect("cos root");
     assert_eq!(
         root.queues[0].hot.queued_bytes,
         queued_before.saturating_sub(sent_bytes)
-    );
-    assert_eq!(
-        root.queues[0].hot.tokens,
-        tokens_before.saturating_sub(sent_bytes)
     );
     assert_eq!(root.tokens, root_tokens_before.saturating_sub(sent_bytes));
     assert_eq!(

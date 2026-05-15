@@ -400,6 +400,17 @@ impl Umem {
     pub(crate) fn as_raw_ptr(&self) -> *mut XskUmemOpaque {
         self.inner
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(config: UmemConfig, area: NonNull<[u8]>) -> Self {
+        Umem {
+            inner: core::ptr::null_mut(),
+            fill: test_prod_ring::<u64>(config.fill_size),
+            comp: test_cons_ring::<u64>(config.complete_size),
+            config,
+            umem_area: area,
+        }
+    }
 }
 
 impl Drop for Umem {
@@ -408,6 +419,50 @@ impl Drop for Umem {
             unsafe { bridge_xsk_umem_delete(self.inner) };
         }
     }
+}
+
+#[cfg(test)]
+fn test_ring_capacity(capacity: u32) -> u32 {
+    capacity.max(1).next_power_of_two()
+}
+
+#[cfg(test)]
+fn test_prod_ring<T: Default + Clone>(capacity: u32) -> Box<XskRingProd> {
+    let capacity = test_ring_capacity(capacity);
+    // Test-only ring backing is intentionally leaked: `XskRingProd`
+    // mirrors libxdp's borrowed mmap pointers and has no ownership
+    // hook for freeing the producer/consumer/ring memory.
+    let entries = vec![T::default(); capacity as usize].into_boxed_slice();
+    let ring = Box::leak(entries).as_mut_ptr().cast::<c_void>();
+    Box::new(XskRingProd {
+        cached_prod: 0,
+        cached_cons: capacity,
+        mask: capacity - 1,
+        size: capacity,
+        producer: Box::leak(Box::new(0)),
+        consumer: Box::leak(Box::new(0)),
+        ring,
+        flags: Box::leak(Box::new(0)),
+    })
+}
+
+#[cfg(test)]
+fn test_cons_ring<T: Default + Clone>(capacity: u32) -> Box<XskRingCons> {
+    let capacity = test_ring_capacity(capacity);
+    // See `test_prod_ring`: these raw pointers model libxdp-owned
+    // mmap state for hermetic unit tests and live for the test process.
+    let entries = vec![T::default(); capacity as usize].into_boxed_slice();
+    let ring = Box::leak(entries).as_mut_ptr().cast::<c_void>();
+    Box::new(XskRingCons {
+        cached_prod: 0,
+        cached_cons: 0,
+        mask: capacity - 1,
+        size: capacity,
+        producer: Box::leak(Box::new(0)),
+        consumer: Box::leak(Box::new(0)),
+        ring,
+        flags: Box::leak(Box::new(0)),
+    })
 }
 
 // ── Socket (placeholder for API compat) ──────────────────────────────
@@ -440,6 +495,11 @@ pub struct User {
 impl User {
     pub fn as_raw_fd(&self) -> c_int {
         self.fd
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(fd: c_int) -> Self {
+        Self { fd }
     }
 }
 
@@ -541,6 +601,18 @@ pub struct DeviceQueue {
 unsafe impl Send for DeviceQueue {}
 
 impl DeviceQueue {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(fd: c_int, capacity: u32) -> Self {
+        Self {
+            xsk: core::ptr::null_mut(),
+            rings: DeviceQueueRings::Owned {
+                fill: test_prod_ring::<u64>(capacity),
+                comp: test_cons_ring::<u64>(capacity),
+            },
+            fd,
+        }
+    }
+
     /// Submit buffers to the fill ring.
     ///
     /// Unlike libxdp's all-or-nothing `xsk_ring_prod__reserve`, this
@@ -664,6 +736,14 @@ pub struct RingRx {
 unsafe impl Send for RingRx {}
 
 impl RingRx {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(fd: c_int, capacity: u32) -> Self {
+        Self {
+            ring: test_cons_ring::<XdpDesc>(capacity),
+            fd,
+        }
+    }
+
     /// Peek and begin receiving up to `n` descriptors.
     pub fn receive(&mut self, n: u32) -> ReadRx<'_> {
         let mut idx: u32 = 0;
@@ -729,6 +809,14 @@ pub struct RingTx {
 unsafe impl Send for RingTx {}
 
 impl RingTx {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(fd: c_int, capacity: u32) -> Self {
+        Self {
+            ring: test_prod_ring::<XdpDesc>(capacity),
+            fd,
+        }
+    }
+
     /// Reserve slots and begin transmitting up to `n` descriptors.
     ///
     /// Uses partial-reservation semantics (1..=n) to match xdpilone.
