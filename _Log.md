@@ -22,8 +22,6 @@
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `_Log.md`
   - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
 
-## 2026-05-15
-
 - **Timestamp**: 2026-05-15T22:05:00Z
   - **Action**: Issue #1278 — make `show class-of-service interface` join configured reverse-egress CoS interfaces to live runtime by configured name first and binding egress ifindex second, so alias drift between `ge-0-0-1.0` and the runtime snapshot no longer hides queue counters.
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `docs/cos-validation-notes.md`, `_Log.md`
@@ -36,6 +34,10 @@
   - **Action**: PR #1315 Copilot follow-up — keep the historical `dbg_cos_queue_overflow` wire key but relabel the CLI/docs as binding-lifetime CoS queue drops because the subset now includes reset-time CoS queue drains in addition to admission rejects.
   - **File(s)**: `pkg/dataplane/userspace/statusfmt.go`, `pkg/dataplane/userspace/statusfmt_test.go`, `pkg/dataplane/userspace/protocol.go`, `userspace-dp/src/protocol.rs`, `docs/cos-validation-notes.md`, `_Log.md`
   - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
+
+- **Timestamp**: 2026-05-15T20:33:36Z
+  - **Action**: PR #1312 hostile-review follow-up — clarified low-rate CoS fixture docs with the actual implicit base/cap pipeline (`rate/100` + 96 KB floor, flow-share expansion, #717 delay clamp), documented the queue-residence tradeoff for q0/q4 overrides, and added a regression test pin that 1 Gbps q4 `buffer-size 4m` remains above delay-cap clamping.
+  - **File(s)**: `docs/cos-validation-notes.md`, `docs/fairness-regimes.md`, `userspace-dp/src/afxdp/cos/admission_tests.rs`, `_Log.md`
 
 ## 2026-05-14
 

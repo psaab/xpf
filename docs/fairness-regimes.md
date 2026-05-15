@@ -343,12 +343,18 @@ class sweep harness to exercise every canonical fixture port:
 The canonical iperf CoS fixtures intentionally give the two low-rate
 classes deeper buffers than the implicit admission/buffer cap:
 `scheduler-be` uses `buffer-size 500k` and `scheduler-iperf-a` uses
-`buffer-size 4m`. #1312 showed that the implicit buffers reproduce
-reverse-mode tail-drop under `-P 12` even when equal-flow suppression is
-disabled: q0 hit aggregate admission drops and q4 hit per-flow share
-drops. Do not remove or shrink these buffers without rerunning at least
-the q0/q4 reverse sweep and checking retransmits plus CoS admission
-drop deltas.
+`buffer-size 4m`. Without explicit `buffer-size`, queue `base` is
+`max(transmit_rate_bytes/100, 96_000)` (10 ms of bytes with a 96 KB
+floor), then admission applies the flow-aware
+`prospective_active * 24 KB` expansion plus the #717 5 ms envelope clamp
+(`.min(delay_cap.max(base))`). #1312 showed that those implicit caps
+reproduce reverse-mode tail-drop under `-P 12` even when equal-flow
+suppression is disabled: q0 hit aggregate admission drops and q4 hit
+per-flow share drops. The fixture overrides therefore trade queue
+residence for retransmit suppression (q0 500k@100M ≈ 40 ms, q4 4m@1G
+≈ 32 ms at full queue). Do not remove or shrink these buffers without
+rerunning at least the q0/q4 reverse sweep and checking retransmits plus
+CoS admission drop deltas.
 
 ```bash
 COS_IFINDEX=<egress-ifindex> \
