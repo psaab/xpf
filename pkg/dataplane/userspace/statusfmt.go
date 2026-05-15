@@ -68,8 +68,12 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var txPackets uint64
 	var txBytes uint64
 	var txErrors uint64
+	var cosQueueOverflowDrops uint64
 	var txSharedRecycleUnknownSlotDrops uint64
 	var txCompletions uint64
+	var cosAdmissionFlowShareDrops uint64
+	var cosAdmissionBufferDrops uint64
+	var cosAdmissionEcnMarked uint64
 	var kernelRXDropped uint64
 	var kernelRXInvalidDescs uint64
 	var directTXPackets uint64
@@ -138,6 +142,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 		txPackets += binding.TXPackets
 		txBytes += binding.TXBytes
 		txErrors += binding.TXErrors
+		cosQueueOverflowDrops = saturatingAddU64(cosQueueOverflowDrops, binding.DbgCoSQueueOverflow)
 		txSharedRecycleUnknownSlotDrops += binding.TXSharedRecycleUnknownSlotDrops
 		txCompletions += binding.TXCompletions
 		kernelRXDropped += binding.KernelRXDropped
@@ -167,6 +172,15 @@ func FormatStatusSummary(status ProcessStatus) string {
 		slowPathForwardBuildPackets += binding.SlowPathForwardBuildPackets
 		slowPathDrops += binding.SlowPathDrops
 	}
+	for _, iface := range status.CoSInterfaces {
+		for _, queue := range iface.Queues {
+			cosAdmissionFlowShareDrops = saturatingAddU64(cosAdmissionFlowShareDrops, queue.AdmissionFlowShareDrops)
+			cosAdmissionBufferDrops = saturatingAddU64(cosAdmissionBufferDrops, queue.AdmissionBufferDrops)
+			cosAdmissionEcnMarked = saturatingAddU64(cosAdmissionEcnMarked, queue.AdmissionEcnMarked)
+		}
+	}
+	cosAdmissionDrops := saturatingAddU64(cosAdmissionFlowShareDrops, cosAdmissionBufferDrops)
+	nonAdmissionTXErrors := saturatingSubU64(txErrors, cosQueueOverflowDrops)
 
 	fmt.Fprintln(&b, "Userspace dataplane helper:")
 	fmt.Fprintf(&b, "  PID:                       %d\n", status.PID)
@@ -278,6 +292,14 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  TX packets:                %d\n", txPackets)
 	fmt.Fprintf(&b, "  TX bytes:                  %d\n", txBytes)
 	fmt.Fprintf(&b, "  TX errors:                 %d\n", txErrors)
+	if len(status.CoSInterfaces) > 0 {
+		fmt.Fprintf(&b, "  TX errors non-admission:   %d\n", nonAdmissionTXErrors)
+		fmt.Fprintf(&b, "  CoS queue overflow drops:  %d\n", cosQueueOverflowDrops)
+		fmt.Fprintf(&b, "  CoS admission drops:       %d\n", cosAdmissionDrops)
+		fmt.Fprintf(&b, "  CoS flow-share drops:      %d\n", cosAdmissionFlowShareDrops)
+		fmt.Fprintf(&b, "  CoS buffer drops:          %d\n", cosAdmissionBufferDrops)
+		fmt.Fprintf(&b, "  CoS ECN marked:            %d\n", cosAdmissionEcnMarked)
+	}
 	fmt.Fprintf(&b, "  TX shared recycle unk:     %d\n", txSharedRecycleUnknownSlotDrops)
 	fmt.Fprintf(&b, "  TX completions:            %d\n", txCompletions)
 	fmt.Fprintf(&b, "  Kernel RX dropped:         %d\n", kernelRXDropped)
