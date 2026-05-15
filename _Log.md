@@ -2,6 +2,11 @@
 
 ## 2026-05-15
 
+- **Timestamp**: 2026-05-15T22:56:00Z
+  - **Action**: Reverted unintended `go.mod` direct/indirect dependency reorder so round-1 fix remains scoped to CoS runtime lookup logic and tests.
+  - **File(s)**: `go.mod`, `_Log.md`
+  - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
+
 - **Timestamp**: 2026-05-15T22:52:00Z
   - **Action**: Round-1 follow-up cleanup — remove duplicate VLAN candidate append path in CoS runtime candidate generation while preserving VLAN-first ordering for unit-zero lookups.
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `_Log.md`
