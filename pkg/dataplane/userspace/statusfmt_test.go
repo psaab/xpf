@@ -253,6 +253,9 @@ func TestFormatStatusSummaryUsesBindingLifetimeForCoSErrorResidual(t *testing.T)
 			t.Fatalf("summary missing binding-lifetime attribution %q:\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "TX errors non-admission:   90") {
+		t.Fatalf("summary used current-runtime CoS reason counters for lifetime residual:\n%s", out)
+	}
 }
 
 func TestFormatStatusSummarySaturatesCoSAdmissionAttribution(t *testing.T) {

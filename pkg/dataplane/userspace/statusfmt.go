@@ -68,11 +68,11 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var txPackets uint64
 	var txBytes uint64
 	var txErrors uint64
-	var cosQueueOverflowDrops uint64
+	var bindingCoSAdmissionDrops uint64
 	var txSharedRecycleUnknownSlotDrops uint64
 	var txCompletions uint64
-	var cosAdmissionFlowShareDrops uint64
-	var cosAdmissionBufferDrops uint64
+	var currentRuntimeCoSFlowShareDrops uint64
+	var currentRuntimeCoSBufferDrops uint64
 	var cosAdmissionEcnMarked uint64
 	var kernelRXDropped uint64
 	var kernelRXInvalidDescs uint64
@@ -142,7 +142,7 @@ func FormatStatusSummary(status ProcessStatus) string {
 		txPackets += binding.TXPackets
 		txBytes += binding.TXBytes
 		txErrors += binding.TXErrors
-		cosQueueOverflowDrops = saturatingAddU64(cosQueueOverflowDrops, binding.DbgCoSQueueOverflow)
+		bindingCoSAdmissionDrops = saturatingAddU64(bindingCoSAdmissionDrops, binding.DbgCoSQueueOverflow)
 		txSharedRecycleUnknownSlotDrops += binding.TXSharedRecycleUnknownSlotDrops
 		txCompletions += binding.TXCompletions
 		kernelRXDropped += binding.KernelRXDropped
@@ -174,13 +174,16 @@ func FormatStatusSummary(status ProcessStatus) string {
 	}
 	for _, iface := range status.CoSInterfaces {
 		for _, queue := range iface.Queues {
-			cosAdmissionFlowShareDrops = saturatingAddU64(cosAdmissionFlowShareDrops, queue.AdmissionFlowShareDrops)
-			cosAdmissionBufferDrops = saturatingAddU64(cosAdmissionBufferDrops, queue.AdmissionBufferDrops)
+			currentRuntimeCoSFlowShareDrops = saturatingAddU64(currentRuntimeCoSFlowShareDrops, queue.AdmissionFlowShareDrops)
+			currentRuntimeCoSBufferDrops = saturatingAddU64(currentRuntimeCoSBufferDrops, queue.AdmissionBufferDrops)
 			cosAdmissionEcnMarked = saturatingAddU64(cosAdmissionEcnMarked, queue.AdmissionEcnMarked)
 		}
 	}
-	cosAdmissionDrops := saturatingAddU64(cosAdmissionFlowShareDrops, cosAdmissionBufferDrops)
-	nonAdmissionTXErrors := saturatingSubU64(txErrors, cosQueueOverflowDrops)
+	currentRuntimeCoSAdmissionDrops := saturatingAddU64(currentRuntimeCoSFlowShareDrops, currentRuntimeCoSBufferDrops)
+	// The residual must use the binding-lifetime CoS subset counter, not
+	// current-runtime queue reason counters; CoS runtimes reset on config
+	// changes while BindingStatus.TXErrors does not.
+	nonAdmissionTXErrors := saturatingSubU64(txErrors, bindingCoSAdmissionDrops)
 
 	fmt.Fprintln(&b, "Userspace dataplane helper:")
 	fmt.Fprintf(&b, "  PID:                       %d\n", status.PID)
@@ -294,10 +297,10 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  TX errors:                 %d\n", txErrors)
 	if len(status.CoSInterfaces) > 0 {
 		fmt.Fprintf(&b, "  TX errors non-admission:   %d\n", nonAdmissionTXErrors)
-		fmt.Fprintf(&b, "  CoS queue overflow drops:  %d\n", cosQueueOverflowDrops)
-		fmt.Fprintf(&b, "  CoS admission drops:       %d\n", cosAdmissionDrops)
-		fmt.Fprintf(&b, "  CoS flow-share drops:      %d\n", cosAdmissionFlowShareDrops)
-		fmt.Fprintf(&b, "  CoS buffer drops:          %d\n", cosAdmissionBufferDrops)
+		fmt.Fprintf(&b, "  CoS queue overflow drops:  %d\n", bindingCoSAdmissionDrops)
+		fmt.Fprintf(&b, "  CoS admission drops:       %d\n", currentRuntimeCoSAdmissionDrops)
+		fmt.Fprintf(&b, "  CoS flow-share drops:      %d\n", currentRuntimeCoSFlowShareDrops)
+		fmt.Fprintf(&b, "  CoS buffer drops:          %d\n", currentRuntimeCoSBufferDrops)
 		fmt.Fprintf(&b, "  CoS ECN marked:            %d\n", cosAdmissionEcnMarked)
 	}
 	fmt.Fprintf(&b, "  TX shared recycle unk:     %d\n", txSharedRecycleUnknownSlotDrops)
