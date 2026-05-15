@@ -1,6 +1,31 @@
 ## Status
 
-DRAFT v1 — pending adversarial plan review.
+DRAFT v2 — incorporates round-1 review feedback (Codex MAJOR + Gemini MINOR, both converged on the same architectural correction).
+
+### v2 changes vs v1
+
+1. **Hidden Invariant #6 rewritten.** v1 handwaved between two
+   options ("keep `#[path]` chains" vs "elevate to crate-root via
+   `pub mod fairness;`"). Both reviewers correctly pointed out
+   there is **no `src/lib.rs`** in this crate — `src/main.rs`
+   and `src/bin/fairness-eval.rs` are *separate* binary crate
+   roots. Adding `pub mod fairness;` to `main.rs` does NOT
+   make `fairness.rs` reachable from `bin/fairness-eval.rs`.
+   v2 commits exclusively to the `#[path]` redirection pattern.
+2. **Test count corrected** from "7 tests" → 16 tests (Gemini
+   round-1 finding C; verified `grep -c "^    #\[test\]"
+   tests/fairness_eval_blackbox.rs` returns 16).
+3. **Inline test blocks accounted for.** Codex round-1 finding #3
+   noted the binary itself has `#[cfg(test)] mod tests` blocks
+   at L1190 and L1464 (~370 LOC combined). v2 specifies that
+   those test bodies move WITH their helpers into the
+   corresponding submodules and remain private-module tests.
+4. **Lower-level submodules take narrow inputs**, not `&Args`.
+   Codex round-1 finding "passing `&Args` everywhere is too
+   blunt" — v2 keeps `&Args` only at the orchestrator entry
+   points (`run_evaluation`, `inputs::load`, `report::emit`)
+   and uses narrow typed inputs for windowing/per_worker/rss/
+   verdict.
 
 ## Issue framing
 
@@ -36,7 +61,7 @@ The win is structural, not behavioral:
 - The orchestration logic becomes unit-testable without
   spawning the binary subprocess and synthesizing iperf3 JSON
   fixtures (current test contract from #547 is 100% black-box
-  CLI invocation; the 7 cargo integration tests in
+  CLI invocation; the 16 cargo integration tests in
   `tests/fairness_eval_blackbox.rs` (1144 LOC) cover the
   binary surface).
 - Future autoresearch loops that want to call the evaluator
@@ -61,8 +86,16 @@ The cost-benefit gets worse over time, not better.
   touch them.
 - PR #547 established the black-box `tests/*.rs` cargo
   integration test discipline (`env!("CARGO_BIN_EXE_fairness-eval")`
-  pattern, 7 tests). This refactor does NOT touch them — they
+  pattern, 16 tests). This refactor does NOT touch them — they
   continue to invoke the binary externally.
+- The binary itself has **2 inline `#[cfg(test)] mod tests`
+  blocks** at L1190 and L1464 (~370 LOC combined) covering
+  helper-fn behavior: parser tests (parse_number_or_percent,
+  parse_rss_expectation, trim_distribution_to_sum,
+  aggregate_per_worker, etc.) at L1190 and TSV-parse tests
+  (parse_binding_flows_tsv, parse_cos_flows_tsv) at L1464.
+  These tests move WITH their target helpers into the
+  corresponding submodules and remain private-module tests.
 - PR #1220 round-3 added the `aggregate_per_worker()` helper
   (now at L234 in fairness-eval.rs) that fixes a per-binding-
   slot vs per-worker aggregation regression. The helper stays;
@@ -149,7 +182,7 @@ binary AND from any future in-crate caller.
 The CLI surface (every `--flag` accepted by `parse_args`) stays
 byte-for-byte identical. Verified by:
 
-- `tests/fairness_eval_blackbox.rs` (1144 LOC, 7 tests) invokes
+- `tests/fairness_eval_blackbox.rs` (1144 LOC, 16 tests) invokes
   the binary with every documented flag combination. This test
   surface continues to pass unchanged.
 - Argument parsing is moved into `args.rs` but the public
@@ -195,20 +228,48 @@ byte-for-byte identical. Verified by:
    semantically belong with `verdict.rs`. Moving them must
    preserve their numeric values (0.10 / 4 / 2 / 0.05).
 
-6. **`#[path = "../fairness.rs"]` re-import.** Both `bin/` and
-   `fairness_eval/` need access to the four primitives. The
-   path declaration in `bin/fairness-eval.rs` is the binary's
-   entry; the submodules under `fairness_eval/` reach the
-   primitives via `use crate::fairness::*` — but `fairness.rs`
-   isn't a crate-root module today; it's reached only via
-   `#[path]` from the binary. Resolution: add
-   `pub mod fairness;` to `lib.rs` if one exists, OR keep the
-   `#[path]` redirection in each submodule that needs the
-   primitives. The simpler option (and one this plan
-   recommends) is to declare `pub mod fairness;` at crate root
-   so all callers (binary + tests + future in-crate users) get
-   it via `crate::fairness`. This makes `fairness.rs` a
-   first-class library module — a small additional benefit.
+6. **`#[path]` redirection chain — committed approach.**
+   Verified: there is no `userspace-dp/src/lib.rs`; only
+   `src/main.rs` (xpfd binary) and `src/bin/fairness-eval.rs`
+   (this binary). Cargo treats them as **separate binary crate
+   roots**. Adding `pub mod fairness;` to `main.rs` does NOT
+   make `fairness.rs` accessible to `bin/fairness-eval.rs`.
+   v1's "elevation to crate-root" option is therefore
+   architecturally impossible without creating a new
+   `src/lib.rs` (which would create a new public library API
+   surface — out of scope for a pure-code-motion refactor).
+
+   v2 commits exclusively to the `#[path]` redirection pattern:
+
+   ```
+   bin/fairness-eval.rs:
+     #[path = "../fairness.rs"]              mod fairness;
+     #[path = "../fairness_eval/mod.rs"]     mod fairness_eval;
+   ```
+
+   Inside `fairness_eval/mod.rs`:
+
+   ```
+   pub mod args;
+   pub mod inputs;
+   pub mod windowing;
+   pub mod per_worker;
+   pub mod rss;
+   pub mod verdict;
+   pub mod report;
+
+   // Re-import the primitives via the parent's `#[path]`
+   // (which is `crate::fairness` from the binary's view, but
+   // from `fairness_eval/mod.rs` it's reachable via `super::fairness`).
+   pub(crate) use super::fairness;
+   ```
+
+   Submodules import primitives via `use super::fairness::*;`
+   (one level up from each submodule reaches `mod.rs`, which
+   re-exports the parent's `fairness`).
+
+   Net: zero new public API. The binary stays binary-private.
+   `src/fairness.rs` is unmodified.
 
 ## Risk assessment
 
@@ -327,11 +388,22 @@ a deviation, stop and revise the plan) is the mitigation.
    submodule call sites. Plus a manual diff smoke (Test #5
    above) comparing pre/post output on a canonical fixture.
 
-7. **`Args` struct as a parameter-passing vehicle.** With main
-   broken up, `Args` gets passed into every submodule.
-   Alternative: project `Args` into per-submodule typed inputs
-   (e.g. `WindowingArgs { warmup_secs, final_burst_secs }`).
-   The latter is cleaner but doubles the type surface. Plan
-   position: pass the whole `&Args` (cheap, no allocation,
-   no public-API change). If reviewers want typed inputs,
-   they're welcome to argue for them.
+7. **`Args` struct as a parameter-passing vehicle.** v2
+   revised: pass `&Args` only at the orchestrator entry points
+   (`run_evaluation`, `inputs::load`, `report::emit`). Lower-
+   level submodules take narrow typed inputs:
+
+   - `windowing::extract_window(intervals: &[Iperf3Interval],
+     test_start: &Iperf3TestStart, warmup_secs: u64,
+     final_burst_secs: u64) -> Result<Window, WindowError>`
+   - `per_worker::aggregate(flows: &[BindingFlowsRow], iface: &str,
+     ss_start: f64, ss_end: f64, n_workers: u32) -> WorkerCounts`
+   - `verdict::evaluate(observed_cov: f64, cstruct: f64,
+     starved: u32, guard_ratio: f64) -> Verdict`
+   - `rss::evaluate(distribution: &[u32], expectation:
+     &RssExpectation) -> RssOutcome`
+
+   This makes each submodule directly unit-testable without
+   constructing a synthetic `Args`, addresses Codex round-1
+   "passing `&Args` everywhere is too blunt", and keeps the
+   submodule dependencies explicit in the function signature.
