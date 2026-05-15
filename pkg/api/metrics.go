@@ -89,13 +89,14 @@ type xpfCollector struct {
 	// #1304: Rust-owned opt-in equal-flow enforcement telemetry for
 	// shared v8 CoS queue leases. Kept separate from the
 	// measurement-only xpf_fairness_equal_flow_* estimator gauges.
-	cosEqualFlowEnforcementEnabled   *prometheus.Desc
-	cosEqualFlowEnforced             *prometheus.Desc
-	cosEqualFlowTargetPerFlowBPS     *prometheus.Desc
-	cosEqualFlowMaxWorkerCapBytes    *prometheus.Desc
-	cosEqualFlowCapHitEvents         *prometheus.Desc
-	cosEqualFlowSuppressedGrantBytes *prometheus.Desc
-	cosEqualFlowFailOpen             *prometheus.Desc
+	cosEqualFlowEnforcementEnabled       *prometheus.Desc
+	cosEqualFlowEnforced                 *prometheus.Desc
+	cosEqualFlowTargetPerFlowBPS         *prometheus.Desc
+	cosEqualFlowMaxWorkerCapBytes        *prometheus.Desc
+	cosEqualFlowCapHitEvents             *prometheus.Desc
+	cosEqualFlowSuppressedGrantBytes     *prometheus.Desc
+	cosEqualFlowStaleOrTagMismatchEvents *prometheus.Desc
+	cosEqualFlowFailOpen                 *prometheus.Desc
 	// #869: per-worker busy/idle runtime counters.
 	workerWallSecs                           *prometheus.Desc
 	workerActiveSecs                         *prometheus.Desc
@@ -393,6 +394,11 @@ func newCollector(srv *Server) *xpfCollector {
 			"Requested queue-lease bytes withheld by the opt-in shared v8 equal-flow suppressor while class capacity remained (#1304).",
 			[]string{"ifindex", "queue_id"}, nil,
 		),
+		cosEqualFlowStaleOrTagMismatchEvents: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total",
+			"Acquire-side stale/tag-mismatch equal-flow cap reads that failed open without overwriting the rotation-published epoch reason (#1304).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
 		cosEqualFlowFailOpen: prometheus.NewDesc(
 			"xpf_userspace_cos_equal_flow_fail_open",
 			"1 for the current bounded fail-open reason on an opt-in shared v8 equal-flow queue; absent for queues without equal-flow enforcement (#1304).",
@@ -647,6 +653,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.cosEqualFlowMaxWorkerCapBytes
 	ch <- c.cosEqualFlowCapHitEvents
 	ch <- c.cosEqualFlowSuppressedGrantBytes
+	ch <- c.cosEqualFlowStaleOrTagMismatchEvents
 	ch <- c.cosEqualFlowFailOpen
 	ch <- c.workerWallSecs
 	ch <- c.workerActiveSecs
@@ -1159,6 +1166,12 @@ func (c *xpfCollector) emitCoSEqualFlowEnforcement(ch chan<- prometheus.Metric, 
 				c.cosEqualFlowSuppressedGrantBytes,
 				prometheus.CounterValue,
 				float64(queue.EqualFlowSuppressedGrantBytes),
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosEqualFlowStaleOrTagMismatchEvents,
+				prometheus.CounterValue,
+				float64(queue.EqualFlowStaleOrTagMismatchEvents),
 				ifindexLabel, queueLabel,
 			)
 			reason := queue.EqualFlowFailOpenReason

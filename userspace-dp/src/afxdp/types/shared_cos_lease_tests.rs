@@ -640,11 +640,16 @@ fn equal_flow_acquire_side_cap_check_is_read_only_on_inconsistent_snapshot() {
         .load(Ordering::Acquire);
     let reason_before = lease.v8_equal_flow_fail_open_reason();
     let count_before = lease.v8_equal_flow_fail_open_count();
+    let stale_before = lease.v8_equal_flow_stale_or_tag_mismatch_events();
 
     assert_eq!(
         lease.equal_flow_cap_v8(v8, 0, tag.wrapping_add(1)),
         None,
         "stale acquirer must fail open without publishing telemetry"
+    );
+    assert_eq!(
+        lease.v8_equal_flow_stale_or_tag_mismatch_events(),
+        stale_before + 1
     );
 
     v8.equal_flow
@@ -671,6 +676,74 @@ fn equal_flow_acquire_side_cap_check_is_read_only_on_inconsistent_snapshot() {
     assert!(lease.v8_equal_flow_enforced());
     assert_eq!(lease.v8_equal_flow_fail_open_reason(), reason_before);
     assert_eq!(lease.v8_equal_flow_fail_open_count(), count_before);
+    assert_eq!(
+        lease.v8_equal_flow_stale_or_tag_mismatch_events(),
+        stale_before + 1,
+        "only stale/tag mismatch increments the transient side channel"
+    );
+}
+
+#[test]
+fn equal_flow_epoch_payload_is_visible_after_tag_under_concurrent_readers() {
+    let lease = new_equal_flow_lease();
+    let v8 = lease.v8.as_ref().expect("v8 lease");
+    let ack = std::sync::atomic::AtomicU32::new(0);
+    let start = std::sync::Barrier::new(2);
+    const ITERS: u32 = 1_000;
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            start.wait();
+            for tag in 1..=ITERS {
+                if tag % 2 == 0 {
+                    v8.equal_flow
+                        .enforce_epoch(tag, tag as u64 + 10, tag as u64 + 20);
+                } else {
+                    v8.equal_flow
+                        .fail_open(tag, V8EqualFlowFailOpenReason::NoActiveFlows);
+                }
+                while ack.load(Ordering::Acquire) < tag {
+                    std::hint::spin_loop();
+                }
+            }
+        });
+
+        start.wait();
+        for tag in 1..=ITERS {
+            loop {
+                let seen_tag = v8.equal_flow.epoch_tag.load(Ordering::Acquire);
+                if seen_tag >= tag {
+                    assert_eq!(seen_tag, tag, "writer must wait for reader ack");
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+
+            let enforced = v8.equal_flow.enforced.load(Ordering::Acquire);
+            let target = v8
+                .equal_flow
+                .current_target_per_flow
+                .load(Ordering::Acquire);
+            let worker_cap = v8.equal_flow.current_worker_cap.load(Ordering::Acquire);
+            let reason = V8EqualFlowFailOpenReason::from_u32(
+                v8.equal_flow.fail_open_reason.load(Ordering::Acquire),
+            );
+
+            if tag % 2 == 0 {
+                assert_eq!(enforced, 1, "tag {tag} must publish enforced payload");
+                assert_eq!(target, tag as u64 + 10);
+                assert_eq!(worker_cap, tag as u64 + 20);
+                assert_eq!(reason, V8EqualFlowFailOpenReason::None);
+            } else {
+                assert_eq!(enforced, 0, "tag {tag} must publish fail-open payload");
+                assert_eq!(target, 0);
+                assert_eq!(worker_cap, 0);
+                assert_eq!(reason, V8EqualFlowFailOpenReason::NoActiveFlows);
+            }
+
+            ack.store(tag, Ordering::Release);
+        }
+    });
 }
 
 #[test]

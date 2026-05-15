@@ -284,6 +284,11 @@ func TestEmitCoSEqualFlowEnforcement_LabelsAndValues(t *testing.T) {
 			"test desc",
 			[]string{"ifindex", "queue_id"}, nil,
 		),
+		cosEqualFlowStaleOrTagMismatchEvents: prometheus.NewDesc(
+			"xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
 		cosEqualFlowFailOpen: prometheus.NewDesc(
 			"xpf_userspace_cos_equal_flow_fail_open",
 			"test desc",
@@ -295,14 +300,15 @@ func TestEmitCoSEqualFlowEnforcement_LabelsAndValues(t *testing.T) {
 			Ifindex: 80,
 			Queues: []dpuserspace.CoSQueueStatus{
 				{
-					QueueID:                       4,
-					EqualFlowEnforcement:          true,
-					EqualFlowEnforced:             true,
-					EqualFlowTargetPerFlowBPS:     8_000_000,
-					EqualFlowMaxWorkerCapBytes:    4096,
-					EqualFlowCapHitEvents:         7,
-					EqualFlowSuppressedGrantBytes: 8192,
-					EqualFlowFailOpenReason:       "none",
+					QueueID:                           4,
+					EqualFlowEnforcement:              true,
+					EqualFlowEnforced:                 true,
+					EqualFlowTargetPerFlowBPS:         8_000_000,
+					EqualFlowMaxWorkerCapBytes:        4096,
+					EqualFlowCapHitEvents:             7,
+					EqualFlowSuppressedGrantBytes:     8192,
+					EqualFlowStaleOrTagMismatchEvents: 3,
+					EqualFlowFailOpenReason:           "none",
 				},
 				{QueueID: 5},
 			},
@@ -318,17 +324,18 @@ func TestEmitCoSEqualFlowEnforcement_LabelsAndValues(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	if len(got) != 7 {
-		t.Fatalf("emitCoSEqualFlowEnforcement: want 7 metrics for one enabled queue, got %d", len(got))
+	if len(got) != 8 {
+		t.Fatalf("emitCoSEqualFlowEnforcement: want 8 metrics for one enabled queue, got %d", len(got))
 	}
 	values := map[*prometheus.Desc]float64{
-		c.cosEqualFlowEnforcementEnabled:   1,
-		c.cosEqualFlowEnforced:             1,
-		c.cosEqualFlowTargetPerFlowBPS:     8_000_000,
-		c.cosEqualFlowMaxWorkerCapBytes:    4096,
-		c.cosEqualFlowCapHitEvents:         7,
-		c.cosEqualFlowSuppressedGrantBytes: 8192,
-		c.cosEqualFlowFailOpen:             1,
+		c.cosEqualFlowEnforcementEnabled:       1,
+		c.cosEqualFlowEnforced:                 1,
+		c.cosEqualFlowTargetPerFlowBPS:         8_000_000,
+		c.cosEqualFlowMaxWorkerCapBytes:        4096,
+		c.cosEqualFlowCapHitEvents:             7,
+		c.cosEqualFlowSuppressedGrantBytes:     8192,
+		c.cosEqualFlowStaleOrTagMismatchEvents: 3,
+		c.cosEqualFlowFailOpen:                 1,
 	}
 	for _, m := range got {
 		var pb dto.Metric

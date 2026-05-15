@@ -490,7 +490,10 @@ Rust shared-v8 CoS lease exports actual enforcement telemetry through
 separate from the measurement-only estimator above: the estimator models
 the observed traffic window, while the Rust metrics report whether the
 current lease epoch is configured, enforced, capped, suppressed, or
-failed open with a bounded reason.
+failed open with a bounded reason. Acquire-side stale/tag mismatches
+are exported as a separate monotonic counter, not by rewriting the
+current epoch reason, so a stale worker cannot clobber the
+rotation-published payload.
 
 The all-class CoS sweep harness captures this estimator as first-class
 run evidence. For each class, `fairness-cos-class-sweep.sh` starts a

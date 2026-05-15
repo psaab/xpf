@@ -269,6 +269,8 @@ fn overlay_shared_cos_queue_lease_statuses(
             queue.equal_flow_max_worker_cap_bytes = lease.v8_equal_flow_worker_cap();
             queue.equal_flow_cap_hit_events = lease.v8_equal_flow_cap_hit_events();
             queue.equal_flow_suppressed_grant_bytes = lease.v8_equal_flow_suppressed_grant_bytes();
+            queue.equal_flow_stale_or_tag_mismatch_events =
+                lease.v8_equal_flow_stale_or_tag_mismatch_events();
             queue.equal_flow_fail_open_reason =
                 lease.v8_equal_flow_fail_open_reason_label().to_string();
         }
@@ -327,5 +329,6 @@ mod tests {
         let queue = &statuses[0].queues[0];
         assert!(queue.equal_flow_enforcement);
         assert_eq!(queue.equal_flow_fail_open_reason, "disabled");
+        assert_eq!(queue.equal_flow_stale_or_tag_mismatch_events, 0);
     }
 }

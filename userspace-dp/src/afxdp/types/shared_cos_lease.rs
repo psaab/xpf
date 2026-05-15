@@ -223,6 +223,7 @@ struct V8EqualFlowSuppressState {
     smoothed_target_per_flow: AtomicU64,
     cap_hit_events: AtomicU64,
     suppressed_grant_bytes: AtomicU64,
+    stale_or_tag_mismatch_events: AtomicU64,
     fail_open_reason: AtomicU32,
     fail_open_count: AtomicU64,
 }
@@ -238,6 +239,7 @@ impl V8EqualFlowSuppressState {
             smoothed_target_per_flow: AtomicU64::new(0),
             cap_hit_events: AtomicU64::new(0),
             suppressed_grant_bytes: AtomicU64::new(0),
+            stale_or_tag_mismatch_events: AtomicU64::new(0),
             fail_open_reason: AtomicU32::new(V8EqualFlowFailOpenReason::Disabled as u32),
             fail_open_count: AtomicU64::new(0),
         }
@@ -1177,6 +1179,17 @@ impl SharedCoSQueueLease {
             .unwrap_or(0)
     }
 
+    pub(in crate::afxdp) fn v8_equal_flow_stale_or_tag_mismatch_events(&self) -> u64 {
+        self.v8
+            .as_ref()
+            .map(|v| {
+                v.equal_flow
+                    .stale_or_tag_mismatch_events
+                    .load(Ordering::Relaxed)
+            })
+            .unwrap_or(0)
+    }
+
     pub(in crate::afxdp) fn v8_equal_flow_fail_open_reason(&self) -> V8EqualFlowFailOpenReason {
         self.v8
             .as_ref()
@@ -1247,8 +1260,13 @@ impl SharedCoSQueueLease {
         }
         // Acquire-side cap evaluation is intentionally read-only. Epoch
         // rotation owns fail-open publication; stale acquirers must not
-        // overwrite the freshly-published payload for a new epoch.
+        // overwrite the freshly-published payload for a new epoch. Keep
+        // the transient stale-tag signal on a separate monotonic side
+        // channel so operators still see the fail-open class.
         if v8.equal_flow.epoch_tag.load(Ordering::Acquire) != epoch_tag {
+            v8.equal_flow
+                .stale_or_tag_mismatch_events
+                .fetch_add(1, Ordering::Relaxed);
             return None;
         }
         if v8.equal_flow.enforced.load(Ordering::Acquire) == 0 {

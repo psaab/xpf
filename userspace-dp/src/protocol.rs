@@ -921,6 +921,8 @@ pub(crate) struct CoSQueueStatus {
     pub equal_flow_cap_hit_events: u64,
     #[serde(rename = "equal_flow_suppressed_grant_bytes", default)]
     pub equal_flow_suppressed_grant_bytes: u64,
+    #[serde(rename = "equal_flow_stale_or_tag_mismatch_events", default)]
+    pub equal_flow_stale_or_tag_mismatch_events: u64,
     #[serde(
         rename = "equal_flow_fail_open_reason",
         default,

@@ -439,13 +439,16 @@ counted as one active unit for suppression:
 - `xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex,queue_id}`
 - `xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex,queue_id}`
 - `xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex,queue_id}`
+- `xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex,queue_id}`
 - `xpf_userspace_cos_equal_flow_fail_open{ifindex,queue_id,reason}`
 
 Those metrics report the shared v8 queue lease's actual mode and
 current epoch state. The suppressor fails open when the active-worker
 sample is incomplete, stale, low-demand, zero-target, or still below
 the valid-streak guard, so a quiet worker cannot become the global
-rate-suppression target.
+rate-suppression target. Acquire-side stale/tag mismatches are counted
+on a separate monotonic counter rather than by rewriting the current
+epoch's `reason`, because the rotation winner owns the epoch payload.
 
 Issue #1306 makes the class sweep preserve that evidence directly:
 each class artifact gets an `equal-flow/` directory with the raw
