@@ -29,6 +29,10 @@
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `docs/cos-validation-notes.md`, `_Log.md`
   - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
 
+- **Timestamp**: 2026-05-15T21:23:20Z
+  - **Action**: PR #1312 CoS TX-error attribution — round-3 fixes: (1) mirror reset-time CoS queue drains into `binding.live.dbg_cos_queue_overflow` in `reset_binding_cos_runtime` so the binding-scoped subset stays lifetime-matched with `tx_errors`; (2) add Rust regression test `reset_binding_cos_runtime_mirrors_drops_to_binding_cos_counter`; (3) update `docs/cos-validation-notes.md` to state the binding-scoped subset includes admission rejects AND reset-time queue drains, and rephrase reason-counter lines as aggregate current-runtime sums (not per-queue rows); (4) extract `saturatingAddU64`/`saturatingSubU64` into `format_math.go` with doc comments; (5) rename ECN accumulator to `cosAdmissionEcnMarked` (Go-style Ecn casing).
+  - **File(s)**: `userspace-dp/src/afxdp/worker/cos.rs`, `userspace-dp/src/afxdp/worker/cos_tests.rs`, `pkg/dataplane/userspace/statusfmt.go`, `pkg/dataplane/userspace/statusfmt_test.go`, `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/format_math.go`, `docs/cos-validation-notes.md`, `_Log.md`
+
 ## 2026-05-14
 
 - **Timestamp**: 2026-05-14T19:33:03Z
