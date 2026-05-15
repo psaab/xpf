@@ -53,6 +53,10 @@ mod.rs for further file-level breakdown.
 - Per-byte hot-path fns are `#[inline]` to preserve cross-module
   inlining across the `pub(in crate::afxdp)` boundary; the larger
   drain/settle bodies aren't inlined (LLVM heuristics suffice).
+- `drain_shaped_tx` primes an interface root only when queued work is
+  runnable now or a parked queue's wake tick is due. Not-yet-due
+  parked queues skip timer-wheel advance and shared-root lease top-up
+  because no queue can service on that drain call.
 - `COS_MIN_BURST_BYTES` (64 × MTU) is canonically owned by
   `token_bucket.rs`; siblings import it via the `cos/mod.rs`
   re-export.

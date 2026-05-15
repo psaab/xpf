@@ -234,6 +234,29 @@ fn timer_wheel_cascades_long_parked_queue() {
 }
 
 #[test]
+fn root_serviceability_tracks_parked_queue_wakeup_tick() {
+    let mut root = test_cos_interface_runtime(0);
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    assert!(cos_root_can_service_after_prime(&root, 1));
+
+    park_cos_queue(&mut root, 0, 10);
+    assert_eq!(root.runnable_queues, 0);
+    assert!(!cos_root_can_service_after_prime(
+        &root,
+        9 * COS_TIMER_WHEEL_TICK_NS
+    ));
+    assert!(cos_root_can_service_after_prime(
+        &root,
+        10 * COS_TIMER_WHEEL_TICK_NS
+    ));
+}
+
+#[test]
 fn park_counter_root_token_starvation_ticks_only_its_reason() {
     let mut root = test_cos_runtime_with_exact(true);
     root.tokens = 0;
