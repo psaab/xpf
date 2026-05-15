@@ -2,6 +2,13 @@
 
 ## 2026-05-15
 
+- **Timestamp**: 2026-05-15T22:45:00Z
+  - **Action**: Round-1 review hardening for issue #1278 — fix unit-zero candidate ordering so VLAN binding ifindex is preferred over parent binding when both exist, preventing wrong runtime CoS counters from being shown.
+  - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `_Log.md`
+  - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
+
+## 2026-05-15
+
 - **Timestamp**: 2026-05-15T22:05:00Z
   - **Action**: Issue #1278 — make `show class-of-service interface` join configured reverse-egress CoS interfaces to live runtime by configured name first and binding egress ifindex second, so alias drift between `ge-0-0-1.0` and the runtime snapshot no longer hides queue counters.
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `docs/cos-validation-notes.md`, `_Log.md`
