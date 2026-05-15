@@ -525,7 +525,11 @@ MQFQ, v8 lease selection, or admission.
   pin `scheduler-be buffer-size 500k` and
   `scheduler-iperf-a buffer-size 4m`; the May 15 q0/q4 rerun reduced
   retransmits from ~74k/~35k per run to ~650/~222 and reduced CoS
-  admission drops from ~222k/~104k to ~1.9k/~527.
+  admission drops from ~222k/~104k to ~1.9k/~527. These fixture values
+  intentionally raise the default implicit cap from roughly 10 ms of
+  rate-derived buffering to about 40 ms at 100 Mbps for q0 and 32 ms at
+  1 Gbps for q4. Treat them as validation headroom for the reverse
+  `-P 12` workload, not as a low-latency production default.
 
 ## Empirical sweep across workload classes (2026-05-07)
 
