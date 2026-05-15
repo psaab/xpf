@@ -489,12 +489,27 @@ continuous Prometheus scrape before invoking the multi-sample wrapper
 and stops it after the wrapper exits. Raw scrapes are preserved under
 `<artifact>/<class>/equal-flow/metrics-raw.prom`; reducer output is
 written beside it as `summary.json`, `aggregate.tsv`, and `worker.tsv`.
+The reducer reads the multi-sample `summary.json` plus each preserved
+`iperf-single.json` and includes only scrapes whose timestamps land
+inside the same steady-state window as the fairness verdict
+(`start.timestamp.timesecs + WARMUP + EQUAL_FLOW_ESTIMATOR_WINDOW_SECS`
+through `start.timestamp.timesecs + duration - FINAL_BURST`). This keeps
+suppression-cost estimates aligned with the accepted CoV/Cstruct
+samples instead of averaging ramp, cooldown, or post-iperf telemetry.
+`WARMUP`, `FINAL_BURST`, and the estimator-window exclusion are
+integer-second values to match the `fairness-eval` CLI contract.
+Because the equal-flow gauges are themselves rolling 30-second
+estimates, the class sweep also skips the first
+`EQUAL_FLOW_ESTIMATOR_WINDOW_SECS=30` seconds after warmup by default;
+otherwise the first accepted scrapes can still contain pre-steady bytes
+inside the gauge's source window.
 The sweep also writes `<artifact>/equal-flow-summary.tsv` and appends an
 equal-flow section to `summary.md`. Missing or empty scrapes, parse
 errors, missing scrape-end markers, non-integer active-worker counts,
-or missing required aggregate estimator rows for the target
-`COS_IFINDEX` and class queue are infrastructure failures and make the
-sweep exit `2`; they do not produce a false-green fairness verdict.
+missing sample summaries or iperf artifacts, or missing required
+aggregate estimator rows for the target `COS_IFINDEX` and class queue
+inside the steady-state windows are infrastructure failures and make
+the sweep exit `2`; they do not produce a false-green fairness verdict.
 - **`xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id=...}`**
   counter: cumulative v8 CoS queue-lease acquire calls made by the
   worker. Use `rate()` over the same scrape window as worker TX

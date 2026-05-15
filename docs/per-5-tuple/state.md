@@ -430,10 +430,16 @@ is designed.
 Issue #1306 makes the class sweep preserve that evidence directly:
 each class artifact gets an `equal-flow/` directory with the raw
 Prometheus scrape stream plus reduced aggregate and worker TSV/JSON
-summaries for the target `COS_IFINDEX` and queue. The sweep fails closed
-with exit `2` if those required estimator rows are absent, the scrape
-stream is empty or truncated, or the active-worker-count gauges are not
-integer counts.
+summaries for the target `COS_IFINDEX` and queue. The reducer uses the
+multi-sample summary and the per-sample preserved `iperf-single.json`
+files to keep only scrapes inside each sample's steady-state window,
+using the same integer-second `WARMUP` and `FINAL_BURST` exclusions as
+`fairness-eval`, plus the default
+`EQUAL_FLOW_ESTIMATOR_WINDOW_SECS=30` rolling-gauge flush after warmup.
+The sweep fails closed with exit `2` if those required
+estimator rows are absent in the steady-state windows, the scrape stream
+is empty or truncated, the sample timing artifacts are missing, or the
+active-worker-count gauges are not integer counts.
 
 ### PR #1241 — TX completion uniformity telemetry
 

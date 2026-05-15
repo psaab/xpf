@@ -12,6 +12,9 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TARGET=${TARGET:-172.16.80.200}
 N=${N:-12}
 DURATION=${DURATION:-75}
+WARMUP=${WARMUP:-5}
+EQUAL_FLOW_ESTIMATOR_WINDOW_SECS=${EQUAL_FLOW_ESTIMATOR_WINDOW_SECS:-30}
+FINAL_BURST=${FINAL_BURST:-1}
 # Default to reverse only when REVERSE is unset. REVERSE= selects a
 # forward sweep.
 REVERSE=${REVERSE--R}
@@ -67,6 +70,21 @@ if ! command -v jq >/dev/null 2>&1; then
     echo "fairness-cos-class-sweep: jq is required to build the aggregate summary" >&2
     exit 2
 fi
+
+require_nonnegative_integer_seconds() {
+    local name=$1
+    local value=$2
+
+    if [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]]; then
+        return 0
+    fi
+    echo "fairness-cos-class-sweep: $name must be a non-negative integer second count, got: $value" >&2
+    exit 2
+}
+
+require_nonnegative_integer_seconds WARMUP "$WARMUP"
+require_nonnegative_integer_seconds EQUAL_FLOW_ESTIMATOR_WINDOW_SECS "$EQUAL_FLOW_ESTIMATOR_WINDOW_SECS"
+require_nonnegative_integer_seconds FINAL_BURST "$FINAL_BURST"
 
 if [[ -z "$ARTIFACT_ROOT" ]]; then
     ARTIFACT_ROOT=$(mktemp -d -t cos-fairness-all.XXXXXX)
@@ -197,11 +215,17 @@ stop_equal_flow_class_capture() {
 analyze_equal_flow_class_capture() {
     local dir=$1
     local queue=$2
+    local sample_summary=$3
 
     python3 "$EQUAL_FLOW_CAPTURE" \
         --raw "$dir/metrics-raw.prom" \
         --ifindex "$COS_IFINDEX" \
         --queue-id "$queue" \
+        --sample-summary "$sample_summary" \
+        --warmup-secs "$WARMUP" \
+        --estimator-window-secs "$EQUAL_FLOW_ESTIMATOR_WINDOW_SECS" \
+        --final-burst-secs "$FINAL_BURST" \
+        --iperf-artifact-role single \
         --summary-json "$dir/summary.json" \
         --aggregate-tsv "$dir/aggregate.tsv" \
         --worker-tsv "$dir/worker.tsv" \
@@ -535,6 +559,8 @@ for spec in "${selected_classes[@]}"; do
         COS_IFINDEX="$COS_IFINDEX" \
         COS_QUEUE_ID="$queue" \
         SHAPER_RATE_BPS="$rate" \
+        WARMUP="$WARMUP" \
+        FINAL_BURST="$FINAL_BURST" \
         IFACE="$IFACE" \
         "$WRAPPER" \
             --samples "$SAMPLES" \
@@ -546,7 +572,7 @@ for spec in "${selected_classes[@]}"; do
         > "$out/wrapper.stdout" 2> "$out/wrapper.stderr"
     status=$?
     stop_equal_flow_class_capture "$EQUAL_FLOW_CAPTURE_PID"
-    analyze_equal_flow_class_capture "$equal_flow_dir" "$queue"
+    analyze_equal_flow_class_capture "$equal_flow_dir" "$queue" "$out/samples/summary.json"
     equal_flow_status=$?
     if (( equal_flow_status == 0 )); then
         append_equal_flow_class_summary "$label" "$port" "$queue" "$rate" "$equal_flow_dir/summary.json" "$equal_flow_dir/summary.tsv" \
@@ -677,6 +703,10 @@ fi
     printf 'Artifacts: `%s`\n\n' "$ARTIFACT_ROOT"
     printf 'Target: `%s`, streams: `%s`, duration: `%s`, reverse: `%s`, metrics: `%s`, cos_ifindex: `%s`\n\n' \
         "$TARGET" "$N" "$DURATION" "$REVERSE" "$METRICS_URL" "$COS_IFINDEX"
+    printf 'Steady-state window per sample: warmup `%s`s, final-burst `%s`s.\n\n' \
+        "$WARMUP" "$FINAL_BURST"
+    printf 'Equal-flow reduction additionally skips `%s`s after warmup for rolling-estimator flush.\n\n' \
+        "$EQUAL_FLOW_ESTIMATOR_WINDOW_SECS"
     if [[ -n "$CLASS_FILTER" ]]; then
         printf 'Class filter: `%s`\n\n' "$CLASS_FILTER"
     fi
