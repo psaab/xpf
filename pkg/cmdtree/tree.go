@@ -19,7 +19,84 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// ValueType classifies the value a typed-leaf node accepts. #1319 Phase 1.
+//
+// The zero value, ValueAny, is the legacy behaviour: any string is accepted
+// and no schema-time validation runs. Specifying a non-zero ValueType opts
+// the leaf in to:
+//   - `?` completion surfacing ValueDesc + ValueExamples for the value slot;
+//   - SchemaValidate (pkg/config) invoking the leaf's Validator at commit
+//     check, so garbage like `transmit-rate asd` fails loud at commit time
+//     instead of silently zeroing out the rate inside the compiler.
+//
+// Add new types here only when we're prepared to wire validators for every
+// leaf that adopts them — IP/CIDR/MAC/duration are deliberately deferred
+// (see issue #1319) until the schedulers subtree lands first.
+type ValueType int
+
+const (
+	// ValueAny is the legacy default: any string accepted, no validation.
+	ValueAny ValueType = iota
+	// ValueRate is a Junos bandwidth value (bits/sec) with k/m/g suffix.
+	// Examples: "100k", "10m", "1g". Accepts plain integers.
+	ValueRate
+	// ValueByteSize is a byte-count value with k/m/g suffix.
+	// Examples: "16k", "1m", "256m".
+	ValueByteSize
+	// ValuePercent is a percent value in the range [0, 100] (no suffix).
+	ValuePercent
+	// ValueInteger is a bare integer. Range is enforced by the leaf's
+	// Validator (callers use validateInteger(min,max) to bound it).
+	ValueInteger
+	// ValueIdentifier is a bare Junos identifier (no spaces, no quotes).
+	ValueIdentifier
+	// ValueEnumOf is one of a fixed set of names. The allowed set lives
+	// in the leaf's Validator closure (validateEnum).
+	ValueEnumOf
+	// ValueBool is "true" or "false".
+	ValueBool
+)
+
+// Placeholder returns the angle-bracket placeholder name shown in `?`
+// completion for an unfilled value slot of this type.
+func (v ValueType) Placeholder() string {
+	switch v {
+	case ValueRate:
+		return "<rate>"
+	case ValueByteSize:
+		return "<bytes>"
+	case ValuePercent:
+		return "<percent>"
+	case ValueInteger:
+		return "<integer>"
+	case ValueIdentifier:
+		return "<name>"
+	case ValueEnumOf:
+		return "<value>"
+	case ValueBool:
+		return "<true|false>"
+	}
+	return ""
+}
+
+// LeafValidator is invoked by SchemaValidate (this package) on the raw
+// AST value for a typed leaf at commit-check time. cfg is the candidate
+// Config (may be nil if SchemaValidate runs on the raw AST before compile).
+// Validators must return a nil error for accepted input.
+//
+// We alias config.LeafValidator (same function signature) so cmdtree
+// Nodes can carry validators declared in pkg/config directly. The alias
+// avoids a config→cmdtree→config import cycle: validators live in
+// config (string parsers), the schema walker lives here (typed-leaf
+// dispatch).
+type LeafValidator = config.LeafValidator
+
 // Node defines a completion tree node with description, children, and optional dynamic values.
+//
+// Phase 1 / #1319: optional typed-leaf fields (ValueType, ValueDesc,
+// ValueExamples, Validator) describe the value a leaf accepts. The zero
+// value of ValueType is ValueAny — every existing Node is backward
+// compatible by construction.
 type Node struct {
 	Desc      string
 	Children  map[string]*Node
@@ -27,11 +104,34 @@ type Node struct {
 	// ContextDynamicFn is like DynamicFn but receives the consumed words
 	// so completions can depend on earlier arguments (e.g. zone pair).
 	ContextDynamicFn func(cfg *config.Config, words []string) []string
+
+	// ValueType, if set to a non-ValueAny value, marks this node as a
+	// typed leaf: it accepts exactly one value of the given kind, and
+	// SchemaValidate (pkg/config) will invoke Validator on the raw
+	// string at commit-check time.
+	ValueType ValueType
+	// ValueDesc is a one-line human description of the value slot
+	// shown in `?` completion (e.g. "Bandwidth (e.g. 100k, 10m, 1g)").
+	ValueDesc string
+	// ValueExamples lists illustrative values surfaced in `?` completion.
+	// These appear as plain completion candidates so operators can pick
+	// one. Examples are NOT validated as the only acceptable inputs;
+	// Validator owns acceptance.
+	ValueExamples []string
+	// Validator, if set, is called at SchemaValidate time to accept or
+	// reject the raw string at this leaf. cfg may be nil.
+	Validator LeafValidator
 }
 
 // HasDynamic returns true if the node has any dynamic completion function.
 func (n *Node) HasDynamic() bool {
 	return n.DynamicFn != nil || n.ContextDynamicFn != nil
+}
+
+// IsTypedLeaf reports whether the node carries a non-default ValueType,
+// i.e. it expects exactly one typed value at the next slot.
+func (n *Node) IsTypedLeaf() bool {
+	return n.ValueType != ValueAny
 }
 
 // DynamicValues returns dynamic completion values, preferring ContextDynamicFn.
@@ -887,6 +987,73 @@ var ConfigSetDataplaneKnobs = map[string]*Node{
 	}},
 }
 
+// ConfigClassOfServiceSchedulers is the per-leaf typed-value schema for
+// `set class-of-service schedulers <name> { ... }` (#1319 Phase 2).
+//
+// It defines the value semantics for the four scheduler leaves the
+// compiler actually consumes today (see
+// pkg/config/compiler_class_of_service.go around lines 227-251):
+// transmit-rate (rate, optional `exact` modifier), priority (enum),
+// buffer-size (byte-size or percent, with optional `temporal` modifier
+// per Junos), and shaping-rate (rate).
+//
+// The set-mode tab/`?` completer uses these via SchemaValidate's
+// walker — the existing pkg/config/ast.go schemaNode tree still
+// answers structural completion ("what keywords are valid here") for
+// every other subtree; this map only adds value-slot semantics for the
+// schedulers leaves.
+//
+// Wiring: SchemaValidate (this file) walks the AST against this map
+// at commit-check time; configstore calls SchemaValidate BEFORE the
+// existing compile step so `commit check` fails loud on garbage like
+// `transmit-rate asd`.
+var ConfigClassOfServiceSchedulers = &Node{
+	Desc: "Per-scheduler configuration",
+	Children: map[string]*Node{
+		"transmit-rate": {
+			Desc:          "Transmit rate (bandwidth allocated to this scheduler)",
+			ValueType:     ValueRate,
+			ValueDesc:     "Bandwidth (e.g. 100k, 10m, 1g) or bps integer; > 0",
+			ValueExamples: []string{"100k", "10m", "1g", "10g"},
+			Validator:     config.ValidateRate,
+			Children: map[string]*Node{
+				"exact": {Desc: "Enforce exact transmit rate (no surplus)"},
+			},
+		},
+		"priority": {
+			Desc:          "Scheduling priority for this queue",
+			ValueType:     ValueEnumOf,
+			ValueDesc:     "Scheduler priority (low | medium-low | medium-high | high | strict-high)",
+			ValueExamples: []string{"low", "medium-low", "medium-high", "high", "strict-high"},
+			Validator: config.ValidateEnum([]string{
+				"low", "medium-low", "medium-high", "high", "strict-high",
+			}),
+		},
+		"buffer-size": {
+			Desc:          "Buffer allocation for this scheduler (bytes or percent)",
+			ValueType:     ValueByteSize,
+			ValueDesc:     "Byte-size (e.g. 16m, 256k) or bare integer 0..100 for percent",
+			ValueExamples: []string{"16m", "256k", "50"},
+			Validator:     config.ValidateByteSizeOrPercent,
+			Children: map[string]*Node{
+				"temporal": {Desc: "Temporal buffer interpretation (Junos)"},
+			},
+		},
+		"shaping-rate": {
+			Desc:          "Shaping rate (peak rate cap for this scheduler)",
+			ValueType:     ValueRate,
+			ValueDesc:     "Bandwidth cap (e.g. 100k, 10m, 1g); > 0",
+			ValueExamples: []string{"100k", "10m", "1g"},
+			Validator:     config.ValidateRate,
+		},
+		// `surplus-sharing` (#915) and `equal-flow-enforcement` are
+		// presence-only flags — no value to validate. We list them for
+		// `?` help completeness.
+		"surplus-sharing":        {Desc: "Allow scheduler to consume surplus bandwidth (opt-in)"},
+		"equal-flow-enforcement": {Desc: "Enforce per-flow equal share within this scheduler"},
+	},
+}
+
 // ConfigTopLevel defines tab completion for config mode top-level commands.
 var ConfigTopLevel = map[string]*Node{
 	"annotate": {Desc: "Annotate the configuration statement"},
@@ -993,11 +1160,23 @@ func resolveTreeWord(tree map[string]*Node, word string) (string, *Node, []strin
 func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg *config.Config) []string {
 	current := tree
 	var currentNode *Node
+	// parentTyped tracks whether the most recent matched node is a typed
+	// leaf whose value slot has not yet been consumed. If so, the next
+	// unmatched word is the value and we stay at the same children
+	// level after consuming it (#1319: same shape as <placeholder> but
+	// derived from ValueType instead of an explicit "<name>" node).
+	parentTyped := false
 	dynamicConsumed := false
 	for wi, w := range words {
 		dynamicConsumed = false
 		_, node, matches, ok := resolveTreeWord(current, w)
 		if !ok {
+			if parentTyped {
+				// Typed-leaf value slot consumed this word; stay at same level.
+				parentTyped = false
+				dynamicConsumed = true
+				continue
+			}
 			if currentNode != nil && currentNode.HasDynamic() {
 				dynamicConsumed = true
 				continue
@@ -1022,6 +1201,7 @@ func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg
 			return nil
 		}
 		currentNode = node
+		parentTyped = node.IsTypedLeaf()
 		if node.Children == nil {
 			if node.HasDynamic() && wi < len(words)-1 {
 				dynamicConsumed = true
@@ -1035,6 +1215,14 @@ func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg
 		current = node.Children
 	}
 	candidates := KeysOf(current)
+	if parentTyped && currentNode != nil {
+		// At the value slot of a typed leaf: surface examples for
+		// `?` completion.
+		candidates = append(candidates, currentNode.ValueExamples...)
+		if ph := currentNode.ValueType.Placeholder(); ph != "" {
+			candidates = append(candidates, ph)
+		}
+	}
 	if !dynamicConsumed && currentNode != nil && currentNode.HasDynamic() && cfg != nil {
 		candidates = append(candidates, currentNode.DynamicValues(cfg, words)...)
 	}
@@ -1045,11 +1233,17 @@ func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg
 func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial string, cfg *config.Config) []Candidate {
 	current := tree
 	var currentNode *Node
+	parentTyped := false
 	dynamicConsumed := false
 	for wi, w := range words {
 		dynamicConsumed = false
 		_, node, matches, ok := resolveTreeWord(current, w)
 		if !ok {
+			if parentTyped {
+				parentTyped = false
+				dynamicConsumed = true
+				continue
+			}
 			if currentNode != nil && currentNode.HasDynamic() {
 				dynamicConsumed = true
 				continue
@@ -1073,6 +1267,7 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 			return nil
 		}
 		currentNode = node
+		parentTyped = node.IsTypedLeaf()
 		if node.Children == nil {
 			if node.HasDynamic() && wi < len(words)-1 {
 				dynamicConsumed = true
@@ -1087,6 +1282,10 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 				}
 				return candidates
 			}
+			// Pure typed leaf with no children: surface placeholder + examples.
+			if parentTyped {
+				return typedLeafCandidates(node, partial)
+			}
 			return nil
 		}
 		current = node.Children
@@ -1098,6 +1297,9 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 			candidates = append(candidates, Candidate{Name: name, Desc: node.Desc})
 		}
 	}
+	if parentTyped && currentNode != nil {
+		candidates = append(candidates, typedLeafCandidates(currentNode, partial)...)
+	}
 	if !dynamicConsumed && currentNode != nil && currentNode.HasDynamic() && cfg != nil {
 		for _, name := range currentNode.DynamicValues(cfg, words) {
 			if strings.HasPrefix(name, partial) {
@@ -1106,6 +1308,28 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 		}
 	}
 	return candidates
+}
+
+// typedLeafCandidates returns the `?` completion entries for the value
+// slot of a typed leaf: a single placeholder entry carrying the value's
+// description, plus one entry per declared example.
+func typedLeafCandidates(node *Node, partial string) []Candidate {
+	var out []Candidate
+	if ph := node.ValueType.Placeholder(); ph != "" {
+		desc := node.ValueDesc
+		if desc == "" {
+			desc = node.Desc
+		}
+		if strings.HasPrefix(ph, partial) {
+			out = append(out, Candidate{Name: ph, Desc: desc})
+		}
+	}
+	for _, ex := range node.ValueExamples {
+		if strings.HasPrefix(ex, partial) {
+			out = append(out, Candidate{Name: ex, Desc: "example"})
+		}
+	}
+	return out
 }
 
 // LookupDesc finds the description for a candidate name given the command path words.
