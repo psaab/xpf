@@ -1369,6 +1369,142 @@ fn debug_state_test_timers() -> WorkerTimers {
     }
 }
 
+fn active_flow_debug_test_queue_config(queue_id: u8) -> crate::afxdp::types::CoSQueueConfig {
+    crate::afxdp::types::CoSQueueConfig {
+        queue_id,
+        forwarding_class: format!("test-q{queue_id}"),
+        priority: 5,
+        transmit_rate_bytes: 1_000_000,
+        exact: true,
+        surplus_sharing: false,
+        equal_flow_enforcement: false,
+        surplus_weight: 1,
+        buffer_bytes: 64 * 1024,
+        dscp_rewrite: None,
+    }
+}
+
+fn active_flow_debug_test_binding() -> BindingWorker {
+    use crate::afxdp::tx::test_support::{
+        test_cos_fast_interfaces, test_cos_runtime_with_queues, test_queue_fast_path,
+    };
+
+    let root_ifindex = 14;
+    let worker_id = 3;
+    let root = test_cos_runtime_with_queues(
+        1_000_000,
+        vec![
+            active_flow_debug_test_queue_config(0),
+            active_flow_debug_test_queue_config(2),
+        ],
+    );
+    let fast_interfaces = test_cos_fast_interfaces(
+        root_ifindex,
+        root_ifindex,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, worker_id, None, None)),
+            (2, test_queue_fast_path(false, worker_id, None, None)),
+        ],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces
+        .get(&root_ifindex)
+        .expect("test fast path")
+        .clone();
+
+    BindingWorker::new_for_cos_drain_test(5, worker_id, root_ifindex, root, fast_path)
+}
+
+fn active_flow_debug_test_key() -> crate::session::SessionKey {
+    crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 5205,
+        dst_port: 443,
+    }
+}
+
+fn active_flow_debug_test_entry(
+    key: crate::session::SessionKey,
+    stamp: FlowCacheStamp,
+) -> FlowCacheEntry {
+    use crate::test_zone_ids::{TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID};
+
+    FlowCacheEntry {
+        key,
+        ingress_ifindex: 7,
+        descriptor: RewriteDescriptor {
+            dst_mac: [0x56, 0x4a, 0xe8, 0x1e, 0xa8, 0x32],
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
+            fabric_redirect: false,
+            tx_vlan_id: 80,
+            ether_type: 0x0800,
+            rewrite_src_ip: None,
+            rewrite_dst_ip: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            ip_csum_delta: 0,
+            l4_csum_delta: 0,
+            egress_ifindex: 14,
+            tx_ifindex: 14,
+            target_binding_index: None,
+            tx_selection: CachedTxSelectionDescriptor {
+                queue_id: Some(2),
+                dscp_rewrite: Some(46),
+                filter_counter: None,
+            },
+            nat64: false,
+            nptv6: false,
+            apply_nat_on_fabric: false,
+        },
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 14,
+                tx_ifindex: 14,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+                neighbor_mac: Some([0x56, 0x4a, 0xe8, 0x1e, 0xa8, 0x32]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
+                tx_vlan_id: 80,
+            },
+            nat: NatDecision::default(),
+        },
+        metadata: SessionMetadata {
+            ingress_zone: TEST_TRUST_ZONE_ID,
+            egress_zone: TEST_UNTRUST_ZONE_ID,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+        },
+        stamp,
+        observed_bytes: 0,
+        last_used_epoch: 0,
+    }
+}
+
+fn active_flow_debug_snapshot(binding: &BindingWorker) -> (u32, usize, usize) {
+    let (flow_rows, flow_rows_truncated) = binding.live.flow_worker_map_snapshot();
+    assert!(
+        !flow_rows_truncated,
+        "single-flow regression fixture must not truncate flow-worker rows"
+    );
+    (
+        binding
+            .live
+            .active_flow_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        flow_rows.len(),
+        binding.live.cos_active_flow_counts_snapshot().len(),
+    )
+}
+
 #[test]
 fn idle_debug_state_publish_cadence_is_wall_clock_based() {
     let mut timers = debug_state_test_timers();
@@ -1410,4 +1546,66 @@ fn non_idle_debug_state_keeps_hot_counter_cadence() {
     assert!(advance_debug_state_publish_counter(&mut timers));
     assert_eq!(timers.debug_state_counter, DEBUG_STATE_PUBLISH_MASK + 1);
     assert_eq!(timers.last_idle_debug_publish_ns, 0);
+}
+
+#[test]
+fn idle_debug_state_ages_active_flow_snapshots_without_rx() {
+    let mut binding = active_flow_debug_test_binding();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = active_flow_debug_test_key();
+    binding
+        .flow
+        .flow_cache
+        .insert(active_flow_debug_test_entry(key.clone(), stamp));
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(
+        binding
+            .flow
+            .flow_cache
+            .lookup_counted(&key, lookup, 0, &rg_epochs, 1500)
+            .is_some(),
+        "fixture flow must be active before idle-only aging starts"
+    );
+
+    let mut now_ns = binding.timers.last_idle_debug_publish_ns;
+    now_ns = now_ns.saturating_add(IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS);
+    update_binding_idle_debug_state(&mut binding, now_ns);
+
+    assert_eq!(
+        active_flow_debug_snapshot(&binding),
+        (1, 1, 1),
+        "first idle publish must surface the active binding, flow-map, and CoS snapshots"
+    );
+    let cos_rows = binding.live.cos_active_flow_counts_snapshot();
+    assert_eq!(cos_rows[0].ifindex, 14);
+    assert_eq!(cos_rows[0].queue_id, 2);
+    assert_eq!(cos_rows[0].worker_id, 3);
+    assert_eq!(cos_rows[0].active_flow_count, 1);
+
+    for _ in 0..9 {
+        now_ns = now_ns.saturating_add(IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS);
+        update_binding_idle_debug_state(&mut binding, now_ns);
+    }
+
+    assert_eq!(
+        active_flow_debug_snapshot(&binding),
+        (0, 0, 0),
+        "idle wall-clock publishes must age stale active-flow telemetry out without packet RX"
+    );
+    assert_eq!(
+        binding.live.snapshot().active_flow_count,
+        0,
+        "operator binding snapshot must observe the aged-out active-flow count"
+    );
 }
