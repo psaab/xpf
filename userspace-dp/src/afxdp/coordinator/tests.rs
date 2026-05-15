@@ -31,6 +31,7 @@ fn build_cos_owner_worker_by_queue_prefers_lowest_worker_with_tx_binding() {
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 64 * 1024,
                 dscp_rewrite: None,
@@ -85,6 +86,7 @@ fn build_cos_owner_worker_by_queue_spreads_queues_across_eligible_workers() {
                     transmit_rate_bytes: 1_000_000,
                     exact: false,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
@@ -96,6 +98,7 @@ fn build_cos_owner_worker_by_queue_spreads_queues_across_eligible_workers() {
                     transmit_rate_bytes: 1_000_000,
                     exact: false,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
@@ -107,6 +110,7 @@ fn build_cos_owner_worker_by_queue_spreads_queues_across_eligible_workers() {
                     transmit_rate_bytes: 1_000_000,
                     exact: false,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
@@ -164,6 +168,7 @@ fn build_cos_owner_worker_by_queue_prefers_ready_workers_when_available() {
                     transmit_rate_bytes: 1_000_000,
                     exact: false,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
@@ -175,6 +180,7 @@ fn build_cos_owner_worker_by_queue_prefers_ready_workers_when_available() {
                     transmit_rate_bytes: 1_000_000,
                     exact: true,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
@@ -230,6 +236,7 @@ fn build_cos_owner_worker_by_queue_falls_back_when_no_ready_workers_exist() {
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 64 * 1024,
                 dscp_rewrite: None,
@@ -390,6 +397,7 @@ fn build_shared_cos_root_leases_uses_active_workers_per_interface() {
                     transmit_rate_bytes: 50_000_000,
                     exact: false,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 128 * 1024,
                     dscp_rewrite: None,
@@ -401,6 +409,7 @@ fn build_shared_cos_root_leases_uses_active_workers_per_interface() {
                     transmit_rate_bytes: 50_000_000,
                     exact: false,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 128 * 1024,
                     dscp_rewrite: None,
@@ -468,6 +477,7 @@ fn build_shared_cos_root_leases_reuses_existing_matching_lease_arc() {
                 transmit_rate_bytes: 100_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -510,6 +520,7 @@ fn build_shared_cos_queue_leases_reuses_existing_matching_lease_arc() {
                 transmit_rate_bytes: 50_000_000,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -559,6 +570,7 @@ fn refresh_cos_owner_worker_map_from_binding_statuses_keeps_shared_arcs_when_unc
                     transmit_rate_bytes: 50_000_000,
                     exact: false,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 128 * 1024,
                     dscp_rewrite: None,
@@ -570,6 +582,7 @@ fn refresh_cos_owner_worker_map_from_binding_statuses_keeps_shared_arcs_when_unc
                     transmit_rate_bytes: 50_000_000,
                     exact: false,
                     surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: 128 * 1024,
                     dscp_rewrite: None,
@@ -917,10 +930,9 @@ fn spawn_supervised_aux_runs_body_to_completion_when_no_panic() {
 fn spawn_supervised_aux_catches_non_string_panic_payload() {
     // Non-string payload exercises the panic_payload_message fallback
     // path, mirroring the worker_loop integration test above.
-    let join = super::supervisor::spawn_supervised_aux("test-aux-i32", || {
-        std::panic::panic_any(99_i32)
-    })
-    .expect("spawn_supervised_aux");
+    let join =
+        super::supervisor::spawn_supervised_aux("test-aux-i32", || std::panic::panic_any(99_i32))
+            .expect("spawn_supervised_aux");
     join.join().expect("supervisor must catch non-string panic");
 }
 

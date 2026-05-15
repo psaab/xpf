@@ -4,6 +4,7 @@
 // `#[path = "tests.rs"]` from mod.rs.
 
 use super::*;
+use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::admission::{
     apply_cos_queue_flow_fair_promotion, cos_flow_aware_buffer_limit, cos_queue_flow_share_limit,
 };
@@ -21,11 +22,10 @@ use crate::afxdp::tx::cos_classify::{
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::tx_frame_capacity;
 use crate::afxdp::types::{
-    CoSQueueConfig, FastMap, FlowRrRing, PreparedTxRecycle, PreparedTxRequest, TxRequest,
-    COS_FLOW_FAIR_BUCKETS,
+    COS_FLOW_FAIR_BUCKETS, CoSQueueConfig, FastMap, FlowRrRing, PreparedTxRecycle,
+    PreparedTxRequest, TxRequest,
 };
 use crate::afxdp::umem::MmapArea;
-use crate::afxdp::PROTO_TCP;
 
 #[test]
 fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
@@ -38,6 +38,7 @@ fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -90,6 +91,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -205,6 +207,7 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -274,6 +277,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -396,6 +400,7 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -533,6 +538,7 @@ fn mqfq_finish_time_u64_has_decades_of_headroom() {
             transmit_rate_bytes: 25_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -650,6 +656,7 @@ fn queue_flow_fair_enabled_on_shared_exact() {
             transmit_rate_bytes: high_rate_bytes,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -715,6 +722,7 @@ fn queue_flow_fair_enabled_on_owner_local_exact() {
             transmit_rate_bytes: low_rate_bytes,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -762,6 +770,7 @@ fn queue_flow_fair_disabled_on_non_exact() {
             transmit_rate_bytes: 0,
             exact: false,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -897,6 +906,7 @@ fn cos_exact_drain_throughput_micro_bench() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 4 * 1024 * 1024,
             dscp_rewrite: None,
@@ -1081,6 +1091,7 @@ fn bench_pop_commit_settle_publish() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 4 * 1024 * 1024,
             dscp_rewrite: None,

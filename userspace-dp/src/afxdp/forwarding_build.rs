@@ -167,17 +167,15 @@ pub(super) fn build_forwarding_state(snapshot: &ConfigSnapshot) -> ForwardingSta
             // every read on the hot path is one HashMap lookup
             // (ifindex → u16). Unknown / dropped zones map to 0 (the
             // canonical "unknown" sentinel).
-            let zone_id = state
-                .zone_name_to_id
-                .get(&iface.zone)
-                .copied()
-                .unwrap_or(0);
+            let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
             state.ifindex_to_zone_id.insert(iface.ifindex, zone_id);
             if iface.parent_ifindex > 0 {
                 match state.ifindex_to_zone_id.get(&iface.parent_ifindex) {
                     Some(existing) if *existing != zone_id => {}
                     _ => {
-                        state.ifindex_to_zone_id.insert(iface.parent_ifindex, zone_id);
+                        state
+                            .ifindex_to_zone_id
+                            .insert(iface.parent_ifindex, zone_id);
                     }
                 }
             }
@@ -720,6 +718,9 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                     surplus_sharing: scheduler
                         .map(|sched| sched.surplus_sharing)
                         .unwrap_or(false),
+                    equal_flow_enforcement: scheduler
+                        .map(|sched| sched.equal_flow_enforcement)
+                        .unwrap_or(false),
                     surplus_weight: cos_surplus_weight(
                         transmit_rate_bytes.max(1),
                         iface.cos_shaping_rate_bytes_per_sec,
@@ -774,11 +775,7 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
             .unwrap_or(false);
         let ieee8021_classifier_targets_iface_queue = ieee8021_classifiers
             .get(&iface.cos_ieee8021_classifier)
-            .map(|c| {
-                c.queue_by_pcp
-                    .values()
-                    .any(|q| iface_queue_ids.contains(q))
-            })
+            .map(|c| c.queue_by_pcp.values().any(|q| iface_queue_ids.contains(q)))
             .unwrap_or(false);
         let dscp_rewrite_targets_iface_class = dscp_rewrite_rule
             .map(|r| {
@@ -810,6 +807,7 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                 transmit_rate_bytes: iface.cos_shaping_rate_bytes_per_sec,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: burst_bytes,
                 dscp_rewrite: dscp_rewrite_rule

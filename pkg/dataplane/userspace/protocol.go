@@ -183,6 +183,9 @@ type CoSSchedulerSnapshot struct {
 	// SurplusSharing (#915) opts an exact queue into surplus-phase
 	// participation; only meaningful when TransmitRateExact == true.
 	SurplusSharing bool `json:"surplus_sharing,omitempty"`
+	// EqualFlowEnforcement is an explicit opt-in for later shared
+	// flow-aware enforcement on positive transmit-rate exact queues.
+	EqualFlowEnforcement bool `json:"equal_flow_enforcement,omitempty"`
 }
 
 type CoSSchedulerMapSnapshot struct {

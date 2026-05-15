@@ -4,10 +4,10 @@
 // `#[path = "admission_tests.rs"]` from admission.rs.
 
 use super::*;
+use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::ecn::{ECN_CE, ECN_ECT_0, ECN_MASK, ECN_NOT_ECT};
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{PreparedTxRecycle, PreparedTxRequest};
-use crate::afxdp::PROTO_TCP;
 
 /// #914: shared_exact rate-aware cap — verify the formula
 /// `max(fair_share*2, bdp_floor).clamp(MIN, buffer_limit)`
@@ -27,6 +27,7 @@ fn flow_share_limit_shared_exact_scales_with_rate() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 0,
             dscp_rewrite: None,
@@ -72,6 +73,7 @@ fn flow_share_limit_shared_exact_caps_at_aggregate_for_single_flow() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 0,
             dscp_rewrite: None,
@@ -109,6 +111,7 @@ fn flow_share_limit_shared_exact_clamps_to_buffer_at_low_n() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 0,
             dscp_rewrite: None,
@@ -151,6 +154,7 @@ fn flow_share_limit_shared_exact_protects_against_dominant_flow() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 0,
             dscp_rewrite: None,
@@ -194,6 +198,7 @@ fn flow_share_limit_owner_local_exact_unchanged() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 125_000,
             dscp_rewrite: None,
@@ -943,7 +948,7 @@ fn admission_ecn_marks_prepared_single_vlan_tagged_ipv4_packet() {
     );
 }
 
-use crate::afxdp::types::{CoSQueueConfig, COS_FLOW_FAIR_BUCKETS};
+use crate::afxdp::types::{COS_FLOW_FAIR_BUCKETS, CoSQueueConfig};
 
 #[test]
 fn cos_flow_aware_buffer_limit_scales_with_prospective_active_flow_count() {
@@ -965,6 +970,7 @@ fn cos_flow_aware_buffer_limit_scales_with_prospective_active_flow_count() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             // Decimal KB to match the operator `buffer-size 125k`
             // config, not KiB — the admission-boundary math must
@@ -1025,6 +1031,7 @@ fn cos_flow_aware_buffer_limit_matches_share_limit_at_new_flow_boundary() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             // Decimal KB to match the operator `buffer-size 125k`
             // config, not KiB — the admission-boundary math must
@@ -1110,6 +1117,7 @@ fn cos_flow_aware_buffer_limit_respects_non_flow_fair_queues() {
             transmit_rate_bytes: 100_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 128 * 1024,
             dscp_rewrite: None,
@@ -1141,6 +1149,7 @@ fn cos_queue_flow_share_limit_never_drops_below_fast_retransmit_floor() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             // Decimal KB to match the operator `buffer-size 125k`
             // config, not KiB — the admission-boundary math must
@@ -1197,6 +1206,7 @@ fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
             transmit_rate_bytes: 125_000_000,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             // Decimal KB to match the operator `buffer-size 125k`
             // config, not KiB.
@@ -1260,6 +1270,7 @@ fn cos_flow_aware_buffer_limit_honours_operator_base_above_delay_cap() {
             transmit_rate_bytes: 125_000_000,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: operator_base,
             dscp_rewrite: None,
@@ -1315,6 +1326,7 @@ fn cos_flow_aware_buffer_limit_preserves_non_flow_fair_path_after_clamp() {
             transmit_rate_bytes: 125_000_000,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             // Operator configured 10 MB — well above delay_cap.
             // If the clamp leaks into this path, the returned cap
@@ -1351,6 +1363,7 @@ fn cos_flow_aware_buffer_limit_delay_cap_scales_linearly_with_rate() {
                 transmit_rate_bytes: rate_bytes,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 // Small operator base so the delay cap dominates.
                 buffer_bytes: COS_MIN_BURST_BYTES,

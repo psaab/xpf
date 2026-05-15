@@ -366,6 +366,12 @@ type CoSScheduler struct {
 	// Only meaningful when TransmitRateExact == true; cleared
 	// by ValidateConfig otherwise (warn-and-strip).
 	SurplusSharing bool
+	// EqualFlowEnforcement opts a positive transmit-rate exact
+	// scheduler into shared flow-aware exact enforcement. The
+	// runtime lease algorithm is wired separately; validation
+	// fails closed unless the scheduler has transmit-rate exact
+	// with a positive rate.
+	EqualFlowEnforcement bool
 }
 
 // CoSSchedulerMap binds forwarding classes to named schedulers.

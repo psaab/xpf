@@ -215,6 +215,10 @@ func compileExpanded(tree *ConfigTree) (*Config, error) {
 		}
 	}
 
+	if err := validateClassOfServiceStrict(cfg.ClassOfService); err != nil {
+		return nil, err
+	}
+
 	if warnings := ValidateConfig(cfg); len(warnings) > 0 {
 		for _, w := range warnings {
 			cfg.Warnings = append(cfg.Warnings, w)
@@ -222,6 +226,23 @@ func compileExpanded(tree *ConfigTree) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {
+	if cos == nil {
+		return nil
+	}
+	for _, sched := range cos.Schedulers {
+		if sched == nil {
+			continue
+		}
+		if sched.EqualFlowEnforcement && (!sched.TransmitRateExact || sched.TransmitRateBytes == 0) {
+			return fmt.Errorf(
+				"class-of-service scheduler %q equal-flow-enforcement requires positive transmit-rate exact",
+				sched.Name)
+		}
+	}
+	return nil
 }
 
 // ValidateConfig performs cross-reference validation on a compiled config.
@@ -764,6 +785,7 @@ func ValidateConfig(cfg *Config) []string {
 // The runtime sites hard-code their process name (not a table lookup):
 //   - pkg/daemon/daemon.go ~:715 — `isProcessDisabled(cfg, "snmpd")`
 //   - pkg/daemon/daemon_system.go ~:383 — `isProcessDisabled(cfg, "ntp")`
+//
 // This table mirrors those hard-codes for the purpose of the #654
 // validation warning. Any addition here MUST be paired with a matching
 // runtime gating site, or the warning will go quiet while the knob

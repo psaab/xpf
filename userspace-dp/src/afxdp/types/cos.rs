@@ -60,6 +60,10 @@ pub(in crate::afxdp) struct CoSQueueConfig {
     /// control plane warn-and-strips otherwise so the runtime
     /// never sees it set on a non-exact queue).
     pub(in crate::afxdp) surplus_sharing: bool,
+    /// Explicit opt-in for later shared equal-flow enforcement on
+    /// positive exact queues. This is carried through config only;
+    /// coordinator lease integration owns the scheduling behavior.
+    pub(in crate::afxdp) equal_flow_enforcement: bool,
     pub(in crate::afxdp) surplus_weight: u32,
     pub(in crate::afxdp) buffer_bytes: u64,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
@@ -472,6 +476,10 @@ pub(in crate::afxdp) struct CoSQueueConfigState {
     /// `shared_queue_lease` consumption to Guarantee phase only,
     /// so surplus draws don't debit the per-queue rate cap.
     pub(in crate::afxdp) surplus_sharing: bool,
+    /// Explicit opt-in for later shared equal-flow enforcement on
+    /// positive exact queues. Present here so coordinator code can
+    /// pass the knob to shared leases once that algorithm lands.
+    pub(in crate::afxdp) equal_flow_enforcement: bool,
     pub(in crate::afxdp) flow_fair: bool,
     /// #785: cached shadow of `WorkerCoSQueueFastPath.shared_exact`
     /// populated by `promote_cos_queue_flow_fair`. Under the current

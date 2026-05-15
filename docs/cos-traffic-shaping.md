@@ -726,6 +726,8 @@ The configuration remains Junos-inspired:
 - scheduler maps
 - interface shaping-rate
 - optional classifier bindings
+- optional `equal-flow-enforcement` on positive `transmit-rate exact`
+  schedulers
 
 Internal mapping:
 
@@ -785,6 +787,11 @@ Important current behavior:
 - adding `surplus-sharing` on the scheduler (#915) opts an `exact` queue
   into surplus participation while keeping the per-queue rate as a
   guarantee floor
+- adding `equal-flow-enforcement` on the scheduler is an explicit opt-in for
+  shared flow-aware exact enforcement. The knob is accepted only with a
+  positive `transmit-rate <rate> exact`; commits fail closed when the rate is
+  missing, zero, or non-`exact`. This branch only carries the knob through the
+  snapshot and Rust queue config so later coordinator lease code can consume it.
 - `per-unit-scheduler` is not implemented
 
 For the `loss` userspace lab, the relevant path is:
@@ -847,6 +854,10 @@ Notes for this specific test:
   for existing configs that do not yet attach an egress CoS filter
 - use `set class-of-service schedulers <name> transmit-rate <rate> exact` for
   queues that must stay capped at their guarantee instead of borrowing surplus
+- use `set class-of-service schedulers <name> equal-flow-enforcement` only on
+  positive exact-rate schedulers; it is an opt-in config surface for the
+  forthcoming shared equal-flow lease algorithm, not a standalone scheduler
+  behavior in this branch
 - `loss-priority` on CoS DSCP / 802.1p classifiers is accepted for syntax
   compatibility but is not enforced yet
 - `loss-priority` on CoS DSCP rewrite-rules is accepted for syntax

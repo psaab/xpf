@@ -631,9 +631,9 @@ fn tx_latency_hist_cross_thread_snapshot_skew_within_bound() {
     //
     // Pin assertion: max observed |sum − count| across all
     // reader snapshots ≤ K_skew.
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
 
     let live = Arc::new(BindingLiveState::new());
@@ -1114,9 +1114,9 @@ fn tx_kick_latency_cross_thread_snapshot_skew_within_bound() {
     // holds for every reader sample.
     //
     // K_skew = ceil(λ_obs × W_read_max) + 2 (plan §4 / #812 §3.6 R2).
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
 
     let live = Arc::new(BindingLiveState::new());
@@ -1259,6 +1259,7 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
                 transmit_rate_bytes: 1_000_000,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 64 * 1024,
                 dscp_rewrite: None,
@@ -1270,6 +1271,7 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
                 transmit_rate_bytes: 5_000_000,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 64 * 1024,
                 dscp_rewrite: None,
@@ -1335,6 +1337,7 @@ fn flush_v_min_scratches_no_op_when_all_zero() {
             transmit_rate_bytes: 1_000_000,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 64 * 1024,
             dscp_rewrite: None,
@@ -1388,10 +1391,7 @@ fn idle_debug_state_publish_cadence_is_wall_clock_based() {
         IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS
     );
     assert!(
-        !idle_debug_state_publish_due(
-            &mut timers,
-            IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS * 2 - 1
-        ),
+        !idle_debug_state_publish_due(&mut timers, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS * 2 - 1),
         "subsequent idle publishes must also respect the interval"
     );
 }

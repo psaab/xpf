@@ -8,6 +8,7 @@
 // (where they were originally placed before the V_min split
 // landed in #1036).
 use super::*;
+use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::queue_ops::{
     cos_queue_pop_front, cos_queue_push_back, cos_queue_push_front,
 };
@@ -19,7 +20,6 @@ use crate::afxdp::tx::cos_classify::demote_prepared_cos_queue_to_local;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{CoSQueueConfig, PreparedTxRecycle, PreparedTxRequest, TxRequest};
 use crate::afxdp::umem::MmapArea;
-use crate::afxdp::PROTO_TCP;
 
 /// #940: speculative pop (snapshot variant) must NOT publish to the
 /// V_min slot. The slot stays at NOT_PARTICIPATING throughout the
@@ -36,6 +36,7 @@ fn vmin_pop_snapshot_does_not_publish() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -96,6 +97,7 @@ fn vmin_post_settle_publish_writes_committed_vtime() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -138,6 +140,7 @@ fn vmin_publish_helper_noop_when_floor_none() {
             transmit_rate_bytes: 1_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -172,6 +175,7 @@ fn vmin_throttle_function_fires_on_lag_breach() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 4 * 1024 * 1024,
             dscp_rewrite: None,
@@ -216,6 +220,7 @@ fn vmin_throttle_increments_v_min_throttles_scratch() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 4 * 1024 * 1024,
             dscp_rewrite: None,
@@ -273,6 +278,7 @@ fn vmin_hard_cap_override_does_not_double_count_throttle() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 4 * 1024 * 1024,
             dscp_rewrite: None,
@@ -324,6 +330,7 @@ fn vmin_pop_rollback_repop_postsettle_compose() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -414,6 +421,7 @@ fn vmin_demote_no_drain_all_leak() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: 4 * 1024 * 1024,
             dscp_rewrite: None,
@@ -492,6 +500,7 @@ fn vmin_vacate_on_bucket_empty() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -546,6 +555,7 @@ fn vmin_vacate_only_when_last_bucket_empties() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -605,6 +615,7 @@ fn vmin_hard_cap_force_continue_activates_suspension() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -615,9 +626,9 @@ fn vmin_hard_cap_force_continue_activates_suspension() {
     // Peer 0 publishes a tiny vtime — guarantees the throttle path.
     floor.slots[0].publish(0);
     test_flow_fair_state_mut(queue).queue_vtime = 100 * 1024 * 1024; // 100 MB ahead, way past lag.
-                                                                     // Each call returns false (throttle) until consecutive_v_min_skips
-                                                                     // reaches HARD_CAP. The Nth call returns true (force-continue) and
-                                                                     // arms suspension.
+    // Each call returns false (throttle) until consecutive_v_min_skips
+    // reaches HARD_CAP. The Nth call returns true (force-continue) and
+    // arms suspension.
     for n in 1..V_MIN_CONSECUTIVE_SKIP_HARD_CAP {
         let cont = cos_queue_v_min_continue(queue, 1);
         assert!(
@@ -656,6 +667,7 @@ fn vmin_consume_suspension_decrements_once() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -693,6 +705,7 @@ fn vmin_suspension_not_decremented_on_empty_tx_frames() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -736,6 +749,7 @@ fn vmin_hard_cap_counter_resets_on_success() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -773,6 +787,7 @@ fn vmin_no_first_enqueue_publish() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -811,6 +826,7 @@ fn vmin_prepared_flow_fair_throttle_and_suspension() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -888,6 +904,7 @@ fn vmin_prepared_no_suspension_burn_when_head_is_local() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -939,6 +956,7 @@ fn vmin_prepared_drain_arms_hard_cap_after_repeated_throttle() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -1041,6 +1059,7 @@ fn vmin_prepared_drain_unblocks_when_peer_slot_vacates() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
@@ -1124,6 +1143,7 @@ fn vmin_local_hard_cap_suspension_carries_into_prepared_drain() {
             transmit_rate_bytes: 10_000_000_000 / 8,
             exact: true,
             surplus_sharing: false,
+            equal_flow_enforcement: false,
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,

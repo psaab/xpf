@@ -29,7 +29,8 @@ fn build_cos_interface_runtime_propagates_surplus_sharing() {
                     priority: 5,
                     transmit_rate_bytes: 1_000_000_000 / 8,
                     exact: true,
-                    surplus_sharing: true, // opt-in
+                    surplus_sharing: true,
+                    equal_flow_enforcement: true,
                     surplus_weight: 1,
                     buffer_bytes: COS_MIN_BURST_BYTES,
                     dscp_rewrite: None,
@@ -40,7 +41,8 @@ fn build_cos_interface_runtime_propagates_surplus_sharing() {
                     priority: 5,
                     transmit_rate_bytes: 10_000_000_000 / 8,
                     exact: true,
-                    surplus_sharing: false, // explicit hard-cap, no opt-in
+                    surplus_sharing: false,
+                    equal_flow_enforcement: false,
                     surplus_weight: 1,
                     buffer_bytes: COS_MIN_BURST_BYTES,
                     dscp_rewrite: None,
@@ -58,6 +60,14 @@ fn build_cos_interface_runtime_propagates_surplus_sharing() {
     assert!(
         !q5.config.surplus_sharing,
         "queue_id=5 expected surplus_sharing=false (default) after copy"
+    );
+    assert!(
+        q4.config.equal_flow_enforcement,
+        "queue_id=4 expected equal_flow_enforcement=true after copy"
+    );
+    assert!(
+        !q5.config.equal_flow_enforcement,
+        "queue_id=5 expected equal_flow_enforcement=false after copy"
     );
     // Both queues remain exact so #1183 useful-state gate doesn't strip them.
     assert!(q4.config.exact && q5.config.exact);
@@ -82,6 +92,7 @@ fn build_cos_interface_runtime_starts_exact_queue_with_zero_local_tokens() {
                 transmit_rate_bytes: 10_000_000,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -114,6 +125,7 @@ fn build_cos_interface_runtime_leaves_flow_hash_seed_zero_until_promotion() {
                 transmit_rate_bytes: 1_000_000_000 / 8,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -125,6 +137,7 @@ fn build_cos_interface_runtime_leaves_flow_hash_seed_zero_until_promotion() {
                 transmit_rate_bytes: 10_000_000_000 / 8,
                 exact: true,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: COS_MIN_BURST_BYTES,
                 dscp_rewrite: None,
@@ -160,6 +173,7 @@ fn build_cos_interface_runtime_zero_shaping_rate_starts_with_full_root_tokens() 
                 transmit_rate_bytes: 1_000_000,
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
@@ -199,6 +213,7 @@ fn build_cos_interface_runtime_zero_queue_rate_starts_with_full_queue_tokens() {
                 transmit_rate_bytes: 0, // <- transparent queue
                 exact: false,
                 surplus_sharing: false,
+                equal_flow_enforcement: false,
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,

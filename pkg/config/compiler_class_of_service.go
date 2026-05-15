@@ -243,6 +243,8 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
 			case "surplus-sharing":
 				// #915: leaf with no value; presence = true.
 				sched.SurplusSharing = true
+			case "equal-flow-enforcement":
+				sched.EqualFlowEnforcement = true
 			}
 		}
 		cos.Schedulers[sched.Name] = sched
