@@ -340,6 +340,16 @@ classes. The 100M and 1G classes are mostly shaper-dominated and can
 produce very low CoV even when high-rate classes remain unfair. Use the
 class sweep harness to exercise every canonical fixture port:
 
+The canonical iperf CoS fixtures intentionally give the two low-rate
+classes deeper buffers than the implicit admission/buffer cap:
+`scheduler-be` uses `buffer-size 500k` and `scheduler-iperf-a` uses
+`buffer-size 4m`. #1312 showed that the implicit buffers reproduce
+reverse-mode tail-drop under `-P 12` even when equal-flow suppression is
+disabled: q0 hit aggregate admission drops and q4 hit per-flow share
+drops. Do not remove or shrink these buffers without rerunning at least
+the q0/q4 reverse sweep and checking retransmits plus CoS admission
+drop deltas.
+
 ```bash
 COS_IFINDEX=<egress-ifindex> \
 IPERF_LAUNCH_ARG_0=/usr/bin/incus \
