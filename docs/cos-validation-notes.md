@@ -38,6 +38,13 @@ Zero-valued counters are still printed. That is deliberate: an operator
 needs to see the zero to confirm the counter is wired and the drop path
 simply is not firing, versus the telemetry being broken.
 
+The CLI joins configured CoS interfaces to live userspace runtime rows by
+configured name first, then by the binding egress ifindex. Reverse egress
+configs can display as a physical unit such as `ge-0-0-1.0` while the runtime
+snapshot carries a different alias for the same ifindex; the ifindex fallback
+keeps those reverse-path counters visible instead of reporting
+`Runtime: unavailable`.
+
 ### Reading them during an iperf3 run
 
 ```bash
