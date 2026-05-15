@@ -105,6 +105,61 @@ func TestFormatStatusSummary(t *testing.T) {
 	}
 }
 
+func TestFormatStatusSummaryWorkerRuntimeRolling60sColumn(t *testing.T) {
+	// Three workers: w0 has a fully-populated window (45s CPU over 60s = 75%);
+	// w1 has only cumulative data and no rotation yet (window_ns=0, show "-");
+	// w2 is dead (windowed column suppressed by DEAD row).
+	status := ProcessStatus{
+		WorkerRuntime: []WorkerRuntimeStatus{
+			{
+				WorkerID:       0,
+				TID:            111,
+				WallNS:         3600 * 1_000_000_000,
+				ActiveNS:       1800 * 1_000_000_000,
+				IdleSpinNS:     900 * 1_000_000_000,
+				IdleBlockNS:    900 * 1_000_000_000,
+				ThreadCPUNS:    1800 * 1_000_000_000,
+				WallNS60s:      60 * 1_000_000_000,
+				ActiveNS60s:    30 * 1_000_000_000,
+				ThreadCPUNS60s: 45 * 1_000_000_000,
+				WindowNS:       60 * 1_000_000_000,
+			},
+			{
+				WorkerID:    1,
+				TID:         222,
+				WallNS:      10 * 1_000_000_000,
+				ActiveNS:    1 * 1_000_000_000,
+				ThreadCPUNS: 1 * 1_000_000_000,
+			},
+			{
+				WorkerID:     2,
+				TID:          333,
+				Dead:         true,
+				PanicMessage: "boom",
+			},
+		},
+	}
+
+	out := FormatStatusSummary(status)
+	for _, want := range []string{
+		"CPU%60s",
+		"75.0",     // 45/60 = 75% on worker 0's rolling window
+		"DEAD - panicked: boom",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("worker runtime row missing %q:\n%s", want, out)
+		}
+	}
+	// Worker 1: WindowNS=0 → literal "-" placeholder in the CPU%60s column.
+	// Asserting the exact row prefix through the CPU%60s slot pins the
+	// column position so a future column reorder can't silently move "-"
+	// elsewhere.
+	wantRow := "  1      222      10.0     0.0      0.0        10.0     -        "
+	if !strings.Contains(out, wantRow) {
+		t.Fatalf("expected '-' placeholder in CPU%%60s column for WindowNS=0 worker (looking for %q), got:\n%s", wantRow, out)
+	}
+}
+
 func TestFormatStatusSummaryReportsStandbyArmedRole(t *testing.T) {
 	status := ProcessStatus{
 		ForwardingArmed: true,

@@ -1134,7 +1134,7 @@ pub(crate) fn worker_loop(
                     wr_counters.thread_cpu_ns = sampled_cpu_ns;
                 }
                 refresh_worker_cos_queue_lease_runtime_counters(&mut wr_counters, &bindings);
-                runtime_atomics.publish(&wr_counters);
+                runtime_atomics.publish(&wr_counters, loop_now_ns);
                 wr_last_publish_ns = loop_now_ns;
             }
         }

@@ -44,9 +44,9 @@ func TestEmitWorkerRuntime_DeadGaugeReflectsDeadFlag(t *testing.T) {
 
 	got := collectFromEmitWorkerRuntime(t, c, status)
 
-	// Each worker emits 9 counters + 1 dead gauge = 10 metrics. 3 workers = 30.
-	if len(got) != 3*10 {
-		t.Fatalf("emitWorkerRuntime: want 30 metrics for 3 workers (9 counters + 1 dead gauge), got %d", len(got))
+	// Each worker emits 9 counters + 1 dead gauge + 1 last-60s gauge + 1 window-width gauge = 12 metrics. 3 workers = 36.
+	if len(got) != 3*12 {
+		t.Fatalf("emitWorkerRuntime: want 36 metrics for 3 workers (9 counters + 1 dead gauge + 1 last-60s gauge + 1 window-width gauge), got %d", len(got))
 	}
 
 	// Gather just the dead-gauge entries, keyed by worker_id label.
@@ -158,6 +158,8 @@ func newCollectorWithWorkerDescsOnly() *xpfCollector {
 		workerIdleSpinSecs:                       mk("xpf_userspace_worker_idle_spin_seconds_total"),
 		workerIdleBlockSecs:                      mk("xpf_userspace_worker_idle_block_seconds_total"),
 		workerThreadCPUSecs:                      mk("xpf_userspace_worker_thread_cpu_seconds_total"),
+		workerThreadCPUSecsLast60s:               mk("xpf_userspace_worker_thread_cpu_seconds_last_60s"),
+		workerThreadCPUWindowSecs:                mk("xpf_userspace_worker_thread_cpu_window_seconds"),
 		workerWorkLoops:                          mk("xpf_userspace_worker_work_loops_total"),
 		workerIdleLoops:                          mk("xpf_userspace_worker_idle_loops_total"),
 		workerCoSQueueLeaseAcquireV8Calls:        mk("xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total"),
@@ -198,6 +200,8 @@ func collectFromEmitWorkerRuntime(
 		c.workerIdleSpinSecs:                       {},
 		c.workerIdleBlockSecs:                      {},
 		c.workerThreadCPUSecs:                      {},
+		c.workerThreadCPUSecsLast60s:               {},
+		c.workerThreadCPUWindowSecs:                {},
 		c.workerWorkLoops:                          {},
 		c.workerIdleLoops:                          {},
 		c.workerCoSQueueLeaseAcquireV8Calls:        {},
