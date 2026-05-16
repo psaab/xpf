@@ -27,6 +27,11 @@
   - **File(s)**: `pkg/dataplane/userspace/buffersfmt.go`, `pkg/dataplane/userspace/buffersfmt_test.go`, `pkg/cli/cli_show_system.go`, `pkg/grpcapi/server_show.go`, `pkg/grpcapi/server_show_system_buffers_test.go`, `docs/userspace-dataplane-architecture.md`, `_Log.md`
   - **Validation**: `go test ./pkg/dataplane/userspace ./pkg/grpcapi ./pkg/cli ./pkg/fwdstatus`; `git diff --check`
 
+- **Timestamp**: 2026-05-16T22:21:02Z
+  - **Action**: PR #1388 round-1 review fix — preserve old-status-JSON display compatibility for shaped interfaces whose userspace runtime synthesizes default best-effort queue 0, while keeping residual scheduler-map queues from inheriting false guarantees.
+  - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `_Log.md`
+  - **Validation**: `go test ./pkg/dataplane/userspace`; `git diff --check`
+
 - **Timestamp**: 2026-05-16T04:36:00Z
   - **Action**: PR #1320 round-3 review fixes — validate typed scheduler leaves against the apply-groups-expanded tree before compile; reject `transmit-rate exact` unless the scheduler also has a typed rate; wire `ConfigClassOfServiceSchedulers` into the real config-mode `set class-of-service schedulers <name>` completion tree; update module docs to keep the byte-size-only scheduler buffer contract explicit.
   - **File(s)**: `pkg/cmdtree/schema_validate.go`, `pkg/cmdtree/tree.go`, `pkg/cmdtree/tree_test.go`, `pkg/cmdtree/README.md`, `pkg/config/schema_validate_test.go`, `pkg/config/README.md`, `pkg/configstore/store.go`, `pkg/configstore/store_test.go`, `_Log.md`
