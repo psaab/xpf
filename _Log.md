@@ -59,6 +59,10 @@
 - **Timestamp**: 2026-05-16T23:24:00Z
   - **Action**: PR #1384 round-1 review follow-up — aligned the #1373 blocker-plan index with #1377/#1380 scope, made all required-before labels explicit, tightened SYN-cookie full-epoch/low-bit-wrap semantics, added risk sections and capability-admission tests to blocker plans, and added SNAT-pool and userspace-buffer parity plan docs.
   - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/README.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1374-syn-cookies.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1375-three-color-policers.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1376-port-mirroring.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1377-snat-pools.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1378-policy-schedulers.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1379-dataplane-events.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1380-userspace-buffers.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-16T23:39:00Z
+  - **Action**: PR #1382 round-1 review follow-up — reconciled Phase 0 retirement docs with #1385/#1386 fix-forward dependencies, removed stale userspace architecture limitations for features already implemented in Rust, changed userspace-dp wording to "being retired", and added Phase 0 exit criteria plus rollback path.
+  - **File(s)**: `README.md`, `docs/userspace-dataplane-gaps.md`, `docs/userspace-dataplane-architecture.md`, `userspace-dp/README.md`, `docs/pr/1373-retire-ebpf-dataplane/plan.md`, `_Log.md`
   - **Validation**: `git diff --check`
 
 - **Timestamp**: 2026-05-16T04:36:00Z

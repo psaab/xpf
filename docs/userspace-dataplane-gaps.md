@@ -65,7 +65,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
 | DataPlane control-plane contract | Userspace manager still embeds the eBPF manager for many BPF-shaped map-writer methods; tracked by #1381 |
 | Dataplane event logging | Session open/close/update are emitted by userspace; policy-deny, screen-drop, and filter-log events still depend on the legacy BPF ring buffer; tracked by #1379 |
-| `show system buffers` | Still reports BPF map utilization through the embedded eBPF manager; userspace-equivalent operator resource reporting is tracked by #1380 |
+| `show system buffers` | Current `master` still has userspace parity gaps in buffer/status display. #1386 is the fix-forward for active-session footer, detail/non-detail separation, and mixed-version capacity fallback; #1380 tracks the retirement gate for removing BPF-map buffer reporting entirely. |
 
 ## Retirement Blockers From The 2026-05-16 Audit
 
@@ -74,13 +74,13 @@ The current #1373 audit produced these tracked blockers:
 | Issue | Blocker | Required before |
 |-------|---------|-----------------|
 | #1381 | Split or replace the BPF-shaped `dataplane.DataPlane` interface so userspace no longer embeds the eBPF manager for map-writer methods | Phase 3 build-system / Go removal |
-| #1377 | Preserve address-persistent SNAT pool selection in userspace instead of silently round-robining pool addresses | Phase 4 BPF source removal |
+| #1377 | Preserve address-persistent SNAT pool selection in userspace instead of silently round-robining pool addresses; requires #1385-style fail-closed pool admission first | Phase 4 BPF source removal |
 | #1378 | Propagate time-based policy scheduler state to userspace policy evaluation | Phase 4 BPF source removal |
 | #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent | Phase 4 BPF source removal |
 | #1375 | Implement userspace RFC 2697/2698 three-color policers | Phase 4 BPF source removal |
 | #1376 | Implement userspace port mirroring or explicitly retire the feature | Phase 4 BPF source removal |
-| #1380 | Replace `show system buffers` BPF-map output with userspace resource reporting, or deprecate the command in favor of an equivalent | Phase 5 CLI / observability cleanup |
+| #1380 | Replace `show system buffers` BPF-map output with userspace resource reporting, or deprecate the command in favor of an equivalent; #1386 closes current mixed-version display parity defects | Phase 5 CLI / observability cleanup |
 
 Recommended dependency order:
 

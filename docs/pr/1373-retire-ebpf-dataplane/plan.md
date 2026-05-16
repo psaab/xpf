@@ -14,13 +14,13 @@ present until later phase PRs.
 | Issue | Summary | Phase dependency |
 |-------|---------|------------------|
 | #1381 | `dataplane.DataPlane` is BPF-shaped and the userspace manager embeds the eBPF manager | Must land first; blocks Phase 3 |
-| #1377 | Address-persistent SNAT pool mode silently degrades to round-robin in userspace | Before Phase 4 |
+| #1377 | Address-persistent SNAT pool mode still needs userspace-owned pool selection; #1385 is the prerequisite fail-closed admission fix for missing/unsafe pools | Before Phase 4 |
 | #1378 | Time-based policy schedulers are not propagated to userspace policy evaluation | Before Phase 4 |
 | #1379 | Policy-deny, screen-drop, and filter-log dataplane events are not emitted by userspace | Before Phase 4 |
 | #1374 | SYN-cookie flood protection is implemented in eBPF but missing from userspace | Before Phase 4 |
 | #1375 | RFC 2697/2698 three-color policers are implemented in eBPF but missing from userspace | Before Phase 4 |
 | #1376 | Port mirroring is implemented in eBPF but missing from userspace | Before Phase 4 |
-| #1380 | `show system buffers` reports BPF map utilization with no userspace equivalent | Phase 5 |
+| #1380 | `show system buffers` needs userspace-equivalent resource reporting before the BPF-map view disappears; #1386 closes current mixed-version display parity defects | Phase 5 |
 
 ## Recommended Order
 
@@ -43,3 +43,33 @@ present until later phase PRs.
 - Phase 4: BPF source removal, only after #1374-#1379 and any production
   blockers from the audit are closed.
 - Phase 5: CLI and observability cleanup, including #1380.
+
+## Phase 0 Exit Criteria
+
+Phase 0 is complete only when:
+
+- the userspace gap audit is verified against current code and explicitly calls
+  out fix-forward PR dependencies such as #1385 and #1386 instead of implying
+  they have already landed;
+- the blocker list here and the #1384 blocker-plan bundle have the same scope
+  for #1374, #1375, #1376, #1377, #1378, #1379, #1380, and #1381;
+- active docs are reconciled with the current userspace runtime instead of
+  preserving stale "not implemented" claims for features already implemented in
+  Rust;
+- rollback remains documented as the legacy eBPF dataplane staying present and
+  selectable until later phases; and
+- no BPF source, generated bindings, loader code, legacy tests, or CLI surfaces
+  are removed by the Phase 0 PR.
+
+## Rollback Path
+
+The Phase 0 rollback path is deliberately simple because this PR is docs/audit
+only:
+
+1. keep the legacy eBPF backend in the tree and in build/test targets;
+2. remove or avoid `system dataplane-type userspace` on affected deployments, or
+   set `system dataplane-type ebpf` where an explicit backend is required;
+3. restart/re-apply `xpfd` so the manager selects the eBPF backend and legacy
+   XDP/TC programs; and
+4. do not remove existing BPF pins or source until the later retirement phases
+   have their own tested rollback plans.
