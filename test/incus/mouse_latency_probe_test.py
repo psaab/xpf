@@ -1,7 +1,9 @@
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 
+import mouse_latency_probe as probe
 from mouse_latency_probe import (
     HISTOGRAM_BUCKETS_US,
     _run,
@@ -144,6 +146,98 @@ class ValidityTests(unittest.TestCase):
         self.assertTrue(any("inconsistent-counts" in r for r in v["reasons"]))
 
 
+class CloseWriterTests(unittest.IsolatedAsyncioTestCase):
+    class _Transport:
+        def __init__(self):
+            self.aborted = False
+
+        def abort(self):
+            self.aborted = True
+
+    class _HangingWriter:
+        def __init__(self):
+            self.closed = False
+            self.transport = CloseWriterTests._Transport()
+            self.wait_started = asyncio.Event()
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            self.wait_started.set()
+            await asyncio.Event().wait()
+
+        def write(self, _data):
+            pass
+
+    async def test_close_writer_aborts_when_wait_closed_exceeds_deadline(self):
+        writer = self._HangingWriter()
+        deadline = time.monotonic() + 0.01
+
+        await asyncio.wait_for(probe._close_writer(writer, deadline), timeout=0.2)
+
+        self.assertTrue(writer.closed)
+        self.assertTrue(writer.wait_started.is_set())
+        self.assertTrue(writer.transport.aborted)
+
+    async def test_close_writer_abort_mode_skips_graceful_wait(self):
+        writer = self._HangingWriter()
+        deadline = time.monotonic() + 10.0
+
+        await asyncio.wait_for(
+            probe._close_writer(writer, deadline, abort=True),
+            timeout=0.2,
+        )
+
+        self.assertFalse(writer.closed)
+        self.assertFalse(writer.wait_started.is_set())
+        self.assertTrue(writer.transport.aborted)
+
+    async def test_per_attempt_drain_timeout_closes_with_abort(self):
+        abort_flags = []
+
+        class FakeReader:
+            async def readexactly(self, _n):
+                return b""
+
+        async def open_fake_connection(_target, _port):
+            return FakeReader(), self._HangingWriter()
+
+        async def forced_timeout(_writer, _deadline):
+            raise asyncio.TimeoutError("forced drain timeout")
+
+        async def record_close(_writer, _deadline, *, abort=False):
+            abort_flags.append(abort)
+
+        original_open_connection = probe.asyncio.open_connection
+        original_drain = probe._drain_with_deadline
+        original_close = probe._close_writer
+        probe.asyncio.open_connection = open_fake_connection
+        probe._drain_with_deadline = forced_timeout
+        probe._close_writer = record_close
+        try:
+            rtts = []
+            attempts = [0]
+            errors = [0]
+            await probe._run_per_attempt_probe_coro(
+                "127.0.0.1",
+                1,
+                16,
+                0.0,
+                time.monotonic() + 0.01,
+                rtts,
+                attempts,
+                errors,
+            )
+        finally:
+            probe.asyncio.open_connection = original_open_connection
+            probe._drain_with_deadline = original_drain
+            probe._close_writer = original_close
+
+        self.assertGreaterEqual(errors[0], 1)
+        self.assertIn(True, abort_flags)
+
+
 class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
     async def _run_local_echo_probe(
         self,
@@ -231,6 +325,63 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
             result["totals"]["completed"] + result["totals"]["errors"],
         )
         self.assertGreaterEqual(connection_count, result["totals"]["completed"])
+
+    async def _run_with_forced_drain_timeout(self, *, connection_mode):
+        async def handle_echo(reader, writer):
+            try:
+                while await reader.read(4096):
+                    writer.write(b"x")
+                    await writer.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                writer.close()
+
+        async def forced_timeout(_writer, _deadline):
+            raise asyncio.TimeoutError("forced drain timeout")
+
+        server = await asyncio.start_server(handle_echo, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        original_drain = probe._drain_with_deadline
+        probe._drain_with_deadline = forced_timeout
+        try:
+            args = SimpleNamespace(
+                target="127.0.0.1",
+                port=port,
+                concurrency=1,
+                duration=0.08,
+                payload_bytes=16,
+                connection_mode=connection_mode,
+                min_interval_ms=20.0,
+            )
+            result = await asyncio.wait_for(_run(args), timeout=1.0)
+        finally:
+            probe._drain_with_deadline = original_drain
+            server.close()
+            await server.wait_closed()
+        return result
+
+    async def test_per_attempt_drain_timeout_counts_error_and_terminates(self):
+        result = await self._run_with_forced_drain_timeout(
+            connection_mode="per-attempt"
+        )
+        self.assertEqual(result["totals"]["completed"], 0)
+        self.assertGreater(result["totals"]["attempted"], 0)
+        self.assertEqual(
+            result["totals"]["attempted"],
+            result["totals"]["errors"],
+        )
+
+    async def test_persistent_drain_timeout_counts_error_and_terminates(self):
+        result = await self._run_with_forced_drain_timeout(
+            connection_mode="persistent"
+        )
+        self.assertEqual(result["totals"]["completed"], 0)
+        self.assertGreater(result["totals"]["attempted"], 0)
+        self.assertEqual(
+            result["totals"]["attempted"],
+            result["totals"]["errors"],
+        )
 
 
 if __name__ == "__main__":

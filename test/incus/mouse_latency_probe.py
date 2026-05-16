@@ -12,6 +12,9 @@ does not issue open-loop requests. Writes a JSON file with
 histogram, percentiles, per-coroutine attempt counts, and a validity
 verdict.
 
+Connect, write-drain, and echo-read phases are deadline-bounded so TCP
+backpressure cannot stall a probe beyond --duration.
+
 Validity model (plan §4.2):
 - error_rate < 0.01.
 - min(attempts_per_coroutine) >= 0.5 × median(attempts) (only when M >= 2).
@@ -39,12 +42,32 @@ HISTOGRAM_BUCKETS_US = [
 ]
 
 
-async def _close_writer(writer: Optional[asyncio.StreamWriter]) -> None:
+def _abort_writer(writer: asyncio.StreamWriter) -> None:
+    transport = getattr(writer, "transport", None)
+    if transport is not None:
+        transport.abort()
+
+
+async def _close_writer(
+    writer: Optional[asyncio.StreamWriter],
+    deadline: float,
+    *,
+    abort: bool = False,
+) -> None:
     if writer is None:
+        return
+    if abort:
+        _abort_writer(writer)
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        _abort_writer(writer)
         return
     writer.close()
     try:
-        await writer.wait_closed()
+        await asyncio.wait_for(writer.wait_closed(), timeout=remaining)
+    except asyncio.TimeoutError:
+        _abort_writer(writer)
     except (BrokenPipeError, ConnectionResetError, OSError):
         pass
 
@@ -61,6 +84,13 @@ async def _respect_min_interval(
     remaining_s = deadline - time.monotonic()
     if sleep_s > 0 and remaining_s > 0:
         await asyncio.sleep(min(sleep_s, remaining_s))
+
+
+async def _drain_with_deadline(writer: asyncio.StreamWriter, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise asyncio.TimeoutError("deadline expired before drain")
+    await asyncio.wait_for(writer.drain(), timeout=min(5.0, remaining))
 
 
 async def _run_per_attempt_probe_coro(
@@ -97,9 +127,10 @@ async def _run_per_attempt_probe_coro(
                 asyncio.open_connection(target, port),
                 timeout=min(5.0, remaining),
             )
+            abort_close = True
             try:
                 writer.write(payload)
-                await writer.drain()
+                await _drain_with_deadline(writer, deadline)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     error_counter[0] += 1
@@ -112,8 +143,9 @@ async def _run_per_attempt_probe_coro(
                     error_counter[0] += 1
                     await _respect_min_interval(t0, min_interval_ms, deadline)
                     continue
+                abort_close = False
             finally:
-                await _close_writer(writer)
+                await _close_writer(writer, deadline, abort=abort_close)
         except (
             asyncio.TimeoutError,
             ConnectionRefusedError,
@@ -187,7 +219,7 @@ async def _run_persistent_probe_coro(
             t0 = time.monotonic_ns()
             try:
                 writer.write(payload)
-                await writer.drain()
+                await _drain_with_deadline(writer, deadline)
             except (
                 asyncio.TimeoutError,
                 ConnectionRefusedError,
@@ -197,7 +229,7 @@ async def _run_persistent_probe_coro(
             ):
                 attempt_counter[0] += 1
                 error_counter[0] += 1
-                await _close_writer(writer)
+                await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
                 await _respect_min_interval(t0, min_interval_ms, deadline)
@@ -207,7 +239,7 @@ async def _run_persistent_probe_coro(
             if remaining <= 0:
                 attempt_counter[0] += 1
                 error_counter[0] += 1
-                await _close_writer(writer)
+                await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
                 await _respect_min_interval(t0, min_interval_ms, deadline)
@@ -222,7 +254,7 @@ async def _run_persistent_probe_coro(
                 )
                 if data != payload:
                     error_counter[0] += 1
-                    await _close_writer(writer)
+                    await _close_writer(writer, deadline, abort=True)
                     reader = None
                     writer = None
                     await _respect_min_interval(t0, min_interval_ms, deadline)
@@ -236,7 +268,7 @@ async def _run_persistent_probe_coro(
                 OSError,
             ):
                 error_counter[0] += 1
-                await _close_writer(writer)
+                await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
                 await _respect_min_interval(t0, min_interval_ms, deadline)
@@ -245,7 +277,7 @@ async def _run_persistent_probe_coro(
             rtts_us.append((t1 - t0) // 1000)
             await _respect_min_interval(t0, min_interval_ms, deadline)
     finally:
-        await _close_writer(writer)
+        await _close_writer(writer, deadline)
 
 
 def _compute_histogram(rtts_us: List[int]) -> List[int]:
