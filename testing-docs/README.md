@@ -1,5 +1,10 @@
 # xpf Testing Documentation
 
+> Deprecation notice (#1373): the legacy eBPF dataplane is being retired. New
+> dataplane validation should use the userspace AF_XDP cluster unless a staged
+> retirement phase calls for explicit legacy regression coverage. Phase 0 removes
+> no BPF source or test target.
+
 Comprehensive test plans and validation procedures for both the legacy eBPF
 dataplane and the userspace AF_XDP dataplane.
 

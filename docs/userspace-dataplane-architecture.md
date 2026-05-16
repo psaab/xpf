@@ -345,7 +345,7 @@ ConfigSnapshot {
     neighbors:       [{ifindex, ip, mac}]
     routes:          [{prefix, next_hop, ifindex, table}]
     policies:        [{from_zone, to_zone, src/dst, apps, action}]
-    source_nat_rules:[{from_zone, to_zone, src/dst, interface_mode}]
+    source_nat_rules:[{from_zone, to_zone, src/dst, interface/pool metadata}]
     flow:            {allow_dns_reply, allow_embedded_icmp}
     map_pins:        {xsk_map, heartbeat_map, sessions_map}
     ha_groups:       [{rg_id, active, watchdog_ts}]
@@ -358,12 +358,17 @@ The manager evaluates the active config to determine if the userspace
 dataplane can handle it. Unsupported features cause automatic fallback
 to the kernel BPF pipeline:
 
-**Supported:** Basic SNAT, zone policies, static routes, HA cluster,
-IPv4/IPv6 forwarding, VLAN sub-interfaces
+The current supported/gated split is maintained in
+[`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md). In broad terms,
+the Rust path now owns stateful forwarding, zone/global policies, application
+matching, interface-mode SNAT, DNAT, static NAT, NAT64, NPTv6, firewall
+filters, flow export, TCP MSS clamping, configurable timeouts, VLAN handling,
+route/neighbor lookup, and HA/session-delta ingestion.
 
-**Not supported (falls back to BPF):** DNAT, static NAT, NAT64, IPsec,
-GRE tunnels, firewall filters, custom flow timeouts, flow export,
-global policies, port mirroring
+Remaining explicit gates include SYN-cookie-dependent screen behavior,
+three-color policers, port mirroring, and full pool-mode SNAT semantics.
+Specific Phase 0 fix-forward PRs are tracked for unsafe pool admission (#1385)
+and userspace buffer/status parity (#1386).
 
 ### 4. HA Cluster Integration
 
@@ -517,26 +522,24 @@ system {
 - Ensure VM has enough RAM: `workers × bindings × 160 MB + 2 GB` base (at 16384 ring,
   mlx5 driver; 192 MB for virtio_net)
 
-## Limitations
+## Limitations and Mixed Boundaries
 
-The userspace dataplane handles a subset of the full BPF pipeline's
-features. When unsupported features are configured, the manager
-automatically falls back to the kernel BPF forwarding path.
+This section is a high-level architecture note. The authoritative current gate
+is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
 
-**Not implemented:**
-- Destination NAT (DNAT), static NAT, NAT64
-- Firewall filters (match/action chains)
-- Custom per-application flow timeouts
-- IPsec / XFRM tunnel processing
-- GRE tunnel encapsulation/decapsulation
-- TCP MSS clamping
-- NetFlow v9 export
-- Port mirroring
-- Global policies (inter-zone default)
-- SYN cookie flood protection
+**Still explicitly gated or incomplete for eBPF retirement:**
+- Source NAT pool mode: #1385 is required to fail closed on missing/unsafe
+  pools; #1377 is required for full address-persistent pool selection.
+- SYN-cookie flood protection: #1374.
+- RFC 2697/2698 three-color policers: #1375.
+- Port mirroring: #1376.
+- Policy-deny, screen-drop, and filter-log event parity: #1379.
+- `show system buffers` userspace parity and BPF-map display retirement:
+  #1380/#1386.
 
-**Handled by fallback to kernel BPF:**
-- ARP, NDP, ICMP (redirected via cpumap)
-- Management traffic (SSH, control plane)
-- Non-IP protocols
-- Packets failing forwarding resolution
+**Handled outside the AF_XDP forwarding fast path:**
+- ARP, NDP, local management traffic, and other kernel-owned packets are passed
+  to cpumap/kernel handling.
+- IPsec/XFRM and GRE transit use kernel/pass-through or tunnel-specific
+  handling where required.
+- Packets failing forwarding resolution can enter the bounded slow path.

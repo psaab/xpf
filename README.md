@@ -2,11 +2,21 @@
 
 eBPF zone-based firewall with native Junos configuration syntax.
 
+> Deprecation notice (#1373): the legacy eBPF dataplane is being retired in
+> favor of the Rust AF_XDP userspace dataplane. New dataplane development should
+> target `userspace-dp`. Phase 0 is documentation/audit only and removes no BPF
+> source.
+
 xpf is a high-performance stateful firewall built on Linux eBPF that replicates Juniper vSRX capabilities. It uses the familiar Junos hierarchical configuration syntax and provides a full interactive CLI with tab completion and `?` help.
 
 ## Dual Dataplane Architecture
 
 xpf provides two dataplane backends selectable via configuration. Both share the same Go control plane (config, HA, routing, CLI, APIs) — only the packet forwarding path differs.
+
+The eBPF backend remains present during the #1373 retirement phases as a legacy
+compatibility and rollback path. New feature work should use the userspace
+AF_XDP dataplane and close blockers tracked in
+[`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
 
 ### eBPF Dataplane (default)
 
