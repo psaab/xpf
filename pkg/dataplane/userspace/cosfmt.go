@@ -570,8 +570,6 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 			qv.exact = runtimeQueue.Exact
 			if runtimeQueue.GuaranteeEnabled != nil {
 				qv.guaranteeEnabled = *runtimeQueue.GuaranteeEnabled
-			} else if qv.transmitRate == 0 && runtimeQueue.TransmitRateBytes > 0 {
-				qv.guaranteeEnabled = true
 			}
 			qv.equalFlowEnforcement = runtimeQueue.EqualFlowEnforcement
 			qv.equalFlowEnforced = runtimeQueue.EqualFlowEnforced

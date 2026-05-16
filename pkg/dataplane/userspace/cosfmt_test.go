@@ -103,6 +103,52 @@ func TestFormatCoSInterfaceSummaryPreservesOldJSONGuaranteeFallback(t *testing.T
 	t.Fatalf("missing bandwidth-10mb queue row for old status JSON:\n%s", out)
 }
 
+func TestFormatCoSInterfaceSummaryOldJSONDoesNotInferGuaranteeFromEffectiveRate(t *testing.T) {
+	cfg := testCoSConfig()
+	cfg.ClassOfService.Schedulers["be"].TransmitRateBytes = 0
+
+	var status ProcessStatus
+	raw := []byte(`{
+		"cos_interfaces": [{
+			"interface_name": "reth0.80",
+			"worker_instances": 1,
+			"queues": [{
+				"queue_id": 0,
+				"forwarding_class": "best-effort",
+				"priority": 1,
+				"exact": false,
+				"transmit_rate_bytes": 1875000,
+				"buffer_bytes": 32768
+			}]
+		}]
+	}`)
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal old status JSON: %v", err)
+	}
+	if status.CoSInterfaces[0].Queues[0].GuaranteeEnabled != nil {
+		t.Fatalf("old status JSON unexpectedly populated guarantee_enabled")
+	}
+
+	out := FormatCoSInterfaceSummary(cfg, &status, "reth0.80")
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "best-effort") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 7 {
+			t.Fatalf("old status JSON residual queue row too short: %q\n%s", line, out)
+		}
+		if fields[5] != "no" {
+			t.Fatalf("old status JSON residual queue rendered guarantee=%s, want no:\n%s", fields[5], out)
+		}
+		if fields[6] != "-" {
+			t.Fatalf("old status JSON residual queue rendered inherited rate=%s, want -:\n%s", fields[6], out)
+		}
+		return
+	}
+	t.Fatalf("missing best-effort queue row for old status JSON:\n%s", out)
+}
+
 func TestFormatCoSInterfaceSummaryShowsConfigOnlyInterface(t *testing.T) {
 	out := FormatCoSInterfaceSummary(testCoSConfig(), nil, "reth0.80")
 	for _, want := range []string{
