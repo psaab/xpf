@@ -6,6 +6,9 @@ Per-rep validity is read from probe.json["validity"]["ok"].
 For each cell, the median valid rep for the configured gate percentile
 is selected as the representative; its p50/p95/p99/p99.9 +
 IQR-of-p99-across-reps + achieved-RPS summary populate summary.json.
+Cells require 10 valid reps to report status OK; if the runner reaches
+its 15-rep ceiling with fewer valid reps, the gate is
+INSUFFICIENT-DATA.
 
 Default decision threshold (#905, plan §7.2):
 - p99(N=128, M=10, best-effort) ≤ 2 × p99(N=0, M=10, best-effort)
@@ -33,6 +36,7 @@ GATE_PERCENTILE_TO_RTT_KEY = {
     "p99_us": "p99",
     "p999_us": "p999",
 }
+REQUIRED_VALID_REPS = 10
 
 
 def has_invalid_marker(rep_dir: str) -> bool:
@@ -119,8 +123,8 @@ def summarize_cell(reps: List[dict], representative_percentile: str = "p99") -> 
         "iqr_p99_across_reps": None,
         "representative_percentile": representative_percentile,
     }
-    if len(valid) < 7:
-        summary["status"] = "INSUFFICIENT-DATA"
+    if len(valid) < REQUIRED_VALID_REPS:
+        summary["status"] = "INSUFFICIENT-VALID-REPS"
         return summary
     median = median_rep_by_percentile(valid, representative_percentile)
     p99s = sorted(

@@ -523,9 +523,9 @@ The cell's hard rep ceiling is **15** (matching §4.7's
 auto-extension), of which up to 5 may be retries. So a cell
 that hits 10 valid reps without retries is done at 10; a cell
 with retry-eligible failures gets up to 5 replacement reps,
-not exceeding 15 total. Cells with > 7 valid reps after 15
-are reported with the data they have; cells with < 7 valid
-reps are INSUFFICIENT-DATA.
+not exceeding 15 total. Gate-grade cells require all 10 valid
+reps; cells with fewer than 10 valid reps after the 15-rep
+ceiling are INSUFFICIENT-DATA.
 
 ### 4.6 Echo-server preflight (R1 #17)
 
@@ -567,7 +567,7 @@ with §4.7 auto-extension):**
   mechanisms are subordinate to the 15-rep ceiling.
 - Cell stops once 10 valid reps are collected, or 15 total
   reps have run, whichever is first.
-- Cell is reported INSUFFICIENT-DATA if fewer than 7 valid
+- Cell is reported INSUFFICIENT-DATA if fewer than 10 valid
   reps after the ceiling.
 
 **Wall-budget math (R2 F4):** per-rep total is iperf3
@@ -713,7 +713,7 @@ Modified files: none.
 - Median-of-10 by p99 picks the 5th-or-6th rep, not the mean.
 - Decision-threshold computes correctly for synthetic inputs at
   PASS, FAIL, exactly-2.0× boundary.
-- INSUFFICIENT-DATA verdict when valid reps < 7.
+- INSUFFICIENT-DATA verdict when valid reps < 10.
 - INVALID cells excluded from median.
 
 `cluster_status_parse_test.py` (R4 HIGH 1, schema updated by
