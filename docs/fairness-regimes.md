@@ -266,10 +266,10 @@ harness command is:
 COS_IFINDEX=<egress-ifindex> ./test/incus/fairness-harness.sh --mixed-cos
 ```
 
-With the default symmetric CoS fixture this runs port 5201
-(`iperf-a`, queue 4) and port 5202 (`iperf-b`, queue 5) concurrently,
+With the default symmetric CoS fixture this runs port 5202
+(`iperf-1g`, queue 2) and port 5205 (`iperf-9g`, queue 5) concurrently,
 then invokes `fairness-eval` twice against the same
-`xpf_userspace_cos_active_flow_count` scrape: once for queue 4 and
+`xpf_userspace_cos_active_flow_count` scrape: once for queue 2 and
 once for queue 5. Non-canonical fixtures must set `COS_QUEUE_ID` and
 `MIXED_COS_QUEUE_ID` explicitly. `MIXED_RSS_EXPECTATION` defaults to
 `RSS_EXPECTATION`, so one expectation gate applies to both classes
@@ -346,19 +346,20 @@ produce very low CoV even when high-rate classes remain unfair. Use the
 class sweep harness to exercise every canonical fixture port:
 
 The canonical iperf CoS fixtures intentionally give the two low-rate
-classes deeper buffers than the implicit admission/buffer cap:
-`scheduler-be` uses `buffer-size 500k` and `scheduler-iperf-a` uses
+exact classes deeper buffers than the implicit admission/buffer cap:
+`scheduler-100m` uses `buffer-size 500k` and `scheduler-1g` uses
 `buffer-size 4m`. Without explicit `buffer-size`, queue `base` is
 `max(transmit_rate_bytes/100, 96_000)` (10 ms of bytes with a 96 KB
 floor), then admission applies the flow-aware
 `prospective_active * 24 KB` expansion plus the #717 5 ms envelope clamp
 (`.min(delay_cap.max(base))`). #1312 showed that those implicit caps
 reproduce reverse-mode tail-drop under `-P 12` even when equal-flow
-suppression is disabled: q0 hit aggregate admission drops and q4 hit
-per-flow share drops. The fixture overrides therefore trade queue
-residence for retransmit suppression (q0 500k@100M ≈ 40 ms, q4 4m@1G
+suppression is disabled: the 100M class hit aggregate admission drops,
+and the 1G class hit per-flow share drops. The fixture overrides
+therefore trade queue residence for retransmit suppression (q1
+500k@100M ≈ 40 ms, q2 4m@1G
 ≈ 32 ms at full queue). Do not remove or shrink these buffers without
-rerunning at least the q0/q4 reverse sweep and checking retransmits plus
+rerunning at least the q1/q2 reverse sweep and checking retransmits plus
 CoS admission drop deltas.
 
 Those values are an explicit validation-fixture tradeoff, not a general
@@ -377,7 +378,7 @@ IPERF_LAUNCH_ARG_3=-- \
 ./test/incus/fairness-cos-class-sweep.sh
 ```
 
-The sweep runs ports 5201..5207 through `fairness_multi_sample.py`,
+The sweep runs ports 5200..5211 through `fairness_multi_sample.py`,
 preserves per-class artifacts, writes `summary.tsv` and `summary.md`,
 and returns non-zero after completing all classes if any class misses
 the Cstruct-aware multi-sample contract (`mean_gap ≤ 0.05` and
@@ -396,7 +397,7 @@ METRICS_URL=http://127.0.0.1:8080/metrics \
 ./test/incus/fairness-cos-throughput-headroom.sh
 ```
 
-By default this wrapper runs `CLASS_FILTER=q2,q3,q6` under the strict
+By default this wrapper runs `CLASS_FILTER=q8,q9,q10` under the strict
 exact fixture, then applies a diagnostic `surplus-sharing` fixture and
 runs the same class set again before restoring the strict fixture. The
 surplus-sharing leg is a headroom diagnostic, not the product fairness

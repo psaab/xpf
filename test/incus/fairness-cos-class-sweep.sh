@@ -109,13 +109,18 @@ class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_
 HEADER
 
 classes=(
-    "q0-best-effort-100m 5207 0 100000000"
-    "q4-iperf-a-1g 5201 4 1000000000"
-    "q5-iperf-b-10g 5202 5 10000000000"
-    "q1-iperf-d-13g 5204 1 13000000000"
-    "q2-iperf-e-16g 5205 2 16000000000"
-    "q3-iperf-f-19g 5206 3 19000000000"
-    "q6-iperf-c-25g 5203 6 25000000000"
+    "q0-best-effort-root 5200 0 25000000000"
+    "q1-iperf-100m 5201 1 100000000"
+    "q2-iperf-1g 5202 2 1000000000"
+    "q3-iperf-3g 5203 3 3000000000"
+    "q4-iperf-6g 5204 4 6000000000"
+    "q5-iperf-9g 5205 5 9000000000"
+    "q6-iperf-12g 5206 6 12000000000"
+    "q7-iperf-15g 5207 7 15000000000"
+    "q8-iperf-18g 5208 8 18000000000"
+    "q9-iperf-21g 5209 9 21000000000"
+    "q10-iperf-24g 5210 10 24000000000"
+    "q11-iperf-uncapped-root 5211 11 25000000000"
 )
 
 class_selected() {

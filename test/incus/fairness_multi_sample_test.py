@@ -531,8 +531,8 @@ class FairnessMultiSampleTest(unittest.TestCase):
                       "cstruct": {"mean": 0.3},
                       "gap": {"mean": -0.2, "max": -0.1},
                       "samples": [
-                        {"sample": 1, "sample_dir": "$out_dir/sample-1", "verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0},
-                        {"sample": 2, "sample_dir": "$out_dir/sample-2", "verdict": "PASS", "aggregate_mbps": 8000.0, "starved_flow_count": 0}
+                        {"sample": 1, "sample_dir": "$out_dir/sample-1", "verdict": "PASS", "aggregate_mbps": 500.0, "starved_flow_count": 0},
+                        {"sample": 2, "sample_dir": "$out_dir/sample-2", "verdict": "PASS", "aggregate_mbps": 500.0, "starved_flow_count": 0}
                       ]
                     }
                     JSON
@@ -602,18 +602,18 @@ class FairnessMultiSampleTest(unittest.TestCase):
             self.assertIn("avg_rate_utilization", summary_lines[0])
             self.assertEqual(len(summary_lines), 2)
             row = summary_lines[1].split("\t")
-            self.assertEqual(row[0], "q2-iperf-e-16g")
+            self.assertEqual(row[0], "q2-iperf-1g")
             self.assertEqual(row[10], "0.5")
             equal_flow_lines = (
                 out_root / "equal-flow-summary.tsv"
             ).read_text(encoding="utf-8").splitlines()
             self.assertIn("target_per_flow_bps_mean", equal_flow_lines[0])
             equal_flow_row = equal_flow_lines[1].split("\t")
-            self.assertEqual(equal_flow_row[0], "q2-iperf-e-16g")
+            self.assertEqual(equal_flow_row[0], "q2-iperf-1g")
             self.assertEqual(equal_flow_row[6], "1")
             self.assertEqual(equal_flow_row[7], "1000.0")
-            self.assertTrue((out_root / "q2-iperf-e-16g" / "equal-flow" / "metrics-raw.prom").exists())
-            self.assertTrue((out_root / "q2-iperf-e-16g" / "equal-flow" / "summary.tsv").exists())
+            self.assertTrue((out_root / "q2-iperf-1g" / "equal-flow" / "metrics-raw.prom").exists())
+            self.assertTrue((out_root / "q2-iperf-1g" / "equal-flow" / "summary.tsv").exists())
 
     def test_class_sweep_equal_flow_failure_reports_infra_exit_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -717,7 +717,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
             summary_lines = (out_root / "summary.tsv").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(summary_lines), 2)
             row = summary_lines[1].split("\t")
-            self.assertEqual(row[0], "q2-iperf-e-16g")
+            self.assertEqual(row[0], "q2-iperf-1g")
             self.assertEqual(row[4], "2")
             self.assertEqual(row[5], "ERROR")
 

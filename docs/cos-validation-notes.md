@@ -8,6 +8,14 @@ claims to move TCP fairness, retransmit count, or cwnd-collapse numbers on
 the 16-flow iperf3 workload — otherwise you are likely to repeat the
 mistake described in #725 or the VLAN-offset bug resolved in #728.
 
+Current validation fixture map: iperf ports 5200..5211 and TCP echo
+ports 6200..6211 share the same CoS class index. 5200/6200 are
+best-effort/root-shaped, 5201/6201 are 100M exact, 5202/6202 are 1G
+exact, then 5203..5210 / 6203..6210 step through 3G, 6G, 9G, 12G, 15G,
+18G, 21G, and 24G exact. 5211/6211 are uncapped except for the
+interface root shaper. Older measurements below may cite the pre-grid
+class names (`iperf-a`/`iperf-b`/`iperf-c`) and queue IDs.
+
 ## How to read admission drop counters live
 
 Since #724, `show class-of-service interface` renders three per-queue
@@ -167,8 +175,8 @@ The decision tree:
 
 #1312 pinned the canonical iperf fixture buffers for the low-rate exact
 classes after reverse `-P 12` reproduced high retransmits with equal-flow
-disabled: `scheduler-be` uses `buffer-size 500k` and
-`scheduler-iperf-a` uses `buffer-size 4m`.
+disabled: `scheduler-100m` uses `buffer-size 500k` and
+`scheduler-1g` uses `buffer-size 4m`.
 
 When `buffer-size` is omitted, queue `base` comes from
 `max(transmit_rate_bytes/100, 96_000)` (10 ms of bytes with a 96 KB
@@ -182,7 +190,7 @@ the exact flow-fair admission gates need enough aggregate and per-flow
 headroom to avoid persistent tail-drop at 12 active TCP flows. They also
 trade latency headroom for retransmit suppression (`500k` at 100M ≈ 40 ms
 residence; `4m` at 1G ≈ 32 ms at full queue). Treat changes to these
-fixture values as admission-policy changes and rerun the q0/q4 reverse
+fixture values as admission-policy changes and rerun the q1/q2 reverse
 sweep before trusting low-rate fairness evidence.
 
 ## Pre-buffer-sizing dominant failure mode on this workload

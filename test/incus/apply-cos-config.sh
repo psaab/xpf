@@ -29,13 +29,14 @@
 #
 set -euo pipefail
 
-# #929: --same-class selects the same-class iperf-b fixture
-# (cos-iperf-same-class.set), which adds term 4 mapping
-# destination-port 7 → iperf-b. #1250: --symmetric selects
-# cos-iperf-symmetric.set, which also shapes reverse iperf3 -R
-# traffic on ge-0-0-1 using source-port terms. Flags must be
-# parsed BEFORE the positional TARGET argument so they are not
-# silently treated as hostnames.
+# #929 compatibility: --same-class still selects
+# cos-iperf-same-class.set for older callers. That fixture mirrors the
+# default 520x/620x map and also preserves the legacy destination-port
+# 7 -> iperf-1g same-class echo override. #1250: --symmetric selects
+# cos-iperf-symmetric.set, which also shapes reverse iperf3 -R and
+# echo replies on ge-0-0-1 using source-port terms. Flags must be
+# parsed BEFORE the positional TARGET argument so they are not silently
+# treated as hostnames.
 SAME_CLASS=0
 SYMMETRIC=0
 SURPLUS_SHARING=0

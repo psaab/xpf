@@ -2,8 +2,8 @@
 # Run one rep of the #905 mouse-latency cell.
 #
 # Usage: test-mouse-latency.sh <N> <M> <duration_s> <out_dir>
-#   N: elephant streams against 172.16.80.200:5201 (iperf-a)
-#   M: concurrent mouse coroutines against 172.16.80.200:7 (best-effort)
+#   N: elephant streams against 172.16.80.200:5202 (1 Gbps exact)
+#   M: concurrent mouse coroutines against 172.16.80.200:6200 (best-effort)
 #   duration_s: probe duration in seconds (≥ 60 recommended)
 #   out_dir: per-rep output directory (created if missing)
 #
@@ -29,19 +29,20 @@ PRIMARY="xpf-userspace-fw0"
 SECONDARY="xpf-userspace-fw1"
 SOURCE="cluster-userspace-host"
 TARGET_V4="172.16.80.200"
-# #929: env-var overridable so test-mouse-latency-same-class.sh
-# can run the same-class variant at the iperf-b 10 Gb/s shaper
-# rate while still sending mice to port 7; the same-class CoS
-# fixture reclassifies port 7 as iperf-b instead of best-effort.
+# Env-var overridable so test-mouse-latency-same-class.sh can run a
+# same-class variant by selecting the matching 520x elephant port and
+# 620x TCP echo port. The canonical CoS fixture maps 6200..6211 to the
+# same forwarding classes as 5200..5211, so same-class latency no longer
+# needs the legacy port-7 override fixture.
 # SHAPER_BPS MUST move with ELEPHANT_PORT because the cwnd-settle
 # and collapse gates compare against it.
-ELEPHANT_PORT="${ELEPHANT_PORT:-5201}"
-MOUSE_PORT="${MOUSE_PORT:-7}"
+ELEPHANT_PORT="${ELEPHANT_PORT:-5202}"
+MOUSE_PORT="${MOUSE_PORT:-6200}"
 MOUSE_CLASS="${MOUSE_CLASS:-best-effort}"
 MOUSE_COS_SURPLUS_SHARING="${MOUSE_COS_SURPLUS_SHARING:-0}"
 MOUSE_PROBE_CONNECTION_MODE="${MOUSE_PROBE_CONNECTION_MODE:-per-attempt}"
 MOUSE_PROBE_MIN_INTERVAL_MS="${MOUSE_PROBE_MIN_INTERVAL_MS:-0}"
-SHAPER_BPS="${SHAPER_BPS:-$((1 * 1000 * 1000 * 1000))}"  # default 1 Gb/s (iperf-a); same-class iperf-b sets 10 Gb/s
+SHAPER_BPS="${SHAPER_BPS:-$((1 * 1000 * 1000 * 1000))}"  # default 1 Gb/s (port 5202); same-class wrappers must override with their selected class cap.
 # Validate env-overrides (Copilot D.5): ports/bps must be
 # digits only so they can't smuggle shell metacharacters into
 # the remote `bash -c` interpolations below. MOUSE_CLASS and
@@ -55,8 +56,8 @@ SHAPER_BPS="${SHAPER_BPS:-$((1 * 1000 * 1000 * 1000))}"  # default 1 Gb/s (iperf
 [[ "$SHAPER_BPS" =~ ^[0-9]+$ ]] \
     || { echo "ABORT: SHAPER_BPS='$SHAPER_BPS' must be digits" >&2; exit 1; }
 case "$MOUSE_CLASS" in
-    best-effort|iperf-a|iperf-b|iperf-c) ;;
-    *) echo "ABORT: MOUSE_CLASS='$MOUSE_CLASS' must be one of best-effort/iperf-a/iperf-b/iperf-c" >&2; exit 1 ;;
+    best-effort|iperf-100m|iperf-1g|iperf-3g|iperf-6g|iperf-9g|iperf-12g|iperf-15g|iperf-18g|iperf-21g|iperf-24g|iperf-uncapped) ;;
+    *) echo "ABORT: MOUSE_CLASS='$MOUSE_CLASS' must be one of best-effort/iperf-100m/iperf-1g/iperf-3g/iperf-6g/iperf-9g/iperf-12g/iperf-15g/iperf-18g/iperf-21g/iperf-24g/iperf-uncapped" >&2; exit 1 ;;
 esac
 case "${MOUSE_COS_SURPLUS_SHARING,,}" in
     0|false|no|off) MOUSE_COS_SURPLUS_SHARING=0 ;;
@@ -188,7 +189,7 @@ incus_run file push "${SCRIPT_DIR}/mouse_latency_probe.py" \
 
 # ---- step 0: echo-daemon preflight (Copilot D.3: must run BEFORE
 # any CoS state mutation so a failure leaves the cluster in
-# whatever state preceded this rep, not in the same-class fixture).
+# whatever state preceded this rep, not in the selected CoS fixture).
 # Uses bash /dev/tcp rather than `nc -zw1` because the source
 # container doesn't ship netcat by default.
 if ! incus_exec "$SOURCE" timeout 2 bash -c \
@@ -206,9 +207,6 @@ fi
 # attempt to apply on the secondary.
 PRE_PRIMARY=$(current_primary)
 APPLY_COS_FLAGS=()
-if [[ "$MOUSE_CLASS" == "iperf-b" ]]; then
-    APPLY_COS_FLAGS+=(--same-class)
-fi
 if [[ "$MOUSE_COS_SURPLUS_SHARING" -eq 1 ]]; then
     APPLY_COS_FLAGS+=(--surplus-sharing)
 fi
