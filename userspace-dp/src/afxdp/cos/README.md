@@ -53,6 +53,11 @@ mod.rs for further file-level breakdown.
 - Per-byte hot-path fns are `#[inline]` to preserve cross-module
   inlining across the `pub(in crate::afxdp)` boundary; the larger
   drain/settle bodies aren't inlined (LLVM heuristics suffice).
+- The TX drain caller enters `drain_shaped_tx` only while the binding
+  reports at least one nonempty CoS interface and has an interface order.
+  Configured-but-idle bindings skip the no-op shaped-drain call path
+  entirely; nonempty bindings still call into CoS so runnable work,
+  due parked queues, and shared lease epoch progress are preserved.
 - `drain_shaped_tx` primes an interface root only when queued work is
   runnable now or a parked queue's wake tick is due. Not-yet-due
   parked queues skip timer-wheel advance and shared-root lease top-up
