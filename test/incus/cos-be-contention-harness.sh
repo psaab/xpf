@@ -36,6 +36,8 @@ MAX_EXACT_DROP_RATIO="${MAX_EXACT_DROP_RATIO:-0.15}"
 WRONG_QUEUE_SENT_BYTES_TOLERANCE="${WRONG_QUEUE_SENT_BYTES_TOLERANCE:-0}"
 MIN_EXPECTED_SENT_BYTES="${MIN_EXPECTED_SENT_BYTES:-1}"
 MIN_CONTENDER_BPS="${MIN_CONTENDER_BPS:-100000000}"
+MIN_EXACT_BASELINE_CAP_RATIO="${MIN_EXACT_BASELINE_CAP_RATIO:-0.70}"
+ROOT_SHAPE_BPS="${ROOT_SHAPE_BPS:-25000000000}"
 IPERF_EXTRA_ARGS="${IPERF_EXTRA_ARGS:-}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -161,11 +163,14 @@ start_iperf() {
         remote_cmd+=" ${IPERF_EXTRA_ARGS}"
     fi
     {
+        rc=1
         printf '%s\n' "$remote_cmd" > "$phase_dir/${role}-iperf.cmd"
         run_incus "$HOST" "$remote_cmd" \
             > "$phase_dir/${role}-iperf.json" \
             2> "$phase_dir/${role}-iperf.stderr"
-        printf '%s\n' "$?" > "$phase_dir/${role}-iperf.rc"
+        rc=$?
+        printf '%s\n' "$rc" > "$phase_dir/${role}-iperf.rc"
+        exit "$rc"
     } &
     STARTED_IPERF_PID=$!
 }
@@ -231,15 +236,15 @@ class_selected() {
 }
 
 cells=(
-    "exact5202-vs-5200 5202 2 iperf-1g 5200 0 best-effort"
-    "exact5210-vs-5200 5210 10 iperf-24g 5200 0 best-effort"
-    "exact5202-vs-5211 5202 2 iperf-1g 5211 11 iperf-uncapped"
-    "exact5210-vs-5211 5210 10 iperf-24g 5211 11 iperf-uncapped"
+    "exact5202-vs-5200 5202 2 iperf-1g 5200 0 best-effort 1000000000 500000000"
+    "exact5210-vs-5200 5210 10 iperf-24g 5200 0 best-effort 24000000000 1000000000"
+    "exact5202-vs-5211 5202 2 iperf-1g 5211 11 iperf-uncapped 1000000000 500000000"
+    "exact5210-vs-5211 5210 10 iperf-24g 5211 11 iperf-uncapped 24000000000 1000000000"
 )
 
 selected_cells=()
 for spec in "${cells[@]}"; do
-    read -r label _exact_port _exact_queue _exact_class _contender_port _contender_queue _contender_class <<< "$spec"
+    read -r label _exact_port _exact_queue _exact_class _contender_port _contender_queue _contender_class _exact_cap_bps _min_contender_bps <<< "$spec"
     if class_selected "$label"; then
         selected_cells+=("$spec")
     fi
@@ -264,7 +269,7 @@ if [[ -z "$ACTIVE_FW" ]]; then
 fi
 log "capturing dataplane status from $ACTIVE_FW"
 
-python3 - "$ARTIFACT_ROOT" "$COS_INTERFACE_NAME" "$COS_IFINDEX" "${selected_cells[@]}" <<'PY'
+python3 - "$ARTIFACT_ROOT" "$COS_INTERFACE_NAME" "$COS_IFINDEX" "$ROOT_SHAPE_BPS" "${selected_cells[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -272,8 +277,9 @@ from pathlib import Path
 root = Path(sys.argv[1])
 cos_interface_name = sys.argv[2]
 cos_ifindex_raw = sys.argv[3]
+root_shape_bps = int(sys.argv[4])
 cells = []
-for raw in sys.argv[4:]:
+for raw in sys.argv[5:]:
     (
         label,
         exact_port,
@@ -282,6 +288,8 @@ for raw in sys.argv[4:]:
         contender_port,
         contender_queue,
         contender_forwarding_class,
+        exact_cap_bps,
+        min_contender_bps,
     ) = raw.split()
     cells.append(
         {
@@ -289,9 +297,11 @@ for raw in sys.argv[4:]:
             "exact_port": int(exact_port),
             "exact_queue": int(exact_queue),
             "exact_forwarding_class": exact_forwarding_class,
+            "exact_cap_bps": int(exact_cap_bps),
             "contender_port": int(contender_port),
             "contender_queue": int(contender_queue),
             "contender_forwarding_class": contender_forwarding_class,
+            "min_contender_bps": int(min_contender_bps),
             "baseline_dir": f"{label}/baseline",
             "contended_dir": f"{label}/contended",
         }
@@ -299,6 +309,7 @@ for raw in sys.argv[4:]:
 manifest = {
     "cos_interface_name": cos_interface_name,
     "cos_ifindex": int(cos_ifindex_raw) if cos_ifindex_raw else None,
+    "root_shape_bps": root_shape_bps,
     "cells": cells,
 }
 (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -306,7 +317,7 @@ PY
 
 overall_run_status=0
 for spec in "${selected_cells[@]}"; do
-    read -r label exact_port exact_queue _exact_class contender_port contender_queue _contender_class <<< "$spec"
+    read -r label exact_port exact_queue _exact_class contender_port contender_queue _contender_class _exact_cap_bps _min_contender_bps <<< "$spec"
     cell_dir="$ARTIFACT_ROOT/$label"
     log "cell=$label exact_port=$exact_port exact_queue=$exact_queue contender_port=$contender_port contender_queue=$contender_queue"
     if ! run_phase "$cell_dir/baseline" "$exact_port"; then
@@ -325,7 +336,8 @@ python3 "$VALIDATOR" "$ARTIFACT_ROOT" \
     --max-exact-drop-ratio "$MAX_EXACT_DROP_RATIO" \
     --wrong-queue-sent-bytes-tolerance "$WRONG_QUEUE_SENT_BYTES_TOLERANCE" \
     --min-expected-sent-bytes "$MIN_EXPECTED_SENT_BYTES" \
-    --min-contender-bps "$MIN_CONTENDER_BPS"
+    --min-contender-bps "$MIN_CONTENDER_BPS" \
+    --min-exact-baseline-cap-ratio "$MIN_EXACT_BASELINE_CAP_RATIO"
 validator_status=$?
 
 log "summary: $ARTIFACT_ROOT/summary.tsv"

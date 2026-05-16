@@ -22,6 +22,8 @@ DEFAULT_MAX_EXACT_DROP_RATIO = 0.15
 DEFAULT_WRONG_QUEUE_SENT_BYTES_TOLERANCE = 0
 DEFAULT_MIN_EXPECTED_SENT_BYTES = 1
 DEFAULT_MIN_CONTENDER_BPS = 100_000_000.0
+DEFAULT_MIN_EXACT_BASELINE_CAP_RATIO = 0.70
+DEFAULT_ROOT_SHAPE_BPS = 25_000_000_000.0
 
 FORWARDING_CLASS_BY_PORT = {
     5200: "best-effort",
@@ -36,6 +38,19 @@ FORWARDING_CLASS_BY_PORT = {
     5209: "iperf-21g",
     5210: "iperf-24g",
     5211: "iperf-uncapped",
+}
+
+PORT_CAP_BPS_BY_PORT = {
+    5201: 100_000_000.0,
+    5202: 1_000_000_000.0,
+    5203: 3_000_000_000.0,
+    5204: 6_000_000_000.0,
+    5205: 9_000_000_000.0,
+    5206: 12_000_000_000.0,
+    5207: 15_000_000_000.0,
+    5208: 18_000_000_000.0,
+    5209: 21_000_000_000.0,
+    5210: 24_000_000_000.0,
 }
 
 
@@ -82,10 +97,39 @@ def _forwarding_class(raw: Any, port: Any, field: str) -> str:
     if raw is not None:
         if not isinstance(raw, str) or raw == "":
             raise ValidationError(f"{field} must be a non-empty string")
+        if isinstance(port, int) and port in FORWARDING_CLASS_BY_PORT:
+            expected = FORWARDING_CLASS_BY_PORT[port]
+            if raw != expected:
+                raise ValidationError(
+                    f"{field} {raw!r} does not match canonical class {expected!r} "
+                    f"for port {port}"
+                )
         return raw
     if isinstance(port, int) and port in FORWARDING_CLASS_BY_PORT:
         return FORWARDING_CLASS_BY_PORT[port]
     raise ValidationError(f"{field} is required for port {port!r}")
+
+
+def _positive_bps(value: Any, field: str) -> float:
+    out = _finite_nonnegative_number(value, field)
+    if out <= 0:
+        raise ValidationError(f"{field} must be positive")
+    return out
+
+
+def _exact_cap_bps(raw: Any, port: int, field: str) -> float:
+    if raw is not None:
+        return _positive_bps(raw, field)
+    if port in PORT_CAP_BPS_BY_PORT:
+        return PORT_CAP_BPS_BY_PORT[port]
+    raise ValidationError(f"{field} is required for exact port {port}")
+
+
+def _default_min_contender_bps(exact_cap_bps: float, root_shape_bps: float) -> float:
+    root_headroom = max(root_shape_bps - exact_cap_bps, 0.0)
+    if root_headroom > 0:
+        return min(exact_cap_bps * 0.50, root_headroom)
+    return exact_cap_bps * 0.05
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -349,15 +393,24 @@ def validate_artifacts(
     wrong_queue_sent_bytes_tolerance: int,
     min_expected_sent_bytes: int,
     min_contender_bps: float,
+    min_exact_baseline_cap_ratio: float,
 ) -> dict[str, Any]:
     min_contender_bps = _finite_nonnegative_number(
         min_contender_bps,
         "min_contender_bps",
     )
+    min_exact_baseline_cap_ratio = _finite_nonnegative_number(
+        min_exact_baseline_cap_ratio,
+        "min_exact_baseline_cap_ratio",
+    )
     manifest = load_json(root / "manifest.json")
     cells = manifest.get("cells")
     if not isinstance(cells, list) or not cells:
         raise ValidationError("manifest.cells must be a non-empty list")
+    root_shape_bps = _positive_bps(
+        manifest.get("root_shape_bps", DEFAULT_ROOT_SHAPE_BPS),
+        "manifest.root_shape_bps",
+    )
     interface_name = manifest.get("cos_interface_name", "reth0.80")
     if interface_name == "":
         interface_name = None
@@ -365,6 +418,8 @@ def validate_artifacts(
         raise ValidationError("manifest.cos_interface_name must be a string")
     ifindex_raw = manifest.get("cos_ifindex")
     ifindex = None if ifindex_raw in (None, "") else _nonnegative_int(ifindex_raw, "manifest.cos_ifindex")
+    if interface_name is None and ifindex is None:
+        raise ValidationError("manifest must specify cos_interface_name or cos_ifindex")
 
     summary_cells: list[dict[str, Any]] = []
     failures: list[str] = []
@@ -386,6 +441,21 @@ def validate_artifacts(
             cell.get("contender_forwarding_class"),
             contender_port,
             f"{label}.contender_forwarding_class",
+        )
+        exact_cap_bps = _exact_cap_bps(
+            cell.get("exact_cap_bps"),
+            exact_port,
+            f"{label}.exact_cap_bps",
+        )
+        cell_min_contender_bps = max(
+            min_contender_bps,
+            _finite_nonnegative_number(
+                cell.get(
+                    "min_contender_bps",
+                    _default_min_contender_bps(exact_cap_bps, root_shape_bps),
+                ),
+                f"{label}.min_contender_bps",
+            ),
         )
         baseline_dir = _resolve_phase_dir(root, cell.get("baseline_dir"), f"{label}.baseline_dir")
         contended_dir = _resolve_phase_dir(root, cell.get("contended_dir"), f"{label}.contended_dir")
@@ -421,19 +491,24 @@ def validate_artifacts(
         baseline_bps = baseline_iperf["exact"]["bps"]
         contended_exact_bps = contended_iperf["exact"]["bps"]
         contender_bps = contended_iperf["contender"]["bps"]
+        minimum_baseline_bps = exact_cap_bps * min_exact_baseline_cap_ratio
         minimum_exact_bps = baseline_bps * (1.0 - max_exact_drop_ratio)
-        if baseline_bps <= 0:
-            cell_failures.append("exact-alone baseline has zero throughput")
+        if baseline_bps < minimum_baseline_bps:
+            cell_failures.append(
+                f"exact-alone baseline {baseline_bps / 1_000_000.0:.3f} Mbps below "
+                f"{minimum_baseline_bps / 1_000_000.0:.3f} Mbps "
+                f"({min_exact_baseline_cap_ratio:.2%} of {exact_cap_bps / 1_000_000.0:.3f} Mbps cap)"
+            )
         elif contended_exact_bps < minimum_exact_bps:
             cell_failures.append(
                 f"exact throughput dropped from {baseline_bps / 1_000_000.0:.3f} Mbps "
                 f"to {contended_exact_bps / 1_000_000.0:.3f} Mbps, below "
                 f"{minimum_exact_bps / 1_000_000.0:.3f} Mbps"
             )
-        if contender_bps < min_contender_bps:
+        if contender_bps < cell_min_contender_bps:
             cell_failures.append(
                 f"contender throughput {contender_bps / 1_000_000.0:.3f} Mbps below "
-                f"{min_contender_bps / 1_000_000.0:.3f} Mbps; contention pressure "
+                f"{cell_min_contender_bps / 1_000_000.0:.3f} Mbps; contention pressure "
                 "is too low to prove exact isolation"
             )
 
@@ -449,14 +524,18 @@ def validate_artifacts(
                 "contender_port": contender_port,
                 "contender_queue": contender_queue,
                 "contender_forwarding_class": contender_forwarding_class,
+                "exact_cap_bps": exact_cap_bps,
+                "root_shape_bps": root_shape_bps,
                 "verdict": "PASS" if not cell_failures else "FAIL",
                 "failure_reasons": cell_failures,
                 "throughput": {
+                    "exact_cap_mbps": exact_cap_bps / 1_000_000.0,
                     "baseline_exact_mbps": baseline_bps / 1_000_000.0,
                     "contended_exact_mbps": contended_exact_bps / 1_000_000.0,
                     "contender_mbps": contender_bps / 1_000_000.0,
+                    "minimum_baseline_exact_mbps": minimum_baseline_bps / 1_000_000.0,
                     "minimum_contended_exact_mbps": minimum_exact_bps / 1_000_000.0,
-                    "minimum_contender_mbps": min_contender_bps / 1_000_000.0,
+                    "minimum_contender_mbps": cell_min_contender_bps / 1_000_000.0,
                 },
                 "baseline": {
                     "iperf": baseline_iperf,
@@ -477,6 +556,7 @@ def validate_artifacts(
             "wrong_queue_sent_bytes_tolerance": wrong_queue_sent_bytes_tolerance,
             "min_expected_sent_bytes": min_expected_sent_bytes,
             "min_contender_bps": min_contender_bps,
+            "min_exact_baseline_cap_ratio": min_exact_baseline_cap_ratio,
         },
         "cos_interface_name": interface_name,
         "cos_ifindex": ifindex,
@@ -488,8 +568,9 @@ def write_summary_tsv(summary: dict[str, Any], path: Path) -> None:
     with path.open("w", encoding="utf-8") as f:
         f.write(
             "cell\texact_port\texact_queue\tcontender_port\tcontender_queue\tverdict\t"
-            "baseline_exact_mbps\tcontended_exact_mbps\tcontender_mbps\t"
-            "minimum_contended_exact_mbps\tfailure_reasons\n"
+            "exact_cap_mbps\tbaseline_exact_mbps\tminimum_baseline_exact_mbps\t"
+            "contended_exact_mbps\tminimum_contended_exact_mbps\t"
+            "contender_mbps\tminimum_contender_mbps\tfailure_reasons\n"
         )
         for cell in summary["cells"]:
             throughput = cell["throughput"]
@@ -502,10 +583,13 @@ def write_summary_tsv(summary: dict[str, Any], path: Path) -> None:
                         str(cell["contender_port"]),
                         str(cell["contender_queue"]),
                         str(cell["verdict"]),
+                        f"{throughput['exact_cap_mbps']:.3f}",
                         f"{throughput['baseline_exact_mbps']:.3f}",
+                        f"{throughput['minimum_baseline_exact_mbps']:.3f}",
                         f"{throughput['contended_exact_mbps']:.3f}",
-                        f"{throughput['contender_mbps']:.3f}",
                         f"{throughput['minimum_contended_exact_mbps']:.3f}",
+                        f"{throughput['contender_mbps']:.3f}",
+                        f"{throughput['minimum_contender_mbps']:.3f}",
                         "; ".join(cell["failure_reasons"]),
                     ]
                 )
@@ -563,6 +647,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=float,
         default=DEFAULT_MIN_CONTENDER_BPS,
     )
+    parser.add_argument(
+        "--min-exact-baseline-cap-ratio",
+        type=float,
+        default=DEFAULT_MIN_EXACT_BASELINE_CAP_RATIO,
+    )
     return parser.parse_args(argv)
 
 
@@ -575,6 +664,7 @@ def main(argv: list[str]) -> int:
             wrong_queue_sent_bytes_tolerance=args.wrong_queue_sent_bytes_tolerance,
             min_expected_sent_bytes=args.min_expected_sent_bytes,
             min_contender_bps=args.min_contender_bps,
+            min_exact_baseline_cap_ratio=args.min_exact_baseline_cap_ratio,
         )
     except ValidationError as exc:
         print(f"cos_be_contention_validate: {exc}", file=sys.stderr)
