@@ -52,10 +52,13 @@ Committed raw summaries copied from that run:
 | q6 | 5203 | 25 Gbps | PASS | 17396.98 | 69.6% | 0.1361 | 0.2008 | 1113, 0, 0 | 0 dataplane drops |
 
 All seven canonical classes passed after q0/q4 were buffered. The raw TSVs
-are checked in so reviewers can audit the Markdown table without access to the
-original `/tmp` directories. The high-rate classes still need to be included in
-future regressions because low-rate classes can produce deceptively low CoV
-while higher-rate classes expose RSS/bin-packing and CPU-limit effects.
+are checked in so reviewers can audit the verdict, throughput, CoV, and
+dataplane-drop fields without access to the original `/tmp` directories. The
+per-run retransmit cells are transcribed from the original iperf summaries for
+operator context; they are not derivable from the checked-in TSV schema. The
+high-rate classes still need to be included in future regressions because
+low-rate classes can produce deceptively low CoV while higher-rate classes
+expose RSS/bin-packing and CPU-limit effects.
 
 The q0/q4 buffers are deliberately not a latency-default recommendation. They
 buy retransmit stability for this reverse `-P 12` validation fixture by
