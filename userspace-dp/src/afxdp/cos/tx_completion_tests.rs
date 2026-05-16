@@ -263,6 +263,55 @@ fn apply_cos_send_result_counts_nonexact_bytes_when_peer_exact_queue_backlogged(
 }
 
 #[test]
+fn same_worker_second_binding_publish_does_not_erase_first_binding_backlog() {
+    let mut exact_root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut exact_root.queues {
+        if queue.config.exact {
+            queue.hot.queued_bytes = 12_000;
+        } else {
+            queue.hot.items.clear();
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+        }
+    }
+    let mut idle_root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut idle_root.queues {
+        queue.hot.items.clear();
+        queue.hot.queued_bytes = 0;
+        queue.hot.runnable = false;
+    }
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog.clone());
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let binding_a = BindingWorker::new_for_cos_drain_test(0, 0, 42, exact_root, fast_path.clone());
+    let binding_b = BindingWorker::new_for_cos_drain_test(1, 0, 42, idle_root, fast_path);
+
+    publish_cos_exact_backlog(&binding_a, 42);
+    publish_cos_exact_backlog(&binding_b, 42);
+
+    assert!(
+        shared_exact_backlog.has_peer_backlog(1),
+        "same-worker idle binding must not overwrite a sibling binding's nonzero exact backlog",
+    );
+}
+
+#[test]
 fn normalize_cos_queue_state_repairs_nonempty_unparked_queue_to_runnable() {
     let mut queue = CoSQueueRuntime {
         config: crate::afxdp::types::CoSQueueConfigState {

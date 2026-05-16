@@ -1064,9 +1064,16 @@ impl Coordinator {
         let current_queue_vtime_floors = self.cos.queue_vtime_floors.load();
         let num_workers = self.workers.last_planned_workers().max(1);
         let current_queue_leases = self.cos.queue_leases.load();
+        let max_binding_slot = self
+            .workers
+            .identities
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0) as usize;
         let next_exact_backlogs = build_shared_cos_exact_backlogs_reusing_existing(
             &self.forwarding,
-            num_workers,
+            max_binding_slot,
             current_exact_backlogs.as_ref(),
         );
         let next_queue_leases = build_shared_cos_queue_leases_reusing_existing(
@@ -1752,10 +1759,9 @@ fn build_shared_cos_root_leases_reusing_existing(
 
 fn build_shared_cos_exact_backlogs_reusing_existing(
     forwarding: &ForwardingState,
-    num_workers: usize,
+    max_binding_slot: usize,
     existing: &BTreeMap<i32, Arc<SharedCoSExactBacklog>>,
 ) -> BTreeMap<i32, Arc<SharedCoSExactBacklog>> {
-    let max_worker_id = num_workers.saturating_sub(1);
     let mut out = BTreeMap::new();
     for (&ifindex, iface) in &forwarding.cos.interfaces {
         if !iface.queues.iter().any(|queue| queue.exact) {
@@ -1763,12 +1769,15 @@ fn build_shared_cos_exact_backlogs_reusing_existing(
         }
         if let Some(backlog) = existing
             .get(&ifindex)
-            .filter(|backlog| backlog.matches_config(max_worker_id))
+            .filter(|backlog| backlog.matches_config(max_binding_slot))
         {
             out.insert(ifindex, backlog.clone());
             continue;
         }
-        out.insert(ifindex, Arc::new(SharedCoSExactBacklog::new(max_worker_id)));
+        out.insert(
+            ifindex,
+            Arc::new(SharedCoSExactBacklog::new(max_binding_slot)),
+        );
     }
     out
 }

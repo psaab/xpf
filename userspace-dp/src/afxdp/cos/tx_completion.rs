@@ -376,17 +376,17 @@ pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_
         return;
     };
     let Some(root) = binding.cos.cos_interfaces.get(&root_ifindex) else {
-        shared_exact_backlog.publish(binding.worker_id, 0);
+        shared_exact_backlog.publish(binding.slot, 0);
         return;
     };
-    shared_exact_backlog.publish(binding.worker_id, exact_backlog_bytes(root));
+    shared_exact_backlog.publish(binding.slot, exact_backlog_bytes(root));
 }
 
 #[inline]
 pub(in crate::afxdp) fn clear_all_cos_exact_backlogs_for_binding(binding: &BindingWorker) {
     for iface_fast in binding.cos.cos_fast_interfaces.values() {
         if let Some(shared_exact_backlog) = iface_fast.shared_exact_backlog.as_ref() {
-            shared_exact_backlog.publish(binding.worker_id, 0);
+            shared_exact_backlog.publish(binding.slot, 0);
         }
     }
 }
@@ -563,13 +563,13 @@ pub(in crate::afxdp) fn apply_cos_send_result(
     retry: VecDeque<TxRequest>,
 ) {
     let mut exact_queue_idx = None;
-    let worker_id = binding.worker_id;
+    let binding_slot = binding.slot;
     let peer_exact_backlogged = binding
         .cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
-        .is_some_and(|backlog| backlog.has_peer_backlog(worker_id));
+        .is_some_and(|backlog| backlog.has_peer_backlog(binding_slot));
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return;
@@ -640,13 +640,13 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
     retry: VecDeque<PreparedTxRequest>,
 ) {
     let mut exact_queue_idx = None;
-    let worker_id = binding.worker_id;
+    let binding_slot = binding.slot;
     let peer_exact_backlogged = binding
         .cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
-        .is_some_and(|backlog| backlog.has_peer_backlog(worker_id));
+        .is_some_and(|backlog| backlog.has_peer_backlog(binding_slot));
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return;

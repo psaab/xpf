@@ -24,7 +24,7 @@ pub(in crate::afxdp) struct SharedCoSQueueLease {
 struct PaddedBacklogSlot(AtomicU64);
 
 /// Interface-global exact-backlog visibility for diagnostics that must not
-/// be limited to the current worker's local CoS root. Each worker owns one
+/// be limited to the current binding's local CoS root. Each binding owns one
 /// slot and publishes its local exact queued-byte total from
 /// exact enqueue/drain/reset sites; readers test peer slots when deciding
 /// whether non-exact service is stealing from any exact queue on the same
@@ -36,32 +36,32 @@ pub(in crate::afxdp) struct SharedCoSExactBacklog {
 }
 
 impl SharedCoSExactBacklog {
-    pub(in crate::afxdp) fn new(max_worker_id: usize) -> Self {
+    pub(in crate::afxdp) fn new(max_binding_slot: usize) -> Self {
         Self {
-            worker_bytes: (0..=max_worker_id)
+            worker_bytes: (0..=max_binding_slot)
                 .map(|_| PaddedBacklogSlot(AtomicU64::new(0)))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         }
     }
 
-    pub(in crate::afxdp) fn matches_config(&self, max_worker_id: usize) -> bool {
-        self.worker_bytes.len() == max_worker_id.saturating_add(1)
+    pub(in crate::afxdp) fn matches_config(&self, max_binding_slot: usize) -> bool {
+        self.worker_bytes.len() == max_binding_slot.saturating_add(1)
     }
 
     #[inline]
-    pub(in crate::afxdp) fn publish(&self, worker_id: u32, bytes: u64) {
-        if let Some(slot) = self.worker_bytes.get(worker_id as usize) {
+    pub(in crate::afxdp) fn publish(&self, binding_slot: u32, bytes: u64) {
+        if let Some(slot) = self.worker_bytes.get(binding_slot as usize) {
             slot.0.store(bytes, Ordering::Relaxed);
         }
     }
 
     #[inline]
-    pub(in crate::afxdp) fn has_peer_backlog(&self, worker_id: u32) -> bool {
+    pub(in crate::afxdp) fn has_peer_backlog(&self, binding_slot: u32) -> bool {
         self.worker_bytes
             .iter()
             .enumerate()
-            .filter(|(idx, _)| *idx != worker_id as usize)
+            .filter(|(idx, _)| *idx != binding_slot as usize)
             .any(|(_, slot)| slot.0.load(Ordering::Relaxed) > 0)
     }
 }
