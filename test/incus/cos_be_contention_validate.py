@@ -276,7 +276,7 @@ def _validate_status_capture(phase_dir: Path) -> list[str]:
         try:
             rc = read_exit_code(rc_path)
         except ValidationError as exc:
-            failures.append(f"{phase_dir.name}: {exc}")
+            failures.append(f"{phase_dir.name}: failed to read status-{phase} exit code: {exc}")
             continue
         if rc != 0:
             failures.append(f"{phase_dir.name}: status-{phase} capture exited {rc}")
@@ -303,11 +303,15 @@ def analyze_phase(
         during_json = load_json(during_path)
     except ValidationError as exc:
         failures.append(str(exc))
+        # Fall back to before_json so during_deltas are zero; the during gate
+        # below will then fail for every expected queue (zero < min_expected_sent_bytes).
         during_json = before_json
     try:
         after_json = load_json(after_path)
     except ValidationError as exc:
         failures.append(str(exc))
+        # Fall back to before_json so deltas are zero; expected-queue sent-bytes
+        # checks below will then FAIL for each expected queue.
         after_json = before_json
     before_shapes = queue_shapes(before_json, interface_name=interface_name, ifindex=ifindex)
     during_shapes = queue_shapes(during_json, interface_name=interface_name, ifindex=ifindex)
@@ -393,7 +397,7 @@ def analyze_iperf(phase_dir: Path, roles: tuple[str, ...]) -> tuple[dict[str, An
             if rc != 0:
                 failures.append(f"{phase_dir.name}: {role} iperf exited {rc}")
         except ValidationError as exc:
-            failures.append(f"{phase_dir.name}: {exc}")
+            failures.append(f"{phase_dir.name}: failed to read {role} iperf exit code: {exc}")
             rc = 1
         try:
             bps = iperf_bps(load_json(phase_dir / f"{role}-iperf.json"))
