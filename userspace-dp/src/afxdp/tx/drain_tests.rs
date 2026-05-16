@@ -119,3 +119,27 @@ fn process_pending_queue_in_place_preserves_failed_item_order() {
 
     assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![2, 4]);
 }
+
+#[test]
+fn shaped_drain_entry_guard_skips_configured_idle_binding() {
+    assert!(
+        !has_queued_cos_work(0, 4),
+        "configured-but-idle bindings must not enter drain_shaped_tx"
+    );
+}
+
+#[test]
+fn shaped_drain_entry_guard_preserves_nonempty_service_path() {
+    assert!(
+        has_queued_cos_work(1, 4),
+        "queued CoS work must still enter drain_shaped_tx for service and lease progress"
+    );
+}
+
+#[test]
+fn shaped_drain_entry_guard_requires_interface_order() {
+    assert!(
+        !has_queued_cos_work(1, 0),
+        "bindings without an interface order cannot make shaped-drain progress"
+    );
+}
