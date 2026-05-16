@@ -33,8 +33,11 @@ the same procedure.
   priority 200, node1 at 100.
 - `loss:cluster-userspace-host` is up with address `10.0.61.102/24`
   and default route `10.0.61.1` (the RG1 VIP on xpf-userspace-fw).
-- iperf3 server listens on `172.16.80.200` ports 5201 (iperf-a class
-  — 1 Gbps `transmit-rate exact`) and 5202 (iperf-b — 10 Gbps).
+- iperf3 server listens on `172.16.80.200` ports 5200..5211. The
+  canonical 1 Gbps exact class is port 5202 (`iperf-1g`, queue 2);
+  ports 5200 and 5211 are non-exact/root-shaped.
+- TCP echo listeners for mouse-latency tests listen on ports 6200..6211
+  and use the same CoS classes as the corresponding 5200..5211 ports.
 - CoS config from `test/incus/cos-iperf-config.set` must be committed
   on the primary. `test/incus/apply-cos-config.sh loss:xpf-userspace-fw0`
   is the canonical applier. Re-apply after any deploy because the
@@ -72,7 +75,7 @@ sg incus-admin -c "incus exec loss:cluster-userspace-host -- ping -c 5 -W 2 172.
 ### 2. Single-flow throughput (`-P 1`)
 
 ```bash
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 1 -t 30 -p 5201 -i 3"
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 1 -t 30 -p 5202 -i 3"
 ```
 
 **Pass**: every 3-second interval reports non-zero throughput. The
@@ -91,7 +94,7 @@ flow should settle somewhere around 1.5–1.7 Gb/s on current master
 ### 3. Parallel fair-share throughput (`-P 16`)
 
 ```bash
-sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 16 -t 30 -p 5201 -i 3"
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- iperf3 -c 172.16.80.200 -P 16 -t 30 -p 5202 -i 3"
 ```
 
 This is the workload #754 was measured on. Per-stream distribution
@@ -153,7 +156,7 @@ fast empty-output signal.
 sg incus-admin -c "incus exec loss:xpf-userspace-fw0 -- /usr/local/sbin/cli -c 'show class-of-service interface reth0'"
 ```
 
-Snapshot the iperf-a queue (queue 4) counters before the tests and
+Snapshot the `iperf-1g` queue (queue 2) counters before the tests and
 again after a 30 s run. Compute deltas.
 
 **Pass** (post-#768 baseline, single 30 s `-P 1` flow):

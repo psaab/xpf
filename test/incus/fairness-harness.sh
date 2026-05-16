@@ -18,8 +18,9 @@
 #   fairness-harness.sh --mixed-cos [TARGET] [PORT] [N] [DURATION] [REVERSE] [METRICS_URL]
 #   fairness-harness.sh --mixed-cos-isolated [TARGET] [PORT] [N] [DURATION] [REVERSE] [METRICS_URL]
 #
-# Mixed CoS mode defaults to canonical fixture ports 5201 (queue 4)
-# and 5202 (queue 5) and evaluates each class separately from the
+# Mixed CoS mode defaults to canonical fixture ports 5202 (queue 2,
+# 1 Gbps exact) and 5205 (queue 5, 9 Gbps exact) and evaluates each
+# class separately from the
 # same live xpf_userspace_cos_active_flow_count scrape. Set COS_IFINDEX
 # to the shaped egress ifindex. Override COS_QUEUE_ID /
 # MIXED_COS_QUEUE_ID only for non-canonical fixtures. In mixed mode the
@@ -58,8 +59,9 @@
 #                                           free-form NIC/RSS audit notes
 #   ARTIFACT_DIR                            placement artifact directory
 #
-# Defaults match the existing iperf-c P=12 -R workload that produced the
-# 47% per-flow CoV measurement that motivates the harness.
+# Defaults track the high-rate canonical CoS grid: single-class mode
+# uses port 5210 (24 Gbps exact), while mixed mode compares the 1 Gbps
+# and 9 Gbps exact classes.
 
 set -euo pipefail
 
@@ -76,9 +78,9 @@ done
 
 TARGET=${1:-172.16.80.200}
 if [[ "$MIXED_COS" -eq 1 ]]; then
-    DEFAULT_PORT=5201
+    DEFAULT_PORT=5202
 else
-    DEFAULT_PORT=5203
+    DEFAULT_PORT=5210
 fi
 PORT=${2:-$DEFAULT_PORT}
 N=${3:-12}
@@ -94,7 +96,7 @@ METRICS_URL=${6:-http://127.0.0.1:8080/metrics}
 IFACE=${IFACE:-ge-0-0-2}
 COS_IFINDEX=${COS_IFINDEX:-}
 COS_QUEUE_ID=${COS_QUEUE_ID:-}
-MIXED_PORT=${MIXED_PORT:-5202}
+MIXED_PORT=${MIXED_PORT:-5205}
 MIXED_N=${MIXED_N:-$N}
 # Preserve an explicit empty MIXED_REVERSE so mixed forward fixtures do
 # not silently inherit reverse mode.
@@ -157,26 +159,36 @@ fi
 
 canonical_cos_queue_for_port() {
     case "$1" in
-        5201) printf '4\n' ;;
-        5202) printf '5\n' ;;
-        5203) printf '6\n' ;;
-        5204) printf '1\n' ;;
-        5205) printf '2\n' ;;
-        5206) printf '3\n' ;;
-        5207) printf '0\n' ;;
+        5200|6200) printf '0\n' ;;
+        5201|6201) printf '1\n' ;;
+        5202|6202) printf '2\n' ;;
+        5203|6203) printf '3\n' ;;
+        5204|6204) printf '4\n' ;;
+        5205|6205) printf '5\n' ;;
+        5206|6206) printf '6\n' ;;
+        5207|6207) printf '7\n' ;;
+        5208|6208) printf '8\n' ;;
+        5209|6209) printf '9\n' ;;
+        5210|6210) printf '10\n' ;;
+        5211|6211) printf '11\n' ;;
         *) return 1 ;;
     esac
 }
 
 canonical_shaper_rate_for_port() {
     case "$1" in
-        5201) printf '1000000000\n' ;;
-        5202) printf '10000000000\n' ;;
-        5203) printf '25000000000\n' ;;
-        5204) printf '13000000000\n' ;;
-        5205) printf '16000000000\n' ;;
-        5206) printf '19000000000\n' ;;
-        5207) printf '100000000\n' ;;
+        5200|6200) printf '25000000000\n' ;;
+        5201|6201) printf '100000000\n' ;;
+        5202|6202) printf '1000000000\n' ;;
+        5203|6203) printf '3000000000\n' ;;
+        5204|6204) printf '6000000000\n' ;;
+        5205|6205) printf '9000000000\n' ;;
+        5206|6206) printf '12000000000\n' ;;
+        5207|6207) printf '15000000000\n' ;;
+        5208|6208) printf '18000000000\n' ;;
+        5209|6209) printf '21000000000\n' ;;
+        5210|6210) printf '24000000000\n' ;;
+        5211|6211) printf '25000000000\n' ;;
         *) return 1 ;;
     esac
 }
@@ -211,7 +223,11 @@ if [[ "$MIXED_COS" -eq 1 ]]; then
         fi
     fi
 else
-    SHAPER_RATE_BPS=${SHAPER_RATE_BPS:-25000000000}
+    if [[ -z "$SHAPER_RATE_BPS" ]]; then
+        if ! SHAPER_RATE_BPS=$(canonical_shaper_rate_for_port "$PORT"); then
+            SHAPER_RATE_BPS=25000000000
+        fi
+    fi
 fi
 
 format_command() {

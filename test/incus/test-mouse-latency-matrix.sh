@@ -12,7 +12,8 @@
 # established mouse transactions rather than echo-server accept rate.
 # Set MOUSE_PROBE_MIN_INTERVAL_MS=20 with that mode on the isolated
 # validation cluster; it still produces hundreds of thousands of
-# samples per 60-second rep without overdriving the port-7 echo daemon.
+# samples per 60-second rep without overdriving the selected 620x TCP
+# echo daemon.
 #
 # 12 cells: N ∈ {0, 8, 32, 128} × M ∈ {1, 10, 50}.
 # Per cell: run up to 15 total reps as needed to reach 10 valid reps.

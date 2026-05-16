@@ -9,11 +9,20 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TARGET_VM=${TARGET_VM:-loss:xpf-userspace-fw0}
 APPLY_CONFIG=${APPLY_CONFIG:-1}
 COMPARE_SURPLUS_SHARING=${COMPARE_SURPLUS_SHARING:-1}
-CLASS_FILTER=${CLASS_FILTER:-q2,q3,q6}
+CLASS_FILTER=${CLASS_FILTER:-q8,q9,q10}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
 SWEEP=${SWEEP:-$ROOT_DIR/test/incus/fairness-cos-class-sweep.sh}
 APPLY_COS_CONFIG=${APPLY_COS_CONFIG:-$ROOT_DIR/test/incus/apply-cos-config.sh}
 RESTORE_STRICT_NEEDED=0
+# Mirror fairness-cos-class-sweep.sh's reverse default. If the sweep
+# is going to run iperf3 -R, CoS must be applied with reverse
+# source-port filters; otherwise the headroom numbers are unclassified
+# reverse traffic. An explicit REVERSE= selects forward-only fixtures.
+SWEEP_REVERSE=${REVERSE--R}
+COS_DIRECTION_FLAGS=()
+if [[ -n "$SWEEP_REVERSE" ]]; then
+    COS_DIRECTION_FLAGS+=(--symmetric)
+fi
 
 enabled() {
     case "${1,,}" in
@@ -47,7 +56,7 @@ restore_strict_if_needed() {
     [[ "$RESTORE_STRICT_NEEDED" -eq 1 ]] || return 0
     enabled "$APPLY_CONFIG" || return 0
 
-    if "$APPLY_COS_CONFIG" "$TARGET_VM" \
+    if "$APPLY_COS_CONFIG" "${COS_DIRECTION_FLAGS[@]}" "$TARGET_VM" \
         > "$ARTIFACT_ROOT/restore-strict.stdout" \
         2> "$ARTIFACT_ROOT/restore-strict.stderr"; then
         RESTORE_STRICT_NEEDED=0
@@ -120,9 +129,9 @@ apply_config_for_scenario() {
     mkdir -p "$out"
     if [[ "$scenario" == surplus-sharing ]]; then
         RESTORE_STRICT_NEEDED=1
-        "$APPLY_COS_CONFIG" --surplus-sharing "$TARGET_VM" > "$out/apply.stdout" 2> "$out/apply.stderr"
+        "$APPLY_COS_CONFIG" "${COS_DIRECTION_FLAGS[@]}" --surplus-sharing "$TARGET_VM" > "$out/apply.stdout" 2> "$out/apply.stderr"
     else
-        "$APPLY_COS_CONFIG" "$TARGET_VM" > "$out/apply.stdout" 2> "$out/apply.stderr"
+        "$APPLY_COS_CONFIG" "${COS_DIRECTION_FLAGS[@]}" "$TARGET_VM" > "$out/apply.stdout" 2> "$out/apply.stderr"
     fi
 }
 
