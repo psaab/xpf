@@ -91,15 +91,19 @@ from work-conserving surplus-sharing:
 - 100E100M runs use the existing mouse-latency artifact reducer with
   configurable gate cells (`MOUSE_LATENCY_GATE_ELEPHANTS=100`,
   `MOUSE_LATENCY_GATE_MICE=100`) and now preserve p99.9 as
-  `median_rep.p999_us`.
+  `median_rep.p999_us`. Canonical 100E100M runs gate on
+  `MOUSE_LATENCY_GATE_PERCENTILE=p999_us`, and the reducer selects the
+  representative rep by the same percentile it gates.
 - Surplus give-back runs reduce live traffic evidence into a four-phase
   artifact (`borrow_alone`, `peer_demand`, `peer_steady`,
   `peer_idle_reclaim`) validated by
   `test/incus/fairness_surplus_giveback_validate.py`.
-- The default give-back gates require the peer to reach 95% of guarantee
-  within a 5 s handback window, no steady peer CoS admission drops,
-  borrower decrease while the peer demands service, borrower reclaim
-  after peer idle, and root-cap respect.
+- The default give-back gates require proof that the borrower exceeded
+  its own guarantee while alone, the peer-demand phase had real peer
+  demand, the peer reaches 95% of guarantee within an auditable 5 s
+  handback window, no steady peer CoS admission drops, borrower decrease
+  while the peer demands service, borrower reclaim near the borrow-alone
+  baseline after peer idle, and root-cap respect.
 
 This lane intentionally does not touch the dataplane hot path. It makes
 future exact, surplus-sharing, and optional equal-flow comparison runs

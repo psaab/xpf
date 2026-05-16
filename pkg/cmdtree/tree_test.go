@@ -108,6 +108,24 @@ func containsCand(cands []Candidate, name string) (Candidate, bool) {
 	return Candidate{}, false
 }
 
+func TestConfigTopLevel_SetIncludesClassOfServiceSchedulers(t *testing.T) {
+	setNode := ConfigTopLevel["set"]
+	if setNode == nil {
+		t.Fatal("missing set node")
+	}
+	cosNode := setNode.Children["class-of-service"]
+	if cosNode == nil {
+		t.Fatalf("set completion tree missing class-of-service: %+v", setNode.Children)
+	}
+	schedulersNode := cosNode.Children["schedulers"]
+	if schedulersNode == nil {
+		t.Fatalf("class-of-service completion tree missing schedulers: %+v", cosNode.Children)
+	}
+	if schedulersNode.Children["<scheduler>"] != ConfigClassOfServiceSchedulers {
+		t.Fatalf("schedulers completion tree is not wired to typed scheduler schema")
+	}
+}
+
 func TestSchedulers_TypedLeaf_QuestionHelpShowsPlaceholderAndExamples(t *testing.T) {
 	// After `sched transmit-rate`, `?` should show the rate placeholder
 	// plus example values.

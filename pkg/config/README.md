@@ -39,7 +39,11 @@ nothing internal.
   `transmit-rate asd` fails loud instead of silently zeroing in the
   existing parsers. Scheduler `buffer-size` validation intentionally
   accepts only byte sizes with explicit suffixes because the current
-  compiler stores bytes, not a percent-of-pool representation.
+  compiler, userspace snapshot, and Rust dataplane protocol all carry
+  `buffer_size_bytes`, not a percent-of-pool representation. Do not
+  accept percent syntax in the schema until that runtime representation
+  exists too (tracked in #1336); otherwise `buffer-size 10%` would
+  validate and then compile as zero bytes through the legacy parser.
   `parseBandwidthLimitStrict` / `parseBurstSizeLimitStrict` /
   `parseScaledDecimalUnitStrict` in `compiler_protocols.go` are the
   error-returning siblings of the legacy zero-return parsers — the legacy
