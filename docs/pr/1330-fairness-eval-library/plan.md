@@ -193,7 +193,7 @@ userspace-dp/src/
     fairness-eval.rs           ~40 LOC; pub fn main only
   fairness.rs                  UNCHANGED (293 LOC; the 4 primitives)
   fairness_eval/               NEW module — orchestration library
-    mod.rs                     pub fn run_evaluation(inputs) -> Report
+    mod.rs                     pub fn run_evaluation(&Args, Inputs) -> Result<Report, String>
     args.rs                    Args struct + parse_args + flag-parse helpers
                                (parse_required_*_arg, parse_required_*_value,
                                parse_number_or_percent, parse_fraction_or_percent,
