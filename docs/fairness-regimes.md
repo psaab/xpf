@@ -457,12 +457,12 @@ infer phase semantics from unrelated per-class sweeps. The validator is:
 
 The input artifact must contain `root_cap_mbps`,
 `borrower_guarantee_mbps`, `peer_guarantee_mbps`,
-`handback_window_sec`, auditable handback evidence, and four named
+`handback_samples`, and four named
 phases: `borrow_alone`, `peer_demand`, `peer_steady`, and
 `peer_idle_reclaim`. Each phase records `throughput_mbps.borrower` and
 `throughput_mbps.peer`; `peer_steady` may also record
-`cos_admission_drops.peer`. Handback evidence is either
-`handback_samples` with time-domain throughput samples. Scalar
+`cos_admission_drops.peer`. Handback evidence must be time-domain
+throughput samples in `handback_samples`. Scalar
 `handback_window_sec` values and self-attested handback labels are not
 accepted as substitutes because the validator must derive the handback
 point from auditable data. The default gates are:
