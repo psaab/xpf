@@ -44,7 +44,11 @@ under the daemon's errgroup. Nothing else imports this package.
   (`xpf_userspace_cos_drain_{guarantee,surplus}_sent_bytes_total` and
   `xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total`)
   deliberately include non-exact queues so best-effort/exact contention can be
-  diagnosed without adding packet-path shared state.
+  diagnosed. Exact-backlog cross-binding visibility uses per-binding
+  cacheline-padded atomic slots (`SharedCoSExactBacklog`) written from the
+  enqueue and completion paths; metric collection still reads from a single
+  `Status()` snapshot per scrape rather than instrumenting the scrape path
+  itself.
 - The SSE handler reads from `pkg/logging.EventBuffer`. The buffer is
   bounded; if a consumer stops reading, events are dropped silently — by
   design.

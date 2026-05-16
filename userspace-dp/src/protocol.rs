@@ -957,6 +957,13 @@ pub(crate) struct CoSQueueStatus {
     // queues without a single unambiguous owner-local binding.
     #[serde(rename = "drain_sent_bytes", default)]
     pub drain_sent_bytes: u64,
+    // #1369 drain-phase telemetry. Populated for all queue types,
+    // including non-exact and shared queues — not zeroed for queues
+    // without a single owner-local binding. The steal counter
+    // (`drain_nonexact_sent_bytes_while_exact_backlogged`) uses
+    // interface-global exact-backlog visibility via
+    // `SharedCoSExactBacklog` (per-binding cacheline-padded atomic
+    // slots) rather than a worker-local scan.
     #[serde(rename = "drain_guarantee_sent_bytes", default)]
     pub drain_guarantee_sent_bytes: u64,
     #[serde(rename = "drain_surplus_sent_bytes", default)]

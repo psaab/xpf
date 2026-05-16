@@ -81,7 +81,7 @@ use cos::{
 // no longer originate from tx.rs after the moves.
 use super::cos::{
     clear_all_cos_exact_backlogs_for_binding, cos_queue_len, cos_queue_pop_front_no_snapshot,
-    release_all_cos_queue_leases, release_all_cos_root_leases,
+    publish_cos_exact_backlog, release_all_cos_queue_leases, release_all_cos_root_leases,
 };
 
 pub(crate) struct BindingWorker {
@@ -1241,6 +1241,16 @@ pub(crate) fn worker_loop(
             );
             for binding in bindings.iter_mut() {
                 binding.cos.cos_fast_interfaces = cos_fast_interfaces.clone();
+            }
+            // The new SharedCoSExactBacklog slots in the freshly built
+            // cos_fast_interfaces start at zero. Republish the current
+            // exact-queue backlog for every binding/ifindex so peer workers
+            // do not observe a false-zero window until the next organic
+            // enqueue or drain refresh.
+            for binding in bindings.iter() {
+                for &root_ifindex in binding.cos.cos_interfaces.keys() {
+                    publish_cos_exact_backlog(binding, root_ifindex);
+                }
             }
         }
         let ha_runtime = ha_state.load();
