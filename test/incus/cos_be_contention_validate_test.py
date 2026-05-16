@@ -473,6 +473,65 @@ class CoSBEContentionValidateTests(unittest.TestCase):
         }
         self.assertEqual(cos_validate.iperf_bps(artifact), 123)
 
+    def test_fails_missing_status_json_without_aborting_cell(self) -> None:
+        """Missing status-before.json should produce a per-cell FAIL, not a global abort."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            # Write baseline with a missing status-before.json (only iperf JSON provided).
+            baseline_dir = root / "cell" / "baseline"
+            baseline_dir.mkdir(parents=True)
+            _write_json(baseline_dir / "status-during.json", _status(q2=100))
+            _write_json(baseline_dir / "status-after.json", _status(q2=200))
+            for phase in ("before", "during", "after"):
+                (baseline_dir / f"status-{phase}.rc").write_text("0\n", encoding="utf-8")
+            _write_json(baseline_dir / "exact-iperf.json", _iperf_json(1_000_000_000))
+            (baseline_dir / "exact-iperf.rc").write_text("0\n", encoding="utf-8")
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=200),
+                during=_status(q0=100, q2=300),
+                after=_status(q0=200, q2=400),
+                exact_bps=920_000_000,
+                contender_bps=24_000_000_000,
+            )
+
+            # Must not raise — missing JSON is a per-cell FAIL, not a global abort.
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(
+                any("missing JSON artifact" in reason for reason in summary["failure_reasons"])
+            )
+
+    def test_fails_during_snapshot_shows_no_traffic_in_expected_queue(self) -> None:
+        """During snapshot that matches before (zero delta) triggers the during gate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=100),
+                during=_status(q2=100),  # no delta from before
+                after=_status(q2=200),   # after gate passes
+                exact_bps=1_000_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=200),
+                during=_status(q0=100, q2=300),
+                after=_status(q0=200, q2=400),
+                exact_bps=920_000_000,
+                contender_bps=24_000_000_000,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(
+                any("during-snapshot" in reason for reason in summary["failure_reasons"])
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

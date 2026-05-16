@@ -273,7 +273,11 @@ def _validate_status_capture(phase_dir: Path) -> list[str]:
         if not rc_path.exists():
             failures.append(f"{phase_dir.name}: missing status-{phase}.rc")
             continue
-        rc = read_exit_code(rc_path)
+        try:
+            rc = read_exit_code(rc_path)
+        except ValidationError as exc:
+            failures.append(f"{phase_dir.name}: {exc}")
+            continue
         if rc != 0:
             failures.append(f"{phase_dir.name}: status-{phase} capture exited {rc}")
     return failures
@@ -290,13 +294,35 @@ def analyze_phase(
 ) -> dict[str, Any]:
     failures = _validate_status_capture(phase_dir)
     before_path, during_path, after_path = _phase_status_paths(phase_dir)
-    before_json = load_json(before_path)
-    during_json = load_json(during_path)
-    after_json = load_json(after_path)
+    try:
+        before_json = load_json(before_path)
+    except ValidationError as exc:
+        failures.append(str(exc))
+        return {"verdict": "FAIL", "failure_reasons": failures, "queue_deltas": [], "drain_shape": []}
+    try:
+        during_json = load_json(during_path)
+    except ValidationError as exc:
+        failures.append(str(exc))
+        during_json = before_json
+    try:
+        after_json = load_json(after_path)
+    except ValidationError as exc:
+        failures.append(str(exc))
+        after_json = before_json
     before_shapes = queue_shapes(before_json, interface_name=interface_name, ifindex=ifindex)
     during_shapes = queue_shapes(during_json, interface_name=interface_name, ifindex=ifindex)
     after_shapes = queue_shapes(after_json, interface_name=interface_name, ifindex=ifindex)
     deltas = queue_deltas(before_shapes, after_shapes)
+    during_deltas = queue_deltas(before_shapes, during_shapes)
+
+    for queue_id in sorted(expected_queues):
+        dur_delta = during_deltas.get(queue_id, QueueDelta(queue_id, "-", 0, 0, 0))
+        if dur_delta.sent_bytes < min_expected_sent_bytes:
+            failures.append(
+                f"{phase_dir.name}: expected queue {queue_id} during-snapshot "
+                f"sent_bytes delta {dur_delta.sent_bytes} below {min_expected_sent_bytes}; "
+                "traffic may not have been flowing when during snapshot was taken"
+            )
 
     negative = [
         delta
@@ -362,9 +388,13 @@ def analyze_iperf(phase_dir: Path, roles: tuple[str, ...]) -> tuple[dict[str, An
     summaries: dict[str, Any] = {}
     failures: list[str] = []
     for role in roles:
-        rc = read_exit_code(phase_dir / f"{role}-iperf.rc")
-        if rc != 0:
-            failures.append(f"{phase_dir.name}: {role} iperf exited {rc}")
+        try:
+            rc = read_exit_code(phase_dir / f"{role}-iperf.rc")
+            if rc != 0:
+                failures.append(f"{phase_dir.name}: {role} iperf exited {rc}")
+        except ValidationError as exc:
+            failures.append(f"{phase_dir.name}: {exc}")
+            rc = 1
         try:
             bps = iperf_bps(load_json(phase_dir / f"{role}-iperf.json"))
         except ValidationError as exc:
