@@ -272,6 +272,12 @@ the NAT module applies it:
   address family, and canonical source IP bytes with SHA-256 to choose a stable
   pool index. This is sticky within the current pool size and order; changing
   either can remap existing source IPs to different pool addresses.
+  This is intentionally documented as a userspace-v1 algorithm, not eBPF/DPDK
+  parity: the legacy eBPF path uses `src_ip % num_ips` for IPv4 and a 32-bit
+  lane XOR for IPv6, while DPDK consumes the shared pool config but has its own
+  allocator implementation. Mixed-backend deployments must not assume the same
+  client maps to the same pool address until #1377 defines a shared
+  cross-backend address-persistent contract.
 - **Checksum update:** Incremental RFC 1624 checksum adjustment for
   IP header + TCP/UDP pseudo-header. Avoids full recomputation.
 

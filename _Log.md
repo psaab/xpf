@@ -2,6 +2,11 @@
 
 ## 2026-05-16
 
+- **Timestamp**: 2026-05-16T23:58:00Z
+  - **Action**: PR #1385 round-2 review follow-up — made Rust pool-mode SNAT skip matched rules whose pool has no address for the packet family so later compatible rules can apply, added wrong-family regression tests, and documented userspace/eBPF/DPDK address-persistent algorithm divergence until #1377 defines a shared contract.
+  - **File(s)**: `userspace-dp/src/nat.rs`, `userspace-dp/src/nat_tests.rs`, `docs/userspace-dataplane-architecture.md`, `docs/userspace-dataplane-gaps.md`, `README.md`, `_Log.md`
+  - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml pool_snat_wrong_family`; `go test ./pkg/dataplane/userspace`; `git diff --check`
+
 - **Timestamp**: 2026-05-16T22:18:20Z
   - **Action**: PR #1385 round-1 review fixes — make userspace source-NAT pool snapshots fail closed when the referenced pool is missing, empty, or has an invalid port range; add regression coverage for each unsafe pool-mode case; refresh the userspace dataplane gap date after the pool-mode capability update.
   - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `docs/userspace-dataplane-gaps.md`, `_Log.md`

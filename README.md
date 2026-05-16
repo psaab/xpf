@@ -59,7 +59,7 @@ system {
 | Stateful forwarding | Yes | Yes |
 | Zone + global policies | Yes | Yes |
 | Application matching | Yes | Yes |
-| Source NAT (interface + pool) | Yes | Interface mode yes; pool mode still gated |
+| Source NAT (interface + pool) | Yes | Interface and pool mode yes; userspace `address-persistent` uses a documented userspace-v1 hash until #1377 defines cross-backend parity |
 | Destination NAT | Yes | Yes |
 | Static NAT (1:1) | Yes | Yes |
 | NAT64 (IPv6↔IPv4) | Yes | Yes |

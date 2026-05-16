@@ -827,6 +827,73 @@ fn pool_snat_multiple_addresses_round_robin() {
 }
 
 #[test]
+fn pool_snat_wrong_family_pool_does_not_shadow_later_rule() {
+    let rules = parse_source_nat_rules(&[
+        SourceNATRuleSnapshot {
+            name: "wrong-family".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "v6-only".to_string(),
+            pool_addresses: vec!["2001:db8::10".to_string()],
+            port_low: 1024,
+            port_high: 65535,
+            ..SourceNATRuleSnapshot::default()
+        },
+        SourceNATRuleSnapshot {
+            name: "usable-v4".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "v4-pool".to_string(),
+            pool_addresses: vec!["203.0.113.20".to_string()],
+            port_low: 40000,
+            port_high: 40000,
+            ..SourceNATRuleSnapshot::default()
+        },
+    ]);
+
+    let d = match_source_nat(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    )
+    .expect("later compatible rule should match");
+    assert_eq!(d.rewrite_src, Some("203.0.113.20".parse().unwrap()));
+    assert_eq!(d.rewrite_src_port, Some(40000));
+}
+
+#[test]
+fn pool_snat_wrong_family_pool_returns_none_when_no_later_rule_matches() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "wrong-family".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "v6-only".to_string(),
+        pool_addresses: vec!["2001:db8::10".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let d = match_source_nat(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    );
+    assert_eq!(d, None);
+}
+
+#[test]
 fn pool_snat_address_persistent_sticks_source_to_pool_address() {
     let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
         name: "pool-sticky".to_string(),

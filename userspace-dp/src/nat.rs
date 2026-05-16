@@ -325,9 +325,15 @@ pub(crate) fn match_source_nat(
                     ..NatDecision::default()
                 });
             }
-            _ => {}
+            _ => {
+                // This rule matched the zones/prefixes but the referenced pool
+                // has no address for the packet family. Treat it as an
+                // unusable rule and keep walking so a later compatible rule can
+                // still apply. Returning a default NatDecision here would
+                // silently shadow later SNAT rules.
+                continue;
+            }
         }
-        return Some(NatDecision::default());
     }
     None
 }

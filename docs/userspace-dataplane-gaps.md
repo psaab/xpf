@@ -17,7 +17,7 @@ These capabilities exist in the current Rust userspace dataplane code path:
 | Zone + global policies | Implemented | Address and application terms are pre-expanded by the daemon |
 | Application matching | Implemented | Protocol + port terms, including expanded multi-term apps |
 | Source NAT (interface mode) | Implemented | IPv4 and IPv6 egress interface rewrite |
-| Source NAT (pool mode) | Implemented | IPv4/IPv6 pool address and port allocation; `address-persistent` uses a deterministic source-IP hash |
+| Source NAT (pool mode) | Implemented with caveat | IPv4/IPv6 pool address and port allocation; wrong-family pools are skipped so later compatible rules can match. `address-persistent` uses a userspace-v1 deterministic SHA-256 source-IP hash that intentionally differs from legacy eBPF IPv4 modulo / IPv6 lane-XOR selection and from DPDK allocator internals until #1377 defines a shared cross-backend contract. |
 | Destination NAT | Implemented | Pre-expanded tuple snapshots from Go |
 | Static NAT | Implemented | Bidirectional 1:1 translation |
 | NAT64 | Implemented | Forward and reverse translation with reverse-session state |
