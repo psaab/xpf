@@ -1,5 +1,10 @@
 ## Status
 
+IMPLEMENTED — the evaluator has been split into `src/fairness_eval/`
+modules with `src/bin/fairness-eval.rs` retained as the thin CLI shell.
+Implementation preserved the black-box CLI contract and kept saturation as
+a reporting-only field.
+
 DRAFT v4 — incorporates round-3 review feedback (Codex PLAN-NEEDS-MINOR with 6 additional ordering invariants I missed + a bad line citation; Gemini PLAN-READY with strong round-2 calibration autopsy).
 
 ### v4 changes vs v3
