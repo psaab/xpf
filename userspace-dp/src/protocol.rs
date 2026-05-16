@@ -412,6 +412,8 @@ pub(crate) struct SourceNATRuleSnapshot {
     pub port_low: u16,
     #[serde(rename = "port_high", default)]
     pub port_high: u16,
+    #[serde(rename = "address_persistent", default)]
+    pub address_persistent: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

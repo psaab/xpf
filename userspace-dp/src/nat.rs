@@ -2,6 +2,7 @@ use crate::prefix::{PrefixV4, PrefixV6};
 use crate::{DestinationNATRuleSnapshot, SourceNATRuleSnapshot, StaticNATRuleSnapshot};
 use ipnet::IpNet;
 use rustc_hash::FxHashMap;
+use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -61,8 +62,10 @@ impl NatDecision {
 pub(crate) struct PortAllocator {
     /// One atomic counter per pool address, used for round-robin port allocation.
     counters: Vec<AtomicU32>,
-    /// Index for round-robin address selection.
-    addr_counter: AtomicU32,
+    /// Index for IPv4 round-robin address selection.
+    addr_counter_v4: AtomicU32,
+    /// Index for IPv6 round-robin address selection.
+    addr_counter_v6: AtomicU32,
     pub(crate) port_low: u16,
     pub(crate) port_high: u16,
 }
@@ -75,7 +78,8 @@ impl Clone for PortAllocator {
                 .iter()
                 .map(|c| AtomicU32::new(c.load(Ordering::Relaxed)))
                 .collect(),
-            addr_counter: AtomicU32::new(self.addr_counter.load(Ordering::Relaxed)),
+            addr_counter_v4: AtomicU32::new(self.addr_counter_v4.load(Ordering::Relaxed)),
+            addr_counter_v6: AtomicU32::new(self.addr_counter_v6.load(Ordering::Relaxed)),
             port_low: self.port_low,
             port_high: self.port_high,
         }
@@ -86,7 +90,8 @@ impl Default for PortAllocator {
     fn default() -> Self {
         Self {
             counters: Vec::new(),
-            addr_counter: AtomicU32::new(0),
+            addr_counter_v4: AtomicU32::new(0),
+            addr_counter_v6: AtomicU32::new(0),
             port_low: 1024,
             port_high: 65535,
         }
@@ -98,19 +103,33 @@ impl PortAllocator {
         let counters = (0..num_addresses).map(|_| AtomicU32::new(0)).collect();
         Self {
             counters,
-            addr_counter: AtomicU32::new(0),
+            addr_counter_v4: AtomicU32::new(0),
+            addr_counter_v6: AtomicU32::new(0),
             port_low,
             port_high,
         }
     }
 
-    /// Pick the next pool address index (round-robin).
-    pub(crate) fn next_address_index(&self) -> usize {
-        if self.counters.is_empty() {
+    /// Pick a pool address index for the current address family.
+    pub(crate) fn address_index(
+        &self,
+        src_ip: IpAddr,
+        family_offset: usize,
+        family_len: usize,
+        address_persistent: bool,
+    ) -> usize {
+        if family_len == 0 {
             return 0;
         }
-        let idx = self.addr_counter.fetch_add(1, Ordering::Relaxed);
-        (idx as usize) % self.counters.len()
+        if address_persistent {
+            return family_offset + sticky_pool_index(src_ip, family_len);
+        }
+        let counter = match src_ip {
+            IpAddr::V4(_) => &self.addr_counter_v4,
+            IpAddr::V6(_) => &self.addr_counter_v6,
+        };
+        let idx = counter.fetch_add(1, Ordering::Relaxed);
+        family_offset + ((idx as usize) % family_len)
     }
 
     /// Allocate the next port for the given address index.
@@ -125,6 +144,29 @@ impl PortAllocator {
     }
 }
 
+fn sticky_pool_index(src_ip: IpAddr, pool_len: usize) -> usize {
+    if pool_len <= 1 {
+        return 0;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"xpf-userspace-snat-address-persistent-v1");
+    match src_ip {
+        IpAddr::V4(addr) => {
+            hasher.update([4]);
+            hasher.update(addr.octets());
+        }
+        IpAddr::V6(addr) => {
+            hasher.update([6]);
+            hasher.update(addr.octets());
+        }
+    }
+    let digest = hasher.finalize();
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    (u64::from_be_bytes(first) % pool_len as u64) as usize
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SourceNatRule {
     pub(crate) from_zone: String,
@@ -135,6 +177,7 @@ pub(crate) struct SourceNatRule {
     pub(crate) destination_v6: Vec<PrefixV6>,
     pub(crate) interface_mode: bool,
     pub(crate) off: bool,
+    pub(crate) address_persistent: bool,
     pub(crate) pool_addresses_v4: Vec<Ipv4Addr>,
     pub(crate) pool_addresses_v6: Vec<Ipv6Addr>,
     pub(crate) pool_allocator: PortAllocator,
@@ -168,6 +211,7 @@ pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<Sou
             to_zone: snap.to_zone.clone(),
             interface_mode: snap.interface_mode,
             off: snap.off,
+            address_persistent: snap.address_persistent,
             ..SourceNatRule::default()
         };
         for prefix in &snap.source_addresses {
@@ -241,12 +285,17 @@ pub(crate) fn match_source_nat(
                 ..NatDecision::default()
             });
         }
-        // Pool-mode SNAT: pick address round-robin, allocate port.
+        // Pool-mode SNAT: pick address by source-IP hash when
+        // address-persistent is enabled, otherwise round-robin by family.
         match src_ip {
             IpAddr::V4(_) if !rule.pool_addresses_v4.is_empty() => {
-                let addr_idx = rule.pool_allocator.next_address_index();
-                // addr_idx is mod total_pool; v4 addresses are at indices 0..v4_len
-                let v4_idx = addr_idx % rule.pool_addresses_v4.len();
+                let addr_idx = rule.pool_allocator.address_index(
+                    src_ip,
+                    0,
+                    rule.pool_addresses_v4.len(),
+                    rule.address_persistent,
+                );
+                let v4_idx = addr_idx;
                 let pool_addr = rule.pool_addresses_v4[v4_idx];
                 let port = rule.pool_allocator.next_port(addr_idx);
                 return Some(NatDecision {
@@ -258,10 +307,14 @@ pub(crate) fn match_source_nat(
                 });
             }
             IpAddr::V6(_) if !rule.pool_addresses_v6.is_empty() => {
-                let addr_idx = rule.pool_allocator.next_address_index();
-                // v6 addresses are stored after v4 addresses in the allocator
                 let v6_offset = rule.pool_addresses_v4.len();
-                let v6_idx = (addr_idx.wrapping_sub(v6_offset)) % rule.pool_addresses_v6.len();
+                let addr_idx = rule.pool_allocator.address_index(
+                    src_ip,
+                    v6_offset,
+                    rule.pool_addresses_v6.len(),
+                    rule.address_persistent,
+                );
+                let v6_idx = addr_idx - v6_offset;
                 let pool_addr = rule.pool_addresses_v6[v6_idx];
                 let port = rule.pool_allocator.next_port(addr_idx);
                 return Some(NatDecision {

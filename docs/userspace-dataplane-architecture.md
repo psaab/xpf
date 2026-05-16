@@ -265,7 +265,13 @@ the NAT module applies it:
 
 - **SNAT (interface mode):** Rewrite source IP to egress interface address.
   Source port preserved.
-- **SNAT (pool mode):** Not yet implemented.
+- **SNAT (pool mode):** Rewrite source IP to a configured source pool address
+  and allocate a source port from the pool range. By default, pool address
+  selection is round-robin within the packet address family. With global source
+  NAT `address-persistent`, the userspace dataplane hashes a domain tag,
+  address family, and canonical source IP bytes with SHA-256 to choose a stable
+  pool index. This is sticky within the current pool size and order; changing
+  either can remap existing source IPs to different pool addresses.
 - **Checksum update:** Incremental RFC 1624 checksum adjustment for
   IP header + TCP/UDP pseudo-header. Avoids full recomputation.
 

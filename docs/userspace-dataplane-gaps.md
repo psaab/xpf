@@ -17,6 +17,7 @@ These capabilities exist in the current Rust userspace dataplane code path:
 | Zone + global policies | Implemented | Address and application terms are pre-expanded by the daemon |
 | Application matching | Implemented | Protocol + port terms, including expanded multi-term apps |
 | Source NAT (interface mode) | Implemented | IPv4 and IPv6 egress interface rewrite |
+| Source NAT (pool mode) | Implemented | IPv4/IPv6 pool address and port allocation; `address-persistent` uses a deterministic source-IP hash |
 | Destination NAT | Implemented | Pre-expanded tuple snapshots from Go |
 | Static NAT | Implemented | Bidirectional 1:1 translation |
 | NAT64 | Implemented | Forward and reverse translation with reverse-session state |
@@ -39,7 +40,6 @@ These are the remaining explicit configuration gates in
 | Feature/config shape | Gate status | Reason |
 |----------------------|-------------|--------|
 | Unsupported policy shapes | Gated | Address/application expansion must succeed for userspace |
-| Source NAT (pool mode) | Gated | Capability check still rejects non-interface SNAT rules |
 | Screen behavior requiring SYN cookies | Gated | SYN-cookie behavior remains a legacy eBPF capability |
 | Three-color policers | Gated | Simple filters are supported; three-color policers are not |
 | Port mirroring | Gated | No userspace mirroring path |
@@ -90,8 +90,7 @@ There are two distinct fallback boundaries:
 
 The highest-value remaining work on current `master` is:
 
-1. admit pool-mode SNAT cleanly through the capability gate
-2. close the remaining SYN-cookie-dependent screen gap
-3. implement three-color policer support
-4. implement port mirroring
-5. continue correctness and performance hardening on the active AF_XDP fast path
+1. close the remaining SYN-cookie-dependent screen gap
+2. implement three-color policer support
+3. implement port mirroring
+4. continue correctness and performance hardening on the active AF_XDP fast path

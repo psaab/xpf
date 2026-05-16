@@ -1202,6 +1202,22 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 			if len(destAddrs) == 0 && rule.Match.DestinationAddress != "" {
 				destAddrs = append(destAddrs, rule.Match.DestinationAddress)
 			}
+			var poolAddresses []string
+			var portLow, portHigh uint16
+			if rule.Then.PoolName != "" {
+				if pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]; ok && pool != nil {
+					if pool.Address != "" {
+						poolAddresses = append(poolAddresses, pool.Address)
+					}
+					poolAddresses = append(poolAddresses, pool.Addresses...)
+					if pool.PortLow > 0 {
+						portLow = uint16(pool.PortLow)
+					}
+					if pool.PortHigh > 0 {
+						portHigh = uint16(pool.PortHigh)
+					}
+				}
+			}
 			out = append(out, SourceNATRuleSnapshot{
 				Name:                 rule.Name,
 				FromZone:             rs.FromZone,
@@ -1211,6 +1227,10 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 				InterfaceMode:        rule.Then.Interface,
 				Off:                  rule.Then.Off,
 				PoolName:             rule.Then.PoolName,
+				PoolAddresses:        poolAddresses,
+				PortLow:              portLow,
+				PortHigh:             portHigh,
+				AddressPersistent:    cfg.Security.NAT.AddressPersistent,
 			})
 		}
 	}

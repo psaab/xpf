@@ -238,6 +238,10 @@ type SourceNATRuleSnapshot struct {
 	InterfaceMode        bool     `json:"interface_mode,omitempty"`
 	Off                  bool     `json:"off,omitempty"`
 	PoolName             string   `json:"pool_name,omitempty"`
+	PoolAddresses        []string `json:"pool_addresses,omitempty"`
+	PortLow              uint16   `json:"port_low,omitempty"`
+	PortHigh             uint16   `json:"port_high,omitempty"`
+	AddressPersistent    bool     `json:"address_persistent,omitempty"`
 }
 
 type StaticNATRuleSnapshot struct {
