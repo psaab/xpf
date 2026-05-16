@@ -117,6 +117,7 @@ pub(super) fn build_worker_cos_fast_interfaces(
     owner_worker_by_queue: &BTreeMap<(i32, u8), u32>,
     owner_live_by_queue: &BTreeMap<(i32, u8), Arc<BindingLiveState>>,
     shared_root_leases: &BTreeMap<i32, Arc<SharedCoSRootLease>>,
+    shared_exact_backlogs: &BTreeMap<i32, Arc<SharedCoSExactBacklog>>,
     shared_queue_leases: &BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>,
     shared_queue_vtime_floors: &BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>,
 ) -> FastMap<i32, WorkerCoSInterfaceFastPath> {
@@ -161,6 +162,7 @@ pub(super) fn build_worker_cos_fast_interfaces(
                 queue_index_by_id,
                 tx_owner_live: tx_owner_live_by_tx_ifindex.get(&tx_ifindex).cloned(),
                 shared_root_lease: shared_root_leases.get(&egress_ifindex).cloned(),
+                shared_exact_backlog: shared_exact_backlogs.get(&egress_ifindex).cloned(),
                 queue_fast_path,
             },
         );
@@ -316,6 +318,7 @@ pub(super) fn reset_binding_cos_runtime(
     // stale value in their V_min calculation, throttling them
     // unnecessarily until the first post-reset post-settle publish.
     vacate_all_shared_exact_slots_for_binding(binding);
+    clear_all_cos_exact_backlogs_for_binding(binding);
     binding.cos.cos_interfaces.clear();
     binding.cos.cos_interface_order.clear();
     binding.cos.cos_interface_rr = 0;
@@ -335,11 +338,7 @@ pub(super) fn reset_binding_cos_runtime(
             .fetch_add(dropped_total, Ordering::Relaxed);
     }
     for req in dropped_prepared {
-        recycle_prepared_immediately_with_shared(
-            binding,
-            &req,
-            shared_recycles.as_deref_mut(),
-        );
+        recycle_prepared_immediately_with_shared(binding, &req, shared_recycles.as_deref_mut());
     }
 }
 
@@ -427,6 +426,15 @@ pub(crate) fn merge_cos_queue_owner_profile_sum(
     // always sum-of-single-non-zero, but saturating_add keeps us
     // safe if the ownership ever shifts mid-scrape.
     dst.drain_sent_bytes = dst.drain_sent_bytes.saturating_add(src.drain_sent_bytes);
+    dst.drain_guarantee_sent_bytes = dst
+        .drain_guarantee_sent_bytes
+        .saturating_add(src.drain_guarantee_sent_bytes);
+    dst.drain_surplus_sent_bytes = dst
+        .drain_surplus_sent_bytes
+        .saturating_add(src.drain_surplus_sent_bytes);
+    dst.drain_nonexact_sent_bytes_while_exact_backlogged = dst
+        .drain_nonexact_sent_bytes_while_exact_backlogged
+        .saturating_add(src.drain_nonexact_sent_bytes_while_exact_backlogged);
     dst.drain_park_root_tokens = dst
         .drain_park_root_tokens
         .saturating_add(src.drain_park_root_tokens);
@@ -722,12 +730,15 @@ where
                 // "bytes the scheduler actually shaped out"; pair it
                 // with `queue.transmit_rate_bytes` over a scrape
                 // window to detect a direct cap bypass on this row.
-                // drain_park_root_tokens / drain_park_queue_tokens
-                // both rising with drain_sent_bytes sustaining above
-                // configured rate would mean the gate fires but the
-                // refill/accounting is wrong; both near zero with
-                // drain_sent_bytes above rate means the gate never
-                // ran for this queue.
+                // The guarantee/surplus split and non-exact/exact-
+                // backlog counter diagnose whether root surplus or
+                // non-exact guarantee service is stealing service
+                // from exact queues. drain_park_root_tokens /
+                // drain_park_queue_tokens both rising with
+                // drain_sent_bytes sustaining above configured rate
+                // would mean the gate fires but refill/accounting is
+                // wrong; both near zero with drain_sent_bytes above
+                // rate means the gate never ran for this queue.
                 status.drain_sent_bytes = status.drain_sent_bytes.saturating_add(
                     queue
                         .telemetry
@@ -735,6 +746,30 @@ where
                         .drain_sent_bytes
                         .load(Ordering::Relaxed),
                 );
+                status.drain_guarantee_sent_bytes =
+                    status.drain_guarantee_sent_bytes.saturating_add(
+                        queue
+                            .telemetry
+                            .owner_profile
+                            .drain_guarantee_sent_bytes
+                            .load(Ordering::Relaxed),
+                    );
+                status.drain_surplus_sent_bytes = status.drain_surplus_sent_bytes.saturating_add(
+                    queue
+                        .telemetry
+                        .owner_profile
+                        .drain_surplus_sent_bytes
+                        .load(Ordering::Relaxed),
+                );
+                status.drain_nonexact_sent_bytes_while_exact_backlogged = status
+                    .drain_nonexact_sent_bytes_while_exact_backlogged
+                    .saturating_add(
+                        queue
+                            .telemetry
+                            .owner_profile
+                            .drain_nonexact_sent_bytes_while_exact_backlogged
+                            .load(Ordering::Relaxed),
+                    );
                 status.drain_park_root_tokens = status.drain_park_root_tokens.saturating_add(
                     queue
                         .telemetry

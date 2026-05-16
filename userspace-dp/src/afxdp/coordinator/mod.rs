@@ -215,6 +215,7 @@ impl Coordinator {
             .owner_live_by_queue
             .store(Arc::new(BTreeMap::new()));
         self.cos.root_leases.store(Arc::new(BTreeMap::new()));
+        self.cos.exact_backlogs.store(Arc::new(BTreeMap::new()));
         self.cos.queue_leases.store(Arc::new(BTreeMap::new()));
         self.cos.queue_vtime_floors.store(Arc::new(BTreeMap::new()));
         self.last_slow_path_status = self
@@ -679,6 +680,7 @@ impl Coordinator {
             let shared_cos_owner_worker_by_queue = self.cos.owner_worker_by_queue.clone();
             let shared_cos_owner_live_by_queue = self.cos.owner_live_by_queue.clone();
             let shared_cos_root_leases = self.cos.root_leases.clone();
+            let shared_cos_exact_backlogs = self.cos.exact_backlogs.clone();
             let shared_cos_queue_leases = self.cos.queue_leases.clone();
             let shared_cos_queue_vtime_floors = self.cos.queue_vtime_floors.clone();
             let runtime_atomics =
@@ -722,6 +724,7 @@ impl Coordinator {
                         shared_cos_owner_worker_by_queue,
                         shared_cos_owner_live_by_queue,
                         shared_cos_root_leases,
+                        shared_cos_exact_backlogs,
                         shared_cos_queue_leases,
                         shared_cos_queue_vtime_floors,
                         cos_status_clone,
@@ -1049,6 +1052,7 @@ impl Coordinator {
             &active_shards_by_egress_ifindex,
             current_leases.as_ref(),
         );
+        let current_exact_backlogs = self.cos.exact_backlogs.load();
         // #917: V_min coordination Arcs sized by worker count.
         // workers.last_planned_workers is set in apply_planned_workers
         // before this reconcile fires; defaults to 0 at first
@@ -1060,6 +1064,18 @@ impl Coordinator {
         let current_queue_vtime_floors = self.cos.queue_vtime_floors.load();
         let num_workers = self.workers.last_planned_workers().max(1);
         let current_queue_leases = self.cos.queue_leases.load();
+        let max_binding_slot = self
+            .workers
+            .identities
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0) as usize;
+        let next_exact_backlogs = build_shared_cos_exact_backlogs_reusing_existing(
+            &self.forwarding,
+            max_binding_slot,
+            current_exact_backlogs.as_ref(),
+        );
         let next_queue_leases = build_shared_cos_queue_leases_reusing_existing(
             &self.forwarding,
             &active_shards_by_egress_ifindex,
@@ -1082,6 +1098,9 @@ impl Coordinator {
         }
         if !shared_cos_root_leases_match(current_leases.as_ref(), &next_leases) {
             self.cos.root_leases.store(Arc::new(next_leases));
+        }
+        if !shared_cos_exact_backlogs_match(current_exact_backlogs.as_ref(), &next_exact_backlogs) {
+            self.cos.exact_backlogs.store(Arc::new(next_exact_backlogs));
         }
         if !shared_cos_queue_leases_match(current_queue_leases.as_ref(), &next_queue_leases) {
             self.cos.queue_leases.store(Arc::new(next_queue_leases));
@@ -1738,6 +1757,31 @@ fn build_shared_cos_root_leases_reusing_existing(
     out
 }
 
+fn build_shared_cos_exact_backlogs_reusing_existing(
+    forwarding: &ForwardingState,
+    max_binding_slot: usize,
+    existing: &BTreeMap<i32, Arc<SharedCoSExactBacklog>>,
+) -> BTreeMap<i32, Arc<SharedCoSExactBacklog>> {
+    let mut out = BTreeMap::new();
+    for (&ifindex, iface) in &forwarding.cos.interfaces {
+        if !iface.queues.iter().any(|queue| queue.exact) {
+            continue;
+        }
+        if let Some(backlog) = existing
+            .get(&ifindex)
+            .filter(|backlog| backlog.matches_config(max_binding_slot))
+        {
+            out.insert(ifindex, backlog.clone());
+            continue;
+        }
+        out.insert(
+            ifindex,
+            Arc::new(SharedCoSExactBacklog::new(max_binding_slot)),
+        );
+    }
+    out
+}
+
 fn build_shared_cos_queue_leases_reusing_existing(
     forwarding: &ForwardingState,
     active_shards_by_egress_ifindex: &BTreeMap<i32, usize>,
@@ -1807,6 +1851,17 @@ fn shared_cos_root_leases_match(
         && current.iter().all(|(ifindex, lease)| {
             next.get(ifindex)
                 .is_some_and(|next| Arc::ptr_eq(lease, next))
+        })
+}
+
+fn shared_cos_exact_backlogs_match(
+    current: &BTreeMap<i32, Arc<SharedCoSExactBacklog>>,
+    next: &BTreeMap<i32, Arc<SharedCoSExactBacklog>>,
+) -> bool {
+    current.len() == next.len()
+        && current.iter().all(|(ifindex, backlog)| {
+            next.get(ifindex)
+                .is_some_and(|next| Arc::ptr_eq(backlog, next))
         })
 }
 

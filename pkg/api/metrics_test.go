@@ -2,6 +2,7 @@ package api
 
 import (
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -380,6 +381,70 @@ func TestEmitCoSEqualFlowEnforcement_LabelsAndValues(t *testing.T) {
 		if value != want {
 			t.Fatalf("equal-flow metric %s = %v, want %v", m.Desc(), value, want)
 		}
+	}
+}
+
+func TestEmitCoSDrainPhaseTelemetry_EmitsNonExactExactBacklogCounter(t *testing.T) {
+	c := &xpfCollector{
+		cosDrainGuaranteeSentBytes: prometheus.NewDesc(
+			"xpf_userspace_cos_drain_guarantee_sent_bytes_total",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosDrainSurplusSentBytes: prometheus.NewDesc(
+			"xpf_userspace_cos_drain_surplus_sent_bytes_total",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosDrainNonExactSentBytesWhileExactBacklogged: prometheus.NewDesc(
+			"xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total",
+			"test desc",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+	}
+	status := dpuserspace.ProcessStatus{
+		CoSInterfaces: []dpuserspace.CoSInterfaceStatus{{
+			Ifindex: 80,
+			Queues: []dpuserspace.CoSQueueStatus{{
+				QueueID:                 0,
+				DrainGuaranteeSentBytes: 1024,
+				DrainSurplusSentBytes:   2048,
+				DrainNonExactSentBytesWhileExactBacklogged: 512,
+			}},
+		}},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitCoSDrainPhaseTelemetry(ch, status)
+		close(ch)
+	}()
+	values := map[*prometheus.Desc]float64{}
+	for m := range ch {
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("metric.Write: %v", err)
+		}
+		labels := map[string]string{}
+		for _, lp := range pb.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["ifindex"] != "80" || labels["queue_id"] != "0" {
+			t.Fatalf("wrong drain phase labels: %v", labels)
+		}
+		if pb.Counter == nil {
+			t.Fatalf("drain phase metric %s must be a counter: %+v", m.Desc(), &pb)
+		}
+		values[m.Desc()] = pb.Counter.GetValue()
+	}
+
+	want := map[*prometheus.Desc]float64{
+		c.cosDrainGuaranteeSentBytes:                    1024,
+		c.cosDrainSurplusSentBytes:                      2048,
+		c.cosDrainNonExactSentBytesWhileExactBacklogged: 512,
+	}
+	if !reflect.DeepEqual(values, want) {
+		t.Fatalf("drain phase metric values: got %+v, want %+v", values, want)
 	}
 }
 

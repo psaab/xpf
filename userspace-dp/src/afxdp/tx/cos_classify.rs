@@ -513,11 +513,7 @@ pub(super) fn enqueue_prepared_into_cos(
         shared_recycles.as_deref_mut(),
     ) {
         Ok(()) => {
-            recycle_prepared_immediately_with_shared(
-                binding,
-                &req,
-                shared_recycles.as_deref_mut(),
-            );
+            recycle_prepared_immediately_with_shared(binding, &req, shared_recycles.as_deref_mut());
             Ok(())
         }
         Err(CoSPendingTxItem::Local(_)) => Err(req),
@@ -723,6 +719,7 @@ fn enqueue_cos_item(
     mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(), CoSPendingTxItem> {
     let mut root_became_nonempty = false;
+    let mut accepted_exact = false;
     let (accepted, queue_id, recycle) = {
         // Split-borrow: `umem` sits alongside `cos_interfaces` on
         // `BindingWorker`, so we can take a shared borrow on the umem
@@ -821,6 +818,7 @@ fn enqueue_cos_item(
             let queue_was_empty = cos_queue_is_empty(queue);
             queue.hot.queued_bytes = queue.hot.queued_bytes.saturating_add(item_len);
             cos_queue_push_back(queue, item);
+            accepted_exact = queue.config.exact;
             if queue_was_empty {
                 root.nonempty_queues = root.nonempty_queues.saturating_add(1);
                 root_became_nonempty = root_was_empty;
@@ -838,6 +836,9 @@ fn enqueue_cos_item(
         binding.cos.cos_nonempty_interfaces = binding.cos.cos_nonempty_interfaces.saturating_add(1);
     }
     if accepted {
+        if accepted_exact {
+            publish_cos_exact_backlog(binding, egress_ifindex);
+        }
         return Ok(());
     }
     if let Some((recycle, offset)) = recycle {

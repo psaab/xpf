@@ -9,6 +9,11 @@ Pluggable: alternative backends (DPDK in `pkg/dataplane/dpdk`, userspace
 AF_XDP in `pkg/dataplane/userspace`) register via `RegisterBackend`. The
 Go interface is the only thing every caller sees.
 
+The userspace backend's status wire format is mirrored here for CLI/API
+consumers. CoS queue status includes queue-scoped drain-phase counters so
+operators can separate guarantee bytes, surplus bytes, and non-exact bytes
+sent while exact queues were still backlogged.
+
 ## Entry points
 
 - `DataPlane` — `dataplane.go`. Abstract interface.

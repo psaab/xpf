@@ -67,6 +67,7 @@ fn test_cos_fast_interfaces(
             queue_index_by_id,
             tx_owner_live: None,
             shared_root_lease: None,
+            shared_exact_backlog: None,
             queue_fast_path,
         },
     );

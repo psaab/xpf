@@ -278,7 +278,8 @@ drain path without having to scrape Prometheus or attach perf:
 Queue  Owner  Class    ...  Buffer     Queued pkts  Queued bytes  ...
 4      1      iperf-a  ...  1.19 MiB   299          443.24 KiB    ...
        Drops: flow_share=75  buffer=0  ecn_marked=97349
-       OwnerProfile: drain_p50=1us  drain_p99=16us  redirect_p99=2us  owner_pps=12345  peer_pps=6789
+       OwnerProfile: drain_p50=1us  drain_p99=16us  drain_invocations=1234
+       Binding telemetry: redirect_p99=2us  owner_pps=12345  peer_pps=6789
 ```
 
 Field meanings (from `BindingLiveState` in `userspace-dp/src/afxdp/umem.rs`):
@@ -328,12 +329,16 @@ without reading them is how we ship dormant code.
 
 ### Operational gotchas
 
-- **Non-exact / shared_exact queues have NO OwnerProfile line.**
-  The telemetry is per-binding on the owner's `BindingLiveState`;
-  if there is no single owner binding (shared_exact at ≥ 2.5 Gbps,
-  or non-exact queues), the CLI suppresses the row. An operator
-  wanting the same view for a high-rate shared queue must wait for
-  a sharded-per-worker histogram to land (not planned).
+- **Non-exact / shared_exact queues have no `OwnerProfile` latency
+  line.** The latency histogram is per-binding on the owner's
+  `BindingLiveState`; if there is no single owner binding
+  (shared_exact at ≥ 2.5 Gbps, or non-exact queues), the CLI
+  suppresses that row. Queue-scoped `DrainShape` counters still render
+  when non-zero. For best-effort/exact contention, compare
+  `guarantee`, `surplus`, and
+  `nonexact_while_exact_backlogged`; a rising non-exact/exact-backlog
+  delta means best-effort or uncapped service ran while exact queues on
+  the same shaped interface still had demand.
 - **The counters are process-monotonic.** For a windowed delta on
   live traffic, snapshot before and after and subtract — same as
   the `Drops:` line.
@@ -341,7 +346,11 @@ without reading them is how we ship dormant code.
   `xpf_cos_drain_latency_ns_bucket{ifindex, queue_id, bucket_hi_ns}`,
   `xpf_cos_redirect_acquire_ns_bucket{...}`,
   `xpf_cos_drain_invocations_total{ifindex, queue_id}`,
-  `xpf_cos_owner_pps{ifindex, queue_id}`, and `xpf_cos_peer_pps{...}`.
+  `xpf_cos_owner_pps{ifindex, queue_id}`,
+  `xpf_cos_peer_pps{...}`,
+  `xpf_userspace_cos_drain_guarantee_sent_bytes_total{...}`,
+  `xpf_userspace_cos_drain_surplus_sent_bytes_total{...}`, and
+  `xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{...}`.
   Expected cardinality per the plan: ≤ 8192 series per histogram.
 
 ## CPU pinning layout for the loss lab
