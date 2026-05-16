@@ -21,6 +21,7 @@ specs (those live at the repo root `docs/` level).
 | `804-instrumentation/`       | Per-binding ring-pressure counters (PR #804)                 | merged `3d2d63a4`     |
 | `807-refactor/`              | Docs refactor into this dir structure (PR #807)              | merged `61ff77c5`     |
 | `1316-lowrate-cos-buffers/`  | #1312/#1316 low-rate exact CoS buffer sizing measurements    | PR #1316              |
+| `1321-validation-contract/`  | #1321 100E100M and surplus give-back validation contract     | PR branch             |
 | `line-rate-investigation/`   | Parent investigation (#798) plan + phase-B step 0 + gaps doc + 8-matrix findings | #798 open |
 
 ## Conventions

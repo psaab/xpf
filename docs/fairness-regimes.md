@@ -405,6 +405,75 @@ placement can be audited after the wrapper exits. The class sweep passes
 default) so back-to-back iperf runs do not reuse stale CoS active-flow
 buckets as current-run RSS evidence.
 
+## 100E100M and surplus give-back validation
+
+Issue #1321 adds two deployment-facing validation contracts on top of the
+Cstruct-relative fairness gate:
+
+1. **100E100M**: 100 elephant streams must keep useful aggregate
+   throughput while 100 mouse probes keep bounded tail latency and do not
+   starve.
+2. **Work-conserving surplus give-back**: a surplus-sharing borrower may
+   exceed its guarantee while peers are idle, but it must hand back that
+   surplus quickly when a peer demands its guarantee and reclaim it after
+   the peer goes idle.
+
+These are separate from equal-flow enforcement. Equal-flow enforcement is
+a non-work-conserving comparison mode for raw equality vs throughput loss;
+it is not proof that surplus-sharing is fair.
+
+The mouse-latency matrix reducer now accepts a configurable gate cell, so
+the same artifact format can express both the legacy #905 gate and the
+#1321 100E100M gate. The canonical 100E100M reduced run is:
+
+```bash
+MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
+MOUSE_LATENCY_GATE_ELEPHANTS=100 \
+MOUSE_LATENCY_GATE_MICE=100 \
+MOUSE_LATENCY_GATE_PERCENTILE=p99_us \
+./test/incus/test-mouse-latency-matrix.sh /tmp/xpf-100e100m-exact
+```
+
+Run it once under the strict exact fixture and once after applying the
+surplus-sharing fixture. The reducer writes `summary.json` with the gate
+verdict, idle and loaded tail latency, ratio, selected percentile, and
+per-cell representative probe. Probe artifacts now include `rtt_us.p999`;
+the reducer carries that forward as `median_rep.p999_us` so p99.9 can be
+reported even when the hard gate remains p99. If p99.9 becomes a hard
+gate for a specific qualification run, set
+`MOUSE_LATENCY_GATE_PERCENTILE=p999_us`.
+
+Surplus give-back uses a reduced phase artifact instead of trying to
+infer phase semantics from unrelated per-class sweeps. The validator is:
+
+```bash
+./test/incus/fairness_surplus_giveback_validate.py \
+  --input /tmp/xpf-surplus-giveback/phases.json \
+  --out /tmp/xpf-surplus-giveback/verdict.json
+```
+
+The input artifact must contain `root_cap_mbps`,
+`peer_guarantee_mbps`, `handback_window_sec`, and four named phases:
+`borrow_alone`, `peer_demand`, `peer_steady`, and
+`peer_idle_reclaim`. Each phase records `throughput_mbps.borrower` and
+`throughput_mbps.peer`; `peer_steady` may also record
+`cos_admission_drops.peer`. The default gates are:
+
+- peer steady throughput reaches at least 95% of its guarantee
+- handback window is at most 5 seconds
+- borrower throughput during peer steady demand falls to at most 90% of
+  borrower-alone throughput
+- borrower reclaim throughput is at least 110% of its peer-steady
+  throughput
+- root cap is not exceeded by more than 2%
+- peer steady CoS admission drops are zero by default
+
+The phase artifact is the handoff between live traffic runners and the
+contract gate. A live runner can populate it from iperf JSON, Prometheus,
+or dataplane status snapshots, but the pass/fail semantics are
+centralized in the reducer so future harness changes do not silently
+drift the contract.
+
 For the symmetric reverse fixture on the loss cluster, `COS_IFINDEX=5`
 selects the `ge-0-0-1` egress. For forward-path sweeps, do not hardcode
 the RETH unit's displayed name into the harness; use the ifindex emitted

@@ -114,31 +114,35 @@ def _compute_histogram(rtts_us: List[int]) -> List[int]:
 
 
 def _compute_percentiles(rtts_us: List[int]) -> dict:
-    """Compute p50/p95/p99 + IQR via stdlib `statistics.quantiles`.
+    """Compute p50/p95/p99/p99.9 + IQR via stdlib `statistics.quantiles`.
 
     R1 MED 3: the plan calls for `statistics.quantiles` output, so
     the implementation and the unit tests share an estimator. With
     n=100 cut points (method="inclusive") we get p50=q[49], p95=q[94],
     p99=q[98] (the 99 cut points between 100 quantiles, zero-indexed).
+    Issue #1321's 100E100M contract also needs p99.9, computed the
+    same way with n=1000 and q[998].
     """
     if not rtts_us:
         return {
-            "p50": None, "p95": None, "p99": None,
+            "p50": None, "p95": None, "p99": None, "p999": None,
             "min": None, "max": None, "mean": None, "iqr": None,
         }
     s = sorted(rtts_us)
     if len(s) < 2:
         v = s[0]
         return {
-            "p50": v, "p95": v, "p99": v,
+            "p50": v, "p95": v, "p99": v, "p999": v,
             "min": v, "max": v, "mean": v, "iqr": 0,
         }
     cuts_100 = statistics.quantiles(s, n=100, method="inclusive")
+    cuts_1000 = statistics.quantiles(s, n=1000, method="inclusive")
     cuts_4 = statistics.quantiles(s, n=4, method="inclusive")
     return {
         "p50": int(round(cuts_100[49])),
         "p95": int(round(cuts_100[94])),
         "p99": int(round(cuts_100[98])),
+        "p999": int(round(cuts_1000[998])),
         "min": s[0],
         "max": s[-1],
         "mean": int(statistics.fmean(s)),
