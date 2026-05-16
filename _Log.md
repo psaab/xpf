@@ -2,6 +2,14 @@
 
 ## 2026-05-15
 
+- **Timestamp**: 2026-05-16T00:06:42Z
+  - **Action**: PR #1316 Copilot follow-up — narrow the validation TSV auditability claim to the fields present in the checked-in TSV schema, permit TSV summaries in the `docs/pr/` evidence convention, and qualify the old dominant-failure heading as a pre-buffer-sizing snapshot.
+  - **File(s)**: `docs/pr/1316-lowrate-cos-buffers/validation.md`, `docs/pr/README.md`, `docs/cos-validation-notes.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-15T23:13:00Z
+  - **Action**: PR #1316 round-4 review follow-up — filled the full seven-class validation table's high-rate Max CoV values from the committed TSV evidence, and documented that the historical 8-matrix `full-cos.set` file was later amended with q0/q4 buffer-size headroom.
+  - **File(s)**: `docs/pr/1316-lowrate-cos-buffers/validation.md`, `docs/pr/line-rate-investigation/8matrix-findings.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-15T23:00:00Z
   - **Action**: Restored `go.mod` to pre-PR state after an unintended direct/indirect dependency classification flip during automation-only progress updates.
   - **File(s)**: `go.mod`, `_Log.md`
@@ -22,8 +30,6 @@
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `_Log.md`
   - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
 
-## 2026-05-15
-
 - **Timestamp**: 2026-05-15T22:05:00Z
   - **Action**: Issue #1278 — make `show class-of-service interface` join configured reverse-egress CoS interfaces to live runtime by configured name first and binding egress ifindex second, so alias drift between `ge-0-0-1.0` and the runtime snapshot no longer hides queue counters.
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `docs/cos-validation-notes.md`, `_Log.md`
@@ -36,6 +42,10 @@
   - **Action**: PR #1315 Copilot follow-up — keep the historical `dbg_cos_queue_overflow` wire key but relabel the CLI/docs as binding-lifetime CoS queue drops because the subset now includes reset-time CoS queue drains in addition to admission rejects.
   - **File(s)**: `pkg/dataplane/userspace/statusfmt.go`, `pkg/dataplane/userspace/statusfmt_test.go`, `pkg/dataplane/userspace/protocol.go`, `userspace-dp/src/protocol.rs`, `docs/cos-validation-notes.md`, `_Log.md`
   - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
+
+- **Timestamp**: 2026-05-15T20:33:36Z
+  - **Action**: PR #1316 / issue #1312 hostile-review follow-up — clarified low-rate CoS fixture docs with the actual implicit base/cap pipeline (`rate/100` + 96 KB floor, flow-share expansion, #717 delay clamp), documented the queue-residence tradeoff for q0/q4 overrides, added a regression test pin that 1 Gbps q4 `buffer-size 4m` remains above delay-cap clamping, updated canonical fixture buffers, and committed durable validation evidence.
+  - **File(s)**: `test/incus/cos-iperf-config.set`, `test/incus/cos-iperf-symmetric.set`, `test/incus/cos-iperf-same-class.set`, `docs/cos-validation-notes.md`, `docs/fairness-regimes.md`, `docs/per-5-tuple/state.md`, `docs/pr/README.md`, `docs/pr/1316-lowrate-cos-buffers/validation.md`, `docs/pr/1316-lowrate-cos-buffers/evidence/focused-summary.tsv`, `docs/pr/1316-lowrate-cos-buffers/evidence/focused-dataplane-summary.tsv`, `docs/pr/1316-lowrate-cos-buffers/evidence/focused-equal-flow-summary.tsv`, `docs/pr/1316-lowrate-cos-buffers/evidence/full-summary.tsv`, `docs/pr/1316-lowrate-cos-buffers/evidence/full-dataplane-summary.tsv`, `docs/pr/1316-lowrate-cos-buffers/evidence/full-equal-flow-summary.tsv`, `docs/pr/line-rate-investigation/full-cos.set`, `userspace-dp/src/afxdp/cos/admission_tests.rs`, `_Log.md`
 
 ## 2026-05-14
 

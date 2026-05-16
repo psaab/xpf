@@ -4,10 +4,10 @@
 // `#[path = "admission_tests.rs"]` from admission.rs.
 
 use super::*;
-use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::ecn::{ECN_CE, ECN_ECT_0, ECN_MASK, ECN_NOT_ECT};
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{PreparedTxRecycle, PreparedTxRequest};
+use crate::afxdp::PROTO_TCP;
 
 /// #914: shared_exact rate-aware cap — verify the formula
 /// `max(fair_share*2, bdp_floor).clamp(MIN, buffer_limit)`
@@ -948,7 +948,7 @@ fn admission_ecn_marks_prepared_single_vlan_tagged_ipv4_packet() {
     );
 }
 
-use crate::afxdp::types::{COS_FLOW_FAIR_BUCKETS, CoSQueueConfig};
+use crate::afxdp::types::{CoSQueueConfig, COS_FLOW_FAIR_BUCKETS};
 
 #[test]
 fn cos_flow_aware_buffer_limit_scales_with_prospective_active_flow_count() {
@@ -1302,6 +1302,47 @@ fn cos_flow_aware_buffer_limit_honours_operator_base_above_delay_cap() {
         cap > naive_delay_cap,
         "naive delay-only clamp would shrink operator intent to {naive_delay_cap}; the \
          `.max(base)` guard must preserve {operator_base}"
+    );
+}
+
+#[test]
+fn cos_flow_aware_buffer_limit_honours_q4_fixture_override_above_delay_cap() {
+    // Canonical #1312 low-rate fixture pin: q4 is 1 Gbps exact with
+    // `buffer-size 4m` under `-P 12` reverse tests. The #717 clamp must
+    // keep the operator override even though delay_cap at 1 Gbps is 625k.
+    let operator_base = 4_000_000u64;
+    let mut root = test_cos_runtime_with_queues(
+        25_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 4,
+            forwarding_class: "iperf-a".into(),
+            priority: 5,
+            transmit_rate_bytes: 125_000_000,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            surplus_weight: 1,
+            buffer_bytes: operator_base,
+            dscp_rewrite: None,
+        }],
+    );
+    let queue = &mut root.queues[0];
+    enable_test_flow_fair(queue);
+    test_flow_fair_state_mut(queue).active_flow_buckets = 12;
+    for bucket in 0..12 {
+        test_flow_fair_state_mut(queue).flow_bucket_bytes[bucket] = 1_000;
+    }
+
+    let cap = cos_flow_aware_buffer_limit(queue, 0);
+    assert_eq!(
+        cap, operator_base,
+        "q4 fixture override must survive the #717 delay clamp at 1 Gbps (delay_cap=625_000)"
+    );
+
+    let delay_cap = 625_000u64;
+    assert!(
+        cap > delay_cap,
+        "delay-only clamping would regress q4 fixture headroom to {delay_cap}; keep operator override {operator_base}"
     );
 }
 
