@@ -51,6 +51,24 @@ debugging entry points, use [`userspace-debug-map.md`](userspace-debug-map.md).
 
 ## Component Architecture
 
+### 0. Operator Buffer Telemetry
+
+`show system buffers` uses the userspace helper status path when the
+active dataplane implements `Status() (userspace.ProcessStatus, error)`;
+it does not depend on BPF map occupancy for userspace mode. The rendered
+rows are aggregate-first AF_XDP UMEM frame and TX-ring utilization, with
+`WARNING` at >=80% and `CRITICAL` at >=90%. Per-binding rows follow the
+aggregates so a hot binding is visible even when total aggregate usage is
+low.
+
+The bounded source fields are
+`ProcessStatus.PerBinding[].umem_total_frames`,
+`umem_inflight_frames`, `tx_ring_capacity`, and `outstanding_tx`; the
+same fields on `ProcessStatus.Bindings[]` are accepted as a fallback for
+older helper status snapshots. If neither path publishes capacity, the
+CLI reports the missing status fields rather than showing BPF-map
+metrics for userspace buffers.
+
 ### 1. XDP Shim (`userspace-xdp/src/lib.rs`)
 
 A minimal BPF program attached at the NIC driver level that decides

@@ -1717,40 +1717,51 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 
 	case "buffers":
 		if s.dp != nil {
-			stats := s.dp.GetMapStats()
-			if len(stats) == 0 {
-				buf.WriteString("No BPF maps available\n")
+			if provider, ok := s.dp.(interface {
+				Status() (dpuserspace.ProcessStatus, error)
+			}); ok {
+				status, err := provider.Status()
+				if err != nil {
+					fmt.Fprintf(&buf, "Userspace buffer metrics unavailable: %v\n", err)
+				} else {
+					buf.WriteString(dpuserspace.FormatSystemBuffers(status, false))
+				}
 			} else {
-				fmt.Fprintf(&buf, "%-24s %-14s %10s %10s %8s %s\n", "Map", "Type", "Max", "Used", "Usage%", "Status")
-				buf.WriteString(strings.Repeat("-", 78) + "\n")
-				var warnings int
-				for _, st := range stats {
-					usage := "-"
-					used := "-"
-					sts := ""
-					if st.Type != "Array" && st.Type != "PerCPUArray" {
-						used = fmt.Sprintf("%d", st.UsedCount)
-						if st.MaxEntries > 0 {
-							pct := float64(st.UsedCount) / float64(st.MaxEntries) * 100
-							usage = fmt.Sprintf("%.1f%%", pct)
-							if pct >= 90 {
-								sts = "CRITICAL"
-								warnings++
-							} else if pct >= 80 {
-								sts = "WARNING"
-								warnings++
+				stats := s.dp.GetMapStats()
+				if len(stats) == 0 {
+					buf.WriteString("No BPF maps available\n")
+				} else {
+					fmt.Fprintf(&buf, "%-24s %-14s %10s %10s %8s %s\n", "Map", "Type", "Max", "Used", "Usage%", "Status")
+					buf.WriteString(strings.Repeat("-", 78) + "\n")
+					var warnings int
+					for _, st := range stats {
+						usage := "-"
+						used := "-"
+						sts := ""
+						if st.Type != "Array" && st.Type != "PerCPUArray" {
+							used = fmt.Sprintf("%d", st.UsedCount)
+							if st.MaxEntries > 0 {
+								pct := float64(st.UsedCount) / float64(st.MaxEntries) * 100
+								usage = fmt.Sprintf("%.1f%%", pct)
+								if pct >= 90 {
+									sts = "CRITICAL"
+									warnings++
+								} else if pct >= 80 {
+									sts = "WARNING"
+									warnings++
+								}
 							}
 						}
+						fmt.Fprintf(&buf, "%-24s %-14s %10d %10s %8s %s\n", st.Name, st.Type, st.MaxEntries, used, usage, sts)
 					}
-					fmt.Fprintf(&buf, "%-24s %-14s %10d %10s %8s %s\n", st.Name, st.Type, st.MaxEntries, used, usage, sts)
+					if warnings > 0 {
+						fmt.Fprintf(&buf, "\n%d map(s) at high utilization — consider increasing max_entries\n", warnings)
+					}
 				}
-				if warnings > 0 {
-					fmt.Fprintf(&buf, "\n%d map(s) at high utilization — consider increasing max_entries\n", warnings)
+				v4, v6 := s.dp.SessionCount()
+				if v4 > 0 || v6 > 0 {
+					fmt.Fprintf(&buf, "\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
 				}
-			}
-			v4, v6 := s.dp.SessionCount()
-			if v4 > 0 || v6 > 0 {
-				fmt.Fprintf(&buf, "\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
 			}
 		} else {
 			buf.WriteString("Dataplane not loaded\n")
@@ -1758,53 +1769,64 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 
 	case "buffers-detail":
 		if s.dp != nil {
-			stats := s.dp.GetMapStats()
-			if len(stats) == 0 {
-				buf.WriteString("No BPF maps available\n")
+			if provider, ok := s.dp.(interface {
+				Status() (dpuserspace.ProcessStatus, error)
+			}); ok {
+				status, err := provider.Status()
+				if err != nil {
+					fmt.Fprintf(&buf, "Userspace buffer metrics unavailable: %v\n", err)
+				} else {
+					buf.WriteString(dpuserspace.FormatSystemBuffers(status, true))
+				}
 			} else {
-				type mapDetail struct {
-					name      string
-					mapType   string
-					max       uint32
-					used      uint32
-					keySize   uint32
-					valueSize uint32
-					pct       float64
-				}
-				var details []mapDetail
-				for _, st := range stats {
-					if st.Type == "Array" || st.Type == "PerCPUArray" {
-						continue
+				stats := s.dp.GetMapStats()
+				if len(stats) == 0 {
+					buf.WriteString("No BPF maps available\n")
+				} else {
+					type mapDetail struct {
+						name      string
+						mapType   string
+						max       uint32
+						used      uint32
+						keySize   uint32
+						valueSize uint32
+						pct       float64
 					}
-					pct := float64(0)
-					if st.MaxEntries > 0 {
-						pct = float64(st.UsedCount) / float64(st.MaxEntries) * 100
+					var details []mapDetail
+					for _, st := range stats {
+						if st.Type == "Array" || st.Type == "PerCPUArray" {
+							continue
+						}
+						pct := float64(0)
+						if st.MaxEntries > 0 {
+							pct = float64(st.UsedCount) / float64(st.MaxEntries) * 100
+						}
+						details = append(details, mapDetail{
+							name: st.Name, mapType: st.Type, max: st.MaxEntries,
+							used: st.UsedCount, keySize: st.KeySize, valueSize: st.ValueSize, pct: pct,
+						})
 					}
-					details = append(details, mapDetail{
-						name: st.Name, mapType: st.Type, max: st.MaxEntries,
-						used: st.UsedCount, keySize: st.KeySize, valueSize: st.ValueSize, pct: pct,
+					sort.Slice(details, func(i, j int) bool {
+						return details[i].pct > details[j].pct
 					})
-				}
-				sort.Slice(details, func(i, j int) bool {
-					return details[i].pct > details[j].pct
-				})
-				buf.WriteString("BPF Map Details (sorted by utilization):\n\n")
-				for _, d := range details {
-					sts := "OK"
-					if d.pct >= 90 {
-						sts = "CRITICAL"
-					} else if d.pct >= 80 {
-						sts = "WARNING"
+					buf.WriteString("BPF Map Details (sorted by utilization):\n\n")
+					for _, d := range details {
+						sts := "OK"
+						if d.pct >= 90 {
+							sts = "CRITICAL"
+						} else if d.pct >= 80 {
+							sts = "WARNING"
+						}
+						fmt.Fprintf(&buf, "Map: %s\n", d.name)
+						fmt.Fprintf(&buf, "  Type: %s, Max: %d, Used: %d, Usage: %.1f%%\n", d.mapType, d.max, d.used, d.pct)
+						fmt.Fprintf(&buf, "  Key size: %d bytes, Value size: %d bytes\n", d.keySize, d.valueSize)
+						fmt.Fprintf(&buf, "  Status: %s\n\n", sts)
 					}
-					fmt.Fprintf(&buf, "Map: %s\n", d.name)
-					fmt.Fprintf(&buf, "  Type: %s, Max: %d, Used: %d, Usage: %.1f%%\n", d.mapType, d.max, d.used, d.pct)
-					fmt.Fprintf(&buf, "  Key size: %d bytes, Value size: %d bytes\n", d.keySize, d.valueSize)
-					fmt.Fprintf(&buf, "  Status: %s\n\n", sts)
 				}
-			}
-			v4, v6 := s.dp.SessionCount()
-			if v4 > 0 || v6 > 0 {
-				fmt.Fprintf(&buf, "Active sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
+				v4, v6 := s.dp.SessionCount()
+				if v4 > 0 || v6 > 0 {
+					fmt.Fprintf(&buf, "Active sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
+				}
 			}
 		} else {
 			buf.WriteString("Dataplane not loaded\n")

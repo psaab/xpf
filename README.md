@@ -129,7 +129,7 @@ The userspace dataplane now covers most of the transit feature set in native Rus
 - **Prometheus metrics** (`/metrics` endpoint)
 - **SNMP**: system + ifTable MIB
 - **RPM probes**, dynamic address feeds
-- **BPF map utilization** (`show system buffers`)
+- **Dataplane buffer utilization** (`show system buffers`): BPF map occupancy on eBPF, AF_XDP UMEM/TX-ring capacity on userspace
 - **LLDP**: link layer discovery protocol
 
 ### Management
