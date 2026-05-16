@@ -19,9 +19,10 @@ useful slice is a stable validation surface for:
    cells and gate parameters, so `/tmp/.../cell_N100_M100` and
    `/tmp/.../cell_N0_M100` are enough for the 100E100M gate.
 2. Preserve p99.9 in probe and aggregate artifacts as `p999` /
-   `p999_us`. The default hard gate remains p99 for compatibility; runs
-   that need p99.9 as the hard gate can set
-   `MOUSE_LATENCY_GATE_PERCENTILE=p999_us`.
+   `p999_us`. Legacy #905-style runs keep the default p99 gate for
+   compatibility. The canonical 100E100M runs set
+   `MOUSE_LATENCY_GATE_PERCENTILE=p999_us`, and the reducer selects the
+   representative rep by the same percentile it gates.
 3. Validate surplus give-back from a reduced phase JSON artifact. The
    first live runner can be shell, Python, or an operator-curated
    reducer, but pass/fail semantics are centralized in
@@ -39,6 +40,7 @@ Strict exact fixture:
 MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
 MOUSE_LATENCY_GATE_ELEPHANTS=100 \
 MOUSE_LATENCY_GATE_MICE=100 \
+MOUSE_LATENCY_GATE_PERCENTILE=p999_us \
 ./test/incus/test-mouse-latency-matrix.sh /tmp/xpf-100e100m-exact
 ```
 
@@ -49,16 +51,13 @@ Surplus-sharing fixture:
 MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
 MOUSE_LATENCY_GATE_ELEPHANTS=100 \
 MOUSE_LATENCY_GATE_MICE=100 \
+MOUSE_LATENCY_GATE_PERCENTILE=p999_us \
 ./test/incus/test-mouse-latency-matrix.sh /tmp/xpf-100e100m-surplus
 ./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0
 ```
 
-If p99.9 is promoted from reported evidence to the hard gate for a run,
-add:
-
-```bash
-MOUSE_LATENCY_GATE_PERCENTILE=p999_us
-```
+The 100E100M qualification gates p99.9. The reducer also supports p99
+for legacy #905-style runs.
 
 ## Surplus Give-Back Artifact
 
@@ -67,8 +66,10 @@ Minimum artifact:
 ```json
 {
   "root_cap_mbps": 25000,
+  "borrower_guarantee_mbps": 10000,
   "peer_guarantee_mbps": 10000,
   "handback_window_sec": 3.2,
+  "handback_evidence": {"source": "transition_observed", "observed": true},
   "phases": [
     {"name": "borrow_alone", "throughput_mbps": {"borrower": 18000, "peer": 0}},
     {"name": "peer_demand", "throughput_mbps": {"borrower": 16000, "peer": 7000}},
@@ -92,6 +93,14 @@ Validation:
 
 The validator exits `0` for PASS, `1` for contract FAIL, and `2` for
 malformed artifact or infrastructure misuse.
+
+`handback_window_sec` must be auditable. A live runner may either attach
+`handback_samples` time-series entries and let the validator compute the
+first handback point, or attach `handback_evidence` showing the scalar
+was measured from a real transition. The validator also checks that the
+borrower actually borrowed above its guarantee, the peer-demand phase
+actually had peer demand, and the borrower reclaimed close to the
+borrow-alone baseline after the peer went idle.
 
 ## Focused Validation
 
