@@ -12,6 +12,9 @@ does not issue open-loop requests. Writes a JSON file with
 histogram, percentiles, per-coroutine attempt counts, and a validity
 verdict.
 
+Connect, write-drain, and echo-read phases are deadline-bounded so TCP
+backpressure cannot stall a probe beyond --duration.
+
 Validity model (plan §4.2):
 - error_rate < 0.01.
 - min(attempts_per_coroutine) >= 0.5 × median(attempts) (only when M >= 2).
@@ -63,6 +66,13 @@ async def _respect_min_interval(
         await asyncio.sleep(min(sleep_s, remaining_s))
 
 
+async def _drain_with_deadline(writer: asyncio.StreamWriter, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise asyncio.TimeoutError("deadline expired before drain")
+    await asyncio.wait_for(writer.drain(), timeout=min(5.0, remaining))
+
+
 async def _run_per_attempt_probe_coro(
     target: str,
     port: int,
@@ -99,7 +109,7 @@ async def _run_per_attempt_probe_coro(
             )
             try:
                 writer.write(payload)
-                await writer.drain()
+                await _drain_with_deadline(writer, deadline)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     error_counter[0] += 1
@@ -187,7 +197,7 @@ async def _run_persistent_probe_coro(
             t0 = time.monotonic_ns()
             try:
                 writer.write(payload)
-                await writer.drain()
+                await _drain_with_deadline(writer, deadline)
             except (
                 asyncio.TimeoutError,
                 ConnectionRefusedError,

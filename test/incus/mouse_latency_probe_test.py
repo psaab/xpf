@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
+import mouse_latency_probe as probe
 from mouse_latency_probe import (
     HISTOGRAM_BUCKETS_US,
     _run,
@@ -231,6 +232,63 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
             result["totals"]["completed"] + result["totals"]["errors"],
         )
         self.assertGreaterEqual(connection_count, result["totals"]["completed"])
+
+    async def _run_with_forced_drain_timeout(self, *, connection_mode):
+        async def handle_echo(reader, writer):
+            try:
+                while await reader.read(4096):
+                    writer.write(b"x")
+                    await writer.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                writer.close()
+
+        async def forced_timeout(_writer, _deadline):
+            raise asyncio.TimeoutError("forced drain timeout")
+
+        server = await asyncio.start_server(handle_echo, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        original_drain = probe._drain_with_deadline
+        probe._drain_with_deadline = forced_timeout
+        try:
+            args = SimpleNamespace(
+                target="127.0.0.1",
+                port=port,
+                concurrency=1,
+                duration=0.08,
+                payload_bytes=16,
+                connection_mode=connection_mode,
+                min_interval_ms=20.0,
+            )
+            result = await asyncio.wait_for(_run(args), timeout=1.0)
+        finally:
+            probe._drain_with_deadline = original_drain
+            server.close()
+            await server.wait_closed()
+        return result
+
+    async def test_per_attempt_drain_timeout_counts_error_and_terminates(self):
+        result = await self._run_with_forced_drain_timeout(
+            connection_mode="per-attempt"
+        )
+        self.assertEqual(result["totals"]["completed"], 0)
+        self.assertGreater(result["totals"]["attempted"], 0)
+        self.assertEqual(
+            result["totals"]["attempted"],
+            result["totals"]["errors"],
+        )
+
+    async def test_persistent_drain_timeout_counts_error_and_terminates(self):
+        result = await self._run_with_forced_drain_timeout(
+            connection_mode="persistent"
+        )
+        self.assertEqual(result["totals"]["completed"], 0)
+        self.assertGreater(result["totals"]["attempted"], 0)
+        self.assertEqual(
+            result["totals"]["attempted"],
+            result["totals"]["errors"],
+        )
 
 
 if __name__ == "__main__":

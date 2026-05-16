@@ -233,8 +233,10 @@ produce a bounded global rate. v2 drops the sleep entirely:
    a. `t0 = time.monotonic_ns()`.
    b. Open TCP socket to `(target, port)` with a 5 s connect
       timeout.
-   c. Send `--payload-bytes` random bytes; flush.
-   d. Read back exactly `--payload-bytes`; on short-read or
+   c. Send `--payload-bytes` random bytes; flush with a
+      deadline-bounded `drain()`.
+   d. Read back exactly `--payload-bytes`; on drain timeout,
+      short-read, or
       timeout, count as error.
    e. Close socket.
    f. `t1 = time.monotonic_ns()`.
@@ -244,6 +246,12 @@ produce a bounded global rate. v2 drops the sleep entirely:
 
 This is canonical closed-loop "M concurrent mice". Achieved RPS
 falls if RTT rises; that drop IS data, not a bug.
+
+Implementation note: later 100E100M work added a `persistent`
+connection mode and optional `--min-interval-ms` closed-loop
+start-to-start spacing. Both modes keep connect, write-drain, and
+echo-read phases bounded by the probe deadline so TCP backpressure
+cannot stall a rep beyond `--duration`.
 
 ### 4.2 Achieved-RPS as co-metric (R1 #2, #3)
 
