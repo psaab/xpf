@@ -99,8 +99,10 @@ malformed artifact or infrastructure misuse.
 first handback point, or attach `handback_evidence` showing the scalar
 was measured from a real transition. The validator also checks that the
 borrower actually borrowed above its guarantee, the peer-demand phase
-actually had peer demand, and the borrower reclaimed close to the
-borrow-alone baseline after the peer went idle.
+actually had non-zero peer activity, and the borrower reclaimed close to
+the borrow-alone baseline after the peer went idle. The peer-demand
+threshold is deliberately a low liveness proxy; guarantee service is
+enforced by `peer_steady` and the handback evidence.
 
 ## Focused Validation
 
