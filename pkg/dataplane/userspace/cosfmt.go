@@ -558,6 +558,7 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 			}
 		}
 	}
+	configuredQueueCount := len(queueViews)
 	if view.interfaceState != nil {
 		for _, runtimeQueue := range view.interfaceState.Queues {
 			qv := queueViews[int(runtimeQueue.QueueID)]
@@ -570,6 +571,8 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 			qv.exact = runtimeQueue.Exact
 			if runtimeQueue.GuaranteeEnabled != nil {
 				qv.guaranteeEnabled = *runtimeQueue.GuaranteeEnabled
+			} else if isOldJSONSyntheticDefaultQueue(view, runtimeQueue, configuredQueueCount) {
+				qv.guaranteeEnabled = true
 			}
 			qv.equalFlowEnforcement = runtimeQueue.EqualFlowEnforcement
 			qv.equalFlowEnforced = runtimeQueue.EqualFlowEnforced
@@ -627,6 +630,15 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].queueID < out[j].queueID })
 	return out
+}
+
+func isOldJSONSyntheticDefaultQueue(view cosInterfaceView, runtimeQueue CoSQueueStatus, configuredQueueCount int) bool {
+	return configuredQueueCount == 0 &&
+		view.cosUnit != nil &&
+		view.cosUnit.ShapingRateBytes > 0 &&
+		runtimeQueue.QueueID == 0 &&
+		!runtimeQueue.Exact &&
+		runtimeQueue.TransmitRateBytes > 0
 }
 
 func formatCoSRate(bytesPerSecond uint64) string {
