@@ -5,7 +5,7 @@ AF_XDP userspace dataplane. It is not a full bug tracker and it is not a
 historical branch plan. For active debugging entry points, use
 [`userspace-debug-map.md`](userspace-debug-map.md).
 
-Last updated: 2026-03-14
+Last updated: 2026-05-16
 
 ## Implemented In The Current Runtime
 

@@ -1205,17 +1205,28 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 			var poolAddresses []string
 			var portLow, portHigh uint16
 			if rule.Then.PoolName != "" {
-				if pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]; ok && pool != nil {
-					if pool.Address != "" {
-						poolAddresses = append(poolAddresses, pool.Address)
-					}
-					poolAddresses = append(poolAddresses, pool.Addresses...)
-					if pool.PortLow > 0 {
-						portLow = uint16(pool.PortLow)
-					}
-					if pool.PortHigh > 0 {
-						portHigh = uint16(pool.PortHigh)
-					}
+				pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]
+				if !ok || pool == nil {
+					slog.Warn("userspace snapshot: skipping source NAT rule with missing pool",
+						"rule", rule.Name, "pool", rule.Then.PoolName)
+					continue
+				}
+				if pool.Address != "" {
+					poolAddresses = append(poolAddresses, pool.Address)
+				}
+				poolAddresses = append(poolAddresses, pool.Addresses...)
+				if len(poolAddresses) == 0 {
+					slog.Warn("userspace snapshot: skipping source NAT rule with empty pool",
+						"rule", rule.Name, "pool", rule.Then.PoolName)
+					continue
+				}
+				var valid bool
+				portLow, portHigh, valid = sourceNATPoolPortRange(pool)
+				if !valid {
+					slog.Warn("userspace snapshot: skipping source NAT rule with invalid pool port range",
+						"rule", rule.Name, "pool", rule.Then.PoolName,
+						"port_low", pool.PortLow, "port_high", pool.PortHigh)
+					continue
 				}
 			}
 			out = append(out, SourceNATRuleSnapshot{
@@ -1235,6 +1246,24 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 		}
 	}
 	return out
+}
+
+func sourceNATPoolPortRange(pool *config.NATPool) (uint16, uint16, bool) {
+	if pool == nil {
+		return 0, 0, false
+	}
+	low := pool.PortLow
+	if low == 0 {
+		low = 1024
+	}
+	high := pool.PortHigh
+	if high == 0 {
+		high = 65535
+	}
+	if low < 1 || high < 1 || low > 65535 || high > 65535 || low > high {
+		return 0, 0, false
+	}
+	return uint16(low), uint16(high), true
 }
 
 func buildStaticNATSnapshots(cfg *config.Config) []StaticNATRuleSnapshot {

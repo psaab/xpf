@@ -2,6 +2,11 @@
 
 ## 2026-05-16
 
+- **Timestamp**: 2026-05-16T22:18:20Z
+  - **Action**: PR #1385 round-1 review fixes — make userspace source-NAT pool snapshots fail closed when the referenced pool is missing, empty, or has an invalid port range; add regression coverage for each unsafe pool-mode case; refresh the userspace dataplane gap date after the pool-mode capability update.
+  - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `docs/userspace-dataplane-gaps.md`, `_Log.md`
+  - **Validation**: `go test ./pkg/dataplane/userspace`; `git diff --check`
+
 - **Timestamp**: 2026-05-16T04:36:00Z
   - **Action**: PR #1320 round-3 review fixes — validate typed scheduler leaves against the apply-groups-expanded tree before compile; reject `transmit-rate exact` unless the scheduler also has a typed rate; wire `ConfigClassOfServiceSchedulers` into the real config-mode `set class-of-service schedulers <name>` completion tree; update module docs to keep the byte-size-only scheduler buffer contract explicit.
   - **File(s)**: `pkg/cmdtree/schema_validate.go`, `pkg/cmdtree/tree.go`, `pkg/cmdtree/tree_test.go`, `pkg/cmdtree/README.md`, `pkg/config/schema_validate_test.go`, `pkg/config/README.md`, `pkg/configstore/store.go`, `pkg/configstore/store_test.go`, `_Log.md`
