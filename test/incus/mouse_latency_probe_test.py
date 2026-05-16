@@ -46,10 +46,12 @@ class PercentileTests(unittest.TestCase):
         rtts = list(range(1, 1001))  # 1..1000
         p = _compute_percentiles(rtts)
         cuts100 = statistics.quantiles(rtts, n=100, method="inclusive")
+        cuts1000 = statistics.quantiles(rtts, n=1000, method="inclusive")
         cuts4 = statistics.quantiles(rtts, n=4, method="inclusive")
         self.assertEqual(p["p50"], int(round(cuts100[49])))
         self.assertEqual(p["p95"], int(round(cuts100[94])))
         self.assertEqual(p["p99"], int(round(cuts100[98])))
+        self.assertEqual(p["p999"], int(round(cuts1000[998])))
         self.assertEqual(p["min"], 1)
         self.assertEqual(p["max"], 1000)
         self.assertEqual(p["iqr"], int(round(cuts4[2] - cuts4[0])))
@@ -57,6 +59,7 @@ class PercentileTests(unittest.TestCase):
     def test_empty(self):
         p = _compute_percentiles([])
         self.assertIsNone(p["p99"])
+        self.assertIsNone(p["p999"])
         self.assertIsNone(p["p50"])
         self.assertIsNone(p["min"])
 
@@ -64,6 +67,7 @@ class PercentileTests(unittest.TestCase):
         p = _compute_percentiles([42])
         self.assertEqual(p["p50"], 42)
         self.assertEqual(p["p99"], 42)
+        self.assertEqual(p["p999"], 42)
         self.assertEqual(p["iqr"], 0)
 
 

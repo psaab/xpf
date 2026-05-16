@@ -7,8 +7,13 @@ For each cell, the median rep (by p99) of the valid reps is selected
 as the representative; its p50/p95/p99 + IQR-of-p99-across-reps +
 achieved-RPS summary populate summary.json.
 
-Decision threshold (#905, plan §7.2):
+Default decision threshold (#905, plan §7.2):
 - p99(N=128, M=10, best-effort) ≤ 2 × p99(N=0, M=10, best-effort)
+
+Issue #1321 can reuse the same artifact reducer for 100E100M by passing
+`--gate-elephants 100 --gate-mice 100`. The reducer records p99.9 when
+probe artifacts include it, but the default hard gate remains p99 unless
+the caller explicitly changes `--gate-percentile`.
 
 The harness only runs best-effort, so cells are keyed by (N, M).
 """
@@ -120,6 +125,7 @@ def summarize_cell(reps: List[dict]) -> dict:
             "p50_us": rtt.get("p50"),
             "p95_us": rtt.get("p95"),
             "p99_us": rtt.get("p99"),
+            "p999_us": rtt.get("p999"),
             "achieved_rps_total": totals.get("achieved_rps_total"),
             # R2 fresh MED 1: propagate per-coroutine attempt-rate
             # distribution to the summary so the diagnosis surface
@@ -136,12 +142,25 @@ def summarize_cell(reps: List[dict]) -> dict:
     return summary
 
 
-def decide(summaries: Dict[CellKey, dict]) -> dict:
-    """Compute the decision-threshold verdict per #905 plan §7.2."""
-    gate_loaded = summaries.get((128, 10))
-    gate_idle = summaries.get((0, 10))
+def decide(
+    summaries: Dict[CellKey, dict],
+    *,
+    gate_elephants: int = 128,
+    gate_mice: int = 10,
+    threshold_ratio: float = 2.0,
+    gate_percentile: str = "p99_us",
+) -> dict:
+    """Compute the mouse-latency gate verdict for the requested cell."""
+    gate_loaded = summaries.get((gate_elephants, gate_mice))
+    gate_idle = summaries.get((0, gate_mice))
     if gate_loaded is None or gate_idle is None:
-        return {"verdict": "INSUFFICIENT-DATA", "reason": "missing gate cell"}
+        return {
+            "verdict": "INSUFFICIENT-DATA",
+            "reason": (
+                f"missing gate cell: loaded=N{gate_elephants}_M{gate_mice}, "
+                f"idle=N0_M{gate_mice}"
+            ),
+        }
     if gate_loaded.get("status") != "OK" or gate_idle.get("status") != "OK":
         return {
             "verdict": "INSUFFICIENT-DATA",
@@ -150,18 +169,25 @@ def decide(summaries: Dict[CellKey, dict]) -> dict:
                 f"idle={gate_idle.get('status')}"
             ),
         }
-    p99_loaded = (gate_loaded.get("median_rep") or {}).get("p99_us")
-    p99_idle = (gate_idle.get("median_rep") or {}).get("p99_us")
-    if p99_loaded is None or p99_idle is None or p99_idle == 0:
-        return {"verdict": "INSUFFICIENT-DATA", "reason": "missing p99 in gate cell"}
-    ratio = p99_loaded / p99_idle
+    loaded_value = (gate_loaded.get("median_rep") or {}).get(gate_percentile)
+    idle_value = (gate_idle.get("median_rep") or {}).get(gate_percentile)
+    if loaded_value is None or idle_value is None or idle_value == 0:
+        return {
+            "verdict": "INSUFFICIENT-DATA",
+            "reason": f"missing {gate_percentile} in gate cell",
+        }
+    ratio = loaded_value / idle_value
     return {
-        "verdict": "PASS" if ratio <= 2.0 else "FAIL",
+        "verdict": "PASS" if ratio <= threshold_ratio else "FAIL",
         "ratio": ratio,
-        "p99_idle_us": p99_idle,
-        "p99_loaded_us": p99_loaded,
-        "threshold": 2.0,
-        "gate": "p99(N=128, M=10) <= 2 * p99(N=0, M=10)",
+        "idle_us": idle_value,
+        "loaded_us": loaded_value,
+        "threshold": threshold_ratio,
+        "percentile": gate_percentile,
+        "gate": (
+            f"{gate_percentile}(N={gate_elephants}, M={gate_mice}) <= "
+            f"{threshold_ratio:g} * {gate_percentile}(N=0, M={gate_mice})"
+        ),
     }
 
 
@@ -186,8 +212,8 @@ def discover_cells(root: str) -> Dict[CellKey, List[dict]]:
 
 def render_markdown(summaries: Dict[CellKey, dict], verdict: dict) -> str:
     lines: List[str] = []
-    lines.append("| N elephants | M mice | reps (valid/total) | p50 µs | p95 µs | p99 µs | RPS | status |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("| N elephants | M mice | reps (valid/total) | p50 us | p95 us | p99 us | p99.9 us | RPS | status |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for key in sorted(summaries.keys()):
         n, m = key
         s = summaries[key]
@@ -197,6 +223,7 @@ def render_markdown(summaries: Dict[CellKey, dict], verdict: dict) -> str:
             f"| {median.get('p50_us', '-')} "
             f"| {median.get('p95_us', '-')} "
             f"| {median.get('p99_us', '-')} "
+            f"| {median.get('p999_us', '-')} "
             f"| {median.get('achieved_rps_total', '-')} "
             f"| {s.get('status', '-')} |"
         )
@@ -205,8 +232,8 @@ def render_markdown(summaries: Dict[CellKey, dict], verdict: dict) -> str:
     if "ratio" in verdict:
         lines.append(
             f"  ratio = {verdict['ratio']:.2f} "
-            f"(p99 loaded {verdict['p99_loaded_us']} µs / "
-            f"p99 idle {verdict['p99_idle_us']} µs); "
+            f"({verdict.get('percentile', 'p99_us')} loaded {verdict['loaded_us']} us / "
+            f"idle {verdict['idle_us']} us); "
             f"threshold ≤ {verdict['threshold']}"
         )
     elif "reason" in verdict:
@@ -218,11 +245,25 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--gate-elephants", type=int, default=128)
+    p.add_argument("--gate-mice", type=int, default=10)
+    p.add_argument("--threshold-ratio", type=float, default=2.0)
+    p.add_argument(
+        "--gate-percentile",
+        choices=("p50_us", "p95_us", "p99_us", "p999_us"),
+        default="p99_us",
+    )
     args = p.parse_args()
 
     cells = discover_cells(args.root)
     summaries = {key: summarize_cell(reps) for key, reps in cells.items()}
-    verdict = decide(summaries)
+    verdict = decide(
+        summaries,
+        gate_elephants=args.gate_elephants,
+        gate_mice=args.gate_mice,
+        threshold_ratio=args.threshold_ratio,
+        gate_percentile=args.gate_percentile,
+    )
 
     with open(args.out, "w") as f:
         json.dump(

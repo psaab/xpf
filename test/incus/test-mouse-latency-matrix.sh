@@ -50,27 +50,16 @@ flock -n 9 || {
 
 OUT_ROOT="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DURATION=60          # per-rep probe seconds
+DURATION=${MOUSE_LATENCY_DURATION:-60} # per-rep probe seconds
 WALL_CAP=$((6*3600)) # seconds, plan §4.7
 
 mkdir -p "$OUT_ROOT"
 
 # Prioritized cell order: gate cells first, then remaining M=10 cells,
 # then everything else.
-CELLS=(
-    "0 10"
-    "128 10"
-    "8 10"
-    "32 10"
-    "0 1"
-    "8 1"
-    "32 1"
-    "128 1"
-    "0 50"
-    "8 50"
-    "32 50"
-    "128 50"
-)
+DEFAULT_CELLS=$'0 10\n128 10\n8 10\n32 10\n0 1\n8 1\n32 1\n128 1\n0 50\n8 50\n32 50\n128 50'
+CELLS_RAW=${MOUSE_LATENCY_CELLS:-$DEFAULT_CELLS}
+mapfile -t CELLS < <(printf '%s\n' "$CELLS_RAW" | sed '/^[[:space:]]*$/d')
 
 start_t=$(date +%s)
 
@@ -214,4 +203,8 @@ done
 echo "Matrix complete; running aggregator..."
 python3 "${SCRIPT_DIR}/mouse_latency_aggregate.py" \
     --root "$OUT_ROOT" \
-    --out "${OUT_ROOT}/summary.json"
+    --out "${OUT_ROOT}/summary.json" \
+    --gate-elephants "${MOUSE_LATENCY_GATE_ELEPHANTS:-128}" \
+    --gate-mice "${MOUSE_LATENCY_GATE_MICE:-10}" \
+    --threshold-ratio "${MOUSE_LATENCY_GATE_THRESHOLD_RATIO:-2.0}" \
+    --gate-percentile "${MOUSE_LATENCY_GATE_PERCENTILE:-p99_us}"
