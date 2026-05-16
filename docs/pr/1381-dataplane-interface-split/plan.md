@@ -42,7 +42,7 @@ isolation. The current consumers are:
 | `pkg/grpcapi/server.go` (`Config.DP`, `Server.dp`) | gRPC show/monitor/control paths read generic counters and type-assert userspace status/control DTOs. | `Telemetry`, `SessionStore`, `LinkController`, and a backend-specific userspace control adapter. |
 | `pkg/cli/cli.go` (`CLI.dp`) | Operational commands read sessions/counters/events and some userspace-only status surfaces. | CLI should consume gRPC for remote operation; in-process CLI should use `Telemetry`, `SessionStore`, and explicit optional userspace diagnostic interfaces. |
 | `pkg/conntrack/gc.go` (`GC.dp`) | GC iterates/deletes BPF session maps and pushes per-IP session-limit state. | `SessionStore` for iteration/delete/count. Per-IP screen/session-limit publish remains backend-private config/state work. |
-| `pkg/cluster/sync.go` (`SessionSync.dp`) | HA sync exports/imports sessions, installs cluster-synced entries, and type-asserts userspace sweep-profile hooks. | `SessionStore` for install/delete/export and a narrow `SessionDeltaSource` adapter hanging off the session domain. |
+| `pkg/cluster/sync.go` (`SessionSync.dp`) | HA sync exports/imports sessions, installs cluster-synced entries, type-asserts userspace sweep-profile hooks, and stale-reconcile manually deletes reverse sessions plus DNAT companions. | `SessionStore` for install/delete/export/reconcile and a narrow `SessionDeltaSource` adapter hanging off the session domain. Companion reverse/NAT cleanup must be owned by the same session/NAT delete semantics as GC. |
 | Daemon HA/fabric/apply code | Calls `UpdateRGActive`, `UpdateHAWatchdog`, `UpdateFabricFwd`, `UpdateFabricFwd1`, `SyncFabricState`, BPF writers, scheduler updates, and userspace link-cycle hooks. | `HAController`, `ConfigSink`, `LinkController`; BPF writers stay inside the eBPF backend. |
 | Metrics/API/CLI session and counter readers | Mix map-backed eBPF counters, helper JSON status, and userspace formatting DTOs. | `Telemetry` owns generic counters/events; userspace-only formatting remains an extension with adapter-local DTO conversion. |
 
@@ -208,6 +208,35 @@ side effects that must move to explicit domain methods:
   removes companion DNAT/NAT64 reverse state in the same generation; and
 - GC stats must still count v4/v6 entries and expired deletes without assuming
   BPF map iteration order.
+
+Cluster sync has the same delete problem through a different path. The stale
+bulk reconcile path in `pkg/cluster/sync.go` currently iterates local sessions,
+finds peer-owned entries absent from the received bulk set, then manually
+deletes:
+
+- the forward session;
+- the reverse session referenced by `SessionValue.ReverseKey`; and
+- companion DNAT/NAT64 reverse entries via `DeleteDNATEntry*`.
+
+That logic must not remain a separate BPF-shaped cleanup copy after the split.
+Move it behind a session-domain operation such as:
+
+```go
+type SessionStore interface {
+	// ...
+	DeleteWithCompanionsV4(dataplane.SessionKey, DeleteReason) error
+	DeleteWithCompanionsV6(dataplane.SessionKeyV6, DeleteReason) error
+	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
+}
+```
+
+The exact method shape can change during implementation, but the invariant is
+fixed: GC expiry and cluster stale reconciliation must use the same backend
+delete semantics so reverse-key cleanup, DNAT/NAT64 cleanup, persistent-NAT
+preservation, and generation accounting cannot drift. Existing
+`pkg/cluster/sync_test.go` mocks that record `DeleteDNATEntry*` as no-op
+callbacks are not sufficient; they let the split compile while preserving the
+duplicated cleanup path.
 
 Userspace session deltas remain an optional extension until the generic event
 stream can carry the same information:
@@ -455,6 +484,11 @@ Required during the split:
 - GC side-effect tests: session expiry preserves persistent-NAT bindings,
   removes companion DNAT/NAT64 reverse entries, updates per-IP session-limit
   state, and uses backend-neutral session-change telemetry.
+- Cluster stale-reconcile tests: bulk reconciliation deletes the forward
+  stale session through `SessionStore`, removes the reverse-key companion, and
+  removes DNAT/NAT64 reverse state through the same session/NAT-owned delete
+  path used by GC. Tests must fail if `pkg/cluster/sync.go` keeps a local
+  `DeleteDNATEntry*` cleanup copy.
 - NAT embedded ICMP tests: userspace no longer depends on BPF `dnat_table`
   pins for v4 or v6 reversal.
 - HA canaries: RG activation, watchdog, fabric0/fabric1 updates, manual
@@ -496,5 +530,7 @@ Phase 1 is not complete until all of these are true:
   reads to `ApplyResult` metadata; and
 - GC side effects are owned by `SessionStore`/NAT/Telemetry domains rather than
   raw BPF map methods; and
+- cluster stale reconciliation uses the same `SessionStore`/NAT companion-delete
+  semantics as GC and has reverse-key plus DNAT/NAT64 cleanup tests; and
 - rollback is documented as switching the daemon back to the existing
   `dataplane.DataPlane` adapter without changing persistent config format.
