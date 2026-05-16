@@ -12,9 +12,10 @@ use crate::afxdp::cos::token_bucket::COS_MIN_BURST_BYTES;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{
     COS_FLOW_FAIR_BUCKETS, CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing,
-    SharedCoSQueueLease,
+    SharedCoSExactBacklog, SharedCoSQueueLease,
 };
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 // #915 Codex code-review MEDIUM: direct unit tests for the
 // phase-gated `shared_queue_lease` consumption helper. Both
@@ -92,6 +93,298 @@ fn maybe_consume_exact_queue_lease_no_lease_no_op() {
     maybe_consume_exact_queue_lease(None, CoSServicePhase::Surplus, 1500);
     maybe_consume_exact_queue_lease(None, CoSServicePhase::Guarantee, 1500);
     // No assertion needed — the function must not panic on None.
+}
+
+#[test]
+fn account_queue_drain_sent_bytes_splits_phase_and_exact_backlog_steal() {
+    let mut root = test_mixed_class_root_with_primed_queues();
+    assert!(
+        root_has_backlogged_exact_queue(&root),
+        "mixed fixture must start with backlogged exact queues"
+    );
+
+    let nonexact = &mut root.queues[1];
+    assert!(!nonexact.config.exact);
+    account_queue_drain_sent_bytes(nonexact, CoSServicePhase::Surplus, 2048, true);
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_sent_bytes
+            .load(Ordering::Relaxed),
+        2048
+    );
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_surplus_sent_bytes
+            .load(Ordering::Relaxed),
+        2048
+    );
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        2048
+    );
+
+    let exact = &mut root.queues[0];
+    assert!(exact.config.exact);
+    account_queue_drain_sent_bytes(exact, CoSServicePhase::Guarantee, 1024, true);
+    assert_eq!(
+        exact
+            .telemetry
+            .owner_profile
+            .drain_guarantee_sent_bytes
+            .load(Ordering::Relaxed),
+        1024
+    );
+    assert_eq!(
+        exact
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        0,
+        "exact queue service must not be counted as non-exact steal"
+    );
+}
+
+#[test]
+fn apply_cos_send_result_counts_nonexact_bytes_when_exact_queue_backlogged() {
+    let root = test_mixed_class_root_with_primed_queues();
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    apply_cos_send_result(
+        &mut binding,
+        42,
+        1,
+        CoSServicePhase::Surplus,
+        1500,
+        1500,
+        std::collections::VecDeque::new(),
+    );
+
+    let root = binding.cos.cos_interfaces.get(&42).expect("cos root");
+    let nonexact = &root.queues[1];
+    assert!(!nonexact.config.exact);
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_surplus_sent_bytes
+            .load(Ordering::Relaxed),
+        1500
+    );
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        1500,
+        "apply_cos_send_result must derive exact_backlogged from the root, not from caller input"
+    );
+}
+
+#[test]
+fn apply_cos_send_result_counts_nonexact_bytes_when_peer_exact_queue_backlogged() {
+    let mut root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut root.queues {
+        if queue.config.exact {
+            queue.hot.items.clear();
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+        }
+    }
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    shared_exact_backlog.publish(1, 12_000);
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog);
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    apply_cos_send_result(
+        &mut binding,
+        42,
+        1,
+        CoSServicePhase::Surplus,
+        1500,
+        1500,
+        std::collections::VecDeque::new(),
+    );
+
+    let root = binding.cos.cos_interfaces.get(&42).expect("cos root");
+    assert!(
+        !root_has_backlogged_exact_queue(root),
+        "fixture must prove the local-root-only predicate would miss this case"
+    );
+    assert_eq!(
+        root.queues[1]
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        1500,
+        "non-exact drain must consult interface-global peer exact backlog"
+    );
+}
+
+#[test]
+fn same_worker_second_binding_publish_does_not_erase_first_binding_backlog() {
+    let mut exact_root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut exact_root.queues {
+        if queue.config.exact {
+            queue.hot.queued_bytes = 12_000;
+        } else {
+            queue.hot.items.clear();
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+        }
+    }
+    let mut idle_root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut idle_root.queues {
+        queue.hot.items.clear();
+        queue.hot.queued_bytes = 0;
+        queue.hot.runnable = false;
+    }
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog.clone());
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let binding_a = BindingWorker::new_for_cos_drain_test(0, 0, 42, exact_root, fast_path.clone());
+    let binding_b = BindingWorker::new_for_cos_drain_test(1, 0, 42, idle_root, fast_path);
+
+    publish_cos_exact_backlog(&binding_a, 42);
+    publish_cos_exact_backlog(&binding_b, 42);
+
+    assert!(
+        shared_exact_backlog.has_peer_backlog(1),
+        "same-worker idle binding must not overwrite a sibling binding's nonzero exact backlog",
+    );
+}
+
+#[test]
+fn apply_cos_send_result_counts_same_worker_sibling_exact_backlog() {
+    let mut exact_root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut exact_root.queues {
+        if queue.config.exact {
+            queue.hot.queued_bytes = 12_000;
+        } else {
+            queue.hot.items.clear();
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+        }
+    }
+    let mut nonexact_root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut nonexact_root.queues {
+        if queue.config.exact {
+            queue.hot.items.clear();
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+        }
+    }
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog);
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let binding_a = BindingWorker::new_for_cos_drain_test(0, 0, 42, exact_root, fast_path.clone());
+    let mut binding_b =
+        BindingWorker::new_for_cos_drain_test(1, 0, 42, nonexact_root, fast_path);
+
+    publish_cos_exact_backlog(&binding_a, 42);
+    publish_cos_exact_backlog(&binding_b, 42);
+
+    {
+        let root_b = binding_b.cos.cos_interfaces.get(&42).expect("cos root");
+        assert!(
+            !root_has_backlogged_exact_queue(root_b),
+            "same-worker non-exact binding must prove a local-only scan would miss the sibling backlog"
+        );
+    }
+
+    apply_cos_send_result(
+        &mut binding_b,
+        42,
+        1,
+        CoSServicePhase::Surplus,
+        1500,
+        1500,
+        std::collections::VecDeque::new(),
+    );
+
+    let root_b = binding_b.cos.cos_interfaces.get(&42).expect("cos root");
+    assert_eq!(
+        root_b.queues[1]
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        1500,
+        "same-worker sibling exact backlog must drive the end-to-end steal telemetry counter"
+    );
 }
 
 #[test]

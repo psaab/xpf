@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // continues to find them as `super::types::SharedCoS*`.
 mod shared_cos_lease;
 pub(super) use shared_cos_lease::{
-    NOT_PARTICIPATING, PaddedVtimeSlot, SharedCoSQueueLease, SharedCoSQueueVtimeFloor,
-    SharedCoSRootLease, V8RateMode,
+    NOT_PARTICIPATING, PaddedVtimeSlot, SharedCoSExactBacklog, SharedCoSQueueLease,
+    SharedCoSQueueVtimeFloor, SharedCoSRootLease, V8RateMode,
 };
 
 // Issue 68.1: CoS shaper / queue / flow-fair / runtime types extracted
@@ -218,7 +218,6 @@ impl From<ForwardPacketMeta> for UserspaceDpMeta {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PacketDisposition {
     Valid,
@@ -227,7 +226,6 @@ pub(super) enum PacketDisposition {
     FibGenerationMismatch,
     UnsupportedPacket,
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SessionFlow {
@@ -251,7 +249,6 @@ impl SessionFlow {
         reverse_session_key(&self.forward_key, nat)
     }
 }
-
 
 #[cfg(test)]
 mod flow_rr_ring_tests {
@@ -406,4 +403,3 @@ mod flow_rr_ring_tests {
         );
     }
 }
-

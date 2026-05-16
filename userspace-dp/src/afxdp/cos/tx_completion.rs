@@ -349,6 +349,90 @@ pub(in crate::afxdp) fn maybe_consume_exact_queue_lease(
 }
 
 #[inline]
+fn root_has_backlogged_exact_queue(root: &CoSInterfaceRuntime) -> bool {
+    root.queues
+        .iter()
+        .any(|queue| queue.config.exact && !cos_queue_is_empty(queue))
+}
+
+#[inline]
+fn exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
+    root.queues
+        .iter()
+        .filter(|queue| queue.config.exact)
+        .fold(0u64, |acc, queue| {
+            acc.saturating_add(queue.hot.queued_bytes)
+        })
+}
+
+#[inline]
+pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_ifindex: i32) {
+    let Some(shared_exact_backlog) = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+    else {
+        return;
+    };
+    let Some(root) = binding.cos.cos_interfaces.get(&root_ifindex) else {
+        shared_exact_backlog.publish(binding.slot, 0);
+        return;
+    };
+    shared_exact_backlog.publish(binding.slot, exact_backlog_bytes(root));
+}
+
+#[inline]
+pub(in crate::afxdp) fn clear_all_cos_exact_backlogs_for_binding(binding: &BindingWorker) {
+    for iface_fast in binding.cos.cos_fast_interfaces.values() {
+        if let Some(shared_exact_backlog) = iface_fast.shared_exact_backlog.as_ref() {
+            shared_exact_backlog.publish(binding.slot, 0);
+        }
+    }
+}
+
+#[inline]
+fn interface_has_backlogged_exact_queue(
+    root: &CoSInterfaceRuntime,
+    peer_exact_backlogged: bool,
+) -> bool {
+    root_has_backlogged_exact_queue(root) || peer_exact_backlogged
+}
+
+#[inline]
+fn account_queue_drain_sent_bytes(
+    queue: &mut CoSQueueRuntime,
+    phase: CoSServicePhase,
+    sent_bytes: u64,
+    exact_backlogged: bool,
+) {
+    if sent_bytes == 0 {
+        return;
+    }
+    let profile = &queue.telemetry.owner_profile;
+    profile
+        .drain_sent_bytes
+        .fetch_add(sent_bytes, Ordering::Relaxed);
+    match phase {
+        CoSServicePhase::Guarantee => {
+            profile
+                .drain_guarantee_sent_bytes
+                .fetch_add(sent_bytes, Ordering::Relaxed);
+        }
+        CoSServicePhase::Surplus => {
+            profile
+                .drain_surplus_sent_bytes
+                .fetch_add(sent_bytes, Ordering::Relaxed);
+        }
+    }
+    if exact_backlogged && !queue.config.exact {
+        profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .fetch_add(sent_bytes, Ordering::Relaxed);
+    }
+}
+
+#[inline]
 pub(in crate::afxdp) fn apply_direct_exact_queue_accounting(
     root: &mut CoSInterfaceRuntime,
     queue_idx: usize,
@@ -362,11 +446,7 @@ pub(in crate::afxdp) fn apply_direct_exact_queue_accounting(
         // scrape window to get an observed per-queue drain rate and
         // compare against `queue.transmit_rate_bytes()` to detect a
         // cap bypass.
-        queue
-            .telemetry
-            .owner_profile
-            .drain_sent_bytes
-            .fetch_add(sent_bytes, Ordering::Relaxed);
+        account_queue_drain_sent_bytes(queue, CoSServicePhase::Guarantee, sent_bytes, false);
     }
     root.tokens = root.tokens.saturating_sub(sent_bytes);
 }
@@ -452,6 +532,7 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity(
         root.nonempty_queues = new_nonempty;
         root.runnable_queues = new_runnable;
     }
+    publish_cos_exact_backlog(binding, root_ifindex);
     if old_nonempty == 0 && new_nonempty > 0 {
         binding.cos.cos_nonempty_interfaces = binding.cos.cos_nonempty_interfaces.saturating_add(1);
     } else if old_nonempty > 0 && new_nonempty == 0 {
@@ -482,10 +563,23 @@ pub(in crate::afxdp) fn apply_cos_send_result(
     retry: VecDeque<TxRequest>,
 ) {
     let mut exact_queue_idx = None;
+    let binding_slot = binding.slot;
+    let peer_exact_backlogged = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+        .is_some_and(|backlog| backlog.has_peer_backlog(binding_slot));
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return;
         };
+        let exact_backlogged = sent_bytes > 0
+            && root
+                .queues
+                .get(queue_idx)
+                .is_some_and(|queue| !queue.config.exact)
+            && interface_has_backlogged_exact_queue(root, peer_exact_backlogged);
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             exact_queue_idx = queue.config.exact.then_some(queue_idx);
             let retry_bytes = restore_cos_local_items_inner(queue, retry);
@@ -508,11 +602,7 @@ pub(in crate::afxdp) fn apply_cos_send_result(
             // or surplus accounting is debited. Paired with the
             // apply_direct_exact_send_result write so the sum across
             // all sites equals the bytes the CoS scheduler accounted.
-            queue
-                .telemetry
-                .owner_profile
-                .drain_sent_bytes
-                .fetch_add(sent_bytes, Ordering::Relaxed);
+            account_queue_drain_sent_bytes(queue, phase, sent_bytes, exact_backlogged);
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }
@@ -550,10 +640,23 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
     retry: VecDeque<PreparedTxRequest>,
 ) {
     let mut exact_queue_idx = None;
+    let binding_slot = binding.slot;
+    let peer_exact_backlogged = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+        .is_some_and(|backlog| backlog.has_peer_backlog(binding_slot));
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return;
         };
+        let exact_backlogged = sent_bytes > 0
+            && root
+                .queues
+                .get(queue_idx)
+                .is_some_and(|queue| !queue.config.exact)
+            && interface_has_backlogged_exact_queue(root, peer_exact_backlogged);
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             exact_queue_idx = queue.config.exact.then_some(queue_idx);
             let retry_bytes = restore_cos_prepared_items_inner(queue, retry);
@@ -580,11 +683,7 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
             // Gbps, leaving ~563 Mbps unaccounted — all of it
             // flowing through this path. Same Relaxed semantics as
             // the other three apply_* sites.
-            queue
-                .telemetry
-                .owner_profile
-                .drain_sent_bytes
-                .fetch_add(sent_bytes, Ordering::Relaxed);
+            account_queue_drain_sent_bytes(queue, phase, sent_bytes, exact_backlogged);
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }

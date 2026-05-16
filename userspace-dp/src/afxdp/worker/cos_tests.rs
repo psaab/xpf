@@ -9,6 +9,7 @@ use crate::afxdp::tx::test_support::{
     test_cos_fast_interfaces, test_cos_runtime_with_queues, test_flow_cos_item,
     test_queue_fast_path,
 };
+use crate::afxdp::types::SharedCoSExactBacklog;
 use crate::test_zone_ids::*;
 
 // Rates used to force owner-local vs shared-exact classification in
@@ -79,6 +80,53 @@ fn reset_binding_cos_runtime_mirrors_drops_to_binding_cos_counter() {
         "reset-time CoS queue drains must mirror into the lifetime-matched CoS subset counter",
     );
     assert!(binding.cos.cos_interfaces.is_empty());
+}
+
+#[test]
+fn reset_binding_cos_runtime_clears_shared_exact_backlog_slot() {
+    let mut root = test_cos_runtime_with_queues(
+        25_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 4,
+            forwarding_class: "iperf-a".into(),
+            priority: 5,
+            transmit_rate_bytes: 125_000_000,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            surplus_weight: 1,
+            buffer_bytes: 4_000_000,
+            dscp_rewrite: None,
+        }],
+    );
+    cos_queue_push_back(&mut root.queues[0], test_flow_cos_item(5201, 128));
+    root.queues[0].hot.queued_bytes = 128;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        4,
+        vec![(4, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    shared_exact_backlog.publish(0, 128);
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog.clone());
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    reset_binding_cos_runtime(&mut binding, None);
+
+    assert!(
+        !shared_exact_backlog.has_peer_backlog(1),
+        "reset must clear this worker's exact-backlog slot before the Arc can be reused",
+    );
 }
 
 #[test]
@@ -1347,6 +1395,7 @@ fn build_worker_cos_fast_interfaces_flattens_owner_and_lease_state() {
         &owner_worker_by_queue,
         &owner_live_by_queue,
         &shared_root_leases,
+        &BTreeMap::new(),
         &shared_queue_leases,
         &BTreeMap::new(),
     );
@@ -1475,6 +1524,7 @@ fn build_worker_cos_fast_interfaces_keeps_low_rate_exact_queue_owner_local() {
         &owner_worker_by_queue,
         &owner_live_by_queue,
         &shared_root_leases,
+        &BTreeMap::new(),
         &shared_queue_leases,
         &BTreeMap::new(),
     );
@@ -1572,6 +1622,7 @@ fn build_worker_cos_fast_interfaces_high_iface_rate_shards_mid_rate_exact_queue(
         &owner_worker_by_queue,
         &owner_live_by_queue,
         &shared_root_leases,
+        &BTreeMap::new(),
         &shared_queue_leases,
         &BTreeMap::new(),
     );
@@ -1726,6 +1777,7 @@ fn build_worker_cos_fast_interfaces_matches_live_loss_ha_3_queue_shape() {
         &owner_worker_by_queue,
         &owner_live_by_queue,
         &shared_root_leases,
+        &BTreeMap::new(),
         &shared_queue_leases,
         &BTreeMap::new(),
     );

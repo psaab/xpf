@@ -89,6 +89,41 @@ func TestBindingCountersSnapshotTXSharedRecycleUnknownSlotDropsRoundTrip(t *test
 	}
 }
 
+func TestCoSQueueStatusDrainPhaseCountersRoundTrip(t *testing.T) {
+	in := CoSQueueStatus{
+		QueueID:                 0,
+		DrainSentBytes:          4096,
+		DrainGuaranteeSentBytes: 1024,
+		DrainSurplusSentBytes:   3072,
+		DrainNonExactSentBytesWhileExactBacklogged: 2048,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range []string{
+		"drain_guarantee_sent_bytes",
+		"drain_surplus_sent_bytes",
+		"drain_nonexact_sent_bytes_while_exact_backlogged",
+	} {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from CoSQueueStatus JSON: %s", key, string(raw))
+		}
+	}
+
+	var back CoSQueueStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal CoSQueueStatus: %v", err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
+	}
+}
+
 func TestBindingStatusTxKickLatencyRoundTrip(t *testing.T) {
 	// Encode a Go BindingStatus with non-trivial values on the
 	// four kick-latency fields; decode the JSON back; assert
