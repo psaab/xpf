@@ -469,6 +469,9 @@ default gates are:
 
 - borrower-alone throughput exceeds 105% of the borrower guarantee
 - peer-demand throughput is non-zero (at least 1% of the peer guarantee)
+  as a liveness proxy; this phase proves the artifact is not decorative,
+  while `peer_steady` and handback evidence enforce actual guarantee
+  service
 - peer steady throughput reaches at least 95% of its guarantee
 - handback window is at most 5 seconds
 - borrower throughput during peer steady demand falls to at most 90% of

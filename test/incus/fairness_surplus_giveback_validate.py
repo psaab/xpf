@@ -190,6 +190,11 @@ def validate(
             f"borrower alone throughput {borrow_alone_bps:.3f} Mbps does not prove surplus borrow: "
             f"below {min_borrower_borrow_ratio:.3f} * guarantee {borrower_guarantee:.3f} Mbps"
         )
+    # `peer_demand` is a liveness/audit phase, not the guarantee-service
+    # verdict. The real service gate is `peer_steady` plus the handback
+    # timing evidence. Keep this default low enough that a legitimate
+    # in-transition sample does not fail merely because handback has not
+    # completed yet, while still rejecting decorative all-zero demand.
     if peer_demand_peer < peer_guarantee * min_peer_demand_ratio:
         failures.append(
             f"peer demand throughput {peer_demand_peer:.3f} Mbps below "
@@ -278,7 +283,15 @@ def main() -> int:
     parser.add_argument("--input", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--min-peer-guarantee-ratio", type=float, default=0.95)
-    parser.add_argument("--min-peer-demand-ratio", type=float, default=0.01)
+    parser.add_argument(
+        "--min-peer-demand-ratio",
+        type=float,
+        default=0.01,
+        help=(
+            "minimum peer-demand phase throughput as a fraction of peer guarantee; "
+            "this is a liveness proxy, while peer_steady/handback enforce service"
+        ),
+    )
     parser.add_argument("--min-borrower-borrow-ratio", type=float, default=1.05)
     parser.add_argument("--max-handback-sec", type=float, default=5.0)
     parser.add_argument("--max-borrower-demand-ratio", type=float, default=0.90)
