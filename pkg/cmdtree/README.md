@@ -58,7 +58,7 @@ would otherwise treat it as exact-with-zero-rate.
 
 `buffer-size` intentionally accepts only byte-size values with explicit
 `k`/`m`/`g` suffixes. Percent buffer sizes need a compiler/runtime
-representation before the schema can safely accept them; accepting
+representation before the schema can safely accept them (#1336); accepting
 `10%` while the dataplane only receives `buffer_size_bytes` would turn a
 validation improvement back into a silent zero-byte compile.
 

@@ -68,8 +68,10 @@ Minimum artifact:
   "root_cap_mbps": 25000,
   "borrower_guarantee_mbps": 10000,
   "peer_guarantee_mbps": 10000,
-  "handback_window_sec": 3.2,
-  "handback_evidence": {"source": "transition_observed", "observed": true},
+  "handback_samples": [
+    {"t_sec": 1.0, "throughput_mbps": {"borrower": 16000, "peer": 4000}},
+    {"t_sec": 3.2, "throughput_mbps": {"borrower": 9000, "peer": 9800}}
+  ],
   "phases": [
     {"name": "borrow_alone", "throughput_mbps": {"borrower": 18000, "peer": 0}},
     {"name": "peer_demand", "throughput_mbps": {"borrower": 16000, "peer": 7000}},
@@ -94,15 +96,16 @@ Validation:
 The validator exits `0` for PASS, `1` for contract FAIL, and `2` for
 malformed artifact or infrastructure misuse.
 
-`handback_window_sec` must be auditable. A live runner may either attach
-`handback_samples` time-series entries and let the validator compute the
-first handback point, or attach `handback_evidence` showing the scalar
-was measured from a real transition. The validator also checks that the
-borrower actually borrowed above its guarantee, the peer-demand phase
-actually had non-zero peer activity, and the borrower reclaimed close to
-the borrow-alone baseline after the peer went idle. The peer-demand
-threshold is deliberately a low liveness proxy; guarantee service is
-enforced by `peer_steady` and the handback evidence.
+The live runner must attach `handback_samples` time-series entries and
+let the validator compute the first handback point. A scalar
+`handback_window_sec` or self-attested evidence label is not accepted as
+a substitute because the validator cannot falsify it from the artifact.
+The validator also checks that the borrower actually borrowed above its
+guarantee, the peer-demand phase actually had non-zero peer activity,
+and the borrower reclaimed close to the borrow-alone baseline after the
+peer went idle. The peer-demand threshold is deliberately a low liveness
+proxy; guarantee service is enforced by `peer_steady` and the derived
+handback sample.
 
 ## Focused Validation
 
