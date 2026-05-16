@@ -996,11 +996,11 @@ var ConfigSetDataplaneKnobs = map[string]*Node{
 // transmit-rate (rate, optional `exact` modifier), priority (enum),
 // and buffer-size (byte-size with optional `temporal` modifier per Junos).
 //
-// The set-mode tab/`?` completer uses these via SchemaValidate's
-// walker — the existing pkg/config/ast.go schemaNode tree still
-// answers structural completion ("what keywords are valid here") for
-// every other subtree; this map only adds value-slot semantics for the
-// schedulers leaves.
+// The set-mode tab/`?` completer reaches these through
+// ConfigTopLevel["set"].Children["class-of-service"].Children["schedulers"].
+// The existing pkg/config/ast.go schemaNode tree still answers structural
+// completion ("what keywords are valid here") for every other subtree; this
+// map only adds value-slot semantics for the schedulers leaves.
 //
 // Wiring: SchemaValidate (this file) walks the AST against this map
 // at commit-check time; configstore calls SchemaValidate BEFORE the
@@ -1053,6 +1053,11 @@ var ConfigTopLevel = map[string]*Node{
 	"insert":   {Desc: "Insert a new ordered configuration statement"},
 	"rename":   {Desc: "Rename a configuration statement"},
 	"set": {Desc: "Set a configuration parameter", Children: map[string]*Node{
+		"class-of-service": {Desc: "Class-of-service configuration", Children: map[string]*Node{
+			"schedulers": {Desc: "Scheduler definitions", Children: map[string]*Node{
+				"<scheduler>": ConfigClassOfServiceSchedulers,
+			}},
+		}},
 		"system": {Desc: "System configuration", Children: map[string]*Node{
 			// Codex M3: surface the #785/#801 dataplane knobs so `?`
 			// help and tab completion show descriptions for

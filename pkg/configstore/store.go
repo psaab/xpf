@@ -33,10 +33,10 @@ type Store struct {
 	journal *Journal
 
 	// Commit confirmed state
-	confirmTimer    *time.Timer
-	confirmPrevTree *config.ConfigTree // active tree before confirmed commit
-	confirmPrevCfg  *config.Config     // compiled config before confirmed commit
-	centralRollbackFn func(*config.Config)   // callback for dataplane central-apply
+	confirmTimer      *time.Timer
+	confirmPrevTree   *config.ConfigTree   // active tree before confirmed commit
+	confirmPrevCfg    *config.Config       // compiled config before confirmed commit
+	centralRollbackFn func(*config.Config) // callback for dataplane central-apply
 
 	// Exclusive configuration mode
 	exclusiveHolder string // who holds exclusive lock (empty = unlocked)
@@ -140,20 +140,48 @@ func (s *Store) SetNodeID(id int) {
 // whether the store is in cluster mode (nodeID >= 0) or standalone.
 //
 // Order of operations (#1319): the typed-leaf SchemaValidate gate runs
-// BEFORE compile. We do this at the candidate-tree level rather than at
-// `set` time so the candidate-edit flow stays permissive — operators can
-// stage half-typed values without each `set` line being rejected — and
-// `commit check` is the one place that fails loud on garbage like
-// `transmit-rate asd`. cfg is nil at this point because we haven't
+// BEFORE compile, but against the same apply-groups-expanded view the
+// compiler consumes. Running on the raw candidate tree would let invalid
+// typed leaves inside `groups { ... }` bypass the gate while still reaching
+// the compiler after expansion. We still validate at commit/load time rather
+// than at `set` time so the candidate-edit flow stays permissive —
+// operators can stage half-typed values without each `set` line being
+// rejected — and `commit check` is the one place that fails loud on garbage
+// like `transmit-rate asd`. cfg is nil at this point because we haven't
 // compiled yet; the schedulers validators don't need it.
 func (s *Store) compileTree(tree *config.ConfigTree) (*config.Config, error) {
-	if err := cmdtree.SchemaValidate(tree, nil); err != nil {
+	if err := s.schemaValidateExpandedTree(tree); err != nil {
 		return nil, err
 	}
 	if s.nodeID >= 0 {
 		return config.CompileConfigForNode(tree, s.nodeID)
 	}
 	return config.CompileConfig(tree)
+}
+
+func (s *Store) schemaValidateExpandedTree(tree *config.ConfigTree) error {
+	if tree == nil {
+		return nil
+	}
+	expanded := tree.Clone()
+	if s.nodeID >= 0 {
+		vars := map[string]string{"node": fmt.Sprintf("node%d", s.nodeID)}
+		if err := expanded.ExpandGroupsWithVars(vars); err != nil {
+			return fmt.Errorf("apply-groups: %w", err)
+		}
+		return cmdtree.SchemaValidate(expanded, nil)
+	}
+	if err := expanded.ExpandGroups(); err != nil {
+		if strings.Contains(err.Error(), `undefined group "${node}"`) {
+			vars := map[string]string{"node": "node0"}
+			if err2 := expanded.ExpandGroupsWithVars(vars); err2 != nil {
+				return fmt.Errorf("apply-groups: %w", err2)
+			}
+		} else {
+			return fmt.Errorf("apply-groups: %w", err)
+		}
+	}
+	return cmdtree.SchemaValidate(expanded, nil)
 }
 
 // SyncApply applies a config received from the cluster primary.

@@ -45,6 +45,28 @@ func TestCommitCheck_RejectsInvalidTransmitRate(t *testing.T) {
 	}
 }
 
+func TestCommitCheck_RejectsInvalidTransmitRateFromApplyGroups(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	for _, cmd := range []string{
+		"groups bad class-of-service schedulers be transmit-rate asd",
+		"apply-groups bad",
+	} {
+		if err := s.SetFromInput(cmd); err != nil {
+			t.Fatalf("SetFromInput(%q): %v", cmd, err)
+		}
+	}
+	_, err := s.CommitCheck()
+	if err == nil {
+		t.Fatal("expected CommitCheck to reject grouped transmit-rate asd, got nil")
+	}
+	if !strings.Contains(err.Error(), "transmit-rate") {
+		t.Fatalf("CommitCheck error should reference transmit-rate: %v", err)
+	}
+}
+
 func TestCommitCheck_AcceptsValidScheduler(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.EnterConfigure(); err != nil {
