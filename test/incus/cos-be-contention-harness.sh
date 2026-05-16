@@ -37,6 +37,7 @@ WRONG_QUEUE_SENT_BYTES_TOLERANCE="${WRONG_QUEUE_SENT_BYTES_TOLERANCE:-0}"
 MIN_EXPECTED_SENT_BYTES="${MIN_EXPECTED_SENT_BYTES:-1}"
 MIN_CONTENDER_BPS="${MIN_CONTENDER_BPS:-100000000}"
 MIN_EXACT_BASELINE_CAP_RATIO="${MIN_EXACT_BASELINE_CAP_RATIO:-0.70}"
+MIN_CONTENDED_ROOT_PRESSURE_RATIO="${MIN_CONTENDED_ROOT_PRESSURE_RATIO:-0.90}"
 ROOT_SHAPE_BPS="${ROOT_SHAPE_BPS:-25000000000}"
 IPERF_EXTRA_ARGS="${IPERF_EXTRA_ARGS:-}"
 
@@ -237,21 +238,21 @@ class_selected() {
 
 # Format:
 #   label exact_port exact_queue exact_class contender_port contender_queue
-#   contender_class exact_cap_bps min_contender_bps
+#   contender_class
 #
-# The pressure floor must prove material contention relative to the exact cap:
-# 1G exact cells require 500M contender pressure; 24G exact cells require 1G,
-# which is the remaining headroom under the default 25G root shape.
+# Exact caps and per-cell contender floors are derived by the validator from
+# the canonical CoS port grid so the live harness and offline reducer do not
+# drift apart.
 cells=(
-    "exact5202-vs-5200 5202 2 iperf-1g 5200 0 best-effort 1000000000 500000000"
-    "exact5210-vs-5200 5210 10 iperf-24g 5200 0 best-effort 24000000000 1000000000"
-    "exact5202-vs-5211 5202 2 iperf-1g 5211 11 iperf-uncapped 1000000000 500000000"
-    "exact5210-vs-5211 5210 10 iperf-24g 5211 11 iperf-uncapped 24000000000 1000000000"
+    "exact5202-vs-5200 5202 2 iperf-1g 5200 0 best-effort"
+    "exact5210-vs-5200 5210 10 iperf-24g 5200 0 best-effort"
+    "exact5202-vs-5211 5202 2 iperf-1g 5211 11 iperf-uncapped"
+    "exact5210-vs-5211 5210 10 iperf-24g 5211 11 iperf-uncapped"
 )
 
 selected_cells=()
 for spec in "${cells[@]}"; do
-    read -r label _exact_port _exact_queue _exact_class _contender_port _contender_queue _contender_class _exact_cap_bps _min_contender_bps <<< "$spec"
+    read -r label _exact_port _exact_queue _exact_class _contender_port _contender_queue _contender_class <<< "$spec"
     if class_selected "$label"; then
         selected_cells+=("$spec")
     fi
@@ -295,8 +296,6 @@ for raw in sys.argv[5:]:
         contender_port,
         contender_queue,
         contender_forwarding_class,
-        exact_cap_bps,
-        min_contender_bps,
     ) = raw.split()
     cells.append(
         {
@@ -304,11 +303,9 @@ for raw in sys.argv[5:]:
             "exact_port": int(exact_port),
             "exact_queue": int(exact_queue),
             "exact_forwarding_class": exact_forwarding_class,
-            "exact_cap_bps": int(exact_cap_bps),
             "contender_port": int(contender_port),
             "contender_queue": int(contender_queue),
             "contender_forwarding_class": contender_forwarding_class,
-            "min_contender_bps": int(min_contender_bps),
             "baseline_dir": f"{label}/baseline",
             "contended_dir": f"{label}/contended",
         }
@@ -324,7 +321,7 @@ PY
 
 overall_run_status=0
 for spec in "${selected_cells[@]}"; do
-    read -r label exact_port exact_queue _exact_class contender_port contender_queue _contender_class _exact_cap_bps _min_contender_bps <<< "$spec"
+    read -r label exact_port exact_queue _exact_class contender_port contender_queue _contender_class <<< "$spec"
     cell_dir="$ARTIFACT_ROOT/$label"
     log "cell=$label exact_port=$exact_port exact_queue=$exact_queue contender_port=$contender_port contender_queue=$contender_queue"
     if ! run_phase "$cell_dir/baseline" "$exact_port"; then
@@ -344,7 +341,8 @@ python3 "$VALIDATOR" "$ARTIFACT_ROOT" \
     --wrong-queue-sent-bytes-tolerance "$WRONG_QUEUE_SENT_BYTES_TOLERANCE" \
     --min-expected-sent-bytes "$MIN_EXPECTED_SENT_BYTES" \
     --min-contender-bps "$MIN_CONTENDER_BPS" \
-    --min-exact-baseline-cap-ratio "$MIN_EXACT_BASELINE_CAP_RATIO"
+    --min-exact-baseline-cap-ratio "$MIN_EXACT_BASELINE_CAP_RATIO" \
+    --min-contended-root-pressure-ratio "$MIN_CONTENDED_ROOT_PRESSURE_RATIO"
 validator_status=$?
 
 log "summary: $ARTIFACT_ROOT/summary.tsv"

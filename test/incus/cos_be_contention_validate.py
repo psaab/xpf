@@ -23,6 +23,7 @@ DEFAULT_WRONG_QUEUE_SENT_BYTES_TOLERANCE = 0
 DEFAULT_MIN_EXPECTED_SENT_BYTES = 1
 DEFAULT_MIN_CONTENDER_BPS = 100_000_000.0
 DEFAULT_MIN_EXACT_BASELINE_CAP_RATIO = 0.70
+DEFAULT_MIN_CONTENDED_ROOT_PRESSURE_RATIO = 0.90
 DEFAULT_ROOT_SHAPE_BPS = 25_000_000_000.0
 
 FORWARDING_CLASS_BY_PORT = {
@@ -394,6 +395,7 @@ def validate_artifacts(
     min_expected_sent_bytes: int,
     min_contender_bps: float,
     min_exact_baseline_cap_ratio: float,
+    min_contended_root_pressure_ratio: float,
 ) -> dict[str, Any]:
     min_contender_bps = _finite_nonnegative_number(
         min_contender_bps,
@@ -402,6 +404,10 @@ def validate_artifacts(
     min_exact_baseline_cap_ratio = _finite_nonnegative_number(
         min_exact_baseline_cap_ratio,
         "min_exact_baseline_cap_ratio",
+    )
+    min_contended_root_pressure_ratio = _finite_nonnegative_number(
+        min_contended_root_pressure_ratio,
+        "min_contended_root_pressure_ratio",
     )
     manifest = load_json(root / "manifest.json")
     cells = manifest.get("cells")
@@ -491,8 +497,10 @@ def validate_artifacts(
         baseline_bps = baseline_iperf["exact"]["bps"]
         contended_exact_bps = contended_iperf["exact"]["bps"]
         contender_bps = contended_iperf["contender"]["bps"]
+        contended_total_bps = contended_exact_bps + contender_bps
         minimum_baseline_bps = exact_cap_bps * min_exact_baseline_cap_ratio
         minimum_exact_bps = baseline_bps * (1.0 - max_exact_drop_ratio)
+        minimum_contended_total_bps = root_shape_bps * min_contended_root_pressure_ratio
         if baseline_bps < minimum_baseline_bps:
             cell_failures.append(
                 f"exact-alone baseline {baseline_bps / 1_000_000.0:.3f} Mbps below "
@@ -510,6 +518,14 @@ def validate_artifacts(
                 f"contender throughput {contender_bps / 1_000_000.0:.3f} Mbps below "
                 f"{cell_min_contender_bps / 1_000_000.0:.3f} Mbps; contention pressure "
                 "is too low to prove exact isolation"
+            )
+        if contended_total_bps < minimum_contended_total_bps:
+            cell_failures.append(
+                f"contended total throughput {contended_total_bps / 1_000_000.0:.3f} Mbps below "
+                f"{minimum_contended_total_bps / 1_000_000.0:.3f} Mbps "
+                f"({min_contended_root_pressure_ratio:.2%} of root shape "
+                f"{root_shape_bps / 1_000_000.0:.3f} Mbps); root pressure is too low "
+                "to prove best-effort/uncapped isolation"
             )
 
         if cell_failures:
@@ -533,9 +549,11 @@ def validate_artifacts(
                     "baseline_exact_mbps": baseline_bps / 1_000_000.0,
                     "contended_exact_mbps": contended_exact_bps / 1_000_000.0,
                     "contender_mbps": contender_bps / 1_000_000.0,
+                    "contended_total_mbps": contended_total_bps / 1_000_000.0,
                     "minimum_baseline_exact_mbps": minimum_baseline_bps / 1_000_000.0,
                     "minimum_contended_exact_mbps": minimum_exact_bps / 1_000_000.0,
                     "minimum_contender_mbps": cell_min_contender_bps / 1_000_000.0,
+                    "minimum_contended_total_mbps": minimum_contended_total_bps / 1_000_000.0,
                 },
                 "baseline": {
                     "iperf": baseline_iperf,
@@ -557,6 +575,7 @@ def validate_artifacts(
             "min_expected_sent_bytes": min_expected_sent_bytes,
             "min_contender_bps": min_contender_bps,
             "min_exact_baseline_cap_ratio": min_exact_baseline_cap_ratio,
+            "min_contended_root_pressure_ratio": min_contended_root_pressure_ratio,
         },
         "cos_interface_name": interface_name,
         "cos_ifindex": ifindex,
@@ -570,7 +589,8 @@ def write_summary_tsv(summary: dict[str, Any], path: Path) -> None:
             "cell\texact_port\texact_queue\tcontender_port\tcontender_queue\tverdict\t"
             "exact_cap_mbps\tbaseline_exact_mbps\tminimum_baseline_exact_mbps\t"
             "contended_exact_mbps\tminimum_contended_exact_mbps\t"
-            "contender_mbps\tminimum_contender_mbps\tfailure_reasons\n"
+            "contender_mbps\tminimum_contender_mbps\t"
+            "contended_total_mbps\tminimum_contended_total_mbps\tfailure_reasons\n"
         )
         for cell in summary["cells"]:
             throughput = cell["throughput"]
@@ -590,6 +610,8 @@ def write_summary_tsv(summary: dict[str, Any], path: Path) -> None:
                         f"{throughput['minimum_contended_exact_mbps']:.3f}",
                         f"{throughput['contender_mbps']:.3f}",
                         f"{throughput['minimum_contender_mbps']:.3f}",
+                        f"{throughput['contended_total_mbps']:.3f}",
+                        f"{throughput['minimum_contended_total_mbps']:.3f}",
                         "; ".join(cell["failure_reasons"]),
                     ]
                 )
@@ -652,6 +674,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=float,
         default=DEFAULT_MIN_EXACT_BASELINE_CAP_RATIO,
     )
+    parser.add_argument(
+        "--min-contended-root-pressure-ratio",
+        type=float,
+        default=DEFAULT_MIN_CONTENDED_ROOT_PRESSURE_RATIO,
+    )
     return parser.parse_args(argv)
 
 
@@ -665,6 +692,7 @@ def main(argv: list[str]) -> int:
             min_expected_sent_bytes=args.min_expected_sent_bytes,
             min_contender_bps=args.min_contender_bps,
             min_exact_baseline_cap_ratio=args.min_exact_baseline_cap_ratio,
+            min_contended_root_pressure_ratio=args.min_contended_root_pressure_ratio,
         )
     except ValidationError as exc:
         print(f"cos_be_contention_validate: {exc}", file=sys.stderr)

@@ -66,6 +66,10 @@ The validator fails closed when:
 - any unexpected queue drains more than `WRONG_QUEUE_SENT_BYTES_TOLERANCE`
 - the contender iperf throughput is below `MIN_CONTENDER_BPS`, because a
   no-pressure contender cannot prove exact-queue isolation
+- exact+contender aggregate throughput is below
+  `MIN_CONTENDED_ROOT_PRESSURE_RATIO * ROOT_SHAPE_BPS`, because a low-rate
+  contended run does not prove best-effort/uncapped traffic is unable to steal
+  under root pressure
 - exact+contender throughput drops below exact-alone throughput by more than
   `MAX_EXACT_DROP_RATIO`
 
@@ -76,6 +80,9 @@ MAX_EXACT_DROP_RATIO=0.15
 WRONG_QUEUE_SENT_BYTES_TOLERANCE=0
 MIN_EXPECTED_SENT_BYTES=1
 MIN_CONTENDER_BPS=100000000
+MIN_EXACT_BASELINE_CAP_RATIO=0.70
+MIN_CONTENDED_ROOT_PRESSURE_RATIO=0.90
+ROOT_SHAPE_BPS=25000000000
 COS_INTERFACE_NAME=reth0.80
 ```
 

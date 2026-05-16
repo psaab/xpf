@@ -125,6 +125,7 @@ def _validate(root: Path) -> dict:
         min_expected_sent_bytes=1,
         min_contender_bps=100_000_000.0,
         min_exact_baseline_cap_ratio=0.70,
+        min_contended_root_pressure_ratio=0.90,
     )
 
 
@@ -146,7 +147,7 @@ class CoSBEContentionValidateTests(unittest.TestCase):
                 during=_status(q0=800, q2=1600),
                 after=_status(q0=1200, q2=1950),
                 exact_bps=920_000_000,
-                contender_bps=15_000_000_000,
+                contender_bps=24_000_000_000,
             )
 
             summary = _validate(root)
@@ -157,6 +158,8 @@ class CoSBEContentionValidateTests(unittest.TestCase):
             self.assertEqual(throughput["exact_cap_mbps"], 1000.0)
             self.assertEqual(throughput["minimum_baseline_exact_mbps"], 700.0)
             self.assertEqual(throughput["minimum_contender_mbps"], 500.0)
+            self.assertEqual(throughput["contended_total_mbps"], 24920.0)
+            self.assertEqual(throughput["minimum_contended_total_mbps"], 22500.0)
             self.assertEqual(summary["cells"][0]["contended"]["dataplane"]["verdict"], "PASS")
 
     def test_default_contender_threshold_math_for_canonical_cells(self) -> None:
@@ -382,6 +385,44 @@ class CoSBEContentionValidateTests(unittest.TestCase):
 
             self.assertEqual(summary["verdict"], "FAIL")
             self.assertTrue(any("exact-alone baseline" in reason for reason in summary["failure_reasons"]))
+
+    def test_fails_when_contended_total_does_not_prove_root_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(
+                root,
+                {
+                    "label": "exact5210-vs-5200",
+                    "exact_port": 5210,
+                    "exact_queue": 10,
+                    "exact_forwarding_class": "iperf-24g",
+                    "contender_port": 5200,
+                    "contender_queue": 0,
+                    "contender_forwarding_class": "best-effort",
+                    "baseline_dir": "cell/baseline",
+                    "contended_dir": "cell/contended",
+                },
+            )
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q10=0),
+                during=_status(q10=100),
+                after=_status(q10=200),
+                exact_bps=16_800_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q10=200),
+                during=_status(q0=100, q10=300),
+                after=_status(q0=200, q10=400),
+                exact_bps=14_280_000_000,
+                contender_bps=1_000_000_000,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(any("root pressure is too low" in reason for reason in summary["failure_reasons"]))
 
     def test_fails_cell_specific_contender_pressure_for_24g_exact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
