@@ -1,5 +1,10 @@
 # xpf - eBPF Firewall with Junos Configuration Syntax
 
+> Deprecation notice (#1373): the legacy eBPF dataplane is being retired in
+> favor of the Rust AF_XDP userspace dataplane. New dataplane development should
+> target `userspace-dp`. Phase 0 is documentation/audit only and removes no BPF
+> source.
+
 ## Working Style
 - Think before acting. Read existing files before writing code.
 - Be concise in output but thorough in reasoning.
@@ -89,6 +94,10 @@ Or use `test/incus/cluster-setup.sh` directly with `BPFRX_CLUSTER_ENV` set:
 **IMPORTANT:** Any change touching cluster, VRRP, session sync, or failover code MUST pass `make test-failover` before commit.
 
 ## Architecture
+
+The BPF pipeline below is legacy context during the #1373 retirement. Keep it
+working until the staged removal phases land, but do not start new dataplane
+features on this path unless a blocker explicitly requires compatibility work.
 
 ### BPF Pipeline (14 programs, tail calls)
 ```

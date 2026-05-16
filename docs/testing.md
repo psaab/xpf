@@ -1,5 +1,10 @@
 # Testing & Performance Guide
 
+> Deprecation notice (#1373): the legacy eBPF dataplane is being retired. New
+> dataplane validation targets the userspace AF_XDP cluster unless a later phase
+> explicitly requires regression coverage for the legacy path. Phase 0 removes no
+> BPF source or test target.
+
 ## Test Environment
 
 ### VM Setup (Incus)
