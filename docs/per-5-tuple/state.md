@@ -93,7 +93,11 @@ from work-conserving surplus-sharing:
   `MOUSE_LATENCY_GATE_MICE=100`) and now preserve p99.9 as
   `median_rep.p999_us`. Canonical 100E100M runs gate on
   `MOUSE_LATENCY_GATE_PERCENTILE=p999_us`, and the reducer selects the
-  representative rep by the same percentile it gates.
+  representative rep by the same percentile it gates. Surplus matrix
+  runs must set `MOUSE_COS_SURPLUS_SHARING=1`; the per-rep harness
+  reapplies CoS before every preflight/rep, so manually applying the
+  surplus fixture once before the matrix is overwritten by the runner.
+  Each rep manifest records `cos_surplus_sharing`.
 - Surplus give-back runs reduce live traffic evidence into a four-phase
   artifact (`borrow_alone`, `peer_demand`, `peer_steady`,
   `peer_idle_reclaim`) validated by
