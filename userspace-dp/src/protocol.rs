@@ -851,6 +851,8 @@ pub(crate) struct CoSQueueStatus {
     pub priority: u8,
     #[serde(default)]
     pub exact: bool,
+    #[serde(rename = "guarantee_enabled", default)]
+    pub guarantee_enabled: bool,
     #[serde(rename = "transmit_rate_bytes", default)]
     pub transmit_rate_bytes: u64,
     #[serde(rename = "buffer_bytes", default)]

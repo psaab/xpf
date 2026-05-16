@@ -787,8 +787,9 @@ Important current behavior:
   `transmit-rate` are residual-only under the shaped root. They keep an
   effective rate for burst sizing and surplus weight, but do not receive
   non-`exact` guarantee service. The synthetic default best-effort queue used
-  when an interface has shaping but no real scheduler-map queues remains the
-  sole root-shaped guarantee queue.
+  when an admitted CoS interface has no real scheduler-map queues remains the
+  sole root-shaped guarantee queue; admission can come from shaping or from a
+  classifier/rewrite rule that targets that default queue/class.
 - `transmit-rate exact` prevents that queue from borrowing surplus by default
 - adding `surplus-sharing` on the scheduler (#915) opts an `exact` queue
   into surplus participation while keeping the per-queue rate as a

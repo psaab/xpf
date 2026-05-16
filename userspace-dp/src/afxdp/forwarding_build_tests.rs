@@ -870,6 +870,60 @@ fn build_cos_state_zero_shaping_rate_queue_inherits_transparent() {
 }
 
 #[test]
+fn build_cos_state_no_rate_exact_surplus_equal_flow_is_residual_only() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 42,
+            cos_shaping_rate_bytes_per_sec: 25_000_000_000 / 8,
+            cos_scheduler_map: "wan-map".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "iperf-a".into(),
+                queue: 4,
+            }],
+            schedulers: vec![CoSSchedulerSnapshot {
+                name: "no-rate-exact".into(),
+                transmit_rate_bytes: 0,
+                transmit_rate_exact: true,
+                priority: "high".into(),
+                buffer_size_bytes: 0,
+                surplus_sharing: true,
+                equal_flow_enforcement: true,
+            }],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "iperf-a".into(),
+                    scheduler: "no-rate-exact".into(),
+                }],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+        }),
+        ..Default::default()
+    };
+
+    let state = build_cos_state(&snapshot);
+    let queue = state
+        .interfaces
+        .get(&42)
+        .expect("shaped iface present")
+        .queues
+        .iter()
+        .find(|q| q.queue_id == 4)
+        .expect("iperf-a queue present");
+
+    assert_eq!(queue.transmit_rate_bytes, 25_000_000_000 / 8);
+    assert!(!queue.guarantee_enabled);
+    assert!(!queue.exact);
+    assert!(!queue.surplus_sharing);
+    assert!(!queue.equal_flow_enforcement);
+}
+
+#[test]
 fn build_cos_state_mixed_zero_and_nonzero_shaping_rate() {
     // Two interfaces in the same snapshot — one with shaping-rate
     // configured, one without. Both must produce CoSState entries

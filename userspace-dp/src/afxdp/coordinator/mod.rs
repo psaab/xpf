@@ -1443,6 +1443,7 @@ pub(super) fn aggregate_cos_statuses_across_workers(
                     q.priority = q.priority.min(queue.priority);
                 }
                 q.exact = queue.exact;
+                q.guarantee_enabled = queue.guarantee_enabled;
                 // #784: flow_fair is per-worker-queue-runtime; OR
                 // across workers so any worker with flow_fair=true
                 // surfaces. active_flow_buckets_peak is already
