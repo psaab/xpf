@@ -17,6 +17,11 @@
   - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `docs/userspace-dataplane-gaps.md`, `_Log.md`
   - **Validation**: `go test ./pkg/dataplane/userspace`; `git diff --check`
 
+- **Timestamp**: 2026-05-17T00:06:00Z
+  - **Action**: PR #1386 round-2 review follow-up — changed userspace buffer capacity fallback from all-or-nothing to per-row fallback so mixed helper snapshots with one populated `per_binding[]` row and one sparse row do not undercount capacity.
+  - **File(s)**: `pkg/dataplane/userspace/buffersfmt.go`, `pkg/dataplane/userspace/buffersfmt_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/dataplane/userspace/buffersfmt.go pkg/dataplane/userspace/buffersfmt_test.go`; `go test ./pkg/dataplane/userspace`; `git diff --check`
+
 - **Timestamp**: 2026-05-16T22:19:53Z
   - **Action**: PR #1386 round-1 review fixes — preserve the `Active sessions` footer in userspace `show system buffers`, make non-detail output aggregate-only while `buffers detail` adds per-binding rows, and fall back to `bindings[]` when `per_binding[]` lacks capacity gauges.
   - **File(s)**: `pkg/dataplane/userspace/buffersfmt.go`, `pkg/dataplane/userspace/buffersfmt_test.go`, `pkg/cli/cli_show_system.go`, `pkg/grpcapi/server_show.go`, `pkg/grpcapi/server_show_system_buffers_test.go`, `docs/userspace-dataplane-architecture.md`, `_Log.md`

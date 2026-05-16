@@ -131,8 +131,15 @@ func systemBufferSamples(status ProcessStatus) []systemBufferSample {
 	}
 
 	var samples []systemBufferSample
-	if perBindingHasBufferCapacity(status.PerBinding) {
+	seen := make(map[systemBufferBindingKey]struct{}, len(status.PerBinding))
+	if len(status.PerBinding) > 0 {
 		for _, binding := range status.PerBinding {
+			key := systemBufferBindingKey{
+				WorkerID: binding.WorkerID,
+				QueueID:  binding.QueueID,
+				Ifindex:  binding.Ifindex,
+			}
+			seen[key] = struct{}{}
 			sample := systemBufferSample{
 				WorkerID:   binding.WorkerID,
 				QueueID:    binding.QueueID,
@@ -142,34 +149,44 @@ func systemBufferSamples(status ProcessStatus) []systemBufferSample {
 				TXRingCap:  binding.TxRingCapacity,
 				TXRingUsed: binding.OutstandingTX,
 			}
-			if full, ok := bindings[systemBufferBindingKey{
-				WorkerID: binding.WorkerID,
-				QueueID:  binding.QueueID,
-				Ifindex:  binding.Ifindex,
-			}]; ok {
+			if full, ok := bindings[key]; ok {
 				sample.Slot = full.Slot
 				sample.HasSlot = true
 				sample.Interface = full.Interface
+				if binding.UmemTotalFrames == 0 {
+					sample.UMEMCap = full.UmemTotalFrames
+					sample.UMEMUsed = full.UmemInflightFrames
+				}
+				if binding.TxRingCapacity == 0 {
+					sample.TXRingCap = full.TxRingCapacity
+					sample.TXRingUsed = full.OutstandingTX
+				}
 			}
 			samples = append(samples, sample)
 		}
-	} else {
-		for _, binding := range status.Bindings {
-			samples = append(samples, systemBufferSample{
-				Slot:       binding.Slot,
-				HasSlot:    true,
-				WorkerID:   binding.WorkerID,
-				QueueID:    binding.QueueID,
-				Ifindex:    binding.Ifindex,
-				Interface:  binding.Interface,
-				UMEMCap:    binding.UmemTotalFrames,
-				UMEMUsed:   binding.UmemInflightFrames,
-				TXRingCap:  binding.TxRingCapacity,
-				TXRingUsed: binding.OutstandingTX,
-			})
-		}
 	}
-
+	for _, binding := range status.Bindings {
+		key := systemBufferBindingKey{
+			WorkerID: binding.WorkerID,
+			QueueID:  binding.QueueID,
+			Ifindex:  binding.Ifindex,
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		samples = append(samples, systemBufferSample{
+			Slot:       binding.Slot,
+			HasSlot:    true,
+			WorkerID:   binding.WorkerID,
+			QueueID:    binding.QueueID,
+			Ifindex:    binding.Ifindex,
+			Interface:  binding.Interface,
+			UMEMCap:    binding.UmemTotalFrames,
+			UMEMUsed:   binding.UmemInflightFrames,
+			TXRingCap:  binding.TxRingCapacity,
+			TXRingUsed: binding.OutstandingTX,
+		})
+	}
 	sort.Slice(samples, func(i, j int) bool {
 		a, b := samples[i], samples[j]
 		if a.WorkerID != b.WorkerID {
@@ -187,15 +204,6 @@ func systemBufferSamples(status ProcessStatus) []systemBufferSample {
 		return a.Slot < b.Slot
 	})
 	return samples
-}
-
-func perBindingHasBufferCapacity(bindings []BindingCountersSnapshot) bool {
-	for _, binding := range bindings {
-		if binding.UmemTotalFrames > 0 || binding.TxRingCapacity > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 type systemBufferBindingKey struct {

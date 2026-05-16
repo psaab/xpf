@@ -94,6 +94,32 @@ func TestFormatSystemBuffersFallsBackWhenPerBindingLacksCapacity(t *testing.T) {
 	}
 }
 
+func TestFormatSystemBuffersFallsBackPerSparsePerBindingRow(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{Slot: 2, WorkerID: 1, QueueID: 0, Ifindex: 7, Interface: "ge-0-0-1", UmemTotalFrames: 256, UmemInflightFrames: 64},
+			{Slot: 3, WorkerID: 1, QueueID: 1, Ifindex: 8, Interface: "ge-0-0-2", UmemTotalFrames: 512, UmemInflightFrames: 128},
+		},
+		PerBinding: []BindingCountersSnapshot{
+			{WorkerID: 1, QueueID: 0, Ifindex: 7, UmemTotalFrames: 1000, UmemInflightFrames: 500},
+			{WorkerID: 1, QueueID: 1, Ifindex: 8, OutstandingTX: 10},
+		},
+	}
+
+	out := FormatSystemBuffers(status, true)
+	for _, want := range []string{
+		"aggregate/2",
+		"1512",
+		"628",
+		"worker 1/queue 0/slot 2/ge-0-0-1",
+		"worker 1/queue 1/slot 3/ge-0-0-2",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("FormatSystemBuffers output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestFormatSystemBuffersDocumentsMissingStatusFields(t *testing.T) {
 	out := FormatSystemBuffers(ProcessStatus{
 		PerBinding: []BindingCountersSnapshot{{WorkerID: 0, QueueID: 0, OutstandingTX: 10}},
