@@ -462,10 +462,10 @@ phases: `borrow_alone`, `peer_demand`, `peer_steady`, and
 `peer_idle_reclaim`. Each phase records `throughput_mbps.borrower` and
 `throughput_mbps.peer`; `peer_steady` may also record
 `cos_admission_drops.peer`. Handback evidence is either
-`handback_samples` with time-domain throughput samples, or
-`handback_evidence: {"source": "transition_observed", "observed": true}`
-when another runner has already measured the transition window. The
-default gates are:
+`handback_samples` with time-domain throughput samples. Scalar
+`handback_window_sec` values and self-attested handback labels are not
+accepted as substitutes because the validator must derive the handback
+point from auditable data. The default gates are:
 
 - borrower-alone throughput exceeds 105% of the borrower guarantee
 - peer-demand throughput is non-zero (at least 1% of the peer guarantee)

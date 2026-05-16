@@ -42,8 +42,8 @@ nothing internal.
   compiler, userspace snapshot, and Rust dataplane protocol all carry
   `buffer_size_bytes`, not a percent-of-pool representation. Do not
   accept percent syntax in the schema until that runtime representation
-  exists too; otherwise `buffer-size 10%` would validate and then
-  compile as zero bytes through the legacy parser.
+  exists too (tracked in #1336); otherwise `buffer-size 10%` would
+  validate and then compile as zero bytes through the legacy parser.
   `parseBandwidthLimitStrict` / `parseBurstSizeLimitStrict` /
   `parseScaledDecimalUnitStrict` in `compiler_protocols.go` are the
   error-returning siblings of the legacy zero-return parsers — the legacy

@@ -7,8 +7,10 @@ Input is a JSON artifact with four named phases:
   "root_cap_mbps": 25000,
   "borrower_guarantee_mbps": 10000,
   "peer_guarantee_mbps": 10000,
-  "handback_window_sec": 3.2,
-  "handback_evidence": {"source": "transition_observed", "observed": true},
+  "handback_samples": [
+    {"t_sec": 1.0, "throughput_mbps": {"borrower": 16000, "peer": 4000}},
+    {"t_sec": 3.2, "throughput_mbps": {"borrower": 9000, "peer": 9800}}
+  ],
   "phases": [
     {"name": "borrow_alone", "throughput_mbps": {"borrower": 18000, "peer": 0}},
     {"name": "peer_demand", "throughput_mbps": {"borrower": 17000, "peer": 4000}},
@@ -94,15 +96,6 @@ def _drops(phase: dict[str, Any], role: str) -> float:
     return _nonnegative_number(drops.get(role, 0), f"phase {phase.get('name')}: cos_admission_drops.{role}")
 
 
-def _handback_scalar_has_evidence(artifact: dict[str, Any]) -> bool:
-    evidence = artifact.get("handback_evidence")
-    if not isinstance(evidence, dict):
-        return False
-    source = evidence.get("source")
-    observed = evidence.get("observed")
-    return bool(observed) and source in {"time_series", "transition_observed"}
-
-
 def _handback_from_samples(
     artifact: dict[str, Any],
     *,
@@ -113,7 +106,7 @@ def _handback_from_samples(
 ) -> Tuple[Optional[float], Optional[str]]:
     samples = artifact.get("handback_samples")
     if samples is None:
-        return None, None
+        return None, "missing_handback_samples"
     if not isinstance(samples, list) or not samples:
         raise ValueError("handback_samples must be a non-empty list when present")
 
@@ -178,10 +171,7 @@ def validate(
         borrow_alone_bps=borrow_alone_bps,
         max_borrower_demand_ratio=max_borrower_demand_ratio,
     )
-    if handback is None and handback_source is None:
-        handback = _nonnegative_number(artifact.get("handback_window_sec"), "handback_window_sec")
-        handback_source = "handback_evidence" if _handback_scalar_has_evidence(artifact) else "unaudited_scalar"
-    elif handback is None:
+    if handback is None:
         handback = max_handback_sec + 1.0
 
     failures: list[str] = []
@@ -213,10 +203,9 @@ def validate(
         failures.append(
             "handback_samples never show peer guarantee restored while borrower gave back surplus"
         )
-    if handback_source == "unaudited_scalar":
+    if handback_source == "missing_handback_samples":
         failures.append(
-            "handback window is an unaudited scalar; provide handback_samples "
-            "or handback_evidence.source with observed=true"
+            "handback_samples are required; scalar handback evidence is not auditable"
         )
     if steady_borrower > borrow_alone_bps * max_borrower_demand_ratio:
         failures.append(

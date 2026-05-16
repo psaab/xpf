@@ -3,17 +3,18 @@
 Cell directory layout: <root>/cell_N{n}_M{m}/rep_{i}/probe.json
 Per-rep validity is read from probe.json["validity"]["ok"].
 
-For each cell, the median rep (by p99) of the valid reps is selected
-as the representative; its p50/p95/p99 + IQR-of-p99-across-reps +
-achieved-RPS summary populate summary.json.
+For each cell, the median valid rep for the configured gate percentile
+is selected as the representative; its p50/p95/p99/p99.9 +
+IQR-of-p99-across-reps + achieved-RPS summary populate summary.json.
 
 Default decision threshold (#905, plan §7.2):
 - p99(N=128, M=10, best-effort) ≤ 2 × p99(N=0, M=10, best-effort)
 
 Issue #1321 can reuse the same artifact reducer for 100E100M by passing
 `--gate-elephants 100 --gate-mice 100`. The reducer records p99.9 when
-probe artifacts include it, but the default hard gate remains p99 unless
-the caller explicitly changes `--gate-percentile`.
+probe artifacts include it. The default hard gate remains p99 unless
+the caller explicitly changes `--gate-percentile`; when changed, the
+representative rep is selected by that same percentile.
 
 The harness only runs best-effort, so cells are keyed by (N, M).
 """
