@@ -1,5 +1,12 @@
 # Action Log
 
+## 2026-05-16
+
+- **Timestamp**: 2026-05-16T00:14:30Z
+  - **Action**: Issue #1330 — split `userspace-dp/src/bin/fairness-eval.rs` into a thin CLI shell plus `userspace-dp/src/fairness_eval/` modules for args, inputs, windowing, per-worker aggregation, RSS expectation, verdict construction, and report emission without changing CLI behavior or fairness semantics.
+  - **File(s)**: `userspace-dp/src/bin/fairness-eval.rs`, `userspace-dp/src/fairness_eval/*`, `userspace-dp/src/bin/README.md`, `docs/pr/1330-fairness-eval-library/plan.md`, `_Log.md`
+  - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml --bin fairness-eval`; `cargo test --manifest-path userspace-dp/Cargo.toml --test fairness_eval_blackbox`; `git diff --check`
+
 ## 2026-05-15
 
 - **Timestamp**: 2026-05-16T00:06:42Z

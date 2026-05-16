@@ -11,8 +11,10 @@ dataplane helper.
   fairness-regime verdict (Cstruct, observed CoV, starved flows). The
   optional `--rss-expectation` gate fails structurally skewed runs that
   violate an explicit workload contract even when scheduler fairness is
-  within `Cstruct`. The merge bar for any fairness-mechanism PR is a
-  PASS from this binary against the loss userspace cluster.
+  within `Cstruct`. `fairness-eval.rs` is only the CLI shell; the
+  evaluator pipeline lives in `src/fairness_eval/`. The merge bar for any
+  fairness-mechanism PR is a PASS from this binary against the loss
+  userspace cluster.
 
   Black-box discipline: cargo integration tests in `tests/*.rs` exercise
   the binary via `env!("CARGO_BIN_EXE_<name>")`, which prevents tests
