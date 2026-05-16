@@ -843,6 +843,23 @@ func parseBandwidthLimit(s string) uint64 {
 	return parseScaledDecimalUnit(s) / 8
 }
 
+// parseBandwidthLimitStrict is the error-returning sibling of
+// parseBandwidthLimit used by the #1319 SchemaValidate path.
+//
+// The legacy parseBandwidthLimit silently returns 0 on garbage input,
+// which is fine when the compiler later treats 0 as "unset"; the
+// schema validator however needs to fail loud so `commit check` can
+// reject `transmit-rate asd` instead of writing 0 bps under the hood.
+// We keep parseBandwidthLimit's zero-return contract unchanged on
+// purpose — too many callers depend on it.
+func parseBandwidthLimitStrict(s string) (uint64, error) {
+	scaled, err := parseScaledDecimalUnitStrict(s)
+	if err != nil {
+		return 0, err
+	}
+	return scaled / 8, nil
+}
+
 // parseBurstSizeLimit parses a Junos burst-size-limit value (in bytes).
 // "15k" = 15,000 bytes; "1m" = 1,000,000 bytes; plain number = bytes.
 func parseBurstSizeLimit(s string) uint64 {
@@ -898,4 +915,74 @@ func parseScaledDecimalUnit(s string) uint64 {
 		return 0
 	}
 	return uint64(rounded)
+}
+
+// parseScaledDecimalUnitStrict is the error-returning sibling of
+// parseScaledDecimalUnit used by the #1319 SchemaValidate path. Keeping
+// the legacy zero-return parseScaledDecimalUnit untouched preserves the
+// compiler's "unset = 0" contract; this strict variant is the one the
+// schema validator uses to fail loud on `asd` / negative / NaN inputs.
+func parseScaledDecimalUnitStrict(s string) (uint64, error) {
+	orig := s
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty value")
+	}
+	multiplier := 1.0
+	if strings.HasSuffix(s, "g") || strings.HasSuffix(s, "G") {
+		multiplier = 1000000000
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "m") || strings.HasSuffix(s, "M") {
+		multiplier = 1000000
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "k") || strings.HasSuffix(s, "K") {
+		multiplier = 1000
+		s = s[:len(s)-1]
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid scaled decimal %q: %w", orig, err)
+	}
+	if v < 0 {
+		return 0, fmt.Errorf("invalid scaled decimal %q: negative not allowed", orig)
+	}
+	scaled := v * multiplier
+	if math.IsNaN(scaled) || math.IsInf(scaled, 0) {
+		return 0, fmt.Errorf("invalid scaled decimal %q: non-finite", orig)
+	}
+	rounded := math.Round(scaled)
+	if rounded > float64(^uint64(0)) {
+		return 0, fmt.Errorf("invalid scaled decimal %q: overflow", orig)
+	}
+	return uint64(rounded), nil
+}
+
+// parseBurstSizeLimitStrict is the error-returning sibling of
+// parseBurstSizeLimit used by the #1319 SchemaValidate path.
+func parseBurstSizeLimitStrict(s string) (uint64, error) {
+	orig := s
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty value")
+	}
+	multiplier := uint64(1)
+	if strings.HasSuffix(s, "g") || strings.HasSuffix(s, "G") {
+		multiplier = 1000000000
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "m") || strings.HasSuffix(s, "M") {
+		multiplier = 1000000
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "k") || strings.HasSuffix(s, "K") {
+		multiplier = 1000
+		s = s[:len(s)-1]
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid byte-size %q: %w", orig, err)
+	}
+	prod := v * multiplier
+	if multiplier != 0 && prod/multiplier != v {
+		return 0, fmt.Errorf("invalid byte-size %q: overflow", orig)
+	}
+	return prod, nil
 }

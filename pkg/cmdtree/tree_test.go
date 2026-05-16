@@ -95,3 +95,60 @@ func TestLookupDesc_ConfigModeResolvesUniquePrefixWords(t *testing.T) {
 		t.Fatalf("LookupDesc() = %q, want %q", got, "Automatically rollback if not confirmed")
 	}
 }
+
+// #1319: typed-leaf `?` completion surfaces placeholder + ValueExamples
+// through the real config-mode set tree.
+
+func containsCand(cands []Candidate, name string) (Candidate, bool) {
+	for _, c := range cands {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return Candidate{}, false
+}
+
+func TestSchedulers_TypedLeaf_QuestionHelpShowsPlaceholderAndExamples(t *testing.T) {
+	// After `sched transmit-rate`, `?` should show the rate placeholder
+	// plus example values.
+	cands := CompleteFromTreeWithDesc(
+		ConfigTopLevel,
+		[]string{"set", "class-of-service", "schedulers", "be", "transmit-rate"},
+		"",
+		nil,
+	)
+	if _, ok := containsCand(cands, "<rate>"); !ok {
+		t.Fatalf("expected <rate> placeholder in `?` candidates, got %+v", cands)
+	}
+	if _, ok := containsCand(cands, "1g"); !ok {
+		t.Fatalf("expected 1g example in `?` candidates, got %+v", cands)
+	}
+}
+
+func TestSchedulers_TypedLeaf_AfterValueShowsModifiers(t *testing.T) {
+	// After `sched transmit-rate 1g`, the value is consumed and `?`
+	// should surface the `exact` modifier child.
+	cands := CompleteFromTreeWithDesc(
+		ConfigTopLevel,
+		[]string{"set", "class-of-service", "schedulers", "be", "transmit-rate", "1g"},
+		"",
+		nil,
+	)
+	if _, ok := containsCand(cands, "exact"); !ok {
+		t.Fatalf("expected `exact` modifier after consumed rate, got %+v", cands)
+	}
+}
+
+func TestSchedulers_TypedLeaf_PriorityEnumExamples(t *testing.T) {
+	cands := CompleteFromTreeWithDesc(
+		ConfigTopLevel,
+		[]string{"set", "class-of-service", "schedulers", "be", "priority"},
+		"",
+		nil,
+	)
+	for _, want := range []string{"strict-high", "low", "high"} {
+		if _, ok := containsCand(cands, want); !ok {
+			t.Fatalf("expected enum example %q for priority, got %+v", want, cands)
+		}
+	}
+}

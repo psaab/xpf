@@ -2,6 +2,11 @@
 
 ## 2026-05-16
 
+- **Timestamp**: 2026-05-16T04:36:00Z
+  - **Action**: PR #1320 round-3 review fixes — validate typed scheduler leaves against the apply-groups-expanded tree before compile; reject `transmit-rate exact` unless the scheduler also has a typed rate; wire `ConfigClassOfServiceSchedulers` into the real config-mode `set class-of-service schedulers <name>` completion tree; update module docs to keep the byte-size-only scheduler buffer contract explicit.
+  - **File(s)**: `pkg/cmdtree/schema_validate.go`, `pkg/cmdtree/tree.go`, `pkg/cmdtree/tree_test.go`, `pkg/cmdtree/README.md`, `pkg/config/schema_validate_test.go`, `pkg/config/README.md`, `pkg/configstore/store.go`, `pkg/configstore/store_test.go`, `_Log.md`
+  - **Validation**: `go test -count=1 ./pkg/cmdtree/... ./pkg/config/... ./pkg/configstore/...`; `go test -count=1 ./pkg/...`; `git diff --check`
+
 - **Timestamp**: 2026-05-16T00:14:30Z
   - **Action**: Issue #1330 — split `userspace-dp/src/bin/fairness-eval.rs` into a thin CLI shell plus `userspace-dp/src/fairness_eval/` modules for args, inputs, windowing, per-worker aggregation, RSS expectation, verdict construction, and report emission without changing CLI behavior or fairness semantics.
   - **File(s)**: `userspace-dp/src/bin/fairness-eval.rs`, `userspace-dp/src/fairness_eval/*`, `userspace-dp/src/bin/README.md`, `docs/pr/1330-fairness-eval-library/plan.md`, `_Log.md`
@@ -564,3 +569,12 @@
   - **Action**: #1318 scoped CoS drain idle fix: gate `drain_shaped_tx` root priming on runnable queues or due parked wake ticks, skipping timer-wheel advance and shared-root lease top-up for not-yet-serviceable parked roots while preserving due wake service.
   - **File(s)**: `userspace-dp/src/afxdp/cos/queue_service/mod.rs`, `userspace-dp/src/afxdp/cos/queue_service/tests.rs`, `userspace-dp/src/afxdp/cos/tx_completion.rs`, `userspace-dp/src/afxdp/cos/tx_completion_tests.rs`, `userspace-dp/src/afxdp/cos/README.md`, `_Log.md`
   - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml drain_shaped_tx_ -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml root_serviceability_tracks_parked_queue_wakeup_tick -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml queue_service`; `cargo test --manifest-path userspace-dp/Cargo.toml tx_completion`
+
+- **Timestamp**: 2026-05-14T20:30:00Z
+  - **Action**: #1319 Phase 1 + Phase 2 (schedulers subtree only): add typed-leaf schema infrastructure (`ValueType` enum + `ValueDesc` + `ValueExamples` + `Validator` on `cmdtree.Node`); add strict error-returning parsers `parseBandwidthLimitStrict` / `parseBurstSizeLimitStrict` / `parseScaledDecimalUnitStrict` alongside the legacy zero-return parsers; add stateless validators in `pkg/config/schema_validators.go` (`ValidateRate`, `ValidateByteSize`, `ValidateInteger`, `ValidateEnum`, `ValidatePercent`); declare per-leaf schema for `class-of-service schedulers <name> { ... }` compiler-consumed leaves (`transmit-rate`, `priority`, `buffer-size`, `surplus-sharing`, `equal-flow-enforcement`); wire `cmdtree.SchemaValidate` into `configstore.compileTree` so `commit check` rejects `transmit-rate asd` with a human-readable error before the legacy zero-return parser silently writes 0 bps. Surfaces `?` placeholder + examples for typed leaves.
+  - **File(s)**: `pkg/cmdtree/tree.go`, `pkg/cmdtree/schema_validate.go` (new), `pkg/cmdtree/tree_test.go`, `pkg/cmdtree/README.md`, `pkg/config/compiler_protocols.go`, `pkg/config/schema_validators.go` (new), `pkg/config/schema_validate_test.go` (new), `pkg/config/README.md`, `pkg/configstore/store.go`, `pkg/configstore/store_test.go`, `_Log.md`
+  - **Validation**: `GOCACHE=/dev/shm/cache GOTMPDIR=/dev/shm go build ./...` (clean); `go test ./pkg/cmdtree/... ./pkg/config/... ./pkg/configstore/...` (PASS); full `go test ./...` (all packages PASS).
+- **Timestamp**: 2026-05-15T22:33:24Z
+  - **Action**: PR #1320 round-1 review fixes: preserve split Junos-style `transmit-rate exact`; make typed scheduler leaves fail closed on missing values and unknown trailing modifiers; reject sub-byte scheduler rates that compile to zero bytes/sec; align `buffer-size` validation and help with the compiler's byte-size-only representation; remove unsupported scheduler-level `shaping-rate` from the typed schema; update module docs to match the enforced schema.
+  - **File(s)**: `pkg/cmdtree/schema_validate.go`, `pkg/cmdtree/tree.go`, `pkg/cmdtree/README.md`, `pkg/config/schema_validators.go`, `pkg/config/schema_validate_test.go`, `pkg/config/README.md`, `_Log.md`
+  - **Validation**: `go test -count=1 ./pkg/config ./pkg/cmdtree ./pkg/configstore` (PASS); `go test -count=1 ./pkg/...` (PASS); `git diff --check` (clean).
