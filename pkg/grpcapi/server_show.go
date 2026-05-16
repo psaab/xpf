@@ -1725,6 +1725,10 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 					fmt.Fprintf(&buf, "Userspace buffer metrics unavailable: %v\n", err)
 				} else {
 					buf.WriteString(dpuserspace.FormatSystemBuffers(status, false))
+					v4, v6 := s.dp.SessionCount()
+					if v4 > 0 || v6 > 0 {
+						fmt.Fprintf(&buf, "\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
+					}
 				}
 			} else {
 				stats := s.dp.GetMapStats()
@@ -1777,6 +1781,10 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 					fmt.Fprintf(&buf, "Userspace buffer metrics unavailable: %v\n", err)
 				} else {
 					buf.WriteString(dpuserspace.FormatSystemBuffers(status, true))
+					v4, v6 := s.dp.SessionCount()
+					if v4 > 0 || v6 > 0 {
+						fmt.Fprintf(&buf, "\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
+					}
 				}
 			} else {
 				stats := s.dp.GetMapStats()

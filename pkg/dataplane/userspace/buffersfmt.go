@@ -30,7 +30,7 @@ type systemBufferRow struct {
 // `show system buffers`. It only uses bounded AF_XDP gauges published in helper
 // status; if those gauges are absent, it reports the missing wire fields rather
 // than falling back to unrelated BPF map occupancy.
-func FormatSystemBuffers(status ProcessStatus, _ bool) string {
+func FormatSystemBuffers(status ProcessStatus, detail bool) string {
 	samples := systemBufferSamples(status)
 	var umemCap, umemUsed, txCap, txUsed uint64
 	var knownUMEM, knownTX int
@@ -64,23 +64,25 @@ func FormatSystemBuffers(status ProcessStatus, _ bool) string {
 			Used:     txUsed,
 		})
 	}
-	for _, sample := range samples {
-		scope := systemBufferSampleScope(sample)
-		if sample.UMEMCap > 0 {
-			rows = append(rows, systemBufferRow{
-				Name:     "AF_XDP UMEM frames",
-				Scope:    scope,
-				Capacity: uint64(sample.UMEMCap),
-				Used:     uint64(sample.UMEMUsed),
-			})
-		}
-		if sample.TXRingCap > 0 {
-			rows = append(rows, systemBufferRow{
-				Name:     "AF_XDP TX ring",
-				Scope:    scope,
-				Capacity: uint64(sample.TXRingCap),
-				Used:     uint64(sample.TXRingUsed),
-			})
+	if detail {
+		for _, sample := range samples {
+			scope := systemBufferSampleScope(sample)
+			if sample.UMEMCap > 0 {
+				rows = append(rows, systemBufferRow{
+					Name:     "AF_XDP UMEM frames",
+					Scope:    scope,
+					Capacity: uint64(sample.UMEMCap),
+					Used:     uint64(sample.UMEMUsed),
+				})
+			}
+			if sample.TXRingCap > 0 {
+				rows = append(rows, systemBufferRow{
+					Name:     "AF_XDP TX ring",
+					Scope:    scope,
+					Capacity: uint64(sample.TXRingCap),
+					Used:     uint64(sample.TXRingUsed),
+				})
+			}
 		}
 	}
 
@@ -129,7 +131,7 @@ func systemBufferSamples(status ProcessStatus) []systemBufferSample {
 	}
 
 	var samples []systemBufferSample
-	if len(status.PerBinding) > 0 {
+	if perBindingHasBufferCapacity(status.PerBinding) {
 		for _, binding := range status.PerBinding {
 			sample := systemBufferSample{
 				WorkerID:   binding.WorkerID,
@@ -185,6 +187,15 @@ func systemBufferSamples(status ProcessStatus) []systemBufferSample {
 		return a.Slot < b.Slot
 	})
 	return samples
+}
+
+func perBindingHasBufferCapacity(bindings []BindingCountersSnapshot) bool {
+	for _, binding := range bindings {
+		if binding.UmemTotalFrames > 0 || binding.TxRingCapacity > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 type systemBufferBindingKey struct {

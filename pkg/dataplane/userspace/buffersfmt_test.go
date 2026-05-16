@@ -57,7 +57,36 @@ func TestFormatSystemBuffersFallsBackToBindingsAndWarnsAtEighty(t *testing.T) {
 		"AF_XDP UMEM frames",
 		"aggregate/1",
 		"80.0% WARNING",
-		"worker 0/queue 0/slot 0/ge-0-0-0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("FormatSystemBuffers output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "worker 0/queue 0/slot 0/ge-0-0-0") {
+		t.Fatalf("non-detail output included per-binding row:\n%s", out)
+	}
+	detail := FormatSystemBuffers(status, true)
+	if !strings.Contains(detail, "worker 0/queue 0/slot 0/ge-0-0-0") {
+		t.Fatalf("detail output missing per-binding row:\n%s", detail)
+	}
+}
+
+func TestFormatSystemBuffersFallsBackWhenPerBindingLacksCapacity(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{Slot: 2, WorkerID: 1, QueueID: 0, Interface: "ge-0-0-1", UmemTotalFrames: 256, UmemInflightFrames: 64},
+		},
+		PerBinding: []BindingCountersSnapshot{
+			{WorkerID: 1, QueueID: 0, OutstandingTX: 10},
+		},
+	}
+
+	out := FormatSystemBuffers(status, true)
+	for _, want := range []string{
+		"aggregate/1",
+		"256",
+		"64",
+		"worker 1/queue 0/slot 2/ge-0-0-1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("FormatSystemBuffers output missing %q:\n%s", want, out)
