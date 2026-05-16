@@ -1202,6 +1202,33 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 			if len(destAddrs) == 0 && rule.Match.DestinationAddress != "" {
 				destAddrs = append(destAddrs, rule.Match.DestinationAddress)
 			}
+			var poolAddresses []string
+			var portLow, portHigh uint16
+			if rule.Then.PoolName != "" {
+				pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]
+				if !ok || pool == nil {
+					slog.Warn("userspace snapshot: skipping source NAT rule with missing pool",
+						"rule", rule.Name, "pool", rule.Then.PoolName)
+					continue
+				}
+				if pool.Address != "" {
+					poolAddresses = append(poolAddresses, pool.Address)
+				}
+				poolAddresses = append(poolAddresses, pool.Addresses...)
+				if len(poolAddresses) == 0 {
+					slog.Warn("userspace snapshot: skipping source NAT rule with empty pool",
+						"rule", rule.Name, "pool", rule.Then.PoolName)
+					continue
+				}
+				var valid bool
+				portLow, portHigh, valid = sourceNATPoolPortRange(pool)
+				if !valid {
+					slog.Warn("userspace snapshot: skipping source NAT rule with invalid pool port range",
+						"rule", rule.Name, "pool", rule.Then.PoolName,
+						"port_low", pool.PortLow, "port_high", pool.PortHigh)
+					continue
+				}
+			}
 			out = append(out, SourceNATRuleSnapshot{
 				Name:                 rule.Name,
 				FromZone:             rs.FromZone,
@@ -1211,10 +1238,32 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 				InterfaceMode:        rule.Then.Interface,
 				Off:                  rule.Then.Off,
 				PoolName:             rule.Then.PoolName,
+				PoolAddresses:        poolAddresses,
+				PortLow:              portLow,
+				PortHigh:             portHigh,
+				AddressPersistent:    cfg.Security.NAT.AddressPersistent,
 			})
 		}
 	}
 	return out
+}
+
+func sourceNATPoolPortRange(pool *config.NATPool) (uint16, uint16, bool) {
+	if pool == nil {
+		return 0, 0, false
+	}
+	low := pool.PortLow
+	if low == 0 {
+		low = 1024
+	}
+	high := pool.PortHigh
+	if high == 0 {
+		high = 65535
+	}
+	if low < 1 || high < 1 || low > 65535 || high > 65535 || low > high {
+		return 0, 0, false
+	}
+	return uint16(low), uint16(high), true
 }
 
 func buildStaticNATSnapshots(cfg *config.Config) []StaticNATRuleSnapshot {
