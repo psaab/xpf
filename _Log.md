@@ -37,6 +37,11 @@
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `_Log.md`
   - **Validation**: `go test -count=1 ./pkg/dataplane/userspace`; `git diff --check`
 
+- **Timestamp**: 2026-05-15T22:15:00Z
+  - **Action**: Issue #1298 — add an idle debug-updater regression test proving wall-clock publishes age active-flow, flow-worker-map, and CoS active-flow snapshots to zero. Round-1 review narrowed the claim to the helper path exercised by the test and tied the aging loop to `ACTIVE_WINDOW_EPOCHS` instead of a hard-coded epoch count.
+  - **File(s)**: `userspace-dp/src/afxdp/flow_cache.rs`, `userspace-dp/src/afxdp/umem/tests.rs`, `_Log.md`
+  - **Validation**: `cargo test idle_debug_updater_ages_active_flow_snapshots`; `cargo test idle_debug_state_publish_cadence_is_wall_clock_based`; `git diff --check`
+
 - **Timestamp**: 2026-05-15T22:05:00Z
   - **Action**: Issue #1278 — make `show class-of-service interface` join configured reverse-egress CoS interfaces to live runtime by configured name first and binding egress ifindex second, so alias drift between `ge-0-0-1.0` and the runtime snapshot no longer hides queue counters.
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `docs/cos-validation-notes.md`, `_Log.md`
