@@ -62,10 +62,21 @@ class MedianByP99Tests(unittest.TestCase):
 
 class SummarizeCellTests(unittest.TestCase):
     def test_insufficient_valid_reps(self):
-        # Only 5 valid → INSUFFICIENT-DATA
+        # Only 5 valid -> insufficient for a gate-grade cell.
         reps = [_make_rep(100) for _ in range(5)]
         s = summarize_cell(reps)
-        self.assertEqual(s["status"], "INSUFFICIENT-DATA")
+        self.assertEqual(s["status"], "INSUFFICIENT-VALID-REPS")
+
+    def test_nine_valid_reps_is_insufficient(self):
+        # A cell that exhausts the 15-rep ceiling at 9 valid reps must
+        # not render as OK; gate-grade artifacts require the full 10.
+        valid = [_make_rep(p99=100 + 10 * i) for i in range(9)]
+        invalid = [_make_rep(p99=99999, ok=False) for _ in range(6)]
+        s = summarize_cell(valid + invalid)
+        self.assertEqual(s["n_reps_valid"], 9)
+        self.assertEqual(s["n_reps_total"], 15)
+        self.assertEqual(s["status"], "INSUFFICIENT-VALID-REPS")
+        self.assertIsNone(s["median_rep"])
 
     def test_ok_with_10_valid(self):
         reps = [_make_rep(p99=100 + 10 * i) for i in range(10)]
@@ -75,14 +86,14 @@ class SummarizeCellTests(unittest.TestCase):
         self.assertIsNotNone(s["iqr_p99_across_reps"])
 
     def test_excludes_invalid_from_median(self):
-        # 7 valid + 3 invalid; the invalid ones with extreme p99 must
+        # 10 valid + 3 invalid; the invalid ones with extreme p99 must
         # not contribute to the median.
-        valid = [_make_rep(p99=100 + 10 * i) for i in range(7)]
+        valid = [_make_rep(p99=100 + 10 * i) for i in range(10)]
         invalid = [_make_rep(p99=99999, ok=False) for _ in range(3)]
         s = summarize_cell(valid + invalid)
         self.assertEqual(s["status"], "OK")
-        # Median p99 of 100..160 is at index 3 → 130.
-        self.assertEqual(s["median_rep"]["p99_us"], 130)
+        # Median p99 of 100..190 is at index 5 → 150.
+        self.assertEqual(s["median_rep"]["p99_us"], 150)
 
 
 class DecideTests(unittest.TestCase):
@@ -158,6 +169,13 @@ class DecideTests(unittest.TestCase):
         loaded = summarize_cell([_make_rep(p99=100) for _ in range(5)])
         v = decide({(0, 10): idle, (128, 10): loaded})
         self.assertEqual(v["verdict"], "INSUFFICIENT-DATA")
+
+    def test_nine_valid_gate_cell_is_insufficient(self):
+        idle = summarize_cell([_make_rep(p99=100) for _ in range(10)])
+        loaded = summarize_cell([_make_rep(p99=100) for _ in range(9)])
+        v = decide({(0, 10): idle, (128, 10): loaded})
+        self.assertEqual(v["verdict"], "INSUFFICIENT-DATA")
+        self.assertIn("INSUFFICIENT-VALID-REPS", v["reason"])
 
 
 class LoadCellRepsInvalidMarkerTests(unittest.TestCase):
