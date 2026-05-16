@@ -5,6 +5,11 @@ of 4 CoS-classified ports × 2 directions. Config:
 `docs/pr/line-rate-investigation/full-cos.set` applied on
 `loss:xpf-userspace-fw0` (primary after manual failover).
 
+Note: `full-cos.set` was later amended by the low-rate validation work to add
+q0/q4 buffer headroom. The raw JSON captures below predate those buffer-size
+lines, so keep that provenance in mind when replaying the historical 8-matrix
+evidence.
+
 Raw JSON captures: `docs/pr/line-rate-investigation/evidence-8matrix/`.
 
 ## Results

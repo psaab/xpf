@@ -165,7 +165,27 @@ The decision tree:
 | low | high | any | Aggregate cap tripping — bufferbloat | Revisit #720 clamp; look at operator `buffer-size` setting |
 | 0 | 0 | 0 | Nothing is dropping; problem is elsewhere | Look at #709 (owner worker), #712 (CPU pinning), or network-layer loss |
 
-## Current dominant failure mode on this workload
+#1312 pinned the canonical iperf fixture buffers for the low-rate exact
+classes after reverse `-P 12` reproduced high retransmits with equal-flow
+disabled: `scheduler-be` uses `buffer-size 500k` and
+`scheduler-iperf-a` uses `buffer-size 4m`.
+
+When `buffer-size` is omitted, queue `base` comes from
+`max(transmit_rate_bytes/100, 96_000)` (10 ms of bytes with a 96 KB
+floor), then `cos_flow_aware_buffer_limit` applies flow-aware expansion
+and the #717 5 ms envelope clamp:
+`base.max(prospective_active * 24 KB).min(delay_cap.max(base))`, where
+`delay_cap = transmit_rate_bytes * 5 ms`.
+
+These fixture overrides intentionally sit above that implicit cap because
+the exact flow-fair admission gates need enough aggregate and per-flow
+headroom to avoid persistent tail-drop at 12 active TCP flows. They also
+trade latency headroom for retransmit suppression (`500k` at 100M ≈ 40 ms
+residence; `4m` at 1G ≈ 32 ms at full queue). Treat changes to these
+fixture values as admission-policy changes and rerun the q0/q4 reverse
+sweep before trusting low-rate fairness evidence.
+
+## Pre-buffer-sizing dominant failure mode on this workload
 
 **Observed 2026-04-17, post-#728.** This is a dated snapshot, not
 timeless methodology. Re-measure before citing these numbers in a new PR.

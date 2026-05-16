@@ -340,6 +340,29 @@ classes. The 100M and 1G classes are mostly shaper-dominated and can
 produce very low CoV even when high-rate classes remain unfair. Use the
 class sweep harness to exercise every canonical fixture port:
 
+The canonical iperf CoS fixtures intentionally give the two low-rate
+classes deeper buffers than the implicit admission/buffer cap:
+`scheduler-be` uses `buffer-size 500k` and `scheduler-iperf-a` uses
+`buffer-size 4m`. Without explicit `buffer-size`, queue `base` is
+`max(transmit_rate_bytes/100, 96_000)` (10 ms of bytes with a 96 KB
+floor), then admission applies the flow-aware
+`prospective_active * 24 KB` expansion plus the #717 5 ms envelope clamp
+(`.min(delay_cap.max(base))`). #1312 showed that those implicit caps
+reproduce reverse-mode tail-drop under `-P 12` even when equal-flow
+suppression is disabled: q0 hit aggregate admission drops and q4 hit
+per-flow share drops. The fixture overrides therefore trade queue
+residence for retransmit suppression (q0 500k@100M ≈ 40 ms, q4 4m@1G
+≈ 32 ms at full queue). Do not remove or shrink these buffers without
+rerunning at least the q0/q4 reverse sweep and checking retransmits plus
+CoS admission drop deltas.
+
+Those values are an explicit validation-fixture tradeoff, not a general
+low-latency recommendation. The extra headroom stabilizes the `-P 12`
+reverse fairness workload, but it can add bufferbloat for
+latency-sensitive traffic. Production configs that care about tail
+latency should size these buffers from the service SLO rather than
+copying the validation fixture blindly.
+
 ```bash
 COS_IFINDEX=<egress-ifindex> \
 IPERF_LAUNCH_ARG_0=/usr/bin/incus \

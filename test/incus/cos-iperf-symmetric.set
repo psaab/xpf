@@ -29,9 +29,11 @@ set class-of-service forwarding-classes queue 6 iperf-c
 
 set class-of-service schedulers scheduler-be transmit-rate 100m
 set class-of-service schedulers scheduler-be transmit-rate exact
+set class-of-service schedulers scheduler-be buffer-size 500k
 
 set class-of-service schedulers scheduler-iperf-a transmit-rate 1.0g
 set class-of-service schedulers scheduler-iperf-a transmit-rate exact
+set class-of-service schedulers scheduler-iperf-a buffer-size 4m
 
 set class-of-service schedulers scheduler-iperf-b transmit-rate 10.0g
 set class-of-service schedulers scheduler-iperf-b transmit-rate exact
