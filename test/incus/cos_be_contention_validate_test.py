@@ -153,7 +153,23 @@ class CoSBEContentionValidateTests(unittest.TestCase):
 
             self.assertEqual(summary["verdict"], "PASS")
             self.assertEqual(summary["failure_reasons"], [])
+            throughput = summary["cells"][0]["throughput"]
+            self.assertEqual(throughput["exact_cap_mbps"], 1000.0)
+            self.assertEqual(throughput["minimum_baseline_exact_mbps"], 700.0)
+            self.assertEqual(throughput["minimum_contender_mbps"], 500.0)
             self.assertEqual(summary["cells"][0]["contended"]["dataplane"]["verdict"], "PASS")
+
+    def test_default_contender_threshold_math_for_canonical_cells(self) -> None:
+        root_shape = 25_000_000_000.0
+
+        self.assertEqual(
+            cos_validate._default_min_contender_bps(1_000_000_000.0, root_shape),
+            500_000_000.0,
+        )
+        self.assertEqual(
+            cos_validate._default_min_contender_bps(24_000_000_000.0, root_shape),
+            1_000_000_000.0,
+        )
 
     def test_fails_nonzero_iperf_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

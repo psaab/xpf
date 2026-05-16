@@ -235,6 +235,13 @@ class_selected() {
     return 1
 }
 
+# Format:
+#   label exact_port exact_queue exact_class contender_port contender_queue
+#   contender_class exact_cap_bps min_contender_bps
+#
+# The pressure floor must prove material contention relative to the exact cap:
+# 1G exact cells require 500M contender pressure; 24G exact cells require 1G,
+# which is the remaining headroom under the default 25G root shape.
 cells=(
     "exact5202-vs-5200 5202 2 iperf-1g 5200 0 best-effort 1000000000 500000000"
     "exact5210-vs-5200 5210 10 iperf-24g 5200 0 best-effort 24000000000 1000000000"
