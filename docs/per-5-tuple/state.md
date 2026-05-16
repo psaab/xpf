@@ -82,6 +82,29 @@ the cluster produced. **No scheduler bug; structurally skew-bound
 under that input.** Any fairness mechanism must be evaluated against
 this gate, not against an unconditional CoV target.
 
+### Issue #1321 — 100E100M plus surplus give-back validation contract (2026-05-15)
+
+The next validation surface is deployment-facing rather than a new
+dataplane mechanism. The contract keeps equal-flow enforcement separate
+from work-conserving surplus-sharing:
+
+- 100E100M runs use the existing mouse-latency artifact reducer with
+  configurable gate cells (`MOUSE_LATENCY_GATE_ELEPHANTS=100`,
+  `MOUSE_LATENCY_GATE_MICE=100`) and now preserve p99.9 as
+  `median_rep.p999_us`.
+- Surplus give-back runs reduce live traffic evidence into a four-phase
+  artifact (`borrow_alone`, `peer_demand`, `peer_steady`,
+  `peer_idle_reclaim`) validated by
+  `test/incus/fairness_surplus_giveback_validate.py`.
+- The default give-back gates require the peer to reach 95% of guarantee
+  within a 5 s handback window, no steady peer CoS admission drops,
+  borrower decrease while the peer demands service, borrower reclaim
+  after peer idle, and root-cap respect.
+
+This lane intentionally does not touch the dataplane hot path. It makes
+future exact, surplus-sharing, and optional equal-flow comparison runs
+produce comparable artifacts with explicit pass/fail semantics.
+
 ## Killed designs
 
 Two categories. **Mechanisms** (in-dataplane scheduler / steering /
