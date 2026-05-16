@@ -4,10 +4,10 @@
 // `#[path = "admission_tests.rs"]` from admission.rs.
 
 use super::*;
+use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::ecn::{ECN_CE, ECN_ECT_0, ECN_MASK, ECN_NOT_ECT};
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{PreparedTxRecycle, PreparedTxRequest};
-use crate::afxdp::PROTO_TCP;
 
 /// #914: shared_exact rate-aware cap — verify the formula
 /// `max(fair_share*2, bdp_floor).clamp(MIN, buffer_limit)`
@@ -25,6 +25,7 @@ fn flow_share_limit_shared_exact_scales_with_rate() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -71,6 +72,7 @@ fn flow_share_limit_shared_exact_caps_at_aggregate_for_single_flow() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -109,6 +111,7 @@ fn flow_share_limit_shared_exact_clamps_to_buffer_at_low_n() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -152,6 +155,7 @@ fn flow_share_limit_shared_exact_protects_against_dominant_flow() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -196,6 +200,7 @@ fn flow_share_limit_owner_local_exact_unchanged() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -948,7 +953,7 @@ fn admission_ecn_marks_prepared_single_vlan_tagged_ipv4_packet() {
     );
 }
 
-use crate::afxdp::types::{CoSQueueConfig, COS_FLOW_FAIR_BUCKETS};
+use crate::afxdp::types::{COS_FLOW_FAIR_BUCKETS, CoSQueueConfig};
 
 #[test]
 fn cos_flow_aware_buffer_limit_scales_with_prospective_active_flow_count() {
@@ -968,6 +973,7 @@ fn cos_flow_aware_buffer_limit_scales_with_prospective_active_flow_count() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1029,6 +1035,7 @@ fn cos_flow_aware_buffer_limit_matches_share_limit_at_new_flow_boundary() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1115,6 +1122,7 @@ fn cos_flow_aware_buffer_limit_respects_non_flow_fair_queues() {
             forwarding_class: "best-effort".into(),
             priority: 5,
             transmit_rate_bytes: 100_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1147,6 +1155,7 @@ fn cos_queue_flow_share_limit_never_drops_below_fast_retransmit_floor() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1204,6 +1213,7 @@ fn cos_flow_aware_buffer_limit_clamps_high_flow_count_to_max_delay() {
             // 1 Gbps → 125_000_000 bytes/s (decimal, matches
             // operator `transmit-rate 1g` semantics).
             transmit_rate_bytes: 125_000_000,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1268,6 +1278,7 @@ fn cos_flow_aware_buffer_limit_honours_operator_base_above_delay_cap() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 125_000_000,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1318,6 +1329,7 @@ fn cos_flow_aware_buffer_limit_honours_q4_fixture_override_above_delay_cap() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 125_000_000,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1365,6 +1377,7 @@ fn cos_flow_aware_buffer_limit_preserves_non_flow_fair_path_after_clamp() {
             priority: 5,
             // 1 Gbps → delay_cap = 625 KB.
             transmit_rate_bytes: 125_000_000,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1402,6 +1415,7 @@ fn cos_flow_aware_buffer_limit_delay_cap_scales_linearly_with_rate() {
                 forwarding_class: "iperf-a".into(),
                 priority: 5,
                 transmit_rate_bytes: rate_bytes,
+                guarantee_enabled: true,
                 exact: true,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,

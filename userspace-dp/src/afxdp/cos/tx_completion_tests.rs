@@ -101,6 +101,7 @@ fn normalize_cos_queue_state_repairs_nonempty_unparked_queue_to_runnable() {
             queue_id: 5,
             priority: 5,
             transmit_rate_bytes: 11_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,

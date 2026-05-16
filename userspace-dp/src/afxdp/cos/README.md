@@ -62,6 +62,11 @@ mod.rs for further file-level breakdown.
   runnable now or a parked queue's wake tick is due. Not-yet-due
   parked queues skip timer-wheel advance and shared-root lease top-up
   because no queue can service on that drain call.
+- Scheduler-map queues without a positive explicit scheduler
+  `transmit-rate` are residual-only under a shaped root. They keep an
+  effective rate for burst sizing and surplus weight, but
+  `queue_service` skips them in guarantee selectors via
+  `queue.config.guarantee_enabled == false`.
 - `COS_MIN_BURST_BYTES` (64 × MTU) is canonically owned by
   `token_bucket.rs`; siblings import it via the `cos/mod.rs`
   re-export.

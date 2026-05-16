@@ -783,6 +783,12 @@ Important current behavior:
     `class-of-service interfaces <if> unit <u> classifiers ieee-802.1 <name>`
 - non-`exact` scheduler `transmit-rate` values act as guarantees and may borrow
   surplus bandwidth up to the root shaper
+- scheduler-map entries whose scheduler has no explicit positive
+  `transmit-rate` are residual-only under the shaped root. They keep an
+  effective rate for burst sizing and surplus weight, but do not receive
+  non-`exact` guarantee service. The synthetic default best-effort queue used
+  when an interface has shaping but no real scheduler-map queues remains the
+  sole root-shaped guarantee queue.
 - `transmit-rate exact` prevents that queue from borrowing surplus by default
 - adding `surplus-sharing` on the scheduler (#915) opts an `exact` queue
   into surplus participation while keeping the per-queue rate as a

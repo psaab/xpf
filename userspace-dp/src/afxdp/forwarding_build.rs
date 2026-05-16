@@ -699,10 +699,12 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                     continue;
                 };
                 let scheduler = schedulers.get(&entry.scheduler).copied();
-                let transmit_rate_bytes = scheduler
-                    .map(|sched| sched.transmit_rate_bytes)
-                    .filter(|rate| *rate > 0)
-                    .unwrap_or(iface.cos_shaping_rate_bytes_per_sec);
+                let explicit_transmit_rate_bytes = scheduler.and_then(|sched| {
+                    (sched.transmit_rate_bytes > 0).then_some(sched.transmit_rate_bytes)
+                });
+                let guarantee_enabled = explicit_transmit_rate_bytes.is_some();
+                let transmit_rate_bytes =
+                    explicit_transmit_rate_bytes.unwrap_or(iface.cos_shaping_rate_bytes_per_sec);
                 queues.push(CoSQueueConfig {
                     queue_id,
                     forwarding_class: entry.forwarding_class.clone(),
@@ -712,14 +714,21 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                             .unwrap_or("low"),
                     ),
                     transmit_rate_bytes,
+                    guarantee_enabled,
                     exact: scheduler
-                        .map(|sched| sched.transmit_rate_exact)
+                        .map(|sched| guarantee_enabled && sched.transmit_rate_exact)
                         .unwrap_or(false),
                     surplus_sharing: scheduler
-                        .map(|sched| sched.surplus_sharing)
+                        .map(|sched| {
+                            guarantee_enabled && sched.transmit_rate_exact && sched.surplus_sharing
+                        })
                         .unwrap_or(false),
                     equal_flow_enforcement: scheduler
-                        .map(|sched| sched.equal_flow_enforcement)
+                        .map(|sched| {
+                            guarantee_enabled
+                                && sched.transmit_rate_exact
+                                && sched.equal_flow_enforcement
+                        })
                         .unwrap_or(false),
                     surplus_weight: cos_surplus_weight(
                         transmit_rate_bytes.max(1),
@@ -805,6 +814,7 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                 forwarding_class: "best-effort".to_string(),
                 priority: cos_priority_rank("low"),
                 transmit_rate_bytes: iface.cos_shaping_rate_bytes_per_sec,
+                guarantee_enabled: true,
                 exact: false,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
