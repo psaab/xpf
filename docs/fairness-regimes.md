@@ -430,7 +430,7 @@ the same artifact format can express both the legacy #905 gate and the
 MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
 MOUSE_LATENCY_GATE_ELEPHANTS=100 \
 MOUSE_LATENCY_GATE_MICE=100 \
-MOUSE_LATENCY_GATE_PERCENTILE=p99_us \
+MOUSE_LATENCY_GATE_PERCENTILE=p999_us \
 ./test/incus/test-mouse-latency-matrix.sh /tmp/xpf-100e100m-exact
 ```
 
@@ -438,10 +438,13 @@ Run it once under the strict exact fixture and once after applying the
 surplus-sharing fixture. The reducer writes `summary.json` with the gate
 verdict, idle and loaded tail latency, ratio, selected percentile, and
 per-cell representative probe. Probe artifacts now include `rtt_us.p999`;
-the reducer carries that forward as `median_rep.p999_us` so p99.9 can be
-reported even when the hard gate remains p99. If p99.9 becomes a hard
-gate for a specific qualification run, set
-`MOUSE_LATENCY_GATE_PERCENTILE=p999_us`.
+the reducer carries that forward as `median_rep.p999_us`. The 100E100M
+qualification should gate p99.9 by setting
+`MOUSE_LATENCY_GATE_PERCENTILE=p999_us`; legacy #905-style runs may keep
+the default p99 gate. When a non-p99 gate is selected, the representative
+rep is also selected by that same percentile. For p99 runs, `summary.json`
+keeps the historical `p99_idle_us` / `p99_loaded_us` aliases alongside
+the generic `idle_us` / `loaded_us` fields.
 
 Surplus give-back uses a reduced phase artifact instead of trying to
 infer phase semantics from unrelated per-class sweeps. The validator is:
@@ -453,17 +456,29 @@ infer phase semantics from unrelated per-class sweeps. The validator is:
 ```
 
 The input artifact must contain `root_cap_mbps`,
-`peer_guarantee_mbps`, `handback_window_sec`, and four named phases:
-`borrow_alone`, `peer_demand`, `peer_steady`, and
+`borrower_guarantee_mbps`, `peer_guarantee_mbps`,
+`handback_samples`, and four named
+phases: `borrow_alone`, `peer_demand`, `peer_steady`, and
 `peer_idle_reclaim`. Each phase records `throughput_mbps.borrower` and
 `throughput_mbps.peer`; `peer_steady` may also record
-`cos_admission_drops.peer`. The default gates are:
+`cos_admission_drops.peer`. Handback evidence must be time-domain
+throughput samples in `handback_samples`. Scalar
+`handback_window_sec` values and self-attested handback labels are not
+accepted as substitutes because the validator must derive the handback
+point from auditable data. The default gates are:
 
+- borrower-alone throughput exceeds 105% of the borrower guarantee
+- peer-demand throughput is non-zero (at least 1% of the peer guarantee)
+  as a liveness proxy; this phase proves the artifact is not decorative,
+  while `peer_steady` and handback evidence enforce actual guarantee
+  service
 - peer steady throughput reaches at least 95% of its guarantee
 - handback window is at most 5 seconds
 - borrower throughput during peer steady demand falls to at most 90% of
   borrower-alone throughput
 - borrower reclaim throughput is at least 110% of its peer-steady
+  throughput
+- borrower reclaim throughput reaches at least 90% of borrow-alone
   throughput
 - root cap is not exceeded by more than 2%
 - peer steady CoS admission drops are zero by default

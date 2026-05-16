@@ -7,6 +7,7 @@ from mouse_latency_aggregate import (
     decide,
     has_invalid_marker,
     load_cell_reps,
+    median_rep_by_percentile,
     median_rep_by_p99,
     select_valid_reps,
     summarize_cell,
@@ -41,6 +42,22 @@ class MedianByP99Tests(unittest.TestCase):
 
     def test_empty(self):
         self.assertIsNone(median_rep_by_p99([]))
+
+    def test_selects_by_requested_percentile(self):
+        reps = [
+            _make_rep(100),
+            _make_rep(200),
+            _make_rep(300),
+        ]
+        reps[0]["rtt_us"]["p999"] = 10000
+        reps[1]["rtt_us"]["p999"] = 200
+        reps[2]["rtt_us"]["p999"] = 300
+
+        by_p99 = median_rep_by_percentile(reps, "p99")
+        by_p999 = median_rep_by_percentile(reps, "p999")
+
+        self.assertEqual(by_p99["rtt_us"]["p99"], 200)
+        self.assertEqual(by_p999["rtt_us"]["p999"], 300)
 
 
 class SummarizeCellTests(unittest.TestCase):
@@ -101,8 +118,14 @@ class DecideTests(unittest.TestCase):
         self.assertIn("N=100, M=100", v["gate"])
 
     def test_custom_gate_percentile(self):
-        idle = summarize_cell([_make_rep(p99=100) for _ in range(10)])
-        loaded = summarize_cell([_make_rep(p99=100) for _ in range(10)])
+        idle = summarize_cell(
+            [_make_rep(p99=100) for _ in range(10)],
+            representative_percentile="p999",
+        )
+        loaded = summarize_cell(
+            [_make_rep(p99=100) for _ in range(10)],
+            representative_percentile="p999",
+        )
         # p999 is p99+10 from _make_rep, so the ratio is 210/110.
         loaded["median_rep"]["p999_us"] = 210
         summaries = {(0, 100): idle, (100, 100): loaded}
@@ -114,6 +137,16 @@ class DecideTests(unittest.TestCase):
             threshold_ratio=1.5,
         )
         self.assertEqual(v["verdict"], "FAIL")
+        self.assertEqual(v["percentile"], "p999_us")
+        self.assertNotIn("p99_idle_us", v)
+
+    def test_p99_gate_preserves_legacy_summary_aliases(self):
+        summaries = self._gate_summaries(100, 190)
+        v = decide(summaries)
+        self.assertEqual(v["idle_us"], 100)
+        self.assertEqual(v["loaded_us"], 190)
+        self.assertEqual(v["p99_idle_us"], 100)
+        self.assertEqual(v["p99_loaded_us"], 190)
 
     def test_missing_gate_cell(self):
         v = decide({(0, 10): summarize_cell([_make_rep(100)] * 10)})

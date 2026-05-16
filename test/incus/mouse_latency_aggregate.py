@@ -3,17 +3,18 @@
 Cell directory layout: <root>/cell_N{n}_M{m}/rep_{i}/probe.json
 Per-rep validity is read from probe.json["validity"]["ok"].
 
-For each cell, the median rep (by p99) of the valid reps is selected
-as the representative; its p50/p95/p99 + IQR-of-p99-across-reps +
-achieved-RPS summary populate summary.json.
+For each cell, the median valid rep for the configured gate percentile
+is selected as the representative; its p50/p95/p99/p99.9 +
+IQR-of-p99-across-reps + achieved-RPS summary populate summary.json.
 
 Default decision threshold (#905, plan §7.2):
 - p99(N=128, M=10, best-effort) ≤ 2 × p99(N=0, M=10, best-effort)
 
 Issue #1321 can reuse the same artifact reducer for 100E100M by passing
 `--gate-elephants 100 --gate-mice 100`. The reducer records p99.9 when
-probe artifacts include it, but the default hard gate remains p99 unless
-the caller explicitly changes `--gate-percentile`.
+probe artifacts include it. The default hard gate remains p99 unless
+the caller explicitly changes `--gate-percentile`; when changed, the
+representative rep is selected by that same percentile.
 
 The harness only runs best-effort, so cells are keyed by (N, M).
 """
@@ -26,6 +27,12 @@ import sys
 from typing import Dict, List, Optional, Tuple
 
 CellKey = Tuple[int, int]  # (N, M)
+GATE_PERCENTILE_TO_RTT_KEY = {
+    "p50_us": "p50",
+    "p95_us": "p95",
+    "p99_us": "p99",
+    "p999_us": "p999",
+}
 
 
 def has_invalid_marker(rep_dir: str) -> bool:
@@ -86,18 +93,23 @@ def select_valid_reps(reps: List[dict]) -> List[dict]:
     return [r for r in reps if r.get("validity", {}).get("ok")]
 
 
-def median_rep_by_p99(valid_reps: List[dict]) -> Optional[dict]:
-    """Return the rep at the median position of p99 across valid reps."""
+def median_rep_by_percentile(valid_reps: List[dict], percentile_key: str = "p99") -> Optional[dict]:
+    """Return the rep at the median position of the selected percentile."""
     if not valid_reps:
         return None
     sortable = sorted(
         valid_reps,
-        key=lambda r: r.get("rtt_us", {}).get("p99") or 0,
+        key=lambda r: r.get("rtt_us", {}).get(percentile_key) or 0,
     )
     return sortable[len(sortable) // 2]
 
 
-def summarize_cell(reps: List[dict]) -> dict:
+def median_rep_by_p99(valid_reps: List[dict]) -> Optional[dict]:
+    """Backward-compatible helper for callers/tests that want p99 ordering."""
+    return median_rep_by_percentile(valid_reps, "p99")
+
+
+def summarize_cell(reps: List[dict], representative_percentile: str = "p99") -> dict:
     """Produce the per-cell summary record."""
     valid = select_valid_reps(reps)
     summary: dict = {
@@ -105,11 +117,12 @@ def summarize_cell(reps: List[dict]) -> dict:
         "n_reps_valid": len(valid),
         "median_rep": None,
         "iqr_p99_across_reps": None,
+        "representative_percentile": representative_percentile,
     }
     if len(valid) < 7:
         summary["status"] = "INSUFFICIENT-DATA"
         return summary
-    median = median_rep_by_p99(valid)
+    median = median_rep_by_percentile(valid, representative_percentile)
     p99s = sorted(
         r.get("rtt_us", {}).get("p99") or 0 for r in valid
     )
@@ -177,7 +190,7 @@ def decide(
             "reason": f"missing {gate_percentile} in gate cell",
         }
     ratio = loaded_value / idle_value
-    return {
+    verdict = {
         "verdict": "PASS" if ratio <= threshold_ratio else "FAIL",
         "ratio": ratio,
         "idle_us": idle_value,
@@ -189,6 +202,10 @@ def decide(
             f"{threshold_ratio:g} * {gate_percentile}(N=0, M={gate_mice})"
         ),
     }
+    if gate_percentile == "p99_us":
+        verdict["p99_idle_us"] = idle_value
+        verdict["p99_loaded_us"] = loaded_value
+    return verdict
 
 
 def discover_cells(root: str) -> Dict[CellKey, List[dict]]:
@@ -256,7 +273,11 @@ def main() -> int:
     args = p.parse_args()
 
     cells = discover_cells(args.root)
-    summaries = {key: summarize_cell(reps) for key, reps in cells.items()}
+    representative_percentile = GATE_PERCENTILE_TO_RTT_KEY[args.gate_percentile]
+    summaries = {
+        key: summarize_cell(reps, representative_percentile=representative_percentile)
+        for key, reps in cells.items()
+    }
     verdict = decide(
         summaries,
         gate_elephants=args.gate_elephants,

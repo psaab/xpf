@@ -193,6 +193,22 @@ func TestSchemaValidate_BufferSize_RejectsBareInteger(t *testing.T) {
 	}
 }
 
+func TestSchemaValidate_BufferSize_RejectsPercentUntilRuntimeRepresentation(t *testing.T) {
+	err := schemaCheck(t, `class-of-service {
+    schedulers {
+        be {
+            buffer-size "10%";
+        }
+    }
+}`)
+	if err == nil {
+		t.Fatal("expected error for percent buffer-size without runtime representation, got nil")
+	}
+	if !strings.Contains(err.Error(), "buffer-size") {
+		t.Fatalf("error should reference buffer-size: %v", err)
+	}
+}
+
 func TestSchemaValidate_BufferSize_RejectsGarbage(t *testing.T) {
 	err := schemaCheck(t, `class-of-service {
     schedulers {
