@@ -371,19 +371,6 @@ func renderBindingScopedTelemetry(b *strings.Builder, view cosInterfaceView, que
 	)
 }
 
-// saturatingAddU64 avoids silent wraparound in the telemetry render.
-// Hot-path this is not (called once per interface at scrape cadence)
-// but honesty-of-summation matters more here than the cycle cost —
-// an overflow under adversarial input is a visible ceiling, not a
-// reset to zero.
-func saturatingAddU64(a, b uint64) uint64 {
-	sum := a + b
-	if sum < a {
-		return ^uint64(0)
-	}
-	return sum
-}
-
 func histHasSample(hist []uint64) bool {
 	for _, count := range hist {
 		if count > 0 {
