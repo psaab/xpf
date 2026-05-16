@@ -356,6 +356,50 @@ fn root_has_backlogged_exact_queue(root: &CoSInterfaceRuntime) -> bool {
 }
 
 #[inline]
+fn exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
+    root.queues
+        .iter()
+        .filter(|queue| queue.config.exact)
+        .fold(0u64, |acc, queue| {
+            acc.saturating_add(queue.hot.queued_bytes)
+        })
+}
+
+#[inline]
+pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_ifindex: i32) {
+    let Some(shared_exact_backlog) = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+    else {
+        return;
+    };
+    let Some(root) = binding.cos.cos_interfaces.get(&root_ifindex) else {
+        shared_exact_backlog.publish(binding.worker_id, 0);
+        return;
+    };
+    shared_exact_backlog.publish(binding.worker_id, exact_backlog_bytes(root));
+}
+
+#[inline]
+pub(in crate::afxdp) fn clear_all_cos_exact_backlogs_for_binding(binding: &BindingWorker) {
+    for iface_fast in binding.cos.cos_fast_interfaces.values() {
+        if let Some(shared_exact_backlog) = iface_fast.shared_exact_backlog.as_ref() {
+            shared_exact_backlog.publish(binding.worker_id, 0);
+        }
+    }
+}
+
+#[inline]
+fn interface_has_backlogged_exact_queue(
+    root: &CoSInterfaceRuntime,
+    peer_exact_backlogged: bool,
+) -> bool {
+    root_has_backlogged_exact_queue(root) || peer_exact_backlogged
+}
+
+#[inline]
 fn account_queue_drain_sent_bytes(
     queue: &mut CoSQueueRuntime,
     phase: CoSServicePhase,
@@ -488,6 +532,7 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity(
         root.nonempty_queues = new_nonempty;
         root.runnable_queues = new_runnable;
     }
+    publish_cos_exact_backlog(binding, root_ifindex);
     if old_nonempty == 0 && new_nonempty > 0 {
         binding.cos.cos_nonempty_interfaces = binding.cos.cos_nonempty_interfaces.saturating_add(1);
     } else if old_nonempty > 0 && new_nonempty == 0 {
@@ -518,6 +563,13 @@ pub(in crate::afxdp) fn apply_cos_send_result(
     retry: VecDeque<TxRequest>,
 ) {
     let mut exact_queue_idx = None;
+    let worker_id = binding.worker_id;
+    let peer_exact_backlogged = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+        .is_some_and(|backlog| backlog.has_peer_backlog(worker_id));
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return;
@@ -527,7 +579,7 @@ pub(in crate::afxdp) fn apply_cos_send_result(
                 .queues
                 .get(queue_idx)
                 .is_some_and(|queue| !queue.config.exact)
-            && root_has_backlogged_exact_queue(root);
+            && interface_has_backlogged_exact_queue(root, peer_exact_backlogged);
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             exact_queue_idx = queue.config.exact.then_some(queue_idx);
             let retry_bytes = restore_cos_local_items_inner(queue, retry);
@@ -588,6 +640,13 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
     retry: VecDeque<PreparedTxRequest>,
 ) {
     let mut exact_queue_idx = None;
+    let worker_id = binding.worker_id;
+    let peer_exact_backlogged = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+        .is_some_and(|backlog| backlog.has_peer_backlog(worker_id));
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return;
@@ -597,7 +656,7 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
                 .queues
                 .get(queue_idx)
                 .is_some_and(|queue| !queue.config.exact)
-            && root_has_backlogged_exact_queue(root);
+            && interface_has_backlogged_exact_queue(root, peer_exact_backlogged);
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             exact_queue_idx = queue.config.exact.then_some(queue_idx);
             let retry_bytes = restore_cos_prepared_items_inner(queue, retry);

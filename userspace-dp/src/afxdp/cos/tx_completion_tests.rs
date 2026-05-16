@@ -12,7 +12,7 @@ use crate::afxdp::cos::token_bucket::COS_MIN_BURST_BYTES;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{
     COS_FLOW_FAIR_BUCKETS, CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing,
-    SharedCoSQueueLease,
+    SharedCoSExactBacklog, SharedCoSQueueLease,
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -201,6 +201,64 @@ fn apply_cos_send_result_counts_nonexact_bytes_when_exact_queue_backlogged() {
             .load(Ordering::Relaxed),
         1500,
         "apply_cos_send_result must derive exact_backlogged from the root, not from caller input"
+    );
+}
+
+#[test]
+fn apply_cos_send_result_counts_nonexact_bytes_when_peer_exact_queue_backlogged() {
+    let mut root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut root.queues {
+        if queue.config.exact {
+            queue.hot.items.clear();
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+        }
+    }
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    shared_exact_backlog.publish(1, 12_000);
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog);
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    apply_cos_send_result(
+        &mut binding,
+        42,
+        1,
+        CoSServicePhase::Surplus,
+        1500,
+        1500,
+        std::collections::VecDeque::new(),
+    );
+
+    let root = binding.cos.cos_interfaces.get(&42).expect("cos root");
+    assert!(
+        !root_has_backlogged_exact_queue(root),
+        "fixture must prove the local-root-only predicate would miss this case"
+    );
+    assert_eq!(
+        root.queues[1]
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        1500,
+        "non-exact drain must consult interface-global peer exact backlog"
     );
 }
 

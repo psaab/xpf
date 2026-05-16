@@ -20,6 +20,52 @@ pub(in crate::afxdp) struct SharedCoSQueueLease {
     v8: Option<V8State>,
 }
 
+#[repr(align(64))]
+struct PaddedBacklogSlot(AtomicU64);
+
+/// Interface-global exact-backlog visibility for diagnostics that must not
+/// be limited to the current worker's local CoS root. Each worker owns one
+/// slot and publishes its local exact queued-byte total from
+/// exact enqueue/drain/reset sites; readers test peer slots when deciding
+/// whether non-exact service is stealing from any exact queue on the same
+/// shaped interface. This is telemetry, not a synchronization primitive:
+/// relaxed atomics are sufficient and avoid imposing ordering on the packet
+/// data path.
+pub(in crate::afxdp) struct SharedCoSExactBacklog {
+    worker_bytes: Box<[PaddedBacklogSlot]>,
+}
+
+impl SharedCoSExactBacklog {
+    pub(in crate::afxdp) fn new(max_worker_id: usize) -> Self {
+        Self {
+            worker_bytes: (0..=max_worker_id)
+                .map(|_| PaddedBacklogSlot(AtomicU64::new(0)))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+
+    pub(in crate::afxdp) fn matches_config(&self, max_worker_id: usize) -> bool {
+        self.worker_bytes.len() == max_worker_id.saturating_add(1)
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn publish(&self, worker_id: u32, bytes: u64) {
+        if let Some(slot) = self.worker_bytes.get(worker_id as usize) {
+            slot.0.store(bytes, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn has_peer_backlog(&self, worker_id: u32) -> bool {
+        self.worker_bytes
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != worker_id as usize)
+            .any(|(_, slot)| slot.0.load(Ordering::Relaxed) > 0)
+    }
+}
+
 // === #1229 Phase 6 v8: per-worker fair lease ===
 // Plan: docs/pr/1229-cross-worker-vtime/phase6-fair-lease.md (commit
 // c159dbd5+, PLAN-READY at task-mowjwl1o-ob7bc5).

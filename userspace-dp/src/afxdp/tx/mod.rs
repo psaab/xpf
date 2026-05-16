@@ -49,6 +49,6 @@ use super::cos::{
     cos_flow_bucket_index, cos_item_flow_key, cos_queue_drain_all, cos_queue_flow_share_limit,
     cos_queue_is_empty, cos_queue_push_back, cos_queue_restore_front, drain_shaped_tx,
     ensure_cos_interface_runtime, mark_cos_queue_runnable, publish_committed_queue_vtime,
-    redirect_prepared_cos_request_to_owner, redirect_prepared_cos_request_to_owner_binding,
-    resolve_local_routing_decision,
+    publish_cos_exact_backlog, redirect_prepared_cos_request_to_owner,
+    redirect_prepared_cos_request_to_owner_binding, resolve_local_routing_decision,
 };

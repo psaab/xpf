@@ -117,6 +117,7 @@ pub(super) fn build_worker_cos_fast_interfaces(
     owner_worker_by_queue: &BTreeMap<(i32, u8), u32>,
     owner_live_by_queue: &BTreeMap<(i32, u8), Arc<BindingLiveState>>,
     shared_root_leases: &BTreeMap<i32, Arc<SharedCoSRootLease>>,
+    shared_exact_backlogs: &BTreeMap<i32, Arc<SharedCoSExactBacklog>>,
     shared_queue_leases: &BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>,
     shared_queue_vtime_floors: &BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>,
 ) -> FastMap<i32, WorkerCoSInterfaceFastPath> {
@@ -161,6 +162,7 @@ pub(super) fn build_worker_cos_fast_interfaces(
                 queue_index_by_id,
                 tx_owner_live: tx_owner_live_by_tx_ifindex.get(&tx_ifindex).cloned(),
                 shared_root_lease: shared_root_leases.get(&egress_ifindex).cloned(),
+                shared_exact_backlog: shared_exact_backlogs.get(&egress_ifindex).cloned(),
                 queue_fast_path,
             },
         );
@@ -316,6 +318,7 @@ pub(super) fn reset_binding_cos_runtime(
     // stale value in their V_min calculation, throttling them
     // unnecessarily until the first post-reset post-settle publish.
     vacate_all_shared_exact_slots_for_binding(binding);
+    clear_all_cos_exact_backlogs_for_binding(binding);
     binding.cos.cos_interfaces.clear();
     binding.cos.cos_interface_order.clear();
     binding.cos.cos_interface_rr = 0;
@@ -335,11 +338,7 @@ pub(super) fn reset_binding_cos_runtime(
             .fetch_add(dropped_total, Ordering::Relaxed);
     }
     for req in dropped_prepared {
-        recycle_prepared_immediately_with_shared(
-            binding,
-            &req,
-            shared_recycles.as_deref_mut(),
-        );
+        recycle_prepared_immediately_with_shared(binding, &req, shared_recycles.as_deref_mut());
     }
 }
 

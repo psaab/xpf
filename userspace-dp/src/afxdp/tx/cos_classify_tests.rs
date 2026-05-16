@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::afxdp::tx::test_support::*;
+use crate::afxdp::types::SharedCoSExactBacklog;
 use crate::{
     ClassOfServiceSnapshot, CoSDSCPClassifierEntrySnapshot, CoSDSCPClassifierSnapshot,
     CoSForwardingClassSnapshot, CoSIEEE8021ClassifierEntrySnapshot, CoSIEEE8021ClassifierSnapshot,
@@ -32,6 +33,57 @@ fn resolve_cos_queue_idx_rejects_explicit_queue_miss() {
 
     assert_eq!(resolve_cos_queue_idx(&root, Some(4)), None);
     assert_eq!(resolve_cos_queue_idx(&root, None), Some(0));
+}
+
+#[test]
+fn enqueue_exact_queue_publishes_shared_backlog_slot() {
+    let root = test_cos_runtime_with_queues(
+        25_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 4,
+            forwarding_class: "iperf-a".into(),
+            priority: 5,
+            transmit_rate_bytes: 125_000_000,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            surplus_weight: 1,
+            buffer_bytes: 4_000_000,
+            dscp_rewrite: None,
+        }],
+    );
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        4,
+        vec![(4, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog.clone());
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    assert!(
+        enqueue_cos_item(
+            &mut binding,
+            42,
+            Some(4),
+            512,
+            test_flow_cos_item(5201, 512),
+            None,
+        )
+        .is_ok()
+    );
+
+    assert!(
+        shared_exact_backlog.has_peer_backlog(1),
+        "exact enqueue must publish immediately so peer workers do not undercount exact backlog",
+    );
 }
 
 #[test]

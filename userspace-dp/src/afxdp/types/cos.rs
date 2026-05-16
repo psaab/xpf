@@ -294,6 +294,7 @@ pub(in crate::afxdp) struct WorkerCoSInterfaceFastPath {
     pub(in crate::afxdp) queue_index_by_id: [u16; 256],
     pub(in crate::afxdp) tx_owner_live: Option<Arc<BindingLiveState>>,
     pub(in crate::afxdp) shared_root_lease: Option<Arc<SharedCoSRootLease>>,
+    pub(in crate::afxdp) shared_exact_backlog: Option<Arc<SharedCoSExactBacklog>>,
     pub(in crate::afxdp) queue_fast_path: Vec<WorkerCoSQueueFastPath>,
 }
 

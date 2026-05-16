@@ -80,8 +80,8 @@ use cos::{
 // `use self::tx::*;` parent-module glob still reaches them — the items
 // no longer originate from tx.rs after the moves.
 use super::cos::{
-    cos_queue_len, cos_queue_pop_front_no_snapshot, release_all_cos_queue_leases,
-    release_all_cos_root_leases,
+    clear_all_cos_exact_backlogs_for_binding, cos_queue_len, cos_queue_pop_front_no_snapshot,
+    release_all_cos_queue_leases, release_all_cos_root_leases,
 };
 
 pub(crate) struct BindingWorker {
@@ -908,6 +908,7 @@ pub(crate) fn worker_loop(
     shared_cos_owner_worker_by_queue: Arc<ArcSwap<BTreeMap<(i32, u8), u32>>>,
     shared_cos_owner_live_by_queue: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<BindingLiveState>>>>,
     shared_cos_root_leases: Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSRootLease>>>>,
+    shared_cos_exact_backlogs: Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSExactBacklog>>>>,
     shared_cos_queue_leases: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>>>,
     shared_cos_queue_vtime_floors: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>>>,
     cos_status: Arc<ArcSwap<Vec<crate::protocol::CoSInterfaceStatus>>>,
@@ -924,6 +925,7 @@ pub(crate) fn worker_loop(
     let mut cos_owner_worker_by_queue = shared_cos_owner_worker_by_queue.load_full();
     let mut cos_owner_live_by_queue = shared_cos_owner_live_by_queue.load_full();
     let mut cos_shared_root_leases = shared_cos_root_leases.load_full();
+    let mut cos_shared_exact_backlogs = shared_cos_exact_backlogs.load_full();
     let mut cos_shared_queue_leases = shared_cos_queue_leases.load_full();
     let mut cos_shared_queue_vtime_floors = shared_cos_queue_vtime_floors.load_full();
     let mut sessions = SessionTable::new();
@@ -962,6 +964,7 @@ pub(crate) fn worker_loop(
         cos_owner_worker_by_queue.as_ref(),
         cos_owner_live_by_queue.as_ref(),
         cos_shared_root_leases.as_ref(),
+        cos_shared_exact_backlogs.as_ref(),
         cos_shared_queue_leases.as_ref(),
         cos_shared_queue_vtime_floors.as_ref(),
     );
@@ -1190,6 +1193,12 @@ pub(crate) fn worker_loop(
             cos_shared_root_leases = new_x;
             rebuild_cos_fast_interfaces = true;
         }
+        if let Some(new_x) =
+            load_arc_if_changed(&cos_shared_exact_backlogs, &shared_cos_exact_backlogs)
+        {
+            cos_shared_exact_backlogs = new_x;
+            rebuild_cos_fast_interfaces = true;
+        }
         if let Some(new_x) = load_arc_if_changed(&cos_shared_queue_leases, &shared_cos_queue_leases)
         {
             for binding in bindings.iter_mut() {
@@ -1226,6 +1235,7 @@ pub(crate) fn worker_loop(
                 cos_owner_worker_by_queue.as_ref(),
                 cos_owner_live_by_queue.as_ref(),
                 cos_shared_root_leases.as_ref(),
+                cos_shared_exact_backlogs.as_ref(),
                 cos_shared_queue_leases.as_ref(),
                 cos_shared_queue_vtime_floors.as_ref(),
             );
@@ -1282,11 +1292,7 @@ pub(crate) fn worker_loop(
                 shaped_tx_requests,
                 &mut shared_recycles,
             );
-            apply_shared_recycles_to_bindings(
-                &mut bindings,
-                &binding_lookup,
-                &mut shared_recycles,
-            );
+            apply_shared_recycles_to_bindings(&mut bindings, &binding_lookup, &mut shared_recycles);
         }
         if !cancelled_keys.is_empty() {
             for key in &cancelled_keys {
@@ -2074,6 +2080,7 @@ pub(crate) fn worker_loop(
     }
     crate::filter::flush_recorded_filter_counters();
     for binding in bindings.iter_mut() {
+        clear_all_cos_exact_backlogs_for_binding(binding);
         release_all_cos_root_leases(binding);
         release_all_cos_queue_leases(binding);
     }
@@ -2392,8 +2399,7 @@ mod tests {
             shared_umem: shared,
         };
 
-        let plan =
-            prepare_shared_binding_plan_for_create(&group, plan, XskSocketRole::SharedOwner);
+        let plan = prepare_shared_binding_plan_for_create(&group, plan, XskSocketRole::SharedOwner);
         let snap = live.snapshot();
 
         assert_eq!(plan.status.shared_umem_mode, "cross-nic");
