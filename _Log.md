@@ -2,6 +2,10 @@
 
 ## 2026-05-15
 
+- **Timestamp**: 2026-05-16T00:06:42Z
+  - **Action**: PR #1316 Copilot follow-up — narrow the validation TSV auditability claim to the fields present in the checked-in TSV schema, permit TSV summaries in the `docs/pr/` evidence convention, and qualify the old dominant-failure heading as a pre-buffer-sizing snapshot.
+  - **File(s)**: `docs/pr/1316-lowrate-cos-buffers/validation.md`, `docs/pr/README.md`, `docs/cos-validation-notes.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-15T23:13:00Z
   - **Action**: PR #1316 round-4 review follow-up — filled the full seven-class validation table's high-rate Max CoV values from the committed TSV evidence, and documented that the historical 8-matrix `full-cos.set` file was later amended with q0/q4 buffer-size headroom.
   - **File(s)**: `docs/pr/1316-lowrate-cos-buffers/validation.md`, `docs/pr/line-rate-investigation/8matrix-findings.md`, `_Log.md`

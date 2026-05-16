@@ -30,7 +30,7 @@ specs (those live at the repo root `docs/` level).
   `systems-plan-review.md` — one per reviewer angle. Append
   `## Round N verification` sections in place; don't fork new files.
 - Measurement evidence: `validation.md` (narrative) + `evidence/`
-  directory for captured JSON.
+  directory for captured JSON, packet captures, or reduced TSV summaries.
 - Post-investigation gap analysis: `remaining-gaps.md` (see
   `line-rate-investigation/`).
 
