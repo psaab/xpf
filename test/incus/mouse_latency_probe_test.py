@@ -167,6 +167,9 @@ class CloseWriterTests(unittest.IsolatedAsyncioTestCase):
             self.wait_started.set()
             await asyncio.Event().wait()
 
+        def write(self, _data):
+            pass
+
     async def test_close_writer_aborts_when_wait_closed_exceeds_deadline(self):
         writer = self._HangingWriter()
         deadline = time.monotonic() + 0.01
@@ -189,6 +192,50 @@ class CloseWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(writer.closed)
         self.assertFalse(writer.wait_started.is_set())
         self.assertTrue(writer.transport.aborted)
+
+    async def test_per_attempt_drain_timeout_closes_with_abort(self):
+        abort_flags = []
+
+        class FakeReader:
+            async def readexactly(self, _n):
+                return b""
+
+        async def open_fake_connection(_target, _port):
+            return FakeReader(), self._HangingWriter()
+
+        async def forced_timeout(_writer, _deadline):
+            raise asyncio.TimeoutError("forced drain timeout")
+
+        async def record_close(_writer, _deadline, *, abort=False):
+            abort_flags.append(abort)
+
+        original_open_connection = probe.asyncio.open_connection
+        original_drain = probe._drain_with_deadline
+        original_close = probe._close_writer
+        probe.asyncio.open_connection = open_fake_connection
+        probe._drain_with_deadline = forced_timeout
+        probe._close_writer = record_close
+        try:
+            rtts = []
+            attempts = [0]
+            errors = [0]
+            await probe._run_per_attempt_probe_coro(
+                "127.0.0.1",
+                1,
+                16,
+                0.0,
+                time.monotonic() + 0.01,
+                rtts,
+                attempts,
+                errors,
+            )
+        finally:
+            probe.asyncio.open_connection = original_open_connection
+            probe._drain_with_deadline = original_drain
+            probe._close_writer = original_close
+
+        self.assertGreaterEqual(errors[0], 1)
+        self.assertIn(True, abort_flags)
 
 
 class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):

@@ -127,6 +127,7 @@ async def _run_per_attempt_probe_coro(
                 asyncio.open_connection(target, port),
                 timeout=min(5.0, remaining),
             )
+            abort_close = True
             try:
                 writer.write(payload)
                 await _drain_with_deadline(writer, deadline)
@@ -142,8 +143,9 @@ async def _run_per_attempt_probe_coro(
                     error_counter[0] += 1
                     await _respect_min_interval(t0, min_interval_ms, deadline)
                     continue
+                abort_close = False
             finally:
-                await _close_writer(writer, deadline)
+                await _close_writer(writer, deadline, abort=abort_close)
         except (
             asyncio.TimeoutError,
             ConnectionRefusedError,
