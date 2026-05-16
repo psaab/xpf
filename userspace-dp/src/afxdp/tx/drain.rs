@@ -101,7 +101,12 @@ pub(in crate::afxdp) fn drain_pending_tx(
     // Original #751 drain loop: service shaped queues until noop.
     // Each shaped drain attributes latency + invocations to the
     // specific queue via drain_shaped_tx's returned queue ref.
-    loop {
+    //
+    // #1318: skip the whole shaped-drain call path when this binding
+    // has no queued CoS work. `drain_shaped_tx` has its own defensive
+    // bail, but the caller would still pay monotonic_nanos(), one
+    // no-op call, and noop telemetry on every idle worker tick.
+    while should_enter_shaped_drain(binding) {
         let start_ns = monotonic_nanos();
         let serviced = drain_shaped_tx(binding, now_ns, shared_recycles);
         if let Some(serviced) = serviced.as_ref() {
@@ -163,7 +168,7 @@ pub(in crate::afxdp) fn drain_pending_tx(
                 shared_recycles,
             );
             let mut serviced_in_inner = false;
-            loop {
+            while should_enter_shaped_drain(binding) {
                 let start_ns = monotonic_nanos();
                 let serviced = drain_shaped_tx(binding, now_ns, shared_recycles);
                 if let Some(serviced) = serviced.as_ref() {
@@ -488,6 +493,19 @@ fn binding_has_pending_tx_work(binding: &BindingWorker) -> bool {
         || !binding.tx_pipeline.pending_tx_local.is_empty()
         || !binding.live.pending_tx_empty()
         || binding.cos.cos_nonempty_interfaces > 0
+}
+
+#[inline]
+fn should_enter_shaped_drain(binding: &BindingWorker) -> bool {
+    has_queued_cos_work(
+        binding.cos.cos_nonempty_interfaces,
+        binding.cos.cos_interface_order.len(),
+    )
+}
+
+#[inline]
+fn has_queued_cos_work(cos_nonempty_interfaces: usize, cos_interface_order_len: usize) -> bool {
+    cos_nonempty_interfaces > 0 && cos_interface_order_len > 0
 }
 
 pub(in crate::afxdp) fn drain_pending_tx_local_owner(
