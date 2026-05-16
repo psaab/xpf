@@ -1400,6 +1400,134 @@ func TestBuildSnapshotSummary(t *testing.T) {
 	}
 }
 
+func TestBuildSourceNATSnapshotsPopulatesPoolFields(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.NAT.AddressPersistent = true
+	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{
+		"pool-a": {
+			Name:      "pool-a",
+			Addresses: []string{"203.0.113.10/32", "203.0.113.11/32", "2001:db8:80::10/128"},
+			PortLow:   40000,
+			PortHigh:  40100,
+		},
+	}
+	cfg.Security.NAT.Source = []*config.NATRuleSet{{
+		Name:     "rs",
+		FromZone: "trust",
+		ToZone:   "wan",
+		Rules: []*config.NATRule{{
+			Name: "snat-pool",
+			Match: config.NATMatch{
+				SourceAddresses:      []string{"10.0.0.0/8"},
+				DestinationAddresses: []string{"0.0.0.0/0"},
+			},
+			Then: config.NATThen{
+				Type:     config.NATSource,
+				PoolName: "pool-a",
+			},
+		}},
+	}}
+
+	snaps := buildSourceNATSnapshots(cfg)
+	if len(snaps) != 1 {
+		t.Fatalf("len(snaps) = %d, want 1", len(snaps))
+	}
+	got := snaps[0]
+	if got.PoolName != "pool-a" || got.InterfaceMode || got.Off {
+		t.Fatalf("snapshot action fields = %+v", got)
+	}
+	if !got.AddressPersistent {
+		t.Fatalf("AddressPersistent = false, want true")
+	}
+	if got.PortLow != 40000 || got.PortHigh != 40100 {
+		t.Fatalf("port range = %d-%d, want 40000-40100", got.PortLow, got.PortHigh)
+	}
+	wantAddrs := []string{"203.0.113.10/32", "203.0.113.11/32", "2001:db8:80::10/128"}
+	if !reflect.DeepEqual(got.PoolAddresses, wantAddrs) {
+		t.Fatalf("PoolAddresses = %#v, want %#v", got.PoolAddresses, wantAddrs)
+	}
+}
+
+func TestBuildSourceNATSnapshotsSkipsUnsafePoolModeRules(t *testing.T) {
+	tests := []struct {
+		name  string
+		pools map[string]*config.NATPool
+	}{
+		{
+			name:  "missing pool",
+			pools: map[string]*config.NATPool{},
+		},
+		{
+			name: "nil pool",
+			pools: map[string]*config.NATPool{
+				"pool-a": nil,
+			},
+		},
+		{
+			name: "empty pool",
+			pools: map[string]*config.NATPool{
+				"pool-a": {Name: "pool-a", PortLow: 1024, PortHigh: 65535},
+			},
+		},
+		{
+			name: "port low overflow",
+			pools: map[string]*config.NATPool{
+				"pool-a": {Name: "pool-a", Addresses: []string{"203.0.113.10/32"}, PortLow: 65536, PortHigh: 65535},
+			},
+		},
+		{
+			name: "port high overflow",
+			pools: map[string]*config.NATPool{
+				"pool-a": {Name: "pool-a", Addresses: []string{"203.0.113.10/32"}, PortLow: 1024, PortHigh: 70000},
+			},
+		},
+		{
+			name: "port range reversed",
+			pools: map[string]*config.NATPool{
+				"pool-a": {Name: "pool-a", Addresses: []string{"203.0.113.10/32"}, PortLow: 40000, PortHigh: 39999},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := sourceNATPoolTestConfig()
+			cfg.Security.NAT.SourcePools = tt.pools
+			if snaps := buildSourceNATSnapshots(cfg); len(snaps) != 0 {
+				t.Fatalf("len(snaps) = %d, want 0; snaps=%+v", len(snaps), snaps)
+			}
+		})
+	}
+}
+
+func sourceNATPoolTestConfig() *config.Config {
+	cfg := &config.Config{}
+	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{
+		"pool-a": {
+			Name:      "pool-a",
+			Addresses: []string{"203.0.113.10/32"},
+			PortLow:   1024,
+			PortHigh:  65535,
+		},
+	}
+	cfg.Security.NAT.Source = []*config.NATRuleSet{{
+		Name:     "rs",
+		FromZone: "trust",
+		ToZone:   "wan",
+		Rules: []*config.NATRule{{
+			Name: "snat-pool",
+			Match: config.NATMatch{
+				SourceAddresses:      []string{"10.0.0.0/8"},
+				DestinationAddresses: []string{"0.0.0.0/0"},
+			},
+			Then: config.NATThen{
+				Type:     config.NATSource,
+				PoolName: "pool-a",
+			},
+		}},
+	}}
+	return cfg
+}
+
 func TestBuildFabricSnapshotsUsesLocalMemberAndPeer(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Chassis.Cluster = &config.ClusterConfig{

@@ -827,6 +827,121 @@ fn pool_snat_multiple_addresses_round_robin() {
 }
 
 #[test]
+fn pool_snat_wrong_family_pool_does_not_shadow_later_rule() {
+    let rules = parse_source_nat_rules(&[
+        SourceNATRuleSnapshot {
+            name: "wrong-family".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "v6-only".to_string(),
+            pool_addresses: vec!["2001:db8::10".to_string()],
+            port_low: 1024,
+            port_high: 65535,
+            ..SourceNATRuleSnapshot::default()
+        },
+        SourceNATRuleSnapshot {
+            name: "usable-v4".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "v4-pool".to_string(),
+            pool_addresses: vec!["203.0.113.20".to_string()],
+            port_low: 40000,
+            port_high: 40000,
+            ..SourceNATRuleSnapshot::default()
+        },
+    ]);
+
+    let d = match_source_nat(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    )
+    .expect("later compatible rule should match");
+    assert_eq!(d.rewrite_src, Some("203.0.113.20".parse().unwrap()));
+    assert_eq!(d.rewrite_src_port, Some(40000));
+}
+
+#[test]
+fn pool_snat_wrong_family_pool_returns_none_when_no_later_rule_matches() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "wrong-family".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "v6-only".to_string(),
+        pool_addresses: vec!["2001:db8::10".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let d = match_source_nat(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    );
+    assert_eq!(d, None);
+}
+
+#[test]
+fn pool_snat_address_persistent_sticks_source_to_pool_address() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "pool-sticky".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "sticky-pool".to_string(),
+        pool_addresses: vec![
+            "203.0.113.1".to_string(),
+            "203.0.113.2".to_string(),
+            "203.0.113.3".to_string(),
+        ],
+        port_low: 40000,
+        port_high: 40010,
+        address_persistent: true,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let src = "10.0.1.101".parse().unwrap();
+    let expected_idx = sticky_pool_index(src, 3);
+    assert_eq!(expected_idx, 1);
+
+    for want_port in 40000..40004 {
+        let d = match_source_nat(
+            &rules,
+            "lan",
+            "wan",
+            src,
+            "8.8.8.8".parse().unwrap(),
+            None,
+            None,
+        )
+        .expect("should match");
+        assert_eq!(d.rewrite_src, Some("203.0.113.2".parse().unwrap()));
+        assert_eq!(d.rewrite_src_port, Some(want_port));
+    }
+}
+
+#[test]
+fn pool_snat_address_persistent_hashes_full_ipv6_address() {
+    let a: IpAddr = "2001:db8::1".parse().unwrap();
+    let b: IpAddr = "2001:db8::2".parse().unwrap();
+
+    assert_eq!(sticky_pool_index(a, 257), 197);
+    assert_eq!(sticky_pool_index(b, 257), 125);
+}
+
+#[test]
 fn pool_snat_port_range_wrapping() {
     let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
         name: "small-range".to_string(),
@@ -988,12 +1103,21 @@ fn pool_snat_zone_mismatch_returns_none() {
 fn port_allocator_basic() {
     let alloc = PortAllocator::new(2, 5000, 5002);
     // Address selection round-robin
-    assert_eq!(alloc.next_address_index(), 0);
-    assert_eq!(alloc.next_address_index(), 1);
-    assert_eq!(alloc.next_address_index(), 0);
+    let src = "10.0.1.100".parse().unwrap();
+    assert_eq!(alloc.address_index(src, 0, 2, false), 0);
+    assert_eq!(alloc.address_index(src, 0, 2, false), 1);
+    assert_eq!(alloc.address_index(src, 0, 2, false), 0);
     // Port allocation for address 0
     assert_eq!(alloc.next_port(0), 5000);
     assert_eq!(alloc.next_port(0), 5001);
     assert_eq!(alloc.next_port(0), 5002);
     assert_eq!(alloc.next_port(0), 5000); // wraps
+
+    let mixed = PortAllocator::new(4, 5000, 5002);
+    let src_v4 = "10.0.1.100".parse().unwrap();
+    let src_v6 = "2001:db8::100".parse().unwrap();
+    assert_eq!(mixed.address_index(src_v4, 0, 2, false), 0);
+    assert_eq!(mixed.address_index(src_v6, 2, 2, false), 2);
+    assert_eq!(mixed.address_index(src_v4, 0, 2, false), 1);
+    assert_eq!(mixed.address_index(src_v6, 2, 2, false), 3);
 }
