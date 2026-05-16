@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -143,6 +144,51 @@ class ValidityTests(unittest.TestCase):
         v = compute_validity(10, [600] * 10, completed=5500, errors=100)
         self.assertFalse(v["ok"])
         self.assertTrue(any("inconsistent-counts" in r for r in v["reasons"]))
+
+
+class CloseWriterTests(unittest.IsolatedAsyncioTestCase):
+    class _Transport:
+        def __init__(self):
+            self.aborted = False
+
+        def abort(self):
+            self.aborted = True
+
+    class _HangingWriter:
+        def __init__(self):
+            self.closed = False
+            self.transport = CloseWriterTests._Transport()
+            self.wait_started = asyncio.Event()
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            self.wait_started.set()
+            await asyncio.Event().wait()
+
+    async def test_close_writer_aborts_when_wait_closed_exceeds_deadline(self):
+        writer = self._HangingWriter()
+        deadline = time.monotonic() + 0.01
+
+        await asyncio.wait_for(probe._close_writer(writer, deadline), timeout=0.2)
+
+        self.assertTrue(writer.closed)
+        self.assertTrue(writer.wait_started.is_set())
+        self.assertTrue(writer.transport.aborted)
+
+    async def test_close_writer_abort_mode_skips_graceful_wait(self):
+        writer = self._HangingWriter()
+        deadline = time.monotonic() + 10.0
+
+        await asyncio.wait_for(
+            probe._close_writer(writer, deadline, abort=True),
+            timeout=0.2,
+        )
+
+        self.assertFalse(writer.closed)
+        self.assertFalse(writer.wait_started.is_set())
+        self.assertTrue(writer.transport.aborted)
 
 
 class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):

@@ -42,12 +42,32 @@ HISTOGRAM_BUCKETS_US = [
 ]
 
 
-async def _close_writer(writer: Optional[asyncio.StreamWriter]) -> None:
+def _abort_writer(writer: asyncio.StreamWriter) -> None:
+    transport = getattr(writer, "transport", None)
+    if transport is not None:
+        transport.abort()
+
+
+async def _close_writer(
+    writer: Optional[asyncio.StreamWriter],
+    deadline: float,
+    *,
+    abort: bool = False,
+) -> None:
     if writer is None:
+        return
+    if abort:
+        _abort_writer(writer)
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        _abort_writer(writer)
         return
     writer.close()
     try:
-        await writer.wait_closed()
+        await asyncio.wait_for(writer.wait_closed(), timeout=remaining)
+    except asyncio.TimeoutError:
+        _abort_writer(writer)
     except (BrokenPipeError, ConnectionResetError, OSError):
         pass
 
@@ -123,7 +143,7 @@ async def _run_per_attempt_probe_coro(
                     await _respect_min_interval(t0, min_interval_ms, deadline)
                     continue
             finally:
-                await _close_writer(writer)
+                await _close_writer(writer, deadline)
         except (
             asyncio.TimeoutError,
             ConnectionRefusedError,
@@ -207,7 +227,7 @@ async def _run_persistent_probe_coro(
             ):
                 attempt_counter[0] += 1
                 error_counter[0] += 1
-                await _close_writer(writer)
+                await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
                 await _respect_min_interval(t0, min_interval_ms, deadline)
@@ -217,7 +237,7 @@ async def _run_persistent_probe_coro(
             if remaining <= 0:
                 attempt_counter[0] += 1
                 error_counter[0] += 1
-                await _close_writer(writer)
+                await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
                 await _respect_min_interval(t0, min_interval_ms, deadline)
@@ -232,7 +252,7 @@ async def _run_persistent_probe_coro(
                 )
                 if data != payload:
                     error_counter[0] += 1
-                    await _close_writer(writer)
+                    await _close_writer(writer, deadline, abort=True)
                     reader = None
                     writer = None
                     await _respect_min_interval(t0, min_interval_ms, deadline)
@@ -246,7 +266,7 @@ async def _run_persistent_probe_coro(
                 OSError,
             ):
                 error_counter[0] += 1
-                await _close_writer(writer)
+                await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
                 await _respect_min_interval(t0, min_interval_ms, deadline)
@@ -255,7 +275,7 @@ async def _run_persistent_probe_coro(
             rtts_us.append((t1 - t0) // 1000)
             await _respect_min_interval(t0, min_interval_ms, deadline)
     finally:
-        await _close_writer(writer)
+        await _close_writer(writer, deadline)
 
 
 def _compute_histogram(rtts_us: List[int]) -> List[int]:
