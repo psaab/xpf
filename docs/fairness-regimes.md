@@ -154,9 +154,14 @@ A measurement run **PASSES** iff ALL of:
    throughput floor would be a category error.
 
 4. **Mouse p99** (only when mouse probes are present): mouse
-   TCP-connect+echo p99 latency `≤ 2 × idle_baseline`, where
-   `idle_baseline` is the same probe against the cluster with no
-   elephant traffic.
+   echo-transaction p99 latency `≤ 2 × idle_baseline`, where
+   `idle_baseline` is the same probe mode against the cluster with no
+   elephant traffic. The legacy `per-attempt` probe mode includes TCP
+   connect latency in every sample. High-concurrency 100E100M runs use
+   `persistent` mode so the gate measures established mouse request
+   latency instead of the target echo daemon's accept/close capacity.
+   The reducer rejects gate comparisons whose idle and loaded cells were
+   captured with different probe modes or minimum-interval pacing.
 
 A run that satisfies any single gate while failing another **does
 not pass**. There is no "OR flagged" escape clause; if a gate
@@ -431,6 +436,8 @@ MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
 MOUSE_LATENCY_GATE_ELEPHANTS=100 \
 MOUSE_LATENCY_GATE_MICE=100 \
 MOUSE_LATENCY_GATE_PERCENTILE=p999_us \
+MOUSE_PROBE_CONNECTION_MODE=persistent \
+MOUSE_PROBE_MIN_INTERVAL_MS=20 \
 ./test/incus/test-mouse-latency-matrix.sh /tmp/xpf-100e100m-exact
 ```
 
@@ -438,16 +445,26 @@ Run it once under the strict exact fixture and once after applying the
 surplus-sharing fixture. Use `MOUSE_COS_SURPLUS_SHARING=1` for the
 surplus leg; the per-rep harness re-applies CoS on every preflight/rep,
 so a one-time manual `apply-cos-config.sh --surplus-sharing` before the
-matrix is not sufficient. The reducer writes `summary.json` with the
-gate verdict, idle and loaded tail latency, ratio, selected percentile,
-and per-cell representative probe. Probe artifacts now include
-`rtt_us.p999`; the reducer carries that forward as `median_rep.p999_us`.
-The 100E100M qualification should gate p99.9 by setting
-`MOUSE_LATENCY_GATE_PERCENTILE=p999_us`; legacy #905-style runs may keep
-the default p99 gate. When a non-p99 gate is selected, the representative
-rep is also selected by that same percentile. For p99 runs, `summary.json`
-keeps the historical `p99_idle_us` / `p99_loaded_us` aliases alongside
-the generic `idle_us` / `loaded_us` fields.
+matrix is not sufficient. 100E100M uses persistent probe connections with
+a 20 ms per-coroutine interval because the validation target is tail
+latency of mouse transactions under elephant load, not the echo server's
+ability to accept and close tens of thousands of short TCP sessions or
+serve millions of unpaced echo requests per minute. A 60-second, 100-mouse
+rep still produces roughly 280k samples on the isolated validation
+cluster. The reducer writes
+`summary.json` with the gate verdict, idle and loaded tail latency,
+ratio, selected percentile, and per-cell representative probe. Probe
+artifacts now include `rtt_us.p999`; the reducer carries that forward as
+`median_rep.p999_us`. The 100E100M qualification should gate p99.9 by
+setting `MOUSE_LATENCY_GATE_PERCENTILE=p999_us`; legacy #905-style runs
+may keep the default p99 gate. When a non-p99 gate is selected, the
+representative rep is also selected by that same percentile. For p99
+runs, `summary.json` keeps the historical `p99_idle_us` /
+`p99_loaded_us` aliases alongside the generic `idle_us` / `loaded_us`
+fields. The reducer also verifies that gate cells share the same
+`MOUSE_PROBE_CONNECTION_MODE` and `MOUSE_PROBE_MIN_INTERVAL_MS` provenance;
+mixed per-attempt/persistent or paced/unpaced gate artifacts are reported
+as insufficient data rather than a PASS/FAIL verdict.
 
 ```bash
 MOUSE_COS_SURPLUS_SHARING=1 \

@@ -9,6 +9,9 @@ IQR-of-p99-across-reps + achieved-RPS summary populate summary.json.
 Cells require 10 valid reps to report status OK; if the runner reaches
 its 15-rep ceiling with fewer valid reps, the gate is
 INSUFFICIENT-DATA.
+Gate cells must use the same mouse-probe connection mode and pacing
+interval; otherwise the reducer returns INSUFFICIENT-DATA instead of
+comparing unlike latency artifacts.
 
 Default decision threshold (#905, plan §7.2):
 - p99(N=128, M=10, best-effort) ≤ 2 × p99(N=0, M=10, best-effort)
@@ -37,6 +40,62 @@ GATE_PERCENTILE_TO_RTT_KEY = {
     "p999_us": "p999",
 }
 REQUIRED_VALID_REPS = 10
+DEFAULT_PROBE_CONFIG = {
+    "connection_mode": "per-attempt",
+    "min_interval_ms": 0.0,
+}
+
+
+def _normalize_min_interval_ms(value) -> object:
+    if value is None:
+        return DEFAULT_PROBE_CONFIG["min_interval_ms"]
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _probe_config_from_rep(rep: dict) -> dict:
+    """Return the probe mode/pacing tuple for a rep.
+
+    New artifacts record the values in both manifest.json and
+    probe.json["config"]. Older artifacts predate the fields and are
+    treated as the historical defaults: per-attempt mode with no
+    min-interval pacing.
+    """
+    manifest = rep.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = {}
+    config = rep.get("config")
+    if not isinstance(config, dict):
+        config = {}
+    mode = manifest.get("mouse_probe_connection_mode")
+    if mode is None:
+        mode = config.get("connection_mode")
+    if mode is None:
+        mode = DEFAULT_PROBE_CONFIG["connection_mode"]
+    interval = manifest.get("mouse_probe_min_interval_ms")
+    if interval is None:
+        interval = config.get("min_interval_ms")
+    return {
+        "connection_mode": mode,
+        "min_interval_ms": _normalize_min_interval_ms(interval),
+    }
+
+
+def _probe_config_key(config: dict) -> Tuple[object, object]:
+    return (config.get("connection_mode"), config.get("min_interval_ms"))
+
+
+def _unique_probe_configs(reps: List[dict]) -> List[dict]:
+    by_key = {}
+    for rep in reps:
+        config = _probe_config_from_rep(rep)
+        by_key.setdefault(_probe_config_key(config), config)
+    return [
+        by_key[k]
+        for k in sorted(by_key.keys(), key=lambda k: (str(k[0]), str(k[1])))
+    ]
 
 
 def has_invalid_marker(rep_dir: str) -> bool:
@@ -85,6 +144,13 @@ def load_cell_reps(cell_dir: str) -> List[dict]:
                     "totals": {},
                 })
                 continue
+        manifest_path = os.path.join(rep_dir, "manifest.json")
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path) as f:
+                    rep["manifest"] = json.load(f)
+            except json.JSONDecodeError:
+                pass
         if marker_reasons:
             v = rep.setdefault("validity", {"ok": False, "reasons": []})
             v["ok"] = False
@@ -123,6 +189,13 @@ def summarize_cell(reps: List[dict], representative_percentile: str = "p99") -> 
         "iqr_p99_across_reps": None,
         "representative_percentile": representative_percentile,
     }
+    probe_configs = _unique_probe_configs(valid)
+    if len(probe_configs) == 1:
+        summary["probe_config"] = probe_configs[0]
+    elif len(probe_configs) > 1:
+        summary["probe_configs"] = probe_configs
+        summary["status"] = "INCONSISTENT-PROBE-CONFIG"
+        return summary
     if len(valid) < REQUIRED_VALID_REPS:
         summary["status"] = "INSUFFICIENT-VALID-REPS"
         return summary
@@ -184,6 +257,16 @@ def decide(
             "reason": (
                 f"gate cell status: loaded={gate_loaded.get('status')}, "
                 f"idle={gate_idle.get('status')}"
+            ),
+        }
+    loaded_probe_config = gate_loaded.get("probe_config")
+    idle_probe_config = gate_idle.get("probe_config")
+    if loaded_probe_config != idle_probe_config:
+        return {
+            "verdict": "INSUFFICIENT-DATA",
+            "reason": (
+                "gate probe config mismatch: "
+                f"loaded={loaded_probe_config}, idle={idle_probe_config}"
             ),
         }
     loaded_value = (gate_loaded.get("median_rep") or {}).get(gate_percentile)
