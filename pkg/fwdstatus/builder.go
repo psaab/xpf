@@ -102,7 +102,8 @@ func Build(
 
 	// --- Buffer % ------------------------------------------------
 	// eBPF path: max BPF map utilization.
-	// Userspace-dp path: unknown (BPF maps don't represent ring fill).
+	// Userspace-dp path: derived from bounded AF_XDP helper status
+	// below; BPF maps do not represent userspace ring fill.
 	//
 	// Note: GetMapStats() iterates every entry of every BPF map and
 	// userspace.Manager.Status() takes Manager.mu.  That's acceptable

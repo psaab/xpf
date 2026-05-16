@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"golang.org/x/sys/unix"
 )
 
@@ -20,6 +21,21 @@ import (
 func (c *CLI) showSystemBuffers() error {
 	if c.dp == nil {
 		fmt.Println("Dataplane not loaded")
+		return nil
+	}
+	if provider, ok := c.dp.(interface {
+		Status() (dpuserspace.ProcessStatus, error)
+	}); ok {
+		status, err := provider.Status()
+		if err != nil {
+			fmt.Printf("Userspace buffer metrics unavailable: %v\n", err)
+			return nil
+		}
+		fmt.Print(dpuserspace.FormatSystemBuffers(status, false))
+		v4, v6 := c.dp.SessionCount()
+		if v4 > 0 || v6 > 0 {
+			fmt.Printf("\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
+		}
 		return nil
 	}
 	stats := c.dp.GetMapStats()
@@ -67,6 +83,21 @@ func (c *CLI) showSystemBuffers() error {
 func (c *CLI) showSystemBuffersDetail() error {
 	if c.dp == nil {
 		fmt.Println("Dataplane not loaded")
+		return nil
+	}
+	if provider, ok := c.dp.(interface {
+		Status() (dpuserspace.ProcessStatus, error)
+	}); ok {
+		status, err := provider.Status()
+		if err != nil {
+			fmt.Printf("Userspace buffer metrics unavailable: %v\n", err)
+			return nil
+		}
+		fmt.Print(dpuserspace.FormatSystemBuffers(status, true))
+		v4, v6 := c.dp.SessionCount()
+		if v4 > 0 || v6 > 0 {
+			fmt.Printf("\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
+		}
 		return nil
 	}
 	stats := c.dp.GetMapStats()
