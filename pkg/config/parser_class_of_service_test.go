@@ -439,14 +439,14 @@ func TestCoSIperfSymmetricFixtureCompilesReverseSourcePortOutputFilter(t *testin
 		t.Fatal("expected reverse filter terms")
 	}
 	term := revFilter.Terms[0]
-	if got := strings.Join(term.SourcePorts, ","); got != "5201" {
-		t.Fatalf("reverse term 0 source ports = %q, want 5201", got)
+	if got := strings.Join(term.SourcePorts, ","); got != "5200,6200" {
+		t.Fatalf("reverse term 0 source ports = %q, want 5200,6200", got)
 	}
 	if len(term.DestinationPorts) != 0 {
 		t.Fatalf("reverse term 0 must not match destination-port; got %v", term.DestinationPorts)
 	}
-	if got := term.ForwardingClass; got != "iperf-a" {
-		t.Fatalf("reverse term 0 forwarding-class = %q, want iperf-a", got)
+	if got := term.ForwardingClass; got != "best-effort" {
+		t.Fatalf("reverse term 0 forwarding-class = %q, want best-effort", got)
 	}
 
 	rev6Filter := cfg.Firewall.FiltersInet6["bandwidth-output-reverse"]
@@ -454,11 +454,11 @@ func TestCoSIperfSymmetricFixtureCompilesReverseSourcePortOutputFilter(t *testin
 		t.Fatal("expected inet6 bandwidth-output-reverse filter with at least 4 terms")
 	}
 	term = rev6Filter.Terms[3]
-	if got := strings.Join(term.SourcePorts, ","); got != "5204" {
-		t.Fatalf("reverse inet6 term 3 source ports = %q, want 5204", got)
+	if got := strings.Join(term.SourcePorts, ","); got != "5203,6203" {
+		t.Fatalf("reverse inet6 term 3 source ports = %q, want 5203,6203", got)
 	}
-	if got := term.ForwardingClass; got != "iperf-d" {
-		t.Fatalf("reverse inet6 term 3 forwarding-class = %q, want iperf-d", got)
+	if got := term.ForwardingClass; got != "iperf-3g" {
+		t.Fatalf("reverse inet6 term 3 forwarding-class = %q, want iperf-3g", got)
 	}
 }
 
