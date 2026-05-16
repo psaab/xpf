@@ -357,7 +357,7 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
     for offset in 0..queue_count {
         let queue_idx = (start + offset) % queue_count;
         let queue = &mut root.queues[queue_idx];
-        if cos_queue_is_empty(queue) || !queue.hot.runnable {
+        if cos_queue_is_empty(queue) || !queue.hot.runnable || !queue.config.guarantee_enabled {
             continue;
         }
         if queue.config.exact {
@@ -469,7 +469,11 @@ fn select_exact_cos_guarantee_queue_with_lease_telemetry(
     for offset in 0..queue_count {
         let queue_idx = (start + offset) % queue_count;
         let queue = &mut root.queues[queue_idx];
-        if cos_queue_is_empty(queue) || !queue.hot.runnable || !queue.config.exact {
+        if cos_queue_is_empty(queue)
+            || !queue.hot.runnable
+            || !queue.config.guarantee_enabled
+            || !queue.config.exact
+        {
             continue;
         }
         let top_up = maybe_top_up_cos_queue_lease(
@@ -599,7 +603,11 @@ pub(in crate::afxdp) fn select_nonexact_cos_guarantee_batch(
     for offset in 0..queue_count {
         let queue_idx = (start + offset) % queue_count;
         let queue = &mut root.queues[queue_idx];
-        if cos_queue_is_empty(queue) || !queue.hot.runnable || queue.config.exact {
+        if cos_queue_is_empty(queue)
+            || !queue.hot.runnable
+            || !queue.config.guarantee_enabled
+            || queue.config.exact
+        {
             continue;
         }
         let transmit_rate_bytes = queue.transmit_rate_bytes();

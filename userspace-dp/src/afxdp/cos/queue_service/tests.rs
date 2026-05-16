@@ -40,6 +40,115 @@ fn surplus_phase_selects_non_exact_queue_without_guarantee_tokens() {
 }
 
 #[test]
+fn nonexact_guarantee_skips_residual_only_scheduler_map_queue() {
+    let mut root = test_cos_runtime_with_queues(
+        1_000_000,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_000_000,
+            guarantee_enabled: false,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+        }],
+    );
+    root.tokens = 1500;
+    root.queues[0].hot.tokens = 1500;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    assert!(
+        select_nonexact_cos_guarantee_batch(&mut root, 1).is_none(),
+        "residual-only queue must not consume non-exact guarantee service"
+    );
+    assert!(matches!(
+        select_cos_surplus_batch(&mut root, 1),
+        Some(CoSBatch::Local {
+            phase: CoSServicePhase::Surplus,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn nonexact_guarantee_selects_explicit_transmit_rate_queue() {
+    let mut root = test_cos_runtime_with_queues(
+        1_000_000,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_000_000,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+        }],
+    );
+    root.tokens = 1500;
+    root.queues[0].hot.tokens = 1500;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    assert!(matches!(
+        select_nonexact_cos_guarantee_batch(&mut root, 1),
+        Some(CoSBatch::Local {
+            phase: CoSServicePhase::Guarantee,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn fallback_root_shaped_default_queue_has_guarantee_service() {
+    let mut root = test_cos_runtime_with_queues(
+        1_000_000,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_000_000,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+        }],
+    );
+    root.tokens = 1500;
+    root.queues[0].hot.tokens = 1500;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    assert!(matches!(
+        select_nonexact_cos_guarantee_batch(&mut root, 1),
+        Some(CoSBatch::Local {
+            phase: CoSServicePhase::Guarantee,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn surplus_phase_skips_exact_queue_without_guarantee_tokens() {
     let mut root = test_cos_runtime_with_exact(true);
     root.tokens = 1500;
@@ -315,6 +424,7 @@ fn guarantee_phase_limits_service_to_visit_quantum() {
             forwarding_class: "best-effort".into(),
             priority: 5,
             transmit_rate_bytes: 1_000_000,
+            guarantee_enabled: true,
             exact: false,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -350,6 +460,7 @@ fn guarantee_phase_allows_larger_high_rate_visit_quantum() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000u64 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -398,6 +509,7 @@ fn guarantee_phase_quantum_scales_with_rate() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000u64 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -413,6 +525,7 @@ fn guarantee_phase_quantum_scales_with_rate() {
             forwarding_class: "iperf-low".into(),
             priority: 5,
             transmit_rate_bytes: 100_000_000u64 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -439,6 +552,7 @@ fn guarantee_phase_rotates_between_backlogged_queues() {
                 forwarding_class: "best-effort".into(),
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
+                guarantee_enabled: true,
                 exact: false,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -451,6 +565,7 @@ fn guarantee_phase_rotates_between_backlogged_queues() {
                 forwarding_class: "af11".into(),
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
+                guarantee_enabled: true,
                 exact: false,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -627,6 +742,7 @@ fn guarantee_rr_cursors_start_at_zero_after_runtime_build() {
             forwarding_class: "q0".into(),
             priority: 5,
             transmit_rate_bytes: 1_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -650,6 +766,7 @@ fn surplus_phase_prefers_higher_priority_queue() {
                 forwarding_class: "bulk".into(),
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
+                guarantee_enabled: true,
                 exact: false,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -662,6 +779,7 @@ fn surplus_phase_prefers_higher_priority_queue() {
                 forwarding_class: "voice".into(),
                 priority: 0,
                 transmit_rate_bytes: 1_000_000,
+                guarantee_enabled: true,
                 exact: false,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -700,6 +818,7 @@ fn surplus_phase_applies_weighted_same_priority_sharing() {
                 forwarding_class: "small".into(),
                 priority: 5,
                 transmit_rate_bytes: 1_000_000,
+                guarantee_enabled: true,
                 exact: false,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -712,6 +831,7 @@ fn surplus_phase_applies_weighted_same_priority_sharing() {
                 forwarding_class: "large".into(),
                 priority: 5,
                 transmit_rate_bytes: 4_000_000,
+                guarantee_enabled: true,
                 exact: false,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -778,6 +898,7 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
                 forwarding_class: "iperf-a".into(),
                 priority: 5,
                 transmit_rate_bytes: 1_000_000_000 / 8,
+                guarantee_enabled: true,
                 exact: true,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -790,6 +911,7 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
                 forwarding_class: "iperf-c".into(),
                 priority: 5,
                 transmit_rate_bytes: 25_000_000_000 / 8,
+                guarantee_enabled: true,
                 exact: true,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -841,6 +963,7 @@ fn equal_flow_cap_reaches_drain_shaped_tx_entry_path() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 100_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: true,
@@ -1060,6 +1183,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1148,6 +1272,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1219,6 +1344,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1321,6 +1447,7 @@ fn release_exact_prepared_scratch_preserves_queue_after_failed_submit() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1382,6 +1509,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1563,6 +1691,7 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
             queue_id: 5,
             priority: 5,
             transmit_rate_bytes: 11_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -1626,6 +1755,7 @@ fn restore_cos_prepared_items_marks_queue_runnable_after_retry() {
             queue_id: 5,
             priority: 5,
             transmit_rate_bytes: 11_000_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,

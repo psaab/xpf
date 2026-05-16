@@ -23,6 +23,7 @@ type cosQueueView struct {
 	forwardingClass      string
 	priority             string
 	exact                bool
+	guaranteeEnabled     bool
 	surplusSharing       bool // #915: only meaningful when exact == true
 	equalFlowEnforcement bool
 	equalFlowEnforced    bool
@@ -154,14 +155,15 @@ func FormatCoSInterfaceSummary(cfg *config.Config, status *ProcessStatus, select
 		// keep the Drops line outside the aligned grid (#710, #718).
 		var tableBuf strings.Builder
 		tw := tabwriter.NewWriter(&tableBuf, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "    Queue\tOwner\tClass\tPriority\tExact\tTransmit rate\tBuffer\tQueued pkts\tQueued bytes\tRunnable\tParked\tNext wake\tSurplus deficit")
+		fmt.Fprintln(tw, "    Queue\tOwner\tClass\tPriority\tExact\tGuarantee\tTransmit rate\tBuffer\tQueued pkts\tQueued bytes\tRunnable\tParked\tNext wake\tSurplus deficit")
 		for _, queue := range queues {
-			fmt.Fprintf(tw, "    %d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%d\t%s\t%s\n",
+			fmt.Fprintf(tw, "    %d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%d\t%s\t%s\n",
 				queue.queueID,
 				formatOptionalWorkerID(queue.ownerWorker),
 				emptyDash(queue.forwardingClass),
 				queue.priority,
 				yesNo(queue.exact),
+				yesNo(queue.guaranteeEnabled),
 				formatCoSRate(queue.transmitRate),
 				formatCoSBytes(queue.bufferBytes),
 				queue.queuedPackets,
@@ -543,6 +545,7 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 				qv.forwardingClass = className
 				if sched := cfg.ClassOfService.Schedulers[entry.Scheduler]; sched != nil {
 					qv.exact = sched.TransmitRateExact
+					qv.guaranteeEnabled = sched.TransmitRateBytes > 0
 					qv.surplusSharing = sched.SurplusSharing
 					qv.equalFlowEnforcement = sched.EqualFlowEnforcement
 					qv.transmitRate = sched.TransmitRateBytes
@@ -565,9 +568,14 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 			}
 			qv.priority = fmt.Sprintf("%d", runtimeQueue.Priority)
 			qv.exact = runtimeQueue.Exact
+			if runtimeQueue.GuaranteeEnabled != nil {
+				qv.guaranteeEnabled = *runtimeQueue.GuaranteeEnabled
+			} else if qv.transmitRate == 0 && runtimeQueue.TransmitRateBytes > 0 {
+				qv.guaranteeEnabled = true
+			}
 			qv.equalFlowEnforcement = runtimeQueue.EqualFlowEnforcement
 			qv.equalFlowEnforced = runtimeQueue.EqualFlowEnforced
-			if runtimeQueue.TransmitRateBytes > 0 {
+			if runtimeQueue.TransmitRateBytes > 0 && qv.guaranteeEnabled {
 				qv.transmitRate = runtimeQueue.TransmitRateBytes
 			}
 			if runtimeQueue.BufferBytes > 0 {

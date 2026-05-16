@@ -52,6 +52,12 @@ pub(in crate::afxdp) struct CoSQueueConfig {
     pub(in crate::afxdp) forwarding_class: String,
     pub(in crate::afxdp) priority: u8,
     pub(in crate::afxdp) transmit_rate_bytes: u64,
+    /// True when this queue has an explicit scheduler transmit-rate and
+    /// therefore participates in guarantee service. Scheduler-map entries
+    /// without an explicit rate still keep an effective rate for burst sizing
+    /// and surplus weighting, but are residual/surplus-only under the root
+    /// shaper.
+    pub(in crate::afxdp) guarantee_enabled: bool,
     pub(in crate::afxdp) exact: bool,
     /// #915: opt-in for exact queues to draw from root surplus
     /// tokens once their own bucket is empty. See the
@@ -465,6 +471,12 @@ pub(in crate::afxdp) struct CoSQueueConfigState {
     pub(in crate::afxdp) queue_id: u8,
     pub(in crate::afxdp) priority: u8,
     pub(in crate::afxdp) transmit_rate_bytes: u64,
+    /// Immutable guarantee eligibility bit copied from `CoSQueueConfig`.
+    /// Do not infer this from `transmit_rate_bytes == 0`: transparent
+    /// zero-rate queues use that value to mean "unshaped/full bucket", while
+    /// residual-only queues under a shaped root may carry a positive effective
+    /// rate for sizing and accounting.
+    pub(in crate::afxdp) guarantee_enabled: bool,
     pub(in crate::afxdp) exact: bool,
     /// #915: only meaningful when `exact == true`. When set, the
     /// queue (1) is NOT parked on `queue.hot.tokens < head_len` in

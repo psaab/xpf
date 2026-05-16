@@ -98,6 +98,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
                     queue_id: queue.queue_id,
                     priority: queue.priority,
                     transmit_rate_bytes: queue.transmit_rate_bytes,
+                    guarantee_enabled: queue.guarantee_enabled,
                     exact: queue.exact,
                     // #915: copy the opt-in flag from the intermediate
                     // CoSQueueConfig (populated in forwarding_build.rs
