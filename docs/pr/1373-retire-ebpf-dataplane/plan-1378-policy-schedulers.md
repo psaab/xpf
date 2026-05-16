@@ -1,0 +1,95 @@
+# #1378 Userspace Policy Scheduler Plan
+
+## Goal
+
+Propagate Junos `schedulers { ... }` state into userspace policy evaluation so
+scheduled policy rules activate and deactivate correctly without the eBPF
+`policy_rules` map.
+
+## Dependencies
+
+- #1381 must land first. `UpdatePolicyScheduleState` currently dispatches
+  through the embedded eBPF `DataPlane`; userspace needs either the split
+  interface or an explicit stub/snapshot branch.
+
+## Design
+
+Add `SchedulerName string`, `Inactive bool`, and a stable rule identity to
+`PolicyRuleSnapshot` and `userspace-dp/src/policy.rs::PolicyRule`. The stable
+identity must not depend on transient array position alone; use a config-driven
+UUID if available or `(policy_set_id, policy_name, rule_name)`/equivalent
+compiled identity.
+
+On scheduler state changes, publish one atomic userspace snapshot delta that
+contains the updated inactive bits for all affected rules. Do not issue
+per-rule fast-path toggles because first-match ordering requires same-instant
+activate/deactivate semantics.
+
+`evaluate_policy` skips inactive rules before address/application matching.
+This is on the new-flow/session-miss path; flow-cache hits keep forwarding
+existing sessions unless a separate `policy-rematch` feature is implemented.
+That matches Junos default behavior: schedulers block new lookups, not existing
+sessions.
+
+Scheduler granularity is 60 seconds. Tests and docs must use deterministic
+clock injection or windows that span multiple evaluator ticks; the earlier
+30-second integration target is invalid.
+
+Missing scheduler references fail closed as commit errors. Do not copy the
+existing eBPF behavior that can default missing scheduler state to active.
+
+## Hot-Path Invariants
+
+- One inactive-branch per rule on miss path is acceptable; no scheduler clock
+  evaluation occurs in the packet worker.
+- Snapshot publication is ArcSwap-atomic across all rule inactive bits.
+- Hit counters are keyed by stable rule identity outside rebuilt rule structs so
+  counters survive scheduler snapshot rebuilds.
+- Do not copy the existing eBPF indexing bug in
+  `UpdatePolicyScheduleState`; userspace updates must target stable identities.
+
+## State and HA Behavior
+
+- Scheduler active state is control-plane derived from config and daemon clock;
+  it is republished after config load, daemon restart, and scheduler state
+  change.
+- Existing sessions continue until normal timeout unless policy-rematch is
+  explicitly configured in a later feature.
+- Counters persist across active/inactive flips and snapshot rebuilds.
+- HA failover recomputes scheduler state on the new active node and publishes a
+  complete policy snapshot before admitting scheduled-policy traffic.
+
+## Risks
+
+- Scheduler atomicity: first-match policy ordering requires affected inactive
+  bits to publish as one coherent snapshot. Per-rule toggles can expose an
+  impossible mixed policy state.
+- Clock drift: scheduler state is daemon-clock derived. HA peers must recompute
+  after failover rather than trusting stale peer-local state.
+- Counter continuity: stable rule identity is mandatory because inactive flips
+  and snapshot rebuilds must not reset operator-visible hit counters.
+- Missing scheduler references: fail-open behavior admits traffic outside the
+  intended time window; userspace must reject these commits explicitly.
+
+## Exact Tests
+
+- Cargo: `policy::evaluate_policy_skips_inactive_rules`.
+- Cargo: `policy::inactive_rule_falls_through_to_next_match`.
+- Cargo: `policy::hit_counters_survive_scheduler_snapshot_rebuild`.
+- Cargo: `policy::snapshot_publish_applies_inactive_bits_atomically`.
+- Go: userspace snapshot round-trip for `SchedulerName`, `Inactive`, and stable
+  rule identity.
+- Go: deterministic scheduler clock tests for active/inactive windows at
+  60-second granularity.
+- Go: `UpdatePolicyScheduleState` in userspace mode republishes one snapshot
+  delta with updated inactive bits.
+- Go: missing scheduler reference is a commit error.
+- Integration: scheduler window spanning multiple 60-second ticks with a policy
+  referencing it; new connections pass only during active windows, while
+  established sessions retain Junos-default behavior.
+
+## Non-Goals
+
+- Do not implement multi-scheduler-per-rule; current config supports one.
+- Do not implement policy-rematch/session flush in this PR.
+- Do not remove eBPF source as part of #1378.
