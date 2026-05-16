@@ -154,6 +154,57 @@ fn account_queue_drain_sent_bytes_splits_phase_and_exact_backlog_steal() {
 }
 
 #[test]
+fn apply_cos_send_result_counts_nonexact_bytes_when_exact_queue_backlogged() {
+    let root = test_mixed_class_root_with_primed_queues();
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    apply_cos_send_result(
+        &mut binding,
+        42,
+        1,
+        CoSServicePhase::Surplus,
+        1500,
+        1500,
+        std::collections::VecDeque::new(),
+    );
+
+    let root = binding.cos.cos_interfaces.get(&42).expect("cos root");
+    let nonexact = &root.queues[1];
+    assert!(!nonexact.config.exact);
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_surplus_sent_bytes
+            .load(Ordering::Relaxed),
+        1500
+    );
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        1500,
+        "apply_cos_send_result must derive exact_backlogged from the root, not from caller input"
+    );
+}
+
+#[test]
 fn normalize_cos_queue_state_repairs_nonempty_unparked_queue_to_runnable() {
     let mut queue = CoSQueueRuntime {
         config: crate::afxdp::types::CoSQueueConfigState {

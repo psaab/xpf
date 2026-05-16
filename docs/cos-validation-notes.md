@@ -278,7 +278,8 @@ drain path without having to scrape Prometheus or attach perf:
 Queue  Owner  Class    ...  Buffer     Queued pkts  Queued bytes  ...
 4      1      iperf-a  ...  1.19 MiB   299          443.24 KiB    ...
        Drops: flow_share=75  buffer=0  ecn_marked=97349
-       OwnerProfile: drain_p50=1us  drain_p99=16us  redirect_p99=2us  owner_pps=12345  peer_pps=6789
+       OwnerProfile: drain_p50=1us  drain_p99=16us  drain_invocations=1234
+       Binding telemetry: redirect_p99=2us  owner_pps=12345  peer_pps=6789
 ```
 
 Field meanings (from `BindingLiveState` in `userspace-dp/src/afxdp/umem.rs`):
