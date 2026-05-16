@@ -15,6 +15,7 @@ use crate::afxdp::types::{
     SharedCoSQueueLease,
 };
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 // #915 Codex code-review MEDIUM: direct unit tests for the
 // phase-gated `shared_queue_lease` consumption helper. Both
@@ -92,6 +93,64 @@ fn maybe_consume_exact_queue_lease_no_lease_no_op() {
     maybe_consume_exact_queue_lease(None, CoSServicePhase::Surplus, 1500);
     maybe_consume_exact_queue_lease(None, CoSServicePhase::Guarantee, 1500);
     // No assertion needed — the function must not panic on None.
+}
+
+#[test]
+fn account_queue_drain_sent_bytes_splits_phase_and_exact_backlog_steal() {
+    let mut root = test_mixed_class_root_with_primed_queues();
+    assert!(
+        root_has_backlogged_exact_queue(&root),
+        "mixed fixture must start with backlogged exact queues"
+    );
+
+    let nonexact = &mut root.queues[1];
+    assert!(!nonexact.config.exact);
+    account_queue_drain_sent_bytes(nonexact, CoSServicePhase::Surplus, 2048, true);
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_sent_bytes
+            .load(Ordering::Relaxed),
+        2048
+    );
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_surplus_sent_bytes
+            .load(Ordering::Relaxed),
+        2048
+    );
+    assert_eq!(
+        nonexact
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        2048
+    );
+
+    let exact = &mut root.queues[0];
+    assert!(exact.config.exact);
+    account_queue_drain_sent_bytes(exact, CoSServicePhase::Guarantee, 1024, true);
+    assert_eq!(
+        exact
+            .telemetry
+            .owner_profile
+            .drain_guarantee_sent_bytes
+            .load(Ordering::Relaxed),
+        1024
+    );
+    assert_eq!(
+        exact
+            .telemetry
+            .owner_profile
+            .drain_nonexact_sent_bytes_while_exact_backlogged
+            .load(Ordering::Relaxed),
+        0,
+        "exact queue service must not be counted as non-exact steal"
+    );
 }
 
 #[test]

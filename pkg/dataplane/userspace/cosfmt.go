@@ -50,11 +50,15 @@ type cosQueueView struct {
 	redirectAcquireHist  []uint64
 	ownerPPS             uint64
 	peerPPS              uint64
-	// #760 overshoot-hunt instrumentation. drainSentBytes /
-	// drainParkRootTokens / drainParkQueueTokens are queue-scoped.
+	// #760/#1369 drain-shape instrumentation. drainSentBytes,
+	// phase splits, exact-backlog steal bytes, and park counters are
+	// queue-scoped.
 	// postDrainBackupBytes is binding-scoped (one-per-binding Rust
 	// attribution; summed across queues here for rendering).
 	drainSentBytes                uint64
+	drainGuaranteeSentBytes       uint64
+	drainSurplusSentBytes         uint64
+	drainNonExactWhileExactBytes  uint64
 	drainParkRootTokens           uint64
 	drainParkQueueTokens          uint64
 	postDrainBackupBytes          uint64
@@ -232,9 +236,8 @@ func FormatCoSInterfaceSummary(cfg *config.Config, status *ProcessStatus, select
 			// the interface header via renderBindingScopedTelemetry
 			// so they are no longer repeated under every queue row
 			// (#732). Non-exact / shared_exact queues keep an empty
-			// per-queue hist post-#751 because the drain path only
-			// writes the atomics when it services them, so
-			// drainInvocations==0 correctly suppresses the row.
+			// per-queue histogram, so drainInvocations==0 correctly
+			// suppresses the latency row.
 			if queue.ownerWorker != nil && queue.drainInvocations > 0 {
 				fmt.Fprintf(
 					&b,
@@ -243,16 +246,20 @@ func FormatCoSInterfaceSummary(cfg *config.Config, status *ProcessStatus, select
 					formatHistPercentileMicros(queue.drainLatencyHist, queue.drainInvocations, 99),
 					queue.drainInvocations,
 				)
-				// #760 overshoot-hunt row. Sibling of the OwnerProfile
-				// line so operators can correlate drain-latency with
-				// the rate the queue actually shaped out and the two
-				// gate-park counters. Only rendered when the queue has
-				// been drained at least once — a never-drained queue's
-				// zeros carry no signal.
+			}
+			if queue.hasDrainShapeTelemetry() {
+				// #760/#1369 overshoot-hunt row. This is queue-
+				// scoped, so render it independently of the exact-only
+				// OwnerProfile latency row. Non-exact rows need this
+				// line to expose best-effort/uncapped bytes sent while
+				// exact queues were still backlogged.
 				fmt.Fprintf(
 					&b,
-					"           DrainShape:   sent_bytes=%d  park_root=%d  park_queue=%d\n",
+					"           DrainShape:   sent_bytes=%d  guarantee=%d  surplus=%d  nonexact_while_exact_backlogged=%d  park_root=%d  park_queue=%d\n",
 					queue.drainSentBytes,
+					queue.drainGuaranteeSentBytes,
+					queue.drainSurplusSentBytes,
+					queue.drainNonExactWhileExactBytes,
 					queue.drainParkRootTokens,
 					queue.drainParkQueueTokens,
 				)
@@ -260,6 +267,15 @@ func FormatCoSInterfaceSummary(cfg *config.Config, status *ProcessStatus, select
 		}
 	}
 	return b.String()
+}
+
+func (q cosQueueView) hasDrainShapeTelemetry() bool {
+	return q.drainSentBytes != 0 ||
+		q.drainGuaranteeSentBytes != 0 ||
+		q.drainSurplusSentBytes != 0 ||
+		q.drainNonExactWhileExactBytes != 0 ||
+		q.drainParkRootTokens != 0 ||
+		q.drainParkQueueTokens != 0
 }
 
 // #709: render a histogram percentile as microseconds. The Rust side
@@ -582,6 +598,9 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 			// drained leaves these at zero; the renderer gates on
 			// drainInvocations > 0 so a silent queue stays silent.
 			qv.drainSentBytes = runtimeQueue.DrainSentBytes
+			qv.drainGuaranteeSentBytes = runtimeQueue.DrainGuaranteeSentBytes
+			qv.drainSurplusSentBytes = runtimeQueue.DrainSurplusSentBytes
+			qv.drainNonExactWhileExactBytes = runtimeQueue.DrainNonExactSentBytesWhileExactBacklogged
 			qv.drainParkRootTokens = runtimeQueue.DrainParkRootTokens
 			qv.drainParkQueueTokens = runtimeQueue.DrainParkQueueTokens
 			qv.postDrainBackupBytes = runtimeQueue.PostDrainBackupBytes

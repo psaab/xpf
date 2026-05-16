@@ -427,6 +427,15 @@ pub(crate) fn merge_cos_queue_owner_profile_sum(
     // always sum-of-single-non-zero, but saturating_add keeps us
     // safe if the ownership ever shifts mid-scrape.
     dst.drain_sent_bytes = dst.drain_sent_bytes.saturating_add(src.drain_sent_bytes);
+    dst.drain_guarantee_sent_bytes = dst
+        .drain_guarantee_sent_bytes
+        .saturating_add(src.drain_guarantee_sent_bytes);
+    dst.drain_surplus_sent_bytes = dst
+        .drain_surplus_sent_bytes
+        .saturating_add(src.drain_surplus_sent_bytes);
+    dst.drain_nonexact_sent_bytes_while_exact_backlogged = dst
+        .drain_nonexact_sent_bytes_while_exact_backlogged
+        .saturating_add(src.drain_nonexact_sent_bytes_while_exact_backlogged);
     dst.drain_park_root_tokens = dst
         .drain_park_root_tokens
         .saturating_add(src.drain_park_root_tokens);
@@ -722,12 +731,15 @@ where
                 // "bytes the scheduler actually shaped out"; pair it
                 // with `queue.transmit_rate_bytes` over a scrape
                 // window to detect a direct cap bypass on this row.
-                // drain_park_root_tokens / drain_park_queue_tokens
-                // both rising with drain_sent_bytes sustaining above
-                // configured rate would mean the gate fires but the
-                // refill/accounting is wrong; both near zero with
-                // drain_sent_bytes above rate means the gate never
-                // ran for this queue.
+                // The guarantee/surplus split and non-exact/exact-
+                // backlog counter diagnose whether root surplus or
+                // non-exact guarantee service is stealing service
+                // from exact queues. drain_park_root_tokens /
+                // drain_park_queue_tokens both rising with
+                // drain_sent_bytes sustaining above configured rate
+                // would mean the gate fires but refill/accounting is
+                // wrong; both near zero with drain_sent_bytes above
+                // rate means the gate never ran for this queue.
                 status.drain_sent_bytes = status.drain_sent_bytes.saturating_add(
                     queue
                         .telemetry
@@ -735,6 +747,30 @@ where
                         .drain_sent_bytes
                         .load(Ordering::Relaxed),
                 );
+                status.drain_guarantee_sent_bytes =
+                    status.drain_guarantee_sent_bytes.saturating_add(
+                        queue
+                            .telemetry
+                            .owner_profile
+                            .drain_guarantee_sent_bytes
+                            .load(Ordering::Relaxed),
+                    );
+                status.drain_surplus_sent_bytes = status.drain_surplus_sent_bytes.saturating_add(
+                    queue
+                        .telemetry
+                        .owner_profile
+                        .drain_surplus_sent_bytes
+                        .load(Ordering::Relaxed),
+                );
+                status.drain_nonexact_sent_bytes_while_exact_backlogged = status
+                    .drain_nonexact_sent_bytes_while_exact_backlogged
+                    .saturating_add(
+                        queue
+                            .telemetry
+                            .owner_profile
+                            .drain_nonexact_sent_bytes_while_exact_backlogged
+                            .load(Ordering::Relaxed),
+                    );
                 status.drain_park_root_tokens = status.drain_park_root_tokens.saturating_add(
                     queue
                         .telemetry

@@ -807,6 +807,41 @@ func TestFormatCoSInterfaceSummarySuppressesZeroedOwnerProfile(t *testing.T) {
 	}
 }
 
+func TestFormatCoSInterfaceSummaryRendersDrainShapeForNonExactQueue(t *testing.T) {
+	status := &ProcessStatus{
+		CoSInterfaces: []CoSInterfaceStatus{
+			{
+				InterfaceName:   "reth0.80",
+				WorkerInstances: 1,
+				Queues: []CoSQueueStatus{
+					{
+						QueueID:                 0,
+						ForwardingClass:         "best-effort",
+						Priority:                5,
+						Exact:                   false,
+						TransmitRateBytes:       1_875_000,
+						BufferBytes:             32 * 1024,
+						DrainSentBytes:          4096,
+						DrainGuaranteeSentBytes: 1024,
+						DrainSurplusSentBytes:   3072,
+						DrainNonExactSentBytesWhileExactBacklogged: 2048,
+						DrainParkRootTokens:                        7,
+						DrainParkQueueTokens:                       0,
+					},
+				},
+			},
+		},
+	}
+	out := FormatCoSInterfaceSummary(testCoSConfig(), status, "reth0.80")
+	if strings.Contains(out, "OwnerProfile:") {
+		t.Fatalf("non-exact queue must not render OwnerProfile latency row:\n%s", out)
+	}
+	want := "DrainShape:   sent_bytes=4096  guarantee=1024  surplus=3072  nonexact_while_exact_backlogged=2048  park_root=7  park_queue=0"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing non-exact DrainShape row %q:\n%s", want, out)
+	}
+}
+
 // Zero-valued counters MUST still render — operators need to see the
 // counter is wired, otherwise "no output" is indistinguishable from
 // "counter missing from the pipeline" when chasing #718 / #722.

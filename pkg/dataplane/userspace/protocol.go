@@ -530,13 +530,19 @@ type CoSQueueStatus struct {
 	// PostDrainBackupBytes is binding-scoped (same row as
 	// OwnerPPS/PeerPPS). See Rust `CoSQueueStatus` for field
 	// semantics and write-site locations.
-	DrainSentBytes                    uint64 `json:"drain_sent_bytes,omitempty"`
-	DrainParkRootTokens               uint64 `json:"drain_park_root_tokens,omitempty"`
-	DrainParkQueueTokens              uint64 `json:"drain_park_queue_tokens,omitempty"`
-	PostDrainBackupBytes              uint64 `json:"post_drain_backup_bytes,omitempty"`
-	DrainSentBytesShapedUnconditional uint64 `json:"drain_sent_bytes_shaped_unconditional,omitempty"`
-	PostDrainBackupCosDrops           uint64 `json:"post_drain_backup_cos_drops,omitempty"`
-	PostDrainBackupCosDropBytes       uint64 `json:"post_drain_backup_cos_drop_bytes,omitempty"`
+	DrainSentBytes          uint64 `json:"drain_sent_bytes,omitempty"`
+	DrainGuaranteeSentBytes uint64 `json:"drain_guarantee_sent_bytes,omitempty"`
+	DrainSurplusSentBytes   uint64 `json:"drain_surplus_sent_bytes,omitempty"`
+	// #1369: non-exact bytes sent while exact queue demand existed on
+	// the same shaped interface. A rising delta means best-effort or
+	// uncapped service was competing with exact queues.
+	DrainNonExactSentBytesWhileExactBacklogged uint64 `json:"drain_nonexact_sent_bytes_while_exact_backlogged,omitempty"`
+	DrainParkRootTokens                        uint64 `json:"drain_park_root_tokens,omitempty"`
+	DrainParkQueueTokens                       uint64 `json:"drain_park_queue_tokens,omitempty"`
+	PostDrainBackupBytes                       uint64 `json:"post_drain_backup_bytes,omitempty"`
+	DrainSentBytesShapedUnconditional          uint64 `json:"drain_sent_bytes_shaped_unconditional,omitempty"`
+	PostDrainBackupCosDrops                    uint64 `json:"post_drain_backup_cos_drops,omitempty"`
+	PostDrainBackupCosDropBytes                uint64 `json:"post_drain_backup_cos_drop_bytes,omitempty"`
 }
 
 type FirewallFilterTermCounterStatus struct {

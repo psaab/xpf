@@ -876,6 +876,23 @@ pub(in crate::afxdp) struct CoSQueueOwnerProfile {
     /// (apply_direct_exact_send_result for exact-owner-local,
     /// apply_cos_send_result for the non-exact / shared-exact paths).
     pub(in crate::afxdp) drain_sent_bytes: AtomicU64,
+    /// Bytes sent while the queue was serviced in Guarantee phase.
+    /// This is a phase split of `drain_sent_bytes`, not a distinct
+    /// packet path. Exact-owner-local sends are always Guarantee
+    /// phase; shared/non-exact paths write this from the
+    /// `CoSServicePhase` observed at TX completion.
+    pub(in crate::afxdp) drain_guarantee_sent_bytes: AtomicU64,
+    /// Bytes sent while the queue was serviced in Surplus phase.
+    /// A non-zero value on a best-effort / uncapped queue proves it
+    /// used residual root service; a high `drain_sent_bytes` with a
+    /// zero surplus split means the queue is consuming guarantee
+    /// service instead.
+    pub(in crate::afxdp) drain_surplus_sent_bytes: AtomicU64,
+    /// Non-exact bytes sent while at least one exact queue on the same
+    /// CoS interface still had backlog. This is the direct diagnostic
+    /// for best-effort or uncapped traffic stealing service from exact
+    /// queues; it is written only on non-exact queue apply paths.
+    pub(in crate::afxdp) drain_nonexact_sent_bytes_while_exact_backlogged: AtomicU64,
     /// #760 instrumentation. Count of drain iterations where the
     /// root token gate fired (root.tokens < head_len) and the queue
     /// got parked waiting for the interface shaper to refill.
@@ -894,6 +911,9 @@ impl CoSQueueOwnerProfile {
             drain_latency_hist: std::array::from_fn(|_| AtomicU64::new(0)),
             drain_invocations: AtomicU64::new(0),
             drain_sent_bytes: AtomicU64::new(0),
+            drain_guarantee_sent_bytes: AtomicU64::new(0),
+            drain_surplus_sent_bytes: AtomicU64::new(0),
+            drain_nonexact_sent_bytes_while_exact_backlogged: AtomicU64::new(0),
             drain_park_root_tokens: AtomicU64::new(0),
             drain_park_queue_tokens: AtomicU64::new(0),
         }

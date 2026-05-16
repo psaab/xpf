@@ -39,6 +39,12 @@ under the daemon's errgroup. Nothing else imports this package.
   with HA sync, session installs, snapshot sync, and forwarding sync.
   Adding a new caller at >1 Hz here will starve session installs during
   bulk sync (per CLAUDE.md control-socket rules).
+- Userspace CoS metrics are emitted from a single `Status()` snapshot per
+  scrape. Queue-scoped drain-phase counters
+  (`xpf_userspace_cos_drain_{guarantee,surplus}_sent_bytes_total` and
+  `xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total`)
+  deliberately include non-exact queues so best-effort/exact contention can be
+  diagnosed without adding packet-path shared state.
 - The SSE handler reads from `pkg/logging.EventBuffer`. The buffer is
   bounded; if a consumer stops reading, events are dropped silently — by
   design.

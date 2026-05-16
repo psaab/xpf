@@ -957,6 +957,12 @@ pub(crate) struct CoSQueueStatus {
     // queues without a single unambiguous owner-local binding.
     #[serde(rename = "drain_sent_bytes", default)]
     pub drain_sent_bytes: u64,
+    #[serde(rename = "drain_guarantee_sent_bytes", default)]
+    pub drain_guarantee_sent_bytes: u64,
+    #[serde(rename = "drain_surplus_sent_bytes", default)]
+    pub drain_surplus_sent_bytes: u64,
+    #[serde(rename = "drain_nonexact_sent_bytes_while_exact_backlogged", default)]
+    pub drain_nonexact_sent_bytes_while_exact_backlogged: u64,
     #[serde(rename = "drain_park_root_tokens", default)]
     pub drain_park_root_tokens: u64,
     #[serde(rename = "drain_park_queue_tokens", default)]

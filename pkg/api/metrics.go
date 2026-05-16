@@ -86,6 +86,13 @@ type xpfCollector struct {
 	cosRedirectAcquireBucket *prometheus.Desc
 	cosOwnerPPS              *prometheus.Desc
 	cosPeerPPS               *prometheus.Desc
+	// #1369: queue-scoped drain-phase counters. Unlike the owner
+	// latency profile, these are meaningful for non-exact queues
+	// too, because they expose whether best-effort/uncapped traffic
+	// consumed service while exact queues still had backlog.
+	cosDrainGuaranteeSentBytes                    *prometheus.Desc
+	cosDrainSurplusSentBytes                      *prometheus.Desc
+	cosDrainNonExactSentBytesWhileExactBacklogged *prometheus.Desc
 	// #1304: Rust-owned opt-in equal-flow enforcement telemetry for
 	// shared v8 CoS queue leases. Kept separate from the
 	// measurement-only xpf_fairness_equal_flow_* estimator gauges.
@@ -364,6 +371,21 @@ func newCollector(srv *Server) *xpfCollector {
 		cosPeerPPS: prometheus.NewDesc(
 			"xpf_cos_peer_pps",
 			"CoS peer-redirected pps (window accumulator, cleared by operator) (#709).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosDrainGuaranteeSentBytes: prometheus.NewDesc(
+			"xpf_userspace_cos_drain_guarantee_sent_bytes_total",
+			"Bytes sent by this CoS queue during guarantee-phase service (#1369).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosDrainSurplusSentBytes: prometheus.NewDesc(
+			"xpf_userspace_cos_drain_surplus_sent_bytes_total",
+			"Bytes sent by this CoS queue during surplus-phase service (#1369).",
+			[]string{"ifindex", "queue_id"}, nil,
+		),
+		cosDrainNonExactSentBytesWhileExactBacklogged: prometheus.NewDesc(
+			"xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total",
+			"Non-exact CoS queue bytes sent while at least one exact queue on the same shaped interface still had backlog; non-zero deltas indicate best-effort/uncapped service competing with exact demand (#1369).",
 			[]string{"ifindex", "queue_id"}, nil,
 		),
 		cosEqualFlowEnforcementEnabled: prometheus.NewDesc(
@@ -659,6 +681,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.cosRedirectAcquireBucket
 	ch <- c.cosOwnerPPS
 	ch <- c.cosPeerPPS
+	ch <- c.cosDrainGuaranteeSentBytes
+	ch <- c.cosDrainSurplusSentBytes
+	ch <- c.cosDrainNonExactSentBytesWhileExactBacklogged
 	ch <- c.cosEqualFlowEnforcementEnabled
 	ch <- c.cosEqualFlowEnforced
 	ch <- c.cosEqualFlowTargetPerFlowBPS
@@ -743,6 +768,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 		return
 	}
 	c.emitCoSOwnerProfile(ch, status)
+	c.emitCoSDrainPhaseTelemetry(ch, status)
 	c.emitCoSEqualFlowEnforcement(ch, status)
 	c.emitWorkerRuntime(ch, status)
 	c.emitBindingActiveFlowCount(ch, status)
@@ -1134,6 +1160,38 @@ func (c *xpfCollector) emitCoSOwnerProfile(ch chan<- prometheus.Metric, status d
 			ch <- prometheus.MustNewConstMetric(c.cosPeerPPS,
 				prometheus.GaugeValue, float64(queue.PeerPPS),
 				ifindexLabel, queueLabel)
+		}
+	}
+}
+
+// #1369: queue-scoped drain-phase bytes for exact-vs-best-effort
+// contention diagnosis. These counters are intentionally not gated on
+// OwnerWorkerID: non-exact queues are the critical source for
+// `*_while_exact_backlogged`, and shared-exact queues still produce a
+// truthful guarantee/surplus phase split.
+func (c *xpfCollector) emitCoSDrainPhaseTelemetry(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, iface := range status.CoSInterfaces {
+		ifindexLabel := strconv.Itoa(iface.Ifindex)
+		for _, queue := range iface.Queues {
+			queueLabel := strconv.Itoa(queue.QueueID)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosDrainGuaranteeSentBytes,
+				prometheus.CounterValue,
+				float64(queue.DrainGuaranteeSentBytes),
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosDrainSurplusSentBytes,
+				prometheus.CounterValue,
+				float64(queue.DrainSurplusSentBytes),
+				ifindexLabel, queueLabel,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.cosDrainNonExactSentBytesWhileExactBacklogged,
+				prometheus.CounterValue,
+				float64(queue.DrainNonExactSentBytesWhileExactBacklogged),
+				ifindexLabel, queueLabel,
+			)
 		}
 	}
 }
