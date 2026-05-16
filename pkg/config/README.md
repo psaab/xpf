@@ -34,13 +34,16 @@ nothing internal.
   `ValidateInteger(min,max)`, `ValidateEnum(allowed)`,
   `ValidatePercent(min,max)`) for the #1319 typed-leaf gate. Attached
   to `cmdtree.Node.Validator` fields and dispatched by
-  `cmdtree.SchemaValidate` at commit-check time, BEFORE compile, so
-  garbage like `transmit-rate asd` fails loud instead of silently
-  zeroing in the existing parsers. `parseBandwidthLimitStrict` /
-  `parseBurstSizeLimitStrict` / `parseScaledDecimalUnitStrict` in
-  `compiler_protocols.go` are the error-returning siblings of the
-  legacy zero-return parsers — the legacy versions keep their
-  "unset = 0" contract for compatibility.
+  `cmdtree.SchemaValidate` at commit-check time, on the same
+  apply-groups-expanded tree the compiler consumes, so garbage like
+  `transmit-rate asd` fails loud instead of silently zeroing in the
+  existing parsers. Scheduler `buffer-size` validation intentionally
+  accepts only byte sizes with explicit suffixes because the current
+  compiler stores bytes, not a percent-of-pool representation.
+  `parseBandwidthLimitStrict` / `parseBurstSizeLimitStrict` /
+  `parseScaledDecimalUnitStrict` in `compiler_protocols.go` are the
+  error-returning siblings of the legacy zero-return parsers — the legacy
+  versions keep their "unset = 0" contract for compatibility.
 
 ## Callers
 

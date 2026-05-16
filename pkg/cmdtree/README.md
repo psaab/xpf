@@ -19,7 +19,8 @@ three frontends.
 - `ConfigTopLevel` — root for the `set`/`delete` configuration grammar.
 - `ConfigClassOfServiceSchedulers` — `tree.go`. Per-leaf typed-value
   schema for `set class-of-service schedulers <name> { ... }` (#1319
-  Phase 2). Read by `SchemaValidate`.
+  Phase 2). Reused by the config-mode `set` completion tree and by
+  `SchemaValidate`.
 - `KeysFromTree(tree)` — `tree.go`. Used by `pkg/cli` and `pkg/grpcapi`
   for Junos-style prefix matching.
 - `WriteHelp`, `LookupDesc`, `PrintTreeHelp`, `CompleteFromTree` — the
@@ -27,8 +28,9 @@ three frontends.
 - `SchemaValidate(tree, cfg)` — `schema_validate.go`. The commit-check
   gate (#1319). Walks the AST against typed-leaf cmdtree Nodes and
   invokes their `Validator` on each value; called by
-  `pkg/configstore.compileTree` BEFORE compile so garbage like
-  `transmit-rate asd` fails loud at `commit check`.
+  `pkg/configstore.compileTree` against an apply-groups-expanded clone
+  BEFORE compile so garbage like `transmit-rate asd` fails loud at
+  `commit check`, including when it arrives through `groups { ... }`.
 
 ## Typed leaves (#1319)
 
@@ -48,6 +50,12 @@ on `ValueAny` (zero value) — no behaviour change. Leaves are only typed
 when the compiler consumes them today; scheduler-level `shaping-rate`
 is intentionally not listed because shaping is implemented under
 `class-of-service interfaces ... unit ... shaping-rate`.
+
+`transmit-rate exact` is accepted only as the Junos split-modifier form
+when the same scheduler also has a typed `transmit-rate <rate>` value.
+An exact-only scheduler line still fails commit-check because the compiler
+would otherwise treat it as exact-with-zero-rate.
+
 Adding a new typed subtree means:
 
 1. populate `ValueType` + `Validator` on the relevant Node(s);

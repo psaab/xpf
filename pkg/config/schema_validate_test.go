@@ -14,8 +14,10 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// schemaCheck parses a Junos hierarchical config snippet, expands
-// groups, and runs SchemaValidate against the resulting AST.
+// schemaCheck parses a Junos hierarchical config snippet and runs
+// SchemaValidate against the resulting AST. apply-groups expansion is
+// exercised through configstore tests because configstore owns the
+// commit/load ordering relative to the compiler.
 func schemaCheck(t *testing.T, input string) error {
 	t.Helper()
 	p := config.NewParser(input)
@@ -92,6 +94,16 @@ func TestSchemaValidate_TransmitRate_AcceptsSplitExactModifier(t *testing.T) {
 		"set class-of-service schedulers be transmit-rate exact",
 	); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSchemaValidate_TransmitRate_RejectsSplitExactWithoutRate(t *testing.T) {
+	err := flatSchemaCheck(t, "set class-of-service schedulers be transmit-rate exact")
+	if err == nil {
+		t.Fatal("expected error for transmit-rate exact without a sibling rate, got nil")
+	}
+	if !strings.Contains(err.Error(), "transmit-rate") {
+		t.Fatalf("error should reference transmit-rate: %v", err)
 	}
 }
 

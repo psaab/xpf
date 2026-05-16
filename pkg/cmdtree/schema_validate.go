@@ -72,15 +72,14 @@ func walkSchedulers(node *config.Node, schemaSchedRoot *Node, cfg *config.Config
 	// AST shape A: Keys = ["schedulers", "<name>"], children = leaves.
 	if len(node.Keys) >= 2 && node.Keys[0] == "schedulers" {
 		schedName := node.Keys[1]
+		var leaves []*config.Node
 		// Per-scheduler value tokens carried directly on this node
 		// (uncommon but possible in flat set form).
 		if len(node.Keys) > 2 {
-			pseudoLeaf := &config.Node{Keys: node.Keys[2:]}
-			if err := validateSchedulerLeaf(schedName, pseudoLeaf, schemaSchedRoot, cfg); err != nil {
-				return err
-			}
+			leaves = append(leaves, &config.Node{Keys: node.Keys[2:]})
 		}
-		return walkSchedulerInstance(schedName, node.Children, schemaSchedRoot, cfg)
+		leaves = append(leaves, node.Children...)
+		return walkSchedulerInstance(schedName, leaves, schemaSchedRoot, cfg)
 	}
 	// AST shape B: Keys = ["schedulers"], children = instance nodes.
 	for _, inst := range node.Children {
@@ -88,22 +87,22 @@ func walkSchedulers(node *config.Node, schemaSchedRoot *Node, cfg *config.Config
 			continue
 		}
 		schedName := inst.Keys[0]
+		var leaves []*config.Node
 		if len(inst.Keys) > 1 {
-			pseudoLeaf := &config.Node{Keys: inst.Keys[1:]}
-			if err := validateSchedulerLeaf(schedName, pseudoLeaf, schemaSchedRoot, cfg); err != nil {
-				return err
-			}
+			leaves = append(leaves, &config.Node{Keys: inst.Keys[1:]})
 		}
-		if err := walkSchedulerInstance(schedName, inst.Children, schemaSchedRoot, cfg); err != nil {
+		leaves = append(leaves, inst.Children...)
+		if err := walkSchedulerInstance(schedName, leaves, schemaSchedRoot, cfg); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func walkSchedulerInstance(schedName string, children []*config.Node, schemaSchedRoot *Node, cfg *config.Config) error {
-	for _, leaf := range children {
-		if err := validateSchedulerLeaf(schedName, leaf, schemaSchedRoot, cfg); err != nil {
+func walkSchedulerInstance(schedName string, leaves []*config.Node, schemaSchedRoot *Node, cfg *config.Config) error {
+	allowSplitTransmitExact := schedulerHasTypedTransmitRate(leaves, cfg)
+	for _, leaf := range leaves {
+		if err := validateSchedulerLeaf(schedName, leaf, schemaSchedRoot, cfg, allowSplitTransmitExact); err != nil {
 			return err
 		}
 	}
@@ -114,7 +113,7 @@ func walkSchedulerInstance(schedName string, children []*config.Node, schemaSche
 // invokes its Validator on the leaf's value. The "value" lives either
 // in Keys[N+] (flat set form: Keys=["transmit-rate","1g","exact"]) or
 // in node.Children[0].Keys[0] (hierarchical: child node holds it).
-func validateSchedulerLeaf(schedName string, leaf *config.Node, schemaSchedRoot *Node, cfg *config.Config) error {
+func validateSchedulerLeaf(schedName string, leaf *config.Node, schemaSchedRoot *Node, cfg *config.Config, allowSplitTransmitExact bool) error {
 	if len(leaf.Keys) == 0 {
 		return nil
 	}
@@ -124,6 +123,17 @@ func validateSchedulerLeaf(schedName string, leaf *config.Node, schemaSchedRoot 
 		// Unknown leaf — leave to existing parser/compiler; gate is opt-in.
 		return nil
 	}
+	return validateValueTokens(
+		schedName,
+		leafName,
+		schemaNode,
+		schedulerLeafValues(leaf),
+		cfg,
+		allowSplitTransmitExact,
+	)
+}
+
+func schedulerLeafValues(leaf *config.Node) []string {
 	// Collect value tokens: trailing Keys[1:] plus any leaf child whose
 	// Keys[0] is the value (hierarchical shape `transmit-rate 1g;` may
 	// also appear as Keys=["transmit-rate"] with one child Keys=["1g"]).
@@ -133,7 +143,24 @@ func validateSchedulerLeaf(schedName string, leaf *config.Node, schemaSchedRoot 
 			values = append(values, child.Keys[0])
 		}
 	}
-	return validateValueTokens(schedName, leafName, schemaNode, values, cfg)
+	return values
+}
+
+func schedulerHasTypedTransmitRate(leaves []*config.Node, cfg *config.Config) bool {
+	for _, leaf := range leaves {
+		if len(leaf.Keys) == 0 || leaf.Keys[0] != "transmit-rate" {
+			continue
+		}
+		for _, tok := range schedulerLeafValues(leaf) {
+			if tok == "exact" {
+				continue
+			}
+			if err := config.ValidateRate(tok, cfg); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // validateValueTokens applies validators along a chain of value tokens.
@@ -142,7 +169,7 @@ func validateSchedulerLeaf(schedName string, leaf *config.Node, schemaSchedRoot 
 // walk one token at a time; if the schemaNode is typed (ValueType !=
 // ValueAny) and has a Validator, the first token is the value and the
 // remainder are matched against children keywords (e.g. "exact").
-func validateValueTokens(schedName, leafName string, schemaNode *Node, values []string, cfg *config.Config) error {
+func validateValueTokens(schedName, leafName string, schemaNode *Node, values []string, cfg *config.Config, allowSplitTransmitExact bool) error {
 	cur := schemaNode
 	consumedTypedValue := false
 	typedLeaf := schemaNode != nil && schemaNode.IsTypedLeaf() && schemaNode.Validator != nil
@@ -160,7 +187,7 @@ func validateValueTokens(schedName, leafName string, schemaNode *Node, values []
 			}
 			return nil
 		}
-		if allowsModifierOnlyTypedLeaf(leafName, tok) && cur == schemaNode && !consumedTypedValue {
+		if allowSplitTransmitExact && allowsModifierOnlyTypedLeaf(leafName, tok) && cur == schemaNode && !consumedTypedValue {
 			if next, ok := cur.Children[tok]; ok {
 				cur = next
 				consumedTypedValue = false

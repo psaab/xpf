@@ -2,6 +2,11 @@
 
 ## 2026-05-16
 
+- **Timestamp**: 2026-05-16T04:36:00Z
+  - **Action**: PR #1320 round-3 review fixes — validate typed scheduler leaves against the apply-groups-expanded tree before compile; reject `transmit-rate exact` unless the scheduler also has a typed rate; wire `ConfigClassOfServiceSchedulers` into the real config-mode `set class-of-service schedulers <name>` completion tree; update module docs to keep the byte-size-only scheduler buffer contract explicit.
+  - **File(s)**: `pkg/cmdtree/schema_validate.go`, `pkg/cmdtree/tree.go`, `pkg/cmdtree/tree_test.go`, `pkg/cmdtree/README.md`, `pkg/config/schema_validate_test.go`, `pkg/config/README.md`, `pkg/configstore/store.go`, `pkg/configstore/store_test.go`, `_Log.md`
+  - **Validation**: `go test -count=1 ./pkg/cmdtree/... ./pkg/config/... ./pkg/configstore/...`; `go test -count=1 ./pkg/...`; `git diff --check`
+
 - **Timestamp**: 2026-05-16T00:14:30Z
   - **Action**: Issue #1330 — split `userspace-dp/src/bin/fairness-eval.rs` into a thin CLI shell plus `userspace-dp/src/fairness_eval/` modules for args, inputs, windowing, per-worker aggregation, RSS expectation, verdict construction, and report emission without changing CLI behavior or fairness semantics.
   - **File(s)**: `userspace-dp/src/bin/fairness-eval.rs`, `userspace-dp/src/fairness_eval/*`, `userspace-dp/src/bin/README.md`, `docs/pr/1330-fairness-eval-library/plan.md`, `_Log.md`
