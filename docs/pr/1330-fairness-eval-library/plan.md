@@ -4,7 +4,7 @@ DRAFT v4 — incorporates round-3 review feedback (Codex PLAN-NEEDS-MINOR with 6
 
 ### v4 changes vs v3
 
-1. **Expanded the ordering-invariants enumeration from 6 to 12.**
+1. **Expanded the ordering-invariants enumeration from 6 to 11.**
    Codex round-3 correctly caught that the 6-item list missed
    critical pass/fail-affecting constraints. Added:
    - CoS override block at L686-726 (mutates
