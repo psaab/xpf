@@ -637,3 +637,7 @@
   - **Action**: PR #1320 round-1 review fixes: preserve split Junos-style `transmit-rate exact`; make typed scheduler leaves fail closed on missing values and unknown trailing modifiers; reject sub-byte scheduler rates that compile to zero bytes/sec; align `buffer-size` validation and help with the compiler's byte-size-only representation; remove unsupported scheduler-level `shaping-rate` from the typed schema; update module docs to match the enforced schema.
   - **File(s)**: `pkg/cmdtree/schema_validate.go`, `pkg/cmdtree/tree.go`, `pkg/cmdtree/README.md`, `pkg/config/schema_validators.go`, `pkg/config/schema_validate_test.go`, `pkg/config/README.md`, `_Log.md`
   - **Validation**: `go test -count=1 ./pkg/config ./pkg/cmdtree ./pkg/configstore` (PASS); `go test -count=1 ./pkg/...` (PASS); `git diff --check` (clean).
+
+- **Timestamp**: 2026-05-16T14:17:38-07:00
+  - **Action**: #1373 Phase 0 documentation/audit update: refresh userspace dataplane gap blockers, add retirement notices to active docs and README entry points, and add an umbrella tracker for the staged eBPF dataplane retirement. Explicitly document that Phase 0 removes no BPF source.
+  - **File(s)**: `docs/userspace-dataplane-gaps.md`, `docs/pr/1373-retire-ebpf-dataplane/plan.md`, `README.md`, `CLAUDE.md`, `docs/testing.md`, `docs/development-workflow.md`, `bpf/README.md`, `userspace-dp/README.md`, `pkg/dataplane/README.md`, `testing-docs/README.md`, `_Log.md`

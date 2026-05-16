@@ -1,5 +1,10 @@
 # pkg/dataplane
 
+> Deprecation notice (#1373): the legacy eBPF backend in this package is being
+> retired in favor of the Rust AF_XDP userspace dataplane. Phase 0 is
+> documentation/audit only; no BPF source, loader code, or bindings are removed
+> in this phase. The DataPlane interface cleanup is tracked by #1381.
+
 Abstract dataplane interface plus the eBPF backend. Compiles the typed
 config from `pkg/config` into BPF-map entries (zones, policies, NAT,
 filters, applications), attaches the 14 BPF programs (9 XDP + 5 TC), and

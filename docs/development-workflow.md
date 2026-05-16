@@ -1,5 +1,9 @@
 # Development workflow — plan, review, code, review, merge
 
+> Deprecation notice (#1373): new dataplane work should target the Rust AF_XDP
+> userspace dataplane. The legacy eBPF dataplane remains in-tree during Phase 0;
+> this phase is documentation/audit only and removes no BPF source.
+
 How non-trivial changes land in this repo. Roles and agent-boundary
 rules are in `AGENTS.md`; read that first. This doc is the process
 layer on top of those roles.

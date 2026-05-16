@@ -7,6 +7,15 @@ historical branch plan. For active debugging entry points, use
 
 Last updated: 2026-05-16
 
+## Deprecation Context
+
+Issue #1373 starts retirement of the legacy eBPF dataplane. Phase 0 is
+documentation and audit only: no BPF source, bpf2go bindings, loader code, test
+targets, or CLI surfaces are removed in this phase. Until the blockers below
+are closed, the legacy eBPF dataplane remains present as the compatibility and
+rollback path for configurations the AF_XDP userspace dataplane cannot yet
+own.
+
 ## Implemented In The Current Runtime
 
 These capabilities exist in the current Rust userspace dataplane code path:
@@ -35,14 +44,14 @@ These capabilities exist in the current Rust userspace dataplane code path:
 ## Still Gated By `deriveUserspaceCapabilities()`
 
 These are the remaining explicit configuration gates in
-[`pkg/dataplane/userspace/manager.go`](/home/ps/git/codex-xpf/pkg/dataplane/userspace/manager.go):
+[`pkg/dataplane/userspace/manager.go`](../pkg/dataplane/userspace/manager.go):
 
-| Feature/config shape | Gate status | Reason |
-|----------------------|-------------|--------|
+| Feature/config shape | Gate status | Retirement blocker |
+|----------------------|-------------|--------------------|
 | Unsupported policy shapes | Gated | Address/application expansion must succeed for userspace |
-| Screen behavior requiring SYN cookies | Gated | SYN-cookie behavior remains a legacy eBPF capability |
-| Three-color policers | Gated | Simple filters are supported; three-color policers are not |
-| Port mirroring | Gated | No userspace mirroring path |
+| Screen behavior requiring SYN cookies | Gated | #1374 |
+| Three-color policers | Gated | #1375 |
+| Port mirroring | Gated | #1376 |
 
 ## Features That Still Use A Mixed Boundary
 
@@ -54,6 +63,36 @@ These are not "missing", but they are not pure userspace forwarding either:
 | Kernel-owned traffic (ARP, local delivery, management, some non-IP) | cpumap or kernel pass-through from XDP |
 | GRE / ESP / explicit early filters | Tail-call back into the legacy XDP pipeline |
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
+| DataPlane control-plane contract | Userspace manager still embeds the eBPF manager for many BPF-shaped map-writer methods; tracked by #1381 |
+| Dataplane event logging | Session open/close/update are emitted by userspace; policy-deny, screen-drop, and filter-log events still depend on the legacy BPF ring buffer; tracked by #1379 |
+| `show system buffers` | Still reports BPF map utilization through the embedded eBPF manager; userspace-equivalent operator resource reporting is tracked by #1380 |
+
+## Retirement Blockers From The 2026-05-16 Audit
+
+The current #1373 audit produced these tracked blockers:
+
+| Issue | Blocker | Required before |
+|-------|---------|-----------------|
+| #1381 | Split or replace the BPF-shaped `dataplane.DataPlane` interface so userspace no longer embeds the eBPF manager for map-writer methods | Phase 3 build-system / Go removal |
+| #1377 | Preserve address-persistent SNAT pool selection in userspace instead of silently round-robining pool addresses | Phase 4 BPF source removal |
+| #1378 | Propagate time-based policy scheduler state to userspace policy evaluation | Phase 4 BPF source removal |
+| #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
+| #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent | Phase 4 BPF source removal |
+| #1375 | Implement userspace RFC 2697/2698 three-color policers | Phase 4 BPF source removal |
+| #1376 | Implement userspace port mirroring or explicitly retire the feature | Phase 4 BPF source removal |
+| #1380 | Replace `show system buffers` BPF-map output with userspace resource reporting, or deprecate the command in favor of an equivalent | Phase 5 CLI / observability cleanup |
+
+Recommended dependency order:
+
+1. #1381 first, because it defines the control-plane interface boundary that
+   every later removal phase depends on.
+2. #1377, #1378, and #1379 next, because they are silent correctness or
+   security-visibility regressions in configurations that may otherwise appear
+   admitted.
+3. #1374, #1375, and #1376 before Phase 4, because these are explicit feature
+   gaps currently protected by the legacy eBPF fallback.
+4. #1380 in Phase 5, after the dataplane boundary is settled but before the
+   operator-facing BPF map surface disappears.
 
 ## What This Document Does Not Mean
 
@@ -90,7 +129,10 @@ There are two distinct fallback boundaries:
 
 The highest-value remaining work on current `master` is:
 
-1. close the remaining SYN-cookie-dependent screen gap
-2. implement three-color policer support
-3. implement port mirroring
-4. continue correctness and performance hardening on the active AF_XDP fast path
+1. resolve #1381 so userspace is no longer structurally coupled to the eBPF
+   manager contract
+2. fix #1377, #1378, and #1379 to remove silent correctness and visibility
+   regressions
+3. close #1374, #1375, and #1376 before any BPF source removal
+4. carry #1380 into the Phase 5 CLI / observability cleanup
+5. continue correctness and performance hardening on the active AF_XDP fast path
