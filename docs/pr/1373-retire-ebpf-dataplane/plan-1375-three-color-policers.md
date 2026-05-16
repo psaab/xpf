@@ -52,6 +52,19 @@ color.
 - Status exposes green/yellow/red packet and byte counters, DSCP rewrites, and
   red drops through Rust status, Go protocol, CLI, and Prometheus.
 
+## Risks
+
+- Token overflow/math: refill uses rates, bursts, and elapsed time supplied by
+  config and monotonic clocks. All multiplication must stay in `u128` or
+  explicitly saturate before conversion to packet-size units.
+- Atomicity: packed/sharded state must avoid cross-worker false sharing while
+  preserving one logical bucket per configured policer identity.
+- Color semantics: color-aware mode must never promote incoming yellow/red
+  traffic; one wrong branch turns a security control into a bandwidth grant.
+- Counter attribution: green/yellow/red/drop counters must survive snapshot
+  rebuilds by stable identity, or operators cannot audit policer behavior after
+  commits.
+
 ## Exact Tests
 
 - Cargo: `policer::srTCM_green_yellow_red_at_thresholds`.
@@ -66,6 +79,9 @@ color.
   actions, and `ColorBlind`.
 - Go: compiler validation rejects zero rates/bursts, `PIR < CIR`, and
   `PBS < CBS`.
+- Go: `deriveUserspaceCapabilities()` admits three-color policer configs only
+  after the userspace snapshot and Rust runtime support are wired, and rejects
+  them before that point.
 - Integration: controlled-rate traffic against userspace cluster verifies
   green/yellow/red classification, DSCP rewrite, red drop behavior, and
   per-color counters.

@@ -59,6 +59,18 @@ existing eBPF behavior that can default missing scheduler state to active.
 - HA failover recomputes scheduler state on the new active node and publishes a
   complete policy snapshot before admitting scheduled-policy traffic.
 
+## Risks
+
+- Scheduler atomicity: first-match policy ordering requires affected inactive
+  bits to publish as one coherent snapshot. Per-rule toggles can expose an
+  impossible mixed policy state.
+- Clock drift: scheduler state is daemon-clock derived. HA peers must recompute
+  after failover rather than trusting stale peer-local state.
+- Counter continuity: stable rule identity is mandatory because inactive flips
+  and snapshot rebuilds must not reset operator-visible hit counters.
+- Missing scheduler references: fail-open behavior admits traffic outside the
+  intended time window; userspace must reject these commits explicitly.
+
 ## Exact Tests
 
 - Cargo: `policy::evaluate_policy_skips_inactive_rules`.

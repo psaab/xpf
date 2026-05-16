@@ -29,10 +29,18 @@ Cookie ISN layout:
 [5 bits epoch] [3 bits MSS index] [24 bits MAC]
 ```
 
-The MAC covers source/destination IPs, ports, MSS index, zone, and epoch. The
-secret is cluster-consistent: either synced as HA state or derived from an
-HA-synced master key plus `(zone_id, epoch)`. Local-only secrets are rejected
-because failover would invalidate in-flight cookies.
+The transmitted epoch field is only `epoch & 0x1f`. The full monotonic epoch is
+still part of the MAC input and secret derivation. Validation reconstructs
+candidate full epochs from the current and previous full epochs, then accepts
+only candidates whose low 5 bits match the transmitted field and whose MAC
+validates. A cookie minted 32 epochs ago has the same transmitted low bits as
+the current epoch but must reject because the full epoch used for MAC/secret
+derivation is outside the current/previous validation window.
+
+The MAC covers source/destination IPs, ports, MSS index, zone, and the full
+monotonic epoch. The secret is cluster-consistent: either synced as HA state or
+derived from an HA-synced master key plus `(zone_id, full_epoch)`. Local-only
+secrets are rejected because failover would invalidate in-flight cookies.
 
 On flood threshold:
 
@@ -66,10 +74,26 @@ On returning ACK:
   epoch overlap.
 - Epoch uses monotonic time, not wall clock, so NTP rollback does not invalidate
   cookies.
+- Epoch publication must be generation-atomic with the secret snapshot: workers
+  must not see a new full epoch with an old per-zone secret or the reverse.
 - Failover during an active flood continues accepting cookies minted by the
   former active node for the overlap window.
 - `synproxy_active`, sent, valid, invalid, bypass, and budget-drop counters are
   exposed in userspace status.
+
+## Risks
+
+- Replay/wrap: the low 5 transmitted epoch bits wrap every 32 epochs. The
+  full-epoch MAC rule above is mandatory to prevent old cookies from becoming
+  valid again at low-bit wrap.
+- Failover skew: active and backup nodes need bounded monotonic-epoch skew or a
+  shared epoch source; otherwise cookies minted immediately before failover can
+  be rejected by the new active node.
+- Budget starvation: cookie replies are useful only if the bounded reply budget
+  cannot drain normal forwarding frames. Drop accounting must distinguish
+  invalid-cookie drops from reply-budget drops.
+- Validated-client cache pressure: attacker-generated valid-looking ACKs must
+  not evict legitimate validated clients without caps and counters.
 
 ## Exact Tests
 
@@ -78,6 +102,8 @@ On returning ACK:
 - Cargo: `screen::syn_cookie_validate_rejects_stale_secret`.
 - Cargo: `screen::syn_cookie_mss_index_encoding_parity`.
 - Cargo: `screen::syn_cookie_ntp_rollback_monotonic_epoch`.
+- Cargo: `screen::syn_cookie_epoch_low_bits_wrap_rejects_32_epoch_old_cookie`.
+- Cargo: `screen::syn_cookie_validation_tries_current_and_previous_full_epoch`.
 - Cargo: `screen::syn_cookie_chosen_when_threshold_exceeded`.
 - Cargo: `screen::syn_cookie_budget_drop_does_not_starve_tx`.
 - Go: remove/update the `SynFloodProtectionMode == "syn-cookie"` capability

@@ -68,6 +68,19 @@ forwarding decision.
 - Fan-in/source selection must avoid duplicate syslog records when both legacy
   eBPF and userspace event sources are present during migration.
 
+## Risks
+
+- Duplicate/lost syslog events: overlap mode must select exactly one source for
+  a decision or explicitly de-duplicate fan-in records.
+- Deny storms: policy or screen drops can arrive at Mpps rates. Rate limiting
+  and non-blocking queue behavior must prevent event emission from becoming a
+  forwarding bottleneck.
+- Metadata fidelity: policy/rule/application identity must be available at the
+  decision point; reconstructing it later from mutable config risks wrong audit
+  records after commits.
+- Codec compatibility: adding event types must not renumber existing session
+  frames or mixed-version readers will decode the wrong event kind.
+
 ## Exact Tests
 
 - Cargo: codec encode/decode round-trip for `MSG_POLICY_DENY`.

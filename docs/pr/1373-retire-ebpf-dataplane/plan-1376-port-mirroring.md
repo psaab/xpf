@@ -55,6 +55,19 @@ that binding.
 - On failover, the new active node mirrors according to the current config; no
   mirror clone state is synchronized.
 
+## Risks
+
+- Mirror backpressure: mirror clones are intentionally lossy. Queue-full,
+  no-frame, and missing-binding cases must drop only the clone and never delay
+  primary forwarding.
+- Cross-binding ownership: cloned descriptors must use the same recycle/UMEM
+  routing discipline as forwarding descriptors; a mirror drop must not return a
+  frame to the wrong binding.
+- Full-frame fidelity: mirror output must preserve Ethernet/VLAN bytes. Any
+  L3-only fallback path silently breaks packet capture/debug workflows.
+- Sampling ambiguity: per-binding sampling is cheaper than global exact
+  sampling, but docs and counters must not claim exact global 1-in-N behavior.
+
 ## Exact Tests
 
 - Cargo: `mirror::sampling_rate_correctness`.
@@ -67,6 +80,9 @@ that binding.
 - Go: userspace snapshot round-trip for mirror config.
 - Go: commit validation rejects duplicate ingress mirror entries and logs/skips
   nonexistent output ifindex consistently with current compiler behavior.
+- Go: `deriveUserspaceCapabilities()` admits port-mirroring configs only after
+  userspace snapshot/runtime support is wired, and rejects them before that
+  point.
 - Integration: userspace cluster with mirror config and tcpdump on output
   interface verifies sample ratio, full frame preservation, and primary
   forwarding survival under mirror pressure.
