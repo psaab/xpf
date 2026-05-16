@@ -38,6 +38,7 @@ TARGET_V4="172.16.80.200"
 ELEPHANT_PORT="${ELEPHANT_PORT:-5201}"
 MOUSE_PORT="${MOUSE_PORT:-7}"
 MOUSE_CLASS="${MOUSE_CLASS:-best-effort}"
+MOUSE_COS_SURPLUS_SHARING="${MOUSE_COS_SURPLUS_SHARING:-0}"
 SHAPER_BPS="${SHAPER_BPS:-$((1 * 1000 * 1000 * 1000))}"  # default 1 Gb/s (iperf-a); same-class iperf-b sets 10 Gb/s
 # Validate env-overrides (Copilot D.5): ports/bps must be
 # digits only so they can't smuggle shell metacharacters into
@@ -53,6 +54,11 @@ SHAPER_BPS="${SHAPER_BPS:-$((1 * 1000 * 1000 * 1000))}"  # default 1 Gb/s (iperf
 case "$MOUSE_CLASS" in
     best-effort|iperf-a|iperf-b|iperf-c) ;;
     *) echo "ABORT: MOUSE_CLASS='$MOUSE_CLASS' must be one of best-effort/iperf-a/iperf-b/iperf-c" >&2; exit 1 ;;
+esac
+case "${MOUSE_COS_SURPLUS_SHARING,,}" in
+    0|false|no|off) MOUSE_COS_SURPLUS_SHARING=0 ;;
+    1|true|yes|on) MOUSE_COS_SURPLUS_SHARING=1 ;;
+    *) echo "ABORT: MOUSE_COS_SURPLUS_SHARING='$MOUSE_COS_SURPLUS_SHARING' must be boolean" >&2; exit 1 ;;
 esac
 SETTLE_BUDGET=20
 SLACK=10
@@ -193,6 +199,9 @@ PRE_PRIMARY=$(current_primary)
 APPLY_COS_FLAGS=()
 if [[ "$MOUSE_CLASS" == "iperf-b" ]]; then
     APPLY_COS_FLAGS+=(--same-class)
+fi
+if [[ "$MOUSE_COS_SURPLUS_SHARING" -eq 1 ]]; then
+    APPLY_COS_FLAGS+=(--surplus-sharing)
 fi
 "${SCRIPT_DIR}/apply-cos-config.sh" "${APPLY_COS_FLAGS[@]}" \
     "${INCUS_REMOTE}:${PRE_PRIMARY}" \
@@ -468,7 +477,8 @@ N="$N" M="$M" DURATION="$DURATION" STARTED_AT="$STARTED_AT" \
 SCREEN_ENGAGED="$screen_engaged" HA_TRANSITION_SEEN="$ha_seen" \
 MPSTAT_AVG_BUSY="${mpstat_busy:-0}" \
 ELEPHANT_PORT="$ELEPHANT_PORT" MOUSE_PORT="$MOUSE_PORT" \
-MOUSE_CLASS="$MOUSE_CLASS" SHAPER_BPS="$SHAPER_BPS" \
+MOUSE_CLASS="$MOUSE_CLASS" MOUSE_COS_SURPLUS_SHARING="$MOUSE_COS_SURPLUS_SHARING" \
+SHAPER_BPS="$SHAPER_BPS" \
 python3 -c '
 import json, os
 manifest = {
@@ -482,6 +492,7 @@ manifest = {
     "elephant_port": int(os.environ["ELEPHANT_PORT"]),
     "mouse_port": int(os.environ["MOUSE_PORT"]),
     "mouse_class": os.environ["MOUSE_CLASS"],
+    "cos_surplus_sharing": os.environ["MOUSE_COS_SURPLUS_SHARING"] == "1",
     "shaper_bps": int(os.environ["SHAPER_BPS"]),
 }
 print(json.dumps(manifest, indent=2))

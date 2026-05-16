@@ -3,6 +3,10 @@
 #
 # Usage: test-mouse-latency-matrix.sh <out_root>
 #
+# Set MOUSE_COS_SURPLUS_SHARING=1 to run every preflight/rep under
+# the diagnostic surplus-sharing fixture instead of the strict exact
+# fixture. The per-rep manifest records the selected fixture bit.
+#
 # 12 cells: N ∈ {0, 8, 32, 128} × M ∈ {1, 10, 50}.
 # Per cell: run up to 15 total reps as needed to reach 10 valid reps.
 # Cell stops at 10 valid reps OR 15 total, whichever is first.

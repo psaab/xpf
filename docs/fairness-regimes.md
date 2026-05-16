@@ -435,16 +435,28 @@ MOUSE_LATENCY_GATE_PERCENTILE=p999_us \
 ```
 
 Run it once under the strict exact fixture and once after applying the
-surplus-sharing fixture. The reducer writes `summary.json` with the gate
-verdict, idle and loaded tail latency, ratio, selected percentile, and
-per-cell representative probe. Probe artifacts now include `rtt_us.p999`;
-the reducer carries that forward as `median_rep.p999_us`. The 100E100M
-qualification should gate p99.9 by setting
+surplus-sharing fixture. Use `MOUSE_COS_SURPLUS_SHARING=1` for the
+surplus leg; the per-rep harness re-applies CoS on every preflight/rep,
+so a one-time manual `apply-cos-config.sh --surplus-sharing` before the
+matrix is not sufficient. The reducer writes `summary.json` with the
+gate verdict, idle and loaded tail latency, ratio, selected percentile,
+and per-cell representative probe. Probe artifacts now include
+`rtt_us.p999`; the reducer carries that forward as `median_rep.p999_us`.
+The 100E100M qualification should gate p99.9 by setting
 `MOUSE_LATENCY_GATE_PERCENTILE=p999_us`; legacy #905-style runs may keep
 the default p99 gate. When a non-p99 gate is selected, the representative
 rep is also selected by that same percentile. For p99 runs, `summary.json`
 keeps the historical `p99_idle_us` / `p99_loaded_us` aliases alongside
 the generic `idle_us` / `loaded_us` fields.
+
+```bash
+MOUSE_COS_SURPLUS_SHARING=1 \
+MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
+MOUSE_LATENCY_GATE_ELEPHANTS=100 \
+MOUSE_LATENCY_GATE_MICE=100 \
+MOUSE_LATENCY_GATE_PERCENTILE=p999_us \
+./test/incus/test-mouse-latency-matrix.sh /tmp/xpf-100e100m-surplus
+```
 
 Surplus give-back uses a reduced phase artifact instead of trying to
 infer phase semantics from unrelated per-class sweeps. The validator is:
