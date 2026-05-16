@@ -310,8 +310,8 @@ mod tests {
                 sum_per_worker[r.worker_id as usize] += r.count;
             }
         }
-        // 2 timestamps × 2 (entries per worker per ts) → 4
-        // entries summed; with count=2 each, per-worker sum = 4.
+        // 2 timestamps × 1 iface-filtered entry per worker per ts
+        // → 2 entries summed; with count=2 each, per-worker sum = 4.
         // Median across the 2 timestamps would still be 2 (the
         // sample value at each ts). The integration of the
         // sum-then-median path lives in the verdict code; here we
