@@ -61,6 +61,7 @@ fn exact_queue_without_shared_lease_does_not_locally_refill() {
             forwarding_class: "best-effort".into(),
             priority: 5,
             transmit_rate_bytes: 100_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -114,6 +115,7 @@ fn maybe_top_up_cos_root_lease_unblocks_large_frame_exceeding_lease_bytes() {
             forwarding_class: "best-effort".into(),
             priority: 5,
             transmit_rate_bytes: rate_bytes,
+            guarantee_enabled: true,
             exact: false,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -154,6 +156,7 @@ fn maybe_top_up_cos_queue_lease_unblocks_local_exact_queue_without_tokens() {
             forwarding_class: "iperf-b".into(),
             priority: 5,
             transmit_rate_bytes: 400_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -206,6 +209,7 @@ fn maybe_top_up_cos_queue_lease_reports_v8_acquire_calls_and_grants() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 100_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -243,6 +247,7 @@ fn maybe_top_up_cos_queue_lease_enforces_equal_flow_cap() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 100_000_000 / 8,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: true,
@@ -276,8 +281,11 @@ fn maybe_top_up_cos_queue_lease_enforces_equal_flow_cap() {
     let _ = lease.acquire_v8(1, 3 * TEST_EPOCH_DURATION_NS, 1);
     assert!(lease.v8_equal_flow_enforced());
 
-    let telemetry =
-        maybe_top_up_cos_queue_lease(&mut root.queues[0], Some(&lease), 3 * TEST_EPOCH_DURATION_NS);
+    let telemetry = maybe_top_up_cos_queue_lease(
+        &mut root.queues[0],
+        Some(&lease),
+        3 * TEST_EPOCH_DURATION_NS,
+    );
 
     assert_eq!(telemetry.v8_calls, 1);
     assert_eq!(telemetry.v8_granted_bytes, 7_200);
@@ -307,6 +315,7 @@ fn maybe_top_up_cos_root_lease_transparent_when_shaping_rate_zero() {
             forwarding_class: "best-effort".into(),
             priority: 5,
             transmit_rate_bytes: 1_000_000,
+            guarantee_enabled: true,
             exact: false,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -345,6 +354,7 @@ fn maybe_top_up_cos_queue_lease_transparent_when_queue_rate_zero_exact_no_lease(
             forwarding_class: "best-effort".into(),
             priority: 5,
             transmit_rate_bytes: 0,
+            guarantee_enabled: true,
             exact: true, // <- precise old-code-failing branch
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -389,6 +399,7 @@ fn maybe_top_up_cos_queue_lease_transparent_non_exact_with_nonzero_last_refill()
             forwarding_class: "best-effort".into(),
             priority: 5,
             transmit_rate_bytes: 0,
+            guarantee_enabled: true,
             exact: false,
             surplus_sharing: false,
             equal_flow_enforcement: false,
@@ -435,6 +446,7 @@ fn transparent_root_preserves_per_queue_exact_cap() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: one_gbps_bytes, // <- per-queue exact cap
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,

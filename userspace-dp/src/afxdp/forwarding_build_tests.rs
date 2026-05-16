@@ -82,6 +82,7 @@ fn build_cos_state_translates_scheduler_map_entries() {
     assert_eq!(iface.queues[0].forwarding_class, "best-effort");
     assert_eq!(iface.queues[0].priority, 5);
     assert_eq!(iface.queues[0].transmit_rate_bytes, 3_000_000);
+    assert!(iface.queues[0].guarantee_enabled);
     assert!(!iface.queues[0].exact);
     assert_eq!(iface.queues[0].surplus_weight, 5);
     assert_eq!(iface.queues[0].buffer_bytes, 128_000);
@@ -89,6 +90,7 @@ fn build_cos_state_translates_scheduler_map_entries() {
     assert_eq!(iface.queues[1].forwarding_class, "expedited-forwarding");
     assert_eq!(iface.queues[1].priority, 0);
     assert_eq!(iface.queues[1].transmit_rate_bytes, 7_000_000);
+    assert!(iface.queues[1].guarantee_enabled);
     assert!(iface.queues[1].exact);
     assert_eq!(iface.queues[1].surplus_weight, 12);
     assert_eq!(iface.queues[1].buffer_bytes, 64_000);
@@ -209,6 +211,7 @@ fn build_cos_state_falls_back_to_default_best_effort_queue() {
     assert_eq!(iface.queues[0].forwarding_class, "best-effort");
     assert_eq!(iface.queues[0].priority, 5);
     assert_eq!(iface.queues[0].transmit_rate_bytes, 1_000_000);
+    assert!(iface.queues[0].guarantee_enabled);
     assert!(!iface.queues[0].exact);
     assert_eq!(iface.queues[0].surplus_weight, 1);
     assert_eq!(
@@ -314,7 +317,59 @@ fn build_cos_state_uses_effective_transmit_rate_for_surplus_weight() {
     let iface = state.interfaces.get(&9).expect("missing CoS interface");
     assert_eq!(iface.queues.len(), 1);
     assert_eq!(iface.queues[0].transmit_rate_bytes, 1_000_000);
+    assert!(
+        !iface.queues[0].guarantee_enabled,
+        "zero scheduler transmit-rate inherits an effective rate for surplus sizing only"
+    );
     assert_eq!(iface.queues[0].surplus_weight, 16);
+}
+
+#[test]
+fn build_cos_state_marks_no_rate_scheduler_map_queue_residual_only() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 9,
+            cos_shaping_rate_bytes_per_sec: 1_000_000,
+            cos_scheduler_map: "test-map".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+            schedulers: vec![CoSSchedulerSnapshot {
+                name: "be-sched".into(),
+                transmit_rate_bytes: 0,
+                transmit_rate_exact: false,
+                priority: "low".into(),
+                buffer_size_bytes: 0,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+            }],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "test-map".into(),
+                entries: vec![CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "best-effort".into(),
+                    scheduler: "be-sched".into(),
+                }],
+            }],
+        }),
+        ..Default::default()
+    };
+
+    let state = build_cos_state(&snapshot);
+    let iface = state.interfaces.get(&9).expect("missing CoS interface");
+    assert_eq!(iface.queues.len(), 1);
+    assert_eq!(iface.queues[0].transmit_rate_bytes, 1_000_000);
+    assert!(
+        !iface.queues[0].guarantee_enabled,
+        "scheduler-map queue without explicit transmit-rate must not become a root-rate guarantee"
+    );
+    assert!(!iface.queues[0].exact);
 }
 
 #[test]
@@ -590,14 +645,18 @@ fn build_forwarding_state_rejects_reserved_zone_ids() {
     assert_eq!(state.zone_name_to_id.get("ok").copied(), Some(5));
     assert!(state.zone_name_to_id.get("reserved-edge").is_none());
     assert!(state.zone_name_to_id.get("global-sentinel").is_none());
-    assert!(state
-        .zone_id_to_name
-        .get(&crate::policy::ZONE_ID_RESERVED_MIN)
-        .is_none());
-    assert!(state
-        .zone_id_to_name
-        .get(&crate::policy::JUNOS_GLOBAL_ZONE_ID)
-        .is_none());
+    assert!(
+        state
+            .zone_id_to_name
+            .get(&crate::policy::ZONE_ID_RESERVED_MIN)
+            .is_none()
+    );
+    assert!(
+        state
+            .zone_id_to_name
+            .get(&crate::policy::JUNOS_GLOBAL_ZONE_ID)
+            .is_none()
+    );
 }
 
 /// #921: ifindex_to_zone_id is populated at config build time
@@ -804,6 +863,64 @@ fn build_cos_state_zero_shaping_rate_queue_inherits_transparent() {
         queue.transmit_rate_bytes, 0,
         "transparent root + no scheduler rate → transparent queue (rate 0)"
     );
+    assert!(
+        !queue.guarantee_enabled,
+        "no scheduler rate means surplus-only even when the effective rate is transparent"
+    );
+}
+
+#[test]
+fn build_cos_state_no_rate_exact_surplus_equal_flow_is_residual_only() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 42,
+            cos_shaping_rate_bytes_per_sec: 25_000_000_000 / 8,
+            cos_scheduler_map: "wan-map".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "iperf-a".into(),
+                queue: 4,
+            }],
+            schedulers: vec![CoSSchedulerSnapshot {
+                name: "no-rate-exact".into(),
+                transmit_rate_bytes: 0,
+                transmit_rate_exact: true,
+                priority: "high".into(),
+                buffer_size_bytes: 0,
+                surplus_sharing: true,
+                equal_flow_enforcement: true,
+            }],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "iperf-a".into(),
+                    scheduler: "no-rate-exact".into(),
+                }],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+        }),
+        ..Default::default()
+    };
+
+    let state = build_cos_state(&snapshot);
+    let queue = state
+        .interfaces
+        .get(&42)
+        .expect("shaped iface present")
+        .queues
+        .iter()
+        .find(|q| q.queue_id == 4)
+        .expect("iperf-a queue present");
+
+    assert_eq!(queue.transmit_rate_bytes, 25_000_000_000 / 8);
+    assert!(!queue.guarantee_enabled);
+    assert!(!queue.exact);
+    assert!(!queue.surplus_sharing);
+    assert!(!queue.equal_flow_enforcement);
 }
 
 #[test]
