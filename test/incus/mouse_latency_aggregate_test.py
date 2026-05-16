@@ -15,7 +15,7 @@ from mouse_latency_aggregate import (
 
 def _make_rep(p99: int, ok: bool = True, p50: int = 100, p95: int = 500, rps: float = 200.0) -> dict:
     return {
-        "rtt_us": {"p50": p50, "p95": p95, "p99": p99},
+        "rtt_us": {"p50": p50, "p95": p95, "p99": p99, "p999": p99 + 10},
         "totals": {"achieved_rps_total": rps, "attempts_per_coroutine": [600] * 10},
         "validity": {"ok": ok, "reasons": []},
     }
@@ -91,6 +91,29 @@ class DecideTests(unittest.TestCase):
         summaries = self._gate_summaries(100, 150)
         v = decide(summaries)
         self.assertEqual(v["verdict"], "PASS")
+
+    def test_custom_100e100m_gate_uses_requested_cell(self):
+        idle = summarize_cell([_make_rep(p99=100) for _ in range(10)])
+        loaded = summarize_cell([_make_rep(p99=190) for _ in range(10)])
+        summaries = {(0, 100): idle, (100, 100): loaded}
+        v = decide(summaries, gate_elephants=100, gate_mice=100)
+        self.assertEqual(v["verdict"], "PASS")
+        self.assertIn("N=100, M=100", v["gate"])
+
+    def test_custom_gate_percentile(self):
+        idle = summarize_cell([_make_rep(p99=100) for _ in range(10)])
+        loaded = summarize_cell([_make_rep(p99=100) for _ in range(10)])
+        # p999 is p99+10 from _make_rep, so the ratio is 210/110.
+        loaded["median_rep"]["p999_us"] = 210
+        summaries = {(0, 100): idle, (100, 100): loaded}
+        v = decide(
+            summaries,
+            gate_elephants=100,
+            gate_mice=100,
+            gate_percentile="p999_us",
+            threshold_ratio=1.5,
+        )
+        self.assertEqual(v["verdict"], "FAIL")
 
     def test_missing_gate_cell(self):
         v = decide({(0, 10): summarize_cell([_make_rep(100)] * 10)})
