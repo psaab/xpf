@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -57,6 +58,49 @@ func testCoSConfig() *config.Config {
 			},
 		},
 	}
+}
+
+func TestFormatCoSInterfaceSummaryPreservesOldJSONGuaranteeFallback(t *testing.T) {
+	var status ProcessStatus
+	raw := []byte(`{
+		"cos_interfaces": [{
+			"interface_name": "reth0.80",
+			"worker_instances": 1,
+			"queues": [{
+				"queue_id": 4,
+				"forwarding_class": "bandwidth-10mb",
+				"priority": 1,
+				"exact": true,
+				"transmit_rate_bytes": 1250000,
+				"buffer_bytes": 32768
+			}]
+		}]
+	}`)
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal old status JSON: %v", err)
+	}
+	if status.CoSInterfaces[0].Queues[0].GuaranteeEnabled != nil {
+		t.Fatalf("old status JSON unexpectedly populated guarantee_enabled")
+	}
+
+	out := FormatCoSInterfaceSummary(testCoSConfig(), &status, "reth0.80")
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "bandwidth-10mb") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 8 {
+			t.Fatalf("old status JSON queue row too short: %q\n%s", line, out)
+		}
+		if fields[5] != "yes" {
+			t.Fatalf("old status JSON queue rendered guarantee=%s, want yes:\n%s", fields[5], out)
+		}
+		if got := fields[6] + " " + fields[7]; got != "10.00 Mb/s" {
+			t.Fatalf("old status JSON queue rendered rate=%s, want 10.00 Mb/s:\n%s", got, out)
+		}
+		return
+	}
+	t.Fatalf("missing bandwidth-10mb queue row for old status JSON:\n%s", out)
 }
 
 func TestFormatCoSInterfaceSummaryShowsConfigOnlyInterface(t *testing.T) {

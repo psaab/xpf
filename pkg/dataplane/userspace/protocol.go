@@ -480,7 +480,7 @@ type CoSQueueStatus struct {
 	ForwardingClass     string  `json:"forwarding_class,omitempty"`
 	Priority            int     `json:"priority,omitempty"`
 	Exact               bool    `json:"exact,omitempty"`
-	GuaranteeEnabled    bool    `json:"guarantee_enabled,omitempty"`
+	GuaranteeEnabled    *bool   `json:"guarantee_enabled,omitempty"`
 	TransmitRateBytes   uint64  `json:"transmit_rate_bytes,omitempty"`
 	BufferBytes         uint64  `json:"buffer_bytes,omitempty"`
 	WorkerInstances     int     `json:"worker_instances,omitempty"`

@@ -552,10 +552,14 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 			}
 			qv.priority = fmt.Sprintf("%d", runtimeQueue.Priority)
 			qv.exact = runtimeQueue.Exact
-			qv.guaranteeEnabled = runtimeQueue.GuaranteeEnabled
+			if runtimeQueue.GuaranteeEnabled != nil {
+				qv.guaranteeEnabled = *runtimeQueue.GuaranteeEnabled
+			} else if qv.transmitRate == 0 && runtimeQueue.TransmitRateBytes > 0 {
+				qv.guaranteeEnabled = true
+			}
 			qv.equalFlowEnforcement = runtimeQueue.EqualFlowEnforcement
 			qv.equalFlowEnforced = runtimeQueue.EqualFlowEnforced
-			if runtimeQueue.TransmitRateBytes > 0 && runtimeQueue.GuaranteeEnabled {
+			if runtimeQueue.TransmitRateBytes > 0 && qv.guaranteeEnabled {
 				qv.transmitRate = runtimeQueue.TransmitRateBytes
 			}
 			if runtimeQueue.BufferBytes > 0 {
