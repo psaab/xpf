@@ -1,7 +1,10 @@
+import asyncio
 import unittest
+from types import SimpleNamespace
 
 from mouse_latency_probe import (
     HISTOGRAM_BUCKETS_US,
+    _run,
     _compute_histogram,
     _compute_percentiles,
     compute_validity,
@@ -139,6 +142,95 @@ class ValidityTests(unittest.TestCase):
         v = compute_validity(10, [600] * 10, completed=5500, errors=100)
         self.assertFalse(v["ok"])
         self.assertTrue(any("inconsistent-counts" in r for r in v["reasons"]))
+
+
+class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
+    async def _run_local_echo_probe(
+        self,
+        *,
+        concurrency,
+        duration,
+        min_interval_ms,
+        connection_mode="persistent",
+    ):
+        connection_count = 0
+
+        async def handle_echo(reader, writer):
+            nonlocal connection_count
+            connection_count += 1
+            try:
+                while True:
+                    data = await reader.read(4096)
+                    if not data:
+                        break
+                    writer.write(data)
+                    await writer.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(handle_echo, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            args = SimpleNamespace(
+                target="127.0.0.1",
+                port=port,
+                concurrency=concurrency,
+                duration=duration,
+                payload_bytes=16,
+                connection_mode=connection_mode,
+                min_interval_ms=min_interval_ms,
+            )
+            result = await _run(args)
+        finally:
+            server.close()
+            await server.wait_closed()
+        return result, connection_count
+
+    async def test_persistent_mode_reuses_one_connection_per_coroutine(self):
+        result, connection_count = await self._run_local_echo_probe(
+            concurrency=3,
+            duration=0.2,
+            min_interval_ms=0.0,
+        )
+        self.assertEqual(result["config"]["connection_mode"], "persistent")
+        self.assertEqual(result["config"]["min_interval_ms"], 0.0)
+        self.assertGreater(result["totals"]["completed"], 3)
+        self.assertEqual(
+            result["totals"]["attempted"],
+            result["totals"]["completed"] + result["totals"]["errors"],
+        )
+        self.assertLessEqual(result["totals"]["error_rate"], 0.05)
+        self.assertLessEqual(connection_count, 3)
+
+    async def test_min_interval_bounds_persistent_attempt_rate(self):
+        result, connection_count = await self._run_local_echo_probe(
+            concurrency=1,
+            duration=0.12,
+            min_interval_ms=20.0,
+        )
+        self.assertEqual(result["config"]["min_interval_ms"], 20.0)
+        self.assertGreaterEqual(result["totals"]["completed"], 3)
+        self.assertLessEqual(result["totals"]["attempted"], 8)
+        self.assertLessEqual(connection_count, 1)
+
+    async def test_min_interval_bounds_per_attempt_rate(self):
+        result, connection_count = await self._run_local_echo_probe(
+            concurrency=1,
+            duration=0.12,
+            min_interval_ms=20.0,
+            connection_mode="per-attempt",
+        )
+        self.assertEqual(result["config"]["connection_mode"], "per-attempt")
+        self.assertEqual(result["config"]["min_interval_ms"], 20.0)
+        self.assertGreaterEqual(result["totals"]["completed"], 3)
+        self.assertLessEqual(result["totals"]["attempted"], 8)
+        self.assertEqual(
+            result["totals"]["attempted"],
+            result["totals"]["completed"] + result["totals"]["errors"],
+        )
+        self.assertGreaterEqual(connection_count, result["totals"]["completed"])
 
 
 if __name__ == "__main__":

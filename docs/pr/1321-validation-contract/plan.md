@@ -21,8 +21,13 @@ useful slice is a stable validation surface for:
 2. Preserve p99.9 in probe and aggregate artifacts as `p999` /
    `p999_us`. Legacy #905-style runs keep the default p99 gate for
    compatibility. The canonical 100E100M runs set
-   `MOUSE_LATENCY_GATE_PERCENTILE=p999_us`, and the reducer selects the
-   representative rep by the same percentile it gates.
+   `MOUSE_LATENCY_GATE_PERCENTILE=p999_us` and
+   `MOUSE_PROBE_CONNECTION_MODE=persistent` with
+   `MOUSE_PROBE_MIN_INTERVAL_MS=20`, and the reducer selects the
+   representative rep by the same percentile it gates. Persistent,
+   interval-bounded mouse probing keeps the 100E100M gate focused on
+   established echo transaction latency instead of the target echo
+   daemon's accept/close capacity or unpaced echo throughput.
 3. Validate surplus give-back from a reduced phase JSON artifact. The
    first live runner can be shell, Python, or an operator-curated
    reducer, but pass/fail semantics are centralized in
@@ -41,6 +46,8 @@ MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
 MOUSE_LATENCY_GATE_ELEPHANTS=100 \
 MOUSE_LATENCY_GATE_MICE=100 \
 MOUSE_LATENCY_GATE_PERCENTILE=p999_us \
+MOUSE_PROBE_CONNECTION_MODE=persistent \
+MOUSE_PROBE_MIN_INTERVAL_MS=20 \
 ./test/incus/test-mouse-latency-matrix.sh /tmp/xpf-100e100m-exact
 ```
 
@@ -52,12 +59,15 @@ MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
 MOUSE_LATENCY_GATE_ELEPHANTS=100 \
 MOUSE_LATENCY_GATE_MICE=100 \
 MOUSE_LATENCY_GATE_PERCENTILE=p999_us \
+MOUSE_PROBE_CONNECTION_MODE=persistent \
+MOUSE_PROBE_MIN_INTERVAL_MS=20 \
 ./test/incus/test-mouse-latency-matrix.sh /tmp/xpf-100e100m-surplus
 ./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0
 ```
 
-The 100E100M qualification gates p99.9. The reducer also supports p99
-for legacy #905-style runs.
+The 100E100M qualification gates p99.9 in persistent connection mode
+with a 20 ms per-coroutine interval. The reducer also supports p99 for
+legacy #905-style runs.
 
 ## Surplus Give-Back Artifact
 

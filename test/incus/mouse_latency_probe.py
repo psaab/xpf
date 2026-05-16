@@ -1,9 +1,16 @@
 """Mouse-latency probe driver — closed-loop TCP echo probes.
 
-Spawns M asyncio coroutines, each looping connect → send → recv-echo →
-close until --duration expires. No per-iteration sleep (closed-loop
-semantics; see plan §4.1). Writes a JSON file with histogram, percentiles,
-per-coroutine attempt counts, and a validity verdict.
+Spawns M asyncio coroutines, each looping echo transactions until
+--duration expires. The default `per-attempt` mode preserves the original
+connect → send → recv-echo → close transaction shape. The `persistent`
+mode keeps one TCP connection per coroutine and measures send →
+recv-echo transactions; this avoids turning high-concurrency 100E100M
+preflights into an echo-server accept/close benchmark. Both modes are
+closed-loop by default. When --min-interval-ms is non-zero, each coroutine
+sleeps only long enough to enforce a minimum start-to-start interval; it
+does not issue open-loop requests. Writes a JSON file with
+histogram, percentiles, per-coroutine attempt counts, and a validity
+verdict.
 
 Validity model (plan §4.2):
 - error_rate < 0.01.
@@ -23,7 +30,7 @@ import os
 import statistics
 import sys
 import time
-from typing import List
+from typing import List, Optional
 
 
 # Histogram bucket upper bounds in microseconds (plan §4.3).
@@ -32,10 +39,35 @@ HISTOGRAM_BUCKETS_US = [
 ]
 
 
-async def _run_probe_coro(
+async def _close_writer(writer: Optional[asyncio.StreamWriter]) -> None:
+    if writer is None:
+        return
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pass
+
+
+async def _respect_min_interval(
+    attempt_started_ns: int,
+    min_interval_ms: float,
+    deadline: float,
+) -> None:
+    if min_interval_ms <= 0:
+        return
+    elapsed_s = (time.monotonic_ns() - attempt_started_ns) / 1_000_000_000
+    sleep_s = (min_interval_ms / 1000.0) - elapsed_s
+    remaining_s = deadline - time.monotonic()
+    if sleep_s > 0 and remaining_s > 0:
+        await asyncio.sleep(min(sleep_s, remaining_s))
+
+
+async def _run_per_attempt_probe_coro(
     target: str,
     port: int,
     payload_bytes: int,
+    min_interval_ms: float,
     deadline: float,
     rtts_us: List[int],
     attempt_counter: List[int],
@@ -78,13 +110,10 @@ async def _run_probe_coro(
                 )
                 if data != payload:
                     error_counter[0] += 1
+                    await _respect_min_interval(t0, min_interval_ms, deadline)
                     continue
             finally:
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    pass
+                await _close_writer(writer)
         except (
             asyncio.TimeoutError,
             ConnectionRefusedError,
@@ -94,9 +123,129 @@ async def _run_probe_coro(
             OSError,
         ):
             error_counter[0] += 1
+            await _respect_min_interval(t0, min_interval_ms, deadline)
             continue
         t1 = time.monotonic_ns()
         rtts_us.append((t1 - t0) // 1000)
+        await _respect_min_interval(t0, min_interval_ms, deadline)
+
+
+async def _run_persistent_probe_coro(
+    target: str,
+    port: int,
+    payload_bytes: int,
+    min_interval_ms: float,
+    deadline: float,
+    rtts_us: List[int],
+    attempt_counter: List[int],
+    error_counter: List[int],
+) -> None:
+    """One coroutine using one long-lived echo connection.
+
+    Each counted attempt is an echo transaction. If the connection cannot
+    be established, that failed transaction is counted as an error so the
+    completed + errors == attempted validity invariant remains meaningful.
+    """
+    payload = os.urandom(payload_bytes)
+    reader: Optional[asyncio.StreamReader] = None
+    writer: Optional[asyncio.StreamWriter] = None
+
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            t0 = time.monotonic_ns()
+            if writer is None or writer.is_closing():
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(target, port),
+                        timeout=min(5.0, remaining),
+                    )
+                except (
+                    asyncio.TimeoutError,
+                    ConnectionRefusedError,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                    OSError,
+                ):
+                    attempt_counter[0] += 1
+                    error_counter[0] += 1
+                    reader = None
+                    writer = None
+                    await _respect_min_interval(t0, min_interval_ms, deadline)
+                    continue
+                # Connection setup is not a latency sample in persistent
+                # mode; it is only a prerequisite for later echo samples.
+                continue
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            t0 = time.monotonic_ns()
+            try:
+                writer.write(payload)
+                await writer.drain()
+            except (
+                asyncio.TimeoutError,
+                ConnectionRefusedError,
+                ConnectionResetError,
+                BrokenPipeError,
+                OSError,
+            ):
+                attempt_counter[0] += 1
+                error_counter[0] += 1
+                await _close_writer(writer)
+                reader = None
+                writer = None
+                await _respect_min_interval(t0, min_interval_ms, deadline)
+                continue
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                attempt_counter[0] += 1
+                error_counter[0] += 1
+                await _close_writer(writer)
+                reader = None
+                writer = None
+                await _respect_min_interval(t0, min_interval_ms, deadline)
+                break
+
+            attempt_counter[0] += 1
+            try:
+                assert reader is not None
+                data = await asyncio.wait_for(
+                    reader.readexactly(payload_bytes),
+                    timeout=min(5.0, remaining),
+                )
+                if data != payload:
+                    error_counter[0] += 1
+                    await _close_writer(writer)
+                    reader = None
+                    writer = None
+                    await _respect_min_interval(t0, min_interval_ms, deadline)
+                    continue
+            except (
+                asyncio.TimeoutError,
+                ConnectionRefusedError,
+                ConnectionResetError,
+                BrokenPipeError,
+                asyncio.IncompleteReadError,
+                OSError,
+            ):
+                error_counter[0] += 1
+                await _close_writer(writer)
+                reader = None
+                writer = None
+                await _respect_min_interval(t0, min_interval_ms, deadline)
+                continue
+            t1 = time.monotonic_ns()
+            rtts_us.append((t1 - t0) // 1000)
+            await _respect_min_interval(t0, min_interval_ms, deadline)
+    finally:
+        await _close_writer(writer)
 
 
 def _compute_histogram(rtts_us: List[int]) -> List[int]:
@@ -192,9 +341,14 @@ async def _run(args: argparse.Namespace) -> dict:
     attempts_per_coro: List[List[int]] = [[0] for _ in range(args.concurrency)]
     errors_per_coro: List[List[int]] = [[0] for _ in range(args.concurrency)]
     deadline = time.monotonic() + args.duration
+    probe_coro = (
+        _run_persistent_probe_coro
+        if args.connection_mode == "persistent"
+        else _run_per_attempt_probe_coro
+    )
     coros = [
-        _run_probe_coro(
-            args.target, args.port, args.payload_bytes, deadline,
+        probe_coro(
+            args.target, args.port, args.payload_bytes, args.min_interval_ms, deadline,
             rtts_per_coro[i], attempts_per_coro[i], errors_per_coro[i],
         )
         for i in range(args.concurrency)
@@ -238,6 +392,8 @@ async def _run(args: argparse.Namespace) -> dict:
             "concurrency": args.concurrency,
             "duration_s": args.duration,
             "payload_bytes": args.payload_bytes,
+            "connection_mode": args.connection_mode,
+            "min_interval_ms": args.min_interval_ms,
         },
         "totals": {
             "attempted": attempted,
@@ -267,6 +423,21 @@ def main() -> int:
     p.add_argument("--concurrency", type=int, required=True)
     p.add_argument("--duration", type=float, required=True)
     p.add_argument("--payload-bytes", type=int, default=64)
+    p.add_argument(
+        "--connection-mode",
+        choices=("per-attempt", "persistent"),
+        default="per-attempt",
+        help=(
+            "per-attempt opens a new TCP connection per echo transaction; "
+            "persistent keeps one connection per coroutine"
+        ),
+    )
+    p.add_argument(
+        "--min-interval-ms",
+        type=float,
+        default=0.0,
+        help="minimum start-to-start interval per coroutine in milliseconds",
+    )
     p.add_argument("--out", required=True)
     args = p.parse_args()
     result = asyncio.run(_run(args))

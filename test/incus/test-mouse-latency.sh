@@ -39,12 +39,15 @@ ELEPHANT_PORT="${ELEPHANT_PORT:-5201}"
 MOUSE_PORT="${MOUSE_PORT:-7}"
 MOUSE_CLASS="${MOUSE_CLASS:-best-effort}"
 MOUSE_COS_SURPLUS_SHARING="${MOUSE_COS_SURPLUS_SHARING:-0}"
+MOUSE_PROBE_CONNECTION_MODE="${MOUSE_PROBE_CONNECTION_MODE:-per-attempt}"
+MOUSE_PROBE_MIN_INTERVAL_MS="${MOUSE_PROBE_MIN_INTERVAL_MS:-0}"
 SHAPER_BPS="${SHAPER_BPS:-$((1 * 1000 * 1000 * 1000))}"  # default 1 Gb/s (iperf-a); same-class iperf-b sets 10 Gb/s
 # Validate env-overrides (Copilot D.5): ports/bps must be
 # digits only so they can't smuggle shell metacharacters into
-# the remote `bash -c` interpolations below, and MOUSE_CLASS is
-# whitelisted to the four configured forwarding classes so a
-# typo can't slip a stray value into manifest.json.
+# the remote `bash -c` interpolations below. MOUSE_CLASS and
+# MOUSE_PROBE_CONNECTION_MODE are whitelisted, MOUSE_COS_SURPLUS_SHARING
+# is normalized as a boolean, and MOUSE_PROBE_MIN_INTERVAL_MS is numeric,
+# so typos can't slip stray values into manifest.json or the probe CLI.
 [[ "$ELEPHANT_PORT" =~ ^[0-9]+$ ]] \
     || { echo "ABORT: ELEPHANT_PORT='$ELEPHANT_PORT' must be digits" >&2; exit 1; }
 [[ "$MOUSE_PORT" =~ ^[0-9]+$ ]] \
@@ -60,6 +63,12 @@ case "${MOUSE_COS_SURPLUS_SHARING,,}" in
     1|true|yes|on) MOUSE_COS_SURPLUS_SHARING=1 ;;
     *) echo "ABORT: MOUSE_COS_SURPLUS_SHARING='$MOUSE_COS_SURPLUS_SHARING' must be boolean" >&2; exit 1 ;;
 esac
+case "$MOUSE_PROBE_CONNECTION_MODE" in
+    per-attempt|persistent) ;;
+    *) echo "ABORT: MOUSE_PROBE_CONNECTION_MODE='$MOUSE_PROBE_CONNECTION_MODE' must be per-attempt or persistent" >&2; exit 1 ;;
+esac
+[[ "$MOUSE_PROBE_MIN_INTERVAL_MS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+    || { echo "ABORT: MOUSE_PROBE_MIN_INTERVAL_MS='$MOUSE_PROBE_MIN_INTERVAL_MS' must be a non-negative number" >&2; exit 1; }
 SETTLE_BUDGET=20
 SLACK=10
 
@@ -170,7 +179,7 @@ trap cleanup EXIT
 # previously left a stale file behind that the next reuse with the
 # same tag would inherit. Belt-and-suspenders.)
 incus_exec "$SOURCE" sh -c \
-    "rm -f /tmp/probe-${REP_TAG}.json /tmp/mpstat-${REP_TAG}.txt /tmp/iperf3-${REP_TAG}.txt" \
+    "rm -f /tmp/mouse_latency_probe.py /tmp/probe-${REP_TAG}.json /tmp/mpstat-${REP_TAG}.txt /tmp/iperf3-${REP_TAG}.txt" \
     < /dev/null > /dev/null 2>&1 || true
 
 # Push helper scripts to the source container (probe driver runs there).
@@ -295,7 +304,9 @@ MPSTAT_PID=$!
 incus_exec "$SOURCE" python3 /tmp/mouse_latency_probe.py \
     --target "$TARGET_V4" --port "$MOUSE_PORT" \
     --concurrency "$M" --duration "$DURATION" \
-    --payload-bytes 64 --out "/tmp/probe-${REP_TAG}.json" \
+    --payload-bytes 64 --connection-mode "$MOUSE_PROBE_CONNECTION_MODE" \
+    --min-interval-ms "$MOUSE_PROBE_MIN_INTERVAL_MS" \
+    --out "/tmp/probe-${REP_TAG}.json" \
     > "${OUT_DIR}/probe-stdout.log" 2>&1 || true
 
 set +e
@@ -478,6 +489,8 @@ SCREEN_ENGAGED="$screen_engaged" HA_TRANSITION_SEEN="$ha_seen" \
 MPSTAT_AVG_BUSY="${mpstat_busy:-0}" \
 ELEPHANT_PORT="$ELEPHANT_PORT" MOUSE_PORT="$MOUSE_PORT" \
 MOUSE_CLASS="$MOUSE_CLASS" MOUSE_COS_SURPLUS_SHARING="$MOUSE_COS_SURPLUS_SHARING" \
+MOUSE_PROBE_CONNECTION_MODE="$MOUSE_PROBE_CONNECTION_MODE" \
+MOUSE_PROBE_MIN_INTERVAL_MS="$MOUSE_PROBE_MIN_INTERVAL_MS" \
 SHAPER_BPS="$SHAPER_BPS" \
 python3 -c '
 import json, os
@@ -493,6 +506,8 @@ manifest = {
     "mouse_port": int(os.environ["MOUSE_PORT"]),
     "mouse_class": os.environ["MOUSE_CLASS"],
     "cos_surplus_sharing": os.environ["MOUSE_COS_SURPLUS_SHARING"] == "1",
+    "mouse_probe_connection_mode": os.environ["MOUSE_PROBE_CONNECTION_MODE"],
+    "mouse_probe_min_interval_ms": float(os.environ["MOUSE_PROBE_MIN_INTERVAL_MS"]),
     "shaper_bps": int(os.environ["SHAPER_BPS"]),
 }
 print(json.dumps(manifest, indent=2))
