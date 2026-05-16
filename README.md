@@ -75,7 +75,7 @@ system {
 | SYN cookie flood protection | Yes | No (fallback) |
 | Throughput (25G mlx5) | 22+ Gbps | See validation/perf docs for current results |
 
-The userspace dataplane now covers most of the transit feature set in native Rust, but it is not "fallback-free". Current explicit gates in code still include pool-mode SNAT admission, SYN-cookie-dependent screen behavior, three-color policers, and port mirroring. The exact admission boundary is documented in [`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
+The userspace dataplane now covers most of the transit feature set in native Rust, but it is not "fallback-free". Current explicit gates in code still include SYN-cookie-dependent screen behavior, three-color policers, and port mirroring. Pool-mode SNAT is admitted, but #1377 still owns cross-backend `address-persistent` parity. The exact admission boundary is documented in [`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
 
 ## Architecture
 

@@ -2,6 +2,11 @@
 
 ## 2026-05-16
 
+- **Timestamp**: 2026-05-17T00:48:00Z
+  - **Action**: PR #1385 round-3 review follow-up — corrected README prose so pool-mode SNAT is no longer described as an explicit userspace capability gate after the pool-mode fixes; the remaining caveat is cross-backend `address-persistent` parity under #1377.
+  - **File(s)**: `README.md`, `_Log.md`
+  - **Validation**: `git diff --check`
+
 - **Timestamp**: 2026-05-16T23:58:00Z
   - **Action**: PR #1385 round-2 review follow-up — made Rust pool-mode SNAT skip matched rules whose pool has no address for the packet family so later compatible rules can apply, added wrong-family regression tests, and documented userspace/eBPF/DPDK address-persistent algorithm divergence until #1377 defines a shared contract.
   - **File(s)**: `userspace-dp/src/nat.rs`, `userspace-dp/src/nat_tests.rs`, `docs/userspace-dataplane-architecture.md`, `docs/userspace-dataplane-gaps.md`, `README.md`, `_Log.md`
