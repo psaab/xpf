@@ -7,6 +7,13 @@
 # the diagnostic surplus-sharing fixture instead of the strict exact
 # fixture. The per-rep manifest records the selected fixture bit.
 #
+# Set MOUSE_PROBE_CONNECTION_MODE=persistent for high-concurrency
+# 100E100M runs where the validation target is tail latency of
+# established mouse transactions rather than echo-server accept rate.
+# Set MOUSE_PROBE_MIN_INTERVAL_MS=20 with that mode on the isolated
+# validation cluster; it still produces hundreds of thousands of
+# samples per 60-second rep without overdriving the port-7 echo daemon.
+#
 # 12 cells: N ∈ {0, 8, 32, 128} × M ∈ {1, 10, 50}.
 # Per cell: run up to 15 total reps as needed to reach 10 valid reps.
 # Cell stops at 10 valid reps OR 15 total, whichever is first.

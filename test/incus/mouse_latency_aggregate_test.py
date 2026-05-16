@@ -14,11 +14,23 @@ from mouse_latency_aggregate import (
 )
 
 
-def _make_rep(p99: int, ok: bool = True, p50: int = 100, p95: int = 500, rps: float = 200.0) -> dict:
+def _make_rep(
+    p99: int,
+    ok: bool = True,
+    p50: int = 100,
+    p95: int = 500,
+    rps: float = 200.0,
+    connection_mode: str = "per-attempt",
+    min_interval_ms: float = 0.0,
+) -> dict:
     return {
         "rtt_us": {"p50": p50, "p95": p95, "p99": p99, "p999": p99 + 10},
         "totals": {"achieved_rps_total": rps, "attempts_per_coroutine": [600] * 10},
         "validity": {"ok": ok, "reasons": []},
+        "config": {
+            "connection_mode": connection_mode,
+            "min_interval_ms": min_interval_ms,
+        },
     }
 
 
@@ -94,6 +106,20 @@ class SummarizeCellTests(unittest.TestCase):
         self.assertEqual(s["status"], "OK")
         # Median p99 of 100..190 is at index 5 → 150.
         self.assertEqual(s["median_rep"]["p99_us"], 150)
+
+    def test_mixed_probe_config_within_cell_is_insufficient(self):
+        reps = [_make_rep(p99=100) for _ in range(7)]
+        reps += [
+            _make_rep(
+                p99=100,
+                connection_mode="persistent",
+                min_interval_ms=20.0,
+            )
+            for _ in range(3)
+        ]
+        s = summarize_cell(reps)
+        self.assertEqual(s["status"], "INCONSISTENT-PROBE-CONFIG")
+        self.assertEqual(len(s["probe_configs"]), 2)
 
 
 class DecideTests(unittest.TestCase):
@@ -177,6 +203,31 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(v["verdict"], "INSUFFICIENT-DATA")
         self.assertIn("INSUFFICIENT-VALID-REPS", v["reason"])
 
+    def test_gate_rejects_mixed_probe_configs(self):
+        idle = summarize_cell(
+            [
+                _make_rep(
+                    p99=100,
+                    connection_mode="per-attempt",
+                    min_interval_ms=0.0,
+                )
+                for _ in range(10)
+            ]
+        )
+        loaded = summarize_cell(
+            [
+                _make_rep(
+                    p99=100,
+                    connection_mode="persistent",
+                    min_interval_ms=20.0,
+                )
+                for _ in range(10)
+            ]
+        )
+        v = decide({(0, 10): idle, (128, 10): loaded})
+        self.assertEqual(v["verdict"], "INSUFFICIENT-DATA")
+        self.assertIn("probe config mismatch", v["reason"])
+
 
 class LoadCellRepsInvalidMarkerTests(unittest.TestCase):
     def _setup_cell(self, tmpdir: str):
@@ -196,6 +247,22 @@ class LoadCellRepsInvalidMarkerTests(unittest.TestCase):
         if marker:
             open(os.path.join(rep_dir, f"INVALID-{marker}"), "w").close()
         return rep_dir
+
+    def test_manifest_probe_config_overrides_probe_json_config(self):
+        with tempfile.TemporaryDirectory() as t:
+            cell_dir = self._setup_cell(t)
+            rep_dir = self._write_rep(cell_dir, 0, ok=True)
+            with open(os.path.join(rep_dir, "manifest.json"), "w") as f:
+                json.dump({
+                    "mouse_probe_connection_mode": "persistent",
+                    "mouse_probe_min_interval_ms": 20,
+                }, f)
+            reps = load_cell_reps(cell_dir)
+            s = summarize_cell(reps * 10)
+            self.assertEqual(s["probe_config"], {
+                "connection_mode": "persistent",
+                "min_interval_ms": 20.0,
+            })
 
     def test_marker_overrides_probe_ok(self):
         with tempfile.TemporaryDirectory() as t:
