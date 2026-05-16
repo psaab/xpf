@@ -98,8 +98,17 @@ stops runtime resources. `Teardown` removes backend-owned persistent state.
 type ApplyResult struct {
 	ZoneIDs           map[string]uint16
 	ManagedInterfaces []networkd.InterfaceConfig
+	FilterIDs         map[string]uint32
+	FilterSpans       map[string]FilterCounterSpan
+	NATCounterIDs     map[string]uint32
 	Capabilities      Capabilities
 	Generation         uint64
+}
+
+type FilterCounterSpan struct {
+	FilterID  uint32
+	RuleStart uint32
+	RuleCount uint32
 }
 
 type ConfigSink interface {
@@ -112,6 +121,22 @@ The eBPF backend may keep its existing compiler internally, but `Set*`,
 `Clear*`, `DeleteStale*`, `UpdatePolicyScheduleState`, and `Map` become
 methods on the eBPF manager only. Userspace builds a snapshot/helper update
 from `*config.Config`; DPDK keeps its own lowering path.
+
+`ApplyResult` is also the replacement for the display metadata currently read
+through `LastCompileResult()`. It must carry at least:
+
+- `FilterIDs` and `FilterSpans` for firewall counter display. Today
+  `pkg/grpcapi/server_show_firewall.go` and `pkg/cli/cli_show_security.go`
+  use `LastCompileResult().FilterIDs` and then read BPF filter config to find
+  `RuleStart`. After the split, `RuleStart` must be carried in the apply
+  result or a backend-neutral telemetry metadata object; display code must not
+  call `ReadFilterConfig` on the root interface.
+- `NATCounterIDs` for source NAT rule display. Today `pkg/cli/cli_show_nat.go`
+  maps `rule-set/rule` to a counter ID via `LastCompileResult().NATCounterIDs`.
+  That mapping is config/apply metadata, not a BPF map-writer method, so it
+  belongs in `ApplyResult`.
+- stable generation numbers for those IDs so mixed old/new metadata cannot be
+  combined with counters from a different apply generation.
 
 `LinkController` owns link-cycle behavior that currently leaks through optional
 interfaces:
@@ -165,6 +190,24 @@ type SessionStore interface {
 The eBPF implementation wraps `sessions` and `sessions_v6`. Userspace wraps
 the helper session socket/event stream and its Rust-owned session store. GC
 must depend on `SessionStore`, not raw BPF map iteration.
+
+GC migration is not only `ForEach` plus `Delete`. The current GC also owns
+side effects that must move to explicit domain methods:
+
+- session-change gating reads `GlobalCtrSessionsNew` and
+  `GlobalCtrSessionsClosed`; this becomes `Telemetry.GlobalCounter` or a
+  `SessionStore.ChangeGeneration()` helper, not a raw dataplane call;
+- per-IP session-limit counting publishes screen/session-limit maps after the
+  sweep; this becomes backend-private config/state publish on the eBPF backend
+  and a userspace snapshot/control update on the userspace backend;
+- persistent-NAT preservation currently saves bindings before session delete;
+  `SessionStore.Delete*` must either perform the preservation atomically or
+  expose a `BeforeDelete` hook owned by the NAT/session domain;
+- DNAT reverse-entry cleanup currently calls `DeleteDNATEntry*`; delete
+  ownership must move into the backend session/NAT store so expiring a session
+  removes companion DNAT/NAT64 reverse state in the same generation; and
+- GC stats must still count v4/v6 entries and expired deletes without assuming
+  BPF map iteration order.
 
 Userspace session deltas remain an optional extension until the generic event
 stream can carry the same information:
@@ -405,6 +448,13 @@ Required during the split:
 - Session parity tests: eBPF and userspace `SessionStore` produce equivalent
   `show security flow session` data, including v4/v6, NAT flags, RG metadata,
   and reverse entries.
+- Apply-result metadata tests: firewall filter display and source NAT rule
+  display use `LastApplyResult().FilterIDs`, `FilterSpans.RuleStart`, and
+  `NATCounterIDs`, with no calls to `ReadFilterConfig` or
+  `LastCompileResult()` through the root dataplane.
+- GC side-effect tests: session expiry preserves persistent-NAT bindings,
+  removes companion DNAT/NAT64 reverse entries, updates per-IP session-limit
+  state, and uses backend-neutral session-change telemetry.
 - NAT embedded ICMP tests: userspace no longer depends on BPF `dnat_table`
   pins for v4 or v6 reversal.
 - HA canaries: RG activation, watchdog, fabric0/fabric1 updates, manual
@@ -441,6 +491,10 @@ Phase 1 is not complete until all of these are true:
 - adapters preserve REST, gRPC, CLI, metrics, cluster sync, and config-only
   behavior from the compatibility matrix;
 - tests include import, method-count, negative-writer, and stale-generation
-  canaries; and
+  canaries;
+- firewall/NAT show commands have moved from compile-result/BPF-filter-config
+  reads to `ApplyResult` metadata; and
+- GC side effects are owned by `SessionStore`/NAT/Telemetry domains rather than
+  raw BPF map methods; and
 - rollback is documented as switching the daemon back to the existing
   `dataplane.DataPlane` adapter without changing persistent config format.

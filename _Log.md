@@ -32,6 +32,11 @@
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `_Log.md`
   - **Validation**: `go test ./pkg/dataplane/userspace`; `git diff --check`
 
+- **Timestamp**: 2026-05-17T00:16:00Z
+  - **Action**: PR #1383 round-2 review follow-up — extended the target `ApplyResult` contract with firewall filter IDs/spans and NAT counter IDs needed by current show paths, and documented GC migration ownership for session-change counters, per-IP session-limit publish, persistent-NAT preservation, DNAT reverse cleanup, and backend-neutral stats.
+  - **File(s)**: `docs/pr/1381-dataplane-interface-split/plan.md`, `_Log.md`
+  - **Validation**: `git diff --check`
+
 - **Timestamp**: 2026-05-16T23:10:00Z
   - **Action**: PR #1383 round-1 review follow-up — removed backend-specific userspace DTOs from the proposed public session-delta interface to avoid a `pkg/dataplane` ↔ `pkg/dataplane/userspace` import cycle, added the missing caller inventory, and documented compatibility, risk, architectural-mismatch, import-canary, and Phase 1 acceptance gates.
   - **File(s)**: `docs/pr/1381-dataplane-interface-split/plan.md`, `_Log.md`
