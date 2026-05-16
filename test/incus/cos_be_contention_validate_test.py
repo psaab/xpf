@@ -101,8 +101,10 @@ def _write_manifest(root: Path, cell: dict | None = None) -> None:
             "label": "exact5202-vs-5200",
             "exact_port": 5202,
             "exact_queue": 2,
+            "exact_forwarding_class": "iperf-1g",
             "contender_port": 5200,
             "contender_queue": 0,
+            "contender_forwarding_class": "best-effort",
             "baseline_dir": "cell/baseline",
             "contended_dir": "cell/contended",
         }
@@ -121,6 +123,7 @@ def _validate(root: Path) -> dict:
         max_exact_drop_ratio=0.15,
         wrong_queue_sent_bytes_tolerance=0,
         min_expected_sent_bytes=1,
+        min_contender_bps=100_000_000.0,
     )
 
 
@@ -251,6 +254,94 @@ class CoSBEContentionValidateTests(unittest.TestCase):
 
             self.assertEqual(summary["verdict"], "FAIL")
             self.assertTrue(any("exact throughput dropped" in reason for reason in summary["failure_reasons"]))
+
+    def test_fails_when_contender_has_no_material_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=0),
+                during=_status(q2=100),
+                after=_status(q2=200),
+                exact_bps=1_000_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=200),
+                during=_status(q0=1, q2=300),
+                after=_status(q0=1, q2=400),
+                exact_bps=1_000_000_000,
+                contender_bps=1.0,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(any("contention pressure is too low" in reason for reason in summary["failure_reasons"]))
+
+    def test_fails_negative_drain_shape_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=200),
+                during=_status(q2=150),
+                after=_status(q2=100),
+                exact_bps=1_000_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=100),
+                during=_status(q0=100, q2=200),
+                after=_status(q0=200, q2=300),
+                exact_bps=1_000_000_000,
+                contender_bps=1_000_000_000,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(any("negative DrainShape delta" in reason for reason in summary["failure_reasons"]))
+
+    def test_fails_forwarding_class_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(
+                root,
+                {
+                    "label": "exact5202-vs-5200",
+                    "exact_port": 5202,
+                    "exact_queue": 2,
+                    "exact_forwarding_class": "not-iperf-1g",
+                    "contender_port": 5200,
+                    "contender_queue": 0,
+                    "contender_forwarding_class": "best-effort",
+                    "baseline_dir": "cell/baseline",
+                    "contended_dir": "cell/contended",
+                },
+            )
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=0),
+                during=_status(q2=100),
+                after=_status(q2=200),
+                exact_bps=1_000_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=200),
+                during=_status(q0=100, q2=300),
+                after=_status(q0=200, q2=400),
+                exact_bps=1_000_000_000,
+                contender_bps=1_000_000_000,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(any("expected queue 2 class" in reason for reason in summary["failure_reasons"]))
 
     def test_iperf_parser_prefers_sum_received(self) -> None:
         artifact = {

@@ -61,7 +61,11 @@ The validator fails closed when:
 - any iperf run exits non-zero
 - status snapshots are missing or their capture commands exit non-zero
 - an expected queue has no `drain_sent_bytes` delta
+- any queue has a negative DrainShape counter delta
+- an expected queue's `forwarding_class` does not match the manifest
 - any unexpected queue drains more than `WRONG_QUEUE_SENT_BYTES_TOLERANCE`
+- the contender iperf throughput is below `MIN_CONTENDER_BPS`, because a
+  no-pressure contender cannot prove exact-queue isolation
 - exact+contender throughput drops below exact-alone throughput by more than
   `MAX_EXACT_DROP_RATIO`
 
@@ -71,6 +75,7 @@ Defaults:
 MAX_EXACT_DROP_RATIO=0.15
 WRONG_QUEUE_SENT_BYTES_TOLERANCE=0
 MIN_EXPECTED_SENT_BYTES=1
+MIN_CONTENDER_BPS=100000000
 COS_INTERFACE_NAME=reth0.80
 ```
 

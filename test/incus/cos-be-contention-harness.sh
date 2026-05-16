@@ -35,6 +35,7 @@ CELL_FILTER="${CELL_FILTER:-}"
 MAX_EXACT_DROP_RATIO="${MAX_EXACT_DROP_RATIO:-0.15}"
 WRONG_QUEUE_SENT_BYTES_TOLERANCE="${WRONG_QUEUE_SENT_BYTES_TOLERANCE:-0}"
 MIN_EXPECTED_SENT_BYTES="${MIN_EXPECTED_SENT_BYTES:-1}"
+MIN_CONTENDER_BPS="${MIN_CONTENDER_BPS:-100000000}"
 IPERF_EXTRA_ARGS="${IPERF_EXTRA_ARGS:-}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -230,15 +231,15 @@ class_selected() {
 }
 
 cells=(
-    "exact5202-vs-5200 5202 2 5200 0"
-    "exact5210-vs-5200 5210 10 5200 0"
-    "exact5202-vs-5211 5202 2 5211 11"
-    "exact5210-vs-5211 5210 10 5211 11"
+    "exact5202-vs-5200 5202 2 iperf-1g 5200 0 best-effort"
+    "exact5210-vs-5200 5210 10 iperf-24g 5200 0 best-effort"
+    "exact5202-vs-5211 5202 2 iperf-1g 5211 11 iperf-uncapped"
+    "exact5210-vs-5211 5210 10 iperf-24g 5211 11 iperf-uncapped"
 )
 
 selected_cells=()
 for spec in "${cells[@]}"; do
-    read -r label _exact_port _exact_queue _contender_port _contender_queue <<< "$spec"
+    read -r label _exact_port _exact_queue _exact_class _contender_port _contender_queue _contender_class <<< "$spec"
     if class_selected "$label"; then
         selected_cells+=("$spec")
     fi
@@ -273,14 +274,24 @@ cos_interface_name = sys.argv[2]
 cos_ifindex_raw = sys.argv[3]
 cells = []
 for raw in sys.argv[4:]:
-    label, exact_port, exact_queue, contender_port, contender_queue = raw.split()
+    (
+        label,
+        exact_port,
+        exact_queue,
+        exact_forwarding_class,
+        contender_port,
+        contender_queue,
+        contender_forwarding_class,
+    ) = raw.split()
     cells.append(
         {
             "label": label,
             "exact_port": int(exact_port),
             "exact_queue": int(exact_queue),
+            "exact_forwarding_class": exact_forwarding_class,
             "contender_port": int(contender_port),
             "contender_queue": int(contender_queue),
+            "contender_forwarding_class": contender_forwarding_class,
             "baseline_dir": f"{label}/baseline",
             "contended_dir": f"{label}/contended",
         }
@@ -295,7 +306,7 @@ PY
 
 overall_run_status=0
 for spec in "${selected_cells[@]}"; do
-    read -r label exact_port exact_queue contender_port contender_queue <<< "$spec"
+    read -r label exact_port exact_queue _exact_class contender_port contender_queue _contender_class <<< "$spec"
     cell_dir="$ARTIFACT_ROOT/$label"
     log "cell=$label exact_port=$exact_port exact_queue=$exact_queue contender_port=$contender_port contender_queue=$contender_queue"
     if ! run_phase "$cell_dir/baseline" "$exact_port"; then
@@ -313,7 +324,8 @@ fi
 python3 "$VALIDATOR" "$ARTIFACT_ROOT" \
     --max-exact-drop-ratio "$MAX_EXACT_DROP_RATIO" \
     --wrong-queue-sent-bytes-tolerance "$WRONG_QUEUE_SENT_BYTES_TOLERANCE" \
-    --min-expected-sent-bytes "$MIN_EXPECTED_SENT_BYTES"
+    --min-expected-sent-bytes "$MIN_EXPECTED_SENT_BYTES" \
+    --min-contender-bps "$MIN_CONTENDER_BPS"
 validator_status=$?
 
 log "summary: $ARTIFACT_ROOT/summary.tsv"

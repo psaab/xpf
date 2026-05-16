@@ -21,6 +21,22 @@ from typing import Any
 DEFAULT_MAX_EXACT_DROP_RATIO = 0.15
 DEFAULT_WRONG_QUEUE_SENT_BYTES_TOLERANCE = 0
 DEFAULT_MIN_EXPECTED_SENT_BYTES = 1
+DEFAULT_MIN_CONTENDER_BPS = 100_000_000.0
+
+FORWARDING_CLASS_BY_PORT = {
+    5200: "best-effort",
+    5201: "iperf-100m",
+    5202: "iperf-1g",
+    5203: "iperf-3g",
+    5204: "iperf-6g",
+    5205: "iperf-9g",
+    5206: "iperf-12g",
+    5207: "iperf-15g",
+    5208: "iperf-18g",
+    5209: "iperf-21g",
+    5210: "iperf-24g",
+    5211: "iperf-uncapped",
+}
 
 
 class ValidationError(ValueError):
@@ -60,6 +76,16 @@ def _nonnegative_int(value: Any, field: str) -> int:
     if value < 0:
         raise ValidationError(f"{field} must be non-negative")
     return value
+
+
+def _forwarding_class(raw: Any, port: Any, field: str) -> str:
+    if raw is not None:
+        if not isinstance(raw, str) or raw == "":
+            raise ValidationError(f"{field} must be a non-empty string")
+        return raw
+    if isinstance(port, int) and port in FORWARDING_CLASS_BY_PORT:
+        return FORWARDING_CLASS_BY_PORT[port]
+    raise ValidationError(f"{field} is required for port {port!r}")
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -211,7 +237,7 @@ def _validate_status_capture(phase_dir: Path) -> list[str]:
 def analyze_phase(
     phase_dir: Path,
     *,
-    expected_queues: set[int],
+    expected_queues: dict[int, str],
     interface_name: str | None,
     ifindex: int | None,
     wrong_queue_sent_bytes_tolerance: int,
@@ -227,12 +253,30 @@ def analyze_phase(
     after_shapes = queue_shapes(after_json, interface_name=interface_name, ifindex=ifindex)
     deltas = queue_deltas(before_shapes, after_shapes)
 
+    negative = [
+        delta
+        for delta in deltas.values()
+        if delta.sent_bytes < 0 or delta.park_root < 0 or delta.park_queue < 0
+    ]
+    if negative:
+        formatted = ", ".join(
+            f"q{d.queue_id}=sent:{d.sent_bytes}/root:{d.park_root}/queue:{d.park_queue}"
+            for d in negative
+        )
+        failures.append(f"{phase_dir.name}: negative DrainShape delta: {formatted}")
+
     for queue_id in sorted(expected_queues):
         delta = deltas.get(queue_id, QueueDelta(queue_id, "-", 0, 0, 0))
         if delta.sent_bytes < min_expected_sent_bytes:
             failures.append(
                 f"{phase_dir.name}: expected queue {queue_id} sent_bytes delta "
                 f"{delta.sent_bytes} below {min_expected_sent_bytes}"
+            )
+        expected_class = expected_queues[queue_id]
+        if expected_class and delta.forwarding_class != expected_class:
+            failures.append(
+                f"{phase_dir.name}: expected queue {queue_id} class {expected_class!r}, "
+                f"got {delta.forwarding_class!r}"
             )
 
     wrong = [
@@ -304,7 +348,12 @@ def validate_artifacts(
     max_exact_drop_ratio: float,
     wrong_queue_sent_bytes_tolerance: int,
     min_expected_sent_bytes: int,
+    min_contender_bps: float,
 ) -> dict[str, Any]:
+    min_contender_bps = _finite_nonnegative_number(
+        min_contender_bps,
+        "min_contender_bps",
+    )
     manifest = load_json(root / "manifest.json")
     cells = manifest.get("cells")
     if not isinstance(cells, list) or not cells:
@@ -324,8 +373,20 @@ def validate_artifacts(
         if not isinstance(cell, dict):
             raise ValidationError(f"manifest.cells[{index}] must be an object")
         label = str(cell.get("label") or f"cell-{index}")
+        exact_port = _nonnegative_int(cell.get("exact_port"), f"{label}.exact_port")
         exact_queue = _nonnegative_int(cell.get("exact_queue"), f"{label}.exact_queue")
+        contender_port = _nonnegative_int(cell.get("contender_port"), f"{label}.contender_port")
         contender_queue = _nonnegative_int(cell.get("contender_queue"), f"{label}.contender_queue")
+        exact_forwarding_class = _forwarding_class(
+            cell.get("exact_forwarding_class"),
+            exact_port,
+            f"{label}.exact_forwarding_class",
+        )
+        contender_forwarding_class = _forwarding_class(
+            cell.get("contender_forwarding_class"),
+            contender_port,
+            f"{label}.contender_forwarding_class",
+        )
         baseline_dir = _resolve_phase_dir(root, cell.get("baseline_dir"), f"{label}.baseline_dir")
         contended_dir = _resolve_phase_dir(root, cell.get("contended_dir"), f"{label}.contended_dir")
 
@@ -333,7 +394,7 @@ def validate_artifacts(
         contended_iperf, contended_iperf_failures = analyze_iperf(contended_dir, ("exact", "contender"))
         baseline_phase = analyze_phase(
             baseline_dir,
-            expected_queues={exact_queue},
+            expected_queues={exact_queue: exact_forwarding_class},
             interface_name=interface_name,
             ifindex=ifindex,
             wrong_queue_sent_bytes_tolerance=wrong_queue_sent_bytes_tolerance,
@@ -341,7 +402,10 @@ def validate_artifacts(
         )
         contended_phase = analyze_phase(
             contended_dir,
-            expected_queues={exact_queue, contender_queue},
+            expected_queues={
+                exact_queue: exact_forwarding_class,
+                contender_queue: contender_forwarding_class,
+            },
             interface_name=interface_name,
             ifindex=ifindex,
             wrong_queue_sent_bytes_tolerance=wrong_queue_sent_bytes_tolerance,
@@ -356,6 +420,7 @@ def validate_artifacts(
         )
         baseline_bps = baseline_iperf["exact"]["bps"]
         contended_exact_bps = contended_iperf["exact"]["bps"]
+        contender_bps = contended_iperf["contender"]["bps"]
         minimum_exact_bps = baseline_bps * (1.0 - max_exact_drop_ratio)
         if baseline_bps <= 0:
             cell_failures.append("exact-alone baseline has zero throughput")
@@ -365,6 +430,12 @@ def validate_artifacts(
                 f"to {contended_exact_bps / 1_000_000.0:.3f} Mbps, below "
                 f"{minimum_exact_bps / 1_000_000.0:.3f} Mbps"
             )
+        if contender_bps < min_contender_bps:
+            cell_failures.append(
+                f"contender throughput {contender_bps / 1_000_000.0:.3f} Mbps below "
+                f"{min_contender_bps / 1_000_000.0:.3f} Mbps; contention pressure "
+                "is too low to prove exact isolation"
+            )
 
         if cell_failures:
             failures.extend(f"{label}: {reason}" for reason in cell_failures)
@@ -372,17 +443,20 @@ def validate_artifacts(
         summary_cells.append(
             {
                 "label": label,
-                "exact_port": cell.get("exact_port"),
+                "exact_port": exact_port,
                 "exact_queue": exact_queue,
-                "contender_port": cell.get("contender_port"),
+                "exact_forwarding_class": exact_forwarding_class,
+                "contender_port": contender_port,
                 "contender_queue": contender_queue,
+                "contender_forwarding_class": contender_forwarding_class,
                 "verdict": "PASS" if not cell_failures else "FAIL",
                 "failure_reasons": cell_failures,
                 "throughput": {
                     "baseline_exact_mbps": baseline_bps / 1_000_000.0,
                     "contended_exact_mbps": contended_exact_bps / 1_000_000.0,
-                    "contender_mbps": contended_iperf["contender"]["bps"] / 1_000_000.0,
+                    "contender_mbps": contender_bps / 1_000_000.0,
                     "minimum_contended_exact_mbps": minimum_exact_bps / 1_000_000.0,
+                    "minimum_contender_mbps": min_contender_bps / 1_000_000.0,
                 },
                 "baseline": {
                     "iperf": baseline_iperf,
@@ -402,6 +476,7 @@ def validate_artifacts(
             "max_exact_drop_ratio": max_exact_drop_ratio,
             "wrong_queue_sent_bytes_tolerance": wrong_queue_sent_bytes_tolerance,
             "min_expected_sent_bytes": min_expected_sent_bytes,
+            "min_contender_bps": min_contender_bps,
         },
         "cos_interface_name": interface_name,
         "cos_ifindex": ifindex,
@@ -483,6 +558,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=DEFAULT_MIN_EXPECTED_SENT_BYTES,
     )
+    parser.add_argument(
+        "--min-contender-bps",
+        type=float,
+        default=DEFAULT_MIN_CONTENDER_BPS,
+    )
     return parser.parse_args(argv)
 
 
@@ -494,6 +574,7 @@ def main(argv: list[str]) -> int:
             max_exact_drop_ratio=args.max_exact_drop_ratio,
             wrong_queue_sent_bytes_tolerance=args.wrong_queue_sent_bytes_tolerance,
             min_expected_sent_bytes=args.min_expected_sent_bytes,
+            min_contender_bps=args.min_contender_bps,
         )
     except ValidationError as exc:
         print(f"cos_be_contention_validate: {exc}", file=sys.stderr)
