@@ -7,7 +7,9 @@ exposes session iteration to GC, the CLI, and the metrics surface.
 
 Pluggable: alternative backends (DPDK in `pkg/dataplane/dpdk`, userspace
 AF_XDP in `pkg/dataplane/userspace`) register via `RegisterBackend`. The
-Go interface is the only thing every caller sees.
+current `DataPlane` interface is still BPF-shaped and is scheduled to split
+under #1381; see `docs/pr/1381-dataplane-interface-split/plan.md` before
+adding new methods to it.
 
 The userspace backend's status wire format is mirrored here for CLI/API
 consumers. CoS queue status includes queue-scoped drain-phase counters so
@@ -16,7 +18,9 @@ sent while exact queues were still backlogged.
 
 ## Entry points
 
-- `DataPlane` — `dataplane.go`. Abstract interface.
+- `DataPlane` — `dataplane.go`. Transitional abstract interface; #1381 will
+  replace it with a small root interface plus config, HA, session, telemetry,
+  and link-control domains.
 - `Manager` — `loader.go`. eBPF implementation.
 - `New() *Manager` — `loader.go`.
 - `Compile(cfg *config.Config) (*CompileResult, error)` — multi-phase
