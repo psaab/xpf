@@ -2,7 +2,7 @@
 
 Status: design-plan bundle for #1373 blockers. These docs convert the
 reviewed issue contracts into implementation plans for the code PRs that must
-land before Phase 4 removes the legacy eBPF dataplane.
+land before their listed #1373 retirement phase.
 
 ## Blocker Index
 

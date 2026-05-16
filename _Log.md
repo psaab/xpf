@@ -46,6 +46,11 @@
   - **Action**: PR #1383 round-1 review follow-up — removed backend-specific userspace DTOs from the proposed public session-delta interface to avoid a `pkg/dataplane` ↔ `pkg/dataplane/userspace` import cycle, added the missing caller inventory, and documented compatibility, risk, architectural-mismatch, import-canary, and Phase 1 acceptance gates.
   - **File(s)**: `docs/pr/1381-dataplane-interface-split/plan.md`, `_Log.md`
 
+- **Timestamp**: 2026-05-17T00:59:00Z
+  - **Action**: PR #1384 round-3 review follow-up — changed the blocker-plan bundle introduction to say plans land before their listed #1373 retirement phase, avoiding a Phase 4 blanket statement now that #1380 is a Phase 5 observability blocker.
+  - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/README.md`, `_Log.md`
+  - **Validation**: `git diff --check`
+
 - **Timestamp**: 2026-05-17T00:24:00Z
   - **Action**: PR #1384 round-2 review follow-up — aligned #1380 with the Phase 5 observability gate, and made the #1377 plan explicitly cover address-persistent SNAT pool selection plus current userspace/eBPF/DPDK algorithm divergence and required compatibility fixtures.
   - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/README.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1377-snat-pools.md`, `_Log.md`
