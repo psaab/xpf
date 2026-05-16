@@ -31,6 +31,25 @@ smaller than the current interface: lifecycle/config, HA/fabric, session
 lookup/iteration, events, scheduler state, link-cycle hooks, and a few
 userspace-only optional interfaces.
 
+## Current caller inventory
+
+The split must move real callers, not only reshape `pkg/dataplane` in
+isolation. The current consumers are:
+
+| Consumer | Current dependency | Target domain |
+|---|---|---|
+| `pkg/api/server.go` (`Config.DP`, `Server.dp`) | REST handlers and metrics read sessions, counters, events, NAT/policy/filter state, and userspace status through `dataplane.DataPlane`. | `Telemetry`, `SessionStore`, plus an explicit userspace status/control extension kept out of the root interface. |
+| `pkg/grpcapi/server.go` (`Config.DP`, `Server.dp`) | gRPC show/monitor/control paths read generic counters and type-assert userspace status/control DTOs. | `Telemetry`, `SessionStore`, `LinkController`, and a backend-specific userspace control adapter. |
+| `pkg/cli/cli.go` (`CLI.dp`) | Operational commands read sessions/counters/events and some userspace-only status surfaces. | CLI should consume gRPC for remote operation; in-process CLI should use `Telemetry`, `SessionStore`, and explicit optional userspace diagnostic interfaces. |
+| `pkg/conntrack/gc.go` (`GC.dp`) | GC iterates/deletes BPF session maps and pushes per-IP session-limit state. | `SessionStore` for iteration/delete/count. Per-IP screen/session-limit publish remains backend-private config/state work. |
+| `pkg/cluster/sync.go` (`SessionSync.dp`) | HA sync exports/imports sessions, installs cluster-synced entries, and type-asserts userspace sweep-profile hooks. | `SessionStore` for install/delete/export and a narrow `SessionDeltaSource` adapter hanging off the session domain. |
+| Daemon HA/fabric/apply code | Calls `UpdateRGActive`, `UpdateHAWatchdog`, `UpdateFabricFwd`, `UpdateFabricFwd1`, `SyncFabricState`, BPF writers, scheduler updates, and userspace link-cycle hooks. | `HAController`, `ConfigSink`, `LinkController`; BPF writers stay inside the eBPF backend. |
+| Metrics/API/CLI session and counter readers | Mix map-backed eBPF counters, helper JSON status, and userspace formatting DTOs. | `Telemetry` owns generic counters/events; userspace-only formatting remains an extension with adapter-local DTO conversion. |
+
+Each migration phase must name which rows it removes from the old root
+`DataPlane`; otherwise the root interface can shrink on paper while callers
+keep depending on the BPF-shaped surface through side assertions.
+
 ## Stub mode rejection
 
 Stub mode is rejected for production and for the #1373 Phase 4 path.
@@ -151,12 +170,39 @@ Userspace session deltas remain an optional extension until the generic event
 stream can carry the same information:
 
 ```go
+// Package pkg/dataplane/runtime, not pkg/dataplane/userspace.
+type SessionDelta struct {
+	Family      SessionFamily
+	Key         SessionIdentity
+	Value       SessionState
+	OwnerRGID   int
+	Reason      SessionDeltaReason
+	Generation  uint64
+}
+
+type SessionDeltaSnapshot struct {
+	Deltas        []SessionDelta
+	Status        RuntimeStatus
+	BackendEpoch  uint64
+	Truncated     bool
+}
+
 type SessionDeltaSource interface {
-	DrainSessionDeltas(max uint32) ([]userspace.SessionDeltaInfo, userspace.ProcessStatus, error)
-	ExportOwnerRGSessions(rgIDs []int, max uint32) ([]userspace.SessionDeltaInfo, userspace.ProcessStatus, error)
+	DrainSessionDeltas(max uint32) (SessionDeltaSnapshot, error)
+	ExportOwnerRGSessions(rgIDs []int, max uint32) (SessionDeltaSnapshot, error)
 	SessionSyncSweepProfile() (enabled bool, fast, slow time.Duration)
 }
 ```
+
+These DTOs must live in the same package as the abstract runtime interfaces or
+in a third leaf package imported by both `pkg/dataplane` and
+`pkg/dataplane/userspace`. The public interface must not reference
+`userspace.SessionDeltaInfo`, `userspace.ProcessStatus`, or any other
+`pkg/dataplane/userspace` type. Otherwise `pkg/dataplane` gains a reverse import
+on one backend while `pkg/dataplane/userspace` already imports `pkg/dataplane`,
+creating a package cycle and making the abstraction unusable. The userspace
+manager should adapt its helper protocol DTOs to these runtime DTOs at the
+backend boundary.
 
 `Telemetry` owns events and counters:
 
@@ -176,6 +222,26 @@ type Telemetry interface {
 
 Counter reset/seed methods are backend-private lifecycle/config work. Raw
 `Map(name)` is not exposed by the abstract interface.
+
+## Architectural mismatch with prior split work
+
+This plan is intentionally narrower than the earlier map-ownership and
+userspace-retirement plans:
+
+- #961-style map ownership plans move individual BPF maps to clearer owners.
+  This plan removes map writers from the daemon-facing abstraction entirely;
+  backend-private eBPF maps may remain after the root interface split.
+- #946 Phase 2 work focused on userspace state parity while eBPF remained a
+  compatibility substrate. This plan defines the package/interface boundary
+  that lets that state parity become the only daemon dependency.
+- #964 Step 3-style cleanup deletes residual userspace/eBPF coupling once
+  features are already owned by the userspace backend. This plan is the
+  prerequisite contract that prevents new callers from reintroducing that
+  coupling during #1373.
+
+Do not treat any of those patterns as an implicit implementation of this plan:
+the acceptance gate here is caller migration off the BPF-shaped root interface,
+not only map cleanup or feature parity.
 
 ## Daemon migration
 
@@ -286,6 +352,40 @@ Phase 5: eBPF source retirement gate for #1373.
   #1378, #1379, and the #1380 telemetry decision are satisfied.
 - Keep only the minimal AF_XDP/XDP shim code if still required for redirect.
 
+## Compatibility matrix
+
+| Surface | Required compatibility during split |
+|---|---|
+| REST API | Existing `/api/v1` responses must stay wire-compatible. Handler internals may move from `DataPlane` to `Telemetry`/`SessionStore`, but JSON names and counter/session semantics must not change without a versioned API note. |
+| gRPC API | Existing protobuf messages and service methods stay stable. Userspace-only operational controls may use adapter-local interfaces, but generated protobuf DTOs must not import backend packages. |
+| CLI | Local and remote CLI output must stay equivalent. In-process CLI can depend on runtime domains; remote CLI should continue to prefer gRPC so command behavior does not depend on whether it runs inside `xpfd`. |
+| Cluster session sync | Session install/delete/export semantics must be unchanged across mixed-version peers until the HA compatibility version is explicitly bumped. Any new `SessionDeltaSnapshot` fields must have zero-value behavior. |
+| Metrics | Metric names, labels, and counter/gauge types stay stable. Backend-local counter resets must not leak through a domain-interface migration. |
+| Config-only and compile-failed mode | `show`, `commit check`, and API health paths must not require a live userspace helper unless the old path already did. `ApplyConfig` errors must leave `LastApplyResult` at the last successful generation. |
+
+## Risks and invariants
+
+- Stale handles: callers may cache `d.dp.Sessions()` or `d.dp.Telemetry()`.
+  Domain objects must either remain valid across config apply or fail with a
+  typed stale-generation error that forces the caller to reacquire them.
+- Lifetime ordering: `Close`, `Teardown`, helper restart, and HA demotion must
+  not race with outstanding session/counter readers. Interfaces that return
+  snapshots must copy data or document a generation-bound lifetime.
+- Atomic apply visibility: `ApplyConfig` must publish config, capability,
+  session, counter, and shim-map generations in an order where readers see
+  either the old complete generation or the new complete generation, not a
+  hybrid.
+- Replay windows: HA `SessionDeltaSource` exports must carry a backend epoch or
+  monotonically increasing generation so reconnect/retry paths do not replay a
+  stale delete over a newer create.
+- Backend escape hatches: optional userspace controls are allowed only as leaf
+  adapter interfaces. They must not become methods on the root `DataPlane`,
+  because that recreates a userspace-shaped root after removing the BPF-shaped
+  one.
+- Failure attribution: migration code must distinguish unsupported backend
+  capability from transient helper failure. Silent no-op adapters are
+  forbidden outside tests.
+
 ## Tests and canaries
 
 Required during the split:
@@ -297,6 +397,9 @@ Required during the split:
   pre-split form that records the current debt.
 - Interface method-count canary: the exported root `DataPlane` interface has
   at most 15 methods after Phase 1.
+- Import canary: the abstract dataplane/runtime package must not import
+  `pkg/dataplane/userspace`, and backend packages must adapt their private DTOs
+  at the package boundary.
 - Negative userspace compile canary: userspace code cannot call eBPF-only
   writer methods through the abstract dataplane.
 - Session parity tests: eBPF and userspace `SessionStore` produce equivalent
@@ -327,3 +430,17 @@ Operational canaries:
 - Replacing AF_XDP/XDP shim attachment.
 - Implementing #1374 through #1380 feature parity.
 - Making userspace manager independent of `*dataplane.Manager` in this patch.
+
+## Phase 1 acceptance gate
+
+Phase 1 is not complete until all of these are true:
+
+- the root interface compiles without importing any backend package;
+- the caller inventory above has an owner row for every remaining old
+  `dataplane.DataPlane` call site;
+- adapters preserve REST, gRPC, CLI, metrics, cluster sync, and config-only
+  behavior from the compatibility matrix;
+- tests include import, method-count, negative-writer, and stale-generation
+  canaries; and
+- rollback is documented as switching the daemon back to the existing
+  `dataplane.DataPlane` adapter without changing persistent config format.

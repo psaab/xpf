@@ -32,6 +32,11 @@
   - **File(s)**: `pkg/dataplane/userspace/cosfmt.go`, `pkg/dataplane/userspace/cosfmt_test.go`, `_Log.md`
   - **Validation**: `go test ./pkg/dataplane/userspace`; `git diff --check`
 
+- **Timestamp**: 2026-05-16T23:10:00Z
+  - **Action**: PR #1383 round-1 review follow-up — removed backend-specific userspace DTOs from the proposed public session-delta interface to avoid a `pkg/dataplane` ↔ `pkg/dataplane/userspace` import cycle, added the missing caller inventory, and documented compatibility, risk, architectural-mismatch, import-canary, and Phase 1 acceptance gates.
+  - **File(s)**: `docs/pr/1381-dataplane-interface-split/plan.md`, `_Log.md`
+  - **Validation**: `git diff --check`
+
 - **Timestamp**: 2026-05-16T04:36:00Z
   - **Action**: PR #1320 round-3 review fixes — validate typed scheduler leaves against the apply-groups-expanded tree before compile; reject `transmit-rate exact` unless the scheduler also has a typed rate; wire `ConfigClassOfServiceSchedulers` into the real config-mode `set class-of-service schedulers <name>` completion tree; update module docs to keep the byte-size-only scheduler buffer contract explicit.
   - **File(s)**: `pkg/cmdtree/schema_validate.go`, `pkg/cmdtree/tree.go`, `pkg/cmdtree/tree_test.go`, `pkg/cmdtree/README.md`, `pkg/config/schema_validate_test.go`, `pkg/config/README.md`, `pkg/configstore/store.go`, `pkg/configstore/store_test.go`, `_Log.md`
