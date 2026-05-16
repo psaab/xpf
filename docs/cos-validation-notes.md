@@ -45,6 +45,45 @@ snapshot carries a different alias for the same ifindex; the ifindex fallback
 keeps those reverse-path counters visible instead of reporting
 `Runtime: unavailable`.
 
+`show chassis cluster data-plane userspace` also prints an aggregate CoS
+admission attribution beside the generic `TX errors` counter:
+
+```
+TX errors:                 332019
+TX errors non-admission:   50
+CoS queue drops lifetime:  331969
+CoS admission drops:       331969
+CoS flow-share drops:      111471
+CoS buffer drops:          220498
+CoS ECN marked:            16496600
+TX shared recycle unk:     0
+```
+
+`TX errors` remains the generic superset used by the dataplane's error
+paths. CoS admission drops intentionally still increment it because a packet
+was not transmitted, but the adjacent `TX errors non-admission` line subtracts
+the binding-scoped `CoS queue drops lifetime` counter from the binding-scoped
+`TX errors` counter so AF_XDP/ring/shared-UMEM failures are not confused with
+expected shaper backpressure. Those two counters share the same lifetime and
+survive CoS config resets. The binding-scoped CoS subset includes admission
+rejects and reset-time CoS queue drains.
+
+The formatter deliberately does not subtract the current-runtime
+`CoS admission drops` reason split from `TX errors`; those reason counters live
+on the active CoS runtime and reset on CoS config commits. If the
+binding-scoped CoS subset briefly appears larger than `TX errors` during a
+publication window, the formatter clamps `TX errors non-admission` to zero.
+Treat that as sample skew unless it persists across later snapshots.
+
+The summary `CoS admission drops`, `CoS flow-share drops`, `CoS buffer drops`,
+and `CoS ECN marked` lines are aggregate sums across the current CoS runtime's
+interfaces and queues. They are useful for explaining the active scheduler
+epoch, but they can reset after a CoS config commit. If `CoS queue drops
+lifetime` is larger than the current reason split, a prior epoch or reset-time
+queue drain likely contributed. Treat non-zero lifetime CoS queue drops as a
+shaping or buffering question first; treat non-zero non-admission TX errors as
+the higher-severity transmit-path question.
+
 ### Reading them during an iperf3 run
 
 ```bash

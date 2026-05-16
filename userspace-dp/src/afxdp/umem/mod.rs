@@ -464,12 +464,13 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// single `dbg_pending_overflow` that conflated the two sites; that
     /// wire key was removed in #804 in favor of the split names.
     pub(super) dbg_bound_pending_overflow: AtomicU64,
-    /// #804: class-of-service queue admission overflow counter —
-    /// incremented in `enqueue_cos_item()` when the CoS admission gate
-    /// rejects the item (flow-share cap + buffer cap exhausted) but the
-    /// caller still needs to account the drop. Separate from
+    /// #804/#1315: binding-lifetime class-of-service queue drop counter.
+    /// Incremented for admission rejects in `enqueue_cos_item()` (flow-share
+    /// cap + buffer cap exhausted) and for reset-time CoS queue drains in
+    /// `reset_binding_cos_runtime()`. Separate from
     /// `dbg_bound_pending_overflow` so operators can disambiguate
-    /// bound-pending pressure from CoS shaping pressure at triage time.
+    /// bound-pending pressure from CoS shaping pressure at triage time. The
+    /// wire key is historical.
     pub(super) dbg_cos_queue_overflow: AtomicU64,
     /// #802: kernel XDP statistics v2 `rx_fill_ring_empty_descs` — the
     /// kernel's native cumulative counter of RX fill-ring starvation

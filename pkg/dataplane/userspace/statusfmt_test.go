@@ -143,7 +143,7 @@ func TestFormatStatusSummaryWorkerRuntimeRolling60sColumn(t *testing.T) {
 	out := FormatStatusSummary(status)
 	for _, want := range []string{
 		"CPU%60s",
-		"75.0",     // 45/60 = 75% on worker 0's rolling window
+		"75.0", // 45/60 = 75% on worker 0's rolling window
 		"DEAD - panicked: boom",
 	} {
 		if !strings.Contains(out, want) {
@@ -194,6 +194,95 @@ func TestFormatStatusSummaryDoesNotCountDisabledSharedUMEMFallback(t *testing.T)
 	out := FormatStatusSummary(status)
 	if !strings.Contains(out, "Shared UMEM bindings:      1/2") {
 		t.Fatalf("summary counted disabled shared UMEM fallback:\n%s", out)
+	}
+}
+
+func TestFormatStatusSummaryAttributesCoSAdmissionTXErrors(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{TXErrors: 100, DbgCoSQueueOverflow: 50},
+		},
+		CoSInterfaces: []CoSInterfaceStatus{
+			{
+				Queues: []CoSQueueStatus{
+					{AdmissionFlowShareDrops: 3, AdmissionBufferDrops: 2, AdmissionEcnMarked: 7},
+					{AdmissionFlowShareDrops: 1, AdmissionBufferDrops: 4, AdmissionEcnMarked: 11},
+				},
+			},
+		},
+	}
+
+	out := FormatStatusSummary(status)
+	for _, want := range []string{
+		"TX errors:                 100",
+		"TX errors non-admission:   50",
+		"CoS queue drops lifetime:  50",
+		"CoS admission drops:       10",
+		"CoS flow-share drops:      4",
+		"CoS buffer drops:          6",
+		"CoS ECN marked:            18",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatStatusSummaryUsesBindingLifetimeForCoSErrorResidual(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{TXErrors: 100, DbgCoSQueueOverflow: 80},
+		},
+		CoSInterfaces: []CoSInterfaceStatus{
+			{
+				Queues: []CoSQueueStatus{
+					{AdmissionFlowShareDrops: 5, AdmissionBufferDrops: 5},
+				},
+			},
+		},
+	}
+
+	out := FormatStatusSummary(status)
+	for _, want := range []string{
+		"TX errors:                 100",
+		"TX errors non-admission:   20",
+		"CoS queue drops lifetime:  80",
+		"CoS admission drops:       10",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing binding-lifetime attribution %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "TX errors non-admission:   90") {
+		t.Fatalf("summary used current-runtime CoS reason counters for lifetime residual:\n%s", out)
+	}
+}
+
+func TestFormatStatusSummarySaturatesCoSAdmissionAttribution(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{TXErrors: 1, DbgCoSQueueOverflow: 2},
+		},
+		CoSInterfaces: []CoSInterfaceStatus{
+			{
+				Queues: []CoSQueueStatus{
+					{AdmissionFlowShareDrops: ^uint64(0) - 1, AdmissionBufferDrops: 10},
+				},
+			},
+		},
+	}
+
+	out := FormatStatusSummary(status)
+	for _, want := range []string{
+		"TX errors non-admission:   0",
+		"CoS queue drops lifetime:  2",
+		"CoS admission drops:       18446744073709551615",
+		"CoS flow-share drops:      18446744073709551614",
+		"CoS buffer drops:          10",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing saturated attribution %q:\n%s", want, out)
+		}
 	}
 }
 

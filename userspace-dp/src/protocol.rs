@@ -1660,12 +1660,13 @@ pub(crate) struct BindingStatus {
 ///   `bound_pending` FIFO (`pending_tx_local` / `pending_tx_prepared`)
 ///   overflowing its soft cap. **This does not include CoS admission
 ///   overflow** — those are counted separately below.
-/// - `dbg_cos_queue_overflow` (#804): drops from the class-of-service
-///   queue admission gate (`enqueue_cos_item`) when the CoS shaping
-///   path rejects the item. Pre-#804 builds conflated this with
-///   `bound_pending` overflow under the old `dbg_pending_overflow` wire
-///   key; the counter was split so operators can disambiguate shaping
-///   pressure from bound-pending pressure.
+/// - `dbg_cos_queue_overflow` (#804): binding-lifetime CoS queue drops.
+///   This includes class-of-service queue admission rejects
+///   (`enqueue_cos_item`) and reset-time CoS queue drains. The wire key is
+///   historical. Pre-#804 builds conflated this with `bound_pending`
+///   overflow under the old `dbg_pending_overflow` wire key; the counter was
+///   split so operators can disambiguate shaping pressure from bound-pending
+///   pressure.
 /// - `rx_fill_ring_empty_descs`: kernel `xdp_statistics_v2` counter of
 ///   RX fill-ring starvation events.
 /// - `outstanding_tx`: accept-proxy for `completion_reap_max_batch` per
