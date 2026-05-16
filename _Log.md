@@ -7,6 +7,11 @@
   - **File(s)**: `README.md`, `_Log.md`
   - **Validation**: `git diff --check`
 
+- **Timestamp**: 2026-05-17T01:03:00Z
+  - **Action**: PR #1382 round-3 rebase follow-up — aligned the Phase 0 audit with the now-merged #1385 pool-mode SNAT fixes, and kept #1377 as the remaining cross-backend `address-persistent` parity blocker.
+  - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/plan.md`, `_Log.md`
+  - **Validation**: `git diff --check`
+
 - **Timestamp**: 2026-05-16T23:58:00Z
   - **Action**: PR #1385 round-2 review follow-up — made Rust pool-mode SNAT skip matched rules whose pool has no address for the packet family so later compatible rules can apply, added wrong-family regression tests, and documented userspace/eBPF/DPDK address-persistent algorithm divergence until #1377 defines a shared contract.
   - **File(s)**: `userspace-dp/src/nat.rs`, `userspace-dp/src/nat_tests.rs`, `docs/userspace-dataplane-architecture.md`, `docs/userspace-dataplane-gaps.md`, `README.md`, `_Log.md`
