@@ -1,13 +1,20 @@
 # pkg/daemon
 
-Daemon lifecycle and orchestration. Loads eBPF, applies compiled config
-to all subsystems (routing, NAT, DHCP, cluster, …), handles signals
+Daemon lifecycle and orchestration. Loads the configured dataplane backend,
+applies compiled config to all subsystems (routing, NAT, DHCP, cluster, ...),
+handles signals
 (SIGHUP reload, SIGTERM shutdown), and wires the commit-atomicity
 semaphore (#846) so `Store.Commit()` and `applyConfig()` always run
 together.
 
 This is the package `cmd/xpfd` instantiates. It depends on essentially
 every other internal package.
+
+The daemon currently stores dataplane backends behind the transitional
+BPF-shaped `dataplane.DataPlane` interface. #1381 will replace that with
+domain interfaces for config, HA/fabric, sessions, telemetry, and link-cycle
+hooks; the actionable plan is in
+`docs/pr/1381-dataplane-interface-split/plan.md`.
 
 ## Entry points
 
