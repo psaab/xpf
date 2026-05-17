@@ -7,6 +7,14 @@
   - **File(s)**: `pkg/daemon/daemon_ha_userspace.go`, `pkg/daemon/userspace_sync_test.go`, `_Log.md`
   - **Validation**: `gofmt -w pkg/daemon/daemon_ha_userspace.go pkg/daemon/userspace_sync_test.go`; `go test ./pkg/daemon ./pkg/dataplane/userspace ./pkg/logging`; `git diff --check`
 
+- **Timestamp**: 2026-05-17T06:39:00Z
+  - **Action**: PR #1376 housekeeping — restored `go.mod` after an unintended direct/indirect dependency classification flip from automation so this branch remains scoped to mirror snapshot fixes.
+  - **File(s)**: `go.mod`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T06:45:00Z
+  - **Action**: PR #1376 re-review follow-up — renamed the mirror snapshot fail-closed wrapper to match behavior, rejected negative port-mirroring input rates before uint32 conversion to prevent wraparound, and updated mirror protocol/build tests accordingly.
+  - **File(s)**: `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/protocol_test.go`, `pkg/dataplane/userspace/manager_test.go`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T05:06:00Z
   - **Action**: PR #1395 cleanup — reverted an unintended `go.mod` direct/indirect dependency classification change introduced by automated tooling so the round-4 fix stays scoped to three-color policer compiler logic/tests/docs.
   - **File(s)**: `go.mod`, `_Log.md`
