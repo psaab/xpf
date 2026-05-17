@@ -372,8 +372,8 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// #1376: full L2 bytes copied into admitted mirror clones.
     pub(super) mirrored_bytes: AtomicU64,
     /// #1376: mirror clone dropped for frame-unavailable outcomes:
-    /// oversized packet (`len > tx_frame_capacity()`), TX-frame
-    /// reserve exhausted, or UMEM slice failure while cloning.
+    /// oversized packet (`len > tx_frame_capacity()`) or UMEM slice
+    /// failure while cloning.
     pub(super) mirror_drops_no_frame: AtomicU64,
     /// #1376: mirror clone dropped specifically to preserve the
     /// output binding's owner-local TX-frame reserve. Split from

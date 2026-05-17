@@ -12,6 +12,11 @@
   - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/README.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1377-snat-pools.md`, `userspace-dp/tests/snat_contract_doc_guard.rs`, `_Log.md`
   - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml --test snat_contract_doc_guard`; `rustfmt --edition 2024 --check userspace-dp/tests/snat_contract_doc_guard.rs`; `git diff --check`
 
+- **Timestamp**: 2026-05-17T22:36:08Z
+  - **Action**: PR #1408 r5 re-review follow-up — corrected mirror counter doc wording so `mirror_drops_no_frame` no longer claims TX-frame-reserve drops (those now have dedicated `mirror_drops_tx_frame_reserve` telemetry).
+  - **File(s)**: `userspace-dp/src/afxdp/umem/mod.rs`, `_Log.md`
+  - **Validation**: `go test ./pkg/dataplane/userspace`; `cargo test --manifest-path userspace-dp/Cargo.toml mirror::` (expected environment failure: missing libelf headers/pkg-config); `git diff --check`
+
 - **Timestamp**: 2026-05-17T15:28:13Z
   - **Action**: PR #1397 follow-up — fixed mouse-latency diagnostics review findings by making `cwnd_settle_ok` tri-state in manifests (unknown/true/false), correcting cwnd byte-unit parsing to 1024-based `K/M/G/TBytes`, recording probe phase timings even on failed/timed-out connect/drain/read attempts, tightening fairness-regimes settle-evidence wording, and extending unit coverage for settle-diagnostics CLI output/status and failure-phase timing counts.
   - **File(s)**: `test/incus/test-mouse-latency.sh`, `test/incus/mouse_latency_orchestrate.py`, `test/incus/mouse_latency_orchestrate_test.py`, `test/incus/mouse_latency_probe.py`, `test/incus/mouse_latency_probe_test.py`, `test/incus/test_mouse_latency_shell_test.py`, `docs/fairness-regimes.md`, `_Log.md`
