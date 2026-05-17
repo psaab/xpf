@@ -10,10 +10,16 @@ fn snat_contract_documents_current_fail_open_runtime() {
         .parent()
         .expect("userspace-dp should live directly under the repo root");
     let plan_path = repo_root.join("docs/pr/1373-retire-ebpf-dataplane/plan-1377-snat-pools.md");
+    let architecture_path = repo_root.join("docs/userspace-dataplane-architecture.md");
+    let gaps_path = repo_root.join("docs/userspace-dataplane-gaps.md");
     let poll_path = manifest_dir.join("src/afxdp/poll_descriptor.rs");
 
     let plan = fs::read_to_string(&plan_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {}", plan_path.display(), e));
+    let architecture = fs::read_to_string(&architecture_path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {}", architecture_path.display(), e));
+    let gaps = fs::read_to_string(&gaps_path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {}", gaps_path.display(), e));
     let poll = fs::read_to_string(&poll_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {}", poll_path.display(), e));
 
@@ -50,6 +56,9 @@ fn snat_contract_documents_current_fail_open_runtime() {
         "{} should enumerate the same number of poll_descriptor.rs source-NAT call sites as the code ({call_lines:?})",
         plan_path.display()
     );
+
+    assert_current_capability_doc_matches_fail_open_contract(&architecture_path, &architecture);
+    assert_current_capability_doc_matches_fail_open_contract(&gaps_path, &gaps);
 }
 
 fn source_nat_call_lines(source: &str) -> Vec<usize> {
@@ -72,6 +81,37 @@ fn assert_each_source_nat_call_falls_through_default(source: &str, call_lines: &
         assert!(
             window.contains(".unwrap_or_default()"),
             "source-NAT call at poll_descriptor.rs:{line_no} no longer falls through unwrap_or_default(); update the #1377 contract"
+        );
+    }
+}
+
+fn assert_current_capability_doc_matches_fail_open_contract(path: &Path, doc: &str) {
+    for required in [
+        "Source NAT",
+        "pool",
+        "runtime remains fail-open",
+        "poll_descriptor.rs",
+        "source-NAT call sites",
+    ] {
+        assert!(
+            doc.contains(required),
+            "{} must mention {:?} so current capability docs match the #1377 runtime contract",
+            path.display(),
+            required
+        );
+    }
+
+    for stale in [
+        "fail-closed admission",
+        "fail-closed pool admission",
+        "landed userspace-v1 pool selection and fail-closed",
+        "landed deterministic userspace selection and fail-closed",
+    ] {
+        assert!(
+            !doc.contains(stale),
+            "{} still contains stale SNAT pool fail-closed wording: {:?}",
+            path.display(),
+            stale
         );
     }
 }
