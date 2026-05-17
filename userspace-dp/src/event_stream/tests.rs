@@ -3,9 +3,10 @@
 // LOC threshold. Loaded as a sibling submodule via
 // `#[path = "tests.rs"]` from mod.rs.
 
-use super::codec::MSG_FULL_RESYNC;
+use super::codec::{DataplaneEventKind, DataplaneEventPayload, MSG_FULL_RESYNC};
 use super::*;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr};
 
 fn build_raw_ack_frame(seq: u64) -> [u8; FRAME_HEADER_SIZE] {
     let mut buf = [0u8; FRAME_HEADER_SIZE];
@@ -15,6 +16,35 @@ fn build_raw_ack_frame(seq: u64) -> [u8; FRAME_HEADER_SIZE] {
     // reserved bytes 5..8 stay zero
     buf[8..16].copy_from_slice(&seq.to_le_bytes());
     buf
+}
+
+fn test_dataplane_event(kind: DataplaneEventKind, ingress_zone_id: u16) -> DataplaneEventPayload {
+    DataplaneEventPayload {
+        kind,
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        action: 0,
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        src_port: 12345,
+        dst_port: 443,
+        nat_src_ip: None,
+        nat_dst_ip: None,
+        nat_src_port: 0,
+        nat_dst_port: 0,
+        ingress_zone_id,
+        egress_zone_id: 9,
+        ingress_ifindex: 42,
+        policy_id: 101,
+        rule_id: 202,
+        term_id: 303,
+        reason: 5,
+        owner_rg_id: 1,
+        application_id: 404,
+        filter_id: 505,
+        screen_id: 606,
+        timestamp_ns: 123_456_789,
+    }
 }
 
 #[test]
@@ -117,6 +147,166 @@ fn test_channel_backpressure() {
     assert!(!handle.try_send(frame));
     assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 2);
     assert_eq!(shared.frames_dropped.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn dataplane_event_budget_stays_held_after_connected_loop_drains_channel() {
+    let (mut daemon_side, helper_side) = std::os::unix::net::UnixStream::pair().unwrap();
+    daemon_side
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    helper_side.set_nonblocking(true).unwrap();
+
+    let capacity = 1;
+    let (tx, rx) = mpsc::sync_channel::<EventFrame>(capacity);
+    let shared = Arc::new(
+        EventStreamShared::new_with_dataplane_event_rate_and_queue_capacity(
+            DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+            },
+            capacity,
+        ),
+    );
+    let handle = EventStreamWorkerHandle {
+        tx,
+        shared: shared.clone(),
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+
+    assert_eq!(
+        handle.try_emit_dataplane_event_at(
+            test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
+            0
+        ),
+        DataplaneEventEmitOutcome::Queued { seq: 1 }
+    );
+
+    let loop_shared = shared.clone();
+    let loop_stop = stop.clone();
+    let loop_join = thread::spawn(move || {
+        let mut replay_buf: VecDeque<EventFrame> = VecDeque::with_capacity(REPLAY_BUFFER_CAPACITY);
+        let mut ctrl_read_buf: Vec<u8> = Vec::new();
+        let reconnect = run_connected_loop(
+            &rx,
+            &helper_side,
+            &loop_shared,
+            &loop_stop,
+            &mut replay_buf,
+            &mut ctrl_read_buf,
+        );
+        drain_remaining(&rx, &loop_shared);
+        release_replay_dataplane_event_queue_budget(&loop_shared, &mut replay_buf);
+        reconnect
+    });
+
+    let mut hdr = [0u8; FRAME_HEADER_SIZE];
+    daemon_side
+        .read_exact(&mut hdr)
+        .expect("dataplane frame header");
+    let payload_len = u32::from_le_bytes(hdr[0..4].try_into().unwrap()) as usize;
+    let mut payload = vec![0u8; payload_len];
+    daemon_side
+        .read_exact(&mut payload)
+        .expect("dataplane frame payload");
+
+    assert_eq!(
+        handle.try_emit_dataplane_event_at(
+            test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
+            0
+        ),
+        DataplaneEventEmitOutcome::Dropped {
+            reason: DataplaneEventDropReason::QueueFull
+        },
+        "draining the mpsc channel into replay must not release telemetry budget"
+    );
+
+    daemon_side
+        .write_all(&build_raw_ack_frame(1))
+        .expect("send ACK");
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        match handle
+            .try_emit_dataplane_event_at(test_dataplane_event(DataplaneEventKind::PolicyDeny, 7), 0)
+        {
+            DataplaneEventEmitOutcome::Queued { seq: 2 } => break,
+            DataplaneEventEmitOutcome::Dropped {
+                reason: DataplaneEventDropReason::QueueFull,
+            } if Instant::now() < deadline => thread::sleep(Duration::from_millis(1)),
+            other => panic!("telemetry budget should release after ACK, got {other:?}"),
+        }
+    }
+
+    stop.store(true, Ordering::Release);
+    assert!(
+        !loop_join.join().expect("connected loop thread"),
+        "test loop should stop without requesting reconnect"
+    );
+}
+
+#[test]
+fn dataplane_event_budget_releases_when_replay_eviction_drops_frame() {
+    let capacity = 1;
+    let (tx, rx) = mpsc::sync_channel::<EventFrame>(capacity);
+    let shared = Arc::new(
+        EventStreamShared::new_with_dataplane_event_rate_and_queue_capacity(
+            DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+            },
+            capacity,
+        ),
+    );
+    let handle = EventStreamWorkerHandle {
+        tx,
+        shared: shared.clone(),
+    };
+
+    assert_eq!(
+        handle.try_emit_dataplane_event_at(
+            test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
+            0
+        ),
+        DataplaneEventEmitOutcome::Queued { seq: 1 }
+    );
+    let frame = rx.try_recv().expect("queued dataplane frame");
+    let mut replay_buf: VecDeque<EventFrame> = VecDeque::with_capacity(REPLAY_BUFFER_CAPACITY);
+    push_replay_frame(&shared, &mut replay_buf, frame);
+
+    assert_eq!(
+        handle.try_emit_dataplane_event_at(
+            test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
+            0
+        ),
+        DataplaneEventEmitOutcome::Dropped {
+            reason: DataplaneEventDropReason::QueueFull
+        }
+    );
+
+    for seq in 2..=REPLAY_BUFFER_CAPACITY as u64 {
+        push_replay_frame(
+            &shared,
+            &mut replay_buf,
+            EventFrame::encode_drain_complete(seq),
+        );
+    }
+    push_replay_frame(
+        &shared,
+        &mut replay_buf,
+        EventFrame::encode_drain_complete(REPLAY_BUFFER_CAPACITY as u64 + 1),
+    );
+
+    assert_eq!(
+        handle.try_emit_dataplane_event_at(
+            test_dataplane_event(DataplaneEventKind::PolicyDeny, 7),
+            0
+        ),
+        DataplaneEventEmitOutcome::Queued { seq: 2 },
+        "replay eviction is a definitive drop and must release telemetry budget"
+    );
+
+    drain_remaining(&rx, &shared);
+    release_replay_dataplane_event_queue_budget(&shared, &mut replay_buf);
 }
 
 #[test]

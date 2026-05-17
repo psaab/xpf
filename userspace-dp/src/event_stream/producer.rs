@@ -285,8 +285,6 @@ impl EventStreamWorkerHandle {
             };
         }
 
-        let seq = self.next_seq();
-        let frame = EventFrame::encode_dataplane_event(seq, &event);
         if !self.shared.dataplane_event_queue.try_acquire(kind) {
             self.shared
                 .dataplane_event_counters
@@ -297,6 +295,8 @@ impl EventStreamWorkerHandle {
             };
         }
 
+        let seq = self.next_seq();
+        let frame = EventFrame::encode_dataplane_event(seq, &event);
         match self.try_send_frame(frame) {
             Ok(()) => {
                 self.shared.dataplane_event_counters.record_sent(kind);

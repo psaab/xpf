@@ -60,8 +60,11 @@ cluster-scoped.
   before sequence allocation, increments the generic producer drop
   counter for rate-limited events, and records per-event loss reason
   counters for later status surfacing. It also enforces the telemetry
-  queue budget before touching the shared channel; event budget drops
-  are reported as queue-full drops.
+  queue budget before sequence allocation or shared-channel enqueue;
+  event budget drops are reported as queue-full drops. Accepted
+  telemetry holds that budget while retained for replay, releasing it
+  only when an ACK trims the frame or the helper definitively drops it
+  during replay eviction, enqueue failure, or shutdown.
 - The Go daemon must know every helper→daemon frame type that carries a
   sequence number. For RT_FLOW-style dataplane telemetry, the daemon
   decodes valid frames through the same RT_FLOW adapter used for ringbuf

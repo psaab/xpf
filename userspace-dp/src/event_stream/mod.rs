@@ -368,6 +368,7 @@ fn io_thread_main(
 
     // Drain remaining events on shutdown
     drain_remaining(&rx, &shared);
+    release_replay_dataplane_event_queue_budget(&shared, &mut replay_buf);
     shared.connected.store(false, Ordering::Release);
     eprintln!("xpf-event-stream: I/O thread exiting");
 }
@@ -468,21 +469,17 @@ fn run_connected_loop(
         let paused = shared.paused.load(Ordering::Acquire);
         let mut drained_any = false;
 
-        // Drain channel into replay buffer + write buffer
+        // Drain channel into replay buffer + write buffer. Dataplane telemetry
+        // keeps its producer budget while retained for replay; release only
+        // when the frame is ACKed or definitively dropped.
         loop {
             match rx.try_recv() {
                 Ok(frame) => {
                     drained_any = true;
-                    release_dataplane_event_queue_budget(shared, &frame);
-                    // Add to replay buffer (drop oldest if over capacity)
-                    if replay_buf.len() >= REPLAY_BUFFER_CAPACITY {
-                        replay_buf.pop_front();
-                    }
-                    replay_buf.push_back(frame.clone());
-
                     if !paused {
                         write_buf.extend_from_slice(frame.as_bytes());
                     }
+                    push_replay_frame(shared, replay_buf, frame);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return false,
@@ -604,7 +601,7 @@ fn process_control_frames(
                 // Trim replay buffer: remove frames with seq <= acked
                 while let Some(front) = replay_buf.front() {
                     if front.seq <= seq {
-                        replay_buf.pop_front();
+                        pop_replay_frame(shared, replay_buf);
                     } else {
                         break;
                     }
@@ -653,11 +650,7 @@ fn handle_drain_request(
         match rx.try_recv() {
             Ok(frame) => {
                 let frame_seq = frame.seq;
-                release_dataplane_event_queue_budget(shared, &frame);
-                if replay_buf.len() >= REPLAY_BUFFER_CAPACITY {
-                    replay_buf.pop_front();
-                }
-                replay_buf.push_back(frame);
+                push_replay_frame(shared, replay_buf, frame);
                 if frame_seq >= target_seq {
                     break;
                 }
@@ -725,6 +718,35 @@ fn release_dataplane_event_queue_budget(shared: &Arc<EventStreamShared>, frame: 
     if let Some(kind) = frame.dataplane_event_kind() {
         shared.dataplane_event_queue.release(kind);
     }
+}
+
+fn push_replay_frame(
+    shared: &Arc<EventStreamShared>,
+    replay_buf: &mut VecDeque<EventFrame>,
+    frame: EventFrame,
+) {
+    if replay_buf.len() >= REPLAY_BUFFER_CAPACITY {
+        pop_replay_frame(shared, replay_buf);
+    }
+    replay_buf.push_back(frame);
+}
+
+fn pop_replay_frame(
+    shared: &Arc<EventStreamShared>,
+    replay_buf: &mut VecDeque<EventFrame>,
+) -> Option<EventFrame> {
+    let frame = replay_buf.pop_front();
+    if let Some(frame) = frame.as_ref() {
+        release_dataplane_event_queue_budget(shared, frame);
+    }
+    frame
+}
+
+fn release_replay_dataplane_event_queue_budget(
+    shared: &Arc<EventStreamShared>,
+    replay_buf: &mut VecDeque<EventFrame>,
+) {
+    while pop_replay_frame(shared, replay_buf).is_some() {}
 }
 
 // ---------------------------------------------------------------------------

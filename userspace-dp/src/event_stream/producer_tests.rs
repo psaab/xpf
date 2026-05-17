@@ -229,7 +229,7 @@ fn dataplane_event_queue_full_counts_per_kind_drop() {
 
     assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 1);
     assert_eq!(shared.frames_dropped.load(Ordering::Relaxed), 1);
-    assert_eq!(shared.next_seq.load(Ordering::Relaxed), 2);
+    assert_eq!(shared.next_seq.load(Ordering::Relaxed), 1);
 
     let stats = handle.dataplane_event_stats();
     assert_eq!(stats.filter_log.sent, 1);
