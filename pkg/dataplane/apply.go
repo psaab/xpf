@@ -5,12 +5,17 @@ import (
 	"maps"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 	"github.com/psaab/xpf/pkg/networkd"
 )
 
 // RuntimeDataPlane is the target daemon-facing dataplane shape for #1381.
 // It is introduced beside the legacy BPF-shaped DataPlane while callers move
 // one domain at a time.
+//
+// TODO(#1381): Add compile-time assertions (var _ RuntimeDataPlane = (*Manager)(nil))
+// for BPF/DPDK/userspace Managers once Start/Link/HA/Sessions/Telemetry/SessionDeltas
+// are wired on each backend in a later migration slice.
 type RuntimeDataPlane interface {
 	Start(context.Context) error
 	ConfigSink
@@ -21,6 +26,13 @@ type RuntimeDataPlane interface {
 	HA() HAController
 	Sessions() SessionStore
 	Telemetry() Telemetry
+
+	// SessionDeltas returns the backend-neutral session-delta source used for
+	// HA session sync. Backends that do not support delta streaming return a
+	// nil source; callers must nil-check before use.
+	// TODO(#1381): daemon_ha_userspace.go still imports dpuserspace directly;
+	// migrate it to use dp.SessionDeltas() once all backends wire this method.
+	SessionDeltas() dpruntime.SessionDeltaSource
 }
 
 type ConfigSink interface {
@@ -36,6 +48,13 @@ type ApplyResult struct {
 	NATCounterIDs     map[string]uint32
 	Capabilities      Capabilities
 	Generation        uint64
+
+	// Display metadata carried from CompileResult so callers can migrate from
+	// LastCompileResult() to LastApplyResult() without losing runtime lookups.
+	PoolIDs                 map[string]uint8            // NAT pool name -> pool ID (0-based)
+	PolicyNames             map[uint32]string           // rule_id -> policy path (zone/policy or global/policy)
+	AppNames                map[uint16]string           // app_id -> application name (structured logging)
+	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot    // compiled slots for scheduled-policy runtime toggling
 }
 
 type FilterCounterSpan struct {
@@ -74,6 +93,9 @@ type Telemetry interface {
 	NATRuleCounter(uint32) (CounterValue, error)
 	NATPortCounter(uint32) (uint64, error)
 	MapStats() []MapStats
+	// ReadFloodCounters returns the per-CPU aggregated flood/screen state for
+	// the given zone. Backends without BPF flood maps return a zero FloodState.
+	ReadFloodCounters(zoneID uint16) (FloodState, error)
 }
 
 func ApplyResultFromCompileResult(result *CompileResult) *ApplyResult {
@@ -87,6 +109,10 @@ func ApplyResultFromCompileResult(result *CompileResult) *ApplyResult {
 		FilterSpans:       maps.Clone(result.FilterSpans),
 		NATCounterIDs:     make(map[string]uint32, len(result.NATCounterIDs)),
 		Capabilities:      Capabilities{ForwardingSupported: true},
+		PoolIDs:           maps.Clone(result.PoolIDs),
+		PolicyNames:       maps.Clone(result.PolicyNames),
+		AppNames:          maps.Clone(result.AppNames),
+		PolicyScheduleRuleSlots: append([]PolicyScheduleRuleSlot(nil), result.PolicyScheduleRuleSlots...),
 	}
 	for key, id := range result.NATCounterIDs {
 		out.NATCounterIDs[key] = uint32(id)
@@ -105,6 +131,10 @@ func (r *ApplyResult) Clone() *ApplyResult {
 	out.FilterSpans = maps.Clone(r.FilterSpans)
 	out.NATCounterIDs = maps.Clone(r.NATCounterIDs)
 	out.Capabilities.UnsupportedReasons = append([]string(nil), r.Capabilities.UnsupportedReasons...)
+	out.PoolIDs = maps.Clone(r.PoolIDs)
+	out.PolicyNames = maps.Clone(r.PolicyNames)
+	out.AppNames = maps.Clone(r.AppNames)
+	out.PolicyScheduleRuleSlots = append([]PolicyScheduleRuleSlot(nil), r.PolicyScheduleRuleSlots...)
 	return &out
 }
 

@@ -25,6 +25,18 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 		NATCounterIDs: map[string]uint16{
 			"srcnat/rule-a": 9,
 		},
+		PoolIDs: map[string]uint8{
+			"snat-pool": 2,
+		},
+		PolicyNames: map[uint32]string{
+			100: "trust/untrust/allow-all",
+		},
+		AppNames: map[uint16]string{
+			5: "junos-http",
+		},
+		PolicyScheduleRuleSlots: []PolicyScheduleRuleSlot{
+			{PolicySetID: 1, RuleIndex: 0, RuleID: 100, PolicyName: "allow-all", SchedulerName: "biz-hours"},
+		},
 	}
 
 	result := ApplyResultFromCompileResult(compileResult)
@@ -43,10 +55,30 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	if !result.Capabilities.ForwardingSupported {
 		t.Fatal("Capabilities.ForwardingSupported = false, want true")
 	}
+	if got := result.PoolIDs["snat-pool"]; got != 2 {
+		t.Fatalf("PoolIDs[snat-pool] = %d, want 2", got)
+	}
+	if got := result.PolicyNames[100]; got != "trust/untrust/allow-all" {
+		t.Fatalf("PolicyNames[100] = %q, want trust/untrust/allow-all", got)
+	}
+	if got := result.AppNames[5]; got != "junos-http" {
+		t.Fatalf("AppNames[5] = %q, want junos-http", got)
+	}
+	if n := len(result.PolicyScheduleRuleSlots); n != 1 {
+		t.Fatalf("PolicyScheduleRuleSlots len = %d, want 1", n)
+	}
+	if got := result.PolicyScheduleRuleSlots[0].PolicyName; got != "allow-all" {
+		t.Fatalf("PolicyScheduleRuleSlots[0].PolicyName = %q, want allow-all", got)
+	}
 
+	// Mutate source — verify ApplyResult has independent copies.
 	compileResult.FilterIDs["inet:edge-in"] = 99
 	compileResult.FilterSpans["inet:edge-in"] = FilterCounterSpan{}
 	compileResult.NATCounterIDs["srcnat/rule-a"] = 99
+	compileResult.PoolIDs["snat-pool"] = 99
+	compileResult.PolicyNames[100] = "mutated"
+	compileResult.AppNames[5] = "mutated"
+	compileResult.PolicyScheduleRuleSlots[0].PolicyName = "mutated"
 	if got := result.FilterIDs["inet:edge-in"]; got != 3 {
 		t.Fatalf("FilterIDs was not copied, got %d", got)
 	}
@@ -55,6 +87,18 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	}
 	if got := result.NATCounterIDs["srcnat/rule-a"]; got != 9 {
 		t.Fatalf("NATCounterIDs was not copied, got %d", got)
+	}
+	if got := result.PoolIDs["snat-pool"]; got != 2 {
+		t.Fatalf("PoolIDs was not copied, got %d", got)
+	}
+	if got := result.PolicyNames[100]; got != "trust/untrust/allow-all" {
+		t.Fatalf("PolicyNames was not copied, got %q", got)
+	}
+	if got := result.AppNames[5]; got != "junos-http" {
+		t.Fatalf("AppNames was not copied, got %q", got)
+	}
+	if got := result.PolicyScheduleRuleSlots[0].PolicyName; got != "allow-all" {
+		t.Fatalf("PolicyScheduleRuleSlots was not copied, got %q", got)
 	}
 }
 
