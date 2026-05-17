@@ -292,12 +292,14 @@ the NAT module applies it:
   address family, and canonical source IP bytes with SHA-256 to choose a stable
   pool index. This is sticky within the current pool size and order; changing
   either can remap existing source IPs to different pool addresses.
-  This is intentionally documented as a userspace-v1 algorithm, not eBPF/DPDK
-  parity: the legacy eBPF path uses `src_ip % num_ips` for IPv4 and a 32-bit
-  lane XOR for IPv6, while DPDK consumes the shared pool config but has its own
-  allocator implementation. Mixed-backend deployments must not assume the same
-  client maps to the same pool address until #1377 defines a shared
-  cross-backend address-persistent contract.
+  This is intentionally documented as a userspace-v1 algorithm, not
+  mixed-backend new-flow parity: legacy eBPF and current DPDK use C-word IPv4
+  modulo and IPv6 lane-XOR selection. Active synced sessions carry the chosen
+  translated tuple, but new allocations after backend rollback may choose a
+  different pool address. Per-pool `persistent-nat` lease reuse is not part of
+  the userspace-v1 runtime contract yet because the snapshot does not carry
+  persistence mode and the Rust allocator does not consult the Go
+  `PersistentNATTable`.
 - **Checksum update:** Incremental RFC 1624 checksum adjustment for
   IP header + TCP/UDP pseudo-header. Avoids full recomputation.
 
@@ -372,15 +374,17 @@ filters, flow export, TCP MSS clamping, configurable timeouts, VLAN handling,
 route/neighbor lookup, and HA/session-delta ingestion.
 
 Remaining explicit gates include SYN-cookie-dependent screen behavior,
-three-color policers, port mirroring, dataplane event parity, and the shared
-cross-backend `address-persistent` SNAT contract.
+three-color policers, port mirroring, dataplane event parity, and the residual
+#1377 SNAT pool contract for per-pool `persistent-nat`, allocator exhaustion
+counters, and mixed-backend rollback constraints.
 
 Policy scheduler state is no longer a propagation gap: #1396 carries scheduler
 state into the userspace snapshot and Rust policy evaluator. #1378 remains a
 retirement blocker only for the residual contract around hit-counter lifetime,
 strict missing-scheduler commit behavior, and integration/failover evidence.
 #1385 landed userspace-v1 pool selection and fail-closed admission; #1377 still
-owns the cross-backend contract. #1386 landed userspace buffer/status
+owns persistent-NAT lease reuse, allocator observability, and the documented
+mixed-backend rollback boundary. #1386 landed userspace buffer/status
 rendering; #1380 still owns retirement of the remaining BPF-map-oriented
 operator surface.
 
@@ -543,8 +547,9 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
 
 **Still explicitly gated or incomplete for eBPF retirement:**
 - Source NAT pool mode: #1385 landed userspace-v1 deterministic pool selection
-  and fail-closed admission; #1377 is still required for the approved
-  cross-backend address-persistent contract.
+  and fail-closed admission. #1377 is still required for per-pool
+  `persistent-nat` lease reuse, pool allocation/exhaustion counters, and the
+  mixed-backend rollback test boundary.
 - SYN-cookie flood protection: #1374.
 - RFC 2697/2698 three-color policers: #1375.
 - Port mirroring: #1376.

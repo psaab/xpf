@@ -933,6 +933,124 @@ fn pool_snat_address_persistent_sticks_source_to_pool_address() {
 }
 
 #[test]
+fn pool_snat_address_persistent_sticks_each_source_independently() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "pool-sticky-many".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "sticky-pool".to_string(),
+        pool_addresses: vec![
+            "203.0.113.1".to_string(),
+            "203.0.113.2".to_string(),
+            "203.0.113.3".to_string(),
+            "203.0.113.4".to_string(),
+            "203.0.113.5".to_string(),
+        ],
+        port_low: 40000,
+        port_high: 40100,
+        address_persistent: true,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let sources: [IpAddr; 8] = [
+        "10.0.1.100".parse().unwrap(),
+        "10.0.1.101".parse().unwrap(),
+        "10.0.1.102".parse().unwrap(),
+        "10.0.1.103".parse().unwrap(),
+        "10.0.1.104".parse().unwrap(),
+        "10.0.1.105".parse().unwrap(),
+        "10.0.1.106".parse().unwrap(),
+        "10.0.1.107".parse().unwrap(),
+    ];
+    let mut pool_addresses_used = std::collections::HashSet::new();
+
+    for src in sources {
+        let mut addresses_for_src = std::collections::HashSet::new();
+        for dst_host in 1..=20 {
+            let dst = IpAddr::V4(Ipv4Addr::new(8, 8, 8, dst_host));
+            let d = match_source_nat(&rules, "lan", "wan", src, dst, None, None)
+                .expect("sticky source should match");
+            addresses_for_src.insert(d.rewrite_src.expect("pool address"));
+        }
+        assert_eq!(
+            addresses_for_src.len(),
+            1,
+            "source {src} mapped to multiple pool addresses: {addresses_for_src:?}"
+        );
+        pool_addresses_used.extend(addresses_for_src);
+    }
+
+    assert!(
+        pool_addresses_used.len() >= 4,
+        "sticky hash collapsed source spread: {pool_addresses_used:?}"
+    );
+}
+
+#[test]
+fn pool_snat_address_persistent_spreads_distinct_sources_across_pool() {
+    let pool_len = 64usize;
+    let mut seen = vec![false; pool_len];
+
+    for host in 0..1000u32 {
+        let src = IpAddr::V4(Ipv4Addr::new(
+            10,
+            ((host >> 16) & 0xff) as u8,
+            ((host >> 8) & 0xff) as u8,
+            (host & 0xff) as u8,
+        ));
+        seen[sticky_pool_index(src, pool_len)] = true;
+    }
+
+    let used = seen.iter().filter(|used| **used).count();
+    assert!(
+        used >= pool_len * 80 / 100,
+        "sticky hash used {used}/{pool_len} pool slots"
+    );
+}
+
+#[test]
+fn pool_snat_address_persistent_userspace_v1_contract_fixtures() {
+    assert_eq!(sticky_pool_index("10.0.1.100".parse().unwrap(), 4), 3);
+    assert_eq!(sticky_pool_index("10.0.1.101".parse().unwrap(), 4), 0);
+    assert_eq!(sticky_pool_index("192.0.2.1".parse().unwrap(), 5), 4);
+    assert_eq!(sticky_pool_index("198.51.100.25".parse().unwrap(), 5), 0);
+    assert_eq!(sticky_pool_index("2001:db8::1".parse().unwrap(), 257), 197);
+    assert_eq!(sticky_pool_index("2001:db8::2".parse().unwrap(), 257), 125);
+}
+
+#[test]
+fn pool_snat_address_persistent_differs_from_legacy_backend_algorithms() {
+    let v4: Ipv4Addr = "10.0.1.100".parse().unwrap();
+    assert_eq!(sticky_pool_index(IpAddr::V4(v4), 4), 3);
+    assert_eq!(legacy_backend_v4_index(v4, 4), 2);
+
+    let v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    assert_eq!(sticky_pool_index(IpAddr::V6(v6), 257), 197);
+    assert_eq!(legacy_backend_v6_index(v6, 257), 116);
+}
+
+fn legacy_backend_v4_index(src_ip: Ipv4Addr, pool_len: usize) -> usize {
+    if pool_len <= 1 {
+        return 0;
+    }
+    (u32::from_le_bytes(src_ip.octets()) as usize) % pool_len
+}
+
+fn legacy_backend_v6_index(src_ip: Ipv6Addr, pool_len: usize) -> usize {
+    if pool_len <= 1 {
+        return 0;
+    }
+    let mut hash = 0u32;
+    for chunk in src_ip.octets().chunks_exact(4) {
+        let mut word = [0u8; 4];
+        word.copy_from_slice(chunk);
+        hash ^= u32::from_le_bytes(word);
+    }
+    (hash as usize) % pool_len
+}
+
+#[test]
 fn pool_snat_address_persistent_hashes_full_ipv6_address() {
     let a: IpAddr = "2001:db8::1".parse().unwrap();
     let b: IpAddr = "2001:db8::2".parse().unwrap();
