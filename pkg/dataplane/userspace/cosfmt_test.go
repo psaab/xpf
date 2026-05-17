@@ -103,6 +103,19 @@ func TestFormatCoSInterfaceSummaryPreservesOldJSONGuaranteeFallback(t *testing.T
 	t.Fatalf("missing bandwidth-10mb queue row for old status JSON:\n%s", out)
 }
 
+func TestFormatCoSInterfaceSummaryRendersPercentBufferFromConfigPool(t *testing.T) {
+	cfg := testCoSConfig()
+	cfg.ClassOfService.Schedulers["10mb"].BufferSizePercent = 10
+	cfg.ClassOfService.Interfaces["reth0"].Units[80].BurstSizeBytes = 200_000
+
+	out := FormatCoSInterfaceSummary(cfg, &ProcessStatus{}, "reth0.80")
+	for _, want := range []string{"bandwidth-10mb", "19.53 KiB"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
 func TestFormatCoSInterfaceSummaryOldJSONDoesNotInferGuaranteeFromEffectiveRate(t *testing.T) {
 	cfg := testCoSConfig()
 	cfg.ClassOfService.Schedulers["be"].TransmitRateBytes = 0

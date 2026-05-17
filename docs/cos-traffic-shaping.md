@@ -764,6 +764,16 @@ set class-of-service interfaces ge-0-0-1 unit 0 shaping-rate burst-size 125m
 set class-of-service interfaces ge-0-0-1 unit 0 scheduler-map my-map
 ```
 
+Scheduler `buffer-size` may be configured as an explicit byte size
+(`4m`, `256k`, `1g`) or as a Junos percent value (`10%`). Percent values
+are carried over the userspace protocol as `buffer_size_percent`, not as
+`buffer_size_bytes = 0`. At runtime the scheduler's queue buffer is
+resolved per interface as that percentage of the interface CoS burst
+pool: the explicit `shaping-rate burst-size` when present, otherwise the
+userspace default root burst (`max(shaping_rate_bytes / 100, 64 * MTU)`).
+If both protocol fields are present, `buffer_size_bytes` keeps precedence
+for compatibility with existing snapshots.
+
 ### Current Userspace Test Recipe
 
 This is the current lab recipe that matches what the userspace dataplane

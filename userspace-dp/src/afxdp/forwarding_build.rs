@@ -1,5 +1,5 @@
 use super::*;
-use crate::RouteSnapshot;
+use crate::{CoSSchedulerSnapshot, RouteSnapshot};
 
 pub(super) fn build_screen_profiles(snapshot: &ConfigSnapshot) -> FxHashMap<String, ScreenProfile> {
     let mut profiles = FxHashMap::default();
@@ -734,10 +734,11 @@ fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
                         transmit_rate_bytes.max(1),
                         iface.cos_shaping_rate_bytes_per_sec,
                     ),
-                    buffer_bytes: scheduler
-                        .map(|sched| sched.buffer_size_bytes)
-                        .filter(|size| *size > 0)
-                        .unwrap_or_else(|| default_cos_burst_bytes(transmit_rate_bytes)),
+                    buffer_bytes: cos_scheduler_buffer_bytes(
+                        scheduler,
+                        burst_bytes,
+                        transmit_rate_bytes,
+                    ),
                     dscp_rewrite: dscp_rewrite_rule.and_then(|rewrite_rule| {
                         rewrite_rule
                             .dscp_by_forwarding_class
@@ -865,6 +866,38 @@ fn default_cos_burst_bytes(rate_bytes: u64) -> u64 {
         .checked_div(100)
         .unwrap_or_default()
         .max(64 * 1500)
+}
+
+fn cos_scheduler_buffer_bytes(
+    scheduler: Option<&CoSSchedulerSnapshot>,
+    interface_burst_bytes: u64,
+    transmit_rate_bytes: u64,
+) -> u64 {
+    let Some(sched) = scheduler else {
+        return default_cos_burst_bytes(transmit_rate_bytes);
+    };
+    if sched.buffer_size_bytes > 0 {
+        return sched.buffer_size_bytes;
+    }
+    let percent_bytes = cos_percent_buffer_bytes(interface_burst_bytes, sched.buffer_size_percent);
+    if let Some(bytes) = percent_bytes {
+        return bytes;
+    }
+    default_cos_burst_bytes(transmit_rate_bytes)
+}
+
+fn cos_percent_buffer_bytes(pool_bytes: u64, percent: f64) -> Option<u64> {
+    if pool_bytes == 0 || !percent.is_finite() || percent <= 0.0 || percent > 100.0 {
+        return None;
+    }
+    let scaled = ((pool_bytes as f64) * percent / 100.0).ceil();
+    if scaled < 1.0 {
+        Some(1)
+    } else if scaled > u64::MAX as f64 {
+        Some(u64::MAX)
+    } else {
+        Some(scaled as u64)
+    }
 }
 
 fn cos_surplus_weight(rate_bytes: u64, root_rate_bytes: u64) -> u32 {

@@ -2011,6 +2011,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 				TransmitRateExact:    sched.TransmitRateExact,
 				Priority:             sched.Priority,
 				BufferSizeBytes:      sched.BufferSizeBytes,
+				BufferSizePercent:    sched.BufferSizePercent,
 				SurplusSharing:       sched.SurplusSharing,
 				EqualFlowEnforcement: sched.EqualFlowEnforcement,
 			})

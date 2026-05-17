@@ -168,6 +168,37 @@ func TestCompileClassOfServiceSetSyntax(t *testing.T) {
 	}
 }
 
+func TestCompileClassOfServicePercentBufferSize(t *testing.T) {
+	lines := []string{
+		"set class-of-service schedulers be-sched transmit-rate 5g",
+		"set class-of-service schedulers be-sched buffer-size 10%",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile error: %v", err)
+	}
+	sched := cfg.ClassOfService.Schedulers["be-sched"]
+	if sched == nil {
+		t.Fatal("expected be-sched")
+	}
+	if got := sched.BufferSizePercent; got != 10 {
+		t.Fatalf("buffer percent = %v, want 10", got)
+	}
+	if got := sched.BufferSizeBytes; got != 0 {
+		t.Fatalf("buffer bytes = %d, want 0 for percent form", got)
+	}
+}
+
 func TestCompileClassOfServiceEqualFlowEnforcementRequiresPositiveExactRate(t *testing.T) {
 	tests := []struct {
 		name  string

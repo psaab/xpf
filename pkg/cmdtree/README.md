@@ -56,11 +56,12 @@ when the same scheduler also has a typed `transmit-rate <rate>` value.
 An exact-only scheduler line still fails commit-check because the compiler
 would otherwise treat it as exact-with-zero-rate.
 
-`buffer-size` intentionally accepts only byte-size values with explicit
-`k`/`m`/`g` suffixes. Percent buffer sizes need a compiler/runtime
-representation before the schema can safely accept them (#1336); accepting
-`10%` while the dataplane only receives `buffer_size_bytes` would turn a
-validation improvement back into a silent zero-byte compile.
+`buffer-size` accepts byte-size values with explicit `k`/`m`/`g` suffixes
+or Junos percent values with an explicit `%` suffix. Percent values are
+compiled into a distinct `buffer_size_percent` snapshot field (#1336);
+the userspace runtime converts them to bytes per interface using the
+resolved CoS burst pool. Bare integers remain rejected because
+`buffer-size 50` is ambiguous between bytes and percent.
 
 Adding a new typed subtree means:
 

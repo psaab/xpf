@@ -369,6 +369,14 @@ latency-sensitive traffic. Production configs that care about tail
 latency should size these buffers from the service SLO rather than
 copying the validation fixture blindly.
 
+Schedulers can also express `buffer-size` as a percent. Userspace does
+not treat that as a byte value of zero: the Go snapshot carries
+`buffer_size_percent`, and the Rust CoS builder resolves it to bytes as a
+percentage of the interface CoS burst pool before queue admission and
+token-bucket runtime state are built. For the fairness fixtures above,
+the explicit byte sizes remain intentional so the queue residence tradeoff
+is visible in the config.
+
 ```bash
 COS_IFINDEX=<egress-ifindex> \
 IPERF_LAUNCH_ARG_0=/usr/bin/incus \

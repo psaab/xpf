@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,11 +46,8 @@ func ValidateRate(raw string, _ *Config) error {
 }
 
 // validateByteSize accepts the byte-size form the current CoS compiler
-// actually consumes. Junos also has percent-shaped buffer-size syntax,
-// but xpf has no percent representation yet and parseBurstSizeLimit
-// treats a bare integer as bytes. Reject bare integers here so
-// `buffer-size 50` cannot pass validation and compile as a 50-byte
-// queue.
+// consumes. Reject bare integers here so `buffer-size 50` cannot pass
+// validation and compile as a 50-byte queue.
 func ValidateByteSize(raw string, _ *Config) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -62,6 +60,48 @@ func ValidateByteSize(raw string, _ *Config) error {
 		return fmt.Errorf("not a valid byte-size (expected 16m, 256k, or 1g): %w", err)
 	}
 	return nil
+}
+
+// ValidateByteSizeOrPercent accepts the two scheduler buffer-size forms
+// that the CoS runtime can represent: explicit byte sizes with k/m/g
+// suffixes, or Junos percent values with a trailing percent sign. Bare
+// integers stay rejected because they are ambiguous between bytes and
+// percent.
+func ValidateByteSizeOrPercent(raw string, _ *Config) error {
+	trimmed := strings.TrimSpace(raw)
+	if strings.HasSuffix(trimmed, "%") {
+		if _, err := parsePercentWithSuffixStrict(trimmed); err != nil {
+			return fmt.Errorf("not a valid percent buffer-size (expected 1%%..100%%): %w", err)
+		}
+		return nil
+	}
+	return ValidateByteSize(raw, nil)
+}
+
+func parsePercentWithSuffixStrict(raw string) (float64, error) {
+	orig := raw
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, fmt.Errorf("empty value")
+	}
+	if !strings.HasSuffix(trimmed, "%") {
+		return 0, fmt.Errorf("missing percent suffix in %q", orig)
+	}
+	number := strings.TrimSpace(strings.TrimSuffix(trimmed, "%"))
+	if number == "" {
+		return 0, fmt.Errorf("empty percent in %q", orig)
+	}
+	v, err := strconv.ParseFloat(number, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid percent %q: %w", orig, err)
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("invalid percent %q: non-finite", orig)
+	}
+	if v <= 0 || v > 100 {
+		return 0, fmt.Errorf("percent out of range (0,100] (got %s)", orig)
+	}
+	return v, nil
 }
 
 // validateInteger returns a closure that accepts a bare integer in

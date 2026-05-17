@@ -82,3 +82,10 @@ mod.rs for further file-level breakdown.
 - `COS_MIN_BURST_BYTES` (64 × MTU) is canonically owned by
   `token_bucket.rs`; siblings import it via the `cos/mod.rs`
   re-export.
+- Scheduler `buffer-size <n>%` is resolved before runtime queue creation
+  as `<n>%` of the interface CoS burst pool. The pool is the explicit
+  `class-of-service interfaces ... shaping-rate burst-size` value when
+  configured, otherwise the same `default_cos_burst_bytes` root-burst
+  fallback used by the shaper. The legacy `buffer_size_bytes` protocol
+  field still wins when present; `buffer_size_percent` is additive for
+  #1336 compatibility.
