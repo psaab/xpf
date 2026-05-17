@@ -336,7 +336,7 @@ func globalCounterPolicyID(t *testing.T, store *configstore.Store, ruleName stri
 	}
 	for i, rule := range cfg.Security.GlobalPolicies {
 		if rule != nil && rule.Name == ruleName {
-			return uint32(len(cfg.Security.Policies))*dataplane.MaxRulesPerPolicy + uint32(i)
+			return policyCounterID(uint32(len(cfg.Security.Policies)), i)
 		}
 	}
 	t.Fatalf("global policy %q not found", ruleName)
