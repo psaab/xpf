@@ -1504,7 +1504,7 @@ security {
 	}
 }
 
-func TestPolicySchedulerMissingReferenceFailsCompile(t *testing.T) {
+func TestPolicySchedulerMissingReferenceWarns(t *testing.T) {
 	input := `security {
     policies {
         from-zone trust to-zone untrust {
@@ -1522,12 +1522,13 @@ func TestPolicySchedulerMissingReferenceFailsCompile(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	_, err := CompileConfig(tree)
-	if err == nil {
-		t.Fatal("CompileConfig succeeded, want missing scheduler error")
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig returned error for warning-only missing scheduler reference: %v", err)
 	}
-	if !strings.Contains(err.Error(), `policy "sched-test" references undefined scheduler "missing-sched"`) {
-		t.Fatalf("CompileConfig error = %v", err)
+	warnings := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(warnings, `policy "sched-test": scheduler "missing-sched" not defined`) {
+		t.Fatalf("CompileConfig warnings = %v, want missing scheduler warning", cfg.Warnings)
 	}
 }
 

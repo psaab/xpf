@@ -221,10 +221,6 @@ func compileExpanded(tree *ConfigTree) (*Config, error) {
 	if err := validateThreeColorPolicersStrict(cfg.Firewall.ThreeColorPolicers); err != nil {
 		return nil, err
 	}
-	if err := validatePolicySchedulerReferencesStrict(cfg); err != nil {
-		return nil, err
-	}
-
 	if warnings := ValidateConfig(cfg); len(warnings) > 0 {
 		for _, w := range warnings {
 			cfg.Warnings = append(cfg.Warnings, w)

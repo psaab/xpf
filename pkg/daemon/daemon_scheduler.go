@@ -3,8 +3,8 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -19,6 +19,10 @@ type policySchedulerActiveStateSetter interface {
 // lifecycle follow committed config instead of only daemon startup, and returns
 // the active-state map that must be used for the same apply transaction.
 func (d *Daemon) reconcilePolicySchedulerLocked(cfg *config.Config) map[string]bool {
+	return d.reconcilePolicySchedulerLockedAt(cfg, time.Now())
+}
+
+func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.Time) map[string]bool {
 	hash, hasSchedulers := policySchedulerConfigHash(cfg)
 	if hasSchedulers && d.scheduler != nil && hash == d.policySchedulerConfigHash {
 		d.startPolicySchedulerLoopLocked()
@@ -39,10 +43,22 @@ func (d *Daemon) reconcilePolicySchedulerLocked(cfg *config.Config) map[string]b
 
 	sched, activeState := scheduler.NewPrimed(cfg.Schedulers, func(activeState map[string]bool) {
 		d.publishPolicyScheduleState(epoch, activeState)
-	}, time.Now())
+	}, now)
 	d.scheduler = sched
 	d.policySchedulerConfigHash = hash
 	d.startPolicySchedulerLoopLocked()
+	return activeState
+}
+
+func (d *Daemon) policySchedulerActiveStateForApplyLocked(cfg *config.Config, now time.Time) map[string]bool {
+	hash, hasSchedulers := policySchedulerConfigHash(cfg)
+	if !hasSchedulers {
+		return nil
+	}
+	if d.scheduler != nil && hash == d.policySchedulerConfigHash {
+		return d.scheduler.ActiveState()
+	}
+	_, activeState := scheduler.NewPrimed(cfg.Schedulers, func(map[string]bool) {}, now)
 	return activeState
 }
 
@@ -50,11 +66,42 @@ func policySchedulerConfigHash(cfg *config.Config) ([32]byte, bool) {
 	if cfg == nil || len(cfg.Schedulers) == 0 {
 		return [32]byte{}, false
 	}
-	b, err := json.Marshal(cfg.Schedulers)
-	if err != nil {
-		return [32]byte{}, false
+	h := sha256.New()
+	names := make([]string, 0, len(cfg.Schedulers))
+	for name := range cfg.Schedulers {
+		names = append(names, name)
 	}
-	return sha256.Sum256(b), true
+	sort.Strings(names)
+	for _, name := range names {
+		writePolicySchedulerHashString(h, name)
+		sched := cfg.Schedulers[name]
+		if sched == nil {
+			writePolicySchedulerHashString(h, "<nil>")
+			continue
+		}
+		writePolicySchedulerHashString(h, sched.Name)
+		writePolicySchedulerHashString(h, sched.StartTime)
+		writePolicySchedulerHashString(h, sched.StopTime)
+		writePolicySchedulerHashString(h, sched.StartDate)
+		writePolicySchedulerHashString(h, sched.StopDate)
+		if sched.Daily {
+			_, _ = h.Write([]byte{1})
+		} else {
+			_, _ = h.Write([]byte{0})
+		}
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out, true
+}
+
+func writePolicySchedulerHashString(h interface{ Write([]byte) (int, error) }, s string) {
+	var lenBuf [8]byte
+	for i := 0; i < len(lenBuf); i++ {
+		lenBuf[i] = byte(uint64(len(s)) >> (8 * i))
+	}
+	_, _ = h.Write(lenBuf[:])
+	_, _ = h.Write([]byte(s))
 }
 
 func (d *Daemon) startPolicySchedulerLoopLocked() {

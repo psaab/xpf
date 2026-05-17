@@ -274,6 +274,31 @@ func TestScheduler_WallClockBackwardStepStaysFailClosedUntilClockRecovers(t *tes
 	}
 }
 
+func TestScheduler_MonotonicAdvanceDoesNotFailClosed(t *testing.T) {
+	schedCfg := map[string]*config.SchedulerConfig{
+		"business-hours": {
+			Name:      "business-hours",
+			StartTime: "00:00:00",
+			StopTime:  "23:59:59",
+		},
+	}
+	start := time.Now()
+	s, state := NewPrimed(schedCfg, func(map[string]bool) {}, start)
+	if !state["business-hours"] {
+		t.Fatal("initial state should be active")
+	}
+
+	// time.Add preserves Go's monotonic reading. This exercises the real
+	// monotonic path; time.Date-only tests would silently skip it.
+	s.evaluate(start.Add(time.Minute), true)
+	if s.IsActive("business-hours") == false {
+		t.Fatal("monotonic time advance with matching wall time should stay active")
+	}
+	if !s.unsafeUntil.IsZero() {
+		t.Fatalf("unsafeUntil = %v, want zero for monotonic advance", s.unsafeUntil)
+	}
+}
+
 func TestScheduler_ActiveState(t *testing.T) {
 	schedCfg := map[string]*config.SchedulerConfig{
 		"always-on": {Name: "always-on"},

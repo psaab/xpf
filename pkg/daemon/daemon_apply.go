@@ -440,7 +440,8 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		}
 	}
 
-	policySchedulerActiveState := d.reconcilePolicySchedulerLocked(cfg)
+	policySchedulerApplyTime := time.Now()
+	policySchedulerActiveState := d.policySchedulerActiveStateForApplyLocked(cfg, policySchedulerApplyTime)
 	d.seedPolicySchedulerActiveStateLocked(policySchedulerActiveState)
 
 	// 2. Compile eBPF dataplane
@@ -456,6 +457,7 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 			d.recordCompileSuccess()
 		}
 	}
+	policySchedulerActiveState = d.reconcilePolicySchedulerLockedAt(cfg, policySchedulerApplyTime)
 	d.publishInitialPolicySchedulerStateLocked(cfg, policySchedulerActiveState, compileResult)
 
 	// Clear defer flag after Compile so subsequent recompiles (where MAC

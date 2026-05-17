@@ -447,14 +447,6 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return
 	}
 
-	next := *m.lastSnapshot
-	m.generation++
-	next.Generation = m.generation
-	next.FIBGeneration = m.readFIBGeneration()
-	next.GeneratedAt = time.Now().UTC()
-	next.Config = cfg
-	next.Policies = buildPolicySnapshotsWithSchedulerState(cfg, activeCopy)
-
 	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
 		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
 			slog.Warn("userspace: failed to disarm helper after refusing policy scheduler publish",
@@ -463,6 +455,14 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		slog.Warn("userspace: refusing policy scheduler publish to incompatible helper", "err", err)
 		return
 	}
+	next := *m.lastSnapshot
+	nextGeneration := m.generation + 1
+	next.Generation = nextGeneration
+	next.FIBGeneration = m.readFIBGeneration()
+	next.GeneratedAt = time.Now().UTC()
+	next.Config = cfg
+	next.Policies = buildPolicySnapshotsWithSchedulerState(cfg, activeCopy)
+
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
@@ -470,6 +470,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		slog.Warn("userspace: failed to publish policy scheduler state", "err", err)
 		return
 	}
+	m.generation = nextGeneration
 	m.lastSnapshot = &next
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
@@ -555,7 +556,7 @@ func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error 
 	}
 	var status ProcessStatus
 	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
-		m.lastStatus.ConfigSnapshotProtocolVersion = status.ConfigSnapshotProtocolVersion
+		m.recordHelperStatusLocked(&status)
 		if status.ConfigSnapshotProtocolVersion >= ProtocolVersion {
 			return nil
 		}
@@ -566,6 +567,18 @@ func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error 
 		m.lastStatus.ConfigSnapshotProtocolVersion,
 		ProtocolVersion,
 	)
+}
+
+func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
+	status.DataplaneMode = m.mode.String()
+	status.ConfiguredMode = m.configuredMode.String()
+	status.EntryPrograms = m.entryProgramsLocked()
+	status.FallbackCounters = m.readFallbackStatsLocked()
+	if m.eventStream != nil {
+		es := m.eventStream.Status()
+		status.EventStream = &es
+	}
+	m.lastStatus = *status
 }
 
 func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) error {
@@ -583,6 +596,7 @@ func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) 
 		return fmt.Errorf("userspace: disarm helper after policy scheduler protocol error: %w", err)
 	}
 	if err := m.applyHelperStatusLocked(&status); err != nil {
+		m.recordHelperStatusLocked(&status)
 		return fmt.Errorf("userspace: sync helper status after policy scheduler fail-closed disarm: %w", err)
 	}
 	slog.Warn("userspace: disarmed helper after policy scheduler protocol error", "err", protocolErr)

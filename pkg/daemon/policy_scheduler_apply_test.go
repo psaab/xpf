@@ -3,11 +3,13 @@ package daemon
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/scheduler"
 )
 
 type policySchedulerApplyTestDP struct {
@@ -71,6 +73,46 @@ func TestApplyConfigClearsDeferWorkersOnAbortCompileError(t *testing.T) {
 	}
 }
 
+func TestApplyConfigProtocolAbortPreservesExistingScheduler(t *testing.T) {
+	oldCfg := &config.Config{
+		Schedulers: map[string]*config.SchedulerConfig{
+			"old": {Name: "old"},
+		},
+	}
+	oldScheduler, oldState := scheduler.NewPrimed(oldCfg.Schedulers, func(map[string]bool) {}, testPolicySchedulerApplyNow())
+	oldHash, _ := policySchedulerConfigHash(oldCfg)
+	dp := &policySchedulerApplyTestDP{
+		compileErr: dpuserspace.ErrPolicySchedulerProtocolIncompatible,
+	}
+	d := &Daemon{
+		dp:                        dp,
+		scheduler:                 oldScheduler,
+		policySchedulerConfigHash: oldHash,
+	}
+	d.policySchedulerEpoch.Store(42)
+	newCfg := &config.Config{
+		Schedulers: map[string]*config.SchedulerConfig{
+			"new": {Name: "new"},
+		},
+	}
+
+	if err := d.applyConfigLocked(newCfg); !errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible) {
+		t.Fatalf("applyConfigLocked error = %v, want protocol incompatibility", err)
+	}
+	if d.scheduler != oldScheduler {
+		t.Fatal("protocol abort replaced scheduler before apply completed")
+	}
+	if got := d.policySchedulerEpoch.Load(); got != 42 {
+		t.Fatalf("policySchedulerEpoch = %d, want unchanged 42", got)
+	}
+	if d.policySchedulerConfigHash != oldHash {
+		t.Fatal("protocol abort changed scheduler config hash")
+	}
+	if got := d.scheduler.ActiveState()["old"]; got != oldState["old"] {
+		t.Fatalf("old scheduler active state = %t, want %t", got, oldState["old"])
+	}
+}
+
 func TestApplyConfigPublishesScheduleStateToNonUserspaceDataplane(t *testing.T) {
 	dp := &policySchedulerApplyTestDP{}
 	d := &Daemon{dp: dp}
@@ -85,4 +127,8 @@ func TestApplyConfigPublishesScheduleStateToNonUserspaceDataplane(t *testing.T) 
 	if got, ok := dp.updateStateSeen["workhours"]; !ok || !got {
 		t.Fatalf("active state for workhours = %t, present=%t; want active true", got, ok)
 	}
+}
+
+func testPolicySchedulerApplyNow() time.Time {
+	return time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 }
