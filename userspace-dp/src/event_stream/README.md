@@ -14,7 +14,9 @@ periodic ACK from the daemon.
   payload. Message types: `MSG_SESSION_OPEN`, `MSG_SESSION_CLOSE`,
   `MSG_SESSION_UPDATE`, `MSG_ACK`, `MSG_PAUSE`, `MSG_RESUME`,
   `MSG_DRAIN_REQUEST`, `MSG_DRAIN_COMPLETE`, `MSG_FULL_RESYNC`,
-  `MSG_KEEPALIVE` (1..10).
+  `MSG_KEEPALIVE` (1..10), plus RT_FLOW-style dataplane telemetry
+  frames `MSG_POLICY_DENY`, `MSG_SCREEN_DROP`, and `MSG_FILTER_LOG`
+  (11..13).
 - `codec_tests.rs`, `tests.rs` — co-located.
 
 ## Why push
@@ -34,3 +36,9 @@ buffers and batches before forwarding to syslog / NetFlow.
   (see `protocol.rs`). Use `push_delta_lossless()` only when
   correctness requires every frame and the producer can tolerate
   back-pressure.
+- The Go daemon must know every helper→daemon frame type that carries a
+  sequence number. For RT_FLOW-style dataplane telemetry, the daemon
+  decodes valid frames into `logging.EventRecord`; malformed or
+  forward-version unknown frames are explicitly counted, dropped, and
+  ACKed so the helper replay buffer cannot churn forever on an
+  unconsumable event.

@@ -293,6 +293,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Create event buffer (shared between event reader and CLI)
 	eventBuf := logging.NewEventBuffer(1000)
+	d.eventBuf = eventBuf
 
 	// WaitGroup for coordinated shutdown of background goroutines
 	var wg sync.WaitGroup

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/logging"
 )
 
 // buildSessionOpenV4Payload builds a binary SessionOpen payload for an IPv4 session.
@@ -81,6 +82,35 @@ func buildSessionCloseV4Payload(
 	return buf
 }
 
+func buildDataplaneEventV4Payload(
+	proto uint8,
+	srcPort, dstPort uint16,
+	srcIP, dstIP [4]byte,
+	natSrcIP [4]byte,
+	natSrcPort uint16,
+	ingressZone, egressZone uint16,
+	reason uint16,
+	policyID uint32,
+	timestampNS uint64,
+) []byte {
+	buf := make([]byte, dataplaneEventPayloadSize)
+	buf[0] = 4
+	buf[1] = proto
+	buf[2] = dataplaneEventFlagNATSrc
+	binary.LittleEndian.PutUint16(buf[4:6], srcPort)
+	binary.LittleEndian.PutUint16(buf[6:8], dstPort)
+	binary.LittleEndian.PutUint16(buf[8:10], natSrcPort)
+	binary.LittleEndian.PutUint16(buf[12:14], ingressZone)
+	binary.LittleEndian.PutUint16(buf[14:16], egressZone)
+	binary.LittleEndian.PutUint16(buf[22:24], reason)
+	binary.LittleEndian.PutUint32(buf[24:28], policyID)
+	binary.LittleEndian.PutUint64(buf[48:56], timestampNS)
+	copy(buf[56:60], srcIP[:])
+	copy(buf[72:76], dstIP[:])
+	copy(buf[88:92], natSrcIP[:])
+	return buf
+}
+
 func writeFrame(w io.Writer, typ uint8, seq uint64, payload []byte) error {
 	var hdr [EventFrameHeaderSize]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], uint32(len(payload)))
@@ -114,19 +144,19 @@ func readFrame(r io.Reader) (typ uint8, seq uint64, payload []byte, err error) {
 
 func TestDecodeSessionEventV4(t *testing.T) {
 	payload := buildSessionOpenV4Payload(
-		6,           // TCP
-		12345, 443,  // ports
+		6,          // TCP
+		12345, 443, // ports
 		[4]byte{10, 0, 1, 102}, [4]byte{172, 16, 80, 200}, // src, dst
 		[4]byte{172, 16, 80, 8}, [4]byte{0, 0, 0, 0}, // nat src, nat dst
 		40000, 0, // nat ports
-		1,     // ownerRG
+		1,      // ownerRG
 		12, 11, // egress/tx ifindex
 		0, 80, // tunnel, vlan
 		SessionEventFlagFabricRedirect, // flags
-		1, 2, 0, // ingress/egress zone, disposition
+		1, 2, 0,                        // ingress/egress zone, disposition
 		[6]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, // neighbor MAC
 		[6]byte{0x02, 0xbf, 0x72, 0x00, 0x50, 0x08}, // src MAC
-		[4]byte{172, 16, 80, 1}, // next hop
+		[4]byte{172, 16, 80, 1},                     // next hop
 	)
 
 	d, ok := decodeSessionEvent(payload)
@@ -268,6 +298,45 @@ func TestDecodeSessionEventRejectsTruncated(t *testing.T) {
 	}
 }
 
+func TestDecodeDataplaneEventPolicyDenyRTFlow(t *testing.T) {
+	payload := buildDataplaneEventV4Payload(
+		6,
+		12345, 443,
+		[4]byte{10, 0, 1, 102}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		7,
+		99,
+		1700000000000000000,
+	)
+	rec, ok := decodeDataplaneEvent(EventTypePolicyDeny, payload)
+	if !ok {
+		t.Fatal("decodeDataplaneEvent returned false")
+	}
+	if rec.Type != "POLICY_DENY" || rec.Action != "deny" {
+		t.Fatalf("event = %s/%s, want POLICY_DENY/deny", rec.Type, rec.Action)
+	}
+	if rec.Protocol != "TCP" {
+		t.Fatalf("Protocol = %q, want TCP", rec.Protocol)
+	}
+	if rec.SrcAddr != "10.0.1.102:12345" {
+		t.Fatalf("SrcAddr = %q, want 10.0.1.102:12345", rec.SrcAddr)
+	}
+	if rec.DstAddr != "172.16.80.200:443" {
+		t.Fatalf("DstAddr = %q, want 172.16.80.200:443", rec.DstAddr)
+	}
+	if rec.NATSrcAddr != "172.16.80.8:40000" {
+		t.Fatalf("NATSrcAddr = %q, want 172.16.80.8:40000", rec.NATSrcAddr)
+	}
+	if rec.PolicyID != 99 || rec.InZone != 1 || rec.OutZone != 2 {
+		t.Fatalf("identity = policy %d zones %d->%d, want policy 99 zones 1->2", rec.PolicyID, rec.InZone, rec.OutZone)
+	}
+	if rec.ScreenCheck != "7" {
+		t.Fatalf("ScreenCheck/reason = %q, want 7", rec.ScreenCheck)
+	}
+}
+
 func TestFrameRoundTrip(t *testing.T) {
 	payload := buildSessionOpenV4Payload(
 		6, 1234, 80,
@@ -359,6 +428,176 @@ func TestEventStreamAcceptAndRead(t *testing.T) {
 
 	if lastSeq.Load() != 3 {
 		t.Fatalf("lastSeq = %d, want 3", lastSeq.Load())
+	}
+}
+
+func TestEventStreamDataplaneEventAckAndCallback(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	type dataplaneEventResult struct {
+		seq uint64
+		rec logging.EventRecord
+	}
+	got := make(chan dataplaneEventResult, 1)
+	es.SetOnDataplaneEvent(func(seq uint64, rec logging.EventRecord) {
+		got <- dataplaneEventResult{seq: seq, rec: rec}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := buildDataplaneEventV4Payload(
+		6, 1111, 443,
+		[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		0, 77,
+		0,
+	)
+	if err := writeFrame(conn, EventTypePolicyDeny, 7, payload); err != nil {
+		t.Fatalf("write dataplane event: %v", err)
+	}
+
+	select {
+	case result := <-got:
+		if result.seq != 7 {
+			t.Fatalf("seq = %d, want 7", result.seq)
+		}
+		if result.rec.Type != "POLICY_DENY" || result.rec.PolicyID != 77 {
+			t.Fatalf("rec = %+v, want policy deny policy 77", result.rec)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dataplane event callback not called")
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if typ != EventTypeAck || seq != 7 {
+		t.Fatalf("ack = type %d seq %d, want type %d seq 7", typ, seq, EventTypeAck)
+	}
+	if got := es.PolicyDenyEvents.Load(); got != 1 {
+		t.Fatalf("PolicyDenyEvents = %d, want 1", got)
+	}
+}
+
+func TestEventStreamMalformedDataplaneEventDropsAndAcks(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	var callbackCalled atomic.Bool
+	es.SetOnDataplaneEvent(func(uint64, logging.EventRecord) {
+		callbackCalled.Store(true)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := writeFrame(conn, EventTypeScreenDrop, 9, []byte{4, 6}); err != nil {
+		t.Fatalf("write malformed dataplane event: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if typ != EventTypeAck || seq != 9 {
+		t.Fatalf("ack = type %d seq %d, want type %d seq 9", typ, seq, EventTypeAck)
+	}
+	if got := es.ScreenDropDrops.Load(); got != 1 {
+		t.Fatalf("ScreenDropDrops = %d, want 1", got)
+	}
+	if got := es.DecodeErrors.Load(); got != 1 {
+		t.Fatalf("DecodeErrors = %d, want 1", got)
+	}
+	if callbackCalled.Load() {
+		t.Fatal("malformed dataplane event must not call callback")
+	}
+}
+
+func TestEventStreamUnknownFrameDropsAndAcks(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := writeFrame(conn, 250, 11, nil); err != nil {
+		t.Fatalf("write unknown frame: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if typ != EventTypeAck || seq != 11 {
+		t.Fatalf("ack = type %d seq %d, want type %d seq 11", typ, seq, EventTypeAck)
+	}
+	if got := es.UnknownFrameDrops.Load(); got != 1 {
+		t.Fatalf("UnknownFrameDrops = %d, want 1", got)
 	}
 }
 

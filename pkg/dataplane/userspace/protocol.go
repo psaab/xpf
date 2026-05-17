@@ -1083,6 +1083,9 @@ const (
 	EventTypeDrainComplete uint8 = 8  // helper → daemon
 	EventTypeFullResync    uint8 = 9  // helper → daemon
 	EventTypeKeepalive     uint8 = 10 // helper → daemon (idle heartbeat)
+	EventTypePolicyDeny    uint8 = 11 // helper → daemon (RT_FLOW policy deny)
+	EventTypeScreenDrop    uint8 = 12 // helper → daemon (RT_FLOW screen drop)
+	EventTypeFilterLog     uint8 = 13 // helper → daemon (RT_FLOW filter log)
 )
 
 // Session event flag bits in the Flags byte of SessionOpen/Update/Close payloads.

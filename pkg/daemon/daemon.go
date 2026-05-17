@@ -94,6 +94,7 @@ type Daemon struct {
 	syncReadyTimeout           time.Duration
 	slogHandler                *logging.SyslogSlogHandler
 	traceWriter                *logging.TraceWriter
+	eventBuf                   *logging.EventBuffer
 	eventReader                *logging.EventReader
 	eventEngine                *eventengine.Engine
 	aggregator                 *logging.SessionAggregator

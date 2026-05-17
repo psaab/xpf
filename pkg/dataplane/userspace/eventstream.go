@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/logging"
 )
 
 // EventStream manages the daemon-side event socket for receiving session events
@@ -38,25 +40,33 @@ type EventStream struct {
 	ackBatch       atomic.Uint64 // events since last ack
 
 	// Callbacks — set before Start(), called on the reader goroutine.
-	onEvent      func(eventType uint8, seq uint64, delta SessionDeltaInfo)
-	onFullResync func()
+	onEvent          func(eventType uint8, seq uint64, delta SessionDeltaInfo)
+	onDataplaneEvent func(seq uint64, rec logging.EventRecord)
+	onFullResync     func()
 
 	// DrainComplete signaling for demotion prep.
 	drainCompleteMu sync.Mutex
 	drainCompleteCh chan uint64
 
 	// Stats.
-	FramesRead    atomic.Uint64
-	FramesWritten atomic.Uint64
-	DecodeErrors  atomic.Uint64
-	SeqGaps       atomic.Uint64
+	FramesRead        atomic.Uint64
+	FramesWritten     atomic.Uint64
+	DecodeErrors      atomic.Uint64
+	SeqGaps           atomic.Uint64
+	PolicyDenyEvents  atomic.Uint64
+	ScreenDropEvents  atomic.Uint64
+	FilterLogEvents   atomic.Uint64
+	PolicyDenyDrops   atomic.Uint64
+	ScreenDropDrops   atomic.Uint64
+	FilterLogDrops    atomic.Uint64
+	UnknownFrameDrops atomic.Uint64
 }
 
 // NewEventStream creates an EventStream for the given Unix socket path.
 // Call Start() to begin listening.
 func NewEventStream(socketPath string) *EventStream {
 	return &EventStream{
-		socketPath:  socketPath,
+		socketPath:      socketPath,
 		drainCompleteCh: make(chan uint64, 1),
 	}
 }
@@ -64,6 +74,12 @@ func NewEventStream(socketPath string) *EventStream {
 // SetOnEvent sets the callback for session events. Must be called before Start().
 func (es *EventStream) SetOnEvent(fn func(eventType uint8, seq uint64, delta SessionDeltaInfo)) {
 	es.onEvent = fn
+}
+
+// SetOnDataplaneEvent sets the callback for RT_FLOW-style dataplane events.
+// Must be called before Start().
+func (es *EventStream) SetOnDataplaneEvent(fn func(seq uint64, rec logging.EventRecord)) {
+	es.onDataplaneEvent = fn
 }
 
 // SetOnFullResync sets the callback for full resync requests. Must be called before Start().
@@ -321,9 +337,66 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			// Idle heartbeat from helper — no action needed, just keeps
 			// the connection alive to prevent read-deadline disconnect.
 
+		case EventTypePolicyDeny, EventTypeScreenDrop, EventTypeFilterLog:
+			rec, ok := decodeDataplaneEvent(typ, payload)
+			if !ok {
+				es.DecodeErrors.Add(1)
+				es.recordDataplaneEventDrop(typ)
+				es.markDroppedFrameApplied(seq, &prevSeq)
+				continue
+			}
+			if seq > prevSeq+1 && prevSeq > 0 {
+				es.SeqGaps.Add(1)
+				slog.Debug("event stream: sequence gap", "expected", prevSeq+1, "got", seq)
+			}
+			prevSeq = seq
+			es.lastRecvSeq.Store(seq)
+			es.ackBatch.Add(1)
+			if es.onDataplaneEvent != nil {
+				es.onDataplaneEvent(seq, rec)
+			}
+			es.recordDataplaneEvent(typ)
+			es.lastAppliedSeq.Store(seq)
+
 		default:
-			slog.Debug("event stream: unknown frame type", "type", typ)
+			es.UnknownFrameDrops.Add(1)
+			es.markDroppedFrameApplied(seq, &prevSeq)
+			slog.Debug("event stream: dropped unknown frame type", "type", typ, "seq", seq)
 		}
+	}
+}
+
+func (es *EventStream) markDroppedFrameApplied(seq uint64, prevSeq *uint64) {
+	if seq > *prevSeq+1 && *prevSeq > 0 {
+		es.SeqGaps.Add(1)
+	}
+	*prevSeq = seq
+	es.lastRecvSeq.Store(seq)
+	es.ackBatch.Add(1)
+	es.lastAppliedSeq.Store(seq)
+}
+
+func (es *EventStream) recordDataplaneEvent(typ uint8) {
+	switch typ {
+	case EventTypePolicyDeny:
+		es.PolicyDenyEvents.Add(1)
+	case EventTypeScreenDrop:
+		es.ScreenDropEvents.Add(1)
+	case EventTypeFilterLog:
+		es.FilterLogEvents.Add(1)
+	}
+}
+
+func (es *EventStream) recordDataplaneEventDrop(typ uint8) {
+	switch typ {
+	case EventTypePolicyDeny:
+		es.PolicyDenyDrops.Add(1)
+	case EventTypeScreenDrop:
+		es.ScreenDropDrops.Add(1)
+	case EventTypeFilterLog:
+		es.FilterLogDrops.Add(1)
+	default:
+		es.UnknownFrameDrops.Add(1)
 	}
 }
 
@@ -422,6 +495,7 @@ func (es *EventStream) writeFrame(typ uint8, seq uint64, payload []byte) error {
 //	[N..]   NeighborMAC (6 bytes)
 //	[N+6..] SrcMAC (6 bytes)
 //	[N+12..]NextHop (4 or 16 bytes)
+//
 // wireAFToDataplane maps the 1-byte wire encoding (4 = IPv4, 6 = IPv6
 // — chosen by the Rust codec to match the protocol number; see
 // userspace-dp/src/event_stream/codec.rs:88) to the Linux dataplane
@@ -586,6 +660,133 @@ func decodeSessionCloseEvent(payload []byte) (SessionDeltaInfo, bool) {
 	}
 
 	return d, true
+}
+
+const dataplaneEventPayloadSize = 120
+
+const (
+	dataplaneEventFlagNATSrc uint8 = 1 << 0
+	dataplaneEventFlagNATDst uint8 = 1 << 1
+)
+
+// decodeDataplaneEvent decodes the fixed-size userspace RT_FLOW event payload
+// emitted by userspace-dp/src/event_stream/codec.rs. These frames are not HA
+// session deltas; they feed the daemon's normal EventBuffer surface.
+func decodeDataplaneEvent(typ uint8, payload []byte) (logging.EventRecord, bool) {
+	if len(payload) != dataplaneEventPayloadSize {
+		return logging.EventRecord{}, false
+	}
+	eventType := dataplaneEventTypeName(typ)
+	if eventType == "" {
+		return logging.EventRecord{}, false
+	}
+
+	wireAF := payload[0]
+	if wireAF != 4 && wireAF != 6 {
+		return logging.EventRecord{}, false
+	}
+	proto := payload[1]
+	flags := payload[2]
+	srcPort := binary.LittleEndian.Uint16(payload[4:6])
+	dstPort := binary.LittleEndian.Uint16(payload[6:8])
+	natSrcPort := binary.LittleEndian.Uint16(payload[8:10])
+	natDstPort := binary.LittleEndian.Uint16(payload[10:12])
+	ingressZone := binary.LittleEndian.Uint16(payload[12:14])
+	egressZone := binary.LittleEndian.Uint16(payload[14:16])
+	reason := binary.LittleEndian.Uint16(payload[22:24])
+	policyID := binary.LittleEndian.Uint32(payload[24:28])
+	filterID := binary.LittleEndian.Uint32(payload[36:40])
+	termID := binary.LittleEndian.Uint32(payload[40:44])
+	screenID := binary.LittleEndian.Uint32(payload[44:48])
+	timestampNS := binary.LittleEndian.Uint64(payload[48:56])
+
+	srcIP := formatIP(payload[56:72], wireAF)
+	dstIP := formatIP(payload[72:88], wireAF)
+	var natSrcIP, natDstIP string
+	if flags&dataplaneEventFlagNATSrc != 0 {
+		natSrcIP = formatIP(payload[88:104], wireAF)
+	}
+	if flags&dataplaneEventFlagNATDst != 0 {
+		natDstIP = formatIP(payload[104:120], wireAF)
+	}
+
+	action := "log"
+	if typ == EventTypePolicyDeny || typ == EventTypeScreenDrop {
+		action = "deny"
+	}
+
+	rec := logging.EventRecord{
+		Time:        time.Now(),
+		Type:        eventType,
+		SrcAddr:     formatEndpoint(srcIP, srcPort),
+		DstAddr:     formatEndpoint(dstIP, dstPort),
+		NATSrcAddr:  formatEndpoint(natSrcIP, natSrcPort),
+		NATDstAddr:  formatEndpoint(natDstIP, natDstPort),
+		Protocol:    eventProtocolName(proto),
+		Action:      action,
+		PolicyID:    policyID,
+		InZone:      ingressZone,
+		OutZone:     egressZone,
+		ScreenCheck: eventReasonString(reason, screenID),
+	}
+	if timestampNS > 0 && timestampNS <= uint64(1<<63-1) {
+		rec.Time = time.Unix(0, int64(timestampNS))
+	}
+	if typ == EventTypeFilterLog {
+		rec.PolicyID = filterID
+		rec.ScreenCheck = eventReasonString(reason, termID)
+	}
+	return rec, true
+}
+
+func dataplaneEventTypeName(typ uint8) string {
+	switch typ {
+	case EventTypePolicyDeny:
+		return "POLICY_DENY"
+	case EventTypeScreenDrop:
+		return "SCREEN_DROP"
+	case EventTypeFilterLog:
+		return "FILTER_LOG"
+	}
+	return ""
+}
+
+func eventProtocolName(proto uint8) string {
+	switch proto {
+	case 1:
+		return "ICMP"
+	case 6:
+		return "TCP"
+	case 17:
+		return "UDP"
+	case 58:
+		return "ICMPv6"
+	default:
+		return strconv.Itoa(int(proto))
+	}
+}
+
+func formatEndpoint(ip string, port uint16) string {
+	if ip == "" {
+		return ""
+	}
+	if port == 0 {
+		return ip
+	}
+	return net.JoinHostPort(ip, strconv.Itoa(int(port)))
+}
+
+func eventReasonString(reason uint16, id uint32) string {
+	if reason != 0 && id != 0 {
+		return fmt.Sprintf("%d/%d", reason, id)
+	}
+	if reason != 0 {
+		return strconv.Itoa(int(reason))
+	}
+	if id != 0 {
+		return strconv.FormatUint(uint64(id), 10)
+	}
+	return ""
 }
 
 // formatIP converts raw IP bytes to a string representation.

@@ -16,6 +16,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/logging"
 )
 
 // buildZoneIDs replicates the deterministic zone ID assignment from the
@@ -505,6 +506,11 @@ func (d *Daemon) runUserspaceEventStream(ctx context.Context) {
 	// Wire callbacks.
 	es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) {
 		d.handleEventStreamDelta(eventType, delta)
+	})
+	es.SetOnDataplaneEvent(func(seq uint64, rec logging.EventRecord) {
+		if d.eventBuf != nil {
+			d.eventBuf.Add(rec)
+		}
 	})
 	es.SetOnFullResync(func() {
 		d.handleEventStreamFullResync()
