@@ -225,6 +225,18 @@ func (er *EventReader) Run(ctx context.Context) {
 	}
 }
 
+// ProcessRawEvent feeds an RT_FLOW-format dataplane.Event record through the
+// same enrichment, buffering, callback, and syslog/local-log fanout path used
+// by the eBPF ring-buffer reader. Userspace transports should call this rather
+// than adding decoded records directly to EventBuffer.
+func (er *EventReader) ProcessRawEvent(data []byte) bool {
+	if len(data) < int(unsafe.Sizeof(dataplane.Event{})) {
+		return false
+	}
+	er.logEvent(data)
+	return true
+}
+
 func (er *EventReader) logEvent(data []byte) {
 	var evt dataplane.Event
 	evt.Timestamp = binary.LittleEndian.Uint64(data[0:8])
@@ -459,10 +471,9 @@ func (er *EventReader) logEvent(data []byte) {
 }
 
 // DecodeRawEventRecord decodes the fixed dataplane.Event RT_FLOW wire shape
-// used by the eBPF ring buffer and by the userspace event-stream adapter. It
-// intentionally skips name resolution and syslog fanout; callers receiving the
-// same wire payload over a non-ringbuf transport can feed the normal
-// EventBuffer without inventing a second event schema.
+// used by the eBPF ring buffer and by the userspace event-stream adapter.
+// It is decode-only; transports that need EventBuffer, callback, local-log,
+// and syslog fanout must call EventReader.ProcessRawEvent instead.
 func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 	if len(data) < int(unsafe.Sizeof(dataplane.Event{})) {
 		return EventRecord{}, false

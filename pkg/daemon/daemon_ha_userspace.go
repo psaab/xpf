@@ -483,7 +483,7 @@ func (d *Daemon) syncUserspaceSessionDeltas(ctx context.Context) {
 // is unavailable or disconnected.
 func (d *Daemon) runUserspaceEventStream(ctx context.Context) {
 	provider, ok := d.dp.(userspaceEventStreamProvider)
-	if !ok || d.cluster == nil || d.sessionSync == nil {
+	if !ok {
 		// Manager doesn't support event stream — fall back to polling.
 		d.syncUserspaceSessionDeltas(ctx)
 		return
@@ -504,14 +504,24 @@ func (d *Daemon) runUserspaceEventStream(ctx context.Context) {
 	}
 
 	// Wire callbacks.
-	es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) {
-		d.handleEventStreamDelta(eventType, delta)
-	})
-	es.SetOnDataplaneEvent(func(seq uint64, rec logging.EventRecord) {
-		if d.eventBuf != nil {
-			d.eventBuf.Add(rec)
-		}
-	})
+	if d.cluster != nil && d.sessionSync != nil {
+		es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) {
+			d.handleEventStreamDelta(eventType, delta)
+		})
+	}
+	if d.eventReader != nil {
+		es.SetOnRawDataplaneEvent(func(seq uint64, payload []byte) {
+			if !d.eventReader.ProcessRawEvent(payload) {
+				slog.Debug("userspace event stream: dropped undecodable dataplane event", "seq", seq)
+			}
+		})
+	} else {
+		es.SetOnDataplaneEvent(func(seq uint64, rec logging.EventRecord) {
+			if d.eventBuf != nil {
+				d.eventBuf.Add(rec)
+			}
+		})
+	}
 	es.SetOnFullResync(func() {
 		d.handleEventStreamFullResync()
 	})
@@ -632,7 +642,7 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, provider userspace
 				continue
 			}
 			if d.cluster == nil || d.sessionSync == nil {
-				return
+				continue
 			}
 			if !d.cluster.IsLocalPrimaryAny() || !d.sessionSync.IsConnected() {
 				continue
@@ -655,7 +665,7 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, provider userspace
 			continue
 		}
 		if d.cluster == nil || d.sessionSync == nil {
-			return
+			continue
 		}
 		if !d.cluster.IsLocalPrimaryAny() || !d.sessionSync.IsConnected() {
 			continue

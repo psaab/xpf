@@ -428,6 +428,26 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.applyFlowTrace(cfg, er)
 			}
 		}
+		if er == nil {
+			if _, ok := d.dp.(userspaceEventStreamProvider); ok {
+				er = logging.NewEventReader(nil, eventBuf)
+				d.eventReader = er
+				if cfg := d.store.ActiveConfig(); cfg != nil {
+					d.applySyslogConfig(er, cfg)
+					d.startFlowExporter(ctx, cfg, er)
+					d.startIPFIXExporter(ctx, cfg, er)
+					d.applyFlowTrace(cfg, er)
+				}
+			}
+		}
+
+		if _, ok := d.dp.(userspaceEventStreamProvider); ok && d.cluster == nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				d.runUserspaceEventStream(ctx)
+			}()
+		}
 	}
 
 	// Start DHCP clients for interfaces configured with dhcp/dhcpv6.

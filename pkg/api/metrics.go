@@ -116,6 +116,13 @@ type xpfCollector struct {
 	workerIdleLoops                          *prometheus.Desc
 	workerCoSQueueLeaseAcquireV8Calls        *prometheus.Desc
 	workerCoSQueueLeaseAcquireV8GrantedBytes *prometheus.Desc
+	// #1379: daemon-side userspace event-stream transport counters.
+	userspaceEventStreamFramesTotal          *prometheus.Desc
+	userspaceEventStreamDecodeErrorsTotal    *prometheus.Desc
+	userspaceEventStreamSequenceGapsTotal    *prometheus.Desc
+	userspaceEventStreamDataplaneEventsTotal *prometheus.Desc
+	userspaceEventStreamDataplaneDropsTotal  *prometheus.Desc
+	userspaceEventStreamUnknownDropsTotal    *prometheus.Desc
 	// #925 Phase 2: liveness gauge for the supervisor's catch_unwind
 	// state. 1 = worker has panicked and the supervisor has caught it;
 	// 0 = healthy. Set-only in Phase 1 (cleared by daemon restart).
@@ -484,6 +491,36 @@ func newCollector(srv *Server) *xpfCollector {
 			"Bytes granted by v8 CoS queue-lease acquire calls for this worker (#1240).",
 			[]string{"worker_id"}, nil,
 		),
+		userspaceEventStreamFramesTotal: prometheus.NewDesc(
+			"xpf_userspace_event_stream_frames_total",
+			"Daemon-side userspace event-stream frames by direction.",
+			[]string{"direction"}, nil,
+		),
+		userspaceEventStreamDecodeErrorsTotal: prometheus.NewDesc(
+			"xpf_userspace_event_stream_decode_errors_total",
+			"Daemon-side userspace event-stream decode errors.",
+			nil, nil,
+		),
+		userspaceEventStreamSequenceGapsTotal: prometheus.NewDesc(
+			"xpf_userspace_event_stream_sequence_gaps_total",
+			"Daemon-side userspace event-stream sequence gaps.",
+			nil, nil,
+		),
+		userspaceEventStreamDataplaneEventsTotal: prometheus.NewDesc(
+			"xpf_userspace_event_stream_dataplane_events_total",
+			"Decoded RT_FLOW dataplane events received over the userspace event stream.",
+			[]string{"type"}, nil,
+		),
+		userspaceEventStreamDataplaneDropsTotal: prometheus.NewDesc(
+			"xpf_userspace_event_stream_dataplane_event_drops_total",
+			"RT_FLOW dataplane events dropped by the userspace event-stream decoder.",
+			[]string{"type"}, nil,
+		),
+		userspaceEventStreamUnknownDropsTotal: prometheus.NewDesc(
+			"xpf_userspace_event_stream_unknown_frame_drops_total",
+			"Userspace event-stream frames dropped because their frame type is unknown.",
+			nil, nil,
+		),
 		workerDead: prometheus.NewDesc(
 			"xpf_userspace_worker_dead",
 			"1 if the userspace-dp worker thread has panicked and been "+
@@ -703,6 +740,12 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerIdleLoops
 	ch <- c.workerCoSQueueLeaseAcquireV8Calls
 	ch <- c.workerCoSQueueLeaseAcquireV8GrantedBytes
+	ch <- c.userspaceEventStreamFramesTotal
+	ch <- c.userspaceEventStreamDecodeErrorsTotal
+	ch <- c.userspaceEventStreamSequenceGapsTotal
+	ch <- c.userspaceEventStreamDataplaneEventsTotal
+	ch <- c.userspaceEventStreamDataplaneDropsTotal
+	ch <- c.userspaceEventStreamUnknownDropsTotal
 	ch <- c.workerDead
 	ch <- c.bindingActiveFlowCount
 	ch <- c.bindingTXCompletions
@@ -771,6 +814,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 	c.emitCoSDrainPhaseTelemetry(ch, status)
 	c.emitCoSEqualFlowEnforcement(ch, status)
 	c.emitWorkerRuntime(ch, status)
+	c.emitUserspaceEventStream(ch, status)
 	c.emitBindingActiveFlowCount(ch, status)
 	c.emitBindingTXCompletionTelemetry(ch, status)
 	c.emitCoSActiveFlowCount(ch, status)
@@ -1129,6 +1173,46 @@ func (c *xpfCollector) emitWorkerRuntime(ch chan<- prometheus.Metric, status dpu
 		ch <- prometheus.MustNewConstMetric(c.workerDead,
 			prometheus.GaugeValue, deadValue, label)
 	}
+}
+
+func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	if status.EventStream == nil {
+		return
+	}
+	es := status.EventStream
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
+		prometheus.CounterValue, float64(es.FramesRead), "read")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
+		prometheus.CounterValue, float64(es.FramesWritten), "written")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDecodeErrorsTotal,
+		prometheus.CounterValue, float64(es.DecodeErrors))
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamSequenceGapsTotal,
+		prometheus.CounterValue, float64(es.SeqGaps))
+
+	for _, item := range []struct {
+		label string
+		count uint64
+	}{
+		{"policy_deny", es.PolicyDenyEvents},
+		{"screen_drop", es.ScreenDropEvents},
+		{"filter_log", es.FilterLogEvents},
+	} {
+		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDataplaneEventsTotal,
+			prometheus.CounterValue, float64(item.count), item.label)
+	}
+	for _, item := range []struct {
+		label string
+		count uint64
+	}{
+		{"policy_deny", es.PolicyDenyDrops},
+		{"screen_drop", es.ScreenDropDrops},
+		{"filter_log", es.FilterLogDrops},
+	} {
+		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDataplaneDropsTotal,
+			prometheus.CounterValue, float64(item.count), item.label)
+	}
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamUnknownDropsTotal,
+		prometheus.CounterValue, float64(es.UnknownFrameDrops))
 }
 
 // #709: export owner-profile telemetry when the dataplane is the

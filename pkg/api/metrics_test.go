@@ -217,6 +217,58 @@ func collectFromEmitWorkerRuntime(
 	return got
 }
 
+func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
+	mkNoLabel := func(name string) *prometheus.Desc {
+		return prometheus.NewDesc(name, name, nil, nil)
+	}
+	mkOneLabel := func(name, label string) *prometheus.Desc {
+		return prometheus.NewDesc(name, name, []string{label}, nil)
+	}
+	c := &xpfCollector{
+		userspaceEventStreamFramesTotal:          mkOneLabel("xpf_userspace_event_stream_frames_total", "direction"),
+		userspaceEventStreamDecodeErrorsTotal:    mkNoLabel("xpf_userspace_event_stream_decode_errors_total"),
+		userspaceEventStreamSequenceGapsTotal:    mkNoLabel("xpf_userspace_event_stream_sequence_gaps_total"),
+		userspaceEventStreamDataplaneEventsTotal: mkOneLabel("xpf_userspace_event_stream_dataplane_events_total", "type"),
+		userspaceEventStreamDataplaneDropsTotal:  mkOneLabel("xpf_userspace_event_stream_dataplane_event_drops_total", "type"),
+		userspaceEventStreamUnknownDropsTotal:    mkNoLabel("xpf_userspace_event_stream_unknown_frame_drops_total"),
+	}
+	status := dpuserspace.ProcessStatus{
+		EventStream: &dpuserspace.EventStreamStatus{
+			FramesRead:        11,
+			FramesWritten:     7,
+			DecodeErrors:      2,
+			SeqGaps:           3,
+			PolicyDenyEvents:  5,
+			ScreenDropEvents:  6,
+			FilterLogEvents:   8,
+			PolicyDenyDrops:   1,
+			ScreenDropDrops:   4,
+			FilterLogDrops:    9,
+			UnknownFrameDrops: 10,
+		},
+	}
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitUserspaceEventStream(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	assertCounterClose(t, got, c.userspaceEventStreamFramesTotal, map[string]string{"direction": "read"}, 11)
+	assertCounterClose(t, got, c.userspaceEventStreamFramesTotal, map[string]string{"direction": "written"}, 7)
+	assertCounterClose(t, got, c.userspaceEventStreamDecodeErrorsTotal, nil, 2)
+	assertCounterClose(t, got, c.userspaceEventStreamSequenceGapsTotal, nil, 3)
+	assertCounterClose(t, got, c.userspaceEventStreamDataplaneEventsTotal, map[string]string{"type": "policy_deny"}, 5)
+	assertCounterClose(t, got, c.userspaceEventStreamDataplaneEventsTotal, map[string]string{"type": "screen_drop"}, 6)
+	assertCounterClose(t, got, c.userspaceEventStreamDataplaneEventsTotal, map[string]string{"type": "filter_log"}, 8)
+	assertCounterClose(t, got, c.userspaceEventStreamDataplaneDropsTotal, map[string]string{"type": "policy_deny"}, 1)
+	assertCounterClose(t, got, c.userspaceEventStreamDataplaneDropsTotal, map[string]string{"type": "screen_drop"}, 4)
+	assertCounterClose(t, got, c.userspaceEventStreamDataplaneDropsTotal, map[string]string{"type": "filter_log"}, 9)
+	assertCounterClose(t, got, c.userspaceEventStreamUnknownDropsTotal, nil, 10)
+}
+
 func metricValuesByWorker(
 	t *testing.T,
 	metrics []prometheus.Metric,

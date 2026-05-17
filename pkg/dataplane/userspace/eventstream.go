@@ -39,9 +39,10 @@ type EventStream struct {
 	ackBatch       atomic.Uint64 // events since last ack
 
 	// Callbacks — set before Start(), called on the reader goroutine.
-	onEvent          func(eventType uint8, seq uint64, delta SessionDeltaInfo)
-	onDataplaneEvent func(seq uint64, rec logging.EventRecord)
-	onFullResync     func()
+	onEvent             func(eventType uint8, seq uint64, delta SessionDeltaInfo)
+	onDataplaneEvent    func(seq uint64, rec logging.EventRecord)
+	onRawDataplaneEvent func(seq uint64, payload []byte)
+	onFullResync        func()
 
 	// DrainComplete signaling for demotion prep.
 	drainCompleteMu sync.Mutex
@@ -79,6 +80,13 @@ func (es *EventStream) SetOnEvent(fn func(eventType uint8, seq uint64, delta Ses
 // Must be called before Start().
 func (es *EventStream) SetOnDataplaneEvent(fn func(seq uint64, rec logging.EventRecord)) {
 	es.onDataplaneEvent = fn
+}
+
+// SetOnRawDataplaneEvent sets the callback for raw RT_FLOW dataplane events.
+// It is preferred when the receiver can process the canonical dataplane.Event
+// payload itself, because it preserves name resolution and syslog fanout.
+func (es *EventStream) SetOnRawDataplaneEvent(fn func(seq uint64, payload []byte)) {
+	es.onRawDataplaneEvent = fn
 }
 
 // SetOnFullResync sets the callback for full resync requests. Must be called before Start().
@@ -373,7 +381,9 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			es.ackBatch.Add(1)
-			if es.onDataplaneEvent != nil {
+			if es.onRawDataplaneEvent != nil {
+				es.onRawDataplaneEvent(seq, payload)
+			} else if es.onDataplaneEvent != nil {
 				es.onDataplaneEvent(seq, rec)
 			}
 			es.recordDataplaneEvent(typ)

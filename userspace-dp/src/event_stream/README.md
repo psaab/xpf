@@ -25,7 +25,12 @@ periodic ACK from the daemon.
 
 Polled deltas at 1 Hz were missing fast-cycling sessions (open + close
 between ticks). The push stream sees every transition. The Go listener
-buffers and batches before forwarding to syslog / NetFlow.
+feeds RT_FLOW dataplane events through the same `logging.EventReader`
+path as ringbuf records, so EventBuffer, callbacks, local writers,
+syslog, NetFlow/IPFIX consumers, and name resolution stay consistent
+between eBPF and userspace transports. The listener is wired in both HA
+cluster and standalone userspace modes; only session replication remains
+cluster-scoped.
 
 ## Gotchas
 
@@ -45,3 +50,7 @@ buffers and batches before forwarding to syslog / NetFlow.
   forward-version unknown frames are explicitly counted, dropped, and
   ACKed so the helper replay buffer cannot churn forever on an
   unconsumable event.
+- Daemon-side transport counters are exported as
+  `xpf_userspace_event_stream_*` Prometheus metrics from
+  `ProcessStatus.EventStream`. Helper-side send/drop counters remain in
+  the helper status fields.

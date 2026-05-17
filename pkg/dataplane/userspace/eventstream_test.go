@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -506,6 +507,72 @@ func TestEventStreamDataplaneEventAckAndCallback(t *testing.T) {
 	}
 	if got := es.PolicyDenyEvents.Load(); got != 1 {
 		t.Fatalf("PolicyDenyEvents = %d, want 1", got)
+	}
+}
+
+func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	rawGot := make(chan []byte, 1)
+	decodedGot := make(chan struct{}, 1)
+	es.SetOnRawDataplaneEvent(func(seq uint64, payload []byte) {
+		if seq != 11 {
+			t.Fatalf("seq = %d, want 11", seq)
+		}
+		rawGot <- append([]byte(nil), payload...)
+	})
+	es.SetOnDataplaneEvent(func(uint64, logging.EventRecord) {
+		decodedGot <- struct{}{}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := buildDataplaneEventV4Payload(
+		6, 1111, 443,
+		[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		0, 77,
+		0,
+	)
+	if err := writeFrame(conn, EventTypePolicyDeny, 11, payload); err != nil {
+		t.Fatalf("write dataplane event: %v", err)
+	}
+
+	select {
+	case got := <-rawGot:
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("raw payload changed: got %d bytes, want %d", len(got), len(payload))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("raw dataplane event callback not called")
+	}
+	select {
+	case <-decodedGot:
+		t.Fatal("decoded callback should not fire when raw callback is installed")
+	default:
 	}
 }
 
