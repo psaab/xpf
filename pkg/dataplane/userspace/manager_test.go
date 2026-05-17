@@ -45,6 +45,63 @@ func TestShouldAttemptRSTSuppression(t *testing.T) {
 	}
 }
 
+func TestReadPolicyCountersUsesHelperPolicyRuleCounters(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Policies: []*config.ZonePairPolicies{{
+				FromZone: "lan",
+				ToZone:   "wan",
+				Policies: []*config.Policy{
+					{Name: "allow-web"},
+					{Name: "allow-dns"},
+				},
+			}},
+			GlobalPolicies: []*config.Policy{{Name: "global-allow"}},
+		},
+	}
+	m := New()
+	m.lastSnapshot = &ConfigSnapshot{Config: cfg}
+	m.lastStatus = ProcessStatus{
+		PolicyRuleCounters: []PolicyRuleCounterStatus{
+			{RuleID: stablePolicyRuleID("lan", "wan", "allow-dns"), Packets: 7, Bytes: 700},
+			{RuleID: stablePolicyRuleID("junos-global", "junos-global", "global-allow"), Packets: 9, Bytes: 900},
+		},
+	}
+
+	got, err := m.ReadPolicyCounters(1)
+	if err != nil {
+		t.Fatalf("ReadPolicyCounters lan/wan allow-dns: %v", err)
+	}
+	if got != (dataplane.CounterValue{Packets: 7, Bytes: 700}) {
+		t.Fatalf("lan/wan allow-dns counter = %+v, want packets=7 bytes=700", got)
+	}
+
+	got, err = m.ReadPolicyCounters(dataplane.MaxRulesPerPolicy)
+	if err != nil {
+		t.Fatalf("ReadPolicyCounters global: %v", err)
+	}
+	if got != (dataplane.CounterValue{Packets: 9, Bytes: 900}) {
+		t.Fatalf("global counter = %+v, want packets=9 bytes=900", got)
+	}
+}
+
+func TestClearPolicyCountersZerosCachedHelperCountersWithoutHelper(t *testing.T) {
+	m := New()
+	m.inner = nil
+	m.lastStatus = ProcessStatus{
+		PolicyRuleCounters: []PolicyRuleCounterStatus{
+			{RuleID: stablePolicyRuleID("lan", "wan", "allow-web"), Packets: 7, Bytes: 700},
+		},
+	}
+
+	if err := m.ClearPolicyCounters(); err != nil {
+		t.Fatalf("ClearPolicyCounters: %v", err)
+	}
+	if got := m.lastStatus.PolicyRuleCounters[0]; got.Packets != 0 || got.Bytes != 0 {
+		t.Fatalf("cached helper counter after clear = %+v, want zero packets and bytes", got)
+	}
+}
+
 func TestConfigEqualIncludesPollMode(t *testing.T) {
 	a := config.UserspaceConfig{
 		Binary:        "/tmp/helper",

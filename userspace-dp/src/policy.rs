@@ -1,11 +1,11 @@
 use crate::prefix::{PrefixV4, PrefixV6};
 use crate::prefix_set::{PrefixSetV4, PrefixSetV6};
-use crate::{PolicyApplicationSnapshot, PolicyRuleSnapshot};
+use crate::{PolicyApplicationSnapshot, PolicyRuleCounterStatus, PolicyRuleSnapshot};
 use ipnet::IpNet;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// #922: zone-pair key packed as u32 (`from_id << 16 | to_id`).
 /// Replaces the previous `(String, String)` key that allocated two
@@ -63,7 +63,7 @@ pub(crate) struct PolicyRule {
     /// Precompiled application matcher (protocol-indexed, exact-port sets).
     compiled_apps: CompiledApplications,
     pub(crate) action: PolicyAction,
-    pub(crate) hit_count: Arc<AtomicU64>,
+    pub(crate) hit_counter: Arc<PolicyRuleCounter>,
 }
 
 impl Default for PolicyRule {
@@ -84,7 +84,7 @@ impl Default for PolicyRule {
                 by_protocol: FxHashMap::default(),
             },
             action: PolicyAction::Deny,
-            hit_count: Arc::new(AtomicU64::new(0)),
+            hit_counter: Arc::new(PolicyRuleCounter::default()),
         }
     }
 }
@@ -104,43 +104,72 @@ impl Clone for PolicyRule {
             applications: self.applications.clone(),
             compiled_apps: self.compiled_apps.clone(),
             action: self.action,
-            hit_count: self.hit_count.clone(),
+            hit_counter: self.hit_counter.clone(),
         }
     }
 }
 
-type PolicyCounterRegistry = FxHashMap<String, Arc<AtomicU64>>;
-
-const POLICY_COUNTER_REGISTRY_PRUNE_THRESHOLD: usize = 16_384;
-
-static POLICY_COUNTERS: OnceLock<Mutex<PolicyCounterRegistry>> = OnceLock::new();
-
-fn policy_counter_registry() -> &'static Mutex<PolicyCounterRegistry> {
-    POLICY_COUNTERS.get_or_init(|| Mutex::new(FxHashMap::default()))
+#[derive(Debug, Default)]
+pub(crate) struct PolicyRuleCounter {
+    packets: AtomicU64,
+    bytes: AtomicU64,
 }
 
-fn prune_policy_counter_registry(active_rule_ids: &FxHashSet<String>) {
-    if let Ok(mut counters) = policy_counter_registry().lock() {
-        if counters.len() <= POLICY_COUNTER_REGISTRY_PRUNE_THRESHOLD {
-            return;
+impl PolicyRuleCounter {
+    fn add(&self, packet_len: u64) {
+        self.packets.fetch_add(1, Ordering::Relaxed);
+        if packet_len != 0 {
+            self.bytes.fetch_add(packet_len, Ordering::Relaxed);
         }
-        counters.retain(|rule_id, counter| {
-            active_rule_ids.contains(rule_id) || Arc::strong_count(counter) > 1
-        });
+    }
+
+    fn reset(&self) {
+        self.packets.store(0, Ordering::Relaxed);
+        self.bytes.store(0, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self, rule_id: &str) -> PolicyRuleCounterStatus {
+        PolicyRuleCounterStatus {
+            rule_id: rule_id.to_string(),
+            packets: self.packets.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
+        }
     }
 }
 
-fn policy_rule_hit_counter(rule_id: &str) -> Arc<AtomicU64> {
-    let mut counters = policy_counter_registry()
-        .lock()
-        .expect("policy counter registry poisoned");
-    if let Some(counter) = counters.get(rule_id) {
-        return counter.clone();
+type PolicyCounterRegistry = FxHashMap<String, Arc<PolicyRuleCounter>>;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PolicyCounterStore {
+    counters: Arc<Mutex<PolicyCounterRegistry>>,
+}
+
+impl PolicyCounterStore {
+    pub(crate) fn reconcile_rules(&self, rules: &[PolicyRuleSnapshot]) {
+        let active_rule_ids: FxHashSet<String> = rules.iter().map(stable_policy_rule_id).collect();
+        if let Ok(mut counters) = self.counters.lock() {
+            counters.retain(|rule_id, _| active_rule_ids.contains(rule_id));
+        }
     }
 
-    let counter = Arc::new(AtomicU64::new(0));
-    counters.insert(rule_id.to_string(), counter.clone());
-    counter
+    pub(crate) fn clear(&self) {
+        if let Ok(counters) = self.counters.lock() {
+            for counter in counters.values() {
+                counter.reset();
+            }
+        }
+    }
+
+    fn rule_hit_counter(&self, rule_id: &str) -> Arc<PolicyRuleCounter> {
+        let mut counters = self.counters.lock().expect("policy counter store poisoned");
+        if let Some(counter) = counters.get(rule_id) {
+            return counter.clone();
+        }
+
+        let counter = Arc::new(PolicyRuleCounter::default());
+        counters.insert(rule_id.to_string(), counter.clone());
+        counter
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,13 +275,30 @@ impl Default for PolicyState {
     }
 }
 
+impl PolicyState {
+    pub(crate) fn counter_snapshots(&self) -> Vec<PolicyRuleCounterStatus> {
+        self.rules
+            .iter()
+            .map(|rule| rule.hit_counter.snapshot(&rule.rule_id))
+            .collect()
+    }
+}
+
 pub(crate) fn parse_policy_state(
     default_policy: &str,
     rules: &[PolicyRuleSnapshot],
     zone_name_to_id: &FxHashMap<String, u16>,
 ) -> PolicyState {
-    let active_rule_ids = rules.iter().map(stable_policy_rule_id).collect();
-    prune_policy_counter_registry(&active_rule_ids);
+    let counter_store = PolicyCounterStore::default();
+    parse_policy_state_with_counters(default_policy, rules, zone_name_to_id, &counter_store)
+}
+
+pub(crate) fn parse_policy_state_with_counters(
+    default_policy: &str,
+    rules: &[PolicyRuleSnapshot],
+    zone_name_to_id: &FxHashMap<String, u16>,
+    counter_store: &PolicyCounterStore,
+) -> PolicyState {
     let mut state = PolicyState {
         default_action: parse_action(default_policy),
         rules: Vec::with_capacity(rules.len()),
@@ -281,7 +327,7 @@ pub(crate) fn parse_policy_state(
             scheduler_name: snap.scheduler_name.clone(),
             inactive: snap.inactive,
             action: parse_action(&snap.action),
-            hit_count: policy_rule_hit_counter(&rule_id),
+            hit_counter: counter_store.rule_hit_counter(&rule_id),
             source_v4: PrefixSetV4::from_prefixes(src_v4),
             source_v6: PrefixSetV6::from_prefixes(src_v6),
             destination_v4: PrefixSetV4::from_prefixes(dst_v4),
@@ -332,6 +378,22 @@ pub(crate) fn evaluate_policy(
     src_port: u16,
     dst_port: u16,
 ) -> PolicyAction {
+    evaluate_policy_with_len(
+        state, from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port, 0,
+    )
+}
+
+pub(crate) fn evaluate_policy_with_len(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_len: u64,
+) -> PolicyAction {
     // Phase 2 optimisation: look up only the rules for this zone-pair
     // instead of scanning all rules. Global rules are checked afterward.
     // #922: zero-allocation key (packed u32).
@@ -345,6 +407,7 @@ pub(crate) fn evaluate_policy(
                 protocol,
                 src_port,
                 dst_port,
+                packet_len,
             ) {
                 return action;
             }
@@ -359,6 +422,7 @@ pub(crate) fn evaluate_policy(
             protocol,
             src_port,
             dst_port,
+            packet_len,
         ) {
             return action;
         }
@@ -376,6 +440,7 @@ fn try_match_rule(
     protocol: u8,
     src_port: u16,
     dst_port: u16,
+    packet_len: u64,
 ) -> Option<PolicyAction> {
     if rule.inactive {
         return None;
@@ -387,13 +452,13 @@ fn try_match_rule(
         (IpAddr::V4(src), IpAddr::V4(dst))
             if rule.source_v4.contains(src) && rule.destination_v4.contains(dst) =>
         {
-            rule.hit_count.fetch_add(1, Ordering::Relaxed);
+            rule.hit_counter.add(packet_len);
             Some(rule.action)
         }
         (IpAddr::V6(src), IpAddr::V6(dst))
             if rule.source_v6.contains(src) && rule.destination_v6.contains(dst) =>
         {
-            rule.hit_count.fetch_add(1, Ordering::Relaxed);
+            rule.hit_counter.add(packet_len);
             Some(rule.action)
         }
         _ => None,

@@ -629,3 +629,32 @@ func TestProcessStatusFlowWorkerMapRoundTrip(t *testing.T) {
 		t.Fatal("CoSActiveFlowCountsTruncated must round-trip true")
 	}
 }
+
+func TestProcessStatusPolicyRuleCountersRoundTrip(t *testing.T) {
+	in := ProcessStatus{
+		PolicyRuleCounters: []PolicyRuleCounterStatus{{
+			RuleID:  "lan->wan/allow-web",
+			Packets: 12,
+			Bytes:   1536,
+		}},
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["policy_rule_counters"]; !ok {
+		t.Fatalf("policy_rule_counters missing from ProcessStatus JSON: %s", string(raw))
+	}
+
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if !reflect.DeepEqual(back.PolicyRuleCounters, in.PolicyRuleCounters) {
+		t.Fatalf("PolicyRuleCounters mismatch: got %+v, want %+v", back.PolicyRuleCounters, in.PolicyRuleCounters)
+	}
+}

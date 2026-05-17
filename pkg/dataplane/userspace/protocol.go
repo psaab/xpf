@@ -489,6 +489,7 @@ type ProcessStatus struct {
 	EventStreamSent              uint64                            `json:"event_stream_sent,omitempty"`
 	EventStreamDropped           uint64                            `json:"event_stream_dropped,omitempty"`
 	CoSInterfaces                []CoSInterfaceStatus              `json:"cos_interfaces,omitempty"`
+	PolicyRuleCounters           []PolicyRuleCounterStatus         `json:"policy_rule_counters,omitempty"`
 	FilterTermCounters           []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
 	LastResolution               *PacketResolution                 `json:"last_resolution,omitempty"`
 	SlowPath                     SlowPathStatus                    `json:"slow_path,omitempty"`
@@ -607,6 +608,12 @@ type FirewallFilterTermCounterStatus struct {
 	TermName   string `json:"term_name,omitempty"`
 	Packets    uint64 `json:"packets,omitempty"`
 	Bytes      uint64 `json:"bytes,omitempty"`
+}
+
+type PolicyRuleCounterStatus struct {
+	RuleID  string `json:"rule_id,omitempty"`
+	Packets uint64 `json:"packets,omitempty"`
+	Bytes   uint64 `json:"bytes,omitempty"`
 }
 
 type HAStateUpdateRequest struct {

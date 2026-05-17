@@ -32,6 +32,14 @@ fn scheduled_allow_snapshot(rule_id: &str, inactive: bool) -> PolicyRuleSnapshot
     }
 }
 
+fn policy_counter(state: &PolicyState, rule_id: &str) -> PolicyRuleCounterStatus {
+    state
+        .counter_snapshots()
+        .into_iter()
+        .find(|counter| counter.rule_id == rule_id)
+        .unwrap_or_else(|| panic!("missing policy counter for {rule_id}"))
+}
+
 #[test]
 fn allow_all_matches_zone_pair() {
     let state = parse_policy_state(
@@ -122,9 +130,7 @@ fn evaluate_policy_skips_inactive_rules() {
         PolicyAction::Deny
     );
     assert_eq!(
-        state.rules[0]
-            .hit_count
-            .load(std::sync::atomic::Ordering::Relaxed),
+        policy_counter(&state, "security-policy:lan:wan:inactive-allow").packets,
         0
     );
 }
@@ -175,16 +181,9 @@ fn inactive_rule_falls_through_to_next_match() {
         ),
         PolicyAction::Permit
     );
+    assert_eq!(policy_counter(&state, "lan->wan/inactive-deny").packets, 0);
     assert_eq!(
-        state.rules[0]
-            .hit_count
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0
-    );
-    assert_eq!(
-        state.rules[1]
-            .hit_count
-            .load(std::sync::atomic::Ordering::Relaxed),
+        policy_counter(&state, "security-policy:lan:wan:active-allow").packets,
         1
     );
 }
@@ -192,15 +191,18 @@ fn inactive_rule_falls_through_to_next_match() {
 #[test]
 fn hit_counters_survive_scheduler_snapshot_rebuild() {
     let rule_id = format!("security-policy:lan:wan:counter-survival-{}", line!());
-    let active = parse_policy_state(
+    let counter_store = PolicyCounterStore::default();
+    counter_store.reconcile_rules(&[scheduled_allow_snapshot(&rule_id, false)]);
+    let active = parse_policy_state_with_counters(
         "deny",
         &[scheduled_allow_snapshot(&rule_id, false)],
         &test_zone_name_to_id(),
+        &counter_store,
     );
 
     for _ in 0..2 {
         assert_eq!(
-            evaluate_policy(
+            evaluate_policy_with_len(
                 &active,
                 TEST_LAN_ZONE_ID,
                 TEST_WAN_ZONE_ID,
@@ -209,29 +211,24 @@ fn hit_counters_survive_scheduler_snapshot_rebuild() {
                 PROTO_TCP,
                 12345,
                 5201,
+                64,
             ),
             PolicyAction::Permit
         );
     }
-    assert_eq!(
-        active.rules[0]
-            .hit_count
-            .load(std::sync::atomic::Ordering::Relaxed),
-        2
-    );
+    let active_counter = policy_counter(&active, &rule_id);
+    assert_eq!(active_counter.packets, 2);
+    assert_eq!(active_counter.bytes, 128);
 
-    let inactive = parse_policy_state(
+    counter_store.reconcile_rules(&[scheduled_allow_snapshot(&rule_id, true)]);
+    let inactive = parse_policy_state_with_counters(
         "deny",
         &[scheduled_allow_snapshot(&rule_id, true)],
         &test_zone_name_to_id(),
+        &counter_store,
     );
     assert!(inactive.rules[0].inactive);
-    assert_eq!(
-        inactive.rules[0]
-            .hit_count
-            .load(std::sync::atomic::Ordering::Relaxed),
-        2
-    );
+    assert_eq!(policy_counter(&inactive, &rule_id).packets, 2);
     assert_eq!(
         evaluate_policy(
             &inactive,
@@ -245,26 +242,18 @@ fn hit_counters_survive_scheduler_snapshot_rebuild() {
         ),
         PolicyAction::Deny
     );
-    assert_eq!(
-        inactive.rules[0]
-            .hit_count
-            .load(std::sync::atomic::Ordering::Relaxed),
-        2
-    );
+    assert_eq!(policy_counter(&inactive, &rule_id).packets, 2);
 
     drop(active);
     drop(inactive);
-    let active_again = parse_policy_state(
+    counter_store.reconcile_rules(&[scheduled_allow_snapshot(&rule_id, false)]);
+    let active_again = parse_policy_state_with_counters(
         "deny",
         &[scheduled_allow_snapshot(&rule_id, false)],
         &test_zone_name_to_id(),
+        &counter_store,
     );
-    assert_eq!(
-        active_again.rules[0]
-            .hit_count
-            .load(std::sync::atomic::Ordering::Relaxed),
-        2
-    );
+    assert_eq!(policy_counter(&active_again, &rule_id).packets, 2);
     assert_eq!(
         evaluate_policy(
             &active_again,
@@ -278,12 +267,53 @@ fn hit_counters_survive_scheduler_snapshot_rebuild() {
         ),
         PolicyAction::Permit
     );
-    assert_eq!(
-        active_again.rules[0]
-            .hit_count
-            .load(std::sync::atomic::Ordering::Relaxed),
-        3
+    assert_eq!(policy_counter(&active_again, &rule_id).packets, 3);
+}
+
+#[test]
+fn hit_counters_reset_after_rule_absent_then_readded() {
+    let rule_id = format!("security-policy:lan:wan:counter-reset-{}", line!());
+    let counter_store = PolicyCounterStore::default();
+    counter_store.reconcile_rules(&[scheduled_allow_snapshot(&rule_id, false)]);
+    let active = parse_policy_state_with_counters(
+        "deny",
+        &[scheduled_allow_snapshot(&rule_id, false)],
+        &test_zone_name_to_id(),
+        &counter_store,
     );
+    assert_eq!(
+        evaluate_policy_with_len(
+            &active,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            "10.0.61.100".parse().expect("src"),
+            "172.16.80.200".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            5201,
+            96,
+        ),
+        PolicyAction::Permit
+    );
+    let active_counter = policy_counter(&active, &rule_id);
+    assert_eq!(active_counter.packets, 1);
+    assert_eq!(active_counter.bytes, 96);
+
+    counter_store.reconcile_rules(&[]);
+    let deleted =
+        parse_policy_state_with_counters("deny", &[], &test_zone_name_to_id(), &counter_store);
+    assert!(deleted.counter_snapshots().is_empty());
+
+    counter_store.reconcile_rules(&[scheduled_allow_snapshot(&rule_id, false)]);
+    let active_again = parse_policy_state_with_counters(
+        "deny",
+        &[scheduled_allow_snapshot(&rule_id, false)],
+        &test_zone_name_to_id(),
+        &counter_store,
+    );
+    let reset_counter = policy_counter(&active_again, &rule_id);
+    assert_eq!(reset_counter.packets, 0);
+    assert_eq!(reset_counter.bytes, 0);
 }
 
 #[test]

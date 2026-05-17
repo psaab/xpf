@@ -1500,31 +1500,24 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp dat
 	if cfg == nil {
 		return
 	}
-	cr := dp.LastCompileResult()
-	if cr == nil {
+	if dp.LastCompileResult() == nil {
 		return
 	}
 
-	// Build reverse zone ID map
-	zoneNames := make(map[uint16]string)
-	for name, id := range cr.ZoneIDs {
-		zoneNames[id] = name
-	}
-
-	var policyID uint32
+	var policySetID uint32
 	for _, zpp := range cfg.Security.Policies {
 		fromZone := zpp.FromZone
 		toZone := zpp.ToZone
-		for _, rule := range zpp.Policies {
+		for i, rule := range zpp.Policies {
+			policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 			ctrs, err := dp.ReadPolicyCounters(policyID)
 			if err != nil {
-				policyID++
 				continue
 			}
 			ch <- prometheus.MustNewConstMetric(c.policyHitsTotal, prometheus.CounterValue,
 				float64(ctrs.Packets), fromZone, toZone, rule.Name)
-			policyID++
 		}
+		policySetID++
 	}
 }
 

@@ -207,6 +207,11 @@ pub(crate) fn handle_stream(
                     response.error = "missing snapshot".to_string();
                 }
             }
+            "clear_policy_counters" => {
+                guard.afxdp.clear_policy_counters();
+                refresh_status(&mut guard);
+                persist_state = true;
+            }
             "set_queue_state" => {
                 if let Some(queue_req) = request.queue {
                     let mut found = false;
