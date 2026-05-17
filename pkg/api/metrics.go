@@ -1500,9 +1500,6 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp dat
 	if cfg == nil {
 		return
 	}
-	if dp.LastCompileResult() == nil {
-		return
-	}
 
 	var policySetID uint32
 	for _, zpp := range cfg.Security.Policies {
@@ -1518,6 +1515,16 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp dat
 				float64(ctrs.Packets), fromZone, toZone, rule.Name)
 		}
 		policySetID++
+	}
+
+	for i, rule := range cfg.Security.GlobalPolicies {
+		policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+		ctrs, err := dp.ReadPolicyCounters(policyID)
+		if err != nil {
+			continue
+		}
+		ch <- prometheus.MustNewConstMetric(c.policyHitsTotal, prometheus.CounterValue,
+			float64(ctrs.Packets), "*", "*", rule.Name)
 	}
 }
 

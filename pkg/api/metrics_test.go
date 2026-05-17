@@ -2,11 +2,14 @@ package api
 
 import (
 	"math"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/dataplane"
 
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -272,6 +275,116 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceEventStreamDataplaneDropsTotal, map[string]string{"type": "screen_drop"}, 4)
 	assertCounterClose(t, got, c.userspaceEventStreamDataplaneDropsTotal, map[string]string{"type": "filter_log"}, 9)
 	assertCounterClose(t, got, c.userspaceEventStreamUnknownDropsTotal, nil, 10)
+}
+
+func newSchedulerCounterMetricsStore(t *testing.T) *configstore.Store {
+	t.Helper()
+
+	store := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure() error = %v", err)
+	}
+	if err := store.LoadOverride(`
+schedulers {
+    scheduler workhours {
+        daily;
+    }
+}
+security {
+    zones {
+        security-zone dmz;
+        security-zone trust;
+        security-zone untrust;
+    }
+    policies {
+        from-zone trust to-zone dmz {
+            policy plain-allow {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+            }
+        }
+        from-zone trust to-zone untrust {
+            policy scheduled-allow {
+                match { source-address any; destination-address any; application any; }
+                then { permit; count; }
+                scheduler-name workhours;
+            }
+        }
+        global {
+            policy global-scheduled {
+                match { source-address any; destination-address any; application any; }
+                then { permit; count; }
+                scheduler-name workhours;
+            }
+        }
+    }
+}
+`); err != nil {
+		t.Fatalf("LoadOverride() error = %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	return store
+}
+
+func globalCounterPolicyID(t *testing.T, store *configstore.Store, ruleName string) uint32 {
+	t.Helper()
+	cfg := store.ActiveConfig()
+	if cfg == nil {
+		t.Fatal("ActiveConfig() = nil")
+	}
+	for i, rule := range cfg.Security.GlobalPolicies {
+		if rule != nil && rule.Name == ruleName {
+			return uint32(len(cfg.Security.Policies))*dataplane.MaxRulesPerPolicy + uint32(i)
+		}
+	}
+	t.Fatalf("global policy %q not found", ruleName)
+	return 0
+}
+
+func TestCollectPolicyCountersExposesSparseAndGlobalPolicyIDs(t *testing.T) {
+	store := newSchedulerCounterMetricsStore(t)
+	scheduledID := scheduledCounterPolicyID(t, store)
+	globalID := globalCounterPolicyID(t, store, "global-scheduled")
+	c := &xpfCollector{
+		srv: &Server{store: store},
+		policyHitsTotal: prometheus.NewDesc(
+			"xpf_policy_hits_total",
+			"policy hits",
+			[]string{"from_zone", "to_zone", "policy_name"},
+			nil,
+		),
+	}
+	dp := &schedulerCounterAPIDP{
+		Manager: dataplane.New(),
+		counters: map[uint32]dataplane.CounterValue{
+			1:           {Packets: 99, Bytes: 9900},
+			scheduledID: {Packets: 17, Bytes: 1700},
+			globalID:    {Packets: 31, Bytes: 3100},
+		},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.collectPolicyCounters(ch, dp)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+
+	assertCounterClose(t, got, c.policyHitsTotal, map[string]string{
+		"from_zone":   "trust",
+		"to_zone":     "untrust",
+		"policy_name": "scheduled-allow",
+	}, 17)
+	assertCounterClose(t, got, c.policyHitsTotal, map[string]string{
+		"from_zone":   "*",
+		"to_zone":     "*",
+		"policy_name": "global-scheduled",
+	}, 31)
 }
 
 func metricValuesByWorker(

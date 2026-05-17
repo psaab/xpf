@@ -56,6 +56,13 @@ security {
                 scheduler-name workhours;
             }
         }
+        global {
+            policy global-scheduled {
+                match { source-address any; destination-address any; application any; }
+                then { permit; count; }
+                scheduler-name workhours;
+            }
+        }
     }
 }
 `); err != nil {
@@ -96,8 +103,9 @@ func TestGetPoliciesExposesScheduledRuleCounters(t *testing.T) {
 		dp: &schedulerCounterGRPCDP{
 			Manager: dataplane.New(),
 			counters: map[uint32]dataplane.CounterValue{
-				1:        {Packets: 99, Bytes: 9900},
-				policyID: {Packets: 23, Bytes: 2300},
+				1:                               {Packets: 99, Bytes: 9900},
+				policyID:                        {Packets: 23, Bytes: 2300},
+				dataplane.MaxRulesPerPolicy * 2: {Packets: 31, Bytes: 3100},
 			},
 		},
 	}
@@ -125,4 +133,41 @@ func TestGetPoliciesExposesScheduledRuleCounters(t *testing.T) {
 		}
 	}
 	t.Fatal("scheduled-allow rule not found in gRPC response")
+}
+
+func TestGetPoliciesExposesGlobalScheduledRuleCounters(t *testing.T) {
+	store := newSchedulerCounterGRPCStore(t)
+	s := &Server{
+		store: store,
+		dp: &schedulerCounterGRPCDP{
+			Manager: dataplane.New(),
+			counters: map[uint32]dataplane.CounterValue{
+				dataplane.MaxRulesPerPolicy * 2: {Packets: 31, Bytes: 3100},
+			},
+		},
+	}
+
+	resp, err := s.GetPolicies(context.Background(), &pb.GetPoliciesRequest{})
+	if err != nil {
+		t.Fatalf("GetPolicies() error = %v", err)
+	}
+	for _, policy := range resp.GetPolicies() {
+		if policy.GetFromZone() != "*" || policy.GetToZone() != "*" {
+			continue
+		}
+		for _, rule := range policy.GetRules() {
+			if rule.GetName() != "global-scheduled" {
+				continue
+			}
+			if !rule.GetCount() {
+				t.Fatal("global-scheduled Count = false, want true")
+			}
+			if rule.GetHitPackets() != 31 || rule.GetHitBytes() != 3100 {
+				t.Fatalf("global-scheduled counters = %d packets/%d bytes, want 31/3100",
+					rule.GetHitPackets(), rule.GetHitBytes())
+			}
+			return
+		}
+	}
+	t.Fatal("global-scheduled rule not found in gRPC response")
 }
