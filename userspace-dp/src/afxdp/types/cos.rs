@@ -337,6 +337,8 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     pub(in crate::afxdp) shaping_rate_bytes: u64,
     pub(in crate::afxdp) burst_bytes: u64,
     pub(in crate::afxdp) tokens: u64,
+    pub(in crate::afxdp) nonexact_surplus_under_exact_tokens: u64,
+    pub(in crate::afxdp) nonexact_surplus_under_exact_last_refill_ns: u64,
     pub(in crate::afxdp) default_queue: u8,
     pub(in crate::afxdp) nonempty_queues: usize,
     pub(in crate::afxdp) runnable_queues: usize,

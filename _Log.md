@@ -1,6 +1,21 @@
 # Action Log
 
-## 2026-05-16
+## 2026-05-17
+
+- **Timestamp**: 2026-05-17T01:12:00Z
+  - **Action**: PR #1391 post-smoke follow-up — live q10(24G)+q0(best-effort) contention on `7e7eb07e` showed serviceable-only exact suppression still let q0 drain ~15.6 GB of surplus while exact was backlogged. Reworked the gate from binary serviceability to residual-rate budgeting: non-exact surplus can consume only `root_rate - backlogged_exact_guarantee_rates`, shared exact queues publish queue masks so one queue's reservation is counted once across workers, and shared interfaces use an interface-global residual token bucket rather than per-worker residual buckets.
+  - **File(s)**: `userspace-dp/src/afxdp/cos/queue_service/mod.rs`, `userspace-dp/src/afxdp/cos/queue_service/tests.rs`, `userspace-dp/src/afxdp/cos/tx_completion.rs`, `userspace-dp/src/afxdp/types/shared_cos_lease.rs`, `userspace-dp/src/afxdp/types/cos.rs`, `userspace-dp/src/afxdp/cos/builders.rs`, `userspace-dp/src/afxdp/worker/cos_tests.rs`, `userspace-dp/src/afxdp/cos/README.md`, `userspace-dp/src/afxdp/types/README.md`, `_Log.md`
+  - **Validation**: `rustfmt --edition 2024` on changed Rust files; `cargo test --manifest-path userspace-dp/Cargo.toml build_nonexact -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml exact_backlog -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml apply_cos_send_result_debits_shared_residual_surplus_budget -- --nocapture`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T00:08:28Z
+  - **Action**: Issue #1390 — initial CoS best-effort strict-priority fix attempt; round-1 review later narrowed the invariant to surplus-only suppression so explicit non-exact guarantees remain Junos-compatible.
+  - **File(s)**: `userspace-dp/src/afxdp/cos/queue_service/mod.rs`, `userspace-dp/src/afxdp/cos/queue_service/tests.rs`, `userspace-dp/src/afxdp/tx/cos_classify_tests.rs`, `userspace-dp/src/afxdp/worker/cos_tests.rs`, `userspace-dp/src/afxdp/cos/README.md`, `_Log.md`
+  - **Validation**: `cargo fmt --manifest-path userspace-dp/Cargo.toml`; `cargo test --manifest-path userspace-dp/Cargo.toml build_nonexact -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml afxdp::cos::queue_service::tests:: -- --nocapture`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T00:35:00Z
+  - **Action**: PR #1391 round-1 review follow-up — narrowed exact-over-residual enforcement to the surplus phase so explicit non-exact guarantees keep Junos-compatible service; local and peer suppression now require a serviceable exact queue, peer serviceability uses acquire/release publication, and tests pin non-exact guarantee plus token-starved exact behavior.
+  - **File(s)**: `userspace-dp/src/afxdp/cos/queue_service/mod.rs`, `userspace-dp/src/afxdp/cos/queue_service/tests.rs`, `userspace-dp/src/afxdp/cos/tx_completion.rs`, `userspace-dp/src/afxdp/types/shared_cos_lease.rs`, `userspace-dp/src/afxdp/cos/README.md`, `userspace-dp/src/afxdp/types/README.md`, `_Log.md`
+  - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml build_nonexact -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml afxdp::cos::queue_service::tests:: -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml exact_backlog -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml reset_binding_cos_runtime_clears_shared_exact_backlog_slot -- --nocapture`; `git diff --check`
 
 - **Timestamp**: 2026-05-17T00:48:00Z
   - **Action**: PR #1385 round-3 review follow-up — corrected README prose so pool-mode SNAT is no longer described as an explicit userspace capability gate after the pool-mode fixes; the remaining caveat is cross-backend `address-persistent` parity under #1377.
@@ -11,6 +26,8 @@
   - **Action**: PR #1382 round-3 rebase follow-up — aligned the Phase 0 audit with the now-merged #1385 pool-mode SNAT fixes, and kept #1377 as the remaining cross-backend `address-persistent` parity blocker.
   - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/plan.md`, `_Log.md`
   - **Validation**: `git diff --check`
+
+## 2026-05-16
 
 - **Timestamp**: 2026-05-16T23:58:00Z
   - **Action**: PR #1385 round-2 review follow-up — made Rust pool-mode SNAT skip matched rules whose pool has no address for the packet family so later compatible rules can apply, added wrong-family regression tests, and documented userspace/eBPF/DPDK address-persistent algorithm divergence until #1377 defines a shared contract.
