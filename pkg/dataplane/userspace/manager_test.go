@@ -2833,8 +2833,8 @@ func TestUpdatePolicyScheduleStateRefusesOldHelperForScheduledPolicies(t *testin
 	if m.lastStatus.ForwardingArmed {
 		t.Fatal("helper status should be disarmed after protocol mismatch")
 	}
-	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || !m.lastSnapshot.Policies[0].Inactive {
-		t.Fatalf("manager should keep local inactive state even when publish is refused: %+v", m.lastSnapshot)
+	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || m.lastSnapshot.Policies[0].Inactive {
+		t.Fatalf("manager should not cache rejected inactive state when publish is refused: %+v", m.lastSnapshot)
 	}
 }
 

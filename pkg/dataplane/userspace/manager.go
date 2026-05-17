@@ -326,13 +326,19 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		pendingXSKStartup = false
 		samePlanRefresh = false
 	}
-	m.lastSnapshot = snap
 	// #1197 v4 (Codex code-review v3 #1+#2): rebuild listener
 	// caches ONLY after a successful apply_snapshot. Doing it
 	// here (before publish) leaves the listener thinking
 	// userspace-dp has entries it doesn't if apply_snapshot fails.
 	// Moved to the post-success path below (after line 343).
 	if pendingXSKStartup {
+		if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+			if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+				return result, errors.Join(err, disarmErr)
+			}
+			return result, err
+		}
+		m.lastSnapshot = snap
 		if err := m.syncIngressIfaceMapLocked(snap); err != nil {
 			return result, err
 		}
@@ -389,6 +395,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
 		return result, fmt.Errorf("publish userspace snapshot: %w", err)
 	}
+	m.lastSnapshot = snap
 	// #1197 v4: apply_snapshot succeeded — userspace-dp has the
 	// new neighbors. NOW rebuild listener caches; before this
 	// point the index would shadow events for entries the
@@ -444,9 +451,9 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	next.GeneratedAt = time.Now().UTC()
 	next.Config = cfg
 	next.Policies = buildPolicySnapshotsWithSchedulerState(cfg, activeCopy)
-	m.lastSnapshot = &next
 
 	if m.proc == nil || m.proc.Process == nil {
+		m.lastSnapshot = &next
 		return
 	}
 	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
@@ -464,6 +471,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		slog.Warn("userspace: failed to publish policy scheduler state", "err", err)
 		return
 	}
+	m.lastSnapshot = &next
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
