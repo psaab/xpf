@@ -369,8 +369,8 @@ fn build_synced_session_entry_preserves_fabric_ingress() {
         ..SessionSyncRequest::default()
     };
 
-    let entry = build_synced_session_entry(&req, &test_zone_name_to_id())
-        .expect("synced session entry");
+    let entry =
+        build_synced_session_entry(&req, &test_zone_name_to_id()).expect("synced session entry");
     assert!(entry.metadata.fabric_ingress);
     assert!(entry.origin.is_peer_synced());
     assert_eq!(entry.metadata.owner_rg_id, 1);
@@ -392,8 +392,8 @@ fn build_synced_session_entry_preserves_tunnel_endpoint_id() {
         ..SessionSyncRequest::default()
     };
 
-    let entry = build_synced_session_entry(&req, &test_zone_name_to_id())
-        .expect("synced session entry");
+    let entry =
+        build_synced_session_entry(&req, &test_zone_name_to_id()).expect("synced session entry");
     assert_eq!(entry.decision.resolution.tunnel_endpoint_id, 3);
     assert_eq!(entry.decision.resolution.egress_ifindex, 586);
     assert_eq!(
@@ -425,8 +425,8 @@ fn build_synced_session_entry_prefers_id_over_legacy_zone_name() {
         tx_ifindex: 5,
         ..SessionSyncRequest::default()
     };
-    let entry = build_synced_session_entry(&req, &test_zone_name_to_id())
-        .expect("synced session entry");
+    let entry =
+        build_synced_session_entry(&req, &test_zone_name_to_id()).expect("synced session entry");
     assert_eq!(entry.metadata.ingress_zone, 1);
     assert_eq!(entry.metadata.egress_zone, 2);
 }
@@ -451,8 +451,8 @@ fn build_synced_session_entry_falls_back_to_zone_name_when_id_zero() {
         tx_ifindex: 5,
         ..SessionSyncRequest::default()
     };
-    let entry = build_synced_session_entry(&req, &test_zone_name_to_id())
-        .expect("synced session entry");
+    let entry =
+        build_synced_session_entry(&req, &test_zone_name_to_id()).expect("synced session entry");
     let m = test_zone_name_to_id();
     assert_eq!(entry.metadata.ingress_zone, m["lan"]);
     assert_eq!(entry.metadata.egress_zone, m["wan"]);
@@ -479,8 +479,8 @@ fn build_synced_session_entry_unknown_zone_name_does_not_drop_session() {
         tx_ifindex: 5,
         ..SessionSyncRequest::default()
     };
-    let entry = build_synced_session_entry(&req, &test_zone_name_to_id())
-        .expect("synced session entry");
+    let entry =
+        build_synced_session_entry(&req, &test_zone_name_to_id()).expect("synced session entry");
     assert_eq!(entry.metadata.ingress_zone, 0);
     assert_eq!(entry.metadata.egress_zone, 0);
 }
@@ -879,8 +879,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
     // Round-trip: the daemon's JSON → Rust decode path must be
     // symmetric with the Rust encode path.
     let json = serde_json::to_string(&snap).expect("serialize snapshot");
-    let round: BindingCountersSnapshot =
-        serde_json::from_str(&json).expect("deserialize snapshot");
+    let round: BindingCountersSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
     assert_eq!(round, snap);
 }
 
@@ -1014,6 +1013,51 @@ fn config_snapshot_three_color_policers_roundtrip() {
 }
 
 #[test]
+fn config_snapshot_mirror_configs_roundtrip() {
+    let json = r#"{
+        "version": 1,
+        "generation": 42,
+        "generated_at": "2026-05-17T00:00:00Z",
+        "summary": {
+            "host_name": "fw",
+            "dataplane_type": "userspace",
+            "interface_count": 0,
+            "zone_count": 0,
+            "policy_count": 0,
+            "scheduler_count": 0,
+            "ha_enabled": false
+        },
+        "mirror_configs": [
+            {"ingress_ifindex": 11, "output_ifindex": 22, "rate": 100},
+            {"ingress_ifindex": 12, "output_ifindex": 22, "rate": 0}
+        ]
+    }"#;
+    let snap: ConfigSnapshot = serde_json::from_str(json).expect("mirror snapshot decodes");
+    assert_eq!(
+        snap.mirror_configs,
+        vec![
+            MirrorConfigSnapshot {
+                ingress_ifindex: 11,
+                output_ifindex: 22,
+                rate: 100,
+            },
+            MirrorConfigSnapshot {
+                ingress_ifindex: 12,
+                output_ifindex: 22,
+                rate: 0,
+            },
+        ],
+        "Rust snapshot DTO must round-trip the Go mirror_configs wire shape"
+    );
+
+    let encoded = serde_json::to_value(&snap).expect("mirror snapshot serializes");
+    assert!(
+        encoded.get("mirror_configs").is_some(),
+        "mirror_configs wire key missing from Rust serialization: {encoded}"
+    );
+}
+
+#[test]
 fn tx_latency_hist_serialization_roundtrip() {
     // #812 plan §6.1 test #4. Construct a BindingCountersSnapshot
     // with a non-trivial TX submit-latency histogram; JSON-encode,
@@ -1057,8 +1101,7 @@ fn tx_latency_hist_serialization_roundtrip() {
         v_min_throttles: 19,
     };
     let json = serde_json::to_string(&snap).expect("serialize snapshot");
-    let back: BindingCountersSnapshot =
-        serde_json::from_str(&json).expect("deserialize snapshot");
+    let back: BindingCountersSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
     assert_eq!(back, snap);
     assert_eq!(back.tx_submit_latency_hist.len(), 16);
     assert_eq!(back.tx_submit_latency_hist[0], 9001);

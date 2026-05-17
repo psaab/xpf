@@ -1978,6 +1978,39 @@ func TestBuildMirrorConfigSnapshots(t *testing.T) {
 	}
 }
 
+func TestBuildSnapshotIncludesMirrorConfigsFromRealInterfaceSnapshot(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"lo": {Name: "lo"},
+	}
+	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
+		Instances: map[string]*config.PortMirrorInstance{
+			"span-loopback": {
+				Name:      "span-loopback",
+				InputRate: 7,
+				Input:     []string{"lo"},
+				Output:    "lo",
+			},
+		},
+	}
+
+	snap := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
+	var loIfindex int
+	for _, iface := range snap.Interfaces {
+		if iface.Name == "lo" {
+			loIfindex = iface.Ifindex
+			break
+		}
+	}
+	if loIfindex <= 0 {
+		t.Fatalf("buildSnapshot did not resolve loopback ifindex in interfaces: %+v", snap.Interfaces)
+	}
+	want := []MirrorConfigSnapshot{{IngressIfindex: loIfindex, OutputIfindex: loIfindex, Rate: 7}}
+	if !reflect.DeepEqual(snap.MirrorConfigs, want) {
+		t.Fatalf("MirrorConfigs = %+v, want %+v", snap.MirrorConfigs, want)
+	}
+}
+
 func TestBuildMirrorConfigSnapshotsRejectsDuplicateIngressIfindex(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
