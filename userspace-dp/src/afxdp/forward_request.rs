@@ -148,5 +148,6 @@ pub(super) fn build_live_forward_request_from_frame(
         nat64_reverse: None,
         cos_queue_id: cos.queue_id,
         dscp_rewrite: cos.dscp_rewrite,
+        cos_tx_selection_resolved: true,
     })
 }

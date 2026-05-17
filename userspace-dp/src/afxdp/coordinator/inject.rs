@@ -1,5 +1,48 @@
 use super::*;
 
+pub(super) fn stamp_injected_packet_tuple(
+    meta: &mut UserspaceDpMeta,
+    frame_len: usize,
+    dst: IpAddr,
+    egress: &EgressInterface,
+    slot: u32,
+) -> Result<(), String> {
+    meta.pkt_len = frame_len.min(u16::MAX as usize) as u16;
+    let l3_offset = if egress.vlan_id > 0 { 18 } else { 14 };
+    meta.l3_offset = l3_offset;
+    meta.flow_src_addr = [0; 16];
+    meta.flow_dst_addr = [0; 16];
+    meta.flow_src_port = slot as u16;
+    meta.flow_dst_port = 0;
+
+    match dst {
+        IpAddr::V4(dst_v4) => {
+            let src_v4 = egress
+                .primary_v4
+                .ok_or_else(|| "egress interface has no IPv4 source address".to_string())?;
+            meta.addr_family = libc::AF_INET as u8;
+            meta.protocol = PROTO_ICMP;
+            meta.l4_offset = l3_offset + 20;
+            meta.payload_offset = meta.l4_offset + 8;
+            meta.flow_src_addr[..4].copy_from_slice(&src_v4.octets());
+            meta.flow_dst_addr[..4].copy_from_slice(&dst_v4.octets());
+        }
+        IpAddr::V6(dst_v6) => {
+            let src_v6 = egress
+                .primary_v6
+                .ok_or_else(|| "egress interface has no IPv6 source address".to_string())?;
+            meta.addr_family = libc::AF_INET6 as u8;
+            meta.protocol = PROTO_ICMPV6;
+            meta.l4_offset = l3_offset + 40;
+            meta.payload_offset = meta.l4_offset + 8;
+            meta.flow_src_addr.copy_from_slice(&src_v6.octets());
+            meta.flow_dst_addr.copy_from_slice(&dst_v6.octets());
+        }
+    }
+
+    Ok(())
+}
+
 /// `request inject-packet` RPC handler. Builds a synthetic packet
 /// against the live ForwardingState/HA snapshot, runs it through the
 /// resolution path, and reports the disposition.
@@ -107,24 +150,33 @@ impl super::Coordinator {
                             format!("binding slot {} has no live state", target_slot)
                         })?;
                         let frame = build_injected_packet(&req, dst, resolution, egress)?;
+                        let mut tx_meta = meta;
+                        stamp_injected_packet_tuple(
+                            &mut tx_meta,
+                            frame.len(),
+                            dst,
+                            egress,
+                            req.slot,
+                        )?;
                         let now_ns = monotonic_nanos();
-                        let cos_flow = parse_session_flow_from_meta(meta);
+                        let cos_flow = parse_session_flow_from_meta(tx_meta);
                         let cos = resolve_cos_tx_selection_at(
                             &self.forwarding,
                             resolution.egress_ifindex,
-                            meta,
+                            tx_meta,
                             cos_flow.as_ref().map(|flow| &flow.forward_key),
                             now_ns,
                         );
                         if cos.drop {
                             return Ok(());
                         }
+                        let flow_key = cos_flow.map(|flow| flow.forward_key);
                         target_live.enqueue_tx(TxRequest {
                             bytes: frame,
                             expected_ports: None,
-                            expected_addr_family: 0,
-                            expected_protocol: 0,
-                            flow_key: None,
+                            expected_addr_family: tx_meta.addr_family,
+                            expected_protocol: tx_meta.protocol,
+                            flow_key,
                             egress_ifindex: resolution.egress_ifindex,
                             cos_queue_id: cos.queue_id,
                             dscp_rewrite: cos.dscp_rewrite,

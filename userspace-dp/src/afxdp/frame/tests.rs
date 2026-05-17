@@ -2170,6 +2170,117 @@ fn build_live_forward_request_meters_non_l4_metadata_flow() {
 }
 
 #[test]
+fn build_live_forward_request_marks_empty_cos_selection_resolved() {
+    let src_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let dst_ip = Ipv4Addr::new(10, 0, 0, 2);
+    let area = MmapArea::new(4096).expect("mmap");
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 10,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_GRE,
+        pkt_len: 64,
+        flow_src_addr: {
+            let mut bytes = [0u8; 16];
+            bytes[..4].copy_from_slice(&src_ip.octets());
+            bytes
+        },
+        flow_dst_addr: {
+            let mut bytes = [0u8; 16];
+            bytes[..4].copy_from_slice(&dst_ip.octets());
+            bytes
+        },
+        ..UserspaceDpMeta::default()
+    };
+    let filter_state = crate::filter::parse_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "policed".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "meter-gre".into(),
+                action: "accept".into(),
+                protocols: vec!["gre".into()],
+                policer: "gre-pol".into(),
+                ..Default::default()
+            }],
+        }],
+        &[],
+        &[ThreeColorPolicerSnapshot {
+            name: "gre-pol".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 128,
+            peak_or_excess_burst_bytes: 64,
+            then_action: "discard".into(),
+            ..Default::default()
+        }],
+        &[crate::InterfaceSnapshot {
+            name: "ge-0/0/1.0".into(),
+            ifindex: 10,
+            filter_input_v4: "policed".into(),
+            ..Default::default()
+        }],
+        "policed",
+        "",
+    );
+    let forwarding = ForwardingState {
+        filter_state,
+        tx_selection_enabled_v4: true,
+        ..ForwardingState::default()
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(dst_ip)),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+    };
+    let ingress = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-1"),
+        ifindex: 10,
+    };
+
+    let req = build_live_forward_request(
+        &area,
+        &WorkerBindingLookup::default(),
+        0,
+        &ingress,
+        XdpDesc {
+            addr: 0,
+            len: 0,
+            options: 0,
+        },
+        meta,
+        &decision,
+        &forwarding,
+        None,
+        None,
+        false,
+        0,
+    )
+    .expect("green policer should permit request");
+
+    assert_eq!(req.cos_queue_id, None);
+    assert_eq!(req.dscp_rewrite, None);
+    assert!(req.cos_tx_selection_resolved);
+    let status = forwarding.filter_state.three_color_policer_statuses();
+    assert_eq!(status[0].green_packets, 1);
+}
+
+#[test]
 fn build_live_forward_request_uses_flow_or_metadata_ports_when_frame_ports_unavailable() {
     let src_ip = "2001:559:8585:ef00::102".parse::<Ipv6Addr>().unwrap();
     let dst_ip = "2001:559:8585:80::200".parse::<Ipv6Addr>().unwrap();

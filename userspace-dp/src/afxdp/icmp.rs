@@ -22,7 +22,7 @@ pub(super) fn build_local_time_exceeded_request(
     desc: XdpDesc,
     meta: UserspaceDpMeta,
     ingress_ident: &BindingIdentity,
-    _flow: &SessionFlow,
+    flow: &SessionFlow,
     forwarding: &ForwardingState,
     _dynamic_neighbors: &Arc<ShardedNeighborMap>,
     _ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -49,12 +49,11 @@ pub(super) fn build_local_time_exceeded_request(
     }?;
 
     let now_ns = monotonic_nanos();
-    let cos_flow = parse_session_flow_from_meta(meta);
     let cos = resolve_cos_tx_selection_at(
         forwarding,
         ingress_ident.ifindex,
         meta,
-        cos_flow.as_ref().map(|flow| &flow.forward_key),
+        Some(&flow.forward_key),
         now_ns,
     );
     if cos.drop {
@@ -83,10 +82,11 @@ pub(super) fn build_local_time_exceeded_request(
         },
         apply_nat_on_fabric: false,
         expected_ports: None,
-        flow_key: None,
+        flow_key: Some(flow.forward_key.clone()),
         nat64_reverse: None,
         cos_queue_id: cos.queue_id,
         dscp_rewrite: cos.dscp_rewrite,
+        cos_tx_selection_resolved: true,
     })
 }
 

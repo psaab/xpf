@@ -1016,15 +1016,11 @@ pub(super) fn poll_binding_process_descriptor(
                                                         icmp_decision.resolution.egress_ifindex,
                                                     )
                                                 };
-                                            let icmp_cos_flow =
-                                                parse_session_flow_from_meta(meta);
                                             let cos = resolve_cos_tx_selection_at(
                                                 worker_ctx.forwarding,
                                                 icmp_decision.resolution.egress_ifindex,
                                                 meta,
-                                                icmp_cos_flow
-                                                    .as_ref()
-                                                    .map(|flow| &flow.forward_key),
+                                                Some(&flow.forward_key),
                                                 now_ns,
                                             );
                                             if !cos.drop {
@@ -1045,10 +1041,11 @@ pub(super) fn poll_binding_process_descriptor(
                                                     decision: icmp_decision,
                                                     apply_nat_on_fabric: false,
                                                     expected_ports: None,
-                                                    flow_key: None,
+                                                    flow_key: Some(flow.forward_key.clone()),
                                                     nat64_reverse: None,
                                                     cos_queue_id: cos.queue_id,
                                                     dscp_rewrite: cos.dscp_rewrite,
+                                                    cos_tx_selection_resolved: true,
                                                 });
                                                 recycle_now = false;
                                             }

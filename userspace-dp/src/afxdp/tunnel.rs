@@ -232,9 +232,9 @@ pub(super) fn build_local_origin_tunnel_tx_request(
         tx_request: TxRequest {
             bytes,
             expected_ports: None,
-            expected_addr_family: 0,
-            expected_protocol: 0,
-            flow_key: None,
+            expected_addr_family: meta.addr_family,
+            expected_protocol: meta.protocol,
+            flow_key: Some(session_entry.key.clone()),
             egress_ifindex: decision.resolution.egress_ifindex,
             cos_queue_id: cos.queue_id,
             dscp_rewrite: cos.dscp_rewrite,
