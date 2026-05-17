@@ -743,5 +743,5 @@
   - **Action**: #1373 Phase 1 documentation migration: mark Rust AF_XDP userspace as the primary/default dataplane development and validation target, demote eBPF wording to legacy compatibility/regression context, and preserve explicit retirement blockers for #1374-#1381 without claiming unresolved gaps closed.
   - **File(s)**: `README.md`, `CLAUDE.md`, `docs/testing.md`, `docs/development-workflow.md`, `docs/test_env.md`, `docs/userspace-dataplane-gaps.md`, `docs/feature-gaps.md`, `docs/userspace-dataplane-architecture.md`, `docs/afxdp-packet-processing.md`, `docs/ha-cluster-test-plan.md`, `testing-docs/README.md`, `bpf/README.md`, `userspace-dp/README.md`, `pkg/dataplane/README.md`, `userspace-dp/src/afxdp/README.md`, `_Log.md`
 - **Timestamp**: 2026-05-17T18:57:46Z
-  - **Action**: Adversarial PR #1374 follow-up: optimize SYN-cookie validated-client cache expiry maintenance to avoid full-queue scans on every insert/take by keeping refreshed entries at tail and popping only expired head entries.
+  - **Action**: Adversarial PR #1374 follow-up: optimize SYN-cookie validated-client cache with map+queue state so insert/take are O(1), while expiry/eviction drain stale queue tokens from the head without whole-cache scans.
   - **File(s)**: `userspace-dp/src/screen.rs`, `userspace-dp/src/screen_tests.rs`, `_Log.md`

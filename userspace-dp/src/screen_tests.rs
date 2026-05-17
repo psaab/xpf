@@ -1360,10 +1360,14 @@ fn syn_cookie_validated_cache_is_bounded() {
 #[test]
 fn syn_cookie_validated_cache_refresh_extends_ttl() {
     let mut cache = SynCookieValidatedCache::new(4, 10);
-    let tuple = syn_cookie_tuple();
-    cache.insert(7, tuple, 100);
-    cache.insert(7, tuple, 109);
-    assert!(cache.take_valid(7, tuple, 110));
+    let tuple_refreshed = syn_cookie_tuple();
+    let mut tuple_old = syn_cookie_tuple();
+    tuple_old.src_port += 1;
+    cache.insert(7, tuple_refreshed, 100);
+    cache.insert(7, tuple_old, 100);
+    cache.insert(7, tuple_refreshed, 109);
+    assert!(!cache.take_valid(7, tuple_old, 110));
+    assert!(cache.take_valid(7, tuple_refreshed, 110));
 }
 
 // ================================================================

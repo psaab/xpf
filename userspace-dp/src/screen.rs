@@ -56,7 +56,7 @@ const _: [(); SYN_COOKIE_ISN_BITS as usize] = [(); SYN_COOKIE_LAYOUT_BITS as usi
 /// selection can choose the largest value not exceeding the peer-advertised MSS.
 pub(crate) const SYN_COOKIE_MSS_VALUES: [u16; 8] = [536, 1200, 1300, 1360, 1400, 1440, 1460, 8960];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SynCookieTuple {
     pub src_ip: IpAddr,
@@ -558,7 +558,7 @@ impl IpSweepTracker {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct SynCookieValidatedKey {
     zone_id: u16,
     tuple: SynCookieTuple,
@@ -572,7 +572,8 @@ struct SynCookieValidatedEntry {
 
 #[derive(Debug, Clone)]
 struct SynCookieValidatedCache {
-    entries: VecDeque<SynCookieValidatedEntry>,
+    entries: FxHashMap<SynCookieValidatedKey, u64>,
+    queue: VecDeque<SynCookieValidatedEntry>,
     capacity: usize,
     ttl_secs: u64,
 }
@@ -589,7 +590,8 @@ impl Default for SynCookieValidatedCache {
 impl SynCookieValidatedCache {
     fn new(capacity: usize, ttl_secs: u64) -> Self {
         Self {
-            entries: VecDeque::with_capacity(capacity),
+            entries: FxHashMap::default(),
+            queue: VecDeque::with_capacity(capacity),
             capacity,
             ttl_secs,
         }
@@ -601,35 +603,57 @@ impl SynCookieValidatedCache {
         }
         self.cleanup_expired(now_secs);
         let key = SynCookieValidatedKey { zone_id, tuple };
-        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
-            if let Some(mut entry) = self.entries.remove(index) {
-                entry.expires_secs = now_secs.saturating_add(self.ttl_secs);
-                self.entries.push_back(entry);
-            }
+        let expires_secs = now_secs.saturating_add(self.ttl_secs);
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key, expires_secs);
+            self.queue
+                .push_back(SynCookieValidatedEntry { key, expires_secs });
             return;
         }
         while self.entries.len() >= self.capacity {
-            self.entries.pop_front();
+            self.evict_oldest();
         }
-        self.entries.push_back(SynCookieValidatedEntry {
-            key,
-            expires_secs: now_secs.saturating_add(self.ttl_secs),
-        });
+        self.entries.insert(key, expires_secs);
+        self.queue
+            .push_back(SynCookieValidatedEntry { key, expires_secs });
     }
 
     fn take_valid(&mut self, zone_id: u16, tuple: SynCookieTuple, now_secs: u64) -> bool {
         self.cleanup_expired(now_secs);
         let key = SynCookieValidatedKey { zone_id, tuple };
-        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
-            self.entries.remove(index);
+        if let Some(expires_secs) = self.entries.get(&key).copied()
+            && expires_secs > now_secs
+        {
+            self.entries.remove(&key);
             return true;
         }
         false
     }
 
+    fn evict_oldest(&mut self) {
+        while let Some(entry) = self.queue.pop_front() {
+            if self.entries.get(&entry.key).copied() == Some(entry.expires_secs) {
+                self.entries.remove(&entry.key);
+                break;
+            }
+        }
+    }
+
     fn cleanup_expired(&mut self, now_secs: u64) {
-        while matches!(self.entries.front(), Some(entry) if entry.expires_secs <= now_secs) {
-            self.entries.pop_front();
+        while let Some(entry) = self.queue.front().copied() {
+            match self.entries.get(&entry.key).copied() {
+                Some(expires_secs) if expires_secs == entry.expires_secs => {
+                    if expires_secs <= now_secs {
+                        self.entries.remove(&entry.key);
+                        self.queue.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                _ => {
+                    self.queue.pop_front();
+                }
+            }
         }
     }
 
