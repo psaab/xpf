@@ -2712,6 +2712,7 @@ func TestUpdatePolicyScheduleStatePublishesUserspaceSnapshot(t *testing.T) {
 	m.cfg.ControlSocket = controlSock
 	m.generation = 7
 	m.lastSnapshot = buildSnapshot(cfg, config.UserspaceConfig{ControlSocket: controlSock}, 7, 0)
+	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
 
 	m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false})
 
@@ -2748,6 +2749,78 @@ func TestUpdatePolicyScheduleStatePublishesUserspaceSnapshot(t *testing.T) {
 	}
 	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || !m.lastSnapshot.Policies[0].Inactive {
 		t.Fatalf("manager lastSnapshot did not keep inactive policy bit: %+v", m.lastSnapshot)
+	}
+}
+
+func TestUpdatePolicyScheduleStateRefusesOldHelperForScheduledPolicies(t *testing.T) {
+	dir := t.TempDir()
+	controlSock := filepath.Join(dir, "control.sock")
+	ln, err := net.Listen("unix", controlSock)
+	if err != nil {
+		t.Fatalf("listen control socket: %v", err)
+	}
+	defer ln.Close()
+
+	reqCh := make(chan ControlRequest, 2)
+	done := make(chan struct{}, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req ControlRequest
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			return
+		}
+		reqCh <- req
+		_ = json.NewEncoder(conn).Encode(ControlResponse{
+			OK: true,
+			Status: &ProcessStatus{
+				PID: 1234,
+			},
+		})
+		done <- struct{}{}
+	}()
+
+	cfg := &config.Config{}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*config.Policy{{
+			Name:          "scheduled-allow",
+			SchedulerName: "workhours",
+			Action:        config.PolicyPermit,
+		}},
+	}}
+	cfg.Schedulers = map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours"},
+	}
+
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	m.cfg.ControlSocket = controlSock
+	m.generation = 7
+	m.lastSnapshot = buildSnapshot(cfg, config.UserspaceConfig{ControlSocket: controlSock}, 7, 0)
+
+	m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for status probe")
+	}
+	req := <-reqCh
+	if req.Type != "status" {
+		t.Fatalf("first request type = %q, want status", req.Type)
+	}
+	select {
+	case req := <-reqCh:
+		t.Fatalf("unexpected apply request to old helper: %+v", req)
+	default:
+	}
+	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || !m.lastSnapshot.Policies[0].Inactive {
+		t.Fatalf("manager should keep local inactive state even when publish is refused: %+v", m.lastSnapshot)
 	}
 }
 

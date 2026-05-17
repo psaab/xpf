@@ -18,17 +18,31 @@ type Scheduler struct {
 	updateFn   func(activeState map[string]bool)
 }
 
-// New creates a Scheduler with the given scheduler configs and update callback.
-// updateFn is called whenever any scheduler's active state changes, receiving
-// the current active state of all schedulers.
-func New(schedulers map[string]*config.SchedulerConfig, updateFn func(activeState map[string]bool)) *Scheduler {
+// NewPrimed creates a Scheduler, evaluates the initial active-state map, and
+// returns that map without firing updateFn from inside the constructor. Daemon
+// apply paths use this when they already hold their own serialization lock and
+// must publish the initial state as part of the same apply transaction.
+func NewPrimed(schedulers map[string]*config.SchedulerConfig, updateFn func(activeState map[string]bool), now time.Time) (*Scheduler, map[string]bool) {
 	s := &Scheduler{
 		schedulers: schedulers,
 		active:     make(map[string]bool),
 		updateFn:   updateFn,
 	}
-	// Compute initial state.
-	s.evaluate(time.Now())
+	s.evaluate(now, false)
+	return s, s.ActiveState()
+}
+
+// New creates a Scheduler with the given scheduler configs and update callback.
+// updateFn is called whenever any scheduler's active state changes, receiving
+// the current active state of all schedulers.
+func New(schedulers map[string]*config.SchedulerConfig, updateFn func(activeState map[string]bool)) *Scheduler {
+	s, _ := NewPrimed(schedulers, updateFn, time.Now())
+	// Preserve the historical constructor contract: New notifies on initial
+	// state. NewPrimed is the no-notify variant for callers that publish the
+	// initial state under an external lock.
+	if len(s.active) > 0 {
+		s.notifyActiveState()
+	}
 	return s
 }
 
@@ -45,7 +59,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			slog.Info("scheduler: stopping evaluation loop")
 			return
 		case t := <-ticker.C:
-			s.evaluate(t)
+			s.evaluate(t, true)
 		}
 	}
 }
@@ -73,14 +87,13 @@ func (s *Scheduler) Update(schedulers map[string]*config.SchedulerConfig) {
 	s.mu.Lock()
 	s.schedulers = schedulers
 	s.mu.Unlock()
-	s.evaluate(time.Now())
+	s.evaluate(time.Now(), true)
 }
 
 // evaluate checks each scheduler against the current time and fires the
 // callback if any state changed.
-func (s *Scheduler) evaluate(now time.Time) {
+func (s *Scheduler) evaluate(now time.Time, notify bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	changed := false
 	newActive := make(map[string]bool, len(s.schedulers))
@@ -104,14 +117,34 @@ func (s *Scheduler) evaluate(now time.Time) {
 
 	s.active = newActive
 
-	if changed && s.updateFn != nil {
-		// Pass a copy so the callback cannot mutate internal state.
-		cp := make(map[string]bool, len(newActive))
-		for k, v := range newActive {
-			cp[k] = v
-		}
-		s.updateFn(cp)
+	if !changed || !notify || s.updateFn == nil {
+		s.mu.Unlock()
+		return
 	}
+	cp := copyActiveState(newActive)
+	updateFn := s.updateFn
+	s.mu.Unlock()
+	updateFn(cp)
+}
+
+func (s *Scheduler) notifyActiveState() {
+	s.mu.RLock()
+	if s.updateFn == nil {
+		s.mu.RUnlock()
+		return
+	}
+	cp := copyActiveState(s.active)
+	updateFn := s.updateFn
+	s.mu.RUnlock()
+	updateFn(cp)
+}
+
+func copyActiveState(in map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // isWithinWindow determines whether now falls within the time window defined

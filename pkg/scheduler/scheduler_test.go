@@ -178,6 +178,27 @@ func TestScheduler_InitialState(t *testing.T) {
 	}
 }
 
+func TestScheduler_NewPrimedDoesNotNotifyInitialState(t *testing.T) {
+	var called bool
+	schedCfg := map[string]*config.SchedulerConfig{
+		"always-on": {Name: "always-on"},
+	}
+
+	s, state := NewPrimed(schedCfg, func(activeState map[string]bool) {
+		called = true
+	}, time.Date(2026, 2, 12, 14, 30, 0, 0, time.UTC))
+
+	if called {
+		t.Fatal("NewPrimed fired callback during constructor")
+	}
+	if !state["always-on"] {
+		t.Fatal("initial state missing always-on=true")
+	}
+	if !s.IsActive("always-on") {
+		t.Fatal("IsActive should return true for always-on")
+	}
+}
+
 func TestScheduler_ActiveState(t *testing.T) {
 	schedCfg := map[string]*config.SchedulerConfig{
 		"always-on": {Name: "always-on"},

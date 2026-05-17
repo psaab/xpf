@@ -174,6 +174,15 @@ func (m *Manager) policySchedulerActiveStateSnapshot() map[string]bool {
 	return copyPolicySchedulerActiveState(m.policySchedulerActive)
 }
 
+// SetPolicySchedulerActiveState seeds the active-state map used by the next
+// full snapshot build. The daemon calls this while holding applySem so config
+// commits and scheduler flips cannot publish hybrid policy snapshots.
+func (m *Manager) SetPolicySchedulerActiveState(activeState map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policySchedulerActive = copyPolicySchedulerActiveState(activeState)
+}
+
 // EventStream returns the event stream instance, or nil if not available.
 func (m *Manager) EventStream() *EventStream {
 	m.mu.Lock()
@@ -358,6 +367,9 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	if err := m.ensureProcessLocked(ucfg); err != nil {
 		return result, err
 	}
+	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+		return result, err
+	}
 	if m.deferWorkers {
 		snap.DeferWorkers = true
 	}
@@ -432,6 +444,10 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	if m.proc == nil || m.proc.Process == nil {
 		return
 	}
+	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+		slog.Warn("userspace: refusing policy scheduler publish to incompatible helper", "err", err)
+		return
+	}
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
@@ -490,6 +506,49 @@ func (m *Manager) readFIBGeneration() uint32 {
 		return 0
 	}
 	return gen
+}
+
+func configHasScheduledPolicy(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil {
+			continue
+		}
+		for _, pol := range zpp.Policies {
+			if pol != nil && pol.SchedulerName != "" {
+				return true
+			}
+		}
+	}
+	for _, pol := range cfg.Security.GlobalPolicies {
+		if pol != nil && pol.SchedulerName != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error {
+	if !configHasScheduledPolicy(cfg) {
+		return nil
+	}
+	if m.lastStatus.ConfigSnapshotProtocolVersion >= ProtocolVersion {
+		return nil
+	}
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+		m.lastStatus.ConfigSnapshotProtocolVersion = status.ConfigSnapshotProtocolVersion
+		if status.ConfigSnapshotProtocolVersion >= ProtocolVersion {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"userspace helper config snapshot protocol version %d does not support policy scheduler snapshots (want >= %d)",
+		m.lastStatus.ConfigSnapshotProtocolVersion,
+		ProtocolVersion,
+	)
 }
 
 // bpfKtimeNs returns the current CLOCK_BOOTTIME in nanoseconds, matching

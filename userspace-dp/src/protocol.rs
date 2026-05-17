@@ -706,6 +706,8 @@ pub(crate) struct ControlRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ProcessStatus {
     pub pid: i32,
+    #[serde(rename = "config_snapshot_protocol_version", default)]
+    pub config_snapshot_protocol_version: i32,
     #[serde(rename = "started_at")]
     pub started_at: DateTime<Utc>,
     #[serde(rename = "control_socket")]
