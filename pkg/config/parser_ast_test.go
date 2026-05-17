@@ -1532,6 +1532,34 @@ func TestPolicySchedulerMissingReferenceWarns(t *testing.T) {
 	}
 }
 
+func TestGlobalPolicySchedulerMissingReferenceWarns(t *testing.T) {
+	input := `security {
+    policies {
+        global {
+            policy global-sched-test {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+                scheduler-name missing-global-sched;
+            }
+        }
+    }
+}
+`
+	parser := NewParser(input)
+	tree, errs := parser.Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig returned error for warning-only missing global scheduler reference: %v", err)
+	}
+	warnings := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(warnings, `policy "global-sched-test": scheduler "missing-global-sched" not defined`) {
+		t.Fatalf("CompileConfig warnings = %v, want missing global scheduler warning", cfg.Warnings)
+	}
+}
+
 func TestMultiTermApplication(t *testing.T) {
 	input := `applications {
     application ssh-long {

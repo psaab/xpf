@@ -548,6 +548,14 @@ func ValidateConfig(cfg *Config) []string {
 			}
 		}
 	}
+	for _, p := range cfg.Security.GlobalPolicies {
+		if p.SchedulerName != "" {
+			if _, ok := cfg.Schedulers[p.SchedulerName]; !ok {
+				warnings = append(warnings, fmt.Sprintf(
+					"policy %q: scheduler %q not defined", p.Name, p.SchedulerName))
+			}
+		}
+	}
 
 	// Validate routing-instance interface references
 	for _, ri := range cfg.RoutingInstances {

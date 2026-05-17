@@ -1500,39 +1500,34 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return
 	}
 
-	policySetID := uint32(0)
-	for _, zpp := range cfg.Security.Policies {
-		for i, pol := range zpp.Policies {
-			if pol.SchedulerName == "" {
-				policySetID++
-				continue
-			}
-
-			active, exists := activeState[pol.SchedulerName]
-			if !exists {
-				active = true // default active if scheduler not found
-			}
-
-			idx := policySetID*MaxRulesPerPolicy + uint32(i)
-			var rule PolicyRule
-			if err := zm.Lookup(idx, &rule); err != nil {
-				continue
-			}
-
-			var newActive uint8
-			if active {
-				newActive = 1
-			}
-			if rule.Active != newActive {
-				rule.Active = newActive
-				zm.Update(idx, rule, ebpf.UpdateAny)
-				slog.Info("policy schedule state updated",
-					"policy", pol.Name,
-					"scheduler", pol.SchedulerName,
-					"active", active)
-			}
+	slots, err := BuildScheduledPolicyRuleSlots(cfg)
+	if err != nil {
+		slog.Warn("policy scheduler: failed to build scheduled rule slots", "err", err)
+		return
+	}
+	for _, slot := range slots {
+		active, exists := activeState[slot.SchedulerName]
+		if !exists {
+			active = true // default active if scheduler not found
 		}
-		policySetID++
+
+		var rule PolicyRule
+		if err := zm.Lookup(slot.AbsoluteRuleIdx, &rule); err != nil {
+			continue
+		}
+
+		var newActive uint8
+		if active {
+			newActive = 1
+		}
+		if rule.Active != newActive {
+			rule.Active = newActive
+			zm.Update(slot.AbsoluteRuleIdx, rule, ebpf.UpdateAny)
+			slog.Info("policy schedule state updated",
+				"policy", slot.PolicyName,
+				"scheduler", slot.SchedulerName,
+				"active", active)
+		}
 	}
 }
 

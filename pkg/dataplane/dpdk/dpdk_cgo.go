@@ -348,37 +348,33 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return
 	}
 
-	policySetID := uint32(0)
-	for _, zpp := range cfg.Security.Policies {
-		for i, pol := range zpp.Policies {
-			if pol.SchedulerName == "" {
-				policySetID++
-				continue
-			}
-
-			active, exists := activeState[pol.SchedulerName]
-			if !exists {
-				active = true // default active if scheduler not found
-			}
-
-			idx := policySetID*C.MAX_RULES_PER_POLICY + uint32(i)
-			ptr := (*C.struct_policy_rule)(unsafe.Pointer(
-				uintptr(unsafe.Pointer(shm.policy_rules)) +
-					uintptr(idx)*unsafe.Sizeof(C.struct_policy_rule{})))
-
-			var newActive C.uint8_t
-			if active {
-				newActive = 1
-			}
-			if ptr.active != newActive {
-				ptr.active = newActive
-				slog.Info("DPDK policy schedule state updated",
-					"policy", pol.Name,
-					"scheduler", pol.SchedulerName,
-					"active", active)
-			}
+	slots, err := dataplane.BuildScheduledPolicyRuleSlots(cfg)
+	if err != nil {
+		slog.Warn("dpdk policy scheduler: failed to build scheduled rule slots", "err", err)
+		return
+	}
+	for _, slot := range slots {
+		active, exists := activeState[slot.SchedulerName]
+		if !exists {
+			active = true // default active if scheduler not found
 		}
-		policySetID++
+
+		idx := slot.AbsoluteRuleIdx
+		ptr := (*C.struct_policy_rule)(unsafe.Pointer(
+			uintptr(unsafe.Pointer(shm.policy_rules)) +
+				uintptr(idx)*unsafe.Sizeof(C.struct_policy_rule{})))
+
+		var newActive C.uint8_t
+		if active {
+			newActive = 1
+		}
+		if ptr.active != newActive {
+			ptr.active = newActive
+			slog.Info("DPDK policy schedule state updated",
+				"policy", slot.PolicyName,
+				"scheduler", slot.SchedulerName,
+				"active", active)
+		}
 	}
 }
 
