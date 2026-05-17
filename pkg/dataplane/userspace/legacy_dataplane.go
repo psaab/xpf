@@ -3,6 +3,7 @@ package userspace
 import (
 	"context"
 	"errors"
+	"net"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -29,10 +30,13 @@ func NewLegacyDataPlaneAdapter(manager *Manager) *LegacyDataPlaneAdapter {
 	if manager == nil {
 		return &LegacyDataPlaneAdapter{}
 	}
-	return &LegacyDataPlaneAdapter{
-		DataPlane: manager.inner,
-		manager:   manager,
+	adapter := &LegacyDataPlaneAdapter{
+		manager: manager,
 	}
+	if manager.inner != nil {
+		adapter.DataPlane = manager.inner
+	}
+	return adapter
 }
 
 func (a *LegacyDataPlaneAdapter) managerOrErr() (*Manager, error) {
@@ -152,6 +156,14 @@ func (a *LegacyDataPlaneAdapter) UpdatePolicyScheduleState(cfg *config.Config, a
 		return
 	}
 	m.UpdatePolicyScheduleState(cfg, activeState)
+}
+
+func (a *LegacyDataPlaneAdapter) SetPolicySchedulerActiveState(activeState map[string]bool) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return
+	}
+	m.SetPolicySchedulerActiveState(activeState)
 }
 
 func (a *LegacyDataPlaneAdapter) BumpFIBGeneration() uint32 {
@@ -274,6 +286,59 @@ func (a *LegacyDataPlaneAdapter) PrepareLinkCycle() {
 	m.PrepareLinkCycle()
 }
 
+func (a *LegacyDataPlaneAdapter) RegenerateNeighborSnapshot() {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return
+	}
+	m.RegenerateNeighborSnapshot()
+}
+
+func (a *LegacyDataPlaneAdapter) LookupSnapshotNeighbor(ifindex int, ip net.IP) *NeighborSnapshot {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil
+	}
+	return m.LookupSnapshotNeighbor(ifindex, ip)
+}
+
+func (a *LegacyDataPlaneAdapter) IsMonitoredIfindex(ifindex int) bool {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false
+	}
+	return m.IsMonitoredIfindex(ifindex)
+}
+
+func (a *LegacyDataPlaneAdapter) ForEachSnapshotNeighbor(fn func(ifindex int, ip net.IP)) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return
+	}
+	m.ForEachSnapshotNeighbor(fn)
+}
+
+func (a *LegacyDataPlaneAdapter) SnapshotHasIfindex(ifindex int) bool {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false
+	}
+	return m.SnapshotHasIfindex(ifindex)
+}
+
+func (a *LegacyDataPlaneAdapter) SnapshotNeighbors() []struct {
+	Ifindex int
+	IP      net.IP
+	MAC     net.HardwareAddr
+	Family  int
+} {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil
+	}
+	return m.SnapshotNeighbors()
+}
+
 func (a *LegacyDataPlaneAdapter) Status() (ProcessStatus, error) {
 	m, err := a.managerOrErr()
 	if err != nil {
@@ -288,6 +353,22 @@ func (a *LegacyDataPlaneAdapter) SetForwardingArmed(armed bool) (ProcessStatus, 
 		return ProcessStatus{}, err
 	}
 	return m.SetForwardingArmed(armed)
+}
+
+func (a *LegacyDataPlaneAdapter) SetQueueState(queueID uint32, registered, armed bool) (ProcessStatus, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return ProcessStatus{}, err
+	}
+	return m.SetQueueState(queueID, registered, armed)
+}
+
+func (a *LegacyDataPlaneAdapter) SetBindingState(slot uint32, registered, armed bool) (ProcessStatus, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return ProcessStatus{}, err
+	}
+	return m.SetBindingState(slot, registered, armed)
 }
 
 func (a *LegacyDataPlaneAdapter) InjectPacket(req InjectPacketRequest) (ProcessStatus, error) {
