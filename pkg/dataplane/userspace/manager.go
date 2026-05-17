@@ -26,6 +26,8 @@ import (
 
 var _ dataplane.DataPlane = (*Manager)(nil)
 
+var ErrPolicySchedulerProtocolIncompatible = errors.New("userspace policy scheduler snapshot protocol incompatible")
+
 // DataplaneMode describes which packet-processing pipeline is active.
 type DataplaneMode int
 
@@ -368,7 +370,9 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return result, err
 	}
 	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
-		m.disarmPolicySchedulerProtocolFailureLocked(err)
+		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+			return result, errors.Join(err, disarmErr)
+		}
 		return result, err
 	}
 	if m.deferWorkers {
@@ -446,7 +450,10 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return
 	}
 	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
-		m.disarmPolicySchedulerProtocolFailureLocked(err)
+		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+			slog.Warn("userspace: failed to disarm helper after refusing policy scheduler publish",
+				"protocol_err", err, "err", disarmErr)
+		}
 		slog.Warn("userspace: refusing policy scheduler publish to incompatible helper", "err", err)
 		return
 	}
@@ -547,15 +554,16 @@ func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error 
 		}
 	}
 	return fmt.Errorf(
-		"userspace helper config snapshot protocol version %d does not support policy scheduler snapshots (want >= %d)",
+		"%w: userspace helper config snapshot protocol version %d does not support policy scheduler snapshots (want >= %d)",
+		ErrPolicySchedulerProtocolIncompatible,
 		m.lastStatus.ConfigSnapshotProtocolVersion,
 		ProtocolVersion,
 	)
 }
 
-func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) {
+func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) error {
 	if m.proc == nil || m.proc.Process == nil {
-		return
+		return nil
 	}
 	req := ControlRequest{
 		Type: "set_forwarding_state",
@@ -565,16 +573,13 @@ func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) 
 	}
 	var status ProcessStatus
 	if err := m.requestLocked(req, &status); err != nil {
-		slog.Warn("userspace: failed to disarm incompatible helper after policy scheduler protocol error",
-			"protocol_err", protocolErr, "err", err)
-		return
+		return fmt.Errorf("userspace: disarm helper after policy scheduler protocol error: %w", err)
 	}
 	if err := m.applyHelperStatusLocked(&status); err != nil {
-		slog.Warn("userspace: failed to sync helper status after policy scheduler fail-closed disarm",
-			"protocol_err", protocolErr, "err", err)
-		return
+		return fmt.Errorf("userspace: sync helper status after policy scheduler fail-closed disarm: %w", err)
 	}
 	slog.Warn("userspace: disarmed helper after policy scheduler protocol error", "err", protocolErr)
+	return nil
 }
 
 // bpfKtimeNs returns the current CLOCK_BOOTTIME in nanoseconds, matching

@@ -4,6 +4,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -67,7 +68,9 @@ func (d *Daemon) bootstrapFromFile() error {
 func (d *Daemon) applyConfig(cfg *config.Config) {
 	_ = d.applySem.Acquire(context.Background(), 1)
 	defer d.applySem.Release(1)
-	d.applyConfigLocked(cfg)
+	if err := d.applyConfigLocked(cfg); err != nil {
+		slog.Warn("apply config failed", "err", err)
+	}
 }
 
 // commitAndApply atomically promotes the candidate config and
@@ -98,7 +101,9 @@ func (d *Daemon) commitAndApply(ctx context.Context, comment string, syncPeer bo
 	if err != nil {
 		return nil, err
 	}
-	d.applyConfigLocked(compiled)
+	if err := d.applyConfigLocked(compiled); err != nil {
+		return nil, err
+	}
 	if syncPeer {
 		d.syncConfigToPeer()
 	}
@@ -121,7 +126,9 @@ func (d *Daemon) syncAndApply(ctx context.Context, configText string, chassisPre
 		return nil, err
 	}
 	if compiled != nil {
-		d.applyConfigLocked(compiled)
+		if err := d.applyConfigLocked(compiled); err != nil {
+			return nil, err
+		}
 	}
 	return compiled, nil
 }
@@ -138,7 +145,9 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, minutes int, syncP
 	if err != nil {
 		return nil, err
 	}
-	d.applyConfigLocked(compiled)
+	if err := d.applyConfigLocked(compiled); err != nil {
+		return nil, err
+	}
 	if syncPeer {
 		d.syncConfigToPeer()
 	}
@@ -147,10 +156,10 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, minutes int, syncP
 
 // applyConfigLocked runs the actual reconcile pipeline. MUST be
 // called with d.applySem held.
-func (d *Daemon) applyConfigLocked(cfg *config.Config) {
+func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 	if d.applyBodyForTest != nil {
 		d.applyBodyForTest(cfg)
-		return
+		return nil
 	}
 	// Reset VIP warning suppression so new config gets fresh warnings.
 	d.vipWarnedIfaces = nil
@@ -429,6 +438,9 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) {
 		var err error
 		if compileResult, err = d.dp.Compile(cfg); err != nil {
 			d.recordCompileFailure(err)
+			if errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible) {
+				return err
+			}
 		} else {
 			d.recordCompileSuccess()
 		}
@@ -1020,4 +1032,5 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) {
 		d.applyStep0Tunables(userspaceDP, claimHostTunables, governor, netdevBudget,
 			coalesceExplicit, coalesceEnable, coalesceRX, coalesceTX, rssAllowed)
 	}
+	return nil
 }

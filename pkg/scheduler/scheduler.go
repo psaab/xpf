@@ -124,8 +124,10 @@ func (s *Scheduler) evaluate(now time.Time, notify bool) {
 	}
 
 	s.active = newActive
-	s.lastEval = now
-	s.lastWallUnixNano = now.UnixNano()
+	if !wallClockUnsafe {
+		s.lastEval = now
+		s.lastWallUnixNano = now.UnixNano()
+	}
 
 	if !changed || !notify || s.updateFn == nil {
 		s.mu.Unlock()

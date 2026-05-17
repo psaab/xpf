@@ -330,7 +330,9 @@ func (m *Manager) syncSnapshotLocked() error {
 	publishSnap := *m.lastSnapshot
 	publishSnap.Neighbors = filterPublishableNeighbors(m.lastSnapshot.Neighbors)
 	if err := m.ensurePolicySchedulerProtocolLocked(publishSnap.Config); err != nil {
-		m.disarmPolicySchedulerProtocolFailureLocked(err)
+		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+			return errors.Join(err, disarmErr)
+		}
 		return err
 	}
 	var status ProcessStatus
