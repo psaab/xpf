@@ -30,6 +30,288 @@ const TCP_SYN: u8 = 0x02;
 const TCP_ACK: u8 = 0x10;
 const TCP_URG: u8 = 0x20;
 
+const SYN_COOKIE_EPOCH_BITS: u32 = 5;
+const SYN_COOKIE_MSS_BITS: u32 = 3;
+const SYN_COOKIE_MAC_BITS: u32 = 24;
+const SYN_COOKIE_ISN_BITS: u32 = 32;
+const SYN_COOKIE_LAYOUT_BITS: u32 =
+    SYN_COOKIE_EPOCH_BITS + SYN_COOKIE_MSS_BITS + SYN_COOKIE_MAC_BITS;
+const SYN_COOKIE_EPOCH_MASK: u32 = (1 << SYN_COOKIE_EPOCH_BITS) - 1;
+const SYN_COOKIE_MSS_MASK: u32 = (1 << SYN_COOKIE_MSS_BITS) - 1;
+const SYN_COOKIE_MAC_MASK: u32 = (1 << SYN_COOKIE_MAC_BITS) - 1;
+const SYN_COOKIE_EPOCH_SHIFT: u32 = SYN_COOKIE_MSS_BITS + SYN_COOKIE_MAC_BITS;
+const SYN_COOKIE_MSS_SHIFT: u32 = SYN_COOKIE_MAC_BITS;
+const SYN_COOKIE_MAC_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sync");
+const SYN_COOKIE_SECRET_LEFT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sck0");
+const SYN_COOKIE_SECRET_RIGHT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sck1");
+const _: [(); SYN_COOKIE_ISN_BITS as usize] = [(); SYN_COOKIE_LAYOUT_BITS as usize];
+
+/// Three-bit MSS table encoded in userspace SYN cookies.
+///
+/// The index, not the raw MSS, is transmitted in the ISN. Values are sorted so
+/// selection can choose the largest value not exceeding the peer-advertised MSS.
+pub(crate) const SYN_COOKIE_MSS_VALUES: [u16; 8] = [536, 1200, 1300, 1360, 1400, 1440, 1460, 8960];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct SynCookieTuple {
+    pub src_ip: IpAddr,
+    pub dst_ip: IpAddr,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+impl SynCookieTuple {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn from_packet(pkt: &ScreenPacketInfo) -> Self {
+        Self {
+            src_ip: pkt.src_ip,
+            dst_ip: pkt.dst_ip,
+            src_port: pkt.src_port,
+            dst_port: pkt.dst_port,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct SynCookieValidation {
+    pub full_epoch: u64,
+    pub mss_index: u8,
+    pub mss: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct SynCookieCodec {
+    master_key: [u8; 16],
+}
+
+impl SynCookieCodec {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const EPOCH_SECS: u64 = 64;
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn new(master_key: [u8; 16]) -> Self {
+        Self { master_key }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn full_epoch_from_monotonic_secs(monotonic_secs: u64) -> u64 {
+        monotonic_secs / Self::EPOCH_SECS
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn mss_index(peer_mss: u16) -> u8 {
+        let mut selected = 0u8;
+        let mut i = 1;
+        while i < SYN_COOKIE_MSS_VALUES.len() {
+            if peer_mss >= SYN_COOKIE_MSS_VALUES[i] {
+                selected = i as u8;
+            }
+            i += 1;
+        }
+        selected
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn mint_isn(
+        &self,
+        tuple: SynCookieTuple,
+        zone_id: u16,
+        full_epoch: u64,
+        peer_mss: u16,
+    ) -> u32 {
+        let mss_index = Self::mss_index(peer_mss);
+        let mac = self.cookie_mac(tuple, zone_id, full_epoch, mss_index);
+        ((full_epoch as u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT)
+            | ((mss_index as u32 & SYN_COOKIE_MSS_MASK) << SYN_COOKIE_MSS_SHIFT)
+            | mac
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn validate_isn(
+        &self,
+        tuple: SynCookieTuple,
+        zone_id: u16,
+        current_full_epoch: u64,
+        cookie_isn: u32,
+    ) -> Option<SynCookieValidation> {
+        let wire_epoch = (cookie_isn >> SYN_COOKIE_EPOCH_SHIFT) & SYN_COOKIE_EPOCH_MASK;
+        let mss_index = ((cookie_isn >> SYN_COOKIE_MSS_SHIFT) & SYN_COOKIE_MSS_MASK) as u8;
+        let wire_mac = cookie_isn & SYN_COOKIE_MAC_MASK;
+
+        for candidate_epoch in [current_full_epoch, current_full_epoch.saturating_sub(1)] {
+            if (candidate_epoch as u32 & SYN_COOKIE_EPOCH_MASK) != wire_epoch {
+                continue;
+            }
+            if self.cookie_mac(tuple, zone_id, candidate_epoch, mss_index) == wire_mac {
+                return Some(SynCookieValidation {
+                    full_epoch: candidate_epoch,
+                    mss_index,
+                    mss: SYN_COOKIE_MSS_VALUES[mss_index as usize],
+                });
+            }
+        }
+
+        None
+    }
+
+    fn cookie_mac(
+        &self,
+        tuple: SynCookieTuple,
+        zone_id: u16,
+        full_epoch: u64,
+        mss_index: u8,
+    ) -> u32 {
+        let secret = self.epoch_secret(zone_id, full_epoch);
+        let mut sip = SipHash24::new(secret[0], secret[1]);
+        sip.write_u64(SYN_COOKIE_MAC_DOMAIN);
+        sip.write_u16(zone_id);
+        sip.write_u64(full_epoch);
+        sip.write_u8(mss_index);
+        sip.write_ip(tuple.src_ip);
+        sip.write_ip(tuple.dst_ip);
+        sip.write_u16(tuple.src_port);
+        sip.write_u16(tuple.dst_port);
+        (sip.finish() as u32) & SYN_COOKIE_MAC_MASK
+    }
+
+    fn epoch_secret(&self, zone_id: u16, full_epoch: u64) -> [u64; 2] {
+        let k0 = u64::from_le_bytes(self.master_key[0..8].try_into().expect("fixed slice"));
+        let k1 = u64::from_le_bytes(self.master_key[8..16].try_into().expect("fixed slice"));
+
+        let mut left = SipHash24::new(k0, k1);
+        left.write_u64(SYN_COOKIE_SECRET_LEFT_DOMAIN);
+        left.write_u16(zone_id);
+        left.write_u64(full_epoch);
+
+        let mut right = SipHash24::new(k0, k1);
+        right.write_u64(SYN_COOKIE_SECRET_RIGHT_DOMAIN);
+        right.write_u16(zone_id);
+        right.write_u64(full_epoch);
+
+        [left.finish(), right.finish()]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SipHash24 {
+    v0: u64,
+    v1: u64,
+    v2: u64,
+    v3: u64,
+    tail: [u8; 8],
+    tail_len: usize,
+    len: u64,
+}
+
+impl SipHash24 {
+    fn new(k0: u64, k1: u64) -> Self {
+        Self {
+            v0: 0x736f_6d65_7073_6575 ^ k0,
+            v1: 0x646f_7261_6e64_6f6d ^ k1,
+            v2: 0x6c79_6765_6e65_7261 ^ k0,
+            v3: 0x7465_6462_7974_6573 ^ k1,
+            tail: [0; 8],
+            tail_len: 0,
+            len: 0,
+        }
+    }
+
+    fn write_ip(&mut self, ip: IpAddr) {
+        match ip {
+            IpAddr::V4(v4) => {
+                self.write_u8(4);
+                self.write_bytes(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                self.write_u8(6);
+                self.write_bytes(&v6.octets());
+            }
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write_bytes(&[value]);
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.write_bytes(&value.to_be_bytes());
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.write_bytes(&value.to_be_bytes());
+    }
+
+    fn write_bytes(&mut self, mut bytes: &[u8]) {
+        self.len += bytes.len() as u64;
+
+        if self.tail_len > 0 {
+            let fill = (8 - self.tail_len).min(bytes.len());
+            self.tail[self.tail_len..self.tail_len + fill].copy_from_slice(&bytes[..fill]);
+            self.tail_len += fill;
+            bytes = &bytes[fill..];
+            if self.tail_len == 8 {
+                self.compress(u64::from_le_bytes(self.tail));
+                self.tail = [0; 8];
+                self.tail_len = 0;
+            }
+        }
+
+        while bytes.len() >= 8 {
+            let block = u64::from_le_bytes(bytes[..8].try_into().expect("fixed slice"));
+            self.compress(block);
+            bytes = &bytes[8..];
+        }
+
+        if !bytes.is_empty() {
+            self.tail[..bytes.len()].copy_from_slice(bytes);
+            self.tail_len = bytes.len();
+        }
+    }
+
+    fn finish(mut self) -> u64 {
+        let mut last = self.len << 56;
+        let mut i = 0;
+        while i < self.tail_len {
+            last |= (self.tail[i] as u64) << (8 * i);
+            i += 1;
+        }
+        self.compress(last);
+        self.v2 ^= 0xff;
+        self.round();
+        self.round();
+        self.round();
+        self.round();
+        self.v0 ^ self.v1 ^ self.v2 ^ self.v3
+    }
+
+    fn compress(&mut self, block: u64) {
+        self.v3 ^= block;
+        self.round();
+        self.round();
+        self.v0 ^= block;
+    }
+
+    fn round(&mut self) {
+        self.v0 = self.v0.wrapping_add(self.v1);
+        self.v1 = self.v1.rotate_left(13);
+        self.v1 ^= self.v0;
+        self.v0 = self.v0.rotate_left(32);
+        self.v2 = self.v2.wrapping_add(self.v3);
+        self.v3 = self.v3.rotate_left(16);
+        self.v3 ^= self.v2;
+        self.v0 = self.v0.wrapping_add(self.v3);
+        self.v3 = self.v3.rotate_left(21);
+        self.v3 ^= self.v0;
+        self.v2 = self.v2.wrapping_add(self.v1);
+        self.v1 = self.v1.rotate_left(17);
+        self.v1 ^= self.v2;
+        self.v2 = self.v2.rotate_left(32);
+    }
+}
+
 /// Parsed packet fields needed for screen checks.
 /// Extracted from raw packet bytes for speed — no allocations.
 #[derive(Debug, Clone)]
@@ -597,12 +879,10 @@ pub(crate) fn extract_screen_info(
                     // IPv6 frag_off layout (big-endian u16 at offset+2):
                     //   offset (13 bits, top) | reserved (2 bits) | M (1 bit, lowest)
                     // Mirrors BPF #866: MF=0x1, offset=0xFFF8.
-                    let frag_off =
-                        u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]);
+                    let frag_off = u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]);
                     info.ip_frag_off = frag_off;
                     info.is_fragment = (frag_off & 0x1) != 0 || (frag_off & 0xFFF8) != 0;
-                    info.is_first_fragment =
-                        (frag_off & 0x1) != 0 && (frag_off & 0xFFF8) == 0;
+                    info.is_first_fragment = (frag_off & 0x1) != 0 && (frag_off & 0xFFF8) == 0;
                     break;
                 }
                 _ => break,
