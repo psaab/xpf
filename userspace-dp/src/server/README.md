@@ -27,6 +27,11 @@ The shapes are mirrored in `pkg/dataplane/userspace/protocol.go` on the
 Go side; **the JSON tags ARE the contract** — changing one without
 updating the other breaks the helper.
 
+`ConfigSnapshot.version` is a compatibility gate, not just documentation.
+The helper accepts only the current snapshot protocol version; this prevents a
+new daemon from publishing fields such as policy-scheduler inactive bits to a
+helper that would silently ignore them.
+
 ## Reconciliation
 
 `replan_queues` derives the binding plan from the current

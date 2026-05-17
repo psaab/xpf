@@ -2655,6 +2655,102 @@ func TestBuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID(t *testing.T) 
 	}
 }
 
+func TestUpdatePolicyScheduleStatePublishesUserspaceSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	controlSock := filepath.Join(dir, "control.sock")
+	ln, err := net.Listen("unix", controlSock)
+	if err != nil {
+		t.Fatalf("listen control socket: %v", err)
+	}
+	defer ln.Close()
+
+	reqCh := make(chan ControlRequest, 1)
+	done := make(chan struct{}, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req ControlRequest
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			return
+		}
+		reqCh <- req
+		_ = json.NewEncoder(conn).Encode(ControlResponse{
+			OK: true,
+			Status: &ProcessStatus{
+				Enabled:                true,
+				LastSnapshotGeneration: req.Snapshot.Generation,
+				LastFIBGeneration:      req.Snapshot.FIBGeneration,
+			},
+		})
+		done <- struct{}{}
+	}()
+
+	cfg := &config.Config{}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*config.Policy{{
+			Name:          "scheduled-allow",
+			SchedulerName: "workhours",
+			Match: config.PolicyMatch{
+				SourceAddresses:      []string{"any"},
+				DestinationAddresses: []string{"any"},
+				Applications:         []string{"any"},
+			},
+			Action: config.PolicyPermit,
+		}},
+	}}
+	cfg.Schedulers = map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours"},
+	}
+
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	m.cfg.ControlSocket = controlSock
+	m.generation = 7
+	m.lastSnapshot = buildSnapshot(cfg, config.UserspaceConfig{ControlSocket: controlSock}, 7, 0)
+
+	m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for apply_snapshot publish")
+	}
+	req := <-reqCh
+	if req.Type != "apply_snapshot" {
+		t.Fatalf("request type = %q, want apply_snapshot", req.Type)
+	}
+	if req.Snapshot == nil {
+		t.Fatal("apply_snapshot missing snapshot")
+	}
+	if req.Snapshot.Version != ProtocolVersion {
+		t.Fatalf("snapshot version = %d, want %d", req.Snapshot.Version, ProtocolVersion)
+	}
+	if req.Snapshot.Generation <= 7 {
+		t.Fatalf("snapshot generation = %d, want > 7", req.Snapshot.Generation)
+	}
+	if len(req.Snapshot.Policies) != 1 {
+		t.Fatalf("policy count = %d, want 1", len(req.Snapshot.Policies))
+	}
+	pol := req.Snapshot.Policies[0]
+	if pol.RuleID != "trust->untrust/scheduled-allow" {
+		t.Fatalf("policy rule_id = %q", pol.RuleID)
+	}
+	if pol.SchedulerName != "workhours" {
+		t.Fatalf("scheduler_name = %q", pol.SchedulerName)
+	}
+	if !pol.Inactive {
+		t.Fatalf("inactive = false, want true for inactive scheduler state")
+	}
+	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || !m.lastSnapshot.Policies[0].Inactive {
+		t.Fatalf("manager lastSnapshot did not keep inactive policy bit: %+v", m.lastSnapshot)
+	}
+}
+
 func TestUserspaceSupportsScreenProfilesBasic(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Screen = map[string]*config.ScreenProfile{

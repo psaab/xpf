@@ -33,3 +33,7 @@ during specific windows.
   precision through this package.
 - `updateFn` receives the **full** active-state map, not just the
   changed entries. Callers compute their own diff if they care.
+- The scheduler uses wall-clock time only in the control plane to evaluate
+  Junos time windows. Packet workers must consume published active/inactive
+  booleans from the userspace snapshot and must not evaluate scheduler time in
+  the hot path.

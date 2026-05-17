@@ -1473,7 +1473,6 @@ security {
             policy sched-test {
                 match { source-address any; destination-address any; application any; }
                 then { permit; }
-                scheduler-name missing-sched;
             }
         }
     }
@@ -1488,16 +1487,13 @@ security {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	var foundIfaceWarn, foundPoolWarn, foundSchedWarn bool
+	var foundIfaceWarn, foundPoolWarn bool
 	for _, w := range cfg.Warnings {
 		if strings.Contains(w, "missing-iface") && strings.Contains(w, "not in interfaces") {
 			foundIfaceWarn = true
 		}
 		if strings.Contains(w, "missing-pool") && strings.Contains(w, "not defined") {
 			foundPoolWarn = true
-		}
-		if strings.Contains(w, "missing-sched") && strings.Contains(w, "not defined") {
-			foundSchedWarn = true
 		}
 	}
 	if !foundIfaceWarn {
@@ -1506,8 +1502,32 @@ security {
 	if !foundPoolWarn {
 		t.Errorf("missing warning for SNAT referencing undefined pool, got: %v", cfg.Warnings)
 	}
-	if !foundSchedWarn {
-		t.Errorf("missing warning for policy referencing undefined scheduler, got: %v", cfg.Warnings)
+}
+
+func TestPolicySchedulerMissingReferenceFailsCompile(t *testing.T) {
+	input := `security {
+    policies {
+        from-zone trust to-zone untrust {
+            policy sched-test {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+                scheduler-name missing-sched;
+            }
+        }
+    }
+}
+`
+	parser := NewParser(input)
+	tree, errs := parser.Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig succeeded, want missing scheduler error")
+	}
+	if !strings.Contains(err.Error(), `policy "sched-test" references undefined scheduler "missing-sched"`) {
+		t.Fatalf("CompileConfig error = %v", err)
 	}
 }
 

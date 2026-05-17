@@ -8,9 +8,9 @@ scheduled policy rules activate and deactivate correctly without the eBPF
 
 ## Dependencies
 
-- #1381 must land first. `UpdatePolicyScheduleState` currently dispatches
-  through the embedded eBPF `DataPlane`; userspace needs either the split
-  interface or an explicit stub/snapshot branch.
+- The safe slice no longer waits on #1381. The userspace manager now shadows
+  `UpdatePolicyScheduleState` and republishes a userspace snapshot instead of
+  falling through to the embedded eBPF manager.
 
 ## Design
 
@@ -22,10 +22,9 @@ compiled identity.
 
 Safe #1378 slice status: this change wires `rule_id`, `scheduler_name`, and
 `inactive` through userspace policy snapshots and Rust policy evaluation. The
-Go snapshot builder can compute inactive bits when supplied scheduler active
-state, but the normal daemon publish path still builds snapshots without that
-state. Scheduler tick/restart/failover republish and missing-scheduler commit
-errors remain gates before scheduled userspace policies are end-to-end enforced.
+Go userspace publish path uses the last known scheduler active-state map during
+config rebuilds, and scheduler ticks publish one coherent snapshot delta with
+updated inactive bits. Missing scheduler references are compile errors.
 
 On scheduler state changes, publish one atomic userspace snapshot delta that
 contains the updated inactive bits for all affected rules. Do not issue
@@ -38,9 +37,11 @@ existing sessions unless a separate `policy-rematch` feature is implemented.
 That matches Junos default behavior: schedulers block new lookups, not existing
 sessions.
 
-Scheduler granularity is 60 seconds. Tests and docs must use deterministic
-clock injection or windows that span multiple evaluator ticks; the earlier
-30-second integration target is invalid.
+Scheduler granularity is 60 seconds. The wall clock is used only by the Go
+control-plane scheduler to decide the next active-state map; workers receive
+booleans in the snapshot and never evaluate wall-clock time in the packet path.
+Tests and docs must use deterministic scheduler inputs or windows that span
+multiple evaluator ticks; the earlier 30-second integration target is invalid.
 
 Missing scheduler references fail closed as commit errors. Do not copy the
 existing eBPF behavior that can default missing scheduler state to active.
@@ -50,6 +51,9 @@ existing eBPF behavior that can default missing scheduler state to active.
 - One inactive-branch per rule on miss path is acceptable; no scheduler clock
   evaluation occurs in the packet worker.
 - Snapshot publication is ArcSwap-atomic across all rule inactive bits.
+- Snapshots carrying scheduler inactive bits require protocol version 2; the
+  Rust control server rejects older/unknown snapshot versions instead of
+  silently ignoring scheduling fields.
 - Hit counters are keyed by stable rule identity outside rebuilt rule structs so
   counters survive scheduler snapshot rebuilds.
 - Do not copy the existing eBPF indexing bug in

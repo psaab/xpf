@@ -21,6 +21,10 @@ import (
 )
 
 func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32) *ConfigSnapshot {
+	return buildSnapshotWithSchedulerState(cfg, ucfg, generation, fibGeneration, nil)
+}
+
+func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool) *ConfigSnapshot {
 	if cfg == nil {
 		return &ConfigSnapshot{
 			Version:       ProtocolVersion,
@@ -50,7 +54,7 @@ func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation u
 		Routes:             buildRouteSnapshots(cfg, interfaces),
 		Flow:               buildFlowSnapshot(cfg),
 		DefaultPolicy:      policyActionString(cfg.Security.DefaultPolicy),
-		Policies:           buildPolicySnapshots(cfg),
+		Policies:           buildPolicySnapshotsWithSchedulerState(cfg, activeState),
 		SourceNAT:          buildSourceNATSnapshots(cfg),
 		StaticNAT:          buildStaticNATSnapshots(cfg),
 		DestinationNAT:     buildDestinationNATSnapshots(cfg),

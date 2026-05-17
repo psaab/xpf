@@ -58,28 +58,29 @@ type Manager struct {
 	dataplane.DataPlane
 	inner *dataplane.Manager
 
-	mu                      sync.Mutex
-	sessionMu               sync.Mutex // separate lock for session sync requests (Phase 3)
-	proc                    *exec.Cmd
-	cfg                     config.UserspaceConfig
-	clusterHA               bool
-	generation              uint64
-	syncCancel              context.CancelFunc
-	lastStatus              ProcessStatus
-	lastSnapshot            *ConfigSnapshot
-	haGroups                map[int]HAGroupStatus
-	lastIngressIfaces       []uint32
-	lastRSTv4               []netip.Addr
-	lastRSTv6               []netip.Addr
-	lastRSTAttempt          time.Time
-	lastRSTInstallOK        bool
-	lastSnapshotHash        [32]byte // content hash of last published snapshot (excludes volatile fields)
+	mu                    sync.Mutex
+	sessionMu             sync.Mutex // separate lock for session sync requests (Phase 3)
+	proc                  *exec.Cmd
+	cfg                   config.UserspaceConfig
+	clusterHA             bool
+	generation            uint64
+	syncCancel            context.CancelFunc
+	lastStatus            ProcessStatus
+	lastSnapshot          *ConfigSnapshot
+	policySchedulerActive map[string]bool
+	haGroups              map[int]HAGroupStatus
+	lastIngressIfaces     []uint32
+	lastRSTv4             []netip.Addr
+	lastRSTv6             []netip.Addr
+	lastRSTAttempt        time.Time
+	lastRSTInstallOK      bool
+	lastSnapshotHash      [32]byte // content hash of last published snapshot (excludes volatile fields)
 	// #1197: O(1) neighbor lookup index for the listener hot path.
 	// Keyed by (ifindex, ip-string). Rebuilt whenever lastSnapshot.Neighbors
 	// is replaced. Read under m.mu (existing snapshot lock).
 	neighborIndex map[neighborIndexKey]*NeighborSnapshot
 	// #1197: ifindex set for listener filter; rebuilt on config commit.
-	monitoredIfindexes map[int]struct{}
+	monitoredIfindexes      map[int]struct{}
 	lastBindingIndices      []uint32
 	neighborsPrewarmed      bool
 	ctrlEnableAt            time.Time
@@ -154,6 +155,23 @@ func New() *Manager {
 		configuredMode: ModeUserspaceCompat,
 		haGroups:       make(map[int]HAGroupStatus),
 	}
+}
+
+func copyPolicySchedulerActiveState(activeState map[string]bool) map[string]bool {
+	if activeState == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(activeState))
+	for name, active := range activeState {
+		out[name] = active
+	}
+	return out
+}
+
+func (m *Manager) policySchedulerActiveStateSnapshot() map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return copyPolicySchedulerActiveState(m.policySchedulerActive)
 }
 
 // EventStream returns the event stream instance, or nil if not available.
@@ -265,7 +283,8 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return nil, err
 	}
 	ucfg := deriveUserspaceConfig(cfg)
-	snap := buildSnapshot(cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration())
+	activeState := m.policySchedulerActiveStateSnapshot()
+	snap := buildSnapshotWithSchedulerState(cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration(), activeState)
 	m.syncInterfaceAttachments(result, snap)
 
 	m.mu.Lock()
@@ -379,6 +398,57 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	m.ensureStatusLoopLocked()
 	m.cfg = ucfg
 	return result, nil
+}
+
+// UpdatePolicyScheduleState republishes the userspace policy snapshot with one
+// coherent inactive-bit view. This shadows the embedded eBPF manager method;
+// scheduled userspace policies must not update the policy_rules BPF map.
+func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) {
+	activeCopy := copyPolicySchedulerActiveState(activeState)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.policySchedulerActive = activeCopy
+	if cfg == nil {
+		if m.lastSnapshot == nil {
+			return
+		}
+		cfg = m.lastSnapshot.Config
+	}
+	if cfg == nil || m.lastSnapshot == nil {
+		return
+	}
+
+	next := *m.lastSnapshot
+	m.generation++
+	next.Generation = m.generation
+	next.FIBGeneration = m.readFIBGeneration()
+	next.GeneratedAt = time.Now().UTC()
+	next.Config = cfg
+	next.Policies = buildPolicySnapshotsWithSchedulerState(cfg, activeCopy)
+	m.lastSnapshot = &next
+
+	if m.proc == nil || m.proc.Process == nil {
+		return
+	}
+	publishSnap := next
+	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
+		slog.Warn("userspace: failed to publish policy scheduler state", "err", err)
+		return
+	}
+	m.rebuildNeighborIndex()
+	m.rebuildMonitoredIfindexes()
+	m.publishedSnapshot = next.Generation
+	m.publishedPlanKey = snapshotBindingPlanKey(&next)
+	if h, ok := snapshotContentHash(&next); ok {
+		m.lastSnapshotHash = h
+	}
+	if err := m.applyHelperStatusLocked(&status); err != nil {
+		slog.Warn("userspace: failed to sync helper status after policy scheduler publish", "err", err)
+	}
 }
 
 func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snapshot *ConfigSnapshot) {

@@ -7,6 +7,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 2;
+
 // ---------------------------------------------------------------------------
 // Snapshot schema
 // ---------------------------------------------------------------------------

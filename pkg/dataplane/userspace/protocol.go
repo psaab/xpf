@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2
 	TypeUserspace   = "userspace"
 )
 
