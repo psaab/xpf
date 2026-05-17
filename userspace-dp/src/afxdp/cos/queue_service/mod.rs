@@ -20,7 +20,7 @@ use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::{
     COS_PRIORITY_LEVELS, CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime,
     ExactLocalScratchTxRequest, ExactPreparedScratchTxRequest, PreparedTxRecycle,
-    PreparedTxRequest, TxRequest, WorkerCoSQueueFastPath,
+    PreparedTxRequest, SharedCoSExactBacklog, TxRequest, WorkerCoSQueueFastPath,
 };
 use crate::afxdp::umem::MmapArea;
 use crate::afxdp::worker::BindingWorker;
@@ -223,23 +223,33 @@ fn build_nonexact_cos_batch(
     root_ifindex: i32,
     now_ns: u64,
 ) -> Option<CoSBatch> {
-    let suppress_peer_nonexact_surplus =
-        interface_has_peer_exact_backlog_for_nonexact_surplus(binding, root_ifindex);
+    let shared_exact_backlog = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.clone());
+    let peer_exact_demand_mask = shared_exact_backlog
+        .as_ref()
+        .map(|backlog| backlog.peer_exact_demand_queue_mask(binding.slot))
+        .unwrap_or(0);
     let selected = {
         let root = binding.cos.cos_interfaces.get_mut(&root_ifindex)?;
         select_nonexact_cos_guarantee_batch(root, now_ns).or_else(|| {
             // Strict priority applies to surplus service only. Non-exact
             // queues with explicit transmit-rate guarantees keep their
-            // guarantee pass; residual/best-effort surplus is filtered while
-            // a local serviceable exact queue or a peer-published exact
-            // backlog indicates exact demand on this shaped interface.
-            let suppress_nonexact_surplus = suppress_peer_nonexact_surplus
-                || root_has_serviceable_exact_queue_for_nonexact_surplus(root);
-            if suppress_nonexact_surplus {
-                select_cos_surplus_batch_filtered(root, now_ns, false)
-            } else {
-                select_cos_surplus_batch(root, now_ns)
-            }
+            // guarantee pass. Residual/best-effort surplus remains
+            // work-conserving, but while exact queues are backlogged it may
+            // consume only the residual root rate after backlogged exact
+            // guarantee rates are reserved.
+            let exact_demand_mask = root_exact_demand_queue_mask(root) | peer_exact_demand_mask;
+            let exact_demand_rate = exact_demand_rate_bytes_for_mask(root, exact_demand_mask);
+            let nonexact_budget = nonexact_surplus_budget_under_exact_demand(
+                root,
+                now_ns,
+                exact_demand_rate,
+                shared_exact_backlog.as_deref(),
+            );
+            select_cos_surplus_batch_filtered(root, now_ns, true, nonexact_budget)
         })
     };
     if selected.is_some() {
@@ -249,34 +259,101 @@ fn build_nonexact_cos_batch(
 }
 
 #[inline]
-fn interface_has_peer_exact_backlog_for_nonexact_surplus(
-    binding: &BindingWorker,
-    root_ifindex: i32,
-) -> bool {
-    binding
-        .cos
-        .cos_fast_interfaces
-        .get(&root_ifindex)
-        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
-        .is_some_and(|backlog| backlog.has_peer_serviceable_backlog(binding.slot))
+fn root_exact_demand_queue_mask(root: &CoSInterfaceRuntime) -> u64 {
+    root.queues
+        .iter()
+        .enumerate()
+        .filter(|(_, queue)| {
+            queue.config.exact && queue.config.guarantee_enabled && !cos_queue_is_empty(queue)
+        })
+        .fold(0u64, |acc, (queue_idx, _)| {
+            if queue_idx < u64::BITS as usize {
+                acc | (1u64 << queue_idx)
+            } else {
+                u64::MAX
+            }
+        })
 }
 
 #[inline]
-fn root_has_serviceable_exact_queue_for_nonexact_surplus(root: &CoSInterfaceRuntime) -> bool {
-    root.queues.iter().any(|queue| {
-        if !queue.config.exact
-            || !queue.config.guarantee_enabled
-            || !queue.hot.runnable
-            || cos_queue_is_empty(queue)
-        {
-            return false;
-        }
-        let Some(head) = cos_queue_front(queue) else {
-            return false;
-        };
-        let head_len = cos_item_len(head);
-        root.tokens >= head_len && queue.hot.tokens >= head_len
-    })
+fn exact_demand_rate_bytes_for_mask(root: &CoSInterfaceRuntime, exact_demand_mask: u64) -> u64 {
+    if exact_demand_mask == 0 {
+        return 0;
+    }
+    root.queues
+        .iter()
+        .enumerate()
+        .filter(|(queue_idx, queue)| {
+            queue.config.exact
+                && queue.config.guarantee_enabled
+                && (*queue_idx >= u64::BITS as usize
+                    || (exact_demand_mask & (1u64 << *queue_idx)) != 0)
+        })
+        .fold(0u64, |acc, (_, queue)| {
+            acc.saturating_add(queue.transmit_rate_bytes())
+        })
+}
+
+#[inline]
+fn reset_nonexact_surplus_under_exact_budget(
+    root: &mut CoSInterfaceRuntime,
+    now_ns: u64,
+    shared_exact_backlog: Option<&SharedCoSExactBacklog>,
+) {
+    root.nonexact_surplus_under_exact_tokens = 0;
+    root.nonexact_surplus_under_exact_last_refill_ns = now_ns;
+    if let Some(backlog) = shared_exact_backlog {
+        backlog.reset_residual_surplus_budget(now_ns);
+    }
+}
+
+#[inline]
+fn residual_rate_and_burst(
+    root: &CoSInterfaceRuntime,
+    exact_demand_rate: u64,
+) -> Option<(u64, u64)> {
+    if exact_demand_rate == 0 || root.shaping_rate_bytes == 0 {
+        return None;
+    }
+    let residual_rate = root.shaping_rate_bytes.saturating_sub(exact_demand_rate);
+    if residual_rate == 0 {
+        return Some((0, 0));
+    }
+    let residual_burst = (residual_rate / 100)
+        .max(COS_MIN_BURST_BYTES)
+        .min(root.burst_bytes.max(COS_MIN_BURST_BYTES));
+    Some((residual_rate, residual_burst))
+}
+
+#[inline]
+fn nonexact_surplus_budget_under_exact_demand(
+    root: &mut CoSInterfaceRuntime,
+    now_ns: u64,
+    exact_demand_rate: u64,
+    shared_exact_backlog: Option<&SharedCoSExactBacklog>,
+) -> Option<u64> {
+    let Some((residual_rate, residual_burst)) = residual_rate_and_burst(root, exact_demand_rate)
+    else {
+        reset_nonexact_surplus_under_exact_budget(root, now_ns, shared_exact_backlog);
+        return None;
+    };
+    if residual_rate == 0 {
+        reset_nonexact_surplus_under_exact_budget(root, now_ns, shared_exact_backlog);
+        return Some(0);
+    }
+    if let Some(backlog) = shared_exact_backlog {
+        root.nonexact_surplus_under_exact_tokens = 0;
+        root.nonexact_surplus_under_exact_last_refill_ns = now_ns;
+        return Some(backlog.residual_surplus_budget(now_ns, residual_rate, residual_burst));
+    }
+    refill_cos_tokens(
+        &mut root.nonexact_surplus_under_exact_tokens,
+        residual_rate,
+        residual_burst,
+        &mut root.nonexact_surplus_under_exact_last_refill_ns,
+        now_ns,
+    );
+    Some(root.nonexact_surplus_under_exact_tokens)
 }
 
 #[inline]
@@ -709,7 +786,7 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(
     root: &mut CoSInterfaceRuntime,
     now_ns: u64,
 ) -> Option<CoSBatch> {
-    select_cos_surplus_batch_filtered(root, now_ns, true)
+    select_cos_surplus_batch_filtered(root, now_ns, true, None)
 }
 
 #[inline]
@@ -717,6 +794,7 @@ fn select_cos_surplus_batch_filtered(
     root: &mut CoSInterfaceRuntime,
     now_ns: u64,
     allow_nonexact: bool,
+    nonexact_surplus_budget: Option<u64>,
 ) -> Option<CoSBatch> {
     for priority in 0..COS_PRIORITY_LEVELS {
         let indices_len = root.queue_indices_by_priority[priority].len();
@@ -733,6 +811,11 @@ fn select_cos_surplus_batch_filtered(
             }
             if !allow_nonexact && !queue.config.exact {
                 continue;
+            }
+            if !queue.config.exact {
+                if nonexact_surplus_budget.is_some_and(|budget| budget == 0) {
+                    continue;
+                }
             }
             // #915: exact queues are excluded from surplus by default
             // (preserves Junos `transmit-rate exact` hard-cap
@@ -773,11 +856,19 @@ fn select_cos_surplus_batch_filtered(
                 }
             }
             root.rr_index_by_priority[priority] = (start + offset + 1) % indices_len;
+            let secondary_budget = if !queue.config.exact {
+                queue
+                    .hot
+                    .surplus_deficit
+                    .min(nonexact_surplus_budget.unwrap_or(u64::MAX))
+            } else {
+                queue.hot.surplus_deficit
+            };
             if let Some(batch) = build_cos_batch_from_queue(
                 queue,
                 queue_idx,
                 root.tokens,
-                queue.hot.surplus_deficit,
+                secondary_budget,
                 CoSServicePhase::Surplus,
             ) {
                 return Some(batch);

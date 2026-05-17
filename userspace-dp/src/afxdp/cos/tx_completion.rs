@@ -373,9 +373,49 @@ fn serviceable_exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
         .filter_map(|queue| {
             let head = cos_queue_front(queue)?;
             let head_len = cos_item_len(head);
-            (root.tokens >= head_len && queue.hot.tokens >= head_len).then_some(queue.hot.queued_bytes)
+            (root.tokens >= head_len && queue.hot.tokens >= head_len)
+                .then_some(queue.hot.queued_bytes)
         })
         .fold(0u64, |acc, bytes| acc.saturating_add(bytes))
+}
+
+#[inline]
+fn exact_backlog_queue_mask(root: &CoSInterfaceRuntime) -> u64 {
+    root.queues
+        .iter()
+        .enumerate()
+        .filter(|(_, queue)| {
+            queue.config.exact && queue.config.guarantee_enabled && !cos_queue_is_empty(queue)
+        })
+        .fold(0u64, |acc, (queue_idx, _)| {
+            if queue_idx < u64::BITS as usize {
+                acc | (1u64 << queue_idx)
+            } else {
+                u64::MAX
+            }
+        })
+}
+
+#[inline]
+fn exact_backlog_guarantee_rate_bytes_for_mask(
+    root: &CoSInterfaceRuntime,
+    exact_demand_mask: u64,
+) -> u64 {
+    if exact_demand_mask == 0 {
+        return 0;
+    }
+    root.queues
+        .iter()
+        .enumerate()
+        .filter(|(queue_idx, queue)| {
+            queue.config.exact
+                && queue.config.guarantee_enabled
+                && (*queue_idx >= u64::BITS as usize
+                    || (exact_demand_mask & (1u64 << *queue_idx)) != 0)
+        })
+        .fold(0u64, |acc, (_, queue)| {
+            acc.saturating_add(queue.transmit_rate_bytes())
+        })
 }
 
 #[inline]
@@ -396,6 +436,7 @@ pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_
         binding.slot,
         exact_backlog_bytes(root),
         serviceable_exact_backlog_bytes(root),
+        exact_backlog_queue_mask(root),
     );
 }
 
@@ -414,6 +455,17 @@ fn interface_has_backlogged_exact_queue(
     peer_exact_backlogged: bool,
 ) -> bool {
     root_has_backlogged_exact_queue(root) || peer_exact_backlogged
+}
+
+#[inline]
+fn peer_exact_demand_queue_mask(binding: &BindingWorker, root_ifindex: i32) -> u64 {
+    binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+        .map(|backlog| backlog.peer_exact_demand_queue_mask(binding.slot))
+        .unwrap_or(0)
 }
 
 #[inline]
@@ -581,24 +633,38 @@ pub(in crate::afxdp) fn apply_cos_send_result(
 ) {
     let mut exact_queue_idx = None;
     let binding_slot = binding.slot;
+    let shared_exact_backlog = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.clone());
     let peer_exact_backlogged = binding
         .cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
         .is_some_and(|backlog| backlog.has_peer_backlog(binding_slot));
+    let peer_exact_demand_mask = peer_exact_demand_queue_mask(binding, root_ifindex);
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return;
         };
+        let exact_demand_mask = exact_backlog_queue_mask(root) | peer_exact_demand_mask;
+        let exact_demand_rate =
+            exact_backlog_guarantee_rate_bytes_for_mask(root, exact_demand_mask);
         let exact_backlogged = sent_bytes > 0
             && root
                 .queues
                 .get(queue_idx)
                 .is_some_and(|queue| !queue.config.exact)
             && interface_has_backlogged_exact_queue(root, peer_exact_backlogged);
+        let mut debit_nonexact_surplus_budget = false;
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             exact_queue_idx = queue.config.exact.then_some(queue_idx);
+            debit_nonexact_surplus_budget = sent_bytes > 0
+                && !queue.config.exact
+                && matches!(phase, CoSServicePhase::Surplus)
+                && exact_demand_rate > 0;
             let retry_bytes = restore_cos_local_items_inner(queue, retry);
             queue.hot.queued_bytes = queue
                 .hot
@@ -620,6 +686,15 @@ pub(in crate::afxdp) fn apply_cos_send_result(
             // apply_direct_exact_send_result write so the sum across
             // all sites equals the bytes the CoS scheduler accounted.
             account_queue_drain_sent_bytes(queue, phase, sent_bytes, exact_backlogged);
+        }
+        if debit_nonexact_surplus_budget {
+            if let Some(backlog) = shared_exact_backlog.as_ref() {
+                backlog.consume_residual_surplus_budget(sent_bytes);
+            } else {
+                root.nonexact_surplus_under_exact_tokens = root
+                    .nonexact_surplus_under_exact_tokens
+                    .saturating_sub(sent_bytes);
+            }
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }
@@ -658,24 +733,38 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
 ) {
     let mut exact_queue_idx = None;
     let binding_slot = binding.slot;
+    let shared_exact_backlog = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.clone());
     let peer_exact_backlogged = binding
         .cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
         .is_some_and(|backlog| backlog.has_peer_backlog(binding_slot));
+    let peer_exact_demand_mask = peer_exact_demand_queue_mask(binding, root_ifindex);
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return;
         };
+        let exact_demand_mask = exact_backlog_queue_mask(root) | peer_exact_demand_mask;
+        let exact_demand_rate =
+            exact_backlog_guarantee_rate_bytes_for_mask(root, exact_demand_mask);
         let exact_backlogged = sent_bytes > 0
             && root
                 .queues
                 .get(queue_idx)
                 .is_some_and(|queue| !queue.config.exact)
             && interface_has_backlogged_exact_queue(root, peer_exact_backlogged);
+        let mut debit_nonexact_surplus_budget = false;
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             exact_queue_idx = queue.config.exact.then_some(queue_idx);
+            debit_nonexact_surplus_budget = sent_bytes > 0
+                && !queue.config.exact
+                && matches!(phase, CoSServicePhase::Surplus)
+                && exact_demand_rate > 0;
             let retry_bytes = restore_cos_prepared_items_inner(queue, retry);
             queue.hot.queued_bytes = queue
                 .hot
@@ -701,6 +790,15 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
             // flowing through this path. Same Relaxed semantics as
             // the other three apply_* sites.
             account_queue_drain_sent_bytes(queue, phase, sent_bytes, exact_backlogged);
+        }
+        if debit_nonexact_surplus_budget {
+            if let Some(backlog) = shared_exact_backlog.as_ref() {
+                backlog.consume_residual_surplus_budget(sent_bytes);
+            } else {
+                root.nonexact_surplus_under_exact_tokens = root
+                    .nonexact_surplus_under_exact_tokens
+                    .saturating_sub(sent_bytes);
+            }
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }

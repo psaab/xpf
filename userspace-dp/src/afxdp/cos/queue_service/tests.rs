@@ -153,6 +153,7 @@ fn residual_and_exact_fast_interfaces(
 #[test]
 fn build_nonexact_suppresses_residual_surplus_when_local_exact_backlogged() {
     let mut root = residual_and_exact_test_root(false);
+    root.queues[1].config.transmit_rate_bytes = root.shaping_rate_bytes;
     root.queues[1].hot.tokens = 1500;
     let fast_interfaces = residual_and_exact_fast_interfaces(None);
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
@@ -160,7 +161,7 @@ fn build_nonexact_suppresses_residual_surplus_when_local_exact_backlogged() {
 
     assert!(
         build_nonexact_cos_batch(&mut binding, 42, 1).is_none(),
-        "best-effort residual surplus must not drain while an exact queue on the same interface is backlogged"
+        "best-effort residual surplus must not drain when exact demand consumes the root shape"
     );
 }
 
@@ -227,7 +228,7 @@ fn build_nonexact_suppresses_residual_surplus_when_peer_exact_backlogged() {
 }
 
 #[test]
-fn build_nonexact_allows_residual_surplus_when_peer_exact_is_not_serviceable() {
+fn build_nonexact_allows_residual_surplus_when_peer_exact_budget_refills() {
     let mut root = residual_and_exact_test_root(false);
     root.queues[1].hot.items.clear();
     root.queues[1].hot.queued_bytes = 0;
@@ -236,13 +237,42 @@ fn build_nonexact_allows_residual_surplus_when_peer_exact_is_not_serviceable() {
     root.runnable_queues = 1;
 
     let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
-    shared_exact_backlog.publish_with_serviceable(1, 1500, 0);
+    shared_exact_backlog.publish_with_serviceable(1, 1500, 0, 1 << 1);
     let fast_interfaces = residual_and_exact_fast_interfaces(Some(shared_exact_backlog));
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
 
-    let batch = build_nonexact_cos_batch(&mut binding, 42, 1)
-        .expect("queued-but-not-serviceable peer exact backlog must not suppress residual surplus");
+    assert!(
+        build_nonexact_cos_batch(&mut binding, 42, 1).is_none(),
+        "shared residual budget starts closed when peer exact demand appears"
+    );
+    let batch = build_nonexact_cos_batch(&mut binding, 42, 2_000_000)
+        .expect("peer exact demand should allow only refilled residual surplus");
+    assert!(matches!(
+        batch,
+        CoSBatch::Local {
+            queue_idx: 0,
+            phase: CoSServicePhase::Surplus,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn build_nonexact_counts_shared_exact_queue_once_across_bindings() {
+    let root = residual_and_exact_test_root(false);
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    shared_exact_backlog.publish_with_serviceable(1, 1500, 0, 1 << 1);
+    let fast_interfaces = residual_and_exact_fast_interfaces(Some(shared_exact_backlog));
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    assert!(
+        build_nonexact_cos_batch(&mut binding, 42, 1).is_none(),
+        "shared residual budget starts closed when aggregate exact demand appears"
+    );
+    let batch = build_nonexact_cos_batch(&mut binding, 42, 2_000_000)
+        .expect("local and peer backlog on the same exact queue reserve that queue's rate once");
     assert!(matches!(
         batch,
         CoSBatch::Local {
@@ -256,6 +286,7 @@ fn build_nonexact_allows_residual_surplus_when_peer_exact_is_not_serviceable() {
 #[test]
 fn build_nonexact_still_allows_exact_surplus_sharing_when_exact_backlogged() {
     let mut root = residual_and_exact_test_root(true);
+    root.queues[1].config.transmit_rate_bytes = root.shaping_rate_bytes;
     root.queues[1].hot.tokens = 1500;
     let fast_interfaces = residual_and_exact_fast_interfaces(None);
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();

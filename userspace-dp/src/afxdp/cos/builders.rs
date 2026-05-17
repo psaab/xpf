@@ -83,6 +83,8 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
         shaping_rate_bytes: config.shaping_rate_bytes,
         burst_bytes: config.burst_bytes.max(COS_MIN_BURST_BYTES),
         tokens: initial_root_tokens,
+        nonexact_surplus_under_exact_tokens: 0,
+        nonexact_surplus_under_exact_last_refill_ns: 0,
         default_queue: config.default_queue,
         nonempty_queues: 0,
         runnable_queues: 0,
