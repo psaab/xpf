@@ -3,6 +3,7 @@ package userspace
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -109,6 +110,7 @@ type fakeUserspaceHAOps struct {
 	fabric1Updates int
 	syncs          int
 	updateErr      error
+	events         []string
 }
 
 func (f *fakeUserspaceHAOps) UpdateRGActive(int, bool) error {
@@ -121,16 +123,29 @@ func (f *fakeUserspaceHAOps) UpdateHAWatchdog(int, uint64) error {
 
 func (f *fakeUserspaceHAOps) UpdateFabricFwd(dataplane.FabricFwdInfo) error {
 	f.fabric0Updates++
+	f.events = append(f.events, "fabric0")
 	return f.updateErr
 }
 
 func (f *fakeUserspaceHAOps) UpdateFabricFwd1(dataplane.FabricFwdInfo) error {
 	f.fabric1Updates++
+	f.events = append(f.events, "fabric1")
 	return f.updateErr
 }
 
 func (f *fakeUserspaceHAOps) SyncFabricState() {
 	f.syncs++
+	f.events = append(f.events, "sync")
+}
+
+func TestRuntimeManagerHAUsesUserspaceController(t *testing.T) {
+	controller, ok := New().HA().(userspaceHAController)
+	if !ok {
+		t.Fatalf("Manager.HA() = %T, want userspaceHAController", New().HA())
+	}
+	if _, ok := controller.manager.(*Manager); !ok {
+		t.Fatalf("Manager.HA() controller manager = %T, want *Manager", controller.manager)
+	}
 }
 
 func TestRuntimeUserspaceHAControllerSyncsFabricStateAfterForwardingUpdate(t *testing.T) {
@@ -144,6 +159,9 @@ func TestRuntimeUserspaceHAControllerSyncsFabricStateAfterForwardingUpdate(t *te
 		t.Fatalf("fabric0 path updates/syncs = %d/%d/%d, want 1/0/1",
 			fake.fabric0Updates, fake.fabric1Updates, fake.syncs)
 	}
+	if want := []string{"fabric0", "sync"}; !reflect.DeepEqual(fake.events, want) {
+		t.Fatalf("fabric0 event order = %#v, want %#v", fake.events, want)
+	}
 
 	if err := controller.SetFabricForwarding(context.Background(), 1, dataplane.FabricFwdInfo{}); err != nil {
 		t.Fatalf("SetFabricForwarding fabric1: %v", err)
@@ -151,6 +169,9 @@ func TestRuntimeUserspaceHAControllerSyncsFabricStateAfterForwardingUpdate(t *te
 	if fake.fabric0Updates != 1 || fake.fabric1Updates != 1 || fake.syncs != 2 {
 		t.Fatalf("fabric1 path updates/syncs = %d/%d/%d, want 1/1/2",
 			fake.fabric0Updates, fake.fabric1Updates, fake.syncs)
+	}
+	if want := []string{"fabric0", "sync", "fabric1", "sync"}; !reflect.DeepEqual(fake.events, want) {
+		t.Fatalf("fabric1 event order = %#v, want %#v", fake.events, want)
 	}
 }
 
@@ -163,5 +184,27 @@ func TestRuntimeUserspaceHAControllerDoesNotSyncFabricStateAfterUpdateError(t *t
 	}
 	if fake.syncs != 0 {
 		t.Fatalf("SyncFabricState calls = %d, want 0 after update error", fake.syncs)
+	}
+}
+
+func TestRuntimeUserspaceHAControllerSyncsAfterSuccessfulUpdateDespiteCanceledContext(t *testing.T) {
+	fake := &fakeUserspaceHAOps{}
+	controller := userspaceHAController{manager: fake}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := controller.SetFabricForwarding(ctx, 0, dataplane.FabricFwdInfo{}); err == nil {
+		t.Fatal("SetFabricForwarding with initially canceled context succeeded, want context error")
+	}
+	if len(fake.events) != 0 {
+		t.Fatalf("events after initially canceled context = %#v, want none", fake.events)
+	}
+
+	ctx = context.Background()
+	if err := controller.SetFabricForwarding(ctx, 0, dataplane.FabricFwdInfo{}); err != nil {
+		t.Fatalf("SetFabricForwarding after successful update: %v", err)
+	}
+	if want := []string{"fabric0", "sync"}; !reflect.DeepEqual(fake.events, want) {
+		t.Fatalf("event order after successful update = %#v, want %#v", fake.events, want)
 	}
 }

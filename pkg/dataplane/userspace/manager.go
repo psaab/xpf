@@ -287,9 +287,9 @@ func (c userspaceHAController) SetFabricForwarding(ctx context.Context, id datap
 	if err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+	// The map update is committed at this point. Always push helper fabric
+	// state after a successful fabric0 or fabric1 update so RuntimeDataPlane.HA
+	// preserves the same "fresh helper view" contract for every fabric slot.
 	c.manager.SyncFabricState()
 	return nil
 }
