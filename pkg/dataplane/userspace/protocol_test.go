@@ -89,6 +89,42 @@ func TestBindingCountersSnapshotTXSharedRecycleUnknownSlotDropsRoundTrip(t *test
 	}
 }
 
+func TestConfigSnapshotThreeColorPolicersRoundTrip(t *testing.T) {
+	in := ConfigSnapshot{
+		Version: 1,
+		ThreeColorPolicers: []ThreeColorPolicerSnapshot{
+			{
+				Name:                   "tr",
+				Mode:                   "two-rate",
+				ColorBlind:             true,
+				CommittedRateBytes:     125000,
+				CommittedBurstBytes:    50000,
+				PeakOrExcessRateBytes:  250000,
+				PeakOrExcessBurstBytes: 100000,
+				ThenAction:             "discard",
+			},
+		},
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["three_color_policers"]; !ok {
+		t.Fatalf("wire key missing from ConfigSnapshot JSON: %s", string(raw))
+	}
+	var back ConfigSnapshot
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ConfigSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(back.ThreeColorPolicers, in.ThreeColorPolicers) {
+		t.Fatalf("ThreeColorPolicers = %+v, want %+v", back.ThreeColorPolicers, in.ThreeColorPolicers)
+	}
+}
+
 func TestCoSQueueStatusDrainPhaseCountersRoundTrip(t *testing.T) {
 	in := CoSQueueStatus{
 		QueueID:                 0,

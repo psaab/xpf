@@ -218,6 +218,9 @@ func compileExpanded(tree *ConfigTree) (*Config, error) {
 	if err := validateClassOfServiceStrict(cfg.ClassOfService); err != nil {
 		return nil, err
 	}
+	if err := validateThreeColorPolicersStrict(cfg.Firewall.ThreeColorPolicers); err != nil {
+		return nil, err
+	}
 
 	if warnings := ValidateConfig(cfg); len(warnings) > 0 {
 		for _, w := range warnings {
@@ -226,6 +229,42 @@ func compileExpanded(tree *ConfigTree) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConfig) error {
+	for name, pol := range policers {
+		if pol == nil {
+			continue
+		}
+		displayName := pol.Name
+		if displayName == "" {
+			displayName = name
+		}
+		if pol.CIR == 0 {
+			return fmt.Errorf("firewall three-color-policer %q requires positive committed-information-rate", displayName)
+		}
+		if pol.CBS == 0 {
+			return fmt.Errorf("firewall three-color-policer %q requires positive committed-burst-size", displayName)
+		}
+		if pol.PBS == 0 {
+			if pol.TwoRate {
+				return fmt.Errorf("firewall three-color-policer %q requires positive peak-burst-size", displayName)
+			}
+			return fmt.Errorf("firewall three-color-policer %q requires positive excess-burst-size", displayName)
+		}
+		if pol.TwoRate {
+			if pol.PIR == 0 {
+				return fmt.Errorf("firewall three-color-policer %q requires positive peak-information-rate", displayName)
+			}
+			if pol.PIR < pol.CIR {
+				return fmt.Errorf("firewall three-color-policer %q peak-information-rate must be >= committed-information-rate", displayName)
+			}
+			if pol.PBS < pol.CBS {
+				return fmt.Errorf("firewall three-color-policer %q peak-burst-size must be >= committed-burst-size", displayName)
+			}
+		}
+	}
+	return nil
 }
 
 func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {

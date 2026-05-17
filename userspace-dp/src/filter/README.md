@@ -53,9 +53,9 @@ Implemented here:
 
 Still gated before removing the userspace capability rejection:
 
-- The Go userspace snapshot currently publishes only single-rate
-  two-color `PolicerSnapshot` fields; three-color snapshot fields and
-  validation are not wired to Rust yet.
+- The Go snapshot schema, Rust wire DTO, and commit-time structural
+  validation are wired for three-color policers. They are published only
+  so the control plane and dataplane agree on the future wire shape.
 - Filter terms still carry a policer name in the evaluation result.
   The hot forwarding path must move to stable policer IDs with
   ID-indexed or sharded state before three-color policers are enabled.
@@ -64,3 +64,6 @@ Still gated before removing the userspace capability rejection:
 - Forwarding-path application of per-color counters, red drops, DSCP
   rewrites, Rust status, Go status, CLI, and Prometheus export remain
   follow-on wiring.
+- Until those runtime pieces land, any config containing
+  `firewall three-color-policer` stays fail-closed for userspace
+  forwarding through the capability gate.

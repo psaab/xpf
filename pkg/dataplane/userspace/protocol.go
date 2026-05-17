@@ -37,35 +37,36 @@ type ControlResponse struct {
 }
 
 type ConfigSnapshot struct {
-	Version         int                          `json:"version"`
-	Generation      uint64                       `json:"generation"`
-	FIBGeneration   uint32                       `json:"fib_generation,omitempty"`
-	GeneratedAt     time.Time                    `json:"generated_at"`
-	Summary         SnapshotSummary              `json:"summary"`
-	Capabilities    UserspaceCapabilities        `json:"capabilities"`
-	MapPins         UserspaceMapPins             `json:"map_pins"`
-	Zones           []ZoneSnapshot               `json:"zones,omitempty"`
-	Interfaces      []InterfaceSnapshot          `json:"interfaces,omitempty"`
-	Fabrics         []FabricSnapshot             `json:"fabrics,omitempty"`
-	TunnelEndpoints []TunnelEndpointSnapshot     `json:"tunnel_endpoints,omitempty"`
-	Neighbors       []NeighborSnapshot           `json:"neighbors,omitempty"`
-	Routes          []RouteSnapshot              `json:"routes,omitempty"`
-	Flow            FlowSnapshot                 `json:"flow,omitempty"`
-	DefaultPolicy   string                       `json:"default_policy,omitempty"`
-	Policies        []PolicyRuleSnapshot         `json:"policies,omitempty"`
-	SourceNAT       []SourceNATRuleSnapshot      `json:"source_nat_rules,omitempty"`
-	StaticNAT       []StaticNATRuleSnapshot      `json:"static_nat_rules,omitempty"`
-	DestinationNAT  []DestinationNATRuleSnapshot `json:"destination_nat_rules,omitempty"`
-	NAT64           []NAT64RuleSnapshot          `json:"nat64_rules,omitempty"`
-	Nptv6           []Nptv6RuleSnapshot          `json:"nptv6_rules,omitempty"`
-	Screens         []ScreenProfileSnapshot      `json:"screens,omitempty"`
-	Filters         []FirewallFilterSnapshot     `json:"filters,omitempty"`
-	Policers        []PolicerSnapshot            `json:"policers,omitempty"`
-	ClassOfService  *ClassOfServiceSnapshot      `json:"class_of_service,omitempty"`
-	FlowExport      *FlowExportSnapshot          `json:"flow_export,omitempty"`
-	Config          *config.Config               `json:"config,omitempty"`
-	Userspace       config.UserspaceConfig       `json:"userspace"`
-	DeferWorkers    bool                         `json:"defer_workers,omitempty"`
+	Version            int                          `json:"version"`
+	Generation         uint64                       `json:"generation"`
+	FIBGeneration      uint32                       `json:"fib_generation,omitempty"`
+	GeneratedAt        time.Time                    `json:"generated_at"`
+	Summary            SnapshotSummary              `json:"summary"`
+	Capabilities       UserspaceCapabilities        `json:"capabilities"`
+	MapPins            UserspaceMapPins             `json:"map_pins"`
+	Zones              []ZoneSnapshot               `json:"zones,omitempty"`
+	Interfaces         []InterfaceSnapshot          `json:"interfaces,omitempty"`
+	Fabrics            []FabricSnapshot             `json:"fabrics,omitempty"`
+	TunnelEndpoints    []TunnelEndpointSnapshot     `json:"tunnel_endpoints,omitempty"`
+	Neighbors          []NeighborSnapshot           `json:"neighbors,omitempty"`
+	Routes             []RouteSnapshot              `json:"routes,omitempty"`
+	Flow               FlowSnapshot                 `json:"flow,omitempty"`
+	DefaultPolicy      string                       `json:"default_policy,omitempty"`
+	Policies           []PolicyRuleSnapshot         `json:"policies,omitempty"`
+	SourceNAT          []SourceNATRuleSnapshot      `json:"source_nat_rules,omitempty"`
+	StaticNAT          []StaticNATRuleSnapshot      `json:"static_nat_rules,omitempty"`
+	DestinationNAT     []DestinationNATRuleSnapshot `json:"destination_nat_rules,omitempty"`
+	NAT64              []NAT64RuleSnapshot          `json:"nat64_rules,omitempty"`
+	Nptv6              []Nptv6RuleSnapshot          `json:"nptv6_rules,omitempty"`
+	Screens            []ScreenProfileSnapshot      `json:"screens,omitempty"`
+	Filters            []FirewallFilterSnapshot     `json:"filters,omitempty"`
+	Policers           []PolicerSnapshot            `json:"policers,omitempty"`
+	ThreeColorPolicers []ThreeColorPolicerSnapshot  `json:"three_color_policers,omitempty"`
+	ClassOfService     *ClassOfServiceSnapshot      `json:"class_of_service,omitempty"`
+	FlowExport         *FlowExportSnapshot          `json:"flow_export,omitempty"`
+	Config             *config.Config               `json:"config,omitempty"`
+	Userspace          config.UserspaceConfig       `json:"userspace"`
+	DeferWorkers       bool                         `json:"defer_workers,omitempty"`
 }
 
 type FlowSnapshot struct {
@@ -333,6 +334,17 @@ type PolicerSnapshot struct {
 	BandwidthBps  uint64 `json:"bandwidth_bps"`
 	BurstBytes    uint64 `json:"burst_bytes"`
 	DiscardExcess bool   `json:"discard_excess"`
+}
+
+type ThreeColorPolicerSnapshot struct {
+	Name                   string `json:"name"`
+	Mode                   string `json:"mode"` // "single-rate" (srTCM) or "two-rate" (trTCM)
+	ColorBlind             bool   `json:"color_blind,omitempty"`
+	CommittedRateBytes     uint64 `json:"committed_rate_bytes_per_sec"`
+	CommittedBurstBytes    uint64 `json:"committed_burst_bytes"`
+	PeakOrExcessRateBytes  uint64 `json:"peak_or_excess_rate_bytes_per_sec,omitempty"`
+	PeakOrExcessBurstBytes uint64 `json:"peak_or_excess_burst_bytes"`
+	ThenAction             string `json:"then_action,omitempty"`
 }
 
 // FlowExportSnapshot captures flow monitoring/export configuration for the

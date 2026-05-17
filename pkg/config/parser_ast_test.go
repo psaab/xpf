@@ -4539,6 +4539,74 @@ func TestThreeColorPolicerSetSyntax(t *testing.T) {
 	}
 }
 
+func TestThreeColorPolicerStrictValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		lines   []string
+		wantErr string
+	}{
+		{
+			name: "missing committed rate",
+			lines: []string{
+				"set firewall three-color-policer bad single-rate committed-burst-size 100k",
+				"set firewall three-color-policer bad single-rate excess-burst-size 200k",
+			},
+			wantErr: "committed-information-rate",
+		},
+		{
+			name: "two-rate missing peak rate",
+			lines: []string{
+				"set firewall three-color-policer bad two-rate committed-information-rate 10m",
+				"set firewall three-color-policer bad two-rate committed-burst-size 100k",
+				"set firewall three-color-policer bad two-rate peak-burst-size 200k",
+			},
+			wantErr: "peak-information-rate",
+		},
+		{
+			name: "peak below committed",
+			lines: []string{
+				"set firewall three-color-policer bad two-rate committed-information-rate 10m",
+				"set firewall three-color-policer bad two-rate committed-burst-size 100k",
+				"set firewall three-color-policer bad two-rate peak-information-rate 1m",
+				"set firewall three-color-policer bad two-rate peak-burst-size 200k",
+			},
+			wantErr: "peak-information-rate must be >= committed-information-rate",
+		},
+		{
+			name: "peak burst below committed burst",
+			lines: []string{
+				"set firewall three-color-policer bad two-rate committed-information-rate 10m",
+				"set firewall three-color-policer bad two-rate committed-burst-size 200k",
+				"set firewall three-color-policer bad two-rate peak-information-rate 20m",
+				"set firewall three-color-policer bad two-rate peak-burst-size 100k",
+			},
+			wantErr: "peak-burst-size must be >= committed-burst-size",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tree := &ConfigTree{}
+			for _, line := range tt.lines {
+				cmd, err := ParseSetCommand(line)
+				if err != nil {
+					t.Fatalf("ParseSetCommand(%q): %v", line, err)
+				}
+				if err := tree.SetPath(cmd); err != nil {
+					t.Fatalf("SetPath(%q): %v", line, err)
+				}
+			}
+			_, err := CompileConfig(tree)
+			if err == nil {
+				t.Fatalf("CompileConfig succeeded, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("CompileConfig error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLogicalInterfacePolicer(t *testing.T) {
 	input := `firewall {
     policer shared-rate {
