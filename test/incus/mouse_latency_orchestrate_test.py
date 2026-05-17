@@ -94,16 +94,16 @@ class CwndSettleDiagnosticsTests(unittest.TestCase):
 """)
             out_path = os.path.join(t, "cwnd-settle.json")
 
-            class A: pass
-            a = A()
-            a.iperf3_txt = txt
-            a.shaper_bps = 300_000_000
-            a.window_rows = 3
-            a.elapsed_sec = 20
-            a.sample_index = 1
-            a.out = out_path
+            class SettleArgs: pass
+            args = SettleArgs()
+            args.iperf3_txt = txt
+            args.shaper_bps = 300_000_000
+            args.window_rows = 3
+            args.elapsed_sec = 20
+            args.sample_index = 1
+            args.out = out_path
 
-            self.assertEqual(orch.cmd_settle_diagnostics(a), 1)
+            self.assertEqual(orch.cmd_settle_diagnostics(args), 1)
             with open(out_path) as f:
                 payload = json.load(f)
             self.assertFalse(payload["settled"])

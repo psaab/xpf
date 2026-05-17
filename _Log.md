@@ -7,6 +7,11 @@
   - **File(s)**: `test/incus/test-mouse-latency.sh`, `test/incus/mouse_latency_orchestrate.py`, `test/incus/mouse_latency_orchestrate_test.py`, `test/incus/mouse_latency_probe.py`, `test/incus/mouse_latency_probe_test.py`, `test/incus/test_mouse_latency_shell_test.py`, `docs/fairness-regimes.md`, `_Log.md`
   - **Validation**: `cd test/incus && python3 -m unittest mouse_latency_orchestrate_test.py mouse_latency_aggregate_test.py test_mouse_latency_shell_test.py && python3 -m unittest mouse_latency_probe_test.py && bash -n test-mouse-latency.sh`; `python3 -m py_compile test/incus/mouse_latency_orchestrate.py test/incus/mouse_latency_probe.py test/incus/mouse_latency_aggregate.py`; `git diff --check`
 
+- **Timestamp**: 2026-05-17T15:29:22Z
+  - **Action**: Addressed parallel validation follow-up by making `CWND_SETTLE_OK="true"` conditional on settle-diagnostics success (explicit `else` branch) and renaming settle-diagnostics test helper variables to descriptive names.
+  - **File(s)**: `test/incus/test-mouse-latency.sh`, `test/incus/mouse_latency_orchestrate_test.py`, `_Log.md`
+  - **Validation**: `cd test/incus && python3 -m unittest mouse_latency_orchestrate_test.py test_mouse_latency_shell_test.py`; `cd test/incus && python3 -m unittest mouse_latency_probe_test.py`; `bash -n test/incus/test-mouse-latency.sh`
+
 - **Timestamp**: 2026-05-17T08:30:20Z
   - **Action**: PR #1394 round-10 follow-up — fixed standalone userspace event-stream callback wiring by always registering session/full-resync callbacks, and added a regression test that verifies standalone SessionOpen and FullResync frames are ACKed instead of stalling behind an unwired callback queue.
   - **File(s)**: `pkg/daemon/daemon_ha_userspace.go`, `pkg/daemon/userspace_sync_test.go`, `_Log.md`

@@ -366,8 +366,9 @@ if [[ "$N" -gt 0 ]]; then
     if [[ $settle_diag_rc -ne 0 ]]; then
         CWND_SETTLE_OK="false"
         invalidate "cwnd-not-settled"
+    else
+        CWND_SETTLE_OK="true"
     fi
-    CWND_SETTLE_OK="true"
 fi
 
 # ---- step 2 (deferred to here): start mpstat over the probe window only.
