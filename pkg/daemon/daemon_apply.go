@@ -313,7 +313,7 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		addrs  []string
 	}
 	var deferredOverlays []deferredIPVLAN
-	_, isUserspaceDP := d.dp.(*dpuserspace.Manager)
+	bindingCtrl, isUserspaceDP := d.dp.(userspaceXSKBindingController)
 	for ifName, ifCfg := range cfg.Interfaces.Interfaces {
 		if ifCfg.LocalFabricMember == "" || !strings.HasPrefix(ifName, "fab") {
 			continue
@@ -332,7 +332,7 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		// already exists from the OnXSKBound callback and XSK is already
 		// bound, so the xskBoundNotified guard prevents re-deletion.
 		if isUserspaceDP {
-			if um, ok := d.dp.(*dpuserspace.Manager); ok && !um.XSKBoundNotified() {
+			if bindingCtrl != nil && !bindingCtrl.XSKBoundNotified() {
 				// First applyConfig — remove stale IPVLAN so XSK can zerocopy.
 				if link, err := netlink.LinkByName(fabLinux); err == nil {
 					netlink.LinkDel(link)
@@ -370,19 +370,17 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		}
 	}
 	// Register deferred IPVLAN creation callback on the userspace manager.
-	if len(deferredOverlays) > 0 {
-		if um, ok := d.dp.(*dpuserspace.Manager); ok {
-			um.OnXSKBound = func() {
-				for _, ov := range deferredOverlays {
-					slog.Info("XSK bound — creating deferred fabric IPVLAN",
-						"parent", ov.parent, "name", ov.name)
-					if err := ensureFabricIPVLAN(ov.parent, ov.name, ov.addrs); err != nil {
-						slog.Error("deferred fabric IPVLAN creation failed",
-							"parent", ov.parent, "name", ov.name, "err", err)
-					}
+	if len(deferredOverlays) > 0 && bindingCtrl != nil {
+		bindingCtrl.SetOnXSKBound(func() {
+			for _, ov := range deferredOverlays {
+				slog.Info("XSK bound — creating deferred fabric IPVLAN",
+					"parent", ov.parent, "name", ov.name)
+				if err := ensureFabricIPVLAN(ov.parent, ov.name, ov.addrs); err != nil {
+					slog.Error("deferred fabric IPVLAN creation failed",
+						"parent", ov.parent, "name", ov.name, "err", err)
 				}
 			}
-		}
+		})
 	}
 	// Clean up stale fabric IPVLAN overlays not in current config (#128).
 	for _, name := range []string{"fab0", "fab1"} {
@@ -1052,7 +1050,7 @@ func (d *Daemon) publishInitialPolicySchedulerStateLocked(cfg *config.Config, ac
 	if d.dp == nil || activeState == nil || compileResult == nil {
 		return
 	}
-	if _, isUserspace := d.dp.(*dpuserspace.Manager); isUserspace {
+	if _, isUserspace := d.dp.(userspaceRuntimeModeReporter); isUserspace {
 		return
 	}
 	d.dp.UpdatePolicyScheduleState(cfg, activeState)

@@ -65,7 +65,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 | Kernel-owned traffic (ARP, local delivery, management, some non-IP) | cpumap or kernel pass-through from XDP |
 | GRE / ESP / explicit early filters | Tail-call back into the legacy XDP pipeline |
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
-| DataPlane control-plane contract | Userspace manager still embeds the eBPF manager for many BPF-shaped map-writer methods; tracked by #1381 |
+| DataPlane control-plane contract | Userspace manager no longer embeds the legacy `dataplane.DataPlane`; a userspace `LegacyDataPlaneAdapter` owns old-interface compatibility while callers migrate. The manager still holds a named eBPF shim manager for XDP/map bootstrap state; tracked by #1381 |
 | Dataplane event logging | Session open/close/update are emitted by userspace; policy-deny, screen-drop, and filter-log events still depend on the legacy BPF ring buffer; tracked by #1379 |
 | `show system buffers` | Userspace helper-status rendering landed in #1386 for AF_XDP UMEM/TX capacity. #1380 still tracks the retirement gate for removing legacy BPF-map buffer reporting and settling the CLI / observability cleanup. |
 
