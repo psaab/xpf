@@ -60,6 +60,46 @@ func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigSnapshotMirrorConfigsRoundTrip(t *testing.T) {
+	in := ConfigSnapshot{
+		Version: ProtocolVersion,
+		MirrorConfigs: []MirrorConfigSnapshot{
+			{IngressIfindex: 11, OutputIfindex: 22, Rate: 100},
+			{IngressIfindex: 12, OutputIfindex: 22},
+		},
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["mirror_configs"]; !ok {
+		t.Fatalf("wire key missing from ConfigSnapshot JSON: %s", string(raw))
+	}
+	var mirrorObjects []map[string]json.RawMessage
+	if err := json.Unmarshal(obj["mirror_configs"], &mirrorObjects); err != nil {
+		t.Fatalf("unmarshal mirror_configs: %v", err)
+	}
+	for i, mirror := range mirrorObjects {
+		for _, key := range []string{"ingress_ifindex", "output_ifindex", "rate"} {
+			if _, ok := mirror[key]; !ok {
+				t.Fatalf("mirror_configs[%d] missing wire key %q: %s", i, key, string(raw))
+			}
+		}
+	}
+
+	var back ConfigSnapshot
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ConfigSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(back.MirrorConfigs, in.MirrorConfigs) {
+		t.Fatalf("mirror config round-trip mismatch: got %+v, want %+v", back.MirrorConfigs, in.MirrorConfigs)
+	}
+}
+
 func TestBindingCountersSnapshotTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	in := BindingCountersSnapshot{
 		WorkerID:                        3,

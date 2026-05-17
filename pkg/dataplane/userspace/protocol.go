@@ -64,6 +64,7 @@ type ConfigSnapshot struct {
 	ThreeColorPolicers []ThreeColorPolicerSnapshot  `json:"three_color_policers,omitempty"`
 	ClassOfService     *ClassOfServiceSnapshot      `json:"class_of_service,omitempty"`
 	FlowExport         *FlowExportSnapshot          `json:"flow_export,omitempty"`
+	MirrorConfigs      []MirrorConfigSnapshot       `json:"mirror_configs,omitempty"`
 	Config             *config.Config               `json:"config,omitempty"`
 	Userspace          config.UserspaceConfig       `json:"userspace"`
 	DeferWorkers       bool                         `json:"defer_workers,omitempty"`
@@ -355,6 +356,16 @@ type FlowExportSnapshot struct {
 	SamplingRate     int    `json:"sampling_rate"`
 	ActiveTimeout    int    `json:"active_timeout,omitempty"`   // seconds, 0=default 60
 	InactiveTimeout  int    `json:"inactive_timeout,omitempty"` // seconds, 0=default 15
+}
+
+// MirrorConfigSnapshot captures one ingress SPAN mapping for userspace-dp.
+// It is snapshot/admission state only until the userspace runtime clone path is
+// wired. Runtime delivery must use full-L2 cross-binding inject; the L3 TUN
+// slow-path is not a valid mirror sink because it strips Ethernet framing.
+type MirrorConfigSnapshot struct {
+	IngressIfindex int    `json:"ingress_ifindex"`
+	OutputIfindex  int    `json:"output_ifindex"`
+	Rate           uint32 `json:"rate"`
 }
 
 type PolicyApplicationSnapshot struct {

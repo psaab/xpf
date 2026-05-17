@@ -323,12 +323,24 @@ pub(crate) struct ConfigSnapshot {
     pub class_of_service: Option<ClassOfServiceSnapshot>,
     #[serde(rename = "flow_export", default)]
     pub flow_export: Option<FlowExportSnapshot>,
+    #[serde(rename = "mirror_configs", default)]
+    pub mirror_configs: Vec<MirrorConfigSnapshot>,
     #[serde(default)]
     pub userspace: serde_json::Value,
     #[serde(default)]
     pub config: serde_json::Value,
     #[serde(rename = "defer_workers", default)]
     pub defer_workers: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct MirrorConfigSnapshot {
+    #[serde(rename = "ingress_ifindex", default)]
+    pub ingress_ifindex: i32,
+    #[serde(rename = "output_ifindex", default)]
+    pub output_ifindex: i32,
+    #[serde(default)]
+    pub rate: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
