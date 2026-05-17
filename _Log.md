@@ -15,6 +15,10 @@
   - **Action**: Round-5 follow-up fix — in userspace pending-XSK-startup compile path, defer `lastSnapshot` cache update until ingress/local/NAT map sync succeeds so sync failures cannot poison cached snapshot state with an unpublished generation.
   - **File(s)**: `pkg/dataplane/userspace/manager.go`, `_Log.md`
 
+- **Timestamp**: 2026-05-17T05:16:00Z
+  - **Action**: Restored `go.mod` after an unintended direct/indirect dependency classification flip introduced by an automation-only progress update.
+  - **File(s)**: `go.mod`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T04:48:51Z
   - **Action**: Re-restored `go.mod` after a subsequent tooling pass reintroduced the same direct/indirect dependency classification flip.
   - **File(s)**: `go.mod`, `_Log.md`
