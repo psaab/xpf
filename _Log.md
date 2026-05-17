@@ -17,6 +17,11 @@
   - **File(s)**: `userspace-dp/src/afxdp/umem/mod.rs`, `_Log.md`
   - **Validation**: `go test ./pkg/dataplane/userspace`; `cargo test --manifest-path userspace-dp/Cargo.toml mirror::` (expected environment failure: missing libelf headers/pkg-config); `git diff --check`
 
+- **Timestamp**: 2026-05-17T21:58:24Z
+  - **Action**: PR #1410 residual review follow-up — made emit-on-wire inject tuple identity an explicit Go/Rust control-wire contract, added helper status gating for mixed-version fail-closed behavior, and stopped Rust from synthesizing source tuple fields for emitted inject packets.
+  - **File(s)**: `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/inject.go`, `pkg/dataplane/userspace/inject_test.go`, `pkg/dataplane/userspace/protocol_test.go`, `pkg/cmdtree/tree.go`, `userspace-dp/src/protocol.rs`, `userspace-dp/src/server/lifecycle.rs`, `userspace-dp/src/server/README.md`, `userspace-dp/src/afxdp/coordinator/inject.rs`, `userspace-dp/src/afxdp/coordinator/tests.rs`, `userspace-dp/src/afxdp/frame/mod.rs`, `_Log.md`
+  - **Validation**: `go test ./pkg/dataplane/userspace ./pkg/cmdtree`; `cargo test --manifest-path userspace-dp/Cargo.toml inject_packet -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml injected_packet -- --nocapture`; `cargo check --manifest-path userspace-dp/Cargo.toml`; `git diff --check`
+
 - **Timestamp**: 2026-05-17T21:39:00Z
   - **Action**: PR #1410 review follow-up — reconciled README userspace capability wording so three-color policers are described as partially admitted (color-blind `then discard` slice) rather than fully gated, matching current userspace capability documentation and runtime admission behavior.
   - **File(s)**: `README.md`, `_Log.md`

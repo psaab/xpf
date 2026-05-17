@@ -119,16 +119,23 @@ pub(in crate::afxdp) fn apply_dscp_rewrite_to_frame(frame: &mut [u8], dscp: u8) 
 
 pub(super) fn build_injected_packet(
     req: &InjectPacketRequest,
+    src: IpAddr,
     dst: IpAddr,
+    src_port: u16,
     resolution: ForwardingResolution,
     egress: &EgressInterface,
 ) -> Result<Vec<u8>, String> {
     let dst_mac = resolution
         .neighbor_mac
         .ok_or_else(|| "missing neighbor MAC".to_string())?;
-    match dst {
-        IpAddr::V4(dst_v4) => build_injected_ipv4(req, dst_mac, dst_v4, egress),
-        IpAddr::V6(dst_v6) => build_injected_ipv6(req, dst_mac, dst_v6, egress),
+    match (src, dst) {
+        (IpAddr::V4(src_v4), IpAddr::V4(dst_v4)) => {
+            build_injected_ipv4(req, dst_mac, src_v4, dst_v4, src_port, egress)
+        }
+        (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) => {
+            build_injected_ipv6(req, dst_mac, src_v6, dst_v6, src_port, egress)
+        }
+        _ => Err("injected packet source and destination address families differ".to_string()),
     }
 }
 
@@ -1441,12 +1448,11 @@ pub(super) fn restore_l4_tuple_from_meta(
 pub(super) fn build_injected_ipv4(
     req: &InjectPacketRequest,
     dst_mac: [u8; 6],
+    src_ip: Ipv4Addr,
     dst_ip: Ipv4Addr,
+    src_port: u16,
     egress: &EgressInterface,
 ) -> Result<Vec<u8>, String> {
-    let src_ip = egress
-        .primary_v4
-        .ok_or_else(|| "egress interface has no IPv4 source address".to_string())?;
     let eth_len = if egress.vlan_id > 0 { 18 } else { 14 };
     let min_total = eth_len + 20 + 8 + 16;
     let target_len = req.packet_length.max(min_total as u32) as usize;
@@ -1479,7 +1485,7 @@ pub(super) fn build_injected_ipv4(
 
     let icmp_start = frame.len();
     frame.extend_from_slice(&[8, 0, 0, 0]);
-    frame.extend_from_slice(&(req.slot as u16).to_be_bytes());
+    frame.extend_from_slice(&src_port.to_be_bytes());
     frame.extend_from_slice(&1u16.to_be_bytes());
     for i in 0..payload_len {
         frame.push((i & 0xff) as u8);
@@ -1493,12 +1499,11 @@ pub(super) fn build_injected_ipv4(
 pub(super) fn build_injected_ipv6(
     req: &InjectPacketRequest,
     dst_mac: [u8; 6],
+    src_ip: Ipv6Addr,
     dst_ip: Ipv6Addr,
+    src_port: u16,
     egress: &EgressInterface,
 ) -> Result<Vec<u8>, String> {
-    let src_ip = egress
-        .primary_v6
-        .ok_or_else(|| "egress interface has no IPv6 source address".to_string())?;
     let eth_len = if egress.vlan_id > 0 { 18 } else { 14 };
     let min_total = eth_len + 40 + 8 + 16;
     let target_len = req.packet_length.max(min_total as u32) as usize;
@@ -1522,7 +1527,7 @@ pub(super) fn build_injected_ipv6(
 
     let icmp_start = frame.len();
     frame.extend_from_slice(&[128, 0, 0, 0]);
-    frame.extend_from_slice(&(req.slot as u16).to_be_bytes());
+    frame.extend_from_slice(&src_port.to_be_bytes());
     frame.extend_from_slice(&1u16.to_be_bytes());
     for i in 0..payload_len {
         frame.push((i & 0xff) as u8);

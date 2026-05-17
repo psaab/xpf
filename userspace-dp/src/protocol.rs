@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 2;
+pub(crate) const INJECT_PACKET_TUPLE_PROTOCOL_VERSION: i32 = 1;
 
 // ---------------------------------------------------------------------------
 // Snapshot schema
@@ -727,6 +728,8 @@ pub(crate) struct ProcessStatus {
     pub pid: i32,
     #[serde(rename = "config_snapshot_protocol_version", default)]
     pub config_snapshot_protocol_version: i32,
+    #[serde(rename = "inject_packet_tuple_protocol_version", default)]
+    pub inject_packet_tuple_protocol_version: i32,
     #[serde(rename = "started_at")]
     pub started_at: DateTime<Utc>,
     #[serde(rename = "control_socket")]
@@ -2075,6 +2078,14 @@ pub(crate) struct InjectPacketRequest {
     pub destination_ip: String,
     #[serde(rename = "emit_on_wire", default)]
     pub emit_on_wire: bool,
+    #[serde(rename = "tuple_metadata_version", default)]
+    pub tuple_metadata_version: i32,
+    #[serde(rename = "source_ip", default)]
+    pub source_ip: String,
+    #[serde(rename = "source_port", default)]
+    pub source_port: Option<u16>,
+    #[serde(rename = "destination_port", default)]
+    pub destination_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -2227,6 +2238,88 @@ pub(crate) struct SessionDeltaInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_status_inject_packet_tuple_protocol_version_roundtrip() {
+        let status = ProcessStatus {
+            inject_packet_tuple_protocol_version: INJECT_PACKET_TUPLE_PROTOCOL_VERSION,
+            ..Default::default()
+        };
+        let value: serde_json::Value =
+            serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+        assert_eq!(
+            value["inject_packet_tuple_protocol_version"],
+            INJECT_PACKET_TUPLE_PROTOCOL_VERSION
+        );
+        let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+        assert_eq!(
+            back.inject_packet_tuple_protocol_version,
+            INJECT_PACKET_TUPLE_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn inject_packet_request_tuple_metadata_wire_roundtrip() {
+        let req = InjectPacketRequest {
+            slot: 7,
+            packet_length: 128,
+            addr_family: libc::AF_INET as u8,
+            protocol: 1,
+            config_generation: 11,
+            fib_generation: 12,
+            metadata_valid: true,
+            destination_ip: "172.16.80.200".into(),
+            emit_on_wire: true,
+            tuple_metadata_version: INJECT_PACKET_TUPLE_PROTOCOL_VERSION,
+            source_ip: "172.16.80.8".into(),
+            source_port: Some(4660),
+            destination_port: Some(0),
+        };
+        let value: serde_json::Value =
+            serde_json::to_value(&req).expect("serialize InjectPacketRequest to Value");
+        let obj = value
+            .as_object()
+            .expect("InjectPacketRequest serializes as object");
+        for key in [
+            "tuple_metadata_version",
+            "source_ip",
+            "source_port",
+            "destination_port",
+        ] {
+            assert!(
+                obj.contains_key(key),
+                "InjectPacketRequest wire key `{key}` missing: {value}"
+            );
+        }
+        let back: InjectPacketRequest =
+            serde_json::from_value(value).expect("deserialize InjectPacketRequest");
+        assert_eq!(
+            back.tuple_metadata_version,
+            INJECT_PACKET_TUPLE_PROTOCOL_VERSION
+        );
+        assert_eq!(back.source_ip, "172.16.80.8");
+        assert_eq!(back.source_port, Some(4660));
+        assert_eq!(back.destination_port, Some(0));
+    }
+
+    #[test]
+    fn inject_packet_request_legacy_tuple_metadata_defaults_absent() {
+        let legacy_json = r#"{
+            "slot": 7,
+            "packet_length": 128,
+            "addr_family": 2,
+            "protocol": 1,
+            "metadata_valid": true,
+            "destination_ip": "172.16.80.200",
+            "emit_on_wire": true
+        }"#;
+        let req: InjectPacketRequest =
+            serde_json::from_str(legacy_json).expect("legacy InjectPacketRequest decodes");
+        assert_eq!(req.tuple_metadata_version, 0);
+        assert_eq!(req.source_ip, "");
+        assert_eq!(req.source_port, None);
+        assert_eq!(req.destination_port, None);
+    }
 
     // #825 plan §3.9 test #5: wire-format round-trip for
     // BindingStatus. Construct with non-zero values on all four

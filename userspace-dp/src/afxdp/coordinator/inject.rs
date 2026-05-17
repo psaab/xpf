@@ -1,43 +1,99 @@
 use super::*;
+use crate::INJECT_PACKET_TUPLE_PROTOCOL_VERSION;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct InjectedPacketTuple {
+    pub source_ip: IpAddr,
+    pub destination_ip: IpAddr,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub addr_family: u8,
+    pub protocol: u8,
+}
+
+pub(super) fn validate_injected_packet_tuple(
+    req: &InjectPacketRequest,
+    dst: IpAddr,
+) -> Result<InjectedPacketTuple, String> {
+    if req.tuple_metadata_version != INJECT_PACKET_TUPLE_PROTOCOL_VERSION {
+        return Err(format!(
+            "emit-on-wire requires tuple metadata version {} (got {})",
+            INJECT_PACKET_TUPLE_PROTOCOL_VERSION, req.tuple_metadata_version
+        ));
+    }
+    let source_ip = req
+        .source_ip
+        .parse::<IpAddr>()
+        .map_err(|e| format!("invalid injected source_ip {}: {e}", req.source_ip))?;
+    let source_port = req
+        .source_port
+        .ok_or_else(|| "emit-on-wire requires source_port tuple metadata".to_string())?;
+    let destination_port = req
+        .destination_port
+        .ok_or_else(|| "emit-on-wire requires destination_port tuple metadata".to_string())?;
+    let (addr_family, protocol) = match (source_ip, dst) {
+        (IpAddr::V4(_), IpAddr::V4(_)) => (libc::AF_INET as u8, PROTO_ICMP),
+        (IpAddr::V6(_), IpAddr::V6(_)) => (libc::AF_INET6 as u8, PROTO_ICMPV6),
+        _ => {
+            return Err(
+                "emit-on-wire source_ip and destination_ip must use the same address family"
+                    .to_string(),
+            );
+        }
+    };
+    if req.addr_family != addr_family {
+        return Err(format!(
+            "emit-on-wire tuple addr_family {} does not match packet family {}",
+            req.addr_family, addr_family
+        ));
+    }
+    if req.protocol != protocol {
+        return Err(format!(
+            "emit-on-wire supports only protocol {} for this address family (got {})",
+            protocol, req.protocol
+        ));
+    }
+
+    Ok(InjectedPacketTuple {
+        source_ip,
+        destination_ip: dst,
+        source_port,
+        destination_port,
+        addr_family,
+        protocol,
+    })
+}
 
 pub(super) fn stamp_injected_packet_tuple(
     meta: &mut UserspaceDpMeta,
     frame_len: usize,
-    dst: IpAddr,
+    tuple: InjectedPacketTuple,
     egress: &EgressInterface,
-    slot: u32,
 ) -> Result<(), String> {
     meta.pkt_len = frame_len.min(u16::MAX as usize) as u16;
     let l3_offset = if egress.vlan_id > 0 { 18 } else { 14 };
     meta.l3_offset = l3_offset;
     meta.flow_src_addr = [0; 16];
     meta.flow_dst_addr = [0; 16];
-    meta.flow_src_port = slot as u16;
-    meta.flow_dst_port = 0;
+    meta.flow_src_port = tuple.source_port;
+    meta.flow_dst_port = tuple.destination_port;
+    meta.addr_family = tuple.addr_family;
+    meta.protocol = tuple.protocol;
 
-    match dst {
-        IpAddr::V4(dst_v4) => {
-            let src_v4 = egress
-                .primary_v4
-                .ok_or_else(|| "egress interface has no IPv4 source address".to_string())?;
-            meta.addr_family = libc::AF_INET as u8;
-            meta.protocol = PROTO_ICMP;
+    match (tuple.source_ip, tuple.destination_ip) {
+        (IpAddr::V4(src_v4), IpAddr::V4(dst_v4)) => {
             meta.l4_offset = l3_offset + 20;
             meta.payload_offset = meta.l4_offset + 8;
             meta.flow_src_addr[..4].copy_from_slice(&src_v4.octets());
             meta.flow_dst_addr[..4].copy_from_slice(&dst_v4.octets());
         }
-        IpAddr::V6(dst_v6) => {
-            let src_v6 = egress
-                .primary_v6
-                .ok_or_else(|| "egress interface has no IPv6 source address".to_string())?;
-            meta.addr_family = libc::AF_INET6 as u8;
-            meta.protocol = PROTO_ICMPV6;
+        (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) => {
             meta.l4_offset = l3_offset + 40;
             meta.payload_offset = meta.l4_offset + 8;
             meta.flow_src_addr.copy_from_slice(&src_v6.octets());
             meta.flow_dst_addr.copy_from_slice(&dst_v6.octets());
         }
+        _ => return Err("injected tuple address family mismatch".to_string()),
     }
 
     Ok(())
@@ -149,15 +205,17 @@ impl super::Coordinator {
                         let target_live = self.workers.live.get(&target_slot).ok_or_else(|| {
                             format!("binding slot {} has no live state", target_slot)
                         })?;
-                        let frame = build_injected_packet(&req, dst, resolution, egress)?;
-                        let mut tx_meta = meta;
-                        stamp_injected_packet_tuple(
-                            &mut tx_meta,
-                            frame.len(),
-                            dst,
+                        let tuple = validate_injected_packet_tuple(&req, dst)?;
+                        let frame = build_injected_packet(
+                            &req,
+                            tuple.source_ip,
+                            tuple.destination_ip,
+                            tuple.source_port,
+                            resolution,
                             egress,
-                            req.slot,
                         )?;
+                        let mut tx_meta = meta;
+                        stamp_injected_packet_tuple(&mut tx_meta, frame.len(), tuple, egress)?;
                         let now_ns = monotonic_nanos();
                         let cos_flow = parse_session_flow_from_meta(tx_meta);
                         let cos = resolve_cos_tx_selection_at(

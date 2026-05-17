@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	ProtocolVersion = 2
-	TypeUserspace   = "userspace"
+	ProtocolVersion                  = 2
+	InjectPacketTupleProtocolVersion = 1
+	TypeUserspace                    = "userspace"
 )
 
 type ControlRequest struct {
@@ -441,29 +442,30 @@ type UserspaceCapabilities struct {
 }
 
 type ProcessStatus struct {
-	PID                           int                   `json:"pid"`
-	ConfigSnapshotProtocolVersion int                   `json:"config_snapshot_protocol_version,omitempty"`
-	StartedAt                     time.Time             `json:"started_at"`
-	ControlSocket                 string                `json:"control_socket"`
-	StateFile                     string                `json:"state_file"`
-	Workers                       int                   `json:"workers"`
-	RingEntries                   int                   `json:"ring_entries"`
-	HelperMode                    string                `json:"helper_mode"`
-	IOUringPlanned                bool                  `json:"io_uring_planned"`
-	IOUringActive                 bool                  `json:"io_uring_active,omitempty"`
-	IOUringMode                   string                `json:"io_uring_mode,omitempty"`
-	IOUringLastError              string                `json:"io_uring_last_error,omitempty"`
-	Enabled                       bool                  `json:"enabled"`
-	ForwardingArmed               bool                  `json:"forwarding_armed,omitempty"`
-	Capabilities                  UserspaceCapabilities `json:"capabilities"`
-	LastSnapshotGeneration        uint64                `json:"last_snapshot_generation"`
-	LastFIBGeneration             uint32                `json:"last_fib_generation,omitempty"`
-	LastSnapshotAt                time.Time             `json:"last_snapshot_at,omitempty"`
-	InterfaceAddresses            int                   `json:"interface_addresses,omitempty"`
-	NeighborEntries               int                   `json:"neighbor_entries,omitempty"`
-	NeighborGeneration            uint64                `json:"neighbor_generation,omitempty"`
-	RouteEntries                  int                   `json:"route_entries,omitempty"`
-	WorkerHeartbeats              []time.Time           `json:"worker_heartbeats,omitempty"`
+	PID                              int                   `json:"pid"`
+	ConfigSnapshotProtocolVersion    int                   `json:"config_snapshot_protocol_version,omitempty"`
+	InjectPacketTupleProtocolVersion int                   `json:"inject_packet_tuple_protocol_version,omitempty"`
+	StartedAt                        time.Time             `json:"started_at"`
+	ControlSocket                    string                `json:"control_socket"`
+	StateFile                        string                `json:"state_file"`
+	Workers                          int                   `json:"workers"`
+	RingEntries                      int                   `json:"ring_entries"`
+	HelperMode                       string                `json:"helper_mode"`
+	IOUringPlanned                   bool                  `json:"io_uring_planned"`
+	IOUringActive                    bool                  `json:"io_uring_active,omitempty"`
+	IOUringMode                      string                `json:"io_uring_mode,omitempty"`
+	IOUringLastError                 string                `json:"io_uring_last_error,omitempty"`
+	Enabled                          bool                  `json:"enabled"`
+	ForwardingArmed                  bool                  `json:"forwarding_armed,omitempty"`
+	Capabilities                     UserspaceCapabilities `json:"capabilities"`
+	LastSnapshotGeneration           uint64                `json:"last_snapshot_generation"`
+	LastFIBGeneration                uint32                `json:"last_fib_generation,omitempty"`
+	LastSnapshotAt                   time.Time             `json:"last_snapshot_at,omitempty"`
+	InterfaceAddresses               int                   `json:"interface_addresses,omitempty"`
+	NeighborEntries                  int                   `json:"neighbor_entries,omitempty"`
+	NeighborGeneration               uint64                `json:"neighbor_generation,omitempty"`
+	RouteEntries                     int                   `json:"route_entries,omitempty"`
+	WorkerHeartbeats                 []time.Time           `json:"worker_heartbeats,omitempty"`
 	// #869: per-worker busy/idle runtime telemetry.
 	WorkerRuntime []WorkerRuntimeStatus `json:"worker_runtime,omitempty"`
 	HAGroups      []HAGroupStatus       `json:"ha_groups,omitempty"`
@@ -1053,15 +1055,19 @@ type ExceptionStatus struct {
 }
 
 type InjectPacketRequest struct {
-	Slot             uint32 `json:"slot"`
-	PacketLength     uint32 `json:"packet_length,omitempty"`
-	AddrFamily       uint8  `json:"addr_family,omitempty"`
-	Protocol         uint8  `json:"protocol,omitempty"`
-	ConfigGeneration uint64 `json:"config_generation,omitempty"`
-	FIBGeneration    uint32 `json:"fib_generation,omitempty"`
-	MetadataValid    bool   `json:"metadata_valid"`
-	DestinationIP    string `json:"destination_ip,omitempty"`
-	EmitOnWire       bool   `json:"emit_on_wire,omitempty"`
+	Slot                 uint32  `json:"slot"`
+	PacketLength         uint32  `json:"packet_length,omitempty"`
+	AddrFamily           uint8   `json:"addr_family,omitempty"`
+	Protocol             uint8   `json:"protocol,omitempty"`
+	ConfigGeneration     uint64  `json:"config_generation,omitempty"`
+	FIBGeneration        uint32  `json:"fib_generation,omitempty"`
+	MetadataValid        bool    `json:"metadata_valid"`
+	DestinationIP        string  `json:"destination_ip,omitempty"`
+	EmitOnWire           bool    `json:"emit_on_wire,omitempty"`
+	TupleMetadataVersion int     `json:"tuple_metadata_version,omitempty"`
+	SourceIP             string  `json:"source_ip,omitempty"`
+	SourcePort           *uint16 `json:"source_port,omitempty"`
+	DestinationPort      *uint16 `json:"destination_port,omitempty"`
 }
 
 type SessionDeltaDrainRequest struct {
