@@ -16,6 +16,22 @@ fn test_zone_name_to_id() -> FxHashMap<String, u16> {
     m
 }
 
+fn scheduled_allow_snapshot(rule_id: &str, inactive: bool) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        rule_id: rule_id.to_string(),
+        name: "scheduled-allow".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        scheduler_name: "workhours".to_string(),
+        inactive,
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn allow_all_matches_zone_pair() {
     let state = parse_policy_state(
@@ -170,6 +186,103 @@ fn inactive_rule_falls_through_to_next_match() {
             .hit_count
             .load(std::sync::atomic::Ordering::Relaxed),
         1
+    );
+}
+
+#[test]
+fn hit_counters_survive_scheduler_snapshot_rebuild() {
+    let rule_id = format!("security-policy:lan:wan:counter-survival-{}", line!());
+    let active = parse_policy_state(
+        "deny",
+        &[scheduled_allow_snapshot(&rule_id, false)],
+        &test_zone_name_to_id(),
+    );
+
+    for _ in 0..2 {
+        assert_eq!(
+            evaluate_policy(
+                &active,
+                TEST_LAN_ZONE_ID,
+                TEST_WAN_ZONE_ID,
+                "10.0.61.100".parse().expect("src"),
+                "172.16.80.200".parse().expect("dst"),
+                PROTO_TCP,
+                12345,
+                5201,
+            ),
+            PolicyAction::Permit
+        );
+    }
+    assert_eq!(
+        active.rules[0]
+            .hit_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+
+    let inactive = parse_policy_state(
+        "deny",
+        &[scheduled_allow_snapshot(&rule_id, true)],
+        &test_zone_name_to_id(),
+    );
+    assert!(inactive.rules[0].inactive);
+    assert_eq!(
+        inactive.rules[0]
+            .hit_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        evaluate_policy(
+            &inactive,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            "10.0.61.100".parse().expect("src"),
+            "172.16.80.200".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            5201,
+        ),
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        inactive.rules[0]
+            .hit_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+
+    drop(active);
+    drop(inactive);
+    let active_again = parse_policy_state(
+        "deny",
+        &[scheduled_allow_snapshot(&rule_id, false)],
+        &test_zone_name_to_id(),
+    );
+    assert_eq!(
+        active_again.rules[0]
+            .hit_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        evaluate_policy(
+            &active_again,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            "10.0.61.100".parse().expect("src"),
+            "172.16.80.200".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            5201,
+        ),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        active_again.rules[0]
+            .hit_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        3
     );
 }
 

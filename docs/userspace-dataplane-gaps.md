@@ -66,7 +66,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 | GRE / ESP / explicit early filters | Tail-call back into the legacy XDP pipeline |
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
 | DataPlane control-plane contract | Userspace manager no longer embeds the legacy `dataplane.DataPlane`; a userspace `LegacyDataPlaneAdapter` owns old-interface compatibility while callers migrate. The manager still holds a named eBPF shim manager for XDP/map bootstrap state; tracked by #1381 |
-| Dataplane event logging | Session open/close/update are emitted by userspace; policy-deny, screen-drop, and filter-log events still depend on the legacy BPF ring buffer; tracked by #1379 |
+| Dataplane event logging | Session open/close/update are emitted by userspace. Policy-deny, screen-drop, and filter-log frame types, RT_FLOW codec/Go decode, and Rust non-blocking producer/rate-limit/loss-accounting infrastructure are present; runtime producer call sites and end-to-end syslog evidence remain tracked by #1379. |
 | `show system buffers` | Userspace helper-status rendering covers AF_XDP UMEM/TX capacity, CoS queued-byte capacity, active-session footer, neighbor/flow-cache counts, and worker queue pressure counters. #1380 is narrowed to the Phase 5 cleanup decision about whether operators need new helper capacity denominators for session-table, flow-cache, or neighbor-cache fill percentages before the legacy BPF-map surface is removed. |
 
 ## Retirement Blockers From The 2026-05-16 Audit
@@ -77,7 +77,7 @@ The current #1373 audit produced these tracked blockers:
 |-------|---------|-----------------|
 | #1381 | Split or replace the BPF-shaped `dataplane.DataPlane` interface so userspace no longer embeds the eBPF manager for map-writer methods | Phase 3 build-system / Go removal |
 | #1377 | Preserve userspace-v1 address-persistent SNAT pool selection with an explicit backend compatibility boundary, then finish per-pool `persistent-nat` semantics and allocation/exhaustion counters. #1385 landed deterministic userspace selection and snapshot omission for missing, empty, or invalid pool inputs, but runtime remains fail-open at the `poll_descriptor.rs` source-NAT call sites and does not provide persistent-NAT lease reuse or cross-backend new-flow parity. | Phase 4 BPF source removal |
-| #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds, strict missing-scheduler commit behavior, and integration/failover validation | Phase 4 BPF source removal |
+| #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds and strict missing-scheduler commit behavior landed in the 2026-05-17 closeout slice; remaining blocker is integration/failover validation evidence | Phase 4 BPF source removal |
 | #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393 and the 2026-05-17 runtime slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, and a bounded validated-client cache. Lower-layer coverage in `userspace-dp/src/screen_tests.rs` pins 4-way validated-client cache replacement; poll-stage tests only pin the operational invalid-ACK drop/bypass semantics. Remaining: validated-client cache expiration semantics, secret-epoch rotation, bounded SYN-ACK TX, ACK RST emission, HA-safe secret publication/cache survivability, counters/status, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
 | #1375 | Implement userspace RFC 2697/2698 three-color policers | Phase 4 BPF source removal |
@@ -94,8 +94,9 @@ Recommended dependency order:
    userspace-v1 selector plus mixed-backend rollback boundary, but per-pool
    `persistent-nat` and allocator exhaustion counters remain #1377 runtime
    gaps. #1378 is no longer missing basic userspace propagation after #1396,
-   but its remaining counter/validation/evidence contract still blocks BPF
-   source removal.
+   and the 2026-05-17 closeout slice added counter continuity plus strict
+   missing-scheduler commit rejection; keep it open for the remaining
+   integration/HA failover evidence.
 3. #1374, #1375, and #1376 before Phase 4, because these are explicit feature
    gaps currently protected by the legacy eBPF fallback.
 4. #1380 in Phase 5, after the dataplane boundary is settled but before the
@@ -141,8 +142,8 @@ The highest-value remaining work on current `master` is:
 2. fix #1377 and #1379 to remove silent correctness and visibility
    regressions; keep #1385 plus the userspace-v1 fixtures as evidence of the
    current AF_XDP SNAT pool selector, not full persistent-NAT parity. Keep
-   #1378 open for the remaining policy-scheduler counter/validation/evidence
-   contract after #1396.
+   #1378 open only for the remaining policy-scheduler integration/HA failover
+   evidence.
 3. close #1374, #1375, and #1376 before any BPF source removal
 4. carry the narrowed #1380 denominator decision into Phase 5; the current
    userspace command already avoids BPF-map fallback when helper status is

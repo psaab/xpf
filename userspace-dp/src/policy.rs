@@ -2,9 +2,10 @@ use crate::prefix::{PrefixV4, PrefixV6};
 use crate::prefix_set::{PrefixSetV4, PrefixSetV6};
 use crate::{PolicyApplicationSnapshot, PolicyRuleSnapshot};
 use ipnet::IpNet;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// #922: zone-pair key packed as u32 (`from_id << 16 | to_id`).
 /// Replaces the previous `(String, String)` key that allocated two
@@ -62,7 +63,7 @@ pub(crate) struct PolicyRule {
     /// Precompiled application matcher (protocol-indexed, exact-port sets).
     compiled_apps: CompiledApplications,
     pub(crate) action: PolicyAction,
-    pub(crate) hit_count: AtomicU64,
+    pub(crate) hit_count: Arc<AtomicU64>,
 }
 
 impl Default for PolicyRule {
@@ -83,7 +84,7 @@ impl Default for PolicyRule {
                 by_protocol: FxHashMap::default(),
             },
             action: PolicyAction::Deny,
-            hit_count: AtomicU64::new(0),
+            hit_count: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -103,9 +104,43 @@ impl Clone for PolicyRule {
             applications: self.applications.clone(),
             compiled_apps: self.compiled_apps.clone(),
             action: self.action,
-            hit_count: AtomicU64::new(self.hit_count.load(Ordering::Relaxed)),
+            hit_count: self.hit_count.clone(),
         }
     }
+}
+
+type PolicyCounterRegistry = FxHashMap<String, Arc<AtomicU64>>;
+
+const POLICY_COUNTER_REGISTRY_PRUNE_THRESHOLD: usize = 16_384;
+
+static POLICY_COUNTERS: OnceLock<Mutex<PolicyCounterRegistry>> = OnceLock::new();
+
+fn policy_counter_registry() -> &'static Mutex<PolicyCounterRegistry> {
+    POLICY_COUNTERS.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+fn prune_policy_counter_registry(active_rule_ids: &FxHashSet<String>) {
+    if let Ok(mut counters) = policy_counter_registry().lock() {
+        if counters.len() <= POLICY_COUNTER_REGISTRY_PRUNE_THRESHOLD {
+            return;
+        }
+        counters.retain(|rule_id, counter| {
+            active_rule_ids.contains(rule_id) || Arc::strong_count(counter) > 1
+        });
+    }
+}
+
+fn policy_rule_hit_counter(rule_id: &str) -> Arc<AtomicU64> {
+    let mut counters = policy_counter_registry()
+        .lock()
+        .expect("policy counter registry poisoned");
+    if let Some(counter) = counters.get(rule_id) {
+        return counter.clone();
+    }
+
+    let counter = Arc::new(AtomicU64::new(0));
+    counters.insert(rule_id.to_string(), counter.clone());
+    counter
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +251,8 @@ pub(crate) fn parse_policy_state(
     rules: &[PolicyRuleSnapshot],
     zone_name_to_id: &FxHashMap<String, u16>,
 ) -> PolicyState {
+    let active_rule_ids = rules.iter().map(stable_policy_rule_id).collect();
+    prune_policy_counter_registry(&active_rule_ids);
     let mut state = PolicyState {
         default_action: parse_action(default_policy),
         rules: Vec::with_capacity(rules.len()),
@@ -236,13 +273,15 @@ pub(crate) fn parse_policy_state(
         for prefix in &snap.destination_addresses {
             parse_address(prefix, &mut dst_v4, &mut dst_v6);
         }
+        let rule_id = stable_policy_rule_id(snap);
         let mut rule = PolicyRule {
-            rule_id: stable_policy_rule_id(snap),
+            rule_id: rule_id.clone(),
             from_zone: snap.from_zone.clone(),
             to_zone: snap.to_zone.clone(),
             scheduler_name: snap.scheduler_name.clone(),
             inactive: snap.inactive,
             action: parse_action(&snap.action),
+            hit_count: policy_rule_hit_counter(&rule_id),
             source_v4: PrefixSetV4::from_prefixes(src_v4),
             source_v6: PrefixSetV6::from_prefixes(src_v6),
             destination_v4: PrefixSetV4::from_prefixes(dst_v4),

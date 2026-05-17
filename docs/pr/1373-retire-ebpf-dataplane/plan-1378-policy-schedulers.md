@@ -28,6 +28,15 @@ same active-state map, and runtime scheduler ticks acquire the same semaphore
 before publishing one coherent snapshot delta. Missing scheduler references are
 compile errors.
 
+Closeout update, 2026-05-17: the strict missing-scheduler validator now runs
+inside `CompileConfig`, so zone and global policies that reference undefined
+schedulers fail commit instead of entering the warning-only path. Rust policy
+hit counters are stored behind stable rule-id keyed atomics, so active/inactive
+scheduler snapshot rebuilds reuse the existing counter when the rule identity
+is unchanged. The remaining #1378 blocker is integration/HA failover evidence:
+show that the new active node recomputes scheduler state and publishes the full
+policy snapshot before admitting scheduled-policy traffic.
+
 On scheduler state changes, publish one atomic userspace snapshot delta that
 contains the updated inactive bits for all affected rules. Do not issue
 per-rule fast-path toggles because first-match ordering requires same-instant
@@ -63,8 +72,10 @@ existing eBPF behavior that can default missing scheduler state to active.
   an old helper before the fail-open path can occur. The refusal actively
   disarms helper forwarding with `set_forwarding_state armed=false`; recording
   a compile error while leaving the old helper armed is not fail-closed.
-- Hit counters are keyed by stable rule identity outside rebuilt rule structs so
-  counters survive scheduler snapshot rebuilds.
+- Hit counters are keyed by stable rule identity outside rebuilt rule structs;
+  rebuilt policy snapshots share the same per-rule atomic while a rule identity
+  remains present in the snapshot, so counters survive scheduler active/inactive
+  flips and same-process policy rebuilds.
 - Do not copy the existing eBPF indexing bug in
   `UpdatePolicyScheduleState`; userspace updates must target stable identities.
 
@@ -108,6 +119,12 @@ existing eBPF behavior that can default missing scheduler state to active.
 - Integration: scheduler window spanning multiple 60-second ticks with a policy
   referencing it; new connections pass only during active windows, while
   established sessions retain Junos-default behavior.
+
+Validated in the 2026-05-17 closeout slice:
+
+- `go test ./pkg/config`
+- `go test ./pkg/dataplane/userspace -run 'Test(BuildPolicySnapshots|UpdatePolicyScheduleState)'`
+- `cargo test policy:: -- --nocapture`
 
 ## Non-Goals
 
