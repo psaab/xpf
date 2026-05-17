@@ -1608,6 +1608,9 @@ func (m *Manager) InjectPacket(req InjectPacketRequest) (ProcessStatus, error) {
 	if m.proc == nil {
 		return ProcessStatus{}, errors.New("userspace dataplane helper not running")
 	}
+	if err := validateInjectPacketRequestForHelper(req, m.lastStatus); err != nil {
+		return ProcessStatus{}, err
+	}
 	var status ProcessStatus
 	if err := m.requestLocked(ControlRequest{Type: "inject_packet", Packet: &req}, &status); err != nil {
 		return ProcessStatus{}, err

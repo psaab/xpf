@@ -68,6 +68,56 @@ func BuildInjectPacketRequest(slot uint32, mode string, extra map[string]string,
 	return req, nil
 }
 
+func validateInjectPacketRequestForHelper(req InjectPacketRequest, status ProcessStatus) error {
+	if !req.EmitOnWire {
+		return nil
+	}
+	if status.InjectPacketTupleProtocolVersion < InjectPacketTupleProtocolVersion {
+		return fmt.Errorf("emit-on-wire requires helper inject tuple protocol version %d (helper has %d)",
+			InjectPacketTupleProtocolVersion, status.InjectPacketTupleProtocolVersion)
+	}
+	if req.TupleMetadataVersion < InjectPacketTupleProtocolVersion {
+		return fmt.Errorf("emit-on-wire request requires tuple metadata version %d (got %d)",
+			InjectPacketTupleProtocolVersion, req.TupleMetadataVersion)
+	}
+	if req.SourceIP == "" {
+		return fmt.Errorf("emit-on-wire requires source-ip")
+	}
+	if req.DestinationIP == "" {
+		return fmt.Errorf("emit-on-wire requires destination-ip")
+	}
+	sourceIP, err := netip.ParseAddr(req.SourceIP)
+	if err != nil {
+		return fmt.Errorf("invalid source-ip %q: %w", req.SourceIP, err)
+	}
+	destinationIP, err := netip.ParseAddr(req.DestinationIP)
+	if err != nil {
+		return fmt.Errorf("invalid destination-ip %q: %w", req.DestinationIP, err)
+	}
+	if sourceIP.Is4() != destinationIP.Is4() {
+		return fmt.Errorf("emit-on-wire source-ip and destination-ip must use the same address family")
+	}
+	expectedFamily := uint8(syscall.AF_INET6)
+	expectedProtocol := uint8(58)
+	if sourceIP.Is4() {
+		expectedFamily = uint8(syscall.AF_INET)
+		expectedProtocol = 1
+	}
+	if req.AddrFamily != expectedFamily {
+		return fmt.Errorf("emit-on-wire tuple addr_family %d does not match packet family %d", req.AddrFamily, expectedFamily)
+	}
+	if req.Protocol != expectedProtocol {
+		return fmt.Errorf("emit-on-wire supports only %s tuples for this address family", injectProtocolName(expectedProtocol))
+	}
+	if req.SourcePort == nil {
+		return fmt.Errorf("emit-on-wire requires source-port tuple metadata")
+	}
+	if req.DestinationPort == nil {
+		return fmt.Errorf("emit-on-wire requires destination-port tuple metadata")
+	}
+	return nil
+}
+
 func populateInjectPacketTuple(req *InjectPacketRequest, extra map[string]string, status ProcessStatus) error {
 	if status.InjectPacketTupleProtocolVersion < InjectPacketTupleProtocolVersion {
 		return fmt.Errorf("emit-on-wire requires helper inject tuple protocol version %d (helper has %d)",

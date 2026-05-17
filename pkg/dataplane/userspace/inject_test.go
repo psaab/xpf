@@ -1,6 +1,8 @@
 package userspace
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -81,5 +83,72 @@ func TestBuildInjectPacketRequestEmitOnWireRejectsUnsupportedProtocol(t *testing
 	}
 	if !strings.Contains(err.Error(), "invalid protocol") {
 		t.Fatalf("error = %v, want invalid protocol failure", err)
+	}
+}
+
+func TestInjectPacketEmitOnWireFailsClosedBeforeHelperIPCWithoutTupleProtocol(t *testing.T) {
+	port := uint16(7)
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	m := New()
+	m.inner = nil
+	m.proc = &exec.Cmd{Process: proc}
+	m.cfg.ControlSocket = "/tmp/xpf-test-inject-packet-must-not-dial.sock"
+	m.lastStatus = ProcessStatus{}
+
+	_, err = m.InjectPacket(InjectPacketRequest{
+		Slot:                 7,
+		PacketLength:         128,
+		AddrFamily:           uint8(syscall.AF_INET),
+		Protocol:             1,
+		MetadataValid:        true,
+		DestinationIP:        "172.16.80.200",
+		EmitOnWire:           true,
+		TupleMetadataVersion: InjectPacketTupleProtocolVersion,
+		SourceIP:             "172.16.80.8",
+		SourcePort:           &port,
+		DestinationPort:      &port,
+	})
+	if err == nil {
+		t.Fatal("InjectPacket succeeded without helper tuple protocol")
+	}
+	if !strings.Contains(err.Error(), "helper inject tuple protocol version") {
+		t.Fatalf("error = %v, want helper tuple protocol failure", err)
+	}
+}
+
+func TestInjectPacketEmitOnWireRejectsLegacyRemoteRequestMetadata(t *testing.T) {
+	port := uint16(7)
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	m := New()
+	m.inner = nil
+	m.proc = &exec.Cmd{Process: proc}
+	m.cfg.ControlSocket = "/tmp/xpf-test-inject-packet-must-not-dial.sock"
+	m.lastStatus = ProcessStatus{
+		InjectPacketTupleProtocolVersion: InjectPacketTupleProtocolVersion,
+	}
+
+	_, err = m.InjectPacket(InjectPacketRequest{
+		Slot:            7,
+		PacketLength:    128,
+		AddrFamily:      uint8(syscall.AF_INET),
+		Protocol:        1,
+		MetadataValid:   true,
+		DestinationIP:   "172.16.80.200",
+		EmitOnWire:      true,
+		SourceIP:        "172.16.80.8",
+		SourcePort:      &port,
+		DestinationPort: &port,
+	})
+	if err == nil {
+		t.Fatal("InjectPacket succeeded with legacy remote emit-on-wire metadata")
+	}
+	if !strings.Contains(err.Error(), "request requires tuple metadata version") {
+		t.Fatalf("error = %v, want request tuple metadata failure", err)
 	}
 }
