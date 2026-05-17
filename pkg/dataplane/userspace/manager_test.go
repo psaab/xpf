@@ -1872,6 +1872,57 @@ func TestDeriveUserspaceCapabilitiesGatesThreeColorPolicers(t *testing.T) {
 	}
 }
 
+func TestBuildSnapshotIncludesThreeColorPolicerSchemaWhileGateClosed(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Firewall.ThreeColorPolicers = map[string]*config.ThreeColorPolicerConfig{
+		"sr": {
+			Name:       "sr",
+			ColorBlind: true,
+			CIR:        125000,
+			CBS:        50000,
+			PBS:        100000,
+			ThenAction: "discard",
+		},
+		"tr": {
+			Name:       "tr",
+			TwoRate:    true,
+			CIR:        125000,
+			CBS:        50000,
+			PIR:        250000,
+			PBS:        100000,
+			ThenAction: "loss-priority high",
+		},
+	}
+
+	snap := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
+	if snap.Capabilities.ForwardingSupported {
+		t.Fatal("ForwardingSupported = true, want three-color policers to remain fail-closed")
+	}
+	want := []ThreeColorPolicerSnapshot{
+		{
+			Name:                   "sr",
+			Mode:                   "single-rate",
+			ColorBlind:             true,
+			CommittedRateBytes:     125000,
+			CommittedBurstBytes:    50000,
+			PeakOrExcessBurstBytes: 100000,
+			ThenAction:             "discard",
+		},
+		{
+			Name:                   "tr",
+			Mode:                   "two-rate",
+			CommittedRateBytes:     125000,
+			CommittedBurstBytes:    50000,
+			PeakOrExcessRateBytes:  250000,
+			PeakOrExcessBurstBytes: 100000,
+			ThenAction:             "loss-priority high",
+		},
+	}
+	if !reflect.DeepEqual(snap.ThreeColorPolicers, want) {
+		t.Fatalf("ThreeColorPolicers = %+v, want %+v", snap.ThreeColorPolicers, want)
+	}
+}
+
 func TestDeriveUserspaceCapabilitiesAllowsFirewallFilters(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{

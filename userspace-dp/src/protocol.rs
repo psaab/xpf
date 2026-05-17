@@ -315,6 +315,8 @@ pub(crate) struct ConfigSnapshot {
     pub filters: Vec<FirewallFilterSnapshot>,
     #[serde(default)]
     pub policers: Vec<PolicerSnapshot>,
+    #[serde(rename = "three_color_policers", default)]
+    pub three_color_policers: Vec<ThreeColorPolicerSnapshot>,
     #[serde(rename = "class_of_service", default)]
     pub class_of_service: Option<ClassOfServiceSnapshot>,
     #[serde(rename = "flow_export", default)]
@@ -554,6 +556,25 @@ pub(crate) struct PolicerSnapshot {
     pub burst_bytes: u64,
     #[serde(rename = "discard_excess", default)]
     pub discard_excess: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct ThreeColorPolicerSnapshot {
+    pub name: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(rename = "color_blind", default)]
+    pub color_blind: bool,
+    #[serde(rename = "committed_rate_bytes_per_sec", default)]
+    pub committed_rate_bytes_per_sec: u64,
+    #[serde(rename = "committed_burst_bytes", default)]
+    pub committed_burst_bytes: u64,
+    #[serde(rename = "peak_or_excess_rate_bytes_per_sec", default)]
+    pub peak_or_excess_rate_bytes_per_sec: u64,
+    #[serde(rename = "peak_or_excess_burst_bytes", default)]
+    pub peak_or_excess_burst_bytes: u64,
+    #[serde(rename = "then_action", default)]
+    pub then_action: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

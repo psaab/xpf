@@ -2,6 +2,18 @@
 
 ## 2026-05-17
 
+- **Timestamp**: 2026-05-17T05:06:00Z
+  - **Action**: PR #1395 cleanup — reverted an unintended `go.mod` direct/indirect dependency classification change introduced by automated tooling so the round-4 fix stays scoped to three-color policer compiler logic/tests/docs.
+  - **File(s)**: `go.mod`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T05:03:00Z
+  - **Action**: PR #1395 round-4 follow-up cleanup — moved three-color mode marker assignment outside repeated same-mode child loops to avoid redundant writes while preserving duplicate-sibling merge semantics.
+  - **File(s)**: `pkg/config/compiler_firewall.go`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T04:58:00Z
+  - **Action**: PR #1395 round-4 follow-up — fixed three-color policer compiler handling for duplicate same-mode sibling blocks by iterating all `single-rate`/`two-rate` children, added hierarchical ambiguity regression coverage in parser/configstore tests, and updated filter module docs to reflect same-mode sibling merge semantics.
+  - **File(s)**: `pkg/config/compiler_firewall.go`, `pkg/config/parser_ast_test.go`, `pkg/configstore/store_test.go`, `userspace-dp/src/filter/README.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T01:12:00Z
   - **Action**: PR #1391 post-smoke follow-up — live q10(24G)+q0(best-effort) contention on `7e7eb07e` showed serviceable-only exact suppression still let q0 drain ~15.6 GB of surplus while exact was backlogged. Reworked the gate from binary serviceability to residual-rate budgeting: non-exact surplus can consume only `root_rate - backlogged_exact_guarantee_rates`, shared exact queues publish queue masks so one queue's reservation is counted once across workers, and shared interfaces use an interface-global residual token bucket rather than per-worker residual buckets.
   - **File(s)**: `userspace-dp/src/afxdp/cos/queue_service/mod.rs`, `userspace-dp/src/afxdp/cos/queue_service/tests.rs`, `userspace-dp/src/afxdp/cos/tx_completion.rs`, `userspace-dp/src/afxdp/types/shared_cos_lease.rs`, `userspace-dp/src/afxdp/types/cos.rs`, `userspace-dp/src/afxdp/cos/builders.rs`, `userspace-dp/src/afxdp/worker/cos_tests.rs`, `userspace-dp/src/afxdp/cos/README.md`, `userspace-dp/src/afxdp/types/README.md`, `_Log.md`

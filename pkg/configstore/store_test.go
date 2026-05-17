@@ -86,6 +86,122 @@ func TestCommitCheck_AcceptsValidScheduler(t *testing.T) {
 	}
 }
 
+func TestCommitCheck_RejectsAmbiguousThreeColorPolicer(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	for _, cmd := range []string{
+		"firewall three-color-policer bad single-rate color-blind",
+		"firewall three-color-policer bad single-rate color-aware",
+		"firewall three-color-policer bad single-rate committed-information-rate 10m",
+		"firewall three-color-policer bad single-rate committed-burst-size 100k",
+		"firewall three-color-policer bad single-rate excess-burst-size 200k",
+	} {
+		if err := s.SetFromInput(cmd); err != nil {
+			t.Fatalf("SetFromInput(%q): %v", cmd, err)
+		}
+	}
+	_, err := s.CommitCheck()
+	if err == nil {
+		t.Fatal("expected CommitCheck to reject ambiguous three-color policer, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot configure both color-blind and color-aware") {
+		t.Fatalf("CommitCheck error = %v", err)
+	}
+}
+
+func TestCommitCheck_RejectsAmbiguousThreeColorPolicerAcrossLoadOverrideBlocks(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	hier := `firewall {
+    three-color-policer bad {
+        single-rate {
+            color-blind;
+            committed-information-rate 10m;
+            committed-burst-size 100k;
+            excess-burst-size 200k;
+        }
+    }
+    three-color-policer bad {
+        two-rate {
+            color-blind;
+            committed-information-rate 10m;
+            peak-information-rate 20m;
+            committed-burst-size 100k;
+            peak-burst-size 200k;
+        }
+    }
+}`
+	if err := s.LoadOverride(hier); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	_, err := s.CommitCheck()
+	if err == nil {
+		t.Fatal("expected CommitCheck to reject duplicate hierarchical single-rate/two-rate blocks")
+	}
+	if !strings.Contains(err.Error(), "cannot configure both single-rate and two-rate") {
+		t.Fatalf("CommitCheck error = %v", err)
+	}
+}
+
+func TestCommitCheck_RejectsAmbiguousThreeColorPolicerAcrossLoadOverrideSameModeSiblings(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	hier := `firewall {
+    three-color-policer bad {
+        single-rate {
+            color-blind;
+            committed-information-rate 10m;
+            committed-burst-size 100k;
+            excess-burst-size 200k;
+        }
+        single-rate {
+            color-aware;
+        }
+    }
+}`
+	if err := s.LoadOverride(hier); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	_, err := s.CommitCheck()
+	if err == nil {
+		t.Fatal("expected CommitCheck to reject duplicate hierarchical single-rate color mode ambiguity")
+	}
+	if !strings.Contains(err.Error(), "cannot configure both color-blind and color-aware") {
+		t.Fatalf("CommitCheck error = %v", err)
+	}
+}
+
+func TestCommitCheck_RejectsThreeColorPolicerPeakBelowCommitted(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	for _, cmd := range []string{
+		"firewall three-color-policer bad two-rate color-blind",
+		"firewall three-color-policer bad two-rate committed-information-rate 20m",
+		"firewall three-color-policer bad two-rate peak-information-rate 10m",
+		"firewall three-color-policer bad two-rate committed-burst-size 100k",
+		"firewall three-color-policer bad two-rate peak-burst-size 200k",
+	} {
+		if err := s.SetFromInput(cmd); err != nil {
+			t.Fatalf("SetFromInput(%q): %v", cmd, err)
+		}
+	}
+	_, err := s.CommitCheck()
+	if err == nil {
+		t.Fatal("expected CommitCheck to reject peak-information-rate below committed-information-rate")
+	}
+	if !strings.Contains(err.Error(), "peak-information-rate must be >= committed-information-rate") {
+		t.Fatalf("CommitCheck error = %v", err)
+	}
+}
+
 func TestEnterExitConfigure(t *testing.T) {
 	s := newTestStore(t)
 

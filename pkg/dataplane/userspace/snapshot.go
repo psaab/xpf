@@ -35,33 +35,34 @@ func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation u
 	policyCount := len(cfg.Security.Policies)
 	interfaces := buildInterfaceSnapshots(cfg)
 	return &ConfigSnapshot{
-		Version:         ProtocolVersion,
-		Generation:      generation,
-		FIBGeneration:   fibGeneration,
-		GeneratedAt:     time.Now().UTC(),
-		Capabilities:    deriveUserspaceCapabilities(cfg),
-		MapPins:         userspaceMapPins(),
-		Userspace:       ucfg,
-		Zones:           buildZoneSnapshots(cfg),
-		Interfaces:      interfaces,
-		Fabrics:         buildFabricSnapshots(cfg),
-		TunnelEndpoints: buildTunnelEndpointSnapshots(cfg, interfaces),
-		Neighbors:       buildNeighborSnapshots(cfg),
-		Routes:          buildRouteSnapshots(cfg, interfaces),
-		Flow:            buildFlowSnapshot(cfg),
-		DefaultPolicy:   policyActionString(cfg.Security.DefaultPolicy),
-		Policies:        buildPolicySnapshots(cfg),
-		SourceNAT:       buildSourceNATSnapshots(cfg),
-		StaticNAT:       buildStaticNATSnapshots(cfg),
-		DestinationNAT:  buildDestinationNATSnapshots(cfg),
-		NAT64:           buildNAT64Snapshots(cfg),
-		Nptv6:           buildNptv6Snapshots(cfg),
-		Screens:         buildScreenSnapshots(cfg),
-		Filters:         buildFirewallFilterSnapshots(cfg),
-		Policers:        buildPolicerSnapshots(cfg),
-		ClassOfService:  buildClassOfServiceSnapshot(cfg),
-		FlowExport:      buildFlowExportSnapshot(cfg),
-		Config:          cfg,
+		Version:            ProtocolVersion,
+		Generation:         generation,
+		FIBGeneration:      fibGeneration,
+		GeneratedAt:        time.Now().UTC(),
+		Capabilities:       deriveUserspaceCapabilities(cfg),
+		MapPins:            userspaceMapPins(),
+		Userspace:          ucfg,
+		Zones:              buildZoneSnapshots(cfg),
+		Interfaces:         interfaces,
+		Fabrics:            buildFabricSnapshots(cfg),
+		TunnelEndpoints:    buildTunnelEndpointSnapshots(cfg, interfaces),
+		Neighbors:          buildNeighborSnapshots(cfg),
+		Routes:             buildRouteSnapshots(cfg, interfaces),
+		Flow:               buildFlowSnapshot(cfg),
+		DefaultPolicy:      policyActionString(cfg.Security.DefaultPolicy),
+		Policies:           buildPolicySnapshots(cfg),
+		SourceNAT:          buildSourceNATSnapshots(cfg),
+		StaticNAT:          buildStaticNATSnapshots(cfg),
+		DestinationNAT:     buildDestinationNATSnapshots(cfg),
+		NAT64:              buildNAT64Snapshots(cfg),
+		Nptv6:              buildNptv6Snapshots(cfg),
+		Screens:            buildScreenSnapshots(cfg),
+		Filters:            buildFirewallFilterSnapshots(cfg),
+		Policers:           buildPolicerSnapshots(cfg),
+		ThreeColorPolicers: buildThreeColorPolicerSnapshots(cfg),
+		ClassOfService:     buildClassOfServiceSnapshot(cfg),
+		FlowExport:         buildFlowExportSnapshot(cfg),
+		Config:             cfg,
 		Summary: SnapshotSummary{
 			HostName:       cfg.System.HostName,
 			DataplaneType:  cfg.System.DataplaneType,
@@ -1758,6 +1759,41 @@ func buildPolicerSnapshots(cfg *config.Config) []PolicerSnapshot {
 			snap.DiscardExcess = true
 		}
 		out = append(out, snap)
+	}
+	return out
+}
+
+func buildThreeColorPolicerSnapshots(cfg *config.Config) []ThreeColorPolicerSnapshot {
+	if cfg == nil || len(cfg.Firewall.ThreeColorPolicers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Firewall.ThreeColorPolicers))
+	for name := range cfg.Firewall.ThreeColorPolicers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]ThreeColorPolicerSnapshot, 0, len(names))
+	for _, name := range names {
+		pol := cfg.Firewall.ThreeColorPolicers[name]
+		if pol == nil {
+			continue
+		}
+		mode := "single-rate"
+		peakOrExcessRate := uint64(0)
+		if pol.TwoRate {
+			mode = "two-rate"
+			peakOrExcessRate = pol.PIR
+		}
+		out = append(out, ThreeColorPolicerSnapshot{
+			Name:                   name,
+			Mode:                   mode,
+			ColorBlind:             pol.ColorBlind,
+			CommittedRateBytes:     pol.CIR,
+			CommittedBurstBytes:    pol.CBS,
+			PeakOrExcessRateBytes:  peakOrExcessRate,
+			PeakOrExcessBurstBytes: pol.PBS,
+			ThenAction:             pol.ThenAction,
+		})
 	}
 	return out
 }
