@@ -34,14 +34,13 @@ cd userspace-dp && cargo test      # 356 Rust tests
 make test-deploy                   # Build + deploy to xpf-fw
 make test-ssh                      # Shell into VM
 
-# HA Cluster (eBPF)
-make cluster-deploy                # Deploy to xpf-fw0 + xpf-fw1
+# HA Cluster (default: loss userspace)
+make cluster-deploy                # Deploy to xpf-userspace-fw0 + xpf-userspace-fw1
 make test-failover                 # Reboot fw0 during iperf3
 make test-ha-crash                 # Force-stop/daemon-stop/multi-cycle
 
-# Userspace HA Cluster
-BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-  ./test/incus/cluster-setup.sh deploy all
+# Explicit userspace HA Cluster invocation
+make userspace-cluster-deploy
 scripts/userspace-ha-validation.sh           # Full validation suite
 scripts/userspace-ha-failover-validation.sh  # Failover-specific
 scripts/userspace-native-gre-validation.sh   # Native GRE transit/failover

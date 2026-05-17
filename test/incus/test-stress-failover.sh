@@ -8,8 +8,8 @@
 # through dual-inactive windows, RST→CLOSED bugs, and txqueuelen drops.
 # This test codifies the stress scenario as a permanent regression gate.
 #
-# Requires: xpf-fw0, xpf-fw1, cluster-lan-host running.
-# Requires: iperf3 server reachable at IPERF_TARGET (default 172.16.100.200).
+# Requires: cluster nodes from BPFRX_CLUSTER_ENV running (default: loss userspace cluster).
+# Requires: iperf3 server reachable at IPERF_TARGET (default from IPERF_TARGET4).
 #
 # Tests:
 #   1. Start iperf3 through the firewall (LAN host → WAN target)
@@ -32,7 +32,11 @@ if ! incus list &>/dev/null 2>&1; then
 	fi
 fi
 
-IPERF_TARGET="${IPERF_TARGET:-172.16.100.200}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
+IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 IPERF_STREAMS="${IPERF_STREAMS:-8}"
 FAILOVER_INTERVAL="${FAILOVER_INTERVAL:-60}"   # seconds between failovers
 TOTAL_CYCLES="${TOTAL_CYCLES:-10}"
@@ -63,13 +67,13 @@ check_streams() {
 	local label="$1"
 	local tail_lines=$(( IPERF_STREAMS * 2 + 5 ))
 	local per_stream
-	per_stream=$(incus exec cluster-lan-host -- \
+	per_stream=$(incus exec "$CLUSTER_LAN_HOST" -- \
 		tail -${tail_lines} "$LOG" 2>/dev/null \
 		| grep -E '^\[  [0-9]|^\[ [0-9][0-9]' | tail -"$IPERF_STREAMS")
 	local dead
 	dead=$(echo "$per_stream" | grep -c "0.00 bits/sec" || true)
 	local sum
-	sum=$(incus exec cluster-lan-host -- \
+	sum=$(incus exec "$CLUSTER_LAN_HOST" -- \
 		tail -${tail_lines} "$LOG" 2>/dev/null \
 		| grep 'SUM' | tail -1 || true)
 	local bps
@@ -85,14 +89,14 @@ check_streams() {
 
 cleanup() {
 	info "Cleanup: killing iperf3, resetting failover flags"
-	incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 	for rg in 0 1 2; do
-		incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 	done
 	# With preempt=false, resetting the flag alone doesn't move VRRP.
 	# Explicitly request RG1 back to fw0 so the next test starts clean.
-	incus exec xpf-fw0 -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
+	incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
 	sleep 2
 }
 
@@ -103,29 +107,29 @@ trap cleanup EXIT
 info "Preflight checks"
 info "Config: ${TOTAL_CYCLES} cycles, ${FAILOVER_INTERVAL}s interval, ${IPERF_STREAMS} streams, ${IPERF_DURATION}s iperf3 duration"
 
-for inst in xpf-fw0 xpf-fw1 cluster-lan-host; do
+for inst in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
 	instance_running "$inst" || die "$inst is not running"
 done
 
 # Reset any stale manual failover flags from previous test runs.
 for rg in 0 1 2; do
-	incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-	incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 done
 sleep 2
 
 # Ensure all RGs are on fw0
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 for rg in 0 1 2; do
 	rg_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
 	if [[ "$rg_primary" -ne 1 ]]; then
-		incus exec xpf-fw0 -- cli -c "request chassis cluster failover redundancy-group $rg node 0" 2>/dev/null || true
+		incus exec "$FW0" -- cli -c "request chassis cluster failover redundancy-group $rg node 0" 2>/dev/null || true
 	fi
 done
 sleep 3
 
 # Verify fw0 is primary for all RGs
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 all_primary=true
 for rg in 0 1 2; do
 	rg_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
@@ -141,35 +145,35 @@ else
 fi
 
 # Verify iperf target reachable
-if incus exec cluster-lan-host -- ping -c 2 -W 2 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 2 -W 2 "$IPERF_TARGET" &>/dev/null; then
 	pass "iperf3 target reachable ($IPERF_TARGET)"
 else
 	die "Cannot reach iperf3 target $IPERF_TARGET from cluster-lan-host"
 fi
 
 # Kill any stale iperf3
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
 
 info "Phase 1: Starting iperf3 -P${IPERF_STREAMS} -t${IPERF_DURATION} → ${IPERF_TARGET}"
 
-incus exec cluster-lan-host -- bash -c \
+incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 	"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
 
 sleep 8  # all parallel streams must be fully established
 
 # Verify iperf3 is running
-if incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 	pass "iperf3 running on cluster-lan-host"
 else
-	incus exec cluster-lan-host -- cat "$LOG" 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- cat "$LOG" 2>/dev/null || true
 	die "iperf3 failed to start"
 fi
 
 # Verify sessions exist on fw0
-fw0_sessions=$(incus exec xpf-fw0 -- cli -c \
+fw0_sessions=$(incus exec "$FW0" -- cli -c \
 	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
 if [[ "$fw0_sessions" -ge "$IPERF_STREAMS" ]]; then
 	pass "fw0 has $fw0_sessions established sessions"
@@ -182,7 +186,7 @@ fi
 info "Phase 2: Waiting ${SYNC_WAIT}s for session sync to fw1"
 sleep "$SYNC_WAIT"
 
-fw1_sessions=$(incus exec xpf-fw1 -- cli -c \
+fw1_sessions=$(incus exec "$FW1" -- cli -c \
 	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
 if [[ "$fw1_sessions" -ge "$IPERF_STREAMS" ]]; then
 	pass "fw1 has $fw1_sessions synced sessions"
@@ -201,7 +205,7 @@ for cycle in $(seq 1 "$TOTAL_CYCLES"); do
 	info "Cycle ${cycle}/${TOTAL_CYCLES}: failover RG1 fw0→fw1"
 
 	# Failover RG1 to fw1
-	incus exec xpf-fw0 -- cli -c 'request chassis cluster failover redundancy-group 1' 2>/dev/null || true
+	incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1' 2>/dev/null || true
 
 	sleep "$half_interval"
 
@@ -211,7 +215,7 @@ for cycle in $(seq 1 "$TOTAL_CYCLES"); do
 	fi
 
 	# Check iperf3 still alive
-	if ! incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 		fail "cycle ${cycle}: iperf3 died after failover"
 		cycle_failed=true
 		break
@@ -220,9 +224,9 @@ for cycle in $(seq 1 "$TOTAL_CYCLES"); do
 	info "Cycle ${cycle}/${TOTAL_CYCLES}: failback RG1 fw1→fw0"
 
 	# Failback RG1 to fw0
-	incus exec xpf-fw0 -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
-	incus exec xpf-fw1 -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
-	incus exec xpf-fw0 -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
+	incus exec "$FW0" -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
+	incus exec "$FW1" -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
+	incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
 
 	sleep "$half_interval"
 
@@ -232,7 +236,7 @@ for cycle in $(seq 1 "$TOTAL_CYCLES"); do
 	fi
 
 	# Check iperf3 still alive
-	if ! incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 		fail "cycle ${cycle}: iperf3 died after failback"
 		cycle_failed=true
 		break
@@ -248,10 +252,10 @@ fi
 info "Phase 4: Final validation"
 
 # Verify iperf3 still running
-if incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 	pass "iperf3 still running after all cycles"
 else
-	if incus exec cluster-lan-host -- grep -q "iperf Done" "$LOG" 2>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" "$LOG" 2>/dev/null; then
 		pass "iperf3 completed successfully (finished during cycles)"
 	else
 		fail "iperf3 died during stress test"
@@ -261,7 +265,7 @@ fi
 # Count total zero-throughput intervals across the full log.
 # Allow up to 1 per cycle — brief pauses during VRRP transitions are expected
 # (iperf3 reports in 1s intervals; a 60ms failover can cause a 0-byte interval).
-total_zero=$(incus exec cluster-lan-host -- \
+total_zero=$(incus exec "$CLUSTER_LAN_HOST" -- \
 	grep -E '^\[  [0-9]|^\[ [0-9][0-9]' "$LOG" 2>/dev/null \
 	| grep -c "0.00 bits/sec" || true)
 max_zero="$TOTAL_CYCLES"
@@ -274,11 +278,11 @@ else
 fi
 
 # Kill iperf3 — we have all the data we need
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
 # Extract throughput from the last SUM line (iperf3 may still be running)
-last_sum=$(incus exec cluster-lan-host -- grep 'SUM' "$LOG" 2>/dev/null | tail -1 || true)
+last_sum=$(incus exec "$CLUSTER_LAN_HOST" -- grep 'SUM' "$LOG" 2>/dev/null | tail -1 || true)
 throughput=""
 if echo "$last_sum" | grep -qiE "[0-9.]+ Gbits"; then
 	throughput=$(echo "$last_sum" | grep -oiE "[0-9.]+ Gbits" | grep -oP '[\d.]+')

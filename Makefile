@@ -13,7 +13,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime
 # eBPF compilation flags
 BPF_CFLAGS := -O2 -g -Wall -Werror -target bpf
 
-.PHONY: all generate build build-ctl build-userspace-dp proto install clean test test-connectivity test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg build-dpdk-worker build-dpdk clean-dpdk
+.PHONY: all generate build build-ctl build-userspace-dp proto install clean test test-connectivity test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity build-dpdk-worker build-dpdk clean-dpdk
 
 all: generate build build-ctl
 
@@ -54,14 +54,16 @@ clean: clean-dpdk
 	rm -f pkg/dataplane/*_bpfel.o pkg/dataplane/*_bpfeb.o
 	rm -rf userspace-dp/target
 
-# Test environment management (Incus VM/container)
-.PHONY: test-env-init test-vm test-ct test-deploy test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal
+# Legacy standalone test environment management (single Incus VM/container).
+.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal
 
 test-env-init:
 	./test/incus/setup.sh init
 
 test-vm:
 	./test/incus/setup.sh create-vm
+
+standalone-test-vm: test-vm
 
 test-ct:
 	./test/incus/setup.sh create-ct
@@ -95,107 +97,131 @@ test-journal:
 
 # Connectivity tests (standalone + cluster, VRF-aware)
 MODE ?= all
+PRIVATE_RG_MODE ?= $(if $(filter all,$(MODE)),full,$(MODE))
 test-connectivity:
-	./test/incus/test-connectivity.sh $(MODE)
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-connectivity.sh $(MODE)
 
 # Cluster failover test (iperf3 through reboot — requires cluster + iperf3 server)
 test-failover:
-	./test/incus/test-failover.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-failover.sh
 
 # Double failover test (crash fw0 → fw1 takes over → fw0 rejoins → crash fw1 → fw0 takes over)
 test-double-failover:
-	./test/incus/test-double-failover.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-double-failover.sh
 
 # Active/active per-RG failover test (iperf3 through RG split — requires cluster + iperf3 server)
 test-active-active:
-	./test/incus/test-active-active.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-active-active.sh
 
 # Rapid failover stress test (repeated failover cycles — requires cluster + iperf3 server)
 test-stress-failover:
-	./test/incus/test-stress-failover.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-stress-failover.sh
 
 # Hard-crash / hung-node HA test (force-stop + daemon stop + multi-cycle — requires cluster + iperf3 server)
 test-ha-crash:
-	./test/incus/test-ha-crash.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-ha-crash.sh
 
 # Chained hard-reset failover test (fw0 crash → fw1 crash → both rejoin — requires cluster + iperf3 server)
 test-chained-crash:
-	./test/incus/test-chained-crash.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-chained-crash.sh
 
 # Private RG election test (enable/disable private-rg-election, verify VRRP behavior)
 test-private-rg:
-	./test/incus/test-private-rg.sh $(MODE)
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-private-rg.sh $(PRIVATE_RG_MODE)
 
 # Restart connectivity regression test (verify no transient loss during daemon restart — requires cluster + iperf3 server)
 test-restart-connectivity:
-	./test/incus/test-restart-connectivity.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/test-restart-connectivity.sh
 
-# Cluster HA test environment (two-VM chassis cluster)
+# Canonical cluster HA test environment (isolated loss userspace cluster).
+# Override CLUSTER_ENV= to use cluster-setup.sh local xpf-fw0/xpf-fw1 defaults.
 NODE ?= all
+ifeq ($(origin CLUSTER_ENV),undefined)
+ifeq ($(origin BPFRX_CLUSTER_ENV),undefined)
+CLUSTER_ENV := test/incus/loss-userspace-cluster.env
+else
+CLUSTER_ENV := $(BPFRX_CLUSTER_ENV)
+endif
+endif
+LOSS_CLUSTER_ENV ?= test/incus/loss-cluster.env
+CLUSTER_SETUP = BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/cluster-setup.sh
+LOSS_CLUSTER_SETUP = BPFRX_CLUSTER_ENV=$(LOSS_CLUSTER_ENV) ./test/incus/cluster-setup.sh
 .PHONY: cluster-init cluster-create cluster-deploy cluster-destroy cluster-status cluster-ssh cluster-logs cluster-start cluster-stop cluster-restart
+.PHONY: userspace-cluster-init userspace-cluster-create userspace-cluster-deploy userspace-cluster-destroy userspace-cluster-status userspace-cluster-ssh userspace-cluster-logs userspace-cluster-start userspace-cluster-stop userspace-cluster-restart
 
 cluster-init:
-	./test/incus/cluster-setup.sh init
+	$(CLUSTER_SETUP) init
 
 cluster-create:
-	./test/incus/cluster-setup.sh create
+	$(CLUSTER_SETUP) create
 
 cluster-deploy: build build-ctl
-	./test/incus/cluster-setup.sh deploy $(NODE)
+	$(CLUSTER_SETUP) deploy $(NODE)
 
 cluster-destroy:
-	./test/incus/cluster-setup.sh destroy
+	$(CLUSTER_SETUP) destroy
 
 cluster-status:
-	./test/incus/cluster-setup.sh status
+	$(CLUSTER_SETUP) status
 
 cluster-ssh:
-	./test/incus/cluster-setup.sh ssh $(NODE)
+	$(CLUSTER_SETUP) ssh $(NODE)
 
 cluster-logs:
-	./test/incus/cluster-setup.sh logs $(NODE)
+	$(CLUSTER_SETUP) logs $(NODE)
 
 cluster-start:
-	./test/incus/cluster-setup.sh start $(NODE)
+	$(CLUSTER_SETUP) start $(NODE)
 
 cluster-stop:
-	./test/incus/cluster-setup.sh stop $(NODE)
+	$(CLUSTER_SETUP) stop $(NODE)
 
 cluster-restart:
-	./test/incus/cluster-setup.sh restart $(NODE)
+	$(CLUSTER_SETUP) restart $(NODE)
 
-# Remote cluster on "loss" host (Mellanox SR-IOV VFs)
+userspace-cluster-init: cluster-init
+userspace-cluster-create: cluster-create
+userspace-cluster-deploy: cluster-deploy
+userspace-cluster-destroy: cluster-destroy
+userspace-cluster-status: cluster-status
+userspace-cluster-ssh: cluster-ssh
+userspace-cluster-logs: cluster-logs
+userspace-cluster-start: cluster-start
+userspace-cluster-stop: cluster-stop
+userspace-cluster-restart: cluster-restart
+
+# Legacy remote "loss" cluster using the older xpf-fw0/xpf-fw1 instance names.
 .PHONY: loss-cluster-init loss-cluster-create loss-cluster-deploy loss-cluster-destroy loss-cluster-status loss-cluster-ssh loss-cluster-logs loss-cluster-start loss-cluster-stop loss-cluster-restart
 
 loss-cluster-init:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh init
+	$(LOSS_CLUSTER_SETUP) init
 
 loss-cluster-create:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh create
+	$(LOSS_CLUSTER_SETUP) create
 
 loss-cluster-deploy: build build-ctl
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh deploy $(NODE)
+	$(LOSS_CLUSTER_SETUP) deploy $(NODE)
 
 loss-cluster-destroy:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh destroy
+	$(LOSS_CLUSTER_SETUP) destroy
 
 loss-cluster-status:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh status
+	$(LOSS_CLUSTER_SETUP) status
 
 loss-cluster-ssh:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh ssh $(NODE)
+	$(LOSS_CLUSTER_SETUP) ssh $(NODE)
 
 loss-cluster-logs:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh logs $(NODE)
+	$(LOSS_CLUSTER_SETUP) logs $(NODE)
 
 loss-cluster-start:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh start $(NODE)
+	$(LOSS_CLUSTER_SETUP) start $(NODE)
 
 loss-cluster-stop:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh stop $(NODE)
+	$(LOSS_CLUSTER_SETUP) stop $(NODE)
 
 loss-cluster-restart:
-	BPFRX_CLUSTER_ENV=test/incus/loss-cluster.env ./test/incus/cluster-setup.sh restart $(NODE)
+	$(LOSS_CLUSTER_SETUP) restart $(NODE)
 
 # --- DPDK targets (require dpdk-dev, meson, ninja) ---
 

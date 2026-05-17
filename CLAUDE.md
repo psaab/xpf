@@ -68,24 +68,25 @@ If `incus` commands fail with permission errors, use `sg incus-admin -c "make ..
 ## Cluster Test Environment (Two-VM HA)
 
 **Smoke tests run ONLY on the loss userspace cluster** (`loss:xpf-userspace-fw0/fw1`).
-The local `make cluster-*` targets drive the legacy eBPF cluster
-(`bpfrx-fw0/1`) which is regression-only; never use them for smoke.
+The Makefile `cluster-*` targets now default to that userspace cluster via
+`test/incus/loss-userspace-cluster.env`. Use `loss-cluster-*` only for the
+older loss cluster, and set `CLUSTER_ENV=` only when intentionally exercising
+the original local `xpf-fw0/xpf-fw1` regression environment.
 
 ```bash
 # === SMOKE (loss userspace cluster, default for all userspace-dp validation) ===
-export BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env
-./test/incus/cluster-setup.sh deploy all
-./test/incus/cluster-setup.sh ssh 0
+make cluster-deploy
+make cluster-ssh NODE=0
 ./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0   # deploy wipes CoS — re-apply
 
-# === LEGACY (local bpfrx-fw0/1, regression-only — do NOT use for smoke) ===
-make cluster-init              # Create networks + profile for legacy HA cluster
-make cluster-create            # Launch bpfrx-fw0, bpfrx-fw1, cluster-lan-host
-make cluster-deploy            # Build + push to both legacy VMs + restart
-make cluster-destroy           # Tear down legacy cluster VMs
-make test-failover             # Reboot fw0 during iperf3 — verify TCP survives failover+failback
-make test-ha-crash             # Force-stop/daemon-stop/multi-cycle crash recovery
-make test-restart-connectivity # Verify 0 packet loss during daemon restart
+# === LEGACY (local xpf-fw0/1, regression-only — do NOT use for smoke) ===
+make CLUSTER_ENV= cluster-init    # Create networks + profile for local HA cluster
+make CLUSTER_ENV= cluster-create  # Launch xpf-fw0, xpf-fw1, cluster-lan-host
+make CLUSTER_ENV= cluster-deploy  # Build + push to both legacy VMs + restart
+make CLUSTER_ENV= cluster-destroy # Tear down legacy cluster VMs
+make CLUSTER_ENV= test-failover             # Reboot fw0 during iperf3 — local regression
+make CLUSTER_ENV= test-ha-crash             # Force-stop/daemon-stop/multi-cycle crash recovery
+make CLUSTER_ENV= test-restart-connectivity # Verify restart behavior on local regression cluster
 ```
 
 Or use `test/incus/cluster-setup.sh` directly with `BPFRX_CLUSTER_ENV` set:

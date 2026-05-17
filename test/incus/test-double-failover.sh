@@ -6,8 +6,8 @@
 # This tests session sync in both directions and ensures sessions survive
 # a full round-trip failover cycle.
 #
-# Requires: xpf-fw0, xpf-fw1, cluster-lan-host running.
-# Requires: iperf3 server reachable at IPERF_TARGET (default 172.16.100.200).
+# Requires: cluster nodes from BPFRX_CLUSTER_ENV running (default: loss userspace cluster).
+# Requires: iperf3 server reachable at IPERF_TARGET (default from IPERF_TARGET4).
 #
 # Tests:
 #   1. Start iperf3 -P4 through the firewall (LAN host → WAN target)
@@ -33,7 +33,11 @@ if ! incus list &>/dev/null 2>&1; then
 	fi
 fi
 
-IPERF_TARGET="${IPERF_TARGET:-172.16.100.200}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
+IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 IPERF_DURATION=300      # seconds — long enough to span two full failover cycles
 IPERF_STREAMS=4
 MIN_SESSIONS=4          # minimum established sessions (control + some data streams)
@@ -73,19 +77,19 @@ wait_for_instance() {
 
 info "Preflight checks"
 
-for inst in xpf-fw0 xpf-fw1 cluster-lan-host; do
+for inst in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
 	instance_running "$inst" || die "$inst is not running"
 done
 
 # Reset any stale manual failover flags from previous test runs.
 for rg in 0 1 2; do
-	incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-	incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 done
 sleep 2
 
 # Verify fw0 is primary
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 if echo "$fw0_status" | grep -q "node0.*primary"; then
 	pass "fw0 is primary"
 else
@@ -93,14 +97,14 @@ else
 fi
 
 # Verify iperf target reachable
-if incus exec cluster-lan-host -- ping -c 2 -W 2 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 2 -W 2 "$IPERF_TARGET" &>/dev/null; then
 	pass "iperf3 target reachable ($IPERF_TARGET)"
 else
 	die "Cannot reach iperf3 target $IPERF_TARGET from cluster-lan-host"
 fi
 
 # Kill any stale iperf3
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
@@ -109,20 +113,20 @@ info "Starting iperf3 -P${IPERF_STREAMS} -t${IPERF_DURATION} → ${IPERF_TARGET}
 
 iperf_started=false
 for attempt in 1 2 3; do
-	incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 	sleep 1
-	incus exec cluster-lan-host -- bash -c \
+	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 		"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > /tmp/iperf3-double-failover.log 2>&1 &"
 
 	sleep 8  # all parallel streams must be fully established
 
-	if ! incus exec cluster-lan-host -- pgrep iperf3 &>/dev/null; then
+	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
 		info "iperf3 exited on attempt $attempt — server may be busy, retrying"
 		sleep $((attempt * 5))
 		continue
 	fi
 
-	fw0_sessions=$(incus exec xpf-fw0 -- cli -c \
+	fw0_sessions=$(incus exec "$FW0" -- cli -c \
 		"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
 	if [[ "$fw0_sessions" -ge "$IPERF_STREAMS" ]]; then
 		iperf_started=true
@@ -130,9 +134,9 @@ for attempt in 1 2 3; do
 	fi
 
 	# iperf3 is running but not enough sessions — streams may have timed out
-	if incus exec cluster-lan-host -- grep -q "unable to connect" /tmp/iperf3-double-failover.log 2>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "unable to connect" /tmp/iperf3-double-failover.log 2>/dev/null; then
 		info "iperf3 stream connect failed on attempt $attempt — server busy, retrying"
-		incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+		incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 		sleep $((attempt * 10))
 		continue
 	fi
@@ -142,22 +146,22 @@ for attempt in 1 2 3; do
 done
 
 if ! $iperf_started; then
-	if ! incus exec cluster-lan-host -- pgrep iperf3 &>/dev/null; then
-		incus exec cluster-lan-host -- cat /tmp/iperf3-double-failover.log 2>/dev/null || true
+	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
+		incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-double-failover.log 2>/dev/null || true
 		die "iperf3 failed to start after 3 attempts"
 	fi
 fi
 
 # Verify iperf3 is running
-if incus exec cluster-lan-host -- pgrep iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
 	pass "iperf3 running on cluster-lan-host"
 else
-	incus exec cluster-lan-host -- cat /tmp/iperf3-double-failover.log 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-double-failover.log 2>/dev/null || true
 	die "iperf3 failed to start"
 fi
 
 # Verify sessions exist on fw0
-fw0_sessions=$(incus exec xpf-fw0 -- cli -c \
+fw0_sessions=$(incus exec "$FW0" -- cli -c \
 	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
 if [[ "$fw0_sessions" -ge "$MIN_SESSIONS" ]]; then
 	pass "fw0 has $fw0_sessions established sessions"
@@ -170,7 +174,7 @@ fi
 info "Waiting ${SYNC_WAIT}s for session sync to fw1"
 sleep "$SYNC_WAIT"
 
-fw1_sessions=$(incus exec xpf-fw1 -- cli -c \
+fw1_sessions=$(incus exec "$FW1" -- cli -c \
 	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
 if [[ "$fw1_sessions" -ge "$MIN_SESSIONS" ]]; then
 	pass "fw1 has $fw1_sessions synced sessions"
@@ -182,13 +186,13 @@ fi
 
 info "Crashing fw0 (sysrq reboot — unclean shutdown, tests worst-case failover)"
 
-incus exec xpf-fw0 -- bash -c 'echo b > /proc/sysrq-trigger' 2>/dev/null || true
+incus exec "$FW0" -- bash -c 'echo b > /proc/sysrq-trigger' 2>/dev/null || true
 
 # Wait for fw1 to detect failure and become primary
 sleep 5
 
 # Verify fw1 became primary
-fw1_status=$(incus exec xpf-fw1 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 if echo "$fw1_status" | grep -q "node1.*primary"; then
 	pass "fw1 became primary after fw0 crash"
 else
@@ -196,7 +200,7 @@ else
 fi
 
 # Verify iperf3 survived the first failover
-if incus exec cluster-lan-host -- pgrep iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
 	pass "iperf3 survived first failover (fw0 crash → fw1)"
 else
 	fail "iperf3 DIED during first failover — fw0 crash broke TCP connections"
@@ -208,7 +212,7 @@ info "Waiting for fw0 to reboot and rejoin as secondary (max ${REBOOT_WAIT}s)"
 
 fw0_back=false
 for i in $(seq 1 "$REBOOT_WAIT"); do
-	if wait_for_instance xpf-fw0 1; then
+	if wait_for_instance "$FW0" 1; then
 		fw0_back=true
 		info "fw0 xpfd active after ${i}s"
 		break
@@ -225,7 +229,7 @@ fi
 sleep 20
 
 # Verify fw0 is secondary (no auto-preempt)
-fw0_status_after=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status_after=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 if echo "$fw0_status_after" | grep -q "node0.*secondary"; then
 	pass "fw0 rejoined as secondary (no auto-preempt)"
 elif echo "$fw0_status_after" | grep -q "node0.*primary"; then
@@ -235,10 +239,10 @@ else
 fi
 
 # Verify iperf3 still running after fw0 rejoin
-if incus exec cluster-lan-host -- pgrep iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
 	pass "iperf3 survived fw0 rejoin"
 else
-	if incus exec cluster-lan-host -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
 		pass "iperf3 completed successfully (finished before rejoin check)"
 	else
 		fail "iperf3 DIED during fw0 rejoin"
@@ -251,7 +255,7 @@ info "Waiting for fw0 to reach 'Takeover ready: yes' (max ${TAKEOVER_WAIT}s)"
 
 takeover_ready=false
 for i in $(seq 1 "$TAKEOVER_WAIT"); do
-	status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 	if echo "$status" | grep -qi "Takeover ready.*yes"; then
 		takeover_ready=true
 		info "fw0 takeover ready after ${i}s"
@@ -273,7 +277,7 @@ info "Verifying session sync from fw1 → fw0"
 # Additional wait for session sync to complete after takeover-ready
 sleep "$SYNC_WAIT"
 
-fw0_synced=$(incus exec xpf-fw0 -- cli -c \
+fw0_synced=$(incus exec "$FW0" -- cli -c \
 	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
 if [[ "$fw0_synced" -ge "$MIN_SESSIONS" ]]; then
 	pass "fw0 has $fw0_synced synced sessions from fw1"
@@ -285,13 +289,13 @@ fi
 
 info "Crashing fw1 (sysrq reboot — second failover, fw0 must take over)"
 
-incus exec xpf-fw1 -- bash -c 'echo b > /proc/sysrq-trigger' 2>/dev/null || true
+incus exec "$FW1" -- bash -c 'echo b > /proc/sysrq-trigger' 2>/dev/null || true
 
 # Wait for fw0 to detect failure and become primary
 sleep 5
 
 # Verify fw0 became primary
-fw0_status_second=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+fw0_status_second=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 if echo "$fw0_status_second" | grep -q "node0.*primary"; then
 	pass "fw0 became primary after fw1 crash (second failover)"
 else
@@ -299,10 +303,10 @@ else
 fi
 
 # Verify iperf3 survived the second failover
-if incus exec cluster-lan-host -- pgrep iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
 	pass "iperf3 survived second failover (fw1 crash → fw0)"
 else
-	if incus exec cluster-lan-host -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
 		pass "iperf3 completed successfully (finished before second failover check)"
 	else
 		fail "iperf3 DIED during second failover — session sync round-trip FAILED"
@@ -314,7 +318,7 @@ fi
 info "Waiting for iperf3 to complete"
 
 for i in $(seq 1 "$IPERF_DURATION"); do
-	if ! incus exec cluster-lan-host -- pgrep iperf3 &>/dev/null; then
+	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
 		break
 	fi
 	sleep 1
@@ -325,15 +329,15 @@ done
 # streams survived — this produces "control socket has closed unexpectedly"
 # instead of "iperf Done". Accept either outcome as long as the sender
 # [SUM] line shows adequate throughput.
-throughput=$(incus exec cluster-lan-host -- grep '\[SUM\].*sender' /tmp/iperf3-double-failover.log 2>/dev/null \
+throughput=$(incus exec "$CLUSTER_LAN_HOST" -- grep '\[SUM\].*sender' /tmp/iperf3-double-failover.log 2>/dev/null \
 	| grep -oP '[\d.]+\s+Gbits' | grep -oP '[\d.]+' || echo "0")
 
-if incus exec cluster-lan-host -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
 	pass "iperf3 completed successfully"
 elif [[ -n "$throughput" ]] && awk "BEGIN{exit !($throughput >= $MIN_THROUGHPUT)}"; then
 	pass "iperf3 data transfer completed (${throughput} Gbps) — control socket disrupted during failover"
 else
-	iperf_log=$(incus exec cluster-lan-host -- tail -5 /tmp/iperf3-double-failover.log 2>/dev/null || echo "(no log)")
+	iperf_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-double-failover.log 2>/dev/null || echo "(no log)")
 	fail "iperf3 did not complete: $iperf_log"
 fi
 
