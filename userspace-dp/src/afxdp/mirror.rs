@@ -12,6 +12,7 @@ pub(in crate::afxdp) enum MirrorCloneResult {
 }
 
 #[inline]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn select_mirror_config(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
@@ -54,6 +55,7 @@ pub(in crate::afxdp) fn mirror_sample_allows(rate: u32, sample_counter: &mut u64
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn enqueue_mirror_clone(
     left: &mut [BindingWorker],
     ingress_index: usize,
@@ -92,6 +94,83 @@ pub(in crate::afxdp) fn enqueue_mirror_clone(
         );
     };
 
+    enqueue_mirror_clone_to_binding(target_binding, config, frame, meta, flow_key, cos_queue_id)
+}
+
+pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
+    left: &mut [BindingWorker],
+    ingress_index: usize,
+    ingress_binding: &mut BindingWorker,
+    right: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    mirror_targets: &MirrorTargetMap,
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    ingress_queue_id: u32,
+    frame: &[u8],
+    meta: ForwardPacketMeta,
+    flow_key: Option<&SessionKey>,
+) -> Option<MirrorCloneResult> {
+    let config = resolve_mirror_config(forwarding, ingress_ifindex, ingress_vlan_id)?;
+    let mirror_tx_ifindex = resolve_tx_binding_ifindex(forwarding, config.output_ifindex);
+    let target_binding_index = mirror_target_binding_index(
+        binding_lookup,
+        ingress_index,
+        ingress_binding.ifindex,
+        ingress_queue_id,
+        mirror_tx_ifindex,
+    );
+    let cos_queue_id = mirror_cos_queue_id(forwarding, config.output_ifindex, meta, flow_key);
+    if let Some(target_binding_index) = target_binding_index {
+        if !mirror_sample_allows(config.rate, &mut ingress_binding.mirror_sample_counter) {
+            return None;
+        }
+        let Some(target_binding) =
+            binding_by_index_mut(left, ingress_index, ingress_binding, right, target_binding_index)
+        else {
+            return Some(MirrorCloneResult::NoBinding);
+        };
+        return Some(enqueue_mirror_clone_to_binding(
+            target_binding,
+            config,
+            frame,
+            meta,
+            flow_key,
+            cos_queue_id,
+        ));
+    } else {
+        let admission = match admit_mirror_clone_to_live(
+            mirror_targets,
+            mirror_tx_ifindex,
+            ingress_queue_id,
+            frame.len(),
+        ) {
+            Ok(admission) => admission,
+            Err(result) => return Some(result),
+        };
+        if !mirror_sample_allows(config.rate, &mut ingress_binding.mirror_sample_counter) {
+            return None;
+        }
+        return Some(enqueue_admitted_mirror_clone_to_live(
+            admission,
+            config,
+            frame.to_vec(),
+            meta,
+            flow_key,
+            cos_queue_id,
+        ));
+    }
+}
+
+fn enqueue_mirror_clone_to_binding(
+    target_binding: &mut BindingWorker,
+    config: MirrorRuntimeConfig,
+    frame: &[u8],
+    meta: ForwardPacketMeta,
+    flow_key: Option<&SessionKey>,
+    cos_queue_id: Option<u8>,
+) -> MirrorCloneResult {
     if frame.len() > tx_frame_capacity() {
         return MirrorCloneResult::NoFrame;
     }
@@ -160,6 +239,7 @@ fn mirror_target_binding_index(
         })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     mirror_targets: &MirrorTargetMap,
     config: MirrorRuntimeConfig,
@@ -170,17 +250,17 @@ pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     flow_key: Option<&SessionKey>,
     cos_queue_id: Option<u8>,
 ) -> MirrorCloneResult {
-    let target_live = match admit_mirror_clone_to_live(
+    let admission = match admit_mirror_clone_to_live(
         mirror_targets,
         mirror_tx_ifindex,
         ingress_queue_id,
         frame.len(),
     ) {
-        Ok(target_live) => target_live,
+        Ok(admission) => admission,
         Err(result) => return result,
     };
     enqueue_admitted_mirror_clone_to_live(
-        &target_live,
+        admission,
         config,
         frame.to_vec(),
         meta,
@@ -194,25 +274,19 @@ pub(in crate::afxdp) fn admit_mirror_clone_to_live(
     mirror_tx_ifindex: i32,
     ingress_queue_id: u32,
     frame_len: usize,
-) -> Result<Arc<BindingLiveState>, MirrorCloneResult> {
+) -> Result<PendingTxAdmission, MirrorCloneResult> {
     if frame_len > tx_frame_capacity() {
         return Err(MirrorCloneResult::NoFrame);
     }
-    let Some(target_live) = mirror_targets.target_live(mirror_tx_ifindex, ingress_queue_id)
-    else {
+    let Some(target_live) = mirror_targets.target_live(mirror_tx_ifindex, ingress_queue_id) else {
         return Err(MirrorCloneResult::NoBinding);
     };
-    if target_live
-        .try_admit_mirror_tx_owned(MIRROR_PENDING_LIMIT)
-        .is_err()
-    {
-        return Err(MirrorCloneResult::QueueFull);
-    }
-    Ok(target_live)
+    BindingLiveState::try_reserve_mirror_tx_owned(&target_live, MIRROR_PENDING_LIMIT)
+        .map_err(|_| MirrorCloneResult::QueueFull)
 }
 
 pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
-    target_live: &BindingLiveState,
+    admission: PendingTxAdmission,
     config: MirrorRuntimeConfig,
     frame: Vec<u8>,
     meta: ForwardPacketMeta,
@@ -232,8 +306,8 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
         cos_queue_id,
         dscp_rewrite: None,
     };
-    target_live
-        .try_enqueue_tx_owned(req)
+    admission
+        .enqueue_owned(req)
         .map(|_| MirrorCloneResult::Enqueued)
         .unwrap_or(MirrorCloneResult::QueueFull)
 }
@@ -251,15 +325,27 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone_to_live(
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
 ) -> Option<MirrorCloneResult> {
-    let config =
-        select_mirror_config(forwarding, ingress_ifindex, ingress_vlan_id, sample_counter)?;
+    let config = resolve_mirror_config(forwarding, ingress_ifindex, ingress_vlan_id)?;
     let cos_queue_id = mirror_cos_queue_id(forwarding, config.output_ifindex, meta, flow_key);
-    let result = enqueue_mirror_clone_to_live(
+    let admission = match admit_mirror_clone_to_live(
         mirror_targets,
-        config,
         resolve_tx_binding_ifindex(forwarding, config.output_ifindex),
         ingress_queue_id,
-        frame,
+        frame.len(),
+    ) {
+        Ok(admission) => admission,
+        Err(result) => {
+            record_mirror_clone_result(live, result, frame.len());
+            return Some(result);
+        }
+    };
+    if !mirror_sample_allows(config.rate, sample_counter) {
+        return None;
+    }
+    let result = enqueue_admitted_mirror_clone_to_live(
+        admission,
+        config,
+        frame.to_vec(),
         meta,
         flow_key,
         cos_queue_id,
@@ -326,6 +412,19 @@ mod tests {
             ieee8021_queue_by_pcp: [u8::MAX; 8],
             queue_by_forwarding_class: FastMap::default(),
             queues: Vec::new(),
+        }
+    }
+
+    fn test_tx_request(payload: u8, egress_ifindex: i32) -> TxRequest {
+        TxRequest {
+            bytes: vec![payload; 64],
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex,
+            cos_queue_id: None,
+            dscp_rewrite: None,
         }
     }
 
@@ -575,16 +674,7 @@ mod tests {
         target_live.set_max_pending_tx(1);
         assert!(
             target_live
-                .try_enqueue_tx_owned(TxRequest {
-                    bytes: vec![0x11; 64],
-                    expected_ports: None,
-                    expected_addr_family: libc::AF_INET as u8,
-                    expected_protocol: PROTO_TCP,
-                    flow_key: None,
-                    egress_ifindex: 22,
-                    cos_queue_id: None,
-                    dscp_rewrite: None,
-                })
+                .try_enqueue_tx_owned(test_tx_request(0x11, 22))
                 .is_ok()
         );
         let mut mirror_targets = MirrorTargetMap::default();
@@ -617,26 +707,68 @@ mod tests {
         let mut queued = VecDeque::new();
         target_live.take_pending_tx_into(&mut queued);
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued.pop_front().expect("original request").bytes, vec![0x11; 64]);
+        assert_eq!(
+            queued.pop_front().expect("original request").bytes,
+            vec![0x11; 64]
+        );
+    }
+
+    #[test]
+    fn live_mirror_admission_reserves_slot_against_interleaving_producer() {
+        let target_live = Arc::new(BindingLiveState::new());
+        target_live.set_max_pending_tx(1);
+        let mut mirror_targets = MirrorTargetMap::default();
+        mirror_targets.insert(
+            &BindingIdentity {
+                slot: 9,
+                queue_id: 0,
+                worker_id: 1,
+                interface: Arc::<str>::from("mirror-out"),
+                ifindex: 22,
+            },
+            target_live.clone(),
+        );
+        let config = MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0,
+        };
+
+        let admission =
+            admit_mirror_clone_to_live(&mirror_targets, 22, 0, 64).expect("mirror admission");
+        assert!(
+            target_live
+                .try_enqueue_tx_owned(test_tx_request(0x99, 22))
+                .is_err(),
+            "an admitted mirror must own capacity before its clone is allocated"
+        );
+
+        let result = enqueue_admitted_mirror_clone_to_live(
+            admission,
+            config,
+            vec![0x22; 64],
+            test_meta(),
+            None,
+            None,
+        );
+
+        assert_eq!(result, MirrorCloneResult::Enqueued);
+        let mut queued = VecDeque::new();
+        target_live.take_pending_tx_into(&mut queued);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(
+            queued.pop_front().expect("mirror request").bytes,
+            vec![0x22; 64]
+        );
     }
 
     #[test]
     fn live_mirror_queue_full_reserves_headroom_above_mirror_limit() {
         let target_live = Arc::new(BindingLiveState::new());
-        target_live.set_max_pending_tx((MIRROR_PENDING_LIMIT * 2) as u32);
+        target_live.set_max_pending_tx(MIRROR_PENDING_LIMIT * 2);
         for _ in 0..MIRROR_PENDING_LIMIT {
             assert!(
                 target_live
-                    .try_enqueue_tx_owned(TxRequest {
-                        bytes: vec![0x11; 64],
-                        expected_ports: None,
-                        expected_addr_family: libc::AF_INET as u8,
-                        expected_protocol: PROTO_TCP,
-                        flow_key: None,
-                        egress_ifindex: 22,
-                        cos_queue_id: None,
-                        dscp_rewrite: None,
-                    })
+                    .try_enqueue_tx_owned(test_tx_request(0x11, 22))
                     .is_ok()
             );
         }
@@ -811,6 +943,72 @@ mod tests {
         assert_eq!(ingress_live.mirrored_packets.load(Ordering::Relaxed), 0);
         let mut queued = VecDeque::new();
         target_live.take_pending_tx_into(&mut queued);
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn sampled_live_mirror_queue_full_does_not_advance_sampler() {
+        let ingress_live = BindingLiveState::new();
+        let target_live = Arc::new(BindingLiveState::new());
+        target_live.set_max_pending_tx(1);
+        assert!(
+            target_live
+                .try_enqueue_tx_owned(test_tx_request(0x33, 22))
+                .is_ok()
+        );
+        let mut mirror_targets = MirrorTargetMap::default();
+        mirror_targets.insert(
+            &BindingIdentity {
+                slot: 9,
+                queue_id: 0,
+                worker_id: 1,
+                interface: Arc::<str>::from("mirror-out"),
+                ifindex: 22,
+            },
+            target_live.clone(),
+        );
+        let mut forwarding = ForwardingState::default();
+        forwarding.mirror_configs.insert(
+            11,
+            MirrorRuntimeConfig {
+                output_ifindex: 22,
+                rate: 4,
+            },
+        );
+        let mut sample_counter = 0;
+
+        let result = enqueue_sampled_mirror_clone_to_live(
+            &ingress_live,
+            &mirror_targets,
+            &forwarding,
+            11,
+            0,
+            0,
+            &mut sample_counter,
+            &[0x44; 80],
+            test_meta(),
+            None,
+        );
+
+        assert_eq!(result, Some(MirrorCloneResult::QueueFull));
+        assert_eq!(
+            sample_counter, 0,
+            "full live target must fail before consuming a mirror sample"
+        );
+        assert_eq!(
+            ingress_live.mirror_drops_queue_full.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            target_live
+                .redirect_inbox_overflow_drops
+                .load(Ordering::Relaxed),
+            0,
+            "mirror backpressure must not pollute target redirect overflow counters"
+        );
+        let mut queued = VecDeque::new();
+        target_live.take_pending_tx_into(&mut queued);
+        assert_eq!(queued.pop_front().expect("original request").bytes, vec![0x33; 64]);
         assert!(queued.is_empty());
     }
 

@@ -182,26 +182,21 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             }
             PendingForwardFrame::Prebuilt(_) => unreachable!(),
         };
-        if let Some(mirror_config) = select_mirror_config(
+        if let Some(result) = enqueue_sampled_mirror_clone(
+            left,
+            ingress_index,
+            ingress_binding,
+            right,
+            binding_lookup,
+            mirror_targets,
             forwarding,
             request.meta.ingress_ifindex as i32,
             request.meta.ingress_vlan_id,
-            &mut ingress_binding.mirror_sample_counter,
+            request.ingress_queue_id,
+            source_frame,
+            request.meta,
+            request.flow_key.as_ref(),
         ) {
-            let result = enqueue_mirror_clone(
-                left,
-                ingress_index,
-                ingress_binding,
-                right,
-                binding_lookup,
-                mirror_targets,
-                forwarding,
-                mirror_config,
-                request.ingress_queue_id,
-                source_frame,
-                request.meta,
-                request.flow_key.as_ref(),
-            );
             record_mirror_clone_result(&ingress_binding.live, result, source_frame.len());
         }
         let expected_ports = request.expected_ports;

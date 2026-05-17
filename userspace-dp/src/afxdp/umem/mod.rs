@@ -496,6 +496,10 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) rx_fill_ring_empty_descs: AtomicU64,
     pub(super) last_heartbeat: AtomicU64,
     pub(super) max_pending_tx: AtomicU32,
+    /// Atomic admission count for `pending_tx`: queued requests plus
+    /// producer-held reservations that have not committed yet. This is the
+    /// linearizable capacity gate; `pending_tx.len()` remains observational.
+    pub(super) pending_tx_admitted: AtomicUsize,
     pub(super) last_error: Mutex<String>,
     /// Cross-worker redirect inbox (#706). N producer workers push
     /// redirected `TxRequest`s; the single owner worker drains. Bounded
@@ -504,6 +508,33 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// against the owner's drain.
     pub(super) pending_tx: MpscInbox<TxRequest>,
     pub(super) pending_session_deltas: Mutex<VecDeque<SessionDeltaInfo>>,
+}
+
+pub(in crate::afxdp) struct PendingTxAdmission {
+    live: Arc<BindingLiveState>,
+    active: bool,
+}
+
+impl PendingTxAdmission {
+    #[inline]
+    pub(in crate::afxdp) fn enqueue_owned(mut self, req: TxRequest) -> Result<(), TxRequest> {
+        match self.live.pending_tx.push(req) {
+            Ok(()) => {
+                self.active = false;
+                Ok(())
+            }
+            Err(req) => Err(req),
+        }
+    }
+}
+
+impl Drop for PendingTxAdmission {
+    #[inline]
+    fn drop(&mut self) {
+        if self.active {
+            self.live.release_pending_tx_admission();
+        }
+    }
 }
 
 impl BindingLiveState {
@@ -627,6 +658,7 @@ impl BindingLiveState {
             rx_fill_ring_empty_descs: AtomicU64::new(0),
             last_heartbeat: AtomicU64::new(0),
             max_pending_tx: AtomicU32::new(0),
+            pending_tx_admitted: AtomicUsize::new(0),
             last_error: Mutex::new(String::new()),
             pending_tx: MpscInbox::new(PENDING_TX_INBOX_HARD_CAP),
             pending_session_deltas: Mutex::new(VecDeque::new()),
@@ -1094,32 +1126,15 @@ impl BindingLiveState {
         self.try_push_redirect_inbox(req)
     }
 
-    pub(super) fn try_admit_tx_owned(&self) -> Result<(), ()> {
-        let pending_len = self.pending_tx.len();
-        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
-        if (max_pending > 0 && pending_len >= max_pending)
-            || pending_len >= self.pending_tx.capacity()
-        {
-            self.record_redirect_inbox_overflow();
-            return Err(());
-        }
-        Ok(())
-    }
-
-    pub(super) fn try_admit_mirror_tx_owned(&self, mirror_pending_limit: usize) -> Result<(), ()> {
-        let pending_len = self.pending_tx.len();
-        let mut admission_cap = self.pending_tx.capacity();
-        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
-        if max_pending > 0 {
-            admission_cap = admission_cap.min(max_pending);
-        }
-        if mirror_pending_limit > 0 {
-            admission_cap = admission_cap.min(mirror_pending_limit);
-        }
-        if pending_len >= admission_cap {
-            return Err(());
-        }
-        Ok(())
+    pub(in crate::afxdp) fn try_reserve_mirror_tx_owned(
+        live: &Arc<Self>,
+        mirror_pending_limit: usize,
+    ) -> Result<PendingTxAdmission, ()> {
+        live.try_acquire_pending_tx_admission(Some(mirror_pending_limit), false)?;
+        Ok(PendingTxAdmission {
+            live: Arc::clone(live),
+            active: true,
+        })
     }
 
     /// Shared push path for `enqueue_tx` and `enqueue_tx_owned`.
@@ -1132,34 +1147,74 @@ impl BindingLiveState {
     /// `redirect_inbox_overflow_drops` as the dedicated view) is preserved.
     #[inline]
     fn push_redirect_inbox(&self, req: TxRequest) {
-        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
-        if max_pending > 0 && self.pending_tx.len() >= max_pending {
-            self.record_redirect_inbox_overflow();
+        if self.try_acquire_pending_tx_admission(None, true).is_err() {
             return;
         }
         if self.pending_tx.push(req).is_err() {
-            // Hard cap hit — ring is full. Rare: the hard cap sits at
-            // `PENDING_TX_INBOX_HARD_CAP`, so a non-zero soft cap
-            // normally fires first. This branch is reachable only under
-            // concurrent producers racing past the soft-cap check, or
-            // when the caller has set `max_pending_tx = 0` (treat as
-            // unlimited → hard cap is the only brake).
+            self.release_pending_tx_admission();
             self.record_redirect_inbox_overflow();
         }
     }
 
     #[inline]
     fn try_push_redirect_inbox(&self, req: TxRequest) -> Result<(), TxRequest> {
-        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
-        if max_pending > 0 && self.pending_tx.len() >= max_pending {
-            self.record_redirect_inbox_overflow();
+        if self.try_acquire_pending_tx_admission(None, true).is_err() {
             return Err(req);
         }
         if let Err(req) = self.pending_tx.push(req) {
+            self.release_pending_tx_admission();
             self.record_redirect_inbox_overflow();
             return Err(req);
         }
         Ok(())
+    }
+
+    #[inline]
+    fn pending_tx_admission_cap(&self, extra_limit: Option<usize>) -> usize {
+        let mut admission_cap = self.pending_tx.capacity();
+        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
+        if max_pending > 0 {
+            admission_cap = admission_cap.min(max_pending);
+        }
+        if let Some(limit) = extra_limit {
+            if limit > 0 {
+                admission_cap = admission_cap.min(limit);
+            }
+        }
+        admission_cap
+    }
+
+    #[inline]
+    fn try_acquire_pending_tx_admission(
+        &self,
+        extra_limit: Option<usize>,
+        record_overflow: bool,
+    ) -> Result<(), ()> {
+        let admission_cap = self.pending_tx_admission_cap(extra_limit);
+        let mut admitted = self.pending_tx_admitted.load(Ordering::Relaxed);
+        loop {
+            if admitted >= admission_cap {
+                if record_overflow {
+                    self.record_redirect_inbox_overflow();
+                }
+                return Err(());
+            }
+            match self.pending_tx_admitted.compare_exchange_weak(
+                admitted,
+                admitted + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => admitted = actual,
+            }
+        }
+    }
+
+    #[inline]
+    fn release_pending_tx_admission(&self) {
+        let previous = self.pending_tx_admitted.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "pending_tx_admitted underflow");
     }
 
     #[inline]
@@ -1190,6 +1245,7 @@ impl BindingLiveState {
         // of `take_pending_tx_into`. Enforced by convention (see the doc
         // comment on `pending_tx` in `BindingLiveState`).
         while let Some(req) = unsafe { self.pending_tx.pop() } {
+            self.release_pending_tx_admission();
             out.push_back(req);
         }
     }
