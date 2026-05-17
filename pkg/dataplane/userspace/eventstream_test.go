@@ -598,7 +598,7 @@ func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
 	}
 }
 
-func TestEventStreamDataplaneEventCallbackCanBeSetAfterStart(t *testing.T) {
+func TestEventStreamDataplaneEventBeforeCallbackWaitsForCallbackBeforeAck(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test-events.sock")
 
@@ -636,30 +636,33 @@ func TestEventStreamDataplaneEventCallbackCanBeSetAfterStart(t *testing.T) {
 	if err := writeFrame(conn, EventTypePolicyDeny, 21, payload); err != nil {
 		t.Fatalf("write first dataplane event: %v", err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	typ, seq, _, err := readFrame(conn)
-	if err != nil {
-		t.Fatalf("read first ack: %v", err)
-	}
-	if typ != EventTypeAck || seq != 21 {
-		t.Fatalf("first ack = type %d seq %d, want type %d seq 21", typ, seq, EventTypeAck)
+	_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if typ, seq, _, err := readFrame(conn); err == nil {
+		t.Fatalf("event before callback was acked type=%d seq=%d; want no ack until callback applies it", typ, seq)
+	} else if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("read first ack error = %v, want timeout", err)
 	}
 
 	got := make(chan uint64, 1)
 	es.SetOnDataplaneEvent(func(seq uint64, _ logging.EventRecord) {
 		got <- seq
 	})
-	if err := writeFrame(conn, EventTypePolicyDeny, 22, payload); err != nil {
-		t.Fatalf("write second dataplane event: %v", err)
-	}
 
 	select {
 	case gotSeq := <-got:
-		if gotSeq != 22 {
-			t.Fatalf("callback seq = %d, want 22", gotSeq)
+		if gotSeq != 21 {
+			t.Fatalf("callback seq = %d, want 21", gotSeq)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("callback not invoked after late registration")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack after callback: %v", err)
+	}
+	if typ != EventTypeAck || seq != 21 {
+		t.Fatalf("ack after callback = type %d seq %d, want type %d seq 21", typ, seq, EventTypeAck)
 	}
 }
 

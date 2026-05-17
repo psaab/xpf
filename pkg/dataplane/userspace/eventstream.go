@@ -103,6 +103,32 @@ func (es *EventStream) SetOnFullResync(fn func()) {
 	es.onFullResync = fn
 }
 
+func (es *EventStream) dataplaneCallbacks() (func(uint64, []byte), func(uint64, logging.EventRecord), bool) {
+	es.callbackMu.RLock()
+	defer es.callbackMu.RUnlock()
+	raw := es.onRawDataplaneEvent
+	decoded := es.onDataplaneEvent
+	return raw, decoded, raw != nil || decoded != nil
+}
+
+func (es *EventStream) waitForDataplaneCallbacks(ctx context.Context) (func(uint64, []byte), func(uint64, logging.EventRecord), bool) {
+	if raw, decoded, ok := es.dataplaneCallbacks(); ok {
+		return raw, decoded, true
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, nil, false
+		case <-ticker.C:
+			if raw, decoded, ok := es.dataplaneCallbacks(); ok {
+				return raw, decoded, true
+			}
+		}
+	}
+}
+
 // Start creates the Unix socket listener and launches the accept loop.
 func (es *EventStream) Start(ctx context.Context) {
 	_ = os.Remove(es.socketPath)
@@ -377,6 +403,7 @@ func (es *EventStream) readLoop(ctx context.Context) {
 		case EventTypeKeepalive:
 			// Idle heartbeat from helper — no action needed, just keeps
 			// the connection alive to prevent read-deadline disconnect.
+			continue
 
 		case EventTypePolicyDeny, EventTypeScreenDrop, EventTypeFilterLog:
 			if !dataplaneEventPayloadMatchesFrame(typ, payload) {
@@ -392,6 +419,10 @@ func (es *EventStream) readLoop(ctx context.Context) {
 				es.markDroppedFrameApplied(seq, &prevSeq)
 				continue
 			}
+			onRawDataplaneEvent, onDataplaneEvent, ok := es.waitForDataplaneCallbacks(ctx)
+			if !ok {
+				return
+			}
 			if seq > prevSeq+1 && prevSeq > 0 {
 				es.SeqGaps.Add(1)
 				slog.Debug("event stream: sequence gap", "expected", prevSeq+1, "got", seq)
@@ -399,10 +430,6 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			es.ackBatch.Add(1)
-			es.callbackMu.RLock()
-			onRawDataplaneEvent := es.onRawDataplaneEvent
-			onDataplaneEvent := es.onDataplaneEvent
-			es.callbackMu.RUnlock()
 			if onRawDataplaneEvent != nil {
 				onRawDataplaneEvent(seq, payload)
 			} else if onDataplaneEvent != nil {
