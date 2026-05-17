@@ -388,9 +388,10 @@ func TestEventStreamAcceptAndRead(t *testing.T) {
 	es := NewEventStream(sockPath)
 	var received atomic.Int32
 	var lastSeq atomic.Uint64
-	es.SetOnEvent(func(eventType uint8, seq uint64, delta SessionDeltaInfo) {
+	es.SetOnEvent(func(eventType uint8, seq uint64, delta SessionDeltaInfo) bool {
 		received.Add(1)
 		lastSeq.Store(seq)
+		return true
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -485,8 +486,9 @@ func TestEventStreamSessionEventBeforeCallbackQueuesUntilCallback(t *testing.T) 
 	}
 
 	got := make(chan uint64, 1)
-	es.SetOnEvent(func(_ uint8, seq uint64, _ SessionDeltaInfo) {
+	es.SetOnEvent(func(_ uint8, seq uint64, _ SessionDeltaInfo) bool {
 		got <- seq
+		return true
 	})
 	select {
 	case seq := <-got:
@@ -503,6 +505,53 @@ func TestEventStreamSessionEventBeforeCallbackQueuesUntilCallback(t *testing.T) 
 	}
 	if typ != EventTypeAck || seq != 5 {
 		t.Fatalf("ack after callback = type %d seq %d, want type %d seq 5", typ, seq, EventTypeAck)
+	}
+}
+
+func TestEventStreamSessionCallbackFalseWithholdsAck(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	es.SetOnEvent(func(_ uint8, _ uint64, _ SessionDeltaInfo) bool {
+		return false
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := buildSessionOpenV4Payload(
+		6, 1000, 80,
+		[4]byte{10, 0, 1, 1}, [4]byte{10, 0, 2, 1},
+		[4]byte{}, [4]byte{},
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		[6]byte{}, [6]byte{}, [4]byte{},
+	)
+	if err := writeFrame(conn, EventTypeSessionOpen, 9, payload); err != nil {
+		t.Fatalf("write session event: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if typ, seq, _, err := readFrame(conn); err == nil {
+		t.Fatalf("unexpected ack for unapplied callback: type %d seq %d", typ, seq)
+	}
+	if acked := es.LastAckedSequence(); acked != 0 {
+		t.Fatalf("LastAckedSequence = %d, want 0 after callback returned false", acked)
 	}
 }
 
@@ -841,7 +890,7 @@ func TestEventStreamAcksSent(t *testing.T) {
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {})
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool { return true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -896,7 +945,10 @@ func TestEventStreamFullResyncCallback(t *testing.T) {
 
 	es := NewEventStream(sockPath)
 	var resyncCalled atomic.Bool
-	es.SetOnFullResync(func() { resyncCalled.Store(true) })
+	es.SetOnFullResync(func() bool {
+		resyncCalled.Store(true)
+		return true
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -933,14 +985,69 @@ func TestEventStreamFullResyncCallback(t *testing.T) {
 	}
 }
 
+func TestEventStreamFullResyncBeforeCallbackQueuesUntilCallback(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("not connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := writeFrame(conn, EventTypeFullResync, 7, nil); err != nil {
+		t.Fatalf("write FullResync: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if typ, seq, _, err := readFrame(conn); err == nil {
+		t.Fatalf("unexpected ack before FullResync callback was wired: type %d seq %d", typ, seq)
+	}
+
+	var resyncCalled atomic.Bool
+	es.SetOnFullResync(func() bool {
+		resyncCalled.Store(true)
+		return true
+	})
+	deadline = time.Now().Add(2 * time.Second)
+	for !resyncCalled.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("onFullResync not called after late registration")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack after FullResync callback: %v", err)
+	}
+	if typ != EventTypeAck || seq != 7 {
+		t.Fatalf("ack after FullResync callback = type %d seq %d, want type %d seq 7", typ, seq, EventTypeAck)
+	}
+}
+
 func TestEventStreamDrainRequestComplete(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	var applied atomic.Int32
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool {
 		applied.Add(1)
+		return true
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1043,8 +1150,9 @@ func TestEventStreamDisconnectReconnect(t *testing.T) {
 
 	es := NewEventStream(sockPath)
 	var received atomic.Int32
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool {
 		received.Add(1)
+		return true
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1124,7 +1232,7 @@ func TestEventStreamPauseResume(t *testing.T) {
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {})
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool { return true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1185,7 +1293,7 @@ func TestEventStreamSequenceGapDetection(t *testing.T) {
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {})
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool { return true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

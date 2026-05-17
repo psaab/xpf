@@ -51,10 +51,10 @@ type EventStream struct {
 	// Callbacks are invoked on the reader goroutine and may be updated
 	// dynamically by control-plane code.
 	callbackMu          sync.RWMutex
-	onEvent             func(eventType uint8, seq uint64, delta SessionDeltaInfo)
+	onEvent             func(eventType uint8, seq uint64, delta SessionDeltaInfo) bool
 	onDataplaneEvent    func(seq uint64, rec logging.EventRecord)
 	onRawDataplaneEvent func(seq uint64, payload []byte)
-	onFullResync        func()
+	onFullResync        func() bool
 
 	pendingFlushMu        sync.Mutex
 	pendingMu             sync.Mutex
@@ -87,8 +87,10 @@ func NewEventStream(socketPath string) *EventStream {
 	}
 }
 
-// SetOnEvent sets the callback for session events.
-func (es *EventStream) SetOnEvent(fn func(eventType uint8, seq uint64, delta SessionDeltaInfo)) {
+// SetOnEvent sets the callback for session events. The callback returns true
+// only after the delta is durably handled; false withholds ACK so the helper can
+// replay instead of losing an event during readiness transitions.
+func (es *EventStream) SetOnEvent(fn func(eventType uint8, seq uint64, delta SessionDeltaInfo) bool) {
 	es.callbackMu.Lock()
 	es.onEvent = fn
 	es.callbackMu.Unlock()
@@ -113,11 +115,13 @@ func (es *EventStream) SetOnRawDataplaneEvent(fn func(seq uint64, payload []byte
 	es.flushPendingCallbackFrames()
 }
 
-// SetOnFullResync sets the callback for full resync requests.
-func (es *EventStream) SetOnFullResync(fn func()) {
+// SetOnFullResync sets the callback for full resync requests. The callback
+// returns true only after the resync request has been acted on.
+func (es *EventStream) SetOnFullResync(fn func() bool) {
 	es.callbackMu.Lock()
-	defer es.callbackMu.Unlock()
 	es.onFullResync = fn
+	es.callbackMu.Unlock()
+	es.flushPendingCallbackFrames()
 }
 
 func (es *EventStream) dataplaneCallbacks() (func(uint64, []byte), func(uint64, logging.EventRecord)) {
@@ -383,11 +387,8 @@ func (es *EventStream) readLoop(ctx context.Context) {
 
 		case EventTypeFullResync:
 			slog.Warn("event stream: full resync requested by helper")
-			es.callbackMu.RLock()
-			onFullResync := es.onFullResync
-			es.callbackMu.RUnlock()
-			if onFullResync != nil {
-				onFullResync()
+			if !es.dispatchOrQueueFullResyncFrame(seq) {
+				return
 			}
 
 		case EventTypeKeepalive:
@@ -457,7 +458,30 @@ func (es *EventStream) dispatchOrQueueSessionFrame(typ uint8, seq uint64, delta 
 		es.flushPendingCallbackFrames()
 		return true
 	}
-	onEvent(typ, seq, delta)
+	if !onEvent(typ, seq, delta) {
+		return false
+	}
+	es.markFrameApplied(seq)
+	return true
+}
+
+func (es *EventStream) dispatchOrQueueFullResyncFrame(seq uint64) bool {
+	es.callbackMu.RLock()
+	onFullResync := es.onFullResync
+	es.callbackMu.RUnlock()
+	if onFullResync == nil || es.hasPendingCallbackFrames() {
+		if !es.enqueuePendingCallbackFrame(pendingCallbackFrame{
+			typ: EventTypeFullResync,
+			seq: seq,
+		}) {
+			return false
+		}
+		es.flushPendingCallbackFrames()
+		return true
+	}
+	if !onFullResync() {
+		return false
+	}
 	es.markFrameApplied(seq)
 	return true
 }
@@ -511,6 +535,8 @@ func (es *EventStream) enqueuePendingCallbackFrame(frame pendingCallbackFrame) b
 }
 
 func (es *EventStream) clearPendingCallbackFrames() {
+	es.pendingFlushMu.Lock()
+	defer es.pendingFlushMu.Unlock()
 	es.pendingMu.Lock()
 	es.pendingCallbackFrames = nil
 	es.pendingMu.Unlock()
@@ -537,7 +563,19 @@ func (es *EventStream) flushPendingCallbackFrames() {
 			if onEvent == nil {
 				return
 			}
-			onEvent(frame.typ, frame.seq, frame.sessionDelta)
+			if !onEvent(frame.typ, frame.seq, frame.sessionDelta) {
+				return
+			}
+		case EventTypeFullResync:
+			es.callbackMu.RLock()
+			onFullResync := es.onFullResync
+			es.callbackMu.RUnlock()
+			if onFullResync == nil {
+				return
+			}
+			if !onFullResync() {
+				return
+			}
 		case EventFrameTypePolicyDeny, EventFrameTypeScreenDrop, EventFrameTypeFilterLog:
 			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
 			if onRawDataplaneEvent == nil && onDataplaneEvent == nil {
@@ -600,6 +638,7 @@ func (es *EventStream) ackLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+		es.flushPendingCallbackFrames()
 		es.sendAckIfNeeded()
 	}
 }

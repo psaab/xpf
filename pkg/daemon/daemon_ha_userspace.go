@@ -520,11 +520,11 @@ func (d *Daemon) wireUserspaceEventStreamCallbacks(ctx context.Context, provider
 
 	// Wire callbacks.
 	if d.cluster != nil && d.sessionSync != nil {
-		es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) {
-			d.handleEventStreamDelta(eventType, delta)
+		es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) bool {
+			return d.handleEventStreamDelta(eventType, delta)
 		})
-		es.SetOnFullResync(func() {
-			d.handleEventStreamFullResync()
+		es.SetOnFullResync(func() bool {
+			return d.handleEventStreamFullResync()
 		})
 	}
 	if d.eventReader != nil {
@@ -543,23 +543,25 @@ func (d *Daemon) wireUserspaceEventStreamCallbacks(ctx context.Context, provider
 	return true
 }
 
-// handleEventStreamDelta processes a single session event from the event stream.
-func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.SessionDeltaInfo) {
+// handleEventStreamDelta processes a single session event from the event
+// stream. It returns true only when the delta has been queued for HA sync; false
+// tells EventStream to withhold ACK so the helper can replay.
+func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.SessionDeltaInfo) bool {
 	if d.cluster == nil || d.sessionSync == nil {
 		slog.Debug("userspace delta: dropped (no cluster/sync)", "type", eventType)
-		return
+		return false
 	}
 	if !d.cluster.IsLocalPrimaryAny() {
 		slog.Debug("userspace delta: dropped (not primary for any RG)", "type", eventType)
-		return
+		return false
 	}
 	if !d.sessionSync.IsConnected() {
 		slog.Debug("userspace delta: dropped (sync not connected)", "type", eventType)
-		return
+		return false
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
-		return
+		return false
 	}
 	zoneIDs := buildZoneIDs(cfg)
 
@@ -572,20 +574,21 @@ func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.Sessi
 	}
 
 	d.queueUserspaceSessionDeltas(zoneIDs, []dpuserspace.SessionDeltaInfo{delta})
+	return true
 }
 
 // handleEventStreamFullResync handles a FullResync frame from the helper.
 // This means the helper's replay buffer was trimmed past our last ack; we need
 // a one-shot bulk export to catch up.
-func (d *Daemon) handleEventStreamFullResync() {
+func (d *Daemon) handleEventStreamFullResync() bool {
 	slog.Warn("userspace event stream: full resync requested, triggering bulk export")
 	exporter, ok := d.dp.(userspaceSessionExporter)
 	if !ok {
-		return
+		return false
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
-		return
+		return false
 	}
 	// Export sessions for all RGs we're primary for.
 	var rgIDs []int
@@ -597,11 +600,13 @@ func (d *Daemon) handleEventStreamFullResync() {
 		}
 	}
 	if len(rgIDs) == 0 {
-		return
+		return true
 	}
 	if _, err := d.exportUserspaceOwnerRGSessionsWithConfig(exporter, cfg, rgIDs); err != nil {
 		slog.Warn("userspace event stream: full resync export failed", "err", err)
+		return false
 	}
+	return true
 }
 
 // eventStreamFallbackLoop monitors the event stream connection and falls back

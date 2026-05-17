@@ -57,7 +57,13 @@ cluster-scoped.
   callback has consumed them. If the helper connects before session-sync
   or RT_FLOW callbacks are wired, the daemon queues a bounded prefix and
   withholds the cumulative ACK; overflow closes the stream so the helper
-  replays instead of silently losing audit or HA session events.
+  replays instead of silently losing audit or HA session events. If the
+  replay buffer no longer contains `acked_seq + 1`, the helper sends a
+  FullResync request even when `acked_seq == 0`; this covers the
+  boot-time queue-overflow case where seq 1 was trimmed before any ACK.
+- Session callbacks and FullResync callbacks are ACK gates. A callback
+  that returns false means the daemon is not ready or did not complete
+  the side effect, so ACK remains withheld and the helper must replay.
 - Daemon-side transport counters are exported as
   `xpf_userspace_event_stream_*` Prometheus metrics from
   `ProcessStatus.EventStream`. Helper-side send/drop counters remain in
