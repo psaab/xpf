@@ -17,6 +17,11 @@
   - **File(s)**: `test/incus/mouse_latency_orchestrate_test.py`, `_Log.md`
   - **Validation**: `cd test/incus && python3 -m unittest mouse_latency_orchestrate_test.py`
 
+- **Timestamp**: 2026-05-17T15:31:13Z
+  - **Action**: Applied final Copilot review polish in orchestrate tests by making the mock args class name explicitly `Mock*` and documenting cwnd KiB fixture constants.
+  - **File(s)**: `test/incus/mouse_latency_orchestrate_test.py`, `_Log.md`
+  - **Validation**: `cd test/incus && python3 -m unittest mouse_latency_orchestrate_test.py`
+
 - **Timestamp**: 2026-05-17T08:30:20Z
   - **Action**: PR #1394 round-10 follow-up — fixed standalone userspace event-stream callback wiring by always registering session/full-resync callbacks, and added a regression test that verifies standalone SessionOpen and FullResync frames are ACKed instead of stalling behind an unwired callback queue.
   - **File(s)**: `pkg/daemon/daemon_ha_userspace.go`, `pkg/daemon/userspace_sync_test.go`, `_Log.md`

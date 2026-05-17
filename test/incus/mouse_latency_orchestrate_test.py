@@ -5,6 +5,7 @@ import unittest
 
 import mouse_latency_orchestrate as orch
 
+# Fixture rows use 120 KBytes and 180 KBytes in iperf3 output.
 _EXPECTED_MIN_CWND_KBYTES = 120
 _EXPECTED_MAX_CWND_KBYTES = 180
 
@@ -103,8 +104,8 @@ class CwndSettleDiagnosticsTests(unittest.TestCase):
 """)
             out_path = os.path.join(t, "cwnd-settle.json")
 
-            class SettleDiagnosticsArgs: pass
-            args = SettleDiagnosticsArgs()
+            class MockSettleDiagnosticsArgs: pass
+            args = MockSettleDiagnosticsArgs()
             args.iperf3_txt = txt
             args.shaper_bps = 300_000_000
             args.window_rows = 3
