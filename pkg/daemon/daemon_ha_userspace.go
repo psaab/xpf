@@ -582,6 +582,18 @@ func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.Sessi
 // a one-shot bulk export to catch up.
 func (d *Daemon) handleEventStreamFullResync() bool {
 	slog.Warn("userspace event stream: full resync requested, triggering bulk export")
+	if d.cluster == nil || d.sessionSync == nil {
+		slog.Debug("userspace event stream: full resync deferred (no cluster/sync)")
+		return false
+	}
+	if !d.cluster.IsLocalPrimaryAny() {
+		slog.Debug("userspace event stream: full resync deferred (not primary for any RG)")
+		return false
+	}
+	if !d.sessionSync.IsConnected() {
+		slog.Debug("userspace event stream: full resync deferred (sync not connected)")
+		return false
+	}
 	exporter, ok := d.dp.(userspaceSessionExporter)
 	if !ok {
 		return false
@@ -590,17 +602,14 @@ func (d *Daemon) handleEventStreamFullResync() bool {
 	if cfg == nil {
 		return false
 	}
-	// Export sessions for all RGs we're primary for.
 	var rgIDs []int
-	if d.cluster != nil {
-		for rgID := 0; rgID < 16; rgID++ {
-			if d.cluster.IsLocalPrimary(rgID) {
-				rgIDs = append(rgIDs, rgID)
-			}
+	for rgID := 0; rgID < 16; rgID++ {
+		if d.cluster.IsLocalPrimary(rgID) {
+			rgIDs = append(rgIDs, rgID)
 		}
 	}
 	if len(rgIDs) == 0 {
-		return true
+		return false
 	}
 	if _, err := d.exportUserspaceOwnerRGSessionsWithConfig(exporter, cfg, rgIDs); err != nil {
 		slog.Warn("userspace event stream: full resync export failed", "err", err)

@@ -556,6 +556,8 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		CloseReason:     closeReasonName(evt.CloseReason),
 	}
 	if evt.EventType != dataplane.EventTypeSessionClose {
+		rec.SessionPkts = 0
+		rec.SessionBytes = 0
 		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
 		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
 		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))

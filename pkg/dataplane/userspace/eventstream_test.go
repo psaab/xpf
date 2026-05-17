@@ -349,6 +349,10 @@ func TestDecodeDataplaneEventPolicyDenyRTFlow(t *testing.T) {
 		t.Fatalf("metadata = rule %d term %d owner_rg %d reason %q, want 1234/5678/3/Rejected by policy",
 			rec.RuleID, rec.TermID, rec.OwnerRGID, rec.Reason)
 	}
+	if rec.SessionPkts != 0 || rec.SessionBytes != 0 {
+		t.Fatalf("security metadata must not leak through session counters: pkts=%d bytes=%d",
+			rec.SessionPkts, rec.SessionBytes)
+	}
 }
 
 func TestFrameRoundTrip(t *testing.T) {
@@ -552,6 +556,18 @@ func TestEventStreamSessionCallbackFalseWithholdsAck(t *testing.T) {
 	}
 	if acked := es.LastAckedSequence(); acked != 0 {
 		t.Fatalf("LastAckedSequence = %d, want 0 after callback returned false", acked)
+	}
+
+	es.SetOnEvent(func(_ uint8, _ uint64, _ SessionDeltaInfo) bool {
+		return true
+	})
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack after callback became ready: %v", err)
+	}
+	if typ != EventTypeAck || seq != 9 {
+		t.Fatalf("ack after callback ready = type %d seq %d, want type %d seq 9", typ, seq, EventTypeAck)
 	}
 }
 

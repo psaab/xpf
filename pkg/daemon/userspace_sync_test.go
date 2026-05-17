@@ -749,6 +749,19 @@ func TestHandleEventStreamDeltaMapsEventTypes(t *testing.T) {
 	d.handleEventStreamDelta(dpuserspace.EventTypeSessionUpdate, delta)
 }
 
+func TestHandleEventStreamFullResyncRequiresHAReady(t *testing.T) {
+	if (&Daemon{}).handleEventStreamFullResync() {
+		t.Fatal("full resync without cluster/sessionSync should withhold ACK")
+	}
+	d := &Daemon{
+		cluster:     newClusterManager(true),
+		sessionSync: &cluster.SessionSync{},
+	}
+	if d.handleEventStreamFullResync() {
+		t.Fatal("full resync with disconnected sessionSync should withhold ACK")
+	}
+}
+
 // TestUserspaceManagerImplementsEventStreamExporter verifies that the userspace
 // Manager satisfies the userspaceEventStreamExporter interface used by
 // bulkSyncViaEventStreamOrFallback.

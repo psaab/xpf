@@ -17,6 +17,7 @@ import (
 )
 
 const pendingCallbackFramesLimit = 4096
+const callbackNotReadyBackoff = 100 * time.Millisecond
 
 type pendingCallbackFrame struct {
 	typ              uint8
@@ -360,6 +361,7 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueSessionFrame(typ, seq, delta) {
+				es.backoffCallbackNotReady(ctx)
 				return
 			}
 
@@ -376,6 +378,7 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueSessionFrame(typ, seq, delta) {
+				es.backoffCallbackNotReady(ctx)
 				return
 			}
 
@@ -388,6 +391,7 @@ func (es *EventStream) readLoop(ctx context.Context) {
 		case EventTypeFullResync:
 			slog.Warn("event stream: full resync requested by helper")
 			if !es.dispatchOrQueueFullResyncFrame(seq) {
+				es.backoffCallbackNotReady(ctx)
 				return
 			}
 
@@ -418,6 +422,7 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueDataplaneFrame(typ, seq, payload, rec, onRawDataplaneEvent, onDataplaneEvent) {
+				es.backoffCallbackNotReady(ctx)
 				return
 			}
 
@@ -443,6 +448,15 @@ func (es *EventStream) markFrameApplied(seq uint64) {
 	es.lastAppliedSeq.Store(seq)
 }
 
+func (es *EventStream) backoffCallbackNotReady(ctx context.Context) {
+	timer := time.NewTimer(callbackNotReadyBackoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
 func (es *EventStream) dispatchOrQueueSessionFrame(typ uint8, seq uint64, delta SessionDeltaInfo) bool {
 	es.callbackMu.RLock()
 	onEvent := es.onEvent
@@ -459,7 +473,11 @@ func (es *EventStream) dispatchOrQueueSessionFrame(typ uint8, seq uint64, delta 
 		return true
 	}
 	if !onEvent(typ, seq, delta) {
-		return false
+		return es.enqueuePendingCallbackFrame(pendingCallbackFrame{
+			typ:          typ,
+			seq:          seq,
+			sessionDelta: delta,
+		})
 	}
 	es.markFrameApplied(seq)
 	return true
@@ -480,7 +498,10 @@ func (es *EventStream) dispatchOrQueueFullResyncFrame(seq uint64) bool {
 		return true
 	}
 	if !onFullResync() {
-		return false
+		return es.enqueuePendingCallbackFrame(pendingCallbackFrame{
+			typ: EventTypeFullResync,
+			seq: seq,
+		})
 	}
 	es.markFrameApplied(seq)
 	return true
