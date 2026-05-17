@@ -2,6 +2,11 @@
 
 ## 2026-05-16
 
+- **Timestamp**: 2026-05-17T00:08:28Z
+  - **Action**: Issue #1390 — CoS best-effort strict-priority fix; suppress residual / non-exact queue service whenever local or peer exact backlog exists on the same shaped interface, while preserving explicit exact `surplus-sharing` eligibility.
+  - **File(s)**: `userspace-dp/src/afxdp/cos/queue_service/mod.rs`, `userspace-dp/src/afxdp/cos/queue_service/tests.rs`, `userspace-dp/src/afxdp/tx/cos_classify_tests.rs`, `userspace-dp/src/afxdp/worker/cos_tests.rs`, `userspace-dp/src/afxdp/cos/README.md`, `_Log.md`
+  - **Validation**: `cargo fmt --manifest-path userspace-dp/Cargo.toml`; `cargo test --manifest-path userspace-dp/Cargo.toml build_nonexact -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml afxdp::cos::queue_service::tests:: -- --nocapture`; `git diff --check`
+
 - **Timestamp**: 2026-05-17T00:48:00Z
   - **Action**: PR #1385 round-3 review follow-up — corrected README prose so pool-mode SNAT is no longer described as an explicit userspace capability gate after the pool-mode fixes; the remaining caveat is cross-backend `address-persistent` parity under #1377.
   - **File(s)**: `README.md`, `_Log.md`

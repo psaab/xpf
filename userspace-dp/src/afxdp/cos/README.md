@@ -67,6 +67,14 @@ mod.rs for further file-level breakdown.
   effective rate for burst sizing and surplus weight, but
   `queue_service` skips them in guarantee selectors via
   `queue.config.guarantee_enabled == false`.
+- Residual-only / non-exact queues must not drain while any exact
+  queue on the same shaped interface is backlogged, including peer
+  binding backlog published through `SharedCoSExactBacklog`. This is
+  the strict priority boundary that keeps best-effort from consuming
+  root tokens while explicit-rate exact queues still need service.
+  Exact queues that explicitly enable `surplus-sharing` remain
+  eligible for surplus service under this gate; the suppression applies
+  only to non-exact queues.
 - `COS_MIN_BURST_BYTES` (64 × MTU) is canonically owned by
   `token_bucket.rs`; siblings import it via the `cos/mod.rs`
   re-export.

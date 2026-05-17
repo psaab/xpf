@@ -223,15 +223,53 @@ fn build_nonexact_cos_batch(
     root_ifindex: i32,
     now_ns: u64,
 ) -> Option<CoSBatch> {
+    // Strict exact-over-residual priority: non-exact queues may
+    // borrow root capacity only while no exact queue on this shaped
+    // interface is backlogged. Exact queues with surplus_sharing
+    // remain eligible through the filtered surplus pass below.
+    let suppress_nonexact =
+        interface_has_backlogged_exact_queue_for_nonexact(binding, root_ifindex);
     let selected = {
         let root = binding.cos.cos_interfaces.get_mut(&root_ifindex)?;
-        select_nonexact_cos_guarantee_batch(root, now_ns)
-            .or_else(|| select_cos_surplus_batch(root, now_ns))
+        if suppress_nonexact {
+            select_cos_surplus_batch_filtered(root, now_ns, false)
+        } else {
+            select_nonexact_cos_guarantee_batch(root, now_ns)
+                .or_else(|| select_cos_surplus_batch(root, now_ns))
+        }
     };
     if selected.is_some() {
         refresh_cos_interface_activity(binding, root_ifindex);
     }
     selected
+}
+
+#[inline]
+fn interface_has_backlogged_exact_queue_for_nonexact(
+    binding: &BindingWorker,
+    root_ifindex: i32,
+) -> bool {
+    let local_exact_backlogged = binding
+        .cos
+        .cos_interfaces
+        .get(&root_ifindex)
+        .is_some_and(root_has_backlogged_exact_queue_for_nonexact);
+    if local_exact_backlogged {
+        return true;
+    }
+    binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+        .is_some_and(|backlog| backlog.has_peer_backlog(binding.slot))
+}
+
+#[inline]
+fn root_has_backlogged_exact_queue_for_nonexact(root: &CoSInterfaceRuntime) -> bool {
+    root.queues
+        .iter()
+        .any(|queue| queue.config.exact && !cos_queue_is_empty(queue))
 }
 
 #[inline]
@@ -664,6 +702,15 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(
     root: &mut CoSInterfaceRuntime,
     now_ns: u64,
 ) -> Option<CoSBatch> {
+    select_cos_surplus_batch_filtered(root, now_ns, true)
+}
+
+#[inline]
+fn select_cos_surplus_batch_filtered(
+    root: &mut CoSInterfaceRuntime,
+    now_ns: u64,
+    allow_nonexact: bool,
+) -> Option<CoSBatch> {
     for priority in 0..COS_PRIORITY_LEVELS {
         let indices_len = root.queue_indices_by_priority[priority].len();
         if indices_len == 0 {
@@ -675,6 +722,9 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(
                 root.queue_indices_by_priority[priority][(start + offset) % indices_len];
             let queue = &mut root.queues[queue_idx];
             if cos_queue_is_empty(queue) || !queue.hot.runnable {
+                continue;
+            }
+            if !allow_nonexact && !queue.config.exact {
                 continue;
             }
             // #915: exact queues are excluded from surplus by default

@@ -92,6 +92,7 @@ fn reset_binding_cos_runtime_clears_shared_exact_backlog_slot() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 125_000_000,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,

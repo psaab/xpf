@@ -4,12 +4,16 @@
 // `#[path = "tests.rs"]` from mod.rs.
 
 use super::*;
+use crate::afxdp::FastMap;
 use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::admission::apply_cos_queue_flow_fair_promotion;
 use crate::afxdp::cos::queue_ops::cos_queue_push_back;
 use crate::afxdp::cos::tx_completion::COS_TIMER_WHEEL_TICK_NS;
 use crate::afxdp::tx::test_support::*;
-use crate::afxdp::types::{SharedCoSQueueLease, SharedCoSRootLease, V8RateMode};
+use crate::afxdp::types::{
+    SharedCoSExactBacklog, SharedCoSQueueLease, SharedCoSRootLease, V8RateMode,
+    WorkerCoSInterfaceFastPath,
+};
 use crate::afxdp::worker::BindingWorker;
 use std::sync::Arc;
 
@@ -75,6 +79,127 @@ fn nonexact_guarantee_skips_residual_only_scheduler_map_queue() {
             phase: CoSServicePhase::Surplus,
             ..
         })
+    ));
+}
+
+fn residual_and_exact_test_root(exact_surplus_sharing: bool) -> CoSInterfaceRuntime {
+    let mut root = test_cos_runtime_with_queues(
+        25_000_000_000 / 8,
+        vec![
+            CoSQueueConfig {
+                queue_id: 0,
+                forwarding_class: "best-effort".into(),
+                priority: 5,
+                transmit_rate_bytes: 25_000_000_000 / 8,
+                guarantee_enabled: false,
+                exact: false,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+                surplus_weight: 1,
+                buffer_bytes: COS_MIN_BURST_BYTES,
+                dscp_rewrite: None,
+            },
+            CoSQueueConfig {
+                queue_id: 10,
+                forwarding_class: "iperf-24g".into(),
+                priority: 5,
+                transmit_rate_bytes: 24_000_000_000 / 8,
+                guarantee_enabled: true,
+                exact: true,
+                surplus_sharing: exact_surplus_sharing,
+                equal_flow_enforcement: false,
+                surplus_weight: 16,
+                buffer_bytes: COS_MIN_BURST_BYTES,
+                dscp_rewrite: None,
+            },
+        ],
+    );
+    root.tokens = 64 * 1024;
+    for queue in &mut root.queues {
+        queue.hot.runnable = true;
+        queue.hot.items.push_back(test_cos_item(1500));
+        queue.hot.queued_bytes = 1500;
+    }
+    root.queues[0].hot.tokens = 0;
+    root.queues[1].hot.tokens = 0;
+    root.nonempty_queues = 2;
+    root.runnable_queues = 2;
+    root
+}
+
+fn residual_and_exact_fast_interfaces(
+    shared_exact_backlog: Option<Arc<SharedCoSExactBacklog>>,
+) -> FastMap<i32, WorkerCoSInterfaceFastPath> {
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (10, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    if let Some(shared_exact_backlog) = shared_exact_backlog {
+        fast_interfaces
+            .get_mut(&42)
+            .expect("test fast path")
+            .shared_exact_backlog = Some(shared_exact_backlog);
+    }
+    fast_interfaces
+}
+
+#[test]
+fn build_nonexact_suppresses_residual_surplus_when_local_exact_backlogged() {
+    let root = residual_and_exact_test_root(false);
+    let fast_interfaces = residual_and_exact_fast_interfaces(None);
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    assert!(
+        build_nonexact_cos_batch(&mut binding, 42, 1).is_none(),
+        "best-effort residual surplus must not drain while an exact queue on the same interface is backlogged"
+    );
+}
+
+#[test]
+fn build_nonexact_suppresses_residual_surplus_when_peer_exact_backlogged() {
+    let mut root = residual_and_exact_test_root(false);
+    root.queues[1].hot.items.clear();
+    root.queues[1].hot.queued_bytes = 0;
+    root.queues[1].hot.runnable = false;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    shared_exact_backlog.publish(1, 1500);
+    let fast_interfaces = residual_and_exact_fast_interfaces(Some(shared_exact_backlog));
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    assert!(
+        build_nonexact_cos_batch(&mut binding, 42, 1).is_none(),
+        "best-effort residual surplus must not drain while a peer binding reports exact backlog"
+    );
+}
+
+#[test]
+fn build_nonexact_still_allows_exact_surplus_sharing_when_exact_backlogged() {
+    let root = residual_and_exact_test_root(true);
+    let fast_interfaces = residual_and_exact_fast_interfaces(None);
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    let batch = build_nonexact_cos_batch(&mut binding, 42, 1)
+        .expect("surplus-sharing exact queue should remain surplus eligible");
+    assert!(matches!(
+        batch,
+        CoSBatch::Local {
+            queue_idx: 1,
+            phase: CoSServicePhase::Surplus,
+            ..
+        }
     ));
 }
 

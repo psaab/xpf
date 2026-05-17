@@ -45,6 +45,7 @@ fn enqueue_exact_queue_publishes_shared_backlog_slot() {
             forwarding_class: "iperf-a".into(),
             priority: 5,
             transmit_rate_bytes: 125_000_000,
+            guarantee_enabled: true,
             exact: true,
             surplus_sharing: false,
             equal_flow_enforcement: false,
