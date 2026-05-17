@@ -387,6 +387,26 @@ func TestCompileClassOfServicePercentBuffer100PercentAllowed(t *testing.T) {
 	}
 }
 
+func TestCompileClassOfServicePercentBufferLiteral100PercentAllowed(t *testing.T) {
+	lines := []string{
+		"set class-of-service schedulers voice buffer-size 100%",
+		"set class-of-service scheduler-maps edge forwarding-class ef scheduler voice",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("CompileConfig: unexpected error for literal 100%%: %v", err)
+	}
+}
+
 // TestCompileClassOfServiceBothBufferFieldsRejected verifies that a scheduler
 // with both BufferSizeBytes and BufferSizePercent set simultaneously is
 // rejected rather than silently applying the byte-wins runtime preference.
