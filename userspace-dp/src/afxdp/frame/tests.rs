@@ -1933,6 +1933,7 @@ fn build_live_forward_request_prefers_session_flow_ports_over_frame() {
         Some(&session_flow),
         None,
         false,
+        0,
     )
     .expect("request");
     // Session flow ports (1025, 5201) take priority over frame ports (38276, 5201)
@@ -2036,6 +2037,7 @@ fn build_live_forward_request_uses_live_frame_ports_when_no_session_flow() {
         None,
         None,
         false,
+        0,
     )
     .expect("request");
     assert_eq!(req.expected_ports, Some((real_src_port, real_dst_port)));
@@ -2110,6 +2112,7 @@ fn build_live_forward_request_uses_flow_or_metadata_ports_when_frame_ports_unava
         Some(&flow),
         None,
         false,
+        0,
     )
     .expect("request");
     assert_eq!(req.expected_ports, Some((54688, 5201)));
@@ -2178,6 +2181,7 @@ fn build_live_forward_request_marks_session_fabric_redirect_for_nat_and_zone() {
         Some(&flow),
         Some(TEST_WAN_ZONE_ID),
         true,
+        0,
     )
     .expect("request");
 
@@ -2260,6 +2264,7 @@ fn build_live_forward_request_caches_target_binding_index() {
         None,
         None,
         false,
+        0,
     )
     .expect("request");
 

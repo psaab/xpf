@@ -182,6 +182,44 @@ func TestFormatStatusSummaryWorkerRuntimeRolling60sColumn(t *testing.T) {
 	}
 }
 
+func TestFormatStatusSummaryIncludesThreeColorPolicerCounters(t *testing.T) {
+	status := ProcessStatus{
+		ThreeColorPolicerCounters: []ThreeColorPolicerStatus{
+			{
+				ID:            2,
+				Name:          "wan-egress",
+				Mode:          "single-rate",
+				ColorBlind:    true,
+				GreenPackets:  10,
+				GreenBytes:    1000,
+				YellowPackets: 3,
+				YellowBytes:   300,
+				RedPackets:    2,
+				RedBytes:      200,
+				DropPackets:   2,
+				DropBytes:     200,
+			},
+		},
+	}
+
+	out := FormatStatusSummary(status)
+	for _, want := range []string{
+		"Three-color policers:",
+		"GreenPkts",
+		"wan-egress",
+		"single-rate",
+		"true",
+		"10",
+		"3",
+		"2",
+		"1000",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing three-color policer field %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestFormatStatusSummaryReportsStandbyArmedRole(t *testing.T) {
 	status := ProcessStatus{
 		ForwardingArmed: true,

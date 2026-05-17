@@ -243,6 +243,7 @@ fn build_live_forward_request_from_frame_uses_precomputed_hints() {
         None,
         None,
         false,
+        0,
         Some(hints),
         None,
     )

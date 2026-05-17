@@ -826,6 +826,8 @@ pub(crate) struct ProcessStatus {
     pub policy_rule_counters: Vec<PolicyRuleCounterStatus>,
     #[serde(rename = "filter_term_counters", default)]
     pub filter_term_counters: Vec<FirewallFilterTermCounterStatus>,
+    #[serde(rename = "three_color_policer_counters", default)]
+    pub three_color_policer_counters: Vec<ThreeColorPolicerStatus>,
     #[serde(rename = "last_resolution", skip_serializing_if = "Option::is_none")]
     pub last_resolution: Option<PacketResolution>,
     #[serde(rename = "slow_path", default)]
@@ -1071,6 +1073,34 @@ pub(crate) struct FirewallFilterTermCounterStatus {
     pub packets: u64,
     #[serde(default)]
     pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct ThreeColorPolicerStatus {
+    #[serde(default)]
+    pub id: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(rename = "color_blind", default)]
+    pub color_blind: bool,
+    #[serde(rename = "green_packets", default)]
+    pub green_packets: u64,
+    #[serde(rename = "green_bytes", default)]
+    pub green_bytes: u64,
+    #[serde(rename = "yellow_packets", default)]
+    pub yellow_packets: u64,
+    #[serde(rename = "yellow_bytes", default)]
+    pub yellow_bytes: u64,
+    #[serde(rename = "red_packets", default)]
+    pub red_packets: u64,
+    #[serde(rename = "red_bytes", default)]
+    pub red_bytes: u64,
+    #[serde(rename = "drop_packets", default)]
+    pub drop_packets: u64,
+    #[serde(rename = "drop_bytes", default)]
+    pub drop_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

@@ -13,7 +13,10 @@
 
 use super::*;
 
-pub(super) fn should_install_local_reverse_session(decision: SessionDecision, fabric_ingress: bool) -> bool {
+pub(super) fn should_install_local_reverse_session(
+    decision: SessionDecision,
+    fabric_ingress: bool,
+) -> bool {
     let fabric_wire_placeholder =
         shared_ops::is_fabric_wire_placeholder(fabric_ingress, false, decision);
     decision.resolution.disposition != ForwardingDisposition::FabricRedirect
@@ -33,6 +36,7 @@ pub(super) fn build_live_forward_request(
     flow: Option<&SessionFlow>,
     fabric_ingress_zone: Option<u16>,
     apply_nat_on_fabric: bool,
+    now_ns: u64,
 ) -> Option<PendingForwardRequest> {
     let frame = area.slice(desc.addr as usize, desc.len as usize)?;
     build_live_forward_request_from_frame(
@@ -47,6 +51,7 @@ pub(super) fn build_live_forward_request(
         flow,
         fabric_ingress_zone,
         apply_nat_on_fabric,
+        now_ns,
         None,
         None,
     )
@@ -64,6 +69,7 @@ pub(super) fn build_live_forward_request_from_frame(
     flow: Option<&SessionFlow>,
     fabric_ingress_zone: Option<u16>,
     apply_nat_on_fabric: bool,
+    now_ns: u64,
     hints: Option<PendingForwardHints>,
     precomputed_tx_selection: Option<&CachedTxSelectionDescriptor>,
 ) -> Option<PendingForwardRequest> {
@@ -107,15 +113,20 @@ pub(super) fn build_live_forward_request_from_frame(
         .map(|selection| CoSTxSelection {
             queue_id: selection.queue_id,
             dscp_rewrite: selection.dscp_rewrite,
+            drop: false,
         })
         .unwrap_or_else(|| {
-            resolve_cos_tx_selection(
+            resolve_cos_tx_selection_at(
                 forwarding,
                 decision.resolution.egress_ifindex,
                 meta,
                 flow.map(|flow| &flow.forward_key),
+                now_ns,
             )
         });
+    if cos.drop {
+        return None;
+    }
     Some(PendingForwardRequest {
         target_ifindex,
         target_binding_index,

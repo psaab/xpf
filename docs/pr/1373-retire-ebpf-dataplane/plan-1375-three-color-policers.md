@@ -5,6 +5,33 @@
 Add userspace support for Junos three-color policers so configs under
 `firewall three-color-policer` no longer require the eBPF dataplane.
 
+## Current Status
+
+The bounded runtime slice is implemented after #1395:
+
+- Rust compiles three-color policer snapshots into stable name-sorted runtime
+  IDs and links filter terms to shared runtime handles.
+- Live forwarding-path TX selection meters srTCM/trTCM policers, applies red
+  drops for `then discard`, and records green/yellow/red/drop packet and byte
+  counters.
+- Flow-cache hits carry cached policer handles and meter them before cached
+  forwarding.
+- Rust status, Go protocol, status formatting, and Prometheus expose
+  per-color/drop counters.
+- `deriveUserspaceCapabilities()` admits `firewall three-color-policer`
+  configs.
+
+Remaining #1375 work is validation and hardening rather than admission:
+
+- Replace the per-policer mutex runtime with the approved sharded or packed
+  atomic state if throughput testing shows contention.
+- Preserve counters and token state across snapshot rebuilds if operator
+  continuity is required for #1373 removal.
+- Wire non-drop per-color actions, especially loss-priority propagation, into
+  the downstream forwarding/CoS path.
+- Run integration traffic, failover, and performance evidence for
+  green/yellow/red classification and red drops.
+
 ## Dependencies
 
 - #1381 should land first so userspace capability removal and snapshot delivery
@@ -36,11 +63,13 @@ color.
 
 - Flow-cache hits still execute the policer before forwarding.
 - No `f64` token math in the dataplane.
-- No `FxHashMap<String, PolicerState>` mutable hot-path lookup as the final
-  production model; use stable rule IDs with sharded or packed atomic state.
+- No `FxHashMap<String, PolicerState>` mutable hot-path lookup. The current
+  runtime uses stable name-sorted IDs with shared handles; sharded or packed
+  atomic state remains the scaling follow-up.
 - Per-color DSCP rewrite and red drop decisions happen in the same forwarding
   decision that accounts tokens.
-- Per-color counters are updated without central hot atomics.
+- Per-color counters are attached to the stable policer runtime. The current
+  counters use relaxed atomics per logical policer/color.
 
 ## State and HA Behavior
 
@@ -49,8 +78,8 @@ color.
   adds token sync.
 - Config snapshots carry stable policer/rule identity so counters can survive
   snapshot rebuilds where practical.
-- Status exposes green/yellow/red packet and byte counters, DSCP rewrites, and
-  red drops through Rust status, Go protocol, CLI, and Prometheus.
+- Status exposes green/yellow/red packet and byte counters plus red drops
+  through Rust status, Go protocol, CLI, and Prometheus.
 
 ## Risks
 
@@ -61,9 +90,9 @@ color.
   preserving one logical bucket per configured policer identity.
 - Color semantics: color-aware mode must never promote incoming yellow/red
   traffic; one wrong branch turns a security control into a bandwidth grant.
-- Counter attribution: green/yellow/red/drop counters must survive snapshot
-  rebuilds by stable identity, or operators cannot audit policer behavior after
-  commits.
+- Counter attribution: green/yellow/red/drop counters are stable inside a
+  compiled runtime. Carrying them across snapshot rebuilds remains a follow-up
+  if operators need continuity across commits.
 
 ## Exact Tests
 
@@ -74,14 +103,16 @@ color.
 - Cargo: `policer::color_blind_ignores_incoming_color`.
 - Cargo: `policer::u128_bucket_math_boundary_inputs`.
 - Cargo: `policer::three_color_dscp_rewrite`.
-- Cargo: `policer::flow_cache_hits_run_policer`.
+- Cargo: `filter::tests::three_color_runtime_ids_and_miss_path_counters_are_stable`.
+- Cargo: `filter::tests::flow_cache_hits_run_three_color_policer`.
 - Go: userspace snapshot round-trip for three-color policer fields, per-color
   actions, and `ColorBlind`.
 - Go: compiler validation rejects zero rates/bursts, `PIR < CIR`, and
   `PBS < CBS`.
-- Go: `deriveUserspaceCapabilities()` admits three-color policer configs only
-  after the userspace snapshot and Rust runtime support are wired, and rejects
-  them before that point.
+- Go: `deriveUserspaceCapabilities()` admits three-color policer configs after
+  the userspace snapshot and Rust runtime support are wired.
+- Go: ProcessStatus, status formatting, and Prometheus tests cover
+  three-color per-color/drop counters.
 - Integration: controlled-rate traffic against userspace cluster verifies
   green/yellow/red classification, DSCP rewrite, red drop behavior, and
   per-color counters.

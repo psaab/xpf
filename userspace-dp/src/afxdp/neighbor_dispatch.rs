@@ -183,12 +183,17 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
-        let cos = resolve_cos_tx_selection(
+        let cos = resolve_cos_tx_selection_at(
             forwarding,
             decision.resolution.egress_ifindex,
             pkt.meta,
-            None,
+            pkt.flow_key.as_deref(),
+            now_ns,
         );
+        if cos.drop {
+            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+            continue;
+        }
         let req = PreparedTxRequest {
             offset: rewrite_result.offset,
             len: rewrite_result.len,
@@ -200,7 +205,7 @@ pub(super) fn retry_pending_neigh(
             expected_ports: None,
             expected_addr_family: pkt.meta.addr_family,
             expected_protocol: pkt.meta.protocol,
-            flow_key: None,
+            flow_key: pkt.flow_key.as_deref().cloned(),
             egress_ifindex: decision.resolution.egress_ifindex,
             cos_queue_id: cos.queue_id,
             dscp_rewrite: cos.dscp_rewrite,

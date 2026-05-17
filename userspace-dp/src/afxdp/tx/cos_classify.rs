@@ -10,6 +10,7 @@ use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 pub(in crate::afxdp) struct CoSTxSelection {
     pub(in crate::afxdp) queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
+    pub(in crate::afxdp) drop: bool,
 }
 
 fn map_cached_forwarding_class_queue(
@@ -31,6 +32,7 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
             queue_id: iface.map(|iface| iface.default_queue),
             dscp_rewrite: None,
             filter_counter: None,
+            three_color_policers: Vec::new(),
         };
     };
 
@@ -42,7 +44,13 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
     );
     let has_input_tx_selection =
         crate::filter::filter_state_has_input_tx_selection(&forwarding.filter_state, is_v6);
-    if iface.is_none() && !has_output_tx_eval && !has_input_tx_selection {
+    let has_input_three_color_policer =
+        crate::filter::filter_state_has_input_three_color_policer(&forwarding.filter_state, is_v6);
+    if iface.is_none()
+        && !has_output_tx_eval
+        && !has_input_tx_selection
+        && !has_input_three_color_policer
+    {
         return CachedTxSelectionDescriptor::default();
     }
     let output_filter = if has_output_tx_eval {
@@ -63,7 +71,11 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
         None
     };
     let output_result = output_filter
-        .filter(|filter| filter.affects_tx_selection || filter.has_counter_terms)
+        .filter(|filter| {
+            filter.affects_tx_selection
+                || filter.has_counter_terms
+                || filter.has_three_color_policer_terms
+        })
         .map(|filter| {
             crate::filter::evaluate_filter_ref_tx_selection_cached(
                 filter,
@@ -80,8 +92,9 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
     let mut effective_dscp_rewrite = output_result.dscp_rewrite;
     let mut forwarding_class = output_result.forwarding_class.clone();
     let mut filter_counter = output_result.counter.clone();
+    let mut three_color_policers = output_result.three_color_policers;
 
-    if output_filter.is_none() && has_input_tx_selection {
+    if (output_filter.is_none() && has_input_tx_selection) || has_input_three_color_policer {
         let ingress_ifindex = resolve_ingress_logical_ifindex(
             forwarding,
             meta.ingress_ifindex as i32,
@@ -101,7 +114,10 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
                 .get(&ingress_ifindex)
                 .map(Arc::as_ref)
         };
-        if let Some(ingress_filter) = ingress_filter.filter(|filter| filter.affects_tx_selection) {
+        if let Some(ingress_filter) = ingress_filter.filter(|filter| {
+            (output_filter.is_none() && filter.affects_tx_selection)
+                || filter.has_three_color_policer_terms
+        }) {
             let ingress_result = crate::filter::evaluate_filter_ref_tx_selection_cached(
                 ingress_filter,
                 flow_key.src_ip,
@@ -112,8 +128,11 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
                 meta.dscp,
             );
             effective_dscp_rewrite = effective_dscp_rewrite.or(ingress_result.dscp_rewrite);
-            forwarding_class = ingress_result.forwarding_class;
-            filter_counter = ingress_result.counter;
+            if output_filter.is_none() {
+                forwarding_class = ingress_result.forwarding_class;
+                filter_counter = ingress_result.counter;
+            }
+            three_color_policers.extend(ingress_result.three_color_policers);
         }
     }
 
@@ -134,6 +153,7 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
         queue_id,
         dscp_rewrite: effective_dscp_rewrite,
         filter_counter,
+        three_color_policers,
     }
 }
 
@@ -152,6 +172,26 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
     meta: impl Into<ForwardPacketMeta>,
     flow_key: Option<&SessionKey>,
 ) -> CoSTxSelection {
+    resolve_cos_tx_selection_internal(forwarding, egress_ifindex, meta, flow_key, None)
+}
+
+pub(in crate::afxdp) fn resolve_cos_tx_selection_at(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+    meta: impl Into<ForwardPacketMeta>,
+    flow_key: Option<&SessionKey>,
+    now_ns: u64,
+) -> CoSTxSelection {
+    resolve_cos_tx_selection_internal(forwarding, egress_ifindex, meta, flow_key, Some(now_ns))
+}
+
+fn resolve_cos_tx_selection_internal(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+    meta: impl Into<ForwardPacketMeta>,
+    flow_key: Option<&SessionKey>,
+    now_ns: Option<u64>,
+) -> CoSTxSelection {
     let meta = meta.into();
     let tx_selection_enabled = if meta.addr_family as i32 == libc::AF_INET6 {
         forwarding.tx_selection_enabled_v6
@@ -166,6 +206,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
         return CoSTxSelection {
             queue_id: iface.map(|iface| iface.default_queue),
             dscp_rewrite: None,
+            drop: false,
         };
     };
     let is_v6 = meta.addr_family as i32 == libc::AF_INET6;
@@ -176,10 +217,17 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
     );
     let has_input_tx_selection =
         crate::filter::filter_state_has_input_tx_selection(&forwarding.filter_state, is_v6);
-    if iface.is_none() && !has_output_tx_eval && !has_input_tx_selection {
+    let has_input_three_color_policer =
+        crate::filter::filter_state_has_input_three_color_policer(&forwarding.filter_state, is_v6);
+    if iface.is_none()
+        && !has_output_tx_eval
+        && !has_input_tx_selection
+        && !has_input_three_color_policer
+    {
         return CoSTxSelection {
             queue_id: None,
             dscp_rewrite: None,
+            drop: false,
         };
     }
     let output_filter = if has_output_tx_eval {
@@ -200,69 +248,108 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
         None
     };
     let has_output_filter = output_filter.is_some();
-    let ingress_ifindex = if !has_output_filter && has_input_tx_selection {
-        resolve_ingress_logical_ifindex(
-            forwarding,
-            meta.ingress_ifindex as i32,
-            meta.ingress_vlan_id,
-        )
-        .unwrap_or(meta.ingress_ifindex as i32)
-    } else {
-        0
-    };
-    let ingress_filter = if !has_output_filter && has_input_tx_selection {
-        if is_v6 {
-            forwarding
-                .filter_state
-                .iface_filter_v6_fast
-                .get(&ingress_ifindex)
-                .map(Arc::as_ref)
+    let ingress_ifindex =
+        if (!has_output_filter && has_input_tx_selection) || has_input_three_color_policer {
+            resolve_ingress_logical_ifindex(
+                forwarding,
+                meta.ingress_ifindex as i32,
+                meta.ingress_vlan_id,
+            )
+            .unwrap_or(meta.ingress_ifindex as i32)
         } else {
-            forwarding
-                .filter_state
-                .iface_filter_v4_fast
-                .get(&ingress_ifindex)
-                .map(Arc::as_ref)
+            0
+        };
+    let ingress_filter =
+        if (!has_output_filter && has_input_tx_selection) || has_input_three_color_policer {
+            if is_v6 {
+                forwarding
+                    .filter_state
+                    .iface_filter_v6_fast
+                    .get(&ingress_ifindex)
+                    .map(Arc::as_ref)
+            } else {
+                forwarding
+                    .filter_state
+                    .iface_filter_v4_fast
+                    .get(&ingress_ifindex)
+                    .map(Arc::as_ref)
+            }
+        } else {
+            None
+        };
+    let output_result = if let Some(output_filter) = output_filter.filter(|filter| {
+        filter.affects_tx_selection
+            || filter.has_counter_terms
+            || filter.has_three_color_policer_terms
+    }) {
+        if let Some(now_ns) = now_ns {
+            crate::filter::evaluate_filter_ref_tx_selection_runtime_counted(
+                output_filter,
+                flow_key.src_ip,
+                flow_key.dst_ip,
+                flow_key.protocol,
+                flow_key.src_port,
+                flow_key.dst_port,
+                meta.dscp,
+                meta.pkt_len as u64,
+                now_ns,
+            )
+        } else {
+            crate::filter::evaluate_filter_ref_tx_selection_counted(
+                output_filter,
+                flow_key.src_ip,
+                flow_key.dst_ip,
+                flow_key.protocol,
+                flow_key.src_port,
+                flow_key.dst_port,
+                meta.dscp,
+                meta.pkt_len as u64,
+            )
         }
-    } else {
-        None
-    };
-    let output_result = if let Some(output_filter) =
-        output_filter.filter(|filter| filter.affects_tx_selection || filter.has_counter_terms)
-    {
-        crate::filter::evaluate_filter_ref_tx_selection_counted(
-            output_filter,
-            flow_key.src_ip,
-            flow_key.dst_ip,
-            flow_key.protocol,
-            flow_key.src_port,
-            flow_key.dst_port,
-            meta.dscp,
-            meta.pkt_len as u64,
-        )
     } else {
         crate::filter::TxSelectionFilterResult::default()
     };
     let mut effective_dscp_rewrite = output_result.dscp_rewrite;
+    let mut policer_drop = output_result.policer_drop;
     let mut ingress_forwarding_class = None;
-    if let Some(ingress_filter) = ingress_filter.filter(|filter| filter.affects_tx_selection) {
-        let ingress_result = crate::filter::evaluate_filter_ref_tx_selection_counted(
-            ingress_filter,
-            flow_key.src_ip,
-            flow_key.dst_ip,
-            flow_key.protocol,
-            flow_key.src_port,
-            flow_key.dst_port,
-            meta.dscp,
-            meta.pkt_len as u64,
-        );
+    if let Some(ingress_filter) = ingress_filter.filter(|filter| {
+        (!has_output_filter && filter.affects_tx_selection) || filter.has_three_color_policer_terms
+    }) {
+        let ingress_result = if let Some(now_ns) = now_ns {
+            crate::filter::evaluate_filter_ref_tx_selection_runtime_counted(
+                ingress_filter,
+                flow_key.src_ip,
+                flow_key.dst_ip,
+                flow_key.protocol,
+                flow_key.src_port,
+                flow_key.dst_port,
+                meta.dscp,
+                meta.pkt_len as u64,
+                now_ns,
+            )
+        } else {
+            crate::filter::evaluate_filter_ref_tx_selection_counted(
+                ingress_filter,
+                flow_key.src_ip,
+                flow_key.dst_ip,
+                flow_key.protocol,
+                flow_key.src_port,
+                flow_key.dst_port,
+                meta.dscp,
+                meta.pkt_len as u64,
+            )
+        };
         effective_dscp_rewrite = effective_dscp_rewrite.or(ingress_result.dscp_rewrite);
-        ingress_forwarding_class = ingress_result.forwarding_class;
+        policer_drop |= ingress_result.policer_drop;
+        if !has_output_filter {
+            ingress_forwarding_class = ingress_result.forwarding_class;
+        }
     }
     let Some(iface) = iface else {
         return CoSTxSelection {
             queue_id: None,
             dscp_rewrite: effective_dscp_rewrite,
+            drop: policer_drop,
         };
     };
     if let Some(forwarding_class) = output_result.forwarding_class {
@@ -270,6 +357,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
             return CoSTxSelection {
                 queue_id: Some(*queue_id),
                 dscp_rewrite: effective_dscp_rewrite,
+                drop: policer_drop,
             };
         }
     }
@@ -278,6 +366,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
             return CoSTxSelection {
                 queue_id: Some(*queue_id),
                 dscp_rewrite: effective_dscp_rewrite,
+                drop: policer_drop,
             };
         }
     }
@@ -285,6 +374,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
         return CoSTxSelection {
             queue_id: Some(queue_id),
             dscp_rewrite: effective_dscp_rewrite,
+            drop: policer_drop,
         };
     }
     if let Some(queue_id) = resolve_cos_ieee8021_classifier_queue_id(
@@ -295,11 +385,13 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
         return CoSTxSelection {
             queue_id: Some(queue_id),
             dscp_rewrite: effective_dscp_rewrite,
+            drop: policer_drop,
         };
     }
     CoSTxSelection {
         queue_id: Some(iface.default_queue),
         dscp_rewrite: effective_dscp_rewrite,
+        drop: policer_drop,
     }
 }
 

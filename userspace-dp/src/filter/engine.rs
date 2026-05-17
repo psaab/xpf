@@ -94,6 +94,55 @@ pub(crate) fn evaluate_filter_ref_tx_selection_counted<'a>(
     dscp: u8,
     packet_bytes: u64,
 ) -> TxSelectionFilterResult<'a> {
+    evaluate_filter_ref_tx_selection_runtime(
+        filter,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        dscp,
+        packet_bytes,
+        None,
+    )
+}
+
+pub(crate) fn evaluate_filter_ref_tx_selection_runtime_counted<'a>(
+    filter: &'a Filter,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    packet_bytes: u64,
+    now_ns: u64,
+) -> TxSelectionFilterResult<'a> {
+    evaluate_filter_ref_tx_selection_runtime(
+        filter,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        dscp,
+        packet_bytes,
+        Some(now_ns),
+    )
+}
+
+#[inline]
+fn evaluate_filter_ref_tx_selection_runtime<'a>(
+    filter: &'a Filter,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    packet_bytes: u64,
+    now_ns: Option<u64>,
+) -> TxSelectionFilterResult<'a> {
     match (src_ip, dst_ip) {
         (IpAddr::V4(src), IpAddr::V4(dst)) => evaluate_filter_ref_tx_selection_counted_v4(
             filter,
@@ -104,6 +153,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_counted<'a>(
             dst_port,
             dscp,
             packet_bytes,
+            now_ns,
         ),
         (IpAddr::V6(src), IpAddr::V6(dst)) => evaluate_filter_ref_tx_selection_counted_v6(
             filter,
@@ -114,6 +164,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_counted<'a>(
             dst_port,
             dscp,
             packet_bytes,
+            now_ns,
         ),
         _ => TxSelectionFilterResult::default(),
     }
@@ -209,6 +260,7 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
     dst_port: u16,
     dscp: u8,
     packet_bytes: u64,
+    now_ns: Option<u64>,
 ) -> TxSelectionFilterResult<'a> {
     for term in &filter.terms {
         if !term_matches_v4(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp) {
@@ -217,10 +269,12 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
         if term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
+        let policer_action = apply_term_three_color_policer(term, now_ns, packet_bytes);
         return TxSelectionFilterResult {
             forwarding_class: (!term.forwarding_class.is_empty())
                 .then_some(term.forwarding_class.as_ref()),
-            dscp_rewrite: term.dscp_rewrite,
+            dscp_rewrite: policer_action.dscp_rewrite.or(term.dscp_rewrite),
+            policer_drop: policer_action.drop,
         };
     }
     TxSelectionFilterResult::default()
@@ -236,6 +290,7 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
     dst_port: u16,
     dscp: u8,
     packet_bytes: u64,
+    now_ns: Option<u64>,
 ) -> TxSelectionFilterResult<'a> {
     for term in &filter.terms {
         if !term_matches_v6(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp) {
@@ -244,13 +299,48 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
         if term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
+        let policer_action = apply_term_three_color_policer(term, now_ns, packet_bytes);
         return TxSelectionFilterResult {
             forwarding_class: (!term.forwarding_class.is_empty())
                 .then_some(term.forwarding_class.as_ref()),
-            dscp_rewrite: term.dscp_rewrite,
+            dscp_rewrite: policer_action.dscp_rewrite.or(term.dscp_rewrite),
+            policer_drop: policer_action.drop,
         };
     }
     TxSelectionFilterResult::default()
+}
+
+#[inline]
+fn apply_term_three_color_policer(
+    term: &FilterTerm,
+    now_ns: Option<u64>,
+    packet_bytes: u64,
+) -> ThreeColorPolicerAction {
+    let Some(runtime) = term.three_color_policer.as_ref() else {
+        return ThreeColorPolicerAction::default();
+    };
+    let Some(now_ns) = now_ns else {
+        return ThreeColorPolicerAction::default();
+    };
+    let decision = runtime.meter(now_ns, packet_bytes, PacketColor::Green);
+    ThreeColorPolicerAction {
+        dscp_rewrite: decision.dscp_rewrite,
+        drop: decision.drop,
+    }
+}
+
+pub(crate) fn apply_cached_three_color_policers(
+    policers: &[Arc<ThreeColorPolicerRuntime>],
+    now_ns: u64,
+    packet_bytes: u64,
+) -> ThreeColorPolicerAction {
+    let mut action = ThreeColorPolicerAction::default();
+    for policer in policers {
+        let decision = policer.meter(now_ns, packet_bytes, PacketColor::Green);
+        action.dscp_rewrite = action.dscp_rewrite.or(decision.dscp_rewrite);
+        action.drop |= decision.drop;
+    }
+    action
 }
 
 fn evaluate_filter_ref_tx_selection_cached_v4(
@@ -271,6 +361,7 @@ fn evaluate_filter_ref_tx_selection_cached_v4(
                 .then(|| term.forwarding_class.clone()),
             dscp_rewrite: term.dscp_rewrite,
             counter: term.has_count.then(|| term.counter.clone()),
+            three_color_policers: term.three_color_policer.iter().cloned().collect(),
         };
     }
     CachedTxSelectionFilterResult::default()
@@ -294,6 +385,7 @@ fn evaluate_filter_ref_tx_selection_cached_v6(
                 .then(|| term.forwarding_class.clone()),
             dscp_rewrite: term.dscp_rewrite,
             counter: term.has_count.then(|| term.counter.clone()),
+            three_color_policers: term.three_color_policer.iter().cloned().collect(),
         };
     }
     CachedTxSelectionFilterResult::default()
@@ -628,6 +720,14 @@ pub(crate) fn interface_filter_affects_tx_selection(
     }
 }
 
+pub(crate) fn filter_state_has_input_three_color_policer(state: &FilterState, is_v6: bool) -> bool {
+    if is_v6 {
+        state.has_input_three_color_policer_v6
+    } else {
+        state.has_input_three_color_policer_v4
+    }
+}
+
 pub(crate) fn interface_filter_affects_route_lookup(
     state: &FilterState,
     ifindex: i32,
@@ -762,4 +862,3 @@ fn term_matches_v6(
     }
     true
 }
-

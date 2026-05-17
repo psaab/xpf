@@ -35,6 +35,7 @@ These capabilities exist in the current Rust userspace dataplane code path:
 | NPTv6 | Implemented | Stateless prefix translation |
 | Firewall filters | Implemented | Filter snapshots and evaluation in Rust |
 | Flow export | Implemented | Userspace flow export snapshot and runtime |
+| Three-color policers | Implemented with caveats | srTCM/trTCM runtime, forwarding-path and flow-cache-hit metering, red drops for `then discard`, status/CLI/Prometheus counters. Sharded state, cross-snapshot continuity, non-drop color actions, and integration evidence remain #1375 follow-up work. |
 | TCP MSS clamping | Implemented | Flow snapshot fields are delivered and used in Rust |
 | Embedded ICMP NAT reversal | Implemented | Includes reverse-session repair paths |
 | Configurable session timeouts | Implemented | Snapshot-driven timeouts in `session.rs` |
@@ -52,7 +53,6 @@ These are the remaining explicit configuration gates in
 |----------------------|-------------|--------------------|
 | Unsupported policy shapes | Gated | Address/application expansion must succeed for userspace |
 | Screen behavior requiring SYN cookies | Gated; userspace screen runtime has fail-closed cookie challenge/ACK-validation/cache scaffolding, but no HA key publication or SYN-ACK/RST TX yet | #1374 |
-| Three-color policers | Gated | #1375 |
 | Port mirroring | Gated; partial runtime | #1376 still needs full path coverage and integration evidence before the gate is removed |
 
 Port mirroring now has snapshot/wire plumbing plus a bounded forwarded-path
@@ -87,7 +87,7 @@ The current #1373 audit produced these tracked blockers:
 | #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds and strict missing-scheduler commit behavior landed in the 2026-05-17 closeout slice; remaining blocker is integration/failover validation evidence | Phase 4 BPF source removal |
 | #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393 and the 2026-05-17 runtime slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, and a bounded validated-client cache. Lower-layer coverage in `userspace-dp/src/screen_tests.rs` pins 4-way validated-client cache replacement; poll-stage tests only pin the operational invalid-ACK drop/bypass semantics. Remaining: validated-client cache expiration semantics, secret-epoch rotation, bounded SYN-ACK TX, ACK RST emission, HA-safe secret publication/cache survivability, counters/status, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
-| #1375 | Implement userspace RFC 2697/2698 three-color policers | Phase 4 BPF source removal |
+| #1375 | Finish userspace RFC 2697/2698 three-color policer hardening: sharded/packed state decision, cross-snapshot counter continuity decision, non-drop color action handling, and integration/failover/performance evidence | Phase 4 BPF source removal |
 | #1376 | Implement userspace port mirroring or explicitly retire the feature | Phase 4 BPF source removal |
 | #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface. Userspace now renders the bounded helper status that exists; only optional new helper capacity denominators for session-table / flow-cache / neighbor-cache fill remain undecided. | Phase 5 CLI / observability cleanup |
 
@@ -101,11 +101,11 @@ Recommended dependency order:
    userspace-v1 selector plus mixed-backend rollback boundary, but per-pool
    `persistent-nat` and allocator exhaustion counters remain #1377 runtime
    gaps. #1378 is no longer missing basic userspace propagation after #1396,
-   and the 2026-05-17 closeout slice added counter continuity plus strict
-   missing-scheduler commit rejection; keep it open for the remaining
-   integration/HA failover evidence.
-3. #1374, #1375, and #1376 before Phase 4, because these are explicit feature
-   gaps currently protected by the legacy eBPF fallback.
+   but its remaining counter/validation/evidence contract still blocks BPF
+   source removal.
+3. #1374 and #1376 before Phase 4, because these are explicit feature gaps
+   currently protected by the legacy eBPF fallback. Keep #1375 on the Phase 4
+   list for validation and hardening evidence, not as a capability gate.
 4. #1380 in Phase 5, after the dataplane boundary is settled but before the
    remaining operator-facing BPF map surface disappears.
 
@@ -149,9 +149,11 @@ The highest-value remaining work on current `master` is:
 2. fix #1377 and #1379 to remove silent correctness and visibility
    regressions; keep #1385 plus the userspace-v1 fixtures as evidence of the
    current AF_XDP SNAT pool selector, not full persistent-NAT parity. Keep
-   #1378 open only for the remaining policy-scheduler integration/HA failover
-   evidence.
-3. close #1374, #1375, and #1376 before any BPF source removal
+   #1378 open for the remaining policy-scheduler counter/validation/evidence
+   contract after #1396.
+3. close #1374 and #1376 before any BPF source removal, and finish the #1375
+   hardening/evidence checklist now that the three-color capability gate is
+   removed
 4. carry the narrowed #1380 denominator decision into Phase 5; the current
    userspace command already avoids BPF-map fallback when helper status is
    available

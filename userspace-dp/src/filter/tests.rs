@@ -12,6 +12,13 @@ fn make_filter_state(
     parse_filter_state(filters, policers, &[], "", "")
 }
 
+fn make_filter_state_with_three_color(
+    filters: &[FirewallFilterSnapshot],
+    three_color_policers: &[ThreeColorPolicerSnapshot],
+) -> FilterState {
+    parse_filter_state_with_three_color(filters, &[], three_color_policers, &[], "", "")
+}
+
 #[test]
 fn basic_accept_discard() {
     let state = make_filter_state(
@@ -291,6 +298,138 @@ fn token_bucket_policer() {
     // After 1 second, tokens should have refilled
     let conforming = policer.consume(1_000_000_000, 1000);
     assert!(conforming, "packet after refill should conform");
+}
+
+#[test]
+fn three_color_runtime_ids_and_miss_path_counters_are_stable() {
+    let state = make_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "policed".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "meter".into(),
+                action: "accept".into(),
+                policer: "alpha".into(),
+                ..Default::default()
+            }],
+        }],
+        &[
+            ThreeColorPolicerSnapshot {
+                name: "zeta".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+            ThreeColorPolicerSnapshot {
+                name: "alpha".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ],
+    );
+
+    let ids = state
+        .three_color_policers
+        .iter()
+        .map(|runtime| (runtime.id, runtime.name.as_ref().to_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![(1, "alpha".into()), (2, "zeta".into())]);
+
+    let filter = state.filters.get("inet:policed").unwrap();
+    assert!(filter.has_three_color_policer_terms);
+    let first = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        100,
+        0,
+    );
+    assert!(!first.policer_drop);
+
+    let second = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        51,
+        0,
+    );
+    assert!(second.policer_drop);
+
+    let status = state.three_color_policer_statuses();
+    let alpha = status.iter().find(|item| item.name == "alpha").unwrap();
+    assert_eq!(alpha.mode, "single-rate");
+    assert!(alpha.color_blind);
+    assert_eq!(alpha.green_packets, 1);
+    assert_eq!(alpha.green_bytes, 100);
+    assert_eq!(alpha.red_packets, 1);
+    assert_eq!(alpha.red_bytes, 51);
+    assert_eq!(alpha.drop_packets, 1);
+    assert_eq!(alpha.drop_bytes, 51);
+}
+
+#[test]
+fn flow_cache_hits_run_three_color_policer() {
+    let state = make_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "policed".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "meter".into(),
+                action: "accept".into(),
+                policer: "cache-pol".into(),
+                ..Default::default()
+            }],
+        }],
+        &[ThreeColorPolicerSnapshot {
+            name: "cache-pol".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 100,
+            peak_or_excess_burst_bytes: 50,
+            then_action: "discard".into(),
+            ..Default::default()
+        }],
+    );
+
+    let filter = state.filters.get("inet:policed").unwrap();
+    let cached = evaluate_filter_ref_tx_selection_cached(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+    );
+    assert_eq!(cached.three_color_policers.len(), 1);
+
+    let first = apply_cached_three_color_policers(&cached.three_color_policers, 0, 100);
+    assert!(!first.drop);
+    let second = apply_cached_three_color_policers(&cached.three_color_policers, 0, 51);
+    assert!(second.drop);
+
+    let status = state.three_color_policer_statuses();
+    assert_eq!(status[0].green_packets, 1);
+    assert_eq!(status[0].red_packets, 1);
+    assert_eq!(status[0].drop_packets, 1);
 }
 
 #[test]

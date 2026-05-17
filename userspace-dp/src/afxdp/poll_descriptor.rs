@@ -179,6 +179,21 @@ pub(super) fn poll_binding_process_descriptor(
                                         meta.pkt_len as u64,
                                     );
                                 }
+                                let mut cached_tx_selection =
+                                    cached_descriptor.tx_selection.clone();
+                                let policer_action =
+                                    crate::filter::apply_cached_three_color_policers(
+                                        &cached_tx_selection.three_color_policers,
+                                        now_ns,
+                                        meta.pkt_len as u64,
+                                    );
+                                if policer_action.drop {
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                                cached_tx_selection.dscp_rewrite = policer_action
+                                    .dscp_rewrite
+                                    .or(cached_tx_selection.dscp_rewrite);
                                 // Amortize session timestamp touch — every 64 cache hits.
                                 binding.flow.flow_cache_session_touch += 1;
                                 if binding.flow.flow_cache_session_touch & 63 == 0 {
@@ -374,12 +389,8 @@ pub(super) fn poll_binding_process_descriptor(
                                                     egress_ifindex: cached_decision
                                                         .resolution
                                                         .egress_ifindex,
-                                                    cos_queue_id: cached_descriptor
-                                                        .tx_selection
-                                                        .queue_id,
-                                                    dscp_rewrite: cached_descriptor
-                                                        .tx_selection
-                                                        .dscp_rewrite,
+                                                    cos_queue_id: cached_tx_selection.queue_id,
+                                                    dscp_rewrite: cached_tx_selection.dscp_rewrite,
                                                     mirror_clone: false,
                                                 },
                                             );
@@ -407,11 +418,12 @@ pub(super) fn poll_binding_process_descriptor(
                                                 Some(flow),
                                                 Some(cached_metadata.ingress_zone),
                                                 cached_descriptor.apply_nat_on_fabric,
+                                                now_ns,
                                                 Some(PendingForwardHints {
                                                     expected_ports,
                                                     target_binding_index: target_bi,
                                                 }),
-                                                Some(&cached_descriptor.tx_selection),
+                                                Some(&cached_tx_selection),
                                             )
                                         {
                                             request.frame = owned_packet_frame
@@ -590,6 +602,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     Some(flow),
                                     None,
                                     false,
+                                    now_ns,
                                     None,
                                     None,
                                 ) {
@@ -1822,6 +1835,7 @@ pub(super) fn poll_binding_process_descriptor(
                             flow.as_ref(),
                             session_ingress_zone,
                             apply_nat_on_fabric,
+                            now_ns,
                             None,
                             None,
                         ) {
@@ -2142,6 +2156,9 @@ pub(super) fn poll_binding_process_descriptor(
                                         desc,
                                         meta,
                                         decision: pending_decision,
+                                        flow_key: flow
+                                            .as_ref()
+                                            .map(|flow| Box::new(flow.forward_key.clone())),
                                         queued_ns: now_ns,
                                         probe_attempts: 0,
                                     });

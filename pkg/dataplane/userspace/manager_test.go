@@ -2212,8 +2212,8 @@ func TestDeriveUserspaceCapabilitiesDetectsFirewallFeatures(t *testing.T) {
 	cfg.Security.Zones = map[string]*config.ZoneConfig{"trust": {Name: "trust"}}
 	cfg.Security.NAT.Source = []*config.NATRuleSet{{Name: "src"}}
 	cfg.Security.Flow.AllowDNSReply = true
-	// Firewall filters (inet/inet6) and single-rate policers are now supported.
-	// Only three-color policers remain unsupported.
+	// Firewall filters (inet/inet6), single-rate policers, and three-color
+	// policers are now supported.
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{"f1": {Name: "f1"}}
 	cfg.Services.FlowMonitoring = &config.FlowMonitoringConfig{}
 
@@ -2223,28 +2223,19 @@ func TestDeriveUserspaceCapabilitiesDetectsFirewallFeatures(t *testing.T) {
 	}
 }
 
-func TestDeriveUserspaceCapabilitiesGatesThreeColorPolicers(t *testing.T) {
+func TestDeriveUserspaceCapabilitiesAdmitsThreeColorPolicers(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.ThreeColorPolicers = map[string]*config.ThreeColorPolicerConfig{
 		"tcp1": {Name: "tcp1", CIR: 1000000, CBS: 50000},
 	}
 
 	caps := deriveUserspaceCapabilities(cfg)
-	if caps.ForwardingSupported {
-		t.Fatal("ForwardingSupported = true, want false for three-color policers")
-	}
-	found := false
-	for _, r := range caps.UnsupportedReasons {
-		if r == "three-color policers are not implemented in the userspace dataplane" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected three-color policer unsupported reason, got: %+v", caps.UnsupportedReasons)
+	if !caps.ForwardingSupported {
+		t.Fatalf("ForwardingSupported = false, want true for three-color policers. Reasons: %+v", caps.UnsupportedReasons)
 	}
 }
 
-func TestBuildSnapshotIncludesThreeColorPolicerSchemaWhileGateClosed(t *testing.T) {
+func TestBuildSnapshotIncludesThreeColorPolicerSchema(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.ThreeColorPolicers = map[string]*config.ThreeColorPolicerConfig{
 		"sr": {
@@ -2267,8 +2258,8 @@ func TestBuildSnapshotIncludesThreeColorPolicerSchemaWhileGateClosed(t *testing.
 	}
 
 	snap := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
-	if snap.Capabilities.ForwardingSupported {
-		t.Fatal("ForwardingSupported = true, want three-color policers to remain fail-closed")
+	if !snap.Capabilities.ForwardingSupported {
+		t.Fatalf("ForwardingSupported = false, want three-color policers admitted. Reasons: %+v", snap.Capabilities.UnsupportedReasons)
 	}
 	want := []ThreeColorPolicerSnapshot{
 		{

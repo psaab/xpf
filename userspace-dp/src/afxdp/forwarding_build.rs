@@ -396,9 +396,10 @@ pub(super) fn build_forwarding_state_with_policy_counters(
     state.tcp_mss_gre_in = snapshot.flow.tcp_mss_gre_in;
     state.tcp_mss_gre_out = snapshot.flow.tcp_mss_gre_out;
     // Build filter state from snapshot
-    state.filter_state = crate::filter::parse_filter_state(
+    state.filter_state = crate::filter::parse_filter_state_with_three_color(
         &snapshot.filters,
         &snapshot.policers,
+        &snapshot.three_color_policers,
         &snapshot.interfaces,
         &snapshot.flow.lo0_filter_input_v4,
         &snapshot.flow.lo0_filter_input_v6,
@@ -407,10 +408,20 @@ pub(super) fn build_forwarding_state_with_policy_counters(
     let has_cos_interfaces = !state.cos.interfaces.is_empty();
     state.tx_selection_enabled_v4 = has_cos_interfaces
         || state.filter_state.has_input_tx_selection_v4
-        || state.filter_state.has_output_tx_selection_v4;
+        || state.filter_state.has_output_tx_selection_v4
+        || state.filter_state.has_input_three_color_policer_v4
+        || !state
+            .filter_state
+            .iface_filter_out_v4_needs_tx_eval
+            .is_empty();
     state.tx_selection_enabled_v6 = has_cos_interfaces
         || state.filter_state.has_input_tx_selection_v6
-        || state.filter_state.has_output_tx_selection_v6;
+        || state.filter_state.has_output_tx_selection_v6
+        || state.filter_state.has_input_three_color_policer_v6
+        || !state
+            .filter_state
+            .iface_filter_out_v6_needs_tx_eval
+            .is_empty();
     // Build flow export config from snapshot
     state.flow_export_config = snapshot.flow_export.as_ref().and_then(|fe| {
         let addr = format!("{}:{}", fe.collector_address, fe.collector_port);

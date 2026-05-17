@@ -110,7 +110,11 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
         };
         if tx_selection_enabled && request.cos_queue_id.is_none() && request.dscp_rewrite.is_none()
         {
-            let cos = resolve_pending_forward_cos_tx_selection(forwarding, &request);
+            let cos = resolve_pending_forward_cos_tx_selection(forwarding, &request, now_ns);
+            if cos.drop {
+                recycle_ingress_frame(ingress_binding, source_offset, now_ns);
+                continue;
+            }
             request.cos_queue_id = cos.queue_id;
             request.dscp_rewrite = cos.dscp_rewrite;
         }
@@ -1193,12 +1197,14 @@ pub(in crate::afxdp) fn resolve_tx_binding_ifindex(
 fn resolve_pending_forward_cos_tx_selection(
     forwarding: &ForwardingState,
     request: &PendingForwardRequest,
+    now_ns: u64,
 ) -> CoSTxSelection {
-    resolve_cos_tx_selection(
+    resolve_cos_tx_selection_at(
         forwarding,
         request.decision.resolution.egress_ifindex,
         request.meta,
         request.flow_key.as_ref(),
+        now_ns,
     )
 }
 

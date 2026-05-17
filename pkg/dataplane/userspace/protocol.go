@@ -491,6 +491,7 @@ type ProcessStatus struct {
 	CoSInterfaces                []CoSInterfaceStatus              `json:"cos_interfaces,omitempty"`
 	PolicyRuleCounters           []PolicyRuleCounterStatus         `json:"policy_rule_counters,omitempty"`
 	FilterTermCounters           []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
+	ThreeColorPolicerCounters    []ThreeColorPolicerStatus         `json:"three_color_policer_counters,omitempty"`
 	LastResolution               *PacketResolution                 `json:"last_resolution,omitempty"`
 	SlowPath                     SlowPathStatus                    `json:"slow_path,omitempty"`
 	LastCacheFlushAt             uint64                            `json:"last_cache_flush_at,omitempty"` // monotonic secs (#312)
@@ -526,6 +527,21 @@ type CoSInterfaceStatus struct {
 	TimerLevel0Sleepers int              `json:"timer_level0_sleepers,omitempty"`
 	TimerLevel1Sleepers int              `json:"timer_level1_sleepers,omitempty"`
 	Queues              []CoSQueueStatus `json:"queues,omitempty"`
+}
+
+type ThreeColorPolicerStatus struct {
+	ID            uint32 `json:"id,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Mode          string `json:"mode,omitempty"`
+	ColorBlind    bool   `json:"color_blind,omitempty"`
+	GreenPackets  uint64 `json:"green_packets,omitempty"`
+	GreenBytes    uint64 `json:"green_bytes,omitempty"`
+	YellowPackets uint64 `json:"yellow_packets,omitempty"`
+	YellowBytes   uint64 `json:"yellow_bytes,omitempty"`
+	RedPackets    uint64 `json:"red_packets,omitempty"`
+	RedBytes      uint64 `json:"red_bytes,omitempty"`
+	DropPackets   uint64 `json:"drop_packets,omitempty"`
+	DropBytes     uint64 `json:"drop_bytes,omitempty"`
 }
 
 type CoSQueueStatus struct {

@@ -1153,11 +1153,8 @@ func deriveUserspaceCapabilities(cfg *config.Config) UserspaceCapabilities {
 	if !userspaceSupportsScreenProfiles(cfg) {
 		addReason("screen features requiring SYN cookies are not implemented in the userspace dataplane")
 	}
-	// Firewall filters and policers are now supported in the userspace dataplane.
-	// Three-color policers remain unsupported.
-	if len(cfg.Firewall.ThreeColorPolicers) > 0 {
-		addReason("three-color policers are not implemented in the userspace dataplane")
-	}
+	// Firewall filters, legacy policers, and three-color policers are
+	// supported in the userspace dataplane.
 	// IPsec: kernel XFRM handles ESP encryption/decryption; the userspace
 	// dataplane passes ESP/IKE traffic to the kernel via the slow-path.
 	// GRE transit is now modeled as native userspace tunnel endpoints on the
