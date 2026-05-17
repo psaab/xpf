@@ -118,6 +118,7 @@ type xpfCollector struct {
 	workerCoSQueueLeaseAcquireV8GrantedBytes *prometheus.Desc
 	// #1379: daemon-side userspace event-stream transport counters.
 	userspaceEventStreamFramesTotal          *prometheus.Desc
+	userspaceEventStreamProducerFramesTotal  *prometheus.Desc
 	userspaceEventStreamDecodeErrorsTotal    *prometheus.Desc
 	userspaceEventStreamSequenceGapsTotal    *prometheus.Desc
 	userspaceEventStreamDataplaneEventsTotal *prometheus.Desc
@@ -496,6 +497,11 @@ func newCollector(srv *Server) *xpfCollector {
 			"Daemon-side userspace event-stream frames by direction.",
 			[]string{"direction"}, nil,
 		),
+		userspaceEventStreamProducerFramesTotal: prometheus.NewDesc(
+			"xpf_userspace_event_stream_producer_frames_total",
+			"Userspace helper event-stream producer counters by outcome.",
+			[]string{"outcome"}, nil,
+		),
 		userspaceEventStreamDecodeErrorsTotal: prometheus.NewDesc(
 			"xpf_userspace_event_stream_decode_errors_total",
 			"Daemon-side userspace event-stream decode errors.",
@@ -741,6 +747,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerCoSQueueLeaseAcquireV8Calls
 	ch <- c.workerCoSQueueLeaseAcquireV8GrantedBytes
 	ch <- c.userspaceEventStreamFramesTotal
+	ch <- c.userspaceEventStreamProducerFramesTotal
 	ch <- c.userspaceEventStreamDecodeErrorsTotal
 	ch <- c.userspaceEventStreamSequenceGapsTotal
 	ch <- c.userspaceEventStreamDataplaneEventsTotal
@@ -1184,6 +1191,10 @@ func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, sta
 		prometheus.CounterValue, float64(es.FramesRead), "read")
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
 		prometheus.CounterValue, float64(es.FramesWritten), "written")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+		prometheus.CounterValue, float64(status.EventStreamSent), "sent")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+		prometheus.CounterValue, float64(status.EventStreamDropped), "dropped")
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDecodeErrorsTotal,
 		prometheus.CounterValue, float64(es.DecodeErrors))
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamSequenceGapsTotal,

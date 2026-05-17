@@ -466,6 +466,8 @@ type ProcessStatus struct {
 	RecentSessionDeltas          []SessionDeltaInfo                `json:"recent_session_deltas,omitempty"`
 	RecentExceptions             []ExceptionStatus                 `json:"recent_exceptions,omitempty"`
 	EventStream                  *EventStreamStatus                `json:"event_stream,omitempty"`
+	EventStreamSent              uint64                            `json:"event_stream_sent,omitempty"`
+	EventStreamDropped           uint64                            `json:"event_stream_dropped,omitempty"`
 	CoSInterfaces                []CoSInterfaceStatus              `json:"cos_interfaces,omitempty"`
 	FilterTermCounters           []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
 	LastResolution               *PacketResolution                 `json:"last_resolution,omitempty"`

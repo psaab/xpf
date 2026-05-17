@@ -38,7 +38,9 @@ type EventStream struct {
 	lastAckSeq     atomic.Uint64
 	ackBatch       atomic.Uint64 // events since last ack
 
-	// Callbacks — set before Start(), called on the reader goroutine.
+	// Callbacks are invoked on the reader goroutine and may be updated
+	// dynamically by control-plane code.
+	callbackMu          sync.RWMutex
 	onEvent             func(eventType uint8, seq uint64, delta SessionDeltaInfo)
 	onDataplaneEvent    func(seq uint64, rec logging.EventRecord)
 	onRawDataplaneEvent func(seq uint64, payload []byte)
@@ -71,14 +73,17 @@ func NewEventStream(socketPath string) *EventStream {
 	}
 }
 
-// SetOnEvent sets the callback for session events. Must be called before Start().
+// SetOnEvent sets the callback for session events.
 func (es *EventStream) SetOnEvent(fn func(eventType uint8, seq uint64, delta SessionDeltaInfo)) {
+	es.callbackMu.Lock()
+	defer es.callbackMu.Unlock()
 	es.onEvent = fn
 }
 
 // SetOnDataplaneEvent sets the callback for RT_FLOW-style dataplane events.
-// Must be called before Start().
 func (es *EventStream) SetOnDataplaneEvent(fn func(seq uint64, rec logging.EventRecord)) {
+	es.callbackMu.Lock()
+	defer es.callbackMu.Unlock()
 	es.onDataplaneEvent = fn
 }
 
@@ -86,11 +91,15 @@ func (es *EventStream) SetOnDataplaneEvent(fn func(seq uint64, rec logging.Event
 // It is preferred when the receiver can process the canonical dataplane.Event
 // payload itself, because it preserves name resolution and syslog fanout.
 func (es *EventStream) SetOnRawDataplaneEvent(fn func(seq uint64, payload []byte)) {
+	es.callbackMu.Lock()
+	defer es.callbackMu.Unlock()
 	es.onRawDataplaneEvent = fn
 }
 
-// SetOnFullResync sets the callback for full resync requests. Must be called before Start().
+// SetOnFullResync sets the callback for full resync requests.
 func (es *EventStream) SetOnFullResync(fn func()) {
+	es.callbackMu.Lock()
+	defer es.callbackMu.Unlock()
 	es.onFullResync = fn
 }
 
@@ -321,8 +330,11 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			es.ackBatch.Add(1)
-			if es.onEvent != nil {
-				es.onEvent(typ, seq, delta)
+			es.callbackMu.RLock()
+			onEvent := es.onEvent
+			es.callbackMu.RUnlock()
+			if onEvent != nil {
+				onEvent(typ, seq, delta)
 			}
 			es.lastAppliedSeq.Store(seq)
 
@@ -339,8 +351,11 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			es.ackBatch.Add(1)
-			if es.onEvent != nil {
-				es.onEvent(typ, seq, delta)
+			es.callbackMu.RLock()
+			onEvent := es.onEvent
+			es.callbackMu.RUnlock()
+			if onEvent != nil {
+				onEvent(typ, seq, delta)
 			}
 			es.lastAppliedSeq.Store(seq)
 
@@ -352,8 +367,11 @@ func (es *EventStream) readLoop(ctx context.Context) {
 
 		case EventTypeFullResync:
 			slog.Warn("event stream: full resync requested by helper")
-			if es.onFullResync != nil {
-				es.onFullResync()
+			es.callbackMu.RLock()
+			onFullResync := es.onFullResync
+			es.callbackMu.RUnlock()
+			if onFullResync != nil {
+				onFullResync()
 			}
 
 		case EventTypeKeepalive:
@@ -381,10 +399,14 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			es.ackBatch.Add(1)
-			if es.onRawDataplaneEvent != nil {
-				es.onRawDataplaneEvent(seq, payload)
-			} else if es.onDataplaneEvent != nil {
-				es.onDataplaneEvent(seq, rec)
+			es.callbackMu.RLock()
+			onRawDataplaneEvent := es.onRawDataplaneEvent
+			onDataplaneEvent := es.onDataplaneEvent
+			es.callbackMu.RUnlock()
+			if onRawDataplaneEvent != nil {
+				onRawDataplaneEvent(seq, payload)
+			} else if onDataplaneEvent != nil {
+				onDataplaneEvent(seq, rec)
 			}
 			es.recordDataplaneEvent(typ)
 			es.lastAppliedSeq.Store(seq)

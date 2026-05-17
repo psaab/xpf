@@ -226,6 +226,7 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 	}
 	c := &xpfCollector{
 		userspaceEventStreamFramesTotal:          mkOneLabel("xpf_userspace_event_stream_frames_total", "direction"),
+		userspaceEventStreamProducerFramesTotal:  mkOneLabel("xpf_userspace_event_stream_producer_frames_total", "outcome"),
 		userspaceEventStreamDecodeErrorsTotal:    mkNoLabel("xpf_userspace_event_stream_decode_errors_total"),
 		userspaceEventStreamSequenceGapsTotal:    mkNoLabel("xpf_userspace_event_stream_sequence_gaps_total"),
 		userspaceEventStreamDataplaneEventsTotal: mkOneLabel("xpf_userspace_event_stream_dataplane_events_total", "type"),
@@ -233,6 +234,8 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 		userspaceEventStreamUnknownDropsTotal:    mkNoLabel("xpf_userspace_event_stream_unknown_frame_drops_total"),
 	}
 	status := dpuserspace.ProcessStatus{
+		EventStreamSent:    101,
+		EventStreamDropped: 7,
 		EventStream: &dpuserspace.EventStreamStatus{
 			FramesRead:        11,
 			FramesWritten:     7,
@@ -258,6 +261,8 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 	}
 	assertCounterClose(t, got, c.userspaceEventStreamFramesTotal, map[string]string{"direction": "read"}, 11)
 	assertCounterClose(t, got, c.userspaceEventStreamFramesTotal, map[string]string{"direction": "written"}, 7)
+	assertCounterClose(t, got, c.userspaceEventStreamProducerFramesTotal, map[string]string{"outcome": "sent"}, 101)
+	assertCounterClose(t, got, c.userspaceEventStreamProducerFramesTotal, map[string]string{"outcome": "dropped"}, 7)
 	assertCounterClose(t, got, c.userspaceEventStreamDecodeErrorsTotal, nil, 2)
 	assertCounterClose(t, got, c.userspaceEventStreamSequenceGapsTotal, nil, 3)
 	assertCounterClose(t, got, c.userspaceEventStreamDataplaneEventsTotal, map[string]string{"type": "policy_deny"}, 5)

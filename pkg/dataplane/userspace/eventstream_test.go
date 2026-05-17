@@ -576,6 +576,71 @@ func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
 	}
 }
 
+func TestEventStreamDataplaneEventCallbackCanBeSetAfterStart(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := buildDataplaneEventV4Payload(
+		6, 1111, 443,
+		[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		0, 77,
+		0,
+	)
+	if err := writeFrame(conn, EventTypePolicyDeny, 21, payload); err != nil {
+		t.Fatalf("write first dataplane event: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read first ack: %v", err)
+	}
+	if typ != EventTypeAck || seq != 21 {
+		t.Fatalf("first ack = type %d seq %d, want type %d seq 21", typ, seq, EventTypeAck)
+	}
+
+	got := make(chan uint64, 1)
+	es.SetOnDataplaneEvent(func(seq uint64, _ logging.EventRecord) {
+		got <- seq
+	})
+	if err := writeFrame(conn, EventTypePolicyDeny, 22, payload); err != nil {
+		t.Fatalf("write second dataplane event: %v", err)
+	}
+
+	select {
+	case gotSeq := <-got:
+		if gotSeq != 22 {
+			t.Fatalf("callback seq = %d, want 22", gotSeq)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback not invoked after late registration")
+	}
+}
+
 func TestEventStreamMalformedDataplaneEventDropsAndAcks(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test-events.sock")

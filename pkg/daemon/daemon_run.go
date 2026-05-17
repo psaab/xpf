@@ -274,11 +274,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.reconcileBlackholeRoutes()
 	}
 
-	// Start cluster heartbeat + sync after applyConfig (needs VRF to exist).
-	if d.cluster != nil {
-		d.startClusterComms(ctx)
-	}
-
 	// Handle signals for clean shutdown.
 	// In interactive mode, only SIGTERM triggers shutdown — SIGINT is handled
 	// by the CLI for command cancellation (Ctrl-C).
@@ -448,6 +443,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.runUserspaceEventStream(ctx)
 			}()
 		}
+	}
+
+	// Start cluster heartbeat + sync after event fanout is initialized.
+	// This avoids an HA startup race where runUserspaceEventStream wires a
+	// decode-only fallback callback before d.eventReader exists.
+	if d.cluster != nil {
+		d.startClusterComms(ctx)
 	}
 
 	// Start DHCP clients for interfaces configured with dhcp/dhcpv6.
