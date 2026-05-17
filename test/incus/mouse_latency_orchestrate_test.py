@@ -18,6 +18,7 @@ class CheckCwndSettleTests(unittest.TestCase):
         a = A()
         a.iperf3_txt = txt_path
         a.shaper_bps = shaper
+        a.window_rows = 3
         return a
 
     def test_settled(self):
@@ -51,6 +52,56 @@ class CheckCwndSettleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             txt = _write(t, "iperf3.txt", "Connecting to host 172.16.80.200, port 5201\n")
             self.assertEqual(orch.cmd_check_cwnd_settle(self._make_args(txt, 1_000_000_000)), 1)
+
+
+class CwndSettleDiagnosticsTests(unittest.TestCase):
+    def test_diagnostics_reports_aggregate_and_per_flow_window(self):
+        text = """\
+[  5]   0.00-1.00   sec  10.0 MBytes  80.0 Mbits/sec    1    100 KBytes
+[  7]   0.00-1.00   sec  20.0 MBytes  160.0 Mbits/sec   0    200 KBytes
+[SUM]   0.00-1.00   sec  30.0 MBytes  240.0 Mbits/sec
+[  5]   1.00-2.00   sec  11.0 MBytes  88.0 Mbits/sec    2    110 KBytes
+[  7]   1.00-2.00   sec  19.0 MBytes  152.0 Mbits/sec   0    190 KBytes
+[SUM]   1.00-2.00   sec  30.0 MBytes  240.0 Mbits/sec
+[  5]   2.00-3.00   sec  10.5 MBytes  84.0 Mbits/sec    3    120 KBytes
+[  7]   2.00-3.00   sec  19.5 MBytes  156.0 Mbits/sec   0    180 KBytes
+[SUM]   2.00-3.00   sec  30.0 MBytes  240.0 Mbits/sec
+"""
+        d = orch.build_cwnd_settle_diagnostics(
+            text,
+            300_000_000,
+            elapsed_sec=20,
+            sample_index=0,
+        )
+        self.assertTrue(d["settled"], d["reasons"])
+        self.assertEqual(d["elapsed_sec"], 20)
+        self.assertEqual(d["aggregate"]["window_bps"], [240_000_000] * 3)
+        self.assertEqual(d["per_flow"]["flow_count"], 2)
+        self.assertEqual(d["per_flow"]["retransmits_total"], 6)
+        self.assertEqual(d["per_flow"]["mean_bps"]["min"], 84_000_000)
+        self.assertEqual(d["per_flow"]["mean_bps"]["max"], 156_000_000)
+        self.assertEqual(d["per_flow"]["cwnd_bytes"]["min"], 120_000)
+        self.assertEqual(d["per_flow"]["cwnd_bytes"]["max"], 180_000)
+        self.assertEqual(d["per_flow"]["slowest_streams"][0]["stream_id"], 5)
+
+    def test_diagnostics_explains_failed_thresholds(self):
+        text = """\
+[SUM]   0.00-1.00   sec  10.0 MBytes  80.0 Mbits/sec
+[SUM]   1.00-2.00   sec  30.0 MBytes  240.0 Mbits/sec
+[SUM]   2.00-3.00   sec  10.0 MBytes  80.0 Mbits/sec
+"""
+        d = orch.build_cwnd_settle_diagnostics(text, 300_000_000)
+        self.assertFalse(d["settled"])
+        self.assertTrue(any("aggregate-window-spread" in r for r in d["reasons"]))
+        self.assertTrue(any("aggregate-too-low" in r for r in d["reasons"]))
+
+    def test_diagnostics_requires_enough_sum_rows(self):
+        d = orch.build_cwnd_settle_diagnostics(
+            "[SUM]   0.00-1.00   sec  10.0 MBytes  80.0 Mbits/sec\n",
+            300_000_000,
+        )
+        self.assertFalse(d["settled"])
+        self.assertIn("insufficient-sum-rows", d["reasons"][0])
 
 
 class CheckCollapseTests(unittest.TestCase):

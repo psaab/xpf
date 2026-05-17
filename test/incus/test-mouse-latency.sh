@@ -43,6 +43,7 @@ MOUSE_COS_SURPLUS_SHARING="${MOUSE_COS_SURPLUS_SHARING:-0}"
 MOUSE_PROBE_CONNECTION_MODE="${MOUSE_PROBE_CONNECTION_MODE:-per-attempt}"
 MOUSE_PROBE_MIN_INTERVAL_MS="${MOUSE_PROBE_MIN_INTERVAL_MS:-0}"
 SHAPER_BPS="${SHAPER_BPS:-$((1 * 1000 * 1000 * 1000))}"  # default 1 Gb/s (port 5202); same-class wrappers must override with their selected class cap.
+SETTLE_BUDGET="${MOUSE_LATENCY_SETTLE_BUDGET:-20}"
 # Validate env-overrides (Copilot D.5): ports/bps must be
 # digits only so they can't smuggle shell metacharacters into
 # the remote `bash -c` interpolations below. MOUSE_CLASS and
@@ -55,6 +56,8 @@ SHAPER_BPS="${SHAPER_BPS:-$((1 * 1000 * 1000 * 1000))}"  # default 1 Gb/s (port 
     || { echo "ABORT: MOUSE_PORT='$MOUSE_PORT' must be digits" >&2; exit 1; }
 [[ "$SHAPER_BPS" =~ ^[0-9]+$ ]] \
     || { echo "ABORT: SHAPER_BPS='$SHAPER_BPS' must be digits" >&2; exit 1; }
+[[ "$SETTLE_BUDGET" =~ ^[0-9]+$ && "$SETTLE_BUDGET" -gt 0 ]] \
+    || { echo "ABORT: MOUSE_LATENCY_SETTLE_BUDGET='$SETTLE_BUDGET' must be a positive integer second count" >&2; exit 1; }
 case "$MOUSE_CLASS" in
     best-effort|iperf-100m|iperf-1g|iperf-3g|iperf-6g|iperf-9g|iperf-12g|iperf-15g|iperf-18g|iperf-21g|iperf-24g|iperf-uncapped) ;;
     *) echo "ABORT: MOUSE_CLASS='$MOUSE_CLASS' must be one of best-effort/iperf-100m/iperf-1g/iperf-3g/iperf-6g/iperf-9g/iperf-12g/iperf-15g/iperf-18g/iperf-21g/iperf-24g/iperf-uncapped" >&2; exit 1 ;;
@@ -70,8 +73,9 @@ case "$MOUSE_PROBE_CONNECTION_MODE" in
 esac
 [[ "$MOUSE_PROBE_MIN_INTERVAL_MS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     || { echo "ABORT: MOUSE_PROBE_MIN_INTERVAL_MS='$MOUSE_PROBE_MIN_INTERVAL_MS' must be a non-negative number" >&2; exit 1; }
-SETTLE_BUDGET=20
 SLACK=10
+CWND_SETTLE_OK="true"
+CWND_SETTLE_ELAPSED=0
 
 mkdir -p "$OUT_DIR"
 # Include the cell name in REP_TAG so per-rep temp files on the
@@ -93,7 +97,12 @@ rm -f "${OUT_DIR}"/probe.json \
       "${OUT_DIR}"/probe-stdout.log \
       "${OUT_DIR}"/iperf3.txt \
       "${OUT_DIR}"/iperf3-settle.txt \
+      "${OUT_DIR}"/cwnd-settle.json \
+      "${OUT_DIR}"/mpstat-settle.txt \
       "${OUT_DIR}"/mpstat.txt \
+      "${OUT_DIR}"/cos-interface-pre.txt \
+      "${OUT_DIR}"/cos-interface-settle.txt \
+      "${OUT_DIR}"/cos-interface-post.txt \
       "${OUT_DIR}"/screen-pre.txt \
       "${OUT_DIR}"/screen-pre-fw.txt \
       "${OUT_DIR}"/screen-post.txt \
@@ -156,9 +165,54 @@ for rg, n, st in parse_cluster_status(sys.stdin.read()):
     echo "$node"
 }
 
+write_invalid_manifest() {
+    local reason="$1"
+    local started_at
+    started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    INVALID_REASON="$reason" STARTED_AT="$started_at" \
+    N="$N" M="$M" DURATION="$DURATION" \
+    ELEPHANT_PORT="$ELEPHANT_PORT" MOUSE_PORT="$MOUSE_PORT" \
+    MOUSE_CLASS="$MOUSE_CLASS" MOUSE_COS_SURPLUS_SHARING="$MOUSE_COS_SURPLUS_SHARING" \
+    MOUSE_PROBE_CONNECTION_MODE="$MOUSE_PROBE_CONNECTION_MODE" \
+    MOUSE_PROBE_MIN_INTERVAL_MS="$MOUSE_PROBE_MIN_INTERVAL_MS" \
+    SHAPER_BPS="$SHAPER_BPS" SETTLE_BUDGET="$SETTLE_BUDGET" \
+    CWND_SETTLE_OK="${CWND_SETTLE_OK:-unknown}" \
+    CWND_SETTLE_ELAPSED="${CWND_SETTLE_ELAPSED:-0}" \
+    python3 -c '
+import json, os
+settle_raw = os.environ["CWND_SETTLE_OK"]
+if settle_raw == "true":
+    settle_ok = True
+elif settle_raw == "false":
+    settle_ok = False
+else:
+    settle_ok = None
+manifest = {
+    "N": int(os.environ["N"]),
+    "M": int(os.environ["M"]),
+    "duration_s": int(os.environ["DURATION"]),
+    "started_at": os.environ["STARTED_AT"],
+    "status": "INVALID",
+    "invalid_reason": os.environ["INVALID_REASON"],
+    "elephant_port": int(os.environ["ELEPHANT_PORT"]),
+    "mouse_port": int(os.environ["MOUSE_PORT"]),
+    "mouse_class": os.environ["MOUSE_CLASS"],
+    "cos_surplus_sharing": os.environ["MOUSE_COS_SURPLUS_SHARING"] == "1",
+    "mouse_probe_connection_mode": os.environ["MOUSE_PROBE_CONNECTION_MODE"],
+    "mouse_probe_min_interval_ms": float(os.environ["MOUSE_PROBE_MIN_INTERVAL_MS"]),
+    "shaper_bps": int(os.environ["SHAPER_BPS"]),
+    "settle_budget_s": int(os.environ["SETTLE_BUDGET"]),
+    "cwnd_settle_ok": settle_ok,
+    "cwnd_settle_elapsed_s": int(os.environ["CWND_SETTLE_ELAPSED"]),
+}
+print(json.dumps(manifest, indent=2))
+' > "${OUT_DIR}/manifest.json" || true
+}
+
 invalidate() {
     local reason="$1"
     : > "${OUT_DIR}/INVALID-${reason}"
+    write_invalid_manifest "$reason"
     echo "REP INVALID: $reason" >&2
     exit 0
 }
@@ -169,6 +223,7 @@ cleanup() {
     # cwnd-settle gate or step 4 cursor capture) it isn't running yet.
     [[ -n "${IPERF_PID:-}" ]] && kill "$IPERF_PID" 2>/dev/null || true
     [[ -n "${RG_POLL_PID:-}" ]] && kill "$RG_POLL_PID" 2>/dev/null || true
+    [[ -n "${SETTLE_MPSTAT_PID:-}" ]] && kill "$SETTLE_MPSTAT_PID" 2>/dev/null || true
     [[ -n "${MPSTAT_PID:-}" ]] && kill "$MPSTAT_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -180,7 +235,7 @@ trap cleanup EXIT
 # previously left a stale file behind that the next reuse with the
 # same tag would inherit. Belt-and-suspenders.)
 incus_exec "$SOURCE" sh -c \
-    "rm -f /tmp/mouse_latency_probe.py /tmp/probe-${REP_TAG}.json /tmp/mpstat-${REP_TAG}.txt /tmp/iperf3-${REP_TAG}.txt" \
+    "rm -f /tmp/mouse_latency_probe.py /tmp/probe-${REP_TAG}.json /tmp/mpstat-${REP_TAG}.txt /tmp/mpstat-settle-${REP_TAG}.txt /tmp/iperf3-${REP_TAG}.txt" \
     < /dev/null > /dev/null 2>&1 || true
 
 # Push helper scripts to the source container (probe driver runs there).
@@ -213,6 +268,8 @@ fi
 "${SCRIPT_DIR}/apply-cos-config.sh" "${APPLY_COS_FLAGS[@]}" \
     "${INCUS_REMOTE}:${PRE_PRIMARY}" \
     > "${OUT_DIR}/cos-apply.log" 2>&1
+incus_exec "$PRE_PRIMARY" cli -c "show class-of-service interface" \
+    > "${OUT_DIR}/cos-interface-pre.txt" 2>/dev/null || true
 
 # ---- step 3: RG state polling at 1 Hz (plan §4.5 step 3)
 RG_POLL_FILE="${OUT_DIR}/rg-state-poll.txt"
@@ -266,24 +323,47 @@ if [[ "$N" -gt 0 ]]; then
         "iperf3 -c ${TARGET_V4} -p ${ELEPHANT_PORT} -P ${N} -t ${IPERF_DURATION} -i 1 --forceflush > /tmp/iperf3-${REP_TAG}.txt 2>&1" \
         < /dev/null > /dev/null 2>&1 &
     IPERF_PID=$!
+    incus_exec "$SOURCE" sh -c \
+        "mpstat 1 ${SETTLE_BUDGET} > /tmp/mpstat-settle-${REP_TAG}.txt 2>&1" \
+        < /dev/null > /dev/null 2>&1 &
+    SETTLE_MPSTAT_PID=$!
 
     # Wait the SETTLE_BUDGET, then snapshot iperf3.txt and run the
     # cwnd-settle gate. (Live tailing inside incus exec is hard to
-    # plumb reliably; the budget is the gate.)
+    # plumb reliably; the budget is the gate.) The diagnostics artifact
+    # records the final aggregate window and per-flow TCP spread so a
+    # high-rate failure is attributable instead of just INVALID.
     sleep "$SETTLE_BUDGET"
+    CWND_SETTLE_ELAPSED="$SETTLE_BUDGET"
     set +e
     incus_run file pull \
         "${INCUS_REMOTE}:${SOURCE}/tmp/iperf3-${REP_TAG}.txt" \
         "${OUT_DIR}/iperf3-settle.txt" 2>/dev/null
     pull_rc=$?
+    wait "$SETTLE_MPSTAT_PID" 2>/dev/null
+    incus_run file pull \
+        "${INCUS_REMOTE}:${SOURCE}/tmp/mpstat-settle-${REP_TAG}.txt" \
+        "${OUT_DIR}/mpstat-settle.txt" 2>/dev/null
     set -e
+    SETTLE_MPSTAT_PID=""
     # Distinguish pull failure from a real cwnd-not-settled (Copilot R2 #1):
     # the cwnd-settle gate fires only when we actually have iperf3 output.
     if [[ $pull_rc -ne 0 || ! -s "${OUT_DIR}/iperf3-settle.txt" ]]; then
         invalidate "iperf3-settle-pull-failed"
     fi
-    if ! python3 "${SCRIPT_DIR}/mouse_latency_orchestrate.py" \
-            check-cwnd-settle "${OUT_DIR}/iperf3-settle.txt" "$SHAPER_BPS"; then
+    set +e
+    python3 "${SCRIPT_DIR}/mouse_latency_orchestrate.py" \
+        settle-diagnostics "${OUT_DIR}/iperf3-settle.txt" "$SHAPER_BPS" \
+        --elapsed-sec "$CWND_SETTLE_ELAPSED" \
+        --sample-index 0 \
+        --out "${OUT_DIR}/cwnd-settle.json"
+    settle_diag_rc=$?
+    set -e
+    SETTLE_PRIMARY=$(current_primary)
+    incus_exec "$SETTLE_PRIMARY" cli -c "show class-of-service interface" \
+        > "${OUT_DIR}/cos-interface-settle.txt" 2>/dev/null || true
+    if [[ $settle_diag_rc -ne 0 ]]; then
+        CWND_SETTLE_OK="false"
         invalidate "cwnd-not-settled"
     fi
 fi
@@ -428,6 +508,8 @@ done
 post_primary=$(current_primary)
 incus_exec "$post_primary" cli -c "show security screen statistics zone wan" \
     > "${OUT_DIR}/screen-post.txt" 2>/dev/null || true
+incus_exec "$post_primary" cli -c "show class-of-service interface" \
+    > "${OUT_DIR}/cos-interface-post.txt" 2>/dev/null || true
 screen_engaged="false"
 if ! diff -q "${OUT_DIR}/screen-pre.txt" "${OUT_DIR}/screen-post.txt" \
         > /dev/null 2>&1; then
@@ -489,7 +571,8 @@ ELEPHANT_PORT="$ELEPHANT_PORT" MOUSE_PORT="$MOUSE_PORT" \
 MOUSE_CLASS="$MOUSE_CLASS" MOUSE_COS_SURPLUS_SHARING="$MOUSE_COS_SURPLUS_SHARING" \
 MOUSE_PROBE_CONNECTION_MODE="$MOUSE_PROBE_CONNECTION_MODE" \
 MOUSE_PROBE_MIN_INTERVAL_MS="$MOUSE_PROBE_MIN_INTERVAL_MS" \
-SHAPER_BPS="$SHAPER_BPS" \
+SHAPER_BPS="$SHAPER_BPS" SETTLE_BUDGET="$SETTLE_BUDGET" \
+CWND_SETTLE_OK="$CWND_SETTLE_OK" CWND_SETTLE_ELAPSED="$CWND_SETTLE_ELAPSED" \
 python3 -c '
 import json, os
 manifest = {
@@ -507,6 +590,9 @@ manifest = {
     "mouse_probe_connection_mode": os.environ["MOUSE_PROBE_CONNECTION_MODE"],
     "mouse_probe_min_interval_ms": float(os.environ["MOUSE_PROBE_MIN_INTERVAL_MS"]),
     "shaper_bps": int(os.environ["SHAPER_BPS"]),
+    "settle_budget_s": int(os.environ["SETTLE_BUDGET"]),
+    "cwnd_settle_ok": os.environ["CWND_SETTLE_OK"] == "true",
+    "cwnd_settle_elapsed_s": int(os.environ["CWND_SETTLE_ELAPSED"]),
 }
 print(json.dumps(manifest, indent=2))
 ' > "${OUT_DIR}/manifest.json"

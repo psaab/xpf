@@ -227,6 +227,8 @@ def summarize_cell(reps: List[dict], representative_percentile: str = "p99") -> 
             "attempts_per_second_per_coroutine_iqr":
                 totals.get("attempts_per_second_per_coroutine_iqr"),
             "attempts_per_coroutine": totals.get("attempts_per_coroutine"),
+            "phase_us": median.get("phase_us"),
+            "coroutines": median.get("coroutines"),
         }
     summary["status"] = "OK"
     return summary

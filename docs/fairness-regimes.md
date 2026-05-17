@@ -467,6 +467,22 @@ fields. The reducer also verifies that gate cells share the same
 mixed per-attempt/persistent or paced/unpaced gate artifacts are reported
 as insufficient data rather than a PASS/FAIL verdict.
 
+High-rate 100E100M runs that fail before the mouse probe now leave
+settle evidence in each rep. `cwnd-settle.json` records the final
+settle-window aggregate, threshold reasons, per-flow min/median/max
+throughput, retransmits, and latest cwnd distribution. `mpstat-settle.txt`
+captures source-side CPU during the settle window. `manifest.json` records
+`settle_budget_s`, `cwnd_settle_elapsed_s`, and `cwnd_settle_ok`; use
+`MOUSE_LATENCY_SETTLE_BUDGET=<seconds>` for a deliberately longer
+high-rate settle budget. Probe artifacts also carry `phase_us` and
+`coroutines` diagnostics so a degenerate-coroutine failure can be read as
+timer wake delay (`start_gap_us` / `sleep_overshoot_us`), client socket
+backpressure (`drain_us`), or echo-path delay (`read_us`) before blaming
+root surplus arbitration or dataplane queue residence. The per-rep
+`cos-interface-pre.txt`, `cos-interface-settle.txt`, and
+`cos-interface-post.txt` snapshots preserve the CoS queue counters needed
+for that cross-check.
+
 ```bash
 MOUSE_COS_SURPLUS_SHARING=1 \
 MOUSE_LATENCY_CELLS=$'0 100\n100 100' \
