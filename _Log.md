@@ -2,6 +2,10 @@
 
 ## 2026-05-17
 
+- **Timestamp**: 2026-05-17T05:03:00Z
+  - **Action**: PR #1395 round-4 follow-up cleanup — moved three-color mode marker assignment outside repeated same-mode child loops to avoid redundant writes while preserving duplicate-sibling merge semantics.
+  - **File(s)**: `pkg/config/compiler_firewall.go`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T04:58:00Z
   - **Action**: PR #1395 round-4 follow-up — fixed three-color policer compiler handling for duplicate same-mode sibling blocks by iterating all `single-rate`/`two-rate` children, added hierarchical ambiguity regression coverage in parser/configstore tests, and updated filter module docs to reflect same-mode sibling merge semantics.
   - **File(s)**: `pkg/config/compiler_firewall.go`, `pkg/config/parser_ast_test.go`, `pkg/configstore/store_test.go`, `userspace-dp/src/filter/README.md`, `_Log.md`
