@@ -275,6 +275,94 @@ func TestCompileClassOfServiceEqualFlowEnforcementRejectsSurplusSharing(t *testi
 	}
 }
 
+// TestCompileClassOfServicePercentBufferAggregateOvercommitRejected verifies
+// that a scheduler-map whose schedulers' buffer-size percentages sum to more
+// than 100% is rejected at compile time. Junos does not allow a port's queue
+// buffer allocations to exceed the total interface buffer pool.
+func TestCompileClassOfServicePercentBufferAggregateOvercommitRejected(t *testing.T) {
+	lines := []string{
+		// Two schedulers each claiming 75% → 150% overcommit.
+		"set class-of-service schedulers voice buffer-size 75%",
+		"set class-of-service schedulers data buffer-size 75%",
+		"set class-of-service scheduler-maps edge forwarding-class ef scheduler voice",
+		"set class-of-service scheduler-maps edge forwarding-class be scheduler data",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig succeeded, want percent overcommit validation error")
+	}
+	if !strings.Contains(err.Error(), "sum of buffer-size percent") {
+		t.Fatalf("CompileConfig error = %v, want aggregate percent overcommit error", err)
+	}
+}
+
+// TestCompileClassOfServicePercentBuffer100PercentAllowed verifies that a
+// scheduler-map whose schedulers' buffer-size percentages sum to exactly 100%
+// is accepted (full pool allocation is valid).
+func TestCompileClassOfServicePercentBuffer100PercentAllowed(t *testing.T) {
+	lines := []string{
+		"set class-of-service schedulers voice buffer-size 40%",
+		"set class-of-service schedulers data buffer-size 60%",
+		"set class-of-service scheduler-maps edge forwarding-class ef scheduler voice",
+		"set class-of-service scheduler-maps edge forwarding-class be scheduler data",
+	}
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("CompileConfig: unexpected error for 40%%+60%% = 100%%: %v", err)
+	}
+}
+
+// TestCompileClassOfServiceBothBufferFieldsRejected verifies that a scheduler
+// with both BufferSizeBytes and BufferSizePercent set simultaneously is
+// rejected rather than silently applying the byte-wins runtime preference.
+// The compiler always clears the unused field, so this state can only arise
+// in constructed configs.
+func TestCompileClassOfServiceBothBufferFieldsRejected(t *testing.T) {
+	// Directly construct a CoSScheduler with both fields non-zero to exercise
+	// the type-level guard in validateClassOfServiceStrict.
+	cos := &ClassOfServiceConfig{
+		Schedulers: map[string]*CoSScheduler{
+			"voice": {
+				Name:              "voice",
+				BufferSizeBytes:   16_000_000,
+				BufferSizePercent: 10,
+			},
+		},
+		SchedulerMaps:       make(map[string]*CoSSchedulerMap),
+		ForwardingClasses:   make(map[string]*CoSForwardingClass),
+		DSCPClassifiers:     make(map[string]*CoSDSCPClassifier),
+		IEEE8021Classifiers: make(map[string]*CoSIEEE8021Classifier),
+		DSCPRewriteRules:    make(map[string]*CoSDSCPRewriteRule),
+		Interfaces:          make(map[string]*CoSInterface),
+	}
+	err := validateClassOfServiceStrict(cos)
+	if err == nil {
+		t.Fatal("validateClassOfServiceStrict succeeded, want both-fields-set validation error")
+	}
+	if !strings.Contains(err.Error(), "both buffer-size bytes") {
+		t.Fatalf("validateClassOfServiceStrict error = %v, want both-buffer-size error", err)
+	}
+}
+
 func TestCompileClassOfServiceFairnessRSSExpectations(t *testing.T) {
 	lines := []string{
 		"set class-of-service fairness rss-expectation ifindex 5 queue 4 balanced",

@@ -321,6 +321,45 @@ func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {
 				"class-of-service scheduler %q equal-flow-enforcement cannot be combined with surplus-sharing",
 				sched.Name)
 		}
+		// Both buffer-size forms set simultaneously is ambiguous. The compiler
+		// always clears the unused field (see compiler_class_of_service.go
+		// buffer-size case), so this can only arise in constructed or
+		// externally-assembled configs. Reject early rather than silently
+		// applying the "byte-size wins" runtime preference.
+		if sched.BufferSizeBytes > 0 && sched.BufferSizePercent > 0 {
+			return fmt.Errorf(
+				"class-of-service scheduler %q has both buffer-size bytes (%d) "+
+					"and buffer-size percent (%.4g%%) set; use one form only",
+				sched.Name, sched.BufferSizeBytes, sched.BufferSizePercent)
+		}
+	}
+	// Aggregate percent check: Junos does not allow per-queue buffer
+	// allocations to exceed 100% of the interface's total buffer pool.
+	// Check each scheduler-map independently and reject overcommit here
+	// so the runtime never silently over-allocates. A sum of exactly
+	// 100% is permitted (full pool allocation).
+	for _, schedMap := range cos.SchedulerMaps {
+		if schedMap == nil {
+			continue
+		}
+		var totalPercent float64
+		for _, entry := range schedMap.Entries {
+			if entry == nil || entry.Scheduler == "" {
+				continue
+			}
+			sched, ok := cos.Schedulers[entry.Scheduler]
+			if !ok || sched == nil {
+				continue
+			}
+			totalPercent += sched.BufferSizePercent
+		}
+		if totalPercent > 100.0 {
+			return fmt.Errorf(
+				"class-of-service scheduler-map %q: "+
+					"sum of buffer-size percent across all schedulers is %.4g%% "+
+					"(must not exceed 100%%)",
+				schedMap.Name, totalPercent)
+		}
 	}
 	return nil
 }
