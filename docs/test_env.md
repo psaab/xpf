@@ -1,5 +1,11 @@
 # Test Environment Details
 
+> #1373 note: this document primarily describes the standalone and legacy eBPF
+> Incus environments. The default target for new dataplane validation is the
+> userspace AF_XDP cluster (`loss:xpf-userspace-fw0/fw1`) and the runbooks under
+> `docs/userspace-*.md` / `testing-docs/`. Keep the legacy procedures here for
+> explicit regression coverage.
+
 ## Network Topology
 ```
                     +-----------+
@@ -87,7 +93,7 @@ ge-0/0/3.50          2001:559:8585:50::5/64
 
 ## Flow Settings
 - `tcp-mss { ipsec-vpn 1350; }` — MSS clamping for IPsec
-- `allow-dns-reply` — permit DNS responses without sessions (wired to BPF conntrack, `1a8b873`)
+- `allow-dns-reply` — permit DNS responses without sessions (legacy BPF conntrack wiring: `1a8b873`)
 - `allow-embedded-icmp` — allow ICMP errors referencing existing sessions
 - ALG disabled: dns, ftp
 
@@ -101,7 +107,7 @@ ge-0/0/3.50          2001:559:8585:50::5/64
 - **Remote CLI:** `incus exec xpf-fw -- cli`
 - **Non-interactive:** `printf 'show ...\nexit\n' | incus exec xpf-fw -- cli 2>/dev/null`
 - **HTTP API:** `incus exec xpf-fw -- curl -s http://127.0.0.1:8080/health`
-- **BPF verify:** `incus exec xpf-fw -- bpftool net show`
+- **Legacy BPF/XDP verify:** `incus exec xpf-fw -- bpftool net show`
 - **FRR routes:** `incus exec xpf-fw -- vtysh -c 'show ip route'`
 - **Forwarding test:** create trust-host/untrust-host containers, set IPs + routes, ping across zones
 
@@ -114,7 +120,7 @@ ge-0/0/3.50          2001:559:8585:50::5/64
 | ge-0-0-3 (PCI) | i40e | native | PF driver supports ndo_xdp_xmit |
 | ge-0-0-4 (PCI) | i40e | native | PF driver supports ndo_xdp_xmit |
 
-## BPF Pin Paths
+## Legacy BPF Pin Paths
 ```
 /sys/fs/bpf/xpf/          # Stateful maps (sessions, DNAT, NAT64, NAT ports)
 /sys/fs/bpf/xpf/links/    # XDP/TC link pins (xdp_N, tc_N per ifindex)
@@ -150,7 +156,7 @@ sg incus-admin -c "incus exec xpf-fw -- perf report -i /tmp/perf.data --stdio --
 ## VRF / Routing Instance Testing
 
 ### What was implemented
-Per-interface VRF routing via `iface_zone_map`. The BPF map value was extended from
+Per-interface VRF routing via `iface_zone_map` on the legacy eBPF path. The BPF map value was extended from
 bare `__u16 zone_id` to `struct iface_zone_value { zone_id, routing_table }`. When a
 packet arrives on an interface belonging to a routing instance, `xdp_zone` sets
 `meta->routing_table` from the map. All `bpf_fib_lookup` calls pass `BPF_FIB_LOOKUP_TBID`
@@ -185,7 +191,8 @@ sg incus-admin -c "incus exec trust-host -- ping -6 -c 3 2001:4860:4860::8888"  
 ```
 
 ### Functional VRF routing tests (DONE — tunnel-host on xpf-tunnel bridge)
-These tests verify BPF actually uses the VRF table for FIB lookups on VRF-bound interfaces.
+These tests verify the legacy BPF path actually uses the VRF table for FIB
+lookups on VRF-bound interfaces.
 
 **Setup:**
 ```bash
@@ -272,7 +279,7 @@ routing-instances {
 3. **VLAN + VRF**: Interface like `enp10s0f0np0.50` in a routing instance — verify
    the ifaceRef lookup in `ifaceTableID` map uses the correct name format
 4. **Multiple routing instances**: Two or more VRFs with different table IDs, verify
-   correct table ID in BPF map per interface
+   correct table ID in the legacy BPF map per interface
 5. **IPv6 in VRF**: FIB lookup for IPv6 destinations with TBID flag
 6. **NAT64 in VRF**: NAT64 FIB lookups use meta->routing_table
 7. **ICMP error in VRF**: Embedded ICMP error routing (xdp_conntrack) uses VRF table
@@ -294,7 +301,7 @@ for i in 1 2 3; do sleep 8; sg incus-admin -c 'incus exec xpf-fw -- systemctl re
 
 ## Full Teardown
 ```bash
-incus exec xpf-fw -- xpfd cleanup   # Remove all BPF pins + FRR routes
+incus exec xpf-fw -- xpfd cleanup   # Remove all legacy BPF pins + FRR routes
 ```
 
 ## Chassis Cluster (Two-VM HA) Test Environment
@@ -411,7 +418,7 @@ sg incus-admin -c 'incus exec xpf-fw1 -- cli -c "show security vrrp"'
 
 # Restart fw0 — preemption should reclaim primary within ~150ms
 sg incus-admin -c 'incus exec xpf-fw0 -- systemctl start xpfd'
-sleep 3  # wait for daemon startup + BPF load + sync hold
+sleep 3  # wait for daemon startup + legacy BPF load + sync hold
 sg incus-admin -c 'incus exec xpf-fw0 -- cli -c "show security vrrp"'
 ```
 
@@ -525,7 +532,7 @@ sg incus-admin -c 'incus exec xpf-fw0 -- systemctl stop xpfd'
 sleep 1  # 30ms VRRP → ~97ms failover (planned stop near-instant via priority-0)
 sg incus-admin -c 'incus exec cluster-lan-host -- ping -c 3 10.0.60.1'  # should reach fw1
 sg incus-admin -c 'incus exec xpf-fw0 -- systemctl start xpfd'
-sleep 5  # daemon startup + BPF load + sync hold
+sleep 5  # daemon startup + legacy BPF load + sync hold
 sg incus-admin -c 'incus exec cluster-lan-host -- ping -c 3 10.0.60.1'  # should reach fw0 again
 
 # 6. Manual failover + reset

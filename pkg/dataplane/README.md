@@ -1,20 +1,22 @@
 # pkg/dataplane
 
 > Deprecation notice (#1373): the legacy eBPF backend in this package is being
-> retired in favor of the Rust AF_XDP userspace dataplane. Phase 0 is
-> documentation/audit only; no BPF source, loader code, or bindings are removed
-> in this phase. The DataPlane interface cleanup is tracked by #1381.
+> retired in favor of the Rust AF_XDP userspace dataplane. Phase 1 updates
+> active docs and migration targeting only; no BPF source, loader code, or
+> bindings are removed in this phase. The DataPlane interface cleanup is tracked
+> by #1381.
 
-Abstract dataplane interface plus the eBPF backend. Compiles the typed
+Abstract dataplane interface plus the legacy eBPF backend. Compiles the typed
 config from `pkg/config` into BPF-map entries (zones, policies, NAT,
 filters, applications), attaches the 14 BPF programs (9 XDP + 5 TC), and
 exposes session iteration to GC, the CLI, and the metrics surface.
 
 Pluggable: alternative backends (DPDK in `pkg/dataplane/dpdk`, userspace
 AF_XDP in `pkg/dataplane/userspace`) register via `RegisterBackend`. The
-current `DataPlane` interface is still BPF-shaped and is scheduled to split
-under #1381; see `docs/pr/1381-dataplane-interface-split/plan.md` before
-adding new methods to it.
+userspace AF_XDP backend is the primary #1373 target, but the current
+`DataPlane` interface is still BPF-shaped and is scheduled to split under
+#1381; see `docs/pr/1381-dataplane-interface-split/plan.md` before adding new
+methods to it.
 
 The userspace backend's status wire format is mirrored here for CLI/API
 consumers. CoS queue status includes queue-scoped drain-phase counters so

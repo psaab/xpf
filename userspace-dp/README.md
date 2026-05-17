@@ -1,16 +1,19 @@
 # userspace-dp/
 
 > #1373 status: this Rust AF_XDP dataplane is the target path for new dataplane
-> development while the legacy eBPF dataplane is being retired. Phase 0 updates
-> docs and audit state only; no BPF source is removed yet.
+> development and routine validation while the legacy eBPF dataplane is being
+> retired. Phase 1 updates active docs and migration targeting only; no BPF
+> source, loader code, or CLI surface is removed yet.
 
 Standalone Rust AF_XDP dataplane that mirrors the BPF pipeline
 (screen → zone → conntrack → policy → NAT → forward) but in userspace.
 Runs as a separate `xpf-userspace-dp` binary the Go daemon spawns over a
 Unix-socket control protocol.
 
-The eBPF backend (`pkg/dataplane`) is the default; this crate is the
-opt-in AF_XDP zero-copy backend used on hardware that benefits from it.
+This crate is the primary AF_XDP backend for #1373. It is still selected with
+`system dataplane-type userspace` until a later cutover changes runtime
+defaults; the legacy eBPF backend (`pkg/dataplane`) remains available for
+compatibility and regression coverage.
 
 ## Crate entry
 

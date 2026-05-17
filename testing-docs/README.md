@@ -2,11 +2,12 @@
 
 > Deprecation notice (#1373): the legacy eBPF dataplane is being retired. New
 > dataplane validation should use the userspace AF_XDP cluster unless a staged
-> retirement phase calls for explicit legacy regression coverage. Phase 0 removes
-> no BPF source or test target.
+> retirement phase calls for explicit legacy regression coverage. Phase 1
+> updates active docs and migration targeting only; no BPF source or test target
+> is removed yet.
 
-Comprehensive test plans and validation procedures for both the legacy eBPF
-dataplane and the userspace AF_XDP dataplane.
+Comprehensive test plans and validation procedures for the primary userspace
+AF_XDP dataplane plus legacy eBPF regression coverage.
 
 ## Test Categories
 
@@ -89,7 +90,7 @@ See [CLAUDE.md](../CLAUDE.md) for full network topology details.
 - i40e PCI passthrough: ge-0-0-3 (wan), ge-0-0-4 (loss)
 - Test containers: trust-host, untrust-host, dmz-host
 
-### eBPF HA Cluster (`xpf-fw0`, `xpf-fw1`)
+### Legacy eBPF HA Cluster (`xpf-fw0`, `xpf-fw1`)
 - Two VMs with VRRP, fabric link, session sync
 - `cluster-lan-host` container for traffic generation
 - Config: `docs/ha-cluster-loss.conf`
