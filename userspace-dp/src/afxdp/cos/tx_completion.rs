@@ -16,7 +16,7 @@ use crate::afxdp::types::{
 };
 use crate::afxdp::worker::BindingWorker;
 
-use super::queue_ops::{cos_queue_is_empty, cos_queue_push_front};
+use super::queue_ops::{cos_item_len, cos_queue_front, cos_queue_is_empty, cos_queue_push_front};
 use super::token_bucket::{maybe_top_up_cos_root_lease, release_cos_root_lease};
 
 // ============================================================================
@@ -366,6 +366,19 @@ fn exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
 }
 
 #[inline]
+fn serviceable_exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
+    root.queues
+        .iter()
+        .filter(|queue| queue.config.exact && queue.config.guarantee_enabled && queue.hot.runnable)
+        .filter_map(|queue| {
+            let head = cos_queue_front(queue)?;
+            let head_len = cos_item_len(head);
+            (root.tokens >= head_len && queue.hot.tokens >= head_len).then_some(queue.hot.queued_bytes)
+        })
+        .fold(0u64, |acc, bytes| acc.saturating_add(bytes))
+}
+
+#[inline]
 pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_ifindex: i32) {
     let Some(shared_exact_backlog) = binding
         .cos
@@ -379,7 +392,11 @@ pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_
         shared_exact_backlog.publish(binding.slot, 0);
         return;
     };
-    shared_exact_backlog.publish(binding.slot, exact_backlog_bytes(root));
+    shared_exact_backlog.publish_with_serviceable(
+        binding.slot,
+        exact_backlog_bytes(root),
+        serviceable_exact_backlog_bytes(root),
+    );
 }
 
 #[inline]

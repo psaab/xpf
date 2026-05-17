@@ -21,16 +21,20 @@ pub(in crate::afxdp) struct SharedCoSQueueLease {
 }
 
 #[repr(align(64))]
-struct PaddedBacklogSlot(AtomicU64);
+struct PaddedBacklogSlot {
+    queued_bytes: AtomicU64,
+    serviceable_bytes: AtomicU64,
+}
 
-/// Interface-global exact-backlog visibility for diagnostics that must not
-/// be limited to the current binding's local CoS root. Each binding owns one
-/// slot and publishes its local exact queued-byte total from
-/// exact enqueue/drain/reset sites; readers test peer slots when deciding
-/// whether non-exact service is stealing from any exact queue on the same
-/// shaped interface. This is telemetry, not a synchronization primitive:
-/// relaxed atomics are sufficient and avoid imposing ordering on the packet
-/// data path.
+/// Interface-global exact-backlog visibility for diagnostics and
+/// cross-binding surplus suppression. Each binding owns one slot and publishes:
+///   * queued exact bytes, used by diagnostics; and
+///   * serviceable exact bytes, used as the priority signal for suppressing
+///     peer non-exact surplus.
+///
+/// The serviceable signal uses release/acquire ordering so transitions are
+/// visible across bindings without putting a locked operation in the forwarding
+/// loop. The queued-byte diagnostic remains relaxed.
 pub(in crate::afxdp) struct SharedCoSExactBacklog {
     worker_bytes: Box<[PaddedBacklogSlot]>,
 }
@@ -39,7 +43,10 @@ impl SharedCoSExactBacklog {
     pub(in crate::afxdp) fn new(max_binding_slot: usize) -> Self {
         Self {
             worker_bytes: (0..=max_binding_slot)
-                .map(|_| PaddedBacklogSlot(AtomicU64::new(0)))
+                .map(|_| PaddedBacklogSlot {
+                    queued_bytes: AtomicU64::new(0),
+                    serviceable_bytes: AtomicU64::new(0),
+                })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         }
@@ -51,8 +58,20 @@ impl SharedCoSExactBacklog {
 
     #[inline]
     pub(in crate::afxdp) fn publish(&self, binding_slot: u32, bytes: u64) {
+        self.publish_with_serviceable(binding_slot, bytes, bytes);
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn publish_with_serviceable(
+        &self,
+        binding_slot: u32,
+        queued_bytes: u64,
+        serviceable_bytes: u64,
+    ) {
         if let Some(slot) = self.worker_bytes.get(binding_slot as usize) {
-            slot.0.store(bytes, Ordering::Relaxed);
+            slot.queued_bytes.store(queued_bytes, Ordering::Relaxed);
+            slot.serviceable_bytes
+                .store(serviceable_bytes, Ordering::Release);
         }
     }
 
@@ -62,7 +81,16 @@ impl SharedCoSExactBacklog {
             .iter()
             .enumerate()
             .filter(|(idx, _)| *idx != binding_slot as usize)
-            .any(|(_, slot)| slot.0.load(Ordering::Relaxed) > 0)
+            .any(|(_, slot)| slot.queued_bytes.load(Ordering::Relaxed) > 0)
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn has_peer_serviceable_backlog(&self, binding_slot: u32) -> bool {
+        self.worker_bytes
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != binding_slot as usize)
+            .any(|(_, slot)| slot.serviceable_bytes.load(Ordering::Acquire) > 0)
     }
 }
 

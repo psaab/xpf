@@ -22,7 +22,7 @@ globs.
 | `cos.rs` | CoS shaper / queue / flow-fair / runtime types (`CoSInterfaceRuntime`, `CoSQueueRuntime`, `CoSPendingTxItem`, `FlowFairState`, `WorkerCoSQueueFastPath`, etc.). Issue 68.1 split. |
 | `forwarding.rs` | Routing / forwarding types (`ForwardingResolution`, `ForwardingDisposition`, `NeighborEntry`, etc.). Issue 68.2 split. Three forwarding types had wider-than-`pub(super)` visibility in the original `mod.rs` and stay re-exported at their original surface. (`PacketDisposition` is in `mod.rs`; `ValidationState` is in `runtime.rs`.) |
 | `runtime.rs` | Per-worker runtime atomics and shared status types. |
-| `shared_cos_lease.rs` | Shared per-CoS lease + V_min coordination types (#1035 P4): `SharedCoSQueueLease`, `SharedCoSRootLease`, `SharedCoSQueueVtimeFloor`, `PaddedVtimeSlot`, `NOT_PARTICIPATING` sentinel. |
+| `shared_cos_lease.rs` | Shared per-CoS lease + V_min coordination types (#1035 P4): `SharedCoSQueueLease`, `SharedCoSRootLease`, `SharedCoSQueueVtimeFloor`, `SharedCoSExactBacklog`, `PaddedVtimeSlot`, `NOT_PARTICIPATING` sentinel. `SharedCoSExactBacklog` carries queued-byte telemetry and a separate serviceable-byte signal for cross-binding non-exact surplus suppression. |
 | `tx.rs` | TX request / prepared-request shapes (`TxRequest`, `PreparedTxRequest`, etc.). |
 | `shared_cos_lease_tests.rs` | Unit tests for the V_min lease coordination — pinned because the lease is the load-bearing primitive in #1229 v8. |
 

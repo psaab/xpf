@@ -223,20 +223,24 @@ fn build_nonexact_cos_batch(
     root_ifindex: i32,
     now_ns: u64,
 ) -> Option<CoSBatch> {
-    // Strict exact-over-residual priority: non-exact queues may
-    // borrow root capacity only while no exact queue on this shaped
-    // interface is backlogged. Exact queues with surplus_sharing
-    // remain eligible through the filtered surplus pass below.
-    let suppress_nonexact =
-        interface_has_backlogged_exact_queue_for_nonexact(binding, root_ifindex);
+    let suppress_peer_nonexact_surplus =
+        interface_has_peer_exact_backlog_for_nonexact_surplus(binding, root_ifindex);
     let selected = {
         let root = binding.cos.cos_interfaces.get_mut(&root_ifindex)?;
-        if suppress_nonexact {
-            select_cos_surplus_batch_filtered(root, now_ns, false)
-        } else {
-            select_nonexact_cos_guarantee_batch(root, now_ns)
-                .or_else(|| select_cos_surplus_batch(root, now_ns))
-        }
+        select_nonexact_cos_guarantee_batch(root, now_ns).or_else(|| {
+            // Strict priority applies to surplus service only. Non-exact
+            // queues with explicit transmit-rate guarantees keep their
+            // guarantee pass; residual/best-effort surplus is filtered while
+            // a local serviceable exact queue or a peer-published exact
+            // backlog indicates exact demand on this shaped interface.
+            let suppress_nonexact_surplus = suppress_peer_nonexact_surplus
+                || root_has_serviceable_exact_queue_for_nonexact_surplus(root);
+            if suppress_nonexact_surplus {
+                select_cos_surplus_batch_filtered(root, now_ns, false)
+            } else {
+                select_cos_surplus_batch(root, now_ns)
+            }
+        })
     };
     if selected.is_some() {
         refresh_cos_interface_activity(binding, root_ifindex);
@@ -245,31 +249,34 @@ fn build_nonexact_cos_batch(
 }
 
 #[inline]
-fn interface_has_backlogged_exact_queue_for_nonexact(
+fn interface_has_peer_exact_backlog_for_nonexact_surplus(
     binding: &BindingWorker,
     root_ifindex: i32,
 ) -> bool {
-    let local_exact_backlogged = binding
-        .cos
-        .cos_interfaces
-        .get(&root_ifindex)
-        .is_some_and(root_has_backlogged_exact_queue_for_nonexact);
-    if local_exact_backlogged {
-        return true;
-    }
     binding
         .cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
-        .is_some_and(|backlog| backlog.has_peer_backlog(binding.slot))
+        .is_some_and(|backlog| backlog.has_peer_serviceable_backlog(binding.slot))
 }
 
 #[inline]
-fn root_has_backlogged_exact_queue_for_nonexact(root: &CoSInterfaceRuntime) -> bool {
-    root.queues
-        .iter()
-        .any(|queue| queue.config.exact && !cos_queue_is_empty(queue))
+fn root_has_serviceable_exact_queue_for_nonexact_surplus(root: &CoSInterfaceRuntime) -> bool {
+    root.queues.iter().any(|queue| {
+        if !queue.config.exact
+            || !queue.config.guarantee_enabled
+            || !queue.hot.runnable
+            || cos_queue_is_empty(queue)
+        {
+            return false;
+        }
+        let Some(head) = cos_queue_front(queue) else {
+            return false;
+        };
+        let head_len = cos_item_len(head);
+        root.tokens >= head_len && queue.hot.tokens >= head_len
+    })
 }
 
 #[inline]
