@@ -371,11 +371,12 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) mirrored_packets: AtomicU64,
     /// #1376: full L2 bytes copied into admitted mirror clones.
     pub(super) mirrored_bytes: AtomicU64,
-    /// #1376: mirror clone dropped because the output binding did not
-    /// have enough reserved TX frames available.
+    /// #1376: mirror clone dropped for frame-unavailable outcomes:
+    /// oversized packet (`len > tx_frame_capacity()`), TX-frame
+    /// reserve exhausted, or UMEM slice failure while cloning.
     pub(super) mirror_drops_no_frame: AtomicU64,
-    /// #1376: mirror clone dropped because the output ifindex has no
-    /// live binding on this worker.
+    /// #1376: mirror clone dropped because no live mirror target
+    /// binding was available for the resolved output TX ifindex.
     pub(super) mirror_drops_no_binding: AtomicU64,
     /// #1376: mirror clone dropped because the output binding already
     /// had mirror/primary TX backlog. Mirrors are lossy under pressure.

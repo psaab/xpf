@@ -68,11 +68,12 @@ pub(in crate::afxdp) fn enqueue_mirror_clone(
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
 ) -> MirrorCloneResult {
+    let mirror_tx_ifindex = resolve_tx_binding_ifindex(forwarding, config.output_ifindex);
     let target_binding_index = binding_lookup.target_index(
         ingress_index,
         ingress_binding.ifindex,
         ingress_queue_id,
-        config.output_ifindex,
+        mirror_tx_ifindex,
     );
     let cos_queue_id = mirror_cos_queue_id(forwarding, config.output_ifindex, meta, flow_key);
     let Some(target_binding) = target_binding_index
@@ -81,6 +82,7 @@ pub(in crate::afxdp) fn enqueue_mirror_clone(
         return enqueue_mirror_clone_to_live(
             mirror_targets,
             config,
+            mirror_tx_ifindex,
             ingress_queue_id,
             frame,
             meta,
@@ -140,6 +142,7 @@ pub(in crate::afxdp) fn enqueue_mirror_clone(
 pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     mirror_targets: &MirrorTargetMap,
     config: MirrorRuntimeConfig,
+    mirror_tx_ifindex: i32,
     ingress_queue_id: u32,
     frame: &[u8],
     meta: ForwardPacketMeta,
@@ -149,7 +152,7 @@ pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     if frame.len() > tx_frame_capacity() {
         return MirrorCloneResult::NoFrame;
     }
-    let Some(target_live) = mirror_targets.target_live(config.output_ifindex, ingress_queue_id)
+    let Some(target_live) = mirror_targets.target_live(mirror_tx_ifindex, ingress_queue_id)
     else {
         return MirrorCloneResult::NoBinding;
     };
@@ -187,6 +190,7 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone_to_live(
     let result = enqueue_mirror_clone_to_live(
         mirror_targets,
         config,
+        resolve_tx_binding_ifindex(forwarding, config.output_ifindex),
         ingress_queue_id,
         frame,
         meta,
@@ -408,6 +412,7 @@ mod tests {
                 output_ifindex: 22,
                 rate: 0,
             },
+            22,
             3,
             &frame,
             test_meta(),
@@ -454,6 +459,7 @@ mod tests {
                 output_ifindex: 22,
                 rate: 0,
             },
+            22,
             0,
             &[0xdd; 64],
             test_meta(),
@@ -516,6 +522,133 @@ mod tests {
         let mut queued = VecDeque::new();
         target_live.take_pending_tx_into(&mut queued);
         assert_eq!(queued.pop_front().expect("mirror tx").bytes, frame);
+    }
+
+    #[test]
+    fn mirror_output_logical_ifindex_resolves_parent_binding() {
+        let mut bindings = vec![
+            BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+            BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+        ];
+        let lookup = WorkerBindingLookup::from_bindings(&bindings);
+        let mut forwarding = ForwardingState::default();
+        forwarding.egress.insert(
+            200,
+            EgressInterface {
+                bind_ifindex: 22,
+                vlan_id: 80,
+                mtu: 1500,
+                src_mac: [0; 6],
+                zone_id: 1,
+                redundancy_group: 0,
+                primary_v4: None,
+                primary_v6: None,
+            },
+        );
+        let mirror_targets = MirrorTargetMap::default();
+        let (left, rest) = bindings.split_at_mut(0);
+        let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+        let frame: Vec<u8> = (0..96).map(|v| v as u8).collect();
+
+        let result = enqueue_mirror_clone(
+            left,
+            0,
+            ingress,
+            right,
+            &lookup,
+            &mirror_targets,
+            &forwarding,
+            MirrorRuntimeConfig {
+                output_ifindex: 200,
+                rate: 0,
+            },
+            0,
+            &frame,
+            test_meta(),
+            None,
+        );
+        assert_eq!(result, MirrorCloneResult::Enqueued);
+        let target = &bindings[1];
+        let req = target
+            .tx_pipeline
+            .pending_tx_prepared
+            .front()
+            .expect("mirror prepared request");
+        assert_eq!(req.egress_ifindex, 200);
+    }
+
+    #[test]
+    fn sampled_live_mirror_resolves_snapshot_logical_ingress_and_output() {
+        let ingress_live = BindingLiveState::new();
+        let target_live = Arc::new(BindingLiveState::new());
+        let mut mirror_targets = MirrorTargetMap::default();
+        mirror_targets.insert(
+            &BindingIdentity {
+                slot: 9,
+                queue_id: 0,
+                worker_id: 1,
+                interface: Arc::<str>::from("mirror-out"),
+                ifindex: 22,
+            },
+            target_live.clone(),
+        );
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![
+                InterfaceSnapshot {
+                    ifindex: 6,
+                    parent_ifindex: 0,
+                    vlan_id: 0,
+                    ..InterfaceSnapshot::default()
+                },
+                InterfaceSnapshot {
+                    ifindex: 20080,
+                    parent_ifindex: 6,
+                    vlan_id: 80,
+                    ..InterfaceSnapshot::default()
+                },
+                InterfaceSnapshot {
+                    ifindex: 22,
+                    parent_ifindex: 0,
+                    vlan_id: 0,
+                    ..InterfaceSnapshot::default()
+                },
+                InterfaceSnapshot {
+                    ifindex: 200,
+                    parent_ifindex: 22,
+                    vlan_id: 90,
+                    ..InterfaceSnapshot::default()
+                },
+            ],
+            mirror_configs: vec![MirrorConfigSnapshot {
+                ingress_ifindex: 20080,
+                output_ifindex: 200,
+                rate: 0,
+            }],
+            ..ConfigSnapshot::default()
+        };
+        let forwarding = build_forwarding_state(&snapshot);
+        let mut sample_counter = 0;
+        let frame = vec![0x88; 80];
+
+        let result = enqueue_sampled_mirror_clone_to_live(
+            &ingress_live,
+            &mirror_targets,
+            &forwarding,
+            6,
+            80,
+            0,
+            &mut sample_counter,
+            &frame,
+            test_meta(),
+            None,
+        );
+
+        assert_eq!(result, Some(MirrorCloneResult::Enqueued));
+        let mut queued = VecDeque::new();
+        target_live.take_pending_tx_into(&mut queued);
+        let req = queued.pop_front().expect("mirror tx");
+        assert_eq!(req.egress_ifindex, 200);
+        assert_eq!(req.bytes, frame);
     }
 
     #[test]

@@ -779,3 +779,11 @@
 - **Timestamp**: 2026-05-17T22:00:00Z
   - **Action**: Added explicit invariant note in `collectPolicyCounters` clarifying why zone-pair policy loop dereferences `rule.Name` without a nil guard while global policy loop retains defensive nil filtering.
   - **File(s)**: `pkg/api/metrics.go`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T20:20:00Z
+  - **Action**: Edited mirror runtime path to resolve mirror output through bind-ifindex mapping and added production-shape mirror tests.
+  - **File(s)**: userspace-dp/src/afxdp/mirror.rs
+
+- **Timestamp**: 2026-05-17T20:21:00Z
+  - **Action**: Updated mirror counter comments to match actual NoFrame/NoBinding semantics.
+  - **File(s)**: userspace-dp/src/afxdp/umem/mod.rs
