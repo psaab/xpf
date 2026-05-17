@@ -289,6 +289,15 @@ func FormatStatusSummary(status ProcessStatus) string {
 	fmt.Fprintf(&b, "  Session delta generated:   %d\n", sessionDeltaGenerated)
 	fmt.Fprintf(&b, "  Session delta dropped:     %d\n", sessionDeltaDropped)
 	fmt.Fprintf(&b, "  Session delta drained:     %d\n", sessionDeltaDrained)
+	if status.EventStream != nil {
+		es := status.EventStream
+		fmt.Fprintf(&b, "  Event stream frames:       read=%d written=%d decode_errors=%d seq_gaps=%d\n",
+			es.FramesRead, es.FramesWritten, es.DecodeErrors, es.SeqGaps)
+		fmt.Fprintf(&b, "  Event stream events:       policy_deny=%d screen_drop=%d filter_log=%d unknown_drops=%d\n",
+			es.PolicyDenyEvents, es.ScreenDropEvents, es.FilterLogEvents, es.UnknownFrameDrops)
+		fmt.Fprintf(&b, "  Event stream drops:        policy_deny=%d screen_drop=%d filter_log=%d\n",
+			es.PolicyDenyDrops, es.ScreenDropDrops, es.FilterLogDrops)
+	}
 	fmt.Fprintf(&b, "  Policy denied packets:     %d\n", policyDeniedPackets)
 	fmt.Fprintf(&b, "  SNAT packets:              %d\n", snatPackets)
 	fmt.Fprintf(&b, "  DNAT packets:              %d\n", dnatPackets)

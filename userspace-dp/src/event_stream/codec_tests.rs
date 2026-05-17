@@ -149,14 +149,49 @@ fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8)
         .expect("security event payload");
     assert_eq!(payload.len(), SECURITY_EVENT_PAYLOAD_SIZE);
     assert_eq!(
-        decode_dataplane_event(msg_type, payload).expect("decoded security event"),
-        event
+        payload[55],
+        if event.addr_family == libc::AF_INET6 as u8 {
+            RT_FLOW_AF_INET6
+        } else {
+            RT_FLOW_AF_INET
+        }
     );
+    assert_eq!(
+        u16::from_be_bytes(payload[40..42].try_into().unwrap()),
+        event.src_port
+    );
+    assert_eq!(
+        u16::from_be_bytes(payload[42..44].try_into().unwrap()),
+        event.dst_port
+    );
+    assert_eq!(payload[52], event.kind.rt_flow_event_type());
+    let decoded = decode_dataplane_event(msg_type, payload).expect("decoded security event");
+    assert_eq!(decoded.kind, event.kind);
+    assert_eq!(decoded.addr_family, event.addr_family);
+    assert_eq!(decoded.protocol, event.protocol);
+    assert_eq!(decoded.src_ip, event.src_ip);
+    assert_eq!(decoded.dst_ip, event.dst_ip);
+    assert_eq!(decoded.src_port, event.src_port);
+    assert_eq!(decoded.dst_port, event.dst_port);
+    assert_eq!(decoded.nat_src_ip, event.nat_src_ip);
+    assert_eq!(decoded.nat_dst_ip, event.nat_dst_ip);
+    assert_eq!(decoded.nat_src_port, event.nat_src_port);
+    assert_eq!(decoded.nat_dst_port, event.nat_dst_port);
+    assert_eq!(decoded.ingress_zone_id, event.ingress_zone_id);
+    assert_eq!(decoded.egress_zone_id, event.egress_zone_id);
+    assert_eq!(decoded.ingress_ifindex, event.ingress_ifindex);
+    assert_eq!(decoded.application_id, event.application_id & 0xffff);
+    assert_eq!(decoded.timestamp_ns, event.timestamp_ns);
+    match event.kind {
+        DataplaneEventKind::PolicyDeny => assert_eq!(decoded.policy_id, event.policy_id),
+        DataplaneEventKind::ScreenDrop => assert_eq!(decoded.screen_id, event.screen_id),
+        DataplaneEventKind::FilterLog => assert_eq!(decoded.filter_id, event.filter_id),
+    }
     assert_eq!(
         frame
             .decode_dataplane_event()
             .expect("decoded security event frame"),
-        event
+        decoded
     );
 }
 

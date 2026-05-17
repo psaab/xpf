@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -161,6 +160,22 @@ func (es *EventStream) SendDrainRequest(ctx context.Context) (uint64, error) {
 // LastAckedSequence returns the last sequence number acknowledged to the helper.
 func (es *EventStream) LastAckedSequence() uint64 {
 	return es.lastAckSeq.Load()
+}
+
+func (es *EventStream) Status() EventStreamStatus {
+	return EventStreamStatus{
+		FramesRead:        es.FramesRead.Load(),
+		FramesWritten:     es.FramesWritten.Load(),
+		DecodeErrors:      es.DecodeErrors.Load(),
+		SeqGaps:           es.SeqGaps.Load(),
+		PolicyDenyEvents:  es.PolicyDenyEvents.Load(),
+		ScreenDropEvents:  es.ScreenDropEvents.Load(),
+		FilterLogEvents:   es.FilterLogEvents.Load(),
+		PolicyDenyDrops:   es.PolicyDenyDrops.Load(),
+		ScreenDropDrops:   es.ScreenDropDrops.Load(),
+		FilterLogDrops:    es.FilterLogDrops.Load(),
+		UnknownFrameDrops: es.UnknownFrameDrops.Load(),
+	}
 }
 
 // acceptLoop listens for helper connections. Only one is active at a time.
@@ -338,7 +353,13 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			// the connection alive to prevent read-deadline disconnect.
 
 		case EventTypePolicyDeny, EventTypeScreenDrop, EventTypeFilterLog:
-			rec, ok := decodeDataplaneEvent(typ, payload)
+			if !dataplaneEventPayloadMatchesFrame(typ, payload) {
+				es.DecodeErrors.Add(1)
+				es.recordDataplaneEventDrop(typ)
+				es.markDroppedFrameApplied(seq, &prevSeq)
+				continue
+			}
+			rec, ok := decodeDataplaneEventPayload(payload)
 			if !ok {
 				es.DecodeErrors.Add(1)
 				es.recordDataplaneEventDrop(typ)
@@ -662,131 +683,29 @@ func decodeSessionCloseEvent(payload []byte) (SessionDeltaInfo, bool) {
 	return d, true
 }
 
-const dataplaneEventPayloadSize = 120
-
-const (
-	dataplaneEventFlagNATSrc uint8 = 1 << 0
-	dataplaneEventFlagNATDst uint8 = 1 << 1
-)
-
-// decodeDataplaneEvent decodes the fixed-size userspace RT_FLOW event payload
-// emitted by userspace-dp/src/event_stream/codec.rs. These frames are not HA
-// session deltas; they feed the daemon's normal EventBuffer surface.
-func decodeDataplaneEvent(typ uint8, payload []byte) (logging.EventRecord, bool) {
-	if len(payload) != dataplaneEventPayloadSize {
-		return logging.EventRecord{}, false
-	}
-	eventType := dataplaneEventTypeName(typ)
-	if eventType == "" {
-		return logging.EventRecord{}, false
-	}
-
-	wireAF := payload[0]
-	if wireAF != 4 && wireAF != 6 {
-		return logging.EventRecord{}, false
-	}
-	proto := payload[1]
-	flags := payload[2]
-	srcPort := binary.LittleEndian.Uint16(payload[4:6])
-	dstPort := binary.LittleEndian.Uint16(payload[6:8])
-	natSrcPort := binary.LittleEndian.Uint16(payload[8:10])
-	natDstPort := binary.LittleEndian.Uint16(payload[10:12])
-	ingressZone := binary.LittleEndian.Uint16(payload[12:14])
-	egressZone := binary.LittleEndian.Uint16(payload[14:16])
-	reason := binary.LittleEndian.Uint16(payload[22:24])
-	policyID := binary.LittleEndian.Uint32(payload[24:28])
-	filterID := binary.LittleEndian.Uint32(payload[36:40])
-	termID := binary.LittleEndian.Uint32(payload[40:44])
-	screenID := binary.LittleEndian.Uint32(payload[44:48])
-	timestampNS := binary.LittleEndian.Uint64(payload[48:56])
-
-	srcIP := formatIP(payload[56:72], wireAF)
-	dstIP := formatIP(payload[72:88], wireAF)
-	var natSrcIP, natDstIP string
-	if flags&dataplaneEventFlagNATSrc != 0 {
-		natSrcIP = formatIP(payload[88:104], wireAF)
-	}
-	if flags&dataplaneEventFlagNATDst != 0 {
-		natDstIP = formatIP(payload[104:120], wireAF)
-	}
-
-	action := "log"
-	if typ == EventTypePolicyDeny || typ == EventTypeScreenDrop {
-		action = "deny"
-	}
-
-	rec := logging.EventRecord{
-		Time:        time.Now(),
-		Type:        eventType,
-		SrcAddr:     formatEndpoint(srcIP, srcPort),
-		DstAddr:     formatEndpoint(dstIP, dstPort),
-		NATSrcAddr:  formatEndpoint(natSrcIP, natSrcPort),
-		NATDstAddr:  formatEndpoint(natDstIP, natDstPort),
-		Protocol:    eventProtocolName(proto),
-		Action:      action,
-		PolicyID:    policyID,
-		InZone:      ingressZone,
-		OutZone:     egressZone,
-		ScreenCheck: eventReasonString(reason, screenID),
-	}
-	if timestampNS > 0 && timestampNS <= uint64(1<<63-1) {
-		rec.Time = time.Unix(0, int64(timestampNS))
-	}
-	if typ == EventTypeFilterLog {
-		rec.PolicyID = filterID
-		rec.ScreenCheck = eventReasonString(reason, termID)
-	}
-	return rec, true
+// decodeDataplaneEventPayload decodes the canonical dataplane.Event RT_FLOW
+// payload. Userspace-dp carries these bytes over event-stream frame types 11-13,
+// but the payload itself is the same shape consumed by pkg/logging/ringbuf.go.
+func decodeDataplaneEventPayload(payload []byte) (logging.EventRecord, bool) {
+	return logging.DecodeRawEventRecord(payload)
 }
 
-func dataplaneEventTypeName(typ uint8) string {
+func dataplaneEventPayloadMatchesFrame(typ uint8, payload []byte) bool {
+	if len(payload) <= 52 {
+		return false
+	}
+	var want uint8
 	switch typ {
 	case EventTypePolicyDeny:
-		return "POLICY_DENY"
+		want = dataplane.EventTypePolicyDeny
 	case EventTypeScreenDrop:
-		return "SCREEN_DROP"
+		want = dataplane.EventTypeScreenDrop
 	case EventTypeFilterLog:
-		return "FILTER_LOG"
-	}
-	return ""
-}
-
-func eventProtocolName(proto uint8) string {
-	switch proto {
-	case 1:
-		return "ICMP"
-	case 6:
-		return "TCP"
-	case 17:
-		return "UDP"
-	case 58:
-		return "ICMPv6"
+		want = dataplane.EventTypeFilterLog
 	default:
-		return strconv.Itoa(int(proto))
+		return false
 	}
-}
-
-func formatEndpoint(ip string, port uint16) string {
-	if ip == "" {
-		return ""
-	}
-	if port == 0 {
-		return ip
-	}
-	return net.JoinHostPort(ip, strconv.Itoa(int(port)))
-}
-
-func eventReasonString(reason uint16, id uint32) string {
-	if reason != 0 && id != 0 {
-		return fmt.Sprintf("%d/%d", reason, id)
-	}
-	if reason != 0 {
-		return strconv.Itoa(int(reason))
-	}
-	if id != 0 {
-		return strconv.FormatUint(uint64(id), 10)
-	}
-	return ""
+	return payload[52] == want
 }
 
 // formatIP converts raw IP bytes to a string representation.

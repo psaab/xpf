@@ -465,6 +465,7 @@ type ProcessStatus struct {
 	CoSActiveFlowCountsTruncated bool                              `json:"cos_active_flow_counts_truncated,omitempty"`
 	RecentSessionDeltas          []SessionDeltaInfo                `json:"recent_session_deltas,omitempty"`
 	RecentExceptions             []ExceptionStatus                 `json:"recent_exceptions,omitempty"`
+	EventStream                  *EventStreamStatus                `json:"event_stream,omitempty"`
 	CoSInterfaces                []CoSInterfaceStatus              `json:"cos_interfaces,omitempty"`
 	FilterTermCounters           []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
 	LastResolution               *PacketResolution                 `json:"last_resolution,omitempty"`
@@ -474,6 +475,20 @@ type ProcessStatus struct {
 	ConfiguredMode               string                            `json:"configured_mode,omitempty"`     // Desired mode from config
 	EntryPrograms                map[int]string                    `json:"entry_programs,omitempty"`      // ifindex -> attached XDP program name
 	FallbackCounters             map[string]uint64                 `json:"fallback_counters,omitempty"`   // reason_name -> count
+}
+
+type EventStreamStatus struct {
+	FramesRead        uint64 `json:"frames_read,omitempty"`
+	FramesWritten     uint64 `json:"frames_written,omitempty"`
+	DecodeErrors      uint64 `json:"decode_errors,omitempty"`
+	SeqGaps           uint64 `json:"seq_gaps,omitempty"`
+	PolicyDenyEvents  uint64 `json:"policy_deny_events,omitempty"`
+	ScreenDropEvents  uint64 `json:"screen_drop_events,omitempty"`
+	FilterLogEvents   uint64 `json:"filter_log_events,omitempty"`
+	PolicyDenyDrops   uint64 `json:"policy_deny_drops,omitempty"`
+	ScreenDropDrops   uint64 `json:"screen_drop_drops,omitempty"`
+	FilterLogDrops    uint64 `json:"filter_log_drops,omitempty"`
+	UnknownFrameDrops uint64 `json:"unknown_frame_drops,omitempty"`
 }
 
 type CoSInterfaceStatus struct {

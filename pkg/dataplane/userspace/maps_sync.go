@@ -609,6 +609,10 @@ ctrlReady:
 	status.ConfiguredMode = m.configuredMode.String()
 	status.EntryPrograms = m.entryProgramsLocked()
 	status.FallbackCounters = m.readFallbackStatsLocked()
+	if m.eventStream != nil {
+		es := m.eventStream.Status()
+		status.EventStream = &es
+	}
 
 	m.lastStatus = *status
 	return nil

@@ -36,12 +36,15 @@ pub(crate) const MSG_SCREEN_DROP: u8 = 12;
 pub(crate) const MSG_FILTER_LOG: u8 = 13;
 
 #[allow(dead_code)]
-pub(crate) const SECURITY_EVENT_PAYLOAD_SIZE: usize = 120;
+pub(crate) const SECURITY_EVENT_PAYLOAD_SIZE: usize = 136;
 
-#[allow(dead_code)]
-const SECURITY_EVENT_FLAG_NAT_SRC: u8 = 1 << 0;
-#[allow(dead_code)]
-const SECURITY_EVENT_FLAG_NAT_DST: u8 = 1 << 1;
+const RT_FLOW_AF_INET: u8 = 2;
+const RT_FLOW_AF_INET6: u8 = 10;
+const RT_FLOW_EVENT_POLICY_DENY: u8 = 3;
+const RT_FLOW_EVENT_SCREEN_DROP: u8 = 4;
+const RT_FLOW_EVENT_FILTER_LOG: u8 = 6;
+const RT_FLOW_ACTION_DENY: u8 = 0;
+const RT_FLOW_ACTION_PERMIT: u8 = 1;
 
 /// Disposition encoding for the wire format.
 const DISP_FORWARD_CANDIDATE: u8 = 0;
@@ -82,6 +85,23 @@ impl DataplaneEventKind {
             MSG_POLICY_DENY => Some(Self::PolicyDeny),
             MSG_SCREEN_DROP => Some(Self::ScreenDrop),
             MSG_FILTER_LOG => Some(Self::FilterLog),
+            _ => None,
+        }
+    }
+
+    fn rt_flow_event_type(self) -> u8 {
+        match self {
+            Self::PolicyDeny => RT_FLOW_EVENT_POLICY_DENY,
+            Self::ScreenDrop => RT_FLOW_EVENT_SCREEN_DROP,
+            Self::FilterLog => RT_FLOW_EVENT_FILTER_LOG,
+        }
+    }
+
+    fn from_rt_flow_event_type(event_type: u8) -> Option<Self> {
+        match event_type {
+            RT_FLOW_EVENT_POLICY_DENY => Some(Self::PolicyDeny),
+            RT_FLOW_EVENT_SCREEN_DROP => Some(Self::ScreenDrop),
+            RT_FLOW_EVENT_FILTER_LOG => Some(Self::FilterLog),
             _ => None,
         }
     }
@@ -381,72 +401,48 @@ impl EventFrame {
         }
     }
 
-    /// Encode a fixed-size security telemetry event.
+    /// Encode a fixed-size security telemetry event using the existing
+    /// RT_FLOW dataplane.Event wire shape consumed by the Go ringbuf parser.
     ///
-    /// Payload layout (120 bytes):
-    /// [0] AF wire value, [1] protocol, [2] flags, [3] reserved,
-    /// [4..56] scalar tuple/identity/reason fields, then four 16-byte IP slots:
-    /// original src/dst and optional NAT src/dst.
+    /// Payload layout (136 bytes) matches `pkg/dataplane.Event`: timestamp,
+    /// 16-byte src/dst IP slots, big-endian ports, little-endian identities
+    /// and zones, event/protocol/action/address-family bytes, NAT slots, and
+    /// extended ingress-ifindex/application fields.
     #[allow(dead_code)]
     pub(crate) fn encode_dataplane_event(seq: u64, event: &DataplaneEventPayload) -> Self {
         let mut buf = [0u8; 256];
-        let mut pos = FRAME_HEADER_SIZE;
+        let base = FRAME_HEADER_SIZE;
+        let wire_af = rt_flow_addr_family(event.addr_family, event.src_ip);
+        let policy_or_reason_id = match event.kind {
+            DataplaneEventKind::PolicyDeny => event.policy_id,
+            DataplaneEventKind::ScreenDrop => event.screen_id,
+            DataplaneEventKind::FilterLog => event.filter_id,
+        };
 
-        let wire_af = wire_addr_family(event.addr_family, event.src_ip);
-        let mut flags = 0u8;
-        if event.nat_src_ip.is_some() {
-            flags |= SECURITY_EVENT_FLAG_NAT_SRC;
-        }
-        if event.nat_dst_ip.is_some() {
-            flags |= SECURITY_EVENT_FLAG_NAT_DST;
-        }
+        buf[base..base + 8].copy_from_slice(&event.timestamp_ns.to_le_bytes());
+        write_ip_16(&mut buf, base + 8, event.src_ip);
+        write_ip_16(&mut buf, base + 24, event.dst_ip);
+        buf[base + 40..base + 42].copy_from_slice(&event.src_port.to_be_bytes());
+        buf[base + 42..base + 44].copy_from_slice(&event.dst_port.to_be_bytes());
+        buf[base + 44..base + 48].copy_from_slice(&policy_or_reason_id.to_le_bytes());
+        buf[base + 48..base + 50].copy_from_slice(&event.ingress_zone_id.to_le_bytes());
+        buf[base + 50..base + 52].copy_from_slice(&event.egress_zone_id.to_le_bytes());
+        buf[base + 52] = event.kind.rt_flow_event_type();
+        buf[base + 53] = event.protocol;
+        buf[base + 54] = if event.kind == DataplaneEventKind::FilterLog {
+            RT_FLOW_ACTION_PERMIT
+        } else {
+            RT_FLOW_ACTION_DENY
+        };
+        buf[base + 55] = wire_af;
+        write_ip_opt_16(&mut buf, base + 72, event.nat_src_ip);
+        write_ip_opt_16(&mut buf, base + 88, event.nat_dst_ip);
+        buf[base + 104..base + 106].copy_from_slice(&event.nat_src_port.to_be_bytes());
+        buf[base + 106..base + 108].copy_from_slice(&event.nat_dst_port.to_be_bytes());
+        buf[base + 128..base + 132].copy_from_slice(&event.ingress_ifindex.to_le_bytes());
+        let app_id = u16::try_from(event.application_id).unwrap_or(0);
+        buf[base + 132..base + 134].copy_from_slice(&app_id.to_le_bytes());
 
-        buf[pos] = wire_af;
-        pos += 1;
-        buf[pos] = event.protocol;
-        pos += 1;
-        buf[pos] = flags;
-        pos += 1;
-        pos += 1; // reserved
-        buf[pos..pos + 2].copy_from_slice(&event.src_port.to_le_bytes());
-        pos += 2;
-        buf[pos..pos + 2].copy_from_slice(&event.dst_port.to_le_bytes());
-        pos += 2;
-        buf[pos..pos + 2].copy_from_slice(&event.nat_src_port.to_le_bytes());
-        pos += 2;
-        buf[pos..pos + 2].copy_from_slice(&event.nat_dst_port.to_le_bytes());
-        pos += 2;
-        buf[pos..pos + 2].copy_from_slice(&event.ingress_zone_id.to_le_bytes());
-        pos += 2;
-        buf[pos..pos + 2].copy_from_slice(&event.egress_zone_id.to_le_bytes());
-        pos += 2;
-        buf[pos..pos + 4].copy_from_slice(&event.ingress_ifindex.to_le_bytes());
-        pos += 4;
-        buf[pos..pos + 2].copy_from_slice(&event.owner_rg_id.to_le_bytes());
-        pos += 2;
-        buf[pos..pos + 2].copy_from_slice(&event.reason.to_le_bytes());
-        pos += 2;
-        buf[pos..pos + 4].copy_from_slice(&event.policy_id.to_le_bytes());
-        pos += 4;
-        buf[pos..pos + 4].copy_from_slice(&event.rule_id.to_le_bytes());
-        pos += 4;
-        buf[pos..pos + 4].copy_from_slice(&event.application_id.to_le_bytes());
-        pos += 4;
-        buf[pos..pos + 4].copy_from_slice(&event.filter_id.to_le_bytes());
-        pos += 4;
-        buf[pos..pos + 4].copy_from_slice(&event.term_id.to_le_bytes());
-        pos += 4;
-        buf[pos..pos + 4].copy_from_slice(&event.screen_id.to_le_bytes());
-        pos += 4;
-        buf[pos..pos + 8].copy_from_slice(&event.timestamp_ns.to_le_bytes());
-        pos += 8;
-
-        pos = write_ip_16(&mut buf, pos, event.src_ip);
-        pos = write_ip_16(&mut buf, pos, event.dst_ip);
-        pos = write_ip_opt_16(&mut buf, pos, event.nat_src_ip);
-        pos = write_ip_opt_16(&mut buf, pos, event.nat_dst_ip);
-
-        debug_assert_eq!(pos - FRAME_HEADER_SIZE, SECURITY_EVENT_PAYLOAD_SIZE);
         write_header(
             &mut buf,
             SECURITY_EVENT_PAYLOAD_SIZE as u32,
@@ -456,7 +452,7 @@ impl EventFrame {
 
         EventFrame {
             data: buf,
-            len: pos as u16,
+            len: (FRAME_HEADER_SIZE + SECURITY_EVENT_PAYLOAD_SIZE) as u16,
             seq,
         }
     }
@@ -550,71 +546,87 @@ pub(crate) fn decode_dataplane_event(
     msg_type: u8,
     payload: &[u8],
 ) -> Option<DataplaneEventPayload> {
-    let kind = DataplaneEventKind::from_msg_type(msg_type)?;
+    let frame_kind = DataplaneEventKind::from_msg_type(msg_type)?;
     if payload.len() != SECURITY_EVENT_PAYLOAD_SIZE {
         return None;
     }
 
-    let wire_af = payload[0];
-    if wire_af != 4 && wire_af != 6 {
+    let event_kind = DataplaneEventKind::from_rt_flow_event_type(payload[52])?;
+    if event_kind != frame_kind {
         return None;
     }
-    let flags = payload[2];
+    let wire_af = payload[55];
+    if wire_af != RT_FLOW_AF_INET && wire_af != RT_FLOW_AF_INET6 {
+        return None;
+    }
+    let policy_or_reason_id = u32::from_le_bytes(payload[44..48].try_into().ok()?);
 
     Some(DataplaneEventPayload {
-        kind,
-        addr_family: if wire_af == 6 {
+        kind: event_kind,
+        addr_family: if wire_af == RT_FLOW_AF_INET6 {
             libc::AF_INET6 as u8
         } else {
             libc::AF_INET as u8
         },
-        protocol: payload[1],
-        src_port: u16::from_le_bytes(payload[4..6].try_into().ok()?),
-        dst_port: u16::from_le_bytes(payload[6..8].try_into().ok()?),
-        nat_src_port: u16::from_le_bytes(payload[8..10].try_into().ok()?),
-        nat_dst_port: u16::from_le_bytes(payload[10..12].try_into().ok()?),
-        ingress_zone_id: u16::from_le_bytes(payload[12..14].try_into().ok()?),
-        egress_zone_id: u16::from_le_bytes(payload[14..16].try_into().ok()?),
-        ingress_ifindex: i32::from_le_bytes(payload[16..20].try_into().ok()?),
-        owner_rg_id: i16::from_le_bytes(payload[20..22].try_into().ok()?),
-        reason: u16::from_le_bytes(payload[22..24].try_into().ok()?),
-        policy_id: u32::from_le_bytes(payload[24..28].try_into().ok()?),
-        rule_id: u32::from_le_bytes(payload[28..32].try_into().ok()?),
-        application_id: u32::from_le_bytes(payload[32..36].try_into().ok()?),
-        filter_id: u32::from_le_bytes(payload[36..40].try_into().ok()?),
-        term_id: u32::from_le_bytes(payload[40..44].try_into().ok()?),
-        screen_id: u32::from_le_bytes(payload[44..48].try_into().ok()?),
-        timestamp_ns: u64::from_le_bytes(payload[48..56].try_into().ok()?),
-        src_ip: read_ip_16(&payload[56..72], wire_af)?,
-        dst_ip: read_ip_16(&payload[72..88], wire_af)?,
-        nat_src_ip: if flags & SECURITY_EVENT_FLAG_NAT_SRC != 0 {
-            read_ip_16(&payload[88..104], wire_af)
+        protocol: payload[53],
+        src_port: u16::from_be_bytes(payload[40..42].try_into().ok()?),
+        dst_port: u16::from_be_bytes(payload[42..44].try_into().ok()?),
+        nat_src_port: u16::from_be_bytes(payload[104..106].try_into().ok()?),
+        nat_dst_port: u16::from_be_bytes(payload[106..108].try_into().ok()?),
+        ingress_zone_id: u16::from_le_bytes(payload[48..50].try_into().ok()?),
+        egress_zone_id: u16::from_le_bytes(payload[50..52].try_into().ok()?),
+        ingress_ifindex: i32::from_le_bytes(payload[128..132].try_into().ok()?),
+        owner_rg_id: 0,
+        reason: 0,
+        policy_id: if event_kind == DataplaneEventKind::PolicyDeny {
+            policy_or_reason_id
         } else {
-            None
+            0
         },
-        nat_dst_ip: if flags & SECURITY_EVENT_FLAG_NAT_DST != 0 {
-            read_ip_16(&payload[104..120], wire_af)
+        rule_id: 0,
+        application_id: u16::from_le_bytes(payload[132..134].try_into().ok()?) as u32,
+        filter_id: if event_kind == DataplaneEventKind::FilterLog {
+            policy_or_reason_id
         } else {
-            None
+            0
         },
+        term_id: 0,
+        screen_id: if event_kind == DataplaneEventKind::ScreenDrop {
+            policy_or_reason_id
+        } else {
+            0
+        },
+        timestamp_ns: u64::from_le_bytes(payload[0..8].try_into().ok()?),
+        src_ip: read_ip_16(&payload[8..24], wire_af)?,
+        dst_ip: read_ip_16(&payload[24..40], wire_af)?,
+        nat_src_ip: read_nonzero_ip_16(&payload[72..88], wire_af),
+        nat_dst_ip: read_nonzero_ip_16(&payload[88..104], wire_af),
     })
 }
 
 #[allow(dead_code)]
 fn read_ip_16(bytes: &[u8], wire_af: u8) -> Option<IpAddr> {
     match wire_af {
-        4 => Some(IpAddr::from(<[u8; 4]>::try_from(&bytes[..4]).ok()?)),
-        6 => Some(IpAddr::from(<[u8; 16]>::try_from(&bytes[..16]).ok()?)),
+        RT_FLOW_AF_INET => Some(IpAddr::from(<[u8; 4]>::try_from(&bytes[..4]).ok()?)),
+        RT_FLOW_AF_INET6 => Some(IpAddr::from(<[u8; 16]>::try_from(&bytes[..16]).ok()?)),
         _ => None,
     }
 }
 
 #[allow(dead_code)]
-fn wire_addr_family(addr_family: u8, src_ip: IpAddr) -> u8 {
+fn read_nonzero_ip_16(bytes: &[u8], wire_af: u8) -> Option<IpAddr> {
+    if bytes.iter().all(|b| *b == 0) {
+        return None;
+    }
+    read_ip_16(bytes, wire_af)
+}
+
+#[allow(dead_code)]
+fn rt_flow_addr_family(addr_family: u8, src_ip: IpAddr) -> u8 {
     if addr_family == libc::AF_INET6 as u8 || matches!(src_ip, IpAddr::V6(_)) {
-        6
+        RT_FLOW_AF_INET6
     } else {
-        4
+        RT_FLOW_AF_INET
     }
 }
 

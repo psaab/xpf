@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/logging"
@@ -93,21 +94,22 @@ func buildDataplaneEventV4Payload(
 	policyID uint32,
 	timestampNS uint64,
 ) []byte {
-	buf := make([]byte, dataplaneEventPayloadSize)
-	buf[0] = 4
-	buf[1] = proto
-	buf[2] = dataplaneEventFlagNATSrc
-	binary.LittleEndian.PutUint16(buf[4:6], srcPort)
-	binary.LittleEndian.PutUint16(buf[6:8], dstPort)
-	binary.LittleEndian.PutUint16(buf[8:10], natSrcPort)
-	binary.LittleEndian.PutUint16(buf[12:14], ingressZone)
-	binary.LittleEndian.PutUint16(buf[14:16], egressZone)
-	binary.LittleEndian.PutUint16(buf[22:24], reason)
-	binary.LittleEndian.PutUint32(buf[24:28], policyID)
-	binary.LittleEndian.PutUint64(buf[48:56], timestampNS)
-	copy(buf[56:60], srcIP[:])
-	copy(buf[72:76], dstIP[:])
-	copy(buf[88:92], natSrcIP[:])
+	_ = reason // RT_FLOW policy-deny records carry policy identity, not the userspace-only reason field.
+	buf := make([]byte, int(unsafe.Sizeof(dataplane.Event{})))
+	binary.LittleEndian.PutUint64(buf[0:8], timestampNS)
+	copy(buf[8:12], srcIP[:])
+	copy(buf[24:28], dstIP[:])
+	binary.BigEndian.PutUint16(buf[40:42], srcPort)
+	binary.BigEndian.PutUint16(buf[42:44], dstPort)
+	binary.LittleEndian.PutUint32(buf[44:48], policyID)
+	binary.LittleEndian.PutUint16(buf[48:50], ingressZone)
+	binary.LittleEndian.PutUint16(buf[50:52], egressZone)
+	buf[52] = dataplane.EventTypePolicyDeny
+	buf[53] = proto
+	buf[54] = dataplane.ActionDeny
+	buf[55] = dataplane.AFInet
+	copy(buf[72:76], natSrcIP[:])
+	binary.BigEndian.PutUint16(buf[104:106], natSrcPort)
 	return buf
 }
 
@@ -310,9 +312,12 @@ func TestDecodeDataplaneEventPolicyDenyRTFlow(t *testing.T) {
 		99,
 		1700000000000000000,
 	)
-	rec, ok := decodeDataplaneEvent(EventTypePolicyDeny, payload)
+	if !dataplaneEventPayloadMatchesFrame(EventTypePolicyDeny, payload) {
+		t.Fatal("RT_FLOW payload did not match policy-deny event-stream frame type")
+	}
+	rec, ok := decodeDataplaneEventPayload(payload)
 	if !ok {
-		t.Fatal("decodeDataplaneEvent returned false")
+		t.Fatal("decodeDataplaneEventPayload returned false")
 	}
 	if rec.Type != "POLICY_DENY" || rec.Action != "deny" {
 		t.Fatalf("event = %s/%s, want POLICY_DENY/deny", rec.Type, rec.Action)
@@ -332,8 +337,8 @@ func TestDecodeDataplaneEventPolicyDenyRTFlow(t *testing.T) {
 	if rec.PolicyID != 99 || rec.InZone != 1 || rec.OutZone != 2 {
 		t.Fatalf("identity = policy %d zones %d->%d, want policy 99 zones 1->2", rec.PolicyID, rec.InZone, rec.OutZone)
 	}
-	if rec.ScreenCheck != "7" {
-		t.Fatalf("ScreenCheck/reason = %q, want 7", rec.ScreenCheck)
+	if rec.ScreenCheck != "" {
+		t.Fatalf("ScreenCheck/reason = %q, want empty for policy-deny RT_FLOW", rec.ScreenCheck)
 	}
 }
 
