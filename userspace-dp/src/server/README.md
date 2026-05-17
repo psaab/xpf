@@ -27,6 +27,18 @@ The shapes are mirrored in `pkg/dataplane/userspace/protocol.go` on the
 Go side; **the JSON tags ARE the contract** — changing one without
 updating the other breaks the helper.
 
+`ConfigSnapshot.version` is a compatibility gate, not just documentation.
+The helper accepts only the current snapshot protocol version; this prevents a
+new daemon from publishing fields such as policy-scheduler inactive bits to a
+helper that would silently ignore them.
+The helper also reports `config_snapshot_protocol_version` in status so a new
+daemon can fail closed before sending scheduled-policy snapshots to an older
+helper binary that predates the gate. If the daemon detects an incompatible
+helper while scheduled policies are configured, it sends
+`set_forwarding_state armed=false` before returning the compile/publish error;
+the old helper must not keep forwarding a stale snapshot that ignores scheduler
+inactive bits.
+
 ## Reconciliation
 
 `replan_queues` derives the binding plan from the current

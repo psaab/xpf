@@ -33,6 +33,8 @@ type CompileResult struct {
 	PolicySets  int               // number of policy sets created
 	FilterIDs   map[string]uint32 // "inet:name" or "inet6:name" -> filter_id
 
+	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot
+
 	Lo0FilterV4 uint32 // lo0 inet filter ID (0=none), set by compileFirewallFilters
 	Lo0FilterV6 uint32 // lo0 inet6 filter ID (0=none), set by compileFirewallFilters
 
@@ -66,6 +68,18 @@ type CompileResult struct {
 	// ethtoolApplied tracks which interfaces have already had speed/duplex
 	// settings applied via ethtool -s, keyed by "iface:speed:duplex".
 	ethtoolApplied map[string]bool
+}
+
+// PolicyScheduleRuleSlot records the exact compiled policy_rules map slot for a
+// scheduled policy. A single policy can compile into multiple dense app-term
+// slots; runtime scheduler updates must toggle those compiled slots rather than
+// recomputing indexes from the original config policy position.
+type PolicyScheduleRuleSlot struct {
+	PolicySetID   uint32
+	RuleIndex     uint32
+	RuleID        uint32
+	PolicyName    string
+	SchedulerName string
 }
 
 // cachedInterfaceByName returns a cached *net.Interface, performing the
@@ -792,6 +806,15 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			}
 
 			result.PolicyNames[rule.RuleID] = pol.Name
+			if pol.SchedulerName != "" {
+				result.PolicyScheduleRuleSlots = append(result.PolicyScheduleRuleSlots, PolicyScheduleRuleSlot{
+					PolicySetID:   policySetID,
+					RuleIndex:     uint32(i),
+					RuleID:        rule.RuleID,
+					PolicyName:    pol.Name,
+					SchedulerName: pol.SchedulerName,
+				})
+			}
 
 			slog.Debug("policy rule compiled",
 				"from", zpp.FromZone, "to", zpp.ToZone,
@@ -913,6 +936,15 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			}
 
 			result.PolicyNames[rule.RuleID] = pol.Name
+			if pol.SchedulerName != "" {
+				result.PolicyScheduleRuleSlots = append(result.PolicyScheduleRuleSlots, PolicyScheduleRuleSlot{
+					PolicySetID:   policySetID,
+					RuleIndex:     uint32(i),
+					RuleID:        rule.RuleID,
+					PolicyName:    pol.Name,
+					SchedulerName: pol.SchedulerName,
+				})
+			}
 
 			slog.Debug("global policy rule compiled",
 				"policy", pol.Name, "action", rule.Action,

@@ -24,7 +24,11 @@ import (
 func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
 	tuneSocketBuffers()
 	if m.proc != nil && m.proc.Process != nil && configEqual(m.cfg, cfg) {
-		if err := m.requestLocked(ControlRequest{Type: "ping"}, nil); err == nil {
+		var status ProcessStatus
+		if err := m.requestLocked(ControlRequest{Type: "ping"}, &status); err == nil {
+			if status.PID != 0 || status.ConfigSnapshotProtocolVersion != 0 {
+				m.lastStatus = status
+			}
 			return nil
 		}
 		slog.Warn("userspace dataplane helper unhealthy, restarting")
@@ -108,7 +112,11 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(cfg.ControlSocket); err == nil {
-			if err := m.requestLocked(ControlRequest{Type: "ping"}, nil); err == nil {
+			var status ProcessStatus
+			if err := m.requestLocked(ControlRequest{Type: "ping"}, &status); err == nil {
+				if status.PID != 0 || status.ConfigSnapshotProtocolVersion != 0 {
+					m.lastStatus = status
+				}
 				slog.Info("userspace dataplane helper started", "pid", cmd.Process.Pid, "socket", cfg.ControlSocket)
 				return nil
 			}
@@ -321,6 +329,12 @@ func (m *Manager) syncSnapshotLocked() error {
 	// for parity with update_neighbors path.
 	publishSnap := *m.lastSnapshot
 	publishSnap.Neighbors = filterPublishableNeighbors(m.lastSnapshot.Neighbors)
+	if err := m.ensurePolicySchedulerProtocolLocked(publishSnap.Config); err != nil {
+		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+			return errors.Join(err, disarmErr)
+		}
+		return err
+	}
 	var status ProcessStatus
 	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
 		return fmt.Errorf("publish userspace snapshot: %w", err)

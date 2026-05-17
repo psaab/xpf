@@ -79,6 +79,9 @@ type Daemon struct {
 	snmpAgent                  *snmp.Agent
 	lldpMgr                    *lldp.Manager
 	scheduler                  *scheduler.Scheduler
+	schedulerCancel            context.CancelFunc
+	policySchedulerConfigHash  [32]byte
+	policySchedulerEpoch       atomic.Uint64
 	cluster                    *cluster.Manager
 	sessionSync                *cluster.SessionSync
 	syncBulkPrimed             atomic.Bool

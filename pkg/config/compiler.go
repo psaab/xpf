@@ -221,7 +221,6 @@ func compileExpanded(tree *ConfigTree) (*Config, error) {
 	if err := validateThreeColorPolicersStrict(cfg.Firewall.ThreeColorPolicers); err != nil {
 		return nil, err
 	}
-
 	if warnings := ValidateConfig(cfg); len(warnings) > 0 {
 		for _, w := range warnings {
 			cfg.Warnings = append(cfg.Warnings, w)
@@ -268,6 +267,37 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 			if pol.PBS < pol.CBS {
 				return fmt.Errorf("firewall three-color-policer %q peak-burst-size must be >= committed-burst-size", displayName)
 			}
+		}
+	}
+	return nil
+}
+
+func validatePolicySchedulerReferencesStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	check := func(pol *Policy) error {
+		if pol == nil || pol.SchedulerName == "" {
+			return nil
+		}
+		if _, ok := cfg.Schedulers[pol.SchedulerName]; ok {
+			return nil
+		}
+		return fmt.Errorf("policy %q references undefined scheduler %q", pol.Name, pol.SchedulerName)
+	}
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil {
+			continue
+		}
+		for _, pol := range zpp.Policies {
+			if err := check(pol); err != nil {
+				return err
+			}
+		}
+	}
+	for _, pol := range cfg.Security.GlobalPolicies {
+		if err := check(pol); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -515,6 +545,14 @@ func ValidateConfig(cfg *Config) []string {
 					warnings = append(warnings, fmt.Sprintf(
 						"policy %q: scheduler %q not defined", p.Name, p.SchedulerName))
 				}
+			}
+		}
+	}
+	for _, p := range cfg.Security.GlobalPolicies {
+		if p.SchedulerName != "" {
+			if _, ok := cfg.Schedulers[p.SchedulerName]; !ok {
+				warnings = append(warnings, fmt.Sprintf(
+					"global policy %q: scheduler %q not defined", p.Name, p.SchedulerName))
 			}
 		}
 	}

@@ -604,17 +604,7 @@ ctrlReady:
 	// even for packets that bypassed the BPF pipeline (#332).
 	m.syncBPFCountersLocked(status)
 
-	// Populate runtime mode and observability fields in status.
-	status.DataplaneMode = m.mode.String()
-	status.ConfiguredMode = m.configuredMode.String()
-	status.EntryPrograms = m.entryProgramsLocked()
-	status.FallbackCounters = m.readFallbackStatsLocked()
-	if m.eventStream != nil {
-		es := m.eventStream.Status()
-		status.EventStream = &es
-	}
-
-	m.lastStatus = *status
+	m.recordHelperStatusLocked(status)
 	return nil
 }
 

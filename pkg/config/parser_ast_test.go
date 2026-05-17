@@ -1473,7 +1473,6 @@ security {
             policy sched-test {
                 match { source-address any; destination-address any; application any; }
                 then { permit; }
-                scheduler-name missing-sched;
             }
         }
     }
@@ -1488,16 +1487,13 @@ security {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	var foundIfaceWarn, foundPoolWarn, foundSchedWarn bool
+	var foundIfaceWarn, foundPoolWarn bool
 	for _, w := range cfg.Warnings {
 		if strings.Contains(w, "missing-iface") && strings.Contains(w, "not in interfaces") {
 			foundIfaceWarn = true
 		}
 		if strings.Contains(w, "missing-pool") && strings.Contains(w, "not defined") {
 			foundPoolWarn = true
-		}
-		if strings.Contains(w, "missing-sched") && strings.Contains(w, "not defined") {
-			foundSchedWarn = true
 		}
 	}
 	if !foundIfaceWarn {
@@ -1506,8 +1502,61 @@ security {
 	if !foundPoolWarn {
 		t.Errorf("missing warning for SNAT referencing undefined pool, got: %v", cfg.Warnings)
 	}
-	if !foundSchedWarn {
-		t.Errorf("missing warning for policy referencing undefined scheduler, got: %v", cfg.Warnings)
+}
+
+func TestPolicySchedulerMissingReferenceWarns(t *testing.T) {
+	input := `security {
+    policies {
+        from-zone trust to-zone untrust {
+            policy sched-test {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+                scheduler-name missing-sched;
+            }
+        }
+    }
+}
+`
+	parser := NewParser(input)
+	tree, errs := parser.Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig returned error for warning-only missing scheduler reference: %v", err)
+	}
+	warnings := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(warnings, `policy "sched-test": scheduler "missing-sched" not defined`) {
+		t.Fatalf("CompileConfig warnings = %v, want missing scheduler warning", cfg.Warnings)
+	}
+}
+
+func TestGlobalPolicySchedulerMissingReferenceWarns(t *testing.T) {
+	input := `security {
+    policies {
+        global {
+            policy sched-global {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+                scheduler-name missing-sched;
+            }
+        }
+    }
+}
+`
+	parser := NewParser(input)
+	tree, errs := parser.Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig returned error for warning-only missing global scheduler reference: %v", err)
+	}
+	warnings := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(warnings, `global policy "sched-global": scheduler "missing-sched" not defined`) {
+		t.Fatalf("CompileConfig warnings = %v, want missing global scheduler warning", cfg.Warnings)
 	}
 }
 

@@ -21,6 +21,10 @@ import (
 )
 
 func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32) *ConfigSnapshot {
+	return buildSnapshotWithSchedulerState(cfg, ucfg, generation, fibGeneration, nil)
+}
+
+func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool) *ConfigSnapshot {
 	if cfg == nil {
 		return &ConfigSnapshot{
 			Version:       ProtocolVersion,
@@ -50,7 +54,7 @@ func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation u
 		Routes:             buildRouteSnapshots(cfg, interfaces),
 		Flow:               buildFlowSnapshot(cfg),
 		DefaultPolicy:      policyActionString(cfg.Security.DefaultPolicy),
-		Policies:           buildPolicySnapshots(cfg),
+		Policies:           buildPolicySnapshotsWithSchedulerState(cfg, activeState),
 		SourceNAT:          buildSourceNATSnapshots(cfg),
 		StaticNAT:          buildStaticNATSnapshots(cfg),
 		DestinationNAT:     buildDestinationNATSnapshots(cfg),
@@ -1968,6 +1972,10 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 }
 
 func buildPolicySnapshots(cfg *config.Config) []PolicyRuleSnapshot {
+	return buildPolicySnapshotsWithSchedulerState(cfg, nil)
+}
+
+func buildPolicySnapshotsWithSchedulerState(cfg *config.Config, activeState map[string]bool) []PolicyRuleSnapshot {
 	if cfg == nil || (len(cfg.Security.Policies) == 0 && len(cfg.Security.GlobalPolicies) == 0) {
 		return nil
 	}
@@ -1992,10 +2000,14 @@ func buildPolicySnapshots(cfg *config.Config) []PolicyRuleSnapshot {
 			if !ok {
 				applicationTerms = nil
 			}
+			schedulerName := pol.SchedulerName
 			out = append(out, PolicyRuleSnapshot{
+				RuleID:               stablePolicyRuleID(zpp.FromZone, zpp.ToZone, pol.Name),
 				Name:                 pol.Name,
 				FromZone:             zpp.FromZone,
 				ToZone:               zpp.ToZone,
+				SchedulerName:        schedulerName,
+				Inactive:             policyRuleInactive(schedulerName, activeState),
 				SourceAddresses:      sourceAddresses,
 				DestinationAddresses: destinationAddresses,
 				Applications:         append([]string(nil), pol.Match.Applications...),
@@ -2021,10 +2033,14 @@ func buildPolicySnapshots(cfg *config.Config) []PolicyRuleSnapshot {
 		if !ok {
 			applicationTerms = nil
 		}
+		schedulerName := pol.SchedulerName
 		out = append(out, PolicyRuleSnapshot{
+			RuleID:               stablePolicyRuleID("junos-global", "junos-global", pol.Name),
 			Name:                 pol.Name,
 			FromZone:             "junos-global",
 			ToZone:               "junos-global",
+			SchedulerName:        schedulerName,
+			Inactive:             policyRuleInactive(schedulerName, activeState),
 			SourceAddresses:      sourceAddresses,
 			DestinationAddresses: destinationAddresses,
 			Applications:         append([]string(nil), pol.Match.Applications...),
@@ -2033,6 +2049,21 @@ func buildPolicySnapshots(cfg *config.Config) []PolicyRuleSnapshot {
 		})
 	}
 	return out
+}
+
+func stablePolicyRuleID(fromZone, toZone, ruleName string) string {
+	return fmt.Sprintf("%s->%s/%s", fromZone, toZone, ruleName)
+}
+
+func policyRuleInactive(schedulerName string, activeState map[string]bool) bool {
+	if schedulerName == "" {
+		return false
+	}
+	if activeState == nil {
+		return true
+	}
+	active, ok := activeState[schedulerName]
+	return !ok || !active
 }
 
 func policyActionString(action config.PolicyAction) string {
