@@ -14,7 +14,9 @@ fn test_handle(
     Arc<EventStreamShared>,
 ) {
     let (tx, rx) = mpsc::sync_channel(capacity);
-    let shared = Arc::new(EventStreamShared::new_with_dataplane_event_rate(config));
+    let shared = Arc::new(
+        EventStreamShared::new_with_dataplane_event_rate_and_queue_capacity(config, capacity),
+    );
     (
         EventStreamWorkerHandle {
             tx,
@@ -85,7 +87,7 @@ fn dataplane_event_rate_limit_is_per_kind_and_ingress_zone() {
         events_per_second: 1,
         burst: 1,
     };
-    let (handle, _rx, shared) = test_handle(8, config);
+    let (handle, _rx, shared) = test_handle(16, config);
 
     assert_eq!(
         handle.try_emit_dataplane_event_at(test_event(DataplaneEventKind::PolicyDeny, 7), 0),
@@ -123,6 +125,85 @@ fn dataplane_event_rate_limit_is_per_kind_and_ingress_zone() {
     assert_eq!(stats.policy_deny.dropped, 1);
     assert_eq!(stats.screen_drop.sent, 1);
     assert_eq!(stats.screen_drop.dropped, 0);
+}
+
+#[test]
+fn dataplane_event_kind_budget_prevents_one_kind_from_monopolizing_shared_queue() {
+    let capacity = 8;
+    let (handle, _rx, shared) = test_handle(
+        capacity,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+
+    let mut admitted_policy_deny = 0usize;
+    for _ in 0..=capacity {
+        match handle.try_emit_dataplane_event_at(test_event(DataplaneEventKind::PolicyDeny, 7), 0) {
+            DataplaneEventEmitOutcome::Queued { .. } => admitted_policy_deny += 1,
+            DataplaneEventEmitOutcome::Dropped {
+                reason: DataplaneEventDropReason::QueueFull,
+            } => break,
+            other => panic!("unexpected policy deny outcome: {other:?}"),
+        }
+    }
+
+    assert!(
+        admitted_policy_deny < capacity,
+        "one event kind must hit its queue budget before it fills the shared channel"
+    );
+    let seq_before_screen = shared.next_seq.load(Ordering::Relaxed);
+    assert_eq!(
+        handle.try_emit_dataplane_event_at(test_event(DataplaneEventKind::ScreenDrop, 7), 0),
+        DataplaneEventEmitOutcome::Queued {
+            seq: seq_before_screen + 1
+        }
+    );
+
+    let stats = handle.dataplane_event_stats();
+    assert_eq!(stats.policy_deny.sent, admitted_policy_deny as u64);
+    assert_eq!(stats.policy_deny.queue_full, 1);
+    assert_eq!(stats.screen_drop.sent, 1);
+}
+
+#[test]
+fn dataplane_event_total_budget_reserves_shared_queue_capacity_for_session_frames() {
+    let capacity = 8;
+    let (handle, _rx, _shared) = test_handle(
+        capacity,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let kinds = [
+        DataplaneEventKind::PolicyDeny,
+        DataplaneEventKind::ScreenDrop,
+        DataplaneEventKind::FilterLog,
+    ];
+
+    let mut admitted_events = 0usize;
+    for idx in 0..=capacity {
+        match handle.try_emit_dataplane_event_at(test_event(kinds[idx % kinds.len()], 7), 0) {
+            DataplaneEventEmitOutcome::Queued { .. } => admitted_events += 1,
+            DataplaneEventEmitOutcome::Dropped {
+                reason: DataplaneEventDropReason::QueueFull,
+            } => break,
+            other => panic!("unexpected dataplane event outcome: {other:?}"),
+        }
+    }
+
+    assert!(
+        admitted_events < capacity,
+        "dataplane telemetry must leave shared queue capacity for non-telemetry frames"
+    );
+    assert!(
+        handle.try_send(crate::event_stream::EventFrame::encode_drain_complete(
+            10_000
+        )),
+        "session/control frames must still fit after telemetry hits its budget"
+    );
 }
 
 #[test]

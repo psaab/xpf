@@ -26,7 +26,10 @@ periodic ACK from the daemon.
   dataplane telemetry. It rate-limits each `(event type, ingress
   zone)` bucket, encodes fixed-size frames only after the limiter
   admits the event, and accounts sent/rate-limited/queue-full/
-  disconnected outcomes per event type.
+  disconnected outcomes per event type. Dataplane telemetry can occupy
+  only a bounded share of the shared event-stream channel, and each
+  event type has its own in-flight cap so one deny/drop/log storm cannot
+  monopolize queue capacity.
 - `codec_tests.rs`, `producer_tests.rs`, `tests.rs` — co-located.
 
 ## Why push
@@ -56,7 +59,9 @@ cluster-scoped.
   wrappers. The API applies the per-kind/per-ingress-zone limiter
   before sequence allocation, increments the generic producer drop
   counter for rate-limited events, and records per-event loss reason
-  counters for later status surfacing.
+  counters for later status surfacing. It also enforces the telemetry
+  queue budget before touching the shared channel; event budget drops
+  are reported as queue-full drops.
 - The Go daemon must know every helper→daemon frame type that carries a
   sequence number. For RT_FLOW-style dataplane telemetry, the daemon
   decodes valid frames through the same RT_FLOW adapter used for ringbuf

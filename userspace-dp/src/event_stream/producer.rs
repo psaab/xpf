@@ -9,6 +9,7 @@ const DATAPLANE_EVENT_KIND_COUNT: usize = 3;
 const DATAPLANE_EVENT_ZONE_BUCKETS: usize = 256;
 const DATAPLANE_EVENT_RATE_BUCKETS: usize =
     DATAPLANE_EVENT_KIND_COUNT * DATAPLANE_EVENT_ZONE_BUCKETS;
+const DATAPLANE_EVENT_QUEUE_SHARE_DIVISOR: usize = 2;
 const NS_PER_SEC: u64 = 1_000_000_000;
 
 const DEFAULT_DATAPLANE_EVENT_RATE_PER_SEC: u64 = 1_000;
@@ -38,19 +39,35 @@ impl DataplaneEventRateLimitConfig {
         self.events_per_second == 0
     }
 
-    fn interval_ns(self) -> u64 {
+    fn runtime(self) -> DataplaneEventRateLimit {
         if self.unlimited() {
-            return 0;
+            return DataplaneEventRateLimit {
+                interval_ns: 0,
+                burst_horizon_ns: 0,
+            };
         }
-        NS_PER_SEC
+
+        let interval_ns = NS_PER_SEC
             .saturating_add(self.events_per_second.saturating_sub(1))
             .saturating_div(self.events_per_second)
-            .max(1)
-    }
-
-    fn burst_horizon_ns(self) -> u64 {
+            .max(1);
         let burst = self.burst.max(1);
-        self.interval_ns().saturating_mul(burst.saturating_sub(1))
+        DataplaneEventRateLimit {
+            interval_ns,
+            burst_horizon_ns: interval_ns.saturating_mul(burst.saturating_sub(1)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DataplaneEventRateLimit {
+    interval_ns: u64,
+    burst_horizon_ns: u64,
+}
+
+impl DataplaneEventRateLimit {
+    fn unlimited(self) -> bool {
+        self.interval_ns == 0
     }
 }
 
@@ -60,21 +77,19 @@ struct DataplaneEventRateBucket {
 }
 
 impl DataplaneEventRateBucket {
-    fn allow_at(&self, config: DataplaneEventRateLimitConfig, now_ns: u64) -> bool {
-        if config.unlimited() {
+    fn allow_at(&self, limit: DataplaneEventRateLimit, now_ns: u64) -> bool {
+        if limit.unlimited() {
             return true;
         }
 
         // GCRA form of a token bucket: one atomic TAT gives fixed memory,
         // no locks, and no per-packet heap work on the producer path.
-        let interval_ns = config.interval_ns();
-        let burst_horizon_ns = config.burst_horizon_ns();
         let mut tat = self.theoretical_arrival_ns.load(Ordering::Relaxed);
         loop {
-            if tat.saturating_sub(burst_horizon_ns) > now_ns {
+            if tat.saturating_sub(limit.burst_horizon_ns) > now_ns {
                 return false;
             }
-            let next_tat = tat.max(now_ns).saturating_add(interval_ns);
+            let next_tat = tat.max(now_ns).saturating_add(limit.interval_ns);
             match self.theoretical_arrival_ns.compare_exchange_weak(
                 tat,
                 next_tat,
@@ -89,20 +104,73 @@ impl DataplaneEventRateBucket {
 }
 
 pub(super) struct DataplaneEventRateLimiter {
-    config: DataplaneEventRateLimitConfig,
+    limit: DataplaneEventRateLimit,
     buckets: [DataplaneEventRateBucket; DATAPLANE_EVENT_RATE_BUCKETS],
 }
 
 impl DataplaneEventRateLimiter {
     pub(super) fn new(config: DataplaneEventRateLimitConfig) -> Self {
         Self {
-            config,
+            limit: config.runtime(),
             buckets: array::from_fn(|_| DataplaneEventRateBucket::default()),
         }
     }
 
     fn allow_at(&self, kind: DataplaneEventKind, ingress_zone_id: u16, now_ns: u64) -> bool {
-        self.buckets[rate_bucket_index(kind, ingress_zone_id)].allow_at(self.config, now_ns)
+        self.buckets[rate_bucket_index(kind, ingress_zone_id)].allow_at(self.limit, now_ns)
+    }
+}
+
+pub(super) struct DataplaneEventQueueBudget {
+    max_total_queued: u64,
+    max_kind_queued: u64,
+    total_queued: AtomicU64,
+    kind_queued: [AtomicU64; DATAPLANE_EVENT_KIND_COUNT],
+}
+
+impl DataplaneEventQueueBudget {
+    pub(super) fn new(channel_capacity: usize) -> Self {
+        // Dataplane telemetry is lossy by design: bound it to roughly half of
+        // the shared channel for normal capacities, then split that telemetry
+        // share across event kinds so one storm cannot monopolize it.
+        let max_total_queued = (channel_capacity / DATAPLANE_EVENT_QUEUE_SHARE_DIVISOR) as u64;
+        let max_total_queued = if channel_capacity == 0 {
+            0
+        } else {
+            max_total_queued.max(1)
+        };
+        let kind_count = DATAPLANE_EVENT_KIND_COUNT as u64;
+        let max_kind_queued = if max_total_queued == 0 {
+            0
+        } else {
+            max_total_queued
+                .saturating_add(kind_count.saturating_sub(1))
+                .saturating_div(kind_count)
+                .max(1)
+        };
+
+        Self {
+            max_total_queued,
+            max_kind_queued,
+            total_queued: AtomicU64::new(0),
+            kind_queued: array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    fn try_acquire(&self, kind: DataplaneEventKind) -> bool {
+        if !try_increment_below(&self.total_queued, self.max_total_queued) {
+            return false;
+        }
+        if !try_increment_below(&self.kind_queued[kind_index(kind)], self.max_kind_queued) {
+            self.total_queued.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn release(&self, kind: DataplaneEventKind) {
+        decrement_if_positive(&self.kind_queued[kind_index(kind)]);
+        decrement_if_positive(&self.total_queued);
     }
 }
 
@@ -219,12 +287,23 @@ impl EventStreamWorkerHandle {
 
         let seq = self.next_seq();
         let frame = EventFrame::encode_dataplane_event(seq, &event);
+        if !self.shared.dataplane_event_queue.try_acquire(kind) {
+            self.shared
+                .dataplane_event_counters
+                .record_drop(kind, DataplaneEventDropReason::QueueFull);
+            self.shared.frames_dropped.fetch_add(1, Ordering::Relaxed);
+            return DataplaneEventEmitOutcome::Dropped {
+                reason: DataplaneEventDropReason::QueueFull,
+            };
+        }
+
         match self.try_send_frame(frame) {
             Ok(()) => {
                 self.shared.dataplane_event_counters.record_sent(kind);
                 DataplaneEventEmitOutcome::Queued { seq }
             }
             Err(EventStreamSendError::Full) => {
+                self.shared.dataplane_event_queue.release(kind);
                 self.shared
                     .dataplane_event_counters
                     .record_drop(kind, DataplaneEventDropReason::QueueFull);
@@ -233,6 +312,7 @@ impl EventStreamWorkerHandle {
                 }
             }
             Err(EventStreamSendError::Disconnected) => {
+                self.shared.dataplane_event_queue.release(kind);
                 self.shared
                     .dataplane_event_counters
                     .record_drop(kind, DataplaneEventDropReason::Disconnected);
@@ -260,6 +340,43 @@ fn kind_index(kind: DataplaneEventKind) -> usize {
 fn rate_bucket_index(kind: DataplaneEventKind, ingress_zone_id: u16) -> usize {
     let zone_bucket = usize::from(ingress_zone_id).min(DATAPLANE_EVENT_ZONE_BUCKETS - 1);
     kind_index(kind) * DATAPLANE_EVENT_ZONE_BUCKETS + zone_bucket
+}
+
+fn try_increment_below(counter: &AtomicU64, limit: u64) -> bool {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current >= limit {
+            return false;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn decrement_if_positive(counter: &AtomicU64) {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current == 0 {
+            debug_assert!(false, "dataplane event queue budget underflow");
+            return;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 #[cfg(test)]

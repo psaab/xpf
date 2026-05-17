@@ -21,7 +21,7 @@ pub(crate) use producer::{
 
 use crate::session::{SessionDelta, SessionDeltaKind};
 use codec::{FRAME_HEADER_SIZE, MSG_ACK, MSG_DRAIN_REQUEST, MSG_KEEPALIVE, MSG_PAUSE, MSG_RESUME};
-use producer::{DataplaneEventCounters, DataplaneEventRateLimiter};
+use producer::{DataplaneEventCounters, DataplaneEventQueueBudget, DataplaneEventRateLimiter};
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::io;
@@ -81,6 +81,7 @@ struct EventStreamShared {
     dataplane_event_counters: DataplaneEventCounters,
     #[allow(dead_code)] // consumed by producer call sites once they are wired
     dataplane_event_limiter: DataplaneEventRateLimiter,
+    dataplane_event_queue: DataplaneEventQueueBudget,
 }
 
 impl EventStreamShared {
@@ -89,6 +90,13 @@ impl EventStreamShared {
     }
 
     fn new_with_dataplane_event_rate(config: DataplaneEventRateLimitConfig) -> Self {
+        Self::new_with_dataplane_event_rate_and_queue_capacity(config, CHANNEL_CAPACITY)
+    }
+
+    fn new_with_dataplane_event_rate_and_queue_capacity(
+        config: DataplaneEventRateLimitConfig,
+        channel_capacity: usize,
+    ) -> Self {
         Self {
             next_seq: AtomicU64::new(0),
             acked_seq: AtomicU64::new(0),
@@ -99,6 +107,7 @@ impl EventStreamShared {
             frames_replayed: AtomicU64::new(0),
             dataplane_event_counters: DataplaneEventCounters::new(),
             dataplane_event_limiter: DataplaneEventRateLimiter::new(config),
+            dataplane_event_queue: DataplaneEventQueueBudget::new(channel_capacity),
         }
     }
 }
@@ -358,7 +367,7 @@ fn io_thread_main(
     }
 
     // Drain remaining events on shutdown
-    drain_remaining(&rx);
+    drain_remaining(&rx, &shared);
     shared.connected.store(false, Ordering::Release);
     eprintln!("xpf-event-stream: I/O thread exiting");
 }
@@ -464,6 +473,7 @@ fn run_connected_loop(
             match rx.try_recv() {
                 Ok(frame) => {
                     drained_any = true;
+                    release_dataplane_event_queue_budget(shared, &frame);
                     // Add to replay buffer (drop oldest if over capacity)
                     if replay_buf.len() >= REPLAY_BUFFER_CAPACITY {
                         replay_buf.pop_front();
@@ -643,6 +653,7 @@ fn handle_drain_request(
         match rx.try_recv() {
             Ok(frame) => {
                 let frame_seq = frame.seq;
+                release_dataplane_event_queue_budget(shared, &frame);
                 if replay_buf.len() >= REPLAY_BUFFER_CAPACITY {
                     replay_buf.pop_front();
                 }
@@ -701,12 +712,18 @@ fn handle_drain_request(
 }
 
 /// Drain remaining events from the channel on shutdown.
-fn drain_remaining(rx: &mpsc::Receiver<EventFrame>) {
+fn drain_remaining(rx: &mpsc::Receiver<EventFrame>, shared: &Arc<EventStreamShared>) {
     loop {
         match rx.try_recv() {
-            Ok(_) => {}
+            Ok(frame) => release_dataplane_event_queue_budget(shared, &frame),
             Err(_) => break,
         }
+    }
+}
+
+fn release_dataplane_event_queue_budget(shared: &Arc<EventStreamShared>, frame: &EventFrame) {
+    if let Some(kind) = frame.dataplane_event_kind() {
+        shared.dataplane_event_queue.release(kind);
     }
 }
 

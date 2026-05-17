@@ -65,6 +65,10 @@ forwarding decision.
 - Use `try_emit_dataplane_event_at()`; a full event queue drops the event and
   increments both the generic producer drop counter and per-event queue-full
   accounting.
+- Dataplane telemetry must not monopolize the shared event-stream queue:
+  in-flight telemetry is capped to a bounded share of the channel, and each
+  event kind has its own cap so one storm leaves capacity for session/control
+  frames and other telemetry kinds.
 - Per-source-zone/per-event token-bucket-equivalent rate limiting must run
   before sequence allocation to prevent deny storms from starving session
   open/close/update events without creating sequence gaps for limiter drops.

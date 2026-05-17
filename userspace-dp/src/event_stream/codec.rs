@@ -445,6 +445,10 @@ impl EventFrame {
         Some(&self.data[FRAME_HEADER_SIZE..end])
     }
 
+    pub(super) fn dataplane_event_kind(&self) -> Option<DataplaneEventKind> {
+        DataplaneEventKind::from_msg_type(self.data[4])
+    }
+
     #[allow(dead_code)]
     pub(crate) fn decode_dataplane_event(&self) -> Option<DataplaneEventPayload> {
         decode_dataplane_event(self.data[4], self.dataplane_event_payload()?)
