@@ -1,9 +1,16 @@
 # Testing & Performance Guide
 
-> Deprecation notice (#1373): the legacy eBPF dataplane is being retired. New
-> dataplane validation targets the userspace AF_XDP cluster unless a later phase
-> explicitly requires regression coverage for the legacy path. Phase 0 removes no
-> BPF source or test target.
+> Deprecation notice (#1373): routine dataplane validation now targets the
+> userspace AF_XDP cluster by default. The legacy eBPF dataplane remains
+> available for compatibility, rollback, and explicit regression coverage during
+> the staged retirement. Phase 1 updates active documentation; later phases own
+> source, loader, build, and CLI removals.
+
+This page still contains legacy eBPF standalone/HA procedures and historical
+performance notes. Treat them as regression context unless a workstream
+explicitly calls for legacy coverage. For current userspace validation, use
+[`userspace-ha-validation.md`](userspace-ha-validation.md) and the
+`loss:xpf-userspace-fw0/fw1` cluster.
 
 ## Test Environment
 
@@ -56,7 +63,7 @@ All interfaces renamed at boot by `xpf-link-setup.service` (PCI bus order → vS
 - i40e driver has **native XDP** — no generic mode overhead
 - Appears as `enp10s0f0np0` inside VM
 - PCI passthrough via: `incus config device add VM internet pci address=<BDF>`
-- VLAN 50 tagging configured in Junos config, handled by BPF
+- VLAN 50 tagging configured in Junos config, handled by the active dataplane
 - IPv6: 2001:559:8585:50::5/64
 
 ### Zone Policy Matrix
@@ -72,8 +79,11 @@ All interfaces renamed at boot by `xpf-link-setup.service` (PCI bus order → vS
 ## Build & Deploy Workflow
 
 ```bash
-# Full build (BPF codegen + Go binary)
+# Legacy/full build (BPF codegen + Go binary)
 make generate && make build
+
+# Primary userspace dataplane helper
+make build-userspace-dp
 
 # Run unit tests (266 tests across 12 packages)
 make test
@@ -187,10 +197,11 @@ perf report --no-children --sort=dso,symbol
 
 ---
 
-## Hitless Restart Testing
+## Legacy eBPF Hitless Restart Testing
 
 ### What It Tests
-Daemon restart with zero session loss and zero packet loss via BPF map/link pinning.
+Daemon restart with zero session loss and zero packet loss via legacy BPF
+map/link pinning.
 
 ### Prerequisites
 - Stateful maps pinned to `/sys/fs/bpf/xpf/`
@@ -351,7 +362,7 @@ printf 'show firewall\nexit\n' | incus exec xpf-fw -- cli 2>/dev/null
 printf 'show security nat source summary\nexit\n' | incus exec xpf-fw -- cli 2>/dev/null
 printf 'show security nat destination summary\nexit\n' | incus exec xpf-fw -- cli 2>/dev/null
 
-# BPF map utilization
+# Dataplane buffer utilization
 printf 'show system buffers\nexit\n' | incus exec xpf-fw -- cli 2>/dev/null
 ```
 
@@ -399,7 +410,7 @@ printf 'clear firewall all\nexit\n' | incus exec xpf-fw -- cli 2>/dev/null
 - STALE ARP entries work fine with `bpf_fib_lookup` — only truly absent entries fail
 
 ### VLAN Handling
-- WAN interface (wan0) uses VLAN 50 — tag pushed/popped in BPF
+- WAN interface (wan0) uses VLAN 50 — tag pushed/popped by the active dataplane
 - Configured via Junos `vlan-tagging` + `unit 50 { vlan-id 50; }`
 - `vlan_iface_map` BPF map tracks VLAN ID per logical interface
 
@@ -407,7 +418,7 @@ printf 'clear firewall all\nexit\n' | incus exec xpf-fw -- cli 2>/dev/null
 - DHCPv6 on WAN gets global address (2001:559:8585:50::5/64)
 - IPv6 default route via link-local gateway
 - Router Advertisements managed via radvd on LAN interfaces
-- NAT64 translation native in BPF (no Tayga/Jool)
+- NAT64 translation is native to the dataplane (no Tayga/Jool)
 
 ---
 
@@ -531,7 +542,8 @@ sg incus-admin -c 'incus exec cluster-lan-host -- ip -6 addr show eth0'
 ### Hitless Forwarding Through Restart (IPv4 + IPv6)
 
 Tests that transit traffic (SNAT'd through firewall) survives daemon restart with
-minimal disruption. This validates the `META_FLAG_KERNEL_ROUTE` BPF fallback path.
+minimal disruption on the legacy eBPF path. This validates the
+`META_FLAG_KERNEL_ROUTE` BPF fallback path.
 
 **Background:** After restart, FIB cache in session entries is stale. `bpf_fib_lookup`
 returns LOCAL/NOT_FWDED until FRR reconverges. The BPF fix (`b0e7e33`) detects existing
@@ -608,7 +620,7 @@ sleep 5 && ping -c 3 172.16.50.6 && ping -c 3 2001:559:8585:50::6
 
 ---
 
-## Known Unimplemented BPF Features
+## Legacy eBPF Feature Caveats
 
 These config fields are parsed and compiled to BPF maps but NOT checked in BPF programs:
 

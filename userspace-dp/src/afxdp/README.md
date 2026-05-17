@@ -1,5 +1,9 @@
 # userspace-dp/src/afxdp/
 
+Primary #1373 AF_XDP forwarding path. New dataplane hot-path work belongs here
+or in the adjacent userspace modules unless a legacy eBPF regression/rollback
+need is explicit.
+
 The hot path. Coordinator + per-worker threads + UMEM + RX/TX/fill/
 completion rings + frame parsing + session glue + neighbor cache + HA
 sync.

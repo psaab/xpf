@@ -1,5 +1,10 @@
 # AF_XDP Userspace Dataplane Packet Processing
 
+> #1373 note: this is the primary packet-processing path for new dataplane
+> development and routine validation. References to the legacy BPF pipeline
+> below describe explicit fallback/regression boundaries, not the preferred
+> implementation target.
+
 ## 1. Architecture Overview
 
 The userspace dataplane uses AF_XDP with driver-specific bind/runtime modes to

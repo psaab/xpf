@@ -1,12 +1,18 @@
 # xpf vs Juniper vSRX Feature Gap Analysis
 
-Last updated: 2026-04-13
+Last updated: 2026-05-17
+
+> #1373 dataplane note: the Rust AF_XDP userspace dataplane is the
+> primary/default target for new dataplane work. Rows that mention only eBPF or
+> DPDK describe legacy/regression coverage unless userspace is explicitly named.
+> The authoritative retirement gate for userspace-vs-legacy behavior is
+> [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
 
 ## Summary
 
 | Category | Fully Missing | Partially Implemented | Parse-Only | Total Gaps |
 |----------|--------------|----------------------|------------|------------|
-| Security Policies (Unified/Advanced) | 7 | 0 | 1 | 8 |
+| Security Policies (Unified/Advanced) | 7 | 1 | 0 | 8 |
 | Application Security (AppSecure) | 8 | 1 | 0 | 9 |
 | IDP/IPS | 8 | 0 | 0 | 8 |
 | Content Security (UTM) | 6 | 0 | 0 | 6 |
@@ -29,7 +35,7 @@ Last updated: 2026-04-13
 | Interface Enhancements | 1 | 1 | 0 | 2 |
 | System Enhancements | 5 | 0 | 0 | 5 |
 | Miscellaneous | 6 | 0 | 0 | 6 |
-| **TOTAL** | **119** | **17** | **1** | **137** |
+| **TOTAL** | **119** | **18** | **0** | **137** |
 
 **Implementation status key:**
 - **Fully Missing**: No config parsing or runtime support
@@ -50,7 +56,7 @@ xpf has zone-based policies with source/dest address, application match, permit/
 | **Source Identity Match** | `security policies ... match source-identity ...` | Match on authenticated user identity (AD user/group) in policy | Medium | Missing (requires user-id) |
 | **Application Services in Policy** | `security policies ... then permit application-services` | Attach UTM, IDP, SSL-proxy, AppFW, ICAP redirect, SecIntel to policy action | High | Missing |
 | **Policy Rematch** | `security policies policy-rematch` | Re-evaluate existing sessions when policy changes | Medium | Missing |
-| **Policy Scheduling (time ranges)** | `schedulers scheduler ...` | Time-based policy activation/deactivation with start/stop dates | Low | Parse-Only (SchedulerConfig parsed, not runtime-wired) |
+| **Policy Scheduling (time ranges)** | `schedulers scheduler ...` | Time-based policy activation/deactivation with start/stop dates | Low | Userspace propagation landed in #1396. #1378 remains open for the remaining retirement contract: hit-counter survival across scheduler snapshot rebuilds, strict missing-scheduler commit behavior, and integration/failover validation. |
 | **Reject Action with Profile** | `security policies ... then reject profile ...` | Custom ICMP/TCP-RST reject messages, redirect URLs for blocked content | Low | Missing |
 
 ---
@@ -187,7 +193,7 @@ xpf has TCP session timeouts (established, initial, closing, time-wait), UDP/ICM
 
 | Feature | Junos Config Path | Description | Priority | Status |
 |---------|-------------------|-------------|----------|--------|
-| **SYN Flood Protection Mode** | `security flow syn-flood-protection-mode syn-cookie` | Global SYN flood protection mode: syn-cookie (stateless) or syn-proxy (stateful). Different from per-screen syn-flood thresholds. | Medium | **Done** (`8cbf31a`) — syn-cookie mode implemented with BPF helpers, validated_clients LRU, 4 counters. syn-proxy mode not implemented. |
+| **SYN Flood Protection Mode** | `security flow syn-flood-protection-mode syn-cookie` | Global SYN flood protection mode: syn-cookie (stateless) or syn-proxy (stateful). Different from per-screen syn-flood thresholds. | Medium | Legacy eBPF done (`8cbf31a`) with BPF helpers, validated_clients LRU, and 4 counters. Userspace SYN-cookie retirement work remains #1374; syn-proxy mode is not implemented. |
 | **TCP Strict SYN Check** | `security flow tcp-session strict-syn-check` | Require SYN as first packet for TCP session creation (drop mid-stream pickup) | Medium | **Done** (`2114333`) — default behavior (SYN required), configurable via no-syn-check / no-syn-check-in-tunnel. |
 | **TCP No-SYN-Check** | `security flow tcp-session no-syn-check` | Allow mid-stream TCP session pickup (useful after failover or asymmetric routing) | Medium | **Done** (`2114333`) — BPF flow_config tcp_flags bit, creates ESTABLISHED state for non-SYN first packet. eBPF + DPDK. |
 | **TCP No-SYN-Check in Tunnel** | `security flow tcp-session no-syn-check-in-tunnel` | Allow mid-stream pickup specifically for tunneled traffic (IPsec, GRE) | Low | **Done** (`2114333`) — per-interface IFACE_FLAG_TUNNEL in iface_zone_value, propagated via META_FLAG_TUNNEL in xdp_zone. |
@@ -312,8 +318,8 @@ xpf has firewall filters with source/dest addresses, prefix-lists (with except),
 
 | Feature | Junos Config Path | Description | Priority | Status |
 |---------|-------------------|-------------|----------|--------|
-| **Policer (Rate Limiting)** | `firewall policer ... bandwidth-limit N burst-size-limit N` | Token-bucket rate limiter applied to filter terms or interfaces. Single-rate two-color, three-color policers. | High | **Done** -- Token bucket policer with single-rate two-color mode. eBPF and DPDK parity. |
-| **Three-Color Policer** | `firewall three-color-policer ...` | RFC 2697/2698 metering with green/yellow/red marking based on CIR/CBS/EBS or CIR/PIR | Medium | **Done** -- Two-rate three-color (RFC 2698) and single-rate three-color (RFC 2697) modes implemented. |
+| **Policer (Rate Limiting)** | `firewall policer ... bandwidth-limit N burst-size-limit N` | Token-bucket rate limiter applied to filter terms or interfaces. Single-rate two-color, three-color policers. | High | Partial for #1373: legacy eBPF/DPDK token-bucket policer support exists; userspace supports the admitted filter path but three-color behavior remains gated by #1375. |
+| **Three-Color Policer** | `firewall three-color-policer ...` | RFC 2697/2698 metering with green/yellow/red marking based on CIR/CBS/EBS or CIR/PIR | Medium | Legacy eBPF/DPDK done; userspace AF_XDP support remains a #1375 retirement blocker. |
 | **Interface Policer** | `firewall policer ... logical-interface-policer` | Aggregate rate limiting across all protocol families on a logical interface | Low | Missing |
 | **Flexible Match Conditions** | `firewall filter ... term ... from flexible-match-range ...` | Match on arbitrary byte offsets within packet header for custom protocol matching | Low | Missing |
 | **Firewall Filter on lo0** | `interfaces lo0 unit 0 family inet filter input ...` | Host-bound traffic filtering — config parsed, compiled to filter IDs, evaluated natively in xdp_forward for host-bound packets, plus kernel nftables fallback | Medium | Done |
@@ -427,8 +433,8 @@ xpf has hostname, domain-name, domain-search, timezone, name-servers, NTP, servi
 Features most commonly used in production vSRX deployments:
 
 1. ~~**Proxy ARP/NDP for NAT**~~ - **Done** (proxy ARP with GARP; proxy NDP still missing)
-2. ~~**Session Limiting (source/dest-ip)**~~ - **Done** (GC sweep + BPF LRU maps + xdp_screen enforcement)
-3. ~~**Firewall Filter Policers**~~ - **Done** (token bucket: single-rate, two-rate RFC 2698, single-rate-3c RFC 2697; eBPF + DPDK)
+2. ~~**Session Limiting (source/dest-ip)**~~ - **Done** on the legacy BPF path (GC sweep + BPF LRU maps + xdp_screen enforcement); userspace admission is tracked in `userspace-dataplane-gaps.md`.
+3. ~~**Firewall Filter Policers**~~ - **Legacy done** (token bucket: single-rate, two-rate RFC 2698, single-rate-3c RFC 2697; eBPF + DPDK). Userspace three-color policers remain #1375.
 4. ~~**BFD**~~ - **Done** (OSPF/IS-IS/BGP BFD via FRR profiles)
 5. **NETCONF/YANG** - Industry-standard management, enables automation tooling
 6. **Unified Policies / AppID** - Foundation of modern NGFW (long-term, high complexity)
@@ -472,7 +478,7 @@ Features for specific use cases or carrier deployments:
 
 ## Parse-Only Features Summary
 
-These features have config parsing in xpf but NO runtime effect:
+These features have config parsing in xpf but no runtime effect.
 
 Note: This includes parse-only knobs that are outside the core category gap
 table, so this list count can be higher than the category-level Parse-Only total.
@@ -480,7 +486,15 @@ table, so this list count can be higher than the category-level Parse-Only total
 | # | Config Path | Type | Notes |
 |---|------------|------|-------|
 | 1 | `system license autoupdate url` | SystemConfig.LicenseAutoUpdate | No licensing system |
-| 2 | `security policies ... schedulers ...` | SchedulerConfig | Parsed, not runtime-enforced in policy engine |
+
+## Runtime Follow-Up Features Summary
+
+These features have a runtime slice, but still have open retirement-contract
+work tracked by the linked issue.
+
+| # | Config Path | Type | Notes |
+|---|------------|------|-------|
+| 1 | `security policies ... schedulers ...` | SchedulerConfig | Runtime userspace propagation landed in #1396. This is no longer parse-only; #1378 remains listed here only for follow-up contract work around counters, strict validation, and integration evidence. |
 
 ---
 
@@ -495,9 +509,10 @@ table, so this list count can be higher than the category-level Parse-Only total
 - xdp_screen enforces limits on TCP SYN
 - Config: `set security screen ids-option <name> limit-session source-ip-based <N>` / `destination-ip-based <N>`
 
-### Firewall Filter Policers (Tier 1) -- DONE
+### Firewall Filter Policers (Tier 1) -- LEGACY DONE
 - Token bucket policer with single-rate two-color, two-rate three-color (RFC 2698), and single-rate three-color (RFC 2697) modes
-- eBPF and DPDK parity
+- eBPF and DPDK parity; userspace three-color policers remain a #1375
+  retirement blocker
 
 ### BFD (Tier 1) -- DONE
 - OSPF BFD with interval/multiplier via FRR profiles

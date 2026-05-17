@@ -1,8 +1,10 @@
 # bpf/
 
 > Deprecation notice (#1373): this legacy eBPF dataplane is being retired in
-> favor of `userspace-dp`. Phase 0 is documentation/audit only, so this source
-> tree remains intact until later removal phases.
+> favor of `userspace-dp`. Phase 1 updates active docs and migration targeting
+> only, so this source tree remains intact until later removal phases. Treat new
+> work here as compatibility, rollback, or explicit regression coverage unless a
+> retirement blocker requires it.
 
 eBPF programs that drive the in-kernel packet pipeline. 14 programs
 total: 9 XDP ingress, 5 TC egress. They compose via tail-calls; metadata
