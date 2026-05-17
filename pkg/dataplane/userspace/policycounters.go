@@ -51,6 +51,10 @@ func policyRuleIDForCounter(cfg *config.Config, policyID uint32) string {
 }
 
 func (m *Manager) ReadPolicyCounters(policyID uint32) (dataplane.CounterValue, error) {
+	// The public DataPlane API is still indexed by legacy policy ID, while the
+	// userspace helper reports counters by stable policy identity. Keep the
+	// translation config-derived so scheduled-rule counters survive delete/re-add
+	// and app-term slot expansion without callers recomputing Rust map slots.
 	var total dataplane.CounterValue
 	var innerErr error
 	if m.inner != nil {

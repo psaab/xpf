@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/vishvananda/netlink"
 )
@@ -147,6 +148,66 @@ func TestReadPolicyCountersPreservesScheduledRuleCountersAcrossDeleteReadd(t *te
 	}
 	if got != (dataplane.CounterValue{Packets: 11, Bytes: 1100}) {
 		t.Fatalf("counter after re-add = %+v, want packets=11 bytes=1100", got)
+	}
+}
+
+func TestReadPolicyCountersMapsCommittedScheduledPolicyToHelperIdentity(t *testing.T) {
+	store := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure() error = %v", err)
+	}
+	if err := store.LoadOverride(`
+schedulers {
+    scheduler workhours {
+        daily;
+    }
+}
+security {
+    zones {
+        security-zone trust;
+        security-zone untrust;
+    }
+    policies {
+        from-zone trust to-zone untrust {
+            policy scheduled-allow {
+                match { source-address any; destination-address any; application any; }
+                then { permit; count; }
+                scheduler-name workhours;
+            }
+        }
+    }
+}
+`); err != nil {
+		t.Fatalf("LoadOverride() error = %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	cfg := store.ActiveConfig()
+	if cfg == nil {
+		t.Fatal("ActiveConfig() = nil")
+	}
+	if len(cfg.Security.Policies) != 1 || len(cfg.Security.Policies[0].Policies) != 1 {
+		t.Fatalf("unexpected committed policy shape: %+v", cfg.Security.Policies)
+	}
+
+	m := New()
+	m.inner = nil
+	m.lastSnapshot = &ConfigSnapshot{Config: cfg}
+	m.lastStatus = ProcessStatus{
+		PolicyRuleCounters: []PolicyRuleCounterStatus{{
+			RuleID:  stablePolicyRuleID("trust", "untrust", "scheduled-allow"),
+			Packets: 17,
+			Bytes:   1700,
+		}},
+	}
+
+	got, err := m.ReadPolicyCounters(0)
+	if err != nil {
+		t.Fatalf("ReadPolicyCounters committed scheduled policy: %v", err)
+	}
+	if got != (dataplane.CounterValue{Packets: 17, Bytes: 1700}) {
+		t.Fatalf("committed scheduled policy counter = %+v, want packets=17 bytes=1700", got)
 	}
 }
 
