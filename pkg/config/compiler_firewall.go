@@ -66,9 +66,13 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 		fw.ThreeColorPolicers = make(map[string]*ThreeColorPolicerConfig)
 	}
 	for _, tcpInst := range namedInstances(node.FindChildren("three-color-policer")) {
-		tcp := &ThreeColorPolicerConfig{
-			Name:       tcpInst.name,
-			ThenAction: "discard",
+		tcp := fw.ThreeColorPolicers[tcpInst.name]
+		if tcp == nil {
+			tcp = &ThreeColorPolicerConfig{
+				Name:       tcpInst.name,
+				ThenAction: "discard",
+			}
+			fw.ThreeColorPolicers[tcpInst.name] = tcp
 		}
 
 		if sr := tcpInst.node.FindChild("single-rate"); sr != nil {
@@ -143,8 +147,6 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 				}
 			}
 		}
-
-		fw.ThreeColorPolicers[tcp.Name] = tcp
 	}
 
 	for _, familyNode := range node.FindChildren("family") {

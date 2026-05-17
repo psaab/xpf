@@ -58,7 +58,11 @@ Still gated before removing the userspace capability rejection:
   so the control plane and dataplane agree on the future wire shape.
   Commit validation rejects ambiguous mode declarations (`single-rate`
   with `two-rate`) and ambiguous color declarations (`color-blind` with
-  `color-aware`) before they can reach the helper.
+  `color-aware`) before they can reach the helper. Duplicate
+  hierarchical `firewall three-color-policer <name>` blocks are compiled
+  as one logical policer before that validation, so load
+  merge/override cannot hide an ambiguity behind last-write-wins map
+  assignment.
 - Filter terms still carry a policer name in the evaluation result.
   The hot forwarding path must move to stable policer IDs with
   ID-indexed or sharded state before three-color policers are enabled.
