@@ -51,7 +51,7 @@ These are the remaining explicit configuration gates in
 | Feature/config shape | Gate status | Retirement blocker |
 |----------------------|-------------|--------------------|
 | Unsupported policy shapes | Gated | Address/application expansion must succeed for userspace |
-| Screen behavior requiring SYN cookies | Gated | #1374 |
+| Screen behavior requiring SYN cookies | Gated; userspace screen runtime has fail-closed cookie challenge/ACK-validation/cache scaffolding, but no HA key publication or SYN-ACK/RST TX yet | #1374 |
 | Three-color policers | Gated | #1375 |
 | Port mirroring | Gated | #1376 |
 
@@ -61,7 +61,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 
 | Area | Current boundary |
 |------|------------------|
-| SYN cookie flood protection | Legacy eBPF fallback |
+| SYN cookie flood protection | Legacy eBPF fallback until #1374 wires HA-safe secrets, bounded SYN-ACK/RST TX, counters/status, and removes the userspace capability gate |
 | Kernel-owned traffic (ARP, local delivery, management, some non-IP) | cpumap or kernel pass-through from XDP |
 | GRE / ESP / explicit early filters | Tail-call back into the legacy XDP pipeline |
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
@@ -79,7 +79,7 @@ The current #1373 audit produced these tracked blockers:
 | #1377 | Preserve address-persistent SNAT pool selection with an approved cross-backend contract. #1385 landed userspace-v1 deterministic selection and fail-closed pool admission, but does not close cross-backend parity by itself. | Phase 4 BPF source removal |
 | #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds, strict missing-scheduler commit behavior, and integration/failover validation | Phase 4 BPF source removal |
 | #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
-| #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent | Phase 4 BPF source removal |
+| #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393 and the 2026-05-17 runtime slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, and a bounded validated-client cache. Remaining: bounded SYN-ACK TX, ACK RST emission, HA-safe secret publication, counters/status, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
 | #1375 | Implement userspace RFC 2697/2698 three-color policers | Phase 4 BPF source removal |
 | #1376 | Implement userspace port mirroring or explicitly retire the feature | Phase 4 BPF source removal |
 | #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface now that #1386 provides userspace helper-status reporting. | Phase 5 CLI / observability cleanup |

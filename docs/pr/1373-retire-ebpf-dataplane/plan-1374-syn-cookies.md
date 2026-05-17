@@ -16,6 +16,20 @@ SYN cookie behavior in `userspace-dp`.
   profile the actual TX completion cost instead of assuming in-place RX-to-TX
   bounce is required.
 
+## Current Slice Status (2026-05-17)
+
+- #1393 landed the deterministic userspace cookie codec/layout and codec tests.
+- This runtime slice carries `syn_cookie` through Go and Rust screen snapshots,
+  adds a fail-closed screen challenge verdict when no HA-safe secret is
+  published, preallocates a bounded validated-client cache, and validates
+  returning ACKs only after normal session lookup misses.
+- The AF_XDP hook currently consumes valid cookie ACKs and drops invalid cookie
+  ACKs while cookie mode is active. `SynCookieChallenge` is still accounted as a
+  screen drop instead of transmitting a SYN-ACK.
+- The userspace capability gate remains in place until bounded SYN-ACK TX, ACK
+  RST emission, HA-safe secret publication, counters/status, and integration
+  validation land.
+
 ## Design
 
 Use SipHash, not HMAC-SHA1/SHA256. Linux SYN cookies and the current kernel
@@ -105,7 +119,16 @@ On returning ACK:
 - Cargo: `screen::syn_cookie_epoch_low_bits_wrap_rejects_32_epoch_old_cookie`.
 - Cargo: `screen::syn_cookie_validation_tries_current_and_previous_full_epoch`.
 - Cargo: `screen::syn_cookie_chosen_when_threshold_exceeded`.
+- Cargo: `screen::syn_cookie_without_published_secret_fails_closed`.
+- Cargo: `screen::syn_cookie_ack_validation_marks_next_syn_bypass_without_session_creation`.
+- Cargo: `screen::syn_cookie_validated_syn_still_runs_later_screen_checks`.
+- Cargo: `screen::syn_cookie_invalid_ack_does_not_validate_client`.
+- Cargo: `screen::syn_cookie_ack_fin_is_invalid_while_cookie_mode_is_active`.
+- Cargo: `screen::syn_cookie_validated_cache_is_bounded`.
 - Cargo: `screen::syn_cookie_budget_drop_does_not_starve_tx`.
+- Go: while the gate remains, keep the `SynFloodProtectionMode == "syn-cookie"`
+  capability rejection pinned and verify screen snapshots carry `syn_cookie` for
+  the runtime path.
 - Go: remove/update the `SynFloodProtectionMode == "syn-cookie"` capability
   rejection and the manager test that pins it.
 - Integration: hping3 SYN flood against the userspace HA cluster with

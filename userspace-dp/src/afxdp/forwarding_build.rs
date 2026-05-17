@@ -23,6 +23,7 @@ pub(super) fn build_screen_profiles(snapshot: &ConfigSnapshot) -> FxHashMap<Stri
                 icmp_flood_threshold: sp.icmp_flood_threshold,
                 udp_flood_threshold: sp.udp_flood_threshold,
                 syn_flood_threshold: sp.syn_flood_threshold,
+                syn_cookie: sp.syn_cookie,
                 session_limit_src: sp.session_limit_src,
                 session_limit_dst: sp.session_limit_dst,
                 port_scan_threshold: sp.port_scan_threshold,

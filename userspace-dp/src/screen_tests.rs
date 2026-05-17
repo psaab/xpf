@@ -21,6 +21,7 @@ fn default_profile() -> ScreenProfile {
         icmp_flood_threshold: 0,
         udp_flood_threshold: 0,
         syn_flood_threshold: 0,
+        syn_cookie: false,
         session_limit_src: 0,
         session_limit_dst: 0,
         port_scan_threshold: 0,
@@ -40,6 +41,9 @@ fn tcp_pkt(src: IpAddr, dst: IpAddr, src_port: u16, dst_port: u16, flags: u8) ->
         dst_ip: dst,
         src_port,
         dst_port,
+        tcp_seq: 1,
+        tcp_ack: 0,
+        tcp_mss: 1460,
         pkt_len: 60,
         is_fragment: false,
         is_first_fragment: false,
@@ -65,6 +69,9 @@ fn icmp_pkt(src: IpAddr, dst: IpAddr, pkt_len: u16) -> ScreenPacketInfo {
         dst_ip: dst,
         src_port: 0,
         dst_port: 0,
+        tcp_seq: 0,
+        tcp_ack: 0,
+        tcp_mss: 0,
         pkt_len,
         is_fragment: false,
         is_first_fragment: false,
@@ -86,6 +93,9 @@ fn udp_pkt(src: IpAddr, dst: IpAddr) -> ScreenPacketInfo {
         dst_ip: dst,
         src_port: 5000,
         dst_port: 5001,
+        tcp_seq: 0,
+        tcp_ack: 0,
+        tcp_mss: 0,
         pkt_len: 100,
         is_fragment: false,
         is_first_fragment: false,
@@ -349,6 +359,9 @@ fn teardrop_drops() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
         src_port: 1234,
         dst_port: 80,
+        tcp_seq: 1,
+        tcp_ack: 0,
+        tcp_mss: 1460,
         pkt_len: 28,
         is_fragment: true,
         is_first_fragment: false,
@@ -373,6 +386,9 @@ fn teardrop_first_fragment_passes() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
         src_port: 1234,
         dst_port: 80,
+        tcp_seq: 1,
+        tcp_ack: 0,
+        tcp_mss: 1460,
         pkt_len: 24,
         is_fragment: true,
         // #1137 Copilot review: ip_frag_off=0x2000 means MF=1 &&
@@ -914,10 +930,14 @@ fn syn_flood_disabled_passes() {
 // ================================================================
 
 fn syn_cookie_codec() -> SynCookieCodec {
-    SynCookieCodec::new([
+    SynCookieCodec::new(syn_cookie_key())
+}
+
+fn syn_cookie_key() -> [u8; 16] {
+    [
         0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe,
         0x0f,
-    ])
+    ]
 }
 
 fn syn_cookie_tuple() -> SynCookieTuple {
@@ -1071,9 +1091,11 @@ fn syn_cookie_epoch_low_bits_wrap_rejects_32_epoch_old_cookie() {
     let cookie = codec.mint_isn(tuple, 7, old_epoch, 1460);
 
     assert_eq!(old_epoch & 0x1f, current_epoch & 0x1f);
-    assert!(codec
-        .validate_isn(tuple, 7, current_epoch, cookie)
-        .is_none());
+    assert!(
+        codec
+            .validate_isn(tuple, 7, current_epoch, cookie)
+            .is_none()
+    );
 }
 
 #[test]
@@ -1099,6 +1121,240 @@ fn syn_cookie_validation_tries_current_and_previous_full_epoch() {
         41
     );
     assert!(codec.validate_isn(tuple, 7, 42, older_cookie).is_none());
+}
+
+#[test]
+fn syn_cookie_chosen_when_threshold_exceeded() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 2;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let pkt = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::Pass
+    );
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::Pass
+    );
+    let expected_isn = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&pkt),
+        7,
+        SynCookieCodec::full_epoch_from_monotonic_secs(128),
+        pkt.tcp_mss,
+    );
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::SynCookieChallenge(SynCookieChallenge {
+            cookie_isn: expected_isn,
+            peer_mss: 1460,
+        })
+    );
+}
+
+#[test]
+fn syn_cookie_without_published_secret_fails_closed() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    let pkt = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::Pass
+    );
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::Drop("syn-cookie-unavailable")
+    );
+}
+
+#[test]
+fn syn_cookie_ack_validation_marks_next_syn_bypass_without_session_creation() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    let challenge = match state.check_packet_with_zone_id("trust", 7, &syn, 128) {
+        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+        other => panic!("expected SYN-cookie challenge, got {other:?}"),
+    };
+
+    let mut ack = syn.clone();
+    ack.tcp_flags = TCP_ACK;
+    ack.tcp_seq = 2;
+    ack.tcp_ack = challenge.cookie_isn.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128),
+        SynCookieAckVerdict::Validated
+    );
+    assert_eq!(state.syn_cookie_validated_len(), 1);
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    assert_eq!(
+        state.syn_cookie_validated_len(),
+        0,
+        "validated tuple is single-use"
+    );
+}
+
+#[test]
+fn syn_cookie_validated_syn_still_runs_later_screen_checks() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    profile.session_limit_src = 1;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    let challenge = match state.check_packet_with_zone_id("trust", 7, &syn, 128) {
+        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+        other => panic!("expected SYN-cookie challenge, got {other:?}"),
+    };
+
+    let mut ack = syn.clone();
+    ack.tcp_flags = TCP_ACK;
+    ack.tcp_ack = challenge.cookie_isn.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128),
+        SynCookieAckVerdict::Validated
+    );
+
+    state.session_created(syn.src_ip, syn.dst_ip);
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Drop("session-limit-src")
+    );
+    assert_eq!(state.syn_cookie_validated_len(), 0);
+}
+
+#[test]
+fn syn_cookie_invalid_ack_does_not_validate_client() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    assert!(matches!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::SynCookieChallenge(_)
+    ));
+
+    let mut ack = syn.clone();
+    ack.tcp_flags = TCP_ACK;
+    ack.tcp_seq = 2;
+    ack.tcp_ack = 0xdead_beefu32;
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128),
+        SynCookieAckVerdict::Invalid
+    );
+    assert_eq!(state.syn_cookie_validated_len(), 0);
+}
+
+#[test]
+fn syn_cookie_ack_fin_is_invalid_while_cookie_mode_is_active() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    let challenge = match state.check_packet_with_zone_id("trust", 7, &syn, 128) {
+        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+        other => panic!("expected SYN-cookie challenge, got {other:?}"),
+    };
+
+    let mut ack_fin = syn.clone();
+    ack_fin.tcp_flags = TCP_ACK | TCP_FIN;
+    ack_fin.tcp_ack = challenge.cookie_isn.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack_fin, 128),
+        SynCookieAckVerdict::Invalid
+    );
+    assert_eq!(state.syn_cookie_validated_len(), 0);
+}
+
+#[test]
+fn syn_cookie_validated_cache_is_bounded() {
+    let mut cache = SynCookieValidatedCache::new(2, 64);
+    let mut tuple = syn_cookie_tuple();
+    cache.insert(7, tuple, 100);
+    tuple.src_port += 1;
+    cache.insert(7, tuple, 100);
+    tuple.src_port += 1;
+    cache.insert(7, tuple, 100);
+
+    assert_eq!(cache.len(), 2);
+    let mut evicted = syn_cookie_tuple();
+    assert!(!cache.take_valid(7, evicted, 100));
+    evicted.src_port += 1;
+    assert!(cache.take_valid(7, evicted, 100));
 }
 
 // ================================================================

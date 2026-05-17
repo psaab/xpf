@@ -23,6 +23,7 @@
 //! the 9-continue table, and the hidden-invariants list.
 
 use super::*;
+use crate::screen::SynCookieAckVerdict;
 
 /// Generic outcome for a per-packet stage. The `RecycleAndContinue`
 /// arm signals that the caller should push `desc.addr` to
@@ -242,23 +243,24 @@ pub(super) fn stage_screen_check(
     let Some(flow) = flow else {
         return StageOutcome::Continue(());
     };
-    let zone_name = ingress_zone_override
-        .and_then(|id| {
-            worker_ctx
-                .forwarding
-                .zone_id_to_name
-                .get(&id)
-                .map(|s| s.as_str())
-        })
+    let zone_id = ingress_zone_override
+        .filter(|id| worker_ctx.forwarding.zone_id_to_name.contains_key(id))
         .or_else(|| {
             worker_ctx
                 .forwarding
                 .ifindex_to_zone_id
                 .get(&(meta.ingress_ifindex as i32))
-                .and_then(|id| worker_ctx.forwarding.zone_id_to_name.get(id))
-                .map(|s| s.as_str())
+                .copied()
         });
-    let Some(zone_name) = zone_name else {
+    let Some(zone_id) = zone_id else {
+        return StageOutcome::Continue(());
+    };
+    let Some(zone_name) = worker_ctx
+        .forwarding
+        .zone_id_to_name
+        .get(&zone_id)
+        .map(|s| s.as_str())
+    else {
         return StageOutcome::Continue(());
     };
     let l3_off = if meta.ingress_vlan_id > 0 { 18 } else { 14 };
@@ -274,12 +276,83 @@ pub(super) fn stage_screen_check(
         flow.forward_key.dst_port,
         l3_off,
     );
-    if let ScreenVerdict::Drop(_reason) = screen.check_packet(zone_name, &screen_pkt, now_secs) {
-        counters.touched = true;
-        counters.screen_drops += 1;
-        return StageOutcome::RecycleAndContinue;
+    match screen.check_packet_with_zone_id(zone_name, zone_id, &screen_pkt, now_secs) {
+        ScreenVerdict::Pass => StageOutcome::Continue(()),
+        ScreenVerdict::Drop(_) | ScreenVerdict::SynCookieChallenge(_) => {
+            counters.touched = true;
+            counters.screen_drops += 1;
+            StageOutcome::RecycleAndContinue
+        }
     }
-    StageOutcome::Continue(())
+}
+
+/// SYN-cookie returning ACK validation on the session-miss path.
+///
+/// This runs after normal session lookup has failed, so established ACK traffic
+/// keeps its normal fast/session path. A valid cookie ACK is consumed without
+/// creating a session; the validated-client cache lets the client's next SYN
+/// traverse the ordinary policy/NAT/session path. Invalid cookie ACKs are
+/// dropped while cookie mode is active.
+#[inline]
+pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
+    flow: Option<&SessionFlow>,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    now_secs: u64,
+    screen: &mut ScreenState,
+    counters: &mut BatchCounters,
+    worker_ctx: &WorkerContext,
+) -> StageOutcome<()> {
+    if !screen.has_profiles() {
+        return StageOutcome::Continue(());
+    }
+    let Some(flow) = flow else {
+        return StageOutcome::Continue(());
+    };
+    let zone_id = ingress_zone_override
+        .filter(|id| worker_ctx.forwarding.zone_id_to_name.contains_key(id))
+        .or_else(|| {
+            worker_ctx
+                .forwarding
+                .ifindex_to_zone_id
+                .get(&(meta.ingress_ifindex as i32))
+                .copied()
+        });
+    let Some(zone_id) = zone_id else {
+        return StageOutcome::Continue(());
+    };
+    let Some(zone_name) = worker_ctx
+        .forwarding
+        .zone_id_to_name
+        .get(&zone_id)
+        .map(|s| s.as_str())
+    else {
+        return StageOutcome::Continue(());
+    };
+    let l3_off = if meta.ingress_vlan_id > 0 { 18 } else { 14 };
+    let screen_pkt = extract_screen_info(
+        packet_frame,
+        meta.addr_family,
+        meta.protocol,
+        meta.tcp_flags,
+        meta.pkt_len,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        l3_off,
+    );
+    match screen.validate_syn_cookie_ack_on_session_miss(zone_name, zone_id, &screen_pkt, now_secs)
+    {
+        SynCookieAckVerdict::NotApplicable => StageOutcome::Continue(()),
+        SynCookieAckVerdict::Validated => StageOutcome::RecycleAndContinue,
+        SynCookieAckVerdict::Invalid => {
+            counters.touched = true;
+            counters.screen_drops += 1;
+            StageOutcome::RecycleAndContinue
+        }
+    }
 }
 
 /// Stage 11 — IPsec passthrough.

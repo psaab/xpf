@@ -3169,6 +3169,28 @@ func TestBuildScreenSnapshotsMatchesZoneToProfile(t *testing.T) {
 	}
 }
 
+func TestBuildScreenSnapshotsMarksSynCookieMode(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Flow.SynFloodProtectionMode = "syn-cookie"
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {Name: "trust", ScreenProfile: "flood"},
+	}
+	cfg.Security.Screen = map[string]*config.ScreenProfile{
+		"flood": {
+			Name: "flood",
+			TCP:  config.TCPScreen{SynFlood: &config.SynFloodConfig{AttackThreshold: 100}},
+		},
+	}
+
+	snaps := buildScreenSnapshots(cfg)
+	if len(snaps) != 1 {
+		t.Fatalf("len(snaps) = %d, want 1", len(snaps))
+	}
+	if !snaps[0].SYNCookie {
+		t.Fatalf("SYNCookie = false, want true: %+v", snaps[0])
+	}
+}
+
 func TestDeriveUserspaceCapabilitiesAllowsSessionTimeouts(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Flow.TCPSession = &config.TCPSessionConfig{
