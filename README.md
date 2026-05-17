@@ -1,39 +1,36 @@
 # xpf
 
-eBPF zone-based firewall with native Junos configuration syntax.
+Stateful firewall with native Junos configuration syntax.
 
-> Deprecation notice (#1373): the legacy eBPF dataplane is being retired in
-> favor of the Rust AF_XDP userspace dataplane. New dataplane development should
-> target `userspace-dp`. Phase 0 is documentation/audit only and removes no BPF
-> source.
+> Deprecation notice (#1373): the Rust AF_XDP userspace dataplane is now the
+> primary/default target for dataplane development and validation. The legacy
+> eBPF dataplane remains in-tree for compatibility, rollback, and regression
+> coverage during the staged retirement. Phase 1 updates active documentation;
+> later phases own source, loader, build, and CLI removals.
 
-xpf is a high-performance stateful firewall built on Linux eBPF that replicates Juniper vSRX capabilities. It uses the familiar Junos hierarchical configuration syntax and provides a full interactive CLI with tab completion and `?` help.
+xpf is a high-performance stateful firewall that replicates Juniper vSRX
+capabilities. It uses the familiar Junos hierarchical configuration syntax and
+provides a full interactive CLI with tab completion and `?` help.
 
-## Dual Dataplane Architecture
+## Dataplane Architecture
 
-xpf provides two dataplane backends selectable via configuration. Both share the same Go control plane (config, HA, routing, CLI, APIs) — only the packet forwarding path differs.
+xpf provides dataplane backends selectable via configuration. Both share the
+same Go control plane (config, HA, routing, CLI, APIs); only the packet
+forwarding path differs.
 
-The eBPF backend remains present during the #1373 retirement phases as a legacy
-compatibility and rollback path. New feature work should use the userspace
-AF_XDP dataplane and close blockers tracked in
+The userspace AF_XDP backend is the primary retirement target. It is still
+selected explicitly with `system dataplane-type userspace`; if that knob is
+omitted, the current code falls back to the legacy eBPF backend until a later
+cutover phase changes runtime defaults. New dataplane feature work should use
+the userspace path and close blockers tracked in
 [`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
 
-### eBPF Dataplane (default)
+### Userspace Dataplane (primary target)
 
-The original dataplane runs entirely in-kernel using 14 BPF programs chained via tail calls:
-
-```
-XDP Ingress: main → screen → zone → conntrack → policy → nat → nat64 → forward
-TC Egress:   main → screen_egress → conntrack → nat → forward
-```
-
-- **Full feature coverage**: all firewall, NAT, routing, and flow features
-- **25+ Gbps** on native XDP (mlx5, i40e, ice)
-- **Best for**: production deployments needing the complete feature set
-
-### Userspace Dataplane
-
-An alternative Rust-based forwarding engine that receives packets via AF_XDP sockets and processes them in userspace. A Rust XDP shim stamps metadata, redirects transit traffic into AF_XDP, and still hands kernel-owned or unsupported traffic back to the kernel/BPF path when needed.
+A Rust-based forwarding engine receives packets via AF_XDP sockets and
+processes them in userspace. A Rust XDP shim stamps metadata, redirects transit
+traffic into AF_XDP, and still hands kernel-owned or unsupported traffic back
+to the kernel or legacy BPF path when needed.
 
 ```
 NIC → XDP shim (live-session + new-flow redirect, kernel pass-through, explicit fallback)
@@ -46,7 +43,7 @@ NIC → XDP shim (live-session + new-flow redirect, kernel pass-through, explici
 - **AF_XDP fast path**: current code supports both copy and zero-copy modes depending on driver/path behavior
 - **Kernel pass-through**: cpumap-assisted delivery keeps local/kernel-owned traffic out of the AF_XDP fast path
 - **Automatic fallback**: unsupported configs and explicit error paths still fall back to the legacy eBPF dataplane
-- **Best for**: active development of the Rust forwarding path and high-throughput transit forwarding on supported configs
+- **Best for**: new dataplane development, primary validation, and high-throughput transit forwarding on supported configs
 - **See**: [`docs/userspace-dataplane-architecture.md`](docs/userspace-dataplane-architecture.md) for the current architecture and [`docs/userspace-debug-map.md`](docs/userspace-debug-map.md) for the active debugging map
 
 **To select the userspace dataplane:**
@@ -62,9 +59,22 @@ system {
 }
 ```
 
+### Legacy eBPF Dataplane (compatibility/regression)
+
+The original dataplane runs in-kernel using 14 BPF programs chained via tail calls:
+
+```
+XDP Ingress: main -> screen -> zone -> conntrack -> policy -> nat -> nat64 -> forward
+TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
+```
+
+- **Legacy coverage**: compatibility, rollback, and targeted regression tests
+- **Historical performance**: 25+ Gbps on native XDP (mlx5, i40e, ice)
+- **Best for**: reproducing legacy behavior while #1373 retirement blockers are being closed
+
 ### Dataplane Comparison
 
-| Capability | eBPF (default) | Userspace |
+| Capability | Legacy eBPF | Userspace AF_XDP (primary target) |
 |------------|---------------|-----------|
 | Stateful forwarding | Yes | Yes |
 | Zone + global policies | Yes | Yes |
@@ -85,21 +95,27 @@ system {
 | SYN cookie flood protection | Yes | No (fallback) |
 | Throughput (25G mlx5) | 22+ Gbps | See validation/perf docs for current results |
 
-The userspace dataplane now covers most of the transit feature set in native Rust, but it is not "fallback-free". Current explicit gates in code still include SYN-cookie-dependent screen behavior, three-color policers, and port mirroring. Pool-mode SNAT is admitted, but #1377 still owns cross-backend `address-persistent` parity. The exact admission boundary is documented in [`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
+The userspace dataplane now covers most of the transit feature set in native
+Rust, but it is not "fallback-free". Current explicit gates in code still
+include SYN-cookie-dependent screen behavior, three-color policers, and port
+mirroring. Pool-mode SNAT is admitted, and #1385 added userspace-v1
+`address-persistent` selection; #1377 still owns the shared cross-backend
+contract. The exact admission boundary is documented in
+[`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
 
 ## Architecture
 
-- **Go control plane** (cilium/ebpf) handles config compilation, session GC, management APIs, HA cluster, and routing
-- **14 BPF programs** (9 XDP ingress + 5 TC egress) chained via tail calls
-- **Per-CPU scratch maps** pass metadata between pipeline stages
+- **Go control plane** handles config compilation, session GC, management APIs, HA cluster, and routing
+- **Rust AF_XDP userspace dataplane** owns the primary packet-forwarding target
+- **Legacy eBPF dataplane** remains available for compatibility and regression coverage
 - **Dual session entries** (forward + reverse) in conntrack hash map
-- **Three-phase config compilation**: Junos AST → typed Go structs → eBPF map entries
+- **Three-phase config compilation**: Junos AST → typed Go structs → dataplane snapshots or legacy map entries
 
 ## Features
 
 ### Firewall & Security
 - **Zone-based policies** with stateful inspection, address books, application matching, global policies
-- **NAT**: source (interface + pool, address-persistent), destination (with hit counters), static 1:1, NAT64 (native BPF), NPTv6 (RFC 6296 stateless prefix translation)
+- **NAT**: source (interface + pool, address-persistent), destination (with hit counters), static 1:1, NAT64, NPTv6 (RFC 6296 stateless prefix translation)
 - **Dual-stack**: IPv4 + IPv6, DHCPv4/v6 clients, embedded Router Advertisement sender (replaces radvd), SLAAC
 - **Screen/IDS**: 11 checks (land, SYN flood, ping of death, teardrop, SYN-FIN, no-flag, winnuke, FIN-no-ACK, rate-limiting), SYN cookie flood protection (XDP-generated SYN-ACK cookies)
 - **Firewall filters**: policer (token bucket + three-color), lo0 filter, flexible match, port ranges, hit counters, logging, forwarding-class DSCP rewrite
@@ -114,7 +130,7 @@ The userspace dataplane now covers most of the transit feature set in native Rus
 - **FRR integration**: static, OSPF, BGP, IS-IS, RIP, ECMP multipath, export/redistribute
 - **VRFs** with inter-VRF route leaking (next-table + rib-group)
 - **GRE tunnels**, XFRM interfaces, PBR (policy-based routing)
-- **VLANs**: 802.1Q tagging in BPF, trunk ports
+- **VLANs**: 802.1Q tagging, trunk ports
 - **IPsec**: strongSwan config generation, IKE proposals, gateway compilation
 - **Full interface management**: xpfd owns ALL interfaces — renames via `.link` files, configures addresses/DHCP via `.network` files, brings down unconfigured interfaces
 
@@ -127,7 +143,7 @@ The userspace dataplane now covers most of the transit feature set in native Rus
 - **IPsec SA sync**: shared IKE/ESP state across cluster nodes
 - **Dual fabric links**: independent fab0/fab1 for redundancy (no bonding)
 - **Fabric cross-chassis forwarding**: `try_fabric_redirect()` redirects to peer when FIB fails for synced sessions
-- **BPF watchdog**: fail-closed on daemon crash (SIGKILL/panic) within 2s
+- **Dataplane watchdogs**: legacy BPF pins and userspace heartbeat checks fail closed on daemon/helper failure
 - **Readiness gate**: per-RG readiness (interfaces + VRRP) + hold timer gates election
 - **Planned shutdown**: near-instant takeover (priority-0 burst), failback ~130ms
 - **ISSU**: in-service software upgrade with rolling deploy
@@ -227,6 +243,7 @@ set security policies from-zone trust to-zone untrust policy allow-all then perm
 ## Performance
 
 - **eBPF dataplane**
+  - Legacy compatibility/regression backend during #1373 retirement
   - **25+ Gbps** with native XDP (i40e/ice PF passthrough)
   - **15.6 Gbps** with virtio-net
   - **Hitless restarts** with zero packet loss
@@ -291,12 +308,12 @@ To deploy to a single node: `make cluster-deploy NODE=0` or `make cluster-deploy
 | Path | Description |
 |------|-------------|
 | `bpf/headers/*.h` | Shared C structs (common, maps, helpers, conntrack, nat) |
-| `bpf/xdp/*.c` | 9 XDP ingress programs (includes cpumap entry) |
-| `bpf/tc/*.c` | 5 TC egress programs |
+| `bpf/xdp/*.c` | Legacy XDP ingress programs (includes cpumap entry) |
+| `bpf/tc/*.c` | Legacy TC egress programs |
 | `pkg/config/` | Junos parser, AST, typed config, compiler |
 | `pkg/cmdtree/` | Single source of truth for all CLI command trees |
 | `pkg/configstore/` | Candidate/active/commit/rollback, atomic DB persistence |
-| `pkg/dataplane/` | eBPF loader, map management, bpf2go bindings |
+| `pkg/dataplane/` | Legacy eBPF loader, map management, bpf2go bindings, shared dataplane interface |
 | `pkg/dataplane/userspace/` | Go manager for the Rust userspace dataplane |
 | `pkg/daemon/` | Daemon lifecycle, reconciliation, interface management |
 | `pkg/cluster/` | Chassis cluster HA (state machine, session sync, config sync) |
@@ -353,8 +370,8 @@ See `docs/` for detailed design documents:
 
 - Linux kernel 6.12+ (6.18+ recommended for full NAT64 support)
 - Go 1.22+
-- clang/llvm (for BPF compilation)
-- Rust stable (for userspace dataplane, optional)
+- clang/llvm (for legacy BPF compilation and XDP shim generation)
+- Rust stable (for the primary userspace dataplane)
 - FRR (for routing protocol integration)
 - strongSwan (for IPsec, optional)
 - Kea (for DHCP server, optional)

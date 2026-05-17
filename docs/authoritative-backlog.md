@@ -22,15 +22,15 @@ Use these sources in this order when there is disagreement:
 
 Row-level gap totals:
 - Missing: 119
-- Partial: 17
-- Parse-Only: 1
+- Partial: 18
+- Parse-Only: 0
 - Total Open Gaps: 137
 
 Category totals:
 
 | Category | Missing | Partial | Parse-Only | Open |
 |---|---:|---:|---:|---:|
-| 1. Security Policies (Unified/Advanced) | 7 | 0 | 1 | 8 |
+| 1. Security Policies (Unified/Advanced) | 7 | 1 | 0 | 8 |
 | 2. Application Security (AppSecure) | 8 | 1 | 0 | 9 |
 | 3. Intrusion Detection & Prevention (IDP/IPS) | 8 | 0 | 0 | 8 |
 | 4. Content Security (UTM) | 6 | 0 | 0 | 6 |

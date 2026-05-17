@@ -1,9 +1,10 @@
-# xpf - eBPF Firewall with Junos Configuration Syntax
+# xpf - Junos-Style Firewall With AF_XDP Userspace Dataplane
 
-> Deprecation notice (#1373): the legacy eBPF dataplane is being retired in
-> favor of the Rust AF_XDP userspace dataplane. New dataplane development should
-> target `userspace-dp`. Phase 0 is documentation/audit only and removes no BPF
-> source.
+> Deprecation notice (#1373): the Rust AF_XDP userspace dataplane is now the
+> primary/default target for dataplane development and validation. The legacy
+> eBPF dataplane remains in-tree for compatibility, rollback, and regression
+> coverage during the staged retirement. Phase 1 updates active documentation;
+> later phases own source, loader, build, and CLI removals.
 
 ## Working Style
 - Think before acting. Read existing files before writing code.
@@ -38,13 +39,18 @@ gotchas that repeatedly bite (deploy wipes CoS, iperf3 target, etc.).
 - **Control socket contention**: The userspace helper control socket is shared by status poll (1/s), HA sync, session installs, snapshot sync, and forwarding sync. High-frequency callers MUST be throttled. Adding a new control socket request at >1/s will starve session installs during bulk sync.
 
 ## What This Is
-An eBPF-based firewall that clones Juniper vSRX capabilities using native Junos configuration syntax. Go userspace (cilium/ebpf) drives C eBPF programs attached at XDP (ingress) and TC (egress).
+A Junos-style firewall that clones Juniper vSRX capabilities using native
+Junos configuration syntax. The primary dataplane target is the Rust AF_XDP
+userspace helper (`userspace-dp`) driven by the Go control plane. The original
+XDP/TC eBPF dataplane remains as the legacy compatibility and regression path
+while #1373 retirement blockers are being closed.
 
 ## Quick Start
 ```bash
 make generate        # Generate Go bindings from BPF C via bpf2go
 make build           # Build xpfd daemon
 make build-ctl       # Build remote CLI client
+make build-userspace-dp # Build the primary Rust AF_XDP dataplane helper
 make test            # Run Go tests (640+ tests across 20 packages)
 ```
 
@@ -98,7 +104,9 @@ Or use `test/incus/cluster-setup.sh` directly with `BPFRX_CLUSTER_ENV` set:
 
 The BPF pipeline below is legacy context during the #1373 retirement. Keep it
 working until the staged removal phases land, but do not start new dataplane
-features on this path unless a blocker explicitly requires compatibility work.
+features on this path unless a blocker explicitly requires compatibility or
+rollback work. New packet-forwarding work belongs in `userspace-dp` and its
+`userspace-xdp` shim.
 
 ### BPF Pipeline (14 programs, tail calls)
 ```
@@ -130,7 +138,8 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 | `pkg/config/` | Junos parser, AST, typed config, compiler |
 | `pkg/cmdtree/` | Single source of truth for all CLI command trees |
 | `pkg/configstore/` | Candidate/active/commit/rollback, atomic DB persistence, JSONL audit journal |
-| `pkg/dataplane/` | eBPF loader, map management, bpf2go bindings |
+| `pkg/dataplane/` | Legacy eBPF loader, map management, bpf2go bindings, shared dataplane interface |
+| `pkg/dataplane/userspace/` | Go manager for the Rust AF_XDP userspace dataplane |
 | `pkg/daemon/` | Daemon lifecycle (TTY detection, signal handling) |
 | `pkg/cluster/` | Chassis cluster HA (state machine, session sync, config sync, IPsec SA sync) |
 | `pkg/cli/` | Interactive Junos-style CLI |
@@ -157,6 +166,8 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 | `pkg/ra/` | Embedded RA sender (replaces radvd) |
 | `docs/` | Protocol docs, feature gaps, phase notes, test plans, memory backups |
 | `test/incus/` | Test environment (setup.sh, config, systemd unit) |
+| `userspace-xdp/` | XDP shim for AF_XDP packet steering |
+| `userspace-dp/` | Primary Rust AF_XDP userspace dataplane helper |
 
 ## Critical Patterns to Know
 
@@ -216,7 +227,7 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 ### Chassis Cluster (HA)
 - **Failover timing**: ~60ms with 30ms VRRP intervals (masterDownInterval ~97ms); configurable via `set chassis cluster reth-advertise-interval <ms>`
 - **Planned shutdown**: burst of 3× priority-0 adverts; peer takes over in ~1ms (immediate takeover on priority-0)
-- **Failback timing**: ~130ms (daemon startup + BPF load + sync hold release)
+- **Failback timing**: ~130ms (daemon startup + dataplane load + sync hold release)
 - **VRRP advertisement**: RETH instances default 30ms; `AdvertiseInterval` is milliseconds internally, centiseconds on wire per RFC 5798
 - **Async GARP**: `becomeMaster()` runs GARP in a goroutine — first pair <1ms, remaining at 50ms intervals in background. Critical path: addVIPs → sendAdvert → emitEvent (sync), then go sendGARP() (async)
 - **Fabric forwarding**: `try_fabric_redirect()` in xdp_zone redirects to fabric peer when `bpf_fib_lookup` fails for synced sessions — prevents TCP death on VRRP failback
@@ -233,14 +244,14 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 
 ## Feature Coverage
 - **Firewall**: Stateful inspection, zone-based policies (including global policies), address books, application matching, multi-term apps, filtered session clearing
-- **NAT**: SNAT (interface + pool, address-persistent), DNAT (with hit counters), static 1:1, NAT64 (native BPF)
+- **NAT**: SNAT (interface + pool, address-persistent), DNAT (with hit counters), static 1:1, NAT64
 - **IPv4 + IPv6**: Dual-stack, DHCPv4/v6 clients, Router Advertisements
 - **Screen/IDS**: 11 checks (land, syn-flood, ping-death, teardrop, rate-limiting), SYN cookie flood protection (XDP-generated SYN-ACK cookies with source validation)
 - **Routing**: FRR integration (static, OSPF, BGP, IS-IS, RIP), VRFs, GRE tunnels, export/redistribute, ECMP multipath, next-table + rib-group inter-VRF route leaking, route filtering by protocol/CIDR
-- **VLANs**: 802.1Q tagging in BPF, trunk ports
+- **VLANs**: 802.1Q tagging, trunk ports
 - **IPsec**: strongSwan config generation, IKE proposals, gateway compilation, XFRM interfaces
-- **Observability**: Syslog (facility/severity/category filtering, structured RT_FLOW format, TCP/TLS transport, event mode local file), NetFlow v9 (1-in-N sampling), Prometheus, RPM probes, dynamic feeds, SNMP (ifTable MIB), BPF map utilization (`show system buffers`), session aggregation reporting
-- **Flow**: TCP MSS clamping (ingress XDP + egress TC, including GRE-specific gre-in/gre-out), ALG control, allow-dns-reply (wired to BPF), allow-embedded-icmp, configurable timeouts (per-application inactivity), firewall filters (port ranges, hit counters, logging, forwarding-class DSCP rewrite, DSCP action)
+- **Observability**: Syslog (facility/severity/category filtering, structured RT_FLOW format, TCP/TLS transport, event mode local file), NetFlow v9 (1-in-N sampling), Prometheus, RPM probes, dynamic feeds, SNMP (ifTable MIB), dataplane buffer utilization (`show system buffers`), session aggregation reporting
+- **Flow**: TCP MSS clamping (ingress XDP + egress TC on the legacy path, plus userspace handling where admitted), ALG control, allow-dns-reply, allow-embedded-icmp, configurable timeouts (per-application inactivity), firewall filters (port ranges, hit counters, logging, forwarding-class DSCP rewrite, DSCP action)
 - **HA**: Chassis cluster state machine (weight-based failover, manual failover/reset, Junos-style show/request commands), native VRRPv3 (Go state machine, AF_PACKET receiver, per-instance sockets, IPv6 NODAD, 30ms RETH advertisements, async GARP burst, ~60ms failover), bondless RETH (VRRP on physical member interfaces, RethToPhysical resolution, per-node virtual MAC), incremental session sync (1s sweep + ring buffer + GC delete callbacks), config sync (forward + reverse-sync on reconnect, ${node} variable quoting), IPsec SA sync, fabric cross-chassis forwarding, ISSU
 - **DHCP**: Relay (Option 82), server (Kea integration with lease display)
 - **CLI**: Junos-style prefix matching, "Possible completions:" headers, zone/interface descriptions, session idle time, session brief tabular view, flow statistics, policy descriptions, config validation warnings

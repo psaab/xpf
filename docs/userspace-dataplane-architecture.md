@@ -4,9 +4,10 @@
 
 The userspace dataplane is a Rust-based packet forwarding engine that
 processes transit traffic via AF_XDP sockets, bypassing the kernel
-networking stack for stateful firewall processing. It runs alongside
-the existing BPF XDP pipeline as a parallel forwarding path optimized
-for high-throughput TCP/UDP forwarding.
+networking stack for stateful firewall processing. Under #1373 it is the
+primary/default target for dataplane development and routine validation. It
+still runs alongside the legacy BPF XDP pipeline while retirement blockers are
+closed.
 
 This document tracks the current `master` architecture. It is not a claim
 that every supported configuration already reaches feature or performance
@@ -306,6 +307,8 @@ Ordered rule matching against zone pairs, address books, and applications:
 
 ```
 for rule in rules:
+    if rule.inactive:
+        continue
     if rule.from_zone matches ingress_zone
        AND rule.to_zone matches egress_zone
        AND rule.source matches src_ip
@@ -316,7 +319,9 @@ return default_deny
 ```
 
 Address book entries support IPv4/IPv6 prefixes. Application matching
-supports protocol + port ranges.
+supports protocol + port ranges. `rule.inactive` is the policy-scheduler result
+published by the Go daemon; inactive scheduled rules are skipped before any
+match side effects or counters.
 
 #### Slow Path (`slowpath.rs`)
 
@@ -344,7 +349,8 @@ ConfigSnapshot {
     fabrics:         [{ifindex, name, mac, peer_mac, fib_ifindex}]
     neighbors:       [{ifindex, ip, mac}]
     routes:          [{prefix, next_hop, ifindex, table}]
-    policies:        [{from_zone, to_zone, src/dst, apps, action}]
+    policies:        [{rule_id, from_zone, to_zone, src/dst, apps, action,
+                       scheduler_name, inactive}]
     source_nat_rules:[{from_zone, to_zone, src/dst, interface/pool metadata}]
     flow:            {allow_dns_reply, allow_embedded_icmp}
     map_pins:        {xsk_map, heartbeat_map, sessions_map}
@@ -356,7 +362,7 @@ ConfigSnapshot {
 
 The manager evaluates the active config to determine if the userspace
 dataplane can handle it. Unsupported features cause automatic fallback
-to the kernel BPF pipeline:
+to the legacy kernel BPF pipeline:
 
 The current supported/gated split is maintained in
 [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md). In broad terms,
@@ -366,9 +372,17 @@ filters, flow export, TCP MSS clamping, configurable timeouts, VLAN handling,
 route/neighbor lookup, and HA/session-delta ingestion.
 
 Remaining explicit gates include SYN-cookie-dependent screen behavior,
-three-color policers, port mirroring, and full pool-mode SNAT semantics.
-Specific Phase 0 fix-forward PRs are tracked for unsafe pool admission (#1385)
-and userspace buffer/status parity (#1386).
+three-color policers, port mirroring, dataplane event parity, and the shared
+cross-backend `address-persistent` SNAT contract.
+
+Policy scheduler state is no longer a propagation gap: #1396 carries scheduler
+state into the userspace snapshot and Rust policy evaluator. #1378 remains a
+retirement blocker only for the residual contract around hit-counter lifetime,
+strict missing-scheduler commit behavior, and integration/failover evidence.
+#1385 landed userspace-v1 pool selection and fail-closed admission; #1377 still
+owns the cross-backend contract. #1386 landed userspace buffer/status
+rendering; #1380 still owns retirement of the remaining BPF-map-oriented
+operator surface.
 
 ### 4. HA Cluster Integration
 
@@ -528,14 +542,16 @@ This section is a high-level architecture note. The authoritative current gate
 is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
 
 **Still explicitly gated or incomplete for eBPF retirement:**
-- Source NAT pool mode: #1385 is required to fail closed on missing/unsafe
-  pools; #1377 is required for full address-persistent pool selection.
+- Source NAT pool mode: #1385 landed userspace-v1 deterministic pool selection
+  and fail-closed admission; #1377 is still required for the approved
+  cross-backend address-persistent contract.
 - SYN-cookie flood protection: #1374.
 - RFC 2697/2698 three-color policers: #1375.
 - Port mirroring: #1376.
 - Policy-deny, screen-drop, and filter-log event parity: #1379.
-- `show system buffers` userspace parity and BPF-map display retirement:
-  #1380/#1386.
+- `show system buffers` BPF-map display retirement: #1380. Userspace
+  helper-status rendering landed in #1386, but the legacy operator surface
+  still needs its Phase 5 cleanup.
 
 **Handled outside the AF_XDP forwarding fast path:**
 - ARP, NDP, local management traffic, and other kernel-owned packets are passed

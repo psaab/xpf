@@ -1,5 +1,10 @@
 # HA Cluster Test Plan — Two-VM SR-IOV Setup
 
+> #1373 note: this plan preserves the legacy eBPF/bpfrx-style HA test
+> topology and BPF-specific fallback checks for regression use. The default
+> target for new dataplane validation is the userspace AF_XDP cluster
+> (`loss:xpf-userspace-fw0/fw1`) and the userspace HA validation runbooks.
+
 ## Overview
 
 Two VMs running xpfd in chassis cluster (active/passive) mode with:
@@ -417,7 +422,7 @@ make cluster-start/stop/restart  # Service lifecycle (NODE=0|1|all)
 4. Install packages: FRR, strongSwan, tcpdump, iperf3, bpftool, ethtool, etc.
 5. Upgrade kernel to 6.18+ from Debian unstable
 6. Set GRUB: `init_on_alloc=0` for XDP performance
-7. Configure sysctl: BPF JIT, IP forwarding, RA disable
+7. Configure sysctl: legacy BPF JIT, IP forwarding, RA disable
 8. Write `/etc/xpf/node-id` (0 or 1)
 9. Reboot for new kernel
 
@@ -696,7 +701,7 @@ incus exec cluster-lan-host -- ping -c 3 2001:559:8585:cf01::1
 **Objective:** Verify transit traffic survives primary restart and full failover
 with minimal disruption, for both IPv4 (with SNAT) and IPv6.
 
-This tests two `META_FLAG_KERNEL_ROUTE` BPF fallback paths:
+This tests two legacy `META_FLAG_KERNEL_ROUTE` BPF fallback paths:
 - **LOCAL/NOT_FWDED:** After daemon restart, existing sessions have stale FIB
   cache (`fib_gen` mismatch). `bpf_fib_lookup` returns LOCAL/NOT_FWDED because
   FRR routes haven't converged. The packet routes through conntrack for NAT
@@ -796,7 +801,7 @@ incus exec xpf-fw0 -- systemctl start xpfd
   VRRP MASTER transition + neighbor discovery). Preemption back to fw0 was seamless.
 
 **How it works:**
-1. BPF programs pinned at `/sys/fs/bpf/xpf/` survive daemon restart
+1. Legacy BPF programs pinned at `/sys/fs/bpf/xpf/` survive daemon restart
 2. Existing sessions preserved in pinned conntrack maps
 3. After restart, FIB cache in session entries is stale (`fib_gen` mismatch)
 4. `bpf_fib_lookup` may return LOCAL/NOT_FWDED (routes not yet in kernel)
@@ -1078,7 +1083,7 @@ make cluster-deploy  # re-push config + restart
 
 Alternatively, use `load override` via CLI to load the new config interactively.
 
-### BPF FIB LOCAL/NOT_FWDED Fix (`b0e7e33`)
+### Legacy BPF FIB LOCAL/NOT_FWDED Fix (`b0e7e33`)
 
 **Problem:** After daemon restart or VRRP failover, existing sessions had stale FIB
 cache entries. `bpf_fib_lookup` returned LOCAL or NOT_FWDED because FRR routes hadn't
@@ -1098,7 +1103,7 @@ NAT reversal, causing RSTs.
 **Result:** Hitless restart loses only 1-2 packets (ARP/NDP warmup delay) instead of
 permanent traffic blackhole for all existing sessions.
 
-### BPF FIB NO_NEIGH Fix (`d95a84e`)
+### Legacy BPF FIB NO_NEIGH Fix (`d95a84e`)
 
 **Problem:** After VRRP failover, the new MASTER had no ARP/NDP entries for LAN
 clients or WAN next-hops. `bpf_fib_lookup` returned NO_NEIGH for synced sessions.
@@ -1146,7 +1151,7 @@ preventing stale RA routes from persisting for up to 1800s.
 - `eno6np1` (i40e) has 32 VFs; this setup uses 2 (VF0+VF1), leaving 30 for other uses
 - VFs are passed through as PCI devices (`type=pci`), not `nictype=sriov` (which has hotplug issues)
 - VFs use `iavf` driver inside VMs — **no native XDP**, only generic/SKB mode
-- `redirect_capable` map in BPF marks VF interfaces as non-redirectable
+- `redirect_capable` map in the legacy BPF path marks VF interfaces as non-redirectable
 - VF interfaces fall back to `XDP_PASS` (kernel forwarding) instead of `bpf_redirect_map`
 - WAN throughput is lower than LAN (virtio native XDP) due to generic mode overhead
 - Spoof checking is ON by default on VFs — may need to be disabled for RETH MAC changes:
