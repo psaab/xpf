@@ -97,6 +97,17 @@ class SummarizeCellTests(unittest.TestCase):
         self.assertIsNotNone(s["median_rep"])
         self.assertIsNotNone(s["iqr_p99_across_reps"])
 
+    def test_median_rep_carries_probe_diagnostics(self):
+        reps = [_make_rep(p99=100 + 10 * i) for i in range(10)]
+        reps[5]["phase_us"] = {"read_us": {"p99": 1234}}
+        reps[5]["coroutines"] = [{"id": 0, "max_start_gap_us": 20000}]
+        s = summarize_cell(reps)
+        self.assertEqual(s["median_rep"]["phase_us"], {"read_us": {"p99": 1234}})
+        self.assertEqual(
+            s["median_rep"]["coroutines"],
+            [{"id": 0, "max_start_gap_us": 20000}],
+        )
+
     def test_excludes_invalid_from_median(self):
         # 10 valid + 3 invalid; the invalid ones with extreme p99 must
         # not contribute to the median.

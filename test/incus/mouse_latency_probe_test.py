@@ -297,6 +297,10 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLessEqual(result["totals"]["error_rate"], 0.05)
         self.assertLessEqual(connection_count, 3)
+        self.assertEqual(len(result["coroutines"]), 3)
+        self.assertGreater(result["phase_us"]["read_us"]["count"], 0)
+        self.assertGreater(result["phase_us"]["drain_us"]["count"], 0)
+        self.assertIn("max_start_gap_us", result["coroutines"][0])
 
     async def test_min_interval_bounds_persistent_attempt_rate(self):
         result, connection_count = await self._run_local_echo_probe(
@@ -308,6 +312,8 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(result["totals"]["completed"], 3)
         self.assertLessEqual(result["totals"]["attempted"], 8)
         self.assertLessEqual(connection_count, 1)
+        self.assertGreater(result["phase_us"]["sleep_overshoot_us"]["count"], 0)
+        self.assertGreaterEqual(result["phase_us"]["start_gap_us"]["max"], 15_000)
 
     async def test_min_interval_bounds_per_attempt_rate(self):
         result, connection_count = await self._run_local_echo_probe(
@@ -371,6 +377,7 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
             result["totals"]["attempted"],
             result["totals"]["errors"],
         )
+        self.assertGreater(result["phase_us"]["drain_us"]["count"], 0)
 
     async def test_persistent_drain_timeout_counts_error_and_terminates(self):
         result = await self._run_with_forced_drain_timeout(
@@ -382,6 +389,7 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
             result["totals"]["attempted"],
             result["totals"]["errors"],
         )
+        self.assertGreater(result["phase_us"]["drain_us"]["count"], 0)
 
 
 if __name__ == "__main__":
