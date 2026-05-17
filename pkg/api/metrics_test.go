@@ -336,6 +336,7 @@ func globalCounterPolicyID(t *testing.T, store *configstore.Store, ruleName stri
 	}
 	for i, rule := range cfg.Security.GlobalPolicies {
 		if rule != nil && rule.Name == ruleName {
+			// Global policy IDs start after all zone-pair policy sets.
 			return policyCounterID(uint32(len(cfg.Security.Policies)), i)
 		}
 	}

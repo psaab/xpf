@@ -770,3 +770,8 @@
   - **Action**: Addressed automated review follow-up on policy-hit metrics by adding a shared `policyCounterID` helper used by collector/tests and guarding global-policy metric emission against nil policy entries.
   - **File(s)**: `pkg/api/metrics.go`, `pkg/api/metrics_test.go`, `_Log.md`
   - **Validation**: `gofmt -w pkg/api/metrics.go pkg/api/metrics_test.go`; `go test ./pkg/api ./pkg/grpcapi ./pkg/dataplane/userspace ./pkg/config`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T21:38:00Z
+  - **Action**: Applied final review nits: reverted unintended zone-policy nil-contract change in Prometheus policy counter loop and documented why global policy IDs use the post-zone-set offset in metrics tests.
+  - **File(s)**: `pkg/api/metrics.go`, `pkg/api/metrics_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/api/metrics.go pkg/api/metrics_test.go`; `go test ./pkg/api ./pkg/grpcapi ./pkg/dataplane/userspace ./pkg/config`; `git diff --check`

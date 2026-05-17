@@ -1506,9 +1506,6 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp dat
 		fromZone := zpp.FromZone
 		toZone := zpp.ToZone
 		for i, rule := range zpp.Policies {
-			if rule == nil {
-				continue
-			}
 			policyID := policyCounterID(policySetID, i)
 			ctrs, err := dp.ReadPolicyCounters(policyID)
 			if err != nil {
