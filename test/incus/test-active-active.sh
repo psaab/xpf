@@ -8,8 +8,8 @@
 # LAN (RG2, fw0) must cross the fabric link to exit on the WAN (RG1, fw1)
 # when the RGs are split across nodes.
 #
-# Requires: xpf-fw0, xpf-fw1, cluster-lan-host running.
-# Requires: iperf3 server reachable at IPERF_TARGET (default 172.16.100.200).
+# Requires: cluster nodes from BPFRX_CLUSTER_ENV running (default: loss userspace cluster).
+# Requires: iperf3 server reachable at IPERF_TARGET (default from IPERF_TARGET4).
 #
 # Tests:
 #   1. Start iperf3 from LAN host through the firewall to WAN target
@@ -31,7 +31,11 @@ if ! incus list &>/dev/null 2>&1; then
 	fi
 fi
 
-IPERF_TARGET="${IPERF_TARGET:-172.16.100.200}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
+IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 IPERF_DURATION=90       # seconds — enough to span two failovers + settling
 IPERF_STREAMS=8
 SETTLE_WAIT=3           # seconds to let VRRP + election settle
@@ -55,13 +59,13 @@ instance_running() {
 
 cleanup() {
 	# Kill iperf3 on LAN host
-	incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 	# Reset any manual failovers
-	incus exec xpf-fw0 -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
-	incus exec xpf-fw1 -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
+	incus exec "$FW0" -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
+	incus exec "$FW1" -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
 	# With preempt=false, resetting the flag alone doesn't move VRRP.
 	# Explicitly request RG1 back to fw0 so the next test starts clean.
-	incus exec xpf-fw0 -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
+	incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
 	sleep 2
 }
 
@@ -71,29 +75,29 @@ trap cleanup EXIT
 
 info "Preflight checks"
 
-for inst in xpf-fw0 xpf-fw1 cluster-lan-host; do
+for inst in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
 	instance_running "$inst" || die "$inst is not running"
 done
 
 # Reset any stale manual failover flags from previous test runs.
 for rg in 0 1 2; do
-	incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-	incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 done
 sleep 2
 
 # Ensure all RGs are on fw0 (request peer failover if needed)
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 for rg in 0 1 2; do
 	rg_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
 	if [[ "$rg_primary" -ne 1 ]]; then
-		incus exec xpf-fw0 -- cli -c "request chassis cluster failover redundancy-group $rg node 0" 2>/dev/null || true
+		incus exec "$FW0" -- cli -c "request chassis cluster failover redundancy-group $rg node 0" 2>/dev/null || true
 	fi
 done
 sleep 3
 
 # Verify fw0 is primary for all RGs
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 rg0_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: 0" | grep "node0" | grep -c "primary" || true)
 rg1_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node0" | grep -c "primary" || true)
 rg2_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: 2" | grep "node0" | grep -c "primary" || true)
@@ -105,27 +109,27 @@ else
 fi
 
 # Verify iperf target reachable
-if incus exec cluster-lan-host -- ping -c 2 -W 2 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 2 -W 2 "$IPERF_TARGET" &>/dev/null; then
 	pass "iperf3 target reachable ($IPERF_TARGET)"
 else
 	die "Cannot reach iperf3 target $IPERF_TARGET from cluster-lan-host"
 fi
 
 # Kill any stale iperf3
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
 
 info "Phase 1: Starting iperf3 -P${IPERF_STREAMS} -t${IPERF_DURATION} → ${IPERF_TARGET}"
 
-incus exec cluster-lan-host -- bash -c \
+incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 	"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > /tmp/iperf3-active-active.log 2>&1 &"
 
 sleep 8  # all parallel streams must be fully established before failover
 
 # Verify iperf3 is running
-if incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 	pass "iperf3 running"
 else
 	die "iperf3 failed to start — check /tmp/iperf3-active-active.log on cluster-lan-host"
@@ -135,11 +139,11 @@ fi
 
 info "Phase 2: Failover RG1 (WAN) to node1 — creating active/active split"
 
-incus exec xpf-fw0 -- cli -c 'request chassis cluster failover redundancy-group 1' 2>/dev/null || true
+incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1' 2>/dev/null || true
 sleep "$SETTLE_WAIT"
 
 # Verify RG split: RG1 on fw1, RG2 on fw0
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 
 rg1_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node0" | awk '{print $3}')
 rg2_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 2" | grep "node0" | awk '{print $3}')
@@ -157,7 +161,7 @@ else
 fi
 
 # Verify VRRP states match cluster state
-fw0_vrrp=$(incus exec xpf-fw0 -- cli -c 'show security vrrp' 2>/dev/null)
+fw0_vrrp=$(incus exec "$FW0" -- cli -c 'show security vrrp' 2>/dev/null)
 
 vrrp_101=$(echo "$fw0_vrrp" | grep "101" | head -1)
 vrrp_102=$(echo "$fw0_vrrp" | grep "102" | head -1)
@@ -180,11 +184,11 @@ info "Phase 3: Verify traffic survives active/active split (fabric forwarding)"
 
 sleep 5  # let traffic settle after failover
 
-if incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 	# Check last interval of iperf3 output for throughput
 	# With -P N, each interval has N+2 lines (N streams + SUM + separator)
 	tail_lines=$(( IPERF_STREAMS * 2 + 5 ))
-	last_sum=$(incus exec cluster-lan-host -- tail -"$tail_lines" /tmp/iperf3-active-active.log 2>/dev/null | grep "SUM" | tail -1 || true)
+	last_sum=$(incus exec "$CLUSTER_LAN_HOST" -- tail -"$tail_lines" /tmp/iperf3-active-active.log 2>/dev/null | grep "SUM" | tail -1 || true)
 	if echo "$last_sum" | grep -qiE "[0-9]+ [MG]bits/sec"; then
 		bps=$(echo "$last_sum" | grep -oiE "[0-9.]+ [MG]bits/sec" | head -1)
 		pass "iperf3 survived RG split ($bps)"
@@ -205,7 +209,7 @@ info "Phase 3b: Verify new TCP connections work through split cluster"
 # proves the full SYN → SYN-ACK → ACK path works across fabric.
 # The iperf3 server accepts the TCP connection (then sends "busy"),
 # but the 3-way handshake completing is what matters.
-if incus exec cluster-lan-host -- bash -c \
+if incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 	"timeout 5 bash -c 'echo > /dev/tcp/${IPERF_TARGET}/5201'" 2>/dev/null; then
 	pass "new TCP connection through split cluster"
 else
@@ -216,7 +220,7 @@ fi
 
 info "Phase 3c: Verify ping works through split cluster"
 
-if incus exec cluster-lan-host -- ping -c 3 -W 3 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 3 "$IPERF_TARGET" &>/dev/null; then
 	pass "ping through split cluster works"
 else
 	fail "ping through split cluster failed (new connections broken)"
@@ -226,11 +230,11 @@ fi
 
 info "Phase 4: Failover RG1 (WAN) back to node0 — reunifying all RGs"
 
-incus exec xpf-fw0 -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
+incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
 sleep "$SETTLE_WAIT"
 
 # Verify all RGs back on fw0
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 
 rg1_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node0" | awk '{print $3}')
 
@@ -246,9 +250,9 @@ info "Phase 5: Verify traffic survives RG reunification"
 
 sleep 5
 
-if incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 	tail_lines=$(( IPERF_STREAMS * 2 + 5 ))
-	last_sum=$(incus exec cluster-lan-host -- tail -"$tail_lines" /tmp/iperf3-active-active.log 2>/dev/null | grep "SUM" | tail -1 || true)
+	last_sum=$(incus exec "$CLUSTER_LAN_HOST" -- tail -"$tail_lines" /tmp/iperf3-active-active.log 2>/dev/null | grep "SUM" | tail -1 || true)
 	if echo "$last_sum" | grep -qiE "[0-9]+ [MG]bits/sec"; then
 		bps=$(echo "$last_sum" | grep -oiE "[0-9.]+ [MG]bits/sec" | head -1)
 		pass "iperf3 survived RG reunification ($bps)"
@@ -264,18 +268,18 @@ fi
 info "Waiting for iperf3 to complete"
 
 for i in $(seq 1 "$IPERF_DURATION"); do
-	if ! incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 		break
 	fi
 	sleep 1
 done
 
 # Check iperf3 completed successfully
-if incus exec cluster-lan-host -- grep -q "iperf Done" /tmp/iperf3-active-active.log 2>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-active-active.log 2>/dev/null; then
 	pass "iperf3 completed successfully"
 
 	# Extract final throughput
-	throughput=$(incus exec cluster-lan-host -- grep '\[SUM\].*sender' /tmp/iperf3-active-active.log 2>/dev/null \
+	throughput=$(incus exec "$CLUSTER_LAN_HOST" -- grep '\[SUM\].*sender' /tmp/iperf3-active-active.log 2>/dev/null \
 		| grep -oP '[\d.]+\s+Gbits' | grep -oP '[\d.]+' || echo "0")
 
 	if [[ -n "$throughput" ]] && awk "BEGIN{exit !($throughput >= $MIN_THROUGHPUT)}"; then
@@ -284,14 +288,14 @@ if incus exec cluster-lan-host -- grep -q "iperf Done" /tmp/iperf3-active-active
 		fail "iperf3 throughput too low: ${throughput} Gbps (expected >= ${MIN_THROUGHPUT} Gbps)"
 	fi
 else
-	iperf_log=$(incus exec cluster-lan-host -- tail -5 /tmp/iperf3-active-active.log 2>/dev/null || echo "(no log)")
+	iperf_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-active-active.log 2>/dev/null || echo "(no log)")
 	fail "iperf3 did not complete: $iperf_log"
 fi
 
 # ── Cleanup & Results ────────────────────────────────────────────────
 
 # Kill iperf3
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

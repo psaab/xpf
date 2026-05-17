@@ -249,9 +249,9 @@ make test-vm         # Create VM
 make test-deploy     # Build + deploy + restart service
 make test-logs       # View daemon logs
 
-# Two-VM HA cluster
+# Two-VM HA cluster (defaults to loss userspace cluster)
 make cluster-init    # Create networks + profile
-make cluster-create  # Launch fw0 + fw1 + LAN host
+make cluster-create  # Launch xpf-userspace-fw0 + xpf-userspace-fw1 + LAN host
 make cluster-deploy  # Rolling deploy: secondary first, then primary (preserves traffic)
 ```
 
@@ -259,8 +259,9 @@ Userspace dataplane testing (requires mlx5 NICs on loss cluster):
 
 ```bash
 # Userspace HA cluster
-./scripts/userspace-ha-validation.sh       # Full HA failover validation
-./scripts/userspace-perf-compare.sh        # IPv4/IPv6 throughput + profiling
+make cluster-deploy
+./scripts/userspace-ha-validation.sh --env test/incus/loss-userspace-cluster.env
+./scripts/userspace-perf-compare.sh
 ```
 
 ### Cluster Deployment

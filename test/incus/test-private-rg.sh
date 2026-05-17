@@ -5,8 +5,8 @@
 # interfaces, using only the heartbeat control link for RG election.
 #
 # Prerequisites:
-#   - Cluster VMs running (make cluster-create)
-#   - iperf3 server at 172.16.100.200 (hades)
+#   - Cluster VMs from BPFRX_CLUSTER_ENV running (make cluster-create)
+#   - iperf3 server at IPERF_TARGET4
 #
 # Usage:
 #   ./test/incus/test-private-rg.sh              # Full test (enable, test, disable, test)
@@ -23,8 +23,11 @@ if ! incus list &>/dev/null 2>&1; then
 	fi
 fi
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CONF="${PROJECT_ROOT}/docs/ha-cluster.conf"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
+CONF="${CLUSTER_CONF:-${PROJECT_ROOT}/docs/ha-cluster.conf}"
 
 PASS=0
 FAIL=0
@@ -39,8 +42,8 @@ wait_cluster_ready() {
 	local max_wait=30
 	local i=0
 	while [[ $i -lt $max_wait ]]; do
-		if incus exec xpf-fw0 -- systemctl is-active --quiet xpfd 2>/dev/null &&
-		   incus exec xpf-fw1 -- systemctl is-active --quiet xpfd 2>/dev/null; then
+		if incus exec "$FW0" -- systemctl is-active --quiet xpfd 2>/dev/null &&
+		   incus exec "$FW1" -- systemctl is-active --quiet xpfd 2>/dev/null; then
 			sleep 5  # Allow election to settle
 			return 0
 		fi
@@ -55,15 +58,15 @@ wait_cluster_ready() {
 check_no_vrrp_multicast() {
 	info "Checking for VRRP multicast on data interfaces..."
 	local count
-	count=$(incus exec xpf-fw0 -- timeout 3 tcpdump -c 1 -i ge-0-0-1 vrrp 2>&1 | grep -c "packet" || echo "0")
+	count=$(incus exec "$FW0" -- timeout 3 tcpdump -c 1 -i ge-0-0-1 vrrp 2>&1 | grep -c "packet" || echo "0")
 	# tcpdump reports "0 packets captured" if no VRRP seen
-	if incus exec xpf-fw0 -- timeout 3 tcpdump -c 1 -i ge-0-0-1 vrrp 2>&1 | grep -q "0 packets captured"; then
+	if incus exec "$FW0" -- timeout 3 tcpdump -c 1 -i ge-0-0-1 vrrp 2>&1 | grep -q "0 packets captured"; then
 		pass "No VRRP multicast on ge-0-0-1 (WAN)"
 	else
 		fail "VRRP multicast detected on ge-0-0-1 (WAN)"
 	fi
 
-	if incus exec xpf-fw0 -- timeout 3 tcpdump -c 1 -i ge-0-0-0 vrrp 2>&1 | grep -q "0 packets captured"; then
+	if incus exec "$FW0" -- timeout 3 tcpdump -c 1 -i ge-0-0-0 vrrp 2>&1 | grep -q "0 packets captured"; then
 		pass "No VRRP multicast on ge-0-0-0 (LAN)"
 	else
 		fail "VRRP multicast detected on ge-0-0-0 (LAN)"
@@ -73,7 +76,7 @@ check_no_vrrp_multicast() {
 check_vrrp_active() {
 	info "Checking VRRP instances are running..."
 	local log
-	log=$(incus exec xpf-fw0 -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
+	log=$(incus exec "$FW0" -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
 
 	if echo "$log" | grep -q "vrrp: instance starting"; then
 		pass "VRRP instances started on fw0"
@@ -91,7 +94,7 @@ check_vrrp_active() {
 check_no_vrrp_instances() {
 	info "Checking VRRP instances are NOT running (private-rg mode)..."
 	local log
-	log=$(incus exec xpf-fw0 -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
+	log=$(incus exec "$FW0" -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
 
 	if echo "$log" | grep -q "vrrp: instance starting"; then
 		fail "VRRP instances running in private-rg mode"
@@ -103,21 +106,21 @@ check_no_vrrp_instances() {
 check_vips_present() {
 	info "Checking VIPs are present..."
 	local addrs
-	addrs=$(incus exec xpf-fw0 -- ip addr show 2>/dev/null)
+	addrs=$(incus exec "$FW0" -- ip addr show 2>/dev/null)
 
-	if echo "$addrs" | grep -q "172.16.50.6"; then
-		pass "WAN VIP 172.16.50.6 present"
+	if echo "$addrs" | grep -q "$WAN_VIP4"; then
+		pass "WAN VIP ${WAN_VIP4} present"
 	else
-		fail "WAN VIP 172.16.50.6 missing"
+		fail "WAN VIP ${WAN_VIP4} missing"
 	fi
 
-	if echo "$addrs" | grep -q "10.0.60.1"; then
-		pass "LAN VIP 10.0.60.1 present"
+	if echo "$addrs" | grep -q "$LAN_VIP4"; then
+		pass "LAN VIP ${LAN_VIP4} present"
 	else
-		fail "LAN VIP 10.0.60.1 missing"
+		fail "LAN VIP ${LAN_VIP4} missing"
 	fi
 
-	if echo "$addrs" | grep -q "2001:559:8585:cf01::1"; then
+	if echo "$addrs" | grep -q "$LAN_VIP6"; then
 		pass "LAN VIP IPv6 present"
 	else
 		fail "LAN VIP IPv6 missing"
@@ -126,34 +129,34 @@ check_vips_present() {
 
 check_connectivity() {
 	info "Checking connectivity from LAN host..."
-	if ! incus info cluster-lan-host &>/dev/null 2>&1; then
-		warn "cluster-lan-host not running, skipping connectivity"
+	if ! incus info "$CLUSTER_LAN_HOST" &>/dev/null 2>&1; then
+		warn "${CLUSTER_LAN_HOST} not running, skipping connectivity"
 		return
 	fi
 
 	# IPv4 ping to VIP
-	if incus exec cluster-lan-host -- ping -c 3 -W 2 10.0.60.1 &>/dev/null; then
-		pass "LAN host → RETH VIP 10.0.60.1 ping"
+	if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 2 "$LAN_VIP4" &>/dev/null; then
+		pass "LAN host → RETH VIP ${LAN_VIP4} ping"
 	else
-		fail "LAN host → RETH VIP 10.0.60.1 ping"
+		fail "LAN host → RETH VIP ${LAN_VIP4} ping"
 	fi
 
 	# IPv6 ping to VIP
-	if incus exec cluster-lan-host -- ping6 -c 3 -W 2 2001:559:8585:cf01::1 &>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- ping6 -c 3 -W 2 "$LAN_VIP6" &>/dev/null; then
 		pass "LAN host → RETH VIP IPv6 ping"
 	else
 		fail "LAN host → RETH VIP IPv6 ping"
 	fi
 
 	# IPv4 cross-zone
-	if incus exec cluster-lan-host -- ping -c 3 -W 2 172.16.50.1 &>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 2 "$WAN_GW4" &>/dev/null; then
 		pass "LAN host → WAN gateway cross-zone"
 	else
 		fail "LAN host → WAN gateway cross-zone"
 	fi
 
 	# Internet
-	if incus exec cluster-lan-host -- ping -c 3 -W 3 1.1.1.1 &>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 3 1.1.1.1 &>/dev/null; then
 		pass "LAN host → internet (1.1.1.1)"
 	else
 		fail "LAN host → internet (1.1.1.1)"
@@ -163,27 +166,27 @@ check_connectivity() {
 check_manual_failover() {
 	info "Testing manual failover..."
 	# Failover RG1 to node1
-	incus exec xpf-fw0 -- bash -c "echo 'request chassis cluster failover redundancy-group 1 node 1' | xpfd cli" &>/dev/null 2>&1 || true
+	incus exec "$FW0" -- bash -c "echo 'request chassis cluster failover redundancy-group 1 node 1' | xpfd cli" &>/dev/null 2>&1 || true
 	sleep 3
 
 	# Check VIPs moved to fw1
 	local fw1_addrs
-	fw1_addrs=$(incus exec xpf-fw1 -- ip addr show 2>/dev/null)
-	if echo "$fw1_addrs" | grep -q "172.16.50.6"; then
+	fw1_addrs=$(incus exec "$FW1" -- ip addr show 2>/dev/null)
+	if echo "$fw1_addrs" | grep -q "$WAN_VIP4"; then
 		pass "Manual failover: VIP moved to fw1"
 	else
 		fail "Manual failover: VIP not on fw1"
 	fi
 
 	# Check connectivity still works
-	if incus exec cluster-lan-host -- ping -c 3 -W 2 172.16.50.1 &>/dev/null 2>&1; then
+	if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 2 "$WAN_GW4" &>/dev/null 2>&1; then
 		pass "Manual failover: connectivity preserved"
 	else
 		fail "Manual failover: connectivity lost"
 	fi
 
 	# Reset failover
-	incus exec xpf-fw0 -- bash -c "echo 'request chassis cluster failover reset redundancy-group 1' | xpfd cli" &>/dev/null 2>&1 || true
+	incus exec "$FW0" -- bash -c "echo 'request chassis cluster failover reset redundancy-group 1' | xpfd cli" &>/dev/null 2>&1 || true
 	sleep 5
 }
 
@@ -245,7 +248,7 @@ main() {
 			;;
 		check)
 			local log
-			log=$(incus exec xpf-fw0 -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
+			log=$(incus exec "$FW0" -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
 			if echo "$log" | grep -q "vrrp: instance starting"; then
 				info "Mode: VRRP (standard)"
 			else
