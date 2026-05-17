@@ -295,7 +295,7 @@ backend boundary.
 type Telemetry interface {
 	NewEventSource() (dataplane.EventSource, error)
 	GlobalCounter(uint32) (uint64, error)
-	FloodCounters(uint16) (dataplane.FloodState, error)
+	ReadFloodCounters(uint16) (dataplane.FloodState, error)
 	InterfaceCounters(int) (dataplane.InterfaceCounterValue, error)
 	ZoneCounters(uint16, int) (dataplane.CounterValue, error)
 	PolicyCounters(uint32) (dataplane.CounterValue, error)
@@ -567,9 +567,10 @@ interface in place and adds the new contract beside it:
   source and userspace adapts its helper-private
   `SessionDeltaInfo`/`ProcessStatus` at the package boundary.
 - eBPF, DPDK, and userspace managers now satisfy `RuntimeDataPlane` at
-  compile time. Shared adapters cover HA/telemetry/session surfaces; userspace
-  keeps a backend-specific link controller so link-cycle prepare/defer/rebind
-  semantics stay intact.
+  compile time. Shared adapters cover eBPF/DPDK HA plus generic telemetry and
+  session surfaces; userspace keeps backend-specific link and HA controllers so
+  link-cycle prepare/defer/rebind semantics and fabric-state helper sync stay
+  intact.
 - Cluster stale-bulk reconciliation now routes through
   `dataplane.SessionStore.ReconcileClusterBulk`, whose companion-delete path
   owns forward, reverse, and DNAT/DNATv6 cleanup. A canary fails if

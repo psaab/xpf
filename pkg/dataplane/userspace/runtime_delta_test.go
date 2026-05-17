@@ -1,9 +1,12 @@
 package userspace
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 )
 
@@ -98,5 +101,67 @@ func TestRuntimeSessionsExposeUserspaceDeltaSource(t *testing.T) {
 	store := New().Sessions()
 	if store.SessionDeltas() == nil {
 		t.Fatal("Sessions().SessionDeltas() = nil, want userspace runtime delta source")
+	}
+}
+
+type fakeUserspaceHAOps struct {
+	fabric0Updates int
+	fabric1Updates int
+	syncs          int
+	updateErr      error
+}
+
+func (f *fakeUserspaceHAOps) UpdateRGActive(int, bool) error {
+	return nil
+}
+
+func (f *fakeUserspaceHAOps) UpdateHAWatchdog(int, uint64) error {
+	return nil
+}
+
+func (f *fakeUserspaceHAOps) UpdateFabricFwd(dataplane.FabricFwdInfo) error {
+	f.fabric0Updates++
+	return f.updateErr
+}
+
+func (f *fakeUserspaceHAOps) UpdateFabricFwd1(dataplane.FabricFwdInfo) error {
+	f.fabric1Updates++
+	return f.updateErr
+}
+
+func (f *fakeUserspaceHAOps) SyncFabricState() {
+	f.syncs++
+}
+
+func TestRuntimeUserspaceHAControllerSyncsFabricStateAfterForwardingUpdate(t *testing.T) {
+	fake := &fakeUserspaceHAOps{}
+	controller := userspaceHAController{manager: fake}
+
+	if err := controller.SetFabricForwarding(context.Background(), 0, dataplane.FabricFwdInfo{}); err != nil {
+		t.Fatalf("SetFabricForwarding fabric0: %v", err)
+	}
+	if fake.fabric0Updates != 1 || fake.fabric1Updates != 0 || fake.syncs != 1 {
+		t.Fatalf("fabric0 path updates/syncs = %d/%d/%d, want 1/0/1",
+			fake.fabric0Updates, fake.fabric1Updates, fake.syncs)
+	}
+
+	if err := controller.SetFabricForwarding(context.Background(), 1, dataplane.FabricFwdInfo{}); err != nil {
+		t.Fatalf("SetFabricForwarding fabric1: %v", err)
+	}
+	if fake.fabric0Updates != 1 || fake.fabric1Updates != 1 || fake.syncs != 2 {
+		t.Fatalf("fabric1 path updates/syncs = %d/%d/%d, want 1/1/2",
+			fake.fabric0Updates, fake.fabric1Updates, fake.syncs)
+	}
+}
+
+func TestRuntimeUserspaceHAControllerDoesNotSyncFabricStateAfterUpdateError(t *testing.T) {
+	fake := &fakeUserspaceHAOps{updateErr: errors.New("update failed")}
+	controller := userspaceHAController{manager: fake}
+
+	if err := controller.SetFabricForwarding(context.Background(), 0, dataplane.FabricFwdInfo{}); err == nil {
+		t.Fatal("SetFabricForwarding succeeded, want update error")
+	}
+	if fake.syncs != 0 {
+		t.Fatalf("SyncFabricState calls = %d, want 0 after update error", fake.syncs)
 	}
 }

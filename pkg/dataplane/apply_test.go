@@ -14,7 +14,7 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 			"trust": 1,
 		},
 		ManagedInterfaces: []networkd.InterfaceConfig{
-			{Name: "xe-0/0/0"},
+			{Name: "xe-0/0/0", Addresses: []string{"192.0.2.1/24"}},
 		},
 		FilterIDs: map[string]uint32{
 			"inet:edge-in": 3,
@@ -46,6 +46,9 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	if got := result.FilterIDs["inet:edge-in"]; got != 3 {
 		t.Fatalf("FilterIDs[inet:edge-in] = %d, want 3", got)
 	}
+	if got := result.ManagedInterfaces[0].Addresses[0]; got != "192.0.2.1/24" {
+		t.Fatalf("ManagedInterfaces[0].Addresses[0] = %q, want 192.0.2.1/24", got)
+	}
 	if got := result.FilterSpans["inet:edge-in"]; got != (FilterCounterSpan{FilterID: 3, RuleStart: 42, RuleCount: 7}) {
 		t.Fatalf("FilterSpans[inet:edge-in] = %+v", got)
 	}
@@ -72,6 +75,7 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	}
 
 	// Mutate source — verify ApplyResult has independent copies.
+	compileResult.ManagedInterfaces[0].Addresses[0] = "198.51.100.1/24"
 	compileResult.FilterIDs["inet:edge-in"] = 99
 	compileResult.FilterSpans["inet:edge-in"] = FilterCounterSpan{}
 	compileResult.NATCounterIDs["srcnat/rule-a"] = 99
@@ -81,6 +85,9 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	compileResult.PolicyScheduleRuleSlots[0].PolicyName = "mutated"
 	if got := result.FilterIDs["inet:edge-in"]; got != 3 {
 		t.Fatalf("FilterIDs was not copied, got %d", got)
+	}
+	if got := result.ManagedInterfaces[0].Addresses[0]; got != "192.0.2.1/24" {
+		t.Fatalf("ManagedInterfaces nested Addresses was not copied, got %q", got)
 	}
 	if got := result.FilterSpans["inet:edge-in"].RuleStart; got != 42 {
 		t.Fatalf("FilterSpans was not copied, RuleStart = %d", got)
@@ -102,7 +109,11 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	}
 
 	clone := result.Clone()
+	clone.ManagedInterfaces[0].Addresses[0] = "203.0.113.1/24"
 	clone.PolicyScheduleRuleSlots[0].PolicyName = "clone-mutated"
+	if got := result.ManagedInterfaces[0].Addresses[0]; got != "192.0.2.1/24" {
+		t.Fatalf("Clone shared ManagedInterfaces nested Addresses, original = %q", got)
+	}
 	if got := result.PolicyScheduleRuleSlots[0].PolicyName; got != "allow-all" {
 		t.Fatalf("Clone shared PolicyScheduleRuleSlots backing array, original PolicyName = %q", got)
 	}

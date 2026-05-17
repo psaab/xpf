@@ -199,7 +199,7 @@ func (m *Manager) Link() dataplane.LinkController {
 }
 
 func (m *Manager) HA() dataplane.HAController {
-	return dataplane.NewDataPlaneHAController(m)
+	return userspaceHAController{manager: m}
 }
 
 func (m *Manager) Sessions() dataplane.SessionStore {
@@ -237,6 +237,72 @@ func (c userspaceLinkController) NotifyLinkCycle() {
 	if c.manager != nil {
 		c.manager.NotifyLinkCycle()
 	}
+}
+
+type userspaceHAOps interface {
+	UpdateRGActive(int, bool) error
+	UpdateHAWatchdog(int, uint64) error
+	UpdateFabricFwd(dataplane.FabricFwdInfo) error
+	UpdateFabricFwd1(dataplane.FabricFwdInfo) error
+	SyncFabricState()
+}
+
+type userspaceHAController struct {
+	manager userspaceHAOps
+}
+
+func (c userspaceHAController) SetRGActive(ctx context.Context, rgID int, active bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	return c.manager.UpdateRGActive(rgID, active)
+}
+
+func (c userspaceHAController) SetHAWatchdog(ctx context.Context, rgID int, timestamp uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	return c.manager.UpdateHAWatchdog(rgID, timestamp)
+}
+
+func (c userspaceHAController) SetFabricForwarding(ctx context.Context, id dataplane.FabricID, info dataplane.FabricFwdInfo) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	var err error
+	if id == 1 {
+		err = c.manager.UpdateFabricFwd1(info)
+	} else {
+		err = c.manager.UpdateFabricFwd(info)
+	}
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.manager.SyncFabricState()
+	return nil
+}
+
+func (c userspaceHAController) SyncFabricState(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	c.manager.SyncFabricState()
+	return nil
 }
 
 type userspaceSessionStore struct {

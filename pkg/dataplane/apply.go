@@ -13,11 +13,8 @@ import (
 
 // RuntimeDataPlane is the target daemon-facing dataplane shape for #1381.
 // It is introduced beside the legacy BPF-shaped DataPlane while callers move
-// one domain at a time.
-//
-// TODO(#1381): Add compile-time assertions (var _ RuntimeDataPlane = (*Manager)(nil))
-// for BPF/DPDK/userspace Managers once Start/Link/HA/Sessions/Telemetry/SessionDeltas
-// are wired on each backend in a later migration slice.
+// one domain at a time. The eBPF, DPDK, and userspace managers have
+// compile-time assertions against this shape.
 type RuntimeDataPlane interface {
 	Start(context.Context) error
 	ConfigSink
@@ -32,8 +29,8 @@ type RuntimeDataPlane interface {
 	// SessionDeltas returns the backend-neutral session-delta source used for
 	// HA session sync. Backends that do not support delta streaming return a
 	// nil source; callers must nil-check before use.
-	// TODO(#1381): daemon_ha_userspace.go still imports dpuserspace directly;
-	// migrate it to use dp.SessionDeltas() once all backends wire this method.
+	// TODO(#1381): migrate daemon HA session sync from direct userspace type
+	// assertions to this backend-neutral source.
 	SessionDeltas() dpruntime.SessionDeltaSource
 }
 
@@ -111,7 +108,7 @@ func ApplyResultFromCompileResult(result *CompileResult) *ApplyResult {
 	}
 	out := &ApplyResult{
 		ZoneIDs:                 maps.Clone(result.ZoneIDs),
-		ManagedInterfaces:       slices.Clone(result.ManagedInterfaces),
+		ManagedInterfaces:       cloneManagedInterfaces(result.ManagedInterfaces),
 		FilterIDs:               maps.Clone(result.FilterIDs),
 		FilterSpans:             maps.Clone(result.FilterSpans),
 		NATCounterIDs:           make(map[string]uint32, len(result.NATCounterIDs)),
@@ -133,7 +130,7 @@ func (r *ApplyResult) Clone() *ApplyResult {
 	}
 	out := *r
 	out.ZoneIDs = maps.Clone(r.ZoneIDs)
-	out.ManagedInterfaces = slices.Clone(r.ManagedInterfaces)
+	out.ManagedInterfaces = cloneManagedInterfaces(r.ManagedInterfaces)
 	out.FilterIDs = maps.Clone(r.FilterIDs)
 	out.FilterSpans = maps.Clone(r.FilterSpans)
 	out.NATCounterIDs = maps.Clone(r.NATCounterIDs)
@@ -143,6 +140,14 @@ func (r *ApplyResult) Clone() *ApplyResult {
 	out.AppNames = maps.Clone(r.AppNames)
 	out.PolicyScheduleRuleSlots = slices.Clone(r.PolicyScheduleRuleSlots)
 	return &out
+}
+
+func cloneManagedInterfaces(in []networkd.InterfaceConfig) []networkd.InterfaceConfig {
+	out := slices.Clone(in)
+	for i := range out {
+		out[i].Addresses = slices.Clone(out[i].Addresses)
+	}
+	return out
 }
 
 func (m *Manager) Start(ctx context.Context) error {
