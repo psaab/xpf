@@ -58,12 +58,17 @@ that binding.
 ## Current Runtime Slice
 
 The 2026-05-17 runtime slice wires mirror configs into `ForwardingState` and
-mirrors packets that enter the pending-forward TX path while the original frame
-bytes are still available. It samples per ingress binding, copies the full L2
-frame into an output binding TX frame, queues the clone as a prepared TX request,
-and records admitted/no-frame/no-binding/queue-full counters. The clone path
-keeps a TX-frame reserve and a small pending-backlog limit so mirror pressure is
-lossy and does not become a primary forwarding dependency.
+mirrors forwarded packets while the original frame bytes are still available,
+covering the miss/pending-forward path and the self-target flow-cache fast path.
+Mirror selection resolves VLAN ingress to the logical ifindex before falling
+back to the parent ifindex. Same-worker output copies the full L2 frame into an
+output binding TX frame and queues the clone as a prepared TX request;
+cross-worker output uses the target binding's live redirect inbox with an owned
+full-frame clone. Mirror clones carry the output CoS default/classified queue
+without DSCP rewrite, and CoS-bound leftovers are dropped rather than allowed to
+escape through backup TX. The clone path keeps a TX-frame reserve and a small
+pending-backlog limit so mirror pressure is lossy and does not become a primary
+forwarding dependency.
 
 The userspace capability gate remains in place for now. This slice does not yet
 claim complete port-mirroring parity for every ingress disposition or for

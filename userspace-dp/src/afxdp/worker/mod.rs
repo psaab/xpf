@@ -1025,6 +1025,7 @@ pub(crate) fn worker_loop(
     shared_cos_exact_backlogs: Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSExactBacklog>>>>,
     shared_cos_queue_leases: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>>>,
     shared_cos_queue_vtime_floors: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>>>,
+    shared_mirror_targets: Arc<ArcSwap<MirrorTargetMap>>,
     cos_status: Arc<ArcSwap<Vec<crate::protocol::CoSInterfaceStatus>>>,
     // #869: worker-runtime telemetry publish slot.  Worker writes its
     // local counters here on a ~1s cadence; coordinator reads for status.
@@ -1042,6 +1043,7 @@ pub(crate) fn worker_loop(
     let mut cos_shared_exact_backlogs = shared_cos_exact_backlogs.load_full();
     let mut cos_shared_queue_leases = shared_cos_queue_leases.load_full();
     let mut cos_shared_queue_vtime_floors = shared_cos_queue_vtime_floors.load_full();
+    let mut mirror_targets = shared_mirror_targets.load_full();
     let mut sessions = SessionTable::new();
     let mut screen_state = ScreenState::new();
     screen_state.update_profiles(forwarding.screen_profiles.clone());
@@ -1286,6 +1288,9 @@ pub(crate) fn worker_loop(
                 rebuild_cos_fast_interfaces = true;
             }
         }
+        if let Some(new_x) = load_arc_if_changed(&mirror_targets, &shared_mirror_targets) {
+            mirror_targets = new_x;
+        }
         if let Some(new_x) = load_arc_if_changed(
             &cos_owner_worker_by_queue,
             &shared_cos_owner_worker_by_queue,
@@ -1500,6 +1505,7 @@ pub(crate) fn worker_loop(
                 idx,
                 &mut bindings,
                 &binding_lookup,
+                mirror_targets.as_ref(),
                 &mut sessions,
                 &mut screen_state,
                 validation,

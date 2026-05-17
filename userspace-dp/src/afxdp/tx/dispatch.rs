@@ -74,6 +74,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     ingress_binding: &mut BindingWorker,
     right: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
+    mirror_targets: &MirrorTargetMap,
     pending_forwards: &mut Vec<PendingForwardRequest>,
     post_recycles: &mut Vec<(u32, u64)>,
     now_ns: u64,
@@ -184,6 +185,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
         if let Some(mirror_config) = select_mirror_config(
             forwarding,
             request.meta.ingress_ifindex as i32,
+            request.meta.ingress_vlan_id,
             &mut ingress_binding.mirror_sample_counter,
         ) {
             let result = enqueue_mirror_clone(
@@ -192,11 +194,13 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 ingress_binding,
                 right,
                 binding_lookup,
+                mirror_targets,
+                forwarding,
                 mirror_config,
                 request.ingress_queue_id,
                 source_frame,
-                request.meta.addr_family,
-                request.meta.protocol,
+                request.meta,
+                request.flow_key.as_ref(),
             );
             record_mirror_clone_result(&ingress_binding.live, result, source_frame.len());
         }

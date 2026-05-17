@@ -203,7 +203,7 @@ pub(in crate::afxdp) fn drain_pending_tx(
     // CoS is configured (no possible cos_queue_id.is_some() on
     // any item) — keeps the non-CoS hot path allocation-free.
     if !forwarding.cos.interfaces.is_empty() {
-        drop_cos_bound_prepared_leftovers(binding, shared_recycles);
+        drop_cos_bound_prepared_leftovers(binding, forwarding, shared_recycles);
     }
     while !binding.tx_pipeline.pending_tx_prepared.is_empty() {
         match transmit_prepared_batch(binding, now_ns, shared_recycles) {
@@ -333,6 +333,7 @@ pub(in crate::afxdp) fn drain_pending_tx(
 /// local-enqueue failure.
 fn drop_cos_bound_prepared_leftovers(
     binding: &mut BindingWorker,
+    forwarding: &ForwardingState,
     shared_recycles: &mut Vec<(u32, u64)>,
 ) {
     if binding.tx_pipeline.pending_tx_prepared.is_empty() {
@@ -357,7 +358,7 @@ fn drop_cos_bound_prepared_leftovers(
         let Some(req) = binding.tx_pipeline.pending_tx_prepared.pop_front() else {
             break;
         };
-        if req.cos_queue_id.is_some() {
+        if tx_request_targets_cos_interface(forwarding, req.egress_ifindex, req.cos_queue_id) {
             dropped = dropped.saturating_add(1);
             dropped_bytes = dropped_bytes.saturating_add(req.len as u64);
             recycle_prepared_immediately_with_shared(binding, &req, Some(shared_recycles));
@@ -420,11 +421,21 @@ fn drop_cos_bound_prepared_leftovers(
 /// `transmit_batch` backup path, bypassing the CoS cap.
 /// Adversarial reviewers MUST reject any PR that re-introduces
 /// an early-exit on head inspection.
-fn partition_cos_bound_local_with_rescue<F>(
+fn tx_request_targets_cos_interface(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+    cos_queue_id: Option<u8>,
+) -> bool {
+    cos_queue_id.is_some() || forwarding.cos.interfaces.contains_key(&egress_ifindex)
+}
+
+fn partition_cos_bound_local_with_rescue<P, F>(
     pending: &mut VecDeque<TxRequest>,
+    mut is_cos_bound: P,
     mut try_rescue: F,
 ) -> (u64, u64)
 where
+    P: FnMut(&TxRequest) -> bool,
     F: FnMut(TxRequest) -> Result<(), TxRequest>,
 {
     let mut dropped = 0u64;
@@ -434,7 +445,7 @@ where
         let Some(req) = pending.pop_front() else {
             break;
         };
-        if req.cos_queue_id.is_some() {
+        if is_cos_bound(&req) {
             let bytes_len = req.bytes.len() as u64;
             match try_rescue(req) {
                 Ok(()) => { /* rescued — do not drop */ }
@@ -460,8 +471,10 @@ fn drop_cos_bound_local_leftovers(
     // Delegate the scan to the pure helper so the mixed-head
     // invariant (Codex review on #784) is unit-testable without
     // constructing a full BindingWorker.
-    let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(pending, |req| {
-        match enqueue_local_into_cos(
+    let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(
+        pending,
+        |req| tx_request_targets_cos_interface(forwarding, req.egress_ifindex, req.cos_queue_id),
+        |req| match enqueue_local_into_cos(
             binding,
             forwarding,
             req,
@@ -470,8 +483,8 @@ fn drop_cos_bound_local_leftovers(
         ) {
             Ok(()) => Ok(()),
             Err(req) => Err(req),
-        }
-    });
+        },
+    );
     if dropped > 0 {
         binding.live.tx_errors.fetch_add(dropped, Ordering::Relaxed);
         binding

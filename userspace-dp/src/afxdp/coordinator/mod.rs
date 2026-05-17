@@ -28,6 +28,7 @@ pub struct Coordinator {
     pub(crate) neighbors: NeighborManager,
     pub(in crate::afxdp) sessions: SessionManager,
     pub(in crate::afxdp) workers: WorkerManager,
+    pub(crate) mirror_targets: Arc<ArcSwap<MirrorTargetMap>>,
     pub(crate) forwarding: ForwardingState,
     pub(crate) policy_counters: PolicyCounterStore,
     pub(crate) recent_exceptions: Arc<Mutex<VecDeque<ExceptionStatus>>>,
@@ -65,6 +66,7 @@ impl Coordinator {
             neighbors: NeighborManager::new(),
             sessions: SessionManager::new(),
             workers: WorkerManager::new(),
+            mirror_targets: Arc::new(ArcSwap::from_pointee(MirrorTargetMap::default())),
             forwarding: ForwardingState::default(),
             policy_counters: PolicyCounterStore::default(),
             recent_exceptions: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_RECENT_EXCEPTIONS))),
@@ -205,6 +207,8 @@ impl Coordinator {
             self.bpf_maps.map_fd.as_ref(),
             self.bpf_maps.heartbeat_map_fd.as_ref(),
         );
+        self.mirror_targets
+            .store(Arc::new(MirrorTargetMap::default()));
         // #925 Phase 1: drop the per-worker panic slots alongside the
         // workers themselves so a long-running daemon that reconciles
         // through many worker-id sets doesn't accumulate stale slots.
@@ -617,6 +621,10 @@ impl Coordinator {
             })
             .collect::<BTreeMap<_, _>>();
         let owner_map = build_cos_owner_worker_by_queue(&self.forwarding, &workers);
+        self.mirror_targets.store(Arc::new(build_mirror_target_map(
+            &self.workers.identities,
+            &self.workers.live,
+        )));
         let active_shards_by_egress_ifindex =
             build_cos_active_shards_by_egress_ifindex_with_fallback_ifindexes(
                 &self.forwarding,
@@ -688,6 +696,7 @@ impl Coordinator {
             let shared_cos_exact_backlogs = self.cos.exact_backlogs.clone();
             let shared_cos_queue_leases = self.cos.queue_leases.clone();
             let shared_cos_queue_vtime_floors = self.cos.queue_vtime_floors.clone();
+            let shared_mirror_targets = self.mirror_targets.clone();
             let runtime_atomics =
                 std::sync::Arc::new(super::worker_runtime::WorkerRuntimeAtomics::new());
             let runtime_atomics_clone = runtime_atomics.clone();
@@ -732,6 +741,7 @@ impl Coordinator {
                         shared_cos_exact_backlogs,
                         shared_cos_queue_leases,
                         shared_cos_queue_vtime_floors,
+                        shared_mirror_targets,
                         cos_status_clone,
                         runtime_atomics_clone,
                     );
@@ -1617,6 +1627,20 @@ fn build_worker_binding_ifindexes_from_identities(
         out.entry(ident.worker_id)
             .or_default()
             .insert(ident.ifindex);
+    }
+    out
+}
+
+fn build_mirror_target_map(
+    identities: &BTreeMap<u32, BindingIdentity>,
+    live: &BTreeMap<u32, Arc<BindingLiveState>>,
+) -> MirrorTargetMap {
+    let mut out = MirrorTargetMap::default();
+    for (slot, ident) in identities {
+        let Some(binding_live) = live.get(slot) else {
+            continue;
+        };
+        out.insert(ident, binding_live.clone());
     }
     out
 }

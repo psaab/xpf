@@ -60,7 +60,8 @@ fn partition_cos_bound_local_scans_mixed_head_deque() {
     // Rescue stub: always fails (returns Err) so every
     // cos-bound item falls through to drop. Verifies the
     // scan covers the WHOLE deque, not just the head.
-    let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(&mut pending, Err);
+    let (dropped, dropped_bytes) =
+        partition_cos_bound_local_with_rescue(&mut pending, |req| req.cos_queue_id.is_some(), Err);
     assert_eq!(
         dropped, 2,
         "both cos-bound items must be dropped (scan covers tail)"
@@ -99,13 +100,54 @@ fn partition_cos_bound_local_rescues_when_try_rescue_ok() {
     };
     let mut pending: VecDeque<TxRequest> = VecDeque::from([non_cos, cos_bound]);
     // Rescue always succeeds — CoS items must NOT count as drops.
-    let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(&mut pending, |_| Ok(()));
+    let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(
+        &mut pending,
+        |req| req.cos_queue_id.is_some(),
+        |_| Ok(()),
+    );
     assert_eq!(dropped, 0);
     assert_eq!(dropped_bytes, 0);
     // Survivor set: only the non-CoS item (rescued CoS item
     // was consumed by try_rescue closure).
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].bytes[0], 0xAA);
+}
+
+#[test]
+fn partition_cos_bound_local_treats_default_queue_on_cos_interface_as_bound() {
+    let mut pending: VecDeque<TxRequest> = VecDeque::from([
+        TxRequest {
+            bytes: vec![0x11; 64],
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex: 14,
+            cos_queue_id: None,
+            dscp_rewrite: None,
+        },
+        TxRequest {
+            bytes: vec![0x22; 64],
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex: 99,
+            cos_queue_id: None,
+            dscp_rewrite: None,
+        },
+    ]);
+
+    let (dropped, dropped_bytes) = partition_cos_bound_local_with_rescue(
+        &mut pending,
+        |req| req.egress_ifindex == 14 || req.cos_queue_id.is_some(),
+        Err,
+    );
+
+    assert_eq!(dropped, 1);
+    assert_eq!(dropped_bytes, 64);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].egress_ifindex, 99);
 }
 
 #[test]

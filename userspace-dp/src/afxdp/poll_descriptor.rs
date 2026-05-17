@@ -261,6 +261,12 @@ pub(super) fn poll_binding_process_descriptor(
                                     if is_self_target && owned_packet_frame.is_none() {
                                         let ingress_slot = binding.slot;
                                         let flow_key = flow.forward_key.clone();
+                                        let mirror_frame = resolve_mirror_config(
+                                            worker_ctx.forwarding,
+                                            meta.ingress_ifindex as i32,
+                                            meta.ingress_vlan_id,
+                                        )
+                                        .map(|_| packet_frame.to_vec());
                                         // Try descriptor-based straight-line rewrite first (no branches
                                         // for AF, NAT type, or checksum recomputation).  Falls back to
                                         // generic rewrite on port mismatch, NAT64, or NPTv6.
@@ -282,6 +288,20 @@ pub(super) fn poll_binding_process_descriptor(
                                             )
                                         });
                                         if let Some(rewrite_result) = rewrite_result {
+                                            if let Some(mirror_frame) = mirror_frame.as_ref() {
+                                                enqueue_sampled_mirror_clone_to_live(
+                                                    &binding.live,
+                                                    worker_ctx.mirror_targets,
+                                                    worker_ctx.forwarding,
+                                                    meta.ingress_ifindex as i32,
+                                                    meta.ingress_vlan_id,
+                                                    worker_ctx.ident.queue_id,
+                                                    &mut binding.mirror_sample_counter,
+                                                    mirror_frame,
+                                                    meta.into(),
+                                                    Some(&flow.forward_key),
+                                                );
+                                            }
                                             binding.tx_pipeline.pending_tx_prepared.push_back(
                                                 PreparedTxRequest {
                                                     offset: rewrite_result.offset,
