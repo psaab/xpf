@@ -550,7 +550,10 @@ fn extract_screen_info_ipv4_first_fragment() {
         14,
     );
     assert!(info.is_fragment, "MF=1 → is_fragment");
-    assert!(info.is_first_fragment, "MF=1 && offset==0 → is_first_fragment");
+    assert!(
+        info.is_first_fragment,
+        "MF=1 && offset==0 → is_first_fragment"
+    );
 }
 
 #[test]
@@ -903,6 +906,172 @@ fn syn_flood_disabled_passes() {
     for _ in 0..1000 {
         assert_eq!(state.check_packet("trust", &pkt, 100), ScreenVerdict::Pass);
     }
+}
+
+// ================================================================
+// SYN cookie core (#1374)
+// ================================================================
+
+fn syn_cookie_codec() -> SynCookieCodec {
+    SynCookieCodec::new([
+        0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe,
+        0x0f,
+    ])
+}
+
+fn syn_cookie_tuple() -> SynCookieTuple {
+    SynCookieTuple {
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        src_port: 49152,
+        dst_port: 443,
+    }
+}
+
+#[test]
+fn syn_cookie_tuple_from_packet_matches_packet_flow() {
+    let pkt = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(SynCookieTuple::from_packet(&pkt), syn_cookie_tuple());
+}
+
+#[test]
+fn syn_cookie_mint_validate_roundtrip() {
+    let codec = syn_cookie_codec();
+    let tuple = syn_cookie_tuple();
+    let cookie = codec.mint_isn(tuple, 7, 42, 1460);
+    let validation = codec
+        .validate_isn(tuple, 7, 42, cookie)
+        .expect("fresh cookie should validate");
+
+    assert_eq!(validation.full_epoch, 42);
+    assert_eq!(validation.mss_index, 6);
+    assert_eq!(validation.mss, 1460);
+    assert_eq!(
+        (cookie >> SYN_COOKIE_EPOCH_SHIFT) & SYN_COOKIE_EPOCH_MASK,
+        10
+    );
+}
+
+#[test]
+fn syn_cookie_validate_rejects_modified_tuple() {
+    let codec = syn_cookie_codec();
+    let tuple = syn_cookie_tuple();
+    let cookie = codec.mint_isn(tuple, 7, 42, 1460);
+
+    let mut mutated = tuple;
+    mutated.src_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+    assert!(codec.validate_isn(mutated, 7, 42, cookie).is_none());
+
+    mutated = tuple;
+    mutated.dst_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 21));
+    assert!(codec.validate_isn(mutated, 7, 42, cookie).is_none());
+
+    mutated = tuple;
+    mutated.src_port += 1;
+    assert!(codec.validate_isn(mutated, 7, 42, cookie).is_none());
+
+    mutated = tuple;
+    mutated.dst_port += 1;
+    assert!(codec.validate_isn(mutated, 7, 42, cookie).is_none());
+
+    assert!(codec.validate_isn(tuple, 8, 42, cookie).is_none());
+}
+
+#[test]
+fn syn_cookie_validate_rejects_stale_secret() {
+    let codec = syn_cookie_codec();
+    let stale_codec = SynCookieCodec::new([
+        0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+        0x00,
+    ]);
+    let tuple = syn_cookie_tuple();
+    let cookie = codec.mint_isn(tuple, 7, 42, 1460);
+
+    assert!(stale_codec.validate_isn(tuple, 7, 42, cookie).is_none());
+}
+
+#[test]
+fn syn_cookie_mss_index_encoding_parity() {
+    let codec = syn_cookie_codec();
+    let tuple = syn_cookie_tuple();
+
+    for (idx, mss) in SYN_COOKIE_MSS_VALUES.iter().copied().enumerate() {
+        assert_eq!(SynCookieCodec::mss_index(mss), idx as u8);
+        let cookie = codec.mint_isn(tuple, 7, 42, mss);
+        assert_eq!(
+            (cookie >> SYN_COOKIE_MSS_SHIFT) & SYN_COOKIE_MSS_MASK,
+            idx as u32
+        );
+        assert_eq!(codec.validate_isn(tuple, 7, 42, cookie).unwrap().mss, mss);
+    }
+
+    assert_eq!(SynCookieCodec::mss_index(535), 0);
+    assert_eq!(SynCookieCodec::mss_index(1459), 5);
+    assert_eq!(SynCookieCodec::mss_index(9000), 7);
+
+    let cookie = codec.mint_isn(tuple, 7, 42, 1460);
+    let tampered_mss =
+        (cookie & !(SYN_COOKIE_MSS_MASK << SYN_COOKIE_MSS_SHIFT)) | (5 << SYN_COOKIE_MSS_SHIFT);
+    assert!(codec.validate_isn(tuple, 7, 42, tampered_mss).is_none());
+}
+
+#[test]
+fn syn_cookie_ntp_rollback_monotonic_epoch() {
+    assert_eq!(SynCookieCodec::full_epoch_from_monotonic_secs(0), 0);
+    assert_eq!(SynCookieCodec::full_epoch_from_monotonic_secs(63), 0);
+    assert_eq!(SynCookieCodec::full_epoch_from_monotonic_secs(64), 1);
+    assert_eq!(
+        SynCookieCodec::full_epoch_from_monotonic_secs(64 * 33 + 9),
+        33
+    );
+}
+
+#[test]
+fn syn_cookie_epoch_low_bits_wrap_rejects_32_epoch_old_cookie() {
+    let codec = syn_cookie_codec();
+    let tuple = syn_cookie_tuple();
+    let old_epoch = 10;
+    let current_epoch = old_epoch + 32;
+    let cookie = codec.mint_isn(tuple, 7, old_epoch, 1460);
+
+    assert_eq!(old_epoch & 0x1f, current_epoch & 0x1f);
+    assert!(
+        codec
+            .validate_isn(tuple, 7, current_epoch, cookie)
+            .is_none()
+    );
+}
+
+#[test]
+fn syn_cookie_validation_tries_current_and_previous_full_epoch() {
+    let codec = syn_cookie_codec();
+    let tuple = syn_cookie_tuple();
+    let current_cookie = codec.mint_isn(tuple, 7, 42, 1460);
+    let previous_cookie = codec.mint_isn(tuple, 7, 41, 1460);
+    let older_cookie = codec.mint_isn(tuple, 7, 40, 1460);
+
+    assert_eq!(
+        codec
+            .validate_isn(tuple, 7, 42, current_cookie)
+            .expect("current epoch")
+            .full_epoch,
+        42
+    );
+    assert_eq!(
+        codec
+            .validate_isn(tuple, 7, 42, previous_cookie)
+            .expect("previous epoch")
+            .full_epoch,
+        41
+    );
+    assert!(codec.validate_isn(tuple, 7, 42, older_cookie).is_none());
 }
 
 // ================================================================
