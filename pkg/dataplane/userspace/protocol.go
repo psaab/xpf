@@ -831,6 +831,9 @@ type BindingStatus struct {
 	TXBytes                           uint64 `json:"tx_bytes,omitempty"`
 	TXErrors                          uint64 `json:"tx_errors,omitempty"`
 	TXSharedRecycleUnknownSlotDrops   uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
+	RedirectInboxOverflowDrops        uint64 `json:"redirect_inbox_overflow_drops,omitempty"`
+	PendingTXLocalOverflowDrops       uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
+	TxSubmitErrorDrops                uint64 `json:"tx_submit_error_drops,omitempty"`
 	TXCompletions                     uint64 `json:"tx_completions,omitempty"`
 	DirectTXPackets                   uint64 `json:"direct_tx_packets,omitempty"`
 	CopyTXPackets                     uint64 `json:"copy_tx_packets,omitempty"`
