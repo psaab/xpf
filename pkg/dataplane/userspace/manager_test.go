@@ -85,6 +85,71 @@ func TestReadPolicyCountersUsesHelperPolicyRuleCounters(t *testing.T) {
 	}
 }
 
+func TestReadPolicyCountersPreservesScheduledRuleCountersAcrossDeleteReadd(t *testing.T) {
+	cfgWithRule := &config.Config{
+		Schedulers: map[string]*config.SchedulerConfig{
+			"workhours": {Name: "workhours"},
+		},
+		Security: config.SecurityConfig{
+			Policies: []*config.ZonePairPolicies{{
+				FromZone: "lan",
+				ToZone:   "wan",
+				Policies: []*config.Policy{{
+					Name:          "scheduled-allow",
+					SchedulerName: "workhours",
+					Count:         true,
+				}},
+			}},
+		},
+	}
+	cfgWithoutRule := &config.Config{
+		Schedulers: cfgWithRule.Schedulers,
+		Security: config.SecurityConfig{
+			Policies: []*config.ZonePairPolicies{{
+				FromZone: "lan",
+				ToZone:   "wan",
+			}},
+		},
+	}
+
+	m := New()
+	m.inner = nil
+	m.lastStatus = ProcessStatus{
+		PolicyRuleCounters: []PolicyRuleCounterStatus{{
+			RuleID:  stablePolicyRuleID("lan", "wan", "scheduled-allow"),
+			Packets: 11,
+			Bytes:   1100,
+		}},
+	}
+
+	m.lastSnapshot = &ConfigSnapshot{Config: cfgWithRule}
+	got, err := m.ReadPolicyCounters(0)
+	if err != nil {
+		t.Fatalf("ReadPolicyCounters before delete: %v", err)
+	}
+	if got != (dataplane.CounterValue{Packets: 11, Bytes: 1100}) {
+		t.Fatalf("counter before delete = %+v, want packets=11 bytes=1100", got)
+	}
+
+	m.lastSnapshot = &ConfigSnapshot{Config: cfgWithoutRule}
+	got, err = m.ReadPolicyCounters(0)
+	if err != nil {
+		t.Fatalf("ReadPolicyCounters after delete: %v", err)
+	}
+	if got != (dataplane.CounterValue{}) {
+		t.Fatalf("counter after delete = %+v, want zero for absent rule", got)
+	}
+
+	m.lastSnapshot = &ConfigSnapshot{Config: cfgWithRule}
+	got, err = m.ReadPolicyCounters(0)
+	if err != nil {
+		t.Fatalf("ReadPolicyCounters after re-add: %v", err)
+	}
+	if got != (dataplane.CounterValue{Packets: 11, Bytes: 1100}) {
+		t.Fatalf("counter after re-add = %+v, want packets=11 bytes=1100", got)
+	}
+}
+
 func TestClearPolicyCountersZerosCachedHelperCountersWithoutHelper(t *testing.T) {
 	m := New()
 	m.inner = nil
