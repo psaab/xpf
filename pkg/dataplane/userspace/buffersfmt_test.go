@@ -215,3 +215,34 @@ func TestFormatSystemBuffersIncludesCoSAndRuntimePressure(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatSystemBuffersCoSAggregateSumsCapacityWithUsage(t *testing.T) {
+	status := ProcessStatus{
+		CoSInterfaces: []CoSInterfaceStatus{
+			{
+				Ifindex:       80,
+				InterfaceName: "reth0.80",
+				Queues: []CoSQueueStatus{
+					{QueueID: 4, ForwardingClass: "iperf-a", BufferBytes: 1000, QueuedBytes: 700},
+					{QueueID: 5, ForwardingClass: "iperf-b", BufferBytes: 1000, QueuedBytes: 100},
+				},
+			},
+		},
+	}
+
+	out := FormatSystemBuffers(status, false)
+	for _, want := range []string{
+		"CoS queue bytes",
+		"aggregate/2",
+		"2000",
+		"800",
+		"40.0% OK",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("FormatSystemBuffers output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "80.0%") {
+		t.Fatalf("CoS aggregate used max capacity instead of summed capacity:\n%s", out)
+	}
+}
