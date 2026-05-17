@@ -64,6 +64,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return nil, err
 	}
 	m.lastCompile = result
+	m.recordApplyResult(dataplane.ApplyResultFromCompileResult(result))
 	return result, nil
 }
 
@@ -309,13 +310,13 @@ func (m *Manager) SeedNATPortCounters()                             {}
 func (m *Manager) SeedSessionIDCounter(_ int)                       {}
 
 func (m *Manager) IncrementGlobalCounter(_ uint32, _ uint64) error { return nil }
-func (m *Manager) ClearGlobalCounters() error                     { return nil }
-func (m *Manager) ClearInterfaceCounters() error { return nil }
-func (m *Manager) ClearZoneCounters() error      { return nil }
-func (m *Manager) ClearPolicyCounters() error    { return nil }
-func (m *Manager) ClearFilterCounters() error    { return nil }
-func (m *Manager) ClearAllCounters() error       { return nil }
-func (m *Manager) ClearNATRuleCounters() error   { return nil }
+func (m *Manager) ClearGlobalCounters() error                      { return nil }
+func (m *Manager) ClearInterfaceCounters() error                   { return nil }
+func (m *Manager) ClearZoneCounters() error                        { return nil }
+func (m *Manager) ClearPolicyCounters() error                      { return nil }
+func (m *Manager) ClearFilterCounters() error                      { return nil }
+func (m *Manager) ClearAllCounters() error                         { return nil }
+func (m *Manager) ClearNATRuleCounters() error                     { return nil }
 
 // --- Events ---
 
@@ -324,7 +325,7 @@ func (m *Manager) NewEventSource() (dataplane.EventSource, error) { return nil, 
 // --- FIB ---
 
 func (m *Manager) StartFIBSync(_ context.Context) {}
-func (m *Manager) BumpFIBGeneration() uint32       { return 0 }
+func (m *Manager) BumpFIBGeneration() uint32      { return 0 }
 func (m *Manager) NotifyLinkCycle()               {}
 func (m *Manager) SyncFabricState()               {}
 

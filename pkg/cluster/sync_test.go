@@ -5,8 +5,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -537,6 +541,8 @@ type mockSweepDP struct {
 	v4sessions     map[dataplane.SessionKey]dataplane.SessionValue
 	v6sessions     map[dataplane.SessionKeyV6]dataplane.SessionValueV6
 	sessionCounter uint64
+	deletedDNATV4  []dataplane.DNATKey
+	deletedDNATV6  []dataplane.DNATKeyV6
 }
 
 func (m *mockSweepDP) ReadGlobalCounter(index uint32) (uint64, error) {
@@ -610,10 +616,12 @@ func (m *mockSweepDP) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 }
 
 func (m *mockSweepDP) DeleteDNATEntry(key dataplane.DNATKey) error {
+	m.deletedDNATV4 = append(m.deletedDNATV4, key)
 	return nil
 }
 
 func (m *mockSweepDP) DeleteDNATEntryV6(key dataplane.DNATKeyV6) error {
+	m.deletedDNATV6 = append(m.deletedDNATV6, key)
 	return nil
 }
 
@@ -1454,6 +1462,125 @@ func TestReconcileStaleSessionsV6(t *testing.T) {
 	if _, ok := dp.v6sessions[staleKey]; ok {
 		t.Fatal("staleKey should be deleted")
 	}
+}
+
+func TestReconcileStaleSessionsUsesSessionStoreCompanionDeleteV4(t *testing.T) {
+	freshKey := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 3, 1}, DstIP: [4]byte{10, 0, 4, 1}, Protocol: 6, SrcPort: 1000, DstPort: 80}
+	staleKey := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 3, 2}, DstIP: [4]byte{10, 0, 4, 2}, Protocol: 6, SrcPort: 2000, DstPort: 443}
+	reverseKey := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 4, 2}, DstIP: [4]byte{10, 0, 3, 2}, Protocol: 6, SrcPort: 443, DstPort: 2000}
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			freshKey: {IsReverse: 0, IngressZone: 2},
+			staleKey: {
+				IsReverse:   0,
+				IngressZone: 2,
+				ReverseKey:  reverseKey,
+				Flags:       dataplane.SessFlagSNAT,
+				NATSrcIP:    0x2c0200c0,
+				NATSrcPort:  40443,
+			},
+			reverseKey: {IsReverse: 1, IngressZone: 2},
+		},
+	}
+
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.IsPrimaryFn = func() bool { return false }
+	ss.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 1 }
+	ss.SetZoneRGMap(map[uint16]int{1: 1, 2: 2})
+
+	ss.handleMessage(nil, syncMsgBulkStart, nil)
+	ss.handleMessage(nil, syncMsgSessionV4, encodeSessionV4Payload(freshKey, dataplane.SessionValue{IsReverse: 0, IngressZone: 2}))
+	ss.handleMessage(nil, syncMsgBulkEnd, nil)
+
+	if _, ok := dp.v4sessions[staleKey]; ok {
+		t.Fatal("stale forward session should be deleted")
+	}
+	if _, ok := dp.v4sessions[reverseKey]; ok {
+		t.Fatal("stale reverse session should be deleted")
+	}
+	wantDNAT := dataplane.DNATKey{Protocol: 6, DstIP: 0x2c0200c0, DstPort: 40443}
+	if len(dp.deletedDNATV4) != 1 || dp.deletedDNATV4[0] != wantDNAT {
+		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNATV4, wantDNAT)
+	}
+}
+
+func TestReconcileStaleSessionsUsesSessionStoreCompanionDeleteV6(t *testing.T) {
+	freshKey := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 1000, DstPort: 80}
+	freshKey.SrcIP[15] = 1
+	freshKey.DstIP[15] = 2
+	staleKey := dataplane.SessionKeyV6{Protocol: 17, SrcPort: 2000, DstPort: 53}
+	staleKey.SrcIP[15] = 3
+	staleKey.DstIP[15] = 4
+	reverseKey := dataplane.SessionKeyV6{Protocol: 17, SrcPort: 53, DstPort: 2000}
+	reverseKey.SrcIP[15] = 4
+	reverseKey.DstIP[15] = 3
+	natIP := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99}
+	dp := &mockSweepDP{
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			freshKey: {IsReverse: 0, IngressZone: 2},
+			staleKey: {
+				IsReverse:   0,
+				IngressZone: 2,
+				ReverseKey:  reverseKey,
+				Flags:       dataplane.SessFlagSNAT,
+				NATSrcIP:    natIP,
+				NATSrcPort:  53000,
+			},
+			reverseKey: {IsReverse: 1, IngressZone: 2},
+		},
+	}
+
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.IsPrimaryFn = func() bool { return false }
+	ss.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 1 }
+	ss.SetZoneRGMap(map[uint16]int{1: 1, 2: 2})
+
+	ss.handleMessage(nil, syncMsgBulkStart, nil)
+	ss.handleMessage(nil, syncMsgSessionV6, encodeSessionV6Payload(freshKey, dataplane.SessionValueV6{IsReverse: 0, IngressZone: 2}))
+	ss.handleMessage(nil, syncMsgBulkEnd, nil)
+
+	if _, ok := dp.v6sessions[staleKey]; ok {
+		t.Fatal("stale forward session should be deleted")
+	}
+	if _, ok := dp.v6sessions[reverseKey]; ok {
+		t.Fatal("stale reverse session should be deleted")
+	}
+	wantDNAT := dataplane.DNATKeyV6{Protocol: 17, DstIP: natIP, DstPort: 53000}
+	if len(dp.deletedDNATV6) != 1 || dp.deletedDNATV6[0] != wantDNAT {
+		t.Fatalf("deleted DNATv6 = %+v, want [%+v]", dp.deletedDNATV6, wantDNAT)
+	}
+}
+
+func TestReconcileStaleSessionsHasNoLocalDNATCleanup(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(".", "sync.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse sync.go: %v", err)
+	}
+	var reconcile ast.Node
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "reconcileStaleSessions" {
+			reconcile = fn.Body
+			break
+		}
+	}
+	if reconcile == nil {
+		t.Fatal("reconcileStaleSessions not found")
+	}
+	ast.Inspect(reconcile, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "DeleteDNATEntry", "DeleteDNATEntryV6":
+			t.Fatalf("reconcileStaleSessions still owns local %s cleanup; use SessionStore companion delete", sel.Sel.Name)
+		}
+		return true
+	})
 }
 
 func TestReconcileNoBulkInProgress(t *testing.T) {

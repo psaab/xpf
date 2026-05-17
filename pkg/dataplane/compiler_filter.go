@@ -95,6 +95,7 @@ func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileRes
 	filterID := uint32(0)
 	ruleIdx := uint32(0)
 	filterIDs := make(map[string]uint32) // "inet:name" or "inet6:name" -> filter_id
+	filterSpans := make(map[string]FilterCounterSpan)
 
 	// Compile inet filters (sorted for deterministic IDs)
 	inetNames := make([]string, 0, len(cfg.Firewall.FiltersInet))
@@ -133,7 +134,13 @@ func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileRes
 		if err := dp.SetFilterConfig(filterID, fcfg); err != nil {
 			return fmt.Errorf("set filter config %s: %w", name, err)
 		}
-		filterIDs["inet:"+name] = filterID
+		filterKey := "inet:" + name
+		filterIDs[filterKey] = filterID
+		filterSpans[filterKey] = FilterCounterSpan{
+			FilterID:  filterID,
+			RuleStart: startIdx,
+			RuleCount: numRules,
+		}
 		slog.Info("compiled firewall filter",
 			"name", name, "family", "inet", "terms", len(filter.Terms),
 			"rules", numRules, "filter_id", filterID)
@@ -177,7 +184,13 @@ func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileRes
 		if err := dp.SetFilterConfig(filterID, fcfg); err != nil {
 			return fmt.Errorf("set filter config %s: %w", name, err)
 		}
-		filterIDs["inet6:"+name] = filterID
+		filterKey := "inet6:" + name
+		filterIDs[filterKey] = filterID
+		filterSpans[filterKey] = FilterCounterSpan{
+			FilterID:  filterID,
+			RuleStart: startIdx,
+			RuleCount: numRules,
+		}
 		slog.Info("compiled firewall filter",
 			"name", name, "family", "inet6", "terms", len(filter.Terms),
 			"rules", numRules, "filter_id", filterID)
@@ -323,6 +336,7 @@ func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileRes
 	dp.ZeroStaleFilterConfigs(filterID)
 
 	result.FilterIDs = filterIDs
+	result.FilterSpans = filterSpans
 
 	// Resolve lo0 filter IDs for host-bound traffic filtering
 	if cfg.System.Lo0FilterInputV4 != "" {
