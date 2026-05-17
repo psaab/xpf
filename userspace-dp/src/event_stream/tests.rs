@@ -115,6 +115,7 @@ fn test_channel_backpressure() {
 
     // Third send should fail (channel full)
     assert!(!handle.try_send(frame));
+    assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 2);
     assert_eq!(shared.frames_dropped.load(Ordering::Relaxed), 1);
 }
 
@@ -171,6 +172,7 @@ fn test_lossless_send_waits_for_capacity() {
     hold_tx.send(()).expect("release consumer thread");
     sender_join.join().expect("sender thread");
     consumer_join.join().expect("consumer thread");
+    assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 2);
     assert_eq!(shared.frames_dropped.load(Ordering::Relaxed), 0);
 }
 
