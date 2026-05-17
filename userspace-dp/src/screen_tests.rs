@@ -1357,6 +1357,15 @@ fn syn_cookie_validated_cache_is_bounded() {
     assert!(cache.take_valid(7, evicted, 100));
 }
 
+#[test]
+fn syn_cookie_validated_cache_refresh_extends_ttl() {
+    let mut cache = SynCookieValidatedCache::new(4, 10);
+    let tuple = syn_cookie_tuple();
+    cache.insert(7, tuple, 100);
+    cache.insert(7, tuple, 109);
+    assert!(cache.take_valid(7, tuple, 110));
+}
+
 // ================================================================
 // Profile update
 // ================================================================

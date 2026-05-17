@@ -601,8 +601,11 @@ impl SynCookieValidatedCache {
         }
         self.cleanup_expired(now_secs);
         let key = SynCookieValidatedKey { zone_id, tuple };
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
-            entry.expires_secs = now_secs.saturating_add(self.ttl_secs);
+        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+            if let Some(mut entry) = self.entries.remove(index) {
+                entry.expires_secs = now_secs.saturating_add(self.ttl_secs);
+                self.entries.push_back(entry);
+            }
             return;
         }
         while self.entries.len() >= self.capacity {
@@ -625,7 +628,9 @@ impl SynCookieValidatedCache {
     }
 
     fn cleanup_expired(&mut self, now_secs: u64) {
-        self.entries.retain(|entry| entry.expires_secs > now_secs);
+        while matches!(self.entries.front(), Some(entry) if entry.expires_secs <= now_secs) {
+            self.entries.pop_front();
+        }
     }
 
     #[cfg(test)]
