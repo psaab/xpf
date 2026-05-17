@@ -37,7 +37,7 @@ Pre-commit validation checklist. Check the boxes that apply to your change.
 
 ## If You Changed Cluster / VRRP / Session Sync
 
-- [ ] `make cluster-deploy` — deploy to eBPF cluster
+- [ ] `make cluster-deploy` — deploy to canonical loss userspace cluster
 - [ ] `make test-failover` — **MANDATORY** per CLAUDE.md
 - [ ] `make test-ha-crash` — crash recovery works
 - [ ] Session sync: `show security flow session` on secondary shows synced sessions

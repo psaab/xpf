@@ -11,6 +11,7 @@
 # Parameterized via env file — set BPFRX_CLUSTER_ENV to source custom
 # settings (remote host, SR-IOV parents, VF indices, network names, etc.).
 # Without an env file, defaults match the original local cluster.
+# The Makefile cluster-* aliases pass loss-userspace-cluster.env by default.
 #
 # Usage:
 #   ./test/incus/cluster-setup.sh init              # Create networks + profile

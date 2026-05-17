@@ -5,8 +5,8 @@
 # connectivity loss. This tests the fix for #75 — neighbor prewarm
 # must run after VRRP MASTER (not before VIPs are installed).
 #
-# Requires: xpf-fw0, xpf-fw1, cluster-lan-host running.
-# Requires: iperf3 server reachable at IPERF_TARGET (default 172.16.100.200).
+# Requires: cluster nodes from BPFRX_CLUSTER_ENV running (default: loss userspace cluster).
+# Requires: iperf3 server reachable at IPERF_TARGET (default from IPERF_TARGET4).
 #
 # Tests:
 #   1. Verify baseline connectivity from cluster-lan-host → IPERF_TARGET
@@ -27,7 +27,11 @@ if ! incus list &>/dev/null 2>&1; then
 	fi
 fi
 
-IPERF_TARGET="${IPERF_TARGET:-172.16.100.200}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
+IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 RESTART_CYCLES="${RESTART_CYCLES:-3}"
 MAX_LOST_PINGS="${MAX_LOST_PINGS:-2}"       # allow 1-2 for VRRP transition
 PING_COUNT=40                                # pings per cycle (0.5s interval = 20s)
@@ -53,7 +57,7 @@ instance_running() {
 
 fw0_is_primary() {
 	local status
-	status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 	for rg in 0 1 2; do
 		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node0.*primary"; then
 			return 1
@@ -68,12 +72,12 @@ restore_fw0_primary() {
 		return 0
 	fi
 	for rg in 0 1 2; do
-		incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 	done
 	sleep 1
 	for rg in 0 1 2; do
-		incus exec xpf-fw1 -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
 	done
 	sleep 5
 	if fw0_is_primary; then
@@ -86,14 +90,14 @@ restore_fw0_primary() {
 }
 
 cleanup() {
-	incus exec cluster-lan-host -- pkill -9 ping 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- pkill -9 ping 2>/dev/null || true
 	# Ensure fw0 xpfd is running
-	incus exec xpf-fw0 -- systemctl start xpfd 2>/dev/null || true
+	incus exec "$FW0" -- systemctl start xpfd 2>/dev/null || true
 	sleep 5
 	# Reset failover flags
 	for rg in 0 1 2; do
-		incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 	done
 }
 
@@ -103,11 +107,11 @@ trap cleanup EXIT
 
 info "Preflight checks"
 
-for inst in xpf-fw0 xpf-fw1 cluster-lan-host; do
+for inst in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
 	instance_running "$inst" || die "$inst is not running"
 done
 
-for inst in xpf-fw0 xpf-fw1; do
+for inst in "$FW0" "$FW1"; do
 	if ! incus exec "$inst" -- systemctl is-active --quiet xpfd 2>/dev/null; then
 		die "xpfd not active on $inst"
 	fi
@@ -122,11 +126,11 @@ else
 fi
 
 # Pre-warm ARP
-incus exec xpf-fw0 -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null || true
+incus exec "$FW0" -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null || true
 sleep 1
 
 # Verify baseline connectivity
-if incus exec cluster-lan-host -- ping -c 3 -W 2 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 2 "$IPERF_TARGET" &>/dev/null; then
 	pass "baseline connectivity OK ($IPERF_TARGET)"
 else
 	die "no baseline connectivity to $IPERF_TARGET from cluster-lan-host"
@@ -140,24 +144,24 @@ for cycle in $(seq 1 "$RESTART_CYCLES"); do
 	info "Cycle ${cycle}/${RESTART_CYCLES}: restart xpfd on fw0 while pinging"
 
 	# Clear stale sessions
-	incus exec xpf-fw0 -- cli -c "clear security flow session all" 2>/dev/null || true
+	incus exec "$FW0" -- cli -c "clear security flow session all" 2>/dev/null || true
 	sleep 1
 
 	# Start continuous ping in background on lan-host
-	incus exec cluster-lan-host -- bash -c \
+	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 		"ping -c ${PING_COUNT} -i ${PING_INTERVAL} ${IPERF_TARGET} > ${PING_LOG} 2>&1 &"
 
 	# Wait for a few pings to succeed before restart (3s)
 	sleep 3
 
 	# Restart xpfd on fw0
-	incus exec xpf-fw0 -- systemctl restart xpfd 2>/dev/null || true
+	incus exec "$FW0" -- systemctl restart xpfd 2>/dev/null || true
 
 	# Wait for ping to finish (~22s total ping time minus 3s pre-restart + 5s buffer)
 	sleep 22
 
 	# Parse ping results
-	ping_output=$(incus exec cluster-lan-host -- cat "$PING_LOG" 2>/dev/null || true)
+	ping_output=$(incus exec "$CLUSTER_LAN_HOST" -- cat "$PING_LOG" 2>/dev/null || true)
 	transmitted=$(echo "$ping_output" | grep -oP '\d+ packets transmitted' | grep -oP '^\d+' || echo "0")
 	received=$(echo "$ping_output" | grep -oP '\d+ received' | grep -oP '^\d+' || echo "0")
 	lost=$((transmitted - received))
@@ -180,7 +184,7 @@ for cycle in $(seq 1 "$RESTART_CYCLES"); do
 	fi
 
 	# Pre-warm ARP for next cycle
-	incus exec xpf-fw0 -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null || true
+	incus exec "$FW0" -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null || true
 	sleep 1
 done
 
@@ -188,7 +192,7 @@ done
 
 info "Final health checks"
 
-for inst in xpf-fw0 xpf-fw1; do
+for inst in "$FW0" "$FW1"; do
 	if incus exec "$inst" -- systemctl is-active --quiet xpfd 2>/dev/null; then
 		pass "final: xpfd active on $inst"
 	else
@@ -196,7 +200,7 @@ for inst in xpf-fw0 xpf-fw1; do
 	fi
 done
 
-if incus exec cluster-lan-host -- ping -c 3 -W 2 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 2 "$IPERF_TARGET" &>/dev/null; then
 	pass "final: connectivity OK"
 else
 	fail "final: connectivity lost"

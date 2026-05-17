@@ -4,8 +4,8 @@
 # Validates that the cluster recovers from hard VM crashes and daemon
 # failures — scenarios not covered by the clean-reboot failover test.
 #
-# Requires: xpf-fw0, xpf-fw1, cluster-lan-host running.
-# Requires: iperf3 server reachable at IPERF_TARGET (default 172.16.100.200).
+# Requires: cluster nodes from BPFRX_CLUSTER_ENV running (default: loss userspace cluster).
+# Requires: iperf3 server reachable at IPERF_TARGET (default from IPERF_TARGET4).
 #
 # Tests:
 #   Phase 1: Hard VM stop (incus stop --force) — simulates kernel panic / power loss
@@ -40,7 +40,11 @@ if ! incus list &>/dev/null 2>&1; then
 	fi
 fi
 
-IPERF_TARGET="${IPERF_TARGET:-172.16.100.200}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
+IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 IPERF_STREAMS=4
 CRASH_CYCLES="${CRASH_CYCLES:-3}"          # multi-cycle crash iterations
 TAKEOVER_TIMEOUT=5                          # max seconds for fw1 to take over
@@ -79,7 +83,7 @@ wait_for_xpfd() {
 # Check that fw1 is primary for all RGs (takeover detection)
 fw1_is_primary() {
 	local status
-	status=$(incus exec xpf-fw1 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 	for rg in 0 1 2; do
 		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node1.*primary"; then
 			return 1
@@ -91,7 +95,7 @@ fw1_is_primary() {
 # Check that fw0 is primary for all RGs
 fw0_is_primary() {
 	local status
-	status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 	for rg in 0 1 2; do
 		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node0.*primary"; then
 			return 1
@@ -117,8 +121,8 @@ wait_for_takeover() {
 check_no_dual_active() {
 	local label="$1"
 	local fw0_status fw1_status
-	fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	fw1_status=$(incus exec xpf-fw1 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 
 	local dual_active=false
 	for rg in 0 1 2; do
@@ -139,7 +143,7 @@ check_no_dual_active() {
 test_new_tcp() {
 	local label="$1" max="$2"
 	for i in $(seq 1 "$max"); do
-		if incus exec cluster-lan-host -- bash -c \
+		if incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 			"timeout 3 bash -c 'echo > /dev/tcp/${IPERF_TARGET}/5201'" 2>/dev/null; then
 			pass "$label: new TCP connection succeeded (${i}s)"
 			return 0
@@ -160,13 +164,13 @@ restore_fw0_primary() {
 	fi
 	# Reset manual failover flags
 	for rg in 0 1 2; do
-		incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 	done
 	sleep 1
 	# Manual failover all RGs to fw0 (from fw1 which is current primary)
 	for rg in 0 1 2; do
-		incus exec xpf-fw1 -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
 	done
 	sleep 5
 	if fw0_is_primary; then
@@ -180,22 +184,22 @@ restore_fw0_primary() {
 
 cleanup() {
 	info "Cleanup: killing iperf3, resetting cluster state"
-	incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 	# Ensure fw0 is running
-	if ! instance_running xpf-fw0; then
-		incus start xpf-fw0 2>/dev/null || true
-		wait_for_xpfd xpf-fw0 "$VM_RESTART_WAIT" >/dev/null 2>&1 || true
+	if ! instance_running "$FW0"; then
+		incus start "$FW0" 2>/dev/null || true
+		wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" >/dev/null 2>&1 || true
 	fi
 	# Ensure xpfd is running on fw0
-	incus exec xpf-fw0 -- systemctl start xpfd 2>/dev/null || true
+	incus exec "$FW0" -- systemctl start xpfd 2>/dev/null || true
 	sleep 5
 	# Clear stale sessions
-	incus exec xpf-fw0 -- cli -c "clear security flow session all" 2>/dev/null || true
-	incus exec xpf-fw1 -- cli -c "clear security flow session all" 2>/dev/null || true
+	incus exec "$FW0" -- cli -c "clear security flow session all" 2>/dev/null || true
+	incus exec "$FW1" -- cli -c "clear security flow session all" 2>/dev/null || true
 	# Reset failover flags
 	for rg in 0 1 2; do
-		incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 	done
 }
 
@@ -205,14 +209,14 @@ trap cleanup EXIT
 
 info "Preflight checks"
 
-for inst in xpf-fw0 xpf-fw1 cluster-lan-host; do
+for inst in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
 	instance_running "$inst" || die "$inst is not running"
 done
 
 # Reset any stale manual failover flags
 for rg in 0 1 2; do
-	incus exec xpf-fw0 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-	incus exec xpf-fw1 -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 done
 sleep 2
 
@@ -231,21 +235,21 @@ else
 fi
 
 # Kill any stale iperf3 and clear stale sessions from previous test runs
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
-incus exec xpf-fw0 -- cli -c "clear security flow session all" 2>/dev/null || true
-incus exec xpf-fw1 -- cli -c "clear security flow session all" 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$FW0" -- cli -c "clear security flow session all" 2>/dev/null || true
+incus exec "$FW1" -- cli -c "clear security flow session all" 2>/dev/null || true
 sleep 3
 
 # Pre-warm ARP on the primary firewall — bpf_fib_lookup returns NO_NEIGH
 # if no ARP entry exists, causing the first through-traffic packet to be slow
-incus exec xpf-fw0 -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null || true
-incus exec xpf-fw1 -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null || true
+incus exec "$FW0" -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null || true
+incus exec "$FW1" -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null || true
 sleep 1
 
 # Verify iperf target reachable (retry — ARP/NDP may need a few seconds after session clear)
 target_ok=false
 for i in $(seq 1 15); do
-	if incus exec cluster-lan-host -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- ping -c 1 -W 3 "$IPERF_TARGET" &>/dev/null; then
 		target_ok=true
 		break
 	fi
@@ -265,18 +269,18 @@ info "Phase 1: Hard VM stop — simulating kernel panic / power loss"
 
 # Start iperf3
 info "Phase 1: Starting iperf3 -P${IPERF_STREAMS} → ${IPERF_TARGET}"
-incus exec cluster-lan-host -- bash -c \
+incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 	"iperf3 --forceflush --connect-timeout 5000 -t 120 -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
 sleep 8
 
-if incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 	pass "phase1: iperf3 running"
 else
 	die "phase1: iperf3 failed to start"
 fi
 
 # Verify sessions on fw0
-fw0_sessions=$(incus exec xpf-fw0 -- cli -c \
+fw0_sessions=$(incus exec "$FW0" -- cli -c \
 	"show security flow session destination-prefix ${IPERF_TARGET}" 2>/dev/null | grep -c "Session State: Valid" || true)
 if [[ "$fw0_sessions" -ge "$IPERF_STREAMS" ]]; then
 	pass "phase1: fw0 has $fw0_sessions established sessions"
@@ -289,7 +293,7 @@ sleep 5
 
 # Force-stop fw0 — this is a hard kill, no graceful shutdown
 info "Phase 1: Force-stopping fw0 (incus stop --force)"
-incus stop --force xpf-fw0 2>/dev/null || true
+incus stop --force "$FW0" 2>/dev/null || true
 
 # Wait for fw1 to take over
 takeover_time=$(wait_for_takeover "$TAKEOVER_TIMEOUT" || true)
@@ -303,21 +307,21 @@ fi
 test_new_tcp "phase1" "$CONN_TIMEOUT"
 
 # Verify connectivity via ping
-if incus exec cluster-lan-host -- ping -c 3 -W 3 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 3 "$IPERF_TARGET" &>/dev/null; then
 	pass "phase1: ping through fw1 works"
 else
 	fail "phase1: ping through fw1 failed"
 fi
 
 # Kill iperf3 from phase 1 (sessions are dead — fw0 hard-crashed)
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
 # Restart fw0
 info "Phase 1: Restarting fw0"
-incus start xpf-fw0 2>/dev/null || true
+incus start "$FW0" 2>/dev/null || true
 
-restart_time=$(wait_for_xpfd xpf-fw0 "$VM_RESTART_WAIT" || true)
+restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 if [[ -n "$restart_time" ]]; then
 	pass "phase1: fw0 xpfd restarted (${restart_time}s)"
 else
@@ -328,7 +332,7 @@ fi
 sleep 10
 
 # Verify fw0 is secondary (no auto-preempt)
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 if echo "$fw0_status" | grep -q "node0.*secondary"; then
 	pass "phase1: fw0 rejoined as secondary"
 else
@@ -347,13 +351,13 @@ sleep 5
 # server may hold the stale connection for up to 120s (TCP keepalive).
 # We must wait for it to become available.
 info "Phase 1→2 transition: clearing sessions, waiting for iperf3 server to be ready"
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
-incus exec xpf-fw0 -- cli -c "clear security flow session all" 2>/dev/null || true
-incus exec xpf-fw1 -- cli -c "clear security flow session all" 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$FW0" -- cli -c "clear security flow session all" 2>/dev/null || true
+incus exec "$FW1" -- cli -c "clear security flow session all" 2>/dev/null || true
 sleep 3
 # Wait for ping connectivity first
 for i in $(seq 1 30); do
-	if incus exec cluster-lan-host -- ping -c 1 -W 2 "$IPERF_TARGET" &>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- ping -c 1 -W 2 "$IPERF_TARGET" &>/dev/null; then
 		break
 	fi
 	sleep 1
@@ -361,7 +365,7 @@ done
 # Then wait for iperf3 server to accept connections (TCP 5201)
 info "Phase 1→2: waiting for iperf3 server at ${IPERF_TARGET}:5201"
 for i in $(seq 1 120); do
-	if incus exec cluster-lan-host -- bash -c \
+	if incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 		"timeout 3 bash -c 'echo > /dev/tcp/${IPERF_TARGET}/5201'" 2>/dev/null; then
 		info "Phase 1→2: iperf3 server ready (${i}s)"
 		break
@@ -383,21 +387,21 @@ fi
 
 # Start iperf3
 info "Phase 2: Starting iperf3 -P${IPERF_STREAMS} → ${IPERF_TARGET}"
-incus exec cluster-lan-host -- bash -c \
+incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 	"iperf3 --forceflush --connect-timeout 5000 -t 120 -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
 sleep 8
 
-if incus exec cluster-lan-host -- pgrep -x iperf3 &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
 	pass "phase2: iperf3 running"
 else
 	# Show the log to diagnose
-	incus exec cluster-lan-host -- cat ${LOG} 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- cat ${LOG} 2>/dev/null || true
 	die "phase2: iperf3 failed to start"
 fi
 
 # Stop xpfd on fw0 (fail-closed: clears rg_active, tears down BPF)
 info "Phase 2: Stopping xpfd on fw0 (systemctl stop)"
-incus exec xpf-fw0 -- systemctl stop xpfd 2>/dev/null || true
+incus exec "$FW0" -- systemctl stop xpfd 2>/dev/null || true
 
 # Wait for fw1 to take over
 takeover_time=$(wait_for_takeover "$TAKEOVER_TIMEOUT" || true)
@@ -411,21 +415,21 @@ fi
 test_new_tcp "phase2" "$CONN_TIMEOUT"
 
 # Verify connectivity via ping
-if incus exec cluster-lan-host -- ping -c 3 -W 3 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 3 "$IPERF_TARGET" &>/dev/null; then
 	pass "phase2: ping through fw1 works"
 else
 	fail "phase2: ping through fw1 failed"
 fi
 
 # Kill iperf3 from phase 2
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
 # Restart xpfd on fw0
 info "Phase 2: Restarting xpfd on fw0"
-incus exec xpf-fw0 -- systemctl start xpfd 2>/dev/null || true
+incus exec "$FW0" -- systemctl start xpfd 2>/dev/null || true
 
-restart_time=$(wait_for_xpfd xpf-fw0 "$DAEMON_RESTART_WAIT" || true)
+restart_time=$(wait_for_xpfd "$FW0" "$DAEMON_RESTART_WAIT" || true)
 if [[ -n "$restart_time" ]]; then
 	pass "phase2: xpfd restarted (${restart_time}s)"
 else
@@ -436,7 +440,7 @@ fi
 sleep 10
 
 # Verify fw0 is secondary
-fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 if echo "$fw0_status" | grep -q "node0.*secondary"; then
 	pass "phase2: fw0 rejoined as secondary after daemon restart"
 else
@@ -452,12 +456,12 @@ sleep 5
 
 # Wait for connectivity to stabilize after phase 2
 info "Phase 2→3 transition: clearing sessions and waiting for connectivity"
-incus exec cluster-lan-host -- pkill -9 iperf3 2>/dev/null || true
-incus exec xpf-fw0 -- cli -c "clear security flow session all" 2>/dev/null || true
-incus exec xpf-fw1 -- cli -c "clear security flow session all" 2>/dev/null || true
+incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+incus exec "$FW0" -- cli -c "clear security flow session all" 2>/dev/null || true
+incus exec "$FW1" -- cli -c "clear security flow session all" 2>/dev/null || true
 sleep 3
 for i in $(seq 1 30); do
-	if incus exec cluster-lan-host -- ping -c 1 -W 2 "$IPERF_TARGET" &>/dev/null; then
+	if incus exec "$CLUSTER_LAN_HOST" -- ping -c 1 -W 2 "$IPERF_TARGET" &>/dev/null; then
 		break
 	fi
 	sleep 1
@@ -465,7 +469,7 @@ done
 # Wait for iperf3 server to release stale client
 info "Phase 2→3: waiting for iperf3 server at ${IPERF_TARGET}:5201"
 for i in $(seq 1 120); do
-	if incus exec cluster-lan-host -- bash -c \
+	if incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 		"timeout 3 bash -c 'echo > /dev/tcp/${IPERF_TARGET}/5201'" 2>/dev/null; then
 		info "Phase 2→3: iperf3 server ready (${i}s)"
 		break
@@ -493,7 +497,7 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	# Verify connectivity before crash (retry a few times)
 	pre_crash_ok=false
 	for i in $(seq 1 10); do
-		if incus exec cluster-lan-host -- ping -c 1 -W 2 "$IPERF_TARGET" &>/dev/null; then
+		if incus exec "$CLUSTER_LAN_HOST" -- ping -c 1 -W 2 "$IPERF_TARGET" &>/dev/null; then
 			pre_crash_ok=true
 			break
 		fi
@@ -506,7 +510,7 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	fi
 
 	# Force-stop fw0
-	incus stop --force xpf-fw0 2>/dev/null || true
+	incus stop --force "$FW0" 2>/dev/null || true
 
 	# Measure takeover time
 	takeover_time=$(wait_for_takeover "$TAKEOVER_TIMEOUT" || true)
@@ -521,8 +525,8 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	test_new_tcp "phase3-cycle${cycle}" "$CONN_TIMEOUT" || cycle_failures=$((cycle_failures + 1))
 
 	# Restart fw0
-	incus start xpf-fw0 2>/dev/null || true
-	restart_time=$(wait_for_xpfd xpf-fw0 "$VM_RESTART_WAIT" || true)
+	incus start "$FW0" 2>/dev/null || true
+	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase3-cycle${cycle}: fw0 restarted (${restart_time}s)"
 	else
@@ -539,7 +543,7 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 
 	# Verify fw0 is in cluster (primary or secondary — after rapid
 	# force-stop cycles, election may resolve either way)
-	fw0_status=$(incus exec xpf-fw0 -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 	if echo "$fw0_status" | grep -q "node0.*secondary"; then
 		pass "phase3-cycle${cycle}: fw0 rejoined as secondary"
 	elif echo "$fw0_status" | grep -q "node0.*primary"; then
@@ -553,11 +557,11 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	if [[ "$cycle" -lt "$CRASH_CYCLES" ]]; then
 		restore_fw0_primary "phase3-cycle${cycle}" || true
 		# Clear stale sessions and wait for connectivity
-		incus exec xpf-fw0 -- cli -c "clear security flow session all" 2>/dev/null || true
-		incus exec xpf-fw1 -- cli -c "clear security flow session all" 2>/dev/null || true
+		incus exec "$FW0" -- cli -c "clear security flow session all" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "clear security flow session all" 2>/dev/null || true
 		sleep 3
 		for i in $(seq 1 15); do
-			if incus exec cluster-lan-host -- ping -c 1 -W 2 "$IPERF_TARGET" &>/dev/null; then
+			if incus exec "$CLUSTER_LAN_HOST" -- ping -c 1 -W 2 "$IPERF_TARGET" &>/dev/null; then
 				break
 			fi
 			sleep 1
@@ -576,12 +580,12 @@ fi
 info "Final health checks"
 
 # Clear stale sessions before final connectivity check
-incus exec xpf-fw0 -- cli -c "clear security flow session all" 2>/dev/null || true
-incus exec xpf-fw1 -- cli -c "clear security flow session all" 2>/dev/null || true
+incus exec "$FW0" -- cli -c "clear security flow session all" 2>/dev/null || true
+incus exec "$FW1" -- cli -c "clear security flow session all" 2>/dev/null || true
 sleep 3
 
 # Ensure both nodes are running
-for inst in xpf-fw0 xpf-fw1; do
+for inst in "$FW0" "$FW1"; do
 	if ! instance_running "$inst"; then
 		# Try to start it
 		incus start "$inst" 2>/dev/null || true
@@ -595,7 +599,7 @@ for inst in xpf-fw0 xpf-fw1; do
 done
 
 # Ensure xpfd active on both (wait briefly for late starters)
-for inst in xpf-fw0 xpf-fw1; do
+for inst in "$FW0" "$FW1"; do
 	xpfd_ok=false
 	for i in $(seq 1 15); do
 		if incus exec "$inst" -- systemctl is-active --quiet xpfd 2>/dev/null; then
@@ -612,7 +616,7 @@ for inst in xpf-fw0 xpf-fw1; do
 done
 
 # Verify connectivity
-if incus exec cluster-lan-host -- ping -c 3 -W 3 "$IPERF_TARGET" &>/dev/null; then
+if incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 3 "$IPERF_TARGET" &>/dev/null; then
 	pass "final: connectivity OK"
 else
 	fail "final: connectivity lost"

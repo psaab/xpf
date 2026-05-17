@@ -27,6 +27,10 @@ if ! incus list &>/dev/null 2>&1; then
 	fi
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/incus/cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -181,52 +185,52 @@ test_standalone() {
 # ── Cluster Tests ────────────────────────────────────────────────────
 
 test_cluster() {
-	info "Cluster HA (xpf-fw0 + xpf-fw1)"
+	info "Cluster HA (${FW0} + ${FW1})"
 
-	if ! instance_running "xpf-fw0" || ! instance_running "xpf-fw1"; then
-		skip "xpf-fw0 or xpf-fw1 not running — skipping cluster tests"
+	if ! instance_running "$FW0" || ! instance_running "$FW1"; then
+		skip "${FW0} or ${FW1} not running — skipping cluster tests"
 		return
 	fi
 
 	# Service health
-	service_check "xpf-fw0" "cluster: xpfd service active on fw0"
-	service_check "xpf-fw1" "cluster: xpfd service active on fw1"
+	service_check "$FW0" "cluster: xpfd service active on fw0"
+	service_check "$FW1" "cluster: xpfd service active on fw1"
 
 	# Heartbeat connectivity (auto VRF — em0/fab0 may be in vrf-mgmt)
-	ping_test "xpf-fw0" "10.99.0.2" "cluster: fw0 → fw1 heartbeat (10.99.0.2)"
-	ping_test "xpf-fw1" "10.99.0.1" "cluster: fw1 → fw0 heartbeat (10.99.0.1)"
+	ping_test "$FW0" "10.99.0.2" "cluster: fw0 → fw1 heartbeat (10.99.0.2)"
+	ping_test "$FW1" "10.99.0.1" "cluster: fw1 → fw0 heartbeat (10.99.0.1)"
 
 	# Fabric connectivity
-	ping_test "xpf-fw0" "10.99.1.2" "cluster: fw0 → fw1 fabric (10.99.1.2)"
-	ping_test "xpf-fw1" "10.99.1.1" "cluster: fw1 → fw0 fabric (10.99.1.1)"
+	ping_test "$FW0" "10.99.1.2" "cluster: fw0 → fw1 fabric (10.99.1.2)"
+	ping_test "$FW1" "10.99.1.1" "cluster: fw1 → fw0 fabric (10.99.1.1)"
 
 	# WAN gateway
-	ping_test "xpf-fw0" "172.16.50.1" "cluster: fw0 → WAN gateway (172.16.50.1)"
+	ping_test "$FW0" "$WAN_GW4" "cluster: fw0 → WAN gateway (${WAN_GW4})"
 
 	# LAN host connectivity
-	if instance_running "cluster-lan-host"; then
+	if instance_running "$CLUSTER_LAN_HOST"; then
 		# From firewall to LAN host
-		ping_test "xpf-fw0" "10.0.60.102" "cluster: fw0 → LAN host (10.0.60.102)"
+		ping_test "$FW0" "$LAN_HOST_IP" "cluster: fw0 → LAN host (${LAN_HOST_IP})"
 
 		# From LAN host to RETH VIP (proves VRRP is working)
-		ping_test "cluster-lan-host" "10.0.60.1" "cluster: LAN host → RETH VIP (10.0.60.1)"
+		ping_test "$CLUSTER_LAN_HOST" "$LAN_VIP4" "cluster: LAN host → RETH VIP (${LAN_VIP4})"
 
 		# Cross-zone: LAN host through firewall to WAN gateway
-		ping_test "cluster-lan-host" "172.16.50.1" "cluster: LAN host → WAN gateway cross-zone (172.16.50.1)"
+		ping_test "$CLUSTER_LAN_HOST" "$WAN_GW4" "cluster: LAN host → WAN gateway cross-zone (${WAN_GW4})"
 
 		# IPv6 LAN connectivity
-		ping6_test "cluster-lan-host" "2001:559:8585:cf01::1" "cluster: LAN host → RETH VIP IPv6"
+		ping6_test "$CLUSTER_LAN_HOST" "$LAN_VIP6" "cluster: LAN host → RETH VIP IPv6"
 
 		# Internet: LAN host → 1.1.1.1 (proves SNAT + routing through fw to internet)
-		internet_test "cluster-lan-host" "cluster: LAN host → internet (1.1.1.1)"
+		internet_test "$CLUSTER_LAN_HOST" "cluster: LAN host → internet (1.1.1.1)"
 
 		# Internet IPv6: LAN host → Google DNS IPv6 (proves IPv6 routing through fw)
-		ping6_test "cluster-lan-host" "2607:f8b0:4005:80e::200e" \
+		ping6_test "$CLUSTER_LAN_HOST" "2607:f8b0:4005:80e::200e" \
 			"cluster: LAN host → internet IPv6 (2607:f8b0:4005:80e::200e)"
 
 		# IPv6 TCP: iperf3 from LAN host to WAN (proves SNAT v6 + return path)
-		if incus exec cluster-lan-host -- which iperf3 &>/dev/null 2>&1; then
-			if incus exec cluster-lan-host -- timeout 8 iperf3 -6 -c 2001:559:8585:100::200 -t 3 &>/dev/null 2>&1; then
+		if incus exec "$CLUSTER_LAN_HOST" -- which iperf3 &>/dev/null 2>&1; then
+			if incus exec "$CLUSTER_LAN_HOST" -- timeout 8 iperf3 -6 -c "$IPERF_TARGET6" -t 3 &>/dev/null 2>&1; then
 				pass "cluster: LAN host → WAN iperf3 IPv6 TCP"
 			else
 				fail "cluster: LAN host → WAN iperf3 IPv6 TCP (SNAT v6 may be missing)"
@@ -236,8 +240,8 @@ test_cluster() {
 		fi
 
 		# IPv4 TCP: iperf3 from LAN host to WAN
-		if incus exec cluster-lan-host -- which iperf3 &>/dev/null 2>&1; then
-			if incus exec cluster-lan-host -- timeout 8 iperf3 -c 172.16.100.200 -t 3 &>/dev/null 2>&1; then
+		if incus exec "$CLUSTER_LAN_HOST" -- which iperf3 &>/dev/null 2>&1; then
+			if incus exec "$CLUSTER_LAN_HOST" -- timeout 8 iperf3 -c "$IPERF_TARGET4" -t 3 &>/dev/null 2>&1; then
 				pass "cluster: LAN host → WAN iperf3 IPv4 TCP"
 			else
 				fail "cluster: LAN host → WAN iperf3 IPv4 TCP"
@@ -247,22 +251,22 @@ test_cluster() {
 		fi
 
 		# mtr path validation: verify traffic traverses RETH VIP to WAN gateway
-		mtr_test "cluster-lan-host" "172.16.50.1" "10.0.60.1" \
+		mtr_test "$CLUSTER_LAN_HOST" "$WAN_GW4" "$LAN_VIP4" \
 			"cluster: mtr LAN→WAN gateway (path through RETH VIP)"
 
 		# mtr to internet: verify full path (RETH VIP → WAN gateway → internet)
-		mtr_test "cluster-lan-host" "1.1.1.1" "10.0.60.1" \
+		mtr_test "$CLUSTER_LAN_HOST" "1.1.1.1" "$LAN_VIP4" \
 			"cluster: mtr LAN→internet (path through RETH VIP)"
 
 		# mtr to internet IPv6: verify full IPv6 path through RETH VIP
-		mtr_test "cluster-lan-host" "2607:f8b0:4005:80e::200e" "2001:559:8585:cf01::1" \
+		mtr_test "$CLUSTER_LAN_HOST" "2607:f8b0:4005:80e::200e" "$LAN_VIP6" \
 			"cluster: mtr LAN→internet IPv6 (path through RETH VIP)"
 	else
-		skip "cluster: LAN host tests (cluster-lan-host not running)"
+		skip "cluster: LAN host tests (${CLUSTER_LAN_HOST} not running)"
 	fi
 
 	# Internet from firewall directly
-	internet_test "xpf-fw0" "cluster: fw0 → internet (1.1.1.1)"
+	internet_test "$FW0" "cluster: fw0 → internet (1.1.1.1)"
 }
 
 # ── Main ─────────────────────────────────────────────────────────────
