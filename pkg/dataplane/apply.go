@@ -3,6 +3,7 @@ package dataplane
 import (
 	"context"
 	"maps"
+	"slices"
 
 	"github.com/psaab/xpf/pkg/config"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
@@ -103,16 +104,16 @@ func ApplyResultFromCompileResult(result *CompileResult) *ApplyResult {
 		return nil
 	}
 	out := &ApplyResult{
-		ZoneIDs:           maps.Clone(result.ZoneIDs),
-		ManagedInterfaces: append([]networkd.InterfaceConfig(nil), result.ManagedInterfaces...),
-		FilterIDs:         maps.Clone(result.FilterIDs),
-		FilterSpans:       maps.Clone(result.FilterSpans),
-		NATCounterIDs:     make(map[string]uint32, len(result.NATCounterIDs)),
-		Capabilities:      Capabilities{ForwardingSupported: true},
-		PoolIDs:           maps.Clone(result.PoolIDs),
-		PolicyNames:       maps.Clone(result.PolicyNames),
-		AppNames:          maps.Clone(result.AppNames),
-		PolicyScheduleRuleSlots: append([]PolicyScheduleRuleSlot(nil), result.PolicyScheduleRuleSlots...),
+		ZoneIDs:                 maps.Clone(result.ZoneIDs),
+		ManagedInterfaces:       slices.Clone(result.ManagedInterfaces),
+		FilterIDs:               maps.Clone(result.FilterIDs),
+		FilterSpans:             maps.Clone(result.FilterSpans),
+		NATCounterIDs:           make(map[string]uint32, len(result.NATCounterIDs)),
+		Capabilities:            Capabilities{ForwardingSupported: true},
+		PoolIDs:                 maps.Clone(result.PoolIDs),
+		PolicyNames:             maps.Clone(result.PolicyNames),
+		AppNames:                maps.Clone(result.AppNames),
+		PolicyScheduleRuleSlots: slices.Clone(result.PolicyScheduleRuleSlots),
 	}
 	for key, id := range result.NATCounterIDs {
 		out.NATCounterIDs[key] = uint32(id)
@@ -126,15 +127,15 @@ func (r *ApplyResult) Clone() *ApplyResult {
 	}
 	out := *r
 	out.ZoneIDs = maps.Clone(r.ZoneIDs)
-	out.ManagedInterfaces = append([]networkd.InterfaceConfig(nil), r.ManagedInterfaces...)
+	out.ManagedInterfaces = slices.Clone(r.ManagedInterfaces)
 	out.FilterIDs = maps.Clone(r.FilterIDs)
 	out.FilterSpans = maps.Clone(r.FilterSpans)
 	out.NATCounterIDs = maps.Clone(r.NATCounterIDs)
-	out.Capabilities.UnsupportedReasons = append([]string(nil), r.Capabilities.UnsupportedReasons...)
+	out.Capabilities.UnsupportedReasons = slices.Clone(r.Capabilities.UnsupportedReasons)
 	out.PoolIDs = maps.Clone(r.PoolIDs)
 	out.PolicyNames = maps.Clone(r.PolicyNames)
 	out.AppNames = maps.Clone(r.AppNames)
-	out.PolicyScheduleRuleSlots = append([]PolicyScheduleRuleSlot(nil), r.PolicyScheduleRuleSlots...)
+	out.PolicyScheduleRuleSlots = slices.Clone(r.PolicyScheduleRuleSlots)
 	return &out
 }
 
