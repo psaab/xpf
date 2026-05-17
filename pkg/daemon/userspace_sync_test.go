@@ -720,8 +720,9 @@ func TestUserspaceRGDemotionPrepLeaseCanBeReleasedAfterFailure(t *testing.T) {
 	}
 }
 
-// TestHandleEventStreamDeltaSkipsWhenNoCluster verifies that events are
-// silently dropped when cluster is nil.
+// TestHandleEventStreamDeltaSkipsWhenNoCluster verifies that permanent
+// non-owner/no-cluster paths ACK and ignore events instead of asking the helper
+// to replay forever.
 func TestHandleEventStreamDeltaSkipsWhenNoCluster(t *testing.T) {
 	d := &Daemon{}
 	delta := dpuserspace.SessionDeltaInfo{
@@ -732,8 +733,16 @@ func TestHandleEventStreamDeltaSkipsWhenNoCluster(t *testing.T) {
 		SrcPort:    12345,
 		DstPort:    443,
 	}
-	// Should not panic when cluster and sessionSync are nil.
-	d.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta)
+	if !d.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta) {
+		t.Fatal("delta without cluster/sessionSync should be permanently ignored and ACKed")
+	}
+	backup := &Daemon{
+		cluster:     newClusterManager(false),
+		sessionSync: &cluster.SessionSync{},
+	}
+	if !backup.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta) {
+		t.Fatal("delta on a backup should be permanently ignored and ACKed")
+	}
 }
 
 // TestHandleEventStreamDeltaMapsEventTypes verifies event type to string mapping
@@ -750,8 +759,15 @@ func TestHandleEventStreamDeltaMapsEventTypes(t *testing.T) {
 }
 
 func TestHandleEventStreamFullResyncRequiresHAReady(t *testing.T) {
-	if (&Daemon{}).handleEventStreamFullResync() {
-		t.Fatal("full resync without cluster/sessionSync should withhold ACK")
+	if !(&Daemon{}).handleEventStreamFullResync() {
+		t.Fatal("full resync without cluster/sessionSync should be permanently ignored and ACKed")
+	}
+	backup := &Daemon{
+		cluster:     newClusterManager(false),
+		sessionSync: &cluster.SessionSync{},
+	}
+	if !backup.handleEventStreamFullResync() {
+		t.Fatal("full resync on a backup should be permanently ignored and ACKed")
 	}
 	d := &Daemon{
 		cluster:     newClusterManager(true),

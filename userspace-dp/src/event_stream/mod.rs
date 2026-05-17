@@ -367,7 +367,9 @@ fn replay_buffered(
             "xpf-event-stream: sent FullResync (buffer gap: acked={}, oldest_buffered={})",
             acked_seq, oldest_buffered
         );
-        replay_buf.clear();
+        // Keep the stale replay window until the daemon ACKs the FullResync.
+        // Clearing here can make an acked_seq=0 reconnect look like a clean
+        // fresh start and permanently suppress the required bulk export.
         return Ok(());
     }
 

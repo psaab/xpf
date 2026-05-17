@@ -544,16 +544,17 @@ func (d *Daemon) wireUserspaceEventStreamCallbacks(ctx context.Context, provider
 }
 
 // handleEventStreamDelta processes a single session event from the event
-// stream. It returns true only when the delta has been queued for HA sync; false
-// tells EventStream to withhold ACK so the helper can replay.
+// stream. It returns true when the delta has been handled, including permanent
+// non-owner no-op handling on HA backups. It returns false only for transient
+// readiness gaps where EventStream should withhold ACK so the helper can replay.
 func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.SessionDeltaInfo) bool {
 	if d.cluster == nil || d.sessionSync == nil {
-		slog.Debug("userspace delta: dropped (no cluster/sync)", "type", eventType)
-		return false
+		slog.Debug("userspace delta: ignored (no cluster/sync)", "type", eventType)
+		return true
 	}
 	if !d.cluster.IsLocalPrimaryAny() {
-		slog.Debug("userspace delta: dropped (not primary for any RG)", "type", eventType)
-		return false
+		slog.Debug("userspace delta: ignored (not primary for any RG)", "type", eventType)
+		return true
 	}
 	if !d.sessionSync.IsConnected() {
 		slog.Debug("userspace delta: dropped (sync not connected)", "type", eventType)
@@ -583,12 +584,12 @@ func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.Sessi
 func (d *Daemon) handleEventStreamFullResync() bool {
 	slog.Warn("userspace event stream: full resync requested, triggering bulk export")
 	if d.cluster == nil || d.sessionSync == nil {
-		slog.Debug("userspace event stream: full resync deferred (no cluster/sync)")
-		return false
+		slog.Debug("userspace event stream: full resync ignored (no cluster/sync)")
+		return true
 	}
 	if !d.cluster.IsLocalPrimaryAny() {
-		slog.Debug("userspace event stream: full resync deferred (not primary for any RG)")
-		return false
+		slog.Debug("userspace event stream: full resync ignored (not primary for any RG)")
+		return true
 	}
 	if !d.sessionSync.IsConnected() {
 		slog.Debug("userspace event stream: full resync deferred (sync not connected)")

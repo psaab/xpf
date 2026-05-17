@@ -92,9 +92,10 @@ fn test_replay_gap_at_zero_ack_sends_full_resync() {
     daemon_side.read_exact(&mut hdr).expect("full resync frame");
     assert_eq!(hdr[4], MSG_FULL_RESYNC);
     assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 1);
-    assert!(
-        replay_buf.is_empty(),
-        "full resync clears stale replay window"
+    assert_eq!(
+        replay_buf.front().map(|f| f.seq),
+        Some(2),
+        "full resync keeps stale replay window until the daemon ACKs"
     );
 }
 
