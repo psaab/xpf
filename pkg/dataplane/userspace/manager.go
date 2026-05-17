@@ -338,7 +338,6 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 			}
 			return result, err
 		}
-		m.lastSnapshot = snap
 		if err := m.syncIngressIfaceMapLocked(snap); err != nil {
 			return result, err
 		}
@@ -348,6 +347,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		if err := m.syncInterfaceNATAddressMapsLocked(snap); err != nil {
 			return result, err
 		}
+		m.lastSnapshot = snap
 		m.cfg = ucfg
 		slog.Info(
 			"userspace: deferring snapshot publish during XSK startup",
