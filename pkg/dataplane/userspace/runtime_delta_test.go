@@ -93,3 +93,10 @@ func TestRuntimeSessionDeltaSnapshotAdaptsUserspaceDTOs(t *testing.T) {
 func TestRuntimeSessionDeltaSourceAdapterSatisfiesNeutralInterface(t *testing.T) {
 	var _ dpruntime.SessionDeltaSource = (&Manager{}).RuntimeSessionDeltaSource()
 }
+
+func TestRuntimeSessionsExposeUserspaceDeltaSource(t *testing.T) {
+	store := New().Sessions()
+	if store.SessionDeltas() == nil {
+		t.Fatal("Sessions().SessionDeltas() = nil, want userspace runtime delta source")
+	}
+}

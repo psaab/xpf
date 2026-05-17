@@ -100,6 +100,12 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	if got := result.PolicyScheduleRuleSlots[0].PolicyName; got != "allow-all" {
 		t.Fatalf("PolicyScheduleRuleSlots was not copied, got %q", got)
 	}
+
+	clone := result.Clone()
+	clone.PolicyScheduleRuleSlots[0].PolicyName = "clone-mutated"
+	if got := result.PolicyScheduleRuleSlots[0].PolicyName; got != "allow-all" {
+		t.Fatalf("Clone shared PolicyScheduleRuleSlots backing array, original PolicyName = %q", got)
+	}
 }
 
 func TestRuntimeDataPlaneContractStaysSmallAndBackendNeutral(t *testing.T) {

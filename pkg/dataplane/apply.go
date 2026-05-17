@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 
@@ -47,15 +48,20 @@ type ApplyResult struct {
 	FilterIDs         map[string]uint32
 	FilterSpans       map[string]FilterCounterSpan
 	NATCounterIDs     map[string]uint32
-	Capabilities      Capabilities
-	Generation        uint64
 
 	// Display metadata carried from CompileResult so callers can migrate from
 	// LastCompileResult() to LastApplyResult() without losing runtime lookups.
-	PoolIDs                 map[string]uint8            // NAT pool name -> pool ID (0-based)
-	PolicyNames             map[uint32]string           // rule_id -> policy path (zone/policy or global/policy)
-	AppNames                map[uint16]string           // app_id -> application name (structured logging)
-	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot    // compiled slots for scheduled-policy runtime toggling
+	PoolIDs     map[string]uint8  // NAT pool name -> pool ID (0-based)
+	PolicyNames map[uint32]string // rule_id -> policy path (zone/policy or global/policy)
+	AppNames    map[uint16]string // app_id -> application name (structured logging)
+
+	// PolicyScheduleRuleSlots records the compiled slots used by runtime
+	// scheduler updates. Callers must not recompute these slots from config
+	// policy positions because app-term expansion can make them diverge.
+	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot
+
+	Capabilities Capabilities
+	Generation   uint64
 }
 
 type FilterCounterSpan struct {
@@ -139,6 +145,35 @@ func (r *ApplyResult) Clone() *ApplyResult {
 	return &out
 }
 
+func (m *Manager) Start(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return m.Load()
+}
+
+func (m *Manager) Link() LinkController {
+	return NewDataPlaneLinkController(m)
+}
+
+func (m *Manager) HA() HAController {
+	return NewDataPlaneHAController(m)
+}
+
+func (m *Manager) Sessions() SessionStore {
+	return NewDataPlaneSessionStore(m)
+}
+
+func (m *Manager) SessionDeltas() dpruntime.SessionDeltaSource {
+	return nil
+}
+
+func (m *Manager) Telemetry() Telemetry {
+	return NewDataPlaneTelemetry(m)
+}
+
 func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*ApplyResult, error) {
 	select {
 	case <-ctx.Done():
@@ -168,4 +203,152 @@ func (m *Manager) recordApplyResult(result *ApplyResult) *ApplyResult {
 	next.Generation = m.applyGeneration
 	m.lastApply = next
 	return next.Clone()
+}
+
+func NewDataPlaneLinkController(dp DataPlane) LinkController {
+	return dataPlaneLinkController{dp: dp}
+}
+
+type dataPlaneLinkController struct {
+	dp DataPlane
+}
+
+func (c dataPlaneLinkController) SetDeferWorkers(bool) {}
+
+func (c dataPlaneLinkController) PrepareLinkCycle() {}
+
+func (c dataPlaneLinkController) NotifyLinkCycle() {
+	if c.dp != nil {
+		c.dp.NotifyLinkCycle()
+	}
+}
+
+func NewDataPlaneHAController(dp DataPlane) HAController {
+	return dataPlaneHAController{dp: dp}
+}
+
+type dataPlaneHAController struct {
+	dp DataPlane
+}
+
+func (c dataPlaneHAController) SetRGActive(ctx context.Context, rgID int, active bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	return c.dp.UpdateRGActive(rgID, active)
+}
+
+func (c dataPlaneHAController) SetHAWatchdog(ctx context.Context, rgID int, timestamp uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	return c.dp.UpdateHAWatchdog(rgID, timestamp)
+}
+
+func (c dataPlaneHAController) SetFabricForwarding(ctx context.Context, id FabricID, info FabricFwdInfo) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	if id == 1 {
+		return c.dp.UpdateFabricFwd1(info)
+	}
+	return c.dp.UpdateFabricFwd(info)
+}
+
+func (c dataPlaneHAController) SyncFabricState(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	c.dp.SyncFabricState()
+	return nil
+}
+
+func NewDataPlaneTelemetry(dp DataPlane) Telemetry {
+	return dataPlaneTelemetry{dp: dp}
+}
+
+type dataPlaneTelemetry struct {
+	dp DataPlane
+}
+
+func (t dataPlaneTelemetry) NewEventSource() (EventSource, error) {
+	if t.dp == nil {
+		return nil, errors.New("nil dataplane")
+	}
+	return t.dp.NewEventSource()
+}
+
+func (t dataPlaneTelemetry) GlobalCounter(index uint32) (uint64, error) {
+	if t.dp == nil {
+		return 0, errors.New("nil dataplane")
+	}
+	return t.dp.ReadGlobalCounter(index)
+}
+
+func (t dataPlaneTelemetry) ReadFloodCounters(zoneID uint16) (FloodState, error) {
+	if t.dp == nil {
+		return FloodState{}, errors.New("nil dataplane")
+	}
+	return t.dp.ReadFloodCounters(zoneID)
+}
+
+func (t dataPlaneTelemetry) InterfaceCounters(ifindex int) (InterfaceCounterValue, error) {
+	if t.dp == nil {
+		return InterfaceCounterValue{}, errors.New("nil dataplane")
+	}
+	return t.dp.ReadInterfaceCounters(ifindex)
+}
+
+func (t dataPlaneTelemetry) ZoneCounters(zoneID uint16, direction int) (CounterValue, error) {
+	if t.dp == nil {
+		return CounterValue{}, errors.New("nil dataplane")
+	}
+	return t.dp.ReadZoneCounters(zoneID, direction)
+}
+
+func (t dataPlaneTelemetry) PolicyCounters(policyID uint32) (CounterValue, error) {
+	if t.dp == nil {
+		return CounterValue{}, errors.New("nil dataplane")
+	}
+	return t.dp.ReadPolicyCounters(policyID)
+}
+
+func (t dataPlaneTelemetry) FilterCounters(ruleIdx uint32) (CounterValue, error) {
+	if t.dp == nil {
+		return CounterValue{}, errors.New("nil dataplane")
+	}
+	return t.dp.ReadFilterCounters(ruleIdx)
+}
+
+func (t dataPlaneTelemetry) NATRuleCounter(counterID uint32) (CounterValue, error) {
+	if t.dp == nil {
+		return CounterValue{}, errors.New("nil dataplane")
+	}
+	return t.dp.ReadNATRuleCounter(counterID)
+}
+
+func (t dataPlaneTelemetry) NATPortCounter(poolID uint32) (uint64, error) {
+	if t.dp == nil {
+		return 0, errors.New("nil dataplane")
+	}
+	return t.dp.ReadNATPortCounter(poolID)
+}
+
+func (t dataPlaneTelemetry) MapStats() []MapStats {
+	if t.dp == nil {
+		return nil
+	}
+	return t.dp.GetMapStats()
 }

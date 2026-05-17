@@ -7,11 +7,13 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 )
 
 // Compile-time assertion.
 var _ dataplane.DataPlane = (*Manager)(nil)
 var _ dataplane.ConfigSink = (*Manager)(nil)
+var _ dataplane.RuntimeDataPlane = (*Manager)(nil)
 
 func init() {
 	dataplane.RegisterBackend(dataplane.TypeDPDK, func() dataplane.DataPlane {
@@ -54,6 +56,35 @@ func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*datapla
 		return nil, err
 	}
 	return m.LastApplyResult(), nil
+}
+
+func (m *Manager) Start(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return m.Load()
+}
+
+func (m *Manager) Link() dataplane.LinkController {
+	return dataplane.NewDataPlaneLinkController(m)
+}
+
+func (m *Manager) HA() dataplane.HAController {
+	return dataplane.NewDataPlaneHAController(m)
+}
+
+func (m *Manager) Sessions() dataplane.SessionStore {
+	return dataplane.NewDataPlaneSessionStore(m)
+}
+
+func (m *Manager) SessionDeltas() dpruntime.SessionDeltaSource {
+	return nil
+}
+
+func (m *Manager) Telemetry() dataplane.Telemetry {
+	return dataplane.NewDataPlaneTelemetry(m)
 }
 
 func (m *Manager) LastApplyResult() *dataplane.ApplyResult {

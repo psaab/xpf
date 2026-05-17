@@ -27,6 +27,7 @@ import (
 
 var _ dataplane.DataPlane = (*Manager)(nil)
 var _ dataplane.ConfigSink = (*Manager)(nil)
+var _ dataplane.RuntimeDataPlane = (*Manager)(nil)
 
 var ErrPolicySchedulerProtocolIncompatible = errors.New("userspace policy scheduler snapshot protocol incompatible")
 
@@ -182,6 +183,69 @@ func (m *Manager) LastApplyResult() *dataplane.ApplyResult {
 
 func (m *Manager) RuntimeSessionDeltaSource() dpruntime.SessionDeltaSource {
 	return runtimeSessionDeltaSource{manager: m}
+}
+
+func (m *Manager) Start(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return m.Load()
+}
+
+func (m *Manager) Link() dataplane.LinkController {
+	return userspaceLinkController{manager: m}
+}
+
+func (m *Manager) HA() dataplane.HAController {
+	return dataplane.NewDataPlaneHAController(m)
+}
+
+func (m *Manager) Sessions() dataplane.SessionStore {
+	return userspaceSessionStore{
+		SessionStore: dataplane.NewDataPlaneSessionStore(m),
+		source:       m.RuntimeSessionDeltaSource(),
+	}
+}
+
+func (m *Manager) SessionDeltas() dpruntime.SessionDeltaSource {
+	return m.RuntimeSessionDeltaSource()
+}
+
+func (m *Manager) Telemetry() dataplane.Telemetry {
+	return dataplane.NewDataPlaneTelemetry(m)
+}
+
+type userspaceLinkController struct {
+	manager *Manager
+}
+
+func (c userspaceLinkController) SetDeferWorkers(v bool) {
+	if c.manager != nil {
+		c.manager.SetDeferWorkers(v)
+	}
+}
+
+func (c userspaceLinkController) PrepareLinkCycle() {
+	if c.manager != nil {
+		c.manager.PrepareLinkCycle()
+	}
+}
+
+func (c userspaceLinkController) NotifyLinkCycle() {
+	if c.manager != nil {
+		c.manager.NotifyLinkCycle()
+	}
+}
+
+type userspaceSessionStore struct {
+	dataplane.SessionStore
+	source dpruntime.SessionDeltaSource
+}
+
+func (s userspaceSessionStore) SessionDeltas() dpruntime.SessionDeltaSource {
+	return s.source
 }
 
 func (m *Manager) recordApplyResultLocked(result *dataplane.ApplyResult, caps UserspaceCapabilities, generation uint64) {

@@ -101,8 +101,12 @@ type ApplyResult struct {
 	FilterIDs         map[string]uint32
 	FilterSpans       map[string]FilterCounterSpan
 	NATCounterIDs     map[string]uint32
-	Capabilities      Capabilities
-	Generation         uint64
+	PoolIDs           map[string]uint8
+	PolicyNames       map[uint32]string
+	AppNames          map[uint16]string
+	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot
+	Capabilities            Capabilities
+	Generation              uint64
 }
 
 type FilterCounterSpan struct {
@@ -135,6 +139,10 @@ through `LastCompileResult()`. It must carry at least:
   maps `rule-set/rule` to a counter ID via `LastCompileResult().NATCounterIDs`.
   That mapping is config/apply metadata, not a BPF map-writer method, so it
   belongs in `ApplyResult`.
+- `PoolIDs`, `PolicyNames`, `AppNames`, and `PolicyScheduleRuleSlots` for NAT
+  display, flow/session attribution, event labels, and policy-scheduler
+  runtime updates. Scheduler callers must consume the compiled slots directly;
+  eBPF/DPDK/userspace must not recompute slots from original config indexes.
 - stable generation numbers for those IDs so mixed old/new metadata cannot be
   combined with counters from a different apply generation.
 
@@ -266,6 +274,11 @@ type SessionDeltaSource interface {
 }
 ```
 
+`SessionStore.SessionDeltas()` is the bridge for this optional source. Generic
+map-backed session stores return nil; the userspace backend returns an adapter
+that converts helper-private DTOs into `pkg/dataplane/runtime` DTOs at the
+backend boundary.
+
 These DTOs must live in the same package as the abstract runtime interfaces or
 in a third leaf package imported by both `pkg/dataplane` and
 `pkg/dataplane/userspace`. The public interface must not reference
@@ -282,6 +295,7 @@ backend boundary.
 type Telemetry interface {
 	NewEventSource() (dataplane.EventSource, error)
 	GlobalCounter(uint32) (uint64, error)
+	FloodCounters(uint16) (dataplane.FloodState, error)
 	InterfaceCounters(int) (dataplane.InterfaceCounterValue, error)
 	ZoneCounters(uint16, int) (dataplane.CounterValue, error)
 	PolicyCounters(uint32) (dataplane.CounterValue, error)
@@ -544,12 +558,18 @@ interface in place and adds the new contract beside it:
   `SessionStore`, `Telemetry`, HA, and link-domain interfaces are now defined
   without importing backend packages.
 - `ApplyResult` carries `FilterIDs`, `FilterSpans` (`FilterID`, `RuleStart`,
-  `RuleCount`), `NATCounterIDs` widened to `uint32`, capabilities, and a
-  generation. eBPF, DPDK, and userspace compiles now publish
-  `LastApplyResult()`.
+  `RuleCount`), `NATCounterIDs` widened to `uint32`, `PoolIDs`,
+  `PolicyNames`, `AppNames`, compiled `PolicyScheduleRuleSlots`,
+  capabilities, and a generation. eBPF, DPDK, and userspace compiles now
+  publish `LastApplyResult()`.
 - `pkg/dataplane/runtime` owns the neutral session-delta DTOs and
-  `SessionDeltaSource`; userspace adapts its helper-private
+  `SessionDeltaSource`; `SessionStore.SessionDeltas()` exposes that optional
+  source and userspace adapts its helper-private
   `SessionDeltaInfo`/`ProcessStatus` at the package boundary.
+- eBPF, DPDK, and userspace managers now satisfy `RuntimeDataPlane` at
+  compile time. Shared adapters cover HA/telemetry/session surfaces; userspace
+  keeps a backend-specific link controller so link-cycle prepare/defer/rebind
+  semantics stay intact.
 - Cluster stale-bulk reconciliation now routes through
   `dataplane.SessionStore.ReconcileClusterBulk`, whose companion-delete path
   owns forward, reverse, and DNAT/DNATv6 cleanup. A canary fails if

@@ -1,6 +1,10 @@
 package dataplane
 
-import "errors"
+import (
+	"errors"
+
+	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
+)
 
 type DeleteReason string
 
@@ -21,6 +25,7 @@ type SessionStore interface {
 	DeleteWithCompanionsV4(SessionKey, DeleteReason) error
 	DeleteWithCompanionsV6(SessionKeyV6, DeleteReason) error
 	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
+	SessionDeltas() dpruntime.SessionDeltaSource
 	Count() (v4, v6 int)
 	Clear() (v4, v6 int, err error)
 }
@@ -50,6 +55,10 @@ type dataPlaneSessionStore struct {
 
 func NewDataPlaneSessionStore(dp DataPlane) SessionStore {
 	return dataPlaneSessionStore{dp: dp}
+}
+
+func (s dataPlaneSessionStore) SessionDeltas() dpruntime.SessionDeltaSource {
+	return nil
 }
 
 func (s dataPlaneSessionStore) ForEachV4(fn func(SessionKey, SessionValue) bool) error {

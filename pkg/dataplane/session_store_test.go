@@ -96,6 +96,13 @@ func TestDeleteWithCompanionsV4RemovesReverseAndDNAT(t *testing.T) {
 	}
 }
 
+func TestDataPlaneSessionStoreReportsNoRuntimeDeltaSource(t *testing.T) {
+	store := NewDataPlaneSessionStore(&sessionStoreTestDP{})
+	if got := store.SessionDeltas(); got != nil {
+		t.Fatalf("SessionDeltas() = %T, want nil for generic dataplane store", got)
+	}
+}
+
 func TestDeleteWithCompanionsV6RemovesReverseAndDNAT(t *testing.T) {
 	forward := SessionKeyV6{Protocol: 17, SrcPort: 1234, DstPort: 53}
 	forward.SrcIP[15] = 1
