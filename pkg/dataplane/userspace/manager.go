@@ -554,7 +554,7 @@ func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error 
 		}
 	}
 	return fmt.Errorf(
-		"%w: userspace helper config snapshot protocol version %d does not support policy scheduler snapshots (want >= %d)",
+		"%w: helper config snapshot protocol version %d < required %d for policy scheduler snapshots",
 		ErrPolicySchedulerProtocolIncompatible,
 		m.lastStatus.ConfigSnapshotProtocolVersion,
 		ProtocolVersion,

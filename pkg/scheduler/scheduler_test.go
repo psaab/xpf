@@ -251,6 +251,7 @@ func TestScheduler_WallClockBackwardStepStaysFailClosedUntilClockRecovers(t *tes
 	}
 	lastState = nil
 
+	// Keep wall time behind the original baseline so continuity remains unsafe.
 	s.evaluate(now.Add(-59*time.Minute), true)
 	if lastState != nil {
 		t.Fatalf("second rollback evaluation should not notify without state change, got %+v", lastState)
