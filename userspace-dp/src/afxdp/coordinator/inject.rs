@@ -91,7 +91,8 @@ impl super::Coordinator {
                                     && candidate.queue_id == ident.queue_id
                             })
                             .or_else(|| {
-                                self.workers.identities
+                                self.workers
+                                    .identities
                                     .values()
                                     .find(|candidate| candidate.ifindex == egress.bind_ifindex)
                             })
@@ -106,12 +107,18 @@ impl super::Coordinator {
                             format!("binding slot {} has no live state", target_slot)
                         })?;
                         let frame = build_injected_packet(&req, dst, resolution, egress)?;
-                        let cos = resolve_cos_tx_selection(
+                        let now_ns = monotonic_nanos();
+                        let cos_flow = parse_session_flow_from_meta(meta);
+                        let cos = resolve_cos_tx_selection_at(
                             &self.forwarding,
                             resolution.egress_ifindex,
                             meta,
-                            None,
+                            cos_flow.as_ref().map(|flow| &flow.forward_key),
+                            now_ns,
                         );
+                        if cos.drop {
+                            return Ok(());
+                        }
                         target_live.enqueue_tx(TxRequest {
                             bytes: frame,
                             expected_ports: None,

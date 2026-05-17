@@ -216,7 +216,17 @@ pub(super) fn build_local_origin_tunnel_tx_request(
         &session_entry,
         monotonic_nanos() / 1_000_000_000,
     );
-    let cos = resolve_cos_tx_selection(forwarding, decision.resolution.egress_ifindex, meta, None);
+    let now_ns = monotonic_nanos();
+    let cos = resolve_cos_tx_selection_at(
+        forwarding,
+        decision.resolution.egress_ifindex,
+        meta,
+        Some(&session_entry.key),
+        now_ns,
+    );
+    if cos.drop {
+        return Err("local_tunnel_packet_dropped_by_three_color_policer".to_string());
+    }
     Ok(LocalTunnelTxPlan {
         tx_ifindex: decision.resolution.tx_ifindex,
         tx_request: TxRequest {

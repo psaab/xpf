@@ -48,7 +48,18 @@ pub(super) fn build_local_time_exceeded_request(
         _ => return None,
     }?;
 
-    let cos = resolve_cos_tx_selection(forwarding, ingress_ident.ifindex, meta, None);
+    let now_ns = monotonic_nanos();
+    let cos_flow = parse_session_flow_from_meta(meta);
+    let cos = resolve_cos_tx_selection_at(
+        forwarding,
+        ingress_ident.ifindex,
+        meta,
+        cos_flow.as_ref().map(|flow| &flow.forward_key),
+        now_ns,
+    );
+    if cos.drop {
+        return None;
+    }
     Some(PendingForwardRequest {
         target_ifindex,
         target_binding_index: None,
