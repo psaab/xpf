@@ -43,6 +43,14 @@ class MouseLatencyShellTests(unittest.TestCase):
         self.assertIn('CWND_SETTLE_OK="false"', SCRIPT)
         self.assertIn('settle_ok = None', SCRIPT)
         self.assertIn('"cwnd_settle_ok": settle_ok', SCRIPT)
+        self.assertRegex(
+            SCRIPT,
+            re.compile(
+                r'if \[\[ \$pull_rc -ne 0 \|\| ! -s "\$\{OUT_DIR\}/iperf3-settle\.txt" \]\]; then\s+'
+                r'invalidate "iperf3-settle-pull-failed"',
+                re.MULTILINE,
+            ),
+        )
         self.assertIn('"status": "INVALID"', SCRIPT)
         self.assertIn('write_invalid_manifest "$reason"', SCRIPT)
 

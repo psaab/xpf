@@ -349,7 +349,6 @@ if [[ "$N" -gt 0 ]]; then
     # Distinguish pull failure from a real cwnd-not-settled (Copilot R2 #1):
     # the cwnd-settle gate fires only when we actually have iperf3 output.
     if [[ $pull_rc -ne 0 || ! -s "${OUT_DIR}/iperf3-settle.txt" ]]; then
-        CWND_SETTLE_OK="false"
         invalidate "iperf3-settle-pull-failed"
     fi
     set +e

@@ -3,7 +3,7 @@
 ## 2026-05-17
 
 - **Timestamp**: 2026-05-17T15:28:13Z
-  - **Action**: PR #1359/#1365 follow-up — fixed mouse-latency diagnostics review findings by making `cwnd_settle_ok` tri-state in manifests (unknown/true/false), correcting cwnd byte-unit parsing to 1024-based `K/M/G/TBytes`, recording probe phase timings even on failed/timed-out connect/drain/read attempts, tightening fairness-regimes settle-evidence wording, and extending unit coverage for settle-diagnostics CLI output/status and failure-phase timing counts.
+  - **Action**: PR #1397 follow-up — fixed mouse-latency diagnostics review findings by making `cwnd_settle_ok` tri-state in manifests (unknown/true/false), correcting cwnd byte-unit parsing to 1024-based `K/M/G/TBytes`, recording probe phase timings even on failed/timed-out connect/drain/read attempts, tightening fairness-regimes settle-evidence wording, and extending unit coverage for settle-diagnostics CLI output/status and failure-phase timing counts.
   - **File(s)**: `test/incus/test-mouse-latency.sh`, `test/incus/mouse_latency_orchestrate.py`, `test/incus/mouse_latency_orchestrate_test.py`, `test/incus/mouse_latency_probe.py`, `test/incus/mouse_latency_probe_test.py`, `test/incus/test_mouse_latency_shell_test.py`, `docs/fairness-regimes.md`, `_Log.md`
   - **Validation**: `cd test/incus && python3 -m unittest mouse_latency_orchestrate_test.py mouse_latency_aggregate_test.py test_mouse_latency_shell_test.py && python3 -m unittest mouse_latency_probe_test.py && bash -n test-mouse-latency.sh`; `python3 -m py_compile test/incus/mouse_latency_orchestrate.py test/incus/mouse_latency_probe.py test/incus/mouse_latency_aggregate.py`; `git diff --check`
 
