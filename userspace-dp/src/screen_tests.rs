@@ -593,7 +593,8 @@ fn extract_screen_info_ipv6_first_fragment() {
     let mut frame = vec![0u8; 14 + 40 + 8];
     // IPv6 first byte: version=6 in top nibble
     frame[14] = 0x60;
-    frame[14 + 6] = 44; // NextHdr = FRAGMENT
+    // NextHdr = FRAGMENT
+    frame[14 + 6] = 44;
     // Fragment header at offset 14+40 = 54: nexthdr=6 (TCP), reserved=0,
     // frag_off (MF=1, offset=0) = 0x0001 in big-endian.
     let frag_off_pos = 14 + 40 + 2;
@@ -929,6 +930,34 @@ fn syn_cookie_tuple() -> SynCookieTuple {
 }
 
 #[test]
+fn siphash24_matches_reference_vectors() {
+    // SipHash-2-4 reference vectors for key bytes 00..0f and message bytes
+    // 00..len. These pin the private implementation used by the cookie MAC.
+    let k0 = u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]);
+    let k1 = u64::from_le_bytes([8, 9, 10, 11, 12, 13, 14, 15]);
+    let vectors = [
+        (0usize, 0x726f_db47_dd0e_0e31u64),
+        (1, 0x74f8_39c5_93dc_67fdu64),
+        (8, 0x93f5_f579_9a93_2462u64),
+        (15, 0xa129_ca61_49be_45e5u64),
+    ];
+
+    for (len, expected) in vectors {
+        let mut sip = SipHash24::new(k0, k1);
+        let bytes: Vec<u8> = (0..len as u8).collect();
+        sip.write_bytes(&bytes);
+        assert_eq!(sip.finish(), expected, "SipHash-2-4 vector length {len}");
+    }
+}
+
+#[test]
+fn syn_cookie_layout_fills_tcp_isn() {
+    assert_eq!(SYN_COOKIE_LAYOUT_BITS, SYN_COOKIE_ISN_BITS);
+    assert_eq!(SYN_COOKIE_EPOCH_SHIFT, 27);
+    assert_eq!(SYN_COOKIE_MSS_SHIFT, 24);
+}
+
+#[test]
 fn syn_cookie_tuple_from_packet_matches_packet_flow() {
     let pkt = tcp_pkt(
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
@@ -1042,11 +1071,9 @@ fn syn_cookie_epoch_low_bits_wrap_rejects_32_epoch_old_cookie() {
     let cookie = codec.mint_isn(tuple, 7, old_epoch, 1460);
 
     assert_eq!(old_epoch & 0x1f, current_epoch & 0x1f);
-    assert!(
-        codec
-            .validate_isn(tuple, 7, current_epoch, cookie)
-            .is_none()
-    );
+    assert!(codec
+        .validate_isn(tuple, 7, current_epoch, cookie)
+        .is_none());
 }
 
 #[test]

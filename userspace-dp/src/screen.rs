@@ -33,11 +33,18 @@ const TCP_URG: u8 = 0x20;
 const SYN_COOKIE_EPOCH_BITS: u32 = 5;
 const SYN_COOKIE_MSS_BITS: u32 = 3;
 const SYN_COOKIE_MAC_BITS: u32 = 24;
+const SYN_COOKIE_ISN_BITS: u32 = 32;
+const SYN_COOKIE_LAYOUT_BITS: u32 =
+    SYN_COOKIE_EPOCH_BITS + SYN_COOKIE_MSS_BITS + SYN_COOKIE_MAC_BITS;
 const SYN_COOKIE_EPOCH_MASK: u32 = (1 << SYN_COOKIE_EPOCH_BITS) - 1;
 const SYN_COOKIE_MSS_MASK: u32 = (1 << SYN_COOKIE_MSS_BITS) - 1;
 const SYN_COOKIE_MAC_MASK: u32 = (1 << SYN_COOKIE_MAC_BITS) - 1;
 const SYN_COOKIE_EPOCH_SHIFT: u32 = SYN_COOKIE_MSS_BITS + SYN_COOKIE_MAC_BITS;
 const SYN_COOKIE_MSS_SHIFT: u32 = SYN_COOKIE_MAC_BITS;
+const SYN_COOKIE_MAC_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sync");
+const SYN_COOKIE_SECRET_LEFT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sck0");
+const SYN_COOKIE_SECRET_RIGHT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sck1");
+const _: [(); SYN_COOKIE_ISN_BITS as usize] = [(); SYN_COOKIE_LAYOUT_BITS as usize];
 
 /// Three-bit MSS table encoded in userspace SYN cookies.
 ///
@@ -159,7 +166,7 @@ impl SynCookieCodec {
     ) -> u32 {
         let secret = self.epoch_secret(zone_id, full_epoch);
         let mut sip = SipHash24::new(secret[0], secret[1]);
-        sip.write_u64(0x7870_662d_7379_6e63);
+        sip.write_u64(SYN_COOKIE_MAC_DOMAIN);
         sip.write_u16(zone_id);
         sip.write_u64(full_epoch);
         sip.write_u8(mss_index);
@@ -175,12 +182,12 @@ impl SynCookieCodec {
         let k1 = u64::from_le_bytes(self.master_key[8..16].try_into().expect("fixed slice"));
 
         let mut left = SipHash24::new(k0, k1);
-        left.write_u64(0x7870_662d_7363_6b30);
+        left.write_u64(SYN_COOKIE_SECRET_LEFT_DOMAIN);
         left.write_u16(zone_id);
         left.write_u64(full_epoch);
 
         let mut right = SipHash24::new(k0, k1);
-        right.write_u64(0x7870_662d_7363_6b31);
+        right.write_u64(SYN_COOKIE_SECRET_RIGHT_DOMAIN);
         right.write_u16(zone_id);
         right.write_u64(full_epoch);
 
