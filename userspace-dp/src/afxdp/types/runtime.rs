@@ -335,7 +335,13 @@ pub(in crate::afxdp) struct TelemetryContext<'a> {
 #[derive(Clone, Default)]
 pub(crate) struct MirrorTargetMap {
     by_if_queue: FastMap<(i32, u32), Arc<BindingLiveState>>,
-    first_by_if: FastMap<i32, Arc<BindingLiveState>>,
+    by_if: FastMap<i32, MirrorTargetIfEntry>,
+}
+
+#[derive(Clone)]
+struct MirrorTargetIfEntry {
+    live: Arc<BindingLiveState>,
+    count: usize,
 }
 
 impl MirrorTargetMap {
@@ -346,7 +352,10 @@ impl MirrorTargetMap {
     ) {
         self.by_if_queue
             .insert((ident.ifindex, ident.queue_id), live.clone());
-        self.first_by_if.entry(ident.ifindex).or_insert(live);
+        self.by_if
+            .entry(ident.ifindex)
+            .and_modify(|entry| entry.count = entry.count.saturating_add(1))
+            .or_insert(MirrorTargetIfEntry { live, count: 1 });
     }
 
     pub(in crate::afxdp) fn target_live(
@@ -357,6 +366,11 @@ impl MirrorTargetMap {
         self.by_if_queue
             .get(&(egress_ifindex, ingress_queue_id))
             .cloned()
-            .or_else(|| self.first_by_if.get(&egress_ifindex).cloned())
+            .or_else(|| {
+                self.by_if
+                    .get(&egress_ifindex)
+                    .filter(|entry| entry.count == 1)
+                    .map(|entry| entry.live.clone())
+            })
     }
 }

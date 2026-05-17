@@ -64,9 +64,11 @@ Mirror selection resolves VLAN ingress to the logical ifindex before falling
 back to the parent ifindex. Same-worker output copies the full L2 frame into an
 output binding TX frame and queues the clone as a prepared TX request;
 cross-worker output uses the target binding's live redirect inbox with an owned
-full-frame clone. Mirror clones carry the output CoS default/classified queue
-without DSCP rewrite, and CoS-bound leftovers are dropped rather than allowed to
-escape through backup TX. The clone path keeps a TX-frame reserve and a small
+full-frame clone. Multi-queue mirror outputs require an exact output queue match;
+the single-binding fallback is used only when that output ifindex has no queue
+ambiguity. Mirror clones carry the output CoS default/classified queue without
+DSCP rewrite, and CoS-bound leftovers are dropped rather than allowed to escape
+through backup TX. The clone path keeps a TX-frame reserve and a small
 pending-backlog limit so mirror pressure is lossy and does not become a primary
 forwarding dependency.
 
@@ -83,7 +85,8 @@ pressure.
   primary forwarding.
 - Cross-binding ownership: cloned descriptors must use the same recycle/UMEM
   routing discipline as forwarding descriptors; a mirror drop must not return a
-  frame to the wrong binding.
+  frame to the wrong binding. Ambiguous multi-queue output bindings fail closed
+  as `mirror_drops_no_binding` rather than falling back to an arbitrary queue.
 - Full-frame fidelity: mirror output must preserve Ethernet/VLAN bytes. Any
   L3-only fallback path silently breaks packet capture/debug workflows.
 - Sampling ambiguity: per-binding sampling is cheaper than global exact
@@ -93,6 +96,8 @@ pressure.
 
 - Cargo: `mirror::sampling_rate_correctness`.
 - Cargo: `mirror::cross_binding_inject_preserves_full_frame`.
+- Cargo: `mirror::cross_binding_mirror_requires_exact_queue_when_output_is_multiqueue`.
+- Cargo: `mirror::live_mirror_requires_exact_queue_when_output_is_multiqueue`.
 - Cargo: `mirror::out_of_frame_drops_increment_counter`.
 - Cargo: `mirror::missing_destination_binding_drop_counter`.
 - Cargo: `mirror::queue_full_drop_counter`.

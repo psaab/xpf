@@ -1094,6 +1094,18 @@ impl BindingLiveState {
         self.try_push_redirect_inbox(req)
     }
 
+    pub(super) fn try_admit_tx_owned(&self) -> Result<(), ()> {
+        let pending_len = self.pending_tx.len();
+        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
+        if (max_pending > 0 && pending_len >= max_pending)
+            || pending_len >= self.pending_tx.capacity()
+        {
+            self.record_redirect_inbox_overflow();
+            return Err(());
+        }
+        Ok(())
+    }
+
     /// Shared push path for `enqueue_tx` and `enqueue_tx_owned`.
     /// Drop-newest on overflow: if the soft cap or ring hard cap is hit,
     /// drop the incoming request and bump the overflow counters. This is
