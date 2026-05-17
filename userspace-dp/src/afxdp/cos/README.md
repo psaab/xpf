@@ -88,4 +88,7 @@ mod.rs for further file-level breakdown.
   configured, otherwise the same `default_cos_burst_bytes` root-burst
   fallback used by the shaper. The legacy `buffer_size_bytes` protocol
   field still wins when present; `buffer_size_percent` is additive for
-  #1336 compatibility.
+  #1336 compatibility. Go-side config validation rejects per-interface
+  scheduler-map percent totals above 100%, so Rust only receives
+  already-admitted percent allocations. xpf rejects `0%` before the
+  snapshot because zero is the additive field's legacy absent value.

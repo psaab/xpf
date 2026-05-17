@@ -772,7 +772,12 @@ resolved per interface as that percentage of the interface CoS burst
 pool: the explicit `shaping-rate burst-size` when present, otherwise the
 userspace default root burst (`max(shaping_rate_bytes / 100, 64 * MTU)`).
 If both protocol fields are present, `buffer_size_bytes` keeps precedence
-for compatibility with existing snapshots.
+for compatibility with existing snapshots. For each interface unit, the
+sum of percent buffers across the scheduler-map entries bound to that
+unit must be at most 100% of the interface CoS burst pool. xpf
+intentionally rejects `buffer-size 0%` even though Junos accepts it,
+because zero is the legacy absent-field value on the userspace protocol
+and runtime queues still retain a minimum burst floor.
 
 ### Current Userspace Test Recipe
 

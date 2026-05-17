@@ -44,7 +44,10 @@ nothing internal.
   `BufferSizeBytes`; the userspace snapshot adds `buffer_size_percent`
   while preserving the legacy `buffer_size_bytes` field. The Rust
   userspace dataplane resolves percent buffers against the interface CoS
-  burst pool when a scheduler is bound to an interface queue.
+  burst pool when a scheduler is bound to an interface queue. The strict
+  config pass rejects scheduler-map percent totals above 100% on one
+  interface unit. xpf rejects Junos `0%` intentionally because the
+  additive wire field uses zero as the legacy absent value.
   `parseBandwidthLimitStrict` / `parseBurstSizeLimitStrict` /
   `parseScaledDecimalUnitStrict` in `compiler_protocols.go` are the
   error-returning siblings of the legacy zero-return parsers — the legacy

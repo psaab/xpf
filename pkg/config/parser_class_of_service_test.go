@@ -199,6 +199,62 @@ func TestCompileClassOfServicePercentBufferSize(t *testing.T) {
 	}
 }
 
+func TestCompileClassOfServiceRejectsAggregatePercentBuffersOver100PerInterface(t *testing.T) {
+	tree := &ConfigTree{}
+	lines := []string{
+		"set class-of-service forwarding-classes queue 0 best-effort",
+		"set class-of-service forwarding-classes queue 1 expedited-forwarding",
+		"set class-of-service schedulers be-sched buffer-size 75%",
+		"set class-of-service schedulers ef-sched buffer-size 75%",
+		"set class-of-service scheduler-maps edge-map forwarding-class best-effort scheduler be-sched",
+		"set class-of-service scheduler-maps edge-map forwarding-class expedited-forwarding scheduler ef-sched",
+		"set class-of-service interfaces ge-0/0/2 unit 0 scheduler-map edge-map",
+	}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("expected aggregate percent buffer-size error, got nil")
+	}
+	for _, want := range []string{"sum of buffer-size percent", "150", "100"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+}
+
+func TestCompileClassOfServiceAllowsAggregatePercentBuffersAt100PerInterface(t *testing.T) {
+	tree := &ConfigTree{}
+	lines := []string{
+		"set class-of-service forwarding-classes queue 0 best-effort",
+		"set class-of-service forwarding-classes queue 1 expedited-forwarding",
+		"set class-of-service schedulers be-sched buffer-size 25%",
+		"set class-of-service schedulers ef-sched buffer-size 75%",
+		"set class-of-service scheduler-maps edge-map forwarding-class best-effort scheduler be-sched",
+		"set class-of-service scheduler-maps edge-map forwarding-class expedited-forwarding scheduler ef-sched",
+		"set class-of-service interfaces ge-0/0/2 unit 0 scheduler-map edge-map",
+	}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("CompileConfig at 100%% aggregate: %v", err)
+	}
+}
+
 func TestCompileClassOfServiceEqualFlowEnforcementRequiresPositiveExactRate(t *testing.T) {
 	tests := []struct {
 		name  string

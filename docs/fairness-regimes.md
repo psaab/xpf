@@ -375,7 +375,11 @@ not treat that as a byte value of zero: the Go snapshot carries
 percentage of the interface CoS burst pool before queue admission and
 token-bucket runtime state are built. For the fairness fixtures above,
 the explicit byte sizes remain intentional so the queue residence tradeoff
-is visible in the config.
+is visible in the config. Percent buffers are validated per interface
+unit: scheduler-map entries bound to the same unit cannot total more than
+100% of that unit's CoS burst pool. xpf rejects the Junos-accepted `0%`
+form because the additive userspace protocol uses zero as the absent
+field value and the runtime still applies a minimum queue burst floor.
 
 ```bash
 COS_IFINDEX=<egress-ifindex> \

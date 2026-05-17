@@ -71,7 +71,7 @@ func ValidateByteSizeOrPercent(raw string, _ *Config) error {
 	trimmed := strings.TrimSpace(raw)
 	if strings.HasSuffix(trimmed, "%") {
 		if _, err := parsePercentWithSuffixStrict(trimmed); err != nil {
-			return fmt.Errorf("not a valid percent buffer-size (expected 1%%..100%%): %w", err)
+			return fmt.Errorf("not a valid percent buffer-size (expected >0%%..100%%; xpf rejects Junos 0%% because zero is the legacy absent-field value): %w", err)
 		}
 		return nil
 	}

@@ -61,7 +61,10 @@ or Junos percent values with an explicit `%` suffix. Percent values are
 compiled into a distinct `buffer_size_percent` snapshot field (#1336);
 the userspace runtime converts them to bytes per interface using the
 resolved CoS burst pool. Bare integers remain rejected because
-`buffer-size 50` is ambiguous between bytes and percent.
+`buffer-size 50` is ambiguous between bytes and percent. The aggregate
+percent buffers for scheduler-map entries bound to one interface unit
+must be `<= 100%`. xpf also rejects Junos `0%` because zero is the
+legacy absent-field value on the additive userspace protocol field.
 
 Adding a new typed subtree means:
 
