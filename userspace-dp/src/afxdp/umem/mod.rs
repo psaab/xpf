@@ -1106,6 +1106,22 @@ impl BindingLiveState {
         Ok(())
     }
 
+    pub(super) fn try_admit_mirror_tx_owned(&self, mirror_pending_limit: usize) -> Result<(), ()> {
+        let pending_len = self.pending_tx.len();
+        let mut admission_cap = self.pending_tx.capacity();
+        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
+        if max_pending > 0 {
+            admission_cap = admission_cap.min(max_pending);
+        }
+        if mirror_pending_limit > 0 {
+            admission_cap = admission_cap.min(mirror_pending_limit);
+        }
+        if pending_len >= admission_cap {
+            return Err(());
+        }
+        Ok(())
+    }
+
     /// Shared push path for `enqueue_tx` and `enqueue_tx_owned`.
     /// Drop-newest on overflow: if the soft cap or ring hard cap is hit,
     /// drop the incoming request and bump the overflow counters. This is

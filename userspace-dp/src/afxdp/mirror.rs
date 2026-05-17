@@ -202,7 +202,10 @@ pub(in crate::afxdp) fn admit_mirror_clone_to_live(
     else {
         return Err(MirrorCloneResult::NoBinding);
     };
-    if target_live.try_admit_tx_owned().is_err() {
+    if target_live
+        .try_admit_mirror_tx_owned(MIRROR_PENDING_LIMIT)
+        .is_err()
+    {
         return Err(MirrorCloneResult::QueueFull);
     }
     Ok(target_live)
@@ -615,6 +618,58 @@ mod tests {
         target_live.take_pending_tx_into(&mut queued);
         assert_eq!(queued.len(), 1);
         assert_eq!(queued.pop_front().expect("original request").bytes, vec![0x11; 64]);
+    }
+
+    #[test]
+    fn live_mirror_queue_full_reserves_headroom_above_mirror_limit() {
+        let target_live = Arc::new(BindingLiveState::new());
+        target_live.set_max_pending_tx((MIRROR_PENDING_LIMIT * 2) as u32);
+        for _ in 0..MIRROR_PENDING_LIMIT {
+            assert!(
+                target_live
+                    .try_enqueue_tx_owned(TxRequest {
+                        bytes: vec![0x11; 64],
+                        expected_ports: None,
+                        expected_addr_family: libc::AF_INET as u8,
+                        expected_protocol: PROTO_TCP,
+                        flow_key: None,
+                        egress_ifindex: 22,
+                        cos_queue_id: None,
+                        dscp_rewrite: None,
+                    })
+                    .is_ok()
+            );
+        }
+        let mut mirror_targets = MirrorTargetMap::default();
+        mirror_targets.insert(
+            &BindingIdentity {
+                slot: 9,
+                queue_id: 0,
+                worker_id: 1,
+                interface: Arc::<str>::from("mirror-out"),
+                ifindex: 22,
+            },
+            target_live.clone(),
+        );
+
+        let result = enqueue_mirror_clone_to_live(
+            &mirror_targets,
+            MirrorRuntimeConfig {
+                output_ifindex: 22,
+                rate: 0,
+            },
+            22,
+            0,
+            &[0x22; 64],
+            test_meta(),
+            None,
+            None,
+        );
+
+        assert_eq!(result, MirrorCloneResult::QueueFull);
+        let mut queued = VecDeque::new();
+        target_live.take_pending_tx_into(&mut queued);
+        assert_eq!(queued.len(), MIRROR_PENDING_LIMIT);
     }
 
     #[test]

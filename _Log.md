@@ -787,3 +787,11 @@
 - **Timestamp**: 2026-05-17T20:21:00Z
   - **Action**: Updated mirror counter comments to match actual NoFrame/NoBinding semantics.
   - **File(s)**: userspace-dp/src/afxdp/umem/mod.rs
+
+- **Timestamp**: 2026-05-17T21:28:00Z
+  - **Action**: Added cross-worker mirror admission cap path to enforce mirror-specific pending limit before redirect-inbox enqueue.
+  - **File(s)**: userspace-dp/src/afxdp/umem/mod.rs, userspace-dp/src/afxdp/mirror.rs
+
+- **Timestamp**: 2026-05-17T21:29:00Z
+  - **Action**: Updated #1376 plan test/runtime notes to match implemented mirror tests and cross-worker limit semantics.
+  - **File(s)**: docs/pr/1373-retire-ebpf-dataplane/plan-1376-port-mirroring.md

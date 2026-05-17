@@ -63,8 +63,9 @@ covering the miss/pending-forward path and the self-target flow-cache fast path.
 Mirror selection resolves VLAN ingress to the logical ifindex before falling
 back to the parent ifindex. Same-worker output copies the full L2 frame into an
 output binding TX frame and queues the clone as a prepared TX request;
-cross-worker output uses the target binding's live redirect inbox with an owned
-full-frame clone. Multi-queue mirror outputs require an exact output queue match;
+ cross-worker output uses the target binding's live redirect inbox with an owned
+ full-frame clone and the same small mirror-specific pending limit used by the
+ same-worker path. Multi-queue mirror outputs require an exact output queue match;
 the single-binding fallback is used only when that output ifindex has no queue
 ambiguity. Mirror clones carry the output CoS default/classified queue without
 DSCP rewrite, and CoS-bound leftovers are dropped rather than allowed to escape
@@ -101,8 +102,9 @@ pressure.
 - Cargo: `mirror::out_of_frame_drops_increment_counter`.
 - Cargo: `mirror::missing_destination_binding_drop_counter`.
 - Cargo: `mirror::queue_full_drop_counter`.
-- Cargo: `mirror::duplicate_ingress_ifindex_rejected`.
-- Cargo: `mirror::ipv4_ipv6_full_frame_preservation`.
+- Cargo: `mirror::cross_worker_live_enqueue_preserves_full_frame`.
+- Cargo: `mirror::mirror_output_logical_ifindex_resolves_parent_binding`.
+- Cargo: `mirror::sampled_live_mirror_resolves_snapshot_logical_ingress_and_output`.
 - Go: userspace snapshot round-trip for mirror config.
 - Go/Rust: status/counter wire round-trips include
   `mirrored_packets`, `mirrored_bytes`, `mirror_drops_no_frame`,
