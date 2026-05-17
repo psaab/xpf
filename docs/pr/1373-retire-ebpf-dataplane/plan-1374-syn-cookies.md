@@ -21,11 +21,14 @@ SYN cookie behavior in `userspace-dp`.
 - #1393 landed the deterministic userspace cookie codec/layout and codec tests.
 - This runtime slice carries `syn_cookie` through Go and Rust screen snapshots,
   adds a fail-closed screen challenge verdict when no HA-safe secret is
-  published, preallocates a bounded validated-client cache, and validates
-  returning ACKs only after normal session lookup misses.
+  published, uses a fixed-size keyed validated-client table for
+  attacker-controlled tuples, and validates returning ACKs only after normal
+  session lookup misses.
 - The AF_XDP hook currently consumes valid cookie ACKs and drops invalid cookie
   ACKs while cookie mode is active. `SynCookieChallenge` is still accounted as a
   screen drop instead of transmitting a SYN-ACK.
+- This PR is therefore a SYN-cookie validation/admission runtime slice, not the
+  full SYN-ACK/RST TX implementation.
 - The userspace capability gate remains in place until bounded SYN-ACK TX, ACK
   RST emission, HA-safe secret publication, counters/status, and integration
   validation land.
@@ -77,10 +80,13 @@ On returning ACK:
 
 - No heap allocation while deciding SYN cookie mint or ACK validation.
 - SipHash key lookup is per-zone and read-only on the published snapshot.
+- Validated-client state is a fixed-size keyed table; attacker-controlled
+  tuples do not enter `FxHashMap` or an unbounded queue.
+- Per-zone SYN-cookie active/counter state is config-bound and prepopulated on
+  profile updates, so packet processing does not allocate zone strings.
 - Cookie reply frame allocation is bounded; normal forwarding frame ownership
   takes priority over diagnostic/flood replies.
 - Random ACKs never install sessions.
-- Validated-client state uses a bounded LRU or equivalent capped table.
 
 ## State and HA Behavior
 
@@ -125,7 +131,11 @@ On returning ACK:
 - Cargo: `screen::syn_cookie_invalid_ack_does_not_validate_client`.
 - Cargo: `screen::syn_cookie_ack_fin_is_invalid_while_cookie_mode_is_active`.
 - Cargo: `screen::syn_cookie_validated_cache_is_bounded`.
-- Cargo: `screen::syn_cookie_budget_drop_does_not_starve_tx`.
+- Cargo: `screen::syn_cookie_validated_cache_index_is_keyed`.
+- Cargo: `screen::syn_cookie_invalid_ack_flood_does_not_grow_validated_cache`.
+- Cargo: `screen::syn_cookie_master_key_rotation_clears_validated_cache`.
+- Cargo: `screen::update_profiles_prepopulates_syn_cookie_active_state`.
+- Cargo: `screen::syn_cookie_validated_cache_refresh_extends_ttl`.
 - Go: while the gate remains, keep the `SynFloodProtectionMode == "syn-cookie"`
   capability rejection pinned and verify screen snapshots carry `syn_cookie` for
   the runtime path.

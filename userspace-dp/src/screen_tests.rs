@@ -1342,19 +1342,139 @@ fn syn_cookie_ack_fin_is_invalid_while_cookie_mode_is_active() {
 
 #[test]
 fn syn_cookie_validated_cache_is_bounded() {
-    let mut cache = SynCookieValidatedCache::new(2, 64);
-    let mut tuple = syn_cookie_tuple();
-    cache.insert(7, tuple, 100);
-    tuple.src_port += 1;
-    cache.insert(7, tuple, 100);
-    tuple.src_port += 1;
-    cache.insert(7, tuple, 100);
+    let mut cache = SynCookieValidatedCache::new(4, 64);
+    assert_eq!(cache.capacity(), 4);
 
-    assert_eq!(cache.len(), 2);
+    let mut tuple = syn_cookie_tuple();
+    for port in 40000..40032 {
+        tuple.src_port = port;
+        cache.insert(7, tuple, 100);
+    }
+
+    assert_eq!(cache.len(), 4);
     let mut evicted = syn_cookie_tuple();
+    evicted.src_port = 40000;
     assert!(!cache.take_valid(7, evicted, 100));
-    evicted.src_port += 1;
-    assert!(cache.take_valid(7, evicted, 100));
+    evicted.src_port = 40027;
+    assert!(!cache.take_valid(7, evicted, 100));
+
+    let mut retained = syn_cookie_tuple();
+    retained.src_port = 40028;
+    assert!(cache.take_valid(7, retained, 100));
+    retained.src_port = 40031;
+    assert!(cache.take_valid(7, retained, 100));
+}
+
+#[test]
+fn syn_cookie_validated_cache_index_is_keyed() {
+    let mut left = SynCookieValidatedCache::new(64, 64);
+    left.set_hash_keys([0x1111_2222_3333_4444, 0x5555_6666_7777_8888]);
+    let mut right = SynCookieValidatedCache::new(64, 64);
+    right.set_hash_keys([0x9999_aaaa_bbbb_cccc, 0xdddd_eeee_ffff_0000]);
+
+    let mut tuple = syn_cookie_tuple();
+    let differs = (0..1024).any(|offset| {
+        tuple.src_port = 30000 + offset;
+        left.debug_set_index(7, tuple) != right.debug_set_index(7, tuple)
+    });
+
+    assert!(
+        differs,
+        "cache slot selection must be keyed rather than attacker-predictable"
+    );
+}
+
+#[test]
+fn syn_cookie_invalid_ack_flood_does_not_grow_validated_cache() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    assert!(matches!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::SynCookieChallenge(_)
+    ));
+
+    for offset in 0..1024 {
+        let mut ack = syn.clone();
+        ack.tcp_flags = TCP_ACK;
+        ack.src_port = 30000 + offset;
+        ack.tcp_ack = 0xdead_0000u32.wrapping_add(offset as u32);
+        assert_eq!(
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128),
+            SynCookieAckVerdict::Invalid
+        );
+    }
+
+    assert_eq!(state.syn_cookie_validated_len(), 0);
+}
+
+#[test]
+fn syn_cookie_master_key_rotation_clears_validated_cache() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    let challenge = match state.check_packet_with_zone_id("trust", 7, &syn, 128) {
+        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+        other => panic!("expected SYN-cookie challenge, got {other:?}"),
+    };
+    let mut ack = syn.clone();
+    ack.tcp_flags = TCP_ACK;
+    ack.tcp_ack = challenge.cookie_isn.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128),
+        SynCookieAckVerdict::Validated
+    );
+    assert_eq!(state.syn_cookie_validated_len(), 1);
+
+    state.update_syn_cookie_master_key(None);
+
+    assert_eq!(state.syn_cookie_validated_len(), 0);
+}
+
+#[test]
+fn update_profiles_prepopulates_syn_cookie_active_state() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile.clone());
+    assert_eq!(state.syn_cookie_active_zone_count(), 1);
+
+    let mut profiles = FxHashMap::default();
+    profiles.insert("trust".to_string(), profile.clone());
+    profiles.insert("untrust".to_string(), profile);
+    state.update_profiles(profiles);
+    assert_eq!(state.syn_cookie_active_zone_count(), 2);
+
+    state.update_profiles(FxHashMap::default());
+    assert_eq!(state.syn_cookie_active_zone_count(), 0);
 }
 
 #[test]

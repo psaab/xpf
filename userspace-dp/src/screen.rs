@@ -17,7 +17,6 @@
 //! - SYN flood (per-zone rate)
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::VecDeque;
 use std::net::IpAddr;
 
 const PROTO_TCP: u8 = 6;
@@ -46,7 +45,10 @@ const SYN_COOKIE_MSS_SHIFT: u32 = SYN_COOKIE_MAC_BITS;
 const SYN_COOKIE_MAC_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sync");
 const SYN_COOKIE_SECRET_LEFT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sck0");
 const SYN_COOKIE_SECRET_RIGHT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sck1");
+const SYN_COOKIE_CACHE_LEFT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-scv0");
+const SYN_COOKIE_CACHE_RIGHT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-scv1");
 const SYN_COOKIE_VALIDATED_CACHE_CAPACITY: usize = 4096;
+const SYN_COOKIE_VALIDATED_CACHE_WAYS: usize = 4;
 const SYN_COOKIE_VALIDATED_CACHE_TTL_SECS: u64 = SynCookieCodec::EPOCH_SECS;
 const _: [(); SYN_COOKIE_ISN_BITS as usize] = [(); SYN_COOKIE_LAYOUT_BITS as usize];
 
@@ -209,6 +211,19 @@ impl SynCookieCodec {
         right.write_u64(SYN_COOKIE_SECRET_RIGHT_DOMAIN);
         right.write_u16(zone_id);
         right.write_u64(full_epoch);
+
+        [left.finish(), right.finish()]
+    }
+
+    fn cache_hash_keys(&self) -> [u64; 2] {
+        let k0 = u64::from_le_bytes(self.master_key[0..8].try_into().expect("fixed slice"));
+        let k1 = u64::from_le_bytes(self.master_key[8..16].try_into().expect("fixed slice"));
+
+        let mut left = SipHash24::new(k0, k1);
+        left.write_u64(SYN_COOKIE_CACHE_LEFT_DOMAIN);
+
+        let mut right = SipHash24::new(k0, k1);
+        right.write_u64(SYN_COOKIE_CACHE_RIGHT_DOMAIN);
 
         [left.finish(), right.finish()]
     }
@@ -568,14 +583,29 @@ struct SynCookieValidatedKey {
 struct SynCookieValidatedEntry {
     key: SynCookieValidatedKey,
     expires_secs: u64,
+    age: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SynCookieValidatedSet {
+    entries: [Option<SynCookieValidatedEntry>; SYN_COOKIE_VALIDATED_CACHE_WAYS],
+}
+
+impl Default for SynCookieValidatedSet {
+    fn default() -> Self {
+        Self {
+            entries: [None; SYN_COOKIE_VALIDATED_CACHE_WAYS],
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct SynCookieValidatedCache {
-    entries: FxHashMap<SynCookieValidatedKey, u64>,
-    queue: VecDeque<SynCookieValidatedEntry>,
-    capacity: usize,
+    sets: Box<[SynCookieValidatedSet]>,
     ttl_secs: u64,
+    hash_keys: [u64; 2],
+    len: usize,
+    clock: u64,
 }
 
 impl Default for SynCookieValidatedCache {
@@ -589,77 +619,136 @@ impl Default for SynCookieValidatedCache {
 
 impl SynCookieValidatedCache {
     fn new(capacity: usize, ttl_secs: u64) -> Self {
+        let set_count = capacity.div_ceil(SYN_COOKIE_VALIDATED_CACHE_WAYS);
         Self {
-            entries: FxHashMap::default(),
-            queue: VecDeque::with_capacity(capacity),
-            capacity,
+            sets: vec![SynCookieValidatedSet::default(); set_count].into_boxed_slice(),
             ttl_secs,
+            hash_keys: [0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908],
+            len: 0,
+            clock: 0,
         }
     }
 
     fn insert(&mut self, zone_id: u16, tuple: SynCookieTuple, now_secs: u64) {
-        if self.capacity == 0 {
+        if self.sets.is_empty() {
             return;
         }
-        self.cleanup_expired(now_secs);
         let key = SynCookieValidatedKey { zone_id, tuple };
-        let expires_secs = now_secs.saturating_add(self.ttl_secs);
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key, expires_secs);
-            self.queue
-                .push_back(SynCookieValidatedEntry { key, expires_secs });
-            return;
+        let set_index = self.set_index(&key);
+        self.clock = self.clock.wrapping_add(1);
+        let set = &mut self.sets[set_index];
+        let new_entry = SynCookieValidatedEntry {
+            key,
+            expires_secs: now_secs.saturating_add(self.ttl_secs),
+            age: self.clock,
+        };
+
+        let mut empty_or_expired = None;
+        let mut oldest_index = 0;
+        let mut oldest_age = u64::MAX;
+
+        for index in 0..SYN_COOKIE_VALIDATED_CACHE_WAYS {
+            match set.entries[index] {
+                Some(entry) if entry.key == key => {
+                    set.entries[index] = Some(new_entry);
+                    return;
+                }
+                Some(entry) if entry.expires_secs <= now_secs => {
+                    empty_or_expired.get_or_insert(index);
+                }
+                Some(entry) => {
+                    if entry.age < oldest_age {
+                        oldest_age = entry.age;
+                        oldest_index = index;
+                    }
+                }
+                None => {
+                    empty_or_expired.get_or_insert(index);
+                }
+            }
         }
-        while self.entries.len() >= self.capacity {
-            self.evict_oldest();
+
+        let replace_index = empty_or_expired.unwrap_or(oldest_index);
+        if set.entries[replace_index].is_none() {
+            self.len += 1;
         }
-        self.entries.insert(key, expires_secs);
-        self.queue
-            .push_back(SynCookieValidatedEntry { key, expires_secs });
+        set.entries[replace_index] = Some(new_entry);
     }
 
     fn take_valid(&mut self, zone_id: u16, tuple: SynCookieTuple, now_secs: u64) -> bool {
-        self.cleanup_expired(now_secs);
-        let key = SynCookieValidatedKey { zone_id, tuple };
-        if let Some(expires_secs) = self.entries.get(&key).copied()
-            && expires_secs > now_secs
-        {
-            self.entries.remove(&key);
-            return true;
+        if self.sets.is_empty() {
+            return false;
         }
-        false
-    }
+        let key = SynCookieValidatedKey { zone_id, tuple };
+        let set_index = self.set_index(&key);
+        let set = &mut self.sets[set_index];
+        let mut valid = false;
 
-    fn evict_oldest(&mut self) {
-        while let Some(entry) = self.queue.pop_front() {
-            if self.entries.get(&entry.key).copied() == Some(entry.expires_secs) {
-                self.entries.remove(&entry.key);
+        for index in 0..SYN_COOKIE_VALIDATED_CACHE_WAYS {
+            let Some(entry) = set.entries[index] else {
+                continue;
+            };
+            if entry.key == key {
+                valid = entry.expires_secs > now_secs;
+                set.entries[index] = None;
+                self.len = self.len.saturating_sub(1);
                 break;
             }
+            if entry.expires_secs <= now_secs {
+                set.entries[index] = None;
+                self.len = self.len.saturating_sub(1);
+            }
+        }
+
+        valid
+    }
+
+    fn set_hash_keys(&mut self, hash_keys: [u64; 2]) {
+        if self.hash_keys != hash_keys {
+            self.hash_keys = hash_keys;
+            self.clear();
         }
     }
 
-    fn cleanup_expired(&mut self, now_secs: u64) {
-        while let Some(entry) = self.queue.front().copied() {
-            match self.entries.get(&entry.key).copied() {
-                Some(expires_secs) if expires_secs == entry.expires_secs => {
-                    if expires_secs <= now_secs {
-                        self.entries.remove(&entry.key);
-                        self.queue.pop_front();
-                    } else {
-                        break;
-                    }
-                }
-                _ => {
-                    self.queue.pop_front();
-                }
-            }
+    fn clear(&mut self) {
+        for set in self.sets.iter_mut() {
+            *set = SynCookieValidatedSet::default();
         }
+        self.len = 0;
+        self.clock = 0;
+    }
+
+    fn set_index(&self, key: &SynCookieValidatedKey) -> usize {
+        debug_assert!(!self.sets.is_empty());
+        (self.key_hash(key) as usize) % self.sets.len()
+    }
+
+    fn key_hash(&self, key: &SynCookieValidatedKey) -> u64 {
+        let mut sip = SipHash24::new(self.hash_keys[0], self.hash_keys[1]);
+        sip.write_u16(key.zone_id);
+        sip.write_ip(key.tuple.src_ip);
+        sip.write_ip(key.tuple.dst_ip);
+        sip.write_u16(key.tuple.src_port);
+        sip.write_u16(key.tuple.dst_port);
+        sip.finish()
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.entries.len()
+        self.len
+    }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        self.sets.len() * SYN_COOKIE_VALIDATED_CACHE_WAYS
+    }
+
+    #[cfg(test)]
+    fn debug_set_index(&self, zone_id: u16, tuple: SynCookieTuple) -> Option<usize> {
+        if self.sets.is_empty() {
+            return None;
+        }
+        Some(self.set_index(&SynCookieValidatedKey { zone_id, tuple }))
     }
 }
 
@@ -705,6 +794,14 @@ impl ScreenState {
         self.syn_counters.retain(|k, _| profiles.contains_key(k));
         self.syn_cookie_active_until_secs
             .retain(|k, _| profiles.contains_key(k));
+        for zone in profiles.keys() {
+            self.icmp_counters.entry(zone.clone()).or_default();
+            self.udp_counters.entry(zone.clone()).or_default();
+            self.syn_counters.entry(zone.clone()).or_default();
+            self.syn_cookie_active_until_secs
+                .entry(zone.clone())
+                .or_insert(0);
+        }
         self.profiles = profiles;
     }
 
@@ -714,7 +811,15 @@ impl ScreenState {
     /// cookies.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn update_syn_cookie_master_key(&mut self, master_key: Option<[u8; 16]>) {
-        self.syn_cookie_codec = master_key.map(SynCookieCodec::new);
+        if let Some(master_key) = master_key {
+            let codec = SynCookieCodec::new(master_key);
+            self.syn_cookie_validated
+                .set_hash_keys(codec.cache_hash_keys());
+            self.syn_cookie_codec = Some(codec);
+        } else {
+            self.syn_cookie_codec = None;
+            self.syn_cookie_validated.clear();
+        }
     }
 
     /// Returns true if any zone has a screen profile configured.
@@ -842,17 +947,19 @@ impl ScreenState {
         if profile.icmp_flood_threshold > 0
             && (pkt.protocol == PROTO_ICMP || pkt.protocol == PROTO_ICMPV6)
         {
-            let counter = self.icmp_counters.entry(zone.to_string()).or_default();
-            if counter.increment(now_secs, profile.icmp_flood_threshold) {
-                return ScreenVerdict::Drop("icmp-flood");
+            if let Some(counter) = self.icmp_counters.get_mut(zone) {
+                if counter.increment(now_secs, profile.icmp_flood_threshold) {
+                    return ScreenVerdict::Drop("icmp-flood");
+                }
             }
         }
 
         // UDP flood
         if profile.udp_flood_threshold > 0 && pkt.protocol == PROTO_UDP {
-            let counter = self.udp_counters.entry(zone.to_string()).or_default();
-            if counter.increment(now_secs, profile.udp_flood_threshold) {
-                return ScreenVerdict::Drop("udp-flood");
+            if let Some(counter) = self.udp_counters.get_mut(zone) {
+                if counter.increment(now_secs, profile.udp_flood_threshold) {
+                    return ScreenVerdict::Drop("udp-flood");
+                }
             }
         }
 
@@ -867,13 +974,20 @@ impl ScreenState {
                         now_secs,
                     );
                 if !syn_cookie_validated {
-                    let counter = self.syn_counters.entry(zone.to_string()).or_default();
-                    if counter.increment(now_secs, profile.syn_flood_threshold) {
+                    if let Some(counter) = self.syn_counters.get_mut(zone)
+                        && counter.increment(now_secs, profile.syn_flood_threshold)
+                    {
                         if profile.syn_cookie {
-                            self.syn_cookie_active_until_secs.insert(
-                                zone.to_string(),
-                                now_secs.saturating_add(SynCookieCodec::EPOCH_SECS),
-                            );
+                            if let Some(active_until) =
+                                self.syn_cookie_active_until_secs.get_mut(zone)
+                            {
+                                *active_until = now_secs.saturating_add(SynCookieCodec::EPOCH_SECS);
+                            } else {
+                                debug_assert!(
+                                    false,
+                                    "screen profile update prepopulates SYN-cookie active state"
+                                );
+                            }
                             let Some(codec) = self.syn_cookie_codec else {
                                 return ScreenVerdict::Drop("syn-cookie-unavailable");
                             };
@@ -1006,6 +1120,11 @@ impl ScreenState {
     #[cfg(test)]
     fn syn_cookie_validated_len(&self) -> usize {
         self.syn_cookie_validated.len()
+    }
+
+    #[cfg(test)]
+    fn syn_cookie_active_zone_count(&self) -> usize {
+        self.syn_cookie_active_until_secs.len()
     }
 
     /// Notify the screen state that a new session was created. This increments
