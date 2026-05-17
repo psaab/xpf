@@ -338,6 +338,13 @@ func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {
 	// Check each scheduler-map independently and reject overcommit here
 	// so the runtime never silently over-allocates. A sum of exactly
 	// 100% is permitted (full pool allocation).
+	//
+	// A small epsilon (1e-9) guards against accumulated IEEE 754 rounding
+	// when summing multiple float64 percent values: e.g. 33.33% * 3 may
+	// round to 99.99000000000001% rather than exactly 99.99%, so the check
+	// must not reject legitimate 100%-summing configs.
+	const maxTotalBufferPercent = 100.0
+	const bufferPercentEpsilon = 1e-9
 	for _, schedMap := range cos.SchedulerMaps {
 		if schedMap == nil {
 			continue
@@ -353,7 +360,7 @@ func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {
 			}
 			totalPercent += sched.BufferSizePercent
 		}
-		if totalPercent > 100.0 {
+		if totalPercent > maxTotalBufferPercent+bufferPercentEpsilon {
 			return fmt.Errorf(
 				"class-of-service scheduler-map %q: "+
 					"sum of buffer-size percent across all schedulers is %.4g%% "+

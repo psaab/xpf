@@ -100,12 +100,12 @@ func parsePercentWithSuffixStrict(raw string) (float64, error) {
 	}
 	// xpf intentionally rejects 0% even though Junos allows it.
 	// A 0% buffer allocation compiles to zero bytes at runtime and is
-	// indistinguishable from "no buffer-size configured" — the runtime
+	// indistinguishable from "no buffer-size configured" -- the runtime
 	// would silently fall back to the default 10 ms burst calculation.
 	// Using the default path directly is unambiguous; disallowing 0%
 	// avoids silent no-op configs that look correct but do nothing.
 	if v <= 0 || v > 100 {
-		return 0, fmt.Errorf("percent out of range (0,100] (got %s); note: 0%% is not supported — omit buffer-size to use the default burst", orig)
+		return 0, fmt.Errorf("percent out of range (0,100] (got %s); note: 0%% is not supported -- omit buffer-size to use the default burst", orig)
 	}
 	return v, nil
 }
