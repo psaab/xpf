@@ -4,6 +4,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -448,7 +449,9 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		var err error
 		if compileResult, err = d.dp.Compile(cfg); err != nil {
 			d.recordCompileFailure(err)
-			return err
+			if compileErrorMustAbortApply(err) {
+				return err
+			}
 		} else {
 			d.recordCompileSuccess()
 		}
@@ -1041,4 +1044,8 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 			coalesceExplicit, coalesceEnable, coalesceRX, coalesceTX, rssAllowed)
 	}
 	return nil
+}
+
+func compileErrorMustAbortApply(err error) bool {
+	return errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible)
 }
