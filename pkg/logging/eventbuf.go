@@ -15,6 +15,10 @@ type EventRecord struct {
 	Protocol        string // "TCP", "UDP"
 	Action          string // "permit", "deny"
 	PolicyID        uint32
+	RuleID          uint32
+	TermID          uint32
+	Reason          string
+	OwnerRGID       int16
 	InZone          uint16
 	OutZone         uint16
 	ScreenCheck     string // for SCREEN_DROP
@@ -39,8 +43,8 @@ type EventBuffer struct {
 	mu    sync.RWMutex
 	buf   []EventRecord
 	size  int
-	head  int // next write position
-	count int // number of events stored
+	head  int    // next write position
+	count int    // number of events stored
 	seq   uint64 // monotonically increasing sequence number
 
 	subMu sync.RWMutex

@@ -79,6 +79,11 @@ fn test_dataplane_event_v4(kind: DataplaneEventKind) -> DataplaneEventPayload {
         kind,
         addr_family: libc::AF_INET as u8,
         protocol: 6,
+        action: if kind == DataplaneEventKind::FilterLog {
+            RT_FLOW_ACTION_PERMIT
+        } else {
+            RT_FLOW_ACTION_DENY
+        },
         src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
         src_port: 49152,
@@ -91,6 +96,10 @@ fn test_dataplane_event_v4(kind: DataplaneEventKind) -> DataplaneEventPayload {
         egress_zone_id: 9,
         ingress_ifindex: 42,
         policy_id: 101,
+        rule_id: 202,
+        term_id: 505,
+        reason: 5,
+        owner_rg_id: 2,
         application_id: 303,
         filter_id: 404,
         screen_id: 606,
@@ -103,6 +112,11 @@ fn test_dataplane_event_v6(kind: DataplaneEventKind) -> DataplaneEventPayload {
         kind,
         addr_family: libc::AF_INET6 as u8,
         protocol: 17,
+        action: if kind == DataplaneEventKind::FilterLog {
+            RT_FLOW_ACTION_PERMIT
+        } else {
+            RT_FLOW_ACTION_DENY
+        },
         src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6)),
         dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 6, 5, 4, 3, 2, 1)),
         src_port: 5353,
@@ -115,6 +129,10 @@ fn test_dataplane_event_v6(kind: DataplaneEventKind) -> DataplaneEventPayload {
         egress_zone_id: 12,
         ingress_ifindex: 77,
         policy_id: 0,
+        rule_id: 0,
+        term_id: 3030,
+        reason: 4,
+        owner_rg_id: 1,
         application_id: 0,
         filter_id: 909,
         screen_id: 1102,
@@ -157,10 +175,25 @@ fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8)
         event.dst_port
     );
     assert_eq!(payload[52], event.kind.rt_flow_event_type());
+    assert_eq!(payload[54], event.action);
+    assert_eq!(
+        u32::from_le_bytes(payload[56..60].try_into().unwrap()),
+        event.rule_id
+    );
+    assert_eq!(
+        u32::from_le_bytes(payload[60..64].try_into().unwrap()),
+        event.term_id
+    );
+    assert_eq!(
+        i16::from_le_bytes(payload[64..66].try_into().unwrap()),
+        event.owner_rg_id
+    );
+    assert_eq!(payload[134], event.reason);
     let decoded = decode_dataplane_event(msg_type, payload).expect("decoded security event");
     assert_eq!(decoded.kind, event.kind);
     assert_eq!(decoded.addr_family, event.addr_family);
     assert_eq!(decoded.protocol, event.protocol);
+    assert_eq!(decoded.action, event.action);
     assert_eq!(decoded.src_ip, event.src_ip);
     assert_eq!(decoded.dst_ip, event.dst_ip);
     assert_eq!(decoded.src_port, event.src_port);
@@ -172,6 +205,10 @@ fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8)
     assert_eq!(decoded.ingress_zone_id, event.ingress_zone_id);
     assert_eq!(decoded.egress_zone_id, event.egress_zone_id);
     assert_eq!(decoded.ingress_ifindex, event.ingress_ifindex);
+    assert_eq!(decoded.rule_id, event.rule_id);
+    assert_eq!(decoded.term_id, event.term_id);
+    assert_eq!(decoded.reason, event.reason);
+    assert_eq!(decoded.owner_rg_id, event.owner_rg_id);
     assert_eq!(decoded.application_id, event.application_id);
     assert_eq!(decoded.timestamp_ns, event.timestamp_ns);
     match event.kind {
@@ -225,6 +262,24 @@ fn test_filter_log_dataplane_event_round_trip() {
     assert_dataplane_event_round_trip(
         test_dataplane_event_v4(DataplaneEventKind::FilterLog),
         MSG_FILTER_LOG,
+    );
+}
+
+#[test]
+fn test_filter_log_can_encode_discard_action() {
+    let mut event = test_dataplane_event_v4(DataplaneEventKind::FilterLog);
+    event.action = RT_FLOW_ACTION_DENY;
+    let frame = EventFrame::encode_dataplane_event(321, &event);
+    let payload = frame
+        .dataplane_event_payload()
+        .expect("security event payload");
+    assert_eq!(payload[54], RT_FLOW_ACTION_DENY);
+    assert_eq!(
+        frame
+            .decode_dataplane_event()
+            .expect("decoded security event frame")
+            .action,
+        RT_FLOW_ACTION_DENY
     );
 }
 
@@ -308,8 +363,8 @@ fn test_encode_session_close_v4() {
     assert_eq!(p[1], 6); // Protocol
     assert_eq!(u16::from_le_bytes([p[2], p[3]]), 12345); // SrcPort
     assert_eq!(u16::from_le_bytes([p[4], p[5]]), 80); // DstPort
-                                                      // p[6..10] SrcIP, p[10..14] DstIP
-                                                      // p[14..16] OwnerRGID
+    // p[6..10] SrcIP, p[10..14] DstIP
+    // p[14..16] OwnerRGID
     assert_eq!(i16::from_le_bytes([p[14], p[15]]), 1);
     // p[16] Flags
     assert_eq!(p[16], FLAG_FABRIC_REDIRECT);

@@ -523,6 +523,9 @@ func (d *Daemon) wireUserspaceEventStreamCallbacks(ctx context.Context, provider
 		es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) {
 			d.handleEventStreamDelta(eventType, delta)
 		})
+		es.SetOnFullResync(func() {
+			d.handleEventStreamFullResync()
+		})
 	}
 	if d.eventReader != nil {
 		es.SetOnRawDataplaneEvent(func(seq uint64, payload []byte) {
@@ -537,9 +540,6 @@ func (d *Daemon) wireUserspaceEventStreamCallbacks(ctx context.Context, provider
 			}
 		})
 	}
-	es.SetOnFullResync(func() {
-		d.handleEventStreamFullResync()
-	})
 	return true
 }
 

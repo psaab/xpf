@@ -317,6 +317,14 @@ func (er *EventReader) logEvent(data []byte) {
 	if evt.EventType == dataplane.EventTypeScreenDrop {
 		rec.ScreenCheck = screenFlagName(evt.PolicyID)
 	}
+	if evt.EventType != dataplane.EventTypeSessionClose && len(data) >= 136 {
+		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
+		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
+		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
+		if data[134] != dataplane.CloseReasonNone {
+			rec.Reason = closeReasonName(data[134])
+		}
+	}
 
 	// Parse extended fields (offset 112+)
 	var closeReasonCode uint8
@@ -546,6 +554,14 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		RevSessionPkts:  evt.RevPackets,
 		RevSessionBytes: evt.RevBytes,
 		CloseReason:     closeReasonName(evt.CloseReason),
+	}
+	if evt.EventType != dataplane.EventTypeSessionClose {
+		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
+		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
+		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
+		if evt.CloseReason != dataplane.CloseReasonNone {
+			rec.Reason = closeReasonName(evt.CloseReason)
+		}
 	}
 	if evt.Timestamp > 0 && evt.Timestamp <= uint64(1<<63-1) {
 		rec.Time = time.Unix(0, int64(evt.Timestamp))

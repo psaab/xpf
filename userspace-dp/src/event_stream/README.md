@@ -18,7 +18,10 @@ periodic ACK from the daemon.
   `MSG_POLICY_DENY`, `MSG_SCREEN_DROP`, and `MSG_FILTER_LOG` (11..13).
   The telemetry frame payload is not a userspace-specific schema: it is
   the same 136-byte `dataplane.Event` layout consumed by the Go ringbuf
-  logger, including AF values 2/10 and big-endian L4 ports.
+  logger, including AF values 2/10 and big-endian L4 ports. Userspace
+  telemetry may also populate the non-session metadata slots used by
+  the Go adapter for action, rule ID, term ID, reason, owner RG,
+  ingress ifindex, and application ID.
 - `codec_tests.rs`, `tests.rs` — co-located.
 
 ## Why push
@@ -50,6 +53,11 @@ cluster-scoped.
   forward-version unknown frames are explicitly counted, dropped, and
   ACKed so the helper replay buffer cannot churn forever on an
   unconsumable event.
+- Callback-dependent frames are ACKed only after the relevant daemon
+  callback has consumed them. If the helper connects before session-sync
+  or RT_FLOW callbacks are wired, the daemon queues a bounded prefix and
+  withholds the cumulative ACK; overflow closes the stream so the helper
+  replays instead of silently losing audit or HA session events.
 - Daemon-side transport counters are exported as
   `xpf_userspace_event_stream_*` Prometheus metrics from
   `ProcessStatus.EventStream`. Helper-side send/drop counters remain in

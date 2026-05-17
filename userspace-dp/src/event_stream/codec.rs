@@ -113,6 +113,7 @@ pub(crate) struct DataplaneEventPayload {
     pub(crate) kind: DataplaneEventKind,
     pub(crate) addr_family: u8,
     pub(crate) protocol: u8,
+    pub(crate) action: u8,
     pub(crate) src_ip: IpAddr,
     pub(crate) dst_ip: IpAddr,
     pub(crate) src_port: u16,
@@ -125,6 +126,10 @@ pub(crate) struct DataplaneEventPayload {
     pub(crate) egress_zone_id: u16,
     pub(crate) ingress_ifindex: i32,
     pub(crate) policy_id: u32,
+    pub(crate) rule_id: u32,
+    pub(crate) term_id: u32,
+    pub(crate) reason: u8,
+    pub(crate) owner_rg_id: i16,
     pub(crate) application_id: u16,
     pub(crate) filter_id: u32,
     pub(crate) screen_id: u32,
@@ -394,18 +399,18 @@ impl EventFrame {
         buf[base + 50..base + 52].copy_from_slice(&event.egress_zone_id.to_le_bytes());
         buf[base + 52] = event.kind.rt_flow_event_type();
         buf[base + 53] = event.protocol;
-        buf[base + 54] = if event.kind == DataplaneEventKind::FilterLog {
-            RT_FLOW_ACTION_PERMIT
-        } else {
-            RT_FLOW_ACTION_DENY
-        };
+        buf[base + 54] = event.action;
         buf[base + 55] = wire_af;
+        buf[base + 56..base + 60].copy_from_slice(&event.rule_id.to_le_bytes());
+        buf[base + 60..base + 64].copy_from_slice(&event.term_id.to_le_bytes());
+        buf[base + 64..base + 66].copy_from_slice(&event.owner_rg_id.to_le_bytes());
         write_ip_opt_16(&mut buf, base + 72, event.nat_src_ip);
         write_ip_opt_16(&mut buf, base + 88, event.nat_dst_ip);
         buf[base + 104..base + 106].copy_from_slice(&event.nat_src_port.to_be_bytes());
         buf[base + 106..base + 108].copy_from_slice(&event.nat_dst_port.to_be_bytes());
         buf[base + 128..base + 132].copy_from_slice(&event.ingress_ifindex.to_le_bytes());
         buf[base + 132..base + 134].copy_from_slice(&event.application_id.to_le_bytes());
+        buf[base + 134] = event.reason;
 
         write_header(
             &mut buf,
@@ -533,6 +538,7 @@ pub(crate) fn decode_dataplane_event(
             libc::AF_INET as u8
         },
         protocol: payload[53],
+        action: payload[54],
         src_port: u16::from_be_bytes(payload[40..42].try_into().ok()?),
         dst_port: u16::from_be_bytes(payload[42..44].try_into().ok()?),
         nat_src_port: u16::from_be_bytes(payload[104..106].try_into().ok()?),
@@ -540,11 +546,15 @@ pub(crate) fn decode_dataplane_event(
         ingress_zone_id: u16::from_le_bytes(payload[48..50].try_into().ok()?),
         egress_zone_id: u16::from_le_bytes(payload[50..52].try_into().ok()?),
         ingress_ifindex: i32::from_le_bytes(payload[128..132].try_into().ok()?),
+        rule_id: u32::from_le_bytes(payload[56..60].try_into().ok()?),
+        term_id: u32::from_le_bytes(payload[60..64].try_into().ok()?),
+        owner_rg_id: i16::from_le_bytes(payload[64..66].try_into().ok()?),
         policy_id: if event_kind == DataplaneEventKind::PolicyDeny {
             policy_or_reason_id
         } else {
             0
         },
+        reason: payload[134],
         application_id: u16::from_le_bytes(payload[132..134].try_into().ok()?),
         filter_id: if event_kind == DataplaneEventKind::FilterLog {
             policy_or_reason_id
