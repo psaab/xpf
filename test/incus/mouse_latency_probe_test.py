@@ -377,6 +377,7 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
             result["totals"]["attempted"],
             result["totals"]["errors"],
         )
+        self.assertGreater(result["phase_us"]["drain_us"]["count"], 0)
 
     async def test_persistent_drain_timeout_counts_error_and_terminates(self):
         result = await self._run_with_forced_drain_timeout(
@@ -388,6 +389,7 @@ class PersistentConnectionModeTests(unittest.IsolatedAsyncioTestCase):
             result["totals"]["attempted"],
             result["totals"]["errors"],
         )
+        self.assertGreater(result["phase_us"]["drain_us"]["count"], 0)
 
 
 if __name__ == "__main__":

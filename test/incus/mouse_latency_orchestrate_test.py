@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -80,9 +81,34 @@ class CwndSettleDiagnosticsTests(unittest.TestCase):
         self.assertEqual(d["per_flow"]["retransmits_total"], 6)
         self.assertEqual(d["per_flow"]["mean_bps"]["min"], 84_000_000)
         self.assertEqual(d["per_flow"]["mean_bps"]["max"], 156_000_000)
-        self.assertEqual(d["per_flow"]["cwnd_bytes"]["min"], 120_000)
-        self.assertEqual(d["per_flow"]["cwnd_bytes"]["max"], 180_000)
+        self.assertEqual(d["per_flow"]["cwnd_bytes"]["min"], 120 * 1024)
+        self.assertEqual(d["per_flow"]["cwnd_bytes"]["max"], 180 * 1024)
         self.assertEqual(d["per_flow"]["slowest_streams"][0]["stream_id"], 5)
+
+    def test_settle_diagnostics_writes_json_and_returns_status(self):
+        with tempfile.TemporaryDirectory() as t:
+            txt = _write(t, "iperf3.txt", """\
+[SUM]   0.00-1.00   sec  10.0 MBytes  80.0 Mbits/sec
+[SUM]   1.00-2.00   sec  30.0 MBytes  240.0 Mbits/sec
+[SUM]   2.00-3.00   sec  10.0 MBytes  80.0 Mbits/sec
+""")
+            out_path = os.path.join(t, "cwnd-settle.json")
+
+            class A: pass
+            a = A()
+            a.iperf3_txt = txt
+            a.shaper_bps = 300_000_000
+            a.window_rows = 3
+            a.elapsed_sec = 20
+            a.sample_index = 1
+            a.out = out_path
+
+            self.assertEqual(orch.cmd_settle_diagnostics(a), 1)
+            with open(out_path) as f:
+                payload = json.load(f)
+            self.assertFalse(payload["settled"])
+            self.assertEqual(payload["elapsed_sec"], 20)
+            self.assertEqual(payload["sample_index"], 1)
 
     def test_diagnostics_explains_failed_thresholds(self):
         text = """\

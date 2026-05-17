@@ -467,10 +467,11 @@ fields. The reducer also verifies that gate cells share the same
 mixed per-attempt/persistent or paced/unpaced gate artifacts are reported
 as insufficient data rather than a PASS/FAIL verdict.
 
-High-rate 100E100M runs that fail before the mouse probe now leave
-settle evidence in each rep. `cwnd-settle.json` records the final
-settle-window aggregate, threshold reasons, per-flow min/median/max
-throughput, retransmits, and latest cwnd distribution. `mpstat-settle.txt`
+When the settle snapshot pull succeeds and diagnostics run, high-rate
+100E100M reps include settle evidence before the mouse probe.
+`cwnd-settle.json` records the final settle-window aggregate, threshold
+reasons, min/median/max of per-flow mean throughput, retransmits, and
+latest cwnd distribution. `mpstat-settle.txt`
 captures source-side CPU during the settle window. `manifest.json` records
 `settle_budget_s`, `cwnd_settle_elapsed_s`, and `cwnd_settle_ok`; use
 `MOUSE_LATENCY_SETTLE_BUDGET=<seconds>` for a deliberately longer

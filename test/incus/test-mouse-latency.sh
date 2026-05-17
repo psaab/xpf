@@ -74,7 +74,7 @@ esac
 [[ "$MOUSE_PROBE_MIN_INTERVAL_MS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     || { echo "ABORT: MOUSE_PROBE_MIN_INTERVAL_MS='$MOUSE_PROBE_MIN_INTERVAL_MS' must be a non-negative number" >&2; exit 1; }
 SLACK=10
-CWND_SETTLE_OK="true"
+CWND_SETTLE_OK="unknown"
 CWND_SETTLE_ELAPSED=0
 
 mkdir -p "$OUT_DIR"
@@ -349,6 +349,7 @@ if [[ "$N" -gt 0 ]]; then
     # Distinguish pull failure from a real cwnd-not-settled (Copilot R2 #1):
     # the cwnd-settle gate fires only when we actually have iperf3 output.
     if [[ $pull_rc -ne 0 || ! -s "${OUT_DIR}/iperf3-settle.txt" ]]; then
+        CWND_SETTLE_OK="false"
         invalidate "iperf3-settle-pull-failed"
     fi
     set +e
@@ -366,6 +367,7 @@ if [[ "$N" -gt 0 ]]; then
         CWND_SETTLE_OK="false"
         invalidate "cwnd-not-settled"
     fi
+    CWND_SETTLE_OK="true"
 fi
 
 # ---- step 2 (deferred to here): start mpstat over the probe window only.
@@ -575,6 +577,13 @@ SHAPER_BPS="$SHAPER_BPS" SETTLE_BUDGET="$SETTLE_BUDGET" \
 CWND_SETTLE_OK="$CWND_SETTLE_OK" CWND_SETTLE_ELAPSED="$CWND_SETTLE_ELAPSED" \
 python3 -c '
 import json, os
+settle_raw = os.environ["CWND_SETTLE_OK"]
+if settle_raw == "true":
+    settle_ok = True
+elif settle_raw == "false":
+    settle_ok = False
+else:
+    settle_ok = None
 manifest = {
     "N": int(os.environ["N"]),
     "M": int(os.environ["M"]),
@@ -591,7 +600,7 @@ manifest = {
     "mouse_probe_min_interval_ms": float(os.environ["MOUSE_PROBE_MIN_INTERVAL_MS"]),
     "shaper_bps": int(os.environ["SHAPER_BPS"]),
     "settle_budget_s": int(os.environ["SETTLE_BUDGET"]),
-    "cwnd_settle_ok": os.environ["CWND_SETTLE_OK"] == "true",
+    "cwnd_settle_ok": settle_ok,
     "cwnd_settle_elapsed_s": int(os.environ["CWND_SETTLE_ELAPSED"]),
 }
 print(json.dumps(manifest, indent=2))

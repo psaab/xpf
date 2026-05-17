@@ -42,6 +42,13 @@ _UNIT_MULTIPLIER = {
     "G": 1_000_000_000,
     "T": 1_000_000_000_000,
 }
+_BYTE_UNIT_MULTIPLIER = {
+    "": 1,
+    "K": 1024,
+    "M": 1024 * 1024,
+    "G": 1024 * 1024 * 1024,
+    "T": 1024 * 1024 * 1024 * 1024,
+}
 
 
 def _last_n_sum_bps(text: str, n: int) -> list:
@@ -79,7 +86,7 @@ def _parse_iperf_interval_rows(text: str) -> list[dict]:
             retransmits = int(m.group("retransmits"))
         cwnd_bytes = None
         if m.group("cwnd") is not None:
-            cwnd_multiplier = _UNIT_MULTIPLIER.get(m.group("cwnd_unit").upper())
+            cwnd_multiplier = _BYTE_UNIT_MULTIPLIER.get(m.group("cwnd_unit").upper())
             if cwnd_multiplier is not None:
                 try:
                     cwnd_bytes = int(float(m.group("cwnd")) * cwnd_multiplier)

@@ -163,27 +163,33 @@ async def _run_per_attempt_probe_coro(
         last_attempt_started_ns = t0
         try:
             connect_started_ns = time.monotonic_ns()
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(target, port),
-                timeout=min(5.0, remaining),
-            )
-            _record_phase_us(phase_samples, "connect_us", connect_started_ns)
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(target, port),
+                    timeout=min(5.0, remaining),
+                )
+            finally:
+                _record_phase_us(phase_samples, "connect_us", connect_started_ns)
             abort_close = True
             try:
                 writer.write(payload)
                 drain_started_ns = time.monotonic_ns()
-                await _drain_with_deadline(writer, deadline)
-                _record_phase_us(phase_samples, "drain_us", drain_started_ns)
+                try:
+                    await _drain_with_deadline(writer, deadline)
+                finally:
+                    _record_phase_us(phase_samples, "drain_us", drain_started_ns)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     error_counter[0] += 1
                     break
                 read_started_ns = time.monotonic_ns()
-                data = await asyncio.wait_for(
-                    reader.readexactly(payload_bytes),
-                    timeout=min(5.0, remaining),
-                )
-                _record_phase_us(phase_samples, "read_us", read_started_ns)
+                try:
+                    data = await asyncio.wait_for(
+                        reader.readexactly(payload_bytes),
+                        timeout=min(5.0, remaining),
+                    )
+                finally:
+                    _record_phase_us(phase_samples, "read_us", read_started_ns)
                 if data != payload:
                     error_counter[0] += 1
                     await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
@@ -240,11 +246,13 @@ async def _run_persistent_probe_coro(
             if writer is None or writer.is_closing():
                 try:
                     connect_started_ns = time.monotonic_ns()
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection(target, port),
-                        timeout=min(5.0, remaining),
-                    )
-                    _record_phase_us(phase_samples, "connect_us", connect_started_ns)
+                    try:
+                        reader, writer = await asyncio.wait_for(
+                            asyncio.open_connection(target, port),
+                            timeout=min(5.0, remaining),
+                        )
+                    finally:
+                        _record_phase_us(phase_samples, "connect_us", connect_started_ns)
                 except (
                     asyncio.TimeoutError,
                     ConnectionRefusedError,
@@ -274,8 +282,10 @@ async def _run_persistent_probe_coro(
             try:
                 writer.write(payload)
                 drain_started_ns = time.monotonic_ns()
-                await _drain_with_deadline(writer, deadline)
-                _record_phase_us(phase_samples, "drain_us", drain_started_ns)
+                try:
+                    await _drain_with_deadline(writer, deadline)
+                finally:
+                    _record_phase_us(phase_samples, "drain_us", drain_started_ns)
             except (
                 asyncio.TimeoutError,
                 ConnectionRefusedError,
@@ -305,11 +315,13 @@ async def _run_persistent_probe_coro(
             try:
                 assert reader is not None
                 read_started_ns = time.monotonic_ns()
-                data = await asyncio.wait_for(
-                    reader.readexactly(payload_bytes),
-                    timeout=min(5.0, remaining),
-                )
-                _record_phase_us(phase_samples, "read_us", read_started_ns)
+                try:
+                    data = await asyncio.wait_for(
+                        reader.readexactly(payload_bytes),
+                        timeout=min(5.0, remaining),
+                    )
+                finally:
+                    _record_phase_us(phase_samples, "read_us", read_started_ns)
                 if data != payload:
                     error_counter[0] += 1
                     await _close_writer(writer, deadline, abort=True)

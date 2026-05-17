@@ -39,7 +39,10 @@ class MouseLatencyShellTests(unittest.TestCase):
         self.assertIn('settle-diagnostics "${OUT_DIR}/iperf3-settle.txt" "$SHAPER_BPS"', SCRIPT)
         self.assertIn('"settle_budget_s": int(os.environ["SETTLE_BUDGET"])', SCRIPT)
         self.assertIn('"cwnd_settle_elapsed_s": int(os.environ["CWND_SETTLE_ELAPSED"])', SCRIPT)
-        self.assertIn('"cwnd_settle_ok": os.environ["CWND_SETTLE_OK"] == "true"', SCRIPT)
+        self.assertIn('CWND_SETTLE_OK="unknown"', SCRIPT)
+        self.assertIn('CWND_SETTLE_OK="false"', SCRIPT)
+        self.assertIn('settle_ok = None', SCRIPT)
+        self.assertIn('"cwnd_settle_ok": settle_ok', SCRIPT)
         self.assertIn('"status": "INVALID"', SCRIPT)
         self.assertIn('write_invalid_manifest "$reason"', SCRIPT)
 
