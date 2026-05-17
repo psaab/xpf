@@ -473,9 +473,12 @@ When the settle snapshot pull succeeds and diagnostics run, high-rate
 reasons, min/median/max of per-flow mean throughput, retransmits, and
 latest cwnd distribution. `mpstat-settle.txt`
 captures source-side CPU during the settle window. `manifest.json` records
-`settle_budget_s`, `cwnd_settle_elapsed_s`, and `cwnd_settle_ok`; use
-`MOUSE_LATENCY_SETTLE_BUDGET=<seconds>` for a deliberately longer
-high-rate settle budget. Probe artifacts also carry `phase_us` and
+`settle_budget_s`, `cwnd_settle_elapsed_s`, and tri-state
+`cwnd_settle_ok`: `true` only after a successful settle diagnostic,
+`false` after an evaluated-but-unsettled diagnostic, and `null` for cells
+that did not run the settle gate (`N=0`, pull failure, or other pre-gate
+invalidations). Use `MOUSE_LATENCY_SETTLE_BUDGET=<seconds>` for a
+deliberately longer high-rate settle budget. Probe artifacts also carry `phase_us` and
 `coroutines` diagnostics so a degenerate-coroutine failure can be read as
 timer wake delay (`start_gap_us` / `sleep_overshoot_us`), client socket
 backpressure (`drain_us`), or echo-path delay (`read_us`) before blaming
