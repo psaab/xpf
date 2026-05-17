@@ -5,6 +5,9 @@ import unittest
 
 import mouse_latency_orchestrate as orch
 
+_EXPECTED_MIN_CWND_KBYTES = 120
+_EXPECTED_MAX_CWND_KBYTES = 180
+
 
 def _write(tmpdir: str, name: str, content: str) -> str:
     path = os.path.join(tmpdir, name)
@@ -81,8 +84,14 @@ class CwndSettleDiagnosticsTests(unittest.TestCase):
         self.assertEqual(d["per_flow"]["retransmits_total"], 6)
         self.assertEqual(d["per_flow"]["mean_bps"]["min"], 84_000_000)
         self.assertEqual(d["per_flow"]["mean_bps"]["max"], 156_000_000)
-        self.assertEqual(d["per_flow"]["cwnd_bytes"]["min"], 120 * 1024)
-        self.assertEqual(d["per_flow"]["cwnd_bytes"]["max"], 180 * 1024)
+        self.assertEqual(
+            d["per_flow"]["cwnd_bytes"]["min"],
+            _EXPECTED_MIN_CWND_KBYTES * 1024,
+        )
+        self.assertEqual(
+            d["per_flow"]["cwnd_bytes"]["max"],
+            _EXPECTED_MAX_CWND_KBYTES * 1024,
+        )
         self.assertEqual(d["per_flow"]["slowest_streams"][0]["stream_id"], 5)
 
     def test_settle_diagnostics_writes_json_and_returns_status(self):
@@ -94,8 +103,8 @@ class CwndSettleDiagnosticsTests(unittest.TestCase):
 """)
             out_path = os.path.join(t, "cwnd-settle.json")
 
-            class SettleArgs: pass
-            args = SettleArgs()
+            class SettleDiagnosticsArgs: pass
+            args = SettleDiagnosticsArgs()
             args.iperf3_txt = txt
             args.shaper_bps = 300_000_000
             args.window_rows = 3

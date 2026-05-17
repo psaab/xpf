@@ -12,6 +12,11 @@
   - **File(s)**: `test/incus/test-mouse-latency.sh`, `test/incus/mouse_latency_orchestrate_test.py`, `_Log.md`
   - **Validation**: `cd test/incus && python3 -m unittest mouse_latency_orchestrate_test.py test_mouse_latency_shell_test.py`; `cd test/incus && python3 -m unittest mouse_latency_probe_test.py`; `bash -n test/incus/test-mouse-latency.sh`
 
+- **Timestamp**: 2026-05-17T15:30:19Z
+  - **Action**: Addressed final review nits in orchestrate tests by renaming the settle-diagnostics args mock class for clarity and replacing inline cwnd-byte magic numbers with named KiB constants.
+  - **File(s)**: `test/incus/mouse_latency_orchestrate_test.py`, `_Log.md`
+  - **Validation**: `cd test/incus && python3 -m unittest mouse_latency_orchestrate_test.py`
+
 - **Timestamp**: 2026-05-17T08:30:20Z
   - **Action**: PR #1394 round-10 follow-up — fixed standalone userspace event-stream callback wiring by always registering session/full-resync callbacks, and added a regression test that verifies standalone SessionOpen and FullResync frames are ACKed instead of stalling behind an unwired callback queue.
   - **File(s)**: `pkg/daemon/daemon_ha_userspace.go`, `pkg/daemon/userspace_sync_test.go`, `_Log.md`
