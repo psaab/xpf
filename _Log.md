@@ -17,6 +17,10 @@
   - **File(s)**: `userspace-dp/src/afxdp/umem/mod.rs`, `_Log.md`
   - **Validation**: `go test ./pkg/dataplane/userspace`; `cargo test --manifest-path userspace-dp/Cargo.toml mirror::` (expected environment failure: missing libelf headers/pkg-config); `git diff --check`
 
+- **Timestamp**: 2026-05-17T21:39:00Z
+  - **Action**: PR #1410 review follow-up — reconciled README userspace capability wording so three-color policers are described as partially admitted (color-blind `then discard` slice) rather than fully gated, matching current userspace capability documentation and runtime admission behavior.
+  - **File(s)**: `README.md`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T21:23:55Z
   - **Action**: PR #1410 round-3 blocker follow-up — added explicit pending-forward CoS resolution state so resolved `None`/`None` selections are not metered again, carried metadata-derived ICMP flow keys through local and embedded ICMP prebuilt-forward paths, stamped emitted inject packets with synthetic ICMP tuples before TX selection, and preserved local tunnel tuple metadata through TX.
   - **File(s)**: `userspace-dp/src/afxdp/types/tx.rs`, `userspace-dp/src/afxdp/forward_request.rs`, `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/icmp.rs`, `userspace-dp/src/afxdp/poll_descriptor.rs`, `userspace-dp/src/afxdp/coordinator/inject.rs`, `userspace-dp/src/afxdp/tunnel.rs`, `userspace-dp/src/afxdp/tx/dispatch_tests.rs`, `userspace-dp/src/afxdp/tests.rs`, `userspace-dp/src/afxdp/frame/tests.rs`, `userspace-dp/src/afxdp/coordinator/tests.rs`, `_Log.md`

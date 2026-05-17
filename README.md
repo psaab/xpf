@@ -85,7 +85,7 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 | NAT64 (IPv6↔IPv4) | Yes | Yes |
 | NPTv6 (RFC 6296) | Yes | Yes |
 | Screen/IDS (11 checks) | Yes | Most checks yes; SYN-cookie behavior falls back |
-| Firewall filters + policers | Yes | Filters yes; three-color policers still gated |
+| Firewall filters + policers | Yes | Filters yes; three-color policers admitted for color-blind `then discard` slice, with remaining #1375 hardening still open |
 | TCP MSS clamping | Yes | Yes |
 | GRE tunnel transit | Yes | Yes (passthrough) |
 | IPsec / XFRM | Yes | Yes (passthrough) |
@@ -97,11 +97,12 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 
 The userspace dataplane now covers most of the transit feature set in native
 Rust, but it is not "fallback-free". Current explicit gates in code still
-include SYN-cookie-dependent screen behavior, three-color policers, and port
-mirroring. Pool-mode SNAT is admitted, and #1385 added userspace-v1
-`address-persistent` selection; #1377 still owns per-pool `persistent-nat`
-lease reuse, allocator/exhaustion counters, and the mixed-backend rollback
-boundary. The exact admission boundary is documented in
+include SYN-cookie-dependent screen behavior and port mirroring. Three-color
+policers are admitted only for the bounded color-blind `then discard` runtime
+slice while #1375 hardening remains. Pool-mode SNAT is admitted, and #1385
+added userspace-v1 `address-persistent` selection; #1377 still owns per-pool
+`persistent-nat` lease reuse, allocator/exhaustion counters, and the
+mixed-backend rollback boundary. The exact admission boundary is documented in
 [`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
 
 ## Architecture
