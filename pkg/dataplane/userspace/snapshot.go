@@ -2056,8 +2056,11 @@ func stablePolicyRuleID(fromZone, toZone, ruleName string) string {
 }
 
 func policyRuleInactive(schedulerName string, activeState map[string]bool) bool {
-	if schedulerName == "" || activeState == nil {
+	if schedulerName == "" {
 		return false
+	}
+	if activeState == nil {
+		return true
 	}
 	active, ok := activeState[schedulerName]
 	return !ok || !active

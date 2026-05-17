@@ -2614,6 +2614,16 @@ func TestBuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID(t *testing.T) 
 		Action: config.PolicyDeny,
 	}}
 
+	unseeded := buildPolicySnapshots(cfg)
+	if len(unseeded) != 2 {
+		t.Fatalf("len(unseeded) = %d, want 2", len(unseeded))
+	}
+	for _, pol := range unseeded {
+		if !pol.Inactive {
+			t.Fatalf("policy %q inactive = false with nil scheduler state, want fail-closed true", pol.RuleID)
+		}
+	}
+
 	snap := buildPolicySnapshotsWithSchedulerState(cfg, map[string]bool{
 		"workhours": false,
 		"always":    true,
@@ -2810,6 +2820,7 @@ func TestUpdatePolicyScheduleStateRefusesOldHelperForScheduledPolicies(t *testin
 	m.cfg.ControlSocket = controlSock
 	m.generation = 7
 	m.lastSnapshot = buildSnapshot(cfg, config.UserspaceConfig{ControlSocket: controlSock}, 7, 0)
+	m.lastSnapshot.Policies[0].Inactive = false
 
 	m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false})
 

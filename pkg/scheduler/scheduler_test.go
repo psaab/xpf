@@ -245,19 +245,32 @@ func TestScheduler_WallClockBackwardStepStaysFailClosedUntilClockRecovers(t *tes
 		t.Fatal("initial state should be active")
 	}
 
-	s.evaluate(now.Add(-1*time.Hour), true)
+	// Simulate the real NTP rollback shape: monotonic time advances while
+	// wall time appears to move backward relative to the previous wall sample.
+	s.mu.Lock()
+	s.lastEval = now
+	s.lastWallUnixNano = now.Add(time.Hour).UnixNano()
+	s.mu.Unlock()
+
+	s.evaluate(now.Add(time.Second), true)
 	if lastState == nil || lastState["business-hours"] {
 		t.Fatalf("first backward-step evaluation should fail closed, got state %+v", lastState)
 	}
 	lastState = nil
 
-	// Keep wall time behind the original baseline so continuity remains unsafe.
-	s.evaluate(now.Add(-59*time.Minute), true)
+	// The recovery hold keeps the scheduler closed for more than one tick,
+	// even after the new wall/monotonic samples are internally consistent.
+	s.evaluate(now.Add(time.Minute), true)
 	if lastState != nil {
 		t.Fatalf("second rollback evaluation should not notify without state change, got %+v", lastState)
 	}
 	if s.IsActive("business-hours") {
-		t.Fatal("scheduler should stay inactive while wall-clock remains rolled back")
+		t.Fatal("scheduler should stay inactive during wall-clock recovery hold")
+	}
+
+	s.evaluate(now.Add(3*time.Minute), true)
+	if lastState == nil || !lastState["business-hours"] {
+		t.Fatalf("scheduler should recover after hold window, got state %+v", lastState)
 	}
 }
 

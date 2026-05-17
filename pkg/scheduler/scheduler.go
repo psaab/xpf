@@ -18,9 +18,13 @@ type Scheduler struct {
 	updateFn         func(activeState map[string]bool)
 	lastEval         time.Time
 	lastWallUnixNano int64
+	unsafeUntil      time.Time
 }
 
-const wallClockDriftTolerance = 5 * time.Second
+const (
+	wallClockDriftTolerance = 5 * time.Second
+	wallClockRecoveryHold   = 2 * time.Minute
+)
 
 // NewPrimed creates a Scheduler, evaluates the initial active-state map, and
 // returns that map without firing updateFn from inside the constructor. Daemon
@@ -101,7 +105,15 @@ func (s *Scheduler) evaluate(now time.Time, notify bool) {
 
 	changed := false
 	newActive := make(map[string]bool, len(s.schedulers))
-	wallClockUnsafe := s.wallClockUnsafeLocked(now)
+	wallClockDiscontinuous := s.wallClockDiscontinuousLocked(now)
+	wallClockUnsafe := wallClockDiscontinuous
+	if !wallClockUnsafe && !s.unsafeUntil.IsZero() {
+		if now.Before(s.unsafeUntil) {
+			wallClockUnsafe = true
+		} else {
+			s.unsafeUntil = time.Time{}
+		}
+	}
 
 	for name, sched := range s.schedulers {
 		cur := false
@@ -124,10 +136,11 @@ func (s *Scheduler) evaluate(now time.Time, notify bool) {
 	}
 
 	s.active = newActive
-	if !wallClockUnsafe {
-		s.lastEval = now
-		s.lastWallUnixNano = now.UnixNano()
+	if wallClockDiscontinuous {
+		s.unsafeUntil = now.Add(wallClockRecoveryHold)
 	}
+	s.lastEval = now
+	s.lastWallUnixNano = now.UnixNano()
 
 	if !changed || !notify || s.updateFn == nil {
 		s.mu.Unlock()
@@ -139,7 +152,7 @@ func (s *Scheduler) evaluate(now time.Time, notify bool) {
 	updateFn(cp)
 }
 
-func (s *Scheduler) wallClockUnsafeLocked(now time.Time) bool {
+func (s *Scheduler) wallClockDiscontinuousLocked(now time.Time) bool {
 	if s.lastEval.IsZero() {
 		return false
 	}

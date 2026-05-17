@@ -32,13 +32,17 @@ func (d *Daemon) reconcilePolicySchedulerLocked(cfg *config.Config) map[string]b
 		d.publishPolicyScheduleState(epoch, activeState)
 	}, time.Now())
 	d.scheduler = sched
-
-	if d.daemonCtx != nil {
-		ctx, cancel := context.WithCancel(d.daemonCtx)
-		d.schedulerCancel = cancel
-		go sched.Run(ctx)
-	}
+	d.startPolicySchedulerLoopLocked()
 	return activeState
+}
+
+func (d *Daemon) startPolicySchedulerLoopLocked() {
+	if d.daemonCtx == nil || d.scheduler == nil || d.schedulerCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(d.daemonCtx)
+	d.schedulerCancel = cancel
+	go d.scheduler.Run(ctx)
 }
 
 func (d *Daemon) publishPolicyScheduleState(epoch uint64, activeState map[string]bool) {

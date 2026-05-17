@@ -72,6 +72,7 @@ func collectAppliedTunnels(cfg *config.Config) []*config.TunnelConfig {
 // Run starts the daemon and blocks until shutdown.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.daemonCtx = ctx
+	d.startPolicySchedulerLoopLocked()
 
 	// Wrap the default slog handler to support system syslog forwarding.
 	// Syslog clients are added later when config is applied.
