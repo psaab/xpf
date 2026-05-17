@@ -108,7 +108,7 @@ existing eBPF behavior that can default missing scheduler state to active.
 - Cargo: `policy::evaluate_policy_skips_inactive_rules`.
 - Cargo: `policy::inactive_rule_falls_through_to_next_match`.
 - Cargo: `policy::hit_counters_survive_scheduler_snapshot_rebuild`.
-- Cargo: `policy::snapshot_publish_applies_inactive_bits_atomically`.
+- Cargo: `policy::hit_counters_reset_after_rule_absent_then_readded`.
 - Go: userspace snapshot round-trip for `SchedulerName`, `Inactive`, and stable
   rule identity.
 - Go: deterministic scheduler clock tests for active/inactive windows at
