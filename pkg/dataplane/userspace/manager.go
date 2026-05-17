@@ -368,6 +368,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return result, err
 	}
 	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+		m.disarmPolicySchedulerProtocolFailureLocked(err)
 		return result, err
 	}
 	if m.deferWorkers {
@@ -445,6 +446,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return
 	}
 	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+		m.disarmPolicySchedulerProtocolFailureLocked(err)
 		slog.Warn("userspace: refusing policy scheduler publish to incompatible helper", "err", err)
 		return
 	}
@@ -549,6 +551,30 @@ func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error 
 		m.lastStatus.ConfigSnapshotProtocolVersion,
 		ProtocolVersion,
 	)
+}
+
+func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) {
+	if m.proc == nil || m.proc.Process == nil {
+		return
+	}
+	req := ControlRequest{
+		Type: "set_forwarding_state",
+		Forwarding: &ForwardingControlRequest{
+			Armed: false,
+		},
+	}
+	var status ProcessStatus
+	if err := m.requestLocked(req, &status); err != nil {
+		slog.Warn("userspace: failed to disarm incompatible helper after policy scheduler protocol error",
+			"protocol_err", protocolErr, "err", err)
+		return
+	}
+	if err := m.applyHelperStatusLocked(&status); err != nil {
+		slog.Warn("userspace: failed to sync helper status after policy scheduler fail-closed disarm",
+			"protocol_err", protocolErr, "err", err)
+		return
+	}
+	slog.Warn("userspace: disarmed helper after policy scheduler protocol error", "err", protocolErr)
 }
 
 // bpfKtimeNs returns the current CLOCK_BOOTTIME in nanoseconds, matching

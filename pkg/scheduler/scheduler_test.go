@@ -199,6 +199,35 @@ func TestScheduler_NewPrimedDoesNotNotifyInitialState(t *testing.T) {
 	}
 }
 
+func TestScheduler_WallClockBackwardStepFailsClosed(t *testing.T) {
+	var lastState map[string]bool
+	schedCfg := map[string]*config.SchedulerConfig{
+		"business-hours": {
+			Name:      "business-hours",
+			StartTime: "08:00:00",
+			StopTime:  "17:00:00",
+		},
+	}
+	now := time.Date(2026, 2, 12, 12, 0, 0, 0, time.UTC)
+	s, state := NewPrimed(schedCfg, func(activeState map[string]bool) {
+		lastState = activeState
+	}, now)
+	if !state["business-hours"] {
+		t.Fatal("initial state should be active")
+	}
+
+	s.evaluate(now.Add(-1*time.Hour), true)
+	if lastState == nil {
+		t.Fatal("expected callback after fail-closed state change")
+	}
+	if lastState["business-hours"] {
+		t.Fatalf("wall-clock backward step should fail closed, got state %+v", lastState)
+	}
+	if s.IsActive("business-hours") {
+		t.Fatal("scheduler should remain inactive after backward wall-clock step")
+	}
+}
+
 func TestScheduler_ActiveState(t *testing.T) {
 	schedCfg := map[string]*config.SchedulerConfig{
 		"always-on": {Name: "always-on"},

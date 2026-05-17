@@ -2764,22 +2764,30 @@ func TestUpdatePolicyScheduleStateRefusesOldHelperForScheduledPolicies(t *testin
 	reqCh := make(chan ControlRequest, 2)
 	done := make(chan struct{}, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
+		for i := 0; i < 2; i++ {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req ControlRequest
+			if err := json.NewDecoder(conn).Decode(&req); err != nil {
+				conn.Close()
+				return
+			}
+			reqCh <- req
+			status := &ProcessStatus{
+				PID:             1234,
+				ForwardingArmed: true,
+			}
+			if req.Type == "set_forwarding_state" {
+				status.ForwardingArmed = false
+			}
+			_ = json.NewEncoder(conn).Encode(ControlResponse{
+				OK:     true,
+				Status: status,
+			})
+			conn.Close()
 		}
-		defer conn.Close()
-		var req ControlRequest
-		if err := json.NewDecoder(conn).Decode(&req); err != nil {
-			return
-		}
-		reqCh <- req
-		_ = json.NewEncoder(conn).Encode(ControlResponse{
-			OK: true,
-			Status: &ProcessStatus{
-				PID: 1234,
-			},
-		})
 		done <- struct{}{}
 	}()
 
@@ -2816,8 +2824,14 @@ func TestUpdatePolicyScheduleStateRefusesOldHelperForScheduledPolicies(t *testin
 	}
 	select {
 	case req := <-reqCh:
-		t.Fatalf("unexpected apply request to old helper: %+v", req)
+		if req.Type != "set_forwarding_state" || req.Forwarding == nil || req.Forwarding.Armed {
+			t.Fatalf("second request = %+v, want fail-closed set_forwarding_state armed=false", req)
+		}
 	default:
+		t.Fatal("expected fail-closed set_forwarding_state request")
+	}
+	if m.lastStatus.ForwardingArmed {
+		t.Fatal("helper status should be disarmed after protocol mismatch")
 	}
 	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || !m.lastSnapshot.Policies[0].Inactive {
 		t.Fatalf("manager should keep local inactive state even when publish is refused: %+v", m.lastSnapshot)

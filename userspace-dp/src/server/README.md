@@ -33,7 +33,11 @@ new daemon from publishing fields such as policy-scheduler inactive bits to a
 helper that would silently ignore them.
 The helper also reports `config_snapshot_protocol_version` in status so a new
 daemon can fail closed before sending scheduled-policy snapshots to an older
-helper binary that predates the gate.
+helper binary that predates the gate. If the daemon detects an incompatible
+helper while scheduled policies are configured, it sends
+`set_forwarding_state armed=false` before returning the compile/publish error;
+the old helper must not keep forwarding a stale snapshot that ignores scheduler
+inactive bits.
 
 ## Reconciliation
 

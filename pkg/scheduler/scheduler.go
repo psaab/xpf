@@ -12,11 +12,15 @@ import (
 // Scheduler periodically evaluates time windows for named schedulers
 // and notifies a callback when any scheduler's active state changes.
 type Scheduler struct {
-	mu         sync.RWMutex
-	schedulers map[string]*config.SchedulerConfig
-	active     map[string]bool
-	updateFn   func(activeState map[string]bool)
+	mu               sync.RWMutex
+	schedulers       map[string]*config.SchedulerConfig
+	active           map[string]bool
+	updateFn         func(activeState map[string]bool)
+	lastEval         time.Time
+	lastWallUnixNano int64
 }
+
+const wallClockDriftTolerance = 5 * time.Second
 
 // NewPrimed creates a Scheduler, evaluates the initial active-state map, and
 // returns that map without firing updateFn from inside the constructor. Daemon
@@ -97,9 +101,13 @@ func (s *Scheduler) evaluate(now time.Time, notify bool) {
 
 	changed := false
 	newActive := make(map[string]bool, len(s.schedulers))
+	wallClockUnsafe := s.wallClockUnsafeLocked(now)
 
 	for name, sched := range s.schedulers {
-		cur := isWithinWindow(now, sched)
+		cur := false
+		if !wallClockUnsafe {
+			cur = isWithinWindow(now, sched)
+		}
 		newActive[name] = cur
 		if prev, ok := s.active[name]; !ok || prev != cur {
 			slog.Info("scheduler: state changed", "name", name, "active", cur)
@@ -116,6 +124,8 @@ func (s *Scheduler) evaluate(now time.Time, notify bool) {
 	}
 
 	s.active = newActive
+	s.lastEval = now
+	s.lastWallUnixNano = now.UnixNano()
 
 	if !changed || !notify || s.updateFn == nil {
 		s.mu.Unlock()
@@ -125,6 +135,34 @@ func (s *Scheduler) evaluate(now time.Time, notify bool) {
 	updateFn := s.updateFn
 	s.mu.Unlock()
 	updateFn(cp)
+}
+
+func (s *Scheduler) wallClockUnsafeLocked(now time.Time) bool {
+	if s.lastEval.IsZero() {
+		return false
+	}
+	wallElapsed := time.Duration(now.UnixNano() - s.lastWallUnixNano)
+	if wallElapsed < 0 {
+		slog.Warn("scheduler: wall clock moved backward, failing closed until next evaluation",
+			"previous", s.lastEval, "current", now)
+		return true
+	}
+	monoElapsed := now.Sub(s.lastEval)
+	if monoElapsed < 0 {
+		slog.Warn("scheduler: monotonic clock moved backward, failing closed until next evaluation",
+			"previous", s.lastEval, "current", now)
+		return true
+	}
+	delta := wallElapsed - monoElapsed
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > wallClockDriftTolerance {
+		slog.Warn("scheduler: wall clock drift exceeded tolerance, failing closed until next evaluation",
+			"wall_elapsed", wallElapsed, "monotonic_elapsed", monoElapsed, "tolerance", wallClockDriftTolerance)
+		return true
+	}
+	return false
 }
 
 func (s *Scheduler) notifyActiveState() {

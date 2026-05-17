@@ -44,3 +44,8 @@ during specific windows.
   Junos time windows. Packet workers must consume published active/inactive
   booleans from the userspace snapshot and must not evaluate scheduler time in
   the hot path.
+- Wall-clock discontinuities are fail-closed. Each evaluation compares
+  wall elapsed time with Go's monotonic elapsed time from the previous
+  evaluation; backward wall steps or drift beyond the tolerance publish
+  all schedulers inactive for that evaluation instead of extending an
+  allow window with a stale wall-clock assumption.
