@@ -2587,6 +2587,74 @@ func TestBuildPolicySnapshotsIncludesGlobalPolicies(t *testing.T) {
 	}
 }
 
+func TestBuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*config.Policy{{
+			Name:          "zone-allow",
+			SchedulerName: "workhours",
+			Match: config.PolicyMatch{
+				SourceAddresses:      []string{"any"},
+				DestinationAddresses: []string{"any"},
+				Applications:         []string{"any"},
+			},
+			Action: config.PolicyPermit,
+		}},
+	}}
+	cfg.Security.GlobalPolicies = []*config.Policy{{
+		Name:          "global-deny-all",
+		SchedulerName: "always",
+		Match: config.PolicyMatch{
+			SourceAddresses:      []string{"any"},
+			DestinationAddresses: []string{"any"},
+			Applications:         []string{"any"},
+		},
+		Action: config.PolicyDeny,
+	}}
+
+	snap := buildPolicySnapshotsWithSchedulerState(cfg, map[string]bool{
+		"workhours": false,
+		"always":    true,
+	})
+	if len(snap) != 2 {
+		t.Fatalf("len(snap) = %d, want 2", len(snap))
+	}
+	if got, want := snap[0].RuleID, "trust->untrust/zone-allow"; got != want {
+		t.Fatalf("snap[0].RuleID = %q, want %q", got, want)
+	}
+	if got, want := snap[0].SchedulerName, "workhours"; got != want {
+		t.Fatalf("snap[0].SchedulerName = %q, want %q", got, want)
+	}
+	if !snap[0].Inactive {
+		t.Fatalf("snap[0].Inactive = false, want true for inactive scheduler")
+	}
+	if got, want := snap[1].RuleID, "junos-global->junos-global/global-deny-all"; got != want {
+		t.Fatalf("snap[1].RuleID = %q, want %q", got, want)
+	}
+	if snap[1].Inactive {
+		t.Fatalf("snap[1].Inactive = true, want false for active scheduler")
+	}
+
+	data, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var roundTrip []PolicyRuleSnapshot
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(roundTrip) != 2 {
+		t.Fatalf("len(roundTrip) = %d, want 2", len(roundTrip))
+	}
+	if roundTrip[0].RuleID != snap[0].RuleID ||
+		roundTrip[0].SchedulerName != snap[0].SchedulerName ||
+		roundTrip[0].Inactive != snap[0].Inactive {
+		t.Fatalf("roundTrip[0] = %+v, want scheduler/inactive/rule_id from %+v", roundTrip[0], snap[0])
+	}
+}
+
 func TestUserspaceSupportsScreenProfilesBasic(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Screen = map[string]*config.ScreenProfile{

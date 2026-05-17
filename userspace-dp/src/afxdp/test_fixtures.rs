@@ -432,6 +432,7 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
             applications: vec!["any".to_string()],
             application_terms: Vec::new(),
             action: "permit".to_string(),
+            ..Default::default()
         }],
         neighbors: vec![
             NeighborSnapshot {
@@ -529,6 +530,7 @@ pub(super) fn policy_deny_snapshot() -> ConfigSnapshot {
             applications: vec!["any".to_string()],
             application_terms: Vec::new(),
             action: "permit".to_string(),
+            ..Default::default()
         }],
         ..Default::default()
     }

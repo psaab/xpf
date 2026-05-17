@@ -20,6 +20,13 @@ identity must not depend on transient array position alone; use a config-driven
 UUID if available or `(policy_set_id, policy_name, rule_name)`/equivalent
 compiled identity.
 
+Safe #1378 slice status: this change wires `rule_id`, `scheduler_name`, and
+`inactive` through userspace policy snapshots and Rust policy evaluation. The
+Go snapshot builder can compute inactive bits when supplied scheduler active
+state, but the normal daemon publish path still builds snapshots without that
+state. Scheduler tick/restart/failover republish and missing-scheduler commit
+errors remain gates before scheduled userspace policies are end-to-end enforced.
+
 On scheduler state changes, publish one atomic userspace snapshot delta that
 contains the updated inactive bits for all affected rules. Do not issue
 per-rule fast-path toggles because first-match ordering requires same-instant

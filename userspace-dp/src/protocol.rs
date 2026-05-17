@@ -593,11 +593,17 @@ pub(crate) struct FlowExportSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct PolicyRuleSnapshot {
+    #[serde(rename = "rule_id", default)]
+    pub rule_id: String,
     pub name: String,
     #[serde(rename = "from_zone", default)]
     pub from_zone: String,
     #[serde(rename = "to_zone", default)]
     pub to_zone: String,
+    #[serde(rename = "scheduler_name", default)]
+    pub scheduler_name: String,
+    #[serde(default)]
+    pub inactive: bool,
     #[serde(rename = "source_addresses", default)]
     pub source_addresses: Vec<String>,
     #[serde(rename = "destination_addresses", default)]
@@ -2276,6 +2282,54 @@ mod tests {
             status.v_min_throttle_hard_cap_overrides
         );
         assert_eq!(back.v_min_throttles, status.v_min_throttles);
+    }
+
+    #[test]
+    fn policy_rule_snapshot_scheduler_fields_round_trip() {
+        let snap = PolicyRuleSnapshot {
+            rule_id: "security-policy:trust:untrust:allow-web".into(),
+            name: "allow-web".into(),
+            from_zone: "trust".into(),
+            to_zone: "untrust".into(),
+            scheduler_name: "workhours".into(),
+            inactive: true,
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["junos-http".into()],
+            action: "permit".into(),
+            ..Default::default()
+        };
+
+        let value: serde_json::Value =
+            serde_json::to_value(&snap).expect("serialize PolicyRuleSnapshot to Value");
+        assert_eq!(value["rule_id"], "security-policy:trust:untrust:allow-web");
+        assert_eq!(value["scheduler_name"], "workhours");
+        assert_eq!(value["inactive"], true);
+
+        let back: PolicyRuleSnapshot =
+            serde_json::from_value(value).expect("deserialize PolicyRuleSnapshot");
+        assert_eq!(back.rule_id, snap.rule_id);
+        assert_eq!(back.scheduler_name, snap.scheduler_name);
+        assert_eq!(back.inactive, snap.inactive);
+    }
+
+    #[test]
+    fn policy_rule_snapshot_legacy_scheduler_fields_default() {
+        let legacy_json = r#"{
+            "name": "allow-web",
+            "from_zone": "trust",
+            "to_zone": "untrust",
+            "source_addresses": ["any"],
+            "destination_addresses": ["any"],
+            "applications": ["junos-http"],
+            "action": "permit"
+        }"#;
+
+        let snap: PolicyRuleSnapshot =
+            serde_json::from_str(legacy_json).expect("pre-#1378 PolicyRuleSnapshot decodes");
+        assert_eq!(snap.rule_id, "");
+        assert_eq!(snap.scheduler_name, "");
+        assert_eq!(snap.inactive, false);
     }
 
     // #915 forward-compat: a pre-#915 CoSSchedulerSnapshot

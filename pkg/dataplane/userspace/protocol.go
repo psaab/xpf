@@ -365,9 +365,12 @@ type PolicyApplicationSnapshot struct {
 }
 
 type PolicyRuleSnapshot struct {
+	RuleID               string                      `json:"rule_id,omitempty"`
 	Name                 string                      `json:"name"`
 	FromZone             string                      `json:"from_zone,omitempty"`
 	ToZone               string                      `json:"to_zone,omitempty"`
+	SchedulerName        string                      `json:"scheduler_name,omitempty"`
+	Inactive             bool                        `json:"inactive,omitempty"`
 	SourceAddresses      []string                    `json:"source_addresses,omitempty"`
 	DestinationAddresses []string                    `json:"destination_addresses,omitempty"`
 	Applications         []string                    `json:"applications,omitempty"`
