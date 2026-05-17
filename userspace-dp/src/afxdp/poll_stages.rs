@@ -547,7 +547,7 @@ mod tests {
             screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
             ScreenVerdict::Pass
         );
-        let challenge = match screen.check_packet_with_zone_id(
+        let _challenge = match screen.check_packet_with_zone_id(
             "lan",
             TEST_LAN_ZONE_ID,
             &syn_info,
@@ -555,6 +555,50 @@ mod tests {
         ) {
             ScreenVerdict::SynCookieChallenge(challenge) => challenge,
             other => panic!("expected SYN-cookie challenge, got {other:?}"),
+        };
+
+        let invalid_ack_frame = tcp_v4_frame(
+            client,
+            server,
+            49152,
+            443,
+            TCP_FLAG_ACK,
+            2,
+            0xdead_beef,
+        );
+        let invalid_ack_meta = tcp_v4_meta(&invalid_ack_frame, TCP_FLAG_ACK);
+        let invalid_ack_flow =
+            parse_session_flow_from_bytes(&invalid_ack_frame, invalid_ack_meta)
+                .expect("session flow from invalid ACK");
+        let mut invalid_counters = BatchCounters::default();
+
+        assert!(matches!(
+            stage_screen_syn_cookie_ack_on_session_miss(
+                Some(&invalid_ack_flow),
+                &invalid_ack_frame,
+                invalid_ack_meta,
+                None,
+                TEST_NOW_SECS,
+                &mut screen,
+                &mut invalid_counters,
+                &worker_ctx,
+            ),
+            StageOutcome::RecycleAndContinue
+        ));
+        assert!(
+            invalid_counters.touched,
+            "invalid cookie ACK must be counted as a screen drop"
+        );
+        assert_eq!(invalid_counters.screen_drops, 1);
+
+        let challenge = match screen.check_packet_with_zone_id(
+            "lan",
+            TEST_LAN_ZONE_ID,
+            &syn_info,
+            TEST_NOW_SECS,
+        ) {
+            ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+            other => panic!("invalid ACK must not install SYN-cookie bypass, got {other:?}"),
         };
 
         let ack_frame = tcp_v4_frame(
