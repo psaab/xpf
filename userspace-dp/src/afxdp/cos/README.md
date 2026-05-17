@@ -67,6 +67,18 @@ mod.rs for further file-level breakdown.
   effective rate for burst sizing and surplus weight, but
   `queue_service` skips them in guarantee selectors via
   `queue.config.guarantee_enabled == false`.
+- Residual-only / non-exact queues keep their explicit guarantee
+  service, but their surplus service is bounded while exact queues
+  have demand on the same shaped interface. The bound is the residual
+  root rate after reserving each backlogged exact queue's configured
+  guarantee rate once. Cross-binding demand is imported through
+  `SharedCoSExactBacklog` as an exact-queue mask, not a per-worker
+  rate, so one shared exact queue does not multiply its reservation by
+  the number of workers. Shared interfaces also use a shared residual
+  token bucket for non-exact surplus; private/local fallbacks use the
+  per-root residual bucket. Exact queues that explicitly enable
+  `surplus-sharing` remain eligible for surplus service outside the
+  non-exact residual budget.
 - `COS_MIN_BURST_BYTES` (64 × MTU) is canonically owned by
   `token_bucket.rs`; siblings import it via the `cos/mod.rs`
   re-export.
