@@ -32,7 +32,7 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
             queue_id: iface.map(|iface| iface.default_queue),
             dscp_rewrite: None,
             filter_counter: None,
-            three_color_policers: Vec::new(),
+            three_color_policers: crate::filter::CachedThreeColorPolicers::default(),
         };
     };
 

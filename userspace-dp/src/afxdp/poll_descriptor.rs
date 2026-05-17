@@ -2151,14 +2151,19 @@ pub(super) fn poll_binding_process_descriptor(
                                 // in zero-copy mode (mlx5). The ICMP probe + netlink
                                 // monitor + buffer-retry path bypasses this issue.
                                 if binding.pending_neigh.len() < MAX_PENDING_NEIGH {
+                                    let pending_flow_key = flow
+                                        .as_ref()
+                                        .map(|flow| flow.forward_key.clone())
+                                        .or_else(|| {
+                                            parse_session_flow_from_meta(meta)
+                                                .map(|flow| flow.forward_key)
+                                        });
                                     binding.pending_neigh.push_back(PendingNeighPacket {
                                         addr: desc.addr,
                                         desc,
                                         meta,
                                         decision: pending_decision,
-                                        flow_key: flow
-                                            .as_ref()
-                                            .map(|flow| Box::new(flow.forward_key.clone())),
+                                        flow_key: pending_flow_key,
                                         queued_ns: now_ns,
                                         probe_attempts: 0,
                                     });

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -2226,12 +2227,50 @@ func TestDeriveUserspaceCapabilitiesDetectsFirewallFeatures(t *testing.T) {
 func TestDeriveUserspaceCapabilitiesAdmitsThreeColorPolicers(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.ThreeColorPolicers = map[string]*config.ThreeColorPolicerConfig{
-		"tcp1": {Name: "tcp1", CIR: 1000000, CBS: 50000},
+		"tcp1": {Name: "tcp1", ColorBlind: true, CIR: 1000000, CBS: 50000, ThenAction: "discard"},
 	}
 
 	caps := deriveUserspaceCapabilities(cfg)
 	if !caps.ForwardingSupported {
 		t.Fatalf("ForwardingSupported = false, want true for three-color policers. Reasons: %+v", caps.UnsupportedReasons)
+	}
+}
+
+func TestDeriveUserspaceCapabilitiesRejectsUnsupportedThreeColorPolicerActions(t *testing.T) {
+	tests := []struct {
+		name string
+		pol  *config.ThreeColorPolicerConfig
+	}{
+		{
+			name: "color-aware",
+			pol:  &config.ThreeColorPolicerConfig{Name: "aware", CIR: 1000000, CBS: 50000, PBS: 50000, ThenAction: "discard"},
+		},
+		{
+			name: "loss-priority",
+			pol: &config.ThreeColorPolicerConfig{
+				Name:       "loss",
+				ColorBlind: true,
+				CIR:        1000000,
+				CBS:        50000,
+				PBS:        50000,
+				ThenAction: "loss-priority high",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Firewall.ThreeColorPolicers = map[string]*config.ThreeColorPolicerConfig{
+				tt.pol.Name: tt.pol,
+			}
+			caps := deriveUserspaceCapabilities(cfg)
+			if caps.ForwardingSupported {
+				t.Fatal("ForwardingSupported = true, want fail-closed for unsupported three-color policer mode/action")
+			}
+			if !slices.Contains(caps.UnsupportedReasons, "userspace three-color policers require color-blind mode and then discard") {
+				t.Fatalf("UnsupportedReasons = %+v, want three-color reason", caps.UnsupportedReasons)
+			}
+		})
 	}
 }
 
@@ -2249,11 +2288,12 @@ func TestBuildSnapshotIncludesThreeColorPolicerSchema(t *testing.T) {
 		"tr": {
 			Name:       "tr",
 			TwoRate:    true,
+			ColorBlind: true,
 			CIR:        125000,
 			CBS:        50000,
 			PIR:        250000,
 			PBS:        100000,
-			ThenAction: "loss-priority high",
+			ThenAction: "discard",
 		},
 	}
 
@@ -2274,11 +2314,12 @@ func TestBuildSnapshotIncludesThreeColorPolicerSchema(t *testing.T) {
 		{
 			Name:                   "tr",
 			Mode:                   "two-rate",
+			ColorBlind:             true,
 			CommittedRateBytes:     125000,
 			CommittedBurstBytes:    50000,
 			PeakOrExcessRateBytes:  250000,
 			PeakOrExcessBurstBytes: 100000,
-			ThenAction:             "loss-priority high",
+			ThenAction:             "discard",
 		},
 	}
 	if !reflect.DeepEqual(snap.ThreeColorPolicers, want) {

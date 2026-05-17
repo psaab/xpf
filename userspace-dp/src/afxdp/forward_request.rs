@@ -109,6 +109,13 @@ pub(super) fn build_live_forward_request_from_frame(
     {
         decision.resolution.src_mac = zone_redirect.src_mac;
     }
+    let fallback_flow;
+    let tx_selection_flow = if flow.is_some() {
+        flow
+    } else {
+        fallback_flow = parse_session_flow_from_meta(meta);
+        fallback_flow.as_ref()
+    };
     let cos = precomputed_tx_selection
         .map(|selection| CoSTxSelection {
             queue_id: selection.queue_id,
@@ -120,7 +127,7 @@ pub(super) fn build_live_forward_request_from_frame(
                 forwarding,
                 decision.resolution.egress_ifindex,
                 meta,
-                flow.map(|flow| &flow.forward_key),
+                tx_selection_flow.map(|flow| &flow.forward_key),
                 now_ns,
             )
         });
@@ -137,7 +144,7 @@ pub(super) fn build_live_forward_request_from_frame(
         decision,
         apply_nat_on_fabric,
         expected_ports,
-        flow_key: flow.map(|flow| flow.forward_key.clone()),
+        flow_key: tx_selection_flow.map(|flow| flow.forward_key.clone()),
         nat64_reverse: None,
         cos_queue_id: cos.queue_id,
         dscp_rewrite: cos.dscp_rewrite,

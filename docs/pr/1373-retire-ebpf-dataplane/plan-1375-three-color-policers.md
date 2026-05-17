@@ -18,17 +18,21 @@ The bounded runtime slice is implemented after #1395:
   forwarding.
 - Rust status, Go protocol, status formatting, and Prometheus expose
   per-color/drop counters.
-- `deriveUserspaceCapabilities()` admits `firewall three-color-policer`
-  configs.
+- `deriveUserspaceCapabilities()` admits the current color-blind `then
+  discard` runtime slice for `firewall three-color-policer` configs.
 
 Remaining #1375 work is validation and hardening rather than admission:
 
+- Color-aware inherited-color handling remains fail-closed until packet
+  metadata carries trusted incoming color end-to-end. This avoids silently
+  promoting yellow/red traffic to green.
 - Replace the per-policer mutex runtime with the approved sharded or packed
   atomic state if throughput testing shows contention.
 - Preserve counters and token state across snapshot rebuilds if operator
   continuity is required for #1373 removal.
 - Wire non-drop per-color actions, especially loss-priority propagation, into
-  the downstream forwarding/CoS path.
+  the downstream forwarding/CoS path. Until then, non-`discard` three-color
+  actions remain fail-closed.
 - Run integration traffic, failover, and performance evidence for
   green/yellow/red classification and red drops.
 
@@ -43,7 +47,9 @@ Remaining #1375 work is validation and hardening rather than admission:
 
 Extend the userspace policer snapshot and Rust types with srTCM, trTCM,
 `color_blind`, color-aware input handling, and per-color actions for DSCP
-rewrite plus red drop/count behavior.
+rewrite plus red drop/count behavior. The current runtime enables only the
+subset with enforceable semantics: color-blind metering and red drop/count
+for `then discard`.
 
 Use `u128` token refill math with `monotonic_nanos`. Reject invalid config at
 compile/commit time: zero rate, zero burst, `PIR < CIR`, `PBS < CBS`, and
@@ -57,7 +63,9 @@ requires both C and P tokens, yellow requires only P tokens, red otherwise.
 
 Color-aware mode must respect incoming color and never promote packets above
 their incoming color. Color-blind mode evaluates each packet without inherited
-color.
+color. Until inherited color is carried in trusted packet metadata, userspace
+must reject color-aware three-color policers rather than defaulting every
+packet to green.
 
 ## Hot-Path Invariants
 

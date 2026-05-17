@@ -330,16 +330,16 @@ fn apply_term_three_color_policer(
 }
 
 pub(crate) fn apply_cached_three_color_policers(
-    policers: &[Arc<ThreeColorPolicerRuntime>],
+    policers: &CachedThreeColorPolicers,
     now_ns: u64,
     packet_bytes: u64,
 ) -> ThreeColorPolicerAction {
     let mut action = ThreeColorPolicerAction::default();
-    for policer in policers {
+    policers.for_each(|policer| {
         let decision = policer.meter(now_ns, packet_bytes, PacketColor::Green);
         action.dscp_rewrite = action.dscp_rewrite.or(decision.dscp_rewrite);
         action.drop |= decision.drop;
-    }
+    });
     action
 }
 
@@ -361,7 +361,9 @@ fn evaluate_filter_ref_tx_selection_cached_v4(
                 .then(|| term.forwarding_class.clone()),
             dscp_rewrite: term.dscp_rewrite,
             counter: term.has_count.then(|| term.counter.clone()),
-            three_color_policers: term.three_color_policer.iter().cloned().collect(),
+            three_color_policers: CachedThreeColorPolicers::from_option(
+                term.three_color_policer.clone(),
+            ),
         };
     }
     CachedTxSelectionFilterResult::default()
@@ -385,7 +387,9 @@ fn evaluate_filter_ref_tx_selection_cached_v6(
                 .then(|| term.forwarding_class.clone()),
             dscp_rewrite: term.dscp_rewrite,
             counter: term.has_count.then(|| term.counter.clone()),
-            three_color_policers: term.three_color_policer.iter().cloned().collect(),
+            three_color_policers: CachedThreeColorPolicers::from_option(
+                term.three_color_policer.clone(),
+            ),
         };
     }
     CachedTxSelectionFilterResult::default()

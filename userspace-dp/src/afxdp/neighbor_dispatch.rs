@@ -187,7 +187,7 @@ pub(super) fn retry_pending_neigh(
             forwarding,
             decision.resolution.egress_ifindex,
             pkt.meta,
-            pkt.flow_key.as_deref(),
+            pkt.flow_key.as_ref(),
             now_ns,
         );
         if cos.drop {
@@ -205,7 +205,7 @@ pub(super) fn retry_pending_neigh(
             expected_ports: None,
             expected_addr_family: pkt.meta.addr_family,
             expected_protocol: pkt.meta.protocol,
-            flow_key: pkt.flow_key.as_deref().cloned(),
+            flow_key: pkt.flow_key.clone(),
             egress_ifindex: decision.resolution.egress_ifindex,
             cos_queue_id: cos.queue_id,
             dscp_rewrite: cos.dscp_rewrite,

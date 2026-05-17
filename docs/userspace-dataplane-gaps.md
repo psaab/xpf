@@ -152,8 +152,9 @@ The highest-value remaining work on current `master` is:
    #1378 open for the remaining policy-scheduler counter/validation/evidence
    contract after #1396.
 3. close #1374 and #1376 before any BPF source removal, and finish the #1375
-   hardening/evidence checklist now that the three-color capability gate is
-   removed
+   hardening/evidence checklist. The three-color capability gate is removed
+   only for the current color-blind `then discard` slice; color-aware and
+   non-drop treatments stay fail-closed.
 4. carry the narrowed #1380 denominator decision into Phase 5; the current
    userspace command already avoids BPF-map fallback when helper status is
    available

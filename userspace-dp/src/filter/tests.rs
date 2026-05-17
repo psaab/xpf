@@ -433,6 +433,71 @@ fn flow_cache_hits_run_three_color_policer() {
 }
 
 #[test]
+fn cached_three_color_descriptor_dedupes_without_vec_allocation() {
+    let state = make_filter_state_with_three_color(
+        &[
+            FirewallFilterSnapshot {
+                name: "in".into(),
+                family: "inet".into(),
+                terms: vec![FirewallTermSnapshot {
+                    name: "meter-in".into(),
+                    action: "accept".into(),
+                    policer: "same-pol".into(),
+                    ..Default::default()
+                }],
+            },
+            FirewallFilterSnapshot {
+                name: "out".into(),
+                family: "inet".into(),
+                terms: vec![FirewallTermSnapshot {
+                    name: "meter-out".into(),
+                    action: "accept".into(),
+                    policer: "same-pol".into(),
+                    ..Default::default()
+                }],
+            },
+        ],
+        &[ThreeColorPolicerSnapshot {
+            name: "same-pol".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 100,
+            peak_or_excess_burst_bytes: 50,
+            then_action: "discard".into(),
+            ..Default::default()
+        }],
+    );
+
+    let mut combined = evaluate_filter_ref_tx_selection_cached(
+        state.filters.get("inet:out").unwrap(),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+    )
+    .three_color_policers;
+    combined.extend(
+        evaluate_filter_ref_tx_selection_cached(
+            state.filters.get("inet:in").unwrap(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PROTO_UDP,
+            12345,
+            5000,
+            0,
+        )
+        .three_color_policers,
+    );
+
+    assert_eq!(combined.len(), 1);
+    assert!(!apply_cached_three_color_policers(&combined, 0, 100).drop);
+    assert!(apply_cached_three_color_policers(&combined, 0, 51).drop);
+}
+
+#[test]
 fn multiple_terms_first_match_wins() {
     let state = make_filter_state(
         &[FirewallFilterSnapshot {

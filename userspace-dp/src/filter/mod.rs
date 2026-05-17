@@ -145,6 +145,75 @@ pub(crate) struct ThreeColorPolicerRuntime {
     counters: ThreeColorPolicerCounters,
 }
 
+impl PartialEq for ThreeColorPolicerRuntime {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.name == other.name
+    }
+}
+
+impl Eq for ThreeColorPolicerRuntime {}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CachedThreeColorPolicers {
+    first: Option<Arc<ThreeColorPolicerRuntime>>,
+    second: Option<Arc<ThreeColorPolicerRuntime>>,
+}
+
+impl CachedThreeColorPolicers {
+    #[inline]
+    pub(crate) fn from_option(runtime: Option<Arc<ThreeColorPolicerRuntime>>) -> Self {
+        Self {
+            first: runtime,
+            second: None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn push(&mut self, runtime: Arc<ThreeColorPolicerRuntime>) {
+        if self
+            .first
+            .as_ref()
+            .is_some_and(|existing| existing.id == runtime.id)
+            || self
+                .second
+                .as_ref()
+                .is_some_and(|existing| existing.id == runtime.id)
+        {
+            return;
+        }
+        if self.first.is_none() {
+            self.first = Some(runtime);
+        } else if self.second.is_none() {
+            self.second = Some(runtime);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn extend(&mut self, other: Self) {
+        if let Some(runtime) = other.first {
+            self.push(runtime);
+        }
+        if let Some(runtime) = other.second {
+            self.push(runtime);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        usize::from(self.first.is_some()) + usize::from(self.second.is_some())
+    }
+
+    #[inline]
+    pub(crate) fn for_each(&self, mut f: impl FnMut(&Arc<ThreeColorPolicerRuntime>)) {
+        if let Some(runtime) = self.first.as_ref() {
+            f(runtime);
+        }
+        if let Some(runtime) = self.second.as_ref() {
+            f(runtime);
+        }
+    }
+}
+
 impl ThreeColorPolicerRuntime {
     pub(crate) fn new(id: u32, name: String, state: ThreeColorPolicerState) -> Self {
         Self {
@@ -393,7 +462,7 @@ pub(crate) struct CachedTxSelectionFilterResult {
     pub(crate) forwarding_class: Option<Arc<str>>,
     pub(crate) dscp_rewrite: Option<u8>,
     pub(crate) counter: Option<Arc<FilterTermCounter>>,
-    pub(crate) three_color_policers: Vec<Arc<ThreeColorPolicerRuntime>>,
+    pub(crate) three_color_policers: CachedThreeColorPolicers,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

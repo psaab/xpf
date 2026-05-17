@@ -67,8 +67,8 @@ Implemented here:
   session key and meter at retry dispatch time before prepared TX.
 - Rust status, Go status, CLI status formatting, and Prometheus export
   expose green/yellow/red packet and byte counters plus drop counters.
-- `deriveUserspaceCapabilities()` no longer rejects
-  `firewall three-color-policer` configs.
+- `deriveUserspaceCapabilities()` no longer rejects the color-blind `then
+  discard` `firewall three-color-policer` runtime slice.
 
 Remaining limitations:
 
@@ -79,8 +79,9 @@ Remaining limitations:
   are stable within one compiled runtime but not yet carried across
   config rebuilds.
 - Snapshot `then_action` handling currently wires red drop for
-  `then discard`. Other actions, such as loss-priority propagation, are
-  parsed and admitted but do not yet drive downstream loss-priority
-  behavior.
+  `then discard`. Other actions, such as loss-priority propagation, stay
+  fail-closed until downstream loss-priority behavior is wired. Color-aware
+  mode also stays fail-closed until inherited packet color is carried through
+  trusted metadata.
 - Traffic-level integration, failover, and performance evidence still
   need to be collected before treating #1375 as fully retired.
