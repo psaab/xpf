@@ -389,6 +389,7 @@ func TestCompileClassOfServicePercentBuffer100PercentAllowed(t *testing.T) {
 
 func TestCompileClassOfServicePercentBufferLiteral100PercentAllowed(t *testing.T) {
 	lines := []string{
+		"set class-of-service forwarding-classes queue 1 expedited-forwarding",
 		"set class-of-service schedulers voice buffer-size 100%",
 		"set class-of-service scheduler-maps edge forwarding-class ef scheduler voice",
 	}
@@ -402,8 +403,12 @@ func TestCompileClassOfServicePercentBufferLiteral100PercentAllowed(t *testing.T
 			t.Fatalf("SetPath(%q): %v", line, err)
 		}
 	}
-	if _, err := CompileConfig(tree); err != nil {
+	cfg, err := CompileConfig(tree)
+	if err != nil {
 		t.Fatalf("CompileConfig: unexpected error for literal 100%%: %v", err)
+	}
+	if got := cfg.ClassOfService.Schedulers["voice"].BufferSizePercent; got != 100 {
+		t.Fatalf("BufferSizePercent = %v, want 100", got)
 	}
 }
 
