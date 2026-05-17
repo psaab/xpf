@@ -62,7 +62,7 @@ func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 
 func TestConfigSnapshotMirrorConfigsRoundTrip(t *testing.T) {
 	in := ConfigSnapshot{
-		Version: 1,
+		Version: ProtocolVersion,
 		MirrorConfigs: []MirrorConfigSnapshot{
 			{IngressIfindex: 11, OutputIfindex: 22, Rate: 100},
 			{IngressIfindex: 12, OutputIfindex: 22},

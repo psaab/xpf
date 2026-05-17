@@ -66,7 +66,7 @@ func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceCo
 		ThreeColorPolicers: buildThreeColorPolicerSnapshots(cfg),
 		ClassOfService:     buildClassOfServiceSnapshot(cfg),
 		FlowExport:         buildFlowExportSnapshot(cfg),
-		MirrorConfigs:      mustBuildMirrorConfigSnapshots(cfg, interfaces),
+		MirrorConfigs:      buildMirrorConfigSnapshotsFailClosed(cfg, interfaces),
 		Config:             cfg,
 		Summary: SnapshotSummary{
 			HostName:       cfg.System.HostName,
@@ -80,7 +80,7 @@ func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceCo
 	}
 }
 
-func mustBuildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot) []MirrorConfigSnapshot {
+func buildMirrorConfigSnapshotsFailClosed(cfg *config.Config, interfaces []InterfaceSnapshot) []MirrorConfigSnapshot {
 	mirrors, err := buildMirrorConfigSnapshots(cfg, interfaces)
 	if err != nil {
 		// The mirror table contract is one output per ingress ifindex. Keep
@@ -145,6 +145,9 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 			}
 			if previous, ok := seenIngress[ingressIfindex]; ok {
 				return nil, fmt.Errorf("duplicate port-mirroring ingress ifindex %d in instances %q and %q", ingressIfindex, previous, name)
+			}
+			if inst.InputRate < 0 {
+				return nil, fmt.Errorf("port-mirroring instance %q has negative input rate %d", name, inst.InputRate)
 			}
 			seenIngress[ingressIfindex] = name
 			out = append(out, MirrorConfigSnapshot{

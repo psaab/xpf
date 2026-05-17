@@ -2063,6 +2063,29 @@ func TestBuildMirrorConfigSnapshotsSkipsMissingOutputIfindex(t *testing.T) {
 	}
 }
 
+func TestBuildMirrorConfigSnapshotsRejectsNegativeInputRate(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
+		Instances: map[string]*config.PortMirrorInstance{
+			"span1": {
+				Name:      "span1",
+				InputRate: -1,
+				Input:     []string{"ge-0/0/0.0"},
+				Output:    "ge-0/0/1.0",
+			},
+		},
+	}
+	interfaces := []InterfaceSnapshot{
+		{Name: "ge-0/0/0.0", LinuxName: "ge-0-0-0.0", Ifindex: 11},
+		{Name: "ge-0/0/1.0", LinuxName: "ge-0-0-1.0", Ifindex: 22},
+	}
+
+	_, err := buildMirrorConfigSnapshots(cfg, interfaces)
+	if err == nil || !strings.Contains(err.Error(), "negative input rate") {
+		t.Fatalf("error = %v, want negative input rate rejection", err)
+	}
+}
+
 func TestDeriveUserspaceCapabilitiesAllowsFirewallFilters(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
