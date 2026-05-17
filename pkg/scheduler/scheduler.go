@@ -12,23 +12,45 @@ import (
 // Scheduler periodically evaluates time windows for named schedulers
 // and notifies a callback when any scheduler's active state changes.
 type Scheduler struct {
-	mu         sync.RWMutex
-	schedulers map[string]*config.SchedulerConfig
-	active     map[string]bool
-	updateFn   func(activeState map[string]bool)
+	mu               sync.RWMutex
+	schedulers       map[string]*config.SchedulerConfig
+	active           map[string]bool
+	updateFn         func(activeState map[string]bool)
+	lastEval         time.Time
+	lastWallUnixNano int64
+	unsafeUntil      time.Time
+}
+
+const (
+	wallClockDriftTolerance = 5 * time.Second
+	wallClockRecoveryHold   = 2 * time.Minute
+)
+
+// NewPrimed creates a Scheduler, evaluates the initial active-state map, and
+// returns that map without firing updateFn from inside the constructor. Daemon
+// apply paths use this when they already hold their own serialization lock and
+// must publish the initial state as part of the same apply transaction.
+func NewPrimed(schedulers map[string]*config.SchedulerConfig, updateFn func(activeState map[string]bool), now time.Time) (*Scheduler, map[string]bool) {
+	s := &Scheduler{
+		schedulers: schedulers,
+		active:     make(map[string]bool),
+		updateFn:   updateFn,
+	}
+	s.evaluate(now, false)
+	return s, s.ActiveState()
 }
 
 // New creates a Scheduler with the given scheduler configs and update callback.
 // updateFn is called whenever any scheduler's active state changes, receiving
 // the current active state of all schedulers.
 func New(schedulers map[string]*config.SchedulerConfig, updateFn func(activeState map[string]bool)) *Scheduler {
-	s := &Scheduler{
-		schedulers: schedulers,
-		active:     make(map[string]bool),
-		updateFn:   updateFn,
+	s, _ := NewPrimed(schedulers, updateFn, time.Now())
+	// Preserve the historical constructor contract: New notifies on initial
+	// state. NewPrimed is the no-notify variant for callers that publish the
+	// initial state under an external lock.
+	if len(s.active) > 0 {
+		s.notifyActiveState()
 	}
-	// Compute initial state.
-	s.evaluate(time.Now())
 	return s
 }
 
@@ -45,7 +67,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			slog.Info("scheduler: stopping evaluation loop")
 			return
 		case t := <-ticker.C:
-			s.evaluate(t)
+			s.evaluate(t, true)
 		}
 	}
 }
@@ -73,20 +95,31 @@ func (s *Scheduler) Update(schedulers map[string]*config.SchedulerConfig) {
 	s.mu.Lock()
 	s.schedulers = schedulers
 	s.mu.Unlock()
-	s.evaluate(time.Now())
+	s.evaluate(time.Now(), true)
 }
 
 // evaluate checks each scheduler against the current time and fires the
 // callback if any state changed.
-func (s *Scheduler) evaluate(now time.Time) {
+func (s *Scheduler) evaluate(now time.Time, notify bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	changed := false
 	newActive := make(map[string]bool, len(s.schedulers))
+	wallClockDiscontinuous := s.wallClockDiscontinuousLocked(now)
+	wallClockUnsafe := wallClockDiscontinuous
+	if !wallClockUnsafe && !s.unsafeUntil.IsZero() {
+		if now.Before(s.unsafeUntil) {
+			wallClockUnsafe = true
+		} else {
+			s.unsafeUntil = time.Time{}
+		}
+	}
 
 	for name, sched := range s.schedulers {
-		cur := isWithinWindow(now, sched)
+		cur := false
+		if !wallClockUnsafe {
+			cur = isWithinWindow(now, sched)
+		}
 		newActive[name] = cur
 		if prev, ok := s.active[name]; !ok || prev != cur {
 			slog.Info("scheduler: state changed", "name", name, "active", cur)
@@ -103,15 +136,68 @@ func (s *Scheduler) evaluate(now time.Time) {
 	}
 
 	s.active = newActive
-
-	if changed && s.updateFn != nil {
-		// Pass a copy so the callback cannot mutate internal state.
-		cp := make(map[string]bool, len(newActive))
-		for k, v := range newActive {
-			cp[k] = v
-		}
-		s.updateFn(cp)
+	if wallClockDiscontinuous {
+		s.unsafeUntil = now.Add(wallClockRecoveryHold)
 	}
+	s.lastEval = now
+	s.lastWallUnixNano = now.UnixNano()
+
+	if !changed || !notify || s.updateFn == nil {
+		s.mu.Unlock()
+		return
+	}
+	cp := copyActiveState(newActive)
+	updateFn := s.updateFn
+	s.mu.Unlock()
+	updateFn(cp)
+}
+
+func (s *Scheduler) wallClockDiscontinuousLocked(now time.Time) bool {
+	if s.lastEval.IsZero() {
+		return false
+	}
+	wallElapsed := time.Duration(now.UnixNano() - s.lastWallUnixNano)
+	if wallElapsed < 0 {
+		slog.Warn("scheduler: wall clock moved backward, failing closed during recovery hold",
+			"previous", s.lastEval, "current", now)
+		return true
+	}
+	monoElapsed := now.Sub(s.lastEval)
+	if monoElapsed < 0 {
+		slog.Warn("scheduler: monotonic clock moved backward, failing closed during recovery hold",
+			"previous", s.lastEval, "current", now)
+		return true
+	}
+	delta := wallElapsed - monoElapsed
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > wallClockDriftTolerance {
+		slog.Warn("scheduler: wall clock drift exceeded tolerance, failing closed during recovery hold",
+			"wall_elapsed", wallElapsed, "monotonic_elapsed", monoElapsed, "tolerance", wallClockDriftTolerance)
+		return true
+	}
+	return false
+}
+
+func (s *Scheduler) notifyActiveState() {
+	s.mu.RLock()
+	if s.updateFn == nil {
+		s.mu.RUnlock()
+		return
+	}
+	cp := copyActiveState(s.active)
+	updateFn := s.updateFn
+	s.mu.RUnlock()
+	updateFn(cp)
+}
+
+func copyActiveState(in map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // isWithinWindow determines whether now falls within the time window defined

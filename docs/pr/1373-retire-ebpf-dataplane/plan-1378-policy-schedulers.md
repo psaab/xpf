@@ -8,9 +8,9 @@ scheduled policy rules activate and deactivate correctly without the eBPF
 
 ## Dependencies
 
-- #1381 must land first. `UpdatePolicyScheduleState` currently dispatches
-  through the embedded eBPF `DataPlane`; userspace needs either the split
-  interface or an explicit stub/snapshot branch.
+- The safe slice no longer waits on #1381. The userspace manager now shadows
+  `UpdatePolicyScheduleState` and republishes a userspace snapshot instead of
+  falling through to the embedded eBPF manager.
 
 ## Design
 
@@ -19,6 +19,14 @@ Add `SchedulerName string`, `Inactive bool`, and a stable rule identity to
 identity must not depend on transient array position alone; use a config-driven
 UUID if available or `(policy_set_id, policy_name, rule_name)`/equivalent
 compiled identity.
+
+Safe #1378 slice status: this change wires `rule_id`, `scheduler_name`, and
+`inactive` through userspace policy snapshots and Rust policy evaluation. The
+daemon reconciles the scheduler lifecycle on every committed config while
+holding the apply semaphore; userspace snapshot rebuilds are seeded with that
+same active-state map, and runtime scheduler ticks acquire the same semaphore
+before publishing one coherent snapshot delta. Missing scheduler references are
+compile errors.
 
 On scheduler state changes, publish one atomic userspace snapshot delta that
 contains the updated inactive bits for all affected rules. Do not issue
@@ -31,9 +39,14 @@ existing sessions unless a separate `policy-rematch` feature is implemented.
 That matches Junos default behavior: schedulers block new lookups, not existing
 sessions.
 
-Scheduler granularity is 60 seconds. Tests and docs must use deterministic
-clock injection or windows that span multiple evaluator ticks; the earlier
-30-second integration target is invalid.
+Scheduler granularity is 60 seconds. The wall clock is used only by the Go
+control-plane scheduler to decide the next active-state map; workers receive
+booleans in the snapshot and never evaluate wall-clock time in the packet path.
+The scheduler compares wall elapsed time with Go's monotonic elapsed time at
+each evaluation. Backward wall-clock steps or drift beyond tolerance fail
+closed for that evaluation by publishing all scheduler bits inactive.
+Tests and docs must use deterministic scheduler inputs or windows that span
+multiple evaluator ticks; the earlier 30-second integration target is invalid.
 
 Missing scheduler references fail closed as commit errors. Do not copy the
 existing eBPF behavior that can default missing scheduler state to active.
@@ -43,6 +56,13 @@ existing eBPF behavior that can default missing scheduler state to active.
 - One inactive-branch per rule on miss path is acceptable; no scheduler clock
   evaluation occurs in the packet worker.
 - Snapshot publication is ArcSwap-atomic across all rule inactive bits.
+- Snapshots carrying scheduler inactive bits require protocol version 2; the
+  Rust control server rejects older/unknown snapshot versions instead of
+  silently ignoring scheduling fields, and status exposes the helper's supported
+  snapshot protocol so new Go refuses to publish scheduled-policy snapshots to
+  an old helper before the fail-open path can occur. The refusal actively
+  disarms helper forwarding with `set_forwarding_state armed=false`; recording
+  a compile error while leaving the old helper armed is not fail-closed.
 - Hit counters are keyed by stable rule identity outside rebuilt rule structs so
   counters survive scheduler snapshot rebuilds.
 - Do not copy the existing eBPF indexing bug in
@@ -64,8 +84,9 @@ existing eBPF behavior that can default missing scheduler state to active.
 - Scheduler atomicity: first-match policy ordering requires affected inactive
   bits to publish as one coherent snapshot. Per-rule toggles can expose an
   impossible mixed policy state.
-- Clock drift: scheduler state is daemon-clock derived. HA peers must recompute
-  after failover rather than trusting stale peer-local state.
+- Clock drift: scheduler state is daemon-clock derived. The scheduler must
+  fail closed on wall-clock discontinuity, and HA peers must recompute after
+  failover rather than trusting stale peer-local state.
 - Counter continuity: stable rule identity is mandatory because inactive flips
   and snapshot rebuilds must not reset operator-visible hit counters.
 - Missing scheduler references: fail-open behavior admits traffic outside the

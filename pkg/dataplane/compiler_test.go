@@ -7,6 +7,97 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+type policyScheduleSlotTestDP struct {
+	DataPlane
+
+	rules []PolicyRule
+}
+
+func (d *policyScheduleSlotTestDP) SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error {
+	return nil
+}
+
+func (d *policyScheduleSlotTestDP) SetPolicyRule(policySetID uint32, ruleIndex uint32, rule PolicyRule) error {
+	d.rules = append(d.rules, rule)
+	return nil
+}
+
+func (d *policyScheduleSlotTestDP) DeleteStaleZonePairPolicies(written map[ZonePairKey]bool) {}
+
+func TestCompilePoliciesRecordsExpandedPolicyScheduleSlots(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*config.Policy{
+			{
+				Name:   "plain",
+				Action: config.PolicyPermit,
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+			},
+			{
+				Name:          "scheduled",
+				SchedulerName: "workhours",
+				Action:        config.PolicyPermit,
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"app-a", "app-b"},
+				},
+			},
+		},
+	}}
+	cfg.Security.GlobalPolicies = []*config.Policy{{
+		Name:          "global-scheduled",
+		SchedulerName: "night",
+		Action:        config.PolicyPermit,
+		Match: config.PolicyMatch{
+			SourceAddresses:      []string{"any"},
+			DestinationAddresses: []string{"any"},
+			Applications:         []string{"app-c", "app-d"},
+		},
+	}}
+	result := &CompileResult{
+		ZoneIDs: map[string]uint16{
+			"trust":   1,
+			"untrust": 2,
+		},
+		AppIDs: map[string]uint32{
+			"app-a": 1,
+			"app-b": 2,
+			"app-c": 3,
+			"app-d": 4,
+		},
+	}
+	dp := &policyScheduleSlotTestDP{}
+
+	if err := compilePolicies(dp, cfg, result); err != nil {
+		t.Fatalf("compilePolicies: %v", err)
+	}
+
+	want := []PolicyScheduleRuleSlot{
+		{PolicySetID: 0, RuleIndex: 1, RuleID: 1, PolicyName: "scheduled", SchedulerName: "workhours"},
+		{PolicySetID: 0, RuleIndex: 2, RuleID: 2, PolicyName: "scheduled", SchedulerName: "workhours"},
+		{PolicySetID: 1, RuleIndex: 0, RuleID: MaxRulesPerPolicy, PolicyName: "global-scheduled", SchedulerName: "night"},
+		{PolicySetID: 1, RuleIndex: 1, RuleID: MaxRulesPerPolicy + 1, PolicyName: "global-scheduled", SchedulerName: "night"},
+	}
+	if len(result.PolicyScheduleRuleSlots) != len(want) {
+		t.Fatalf("got %d slots, want %d: %#v", len(result.PolicyScheduleRuleSlots), len(want), result.PolicyScheduleRuleSlots)
+	}
+	for i := range want {
+		if got := result.PolicyScheduleRuleSlots[i]; got != want[i] {
+			t.Fatalf("slot %d = %#v, want %#v", i, got, want[i])
+		}
+	}
+	if len(dp.rules) != 5 {
+		t.Fatalf("compiled %d policy rules, want 5", len(dp.rules))
+	}
+}
+
 func TestExpandFilterTermNegateFlags(t *testing.T) {
 	prefixLists := map[string]*config.PrefixList{
 		"rfc1918": {

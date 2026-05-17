@@ -4,6 +4,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -67,7 +68,9 @@ func (d *Daemon) bootstrapFromFile() error {
 func (d *Daemon) applyConfig(cfg *config.Config) {
 	_ = d.applySem.Acquire(context.Background(), 1)
 	defer d.applySem.Release(1)
-	d.applyConfigLocked(cfg)
+	if err := d.applyConfigLocked(cfg); err != nil {
+		slog.Warn("apply config failed", "err", err)
+	}
 }
 
 // commitAndApply atomically promotes the candidate config and
@@ -98,7 +101,9 @@ func (d *Daemon) commitAndApply(ctx context.Context, comment string, syncPeer bo
 	if err != nil {
 		return nil, err
 	}
-	d.applyConfigLocked(compiled)
+	if err := d.applyConfigLocked(compiled); err != nil {
+		return nil, err
+	}
 	if syncPeer {
 		d.syncConfigToPeer()
 	}
@@ -121,7 +126,9 @@ func (d *Daemon) syncAndApply(ctx context.Context, configText string, chassisPre
 		return nil, err
 	}
 	if compiled != nil {
-		d.applyConfigLocked(compiled)
+		if err := d.applyConfigLocked(compiled); err != nil {
+			return nil, err
+		}
 	}
 	return compiled, nil
 }
@@ -138,7 +145,9 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, minutes int, syncP
 	if err != nil {
 		return nil, err
 	}
-	d.applyConfigLocked(compiled)
+	if err := d.applyConfigLocked(compiled); err != nil {
+		return nil, err
+	}
 	if syncPeer {
 		d.syncConfigToPeer()
 	}
@@ -147,10 +156,10 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, minutes int, syncP
 
 // applyConfigLocked runs the actual reconcile pipeline. MUST be
 // called with d.applySem held.
-func (d *Daemon) applyConfigLocked(cfg *config.Config) {
+func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 	if d.applyBodyForTest != nil {
 		d.applyBodyForTest(cfg)
-		return
+		return nil
 	}
 	// Reset VIP warning suppression so new config gets fresh warnings.
 	d.vipWarnedIfaces = nil
@@ -394,6 +403,8 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) {
 	// programming is done. This avoids the double-bind that causes EBUSY
 	// on mlx5 zero-copy queues.
 	rethMACPending := false
+	deferWorkersActive := false
+	var clearDeferWorkers func()
 	if d.cluster != nil && cfg.Chassis.Cluster != nil && d.dp != nil {
 		cc := cfg.Chassis.Cluster
 		for rethName, physName := range cfg.RethToPhysical() {
@@ -416,9 +427,22 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) {
 			type deferSetter interface{ SetDeferWorkers(bool) }
 			if ds, ok := d.dp.(deferSetter); ok {
 				ds.SetDeferWorkers(true)
+				deferWorkersActive = true
+				clearDeferWorkers = func() {
+					ds.SetDeferWorkers(false)
+				}
+				defer func() {
+					if deferWorkersActive {
+						clearDeferWorkers()
+					}
+				}()
 			}
 		}
 	}
+
+	policySchedulerApplyTime := time.Now()
+	policySchedulerActiveState := d.policySchedulerActiveStateForApplyLocked(cfg, policySchedulerApplyTime)
+	d.seedPolicySchedulerActiveStateLocked(policySchedulerActiveState)
 
 	// 2. Compile eBPF dataplane
 	var compileResult *dataplane.CompileResult
@@ -426,18 +450,21 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) {
 		var err error
 		if compileResult, err = d.dp.Compile(cfg); err != nil {
 			d.recordCompileFailure(err)
+			if compileErrorMustAbortApply(err) {
+				return err
+			}
 		} else {
 			d.recordCompileSuccess()
 		}
 	}
+	policySchedulerActiveState = d.reconcilePolicySchedulerLockedAt(cfg, policySchedulerApplyTime)
+	d.publishInitialPolicySchedulerStateLocked(cfg, policySchedulerActiveState, compileResult)
 
 	// Clear defer flag after Compile so subsequent recompiles (where MAC
 	// is already set) don't skip workers.
-	if rethMACPending {
-		type deferSetter interface{ SetDeferWorkers(bool) }
-		if ds, ok := d.dp.(deferSetter); ok {
-			ds.SetDeferWorkers(false)
-		}
+	if deferWorkersActive {
+		clearDeferWorkers()
+		deferWorkersActive = false
 	}
 
 	// 2.1. Wire aggressive session aging config to GC.
@@ -1014,4 +1041,19 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) {
 		d.applyStep0Tunables(userspaceDP, claimHostTunables, governor, netdevBudget,
 			coalesceExplicit, coalesceEnable, coalesceRX, coalesceTX, rssAllowed)
 	}
+	return nil
+}
+
+func compileErrorMustAbortApply(err error) bool {
+	return errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible)
+}
+
+func (d *Daemon) publishInitialPolicySchedulerStateLocked(cfg *config.Config, activeState map[string]bool, compileResult *dataplane.CompileResult) {
+	if d.dp == nil || activeState == nil || compileResult == nil {
+		return
+	}
+	if _, isUserspace := d.dp.(*dpuserspace.Manager); isUserspace {
+		return
+	}
+	d.dp.UpdatePolicyScheduleState(cfg, activeState)
 }

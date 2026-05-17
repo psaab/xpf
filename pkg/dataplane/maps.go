@@ -1494,45 +1494,40 @@ func (m *Manager) ClearFilterConfigs() error {
 
 // UpdatePolicyScheduleState iterates policy rules and toggles the Active flag
 // based on scheduler state. Only rules whose scheduler state changed are updated.
-func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) {
+func (m *Manager) UpdatePolicyScheduleState(_ *config.Config, activeState map[string]bool) {
 	zm, ok := m.maps["policy_rules"]
 	if !ok {
 		return
 	}
+	result := m.LastCompileResult()
+	if result == nil {
+		return
+	}
 
-	policySetID := uint32(0)
-	for _, zpp := range cfg.Security.Policies {
-		for i, pol := range zpp.Policies {
-			if pol.SchedulerName == "" {
-				policySetID++
-				continue
-			}
-
-			active, exists := activeState[pol.SchedulerName]
-			if !exists {
-				active = true // default active if scheduler not found
-			}
-
-			idx := policySetID*MaxRulesPerPolicy + uint32(i)
-			var rule PolicyRule
-			if err := zm.Lookup(idx, &rule); err != nil {
-				continue
-			}
-
-			var newActive uint8
-			if active {
-				newActive = 1
-			}
-			if rule.Active != newActive {
-				rule.Active = newActive
-				zm.Update(idx, rule, ebpf.UpdateAny)
-				slog.Info("policy schedule state updated",
-					"policy", pol.Name,
-					"scheduler", pol.SchedulerName,
-					"active", active)
-			}
+	for _, slot := range result.PolicyScheduleRuleSlots {
+		active, exists := activeState[slot.SchedulerName]
+		if !exists {
+			active = true // default active if scheduler not found
 		}
-		policySetID++
+
+		idx := slot.PolicySetID*MaxRulesPerPolicy + slot.RuleIndex
+		var rule PolicyRule
+		if err := zm.Lookup(idx, &rule); err != nil {
+			continue
+		}
+
+		var newActive uint8
+		if active {
+			newActive = 1
+		}
+		if rule.Active != newActive {
+			rule.Active = newActive
+			zm.Update(idx, rule, ebpf.UpdateAny)
+			slog.Info("policy schedule state updated",
+				"policy", slot.PolicyName,
+				"scheduler", slot.SchedulerName,
+				"active", active)
+		}
 	}
 }
 

@@ -178,6 +178,127 @@ func TestScheduler_InitialState(t *testing.T) {
 	}
 }
 
+func TestScheduler_NewPrimedDoesNotNotifyInitialState(t *testing.T) {
+	var called bool
+	schedCfg := map[string]*config.SchedulerConfig{
+		"always-on": {Name: "always-on"},
+	}
+
+	s, state := NewPrimed(schedCfg, func(activeState map[string]bool) {
+		called = true
+	}, time.Date(2026, 2, 12, 14, 30, 0, 0, time.UTC))
+
+	if called {
+		t.Fatal("NewPrimed fired callback during constructor")
+	}
+	if !state["always-on"] {
+		t.Fatal("initial state missing always-on=true")
+	}
+	if !s.IsActive("always-on") {
+		t.Fatal("IsActive should return true for always-on")
+	}
+}
+
+func TestScheduler_WallClockBackwardStepFailsClosed(t *testing.T) {
+	var lastState map[string]bool
+	schedCfg := map[string]*config.SchedulerConfig{
+		"business-hours": {
+			Name:      "business-hours",
+			StartTime: "08:00:00",
+			StopTime:  "17:00:00",
+		},
+	}
+	now := time.Date(2026, 2, 12, 12, 0, 0, 0, time.UTC)
+	s, state := NewPrimed(schedCfg, func(activeState map[string]bool) {
+		lastState = activeState
+	}, now)
+	if !state["business-hours"] {
+		t.Fatal("initial state should be active")
+	}
+
+	s.evaluate(now.Add(-1*time.Hour), true)
+	if lastState == nil {
+		t.Fatal("expected callback after fail-closed state change")
+	}
+	if lastState["business-hours"] {
+		t.Fatalf("wall-clock backward step should fail closed, got state %+v", lastState)
+	}
+	if s.IsActive("business-hours") {
+		t.Fatal("scheduler should remain inactive after backward wall-clock step")
+	}
+}
+
+func TestScheduler_WallClockBackwardStepStaysFailClosedUntilClockRecovers(t *testing.T) {
+	var lastState map[string]bool
+	schedCfg := map[string]*config.SchedulerConfig{
+		"business-hours": {
+			Name:      "business-hours",
+			StartTime: "08:00:00",
+			StopTime:  "17:00:00",
+		},
+	}
+	now := time.Date(2026, 2, 12, 12, 0, 0, 0, time.UTC)
+	s, state := NewPrimed(schedCfg, func(activeState map[string]bool) {
+		lastState = activeState
+	}, now)
+	if !state["business-hours"] {
+		t.Fatal("initial state should be active")
+	}
+
+	// Simulate the real NTP rollback shape: monotonic time advances while
+	// wall time appears to move backward relative to the previous wall sample.
+	s.mu.Lock()
+	s.lastEval = now
+	s.lastWallUnixNano = now.Add(time.Hour).UnixNano()
+	s.mu.Unlock()
+
+	s.evaluate(now.Add(time.Second), true)
+	if lastState == nil || lastState["business-hours"] {
+		t.Fatalf("first backward-step evaluation should fail closed, got state %+v", lastState)
+	}
+	lastState = nil
+
+	// The recovery hold keeps the scheduler closed for more than one tick,
+	// even after the new wall/monotonic samples are internally consistent.
+	s.evaluate(now.Add(time.Minute), true)
+	if lastState != nil {
+		t.Fatalf("second rollback evaluation should not notify without state change, got %+v", lastState)
+	}
+	if s.IsActive("business-hours") {
+		t.Fatal("scheduler should stay inactive during wall-clock recovery hold")
+	}
+
+	s.evaluate(now.Add(3*time.Minute), true)
+	if lastState == nil || !lastState["business-hours"] {
+		t.Fatalf("scheduler should recover after hold window, got state %+v", lastState)
+	}
+}
+
+func TestScheduler_MonotonicAdvanceDoesNotFailClosed(t *testing.T) {
+	schedCfg := map[string]*config.SchedulerConfig{
+		"business-hours": {
+			Name:      "business-hours",
+			StartTime: "00:00:00",
+			StopTime:  "23:59:59",
+		},
+	}
+	start := time.Now()
+	s, state := NewPrimed(schedCfg, func(map[string]bool) {}, start)
+	if !state["business-hours"] {
+		t.Fatal("initial state should be active")
+	}
+
+	// time.Add preserves Go's monotonic reading. This exercises the real
+	// monotonic path; time.Date-only tests would silently skip it.
+	s.evaluate(start.Add(time.Minute), true)
+	if s.IsActive("business-hours") == false {
+		t.Fatal("monotonic time advance with matching wall time should stay active")
+	}
+	if !s.unsafeUntil.IsZero() {
+		t.Fatalf("unsafeUntil = %v, want zero for monotonic advance", s.unsafeUntil)
+	}
+}
+
 func TestScheduler_ActiveState(t *testing.T) {
 	schedCfg := map[string]*config.SchedulerConfig{
 		"always-on": {Name: "always-on"},

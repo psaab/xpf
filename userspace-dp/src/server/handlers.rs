@@ -52,51 +52,61 @@ pub(crate) fn handle_stream(
             "ping" | "status" => {}
             "apply_snapshot" => {
                 if let Some(snapshot) = request.snapshot {
-                    eprintln!(
-                        "CTRL_REQ: apply_snapshot generation={} fib_generation={} forwarding_armed_before={}",
-                        snapshot.generation, snapshot.fib_generation, guard.status.forwarding_armed
-                    );
-                    guard.status.last_snapshot_generation = snapshot.generation;
-                    guard.status.last_fib_generation = snapshot.fib_generation;
-                    guard.status.last_snapshot_at = Some(snapshot.generated_at);
-                    guard.status.capabilities = snapshot.capabilities.clone();
-                    let existing_bindings = guard.status.bindings.clone();
-                    let previous_snapshot = guard.snapshot.as_ref();
-                    let same_plan = previous_snapshot.is_some_and(|prev| {
-                        let prev_key = snapshot_binding_plan_key(prev);
-                        let next_key = snapshot_binding_plan_key(&snapshot);
-                        let same = prev_key == next_key;
-                        if !same {
-                            eprintln!(
-                                "CTRL_REQ: binding plan changed prev_key={} next_key={}",
-                                prev_key, next_key
-                            );
-                        }
-                        same
-                    });
-                    if same_plan {
-                        guard.afxdp.refresh_runtime_snapshot(&snapshot);
-                        guard.snapshot = Some(snapshot);
-                        refresh_status(&mut guard);
-                        persist_state = true;
-                    } else {
-                        let defer_workers = snapshot.defer_workers;
-                        guard.snapshot = Some(snapshot);
-                        let replanned = replan_queues(
-                            guard.snapshot.as_ref(),
-                            guard.status.workers,
-                            &existing_bindings,
+                    if snapshot.version != CONFIG_SNAPSHOT_PROTOCOL_VERSION {
+                        response.ok = false;
+                        response.error = format!(
+                            "unsupported snapshot protocol version {} (want {})",
+                            snapshot.version, CONFIG_SNAPSHOT_PROTOCOL_VERSION
                         );
-                        guard.status.bindings = replanned;
-                        if defer_workers {
-                            eprintln!(
-                                "CTRL_REQ: apply_snapshot defer_workers=true — skipping worker spawn (RETH MAC pending)"
-                            );
+                    } else {
+                        eprintln!(
+                            "CTRL_REQ: apply_snapshot generation={} fib_generation={} forwarding_armed_before={}",
+                            snapshot.generation,
+                            snapshot.fib_generation,
+                            guard.status.forwarding_armed
+                        );
+                        guard.status.last_snapshot_generation = snapshot.generation;
+                        guard.status.last_fib_generation = snapshot.fib_generation;
+                        guard.status.last_snapshot_at = Some(snapshot.generated_at);
+                        guard.status.capabilities = snapshot.capabilities.clone();
+                        let existing_bindings = guard.status.bindings.clone();
+                        let previous_snapshot = guard.snapshot.as_ref();
+                        let same_plan = previous_snapshot.is_some_and(|prev| {
+                            let prev_key = snapshot_binding_plan_key(prev);
+                            let next_key = snapshot_binding_plan_key(&snapshot);
+                            let same = prev_key == next_key;
+                            if !same {
+                                eprintln!(
+                                    "CTRL_REQ: binding plan changed prev_key={} next_key={}",
+                                    prev_key, next_key
+                                );
+                            }
+                            same
+                        });
+                        if same_plan {
+                            guard.afxdp.refresh_runtime_snapshot(&snapshot);
+                            guard.snapshot = Some(snapshot);
+                            refresh_status(&mut guard);
+                            persist_state = true;
                         } else {
-                            reconcile_status_bindings(&mut guard);
+                            let defer_workers = snapshot.defer_workers;
+                            guard.snapshot = Some(snapshot);
+                            let replanned = replan_queues(
+                                guard.snapshot.as_ref(),
+                                guard.status.workers,
+                                &existing_bindings,
+                            );
+                            guard.status.bindings = replanned;
+                            if defer_workers {
+                                eprintln!(
+                                    "CTRL_REQ: apply_snapshot defer_workers=true — skipping worker spawn (RETH MAC pending)"
+                                );
+                            } else {
+                                reconcile_status_bindings(&mut guard);
+                            }
+                            refresh_status(&mut guard);
+                            persist_state = true;
                         }
-                        refresh_status(&mut guard);
-                        persist_state = true;
                     }
                 } else {
                     response.ok = false;

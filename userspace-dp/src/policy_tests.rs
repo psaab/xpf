@@ -29,6 +29,7 @@ fn allow_all_matches_zone_pair() {
             applications: vec!["any".to_string()],
             application_terms: Vec::new(),
             action: "permit".to_string(),
+            ..Default::default()
         }],
         &test_zone_name_to_id(),
     );
@@ -66,6 +67,113 @@ fn default_deny_applies_without_match() {
 }
 
 #[test]
+fn evaluate_policy_skips_inactive_rules() {
+    let state = parse_policy_state(
+        "deny",
+        &[PolicyRuleSnapshot {
+            rule_id: "security-policy:lan:wan:inactive-allow".to_string(),
+            name: "inactive-allow".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            scheduler_name: "workhours".to_string(),
+            inactive: true,
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        }],
+        &test_zone_name_to_id(),
+    );
+
+    assert_eq!(
+        state.rules[0].rule_id,
+        "security-policy:lan:wan:inactive-allow"
+    );
+    assert_eq!(state.rules[0].scheduler_name, "workhours");
+    assert!(state.rules[0].inactive);
+    assert_eq!(
+        evaluate_policy(
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            "10.0.61.100".parse().expect("src"),
+            "172.16.80.200".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            5201,
+        ),
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        state.rules[0]
+            .hit_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+
+#[test]
+fn inactive_rule_falls_through_to_next_match() {
+    let state = parse_policy_state(
+        "deny",
+        &[
+            PolicyRuleSnapshot {
+                name: "inactive-deny".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                scheduler_name: "offhours".to_string(),
+                inactive: true,
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "deny".to_string(),
+                ..Default::default()
+            },
+            PolicyRuleSnapshot {
+                rule_id: "security-policy:lan:wan:active-allow".to_string(),
+                name: "active-allow".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..Default::default()
+            },
+        ],
+        &test_zone_name_to_id(),
+    );
+
+    assert_eq!(state.rules[0].rule_id, "lan->wan/inactive-deny");
+    assert_eq!(
+        evaluate_policy(
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            "10.0.61.100".parse().expect("src"),
+            "172.16.80.200".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            5201,
+        ),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        state.rules[0]
+            .hit_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state.rules[1]
+            .hit_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[test]
 fn cidr_matches_ipv6() {
     let state = parse_policy_state(
         "deny",
@@ -78,6 +186,7 @@ fn cidr_matches_ipv6() {
             applications: vec!["any".to_string()],
             application_terms: Vec::new(),
             action: "permit".to_string(),
+            ..Default::default()
         }],
         &test_zone_name_to_id(),
     );
@@ -114,6 +223,7 @@ fn named_application_matches_protocol_and_port() {
                 destination_port: "80".to_string(),
             }],
             action: "permit".to_string(),
+            ..Default::default()
         }],
         &test_zone_name_to_id(),
     );
@@ -171,6 +281,7 @@ fn application_set_matches_any_expanded_term() {
                 },
             ],
             action: "permit".to_string(),
+            ..Default::default()
         }],
         &test_zone_name_to_id(),
     );
@@ -202,6 +313,7 @@ fn global_policy_matches_any_zone_pair() {
             applications: vec!["any".to_string()],
             application_terms: Vec::new(),
             action: "permit".to_string(),
+            ..Default::default()
         }],
         &test_zone_name_to_id(),
     );
@@ -248,6 +360,7 @@ fn global_policy_evaluated_after_zone_specific() {
                 applications: vec!["any".to_string()],
                 application_terms: Vec::new(),
                 action: "deny".to_string(),
+                ..Default::default()
             },
             PolicyRuleSnapshot {
                 name: "global-allow".to_string(),
@@ -258,6 +371,7 @@ fn global_policy_evaluated_after_zone_specific() {
                 applications: vec!["any".to_string()],
                 application_terms: Vec::new(),
                 action: "permit".to_string(),
+                ..Default::default()
             },
         ],
         &test_zone_name_to_id(),
@@ -310,6 +424,7 @@ fn evaluate_policy_unknown_zone_pair_returns_default_action() {
             applications: vec!["any".into()],
             application_terms: Vec::new(),
             action: "permit".into(),
+            ..Default::default()
         }],
         &zones,
     );
@@ -353,6 +468,7 @@ fn malformed_only_input_yields_match_all_via_evaluate_policy() {
             applications: vec!["any".into()],
             application_terms: Vec::new(),
             action: "permit".into(),
+            ..Default::default()
         }],
         &zones,
     );

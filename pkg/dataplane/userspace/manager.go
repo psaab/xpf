@@ -26,6 +26,8 @@ import (
 
 var _ dataplane.DataPlane = (*Manager)(nil)
 
+var ErrPolicySchedulerProtocolIncompatible = errors.New("userspace policy scheduler snapshot protocol incompatible")
+
 // DataplaneMode describes which packet-processing pipeline is active.
 type DataplaneMode int
 
@@ -58,28 +60,29 @@ type Manager struct {
 	dataplane.DataPlane
 	inner *dataplane.Manager
 
-	mu                      sync.Mutex
-	sessionMu               sync.Mutex // separate lock for session sync requests (Phase 3)
-	proc                    *exec.Cmd
-	cfg                     config.UserspaceConfig
-	clusterHA               bool
-	generation              uint64
-	syncCancel              context.CancelFunc
-	lastStatus              ProcessStatus
-	lastSnapshot            *ConfigSnapshot
-	haGroups                map[int]HAGroupStatus
-	lastIngressIfaces       []uint32
-	lastRSTv4               []netip.Addr
-	lastRSTv6               []netip.Addr
-	lastRSTAttempt          time.Time
-	lastRSTInstallOK        bool
-	lastSnapshotHash        [32]byte // content hash of last published snapshot (excludes volatile fields)
+	mu                    sync.Mutex
+	sessionMu             sync.Mutex // separate lock for session sync requests (Phase 3)
+	proc                  *exec.Cmd
+	cfg                   config.UserspaceConfig
+	clusterHA             bool
+	generation            uint64
+	syncCancel            context.CancelFunc
+	lastStatus            ProcessStatus
+	lastSnapshot          *ConfigSnapshot
+	policySchedulerActive map[string]bool
+	haGroups              map[int]HAGroupStatus
+	lastIngressIfaces     []uint32
+	lastRSTv4             []netip.Addr
+	lastRSTv6             []netip.Addr
+	lastRSTAttempt        time.Time
+	lastRSTInstallOK      bool
+	lastSnapshotHash      [32]byte // content hash of last published snapshot (excludes volatile fields)
 	// #1197: O(1) neighbor lookup index for the listener hot path.
 	// Keyed by (ifindex, ip-string). Rebuilt whenever lastSnapshot.Neighbors
 	// is replaced. Read under m.mu (existing snapshot lock).
 	neighborIndex map[neighborIndexKey]*NeighborSnapshot
 	// #1197: ifindex set for listener filter; rebuilt on config commit.
-	monitoredIfindexes map[int]struct{}
+	monitoredIfindexes      map[int]struct{}
 	lastBindingIndices      []uint32
 	neighborsPrewarmed      bool
 	ctrlEnableAt            time.Time
@@ -154,6 +157,32 @@ func New() *Manager {
 		configuredMode: ModeUserspaceCompat,
 		haGroups:       make(map[int]HAGroupStatus),
 	}
+}
+
+func copyPolicySchedulerActiveState(activeState map[string]bool) map[string]bool {
+	if activeState == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(activeState))
+	for name, active := range activeState {
+		out[name] = active
+	}
+	return out
+}
+
+func (m *Manager) policySchedulerActiveStateSnapshot() map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return copyPolicySchedulerActiveState(m.policySchedulerActive)
+}
+
+// SetPolicySchedulerActiveState seeds the active-state map used by the next
+// full snapshot build. The daemon calls this while holding applySem so config
+// commits and scheduler flips cannot publish hybrid policy snapshots.
+func (m *Manager) SetPolicySchedulerActiveState(activeState map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policySchedulerActive = copyPolicySchedulerActiveState(activeState)
 }
 
 // EventStream returns the event stream instance, or nil if not available.
@@ -265,7 +294,8 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return nil, err
 	}
 	ucfg := deriveUserspaceConfig(cfg)
-	snap := buildSnapshot(cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration())
+	activeState := m.policySchedulerActiveStateSnapshot()
+	snap := buildSnapshotWithSchedulerState(cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration(), activeState)
 	m.syncInterfaceAttachments(result, snap)
 
 	m.mu.Lock()
@@ -296,13 +326,18 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		pendingXSKStartup = false
 		samePlanRefresh = false
 	}
-	m.lastSnapshot = snap
 	// #1197 v4 (Codex code-review v3 #1+#2): rebuild listener
 	// caches ONLY after a successful apply_snapshot. Doing it
 	// here (before publish) leaves the listener thinking
 	// userspace-dp has entries it doesn't if apply_snapshot fails.
 	// Moved to the post-success path below (after line 343).
 	if pendingXSKStartup {
+		if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+			if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+				return result, errors.Join(err, disarmErr)
+			}
+			return result, err
+		}
 		if err := m.syncIngressIfaceMapLocked(snap); err != nil {
 			return result, err
 		}
@@ -312,6 +347,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		if err := m.syncInterfaceNATAddressMapsLocked(snap); err != nil {
 			return result, err
 		}
+		m.lastSnapshot = snap
 		m.cfg = ucfg
 		slog.Info(
 			"userspace: deferring snapshot publish during XSK startup",
@@ -339,6 +375,12 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	if err := m.ensureProcessLocked(ucfg); err != nil {
 		return result, err
 	}
+	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+			return result, errors.Join(err, disarmErr)
+		}
+		return result, err
+	}
 	if m.deferWorkers {
 		snap.DeferWorkers = true
 	}
@@ -353,6 +395,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
 		return result, fmt.Errorf("publish userspace snapshot: %w", err)
 	}
+	m.lastSnapshot = snap
 	// #1197 v4: apply_snapshot succeeded — userspace-dp has the
 	// new neighbors. NOW rebuild listener caches; before this
 	// point the index would shadow events for entries the
@@ -379,6 +422,66 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	m.ensureStatusLoopLocked()
 	m.cfg = ucfg
 	return result, nil
+}
+
+// UpdatePolicyScheduleState republishes the userspace policy snapshot with one
+// coherent inactive-bit view. This shadows the embedded eBPF manager method;
+// scheduled userspace policies must not update the policy_rules BPF map.
+func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) {
+	activeCopy := copyPolicySchedulerActiveState(activeState)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.policySchedulerActive = activeCopy
+	if cfg == nil {
+		if m.lastSnapshot == nil {
+			return
+		}
+		cfg = m.lastSnapshot.Config
+	}
+	if cfg == nil || m.lastSnapshot == nil {
+		return
+	}
+	if m.proc == nil || m.proc.Process == nil {
+		return
+	}
+
+	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+			slog.Warn("userspace: failed to disarm helper after refusing policy scheduler publish",
+				"protocol_err", err, "err", disarmErr)
+		}
+		slog.Warn("userspace: refusing policy scheduler publish to incompatible helper", "err", err)
+		return
+	}
+	next := *m.lastSnapshot
+	nextGeneration := m.generation + 1
+	next.Generation = nextGeneration
+	next.FIBGeneration = m.readFIBGeneration()
+	next.GeneratedAt = time.Now().UTC()
+	next.Config = cfg
+	next.Policies = buildPolicySnapshotsWithSchedulerState(cfg, activeCopy)
+
+	publishSnap := next
+	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
+		slog.Warn("userspace: failed to publish policy scheduler state", "err", err)
+		return
+	}
+	m.generation = nextGeneration
+	m.lastSnapshot = &next
+	m.rebuildNeighborIndex()
+	m.rebuildMonitoredIfindexes()
+	m.publishedSnapshot = next.Generation
+	m.publishedPlanKey = snapshotBindingPlanKey(&next)
+	if h, ok := snapshotContentHash(&next); ok {
+		m.lastSnapshotHash = h
+	}
+	if err := m.applyHelperStatusLocked(&status); err != nil {
+		slog.Warn("userspace: failed to sync helper status after policy scheduler publish", "err", err)
+	}
 }
 
 func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snapshot *ConfigSnapshot) {
@@ -420,6 +523,84 @@ func (m *Manager) readFIBGeneration() uint32 {
 		return 0
 	}
 	return gen
+}
+
+func configHasScheduledPolicy(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil {
+			continue
+		}
+		for _, pol := range zpp.Policies {
+			if pol != nil && pol.SchedulerName != "" {
+				return true
+			}
+		}
+	}
+	for _, pol := range cfg.Security.GlobalPolicies {
+		if pol != nil && pol.SchedulerName != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error {
+	if !configHasScheduledPolicy(cfg) {
+		return nil
+	}
+	if m.lastStatus.ConfigSnapshotProtocolVersion >= ProtocolVersion {
+		return nil
+	}
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+		m.recordHelperStatusLocked(&status)
+		if status.ConfigSnapshotProtocolVersion >= ProtocolVersion {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"%w: helper config snapshot protocol version %d < required %d for policy scheduler snapshots",
+		ErrPolicySchedulerProtocolIncompatible,
+		m.lastStatus.ConfigSnapshotProtocolVersion,
+		ProtocolVersion,
+	)
+}
+
+func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
+	status.DataplaneMode = m.mode.String()
+	status.ConfiguredMode = m.configuredMode.String()
+	status.EntryPrograms = m.entryProgramsLocked()
+	status.FallbackCounters = m.readFallbackStatsLocked()
+	if m.eventStream != nil {
+		es := m.eventStream.Status()
+		status.EventStream = &es
+	}
+	m.lastStatus = *status
+}
+
+func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) error {
+	if m.proc == nil || m.proc.Process == nil {
+		return nil
+	}
+	req := ControlRequest{
+		Type: "set_forwarding_state",
+		Forwarding: &ForwardingControlRequest{
+			Armed: false,
+		},
+	}
+	var status ProcessStatus
+	if err := m.requestLocked(req, &status); err != nil {
+		return fmt.Errorf("userspace: disarm helper after policy scheduler protocol error: %w", err)
+	}
+	if err := m.applyHelperStatusLocked(&status); err != nil {
+		m.recordHelperStatusLocked(&status)
+		return fmt.Errorf("userspace: sync helper status after policy scheduler fail-closed disarm: %w", err)
+	}
+	slog.Warn("userspace: disarmed helper after policy scheduler protocol error", "err", protocolErr)
+	return nil
 }
 
 // bpfKtimeNs returns the current CLOCK_BOOTTIME in nanoseconds, matching

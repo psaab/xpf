@@ -885,6 +885,55 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
 }
 
 #[test]
+fn apply_snapshot_rejects_unsupported_protocol_version() {
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let state = Arc::new(Mutex::new(ServerState {
+        status: ProcessStatus::default(),
+        snapshot: None,
+        afxdp: afxdp::Coordinator::new(),
+        state_writer: Arc::new(StateWriter::new()),
+    }));
+    let running = Arc::new(AtomicBool::new(true));
+    let state_file = format!(
+        "{}/xpf-policy-scheduler-version-gate-{}.json",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    let handle = {
+        let state = state.clone();
+        let running = running.clone();
+        std::thread::spawn(move || handle_stream(server, &state_file, state, running))
+    };
+
+    let request = ControlRequest {
+        request_type: "apply_snapshot".to_string(),
+        snapshot: Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION - 1,
+            generated_at: Utc::now(),
+            ..ConfigSnapshot::default()
+        }),
+        ..ControlRequest::default()
+    };
+    serde_json::to_writer(&mut client, &request).expect("write request");
+    std::io::Write::write_all(&mut client, b"\n").expect("newline");
+
+    let response: ControlResponse =
+        serde_json::from_reader(std::io::BufReader::new(client)).expect("read response");
+    assert!(!response.ok);
+    assert!(
+        response
+            .error
+            .contains("unsupported snapshot protocol version"),
+        "unexpected error: {}",
+        response.error
+    );
+    handle
+        .join()
+        .expect("handler thread")
+        .expect("handler result");
+}
+
+#[test]
 fn binding_counters_snapshot_tolerates_pre_split_wire() {
     // #804: a helper snapshot that pre-dates the
     // dbg_pending_overflow → {dbg_bound_pending_overflow,

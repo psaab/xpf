@@ -45,8 +45,11 @@ impl Default for PolicyAction {
 
 #[derive(Debug)]
 pub(crate) struct PolicyRule {
+    pub(crate) rule_id: String,
     pub(crate) from_zone: String,
     pub(crate) to_zone: String,
+    pub(crate) scheduler_name: String,
+    pub(crate) inactive: bool,
     /// #923: adaptive prefix set (MatchAny / Linear ≤16 / Trie >16).
     /// Replaces the legacy `Vec<PrefixV*>` linear scan in
     /// `nets_match_v4/v6`. Empty input collapses to `MatchAny`,
@@ -65,8 +68,11 @@ pub(crate) struct PolicyRule {
 impl Default for PolicyRule {
     fn default() -> Self {
         Self {
+            rule_id: String::new(),
             from_zone: String::new(),
             to_zone: String::new(),
+            scheduler_name: String::new(),
+            inactive: false,
             source_v4: PrefixSetV4::default(),
             source_v6: PrefixSetV6::default(),
             destination_v4: PrefixSetV4::default(),
@@ -85,8 +91,11 @@ impl Default for PolicyRule {
 impl Clone for PolicyRule {
     fn clone(&self) -> Self {
         Self {
+            rule_id: self.rule_id.clone(),
             from_zone: self.from_zone.clone(),
             to_zone: self.to_zone.clone(),
+            scheduler_name: self.scheduler_name.clone(),
+            inactive: self.inactive,
             source_v4: self.source_v4.clone(),
             source_v6: self.source_v6.clone(),
             destination_v4: self.destination_v4.clone(),
@@ -228,8 +237,11 @@ pub(crate) fn parse_policy_state(
             parse_address(prefix, &mut dst_v4, &mut dst_v6);
         }
         let mut rule = PolicyRule {
+            rule_id: stable_policy_rule_id(snap),
             from_zone: snap.from_zone.clone(),
             to_zone: snap.to_zone.clone(),
+            scheduler_name: snap.scheduler_name.clone(),
+            inactive: snap.inactive,
             action: parse_action(&snap.action),
             source_v4: PrefixSetV4::from_prefixes(src_v4),
             source_v6: PrefixSetV6::from_prefixes(src_v6),
@@ -326,6 +338,9 @@ fn try_match_rule(
     src_port: u16,
     dst_port: u16,
 ) -> Option<PolicyAction> {
+    if rule.inactive {
+        return None;
+    }
     if !rule.compiled_apps.matches(protocol, src_port, dst_port) {
         return None;
     }
@@ -344,6 +359,13 @@ fn try_match_rule(
         }
         _ => None,
     }
+}
+
+fn stable_policy_rule_id(snap: &PolicyRuleSnapshot) -> String {
+    if !snap.rule_id.is_empty() {
+        return snap.rule_id.clone();
+    }
+    format!("{}->{}/{}", snap.from_zone, snap.to_zone, snap.name)
 }
 
 fn parse_action(action: &str) -> PolicyAction {

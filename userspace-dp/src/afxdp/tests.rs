@@ -939,6 +939,7 @@ fn post_dnat_source_nat_matches_translated_destination() {
         applications: vec!["any".to_string()],
         application_terms: Vec::new(),
         action: "permit".to_string(),
+        ..Default::default()
     });
 
     let state = build_forwarding_state(&snapshot);

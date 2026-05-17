@@ -11,6 +11,18 @@
   - **Action**: PR #1395 cleanup — reverted an unintended `go.mod` direct/indirect dependency classification change introduced by automated tooling so the round-4 fix stays scoped to three-color policer compiler logic/tests/docs.
   - **File(s)**: `go.mod`, `_Log.md`
 
+- **Timestamp**: 2026-05-17T05:12:00Z
+  - **Action**: Round-5 follow-up fix — in userspace pending-XSK-startup compile path, defer `lastSnapshot` cache update until ingress/local/NAT map sync succeeds so sync failures cannot poison cached snapshot state with an unpublished generation.
+  - **File(s)**: `pkg/dataplane/userspace/manager.go`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T05:16:00Z
+  - **Action**: Restored `go.mod` after an unintended direct/indirect dependency classification flip introduced by an automation-only progress update.
+  - **File(s)**: `go.mod`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T04:48:51Z
+  - **Action**: Re-restored `go.mod` after a subsequent tooling pass reintroduced the same direct/indirect dependency classification flip.
+  - **File(s)**: `go.mod`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T05:03:00Z
   - **Action**: PR #1395 round-4 follow-up cleanup — moved three-color mode marker assignment outside repeated same-mode child loops to avoid redundant writes while preserving duplicate-sibling merge semantics.
   - **File(s)**: `pkg/config/compiler_firewall.go`, `_Log.md`

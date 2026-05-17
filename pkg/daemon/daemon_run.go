@@ -38,7 +38,6 @@ import (
 	"github.com/psaab/xpf/pkg/ra"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/rpm"
-	"github.com/psaab/xpf/pkg/scheduler"
 	"github.com/psaab/xpf/pkg/snmp"
 	"github.com/psaab/xpf/pkg/vrrp"
 )
@@ -73,6 +72,7 @@ func collectAppliedTunnels(cfg *config.Config) []*config.TunnelConfig {
 // Run starts the daemon and blocks until shutdown.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.daemonCtx = ctx
+	d.startPolicySchedulerLoopLocked()
 
 	// Wrap the default slog handler to support system syslog forwarding.
 	// Syslog clients are added later when config is applied.
@@ -602,21 +602,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.monitorLinkState(ctx)
 			}()
 		}
-	}
-
-	// Start policy scheduler if configured.
-	if cfg := d.store.ActiveConfig(); cfg != nil && len(cfg.Schedulers) > 0 && d.dp != nil {
-		d.scheduler = scheduler.New(cfg.Schedulers, func(activeState map[string]bool) {
-			slog.Info("scheduler state changed, updating policy rules")
-			if activeCfg := d.store.ActiveConfig(); activeCfg != nil {
-				d.dp.UpdatePolicyScheduleState(activeCfg, activeState)
-			}
-		})
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			d.scheduler.Run(ctx)
-		}()
 	}
 
 	// Start periodic neighbor resolution to keep ARP entries warm for
