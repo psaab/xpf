@@ -75,7 +75,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			fw.ThreeColorPolicers[tcpInst.name] = tcp
 		}
 
-		if sr := tcpInst.node.FindChild("single-rate"); sr != nil {
+		for _, sr := range tcpInst.node.FindChildren("single-rate") {
 			tcp.SingleRateConfigured = true
 			tcp.TwoRate = false
 			if sr.FindChild("color-blind") != nil {
@@ -103,7 +103,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			}
 		}
 
-		if tr := tcpInst.node.FindChild("two-rate"); tr != nil {
+		for _, tr := range tcpInst.node.FindChildren("two-rate") {
 			tcp.TwoRateConfigured = true
 			tcp.TwoRate = true
 			if tr.FindChild("color-blind") != nil {

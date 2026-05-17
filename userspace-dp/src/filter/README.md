@@ -62,7 +62,9 @@ Still gated before removing the userspace capability rejection:
   hierarchical `firewall three-color-policer <name>` blocks are compiled
   as one logical policer before that validation, so load
   merge/override cannot hide an ambiguity behind last-write-wins map
-  assignment.
+  assignment. Repeated same-mode sub-blocks (`single-rate` or
+  `two-rate`) are merged before strict validation as well, so split
+  color-mode declarations in sibling blocks are surfaced and rejected.
 - Filter terms still carry a policer name in the evaluation result.
   The hot forwarding path must move to stable policer IDs with
   ID-indexed or sharded state before three-color policers are enabled.

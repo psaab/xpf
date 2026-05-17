@@ -147,6 +147,36 @@ func TestCommitCheck_RejectsAmbiguousThreeColorPolicerAcrossLoadOverrideBlocks(t
 	}
 }
 
+func TestCommitCheck_RejectsAmbiguousThreeColorPolicerAcrossLoadOverrideSameModeSiblings(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	hier := `firewall {
+    three-color-policer bad {
+        single-rate {
+            color-blind;
+            committed-information-rate 10m;
+            committed-burst-size 100k;
+            excess-burst-size 200k;
+        }
+        single-rate {
+            color-aware;
+        }
+    }
+}`
+	if err := s.LoadOverride(hier); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	_, err := s.CommitCheck()
+	if err == nil {
+		t.Fatal("expected CommitCheck to reject duplicate hierarchical single-rate color mode ambiguity")
+	}
+	if !strings.Contains(err.Error(), "cannot configure both color-blind and color-aware") {
+		t.Fatalf("CommitCheck error = %v", err)
+	}
+}
+
 func TestCommitCheck_RejectsThreeColorPolicerPeakBelowCommitted(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.EnterConfigure(); err != nil {

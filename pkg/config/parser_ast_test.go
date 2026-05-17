@@ -4631,6 +4631,35 @@ func TestThreeColorPolicerStrictValidation(t *testing.T) {
 	}
 }
 
+func TestThreeColorPolicerStrictValidation_HierarchicalDuplicateSameModeSiblings(t *testing.T) {
+	input := `firewall {
+    three-color-policer bad {
+        single-rate {
+            color-blind;
+            committed-information-rate 10m;
+            committed-burst-size 100k;
+            excess-burst-size 200k;
+        }
+        single-rate {
+            color-aware;
+        }
+    }
+}
+`
+	p := NewParser(input)
+	tree, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	_, compileErr := CompileConfig(tree)
+	if compileErr == nil {
+		t.Fatal("CompileConfig succeeded, want ambiguous color mode error")
+	}
+	if !strings.Contains(compileErr.Error(), "cannot configure both color-blind and color-aware") {
+		t.Fatalf("CompileConfig error = %v", compileErr)
+	}
+}
+
 func TestLogicalInterfacePolicer(t *testing.T) {
 	input := `firewall {
     policer shared-rate {
