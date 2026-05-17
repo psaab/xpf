@@ -13,7 +13,19 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/logging"
 )
+
+const pendingCallbackFramesLimit = 4096
+const callbackNotReadyBackoff = 100 * time.Millisecond
+
+type pendingCallbackFrame struct {
+	typ              uint8
+	seq              uint64
+	sessionDelta     SessionDeltaInfo
+	dataplanePayload []byte
+	dataplaneRecord  logging.EventRecord
+}
 
 // EventStream manages the daemon-side event socket for receiving session events
 // from the Rust helper over a persistent binary-framed Unix stream.
@@ -37,38 +49,88 @@ type EventStream struct {
 	lastAckSeq     atomic.Uint64
 	ackBatch       atomic.Uint64 // events since last ack
 
-	// Callbacks — set before Start(), called on the reader goroutine.
-	onEvent      func(eventType uint8, seq uint64, delta SessionDeltaInfo)
-	onFullResync func()
+	// Callbacks are invoked on the reader goroutine and may be updated
+	// dynamically by control-plane code.
+	callbackMu          sync.RWMutex
+	onEvent             func(eventType uint8, seq uint64, delta SessionDeltaInfo) bool
+	onDataplaneEvent    func(seq uint64, rec logging.EventRecord)
+	onRawDataplaneEvent func(seq uint64, payload []byte)
+	onFullResync        func() bool
+
+	pendingFlushMu        sync.Mutex
+	pendingMu             sync.Mutex
+	pendingCallbackFrames []pendingCallbackFrame
 
 	// DrainComplete signaling for demotion prep.
 	drainCompleteMu sync.Mutex
 	drainCompleteCh chan uint64
 
 	// Stats.
-	FramesRead    atomic.Uint64
-	FramesWritten atomic.Uint64
-	DecodeErrors  atomic.Uint64
-	SeqGaps       atomic.Uint64
+	FramesRead        atomic.Uint64
+	FramesWritten     atomic.Uint64
+	DecodeErrors      atomic.Uint64
+	SeqGaps           atomic.Uint64
+	PolicyDenyEvents  atomic.Uint64
+	ScreenDropEvents  atomic.Uint64
+	FilterLogEvents   atomic.Uint64
+	PolicyDenyDrops   atomic.Uint64
+	ScreenDropDrops   atomic.Uint64
+	FilterLogDrops    atomic.Uint64
+	UnknownFrameDrops atomic.Uint64
 }
 
 // NewEventStream creates an EventStream for the given Unix socket path.
 // Call Start() to begin listening.
 func NewEventStream(socketPath string) *EventStream {
 	return &EventStream{
-		socketPath:  socketPath,
+		socketPath:      socketPath,
 		drainCompleteCh: make(chan uint64, 1),
 	}
 }
 
-// SetOnEvent sets the callback for session events. Must be called before Start().
-func (es *EventStream) SetOnEvent(fn func(eventType uint8, seq uint64, delta SessionDeltaInfo)) {
+// SetOnEvent sets the callback for session events. The callback returns true
+// only after the delta is durably handled; false withholds ACK so the helper can
+// replay instead of losing an event during readiness transitions.
+func (es *EventStream) SetOnEvent(fn func(eventType uint8, seq uint64, delta SessionDeltaInfo) bool) {
+	es.callbackMu.Lock()
 	es.onEvent = fn
+	es.callbackMu.Unlock()
+	es.flushPendingCallbackFrames()
 }
 
-// SetOnFullResync sets the callback for full resync requests. Must be called before Start().
-func (es *EventStream) SetOnFullResync(fn func()) {
+// SetOnDataplaneEvent sets the callback for RT_FLOW-style dataplane events.
+func (es *EventStream) SetOnDataplaneEvent(fn func(seq uint64, rec logging.EventRecord)) {
+	es.callbackMu.Lock()
+	es.onDataplaneEvent = fn
+	es.callbackMu.Unlock()
+	es.flushPendingCallbackFrames()
+}
+
+// SetOnRawDataplaneEvent sets the callback for raw RT_FLOW dataplane events.
+// It is preferred when the receiver can process the canonical dataplane.Event
+// payload itself, because it preserves name resolution and syslog fanout.
+func (es *EventStream) SetOnRawDataplaneEvent(fn func(seq uint64, payload []byte)) {
+	es.callbackMu.Lock()
+	es.onRawDataplaneEvent = fn
+	es.callbackMu.Unlock()
+	es.flushPendingCallbackFrames()
+}
+
+// SetOnFullResync sets the callback for full resync requests. The callback
+// returns true only after the resync request has been acted on.
+func (es *EventStream) SetOnFullResync(fn func() bool) {
+	es.callbackMu.Lock()
 	es.onFullResync = fn
+	es.callbackMu.Unlock()
+	es.flushPendingCallbackFrames()
+}
+
+func (es *EventStream) dataplaneCallbacks() (func(uint64, []byte), func(uint64, logging.EventRecord)) {
+	es.callbackMu.RLock()
+	defer es.callbackMu.RUnlock()
+	raw := es.onRawDataplaneEvent
+	decoded := es.onDataplaneEvent
+	return raw, decoded
 }
 
 // Start creates the Unix socket listener and launches the accept loop.
@@ -147,6 +209,22 @@ func (es *EventStream) LastAckedSequence() uint64 {
 	return es.lastAckSeq.Load()
 }
 
+func (es *EventStream) Status() EventStreamStatus {
+	return EventStreamStatus{
+		FramesRead:        es.FramesRead.Load(),
+		FramesWritten:     es.FramesWritten.Load(),
+		DecodeErrors:      es.DecodeErrors.Load(),
+		SeqGaps:           es.SeqGaps.Load(),
+		PolicyDenyEvents:  es.PolicyDenyEvents.Load(),
+		ScreenDropEvents:  es.ScreenDropEvents.Load(),
+		FilterLogEvents:   es.FilterLogEvents.Load(),
+		PolicyDenyDrops:   es.PolicyDenyDrops.Load(),
+		ScreenDropDrops:   es.ScreenDropDrops.Load(),
+		FilterLogDrops:    es.FilterLogDrops.Load(),
+		UnknownFrameDrops: es.UnknownFrameDrops.Load(),
+	}
+}
+
 // acceptLoop listens for helper connections. Only one is active at a time.
 func (es *EventStream) acceptLoop(ctx context.Context) {
 	for {
@@ -176,6 +254,7 @@ func (es *EventStream) acceptLoop(ctx context.Context) {
 		es.lastRecvSeq.Store(0)
 		es.lastAppliedSeq.Store(0)
 		es.lastAckSeq.Store(0)
+		es.clearPendingCallbackFrames()
 		es.mu.Unlock()
 
 		// Run the reader and ack loops for this connection.
@@ -281,11 +360,10 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			}
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
-			es.ackBatch.Add(1)
-			if es.onEvent != nil {
-				es.onEvent(typ, seq, delta)
+			if !es.dispatchOrQueueSessionFrame(typ, seq, delta) {
+				es.backoffCallbackNotReady(ctx)
+				return
 			}
-			es.lastAppliedSeq.Store(seq)
 
 		case EventTypeSessionClose:
 			delta, ok := decodeSessionCloseEvent(payload)
@@ -299,11 +377,10 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			}
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
-			es.ackBatch.Add(1)
-			if es.onEvent != nil {
-				es.onEvent(typ, seq, delta)
+			if !es.dispatchOrQueueSessionFrame(typ, seq, delta) {
+				es.backoffCallbackNotReady(ctx)
+				return
 			}
-			es.lastAppliedSeq.Store(seq)
 
 		case EventTypeDrainComplete:
 			select {
@@ -313,17 +390,260 @@ func (es *EventStream) readLoop(ctx context.Context) {
 
 		case EventTypeFullResync:
 			slog.Warn("event stream: full resync requested by helper")
-			if es.onFullResync != nil {
-				es.onFullResync()
+			if !es.dispatchOrQueueFullResyncFrame(seq) {
+				es.backoffCallbackNotReady(ctx)
+				return
 			}
 
 		case EventTypeKeepalive:
 			// Idle heartbeat from helper — no action needed, just keeps
 			// the connection alive to prevent read-deadline disconnect.
+			continue
+
+		case EventFrameTypePolicyDeny, EventFrameTypeScreenDrop, EventFrameTypeFilterLog:
+			if !dataplaneEventPayloadMatchesFrame(typ, payload) {
+				es.DecodeErrors.Add(1)
+				es.recordDataplaneEventDrop(typ)
+				es.markDroppedFrameApplied(seq, &prevSeq)
+				continue
+			}
+			rec, ok := decodeDataplaneEventPayload(payload)
+			if !ok {
+				es.DecodeErrors.Add(1)
+				es.recordDataplaneEventDrop(typ)
+				es.markDroppedFrameApplied(seq, &prevSeq)
+				continue
+			}
+			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
+			if seq > prevSeq+1 && prevSeq > 0 {
+				es.SeqGaps.Add(1)
+				slog.Debug("event stream: sequence gap", "expected", prevSeq+1, "got", seq)
+			}
+			prevSeq = seq
+			es.lastRecvSeq.Store(seq)
+			if !es.dispatchOrQueueDataplaneFrame(typ, seq, payload, rec, onRawDataplaneEvent, onDataplaneEvent) {
+				es.backoffCallbackNotReady(ctx)
+				return
+			}
 
 		default:
-			slog.Debug("event stream: unknown frame type", "type", typ)
+			es.UnknownFrameDrops.Add(1)
+			es.markDroppedFrameApplied(seq, &prevSeq)
+			slog.Debug("event stream: dropped unknown frame type", "type", typ, "seq", seq)
 		}
+	}
+}
+
+func (es *EventStream) markDroppedFrameApplied(seq uint64, prevSeq *uint64) {
+	if seq > *prevSeq+1 && *prevSeq > 0 {
+		es.SeqGaps.Add(1)
+	}
+	*prevSeq = seq
+	es.lastRecvSeq.Store(seq)
+	es.markFrameApplied(seq)
+}
+
+func (es *EventStream) markFrameApplied(seq uint64) {
+	es.ackBatch.Add(1)
+	es.lastAppliedSeq.Store(seq)
+}
+
+func (es *EventStream) backoffCallbackNotReady(ctx context.Context) {
+	timer := time.NewTimer(callbackNotReadyBackoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
+func (es *EventStream) dispatchOrQueueSessionFrame(typ uint8, seq uint64, delta SessionDeltaInfo) bool {
+	es.callbackMu.RLock()
+	onEvent := es.onEvent
+	es.callbackMu.RUnlock()
+	if onEvent == nil || es.hasPendingCallbackFrames() {
+		if !es.enqueuePendingCallbackFrame(pendingCallbackFrame{
+			typ:          typ,
+			seq:          seq,
+			sessionDelta: delta,
+		}) {
+			return false
+		}
+		es.flushPendingCallbackFrames()
+		return true
+	}
+	if !onEvent(typ, seq, delta) {
+		return es.enqueuePendingCallbackFrame(pendingCallbackFrame{
+			typ:          typ,
+			seq:          seq,
+			sessionDelta: delta,
+		})
+	}
+	es.markFrameApplied(seq)
+	return true
+}
+
+func (es *EventStream) dispatchOrQueueFullResyncFrame(seq uint64) bool {
+	es.callbackMu.RLock()
+	onFullResync := es.onFullResync
+	es.callbackMu.RUnlock()
+	if onFullResync == nil || es.hasPendingCallbackFrames() {
+		if !es.enqueuePendingCallbackFrame(pendingCallbackFrame{
+			typ: EventTypeFullResync,
+			seq: seq,
+		}) {
+			return false
+		}
+		es.flushPendingCallbackFrames()
+		return true
+	}
+	if !onFullResync() {
+		return es.enqueuePendingCallbackFrame(pendingCallbackFrame{
+			typ: EventTypeFullResync,
+			seq: seq,
+		})
+	}
+	es.markFrameApplied(seq)
+	return true
+}
+
+func (es *EventStream) dispatchOrQueueDataplaneFrame(
+	typ uint8,
+	seq uint64,
+	payload []byte,
+	rec logging.EventRecord,
+	onRawDataplaneEvent func(uint64, []byte),
+	onDataplaneEvent func(uint64, logging.EventRecord),
+) bool {
+	if onRawDataplaneEvent == nil && onDataplaneEvent == nil || es.hasPendingCallbackFrames() {
+		if !es.enqueuePendingCallbackFrame(pendingCallbackFrame{
+			typ:              typ,
+			seq:              seq,
+			dataplanePayload: append([]byte(nil), payload...),
+			dataplaneRecord:  rec,
+		}) {
+			return false
+		}
+		es.flushPendingCallbackFrames()
+		return true
+	}
+	if onRawDataplaneEvent != nil {
+		onRawDataplaneEvent(seq, payload)
+	} else {
+		onDataplaneEvent(seq, rec)
+	}
+	es.recordDataplaneEvent(typ)
+	es.markFrameApplied(seq)
+	return true
+}
+
+func (es *EventStream) hasPendingCallbackFrames() bool {
+	es.pendingMu.Lock()
+	defer es.pendingMu.Unlock()
+	return len(es.pendingCallbackFrames) > 0
+}
+
+func (es *EventStream) enqueuePendingCallbackFrame(frame pendingCallbackFrame) bool {
+	es.pendingMu.Lock()
+	defer es.pendingMu.Unlock()
+	if len(es.pendingCallbackFrames) >= pendingCallbackFramesLimit {
+		slog.Error("event stream: pending callback queue full; closing helper stream to force replay",
+			"limit", pendingCallbackFramesLimit, "type", frame.typ, "seq", frame.seq)
+		return false
+	}
+	es.pendingCallbackFrames = append(es.pendingCallbackFrames, frame)
+	return true
+}
+
+func (es *EventStream) clearPendingCallbackFrames() {
+	es.pendingFlushMu.Lock()
+	defer es.pendingFlushMu.Unlock()
+	es.pendingMu.Lock()
+	es.pendingCallbackFrames = nil
+	es.pendingMu.Unlock()
+}
+
+func (es *EventStream) flushPendingCallbackFrames() {
+	es.pendingFlushMu.Lock()
+	defer es.pendingFlushMu.Unlock()
+
+	for {
+		es.pendingMu.Lock()
+		if len(es.pendingCallbackFrames) == 0 {
+			es.pendingMu.Unlock()
+			return
+		}
+		frame := es.pendingCallbackFrames[0]
+		es.pendingMu.Unlock()
+
+		switch frame.typ {
+		case EventTypeSessionOpen, EventTypeSessionUpdate, EventTypeSessionClose:
+			es.callbackMu.RLock()
+			onEvent := es.onEvent
+			es.callbackMu.RUnlock()
+			if onEvent == nil {
+				return
+			}
+			if !onEvent(frame.typ, frame.seq, frame.sessionDelta) {
+				return
+			}
+		case EventTypeFullResync:
+			es.callbackMu.RLock()
+			onFullResync := es.onFullResync
+			es.callbackMu.RUnlock()
+			if onFullResync == nil {
+				return
+			}
+			if !onFullResync() {
+				return
+			}
+		case EventFrameTypePolicyDeny, EventFrameTypeScreenDrop, EventFrameTypeFilterLog:
+			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
+			if onRawDataplaneEvent == nil && onDataplaneEvent == nil {
+				return
+			}
+			if onRawDataplaneEvent != nil {
+				onRawDataplaneEvent(frame.seq, frame.dataplanePayload)
+			} else {
+				onDataplaneEvent(frame.seq, frame.dataplaneRecord)
+			}
+			es.recordDataplaneEvent(frame.typ)
+		default:
+			slog.Warn("event stream: dropping unsupported pending callback frame",
+				"type", frame.typ, "seq", frame.seq)
+		}
+
+		es.markFrameApplied(frame.seq)
+		es.pendingMu.Lock()
+		if len(es.pendingCallbackFrames) > 0 && es.pendingCallbackFrames[0].seq == frame.seq {
+			copy(es.pendingCallbackFrames, es.pendingCallbackFrames[1:])
+			es.pendingCallbackFrames = es.pendingCallbackFrames[:len(es.pendingCallbackFrames)-1]
+		}
+		es.pendingMu.Unlock()
+	}
+}
+
+func (es *EventStream) recordDataplaneEvent(typ uint8) {
+	switch typ {
+	case EventFrameTypePolicyDeny:
+		es.PolicyDenyEvents.Add(1)
+	case EventFrameTypeScreenDrop:
+		es.ScreenDropEvents.Add(1)
+	case EventFrameTypeFilterLog:
+		es.FilterLogEvents.Add(1)
+	}
+}
+
+func (es *EventStream) recordDataplaneEventDrop(typ uint8) {
+	switch typ {
+	case EventFrameTypePolicyDeny:
+		es.PolicyDenyDrops.Add(1)
+	case EventFrameTypeScreenDrop:
+		es.ScreenDropDrops.Add(1)
+	case EventFrameTypeFilterLog:
+		es.FilterLogDrops.Add(1)
+	default:
+		es.UnknownFrameDrops.Add(1)
 	}
 }
 
@@ -339,6 +659,7 @@ func (es *EventStream) ackLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+		es.flushPendingCallbackFrames()
 		es.sendAckIfNeeded()
 	}
 }
@@ -422,6 +743,7 @@ func (es *EventStream) writeFrame(typ uint8, seq uint64, payload []byte) error {
 //	[N..]   NeighborMAC (6 bytes)
 //	[N+6..] SrcMAC (6 bytes)
 //	[N+12..]NextHop (4 or 16 bytes)
+//
 // wireAFToDataplane maps the 1-byte wire encoding (4 = IPv4, 6 = IPv6
 // — chosen by the Rust codec to match the protocol number; see
 // userspace-dp/src/event_stream/codec.rs:88) to the Linux dataplane
@@ -586,6 +908,31 @@ func decodeSessionCloseEvent(payload []byte) (SessionDeltaInfo, bool) {
 	}
 
 	return d, true
+}
+
+// decodeDataplaneEventPayload decodes the canonical dataplane.Event RT_FLOW
+// payload. Userspace-dp carries these bytes over event-stream frame types 11-13,
+// but the payload itself is the same shape consumed by pkg/logging/ringbuf.go.
+func decodeDataplaneEventPayload(payload []byte) (logging.EventRecord, bool) {
+	return logging.DecodeRawEventRecord(payload)
+}
+
+func dataplaneEventPayloadMatchesFrame(typ uint8, payload []byte) bool {
+	if len(payload) <= 52 {
+		return false
+	}
+	var want uint8
+	switch typ {
+	case EventFrameTypePolicyDeny:
+		want = dataplane.EventTypePolicyDeny
+	case EventFrameTypeScreenDrop:
+		want = dataplane.EventTypeScreenDrop
+	case EventFrameTypeFilterLog:
+		want = dataplane.EventTypeFilterLog
+	default:
+		return false
+	}
+	return payload[52] == want
 }
 
 // formatIP converts raw IP bytes to a string representation.

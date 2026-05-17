@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -10,8 +11,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/logging"
 )
 
 // buildSessionOpenV4Payload builds a binary SessionOpen payload for an IPv4 session.
@@ -81,6 +84,36 @@ func buildSessionCloseV4Payload(
 	return buf
 }
 
+func buildDataplaneEventV4Payload(
+	proto uint8,
+	srcPort, dstPort uint16,
+	srcIP, dstIP [4]byte,
+	natSrcIP [4]byte,
+	natSrcPort uint16,
+	ingressZone, egressZone uint16,
+	reason uint16,
+	policyID uint32,
+	timestampNS uint64,
+) []byte {
+	_ = reason // RT_FLOW policy-deny records carry policy identity, not the userspace-only reason field.
+	buf := make([]byte, int(unsafe.Sizeof(dataplane.Event{})))
+	binary.LittleEndian.PutUint64(buf[0:8], timestampNS)
+	copy(buf[8:12], srcIP[:])
+	copy(buf[24:28], dstIP[:])
+	binary.BigEndian.PutUint16(buf[40:42], srcPort)
+	binary.BigEndian.PutUint16(buf[42:44], dstPort)
+	binary.LittleEndian.PutUint32(buf[44:48], policyID)
+	binary.LittleEndian.PutUint16(buf[48:50], ingressZone)
+	binary.LittleEndian.PutUint16(buf[50:52], egressZone)
+	buf[52] = dataplane.EventTypePolicyDeny
+	buf[53] = proto
+	buf[54] = dataplane.ActionDeny
+	buf[55] = dataplane.AFInet
+	copy(buf[72:76], natSrcIP[:])
+	binary.BigEndian.PutUint16(buf[104:106], natSrcPort)
+	return buf
+}
+
 func writeFrame(w io.Writer, typ uint8, seq uint64, payload []byte) error {
 	var hdr [EventFrameHeaderSize]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], uint32(len(payload)))
@@ -114,19 +147,19 @@ func readFrame(r io.Reader) (typ uint8, seq uint64, payload []byte, err error) {
 
 func TestDecodeSessionEventV4(t *testing.T) {
 	payload := buildSessionOpenV4Payload(
-		6,           // TCP
-		12345, 443,  // ports
+		6,          // TCP
+		12345, 443, // ports
 		[4]byte{10, 0, 1, 102}, [4]byte{172, 16, 80, 200}, // src, dst
 		[4]byte{172, 16, 80, 8}, [4]byte{0, 0, 0, 0}, // nat src, nat dst
 		40000, 0, // nat ports
-		1,     // ownerRG
+		1,      // ownerRG
 		12, 11, // egress/tx ifindex
 		0, 80, // tunnel, vlan
 		SessionEventFlagFabricRedirect, // flags
-		1, 2, 0, // ingress/egress zone, disposition
+		1, 2, 0,                        // ingress/egress zone, disposition
 		[6]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, // neighbor MAC
 		[6]byte{0x02, 0xbf, 0x72, 0x00, 0x50, 0x08}, // src MAC
-		[4]byte{172, 16, 80, 1}, // next hop
+		[4]byte{172, 16, 80, 1},                     // next hop
 	)
 
 	d, ok := decodeSessionEvent(payload)
@@ -268,6 +301,60 @@ func TestDecodeSessionEventRejectsTruncated(t *testing.T) {
 	}
 }
 
+func TestDecodeDataplaneEventPolicyDenyRTFlow(t *testing.T) {
+	payload := buildDataplaneEventV4Payload(
+		6,
+		12345, 443,
+		[4]byte{10, 0, 1, 102}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		7,
+		99,
+		1700000000000000000,
+	)
+	if !dataplaneEventPayloadMatchesFrame(EventFrameTypePolicyDeny, payload) {
+		t.Fatal("RT_FLOW payload did not match policy-deny event-stream frame type")
+	}
+	binary.LittleEndian.PutUint32(payload[56:60], 1234)
+	binary.LittleEndian.PutUint32(payload[60:64], 5678)
+	binary.LittleEndian.PutUint16(payload[64:66], 3)
+	payload[134] = dataplane.CloseReasonPolicy
+	rec, ok := decodeDataplaneEventPayload(payload)
+	if !ok {
+		t.Fatal("decodeDataplaneEventPayload returned false")
+	}
+	if rec.Type != "POLICY_DENY" || rec.Action != "deny" {
+		t.Fatalf("event = %s/%s, want POLICY_DENY/deny", rec.Type, rec.Action)
+	}
+	if rec.Protocol != "TCP" {
+		t.Fatalf("Protocol = %q, want TCP", rec.Protocol)
+	}
+	if rec.SrcAddr != "10.0.1.102:12345" {
+		t.Fatalf("SrcAddr = %q, want 10.0.1.102:12345", rec.SrcAddr)
+	}
+	if rec.DstAddr != "172.16.80.200:443" {
+		t.Fatalf("DstAddr = %q, want 172.16.80.200:443", rec.DstAddr)
+	}
+	if rec.NATSrcAddr != "172.16.80.8:40000" {
+		t.Fatalf("NATSrcAddr = %q, want 172.16.80.8:40000", rec.NATSrcAddr)
+	}
+	if rec.PolicyID != 99 || rec.InZone != 1 || rec.OutZone != 2 {
+		t.Fatalf("identity = policy %d zones %d->%d, want policy 99 zones 1->2", rec.PolicyID, rec.InZone, rec.OutZone)
+	}
+	if rec.ScreenCheck != "" {
+		t.Fatalf("ScreenCheck/reason = %q, want empty for policy-deny RT_FLOW", rec.ScreenCheck)
+	}
+	if rec.RuleID != 1234 || rec.TermID != 5678 || rec.OwnerRGID != 3 || rec.Reason != "Rejected by policy" {
+		t.Fatalf("metadata = rule %d term %d owner_rg %d reason %q, want 1234/5678/3/Rejected by policy",
+			rec.RuleID, rec.TermID, rec.OwnerRGID, rec.Reason)
+	}
+	if rec.SessionPkts != 0 || rec.SessionBytes != 0 {
+		t.Fatalf("security metadata must not leak through session counters: pkts=%d bytes=%d",
+			rec.SessionPkts, rec.SessionBytes)
+	}
+}
+
 func TestFrameRoundTrip(t *testing.T) {
 	payload := buildSessionOpenV4Payload(
 		6, 1234, 80,
@@ -305,9 +392,10 @@ func TestEventStreamAcceptAndRead(t *testing.T) {
 	es := NewEventStream(sockPath)
 	var received atomic.Int32
 	var lastSeq atomic.Uint64
-	es.SetOnEvent(func(eventType uint8, seq uint64, delta SessionDeltaInfo) {
+	es.SetOnEvent(func(eventType uint8, seq uint64, delta SessionDeltaInfo) bool {
 		received.Add(1)
 		lastSeq.Store(seq)
+		return true
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -362,12 +450,463 @@ func TestEventStreamAcceptAndRead(t *testing.T) {
 	}
 }
 
+func TestEventStreamSessionEventBeforeCallbackQueuesUntilCallback(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := buildSessionOpenV4Payload(
+		6, 1000, 80,
+		[4]byte{10, 0, 1, 1}, [4]byte{10, 0, 2, 1},
+		[4]byte{}, [4]byte{},
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		[6]byte{}, [6]byte{}, [4]byte{},
+	)
+	if err := writeFrame(conn, EventTypeSessionOpen, 5, payload); err != nil {
+		t.Fatalf("write session event: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if typ, seq, _, err := readFrame(conn); err == nil {
+		t.Fatalf("unexpected ack before callback was wired: type %d seq %d", typ, seq)
+	}
+
+	got := make(chan uint64, 1)
+	es.SetOnEvent(func(_ uint8, seq uint64, _ SessionDeltaInfo) bool {
+		got <- seq
+		return true
+	})
+	select {
+	case seq := <-got:
+		if seq != 5 {
+			t.Fatalf("callback seq = %d, want 5", seq)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback not invoked after late registration")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack after callback: %v", err)
+	}
+	if typ != EventTypeAck || seq != 5 {
+		t.Fatalf("ack after callback = type %d seq %d, want type %d seq 5", typ, seq, EventTypeAck)
+	}
+}
+
+func TestEventStreamSessionCallbackFalseWithholdsAck(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	es.SetOnEvent(func(_ uint8, _ uint64, _ SessionDeltaInfo) bool {
+		return false
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := buildSessionOpenV4Payload(
+		6, 1000, 80,
+		[4]byte{10, 0, 1, 1}, [4]byte{10, 0, 2, 1},
+		[4]byte{}, [4]byte{},
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		[6]byte{}, [6]byte{}, [4]byte{},
+	)
+	if err := writeFrame(conn, EventTypeSessionOpen, 9, payload); err != nil {
+		t.Fatalf("write session event: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if typ, seq, _, err := readFrame(conn); err == nil {
+		t.Fatalf("unexpected ack for unapplied callback: type %d seq %d", typ, seq)
+	}
+	if acked := es.LastAckedSequence(); acked != 0 {
+		t.Fatalf("LastAckedSequence = %d, want 0 after callback returned false", acked)
+	}
+
+	es.SetOnEvent(func(_ uint8, _ uint64, _ SessionDeltaInfo) bool {
+		return true
+	})
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack after callback became ready: %v", err)
+	}
+	if typ != EventTypeAck || seq != 9 {
+		t.Fatalf("ack after callback ready = type %d seq %d, want type %d seq 9", typ, seq, EventTypeAck)
+	}
+}
+
+func TestEventStreamDataplaneEventAckAndCallback(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	type dataplaneEventResult struct {
+		seq uint64
+		rec logging.EventRecord
+	}
+	got := make(chan dataplaneEventResult, 1)
+	es.SetOnDataplaneEvent(func(seq uint64, rec logging.EventRecord) {
+		got <- dataplaneEventResult{seq: seq, rec: rec}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	var conn net.Conn
+	for conn == nil {
+		var err error
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("dial: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	defer conn.Close()
+
+	connectCtx, connectCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer connectCancel()
+	for !es.IsConnected() {
+		select {
+		case <-connectCtx.Done():
+			t.Fatal("event stream did not become connected")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	payload := buildDataplaneEventV4Payload(
+		6, 1111, 443,
+		[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		0, 77,
+		0,
+	)
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 7, payload); err != nil {
+		t.Fatalf("write dataplane event: %v", err)
+	}
+
+	select {
+	case result := <-got:
+		if result.seq != 7 {
+			t.Fatalf("seq = %d, want 7", result.seq)
+		}
+		if result.rec.Type != "POLICY_DENY" || result.rec.PolicyID != 77 {
+			t.Fatalf("rec = %+v, want policy deny policy 77", result.rec)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dataplane event callback not called")
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if typ != EventTypeAck || seq != 7 {
+		t.Fatalf("ack = type %d seq %d, want type %d seq 7", typ, seq, EventTypeAck)
+	}
+	if got := es.PolicyDenyEvents.Load(); got != 1 {
+		t.Fatalf("PolicyDenyEvents = %d, want 1", got)
+	}
+}
+
+func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	rawGot := make(chan []byte, 1)
+	decodedGot := make(chan struct{}, 1)
+	es.SetOnRawDataplaneEvent(func(seq uint64, payload []byte) {
+		if seq != 11 {
+			t.Fatalf("seq = %d, want 11", seq)
+		}
+		rawGot <- append([]byte(nil), payload...)
+	})
+	es.SetOnDataplaneEvent(func(uint64, logging.EventRecord) {
+		decodedGot <- struct{}{}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	var conn net.Conn
+	for conn == nil {
+		var err error
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("dial: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	defer conn.Close()
+
+	connectCtx, connectCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer connectCancel()
+	for !es.IsConnected() {
+		select {
+		case <-connectCtx.Done():
+			t.Fatal("event stream did not become connected")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	payload := buildDataplaneEventV4Payload(
+		6, 1111, 443,
+		[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		0, 77,
+		0,
+	)
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 11, payload); err != nil {
+		t.Fatalf("write dataplane event: %v", err)
+	}
+
+	select {
+	case got := <-rawGot:
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("raw payload changed: got %d bytes, want %d", len(got), len(payload))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("raw dataplane event callback not called")
+	}
+	select {
+	case <-decodedGot:
+		t.Fatal("decoded callback should not fire when raw callback is installed")
+	default:
+	}
+}
+
+func TestEventStreamDataplaneEventBeforeCallbackQueuesUntilCallback(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := buildDataplaneEventV4Payload(
+		6, 1111, 443,
+		[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		0, 77,
+		0,
+	)
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 21, payload); err != nil {
+		t.Fatalf("write first dataplane event: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if typ, seq, _, err := readFrame(conn); err == nil {
+		t.Fatalf("unexpected ack before callback was wired: type %d seq %d", typ, seq)
+	}
+	if got := es.PolicyDenyDrops.Load(); got != 0 {
+		t.Fatalf("PolicyDenyDrops = %d, want 0", got)
+	}
+
+	got := make(chan uint64, 1)
+	es.SetOnDataplaneEvent(func(seq uint64, _ logging.EventRecord) {
+		got <- seq
+	})
+
+	select {
+	case gotSeq := <-got:
+		if gotSeq != 21 {
+			t.Fatalf("callback seq = %d, want 21", gotSeq)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback not invoked after late registration")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack after callback: %v", err)
+	}
+	if typ != EventTypeAck || seq != 21 {
+		t.Fatalf("ack after callback = type %d seq %d, want type %d seq 21", typ, seq, EventTypeAck)
+	}
+	if got := es.PolicyDenyEvents.Load(); got != 1 {
+		t.Fatalf("PolicyDenyEvents = %d, want 1", got)
+	}
+}
+
+func TestEventStreamMalformedDataplaneEventDropsAndAcks(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	var callbackCalled atomic.Bool
+	es.SetOnDataplaneEvent(func(uint64, logging.EventRecord) {
+		callbackCalled.Store(true)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := writeFrame(conn, EventFrameTypeScreenDrop, 9, []byte{4, 6}); err != nil {
+		t.Fatalf("write malformed dataplane event: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if typ != EventTypeAck || seq != 9 {
+		t.Fatalf("ack = type %d seq %d, want type %d seq 9", typ, seq, EventTypeAck)
+	}
+	if got := es.ScreenDropDrops.Load(); got != 1 {
+		t.Fatalf("ScreenDropDrops = %d, want 1", got)
+	}
+	if got := es.DecodeErrors.Load(); got != 1 {
+		t.Fatalf("DecodeErrors = %d, want 1", got)
+	}
+	if callbackCalled.Load() {
+		t.Fatal("malformed dataplane event must not call callback")
+	}
+}
+
+func TestEventStreamUnknownFrameDropsAndAcks(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("event stream did not become connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := writeFrame(conn, 250, 11, nil); err != nil {
+		t.Fatalf("write unknown frame: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if typ != EventTypeAck || seq != 11 {
+		t.Fatalf("ack = type %d seq %d, want type %d seq 11", typ, seq, EventTypeAck)
+	}
+	if got := es.UnknownFrameDrops.Load(); got != 1 {
+		t.Fatalf("UnknownFrameDrops = %d, want 1", got)
+	}
+}
+
 func TestEventStreamAcksSent(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {})
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool { return true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -422,7 +961,10 @@ func TestEventStreamFullResyncCallback(t *testing.T) {
 
 	es := NewEventStream(sockPath)
 	var resyncCalled atomic.Bool
-	es.SetOnFullResync(func() { resyncCalled.Store(true) })
+	es.SetOnFullResync(func() bool {
+		resyncCalled.Store(true)
+		return true
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -459,14 +1001,69 @@ func TestEventStreamFullResyncCallback(t *testing.T) {
 	}
 }
 
+func TestEventStreamFullResyncBeforeCallbackQueuesUntilCallback(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("not connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := writeFrame(conn, EventTypeFullResync, 7, nil); err != nil {
+		t.Fatalf("write FullResync: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if typ, seq, _, err := readFrame(conn); err == nil {
+		t.Fatalf("unexpected ack before FullResync callback was wired: type %d seq %d", typ, seq)
+	}
+
+	var resyncCalled atomic.Bool
+	es.SetOnFullResync(func() bool {
+		resyncCalled.Store(true)
+		return true
+	})
+	deadline = time.Now().Add(2 * time.Second)
+	for !resyncCalled.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("onFullResync not called after late registration")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack after FullResync callback: %v", err)
+	}
+	if typ != EventTypeAck || seq != 7 {
+		t.Fatalf("ack after FullResync callback = type %d seq %d, want type %d seq 7", typ, seq, EventTypeAck)
+	}
+}
+
 func TestEventStreamDrainRequestComplete(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	var applied atomic.Int32
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool {
 		applied.Add(1)
+		return true
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -569,8 +1166,9 @@ func TestEventStreamDisconnectReconnect(t *testing.T) {
 
 	es := NewEventStream(sockPath)
 	var received atomic.Int32
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool {
 		received.Add(1)
+		return true
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -650,7 +1248,7 @@ func TestEventStreamPauseResume(t *testing.T) {
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {})
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool { return true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -711,7 +1309,7 @@ func TestEventStreamSequenceGapDetection(t *testing.T) {
 	sockPath := filepath.Join(dir, "test-events.sock")
 
 	es := NewEventStream(sockPath)
-	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) {})
+	es.SetOnEvent(func(uint8, uint64, SessionDeltaInfo) bool { return true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -676,6 +676,20 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			}
 
 			d.sessionSync.SetVRFDevice(vrfDevice)
+			var streamProvider userspaceEventStreamProvider
+			streamCallbacksWired := false
+			if d.dp != nil {
+				if provider, ok := d.dp.(userspaceEventStreamProvider); ok {
+					streamProvider = provider
+					wireCtx, cancel := context.WithTimeout(commsCtx, 5*time.Second)
+					streamCallbacksWired = d.wireUserspaceEventStreamCallbacks(wireCtx, provider)
+					cancel()
+					if !streamCallbacksWired {
+						slog.Warn("userspace: event stream callbacks not ready before session sync start; falling back to polling until stream wires")
+					}
+				}
+			}
+
 			// Retry sync start: the VRF device and address binding may not
 			// be ready during daemon startup (networkd race).
 			for i := 0; i < 30; i++ {
@@ -709,7 +723,11 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 						return d.cluster != nil && d.cluster.IsLocalPrimary(rgID)
 					}
 					d.sessionSync.StartSyncSweep(commsCtx)
-					go d.runUserspaceEventStream(commsCtx)
+					if streamCallbacksWired {
+						go d.eventStreamFallbackLoop(commsCtx, streamProvider)
+					} else {
+						go d.runUserspaceEventStream(commsCtx)
+					}
 				}
 
 				break
