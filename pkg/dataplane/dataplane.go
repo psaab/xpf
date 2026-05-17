@@ -11,6 +11,7 @@ import (
 
 // Compile-time assertion that Manager implements DataPlane.
 var _ DataPlane = (*Manager)(nil)
+var _ ConfigSink = (*Manager)(nil)
 
 // Dataplane type constants used in system { dataplane-type <type>; }.
 const (

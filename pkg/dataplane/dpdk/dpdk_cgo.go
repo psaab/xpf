@@ -210,6 +210,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return nil, err
 	}
 	m.lastCompile = result
+	m.recordApplyResult(dataplane.ApplyResultFromCompileResult(result))
 	return result, nil
 }
 

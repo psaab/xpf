@@ -534,3 +534,29 @@ Phase 1 is not complete until all of these are true:
   semantics as GC and has reverse-key plus DNAT/NAT64 cleanup tests; and
 - rollback is documented as switching the daemon back to the existing
   `dataplane.DataPlane` adapter without changing persistent config format.
+
+## Implementation note: first Phase 1 slice
+
+The first implementation slice keeps the legacy BPF-shaped `DataPlane`
+interface in place and adds the new contract beside it:
+
+- `pkg/dataplane.RuntimeDataPlane`, `ConfigSink`, `ApplyResult`,
+  `SessionStore`, `Telemetry`, HA, and link-domain interfaces are now defined
+  without importing backend packages.
+- `ApplyResult` carries `FilterIDs`, `FilterSpans` (`FilterID`, `RuleStart`,
+  `RuleCount`), `NATCounterIDs` widened to `uint32`, capabilities, and a
+  generation. eBPF, DPDK, and userspace compiles now publish
+  `LastApplyResult()`.
+- `pkg/dataplane/runtime` owns the neutral session-delta DTOs and
+  `SessionDeltaSource`; userspace adapts its helper-private
+  `SessionDeltaInfo`/`ProcessStatus` at the package boundary.
+- Cluster stale-bulk reconciliation now routes through
+  `dataplane.SessionStore.ReconcileClusterBulk`, whose companion-delete path
+  owns forward, reverse, and DNAT/DNATv6 cleanup. A canary fails if
+  `pkg/cluster/sync.go` reintroduces local `DeleteDNATEntry*` cleanup.
+
+Remaining Phase 1 work is still explicit: daemon/API/gRPC/CLI callers must move
+from `LastCompileResult()` and BPF map reads to `LastApplyResult()`/domain
+interfaces, GC must move to `SessionStore`/`Telemetry`, and the legacy
+`DataPlane` method-count canary can only flip after those callers no longer need
+the BPF-shaped surface.

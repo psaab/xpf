@@ -20,11 +20,13 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
 var _ dataplane.DataPlane = (*Manager)(nil)
+var _ dataplane.ConfigSink = (*Manager)(nil)
 
 var ErrPolicySchedulerProtocolIncompatible = errors.New("userspace policy scheduler snapshot protocol incompatible")
 
@@ -69,6 +71,7 @@ type Manager struct {
 	syncCancel            context.CancelFunc
 	lastStatus            ProcessStatus
 	lastSnapshot          *ConfigSnapshot
+	lastApply             *dataplane.ApplyResult
 	policySchedulerActive map[string]bool
 	haGroups              map[int]HAGroupStatus
 	lastIngressIfaces     []uint32
@@ -157,6 +160,40 @@ func New() *Manager {
 		configuredMode: ModeUserspaceCompat,
 		haGroups:       make(map[int]HAGroupStatus),
 	}
+}
+
+func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*dataplane.ApplyResult, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	if _, err := m.Compile(cfg); err != nil {
+		return nil, err
+	}
+	return m.LastApplyResult(), nil
+}
+
+func (m *Manager) LastApplyResult() *dataplane.ApplyResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastApply.Clone()
+}
+
+func (m *Manager) RuntimeSessionDeltaSource() dpruntime.SessionDeltaSource {
+	return runtimeSessionDeltaSource{manager: m}
+}
+
+func (m *Manager) recordApplyResultLocked(result *dataplane.ApplyResult, caps UserspaceCapabilities, generation uint64) {
+	if result == nil {
+		return
+	}
+	result.Capabilities = dataplane.Capabilities{
+		ForwardingSupported: caps.ForwardingSupported,
+		UnsupportedReasons:  append([]string(nil), caps.UnsupportedReasons...),
+	}
+	result.Generation = generation
+	m.lastApply = result.Clone()
 }
 
 func copyPolicySchedulerActiveState(activeState map[string]bool) map[string]bool {
@@ -349,6 +386,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		}
 		m.lastSnapshot = snap
 		m.cfg = ucfg
+		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 		slog.Info(
 			"userspace: deferring snapshot publish during XSK startup",
 			"generation", snap.Generation,
@@ -421,6 +459,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	}
 	m.ensureStatusLoopLocked()
 	m.cfg = ucfg
+	m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 	return result, nil
 }
 
