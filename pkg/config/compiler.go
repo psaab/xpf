@@ -552,7 +552,7 @@ func ValidateConfig(cfg *Config) []string {
 		if p.SchedulerName != "" {
 			if _, ok := cfg.Schedulers[p.SchedulerName]; !ok {
 				warnings = append(warnings, fmt.Sprintf(
-					"policy %q: scheduler %q not defined", p.Name, p.SchedulerName))
+					"global policy %q: scheduler %q not defined", p.Name, p.SchedulerName))
 			}
 		}
 	}

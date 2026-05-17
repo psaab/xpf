@@ -34,8 +34,8 @@ sent while exact queues were still backlogged.
   NAT, static NAT, NAT64 prefixes, NPTv6, screen profiles, default
   policy, flow timeouts, firewall filters, flow config, port
   mirroring.
-- `CompileResult` — `compiler.go`. Zone/policy/NAT/app IDs and the
-  per-interface networkd configs.
+- `CompileResult` — `compiler.go`. Zone/policy/NAT/app IDs, compiled
+  policy-scheduler rule slots, and the per-interface networkd configs.
 - Session iteration: `IterateSessions`, `BatchIterateSessions`,
   `IterateSessionsV6`, `BatchIterateSessionsV6`.
 

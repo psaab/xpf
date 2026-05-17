@@ -1494,25 +1494,25 @@ func (m *Manager) ClearFilterConfigs() error {
 
 // UpdatePolicyScheduleState iterates policy rules and toggles the Active flag
 // based on scheduler state. Only rules whose scheduler state changed are updated.
-func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) {
+func (m *Manager) UpdatePolicyScheduleState(_ *config.Config, activeState map[string]bool) {
 	zm, ok := m.maps["policy_rules"]
 	if !ok {
 		return
 	}
-
-	slots, err := BuildScheduledPolicyRuleSlots(cfg)
-	if err != nil {
-		slog.Warn("policy scheduler: failed to build scheduled rule slots", "err", err)
+	result := m.LastCompileResult()
+	if result == nil {
 		return
 	}
-	for _, slot := range slots {
+
+	for _, slot := range result.PolicyScheduleRuleSlots {
 		active, exists := activeState[slot.SchedulerName]
 		if !exists {
 			active = true // default active if scheduler not found
 		}
 
+		idx := slot.PolicySetID*MaxRulesPerPolicy + slot.RuleIndex
 		var rule PolicyRule
-		if err := zm.Lookup(slot.AbsoluteRuleIdx, &rule); err != nil {
+		if err := zm.Lookup(idx, &rule); err != nil {
 			continue
 		}
 
@@ -1522,7 +1522,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		}
 		if rule.Active != newActive {
 			rule.Active = newActive
-			zm.Update(slot.AbsoluteRuleIdx, rule, ebpf.UpdateAny)
+			zm.Update(idx, rule, ebpf.UpdateAny)
 			slog.Info("policy schedule state updated",
 				"policy", slot.PolicyName,
 				"scheduler", slot.SchedulerName,

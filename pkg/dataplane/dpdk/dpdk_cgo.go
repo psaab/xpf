@@ -342,24 +342,23 @@ func (m *Manager) SetDefaultPolicy(action uint8) error {
 	return nil
 }
 
-func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) {
+func (m *Manager) UpdatePolicyScheduleState(_ *config.Config, activeState map[string]bool) {
 	shm := m.platform.shm
-	if shm == nil || cfg == nil {
+	if shm == nil {
+		return
+	}
+	result := m.LastCompileResult()
+	if result == nil {
 		return
 	}
 
-	slots, err := dataplane.BuildScheduledPolicyRuleSlots(cfg)
-	if err != nil {
-		slog.Warn("dpdk policy scheduler: failed to build scheduled rule slots", "err", err)
-		return
-	}
-	for _, slot := range slots {
+	for _, slot := range result.PolicyScheduleRuleSlots {
 		active, exists := activeState[slot.SchedulerName]
 		if !exists {
 			active = true // default active if scheduler not found
 		}
 
-		idx := slot.AbsoluteRuleIdx
+		idx := slot.PolicySetID*C.MAX_RULES_PER_POLICY + slot.RuleIndex
 		ptr := (*C.struct_policy_rule)(unsafe.Pointer(
 			uintptr(unsafe.Pointer(shm.policy_rules)) +
 				uintptr(idx)*unsafe.Sizeof(C.struct_policy_rule{})))

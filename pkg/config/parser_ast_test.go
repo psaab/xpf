@@ -1536,10 +1536,10 @@ func TestGlobalPolicySchedulerMissingReferenceWarns(t *testing.T) {
 	input := `security {
     policies {
         global {
-            policy global-sched-test {
+            policy sched-global {
                 match { source-address any; destination-address any; application any; }
                 then { permit; }
-                scheduler-name missing-global-sched;
+                scheduler-name missing-sched;
             }
         }
     }
@@ -1555,7 +1555,7 @@ func TestGlobalPolicySchedulerMissingReferenceWarns(t *testing.T) {
 		t.Fatalf("CompileConfig returned error for warning-only missing global scheduler reference: %v", err)
 	}
 	warnings := strings.Join(cfg.Warnings, "\n")
-	if !strings.Contains(warnings, `policy "global-sched-test": scheduler "missing-global-sched" not defined`) {
+	if !strings.Contains(warnings, `global policy "sched-global": scheduler "missing-sched" not defined`) {
 		t.Fatalf("CompileConfig warnings = %v, want missing global scheduler warning", cfg.Warnings)
 	}
 }
