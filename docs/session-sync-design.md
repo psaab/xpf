@@ -560,7 +560,11 @@ On disconnect, the helper retains its replay buffer (bounded, ~4096 events per
 binding). On reconnect, it replays from the last acked sequence. If the buffer
 has been trimmed past the last acked sequence (long disconnect), it sends a
 special `FullResync` frame (type 9) that tells the daemon to treat this as a
-fresh start and request a bulk export.
+fresh start and request a bulk export. The helper retains the stale replay
+window until the daemon ACKs the `FullResync`; otherwise an unacked resync could
+be lost across a second reconnect. HA backup nodes ACK and ignore session
+events because they are permanent non-owners, while transient primary readiness
+gaps withhold ACK for replay.
 
 ### Integration with Existing Code
 

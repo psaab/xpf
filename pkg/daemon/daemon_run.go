@@ -274,11 +274,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.reconcileBlackholeRoutes()
 	}
 
-	// Start cluster heartbeat + sync after applyConfig (needs VRF to exist).
-	if d.cluster != nil {
-		d.startClusterComms(ctx)
-	}
-
 	// Handle signals for clean shutdown.
 	// In interactive mode, only SIGTERM triggers shutdown — SIGINT is handled
 	// by the CLI for command cancellation (Ctrl-C).
@@ -293,6 +288,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Create event buffer (shared between event reader and CLI)
 	eventBuf := logging.NewEventBuffer(1000)
+	d.eventBuf = eventBuf
 
 	// WaitGroup for coordinated shutdown of background goroutines
 	var wg sync.WaitGroup
@@ -427,6 +423,33 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.applyFlowTrace(cfg, er)
 			}
 		}
+		if er == nil {
+			if _, ok := d.dp.(userspaceEventStreamProvider); ok {
+				er = logging.NewEventReader(nil, eventBuf)
+				d.eventReader = er
+				if cfg := d.store.ActiveConfig(); cfg != nil {
+					d.applySyslogConfig(er, cfg)
+					d.startFlowExporter(ctx, cfg, er)
+					d.startIPFIXExporter(ctx, cfg, er)
+					d.applyFlowTrace(cfg, er)
+				}
+			}
+		}
+
+		if _, ok := d.dp.(userspaceEventStreamProvider); ok && d.cluster == nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				d.runUserspaceEventStream(ctx)
+			}()
+		}
+	}
+
+	// Start cluster heartbeat + sync after event fanout is initialized.
+	// This avoids an HA startup race where runUserspaceEventStream wires a
+	// decode-only fallback callback before d.eventReader exists.
+	if d.cluster != nil {
+		d.startClusterComms(ctx)
 	}
 
 	// Start DHCP clients for interfaces configured with dhcp/dhcpv6.

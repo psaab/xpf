@@ -16,6 +16,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/logging"
 )
 
 // buildZoneIDs replicates the deterministic zone ID assignment from the
@@ -482,33 +483,17 @@ func (d *Daemon) syncUserspaceSessionDeltas(ctx context.Context) {
 // is unavailable or disconnected.
 func (d *Daemon) runUserspaceEventStream(ctx context.Context) {
 	provider, ok := d.dp.(userspaceEventStreamProvider)
-	if !ok || d.cluster == nil || d.sessionSync == nil {
+	if !ok {
 		// Manager doesn't support event stream — fall back to polling.
 		d.syncUserspaceSessionDeltas(ctx)
 		return
 	}
-
-	// Wait for the event stream to become available (helper may not have started yet).
-	var es *dpuserspace.EventStream
-	for {
-		es = provider.EventStream()
-		if es != nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(500 * time.Millisecond):
-		}
+	if !d.wireUserspaceEventStreamCallbacks(ctx, provider) {
+		return
 	}
-
-	// Wire callbacks.
-	es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) {
-		d.handleEventStreamDelta(eventType, delta)
-	})
-	es.SetOnFullResync(func() {
-		d.handleEventStreamFullResync()
-	})
+	if d.cluster == nil || d.sessionSync == nil {
+		return
+	}
 
 	slog.Info("userspace: event stream consumer started, polling is primary until stream connects")
 
@@ -518,23 +503,64 @@ func (d *Daemon) runUserspaceEventStream(ctx context.Context) {
 	d.eventStreamFallbackLoop(ctx, provider)
 }
 
-// handleEventStreamDelta processes a single session event from the event stream.
-func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.SessionDeltaInfo) {
+func (d *Daemon) wireUserspaceEventStreamCallbacks(ctx context.Context, provider userspaceEventStreamProvider) bool {
+	// Wait for the event stream to become available (helper may not have started yet).
+	var es *dpuserspace.EventStream
+	for {
+		es = provider.EventStream()
+		if es != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	// Wire callbacks.
+	es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) bool {
+		return d.handleEventStreamDelta(eventType, delta)
+	})
+	es.SetOnFullResync(func() bool {
+		return d.handleEventStreamFullResync()
+	})
+	if d.eventReader != nil {
+		es.SetOnRawDataplaneEvent(func(seq uint64, payload []byte) {
+			if !d.eventReader.ProcessRawEvent(payload) {
+				slog.Debug("userspace event stream: dropped undecodable dataplane event", "seq", seq)
+			}
+		})
+	} else {
+		es.SetOnDataplaneEvent(func(seq uint64, rec logging.EventRecord) {
+			if d.eventBuf != nil {
+				d.eventBuf.Add(rec)
+			}
+		})
+	}
+	return true
+}
+
+// handleEventStreamDelta processes a single session event from the event
+// stream. It returns true when the delta has been handled, including permanent
+// non-owner no-op handling on HA backups. It returns false only for transient
+// readiness gaps where EventStream should withhold ACK so the helper can replay.
+func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.SessionDeltaInfo) bool {
 	if d.cluster == nil || d.sessionSync == nil {
-		slog.Debug("userspace delta: dropped (no cluster/sync)", "type", eventType)
-		return
+		slog.Debug("userspace delta: ignored (no cluster/sync)", "type", eventType)
+		return true
 	}
 	if !d.cluster.IsLocalPrimaryAny() {
-		slog.Debug("userspace delta: dropped (not primary for any RG)", "type", eventType)
-		return
+		slog.Debug("userspace delta: ignored (not primary for any RG)", "type", eventType)
+		return true
 	}
 	if !d.sessionSync.IsConnected() {
 		slog.Debug("userspace delta: dropped (sync not connected)", "type", eventType)
-		return
+		return false
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
-		return
+		return false
 	}
 	zoneIDs := buildZoneIDs(cfg)
 
@@ -547,36 +573,48 @@ func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.Sessi
 	}
 
 	d.queueUserspaceSessionDeltas(zoneIDs, []dpuserspace.SessionDeltaInfo{delta})
+	return true
 }
 
 // handleEventStreamFullResync handles a FullResync frame from the helper.
 // This means the helper's replay buffer was trimmed past our last ack; we need
 // a one-shot bulk export to catch up.
-func (d *Daemon) handleEventStreamFullResync() {
+func (d *Daemon) handleEventStreamFullResync() bool {
 	slog.Warn("userspace event stream: full resync requested, triggering bulk export")
+	if d.cluster == nil || d.sessionSync == nil {
+		slog.Debug("userspace event stream: full resync ignored (no cluster/sync)")
+		return true
+	}
+	if !d.cluster.IsLocalPrimaryAny() {
+		slog.Debug("userspace event stream: full resync ignored (not primary for any RG)")
+		return true
+	}
+	if !d.sessionSync.IsConnected() {
+		slog.Debug("userspace event stream: full resync deferred (sync not connected)")
+		return false
+	}
 	exporter, ok := d.dp.(userspaceSessionExporter)
 	if !ok {
-		return
+		return false
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
-		return
+		return false
 	}
-	// Export sessions for all RGs we're primary for.
 	var rgIDs []int
-	if d.cluster != nil {
-		for rgID := 0; rgID < 16; rgID++ {
-			if d.cluster.IsLocalPrimary(rgID) {
-				rgIDs = append(rgIDs, rgID)
-			}
+	for rgID := 0; rgID < 16; rgID++ {
+		if d.cluster.IsLocalPrimary(rgID) {
+			rgIDs = append(rgIDs, rgID)
 		}
 	}
 	if len(rgIDs) == 0 {
-		return
+		return false
 	}
 	if _, err := d.exportUserspaceOwnerRGSessionsWithConfig(exporter, cfg, rgIDs); err != nil {
 		slog.Warn("userspace event stream: full resync export failed", "err", err)
+		return false
 	}
+	return true
 }
 
 // eventStreamFallbackLoop monitors the event stream connection and falls back
@@ -585,6 +623,9 @@ func (d *Daemon) handleEventStreamFullResync() {
 // when disconnected, it runs at 100ms to compensate for the lost stream.
 func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, provider userspaceEventStreamProvider) {
 	drainer, hasDrainer := d.dp.(userspaceSessionDeltaDrainer)
+	if d.cluster == nil || d.sessionSync == nil {
+		return
+	}
 
 	const (
 		fastInterval      = 100 * time.Millisecond // event stream disconnected

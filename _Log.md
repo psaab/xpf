@@ -2,6 +2,11 @@
 
 ## 2026-05-17
 
+- **Timestamp**: 2026-05-17T08:30:20Z
+  - **Action**: PR #1394 round-10 follow-up — fixed standalone userspace event-stream callback wiring by always registering session/full-resync callbacks, and added a regression test that verifies standalone SessionOpen and FullResync frames are ACKed instead of stalling behind an unwired callback queue.
+  - **File(s)**: `pkg/daemon/daemon_ha_userspace.go`, `pkg/daemon/userspace_sync_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/daemon/daemon_ha_userspace.go pkg/daemon/userspace_sync_test.go`; `go test ./pkg/daemon ./pkg/dataplane/userspace ./pkg/logging`; `git diff --check`
+
 - **Timestamp**: 2026-05-17T05:06:00Z
   - **Action**: PR #1395 cleanup — reverted an unintended `go.mod` direct/indirect dependency classification change introduced by automated tooling so the round-4 fix stays scoped to three-color policer compiler logic/tests/docs.
   - **File(s)**: `go.mod`, `_Log.md`
@@ -13,6 +18,21 @@
 - **Timestamp**: 2026-05-17T04:58:00Z
   - **Action**: PR #1395 round-4 follow-up — fixed three-color policer compiler handling for duplicate same-mode sibling blocks by iterating all `single-rate`/`two-rate` children, added hierarchical ambiguity regression coverage in parser/configstore tests, and updated filter module docs to reflect same-mode sibling merge semantics.
   - **File(s)**: `pkg/config/compiler_firewall.go`, `pkg/config/parser_ast_test.go`, `pkg/configstore/store_test.go`, `userspace-dp/src/filter/README.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T04:58:00Z
+  - **Action**: PR #1379 round-4 blocker fix follow-up — removed HA startup ordering race by starting cluster comms only after event fanout wiring, made userspace event-stream callback registration concurrency-safe for post-start wiring, and exposed helper producer sent/dropped counters through status text and Prometheus.
+  - **File(s)**: `pkg/daemon/daemon_run.go`, `pkg/dataplane/userspace/eventstream.go`, `pkg/dataplane/userspace/eventstream_test.go`, `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/statusfmt.go`, `pkg/api/metrics.go`, `pkg/api/metrics_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/daemon/daemon_run.go pkg/dataplane/userspace/eventstream.go pkg/dataplane/userspace/eventstream_test.go pkg/dataplane/userspace/protocol.go pkg/dataplane/userspace/statusfmt.go pkg/api/metrics.go pkg/api/metrics_test.go`; `go test ./pkg/dataplane/userspace ./pkg/logging ./pkg/api ./pkg/daemon`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T05:06:00Z
+  - **Action**: Addressed automated review nit on the new event-stream lifecycle regression test by replacing fixed sleep + wall-clock polling with timeout contexts and retry loops for listener readiness/connection checks.
+  - **File(s)**: `pkg/dataplane/userspace/eventstream_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/dataplane/userspace/eventstream_test.go`; `go test ./pkg/dataplane/userspace ./pkg/logging ./pkg/api ./pkg/daemon`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T05:13:00Z
+  - **Action**: Completed the same timeout-context synchronization pattern in `TestEventStreamDataplaneEventCallbackCanBeSetAfterStart` so the new lifecycle regression test no longer relies on fixed sleeps or wall-clock deadline polling.
+  - **File(s)**: `pkg/dataplane/userspace/eventstream_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/dataplane/userspace/eventstream_test.go`; `go test ./pkg/dataplane/userspace ./pkg/logging ./pkg/api ./pkg/daemon`; `git diff --check`
 
 - **Timestamp**: 2026-05-17T01:12:00Z
   - **Action**: PR #1391 post-smoke follow-up — live q10(24G)+q0(best-effort) contention on `7e7eb07e` showed serviceable-only exact suppression still let q0 drain ~15.6 GB of surplus while exact was backlogged. Reworked the gate from binary serviceability to residual-rate budgeting: non-exact surplus can consume only `root_rate - backlogged_exact_guarantee_rates`, shared exact queues publish queue masks so one queue's reservation is counted once across workers, and shared interfaces use an interface-global residual token bucket rather than per-worker residual buckets.

@@ -225,6 +225,18 @@ func (er *EventReader) Run(ctx context.Context) {
 	}
 }
 
+// ProcessRawEvent feeds an RT_FLOW-format dataplane.Event record through the
+// same enrichment, buffering, callback, and syslog/local-log fanout path used
+// by the eBPF ring-buffer reader. Userspace transports should call this rather
+// than adding decoded records directly to EventBuffer.
+func (er *EventReader) ProcessRawEvent(data []byte) bool {
+	if len(data) < int(unsafe.Sizeof(dataplane.Event{})) {
+		return false
+	}
+	er.logEvent(data)
+	return true
+}
+
 func (er *EventReader) logEvent(data []byte) {
 	var evt dataplane.Event
 	evt.Timestamp = binary.LittleEndian.Uint64(data[0:8])
@@ -304,6 +316,14 @@ func (er *EventReader) logEvent(data []byte) {
 	}
 	if evt.EventType == dataplane.EventTypeScreenDrop {
 		rec.ScreenCheck = screenFlagName(evt.PolicyID)
+	}
+	if evt.EventType != dataplane.EventTypeSessionClose && len(data) >= 136 {
+		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
+		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
+		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
+		if data[134] != dataplane.CloseReasonNone {
+			rec.Reason = closeReasonName(data[134])
+		}
 	}
 
 	// Parse extended fields (offset 112+)
@@ -456,6 +476,102 @@ func (er *EventReader) logEvent(data []byte) {
 			}
 		}
 	}
+}
+
+// DecodeRawEventRecord decodes the fixed dataplane.Event RT_FLOW wire shape
+// used by the eBPF ring buffer and by the userspace event-stream adapter.
+// It is decode-only; transports that need EventBuffer, callback, local-log,
+// and syslog fanout must call EventReader.ProcessRawEvent instead.
+func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
+	if len(data) < int(unsafe.Sizeof(dataplane.Event{})) {
+		return EventRecord{}, false
+	}
+
+	var evt dataplane.Event
+	evt.Timestamp = binary.LittleEndian.Uint64(data[0:8])
+	copy(evt.SrcIP[:], data[8:24])
+	copy(evt.DstIP[:], data[24:40])
+	evt.SrcPort = binary.BigEndian.Uint16(data[40:42])
+	evt.DstPort = binary.BigEndian.Uint16(data[42:44])
+	evt.PolicyID = binary.LittleEndian.Uint32(data[44:48])
+	evt.IngressZone = binary.LittleEndian.Uint16(data[48:50])
+	evt.EgressZone = binary.LittleEndian.Uint16(data[50:52])
+	evt.EventType = data[52]
+	evt.Protocol = data[53]
+	evt.Action = data[54]
+	evt.AddrFamily = data[55]
+	evt.SessionPackets = binary.LittleEndian.Uint64(data[56:64])
+	evt.SessionBytes = binary.LittleEndian.Uint64(data[64:72])
+	copy(evt.NATSrcIP[:], data[72:88])
+	copy(evt.NATDstIP[:], data[88:104])
+	evt.NATSrcPort = binary.BigEndian.Uint16(data[104:106])
+	evt.NATDstPort = binary.BigEndian.Uint16(data[106:108])
+	evt.Created = binary.LittleEndian.Uint32(data[108:112])
+	evt.RevPackets = binary.LittleEndian.Uint64(data[112:120])
+	evt.RevBytes = binary.LittleEndian.Uint64(data[120:128])
+	evt.IngressIfindex = binary.LittleEndian.Uint32(data[128:132])
+	evt.AppID = binary.LittleEndian.Uint16(data[132:134])
+	evt.CloseReason = data[134]
+
+	var srcStr, dstStr, natSrcStr, natDstStr string
+	switch evt.AddrFamily {
+	case dataplane.AFInet6:
+		srcIP := net.IP(evt.SrcIP[:])
+		dstIP := net.IP(evt.DstIP[:])
+		srcStr = fmt.Sprintf("[%s]:%d", srcIP, evt.SrcPort)
+		dstStr = fmt.Sprintf("[%s]:%d", dstIP, evt.DstPort)
+		natSrcIP := net.IP(evt.NATSrcIP[:])
+		natDstIP := net.IP(evt.NATDstIP[:])
+		natSrcStr = fmt.Sprintf("[%s]:%d", natSrcIP, evt.NATSrcPort)
+		natDstStr = fmt.Sprintf("[%s]:%d", natDstIP, evt.NATDstPort)
+	case dataplane.AFInet:
+		srcIP := net.IP(evt.SrcIP[:4])
+		dstIP := net.IP(evt.DstIP[:4])
+		srcStr = fmt.Sprintf("%s:%d", srcIP, evt.SrcPort)
+		dstStr = fmt.Sprintf("%s:%d", dstIP, evt.DstPort)
+		natSrcIP := net.IP(evt.NATSrcIP[:4])
+		natDstIP := net.IP(evt.NATDstIP[:4])
+		natSrcStr = fmt.Sprintf("%s:%d", natSrcIP, evt.NATSrcPort)
+		natDstStr = fmt.Sprintf("%s:%d", natDstIP, evt.NATDstPort)
+	default:
+		return EventRecord{}, false
+	}
+
+	rec := EventRecord{
+		Time:            time.Now(),
+		Type:            eventTypeName(evt.EventType),
+		SrcAddr:         srcStr,
+		DstAddr:         dstStr,
+		Protocol:        protoName(evt.Protocol),
+		Action:          actionName(evt.Action),
+		PolicyID:        evt.PolicyID,
+		InZone:          evt.IngressZone,
+		OutZone:         evt.EgressZone,
+		NATSrcAddr:      natSrcStr,
+		NATDstAddr:      natDstStr,
+		SessionPkts:     evt.SessionPackets,
+		SessionBytes:    evt.SessionBytes,
+		RevSessionPkts:  evt.RevPackets,
+		RevSessionBytes: evt.RevBytes,
+		CloseReason:     closeReasonName(evt.CloseReason),
+	}
+	if evt.EventType != dataplane.EventTypeSessionClose {
+		rec.SessionPkts = 0
+		rec.SessionBytes = 0
+		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
+		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
+		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
+		if evt.CloseReason != dataplane.CloseReasonNone {
+			rec.Reason = closeReasonName(evt.CloseReason)
+		}
+	}
+	if evt.Timestamp > 0 && evt.Timestamp <= uint64(1<<63-1) {
+		rec.Time = time.Unix(0, int64(evt.Timestamp))
+	}
+	if evt.EventType == dataplane.EventTypeScreenDrop {
+		rec.ScreenCheck = screenFlagName(evt.PolicyID)
+	}
+	return rec, true
 }
 
 // eventCategory maps event types to category bitmask values.

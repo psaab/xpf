@@ -3,7 +3,9 @@
 // LOC threshold. Loaded as a sibling submodule via
 // `#[path = "tests.rs"]` from mod.rs.
 
+use super::codec::MSG_FULL_RESYNC;
 use super::*;
+use std::io::Read;
 
 fn build_raw_ack_frame(seq: u64) -> [u8; FRAME_HEADER_SIZE] {
     let mut buf = [0u8; FRAME_HEADER_SIZE];
@@ -66,6 +68,35 @@ fn test_replay_buffer_trim() {
     }
     assert_eq!(replay_buf.len(), 5);
     assert_eq!(replay_buf.front().unwrap().seq, 6);
+}
+
+#[test]
+fn test_replay_gap_at_zero_ack_sends_full_resync() {
+    let (mut daemon_side, helper_side) = std::os::unix::net::UnixStream::pair().unwrap();
+    daemon_side
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let shared = Arc::new(EventStreamShared::new());
+    let mut replay_buf: VecDeque<EventFrame> = VecDeque::new();
+
+    // Simulate a replay buffer overrun before the daemon ever ACKed anything:
+    // seq 1 has been trimmed, so replaying seq 2.. would silently lose the
+    // first audit/session event unless the helper requests FullResync.
+    for seq in 2..=REPLAY_BUFFER_CAPACITY as u64 + 1 {
+        replay_buf.push_back(EventFrame::encode_drain_complete(seq));
+    }
+
+    replay_buffered(&helper_side, &mut replay_buf, 0, &shared).expect("replay gap");
+
+    let mut hdr = [0u8; FRAME_HEADER_SIZE];
+    daemon_side.read_exact(&mut hdr).expect("full resync frame");
+    assert_eq!(hdr[4], MSG_FULL_RESYNC);
+    assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        replay_buf.front().map(|f| f.seq),
+        Some(2),
+        "full resync keeps stale replay window until the daemon ACKs"
+    );
 }
 
 #[test]

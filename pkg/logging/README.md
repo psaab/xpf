@@ -40,6 +40,12 @@ reports.
 - The binary RT_FLOW format used by Junos session logging is custom; it
   is not human-readable without a parser. Use the local-log facility for
   human-readable session events.
+- Userspace event-stream telemetry enters through
+  `EventReader.ProcessRawEvent`, not by direct `EventBuffer.Add`, so it
+  gets the same name resolution, callback fanout, local writers, and
+  syslog delivery as eBPF ring-buffer events. `DecodeRawEventRecord` is
+  decode-only and must not be used as a replacement for the full reader
+  path when audit delivery matters.
 - The event buffer is bounded. If a subscriber stops draining, new events
   drop silently — by design. Don't wire a slow consumer to it.
 - The session aggregator flushes on a 5-minute timer. The flushed

@@ -11,7 +11,7 @@
 
 pub(crate) mod codec;
 
-pub(crate) use codec::{EventFrame, close_flags};
+pub(crate) use codec::{close_flags, EventFrame};
 
 use crate::session::{SessionDelta, SessionDeltaKind};
 use codec::{FRAME_HEADER_SIZE, MSG_ACK, MSG_DRAIN_REQUEST, MSG_KEEPALIVE, MSG_PAUSE, MSG_RESUME};
@@ -19,9 +19,9 @@ use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TryRecvError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -352,13 +352,13 @@ fn replay_buffered(
     acked_seq: u64,
     shared: &Arc<EventStreamShared>,
 ) -> io::Result<()> {
-    // Check if replay buffer covers what we need.
-    // Only send FullResync if the daemon previously acked real events
-    // (acked_seq > 0) AND our replay buffer has a gap (can't replay
-    // from acked+1). On fresh start with no events, just start clean.
+    // Check if replay buffer covers what we need. On a true fresh start
+    // (acked_seq == 0 and no buffered frames), start clean. Otherwise any gap
+    // at acked+1 requires FullResync, including the acked_seq==0 case where an
+    // overrun replay buffer has already trimmed seq 1.
     let oldest_buffered = replay_buf.front().map(|f| f.seq).unwrap_or(0);
-    let has_gap = replay_buf.is_empty() || oldest_buffered > acked_seq + 1;
-    if acked_seq > 0 && has_gap {
+    let has_gap = (replay_buf.is_empty() && acked_seq > 0) || oldest_buffered > acked_seq + 1;
+    if has_gap {
         let seq = shared.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let frame = EventFrame::encode_full_resync(seq);
         write_frame_blocking(stream, &frame)?;
@@ -367,7 +367,9 @@ fn replay_buffered(
             "xpf-event-stream: sent FullResync (buffer gap: acked={}, oldest_buffered={})",
             acked_seq, oldest_buffered
         );
-        replay_buf.clear();
+        // Keep the stale replay window until the daemon ACKs the FullResync.
+        // Clearing here can make an acked_seq=0 reconnect look like a clean
+        // fresh start and permanently suppress the required bulk export.
         return Ok(());
     }
 

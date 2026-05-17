@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"io"
+	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +15,79 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
+
+type fixedEventStreamProvider struct {
+	es *dpuserspace.EventStream
+}
+
+const maxEventFramePayloadForWiringTest = 1 << 20
+
+func (p fixedEventStreamProvider) EventStream() *dpuserspace.EventStream { return p.es }
+
+func buildSessionOpenFrameV4PayloadForWiringTest() []byte {
+	buf := make([]byte, 56)
+	buf[0] = 4
+	buf[1] = 6
+	binary.LittleEndian.PutUint16(buf[2:4], 12345)
+	binary.LittleEndian.PutUint16(buf[4:6], 443)
+	copy(buf[24:28], []byte{10, 0, 1, 2})
+	copy(buf[28:32], []byte{172, 16, 0, 1})
+	return buf
+}
+
+func writeEventFrameForWiringTest(t *testing.T, conn net.Conn, typ uint8, seq uint64, payload []byte) {
+	t.Helper()
+	var hdr [dpuserspace.EventFrameHeaderSize]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], uint32(len(payload)))
+	hdr[4] = typ
+	binary.LittleEndian.PutUint64(hdr[8:16], seq)
+	if _, err := conn.Write(hdr[:]); err != nil {
+		t.Fatalf("write frame header: %v", err)
+	}
+	if len(payload) > 0 {
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatalf("write frame payload: %v", err)
+		}
+	}
+}
+
+func waitForAckSeqForWiringTest(t *testing.T, conn net.Conn, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		var hdr [dpuserspace.EventFrameHeaderSize]byte
+		if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() && time.Now().Before(deadline) {
+				continue
+			}
+			t.Fatalf("read ack frame: %v", err)
+		}
+		payloadLen := binary.LittleEndian.Uint32(hdr[0:4])
+		typ := hdr[4]
+		seq := binary.LittleEndian.Uint64(hdr[8:16])
+		if payloadLen > maxEventFramePayloadForWiringTest {
+			t.Fatalf("unexpected frame payload length: %d", payloadLen)
+		}
+		if payloadLen > 0 {
+			// Ack/control frames in this helper are header-only; drain any payload
+			// to keep stream framing aligned for subsequent reads.
+			payload := make([]byte, payloadLen)
+			if _, err := io.ReadFull(conn, payload); err != nil {
+				t.Fatalf("read frame payload: %v", err)
+			}
+		}
+		if typ == dpuserspace.EventTypeAck && seq >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for ack seq >= %d", want)
+		}
+	}
+}
 
 type fakeUserspaceDeltaDrainer struct {
 	batches [][]dpuserspace.SessionDeltaInfo
@@ -720,8 +797,9 @@ func TestUserspaceRGDemotionPrepLeaseCanBeReleasedAfterFailure(t *testing.T) {
 	}
 }
 
-// TestHandleEventStreamDeltaSkipsWhenNoCluster verifies that events are
-// silently dropped when cluster is nil.
+// TestHandleEventStreamDeltaSkipsWhenNoCluster verifies that permanent
+// non-owner/no-cluster paths ACK and ignore events instead of asking the helper
+// to replay forever.
 func TestHandleEventStreamDeltaSkipsWhenNoCluster(t *testing.T) {
 	d := &Daemon{}
 	delta := dpuserspace.SessionDeltaInfo{
@@ -732,8 +810,16 @@ func TestHandleEventStreamDeltaSkipsWhenNoCluster(t *testing.T) {
 		SrcPort:    12345,
 		DstPort:    443,
 	}
-	// Should not panic when cluster and sessionSync are nil.
-	d.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta)
+	if !d.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta) {
+		t.Fatal("delta without cluster/sessionSync should be permanently ignored and ACKed")
+	}
+	backup := &Daemon{
+		cluster:     newClusterManager(false),
+		sessionSync: &cluster.SessionSync{},
+	}
+	if !backup.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta) {
+		t.Fatal("delta on a backup should be permanently ignored and ACKed")
+	}
 }
 
 // TestHandleEventStreamDeltaMapsEventTypes verifies event type to string mapping
@@ -747,6 +833,61 @@ func TestHandleEventStreamDeltaMapsEventTypes(t *testing.T) {
 	d.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta)
 	d.handleEventStreamDelta(dpuserspace.EventTypeSessionClose, delta)
 	d.handleEventStreamDelta(dpuserspace.EventTypeSessionUpdate, delta)
+}
+
+func TestHandleEventStreamFullResyncRequiresHAReady(t *testing.T) {
+	if !(&Daemon{}).handleEventStreamFullResync() {
+		t.Fatal("full resync without cluster/sessionSync should be permanently ignored and ACKed")
+	}
+	backup := &Daemon{
+		cluster:     newClusterManager(false),
+		sessionSync: &cluster.SessionSync{},
+	}
+	if !backup.handleEventStreamFullResync() {
+		t.Fatal("full resync on a backup should be permanently ignored and ACKed")
+	}
+	d := &Daemon{
+		cluster:     newClusterManager(true),
+		sessionSync: &cluster.SessionSync{},
+	}
+	if d.handleEventStreamFullResync() {
+		t.Fatal("full resync with disconnected sessionSync should withhold ACK")
+	}
+}
+
+func TestWireUserspaceEventStreamCallbacksStandaloneWiresSessionAndFullResync(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "events.sock")
+	es := dpuserspace.NewEventStream(socketPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	d := &Daemon{}
+	if !d.wireUserspaceEventStreamCallbacks(ctx, fixedEventStreamProvider{es: es}) {
+		t.Fatal("expected callback wiring to succeed")
+	}
+
+	var conn net.Conn
+	var err error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err = net.Dial("unix", socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("dial event stream socket: %v", err)
+	}
+	defer conn.Close()
+
+	writeEventFrameForWiringTest(t, conn, dpuserspace.EventTypeSessionOpen, 1, buildSessionOpenFrameV4PayloadForWiringTest())
+	waitForAckSeqForWiringTest(t, conn, 1)
+
+	writeEventFrameForWiringTest(t, conn, dpuserspace.EventTypeFullResync, 2, nil)
+	waitForAckSeqForWiringTest(t, conn, 2)
 }
 
 // TestUserspaceManagerImplementsEventStreamExporter verifies that the userspace
