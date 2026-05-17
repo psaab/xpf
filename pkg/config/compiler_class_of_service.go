@@ -238,7 +238,13 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
 				sched.Priority = nodeVal(child)
 			case "buffer-size":
 				if v := nodeVal(child); v != "" {
-					sched.BufferSizeBytes = parseBurstSizeLimit(v)
+					if percent, err := parsePercentWithSuffixStrict(v); err == nil {
+						sched.BufferSizeBytes = 0
+						sched.BufferSizePercent = percent
+					} else {
+						sched.BufferSizeBytes = parseBurstSizeLimit(v)
+						sched.BufferSizePercent = 0
+					}
 				}
 			case "surplus-sharing":
 				// #915: leaf with no value; presence = true.

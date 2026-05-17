@@ -100,6 +100,50 @@ func TestConfigSnapshotMirrorConfigsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCoSSchedulerSnapshotBufferSizePercentRoundTrip(t *testing.T) {
+	in := CoSSchedulerSnapshot{
+		Name:              "percent-sched",
+		TransmitRateBytes: 1_250_000,
+		BufferSizePercent: 10,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["buffer_size_percent"]; !ok {
+		t.Fatalf("wire key missing from CoSSchedulerSnapshot JSON: %s", string(raw))
+	}
+	if _, ok := obj["buffer_size_bytes"]; ok {
+		t.Fatalf("legacy byte key should be omitted for percent-only scheduler: %s", string(raw))
+	}
+
+	var back CoSSchedulerSnapshot
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal CoSSchedulerSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
+	}
+}
+
+func TestCoSSchedulerSnapshotLegacyBufferSizePercentDefault(t *testing.T) {
+	raw := []byte(`{"name":"legacy","buffer_size_bytes":65536}`)
+	var back CoSSchedulerSnapshot
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal legacy CoSSchedulerSnapshot: %v", err)
+	}
+	if got := back.BufferSizeBytes; got != 65536 {
+		t.Fatalf("BufferSizeBytes = %d, want 65536", got)
+	}
+	if got := back.BufferSizePercent; got != 0 {
+		t.Fatalf("BufferSizePercent = %v, want 0 for legacy JSON", got)
+	}
+}
+
 func TestBindingCountersSnapshotTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	in := BindingCountersSnapshot{
 		WorkerID:                        3,

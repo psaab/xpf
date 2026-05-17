@@ -43,6 +43,9 @@ const (
 	// ValueByteSize is a byte-count value with k/m/g suffix.
 	// Examples: "16k", "1m", "256m".
 	ValueByteSize
+	// ValueByteSizeOrPercent is a scheduler buffer size: byte-count with
+	// k/m/g suffix, or percent with an explicit % suffix.
+	ValueByteSizeOrPercent
 	// ValuePercent is a percent value in the range [0, 100] (no suffix).
 	ValuePercent
 	// ValueInteger is a bare integer. Range is enforced by the leaf's
@@ -65,6 +68,8 @@ func (v ValueType) Placeholder() string {
 		return "<rate>"
 	case ValueByteSize:
 		return "<bytes>"
+	case ValueByteSizeOrPercent:
+		return "<bytes|percent>"
 	case ValuePercent:
 		return "<percent>"
 	case ValueInteger:
@@ -1029,11 +1034,11 @@ var ConfigClassOfServiceSchedulers = &Node{
 			}),
 		},
 		"buffer-size": {
-			Desc:          "Byte buffer allocation for this scheduler",
-			ValueType:     ValueByteSize,
-			ValueDesc:     "Byte-size with explicit k/m/g suffix (e.g. 16m, 256k)",
-			ValueExamples: []string{"16m", "256k", "1g"},
-			Validator:     config.ValidateByteSize,
+			Desc:          "Buffer allocation for this scheduler",
+			ValueType:     ValueByteSizeOrPercent,
+			ValueDesc:     "Byte-size with explicit k/m/g suffix, or percent of interface CoS burst pool (e.g. 16m, 256k, 10%)",
+			ValueExamples: []string{"16m", "256k", "10%"},
+			Validator:     config.ValidateByteSizeOrPercent,
 			Children: map[string]*Node{
 				"temporal": {Desc: "Temporal buffer interpretation (Junos)"},
 			},

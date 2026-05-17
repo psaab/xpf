@@ -234,7 +234,8 @@ func (l *Lexer) readIdentifier(line, col int) Token {
 
 // isIdentChar returns true if ch is valid in a Junos identifier.
 // Junos identifiers can contain letters, digits, hyphens, underscores,
-// dots, slashes, colons, asterisks, plus signs, and angle brackets.
+// dots, slashes, colons, asterisks, plus signs, percent signs, and angle
+// brackets.
 // This handles IP addresses (10.0.1.0/24), interface names (eth0.0),
 // wildcards (*), and group wildcards (<*>).
 func isIdentChar(ch byte) bool {
@@ -243,7 +244,7 @@ func isIdentChar(ch byte) bool {
 		(ch >= '0' && ch <= '9') ||
 		ch == '-' || ch == '_' || ch == '.' ||
 		ch == '/' || ch == ':' || ch == '*' || ch == '+' ||
-		ch == '=' || ch == ',' ||
+		ch == '%' || ch == '=' || ch == ',' ||
 		ch == '<' || ch == '>'
 }
 
@@ -252,6 +253,6 @@ func IsIdentRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r) ||
 		r == '-' || r == '_' || r == '.' ||
 		r == '/' || r == ':' || r == '*' || r == '+' ||
-		r == '=' || r == ',' ||
+		r == '%' || r == '=' || r == ',' ||
 		r == '<' || r == '>'
 }

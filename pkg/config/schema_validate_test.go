@@ -193,19 +193,27 @@ func TestSchemaValidate_BufferSize_RejectsBareInteger(t *testing.T) {
 	}
 }
 
-func TestSchemaValidate_BufferSize_RejectsPercentUntilRuntimeRepresentation(t *testing.T) {
-	err := schemaCheck(t, `class-of-service {
+func TestSchemaValidate_BufferSize_AcceptsPercent(t *testing.T) {
+	if err := schemaCheck(t, `class-of-service {
     schedulers {
         be {
-            buffer-size "10%";
+            buffer-size 10%;
         }
     }
-}`)
-	if err == nil {
-		t.Fatal("expected error for percent buffer-size without runtime representation, got nil")
+}`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "buffer-size") {
-		t.Fatalf("error should reference buffer-size: %v", err)
+}
+
+func TestSchemaValidate_BufferSize_AcceptsQuotedPercent(t *testing.T) {
+	if err := schemaCheck(t, `class-of-service {
+    schedulers {
+        be {
+            buffer-size "12.5%";
+        }
+    }
+}`); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -249,6 +257,22 @@ func TestSchemaValidate_BufferSize_RejectsBareIntegerGreaterThan100(t *testing.T
 	}`)
 	if err == nil {
 		t.Fatal("expected error for ambiguous bare-integer buffer-size 150, got nil")
+	}
+}
+
+func TestSchemaValidate_BufferSize_RejectsZeroPercent(t *testing.T) {
+	err := schemaCheck(t, `class-of-service {
+    schedulers {
+        be {
+            buffer-size 0%;
+        }
+    }
+}`)
+	if err == nil {
+		t.Fatal("expected error for zero percent buffer-size, got nil")
+	}
+	if !strings.Contains(err.Error(), "buffer-size") {
+		t.Fatalf("error should reference buffer-size: %v", err)
 	}
 }
 
@@ -314,6 +338,40 @@ func TestSchemaValidate_AcceptedSchedulerValuesCompileAsValidated(t *testing.T) 
 	}
 }
 
+func TestSchemaValidate_PercentBufferSizeCompilesAsPercentNotZeroBytes(t *testing.T) {
+	tree := &config.ConfigTree{}
+	cmds := []string{
+		"set class-of-service schedulers be transmit-rate 8",
+		"set class-of-service schedulers be buffer-size 10%",
+	}
+	for _, cmd := range cmds {
+		path, err := config.ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", cmd, err)
+		}
+	}
+	if err := cmdtree.SchemaValidate(tree, nil); err != nil {
+		t.Fatalf("schema validate: %v", err)
+	}
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	sched := cfg.ClassOfService.Schedulers["be"]
+	if sched == nil {
+		t.Fatal("expected be scheduler")
+	}
+	if got := sched.BufferSizePercent; got != 10 {
+		t.Fatalf("buffer-size percent = %v, want 10", got)
+	}
+	if got := sched.BufferSizeBytes; got != 0 {
+		t.Fatalf("buffer-size bytes = %d, want 0 for percent form", got)
+	}
+}
+
 // Negative: nodes outside the schedulers subtree are NOT validated.
 // This guards the "only schedulers in this PR" scope contract.
 func TestSchemaValidate_OutsideSchedulersIgnored(t *testing.T) {
@@ -364,6 +422,21 @@ func TestValidateByteSize(t *testing.T) {
 	for _, b := range bad {
 		if err := config.ValidateByteSize(b, nil); err == nil {
 			t.Errorf("ValidateByteSize(%q): expected error", b)
+		}
+	}
+}
+
+func TestValidateByteSizeOrPercent(t *testing.T) {
+	good := []string{"16m", "256k", "1g", "10%", "12.5%"}
+	for _, g := range good {
+		if err := config.ValidateByteSizeOrPercent(g, nil); err != nil {
+			t.Errorf("ValidateByteSizeOrPercent(%q): unexpected error %v", g, err)
+		}
+	}
+	bad := []string{"", "0", "50", "100", "purple", "-5", "1.5", "0%", "-1%", "101%", "NaN%"}
+	for _, b := range bad {
+		if err := config.ValidateByteSizeOrPercent(b, nil); err == nil {
+			t.Errorf("ValidateByteSizeOrPercent(%q): expected error", b)
 		}
 	}
 }

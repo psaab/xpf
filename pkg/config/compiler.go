@@ -321,6 +321,52 @@ func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {
 				"class-of-service scheduler %q equal-flow-enforcement cannot be combined with surplus-sharing",
 				sched.Name)
 		}
+		// Both buffer-size forms set simultaneously is ambiguous. The compiler
+		// always clears the unused field (see compiler_class_of_service.go
+		// buffer-size case), so this can only arise in constructed or
+		// externally-assembled configs. Reject early rather than silently
+		// applying the "byte-size wins" runtime preference.
+		if sched.BufferSizeBytes > 0 && sched.BufferSizePercent > 0 {
+			return fmt.Errorf(
+				"class-of-service scheduler %q has both buffer-size bytes (%d) "+
+					"and buffer-size percent (%.4g%%) set; use one form only",
+				sched.Name, sched.BufferSizeBytes, sched.BufferSizePercent)
+		}
+	}
+	// Aggregate percent check: Junos does not allow per-queue buffer
+	// allocations to exceed 100% of the interface's total buffer pool.
+	// Check each scheduler-map independently and reject overcommit here
+	// so the runtime never silently over-allocates. A sum of exactly
+	// 100% is permitted (full pool allocation).
+	//
+	// A small epsilon (1e-9) guards against accumulated IEEE 754 rounding
+	// when summing multiple float64 percent values: e.g. 33.33% * 3 may
+	// round to 99.99000000000001% rather than exactly 99.99%, so the check
+	// must not reject legitimate 100%-summing configs.
+	const maxTotalBufferPercent = 100.0
+	const bufferPercentEpsilon = 1e-9
+	for _, schedMap := range cos.SchedulerMaps {
+		if schedMap == nil {
+			continue
+		}
+		var totalPercent float64
+		for _, entry := range schedMap.Entries {
+			if entry == nil || entry.Scheduler == "" {
+				continue
+			}
+			sched, ok := cos.Schedulers[entry.Scheduler]
+			if !ok || sched == nil {
+				continue
+			}
+			totalPercent += sched.BufferSizePercent
+		}
+		if totalPercent > maxTotalBufferPercent+bufferPercentEpsilon {
+			return fmt.Errorf(
+				"class-of-service scheduler-map %q: "+
+					"sum of buffer-size percent across all schedulers is %.4g%% "+
+					"(must not exceed 100%%)",
+				schedMap.Name, totalPercent)
+		}
 	}
 	return nil
 }
