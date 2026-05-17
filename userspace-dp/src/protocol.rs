@@ -173,6 +173,11 @@ pub(crate) struct CoSSchedulerSnapshot {
     pub priority: String,
     #[serde(rename = "buffer_size_bytes", default)]
     pub buffer_size_bytes: u64,
+    /// Additive #1336 field for Junos scheduler `buffer-size 10%`.
+    /// Legacy snapshots carry only `buffer_size_bytes`; this defaults
+    /// to 0.0 and is used by the runtime only when byte size is absent.
+    #[serde(rename = "buffer_size_percent", default)]
+    pub buffer_size_percent: f64,
     /// #915: opt an exact queue into surplus-phase participation
     /// so it can draw from root surplus tokens once its own bucket
     /// is empty. Only meaningful when transmit_rate_exact == true;
@@ -2373,6 +2378,10 @@ mod tests {
             snap.equal_flow_enforcement, false,
             "equal_flow_enforcement must default to false for older snapshots"
         );
+        assert_eq!(
+            snap.buffer_size_percent, 0.0,
+            "buffer_size_percent must default to 0 for pre-#1336 snapshots"
+        );
         assert_eq!(snap.transmit_rate_exact, true);
     }
 
@@ -2384,6 +2393,7 @@ mod tests {
             transmit_rate_exact: true,
             priority: "low".into(),
             buffer_size_bytes: 65_536,
+            buffer_size_percent: 0.0,
             surplus_sharing: true,
             equal_flow_enforcement: false,
         };
@@ -2400,12 +2410,36 @@ mod tests {
             transmit_rate_exact: true,
             priority: "low".into(),
             buffer_size_bytes: 65_536,
+            buffer_size_percent: 0.0,
             surplus_sharing: false,
             equal_flow_enforcement: true,
         };
         let json = serde_json::to_string(&snap).expect("serialize");
         let back: CoSSchedulerSnapshot = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.equal_flow_enforcement, true);
+    }
+
+    #[test]
+    fn cos_scheduler_snapshot_buffer_size_percent_round_trip() {
+        let snap = CoSSchedulerSnapshot {
+            name: "percent-sched".into(),
+            transmit_rate_bytes: 125_000_000,
+            transmit_rate_exact: true,
+            priority: "low".into(),
+            buffer_size_bytes: 0,
+            buffer_size_percent: 10.0,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+        };
+        let json = serde_json::to_string(&snap).expect("serialize");
+        assert!(
+            json.contains("buffer_size_percent"),
+            "percent field must be present in serialized scheduler JSON: {}",
+            json
+        );
+        let back: CoSSchedulerSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.buffer_size_percent, 10.0);
+        assert_eq!(back.buffer_size_bytes, 0);
     }
 
     // #943 additive-wire contract: a pre-#943 BindingStatus payload

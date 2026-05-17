@@ -369,6 +369,18 @@ latency-sensitive traffic. Production configs that care about tail
 latency should size these buffers from the service SLO rather than
 copying the validation fixture blindly.
 
+Schedulers can also express `buffer-size` as a percent. Userspace does
+not treat that as a byte value of zero: the Go snapshot carries
+`buffer_size_percent`, and the Rust CoS builder resolves it to bytes as a
+percentage of the interface CoS burst pool before queue admission and
+token-bucket runtime state are built. For the fairness fixtures above,
+the explicit byte sizes remain intentional so the queue residence tradeoff
+is visible in the config. Percent buffers are validated per interface
+unit: scheduler-map entries bound to the same unit cannot total more than
+100% of that unit's CoS burst pool. xpf rejects the Junos-accepted `0%`
+form because the additive userspace protocol uses zero as the absent
+field value and the runtime still applies a minimum queue burst floor.
+
 ```bash
 COS_IFINDEX=<egress-ifindex> \
 IPERF_LAUNCH_ARG_0=/usr/bin/incus \

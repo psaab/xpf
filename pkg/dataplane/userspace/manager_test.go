@@ -3724,6 +3724,34 @@ func TestBuildClassOfServiceSnapshotIncludesTransmitRateExact(t *testing.T) {
 	}
 }
 
+func TestBuildClassOfServiceSnapshotIncludesBufferSizePercent(t *testing.T) {
+	cfg := &config.Config{
+		ClassOfService: &config.ClassOfServiceConfig{
+			Schedulers: map[string]*config.CoSScheduler{
+				"percent-sched": {
+					Name:              "percent-sched",
+					TransmitRateBytes: 1_250_000,
+					BufferSizePercent: 10,
+				},
+			},
+		},
+	}
+
+	snap := buildClassOfServiceSnapshot(cfg)
+	if snap == nil {
+		t.Fatal("expected non-nil class-of-service snapshot")
+	}
+	if len(snap.Schedulers) != 1 {
+		t.Fatalf("Schedulers len = %d, want 1", len(snap.Schedulers))
+	}
+	if got := snap.Schedulers[0].BufferSizePercent; got != 10 {
+		t.Fatalf("BufferSizePercent = %v, want 10", got)
+	}
+	if got := snap.Schedulers[0].BufferSizeBytes; got != 0 {
+		t.Fatalf("BufferSizeBytes = %d, want 0 for percent scheduler", got)
+	}
+}
+
 // #915: snapshot encoding round-trips the SurplusSharing bool.
 func TestBuildClassOfServiceSnapshotIncludesSurplusSharing(t *testing.T) {
 	cfg := &config.Config{

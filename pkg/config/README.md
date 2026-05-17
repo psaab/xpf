@@ -31,19 +31,23 @@ nothing internal.
   `pkg/dataplane.Manager.Compile`.
 - `Validate*` functions — `schema_validators.go`. Stateless string
   validators (`ValidateRate`, `ValidateByteSize`,
+  `ValidateByteSizeOrPercent`,
   `ValidateInteger(min,max)`, `ValidateEnum(allowed)`,
   `ValidatePercent(min,max)`) for the #1319 typed-leaf gate. Attached
   to `cmdtree.Node.Validator` fields and dispatched by
   `cmdtree.SchemaValidate` at commit-check time, on the same
   apply-groups-expanded tree the compiler consumes, so garbage like
   `transmit-rate asd` fails loud instead of silently zeroing in the
-  existing parsers. Scheduler `buffer-size` validation intentionally
-  accepts only byte sizes with explicit suffixes because the current
-  compiler, userspace snapshot, and Rust dataplane protocol all carry
-  `buffer_size_bytes`, not a percent-of-pool representation. Do not
-  accept percent syntax in the schema until that runtime representation
-  exists too (tracked in #1336); otherwise `buffer-size 10%` would
-  validate and then compile as zero bytes through the legacy parser.
+  existing parsers. Scheduler `buffer-size` validation accepts byte
+  sizes with explicit suffixes and percent values with an explicit `%`
+  suffix. The compiler stores percent values separately from
+  `BufferSizeBytes`; the userspace snapshot adds `buffer_size_percent`
+  while preserving the legacy `buffer_size_bytes` field. The Rust
+  userspace dataplane resolves percent buffers against the interface CoS
+  burst pool when a scheduler is bound to an interface queue. The strict
+  config pass rejects scheduler-map percent totals above 100% on one
+  interface unit. xpf rejects Junos `0%` intentionally because the
+  additive wire field uses zero as the legacy absent value.
   `parseBandwidthLimitStrict` / `parseBurstSizeLimitStrict` /
   `parseScaledDecimalUnitStrict` in `compiler_protocols.go` are the
   error-returning siblings of the legacy zero-return parsers — the legacy

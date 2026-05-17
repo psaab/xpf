@@ -39,6 +39,7 @@ fn build_cos_state_translates_scheduler_map_entries() {
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 128_000,
+                    buffer_size_percent: 0.0,
                     surplus_sharing: false,
                     equal_flow_enforcement: false,
                 },
@@ -48,6 +49,7 @@ fn build_cos_state_translates_scheduler_map_entries() {
                     transmit_rate_exact: true,
                     priority: "strict-high".into(),
                     buffer_size_bytes: 64_000,
+                    buffer_size_percent: 0.0,
                     surplus_sharing: false,
                     equal_flow_enforcement: false,
                 },
@@ -96,6 +98,107 @@ fn build_cos_state_translates_scheduler_map_entries() {
     assert_eq!(iface.queues[1].buffer_bytes, 64_000);
 }
 
+#[test]
+fn build_cos_state_resolves_percent_buffer_size_from_interface_burst_pool() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 42,
+            cos_shaping_rate_bytes_per_sec: 10_000_000,
+            cos_shaping_burst_bytes: 256_000,
+            cos_scheduler_map: "wan-map".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            }],
+            schedulers: vec![CoSSchedulerSnapshot {
+                name: "be-sched".into(),
+                transmit_rate_bytes: 3_000_000,
+                transmit_rate_exact: false,
+                priority: "low".into(),
+                buffer_size_bytes: 0,
+                buffer_size_percent: 10.0,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+            }],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "best-effort".into(),
+                    scheduler: "be-sched".into(),
+                }],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+        }),
+        ..Default::default()
+    };
+
+    let state = build_cos_state(&snapshot);
+    let iface = state.interfaces.get(&42).expect("missing CoS interface");
+    assert_eq!(iface.burst_bytes, 256_000);
+    assert_eq!(
+        iface.queues[0].buffer_bytes, 25_600,
+        "10% of the resolved interface CoS burst pool must not compile to zero"
+    );
+
+    let runtime = crate::afxdp::cos::builders::build_cos_interface_runtime(iface, 0);
+    assert!(
+        runtime.queues[0].config.buffer_bytes >= crate::afxdp::cos::COS_MIN_BURST_BYTES,
+        "runtime queue buffer must retain a non-zero capacity after the queue floor"
+    );
+}
+
+#[test]
+fn build_cos_state_prefers_legacy_byte_buffer_when_both_fields_present() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 42,
+            cos_shaping_rate_bytes_per_sec: 10_000_000,
+            cos_shaping_burst_bytes: 256_000,
+            cos_scheduler_map: "wan-map".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "best-effort".into(),
+                queue: 0,
+            }],
+            schedulers: vec![CoSSchedulerSnapshot {
+                name: "be-sched".into(),
+                transmit_rate_bytes: 3_000_000,
+                transmit_rate_exact: false,
+                priority: "low".into(),
+                buffer_size_bytes: 128_000,
+                buffer_size_percent: 10.0,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+            }],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "best-effort".into(),
+                    scheduler: "be-sched".into(),
+                }],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+        }),
+        ..Default::default()
+    };
+
+    let state = build_cos_state(&snapshot);
+    let iface = state.interfaces.get(&42).expect("missing CoS interface");
+    assert_eq!(
+        iface.queues[0].buffer_bytes, 128_000,
+        "legacy buffer_size_bytes must keep precedence for additive protocol compatibility"
+    );
+}
+
 // #915 (Copilot code-review #3): regression test that
 // `build_cos_state` correctly propagates the snapshot
 // `surplus_sharing` flag into the runtime `CoSQueueConfig`.
@@ -133,6 +236,7 @@ fn build_cos_state_propagates_surplus_sharing_from_snapshot() {
                     transmit_rate_exact: true,
                     priority: "low".into(),
                     buffer_size_bytes: 128 * 1024,
+                    buffer_size_percent: 0.0,
                     surplus_sharing: true, // opt-in
                     equal_flow_enforcement: false,
                 },
@@ -142,6 +246,7 @@ fn build_cos_state_propagates_surplus_sharing_from_snapshot() {
                     transmit_rate_exact: true,
                     priority: "low".into(),
                     buffer_size_bytes: 128 * 1024,
+                    buffer_size_percent: 0.0,
                     surplus_sharing: false, // explicit hard-cap
                     equal_flow_enforcement: false,
                 },
@@ -240,6 +345,7 @@ fn build_cos_state_derives_exact_queue_default_burst_from_queue_rate() {
                 transmit_rate_exact: true,
                 priority: "low".into(),
                 buffer_size_bytes: 0,
+                buffer_size_percent: 0.0,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
             }],
@@ -299,6 +405,7 @@ fn build_cos_state_uses_effective_transmit_rate_for_surplus_weight() {
                 transmit_rate_exact: false,
                 priority: "low".into(),
                 buffer_size_bytes: 0,
+                buffer_size_percent: 0.0,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
             }],
@@ -347,6 +454,7 @@ fn build_cos_state_marks_no_rate_scheduler_map_queue_residual_only() {
                 transmit_rate_exact: false,
                 priority: "low".into(),
                 buffer_size_bytes: 0,
+                buffer_size_percent: 0.0,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
             }],
@@ -433,6 +541,7 @@ fn build_cos_state_binds_dscp_classifier_to_usable_interface_queue_ids() {
                     transmit_rate_exact: false,
                     priority: "low".into(),
                     buffer_size_bytes: 0,
+                    buffer_size_percent: 0.0,
                     surplus_sharing: false,
                     equal_flow_enforcement: false,
                 },
@@ -442,6 +551,7 @@ fn build_cos_state_binds_dscp_classifier_to_usable_interface_queue_ids() {
                     transmit_rate_exact: false,
                     priority: "high".into(),
                     buffer_size_bytes: 0,
+                    buffer_size_percent: 0.0,
                     surplus_sharing: false,
                     equal_flow_enforcement: false,
                 },
@@ -833,6 +943,7 @@ fn build_cos_state_zero_shaping_rate_queue_inherits_transparent() {
                 transmit_rate_exact: false,
                 priority: "low".into(),
                 buffer_size_bytes: 0,
+                buffer_size_percent: 0.0,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
             }],
@@ -889,6 +1000,7 @@ fn build_cos_state_no_rate_exact_surplus_equal_flow_is_residual_only() {
                 transmit_rate_exact: true,
                 priority: "high".into(),
                 buffer_size_bytes: 0,
+                buffer_size_percent: 0.0,
                 surplus_sharing: true,
                 equal_flow_enforcement: true,
             }],

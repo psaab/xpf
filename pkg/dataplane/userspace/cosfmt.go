@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -549,7 +550,11 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 					qv.surplusSharing = sched.SurplusSharing
 					qv.equalFlowEnforcement = sched.EqualFlowEnforcement
 					qv.transmitRate = sched.TransmitRateBytes
-					qv.bufferBytes = sched.BufferSizeBytes
+					if sched.BufferSizeBytes > 0 {
+						qv.bufferBytes = sched.BufferSizeBytes
+					} else if sched.BufferSizePercent > 0 {
+						qv.bufferBytes = cosPercentBufferBytes(cosUnitBurstPoolBytes(view.cosUnit), sched.BufferSizePercent)
+					}
 					if sched.Priority != "" {
 						qv.priority = sched.Priority
 					}
@@ -646,6 +651,40 @@ func formatCoSRate(bytesPerSecond uint64) string {
 		return "-"
 	}
 	return formatBitsPerSecondFloat(float64(bytesPerSecond) * 8)
+}
+
+func cosUnitBurstPoolBytes(unit *config.CoSInterfaceUnit) uint64 {
+	if unit == nil {
+		return minCoSBurstBytes
+	}
+	if unit.BurstSizeBytes > 0 {
+		return unit.BurstSizeBytes
+	}
+	return defaultCoSBurstBytes(unit.ShapingRateBytes)
+}
+
+const minCoSBurstBytes = 64 * 1500
+
+func defaultCoSBurstBytes(rateBytes uint64) uint64 {
+	burst := rateBytes / 100
+	if burst < minCoSBurstBytes {
+		return minCoSBurstBytes
+	}
+	return burst
+}
+
+func cosPercentBufferBytes(poolBytes uint64, percent float64) uint64 {
+	if poolBytes == 0 || percent <= 0 || math.IsNaN(percent) || math.IsInf(percent, 0) {
+		return 0
+	}
+	scaled := math.Ceil(float64(poolBytes) * percent / 100)
+	if scaled < 1 {
+		return 1
+	}
+	if scaled > float64(^uint64(0)) {
+		return ^uint64(0)
+	}
+	return uint64(scaled)
 }
 
 func formatBitsPerSecond(bitsPerSecond uint64) string {

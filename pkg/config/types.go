@@ -359,7 +359,12 @@ type CoSScheduler struct {
 	TransmitRateBytes uint64
 	TransmitRateExact bool
 	Priority          string
-	BufferSizeBytes   uint64
+	// BufferSizeBytes preserves the legacy explicit byte-size path.
+	BufferSizeBytes uint64
+	// BufferSizePercent is the Junos percent form. A value > 0 means
+	// userspace resolves the scheduler buffer against the interface CoS
+	// burst pool when the scheduler is bound to a queue.
+	BufferSizePercent float64
 	// SurplusSharing (#915) lifts the surplus-phase skip on
 	// transmit-rate exact queues so they can draw from the root
 	// shaper's surplus tokens once their own bucket is empty.
