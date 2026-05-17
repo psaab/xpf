@@ -37,18 +37,21 @@ const linkPinPath = "/sys/fs/bpf/xpf/links"
 
 // Manager manages the eBPF dataplane: programs, maps, and attachments.
 type Manager struct {
-	loaded             bool
-	programs           map[string]*ebpf.Program
-	maps               map[string]*ebpf.Map
-	xdpLinks           map[int]link.Link
-	tcLinks            map[int]link.Link
-	lastCompile        *CompileResult
-	PersistentNAT      *PersistentNATTable
-	EnableCPUMap       bool // Enable cpumap multi-CPU distribution (adds startup overhead)
-	XDPEntryProg       string
-	VlanSubInterfaces      map[int]bool       // VLAN sub-interface ifindexes (skip XDP swap for these)
-	mu                     sync.Mutex         // protects userspaceCounterOffsets
-	userspaceCounterOffsets map[uint32]uint64  // userspace counter deltas merged in ReadGlobalCounter
+	loaded                  bool
+	programs                map[string]*ebpf.Program
+	maps                    map[string]*ebpf.Map
+	xdpLinks                map[int]link.Link
+	tcLinks                 map[int]link.Link
+	lastCompile             *CompileResult
+	applyMu                 sync.Mutex
+	applyGeneration         uint64
+	lastApply               *ApplyResult
+	PersistentNAT           *PersistentNATTable
+	EnableCPUMap            bool // Enable cpumap multi-CPU distribution (adds startup overhead)
+	XDPEntryProg            string
+	VlanSubInterfaces       map[int]bool      // VLAN sub-interface ifindexes (skip XDP swap for these)
+	mu                      sync.Mutex        // protects userspaceCounterOffsets
+	userspaceCounterOffsets map[uint32]uint64 // userspace counter deltas merged in ReadGlobalCounter
 
 	// #863: refcount of XDP-attached ifindexes that "claim" the
 	// IFACE_FLAG_XDP_ATTACHED bit on each iface_zone_map entry.
@@ -65,10 +68,10 @@ type Manager struct {
 // New creates a new dataplane Manager.
 func New() *Manager {
 	return &Manager{
-		programs:      make(map[string]*ebpf.Program),
-		maps:          make(map[string]*ebpf.Map),
-		xdpLinks:      make(map[int]link.Link),
-		tcLinks:       make(map[int]link.Link),
+		programs:          make(map[string]*ebpf.Program),
+		maps:              make(map[string]*ebpf.Map),
+		xdpLinks:          make(map[int]link.Link),
+		tcLinks:           make(map[int]link.Link),
 		PersistentNAT:     NewPersistentNATTable(),
 		XDPEntryProg:      "xdp_main_prog",
 		VlanSubInterfaces: make(map[int]bool),
@@ -103,10 +106,11 @@ func (m *Manager) IsLoaded() bool {
 // than punishing transient netlink hiccups.
 //
 // Kernel XDP attach modes (nl/link_linux.go):
-//   XDP_ATTACHED_NONE = 0 — no prog attached
-//   XDP_ATTACHED_DRV  = 1 — driver (native) mode
-//   XDP_ATTACHED_SKB  = 2 — generic (skb) mode
-//   XDP_ATTACHED_HW   = 3 — hw offload
+//
+//	XDP_ATTACHED_NONE = 0 — no prog attached
+//	XDP_ATTACHED_DRV  = 1 — driver (native) mode
+//	XDP_ATTACHED_SKB  = 2 — generic (skb) mode
+//	XDP_ATTACHED_HW   = 3 — hw offload
 func xdpAttachModeMatches(ifindex int, wantGeneric bool) bool {
 	l, err := netlink.LinkByIndex(ifindex)
 	if err != nil || l == nil {

@@ -32,6 +32,7 @@ type CompileResult struct {
 	AppNames    map[uint16]string // app_id -> application name (for structured logging)
 	PolicySets  int               // number of policy sets created
 	FilterIDs   map[string]uint32 // "inet:name" or "inet6:name" -> filter_id
+	FilterSpans map[string]FilterCounterSpan
 
 	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot
 
@@ -148,6 +149,7 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool) (*Compile
 		implicitSets:        make(map[string]uint32),
 		nextNATCounterID:    1, // 0 = no counter
 		NATCounterIDs:       make(map[string]uint16),
+		FilterSpans:         make(map[string]FilterCounterSpan),
 		Lo0FilterV4:         0xFFFFFFFF, // sentinel: no lo0 filter
 		Lo0FilterV6:         0xFFFFFFFF,
 		ifCache:             make(map[string]*net.Interface),
@@ -401,6 +403,7 @@ func (m *Manager) Compile(cfg *config.Config) (*CompileResult, error) {
 		}
 	}
 	m.lastCompile = result
+	m.recordApplyResult(ApplyResultFromCompileResult(result))
 	return result, nil
 }
 

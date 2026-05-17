@@ -20,11 +20,14 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
 var _ dataplane.DataPlane = (*Manager)(nil)
+var _ dataplane.ConfigSink = (*Manager)(nil)
+var _ dataplane.RuntimeDataPlane = (*Manager)(nil)
 
 var ErrPolicySchedulerProtocolIncompatible = errors.New("userspace policy scheduler snapshot protocol incompatible")
 
@@ -69,6 +72,7 @@ type Manager struct {
 	syncCancel            context.CancelFunc
 	lastStatus            ProcessStatus
 	lastSnapshot          *ConfigSnapshot
+	lastApply             *dataplane.ApplyResult
 	policySchedulerActive map[string]bool
 	haGroups              map[int]HAGroupStatus
 	lastIngressIfaces     []uint32
@@ -157,6 +161,169 @@ func New() *Manager {
 		configuredMode: ModeUserspaceCompat,
 		haGroups:       make(map[int]HAGroupStatus),
 	}
+}
+
+func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*dataplane.ApplyResult, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	if _, err := m.Compile(cfg); err != nil {
+		return nil, err
+	}
+	return m.LastApplyResult(), nil
+}
+
+func (m *Manager) LastApplyResult() *dataplane.ApplyResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastApply.Clone()
+}
+
+func (m *Manager) RuntimeSessionDeltaSource() dpruntime.SessionDeltaSource {
+	return runtimeSessionDeltaSource{manager: m}
+}
+
+func (m *Manager) Start(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return m.Load()
+}
+
+func (m *Manager) Link() dataplane.LinkController {
+	return userspaceLinkController{manager: m}
+}
+
+func (m *Manager) HA() dataplane.HAController {
+	return userspaceHAController{manager: m}
+}
+
+func (m *Manager) Sessions() dataplane.SessionStore {
+	return userspaceSessionStore{
+		SessionStore: dataplane.NewDataPlaneSessionStore(m),
+		source:       m.RuntimeSessionDeltaSource(),
+	}
+}
+
+func (m *Manager) SessionDeltas() dpruntime.SessionDeltaSource {
+	return m.RuntimeSessionDeltaSource()
+}
+
+func (m *Manager) Telemetry() dataplane.Telemetry {
+	return dataplane.NewDataPlaneTelemetry(m)
+}
+
+type userspaceLinkController struct {
+	manager *Manager
+}
+
+func (c userspaceLinkController) SetDeferWorkers(v bool) {
+	if c.manager != nil {
+		c.manager.SetDeferWorkers(v)
+	}
+}
+
+func (c userspaceLinkController) PrepareLinkCycle() {
+	if c.manager != nil {
+		c.manager.PrepareLinkCycle()
+	}
+}
+
+func (c userspaceLinkController) NotifyLinkCycle() {
+	if c.manager != nil {
+		c.manager.NotifyLinkCycle()
+	}
+}
+
+type userspaceHAOps interface {
+	UpdateRGActive(int, bool) error
+	UpdateHAWatchdog(int, uint64) error
+	UpdateFabricFwd(dataplane.FabricFwdInfo) error
+	UpdateFabricFwd1(dataplane.FabricFwdInfo) error
+	SyncFabricState()
+}
+
+type userspaceHAController struct {
+	manager userspaceHAOps
+}
+
+func (c userspaceHAController) SetRGActive(ctx context.Context, rgID int, active bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	return c.manager.UpdateRGActive(rgID, active)
+}
+
+func (c userspaceHAController) SetHAWatchdog(ctx context.Context, rgID int, timestamp uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	return c.manager.UpdateHAWatchdog(rgID, timestamp)
+}
+
+func (c userspaceHAController) SetFabricForwarding(ctx context.Context, id dataplane.FabricID, info dataplane.FabricFwdInfo) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	var err error
+	if id == 1 {
+		err = c.manager.UpdateFabricFwd1(info)
+	} else {
+		err = c.manager.UpdateFabricFwd(info)
+	}
+	if err != nil {
+		return err
+	}
+	// The map update is committed at this point. Always push helper fabric
+	// state after a successful fabric0 or fabric1 update so RuntimeDataPlane.HA
+	// preserves the same "fresh helper view" contract for every fabric slot.
+	c.manager.SyncFabricState()
+	return nil
+}
+
+func (c userspaceHAController) SyncFabricState(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	c.manager.SyncFabricState()
+	return nil
+}
+
+type userspaceSessionStore struct {
+	dataplane.SessionStore
+	source dpruntime.SessionDeltaSource
+}
+
+func (s userspaceSessionStore) SessionDeltas() dpruntime.SessionDeltaSource {
+	return s.source
+}
+
+func (m *Manager) recordApplyResultLocked(result *dataplane.ApplyResult, caps UserspaceCapabilities, generation uint64) {
+	if result == nil {
+		return
+	}
+	result.Capabilities = dataplane.Capabilities{
+		ForwardingSupported: caps.ForwardingSupported,
+		UnsupportedReasons:  append([]string(nil), caps.UnsupportedReasons...),
+	}
+	result.Generation = generation
+	m.lastApply = result.Clone()
 }
 
 func copyPolicySchedulerActiveState(activeState map[string]bool) map[string]bool {
@@ -349,6 +516,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		}
 		m.lastSnapshot = snap
 		m.cfg = ucfg
+		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 		slog.Info(
 			"userspace: deferring snapshot publish during XSK startup",
 			"generation", snap.Generation,
@@ -421,6 +589,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	}
 	m.ensureStatusLoopLocked()
 	m.cfg = ucfg
+	m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 	return result, nil
 }
 

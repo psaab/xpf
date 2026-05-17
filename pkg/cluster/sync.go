@@ -551,64 +551,25 @@ func (s *SessionSync) reconcileStaleSessions() {
 		return true
 	}
 	var deleted int
-	var staleV4 []dataplane.SessionKey
-	v4IterStart := time.Now()
-	s.dp.IterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
-		if val.IsReverse != 0 {
-			return true
-		}
-		if shouldSyncAtBulkStart(val.IngressZone) {
-			return true
-		}
-		if _, ok := recvV4[key]; !ok {
-			staleV4 = append(staleV4, key)
-		}
-		return true
+	store := dataplane.NewDataPlaneSessionStore(s.dp)
+	result, err := store.ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput{
+		ReceivedV4:     recvV4,
+		ReceivedV6:     recvV6,
+		ShouldSyncZone: shouldSyncAtBulkStart,
+		DeleteReason:   dataplane.DeleteReasonClusterStale,
 	})
-	slog.Info("cluster sync: reconcile stale sessions iterated v4", "stale", len(staleV4), "elapsed", time.Since(v4IterStart))
-	v4DeleteStart := time.Now()
-	for _, key := range staleV4 {
-		if val, err := s.dp.GetSessionV4(key); err == nil {
-			if val.ReverseKey.Protocol != 0 {
-				s.dp.DeleteSession(val.ReverseKey)
-			}
-			if val.Flags&dataplane.SessFlagSNAT != 0 && val.Flags&dataplane.SessFlagStaticNAT == 0 {
-				s.dp.DeleteDNATEntry(dataplane.DNATKey{Protocol: key.Protocol, DstIP: val.NATSrcIP, DstPort: val.NATSrcPort})
-			}
-		}
-		s.dp.DeleteSession(key)
-		deleted++
+	deleted = result.DeletedV4 + result.DeletedV6
+	if err != nil {
+		slog.Warn("cluster sync: reconcile stale sessions failed", "err", err)
+		s.stats.Errors.Add(1)
 	}
-	slog.Info("cluster sync: reconcile stale sessions deleted v4", "deleted", len(staleV4), "elapsed", time.Since(v4DeleteStart))
-	var staleV6 []dataplane.SessionKeyV6
-	v6IterStart := time.Now()
-	s.dp.IterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
-		if val.IsReverse != 0 {
-			return true
-		}
-		if shouldSyncAtBulkStart(val.IngressZone) {
-			return true
-		}
-		if _, ok := recvV6[key]; !ok {
-			staleV6 = append(staleV6, key)
-		}
-		return true
-	})
-	slog.Info("cluster sync: reconcile stale sessions iterated v6", "stale", len(staleV6), "elapsed", time.Since(v6IterStart))
-	v6DeleteStart := time.Now()
-	for _, key := range staleV6 {
-		if val, err := s.dp.GetSessionV6(key); err == nil {
-			if val.ReverseKey.Protocol != 0 {
-				s.dp.DeleteSessionV6(val.ReverseKey)
-			}
-			if val.Flags&dataplane.SessFlagSNAT != 0 && val.Flags&dataplane.SessFlagStaticNAT == 0 {
-				s.dp.DeleteDNATEntryV6(dataplane.DNATKeyV6{Protocol: key.Protocol, DstIP: val.NATSrcIP, DstPort: val.NATSrcPort})
-			}
-		}
-		s.dp.DeleteSessionV6(key)
-		deleted++
-	}
-	slog.Info("cluster sync: reconcile stale sessions deleted v6", "deleted", len(staleV6), "elapsed", time.Since(v6DeleteStart))
+	slog.Info(
+		"cluster sync: reconcile stale sessions applied",
+		"stale_v4", result.StaleV4,
+		"stale_v6", result.StaleV6,
+		"deleted_v4", result.DeletedV4,
+		"deleted_v6", result.DeletedV6,
+	)
 	if deleted > 0 {
 		slog.Info("cluster sync: reconciled stale sessions", "deleted", deleted)
 	}
