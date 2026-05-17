@@ -1505,6 +1505,7 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp dat
 	for _, zpp := range cfg.Security.Policies {
 		fromZone := zpp.FromZone
 		toZone := zpp.ToZone
+		// Zone-pair compile output normalizes nil entries out of zpp.Policies.
 		for i, rule := range zpp.Policies {
 			policyID := policyCounterID(policySetID, i)
 			ctrs, err := dp.ReadPolicyCounters(policyID)

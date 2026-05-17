@@ -775,3 +775,7 @@
   - **Action**: Applied final review nits: reverted unintended zone-policy nil-contract change in Prometheus policy counter loop and documented why global policy IDs use the post-zone-set offset in metrics tests.
   - **File(s)**: `pkg/api/metrics.go`, `pkg/api/metrics_test.go`, `_Log.md`
   - **Validation**: `gofmt -w pkg/api/metrics.go pkg/api/metrics_test.go`; `go test ./pkg/api ./pkg/grpcapi ./pkg/dataplane/userspace ./pkg/config`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T22:00:00Z
+  - **Action**: Added explicit invariant note in `collectPolicyCounters` clarifying why zone-pair policy loop dereferences `rule.Name` without a nil guard while global policy loop retains defensive nil filtering.
+  - **File(s)**: `pkg/api/metrics.go`, `_Log.md`
