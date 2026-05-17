@@ -28,6 +28,13 @@ removal. #1380 is a Phase 5 CLI/observability cleanup blocker: it must land
 before BPF-map-oriented operator surfaces disappear, but it does not block the
 Phase 4 forwarding-source removal gate by itself.
 
+## Phase 1/2 Smoke Gates
+
+Use [smoke-gates.md](smoke-gates.md) for the repeatable Phase 1/2 operator
+checklist: CoS-off IPv4/IPv6 push and reverse, screen/flood baseline,
+CoS-on 5200..5211 class sweeps, 6200..6211 TCP echo probes, and the
+existing HA Makefile gates.
+
 ## Shared Non-Goals
 
 - Do not remove `bpf/` in these blocker implementation PRs; that remains #1373
