@@ -759,4 +759,4 @@
 - **Timestamp**: 2026-05-17T20:25:00Z
   - **Action**: PR #1407 Codex round-1 follow-up docs correction — replaced a non-existent scheduler test reference in the #1378 plan with the implemented delete/re-add counter lifecycle regression (`hit_counters_reset_after_rule_absent_then_readded`) to match actual coverage.
   - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/plan-1378-policy-schedulers.md`, `_Log.md`
-  - **Validation**: `go test ./pkg/config ./pkg/dataplane/userspace ./pkg/api ./pkg/grpcapi ./pkg/cli`; `cargo test --manifest-path /home/runner/work/xpf/xpf/userspace-dp/Cargo.toml policy:: -- --nocapture` (blocked: missing libelf headers/pkg-config in runner)
+  - **Validation**: `go test ./pkg/config ./pkg/dataplane/userspace ./pkg/api ./pkg/grpcapi ./pkg/cli`; `cargo test --manifest-path userspace-dp/Cargo.toml policy:: -- --nocapture` (blocked: missing libelf headers/pkg-config in runner)
