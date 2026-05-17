@@ -1923,6 +1923,113 @@ func TestBuildSnapshotIncludesThreeColorPolicerSchemaWhileGateClosed(t *testing.
 	}
 }
 
+func TestDeriveUserspaceCapabilitiesKeepsPortMirroringFailClosed(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
+		Instances: map[string]*config.PortMirrorInstance{
+			"span1": {
+				Name:      "span1",
+				InputRate: 10,
+				Input:     []string{"ge-0/0/0.0"},
+				Output:    "ge-0/0/1.0",
+			},
+		},
+	}
+
+	caps := deriveUserspaceCapabilities(cfg)
+	if caps.ForwardingSupported {
+		t.Fatal("ForwardingSupported = true, want false until mirror snapshot and runtime clone/inject are both wired")
+	}
+	found := false
+	for _, r := range caps.UnsupportedReasons {
+		if r == "port mirroring is not implemented in the userspace dataplane" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected port mirroring unsupported reason, got: %+v", caps.UnsupportedReasons)
+	}
+}
+
+func TestBuildMirrorConfigSnapshots(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
+		Instances: map[string]*config.PortMirrorInstance{
+			"span1": {
+				Name:      "span1",
+				InputRate: 50,
+				Input:     []string{"ge-0/0/0.0"},
+				Output:    "ge-0/0/1.0",
+			},
+		},
+	}
+	interfaces := []InterfaceSnapshot{
+		{Name: "ge-0/0/0.0", LinuxName: "ge-0-0-0.0", Ifindex: 11},
+		{Name: "ge-0/0/1.0", LinuxName: "ge-0-0-1.0", Ifindex: 22},
+	}
+
+	got, err := buildMirrorConfigSnapshots(cfg, interfaces)
+	if err != nil {
+		t.Fatalf("buildMirrorConfigSnapshots: %v", err)
+	}
+	want := []MirrorConfigSnapshot{{IngressIfindex: 11, OutputIfindex: 22, Rate: 50}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mirror snapshots = %+v, want %+v", got, want)
+	}
+}
+
+func TestBuildMirrorConfigSnapshotsRejectsDuplicateIngressIfindex(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
+		Instances: map[string]*config.PortMirrorInstance{
+			"span1": {
+				Name:   "span1",
+				Input:  []string{"ge-0/0/0.0"},
+				Output: "ge-0/0/1.0",
+			},
+			"span2": {
+				Name:   "span2",
+				Input:  []string{"ge-0-0-0.0"},
+				Output: "ge-0/0/1.0",
+			},
+		},
+	}
+	interfaces := []InterfaceSnapshot{
+		{Name: "ge-0/0/0.0", LinuxName: "ge-0-0-0.0", Ifindex: 11},
+		{Name: "ge-0/0/1.0", LinuxName: "ge-0-0-1.0", Ifindex: 22},
+	}
+
+	_, err := buildMirrorConfigSnapshots(cfg, interfaces)
+	if err == nil || !strings.Contains(err.Error(), "duplicate port-mirroring ingress ifindex 11") {
+		t.Fatalf("error = %v, want duplicate ingress ifindex rejection", err)
+	}
+}
+
+func TestBuildMirrorConfigSnapshotsSkipsMissingOutputIfindex(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
+		Instances: map[string]*config.PortMirrorInstance{
+			"span1": {
+				Name:   "span1",
+				Input:  []string{"ge-0/0/0.0"},
+				Output: "ge-0/0/9.0",
+			},
+		},
+	}
+	interfaces := []InterfaceSnapshot{
+		{Name: "ge-0/0/0.0", LinuxName: "ge-0-0-0.0", Ifindex: 11},
+		{Name: "ge-0/0/9.0", LinuxName: "ge-0-0-9.0", Ifindex: 0},
+	}
+
+	got, err := buildMirrorConfigSnapshots(cfg, interfaces)
+	if err != nil {
+		t.Fatalf("buildMirrorConfigSnapshots: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("mirror snapshots = %+v, want missing output ifindex skipped", got)
+	}
+}
+
 func TestDeriveUserspaceCapabilitiesAllowsFirewallFilters(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
