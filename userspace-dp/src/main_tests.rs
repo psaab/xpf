@@ -784,6 +784,11 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         tx_shared_recycle_unknown_slot_drops: 14,
         tx_submit_error_drops: 10,
         pending_tx_local_overflow_drops: 11,
+        mirrored_packets: 32,
+        mirrored_bytes: 33,
+        mirror_drops_no_frame: 34,
+        mirror_drops_no_binding: 35,
+        mirror_drops_queue_full: 36,
         // #812: populated so wire-key assertions below also cover
         // the new TX submit-latency fields.
         tx_submit_latency_hist: vec![13, 14, 15],
@@ -835,6 +840,11 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         "tx_shared_recycle_unknown_slot_drops",
         "tx_submit_error_drops",
         "pending_tx_local_overflow_drops",
+        "mirrored_packets",
+        "mirrored_bytes",
+        "mirror_drops_no_frame",
+        "mirror_drops_no_binding",
+        "mirror_drops_queue_full",
         // #812: new wire keys — absence from BindingCountersSnapshot
         // JSON breaks the Go-side step1-capture consumer.
         "tx_submit_latency_hist",
@@ -1079,6 +1089,11 @@ fn tx_latency_hist_serialization_roundtrip() {
         tx_shared_recycle_unknown_slot_drops: 0,
         tx_submit_error_drops: 0,
         pending_tx_local_overflow_drops: 0,
+        mirrored_packets: 0,
+        mirrored_bytes: 0,
+        mirror_drops_no_frame: 0,
+        mirror_drops_no_binding: 0,
+        mirror_drops_queue_full: 0,
         // Hand-built plausible histogram — bucket 0 heavy,
         // tail in buckets 6-7, saturation bucket 15 empty.
         tx_submit_latency_hist: vec![9001, 123, 45, 30, 12, 4, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0],

@@ -54,10 +54,17 @@ pub(in crate::afxdp) struct ForwardingState {
     #[allow(dead_code)]
     pub(in crate::afxdp) gre_acceleration: bool,
     pub(in crate::afxdp) flow_export_config: Option<crate::flowexport::FlowExportConfig>,
+    pub(in crate::afxdp) mirror_configs: FastMap<i32, MirrorRuntimeConfig>,
     pub(in crate::afxdp) tcp_mss_all_tcp: u16,
     pub(in crate::afxdp) tcp_mss_ipsec_vpn: u16,
     pub(in crate::afxdp) tcp_mss_gre_in: u16,
     pub(in crate::afxdp) tcp_mss_gre_out: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct MirrorRuntimeConfig {
+    pub(in crate::afxdp) output_ifindex: i32,
+    pub(in crate::afxdp) rate: u32,
 }
 
 #[derive(Clone, Copy, Debug)]

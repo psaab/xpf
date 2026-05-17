@@ -366,6 +366,20 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// non-zero value usually indicates a frame-building bug upstream
     /// or a legitimate oversize packet. Subset of `tx_errors`.
     pub(super) tx_submit_error_drops: AtomicU64,
+    /// #1376: ingress mirror clone packets successfully admitted to a
+    /// mirror output binding. Written by the ingress binding's worker.
+    pub(super) mirrored_packets: AtomicU64,
+    /// #1376: full L2 bytes copied into admitted mirror clones.
+    pub(super) mirrored_bytes: AtomicU64,
+    /// #1376: mirror clone dropped because the output binding did not
+    /// have enough reserved TX frames available.
+    pub(super) mirror_drops_no_frame: AtomicU64,
+    /// #1376: mirror clone dropped because the output ifindex has no
+    /// live binding on this worker.
+    pub(super) mirror_drops_no_binding: AtomicU64,
+    /// #1376: mirror clone dropped because the output binding already
+    /// had mirror/primary TX backlog. Mirrors are lossy under pressure.
+    pub(super) mirror_drops_queue_full: AtomicU64,
     /// #710: packets dropped in `apply_worker_shaped_tx_requests`
     /// because the worker could not locate any binding for the
     /// request's egress_ifindex. Happens when a cross-worker CoS
@@ -559,6 +573,11 @@ impl BindingLiveState {
             redirect_inbox_overflow_drops: AtomicU64::new(0),
             pending_tx_local_overflow_drops: AtomicU64::new(0),
             tx_submit_error_drops: AtomicU64::new(0),
+            mirrored_packets: AtomicU64::new(0),
+            mirrored_bytes: AtomicU64::new(0),
+            mirror_drops_no_frame: AtomicU64::new(0),
+            mirror_drops_no_binding: AtomicU64::new(0),
+            mirror_drops_queue_full: AtomicU64::new(0),
             no_owner_binding_drops: AtomicU64::new(0),
             // #709 / #746: owner-profile telemetry, split by writer
             // into two cacheline-isolated groups. Histograms are zero-
@@ -871,6 +890,11 @@ impl BindingLiveState {
                 .pending_tx_local_overflow_drops
                 .load(Ordering::Relaxed),
             tx_submit_error_drops: self.tx_submit_error_drops.load(Ordering::Relaxed),
+            mirrored_packets: self.mirrored_packets.load(Ordering::Relaxed),
+            mirrored_bytes: self.mirrored_bytes.load(Ordering::Relaxed),
+            mirror_drops_no_frame: self.mirror_drops_no_frame.load(Ordering::Relaxed),
+            mirror_drops_no_binding: self.mirror_drops_no_binding.load(Ordering::Relaxed),
+            mirror_drops_queue_full: self.mirror_drops_queue_full.load(Ordering::Relaxed),
             post_drain_backup_bytes: self
                 .owner_profile_owner
                 .post_drain_backup_bytes

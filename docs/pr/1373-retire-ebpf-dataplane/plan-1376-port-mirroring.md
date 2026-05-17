@@ -49,11 +49,27 @@ that binding.
 - Mirror config is snapshot state and is republished on config changes.
 - Runtime sampling counters are local per binding and reset on worker restart or
   failover.
-- Counters exposed through Rust status, Go protocol, CLI, and Prometheus:
+- Counters exposed through Rust status, Go protocol, and CLI summary:
   `mirrored_packets`, `mirrored_bytes`, `mirror_drops_no_frame`,
   `mirror_drops_no_binding`, and `mirror_drops_queue_full`.
 - On failover, the new active node mirrors according to the current config; no
   mirror clone state is synchronized.
+
+## Current Runtime Slice
+
+The 2026-05-17 runtime slice wires mirror configs into `ForwardingState` and
+mirrors packets that enter the pending-forward TX path while the original frame
+bytes are still available. It samples per ingress binding, copies the full L2
+frame into an output binding TX frame, queues the clone as a prepared TX request,
+and records admitted/no-frame/no-binding/queue-full counters. The clone path
+keeps a TX-frame reserve and a small pending-backlog limit so mirror pressure is
+lossy and does not become a primary forwarding dependency.
+
+The userspace capability gate remains in place for now. This slice does not yet
+claim complete port-mirroring parity for every ingress disposition or for
+prebuilt/deferred transmit paths, and it still needs integration evidence with
+tcpdump on the mirror output plus primary forwarding survival under mirror
+pressure.
 
 ## Risks
 
@@ -71,13 +87,16 @@ that binding.
 ## Exact Tests
 
 - Cargo: `mirror::sampling_rate_correctness`.
-- Cargo: `mirror::cross_binding_inject`.
+- Cargo: `mirror::cross_binding_inject_preserves_full_frame`.
 - Cargo: `mirror::out_of_frame_drops_increment_counter`.
 - Cargo: `mirror::missing_destination_binding_drop_counter`.
 - Cargo: `mirror::queue_full_drop_counter`.
 - Cargo: `mirror::duplicate_ingress_ifindex_rejected`.
 - Cargo: `mirror::ipv4_ipv6_full_frame_preservation`.
 - Go: userspace snapshot round-trip for mirror config.
+- Go/Rust: status/counter wire round-trips include
+  `mirrored_packets`, `mirrored_bytes`, `mirror_drops_no_frame`,
+  `mirror_drops_no_binding`, and `mirror_drops_queue_full`.
 - Go: commit validation rejects duplicate ingress mirror entries and logs/skips
   nonexistent output ifindex consistently with current compiler behavior.
 - Go: `deriveUserspaceCapabilities()` admits port-mirroring configs only after

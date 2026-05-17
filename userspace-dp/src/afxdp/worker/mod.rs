@@ -138,6 +138,9 @@ pub(crate) struct BindingWorker {
     /// `WorkerFlowCacheState`. Field semantics unchanged; access
     /// via `binding.flow.flow_cache` and `binding.flow.flow_cache_session_touch`.
     pub(crate) flow: WorkerFlowCacheState,
+    /// #1376: per-worker/per-binding mirror sampler. Reset on worker
+    /// restart and intentionally not synchronized across workers.
+    pub(crate) mirror_sample_counter: u64,
     /// #959 Phase 8: 3 binding registration / identity fields
     /// (bind_time_ns, bind_mode, xsk_rx_confirmed) extracted into
     /// `WorkerBindMeta`. Field semantics unchanged; access via
@@ -421,6 +424,7 @@ impl BindingWorker {
                 flow_cache: FlowCache::new(),
                 flow_cache_session_touch: 0,
             },
+            mirror_sample_counter: 0,
             bind_meta: WorkerBindMeta {
                 bind_time_ns: {
                     let mut ts = libc::timespec {
@@ -548,6 +552,116 @@ impl BindingWorker {
                 flow_cache: FlowCache::new(),
                 flow_cache_session_touch: 0,
             },
+            mirror_sample_counter: 0,
+            bind_meta: WorkerBindMeta {
+                bind_time_ns: init_now,
+                bind_mode: XskBindMode::Copy,
+                xsk_rx_confirmed: false,
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::afxdp) fn new_for_mirror_test(
+        slot: u32,
+        worker_id: u32,
+        ifindex: i32,
+        queue_id: u32,
+    ) -> Self {
+        let ring_entries = 128;
+        let total_frames = 256;
+        let live = Arc::new(BindingLiveState::new());
+        live.set_bound(-1);
+        live.set_bind_mode(XskBindMode::Copy);
+        live.set_socket_binding(ifindex, queue_id, 0);
+        live.set_max_pending_tx(pending_tx_capacity(ring_entries));
+        live.umem_total_frames
+            .store(total_frames, std::sync::atomic::Ordering::Relaxed);
+        live.tx_ring_capacity
+            .store(ring_entries, std::sync::atomic::Ordering::Relaxed);
+        let init_now = monotonic_nanos();
+        Self {
+            slot,
+            queue_id,
+            worker_id,
+            interface: Arc::<str>::from("mirror-test"),
+            ifindex,
+            live,
+            user: User::new_for_test(-1),
+            xsk: WorkerXskRings {
+                device: crate::xsk_ffi::DeviceQueue::new_for_test(-1, ring_entries),
+                rx: crate::xsk_ffi::RingRx::new_for_test(-1, ring_entries),
+                tx: crate::xsk_ffi::RingTx::new_for_test(-1, ring_entries),
+            },
+            umem: WorkerUmem::new_for_test(total_frames).expect("test worker umem"),
+            tx_pipeline: WorkerTxPipeline {
+                free_tx_frames: (0..total_frames)
+                    .map(|idx| (idx as u64) << UMEM_FRAME_SHIFT)
+                    .collect(),
+                pending_tx_prepared: VecDeque::new(),
+                pending_tx_local: VecDeque::new(),
+                max_pending_tx: pending_tx_capacity(ring_entries),
+                outstanding_tx: 0,
+                pending_fill_frames: VecDeque::new(),
+                in_flight_prepared_recycles: FastMap::default(),
+                tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; total_frames as usize].into_boxed_slice(),
+            },
+            cos: WorkerCos {
+                cos_fast_interfaces: FastMap::default(),
+                cos_interfaces: FastMap::default(),
+                cos_interface_order: Vec::new(),
+                cos_interface_rr: 0,
+                cos_nonempty_interfaces: 0,
+                cos_queue_lease_acquire_v8_calls: 0,
+                cos_queue_lease_acquire_v8_granted_bytes: 0,
+            },
+            scratch: WorkerScratch {
+                scratch_recycle: Vec::with_capacity(RX_BATCH_SIZE as usize),
+                scratch_forwards: Vec::with_capacity(RX_BATCH_SIZE as usize),
+                scratch_fill: Vec::with_capacity(FILL_BATCH_SIZE),
+                scratch_prepared_tx: Vec::with_capacity(TX_BATCH_SIZE),
+                scratch_local_tx: Vec::with_capacity(TX_BATCH_SIZE),
+                scratch_exact_prepared_tx: Vec::with_capacity(TX_BATCH_SIZE),
+                scratch_exact_local_tx: Vec::with_capacity(TX_BATCH_SIZE),
+                scratch_completed_offsets: Vec::with_capacity(ring_entries as usize),
+                scratch_post_recycles: Vec::with_capacity(RX_BATCH_SIZE as usize),
+                scratch_cross_binding_tx: Vec::with_capacity(RX_BATCH_SIZE as usize),
+                scratch_rst_teardowns: Vec::with_capacity(16),
+            },
+            pending_neigh: VecDeque::new(),
+            bpf_maps: WorkerBpfMaps {
+                heartbeat_map_fd: -1,
+                session_map_fd: -1,
+                conntrack_v4_fd: -1,
+                conntrack_v6_fd: -1,
+            },
+            timers: WorkerTimers {
+                last_heartbeat_update_ns: init_now,
+                debug_state_counter: 0,
+                last_idle_debug_publish_ns: init_now,
+                last_rx_wake_ns: init_now,
+                last_tx_wake_ns: init_now,
+                empty_rx_polls: 0,
+            },
+            last_learned_neighbor: None,
+            telemetry: WorkerTelemetry::default(),
+            tx_counters: WorkerTxCounters {
+                pending_direct_tx_packets: 0,
+                pending_copy_tx_packets: 0,
+                pending_in_place_tx_packets: 0,
+                pending_in_place_vlan_push_desc_packets: 0,
+                pending_in_place_vlan_pop_desc_packets: 0,
+                pending_in_place_vlan_push_no_headroom_packets: 0,
+                pending_in_place_l2_memmove_fallback_packets: 0,
+                pending_direct_tx_no_frame_fallback_packets: 0,
+                pending_direct_tx_build_fallback_packets: 0,
+                pending_direct_tx_disallowed_fallback_packets: 0,
+            },
+            flow: WorkerFlowCacheState {
+                flow_cache: FlowCache::new(),
+                flow_cache_session_touch: 0,
+            },
+            mirror_sample_counter: 0,
             bind_meta: WorkerBindMeta {
                 bind_time_ns: init_now,
                 bind_mode: XskBindMode::Copy,
@@ -2280,6 +2394,11 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) redirect_inbox_overflow_drops: u64,
     pub(crate) pending_tx_local_overflow_drops: u64,
     pub(crate) tx_submit_error_drops: u64,
+    pub(crate) mirrored_packets: u64,
+    pub(crate) mirrored_bytes: u64,
+    pub(crate) mirror_drops_no_frame: u64,
+    pub(crate) mirror_drops_no_binding: u64,
+    pub(crate) mirror_drops_queue_full: u64,
     // #760 triage: surfaced on BindingStatus so operators can
     // compare binding-level vs per-queue drain accounting.
     pub(crate) post_drain_backup_bytes: u64,

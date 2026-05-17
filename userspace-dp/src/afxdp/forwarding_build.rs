@@ -423,6 +423,18 @@ pub(super) fn build_forwarding_state_with_policy_counters(
             }
         })
     });
+    for mirror in &snapshot.mirror_configs {
+        if mirror.ingress_ifindex <= 0 || mirror.output_ifindex <= 0 {
+            continue;
+        }
+        state.mirror_configs.insert(
+            mirror.ingress_ifindex,
+            MirrorRuntimeConfig {
+                output_ifindex: mirror.output_ifindex,
+                rate: mirror.rate,
+            },
+        );
+    }
 
     // Add static NAT external IPs as local delivery targets so inbound
     // traffic destined to external IPs is recognized by the firewall.

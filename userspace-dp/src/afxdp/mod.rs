@@ -77,6 +77,8 @@ mod icmp;
 mod icmp_embed;
 #[path = "ethernet.rs"]
 mod ethernet;
+#[path = "mirror.rs"]
+mod mirror;
 #[path = "neighbor.rs"]
 mod neighbor;
 #[path = "parser.rs"]
@@ -141,6 +143,7 @@ use self::icmp_embed::{
     build_nat_reversed_icmp_error_v4, build_nat_reversed_icmp_error_v6,
     finalize_embedded_icmp_resolution, try_embedded_icmp_nat_match,
 };
+use self::mirror::*;
 use self::neighbor::*;
 pub use self::neighbor::{neighbor_state_usable_str, parse_mac_str};
 pub(crate) use self::rst::remove_kernel_rst_suppression;

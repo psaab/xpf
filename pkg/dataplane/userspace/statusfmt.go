@@ -71,6 +71,11 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var bindingLifetimeCoSQueueDrops uint64
 	var txSharedRecycleUnknownSlotDrops uint64
 	var txCompletions uint64
+	var mirroredPackets uint64
+	var mirroredBytes uint64
+	var mirrorDropsNoFrame uint64
+	var mirrorDropsNoBinding uint64
+	var mirrorDropsQueueFull uint64
 	var currentRuntimeCoSFlowShareDrops uint64
 	var currentRuntimeCoSBufferDrops uint64
 	var cosAdmissionEcnMarked uint64
@@ -145,6 +150,11 @@ func FormatStatusSummary(status ProcessStatus) string {
 		bindingLifetimeCoSQueueDrops = saturatingAddU64(bindingLifetimeCoSQueueDrops, binding.DbgCoSQueueOverflow)
 		txSharedRecycleUnknownSlotDrops += binding.TXSharedRecycleUnknownSlotDrops
 		txCompletions += binding.TXCompletions
+		mirroredPackets += binding.MirroredPackets
+		mirroredBytes += binding.MirroredBytes
+		mirrorDropsNoFrame += binding.MirrorDropsNoFrame
+		mirrorDropsNoBinding += binding.MirrorDropsNoBinding
+		mirrorDropsQueueFull += binding.MirrorDropsQueueFull
 		kernelRXDropped += binding.KernelRXDropped
 		kernelRXInvalidDescs += binding.KernelRXInvalidDescs
 		directTXPackets += binding.DirectTXPackets
@@ -316,6 +326,9 @@ func FormatStatusSummary(status ProcessStatus) string {
 	}
 	fmt.Fprintf(&b, "  TX shared recycle unk:     %d\n", txSharedRecycleUnknownSlotDrops)
 	fmt.Fprintf(&b, "  TX completions:            %d\n", txCompletions)
+	fmt.Fprintf(&b, "  Mirrored packets:          %d\n", mirroredPackets)
+	fmt.Fprintf(&b, "  Mirrored bytes:            %d\n", mirroredBytes)
+	fmt.Fprintf(&b, "  Mirror drops:              no-frame=%d no-binding=%d queue-full=%d\n", mirrorDropsNoFrame, mirrorDropsNoBinding, mirrorDropsQueueFull)
 	fmt.Fprintf(&b, "  Kernel RX dropped:         %d\n", kernelRXDropped)
 	fmt.Fprintf(&b, "  Kernel RX invalid descs:   %d\n", kernelRXInvalidDescs)
 	fmt.Fprintf(&b, "  Direct TX packets:         %d\n", directTXPackets)

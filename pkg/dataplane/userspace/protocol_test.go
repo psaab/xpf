@@ -29,6 +29,14 @@ var tx_completion_ring_wire_keys = []string{
 	"tx_completion_ring_available_max",
 }
 
+var mirror_counter_wire_keys = []string{
+	"mirrored_packets",
+	"mirrored_bytes",
+	"mirror_drops_no_frame",
+	"mirror_drops_no_binding",
+	"mirror_drops_queue_full",
+}
+
 func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	in := BindingStatus{
 		WorkerID:                        3,
@@ -119,6 +127,74 @@ func TestConfigSnapshotMirrorConfigsRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(back.MirrorConfigs, in.MirrorConfigs) {
 		t.Fatalf("mirror config round-trip mismatch: got %+v, want %+v", back.MirrorConfigs, in.MirrorConfigs)
+	}
+}
+
+func TestBindingStatusMirrorCountersRoundTrip(t *testing.T) {
+	in := BindingStatus{
+		WorkerID:             3,
+		Ifindex:              11,
+		QueueID:              2,
+		MirroredPackets:      5,
+		MirroredBytes:        640,
+		MirrorDropsNoFrame:   1,
+		MirrorDropsNoBinding: 2,
+		MirrorDropsQueueFull: 3,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range mirror_counter_wire_keys {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from BindingStatus JSON: %s", key, string(raw))
+		}
+	}
+
+	var back BindingStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal BindingStatus: %v", err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("mirror counters round-trip mismatch: got %+v, want %+v", back, in)
+	}
+}
+
+func TestBindingCountersSnapshotMirrorCountersRoundTrip(t *testing.T) {
+	in := BindingCountersSnapshot{
+		WorkerID:             3,
+		Ifindex:              11,
+		QueueID:              2,
+		MirroredPackets:      5,
+		MirroredBytes:        640,
+		MirrorDropsNoFrame:   1,
+		MirrorDropsNoBinding: 2,
+		MirrorDropsQueueFull: 3,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range mirror_counter_wire_keys {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from BindingCountersSnapshot JSON: %s", key, string(raw))
+		}
+	}
+
+	var back BindingCountersSnapshot
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal BindingCountersSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("mirror counters round-trip mismatch: got %+v, want %+v", back, in)
 	}
 }
 

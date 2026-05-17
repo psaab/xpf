@@ -1222,6 +1222,11 @@ impl Coordinator {
                 binding.redirect_inbox_overflow_drops = snap.redirect_inbox_overflow_drops;
                 binding.pending_tx_local_overflow_drops = snap.pending_tx_local_overflow_drops;
                 binding.tx_submit_error_drops = snap.tx_submit_error_drops;
+                binding.mirrored_packets = snap.mirrored_packets;
+                binding.mirrored_bytes = snap.mirrored_bytes;
+                binding.mirror_drops_no_frame = snap.mirror_drops_no_frame;
+                binding.mirror_drops_no_binding = snap.mirror_drops_no_binding;
+                binding.mirror_drops_queue_full = snap.mirror_drops_queue_full;
                 binding.post_drain_backup_bytes = snap.post_drain_backup_bytes;
                 binding.drain_sent_bytes_shaped_unconditional =
                     snap.drain_sent_bytes_shaped_unconditional;
@@ -1370,6 +1375,11 @@ impl Coordinator {
                 binding.tx_completions = 0;
                 binding.tx_errors = 0;
                 binding.tx_shared_recycle_unknown_slot_drops = 0;
+                binding.mirrored_packets = 0;
+                binding.mirrored_bytes = 0;
+                binding.mirror_drops_no_frame = 0;
+                binding.mirror_drops_no_binding = 0;
+                binding.mirror_drops_queue_full = 0;
                 binding.post_drain_backup_bytes = 0;
                 binding.drain_sent_bytes_shaped_unconditional = 0;
                 binding.post_drain_backup_cos_drops = 0;
