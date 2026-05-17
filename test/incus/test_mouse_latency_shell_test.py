@@ -33,6 +33,39 @@ class MouseLatencyShellTests(unittest.TestCase):
         self.assertIn("Set MOUSE_COS_SURPLUS_SHARING=1", MATRIX_SCRIPT)
         self.assertIn("per-rep manifest records the selected fixture bit", MATRIX_SCRIPT)
 
+    def test_settle_budget_and_diagnostics_are_recorded(self):
+        self.assertIn('SETTLE_BUDGET="${MOUSE_LATENCY_SETTLE_BUDGET:-20}"', SCRIPT)
+        self.assertIn("MOUSE_LATENCY_SETTLE_BUDGET='$SETTLE_BUDGET' must be a positive integer second count", SCRIPT)
+        self.assertIn('settle-diagnostics "${OUT_DIR}/iperf3-settle.txt" "$SHAPER_BPS"', SCRIPT)
+        self.assertIn('"settle_budget_s": int(os.environ["SETTLE_BUDGET"])', SCRIPT)
+        self.assertIn('"cwnd_settle_elapsed_s": int(os.environ["CWND_SETTLE_ELAPSED"])', SCRIPT)
+        self.assertIn('CWND_SETTLE_OK="unknown"', SCRIPT)
+        self.assertIn('CWND_SETTLE_OK="false"', SCRIPT)
+        self.assertIn('settle_ok = None', SCRIPT)
+        self.assertIn('"cwnd_settle_ok": settle_ok', SCRIPT)
+        self.assertRegex(
+            SCRIPT,
+            re.compile(
+                r'if \[\[ \$pull_rc -ne 0 \|\| ! -s "\$\{OUT_DIR\}/iperf3-settle\.txt" \]\]; then\s+'
+                r'invalidate "iperf3-settle-pull-failed"',
+                re.MULTILINE,
+            ),
+        )
+        self.assertIn('"status": "INVALID"', SCRIPT)
+        self.assertIn('write_invalid_manifest "$reason"', SCRIPT)
+
+    def test_runtime_cos_and_settle_cpu_artifacts_are_cleared_and_captured(self):
+        for artifact in (
+            '"/cwnd-settle.json \\',
+            '"/mpstat-settle.txt \\',
+            '"/cos-interface-pre.txt \\',
+            '"/cos-interface-settle.txt \\',
+            '"/cos-interface-post.txt \\',
+        ):
+            self.assertIn(artifact, SCRIPT)
+        self.assertIn("show class-of-service interface", SCRIPT)
+        self.assertIn("mpstat 1 ${SETTLE_BUDGET} > /tmp/mpstat-settle-${REP_TAG}.txt", SCRIPT)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,6 +48,34 @@ def _abort_writer(writer: asyncio.StreamWriter) -> None:
         transport.abort()
 
 
+def _phase_bucket(phase_samples: Optional[dict], name: str) -> Optional[List[int]]:
+    if phase_samples is None:
+        return None
+    return phase_samples.setdefault(name, [])
+
+
+def _record_phase_us(
+    phase_samples: Optional[dict],
+    name: str,
+    started_ns: int,
+) -> None:
+    bucket = _phase_bucket(phase_samples, name)
+    if bucket is not None:
+        bucket.append((time.monotonic_ns() - started_ns) // 1000)
+
+
+def _record_start_gap_us(
+    phase_samples: Optional[dict],
+    previous_started_ns: Optional[int],
+    started_ns: int,
+) -> None:
+    if previous_started_ns is None:
+        return
+    bucket = _phase_bucket(phase_samples, "start_gap_us")
+    if bucket is not None:
+        bucket.append((started_ns - previous_started_ns) // 1000)
+
+
 async def _close_writer(
     writer: Optional[asyncio.StreamWriter],
     deadline: float,
@@ -76,6 +104,7 @@ async def _respect_min_interval(
     attempt_started_ns: int,
     min_interval_ms: float,
     deadline: float,
+    sleep_overshoot_us: Optional[List[int]] = None,
 ) -> None:
     if min_interval_ms <= 0:
         return
@@ -83,7 +112,12 @@ async def _respect_min_interval(
     sleep_s = (min_interval_ms / 1000.0) - elapsed_s
     remaining_s = deadline - time.monotonic()
     if sleep_s > 0 and remaining_s > 0:
-        await asyncio.sleep(min(sleep_s, remaining_s))
+        requested_s = min(sleep_s, remaining_s)
+        sleep_started_ns = time.monotonic_ns()
+        await asyncio.sleep(requested_s)
+        actual_s = (time.monotonic_ns() - sleep_started_ns) / 1_000_000_000
+        if sleep_overshoot_us is not None:
+            sleep_overshoot_us.append(max(0, int((actual_s - requested_s) * 1_000_000)))
 
 
 async def _drain_with_deadline(writer: asyncio.StreamWriter, deadline: float) -> None:
@@ -102,6 +136,7 @@ async def _run_per_attempt_probe_coro(
     rtts_us: List[int],
     attempt_counter: List[int],
     error_counter: List[int],
+    phase_samples: Optional[dict] = None,
 ) -> None:
     """One coroutine: closed-loop probe loop until deadline.
 
@@ -116,32 +151,48 @@ async def _run_per_attempt_probe_coro(
     above deadline.
     """
     payload = os.urandom(payload_bytes)
+    last_attempt_started_ns: Optional[int] = None
+    sleep_overshoot = _phase_bucket(phase_samples, "sleep_overshoot_us")
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         attempt_counter[0] += 1
         t0 = time.monotonic_ns()
+        _record_start_gap_us(phase_samples, last_attempt_started_ns, t0)
+        last_attempt_started_ns = t0
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(target, port),
-                timeout=min(5.0, remaining),
-            )
+            connect_started_ns = time.monotonic_ns()
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(target, port),
+                    timeout=min(5.0, remaining),
+                )
+            finally:
+                _record_phase_us(phase_samples, "connect_us", connect_started_ns)
             abort_close = True
             try:
                 writer.write(payload)
-                await _drain_with_deadline(writer, deadline)
+                drain_started_ns = time.monotonic_ns()
+                try:
+                    await _drain_with_deadline(writer, deadline)
+                finally:
+                    _record_phase_us(phase_samples, "drain_us", drain_started_ns)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     error_counter[0] += 1
                     break
-                data = await asyncio.wait_for(
-                    reader.readexactly(payload_bytes),
-                    timeout=min(5.0, remaining),
-                )
+                read_started_ns = time.monotonic_ns()
+                try:
+                    data = await asyncio.wait_for(
+                        reader.readexactly(payload_bytes),
+                        timeout=min(5.0, remaining),
+                    )
+                finally:
+                    _record_phase_us(phase_samples, "read_us", read_started_ns)
                 if data != payload:
                     error_counter[0] += 1
-                    await _respect_min_interval(t0, min_interval_ms, deadline)
+                    await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
                     continue
                 abort_close = False
             finally:
@@ -155,11 +206,11 @@ async def _run_per_attempt_probe_coro(
             OSError,
         ):
             error_counter[0] += 1
-            await _respect_min_interval(t0, min_interval_ms, deadline)
+            await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
             continue
         t1 = time.monotonic_ns()
         rtts_us.append((t1 - t0) // 1000)
-        await _respect_min_interval(t0, min_interval_ms, deadline)
+        await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
 
 
 async def _run_persistent_probe_coro(
@@ -171,6 +222,7 @@ async def _run_persistent_probe_coro(
     rtts_us: List[int],
     attempt_counter: List[int],
     error_counter: List[int],
+    phase_samples: Optional[dict] = None,
 ) -> None:
     """One coroutine using one long-lived echo connection.
 
@@ -181,6 +233,8 @@ async def _run_persistent_probe_coro(
     payload = os.urandom(payload_bytes)
     reader: Optional[asyncio.StreamReader] = None
     writer: Optional[asyncio.StreamWriter] = None
+    last_attempt_started_ns: Optional[int] = None
+    sleep_overshoot = _phase_bucket(phase_samples, "sleep_overshoot_us")
 
     try:
         while True:
@@ -191,10 +245,14 @@ async def _run_persistent_probe_coro(
             t0 = time.monotonic_ns()
             if writer is None or writer.is_closing():
                 try:
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection(target, port),
-                        timeout=min(5.0, remaining),
-                    )
+                    connect_started_ns = time.monotonic_ns()
+                    try:
+                        reader, writer = await asyncio.wait_for(
+                            asyncio.open_connection(target, port),
+                            timeout=min(5.0, remaining),
+                        )
+                    finally:
+                        _record_phase_us(phase_samples, "connect_us", connect_started_ns)
                 except (
                     asyncio.TimeoutError,
                     ConnectionRefusedError,
@@ -202,11 +260,13 @@ async def _run_persistent_probe_coro(
                     BrokenPipeError,
                     OSError,
                 ):
+                    _record_start_gap_us(phase_samples, last_attempt_started_ns, t0)
+                    last_attempt_started_ns = t0
                     attempt_counter[0] += 1
                     error_counter[0] += 1
                     reader = None
                     writer = None
-                    await _respect_min_interval(t0, min_interval_ms, deadline)
+                    await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
                     continue
                 # Connection setup is not a latency sample in persistent
                 # mode; it is only a prerequisite for later echo samples.
@@ -217,9 +277,15 @@ async def _run_persistent_probe_coro(
                 break
 
             t0 = time.monotonic_ns()
+            _record_start_gap_us(phase_samples, last_attempt_started_ns, t0)
+            last_attempt_started_ns = t0
             try:
                 writer.write(payload)
-                await _drain_with_deadline(writer, deadline)
+                drain_started_ns = time.monotonic_ns()
+                try:
+                    await _drain_with_deadline(writer, deadline)
+                finally:
+                    _record_phase_us(phase_samples, "drain_us", drain_started_ns)
             except (
                 asyncio.TimeoutError,
                 ConnectionRefusedError,
@@ -232,7 +298,7 @@ async def _run_persistent_probe_coro(
                 await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
-                await _respect_min_interval(t0, min_interval_ms, deadline)
+                await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
                 continue
 
             remaining = deadline - time.monotonic()
@@ -242,22 +308,26 @@ async def _run_persistent_probe_coro(
                 await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
-                await _respect_min_interval(t0, min_interval_ms, deadline)
+                await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
                 break
 
             attempt_counter[0] += 1
             try:
                 assert reader is not None
-                data = await asyncio.wait_for(
-                    reader.readexactly(payload_bytes),
-                    timeout=min(5.0, remaining),
-                )
+                read_started_ns = time.monotonic_ns()
+                try:
+                    data = await asyncio.wait_for(
+                        reader.readexactly(payload_bytes),
+                        timeout=min(5.0, remaining),
+                    )
+                finally:
+                    _record_phase_us(phase_samples, "read_us", read_started_ns)
                 if data != payload:
                     error_counter[0] += 1
                     await _close_writer(writer, deadline, abort=True)
                     reader = None
                     writer = None
-                    await _respect_min_interval(t0, min_interval_ms, deadline)
+                    await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
                     continue
             except (
                 asyncio.TimeoutError,
@@ -271,11 +341,11 @@ async def _run_persistent_probe_coro(
                 await _close_writer(writer, deadline, abort=True)
                 reader = None
                 writer = None
-                await _respect_min_interval(t0, min_interval_ms, deadline)
+                await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
                 continue
             t1 = time.monotonic_ns()
             rtts_us.append((t1 - t0) // 1000)
-            await _respect_min_interval(t0, min_interval_ms, deadline)
+            await _respect_min_interval(t0, min_interval_ms, deadline, sleep_overshoot)
     finally:
         await _close_writer(writer, deadline)
 
@@ -331,6 +401,23 @@ def _compute_percentiles(rtts_us: List[int]) -> dict:
     }
 
 
+def _compute_phase_percentiles(values_us: List[int]) -> dict:
+    p = _compute_percentiles(values_us)
+    return {
+        "count": len(values_us),
+        "p50": p["p50"],
+        "p95": p["p95"],
+        "p99": p["p99"],
+        "p999": p["p999"],
+        "max": p["max"],
+        "mean": p["mean"],
+    }
+
+
+def _max_or_none(values: List[int]) -> Optional[int]:
+    return max(values) if values else None
+
+
 def compute_validity(
     concurrency: int,
     attempts_per_coroutine: List[int],
@@ -372,6 +459,16 @@ async def _run(args: argparse.Namespace) -> dict:
     rtts_per_coro: List[List[int]] = [[] for _ in range(args.concurrency)]
     attempts_per_coro: List[List[int]] = [[0] for _ in range(args.concurrency)]
     errors_per_coro: List[List[int]] = [[0] for _ in range(args.concurrency)]
+    phase_per_coro = [
+        {
+            "connect_us": [],
+            "drain_us": [],
+            "read_us": [],
+            "start_gap_us": [],
+            "sleep_overshoot_us": [],
+        }
+        for _ in range(args.concurrency)
+    ]
     deadline = time.monotonic() + args.duration
     probe_coro = (
         _run_persistent_probe_coro
@@ -382,6 +479,7 @@ async def _run(args: argparse.Namespace) -> dict:
         probe_coro(
             args.target, args.port, args.payload_bytes, args.min_interval_ms, deadline,
             rtts_per_coro[i], attempts_per_coro[i], errors_per_coro[i],
+            phase_per_coro[i],
         )
         for i in range(args.concurrency)
     ]
@@ -418,6 +516,37 @@ async def _run(args: argparse.Namespace) -> dict:
         per_coro_iqr = 0.0
         per_coro_median = 0.0
 
+    phase_names = [
+        "connect_us",
+        "drain_us",
+        "read_us",
+        "start_gap_us",
+        "sleep_overshoot_us",
+    ]
+    phase_samples = {
+        name: [
+            value
+            for coro_phases in phase_per_coro
+            for value in coro_phases.get(name, [])
+        ]
+        for name in phase_names
+    }
+    coroutine_diagnostics = []
+    for i in range(args.concurrency):
+        phases = phase_per_coro[i]
+        coroutine_diagnostics.append({
+            "id": i,
+            "attempted": attempts[i],
+            "completed": len(rtts_per_coro[i]),
+            "errors": errors_per_coro[i][0],
+            "max_rtt_us": _max_or_none(rtts_per_coro[i]),
+            "max_connect_us": _max_or_none(phases["connect_us"]),
+            "max_drain_us": _max_or_none(phases["drain_us"]),
+            "max_read_us": _max_or_none(phases["read_us"]),
+            "max_start_gap_us": _max_or_none(phases["start_gap_us"]),
+            "max_sleep_overshoot_us": _max_or_none(phases["sleep_overshoot_us"]),
+        })
+
     return {
         "config": {
             "target": args.target, "port": args.port,
@@ -437,6 +566,11 @@ async def _run(args: argparse.Namespace) -> dict:
             "attempts_per_second_per_coroutine_median": per_coro_median,
             "attempts_per_second_per_coroutine_iqr": per_coro_iqr,
         },
+        "phase_us": {
+            name: _compute_phase_percentiles(values)
+            for name, values in phase_samples.items()
+        },
+        "coroutines": coroutine_diagnostics,
         "rtt_us": _compute_percentiles(rtts_us),
         "histogram_us": {
             "buckets": HISTOGRAM_BUCKETS_US,
