@@ -543,20 +543,31 @@ func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
 	es.Start(ctx)
 	defer es.Close()
 
-	time.Sleep(50 * time.Millisecond)
-
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	var conn net.Conn
+	for conn == nil {
+		var err error
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("dial: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	defer conn.Close()
 
-	deadline := time.Now().Add(2 * time.Second)
+	connectCtx, connectCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer connectCancel()
 	for !es.IsConnected() {
-		if time.Now().After(deadline) {
+		select {
+		case <-connectCtx.Done():
 			t.Fatal("event stream did not become connected")
+		case <-time.After(10 * time.Millisecond):
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	payload := buildDataplaneEventV4Payload(
