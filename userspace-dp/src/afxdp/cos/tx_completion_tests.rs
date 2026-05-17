@@ -449,6 +449,68 @@ fn apply_cos_send_result_debits_shared_residual_surplus_budget() {
 }
 
 #[test]
+fn apply_cos_prepared_result_debits_shared_residual_surplus_budget() {
+    let mut root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut root.queues {
+        if queue.config.exact {
+            queue.hot.items.clear();
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+        }
+    }
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    shared_exact_backlog.publish_with_serviceable(1, 1500, 0, 1 << 0);
+    let residual_rate = 100_000_000;
+    let residual_burst = COS_MIN_BURST_BYTES;
+    assert_eq!(
+        shared_exact_backlog.residual_surplus_budget(1, residual_rate, residual_burst),
+        0,
+        "shared residual budget starts closed on first exact-demand observation"
+    );
+    let before =
+        shared_exact_backlog.residual_surplus_budget(1_000_001, residual_rate, residual_burst);
+    assert!(before >= 1500, "test must seed enough residual budget");
+
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog.clone());
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+
+    apply_cos_prepared_result(
+        &mut binding,
+        42,
+        1,
+        CoSServicePhase::Surplus,
+        1500,
+        1500,
+        std::collections::VecDeque::new(),
+    );
+
+    let after =
+        shared_exact_backlog.residual_surplus_budget(1_000_001, residual_rate, residual_burst);
+    assert_eq!(
+        after,
+        before - 1500,
+        "non-exact surplus prepared send must debit the shared residual budget, not a per-worker bucket"
+    );
+}
+
+#[test]
 fn normalize_cos_queue_state_repairs_nonempty_unparked_queue_to_runnable() {
     let mut queue = CoSQueueRuntime {
         config: crate::afxdp::types::CoSQueueConfigState {
