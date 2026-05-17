@@ -2,6 +2,10 @@
 
 ## 2026-05-17
 
+- **Timestamp**: 2026-05-17T05:06:00Z
+  - **Action**: PR #1395 cleanup — reverted an unintended `go.mod` direct/indirect dependency classification change introduced by automated tooling so the round-4 fix stays scoped to three-color policer compiler logic/tests/docs.
+  - **File(s)**: `go.mod`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T05:03:00Z
   - **Action**: PR #1395 round-4 follow-up cleanup — moved three-color mode marker assignment outside repeated same-mode child loops to avoid redundant writes while preserving duplicate-sibling merge semantics.
   - **File(s)**: `pkg/config/compiler_firewall.go`, `_Log.md`
