@@ -92,6 +92,9 @@ fn assert_current_capability_doc_matches_fail_open_contract(path: &Path, doc: &s
         "runtime remains fail-open",
         "poll_descriptor.rs",
         "source-NAT call sites",
+        "missing pools",
+        "empty pools",
+        "invalid port",
     ] {
         assert!(
             doc.contains(required),
@@ -106,6 +109,7 @@ fn assert_current_capability_doc_matches_fail_open_contract(path: &Path, doc: &s
         "fail-closed pool admission",
         "landed userspace-v1 pool selection and fail-closed",
         "landed deterministic userspace selection and fail-closed",
+        "unusable pools",
     ] {
         assert!(
             !doc.contains(stale),

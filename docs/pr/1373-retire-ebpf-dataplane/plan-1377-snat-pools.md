@@ -12,8 +12,8 @@ translations, and operator-visible allocation failures.
 - #1385 landed a defensive userspace snapshot fix: missing pools, empty pools,
   and invalid `uint16` port ranges are omitted from the snapshot instead of
   being emitted as broad matching no-op rules. That is not a forwarding
-  fail-closed gate today; omitted or unusable source-NAT pool rules still leave
-  the runtime free to forward without SNAT.
+  fail-closed gate today; rules omitted for those inputs still leave the
+  runtime free to forward without SNAT.
 - #1385 also plumbed `address_persistent`, resolved pool addresses, and
   `port_low` / `port_high` into the userspace snapshot and Rust
   `SourceNATRuleSnapshot`.
@@ -21,8 +21,9 @@ translations, and operator-visible allocation failures.
   pool selector. That closes the original silent round-robin regression for
   AF_XDP userspace forwarding.
 - The remaining #1377 work is now contract work plus runtime work for per-pool
-  `persistent-nat`, pool allocator observability, and a real fail-closed path
-  for unusable source-NAT pool rules.
+  `persistent-nat`, pool allocator observability, and real fail-closed paths
+  for missing-pool, empty-pool, invalid-port-range, and live allocation-failure
+  source-NAT pool cases.
 
 ## Current Fail-Open Runtime Boundary
 
@@ -199,9 +200,10 @@ Still required to close the remaining #1377 runtime work:
   reallocates after expiry.
 - Cargo: allocator never assigns the same live translated 5-tuple to two live
   clients and reports exhaustion instead of silent wrap reuse.
-- Cargo/integration: unusable source-NAT pool rules fail closed at all four
-  `poll_descriptor.rs` source-NAT call sites instead of falling through
-  `unwrap_or_default()` as an untranslated forward.
+- Cargo/integration: source-NAT pool rules with missing pools, empty pools,
+  invalid port ranges, wrong-family-only pools, or live allocation failures
+  fail closed at all four `poll_descriptor.rs` source-NAT call sites instead
+  of falling through `unwrap_or_default()` as an untranslated forward.
 - Integration: active userspace SNAT pool sessions preserve return traffic
   across failover, while new-flow mixed-backend rollback tests accept the
   documented selector boundary.
