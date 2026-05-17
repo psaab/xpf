@@ -74,6 +74,133 @@ fn test_metadata() -> SessionMetadata {
     }
 }
 
+fn test_dataplane_event_v4(kind: DataplaneEventKind) -> DataplaneEventPayload {
+    DataplaneEventPayload {
+        kind,
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        src_port: 49152,
+        dst_port: 443,
+        nat_src_ip: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 30))),
+        nat_dst_ip: None,
+        nat_src_port: 40000,
+        nat_dst_port: 8443,
+        ingress_zone_id: 7,
+        egress_zone_id: 9,
+        ingress_ifindex: 42,
+        owner_rg_id: -1,
+        reason: 17,
+        policy_id: 101,
+        rule_id: 202,
+        application_id: 303,
+        filter_id: 404,
+        term_id: 505,
+        screen_id: 606,
+        timestamp_ns: 123_456_789,
+    }
+}
+
+fn test_dataplane_event_v6(kind: DataplaneEventKind) -> DataplaneEventPayload {
+    DataplaneEventPayload {
+        kind,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 17,
+        src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6)),
+        dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 6, 5, 4, 3, 2, 1)),
+        src_port: 5353,
+        dst_port: 53,
+        nat_src_ip: None,
+        nat_dst_ip: None,
+        nat_src_port: 0,
+        nat_dst_port: 0,
+        ingress_zone_id: 11,
+        egress_zone_id: 12,
+        ingress_ifindex: 77,
+        owner_rg_id: 2,
+        reason: 88,
+        policy_id: 0,
+        rule_id: 0,
+        application_id: 0,
+        filter_id: 909,
+        term_id: 1001,
+        screen_id: 1102,
+        timestamp_ns: 987_654_321,
+    }
+}
+
+fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8) {
+    let frame = EventFrame::encode_dataplane_event(321, &event);
+
+    assert_eq!(frame.data[4], msg_type);
+    assert_eq!(frame.seq, 321);
+    assert_eq!(
+        u32::from_le_bytes(frame.data[0..4].try_into().unwrap()),
+        SECURITY_EVENT_PAYLOAD_SIZE as u32
+    );
+    assert_eq!(
+        frame.len as usize,
+        FRAME_HEADER_SIZE + SECURITY_EVENT_PAYLOAD_SIZE
+    );
+
+    let payload = frame
+        .dataplane_event_payload()
+        .expect("security event payload");
+    assert_eq!(payload.len(), SECURITY_EVENT_PAYLOAD_SIZE);
+    assert_eq!(
+        decode_dataplane_event(msg_type, payload).expect("decoded security event"),
+        event
+    );
+    assert_eq!(
+        frame
+            .decode_dataplane_event()
+            .expect("decoded security event frame"),
+        event
+    );
+}
+
+#[test]
+fn test_event_frame_type_values_are_stable() {
+    assert_eq!(MSG_SESSION_OPEN, 1);
+    assert_eq!(MSG_SESSION_CLOSE, 2);
+    assert_eq!(MSG_SESSION_UPDATE, 3);
+    assert_eq!(MSG_ACK, 4);
+    assert_eq!(MSG_PAUSE, 5);
+    assert_eq!(MSG_RESUME, 6);
+    assert_eq!(MSG_DRAIN_REQUEST, 7);
+    assert_eq!(MSG_DRAIN_COMPLETE, 8);
+    assert_eq!(MSG_FULL_RESYNC, 9);
+    assert_eq!(MSG_KEEPALIVE, 10);
+    assert_eq!(MSG_POLICY_DENY, 11);
+    assert_eq!(MSG_SCREEN_DROP, 12);
+    assert_eq!(MSG_FILTER_LOG, 13);
+}
+
+#[test]
+fn test_policy_deny_dataplane_event_round_trip() {
+    assert_dataplane_event_round_trip(
+        test_dataplane_event_v4(DataplaneEventKind::PolicyDeny),
+        MSG_POLICY_DENY,
+    );
+}
+
+#[test]
+fn test_screen_drop_dataplane_event_round_trip() {
+    assert_dataplane_event_round_trip(
+        test_dataplane_event_v6(DataplaneEventKind::ScreenDrop),
+        MSG_SCREEN_DROP,
+    );
+}
+
+#[test]
+fn test_filter_log_dataplane_event_round_trip() {
+    assert_dataplane_event_round_trip(
+        test_dataplane_event_v4(DataplaneEventKind::FilterLog),
+        MSG_FILTER_LOG,
+    );
+}
+
 #[test]
 fn test_encode_session_open_v4() {
     let zones = test_zone_map();
@@ -154,8 +281,8 @@ fn test_encode_session_close_v4() {
     assert_eq!(p[1], 6); // Protocol
     assert_eq!(u16::from_le_bytes([p[2], p[3]]), 12345); // SrcPort
     assert_eq!(u16::from_le_bytes([p[4], p[5]]), 80); // DstPort
-                                                      // p[6..10] SrcIP, p[10..14] DstIP
-                                                      // p[14..16] OwnerRGID
+    // p[6..10] SrcIP, p[10..14] DstIP
+    // p[14..16] OwnerRGID
     assert_eq!(i16::from_le_bytes([p[14], p[15]]), 1);
     // p[16] Flags
     assert_eq!(p[16], FLAG_FABRIC_REDIRECT);

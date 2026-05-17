@@ -26,6 +26,23 @@ pub(crate) const MSG_DRAIN_COMPLETE: u8 = 8;
 pub(crate) const MSG_FULL_RESYNC: u8 = 9;
 pub(crate) const MSG_KEEPALIVE: u8 = 10;
 
+// #1379 codec-only security event foundation. Producer wiring must add
+// fixed-size non-blocking emission, rate limiting, and loss accounting.
+#[allow(dead_code)]
+pub(crate) const MSG_POLICY_DENY: u8 = 11;
+#[allow(dead_code)]
+pub(crate) const MSG_SCREEN_DROP: u8 = 12;
+#[allow(dead_code)]
+pub(crate) const MSG_FILTER_LOG: u8 = 13;
+
+#[allow(dead_code)]
+pub(crate) const SECURITY_EVENT_PAYLOAD_SIZE: usize = 120;
+
+#[allow(dead_code)]
+const SECURITY_EVENT_FLAG_NAT_SRC: u8 = 1 << 0;
+#[allow(dead_code)]
+const SECURITY_EVENT_FLAG_NAT_DST: u8 = 1 << 1;
+
 /// Disposition encoding for the wire format.
 const DISP_FORWARD_CANDIDATE: u8 = 0;
 const DISP_LOCAL_DELIVERY: u8 = 1;
@@ -41,6 +58,93 @@ const DISP_NEXT_TABLE_UNSUPPORTED: u8 = 8;
 pub(crate) const FLAG_FABRIC_REDIRECT: u8 = 1 << 0;
 pub(crate) const FLAG_FABRIC_INGRESS: u8 = 1 << 1;
 pub(crate) const FLAG_IS_REVERSE: u8 = 1 << 2;
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DataplaneEventKind {
+    PolicyDeny,
+    ScreenDrop,
+    FilterLog,
+}
+
+#[allow(dead_code)]
+impl DataplaneEventKind {
+    fn msg_type(self) -> u8 {
+        match self {
+            Self::PolicyDeny => MSG_POLICY_DENY,
+            Self::ScreenDrop => MSG_SCREEN_DROP,
+            Self::FilterLog => MSG_FILTER_LOG,
+        }
+    }
+
+    fn from_msg_type(msg_type: u8) -> Option<Self> {
+        match msg_type {
+            MSG_POLICY_DENY => Some(Self::PolicyDeny),
+            MSG_SCREEN_DROP => Some(Self::ScreenDrop),
+            MSG_FILTER_LOG => Some(Self::FilterLog),
+            _ => None,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DataplaneEventPayload {
+    pub(crate) kind: DataplaneEventKind,
+    pub(crate) addr_family: u8,
+    pub(crate) protocol: u8,
+    pub(crate) src_ip: IpAddr,
+    pub(crate) dst_ip: IpAddr,
+    pub(crate) src_port: u16,
+    pub(crate) dst_port: u16,
+    pub(crate) nat_src_ip: Option<IpAddr>,
+    pub(crate) nat_dst_ip: Option<IpAddr>,
+    pub(crate) nat_src_port: u16,
+    pub(crate) nat_dst_port: u16,
+    pub(crate) ingress_zone_id: u16,
+    pub(crate) egress_zone_id: u16,
+    pub(crate) ingress_ifindex: i32,
+    pub(crate) owner_rg_id: i16,
+    pub(crate) reason: u16,
+    pub(crate) policy_id: u32,
+    pub(crate) rule_id: u32,
+    pub(crate) application_id: u32,
+    pub(crate) filter_id: u32,
+    pub(crate) term_id: u32,
+    pub(crate) screen_id: u32,
+    pub(crate) timestamp_ns: u64,
+}
+
+#[allow(dead_code)]
+impl DataplaneEventPayload {
+    pub(crate) fn from_session_key(kind: DataplaneEventKind, key: &SessionKey) -> Self {
+        Self {
+            kind,
+            addr_family: key.addr_family,
+            protocol: key.protocol,
+            src_ip: key.src_ip,
+            dst_ip: key.dst_ip,
+            src_port: key.src_port,
+            dst_port: key.dst_port,
+            nat_src_ip: None,
+            nat_dst_ip: None,
+            nat_src_port: 0,
+            nat_dst_port: 0,
+            ingress_zone_id: 0,
+            egress_zone_id: 0,
+            ingress_ifindex: 0,
+            owner_rg_id: 0,
+            reason: 0,
+            policy_id: 0,
+            rule_id: 0,
+            application_id: 0,
+            filter_id: 0,
+            term_id: 0,
+            screen_id: 0,
+            timestamp_ns: 0,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EventFrame -- zero-allocation stack-buffered wire frame
@@ -277,9 +381,108 @@ impl EventFrame {
         }
     }
 
+    /// Encode a fixed-size security telemetry event.
+    ///
+    /// Payload layout (120 bytes):
+    /// [0] AF wire value, [1] protocol, [2] flags, [3] reserved,
+    /// [4..56] scalar tuple/identity/reason fields, then four 16-byte IP slots:
+    /// original src/dst and optional NAT src/dst.
+    #[allow(dead_code)]
+    pub(crate) fn encode_dataplane_event(seq: u64, event: &DataplaneEventPayload) -> Self {
+        let mut buf = [0u8; 256];
+        let mut pos = FRAME_HEADER_SIZE;
+
+        let wire_af = wire_addr_family(event.addr_family, event.src_ip);
+        let mut flags = 0u8;
+        if event.nat_src_ip.is_some() {
+            flags |= SECURITY_EVENT_FLAG_NAT_SRC;
+        }
+        if event.nat_dst_ip.is_some() {
+            flags |= SECURITY_EVENT_FLAG_NAT_DST;
+        }
+
+        buf[pos] = wire_af;
+        pos += 1;
+        buf[pos] = event.protocol;
+        pos += 1;
+        buf[pos] = flags;
+        pos += 1;
+        pos += 1; // reserved
+        buf[pos..pos + 2].copy_from_slice(&event.src_port.to_le_bytes());
+        pos += 2;
+        buf[pos..pos + 2].copy_from_slice(&event.dst_port.to_le_bytes());
+        pos += 2;
+        buf[pos..pos + 2].copy_from_slice(&event.nat_src_port.to_le_bytes());
+        pos += 2;
+        buf[pos..pos + 2].copy_from_slice(&event.nat_dst_port.to_le_bytes());
+        pos += 2;
+        buf[pos..pos + 2].copy_from_slice(&event.ingress_zone_id.to_le_bytes());
+        pos += 2;
+        buf[pos..pos + 2].copy_from_slice(&event.egress_zone_id.to_le_bytes());
+        pos += 2;
+        buf[pos..pos + 4].copy_from_slice(&event.ingress_ifindex.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 2].copy_from_slice(&event.owner_rg_id.to_le_bytes());
+        pos += 2;
+        buf[pos..pos + 2].copy_from_slice(&event.reason.to_le_bytes());
+        pos += 2;
+        buf[pos..pos + 4].copy_from_slice(&event.policy_id.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&event.rule_id.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&event.application_id.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&event.filter_id.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&event.term_id.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&event.screen_id.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 8].copy_from_slice(&event.timestamp_ns.to_le_bytes());
+        pos += 8;
+
+        pos = write_ip_16(&mut buf, pos, event.src_ip);
+        pos = write_ip_16(&mut buf, pos, event.dst_ip);
+        pos = write_ip_opt_16(&mut buf, pos, event.nat_src_ip);
+        pos = write_ip_opt_16(&mut buf, pos, event.nat_dst_ip);
+
+        debug_assert_eq!(pos - FRAME_HEADER_SIZE, SECURITY_EVENT_PAYLOAD_SIZE);
+        write_header(
+            &mut buf,
+            SECURITY_EVENT_PAYLOAD_SIZE as u32,
+            event.kind.msg_type(),
+            seq,
+        );
+
+        EventFrame {
+            data: buf,
+            len: pos as u16,
+            seq,
+        }
+    }
+
     /// The raw bytes of this frame (header + payload).
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.data[..self.len as usize]
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn dataplane_event_payload(&self) -> Option<&[u8]> {
+        DataplaneEventKind::from_msg_type(self.data[4])?;
+        let payload_len = u32::from_le_bytes(self.data[0..4].try_into().ok()?) as usize;
+        if payload_len != SECURITY_EVENT_PAYLOAD_SIZE {
+            return None;
+        }
+        let end = FRAME_HEADER_SIZE + payload_len;
+        if (self.len as usize) < end {
+            return None;
+        }
+        Some(&self.data[FRAME_HEADER_SIZE..end])
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn decode_dataplane_event(&self) -> Option<DataplaneEventPayload> {
+        decode_dataplane_event(self.data[4], self.dataplane_event_payload()?)
     }
 }
 
@@ -324,6 +527,97 @@ fn write_ip_opt(buf: &mut [u8; 256], pos: usize, ip: Option<IpAddr>, is_v6: bool
     }
 }
 
+#[allow(dead_code)]
+fn write_ip_16(buf: &mut [u8; 256], pos: usize, ip: IpAddr) -> usize {
+    match ip {
+        IpAddr::V4(v4) => buf[pos..pos + 4].copy_from_slice(&v4.octets()),
+        IpAddr::V6(v6) => buf[pos..pos + 16].copy_from_slice(&v6.octets()),
+    }
+    pos + 16
+}
+
+#[allow(dead_code)]
+fn write_ip_opt_16(buf: &mut [u8; 256], pos: usize, ip: Option<IpAddr>) -> usize {
+    if let Some(addr) = ip {
+        write_ip_16(buf, pos, addr)
+    } else {
+        pos + 16
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn decode_dataplane_event(
+    msg_type: u8,
+    payload: &[u8],
+) -> Option<DataplaneEventPayload> {
+    let kind = DataplaneEventKind::from_msg_type(msg_type)?;
+    if payload.len() != SECURITY_EVENT_PAYLOAD_SIZE {
+        return None;
+    }
+
+    let wire_af = payload[0];
+    if wire_af != 4 && wire_af != 6 {
+        return None;
+    }
+    let flags = payload[2];
+
+    Some(DataplaneEventPayload {
+        kind,
+        addr_family: if wire_af == 6 {
+            libc::AF_INET6 as u8
+        } else {
+            libc::AF_INET as u8
+        },
+        protocol: payload[1],
+        src_port: u16::from_le_bytes(payload[4..6].try_into().ok()?),
+        dst_port: u16::from_le_bytes(payload[6..8].try_into().ok()?),
+        nat_src_port: u16::from_le_bytes(payload[8..10].try_into().ok()?),
+        nat_dst_port: u16::from_le_bytes(payload[10..12].try_into().ok()?),
+        ingress_zone_id: u16::from_le_bytes(payload[12..14].try_into().ok()?),
+        egress_zone_id: u16::from_le_bytes(payload[14..16].try_into().ok()?),
+        ingress_ifindex: i32::from_le_bytes(payload[16..20].try_into().ok()?),
+        owner_rg_id: i16::from_le_bytes(payload[20..22].try_into().ok()?),
+        reason: u16::from_le_bytes(payload[22..24].try_into().ok()?),
+        policy_id: u32::from_le_bytes(payload[24..28].try_into().ok()?),
+        rule_id: u32::from_le_bytes(payload[28..32].try_into().ok()?),
+        application_id: u32::from_le_bytes(payload[32..36].try_into().ok()?),
+        filter_id: u32::from_le_bytes(payload[36..40].try_into().ok()?),
+        term_id: u32::from_le_bytes(payload[40..44].try_into().ok()?),
+        screen_id: u32::from_le_bytes(payload[44..48].try_into().ok()?),
+        timestamp_ns: u64::from_le_bytes(payload[48..56].try_into().ok()?),
+        src_ip: read_ip_16(&payload[56..72], wire_af)?,
+        dst_ip: read_ip_16(&payload[72..88], wire_af)?,
+        nat_src_ip: if flags & SECURITY_EVENT_FLAG_NAT_SRC != 0 {
+            read_ip_16(&payload[88..104], wire_af)
+        } else {
+            None
+        },
+        nat_dst_ip: if flags & SECURITY_EVENT_FLAG_NAT_DST != 0 {
+            read_ip_16(&payload[104..120], wire_af)
+        } else {
+            None
+        },
+    })
+}
+
+#[allow(dead_code)]
+fn read_ip_16(bytes: &[u8], wire_af: u8) -> Option<IpAddr> {
+    match wire_af {
+        4 => Some(IpAddr::from(<[u8; 4]>::try_from(&bytes[..4]).ok()?)),
+        6 => Some(IpAddr::from(<[u8; 16]>::try_from(&bytes[..16]).ok()?)),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn wire_addr_family(addr_family: u8, src_ip: IpAddr) -> u8 {
+    if addr_family == libc::AF_INET6 as u8 || matches!(src_ip, IpAddr::V6(_)) {
+        6
+    } else {
+        4
+    }
+}
+
 fn encode_disposition(d: ForwardingDisposition) -> u8 {
     match d {
         ForwardingDisposition::ForwardCandidate => DISP_FORWARD_CANDIDATE,
@@ -359,4 +653,3 @@ pub(crate) fn close_flags(delta: &SessionDelta) -> u8 {
 #[cfg(test)]
 #[path = "codec_tests.rs"]
 mod tests;
-
