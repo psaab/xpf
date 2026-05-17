@@ -158,13 +158,13 @@ func (s *Scheduler) wallClockDiscontinuousLocked(now time.Time) bool {
 	}
 	wallElapsed := time.Duration(now.UnixNano() - s.lastWallUnixNano)
 	if wallElapsed < 0 {
-		slog.Warn("scheduler: wall clock moved backward, failing closed until next evaluation",
+		slog.Warn("scheduler: wall clock moved backward, failing closed during recovery hold",
 			"previous", s.lastEval, "current", now)
 		return true
 	}
 	monoElapsed := now.Sub(s.lastEval)
 	if monoElapsed < 0 {
-		slog.Warn("scheduler: monotonic clock moved backward, failing closed until next evaluation",
+		slog.Warn("scheduler: monotonic clock moved backward, failing closed during recovery hold",
 			"previous", s.lastEval, "current", now)
 		return true
 	}
@@ -173,7 +173,7 @@ func (s *Scheduler) wallClockDiscontinuousLocked(now time.Time) bool {
 		delta = -delta
 	}
 	if delta > wallClockDriftTolerance {
-		slog.Warn("scheduler: wall clock drift exceeded tolerance, failing closed until next evaluation",
+		slog.Warn("scheduler: wall clock drift exceeded tolerance, failing closed during recovery hold",
 			"wall_elapsed", wallElapsed, "monotonic_elapsed", monoElapsed, "tolerance", wallClockDriftTolerance)
 		return true
 	}

@@ -456,11 +456,7 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 			d.recordCompileSuccess()
 		}
 	}
-	if d.dp != nil && policySchedulerActiveState != nil && compileResult != nil {
-		if _, isUserspace := d.dp.(*dpuserspace.Manager); !isUserspace {
-			d.dp.UpdatePolicyScheduleState(cfg, policySchedulerActiveState)
-		}
-	}
+	d.publishInitialPolicySchedulerStateLocked(cfg, policySchedulerActiveState, compileResult)
 
 	// Clear defer flag after Compile so subsequent recompiles (where MAC
 	// is already set) don't skip workers.
@@ -1048,4 +1044,14 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 
 func compileErrorMustAbortApply(err error) bool {
 	return errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible)
+}
+
+func (d *Daemon) publishInitialPolicySchedulerStateLocked(cfg *config.Config, activeState map[string]bool, compileResult *dataplane.CompileResult) {
+	if d.dp == nil || activeState == nil || compileResult == nil {
+		return
+	}
+	if _, isUserspace := d.dp.(*dpuserspace.Manager); isUserspace {
+		return
+	}
+	d.dp.UpdatePolicyScheduleState(cfg, activeState)
 }
