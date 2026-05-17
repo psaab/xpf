@@ -90,13 +90,9 @@ fn test_dataplane_event_v4(kind: DataplaneEventKind) -> DataplaneEventPayload {
         ingress_zone_id: 7,
         egress_zone_id: 9,
         ingress_ifindex: 42,
-        owner_rg_id: -1,
-        reason: 17,
         policy_id: 101,
-        rule_id: 202,
         application_id: 303,
         filter_id: 404,
-        term_id: 505,
         screen_id: 606,
         timestamp_ns: 123_456_789,
     }
@@ -118,13 +114,9 @@ fn test_dataplane_event_v6(kind: DataplaneEventKind) -> DataplaneEventPayload {
         ingress_zone_id: 11,
         egress_zone_id: 12,
         ingress_ifindex: 77,
-        owner_rg_id: 2,
-        reason: 88,
         policy_id: 0,
-        rule_id: 0,
         application_id: 0,
         filter_id: 909,
-        term_id: 1001,
         screen_id: 1102,
         timestamp_ns: 987_654_321,
     }
@@ -180,7 +172,7 @@ fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8)
     assert_eq!(decoded.ingress_zone_id, event.ingress_zone_id);
     assert_eq!(decoded.egress_zone_id, event.egress_zone_id);
     assert_eq!(decoded.ingress_ifindex, event.ingress_ifindex);
-    assert_eq!(decoded.application_id, event.application_id & 0xffff);
+    assert_eq!(decoded.application_id, event.application_id);
     assert_eq!(decoded.timestamp_ns, event.timestamp_ns);
     match event.kind {
         DataplaneEventKind::PolicyDeny => assert_eq!(decoded.policy_id, event.policy_id),
@@ -316,8 +308,8 @@ fn test_encode_session_close_v4() {
     assert_eq!(p[1], 6); // Protocol
     assert_eq!(u16::from_le_bytes([p[2], p[3]]), 12345); // SrcPort
     assert_eq!(u16::from_le_bytes([p[4], p[5]]), 80); // DstPort
-    // p[6..10] SrcIP, p[10..14] DstIP
-    // p[14..16] OwnerRGID
+                                                      // p[6..10] SrcIP, p[10..14] DstIP
+                                                      // p[14..16] OwnerRGID
     assert_eq!(i16::from_le_bytes([p[14], p[15]]), 1);
     // p[16] Flags
     assert_eq!(p[16], FLAG_FABRIC_REDIRECT);

@@ -124,46 +124,11 @@ pub(crate) struct DataplaneEventPayload {
     pub(crate) ingress_zone_id: u16,
     pub(crate) egress_zone_id: u16,
     pub(crate) ingress_ifindex: i32,
-    pub(crate) owner_rg_id: i16,
-    pub(crate) reason: u16,
     pub(crate) policy_id: u32,
-    pub(crate) rule_id: u32,
-    pub(crate) application_id: u32,
+    pub(crate) application_id: u16,
     pub(crate) filter_id: u32,
-    pub(crate) term_id: u32,
     pub(crate) screen_id: u32,
     pub(crate) timestamp_ns: u64,
-}
-
-#[allow(dead_code)]
-impl DataplaneEventPayload {
-    pub(crate) fn from_session_key(kind: DataplaneEventKind, key: &SessionKey) -> Self {
-        Self {
-            kind,
-            addr_family: key.addr_family,
-            protocol: key.protocol,
-            src_ip: key.src_ip,
-            dst_ip: key.dst_ip,
-            src_port: key.src_port,
-            dst_port: key.dst_port,
-            nat_src_ip: None,
-            nat_dst_ip: None,
-            nat_src_port: 0,
-            nat_dst_port: 0,
-            ingress_zone_id: 0,
-            egress_zone_id: 0,
-            ingress_ifindex: 0,
-            owner_rg_id: 0,
-            reason: 0,
-            policy_id: 0,
-            rule_id: 0,
-            application_id: 0,
-            filter_id: 0,
-            term_id: 0,
-            screen_id: 0,
-            timestamp_ns: 0,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -440,8 +405,7 @@ impl EventFrame {
         buf[base + 104..base + 106].copy_from_slice(&event.nat_src_port.to_be_bytes());
         buf[base + 106..base + 108].copy_from_slice(&event.nat_dst_port.to_be_bytes());
         buf[base + 128..base + 132].copy_from_slice(&event.ingress_ifindex.to_le_bytes());
-        let app_id = u16::try_from(event.application_id).unwrap_or(0);
-        buf[base + 132..base + 134].copy_from_slice(&app_id.to_le_bytes());
+        buf[base + 132..base + 134].copy_from_slice(&event.application_id.to_le_bytes());
 
         write_header(
             &mut buf,
@@ -576,21 +540,17 @@ pub(crate) fn decode_dataplane_event(
         ingress_zone_id: u16::from_le_bytes(payload[48..50].try_into().ok()?),
         egress_zone_id: u16::from_le_bytes(payload[50..52].try_into().ok()?),
         ingress_ifindex: i32::from_le_bytes(payload[128..132].try_into().ok()?),
-        owner_rg_id: 0,
-        reason: 0,
         policy_id: if event_kind == DataplaneEventKind::PolicyDeny {
             policy_or_reason_id
         } else {
             0
         },
-        rule_id: 0,
-        application_id: u16::from_le_bytes(payload[132..134].try_into().ok()?) as u32,
+        application_id: u16::from_le_bytes(payload[132..134].try_into().ok()?),
         filter_id: if event_kind == DataplaneEventKind::FilterLog {
             policy_or_reason_id
         } else {
             0
         },
-        term_id: 0,
         screen_id: if event_kind == DataplaneEventKind::ScreenDrop {
             policy_or_reason_id
         } else {

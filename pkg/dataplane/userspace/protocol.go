@@ -1090,19 +1090,19 @@ const EventFrameHeaderSize = 16
 
 // Event stream message types.
 const (
-	EventTypeSessionOpen   uint8 = 1
-	EventTypeSessionClose  uint8 = 2
-	EventTypeSessionUpdate uint8 = 3
-	EventTypeAck           uint8 = 4  // daemon → helper
-	EventTypePause         uint8 = 5  // daemon → helper
-	EventTypeResume        uint8 = 6  // daemon → helper
-	EventTypeDrainRequest  uint8 = 7  // daemon → helper (target seq in header)
-	EventTypeDrainComplete uint8 = 8  // helper → daemon
-	EventTypeFullResync    uint8 = 9  // helper → daemon
-	EventTypeKeepalive     uint8 = 10 // helper → daemon (idle heartbeat)
-	EventTypePolicyDeny    uint8 = 11 // helper → daemon (RT_FLOW policy deny)
-	EventTypeScreenDrop    uint8 = 12 // helper → daemon (RT_FLOW screen drop)
-	EventTypeFilterLog     uint8 = 13 // helper → daemon (RT_FLOW filter log)
+	EventTypeSessionOpen     uint8 = 1
+	EventTypeSessionClose    uint8 = 2
+	EventTypeSessionUpdate   uint8 = 3
+	EventTypeAck             uint8 = 4  // daemon → helper
+	EventTypePause           uint8 = 5  // daemon → helper
+	EventTypeResume          uint8 = 6  // daemon → helper
+	EventTypeDrainRequest    uint8 = 7  // daemon → helper (target seq in header)
+	EventTypeDrainComplete   uint8 = 8  // helper → daemon
+	EventTypeFullResync      uint8 = 9  // helper → daemon
+	EventTypeKeepalive       uint8 = 10 // helper → daemon (idle heartbeat)
+	EventFrameTypePolicyDeny uint8 = 11 // helper → daemon (RT_FLOW policy deny)
+	EventFrameTypeScreenDrop uint8 = 12 // helper → daemon (RT_FLOW screen drop)
+	EventFrameTypeFilterLog  uint8 = 13 // helper → daemon (RT_FLOW filter log)
 )
 
 // Session event flag bits in the Flags byte of SessionOpen/Update/Close payloads.

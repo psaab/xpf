@@ -313,7 +313,7 @@ func TestDecodeDataplaneEventPolicyDenyRTFlow(t *testing.T) {
 		99,
 		1700000000000000000,
 	)
-	if !dataplaneEventPayloadMatchesFrame(EventTypePolicyDeny, payload) {
+	if !dataplaneEventPayloadMatchesFrame(EventFrameTypePolicyDeny, payload) {
 		t.Fatal("RT_FLOW payload did not match policy-deny event-stream frame type")
 	}
 	rec, ok := decodeDataplaneEventPayload(payload)
@@ -492,7 +492,7 @@ func TestEventStreamDataplaneEventAckAndCallback(t *testing.T) {
 		0, 77,
 		0,
 	)
-	if err := writeFrame(conn, EventTypePolicyDeny, 7, payload); err != nil {
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 7, payload); err != nil {
 		t.Fatalf("write dataplane event: %v", err)
 	}
 
@@ -579,7 +579,7 @@ func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
 		0, 77,
 		0,
 	)
-	if err := writeFrame(conn, EventTypePolicyDeny, 11, payload); err != nil {
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 11, payload); err != nil {
 		t.Fatalf("write dataplane event: %v", err)
 	}
 
@@ -598,7 +598,7 @@ func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
 	}
 }
 
-func TestEventStreamDataplaneEventBeforeCallbackWaitsForCallbackBeforeAck(t *testing.T) {
+func TestEventStreamDataplaneEventBeforeCallbackDropsWithoutBlocking(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test-events.sock")
 
@@ -633,36 +633,44 @@ func TestEventStreamDataplaneEventBeforeCallbackWaitsForCallbackBeforeAck(t *tes
 		0, 77,
 		0,
 	)
-	if err := writeFrame(conn, EventTypePolicyDeny, 21, payload); err != nil {
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 21, payload); err != nil {
 		t.Fatalf("write first dataplane event: %v", err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
-	if typ, seq, _, err := readFrame(conn); err == nil {
-		t.Fatalf("event before callback was acked type=%d seq=%d; want no ack until callback applies it", typ, seq)
-	} else if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
-		t.Fatalf("read first ack error = %v, want timeout", err)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, seq, _, err := readFrame(conn)
+	if err != nil {
+		t.Fatalf("read ack for dropped pre-callback event: %v", err)
+	}
+	if typ != EventTypeAck || seq != 21 {
+		t.Fatalf("ack for dropped pre-callback event = type %d seq %d, want type %d seq 21", typ, seq, EventTypeAck)
+	}
+	if got := es.PolicyDenyDrops.Load(); got != 1 {
+		t.Fatalf("PolicyDenyDrops = %d, want 1", got)
 	}
 
 	got := make(chan uint64, 1)
 	es.SetOnDataplaneEvent(func(seq uint64, _ logging.EventRecord) {
 		got <- seq
 	})
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 22, payload); err != nil {
+		t.Fatalf("write second dataplane event: %v", err)
+	}
 
 	select {
 	case gotSeq := <-got:
-		if gotSeq != 21 {
-			t.Fatalf("callback seq = %d, want 21", gotSeq)
+		if gotSeq != 22 {
+			t.Fatalf("callback seq = %d, want 22", gotSeq)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("callback not invoked after late registration")
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	typ, seq, _, err := readFrame(conn)
+	typ, seq, _, err = readFrame(conn)
 	if err != nil {
 		t.Fatalf("read ack after callback: %v", err)
 	}
-	if typ != EventTypeAck || seq != 21 {
-		t.Fatalf("ack after callback = type %d seq %d, want type %d seq 21", typ, seq, EventTypeAck)
+	if typ != EventTypeAck || seq != 22 {
+		t.Fatalf("ack after callback = type %d seq %d, want type %d seq 22", typ, seq, EventTypeAck)
 	}
 }
 
@@ -697,7 +705,7 @@ func TestEventStreamMalformedDataplaneEventDropsAndAcks(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if err := writeFrame(conn, EventTypeScreenDrop, 9, []byte{4, 6}); err != nil {
+	if err := writeFrame(conn, EventFrameTypeScreenDrop, 9, []byte{4, 6}); err != nil {
 		t.Fatalf("write malformed dataplane event: %v", err)
 	}
 

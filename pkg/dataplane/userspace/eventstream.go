@@ -103,30 +103,12 @@ func (es *EventStream) SetOnFullResync(fn func()) {
 	es.onFullResync = fn
 }
 
-func (es *EventStream) dataplaneCallbacks() (func(uint64, []byte), func(uint64, logging.EventRecord), bool) {
+func (es *EventStream) dataplaneCallbacks() (func(uint64, []byte), func(uint64, logging.EventRecord)) {
 	es.callbackMu.RLock()
 	defer es.callbackMu.RUnlock()
 	raw := es.onRawDataplaneEvent
 	decoded := es.onDataplaneEvent
-	return raw, decoded, raw != nil || decoded != nil
-}
-
-func (es *EventStream) waitForDataplaneCallbacks(ctx context.Context) (func(uint64, []byte), func(uint64, logging.EventRecord), bool) {
-	if raw, decoded, ok := es.dataplaneCallbacks(); ok {
-		return raw, decoded, true
-	}
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, nil, false
-		case <-ticker.C:
-			if raw, decoded, ok := es.dataplaneCallbacks(); ok {
-				return raw, decoded, true
-			}
-		}
-	}
+	return raw, decoded
 }
 
 // Start creates the Unix socket listener and launches the accept loop.
@@ -405,7 +387,7 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			// the connection alive to prevent read-deadline disconnect.
 			continue
 
-		case EventTypePolicyDeny, EventTypeScreenDrop, EventTypeFilterLog:
+		case EventFrameTypePolicyDeny, EventFrameTypeScreenDrop, EventFrameTypeFilterLog:
 			if !dataplaneEventPayloadMatchesFrame(typ, payload) {
 				es.DecodeErrors.Add(1)
 				es.recordDataplaneEventDrop(typ)
@@ -419,9 +401,13 @@ func (es *EventStream) readLoop(ctx context.Context) {
 				es.markDroppedFrameApplied(seq, &prevSeq)
 				continue
 			}
-			onRawDataplaneEvent, onDataplaneEvent, ok := es.waitForDataplaneCallbacks(ctx)
-			if !ok {
-				return
+			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
+			if onRawDataplaneEvent == nil && onDataplaneEvent == nil {
+				es.recordDataplaneEventDrop(typ)
+				es.markDroppedFrameApplied(seq, &prevSeq)
+				slog.Warn("event stream: dropped dataplane frame before callbacks were wired",
+					"type", typ, "seq", seq)
+				continue
 			}
 			if seq > prevSeq+1 && prevSeq > 0 {
 				es.SeqGaps.Add(1)
@@ -458,22 +444,22 @@ func (es *EventStream) markDroppedFrameApplied(seq uint64, prevSeq *uint64) {
 
 func (es *EventStream) recordDataplaneEvent(typ uint8) {
 	switch typ {
-	case EventTypePolicyDeny:
+	case EventFrameTypePolicyDeny:
 		es.PolicyDenyEvents.Add(1)
-	case EventTypeScreenDrop:
+	case EventFrameTypeScreenDrop:
 		es.ScreenDropEvents.Add(1)
-	case EventTypeFilterLog:
+	case EventFrameTypeFilterLog:
 		es.FilterLogEvents.Add(1)
 	}
 }
 
 func (es *EventStream) recordDataplaneEventDrop(typ uint8) {
 	switch typ {
-	case EventTypePolicyDeny:
+	case EventFrameTypePolicyDeny:
 		es.PolicyDenyDrops.Add(1)
-	case EventTypeScreenDrop:
+	case EventFrameTypeScreenDrop:
 		es.ScreenDropDrops.Add(1)
-	case EventTypeFilterLog:
+	case EventFrameTypeFilterLog:
 		es.FilterLogDrops.Add(1)
 	default:
 		es.UnknownFrameDrops.Add(1)
@@ -755,11 +741,11 @@ func dataplaneEventPayloadMatchesFrame(typ uint8, payload []byte) bool {
 	}
 	var want uint8
 	switch typ {
-	case EventTypePolicyDeny:
+	case EventFrameTypePolicyDeny:
 		want = dataplane.EventTypePolicyDeny
-	case EventTypeScreenDrop:
+	case EventFrameTypeScreenDrop:
 		want = dataplane.EventTypeScreenDrop
-	case EventTypeFilterLog:
+	case EventFrameTypeFilterLog:
 		want = dataplane.EventTypeFilterLog
 	default:
 		return false

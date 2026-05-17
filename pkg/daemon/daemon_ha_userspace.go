@@ -488,7 +488,22 @@ func (d *Daemon) runUserspaceEventStream(ctx context.Context) {
 		d.syncUserspaceSessionDeltas(ctx)
 		return
 	}
+	if !d.wireUserspaceEventStreamCallbacks(ctx, provider) {
+		return
+	}
+	if d.cluster == nil || d.sessionSync == nil {
+		return
+	}
 
+	slog.Info("userspace: event stream consumer started, polling is primary until stream connects")
+
+	// Monitor connection. When the stream is connected, events arrive via
+	// callback and polling drops to 5s reconciliation. When disconnected,
+	// polling resumes at 100ms.
+	d.eventStreamFallbackLoop(ctx, provider)
+}
+
+func (d *Daemon) wireUserspaceEventStreamCallbacks(ctx context.Context, provider userspaceEventStreamProvider) bool {
 	// Wait for the event stream to become available (helper may not have started yet).
 	var es *dpuserspace.EventStream
 	for {
@@ -498,7 +513,7 @@ func (d *Daemon) runUserspaceEventStream(ctx context.Context) {
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
@@ -525,13 +540,7 @@ func (d *Daemon) runUserspaceEventStream(ctx context.Context) {
 	es.SetOnFullResync(func() {
 		d.handleEventStreamFullResync()
 	})
-
-	slog.Info("userspace: event stream consumer started, polling is primary until stream connects")
-
-	// Monitor connection. When the stream is connected, events arrive via
-	// callback and polling drops to 5s reconciliation. When disconnected,
-	// polling resumes at 100ms.
-	d.eventStreamFallbackLoop(ctx, provider)
+	return true
 }
 
 // handleEventStreamDelta processes a single session event from the event stream.
@@ -601,6 +610,9 @@ func (d *Daemon) handleEventStreamFullResync() {
 // when disconnected, it runs at 100ms to compensate for the lost stream.
 func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, provider userspaceEventStreamProvider) {
 	drainer, hasDrainer := d.dp.(userspaceSessionDeltaDrainer)
+	if d.cluster == nil || d.sessionSync == nil {
+		return
+	}
 
 	const (
 		fastInterval      = 100 * time.Millisecond // event stream disconnected
@@ -642,7 +654,7 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, provider userspace
 				continue
 			}
 			if d.cluster == nil || d.sessionSync == nil {
-				continue
+				return
 			}
 			if !d.cluster.IsLocalPrimaryAny() || !d.sessionSync.IsConnected() {
 				continue
@@ -665,7 +677,7 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, provider userspace
 			continue
 		}
 		if d.cluster == nil || d.sessionSync == nil {
-			continue
+			return
 		}
 		if !d.cluster.IsLocalPrimaryAny() || !d.sessionSync.IsConnected() {
 			continue
