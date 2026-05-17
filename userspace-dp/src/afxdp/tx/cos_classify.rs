@@ -537,6 +537,7 @@ pub(super) fn clone_prepared_request_for_cos(
         egress_ifindex: req.egress_ifindex,
         cos_queue_id: req.cos_queue_id,
         dscp_rewrite: req.dscp_rewrite,
+        mirror_clone: false,
     })
 }
 

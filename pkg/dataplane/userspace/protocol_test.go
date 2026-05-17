@@ -33,6 +33,7 @@ var mirror_counter_wire_keys = []string{
 	"mirrored_packets",
 	"mirrored_bytes",
 	"mirror_drops_no_frame",
+	"mirror_drops_tx_frame_reserve",
 	"mirror_drops_no_binding",
 	"mirror_drops_queue_full",
 }
@@ -132,14 +133,15 @@ func TestConfigSnapshotMirrorConfigsRoundTrip(t *testing.T) {
 
 func TestBindingStatusMirrorCountersRoundTrip(t *testing.T) {
 	in := BindingStatus{
-		WorkerID:             3,
-		Ifindex:              11,
-		QueueID:              2,
-		MirroredPackets:      5,
-		MirroredBytes:        640,
-		MirrorDropsNoFrame:   1,
-		MirrorDropsNoBinding: 2,
-		MirrorDropsQueueFull: 3,
+		WorkerID:                  3,
+		Ifindex:                   11,
+		QueueID:                   2,
+		MirroredPackets:           5,
+		MirroredBytes:             640,
+		MirrorDropsNoFrame:        1,
+		MirrorDropsTXFrameReserve: 2,
+		MirrorDropsNoBinding:      3,
+		MirrorDropsQueueFull:      4,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {
@@ -166,14 +168,15 @@ func TestBindingStatusMirrorCountersRoundTrip(t *testing.T) {
 
 func TestBindingCountersSnapshotMirrorCountersRoundTrip(t *testing.T) {
 	in := BindingCountersSnapshot{
-		WorkerID:             3,
-		Ifindex:              11,
-		QueueID:              2,
-		MirroredPackets:      5,
-		MirroredBytes:        640,
-		MirrorDropsNoFrame:   1,
-		MirrorDropsNoBinding: 2,
-		MirrorDropsQueueFull: 3,
+		WorkerID:                  3,
+		Ifindex:                   11,
+		QueueID:                   2,
+		MirroredPackets:           5,
+		MirroredBytes:             640,
+		MirrorDropsNoFrame:        1,
+		MirrorDropsTXFrameReserve: 2,
+		MirrorDropsNoBinding:      3,
+		MirrorDropsQueueFull:      4,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {

@@ -149,6 +149,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 egress_ifindex: request.decision.resolution.egress_ifindex,
                 cos_queue_id: request.cos_queue_id,
                 dscp_rewrite: request.dscp_rewrite,
+                mirror_clone: false,
             };
             if enqueue_local_request_to_target_or_owner(target_binding, req).is_err() {
                 recycle_ingress_frame(ingress_binding, source_offset, now_ns);
@@ -364,6 +365,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                 egress_ifindex: request.decision.resolution.egress_ifindex,
                                 cos_queue_id: request.cos_queue_id,
                                 dscp_rewrite: request.dscp_rewrite,
+                                mirror_clone: false,
                             });
                         bound_pending_tx_local(target_binding);
                         dbg.enqueue_ok += 1;
@@ -554,6 +556,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     egress_ifindex: request.decision.resolution.egress_ifindex,
                                     cos_queue_id: request.cos_queue_id,
                                     dscp_rewrite: request.dscp_rewrite,
+                                    mirror_clone: false,
                                 };
                                 if enqueue_local_request_to_target_or_owner(target_binding, req)
                                     .is_err()
@@ -832,6 +835,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     egress_ifindex: request.decision.resolution.egress_ifindex,
                                     cos_queue_id: request.cos_queue_id,
                                     dscp_rewrite: request.dscp_rewrite,
+                                    mirror_clone: false,
                                 };
                                 if enqueue_local_request_to_target_or_owner(target_binding, req)
                                     .is_err()

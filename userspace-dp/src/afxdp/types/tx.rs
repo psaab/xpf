@@ -21,6 +21,7 @@ pub(in crate::afxdp) struct TxRequest {
     pub(in crate::afxdp) egress_ifindex: i32,
     pub(in crate::afxdp) cos_queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
+    pub(in crate::afxdp) mirror_clone: bool,
 }
 
 pub(in crate::afxdp) enum PendingForwardFrame {

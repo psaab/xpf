@@ -4,10 +4,10 @@
 // `#[path = "cross_binding_tests.rs"]` from cross_binding.rs.
 
 use super::*;
+use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::token_bucket::COS_MIN_BURST_BYTES;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::SharedCoSQueueLease;
-use crate::afxdp::PROTO_TCP;
 
 #[test]
 fn redirect_local_cos_request_to_owner_pushes_worker_command() {
@@ -30,6 +30,7 @@ fn redirect_local_cos_request_to_owner_pushes_worker_command() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let redirected =
@@ -68,6 +69,7 @@ fn redirect_local_cos_request_to_owner_uses_interface_default_queue_owner_when_u
         egress_ifindex: 80,
         cos_queue_id: None,
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let redirected =
@@ -99,6 +101,7 @@ fn redirect_local_cos_request_to_owner_rejects_explicit_queue_miss() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let redirected =
@@ -142,6 +145,7 @@ fn redirect_local_cos_request_to_owner_keeps_exact_queue_on_eligible_worker() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let redirected =
@@ -354,6 +358,7 @@ fn redirect_local_cos_request_to_owner_binding_pushes_owner_live_queue() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let redirected =
@@ -445,6 +450,7 @@ fn redirect_local_cos_request_to_owner_uses_owner_live_queue_when_available() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let redirected =
@@ -492,6 +498,7 @@ fn redirect_local_cos_request_to_owner_redirects_low_rate_exact_queue() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let redirected =
@@ -542,6 +549,7 @@ fn redirect_local_exact_cos_request_to_owner_binding_pushes_owner_live_queue() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let redirected =

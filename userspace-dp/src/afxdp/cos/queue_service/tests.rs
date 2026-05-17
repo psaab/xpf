@@ -1430,6 +1430,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -1443,6 +1444,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -1519,6 +1521,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -1532,6 +1535,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     let mut free_tx_frames = VecDeque::from([64, 128]);
     let mut scratch_local_tx = Vec::new();
@@ -1591,6 +1595,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -1604,6 +1609,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -1617,6 +1623,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     let mut free_tx_frames = VecDeque::new();
     let mut scratch_local_tx = vec![
@@ -1851,6 +1858,7 @@ fn assign_local_dscp_rewrite_preserves_existing_filter_rewrite() {
             egress_ifindex: 42,
             cos_queue_id: Some(0),
             dscp_rewrite: None,
+            mirror_clone: false,
         },
         TxRequest {
             bytes: vec![0; 64],
@@ -1861,6 +1869,7 @@ fn assign_local_dscp_rewrite_preserves_existing_filter_rewrite() {
             egress_ifindex: 42,
             cos_queue_id: Some(0),
             dscp_rewrite: Some(0),
+            mirror_clone: false,
         },
     ]);
 
@@ -1964,6 +1973,7 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
         egress_ifindex: 80,
         cos_queue_id: Some(5),
         dscp_rewrite: None,
+        mirror_clone: false,
     }]);
 
     let retry_bytes = restore_cos_local_items_inner(&mut queue, retry);

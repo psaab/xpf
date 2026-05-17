@@ -1235,6 +1235,7 @@ impl Coordinator {
                 binding.mirrored_packets = snap.mirrored_packets;
                 binding.mirrored_bytes = snap.mirrored_bytes;
                 binding.mirror_drops_no_frame = snap.mirror_drops_no_frame;
+                binding.mirror_drops_tx_frame_reserve = snap.mirror_drops_tx_frame_reserve;
                 binding.mirror_drops_no_binding = snap.mirror_drops_no_binding;
                 binding.mirror_drops_queue_full = snap.mirror_drops_queue_full;
                 binding.post_drain_backup_bytes = snap.post_drain_backup_bytes;
@@ -1388,6 +1389,7 @@ impl Coordinator {
                 binding.mirrored_packets = 0;
                 binding.mirrored_bytes = 0;
                 binding.mirror_drops_no_frame = 0;
+                binding.mirror_drops_tx_frame_reserve = 0;
                 binding.mirror_drops_no_binding = 0;
                 binding.mirror_drops_queue_full = 0;
                 binding.post_drain_backup_bytes = 0;

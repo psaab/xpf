@@ -1,6 +1,6 @@
 use super::*;
 
-const MIRROR_TX_FRAME_RESERVE: usize = TX_BATCH_SIZE;
+pub(in crate::afxdp) const MIRROR_TX_FRAME_RESERVE: usize = TX_BATCH_SIZE;
 const MIRROR_PENDING_LIMIT: usize = TX_BATCH_SIZE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,6 +8,7 @@ pub(in crate::afxdp) enum MirrorCloneResult {
     Enqueued,
     NoBinding,
     NoFrame,
+    TxFrameReserve,
     QueueFull,
 }
 
@@ -126,9 +127,13 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
         if !mirror_sample_allows(config.rate, &mut ingress_binding.mirror_sample_counter) {
             return None;
         }
-        let Some(target_binding) =
-            binding_by_index_mut(left, ingress_index, ingress_binding, right, target_binding_index)
-        else {
+        let Some(target_binding) = binding_by_index_mut(
+            left,
+            ingress_index,
+            ingress_binding,
+            right,
+            target_binding_index,
+        ) else {
             return Some(MirrorCloneResult::NoBinding);
         };
         return Some(enqueue_mirror_clone_to_binding(
@@ -183,10 +188,10 @@ fn enqueue_mirror_clone_to_binding(
         return MirrorCloneResult::QueueFull;
     }
     if target_binding.tx_pipeline.free_tx_frames.len() <= MIRROR_TX_FRAME_RESERVE {
-        return MirrorCloneResult::NoFrame;
+        return MirrorCloneResult::TxFrameReserve;
     }
     let Some(tx_offset) = target_binding.tx_pipeline.free_tx_frames.pop_front() else {
-        return MirrorCloneResult::NoFrame;
+        return MirrorCloneResult::TxFrameReserve;
     };
     let Some(out) = (unsafe {
         target_binding
@@ -305,6 +310,7 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
         egress_ifindex: config.output_ifindex,
         cos_queue_id,
         dscp_rewrite: None,
+        mirror_clone: true,
     };
     admission
         .enqueue_owned(req)
@@ -382,6 +388,10 @@ pub(in crate::afxdp) fn record_mirror_clone_result(
         MirrorCloneResult::NoFrame => {
             live.mirror_drops_no_frame.fetch_add(1, Ordering::Relaxed);
         }
+        MirrorCloneResult::TxFrameReserve => {
+            live.mirror_drops_tx_frame_reserve
+                .fetch_add(1, Ordering::Relaxed);
+        }
         MirrorCloneResult::QueueFull => {
             live.mirror_drops_queue_full.fetch_add(1, Ordering::Relaxed);
         }
@@ -425,6 +435,7 @@ mod tests {
             egress_ifindex,
             cos_queue_id: None,
             dscp_rewrite: None,
+            mirror_clone: false,
         }
     }
 
@@ -1008,7 +1019,10 @@ mod tests {
         );
         let mut queued = VecDeque::new();
         target_live.take_pending_tx_into(&mut queued);
-        assert_eq!(queued.pop_front().expect("original request").bytes, vec![0x33; 64]);
+        assert_eq!(
+            queued.pop_front().expect("original request").bytes,
+            vec![0x33; 64]
+        );
         assert!(queued.is_empty());
     }
 
@@ -1205,10 +1219,56 @@ mod tests {
             None,
         );
         record_mirror_clone_result(&ingress.live, result, 64);
-        assert_eq!(result, MirrorCloneResult::NoFrame);
+        assert_eq!(result, MirrorCloneResult::TxFrameReserve);
         assert_eq!(
-            ingress.live.mirror_drops_no_frame.load(Ordering::Relaxed),
+            ingress
+                .live
+                .mirror_drops_tx_frame_reserve
+                .load(Ordering::Relaxed),
             1
+        );
+    }
+
+    #[test]
+    fn live_mirror_owner_drops_before_consuming_tx_frame_reserve() {
+        let mut binding = BindingWorker::new_for_mirror_test(1, 0, 22, 0);
+        binding
+            .tx_pipeline
+            .free_tx_frames
+            .truncate(MIRROR_TX_FRAME_RESERVE);
+        let free_before = binding.tx_pipeline.free_tx_frames.len();
+        let mut pending = VecDeque::from([TxRequest {
+            bytes: vec![0xdd; 64],
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex: 22,
+            cos_queue_id: None,
+            dscp_rewrite: None,
+            mirror_clone: true,
+        }]);
+        let mut shared_recycles = Vec::new();
+
+        let result = match transmit_batch(&mut binding, &mut pending, 0, &mut shared_recycles) {
+            Ok(result) => result,
+            Err(_) => panic!("mirror reserve drop should not surface as TX retry"),
+        };
+
+        assert_eq!(result, (0, 0));
+        assert!(pending.is_empty());
+        assert_eq!(binding.tx_pipeline.free_tx_frames.len(), free_before);
+        assert_eq!(
+            binding
+                .live
+                .mirror_drops_tx_frame_reserve
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            binding.live.mirror_drops_no_frame.load(Ordering::Relaxed),
+            0,
+            "TX-frame reserve drops must not be conflated with oversize/slice failures"
         );
     }
 

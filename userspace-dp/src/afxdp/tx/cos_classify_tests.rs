@@ -172,6 +172,7 @@ fn prepare_local_request_for_cos_materializes_prepared_frame() {
         egress_ifindex: 80,
         cos_queue_id: Some(5),
         dscp_rewrite: Some(46),
+        mirror_clone: false,
     };
 
     let prepared =
@@ -201,6 +202,7 @@ fn prepare_local_request_for_cos_falls_back_when_no_free_tx_frame_exists() {
         egress_ifindex: 80,
         cos_queue_id: Some(5),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     let req = match prepare_local_request_for_cos(&area, &mut free_tx_frames, req) {

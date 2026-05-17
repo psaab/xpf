@@ -848,6 +848,7 @@ type BindingStatus struct {
 	MirroredPackets                   uint64 `json:"mirrored_packets,omitempty"`
 	MirroredBytes                     uint64 `json:"mirrored_bytes,omitempty"`
 	MirrorDropsNoFrame                uint64 `json:"mirror_drops_no_frame,omitempty"`
+	MirrorDropsTXFrameReserve         uint64 `json:"mirror_drops_tx_frame_reserve,omitempty"`
 	MirrorDropsNoBinding              uint64 `json:"mirror_drops_no_binding,omitempty"`
 	MirrorDropsQueueFull              uint64 `json:"mirror_drops_queue_full,omitempty"`
 	DirectTXPackets                   uint64 `json:"direct_tx_packets,omitempty"`
@@ -971,6 +972,7 @@ type BindingCountersSnapshot struct {
 	MirroredPackets                 uint64 `json:"mirrored_packets,omitempty"`
 	MirroredBytes                   uint64 `json:"mirrored_bytes,omitempty"`
 	MirrorDropsNoFrame              uint64 `json:"mirror_drops_no_frame,omitempty"`
+	MirrorDropsTXFrameReserve       uint64 `json:"mirror_drops_tx_frame_reserve,omitempty"`
 	MirrorDropsNoBinding            uint64 `json:"mirror_drops_no_binding,omitempty"`
 	MirrorDropsQueueFull            uint64 `json:"mirror_drops_queue_full,omitempty"`
 	// #812: per-queue TX submit→completion latency histogram, pulled

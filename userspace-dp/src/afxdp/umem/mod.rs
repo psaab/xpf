@@ -375,6 +375,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// oversized packet (`len > tx_frame_capacity()`), TX-frame
     /// reserve exhausted, or UMEM slice failure while cloning.
     pub(super) mirror_drops_no_frame: AtomicU64,
+    /// #1376: mirror clone dropped specifically to preserve the
+    /// output binding's owner-local TX-frame reserve. Split from
+    /// `mirror_drops_no_frame` so operators can distinguish an
+    /// oversize/slice failure from pressure that would starve normal TX.
+    pub(super) mirror_drops_tx_frame_reserve: AtomicU64,
     /// #1376: mirror clone dropped because no live mirror target
     /// binding was available for the resolved output TX ifindex.
     pub(super) mirror_drops_no_binding: AtomicU64,
@@ -608,6 +613,7 @@ impl BindingLiveState {
             mirrored_packets: AtomicU64::new(0),
             mirrored_bytes: AtomicU64::new(0),
             mirror_drops_no_frame: AtomicU64::new(0),
+            mirror_drops_tx_frame_reserve: AtomicU64::new(0),
             mirror_drops_no_binding: AtomicU64::new(0),
             mirror_drops_queue_full: AtomicU64::new(0),
             no_owner_binding_drops: AtomicU64::new(0),
@@ -926,6 +932,9 @@ impl BindingLiveState {
             mirrored_packets: self.mirrored_packets.load(Ordering::Relaxed),
             mirrored_bytes: self.mirrored_bytes.load(Ordering::Relaxed),
             mirror_drops_no_frame: self.mirror_drops_no_frame.load(Ordering::Relaxed),
+            mirror_drops_tx_frame_reserve: self
+                .mirror_drops_tx_frame_reserve
+                .load(Ordering::Relaxed),
             mirror_drops_no_binding: self.mirror_drops_no_binding.load(Ordering::Relaxed),
             mirror_drops_queue_full: self.mirror_drops_queue_full.load(Ordering::Relaxed),
             post_drain_backup_bytes: self

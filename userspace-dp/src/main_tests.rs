@@ -787,8 +787,9 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         mirrored_packets: 32,
         mirrored_bytes: 33,
         mirror_drops_no_frame: 34,
-        mirror_drops_no_binding: 35,
-        mirror_drops_queue_full: 36,
+        mirror_drops_tx_frame_reserve: 35,
+        mirror_drops_no_binding: 36,
+        mirror_drops_queue_full: 37,
         // #812: populated so wire-key assertions below also cover
         // the new TX submit-latency fields.
         tx_submit_latency_hist: vec![13, 14, 15],
@@ -843,6 +844,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         "mirrored_packets",
         "mirrored_bytes",
         "mirror_drops_no_frame",
+        "mirror_drops_tx_frame_reserve",
         "mirror_drops_no_binding",
         "mirror_drops_queue_full",
         // #812: new wire keys — absence from BindingCountersSnapshot
@@ -1092,6 +1094,7 @@ fn tx_latency_hist_serialization_roundtrip() {
         mirrored_packets: 0,
         mirrored_bytes: 0,
         mirror_drops_no_frame: 0,
+        mirror_drops_tx_frame_reserve: 0,
         mirror_drops_no_binding: 0,
         mirror_drops_queue_full: 0,
         // Hand-built plausible histogram — bucket 0 heavy,

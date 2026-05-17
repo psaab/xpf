@@ -228,6 +228,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             egress_ifindex: decision.resolution.egress_ifindex,
             cos_queue_id: cos.queue_id,
             dscp_rewrite: cos.dscp_rewrite,
+            mirror_clone: false,
         },
         session_entry,
         reverse_session_entry,
@@ -429,4 +430,3 @@ pub(super) fn record_local_tunnel_exception(
         );
     }
 }
-

@@ -94,7 +94,7 @@ func TestFormatStatusSummary(t *testing.T) {
 		"TX completions:            5",
 		"Mirrored packets:          10",
 		"Mirrored bytes:            1280",
-		"Mirror drops:              no-frame=1 no-binding=2 queue-full=3",
+		"Mirror drops:              no-frame=1 tx-frame-reserve=0 no-binding=2 queue-full=3",
 		"Kernel RX dropped:         13",
 		"Kernel RX invalid descs:   3",
 		"Direct TX packets:         2",

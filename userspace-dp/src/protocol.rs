@@ -1564,6 +1564,8 @@ pub(crate) struct BindingStatus {
     pub mirrored_bytes: u64,
     #[serde(rename = "mirror_drops_no_frame", default)]
     pub mirror_drops_no_frame: u64,
+    #[serde(rename = "mirror_drops_tx_frame_reserve", default)]
+    pub mirror_drops_tx_frame_reserve: u64,
     #[serde(rename = "mirror_drops_no_binding", default)]
     pub mirror_drops_no_binding: u64,
     #[serde(rename = "mirror_drops_queue_full", default)]
@@ -1836,6 +1838,8 @@ pub(crate) struct BindingCountersSnapshot {
     pub mirrored_bytes: u64,
     #[serde(rename = "mirror_drops_no_frame", default)]
     pub mirror_drops_no_frame: u64,
+    #[serde(rename = "mirror_drops_tx_frame_reserve", default)]
+    pub mirror_drops_tx_frame_reserve: u64,
     #[serde(rename = "mirror_drops_no_binding", default)]
     pub mirror_drops_no_binding: u64,
     #[serde(rename = "mirror_drops_queue_full", default)]
@@ -1941,6 +1945,7 @@ impl From<&BindingStatus> for BindingCountersSnapshot {
             mirrored_packets: b.mirrored_packets,
             mirrored_bytes: b.mirrored_bytes,
             mirror_drops_no_frame: b.mirror_drops_no_frame,
+            mirror_drops_tx_frame_reserve: b.mirror_drops_tx_frame_reserve,
             mirror_drops_no_binding: b.mirror_drops_no_binding,
             mirror_drops_queue_full: b.mirror_drops_queue_full,
             // #812: clone the histogram Vec<u64> by value (owned
@@ -2320,8 +2325,9 @@ mod tests {
             mirrored_packets: 5,
             mirrored_bytes: 640,
             mirror_drops_no_frame: 1,
-            mirror_drops_no_binding: 2,
-            mirror_drops_queue_full: 3,
+            mirror_drops_tx_frame_reserve: 2,
+            mirror_drops_no_binding: 3,
+            mirror_drops_queue_full: 4,
             ..Default::default()
         };
 
@@ -2334,6 +2340,7 @@ mod tests {
             "mirrored_packets",
             "mirrored_bytes",
             "mirror_drops_no_frame",
+            "mirror_drops_tx_frame_reserve",
             "mirror_drops_no_binding",
             "mirror_drops_queue_full",
         ] {
@@ -2349,9 +2356,10 @@ mod tests {
         assert_eq!(back.mirrored_bytes, status.mirrored_bytes);
         assert_eq!(back.mirror_drops_no_frame, status.mirror_drops_no_frame);
         assert_eq!(
-            back.mirror_drops_no_binding,
-            status.mirror_drops_no_binding
+            back.mirror_drops_tx_frame_reserve,
+            status.mirror_drops_tx_frame_reserve
         );
+        assert_eq!(back.mirror_drops_no_binding, status.mirror_drops_no_binding);
         assert_eq!(back.mirror_drops_queue_full, status.mirror_drops_queue_full);
 
         let snap: BindingCountersSnapshot = (&status).into();
@@ -2359,13 +2367,11 @@ mod tests {
         assert_eq!(snap.mirrored_bytes, status.mirrored_bytes);
         assert_eq!(snap.mirror_drops_no_frame, status.mirror_drops_no_frame);
         assert_eq!(
-            snap.mirror_drops_no_binding,
-            status.mirror_drops_no_binding
+            snap.mirror_drops_tx_frame_reserve,
+            status.mirror_drops_tx_frame_reserve
         );
-        assert_eq!(
-            snap.mirror_drops_queue_full,
-            status.mirror_drops_queue_full
-        );
+        assert_eq!(snap.mirror_drops_no_binding, status.mirror_drops_no_binding);
+        assert_eq!(snap.mirror_drops_queue_full, status.mirror_drops_queue_full);
     }
 
     // #943 Copilot round-2 finding #3: the rich BindingStatus wire

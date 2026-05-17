@@ -4,8 +4,8 @@
 // `#[path = "ecn_tests.rs"]` from ecn.rs.
 
 use super::*;
-use crate::afxdp::tx::test_support::*;
 use crate::afxdp::PROTO_TCP;
+use crate::afxdp::tx::test_support::*;
 
 #[test]
 fn mark_ecn_ce_ipv4_converts_ect0_to_ce_and_updates_checksum() {
@@ -154,6 +154,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
         egress_ifindex: 1,
         cos_queue_id: Some(0),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     assert!(maybe_mark_ecn_ce(&mut req));
     assert_eq!(req.bytes[15] & ECN_MASK, ECN_CE);
@@ -170,6 +171,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
         egress_ifindex: 1,
         cos_queue_id: Some(0),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     assert!(maybe_mark_ecn_ce(&mut req));
     assert_eq!(ipv6_tclass(&req.bytes), ECN_CE);
@@ -188,6 +190,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
         egress_ifindex: 1,
         cos_queue_id: Some(0),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     assert!(!maybe_mark_ecn_ce(&mut req));
 }
@@ -208,7 +211,7 @@ fn maybe_mark_ecn_ce_handles_single_vlan_tagged_frame() {
     let mut tagged = Vec::with_capacity(base.len() + 4);
     tagged.extend_from_slice(&base[..12]); // dst + src MAC
     tagged.extend_from_slice(&[0x81, 0x00]); // TPID
-                                             // TCI: priority 5 << 13 | DEI 0 | VID 80.
+    // TCI: priority 5 << 13 | DEI 0 | VID 80.
     let tci: u16 = (5 << 13) | 80;
     tagged.extend_from_slice(&tci.to_be_bytes());
     tagged.extend_from_slice(&[0x08, 0x00]); // inner ethertype (IPv4)
@@ -226,6 +229,7 @@ fn maybe_mark_ecn_ce_handles_single_vlan_tagged_frame() {
         egress_ifindex: 1,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     assert!(
         maybe_mark_ecn_ce(&mut req),
@@ -261,6 +265,7 @@ fn maybe_mark_ecn_ce_rejects_unknown_ethertype() {
         egress_ifindex: 1,
         cos_queue_id: Some(0),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     assert_eq!(ethernet_l3(&req.bytes), None);
     assert!(!maybe_mark_ecn_ce(&mut req));
@@ -278,7 +283,7 @@ fn ethernet_l3_rejects_qinq_until_explicitly_supported() {
     let base = build_ipv4_test_packet(ECN_ECT_0);
     let mut qinq = Vec::with_capacity(base.len() + 8);
     qinq.extend_from_slice(&base[..12]); // MACs
-                                         // Outer 802.1ad: TPID 0x88A8, TCI with an outer VID 100.
+    // Outer 802.1ad: TPID 0x88A8, TCI with an outer VID 100.
     qinq.extend_from_slice(&[0x88, 0xA8]);
     let outer_tci: u16 = 100;
     qinq.extend_from_slice(&outer_tci.to_be_bytes());
@@ -305,6 +310,7 @@ fn ethernet_l3_rejects_qinq_until_explicitly_supported() {
         egress_ifindex: 1,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     assert!(!maybe_mark_ecn_ce(&mut req));
 }

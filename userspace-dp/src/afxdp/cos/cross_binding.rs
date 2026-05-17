@@ -140,7 +140,6 @@ pub(in crate::afxdp) fn redirect_local_cos_request_to_owner(
     }
     Err(req)
 }
-
 #[cfg(test)]
 #[inline]
 pub(in crate::afxdp) fn redirect_local_cos_request_to_owner_binding(
@@ -210,6 +209,7 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner(
         egress_ifindex: req.egress_ifindex,
         cos_queue_id: req.cos_queue_id,
         dscp_rewrite: req.dscp_rewrite,
+        mirror_clone: false,
     };
     if redirect_local_cos_request_to_owner(
         &binding.cos.cos_fast_interfaces,
@@ -267,6 +267,7 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner_binding(
         egress_ifindex: req.egress_ifindex,
         cos_queue_id: req.cos_queue_id,
         dscp_rewrite: req.dscp_rewrite,
+        mirror_clone: false,
     };
     if owner_live.enqueue_tx(local_req).is_ok() {
         recycle_prepared_immediately_with_shared(binding, &req, shared_recycles);
@@ -274,7 +275,6 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner_binding(
     }
     Err(req)
 }
-
 
 #[cfg(test)]
 #[path = "cross_binding_tests.rs"]

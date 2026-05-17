@@ -39,6 +39,7 @@ fn partition_cos_bound_local_scans_mixed_head_deque() {
         egress_ifindex: 99,
         cos_queue_id: None,
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     let cos_bound = |payload: u8| TxRequest {
         bytes: vec![payload; 64],
@@ -49,6 +50,7 @@ fn partition_cos_bound_local_scans_mixed_head_deque() {
         egress_ifindex: 14,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     let mut pending: VecDeque<TxRequest> = VecDeque::from([
         non_cos(1),
@@ -87,6 +89,7 @@ fn partition_cos_bound_local_rescues_when_try_rescue_ok() {
         egress_ifindex: 99,
         cos_queue_id: None,
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     let cos_bound = TxRequest {
         bytes: vec![0xBB; 64],
@@ -97,6 +100,7 @@ fn partition_cos_bound_local_rescues_when_try_rescue_ok() {
         egress_ifindex: 14,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     let mut pending: VecDeque<TxRequest> = VecDeque::from([non_cos, cos_bound]);
     // Rescue always succeeds — CoS items must NOT count as drops.
@@ -125,6 +129,7 @@ fn partition_cos_bound_local_treats_default_queue_on_cos_interface_as_bound() {
             egress_ifindex: 14,
             cos_queue_id: None,
             dscp_rewrite: None,
+            mirror_clone: false,
         },
         TxRequest {
             bytes: vec![0x22; 64],
@@ -135,6 +140,7 @@ fn partition_cos_bound_local_treats_default_queue_on_cos_interface_as_bound() {
             egress_ifindex: 99,
             cos_queue_id: None,
             dscp_rewrite: None,
+            mirror_clone: false,
         },
     ]);
 

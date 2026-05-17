@@ -2403,6 +2403,7 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) mirrored_packets: u64,
     pub(crate) mirrored_bytes: u64,
     pub(crate) mirror_drops_no_frame: u64,
+    pub(crate) mirror_drops_tx_frame_reserve: u64,
     pub(crate) mirror_drops_no_binding: u64,
     pub(crate) mirror_drops_queue_full: u64,
     // #760 triage: surfaced on BindingStatus so operators can

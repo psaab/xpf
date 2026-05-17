@@ -8,7 +8,7 @@ use crate::afxdp::frame::{apply_dscp_rewrite_to_frame, decode_frame_summary, fra
 use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::{FastMap, PreparedTxRecycle, PreparedTxRequest, TxRequest};
 use crate::afxdp::worker::BindingWorker;
-use crate::afxdp::{TX_BATCH_SIZE, tx_frame_capacity};
+use crate::afxdp::{MIRROR_TX_FRAME_RESERVE, TX_BATCH_SIZE, tx_frame_capacity};
 use crate::xsk_ffi::xdp::XdpDesc;
 
 use super::rings::{maybe_wake_tx, reap_tx_completions};
@@ -94,10 +94,19 @@ pub(in crate::afxdp) fn transmit_batch(
     }
 
     binding.scratch.scratch_local_tx.clear();
+    let mut dropped_mirror_reserve = false;
     while binding.scratch.scratch_local_tx.len() < batch_size {
         let Some(mut req) = pending.pop_front() else {
             break;
         };
+        if req.mirror_clone && binding.tx_pipeline.free_tx_frames.len() <= MIRROR_TX_FRAME_RESERVE {
+            binding
+                .live
+                .mirror_drops_tx_frame_reserve
+                .fetch_add(1, Ordering::Relaxed);
+            dropped_mirror_reserve = true;
+            continue;
+        }
         if let Some(dscp_rewrite) = req.dscp_rewrite {
             let _ = apply_dscp_rewrite_to_frame(&mut req.bytes, dscp_rewrite);
         }
@@ -171,6 +180,9 @@ pub(in crate::afxdp) fn transmit_batch(
     }
 
     if binding.scratch.scratch_local_tx.is_empty() {
+        if dropped_mirror_reserve {
+            return Ok((0, 0));
+        }
         maybe_wake_tx(binding, true, now_ns);
         return Err(TxError::Retry("no prepared TX frame available".to_string()));
     }
