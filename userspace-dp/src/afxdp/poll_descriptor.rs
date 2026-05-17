@@ -193,11 +193,6 @@ pub(super) fn poll_binding_process_descriptor(
                                 let cached_dscp_rewrite = policer_action
                                     .dscp_rewrite
                                     .or(cached_descriptor.tx_selection.dscp_rewrite);
-                                let cached_precomputed_tx_selection = CachedTxSelectionDescriptor {
-                                    queue_id: cached_queue_id,
-                                    dscp_rewrite: cached_dscp_rewrite,
-                                    ..CachedTxSelectionDescriptor::default()
-                                };
                                 // Amortize session timestamp touch — every 64 cache hits.
                                 binding.flow.flow_cache_session_touch += 1;
                                 if binding.flow.flow_cache_session_touch & 63 == 0 {
@@ -409,6 +404,12 @@ pub(super) fn poll_binding_process_descriptor(
                                     }
                                     // Fallback: use PendingForwardRequest path for cross-binding or failure.
                                     if recycle_now {
+                                        let cached_precomputed_tx_selection =
+                                            CachedTxSelectionDescriptor {
+                                                queue_id: cached_queue_id,
+                                                dscp_rewrite: cached_dscp_rewrite,
+                                                ..CachedTxSelectionDescriptor::default()
+                                            };
                                         if let Some(mut request) =
                                             build_live_forward_request_from_frame(
                                                 worker_ctx.binding_lookup,

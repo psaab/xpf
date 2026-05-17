@@ -21,6 +21,10 @@
   - **Action**: PR #1410 round-1 review follow-up — removed flow-cache hit TX-selection cloning from the packet fast path, switched local ICMP/tunnel/control-packet CoS resolution to timestamped `_at` evaluation with flow-key fallback, and enforced `cos.drop` handling on those paths so three-color policer drops are not bypassed when metadata-only classification is used.
   - **File(s)**: `userspace-dp/src/afxdp/poll_descriptor.rs`, `userspace-dp/src/afxdp/icmp.rs`, `userspace-dp/src/afxdp/tunnel.rs`, `userspace-dp/src/afxdp/coordinator/inject.rs`, `_Log.md`
 
+- **Timestamp**: 2026-05-17T20:37:00Z
+  - **Action**: Addressed post-validation review nit by lazily constructing cached precomputed TX-selection descriptors only on flow-cache fallback forwarding, avoiding unnecessary per-hit descriptor construction on successful in-place TX hits.
+  - **File(s)**: `userspace-dp/src/afxdp/poll_descriptor.rs`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T15:28:13Z
   - **Action**: PR #1397 follow-up — fixed mouse-latency diagnostics review findings by making `cwnd_settle_ok` tri-state in manifests (unknown/true/false), correcting cwnd byte-unit parsing to 1024-based `K/M/G/TBytes`, recording probe phase timings even on failed/timed-out connect/drain/read attempts, tightening fairness-regimes settle-evidence wording, and extending unit coverage for settle-diagnostics CLI output/status and failure-phase timing counts.
   - **File(s)**: `test/incus/test-mouse-latency.sh`, `test/incus/mouse_latency_orchestrate.py`, `test/incus/mouse_latency_orchestrate_test.py`, `test/incus/mouse_latency_probe.py`, `test/incus/mouse_latency_probe_test.py`, `test/incus/test_mouse_latency_shell_test.py`, `docs/fairness-regimes.md`, `_Log.md`
