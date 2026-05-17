@@ -40,6 +40,12 @@ during specific windows.
   apply semaphore. Runtime scheduler callbacks take that semaphore before
   touching dataplane state so commits and time-window flips cannot publish
   hybrid policy snapshots.
+- The daemon reconciler keeps an existing scheduler instance when the
+  committed scheduler config is byte-identical. This preserves the
+  monotonic/wall-clock recovery state and avoids resetting timers on
+  no-op commits. Runtime publishes use the daemon context when acquiring
+  the apply semaphore, so shutdown cancels a blocked scheduler publish
+  instead of leaving a goroutine parked behind a long apply.
 - The scheduler uses wall-clock time only in the control plane to evaluate
   Junos time windows. Packet workers must consume published active/inactive
   booleans from the userspace snapshot and must not evaluate scheduler time in

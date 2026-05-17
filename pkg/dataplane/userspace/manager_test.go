@@ -2849,6 +2849,39 @@ func TestUpdatePolicyScheduleStateRefusesOldHelperForScheduledPolicies(t *testin
 	}
 }
 
+func TestUpdatePolicyScheduleStateWithoutHelperDoesNotMutateSnapshot(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*config.Policy{{
+			Name:          "scheduled-allow",
+			SchedulerName: "workhours",
+			Action:        config.PolicyPermit,
+		}},
+	}}
+	cfg.Schedulers = map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours"},
+	}
+
+	m := New()
+	m.generation = 7
+	m.lastSnapshot = buildSnapshot(cfg, config.UserspaceConfig{}, 7, 0)
+	m.lastSnapshot.Policies[0].Inactive = false
+
+	m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false})
+
+	if m.generation != 7 {
+		t.Fatalf("generation = %d, want unchanged 7", m.generation)
+	}
+	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || m.lastSnapshot.Policies[0].Inactive {
+		t.Fatalf("lastSnapshot mutated without helper: %+v", m.lastSnapshot)
+	}
+	if got, ok := m.policySchedulerActive["workhours"]; !ok || got {
+		t.Fatalf("policySchedulerActive[workhours] = %t, present=%t; want false and present", got, ok)
+	}
+}
+
 func TestUserspaceSupportsScreenProfilesBasic(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Screen = map[string]*config.ScreenProfile{

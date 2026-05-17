@@ -443,6 +443,9 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	if cfg == nil || m.lastSnapshot == nil {
 		return
 	}
+	if m.proc == nil || m.proc.Process == nil {
+		return
+	}
 
 	next := *m.lastSnapshot
 	m.generation++
@@ -452,10 +455,6 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	next.Config = cfg
 	next.Policies = buildPolicySnapshotsWithSchedulerState(cfg, activeCopy)
 
-	if m.proc == nil || m.proc.Process == nil {
-		m.lastSnapshot = &next
-		return
-	}
 	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
 		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
 			slog.Warn("userspace: failed to disarm helper after refusing policy scheduler publish",

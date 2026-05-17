@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -17,6 +19,12 @@ type policySchedulerActiveStateSetter interface {
 // lifecycle follow committed config instead of only daemon startup, and returns
 // the active-state map that must be used for the same apply transaction.
 func (d *Daemon) reconcilePolicySchedulerLocked(cfg *config.Config) map[string]bool {
+	hash, hasSchedulers := policySchedulerConfigHash(cfg)
+	if hasSchedulers && d.scheduler != nil && hash == d.policySchedulerConfigHash {
+		d.startPolicySchedulerLoopLocked()
+		return d.scheduler.ActiveState()
+	}
+
 	if d.schedulerCancel != nil {
 		d.schedulerCancel()
 		d.schedulerCancel = nil
@@ -24,7 +32,8 @@ func (d *Daemon) reconcilePolicySchedulerLocked(cfg *config.Config) map[string]b
 	d.scheduler = nil
 	epoch := d.policySchedulerEpoch.Add(1)
 
-	if cfg == nil || len(cfg.Schedulers) == 0 {
+	if !hasSchedulers {
+		d.policySchedulerConfigHash = [32]byte{}
 		return nil
 	}
 
@@ -32,8 +41,20 @@ func (d *Daemon) reconcilePolicySchedulerLocked(cfg *config.Config) map[string]b
 		d.publishPolicyScheduleState(epoch, activeState)
 	}, time.Now())
 	d.scheduler = sched
+	d.policySchedulerConfigHash = hash
 	d.startPolicySchedulerLoopLocked()
 	return activeState
+}
+
+func policySchedulerConfigHash(cfg *config.Config) ([32]byte, bool) {
+	if cfg == nil || len(cfg.Schedulers) == 0 {
+		return [32]byte{}, false
+	}
+	b, err := json.Marshal(cfg.Schedulers)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	return sha256.Sum256(b), true
 }
 
 func (d *Daemon) startPolicySchedulerLoopLocked() {
@@ -46,7 +67,11 @@ func (d *Daemon) startPolicySchedulerLoopLocked() {
 }
 
 func (d *Daemon) publishPolicyScheduleState(epoch uint64, activeState map[string]bool) {
-	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+	ctx := d.daemonCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		slog.Warn("scheduler: failed to acquire apply semaphore", "err", err)
 		return
 	}

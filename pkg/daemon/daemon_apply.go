@@ -4,7 +4,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -403,6 +402,8 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 	// programming is done. This avoids the double-bind that causes EBUSY
 	// on mlx5 zero-copy queues.
 	rethMACPending := false
+	deferWorkersActive := false
+	var clearDeferWorkers func()
 	if d.cluster != nil && cfg.Chassis.Cluster != nil && d.dp != nil {
 		cc := cfg.Chassis.Cluster
 		for rethName, physName := range cfg.RethToPhysical() {
@@ -425,6 +426,15 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 			type deferSetter interface{ SetDeferWorkers(bool) }
 			if ds, ok := d.dp.(deferSetter); ok {
 				ds.SetDeferWorkers(true)
+				deferWorkersActive = true
+				clearDeferWorkers = func() {
+					ds.SetDeferWorkers(false)
+				}
+				defer func() {
+					if deferWorkersActive {
+						clearDeferWorkers()
+					}
+				}()
 			}
 		}
 	}
@@ -438,24 +448,22 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		var err error
 		if compileResult, err = d.dp.Compile(cfg); err != nil {
 			d.recordCompileFailure(err)
-			if errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible) {
-				return err
-			}
+			return err
 		} else {
 			d.recordCompileSuccess()
 		}
 	}
 	if d.dp != nil && policySchedulerActiveState != nil && compileResult != nil {
-		d.dp.UpdatePolicyScheduleState(cfg, policySchedulerActiveState)
+		if _, isUserspace := d.dp.(*dpuserspace.Manager); !isUserspace {
+			d.dp.UpdatePolicyScheduleState(cfg, policySchedulerActiveState)
+		}
 	}
 
 	// Clear defer flag after Compile so subsequent recompiles (where MAC
 	// is already set) don't skip workers.
-	if rethMACPending {
-		type deferSetter interface{ SetDeferWorkers(bool) }
-		if ds, ok := d.dp.(deferSetter); ok {
-			ds.SetDeferWorkers(false)
-		}
+	if deferWorkersActive {
+		clearDeferWorkers()
+		deferWorkersActive = false
 	}
 
 	// 2.1. Wire aggressive session aging config to GC.
