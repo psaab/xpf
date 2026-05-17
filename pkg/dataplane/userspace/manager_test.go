@@ -228,6 +228,82 @@ func TestClearPolicyCountersZerosCachedHelperCountersWithoutHelper(t *testing.T)
 	}
 }
 
+func TestClearPolicyCountersUsesHelperIPCAndRecordsStatus(t *testing.T) {
+	dir := t.TempDir()
+	controlSock := filepath.Join(dir, "control.sock")
+	ln, err := net.Listen("unix", controlSock)
+	if err != nil {
+		t.Fatalf("listen control socket: %v", err)
+	}
+	defer ln.Close()
+
+	wantRuleID := stablePolicyRuleID("lan", "wan", "allow-web")
+	reqCh := make(chan ControlRequest, 1)
+	done := make(chan struct{}, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req ControlRequest
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			return
+		}
+		reqCh <- req
+		_ = json.NewEncoder(conn).Encode(ControlResponse{
+			OK: true,
+			Status: &ProcessStatus{
+				PolicyRuleCounters: []PolicyRuleCounterStatus{{
+					RuleID: wantRuleID,
+				}},
+			},
+		})
+		done <- struct{}{}
+	}()
+
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	m := New()
+	m.proc = &exec.Cmd{Process: proc}
+	m.cfg.ControlSocket = controlSock
+	m.lastStatus = ProcessStatus{
+		PolicyRuleCounters: []PolicyRuleCounterStatus{{
+			RuleID:  wantRuleID,
+			Packets: 7,
+			Bytes:   700,
+		}},
+	}
+
+	m.mu.Lock()
+	err = m.clearHelperPolicyCountersLocked()
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("clearHelperPolicyCountersLocked: %v", err)
+	}
+	select {
+	case req := <-reqCh:
+		if req.Type != "clear_policy_counters" {
+			t.Fatalf("request type = %q, want clear_policy_counters", req.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("helper did not receive clear_policy_counters request")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("helper did not finish clear_policy_counters response")
+	}
+	if len(m.lastStatus.PolicyRuleCounters) != 1 {
+		t.Fatalf("len(PolicyRuleCounters) = %d, want 1", len(m.lastStatus.PolicyRuleCounters))
+	}
+	if got := m.lastStatus.PolicyRuleCounters[0]; got.RuleID != wantRuleID || got.Packets != 0 || got.Bytes != 0 {
+		t.Fatalf("helper counter after IPC clear = %+v, want rule_id=%q zero packets/bytes", got, wantRuleID)
+	}
+}
+
 func TestConfigEqualIncludesPollMode(t *testing.T) {
 	a := config.UserspaceConfig{
 		Binary:        "/tmp/helper",
