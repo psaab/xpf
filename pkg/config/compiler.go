@@ -240,6 +240,12 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 		if displayName == "" {
 			displayName = name
 		}
+		if pol.SingleRateConfigured && pol.TwoRateConfigured {
+			return fmt.Errorf("firewall three-color-policer %q cannot configure both single-rate and two-rate", displayName)
+		}
+		if pol.ColorBlindConfigured && pol.ColorAwareConfigured {
+			return fmt.Errorf("firewall three-color-policer %q cannot configure both color-blind and color-aware", displayName)
+		}
 		if pol.CIR == 0 {
 			return fmt.Errorf("firewall three-color-policer %q requires positive committed-information-rate", displayName)
 		}

@@ -56,6 +56,9 @@ Still gated before removing the userspace capability rejection:
 - The Go snapshot schema, Rust wire DTO, and commit-time structural
   validation are wired for three-color policers. They are published only
   so the control plane and dataplane agree on the future wire shape.
+  Commit validation rejects ambiguous mode declarations (`single-rate`
+  with `two-rate`) and ambiguous color declarations (`color-blind` with
+  `color-aware`) before they can reach the helper.
 - Filter terms still carry a policer name in the evaluation result.
   The hot forwarding path must move to stable policer IDs with
   ID-indexed or sharded state before three-color policers are enabled.

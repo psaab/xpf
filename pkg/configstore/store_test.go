@@ -86,6 +86,31 @@ func TestCommitCheck_AcceptsValidScheduler(t *testing.T) {
 	}
 }
 
+func TestCommitCheck_RejectsAmbiguousThreeColorPolicer(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	for _, cmd := range []string{
+		"firewall three-color-policer bad single-rate color-blind",
+		"firewall three-color-policer bad single-rate color-aware",
+		"firewall three-color-policer bad single-rate committed-information-rate 10m",
+		"firewall three-color-policer bad single-rate committed-burst-size 100k",
+		"firewall three-color-policer bad single-rate excess-burst-size 200k",
+	} {
+		if err := s.SetFromInput(cmd); err != nil {
+			t.Fatalf("SetFromInput(%q): %v", cmd, err)
+		}
+	}
+	_, err := s.CommitCheck()
+	if err == nil {
+		t.Fatal("expected CommitCheck to reject ambiguous three-color policer, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot configure both color-blind and color-aware") {
+		t.Fatalf("CommitCheck error = %v", err)
+	}
+}
+
 func TestEnterExitConfigure(t *testing.T) {
 	s := newTestStore(t)
 

@@ -72,9 +72,14 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 		}
 
 		if sr := tcpInst.node.FindChild("single-rate"); sr != nil {
+			tcp.SingleRateConfigured = true
 			tcp.TwoRate = false
 			if sr.FindChild("color-blind") != nil {
 				tcp.ColorBlind = true
+				tcp.ColorBlindConfigured = true
+			}
+			if sr.FindChild("color-aware") != nil {
+				tcp.ColorAwareConfigured = true
 			}
 			for _, child := range sr.Children {
 				switch child.Name() {
@@ -95,9 +100,14 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 		}
 
 		if tr := tcpInst.node.FindChild("two-rate"); tr != nil {
+			tcp.TwoRateConfigured = true
 			tcp.TwoRate = true
 			if tr.FindChild("color-blind") != nil {
 				tcp.ColorBlind = true
+				tcp.ColorBlindConfigured = true
+			}
+			if tr.FindChild("color-aware") != nil {
+				tcp.ColorAwareConfigured = true
 			}
 			for _, child := range tr.Children {
 				switch child.Name() {

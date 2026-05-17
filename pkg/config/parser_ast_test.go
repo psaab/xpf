@@ -4582,6 +4582,30 @@ func TestThreeColorPolicerStrictValidation(t *testing.T) {
 			},
 			wantErr: "peak-burst-size must be >= committed-burst-size",
 		},
+		{
+			name: "ambiguous single and two rate",
+			lines: []string{
+				"set firewall three-color-policer bad single-rate committed-information-rate 10m",
+				"set firewall three-color-policer bad single-rate committed-burst-size 100k",
+				"set firewall three-color-policer bad single-rate excess-burst-size 200k",
+				"set firewall three-color-policer bad two-rate committed-information-rate 10m",
+				"set firewall three-color-policer bad two-rate committed-burst-size 100k",
+				"set firewall three-color-policer bad two-rate peak-information-rate 20m",
+				"set firewall three-color-policer bad two-rate peak-burst-size 200k",
+			},
+			wantErr: "cannot configure both single-rate and two-rate",
+		},
+		{
+			name: "ambiguous color mode",
+			lines: []string{
+				"set firewall three-color-policer bad single-rate color-blind",
+				"set firewall three-color-policer bad single-rate color-aware",
+				"set firewall three-color-policer bad single-rate committed-information-rate 10m",
+				"set firewall three-color-policer bad single-rate committed-burst-size 100k",
+				"set firewall three-color-policer bad single-rate excess-burst-size 200k",
+			},
+			wantErr: "cannot configure both color-blind and color-aware",
+		},
 	}
 
 	for _, tt := range tests {
