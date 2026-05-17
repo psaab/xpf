@@ -66,15 +66,27 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 		fw.ThreeColorPolicers = make(map[string]*ThreeColorPolicerConfig)
 	}
 	for _, tcpInst := range namedInstances(node.FindChildren("three-color-policer")) {
-		tcp := &ThreeColorPolicerConfig{
-			Name:       tcpInst.name,
-			ThenAction: "discard",
+		tcp := fw.ThreeColorPolicers[tcpInst.name]
+		if tcp == nil {
+			tcp = &ThreeColorPolicerConfig{
+				Name:       tcpInst.name,
+				ThenAction: "discard",
+			}
+			fw.ThreeColorPolicers[tcpInst.name] = tcp
 		}
 
-		if sr := tcpInst.node.FindChild("single-rate"); sr != nil {
+		singleRates := tcpInst.node.FindChildren("single-rate")
+		if len(singleRates) > 0 {
+			tcp.SingleRateConfigured = true
 			tcp.TwoRate = false
+		}
+		for _, sr := range singleRates {
 			if sr.FindChild("color-blind") != nil {
 				tcp.ColorBlind = true
+				tcp.ColorBlindConfigured = true
+			}
+			if sr.FindChild("color-aware") != nil {
+				tcp.ColorAwareConfigured = true
 			}
 			for _, child := range sr.Children {
 				switch child.Name() {
@@ -94,10 +106,18 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			}
 		}
 
-		if tr := tcpInst.node.FindChild("two-rate"); tr != nil {
+		twoRates := tcpInst.node.FindChildren("two-rate")
+		if len(twoRates) > 0 {
+			tcp.TwoRateConfigured = true
 			tcp.TwoRate = true
+		}
+		for _, tr := range twoRates {
 			if tr.FindChild("color-blind") != nil {
 				tcp.ColorBlind = true
+				tcp.ColorBlindConfigured = true
+			}
+			if tr.FindChild("color-aware") != nil {
+				tcp.ColorAwareConfigured = true
 			}
 			for _, child := range tr.Children {
 				switch child.Name() {
@@ -133,8 +153,6 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 				}
 			}
 		}
-
-		fw.ThreeColorPolicers[tcp.Name] = tcp
 	}
 
 	for _, familyNode := range node.FindChildren("family") {

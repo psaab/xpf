@@ -927,13 +927,19 @@ type PolicerConfig struct {
 // ThreeColorPolicerConfig defines a three-color policer (RFC 2697/2698).
 type ThreeColorPolicerConfig struct {
 	Name       string
-	TwoRate    bool   // true=two-rate (RFC 2698), false=single-rate (RFC 2697)
-	ColorBlind bool   // color-blind mode (default: color-aware)
-	CIR        uint64 // committed information rate (bytes/sec)
-	CBS        uint64 // committed burst size (bytes)
-	PIR        uint64 // peak information rate (bytes/sec, two-rate only)
-	PBS        uint64 // peak/excess burst size (bytes)
-	ThenAction string // action on exceed/violate: "discard" or "loss-priority"
+	TwoRate    bool // true=two-rate (RFC 2698), false=single-rate (RFC 2697)
+	ColorBlind bool // color-blind mode (default: color-aware)
+	// Explicit mode/color markers are retained for commit-time ambiguity
+	// checks. The dataplane snapshot still carries only the canonical mode.
+	SingleRateConfigured bool
+	TwoRateConfigured    bool
+	ColorAwareConfigured bool
+	ColorBlindConfigured bool
+	CIR                  uint64 // committed information rate (bytes/sec)
+	CBS                  uint64 // committed burst size (bytes)
+	PIR                  uint64 // peak information rate (bytes/sec, two-rate only)
+	PBS                  uint64 // peak/excess burst size (bytes)
+	ThenAction           string // action on exceed/violate: "discard" or "loss-priority"
 }
 
 // FirewallFilter defines a named firewall filter with ordered terms.

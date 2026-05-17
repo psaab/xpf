@@ -919,6 +919,52 @@ fn binding_counters_snapshot_tolerates_pre_split_wire() {
 }
 
 #[test]
+fn config_snapshot_three_color_policers_roundtrip() {
+    let json = r#"{
+        "version": 1,
+        "generation": 42,
+        "generated_at": "2026-05-17T00:00:00Z",
+        "summary": {
+            "host_name": "fw",
+            "dataplane_type": "userspace",
+            "interface_count": 0,
+            "zone_count": 0,
+            "policy_count": 0,
+            "scheduler_count": 0,
+            "ha_enabled": false
+        },
+        "three_color_policers": [
+            {
+                "name": "tr",
+                "mode": "two-rate",
+                "color_blind": true,
+                "committed_rate_bytes_per_sec": 125000,
+                "committed_burst_bytes": 50000,
+                "peak_or_excess_rate_bytes_per_sec": 250000,
+                "peak_or_excess_burst_bytes": 100000,
+                "then_action": "discard"
+            }
+        ]
+    }"#;
+    let snap: ConfigSnapshot = serde_json::from_str(json).expect("three-color snapshot decodes");
+    assert_eq!(snap.three_color_policers.len(), 1);
+    let policer = &snap.three_color_policers[0];
+    assert_eq!(policer.name, "tr");
+    assert_eq!(policer.mode, "two-rate");
+    assert!(policer.color_blind);
+    assert_eq!(policer.committed_rate_bytes_per_sec, 125000);
+    assert_eq!(policer.committed_burst_bytes, 50000);
+    assert_eq!(policer.peak_or_excess_rate_bytes_per_sec, 250000);
+    assert_eq!(policer.peak_or_excess_burst_bytes, 100000);
+
+    let encoded = serde_json::to_value(&snap).expect("three-color snapshot serializes");
+    assert!(
+        encoded.get("three_color_policers").is_some(),
+        "three_color_policers wire key missing from Rust serialization: {encoded}"
+    );
+}
+
+#[test]
 fn tx_latency_hist_serialization_roundtrip() {
     // #812 plan §6.1 test #4. Construct a BindingCountersSnapshot
     // with a non-trivial TX submit-latency histogram; JSON-encode,
