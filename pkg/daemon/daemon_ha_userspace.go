@@ -519,14 +519,12 @@ func (d *Daemon) wireUserspaceEventStreamCallbacks(ctx context.Context, provider
 	}
 
 	// Wire callbacks.
-	if d.cluster != nil && d.sessionSync != nil {
-		es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) bool {
-			return d.handleEventStreamDelta(eventType, delta)
-		})
-		es.SetOnFullResync(func() bool {
-			return d.handleEventStreamFullResync()
-		})
-	}
+	es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) bool {
+		return d.handleEventStreamDelta(eventType, delta)
+	})
+	es.SetOnFullResync(func() bool {
+		return d.handleEventStreamFullResync()
+	})
 	if d.eventReader != nil {
 		es.SetOnRawDataplaneEvent(func(seq uint64, payload []byte) {
 			if !d.eventReader.ProcessRawEvent(payload) {
