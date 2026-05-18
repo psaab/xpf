@@ -304,6 +304,7 @@ type ScreenProfileSnapshot struct {
 	ICMPFloodThreshold uint32 `json:"icmp_flood_threshold,omitempty"`
 	UDPFloodThreshold  uint32 `json:"udp_flood_threshold,omitempty"`
 	SYNFloodThreshold  uint32 `json:"syn_flood_threshold,omitempty"`
+	SYNCookie          bool   `json:"syn_cookie,omitempty"`
 	// Advanced screen features for userspace dataplane
 	SessionLimitSrc   uint32 `json:"session_limit_src,omitempty"`
 	SessionLimitDst   uint32 `json:"session_limit_dst,omitempty"`

@@ -9,8 +9,8 @@
 use super::*;
 use super::poll_stages::{
     stage_classify_fabric_ingress, stage_ipsec_passthrough_check, stage_link_layer_classify,
-    stage_native_gre_decap, stage_parse_flow_and_learn, stage_screen_check, FabricIngressOutcome,
-    StageOutcome,
+    stage_native_gre_decap, stage_parse_flow_and_learn, stage_screen_check,
+    stage_screen_syn_cookie_ack_on_session_miss, FabricIngressOutcome, StageOutcome,
 };
 
 // Per-batch packet processing lifted from `poll_binding` (#678).
@@ -459,6 +459,21 @@ pub(super) fn poll_binding_process_descriptor(
                         } else {
                             telemetry.counters.session_misses += 1;
                             telemetry.dbg.session_miss += 1;
+                            if let StageOutcome::RecycleAndContinue =
+                                stage_screen_syn_cookie_ack_on_session_miss(
+                                    Some(flow),
+                                    packet_frame,
+                                    meta,
+                                    ingress_zone_override,
+                                    now_secs,
+                                    screen,
+                                    telemetry.counters,
+                                    worker_ctx,
+                                )
+                            {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
                             let resolution_target =
                                 parse_packet_destination_from_frame(packet_frame, meta)
                                     .unwrap_or(flow.dst_ip);
