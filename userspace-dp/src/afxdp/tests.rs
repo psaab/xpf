@@ -3,8 +3,9 @@ use super::*;
 use crate::test_zone_ids::*;
 use crate::xsk_ffi::IfInfo;
 use crate::{
-    DestinationNATRuleSnapshot, InterfaceAddressSnapshot, PolicyRuleSnapshot,
-    SourceNATRuleSnapshot, StaticNATRuleSnapshot,
+    DestinationNATRuleSnapshot, FirewallFilterSnapshot, FirewallTermSnapshot,
+    InterfaceAddressSnapshot, PolicyRuleSnapshot, SourceNATRuleSnapshot, StaticNATRuleSnapshot,
+    ThreeColorPolicerSnapshot,
 };
 
 #[test]
@@ -243,6 +244,7 @@ fn build_live_forward_request_from_frame_uses_precomputed_hints() {
         None,
         None,
         false,
+        0,
         Some(hints),
         None,
     )
@@ -1124,6 +1126,7 @@ fn build_local_time_exceeded_request_returns_prebuilt_forward_for_ttl_expiry() {
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 34,
+        ingress_ifindex: 5,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
@@ -1183,7 +1186,119 @@ fn build_local_time_exceeded_request_returns_prebuilt_forward_for_ttl_expiry() {
     assert_eq!(request.target_ifindex, 5);
     assert_eq!(request.ingress_queue_id, ingress_ident.queue_id);
     assert_eq!(request.desc.addr, desc.addr);
+    assert_eq!(request.flow_key.as_ref(), Some(&flow.forward_key));
+    assert!(request.cos_tx_selection_resolved);
     assert!(matches!(request.frame, PendingForwardFrame::Prebuilt(_)));
+}
+
+#[test]
+fn build_local_time_exceeded_request_meters_icmp_flow_key() {
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 1);
+    let meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 34,
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        pkt_len: 128,
+        ..UserspaceDpMeta::default()
+    };
+    let desc = XdpDesc {
+        addr: 4096,
+        len: frame.len() as u32,
+        options: 0,
+    };
+    let ingress_ident = BindingIdentity {
+        slot: 0,
+        queue_id: 7,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-1"),
+        ifindex: 5,
+    };
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(dst_ip),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_ICMP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(dst_ip),
+            src_port: 0x1234,
+            dst_port: 0,
+        },
+    };
+    let filter_state = crate::filter::parse_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "policed-icmp".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "meter-icmp".into(),
+                action: "accept".into(),
+                protocols: vec!["icmp".into()],
+                policer: "icmp-pol".into(),
+                ..Default::default()
+            }],
+        }],
+        &[],
+        &[ThreeColorPolicerSnapshot {
+            name: "icmp-pol".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 64,
+            peak_or_excess_burst_bytes: 32,
+            then_action: "discard".into(),
+            ..Default::default()
+        }],
+        &[crate::InterfaceSnapshot {
+            name: "ge-0/0/1.0".into(),
+            ifindex: 5,
+            filter_input_v4: "policed-icmp".into(),
+            ..Default::default()
+        }],
+        "policed-icmp",
+        "",
+    );
+    let mut forwarding = ForwardingState {
+        filter_state,
+        tx_selection_enabled_v4: true,
+        ..ForwardingState::default()
+    };
+    forwarding.egress.insert(
+        5,
+        EgressInterface {
+            bind_ifindex: 5,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01],
+            zone_id: TEST_LAN_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)),
+            primary_v6: None,
+        },
+    );
+
+    let request = build_local_time_exceeded_request(
+        &frame,
+        desc,
+        meta,
+        &ingress_ident,
+        &flow,
+        &forwarding,
+        &Arc::new(ShardedNeighborMap::new()),
+        &BTreeMap::new(),
+        0,
+    );
+
+    assert!(
+        request.is_none(),
+        "red-drop policer should reject the generated ICMP response"
+    );
+    let status = forwarding.filter_state.three_color_policer_statuses();
+    assert_eq!(status[0].red_packets, 1);
+    assert_eq!(status[0].drop_packets, 1);
 }
 
 #[test]

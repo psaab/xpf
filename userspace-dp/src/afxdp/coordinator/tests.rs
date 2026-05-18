@@ -4,11 +4,181 @@
 // `#[path = "tests.rs"]` from coordinator/mod.rs.
 
 use super::*;
+use crate::INJECT_PACKET_TUPLE_PROTOCOL_VERSION;
 use crate::test_zone_ids::*;
 use crate::{
     ClassOfServiceSnapshot, CoSForwardingClassSnapshot, CoSSchedulerMapEntrySnapshot,
     CoSSchedulerMapSnapshot,
 };
+
+#[test]
+fn stamp_injected_packet_tuple_builds_ipv4_icmp_flow_key() {
+    let mut meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: 0,
+        ..UserspaceDpMeta::default()
+    };
+    let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let req = InjectPacketRequest {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        destination_ip: "172.16.80.200".into(),
+        tuple_metadata_version: INJECT_PACKET_TUPLE_PROTOCOL_VERSION,
+        source_ip: "172.16.80.8".into(),
+        source_port: Some(0x1234),
+        destination_port: Some(0),
+        ..Default::default()
+    };
+    let tuple = inject::validate_injected_packet_tuple(&req, dst).expect("validate tuple");
+    let egress = EgressInterface {
+        bind_ifindex: 12,
+        vlan_id: 0,
+        mtu: 1500,
+        src_mac: [0; 6],
+        zone_id: TEST_WAN_ZONE_ID,
+        redundancy_group: 0,
+        primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+        primary_v6: None,
+    };
+
+    inject::stamp_injected_packet_tuple(&mut meta, 98, tuple, &egress).expect("stamp tuple");
+
+    let flow = parse_session_flow_from_meta(meta).expect("metadata flow");
+    assert_eq!(meta.protocol, PROTO_ICMP);
+    assert_eq!(meta.l3_offset, 14);
+    assert_eq!(meta.l4_offset, 34);
+    assert_eq!(meta.payload_offset, 42);
+    assert_eq!(
+        flow.forward_key.src_ip,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))
+    );
+    assert_eq!(
+        flow.forward_key.dst_ip,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))
+    );
+    assert_eq!(flow.forward_key.src_port, 0x1234);
+    assert_eq!(flow.forward_key.dst_port, 0);
+}
+
+#[test]
+fn stamp_injected_packet_tuple_builds_ipv6_icmp_flow_key() {
+    let mut meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 0,
+        ..UserspaceDpMeta::default()
+    };
+    let src = "2001:db8:80::8".parse::<Ipv6Addr>().unwrap();
+    let dst = "2001:db8:80::200".parse::<Ipv6Addr>().unwrap();
+    let req = InjectPacketRequest {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        destination_ip: "2001:db8:80::200".into(),
+        tuple_metadata_version: INJECT_PACKET_TUPLE_PROTOCOL_VERSION,
+        source_ip: "2001:db8:80::8".into(),
+        source_port: Some(0x4321),
+        destination_port: Some(0),
+        ..Default::default()
+    };
+    let tuple =
+        inject::validate_injected_packet_tuple(&req, IpAddr::V6(dst)).expect("validate tuple");
+    let egress = EgressInterface {
+        bind_ifindex: 12,
+        vlan_id: 80,
+        mtu: 1500,
+        src_mac: [0; 6],
+        zone_id: TEST_WAN_ZONE_ID,
+        redundancy_group: 0,
+        primary_v4: None,
+        primary_v6: Some(src),
+    };
+
+    inject::stamp_injected_packet_tuple(&mut meta, 118, tuple, &egress).expect("stamp tuple");
+
+    let flow = parse_session_flow_from_meta(meta).expect("metadata flow");
+    assert_eq!(meta.protocol, PROTO_ICMPV6);
+    assert_eq!(meta.l3_offset, 18);
+    assert_eq!(meta.l4_offset, 58);
+    assert_eq!(meta.payload_offset, 66);
+    assert_eq!(flow.forward_key.src_ip, IpAddr::V6(src));
+    assert_eq!(flow.forward_key.dst_ip, IpAddr::V6(dst));
+    assert_eq!(flow.forward_key.src_port, 0x4321);
+    assert_eq!(flow.forward_key.dst_port, 0);
+}
+
+#[test]
+fn validate_injected_packet_tuple_rejects_legacy_wire_request() {
+    let req = InjectPacketRequest {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        destination_ip: "172.16.80.200".into(),
+        source_ip: "172.16.80.8".into(),
+        source_port: Some(0x1234),
+        destination_port: Some(0),
+        ..Default::default()
+    };
+
+    let err =
+        inject::validate_injected_packet_tuple(&req, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)))
+            .expect_err("legacy request must fail closed");
+    assert!(err.contains("tuple metadata version"), "{err}");
+}
+
+#[test]
+fn validate_injected_packet_tuple_rejects_protocol_mismatch() {
+    let req = InjectPacketRequest {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        destination_ip: "172.16.80.200".into(),
+        tuple_metadata_version: INJECT_PACKET_TUPLE_PROTOCOL_VERSION,
+        source_ip: "172.16.80.8".into(),
+        source_port: Some(0x1234),
+        destination_port: Some(0),
+        ..Default::default()
+    };
+
+    let err =
+        inject::validate_injected_packet_tuple(&req, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)))
+            .expect_err("non-ICMP tuple must fail closed");
+    assert!(err.contains("supports only protocol"), "{err}");
+}
+
+#[test]
+fn build_injected_packet_uses_wire_tuple_source_ipv4() {
+    let req = InjectPacketRequest {
+        packet_length: 98,
+        ..Default::default()
+    };
+    let src = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+    let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let egress = EgressInterface {
+        bind_ifindex: 12,
+        vlan_id: 0,
+        mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+        zone_id: TEST_WAN_ZONE_ID,
+        redundancy_group: 0,
+        primary_v4: Some(Ipv4Addr::new(192, 0, 2, 1)),
+        primary_v6: None,
+    };
+    let resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 80,
+        tx_ifindex: 80,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(dst),
+        neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+        src_mac: Some(egress.src_mac),
+        tx_vlan_id: 0,
+    };
+
+    let frame = build_injected_packet(&req, src, dst, 0x3456, resolution, &egress)
+        .expect("build injected packet");
+
+    assert_eq!(&frame[26..30], &[172, 16, 80, 8]);
+    assert_eq!(&frame[30..34], &[172, 16, 80, 200]);
+    assert_eq!(&frame[38..40], &0x3456u16.to_be_bytes());
+}
 
 #[test]
 fn build_cos_owner_worker_by_queue_prefers_lowest_worker_with_tx_binding() {

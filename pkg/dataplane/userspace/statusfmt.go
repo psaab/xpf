@@ -330,6 +330,34 @@ func FormatStatusSummary(status ProcessStatus) string {
 		fmt.Fprintf(&b, "  CoS buffer drops:          %d\n", currentRuntimeCoSBufferDrops)
 		fmt.Fprintf(&b, "  CoS ECN marked:            %d\n", cosAdmissionEcnMarked)
 	}
+	if len(status.ThreeColorPolicerCounters) > 0 {
+		rows := append([]ThreeColorPolicerStatus(nil), status.ThreeColorPolicerCounters...)
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].ID != rows[j].ID {
+				return rows[i].ID < rows[j].ID
+			}
+			return rows[i].Name < rows[j].Name
+		})
+		fmt.Fprintln(&b, "Three-color policers:")
+		fmt.Fprintf(&b, "  %-5s %-16s %-11s %-6s %-9s %-9s %-9s %-9s %-10s %-10s %-10s %-10s\n",
+			"ID", "Name", "Mode", "Blind", "GreenPkts", "YellowPkts", "RedPkts", "DropPkts", "GreenB", "YellowB", "RedB", "DropB")
+		for _, row := range rows {
+			fmt.Fprintf(&b, "  %-5d %-16s %-11s %-6t %-9d %-9d %-9d %-9d %-10d %-10d %-10d %-10d\n",
+				row.ID,
+				row.Name,
+				row.Mode,
+				row.ColorBlind,
+				row.GreenPackets,
+				row.YellowPackets,
+				row.RedPackets,
+				row.DropPackets,
+				row.GreenBytes,
+				row.YellowBytes,
+				row.RedBytes,
+				row.DropBytes,
+			)
+		}
+	}
 	fmt.Fprintf(&b, "  TX shared recycle unk:     %d\n", txSharedRecycleUnknownSlotDrops)
 	fmt.Fprintf(&b, "  TX completions:            %d\n", txCompletions)
 	fmt.Fprintf(&b, "  Mirrored packets:          %d\n", mirroredPackets)

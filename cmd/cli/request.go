@@ -177,7 +177,7 @@ func (c *ctl) handleRequestChassisClusterDataPlane(args []string) error {
 			return err
 		}
 		action = fmt.Sprintf("userspace-inject:%d:%s", slot, mode)
-		target = extra["destination-ip"]
+		target = dpuserspace.EncodeInjectPacketTarget(extra)
 	case len(args) > 0 && args[0] == "forwarding":
 		armed, err := dpuserspace.ParseForwardingCommand(args)
 		if err != nil {

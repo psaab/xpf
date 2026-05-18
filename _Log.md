@@ -17,6 +17,28 @@
   - **File(s)**: `userspace-dp/src/afxdp/umem/mod.rs`, `_Log.md`
   - **Validation**: `go test ./pkg/dataplane/userspace`; `cargo test --manifest-path userspace-dp/Cargo.toml mirror::` (expected environment failure: missing libelf headers/pkg-config); `git diff --check`
 
+- **Timestamp**: 2026-05-17T21:58:24Z
+  - **Action**: PR #1410 residual review follow-up — made emit-on-wire inject tuple identity an explicit Go/Rust control-wire contract, added helper status gating for mixed-version fail-closed behavior, and stopped Rust from synthesizing source tuple fields for emitted inject packets.
+  - **File(s)**: `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/inject.go`, `pkg/dataplane/userspace/inject_test.go`, `pkg/dataplane/userspace/protocol_test.go`, `pkg/cmdtree/tree.go`, `userspace-dp/src/protocol.rs`, `userspace-dp/src/server/lifecycle.rs`, `userspace-dp/src/server/README.md`, `userspace-dp/src/afxdp/coordinator/inject.rs`, `userspace-dp/src/afxdp/coordinator/tests.rs`, `userspace-dp/src/afxdp/frame/mod.rs`, `_Log.md`
+  - **Validation**: `go test ./pkg/dataplane/userspace ./pkg/cmdtree`; `cargo test --manifest-path userspace-dp/Cargo.toml inject_packet -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml injected_packet -- --nocapture`; `cargo check --manifest-path userspace-dp/Cargo.toml`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T21:39:00Z
+  - **Action**: PR #1410 review follow-up — reconciled README userspace capability wording so three-color policers are described as partially admitted (color-blind `then discard` slice) rather than fully gated, matching current userspace capability documentation and runtime admission behavior.
+  - **File(s)**: `README.md`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T21:23:55Z
+  - **Action**: PR #1410 round-3 blocker follow-up — added explicit pending-forward CoS resolution state so resolved `None`/`None` selections are not metered again, carried metadata-derived ICMP flow keys through local and embedded ICMP prebuilt-forward paths, stamped emitted inject packets with synthetic ICMP tuples before TX selection, and preserved local tunnel tuple metadata through TX.
+  - **File(s)**: `userspace-dp/src/afxdp/types/tx.rs`, `userspace-dp/src/afxdp/forward_request.rs`, `userspace-dp/src/afxdp/tx/dispatch.rs`, `userspace-dp/src/afxdp/icmp.rs`, `userspace-dp/src/afxdp/poll_descriptor.rs`, `userspace-dp/src/afxdp/coordinator/inject.rs`, `userspace-dp/src/afxdp/tunnel.rs`, `userspace-dp/src/afxdp/tx/dispatch_tests.rs`, `userspace-dp/src/afxdp/tests.rs`, `userspace-dp/src/afxdp/frame/tests.rs`, `userspace-dp/src/afxdp/coordinator/tests.rs`, `_Log.md`
+  - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml build_local_time_exceeded_request -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml pending_forward_cos_resolution -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml stamp_injected_packet_tuple -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml build_live_forward_request_marks_empty_cos_selection_resolved -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml build_live_forward_request_meters_non_l4_metadata_flow -- --nocapture`; `cargo test --manifest-path userspace-dp/Cargo.toml three_color -- --nocapture`; `cargo check --manifest-path userspace-dp/Cargo.toml`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T20:30:00Z
+  - **Action**: PR #1410 round-1 review follow-up — removed flow-cache hit TX-selection cloning from the packet fast path, switched local ICMP/tunnel/control-packet CoS resolution to timestamped `_at` evaluation with flow-key fallback, and enforced `cos.drop` handling on those paths so three-color policer drops are not bypassed when metadata-only classification is used.
+  - **File(s)**: `userspace-dp/src/afxdp/poll_descriptor.rs`, `userspace-dp/src/afxdp/icmp.rs`, `userspace-dp/src/afxdp/tunnel.rs`, `userspace-dp/src/afxdp/coordinator/inject.rs`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T20:37:00Z
+  - **Action**: Addressed post-validation review nit by lazily constructing cached precomputed TX-selection descriptors only on flow-cache fallback forwarding, avoiding unnecessary per-hit descriptor construction on successful in-place TX hits.
+  - **File(s)**: `userspace-dp/src/afxdp/poll_descriptor.rs`, `_Log.md`
+
 - **Timestamp**: 2026-05-17T15:28:13Z
   - **Action**: PR #1397 follow-up — fixed mouse-latency diagnostics review findings by making `cwnd_settle_ok` tri-state in manifests (unknown/true/false), correcting cwnd byte-unit parsing to 1024-based `K/M/G/TBytes`, recording probe phase timings even on failed/timed-out connect/drain/read attempts, tightening fairness-regimes settle-evidence wording, and extending unit coverage for settle-diagnostics CLI output/status and failure-phase timing counts.
   - **File(s)**: `test/incus/test-mouse-latency.sh`, `test/incus/mouse_latency_orchestrate.py`, `test/incus/mouse_latency_orchestrate_test.py`, `test/incus/mouse_latency_probe.py`, `test/incus/mouse_latency_probe_test.py`, `test/incus/test_mouse_latency_shell_test.py`, `docs/fairness-regimes.md`, `_Log.md`

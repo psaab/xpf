@@ -101,6 +101,10 @@ impl super::Coordinator {
         out
     }
 
+    pub fn three_color_policer_counters(&self) -> Vec<crate::protocol::ThreeColorPolicerStatus> {
+        self.forwarding.filter_state.three_color_policer_statuses()
+    }
+
     pub fn flow_worker_map(&self) -> (Vec<crate::protocol::FlowWorkerStatus>, bool) {
         const FLOW_WORKER_MAP_MAX_ROWS: usize = 4096;
         let mut out = Vec::new();

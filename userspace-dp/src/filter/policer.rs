@@ -297,6 +297,17 @@ impl ThreeColorPolicerState {
         }
     }
 
+    pub(crate) fn mode_name(&self) -> &'static str {
+        match self.mode {
+            ThreeColorMode::SingleRate => "single-rate",
+            ThreeColorMode::TwoRate => "two-rate",
+        }
+    }
+
+    pub(crate) fn color_blind(&self) -> bool {
+        self.color_blind
+    }
+
     fn refill(&mut self, now_ns: u64) {
         if !self.initialized {
             self.initialized = true;

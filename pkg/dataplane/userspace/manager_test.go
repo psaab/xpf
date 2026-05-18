@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -2212,8 +2213,8 @@ func TestDeriveUserspaceCapabilitiesDetectsFirewallFeatures(t *testing.T) {
 	cfg.Security.Zones = map[string]*config.ZoneConfig{"trust": {Name: "trust"}}
 	cfg.Security.NAT.Source = []*config.NATRuleSet{{Name: "src"}}
 	cfg.Security.Flow.AllowDNSReply = true
-	// Firewall filters (inet/inet6) and single-rate policers are now supported.
-	// Only three-color policers remain unsupported.
+	// Firewall filters (inet/inet6), single-rate policers, and three-color
+	// policers are now supported.
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{"f1": {Name: "f1"}}
 	cfg.Services.FlowMonitoring = &config.FlowMonitoringConfig{}
 
@@ -2223,28 +2224,57 @@ func TestDeriveUserspaceCapabilitiesDetectsFirewallFeatures(t *testing.T) {
 	}
 }
 
-func TestDeriveUserspaceCapabilitiesGatesThreeColorPolicers(t *testing.T) {
+func TestDeriveUserspaceCapabilitiesAdmitsThreeColorPolicers(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.ThreeColorPolicers = map[string]*config.ThreeColorPolicerConfig{
-		"tcp1": {Name: "tcp1", CIR: 1000000, CBS: 50000},
+		"tcp1": {Name: "tcp1", ColorBlind: true, CIR: 1000000, CBS: 50000, ThenAction: "discard"},
 	}
 
 	caps := deriveUserspaceCapabilities(cfg)
-	if caps.ForwardingSupported {
-		t.Fatal("ForwardingSupported = true, want false for three-color policers")
-	}
-	found := false
-	for _, r := range caps.UnsupportedReasons {
-		if r == "three-color policers are not implemented in the userspace dataplane" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected three-color policer unsupported reason, got: %+v", caps.UnsupportedReasons)
+	if !caps.ForwardingSupported {
+		t.Fatalf("ForwardingSupported = false, want true for three-color policers. Reasons: %+v", caps.UnsupportedReasons)
 	}
 }
 
-func TestBuildSnapshotIncludesThreeColorPolicerSchemaWhileGateClosed(t *testing.T) {
+func TestDeriveUserspaceCapabilitiesRejectsUnsupportedThreeColorPolicerActions(t *testing.T) {
+	tests := []struct {
+		name string
+		pol  *config.ThreeColorPolicerConfig
+	}{
+		{
+			name: "color-aware",
+			pol:  &config.ThreeColorPolicerConfig{Name: "aware", CIR: 1000000, CBS: 50000, PBS: 50000, ThenAction: "discard"},
+		},
+		{
+			name: "loss-priority",
+			pol: &config.ThreeColorPolicerConfig{
+				Name:       "loss",
+				ColorBlind: true,
+				CIR:        1000000,
+				CBS:        50000,
+				PBS:        50000,
+				ThenAction: "loss-priority high",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Firewall.ThreeColorPolicers = map[string]*config.ThreeColorPolicerConfig{
+				tt.pol.Name: tt.pol,
+			}
+			caps := deriveUserspaceCapabilities(cfg)
+			if caps.ForwardingSupported {
+				t.Fatal("ForwardingSupported = true, want fail-closed for unsupported three-color policer mode/action")
+			}
+			if !slices.Contains(caps.UnsupportedReasons, "userspace three-color policers require color-blind mode and then discard") {
+				t.Fatalf("UnsupportedReasons = %+v, want three-color reason", caps.UnsupportedReasons)
+			}
+		})
+	}
+}
+
+func TestBuildSnapshotIncludesThreeColorPolicerSchema(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.ThreeColorPolicers = map[string]*config.ThreeColorPolicerConfig{
 		"sr": {
@@ -2258,17 +2288,18 @@ func TestBuildSnapshotIncludesThreeColorPolicerSchemaWhileGateClosed(t *testing.
 		"tr": {
 			Name:       "tr",
 			TwoRate:    true,
+			ColorBlind: true,
 			CIR:        125000,
 			CBS:        50000,
 			PIR:        250000,
 			PBS:        100000,
-			ThenAction: "loss-priority high",
+			ThenAction: "discard",
 		},
 	}
 
 	snap := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
-	if snap.Capabilities.ForwardingSupported {
-		t.Fatal("ForwardingSupported = true, want three-color policers to remain fail-closed")
+	if !snap.Capabilities.ForwardingSupported {
+		t.Fatalf("ForwardingSupported = false, want three-color policers admitted. Reasons: %+v", snap.Capabilities.UnsupportedReasons)
 	}
 	want := []ThreeColorPolicerSnapshot{
 		{
@@ -2283,11 +2314,12 @@ func TestBuildSnapshotIncludesThreeColorPolicerSchemaWhileGateClosed(t *testing.
 		{
 			Name:                   "tr",
 			Mode:                   "two-rate",
+			ColorBlind:             true,
 			CommittedRateBytes:     125000,
 			CommittedBurstBytes:    50000,
 			PeakOrExcessRateBytes:  250000,
 			PeakOrExcessBurstBytes: 100000,
-			ThenAction:             "loss-priority high",
+			ThenAction:             "discard",
 		},
 	}
 	if !reflect.DeepEqual(snap.ThreeColorPolicers, want) {

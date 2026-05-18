@@ -39,6 +39,12 @@ helper while scheduled policies are configured, it sends
 the old helper must not keep forwarding a stale snapshot that ignores scheduler
 inactive bits.
 
+`inject_packet_tuple_protocol_version` is the corresponding status gate for
+`inject_packet` requests that set `emit_on_wire=true`. Those requests must carry
+the complete tuple metadata (`source_ip`, `destination_ip`, protocol, and ports)
+on the control wire; helpers reject legacy emit-on-wire requests instead of
+synthesizing tuple identity locally.
+
 ## Reconciliation
 
 `replan_queues` derives the binding plan from the current

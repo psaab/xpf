@@ -40,6 +40,35 @@ fn test_decision() -> SessionDecision {
     }
 }
 
+fn test_pending_forward_request(
+    addr_family: u8,
+    cos_tx_selection_resolved: bool,
+) -> PendingForwardRequest {
+    PendingForwardRequest {
+        target_ifindex: 11,
+        target_binding_index: None,
+        ingress_queue_id: 0,
+        desc: XdpDesc {
+            addr: 0,
+            len: 64,
+            options: 0,
+        },
+        frame: PendingForwardFrame::Live,
+        meta: ForwardPacketMeta {
+            addr_family,
+            ..ForwardPacketMeta::default()
+        },
+        decision: test_decision(),
+        apply_nat_on_fabric: false,
+        expected_ports: None,
+        flow_key: None,
+        nat64_reverse: None,
+        cos_queue_id: None,
+        dscp_rewrite: None,
+        cos_tx_selection_resolved,
+    }
+}
+
 fn test_cos_fast_interfaces(
     egress_ifindex: i32,
     default_queue: u8,
@@ -72,6 +101,29 @@ fn test_cos_fast_interfaces(
         },
     );
     interfaces
+}
+
+#[test]
+fn pending_forward_cos_resolution_uses_resolved_bit_not_empty_outputs() {
+    let resolved = test_pending_forward_request(libc::AF_INET as u8, true);
+    assert!(
+        !pending_forward_needs_cos_tx_selection(&resolved, true, false),
+        "a resolved None/None selection must not be metered again"
+    );
+
+    let unresolved_v4 = test_pending_forward_request(libc::AF_INET as u8, false);
+    assert!(pending_forward_needs_cos_tx_selection(
+        &unresolved_v4,
+        true,
+        false
+    ));
+
+    let unresolved_v6 = test_pending_forward_request(libc::AF_INET6 as u8, false);
+    assert!(pending_forward_needs_cos_tx_selection(
+        &unresolved_v6,
+        false,
+        true
+    ));
 }
 
 #[test]

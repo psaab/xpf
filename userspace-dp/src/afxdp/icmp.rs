@@ -22,7 +22,7 @@ pub(super) fn build_local_time_exceeded_request(
     desc: XdpDesc,
     meta: UserspaceDpMeta,
     ingress_ident: &BindingIdentity,
-    _flow: &SessionFlow,
+    flow: &SessionFlow,
     forwarding: &ForwardingState,
     _dynamic_neighbors: &Arc<ShardedNeighborMap>,
     _ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -48,7 +48,17 @@ pub(super) fn build_local_time_exceeded_request(
         _ => return None,
     }?;
 
-    let cos = resolve_cos_tx_selection(forwarding, ingress_ident.ifindex, meta, None);
+    let now_ns = monotonic_nanos();
+    let cos = resolve_cos_tx_selection_at(
+        forwarding,
+        ingress_ident.ifindex,
+        meta,
+        Some(&flow.forward_key),
+        now_ns,
+    );
+    if cos.drop {
+        return None;
+    }
     Some(PendingForwardRequest {
         target_ifindex,
         target_binding_index: None,
@@ -72,10 +82,11 @@ pub(super) fn build_local_time_exceeded_request(
         },
         apply_nat_on_fabric: false,
         expected_ports: None,
-        flow_key: None,
+        flow_key: Some(flow.forward_key.clone()),
         nat64_reverse: None,
         cos_queue_id: cos.queue_id,
         dscp_rewrite: cos.dscp_rewrite,
+        cos_tx_selection_resolved: true,
     })
 }
 

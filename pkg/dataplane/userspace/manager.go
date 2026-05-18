@@ -1153,11 +1153,14 @@ func deriveUserspaceCapabilities(cfg *config.Config) UserspaceCapabilities {
 	if !userspaceSupportsScreenProfiles(cfg) {
 		addReason("screen features requiring SYN cookies are not implemented in the userspace dataplane")
 	}
-	// Firewall filters and policers are now supported in the userspace dataplane.
-	// Three-color policers remain unsupported.
-	if len(cfg.Firewall.ThreeColorPolicers) > 0 {
-		addReason("three-color policers are not implemented in the userspace dataplane")
+	if !userspaceSupportsThreeColorPolicers(cfg) {
+		addReason("userspace three-color policers require color-blind mode and then discard")
 	}
+	// Firewall filters and legacy policers are supported in the userspace
+	// dataplane. Three-color policers are supported for the color-blind
+	// `then discard` runtime slice above; unsupported color-aware and
+	// non-drop actions remain fail-closed so the dataplane does not silently
+	// promote inherited color or ignore configured treatment.
 	// IPsec: kernel XFRM handles ESP encryption/decryption; the userspace
 	// dataplane passes ESP/IKE traffic to the kernel via the slow-path.
 	// GRE transit is now modeled as native userspace tunnel endpoints on the
@@ -1168,6 +1171,24 @@ func deriveUserspaceCapabilities(cfg *config.Config) UserspaceCapabilities {
 	}
 	// Flow export (NetFlow v9) is now supported in the userspace dataplane.
 	return caps
+}
+
+func userspaceSupportsThreeColorPolicers(cfg *config.Config) bool {
+	if cfg == nil {
+		return true
+	}
+	for _, pol := range cfg.Firewall.ThreeColorPolicers {
+		if pol == nil {
+			continue
+		}
+		if !pol.ColorBlind {
+			return false
+		}
+		if pol.ThenAction != "" && pol.ThenAction != "discard" {
+			return false
+		}
+	}
+	return true
 }
 
 func userspaceSupportsSecurityPolicies(cfg *config.Config) bool {
@@ -1586,6 +1607,9 @@ func (m *Manager) InjectPacket(req InjectPacketRequest) (ProcessStatus, error) {
 
 	if m.proc == nil {
 		return ProcessStatus{}, errors.New("userspace dataplane helper not running")
+	}
+	if err := validateInjectPacketRequestForHelper(req, m.lastStatus); err != nil {
+		return ProcessStatus{}, err
 	}
 	var status ProcessStatus
 	if err := m.requestLocked(ControlRequest{Type: "inject_packet", Packet: &req}, &status); err != nil {

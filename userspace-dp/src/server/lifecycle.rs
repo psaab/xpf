@@ -74,6 +74,7 @@ pub(crate) fn run() -> Result<(), String> {
         status: ProcessStatus {
             pid: std::process::id() as i32,
             config_snapshot_protocol_version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            inject_packet_tuple_protocol_version: INJECT_PACKET_TUPLE_PROTOCOL_VERSION,
             started_at: Utc::now(),
             control_socket: args.control_socket.clone(),
             state_file: args.state_file.clone(),
@@ -111,6 +112,7 @@ pub(crate) fn run() -> Result<(), String> {
             cos_interfaces: Vec::new(),
             policy_rule_counters: Vec::new(),
             filter_term_counters: Vec::new(),
+            three_color_policer_counters: Vec::new(),
             last_resolution: None,
             slow_path: SlowPathStatus::default(),
             debug_worker_threads: 0,
