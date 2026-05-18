@@ -322,6 +322,20 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) session_delta_drained: AtomicU64,
     pub(super) policy_denied_packets: AtomicU64,
     pub(super) screen_drops: AtomicU64,
+    /// #1374: SYN-cookie challenge decisions selected by the screen runtime.
+    /// This is not the legacy `sent` counter until bounded SYN-ACK TX exists.
+    pub(super) syn_cookie_challenges: AtomicU64,
+    /// #1374: SYN-cookie mode crossed the threshold but no HA-safe master key
+    /// was published, so the runtime failed closed instead of minting a
+    /// local-only cookie.
+    pub(super) syn_cookie_secret_unavailable: AtomicU64,
+    /// #1374: session-miss ACKs with a valid cookie accepted by the runtime.
+    pub(super) syn_cookie_ack_valid: AtomicU64,
+    /// #1374: session-miss ACKs rejected while SYN-cookie mode was active.
+    pub(super) syn_cookie_ack_invalid: AtomicU64,
+    /// #1374: retransmitted SYNs admitted by the single-use validated-client
+    /// cache after a valid cookie ACK.
+    pub(super) syn_cookie_bypass: AtomicU64,
     pub(super) snat_packets: AtomicU64,
     pub(super) dnat_packets: AtomicU64,
     pub(super) slow_path_packets: AtomicU64,
@@ -596,6 +610,11 @@ impl BindingLiveState {
             session_delta_drained: AtomicU64::new(0),
             policy_denied_packets: AtomicU64::new(0),
             screen_drops: AtomicU64::new(0),
+            syn_cookie_challenges: AtomicU64::new(0),
+            syn_cookie_secret_unavailable: AtomicU64::new(0),
+            syn_cookie_ack_valid: AtomicU64::new(0),
+            syn_cookie_ack_invalid: AtomicU64::new(0),
+            syn_cookie_bypass: AtomicU64::new(0),
             snat_packets: AtomicU64::new(0),
             dnat_packets: AtomicU64::new(0),
             slow_path_packets: AtomicU64::new(0),
@@ -905,6 +924,13 @@ impl BindingLiveState {
             session_delta_drained: self.session_delta_drained.load(Ordering::Relaxed),
             policy_denied_packets: self.policy_denied_packets.load(Ordering::Relaxed),
             screen_drops: self.screen_drops.load(Ordering::Relaxed),
+            syn_cookie_challenges: self.syn_cookie_challenges.load(Ordering::Relaxed),
+            syn_cookie_secret_unavailable: self
+                .syn_cookie_secret_unavailable
+                .load(Ordering::Relaxed),
+            syn_cookie_ack_valid: self.syn_cookie_ack_valid.load(Ordering::Relaxed),
+            syn_cookie_ack_invalid: self.syn_cookie_ack_invalid.load(Ordering::Relaxed),
+            syn_cookie_bypass: self.syn_cookie_bypass.load(Ordering::Relaxed),
             snat_packets: self.snat_packets.load(Ordering::Relaxed),
             dnat_packets: self.dnat_packets.load(Ordering::Relaxed),
             slow_path_packets: self.slow_path_packets.load(Ordering::Relaxed),

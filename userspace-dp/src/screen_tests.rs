@@ -1221,7 +1221,7 @@ fn syn_cookie_ack_validation_marks_next_syn_bypass_without_session_creation() {
 
     assert_eq!(
         state.check_packet_with_zone_id("trust", 7, &syn, 128),
-        ScreenVerdict::Pass
+        ScreenVerdict::SynCookieBypass
     );
     assert_eq!(
         state.syn_cookie_validated_len(),
@@ -1488,6 +1488,62 @@ fn syn_cookie_validated_cache_refresh_extends_ttl() {
     cache.insert(7, tuple_refreshed, 109);
     assert!(!cache.take_valid(7, tuple_old, 110));
     assert!(cache.take_valid(7, tuple_refreshed, 110));
+}
+
+#[test]
+fn syn_cookie_validated_cache_expires_on_ttl_boundary() {
+    let mut cache = SynCookieValidatedCache::new(4, SynCookieCodec::EPOCH_SECS);
+    let tuple = syn_cookie_tuple();
+
+    cache.insert(7, tuple, 128);
+    assert!(
+        cache.take_valid(7, tuple, 191),
+        "entry should remain valid until just before the 64s TTL boundary"
+    );
+
+    cache.insert(7, tuple, 128);
+    assert!(
+        !cache.take_valid(7, tuple, 192),
+        "entry expires at insertion time + one cookie epoch"
+    );
+}
+
+#[test]
+fn syn_cookie_ack_validation_accepts_previous_epoch_after_rotation() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 127),
+        ScreenVerdict::Pass
+    );
+    let challenge = match state.check_packet_with_zone_id("trust", 7, &syn, 127) {
+        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+        other => panic!("expected SYN-cookie challenge, got {other:?}"),
+    };
+
+    let mut ack = syn.clone();
+    ack.tcp_flags = TCP_ACK;
+    ack.tcp_ack = challenge.cookie_isn.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128),
+        SynCookieAckVerdict::Validated,
+        "ACK after the epoch tick must validate against the previous full epoch"
+    );
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::SynCookieBypass
+    );
 }
 
 // ================================================================

@@ -2986,3 +2986,32 @@ fn disposition_counters_hot_screen_drops_accumulate_in_batch() {
     assert_eq!(counters.screen_drops, 0, "batch must clear after flush");
     assert_eq!(live.screen_drops.load(Ordering::Relaxed), 3, "live must receive count after flush");
 }
+
+#[test]
+fn syn_cookie_counters_hot_path_accumulate_in_batch() {
+    let live = BindingLiveState::new();
+    let mut counters = BatchCounters::default();
+
+    counters.touched = true;
+    counters.syn_cookie_challenges = 2;
+    counters.syn_cookie_secret_unavailable = 3;
+    counters.syn_cookie_ack_valid = 5;
+    counters.syn_cookie_ack_invalid = 7;
+    counters.syn_cookie_bypass = 11;
+
+    counters.flush(&live);
+
+    assert_eq!(counters.syn_cookie_challenges, 0);
+    assert_eq!(counters.syn_cookie_secret_unavailable, 0);
+    assert_eq!(counters.syn_cookie_ack_valid, 0);
+    assert_eq!(counters.syn_cookie_ack_invalid, 0);
+    assert_eq!(counters.syn_cookie_bypass, 0);
+    assert_eq!(live.syn_cookie_challenges.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        live.syn_cookie_secret_unavailable.load(Ordering::Relaxed),
+        3
+    );
+    assert_eq!(live.syn_cookie_ack_valid.load(Ordering::Relaxed), 5);
+    assert_eq!(live.syn_cookie_ack_invalid.load(Ordering::Relaxed), 7);
+    assert_eq!(live.syn_cookie_bypass.load(Ordering::Relaxed), 11);
+}

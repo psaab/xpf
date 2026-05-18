@@ -842,6 +842,11 @@ type BindingStatus struct {
 	SessionDeltaDrained               uint64 `json:"session_delta_drained,omitempty"`
 	PolicyDeniedPackets               uint64 `json:"policy_denied_packets,omitempty"`
 	ScreenDrops                       uint64 `json:"screen_drops,omitempty"`
+	SYNCookieChallenges               uint64 `json:"syn_cookie_challenges,omitempty"`
+	SYNCookieSecretUnavailable        uint64 `json:"syn_cookie_secret_unavailable,omitempty"`
+	SYNCookieAckValid                 uint64 `json:"syn_cookie_ack_valid,omitempty"`
+	SYNCookieAckInvalid               uint64 `json:"syn_cookie_ack_invalid,omitempty"`
+	SYNCookieBypass                   uint64 `json:"syn_cookie_bypass,omitempty"`
 	SNATPackets                       uint64 `json:"snat_packets,omitempty"`
 	DNATPackets                       uint64 `json:"dnat_packets,omitempty"`
 	SlowPathPackets                   uint64 `json:"slow_path_packets,omitempty"`

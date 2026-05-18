@@ -63,6 +63,12 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var sessionDeltaDropped uint64
 	var sessionDeltaDrained uint64
 	var policyDeniedPackets uint64
+	var screenDrops uint64
+	var synCookieChallenges uint64
+	var synCookieSecretUnavailable uint64
+	var synCookieAckValid uint64
+	var synCookieAckInvalid uint64
+	var synCookieBypass uint64
 	var snatPackets uint64
 	var dnatPackets uint64
 	var txPackets uint64
@@ -145,6 +151,12 @@ func FormatStatusSummary(status ProcessStatus) string {
 		sessionDeltaDropped += binding.SessionDeltaDropped
 		sessionDeltaDrained += binding.SessionDeltaDrained
 		policyDeniedPackets += binding.PolicyDeniedPackets
+		screenDrops += binding.ScreenDrops
+		synCookieChallenges += binding.SYNCookieChallenges
+		synCookieSecretUnavailable += binding.SYNCookieSecretUnavailable
+		synCookieAckValid += binding.SYNCookieAckValid
+		synCookieAckInvalid += binding.SYNCookieAckInvalid
+		synCookieBypass += binding.SYNCookieBypass
 		snatPackets += binding.SNATPackets
 		dnatPackets += binding.DNATPackets
 		txPackets += binding.TXPackets
@@ -317,6 +329,11 @@ func FormatStatusSummary(status ProcessStatus) string {
 			es.PolicyDenyDrops, es.ScreenDropDrops, es.FilterLogDrops)
 	}
 	fmt.Fprintf(&b, "  Policy denied packets:     %d\n", policyDeniedPackets)
+	fmt.Fprintf(&b, "  Screen drops:              %d\n", screenDrops)
+	if synCookieChallenges != 0 || synCookieSecretUnavailable != 0 || synCookieAckValid != 0 || synCookieAckInvalid != 0 || synCookieBypass != 0 {
+		fmt.Fprintf(&b, "  SYN-cookie counters:       challenges=%d unavailable=%d ack_valid=%d ack_invalid=%d bypass=%d\n",
+			synCookieChallenges, synCookieSecretUnavailable, synCookieAckValid, synCookieAckInvalid, synCookieBypass)
+	}
 	fmt.Fprintf(&b, "  SNAT packets:              %d\n", snatPackets)
 	fmt.Fprintf(&b, "  DNAT packets:              %d\n", dnatPackets)
 	fmt.Fprintf(&b, "  TX packets:                %d\n", txPackets)

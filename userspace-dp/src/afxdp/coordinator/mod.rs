@@ -1209,6 +1209,11 @@ impl Coordinator {
                 binding.session_delta_drained = snap.session_delta_drained;
                 binding.policy_denied_packets = snap.policy_denied_packets;
                 binding.screen_drops = snap.screen_drops;
+                binding.syn_cookie_challenges = snap.syn_cookie_challenges;
+                binding.syn_cookie_secret_unavailable = snap.syn_cookie_secret_unavailable;
+                binding.syn_cookie_ack_valid = snap.syn_cookie_ack_valid;
+                binding.syn_cookie_ack_invalid = snap.syn_cookie_ack_invalid;
+                binding.syn_cookie_bypass = snap.syn_cookie_bypass;
                 binding.snat_packets = snap.snat_packets;
                 binding.dnat_packets = snap.dnat_packets;
                 binding.slow_path_packets = snap.slow_path_packets;
@@ -1372,6 +1377,12 @@ impl Coordinator {
                 binding.session_delta_dropped = 0;
                 binding.session_delta_drained = 0;
                 binding.policy_denied_packets = 0;
+                binding.screen_drops = 0;
+                binding.syn_cookie_challenges = 0;
+                binding.syn_cookie_secret_unavailable = 0;
+                binding.syn_cookie_ack_valid = 0;
+                binding.syn_cookie_ack_invalid = 0;
+                binding.syn_cookie_bypass = 0;
                 binding.snat_packets = 0;
                 binding.dnat_packets = 0;
                 binding.slow_path_packets = 0;

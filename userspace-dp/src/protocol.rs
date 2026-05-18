@@ -1533,6 +1533,16 @@ pub(crate) struct BindingStatus {
     pub policy_denied_packets: u64,
     #[serde(rename = "screen_drops", default)]
     pub screen_drops: u64,
+    #[serde(rename = "syn_cookie_challenges", default)]
+    pub syn_cookie_challenges: u64,
+    #[serde(rename = "syn_cookie_secret_unavailable", default)]
+    pub syn_cookie_secret_unavailable: u64,
+    #[serde(rename = "syn_cookie_ack_valid", default)]
+    pub syn_cookie_ack_valid: u64,
+    #[serde(rename = "syn_cookie_ack_invalid", default)]
+    pub syn_cookie_ack_invalid: u64,
+    #[serde(rename = "syn_cookie_bypass", default)]
+    pub syn_cookie_bypass: u64,
     #[serde(rename = "snat_packets", default)]
     pub snat_packets: u64,
     #[serde(rename = "dnat_packets", default)]
@@ -2505,6 +2515,51 @@ mod tests {
         );
         assert_eq!(snap.mirror_drops_no_binding, status.mirror_drops_no_binding);
         assert_eq!(snap.mirror_drops_queue_full, status.mirror_drops_queue_full);
+    }
+
+    #[test]
+    fn syn_cookie_counters_binding_status_wire_roundtrip() {
+        let status = BindingStatus {
+            worker_id: 7,
+            slot: 1,
+            ifindex: 11,
+            queue_id: 2,
+            syn_cookie_challenges: 3,
+            syn_cookie_secret_unavailable: 5,
+            syn_cookie_ack_valid: 7,
+            syn_cookie_ack_invalid: 11,
+            syn_cookie_bypass: 13,
+            ..Default::default()
+        };
+
+        let value: serde_json::Value =
+            serde_json::to_value(&status).expect("serialize BindingStatus to Value");
+        let obj = value
+            .as_object()
+            .expect("BindingStatus serializes as a JSON object");
+        for key in [
+            "syn_cookie_challenges",
+            "syn_cookie_secret_unavailable",
+            "syn_cookie_ack_valid",
+            "syn_cookie_ack_invalid",
+            "syn_cookie_bypass",
+        ] {
+            assert!(
+                obj.contains_key(key),
+                "BindingStatus wire key `{key}` missing: {value}"
+            );
+        }
+
+        let json = serde_json::to_string(&status).expect("serialize BindingStatus");
+        let back: BindingStatus = serde_json::from_str(&json).expect("deserialize BindingStatus");
+        assert_eq!(back.syn_cookie_challenges, status.syn_cookie_challenges);
+        assert_eq!(
+            back.syn_cookie_secret_unavailable,
+            status.syn_cookie_secret_unavailable
+        );
+        assert_eq!(back.syn_cookie_ack_valid, status.syn_cookie_ack_valid);
+        assert_eq!(back.syn_cookie_ack_invalid, status.syn_cookie_ack_invalid);
+        assert_eq!(back.syn_cookie_bypass, status.syn_cookie_bypass);
     }
 
     // #943 Copilot round-2 finding #3: the rich BindingStatus wire

@@ -475,15 +475,18 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 }
 
 type userspaceCounterSnapshot struct {
-	rxPackets      uint64
-	txPackets      uint64
-	forwardPackets uint64
-	sessionCreates uint64
-	sessionExpires uint64
-	policyDenied   uint64
-	screenDrops    uint64
-	snatPackets    uint64
-	dnatPackets    uint64
+	rxPackets        uint64
+	txPackets        uint64
+	forwardPackets   uint64
+	sessionCreates   uint64
+	sessionExpires   uint64
+	policyDenied     uint64
+	screenDrops      uint64
+	synCookieValid   uint64
+	synCookieInvalid uint64
+	synCookieBypass  uint64
+	snatPackets      uint64
+	dnatPackets      uint64
 }
 
 // sumBindingCounters aggregates counters across all bindings in a status response.
@@ -498,6 +501,9 @@ func sumBindingCounters(status *ProcessStatus) userspaceCounterSnapshot {
 		s.sessionExpires += b.SessionExpires
 		s.policyDenied += b.PolicyDeniedPackets
 		s.screenDrops += b.ScreenDrops
+		s.synCookieValid += b.SYNCookieAckValid
+		s.synCookieInvalid += b.SYNCookieAckInvalid
+		s.synCookieBypass += b.SYNCookieBypass
 		s.snatPackets += b.SNATPackets
 		s.dnatPackets += b.DNATPackets
 	}
@@ -528,6 +534,11 @@ func (m *Manager) syncBPFCountersLocked(status *ProcessStatus) {
 		{dataplane.GlobalCtrSessionsClosed, safeDelta(cur.sessionExpires, prev.sessionExpires)},
 		{dataplane.GlobalCtrPolicyDeny, safeDelta(cur.policyDenied, prev.policyDenied)},
 		{dataplane.GlobalCtrScreenDrops, safeDelta(cur.screenDrops, prev.screenDrops)},
+		// Challenge decisions are not SYN-cookie "sent" events until the
+		// userspace helper can transmit bounded SYN-ACK replies.
+		{dataplane.GlobalCtrSyncookieValid, safeDelta(cur.synCookieValid, prev.synCookieValid)},
+		{dataplane.GlobalCtrSyncookieInvalid, safeDelta(cur.synCookieInvalid, prev.synCookieInvalid)},
+		{dataplane.GlobalCtrSyncookieBypass, safeDelta(cur.synCookieBypass, prev.synCookieBypass)},
 	}
 
 	for _, d := range deltas {

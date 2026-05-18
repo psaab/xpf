@@ -4704,6 +4704,9 @@ func TestSumBindingCounters(t *testing.T) {
 				SessionExpires:       5,
 				PolicyDeniedPackets:  3,
 				ScreenDrops:          2,
+				SYNCookieAckValid:    11,
+				SYNCookieAckInvalid:  13,
+				SYNCookieBypass:      17,
 				SNATPackets:          20,
 				DNATPackets:          15,
 			},
@@ -4715,6 +4718,9 @@ func TestSumBindingCounters(t *testing.T) {
 				SessionExpires:       10,
 				PolicyDeniedPackets:  7,
 				ScreenDrops:          4,
+				SYNCookieAckValid:    19,
+				SYNCookieAckInvalid:  23,
+				SYNCookieBypass:      29,
 				SNATPackets:          40,
 				DNATPackets:          30,
 			},
@@ -4741,6 +4747,15 @@ func TestSumBindingCounters(t *testing.T) {
 	}
 	if s.screenDrops != 6 {
 		t.Fatalf("screenDrops = %d, want 6", s.screenDrops)
+	}
+	if s.synCookieValid != 30 {
+		t.Fatalf("synCookieValid = %d, want 30", s.synCookieValid)
+	}
+	if s.synCookieInvalid != 36 {
+		t.Fatalf("synCookieInvalid = %d, want 36", s.synCookieInvalid)
+	}
+	if s.synCookieBypass != 46 {
+		t.Fatalf("synCookieBypass = %d, want 46", s.synCookieBypass)
 	}
 	if s.snatPackets != 60 {
 		t.Fatalf("snatPackets = %d, want 60", s.snatPackets)
