@@ -187,10 +187,30 @@ func (s *runtimeDomainSessionStore) DeleteV4(key dataplane.SessionKey) error {
 
 func (s *runtimeDomainSessionStore) DeleteV6(dataplane.SessionKeyV6) error { return nil }
 
-func (s *runtimeDomainSessionStore) DeleteWithCompanionsV4(key dataplane.SessionKey, _ dataplane.DeleteReason) error {
+func (s *runtimeDomainSessionStore) DeleteKnownV4(key dataplane.SessionKey, _ dataplane.SessionValue, _ dataplane.DeleteReason) error {
 	s.deleted = append(s.deleted, key)
 	delete(s.v4, key)
 	return nil
+}
+
+func (s *runtimeDomainSessionStore) DeleteKnownV6(dataplane.SessionKeyV6, dataplane.SessionValueV6, dataplane.DeleteReason) error {
+	return nil
+}
+
+func (s *runtimeDomainSessionStore) DeleteBatchKnownV4(entries []dataplane.SessionEntryV4, _ dataplane.DeleteReason) (int, error) {
+	for _, entry := range entries {
+		s.deleted = append(s.deleted, entry.Key)
+		delete(s.v4, entry.Key)
+	}
+	return len(entries), nil
+}
+
+func (s *runtimeDomainSessionStore) DeleteBatchKnownV6([]dataplane.SessionEntryV6, dataplane.DeleteReason) (int, error) {
+	return 0, nil
+}
+
+func (s *runtimeDomainSessionStore) DeleteWithCompanionsV4(key dataplane.SessionKey, _ dataplane.DeleteReason) error {
+	return s.DeleteKnownV4(key, dataplane.SessionValue{}, dataplane.DeleteReasonGCExpired)
 }
 
 func (s *runtimeDomainSessionStore) DeleteWithCompanionsV6(dataplane.SessionKeyV6, dataplane.DeleteReason) error {

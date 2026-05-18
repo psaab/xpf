@@ -49,9 +49,12 @@ sent while exact queues were still backlogged.
   `NewDataPlaneSessionStore`. The generic `DataPlane` adapter preserves the
   batch-iteration fast path and centralizes cluster/GC companion ownership:
   cluster-synced forward installs create reverse and DNAT companions and roll
-  back session writes if companion creation fails, while `DeleteWithCompanions*`
-  removes reverse/DNAT state and preserves persistent-NAT bindings before
-  deletion.
+  back session writes if companion creation fails. Iteration callers that
+  already have the session value must delete through `DeleteKnown*` or
+  `DeleteBatchKnown*` so reverse/DNAT cleanup uses the authoritative
+  iterator value, preserves persistent-NAT bindings, and keeps the batched
+  map-delete fast path. `DeleteWithCompanions*` is retained for key-only
+  HA delete messages.
 
 ## Callers
 

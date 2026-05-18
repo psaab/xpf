@@ -44,7 +44,7 @@ isolation. The current consumers are:
 | `pkg/api/server.go` (`Config.DP`, `Server.dp`) | REST handlers and metrics read sessions, counters, events, NAT/policy/filter state, and userspace status through `dataplane.DataPlane`. | `Telemetry`, `SessionStore`, plus an explicit userspace status/control extension kept out of the root interface. |
 | `pkg/grpcapi/server.go` (`Config.DP`, `Server.dp`) | gRPC show/monitor/control paths read generic counters and type-assert userspace status/control DTOs. | `Telemetry`, `SessionStore`, `LinkController`, and a backend-specific userspace control adapter. |
 | `pkg/cli/cli.go` (`CLI.dp`) | Operational commands read sessions/counters/events and some userspace-only status surfaces. | CLI should consume gRPC for remote operation; in-process CLI should use `Telemetry`, `SessionStore`, and explicit optional userspace diagnostic interfaces. |
-| `pkg/conntrack/gc.go` | GC used to iterate/delete BPF session maps and read raw global counters through `DataPlane`. | Now adapted at construction to `SessionStore` and `Telemetry`; expiry deletes use `DeleteWithCompanions*`, and session-limit publish is the only remaining narrow eBPF writer. |
+| `pkg/conntrack/gc.go` | GC used to iterate/delete BPF session maps and read raw global counters through `DataPlane`. | Now adapted at construction to `SessionStore` and `Telemetry`; expiry deletes use known-value batched companion deletes, and session-limit publish is the only remaining narrow eBPF writer. |
 | `pkg/cluster/sync.go` | HA sync used to export/import sessions, type-assert userspace sweep-profile hooks, and stale-reconcile with local reverse/DNAT cleanup. | Now adapted at construction to `SessionStore` and `Telemetry`; receive, sweep, bulk export, and stale reconcile use the session domain. Companion reverse/NAT cleanup is owned by the same delete semantics as GC. |
 | Daemon HA/fabric/apply code | Calls `UpdateRGActive`, `UpdateHAWatchdog`, `UpdateFabricFwd`, `UpdateFabricFwd1`, `SyncFabricState`, BPF writers, scheduler updates, and userspace link-cycle hooks. | `HAController`, `ConfigSink`, `LinkController`; BPF writers stay inside the eBPF backend. |
 | Metrics/API/CLI session and counter readers | Mix map-backed eBPF counters, helper JSON status, and userspace formatting DTOs. | `Telemetry` owns generic counters/events; userspace-only formatting remains an extension with adapter-local DTO conversion. |
@@ -193,6 +193,10 @@ type SessionStore interface {
 	PutClusterSyncedV6(dataplane.SessionKeyV6, dataplane.SessionValueV6) error
 	DeleteV4(dataplane.SessionKey) error
 	DeleteV6(dataplane.SessionKeyV6) error
+	DeleteKnownV4(dataplane.SessionKey, dataplane.SessionValue, DeleteReason) error
+	DeleteKnownV6(dataplane.SessionKeyV6, dataplane.SessionValueV6, DeleteReason) error
+	DeleteBatchKnownV4([]dataplane.SessionEntryV4, DeleteReason) (int, error)
+	DeleteBatchKnownV6([]dataplane.SessionEntryV6, DeleteReason) (int, error)
 	DeleteWithCompanionsV4(dataplane.SessionKey, DeleteReason) error
 	DeleteWithCompanionsV6(dataplane.SessionKeyV6, DeleteReason) error
 	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
@@ -215,8 +219,8 @@ side effects that now move to explicit domain methods:
 - per-IP session-limit counting publishes screen/session-limit maps after the
   sweep; this remains a narrow compatibility publisher while backend-private
   config/state ownership is split out;
-- persistent-NAT preservation now runs inside
-  `SessionStore.DeleteWithCompanions*` before the session disappears;
+- persistent-NAT preservation now runs inside the known-value delete path
+  before the session disappears;
 - DNAT reverse-entry cleanup now runs inside the backend session/NAT store so
   expiring a session removes companion DNAT/NAT64 reverse state in the same
   generation; and
@@ -231,6 +235,8 @@ operations:
 ```go
 type SessionStore interface {
 	// ...
+	DeleteBatchKnownV4([]dataplane.SessionEntryV4, DeleteReason) (int, error)
+	DeleteBatchKnownV6([]dataplane.SessionEntryV6, DeleteReason) (int, error)
 	DeleteWithCompanionsV4(dataplane.SessionKey, DeleteReason) error
 	DeleteWithCompanionsV6(dataplane.SessionKeyV6, DeleteReason) error
 	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
@@ -238,11 +244,13 @@ type SessionStore interface {
 ```
 
 The invariant is fixed: GC expiry and cluster stale reconciliation must use the
-same backend delete semantics so reverse-key cleanup, DNAT/NAT64 cleanup,
-persistent-NAT preservation, and generation accounting cannot drift. Existing
-`pkg/cluster/sync_test.go` mocks that record `DeleteDNATEntry*` as no-op
-callbacks are no longer sufficient by themselves; tests must also drive
-`SessionStore` companion deletion.
+same known-value backend delete semantics so reverse-key cleanup, DNAT/NAT64
+cleanup, persistent-NAT preservation, batching, and generation accounting
+cannot drift. Key-only `DeleteWithCompanions*` remains for explicit HA delete
+messages, but GC and stale reconciliation must not re-read the session value
+after iteration. Existing `pkg/cluster/sync_test.go` mocks that record
+`DeleteDNATEntry*` as no-op callbacks are no longer sufficient by themselves;
+tests must also drive `SessionStore` companion deletion.
 
 Userspace session deltas remain an optional extension until the generic event
 stream can carry the same information:
@@ -581,8 +589,9 @@ interface in place and adds the new contract beside it:
 - GC now routes through `SessionStore` and `Telemetry`. The legacy
   `NewGC(dataplane.DataPlane, ...)` constructor is only an adapter boundary;
   the sweep body uses session-domain iteration, domain-owned
-  `DeleteWithCompanions*`, and telemetry global counters. A domain-only unit
-  test pins that GC can expire sessions without a `DataPlane`.
+  known-value batched companion deletes, and telemetry global counters. A
+  domain-only unit test pins that GC can expire sessions without a
+  `DataPlane`.
 - Session sync now routes receive, sweep, bulk export, and stale-reconcile
   through `SessionStore`/`Telemetry`. The legacy constructors still accept a
   `DataPlane` for compatibility, but immediately adapt it with

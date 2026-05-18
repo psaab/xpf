@@ -65,8 +65,8 @@ type GC struct {
 	lastClosedCounter  uint64 // last seen GLOBAL_CTR_SESSIONS_CLOSED value
 
 	// Scratch buffers reused across sweeps to reduce allocation churn.
-	toDeleteV4 []dataplane.SessionKey
-	toDeleteV6 []dataplane.SessionKeyV6
+	toDeleteV4 []dataplane.SessionEntryV4
+	toDeleteV6 []dataplane.SessionEntryV6
 
 	// Aggressive session aging (set via SetAgingConfig).
 	agingActive   bool
@@ -242,8 +242,7 @@ func (gc *GC) sweep() time.Duration {
 			}
 			deadline := val.LastSeen + effectiveTimeout
 			if deadline < now {
-				expired++
-				toDelete = append(toDelete, key)
+				toDelete = append(toDelete, dataplane.SessionEntryV4{Key: key, Value: val})
 			} else if earliestDeadline == 0 || deadline < earliestDeadline {
 				earliestDeadline = deadline
 			}
@@ -269,12 +268,14 @@ func (gc *GC) sweep() time.Duration {
 		return gc.interval
 	}
 
-	for _, key := range toDelete {
-		if err := gc.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonGCExpired); err != nil {
-			slog.Debug("conntrack GC v4 delete failed", "err", err)
-		}
+	if deleted, err := gc.sessions.DeleteBatchKnownV4(toDelete, dataplane.DeleteReasonGCExpired); err != nil {
+		slog.Debug("conntrack GC v4 delete failed", "err", err)
+	} else {
+		expired += deleted
 		if gc.OnDeleteV4 != nil {
-			gc.OnDeleteV4(key)
+			for _, entry := range toDelete {
+				gc.OnDeleteV4(entry.Key)
+			}
 		}
 	}
 
@@ -309,8 +310,7 @@ func (gc *GC) sweep() time.Duration {
 				}
 				deadline := val.LastSeen + effectiveTimeout
 				if deadline < now {
-					expired++
-					toDeleteV6 = append(toDeleteV6, key)
+					toDeleteV6 = append(toDeleteV6, dataplane.SessionEntryV6{Key: key, Value: val})
 				} else if earliestDeadline == 0 || deadline < earliestDeadline {
 					earliestDeadline = deadline
 				}
@@ -345,12 +345,14 @@ func (gc *GC) sweep() time.Duration {
 		gc.lastV6Count = v6Count
 	}
 
-	for _, key := range toDeleteV6 {
-		if err := gc.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonGCExpired); err != nil {
-			slog.Debug("conntrack GC v6 delete failed", "err", err)
-		}
+	if deleted, err := gc.sessions.DeleteBatchKnownV6(toDeleteV6, dataplane.DeleteReasonGCExpired); err != nil {
+		slog.Debug("conntrack GC v6 delete failed", "err", err)
+	} else {
+		expired += deleted
 		if gc.OnDeleteV6 != nil {
-			gc.OnDeleteV6(key)
+			for _, entry := range toDeleteV6 {
+				gc.OnDeleteV6(entry.Key)
+			}
 		}
 	}
 

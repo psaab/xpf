@@ -42,9 +42,11 @@ body must not reach through raw BPF session/counter methods directly.
 - Delete callbacks fire **inside** the GC loop. Keep them non-blocking
   and at `slog.Debug` for high-frequency paths — earlier `slog.Info` here
   flooded HA sync at 15 req/s.
-- Expiry deletes must go through `SessionStore.DeleteWithCompanions*`.
-  That is where reverse-key deletion, DNAT/DNATv6 cleanup, and persistent-NAT
-  binding preservation are owned. Do not reintroduce local `DeleteDNATEntry*`
+- Expiry deletes must go through `SessionStore.DeleteBatchKnown*` with the
+  `(key,value)` pair captured during iteration. That keeps GC on the batched
+  map-delete path and prevents a second `GetSession*` read from racing a
+  concurrent delete or losing companion metadata on backends that cannot
+  perform single-entry lookups. Do not reintroduce local `DeleteDNATEntry*`
   cleanup in GC.
 - `MaxSessions` = 10M entries combined (forward + reverse). The
   user-visible session count is the total / 2.

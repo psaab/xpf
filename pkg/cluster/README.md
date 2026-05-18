@@ -50,10 +50,12 @@ sync.
 - HA delete-sync callbacks fire from the GC loop. They must not block, and
   must log at `slog.Debug` — earlier `slog.Info` flooded at 15 req/s and
   drowned out real diagnostics (per CLAUDE.md logging rules).
-- Session-sync deletes and bulk stale reconciliation must use
-  `SessionStore.DeleteWithCompanions*`. Reverse-session, DNAT/DNATv6, and
-  persistent-NAT side effects are backend-owned; do not add local map cleanup
-  in `pkg/cluster`.
+- Session-sync key-only delete messages use `SessionStore.DeleteWithCompanions*`.
+  Bulk stale reconciliation must use the known-value batch delete path through
+  `SessionStore.ReconcileClusterBulk`, which deletes with the iterator's
+  `(key,value)` snapshot. Reverse-session, DNAT/DNATv6, and persistent-NAT
+  side effects are backend-owned; do not add local map cleanup in
+  `pkg/cluster`.
 - Dual-active overlap is intentional: primary sets `rg_active=true`
   immediately on becoming master; secondary defers `rg_active=false` until
   it sees the VRRP BACKUP event. Brief overlap, never both inactive.

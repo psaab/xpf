@@ -23,6 +23,13 @@ type sessionStoreTestDP struct {
 	failSetV6    map[SessionKeyV6]error
 	failSetDNAT  error
 	failSetDNAT6 error
+	failDelV4    map[SessionKey]error
+	failDelV6    map[SessionKeyV6]error
+	failDelDNAT  map[DNATKey]error
+	failDelDNAT6 map[DNATKeyV6]error
+	batchDelV4   int
+	batchDelV6   int
+	forceGetMiss bool
 }
 
 func (m *sessionStoreTestDP) IterateSessions(fn func(SessionKey, SessionValue) bool) error {
@@ -52,6 +59,9 @@ func (m *sessionStoreTestDP) BatchIterateSessionsV6(fn func(SessionKeyV6, Sessio
 }
 
 func (m *sessionStoreTestDP) GetSessionV4(key SessionKey) (SessionValue, error) {
+	if m.forceGetMiss {
+		return SessionValue{}, ebpf.ErrKeyNotExist
+	}
 	if val, ok := m.v4[key]; ok {
 		return val, nil
 	}
@@ -59,6 +69,9 @@ func (m *sessionStoreTestDP) GetSessionV4(key SessionKey) (SessionValue, error) 
 }
 
 func (m *sessionStoreTestDP) GetSessionV6(key SessionKeyV6) (SessionValueV6, error) {
+	if m.forceGetMiss {
+		return SessionValueV6{}, ebpf.ErrKeyNotExist
+	}
 	if val, ok := m.v6[key]; ok {
 		return val, nil
 	}
@@ -88,21 +101,53 @@ func (m *sessionStoreTestDP) SetSessionV6(key SessionKeyV6, val SessionValueV6) 
 }
 
 func (m *sessionStoreTestDP) DeleteSession(key SessionKey) error {
+	if err, ok := m.failDelV4[key]; ok {
+		return err
+	}
 	delete(m.v4, key)
 	return nil
 }
 
 func (m *sessionStoreTestDP) DeleteSessionV6(key SessionKeyV6) error {
+	if err, ok := m.failDelV6[key]; ok {
+		return err
+	}
 	delete(m.v6, key)
 	return nil
 }
 
+func (m *sessionStoreTestDP) BatchDeleteSessions(keys []SessionKey) (int, error) {
+	m.batchDelV4++
+	for i, key := range keys {
+		if err := m.DeleteSession(key); err != nil {
+			return i, err
+		}
+	}
+	return len(keys), nil
+}
+
+func (m *sessionStoreTestDP) BatchDeleteSessionsV6(keys []SessionKeyV6) (int, error) {
+	m.batchDelV6++
+	for i, key := range keys {
+		if err := m.DeleteSessionV6(key); err != nil {
+			return i, err
+		}
+	}
+	return len(keys), nil
+}
+
 func (m *sessionStoreTestDP) DeleteDNATEntry(key DNATKey) error {
+	if err, ok := m.failDelDNAT[key]; ok {
+		return err
+	}
 	m.deletedDNAT = append(m.deletedDNAT, key)
 	return nil
 }
 
 func (m *sessionStoreTestDP) DeleteDNATEntryV6(key DNATKeyV6) error {
+	if err, ok := m.failDelDNAT6[key]; ok {
+		return err
+	}
 	m.deletedDNAT6 = append(m.deletedDNAT6, key)
 	return nil
 }
@@ -253,6 +298,134 @@ func TestDeleteWithCompanionsV4RemovesReverseAndDNAT(t *testing.T) {
 
 	if err := store.DeleteWithCompanionsV4(forward, DeleteReasonClusterStale); err != nil {
 		t.Fatalf("DeleteWithCompanionsV4: %v", err)
+	}
+	if _, ok := dp.v4[forward]; ok {
+		t.Fatal("forward session still present")
+	}
+	if _, ok := dp.v4[reverse]; ok {
+		t.Fatal("reverse session still present")
+	}
+	wantDNAT := DNATKey{Protocol: 6, DstIP: 0x0a0200c0, DstPort: 40000}
+	if len(dp.deletedDNAT) != 1 || dp.deletedDNAT[0] != wantDNAT {
+		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNAT, wantDNAT)
+	}
+}
+
+func TestDeleteKnownV4StopsBeforeSessionsWhenDNATDeleteFails(t *testing.T) {
+	forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}
+	reverse := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 2}, DstIP: [4]byte{10, 0, 0, 1}, SrcPort: 80, DstPort: 1234}
+	val := SessionValue{
+		ReverseKey: reverse,
+		Flags:      SessFlagSNAT,
+		NATSrcIP:   0x0a0200c0,
+		NATSrcPort: 40000,
+	}
+	dnatErr := errors.New("dnat delete failed")
+	dp := &sessionStoreTestDP{
+		v4: map[SessionKey]SessionValue{
+			forward: val,
+			reverse: {IsReverse: 1},
+		},
+		failDelDNAT: map[DNATKey]error{
+			dnatKeyForSessionV4(forward, val): dnatErr,
+		},
+	}
+	store := NewDataPlaneSessionStore(dp)
+
+	err := store.DeleteKnownV4(forward, val, DeleteReasonGCExpired)
+	if !errors.Is(err, dnatErr) {
+		t.Fatalf("DeleteKnownV4 error = %v, want DNAT error", err)
+	}
+	if _, ok := dp.v4[forward]; !ok {
+		t.Fatal("forward session was deleted after DNAT cleanup failure")
+	}
+	if _, ok := dp.v4[reverse]; !ok {
+		t.Fatal("reverse session was deleted after DNAT cleanup failure")
+	}
+}
+
+func TestDeleteKnownV4StopsBeforeForwardWhenReverseDeleteFails(t *testing.T) {
+	forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}
+	reverse := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 2}, DstIP: [4]byte{10, 0, 0, 1}, SrcPort: 80, DstPort: 1234}
+	val := SessionValue{ReverseKey: reverse}
+	reverseErr := errors.New("reverse delete failed")
+	dp := &sessionStoreTestDP{
+		v4: map[SessionKey]SessionValue{
+			forward: val,
+			reverse: {IsReverse: 1},
+		},
+		failDelV4: map[SessionKey]error{reverse: reverseErr},
+	}
+	store := NewDataPlaneSessionStore(dp)
+
+	err := store.DeleteKnownV4(forward, val, DeleteReasonGCExpired)
+	if !errors.Is(err, reverseErr) {
+		t.Fatalf("DeleteKnownV4 error = %v, want reverse error", err)
+	}
+	if _, ok := dp.v4[forward]; !ok {
+		t.Fatal("forward session was deleted after reverse cleanup failure")
+	}
+}
+
+func TestDeleteBatchKnownV4UsesBatchSessionDeletes(t *testing.T) {
+	const n = sessionDeleteBatchSize + 6
+	dp := &sessionStoreTestDP{
+		v4: make(map[SessionKey]SessionValue),
+	}
+	entries := make([]SessionEntryV4, 0, n)
+	for i := 0; i < n; i++ {
+		forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, byte(i + 1)}, DstIP: [4]byte{10, 0, 1, 1}, SrcPort: uint16(1000 + i), DstPort: 80}
+		reverse := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 1, 1}, DstIP: [4]byte{10, 0, 0, byte(i + 1)}, SrcPort: 80, DstPort: uint16(1000 + i)}
+		val := SessionValue{ReverseKey: reverse}
+		dp.v4[forward] = val
+		dp.v4[reverse] = SessionValue{IsReverse: 1}
+		entries = append(entries, SessionEntryV4{Key: forward, Value: val})
+	}
+	store := NewDataPlaneSessionStore(dp)
+
+	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired)
+	if err != nil {
+		t.Fatalf("DeleteBatchKnownV4: %v", err)
+	}
+	if deleted != n {
+		t.Fatalf("deleted = %d, want %d", deleted, n)
+	}
+	if dp.batchDelV4 != 4 {
+		t.Fatalf("BatchDeleteSessions calls = %d, want 4", dp.batchDelV4)
+	}
+	if len(dp.v4) != 0 {
+		t.Fatalf("sessions remaining = %d, want 0", len(dp.v4))
+	}
+}
+
+func TestReconcileClusterBulkUsesIteratorValueForCompanionDeleteV4(t *testing.T) {
+	forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}
+	reverse := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 2}, DstIP: [4]byte{10, 0, 0, 1}, SrcPort: 80, DstPort: 1234}
+	dp := &sessionStoreTestDP{
+		v4: map[SessionKey]SessionValue{
+			forward: {
+				IngressZone: 2,
+				ReverseKey:  reverse,
+				Flags:       SessFlagSNAT,
+				NATSrcIP:    0x0a0200c0,
+				NATSrcPort:  40000,
+			},
+			reverse: {IsReverse: 1, IngressZone: 2},
+		},
+		forceGetMiss: true,
+	}
+	store := NewDataPlaneSessionStore(dp)
+
+	result, err := store.ReconcileClusterBulk(ClusterBulkReconcileInput{
+		ReceivedV4:     map[SessionKey]struct{}{},
+		ShouldSyncZone: func(zone uint16) bool { return false },
+		DeleteReason:   DeleteReasonClusterStale,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileClusterBulk: %v", err)
+	}
+	if result.DeletedV4 != 1 {
+		t.Fatalf("DeletedV4 = %d, want 1", result.DeletedV4)
 	}
 	if _, ok := dp.v4[forward]; ok {
 		t.Fatal("forward session still present")

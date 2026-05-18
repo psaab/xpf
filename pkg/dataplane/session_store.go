@@ -18,6 +18,18 @@ const (
 	DeleteReasonGCExpired    DeleteReason = "gc-expired"
 )
 
+const sessionDeleteBatchSize = 64
+
+type SessionEntryV4 struct {
+	Key   SessionKey
+	Value SessionValue
+}
+
+type SessionEntryV6 struct {
+	Key   SessionKeyV6
+	Value SessionValueV6
+}
+
 type SessionStore interface {
 	ForEachV4(func(SessionKey, SessionValue) bool) error
 	ForEachV6(func(SessionKeyV6, SessionValueV6) bool) error
@@ -31,6 +43,10 @@ type SessionStore interface {
 	PutClusterSyncedV6(SessionKeyV6, SessionValueV6) error
 	DeleteV4(SessionKey) error
 	DeleteV6(SessionKeyV6) error
+	DeleteKnownV4(SessionKey, SessionValue, DeleteReason) error
+	DeleteKnownV6(SessionKeyV6, SessionValueV6, DeleteReason) error
+	DeleteBatchKnownV4([]SessionEntryV4, DeleteReason) (int, error)
+	DeleteBatchKnownV6([]SessionEntryV6, DeleteReason) (int, error)
 	DeleteWithCompanionsV4(SessionKey, DeleteReason) error
 	DeleteWithCompanionsV6(SessionKeyV6, DeleteReason) error
 	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
@@ -119,6 +135,22 @@ func ignoreSessionNotFound(err error) error {
 		return nil
 	}
 	return err
+}
+
+func dnatKeyForSessionV4(key SessionKey, val SessionValue) DNATKey {
+	return DNATKey{
+		Protocol: key.Protocol,
+		DstIP:    val.NATSrcIP,
+		DstPort:  val.NATSrcPort,
+	}
+}
+
+func dnatKeyForSessionV6(key SessionKeyV6, val SessionValueV6) DNATKeyV6 {
+	return DNATKeyV6{
+		Protocol: key.Protocol,
+		DstIP:    val.NATSrcIP,
+		DstPort:  val.NATSrcPort,
+	}
 }
 
 func (s dataPlaneSessionStore) snapshotV4(key SessionKey) (sessionSnapshotV4, error) {
@@ -315,48 +347,144 @@ func (s dataPlaneSessionStore) DeleteV6(key SessionKeyV6) error {
 	return s.dp.DeleteSessionV6(key)
 }
 
-func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, _ DeleteReason) error {
-	if s.dp == nil {
-		return errors.New("nil dataplane")
-	}
-	var errs []error
-	if val, err := s.dp.GetSessionV4(key); err == nil {
-		s.preservePersistentNATV4(key, val)
-		if val.ReverseKey.Protocol != 0 {
-			errs = append(errs, s.dp.DeleteSession(val.ReverseKey))
-		}
-		if val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-			errs = append(errs, s.dp.DeleteDNATEntry(DNATKey{
-				Protocol: key.Protocol,
-				DstIP:    val.NATSrcIP,
-				DstPort:  val.NATSrcPort,
-			}))
-		}
-	}
-	errs = append(errs, s.dp.DeleteSession(key))
-	return errors.Join(errs...)
+func (s dataPlaneSessionStore) DeleteKnownV4(key SessionKey, val SessionValue, reason DeleteReason) error {
+	_, err := s.DeleteBatchKnownV4([]SessionEntryV4{{Key: key, Value: val}}, reason)
+	return err
 }
 
-func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, _ DeleteReason) error {
+func (s dataPlaneSessionStore) DeleteKnownV6(key SessionKeyV6, val SessionValueV6, reason DeleteReason) error {
+	_, err := s.DeleteBatchKnownV6([]SessionEntryV6{{Key: key, Value: val}}, reason)
+	return err
+}
+
+func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, _ DeleteReason) (int, error) {
+	if s.dp == nil {
+		return 0, errors.New("nil dataplane")
+	}
+	if len(entries) == 0 {
+		return 0, nil
+	}
+
+	reverseKeys := make([]SessionKey, 0, len(entries))
+	for _, entry := range entries {
+		val := entry.Value
+		s.preservePersistentNATV4(entry.Key, val)
+		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
+			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntry(dnatKeyForSessionV4(entry.Key, val))); err != nil {
+				return 0, err
+			}
+		}
+		if val.ReverseKey.Protocol != 0 {
+			reverseKeys = append(reverseKeys, val.ReverseKey)
+		}
+	}
+
+	if err := s.batchDeleteV4(reverseKeys); err != nil {
+		return 0, err
+	}
+
+	forwardKeys := make([]SessionKey, 0, len(entries))
+	for _, entry := range entries {
+		forwardKeys = append(forwardKeys, entry.Key)
+	}
+	if err := s.batchDeleteV4(forwardKeys); err != nil {
+		return 0, err
+	}
+	return len(entries), nil
+}
+
+func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, _ DeleteReason) (int, error) {
+	if s.dp == nil {
+		return 0, errors.New("nil dataplane")
+	}
+	if len(entries) == 0 {
+		return 0, nil
+	}
+
+	reverseKeys := make([]SessionKeyV6, 0, len(entries))
+	for _, entry := range entries {
+		val := entry.Value
+		s.preservePersistentNATV6(entry.Key, val)
+		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
+			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntryV6(dnatKeyForSessionV6(entry.Key, val))); err != nil {
+				return 0, err
+			}
+		}
+		if val.ReverseKey.Protocol != 0 {
+			reverseKeys = append(reverseKeys, val.ReverseKey)
+		}
+	}
+
+	if err := s.batchDeleteV6(reverseKeys); err != nil {
+		return 0, err
+	}
+
+	forwardKeys := make([]SessionKeyV6, 0, len(entries))
+	for _, entry := range entries {
+		forwardKeys = append(forwardKeys, entry.Key)
+	}
+	if err := s.batchDeleteV6(forwardKeys); err != nil {
+		return 0, err
+	}
+	return len(entries), nil
+}
+
+func (s dataPlaneSessionStore) batchDeleteV4(keys []SessionKey) error {
+	for len(keys) > 0 {
+		n := sessionDeleteBatchSize
+		if len(keys) < n {
+			n = len(keys)
+		}
+		_, err := s.dp.BatchDeleteSessions(keys[:n])
+		if err := ignoreSessionNotFound(err); err != nil {
+			return err
+		}
+		keys = keys[n:]
+	}
+	return nil
+}
+
+func (s dataPlaneSessionStore) batchDeleteV6(keys []SessionKeyV6) error {
+	for len(keys) > 0 {
+		n := sessionDeleteBatchSize
+		if len(keys) < n {
+			n = len(keys)
+		}
+		_, err := s.dp.BatchDeleteSessionsV6(keys[:n])
+		if err := ignoreSessionNotFound(err); err != nil {
+			return err
+		}
+		keys = keys[n:]
+	}
+	return nil
+}
+
+func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason DeleteReason) error {
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
-	var errs []error
-	if val, err := s.dp.GetSessionV6(key); err == nil {
-		s.preservePersistentNATV6(key, val)
-		if val.ReverseKey.Protocol != 0 {
-			errs = append(errs, s.dp.DeleteSessionV6(val.ReverseKey))
+	val, err := s.dp.GetSessionV4(key)
+	if err != nil {
+		if sessionNotFound(err) {
+			return ignoreSessionNotFound(s.dp.DeleteSession(key))
 		}
-		if val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-			errs = append(errs, s.dp.DeleteDNATEntryV6(DNATKeyV6{
-				Protocol: key.Protocol,
-				DstIP:    val.NATSrcIP,
-				DstPort:  val.NATSrcPort,
-			}))
-		}
+		return err
 	}
-	errs = append(errs, s.dp.DeleteSessionV6(key))
-	return errors.Join(errs...)
+	return s.DeleteKnownV4(key, val, reason)
+}
+
+func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, reason DeleteReason) error {
+	if s.dp == nil {
+		return errors.New("nil dataplane")
+	}
+	val, err := s.dp.GetSessionV6(key)
+	if err != nil {
+		if sessionNotFound(err) {
+			return ignoreSessionNotFound(s.dp.DeleteSessionV6(key))
+		}
+		return err
+	}
+	return s.DeleteKnownV6(key, val, reason)
 }
 
 func (s dataPlaneSessionStore) preservePersistentNATV4(key SessionKey, val SessionValue) {
@@ -420,7 +548,7 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 		reason = DeleteReasonClusterStale
 	}
 
-	var staleV4 []SessionKey
+	var staleV4 []SessionEntryV4
 	if err := s.ForEachV4(func(key SessionKey, val SessionValue) bool {
 		if val.IsReverse != 0 {
 			return true
@@ -429,7 +557,7 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 			return true
 		}
 		if _, ok := input.ReceivedV4[key]; !ok {
-			staleV4 = append(staleV4, key)
+			staleV4 = append(staleV4, SessionEntryV4{Key: key, Value: val})
 		}
 		return true
 	}); err != nil {
@@ -438,14 +566,13 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	result.StaleV4 = len(staleV4)
 
 	var errs []error
-	for _, key := range staleV4 {
-		if err := s.DeleteWithCompanionsV4(key, reason); err != nil {
-			errs = append(errs, err)
-		}
-		result.DeletedV4++
+	if deleted, err := s.DeleteBatchKnownV4(staleV4, reason); err != nil {
+		errs = append(errs, err)
+	} else {
+		result.DeletedV4 = deleted
 	}
 
-	var staleV6 []SessionKeyV6
+	var staleV6 []SessionEntryV6
 	if err := s.ForEachV6(func(key SessionKeyV6, val SessionValueV6) bool {
 		if val.IsReverse != 0 {
 			return true
@@ -454,7 +581,7 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 			return true
 		}
 		if _, ok := input.ReceivedV6[key]; !ok {
-			staleV6 = append(staleV6, key)
+			staleV6 = append(staleV6, SessionEntryV6{Key: key, Value: val})
 		}
 		return true
 	}); err != nil {
@@ -462,11 +589,10 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	}
 	result.StaleV6 = len(staleV6)
 
-	for _, key := range staleV6 {
-		if err := s.DeleteWithCompanionsV6(key, reason); err != nil {
-			errs = append(errs, err)
-		}
-		result.DeletedV6++
+	if deleted, err := s.DeleteBatchKnownV6(staleV6, reason); err != nil {
+		errs = append(errs, err)
+	} else {
+		result.DeletedV6 = deleted
 	}
 	return result, errors.Join(errs...)
 }
