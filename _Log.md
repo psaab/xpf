@@ -2,6 +2,16 @@
 
 ## 2026-05-17
 
+- **Timestamp**: 2026-05-17T21:25:00Z
+  - **Action**: PR #1406 review follow-up — updated the Phase 0 blocker-plan summary so #1377/#1378 match the current userspace runtime contract (userspace-v1 selector landed; residual persistent-NAT/exhaustion/fail-open and scheduler validation work remain).
+  - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/plan.md`, `_Log.md`
+  - **Validation**: `git diff --check`
+
+- **Timestamp**: 2026-05-17T19:59:18Z
+  - **Action**: PR #1406 round-1 contract follow-up — corrected the #1377 SNAT pool plan so current userspace pool handling is documented as runtime fail-open at the four `poll_descriptor.rs` source-NAT call sites, enumerated the risk and code prerequisites for a later fail-closed runtime gate, and added a SNAT contract doc guard.
+  - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/README.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1377-snat-pools.md`, `userspace-dp/tests/snat_contract_doc_guard.rs`, `_Log.md`
+  - **Validation**: `cargo test --manifest-path userspace-dp/Cargo.toml --test snat_contract_doc_guard`; `rustfmt --edition 2024 --check userspace-dp/tests/snat_contract_doc_guard.rs`; `git diff --check`
+
 - **Timestamp**: 2026-05-17T15:28:13Z
   - **Action**: PR #1397 follow-up — fixed mouse-latency diagnostics review findings by making `cwnd_settle_ok` tri-state in manifests (unknown/true/false), correcting cwnd byte-unit parsing to 1024-based `K/M/G/TBytes`, recording probe phase timings even on failed/timed-out connect/drain/read attempts, tightening fairness-regimes settle-evidence wording, and extending unit coverage for settle-diagnostics CLI output/status and failure-phase timing counts.
   - **File(s)**: `test/incus/test-mouse-latency.sh`, `test/incus/mouse_latency_orchestrate.py`, `test/incus/mouse_latency_orchestrate_test.py`, `test/incus/mouse_latency_probe.py`, `test/incus/mouse_latency_probe_test.py`, `test/incus/test_mouse_latency_shell_test.py`, `docs/fairness-regimes.md`, `_Log.md`
