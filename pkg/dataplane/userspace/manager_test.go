@@ -314,31 +314,35 @@ func TestReadPolicyCountersUsesStatusIPCPolicyRuleCounters(t *testing.T) {
 	defer ln.Close()
 
 	wantRuleID := stablePolicyRuleID("trust", "untrust", "scheduled-allow")
-	reqCh := make(chan ControlRequest, 1)
-	done := make(chan struct{}, 1)
+	responses := []PolicyRuleCounterStatus{
+		{RuleID: wantRuleID, Packets: 23, Bytes: 2300},
+		{RuleID: wantRuleID, Packets: 31, Bytes: 3100},
+	}
+	reqCh := make(chan ControlRequest, len(responses))
+	done := make(chan struct{}, len(responses))
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
+		for _, counter := range responses {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			func() {
+				defer conn.Close()
+				var req ControlRequest
+				if err := json.NewDecoder(conn).Decode(&req); err != nil {
+					return
+				}
+				reqCh <- req
+				_ = json.NewEncoder(conn).Encode(ControlResponse{
+					OK: true,
+					Status: &ProcessStatus{
+						PID:                4321,
+						PolicyRuleCounters: []PolicyRuleCounterStatus{counter},
+					},
+				})
+				done <- struct{}{}
+			}()
 		}
-		defer conn.Close()
-		var req ControlRequest
-		if err := json.NewDecoder(conn).Decode(&req); err != nil {
-			return
-		}
-		reqCh <- req
-		_ = json.NewEncoder(conn).Encode(ControlResponse{
-			OK: true,
-			Status: &ProcessStatus{
-				PID: 4321,
-				PolicyRuleCounters: []PolicyRuleCounterStatus{{
-					RuleID:  wantRuleID,
-					Packets: 23,
-					Bytes:   2300,
-				}},
-			},
-		})
-		done <- struct{}{}
 	}()
 
 	cfg := &config.Config{
@@ -361,37 +365,55 @@ func TestReadPolicyCountersUsesStatusIPCPolicyRuleCounters(t *testing.T) {
 	m.proc = &exec.Cmd{Process: proc}
 	m.cfg.ControlSocket = controlSock
 	m.lastSnapshot = &ConfigSnapshot{Config: cfg}
+	m.lastStatus = ProcessStatus{
+		PolicyRuleCounters: []PolicyRuleCounterStatus{{
+			RuleID: wantRuleID,
+		}},
+	}
 
-	m.mu.Lock()
-	var status ProcessStatus
-	err = m.requestLocked(ControlRequest{Type: "status"}, &status)
-	if err == nil {
-		m.recordHelperStatusLocked(&status)
-	}
-	m.mu.Unlock()
-	if err != nil {
-		t.Fatalf("status IPC: %v", err)
-	}
-	select {
-	case req := <-reqCh:
-		if req.Type != "status" {
-			t.Fatalf("request type = %q, want status", req.Type)
+	refreshStatus := func() {
+		t.Helper()
+		m.mu.Lock()
+		var status ProcessStatus
+		err = m.requestLocked(ControlRequest{Type: "status"}, &status)
+		if err == nil {
+			m.recordHelperStatusLocked(&status)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("helper did not receive status request")
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("helper did not finish status response")
+		m.mu.Unlock()
+		if err != nil {
+			t.Fatalf("status IPC: %v", err)
+		}
+		select {
+		case req := <-reqCh:
+			if req.Type != "status" {
+				t.Fatalf("request type = %q, want status", req.Type)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("helper did not receive status request")
+		}
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("helper did not finish status response")
+		}
 	}
 
+	refreshStatus()
 	got, err := m.ReadPolicyCounters(0)
 	if err != nil {
 		t.Fatalf("ReadPolicyCounters after status IPC: %v", err)
 	}
 	if got != (dataplane.CounterValue{Packets: 23, Bytes: 2300}) {
 		t.Fatalf("counter after status IPC = %+v, want packets=23 bytes=2300", got)
+	}
+
+	refreshStatus()
+	got, err = m.ReadPolicyCounters(0)
+	if err != nil {
+		t.Fatalf("ReadPolicyCounters after second status IPC: %v", err)
+	}
+	if got != (dataplane.CounterValue{Packets: 31, Bytes: 3100}) {
+		t.Fatalf("counter after second status IPC = %+v, want packets=31 bytes=3100", got)
 	}
 }
 
