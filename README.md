@@ -79,7 +79,7 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 | Stateful forwarding | Yes | Yes |
 | Zone + global policies | Yes | Yes |
 | Application matching | Yes | Yes |
-| Source NAT (interface + pool) | Yes | Interface and pool mode yes; userspace `address-persistent` uses a documented userspace-v1 hash until #1377 defines cross-backend parity |
+| Source NAT (interface + pool) | Yes | Interface and pool mode yes; userspace `address-persistent` uses a documented userspace-v1 hash. Per-pool `persistent-nat`, pool exhaustion counters, and cross-backend new-flow parity remain #1377 work |
 | Destination NAT | Yes | Yes |
 | Static NAT (1:1) | Yes | Yes |
 | NAT64 (IPv6↔IPv4) | Yes | Yes |
@@ -99,8 +99,9 @@ The userspace dataplane now covers most of the transit feature set in native
 Rust, but it is not "fallback-free". Current explicit gates in code still
 include SYN-cookie-dependent screen behavior, three-color policers, and port
 mirroring. Pool-mode SNAT is admitted, and #1385 added userspace-v1
-`address-persistent` selection; #1377 still owns the shared cross-backend
-contract. The exact admission boundary is documented in
+`address-persistent` selection; #1377 still owns per-pool `persistent-nat`
+lease reuse, allocator/exhaustion counters, and the mixed-backend rollback
+boundary. The exact admission boundary is documented in
 [`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
 
 ## Architecture
@@ -115,7 +116,7 @@ contract. The exact admission boundary is documented in
 
 ### Firewall & Security
 - **Zone-based policies** with stateful inspection, address books, application matching, global policies
-- **NAT**: source (interface + pool, address-persistent), destination (with hit counters), static 1:1, NAT64, NPTv6 (RFC 6296 stateless prefix translation)
+- **NAT**: source (interface + pool, userspace-v1 address-persistent), destination (with hit counters), static 1:1, NAT64, NPTv6 (RFC 6296 stateless prefix translation)
 - **Dual-stack**: IPv4 + IPv6, DHCPv4/v6 clients, embedded Router Advertisement sender (replaces radvd), SLAAC
 - **Screen/IDS**: 11 checks (land, SYN flood, ping of death, teardrop, SYN-FIN, no-flag, winnuke, FIN-no-ACK, rate-limiting), SYN cookie flood protection (XDP-generated SYN-ACK cookies)
 - **Firewall filters**: policer (token bucket + three-color), lo0 filter, flexible match, port ranges, hit counters, logging, forwarding-class DSCP rewrite

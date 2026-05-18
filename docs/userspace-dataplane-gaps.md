@@ -28,7 +28,7 @@ These capabilities exist in the current Rust userspace dataplane code path:
 | Zone + global policies | Implemented | Address and application terms are pre-expanded by the daemon |
 | Application matching | Implemented | Protocol + port terms, including expanded multi-term apps |
 | Source NAT (interface mode) | Implemented | IPv4 and IPv6 egress interface rewrite |
-| Source NAT (pool mode) | Implemented with caveat | IPv4/IPv6 pool address and port allocation; wrong-family pools are skipped so later compatible rules can match. `address-persistent` uses a userspace-v1 deterministic SHA-256 source-IP hash that intentionally differs from legacy eBPF IPv4 modulo / IPv6 lane-XOR selection and from DPDK allocator internals until #1377 defines a shared cross-backend contract. |
+| Source NAT (pool mode) | Implemented with caveats | IPv4/IPv6 pool address and port allocation; wrong-family pools are skipped so later compatible rules can match. Global `source address-persistent` uses the documented userspace-v1 SHA-256 source-IP hash and is stable only within the AF_XDP backend, pool family, pool order, and pool size. Legacy eBPF and current DPDK use C-word IPv4 modulo / IPv6 lane-XOR selection, so new-flow pool address parity is not promised across backend rollback. Pool-mode rules omitted for missing pools, empty pools, or invalid port ranges are not a runtime fail-closed gate yet: the current `poll_descriptor.rs` source-NAT call sites can fall through to the default empty NAT decision and forward without SNAT. Per-pool `persistent-nat` is not a userspace-v1 runtime contract yet: the snapshot has no persistence-mode fields, Rust does not consult the Go `PersistentNATTable`, and the allocator has no live-port exhaustion counter. |
 | Destination NAT | Implemented | Pre-expanded tuple snapshots from Go |
 | Static NAT | Implemented | Bidirectional 1:1 translation |
 | NAT64 | Implemented | Forward and reverse translation with reverse-session state |
@@ -76,7 +76,7 @@ The current #1373 audit produced these tracked blockers:
 | Issue | Blocker | Required before |
 |-------|---------|-----------------|
 | #1381 | Split or replace the BPF-shaped `dataplane.DataPlane` interface so userspace no longer embeds the eBPF manager for map-writer methods | Phase 3 build-system / Go removal |
-| #1377 | Preserve address-persistent SNAT pool selection with an approved cross-backend contract. #1385 landed userspace-v1 deterministic selection and fail-closed pool admission, but does not close cross-backend parity by itself. | Phase 4 BPF source removal |
+| #1377 | Preserve userspace-v1 address-persistent SNAT pool selection with an explicit backend compatibility boundary, then finish per-pool `persistent-nat` semantics and allocation/exhaustion counters. #1385 landed deterministic userspace selection and snapshot omission for missing, empty, or invalid pool inputs, but runtime remains fail-open at the `poll_descriptor.rs` source-NAT call sites and does not provide persistent-NAT lease reuse or cross-backend new-flow parity. | Phase 4 BPF source removal |
 | #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds, strict missing-scheduler commit behavior, and integration/failover validation | Phase 4 BPF source removal |
 | #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent | Phase 4 BPF source removal |
@@ -90,10 +90,12 @@ Recommended dependency order:
    every later removal phase depends on.
 2. #1377 and #1379 next, because they are silent correctness or
    security-visibility regressions in configurations that may otherwise appear
-   admitted. #1385 reduced #1377 risk but did not close the cross-backend
-   address-persistent contract. #1378 is no longer missing basic userspace
-   propagation after #1396, but its remaining counter/validation/evidence
-   contract still blocks BPF source removal.
+   admitted. #1385 reduced #1377 risk, and the current contract documents the
+   userspace-v1 selector plus mixed-backend rollback boundary, but per-pool
+   `persistent-nat` and allocator exhaustion counters remain #1377 runtime
+   gaps. #1378 is no longer missing basic userspace propagation after #1396,
+   but its remaining counter/validation/evidence contract still blocks BPF
+   source removal.
 3. #1374, #1375, and #1376 before Phase 4, because these are explicit feature
    gaps currently protected by the legacy eBPF fallback.
 4. #1380 in Phase 5, after the dataplane boundary is settled but before the
@@ -137,9 +139,10 @@ The highest-value remaining work on current `master` is:
 1. resolve #1381 so userspace is no longer structurally coupled to the eBPF
    manager contract
 2. fix #1377 and #1379 to remove silent correctness and visibility
-   regressions; keep #1385 as evidence of the current userspace-v1 SNAT pool
-   behavior, not full cross-backend parity. Keep #1378 open for the remaining
-   policy-scheduler counter/validation/evidence contract after #1396.
+   regressions; keep #1385 plus the userspace-v1 fixtures as evidence of the
+   current AF_XDP SNAT pool selector, not full persistent-NAT parity. Keep
+   #1378 open for the remaining policy-scheduler counter/validation/evidence
+   contract after #1396.
 3. close #1374, #1375, and #1376 before any BPF source removal
 4. carry the narrowed #1380 denominator decision into Phase 5; the current
    userspace command already avoids BPF-map fallback when helper status is

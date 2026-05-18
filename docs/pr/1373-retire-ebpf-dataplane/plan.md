@@ -14,8 +14,8 @@ present until later phase PRs.
 | Issue | Summary | Phase dependency |
 |-------|---------|------------------|
 | #1381 | `dataplane.DataPlane` is BPF-shaped and the userspace manager embeds the eBPF manager | Must land first; blocks Phase 3 |
-| #1377 | Address-persistent SNAT pool mode still needs userspace-owned pool selection; #1385 is the prerequisite fix for admitted pool-mode rules missing resolved pool addresses/port ranges and wrong-family shadowing | Before Phase 4 |
-| #1378 | Time-based policy schedulers are not propagated to userspace policy evaluation | Before Phase 4 |
+| #1377 | Userspace-v1 address-persistent SNAT pool selection is implemented; remaining work is per-pool `persistent-nat`, allocator exhaustion observability, and documented mixed-backend rollback behavior (runtime still fail-open for rules omitted due to missing pools, empty pools, or invalid port ranges) | Before Phase 4 |
+| #1378 | Scheduler state now propagates to userspace policy evaluation (#1396); remaining work is hit-counter/snapshot-lifetime contract and integration/failover validation | Before Phase 4 |
 | #1379 | Policy-deny, screen-drop, and filter-log dataplane events are not emitted by userspace | Before Phase 4 |
 | #1374 | SYN-cookie flood protection is implemented in eBPF but missing from userspace | Before Phase 4 |
 | #1375 | RFC 2697/2698 three-color policers are implemented in eBPF but missing from userspace | Before Phase 4 |
