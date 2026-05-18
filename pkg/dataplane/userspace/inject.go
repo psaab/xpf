@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 )
 
 const InjectPacketUsage = "request chassis cluster data-plane userspace inject-packet slot <N> <valid|fib-mismatch|metadata-parse-error> [destination-ip <ip>] [emit-on-wire true source-ip <ip> [source-port <port>] [destination-port <port>] [protocol <icmp|icmpv6>]]"
+const injectPacketTargetExtraPrefix = "xpf-inject-extra:"
 
 func ParseInjectPacketCommand(args []string) (slot uint32, mode string, extra map[string]string, err error) {
 	if len(args) < 4 || args[0] != "inject-packet" || args[1] != "slot" {
@@ -29,6 +31,32 @@ func ParseInjectPacketCommand(args []string) (slot uint32, mode string, extra ma
 		extra[key] = args[i+1]
 	}
 	return slot, mode, extra, nil
+}
+
+func EncodeInjectPacketTarget(extra map[string]string) string {
+	if len(extra) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(extra)
+	if err != nil {
+		return extra["destination-ip"]
+	}
+	return injectPacketTargetExtraPrefix + string(raw)
+}
+
+func DecodeInjectPacketTarget(target string) (map[string]string, error) {
+	extra := make(map[string]string)
+	if target == "" {
+		return extra, nil
+	}
+	if !strings.HasPrefix(target, injectPacketTargetExtraPrefix) {
+		extra["destination-ip"] = target
+		return extra, nil
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(target, injectPacketTargetExtraPrefix)), &extra); err != nil {
+		return nil, fmt.Errorf("invalid userspace inject target extras: %w", err)
+	}
+	return extra, nil
 }
 
 func BuildInjectPacketRequest(slot uint32, mode string, extra map[string]string, status ProcessStatus) (InjectPacketRequest, error) {

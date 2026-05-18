@@ -86,6 +86,36 @@ func TestBuildInjectPacketRequestEmitOnWireRejectsUnsupportedProtocol(t *testing
 	}
 }
 
+func TestInjectPacketTargetRoundTripCarriesEmitOnWireOptions(t *testing.T) {
+	target := EncodeInjectPacketTarget(map[string]string{
+		"destination-ip":   "172.16.80.200",
+		"emit-on-wire":     "true",
+		"source-ip":        "172.16.80.8",
+		"source-port":      "7",
+		"destination-port": "0",
+		"protocol":         "icmp",
+	})
+	extra, err := DecodeInjectPacketTarget(target)
+	if err != nil {
+		t.Fatalf("DecodeInjectPacketTarget: %v", err)
+	}
+	req, err := BuildInjectPacketRequest(7, "valid", extra, ProcessStatus{
+		InjectPacketTupleProtocolVersion: InjectPacketTupleProtocolVersion,
+	})
+	if err != nil {
+		t.Fatalf("BuildInjectPacketRequest: %v", err)
+	}
+	if !req.EmitOnWire {
+		t.Fatal("EmitOnWire = false after target round-trip")
+	}
+	if req.SourceIP != "172.16.80.8" || req.DestinationIP != "172.16.80.200" {
+		t.Fatalf("tuple IPs = %s -> %s", req.SourceIP, req.DestinationIP)
+	}
+	if req.TupleMetadataVersion != InjectPacketTupleProtocolVersion {
+		t.Fatalf("TupleMetadataVersion = %d, want %d", req.TupleMetadataVersion, InjectPacketTupleProtocolVersion)
+	}
+}
+
 func TestInjectPacketEmitOnWireFailsClosedBeforeHelperIPCWithoutTupleProtocol(t *testing.T) {
 	port := uint16(7)
 	proc, err := os.FindProcess(os.Getpid())

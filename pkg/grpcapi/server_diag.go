@@ -845,9 +845,9 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 			if err != nil {
 				return nil, status.Errorf(codes.Unavailable, "userspace status: %v", err)
 			}
-			extra := map[string]string{}
-			if req.Target != "" {
-				extra["destination-ip"] = req.Target
+			extra, err := dpuserspace.DecodeInjectPacketTarget(req.Target)
+			if err != nil {
+				return nil, status.Error(codes.InvalidArgument, err.Error())
 			}
 			injectReq, err := dpuserspace.BuildInjectPacketRequest(uint32(slot), mode, extra, statusNow)
 			if err != nil {
