@@ -9,7 +9,7 @@ land before their listed #1373 retirement phase.
 | Issue | Plan | Required before | Code PR still needed |
 |---|---|---|---|
 | #1374 SYN cookie flood protection | [plan-1374-syn-cookies.md](plan-1374-syn-cookies.md) | #1373 Phase 4 | Runtime challenge/ACK/cache/counters landed; bounded SYN-ACK/RST TX, HA-safe secrets, integration evidence, and gate removal still needed |
-| #1375 three-color policers | [plan-1375-three-color-policers.md](plan-1375-three-color-policers.md) | #1373 Phase 4 | Color-blind `then discard` runtime landed; sharded/packed state, counter continuity, non-drop color actions, and integration/perf evidence still needed |
+| #1375 three-color policers | [plan-1375-three-color-policers.md](plan-1375-three-color-policers.md) | #1373 Phase 4 | Color-blind `then discard` runtime plus compatible snapshot continuity landed; sharded/packed state decision, HA/restart continuity decision, non-drop color actions, and integration/perf evidence still needed |
 | #1376 port mirroring | [plan-1376-port-mirroring.md](plan-1376-port-mirroring.md) | #1373 Phase 4 | Snapshot/wire plus bounded forwarded-path runtime landed; remaining ingress/transmit surfaces, mirror-fidelity evidence, pressure survival, and gate removal still needed |
 | #1377 persistent SNAT pool address selection | [plan-1377-snat-pools.md](plan-1377-snat-pools.md) | #1373 Phase 4 | Userspace-v1 selector and unusable-pool fail-closed runtime landed; persistent NAT lease reuse and allocator/exhaustion counters still needed |
 | #1378 policy schedulers | [plan-1378-policy-schedulers.md](plan-1378-policy-schedulers.md) | #1373 Phase 4 | No known runtime code gap; live HA artifact capture accepted by `policy_scheduler_validate.py` still needed |

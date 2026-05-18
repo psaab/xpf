@@ -76,6 +76,14 @@ pub(super) fn build_forwarding_state_with_policy_counters(
     snapshot: &ConfigSnapshot,
     policy_counters: &PolicyCounterStore,
 ) -> ForwardingState {
+    build_forwarding_state_with_policy_counters_and_previous(snapshot, policy_counters, None)
+}
+
+pub(super) fn build_forwarding_state_with_policy_counters_and_previous(
+    snapshot: &ConfigSnapshot,
+    policy_counters: &PolicyCounterStore,
+    previous: Option<&ForwardingState>,
+) -> ForwardingState {
     let mut state = ForwardingState::default();
     let mut name_to_ifindex = BTreeMap::new();
     let mut linux_to_ifindex = BTreeMap::new();
@@ -396,13 +404,14 @@ pub(super) fn build_forwarding_state_with_policy_counters(
     state.tcp_mss_gre_in = snapshot.flow.tcp_mss_gre_in;
     state.tcp_mss_gre_out = snapshot.flow.tcp_mss_gre_out;
     // Build filter state from snapshot
-    state.filter_state = crate::filter::parse_filter_state_with_three_color(
+    state.filter_state = crate::filter::parse_filter_state_with_three_color_preserving(
         &snapshot.filters,
         &snapshot.policers,
         &snapshot.three_color_policers,
         &snapshot.interfaces,
         &snapshot.flow.lo0_filter_input_v4,
         &snapshot.flow.lo0_filter_input_v6,
+        previous.map(|state| &state.filter_state),
     );
     state.cos = build_cos_state(snapshot);
     let has_cos_interfaces = !state.cos.interfaces.is_empty();

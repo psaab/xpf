@@ -25,6 +25,10 @@ The bounded runtime slice is implemented after #1395:
   actions, unknown modes, or invalid token parameters. Matching traffic is
   metered by an explicit unsupported runtime that returns red/drop, rather
   than silently unlinking the policer.
+- Equivalent snapshot refreshes preserve token buckets and per-color counters
+  by reusing the same runtime handle when the name-derived runtime ID and shape
+  are unchanged. A changed mode, color mode, rate, burst, or treatment creates
+  a fresh runtime.
 
 Remaining #1375 work is validation and hardening rather than admission:
 
@@ -33,8 +37,8 @@ Remaining #1375 work is validation and hardening rather than admission:
   promoting yellow/red traffic to green.
 - Replace the per-policer mutex runtime with the approved sharded or packed
   atomic state if throughput testing shows contention.
-- Preserve counters and token state across snapshot rebuilds if operator
-  continuity is required for #1373 removal.
+- Decide whether #1373 needs HA/process-restart token continuity. Current
+  continuity is local to compatible in-process snapshot refreshes.
 - Wire non-drop per-color actions, especially loss-priority propagation, into
   the downstream forwarding/CoS path. Until then, non-`discard` three-color
   actions remain fail-closed.
@@ -89,11 +93,13 @@ packet to green.
 
 ## State and HA Behavior
 
-- Policer token state is local runtime state; failover may restart token buckets
-  from configured burst values unless a broader HA state-sync PR explicitly
-  adds token sync.
-- Config snapshots carry stable policer/rule identity so counters can survive
-  snapshot rebuilds where practical.
+- Policer token state is local runtime state. Compatible in-process snapshot
+  refreshes preserve token and counter state by reusing the same runtime handle
+  for the name-derived policer ID; failover or process restart may restart
+  token buckets from configured burst values unless a broader HA state-sync PR
+  explicitly adds token sync.
+- Config snapshots carry stable policer/rule identity so counters survive
+  compatible snapshot rebuilds where practical.
 - Status exposes green/yellow/red packet and byte counters plus red drops
   through Rust status, Go protocol, CLI, and Prometheus.
 
@@ -107,9 +113,10 @@ packet to green.
 - Color semantics: color-aware mode must never promote incoming yellow/red
   traffic; one wrong branch turns a security control into a bandwidth grant.
 - Counter attribution: green/yellow/red/drop counters are stable inside a
-  compiled runtime. Carrying them across snapshot rebuilds remains a follow-up;
-  this slice deliberately preserves the existing token/counter rebuild
-  behavior and hardens unsupported-shape handling instead.
+  compiled runtime and across compatible in-process snapshot refreshes. Changed
+  runtime shapes intentionally reset counters with the new rate/burst contract;
+  failover/restart continuity remains out of scope until userspace owns a
+  broader HA state-sync surface.
 
 ## Exact Tests
 
@@ -124,6 +131,8 @@ packet to green.
 - Cargo: `filter::tests::flow_cache_hits_run_three_color_policer`.
 - Cargo: `filter::tests::unsupported_three_color_snapshots_fail_closed_in_rust_compiler`.
 - Cargo: `filter::tests::three_color_empty_then_action_uses_default_discard`.
+- Cargo: `filter::tests::equivalent_snapshot_refresh_preserves_three_color_state_and_counters`.
+- Cargo: `filter::tests::changed_snapshot_shape_resets_three_color_runtime_state`.
 - Go: userspace snapshot round-trip for three-color policer fields, per-color
   actions, and `ColorBlind`.
 - Go: compiler validation rejects zero rates/bursts, `PIR < CIR`, and
