@@ -851,6 +851,8 @@ type BindingStatus struct {
 	MirrorDropsTXFrameReserve         uint64 `json:"mirror_drops_tx_frame_reserve,omitempty"`
 	MirrorDropsNoBinding              uint64 `json:"mirror_drops_no_binding,omitempty"`
 	MirrorDropsQueueFull              uint64 `json:"mirror_drops_queue_full,omitempty"`
+	MirrorDropsQueueFullSameWorker    uint64 `json:"mirror_drops_queue_full_same_worker,omitempty"`
+	MirrorDropsQueueFullCrossWorker   uint64 `json:"mirror_drops_queue_full_cross_worker,omitempty"`
 	DirectTXPackets                   uint64 `json:"direct_tx_packets,omitempty"`
 	CopyTXPackets                     uint64 `json:"copy_tx_packets,omitempty"`
 	InPlaceTXPackets                  uint64 `json:"in_place_tx_packets,omitempty"`
@@ -975,6 +977,8 @@ type BindingCountersSnapshot struct {
 	MirrorDropsTXFrameReserve       uint64 `json:"mirror_drops_tx_frame_reserve,omitempty"`
 	MirrorDropsNoBinding            uint64 `json:"mirror_drops_no_binding,omitempty"`
 	MirrorDropsQueueFull            uint64 `json:"mirror_drops_queue_full,omitempty"`
+	MirrorDropsQueueFullSameWorker  uint64 `json:"mirror_drops_queue_full_same_worker,omitempty"`
+	MirrorDropsQueueFullCrossWorker uint64 `json:"mirror_drops_queue_full_cross_worker,omitempty"`
 	// #812: per-queue TX submit→completion latency histogram, pulled
 	// through from BindingStatus so step1-capture consumers can
 	// compute per-queue latency distributions without a second

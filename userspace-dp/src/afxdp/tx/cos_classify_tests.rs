@@ -113,6 +113,7 @@ fn clone_prepared_request_for_cos_returns_local_copy_with_metadata() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: Some(46),
+        mirror_clone: true,
     };
 
     let local = clone_prepared_request_for_cos(&area, &req).expect("local copy");
@@ -124,6 +125,7 @@ fn clone_prepared_request_for_cos_returns_local_copy_with_metadata() {
     assert_eq!(local.egress_ifindex, 80);
     assert_eq!(local.cos_queue_id, Some(4));
     assert_eq!(local.dscp_rewrite, Some(46));
+    assert!(local.mirror_clone);
     assert_eq!(
         local
             .flow_key
@@ -147,9 +149,38 @@ fn clone_prepared_request_for_cos_rejects_out_of_range_offset() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
 
     assert!(clone_prepared_request_for_cos(&area, &req).is_none());
+}
+
+#[test]
+fn prepare_local_request_for_cos_preserves_mirror_tx_frame_reserve() {
+    let area = MmapArea::new(4096).expect("mmap");
+    let mut free_tx_frames = (0..MIRROR_TX_FRAME_RESERVE as u64)
+        .map(|idx| idx << UMEM_FRAME_SHIFT)
+        .collect::<VecDeque<_>>();
+    let original_free = free_tx_frames.clone();
+    let req = TxRequest {
+        bytes: vec![1, 2, 3, 4],
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 80,
+        cos_queue_id: Some(5),
+        dscp_rewrite: None,
+        mirror_clone: true,
+    };
+
+    let req = match prepare_local_request_for_cos(&area, &mut free_tx_frames, req) {
+        Ok(_) => panic!("mirror clones must not consume the last reserved TX frames"),
+        Err(req) => req,
+    };
+
+    assert!(req.mirror_clone);
+    assert_eq!(free_tx_frames, original_free);
 }
 
 #[test]
@@ -246,6 +277,7 @@ fn cos_queue_accepts_prepared_when_queue_is_prepared_only() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
 
     assert!(cos_queue_accepts_prepared(&root, Some(5)));
@@ -291,6 +323,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -306,6 +339,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
 
     let mut free_tx_frames = VecDeque::from([512]);
@@ -400,6 +434,7 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
             egress_ifindex: 42,
             cos_queue_id: Some(4),
             dscp_rewrite: None,
+            mirror_clone: false,
         }),
     );
     cos_queue_push_back(
@@ -415,6 +450,7 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
             egress_ifindex: 42,
             cos_queue_id: Some(4),
             dscp_rewrite: None,
+            mirror_clone: false,
         }),
     );
 
@@ -536,6 +572,7 @@ fn demote_prepared_cos_queue_to_local_skips_non_exact_queue() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
 
     let mut free_tx_frames = VecDeque::new();

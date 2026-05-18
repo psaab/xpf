@@ -475,6 +475,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     egress_ifindex: request.decision.resolution.egress_ifindex,
                                     cos_queue_id: request.cos_queue_id,
                                     dscp_rewrite: request.dscp_rewrite,
+                                    mirror_clone: false,
                                 },
                             );
                             bound_pending_tx_prepared(target_binding, Some(post_recycles));
@@ -724,6 +725,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         egress_ifindex: request.decision.resolution.egress_ifindex,
                                         cos_queue_id: request.cos_queue_id,
                                         dscp_rewrite: request.dscp_rewrite,
+                                        mirror_clone: false,
                                     },
                                 );
                                 bound_pending_tx_prepared(target_binding, Some(post_recycles));

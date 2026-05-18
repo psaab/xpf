@@ -386,6 +386,13 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// #1376: mirror clone dropped because the output binding already
     /// had mirror/primary TX backlog. Mirrors are lossy under pressure.
     pub(super) mirror_drops_queue_full: AtomicU64,
+    /// #1376: same-worker mirror queue-full drops. Split from
+    /// cross-worker live-inbox drops so operators can localize mirror
+    /// pressure to the ingress/owner worker boundary.
+    pub(super) mirror_drops_queue_full_same_worker: AtomicU64,
+    /// #1376: cross-worker mirror queue-full drops at the target live
+    /// inbox/admission boundary.
+    pub(super) mirror_drops_queue_full_cross_worker: AtomicU64,
     /// #710: packets dropped in `apply_worker_shaped_tx_requests`
     /// because the worker could not locate any binding for the
     /// request's egress_ifindex. Happens when a cross-worker CoS
@@ -616,6 +623,8 @@ impl BindingLiveState {
             mirror_drops_tx_frame_reserve: AtomicU64::new(0),
             mirror_drops_no_binding: AtomicU64::new(0),
             mirror_drops_queue_full: AtomicU64::new(0),
+            mirror_drops_queue_full_same_worker: AtomicU64::new(0),
+            mirror_drops_queue_full_cross_worker: AtomicU64::new(0),
             no_owner_binding_drops: AtomicU64::new(0),
             // #709 / #746: owner-profile telemetry, split by writer
             // into two cacheline-isolated groups. Histograms are zero-
@@ -937,6 +946,12 @@ impl BindingLiveState {
                 .load(Ordering::Relaxed),
             mirror_drops_no_binding: self.mirror_drops_no_binding.load(Ordering::Relaxed),
             mirror_drops_queue_full: self.mirror_drops_queue_full.load(Ordering::Relaxed),
+            mirror_drops_queue_full_same_worker: self
+                .mirror_drops_queue_full_same_worker
+                .load(Ordering::Relaxed),
+            mirror_drops_queue_full_cross_worker: self
+                .mirror_drops_queue_full_cross_worker
+                .load(Ordering::Relaxed),
             post_drain_backup_bytes: self
                 .owner_profile_owner
                 .post_drain_backup_bytes

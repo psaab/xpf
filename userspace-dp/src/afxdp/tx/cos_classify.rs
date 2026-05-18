@@ -4,6 +4,7 @@
 // atomic ops use `Ordering::Relaxed`.
 
 use super::*;
+use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSTxSelection {
@@ -440,6 +441,9 @@ pub(super) fn prepare_local_request_for_cos(
     if req.bytes.len() > tx_frame_capacity() {
         return Err(req);
     }
+    if req.mirror_clone && free_tx_frames.len() <= MIRROR_TX_FRAME_RESERVE {
+        return Err(req);
+    }
     let Some(offset) = free_tx_frames.pop_front() else {
         return Err(req);
     };
@@ -460,6 +464,7 @@ pub(super) fn prepare_local_request_for_cos(
         egress_ifindex: req.egress_ifindex,
         cos_queue_id: req.cos_queue_id,
         dscp_rewrite: req.dscp_rewrite,
+        mirror_clone: req.mirror_clone,
     })
 }
 
@@ -537,7 +542,7 @@ pub(super) fn clone_prepared_request_for_cos(
         egress_ifindex: req.egress_ifindex,
         cos_queue_id: req.cos_queue_id,
         dscp_rewrite: req.dscp_rewrite,
-        mirror_clone: false,
+        mirror_clone: req.mirror_clone,
     })
 }
 

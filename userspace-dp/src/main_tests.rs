@@ -724,6 +724,8 @@ fn binding_counters_snapshot_projects_ring_pressure_fields() {
         tx_shared_recycle_unknown_slot_drops: 43,
         tx_submit_error_drops: 31,
         pending_tx_local_overflow_drops: 37,
+        mirror_drops_queue_full_same_worker: 47,
+        mirror_drops_queue_full_cross_worker: 49,
         // #918 / #943: pin per-set LRU collision and V_min telemetry
         // through the projection so a future refactor that drops
         // either assignment surfaces here.
@@ -751,6 +753,8 @@ fn binding_counters_snapshot_projects_ring_pressure_fields() {
     assert_eq!(snap.tx_shared_recycle_unknown_slot_drops, 43);
     assert_eq!(snap.tx_submit_error_drops, 31);
     assert_eq!(snap.pending_tx_local_overflow_drops, 37);
+    assert_eq!(snap.mirror_drops_queue_full_same_worker, 47);
+    assert_eq!(snap.mirror_drops_queue_full_cross_worker, 49);
     assert_eq!(snap.flow_cache_collision_evictions, 53);
     // #1219: pin active_flow_count projection through the From impl.
     assert_eq!(snap.active_flow_count, 71);
@@ -790,6 +794,8 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         mirror_drops_tx_frame_reserve: 35,
         mirror_drops_no_binding: 36,
         mirror_drops_queue_full: 37,
+        mirror_drops_queue_full_same_worker: 38,
+        mirror_drops_queue_full_cross_worker: 39,
         // #812: populated so wire-key assertions below also cover
         // the new TX submit-latency fields.
         tx_submit_latency_hist: vec![13, 14, 15],
@@ -847,6 +853,8 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         "mirror_drops_tx_frame_reserve",
         "mirror_drops_no_binding",
         "mirror_drops_queue_full",
+        "mirror_drops_queue_full_same_worker",
+        "mirror_drops_queue_full_cross_worker",
         // #812: new wire keys — absence from BindingCountersSnapshot
         // JSON breaks the Go-side step1-capture consumer.
         "tx_submit_latency_hist",
@@ -1097,6 +1105,8 @@ fn tx_latency_hist_serialization_roundtrip() {
         mirror_drops_tx_frame_reserve: 0,
         mirror_drops_no_binding: 0,
         mirror_drops_queue_full: 0,
+        mirror_drops_queue_full_same_worker: 0,
+        mirror_drops_queue_full_cross_worker: 0,
         // Hand-built plausible histogram — bucket 0 heavy,
         // tail in buckets 6-7, saturation bucket 15 empty.
         tx_submit_latency_hist: vec![9001, 123, 45, 30, 12, 4, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0],

@@ -380,6 +380,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                     dscp_rewrite: cached_descriptor
                                                         .tx_selection
                                                         .dscp_rewrite,
+                                                    mirror_clone: false,
                                                 },
                                             );
                                             binding.tx_counters.pending_in_place_tx_packets += 1;

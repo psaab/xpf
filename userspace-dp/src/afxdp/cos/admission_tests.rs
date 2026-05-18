@@ -813,6 +813,7 @@ fn admission_ecn_skips_prepared_when_umem_slice_out_of_range() {
         egress_ifindex: 42,
         cos_queue_id: Some(0),
         dscp_rewrite: None,
+        mirror_clone: false,
     });
 
     let marked =

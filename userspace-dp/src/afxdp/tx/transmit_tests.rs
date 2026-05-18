@@ -23,6 +23,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
             egress_ifindex: 0,
             cos_queue_id: None,
             dscp_rewrite: None,
+            mirror_clone: false,
         },
     );
     remember_prepared_recycle(
@@ -38,6 +39,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
             egress_ifindex: 0,
             cos_queue_id: None,
             dscp_rewrite: None,
+            mirror_clone: false,
         },
     );
     remember_prepared_recycle(
@@ -56,6 +58,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
             egress_ifindex: 0,
             cos_queue_id: None,
             dscp_rewrite: None,
+            mirror_clone: false,
         },
     );
 

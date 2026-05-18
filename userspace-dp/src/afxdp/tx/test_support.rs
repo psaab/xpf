@@ -190,6 +190,7 @@ pub(in crate::afxdp) fn test_flow_prepared_cos_item(
         egress_ifindex: 42,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     })
 }
 
@@ -523,6 +524,7 @@ pub(in crate::afxdp) fn test_prepared_item_in_umem(
         egress_ifindex: 42,
         cos_queue_id: Some(0),
         dscp_rewrite: None,
+        mirror_clone: false,
     })
 }
 

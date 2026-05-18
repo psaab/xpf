@@ -1238,6 +1238,10 @@ impl Coordinator {
                 binding.mirror_drops_tx_frame_reserve = snap.mirror_drops_tx_frame_reserve;
                 binding.mirror_drops_no_binding = snap.mirror_drops_no_binding;
                 binding.mirror_drops_queue_full = snap.mirror_drops_queue_full;
+                binding.mirror_drops_queue_full_same_worker =
+                    snap.mirror_drops_queue_full_same_worker;
+                binding.mirror_drops_queue_full_cross_worker =
+                    snap.mirror_drops_queue_full_cross_worker;
                 binding.post_drain_backup_bytes = snap.post_drain_backup_bytes;
                 binding.drain_sent_bytes_shaped_unconditional =
                     snap.drain_sent_bytes_shaped_unconditional;
@@ -1392,6 +1396,8 @@ impl Coordinator {
                 binding.mirror_drops_tx_frame_reserve = 0;
                 binding.mirror_drops_no_binding = 0;
                 binding.mirror_drops_queue_full = 0;
+                binding.mirror_drops_queue_full_same_worker = 0;
+                binding.mirror_drops_queue_full_cross_worker = 0;
                 binding.post_drain_backup_bytes = 0;
                 binding.drain_sent_bytes_shaped_unconditional = 0;
                 binding.post_drain_backup_cos_drops = 0;

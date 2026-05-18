@@ -1570,6 +1570,10 @@ pub(crate) struct BindingStatus {
     pub mirror_drops_no_binding: u64,
     #[serde(rename = "mirror_drops_queue_full", default)]
     pub mirror_drops_queue_full: u64,
+    #[serde(rename = "mirror_drops_queue_full_same_worker", default)]
+    pub mirror_drops_queue_full_same_worker: u64,
+    #[serde(rename = "mirror_drops_queue_full_cross_worker", default)]
+    pub mirror_drops_queue_full_cross_worker: u64,
     // #760 instrumentation: post-CoS backup transmit bytes
     // (drain_pending_tx fallbacks (tx/drain.rs::drain_pending_tx)) that bypass
     // any CoS queue's token gate.
@@ -1844,6 +1848,10 @@ pub(crate) struct BindingCountersSnapshot {
     pub mirror_drops_no_binding: u64,
     #[serde(rename = "mirror_drops_queue_full", default)]
     pub mirror_drops_queue_full: u64,
+    #[serde(rename = "mirror_drops_queue_full_same_worker", default)]
+    pub mirror_drops_queue_full_same_worker: u64,
+    #[serde(rename = "mirror_drops_queue_full_cross_worker", default)]
+    pub mirror_drops_queue_full_cross_worker: u64,
     // #812: TX submit→completion latency histogram, pulled through
     // from BindingStatus so step1-capture consumers can compute
     // per-queue latency distributions without a second join.
@@ -1948,6 +1956,8 @@ impl From<&BindingStatus> for BindingCountersSnapshot {
             mirror_drops_tx_frame_reserve: b.mirror_drops_tx_frame_reserve,
             mirror_drops_no_binding: b.mirror_drops_no_binding,
             mirror_drops_queue_full: b.mirror_drops_queue_full,
+            mirror_drops_queue_full_same_worker: b.mirror_drops_queue_full_same_worker,
+            mirror_drops_queue_full_cross_worker: b.mirror_drops_queue_full_cross_worker,
             // #812: clone the histogram Vec<u64> by value (owned
             // copy). Avoids any shared-reference aliasing against
             // the `BindingStatus` owner and satisfies the

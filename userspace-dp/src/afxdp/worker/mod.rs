@@ -2406,6 +2406,8 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) mirror_drops_tx_frame_reserve: u64,
     pub(crate) mirror_drops_no_binding: u64,
     pub(crate) mirror_drops_queue_full: u64,
+    pub(crate) mirror_drops_queue_full_same_worker: u64,
+    pub(crate) mirror_drops_queue_full_cross_worker: u64,
     // #760 triage: surfaced on BindingStatus so operators can
     // compare binding-level vs per-queue drain accounting.
     pub(crate) post_drain_backup_bytes: u64,

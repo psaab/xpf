@@ -61,6 +61,7 @@ fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }),
     );
     cos_queue_push_back(
@@ -142,6 +143,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
 
     let mut free_tx_frames = VecDeque::from([64, 128, 192]);
@@ -233,6 +235,7 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
 
     let mut scratch_prepared_tx = Vec::new();
@@ -257,6 +260,9 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
             assert_eq!(dropped_bytes, (tx_frame_capacity() + 1) as u64);
         }
         ExactCoSScratchBuild::Ready => panic!("oversized prepared frame must drop"),
+        ExactCoSScratchBuild::MirrorTxFrameReserve { .. } => {
+            panic!("prepared frame must not trip mirror reserve handling")
+        }
     }
     assert!(scratch_prepared_tx.is_empty());
     assert!(free_tx_frames.is_empty());
@@ -304,6 +310,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -319,6 +326,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot

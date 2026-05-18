@@ -9,7 +9,8 @@ pub(in crate::afxdp) enum MirrorCloneResult {
     NoBinding,
     NoFrame,
     TxFrameReserve,
-    QueueFull,
+    QueueFullSameWorker,
+    QueueFullCrossWorker,
 }
 
 #[inline]
@@ -185,7 +186,7 @@ fn enqueue_mirror_clone_to_binding(
         .len()
         .saturating_add(target_binding.tx_pipeline.pending_tx_local.len());
     if pending_mirror_pressure >= MIRROR_PENDING_LIMIT {
-        return MirrorCloneResult::QueueFull;
+        return MirrorCloneResult::QueueFullSameWorker;
     }
     if target_binding.tx_pipeline.free_tx_frames.len() <= MIRROR_TX_FRAME_RESERVE {
         return MirrorCloneResult::TxFrameReserve;
@@ -220,6 +221,7 @@ fn enqueue_mirror_clone_to_binding(
             egress_ifindex: config.output_ifindex,
             cos_queue_id,
             dscp_rewrite: None,
+            mirror_clone: true,
         });
     MirrorCloneResult::Enqueued
 }
@@ -287,7 +289,7 @@ pub(in crate::afxdp) fn admit_mirror_clone_to_live(
         return Err(MirrorCloneResult::NoBinding);
     };
     BindingLiveState::try_reserve_mirror_tx_owned(&target_live, MIRROR_PENDING_LIMIT)
-        .map_err(|_| MirrorCloneResult::QueueFull)
+        .map_err(|_| MirrorCloneResult::QueueFullCrossWorker)
 }
 
 pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
@@ -315,7 +317,7 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
     admission
         .enqueue_owned(req)
         .map(|_| MirrorCloneResult::Enqueued)
-        .unwrap_or(MirrorCloneResult::QueueFull)
+        .unwrap_or(MirrorCloneResult::QueueFullCrossWorker)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -392,8 +394,15 @@ pub(in crate::afxdp) fn record_mirror_clone_result(
             live.mirror_drops_tx_frame_reserve
                 .fetch_add(1, Ordering::Relaxed);
         }
-        MirrorCloneResult::QueueFull => {
+        MirrorCloneResult::QueueFullSameWorker => {
             live.mirror_drops_queue_full.fetch_add(1, Ordering::Relaxed);
+            live.mirror_drops_queue_full_same_worker
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        MirrorCloneResult::QueueFullCrossWorker => {
+            live.mirror_drops_queue_full.fetch_add(1, Ordering::Relaxed);
+            live.mirror_drops_queue_full_cross_worker
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -714,7 +723,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(result, MirrorCloneResult::QueueFull);
+        assert_eq!(result, MirrorCloneResult::QueueFullCrossWorker);
         let mut queued = VecDeque::new();
         target_live.take_pending_tx_into(&mut queued);
         assert_eq!(queued.len(), 1);
@@ -809,7 +818,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(result, MirrorCloneResult::QueueFull);
+        assert_eq!(result, MirrorCloneResult::QueueFullCrossWorker);
         let mut queued = VecDeque::new();
         target_live.take_pending_tx_into(&mut queued);
         assert_eq!(queued.len(), MIRROR_PENDING_LIMIT);
@@ -1001,13 +1010,19 @@ mod tests {
             None,
         );
 
-        assert_eq!(result, Some(MirrorCloneResult::QueueFull));
+        assert_eq!(result, Some(MirrorCloneResult::QueueFullCrossWorker));
         assert_eq!(
             sample_counter, 0,
             "full live target must fail before consuming a mirror sample"
         );
         assert_eq!(
             ingress_live.mirror_drops_queue_full.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            ingress_live
+                .mirror_drops_queue_full_cross_worker
+                .load(Ordering::Relaxed),
             1
         );
         assert_eq!(
@@ -1293,6 +1308,7 @@ mod tests {
                     egress_ifindex: 22,
                     cos_queue_id: None,
                     dscp_rewrite: None,
+                    mirror_clone: true,
                 });
         }
         let lookup = WorkerBindingLookup::from_bindings(&bindings);
@@ -1318,9 +1334,16 @@ mod tests {
             None,
         );
         record_mirror_clone_result(&ingress.live, result, 64);
-        assert_eq!(result, MirrorCloneResult::QueueFull);
+        assert_eq!(result, MirrorCloneResult::QueueFullSameWorker);
         assert_eq!(
             ingress.live.mirror_drops_queue_full.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            ingress
+                .live
+                .mirror_drops_queue_full_same_worker
+                .load(Ordering::Relaxed),
             1
         );
     }
