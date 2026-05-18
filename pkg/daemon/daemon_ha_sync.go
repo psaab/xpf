@@ -268,7 +268,7 @@ func (d *Daemon) startSessionSyncPrimeRetry(gen uint64) {
 // callback into QueueSessionV4/V6). Falls back to the old BulkSync path
 // (iterating BPF maps from Go) when the event stream isn't available.
 func (d *Daemon) bulkSyncViaEventStreamOrFallback(ss *cluster.SessionSync) error {
-	if exporter, ok := d.dp.(userspaceEventStreamExporter); ok {
+	if exporter, ok := d.legacyDP().(userspaceEventStreamExporter); ok {
 		slog.Info("cluster: using event stream export for bulk sync")
 		if err := exporter.ExportAllSessionsViaEventStream(); err != nil {
 			slog.Warn("cluster: event stream bulk export failed, falling back to BulkSync", "err", err)
@@ -278,7 +278,7 @@ func (d *Daemon) bulkSyncViaEventStreamOrFallback(ss *cluster.SessionSync) error
 		}
 	}
 	slog.Info("cluster: event stream export not available, falling back to BulkSync",
-		"dp_type", fmt.Sprintf("%T", d.dp))
+		"dp_type", fmt.Sprintf("%T", d.legacyDP()))
 	if ss == nil {
 		return fmt.Errorf("session sync not initialized")
 	}
@@ -400,7 +400,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 					_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
 					now := uint64(ts.Sec)
 					for _, rg := range cc.RedundancyGroups {
-						if err := d.dp.UpdateHAWatchdog(rg.ID, now); err != nil {
+						if err := d.dp.HA().SetHAWatchdog(commsCtx, rg.ID, now); err != nil {
 							slog.Warn("ha watchdog write failed", "rg", rg.ID, "err", err)
 						}
 					}
@@ -667,7 +667,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				slog.Warn("cluster: fence received from peer, disabling all RGs")
 				if cfg.Chassis.Cluster != nil {
 					for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
-						if err := d.dp.UpdateRGActive(rg.ID, false); err != nil {
+						if err := d.dp.HA().SetRGActive(commsCtx, rg.ID, false); err != nil {
 							slog.Warn("cluster: fence: failed to disable rg_active",
 								"rg", rg.ID, "err", err)
 						}
@@ -679,7 +679,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			var streamProvider userspaceEventStreamProvider
 			streamCallbacksWired := false
 			if d.dp != nil {
-				if provider, ok := d.dp.(userspaceEventStreamProvider); ok {
+				if provider, ok := d.legacyDP().(userspaceEventStreamProvider); ok {
 					streamProvider = provider
 					wireCtx, cancel := context.WithTimeout(commsCtx, 5*time.Second)
 					streamCallbacksWired = d.wireUserspaceEventStreamCallbacks(wireCtx, provider)
@@ -715,7 +715,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				// Must happen here (not in Run) because d.sessionSync is
 				// created asynchronously in this goroutine.
 				if d.dp != nil {
-					d.sessionSync.SetDataPlane(d.dp)
+					d.sessionSync.SetDataPlane(d.legacyDP())
 					d.sessionSync.IsPrimaryFn = func() bool {
 						return d.cluster != nil && d.cluster.IsLocalPrimary(0)
 					}
