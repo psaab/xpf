@@ -101,6 +101,34 @@ class PolicySchedulerValidateTests(unittest.TestCase):
             ):
                 policy_validate.validate_artifacts(root, rule_id=RULE_ID)
 
+    def test_fails_when_entry_programs_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifacts(root)
+            active = _status(3)
+            del active["status"]["entry_programs"]
+            _write_json(root / "active-status.json", active)
+
+            with self.assertRaisesRegex(
+                policy_validate.ValidationFailure,
+                "entry_programs must be a non-empty object",
+            ):
+                policy_validate.validate_artifacts(root, rule_id=RULE_ID)
+
+    def test_fails_when_entry_programs_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifacts(root)
+            active = _status(3)
+            active["status"]["entry_programs"] = {}
+            _write_json(root / "active-status.json", active)
+
+            with self.assertRaisesRegex(
+                policy_validate.ValidationFailure,
+                "entry_programs must be a non-empty object",
+            ):
+                policy_validate.validate_artifacts(root, rule_id=RULE_ID)
+
     def test_fails_when_rebuild_resets_counter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -115,11 +143,17 @@ class PolicySchedulerValidateTests(unittest.TestCase):
     def test_fails_when_missing_scheduler_commit_succeeds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write_artifacts(root, missing_text="commit complete")
+            _write_artifacts(
+                root,
+                missing_text=(
+                    'policy "scheduled-allow" references undefined scheduler "missing"\n'
+                    "commit complete"
+                ),
+            )
 
             with self.assertRaisesRegex(
                 policy_validate.ValidationFailure,
-                "strict rejection",
+                "looks like a successful commit",
             ):
                 policy_validate.validate_artifacts(root, rule_id=RULE_ID)
 

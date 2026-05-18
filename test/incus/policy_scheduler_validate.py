@@ -76,11 +76,12 @@ def _require_userspace_runtime(label: str, status: dict[str, Any]) -> None:
         raise ValidationFailure(f"{label}: dataplane_mode is ebpf_only")
 
     programs = status.get("entry_programs")
-    if isinstance(programs, dict) and programs:
-        if not any("xdp_userspace" in str(name) for name in programs.values()):
-            raise ValidationFailure(
-                f"{label}: entry_programs do not show xdp_userspace attachment"
-            )
+    if not isinstance(programs, dict) or not programs:
+        raise ValidationFailure(f"{label}: entry_programs must be a non-empty object")
+    if not any("xdp_userspace" in str(name) for name in programs.values()):
+        raise ValidationFailure(
+            f"{label}: entry_programs do not show xdp_userspace attachment"
+        )
 
 
 def _policy_counter(label: str, status: dict[str, Any], rule_id: str) -> PolicyCounter:
