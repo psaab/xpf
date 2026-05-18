@@ -899,6 +899,9 @@ pub(super) fn ingress_route_table_override(
     forwarding: &ForwardingState,
     meta: UserspaceDpMeta,
     flow: &SessionFlow,
+    ingress_zone_override: Option<u16>,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    now_ns: u64,
 ) -> Option<String> {
     let ingress_ifindex = resolve_ingress_logical_ifindex(
         forwarding,
@@ -914,7 +917,7 @@ pub(super) fn ingress_route_table_override(
     ) {
         return None;
     }
-    let routing_instance = crate::filter::evaluate_interface_filter_routing_instance_counted(
+    let routing_result = crate::filter::evaluate_interface_filter_routing_instance_event_counted(
         &forwarding.filter_state,
         ingress_ifindex,
         is_v6,
@@ -925,8 +928,31 @@ pub(super) fn ingress_route_table_override(
         flow.forward_key.dst_port,
         meta.dscp,
         meta.pkt_len as u64,
-    );
-    let routing_instance = routing_instance?;
+    )?;
+    if routing_result.log {
+        let ingress_zone_id = ingress_zone_override
+            .filter(|id| forwarding.zone_id_to_name.contains_key(id))
+            .or_else(|| forwarding.ifindex_to_zone_id.get(&ingress_ifindex).copied())
+            .or_else(|| {
+                forwarding
+                    .ifindex_to_zone_id
+                    .get(&(meta.ingress_ifindex as i32))
+                    .copied()
+            })
+            .unwrap_or(0);
+        emit_filter_log_event(
+            event_stream,
+            flow,
+            meta,
+            ingress_zone_id,
+            0,
+            routing_result.filter_id,
+            routing_result.term_id,
+            routing_result.action,
+            now_ns,
+        );
+    }
+    let routing_instance = routing_result.routing_instance;
     Some(if is_v6 {
         format!("{routing_instance}.inet6.0")
     } else {

@@ -193,6 +193,18 @@ impl Drop for EventStreamSender {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_worker_handle(
+    capacity: usize,
+    config: DataplaneEventRateLimitConfig,
+) -> (EventStreamWorkerHandle, mpsc::Receiver<EventFrame>) {
+    let (tx, rx) = mpsc::sync_channel(capacity);
+    let shared = Arc::new(
+        EventStreamShared::new_with_dataplane_event_rate_and_queue_capacity(config, capacity),
+    );
+    (EventStreamWorkerHandle { tx, shared }, rx)
+}
+
 // ---------------------------------------------------------------------------
 // EventStreamWorkerHandle -- lightweight clone for worker threads
 // ---------------------------------------------------------------------------

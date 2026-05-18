@@ -771,8 +771,14 @@ pub(super) fn poll_binding_process_descriptor(
                                         None => resolution_target,
                                     }
                                 };
-                            let route_table_override =
-                                ingress_route_table_override(worker_ctx.forwarding, meta, flow);
+                            let route_table_override = ingress_route_table_override(
+                                worker_ctx.forwarding,
+                                meta,
+                                flow,
+                                ingress_zone_override,
+                                worker_ctx.event_stream,
+                                now_ns,
+                            );
 
                             let resolution = if should_block_tunnel_interface_nat_session_miss(
                                 worker_ctx.forwarding,
@@ -1154,7 +1160,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // the session-install step below is skipped only when
                                 // the knob matches AND no NAT is required (to avoid
                                 // orphan NAT state without a session anchor).
-                                if let PolicyAction::Permit = evaluate_policy_with_len(
+                                let policy_action = evaluate_policy_with_len(
                                     &worker_ctx.forwarding.policy,
                                     from_zone_id,
                                     to_zone_id,
@@ -1164,7 +1170,8 @@ pub(super) fn poll_binding_process_descriptor(
                                     flow.forward_key.src_port,
                                     flow.forward_key.dst_port,
                                     desc.len as u64,
-                                ) {
+                                );
+                                if let PolicyAction::Permit = policy_action {
                                     // NAT64: cross-family translation takes
                                     // priority over same-family SNAT.
                                     let nat64_info = if let Some((
@@ -1552,6 +1559,16 @@ pub(super) fn poll_binding_process_descriptor(
                                         }
                                     }
                                 } else {
+                                    emit_policy_deny_event(
+                                        worker_ctx.event_stream,
+                                        flow,
+                                        meta,
+                                        from_zone_id,
+                                        to_zone_id,
+                                        owner_rg_id,
+                                        policy_action,
+                                        now_ns,
+                                    );
                                     telemetry.dbg.policy_deny += 1;
                                     if cfg!(feature = "debug-log")
                                         && (telemetry.dbg.policy_deny <= 3 || is_trust_flow)

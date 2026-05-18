@@ -4,6 +4,8 @@
 
 use super::super::test_fixtures::*;
 use super::*;
+use crate::event_stream::DataplaneEventRateLimitConfig;
+use crate::event_stream::codec::DataplaneEventKind;
 use crate::{FirewallFilterSnapshot, FirewallTermSnapshot, ThreeColorPolicerSnapshot};
 use crate::test_zone_ids::*;
 
@@ -482,8 +484,26 @@ fn ingress_filter_routing_instance_steers_flow_into_native_gre_table() {
         protocol: PROTO_ICMP,
         ..Default::default()
     };
-    let override_table = ingress_route_table_override(&state, meta, &flow);
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let override_table =
+        ingress_route_table_override(&state, meta, &flow, None, Some(&event_handle), 99);
     assert_eq!(override_table.as_deref(), Some("sfmix.inet.0"));
+    let filter_event = event_rx
+        .try_recv()
+        .expect("filter-log event")
+        .decode_dataplane_event()
+        .expect("filter-log payload");
+    assert_eq!(filter_event.kind, DataplaneEventKind::FilterLog);
+    assert_eq!(filter_event.filter_id, 0);
+    assert_eq!(filter_event.term_id, 0);
+    assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(filter_event.egress_zone_id, 0);
     let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
         &state,
         &Default::default(),

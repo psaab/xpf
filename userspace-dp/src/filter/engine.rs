@@ -405,7 +405,7 @@ fn evaluate_filter_ref_routing_instance_counted_v4<'a>(
     dst_port: u16,
     dscp: u8,
     packet_bytes: u64,
-) -> Option<&'a str> {
+) -> Option<FilterRoutingInstanceResult<'a>> {
     for term in &filter.terms {
         if !term_matches_v4(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp) {
             continue;
@@ -413,7 +413,15 @@ fn evaluate_filter_ref_routing_instance_counted_v4<'a>(
         if term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
-        return (!term.routing_instance.is_empty()).then_some(term.routing_instance.as_str());
+        let routing_instance =
+            (!term.routing_instance.is_empty()).then_some(term.routing_instance.as_str())?;
+        return Some(FilterRoutingInstanceResult {
+            routing_instance,
+            log: term.log,
+            action: term.action,
+            filter_id: filter.id,
+            term_id: term.id,
+        });
     }
     None
 }
@@ -428,7 +436,7 @@ fn evaluate_filter_ref_routing_instance_counted_v6<'a>(
     dst_port: u16,
     dscp: u8,
     packet_bytes: u64,
-) -> Option<&'a str> {
+) -> Option<FilterRoutingInstanceResult<'a>> {
     for term in &filter.terms {
         if !term_matches_v6(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp) {
             continue;
@@ -436,7 +444,15 @@ fn evaluate_filter_ref_routing_instance_counted_v6<'a>(
         if term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
-        return (!term.routing_instance.is_empty()).then_some(term.routing_instance.as_str());
+        let routing_instance =
+            (!term.routing_instance.is_empty()).then_some(term.routing_instance.as_str())?;
+        return Some(FilterRoutingInstanceResult {
+            routing_instance,
+            log: term.log,
+            action: term.action,
+            filter_id: filter.id,
+            term_id: term.id,
+        });
     }
     None
 }
@@ -582,6 +598,33 @@ pub(crate) fn evaluate_interface_filter_routing_instance_counted<'a>(
     dscp: u8,
     packet_bytes: u64,
 ) -> Option<&'a str> {
+    evaluate_interface_filter_routing_instance_event_counted(
+        state,
+        ifindex,
+        is_v6,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        dscp,
+        packet_bytes,
+    )
+    .map(|result| result.routing_instance)
+}
+
+pub(crate) fn evaluate_interface_filter_routing_instance_event_counted<'a>(
+    state: &'a FilterState,
+    ifindex: i32,
+    is_v6: bool,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    packet_bytes: u64,
+) -> Option<FilterRoutingInstanceResult<'a>> {
     let filter = if is_v6 {
         state.iface_filter_v6_fast.get(&ifindex).map(Arc::as_ref)
     } else {
