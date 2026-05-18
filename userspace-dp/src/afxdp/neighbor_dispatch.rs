@@ -50,6 +50,7 @@ pub(super) fn retry_pending_neigh(
     binding_index: usize,
     right: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
+    mirror_targets: &MirrorTargetMap,
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     now_ns: u64,
@@ -122,10 +123,7 @@ pub(super) fn retry_pending_neigh(
             // (egress_ifindex, next_hop) prevents probe-storm when
             // many packets share the same unresolved neighbor.
             let mut pkt = pkt;
-            if probe_due(
-                now_ns.saturating_sub(pkt.queued_ns),
-                pkt.probe_attempts,
-            ) {
+            if probe_due(now_ns.saturating_sub(pkt.queued_ns), pkt.probe_attempts) {
                 if let Some(hop) = pkt.decision.resolution.next_hop {
                     let key = (pkt.decision.resolution.egress_ifindex, hop);
                     if probed_this_sweep.contains(&key) {
@@ -158,6 +156,38 @@ pub(super) fn retry_pending_neigh(
         decision.resolution.neighbor_mac = Some(neighbor_mac);
         decision.resolution.disposition = ForwardingDisposition::ForwardCandidate;
         let expected_ports = None;
+        let Some(source_frame) = area.slice(pkt.desc.addr as usize, pkt.desc.len as usize) else {
+            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+            continue;
+        };
+        let cos = resolve_cos_tx_selection_at(
+            forwarding,
+            decision.resolution.egress_ifindex,
+            pkt.meta,
+            pkt.flow_key.as_ref(),
+            now_ns,
+        );
+        if cos.drop {
+            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+            continue;
+        }
+        if let Some(result) = enqueue_sampled_mirror_clone(
+            left,
+            binding_index,
+            binding,
+            right,
+            binding_lookup,
+            mirror_targets,
+            forwarding,
+            pkt.meta.ingress_ifindex as i32,
+            pkt.meta.ingress_vlan_id,
+            ingress_queue,
+            source_frame,
+            pkt.meta.into(),
+            pkt.flow_key.as_ref(),
+        ) {
+            record_mirror_clone_result(&binding.live, result, source_frame.len());
+        }
         let Some(rewrite_result) = rewrite_forwarded_frame_in_place(
             &*area,
             pkt.desc,
@@ -183,17 +213,6 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
-        let cos = resolve_cos_tx_selection_at(
-            forwarding,
-            decision.resolution.egress_ifindex,
-            pkt.meta,
-            pkt.flow_key.as_ref(),
-            now_ns,
-        );
-        if cos.drop {
-            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
-            continue;
-        }
         let req = PreparedTxRequest {
             offset: rewrite_result.offset,
             len: rewrite_result.len,
@@ -230,7 +249,14 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
         }
     }
-    apply_shared_recycles(left, binding_index, binding, right, binding_lookup, shared_recycles);
+    apply_shared_recycles(
+        left,
+        binding_index,
+        binding,
+        right,
+        binding_lookup,
+        shared_recycles,
+    );
 }
 
 pub(super) fn learn_dynamic_neighbor_from_packet(
@@ -322,6 +348,148 @@ pub(super) fn build_missing_neighbor_session_metadata(
         fabric_ingress,
         is_reverse: false,
         nat64_reverse: None,
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+    use crate::afxdp::tx::test_support::{build_ipv4_test_packet, test_session_key};
+    use std::sync::atomic::Ordering;
+
+    fn resolved_neighbor_decision(next_hop: IpAddr) -> SessionDecision {
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::MissingNeighbor,
+                local_ifindex: 0,
+                egress_ifindex: 80,
+                tx_ifindex: 22,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(next_hop),
+                neighbor_mac: None,
+                src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+        }
+    }
+
+    fn pending_neighbor_meta(frame_len: usize) -> UserspaceDpMeta {
+        UserspaceDpMeta {
+            ingress_ifindex: 11,
+            l3_offset: 14,
+            l4_offset: 34,
+            pkt_len: frame_len as u16,
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            ..UserspaceDpMeta::default()
+        }
+    }
+
+    #[test]
+    fn retry_pending_neighbor_mirrors_original_frame_before_rewrite() {
+        let mut bindings = vec![
+            BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+            BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+            BindingWorker::new_for_mirror_test(2, 0, 33, 0),
+        ];
+        let original_frame = build_ipv4_test_packet(0);
+        unsafe {
+            bindings[0]
+                .umem
+                .area()
+                .slice_mut_unchecked(0, original_frame.len())
+        }
+        .expect("ingress frame")
+        .copy_from_slice(&original_frame);
+
+        let next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let meta = pending_neighbor_meta(original_frame.len());
+        bindings[0].pending_neigh.push_back(PendingNeighPacket {
+            addr: 0,
+            desc: XdpDesc {
+                addr: 0,
+                len: original_frame.len() as u32,
+                options: 0,
+            },
+            meta,
+            decision: resolved_neighbor_decision(next_hop),
+            flow_key: Some(test_session_key(12345, 443)),
+            queued_ns: 0,
+            probe_attempts: 0,
+        });
+
+        let mut forwarding = ForwardingState::default();
+        forwarding.neighbors.insert(
+            (80, next_hop),
+            NeighborEntry {
+                mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            },
+        );
+        forwarding.mirror_configs.insert(
+            11,
+            MirrorRuntimeConfig {
+                output_ifindex: 33,
+                rate: 0,
+            },
+        );
+
+        let lookup = WorkerBindingLookup::from_bindings(&bindings);
+        let mirror_targets = MirrorTargetMap::default();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let mut shared_recycles = Vec::new();
+        let area = bindings[0].umem.area() as *const MmapArea;
+        let (left, rest) = bindings.split_at_mut(0);
+        let (binding, right) = rest.split_first_mut().expect("ingress binding");
+
+        retry_pending_neigh(
+            binding,
+            left,
+            0,
+            right,
+            &lookup,
+            &mirror_targets,
+            &forwarding,
+            &dynamic_neighbors,
+            1,
+            unsafe { &*area },
+            &mut shared_recycles,
+        );
+
+        assert!(bindings[0].pending_neigh.is_empty());
+        assert_eq!(bindings[0].live.mirrored_packets.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            bindings[0].live.mirrored_bytes.load(Ordering::Relaxed),
+            original_frame.len() as u64
+        );
+
+        let mirror_req = bindings[2]
+            .tx_pipeline
+            .pending_tx_prepared
+            .front()
+            .expect("mirror prepared request");
+        assert!(mirror_req.mirror_clone);
+        assert_eq!(mirror_req.egress_ifindex, 33);
+        assert_eq!(mirror_req.len, original_frame.len() as u32);
+        assert_eq!(
+            bindings[2]
+                .umem
+                .area()
+                .slice(mirror_req.offset as usize, mirror_req.len as usize)
+                .expect("mirrored frame"),
+            original_frame.as_slice(),
+            "deferred neighbor path must mirror pre-rewrite L2 bytes",
+        );
+
+        let forwarded_req = bindings[1]
+            .tx_pipeline
+            .pending_tx_prepared
+            .front()
+            .expect("forwarded prepared request");
+        assert!(
+            !forwarded_req.mirror_clone,
+            "primary forwarding request must not inherit mirror identity",
+        );
     }
 }
 
