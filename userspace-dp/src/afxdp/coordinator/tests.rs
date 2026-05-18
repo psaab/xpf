@@ -1218,6 +1218,12 @@ fn refresh_bindings_bridges_v_min_counters_into_binding_status() {
     // assignments and drops one in the middle would surface here).
     live.flow_cache_collision_evictions
         .store(79, Ordering::Relaxed);
+    live.syn_cookie_challenges.store(97, Ordering::Relaxed);
+    live.syn_cookie_secret_unavailable
+        .store(101, Ordering::Relaxed);
+    live.syn_cookie_ack_valid.store(103, Ordering::Relaxed);
+    live.syn_cookie_ack_invalid.store(107, Ordering::Relaxed);
+    live.syn_cookie_bypass.store(109, Ordering::Relaxed);
     coordinator.workers.live.insert(0, live);
 
     let mut bindings = vec![BindingStatus {
@@ -1230,6 +1236,11 @@ fn refresh_bindings_bridges_v_min_counters_into_binding_status() {
         v_min_throttle_hard_cap_overrides: 0xdead_beef,
         v_min_throttles: 0xcafe_f00d,
         flow_cache_collision_evictions: 0xbad_c0de,
+        syn_cookie_challenges: 1,
+        syn_cookie_secret_unavailable: 1,
+        syn_cookie_ack_valid: 1,
+        syn_cookie_ack_invalid: 1,
+        syn_cookie_bypass: 1,
         ..Default::default()
     }];
 
@@ -1250,6 +1261,11 @@ fn refresh_bindings_bridges_v_min_counters_into_binding_status() {
         "refresh_bindings must bridge flow_cache_collision_evictions \
          (companion bridge line — pinning the surrounding layout)"
     );
+    assert_eq!(bindings[0].syn_cookie_challenges, 97);
+    assert_eq!(bindings[0].syn_cookie_secret_unavailable, 101);
+    assert_eq!(bindings[0].syn_cookie_ack_valid, 103);
+    assert_eq!(bindings[0].syn_cookie_ack_invalid, 107);
+    assert_eq!(bindings[0].syn_cookie_bypass, 109);
 }
 
 #[test]
@@ -1269,6 +1285,12 @@ fn refresh_bindings_zeroes_v_min_counters_when_worker_absent() {
         worker_id: 9,
         v_min_throttle_hard_cap_overrides: 999,
         v_min_throttles: 888,
+        screen_drops: 777,
+        syn_cookie_challenges: 666,
+        syn_cookie_secret_unavailable: 555,
+        syn_cookie_ack_valid: 444,
+        syn_cookie_ack_invalid: 333,
+        syn_cookie_bypass: 222,
         ..Default::default()
     }];
 
@@ -1276,4 +1298,10 @@ fn refresh_bindings_zeroes_v_min_counters_when_worker_absent() {
 
     assert_eq!(bindings[0].v_min_throttle_hard_cap_overrides, 0);
     assert_eq!(bindings[0].v_min_throttles, 0);
+    assert_eq!(bindings[0].screen_drops, 0);
+    assert_eq!(bindings[0].syn_cookie_challenges, 0);
+    assert_eq!(bindings[0].syn_cookie_secret_unavailable, 0);
+    assert_eq!(bindings[0].syn_cookie_ack_valid, 0);
+    assert_eq!(bindings[0].syn_cookie_ack_invalid, 0);
+    assert_eq!(bindings[0].syn_cookie_bypass, 0);
 }

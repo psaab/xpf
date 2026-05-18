@@ -278,9 +278,23 @@ pub(super) fn stage_screen_check(
     );
     match screen.check_packet_with_zone_id(zone_name, zone_id, &screen_pkt, now_secs) {
         ScreenVerdict::Pass => StageOutcome::Continue(()),
-        ScreenVerdict::Drop(_) | ScreenVerdict::SynCookieChallenge(_) => {
+        ScreenVerdict::SynCookieBypass => {
+            counters.touched = true;
+            counters.syn_cookie_bypass += 1;
+            StageOutcome::Continue(())
+        }
+        ScreenVerdict::Drop(reason) => {
             counters.touched = true;
             counters.screen_drops += 1;
+            if reason == "syn-cookie-unavailable" {
+                counters.syn_cookie_secret_unavailable += 1;
+            }
+            StageOutcome::RecycleAndContinue
+        }
+        ScreenVerdict::SynCookieChallenge(_) => {
+            counters.touched = true;
+            counters.screen_drops += 1;
+            counters.syn_cookie_challenges += 1;
             StageOutcome::RecycleAndContinue
         }
     }
@@ -294,9 +308,9 @@ pub(super) fn stage_screen_check(
 /// traverse the ordinary policy/NAT/session path. Invalid cookie ACKs are
 /// dropped while cookie mode is active. Poll-stage coverage intentionally pins
 /// only the operational drop/bypass behavior here; the lower screen runtime
-/// owns cache mechanics. `screen_tests.rs` covers bounded 4-way validated-client
-/// cache replacement, while cache expiration, secret-epoch rotation, and
-/// HA-safe secret/cache survivability remain explicit #1374 follow-ups.
+/// owns cache mechanics. `screen_tests.rs` covers bounded 4-way replacement,
+/// explicit cache expiration, and current/previous secret-epoch validation;
+/// HA-safe secret/cache survivability remains an explicit #1374 follow-up.
 #[inline]
 pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
     flow: Option<&SessionFlow>,
@@ -350,10 +364,15 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
     match screen.validate_syn_cookie_ack_on_session_miss(zone_name, zone_id, &screen_pkt, now_secs)
     {
         SynCookieAckVerdict::NotApplicable => StageOutcome::Continue(()),
-        SynCookieAckVerdict::Validated => StageOutcome::RecycleAndContinue,
+        SynCookieAckVerdict::Validated => {
+            counters.touched = true;
+            counters.syn_cookie_ack_valid += 1;
+            StageOutcome::RecycleAndContinue
+        }
         SynCookieAckVerdict::Invalid => {
             counters.touched = true;
             counters.screen_drops += 1;
+            counters.syn_cookie_ack_invalid += 1;
             StageOutcome::RecycleAndContinue
         }
     }
@@ -596,6 +615,7 @@ mod tests {
             "invalid cookie ACK must be counted as a screen drop"
         );
         assert_eq!(invalid_counters.screen_drops, 1);
+        assert_eq!(invalid_counters.syn_cookie_ack_invalid, 1);
 
         let challenge = match screen.check_packet_with_zone_id(
             "lan",
@@ -635,14 +655,15 @@ mod tests {
             StageOutcome::RecycleAndContinue
         ));
         assert!(
-            !counters.touched,
-            "valid cookie ACK is consumed without counting a screen drop"
+            counters.touched,
+            "valid cookie ACK must be counted without counting a screen drop"
         );
         assert_eq!(counters.screen_drops, 0);
+        assert_eq!(counters.syn_cookie_ack_valid, 1);
 
         assert_eq!(
             screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
-            ScreenVerdict::Pass,
+            ScreenVerdict::SynCookieBypass,
             "poll-stage session-miss ACK handling must invoke SYN-cookie validation"
         );
         assert!(

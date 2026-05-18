@@ -52,7 +52,7 @@ These are the remaining explicit configuration gates in
 | Feature/config shape | Gate status | Retirement blocker |
 |----------------------|-------------|--------------------|
 | Unsupported policy shapes | Gated | Address/application expansion must succeed for userspace |
-| Screen behavior requiring SYN cookies | Gated; userspace screen runtime has fail-closed cookie challenge/ACK-validation/cache scaffolding, but no HA key publication or SYN-ACK/RST TX yet | #1374 |
+| Screen behavior requiring SYN cookies | Gated; userspace screen runtime has fail-closed cookie challenge/ACK-validation/cache semantics and status counters, but no HA key publication or SYN-ACK/RST TX yet | #1374 |
 | Port mirroring | Gated; partial runtime | #1376 still needs full path coverage and integration evidence before the gate is removed |
 
 Port mirroring now has snapshot/wire plumbing plus a bounded forwarded-path
@@ -70,7 +70,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 
 | Area | Current boundary |
 |------|------------------|
-| SYN cookie flood protection | Legacy eBPF fallback until #1374 wires HA-safe secrets, bounded SYN-ACK/RST TX, counters/status, and removes the userspace capability gate |
+| SYN cookie flood protection | Legacy eBPF fallback until #1374 wires HA-safe secrets, bounded SYN-ACK/RST TX, integration/failover validation, and removes the userspace capability gate. Userspace now reports selected challenge/no-secret/valid-ACK/invalid-ACK/bypass counters, but does not report SYN-ACKs sent until TX exists. |
 | Kernel-owned traffic (ARP, local delivery, management, some non-IP) | cpumap or kernel pass-through from XDP |
 | GRE / ESP / explicit early filters | Tail-call back into the legacy XDP pipeline |
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
@@ -88,7 +88,7 @@ The current #1373 audit produced these tracked blockers:
 | #1377 | Preserve userspace-v1 address-persistent SNAT pool selection with an explicit backend compatibility boundary, then finish per-pool `persistent-nat` semantics and allocation/exhaustion counters. #1385 landed deterministic userspace selection and snapshot omission for missing, empty, or invalid pool inputs, but runtime remains fail-open at the `poll_descriptor.rs` source-NAT call sites and does not provide persistent-NAT lease reuse or cross-backend new-flow parity. | Phase 4 BPF source removal |
 | #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds and strict missing-scheduler commit behavior landed in the 2026-05-17 closeout slice; remaining blocker is integration/failover validation evidence | Phase 4 BPF source removal |
 | #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
-| #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393 and the 2026-05-17 runtime slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, and a bounded validated-client cache. Lower-layer coverage in `userspace-dp/src/screen_tests.rs` pins 4-way validated-client cache replacement; poll-stage tests only pin the operational invalid-ACK drop/bypass semantics. Remaining: validated-client cache expiration semantics, secret-epoch rotation, bounded SYN-ACK TX, ACK RST emission, HA-safe secret publication/cache survivability, counters/status, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
+| #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393, the 2026-05-17 runtime slice, and the 2026-05-18 closeout slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, bounded validated-client cache behavior, TTL-bound single-use validated-client expiration, current/previous cookie-epoch ACK validation, explicit validated-client bypass verdicts, userspace helper status counters, and legacy global sync for valid/invalid/bypass counters. Remaining: bounded SYN-ACK TX and sent/budget counters, ACK RST emission, HA-safe secret publication/cache survivability, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
 | #1375 | Finish userspace RFC 2697/2698 three-color policer hardening. The current runtime admits the color-blind `then discard` slice and now fails closed for unsupported snapshot shapes that bypass Go admission. Remaining work: sharded/packed state decision, cross-snapshot counter continuity decision, full non-drop color action propagation, and integration/failover/performance evidence | Phase 4 BPF source removal |
 | #1376 | Implement userspace port mirroring or explicitly retire the feature | Phase 4 BPF source removal |
 | #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface. Userspace now renders the bounded helper status that exists and intentionally keeps session-table / flow-cache / neighbor-cache as counters rather than synthetic utilization rows until the helper exports true capacity fields. | Phase 5 CLI / observability cleanup |

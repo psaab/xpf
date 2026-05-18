@@ -418,6 +418,12 @@ fn binding_live_snapshot_propagates_710_drop_counters() {
     live.tx_submit_error_drops.store(7, Ordering::Relaxed);
     live.tx_shared_recycle_unknown_slot_drops
         .store(13, Ordering::Relaxed);
+    live.syn_cookie_challenges.store(17, Ordering::Relaxed);
+    live.syn_cookie_secret_unavailable
+        .store(19, Ordering::Relaxed);
+    live.syn_cookie_ack_valid.store(23, Ordering::Relaxed);
+    live.syn_cookie_ack_invalid.store(29, Ordering::Relaxed);
+    live.syn_cookie_bypass.store(31, Ordering::Relaxed);
     live.no_owner_binding_drops.store(11, Ordering::Relaxed);
 
     let snap = live.snapshot();
@@ -425,6 +431,11 @@ fn binding_live_snapshot_propagates_710_drop_counters() {
     assert_eq!(snap.pending_tx_local_overflow_drops, 5);
     assert_eq!(snap.tx_submit_error_drops, 7);
     assert_eq!(snap.tx_shared_recycle_unknown_slot_drops, 13);
+    assert_eq!(snap.syn_cookie_challenges, 17);
+    assert_eq!(snap.syn_cookie_secret_unavailable, 19);
+    assert_eq!(snap.syn_cookie_ack_valid, 23);
+    assert_eq!(snap.syn_cookie_ack_invalid, 29);
+    assert_eq!(snap.syn_cookie_bypass, 31);
     // `no_owner_binding_drops` has no per-binding protocol surface;
     // it is read directly from the atomic by
     // `Coordinator::cos_no_owner_binding_drops_total()`.

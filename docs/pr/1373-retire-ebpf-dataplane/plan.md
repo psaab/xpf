@@ -17,7 +17,7 @@ present until later phase PRs.
 | #1377 | Userspace-v1 address-persistent SNAT pool selection is implemented; remaining work is per-pool `persistent-nat`, allocator exhaustion observability, and documented mixed-backend rollback behavior (runtime still fail-open for rules omitted due to missing pools, empty pools, or invalid port ranges) | Before Phase 4 |
 | #1378 | Scheduler state now propagates to userspace policy evaluation (#1396); remaining work is hit-counter/snapshot-lifetime contract and integration/failover validation | Before Phase 4 |
 | #1379 | Policy-deny, screen-drop, and filter-log dataplane events are not emitted by userspace | Before Phase 4 |
-| #1374 | SYN-cookie flood protection is implemented in eBPF but missing from userspace | Before Phase 4 |
+| #1374 | Userspace SYN-cookie validation/admission semantics and counters exist; remaining blocker is bounded SYN-ACK/RST TX plus HA-safe secrets before the capability gate can be removed | Before Phase 4 |
 | #1375 | RFC 2697/2698 three-color policers are implemented in eBPF but missing from userspace | Before Phase 4 |
 | #1376 | Port mirroring is implemented in eBPF but missing from userspace | Before Phase 4 |
 | #1380 | `show system buffers` needs userspace-equivalent resource reporting before the BPF-map view disappears; #1386 closes current mixed-version display parity defects | Phase 5 |

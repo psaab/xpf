@@ -88,3 +88,49 @@ func TestHandleShowFirewallFilterHonorsFamilyAndUserspaceCounters(t *testing.T) 
 		t.Fatalf("output = %q, want a hit count only for the counted term", out)
 	}
 }
+
+func TestScreenSYNCookieCounterRowsUsesUserspaceStatus(t *testing.T) {
+	c := &CLI{
+		dp: &firewallFilterUserspaceDP{
+			Manager: dataplane.New(),
+			status: dpuserspace.ProcessStatus{
+				Bindings: []dpuserspace.BindingStatus{
+					{
+						SYNCookieChallenges:        3,
+						SYNCookieSecretUnavailable: 5,
+						SYNCookieAckValid:          7,
+						SYNCookieAckInvalid:        11,
+						SYNCookieBypass:            13,
+					},
+					{
+						SYNCookieChallenges:        17,
+						SYNCookieSecretUnavailable: 19,
+						SYNCookieAckValid:          23,
+						SYNCookieAckInvalid:        29,
+						SYNCookieBypass:            31,
+					},
+				},
+			},
+		},
+	}
+
+	out := c.screenSYNCookieCounterRows()
+	for _, want := range []string{
+		"Userspace SYN-cookie scope",
+		"all bindings",
+		"SYN-cookie challenges",
+		"20",
+		"SYN-cookie secret unavailable",
+		"24",
+		"SYN-cookie ACK valid",
+		"30",
+		"SYN-cookie ACK invalid",
+		"40",
+		"SYN-cookie bypass",
+		"44",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("screen SYN-cookie rows missing %q:\n%s", want, out)
+		}
+	}
+}
