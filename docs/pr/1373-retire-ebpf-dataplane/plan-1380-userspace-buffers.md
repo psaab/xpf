@@ -37,10 +37,13 @@ The current helper status does not publish capacity denominators for the
 session table, dynamic neighbor cache, or per-worker flow cache. `show system
 buffers` therefore reports active sessions through the existing footer and
 renders neighbor/flow-cache pressure as counts/counters, not fill percentages.
-Adding true fill rows for those structures requires new optional helper fields
-such as `session_table_entries/max_sessions`, `flow_cache_capacity`, and
+This is now the Phase 5 contract, not an undecided gap: adding true fill rows
+for those structures requires new optional helper fields such as
+`session_table_entries/max_sessions`, `flow_cache_capacity`, and
 `neighbor_cache_capacity`; Go must not hard-code Rust private constants to infer
-those denominators.
+those denominators. `TestFormatSystemBuffersKeepsDynamicCountsOutOfUtilizationTable`
+pins the contract so dynamic counts cannot drift into the utilization table
+without real denominators.
 
 ## Hot-Path Invariants
 
@@ -80,7 +83,9 @@ those denominators.
 - Go: gRPC `ShowText` and local CLI use the same userspace buffer fixture and
   produce equivalent text.
 - Go: formatter covers CoS queued-byte capacity plus existing helper pressure
-  counters without turning unbounded counts into utilization percentages.
+  counters without turning unbounded counts into utilization percentages; the
+  dynamic-count regression test must fail if neighbor/flow-cache counters gain
+  a `Usage%` row before helper capacity fields exist.
 - Integration: userspace cluster under forwarding load shows nonzero AF_XDP
   capacities, stable active sessions, and no status command hang.
 

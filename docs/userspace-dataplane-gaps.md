@@ -74,7 +74,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
 | DataPlane control-plane contract | Userspace manager no longer embeds the legacy `dataplane.DataPlane`; a userspace `LegacyDataPlaneAdapter` owns old-interface compatibility while callers migrate. The manager still holds a named eBPF shim manager for XDP/map bootstrap state; tracked by #1381 |
 | Dataplane event logging | Session open/close/update are emitted by userspace. Policy-deny, screen-drop, and filter-log frame types, RT_FLOW codec/Go decode, and Rust non-blocking producer/rate-limit/loss-accounting infrastructure are present; runtime producer call sites and end-to-end syslog evidence remain tracked by #1379. |
-| `show system buffers` | Userspace helper-status rendering covers AF_XDP UMEM/TX capacity, CoS queued-byte capacity, active-session footer, neighbor/flow-cache counts, and worker queue pressure counters. #1380 is narrowed to the Phase 5 cleanup decision about whether operators need new helper capacity denominators for session-table, flow-cache, or neighbor-cache fill percentages before the legacy BPF-map surface is removed. |
+| `show system buffers` | Userspace helper-status rendering covers AF_XDP UMEM/TX capacity, CoS queued-byte capacity, active-session footer, neighbor/flow-cache counts, and worker queue pressure counters. The Phase 5 denominator decision is explicit: session-table, flow-cache, and neighbor-cache values remain counters, not fill percentages, until the helper publishes bounded capacity fields. A formatter test pins that these dynamic counts cannot move into the utilization table without real denominators. |
 
 ## Retirement Blockers From The 2026-05-16 Audit
 
@@ -89,7 +89,7 @@ The current #1373 audit produced these tracked blockers:
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393 and the 2026-05-17 runtime slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, and a bounded validated-client cache. Lower-layer coverage in `userspace-dp/src/screen_tests.rs` pins 4-way validated-client cache replacement; poll-stage tests only pin the operational invalid-ACK drop/bypass semantics. Remaining: validated-client cache expiration semantics, secret-epoch rotation, bounded SYN-ACK TX, ACK RST emission, HA-safe secret publication/cache survivability, counters/status, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
 | #1375 | Finish userspace RFC 2697/2698 three-color policer hardening: sharded/packed state decision, cross-snapshot counter continuity decision, non-drop color action handling, and integration/failover/performance evidence | Phase 4 BPF source removal |
 | #1376 | Implement userspace port mirroring or explicitly retire the feature | Phase 4 BPF source removal |
-| #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface. Userspace now renders the bounded helper status that exists; only optional new helper capacity denominators for session-table / flow-cache / neighbor-cache fill remain undecided. | Phase 5 CLI / observability cleanup |
+| #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface. Userspace now renders the bounded helper status that exists and intentionally keeps session-table / flow-cache / neighbor-cache as counters rather than synthetic utilization rows until the helper exports true capacity fields. | Phase 5 CLI / observability cleanup |
 
 Recommended dependency order:
 
@@ -155,7 +155,7 @@ The highest-value remaining work on current `master` is:
    hardening/evidence checklist. The three-color capability gate is removed
    only for the current color-blind `then discard` slice; color-aware and
    non-drop treatments stay fail-closed.
-4. carry the narrowed #1380 denominator decision into Phase 5; the current
-   userspace command already avoids BPF-map fallback when helper status is
-   available
+4. carry #1380 into Phase 5 only if operators need new helper capacity fields;
+   the current userspace command already avoids BPF-map fallback when helper
+   status is available and does not synthesize percentages for dynamic tables
 5. continue correctness and performance hardening on the active AF_XDP fast path

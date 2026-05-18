@@ -216,6 +216,36 @@ func TestFormatSystemBuffersIncludesCoSAndRuntimePressure(t *testing.T) {
 	}
 }
 
+func TestFormatSystemBuffersKeepsDynamicCountsOutOfUtilizationTable(t *testing.T) {
+	status := ProcessStatus{
+		NeighborEntries: 42,
+		Bindings: []BindingStatus{
+			{Slot: 1, WorkerID: 0, QueueID: 0, Interface: "ge-0-0-0", UmemTotalFrames: 1000, UmemInflightFrames: 250},
+		},
+		PerBinding: []BindingCountersSnapshot{
+			{WorkerID: 0, QueueID: 0, ActiveFlowCount: 128},
+		},
+	}
+
+	out := FormatSystemBuffers(status, false)
+	sections := strings.SplitN(out, "Userspace Status Counters:", 2)
+	if len(sections) != 2 {
+		t.Fatalf("FormatSystemBuffers missing status counter section:\n%s", out)
+	}
+	utilSection, counterSection := sections[0], sections[1]
+	for _, dynamic := range []string{"Neighbor cache entries", "Flow cache active flows"} {
+		if strings.Contains(utilSection, dynamic) {
+			t.Fatalf("%s appeared in utilization table without a bounded capacity:\n%s", dynamic, out)
+		}
+		if !strings.Contains(counterSection, dynamic) {
+			t.Fatalf("%s missing from status counter section:\n%s", dynamic, out)
+		}
+	}
+	if strings.Contains(counterSection, "%") {
+		t.Fatalf("status counters rendered a fill percentage without a denominator:\n%s", out)
+	}
+}
+
 func TestFormatSystemBuffersCoSAggregateSumsCapacityWithUsage(t *testing.T) {
 	status := ProcessStatus{
 		CoSInterfaces: []CoSInterfaceStatus{
