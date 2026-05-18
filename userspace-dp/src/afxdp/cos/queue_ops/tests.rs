@@ -61,6 +61,7 @@ fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }),
     );
     cos_queue_push_back(
@@ -74,6 +75,7 @@ fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }),
     );
 
@@ -111,6 +113,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -124,6 +127,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -139,6 +143,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
 
     let mut free_tx_frames = VecDeque::from([64, 128, 192]);
@@ -230,6 +235,7 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
 
     let mut scratch_prepared_tx = Vec::new();
@@ -254,6 +260,9 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
             assert_eq!(dropped_bytes, (tx_frame_capacity() + 1) as u64);
         }
         ExactCoSScratchBuild::Ready => panic!("oversized prepared frame must drop"),
+        ExactCoSScratchBuild::MirrorTxFrameReserve { .. } => {
+            panic!("prepared frame must not trip mirror reserve handling")
+        }
     }
     assert!(scratch_prepared_tx.is_empty());
     assert!(free_tx_frames.is_empty());
@@ -301,6 +310,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -316,6 +326,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
     root.queues[0]
         .hot
@@ -329,6 +340,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             egress_ifindex: 80,
             cos_queue_id: Some(5),
             dscp_rewrite: None,
+            mirror_clone: false,
         }));
 
     let mut scratch_prepared_tx = Vec::new();
@@ -423,6 +435,7 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     let req_b = TxRequest {
         bytes: vec![0; 1500],
@@ -433,6 +446,7 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
         egress_ifindex: 80,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     };
     let bucket_a = cos_flow_bucket_index(
         test_flow_fair_state(queue).flow_hash_seed,
@@ -949,6 +963,7 @@ fn cos_exact_drain_throughput_micro_bench() {
                     egress_ifindex: 80,
                     cos_queue_id: Some(5),
                     dscp_rewrite: None,
+                    mirror_clone: false,
                 }));
             queue.hot.queued_bytes += packet.len() as u64;
         }
@@ -1147,6 +1162,7 @@ fn bench_pop_commit_settle_publish() {
                 egress_ifindex: 80,
                 cos_queue_id: Some(0),
                 dscp_rewrite: None,
+                mirror_clone: false,
             };
             let _ = req.bytes.len();
             cos_queue_push_back(queue, CoSPendingTxItem::Local(req));

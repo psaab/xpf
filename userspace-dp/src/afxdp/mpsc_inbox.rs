@@ -87,6 +87,7 @@ impl<T> MpscInbox<T> {
     /// claimed a slot (advanced `head`) without yet publishing a value,
     /// and the consumer may have consumed a value without readers seeing
     /// the updated `tail`. Safe for observability and soft-cap gating.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[inline]
     pub(super) fn len(&self) -> usize {
         let head = self.head.0.load(Ordering::Relaxed);
@@ -186,4 +187,3 @@ impl<T> Drop for MpscInbox<T> {
 #[cfg(test)]
 #[path = "mpsc_inbox_tests.rs"]
 mod tests;
-

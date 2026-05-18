@@ -450,6 +450,7 @@ fn vmin_demote_no_drain_all_leak() {
         len: 1500,
         recycle: PreparedTxRecycle::FreeTxFrame,
         dscp_rewrite: None,
+        mirror_clone: false,
         cos_queue_id: Some(0),
         flow_key: None,
         expected_ports: None,

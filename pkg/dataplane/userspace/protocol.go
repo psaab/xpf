@@ -845,6 +845,14 @@ type BindingStatus struct {
 	PendingTXLocalOverflowDrops       uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
 	TxSubmitErrorDrops                uint64 `json:"tx_submit_error_drops,omitempty"`
 	TXCompletions                     uint64 `json:"tx_completions,omitempty"`
+	MirroredPackets                   uint64 `json:"mirrored_packets,omitempty"`
+	MirroredBytes                     uint64 `json:"mirrored_bytes,omitempty"`
+	MirrorDropsNoFrame                uint64 `json:"mirror_drops_no_frame,omitempty"`
+	MirrorDropsTXFrameReserve         uint64 `json:"mirror_drops_tx_frame_reserve,omitempty"`
+	MirrorDropsNoBinding              uint64 `json:"mirror_drops_no_binding,omitempty"`
+	MirrorDropsQueueFull              uint64 `json:"mirror_drops_queue_full,omitempty"`
+	MirrorDropsQueueFullSameWorker    uint64 `json:"mirror_drops_queue_full_same_worker,omitempty"`
+	MirrorDropsQueueFullCrossWorker   uint64 `json:"mirror_drops_queue_full_cross_worker,omitempty"`
 	DirectTXPackets                   uint64 `json:"direct_tx_packets,omitempty"`
 	CopyTXPackets                     uint64 `json:"copy_tx_packets,omitempty"`
 	InPlaceTXPackets                  uint64 `json:"in_place_tx_packets,omitempty"`
@@ -963,6 +971,14 @@ type BindingCountersSnapshot struct {
 	TXSharedRecycleUnknownSlotDrops uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
 	TxSubmitErrorDrops              uint64 `json:"tx_submit_error_drops,omitempty"`
 	PendingTxLocalOverflowDrops     uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
+	MirroredPackets                 uint64 `json:"mirrored_packets,omitempty"`
+	MirroredBytes                   uint64 `json:"mirrored_bytes,omitempty"`
+	MirrorDropsNoFrame              uint64 `json:"mirror_drops_no_frame,omitempty"`
+	MirrorDropsTXFrameReserve       uint64 `json:"mirror_drops_tx_frame_reserve,omitempty"`
+	MirrorDropsNoBinding            uint64 `json:"mirror_drops_no_binding,omitempty"`
+	MirrorDropsQueueFull            uint64 `json:"mirror_drops_queue_full,omitempty"`
+	MirrorDropsQueueFullSameWorker  uint64 `json:"mirror_drops_queue_full_same_worker,omitempty"`
+	MirrorDropsQueueFullCrossWorker uint64 `json:"mirror_drops_queue_full_cross_worker,omitempty"`
 	// #812: per-queue TX submit→completion latency histogram, pulled
 	// through from BindingStatus so step1-capture consumers can
 	// compute per-queue latency distributions without a second

@@ -53,7 +53,14 @@ These are the remaining explicit configuration gates in
 | Unsupported policy shapes | Gated | Address/application expansion must succeed for userspace |
 | Screen behavior requiring SYN cookies | Gated; userspace screen runtime has fail-closed cookie challenge/ACK-validation/cache scaffolding, but no HA key publication or SYN-ACK/RST TX yet | #1374 |
 | Three-color policers | Gated | #1375 |
-| Port mirroring | Gated | #1376 |
+| Port mirroring | Gated; partial runtime | #1376 still needs full path coverage and integration evidence before the gate is removed |
+
+Port mirroring now has snapshot/wire plumbing plus a bounded forwarded-path
+runtime slice that samples and queues discardable full-L2 mirror clones with
+drop counters. The `deriveUserspaceCapabilities()` gate intentionally remains
+until #1376 covers every required ingress/transmit path and has integration
+validation for mirror output fidelity and forwarding survival under mirror
+pressure.
 
 ## Features That Still Use A Mixed Boundary
 

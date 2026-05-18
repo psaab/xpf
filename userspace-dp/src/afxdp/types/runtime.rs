@@ -306,6 +306,7 @@ pub(in crate::afxdp) struct DebugPollCounters {
 pub(in crate::afxdp) struct WorkerContext<'a> {
     pub(in crate::afxdp) ident: &'a BindingIdentity,
     pub(in crate::afxdp) binding_lookup: &'a WorkerBindingLookup,
+    pub(in crate::afxdp) mirror_targets: &'a MirrorTargetMap,
     pub(in crate::afxdp) forwarding: &'a ForwardingState,
     pub(in crate::afxdp) ha_state: &'a BTreeMap<i32, HAGroupRuntime>,
     pub(in crate::afxdp) dynamic_neighbors: &'a Arc<super::sharded_neighbor::ShardedNeighborMap>,
@@ -329,4 +330,47 @@ pub(in crate::afxdp) struct WorkerContext<'a> {
 pub(in crate::afxdp) struct TelemetryContext<'a> {
     pub(in crate::afxdp) dbg: &'a mut DebugPollCounters,
     pub(in crate::afxdp) counters: &'a mut BatchCounters,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MirrorTargetMap {
+    by_if_queue: FastMap<(i32, u32), Arc<BindingLiveState>>,
+    by_if: FastMap<i32, MirrorTargetIfEntry>,
+}
+
+#[derive(Clone)]
+struct MirrorTargetIfEntry {
+    live: Arc<BindingLiveState>,
+    count: usize,
+}
+
+impl MirrorTargetMap {
+    pub(in crate::afxdp) fn insert(
+        &mut self,
+        ident: &BindingIdentity,
+        live: Arc<BindingLiveState>,
+    ) {
+        self.by_if_queue
+            .insert((ident.ifindex, ident.queue_id), live.clone());
+        self.by_if
+            .entry(ident.ifindex)
+            .and_modify(|entry| entry.count = entry.count.saturating_add(1))
+            .or_insert(MirrorTargetIfEntry { live, count: 1 });
+    }
+
+    pub(in crate::afxdp) fn target_live(
+        &self,
+        egress_ifindex: i32,
+        ingress_queue_id: u32,
+    ) -> Option<Arc<BindingLiveState>> {
+        self.by_if_queue
+            .get(&(egress_ifindex, ingress_queue_id))
+            .cloned()
+            .or_else(|| {
+                self.by_if
+                    .get(&egress_ifindex)
+                    .filter(|entry| entry.count == 1)
+                    .map(|entry| entry.live.clone())
+            })
+    }
 }

@@ -90,6 +90,18 @@ pub(super) fn service_exact_local_queue_direct(
             binding.live.set_error(error);
             return false;
         }
+        ExactCoSScratchBuild::MirrorTxFrameReserve { dropped_bytes } => {
+            if dropped_bytes > 0 {
+                subtract_direct_cos_queue_bytes(binding, root_ifindex, queue_idx, dropped_bytes);
+            } else {
+                refresh_cos_interface_activity(binding, root_ifindex);
+            }
+            binding
+                .live
+                .mirror_drops_tx_frame_reserve
+                .fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
     }
     if binding.scratch.scratch_exact_local_tx.is_empty() {
         maybe_wake_tx(binding, true, now_ns);
@@ -250,6 +262,18 @@ fn service_exact_local_queue_direct_flow_fair(
                 .tx_submit_error_drops
                 .fetch_add(1, Ordering::Relaxed);
             binding.live.set_error(error);
+            return false;
+        }
+        ExactCoSScratchBuild::MirrorTxFrameReserve { dropped_bytes } => {
+            if dropped_bytes > 0 {
+                subtract_direct_cos_queue_bytes(binding, root_ifindex, queue_idx, dropped_bytes);
+            } else {
+                refresh_cos_interface_activity(binding, root_ifindex);
+            }
+            binding
+                .live
+                .mirror_drops_tx_frame_reserve
+                .fetch_add(1, Ordering::Relaxed);
             return false;
         }
     }
@@ -423,6 +447,9 @@ pub(super) fn service_exact_prepared_queue_direct(
             binding.live.set_error(error);
             return false;
         }
+        ExactCoSScratchBuild::MirrorTxFrameReserve { .. } => {
+            unreachable!("prepared CoS queues do not drain local mirror clones")
+        }
     }
     if binding.scratch.scratch_exact_prepared_tx.is_empty() {
         return false;
@@ -585,6 +612,9 @@ fn service_exact_prepared_queue_direct_flow_fair(
                 .fetch_add(1, Ordering::Relaxed);
             binding.live.set_error(error);
             return false;
+        }
+        ExactCoSScratchBuild::MirrorTxFrameReserve { .. } => {
+            unreachable!("prepared CoS queues do not drain local mirror clones")
         }
     }
     if binding.scratch.scratch_prepared_tx.is_empty() {

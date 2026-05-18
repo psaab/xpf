@@ -74,6 +74,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     ingress_binding: &mut BindingWorker,
     right: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
+    mirror_targets: &MirrorTargetMap,
     pending_forwards: &mut Vec<PendingForwardRequest>,
     post_recycles: &mut Vec<(u32, u64)>,
     now_ns: u64,
@@ -148,6 +149,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 egress_ifindex: request.decision.resolution.egress_ifindex,
                 cos_queue_id: request.cos_queue_id,
                 dscp_rewrite: request.dscp_rewrite,
+                mirror_clone: false,
             };
             if enqueue_local_request_to_target_or_owner(target_binding, req).is_err() {
                 recycle_ingress_frame(ingress_binding, source_offset, now_ns);
@@ -181,6 +183,23 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             }
             PendingForwardFrame::Prebuilt(_) => unreachable!(),
         };
+        if let Some(result) = enqueue_sampled_mirror_clone(
+            left,
+            ingress_index,
+            ingress_binding,
+            right,
+            binding_lookup,
+            mirror_targets,
+            forwarding,
+            request.meta.ingress_ifindex as i32,
+            request.meta.ingress_vlan_id,
+            request.ingress_queue_id,
+            source_frame,
+            request.meta,
+            request.flow_key.as_ref(),
+        ) {
+            record_mirror_clone_result(&ingress_binding.live, result, source_frame.len());
+        }
         let expected_ports = request.expected_ports;
         let ingress_umem_ptr = ingress_binding.umem.allocation_ptr();
         let Some(target_binding) = resolve_pending_forward_target_binding(
@@ -346,6 +365,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                 egress_ifindex: request.decision.resolution.egress_ifindex,
                                 cos_queue_id: request.cos_queue_id,
                                 dscp_rewrite: request.dscp_rewrite,
+                                mirror_clone: false,
                             });
                         bound_pending_tx_local(target_binding);
                         dbg.enqueue_ok += 1;
@@ -455,6 +475,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     egress_ifindex: request.decision.resolution.egress_ifindex,
                                     cos_queue_id: request.cos_queue_id,
                                     dscp_rewrite: request.dscp_rewrite,
+                                    mirror_clone: false,
                                 },
                             );
                             bound_pending_tx_prepared(target_binding, Some(post_recycles));
@@ -536,6 +557,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     egress_ifindex: request.decision.resolution.egress_ifindex,
                                     cos_queue_id: request.cos_queue_id,
                                     dscp_rewrite: request.dscp_rewrite,
+                                    mirror_clone: false,
                                 };
                                 if enqueue_local_request_to_target_or_owner(target_binding, req)
                                     .is_err()
@@ -703,6 +725,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         egress_ifindex: request.decision.resolution.egress_ifindex,
                                         cos_queue_id: request.cos_queue_id,
                                         dscp_rewrite: request.dscp_rewrite,
+                                        mirror_clone: false,
                                     },
                                 );
                                 bound_pending_tx_prepared(target_binding, Some(post_recycles));
@@ -814,6 +837,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     egress_ifindex: request.decision.resolution.egress_ifindex,
                                     cos_queue_id: request.cos_queue_id,
                                     dscp_rewrite: request.dscp_rewrite,
+                                    mirror_clone: false,
                                 };
                                 if enqueue_local_request_to_target_or_owner(target_binding, req)
                                     .is_err()

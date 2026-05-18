@@ -1558,6 +1558,22 @@ pub(crate) struct BindingStatus {
     // the flow-fair admission / redirect-inbox / pending-FIFO drops.
     #[serde(rename = "tx_submit_error_drops", default)]
     pub tx_submit_error_drops: u64,
+    #[serde(rename = "mirrored_packets", default)]
+    pub mirrored_packets: u64,
+    #[serde(rename = "mirrored_bytes", default)]
+    pub mirrored_bytes: u64,
+    #[serde(rename = "mirror_drops_no_frame", default)]
+    pub mirror_drops_no_frame: u64,
+    #[serde(rename = "mirror_drops_tx_frame_reserve", default)]
+    pub mirror_drops_tx_frame_reserve: u64,
+    #[serde(rename = "mirror_drops_no_binding", default)]
+    pub mirror_drops_no_binding: u64,
+    #[serde(rename = "mirror_drops_queue_full", default)]
+    pub mirror_drops_queue_full: u64,
+    #[serde(rename = "mirror_drops_queue_full_same_worker", default)]
+    pub mirror_drops_queue_full_same_worker: u64,
+    #[serde(rename = "mirror_drops_queue_full_cross_worker", default)]
+    pub mirror_drops_queue_full_cross_worker: u64,
     // #760 instrumentation: post-CoS backup transmit bytes
     // (drain_pending_tx fallbacks (tx/drain.rs::drain_pending_tx)) that bypass
     // any CoS queue's token gate.
@@ -1820,6 +1836,22 @@ pub(crate) struct BindingCountersSnapshot {
     pub tx_submit_error_drops: u64,
     #[serde(rename = "pending_tx_local_overflow_drops", default)]
     pub pending_tx_local_overflow_drops: u64,
+    #[serde(rename = "mirrored_packets", default)]
+    pub mirrored_packets: u64,
+    #[serde(rename = "mirrored_bytes", default)]
+    pub mirrored_bytes: u64,
+    #[serde(rename = "mirror_drops_no_frame", default)]
+    pub mirror_drops_no_frame: u64,
+    #[serde(rename = "mirror_drops_tx_frame_reserve", default)]
+    pub mirror_drops_tx_frame_reserve: u64,
+    #[serde(rename = "mirror_drops_no_binding", default)]
+    pub mirror_drops_no_binding: u64,
+    #[serde(rename = "mirror_drops_queue_full", default)]
+    pub mirror_drops_queue_full: u64,
+    #[serde(rename = "mirror_drops_queue_full_same_worker", default)]
+    pub mirror_drops_queue_full_same_worker: u64,
+    #[serde(rename = "mirror_drops_queue_full_cross_worker", default)]
+    pub mirror_drops_queue_full_cross_worker: u64,
     // #812: TX submit→completion latency histogram, pulled through
     // from BindingStatus so step1-capture consumers can compute
     // per-queue latency distributions without a second join.
@@ -1918,6 +1950,14 @@ impl From<&BindingStatus> for BindingCountersSnapshot {
             tx_shared_recycle_unknown_slot_drops: b.tx_shared_recycle_unknown_slot_drops,
             tx_submit_error_drops: b.tx_submit_error_drops,
             pending_tx_local_overflow_drops: b.pending_tx_local_overflow_drops,
+            mirrored_packets: b.mirrored_packets,
+            mirrored_bytes: b.mirrored_bytes,
+            mirror_drops_no_frame: b.mirror_drops_no_frame,
+            mirror_drops_tx_frame_reserve: b.mirror_drops_tx_frame_reserve,
+            mirror_drops_no_binding: b.mirror_drops_no_binding,
+            mirror_drops_queue_full: b.mirror_drops_queue_full,
+            mirror_drops_queue_full_same_worker: b.mirror_drops_queue_full_same_worker,
+            mirror_drops_queue_full_cross_worker: b.mirror_drops_queue_full_cross_worker,
             // #812: clone the histogram Vec<u64> by value (owned
             // copy). Avoids any shared-reference aliasing against
             // the `BindingStatus` owner and satisfies the
@@ -2283,6 +2323,65 @@ mod tests {
             snap.tx_completion_ring_available_max,
             status.tx_completion_ring_available_max
         );
+    }
+
+    #[test]
+    fn mirror_counters_binding_status_wire_roundtrip_and_projection() {
+        let status = BindingStatus {
+            worker_id: 7,
+            slot: 1,
+            ifindex: 11,
+            queue_id: 2,
+            mirrored_packets: 5,
+            mirrored_bytes: 640,
+            mirror_drops_no_frame: 1,
+            mirror_drops_tx_frame_reserve: 2,
+            mirror_drops_no_binding: 3,
+            mirror_drops_queue_full: 4,
+            ..Default::default()
+        };
+
+        let value: serde_json::Value =
+            serde_json::to_value(&status).expect("serialize BindingStatus to Value");
+        let obj = value
+            .as_object()
+            .expect("BindingStatus serializes as a JSON object");
+        for key in [
+            "mirrored_packets",
+            "mirrored_bytes",
+            "mirror_drops_no_frame",
+            "mirror_drops_tx_frame_reserve",
+            "mirror_drops_no_binding",
+            "mirror_drops_queue_full",
+        ] {
+            assert!(
+                obj.contains_key(key),
+                "BindingStatus wire key `{key}` missing: {value}"
+            );
+        }
+
+        let json = serde_json::to_string(&status).expect("serialize BindingStatus");
+        let back: BindingStatus = serde_json::from_str(&json).expect("deserialize BindingStatus");
+        assert_eq!(back.mirrored_packets, status.mirrored_packets);
+        assert_eq!(back.mirrored_bytes, status.mirrored_bytes);
+        assert_eq!(back.mirror_drops_no_frame, status.mirror_drops_no_frame);
+        assert_eq!(
+            back.mirror_drops_tx_frame_reserve,
+            status.mirror_drops_tx_frame_reserve
+        );
+        assert_eq!(back.mirror_drops_no_binding, status.mirror_drops_no_binding);
+        assert_eq!(back.mirror_drops_queue_full, status.mirror_drops_queue_full);
+
+        let snap: BindingCountersSnapshot = (&status).into();
+        assert_eq!(snap.mirrored_packets, status.mirrored_packets);
+        assert_eq!(snap.mirrored_bytes, status.mirrored_bytes);
+        assert_eq!(snap.mirror_drops_no_frame, status.mirror_drops_no_frame);
+        assert_eq!(
+            snap.mirror_drops_tx_frame_reserve,
+            status.mirror_drops_tx_frame_reserve
+        );
+        assert_eq!(snap.mirror_drops_no_binding, status.mirror_drops_no_binding);
+        assert_eq!(snap.mirror_drops_queue_full, status.mirror_drops_queue_full);
     }
 
     // #943 Copilot round-2 finding #3: the rich BindingStatus wire

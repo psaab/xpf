@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
 use crate::afxdp::frame::{apply_dscp_rewrite_to_frame, frame_has_tcp_rst};
+use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::{
     COS_PRIORITY_LEVELS, CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime,
@@ -99,6 +100,7 @@ pub(in crate::afxdp) struct ExactCoSQueueSelection {
 pub(in crate::afxdp) enum ExactCoSScratchBuild {
     Ready,
     Drop { error: String, dropped_bytes: u64 },
+    MirrorTxFrameReserve { dropped_bytes: u64 },
 }
 
 /// #751: one drain pass through the binding's CoS interfaces. Returns

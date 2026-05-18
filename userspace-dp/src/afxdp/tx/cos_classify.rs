@@ -4,6 +4,7 @@
 // atomic ops use `Ordering::Relaxed`.
 
 use super::*;
+use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSTxSelection {
@@ -440,6 +441,9 @@ pub(super) fn prepare_local_request_for_cos(
     if req.bytes.len() > tx_frame_capacity() {
         return Err(req);
     }
+    if req.mirror_clone && free_tx_frames.len() <= MIRROR_TX_FRAME_RESERVE {
+        return Err(req);
+    }
     let Some(offset) = free_tx_frames.pop_front() else {
         return Err(req);
     };
@@ -449,18 +453,7 @@ pub(super) fn prepare_local_request_for_cos(
         return Err(req);
     };
     frame.copy_from_slice(&req.bytes);
-    Ok(PreparedTxRequest {
-        offset,
-        len: req.bytes.len() as u32,
-        recycle: PreparedTxRecycle::FreeTxFrame,
-        expected_ports: req.expected_ports,
-        expected_addr_family: req.expected_addr_family,
-        expected_protocol: req.expected_protocol,
-        flow_key: req.flow_key,
-        egress_ifindex: req.egress_ifindex,
-        cos_queue_id: req.cos_queue_id,
-        dscp_rewrite: req.dscp_rewrite,
-    })
+    Ok(req.into_prepared_request(offset, PreparedTxRecycle::FreeTxFrame))
 }
 
 pub(super) fn enqueue_prepared_into_cos(
@@ -528,16 +521,7 @@ pub(super) fn clone_prepared_request_for_cos(
     req: &PreparedTxRequest,
 ) -> Option<TxRequest> {
     let frame = area.slice(req.offset as usize, req.len as usize)?.to_vec();
-    Some(TxRequest {
-        bytes: frame,
-        expected_ports: req.expected_ports,
-        expected_addr_family: req.expected_addr_family,
-        expected_protocol: req.expected_protocol,
-        flow_key: req.flow_key.clone(),
-        egress_ifindex: req.egress_ifindex,
-        cos_queue_id: req.cos_queue_id,
-        dscp_rewrite: req.dscp_rewrite,
-    })
+    Some(req.to_local_request(frame))
 }
 
 pub(super) fn resolve_cos_queue_idx(

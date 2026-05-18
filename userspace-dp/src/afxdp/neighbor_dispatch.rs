@@ -204,6 +204,7 @@ pub(super) fn retry_pending_neigh(
             egress_ifindex: decision.resolution.egress_ifindex,
             cos_queue_id: cos.queue_id,
             dscp_rewrite: cos.dscp_rewrite,
+            mirror_clone: false,
         };
         if target_idx == binding_index {
             binding.tx_pipeline.pending_tx_prepared.push_back(req);

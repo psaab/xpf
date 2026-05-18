@@ -29,9 +29,7 @@ fn compute_drain_target_bps(queue: &CoSQueueRuntime) -> u64 {
     // Convert bytes/sec → bits/sec. u128 intermediate avoids overflow
     // at 100+ Gbps configured rates; clamp to u64::MAX before narrowing
     // so extreme configured rates saturate rather than silently wrap.
-    let queue_bw_bps = (rate_bytes as u128)
-        .saturating_mul(8)
-        .min(u64::MAX as u128) as u64;
+    let queue_bw_bps = (rate_bytes as u128).saturating_mul(8).min(u64::MAX as u128) as u64;
     let denom = ff.active_flow_buckets.max(1) as u64;
     queue_bw_bps / denom
 }
@@ -70,6 +68,16 @@ pub(in crate::afxdp) fn drain_exact_local_fifo_items_to_scratch(
             };
             let len = req.bytes.len() as u64;
             if remaining_root < len || remaining_secondary < len {
+                break;
+            }
+            if req.mirror_clone && free_tx_frames.len() <= MIRROR_TX_FRAME_RESERVE {
+                if scratch_local_tx.is_empty() {
+                    let dropped_bytes = match queue.hot.items.remove(index) {
+                        Some(CoSPendingTxItem::Local(req)) => req.bytes.len() as u64,
+                        Some(CoSPendingTxItem::Prepared(_)) | None => len,
+                    };
+                    return ExactCoSScratchBuild::MirrorTxFrameReserve { dropped_bytes };
+                }
                 break;
             }
             if req.bytes.len() > tx_frame_capacity() {
@@ -206,6 +214,20 @@ pub(in crate::afxdp) fn drain_exact_local_items_to_scratch_flow_fair(
             CoSPendingTxItem::Prepared(_) => break,
         };
         if remaining_root < len || remaining_secondary < len {
+            break;
+        }
+        if matches!(front, CoSPendingTxItem::Local(req) if req.mirror_clone)
+            && free_tx_frames.len() <= MIRROR_TX_FRAME_RESERVE
+        {
+            if scratch_local_tx.is_empty() {
+                let Some(CoSPendingTxItem::Local(_req)) =
+                    cos_queue_pop_front_with_cap(queue, target_bps)
+                else {
+                    break;
+                };
+                cos_queue_clear_orphan_snapshot_after_drop(queue);
+                return ExactCoSScratchBuild::MirrorTxFrameReserve { dropped_bytes: len };
+            }
             break;
         }
         let Some(CoSPendingTxItem::Local(mut req)) =
