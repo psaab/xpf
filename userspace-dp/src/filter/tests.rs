@@ -474,6 +474,111 @@ fn unsupported_three_color_snapshots_fail_closed_in_rust_compiler() {
                 ..Default::default()
             },
         ),
+        (
+            "mode-drift",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "single_rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "pir-below-cir",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_rate_bytes_per_sec: 999,
+                peak_or_excess_burst_bytes: 100,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero-pir-two-rate",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_rate_bytes_per_sec: 0,
+                peak_or_excess_burst_bytes: 100,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero-committed-burst-two-rate",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 0,
+                peak_or_excess_rate_bytes_per_sec: 2_000,
+                peak_or_excess_burst_bytes: 100,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "peak-burst-below-committed-burst",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_rate_bytes_per_sec: 2_000,
+                peak_or_excess_burst_bytes: 99,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero-peak-burst-two-rate",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_rate_bytes_per_sec: 2_000,
+                peak_or_excess_burst_bytes: 0,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero-excess-burst",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 0,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "serde-defaulted-malformed",
+            serde_json::from_value(serde_json::json!({
+                "name": "bad-pol",
+                "color_blind": true,
+                "then_action": "discard"
+            }))
+            .expect("defaulted malformed snapshot decodes"),
+        ),
     ];
 
     for (name, snapshot) in cases {
