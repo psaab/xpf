@@ -13,14 +13,14 @@ present until later phase PRs.
 
 | Issue | Summary | Phase dependency |
 |-------|---------|------------------|
-| #1381 | `dataplane.DataPlane` is BPF-shaped and the userspace manager embeds the eBPF manager | Must land first; blocks Phase 3 |
+| #1381 | Runtime interface split is underway; userspace no longer embeds the old interface directly for the first operator metadata surfaces, but session/telemetry/GC/control callers still need to leave the BPF-shaped contract | Must land first; blocks Phase 3 |
 | #1377 | Userspace-v1 address-persistent SNAT pool selection and fail-closed runtime handling for unusable pool rules are implemented; remaining work is per-pool `persistent-nat`, live-port exhaustion observability, allocator counters, and documented mixed-backend rollback behavior | Before Phase 4 |
-| #1378 | Scheduler state now propagates to userspace policy evaluation (#1396); remaining work is hit-counter/snapshot-lifetime contract and integration/failover validation | Before Phase 4 |
-| #1379 | Policy-deny, screen-drop, and filter-log dataplane events are not emitted by userspace | Before Phase 4 |
-| #1374 | Userspace SYN-cookie validation/admission semantics and counters exist; remaining blocker is bounded SYN-ACK/RST TX plus HA-safe secrets before the capability gate can be removed | Before Phase 4 |
-| #1375 | RFC 2697/2698 three-color policers are implemented in eBPF but missing from userspace | Before Phase 4 |
-| #1376 | Port mirroring is implemented in eBPF but missing from userspace | Before Phase 4 |
-| #1380 | `show system buffers` needs userspace-equivalent resource reporting before the BPF-map view disappears; #1386 closes current mixed-version display parity defects | Phase 5 |
+| #1378 | Scheduler state, counter survival, strict missing-scheduler behavior, and deterministic evidence validation now exist for userspace; remaining work is live HA artifact capture | Before Phase 4 |
+| #1379 | Policy-deny, screen-drop, and logged PBR filter events now emit from userspace; remaining work is syslog evidence, broader non-PBR filter-log call sites, and richer identity mapping | Before Phase 4 |
+| #1374 | Userspace SYN-cookie validation/admission semantics and counters exist; remaining blockers are bounded SYN-ACK/RST TX, HA-safe secrets, integration/failover validation, and gate removal | Before Phase 4 |
+| #1375 | Userspace supports the color-blind `then discard` srTCM/trTCM slice and fails closed for unsupported shapes; remaining work is state/counter continuity, non-drop color actions, and integration/perf evidence | Before Phase 4 |
+| #1376 | Userspace port mirroring has snapshot/wire plumbing plus bounded forwarded-path runtime; remaining work is ingress/transmit surface coverage, fidelity/pressure evidence, and gate removal | Before Phase 4 |
+| #1380 | Userspace `show system buffers` can render helper status; remaining work is Phase 5 cleanup of BPF-map-oriented fallback and optional true-capacity fields | Phase 5 |
 
 ## Recommended Order
 

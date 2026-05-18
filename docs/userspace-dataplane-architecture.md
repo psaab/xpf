@@ -560,10 +560,15 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   still required for per-pool `persistent-nat` lease reuse,
   pool allocation/exhaustion counters, and the mixed-backend rollback test
   boundary.
-- SYN-cookie flood protection: #1374.
-- RFC 2697/2698 three-color policers: #1375.
-- Port mirroring: #1376.
-- Policy-deny, screen-drop, and filter-log event parity: #1379.
+- SYN-cookie flood protection closeout: #1374 still owns bounded SYN-ACK/RST
+  TX, HA-safe secrets, integration evidence, and gate removal.
+- RFC 2697/2698 three-color policer closeout: #1375 still owns the remaining
+  state/counter continuity, non-drop color actions, and integration/perf
+  evidence beyond the admitted color-blind `then discard` slice.
+- Port mirroring closeout: #1376 still owns remaining ingress/transmit
+  surfaces, mirror-fidelity evidence, pressure survival, and gate removal.
+- Dataplane event closeout: #1379 still owns end-to-end syslog evidence,
+  broader non-PBR filter-log call sites, and richer identity mapping.
 - `show system buffers` BPF-map display retirement: #1380. Userspace
   helper-status rendering landed in #1386, but the legacy operator surface
   still needs its Phase 5 cleanup.

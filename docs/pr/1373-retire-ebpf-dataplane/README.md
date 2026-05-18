@@ -8,25 +8,24 @@ land before their listed #1373 retirement phase.
 
 | Issue | Plan | Required before | Code PR still needed |
 |---|---|---|---|
-| #1374 SYN cookie flood protection | [plan-1374-syn-cookies.md](plan-1374-syn-cookies.md) | #1373 Phase 4 | Yes |
-| #1375 three-color policers | [plan-1375-three-color-policers.md](plan-1375-three-color-policers.md) | #1373 Phase 4 | Yes |
-| #1376 port mirroring | [plan-1376-port-mirroring.md](plan-1376-port-mirroring.md) | #1373 Phase 4 | Yes |
-| #1377 persistent SNAT pool address selection | [plan-1377-snat-pools.md](plan-1377-snat-pools.md) | #1373 Phase 4 | Pool-mode fail-closed runtime slice landed; persistent NAT and allocator counters still needed |
-| #1378 policy schedulers | [plan-1378-policy-schedulers.md](plan-1378-policy-schedulers.md) | #1373 Phase 4 | No code gap known; live HA evidence pending |
-| #1379 dataplane events | [plan-1379-dataplane-events.md](plan-1379-dataplane-events.md) | #1373 Phase 4 | Yes |
-| #1380 userspace buffer/status parity | [plan-1380-userspace-buffers.md](plan-1380-userspace-buffers.md) | #1373 Phase 5 | Partly covered by #1386 |
+| #1374 SYN cookie flood protection | [plan-1374-syn-cookies.md](plan-1374-syn-cookies.md) | #1373 Phase 4 | Runtime challenge/ACK/cache/counters landed; bounded SYN-ACK/RST TX, HA-safe secrets, integration evidence, and gate removal still needed |
+| #1375 three-color policers | [plan-1375-three-color-policers.md](plan-1375-three-color-policers.md) | #1373 Phase 4 | Color-blind `then discard` runtime landed; sharded/packed state, counter continuity, non-drop color actions, and integration/perf evidence still needed |
+| #1376 port mirroring | [plan-1376-port-mirroring.md](plan-1376-port-mirroring.md) | #1373 Phase 4 | Snapshot/wire plus bounded forwarded-path runtime landed; remaining ingress/transmit surfaces, mirror-fidelity evidence, pressure survival, and gate removal still needed |
+| #1377 persistent SNAT pool address selection | [plan-1377-snat-pools.md](plan-1377-snat-pools.md) | #1373 Phase 4 | Userspace-v1 selector and unusable-pool fail-closed runtime landed; persistent NAT lease reuse and allocator/exhaustion counters still needed |
+| #1378 policy schedulers | [plan-1378-policy-schedulers.md](plan-1378-policy-schedulers.md) | #1373 Phase 4 | No known runtime code gap; live HA artifact capture accepted by `policy_scheduler_validate.py` still needed |
+| #1379 dataplane events | [plan-1379-dataplane-events.md](plan-1379-dataplane-events.md) | #1373 Phase 4 | Policy-deny, screen-drop, and logged PBR events landed; syslog evidence, broader non-PBR filter-log call sites, and richer identity mapping still needed |
+| #1380 userspace buffer/status parity | [plan-1380-userspace-buffers.md](plan-1380-userspace-buffers.md) | #1373 Phase 5 | Userspace helper-status rendering landed; final BPF-map fallback cleanup and optional true-capacity fields remain |
 
 ## Shared Dependency
 
 #1381 is the common plumbing dependency for the blocker set. The userspace
-`Manager` still embeds the eBPF `DataPlane`, which makes capability removal,
-event source selection, scheduler update dispatch, and BPF source deletion
-coupled to the old map-shaped interface. The implementation PRs for #1374,
-#1375, #1376, #1377, #1378, and #1379 should land after #1381 or explicitly
-include the matching interface split/stub slice before Phase 4 BPF source
-removal. #1380 is a Phase 5 CLI/observability cleanup blocker: it must land
-before BPF-map-oriented operator surfaces disappear, but it does not block the
-Phase 4 forwarding-source removal gate by itself.
+manager no longer embeds the old `DataPlane` interface directly for the first
+operator metadata surfaces, and a userspace legacy adapter owns the compatibility
+boundary. Remaining Phase 3 work is to move session, telemetry, GC, and control
+callers off the old BPF-shaped surface before generated bindings, loader code,
+and BPF build rules can be removed. #1380 is a Phase 5 CLI/observability cleanup
+blocker: it must land before BPF-map-oriented operator surfaces disappear, but
+it does not block the Phase 4 forwarding-source removal gate by itself.
 
 ## Phase 1/2 Smoke Gates
 
