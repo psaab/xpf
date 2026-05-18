@@ -1915,52 +1915,69 @@ func TestBuildSourceNATSnapshotsPopulatesPoolFields(t *testing.T) {
 	}
 }
 
-func TestBuildSourceNATSnapshotsSkipsUnsafePoolModeRules(t *testing.T) {
+func TestBuildSourceNATSnapshotsMarksUnsafePoolModeRules(t *testing.T) {
 	tests := []struct {
-		name  string
-		pools map[string]*config.NATPool
+		name       string
+		pools      map[string]*config.NATPool
+		wantReason string
 	}{
 		{
-			name:  "missing pool",
-			pools: map[string]*config.NATPool{},
+			name:       "missing pool",
+			pools:      map[string]*config.NATPool{},
+			wantReason: "missing_pool",
 		},
 		{
 			name: "nil pool",
 			pools: map[string]*config.NATPool{
 				"pool-a": nil,
 			},
+			wantReason: "missing_pool",
 		},
 		{
 			name: "empty pool",
 			pools: map[string]*config.NATPool{
 				"pool-a": {Name: "pool-a", PortLow: 1024, PortHigh: 65535},
 			},
+			wantReason: "empty_pool",
 		},
 		{
 			name: "port low overflow",
 			pools: map[string]*config.NATPool{
 				"pool-a": {Name: "pool-a", Addresses: []string{"203.0.113.10/32"}, PortLow: 65536, PortHigh: 65535},
 			},
+			wantReason: "invalid_port_range",
 		},
 		{
 			name: "port high overflow",
 			pools: map[string]*config.NATPool{
 				"pool-a": {Name: "pool-a", Addresses: []string{"203.0.113.10/32"}, PortLow: 1024, PortHigh: 70000},
 			},
+			wantReason: "invalid_port_range",
 		},
 		{
 			name: "port range reversed",
 			pools: map[string]*config.NATPool{
 				"pool-a": {Name: "pool-a", Addresses: []string{"203.0.113.10/32"}, PortLow: 40000, PortHigh: 39999},
 			},
+			wantReason: "invalid_port_range",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := sourceNATPoolTestConfig()
 			cfg.Security.NAT.SourcePools = tt.pools
-			if snaps := buildSourceNATSnapshots(cfg); len(snaps) != 0 {
-				t.Fatalf("len(snaps) = %d, want 0; snaps=%+v", len(snaps), snaps)
+			snaps := buildSourceNATSnapshots(cfg)
+			if len(snaps) != 1 {
+				t.Fatalf("len(snaps) = %d, want 1; snaps=%+v", len(snaps), snaps)
+			}
+			if !snaps[0].PoolUnusable {
+				t.Fatalf("PoolUnusable = false, want true; snap=%+v", snaps[0])
+			}
+			if snaps[0].PoolUnusableReason != tt.wantReason {
+				t.Fatalf("PoolUnusableReason = %q, want %q", snaps[0].PoolUnusableReason, tt.wantReason)
+			}
+			if snaps[0].PoolName != "pool-a" {
+				t.Fatalf("PoolName = %q, want pool-a", snaps[0].PoolName)
 			}
 		})
 	}

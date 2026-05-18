@@ -3,7 +3,8 @@ use super::{
     InterfaceSnapshot, PacketResolution, SessionDeltaInfo,
 };
 use crate::nat::{
-    DnatTable, NatDecision, SourceNatRule, StaticNatTable, match_source_nat, parse_source_nat_rules,
+    DnatTable, NatDecision, SourceNatFailure, SourceNatLookup, SourceNatRule, StaticNatTable,
+    match_source_nat, match_source_nat_result, parse_source_nat_rules,
 };
 use crate::nat64::{Nat64ReverseInfo, Nat64State};
 use crate::nptv6::Nptv6State;

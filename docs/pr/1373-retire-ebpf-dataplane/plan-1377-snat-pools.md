@@ -9,64 +9,58 @@ translations, and operator-visible allocation failures.
 
 ## Current Status
 
-- #1385 landed a defensive userspace snapshot fix: missing pools, empty pools,
-  and invalid `uint16` port ranges are omitted from the snapshot instead of
-  being emitted as broad matching no-op rules. That is not a forwarding
-  fail-closed gate today; rules omitted for those inputs still leave the
-  runtime free to forward without SNAT.
+- The current snapshot preserves pool-mode source-NAT rule intent even when
+  the referenced pool is missing, nil, empty, or has an invalid port range.
+  Such rules carry `pool_unusable` / `pool_unusable_reason` so Rust can fail
+  closed at runtime instead of treating the rule as absent.
 - #1385 also plumbed `address_persistent`, resolved pool addresses, and
   `port_low` / `port_high` into the userspace snapshot and Rust
   `SourceNATRuleSnapshot`.
 - The current Rust dataplane implements a userspace-v1 `address-persistent`
   pool selector. That closes the original silent round-robin regression for
   AF_XDP userspace forwarding.
+- The current Rust dataplane separates "no source-NAT rule matched" from "a
+  pool-mode source-NAT rule matched but cannot produce a translation". Missing
+  pools, empty pools, invalid pool inputs, wrong-family-only pools, and
+  allocator failures are fail-closed before session creation or forwarding.
 - The remaining #1377 work is now contract work plus runtime work for per-pool
-  `persistent-nat`, pool allocator observability, and real fail-closed paths
-  for missing-pool, empty-pool, invalid-port-range, and live allocation-failure
-  source-NAT pool cases.
+  `persistent-nat`, pool allocator observability, live-port ownership, and
+  true exhaustion counters.
 
-## Current Fail-Open Runtime Boundary
+## Current Fail-Closed Runtime Boundary
 
-Current AF_XDP userspace SNAT pool handling is fail-open from the forwarding
-path's point of view. `match_source_nat_for_flow` returns `None` for both "no
-source-NAT rule applies" and "a configured pool-mode rule cannot produce a
-usable translation". The packet path then converts that `None` into the default
-empty `NatDecision`, creates/continues the forwarding decision, and sends the
-packet without SNAT.
+Current AF_XDP userspace SNAT pool handling is fail-closed for matched pool-mode
+rules that cannot produce a usable translation. `match_source_nat_for_flow_result`
+distinguishes "no source-NAT rule applies" from "a configured pool-mode rule
+matched but is unavailable". The packet path converts unavailable pool results
+into `record_source_nat_failure` exceptions and recycles the packet before
+session creation or forwarding.
 
-The current fail-open runtime call sites are the four
-`match_source_nat_for_flow(...).unwrap_or_default()` paths in
+The current fail-closed runtime call sites are the four
+`source_nat_decision_for_flow(...)` paths in
 `userspace-dp/src/afxdp/poll_descriptor.rs`:
 
-- `poll_descriptor.rs:1060` - normal new-session path, no pre-routing DNAT:
-  source NAT lookup falls through to `unwrap_or_default()` and forwards with no
-  rewrite.
-- `poll_descriptor.rs:1074` - normal new-session path after pre-routing DNAT:
-  the source NAT side of the merged decision falls through to
-  `unwrap_or_default()`.
-- `poll_descriptor.rs:1953` - pending-neighbor/session-build retry path, no
-  pre-routing DNAT: source NAT lookup falls through to `unwrap_or_default()`.
-- `poll_descriptor.rs:1967` - pending-neighbor/session-build retry path after
-  pre-routing DNAT: the source NAT side of the merged decision falls through to
-  `unwrap_or_default()`.
+- `poll_descriptor.rs:1214` - normal new-session path, no pre-routing DNAT:
+  source NAT lookup fails closed before the NAT decision is installed.
+- `poll_descriptor.rs:1241` - normal new-session path after pre-routing DNAT:
+  the source NAT side of the merged decision fails closed before merge/session
+  creation.
+- `poll_descriptor.rs:2133` - pending-neighbor/session-build retry path, no
+  pre-routing DNAT: source NAT lookup fails closed before the missing-neighbor
+  seed session is installed.
+- `poll_descriptor.rs:2159` - pending-neighbor/session-build retry path after
+  pre-routing DNAT: the source NAT side of the merged decision fails closed
+  before the missing-neighbor seed session is installed.
 
-Risk: traffic that matched an intended pool-mode source-NAT rule can leave the
-userspace dataplane untranslated when the pool is omitted from the snapshot, all
-pool addresses are malformed, no address exists for the packet family, egress
-metadata is missing, or the allocator cannot produce a usable tuple. That can
-leak original source addresses, create sessions with no reverse SNAT state, and
-make return traffic fail in ways that look like routing or policy issues rather
-than NAT admission failures.
+Recent-exception reasons identify the runtime failure class:
+`source_nat_pool_missing`, `source_nat_pool_empty`,
+`source_nat_pool_invalid`, `source_nat_pool_invalid_port_range`,
+`source_nat_pool_wrong_family`, and `source_nat_pool_exhausted`.
 
-Closing this boundary requires a code PR that separates "no source-NAT rule
-matched" from "a source-NAT rule matched but translation failed", then plumbs
-the failure through all four call sites above as a drop/exception before
-session creation or forwarding. The closing PR also needs tests for the normal
-and pending-neighbor paths, plus counters or exceptions that name the pool,
-family, and reason: missing pool, empty pool, malformed address, wrong-family
-pool with no compatible fallback, invalid range, live tuple exhaustion, and
-persistent table failure. Until that lands, docs and capability gates must not
-claim userspace pool-mode SNAT is fail-closed.
+Residual risk: the allocator still wraps ports because Rust does not yet keep a
+live translated-tuple ownership table. The fail-closed path exists for
+allocator failure, but true live-port exhaustion detection and counters remain
+open #1377 work.
 
 ## Userspace-v1 Address-Persistent Contract
 
@@ -162,9 +156,9 @@ exhaustion. The counter contract still needed for #1377 is:
 
 - No global allocator lock on the packet path.
 - Port-range validation happens before any `u16` truncation.
-- Current behavior: a pool-mode rule without a usable pool is fail-open at the
-  four runtime call sites listed above. Target behavior for the runtime follow-up
-  is fail-closed drop/exception before session creation or forwarding.
+- A pool-mode rule without a usable pool is fail-closed at the four runtime
+  call sites listed above. The packet is dropped and a recent exception is
+  recorded before session creation or forwarding.
 - Existing reverse-session NAT behavior remains the source of truth for return
   traffic on active sessions.
 - Address-persistent pool choice is deterministic for the configured backend,
@@ -178,13 +172,16 @@ Already covered by #1385 and this follow-up:
 
 - Go: userspace snapshot carries pool addresses, port low/high, rule identity,
   and `address_persistent`.
-- Go: snapshot builder omits missing pool, empty pool, invalid port range, and
-  nil pool entries instead of emitting a matching no-op rule. This prevents one
-  no-op shadowing bug but remains fail-open at runtime because forwarding can
-  continue without SNAT.
-- Cargo: wrong-family pools do not shadow later compatible source-NAT rules.
-  If no compatible later rule exists, the current runtime still forwards without
-  SNAT.
+- Go: snapshot builder preserves missing pool, empty pool, invalid port range,
+  and nil pool entries as unusable pool-mode rules with
+  `pool_unusable_reason`.
+- Cargo: missing pools, empty pools, invalid port ranges, malformed pool
+  addresses, wrong-family-only pools, and allocator failure surfaces are
+  distinct from no source-NAT match.
+- Cargo: source-NAT pool rules with missing pools, empty pools, invalid port
+  ranges, wrong-family-only pools, or allocation failures fail closed at all
+  four `poll_descriptor.rs` source-NAT call sites instead of becoming an
+  untranslated forward.
 - Cargo: userspace-v1 fixtures pin IPv4/IPv6 sticky hash outputs.
 - Cargo: one source keeps one pool address across repeated allocations.
 - Cargo: many sources spread across the pool and do not collapse to a single
@@ -200,10 +197,6 @@ Still required to close the remaining #1377 runtime work:
   reallocates after expiry.
 - Cargo: allocator never assigns the same live translated 5-tuple to two live
   clients and reports exhaustion instead of silent wrap reuse.
-- Cargo/integration: source-NAT pool rules with missing pools, empty pools,
-  invalid port ranges, wrong-family-only pools, or live allocation failures
-  fail closed at all four `poll_descriptor.rs` source-NAT call sites instead
-  of falling through `unwrap_or_default()` as an untranslated forward.
 - Integration: active userspace SNAT pool sessions preserve return traffic
   across failover, while new-flow mixed-backend rollback tests accept the
   documented selector boundary.

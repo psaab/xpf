@@ -249,6 +249,8 @@ type SourceNATRuleSnapshot struct {
 	PortLow              uint16   `json:"port_low,omitempty"`
 	PortHigh             uint16   `json:"port_high,omitempty"`
 	AddressPersistent    bool     `json:"address_persistent,omitempty"`
+	PoolUnusable         bool     `json:"pool_unusable,omitempty"`
+	PoolUnusableReason   string   `json:"pool_unusable_reason,omitempty"`
 }
 
 type StaticNATRuleSnapshot struct {

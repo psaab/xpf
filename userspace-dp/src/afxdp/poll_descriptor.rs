@@ -14,6 +14,51 @@ use super::poll_stages::{
 };
 use crate::policy::evaluate_policy_with_len;
 
+#[inline]
+fn source_nat_decision_for_flow(
+    forwarding: &ForwardingState,
+    from_zone: &str,
+    to_zone: &str,
+    egress_ifindex: i32,
+    flow: &SessionFlow,
+) -> Result<NatDecision, SourceNatFailure> {
+    if let Some(decision) = forwarding.static_nat.match_snat(flow.src_ip, from_zone) {
+        return Ok(decision);
+    }
+    match match_source_nat_for_flow_result(forwarding, from_zone, to_zone, egress_ifindex, flow) {
+        SourceNatLookup::Matched(decision) => Ok(decision),
+        SourceNatLookup::NoMatch => Ok(NatDecision::default()),
+        SourceNatLookup::Unavailable(failure) => Err(failure),
+    }
+}
+
+#[inline]
+fn record_source_nat_failure(
+    telemetry: &mut TelemetryContext,
+    worker_ctx: &WorkerContext,
+    meta: UserspaceDpMeta,
+    flow: &SessionFlow,
+    from_zone_id: u16,
+    to_zone_id: u16,
+    packet_length: u32,
+    failure: &SourceNatFailure,
+) {
+    telemetry.counters.touched = true;
+    telemetry.counters.exception_packets += 1;
+    let mut debug = ResolutionDebug::from_flow(meta.ingress_ifindex as i32, flow);
+    debug.from_zone = Some(from_zone_id);
+    debug.to_zone = Some(to_zone_id);
+    record_exception(
+        worker_ctx.recent_exceptions,
+        &worker_ctx.ident,
+        failure.exception_reason(),
+        packet_length,
+        Some(meta),
+        Some(&debug),
+        worker_ctx.forwarding,
+    );
+}
+
 // Per-batch packet processing lifted from `poll_binding` (#678).
 //
 // Runs `binding.xsk.rx.receive(available)` + the descriptor while-let +
@@ -1165,38 +1210,59 @@ pub(super) fn poll_binding_process_descriptor(
                                             } else {
                                                 None
                                             };
-                                            decision.nat = nptv6_snat
-                                                .or_else(|| {
-                                                    worker_ctx.forwarding.static_nat.match_snat(
-                                                        nat_match_flow.src_ip,
-                                                        &from_zone,
-                                                    )
-                                                })
-                                                .or_else(|| {
-                                                    match_source_nat_for_flow(
-                                                        worker_ctx.forwarding,
-                                                        &from_zone,
-                                                        &to_zone,
-                                                        decision.resolution.egress_ifindex,
-                                                        &nat_match_flow,
-                                                    )
-                                                })
-                                                .unwrap_or_default();
+                                            match nptv6_snat.map(Ok).unwrap_or_else(|| {
+                                                source_nat_decision_for_flow(
+                                                    worker_ctx.forwarding,
+                                                    &from_zone,
+                                                    &to_zone,
+                                                    decision.resolution.egress_ifindex,
+                                                    &nat_match_flow,
+                                                )
+                                            }) {
+                                                Ok(snat_decision) => {
+                                                    decision.nat = snat_decision;
+                                                }
+                                                Err(failure) => {
+                                                    record_source_nat_failure(
+                                                        telemetry,
+                                                        worker_ctx,
+                                                        meta,
+                                                        flow,
+                                                        from_zone_id,
+                                                        to_zone_id,
+                                                        desc.len,
+                                                        &failure,
+                                                    );
+                                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                                    continue;
+                                                }
+                                            }
                                         } else {
-                                            let snat_decision = worker_ctx.forwarding
-                                                .static_nat
-                                                .match_snat(nat_match_flow.src_ip, &from_zone)
-                                                .or_else(|| {
-                                                    match_source_nat_for_flow(
-                                                        worker_ctx.forwarding,
-                                                        &from_zone,
-                                                        &to_zone,
-                                                        decision.resolution.egress_ifindex,
-                                                        &nat_match_flow,
-                                                    )
-                                                })
-                                                .unwrap_or_default();
-                                            decision.nat = decision.nat.merge(snat_decision);
+                                            match source_nat_decision_for_flow(
+                                                worker_ctx.forwarding,
+                                                &from_zone,
+                                                &to_zone,
+                                                decision.resolution.egress_ifindex,
+                                                &nat_match_flow,
+                                            ) {
+                                                Ok(snat_decision) => {
+                                                    decision.nat = decision.nat.merge(snat_decision);
+                                                }
+                                                Err(failure) => {
+                                                    record_source_nat_failure(
+                                                        telemetry,
+                                                        worker_ctx,
+                                                        meta,
+                                                        flow,
+                                                        from_zone_id,
+                                                        to_zone_id,
+                                                        desc.len,
+                                                        &failure,
+                                                    );
+                                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                                    continue;
+                                                }
+                                            }
                                         }
                                         None
                                     };
@@ -2064,35 +2130,58 @@ pub(super) fn poll_binding_process_descriptor(
                                             pending_decision.nat.rewrite_dst.unwrap_or(flow.dst_ip),
                                         );
                                         if pending_decision.nat.rewrite_dst.is_none() {
-                                            pending_decision.nat = worker_ctx.forwarding
-                                                .static_nat
-                                                .match_snat(nat_match_flow.src_ip, &from_zone)
-                                                .or_else(|| {
-                                                    match_source_nat_for_flow(
-                                                        worker_ctx.forwarding,
-                                                        &from_zone,
-                                                        &to_zone,
-                                                        pending_decision.resolution.egress_ifindex,
-                                                        &nat_match_flow,
-                                                    )
-                                                })
-                                                .unwrap_or_default();
+                                            match source_nat_decision_for_flow(
+                                                worker_ctx.forwarding,
+                                                &from_zone,
+                                                &to_zone,
+                                                pending_decision.resolution.egress_ifindex,
+                                                &nat_match_flow,
+                                            ) {
+                                                Ok(snat_decision) => {
+                                                    pending_decision.nat = snat_decision;
+                                                }
+                                                Err(failure) => {
+                                                    record_source_nat_failure(
+                                                        telemetry,
+                                                        worker_ctx,
+                                                        meta,
+                                                        flow,
+                                                        from_zone_id,
+                                                        to_zone_id,
+                                                        desc.len,
+                                                        &failure,
+                                                    );
+                                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                                    continue;
+                                                }
+                                            }
                                         } else {
-                                            let snat_decision = worker_ctx.forwarding
-                                                .static_nat
-                                                .match_snat(nat_match_flow.src_ip, &from_zone)
-                                                .or_else(|| {
-                                                    match_source_nat_for_flow(
-                                                        worker_ctx.forwarding,
-                                                        &from_zone,
-                                                        &to_zone,
-                                                        pending_decision.resolution.egress_ifindex,
-                                                        &nat_match_flow,
-                                                    )
-                                                })
-                                                .unwrap_or_default();
-                                            pending_decision.nat =
-                                                pending_decision.nat.merge(snat_decision);
+                                            match source_nat_decision_for_flow(
+                                                worker_ctx.forwarding,
+                                                &from_zone,
+                                                &to_zone,
+                                                pending_decision.resolution.egress_ifindex,
+                                                &nat_match_flow,
+                                            ) {
+                                                Ok(snat_decision) => {
+                                                    pending_decision.nat =
+                                                        pending_decision.nat.merge(snat_decision);
+                                                }
+                                                Err(failure) => {
+                                                    record_source_nat_failure(
+                                                        telemetry,
+                                                        worker_ctx,
+                                                        meta,
+                                                        flow,
+                                                        from_zone_id,
+                                                        to_zone_id,
+                                                        desc.len,
+                                                        &failure,
+                                                    );
+                                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                                    continue;
+                                                }
+                                            }
                                         }
                                     }
                                     let sess_meta = build_missing_neighbor_session_metadata(
