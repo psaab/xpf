@@ -25,7 +25,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var _ dataplane.DataPlane = (*Manager)(nil)
 var _ dataplane.ConfigSink = (*Manager)(nil)
 var _ dataplane.RuntimeDataPlane = (*Manager)(nil)
 
@@ -55,12 +54,11 @@ func (m DataplaneMode) String() string {
 
 func init() {
 	dataplane.RegisterBackend(dataplane.TypeUserspace, func() dataplane.DataPlane {
-		return New()
+		return NewLegacyDataPlaneAdapter(New())
 	})
 }
 
 type Manager struct {
-	dataplane.DataPlane
 	inner *dataplane.Manager
 
 	mu                    sync.Mutex
@@ -156,7 +154,6 @@ func New() *Manager {
 	inner := dataplane.New()
 	inner.XDPEntryProg = "xdp_main_prog"
 	return &Manager{
-		DataPlane:      inner,
 		inner:          inner,
 		configuredMode: ModeUserspaceCompat,
 		haGroups:       make(map[int]HAGroupStatus),
@@ -199,12 +196,12 @@ func (m *Manager) Link() dataplane.LinkController {
 }
 
 func (m *Manager) HA() dataplane.HAController {
-	return userspaceHAController{manager: m}
+	return userspaceHAController{manager: managerHAOps{manager: m}}
 }
 
 func (m *Manager) Sessions() dataplane.SessionStore {
 	return userspaceSessionStore{
-		SessionStore: dataplane.NewDataPlaneSessionStore(m),
+		SessionStore: dataplane.NewDataPlaneSessionStore(NewLegacyDataPlaneAdapter(m)),
 		source:       m.RuntimeSessionDeltaSource(),
 	}
 }
@@ -214,7 +211,7 @@ func (m *Manager) SessionDeltas() dpruntime.SessionDeltaSource {
 }
 
 func (m *Manager) Telemetry() dataplane.Telemetry {
-	return dataplane.NewDataPlaneTelemetry(m)
+	return dataplane.NewDataPlaneTelemetry(NewLegacyDataPlaneAdapter(m))
 }
 
 type userspaceLinkController struct {
@@ -245,6 +242,44 @@ type userspaceHAOps interface {
 	UpdateFabricFwd(dataplane.FabricFwdInfo) error
 	UpdateFabricFwd1(dataplane.FabricFwdInfo) error
 	SyncFabricState()
+}
+
+type managerHAOps struct {
+	manager *Manager
+}
+
+func (o managerHAOps) UpdateRGActive(rgID int, active bool) error {
+	if o.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	return o.manager.UpdateRGActive(rgID, active)
+}
+
+func (o managerHAOps) UpdateHAWatchdog(rgID int, timestamp uint64) error {
+	if o.manager == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	return o.manager.UpdateHAWatchdog(rgID, timestamp)
+}
+
+func (o managerHAOps) UpdateFabricFwd(info dataplane.FabricFwdInfo) error {
+	if o.manager == nil || o.manager.inner == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	return o.manager.inner.UpdateFabricFwd(info)
+}
+
+func (o managerHAOps) UpdateFabricFwd1(info dataplane.FabricFwdInfo) error {
+	if o.manager == nil || o.manager.inner == nil {
+		return errors.New("nil userspace dataplane")
+	}
+	return o.manager.inner.UpdateFabricFwd1(info)
+}
+
+func (o managerHAOps) SyncFabricState() {
+	if o.manager != nil {
+		o.manager.SyncFabricState()
+	}
 }
 
 type userspaceHAController struct {
@@ -366,6 +401,12 @@ func (m *Manager) XSKBoundNotified() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.xskBoundNotified
+}
+
+func (m *Manager) SetOnXSKBound(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.OnXSKBound = fn
 }
 
 // Mode returns the current active dataplane runtime mode.

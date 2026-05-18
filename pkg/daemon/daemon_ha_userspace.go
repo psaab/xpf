@@ -50,6 +50,19 @@ type userspaceEventStreamExporter interface {
 	ExportAllSessionsViaEventStream() error
 }
 
+type userspaceRuntimeModeReporter interface {
+	Mode() dpuserspace.DataplaneMode
+}
+
+type userspaceXSKBindingController interface {
+	XSKBoundNotified() bool
+	SetOnXSKBound(func())
+}
+
+type userspaceTakeoverReadiness interface {
+	TakeoverReady() (bool, []string)
+}
+
 func daemonMonotonicSeconds() uint64 {
 	var ts unix.Timespec
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
@@ -998,8 +1011,8 @@ func (d *Daemon) prepareUserspaceRGDemotionWithTimeout(rgID int, barrierTimeout 
 // this to skip eBPF-specific workarounds (blackhole routes) that the
 // userspace pipeline doesn't need.
 func (d *Daemon) userspaceDataplaneActive() bool {
-	if um, ok := d.dp.(*dpuserspace.Manager); ok {
-		return um.Mode() != dpuserspace.ModeEBPFOnly
+	if runtime, ok := d.dp.(userspaceRuntimeModeReporter); ok {
+		return runtime.Mode() != dpuserspace.ModeEBPFOnly
 	}
 	return false
 }
@@ -1029,9 +1042,9 @@ func (d *Daemon) checkUserspaceTakeoverReadiness(rgID int) (bool, []string) {
 	if d.dp == nil {
 		return false, []string{fmt.Sprintf("userspace dataplane not initialized for RG %d", rgID)}
 	}
-	um, ok := d.dp.(*dpuserspace.Manager)
+	ready, ok := d.dp.(userspaceTakeoverReadiness)
 	if !ok {
-		return false, []string{fmt.Sprintf("userspace dataplane manager not available for RG %d", rgID)}
+		return false, []string{fmt.Sprintf("userspace dataplane readiness provider not available for RG %d", rgID)}
 	}
-	return um.TakeoverReady()
+	return ready.TakeoverReady()
 }
