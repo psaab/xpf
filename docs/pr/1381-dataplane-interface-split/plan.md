@@ -584,8 +584,9 @@ interface in place and adds the new contract beside it:
   owns forward, reverse, and DNAT/DNATv6 cleanup. A canary fails if
   `pkg/cluster/sync.go` reintroduces local `DeleteDNATEntry*` cleanup.
 
-Remaining Phase 1 work is still explicit: daemon/API/gRPC/CLI callers must move
-from `LastCompileResult()` and BPF map reads to `LastApplyResult()`/domain
-interfaces, GC must move to `SessionStore`/`Telemetry`, and the legacy
-`DataPlane` method-count canary can only flip after those callers no longer need
-the BPF-shaped surface.
+Remaining Phase 1 work is still explicit: daemon/API/gRPC/CLI operator metadata
+callers now read `LastApplyResult()` and a canary prevents those packages from
+regressing to `LastCompileResult()`, but session, counter, GC, and control paths
+still need to move from BPF-shaped map methods to `SessionStore`/`Telemetry` and
+the other domain interfaces. The legacy `DataPlane` method-count canary can only
+flip after those callers no longer need the BPF-shaped surface.

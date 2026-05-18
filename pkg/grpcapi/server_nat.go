@@ -66,7 +66,7 @@ func (s *Server) GetNATDestination(_ context.Context, _ *pb.GetNATDestinationReq
 		type rsKey struct{ from, to string }
 		rsSessions := make(map[rsKey]int32)
 		var zoneByID map[uint16]string
-		if cr := s.dp.LastCompileResult(); cr != nil {
+		if cr := s.applyResult(); cr != nil {
 			zoneByID = make(map[uint16]string, len(cr.ZoneIDs))
 			for name, id := range cr.ZoneIDs {
 				zoneByID[id] = name
@@ -114,6 +114,10 @@ func (s *Server) GetNATPoolStats(_ context.Context, _ *pb.GetNATPoolStatsRequest
 	}
 
 	resp := &pb.GetNATPoolStatsResponse{}
+	var cr *dataplane.ApplyResult
+	if s.dp != nil && s.dp.IsLoaded() {
+		cr = s.applyResult()
+	}
 
 	// Named pools
 	for name, pool := range cfg.Security.NAT.SourcePools {
@@ -127,13 +131,11 @@ func (s *Server) GetNATPoolStats(_ context.Context, _ *pb.GetNATPoolStatsRequest
 		totalPorts := int32((portHigh - portLow + 1) * len(pool.Addresses))
 		used := int32(0)
 
-		if s.dp != nil && s.dp.IsLoaded() {
-			if cr := s.dp.LastCompileResult(); cr != nil {
-				if id, ok := cr.PoolIDs[name]; ok {
-					cnt, err := s.dp.ReadNATPortCounter(uint32(id))
-					if err == nil {
-						used = int32(cnt)
-					}
+		if cr != nil {
+			if id, ok := cr.PoolIDs[name]; ok {
+				cnt, err := s.dp.ReadNATPortCounter(uint32(id))
+				if err == nil {
+					used = int32(cnt)
 				}
 			}
 		}
@@ -163,7 +165,7 @@ func (s *Server) GetNATPoolStats(_ context.Context, _ *pb.GetNATPoolStatsRequest
 	rsSessions := make(map[rsKey]int32)
 	if s.dp != nil && s.dp.IsLoaded() {
 		var zoneByID map[uint16]string
-		if cr := s.dp.LastCompileResult(); cr != nil {
+		if cr != nil {
 			zoneByID = make(map[uint16]string, len(cr.ZoneIDs))
 			for name, id := range cr.ZoneIDs {
 				zoneByID[id] = name
@@ -226,17 +228,19 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 	}
 
 	resp := &pb.GetNATRuleStatsResponse{}
+	var cr *dataplane.ApplyResult
+	if s.dp != nil && s.dp.IsLoaded() {
+		cr = s.applyResult()
+	}
 
 	// Helper to read NAT rule counters
 	readCounter := func(rsName, ruleName string) (uint64, uint64) {
-		if s.dp != nil && s.dp.IsLoaded() {
-			if cr := s.dp.LastCompileResult(); cr != nil {
-				ruleKey := rsName + "/" + ruleName
-				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
-					cnt, err := s.dp.ReadNATRuleCounter(uint32(cid))
-					if err == nil {
-						return cnt.Packets, cnt.Bytes
-					}
+		if cr != nil {
+			ruleKey := rsName + "/" + ruleName
+			if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
+				cnt, err := s.dp.ReadNATRuleCounter(uint32(cid))
+				if err == nil {
+					return cnt.Packets, cnt.Bytes
 				}
 			}
 		}

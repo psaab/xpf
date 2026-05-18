@@ -38,7 +38,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 
 	// Wire policy names and app names for structured logging
 	if d.dp != nil {
-		if cr := d.dp.LastCompileResult(); cr != nil {
+		if cr := d.applyResult(); cr != nil {
 			er.SetPolicyNames(cr.PolicyNames)
 			if cr.AppNames != nil {
 				er.SetAppNames(cr.AppNames)

@@ -256,7 +256,7 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 		} else if s.dp == nil || !s.dp.IsLoaded() {
 			buf.WriteString("Dataplane not loaded\n")
 		} else {
-			cr := s.dp.LastCompileResult()
+			cr := s.applyResult()
 			if cr == nil {
 				buf.WriteString("No compile result available\n")
 			} else {
@@ -292,7 +292,7 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 			buf.WriteString("No active configuration\n")
 		} else if s.dp == nil || !s.dp.IsLoaded() {
 			buf.WriteString("Dataplane not loaded\n")
-		} else if cr := s.dp.LastCompileResult(); cr == nil {
+		} else if cr := s.applyResult(); cr == nil {
 			buf.WriteString("No compile result available\n")
 		} else {
 			var zones []string
@@ -660,7 +660,7 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 				userspaceCounters := dpuserspace.BuildFirewallFilterTermCounterIndex(userspaceStatus)
 				var filterIDs map[string]uint32
 				if s.dp != nil && s.dp.IsLoaded() {
-					if cr := s.dp.LastCompileResult(); cr != nil {
+					if cr := s.applyResult(); cr != nil {
 						filterIDs = cr.FilterIDs
 					}
 				}

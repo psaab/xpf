@@ -227,6 +227,7 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	cr := c.applyResult()
 
 	for _, name := range zoneNames {
 		if filterZone != "" && name != filterZone {
@@ -236,10 +237,8 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 
 		// Resolve zone ID for counter lookup
 		var zoneID uint16
-		if c.dp != nil {
-			if cr := c.dp.LastCompileResult(); cr != nil {
-				zoneID = cr.ZoneIDs[name]
-			}
+		if cr != nil {
+			zoneID = cr.ZoneIDs[name]
 		}
 
 		// Junos format: "Security zone: <name>"
@@ -694,7 +693,7 @@ func (c *CLI) showScreenStatistics(zoneName string) error {
 		fmt.Println("dataplane not loaded")
 		return nil
 	}
-	cr := c.dp.LastCompileResult()
+	cr := c.applyResult()
 	if cr == nil {
 		fmt.Println("no compile result available")
 		return nil
@@ -735,7 +734,7 @@ func (c *CLI) showScreenStatisticsAll() error {
 		fmt.Println("dataplane not loaded")
 		return nil
 	}
-	cr := c.dp.LastCompileResult()
+	cr := c.applyResult()
 	if cr == nil {
 		fmt.Println("no compile result available")
 		return nil
@@ -1234,6 +1233,7 @@ func (c *CLI) showSecurityLog(args []string) error {
 
 	n := 50
 	var filter logging.EventFilter
+	cr := c.applyResult()
 
 	// Parse arguments: [N] [zone <name>] [protocol <proto>] [action <act>]
 	for i := 0; i < len(args); i++ {
@@ -1242,13 +1242,11 @@ func (c *CLI) showSecurityLog(args []string) error {
 			if i+1 < len(args) {
 				i++
 				zoneName := args[i]
-				if c.dp != nil {
-					if cr := c.dp.LastCompileResult(); cr != nil {
-						if zid, ok := cr.ZoneIDs[zoneName]; ok {
-							filter.Zone = zid
-						} else {
-							return fmt.Errorf("zone %q not found", zoneName)
-						}
+				if cr != nil {
+					if zid, ok := cr.ZoneIDs[zoneName]; ok {
+						filter.Zone = zid
+					} else {
+						return fmt.Errorf("zone %q not found", zoneName)
 					}
 				}
 			}
@@ -1283,11 +1281,9 @@ func (c *CLI) showSecurityLog(args []string) error {
 
 	// Build reverse zone ID → name map for event display
 	evZoneNames := make(map[uint16]string)
-	if c.dp != nil {
-		if cr := c.dp.LastCompileResult(); cr != nil {
-			for name, id := range cr.ZoneIDs {
-				evZoneNames[id] = name
-			}
+	if cr != nil {
+		for name, id := range cr.ZoneIDs {
+			evZoneNames[id] = name
 		}
 	}
 	zoneName := func(id uint16) string {
@@ -1398,7 +1394,7 @@ func (c *CLI) showFirewallFilters() error {
 	// Look up filter IDs from compile result for counter display
 	var filterIDs map[string]uint32
 	if c.dp != nil && c.dp.IsLoaded() {
-		if cr := c.dp.LastCompileResult(); cr != nil {
+		if cr := c.applyResult(); cr != nil {
 			filterIDs = cr.FilterIDs
 		}
 	}
@@ -1581,7 +1577,7 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 	var ruleStart uint32
 	var hasCounters bool
 	if c.dp != nil && c.dp.IsLoaded() {
-		if cr := c.dp.LastCompileResult(); cr != nil {
+		if cr := c.applyResult(); cr != nil {
 			if fid, ok := cr.FilterIDs[family+":"+name]; ok {
 				if fcfg, err := c.dp.ReadFilterConfig(fid); err == nil {
 					ruleStart = fcfg.RuleStart
@@ -1976,4 +1972,3 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 	fmt.Printf("No matching policy found for %s -> %s (default deny)\n", fromZone, toZone)
 	return nil
 }
-
