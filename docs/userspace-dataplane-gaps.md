@@ -67,7 +67,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
 | DataPlane control-plane contract | Userspace manager still embeds the eBPF manager for many BPF-shaped map-writer methods; tracked by #1381 |
 | Dataplane event logging | Session open/close/update are emitted by userspace; policy-deny, screen-drop, and filter-log events still depend on the legacy BPF ring buffer; tracked by #1379 |
-| `show system buffers` | Userspace helper-status rendering landed in #1386 for AF_XDP UMEM/TX capacity. #1380 still tracks the retirement gate for removing legacy BPF-map buffer reporting and settling the CLI / observability cleanup. |
+| `show system buffers` | Userspace helper-status rendering covers AF_XDP UMEM/TX capacity, CoS queued-byte capacity, active-session footer, neighbor/flow-cache counts, and worker queue pressure counters. #1380 is narrowed to the Phase 5 cleanup decision about whether operators need new helper capacity denominators for session-table, flow-cache, or neighbor-cache fill percentages before the legacy BPF-map surface is removed. |
 
 ## Retirement Blockers From The 2026-05-16 Audit
 
@@ -82,7 +82,7 @@ The current #1373 audit produced these tracked blockers:
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent | Phase 4 BPF source removal |
 | #1375 | Implement userspace RFC 2697/2698 three-color policers | Phase 4 BPF source removal |
 | #1376 | Implement userspace port mirroring or explicitly retire the feature | Phase 4 BPF source removal |
-| #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface now that #1386 provides userspace helper-status reporting. | Phase 5 CLI / observability cleanup |
+| #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface. Userspace now renders the bounded helper status that exists; only optional new helper capacity denominators for session-table / flow-cache / neighbor-cache fill remain undecided. | Phase 5 CLI / observability cleanup |
 
 Recommended dependency order:
 
@@ -141,6 +141,7 @@ The highest-value remaining work on current `master` is:
    behavior, not full cross-backend parity. Keep #1378 open for the remaining
    policy-scheduler counter/validation/evidence contract after #1396.
 3. close #1374, #1375, and #1376 before any BPF source removal
-4. carry #1380 into the Phase 5 CLI / observability cleanup now that #1386
-   supplies userspace buffer rendering
+4. carry the narrowed #1380 denominator decision into Phase 5; the current
+   userspace command already avoids BPF-map fallback when helper status is
+   available
 5. continue correctness and performance hardening on the active AF_XDP fast path

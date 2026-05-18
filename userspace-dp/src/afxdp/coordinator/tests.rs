@@ -737,6 +737,8 @@ fn aggregate_cos_statuses_sums_drop_counters_across_worker_snapshots() {
         queues: vec![CoSQueueStatus {
             queue_id: 4,
             worker_instances: 1,
+            buffer_bytes: 64 * 1024,
+            queued_bytes: 48 * 1024,
             admission_flow_share_drops: 3,
             admission_buffer_drops: 5,
             admission_ecn_marked: 37,
@@ -756,6 +758,8 @@ fn aggregate_cos_statuses_sums_drop_counters_across_worker_snapshots() {
         queues: vec![CoSQueueStatus {
             queue_id: 4,
             worker_instances: 1,
+            buffer_bytes: 64 * 1024,
+            queued_bytes: 16 * 1024,
             admission_flow_share_drops: 17,
             admission_buffer_drops: 19,
             admission_ecn_marked: 41,
@@ -776,6 +780,8 @@ fn aggregate_cos_statuses_sums_drop_counters_across_worker_snapshots() {
     let q = &iface.queues[0];
     assert_eq!(q.queue_id, 4);
     assert_eq!(q.owner_worker_id, Some(3));
+    assert_eq!(q.buffer_bytes, 128 * 1024);
+    assert_eq!(q.queued_bytes, 64 * 1024);
     // Each counter is non-coprime-prime on both sides to catch
     // accidental re-attribution between counters.
     assert_eq!(q.admission_flow_share_drops, 3 + 17);

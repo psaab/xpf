@@ -37,6 +37,9 @@ func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 		QueueID:                         2,
 		TXErrors:                        9,
 		TXSharedRecycleUnknownSlotDrops: 4,
+		RedirectInboxOverflowDrops:      5,
+		PendingTXLocalOverflowDrops:     6,
+		TxSubmitErrorDrops:              7,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {
@@ -46,8 +49,15 @@ func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		t.Fatalf("unmarshal obj: %v", err)
 	}
-	if _, ok := obj["tx_shared_recycle_unknown_slot_drops"]; !ok {
-		t.Fatalf("wire key missing from BindingStatus JSON: %s", string(raw))
+	for _, key := range []string{
+		"tx_shared_recycle_unknown_slot_drops",
+		"redirect_inbox_overflow_drops",
+		"pending_tx_local_overflow_drops",
+		"tx_submit_error_drops",
+	} {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from BindingStatus JSON: %s", key, string(raw))
+		}
 	}
 
 	var back BindingStatus
@@ -57,6 +67,18 @@ func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	if back.TXSharedRecycleUnknownSlotDrops != in.TXSharedRecycleUnknownSlotDrops {
 		t.Fatalf("TXSharedRecycleUnknownSlotDrops: got %d, want %d",
 			back.TXSharedRecycleUnknownSlotDrops, in.TXSharedRecycleUnknownSlotDrops)
+	}
+	if back.RedirectInboxOverflowDrops != in.RedirectInboxOverflowDrops {
+		t.Fatalf("RedirectInboxOverflowDrops: got %d, want %d",
+			back.RedirectInboxOverflowDrops, in.RedirectInboxOverflowDrops)
+	}
+	if back.PendingTXLocalOverflowDrops != in.PendingTXLocalOverflowDrops {
+		t.Fatalf("PendingTXLocalOverflowDrops: got %d, want %d",
+			back.PendingTXLocalOverflowDrops, in.PendingTXLocalOverflowDrops)
+	}
+	if back.TxSubmitErrorDrops != in.TxSubmitErrorDrops {
+		t.Fatalf("TxSubmitErrorDrops: got %d, want %d",
+			back.TxSubmitErrorDrops, in.TxSubmitErrorDrops)
 	}
 }
 

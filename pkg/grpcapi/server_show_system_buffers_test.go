@@ -34,8 +34,19 @@ func TestShowTextSystemBuffersUsesUserspaceStatus(t *testing.T) {
 			v4:      3,
 			v6:      2,
 			status: dpuserspace.ProcessStatus{
+				NeighborEntries: 6,
 				PerBinding: []dpuserspace.BindingCountersSnapshot{
-					{WorkerID: 0, QueueID: 0, Ifindex: 5, UmemTotalFrames: 1000, UmemInflightFrames: 800, TxRingCapacity: 100, OutstandingTX: 90},
+					{
+						WorkerID:           0,
+						QueueID:            0,
+						Ifindex:            5,
+						UmemTotalFrames:    1000,
+						UmemInflightFrames: 800,
+						TxRingCapacity:     100,
+						OutstandingTX:      90,
+						ActiveFlowCount:    4,
+						DbgTxRingFull:      2,
+					},
 				},
 			},
 		},
@@ -52,6 +63,10 @@ func TestShowTextSystemBuffersUsesUserspaceStatus(t *testing.T) {
 		"80.0% WARNING",
 		"AF_XDP TX ring",
 		"90.0% CRITICAL",
+		"Userspace Status Counters:",
+		"Neighbor cache entries",
+		"Flow cache active flows",
+		"TX ring full events",
 		"Active sessions: 3 IPv4, 2 IPv6, 5 total",
 	} {
 		if !strings.Contains(out, want) {

@@ -606,7 +606,9 @@ where
                 status.guarantee_enabled = queue.config.guarantee_enabled;
                 status.transmit_rate_bytes =
                     status.transmit_rate_bytes.max(queue.transmit_rate_bytes());
-                status.buffer_bytes = status.buffer_bytes.max(queue.config.buffer_bytes);
+                status.buffer_bytes = status
+                    .buffer_bytes
+                    .saturating_add(queue.config.buffer_bytes);
                 status.worker_instances = status.worker_instances.saturating_add(1);
                 status.queued_packets = status
                     .queued_packets

@@ -905,6 +905,9 @@ pub(crate) struct CoSQueueStatus {
     pub guarantee_enabled: bool,
     #[serde(rename = "transmit_rate_bytes", default)]
     pub transmit_rate_bytes: u64,
+    /// Total queue capacity represented by this status row. Worker and
+    /// coordinator aggregation sum this alongside `queued_bytes` so buffer
+    /// fill percentages use matched numerator/denominator populations.
     #[serde(rename = "buffer_bytes", default)]
     pub buffer_bytes: u64,
     #[serde(rename = "worker_instances", default)]
