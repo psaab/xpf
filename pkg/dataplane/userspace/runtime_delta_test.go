@@ -143,8 +143,8 @@ func TestRuntimeManagerHAUsesUserspaceController(t *testing.T) {
 	if !ok {
 		t.Fatalf("Manager.HA() = %T, want userspaceHAController", New().HA())
 	}
-	if _, ok := controller.manager.(*Manager); !ok {
-		t.Fatalf("Manager.HA() controller manager = %T, want *Manager", controller.manager)
+	if _, ok := controller.manager.(managerHAOps); !ok {
+		t.Fatalf("Manager.HA() controller manager = %T, want managerHAOps", controller.manager)
 	}
 }
 

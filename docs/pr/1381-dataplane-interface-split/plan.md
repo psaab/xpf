@@ -19,11 +19,14 @@ methods. It mixes:
 - runtime session and counter APIs;
 - HA, fabric, scheduler, link-cycle, and event APIs.
 
-`pkg/dataplane/userspace/manager.go` currently embeds `dataplane.DataPlane`
-and keeps `inner *dataplane.Manager`. That makes userspace compile by
-inheriting all eBPF writers. It also makes userspace runtime state depend on
-`m.inner.Map(...)` for XDP shim maps, BPF conntrack mirrors, DNAT bridge maps,
-FIB generation, RG state, and helper control.
+`pkg/dataplane/userspace/manager.go` used to embed `dataplane.DataPlane` and
+compile by inheriting all eBPF writers. The current migration slice has moved
+that legacy interface satisfaction into `userspace.LegacyDataPlaneAdapter` so
+`*userspace.Manager` implements the small `RuntimeDataPlane` contract instead
+of the BPF-shaped root interface. The manager still keeps
+`inner *dataplane.Manager` for XDP shim maps, BPF conntrack mirrors, DNAT bridge
+maps, FIB generation, RG state, and helper control. Removing that named shim
+dependency remains a later #1381 phase.
 
 `pkg/daemon` stores one `dataplane.DataPlane` and calls both generic runtime
 methods and BPF-shaped methods from the same field. The real daemon surface is
@@ -353,9 +356,11 @@ The daemon should migrate in this order:
 7. Replace `NewEventSource` and counter reads with `d.dp.Telemetry()`.
 8. Replace userspace type assertions in fabric/IPVLAN/link-cycle handling with
    `d.dp.Link()` and a narrow userspace binding-ready callback interface.
-9. Delete userspace embedding of `dataplane.DataPlane` and `inner
-   *dataplane.Manager`. At this point the canary added by this PR must be
-   inverted to fail if either dependency returns.
+9. Delete the remaining userspace `inner *dataplane.Manager` dependency once
+   the XDP shim/session/NAT pins have backend owners. The
+   `dataplane.DataPlane` embedding has already been removed; the current
+   canary now fails if it returns and records the named inner manager as the
+   remaining debt.
 
 ## BPF pin ownership
 
@@ -405,6 +410,10 @@ Phase 1: interfaces and adapters.
 - Add compile-time assertions for the new root interface and domains.
 - Add a negative compile/test canary ensuring userspace code cannot call raw
   eBPF `Set*`/`Clear*`/`Map` methods through the new root interface.
+- Current slice: `userspace.LegacyDataPlaneAdapter` is the only userspace type
+  that satisfies the legacy `dataplane.DataPlane`; `*userspace.Manager`
+  satisfies `RuntimeDataPlane` and daemon userspace-specific hooks use narrow
+  interfaces instead of concrete `*userspace.Manager` assertions.
 
 Phase 2: config ownership.
 
@@ -425,9 +434,8 @@ Phase 3: session, NAT, and telemetry ownership.
 
 Phase 4: remove eBPF inheritance.
 
-- Delete `dataplane.DataPlane` embedding and `inner *dataplane.Manager` from
-  userspace `Manager`.
-- Invert the scaffold canary: userspace Manager must not embed
+- Delete `inner *dataplane.Manager` from userspace `Manager`.
+- Keep the inverted scaffold canary strict: userspace Manager must not embed
   `dataplane.DataPlane`, must not name `*dataplane.Manager`, and must not
   import `github.com/cilium/ebpf` outside the XDP shim owner package.
 - Remove daemon access to old BPF-shaped interface.
@@ -478,9 +486,9 @@ Required during the split:
 
 - `go test ./pkg/dataplane/... ./pkg/dataplane/userspace/... ./pkg/daemon/...`
 - `go build ./...`
-- AST canary: userspace `Manager` must not embed `dataplane.DataPlane` or hold
-  `inner *dataplane.Manager` after Phase 4. This PR adds the temporary
-  pre-split form that records the current debt.
+- AST canary: userspace `Manager` must not embed `dataplane.DataPlane`; the
+  remaining named `inner *dataplane.Manager` dependency is recorded as debt and
+  must fail once Phase 4 removes it.
 - Interface method-count canary: the exported root `DataPlane` interface has
   at most 15 methods after Phase 1.
 - Import canary: the abstract dataplane/runtime package must not import
