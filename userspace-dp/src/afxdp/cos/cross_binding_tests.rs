@@ -7,7 +7,23 @@ use super::*;
 use crate::afxdp::PROTO_TCP;
 use crate::afxdp::cos::token_bucket::COS_MIN_BURST_BYTES;
 use crate::afxdp::tx::test_support::*;
-use crate::afxdp::types::SharedCoSQueueLease;
+use crate::afxdp::types::{PreparedTxRecycle, PreparedTxRequest, SharedCoSQueueLease};
+
+fn test_prepared_mirror_request(offset: u64, len: u32) -> PreparedTxRequest {
+    PreparedTxRequest {
+        offset,
+        len,
+        recycle: PreparedTxRecycle::FreeTxFrame,
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 80,
+        cos_queue_id: Some(4),
+        dscp_rewrite: None,
+        mirror_clone: true,
+    }
+}
 
 #[test]
 fn redirect_local_cos_request_to_owner_pushes_worker_command() {
@@ -563,4 +579,81 @@ fn redirect_local_exact_cos_request_to_owner_binding_pushes_owner_live_queue() {
     let mut current_queued = VecDeque::new();
     current_live.take_pending_tx_into(&mut current_queued);
     assert!(current_queued.is_empty());
+}
+
+#[test]
+fn redirect_prepared_cos_request_to_owner_preserves_mirror_clone_on_worker_command() {
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let worker_commands_by_id = BTreeMap::from([(7, commands.clone())]);
+    let fast_path = test_cos_fast_interfaces(
+        80,
+        12,
+        4,
+        vec![(4, test_queue_fast_path(false, 7, None, None))],
+        None,
+        None,
+    )
+    .remove(&80)
+    .expect("fast path");
+    let root = test_cos_runtime_with_exact(false);
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 2, 80, root, fast_path);
+    unsafe { binding.umem.area().slice_mut_unchecked(128, 3) }
+        .expect("source frame")
+        .copy_from_slice(&[1, 2, 3]);
+
+    let req = test_prepared_mirror_request(128, 3);
+    let redirected =
+        redirect_prepared_cos_request_to_owner(&mut binding, req, 2, &worker_commands_by_id, None);
+
+    assert!(redirected.is_ok());
+    let pending = commands.lock().unwrap();
+    assert_eq!(pending.len(), 1);
+    match pending.front() {
+        Some(WorkerCommand::EnqueueShapedLocal(req)) => {
+            assert!(
+                req.mirror_clone,
+                "mirror identity must survive worker redirect"
+            );
+            assert_eq!(req.bytes, vec![1, 2, 3]);
+            assert_eq!(req.egress_ifindex, 80);
+            assert_eq!(req.cos_queue_id, Some(4));
+        }
+        other => panic!("unexpected command queued: {other:?}"),
+    }
+}
+
+#[test]
+fn redirect_prepared_cos_request_to_owner_binding_preserves_mirror_clone_on_live_queue() {
+    let owner_live = Arc::new(BindingLiveState::new());
+    let fast_path = test_cos_fast_interfaces(
+        80,
+        12,
+        4,
+        vec![(4, test_queue_fast_path(false, 7, None, None))],
+        Some(owner_live.clone()),
+        None,
+    )
+    .remove(&80)
+    .expect("fast path");
+    let root = test_cos_runtime_with_exact(false);
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 2, 80, root, fast_path);
+    unsafe { binding.umem.area().slice_mut_unchecked(128, 3) }
+        .expect("source frame")
+        .copy_from_slice(&[4, 5, 6]);
+
+    let req = test_prepared_mirror_request(128, 3);
+    let redirected = redirect_prepared_cos_request_to_owner_binding(&mut binding, req, None);
+
+    assert!(redirected.is_ok());
+    let mut queued = VecDeque::new();
+    owner_live.take_pending_tx_into(&mut queued);
+    assert_eq!(queued.len(), 1);
+    let req = queued.front().expect("queued local request");
+    assert!(
+        req.mirror_clone,
+        "mirror identity must survive owner-live redirect"
+    );
+    assert_eq!(req.bytes, vec![4, 5, 6]);
+    assert_eq!(req.egress_ifindex, 80);
+    assert_eq!(req.cos_queue_id, Some(4));
 }
