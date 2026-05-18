@@ -10,18 +10,25 @@
 //!   Payload: type-specific binary (see codec module)
 
 pub(crate) mod codec;
+mod producer;
 
-pub(crate) use codec::{close_flags, EventFrame};
+pub(crate) use codec::{EventFrame, close_flags};
+#[allow(unused_imports)] // public API for later policy/screen/filter producer wiring
+pub(crate) use producer::{
+    DataplaneEventDropReason, DataplaneEventEmitOutcome, DataplaneEventRateLimitConfig,
+    DataplaneEventStats,
+};
 
 use crate::session::{SessionDelta, SessionDeltaKind};
 use codec::{FRAME_HEADER_SIZE, MSG_ACK, MSG_DRAIN_REQUEST, MSG_KEEPALIVE, MSG_PAUSE, MSG_RESUME};
+use producer::{DataplaneEventCounters, DataplaneEventQueueBudget, DataplaneEventRateLimiter};
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TryRecvError};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -54,6 +61,8 @@ pub(crate) struct EventStreamStats {
     pub(crate) dropped: u64,
     #[allow(dead_code)] // stats field for future reporting
     pub(crate) replayed: u64,
+    #[allow(dead_code)] // producer-call-site wiring will surface these fields
+    pub(crate) dataplane_events: DataplaneEventStats,
 }
 
 struct EventStreamShared {
@@ -69,10 +78,25 @@ struct EventStreamShared {
     frames_sent: AtomicU64,
     frames_dropped: AtomicU64,
     frames_replayed: AtomicU64,
+    dataplane_event_counters: DataplaneEventCounters,
+    #[allow(dead_code)] // consumed by producer call sites once they are wired
+    dataplane_event_limiter: DataplaneEventRateLimiter,
+    dataplane_event_queue: DataplaneEventQueueBudget,
 }
 
 impl EventStreamShared {
     fn new() -> Self {
+        Self::new_with_dataplane_event_rate(DataplaneEventRateLimitConfig::default())
+    }
+
+    fn new_with_dataplane_event_rate(config: DataplaneEventRateLimitConfig) -> Self {
+        Self::new_with_dataplane_event_rate_and_queue_capacity(config, CHANNEL_CAPACITY)
+    }
+
+    fn new_with_dataplane_event_rate_and_queue_capacity(
+        config: DataplaneEventRateLimitConfig,
+        channel_capacity: usize,
+    ) -> Self {
         Self {
             next_seq: AtomicU64::new(0),
             acked_seq: AtomicU64::new(0),
@@ -81,8 +105,17 @@ impl EventStreamShared {
             frames_sent: AtomicU64::new(0),
             frames_dropped: AtomicU64::new(0),
             frames_replayed: AtomicU64::new(0),
+            dataplane_event_counters: DataplaneEventCounters::new(),
+            dataplane_event_limiter: DataplaneEventRateLimiter::new(config),
+            dataplane_event_queue: DataplaneEventQueueBudget::new(channel_capacity),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventStreamSendError {
+    Full,
+    Disconnected,
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +174,7 @@ impl EventStreamSender {
             sent: self.shared.frames_sent.load(Ordering::Relaxed),
             dropped: self.shared.frames_dropped.load(Ordering::Relaxed),
             replayed: self.shared.frames_replayed.load(Ordering::Relaxed),
+            dataplane_events: self.shared.dataplane_event_counters.snapshot(),
         }
     }
 
@@ -178,15 +212,22 @@ impl EventStreamWorkerHandle {
 
     /// Non-blocking send. Returns false if the channel is full (event dropped).
     pub(crate) fn try_send(&self, frame: EventFrame) -> bool {
+        self.try_send_frame(frame).is_ok()
+    }
+
+    fn try_send_frame(&self, frame: EventFrame) -> Result<(), EventStreamSendError> {
         match self.tx.try_send(frame) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.shared.frames_sent.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
             Err(mpsc::TrySendError::Full(_)) => {
                 self.shared.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                false
+                Err(EventStreamSendError::Full)
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 self.shared.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                false
+                Err(EventStreamSendError::Disconnected)
             }
         }
     }
@@ -198,7 +239,10 @@ impl EventStreamWorkerHandle {
         let deadline = Instant::now() + LOSSLESS_QUEUE_TIMEOUT;
         loop {
             match self.tx.try_send(frame) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.shared.frames_sent.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
                 Err(mpsc::TrySendError::Full(returned)) => {
                     frame = returned;
                     if !self.shared.connected.load(Ordering::Acquire) {
@@ -323,7 +367,8 @@ fn io_thread_main(
     }
 
     // Drain remaining events on shutdown
-    drain_remaining(&rx);
+    drain_remaining(&rx, &shared);
+    release_replay_dataplane_event_queue_budget(&shared, &mut replay_buf);
     shared.connected.store(false, Ordering::Release);
     eprintln!("xpf-event-stream: I/O thread exiting");
 }
@@ -385,7 +430,6 @@ fn replay_buffered(
         shared
             .frames_replayed
             .fetch_add(replayed, Ordering::Relaxed);
-        shared.frames_sent.fetch_add(replayed, Ordering::Relaxed);
         eprintln!("xpf-event-stream: replayed {replayed} events");
     }
     Ok(())
@@ -425,20 +469,17 @@ fn run_connected_loop(
         let paused = shared.paused.load(Ordering::Acquire);
         let mut drained_any = false;
 
-        // Drain channel into replay buffer + write buffer
+        // Drain channel into replay buffer + write buffer. Dataplane telemetry
+        // keeps its producer budget while retained for replay; release only
+        // when the frame is ACKed or definitively dropped.
         loop {
             match rx.try_recv() {
                 Ok(frame) => {
                     drained_any = true;
-                    // Add to replay buffer (drop oldest if over capacity)
-                    if replay_buf.len() >= REPLAY_BUFFER_CAPACITY {
-                        replay_buf.pop_front();
-                    }
-                    replay_buf.push_back(frame.clone());
-
                     if !paused {
                         write_buf.extend_from_slice(frame.as_bytes());
                     }
+                    push_replay_frame(shared, replay_buf, frame);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return false,
@@ -455,8 +496,6 @@ fn run_connected_loop(
                     } else {
                         write_buf.clear();
                     }
-                    // Count frames sent (approximate -- count by frames drained)
-                    shared.frames_sent.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     // Socket buffer full, keep write_buf for next cycle
@@ -562,7 +601,7 @@ fn process_control_frames(
                 // Trim replay buffer: remove frames with seq <= acked
                 while let Some(front) = replay_buf.front() {
                     if front.seq <= seq {
-                        replay_buf.pop_front();
+                        pop_replay_frame(shared, replay_buf);
                     } else {
                         break;
                     }
@@ -611,10 +650,7 @@ fn handle_drain_request(
         match rx.try_recv() {
             Ok(frame) => {
                 let frame_seq = frame.seq;
-                if replay_buf.len() >= REPLAY_BUFFER_CAPACITY {
-                    replay_buf.pop_front();
-                }
-                replay_buf.push_back(frame);
+                push_replay_frame(shared, replay_buf, frame);
                 if frame_seq >= target_seq {
                     break;
                 }
@@ -648,7 +684,6 @@ fn handle_drain_request(
             eprintln!("xpf-event-stream: drain write error: {e}");
             break;
         }
-        shared.frames_sent.fetch_add(1, Ordering::Relaxed);
     }
 
     // Send DrainComplete
@@ -656,8 +691,9 @@ fn handle_drain_request(
     let complete_frame = EventFrame::encode_drain_complete(drain_seq);
     if let Err(e) = (&*stream).write_all(complete_frame.as_bytes()) {
         eprintln!("xpf-event-stream: drain complete write error: {e}");
+    } else {
+        shared.frames_sent.fetch_add(1, Ordering::Relaxed);
     }
-    shared.frames_sent.fetch_add(1, Ordering::Relaxed);
     stream.set_nonblocking(true).ok();
 
     // Restore pause state
@@ -669,13 +705,48 @@ fn handle_drain_request(
 }
 
 /// Drain remaining events from the channel on shutdown.
-fn drain_remaining(rx: &mpsc::Receiver<EventFrame>) {
+fn drain_remaining(rx: &mpsc::Receiver<EventFrame>, shared: &Arc<EventStreamShared>) {
     loop {
         match rx.try_recv() {
-            Ok(_) => {}
+            Ok(frame) => release_dataplane_event_queue_budget(shared, &frame),
             Err(_) => break,
         }
     }
+}
+
+fn release_dataplane_event_queue_budget(shared: &Arc<EventStreamShared>, frame: &EventFrame) {
+    if let Some(kind) = frame.dataplane_event_kind() {
+        shared.dataplane_event_queue.release(kind);
+    }
+}
+
+fn push_replay_frame(
+    shared: &Arc<EventStreamShared>,
+    replay_buf: &mut VecDeque<EventFrame>,
+    frame: EventFrame,
+) {
+    if replay_buf.len() >= REPLAY_BUFFER_CAPACITY {
+        pop_replay_frame(shared, replay_buf);
+    }
+    replay_buf.push_back(frame);
+}
+
+fn pop_replay_frame(
+    shared: &Arc<EventStreamShared>,
+    replay_buf: &mut VecDeque<EventFrame>,
+) -> Option<EventFrame> {
+    let frame = replay_buf.pop_front();
+    if let Some(frame) = frame.as_ref() {
+        release_dataplane_event_queue_budget(shared, frame);
+    }
+    frame
+}
+
+fn release_replay_dataplane_event_queue_budget(
+    shared: &Arc<EventStreamShared>,
+    replay_buf: &mut VecDeque<EventFrame>,
+) {
+    while pop_replay_frame(shared, replay_buf).is_some() {}
 }
 
 // ---------------------------------------------------------------------------

@@ -46,6 +46,21 @@ func TestFormatStatusSummary(t *testing.T) {
 		RecentExceptions: []ExceptionStatus{
 			{Timestamp: now, Slot: 1, QueueID: 0, Interface: "ge-0-0-2", Reason: "metadata_parse", PacketLength: 128},
 		},
+		EventStreamSent:    101,
+		EventStreamDropped: 7,
+		EventStream: &EventStreamStatus{
+			FramesRead:        11,
+			FramesWritten:     5,
+			DecodeErrors:      2,
+			SeqGaps:           3,
+			PolicyDenyEvents:  13,
+			ScreenDropEvents:  17,
+			FilterLogEvents:   19,
+			PolicyDenyDrops:   1,
+			ScreenDropDrops:   4,
+			FilterLogDrops:    9,
+			UnknownFrameDrops: 6,
+		},
 	}
 
 	out := FormatStatusSummary(status)
@@ -89,6 +104,10 @@ func TestFormatStatusSummary(t *testing.T) {
 		"Direct TX no-frame fb:     5",
 		"Direct TX build-none fb:   6",
 		"Direct TX disallowed fb:   7",
+		"Event stream frames:       read=11 written=5 decode_errors=2 seq_gaps=3",
+		"Event stream producer:     sent=101 dropped=7",
+		"Event stream events:       policy_deny=13 screen_drop=17 filter_log=19 unknown_drops=6",
+		"Event stream drops:        policy_deny=1 screen_drop=4 filter_log=9",
 		"Pending fill frames:       30",
 		"Spare fill frames:         32",
 		"Free TX frames:            34",
