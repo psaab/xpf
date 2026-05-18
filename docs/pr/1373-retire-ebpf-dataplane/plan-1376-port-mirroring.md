@@ -73,9 +73,15 @@ through backup TX. The clone path keeps a TX-frame reserve and a small
 pending-backlog limit so mirror pressure is lossy and does not become a primary
 forwarding dependency.
 
+The 2026-05-18 closeout slice also wires deferred neighbor-resolution retry
+through the same bounded mirror helper before the held ingress frame is
+rewritten for transmit. The retry path now records the ingress mirror
+enqueue/drop counters and preserves `mirror_clone` identity on the clone while
+keeping the primary prepared TX request non-mirror.
+
 The userspace capability gate remains in place for now. This slice does not yet
 claim complete port-mirroring parity for every ingress disposition or for
-prebuilt/deferred transmit paths, and it still needs integration evidence with
+prebuilt transmit paths, and it still needs integration evidence with
 tcpdump on the mirror output plus primary forwarding survival under mirror
 pressure.
 
@@ -105,6 +111,9 @@ pressure.
 - Cargo: `mirror::cross_worker_live_enqueue_preserves_full_frame`.
 - Cargo: `mirror::mirror_output_logical_ifindex_resolves_parent_binding`.
 - Cargo: `mirror::sampled_live_mirror_resolves_snapshot_logical_ingress_and_output`.
+- Cargo: `mirror::sampled_live_mirror_missing_target_records_drop_counter`.
+- Cargo: `neighbor_dispatch::mirror_tests::retry_pending_neighbor_mirrors_original_frame_before_rewrite`.
+- Cargo: `tx::dispatch::tests::enqueue_pending_forwards_mirrors_live_frame_and_records_counter`.
 - Go: userspace snapshot round-trip for mirror config.
 - Go/Rust: status/counter wire round-trips include
   `mirrored_packets`, `mirrored_bytes`, `mirror_drops_no_frame`,

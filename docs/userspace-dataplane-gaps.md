@@ -57,8 +57,10 @@ These are the remaining explicit configuration gates in
 
 Port mirroring now has snapshot/wire plumbing plus a bounded forwarded-path
 runtime slice that samples and queues discardable full-L2 mirror clones with
-drop counters. The `deriveUserspaceCapabilities()` gate intentionally remains
-until #1376 covers every required ingress/transmit path and has integration
+drop counters. The runtime coverage now includes the pending-forward path,
+self-target flow-cache mirror surface, and deferred neighbor-resolution retry
+path. The `deriveUserspaceCapabilities()` gate intentionally remains until
+#1376 covers the remaining ingress/transmit surfaces and has integration
 validation for mirror output fidelity and forwarding survival under mirror
 pressure.
 
