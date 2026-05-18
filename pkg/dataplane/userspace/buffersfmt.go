@@ -6,6 +6,30 @@ import (
 	"strings"
 )
 
+const (
+	systemBufferUtilizationHeading = "Userspace Buffer Utilization:"
+	systemBufferCountersHeading    = "Userspace Status Counters:"
+
+	systemBufferLabelAFXDPUMEMFrames       = "AF_XDP UMEM frames"
+	systemBufferLabelAFXDPTXRing           = "AF_XDP TX ring"
+	systemBufferLabelCoSQueueBytes         = "CoS queue bytes"
+	systemBufferLabelNeighborCacheEntries  = "Neighbor cache entries"
+	systemBufferLabelFlowCacheActiveFlows  = "Flow cache active flows"
+	systemBufferLabelFlowCacheEvictions    = "Flow cache collision evict"
+	systemBufferLabelPendingFillFrames     = "Pending fill frames"
+	systemBufferLabelSpareFillFrames       = "Spare fill frames"
+	systemBufferLabelPendingTXPrepared     = "Pending TX prepared"
+	systemBufferLabelPendingTXLocal        = "Pending TX local"
+	systemBufferLabelTXRingFullEvents      = "TX ring full events"
+	systemBufferLabelSendtoENOBUFS         = "sendto ENOBUFS"
+	systemBufferLabelBoundPendingOverflow  = "Bound pending overflow"
+	systemBufferLabelCoSQueueOverflow      = "CoS queue overflow"
+	systemBufferLabelRXFillRingEmptyDescs  = "RX fill-ring empty descs"
+	systemBufferLabelRedirectInboxOverflow = "Redirect inbox overflow"
+	systemBufferLabelPendingTXLocalOver    = "Pending TX local overflow"
+	systemBufferLabelTXSubmitErrorDrops    = "TX submit error drops"
+)
+
 type systemBufferSample struct {
 	Slot                        uint32
 	HasSlot                     bool
@@ -70,7 +94,7 @@ func FormatSystemBuffers(status ProcessStatus, detail bool) string {
 	var rows []systemBufferRow
 	if knownUMEM > 0 {
 		rows = append(rows, systemBufferRow{
-			Name:     "AF_XDP UMEM frames",
+			Name:     systemBufferLabelAFXDPUMEMFrames,
 			Scope:    fmt.Sprintf("aggregate/%d", knownUMEM),
 			Capacity: umemCap,
 			Used:     umemUsed,
@@ -78,7 +102,7 @@ func FormatSystemBuffers(status ProcessStatus, detail bool) string {
 	}
 	if knownTX > 0 {
 		rows = append(rows, systemBufferRow{
-			Name:     "AF_XDP TX ring",
+			Name:     systemBufferLabelAFXDPTXRing,
 			Scope:    fmt.Sprintf("aggregate/%d", knownTX),
 			Capacity: txCap,
 			Used:     txUsed,
@@ -90,7 +114,7 @@ func FormatSystemBuffers(status ProcessStatus, detail bool) string {
 			scope := systemBufferSampleScope(sample)
 			if sample.UMEMCap > 0 {
 				rows = append(rows, systemBufferRow{
-					Name:     "AF_XDP UMEM frames",
+					Name:     systemBufferLabelAFXDPUMEMFrames,
 					Scope:    scope,
 					Capacity: uint64(sample.UMEMCap),
 					Used:     uint64(sample.UMEMUsed),
@@ -98,7 +122,7 @@ func FormatSystemBuffers(status ProcessStatus, detail bool) string {
 			}
 			if sample.TXRingCap > 0 {
 				rows = append(rows, systemBufferRow{
-					Name:     "AF_XDP TX ring",
+					Name:     systemBufferLabelAFXDPTXRing,
 					Scope:    scope,
 					Capacity: uint64(sample.TXRingCap),
 					Used:     uint64(sample.TXRingUsed),
@@ -109,7 +133,7 @@ func FormatSystemBuffers(status ProcessStatus, detail bool) string {
 	counterRows := systemBufferCounterRows(status, samples, detail)
 
 	var b strings.Builder
-	b.WriteString("Userspace Buffer Utilization:\n")
+	b.WriteString(systemBufferUtilizationHeading + "\n")
 	if len(rows) == 0 {
 		b.WriteString("  unavailable: helper status does not include bounded AF_XDP capacity gauges\n")
 		b.WriteString("  required status fields: per_binding[].umem_total_frames, per_binding[].umem_inflight_frames, per_binding[].tx_ring_capacity, per_binding[].outstanding_tx\n")
@@ -145,7 +169,7 @@ func FormatSystemBuffers(status ProcessStatus, detail bool) string {
 		if !strings.HasSuffix(b.String(), "\n\n") {
 			b.WriteString("\n")
 		}
-		b.WriteString("Userspace Status Counters:\n")
+		b.WriteString(systemBufferCountersHeading + "\n")
 		fmt.Fprintf(&b, "%-32s %-24s %12s\n", "Counter", "Scope", "Value")
 		b.WriteString(strings.Repeat("-", 70) + "\n")
 		for _, row := range counterRows {
@@ -173,7 +197,7 @@ func systemBufferCoSRows(status ProcessStatus, detail bool) []systemBufferRow {
 		return rows
 	}
 	rows = append(rows, systemBufferRow{
-		Name:     "CoS queue bytes",
+		Name:     systemBufferLabelCoSQueueBytes,
 		Scope:    fmt.Sprintf("aggregate/%d", queueCount),
 		Capacity: aggregateCap,
 		Used:     aggregateUsed,
@@ -187,7 +211,7 @@ func systemBufferCoSRows(status ProcessStatus, detail bool) []systemBufferRow {
 				continue
 			}
 			rows = append(rows, systemBufferRow{
-				Name:     "CoS queue bytes",
+				Name:     systemBufferLabelCoSQueueBytes,
 				Scope:    systemBufferCoSQueueScope(iface, queue),
 				Capacity: queue.BufferBytes,
 				Used:     queue.QueuedBytes,
@@ -235,41 +259,41 @@ func systemBufferCounterRows(status ProcessStatus, samples []systemBufferSample,
 			rows = append(rows, systemBufferCounterRow{Name: name, Scope: scope, Value: value})
 		}
 	}
-	appendCounter("Neighbor cache entries", "dynamic", uint64(status.NeighborEntries))
-	appendCounter("Flow cache active flows", "active window", activeFlowCount)
-	appendCounter("Flow cache collision evict", "aggregate", flowCacheCollisionEvictions)
-	appendCounter("Pending fill frames", "aggregate", debugPendingFillFrames)
-	appendCounter("Spare fill frames", "aggregate", debugSpareFillFrames)
-	appendCounter("Pending TX prepared", "aggregate", debugPendingTXPrepared)
-	appendCounter("Pending TX local", "aggregate", debugPendingTXLocal)
-	appendCounter("TX ring full events", "aggregate", dbgTxRingFull)
-	appendCounter("sendto ENOBUFS", "aggregate", dbgSendtoENOBUFS)
-	appendCounter("Bound pending overflow", "aggregate", dbgBoundPendingOverflow)
-	appendCounter("CoS queue overflow", "aggregate", dbgCoSQueueOverflow)
-	appendCounter("RX fill-ring empty descs", "aggregate", rxFillRingEmptyDescs)
-	appendCounter("Redirect inbox overflow", "aggregate", redirectInboxOverflowDrops)
-	appendCounter("Pending TX local overflow", "aggregate", pendingTXLocalOverflowDrops)
-	appendCounter("TX submit error drops", "aggregate", txSubmitErrorDrops)
+	appendCounter(systemBufferLabelNeighborCacheEntries, "dynamic", uint64(status.NeighborEntries))
+	appendCounter(systemBufferLabelFlowCacheActiveFlows, "active window", activeFlowCount)
+	appendCounter(systemBufferLabelFlowCacheEvictions, "aggregate", flowCacheCollisionEvictions)
+	appendCounter(systemBufferLabelPendingFillFrames, "aggregate", debugPendingFillFrames)
+	appendCounter(systemBufferLabelSpareFillFrames, "aggregate", debugSpareFillFrames)
+	appendCounter(systemBufferLabelPendingTXPrepared, "aggregate", debugPendingTXPrepared)
+	appendCounter(systemBufferLabelPendingTXLocal, "aggregate", debugPendingTXLocal)
+	appendCounter(systemBufferLabelTXRingFullEvents, "aggregate", dbgTxRingFull)
+	appendCounter(systemBufferLabelSendtoENOBUFS, "aggregate", dbgSendtoENOBUFS)
+	appendCounter(systemBufferLabelBoundPendingOverflow, "aggregate", dbgBoundPendingOverflow)
+	appendCounter(systemBufferLabelCoSQueueOverflow, "aggregate", dbgCoSQueueOverflow)
+	appendCounter(systemBufferLabelRXFillRingEmptyDescs, "aggregate", rxFillRingEmptyDescs)
+	appendCounter(systemBufferLabelRedirectInboxOverflow, "aggregate", redirectInboxOverflowDrops)
+	appendCounter(systemBufferLabelPendingTXLocalOver, "aggregate", pendingTXLocalOverflowDrops)
+	appendCounter(systemBufferLabelTXSubmitErrorDrops, "aggregate", txSubmitErrorDrops)
 
 	if !detail {
 		return rows
 	}
 	for _, sample := range samples {
 		scope := systemBufferSampleScope(sample)
-		appendCounter("Flow cache active flows", scope, uint64(sample.ActiveFlowCount))
-		appendCounter("Flow cache collision evict", scope, sample.FlowCacheCollisionEvictions)
-		appendCounter("Pending fill frames", scope, uint64(sample.DebugPendingFillFrames))
-		appendCounter("Spare fill frames", scope, uint64(sample.DebugSpareFillFrames))
-		appendCounter("Pending TX prepared", scope, uint64(sample.DebugPendingTXPrepared))
-		appendCounter("Pending TX local", scope, uint64(sample.DebugPendingTXLocal))
-		appendCounter("TX ring full events", scope, sample.DbgTxRingFull)
-		appendCounter("sendto ENOBUFS", scope, sample.DbgSendtoENOBUFS)
-		appendCounter("Bound pending overflow", scope, sample.DbgBoundPendingOverflow)
-		appendCounter("CoS queue overflow", scope, sample.DbgCoSQueueOverflow)
-		appendCounter("RX fill-ring empty descs", scope, sample.RxFillRingEmptyDescs)
-		appendCounter("Redirect inbox overflow", scope, sample.RedirectInboxOverflowDrops)
-		appendCounter("Pending TX local overflow", scope, sample.PendingTXLocalOverflowDrops)
-		appendCounter("TX submit error drops", scope, sample.TxSubmitErrorDrops)
+		appendCounter(systemBufferLabelFlowCacheActiveFlows, scope, uint64(sample.ActiveFlowCount))
+		appendCounter(systemBufferLabelFlowCacheEvictions, scope, sample.FlowCacheCollisionEvictions)
+		appendCounter(systemBufferLabelPendingFillFrames, scope, uint64(sample.DebugPendingFillFrames))
+		appendCounter(systemBufferLabelSpareFillFrames, scope, uint64(sample.DebugSpareFillFrames))
+		appendCounter(systemBufferLabelPendingTXPrepared, scope, uint64(sample.DebugPendingTXPrepared))
+		appendCounter(systemBufferLabelPendingTXLocal, scope, uint64(sample.DebugPendingTXLocal))
+		appendCounter(systemBufferLabelTXRingFullEvents, scope, sample.DbgTxRingFull)
+		appendCounter(systemBufferLabelSendtoENOBUFS, scope, sample.DbgSendtoENOBUFS)
+		appendCounter(systemBufferLabelBoundPendingOverflow, scope, sample.DbgBoundPendingOverflow)
+		appendCounter(systemBufferLabelCoSQueueOverflow, scope, sample.DbgCoSQueueOverflow)
+		appendCounter(systemBufferLabelRXFillRingEmptyDescs, scope, sample.RxFillRingEmptyDescs)
+		appendCounter(systemBufferLabelRedirectInboxOverflow, scope, sample.RedirectInboxOverflowDrops)
+		appendCounter(systemBufferLabelPendingTXLocalOver, scope, sample.PendingTXLocalOverflowDrops)
+		appendCounter(systemBufferLabelTXSubmitErrorDrops, scope, sample.TxSubmitErrorDrops)
 	}
 	return rows
 }

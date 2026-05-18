@@ -19,9 +19,9 @@ func TestFormatSystemBuffersUsesPerBindingAggregatesBeforeDetails(t *testing.T) 
 
 	out := FormatSystemBuffers(status, true)
 	for _, want := range []string{
-		"Userspace Buffer Utilization:",
-		"AF_XDP UMEM frames",
-		"AF_XDP TX ring",
+		systemBufferUtilizationHeading,
+		systemBufferLabelAFXDPUMEMFrames,
+		systemBufferLabelAFXDPTXRing,
 		"aggregate/2",
 		"2000",
 		"900",
@@ -54,7 +54,7 @@ func TestFormatSystemBuffersFallsBackToBindingsAndWarnsAtEighty(t *testing.T) {
 
 	out := FormatSystemBuffers(status, false)
 	for _, want := range []string{
-		"AF_XDP UMEM frames",
+		systemBufferLabelAFXDPUMEMFrames,
 		"aggregate/1",
 		"80.0% WARNING",
 	} {
@@ -187,32 +187,62 @@ func TestFormatSystemBuffersIncludesCoSAndRuntimePressure(t *testing.T) {
 
 	out := FormatSystemBuffers(status, true)
 	for _, want := range []string{
-		"CoS queue bytes",
+		systemBufferLabelCoSQueueBytes,
 		"aggregate/1",
 		"850",
 		"85.0% WARNING",
 		"ge-0-0-9/queue 2/ef/worker 2",
-		"Userspace Status Counters:",
-		"Neighbor cache entries",
-		"Flow cache active flows",
-		"Flow cache collision evict",
-		"Pending fill frames",
-		"Spare fill frames",
-		"Pending TX prepared",
-		"Pending TX local",
-		"TX ring full events",
-		"sendto ENOBUFS",
-		"Bound pending overflow",
-		"CoS queue overflow",
-		"RX fill-ring empty descs",
-		"Redirect inbox overflow",
-		"Pending TX local overflow",
-		"TX submit error drops",
+		systemBufferCountersHeading,
+		systemBufferLabelNeighborCacheEntries,
+		systemBufferLabelFlowCacheActiveFlows,
+		systemBufferLabelFlowCacheEvictions,
+		systemBufferLabelPendingFillFrames,
+		systemBufferLabelSpareFillFrames,
+		systemBufferLabelPendingTXPrepared,
+		systemBufferLabelPendingTXLocal,
+		systemBufferLabelTXRingFullEvents,
+		systemBufferLabelSendtoENOBUFS,
+		systemBufferLabelBoundPendingOverflow,
+		systemBufferLabelCoSQueueOverflow,
+		systemBufferLabelRXFillRingEmptyDescs,
+		systemBufferLabelRedirectInboxOverflow,
+		systemBufferLabelPendingTXLocalOver,
+		systemBufferLabelTXSubmitErrorDrops,
 		"worker 2/queue 7/slot 4/ge-0-0-9",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("FormatSystemBuffers output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestFormatSystemBuffersKeepsDynamicCountsOutOfUtilizationTable(t *testing.T) {
+	status := ProcessStatus{
+		NeighborEntries: 42,
+		Bindings: []BindingStatus{
+			{Slot: 1, WorkerID: 0, QueueID: 0, Interface: "ge-0-0-0", UmemTotalFrames: 1000, UmemInflightFrames: 250},
+		},
+		PerBinding: []BindingCountersSnapshot{
+			{WorkerID: 0, QueueID: 0, ActiveFlowCount: 128},
+		},
+	}
+
+	out := FormatSystemBuffers(status, false)
+	sections := strings.SplitN(out, systemBufferCountersHeading, 2)
+	if len(sections) != 2 {
+		t.Fatalf("FormatSystemBuffers missing status counter section:\n%s", out)
+	}
+	utilSection, counterSection := sections[0], sections[1]
+	for _, dynamic := range []string{systemBufferLabelNeighborCacheEntries, systemBufferLabelFlowCacheActiveFlows} {
+		if strings.Contains(utilSection, dynamic) {
+			t.Fatalf("%s appeared in utilization table without a bounded capacity:\n%s", dynamic, out)
+		}
+		if !strings.Contains(counterSection, dynamic) {
+			t.Fatalf("%s missing from status counter section:\n%s", dynamic, out)
+		}
+	}
+	if strings.Contains(counterSection, "%") {
+		t.Fatalf("status counters rendered a fill percentage without a denominator:\n%s", out)
 	}
 }
 
@@ -232,7 +262,7 @@ func TestFormatSystemBuffersCoSAggregateSumsCapacityWithUsage(t *testing.T) {
 
 	out := FormatSystemBuffers(status, false)
 	for _, want := range []string{
-		"CoS queue bytes",
+		systemBufferLabelCoSQueueBytes,
 		"aggregate/2",
 		"2000",
 		"800",
