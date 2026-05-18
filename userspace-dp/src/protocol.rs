@@ -516,6 +516,8 @@ pub(crate) struct ScreenProfileSnapshot {
     pub udp_flood_threshold: u32,
     #[serde(rename = "syn_flood_threshold", default)]
     pub syn_flood_threshold: u32,
+    #[serde(rename = "syn_cookie", default)]
+    pub syn_cookie: bool,
     #[serde(rename = "session_limit_src", default)]
     pub session_limit_src: u32,
     #[serde(rename = "session_limit_dst", default)]

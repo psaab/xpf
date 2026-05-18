@@ -23,6 +23,7 @@
 //! the 9-continue table, and the hidden-invariants list.
 
 use super::*;
+use crate::screen::SynCookieAckVerdict;
 
 /// Generic outcome for a per-packet stage. The `RecycleAndContinue`
 /// arm signals that the caller should push `desc.addr` to
@@ -242,23 +243,24 @@ pub(super) fn stage_screen_check(
     let Some(flow) = flow else {
         return StageOutcome::Continue(());
     };
-    let zone_name = ingress_zone_override
-        .and_then(|id| {
-            worker_ctx
-                .forwarding
-                .zone_id_to_name
-                .get(&id)
-                .map(|s| s.as_str())
-        })
+    let zone_id = ingress_zone_override
+        .filter(|id| worker_ctx.forwarding.zone_id_to_name.contains_key(id))
         .or_else(|| {
             worker_ctx
                 .forwarding
                 .ifindex_to_zone_id
                 .get(&(meta.ingress_ifindex as i32))
-                .and_then(|id| worker_ctx.forwarding.zone_id_to_name.get(id))
-                .map(|s| s.as_str())
+                .copied()
         });
-    let Some(zone_name) = zone_name else {
+    let Some(zone_id) = zone_id else {
+        return StageOutcome::Continue(());
+    };
+    let Some(zone_name) = worker_ctx
+        .forwarding
+        .zone_id_to_name
+        .get(&zone_id)
+        .map(|s| s.as_str())
+    else {
         return StageOutcome::Continue(());
     };
     let l3_off = if meta.ingress_vlan_id > 0 { 18 } else { 14 };
@@ -274,12 +276,87 @@ pub(super) fn stage_screen_check(
         flow.forward_key.dst_port,
         l3_off,
     );
-    if let ScreenVerdict::Drop(_reason) = screen.check_packet(zone_name, &screen_pkt, now_secs) {
-        counters.touched = true;
-        counters.screen_drops += 1;
-        return StageOutcome::RecycleAndContinue;
+    match screen.check_packet_with_zone_id(zone_name, zone_id, &screen_pkt, now_secs) {
+        ScreenVerdict::Pass => StageOutcome::Continue(()),
+        ScreenVerdict::Drop(_) | ScreenVerdict::SynCookieChallenge(_) => {
+            counters.touched = true;
+            counters.screen_drops += 1;
+            StageOutcome::RecycleAndContinue
+        }
     }
-    StageOutcome::Continue(())
+}
+
+/// SYN-cookie returning ACK validation on the session-miss path.
+///
+/// This runs after normal session lookup has failed, so established ACK traffic
+/// keeps its normal fast/session path. A valid cookie ACK is consumed without
+/// creating a session; the validated-client cache lets the client's next SYN
+/// traverse the ordinary policy/NAT/session path. Invalid cookie ACKs are
+/// dropped while cookie mode is active. Poll-stage coverage intentionally pins
+/// only the operational drop/bypass behavior here; the lower screen runtime
+/// owns cache mechanics. `screen_tests.rs` covers bounded 4-way validated-client
+/// cache replacement, while cache expiration, secret-epoch rotation, and
+/// HA-safe secret/cache survivability remain explicit #1374 follow-ups.
+#[inline]
+pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
+    flow: Option<&SessionFlow>,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    now_secs: u64,
+    screen: &mut ScreenState,
+    counters: &mut BatchCounters,
+    worker_ctx: &WorkerContext,
+) -> StageOutcome<()> {
+    if !screen.has_profiles() {
+        return StageOutcome::Continue(());
+    }
+    let Some(flow) = flow else {
+        return StageOutcome::Continue(());
+    };
+    let zone_id = ingress_zone_override
+        .filter(|id| worker_ctx.forwarding.zone_id_to_name.contains_key(id))
+        .or_else(|| {
+            worker_ctx
+                .forwarding
+                .ifindex_to_zone_id
+                .get(&(meta.ingress_ifindex as i32))
+                .copied()
+        });
+    let Some(zone_id) = zone_id else {
+        return StageOutcome::Continue(());
+    };
+    let Some(zone_name) = worker_ctx
+        .forwarding
+        .zone_id_to_name
+        .get(&zone_id)
+        .map(|s| s.as_str())
+    else {
+        return StageOutcome::Continue(());
+    };
+    let l3_off = if meta.ingress_vlan_id > 0 { 18 } else { 14 };
+    let screen_pkt = extract_screen_info(
+        packet_frame,
+        meta.addr_family,
+        meta.protocol,
+        meta.tcp_flags,
+        meta.pkt_len,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        l3_off,
+    );
+    match screen.validate_syn_cookie_ack_on_session_miss(zone_name, zone_id, &screen_pkt, now_secs)
+    {
+        SynCookieAckVerdict::NotApplicable => StageOutcome::Continue(()),
+        SynCookieAckVerdict::Validated => StageOutcome::RecycleAndContinue,
+        SynCookieAckVerdict::Invalid => {
+            counters.touched = true;
+            counters.screen_drops += 1;
+            StageOutcome::RecycleAndContinue
+        }
+    }
 }
 
 /// Stage 11 — IPsec passthrough.
@@ -332,4 +409,246 @@ pub(super) fn stage_ipsec_passthrough_check(
         worker_ctx.forwarding,
     );
     StageOutcome::RecycleAndContinue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_zone_ids::TEST_LAN_ZONE_ID;
+
+    const TEST_NOW_SECS: u64 = 128;
+    const TCP_FLAG_ACK: u8 = 0x10;
+
+    fn tcp_v4_frame(
+        src: Ipv4Addr,
+        dst: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        flags: u8,
+        seq: u32,
+        ack: u32,
+    ) -> Vec<u8> {
+        let mut frame = Vec::new();
+        write_eth_header(
+            &mut frame,
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+            0,
+            0x0800,
+        );
+        frame.extend_from_slice(&[
+            0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00,
+        ]);
+        frame.extend_from_slice(&src.octets());
+        frame.extend_from_slice(&dst.octets());
+        let ip_csum = checksum16(&frame[14..34]);
+        frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+        frame.extend_from_slice(&src_port.to_be_bytes());
+        frame.extend_from_slice(&dst_port.to_be_bytes());
+        frame.extend_from_slice(&seq.to_be_bytes());
+        frame.extend_from_slice(&ack.to_be_bytes());
+        frame.extend_from_slice(&[0x50, flags, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        recompute_l4_checksum_ipv4(&mut frame[14..], 20, PROTO_TCP, false).expect("tcp checksum");
+        frame
+    }
+
+    fn tcp_v4_meta(frame: &[u8], flags: u8) -> UserspaceDpMeta {
+        UserspaceDpMeta {
+            magic: USERSPACE_META_MAGIC,
+            version: USERSPACE_META_VERSION,
+            length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+            ingress_ifindex: 24,
+            l3_offset: 14,
+            l4_offset: 34,
+            payload_offset: 54,
+            pkt_len: (frame.len() - 14) as u16,
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            tcp_flags: flags,
+            ..UserspaceDpMeta::default()
+        }
+    }
+
+    fn syn_cookie_screen() -> ScreenState {
+        let mut profiles = FxHashMap::default();
+        profiles.insert(
+            "lan".to_string(),
+            ScreenProfile {
+                syn_flood_threshold: 1,
+                syn_cookie: true,
+                ..ScreenProfile::default()
+            },
+        );
+        let mut screen = ScreenState::new();
+        screen.update_profiles(profiles);
+        screen.update_syn_cookie_master_key(Some([0x42; 16]));
+        screen
+    }
+
+    #[test]
+    fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
+        let mut screen = syn_cookie_screen();
+        let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+        let ident = BindingIdentity {
+            slot: 0,
+            queue_id: 0,
+            worker_id: 0,
+            interface: Arc::<str>::from("reth1.0"),
+            ifindex: 24,
+        };
+        let binding_lookup = WorkerBindingLookup::default();
+        let ha_state = BTreeMap::new();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+        let recent_exceptions = Arc::new(Mutex::new(VecDeque::new()));
+        let last_resolution = Arc::new(Mutex::new(None));
+        let peer_worker_commands = Vec::new();
+        let dnat_fds = DnatTableFds::default();
+        let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+        let worker_ctx = WorkerContext {
+            ident: &ident,
+            binding_lookup: &binding_lookup,
+            forwarding: &forwarding,
+            ha_state: &ha_state,
+            dynamic_neighbors: &dynamic_neighbors,
+            shared_sessions: &shared_sessions,
+            shared_nat_sessions: &shared_nat_sessions,
+            shared_forward_wire_sessions: &shared_forward_wire_sessions,
+            shared_owner_rg_indexes: &shared_owner_rg_indexes,
+            slow_path: None,
+            local_tunnel_deliveries: &local_tunnel_deliveries,
+            recent_exceptions: &recent_exceptions,
+            last_resolution: &last_resolution,
+            peer_worker_commands: &peer_worker_commands,
+            dnat_fds: &dnat_fds,
+            rg_epochs: &rg_epochs,
+        };
+
+        let client = Ipv4Addr::new(192, 0, 2, 10);
+        let server = Ipv4Addr::new(198, 51, 100, 20);
+        let syn_frame = tcp_v4_frame(client, server, 49152, 443, TCP_FLAG_SYN, 1, 0);
+        let syn_meta = tcp_v4_meta(&syn_frame, TCP_FLAG_SYN);
+        let syn_flow =
+            parse_session_flow_from_bytes(&syn_frame, syn_meta).expect("session flow from SYN");
+        let syn_info = extract_screen_info(
+            &syn_frame,
+            syn_meta.addr_family,
+            syn_meta.protocol,
+            syn_meta.tcp_flags,
+            syn_meta.pkt_len,
+            syn_flow.src_ip,
+            syn_flow.dst_ip,
+            syn_flow.forward_key.src_port,
+            syn_flow.forward_key.dst_port,
+            syn_meta.l3_offset as usize,
+        );
+
+        assert_eq!(
+            screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
+            ScreenVerdict::Pass
+        );
+        let _challenge = match screen.check_packet_with_zone_id(
+            "lan",
+            TEST_LAN_ZONE_ID,
+            &syn_info,
+            TEST_NOW_SECS,
+        ) {
+            ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+            other => panic!("expected SYN-cookie challenge, got {other:?}"),
+        };
+
+        let invalid_ack_frame = tcp_v4_frame(
+            client,
+            server,
+            49152,
+            443,
+            TCP_FLAG_ACK,
+            2,
+            0xdead_beef,
+        );
+        let invalid_ack_meta = tcp_v4_meta(&invalid_ack_frame, TCP_FLAG_ACK);
+        let invalid_ack_flow =
+            parse_session_flow_from_bytes(&invalid_ack_frame, invalid_ack_meta)
+                .expect("session flow from invalid ACK");
+        let mut invalid_counters = BatchCounters::default();
+
+        assert!(matches!(
+            stage_screen_syn_cookie_ack_on_session_miss(
+                Some(&invalid_ack_flow),
+                &invalid_ack_frame,
+                invalid_ack_meta,
+                None,
+                TEST_NOW_SECS,
+                &mut screen,
+                &mut invalid_counters,
+                &worker_ctx,
+            ),
+            StageOutcome::RecycleAndContinue
+        ));
+        assert!(
+            invalid_counters.touched,
+            "invalid cookie ACK must be counted as a screen drop"
+        );
+        assert_eq!(invalid_counters.screen_drops, 1);
+
+        let challenge = match screen.check_packet_with_zone_id(
+            "lan",
+            TEST_LAN_ZONE_ID,
+            &syn_info,
+            TEST_NOW_SECS,
+        ) {
+            ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+            other => panic!("invalid ACK must not install SYN-cookie bypass, got {other:?}"),
+        };
+
+        let ack_frame = tcp_v4_frame(
+            client,
+            server,
+            49152,
+            443,
+            TCP_FLAG_ACK,
+            2,
+            challenge.cookie_isn.wrapping_add(1),
+        );
+        let ack_meta = tcp_v4_meta(&ack_frame, TCP_FLAG_ACK);
+        let ack_flow =
+            parse_session_flow_from_bytes(&ack_frame, ack_meta).expect("session flow from ACK");
+        let mut counters = BatchCounters::default();
+
+        assert!(matches!(
+            stage_screen_syn_cookie_ack_on_session_miss(
+                Some(&ack_flow),
+                &ack_frame,
+                ack_meta,
+                None,
+                TEST_NOW_SECS,
+                &mut screen,
+                &mut counters,
+                &worker_ctx,
+            ),
+            StageOutcome::RecycleAndContinue
+        ));
+        assert!(
+            !counters.touched,
+            "valid cookie ACK is consumed without counting a screen drop"
+        );
+        assert_eq!(counters.screen_drops, 0);
+
+        assert_eq!(
+            screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
+            ScreenVerdict::Pass,
+            "poll-stage session-miss ACK handling must invoke SYN-cookie validation"
+        );
+        assert!(
+            matches!(
+                screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
+                ScreenVerdict::SynCookieChallenge(_)
+            ),
+            "validated SYN-cookie bypass must be single-use"
+        );
+    }
 }

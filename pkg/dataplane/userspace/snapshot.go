@@ -1614,6 +1614,7 @@ func buildScreenSnapshots(cfg *config.Config) []ScreenProfileSnapshot {
 		}
 		if sp.TCP.SynFlood != nil && sp.TCP.SynFlood.AttackThreshold > 0 {
 			snap.SYNFloodThreshold = uint32(sp.TCP.SynFlood.AttackThreshold)
+			snap.SYNCookie = cfg.Security.Flow.SynFloodProtectionMode == "syn-cookie"
 		}
 		if sp.LimitSession.SourceIPBased > 0 {
 			snap.SessionLimitSrc = uint32(sp.LimitSession.SourceIPBased)
