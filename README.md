@@ -100,8 +100,9 @@ Rust, but it is not "fallback-free". Current explicit gates in code still
 include SYN-cookie-dependent screen behavior and port mirroring. Three-color
 policers are admitted only for the bounded color-blind `then discard` runtime
 slice while #1375 hardening remains. Pool-mode SNAT is admitted, and #1385
-added userspace-v1 `address-persistent` selection; #1377 still owns per-pool
-`persistent-nat` lease reuse, allocator/exhaustion counters, and the
+added userspace-v1 `address-persistent` selection. The current runtime fails
+closed for unusable source-NAT pool rules before forwarding; #1377 still owns
+per-pool `persistent-nat` lease reuse, allocator/exhaustion counters, and the
 mixed-backend rollback boundary. The exact admission boundary is documented in
 [`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
 

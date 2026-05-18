@@ -436,6 +436,10 @@ pub(crate) struct SourceNATRuleSnapshot {
     pub port_high: u16,
     #[serde(rename = "address_persistent", default)]
     pub address_persistent: bool,
+    #[serde(rename = "pool_unusable", default)]
+    pub pool_unusable: bool,
+    #[serde(rename = "pool_unusable_reason", default)]
+    pub pool_unusable_reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -2067,6 +2071,10 @@ pub(crate) struct ExceptionStatus {
     pub from_zone: String,
     #[serde(rename = "to_zone", default)]
     pub to_zone: String,
+    #[serde(rename = "rule_name", default)]
+    pub rule_name: String,
+    #[serde(rename = "pool_name", default)]
+    pub pool_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

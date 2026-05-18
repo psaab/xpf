@@ -581,7 +581,7 @@ func TestFormatBindings(t *testing.T) {
 			{Slot: 1, QueueID: 0, WorkerID: 0, Registered: true, Armed: false, Ready: false, Bound: true, XSKRegistered: false, Ifindex: 6, Interface: "ge-0-0-2", ExceptionPackets: 1, LastError: "xsk map update failed"},
 		},
 		RecentExceptions: []ExceptionStatus{
-			{Timestamp: time.Unix(0, 0).UTC(), Slot: 1, QueueID: 0, Interface: "ge-0-0-2", Reason: "fib_generation_mismatch", PacketLength: 512, AddrFamily: 10, Protocol: 6, ConfigGeneration: 11, FIBGeneration: 9},
+			{Timestamp: time.Unix(0, 0).UTC(), Slot: 1, QueueID: 0, Interface: "ge-0-0-2", Reason: "fib_generation_mismatch", PacketLength: 512, AddrFamily: 10, Protocol: 6, ConfigGeneration: 11, FIBGeneration: 9, RuleName: "snat-a", PoolName: "pool-a"},
 		},
 	}
 
@@ -605,6 +605,8 @@ func TestFormatBindings(t *testing.T) {
 		"xsk map update failed",
 		"Recent userspace exceptions:",
 		"fib_generation_mismatch",
+		"rule=snat-a",
+		"pool=pool-a",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("bindings output missing %q:\n%s", want, out)

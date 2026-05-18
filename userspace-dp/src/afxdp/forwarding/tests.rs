@@ -1,6 +1,7 @@
 use super::super::forwarding_build::*;
 use super::super::test_fixtures::*;
 use super::*;
+use crate::nat::SourceNatFailureReason;
 use crate::test_zone_ids::*;
 use crate::{FabricSnapshot, NeighborSnapshot, SourceNATRuleSnapshot};
 
@@ -1296,6 +1297,83 @@ fn source_nat_selection_uses_interface_addresses_v6() {
 }
 
 #[test]
+fn source_nat_pool_unavailable_reports_rule_and_pool_identity() {
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "wrong-family".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "v6-only".to_string(),
+        pool_addresses: vec!["2001:db8::10".to_string()],
+        port_low: 10_000,
+        port_high: 10_010,
+        ..Default::default()
+    }];
+    let state = build_forwarding_state(&snapshot);
+    let flow = SessionFlow {
+        src_ip: "10.0.61.102".parse().expect("src"),
+        dst_ip: "172.16.80.200".parse().expect("dst"),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: "10.0.61.102".parse().expect("src"),
+            dst_ip: "172.16.80.200".parse().expect("dst"),
+            src_port: 12345,
+            dst_port: 5201,
+        },
+    };
+    let (from_zone, to_zone) = zone_pair_for_flow(&state, 24, 12);
+
+    assert_eq!(
+        match_source_nat_for_flow_result(&state, &from_zone, &to_zone, 12, &flow),
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "wrong-family".to_string(),
+            pool_name: "v6-only".to_string(),
+            reason: SourceNatFailureReason::WrongAddressFamily,
+        })
+    );
+}
+
+#[test]
+fn source_nat_allocator_exhausted_reports_rule_and_pool_identity() {
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "exhausted".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "tiny-pool".to_string(),
+        pool_unusable: true,
+        pool_unusable_reason: "allocator_exhausted".to_string(),
+        ..Default::default()
+    }];
+    let state = build_forwarding_state(&snapshot);
+    let flow = SessionFlow {
+        src_ip: "10.0.61.102".parse().expect("src"),
+        dst_ip: "172.16.80.200".parse().expect("dst"),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: "10.0.61.102".parse().expect("src"),
+            dst_ip: "172.16.80.200".parse().expect("dst"),
+            src_port: 12345,
+            dst_port: 5201,
+        },
+    };
+    let (from_zone, to_zone) = zone_pair_for_flow(&state, 24, 12);
+
+    assert_eq!(
+        match_source_nat_for_flow_result(&state, &from_zone, &to_zone, 12, &flow),
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "exhausted".to_string(),
+            pool_name: "tiny-pool".to_string(),
+            reason: SourceNatFailureReason::AllocatorExhausted,
+        })
+    );
+}
+
+#[test]
 fn interface_snat_addresses_are_not_treated_as_local_delivery() {
     let state = build_forwarding_state(&nat_snapshot());
     let resolved_v4 = lookup_forwarding_resolution(&state, "172.16.80.8".parse().expect("v4"));
@@ -1977,4 +2055,3 @@ fn tx_binding_resolution_uses_fabric_parent_ifindex() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     assert_eq!(resolve_tx_binding_ifindex(&state, 21), 21);
 }
-

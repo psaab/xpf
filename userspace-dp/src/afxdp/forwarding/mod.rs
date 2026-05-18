@@ -103,6 +103,7 @@ pub(super) fn resolve_forwarding(
     lookup_forwarding_resolution_with_dynamic(state, dynamic_neighbors, dst)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn match_source_nat_for_flow(
     forwarding: &ForwardingState,
     from_zone: &str,
@@ -112,6 +113,27 @@ pub(super) fn match_source_nat_for_flow(
 ) -> Option<NatDecision> {
     let egress = forwarding.egress.get(&egress_ifindex)?;
     match_source_nat(
+        &forwarding.source_nat_rules,
+        from_zone,
+        to_zone,
+        flow.src_ip,
+        flow.dst_ip,
+        egress.primary_v4,
+        egress.primary_v6,
+    )
+}
+
+pub(super) fn match_source_nat_for_flow_result(
+    forwarding: &ForwardingState,
+    from_zone: &str,
+    to_zone: &str,
+    egress_ifindex: i32,
+    flow: &SessionFlow,
+) -> SourceNatLookup {
+    let Some(egress) = forwarding.egress.get(&egress_ifindex) else {
+        return SourceNatLookup::NoMatch;
+    };
+    match_source_nat_result(
         &forwarding.source_nat_rules,
         from_zone,
         to_zone,

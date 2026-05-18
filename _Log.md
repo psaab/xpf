@@ -2,6 +2,11 @@
 
 ## 2026-05-18
 
+- **Timestamp**: 2026-05-18T04:01:54Z
+  - **Action**: Issue #1377 SNAT pool runtime closeout slice — preserved unusable pool-mode source NAT rules in the Go userspace snapshot, added Rust source-NAT failure results for missing/empty/invalid/wrong-family/allocator failures, made the four AF_XDP `poll_descriptor.rs` source-NAT decision sites fail closed with recent-exception records before session creation or forwarding, and refreshed #1377 docs plus the contract guard.
+  - **File(s)**: `README.md`, `docs/userspace-dataplane-gaps.md`, `docs/userspace-dataplane-architecture.md`, `docs/pr/1373-retire-ebpf-dataplane/README.md`, `docs/pr/1373-retire-ebpf-dataplane/plan.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1377-snat-pools.md`, `pkg/dataplane/userspace/protocol.go`, `pkg/dataplane/userspace/snapshot.go`, `pkg/dataplane/userspace/manager_test.go`, `userspace-dp/src/protocol.rs`, `userspace-dp/src/nat.rs`, `userspace-dp/src/nat_tests.rs`, `userspace-dp/src/afxdp/mod.rs`, `userspace-dp/src/afxdp/forwarding/mod.rs`, `userspace-dp/src/afxdp/poll_descriptor.rs`, `userspace-dp/tests/snat_contract_doc_guard.rs`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/dataplane/userspace/protocol.go pkg/dataplane/userspace/snapshot.go pkg/dataplane/userspace/manager_test.go`; `cargo test --manifest-path userspace-dp/Cargo.toml pool_snat_`; `cargo test --manifest-path userspace-dp/Cargo.toml --test snat_contract_doc_guard`; `go test ./pkg/dataplane/userspace -run 'TestBuildSourceNATSnapshots'`; `git diff --check`
+
 - **Timestamp**: 2026-05-18T03:59:26Z
   - **Action**: #1378 policy-scheduler closeout slice — added a deterministic userspace scheduler evidence validator for active/rebuild/inactive/failover artifacts, pinned the userspace apply seed path so initial scheduled-policy snapshots do not rely on legacy policy-map updates, and narrowed the #1378 docs to live HA artifact capture only.
   - **File(s)**: `test/incus/policy_scheduler_validate.py`, `test/incus/policy_scheduler_validate_test.py`, `pkg/daemon/policy_scheduler_apply_test.go`, `docs/userspace-dataplane-gaps.md`, `docs/pr/1373-retire-ebpf-dataplane/README.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1378-policy-schedulers.md`, `_Log.md`
