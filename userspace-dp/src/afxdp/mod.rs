@@ -278,10 +278,10 @@ const XDP_OPTIONS_ZEROCOPY: u32 = 1;
 const PENDING_NEIGH_TIMEOUT_NS: u64 = 2_000_000_000; // 2 seconds
 // GEMINI-NEXT.md Section 3 cold start: admission cap bumped 64 → 4096 so a
 // per-binding burst of new connections during the ARP/NDP probe window
-// doesn't drop frames. PendingNeighPacket is 224 B on x86_64 (XdpDesc +
-// UserspaceDpMeta + SessionDecision + queued_ns + probe_attempts), so
-// worst-case per binding when the queue is fully populated is ~896 KiB.
-// To avoid paying that ~896 KiB up front per binding × N bindings, the
+// doesn't drop frames. PendingNeighPacket is 264 B on x86_64 (XdpDesc +
+// UserspaceDpMeta + SessionDecision + flow key + queued_ns + probe_attempts),
+// so worst-case per binding when the queue is fully populated is ~1.0 MiB.
+// To avoid paying that ~1.0 MiB up front per binding × N bindings, the
 // underlying VecDeque is now constructed with `VecDeque::new()` (zero
 // capacity) at worker init — see worker/mod.rs.
 // The buffer grows on push only when traffic actually queues up, and the

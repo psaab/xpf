@@ -49,6 +49,11 @@ type xpfCollector struct {
 
 	// Filter counters
 	filterHitsTotal *prometheus.Desc
+	// Userspace three-color policer counters.
+	threeColorPolicerPacketsTotal *prometheus.Desc
+	threeColorPolicerBytesTotal   *prometheus.Desc
+	threeColorPolicerDropsTotal   *prometheus.Desc
+	threeColorPolicerDropBytes    *prometheus.Desc
 
 	// Session gauges (from GC)
 	sessionsActive      *prometheus.Desc
@@ -260,6 +265,26 @@ func newCollector(srv *Server) *xpfCollector {
 			"xpf_filter_hits_total",
 			"Total firewall filter term hits.",
 			[]string{"filter", "family", "term"}, nil,
+		),
+		threeColorPolicerPacketsTotal: prometheus.NewDesc(
+			"xpf_userspace_three_color_policer_packets_total",
+			"Userspace three-color policer packets by resulting color.",
+			[]string{"policer", "color"}, nil,
+		),
+		threeColorPolicerBytesTotal: prometheus.NewDesc(
+			"xpf_userspace_three_color_policer_bytes_total",
+			"Userspace three-color policer bytes by resulting color.",
+			[]string{"policer", "color"}, nil,
+		),
+		threeColorPolicerDropsTotal: prometheus.NewDesc(
+			"xpf_userspace_three_color_policer_drops_total",
+			"Userspace three-color policer packets dropped by policer treatment.",
+			[]string{"policer"}, nil,
+		),
+		threeColorPolicerDropBytes: prometheus.NewDesc(
+			"xpf_userspace_three_color_policer_drop_bytes_total",
+			"Userspace three-color policer bytes dropped by policer treatment.",
+			[]string{"policer"}, nil,
 		),
 		sessionsActive: prometheus.NewDesc(
 			"xpf_sessions_active",
@@ -702,6 +727,10 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.zoneBytesTotal
 	ch <- c.policyHitsTotal
 	ch <- c.filterHitsTotal
+	ch <- c.threeColorPolicerPacketsTotal
+	ch <- c.threeColorPolicerBytesTotal
+	ch <- c.threeColorPolicerDropsTotal
+	ch <- c.threeColorPolicerDropBytes
 	ch <- c.sessionsActive
 	ch <- c.sessionsEstablished
 	ch <- c.sessionsIPv4
@@ -825,8 +854,45 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 	c.emitBindingActiveFlowCount(ch, status)
 	c.emitBindingTXCompletionTelemetry(ch, status)
 	c.emitCoSActiveFlowCount(ch, status)
+	c.emitThreeColorPolicerCounters(ch, status)
 	c.emitFairnessRSSGauges(ch, status)
 	c.emitFairnessThroughputGauges(ch, status)
+}
+
+func (c *xpfCollector) emitThreeColorPolicerCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, p := range status.ThreeColorPolicerCounters {
+		emitColor := func(color string, packets, bytes uint64) {
+			ch <- prometheus.MustNewConstMetric(
+				c.threeColorPolicerPacketsTotal,
+				prometheus.CounterValue,
+				float64(packets),
+				p.Name,
+				color,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				c.threeColorPolicerBytesTotal,
+				prometheus.CounterValue,
+				float64(bytes),
+				p.Name,
+				color,
+			)
+		}
+		emitColor("green", p.GreenPackets, p.GreenBytes)
+		emitColor("yellow", p.YellowPackets, p.YellowBytes)
+		emitColor("red", p.RedPackets, p.RedBytes)
+		ch <- prometheus.MustNewConstMetric(
+			c.threeColorPolicerDropsTotal,
+			prometheus.CounterValue,
+			float64(p.DropPackets),
+			p.Name,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.threeColorPolicerDropBytes,
+			prometheus.CounterValue,
+			float64(p.DropBytes),
+			p.Name,
+		)
+	}
 }
 
 // #1219: emit per-binding distinct active flow count for the fairness

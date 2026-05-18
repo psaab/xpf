@@ -388,6 +388,72 @@ func TestCollectPolicyCountersExposesSparseAndGlobalPolicyIDs(t *testing.T) {
 	}, 31)
 }
 
+func TestEmitThreeColorPolicerCounters(t *testing.T) {
+	c := &xpfCollector{
+		threeColorPolicerPacketsTotal: prometheus.NewDesc(
+			"xpf_userspace_three_color_policer_packets_total",
+			"packets",
+			[]string{"policer", "color"},
+			nil,
+		),
+		threeColorPolicerBytesTotal: prometheus.NewDesc(
+			"xpf_userspace_three_color_policer_bytes_total",
+			"bytes",
+			[]string{"policer", "color"},
+			nil,
+		),
+		threeColorPolicerDropsTotal: prometheus.NewDesc(
+			"xpf_userspace_three_color_policer_drops_total",
+			"drops",
+			[]string{"policer"},
+			nil,
+		),
+		threeColorPolicerDropBytes: prometheus.NewDesc(
+			"xpf_userspace_three_color_policer_drop_bytes_total",
+			"drop bytes",
+			[]string{"policer"},
+			nil,
+		),
+	}
+	status := dpuserspace.ProcessStatus{
+		ThreeColorPolicerCounters: []dpuserspace.ThreeColorPolicerStatus{
+			{
+				Name:          "wan-egress",
+				GreenPackets:  10,
+				GreenBytes:    1000,
+				YellowPackets: 3,
+				YellowBytes:   300,
+				RedPackets:    2,
+				RedBytes:      200,
+				DropPackets:   2,
+				DropBytes:     200,
+			},
+		},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitThreeColorPolicerCounters(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 8 {
+		t.Fatalf("emitThreeColorPolicerCounters: want 8 metrics, got %d", len(got))
+	}
+
+	assertCounterClose(t, got, c.threeColorPolicerPacketsTotal, map[string]string{"policer": "wan-egress", "color": "green"}, 10)
+	assertCounterClose(t, got, c.threeColorPolicerBytesTotal, map[string]string{"policer": "wan-egress", "color": "green"}, 1000)
+	assertCounterClose(t, got, c.threeColorPolicerPacketsTotal, map[string]string{"policer": "wan-egress", "color": "yellow"}, 3)
+	assertCounterClose(t, got, c.threeColorPolicerBytesTotal, map[string]string{"policer": "wan-egress", "color": "yellow"}, 300)
+	assertCounterClose(t, got, c.threeColorPolicerPacketsTotal, map[string]string{"policer": "wan-egress", "color": "red"}, 2)
+	assertCounterClose(t, got, c.threeColorPolicerBytesTotal, map[string]string{"policer": "wan-egress", "color": "red"}, 200)
+	assertCounterClose(t, got, c.threeColorPolicerDropsTotal, map[string]string{"policer": "wan-egress"}, 2)
+	assertCounterClose(t, got, c.threeColorPolicerDropBytes, map[string]string{"policer": "wan-egress"}, 200)
+}
+
 func metricValuesByWorker(
 	t *testing.T,
 	metrics []prometheus.Metric,

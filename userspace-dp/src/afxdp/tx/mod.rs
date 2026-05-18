@@ -33,7 +33,7 @@ pub(super) mod tcp_segmentation;
 pub(in crate::afxdp) use cos_classify::cos_queue_dscp_rewrite;
 pub(super) use cos_classify::{
     CoSTxSelection, enqueue_local_into_cos, resolve_cached_cos_tx_selection, resolve_cos_queue_id,
-    resolve_cos_tx_selection,
+    resolve_cos_tx_selection, resolve_cos_tx_selection_at,
 };
 // Private use, not a re-export: a `pub(super) use` of a `pub(super)`
 // item triggers E0364. drain.rs reaches this through `use super::*;`.

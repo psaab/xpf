@@ -4,7 +4,6 @@
 
 use super::*;
 
-
 /// Build the complete FilterState from snapshot data.
 pub(crate) fn parse_filter_state(
     filters: &[FirewallFilterSnapshot],
@@ -13,29 +12,29 @@ pub(crate) fn parse_filter_state(
     lo0_filter_v4: &str,
     lo0_filter_v6: &str,
 ) -> FilterState {
+    parse_filter_state_with_three_color(
+        filters,
+        policers,
+        &[],
+        interfaces,
+        lo0_filter_v4,
+        lo0_filter_v6,
+    )
+}
+
+/// Build the complete FilterState from snapshot data, including stable
+/// three-color policer runtimes.
+pub(crate) fn parse_filter_state_with_three_color(
+    filters: &[FirewallFilterSnapshot],
+    policers: &[PolicerSnapshot],
+    three_color_policers: &[ThreeColorPolicerSnapshot],
+    interfaces: &[crate::InterfaceSnapshot],
+    lo0_filter_v4: &str,
+    lo0_filter_v6: &str,
+) -> FilterState {
     let mut state = FilterState::default();
 
-    // Parse filters
-    for snap in filters {
-        let key = qualify_filter_key(&snap.family, &snap.name);
-        let filter = Filter {
-            name: snap.name.clone(),
-            family: snap.family.clone(),
-            terms: snap.terms.iter().map(|t| parse_term(t)).collect(),
-            affects_tx_selection: snap
-                .terms
-                .iter()
-                .any(|term| !term.forwarding_class.is_empty() || term.dscp_rewrite.is_some()),
-            affects_route_lookup: snap
-                .terms
-                .iter()
-                .any(|term| !term.routing_instance.is_empty()),
-            has_counter_terms: snap.terms.iter().any(|term| !term.count.is_empty()),
-        };
-        state.filters.insert(key, Arc::new(filter));
-    }
-
-    // Parse policers
+    // Parse legacy token-bucket policers.
     for snap in policers {
         state.policers.insert(
             snap.name.clone(),
@@ -46,6 +45,45 @@ pub(crate) fn parse_filter_state(
                 snap.discard_excess,
             ),
         );
+    }
+
+    // Parse three-color policers by stable name order. Terms store Arc
+    // handles, so cache-hit enforcement uses the same logical runtime.
+    let mut three_color = three_color_policers.iter().collect::<Vec<_>>();
+    three_color.sort_by(|a, b| a.name.cmp(&b.name));
+    for snap in three_color {
+        let Some(runtime) = parse_three_color_policer(snap, state.three_color_policers.len() + 1)
+        else {
+            continue;
+        };
+        state
+            .three_color_policer_by_name
+            .insert(runtime.name.to_string(), runtime.clone());
+        state.three_color_policers.push(runtime);
+    }
+
+    // Parse filters
+    for snap in filters {
+        let key = qualify_filter_key(&snap.family, &snap.name);
+        let terms = snap
+            .terms
+            .iter()
+            .map(|t| parse_term(t, &state.three_color_policer_by_name))
+            .collect::<Vec<_>>();
+        let filter = Filter {
+            name: snap.name.clone(),
+            family: snap.family.clone(),
+            affects_tx_selection: terms
+                .iter()
+                .any(|term| !term.forwarding_class.is_empty() || term.dscp_rewrite.is_some()),
+            affects_route_lookup: terms.iter().any(|term| !term.routing_instance.is_empty()),
+            has_counter_terms: terms.iter().any(|term| term.has_count),
+            has_three_color_policer_terms: terms
+                .iter()
+                .any(|term| term.three_color_policer.is_some()),
+            terms,
+        };
+        state.filters.insert(key, Arc::new(filter));
     }
 
     // Build per-interface filter assignments
@@ -62,6 +100,9 @@ pub(crate) fn parse_filter_state(
                         .insert(iface.ifindex);
                     state.has_input_tx_selection_v4 = true;
                 }
+                if filter.has_three_color_policer_terms {
+                    state.has_input_three_color_policer_v4 = true;
+                }
                 if filter.affects_route_lookup {
                     state
                         .iface_filter_v4_affects_route_lookup
@@ -76,7 +117,10 @@ pub(crate) fn parse_filter_state(
         if !iface.filter_output_v4.is_empty() {
             let key = qualify_filter_key("inet", &iface.filter_output_v4);
             if let Some(filter) = state.filters.get(&key) {
-                if filter.affects_tx_selection || filter.has_counter_terms {
+                if filter.affects_tx_selection
+                    || filter.has_counter_terms
+                    || filter.has_three_color_policer_terms
+                {
                     state
                         .iface_filter_out_v4_needs_tx_eval
                         .insert(iface.ifindex);
@@ -99,6 +143,9 @@ pub(crate) fn parse_filter_state(
                         .insert(iface.ifindex);
                     state.has_input_tx_selection_v6 = true;
                 }
+                if filter.has_three_color_policer_terms {
+                    state.has_input_three_color_policer_v6 = true;
+                }
                 if filter.affects_route_lookup {
                     state
                         .iface_filter_v6_affects_route_lookup
@@ -113,7 +160,10 @@ pub(crate) fn parse_filter_state(
         if !iface.filter_output_v6.is_empty() {
             let key = qualify_filter_key("inet6", &iface.filter_output_v6);
             if let Some(filter) = state.filters.get(&key) {
-                if filter.affects_tx_selection || filter.has_counter_terms {
+                if filter.affects_tx_selection
+                    || filter.has_counter_terms
+                    || filter.has_three_color_policer_terms
+                {
                     state
                         .iface_filter_out_v6_needs_tx_eval
                         .insert(iface.ifindex);
@@ -145,11 +195,56 @@ pub(crate) fn parse_filter_state(
     state
 }
 
+fn parse_three_color_policer(
+    snap: &ThreeColorPolicerSnapshot,
+    id: usize,
+) -> Option<Arc<ThreeColorPolicerRuntime>> {
+    let treatments = treatments_from_then_action(&snap.then_action);
+    let state = match snap.mode.as_str() {
+        "single-rate" => ThreeColorPolicerState::sr_tcm_with_treatments(
+            snap.committed_rate_bytes_per_sec,
+            snap.committed_burst_bytes,
+            snap.peak_or_excess_burst_bytes,
+            snap.color_blind,
+            treatments,
+        )
+        .ok()?,
+        "two-rate" => ThreeColorPolicerState::tr_tcm_with_treatments(
+            snap.committed_rate_bytes_per_sec,
+            snap.committed_burst_bytes,
+            snap.peak_or_excess_rate_bytes_per_sec,
+            snap.peak_or_excess_burst_bytes,
+            snap.color_blind,
+            treatments,
+        )
+        .ok()?,
+        _ => return None,
+    };
+    Some(Arc::new(ThreeColorPolicerRuntime::new(
+        id as u32,
+        snap.name.clone(),
+        state,
+    )))
+}
+
+fn treatments_from_then_action(action: &str) -> ThreeColorTreatments {
+    if action == "discard" {
+        return ThreeColorTreatments {
+            red: ColorTreatment::drop(),
+            ..ThreeColorTreatments::default()
+        };
+    }
+    ThreeColorTreatments::default()
+}
+
 fn qualify_filter_key(family: &str, filter_name: &str) -> String {
     format!("{family}:{filter_name}")
 }
 
-fn parse_term(snap: &FirewallTermSnapshot) -> FilterTerm {
+fn parse_term(
+    snap: &FirewallTermSnapshot,
+    three_color_policers: &rustc_hash::FxHashMap<String, Arc<ThreeColorPolicerRuntime>>,
+) -> FilterTerm {
     let mut source_v4 = Vec::new();
     let mut source_v6 = Vec::new();
     for addr in &snap.source_addresses {
@@ -202,6 +297,7 @@ fn parse_term(snap: &FirewallTermSnapshot) -> FilterTerm {
         has_count: !snap.count.is_empty(),
         log: snap.log,
         policer_name: snap.policer.clone(),
+        three_color_policer: three_color_policers.get(&snap.policer).cloned(),
         routing_instance: snap.routing_instance.clone(),
         forwarding_class: Arc::<str>::from(snap.forwarding_class.as_str()),
         dscp_rewrite,
@@ -316,4 +412,3 @@ fn build_u6_match_bitmap(values: &[u8]) -> u64 {
     }
     bitmap
 }
-

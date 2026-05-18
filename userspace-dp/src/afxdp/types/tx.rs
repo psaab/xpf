@@ -73,6 +73,7 @@ pub(in crate::afxdp) struct PendingForwardRequest {
     pub(in crate::afxdp) nat64_reverse: Option<Nat64ReverseInfo>,
     pub(in crate::afxdp) cos_queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
+    pub(in crate::afxdp) cos_tx_selection_resolved: bool,
 }
 
 pub(in crate::afxdp) struct PreparedTxRequest {

@@ -13,7 +13,10 @@
 
 use super::*;
 
-pub(super) fn should_install_local_reverse_session(decision: SessionDecision, fabric_ingress: bool) -> bool {
+pub(super) fn should_install_local_reverse_session(
+    decision: SessionDecision,
+    fabric_ingress: bool,
+) -> bool {
     let fabric_wire_placeholder =
         shared_ops::is_fabric_wire_placeholder(fabric_ingress, false, decision);
     decision.resolution.disposition != ForwardingDisposition::FabricRedirect
@@ -33,6 +36,7 @@ pub(super) fn build_live_forward_request(
     flow: Option<&SessionFlow>,
     fabric_ingress_zone: Option<u16>,
     apply_nat_on_fabric: bool,
+    now_ns: u64,
 ) -> Option<PendingForwardRequest> {
     let frame = area.slice(desc.addr as usize, desc.len as usize)?;
     build_live_forward_request_from_frame(
@@ -47,6 +51,7 @@ pub(super) fn build_live_forward_request(
         flow,
         fabric_ingress_zone,
         apply_nat_on_fabric,
+        now_ns,
         None,
         None,
     )
@@ -64,6 +69,7 @@ pub(super) fn build_live_forward_request_from_frame(
     flow: Option<&SessionFlow>,
     fabric_ingress_zone: Option<u16>,
     apply_nat_on_fabric: bool,
+    now_ns: u64,
     hints: Option<PendingForwardHints>,
     precomputed_tx_selection: Option<&CachedTxSelectionDescriptor>,
 ) -> Option<PendingForwardRequest> {
@@ -103,19 +109,31 @@ pub(super) fn build_live_forward_request_from_frame(
     {
         decision.resolution.src_mac = zone_redirect.src_mac;
     }
+    let fallback_flow;
+    let tx_selection_flow = if flow.is_some() {
+        flow
+    } else {
+        fallback_flow = parse_session_flow_from_meta(meta);
+        fallback_flow.as_ref()
+    };
     let cos = precomputed_tx_selection
         .map(|selection| CoSTxSelection {
             queue_id: selection.queue_id,
             dscp_rewrite: selection.dscp_rewrite,
+            drop: false,
         })
         .unwrap_or_else(|| {
-            resolve_cos_tx_selection(
+            resolve_cos_tx_selection_at(
                 forwarding,
                 decision.resolution.egress_ifindex,
                 meta,
-                flow.map(|flow| &flow.forward_key),
+                tx_selection_flow.map(|flow| &flow.forward_key),
+                now_ns,
             )
         });
+    if cos.drop {
+        return None;
+    }
     Some(PendingForwardRequest {
         target_ifindex,
         target_binding_index,
@@ -126,9 +144,10 @@ pub(super) fn build_live_forward_request_from_frame(
         decision,
         apply_nat_on_fabric,
         expected_ports,
-        flow_key: flow.map(|flow| flow.forward_key.clone()),
+        flow_key: tx_selection_flow.map(|flow| flow.forward_key.clone()),
         nat64_reverse: None,
         cos_queue_id: cos.queue_id,
         dscp_rewrite: cos.dscp_rewrite,
+        cos_tx_selection_resolved: true,
     })
 }

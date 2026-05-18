@@ -316,6 +316,118 @@ func TestConfigSnapshotThreeColorPolicersRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProcessStatusThreeColorPolicerCountersRoundTrip(t *testing.T) {
+	in := ProcessStatus{
+		ThreeColorPolicerCounters: []ThreeColorPolicerStatus{
+			{
+				ID:            1,
+				Name:          "wan-egress",
+				Mode:          "single-rate",
+				ColorBlind:    true,
+				GreenPackets:  10,
+				GreenBytes:    1000,
+				YellowPackets: 3,
+				YellowBytes:   300,
+				RedPackets:    2,
+				RedBytes:      200,
+				DropPackets:   2,
+				DropBytes:     200,
+			},
+		},
+	}
+
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["three_color_policer_counters"]; !ok {
+		t.Fatalf("wire key missing from ProcessStatus JSON: %s", string(raw))
+	}
+
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if !reflect.DeepEqual(back.ThreeColorPolicerCounters, in.ThreeColorPolicerCounters) {
+		t.Fatalf("ThreeColorPolicerCounters = %+v, want %+v",
+			back.ThreeColorPolicerCounters, in.ThreeColorPolicerCounters)
+	}
+}
+
+func TestProcessStatusInjectPacketTupleVersionRoundTrip(t *testing.T) {
+	in := ProcessStatus{
+		InjectPacketTupleProtocolVersion: InjectPacketTupleProtocolVersion,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["inject_packet_tuple_protocol_version"]; !ok {
+		t.Fatalf("wire key missing from ProcessStatus JSON: %s", string(raw))
+	}
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if back.InjectPacketTupleProtocolVersion != InjectPacketTupleProtocolVersion {
+		t.Fatalf("InjectPacketTupleProtocolVersion = %d, want %d",
+			back.InjectPacketTupleProtocolVersion, InjectPacketTupleProtocolVersion)
+	}
+}
+
+func TestInjectPacketRequestTupleMetadataRoundTrip(t *testing.T) {
+	sourcePort := uint16(4660)
+	destinationPort := uint16(0)
+	in := InjectPacketRequest{
+		Slot:                 7,
+		PacketLength:         128,
+		AddrFamily:           2,
+		Protocol:             1,
+		ConfigGeneration:     11,
+		FIBGeneration:        12,
+		MetadataValid:        true,
+		DestinationIP:        "172.16.80.200",
+		EmitOnWire:           true,
+		TupleMetadataVersion: InjectPacketTupleProtocolVersion,
+		SourceIP:             "172.16.80.8",
+		SourcePort:           &sourcePort,
+		DestinationPort:      &destinationPort,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range []string{
+		"tuple_metadata_version",
+		"source_ip",
+		"source_port",
+		"destination_port",
+	} {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from InjectPacketRequest JSON: %s", key, string(raw))
+		}
+	}
+	var back InjectPacketRequest
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal InjectPacketRequest: %v", err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
+	}
+}
+
 func TestCoSQueueStatusDrainPhaseCountersRoundTrip(t *testing.T) {
 	in := CoSQueueStatus{
 		QueueID:                 0,

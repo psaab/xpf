@@ -103,16 +103,19 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     for request in pending_forwards.iter_mut() {
         let source_offset = request.desc.addr;
         let ingress_slot = ingress_binding.slot;
-        let tx_selection_enabled = if request.meta.addr_family as i32 == libc::AF_INET6 {
-            tx_selection_enabled_v6
-        } else {
-            tx_selection_enabled_v4
-        };
-        if tx_selection_enabled && request.cos_queue_id.is_none() && request.dscp_rewrite.is_none()
-        {
-            let cos = resolve_pending_forward_cos_tx_selection(forwarding, &request);
+        if pending_forward_needs_cos_tx_selection(
+            request,
+            tx_selection_enabled_v4,
+            tx_selection_enabled_v6,
+        ) {
+            let cos = resolve_pending_forward_cos_tx_selection(forwarding, &request, now_ns);
+            if cos.drop {
+                recycle_ingress_frame(ingress_binding, source_offset, now_ns);
+                continue;
+            }
             request.cos_queue_id = cos.queue_id;
             request.dscp_rewrite = cos.dscp_rewrite;
+            request.cos_tx_selection_resolved = true;
         }
         let target_binding_index = request.target_binding_index.or_else(|| {
             binding_lookup.target_index(
@@ -145,7 +148,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 expected_ports: None,
                 expected_addr_family: request.meta.addr_family,
                 expected_protocol: request.meta.protocol,
-                flow_key: None,
+                flow_key: request.flow_key.clone(),
                 egress_ifindex: request.decision.resolution.egress_ifindex,
                 cos_queue_id: request.cos_queue_id,
                 dscp_rewrite: request.dscp_rewrite,
@@ -1193,13 +1196,28 @@ pub(in crate::afxdp) fn resolve_tx_binding_ifindex(
 fn resolve_pending_forward_cos_tx_selection(
     forwarding: &ForwardingState,
     request: &PendingForwardRequest,
+    now_ns: u64,
 ) -> CoSTxSelection {
-    resolve_cos_tx_selection(
+    resolve_cos_tx_selection_at(
         forwarding,
         request.decision.resolution.egress_ifindex,
         request.meta,
         request.flow_key.as_ref(),
+        now_ns,
     )
+}
+
+fn pending_forward_needs_cos_tx_selection(
+    request: &PendingForwardRequest,
+    tx_selection_enabled_v4: bool,
+    tx_selection_enabled_v6: bool,
+) -> bool {
+    let tx_selection_enabled = if request.meta.addr_family as i32 == libc::AF_INET6 {
+        tx_selection_enabled_v6
+    } else {
+        tx_selection_enabled_v4
+    };
+    tx_selection_enabled && !request.cos_tx_selection_resolved
 }
 
 pub(in crate::afxdp) fn maybe_reinject_slow_path(
