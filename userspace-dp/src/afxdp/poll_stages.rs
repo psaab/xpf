@@ -497,6 +497,7 @@ mod tests {
             ifindex: 24,
         };
         let binding_lookup = WorkerBindingLookup::default();
+        let mirror_targets = MirrorTargetMap::default();
         let ha_state = BTreeMap::new();
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
         let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -512,6 +513,7 @@ mod tests {
         let worker_ctx = WorkerContext {
             ident: &ident,
             binding_lookup: &binding_lookup,
+            mirror_targets: &mirror_targets,
             forwarding: &forwarding,
             ha_state: &ha_state,
             dynamic_neighbors: &dynamic_neighbors,

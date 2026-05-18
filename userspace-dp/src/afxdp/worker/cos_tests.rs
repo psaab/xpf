@@ -31,6 +31,7 @@ fn test_tx_request(ifindex: i32) -> TxRequest {
         egress_ifindex: ifindex,
         cos_queue_id: Some(4),
         dscp_rewrite: None,
+        mirror_clone: false,
     }
 }
 

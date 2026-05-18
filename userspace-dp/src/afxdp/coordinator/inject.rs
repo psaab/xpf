@@ -121,6 +121,7 @@ impl super::Coordinator {
                             egress_ifindex: resolution.egress_ifindex,
                             cos_queue_id: cos.queue_id,
                             dscp_rewrite: cos.dscp_rewrite,
+                            mirror_clone: false,
                         })?;
                     }
                 } else {

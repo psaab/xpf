@@ -366,6 +366,33 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// non-zero value usually indicates a frame-building bug upstream
     /// or a legitimate oversize packet. Subset of `tx_errors`.
     pub(super) tx_submit_error_drops: AtomicU64,
+    /// #1376: ingress mirror clone packets successfully admitted to a
+    /// mirror output binding. Written by the ingress binding's worker.
+    pub(super) mirrored_packets: AtomicU64,
+    /// #1376: full L2 bytes copied into admitted mirror clones.
+    pub(super) mirrored_bytes: AtomicU64,
+    /// #1376: mirror clone dropped for frame-unavailable outcomes:
+    /// oversized packet (`len > tx_frame_capacity()`) or UMEM slice
+    /// failure while cloning.
+    pub(super) mirror_drops_no_frame: AtomicU64,
+    /// #1376: mirror clone dropped specifically to preserve the
+    /// output binding's owner-local TX-frame reserve. Split from
+    /// `mirror_drops_no_frame` so operators can distinguish an
+    /// oversize/slice failure from pressure that would starve normal TX.
+    pub(super) mirror_drops_tx_frame_reserve: AtomicU64,
+    /// #1376: mirror clone dropped because no live mirror target
+    /// binding was available for the resolved output TX ifindex.
+    pub(super) mirror_drops_no_binding: AtomicU64,
+    /// #1376: mirror clone dropped because the output binding already
+    /// had mirror/primary TX backlog. Mirrors are lossy under pressure.
+    pub(super) mirror_drops_queue_full: AtomicU64,
+    /// #1376: same-worker mirror queue-full drops. Split from
+    /// cross-worker live-inbox drops so operators can localize mirror
+    /// pressure to the ingress/owner worker boundary.
+    pub(super) mirror_drops_queue_full_same_worker: AtomicU64,
+    /// #1376: cross-worker mirror queue-full drops at the target live
+    /// inbox/admission boundary.
+    pub(super) mirror_drops_queue_full_cross_worker: AtomicU64,
     /// #710: packets dropped in `apply_worker_shaped_tx_requests`
     /// because the worker could not locate any binding for the
     /// request's egress_ifindex. Happens when a cross-worker CoS
@@ -481,6 +508,10 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) rx_fill_ring_empty_descs: AtomicU64,
     pub(super) last_heartbeat: AtomicU64,
     pub(super) max_pending_tx: AtomicU32,
+    /// Atomic admission count for `pending_tx`: queued requests plus
+    /// producer-held reservations that have not committed yet. This is the
+    /// linearizable capacity gate; `pending_tx.len()` remains observational.
+    pub(super) pending_tx_admitted: AtomicUsize,
     pub(super) last_error: Mutex<String>,
     /// Cross-worker redirect inbox (#706). N producer workers push
     /// redirected `TxRequest`s; the single owner worker drains. Bounded
@@ -489,6 +520,33 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// against the owner's drain.
     pub(super) pending_tx: MpscInbox<TxRequest>,
     pub(super) pending_session_deltas: Mutex<VecDeque<SessionDeltaInfo>>,
+}
+
+pub(in crate::afxdp) struct PendingTxAdmission {
+    live: Arc<BindingLiveState>,
+    active: bool,
+}
+
+impl PendingTxAdmission {
+    #[inline]
+    pub(in crate::afxdp) fn enqueue_owned(mut self, req: TxRequest) -> Result<(), TxRequest> {
+        match self.live.pending_tx.push(req) {
+            Ok(()) => {
+                self.active = false;
+                Ok(())
+            }
+            Err(req) => Err(req),
+        }
+    }
+}
+
+impl Drop for PendingTxAdmission {
+    #[inline]
+    fn drop(&mut self) {
+        if self.active {
+            self.live.release_pending_tx_admission();
+        }
+    }
 }
 
 impl BindingLiveState {
@@ -559,6 +617,14 @@ impl BindingLiveState {
             redirect_inbox_overflow_drops: AtomicU64::new(0),
             pending_tx_local_overflow_drops: AtomicU64::new(0),
             tx_submit_error_drops: AtomicU64::new(0),
+            mirrored_packets: AtomicU64::new(0),
+            mirrored_bytes: AtomicU64::new(0),
+            mirror_drops_no_frame: AtomicU64::new(0),
+            mirror_drops_tx_frame_reserve: AtomicU64::new(0),
+            mirror_drops_no_binding: AtomicU64::new(0),
+            mirror_drops_queue_full: AtomicU64::new(0),
+            mirror_drops_queue_full_same_worker: AtomicU64::new(0),
+            mirror_drops_queue_full_cross_worker: AtomicU64::new(0),
             no_owner_binding_drops: AtomicU64::new(0),
             // #709 / #746: owner-profile telemetry, split by writer
             // into two cacheline-isolated groups. Histograms are zero-
@@ -607,6 +673,7 @@ impl BindingLiveState {
             rx_fill_ring_empty_descs: AtomicU64::new(0),
             last_heartbeat: AtomicU64::new(0),
             max_pending_tx: AtomicU32::new(0),
+            pending_tx_admitted: AtomicUsize::new(0),
             last_error: Mutex::new(String::new()),
             pending_tx: MpscInbox::new(PENDING_TX_INBOX_HARD_CAP),
             pending_session_deltas: Mutex::new(VecDeque::new()),
@@ -871,6 +938,20 @@ impl BindingLiveState {
                 .pending_tx_local_overflow_drops
                 .load(Ordering::Relaxed),
             tx_submit_error_drops: self.tx_submit_error_drops.load(Ordering::Relaxed),
+            mirrored_packets: self.mirrored_packets.load(Ordering::Relaxed),
+            mirrored_bytes: self.mirrored_bytes.load(Ordering::Relaxed),
+            mirror_drops_no_frame: self.mirror_drops_no_frame.load(Ordering::Relaxed),
+            mirror_drops_tx_frame_reserve: self
+                .mirror_drops_tx_frame_reserve
+                .load(Ordering::Relaxed),
+            mirror_drops_no_binding: self.mirror_drops_no_binding.load(Ordering::Relaxed),
+            mirror_drops_queue_full: self.mirror_drops_queue_full.load(Ordering::Relaxed),
+            mirror_drops_queue_full_same_worker: self
+                .mirror_drops_queue_full_same_worker
+                .load(Ordering::Relaxed),
+            mirror_drops_queue_full_cross_worker: self
+                .mirror_drops_queue_full_cross_worker
+                .load(Ordering::Relaxed),
             post_drain_backup_bytes: self
                 .owner_profile_owner
                 .post_drain_backup_bytes
@@ -1065,6 +1146,21 @@ impl BindingLiveState {
         Ok(())
     }
 
+    pub(super) fn try_enqueue_tx_owned(&self, req: TxRequest) -> Result<(), TxRequest> {
+        self.try_push_redirect_inbox(req)
+    }
+
+    pub(in crate::afxdp) fn try_reserve_mirror_tx_owned(
+        live: &Arc<Self>,
+        mirror_pending_limit: usize,
+    ) -> Result<PendingTxAdmission, ()> {
+        live.try_acquire_pending_tx_admission(Some(mirror_pending_limit), false)?;
+        Ok(PendingTxAdmission {
+            live: Arc::clone(live),
+            active: true,
+        })
+    }
+
     /// Shared push path for `enqueue_tx` and `enqueue_tx_owned`.
     /// Drop-newest on overflow: if the soft cap or ring hard cap is hit,
     /// drop the incoming request and bump the overflow counters. This is
@@ -1075,20 +1171,74 @@ impl BindingLiveState {
     /// `redirect_inbox_overflow_drops` as the dedicated view) is preserved.
     #[inline]
     fn push_redirect_inbox(&self, req: TxRequest) {
-        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
-        if max_pending > 0 && self.pending_tx.len() >= max_pending {
-            self.record_redirect_inbox_overflow();
+        if self.try_acquire_pending_tx_admission(None, true).is_err() {
             return;
         }
         if self.pending_tx.push(req).is_err() {
-            // Hard cap hit — ring is full. Rare: the hard cap sits at
-            // `PENDING_TX_INBOX_HARD_CAP`, so a non-zero soft cap
-            // normally fires first. This branch is reachable only under
-            // concurrent producers racing past the soft-cap check, or
-            // when the caller has set `max_pending_tx = 0` (treat as
-            // unlimited → hard cap is the only brake).
+            self.release_pending_tx_admission();
             self.record_redirect_inbox_overflow();
         }
+    }
+
+    #[inline]
+    fn try_push_redirect_inbox(&self, req: TxRequest) -> Result<(), TxRequest> {
+        if self.try_acquire_pending_tx_admission(None, true).is_err() {
+            return Err(req);
+        }
+        if let Err(req) = self.pending_tx.push(req) {
+            self.release_pending_tx_admission();
+            self.record_redirect_inbox_overflow();
+            return Err(req);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn pending_tx_admission_cap(&self, extra_limit: Option<usize>) -> usize {
+        let mut admission_cap = self.pending_tx.capacity();
+        let max_pending = self.max_pending_tx.load(Ordering::Relaxed) as usize;
+        if max_pending > 0 {
+            admission_cap = admission_cap.min(max_pending);
+        }
+        if let Some(limit) = extra_limit {
+            if limit > 0 {
+                admission_cap = admission_cap.min(limit);
+            }
+        }
+        admission_cap
+    }
+
+    #[inline]
+    fn try_acquire_pending_tx_admission(
+        &self,
+        extra_limit: Option<usize>,
+        record_overflow: bool,
+    ) -> Result<(), ()> {
+        let admission_cap = self.pending_tx_admission_cap(extra_limit);
+        let mut admitted = self.pending_tx_admitted.load(Ordering::Relaxed);
+        loop {
+            if admitted >= admission_cap {
+                if record_overflow {
+                    self.record_redirect_inbox_overflow();
+                }
+                return Err(());
+            }
+            match self.pending_tx_admitted.compare_exchange_weak(
+                admitted,
+                admitted + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => admitted = actual,
+            }
+        }
+    }
+
+    #[inline]
+    fn release_pending_tx_admission(&self) {
+        let previous = self.pending_tx_admitted.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "pending_tx_admitted underflow");
     }
 
     #[inline]
@@ -1119,6 +1269,7 @@ impl BindingLiveState {
         // of `take_pending_tx_into`. Enforced by convention (see the doc
         // comment on `pending_tx` in `BindingLiveState`).
         while let Some(req) = unsafe { self.pending_tx.pop() } {
+            self.release_pending_tx_admission();
             out.push_back(req);
         }
     }

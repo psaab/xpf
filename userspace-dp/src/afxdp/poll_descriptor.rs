@@ -261,6 +261,45 @@ pub(super) fn poll_binding_process_descriptor(
                                     if is_self_target && owned_packet_frame.is_none() {
                                         let ingress_slot = binding.slot;
                                         let flow_key = flow.forward_key.clone();
+                                        let mirror_config = resolve_mirror_config(
+                                            worker_ctx.forwarding,
+                                            meta.ingress_ifindex as i32,
+                                            meta.ingress_vlan_id,
+                                        );
+                                        let mut mirror_next_counter = None;
+                                        let mut mirror_admission = mirror_config.and_then(|config| {
+                                            let admission = admit_mirror_clone_to_live(
+                                                worker_ctx.mirror_targets,
+                                                resolve_tx_binding_ifindex(
+                                                    worker_ctx.forwarding,
+                                                    config.output_ifindex,
+                                                ),
+                                                worker_ctx.ident.queue_id,
+                                                packet_frame.len(),
+                                            );
+                                            match admission {
+                                                Ok(admission) => {
+                                                    let mut next_counter =
+                                                        binding.mirror_sample_counter;
+                                                    if mirror_sample_allows(
+                                                        config.rate,
+                                                        &mut next_counter,
+                                                    ) {
+                                                        mirror_next_counter = Some(next_counter);
+                                                        Some((config, Ok(admission)))
+                                                    } else {
+                                                        mirror_next_counter = Some(next_counter);
+                                                        None
+                                                    }
+                                                }
+                                                Err(result) => Some((config, Err(result))),
+                                            }
+                                        });
+                                        let mirror_frame_len = packet_frame.len();
+                                        let mut mirror_frame = mirror_admission
+                                            .as_ref()
+                                            .and_then(|(_, admission)| admission.as_ref().ok())
+                                            .map(|_| packet_frame.to_vec());
                                         // Try descriptor-based straight-line rewrite first (no branches
                                         // for AF, NAT type, or checksum recomputation).  Falls back to
                                         // generic rewrite on port mismatch, NAT64, or NPTv6.
@@ -282,6 +321,43 @@ pub(super) fn poll_binding_process_descriptor(
                                             )
                                         });
                                         if let Some(rewrite_result) = rewrite_result {
+                                            if let Some(next_counter) = mirror_next_counter {
+                                                binding.mirror_sample_counter = next_counter;
+                                            }
+                                            if let Some((mirror_config, admission)) =
+                                                mirror_admission.take()
+                                            {
+                                                let result = match admission {
+                                                    Ok(admission) => {
+                                                        if let Some(mirror_frame) =
+                                                            mirror_frame.take()
+                                                        {
+                                                            let cos_queue_id = mirror_cos_queue_id(
+                                                                worker_ctx.forwarding,
+                                                                mirror_config.output_ifindex,
+                                                                meta.into(),
+                                                                Some(&flow_key),
+                                                            );
+                                                            enqueue_admitted_mirror_clone_to_live(
+                                                                admission,
+                                                                mirror_config,
+                                                                mirror_frame,
+                                                                meta.into(),
+                                                                Some(&flow_key),
+                                                                cos_queue_id,
+                                                            )
+                                                        } else {
+                                                            MirrorCloneResult::NoFrame
+                                                        }
+                                                    }
+                                                    Err(result) => result,
+                                                };
+                                                record_mirror_clone_result(
+                                                    &binding.live,
+                                                    result,
+                                                    mirror_frame_len,
+                                                );
+                                            }
                                             binding.tx_pipeline.pending_tx_prepared.push_back(
                                                 PreparedTxRequest {
                                                     offset: rewrite_result.offset,
@@ -304,6 +380,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                     dscp_rewrite: cached_descriptor
                                                         .tx_selection
                                                         .dscp_rewrite,
+                                                    mirror_clone: false,
                                                 },
                                             );
                                             binding.tx_counters.pending_in_place_tx_packets += 1;

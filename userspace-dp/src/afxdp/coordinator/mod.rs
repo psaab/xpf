@@ -28,6 +28,7 @@ pub struct Coordinator {
     pub(crate) neighbors: NeighborManager,
     pub(in crate::afxdp) sessions: SessionManager,
     pub(in crate::afxdp) workers: WorkerManager,
+    pub(crate) mirror_targets: Arc<ArcSwap<MirrorTargetMap>>,
     pub(crate) forwarding: ForwardingState,
     pub(crate) policy_counters: PolicyCounterStore,
     pub(crate) recent_exceptions: Arc<Mutex<VecDeque<ExceptionStatus>>>,
@@ -65,6 +66,7 @@ impl Coordinator {
             neighbors: NeighborManager::new(),
             sessions: SessionManager::new(),
             workers: WorkerManager::new(),
+            mirror_targets: Arc::new(ArcSwap::from_pointee(MirrorTargetMap::default())),
             forwarding: ForwardingState::default(),
             policy_counters: PolicyCounterStore::default(),
             recent_exceptions: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_RECENT_EXCEPTIONS))),
@@ -205,6 +207,8 @@ impl Coordinator {
             self.bpf_maps.map_fd.as_ref(),
             self.bpf_maps.heartbeat_map_fd.as_ref(),
         );
+        self.mirror_targets
+            .store(Arc::new(MirrorTargetMap::default()));
         // #925 Phase 1: drop the per-worker panic slots alongside the
         // workers themselves so a long-running daemon that reconciles
         // through many worker-id sets doesn't accumulate stale slots.
@@ -617,6 +621,10 @@ impl Coordinator {
             })
             .collect::<BTreeMap<_, _>>();
         let owner_map = build_cos_owner_worker_by_queue(&self.forwarding, &workers);
+        self.mirror_targets.store(Arc::new(build_mirror_target_map(
+            &self.workers.identities,
+            &self.workers.live,
+        )));
         let active_shards_by_egress_ifindex =
             build_cos_active_shards_by_egress_ifindex_with_fallback_ifindexes(
                 &self.forwarding,
@@ -688,6 +696,7 @@ impl Coordinator {
             let shared_cos_exact_backlogs = self.cos.exact_backlogs.clone();
             let shared_cos_queue_leases = self.cos.queue_leases.clone();
             let shared_cos_queue_vtime_floors = self.cos.queue_vtime_floors.clone();
+            let shared_mirror_targets = self.mirror_targets.clone();
             let runtime_atomics =
                 std::sync::Arc::new(super::worker_runtime::WorkerRuntimeAtomics::new());
             let runtime_atomics_clone = runtime_atomics.clone();
@@ -732,6 +741,7 @@ impl Coordinator {
                         shared_cos_exact_backlogs,
                         shared_cos_queue_leases,
                         shared_cos_queue_vtime_floors,
+                        shared_mirror_targets,
                         cos_status_clone,
                         runtime_atomics_clone,
                     );
@@ -1222,6 +1232,16 @@ impl Coordinator {
                 binding.redirect_inbox_overflow_drops = snap.redirect_inbox_overflow_drops;
                 binding.pending_tx_local_overflow_drops = snap.pending_tx_local_overflow_drops;
                 binding.tx_submit_error_drops = snap.tx_submit_error_drops;
+                binding.mirrored_packets = snap.mirrored_packets;
+                binding.mirrored_bytes = snap.mirrored_bytes;
+                binding.mirror_drops_no_frame = snap.mirror_drops_no_frame;
+                binding.mirror_drops_tx_frame_reserve = snap.mirror_drops_tx_frame_reserve;
+                binding.mirror_drops_no_binding = snap.mirror_drops_no_binding;
+                binding.mirror_drops_queue_full = snap.mirror_drops_queue_full;
+                binding.mirror_drops_queue_full_same_worker =
+                    snap.mirror_drops_queue_full_same_worker;
+                binding.mirror_drops_queue_full_cross_worker =
+                    snap.mirror_drops_queue_full_cross_worker;
                 binding.post_drain_backup_bytes = snap.post_drain_backup_bytes;
                 binding.drain_sent_bytes_shaped_unconditional =
                     snap.drain_sent_bytes_shaped_unconditional;
@@ -1370,6 +1390,14 @@ impl Coordinator {
                 binding.tx_completions = 0;
                 binding.tx_errors = 0;
                 binding.tx_shared_recycle_unknown_slot_drops = 0;
+                binding.mirrored_packets = 0;
+                binding.mirrored_bytes = 0;
+                binding.mirror_drops_no_frame = 0;
+                binding.mirror_drops_tx_frame_reserve = 0;
+                binding.mirror_drops_no_binding = 0;
+                binding.mirror_drops_queue_full = 0;
+                binding.mirror_drops_queue_full_same_worker = 0;
+                binding.mirror_drops_queue_full_cross_worker = 0;
                 binding.post_drain_backup_bytes = 0;
                 binding.drain_sent_bytes_shaped_unconditional = 0;
                 binding.post_drain_backup_cos_drops = 0;
@@ -1607,6 +1635,20 @@ fn build_worker_binding_ifindexes_from_identities(
         out.entry(ident.worker_id)
             .or_default()
             .insert(ident.ifindex);
+    }
+    out
+}
+
+fn build_mirror_target_map(
+    identities: &BTreeMap<u32, BindingIdentity>,
+    live: &BTreeMap<u32, Arc<BindingLiveState>>,
+) -> MirrorTargetMap {
+    let mut out = MirrorTargetMap::default();
+    for (slot, ident) in identities {
+        let Some(binding_live) = live.get(slot) else {
+            continue;
+        };
+        out.insert(ident, binding_live.clone());
     }
     out
 }

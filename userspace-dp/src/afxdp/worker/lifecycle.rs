@@ -18,6 +18,7 @@ pub(super) fn poll_binding(
     binding_index: usize,
     bindings: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
+    mirror_targets: &MirrorTargetMap,
     sessions: &mut SessionTable,
     screen: &mut ScreenState,
     validation: ValidationState,
@@ -168,6 +169,7 @@ pub(super) fn poll_binding(
         let worker_ctx = WorkerContext {
             ident,
             binding_lookup,
+            mirror_targets,
             forwarding,
             ha_state,
             dynamic_neighbors,
@@ -245,6 +247,7 @@ pub(super) fn poll_binding(
                 binding,
                 right,
                 binding_lookup,
+                mirror_targets,
                 &mut pending_forwards,
                 &mut scratch_post_recycles,
                 now_ns,
