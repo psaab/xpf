@@ -917,7 +917,12 @@ mod tests {
         );
         let mut queued = VecDeque::new();
         target_live.take_pending_tx_into(&mut queued);
-        assert_eq!(queued.pop_front().expect("mirror tx").bytes, frame);
+        let req = queued.pop_front().expect("mirror tx");
+        assert!(
+            req.mirror_clone,
+            "flow-cache mirror surface must preserve mirror identity"
+        );
+        assert_eq!(req.bytes, frame);
     }
 
     #[test]
@@ -1039,6 +1044,45 @@ mod tests {
             vec![0x33; 64]
         );
         assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn sampled_live_mirror_missing_target_records_drop_counter() {
+        let ingress_live = BindingLiveState::new();
+        let mirror_targets = MirrorTargetMap::default();
+        let mut forwarding = ForwardingState::default();
+        forwarding.mirror_configs.insert(
+            11,
+            MirrorRuntimeConfig {
+                output_ifindex: 22,
+                rate: 0,
+            },
+        );
+        let mut sample_counter = 0;
+
+        let result = enqueue_sampled_mirror_clone_to_live(
+            &ingress_live,
+            &mirror_targets,
+            &forwarding,
+            11,
+            0,
+            0,
+            &mut sample_counter,
+            &[0x44; 80],
+            test_meta(),
+            None,
+        );
+
+        assert_eq!(result, Some(MirrorCloneResult::NoBinding));
+        assert_eq!(
+            sample_counter, 0,
+            "missing mirror target must fail before consuming a sample"
+        );
+        assert_eq!(
+            ingress_live.mirror_drops_no_binding.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(ingress_live.mirrored_packets.load(Ordering::Relaxed), 0);
     }
 
     #[test]
