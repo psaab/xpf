@@ -534,8 +534,10 @@ func (m *Manager) syncBPFCountersLocked(status *ProcessStatus) {
 		{dataplane.GlobalCtrSessionsClosed, safeDelta(cur.sessionExpires, prev.sessionExpires)},
 		{dataplane.GlobalCtrPolicyDeny, safeDelta(cur.policyDenied, prev.policyDenied)},
 		{dataplane.GlobalCtrScreenDrops, safeDelta(cur.screenDrops, prev.screenDrops)},
-		// Challenge decisions are not SYN-cookie "sent" events until the
-		// userspace helper can transmit bounded SYN-ACK replies.
+		// Propagate only counters that already have BPF-global parity.
+		// Challenges are not SYN-cookie "sent" events until the helper
+		// can transmit bounded SYN-ACK replies, and secret-unavailable is
+		// a local fail-closed signal until HA secret publication exists.
 		{dataplane.GlobalCtrSyncookieValid, safeDelta(cur.synCookieValid, prev.synCookieValid)},
 		{dataplane.GlobalCtrSyncookieInvalid, safeDelta(cur.synCookieInvalid, prev.synCookieInvalid)},
 		{dataplane.GlobalCtrSyncookieBypass, safeDelta(cur.synCookieBypass, prev.synCookieBypass)},

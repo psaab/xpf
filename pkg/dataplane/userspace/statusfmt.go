@@ -11,6 +11,53 @@ import (
 const defaultFlowWorkerMapLimit = 128
 const flowWorkerMapAllLimit = -1
 
+// SYNCookieCounters aggregates userspace per-binding SYN-cookie status counters.
+type SYNCookieCounters struct {
+	Challenges        uint64
+	SecretUnavailable uint64
+	AckValid          uint64
+	AckInvalid        uint64
+	Bypass            uint64
+}
+
+// Any reports whether any SYN-cookie counter is non-zero.
+func (c SYNCookieCounters) Any() bool {
+	return c.Challenges != 0 ||
+		c.SecretUnavailable != 0 ||
+		c.AckValid != 0 ||
+		c.AckInvalid != 0 ||
+		c.Bypass != 0
+}
+
+// SumSYNCookieCounters sums SYN-cookie counters across all bindings in status.
+func SumSYNCookieCounters(status ProcessStatus) SYNCookieCounters {
+	var counters SYNCookieCounters
+	for _, binding := range status.Bindings {
+		counters.Challenges += binding.SYNCookieChallenges
+		counters.SecretUnavailable += binding.SYNCookieSecretUnavailable
+		counters.AckValid += binding.SYNCookieAckValid
+		counters.AckInvalid += binding.SYNCookieAckInvalid
+		counters.Bypass += binding.SYNCookieBypass
+	}
+	return counters
+}
+
+// FormatSYNCookieCounterRows renders non-zero userspace SYN-cookie counters
+// using the same Counter/Value table shape as show screen statistics.
+func FormatSYNCookieCounterRows(counters SYNCookieCounters) string {
+	if !counters.Any() {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  %-30s %s\n", "Userspace SYN-cookie scope", "all bindings")
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie challenges", counters.Challenges)
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie secret unavailable", counters.SecretUnavailable)
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie ACK valid", counters.AckValid)
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie ACK invalid", counters.AckInvalid)
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie bypass", counters.Bypass)
+	return b.String()
+}
+
 func localHAForwardingRole(status ProcessStatus) string {
 	if len(status.HAGroups) == 0 {
 		return ""

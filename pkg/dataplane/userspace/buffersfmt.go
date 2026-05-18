@@ -10,24 +10,29 @@ const (
 	systemBufferUtilizationHeading = "Userspace Buffer Utilization:"
 	systemBufferCountersHeading    = "Userspace Status Counters:"
 
-	systemBufferLabelAFXDPUMEMFrames       = "AF_XDP UMEM frames"
-	systemBufferLabelAFXDPTXRing           = "AF_XDP TX ring"
-	systemBufferLabelCoSQueueBytes         = "CoS queue bytes"
-	systemBufferLabelNeighborCacheEntries  = "Neighbor cache entries"
-	systemBufferLabelFlowCacheActiveFlows  = "Flow cache active flows"
-	systemBufferLabelFlowCacheEvictions    = "Flow cache collision evict"
-	systemBufferLabelPendingFillFrames     = "Pending fill frames"
-	systemBufferLabelSpareFillFrames       = "Spare fill frames"
-	systemBufferLabelPendingTXPrepared     = "Pending TX prepared"
-	systemBufferLabelPendingTXLocal        = "Pending TX local"
-	systemBufferLabelTXRingFullEvents      = "TX ring full events"
-	systemBufferLabelSendtoENOBUFS         = "sendto ENOBUFS"
-	systemBufferLabelBoundPendingOverflow  = "Bound pending overflow"
-	systemBufferLabelCoSQueueOverflow      = "CoS queue overflow"
-	systemBufferLabelRXFillRingEmptyDescs  = "RX fill-ring empty descs"
-	systemBufferLabelRedirectInboxOverflow = "Redirect inbox overflow"
-	systemBufferLabelPendingTXLocalOver    = "Pending TX local overflow"
-	systemBufferLabelTXSubmitErrorDrops    = "TX submit error drops"
+	systemBufferLabelAFXDPUMEMFrames        = "AF_XDP UMEM frames"
+	systemBufferLabelAFXDPTXRing            = "AF_XDP TX ring"
+	systemBufferLabelCoSQueueBytes          = "CoS queue bytes"
+	systemBufferLabelNeighborCacheEntries   = "Neighbor cache entries"
+	systemBufferLabelFlowCacheActiveFlows   = "Flow cache active flows"
+	systemBufferLabelFlowCacheEvictions     = "Flow cache collision evict"
+	systemBufferLabelPendingFillFrames      = "Pending fill frames"
+	systemBufferLabelSpareFillFrames        = "Spare fill frames"
+	systemBufferLabelPendingTXPrepared      = "Pending TX prepared"
+	systemBufferLabelPendingTXLocal         = "Pending TX local"
+	systemBufferLabelTXRingFullEvents       = "TX ring full events"
+	systemBufferLabelSendtoENOBUFS          = "sendto ENOBUFS"
+	systemBufferLabelBoundPendingOverflow   = "Bound pending overflow"
+	systemBufferLabelCoSQueueOverflow       = "CoS queue overflow"
+	systemBufferLabelRXFillRingEmptyDescs   = "RX fill-ring empty descs"
+	systemBufferLabelRedirectInboxOverflow  = "Redirect inbox overflow"
+	systemBufferLabelPendingTXLocalOver     = "Pending TX local overflow"
+	systemBufferLabelTXSubmitErrorDrops     = "TX submit error drops"
+	systemBufferLabelSYNCookieChallenges    = "SYN-cookie challenges"
+	systemBufferLabelSYNCookieSecretUnavail = "SYN-cookie secret unavailable"
+	systemBufferLabelSYNCookieAckValid      = "SYN-cookie ACK valid"
+	systemBufferLabelSYNCookieAckInvalid    = "SYN-cookie ACK invalid"
+	systemBufferLabelSYNCookieBypass        = "SYN-cookie bypass"
 )
 
 type systemBufferSample struct {
@@ -55,6 +60,11 @@ type systemBufferSample struct {
 	RedirectInboxOverflowDrops  uint64
 	PendingTXLocalOverflowDrops uint64
 	TxSubmitErrorDrops          uint64
+	SYNCookieChallenges         uint64
+	SYNCookieSecretUnavailable  uint64
+	SYNCookieAckValid           uint64
+	SYNCookieAckInvalid         uint64
+	SYNCookieBypass             uint64
 }
 
 type systemBufferRow struct {
@@ -236,6 +246,11 @@ func systemBufferCounterRows(status ProcessStatus, samples []systemBufferSample,
 	var redirectInboxOverflowDrops uint64
 	var pendingTXLocalOverflowDrops uint64
 	var txSubmitErrorDrops uint64
+	var synCookieChallenges uint64
+	var synCookieSecretUnavailable uint64
+	var synCookieAckValid uint64
+	var synCookieAckInvalid uint64
+	var synCookieBypass uint64
 	for _, sample := range samples {
 		activeFlowCount += uint64(sample.ActiveFlowCount)
 		flowCacheCollisionEvictions += sample.FlowCacheCollisionEvictions
@@ -251,6 +266,11 @@ func systemBufferCounterRows(status ProcessStatus, samples []systemBufferSample,
 		redirectInboxOverflowDrops += sample.RedirectInboxOverflowDrops
 		pendingTXLocalOverflowDrops += sample.PendingTXLocalOverflowDrops
 		txSubmitErrorDrops += sample.TxSubmitErrorDrops
+		synCookieChallenges += sample.SYNCookieChallenges
+		synCookieSecretUnavailable += sample.SYNCookieSecretUnavailable
+		synCookieAckValid += sample.SYNCookieAckValid
+		synCookieAckInvalid += sample.SYNCookieAckInvalid
+		synCookieBypass += sample.SYNCookieBypass
 	}
 
 	var rows []systemBufferCounterRow
@@ -274,6 +294,11 @@ func systemBufferCounterRows(status ProcessStatus, samples []systemBufferSample,
 	appendCounter(systemBufferLabelRedirectInboxOverflow, "aggregate", redirectInboxOverflowDrops)
 	appendCounter(systemBufferLabelPendingTXLocalOver, "aggregate", pendingTXLocalOverflowDrops)
 	appendCounter(systemBufferLabelTXSubmitErrorDrops, "aggregate", txSubmitErrorDrops)
+	appendCounter(systemBufferLabelSYNCookieChallenges, "aggregate", synCookieChallenges)
+	appendCounter(systemBufferLabelSYNCookieSecretUnavail, "aggregate", synCookieSecretUnavailable)
+	appendCounter(systemBufferLabelSYNCookieAckValid, "aggregate", synCookieAckValid)
+	appendCounter(systemBufferLabelSYNCookieAckInvalid, "aggregate", synCookieAckInvalid)
+	appendCounter(systemBufferLabelSYNCookieBypass, "aggregate", synCookieBypass)
 
 	if !detail {
 		return rows
@@ -294,6 +319,11 @@ func systemBufferCounterRows(status ProcessStatus, samples []systemBufferSample,
 		appendCounter(systemBufferLabelRedirectInboxOverflow, scope, sample.RedirectInboxOverflowDrops)
 		appendCounter(systemBufferLabelPendingTXLocalOver, scope, sample.PendingTXLocalOverflowDrops)
 		appendCounter(systemBufferLabelTXSubmitErrorDrops, scope, sample.TxSubmitErrorDrops)
+		appendCounter(systemBufferLabelSYNCookieChallenges, scope, sample.SYNCookieChallenges)
+		appendCounter(systemBufferLabelSYNCookieSecretUnavail, scope, sample.SYNCookieSecretUnavailable)
+		appendCounter(systemBufferLabelSYNCookieAckValid, scope, sample.SYNCookieAckValid)
+		appendCounter(systemBufferLabelSYNCookieAckInvalid, scope, sample.SYNCookieAckInvalid)
+		appendCounter(systemBufferLabelSYNCookieBypass, scope, sample.SYNCookieBypass)
 	}
 	return rows
 }
@@ -387,6 +417,11 @@ func systemBufferSamples(status ProcessStatus) []systemBufferSample {
 			RedirectInboxOverflowDrops:  binding.RedirectInboxOverflowDrops,
 			PendingTXLocalOverflowDrops: binding.PendingTXLocalOverflowDrops,
 			TxSubmitErrorDrops:          binding.TxSubmitErrorDrops,
+			SYNCookieChallenges:         binding.SYNCookieChallenges,
+			SYNCookieSecretUnavailable:  binding.SYNCookieSecretUnavailable,
+			SYNCookieAckValid:           binding.SYNCookieAckValid,
+			SYNCookieAckInvalid:         binding.SYNCookieAckInvalid,
+			SYNCookieBypass:             binding.SYNCookieBypass,
 		})
 	}
 	sort.Slice(samples, func(i, j int) bool {
@@ -450,6 +485,21 @@ func (sample *systemBufferSample) applyBindingStatusFallback(binding BindingStat
 	}
 	if sample.TxSubmitErrorDrops == 0 {
 		sample.TxSubmitErrorDrops = binding.TxSubmitErrorDrops
+	}
+	if sample.SYNCookieChallenges == 0 {
+		sample.SYNCookieChallenges = binding.SYNCookieChallenges
+	}
+	if sample.SYNCookieSecretUnavailable == 0 {
+		sample.SYNCookieSecretUnavailable = binding.SYNCookieSecretUnavailable
+	}
+	if sample.SYNCookieAckValid == 0 {
+		sample.SYNCookieAckValid = binding.SYNCookieAckValid
+	}
+	if sample.SYNCookieAckInvalid == 0 {
+		sample.SYNCookieAckInvalid = binding.SYNCookieAckInvalid
+	}
+	if sample.SYNCookieBypass == 0 {
+		sample.SYNCookieBypass = binding.SYNCookieBypass
 	}
 }
 

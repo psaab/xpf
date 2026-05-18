@@ -418,6 +418,100 @@ func TestReadPolicyCountersUsesStatusIPCPolicyRuleCounters(t *testing.T) {
 	}
 }
 
+func TestStatusIPCRecordsSYNCookieBindingCounters(t *testing.T) {
+	dir := t.TempDir()
+	controlSock := filepath.Join(dir, "control.sock")
+	ln, err := net.Listen("unix", controlSock)
+	if err != nil {
+		t.Fatalf("listen control socket: %v", err)
+	}
+	defer ln.Close()
+
+	reqCh := make(chan ControlRequest, 1)
+	done := make(chan struct{}, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req ControlRequest
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			return
+		}
+		reqCh <- req
+		_ = json.NewEncoder(conn).Encode(ControlResponse{
+			OK: true,
+			Status: &ProcessStatus{
+				PID: 4321,
+				Bindings: []BindingStatus{
+					{
+						Slot:                       0,
+						SYNCookieChallenges:        3,
+						SYNCookieSecretUnavailable: 5,
+						SYNCookieAckValid:          7,
+						SYNCookieAckInvalid:        11,
+						SYNCookieBypass:            13,
+					},
+					{
+						Slot:                       1,
+						SYNCookieChallenges:        17,
+						SYNCookieSecretUnavailable: 19,
+						SYNCookieAckValid:          23,
+						SYNCookieAckInvalid:        29,
+						SYNCookieBypass:            31,
+					},
+				},
+			},
+		})
+		done <- struct{}{}
+	}()
+
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	m := New()
+	m.proc = &exec.Cmd{Process: proc}
+	m.cfg.ControlSocket = controlSock
+
+	m.mu.Lock()
+	var status ProcessStatus
+	err = m.requestLocked(ControlRequest{Type: "status"}, &status)
+	if err == nil {
+		m.recordHelperStatusLocked(&status)
+	}
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("status IPC: %v", err)
+	}
+	select {
+	case req := <-reqCh:
+		if req.Type != "status" {
+			t.Fatalf("request type = %q, want status", req.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("helper did not receive status request")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("helper did not finish status response")
+	}
+
+	got := SumSYNCookieCounters(m.lastStatus)
+	want := SYNCookieCounters{
+		Challenges:        20,
+		SecretUnavailable: 24,
+		AckValid:          30,
+		AckInvalid:        40,
+		Bypass:            44,
+	}
+	if got != want {
+		t.Fatalf("SYN-cookie counters after status IPC = %+v, want %+v", got, want)
+	}
+}
+
 func TestConfigEqualIncludesPollMode(t *testing.T) {
 	a := config.UserspaceConfig{
 		Binary:        "/tmp/helper",

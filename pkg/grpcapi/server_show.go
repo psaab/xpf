@@ -44,6 +44,14 @@ func writeRPMConfig(buf *strings.Builder, cfg *config.Config) {
 	}
 }
 
+func (s *Server) screenSYNCookieCounterRows() string {
+	status, err := s.userspaceDataplaneStatus()
+	if err != nil {
+		return ""
+	}
+	return dpuserspace.FormatSYNCookieCounterRows(dpuserspace.SumSYNCookieCounters(status))
+}
+
 func firewallFilterTermExpansionCount(cfg *config.Config, term *config.FirewallFilterTerm) uint32 {
 	nSrc := len(term.SourceAddresses)
 	for _, ref := range term.SourcePrefixLists {
@@ -280,6 +288,7 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 						fmt.Fprintf(&buf, "  %-30s %d\n", "SYN flood events", fs.SynCount)
 						fmt.Fprintf(&buf, "  %-30s %d\n", "ICMP flood events", fs.ICMPCount)
 						fmt.Fprintf(&buf, "  %-30s %d\n", "UDP flood events", fs.UDPCount)
+						buf.WriteString(s.screenSYNCookieCounterRows())
 					}
 				}
 			}
@@ -320,6 +329,7 @@ func (s *Server) ShowText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 				fmt.Fprintf(&buf, "  %-30s %d\n", "UDP flood events", fs.UDPCount)
 				buf.WriteString("\n")
 			}
+			buf.WriteString(s.screenSYNCookieCounterRows())
 		}
 		return &pb.ShowTextResponse{Output: buf.String()}, nil
 	}

@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +127,44 @@ func TestFormatStatusSummary(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestFormatSYNCookieCounterRows(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{
+				SYNCookieChallenges:        3,
+				SYNCookieSecretUnavailable: 5,
+				SYNCookieAckValid:          7,
+				SYNCookieAckInvalid:        11,
+				SYNCookieBypass:            13,
+			},
+			{
+				SYNCookieChallenges:        17,
+				SYNCookieSecretUnavailable: 19,
+				SYNCookieAckValid:          23,
+				SYNCookieAckInvalid:        29,
+				SYNCookieBypass:            31,
+			},
+		},
+	}
+
+	rows := FormatSYNCookieCounterRows(SumSYNCookieCounters(status))
+	for _, want := range []string{
+		fmt.Sprintf("  %-30s %s\n", "Userspace SYN-cookie scope", "all bindings"),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie challenges", 20),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie secret unavailable", 24),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie ACK valid", 30),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie ACK invalid", 40),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie bypass", 44),
+	} {
+		if !strings.Contains(rows, want) {
+			t.Fatalf("SYN-cookie rows missing %q:\n%s", want, rows)
+		}
+	}
+	if got := FormatSYNCookieCounterRows(SYNCookieCounters{}); got != "" {
+		t.Fatalf("zero SYN-cookie counters rendered rows: %q", got)
 	}
 }
 

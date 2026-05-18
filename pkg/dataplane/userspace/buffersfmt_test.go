@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -243,6 +244,59 @@ func TestFormatSystemBuffersKeepsDynamicCountsOutOfUtilizationTable(t *testing.T
 	}
 	if strings.Contains(counterSection, "%") {
 		t.Fatalf("status counters rendered a fill percentage without a denominator:\n%s", out)
+	}
+}
+
+func TestFormatSystemBuffersIncludesSYNCookieCounters(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{
+				Slot:                       0,
+				WorkerID:                   0,
+				QueueID:                    0,
+				Interface:                  "ge-0-0-0",
+				SYNCookieChallenges:        3,
+				SYNCookieSecretUnavailable: 5,
+				SYNCookieAckValid:          7,
+				SYNCookieAckInvalid:        11,
+				SYNCookieBypass:            13,
+			},
+			{
+				Slot:                       1,
+				WorkerID:                   1,
+				QueueID:                    0,
+				Interface:                  "ge-0-0-1",
+				SYNCookieChallenges:        17,
+				SYNCookieSecretUnavailable: 19,
+				SYNCookieAckValid:          23,
+				SYNCookieAckInvalid:        29,
+				SYNCookieBypass:            31,
+			},
+		},
+	}
+
+	out := FormatSystemBuffers(status, false)
+	for _, want := range []string{
+		systemBufferCountersHeading,
+		fmt.Sprintf("%-32s %-24s %12d", systemBufferLabelSYNCookieChallenges, "aggregate", 20),
+		fmt.Sprintf("%-32s %-24s %12d", systemBufferLabelSYNCookieSecretUnavail, "aggregate", 24),
+		fmt.Sprintf("%-32s %-24s %12d", systemBufferLabelSYNCookieAckValid, "aggregate", 30),
+		fmt.Sprintf("%-32s %-24s %12d", systemBufferLabelSYNCookieAckInvalid, "aggregate", 40),
+		fmt.Sprintf("%-32s %-24s %12d", systemBufferLabelSYNCookieBypass, "aggregate", 44),
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("FormatSystemBuffers output missing %q:\n%s", want, out)
+		}
+	}
+
+	detail := FormatSystemBuffers(status, true)
+	for _, want := range []string{
+		fmt.Sprintf("%-32s %-24s %12d", systemBufferLabelSYNCookieAckValid, "worker 0/queue 0/slot 0/ge-0-0-0", 7),
+		fmt.Sprintf("%-32s %-24s %12d", systemBufferLabelSYNCookieAckValid, "worker 1/queue 0/slot 1/ge-0-0-1", 23),
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("FormatSystemBuffers detail output missing %q:\n%s", want, detail)
+		}
 	}
 }
 

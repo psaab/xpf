@@ -97,7 +97,33 @@ checks this flag to decide between drop mode and cookie mode.
 | `pkg/dataplane/compiler.go` | Sets `ScreenSynCookie` flag on screen config |
 | `pkg/dataplane/types.go` | `ScreenSynCookie` constant |
 | `pkg/api/metrics.go` | 4 Prometheus metrics (`xpf_screen_syncookie_total`) |
-| `pkg/grpcapi/server.go` | 4 CLI counters in screen statistics display |
+| `pkg/dataplane/userspace/protocol.go` | Userspace `BindingStatus` SYN-cookie counters |
+| `pkg/cli/cli_show_security.go`, `pkg/grpcapi/server_show.go` | Userspace counters in screen statistics display |
+
+## Userspace Dataplane Status and HA Propagation
+
+The userspace dataplane reports per-binding SYN-cookie counters in
+`BindingStatus`:
+
+| JSON key | Meaning |
+|----------|---------|
+| `syn_cookie_challenges` | SYNs that entered the userspace challenge path |
+| `syn_cookie_secret_unavailable` | Challenge attempts that failed closed because no SYN-cookie secret was published |
+| `syn_cookie_ack_valid` | Session-miss ACKs that validated against a minted cookie |
+| `syn_cookie_ack_invalid` | Session-miss ACKs that did not validate |
+| `syn_cookie_bypass` | SYNs admitted from the local validated-client cache |
+
+Only `syn_cookie_ack_valid`, `syn_cookie_ack_invalid`, and `syn_cookie_bypass`
+are currently propagated beyond the local `BindingStatus`, and only as deltas
+into the daemon's BPF-compatible global counters. They do not publish remote HA
+acceptance state. `syn_cookie_challenges` is intentionally not propagated as
+`GLOBAL_CTR_SYNCOOKIE_SENT`: in userspace, a challenge decision is not a sent
+SYN-ACK until bounded SYN-ACK TX replies are implemented.
+`syn_cookie_secret_unavailable` also stays local because it describes a local
+fail-closed condition while HA secret publication is still absent. The
+validated-client cache and SYN-cookie secret are local for the same reason;
+cross-node cache/secret propagation is deferred until bounded SYN-ACK TX and HA
+secret publication are available.
 
 ## Prometheus Metrics
 
@@ -127,3 +153,5 @@ xpf_screen_syncookie_total{type="bypass"}    # Validated sources bypassing chall
 - The `validated_clients` LRU map has a fixed size of 65536 entries. Under
   extremely high cardinality attacks, legitimate entries may be evicted.
 - IPv6 SYN-ACK MSS is 1440 (vs 1460 for IPv4) to account for the larger header.
+- Userspace SYN-cookie challenge and secret-unavailable counters are local-only
+  until bounded SYN-ACK TX replies and HA secret publication are implemented.

@@ -40,6 +40,14 @@ var mirror_counter_wire_keys = []string{
 	"mirror_drops_queue_full_cross_worker",
 }
 
+var syn_cookie_counter_wire_keys = []string{
+	"syn_cookie_challenges",
+	"syn_cookie_secret_unavailable",
+	"syn_cookie_ack_valid",
+	"syn_cookie_ack_invalid",
+	"syn_cookie_bypass",
+}
+
 func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	in := BindingStatus{
 		WorkerID:                        3,
@@ -90,6 +98,54 @@ func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	if back.TxSubmitErrorDrops != in.TxSubmitErrorDrops {
 		t.Fatalf("TxSubmitErrorDrops: got %d, want %d",
 			back.TxSubmitErrorDrops, in.TxSubmitErrorDrops)
+	}
+}
+
+func TestBindingStatusSYNCookieCountersRoundTrip(t *testing.T) {
+	in := BindingStatus{
+		WorkerID:                   7,
+		Slot:                       1,
+		Ifindex:                    11,
+		QueueID:                    2,
+		SYNCookieChallenges:        3,
+		SYNCookieSecretUnavailable: 5,
+		SYNCookieAckValid:          7,
+		SYNCookieAckInvalid:        11,
+		SYNCookieBypass:            13,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range syn_cookie_counter_wire_keys {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from BindingStatus JSON: %s", key, string(raw))
+		}
+	}
+
+	var back BindingStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal BindingStatus: %v", err)
+	}
+	if back.SYNCookieChallenges != in.SYNCookieChallenges {
+		t.Fatalf("SYNCookieChallenges: got %d, want %d", back.SYNCookieChallenges, in.SYNCookieChallenges)
+	}
+	if back.SYNCookieSecretUnavailable != in.SYNCookieSecretUnavailable {
+		t.Fatalf("SYNCookieSecretUnavailable: got %d, want %d",
+			back.SYNCookieSecretUnavailable, in.SYNCookieSecretUnavailable)
+	}
+	if back.SYNCookieAckValid != in.SYNCookieAckValid {
+		t.Fatalf("SYNCookieAckValid: got %d, want %d", back.SYNCookieAckValid, in.SYNCookieAckValid)
+	}
+	if back.SYNCookieAckInvalid != in.SYNCookieAckInvalid {
+		t.Fatalf("SYNCookieAckInvalid: got %d, want %d", back.SYNCookieAckInvalid, in.SYNCookieAckInvalid)
+	}
+	if back.SYNCookieBypass != in.SYNCookieBypass {
+		t.Fatalf("SYNCookieBypass: got %d, want %d", back.SYNCookieBypass, in.SYNCookieBypass)
 	}
 }
 

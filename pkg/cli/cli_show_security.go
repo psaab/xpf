@@ -721,6 +721,7 @@ func (c *CLI) showScreenStatistics(zoneName string) error {
 	fmt.Printf("  %-30s %d\n", "SYN flood events", totalSyn)
 	fmt.Printf("  %-30s %d\n", "ICMP flood events", totalICMP)
 	fmt.Printf("  %-30s %d\n", "UDP flood events", totalUDP)
+	fmt.Print(c.screenSYNCookieCounterRows())
 	return nil
 }
 
@@ -766,7 +767,18 @@ func (c *CLI) showScreenStatisticsAll() error {
 		fmt.Printf("  %-30s %d\n", "UDP flood events", fs.UDPCount)
 		fmt.Println()
 	}
+	if rows := c.screenSYNCookieCounterRows(); rows != "" {
+		fmt.Print(rows)
+	}
 	return nil
+}
+
+func (c *CLI) screenSYNCookieCounterRows() string {
+	status, err := c.userspaceDataplaneStatus()
+	if err != nil {
+		return ""
+	}
+	return dpuserspace.FormatSYNCookieCounterRows(dpuserspace.SumSYNCookieCounters(status))
 }
 
 func (c *CLI) showAddressBook(args []string) error {
