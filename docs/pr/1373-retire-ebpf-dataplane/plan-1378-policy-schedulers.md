@@ -37,6 +37,18 @@ is unchanged. The remaining #1378 blocker is integration/HA failover evidence:
 show that the new active node recomputes scheduler state and publishes the full
 policy snapshot before admitting scheduled-policy traffic.
 
+Closeout update, 2026-05-18: `test/incus/policy_scheduler_validate.py` now
+defines the deterministic evidence contract for that remaining lab gate. It
+requires helper/control-socket status from the userspace runtime, protocol
+version >= 2, `forwarding_supported=true`, `forwarding_armed=true`, policy
+rule counters that advance while the scheduler is active, survive a full
+snapshot rebuild, stay unchanged while the scheduler is inactive, advance again
+after RG failover on the new userspace owner, and a captured commit failure for
+an undefined scheduler. `pkg/daemon/policy_scheduler_apply_test.go` also pins
+the non-eBPF apply path: scheduler state is seeded before userspace compile and
+the initial userspace apply does not fall back to `UpdatePolicyScheduleState`
+legacy map updates.
+
 On scheduler state changes, publish one atomic userspace snapshot delta that
 contains the updated inactive bits for all affected rules. Do not issue
 per-rule fast-path toggles because first-match ordering requires same-instant
@@ -115,16 +127,56 @@ existing eBPF behavior that can default missing scheduler state to active.
   60-second granularity.
 - Go: `UpdatePolicyScheduleState` in userspace mode republishes one snapshot
   delta with updated inactive bits.
+- Go: userspace apply seed test proves initial scheduled-policy snapshots are
+  built from daemon-computed active state without invoking legacy eBPF policy
+  map updates.
 - Go: missing scheduler reference is a commit error.
+- Python: `test/incus/policy_scheduler_validate.py` validates the live artifact
+  set for active, rebuild, inactive, failover, and missing-scheduler rejection.
 - Integration: scheduler window spanning multiple 60-second ticks with a policy
   referencing it; new connections pass only during active windows, while
   established sessions retain Junos-default behavior.
+
+## Integration Evidence Harness
+
+The #1378 live evidence directory must contain:
+
+- `active-status.json`: helper `{"type":"status"}` response after active
+  scheduled-policy traffic increments the stable rule counter.
+- `rebuild-status.json`: helper status after a full snapshot rebuild with the
+  same rule identity; the counter must not go backward.
+- `inactive-status.json`: helper status after the scheduler is inactive and a
+  new connection attempt was made; the scheduled rule counter must remain equal
+  to `rebuild-status.json`.
+- `failover-status.json`: helper status from the new RG owner after failover
+  and post-failover scheduled-policy traffic; the counter must advance.
+- `missing-scheduler-commit.txt`: `commit check` or `commit` output for a
+  policy referencing an undefined scheduler; it must contain the strict
+  undefined-scheduler rejection and no commit-success text.
+
+Validate the directory from the repo root:
+
+```bash
+python3 test/incus/policy_scheduler_validate.py \
+  <artifact-dir> \
+  --rule-id 'trust->untrust/scheduled-allow'
+```
+
+The validator intentionally fails if the artifacts show `ebpf_only`, missing
+protocol v2 support, unarmed/unsupported userspace forwarding, counter reset on
+rebuild, counter growth while inactive, no post-failover counter growth, or a
+successful missing-scheduler commit.
 
 Validated in the 2026-05-17 closeout slice:
 
 - `go test ./pkg/config`
 - `go test ./pkg/dataplane/userspace -run 'Test(BuildPolicySnapshots|UpdatePolicyScheduleState)'`
 - `cargo test policy:: -- --nocapture`
+
+Validated in the 2026-05-18 closeout slice:
+
+- `go test ./pkg/daemon -run 'TestPolicyScheduler|TestApplyConfig.*Scheduler|TestApplyConfig.*Protocol'`
+- `python3 test/incus/policy_scheduler_validate_test.py`
 
 ## Non-Goals
 

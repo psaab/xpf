@@ -5,7 +5,7 @@ AF_XDP userspace dataplane. It is not a full bug tracker and it is not a
 historical branch plan. For active debugging entry points, use
 [`userspace-debug-map.md`](userspace-debug-map.md).
 
-Last updated: 2026-05-17
+Last updated: 2026-05-18
 
 ## Deprecation Context
 
@@ -26,6 +26,7 @@ These capabilities exist in the current Rust userspace dataplane code path:
 |---------|---------------|-------|
 | Stateful forwarding | Implemented | Per-worker sessions plus shared session tables |
 | Zone + global policies | Implemented | Address and application terms are pre-expanded by the daemon |
+| Policy schedulers | Implemented with evidence pending | Scheduled-policy `scheduler_name` and `inactive` bits are published in userspace snapshots, old helper protocol mismatches disarm forwarding, missing policy-scheduler references are commit errors, and Rust hit counters survive active/inactive snapshot rebuilds by stable rule ID. #1378 is narrowed to collecting live userspace HA artifacts with `test/incus/policy_scheduler_validate.py`. |
 | Application matching | Implemented | Protocol + port terms, including expanded multi-term apps |
 | Source NAT (interface mode) | Implemented | IPv4 and IPv6 egress interface rewrite |
 | Source NAT (pool mode) | Implemented with caveats | IPv4/IPv6 pool address and port allocation; wrong-family pools are skipped so later compatible rules can match. Global `source address-persistent` uses the documented userspace-v1 SHA-256 source-IP hash and is stable only within the AF_XDP backend, pool family, pool order, and pool size. Legacy eBPF and current DPDK use C-word IPv4 modulo / IPv6 lane-XOR selection, so new-flow pool address parity is not promised across backend rollback. Pool-mode rules omitted for missing pools, empty pools, or invalid port ranges are not a runtime fail-closed gate yet: the current `poll_descriptor.rs` source-NAT call sites can fall through to the default empty NAT decision and forward without SNAT. Per-pool `persistent-nat` is not a userspace-v1 runtime contract yet: the snapshot has no persistence-mode fields, Rust does not consult the Go `PersistentNATTable`, and the allocator has no live-port exhaustion counter. |
@@ -86,7 +87,7 @@ The current #1373 audit produced these tracked blockers:
 |-------|---------|-----------------|
 | #1381 | Split or replace the BPF-shaped `dataplane.DataPlane` interface so userspace no longer embeds the eBPF manager for map-writer methods. Current progress: userspace no longer embeds the legacy interface, neutral `RuntimeDataPlane` domains exist, cluster stale reconciliation uses `SessionStore`, and operator metadata reads use `ApplyResult`; remaining work is to move session, telemetry, GC, and control callers off the old surface. | Phase 3 build-system / Go removal |
 | #1377 | Preserve userspace-v1 address-persistent SNAT pool selection with an explicit backend compatibility boundary, then finish per-pool `persistent-nat` semantics and allocation/exhaustion counters. #1385 landed deterministic userspace selection and snapshot omission for missing, empty, or invalid pool inputs, but runtime remains fail-open at the `poll_descriptor.rs` source-NAT call sites and does not provide persistent-NAT lease reuse or cross-backend new-flow parity. | Phase 4 BPF source removal |
-| #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds and strict missing-scheduler commit behavior landed in the 2026-05-17 closeout slice; remaining blocker is integration/failover validation evidence | Phase 4 BPF source removal |
+| #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds and strict missing-scheduler commit behavior landed in the 2026-05-17 closeout slice. The 2026-05-18 closeout slice adds a deterministic userspace evidence checker and pins the non-eBPF apply path; remaining blocker is only the live HA artifact capture accepted by `test/incus/policy_scheduler_validate.py`. | Phase 4 BPF source removal |
 | #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393, the 2026-05-17 runtime slice, and the 2026-05-18 closeout slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, bounded validated-client cache behavior, TTL-bound single-use validated-client expiration, current/previous cookie-epoch ACK validation, explicit validated-client bypass verdicts, userspace helper status counters, and legacy global sync for valid/invalid/bypass counters. Remaining: bounded SYN-ACK TX and sent/budget counters, ACK RST emission, HA-safe secret publication/cache survivability, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
 | #1375 | Finish userspace RFC 2697/2698 three-color policer hardening. The current runtime admits the color-blind `then discard` slice and now fails closed for unsupported snapshot shapes that bypass Go admission. Remaining work: sharded/packed state decision, cross-snapshot counter continuity decision, full non-drop color action propagation, and integration/failover/performance evidence | Phase 4 BPF source removal |
@@ -107,7 +108,9 @@ Recommended dependency order:
    source removal.
 3. #1374 and #1376 before Phase 4, because these are explicit feature gaps
    currently protected by the legacy eBPF fallback. Keep #1375 on the Phase 4
-   list for validation and hardening evidence, not as a capability gate.
+   list for validation and hardening evidence, not as a capability gate. #1378
+   now needs the scripted scheduler artifact capture only; no additional
+   scheduler runtime code is known from the current audit.
 4. #1380 in Phase 5, after the dataplane boundary is settled but before the
    remaining operator-facing BPF map surface disappears.
 
@@ -151,8 +154,8 @@ The highest-value remaining work on current `master` is:
 2. fix #1377 and #1379 to remove silent correctness and visibility
    regressions; keep #1385 plus the userspace-v1 fixtures as evidence of the
    current AF_XDP SNAT pool selector, not full persistent-NAT parity. Keep
-   #1378 open for the remaining policy-scheduler counter/validation/evidence
-   contract after #1396.
+   #1378 on the closeout list until the scripted userspace HA scheduler
+   evidence artifact set is captured.
 3. close #1374 and #1376 before any BPF source removal, and finish the #1375
    hardening/evidence checklist. The three-color capability gate is removed
    only for the current color-blind `then discard` slice; color-aware and

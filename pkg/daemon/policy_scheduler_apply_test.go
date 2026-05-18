@@ -39,6 +39,50 @@ func (d *policySchedulerApplyTestDP) UpdatePolicyScheduleState(_ *config.Config,
 	d.updateStateSeen = activeState
 }
 
+type userspacePolicySchedulerApplyTestDP struct {
+	policySchedulerApplyTestDP
+
+	seedCalls          int
+	seedStateSeen      map[string]bool
+	compileStateSeen   map[string]bool
+	compileCfgPolicy   string
+	compileCfgSchedule string
+}
+
+func (d *userspacePolicySchedulerApplyTestDP) SetPolicySchedulerActiveState(activeState map[string]bool) {
+	d.seedCalls++
+	d.seedStateSeen = copyPolicySchedulerApplyState(activeState)
+}
+
+func (d *userspacePolicySchedulerApplyTestDP) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
+	d.compileCalls++
+	d.compileStateSeen = copyPolicySchedulerApplyState(d.seedStateSeen)
+	if cfg != nil && len(cfg.Security.Policies) > 0 && len(cfg.Security.Policies[0].Policies) > 0 {
+		pol := cfg.Security.Policies[0].Policies[0]
+		d.compileCfgPolicy = pol.Name
+		d.compileCfgSchedule = pol.SchedulerName
+	}
+	if d.compileErr != nil {
+		return nil, d.compileErr
+	}
+	return &dataplane.CompileResult{}, nil
+}
+
+func (d *userspacePolicySchedulerApplyTestDP) Mode() dpuserspace.DataplaneMode {
+	return dpuserspace.ModeUserspaceStrict
+}
+
+func copyPolicySchedulerApplyState(in map[string]bool) map[string]bool {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 func TestApplyConfigClearsDeferWorkersOnAbortCompileError(t *testing.T) {
 	dp := &policySchedulerApplyTestDP{
 		compileErr: dpuserspace.ErrPolicySchedulerProtocolIncompatible,
@@ -126,6 +170,66 @@ func TestApplyConfigPublishesScheduleStateToNonUserspaceDataplane(t *testing.T) 
 	}
 	if got, ok := dp.updateStateSeen["workhours"]; !ok || !got {
 		t.Fatalf("active state for workhours = %t, present=%t; want active true", got, ok)
+	}
+}
+
+func TestApplyConfigSeedsUserspacePolicySchedulerStateBeforeCompile(t *testing.T) {
+	dp := &userspacePolicySchedulerApplyTestDP{}
+	dp.compileErr = dpuserspace.ErrPolicySchedulerProtocolIncompatible
+	d := &Daemon{dp: dp}
+	cfg := testPolicySchedulerApplyConfig()
+
+	if err := d.applyConfigLocked(cfg); !errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible) {
+		t.Fatalf("applyConfigLocked error = %v, want protocol incompatibility", err)
+	}
+
+	if dp.seedCalls != 1 {
+		t.Fatalf("SetPolicySchedulerActiveState calls = %d, want 1", dp.seedCalls)
+	}
+	if dp.compileCalls != 1 {
+		t.Fatalf("Compile calls = %d, want 1", dp.compileCalls)
+	}
+	if got, ok := dp.compileStateSeen["workhours"]; !ok || !got {
+		t.Fatalf("compile saw workhours active = %t, present=%t; want active true", got, ok)
+	}
+	if dp.compileCfgPolicy != "scheduled-allow" || dp.compileCfgSchedule != "workhours" {
+		t.Fatalf("compile cfg policy=%q scheduler=%q, want scheduled-allow/workhours",
+			dp.compileCfgPolicy, dp.compileCfgSchedule)
+	}
+	if dp.updateCalls != 0 {
+		t.Fatalf("UpdatePolicyScheduleState calls = %d, want 0 before aborted apply publishes", dp.updateCalls)
+	}
+}
+
+func TestPolicySchedulerInitialPublishSkipsUserspaceLegacyMapUpdate(t *testing.T) {
+	dp := &userspacePolicySchedulerApplyTestDP{}
+	d := &Daemon{dp: dp}
+	cfg := testPolicySchedulerApplyConfig()
+	activeState := d.policySchedulerActiveStateForApplyLocked(cfg, testPolicySchedulerApplyNow())
+
+	d.publishInitialPolicySchedulerStateLocked(cfg, activeState, &dataplane.CompileResult{})
+
+	if dp.updateCalls != 0 {
+		t.Fatalf("UpdatePolicyScheduleState calls = %d, want 0 for userspace initial apply", dp.updateCalls)
+	}
+}
+
+func testPolicySchedulerApplyConfig() *config.Config {
+	return &config.Config{
+		Schedulers: map[string]*config.SchedulerConfig{
+			"workhours": {Name: "workhours"},
+		},
+		Security: config.SecurityConfig{
+			Policies: []*config.ZonePairPolicies{{
+				FromZone: "trust",
+				ToZone:   "untrust",
+				Policies: []*config.Policy{{
+					Name:          "scheduled-allow",
+					SchedulerName: "workhours",
+					Action:        config.PolicyPermit,
+				}},
+			}},
+		},
 	}
 }
 
