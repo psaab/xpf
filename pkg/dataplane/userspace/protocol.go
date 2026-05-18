@@ -527,21 +527,23 @@ type CoSInterfaceStatus struct {
 }
 
 type CoSQueueStatus struct {
-	QueueID             int     `json:"queue_id,omitempty"`
-	OwnerWorkerID       *uint32 `json:"owner_worker_id,omitempty"`
-	ForwardingClass     string  `json:"forwarding_class,omitempty"`
-	Priority            int     `json:"priority,omitempty"`
-	Exact               bool    `json:"exact,omitempty"`
-	GuaranteeEnabled    *bool   `json:"guarantee_enabled,omitempty"`
-	TransmitRateBytes   uint64  `json:"transmit_rate_bytes,omitempty"`
-	BufferBytes         uint64  `json:"buffer_bytes,omitempty"`
-	WorkerInstances     int     `json:"worker_instances,omitempty"`
-	QueuedPackets       uint64  `json:"queued_packets,omitempty"`
-	QueuedBytes         uint64  `json:"queued_bytes,omitempty"`
-	RunnableInstances   int     `json:"runnable_instances,omitempty"`
-	ParkedInstances     int     `json:"parked_instances,omitempty"`
-	NextWakeupTick      uint64  `json:"next_wakeup_tick,omitempty"`
-	SurplusDeficitBytes uint64  `json:"surplus_deficit_bytes,omitempty"`
+	QueueID           int     `json:"queue_id,omitempty"`
+	OwnerWorkerID     *uint32 `json:"owner_worker_id,omitempty"`
+	ForwardingClass   string  `json:"forwarding_class,omitempty"`
+	Priority          int     `json:"priority,omitempty"`
+	Exact             bool    `json:"exact,omitempty"`
+	GuaranteeEnabled  *bool   `json:"guarantee_enabled,omitempty"`
+	TransmitRateBytes uint64  `json:"transmit_rate_bytes,omitempty"`
+	// BufferBytes is total queue capacity for this status row. Rust status
+	// aggregation sums it with QueuedBytes across worker/binding instances.
+	BufferBytes         uint64 `json:"buffer_bytes,omitempty"`
+	WorkerInstances     int    `json:"worker_instances,omitempty"`
+	QueuedPackets       uint64 `json:"queued_packets,omitempty"`
+	QueuedBytes         uint64 `json:"queued_bytes,omitempty"`
+	RunnableInstances   int    `json:"runnable_instances,omitempty"`
+	ParkedInstances     int    `json:"parked_instances,omitempty"`
+	NextWakeupTick      uint64 `json:"next_wakeup_tick,omitempty"`
+	SurplusDeficitBytes uint64 `json:"surplus_deficit_bytes,omitempty"`
 	// #710/#718: per-queue admission-path counters aggregated across
 	// worker instances by the Rust coordinator. JSON tags MUST match the
 	// Rust serde rename(...) exactly — the wire format is the contract.
@@ -831,6 +833,9 @@ type BindingStatus struct {
 	TXBytes                           uint64 `json:"tx_bytes,omitempty"`
 	TXErrors                          uint64 `json:"tx_errors,omitempty"`
 	TXSharedRecycleUnknownSlotDrops   uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
+	RedirectInboxOverflowDrops        uint64 `json:"redirect_inbox_overflow_drops,omitempty"`
+	PendingTXLocalOverflowDrops       uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
+	TxSubmitErrorDrops                uint64 `json:"tx_submit_error_drops,omitempty"`
 	TXCompletions                     uint64 `json:"tx_completions,omitempty"`
 	DirectTXPackets                   uint64 `json:"direct_tx_packets,omitempty"`
 	CopyTXPackets                     uint64 `json:"copy_tx_packets,omitempty"`

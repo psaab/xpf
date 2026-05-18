@@ -270,6 +270,7 @@ fn build_worker_cos_statuses_aggregates_runtime_by_interface_and_queue() {
     let queue = &iface.queues[0];
     assert_eq!(queue.queue_id, 4);
     assert_eq!(queue.forwarding_class, "bandwidth-10mb");
+    assert_eq!(queue.buffer_bytes, 2 * 32 * 1024);
     assert_eq!(queue.queued_packets, 2);
     assert_eq!(queue.queued_bytes, 3072);
     assert_eq!(queue.runnable_instances, 1);

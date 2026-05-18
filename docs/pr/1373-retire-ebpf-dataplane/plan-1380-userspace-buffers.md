@@ -14,6 +14,12 @@ session summaries with the same operator utility as the legacy path.
 - #1386 restores the immediate userspace `show system buffers` parity gaps:
   active-session footer, detail/non-detail distinction, and fallback from sparse
   per-binding capacity gauges to binding-level status.
+- Follow-up implementation after #1386 widens the shared formatter to include
+  all bounded buffer surfaces already present on the helper status wire: AF_XDP
+  UMEM/TX rings plus class-of-service queued-byte capacity. It also adds an
+  unbounded status-counter section for neighbor entries, active flow-cache
+  counts, flow-cache collision evictions, fill/TX ring saturation, pending-TX
+  gauges, and worker queue overflow/drop attribution.
 
 ## Design
 
@@ -26,6 +32,15 @@ for `show system buffers detail`.
 If mixed-version helpers omit a newer capacity surface, Go must fall back to the
 older binding fields or clearly mark the row unavailable. It must not display
 zero capacity for a live binding unless the helper explicitly reported zero.
+
+The current helper status does not publish capacity denominators for the
+session table, dynamic neighbor cache, or per-worker flow cache. `show system
+buffers` therefore reports active sessions through the existing footer and
+renders neighbor/flow-cache pressure as counts/counters, not fill percentages.
+Adding true fill rows for those structures requires new optional helper fields
+such as `session_table_entries/max_sessions`, `flow_cache_capacity`, and
+`neighbor_cache_capacity`; Go must not hard-code Rust private constants to infer
+those denominators.
 
 ## Hot-Path Invariants
 
@@ -46,6 +61,9 @@ zero capacity for a live binding unless the helper explicitly reported zero.
 
 - False-zero capacity: missing fields rendered as zero can hide a compatibility
   problem and send operators chasing nonexistent ring exhaustion.
+- False fill percentages: session, flow-cache, or neighbor-cache counts without
+  matching denominators must remain counters until the helper publishes bounded
+  capacity fields.
 - Status drift: CLI, gRPC, and REST/metrics can diverge if they format different
   DTOs. Tests should use the same fixture through every output path.
 - Sampling cost: overly frequent ring introspection can perturb the hot path;
@@ -61,6 +79,8 @@ zero capacity for a live binding unless the helper explicitly reported zero.
   binding-level capacity instead of rendering false zeroes.
 - Go: gRPC `ShowText` and local CLI use the same userspace buffer fixture and
   produce equivalent text.
+- Go: formatter covers CoS queued-byte capacity plus existing helper pressure
+  counters without turning unbounded counts into utilization percentages.
 - Integration: userspace cluster under forwarding load shows nonzero AF_XDP
   capacities, stable active sessions, and no status command hang.
 

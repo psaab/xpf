@@ -136,3 +136,113 @@ func TestFormatSystemBuffersDocumentsMissingStatusFields(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatSystemBuffersIncludesCoSAndRuntimePressure(t *testing.T) {
+	owner := uint32(2)
+	status := ProcessStatus{
+		NeighborEntries: 12,
+		Bindings: []BindingStatus{
+			{
+				Slot:                        4,
+				WorkerID:                    2,
+				QueueID:                     7,
+				Ifindex:                     9,
+				Interface:                   "ge-0-0-9",
+				UmemTotalFrames:             1000,
+				UmemInflightFrames:          100,
+				TxRingCapacity:              100,
+				OutstandingTX:               10,
+				ActiveFlowCount:             29,
+				FlowCacheCollisionEvictions: 31,
+				DebugPendingFillFrames:      3,
+				DebugSpareFillFrames:        5,
+				DebugPendingTXPrepared:      7,
+				DebugPendingTXLocal:         11,
+				DbgTxRingFull:               13,
+				DbgSendtoENOBUFS:            17,
+				DbgBoundPendingOverflow:     19,
+				DbgCoSQueueOverflow:         23,
+				RxFillRingEmptyDescs:        37,
+				RedirectInboxOverflowDrops:  41,
+				PendingTXLocalOverflowDrops: 43,
+				TxSubmitErrorDrops:          47,
+			},
+		},
+		CoSInterfaces: []CoSInterfaceStatus{
+			{
+				Ifindex:       9,
+				InterfaceName: "ge-0-0-9",
+				Queues: []CoSQueueStatus{
+					{
+						QueueID:         2,
+						OwnerWorkerID:   &owner,
+						ForwardingClass: "ef",
+						BufferBytes:     1000,
+						QueuedBytes:     850,
+					},
+				},
+			},
+		},
+	}
+
+	out := FormatSystemBuffers(status, true)
+	for _, want := range []string{
+		"CoS queue bytes",
+		"aggregate/1",
+		"850",
+		"85.0% WARNING",
+		"ge-0-0-9/queue 2/ef/worker 2",
+		"Userspace Status Counters:",
+		"Neighbor cache entries",
+		"Flow cache active flows",
+		"Flow cache collision evict",
+		"Pending fill frames",
+		"Spare fill frames",
+		"Pending TX prepared",
+		"Pending TX local",
+		"TX ring full events",
+		"sendto ENOBUFS",
+		"Bound pending overflow",
+		"CoS queue overflow",
+		"RX fill-ring empty descs",
+		"Redirect inbox overflow",
+		"Pending TX local overflow",
+		"TX submit error drops",
+		"worker 2/queue 7/slot 4/ge-0-0-9",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("FormatSystemBuffers output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatSystemBuffersCoSAggregateSumsCapacityWithUsage(t *testing.T) {
+	status := ProcessStatus{
+		CoSInterfaces: []CoSInterfaceStatus{
+			{
+				Ifindex:       80,
+				InterfaceName: "reth0.80",
+				Queues: []CoSQueueStatus{
+					{QueueID: 4, ForwardingClass: "iperf-a", BufferBytes: 1000, QueuedBytes: 700},
+					{QueueID: 5, ForwardingClass: "iperf-b", BufferBytes: 1000, QueuedBytes: 100},
+				},
+			},
+		},
+	}
+
+	out := FormatSystemBuffers(status, false)
+	for _, want := range []string{
+		"CoS queue bytes",
+		"aggregate/2",
+		"2000",
+		"800",
+		"40.0% OK",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("FormatSystemBuffers output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "80.0%") {
+		t.Fatalf("CoS aggregate used max capacity instead of summed capacity:\n%s", out)
+	}
+}
