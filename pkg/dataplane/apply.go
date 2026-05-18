@@ -39,6 +39,21 @@ type ConfigSink interface {
 	LastApplyResult() *ApplyResult
 }
 
+type ApplyResultReader interface {
+	LastApplyResult() *ApplyResult
+}
+
+func LastApplyResultOf(provider any) *ApplyResult {
+	if provider == nil {
+		return nil
+	}
+	reader, ok := provider.(ApplyResultReader)
+	if !ok {
+		return nil
+	}
+	return reader.LastApplyResult()
+}
+
 type ApplyResult struct {
 	ZoneIDs           map[string]uint16
 	ManagedInterfaces []networkd.InterfaceConfig

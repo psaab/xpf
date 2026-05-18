@@ -1536,7 +1536,7 @@ func (c *xpfCollector) collectZoneCounters(ch chan<- prometheus.Metric, dp datap
 	if cfg == nil {
 		return
 	}
-	cr := dp.LastCompileResult()
+	cr := dataplane.LastApplyResultOf(dp)
 	if cr == nil {
 		return
 	}
@@ -1607,7 +1607,7 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp dat
 	if cfg == nil {
 		return
 	}
-	cr := dp.LastCompileResult()
+	cr := dataplane.LastApplyResultOf(dp)
 	if cr == nil || cr.FilterIDs == nil {
 		return
 	}
@@ -1705,7 +1705,7 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp dat
 	if cfg == nil {
 		return
 	}
-	cr := dp.LastCompileResult()
+	cr := dataplane.LastApplyResultOf(dp)
 	if cr == nil {
 		return
 	}

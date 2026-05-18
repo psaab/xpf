@@ -161,7 +161,7 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 	// Build zone name map
 	evZoneNames := make(map[uint16]string)
 	if s.dp != nil {
-		if cr := s.dp.LastCompileResult(); cr != nil {
+		if cr := s.applyResult(); cr != nil {
 			for name, id := range cr.ZoneIDs {
 				evZoneNames[id] = name
 			}

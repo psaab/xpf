@@ -14,10 +14,7 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 		return &pb.GetZonesResponse{}, nil
 	}
 
-	var cr *dataplane.CompileResult
-	if s.dp != nil {
-		cr = s.dp.LastCompileResult()
-	}
+	cr := s.applyResult()
 
 	resp := &pb.GetZonesResponse{}
 	for zoneName, zone := range cfg.Security.Zones {

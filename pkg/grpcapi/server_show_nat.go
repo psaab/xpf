@@ -104,8 +104,8 @@ func (s *Server) showNATSourceRuleDetail(cfg *config.Config, buf *strings.Builde
 	// Count active SNAT sessions per rule-set
 	type ruleSetKey struct{ from, to string }
 	rsSessions := make(map[ruleSetKey]int)
-	if s.dp != nil && s.dp.IsLoaded() && s.dp.LastCompileResult() != nil {
-		cr := s.dp.LastCompileResult()
+	cr := s.applyResult()
+	if s.dp != nil && s.dp.IsLoaded() && cr != nil {
 		zoneByID := make(map[uint16]string, len(cr.ZoneIDs))
 		for name, id := range cr.ZoneIDs {
 			zoneByID[id] = name
@@ -172,9 +172,9 @@ func (s *Server) showNATSourceRuleDetail(cfg *config.Config, buf *strings.Builde
 				}
 			}
 
-			if s.dp != nil && s.dp.LastCompileResult() != nil {
+			if s.dp != nil && cr != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := s.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := s.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Fprintf(buf, "    Translation hits:        %d packets  %d bytes\n",
@@ -200,8 +200,8 @@ func (s *Server) showNATDestRuleDetail(cfg *config.Config, buf *strings.Builder)
 	dnat := cfg.Security.NAT.Destination
 	type ruleSetKey struct{ from, to string }
 	rsSessions := make(map[ruleSetKey]int)
-	if s.dp != nil && s.dp.IsLoaded() && s.dp.LastCompileResult() != nil {
-		cr := s.dp.LastCompileResult()
+	cr := s.applyResult()
+	if s.dp != nil && s.dp.IsLoaded() && cr != nil {
 		zoneByID := make(map[uint16]string, len(cr.ZoneIDs))
 		for name, id := range cr.ZoneIDs {
 			zoneByID[id] = name
@@ -257,9 +257,9 @@ func (s *Server) showNATDestRuleDetail(cfg *config.Config, buf *strings.Builder)
 				}
 			}
 
-			if s.dp != nil && s.dp.LastCompileResult() != nil {
+			if s.dp != nil && cr != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := s.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := s.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Fprintf(buf, "    Translation hits:        %d packets  %d bytes\n",

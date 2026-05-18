@@ -38,7 +38,7 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 	// Resolve filter IDs for counter display
 	var filterIDs map[string]uint32
 	if s.dp != nil && s.dp.IsLoaded() {
-		if cr := s.dp.LastCompileResult(); cr != nil {
+		if cr := s.applyResult(); cr != nil {
 			filterIDs = cr.FilterIDs
 		}
 	}

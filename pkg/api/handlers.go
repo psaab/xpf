@@ -163,7 +163,7 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	cr := s.compileResult()
+	cr := s.applyResult()
 	var zones []ZoneInfo
 	for zoneName, zone := range cfg.Security.Zones {
 		zi := ZoneInfo{
@@ -502,11 +502,11 @@ func (s *Server) configHandler(w http.ResponseWriter, _ *http.Request) {
 
 // --- helpers ---
 
-func (s *Server) compileResult() *dataplane.CompileResult {
+func (s *Server) applyResult() *dataplane.ApplyResult {
 	if s.dp == nil {
 		return nil
 	}
-	return s.dp.LastCompileResult()
+	return dataplane.LastApplyResultOf(s.dp)
 }
 
 func queryInt(r *http.Request, key string, def int) int {
@@ -715,6 +715,10 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	var result []NATPoolStatsInfo
+	var cr *dataplane.ApplyResult
+	if s.dp != nil && s.dp.IsLoaded() {
+		cr = s.applyResult()
+	}
 
 	// Named pools
 	for name, pool := range cfg.Security.NAT.SourcePools {
@@ -728,13 +732,11 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, _ *http.Request) {
 		totalPorts := (portHigh - portLow + 1) * len(pool.Addresses)
 		used := 0
 
-		if s.dp != nil && s.dp.IsLoaded() {
-			if cr := s.dp.LastCompileResult(); cr != nil {
-				if id, ok := cr.PoolIDs[name]; ok {
-					cnt, err := s.dp.ReadNATPortCounter(uint32(id))
-					if err == nil {
-						used = int(cnt)
-					}
+		if cr != nil {
+			if id, ok := cr.PoolIDs[name]; ok {
+				cnt, err := s.dp.ReadNATPortCounter(uint32(id))
+				if err == nil {
+					used = int(cnt)
 				}
 			}
 		}
@@ -796,6 +798,10 @@ func (s *Server) natRuleStatsHandler(w http.ResponseWriter, r *http.Request) {
 
 	ruleSetFilter := r.URL.Query().Get("rule_set")
 	var result []NATRuleStatsInfo
+	var cr *dataplane.ApplyResult
+	if s.dp != nil && s.dp.IsLoaded() {
+		cr = s.applyResult()
+	}
 
 	for _, rs := range cfg.Security.NAT.Source {
 		if ruleSetFilter != "" && rs.Name != ruleSetFilter {
@@ -816,15 +822,13 @@ func (s *Server) natRuleStatsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			var hitPkts, hitBytes uint64
-			if s.dp != nil && s.dp.IsLoaded() {
-				if cr := s.dp.LastCompileResult(); cr != nil {
-					ruleKey := rs.Name + "/" + rule.Name
-					if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
-						cnt, err := s.dp.ReadNATRuleCounter(uint32(cid))
-						if err == nil {
-							hitPkts = cnt.Packets
-							hitBytes = cnt.Bytes
-						}
+			if cr != nil {
+				ruleKey := rs.Name + "/" + rule.Name
+				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
+					cnt, err := s.dp.ReadNATRuleCounter(uint32(cid))
+					if err == nil {
+						hitPkts = cnt.Packets
+						hitBytes = cnt.Bytes
 					}
 				}
 			}

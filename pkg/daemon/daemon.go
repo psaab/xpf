@@ -284,6 +284,13 @@ type Daemon struct {
 	priorTunablesActive bool // true once the current config has applied host tunables
 }
 
+func (d *Daemon) applyResult() *dataplane.ApplyResult {
+	if d == nil {
+		return nil
+	}
+	return dataplane.LastApplyResultOf(d.dp)
+}
+
 // CompileHealth is a snapshot of dataplane compile health (#758).
 // Consumed by /health to surface a degraded state instead of returning
 // OK when the dataplane never compiled successfully.
