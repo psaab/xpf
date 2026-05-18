@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"log/slog"
-	"net/netip"
 	"sync"
 	"time"
 
@@ -30,12 +29,25 @@ const MaxSessions = 10_000_000
 
 const maxAdaptiveInterval = 60 * time.Second
 
+type sessionCountPublisher interface {
+	UpdateSessionCountSrc(dataplane.SessionCountKey, uint32) error
+	UpdateSessionCountDst(dataplane.SessionCountKey, uint32) error
+	ClearSessionCounts() error
+}
+
+type persistentNATProvider interface {
+	GetPersistentNAT() *dataplane.PersistentNATTable
+}
+
 // GC performs periodic garbage collection on the session table.
 type GC struct {
-	dp       dataplane.DataPlane
-	interval time.Duration
-	mu       sync.RWMutex
-	stats    GCStats
+	sessions     dataplane.SessionStore
+	telemetry    dataplane.Telemetry
+	sessionCount sessionCountPublisher
+	persistent   persistentNATProvider
+	interval     time.Duration
+	mu           sync.RWMutex
+	stats        GCStats
 
 	OnDeleteV4 func(key dataplane.SessionKey)
 	OnDeleteV6 func(key dataplane.SessionKeyV6)
@@ -53,10 +65,8 @@ type GC struct {
 	lastClosedCounter  uint64 // last seen GLOBAL_CTR_SESSIONS_CLOSED value
 
 	// Scratch buffers reused across sweeps to reduce allocation churn.
-	toDeleteV4    []dataplane.SessionKey
-	snatExpiredV4 []expiredSession
-	toDeleteV6    []dataplane.SessionKeyV6
-	snatExpiredV6 []expiredSessionV6
+	toDeleteV4 []dataplane.SessionKey
+	toDeleteV6 []dataplane.SessionKeyV6
 
 	// Aggressive session aging (set via SetAgingConfig).
 	agingActive   bool
@@ -84,7 +94,33 @@ type GC struct {
 
 // NewGC creates a new session garbage collector.
 func NewGC(dp dataplane.DataPlane, interval time.Duration) *GC {
-	return &GC{dp: dp, interval: interval, lastV6Count: -1}
+	return NewGCWithDomains(
+		dataplane.SessionStoreOf(dp),
+		dataplane.TelemetryOf(dp),
+		dp,
+		dp,
+		interval,
+	)
+}
+
+// NewGCWithDomains creates a garbage collector from the runtime-domain
+// interfaces used by #1381. The legacy NewGC constructor adapts existing
+// dataplanes into these surfaces so callers can migrate independently.
+func NewGCWithDomains(
+	sessions dataplane.SessionStore,
+	telemetry dataplane.Telemetry,
+	sessionCount sessionCountPublisher,
+	persistent persistentNATProvider,
+	interval time.Duration,
+) *GC {
+	return &GC{
+		sessions:     sessions,
+		telemetry:    telemetry,
+		sessionCount: sessionCount,
+		persistent:   persistent,
+		interval:     interval,
+		lastV6Count:  -1,
+	}
 }
 
 // SetAgingConfig updates the aggressive aging parameters.
@@ -138,18 +174,6 @@ func (gc *GC) Run(ctx context.Context) {
 	}
 }
 
-// expiredSession holds session data needed for cleanup.
-type expiredSession struct {
-	key dataplane.SessionKey
-	val dataplane.SessionValue
-}
-
-// expiredSessionV6 holds IPv6 session data needed for cleanup.
-type expiredSessionV6 struct {
-	key dataplane.SessionKeyV6
-	val dataplane.SessionValueV6
-}
-
 func (gc *GC) sweep() time.Duration {
 	// When userspace dataplane is active, skip the BPF session map scan
 	// entirely — sessions are managed in user-space. Without this, the
@@ -157,13 +181,17 @@ func (gc *GC) sweep() time.Duration {
 	if gc.SkipSweep != nil && gc.SkipSweep() {
 		return gc.interval
 	}
+	if gc.sessions == nil {
+		slog.Error("conntrack GC session store not ready")
+		return gc.interval
+	}
 
 	// Fast path: if no sessions existed on last sweep AND no new sessions
 	// have been created since, skip the entire iteration.  This eliminates
 	// ~25% CPU from empty-table batch lookups on idle firewalls.
-	if gc.lastTotal == 0 {
-		newCtr, err1 := gc.dp.ReadGlobalCounter(dataplane.GlobalCtrSessionsNew)
-		closedCtr, err2 := gc.dp.ReadGlobalCounter(dataplane.GlobalCtrSessionsClosed)
+	if gc.lastTotal == 0 && gc.telemetry != nil {
+		newCtr, err1 := gc.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsNew)
+		closedCtr, err2 := gc.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsClosed)
 		if err1 == nil && err2 == nil &&
 			newCtr == gc.lastSessionCounter &&
 			closedCtr == gc.lastClosedCounter {
@@ -184,18 +212,16 @@ func (gc *GC) sweep() time.Duration {
 	var total, established, expired int
 	var earliestDeadline uint64
 	toDelete := gc.toDeleteV4[:0]
-	snatExpired := gc.snatExpiredV4[:0]
 
 	// Per-IP session count accumulators (only used when session limiting is enabled)
-	countSessions := gc.sessionLimitEnabled
+	countSessions := gc.sessionLimitEnabled && gc.sessionCount != nil
 	var srcCounts, dstCounts map[dataplane.SessionCountKey]uint32
 	if countSessions {
 		srcCounts = make(map[dataplane.SessionCountKey]uint32, 1024)
 		dstCounts = make(map[dataplane.SessionCountKey]uint32, 1024)
 	}
 
-	// IPv4 sessions — batch iteration reduces kernel lock contention
-	err := gc.dp.BatchIterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
+	err := gc.sessions.ForEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		total++
 
 		// Only process forward entries to avoid double-counting
@@ -217,16 +243,7 @@ func (gc *GC) sweep() time.Duration {
 			deadline := val.LastSeen + effectiveTimeout
 			if deadline < now {
 				expired++
-				// Delete both forward and reverse entries
 				toDelete = append(toDelete, key)
-				toDelete = append(toDelete, val.ReverseKey)
-
-				// Track dynamic SNAT sessions for dnat_table cleanup
-				// (skip static NAT -- no dynamic dnat_table entry exists)
-				if val.Flags&dataplane.SessFlagSNAT != 0 &&
-					val.Flags&dataplane.SessFlagStaticNAT == 0 {
-					snatExpired = append(snatExpired, expiredSession{key: key, val: val})
-				}
 			} else if earliestDeadline == 0 || deadline < earliestDeadline {
 				earliestDeadline = deadline
 			}
@@ -252,71 +269,27 @@ func (gc *GC) sweep() time.Duration {
 		return gc.interval
 	}
 
-	// Batch delete in chunks for fewer syscalls and reduced lock contention
-	const deleteBatch = 64
-	for i := 0; i < len(toDelete); i += deleteBatch {
-		end := i + deleteBatch
-		if end > len(toDelete) {
-			end = len(toDelete)
+	for _, key := range toDelete {
+		if err := gc.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonGCExpired); err != nil {
+			slog.Debug("conntrack GC v4 delete failed", "err", err)
 		}
-		gc.dp.BatchDeleteSessions(toDelete[i:end])
-	}
-	// Fire delete callbacks for forward entries (even indices)
-	if gc.OnDeleteV4 != nil {
-		for i := 0; i < len(toDelete); i += 2 {
-			gc.OnDeleteV4(toDelete[i])
-		}
-	}
-
-	// Clean up dynamic dnat_table entries for expired SNAT sessions.
-	// For persistent NAT pools, save the binding before cleanup.
-	pnat := gc.dp.GetPersistentNAT()
-	for _, s := range snatExpired {
-		// Check if this SNAT session belongs to a persistent NAT pool
-		if pnat != nil {
-			var natIPBytes [4]byte
-			binary.NativeEndian.PutUint32(natIPBytes[:], s.val.NATSrcIP)
-			natIP := netip.AddrFrom4(natIPBytes)
-
-			if poolName, poolCfg, ok := pnat.LookupPool(natIP); ok {
-				srcIP := netip.AddrFrom4(s.key.SrcIP)
-				pnat.Save(&dataplane.PersistentNATBinding{
-					SrcIP:               srcIP,
-					SrcPort:             s.key.SrcPort,
-					NatIP:               natIP,
-					NatPort:             s.val.NATSrcPort,
-					PoolName:            poolName,
-					LastSeen:            time.Now(),
-					Timeout:             poolCfg.Timeout,
-					PermitAnyRemoteHost: poolCfg.PermitAnyRemoteHost,
-				})
-			}
-		}
-
-		dk := dataplane.DNATKey{
-			Protocol: s.key.Protocol,
-			DstIP:    s.val.NATSrcIP,
-			DstPort:  s.val.NATSrcPort,
-		}
-		if err := gc.dp.DeleteDNATEntry(dk); err != nil {
-			slog.Debug("conntrack GC dnat cleanup failed", "err", err)
+		if gc.OnDeleteV4 != nil {
+			gc.OnDeleteV4(key)
 		}
 	}
 
 	// Save scratch buffers for reuse.
 	gc.toDeleteV4 = toDelete
-	gc.snatExpiredV4 = snatExpired
 
 	// IPv6 sessions — skip iteration when previous sweep found zero entries,
 	// but force a check every 6th sweep (60s at default 10s interval).
 	gc.sweepCount++
 	toDeleteV6 := gc.toDeleteV6[:0]
-	snatExpiredV6 := gc.snatExpiredV6[:0]
 	skipV6 := gc.lastV6Count == 0 && gc.sweepCount%6 != 0
 
 	if !skipV6 {
 		var v6Count int
-		err = gc.dp.BatchIterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+		err = gc.sessions.ForEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 			v6Count++
 			total++
 
@@ -338,12 +311,6 @@ func (gc *GC) sweep() time.Duration {
 				if deadline < now {
 					expired++
 					toDeleteV6 = append(toDeleteV6, key)
-					toDeleteV6 = append(toDeleteV6, val.ReverseKey)
-
-					if val.Flags&dataplane.SessFlagSNAT != 0 &&
-						val.Flags&dataplane.SessFlagStaticNAT == 0 {
-						snatExpiredV6 = append(snatExpiredV6, expiredSessionV6{key: key, val: val})
-					}
 				} else if earliestDeadline == 0 || deadline < earliestDeadline {
 					earliestDeadline = deadline
 				}
@@ -378,66 +345,34 @@ func (gc *GC) sweep() time.Duration {
 		gc.lastV6Count = v6Count
 	}
 
-	for i := 0; i < len(toDeleteV6); i += deleteBatch {
-		end := i + deleteBatch
-		if end > len(toDeleteV6) {
-			end = len(toDeleteV6)
+	for _, key := range toDeleteV6 {
+		if err := gc.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonGCExpired); err != nil {
+			slog.Debug("conntrack GC v6 delete failed", "err", err)
 		}
-		gc.dp.BatchDeleteSessionsV6(toDeleteV6[i:end])
-	}
-	if gc.OnDeleteV6 != nil {
-		for i := 0; i < len(toDeleteV6); i += 2 {
-			gc.OnDeleteV6(toDeleteV6[i])
-		}
-	}
-
-	for _, s := range snatExpiredV6 {
-		// Check if this SNAT session belongs to a persistent NAT pool
-		if pnat != nil {
-			natIP := netip.AddrFrom16(s.val.NATSrcIP)
-			if poolName, poolCfg, ok := pnat.LookupPool(natIP); ok {
-				srcIP := netip.AddrFrom16(s.key.SrcIP)
-				pnat.Save(&dataplane.PersistentNATBinding{
-					SrcIP:               srcIP,
-					SrcPort:             s.key.SrcPort,
-					NatIP:               natIP,
-					NatPort:             s.val.NATSrcPort,
-					PoolName:            poolName,
-					LastSeen:            time.Now(),
-					Timeout:             poolCfg.Timeout,
-					PermitAnyRemoteHost: poolCfg.PermitAnyRemoteHost,
-				})
-			}
-		}
-
-		dk := dataplane.DNATKeyV6{
-			Protocol: s.key.Protocol,
-			DstIP:    s.val.NATSrcIP,
-			DstPort:  s.val.NATSrcPort,
-		}
-		if err := gc.dp.DeleteDNATEntryV6(dk); err != nil {
-			slog.Debug("conntrack GC dnat_v6 cleanup failed", "err", err)
+		if gc.OnDeleteV6 != nil {
+			gc.OnDeleteV6(key)
 		}
 	}
 
 	// Save v6 scratch buffers for reuse.
 	gc.toDeleteV6 = toDeleteV6
-	gc.snatExpiredV6 = snatExpiredV6
 
 	// Run persistent NAT table GC to expire old bindings
+	var pnat *dataplane.PersistentNATTable
+	if gc.persistent != nil {
+		pnat = gc.persistent.GetPersistentNAT()
+	}
 	if pnat != nil {
 		if removed := pnat.GC(); removed > 0 {
 			slog.Info("persistent NAT GC", "removed", removed)
 		}
 	}
 
-	totalSnatCleaned := len(snatExpired) + len(snatExpiredV6)
 	if expired > 0 {
 		slog.Info("conntrack GC sweep",
 			"total_entries", total,
 			"established", established,
-			"expired_deleted", expired,
-			"snat_dnat_cleaned", totalSnatCleaned)
+			"expired_deleted", expired)
 	}
 
 	gc.lastTotal = total
@@ -445,10 +380,10 @@ func (gc *GC) sweep() time.Duration {
 	// Push per-IP session counts to BPF maps for xdp_screen limiting.
 	if countSessions {
 		for k, c := range srcCounts {
-			gc.dp.UpdateSessionCountSrc(k, c)
+			_ = gc.sessionCount.UpdateSessionCountSrc(k, c)
 		}
 		for k, c := range dstCounts {
-			gc.dp.UpdateSessionCountDst(k, c)
+			_ = gc.sessionCount.UpdateSessionCountDst(k, c)
 		}
 	}
 

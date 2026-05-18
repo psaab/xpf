@@ -1,7 +1,10 @@
 package dataplane
 
 import (
+	"encoding/binary"
 	"errors"
+	"net/netip"
+	"time"
 
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 )
@@ -18,6 +21,10 @@ type SessionStore interface {
 	ForEachV6(func(SessionKeyV6, SessionValueV6) bool) error
 	GetV4(SessionKey) (SessionValue, error)
 	GetV6(SessionKeyV6) (SessionValueV6, error)
+	// PutClusterSyncedV4/V6 installs a peer-owned forward or reverse session.
+	// Forward entries also install their reverse-key companion and dynamic
+	// DNAT/NAT64 companion state through the same backend-owned path used by
+	// stale bulk reconciliation.
 	PutClusterSyncedV4(SessionKey, SessionValue) error
 	PutClusterSyncedV6(SessionKeyV6, SessionValueV6) error
 	DeleteV4(SessionKey) error
@@ -65,14 +72,14 @@ func (s dataPlaneSessionStore) ForEachV4(fn func(SessionKey, SessionValue) bool)
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
-	return s.dp.IterateSessions(fn)
+	return s.dp.BatchIterateSessions(fn)
 }
 
 func (s dataPlaneSessionStore) ForEachV6(fn func(SessionKeyV6, SessionValueV6) bool) error {
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
-	return s.dp.IterateSessionsV6(fn)
+	return s.dp.BatchIterateSessionsV6(fn)
 }
 
 func (s dataPlaneSessionStore) GetV4(key SessionKey) (SessionValue, error) {
@@ -93,9 +100,41 @@ func (s dataPlaneSessionStore) PutClusterSyncedV4(key SessionKey, val SessionVal
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
+	if err := s.putClusterSyncedV4Raw(key, val); err != nil {
+		return err
+	}
+	if val.IsReverse == 0 && val.ReverseKey.Protocol != 0 {
+		revVal := val
+		revVal.IsReverse = 1
+		revVal.ReverseKey = key
+		revVal.IngressZone = val.EgressZone
+		revVal.EgressZone = val.IngressZone
+		if err := s.putClusterSyncedV4Raw(val.ReverseKey, revVal); err != nil {
+			return err
+		}
+	}
+	if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
+		return s.dp.SetDNATEntry(DNATKey{
+			Protocol: key.Protocol,
+			DstIP:    val.NATSrcIP,
+			DstPort:  val.NATSrcPort,
+		}, DNATValue{
+			NewDstIP:   binary.NativeEndian.Uint32(key.SrcIP[:]),
+			NewDstPort: key.SrcPort,
+		})
+	}
+	return nil
+}
+
+func (s dataPlaneSessionStore) putClusterSyncedV4Raw(key SessionKey, val SessionValue) error {
 	if installer, ok := s.dp.(clusterSyncedSessionInstaller); ok {
 		return installer.SetClusterSyncedSessionV4(key, val)
 	}
+	val.FibIfindex = 0
+	val.FibVlanID = 0
+	val.FibDmac = [6]byte{}
+	val.FibSmac = [6]byte{}
+	val.FibGen = 0
 	return s.dp.SetSessionV4(key, val)
 }
 
@@ -103,9 +142,41 @@ func (s dataPlaneSessionStore) PutClusterSyncedV6(key SessionKeyV6, val SessionV
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
+	if err := s.putClusterSyncedV6Raw(key, val); err != nil {
+		return err
+	}
+	if val.IsReverse == 0 && val.ReverseKey.Protocol != 0 {
+		revVal := val
+		revVal.IsReverse = 1
+		revVal.ReverseKey = key
+		revVal.IngressZone = val.EgressZone
+		revVal.EgressZone = val.IngressZone
+		if err := s.putClusterSyncedV6Raw(val.ReverseKey, revVal); err != nil {
+			return err
+		}
+	}
+	if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
+		return s.dp.SetDNATEntryV6(DNATKeyV6{
+			Protocol: key.Protocol,
+			DstIP:    val.NATSrcIP,
+			DstPort:  val.NATSrcPort,
+		}, DNATValueV6{
+			NewDstIP:   key.SrcIP,
+			NewDstPort: key.SrcPort,
+		})
+	}
+	return nil
+}
+
+func (s dataPlaneSessionStore) putClusterSyncedV6Raw(key SessionKeyV6, val SessionValueV6) error {
 	if installer, ok := s.dp.(clusterSyncedSessionInstaller); ok {
 		return installer.SetClusterSyncedSessionV6(key, val)
 	}
+	val.FibIfindex = 0
+	val.FibVlanID = 0
+	val.FibDmac = [6]byte{}
+	val.FibSmac = [6]byte{}
+	val.FibGen = 0
 	return s.dp.SetSessionV6(key, val)
 }
 
@@ -129,6 +200,7 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, _ DeleteRe
 	}
 	var errs []error
 	if val, err := s.dp.GetSessionV4(key); err == nil {
+		s.preservePersistentNATV4(key, val)
 		if val.ReverseKey.Protocol != 0 {
 			errs = append(errs, s.dp.DeleteSession(val.ReverseKey))
 		}
@@ -150,6 +222,7 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, _ Delete
 	}
 	var errs []error
 	if val, err := s.dp.GetSessionV6(key); err == nil {
+		s.preservePersistentNATV6(key, val)
 		if val.ReverseKey.Protocol != 0 {
 			errs = append(errs, s.dp.DeleteSessionV6(val.ReverseKey))
 		}
@@ -163,6 +236,54 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, _ Delete
 	}
 	errs = append(errs, s.dp.DeleteSessionV6(key))
 	return errors.Join(errs...)
+}
+
+func (s dataPlaneSessionStore) preservePersistentNATV4(key SessionKey, val SessionValue) {
+	if val.IsReverse != 0 || val.Flags&SessFlagSNAT == 0 || val.Flags&SessFlagStaticNAT != 0 {
+		return
+	}
+	pnat := s.dp.GetPersistentNAT()
+	if pnat == nil {
+		return
+	}
+	var natIPBytes [4]byte
+	binary.NativeEndian.PutUint32(natIPBytes[:], val.NATSrcIP)
+	natIP := netip.AddrFrom4(natIPBytes)
+	if poolName, poolCfg, ok := pnat.LookupPool(natIP); ok {
+		pnat.Save(&PersistentNATBinding{
+			SrcIP:               netip.AddrFrom4(key.SrcIP),
+			SrcPort:             key.SrcPort,
+			NatIP:               natIP,
+			NatPort:             val.NATSrcPort,
+			PoolName:            poolName,
+			LastSeen:            time.Now(),
+			Timeout:             poolCfg.Timeout,
+			PermitAnyRemoteHost: poolCfg.PermitAnyRemoteHost,
+		})
+	}
+}
+
+func (s dataPlaneSessionStore) preservePersistentNATV6(key SessionKeyV6, val SessionValueV6) {
+	if val.IsReverse != 0 || val.Flags&SessFlagSNAT == 0 || val.Flags&SessFlagStaticNAT != 0 {
+		return
+	}
+	pnat := s.dp.GetPersistentNAT()
+	if pnat == nil {
+		return
+	}
+	natIP := netip.AddrFrom16(val.NATSrcIP)
+	if poolName, poolCfg, ok := pnat.LookupPool(natIP); ok {
+		pnat.Save(&PersistentNATBinding{
+			SrcIP:               netip.AddrFrom16(key.SrcIP),
+			SrcPort:             key.SrcPort,
+			NatIP:               natIP,
+			NatPort:             val.NATSrcPort,
+			PoolName:            poolName,
+			LastSeen:            time.Now(),
+			Timeout:             poolCfg.Timeout,
+			PermitAnyRemoteHost: poolCfg.PermitAnyRemoteHost,
+		})
+	}
 }
 
 func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error) {

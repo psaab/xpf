@@ -1,8 +1,11 @@
 package dataplane
 
 import (
+	"encoding/binary"
 	"fmt"
+	"net/netip"
 	"testing"
+	"time"
 )
 
 type sessionStoreTestDP struct {
@@ -11,6 +14,7 @@ type sessionStoreTestDP struct {
 	v6           map[SessionKeyV6]SessionValueV6
 	deletedDNAT  []DNATKey
 	deletedDNAT6 []DNATKeyV6
+	pnat         *PersistentNATTable
 }
 
 func (m *sessionStoreTestDP) IterateSessions(fn func(SessionKey, SessionValue) bool) error {
@@ -22,6 +26,10 @@ func (m *sessionStoreTestDP) IterateSessions(fn func(SessionKey, SessionValue) b
 	return nil
 }
 
+func (m *sessionStoreTestDP) BatchIterateSessions(fn func(SessionKey, SessionValue) bool) error {
+	return m.IterateSessions(fn)
+}
+
 func (m *sessionStoreTestDP) IterateSessionsV6(fn func(SessionKeyV6, SessionValueV6) bool) error {
 	for key, val := range m.v6 {
 		if !fn(key, val) {
@@ -29,6 +37,10 @@ func (m *sessionStoreTestDP) IterateSessionsV6(fn func(SessionKeyV6, SessionValu
 		}
 	}
 	return nil
+}
+
+func (m *sessionStoreTestDP) BatchIterateSessionsV6(fn func(SessionKeyV6, SessionValueV6) bool) error {
+	return m.IterateSessionsV6(fn)
 }
 
 func (m *sessionStoreTestDP) GetSessionV4(key SessionKey) (SessionValue, error) {
@@ -65,6 +77,8 @@ func (m *sessionStoreTestDP) DeleteDNATEntryV6(key DNATKeyV6) error {
 	return nil
 }
 
+func (m *sessionStoreTestDP) GetPersistentNAT() *PersistentNATTable { return m.pnat }
+
 func TestDeleteWithCompanionsV4RemovesReverseAndDNAT(t *testing.T) {
 	forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}
 	reverse := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 2}, DstIP: [4]byte{10, 0, 0, 1}, SrcPort: 80, DstPort: 1234}
@@ -93,6 +107,64 @@ func TestDeleteWithCompanionsV4RemovesReverseAndDNAT(t *testing.T) {
 	wantDNAT := DNATKey{Protocol: 6, DstIP: 0x0a0200c0, DstPort: 40000}
 	if len(dp.deletedDNAT) != 1 || dp.deletedDNAT[0] != wantDNAT {
 		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNAT, wantDNAT)
+	}
+}
+
+func TestDeleteWithCompanionsV4PreservesPersistentNATBinding(t *testing.T) {
+	forward := SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 1},
+		DstIP:    [4]byte{10, 0, 0, 2},
+		SrcPort:  1234,
+		DstPort:  80,
+	}
+	reverse := SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 2},
+		DstIP:    [4]byte{10, 0, 0, 1},
+		SrcPort:  80,
+		DstPort:  1234,
+	}
+	const natIPU32 = 0x0a0200c0
+	var natIPBytes [4]byte
+	binary.NativeEndian.PutUint32(natIPBytes[:], natIPU32)
+	natIP := netip.AddrFrom4(natIPBytes)
+
+	pnat := NewPersistentNATTable()
+	pnat.SetPoolConfig("pool-a", PersistentNATPoolInfo{
+		Timeout:             time.Hour,
+		PermitAnyRemoteHost: true,
+	})
+	pnat.RegisterNATIP(natIP, "pool-a")
+
+	dp := &sessionStoreTestDP{
+		v4: map[SessionKey]SessionValue{
+			forward: {
+				ReverseKey: reverse,
+				Flags:      SessFlagSNAT,
+				NATSrcIP:   natIPU32,
+				NATSrcPort: 40000,
+			},
+			reverse: {IsReverse: 1},
+		},
+		pnat: pnat,
+	}
+	store := NewDataPlaneSessionStore(dp)
+
+	if err := store.DeleteWithCompanionsV4(forward, DeleteReasonGCExpired); err != nil {
+		t.Fatalf("DeleteWithCompanionsV4: %v", err)
+	}
+	binding := pnat.Lookup(netip.AddrFrom4(forward.SrcIP), forward.SrcPort, "pool-a")
+	if binding == nil {
+		t.Fatal("persistent NAT binding was not preserved")
+	}
+	if binding.NatIP != natIP || binding.NatPort != 40000 {
+		t.Fatalf("binding NAT tuple = %v:%d, want %v:%d",
+			binding.NatIP, binding.NatPort, natIP, 40000)
+	}
+	if !binding.PermitAnyRemoteHost || binding.Timeout != time.Hour {
+		t.Fatalf("binding pool metadata = permit=%v timeout=%v",
+			binding.PermitAnyRemoteHost, binding.Timeout)
 	}
 }
 

@@ -43,6 +43,14 @@ type ApplyResultReader interface {
 	LastApplyResult() *ApplyResult
 }
 
+type SessionStoreProvider interface {
+	Sessions() SessionStore
+}
+
+type TelemetryProvider interface {
+	Telemetry() Telemetry
+}
+
 func LastApplyResultOf(provider any) *ApplyResult {
 	if provider == nil {
 		return nil
@@ -52,6 +60,38 @@ func LastApplyResultOf(provider any) *ApplyResult {
 		return nil
 	}
 	return reader.LastApplyResult()
+}
+
+func SessionStoreOf(provider any) SessionStore {
+	switch p := provider.(type) {
+	case nil:
+		return NewDataPlaneSessionStore(nil)
+	case SessionStore:
+		return p
+	case SessionStoreProvider:
+		if store := p.Sessions(); store != nil {
+			return store
+		}
+	case DataPlane:
+		return NewDataPlaneSessionStore(p)
+	}
+	return NewDataPlaneSessionStore(nil)
+}
+
+func TelemetryOf(provider any) Telemetry {
+	switch p := provider.(type) {
+	case nil:
+		return NewDataPlaneTelemetry(nil)
+	case Telemetry:
+		return p
+	case TelemetryProvider:
+		if telemetry := p.Telemetry(); telemetry != nil {
+			return telemetry
+		}
+	case DataPlane:
+		return NewDataPlaneTelemetry(p)
+	}
+	return NewDataPlaneTelemetry(nil)
 }
 
 type ApplyResult struct {

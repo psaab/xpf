@@ -80,8 +80,8 @@ func (s *SessionSync) BulkSync() error {
 	s.bulkSendMu.Lock()
 	defer s.bulkSendMu.Unlock()
 
-	if s.dp == nil {
-		return fmt.Errorf("dataplane not ready")
+	if s.sessions == nil {
+		return fmt.Errorf("session store not ready")
 	}
 	conn := s.getActiveConn()
 	if conn == nil {
@@ -118,7 +118,7 @@ func (s *SessionSync) BulkSync() error {
 	var count, skipped int
 	slog.Info("cluster sync: bulk sync iterating v4", "epoch", epoch)
 	// Send owned v4 forward sessions.
-	err = s.dp.IterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
+	err = s.sessions.ForEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		if val.IsReverse != 0 {
 			return true
 		}
@@ -157,7 +157,7 @@ func (s *SessionSync) BulkSync() error {
 
 	// Send owned v6 forward sessions.
 	slog.Info("cluster sync: bulk sync iterating v6", "epoch", epoch, "sessions", count, "skipped", skipped)
-	err = s.dp.IterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+	err = s.sessions.ForEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		if val.IsReverse != 0 {
 			return true
 		}

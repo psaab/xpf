@@ -17,6 +17,11 @@ sync.
   `pkg/daemon/daemon_ha.go`, which fans events out (HA sync, status
   publish, etc.). `pkg/cluster/reth.go::HandleStateChange` is a
   state-handler method, not the event-channel consumer.
+- `SessionSync` — `sync.go`, `sync_conn.go`, `sync_bulk.go`. HA session
+  replication. Legacy constructors still accept a transitional
+  `dataplane.DataPlane`, but they immediately adapt it to `SessionStore` and
+  `Telemetry`. The receive, sweep, bulk export, and stale-reconcile paths must
+  stay on those runtime-domain interfaces.
 
 ## Callers
 
@@ -45,6 +50,10 @@ sync.
 - HA delete-sync callbacks fire from the GC loop. They must not block, and
   must log at `slog.Debug` — earlier `slog.Info` flooded at 15 req/s and
   drowned out real diagnostics (per CLAUDE.md logging rules).
+- Session-sync deletes and bulk stale reconciliation must use
+  `SessionStore.DeleteWithCompanions*`. Reverse-session, DNAT/DNATv6, and
+  persistent-NAT side effects are backend-owned; do not add local map cleanup
+  in `pkg/cluster`.
 - Dual-active overlap is intentional: primary sets `rg_active=true`
   immediately on becoming master; secondary defers `rg_active=false` until
   it sees the VRRP BACKUP event. Brief overlap, never both inactive.

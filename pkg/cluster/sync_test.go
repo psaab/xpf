@@ -503,8 +503,8 @@ func TestPeerIPsecSAs(t *testing.T) {
 
 func TestSetDataPlane(t *testing.T) {
 	ss := NewSessionSync(":4785", "10.0.0.2:4785", nil)
-	if ss.dp != nil {
-		t.Fatal("dp should be nil initially")
+	if ss.sessions != nil {
+		t.Fatal("session store should be nil initially")
 	}
 
 	// Simulate handleMessage without dp — should not crash
@@ -624,6 +624,8 @@ func (m *mockSweepDP) DeleteDNATEntryV6(key dataplane.DNATKeyV6) error {
 	m.deletedDNATV6 = append(m.deletedDNATV6, key)
 	return nil
 }
+
+func (m *mockSweepDP) GetPersistentNAT() *dataplane.PersistentNATTable { return nil }
 
 func (m *mockSweepDP) SetDNATEntry(key dataplane.DNATKey, val dataplane.DNATValue) error {
 	return nil
