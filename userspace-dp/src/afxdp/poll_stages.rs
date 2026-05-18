@@ -292,10 +292,11 @@ pub(super) fn stage_screen_check(
 /// keeps its normal fast/session path. A valid cookie ACK is consumed without
 /// creating a session; the validated-client cache lets the client's next SYN
 /// traverse the ordinary policy/NAT/session path. Invalid cookie ACKs are
-/// dropped while cookie mode is active. Cache expiry, secret-epoch rotation,
-/// and HA/cache-survivability semantics remain explicit #1374 follow-ups; this
-/// stage only consumes already-valid cookies and installs a bounded one-shot
-/// admission hint.
+/// dropped while cookie mode is active. Poll-stage coverage intentionally pins
+/// only the operational drop/bypass behavior here; the lower screen runtime
+/// owns cache mechanics. `screen_tests.rs` covers bounded 4-way validated-client
+/// cache replacement, while cache expiration, secret-epoch rotation, and
+/// HA-safe secret/cache survivability remain explicit #1374 follow-ups.
 #[inline]
 pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
     flow: Option<&SessionFlow>,
