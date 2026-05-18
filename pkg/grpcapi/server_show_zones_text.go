@@ -29,13 +29,12 @@ func (s *Server) showZonesDetail(cfg *config.Config, buf *strings.Builder) {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	cr := s.applyResult()
 	for _, name := range zoneNames {
 		zone := cfg.Security.Zones[name]
 		var zoneID uint16
-		if s.dp != nil {
-			if cr := s.applyResult(); cr != nil {
-				zoneID = cr.ZoneIDs[name]
-			}
+		if cr != nil {
+			zoneID = cr.ZoneIDs[name]
 		}
 		if zoneID > 0 {
 			fmt.Fprintf(buf, "Zone: %s (id: %d)\n", name, zoneID)

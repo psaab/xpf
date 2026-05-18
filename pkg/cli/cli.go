@@ -1327,20 +1327,17 @@ type sessionFilter struct {
 func (c *CLI) parseSessionFilter(args []string) sessionFilter {
 	var f sessionFilter
 	f.cfg = c.store.ActiveConfig()
-	if c.dp != nil {
-		if cr := c.applyResult(); cr != nil {
-			f.appNames = cr.AppNames
-		}
+	cr := c.applyResult()
+	if cr != nil {
+		f.appNames = cr.AppNames
 	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "zone":
 			if i+1 < len(args) {
 				i++
-				if c.dp != nil {
-					if cr := c.applyResult(); cr != nil {
-						f.zoneID = cr.ZoneIDs[args[i]]
-					}
+				if cr != nil {
+					f.zoneID = cr.ZoneIDs[args[i]]
 				}
 			}
 		case "protocol":

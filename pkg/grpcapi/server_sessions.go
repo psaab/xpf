@@ -291,19 +291,18 @@ func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 	}
 
 	// Build zone/policy/app name maps.
-	if cr := s.applyResult(); cr != nil {
+	cr := s.applyResult()
+	if cr != nil {
 		for name, id := range cr.ZoneIDs {
 			f.zoneNames[id] = name
 		}
 		f.policyNames = cr.PolicyNames
 		f.appNames = cr.AppNames
 	}
-	if f.cfg != nil {
+	if f.cfg != nil && cr != nil {
 		for zoneName, zone := range f.cfg.Security.Zones {
-			if cr := s.applyResult(); cr != nil {
-				if zid, ok := cr.ZoneIDs[zoneName]; ok && len(zone.Interfaces) > 0 {
-					f.zoneIfaces[zid] = zone.Interfaces[0]
-				}
+			if zid, ok := cr.ZoneIDs[zoneName]; ok && len(zone.Interfaces) > 0 {
+				f.zoneIfaces[zid] = zone.Interfaces[0]
 			}
 		}
 		for ifName, ifc := range f.cfg.Interfaces.Interfaces {
@@ -681,13 +680,14 @@ func (s *Server) ClearSessions(ctx context.Context, req *pb.ClearSessionsRequest
 
 	clearCfg := s.store.ActiveConfig()
 	var appNames map[uint16]string
-	if cr := s.applyResult(); cr != nil {
+	cr := s.applyResult()
+	if cr != nil {
 		appNames = cr.AppNames
 	}
 
 	var zoneID uint16
 	if req.Zone != "" {
-		if cr := s.applyResult(); cr != nil {
+		if cr != nil {
 			zoneID = cr.ZoneIDs[req.Zone]
 		}
 	}
