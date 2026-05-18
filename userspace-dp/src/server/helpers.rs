@@ -78,6 +78,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.recent_session_deltas = state.afxdp.recent_session_deltas();
     state.status.recent_exceptions = state.afxdp.recent_exceptions();
     state.status.cos_interfaces = state.afxdp.cos_statuses();
+    state.status.policy_rule_counters = state.afxdp.policy_rule_counters();
     state.status.filter_term_counters = state.afxdp.filter_term_counters();
     let (flow_worker_map, flow_worker_map_truncated) = state.afxdp.flow_worker_map();
     state.status.flow_worker_map = flow_worker_map;

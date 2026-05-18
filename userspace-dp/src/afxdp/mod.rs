@@ -7,7 +7,9 @@ use crate::nat::{
 };
 use crate::nat64::{Nat64ReverseInfo, Nat64State};
 use crate::nptv6::Nptv6State;
-use crate::policy::{PolicyAction, PolicyState, evaluate_policy, parse_policy_state};
+use crate::policy::{
+    PolicyAction, PolicyCounterStore, PolicyState, evaluate_policy, parse_policy_state_with_counters,
+};
 use crate::prefix::{PrefixV4, PrefixV6};
 use crate::screen::{ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info};
 use crate::session::{

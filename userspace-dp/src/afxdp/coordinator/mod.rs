@@ -29,6 +29,7 @@ pub struct Coordinator {
     pub(in crate::afxdp) sessions: SessionManager,
     pub(in crate::afxdp) workers: WorkerManager,
     pub(crate) forwarding: ForwardingState,
+    pub(crate) policy_counters: PolicyCounterStore,
     pub(crate) recent_exceptions: Arc<Mutex<VecDeque<ExceptionStatus>>>,
     pub(crate) recent_session_deltas: Arc<Mutex<VecDeque<SessionDeltaInfo>>>,
     pub(crate) last_resolution: Arc<Mutex<Option<PacketResolution>>>,
@@ -65,6 +66,7 @@ impl Coordinator {
             sessions: SessionManager::new(),
             workers: WorkerManager::new(),
             forwarding: ForwardingState::default(),
+            policy_counters: PolicyCounterStore::default(),
             recent_exceptions: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_RECENT_EXCEPTIONS))),
             recent_session_deltas: Arc::new(Mutex::new(VecDeque::with_capacity(
                 MAX_RECENT_SESSION_DELTAS,
@@ -387,6 +389,7 @@ impl Coordinator {
             binding.ready = false;
         }
         let Some(snapshot) = snapshot else {
+            self.policy_counters.reconcile_rules(&[]);
             self.last_reconcile_stage = "no_snapshot".to_string();
             return;
         };
@@ -395,7 +398,9 @@ impl Coordinator {
             config_generation: snapshot.generation,
             fib_generation: snapshot.fib_generation,
         };
-        self.forwarding = build_forwarding_state(snapshot);
+        self.policy_counters.reconcile_rules(&snapshot.policies);
+        self.forwarding =
+            build_forwarding_state_with_policy_counters(snapshot, &self.policy_counters);
         self.shared_validation.store(Arc::new(self.validation));
         self.ha.forwarding.store(Arc::new(self.forwarding.clone()));
         self.slow_path = if let Some(slow_path) = preserved_slow_path {
@@ -961,7 +966,9 @@ impl Coordinator {
         // may not include them if the peer MAC wasn't resolved at
         // snapshot build time. Always keep the better-resolved set.
         let preserved_fabrics = self.forwarding.fabrics.clone();
-        self.forwarding = build_forwarding_state(snapshot);
+        self.policy_counters.reconcile_rules(&snapshot.policies);
+        self.forwarding =
+            build_forwarding_state_with_policy_counters(snapshot, &self.policy_counters);
         if self.forwarding.fabrics.is_empty() && !preserved_fabrics.is_empty() {
             self.forwarding.fabrics = preserved_fabrics;
         } else if !preserved_fabrics.is_empty() {
@@ -984,6 +991,14 @@ impl Coordinator {
         self.ha
             .fabrics
             .store(Arc::new(self.forwarding.fabrics.clone()));
+    }
+
+    pub fn policy_rule_counters(&self) -> Vec<crate::protocol::PolicyRuleCounterStatus> {
+        self.forwarding.policy.counter_snapshots()
+    }
+
+    pub fn clear_policy_counters(&self) {
+        self.policy_counters.clear();
     }
 
     fn refresh_cos_owner_worker_map_from_identities(&mut self) {

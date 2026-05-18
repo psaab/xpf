@@ -755,3 +755,27 @@
 - **Timestamp**: 2026-05-17T18:57:46Z
   - **Action**: Adversarial PR #1374 follow-up: optimize SYN-cookie validated-client cache with map+queue state so insert/take are O(1), while expiry/eviction drain stale queue tokens from the head without whole-cache scans.
   - **File(s)**: `userspace-dp/src/screen.rs`, `userspace-dp/src/screen_tests.rs`, `_Log.md`
+
+- **Timestamp**: 2026-05-17T20:25:00Z
+  - **Action**: PR #1407 Codex round-1 follow-up docs correction — replaced a non-existent scheduler test reference in the #1378 plan with the implemented delete/re-add counter lifecycle regression (`hit_counters_reset_after_rule_absent_then_readded`) to match actual coverage.
+  - **File(s)**: `docs/pr/1373-retire-ebpf-dataplane/plan-1378-policy-schedulers.md`, `_Log.md`
+  - **Validation**: `go test ./pkg/config ./pkg/dataplane/userspace ./pkg/api ./pkg/grpcapi ./pkg/cli`; `cargo test --manifest-path userspace-dp/Cargo.toml policy:: -- --nocapture` (blocked: missing libelf headers/pkg-config in runner)
+
+- **Timestamp**: 2026-05-17T21:28:00Z
+  - **Action**: PR #1407 Codex round-2 follow-up — added regression coverage for helper-backed sparse/global policy counters in gRPC and Prometheus reporting paths, and extended policy-hit metric collection to include global policies (`*`/`*` labels) so userspace/global counter IDs are surfaced consistently.
+  - **File(s)**: `pkg/api/metrics.go`, `pkg/api/metrics_test.go`, `pkg/grpcapi/server_show_zones_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/api/metrics.go pkg/api/metrics_test.go pkg/grpcapi/server_show_zones_test.go`; `go test ./pkg/api ./pkg/grpcapi ./pkg/dataplane/userspace ./pkg/config`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T21:34:00Z
+  - **Action**: Addressed automated review follow-up on policy-hit metrics by adding a shared `policyCounterID` helper used by collector/tests and guarding global-policy metric emission against nil policy entries.
+  - **File(s)**: `pkg/api/metrics.go`, `pkg/api/metrics_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/api/metrics.go pkg/api/metrics_test.go`; `go test ./pkg/api ./pkg/grpcapi ./pkg/dataplane/userspace ./pkg/config`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T21:38:00Z
+  - **Action**: Applied final review nits: reverted unintended zone-policy nil-contract change in Prometheus policy counter loop and documented why global policy IDs use the post-zone-set offset in metrics tests.
+  - **File(s)**: `pkg/api/metrics.go`, `pkg/api/metrics_test.go`, `_Log.md`
+  - **Validation**: `gofmt -w pkg/api/metrics.go pkg/api/metrics_test.go`; `go test ./pkg/api ./pkg/grpcapi ./pkg/dataplane/userspace ./pkg/config`; `git diff --check`
+
+- **Timestamp**: 2026-05-17T22:00:00Z
+  - **Action**: Added explicit invariant note in `collectPolicyCounters` clarifying why zone-pair policy loop dereferences `rule.Name` without a nil guard while global policy loop retains defensive nil filtering.
+  - **File(s)**: `pkg/api/metrics.go`, `_Log.md`

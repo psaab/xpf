@@ -1500,32 +1500,40 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp dat
 	if cfg == nil {
 		return
 	}
-	cr := dp.LastCompileResult()
-	if cr == nil {
-		return
-	}
 
-	// Build reverse zone ID map
-	zoneNames := make(map[uint16]string)
-	for name, id := range cr.ZoneIDs {
-		zoneNames[id] = name
-	}
-
-	var policyID uint32
+	var policySetID uint32
 	for _, zpp := range cfg.Security.Policies {
 		fromZone := zpp.FromZone
 		toZone := zpp.ToZone
-		for _, rule := range zpp.Policies {
+		// Zone-pair compile output normalizes nil entries out of zpp.Policies.
+		for i, rule := range zpp.Policies {
+			policyID := policyCounterID(policySetID, i)
 			ctrs, err := dp.ReadPolicyCounters(policyID)
 			if err != nil {
-				policyID++
 				continue
 			}
 			ch <- prometheus.MustNewConstMetric(c.policyHitsTotal, prometheus.CounterValue,
 				float64(ctrs.Packets), fromZone, toZone, rule.Name)
-			policyID++
 		}
+		policySetID++
 	}
+
+	for i, rule := range cfg.Security.GlobalPolicies {
+		if rule == nil {
+			continue
+		}
+		policyID := policyCounterID(policySetID, i)
+		ctrs, err := dp.ReadPolicyCounters(policyID)
+		if err != nil {
+			continue
+		}
+		ch <- prometheus.MustNewConstMetric(c.policyHitsTotal, prometheus.CounterValue,
+			float64(ctrs.Packets), "*", "*", rule.Name)
+	}
+}
+
+func policyCounterID(policySetID uint32, ruleIndex int) uint32 {
+	return policySetID*dataplane.MaxRulesPerPolicy + uint32(ruleIndex)
 }
 
 func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp dataplane.DataPlane) {

@@ -822,6 +822,8 @@ pub(crate) struct ProcessStatus {
     pub recent_exceptions: Vec<ExceptionStatus>,
     #[serde(rename = "cos_interfaces", default)]
     pub cos_interfaces: Vec<CoSInterfaceStatus>,
+    #[serde(rename = "policy_rule_counters", default)]
+    pub policy_rule_counters: Vec<PolicyRuleCounterStatus>,
     #[serde(rename = "filter_term_counters", default)]
     pub filter_term_counters: Vec<FirewallFilterTermCounterStatus>,
     #[serde(rename = "last_resolution", skip_serializing_if = "Option::is_none")]
@@ -1045,6 +1047,16 @@ pub(crate) struct CoSQueueStatus {
     /// per-queue write via an `apply_*` early-return / queue miss.
     #[serde(rename = "drain_sent_bytes_shaped_unconditional", default)]
     pub drain_sent_bytes_shaped_unconditional: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct PolicyRuleCounterStatus {
+    #[serde(rename = "rule_id", default)]
+    pub rule_id: String,
+    #[serde(default)]
+    pub packets: u64,
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

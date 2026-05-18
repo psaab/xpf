@@ -12,6 +12,7 @@ use super::poll_stages::{
     stage_native_gre_decap, stage_parse_flow_and_learn, stage_screen_check,
     stage_screen_syn_cookie_ack_on_session_miss, FabricIngressOutcome, StageOutcome,
 };
+use crate::policy::evaluate_policy_with_len;
 
 // Per-batch packet processing lifted from `poll_binding` (#678).
 //
@@ -1009,7 +1010,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // the session-install step below is skipped only when
                                 // the knob matches AND no NAT is required (to avoid
                                 // orphan NAT state without a session anchor).
-                                if let PolicyAction::Permit = evaluate_policy(
+                                if let PolicyAction::Permit = evaluate_policy_with_len(
                                     &worker_ctx.forwarding.policy,
                                     from_zone_id,
                                     to_zone_id,
@@ -1018,6 +1019,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     flow.forward_key.protocol,
                                     flow.forward_key.src_port,
                                     flow.forward_key.dst_port,
+                                    desc.len as u64,
                                 ) {
                                     // NAT64: cross-family translation takes
                                     // priority over same-family SNAT.
@@ -1947,7 +1949,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // session miss → policy deny (no rule for WAN→LAN).
                                 let mut pending_decision = decision;
                                 if let Some(flow) = flow.as_ref() {
-                                    if let PolicyAction::Permit = evaluate_policy(
+                                    if let PolicyAction::Permit = evaluate_policy_with_len(
                                         &worker_ctx.forwarding.policy,
                                         from_zone_id,
                                         to_zone_id,
@@ -1956,6 +1958,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         flow.forward_key.protocol,
                                         flow.forward_key.src_port,
                                         flow.forward_key.dst_port,
+                                        desc.len as u64,
                                     ) {
                                         let nat_match_flow = flow.with_destination(
                                             pending_decision.nat.rewrite_dst.unwrap_or(flow.dst_ip),
