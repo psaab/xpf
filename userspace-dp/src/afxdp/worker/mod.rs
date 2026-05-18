@@ -1520,6 +1520,7 @@ pub(crate) fn worker_loop(
                 &shared_forward_wire_sessions,
                 &shared_owner_rg_indexes,
                 slow_path.as_ref(),
+                event_stream.as_ref(),
                 &local_tunnel_deliveries,
                 &recent_exceptions,
                 &recent_session_deltas,

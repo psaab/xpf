@@ -1,4 +1,4 @@
-#![allow(dead_code)] // producer call sites are intentionally wired in later slices
+#![allow(dead_code)] // status surfaces still consume only part of the producer API
 
 use super::codec::{DataplaneEventKind, DataplaneEventPayload};
 use super::{EventFrame, EventStreamSendError, EventStreamWorkerHandle};

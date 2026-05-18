@@ -28,6 +28,11 @@ sync.
   active-bucket selection, fair-share lease (#1229 Phase 6 v8). See
   `docs/per-5-tuple/state.md` for the architectural ceiling.
 - `forwarding/` — FIB lookup, next-hop selection, VLAN/GRE encap.
+- `event_emit.rs` — fixed-size, non-blocking RT_FLOW event producers
+  for userspace policy-deny, screen-drop, and logged PBR filter hits.
+  Producers must use the event-stream worker handle so rate limiting,
+  queue-budget accounting, replay, and daemon callback ACK behavior stay
+  centralized in `event_stream/`.
 - `session_glue/` — bridges the userspace session table back to the
   BPF session map mirror so the CLI / GC see the same sessions.
 - `types/` — shared structs: `BindingPlan`, `BindingStatus`,

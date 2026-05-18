@@ -1,9 +1,11 @@
 use super::super::forwarding_build::*;
 use super::super::test_fixtures::*;
 use super::*;
+use crate::event_stream::DataplaneEventRateLimitConfig;
+use crate::event_stream::codec::DataplaneEventKind;
 use crate::nat::SourceNatFailureReason;
 use crate::test_zone_ids::*;
-use crate::{FabricSnapshot, NeighborSnapshot, SourceNATRuleSnapshot};
+use crate::{FabricSnapshot, NeighborSnapshot, SourceNATRuleSnapshot, ZoneSnapshot};
 
 fn active_ha_runtime(now_secs: u64) -> HAGroupRuntime {
     HAGroupRuntime {
@@ -1867,6 +1869,91 @@ fn policy_selection_denies_on_default_policy() {
         ),
         PolicyAction::Deny
     );
+}
+
+#[test]
+fn policy_selection_deny_emits_rt_flow_event() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.zones = vec![
+        ZoneSnapshot {
+            name: "lan".to_string(),
+            id: TEST_LAN_ZONE_ID,
+        },
+        ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+        },
+        ZoneSnapshot {
+            name: "dmz".to_string(),
+            id: TEST_DMZ_ZONE_ID,
+        },
+    ];
+    let state = build_forwarding_state(&snapshot);
+    let flow = SessionFlow {
+        src_ip: "10.0.61.102".parse().expect("src"),
+        dst_ip: "172.16.80.200".parse().expect("dst"),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: "10.0.61.102".parse().expect("src"),
+            dst_ip: "172.16.80.200".parse().expect("dst"),
+            src_port: 12345,
+            dst_port: 5201,
+        },
+    };
+    let (from_id, to_id) = zone_pair_ids_for_flow(&state, 24, 12);
+    let action = evaluate_policy(
+        &state.policy,
+        from_id,
+        to_id,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+    );
+    assert_eq!(action, PolicyAction::Deny);
+
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: 24,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        pkt_len: 60,
+        ..Default::default()
+    };
+
+    super::super::emit_policy_deny_event(
+        Some(&event_handle),
+        &flow,
+        meta,
+        from_id,
+        to_id,
+        1,
+        action,
+        123,
+    );
+
+    let event = event_rx
+        .try_recv()
+        .expect("policy-deny event")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(event.kind, DataplaneEventKind::PolicyDeny);
+    assert_eq!(event.action, 0);
+    assert_eq!(event.reason, 5);
+    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID);
+    assert_eq!(event.ingress_ifindex, 24);
+    assert_eq!(event.src_port, 12345);
+    assert_eq!(event.dst_port, 5201);
+    assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
 }
 
 #[test]

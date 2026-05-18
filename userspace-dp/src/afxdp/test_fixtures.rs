@@ -216,6 +216,7 @@ pub(super) fn native_gre_pbr_snapshot(include_neighbor: bool) -> ConfigSnapshot 
                 name: "sfmix-route".to_string(),
                 destination_addresses: vec!["10.255.192.40/30".to_string()],
                 routing_instance: "sfmix".to_string(),
+                log: true,
                 ..Default::default()
             },
             FirewallTermSnapshot {

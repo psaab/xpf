@@ -317,6 +317,7 @@ pub(in crate::afxdp) struct WorkerContext<'a> {
         &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub(in crate::afxdp) shared_owner_rg_indexes: &'a SharedSessionOwnerRgIndexes,
     pub(in crate::afxdp) slow_path: Option<&'a Arc<SlowPathReinjector>>,
+    pub(in crate::afxdp) event_stream: Option<&'a crate::event_stream::EventStreamWorkerHandle>,
     pub(in crate::afxdp) local_tunnel_deliveries:
         &'a Arc<ArcSwap<BTreeMap<i32, SyncSender<Vec<u8>>>>>,
     pub(in crate::afxdp) recent_exceptions: &'a Arc<Mutex<VecDeque<ExceptionStatus>>>,

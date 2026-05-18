@@ -31,7 +31,7 @@ const PROTO_OSPF: u8 = 89;
 const PROTO_IPIP: u8 = 4;
 
 /// Result of evaluating a filter term.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FilterAction {
     /// Accept the packet (default if no term matches).
     Accept,
@@ -45,6 +45,7 @@ pub(crate) enum FilterAction {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct FilterTerm {
+    pub(crate) id: u32,
     pub(crate) name: String,
     pub(crate) source_v4: Vec<PrefixV4>,
     pub(crate) source_v6: Vec<PrefixV6>,
@@ -101,6 +102,7 @@ impl PortMatcher {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct Filter {
+    pub(crate) id: u32,
     pub(crate) name: String,
     pub(crate) family: String,
     pub(crate) terms: Vec<FilterTerm>,
@@ -448,6 +450,15 @@ pub(crate) struct FilterResult {
     pub(crate) routing_instance: String,
     pub(crate) forwarding_class: Arc<str>,
     pub(crate) log: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FilterRoutingInstanceResult<'a> {
+    pub(crate) routing_instance: &'a str,
+    pub(crate) log: bool,
+    pub(crate) action: FilterAction,
+    pub(crate) filter_id: u32,
+    pub(crate) term_id: u32,
 }
 
 #[derive(Clone, Debug, Default)]

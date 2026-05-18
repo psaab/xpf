@@ -18,10 +18,13 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   matcher, DSCP bitmap). Three-color policer snapshots are sorted by
   name and compiled into stable runtime IDs before terms are linked.
 - `engine.rs` — per-term evaluation, first-match-wins. It carries the
-  matched `then policer ...` name in the filter result. TX-selection
-  evaluation meters three-color policers on live forwarding paths and
-  cached evaluation returns runtime handles so flow-cache hits can meter
-  the same policer before forwarding.
+  matched `then policer ...` name in the filter result. Routing-instance
+  evaluation can also return log/action/filter/term metadata so AF_XDP
+  can emit RT_FLOW filter-log events without re-evaluating the term or
+  allocating on the packet path. TX-selection evaluation meters
+  three-color policers on live forwarding paths and cached evaluation
+  returns runtime handles so flow-cache hits can meter the same policer
+  before forwarding.
 - `policer.rs` — token-bucket implementation plus the #1375 RFC
   2697/2698 three-color meter core. Token math is integer-only:
   the legacy token bucket keeps its bits/sec constructor contract, and
@@ -39,6 +42,10 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   entries" was incorrect.
 - Hit counters live on each `FilterTerm` (`Arc<FilterTermCounter>`)
   and are surfaced through the status JSON.
+- `Filter.id` and `FilterTerm.id` are stable only within the compiled
+  snapshot order today. They are sufficient for userspace RT_FLOW
+  scaffolding, but richer policy/filter identity mapping remains #1379
+  closeout work.
 - `from-interface` is matched at the binding level (caller sets the
   ingress interface; the term doesn't re-derive it).
 

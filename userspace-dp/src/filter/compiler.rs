@@ -63,14 +63,16 @@ pub(crate) fn parse_filter_state_with_three_color(
     }
 
     // Parse filters
-    for snap in filters {
+    for (filter_idx, snap) in filters.iter().enumerate() {
         let key = qualify_filter_key(&snap.family, &snap.name);
         let terms = snap
             .terms
             .iter()
-            .map(|t| parse_term(t, &state.three_color_policer_by_name))
+            .enumerate()
+            .map(|(term_idx, t)| parse_term(t, term_idx as u32, &state.three_color_policer_by_name))
             .collect::<Vec<_>>();
         let filter = Filter {
+            id: filter_idx as u32,
             name: snap.name.clone(),
             family: snap.family.clone(),
             affects_tx_selection: terms
@@ -258,6 +260,7 @@ fn qualify_filter_key(family: &str, filter_name: &str) -> String {
 
 fn parse_term(
     snap: &FirewallTermSnapshot,
+    id: u32,
     three_color_policers: &rustc_hash::FxHashMap<String, Arc<ThreeColorPolicerRuntime>>,
 ) -> FilterTerm {
     let mut source_v4 = Vec::new();
@@ -296,6 +299,7 @@ fn parse_term(
     let dscp_rewrite = snap.dscp_rewrite.map(|value| value & 0x3f);
 
     FilterTerm {
+        id,
         name: snap.name.clone(),
         source_v4,
         source_v6,

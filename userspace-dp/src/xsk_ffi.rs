@@ -744,6 +744,17 @@ impl RingRx {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn push_for_test(&mut self, desc: XdpDesc) {
+        let prod = unsafe { *self.ring.producer };
+        let idx = prod & self.ring.mask;
+        let slot = unsafe { (self.ring.ring as *mut XdpDesc).add(idx as usize) };
+        unsafe {
+            *slot = desc;
+            *self.ring.producer = prod.wrapping_add(1);
+        }
+    }
+
     /// Peek and begin receiving up to `n` descriptors.
     pub fn receive(&mut self, n: u32) -> ReadRx<'_> {
         let mut idx: u32 = 0;

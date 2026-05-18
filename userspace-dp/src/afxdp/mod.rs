@@ -79,6 +79,8 @@ mod icmp;
 mod icmp_embed;
 #[path = "ethernet.rs"]
 mod ethernet;
+#[path = "event_emit.rs"]
+mod event_emit;
 #[path = "mirror.rs"]
 mod mirror;
 #[path = "neighbor.rs"]
@@ -125,6 +127,7 @@ use self::bind::{
 };
 use self::bpf_map::*;
 use self::checksum::*;
+use self::event_emit::*;
 use self::flow_cache::*;
 use self::forwarding::*;
 use self::forwarding_build::*;

@@ -284,6 +284,14 @@ pub(super) fn stage_screen_check(
             StageOutcome::Continue(())
         }
         ScreenVerdict::Drop(reason) => {
+            emit_screen_drop_event(
+                worker_ctx.event_stream,
+                &screen_pkt,
+                meta,
+                zone_id,
+                reason,
+                event_now_ns_from_secs(now_secs),
+            );
             counters.touched = true;
             counters.screen_drops += 1;
             if reason == "syn-cookie-unavailable" {
@@ -292,6 +300,14 @@ pub(super) fn stage_screen_check(
             StageOutcome::RecycleAndContinue
         }
         ScreenVerdict::SynCookieChallenge(_) => {
+            emit_screen_drop_event(
+                worker_ctx.event_stream,
+                &screen_pkt,
+                meta,
+                zone_id,
+                "syn-cookie",
+                event_now_ns_from_secs(now_secs),
+            );
             counters.touched = true;
             counters.screen_drops += 1;
             counters.syn_cookie_challenges += 1;
@@ -370,6 +386,14 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
             StageOutcome::RecycleAndContinue
         }
         SynCookieAckVerdict::Invalid => {
+            emit_screen_drop_event(
+                worker_ctx.event_stream,
+                &screen_pkt,
+                meta,
+                zone_id,
+                "syn-cookie",
+                event_now_ns_from_secs(now_secs),
+            );
             counters.touched = true;
             counters.screen_drops += 1;
             counters.syn_cookie_ack_invalid += 1;
@@ -433,6 +457,8 @@ pub(super) fn stage_ipsec_passthrough_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_stream::DataplaneEventRateLimitConfig;
+    use crate::event_stream::codec::DataplaneEventKind;
     use crate::test_zone_ids::TEST_LAN_ZONE_ID;
 
     const TEST_NOW_SECS: u64 = 128;
@@ -529,6 +555,13 @@ mod tests {
         let peer_worker_commands = Vec::new();
         let dnat_fds = DnatTableFds::default();
         let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+        let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+            8,
+            DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+            },
+        );
         let worker_ctx = WorkerContext {
             ident: &ident,
             binding_lookup: &binding_lookup,
@@ -541,6 +574,7 @@ mod tests {
             shared_forward_wire_sessions: &shared_forward_wire_sessions,
             shared_owner_rg_indexes: &shared_owner_rg_indexes,
             slow_path: None,
+            event_stream: Some(&event_handle),
             local_tunnel_deliveries: &local_tunnel_deliveries,
             recent_exceptions: &recent_exceptions,
             last_resolution: &last_resolution,
@@ -616,6 +650,16 @@ mod tests {
         );
         assert_eq!(invalid_counters.screen_drops, 1);
         assert_eq!(invalid_counters.syn_cookie_ack_invalid, 1);
+        let screen_event = event_rx
+            .try_recv()
+            .expect("screen-drop event")
+            .decode_dataplane_event()
+            .expect("screen-drop payload");
+        assert_eq!(screen_event.kind, DataplaneEventKind::ScreenDrop);
+        assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID);
+        assert_eq!(screen_event.ingress_ifindex, 24);
+        assert_eq!(screen_event.screen_id, 1 << 14);
+        assert_eq!(event_handle.dataplane_event_stats().screen_drop.sent, 1);
 
         let challenge = match screen.check_packet_with_zone_id(
             "lan",
@@ -660,6 +704,10 @@ mod tests {
         );
         assert_eq!(counters.screen_drops, 0);
         assert_eq!(counters.syn_cookie_ack_valid, 1);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "valid cookie ACK must not emit a screen-drop event"
+        );
 
         assert_eq!(
             screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
