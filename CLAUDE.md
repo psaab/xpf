@@ -16,6 +16,11 @@
   documentation in the corresponding Markdown files as part of the same work.
   Treat README/design/state/operator docs as part of the module contract; if no
   docs change is needed, say why in the review notes.
+- Write complete commit messages. Use a specific subject plus a body that
+  describes the reason for the change, the important implementation details,
+  and the validation performed. Wrap body paragraphs and bullets to readable
+  terminal width, roughly 72 columns. Do not use terse checkpoint-style messages
+  for production work.
 - No sycophantic openers or closing fluff.
 - Keep solutions simple and direct.
 - When working with many teams, don't let the context windows get too large.

@@ -190,6 +190,10 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 
 ## Workflow
 - **Always commit and push** when finishing a task
+- **Commit messages must be complete:** use a specific subject and a descriptive
+  body covering why the change exists, what changed, and what validation ran.
+  Wrap body paragraphs and bullets to readable terminal width, roughly 72
+  columns. Avoid vague or checkpoint-style commit messages.
 - **Full validation before commit:** `make test` + `make test-deploy` + connectivity tests
 - **Cluster changes MUST run failover test:** `make test-failover` + `make test-ha-crash`
 - Guard context window — keep messages concise
