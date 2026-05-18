@@ -172,7 +172,7 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 	totalSNAT := 0
 	rsSessions := make(map[ruleSetKey]int)
 	if c.dp != nil && c.dp.IsLoaded() {
-		cr := c.dp.LastCompileResult()
+		cr := c.applyResult()
 		// Build reverse zone ID map
 		var zoneByID map[uint16]string
 		if cr != nil {
@@ -288,7 +288,7 @@ func (c *CLI) showNATSourcePool(cfg *config.Config, poolName string) error {
 		fmt.Printf("  Port range: %d-%d\n", portLow, portHigh)
 
 		if c.dp != nil && c.dp.IsLoaded() {
-			if cr := c.dp.LastCompileResult(); cr != nil {
+			if cr := c.applyResult(); cr != nil {
 				if id, ok := cr.PoolIDs[name]; ok {
 					cnt, err := c.dp.ReadNATPortCounter(uint32(id))
 					if err == nil {
@@ -349,9 +349,9 @@ func (c *CLI) showNATSourceRuleSet(cfg *config.Config, rsName string) error {
 			fmt.Printf("    Action: %s\n", action)
 
 			// Show hit counters if dataplane is loaded
-			if c.dp != nil && c.dp.LastCompileResult() != nil {
+			if c.dp != nil && c.applyResult() != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := c.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := c.applyResult().NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Printf("    Translation hits: %d packets  %d bytes\n",
@@ -396,9 +396,9 @@ func (c *CLI) showNATSourceRuleAll(cfg *config.Config) error {
 				rs.Name, rule.Name, rs.FromZone, rs.ToZone, action)
 			fmt.Printf("  Match: source %s destination %s\n", srcMatch, dstMatch)
 
-			if c.dp != nil && c.dp.LastCompileResult() != nil {
+			if c.dp != nil && c.applyResult() != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := c.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := c.applyResult().NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Printf("  Translation hits: %d packets  %d bytes\n",
@@ -423,8 +423,8 @@ func (c *CLI) showNATSourceRuleDetail(cfg *config.Config) error {
 	// Count active SNAT sessions per rule-set
 	type ruleSetKey struct{ from, to string }
 	rsSessions := make(map[ruleSetKey]int)
-	if c.dp != nil && c.dp.IsLoaded() && c.dp.LastCompileResult() != nil {
-		cr := c.dp.LastCompileResult()
+	if c.dp != nil && c.dp.IsLoaded() && c.applyResult() != nil {
+		cr := c.applyResult()
 		zoneByID := make(map[uint16]string, len(cr.ZoneIDs))
 		for name, id := range cr.ZoneIDs {
 			zoneByID[id] = name
@@ -492,9 +492,9 @@ func (c *CLI) showNATSourceRuleDetail(cfg *config.Config) error {
 				}
 			}
 
-			if c.dp != nil && c.dp.LastCompileResult() != nil {
+			if c.dp != nil && c.applyResult() != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := c.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := c.applyResult().NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Printf("    Translation hits:        %d packets  %d bytes\n",
@@ -573,9 +573,9 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 			}
 
 			// Show hit counters if dataplane is loaded
-			if c.dp != nil && c.dp.LastCompileResult() != nil {
+			if c.dp != nil && c.applyResult() != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := c.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := c.applyResult().NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Printf("    Translation hits: %d packets  %d bytes\n",
@@ -629,8 +629,8 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 	type ruleSetKey struct{ from, to string }
 	rsSessions := make(map[ruleSetKey]int)
 
-	if c.dp != nil && c.dp.IsLoaded() && c.dp.LastCompileResult() != nil {
-		cr := c.dp.LastCompileResult()
+	if c.dp != nil && c.dp.IsLoaded() && c.applyResult() != nil {
+		cr := c.applyResult()
 		for _, rs := range dnat.RuleSets {
 			for _, rule := range rs.Rules {
 				if rule.Then.PoolName == "" {
@@ -729,8 +729,8 @@ func (c *CLI) showNATDestinationPool(cfg *config.Config, poolName string) error 
 		}
 
 		// Show hit counters from all rules referencing this pool
-		if c.dp != nil && c.dp.LastCompileResult() != nil {
-			cr := c.dp.LastCompileResult()
+		if c.dp != nil && c.applyResult() != nil {
+			cr := c.applyResult()
 			var totalPkts, totalBytes uint64
 			for _, rs := range dnat.RuleSets {
 				for _, rule := range rs.Rules {
@@ -792,9 +792,9 @@ func (c *CLI) showNATDestinationRuleSet(cfg *config.Config, rsName string) error
 			fmt.Printf("    Action: %s\n", action)
 
 			// Show hit counters if dataplane is loaded
-			if c.dp != nil && c.dp.LastCompileResult() != nil {
+			if c.dp != nil && c.applyResult() != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := c.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := c.applyResult().NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Printf("    Translation hits: %d packets  %d bytes\n",
@@ -839,9 +839,9 @@ func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
 				rs.Name, rule.Name, rs.FromZone, action)
 			fmt.Printf("  Match: destination %s\n", dstMatch)
 
-			if c.dp != nil && c.dp.LastCompileResult() != nil {
+			if c.dp != nil && c.applyResult() != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := c.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := c.applyResult().NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Printf("  Translation hits: %d packets  %d bytes\n",
@@ -867,8 +867,8 @@ func (c *CLI) showNATDestinationRuleDetail(cfg *config.Config) error {
 	// Count active DNAT sessions per rule-set
 	type ruleSetKey struct{ from, to string }
 	rsSessions := make(map[ruleSetKey]int)
-	if c.dp != nil && c.dp.IsLoaded() && c.dp.LastCompileResult() != nil {
-		cr := c.dp.LastCompileResult()
+	if c.dp != nil && c.dp.IsLoaded() && c.applyResult() != nil {
+		cr := c.applyResult()
 		zoneByID := make(map[uint16]string, len(cr.ZoneIDs))
 		for name, id := range cr.ZoneIDs {
 			zoneByID[id] = name
@@ -925,9 +925,9 @@ func (c *CLI) showNATDestinationRuleDetail(cfg *config.Config) error {
 				}
 			}
 
-			if c.dp != nil && c.dp.LastCompileResult() != nil {
+			if c.dp != nil && c.applyResult() != nil {
 				ruleKey := rs.Name + "/" + rule.Name
-				if cid, ok := c.dp.LastCompileResult().NATCounterIDs[ruleKey]; ok {
+				if cid, ok := c.applyResult().NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
 					if err == nil {
 						fmt.Printf("    Translation hits:        %d packets  %d bytes\n",

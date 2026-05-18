@@ -237,7 +237,7 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		// Resolve zone ID for counter lookup
 		var zoneID uint16
 		if c.dp != nil {
-			if cr := c.dp.LastCompileResult(); cr != nil {
+			if cr := c.applyResult(); cr != nil {
 				zoneID = cr.ZoneIDs[name]
 			}
 		}
@@ -694,7 +694,7 @@ func (c *CLI) showScreenStatistics(zoneName string) error {
 		fmt.Println("dataplane not loaded")
 		return nil
 	}
-	cr := c.dp.LastCompileResult()
+	cr := c.applyResult()
 	if cr == nil {
 		fmt.Println("no compile result available")
 		return nil
@@ -735,7 +735,7 @@ func (c *CLI) showScreenStatisticsAll() error {
 		fmt.Println("dataplane not loaded")
 		return nil
 	}
-	cr := c.dp.LastCompileResult()
+	cr := c.applyResult()
 	if cr == nil {
 		fmt.Println("no compile result available")
 		return nil
@@ -1243,7 +1243,7 @@ func (c *CLI) showSecurityLog(args []string) error {
 				i++
 				zoneName := args[i]
 				if c.dp != nil {
-					if cr := c.dp.LastCompileResult(); cr != nil {
+					if cr := c.applyResult(); cr != nil {
 						if zid, ok := cr.ZoneIDs[zoneName]; ok {
 							filter.Zone = zid
 						} else {
@@ -1284,7 +1284,7 @@ func (c *CLI) showSecurityLog(args []string) error {
 	// Build reverse zone ID → name map for event display
 	evZoneNames := make(map[uint16]string)
 	if c.dp != nil {
-		if cr := c.dp.LastCompileResult(); cr != nil {
+		if cr := c.applyResult(); cr != nil {
 			for name, id := range cr.ZoneIDs {
 				evZoneNames[id] = name
 			}
@@ -1398,7 +1398,7 @@ func (c *CLI) showFirewallFilters() error {
 	// Look up filter IDs from compile result for counter display
 	var filterIDs map[string]uint32
 	if c.dp != nil && c.dp.IsLoaded() {
-		if cr := c.dp.LastCompileResult(); cr != nil {
+		if cr := c.applyResult(); cr != nil {
 			filterIDs = cr.FilterIDs
 		}
 	}
@@ -1581,7 +1581,7 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 	var ruleStart uint32
 	var hasCounters bool
 	if c.dp != nil && c.dp.IsLoaded() {
-		if cr := c.dp.LastCompileResult(); cr != nil {
+		if cr := c.applyResult(); cr != nil {
 			if fid, ok := cr.FilterIDs[family+":"+name]; ok {
 				if fcfg, err := c.dp.ReadFilterConfig(fid); err == nil {
 					ruleStart = fcfg.RuleStart
@@ -1976,4 +1976,3 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 	fmt.Printf("No matching policy found for %s -> %s (default deny)\n", fromZone, toZone)
 	return nil
 }
-

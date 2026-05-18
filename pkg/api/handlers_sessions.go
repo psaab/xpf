@@ -146,7 +146,7 @@ func (s *Server) sessionZonePairHandler(w http.ResponseWriter, _ *http.Request) 
 
 	// Build zone ID -> name reverse map
 	zoneNames := make(map[uint16]string)
-	if cr := s.compileResult(); cr != nil {
+	if cr := s.applyResult(); cr != nil {
 		for name, id := range cr.ZoneIDs {
 			zoneNames[id] = name
 		}

@@ -33,7 +33,7 @@ func (s *Server) showZonesDetail(cfg *config.Config, buf *strings.Builder) {
 		zone := cfg.Security.Zones[name]
 		var zoneID uint16
 		if s.dp != nil {
-			if cr := s.dp.LastCompileResult(); cr != nil {
+			if cr := s.applyResult(); cr != nil {
 				zoneID = cr.ZoneIDs[name]
 			}
 		}

@@ -148,13 +148,13 @@ func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.
 	}
 	now := monotonicSeconds()
 	zoneNames := make(map[uint16]string)
-	if cr := s.dp.LastCompileResult(); cr != nil {
+	if cr := s.applyResult(); cr != nil {
 		for name, id := range cr.ZoneIDs {
 			zoneNames[id] = name
 		}
 	}
 	var appNames map[uint16]string
-	if cr := s.dp.LastCompileResult(); cr != nil {
+	if cr := s.applyResult(); cr != nil {
 		appNames = cr.AppNames
 	}
 	var entries []topEntry

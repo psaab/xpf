@@ -225,7 +225,7 @@ func (c *CLI) showFlowSession(args []string) error {
 	zoneNames := make(map[uint16]string)
 	zoneIfaces := make(map[uint16]string) // zone ID → first interface name
 	var policyNames map[uint32]string
-	if cr := c.dp.LastCompileResult(); cr != nil {
+	if cr := c.applyResult(); cr != nil {
 		for name, id := range cr.ZoneIDs {
 			zoneNames[id] = name
 		}
@@ -233,7 +233,7 @@ func (c *CLI) showFlowSession(args []string) error {
 	}
 	if f.cfg != nil {
 		for zoneName, zone := range f.cfg.Security.Zones {
-			if cr := c.dp.LastCompileResult(); cr != nil {
+			if cr := c.applyResult(); cr != nil {
 				if zid, ok := cr.ZoneIDs[zoneName]; ok && len(zone.Interfaces) > 0 {
 					zoneIfaces[zid] = zone.Interfaces[0]
 				}
@@ -713,7 +713,7 @@ func (c *CLI) showFlowSession(args []string) error {
 
 func (c *CLI) showTopTalkers(f sessionFilter) error {
 	zoneNames := make(map[uint16]string)
-	if cr := c.dp.LastCompileResult(); cr != nil {
+	if cr := c.applyResult(); cr != nil {
 		for name, id := range cr.ZoneIDs {
 			zoneNames[id] = name
 		}

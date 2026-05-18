@@ -2,7 +2,10 @@ package dataplane
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/networkd"
@@ -119,6 +122,27 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	}
 }
 
+type applyResultReaderTestDouble struct {
+	result *ApplyResult
+}
+
+func (d applyResultReaderTestDouble) LastApplyResult() *ApplyResult {
+	return d.result
+}
+
+func TestLastApplyResultOfReadsRuntimeProviderOnly(t *testing.T) {
+	want := &ApplyResult{Generation: 7}
+	if got := LastApplyResultOf(applyResultReaderTestDouble{result: want}); got != want {
+		t.Fatalf("LastApplyResultOf(provider) = %p, want %p", got, want)
+	}
+	if got := LastApplyResultOf(struct{}{}); got != nil {
+		t.Fatalf("LastApplyResultOf(non-provider) = %+v, want nil", got)
+	}
+	if got := LastApplyResultOf(nil); got != nil {
+		t.Fatalf("LastApplyResultOf(nil) = %+v, want nil", got)
+	}
+}
+
 func TestRuntimeDataPlaneContractStaysSmallAndBackendNeutral(t *testing.T) {
 	typ := reflect.TypeOf((*RuntimeDataPlane)(nil)).Elem()
 	if got := typ.NumMethod(); got > 15 {
@@ -142,6 +166,31 @@ func TestRuntimeDataPlaneContractStaysSmallAndBackendNeutral(t *testing.T) {
 	for name := range forbidden {
 		if _, ok := typ.MethodByName(name); ok {
 			t.Fatalf("RuntimeDataPlane exposes BPF-shaped method %s", name)
+		}
+	}
+}
+
+func TestOperatorSurfacesUseApplyResultMetadata(t *testing.T) {
+	roots := []string{"../api", "../cli", "../grpcapi", "../daemon"}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if strings.Contains(string(data), "LastCompileResult(") {
+				t.Fatalf("%s still reads LastCompileResult; use LastApplyResult metadata instead", path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
 		}
 	}
 }

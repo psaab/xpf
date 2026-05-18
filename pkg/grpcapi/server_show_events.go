@@ -36,7 +36,7 @@ func (s *Server) GetEvents(_ context.Context, req *pb.GetEventsRequest) (*pb.Get
 
 	// Build reverse zone ID → name map
 	evZoneNames := make(map[uint16]string)
-	if cr := s.dp.LastCompileResult(); cr != nil {
+	if cr := s.applyResult(); cr != nil {
 		for name, id := range cr.ZoneIDs {
 			evZoneNames[id] = name
 		}

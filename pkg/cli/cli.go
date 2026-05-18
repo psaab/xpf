@@ -29,13 +29,13 @@ import (
 	"github.com/psaab/xpf/pkg/dhcprelay"
 	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/frr"
+	"github.com/psaab/xpf/pkg/fwdstatus"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/ipsec"
 	"github.com/psaab/xpf/pkg/lldp"
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/rpm"
-	"github.com/psaab/xpf/pkg/fwdstatus"
 	"github.com/psaab/xpf/pkg/vrrp"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
@@ -130,6 +130,13 @@ func New(store *configstore.Store, dp dataplane.DataPlane, eventBuf *logging.Eve
 		hostname:    hostname,
 		username:    username,
 	}
+}
+
+func (c *CLI) applyResult() *dataplane.ApplyResult {
+	if c == nil {
+		return nil
+	}
+	return dataplane.LastApplyResultOf(c.dp)
 }
 
 // SetForwardingSampler wires the pkg/fwdstatus Sampler into the CLI
@@ -709,8 +716,6 @@ func (c *CLI) Run() error {
 	return nil
 }
 
-
-
 // parsePolicyZoneFilter extracts from-zone/to-zone filters from args.
 func enabledStr(v bool) string {
 	if v {
@@ -1081,7 +1086,6 @@ func (c *CLI) handleShowScreen(args []string) error {
 	}
 }
 
-
 func (c *CLI) refreshPrompt() {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		c.hostname = h
@@ -1324,7 +1328,7 @@ func (c *CLI) parseSessionFilter(args []string) sessionFilter {
 	var f sessionFilter
 	f.cfg = c.store.ActiveConfig()
 	if c.dp != nil {
-		if cr := c.dp.LastCompileResult(); cr != nil {
+		if cr := c.applyResult(); cr != nil {
 			f.appNames = cr.AppNames
 		}
 	}
@@ -1334,7 +1338,7 @@ func (c *CLI) parseSessionFilter(args []string) sessionFilter {
 			if i+1 < len(args) {
 				i++
 				if c.dp != nil {
-					if cr := c.dp.LastCompileResult(); cr != nil {
+					if cr := c.applyResult(); cr != nil {
 						f.zoneID = cr.ZoneIDs[args[i]]
 					}
 				}
@@ -1737,7 +1741,6 @@ func formatDuplex(duplex string) string {
 	}
 }
 
-
 func printChronyTracking(output string) {
 	fields := map[string]string{}
 	for _, line := range strings.Split(output, "\n") {
@@ -1897,7 +1900,6 @@ func monotonicSeconds() uint64 {
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
 	return uint64(ts.Sec)
 }
-
 
 func (c *CLI) clusterPrefix() string {
 	if c.cluster == nil {

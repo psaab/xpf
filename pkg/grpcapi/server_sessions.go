@@ -291,7 +291,7 @@ func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 	}
 
 	// Build zone/policy/app name maps.
-	if cr := s.dp.LastCompileResult(); cr != nil {
+	if cr := s.applyResult(); cr != nil {
 		for name, id := range cr.ZoneIDs {
 			f.zoneNames[id] = name
 		}
@@ -300,7 +300,7 @@ func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 	}
 	if f.cfg != nil {
 		for zoneName, zone := range f.cfg.Security.Zones {
-			if cr := s.dp.LastCompileResult(); cr != nil {
+			if cr := s.applyResult(); cr != nil {
 				if zid, ok := cr.ZoneIDs[zoneName]; ok && len(zone.Interfaces) > 0 {
 					f.zoneIfaces[zid] = zone.Interfaces[0]
 				}
@@ -681,13 +681,13 @@ func (s *Server) ClearSessions(ctx context.Context, req *pb.ClearSessionsRequest
 
 	clearCfg := s.store.ActiveConfig()
 	var appNames map[uint16]string
-	if cr := s.dp.LastCompileResult(); cr != nil {
+	if cr := s.applyResult(); cr != nil {
 		appNames = cr.AppNames
 	}
 
 	var zoneID uint16
 	if req.Zone != "" {
-		if cr := s.dp.LastCompileResult(); cr != nil {
+		if cr := s.applyResult(); cr != nil {
 			zoneID = cr.ZoneIDs[req.Zone]
 		}
 	}
