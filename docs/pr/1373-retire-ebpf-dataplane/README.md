@@ -12,7 +12,7 @@ land before their listed #1373 retirement phase.
 | #1375 three-color policers | [plan-1375-three-color-policers.md](plan-1375-three-color-policers.md) | #1373 Phase 4 | Yes |
 | #1376 port mirroring | [plan-1376-port-mirroring.md](plan-1376-port-mirroring.md) | #1373 Phase 4 | Yes |
 | #1377 persistent SNAT pool address selection | [plan-1377-snat-pools.md](plan-1377-snat-pools.md) | #1373 Phase 4 | Partly covered by #1385; runtime fail-closed work still needed |
-| #1378 policy schedulers | [plan-1378-policy-schedulers.md](plan-1378-policy-schedulers.md) | #1373 Phase 4 | Yes |
+| #1378 policy schedulers | [plan-1378-policy-schedulers.md](plan-1378-policy-schedulers.md) | #1373 Phase 4 | No code gap known; live HA evidence pending |
 | #1379 dataplane events | [plan-1379-dataplane-events.md](plan-1379-dataplane-events.md) | #1373 Phase 4 | Yes |
 | #1380 userspace buffer/status parity | [plan-1380-userspace-buffers.md](plan-1380-userspace-buffers.md) | #1373 Phase 5 | Partly covered by #1386 |
 

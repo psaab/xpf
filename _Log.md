@@ -1,5 +1,12 @@
 # Action Log
 
+## 2026-05-18
+
+- **Timestamp**: 2026-05-18T03:59:26Z
+  - **Action**: #1378 policy-scheduler closeout slice — added a deterministic userspace scheduler evidence validator for active/rebuild/inactive/failover artifacts, pinned the userspace apply seed path so initial scheduled-policy snapshots do not rely on legacy policy-map updates, and narrowed the #1378 docs to live HA artifact capture only.
+  - **File(s)**: `test/incus/policy_scheduler_validate.py`, `test/incus/policy_scheduler_validate_test.py`, `pkg/daemon/policy_scheduler_apply_test.go`, `docs/userspace-dataplane-gaps.md`, `docs/pr/1373-retire-ebpf-dataplane/README.md`, `docs/pr/1373-retire-ebpf-dataplane/plan-1378-policy-schedulers.md`, `_Log.md`
+  - **Validation**: `python3 test/incus/policy_scheduler_validate_test.py`; `go test ./pkg/daemon -run 'TestPolicyScheduler|TestApplyConfig.*Scheduler|TestApplyConfig.*Protocol'`; `go test ./pkg/config -run 'Test.*PolicyScheduler.*ReferenceRejectsCommit'`; `go test ./pkg/dataplane/userspace -run 'Test(BuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID|UpdatePolicyScheduleState)'`; `cargo test --manifest-path userspace-dp/Cargo.toml policy:: -- --nocapture`
+
 ## 2026-05-17
 
 - **Timestamp**: 2026-05-17T21:25:00Z
