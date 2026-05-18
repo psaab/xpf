@@ -2,10 +2,12 @@ package dataplane
 
 import (
 	"encoding/binary"
-	"fmt"
+	"errors"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/cilium/ebpf"
 )
 
 type sessionStoreTestDP struct {
@@ -14,7 +16,13 @@ type sessionStoreTestDP struct {
 	v6           map[SessionKeyV6]SessionValueV6
 	deletedDNAT  []DNATKey
 	deletedDNAT6 []DNATKeyV6
+	setDNAT      []DNATKey
+	setDNAT6     []DNATKeyV6
 	pnat         *PersistentNATTable
+	failSetV4    map[SessionKey]error
+	failSetV6    map[SessionKeyV6]error
+	failSetDNAT  error
+	failSetDNAT6 error
 }
 
 func (m *sessionStoreTestDP) IterateSessions(fn func(SessionKey, SessionValue) bool) error {
@@ -47,14 +55,36 @@ func (m *sessionStoreTestDP) GetSessionV4(key SessionKey) (SessionValue, error) 
 	if val, ok := m.v4[key]; ok {
 		return val, nil
 	}
-	return SessionValue{}, fmt.Errorf("not found")
+	return SessionValue{}, ebpf.ErrKeyNotExist
 }
 
 func (m *sessionStoreTestDP) GetSessionV6(key SessionKeyV6) (SessionValueV6, error) {
 	if val, ok := m.v6[key]; ok {
 		return val, nil
 	}
-	return SessionValueV6{}, fmt.Errorf("not found")
+	return SessionValueV6{}, ebpf.ErrKeyNotExist
+}
+
+func (m *sessionStoreTestDP) SetSessionV4(key SessionKey, val SessionValue) error {
+	if err, ok := m.failSetV4[key]; ok {
+		return err
+	}
+	if m.v4 == nil {
+		m.v4 = make(map[SessionKey]SessionValue)
+	}
+	m.v4[key] = val
+	return nil
+}
+
+func (m *sessionStoreTestDP) SetSessionV6(key SessionKeyV6, val SessionValueV6) error {
+	if err, ok := m.failSetV6[key]; ok {
+		return err
+	}
+	if m.v6 == nil {
+		m.v6 = make(map[SessionKeyV6]SessionValueV6)
+	}
+	m.v6[key] = val
+	return nil
 }
 
 func (m *sessionStoreTestDP) DeleteSession(key SessionKey) error {
@@ -77,7 +107,133 @@ func (m *sessionStoreTestDP) DeleteDNATEntryV6(key DNATKeyV6) error {
 	return nil
 }
 
+func (m *sessionStoreTestDP) SetDNATEntry(key DNATKey, _ DNATValue) error {
+	if m.failSetDNAT != nil {
+		return m.failSetDNAT
+	}
+	m.setDNAT = append(m.setDNAT, key)
+	return nil
+}
+
+func (m *sessionStoreTestDP) SetDNATEntryV6(key DNATKeyV6, _ DNATValueV6) error {
+	if m.failSetDNAT6 != nil {
+		return m.failSetDNAT6
+	}
+	m.setDNAT6 = append(m.setDNAT6, key)
+	return nil
+}
+
 func (m *sessionStoreTestDP) GetPersistentNAT() *PersistentNATTable { return m.pnat }
+
+func TestPutClusterSyncedV4RollsBackForwardWhenReverseInstallFails(t *testing.T) {
+	forward := SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 1},
+		DstIP:    [4]byte{10, 0, 0, 2},
+		SrcPort:  1234,
+		DstPort:  80,
+	}
+	reverse := SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 2},
+		DstIP:    [4]byte{10, 0, 0, 1},
+		SrcPort:  80,
+		DstPort:  1234,
+	}
+	reverseErr := errors.New("reverse install failed")
+	dp := &sessionStoreTestDP{
+		v4:        map[SessionKey]SessionValue{},
+		failSetV4: map[SessionKey]error{reverse: reverseErr},
+	}
+	store := NewDataPlaneSessionStore(dp)
+
+	err := store.PutClusterSyncedV4(forward, SessionValue{
+		State:      SessStateEstablished,
+		ReverseKey: reverse,
+	})
+	if !errors.Is(err, reverseErr) {
+		t.Fatalf("PutClusterSyncedV4 error = %v, want reverse error", err)
+	}
+	if _, ok := dp.v4[forward]; ok {
+		t.Fatal("forward session remained after reverse install failure")
+	}
+	if _, ok := dp.v4[reverse]; ok {
+		t.Fatal("reverse session unexpectedly installed")
+	}
+}
+
+func TestPutClusterSyncedV4RollsBackForwardAndReverseWhenDNATFails(t *testing.T) {
+	forward := SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 1},
+		DstIP:    [4]byte{10, 0, 0, 2},
+		SrcPort:  1234,
+		DstPort:  80,
+	}
+	reverse := SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 2},
+		DstIP:    [4]byte{10, 0, 0, 1},
+		SrcPort:  80,
+		DstPort:  1234,
+	}
+	dnatErr := errors.New("dnat install failed")
+	dp := &sessionStoreTestDP{
+		v4:          map[SessionKey]SessionValue{},
+		failSetDNAT: dnatErr,
+	}
+	store := NewDataPlaneSessionStore(dp)
+
+	err := store.PutClusterSyncedV4(forward, SessionValue{
+		State:      SessStateEstablished,
+		ReverseKey: reverse,
+		Flags:      SessFlagSNAT,
+		NATSrcIP:   0x0a0200c0,
+		NATSrcPort: 40000,
+	})
+	if !errors.Is(err, dnatErr) {
+		t.Fatalf("PutClusterSyncedV4 error = %v, want DNAT error", err)
+	}
+	if _, ok := dp.v4[forward]; ok {
+		t.Fatal("forward session remained after DNAT install failure")
+	}
+	if _, ok := dp.v4[reverse]; ok {
+		t.Fatal("reverse session remained after DNAT install failure")
+	}
+	if len(dp.setDNAT) != 0 {
+		t.Fatalf("DNAT entries installed despite failure: %+v", dp.setDNAT)
+	}
+}
+
+func TestPutClusterSyncedV6RollsBackForwardWhenReverseInstallFails(t *testing.T) {
+	forward := SessionKeyV6{Protocol: 6, SrcPort: 1234, DstPort: 80}
+	forward.SrcIP[15] = 1
+	forward.DstIP[15] = 2
+	reverse := SessionKeyV6{Protocol: 6, SrcPort: 80, DstPort: 1234}
+	reverse.SrcIP[15] = 2
+	reverse.DstIP[15] = 1
+
+	reverseErr := errors.New("reverse v6 install failed")
+	dp := &sessionStoreTestDP{
+		v6:        map[SessionKeyV6]SessionValueV6{},
+		failSetV6: map[SessionKeyV6]error{reverse: reverseErr},
+	}
+	store := NewDataPlaneSessionStore(dp)
+
+	err := store.PutClusterSyncedV6(forward, SessionValueV6{
+		State:      SessStateEstablished,
+		ReverseKey: reverse,
+	})
+	if !errors.Is(err, reverseErr) {
+		t.Fatalf("PutClusterSyncedV6 error = %v, want reverse error", err)
+	}
+	if _, ok := dp.v6[forward]; ok {
+		t.Fatal("forward v6 session remained after reverse install failure")
+	}
+	if _, ok := dp.v6[reverse]; ok {
+		t.Fatal("reverse v6 session unexpectedly installed")
+	}
+}
 
 func TestDeleteWithCompanionsV4RemovesReverseAndDNAT(t *testing.T) {
 	forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}

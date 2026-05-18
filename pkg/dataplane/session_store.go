@@ -6,7 +6,9 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/cilium/ebpf"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
+	"golang.org/x/sys/unix"
 )
 
 type DeleteReason string
@@ -60,6 +62,18 @@ type dataPlaneSessionStore struct {
 	dp DataPlane
 }
 
+type sessionSnapshotV4 struct {
+	key     SessionKey
+	val     SessionValue
+	existed bool
+}
+
+type sessionSnapshotV6 struct {
+	key     SessionKeyV6
+	val     SessionValueV6
+	existed bool
+}
+
 func NewDataPlaneSessionStore(dp DataPlane) SessionStore {
 	return dataPlaneSessionStore{dp: dp}
 }
@@ -96,32 +110,122 @@ func (s dataPlaneSessionStore) GetV6(key SessionKeyV6) (SessionValueV6, error) {
 	return s.dp.GetSessionV6(key)
 }
 
+func sessionNotFound(err error) bool {
+	return errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, unix.ENOENT)
+}
+
+func ignoreSessionNotFound(err error) error {
+	if err == nil || sessionNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func (s dataPlaneSessionStore) snapshotV4(key SessionKey) (sessionSnapshotV4, error) {
+	snap := sessionSnapshotV4{key: key}
+	val, err := s.dp.GetSessionV4(key)
+	if err == nil {
+		snap.val = val
+		snap.existed = true
+		return snap, nil
+	}
+	if sessionNotFound(err) {
+		return snap, nil
+	}
+	return snap, err
+}
+
+func (s dataPlaneSessionStore) snapshotV6(key SessionKeyV6) (sessionSnapshotV6, error) {
+	snap := sessionSnapshotV6{key: key}
+	val, err := s.dp.GetSessionV6(key)
+	if err == nil {
+		snap.val = val
+		snap.existed = true
+		return snap, nil
+	}
+	if sessionNotFound(err) {
+		return snap, nil
+	}
+	return snap, err
+}
+
+func (s dataPlaneSessionStore) restoreV4(snap sessionSnapshotV4) error {
+	if snap.existed {
+		return s.dp.SetSessionV4(snap.key, snap.val)
+	}
+	return ignoreSessionNotFound(s.dp.DeleteSession(snap.key))
+}
+
+func (s dataPlaneSessionStore) restoreV6(snap sessionSnapshotV6) error {
+	if snap.existed {
+		return s.dp.SetSessionV6(snap.key, snap.val)
+	}
+	return ignoreSessionNotFound(s.dp.DeleteSessionV6(snap.key))
+}
+
+func (s dataPlaneSessionStore) rollbackV4(written []sessionSnapshotV4) error {
+	var errs []error
+	for i := len(written) - 1; i >= 0; i-- {
+		if err := s.restoreV4(written[i]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s dataPlaneSessionStore) rollbackV6(written []sessionSnapshotV6) error {
+	var errs []error
+	for i := len(written) - 1; i >= 0; i-- {
+		if err := s.restoreV6(written[i]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (s dataPlaneSessionStore) PutClusterSyncedV4(key SessionKey, val SessionValue) error {
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
+	forwardSnap, err := s.snapshotV4(key)
+	if err != nil {
+		return err
+	}
+	var reverseSnap sessionSnapshotV4
+	needsReverse := val.IsReverse == 0 && val.ReverseKey.Protocol != 0
+	if needsReverse {
+		reverseSnap, err = s.snapshotV4(val.ReverseKey)
+		if err != nil {
+			return err
+		}
+	}
+	var written []sessionSnapshotV4
 	if err := s.putClusterSyncedV4Raw(key, val); err != nil {
 		return err
 	}
-	if val.IsReverse == 0 && val.ReverseKey.Protocol != 0 {
+	written = append(written, forwardSnap)
+	if needsReverse {
 		revVal := val
 		revVal.IsReverse = 1
 		revVal.ReverseKey = key
 		revVal.IngressZone = val.EgressZone
 		revVal.EgressZone = val.IngressZone
 		if err := s.putClusterSyncedV4Raw(val.ReverseKey, revVal); err != nil {
-			return err
+			return errors.Join(err, s.rollbackV4(written))
 		}
+		written = append(written, reverseSnap)
 	}
 	if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-		return s.dp.SetDNATEntry(DNATKey{
+		if err := s.dp.SetDNATEntry(DNATKey{
 			Protocol: key.Protocol,
 			DstIP:    val.NATSrcIP,
 			DstPort:  val.NATSrcPort,
 		}, DNATValue{
 			NewDstIP:   binary.NativeEndian.Uint32(key.SrcIP[:]),
 			NewDstPort: key.SrcPort,
-		})
+		}); err != nil {
+			return errors.Join(err, s.rollbackV4(written))
+		}
 	}
 	return nil
 }
@@ -142,28 +246,45 @@ func (s dataPlaneSessionStore) PutClusterSyncedV6(key SessionKeyV6, val SessionV
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
+	forwardSnap, err := s.snapshotV6(key)
+	if err != nil {
+		return err
+	}
+	var reverseSnap sessionSnapshotV6
+	needsReverse := val.IsReverse == 0 && val.ReverseKey.Protocol != 0
+	if needsReverse {
+		reverseSnap, err = s.snapshotV6(val.ReverseKey)
+		if err != nil {
+			return err
+		}
+	}
+	var written []sessionSnapshotV6
 	if err := s.putClusterSyncedV6Raw(key, val); err != nil {
 		return err
 	}
-	if val.IsReverse == 0 && val.ReverseKey.Protocol != 0 {
+	written = append(written, forwardSnap)
+	if needsReverse {
 		revVal := val
 		revVal.IsReverse = 1
 		revVal.ReverseKey = key
 		revVal.IngressZone = val.EgressZone
 		revVal.EgressZone = val.IngressZone
 		if err := s.putClusterSyncedV6Raw(val.ReverseKey, revVal); err != nil {
-			return err
+			return errors.Join(err, s.rollbackV6(written))
 		}
+		written = append(written, reverseSnap)
 	}
 	if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-		return s.dp.SetDNATEntryV6(DNATKeyV6{
+		if err := s.dp.SetDNATEntryV6(DNATKeyV6{
 			Protocol: key.Protocol,
 			DstIP:    val.NATSrcIP,
 			DstPort:  val.NATSrcPort,
 		}, DNATValueV6{
 			NewDstIP:   key.SrcIP,
 			NewDstPort: key.SrcPort,
-		})
+		}); err != nil {
+			return errors.Join(err, s.rollbackV6(written))
+		}
 	}
 	return nil
 }

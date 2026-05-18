@@ -48,9 +48,10 @@ sent while exact queues were still backlogged.
 - Session domain adapters: `SessionStoreOf`, `TelemetryOf`, and
   `NewDataPlaneSessionStore`. The generic `DataPlane` adapter preserves the
   batch-iteration fast path and centralizes cluster/GC companion ownership:
-  cluster-synced forward installs create reverse and DNAT companions, while
-  `DeleteWithCompanions*` removes reverse/DNAT state and preserves
-  persistent-NAT bindings before deletion.
+  cluster-synced forward installs create reverse and DNAT companions and roll
+  back session writes if companion creation fails, while `DeleteWithCompanions*`
+  removes reverse/DNAT state and preserves persistent-NAT bindings before
+  deletion.
 
 ## Callers
 

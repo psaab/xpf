@@ -115,6 +115,34 @@ func (m *mockGCDP) UpdateSessionCountDst(_ dataplane.SessionCountKey, _ uint32) 
 }
 func (m *mockGCDP) ClearSessionCounts() error { return nil }
 
+func TestNewGCAdaptsLegacyDataplaneToRuntimeDomains(t *testing.T) {
+	dp := &mockGCDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{},
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+	}
+
+	gc := NewGC(dp, 10*time.Second)
+
+	if gc.sessions == nil {
+		t.Fatal("NewGC did not adapt SessionStore")
+	}
+	if gc.telemetry == nil {
+		t.Fatal("NewGC did not adapt Telemetry")
+	}
+	if gc.sessionCount != dp {
+		t.Fatal("NewGC did not retain session-count publisher")
+	}
+	if gc.persistent != dp {
+		t.Fatal("NewGC did not retain persistent NAT provider")
+	}
+	if gc.interval != 10*time.Second {
+		t.Fatalf("interval = %v, want 10s", gc.interval)
+	}
+	if gc.lastV6Count != -1 {
+		t.Fatalf("lastV6Count = %d, want -1", gc.lastV6Count)
+	}
+}
+
 type runtimeDomainSessionStore struct {
 	v4      map[dataplane.SessionKey]dataplane.SessionValue
 	deleted []dataplane.SessionKey

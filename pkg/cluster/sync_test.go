@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -579,14 +580,14 @@ func (m *mockSweepDP) GetSessionV4(key dataplane.SessionKey) (dataplane.SessionV
 	if v, ok := m.v4sessions[key]; ok {
 		return v, nil
 	}
-	return dataplane.SessionValue{}, fmt.Errorf("not found")
+	return dataplane.SessionValue{}, ebpf.ErrKeyNotExist
 }
 
 func (m *mockSweepDP) GetSessionV6(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
 	if v, ok := m.v6sessions[key]; ok {
 		return v, nil
 	}
-	return dataplane.SessionValueV6{}, fmt.Errorf("not found")
+	return dataplane.SessionValueV6{}, ebpf.ErrKeyNotExist
 }
 
 func (m *mockSweepDP) SetSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) error {
