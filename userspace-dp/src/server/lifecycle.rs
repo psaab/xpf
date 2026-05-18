@@ -109,6 +109,7 @@ pub(crate) fn run() -> Result<(), String> {
             recent_session_deltas: Vec::new(),
             recent_exceptions: Vec::new(),
             cos_interfaces: Vec::new(),
+            policy_rule_counters: Vec::new(),
             filter_term_counters: Vec::new(),
             last_resolution: None,
             slow_path: SlowPathStatus::default(),

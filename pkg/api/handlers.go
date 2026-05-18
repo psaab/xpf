@@ -89,16 +89,16 @@ func (s *Server) globalStatsHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	stats := GlobalStats{
-		RxPackets:       readCounter(dataplane.GlobalCtrRxPackets),
-		TxPackets:       readCounter(dataplane.GlobalCtrTxPackets),
-		Drops:           readCounter(dataplane.GlobalCtrDrops),
-		SessionsCreated: readCounter(dataplane.GlobalCtrSessionsNew),
-		SessionsClosed:  readCounter(dataplane.GlobalCtrSessionsClosed),
-		ScreenDrops:     readCounter(dataplane.GlobalCtrScreenDrops),
-		PolicyDenies:    readCounter(dataplane.GlobalCtrPolicyDeny),
-		NATAllocFails:   readCounter(dataplane.GlobalCtrNATAllocFail),
-		HostInboundDeny:  readCounter(dataplane.GlobalCtrHostInboundDeny),
-		TCEgressPackets:  readCounter(dataplane.GlobalCtrTCEgressPackets),
+		RxPackets:            readCounter(dataplane.GlobalCtrRxPackets),
+		TxPackets:            readCounter(dataplane.GlobalCtrTxPackets),
+		Drops:                readCounter(dataplane.GlobalCtrDrops),
+		SessionsCreated:      readCounter(dataplane.GlobalCtrSessionsNew),
+		SessionsClosed:       readCounter(dataplane.GlobalCtrSessionsClosed),
+		ScreenDrops:          readCounter(dataplane.GlobalCtrScreenDrops),
+		PolicyDenies:         readCounter(dataplane.GlobalCtrPolicyDeny),
+		NATAllocFails:        readCounter(dataplane.GlobalCtrNATAllocFail),
+		HostInboundDeny:      readCounter(dataplane.GlobalCtrHostInboundDeny),
+		TCEgressPackets:      readCounter(dataplane.GlobalCtrTCEgressPackets),
 		FabricRedirects:      readCounter(dataplane.GlobalCtrFabricRedirect),
 		FabricFwdDrops:       readCounter(dataplane.GlobalCtrFabricFwdDrop),
 		FlowCacheHits:        readCounter(dataplane.GlobalCtrFlowCacheHit),
@@ -215,7 +215,7 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	var policyID uint32
+	var policySetID uint32
 	var result []PolicyInfo
 	for _, zpp := range cfg.Security.Policies {
 		pi := PolicyInfo{
@@ -243,22 +243,22 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 			}
 
 			if s.dp != nil && s.dp.IsLoaded() {
+				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(len(pi.Rules))
 				if ctrs, err := s.dp.ReadPolicyCounters(policyID); err == nil {
 					pr.HitPackets = ctrs.Packets
 					pr.HitBytes = ctrs.Bytes
 				}
 			}
-			policyID++
 			pi.Rules = append(pi.Rules, pr)
 		}
 		if pi.Rules == nil {
 			pi.Rules = []PolicyRule{}
 		}
 		result = append(result, pi)
+		policySetID++
 	}
 	writeOK(w, result)
 }
-
 
 func (s *Server) natSourceHandler(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.store.ActiveConfig()
@@ -575,7 +575,6 @@ func protoName(p uint8) string {
 		return fmt.Sprintf("%d", p)
 	}
 }
-
 
 func screenChecks(p *config.ScreenProfile) []string {
 	var checks []string
@@ -1357,7 +1356,6 @@ func (s *Server) dhcpIdentifiersHandler(w http.ResponseWriter, _ *http.Request) 
 
 // --- Mutation handlers ---
 
-
 func (s *Server) clearCountersHandler(w http.ResponseWriter, _ *http.Request) {
 	if s.dp == nil || !s.dp.IsLoaded() {
 		writeError(w, http.StatusServiceUnavailable, "dataplane not loaded")
@@ -2081,7 +2079,6 @@ func (s *Server) configAnnotateHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Session zone-pair summary handler ---
-
 
 func (s *Server) systemBuffersHandler(w http.ResponseWriter, _ *http.Request) {
 	if s.dp == nil || !s.dp.IsLoaded() {

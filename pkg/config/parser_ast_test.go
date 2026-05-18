@@ -1504,7 +1504,7 @@ security {
 	}
 }
 
-func TestPolicySchedulerMissingReferenceWarns(t *testing.T) {
+func TestPolicySchedulerMissingReferenceRejectsCommit(t *testing.T) {
 	input := `security {
     policies {
         from-zone trust to-zone untrust {
@@ -1522,17 +1522,16 @@ func TestPolicySchedulerMissingReferenceWarns(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig returned error for warning-only missing scheduler reference: %v", err)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig succeeded, want missing scheduler commit error")
 	}
-	warnings := strings.Join(cfg.Warnings, "\n")
-	if !strings.Contains(warnings, `policy "sched-test": scheduler "missing-sched" not defined`) {
-		t.Fatalf("CompileConfig warnings = %v, want missing scheduler warning", cfg.Warnings)
+	if !strings.Contains(err.Error(), `policy "sched-test" references undefined scheduler "missing-sched"`) {
+		t.Fatalf("CompileConfig error = %v, want missing scheduler commit error", err)
 	}
 }
 
-func TestGlobalPolicySchedulerMissingReferenceWarns(t *testing.T) {
+func TestGlobalPolicySchedulerMissingReferenceRejectsCommit(t *testing.T) {
 	input := `security {
     policies {
         global {
@@ -1550,13 +1549,12 @@ func TestGlobalPolicySchedulerMissingReferenceWarns(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig returned error for warning-only missing global scheduler reference: %v", err)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig succeeded, want missing global scheduler commit error")
 	}
-	warnings := strings.Join(cfg.Warnings, "\n")
-	if !strings.Contains(warnings, `global policy "sched-global": scheduler "missing-sched" not defined`) {
-		t.Fatalf("CompileConfig warnings = %v, want missing global scheduler warning", cfg.Warnings)
+	if !strings.Contains(err.Error(), `global policy "sched-global" references undefined scheduler "missing-sched"`) {
+		t.Fatalf("CompileConfig error = %v, want missing global scheduler commit error", err)
 	}
 }
 

@@ -221,6 +221,9 @@ func compileExpanded(tree *ConfigTree) (*Config, error) {
 	if err := validateThreeColorPolicersStrict(cfg.Firewall.ThreeColorPolicers); err != nil {
 		return nil, err
 	}
+	if err := validatePolicySchedulerReferencesStrict(cfg); err != nil {
+		return nil, err
+	}
 	if warnings := ValidateConfig(cfg); len(warnings) > 0 {
 		for _, w := range warnings {
 			cfg.Warnings = append(cfg.Warnings, w)
@@ -276,12 +279,15 @@ func validatePolicySchedulerReferencesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
-	check := func(pol *Policy) error {
+	check := func(scope string, pol *Policy) error {
 		if pol == nil || pol.SchedulerName == "" {
 			return nil
 		}
 		if _, ok := cfg.Schedulers[pol.SchedulerName]; ok {
 			return nil
+		}
+		if scope != "" {
+			return fmt.Errorf("%s policy %q references undefined scheduler %q", scope, pol.Name, pol.SchedulerName)
 		}
 		return fmt.Errorf("policy %q references undefined scheduler %q", pol.Name, pol.SchedulerName)
 	}
@@ -290,13 +296,13 @@ func validatePolicySchedulerReferencesStrict(cfg *Config) error {
 			continue
 		}
 		for _, pol := range zpp.Policies {
-			if err := check(pol); err != nil {
+			if err := check("", pol); err != nil {
 				return err
 			}
 		}
 	}
 	for _, pol := range cfg.Security.GlobalPolicies {
-		if err := check(pol); err != nil {
+		if err := check("global", pol); err != nil {
 			return err
 		}
 	}

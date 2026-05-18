@@ -69,6 +69,13 @@ fn build_cos_ieee8021_queue_table(
 }
 
 pub(super) fn build_forwarding_state(snapshot: &ConfigSnapshot) -> ForwardingState {
+    build_forwarding_state_with_policy_counters(snapshot, &PolicyCounterStore::default())
+}
+
+pub(super) fn build_forwarding_state_with_policy_counters(
+    snapshot: &ConfigSnapshot,
+    policy_counters: &PolicyCounterStore,
+) -> ForwardingState {
     let mut state = ForwardingState::default();
     let mut name_to_ifindex = BTreeMap::new();
     let mut linux_to_ifindex = BTreeMap::new();
@@ -365,10 +372,11 @@ pub(super) fn build_forwarding_state(snapshot: &ConfigSnapshot) -> ForwardingSta
             local_mac,
         });
     }
-    state.policy = parse_policy_state(
+    state.policy = parse_policy_state_with_counters(
         &snapshot.default_policy,
         &snapshot.policies,
         &state.zone_name_to_id,
+        policy_counters,
     );
     state.allow_dns_reply = snapshot.flow.allow_dns_reply;
     state.allow_embedded_icmp = snapshot.flow.allow_embedded_icmp;

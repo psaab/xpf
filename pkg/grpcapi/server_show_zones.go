@@ -69,13 +69,13 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 	}
 
 	resp := &pb.GetPoliciesResponse{}
-	var policyID uint32
+	var policySetID uint32
 	for _, zpp := range cfg.Security.Policies {
 		pi := &pb.PolicyInfo{
 			FromZone: zpp.FromZone,
 			ToZone:   zpp.ToZone,
 		}
-		for _, rule := range zpp.Policies {
+		for i, rule := range zpp.Policies {
 			pr := &pb.PolicyRule{
 				Name:         rule.Name,
 				Description:  rule.Description,
@@ -96,18 +96,19 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 				pr.Applications = []string{}
 			}
 			if s.dp != nil && s.dp.IsLoaded() {
+				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 				if ctrs, err := s.dp.ReadPolicyCounters(policyID); err == nil {
 					pr.HitPackets = ctrs.Packets
 					pr.HitBytes = ctrs.Bytes
 				}
 			}
-			policyID++
 			pi.Rules = append(pi.Rules, pr)
 		}
 		if pi.Rules == nil {
 			pi.Rules = []*pb.PolicyRule{}
 		}
 		resp.Policies = append(resp.Policies, pi)
+		policySetID++
 	}
 
 	// Global policies
@@ -116,7 +117,7 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 			FromZone: "*",
 			ToZone:   "*",
 		}
-		for _, rule := range cfg.Security.GlobalPolicies {
+		for i, rule := range cfg.Security.GlobalPolicies {
 			pr := &pb.PolicyRule{
 				Name:         rule.Name,
 				Description:  rule.Description,
@@ -137,12 +138,12 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 				pr.Applications = []string{}
 			}
 			if s.dp != nil && s.dp.IsLoaded() {
+				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 				if ctrs, err := s.dp.ReadPolicyCounters(policyID); err == nil {
 					pr.HitPackets = ctrs.Packets
 					pr.HitBytes = ctrs.Bytes
 				}
 			}
-			policyID++
 			pi.Rules = append(pi.Rules, pr)
 		}
 		if pi.Rules == nil {
