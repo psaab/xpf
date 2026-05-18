@@ -3,7 +3,8 @@ use super::{
     InterfaceSnapshot, PacketResolution, SessionDeltaInfo,
 };
 use crate::nat::{
-    DnatTable, NatDecision, SourceNatRule, StaticNatTable, match_source_nat, parse_source_nat_rules,
+    DnatTable, NatDecision, SourceNatFailure, SourceNatLookup, SourceNatRule, StaticNatTable,
+    match_source_nat, match_source_nat_result, parse_source_nat_rules,
 };
 use crate::nat64::{Nat64ReverseInfo, Nat64State};
 use crate::nptv6::Nptv6State;
@@ -513,6 +514,7 @@ use neighbor_dispatch::learn_dynamic_neighbor;
 mod disposition;
 use disposition::{
     DispositionCounters, record_disposition, record_exception, record_forwarding_disposition,
+    record_source_nat_exception,
 };
 // `update_last_resolution` is only referenced by tests in afxdp/tests.rs;
 // gate its import behind cfg(test).

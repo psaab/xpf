@@ -53,6 +53,69 @@ impl NatDecision {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceNatLookup {
+    NoMatch,
+    Matched(NatDecision),
+    Unavailable(SourceNatFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceNatFailure {
+    pub(crate) rule_name: String,
+    pub(crate) pool_name: String,
+    pub(crate) reason: SourceNatFailureReason,
+}
+
+impl SourceNatFailure {
+    fn for_rule(rule: &SourceNatRule, reason: SourceNatFailureReason) -> Self {
+        Self {
+            rule_name: rule.name.clone(),
+            pool_name: rule.pool_name.clone(),
+            reason,
+        }
+    }
+
+    pub(crate) fn exception_reason(&self) -> &'static str {
+        self.reason.exception_reason()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceNatFailureReason {
+    MissingPool,
+    EmptyPool,
+    InvalidPool,
+    InvalidPortRange,
+    WrongAddressFamily,
+    AllocatorExhausted,
+}
+
+impl SourceNatFailureReason {
+    fn exception_reason(self) -> &'static str {
+        match self {
+            Self::MissingPool => "source_nat_pool_missing",
+            Self::EmptyPool => "source_nat_pool_empty",
+            Self::InvalidPool => "source_nat_pool_invalid",
+            Self::InvalidPortRange => "source_nat_pool_invalid_port_range",
+            Self::WrongAddressFamily => "source_nat_pool_wrong_family",
+            Self::AllocatorExhausted => "source_nat_pool_exhausted",
+        }
+    }
+}
+
+fn source_nat_failure_reason_from_snapshot(reason: &str) -> SourceNatFailureReason {
+    match reason {
+        "missing_pool" => SourceNatFailureReason::MissingPool,
+        "empty_pool" => SourceNatFailureReason::EmptyPool,
+        "invalid_port_range" => SourceNatFailureReason::InvalidPortRange,
+        "invalid_pool" => SourceNatFailureReason::InvalidPool,
+        "wrong_address_family" => SourceNatFailureReason::WrongAddressFamily,
+        "allocator_exhausted" => SourceNatFailureReason::AllocatorExhausted,
+        _ => SourceNatFailureReason::InvalidPool,
+    }
+}
+
 /// Round-robin port allocator for pool-mode SNAT.
 ///
 /// Each pool address gets its own atomic counter. Ports are allocated by
@@ -132,15 +195,20 @@ impl PortAllocator {
         family_offset + ((idx as usize) % family_len)
     }
 
-    /// Allocate the next port for the given address index.
-    pub(crate) fn next_port(&self, addr_index: usize) -> u16 {
+    /// Allocate the next port for the given address index, reporting
+    /// unusable allocator state to the caller instead of producing a
+    /// no-op translation.
+    pub(crate) fn try_next_port(&self, addr_index: usize) -> Result<u16, SourceNatFailureReason> {
+        if self.port_low == 0 || self.port_high == 0 || self.port_low > self.port_high {
+            return Err(SourceNatFailureReason::InvalidPortRange);
+        }
         let range = (self.port_high as u32).saturating_sub(self.port_low as u32) + 1;
         if range == 0 || addr_index >= self.counters.len() {
-            return self.port_low;
+            return Err(SourceNatFailureReason::AllocatorExhausted);
         }
         let counter = &self.counters[addr_index];
         let val = counter.fetch_add(1, Ordering::Relaxed);
-        self.port_low + (val % range) as u16
+        Ok(self.port_low + (val % range) as u16)
     }
 }
 
@@ -169,6 +237,7 @@ fn sticky_pool_index(src_ip: IpAddr, pool_len: usize) -> usize {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SourceNatRule {
+    pub(crate) name: String,
     pub(crate) from_zone: String,
     pub(crate) to_zone: String,
     pub(crate) source_v4: Vec<PrefixV4>,
@@ -177,6 +246,9 @@ pub(crate) struct SourceNatRule {
     pub(crate) destination_v6: Vec<PrefixV6>,
     pub(crate) interface_mode: bool,
     pub(crate) off: bool,
+    pub(crate) pool_name: String,
+    pub(crate) pool_mode: bool,
+    pub(crate) pool_failure: Option<SourceNatFailureReason>,
     pub(crate) address_persistent: bool,
     pub(crate) pool_addresses_v4: Vec<Ipv4Addr>,
     pub(crate) pool_addresses_v6: Vec<Ipv6Addr>,
@@ -207,10 +279,13 @@ pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<Sou
     let mut out = Vec::with_capacity(snaps.len());
     for snap in snaps {
         let mut rule = SourceNatRule {
+            name: snap.name.clone(),
             from_zone: snap.from_zone.clone(),
             to_zone: snap.to_zone.clone(),
             interface_mode: snap.interface_mode,
             off: snap.off,
+            pool_name: snap.pool_name.clone(),
+            pool_mode: !snap.pool_name.is_empty() || !snap.pool_addresses.is_empty(),
             address_persistent: snap.address_persistent,
             ..SourceNatRule::default()
         };
@@ -229,6 +304,7 @@ pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<Sou
             }
         }
         // Parse pool addresses and port range for pool-mode SNAT.
+        let mut invalid_pool_address = false;
         for addr_str in &snap.pool_addresses {
             // Pool addresses may be bare IPs or /32 CIDRs — strip the mask.
             let ip_str = addr_str.split('/').next().unwrap_or(addr_str);
@@ -237,20 +313,37 @@ pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<Sou
                     IpAddr::V4(v4) => rule.pool_addresses_v4.push(v4),
                     IpAddr::V6(v6) => rule.pool_addresses_v6.push(v6),
                 }
+            } else {
+                invalid_pool_address = true;
             }
         }
         let total_pool = rule.pool_addresses_v4.len() + rule.pool_addresses_v6.len();
+        let port_low = if snap.port_low > 0 {
+            snap.port_low
+        } else {
+            1024
+        };
+        let port_high = if snap.port_high > 0 {
+            snap.port_high
+        } else {
+            65535
+        };
+        if snap.pool_unusable {
+            rule.pool_failure = Some(source_nat_failure_reason_from_snapshot(
+                &snap.pool_unusable_reason,
+            ));
+        } else if rule.pool_mode && invalid_pool_address {
+            rule.pool_failure = Some(SourceNatFailureReason::InvalidPool);
+        } else if rule.pool_mode && total_pool == 0 {
+            rule.pool_failure = Some(if snap.pool_addresses.is_empty() {
+                SourceNatFailureReason::EmptyPool
+            } else {
+                SourceNatFailureReason::MissingPool
+            });
+        } else if rule.pool_mode && port_low > port_high {
+            rule.pool_failure = Some(SourceNatFailureReason::InvalidPortRange);
+        }
         if total_pool > 0 {
-            let port_low = if snap.port_low > 0 {
-                snap.port_low
-            } else {
-                1024
-            };
-            let port_high = if snap.port_high > 0 {
-                snap.port_high
-            } else {
-                65535
-            };
             rule.pool_allocator = PortAllocator::new(total_pool, port_low, port_high);
         }
         out.push(rule);
@@ -267,23 +360,47 @@ pub(crate) fn match_source_nat(
     egress_v4: Option<Ipv4Addr>,
     egress_v6: Option<Ipv6Addr>,
 ) -> Option<NatDecision> {
+    match match_source_nat_result(
+        rules, from_zone, to_zone, src_ip, dst_ip, egress_v4, egress_v6,
+    ) {
+        SourceNatLookup::Matched(decision) => Some(decision),
+        SourceNatLookup::NoMatch | SourceNatLookup::Unavailable(_) => None,
+    }
+}
+
+pub(crate) fn match_source_nat_result(
+    rules: &[SourceNatRule],
+    from_zone: &str,
+    to_zone: &str,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    egress_v4: Option<Ipv4Addr>,
+    egress_v6: Option<Ipv6Addr>,
+) -> SourceNatLookup {
     for rule in rules {
         if !rule.matches(from_zone, to_zone, src_ip, dst_ip) {
             continue;
         }
         if rule.off {
-            return Some(NatDecision::default());
+            return SourceNatLookup::Matched(NatDecision::default());
         }
         if rule.interface_mode {
             let rewrite_src = match src_ip {
                 IpAddr::V4(_) => egress_v4.map(IpAddr::V4),
                 IpAddr::V6(_) => egress_v6.map(IpAddr::V6),
             };
-            return Some(NatDecision {
+            return SourceNatLookup::Matched(NatDecision {
                 rewrite_src,
                 rewrite_dst: None,
                 ..NatDecision::default()
             });
+        }
+        if rule.pool_mode {
+            if let Some(reason) = rule.pool_failure {
+                return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(rule, reason));
+            }
+        } else {
+            continue;
         }
         // Pool-mode SNAT: pick address by source-IP hash when
         // address-persistent is enabled, otherwise round-robin by family.
@@ -297,8 +414,15 @@ pub(crate) fn match_source_nat(
                 );
                 let v4_idx = addr_idx;
                 let pool_addr = rule.pool_addresses_v4[v4_idx];
-                let port = rule.pool_allocator.next_port(addr_idx);
-                return Some(NatDecision {
+                let port = match rule.pool_allocator.try_next_port(addr_idx) {
+                    Ok(port) => port,
+                    Err(reason) => {
+                        return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                            rule, reason,
+                        ));
+                    }
+                };
+                return SourceNatLookup::Matched(NatDecision {
                     rewrite_src: Some(IpAddr::V4(pool_addr)),
                     rewrite_dst: None,
                     rewrite_src_port: Some(port),
@@ -316,8 +440,15 @@ pub(crate) fn match_source_nat(
                 );
                 let v6_idx = addr_idx - v6_offset;
                 let pool_addr = rule.pool_addresses_v6[v6_idx];
-                let port = rule.pool_allocator.next_port(addr_idx);
-                return Some(NatDecision {
+                let port = match rule.pool_allocator.try_next_port(addr_idx) {
+                    Ok(port) => port,
+                    Err(reason) => {
+                        return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                            rule, reason,
+                        ));
+                    }
+                };
+                return SourceNatLookup::Matched(NatDecision {
                     rewrite_src: Some(IpAddr::V6(pool_addr)),
                     rewrite_dst: None,
                     rewrite_src_port: Some(port),
@@ -326,16 +457,14 @@ pub(crate) fn match_source_nat(
                 });
             }
             _ => {
-                // This rule matched the zones/prefixes but the referenced pool
-                // has no address for the packet family. Treat it as an
-                // unusable rule and keep walking so a later compatible rule can
-                // still apply. Returning a default NatDecision here would
-                // silently shadow later SNAT rules.
-                continue;
+                return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                    rule,
+                    SourceNatFailureReason::WrongAddressFamily,
+                ));
             }
         }
     }
-    None
+    SourceNatLookup::NoMatch
 }
 
 /// Static 1:1 NAT entry (bidirectional).

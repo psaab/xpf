@@ -249,6 +249,8 @@ type SourceNATRuleSnapshot struct {
 	PortLow              uint16   `json:"port_low,omitempty"`
 	PortHigh             uint16   `json:"port_high,omitempty"`
 	AddressPersistent    bool     `json:"address_persistent,omitempty"`
+	PoolUnusable         bool     `json:"pool_unusable,omitempty"`
+	PoolUnusableReason   string   `json:"pool_unusable_reason,omitempty"`
 }
 
 type StaticNATRuleSnapshot struct {
@@ -1057,6 +1059,8 @@ type ExceptionStatus struct {
 	DstPort          uint16    `json:"dst_port,omitempty"`
 	FromZone         string    `json:"from_zone,omitempty"`
 	ToZone           string    `json:"to_zone,omitempty"`
+	RuleName         string    `json:"rule_name,omitempty"`
+	PoolName         string    `json:"pool_name,omitempty"`
 }
 
 type InjectPacketRequest struct {

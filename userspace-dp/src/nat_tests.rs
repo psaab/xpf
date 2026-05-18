@@ -827,7 +827,7 @@ fn pool_snat_multiple_addresses_round_robin() {
 }
 
 #[test]
-fn pool_snat_wrong_family_pool_does_not_shadow_later_rule() {
+fn pool_snat_wrong_family_pool_fails_closed_before_later_rule() {
     let rules = parse_source_nat_rules(&[
         SourceNATRuleSnapshot {
             name: "wrong-family".to_string(),
@@ -853,7 +853,7 @@ fn pool_snat_wrong_family_pool_does_not_shadow_later_rule() {
         },
     ]);
 
-    let d = match_source_nat(
+    let lookup = match_source_nat_result(
         &rules,
         "lan",
         "wan",
@@ -861,14 +861,19 @@ fn pool_snat_wrong_family_pool_does_not_shadow_later_rule() {
         "8.8.8.8".parse().unwrap(),
         None,
         None,
-    )
-    .expect("later compatible rule should match");
-    assert_eq!(d.rewrite_src, Some("203.0.113.20".parse().unwrap()));
-    assert_eq!(d.rewrite_src_port, Some(40000));
+    );
+    assert_eq!(
+        lookup,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "wrong-family".to_string(),
+            pool_name: "v6-only".to_string(),
+            reason: SourceNatFailureReason::WrongAddressFamily,
+        })
+    );
 }
 
 #[test]
-fn pool_snat_wrong_family_pool_returns_none_when_no_later_rule_matches() {
+fn pool_snat_wrong_family_pool_fails_closed_when_no_later_rule_matches() {
     let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
         name: "wrong-family".to_string(),
         from_zone: "lan".to_string(),
@@ -881,7 +886,7 @@ fn pool_snat_wrong_family_pool_returns_none_when_no_later_rule_matches() {
         ..SourceNATRuleSnapshot::default()
     }]);
 
-    let d = match_source_nat(
+    let lookup = match_source_nat_result(
         &rules,
         "lan",
         "wan",
@@ -890,7 +895,175 @@ fn pool_snat_wrong_family_pool_returns_none_when_no_later_rule_matches() {
         None,
         None,
     );
-    assert_eq!(d, None);
+    assert_eq!(
+        lookup,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "wrong-family".to_string(),
+            pool_name: "v6-only".to_string(),
+            reason: SourceNatFailureReason::WrongAddressFamily,
+        })
+    );
+}
+
+#[test]
+fn pool_snat_missing_pool_snapshot_fails_closed() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "missing".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "missing-pool".to_string(),
+        pool_unusable: true,
+        pool_unusable_reason: "missing_pool".to_string(),
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let lookup = match_source_nat_result(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    );
+    assert_eq!(
+        lookup,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "missing".to_string(),
+            pool_name: "missing-pool".to_string(),
+            reason: SourceNatFailureReason::MissingPool,
+        })
+    );
+}
+
+#[test]
+fn pool_snat_empty_pool_fails_closed_instead_of_no_match() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "empty".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "empty-pool".to_string(),
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let lookup = match_source_nat_result(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    );
+    assert_eq!(
+        lookup,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "empty".to_string(),
+            pool_name: "empty-pool".to_string(),
+            reason: SourceNatFailureReason::EmptyPool,
+        })
+    );
+}
+
+#[test]
+fn pool_snat_invalid_port_range_fails_closed() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "bad-ports".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "bad-port-pool".to_string(),
+        pool_addresses: vec!["203.0.113.1".to_string()],
+        port_low: 40000,
+        port_high: 39999,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let lookup = match_source_nat_result(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    );
+    assert_eq!(
+        lookup,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "bad-ports".to_string(),
+            pool_name: "bad-port-pool".to_string(),
+            reason: SourceNatFailureReason::InvalidPortRange,
+        })
+    );
+}
+
+#[test]
+fn pool_snat_invalid_pool_address_fails_closed() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "bad-address".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "bad-address-pool".to_string(),
+        pool_addresses: vec!["not-an-ip".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let lookup = match_source_nat_result(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    );
+    assert_eq!(
+        lookup,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "bad-address".to_string(),
+            pool_name: "bad-address-pool".to_string(),
+            reason: SourceNatFailureReason::InvalidPool,
+        })
+    );
+}
+
+#[test]
+fn pool_snat_partially_invalid_pool_address_fails_closed() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "mixed-addresses".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "mixed-address-pool".to_string(),
+        pool_addresses: vec!["203.0.113.1".to_string(), "not-an-ip".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let lookup = match_source_nat_result(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        None,
+        None,
+    );
+    assert_eq!(
+        lookup,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "mixed-addresses".to_string(),
+            pool_name: "mixed-address-pool".to_string(),
+            reason: SourceNatFailureReason::InvalidPool,
+        })
+    );
 }
 
 #[test]
@@ -1226,10 +1399,10 @@ fn port_allocator_basic() {
     assert_eq!(alloc.address_index(src, 0, 2, false), 1);
     assert_eq!(alloc.address_index(src, 0, 2, false), 0);
     // Port allocation for address 0
-    assert_eq!(alloc.next_port(0), 5000);
-    assert_eq!(alloc.next_port(0), 5001);
-    assert_eq!(alloc.next_port(0), 5002);
-    assert_eq!(alloc.next_port(0), 5000); // wraps
+    assert_eq!(alloc.try_next_port(0), Ok(5000));
+    assert_eq!(alloc.try_next_port(0), Ok(5001));
+    assert_eq!(alloc.try_next_port(0), Ok(5002));
+    assert_eq!(alloc.try_next_port(0), Ok(5000)); // wraps
 
     let mixed = PortAllocator::new(4, 5000, 5002);
     let src_v4 = "10.0.1.100".parse().unwrap();

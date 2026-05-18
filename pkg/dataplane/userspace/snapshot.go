@@ -1290,29 +1290,35 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 			}
 			var poolAddresses []string
 			var portLow, portHigh uint16
+			var poolUnusable bool
+			var poolUnusableReason string
 			if rule.Then.PoolName != "" {
 				pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]
 				if !ok || pool == nil {
-					slog.Warn("userspace snapshot: skipping source NAT rule with missing pool",
+					slog.Warn("userspace snapshot: marking source NAT rule with missing pool unusable",
 						"rule", rule.Name, "pool", rule.Then.PoolName)
-					continue
-				}
-				if pool.Address != "" {
-					poolAddresses = append(poolAddresses, pool.Address)
-				}
-				poolAddresses = append(poolAddresses, pool.Addresses...)
-				if len(poolAddresses) == 0 {
-					slog.Warn("userspace snapshot: skipping source NAT rule with empty pool",
-						"rule", rule.Name, "pool", rule.Then.PoolName)
-					continue
-				}
-				var valid bool
-				portLow, portHigh, valid = sourceNATPoolPortRange(pool)
-				if !valid {
-					slog.Warn("userspace snapshot: skipping source NAT rule with invalid pool port range",
-						"rule", rule.Name, "pool", rule.Then.PoolName,
-						"port_low", pool.PortLow, "port_high", pool.PortHigh)
-					continue
+					poolUnusable = true
+					poolUnusableReason = "missing_pool"
+				} else {
+					if pool.Address != "" {
+						poolAddresses = append(poolAddresses, pool.Address)
+					}
+					poolAddresses = append(poolAddresses, pool.Addresses...)
+					if len(poolAddresses) == 0 {
+						slog.Warn("userspace snapshot: marking source NAT rule with empty pool unusable",
+							"rule", rule.Name, "pool", rule.Then.PoolName)
+						poolUnusable = true
+						poolUnusableReason = "empty_pool"
+					}
+					var valid bool
+					portLow, portHigh, valid = sourceNATPoolPortRange(pool)
+					if !valid {
+						slog.Warn("userspace snapshot: marking source NAT rule with invalid pool port range unusable",
+							"rule", rule.Name, "pool", rule.Then.PoolName,
+							"port_low", pool.PortLow, "port_high", pool.PortHigh)
+						poolUnusable = true
+						poolUnusableReason = "invalid_port_range"
+					}
 				}
 			}
 			out = append(out, SourceNATRuleSnapshot{
@@ -1328,6 +1334,8 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 				PortLow:              portLow,
 				PortHigh:             portHigh,
 				AddressPersistent:    cfg.Security.NAT.AddressPersistent,
+				PoolUnusable:         poolUnusable,
+				PoolUnusableReason:   poolUnusableReason,
 			})
 		}
 	}
