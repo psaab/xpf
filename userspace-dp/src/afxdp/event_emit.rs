@@ -28,6 +28,7 @@ const SCREEN_SYN_FRAG: u32 = 1 << 13;
 const SCREEN_SYN_COOKIE: u32 = 1 << 14;
 const SCREEN_SESSION_LIMIT_SRC: u32 = 1 << 15;
 const SCREEN_SESSION_LIMIT_DST: u32 = 1 << 16;
+const SCREEN_ICMP_FRAGMENT: u32 = 1 << 17;
 
 #[inline]
 pub(super) fn event_now_ns_from_secs(now_secs: u64) -> u64 {
@@ -210,6 +211,7 @@ fn screen_reason_id(reason: &'static str) -> u32 {
         "syn-cookie" | "syn-cookie-unavailable" => SCREEN_SYN_COOKIE,
         "session-limit-src" => SCREEN_SESSION_LIMIT_SRC,
         "session-limit-dst" => SCREEN_SESSION_LIMIT_DST,
+        "icmp-fragment" => SCREEN_ICMP_FRAGMENT,
         _ => 0,
     }
 }
@@ -333,6 +335,39 @@ mod tests {
         assert_eq!(event.src_ip, pkt.src_ip);
         assert_eq!(event.dst_ip, pkt.dst_ip);
         assert_eq!(handle.dataplane_event_stats().screen_drop.sent, 1);
+    }
+
+    #[test]
+    fn screen_reason_id_maps_icmp_fragment() {
+        let (handle, rx) = unlimited_handle();
+        let pkt = ScreenPacketInfo {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_ICMP,
+            tcp_flags: 0,
+            src_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11)),
+            src_port: 0,
+            dst_port: 0,
+            tcp_seq: 0,
+            tcp_ack: 0,
+            tcp_mss: 0,
+            pkt_len: 60,
+            is_fragment: true,
+            is_first_fragment: false,
+            ip_ihl: 5,
+            ip_frag_off: 0x2000,
+            ip_total_len: 60,
+        };
+
+        emit_screen_drop_event(Some(&handle), &pkt, test_meta(), 11, "icmp-fragment", 456);
+
+        let event = rx
+            .try_recv()
+            .expect("screen event frame")
+            .decode_dataplane_event()
+            .expect("screen event payload");
+        assert_eq!(event.kind, DataplaneEventKind::ScreenDrop);
+        assert_eq!(event.screen_id, SCREEN_ICMP_FRAGMENT);
     }
 
     #[test]

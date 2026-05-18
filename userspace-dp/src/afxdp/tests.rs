@@ -4,8 +4,8 @@ use crate::test_zone_ids::*;
 use crate::xsk_ffi::IfInfo;
 use crate::{
     DestinationNATRuleSnapshot, FirewallFilterSnapshot, FirewallTermSnapshot,
-    InterfaceAddressSnapshot, PolicyRuleSnapshot, SourceNATRuleSnapshot, StaticNATRuleSnapshot,
-    ThreeColorPolicerSnapshot,
+    InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, SourceNATRuleSnapshot,
+    StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
 
 #[test]
@@ -2510,6 +2510,197 @@ fn embedded_icmp_nat_match_ignores_non_error_echo() {
         result.is_none(),
         "non-error ICMP echo should not trigger embedded NAT reversal"
     );
+}
+
+fn build_policy_deny_tcp_syn_frame() -> Vec<u8> {
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
+        [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5],
+        0,
+        0x0800,
+    );
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00, 10, 0, 61, 102,
+        172, 16, 80, 200,
+    ]);
+    let ip_sum = checksum16(&frame[14..34]);
+    frame[24] = (ip_sum >> 8) as u8;
+    frame[25] = ip_sum as u8;
+    frame.extend_from_slice(&12345u16.to_be_bytes());
+    frame.extend_from_slice(&5201u16.to_be_bytes());
+    frame.extend_from_slice(&1u32.to_be_bytes());
+    frame.extend_from_slice(&0u32.to_be_bytes());
+    frame.extend_from_slice(&[0x50, TCP_FLAG_SYN, 0xfa, 0xf0, 0x00, 0x00, 0x00, 0x00]);
+    frame
+}
+
+#[test]
+fn poll_descriptor_policy_deny_path_emits_rt_flow_event() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.zones = vec![
+        ZoneSnapshot {
+            name: "lan".to_string(),
+            id: TEST_LAN_ZONE_ID,
+        },
+        ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+        },
+        ZoneSnapshot {
+            name: "dmz".to_string(),
+            id: TEST_DMZ_ZONE_ID,
+        },
+    ];
+    snapshot.neighbors = vec![NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.200".to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+    }];
+
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_policy_deny_tcp_syn_frame();
+    let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+    let frame_offset = 128;
+    let meta_offset = frame_offset - meta_len;
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: meta_len as u16,
+        ingress_ifindex: 24,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 54,
+        pkt_len: (frame.len() - 14) as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_SYN,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let meta_bytes = unsafe {
+        std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+    };
+    unsafe {
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(meta_offset, meta_len)
+            .expect("meta slice")
+            .copy_from_slice(meta_bytes);
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(frame_offset, frame.len())
+            .expect("frame slice")
+            .copy_from_slice(&frame);
+    }
+    binding.xsk.rx.push_for_test(XdpDesc {
+        addr: frame_offset as u64,
+        len: frame.len() as u32,
+        options: 0,
+    });
+
+    let ident = binding.identity();
+    let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(VecDeque::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let worker_ctx = WorkerContext {
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding: &forwarding,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        slow_path: None,
+        event_stream: Some(&event_handle),
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+    };
+    let mut sessions = SessionTable::new();
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext {
+        dbg: &mut dbg,
+        counters: &mut batch,
+    };
+    let area_ptr = binding.umem.area() as *const MmapArea;
+
+    poll_binding_process_descriptor(
+        &mut binding,
+        0,
+        area_ptr,
+        1,
+        &mut sessions,
+        &mut screen,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        123_000_000_000,
+        123,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+    );
+
+    let event = event_rx
+        .try_recv()
+        .expect("policy-deny event from poll descriptor")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(
+        event.kind,
+        crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+    );
+    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID);
+    assert_eq!(event.ingress_ifindex, 24);
+    assert_eq!(event.src_port, 12345);
+    assert_eq!(event.dst_port, 5201);
+    assert_eq!(event.timestamp_ns, 0);
+    assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
+    assert!(telemetry.dbg.policy_deny >= 1);
 }
 
 #[test]
