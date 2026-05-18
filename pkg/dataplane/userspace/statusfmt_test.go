@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -40,8 +41,8 @@ func TestFormatStatusSummary(t *testing.T) {
 			{QueueID: 1, Armed: false, Ready: false},
 		},
 		Bindings: []BindingStatus{
-			{Slot: 0, Armed: false, Ready: true, Bound: true, XSKRegistered: true, XSKBindMode: "zerocopy", ZeroCopy: true, SharedUMEMMode: "cross-nic", SharedUMEMSocketRole: "owner", SharedUMEMGroup: "cross-nic:w0:ge-0-0-1,ge-0-0-2", RXPackets: 10, ValidatedPackets: 8, ExceptionPackets: 1, TXPackets: 3, TXBytes: 420, TXCompletions: 2, MirroredPackets: 4, MirroredBytes: 512, MirrorDropsNoFrame: 1, KernelRXDropped: 9, KernelRXInvalidDescs: 1, DirectTXPackets: 2, InPlaceTXPackets: 1, InPlaceVLANPushDescPackets: 8, InPlaceVLANPopDescPackets: 9, InPlaceVLANPushNoHeadroomPackets: 10, InPlaceL2MemmoveFallbackPackets: 11, DirectTXNoFrameFallbackPackets: 5, DirectTXBuildFallbackPackets: 6, DebugPendingFillFrames: 10, DebugSpareFillFrames: 11, DebugFreeTXFrames: 12, DebugPendingTXPrepared: 13, DebugPendingTXLocal: 14, DebugOutstandingTX: 15, DebugInFlightRecycles: 16},
-			{Slot: 1, Armed: false, Ready: false, Bound: true, XSKRegistered: false, RXPackets: 5, ValidatedPackets: 4, ExceptionPackets: 2, TXErrors: 1, TXSharedRecycleUnknownSlotDrops: 1, TXCompletions: 3, MirroredPackets: 6, MirroredBytes: 768, MirrorDropsNoBinding: 2, MirrorDropsQueueFull: 3, KernelRXDropped: 4, KernelRXInvalidDescs: 2, CopyTXPackets: 4, InPlaceVLANPushDescPackets: 3, InPlaceVLANPopDescPackets: 4, InPlaceVLANPushNoHeadroomPackets: 5, InPlaceL2MemmoveFallbackPackets: 6, DirectTXDisallowedFallbackPackets: 7, DebugPendingFillFrames: 20, DebugSpareFillFrames: 21, DebugFreeTXFrames: 22, DebugPendingTXPrepared: 23, DebugPendingTXLocal: 24, DebugOutstandingTX: 25, DebugInFlightRecycles: 26},
+			{Slot: 0, Armed: false, Ready: true, Bound: true, XSKRegistered: true, XSKBindMode: "zerocopy", ZeroCopy: true, SharedUMEMMode: "cross-nic", SharedUMEMSocketRole: "owner", SharedUMEMGroup: "cross-nic:w0:ge-0-0-1,ge-0-0-2", RXPackets: 10, ValidatedPackets: 8, ExceptionPackets: 1, ScreenDrops: 2, SYNCookieChallenges: 3, SYNCookieSecretUnavailable: 1, SYNCookieAckValid: 5, SYNCookieAckInvalid: 7, SYNCookieBypass: 11, TXPackets: 3, TXBytes: 420, TXCompletions: 2, MirroredPackets: 4, MirroredBytes: 512, MirrorDropsNoFrame: 1, KernelRXDropped: 9, KernelRXInvalidDescs: 1, DirectTXPackets: 2, InPlaceTXPackets: 1, InPlaceVLANPushDescPackets: 8, InPlaceVLANPopDescPackets: 9, InPlaceVLANPushNoHeadroomPackets: 10, InPlaceL2MemmoveFallbackPackets: 11, DirectTXNoFrameFallbackPackets: 5, DirectTXBuildFallbackPackets: 6, DebugPendingFillFrames: 10, DebugSpareFillFrames: 11, DebugFreeTXFrames: 12, DebugPendingTXPrepared: 13, DebugPendingTXLocal: 14, DebugOutstandingTX: 15, DebugInFlightRecycles: 16},
+			{Slot: 1, Armed: false, Ready: false, Bound: true, XSKRegistered: false, RXPackets: 5, ValidatedPackets: 4, ExceptionPackets: 2, ScreenDrops: 4, SYNCookieChallenges: 13, SYNCookieAckValid: 17, SYNCookieAckInvalid: 19, SYNCookieBypass: 23, TXErrors: 1, TXSharedRecycleUnknownSlotDrops: 1, TXCompletions: 3, MirroredPackets: 6, MirroredBytes: 768, MirrorDropsNoBinding: 2, MirrorDropsQueueFull: 3, KernelRXDropped: 4, KernelRXInvalidDescs: 2, CopyTXPackets: 4, InPlaceVLANPushDescPackets: 3, InPlaceVLANPopDescPackets: 4, InPlaceVLANPushNoHeadroomPackets: 5, InPlaceL2MemmoveFallbackPackets: 6, DirectTXDisallowedFallbackPackets: 7, DebugPendingFillFrames: 20, DebugSpareFillFrames: 21, DebugFreeTXFrames: 22, DebugPendingTXPrepared: 23, DebugPendingTXLocal: 24, DebugOutstandingTX: 25, DebugInFlightRecycles: 26},
 		},
 		RecentExceptions: []ExceptionStatus{
 			{Timestamp: now, Slot: 1, QueueID: 0, Interface: "ge-0-0-2", Reason: "metadata_parse", PacketLength: 128},
@@ -90,6 +91,8 @@ func TestFormatStatusSummary(t *testing.T) {
 		"TX packets:                3",
 		"TX bytes:                  420",
 		"TX errors:                 1",
+		"Screen drops:              6",
+		"SYN-cookie counters:       challenges=16 unavailable=1 ack_valid=22 ack_invalid=26 bypass=34",
 		"TX shared recycle unk:     1",
 		"TX completions:            5",
 		"Mirrored packets:          10",
@@ -124,6 +127,44 @@ func TestFormatStatusSummary(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestFormatSYNCookieCounterRows(t *testing.T) {
+	status := ProcessStatus{
+		Bindings: []BindingStatus{
+			{
+				SYNCookieChallenges:        3,
+				SYNCookieSecretUnavailable: 5,
+				SYNCookieAckValid:          7,
+				SYNCookieAckInvalid:        11,
+				SYNCookieBypass:            13,
+			},
+			{
+				SYNCookieChallenges:        17,
+				SYNCookieSecretUnavailable: 19,
+				SYNCookieAckValid:          23,
+				SYNCookieAckInvalid:        29,
+				SYNCookieBypass:            31,
+			},
+		},
+	}
+
+	rows := FormatSYNCookieCounterRows(SumSYNCookieCounters(status))
+	for _, want := range []string{
+		fmt.Sprintf("  %-30s %s\n", "Userspace SYN-cookie scope", "all bindings"),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie challenges", 20),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie secret unavailable", 24),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie ACK valid", 30),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie ACK invalid", 40),
+		fmt.Sprintf("  %-30s %d\n", "SYN-cookie bypass", 44),
+	} {
+		if !strings.Contains(rows, want) {
+			t.Fatalf("SYN-cookie rows missing %q:\n%s", want, rows)
+		}
+	}
+	if got := FormatSYNCookieCounterRows(SYNCookieCounters{}); got != "" {
+		t.Fatalf("zero SYN-cookie counters rendered rows: %q", got)
 	}
 }
 

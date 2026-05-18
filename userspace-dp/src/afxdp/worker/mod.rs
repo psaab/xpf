@@ -2379,6 +2379,13 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) session_delta_drained: u64,
     pub(crate) policy_denied_packets: u64,
     pub(crate) screen_drops: u64,
+    /// #1374: SYN-cookie challenge decisions selected by userspace screen
+    /// runtime. Not equivalent to SYN-ACKs sent until bounded TX exists.
+    pub(crate) syn_cookie_challenges: u64,
+    pub(crate) syn_cookie_secret_unavailable: u64,
+    pub(crate) syn_cookie_ack_valid: u64,
+    pub(crate) syn_cookie_ack_invalid: u64,
+    pub(crate) syn_cookie_bypass: u64,
     pub(crate) snat_packets: u64,
     pub(crate) dnat_packets: u64,
     pub(crate) slow_path_packets: u64,

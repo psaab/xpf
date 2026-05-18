@@ -11,6 +11,53 @@ import (
 const defaultFlowWorkerMapLimit = 128
 const flowWorkerMapAllLimit = -1
 
+// SYNCookieCounters aggregates userspace per-binding SYN-cookie status counters.
+type SYNCookieCounters struct {
+	Challenges        uint64
+	SecretUnavailable uint64
+	AckValid          uint64
+	AckInvalid        uint64
+	Bypass            uint64
+}
+
+// Any reports whether any SYN-cookie counter is non-zero.
+func (c SYNCookieCounters) Any() bool {
+	return c.Challenges != 0 ||
+		c.SecretUnavailable != 0 ||
+		c.AckValid != 0 ||
+		c.AckInvalid != 0 ||
+		c.Bypass != 0
+}
+
+// SumSYNCookieCounters sums SYN-cookie counters across all bindings in status.
+func SumSYNCookieCounters(status ProcessStatus) SYNCookieCounters {
+	var counters SYNCookieCounters
+	for _, binding := range status.Bindings {
+		counters.Challenges += binding.SYNCookieChallenges
+		counters.SecretUnavailable += binding.SYNCookieSecretUnavailable
+		counters.AckValid += binding.SYNCookieAckValid
+		counters.AckInvalid += binding.SYNCookieAckInvalid
+		counters.Bypass += binding.SYNCookieBypass
+	}
+	return counters
+}
+
+// FormatSYNCookieCounterRows renders non-zero userspace SYN-cookie counters
+// using the same Counter/Value table shape as show screen statistics.
+func FormatSYNCookieCounterRows(counters SYNCookieCounters) string {
+	if !counters.Any() {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  %-30s %s\n", "Userspace SYN-cookie scope", "all bindings")
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie challenges", counters.Challenges)
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie secret unavailable", counters.SecretUnavailable)
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie ACK valid", counters.AckValid)
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie ACK invalid", counters.AckInvalid)
+	fmt.Fprintf(&b, "  %-30s %d\n", "SYN-cookie bypass", counters.Bypass)
+	return b.String()
+}
+
 func localHAForwardingRole(status ProcessStatus) string {
 	if len(status.HAGroups) == 0 {
 		return ""
@@ -63,6 +110,12 @@ func FormatStatusSummary(status ProcessStatus) string {
 	var sessionDeltaDropped uint64
 	var sessionDeltaDrained uint64
 	var policyDeniedPackets uint64
+	var screenDrops uint64
+	var synCookieChallenges uint64
+	var synCookieSecretUnavailable uint64
+	var synCookieAckValid uint64
+	var synCookieAckInvalid uint64
+	var synCookieBypass uint64
 	var snatPackets uint64
 	var dnatPackets uint64
 	var txPackets uint64
@@ -145,6 +198,12 @@ func FormatStatusSummary(status ProcessStatus) string {
 		sessionDeltaDropped += binding.SessionDeltaDropped
 		sessionDeltaDrained += binding.SessionDeltaDrained
 		policyDeniedPackets += binding.PolicyDeniedPackets
+		screenDrops += binding.ScreenDrops
+		synCookieChallenges += binding.SYNCookieChallenges
+		synCookieSecretUnavailable += binding.SYNCookieSecretUnavailable
+		synCookieAckValid += binding.SYNCookieAckValid
+		synCookieAckInvalid += binding.SYNCookieAckInvalid
+		synCookieBypass += binding.SYNCookieBypass
 		snatPackets += binding.SNATPackets
 		dnatPackets += binding.DNATPackets
 		txPackets += binding.TXPackets
@@ -317,6 +376,11 @@ func FormatStatusSummary(status ProcessStatus) string {
 			es.PolicyDenyDrops, es.ScreenDropDrops, es.FilterLogDrops)
 	}
 	fmt.Fprintf(&b, "  Policy denied packets:     %d\n", policyDeniedPackets)
+	fmt.Fprintf(&b, "  Screen drops:              %d\n", screenDrops)
+	if synCookieChallenges != 0 || synCookieSecretUnavailable != 0 || synCookieAckValid != 0 || synCookieAckInvalid != 0 || synCookieBypass != 0 {
+		fmt.Fprintf(&b, "  SYN-cookie counters:       challenges=%d unavailable=%d ack_valid=%d ack_invalid=%d bypass=%d\n",
+			synCookieChallenges, synCookieSecretUnavailable, synCookieAckValid, synCookieAckInvalid, synCookieBypass)
+	}
 	fmt.Fprintf(&b, "  SNAT packets:              %d\n", snatPackets)
 	fmt.Fprintf(&b, "  DNAT packets:              %d\n", dnatPackets)
 	fmt.Fprintf(&b, "  TX packets:                %d\n", txPackets)

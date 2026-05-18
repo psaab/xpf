@@ -334,6 +334,11 @@ pub(in crate::afxdp) struct BatchCounters {
     // reload windows. See docs/pr/1187-telemetry-double-buffer/plan.md
     // (v7 PLAN-READY).
     screen_drops: u64,
+    syn_cookie_challenges: u64,
+    syn_cookie_secret_unavailable: u64,
+    syn_cookie_ack_valid: u64,
+    syn_cookie_ack_invalid: u64,
+    syn_cookie_bypass: u64,
     policy_denied_packets: u64,
     route_miss_packets: u64,
     neighbor_miss_packets: u64,
@@ -412,6 +417,31 @@ impl BatchCounters {
             live.screen_drops
                 .fetch_add(self.screen_drops, Ordering::Relaxed);
             self.screen_drops = 0;
+        }
+        if self.syn_cookie_challenges != 0 {
+            live.syn_cookie_challenges
+                .fetch_add(self.syn_cookie_challenges, Ordering::Relaxed);
+            self.syn_cookie_challenges = 0;
+        }
+        if self.syn_cookie_secret_unavailable != 0 {
+            live.syn_cookie_secret_unavailable
+                .fetch_add(self.syn_cookie_secret_unavailable, Ordering::Relaxed);
+            self.syn_cookie_secret_unavailable = 0;
+        }
+        if self.syn_cookie_ack_valid != 0 {
+            live.syn_cookie_ack_valid
+                .fetch_add(self.syn_cookie_ack_valid, Ordering::Relaxed);
+            self.syn_cookie_ack_valid = 0;
+        }
+        if self.syn_cookie_ack_invalid != 0 {
+            live.syn_cookie_ack_invalid
+                .fetch_add(self.syn_cookie_ack_invalid, Ordering::Relaxed);
+            self.syn_cookie_ack_invalid = 0;
+        }
+        if self.syn_cookie_bypass != 0 {
+            live.syn_cookie_bypass
+                .fetch_add(self.syn_cookie_bypass, Ordering::Relaxed);
+            self.syn_cookie_bypass = 0;
         }
         if self.policy_denied_packets != 0 {
             live.policy_denied_packets

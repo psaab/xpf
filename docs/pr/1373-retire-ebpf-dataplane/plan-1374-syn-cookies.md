@@ -16,7 +16,7 @@ SYN cookie behavior in `userspace-dp`.
   profile the actual TX completion cost instead of assuming in-place RX-to-TX
   bounce is required.
 
-## Current Slice Status (2026-05-17)
+## Current Slice Status (2026-05-18)
 
 - #1393 landed the deterministic userspace cookie codec/layout and codec tests.
 - This runtime slice carries `syn_cookie` through Go and Rust screen snapshots,
@@ -24,14 +24,20 @@ SYN cookie behavior in `userspace-dp`.
   published, uses a fixed-size keyed validated-client table for
   attacker-controlled tuples, and validates returning ACKs only after normal
   session lookup misses.
-- The AF_XDP hook currently consumes valid cookie ACKs and drops invalid cookie
-  ACKs while cookie mode is active. `SynCookieChallenge` is still accounted as a
-  screen drop instead of transmitting a SYN-ACK.
+- The 2026-05-18 closeout slice makes validated-client cache hits visible as an
+  explicit single-use `SynCookieBypass`, pins cache expiration at the one-epoch
+  TTL boundary, pins current/previous cookie-epoch ACK validation, and wires
+  per-binding helper status counters for selected challenges, no-secret
+  fail-closed decisions, valid ACKs, invalid ACKs, and bypasses.
+- Go helper status renders those counters, and the HA/BPF compatibility counter
+  sync mirrors valid ACK, invalid ACK, and bypass deltas. Challenge decisions are
+  deliberately not mapped to the legacy sent counter until bounded SYN-ACK TX
+  exists.
 - This PR is therefore a SYN-cookie validation/admission runtime slice, not the
   full SYN-ACK/RST TX implementation.
 - The userspace capability gate remains in place until bounded SYN-ACK TX, ACK
-  RST emission, HA-safe secret publication, counters/status, and integration
-  validation land.
+  RST emission, HA-safe secret publication/cache survivability, sent/budget TX
+  counters, and integration/failover validation land.
 
 ## Design
 
@@ -132,10 +138,20 @@ On returning ACK:
 - Cargo: `screen::syn_cookie_ack_fin_is_invalid_while_cookie_mode_is_active`.
 - Cargo: `screen::syn_cookie_validated_cache_is_bounded`.
 - Cargo: `screen::syn_cookie_validated_cache_index_is_keyed`.
+- Cargo: `screen::syn_cookie_validated_cache_expires_on_ttl_boundary`.
 - Cargo: `screen::syn_cookie_invalid_ack_flood_does_not_grow_validated_cache`.
 - Cargo: `screen::syn_cookie_master_key_rotation_clears_validated_cache`.
 - Cargo: `screen::update_profiles_prepopulates_syn_cookie_active_state`.
 - Cargo: `screen::syn_cookie_validated_cache_refresh_extends_ttl`.
+- Cargo: `screen::syn_cookie_ack_validation_accepts_previous_epoch_after_rotation`.
+- Cargo: `afxdp::poll_stages::session_miss_ack_stage_invokes_syn_cookie_runtime_validation`.
+- Cargo: `afxdp::tests::syn_cookie_counters_hot_path_accumulate_in_batch`.
+- Cargo: `afxdp::umem::tests::binding_live_snapshot_propagates_710_drop_counters`.
+- Cargo: `afxdp::coordinator::tests::refresh_bindings_bridges_v_min_counters_into_binding_status`.
+- Cargo: `afxdp::coordinator::tests::refresh_bindings_zeroes_v_min_counters_when_worker_absent`.
+- Cargo: `protocol::tests::syn_cookie_counters_binding_status_wire_roundtrip`.
+- Go: `TestSumBindingCounters` and `TestFormatStatusSummary` pin helper-side
+  aggregation/status rendering for the userspace SYN-cookie counters.
 - Go: while the gate remains, keep the `SynFloodProtectionMode == "syn-cookie"`
   capability rejection pinned and verify screen snapshots carry `syn_cookie` for
   the runtime path.

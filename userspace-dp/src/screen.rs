@@ -405,6 +405,7 @@ pub(crate) struct ScreenProfile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ScreenVerdict {
     Pass,
+    SynCookieBypass,
     Drop(&'static str),
     SynCookieChallenge(SynCookieChallenge),
 }
@@ -942,6 +943,7 @@ impl ScreenState {
         }
 
         // --- Rate-based flood checks ---
+        let mut syn_cookie_bypassed = false;
 
         // ICMP flood
         if profile.icmp_flood_threshold > 0
@@ -973,6 +975,9 @@ impl ScreenState {
                         SynCookieTuple::from_packet(pkt),
                         now_secs,
                     );
+                if syn_cookie_validated {
+                    syn_cookie_bypassed = true;
+                }
                 if !syn_cookie_validated {
                     if let Some(counter) = self.syn_counters.get_mut(zone)
                         && counter.increment(now_secs, profile.syn_flood_threshold)
@@ -1065,7 +1070,11 @@ impl ScreenState {
             self.last_cleanup_secs = now_secs;
         }
 
-        ScreenVerdict::Pass
+        if syn_cookie_bypassed {
+            ScreenVerdict::SynCookieBypass
+        } else {
+            ScreenVerdict::Pass
+        }
     }
 
     /// Validate a returning SYN-cookie ACK only after the caller has already
