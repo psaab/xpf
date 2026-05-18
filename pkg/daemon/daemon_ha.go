@@ -211,7 +211,7 @@ func (d *Daemon) watchClusterEvents(ctx context.Context) {
 				// already superseded this transition.
 				if tr.Changed && d.dp != nil {
 					cur, _ := s.CurrentDesired()
-					if err := d.dp.UpdateRGActive(ev.GroupID, cur); err != nil {
+					if err := d.dp.HA().SetRGActive(ctx, ev.GroupID, cur); err != nil {
 						slog.Warn("failed to update rg_active from cluster event",
 							"rg", ev.GroupID, "active", cur, "err", err)
 					} else {
@@ -279,7 +279,7 @@ func (d *Daemon) watchClusterEvents(ctx context.Context) {
 					if !cur && !clusterDemotionEdge {
 						d.tryPrepareUserspaceRGDemotion(ev.GroupID)
 					}
-					if err := d.dp.UpdateRGActive(ev.GroupID, cur); err != nil {
+					if err := d.dp.HA().SetRGActive(ctx, ev.GroupID, cur); err != nil {
 						slog.Warn("failed to update rg_active from cluster event",
 							"rg", ev.GroupID, "active", cur, "err", err)
 					} else {
@@ -400,7 +400,7 @@ func (d *Daemon) watchVRRPEvents(ctx context.Context) {
 					// Only activate when ALL VRRP instances in the RG
 					// are MASTER — prevents partial ownership (#132).
 					cur, _ := s.CurrentDesired()
-					if err := d.dp.UpdateRGActive(rgID, cur); err != nil {
+					if err := d.dp.HA().SetRGActive(ctx, rgID, cur); err != nil {
 						slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
 					} else {
 						recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
@@ -434,7 +434,7 @@ func (d *Daemon) watchVRRPEvents(ctx context.Context) {
 						if !cur {
 							d.tryPrepareUserspaceRGDemotion(rgID)
 						}
-						if err := d.dp.UpdateRGActive(rgID, cur); err != nil {
+						if err := d.dp.HA().SetRGActive(ctx, rgID, cur); err != nil {
 							slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
 						} else {
 							recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
@@ -581,7 +581,7 @@ func (d *Daemon) reconcileRGState() {
 			if tr.Active {
 				// Activation ordering: set rg_active FIRST, then
 				// remove blackholes.
-				if err := d.dp.UpdateRGActive(rgID, true); err != nil {
+				if err := d.dp.HA().SetRGActive(context.Background(), rgID, true); err != nil {
 					if s.ShouldLogApplyError(err.Error()) {
 						slog.Warn("reconcile: failed to update rg_active",
 							"rg", rgID, "active", true, "err", err)
@@ -597,7 +597,7 @@ func (d *Daemon) reconcileRGState() {
 				// clear rg_active.
 				d.injectBlackholeRoutes(rgID)
 				d.tryPrepareUserspaceRGDemotion(rgID)
-				if err := d.dp.UpdateRGActive(rgID, false); err != nil {
+				if err := d.dp.HA().SetRGActive(context.Background(), rgID, false); err != nil {
 					if s.ShouldLogApplyError(err.Error()) {
 						slog.Warn("reconcile: failed to update rg_active",
 							"rg", rgID, "active", false, "err", err)
@@ -1086,7 +1086,7 @@ func (d *Daemon) warmNeighborCache() {
 	// Iterate IPv4 sessions: collect unique dst IPs (forward entries
 	// need ARP for the next-hop toward the destination) and unique src IPs
 	// (return entries need ARP for the on-link client).
-	_ = d.dp.IterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
+	_ = d.dp.Sessions().ForEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		if val.IsReverse != 0 {
 			return true
 		}
@@ -1100,7 +1100,7 @@ func (d *Daemon) warmNeighborCache() {
 	})
 
 	// Iterate IPv6 sessions.
-	_ = d.dp.IterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+	_ = d.dp.Sessions().ForEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		if val.IsReverse != 0 {
 			return true
 		}

@@ -132,7 +132,7 @@ func (d *Daemon) publishPolicyScheduleState(epoch uint64, activeState map[string
 		return
 	}
 	d.seedPolicySchedulerActiveStateLocked(activeState)
-	d.dp.UpdatePolicyScheduleState(cfg, activeState)
+	d.legacyDP().UpdatePolicyScheduleState(cfg, activeState)
 }
 
 func (d *Daemon) seedPolicySchedulerActiveStateLocked(activeState map[string]bool) {

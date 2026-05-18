@@ -313,7 +313,7 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		addrs  []string
 	}
 	var deferredOverlays []deferredIPVLAN
-	bindingCtrl, isUserspaceDP := d.dp.(userspaceXSKBindingController)
+		bindingCtrl, isUserspaceDP := d.legacyDP().(userspaceXSKBindingController)
 	for ifName, ifCfg := range cfg.Interfaces.Interfaces {
 		if ifCfg.LocalFabricMember == "" || !strings.HasPrefix(ifName, "fab") {
 			continue
@@ -421,20 +421,22 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 				break
 			}
 		}
-		if rethMACPending {
-			type deferSetter interface{ SetDeferWorkers(bool) }
-			if ds, ok := d.dp.(deferSetter); ok {
-				ds.SetDeferWorkers(true)
-				deferWorkersActive = true
-				clearDeferWorkers = func() {
-					ds.SetDeferWorkers(false)
-				}
-				defer func() {
-					if deferWorkersActive {
-						clearDeferWorkers()
-					}
-				}()
+	if rethMACPending {
+		type deferSetter interface{ SetDeferWorkers(bool) }
+		if ds, ok := d.legacyDP().(deferSetter); ok {
+			ds.SetDeferWorkers(true)
+		}
+		deferWorkersActive = true
+		clearDeferWorkers = func() {
+			if ds, ok := d.legacyDP().(deferSetter); ok {
+				ds.SetDeferWorkers(false)
 			}
+		}
+			defer func() {
+				if deferWorkersActive {
+					clearDeferWorkers()
+				}
+			}()
 		}
 	}
 
@@ -446,7 +448,7 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 	var compileResult *dataplane.CompileResult
 	if d.dp != nil {
 		var err error
-		if compileResult, err = d.dp.Compile(cfg); err != nil {
+		if compileResult, err = d.legacyDP().Compile(cfg); err != nil {
 			d.recordCompileFailure(err)
 			if compileErrorMustAbortApply(err) {
 				return err
@@ -552,11 +554,8 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 				// been accessing UMEM during the DOWN/UP). The rebind
 				// in NotifyLinkCycle will restart them.
 				if d.dp != nil {
-					type linkCyclePreparer interface{ PrepareLinkCycle() }
-					if preparer, ok := d.dp.(linkCyclePreparer); ok {
-						slog.Info("userspace: stopping workers after RETH MAC link cycle")
-						preparer.PrepareLinkCycle()
-					}
+					slog.Info("userspace: stopping workers after RETH MAC link cycle")
+					d.dp.Link().PrepareLinkCycle()
 				}
 			}
 			needLinkCycleRecovery = needLinkCycleRecovery || linkCycled
@@ -655,7 +654,7 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 	if d.dp != nil && needLinkCycleRecovery {
 		// Actual link DOWN/UP occurred — old XSK sockets are dead.
 		// Rebind to create fresh sockets on the reinitialized queues.
-		d.dp.NotifyLinkCycle()
+		d.dp.Link().NotifyLinkCycle()
 		if d.ra != nil {
 			d.ra.ResendBurst()
 		}
@@ -663,7 +662,7 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		// MAC set live (no link cycle) but workers were deferred.
 		// Trigger a re-Compile to start workers with the now-correct MAC.
 		// This is cheaper than NotifyLinkCycle (no stop_workers/rebind).
-		if _, err := d.dp.Compile(cfg); err != nil {
+		if _, err := d.legacyDP().Compile(cfg); err != nil {
 			slog.Warn("failed to re-compile after deferred MAC", "err", err)
 		}
 	}
@@ -1050,8 +1049,8 @@ func (d *Daemon) publishInitialPolicySchedulerStateLocked(cfg *config.Config, ac
 	if d.dp == nil || activeState == nil || compileResult == nil {
 		return
 	}
-	if _, isUserspace := d.dp.(userspaceRuntimeModeReporter); isUserspace {
+	if _, isUserspace := d.legacyDP().(userspaceRuntimeModeReporter); isUserspace {
 		return
 	}
-	d.dp.UpdatePolicyScheduleState(cfg, activeState)
+	d.legacyDP().UpdatePolicyScheduleState(cfg, activeState)
 }

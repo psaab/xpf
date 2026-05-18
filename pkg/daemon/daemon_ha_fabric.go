@@ -210,7 +210,7 @@ func (d *Daemon) populateFabricFwd(ctx context.Context, fabIface, overlay, peerA
 		// Actively probe for neighbor entry on the overlay (#129).
 		d.probeFabricNeighbor(ctx, overlay, peerIP)
 
-		if d.refreshFabricFwd(fabIface, overlay, peerIP, i == 0) {
+		if d.refreshFabricFwd(ctx, fabIface, overlay, peerIP, i == 0) {
 			break
 		}
 		if i == 9 {
@@ -227,9 +227,9 @@ func (d *Daemon) populateFabricFwd(ctx context.Context, fabIface, overlay, peerA
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			d.refreshFabricFwd(fabIface, overlay, peerIP, false)
+			d.refreshFabricFwd(ctx, fabIface, overlay, peerIP, false)
 		case <-d.fabricRefreshCh:
-			d.refreshFabricFwd(fabIface, overlay, peerIP, false)
+			d.refreshFabricFwd(ctx, fabIface, overlay, peerIP, false)
 		}
 	}
 }
@@ -391,19 +391,19 @@ func (d *Daemon) retainFabricFwdOnNeighborMiss(slot int, peerIP net.IP, overlay 
 // population and periodic drift correction.
 // fabIface is the physical parent (for ifindex/MAC); overlay is the IPVLAN
 // child where the sync IP lives (for neighbor resolution, #129).
-func (d *Daemon) refreshFabricFwd(fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
+func (d *Daemon) refreshFabricFwd(ctx context.Context, fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
 	link, err := netlink.LinkByName(fabIface)
 	if err != nil {
 		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (link not found)",
 			"interface", fabIface, "err", err)
-		d.clearFabricFwd0()
+		d.clearFabricFwd0(ctx)
 		return false
 	}
 	localMAC := link.Attrs().HardwareAddr
 	if len(localMAC) != 6 {
 		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (invalid local mac)",
 			"interface", fabIface, "local_mac", localMAC)
-		d.clearFabricFwd0()
+		d.clearFabricFwd0(ctx)
 		return false
 	}
 
@@ -412,7 +412,7 @@ func (d *Daemon) refreshFabricFwd(fabIface, overlay string, peerIP net.IP, logWa
 	if operState != netlink.OperUp && operState != netlink.OperUnknown {
 		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (link not operational)",
 			"interface", fabIface, "oper_state", operState)
-		d.clearFabricFwd0()
+		d.clearFabricFwd0(ctx)
 		return false
 	}
 
@@ -444,7 +444,7 @@ func (d *Daemon) refreshFabricFwd(fabIface, overlay string, peerIP net.IP, logWa
 	if err != nil {
 		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (neighbor list)",
 			"overlay", neighLink.Attrs().Name, "peer", peerIP, "err", err)
-		d.clearFabricFwd0()
+		d.clearFabricFwd0(ctx)
 		return false
 	}
 	var peerMAC net.HardwareAddr
@@ -501,7 +501,7 @@ func (d *Daemon) refreshFabricFwd(fabIface, overlay string, peerIP net.IP, logWa
 		if d.retainFabricFwdOnNeighborMiss(0, peerIP, overlay, logWaiting) {
 			return true
 		}
-		d.clearFabricFwd0()
+		d.clearFabricFwd0(ctx)
 		return false
 	}
 
@@ -527,7 +527,7 @@ func (d *Daemon) refreshFabricFwd(fabIface, overlay string, peerIP net.IP, logWa
 		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (dataplane not ready)")
 		return false
 	}
-	if err := d.dp.UpdateFabricFwd(info); err != nil {
+	if err := d.dp.HA().SetFabricForwarding(ctx, dataplane.FabricID(0), info); err != nil {
 		slog.Warn("cluster: failed to update fabric_fwd map", "err", err)
 		return false
 	}
@@ -545,7 +545,7 @@ func (d *Daemon) refreshFabricFwd(fabIface, overlay string, peerIP net.IP, logWa
 	// cross-chassis fabric redirect. The initial snapshot may have
 	// been built before the peer MAC was resolved.
 	if d.dp != nil {
-		d.dp.SyncFabricState()
+		d.dp.HA().SyncFabricState(ctx)
 	}
 
 	return true
@@ -553,14 +553,14 @@ func (d *Daemon) refreshFabricFwd(fabIface, overlay string, peerIP net.IP, logWa
 
 // clearFabricFwd0 writes a zeroed FabricFwdInfo to key=0 if a valid entry
 // was previously written, ensuring the dataplane falls back (#121).
-func (d *Daemon) clearFabricFwd0() {
+func (d *Daemon) clearFabricFwd0(ctx context.Context) {
 	d.fabricMu.RLock()
 	populated := d.fabricPopulated
 	d.fabricMu.RUnlock()
 	if !populated || d.dp == nil {
 		return
 	}
-	if err := d.dp.UpdateFabricFwd(dataplane.FabricFwdInfo{}); err != nil {
+	if err := d.dp.HA().SetFabricForwarding(ctx, dataplane.FabricID(0), dataplane.FabricFwdInfo{}); err != nil {
 		slog.Warn("cluster: failed to clear fabric_fwd[0]", "err", err)
 		return
 	}
@@ -603,7 +603,7 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 		// Probe on the overlay (#129).
 		d.probeFabricNeighbor(ctx, overlay, peerIP)
 
-		if d.refreshFabricFwd1(fabIface, overlay, peerIP, i == 0) {
+		if d.refreshFabricFwd1(ctx, fabIface, overlay, peerIP, i == 0) {
 			break
 		}
 		if i == 9 {
@@ -620,9 +620,9 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			d.refreshFabricFwd1(fabIface, overlay, peerIP, false)
+			d.refreshFabricFwd1(ctx, fabIface, overlay, peerIP, false)
 		case <-d.fabricRefreshCh:
-			d.refreshFabricFwd1(fabIface, overlay, peerIP, false)
+			d.refreshFabricFwd1(ctx, fabIface, overlay, peerIP, false)
 		}
 	}
 }
@@ -630,19 +630,19 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 // refreshFabricFwd1 resolves secondary fabric link/neighbor state and updates
 // the fabric_fwd BPF map at key=1. Returns true on success.
 // fabIface is the physical parent; overlay is the IPVLAN child (#129).
-func (d *Daemon) refreshFabricFwd1(fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
+func (d *Daemon) refreshFabricFwd1(ctx context.Context, fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
 	link, err := netlink.LinkByName(fabIface)
 	if err != nil {
 		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (link not found)",
 			"interface", fabIface, "err", err)
-		d.clearFabricFwd1()
+		d.clearFabricFwd1(ctx)
 		return false
 	}
 	localMAC := link.Attrs().HardwareAddr
 	if len(localMAC) != 6 {
 		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (invalid local mac)",
 			"interface", fabIface, "local_mac", localMAC)
-		d.clearFabricFwd1()
+		d.clearFabricFwd1(ctx)
 		return false
 	}
 
@@ -651,7 +651,7 @@ func (d *Daemon) refreshFabricFwd1(fabIface, overlay string, peerIP net.IP, logW
 	if operState != netlink.OperUp && operState != netlink.OperUnknown {
 		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (link not operational)",
 			"interface", fabIface, "oper_state", operState)
-		d.clearFabricFwd1()
+		d.clearFabricFwd1(ctx)
 		return false
 	}
 
@@ -678,7 +678,7 @@ func (d *Daemon) refreshFabricFwd1(fabIface, overlay string, peerIP net.IP, logW
 	if err != nil {
 		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (neighbor list)",
 			"overlay", neighLink.Attrs().Name, "peer", peerIP, "err", err)
-		d.clearFabricFwd1()
+		d.clearFabricFwd1(ctx)
 		return false
 	}
 	var peerMAC net.HardwareAddr
@@ -693,7 +693,7 @@ func (d *Daemon) refreshFabricFwd1(fabIface, overlay string, peerIP net.IP, logW
 		if d.retainFabricFwdOnNeighborMiss(1, peerIP, overlay, logWaiting) {
 			return true
 		}
-		d.clearFabricFwd1()
+		d.clearFabricFwd1(ctx)
 		return false
 	}
 
@@ -712,7 +712,7 @@ func (d *Daemon) refreshFabricFwd1(fabIface, overlay string, peerIP net.IP, logW
 		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (dataplane not ready)")
 		return false
 	}
-	if err := d.dp.UpdateFabricFwd1(info); err != nil {
+	if err := d.dp.HA().SetFabricForwarding(ctx, dataplane.FabricID(1), info); err != nil {
 		slog.Warn("cluster: failed to update fabric1_fwd map", "err", err)
 		return false
 	}
@@ -730,14 +730,14 @@ func (d *Daemon) refreshFabricFwd1(fabIface, overlay string, peerIP net.IP, logW
 
 // clearFabricFwd1 writes a zeroed FabricFwdInfo to key=1 if a valid entry
 // was previously written, ensuring the dataplane falls back (#121).
-func (d *Daemon) clearFabricFwd1() {
+func (d *Daemon) clearFabricFwd1(ctx context.Context) {
 	d.fabricMu.RLock()
 	populated := d.fabric1Populated
 	d.fabricMu.RUnlock()
 	if !populated || d.dp == nil {
 		return
 	}
-	if err := d.dp.UpdateFabricFwd1(dataplane.FabricFwdInfo{}); err != nil {
+	if err := d.dp.HA().SetFabricForwarding(ctx, dataplane.FabricID(1), dataplane.FabricFwdInfo{}); err != nil {
 		slog.Warn("cluster: failed to clear fabric_fwd[1]", "err", err)
 		return
 	}
@@ -770,7 +770,7 @@ func (d *Daemon) RefreshFabricFwd() {
 			}
 			d.fabricMu.Unlock()
 		}
-		d.refreshFabricFwd(fabIface, overlay, peerIP, false)
+		d.refreshFabricFwd(context.Background(), fabIface, overlay, peerIP, false)
 	}
 	if fabIface1 != "" && peerIP1 != nil {
 		if time.Since(probeAt1) >= 2*time.Second {
@@ -781,7 +781,7 @@ func (d *Daemon) RefreshFabricFwd() {
 			}
 			d.fabricMu.Unlock()
 		}
-		d.refreshFabricFwd1(fabIface1, overlay1, peerIP1, false)
+		d.refreshFabricFwd1(context.Background(), fabIface1, overlay1, peerIP1, false)
 	}
 }
 
