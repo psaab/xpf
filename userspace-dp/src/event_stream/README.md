@@ -22,7 +22,15 @@ periodic ACK from the daemon.
   telemetry may also populate the non-session metadata slots used by
   the Go adapter for action, rule ID, term ID, reason, owner RG,
   ingress ifindex, and application ID.
-- `codec_tests.rs`, `tests.rs` — co-located.
+- `producer.rs` — non-blocking helper-side producer API for RT_FLOW
+  dataplane telemetry. It rate-limits each `(event type, ingress
+  zone)` bucket, encodes fixed-size frames only after the limiter
+  admits the event, and accounts sent/rate-limited/queue-full/
+  disconnected outcomes per event type. Dataplane telemetry can occupy
+  only a bounded share of the shared event-stream channel, and each
+  event type has its own in-flight cap so one deny/drop/log storm cannot
+  monopolize queue capacity.
+- `codec_tests.rs`, `producer_tests.rs`, `tests.rs` — co-located.
 
 ## Why push
 
@@ -46,6 +54,17 @@ cluster-scoped.
   (see `protocol.rs`). Use `push_delta_lossless()` only when
   correctness requires every frame and the producer can tolerate
   back-pressure.
+- RT_FLOW dataplane telemetry producers must use
+  `try_emit_dataplane_event_at()`, not hand-rolled `try_send()`
+  wrappers. The API applies the per-kind/per-ingress-zone limiter
+  before sequence allocation, increments the generic producer drop
+  counter for rate-limited events, and records per-event loss reason
+  counters for later status surfacing. It also enforces the telemetry
+  queue budget before sequence allocation or shared-channel enqueue;
+  event budget drops are reported as queue-full drops. Accepted
+  telemetry holds that budget while retained for replay, releasing it
+  only when an ACK trims the frame or the helper definitively drops it
+  during replay eviction, enqueue failure, or shutdown.
 - The Go daemon must know every helper→daemon frame type that carries a
   sequence number. For RT_FLOW-style dataplane telemetry, the daemon
   decodes valid frames through the same RT_FLOW adapter used for ringbuf

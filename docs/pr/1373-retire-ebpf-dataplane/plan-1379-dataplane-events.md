@@ -31,6 +31,18 @@ and destination tuple, ingress ifindex/interface name path, zone data,
 policy/rule/application identity, reason, NAT-rewritten tuple when applicable,
 and timestamp.
 
+Current implementation status after #1394 and this infrastructure slice:
+
+- Frame types 11/12/13 are reserved and covered by Rust golden tests.
+- Rust encodes and decodes fixed-size 136-byte RT_FLOW payloads for policy
+  deny, screen drop, and filter log records.
+- Go decodes and dispatches these frames through the existing logging path and
+  exposes daemon-side event/drop counters.
+- Rust helper producer infrastructure now provides
+  `try_emit_dataplane_event_at()` with fixed-size non-blocking queueing,
+  per-event/per-ingress-zone rate limiting, generic producer sent/dropped
+  counters, and per-event loss reason accounting.
+
 Emission points:
 
 - policy deny path in `userspace-dp/src/policy.rs`
@@ -50,9 +62,16 @@ forwarding decision.
 ## Hot-Path Invariants
 
 - Event emission is fixed-size, no heap, copy-by-value, and non-blocking.
-- Use `try_send`; a full event queue drops the event and increments a counter.
-- Add per-source-zone/per-event token buckets to prevent deny storms from
-  starving session open/close/update events.
+- Use `try_emit_dataplane_event_at()`; a full event queue drops the event and
+  increments both the generic producer drop counter and per-event queue-full
+  accounting.
+- Dataplane telemetry must not monopolize the shared event-stream queue:
+  in-flight telemetry is capped to a bounded share of the channel, and each
+  event kind has its own cap so one storm leaves capacity for session/control
+  frames and other telemetry kinds.
+- Per-source-zone/per-event token-bucket-equivalent rate limiting must run
+  before sequence allocation to prevent deny storms from starving session
+  open/close/update events without creating sequence gaps for limiter drops.
 - Event frames stay within the existing 256-byte-ish event budget unless the
   codec is explicitly resized and tested.
 - Policy evaluation returns enough rule/policy/app metadata for event creation;
@@ -91,7 +110,12 @@ forwarding decision.
 - Cargo: screen drop path emits a rate-limited event and accounts drops when
   the limiter is empty.
 - Cargo: filter log emits only for log/syslog terms, not count-only terms.
-- Cargo: event queue full uses non-blocking drop-and-count behavior.
+- Cargo: producer API queues admitted RT_FLOW events without blocking and
+  accounts per-event sent counts.
+- Cargo: rate limiting is per event kind and ingress zone, and limiter drops do
+  not allocate sequence numbers.
+- Cargo: event queue full and disconnected paths use non-blocking
+  drop-and-count behavior with per-event loss reason accounting.
 - Go: userspace `EventSource` adapter converts each new frame into the expected
   `dataplane.Event`.
 - Go: `pkg/logging/ringbuf_test.go` or equivalent verifies identical
@@ -102,6 +126,18 @@ forwarding decision.
 - Integration: userspace cluster with deny policy, screen drop, and filter log
   term; generated traffic produces matching syslog records with no session
   event starvation under a deny storm.
+
+## Remaining Gaps
+
+- Wire policy deny, screen drop, and filter log runtime producer call sites to
+  the Rust producer API without colliding with #1374/#1375/#1378 workstreams.
+- Surface the helper-side per-event loss reason counters in status JSON,
+  CLI/status formatting, and Prometheus if the follow-up wants operator-visible
+  attribution beyond the existing aggregate `event_stream_dropped` producer
+  counter.
+- Run end-to-end userspace syslog validation for deny policy, screen drop, and
+  filter log traffic, including a deny-storm case that proves session event
+  delivery is not starved.
 
 ## Non-Goals
 

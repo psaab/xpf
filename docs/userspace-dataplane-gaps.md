@@ -66,7 +66,7 @@ These are not "missing", but they are not pure userspace forwarding either:
 | GRE / ESP / explicit early filters | Tail-call back into the legacy XDP pipeline |
 | IPsec / XFRM handling | Userspace detects and punts to kernel/slow-path as needed |
 | DataPlane control-plane contract | Userspace manager no longer embeds the legacy `dataplane.DataPlane`; a userspace `LegacyDataPlaneAdapter` owns old-interface compatibility while callers migrate. The manager still holds a named eBPF shim manager for XDP/map bootstrap state; tracked by #1381 |
-| Dataplane event logging | Session open/close/update are emitted by userspace; policy-deny, screen-drop, and filter-log events still depend on the legacy BPF ring buffer; tracked by #1379 |
+| Dataplane event logging | Session open/close/update are emitted by userspace. Policy-deny, screen-drop, and filter-log frame types, RT_FLOW codec/Go decode, and Rust non-blocking producer/rate-limit/loss-accounting infrastructure are present; runtime producer call sites and end-to-end syslog evidence remain tracked by #1379. |
 | `show system buffers` | Userspace helper-status rendering covers AF_XDP UMEM/TX capacity, CoS queued-byte capacity, active-session footer, neighbor/flow-cache counts, and worker queue pressure counters. #1380 is narrowed to the Phase 5 cleanup decision about whether operators need new helper capacity denominators for session-table, flow-cache, or neighbor-cache fill percentages before the legacy BPF-map surface is removed. |
 
 ## Retirement Blockers From The 2026-05-16 Audit
