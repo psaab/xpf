@@ -97,6 +97,7 @@ pub(crate) enum PacketColor {
 enum ThreeColorMode {
     SingleRate,
     TwoRate,
+    Unsupported,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -173,6 +174,22 @@ pub(crate) struct ThreeColorPolicerState {
 }
 
 impl ThreeColorPolicerState {
+    pub(crate) fn fail_closed(color_blind: bool) -> Self {
+        Self {
+            mode: ThreeColorMode::Unsupported,
+            color_blind,
+            committed_rate_bytes_per_sec: 0,
+            committed_burst_bytes: 0,
+            peak_or_excess_rate_bytes_per_sec: 0,
+            peak_or_excess_burst_bytes: 0,
+            committed_tokens: 0,
+            peak_or_excess_tokens: 0,
+            last_refill_ns: 0,
+            initialized: true,
+            treatments: ThreeColorTreatments::default(),
+        }
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn sr_tcm(
         committed_rate_bytes_per_sec: u64,
@@ -279,6 +296,13 @@ impl ThreeColorPolicerState {
         packet_bytes: u64,
         incoming_color: PacketColor,
     ) -> ThreeColorDecision {
+        if self.mode == ThreeColorMode::Unsupported {
+            return ThreeColorDecision {
+                color: PacketColor::Red,
+                dscp_rewrite: None,
+                drop: true,
+            };
+        }
         self.refill(now_ns);
         let effective_incoming_color = if self.color_blind {
             PacketColor::Green
@@ -288,6 +312,7 @@ impl ThreeColorPolicerState {
         let color = match self.mode {
             ThreeColorMode::SingleRate => self.meter_sr_tcm(packet_bytes, effective_incoming_color),
             ThreeColorMode::TwoRate => self.meter_tr_tcm(packet_bytes, effective_incoming_color),
+            ThreeColorMode::Unsupported => PacketColor::Red,
         };
         let treatment = self.treatments.treatment_for(color);
         ThreeColorDecision {
@@ -301,6 +326,7 @@ impl ThreeColorPolicerState {
         match self.mode {
             ThreeColorMode::SingleRate => "single-rate",
             ThreeColorMode::TwoRate => "two-rate",
+            ThreeColorMode::Unsupported => "unsupported",
         }
     }
 
@@ -324,6 +350,7 @@ impl ThreeColorPolicerState {
         match self.mode {
             ThreeColorMode::SingleRate => self.refill_sr_tcm(elapsed_ns),
             ThreeColorMode::TwoRate => self.refill_tr_tcm(elapsed_ns),
+            ThreeColorMode::Unsupported => return,
         }
         self.last_refill_ns = now_ns;
     }
