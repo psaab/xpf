@@ -29,6 +29,46 @@ pub(super) fn record_exception(
     debug: Option<&ResolutionDebug>,
     forwarding: &ForwardingState,
 ) {
+    if let Ok(mut recent) = recent_exceptions.lock() {
+        push_recent_exception(
+            &mut recent,
+            build_exception_status(binding, reason, packet_length, meta, debug, forwarding),
+        );
+    }
+}
+
+pub(super) fn record_source_nat_exception(
+    recent_exceptions: &Arc<Mutex<VecDeque<ExceptionStatus>>>,
+    binding: &BindingIdentity,
+    packet_length: u32,
+    meta: Option<UserspaceDpMeta>,
+    debug: Option<&ResolutionDebug>,
+    forwarding: &ForwardingState,
+    failure: &SourceNatFailure,
+) {
+    if let Ok(mut recent) = recent_exceptions.lock() {
+        let mut exception = build_exception_status(
+            binding,
+            failure.exception_reason(),
+            packet_length,
+            meta,
+            debug,
+            forwarding,
+        );
+        exception.rule_name = failure.rule_name.clone();
+        exception.pool_name = failure.pool_name.clone();
+        push_recent_exception(&mut recent, exception);
+    }
+}
+
+fn build_exception_status(
+    binding: &BindingIdentity,
+    reason: &str,
+    packet_length: u32,
+    meta: Option<UserspaceDpMeta>,
+    debug: Option<&ResolutionDebug>,
+    forwarding: &ForwardingState,
+) -> ExceptionStatus {
     // #919: zone IDs render as zone names through `zone_id_to_name`;
     // unknown IDs render as the empty string (was the original
     // behaviour for unknown zone names too).
@@ -39,37 +79,39 @@ pub(super) fn record_exception(
             .cloned()
             .unwrap_or_default()
     };
-    if let Ok(mut recent) = recent_exceptions.lock() {
-        push_recent_exception(
-            &mut recent,
-            ExceptionStatus {
-                timestamp: Utc::now(),
-                slot: binding.slot,
-                queue_id: binding.queue_id,
-                worker_id: binding.worker_id,
-                interface: binding.interface.to_string(),
-                ifindex: binding.ifindex,
-                ingress_ifindex: debug.map(|d| d.ingress_ifindex).unwrap_or_default(),
-                reason: reason.to_string(),
-                packet_length,
-                addr_family: meta.map(|m| m.addr_family).unwrap_or(0),
-                protocol: meta.map(|m| m.protocol).unwrap_or(0),
-                config_generation: meta.map(|m| m.config_generation).unwrap_or(0),
-                fib_generation: meta.map(|m| m.fib_generation).unwrap_or(0),
-                src_ip: debug
-                    .and_then(|d| d.src_ip)
-                    .map(|ip| ip.to_string())
-                    .unwrap_or_default(),
-                dst_ip: debug
-                    .and_then(|d| d.dst_ip)
-                    .map(|ip| ip.to_string())
-                    .unwrap_or_default(),
-                src_port: debug.map(|d| d.src_port).unwrap_or_default(),
-                dst_port: debug.map(|d| d.dst_port).unwrap_or_default(),
-                from_zone: debug.and_then(|d| d.from_zone).map(zone_name_for).unwrap_or_default(),
-                to_zone: debug.and_then(|d| d.to_zone).map(zone_name_for).unwrap_or_default(),
-            },
-        );
+    ExceptionStatus {
+        timestamp: Utc::now(),
+        slot: binding.slot,
+        queue_id: binding.queue_id,
+        worker_id: binding.worker_id,
+        interface: binding.interface.to_string(),
+        ifindex: binding.ifindex,
+        ingress_ifindex: debug.map(|d| d.ingress_ifindex).unwrap_or_default(),
+        reason: reason.to_string(),
+        packet_length,
+        addr_family: meta.map(|m| m.addr_family).unwrap_or(0),
+        protocol: meta.map(|m| m.protocol).unwrap_or(0),
+        config_generation: meta.map(|m| m.config_generation).unwrap_or(0),
+        fib_generation: meta.map(|m| m.fib_generation).unwrap_or(0),
+        src_ip: debug
+            .and_then(|d| d.src_ip)
+            .map(|ip| ip.to_string())
+            .unwrap_or_default(),
+        dst_ip: debug
+            .and_then(|d| d.dst_ip)
+            .map(|ip| ip.to_string())
+            .unwrap_or_default(),
+        src_port: debug.map(|d| d.src_port).unwrap_or_default(),
+        dst_port: debug.map(|d| d.dst_port).unwrap_or_default(),
+        from_zone: debug
+            .and_then(|d| d.from_zone)
+            .map(zone_name_for)
+            .unwrap_or_default(),
+        to_zone: debug
+            .and_then(|d| d.to_zone)
+            .map(zone_name_for)
+            .unwrap_or_default(),
+        ..ExceptionStatus::default()
     }
 }
 

@@ -765,6 +765,12 @@ func FormatBindings(status ProcessStatus) string {
 			if exc.FromZone != "" || exc.ToZone != "" {
 				fmt.Fprintf(&b, " zones=%s->%s", exc.FromZone, exc.ToZone)
 			}
+			if exc.RuleName != "" {
+				fmt.Fprintf(&b, " rule=%s", exc.RuleName)
+			}
+			if exc.PoolName != "" {
+				fmt.Fprintf(&b, " pool=%s", exc.PoolName)
+			}
 			if exc.ConfigGeneration != 0 || exc.FIBGeneration != 0 {
 				fmt.Fprintf(&b, " cfg=%d fib=%d", exc.ConfigGeneration, exc.FIBGeneration)
 			}

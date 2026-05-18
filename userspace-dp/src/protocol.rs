@@ -2071,6 +2071,10 @@ pub(crate) struct ExceptionStatus {
     pub from_zone: String,
     #[serde(rename = "to_zone", default)]
     pub to_zone: String,
+    #[serde(rename = "rule_name", default)]
+    pub rule_name: String,
+    #[serde(rename = "pool_name", default)]
+    pub pool_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

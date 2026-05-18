@@ -1059,6 +1059,8 @@ type ExceptionStatus struct {
 	DstPort          uint16    `json:"dst_port,omitempty"`
 	FromZone         string    `json:"from_zone,omitempty"`
 	ToZone           string    `json:"to_zone,omitempty"`
+	RuleName         string    `json:"rule_name,omitempty"`
+	PoolName         string    `json:"pool_name,omitempty"`
 }
 
 type InjectPacketRequest struct {

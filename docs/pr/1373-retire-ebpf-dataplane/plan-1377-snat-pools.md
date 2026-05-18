@@ -56,6 +56,16 @@ Recent-exception reasons identify the runtime failure class:
 `source_nat_pool_missing`, `source_nat_pool_empty`,
 `source_nat_pool_invalid`, `source_nat_pool_invalid_port_range`,
 `source_nat_pool_wrong_family`, and `source_nat_pool_exhausted`.
+Source-NAT pool exceptions also carry the matched `rule_name` and `pool_name`
+so operators can identify the unusable stanza without reverse-engineering the
+packet tuple.
+
+The wrong-family case is deliberately fail-closed, even though older userspace
+behavior walked past a matched IPv4 rule whose pool only contained IPv6
+addresses. Once a rule's zones and prefixes match, the configured rule owns the
+packet; silently falling through to a later rule would mask the broken pool and
+make rule ordering dependent on address-family mistakes. Operators should split
+IPv4 and IPv6 pool rules explicitly when they want independent behavior.
 
 Residual risk: the allocator still wraps ports because Rust does not yet keep a
 live translated-tuple ownership table. The fail-closed path exists for

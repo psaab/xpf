@@ -48,14 +48,14 @@ fn record_source_nat_failure(
     let mut debug = ResolutionDebug::from_flow(meta.ingress_ifindex as i32, flow);
     debug.from_zone = Some(from_zone_id);
     debug.to_zone = Some(to_zone_id);
-    record_exception(
+    record_source_nat_exception(
         worker_ctx.recent_exceptions,
         &worker_ctx.ident,
-        failure.exception_reason(),
         packet_length,
         Some(meta),
         Some(&debug),
         worker_ctx.forwarding,
+        failure,
     );
 }
 
