@@ -199,17 +199,7 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner(
     else {
         return Err(req);
     };
-    let local_req = TxRequest {
-        bytes: frame,
-        expected_ports: req.expected_ports,
-        expected_addr_family: req.expected_addr_family,
-        expected_protocol: req.expected_protocol,
-        flow_key: req.flow_key.clone(),
-        egress_ifindex: req.egress_ifindex,
-        cos_queue_id: req.cos_queue_id,
-        dscp_rewrite: req.dscp_rewrite,
-        mirror_clone: req.mirror_clone,
-    };
+    let local_req = req.to_local_request(frame);
     if redirect_local_cos_request_to_owner(
         &binding.cos.cos_fast_interfaces,
         local_req,
@@ -257,17 +247,7 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner_binding(
     else {
         return Err(req);
     };
-    let local_req = TxRequest {
-        bytes: frame,
-        expected_ports: req.expected_ports,
-        expected_addr_family: req.expected_addr_family,
-        expected_protocol: req.expected_protocol,
-        flow_key: req.flow_key.clone(),
-        egress_ifindex: req.egress_ifindex,
-        cos_queue_id: req.cos_queue_id,
-        dscp_rewrite: req.dscp_rewrite,
-        mirror_clone: req.mirror_clone,
-    };
+    let local_req = req.to_local_request(frame);
     if owner_live.enqueue_tx(local_req).is_ok() {
         recycle_prepared_immediately_with_shared(binding, &req, shared_recycles);
         return Ok(());

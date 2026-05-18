@@ -453,19 +453,7 @@ pub(super) fn prepare_local_request_for_cos(
         return Err(req);
     };
     frame.copy_from_slice(&req.bytes);
-    Ok(PreparedTxRequest {
-        offset,
-        len: req.bytes.len() as u32,
-        recycle: PreparedTxRecycle::FreeTxFrame,
-        expected_ports: req.expected_ports,
-        expected_addr_family: req.expected_addr_family,
-        expected_protocol: req.expected_protocol,
-        flow_key: req.flow_key,
-        egress_ifindex: req.egress_ifindex,
-        cos_queue_id: req.cos_queue_id,
-        dscp_rewrite: req.dscp_rewrite,
-        mirror_clone: req.mirror_clone,
-    })
+    Ok(req.into_prepared_request(offset, PreparedTxRecycle::FreeTxFrame))
 }
 
 pub(super) fn enqueue_prepared_into_cos(
@@ -533,17 +521,7 @@ pub(super) fn clone_prepared_request_for_cos(
     req: &PreparedTxRequest,
 ) -> Option<TxRequest> {
     let frame = area.slice(req.offset as usize, req.len as usize)?.to_vec();
-    Some(TxRequest {
-        bytes: frame,
-        expected_ports: req.expected_ports,
-        expected_addr_family: req.expected_addr_family,
-        expected_protocol: req.expected_protocol,
-        flow_key: req.flow_key.clone(),
-        egress_ifindex: req.egress_ifindex,
-        cos_queue_id: req.cos_queue_id,
-        dscp_rewrite: req.dscp_rewrite,
-        mirror_clone: req.mirror_clone,
-    })
+    Some(req.to_local_request(frame))
 }
 
 pub(super) fn resolve_cos_queue_idx(

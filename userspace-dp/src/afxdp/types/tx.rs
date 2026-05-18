@@ -24,6 +24,29 @@ pub(in crate::afxdp) struct TxRequest {
     pub(in crate::afxdp) mirror_clone: bool,
 }
 
+impl TxRequest {
+    #[inline]
+    pub(in crate::afxdp) fn into_prepared_request(
+        self,
+        offset: u64,
+        recycle: PreparedTxRecycle,
+    ) -> PreparedTxRequest {
+        PreparedTxRequest {
+            offset,
+            len: self.bytes.len() as u32,
+            recycle,
+            expected_ports: self.expected_ports,
+            expected_addr_family: self.expected_addr_family,
+            expected_protocol: self.expected_protocol,
+            flow_key: self.flow_key,
+            egress_ifindex: self.egress_ifindex,
+            cos_queue_id: self.cos_queue_id,
+            dscp_rewrite: self.dscp_rewrite,
+            mirror_clone: self.mirror_clone,
+        }
+    }
+}
+
 pub(in crate::afxdp) enum PendingForwardFrame {
     Live,
     Owned(Vec<u8>),
@@ -67,6 +90,23 @@ pub(in crate::afxdp) struct PreparedTxRequest {
     pub(in crate::afxdp) cos_queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
     pub(in crate::afxdp) mirror_clone: bool,
+}
+
+impl PreparedTxRequest {
+    #[inline]
+    pub(in crate::afxdp) fn to_local_request(&self, bytes: Vec<u8>) -> TxRequest {
+        TxRequest {
+            bytes,
+            expected_ports: self.expected_ports,
+            expected_addr_family: self.expected_addr_family,
+            expected_protocol: self.expected_protocol,
+            flow_key: self.flow_key.clone(),
+            egress_ifindex: self.egress_ifindex,
+            cos_queue_id: self.cos_queue_id,
+            dscp_rewrite: self.dscp_rewrite,
+            mirror_clone: self.mirror_clone,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
