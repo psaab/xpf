@@ -401,64 +401,64 @@ type schemaNode struct {
 var setSchema = &schemaNode{children: map[string]*schemaNode{
 	"groups":       {wildcard: &schemaNode{}}, // children set in init()
 	"apply-groups": {args: 1, multi: true, children: nil},
-	"security": {desc: "Security configuration", children: map[string]*schemaNode{
-		"zones": {desc: "Security zones", children: map[string]*schemaNode{
-			"security-zone": {desc: "Security zone name", args: 1, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: map[string]*schemaNode{
-				"description": {desc: "Zone description", args: 1, placeholder: "<text>", children: nil},
-				"interfaces":  {desc: "Interfaces in this zone", children: nil},
-				"tcp-rst":     {desc: "Send TCP RST for denied traffic", children: nil},
-				"screen":      {desc: "Screen profile name", args: 1, placeholder: "<screen-name>", children: nil},
-				"host-inbound-traffic": {desc: "Host inbound traffic", children: map[string]*schemaNode{
-					"system-services": {desc: "System services", children: nil},
-					"protocols":       {desc: "Protocols", children: nil},
+	"security": {children: map[string]*schemaNode{
+		"zones": {children: map[string]*schemaNode{
+			"security-zone": {args: 1, valueHint: ValueHintZoneName, children: map[string]*schemaNode{
+				"description": {args: 1, children: nil},
+				"interfaces":  {children: nil},
+				"tcp-rst":     {children: nil},
+				"screen":      {args: 1, children: nil},
+				"host-inbound-traffic": {children: map[string]*schemaNode{
+					"system-services": {children: nil},
+					"protocols":       {children: nil},
 				}},
 			}},
 		}},
-		"policies": {desc: "Security policies", children: map[string]*schemaNode{
-			"from-zone": {desc: "From zone", args: 3, valueHint: ValueHintZoneName, midKeyword: "to-zone", midKeywordAt: 2, placeholder: "<zone-name>", children: map[string]*schemaNode{
-				"policy": {desc: "Policy name", args: 1, valueHint: ValueHintPolicyName, placeholder: "<policy-name>", children: map[string]*schemaNode{
-					"description": {desc: "Policy description", args: 1, placeholder: "<text>", children: nil},
-					"match": {desc: "Match criteria", children: map[string]*schemaNode{
-						"source-address":      {desc: "Source address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
-						"destination-address": {desc: "Destination address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
-						"application":         {desc: "Application", args: 1, multi: true, valueHint: ValueHintPolicyApp, placeholder: "<application>", children: nil},
+		"policies": {children: map[string]*schemaNode{
+			"from-zone": {args: 3, valueHint: ValueHintZoneName, midKeyword: "to-zone", midKeywordAt: 2, children: map[string]*schemaNode{
+				"policy": {args: 1, valueHint: ValueHintPolicyName, children: map[string]*schemaNode{
+					"description": {args: 1, children: nil},
+					"match": {children: map[string]*schemaNode{
+						"source-address":      {args: 1, multi: true, valueHint: ValueHintPolicyAddress, children: nil},
+						"destination-address": {args: 1, multi: true, valueHint: ValueHintPolicyAddress, children: nil},
+						"application":         {args: 1, multi: true, valueHint: ValueHintPolicyApp, children: nil},
 					}},
-					"then": {desc: "Action", children: map[string]*schemaNode{
-						"log": {desc: "Log session", children: nil},
+					"then": {children: map[string]*schemaNode{
+						"log": {children: nil},
 						// permit, deny, reject, count → leaf
 					}},
 				}},
 			}},
-			"global": {desc: "Global policies", children: map[string]*schemaNode{
-				"policy": {desc: "Policy name", args: 1, valueHint: ValueHintPolicyName, placeholder: "<policy-name>", children: map[string]*schemaNode{
-					"description": {desc: "Policy description", args: 1, placeholder: "<text>", children: nil},
-					"match": {desc: "Match criteria", children: map[string]*schemaNode{
-						"source-address":      {desc: "Source address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
-						"destination-address": {desc: "Destination address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
-						"application":         {desc: "Application", args: 1, multi: true, valueHint: ValueHintPolicyApp, placeholder: "<application>", children: nil},
+			"global": {children: map[string]*schemaNode{
+				"policy": {args: 1, valueHint: ValueHintPolicyName, children: map[string]*schemaNode{
+					"description": {args: 1, children: nil},
+					"match": {children: map[string]*schemaNode{
+						"source-address":      {args: 1, multi: true, valueHint: ValueHintPolicyAddress, children: nil},
+						"destination-address": {args: 1, multi: true, valueHint: ValueHintPolicyAddress, children: nil},
+						"application":         {args: 1, multi: true, valueHint: ValueHintPolicyApp, children: nil},
 					}},
-					"then": {desc: "Action", children: map[string]*schemaNode{
-						"log": {desc: "Log session", children: nil},
+					"then": {children: map[string]*schemaNode{
+						"log": {children: nil},
 					}},
 				}},
 			}},
 		}},
-		"screen": {desc: "Screen options", children: map[string]*schemaNode{
-			"ids-option": {desc: "Screen profile name", args: 1, valueHint: ValueHintScreenProfile, placeholder: "<screen-name>", children: map[string]*schemaNode{
-				"icmp": {desc: "ICMP screening", children: nil},
-				"tcp": {desc: "TCP screening", children: map[string]*schemaNode{
-					"syn-flood": {desc: "SYN flood protection", children: nil},
-					"port-scan": {desc: "Port scan protection", children: nil},
+		"screen": {children: map[string]*schemaNode{
+			"ids-option": {args: 1, valueHint: ValueHintScreenProfile, children: map[string]*schemaNode{
+				"icmp": {children: nil},
+				"tcp": {children: map[string]*schemaNode{
+					"syn-flood": {children: nil},
+					"port-scan": {children: nil},
 					// land, winnuke, syn-frag -> leaf
 				}},
-				"ip": {desc: "IP screening", children: map[string]*schemaNode{
-					"ip-sweep": {desc: "IP sweep protection", children: nil},
+				"ip": {children: map[string]*schemaNode{
+					"ip-sweep": {children: nil},
 					// source-route-option, tear-drop -> leaf
 				}},
-				"udp": {desc: "UDP screening", children: nil},
-				"limit-session": {desc: "Session limits", children: map[string]*schemaNode{
-					"source-ip-based":      {desc: "Source IP based limit", args: 1, placeholder: "<number>", children: nil},
-					"destination-ip-based": {desc: "Destination IP based limit", args: 1, placeholder: "<number>", children: nil},
+				"udp": {children: nil},
+				"limit-session": {children: map[string]*schemaNode{
+					"source-ip-based":      {args: 1, children: nil},
+					"destination-ip-based": {args: 1, children: nil},
 				}},
 			}},
 		}},
@@ -735,340 +735,340 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 			}},
 		}},
 		"unit": {desc: "Logical unit number", args: 1, valueHint: ValueHintUnitNumber, placeholder: "<unit-number>", children: map[string]*schemaNode{
-			"description":    {desc: "Text description", args: 1, placeholder: "<text>", children: nil},
-			"point-to-point": {desc: "Point-to-point interface", children: nil},
-			"vlan-id":        {desc: "VLAN ID", args: 1, placeholder: "<number>", children: nil},
-			"inner-vlan-id":  {desc: "Inner VLAN ID", args: 1, placeholder: "<number>", children: nil},
+			"description":    {args: 1, children: nil},
+			"point-to-point": {children: nil},
+			"vlan-id":        {args: 1, children: nil},
+			"inner-vlan-id":  {args: 1, children: nil},
 			"tunnel": {desc: "Tunnel parameters", children: map[string]*schemaNode{
-				"source":          {desc: "Tunnel source address", args: 1, placeholder: "<address>", children: nil},
-				"destination":     {desc: "Tunnel destination address", args: 1, placeholder: "<address>", children: nil},
-				"mode":            {desc: "Tunnel mode", args: 1, placeholder: "<mode>", children: nil},
-				"key":             {desc: "Tunnel key", args: 1, placeholder: "<key>", children: nil},
-				"ttl":             {desc: "Time to live", args: 1, placeholder: "<number>", children: nil},
-				"keepalive":       {desc: "Keepalive interval", args: 1, placeholder: "<seconds>", children: nil},
-				"keepalive-retry": {desc: "Keepalive retry count", args: 1, placeholder: "<number>", children: nil},
+				"source":          {desc: "Tunnel source address", args: 1, children: nil},
+				"destination":     {desc: "Tunnel destination address", args: 1, children: nil},
+				"mode":            {desc: "Tunnel mode", args: 1, children: nil},
+				"key":             {desc: "Tunnel key", args: 1, children: nil},
+				"ttl":             {desc: "Time to live", args: 1, children: nil},
+				"keepalive":       {desc: "Keepalive interval", args: 1, children: nil},
+				"keepalive-retry": {desc: "Keepalive retry count", args: 1, children: nil},
 				"routing-instance": {desc: "Routing instance", children: map[string]*schemaNode{
-					"destination": {desc: "Destination routing instance", args: 1, placeholder: "<name>", children: nil},
+					"destination": {desc: "Destination routing instance", args: 1, children: nil},
 				}},
 			}},
-			"family": {desc: "Protocol family", compoundKey: true, children: map[string]*schemaNode{
-				"inet": {desc: "IPv4 protocol", children: map[string]*schemaNode{
-					"mtu": {desc: "Maximum transmit packet size", args: 1, placeholder: "<size>", children: nil},
-					"address": {desc: "IPv4 address", args: 1, placeholder: "<address>", children: map[string]*schemaNode{
-						"primary":   {desc: "Primary address", children: nil},
-						"preferred": {desc: "Preferred address", children: nil},
+			"family": {compoundKey: true, children: map[string]*schemaNode{
+				"inet": {children: map[string]*schemaNode{
+					"mtu": {args: 1, children: nil},
+					"address": {args: 1, children: map[string]*schemaNode{
+						"primary":   {children: nil},
+						"preferred": {children: nil},
 					}},
-					"dhcp": {desc: "DHCP client", children: map[string]*schemaNode{
-						"lease-time":              {desc: "Lease time", args: 1, placeholder: "<seconds>", children: nil},
-						"retransmission-attempt":  {desc: "Retransmission attempts", args: 1, placeholder: "<number>", children: nil},
-						"retransmission-interval": {desc: "Retransmission interval", args: 1, placeholder: "<seconds>", children: nil},
-						"force-discover":          {desc: "Force DHCP discover", children: nil},
+					"dhcp": {children: map[string]*schemaNode{
+						"lease-time":              {args: 1, children: nil},
+						"retransmission-attempt":  {args: 1, children: nil},
+						"retransmission-interval": {args: 1, children: nil},
+						"force-discover":          {children: nil},
 					}},
-					"sampling": {desc: "Traffic sampling", children: map[string]*schemaNode{
-						"input":  {desc: "Sample input traffic", children: nil},
-						"output": {desc: "Sample output traffic", children: nil},
+					"sampling": {children: map[string]*schemaNode{
+						"input":  {children: nil},
+						"output": {children: nil},
 					}},
-					"filter": {desc: "Firewall filter", children: map[string]*schemaNode{
-						"input":  {desc: "Input filter", args: 1, placeholder: "<filter-name>", children: nil},
-						"output": {desc: "Output filter", args: 1, placeholder: "<filter-name>", children: nil},
+					"filter": {children: map[string]*schemaNode{
+						"input":  {args: 1, children: nil},
+						"output": {args: 1, children: nil},
 					}},
 				}},
-				"inet6": {desc: "IPv6 protocol", children: map[string]*schemaNode{
-					"mtu":         {desc: "Maximum transmit packet size", args: 1, placeholder: "<size>", children: nil},
-					"dad-disable": {desc: "Disable duplicate address detection", children: nil},
-					"address": {desc: "IPv6 address", args: 1, placeholder: "<address>", children: map[string]*schemaNode{
-						"primary":   {desc: "Primary address", children: nil},
-						"preferred": {desc: "Preferred address", children: nil},
+				"inet6": {children: map[string]*schemaNode{
+					"mtu":         {args: 1, children: nil},
+					"dad-disable": {children: nil},
+					"address": {args: 1, children: map[string]*schemaNode{
+						"primary":   {children: nil},
+						"preferred": {children: nil},
 					}},
-					"sampling": {desc: "Traffic sampling", children: map[string]*schemaNode{
-						"input":  {desc: "Sample input traffic", children: nil},
-						"output": {desc: "Sample output traffic", children: nil},
+					"sampling": {children: map[string]*schemaNode{
+						"input":  {children: nil},
+						"output": {children: nil},
 					}},
-					"filter": {desc: "Firewall filter", children: map[string]*schemaNode{
-						"input":  {desc: "Input filter", args: 1, placeholder: "<filter-name>", children: nil},
-						"output": {desc: "Output filter", args: 1, placeholder: "<filter-name>", children: nil},
+					"filter": {children: map[string]*schemaNode{
+						"input":  {args: 1, children: nil},
+						"output": {args: 1, children: nil},
 					}},
-					"dhcpv6-client": {desc: "DHCPv6 client", children: map[string]*schemaNode{
-						"client-type":    {desc: "Client type", args: 1, placeholder: "<type>", children: nil},
-						"client-ia-type": {desc: "Client IA type", args: 1, placeholder: "<type>", children: nil},
-						"prefix-delegating": {desc: "Prefix delegation", children: map[string]*schemaNode{
-							"preferred-prefix-length": {desc: "Preferred prefix length", args: 1, placeholder: "<length>", children: nil},
-							"sub-prefix-length":       {desc: "Sub-prefix length", args: 1, placeholder: "<length>", children: nil},
+					"dhcpv6-client": {children: map[string]*schemaNode{
+						"client-type":    {args: 1, children: nil},
+						"client-ia-type": {args: 1, children: nil},
+						"prefix-delegating": {children: map[string]*schemaNode{
+							"preferred-prefix-length": {args: 1, children: nil},
+							"sub-prefix-length":       {args: 1, children: nil},
 						}},
-						"client-identifier": {desc: "Client identifier", children: map[string]*schemaNode{
-							"duid-type": {desc: "DUID type", args: 1, placeholder: "<type>", children: nil},
+						"client-identifier": {children: map[string]*schemaNode{
+							"duid-type": {args: 1, children: nil},
 						}},
-						"req-option": {desc: "Request option", args: 1, placeholder: "<option>", children: nil},
-						"update-router-advertisement": {desc: "Update router advertisement", children: map[string]*schemaNode{
-							"interface": {desc: "Interface", args: 1, placeholder: "<interface>", children: nil},
+						"req-option": {args: 1, children: nil},
+						"update-router-advertisement": {children: map[string]*schemaNode{
+							"interface": {args: 1, children: nil},
 						}},
 					}},
 				}},
 			}},
 		}},
 	}}},
-	"applications": {desc: "Applications", children: map[string]*schemaNode{
-		"application": {desc: "Application name", args: 1, valueHint: ValueHintAppName, placeholder: "<name>", children: map[string]*schemaNode{
-			"protocol":           {desc: "Protocol", args: 1, placeholder: "<protocol>", children: nil},
-			"destination-port":   {desc: "Destination port", args: 1, placeholder: "<port>", children: nil},
-			"source-port":        {desc: "Source port", args: 1, placeholder: "<port>", children: nil},
-			"inactivity-timeout": {desc: "Inactivity timeout", args: 1, placeholder: "<seconds>", children: nil},
-			"timeout":            {desc: "Timeout", args: 1, placeholder: "<seconds>", children: nil},
-			"alg":                {desc: "Application layer gateway", args: 1, placeholder: "<alg>", children: nil},
-			"description":        {desc: "Description", args: 1, placeholder: "<text>", children: nil},
-			"term":               {desc: "Term", args: 1, placeholder: "<term>", children: nil},
+	"applications": {children: map[string]*schemaNode{
+		"application": {args: 1, valueHint: ValueHintAppName, children: map[string]*schemaNode{
+			"protocol":           {args: 1, children: nil},
+			"destination-port":   {args: 1, children: nil},
+			"source-port":        {args: 1, children: nil},
+			"inactivity-timeout": {args: 1, children: nil},
+			"timeout":            {args: 1, children: nil},
+			"alg":                {args: 1, children: nil},
+			"description":        {args: 1, children: nil},
+			"term":               {args: 1, children: nil},
 		}},
-		"application-set": {desc: "Application set", args: 1, valueHint: ValueHintAppSetName, placeholder: "<name>", children: nil},
+		"application-set": {args: 1, valueHint: ValueHintAppSetName, children: nil},
 	}},
-	"routing-options": {desc: "Routing options", children: map[string]*schemaNode{
-		"static": {desc: "Static routes", children: map[string]*schemaNode{
-			"route": {desc: "Static route", args: 1, placeholder: "<destination>", children: nil},
+	"routing-options": {children: map[string]*schemaNode{
+		"static": {children: map[string]*schemaNode{
+			"route": {args: 1, children: nil},
 		}},
-		"rib": {desc: "Routing information base", args: 1, placeholder: "<rib-name>", children: map[string]*schemaNode{
-			"static": {desc: "Static routes", children: map[string]*schemaNode{
-				"route": {desc: "Static route", args: 1, placeholder: "<destination>", children: nil},
+		"rib": {args: 1, children: map[string]*schemaNode{
+			"static": {children: map[string]*schemaNode{
+				"route": {args: 1, children: nil},
 			}},
 		}},
-		"autonomous-system": {desc: "Autonomous system number", args: 1, placeholder: "<as-number>", children: nil},
-		"forwarding-table": {desc: "Forwarding table", children: map[string]*schemaNode{
-			"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy>", children: nil},
+		"autonomous-system": {args: 1, children: nil},
+		"forwarding-table": {children: map[string]*schemaNode{
+			"export": {args: 1, multi: true, children: nil},
 		}},
-		"rib-groups": {desc: "RIB groups", wildcard: &schemaNode{children: map[string]*schemaNode{
-			"import-rib": {desc: "Import RIB", children: nil},
+		"rib-groups": {wildcard: &schemaNode{children: map[string]*schemaNode{
+			"import-rib": {children: nil},
 		}}},
-		"interface-routes": {desc: "Interface routes", children: map[string]*schemaNode{
-			"rib-group": {desc: "RIB group", children: map[string]*schemaNode{
-				"inet":  {desc: "IPv4 RIB group", args: 1, placeholder: "<group-name>", children: nil},
-				"inet6": {desc: "IPv6 RIB group", args: 1, placeholder: "<group-name>", children: nil},
+		"interface-routes": {children: map[string]*schemaNode{
+			"rib-group": {children: map[string]*schemaNode{
+				"inet":  {args: 1, children: nil},
+				"inet6": {args: 1, children: nil},
 			}},
 		}},
-		"generate": {desc: "Generated routes", children: map[string]*schemaNode{
-			"route": {desc: "Generated route", args: 1, placeholder: "<destination>", children: map[string]*schemaNode{
-				"policy":  {desc: "Policy", args: 1, placeholder: "<policy>", children: nil},
-				"discard": {desc: "Discard route", children: nil},
+		"generate": {children: map[string]*schemaNode{
+			"route": {args: 1, children: map[string]*schemaNode{
+				"policy":  {args: 1, children: nil},
+				"discard": {children: nil},
 			}},
 		}},
 	}},
-	"snmp": {desc: "SNMP configuration", children: map[string]*schemaNode{
-		"community": {desc: "SNMP community", args: 1, placeholder: "<community-name>", children: map[string]*schemaNode{
-			"authorization": {desc: "Authorization level", args: 1, placeholder: "<level>", children: nil},
+	"snmp": {children: map[string]*schemaNode{
+		"community": {args: 1, children: map[string]*schemaNode{
+			"authorization": {args: 1, children: nil},
 		}},
-		"trap-group": {desc: "Trap group", args: 1, placeholder: "<group-name>", children: nil},
-		"v3": {desc: "SNMPv3", children: map[string]*schemaNode{
-			"usm": {desc: "USM", children: map[string]*schemaNode{
-				"local-engine": {desc: "Local engine", children: map[string]*schemaNode{
-					"user": {desc: "User name", args: 1, placeholder: "<user-name>", children: map[string]*schemaNode{
-						"authentication-md5":    {desc: "MD5 authentication", children: map[string]*schemaNode{"authentication-password": {desc: "Password", args: 1, placeholder: "<password>", children: nil}}},
-						"authentication-sha":    {desc: "SHA authentication", children: map[string]*schemaNode{"authentication-password": {desc: "Password", args: 1, placeholder: "<password>", children: nil}}},
-						"authentication-sha256": {desc: "SHA256 authentication", children: map[string]*schemaNode{"authentication-password": {desc: "Password", args: 1, placeholder: "<password>", children: nil}}},
-						"privacy-des":           {desc: "DES privacy", children: map[string]*schemaNode{"privacy-password": {desc: "Password", args: 1, placeholder: "<password>", children: nil}}},
-						"privacy-aes128":        {desc: "AES128 privacy", children: map[string]*schemaNode{"privacy-password": {desc: "Password", args: 1, placeholder: "<password>", children: nil}}},
+		"trap-group": {args: 1, children: nil},
+		"v3": {children: map[string]*schemaNode{
+			"usm": {children: map[string]*schemaNode{
+				"local-engine": {children: map[string]*schemaNode{
+					"user": {args: 1, children: map[string]*schemaNode{
+						"authentication-md5":    {children: map[string]*schemaNode{"authentication-password": {args: 1, children: nil}}},
+						"authentication-sha":    {children: map[string]*schemaNode{"authentication-password": {args: 1, children: nil}}},
+						"authentication-sha256": {children: map[string]*schemaNode{"authentication-password": {args: 1, children: nil}}},
+						"privacy-des":           {children: map[string]*schemaNode{"privacy-password": {args: 1, children: nil}}},
+						"privacy-aes128":        {children: map[string]*schemaNode{"privacy-password": {args: 1, children: nil}}},
 					}},
 				}},
 			}},
 		}},
 	}},
-	"policy-options": {desc: "Policy options", children: map[string]*schemaNode{
-		"prefix-list": {desc: "Prefix list", args: 1, placeholder: "<name>", children: nil},
-		"community": {desc: "Community", args: 1, placeholder: "<name>", children: map[string]*schemaNode{
-			"members": {desc: "Community members", args: 1, multi: true, placeholder: "<community>", children: nil},
+	"policy-options": {children: map[string]*schemaNode{
+		"prefix-list": {args: 1, children: nil},
+		"community": {args: 1, children: map[string]*schemaNode{
+			"members": {args: 1, multi: true, children: nil},
 		}},
-		"as-path": {desc: "AS path", args: 2, multi: true, placeholder: "<name>", children: nil},
-		"policy-statement": {desc: "Policy statement", args: 1, placeholder: "<name>", children: map[string]*schemaNode{
-			"term": {desc: "Term name", args: 1, placeholder: "<term-name>", children: map[string]*schemaNode{
-				"from": {desc: "Match condition", children: map[string]*schemaNode{
-					"protocol":     {desc: "Protocol", args: 1, placeholder: "<protocol>", children: nil},
-					"prefix-list":  {desc: "Prefix list", args: 1, placeholder: "<list-name>", children: nil},
-					"route-filter": {desc: "Route filter", args: 2, placeholder: "<prefix>", children: nil},
-					"community":    {desc: "Community", args: 1, placeholder: "<community>", children: nil},
-					"as-path":      {desc: "AS path", args: 1, placeholder: "<name>", children: nil},
+		"as-path": {args: 2, multi: true, children: nil},
+		"policy-statement": {args: 1, children: map[string]*schemaNode{
+			"term": {args: 1, children: map[string]*schemaNode{
+				"from": {children: map[string]*schemaNode{
+					"protocol":     {args: 1, children: nil},
+					"prefix-list":  {args: 1, children: nil},
+					"route-filter": {args: 2, children: nil},
+					"community":    {args: 1, children: nil},
+					"as-path":      {args: 1, children: nil},
 				}},
-				"then": {desc: "Action", children: map[string]*schemaNode{
-					"accept":           {desc: "Accept route", children: nil},
-					"reject":           {desc: "Reject route", children: nil},
-					"next-hop":         {desc: "Next hop", args: 1, placeholder: "<address>", children: nil},
-					"load-balance":     {desc: "Load balance", args: 1, placeholder: "<policy>", children: nil},
-					"local-preference": {desc: "Local preference", args: 1, placeholder: "<value>", children: nil},
-					"metric":           {desc: "Metric", args: 1, placeholder: "<value>", children: nil},
-					"metric-type":      {desc: "Metric type", args: 1, placeholder: "<type>", children: nil},
-					"community":        {desc: "Community", args: 1, placeholder: "<community>", children: nil},
-					"origin":           {desc: "Origin", args: 1, placeholder: "<origin>", children: nil},
+				"then": {children: map[string]*schemaNode{
+					"accept":           {children: nil},
+					"reject":           {children: nil},
+					"next-hop":         {args: 1, children: nil},
+					"load-balance":     {args: 1, children: nil},
+					"local-preference": {args: 1, children: nil},
+					"metric":           {args: 1, children: nil},
+					"metric-type":      {args: 1, children: nil},
+					"community":        {args: 1, children: nil},
+					"origin":           {args: 1, children: nil},
 				}},
 			}},
-			"then": {desc: "Default action", children: nil},
+			"then": {children: nil},
 		}},
 	}},
-	"protocols": {desc: "Protocols configuration", children: map[string]*schemaNode{
-		"ospf": {desc: "OSPF configuration", children: map[string]*schemaNode{
-			"router-id":           {desc: "Router ID", args: 1, placeholder: "<address>", children: nil},
-			"reference-bandwidth": {desc: "Reference bandwidth", args: 1, placeholder: "<bandwidth>", children: nil},
-			"passive":             {desc: "Passive mode", children: nil},
-			"export":              {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-			"area": {desc: "OSPF area", args: 1, placeholder: "<area-id>", children: map[string]*schemaNode{
-				"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
-					"passive":        {desc: "Passive interface", children: nil},
-					"no-passive":     {desc: "Non-passive interface", children: nil},
-					"interface-type": {desc: "Interface type", args: 1, placeholder: "<type>", children: nil},
-					"cost":           {desc: "Interface cost", args: 1, placeholder: "<cost>", children: nil},
-					"authentication": {desc: "Authentication", children: map[string]*schemaNode{
-						"md5": {desc: "MD5 authentication", args: 1, placeholder: "<key-id>", children: map[string]*schemaNode{
-							"key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
+	"protocols": {children: map[string]*schemaNode{
+		"ospf": {children: map[string]*schemaNode{
+			"router-id":           {args: 1, children: nil},
+			"reference-bandwidth": {args: 1, children: nil},
+			"passive":             {children: nil},
+			"export":              {args: 1, multi: true, children: nil},
+			"area": {args: 1, children: map[string]*schemaNode{
+				"interface": {args: 1, valueHint: ValueHintInterfaceName, children: map[string]*schemaNode{
+					"passive":        {children: nil},
+					"no-passive":     {children: nil},
+					"interface-type": {args: 1, children: nil},
+					"cost":           {args: 1, children: nil},
+					"authentication": {children: map[string]*schemaNode{
+						"md5": {args: 1, children: map[string]*schemaNode{
+							"key": {args: 1, children: nil},
 						}},
-						"simple-password": {desc: "Simple password", args: 1, placeholder: "<password>", children: nil},
+						"simple-password": {args: 1, children: nil},
 					}},
-					"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-						"minimum-interval": {desc: "Minimum interval", args: 1, placeholder: "<milliseconds>", children: nil},
-						"multiplier":       {desc: "Multiplier", args: 1, placeholder: "<multiplier>", children: nil},
-					}},
-				}},
-				"area-type": {desc: "Area type", children: map[string]*schemaNode{
-					"stub": {desc: "Stub area", children: map[string]*schemaNode{
-						"no-summaries": {desc: "No summaries", children: nil},
-					}},
-					"nssa": {desc: "NSSA area", children: map[string]*schemaNode{
-						"no-summaries": {desc: "No summaries", children: nil},
+					"bfd-liveness-detection": {children: map[string]*schemaNode{
+						"minimum-interval": {args: 1, children: nil},
+						"multiplier":       {args: 1, children: nil},
 					}},
 				}},
-				"virtual-link": {desc: "Virtual link", args: 1, placeholder: "<router-id>", children: map[string]*schemaNode{
-					"transit-area": {desc: "Transit area", args: 1, placeholder: "<area-id>", children: nil},
+				"area-type": {children: map[string]*schemaNode{
+					"stub": {children: map[string]*schemaNode{
+						"no-summaries": {children: nil},
+					}},
+					"nssa": {children: map[string]*schemaNode{
+						"no-summaries": {children: nil},
+					}},
 				}},
-			}},
-		}},
-		"ospf3": {desc: "OSPFv3 configuration", children: map[string]*schemaNode{
-			"router-id": {desc: "Router ID", args: 1, placeholder: "<address>", children: nil},
-			"export":    {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-			"area": {desc: "OSPFv3 area", args: 1, placeholder: "<area-id>", children: map[string]*schemaNode{
-				"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
-					"passive": {desc: "Passive interface", children: nil},
-					"cost":    {desc: "Interface cost", args: 1, placeholder: "<cost>", children: nil},
+				"virtual-link": {args: 1, children: map[string]*schemaNode{
+					"transit-area": {args: 1, children: nil},
 				}},
 			}},
 		}},
-		"bgp": {desc: "BGP configuration", children: map[string]*schemaNode{
-			"local-as":         {desc: "Local AS number", args: 1, placeholder: "<as-number>", children: nil},
-			"router-id":        {desc: "Router ID", args: 1, placeholder: "<address>", children: nil},
-			"cluster-id":       {desc: "Cluster ID", args: 1, placeholder: "<id>", children: nil},
-			"graceful-restart": {desc: "Graceful restart", children: nil},
-			"log-updown":       {desc: "Log up/down events", children: nil},
-			"multipath": {desc: "Multipath", children: map[string]*schemaNode{
-				"multiple-as": {desc: "Multiple AS", children: nil},
+		"ospf3": {children: map[string]*schemaNode{
+			"router-id": {args: 1, children: nil},
+			"export":    {args: 1, multi: true, children: nil},
+			"area": {args: 1, children: map[string]*schemaNode{
+				"interface": {args: 1, valueHint: ValueHintInterfaceName, children: map[string]*schemaNode{
+					"passive": {children: nil},
+					"cost":    {args: 1, children: nil},
+				}},
 			}},
-			"damping": {desc: "Route damping", children: map[string]*schemaNode{
-				"half-life":    {desc: "Half life", args: 1, placeholder: "<minutes>", children: nil},
-				"reuse":        {desc: "Reuse threshold", args: 1, placeholder: "<value>", children: nil},
-				"suppress":     {desc: "Suppress threshold", args: 1, placeholder: "<value>", children: nil},
-				"max-suppress": {desc: "Max suppress time", args: 1, placeholder: "<minutes>", children: nil},
+		}},
+		"bgp": {children: map[string]*schemaNode{
+			"local-as":         {args: 1, children: nil},
+			"router-id":        {args: 1, children: nil},
+			"cluster-id":       {args: 1, children: nil},
+			"graceful-restart": {children: nil},
+			"log-updown":       {children: nil},
+			"multipath": {children: map[string]*schemaNode{
+				"multiple-as": {children: nil},
 			}},
-			"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-			"group": {desc: "BGP group", args: 1, placeholder: "<group-name>", children: map[string]*schemaNode{
-				"peer-as":            {desc: "Peer AS number", args: 1, placeholder: "<as-number>", children: nil},
-				"description":        {desc: "Description", args: 1, placeholder: "<text>", children: nil},
-				"multihop":           {desc: "Multihop TTL", args: 1, placeholder: "<ttl>", children: nil},
-				"export":             {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-				"authentication-key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-				"default-originate":  {desc: "Default originate", children: nil},
-				"loops":              {desc: "Loops", args: 1, placeholder: "<count>", children: nil},
-				"remove-private":     {desc: "Remove private AS", children: nil},
-				"family": {desc: "Address family", compoundKey: true, children: map[string]*schemaNode{
-					"inet": {desc: "IPv4", children: map[string]*schemaNode{
-						"unicast": {desc: "Unicast", children: map[string]*schemaNode{
-							"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
-								"maximum": {desc: "Maximum prefixes", args: 1, placeholder: "<count>", children: nil},
+			"damping": {children: map[string]*schemaNode{
+				"half-life":    {args: 1, children: nil},
+				"reuse":        {args: 1, children: nil},
+				"suppress":     {args: 1, children: nil},
+				"max-suppress": {args: 1, children: nil},
+			}},
+			"export": {args: 1, multi: true, children: nil},
+			"group": {args: 1, children: map[string]*schemaNode{
+				"peer-as":            {args: 1, children: nil},
+				"description":        {args: 1, children: nil},
+				"multihop":           {args: 1, children: nil},
+				"export":             {args: 1, multi: true, children: nil},
+				"authentication-key": {args: 1, children: nil},
+				"default-originate":  {children: nil},
+				"loops":              {args: 1, children: nil},
+				"remove-private":     {children: nil},
+				"family": {compoundKey: true, children: map[string]*schemaNode{
+					"inet": {children: map[string]*schemaNode{
+						"unicast": {children: map[string]*schemaNode{
+							"prefix-limit": {children: map[string]*schemaNode{
+								"maximum": {args: 1, children: nil},
 							}},
 						}},
 					}},
-					"inet6": {desc: "IPv6", children: map[string]*schemaNode{
-						"unicast": {desc: "Unicast", children: map[string]*schemaNode{
-							"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
-								"maximum": {desc: "Maximum prefixes", args: 1, placeholder: "<count>", children: nil},
+					"inet6": {children: map[string]*schemaNode{
+						"unicast": {children: map[string]*schemaNode{
+							"prefix-limit": {children: map[string]*schemaNode{
+								"maximum": {args: 1, children: nil},
 							}},
 						}},
 					}},
 				}},
-				"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-					"minimum-interval": {desc: "Minimum interval", args: 1, placeholder: "<milliseconds>", children: nil},
-					"multiplier":       {desc: "Multiplier", args: 1, placeholder: "<multiplier>", children: nil},
+				"bfd-liveness-detection": {children: map[string]*schemaNode{
+					"minimum-interval": {args: 1, children: nil},
+					"multiplier":       {args: 1, children: nil},
 				}},
-				"neighbor": {desc: "BGP neighbor", args: 1, placeholder: "<address>", children: map[string]*schemaNode{
-					"description":            {desc: "Description", args: 1, placeholder: "<text>", children: nil},
-					"peer-as":                {desc: "Peer AS number", args: 1, placeholder: "<as-number>", children: nil},
-					"multihop":               {desc: "Multihop TTL", args: 1, placeholder: "<ttl>", children: nil},
-					"authentication-key":     {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-					"route-reflector-client": {desc: "Route reflector client", children: nil},
-					"default-originate":      {desc: "Default originate", children: nil},
-					"loops":                  {desc: "Loops", args: 1, placeholder: "<count>", children: nil},
-					"remove-private":         {desc: "Remove private AS", children: nil},
-					"family": {desc: "Address family", compoundKey: true, children: map[string]*schemaNode{
-						"inet": {desc: "IPv4", children: map[string]*schemaNode{
-							"unicast": {desc: "Unicast", children: map[string]*schemaNode{
-								"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
-									"maximum": {desc: "Maximum prefixes", args: 1, placeholder: "<count>", children: nil},
+				"neighbor": {args: 1, children: map[string]*schemaNode{
+					"description":            {args: 1, children: nil},
+					"peer-as":                {args: 1, children: nil},
+					"multihop":               {args: 1, children: nil},
+					"authentication-key":     {args: 1, children: nil},
+					"route-reflector-client": {children: nil},
+					"default-originate":      {children: nil},
+					"loops":                  {args: 1, children: nil},
+					"remove-private":         {children: nil},
+					"family": {compoundKey: true, children: map[string]*schemaNode{
+						"inet": {children: map[string]*schemaNode{
+							"unicast": {children: map[string]*schemaNode{
+								"prefix-limit": {children: map[string]*schemaNode{
+									"maximum": {args: 1, children: nil},
 								}},
 							}},
 						}},
-						"inet6": {desc: "IPv6", children: map[string]*schemaNode{
-							"unicast": {desc: "Unicast", children: map[string]*schemaNode{
-								"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
-									"maximum": {desc: "Maximum prefixes", args: 1, placeholder: "<count>", children: nil},
+						"inet6": {children: map[string]*schemaNode{
+							"unicast": {children: map[string]*schemaNode{
+								"prefix-limit": {children: map[string]*schemaNode{
+									"maximum": {args: 1, children: nil},
 								}},
 							}},
 						}},
 					}},
-					"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-						"minimum-interval": {desc: "Minimum interval", args: 1, placeholder: "<milliseconds>", children: nil},
-						"multiplier":       {desc: "Multiplier", args: 1, placeholder: "<multiplier>", children: nil},
+					"bfd-liveness-detection": {children: map[string]*schemaNode{
+						"minimum-interval": {args: 1, children: nil},
+						"multiplier":       {args: 1, children: nil},
 					}},
 				}},
 			}},
 		}},
-		"rip": {desc: "RIP configuration", children: map[string]*schemaNode{
-			"group":               {desc: "Group", args: 1, placeholder: "<group-name>", children: nil},
-			"neighbor":            {desc: "Neighbor", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: nil},
-			"passive-interface":   {desc: "Passive interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: nil},
-			"redistribute":        {desc: "Redistribute", args: 1, placeholder: "<protocol>", children: nil},
-			"authentication-key":  {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-			"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>", children: nil},
+		"rip": {children: map[string]*schemaNode{
+			"group":               {args: 1, children: nil},
+			"neighbor":            {args: 1, valueHint: ValueHintInterfaceName, children: nil},
+			"passive-interface":   {args: 1, valueHint: ValueHintInterfaceName, children: nil},
+			"redistribute":        {args: 1, children: nil},
+			"authentication-key":  {args: 1, children: nil},
+			"authentication-type": {args: 1, children: nil},
 		}},
-		"isis": {desc: "IS-IS configuration", children: map[string]*schemaNode{
-			"net":     {desc: "NET address", args: 1, placeholder: "<net-address>", children: nil},
-			"level":   {desc: "Level", args: 1, placeholder: "<level>", children: nil},
-			"is-type": {desc: "IS type", args: 1, placeholder: "<type>", children: nil},
-			"export":  {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-			"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
-				"level":               {desc: "Level", args: 1, placeholder: "<level>", children: nil},
-				"passive":             {desc: "Passive interface", children: nil},
-				"metric":              {desc: "Metric", args: 1, placeholder: "<value>", children: nil},
-				"authentication-key":  {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-				"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>", children: nil},
-				"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-					"minimum-interval": {desc: "Minimum interval", args: 1, placeholder: "<milliseconds>", children: nil},
-					"multiplier":       {desc: "Multiplier", args: 1, placeholder: "<multiplier>", children: nil},
+		"isis": {children: map[string]*schemaNode{
+			"net":     {args: 1, children: nil},
+			"level":   {args: 1, children: nil},
+			"is-type": {args: 1, children: nil},
+			"export":  {args: 1, multi: true, children: nil},
+			"interface": {args: 1, valueHint: ValueHintInterfaceName, children: map[string]*schemaNode{
+				"level":               {args: 1, children: nil},
+				"passive":             {children: nil},
+				"metric":              {args: 1, children: nil},
+				"authentication-key":  {args: 1, children: nil},
+				"authentication-type": {args: 1, children: nil},
+				"bfd-liveness-detection": {children: map[string]*schemaNode{
+					"minimum-interval": {args: 1, children: nil},
+					"multiplier":       {args: 1, children: nil},
 				}},
 			}},
-			"authentication-key":  {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-			"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>", children: nil},
-			"wide-metrics-only":   {desc: "Wide metrics only", children: nil},
-			"overload":            {desc: "Overload", children: nil},
+			"authentication-key":  {args: 1, children: nil},
+			"authentication-type": {args: 1, children: nil},
+			"wide-metrics-only":   {children: nil},
+			"overload":            {children: nil},
 		}},
-		"router-advertisement": {desc: "Router advertisement", children: map[string]*schemaNode{
-			"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
-				"prefix":     {desc: "Prefix", args: 1, placeholder: "<prefix>", children: nil}, // prefix <prefix/len>
-				"preference": {desc: "Preference", args: 1, placeholder: "<preference>", children: nil},
-				"nat-prefix": {desc: "NAT prefix", args: 1, placeholder: "<prefix>", children: map[string]*schemaNode{
-					"lifetime": {desc: "Lifetime", args: 1, placeholder: "<seconds>", children: nil},
+		"router-advertisement": {children: map[string]*schemaNode{
+			"interface": {args: 1, valueHint: ValueHintInterfaceName, children: map[string]*schemaNode{
+				"prefix":     {args: 1, children: nil}, // prefix <prefix/len>
+				"preference": {args: 1, children: nil},
+				"nat-prefix": {args: 1, children: map[string]*schemaNode{
+					"lifetime": {args: 1, children: nil},
 				}},
-				"nat64prefix": {desc: "NAT64 prefix", args: 1, placeholder: "<prefix>", children: map[string]*schemaNode{
-					"lifetime": {desc: "Lifetime", args: 1, placeholder: "<seconds>", children: nil},
+				"nat64prefix": {args: 1, children: map[string]*schemaNode{
+					"lifetime": {args: 1, children: nil},
 				}},
 			}},
 		}},
-		"lldp": {desc: "LLDP configuration", children: map[string]*schemaNode{
-			"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
-				"disable": {desc: "Disable LLDP", children: nil},
+		"lldp": {children: map[string]*schemaNode{
+			"interface": {args: 1, valueHint: ValueHintInterfaceName, children: map[string]*schemaNode{
+				"disable": {children: nil},
 			}},
-			"transmit-interval": {desc: "Transmit interval", args: 1, placeholder: "<seconds>", children: nil},
-			"hold-multiplier":   {desc: "Hold multiplier", args: 1, placeholder: "<multiplier>", children: nil},
-			"disable":           {desc: "Disable LLDP", children: nil},
+			"transmit-interval": {args: 1, children: nil},
+			"hold-multiplier":   {args: 1, children: nil},
+			"disable":           {children: nil},
 		}},
 	}},
 	"event-options": {children: map[string]*schemaNode{
@@ -1131,7 +1131,7 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 			}},
 		}},
 	}},
-	"class-of-service": {desc: "Class of service configuration", children: map[string]*schemaNode{
+	"class-of-service": {children: map[string]*schemaNode{
 		"forwarding-classes": {children: map[string]*schemaNode{
 			"queue": {args: 2, multi: true, children: nil},
 		}},
@@ -1330,59 +1330,59 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 			}},
 		}},
 	}},
-	"system": {desc: "System configuration", children: map[string]*schemaNode{
-		"host-name":     {desc: "System hostname", args: 1, placeholder: "<hostname>", children: nil},
-		"domain-name":   {desc: "Domain name", args: 1, placeholder: "<domain>", children: nil},
-		"domain-search": {desc: "Domain search list", args: 1, multi: true, placeholder: "<domain>", children: nil},
-		"time-zone":     {desc: "System time zone", args: 1, placeholder: "<timezone>", children: nil},
-		"no-redirects":  {desc: "Disable ICMP redirects", children: nil},
-		"name-server":   {desc: "DNS name server", args: 1, placeholder: "<address>", children: nil},
-		"backup-router": {desc: "Backup router", args: 1, placeholder: "<address>", children: map[string]*schemaNode{
-			"destination": {desc: "Destination network", args: 1, placeholder: "<network>", children: nil},
+	"system": {children: map[string]*schemaNode{
+		"host-name":     {args: 1, children: nil},
+		"domain-name":   {args: 1, children: nil},
+		"domain-search": {args: 1, multi: true, children: nil},
+		"time-zone":     {args: 1, children: nil},
+		"no-redirects":  {children: nil},
+		"name-server":   {children: nil},
+		"backup-router": {args: 1, children: map[string]*schemaNode{
+			"destination": {args: 1, children: nil},
 		}},
-		"root-authentication": {desc: "Root authentication", children: map[string]*schemaNode{
-			"encrypted-password": {desc: "Encrypted password", args: 1, placeholder: "<password>", children: nil},
-			"ssh-ed25519":        {desc: "SSH ED25519 public key", args: 1, placeholder: "<key>", children: nil},
-			"ssh-rsa":            {desc: "SSH RSA public key", args: 1, placeholder: "<key>", children: nil},
-			"ssh-dsa":            {desc: "SSH DSA public key", args: 1, placeholder: "<key>", children: nil},
+		"root-authentication": {children: map[string]*schemaNode{
+			"encrypted-password": {args: 1, children: nil},
+			"ssh-ed25519":        {args: 1, children: nil},
+			"ssh-rsa":            {args: 1, children: nil},
+			"ssh-dsa":            {args: 1, children: nil},
 		}},
-		"archival": {desc: "Configuration archival", children: map[string]*schemaNode{
-			"configuration": {desc: "Configuration archival", children: map[string]*schemaNode{
-				"transfer-on-commit": {desc: "Transfer on commit", children: nil},
-				"archive-sites":      {desc: "Archive site URL", args: 1, placeholder: "<url>", children: nil},
+		"archival": {children: map[string]*schemaNode{
+			"configuration": {children: map[string]*schemaNode{
+				"transfer-on-commit": {children: nil},
+				"archive-sites":      {args: 1, children: nil},
 			}},
 		}},
-		"master-password": {desc: "Master password", children: map[string]*schemaNode{
-			"pseudorandom-function": {desc: "Pseudorandom function", args: 1, placeholder: "<function>", children: nil},
+		"master-password": {children: map[string]*schemaNode{
+			"pseudorandom-function": {args: 1, children: nil},
 		}},
-		"license": {desc: "License configuration", children: map[string]*schemaNode{
-			"autoupdate": {desc: "Autoupdate", children: map[string]*schemaNode{
-				"url": {desc: "Autoupdate URL", args: 1, placeholder: "<url>", children: nil},
+		"license": {children: map[string]*schemaNode{
+			"autoupdate": {children: map[string]*schemaNode{
+				"url": {args: 1, children: nil},
 			}},
 		}},
-		"processes": {desc: "Process information", children: nil},
-		"internet-options": {desc: "Internet options", children: map[string]*schemaNode{
-			"no-ipv6-reject-zero-hop-limit": {desc: "Do not reject IPv6 packets with zero hop limit", children: nil},
+		"processes": {children: nil},
+		"internet-options": {children: map[string]*schemaNode{
+			"no-ipv6-reject-zero-hop-limit": {children: nil},
 		}},
-		"ntp": {desc: "NTP configuration", children: map[string]*schemaNode{
-			"server": {desc: "NTP server", args: 1, placeholder: "<address>", children: nil},
-			"threshold": {desc: "Threshold", args: 1, placeholder: "<seconds>", children: map[string]*schemaNode{
-				"action": {desc: "Action on threshold", args: 1, placeholder: "<action>", children: nil},
+		"ntp": {children: map[string]*schemaNode{
+			"server": {args: 1, children: nil},
+			"threshold": {args: 1, children: map[string]*schemaNode{
+				"action": {args: 1, children: nil},
 			}},
 		}},
-		"syslog": {desc: "Syslog configuration", children: map[string]*schemaNode{
-			"user": {desc: "Syslog user", args: 1, placeholder: "<user>", children: nil},
-			"host": {desc: "Syslog host", args: 1, placeholder: "<host>", children: nil},
-			"file": {desc: "Syslog file", args: 1, placeholder: "<filename>", children: nil},
+		"syslog": {children: map[string]*schemaNode{
+			"user": {args: 1, children: nil},
+			"host": {args: 1, children: nil},
+			"file": {args: 1, children: nil},
 		}},
-		"login": {desc: "Login configuration", children: map[string]*schemaNode{
-			"user": {desc: "User name", args: 1, placeholder: "<username>", children: map[string]*schemaNode{
-				"uid":            {desc: "User ID", args: 1, placeholder: "<uid>", children: nil},
-				"class":          {desc: "Login class", args: 1, placeholder: "<class>", children: nil},
-				"authentication": {desc: "Authentication methods", children: nil},
+		"login": {children: map[string]*schemaNode{
+			"user": {args: 1, children: map[string]*schemaNode{
+				"uid":            {args: 1, children: nil},
+				"class":          {args: 1, children: nil},
+				"authentication": {children: nil},
 			}},
 		}},
-		"dataplane-type": {desc: "Dataplane type", args: 1, placeholder: "<type>", children: nil},
+		"dataplane-type": {args: 1, children: nil},
 		"dataplane": {desc: "Dataplane configuration", children: map[string]*schemaNode{
 			"cores":          {args: 1, desc: "Number of dataplane cores", children: nil},
 			"memory":         {args: 1, desc: "Dataplane memory allocation", children: nil},
@@ -1419,42 +1419,39 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 				"cores":     {args: 1, children: nil},
 			}}},
 		}},
-		"services": {desc: "System services", children: map[string]*schemaNode{
-			"ssh": {desc: "SSH service", children: map[string]*schemaNode{
-				"root-login": {desc: "Root login permission", args: 1, placeholder: "<permit|deny>", children: nil},
+		"services": {children: map[string]*schemaNode{
+			"ssh": {children: map[string]*schemaNode{
+				"root-login": {args: 1, children: nil},
 			}},
-			"netconf": {desc: "NETCONF service", children: map[string]*schemaNode{
-				"ssh": {desc: "NETCONF over SSH", children: nil},
-			}},
-			"web-management": {desc: "Web management", children: map[string]*schemaNode{
-				"http": {desc: "HTTP service", children: map[string]*schemaNode{
-					"interface": {desc: "Interface", args: 1, placeholder: "<interface>", children: nil},
+			"web-management": {children: map[string]*schemaNode{
+				"http": {children: map[string]*schemaNode{
+					"interface": {args: 1, children: nil},
 				}},
-				"https": {desc: "HTTPS service", children: map[string]*schemaNode{
-					"system-generated-certificate": {desc: "Use system-generated certificate", children: nil},
-					"interface":                    {desc: "Interface", args: 1, placeholder: "<interface>", children: nil},
+				"https": {children: map[string]*schemaNode{
+					"system-generated-certificate": {children: nil},
+					"interface":                    {args: 1, children: nil},
 				}},
-				"api-auth": {desc: "API authentication", children: map[string]*schemaNode{
-					"user": {desc: "User name", wildcard: &schemaNode{placeholder: "<username>", children: map[string]*schemaNode{
-						"password": {desc: "Password", args: 1, placeholder: "<password>", children: nil},
+				"api-auth": {children: map[string]*schemaNode{
+					"user": {wildcard: &schemaNode{children: map[string]*schemaNode{
+						"password": {args: 1, children: nil},
 					}}},
-					"api-key": {desc: "API key", args: 1, placeholder: "<key>", children: nil},
+					"api-key": {args: 1, children: nil},
 				}},
 			}},
-			"dns": {desc: "DNS service", children: nil},
-			"dhcp-local-server": {desc: "DHCP local server", children: map[string]*schemaNode{
-				"group": {desc: "DHCP group", args: 1, placeholder: "<group-name>", children: map[string]*schemaNode{
-					"pool": {desc: "Address pool", args: 1, placeholder: "<pool-name>", children: nil},
+			"dns": {children: nil},
+			"dhcp-local-server": {children: map[string]*schemaNode{
+				"group": {args: 1, children: map[string]*schemaNode{
+					"pool": {args: 1, children: nil},
 				}},
 			}},
-			"dhcpv6-local-server": {desc: "DHCPv6 local server", children: map[string]*schemaNode{
-				"group": {desc: "DHCPv6 group", args: 1, placeholder: "<group-name>", children: map[string]*schemaNode{
-					"pool": {desc: "Address pool", args: 1, placeholder: "<pool-name>", children: nil},
+			"dhcpv6-local-server": {children: map[string]*schemaNode{
+				"group": {args: 1, children: map[string]*schemaNode{
+					"pool": {args: 1, children: nil},
 				}},
 			}},
 		}},
 	}},
-	"services": {desc: "Services configuration", children: map[string]*schemaNode{
+	"services": {children: map[string]*schemaNode{
 		"rpm": {desc: "Real-time Performance Monitoring probes", children: map[string]*schemaNode{
 			"probe-limit": {args: 1, desc: "Default maximum consecutive failed probes before stopping a test cycle", children: nil},
 			"probe": {args: 1, desc: "RPM probe name", children: map[string]*schemaNode{
