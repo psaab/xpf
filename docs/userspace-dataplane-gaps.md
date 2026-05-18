@@ -36,7 +36,7 @@ These capabilities exist in the current Rust userspace dataplane code path:
 | NPTv6 | Implemented | Stateless prefix translation |
 | Firewall filters | Implemented | Filter snapshots and evaluation in Rust |
 | Flow export | Implemented | Userspace flow export snapshot and runtime |
-| Three-color policers | Implemented with caveats | srTCM/trTCM runtime, forwarding-path and flow-cache-hit metering, red drops for `then discard`, status/CLI/Prometheus counters. Unsupported color-aware, non-`discard`, and malformed snapshots now fail closed in Rust if they bypass Go admission. Sharded state, cross-snapshot continuity, full non-drop action propagation, and integration evidence remain #1375 follow-up work. |
+| Three-color policers | Implemented with caveats | srTCM/trTCM runtime, forwarding-path and flow-cache-hit metering, red drops for `then discard`, status/CLI/Prometheus counters, and compatible in-process snapshot continuity. Unsupported color-aware, non-`discard`, and malformed snapshots now fail closed in Rust if they bypass Go admission. Sharded state, HA/restart continuity decision, full non-drop action propagation, and integration evidence remain #1375 follow-up work. |
 | TCP MSS clamping | Implemented | Flow snapshot fields are delivered and used in Rust |
 | Embedded ICMP NAT reversal | Implemented | Includes reverse-session repair paths |
 | Configurable session timeouts | Implemented | Snapshot-driven timeouts in `session.rs` |
@@ -90,7 +90,7 @@ The current #1373 audit produced these tracked blockers:
 | #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds and strict missing-scheduler commit behavior landed in the 2026-05-17 closeout slice. The 2026-05-18 closeout slice adds a deterministic userspace evidence checker and pins the non-eBPF apply path; remaining blocker is only the live HA artifact capture accepted by `test/incus/policy_scheduler_validate.py`. | Phase 4 BPF source removal |
 | #1379 | Complete dataplane event closeout: policy-deny, screen-drop, and logged PBR filter hits emit from userspace; remaining work is end-to-end syslog evidence, broader non-PBR filter-log call sites, and richer policy/filter identity mapping | Phase 4 BPF source removal |
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393, the 2026-05-17 runtime slice, and the 2026-05-18 closeout slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, bounded validated-client cache behavior, TTL-bound single-use validated-client expiration, current/previous cookie-epoch ACK validation, explicit validated-client bypass verdicts, userspace helper status counters, and legacy global sync for valid/invalid/bypass counters. Remaining: bounded SYN-ACK TX and sent/budget counters, ACK RST emission, HA-safe secret publication/cache survivability, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
-| #1375 | Finish userspace RFC 2697/2698 three-color policer hardening. The current runtime admits the color-blind `then discard` slice and now fails closed for unsupported snapshot shapes that bypass Go admission. Remaining work: sharded/packed state decision, cross-snapshot counter continuity decision, full non-drop color action propagation, and integration/failover/performance evidence | Phase 4 BPF source removal |
+| #1375 | Finish userspace RFC 2697/2698 three-color policer hardening. The current runtime admits the color-blind `then discard` slice, fails closed for unsupported snapshot shapes that bypass Go admission, and preserves token/counter state across compatible in-process snapshot refreshes. Remaining work: sharded/packed state decision, HA/restart continuity decision, full non-drop color action propagation, and integration/failover/performance evidence | Phase 4 BPF source removal |
 | #1376 | Finish userspace port mirroring closeout. Snapshot/wire plumbing and a bounded forwarded-path runtime slice now exist, including pending-forward, self-target flow-cache, and deferred-neighbor retry surfaces. Remaining work is ingress/transmit surface coverage, mirror-fidelity evidence, forwarding survival under mirror pressure, and capability-gate removal. | Phase 4 BPF source removal |
 | #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface. Userspace now renders the bounded helper status that exists and intentionally keeps session-table / flow-cache / neighbor-cache as counters rather than synthetic utilization rows until the helper exports true capacity fields. | Phase 5 CLI / observability cleanup |
 
@@ -159,9 +159,9 @@ The highest-value remaining work on current `master` is:
    evidence artifact set is captured.
 3. close #1374 and #1376 before any BPF source removal, and finish the #1375
    hardening/evidence checklist. The three-color capability gate is removed
-   only for the current color-blind `then discard` slice; color-aware and
-   non-drop treatments stay fail-closed in both Go admission and Rust snapshot
-   parsing.
+   only for the current color-blind `then discard` slice with compatible
+   in-process snapshot continuity; color-aware and non-drop treatments stay
+   fail-closed in both Go admission and Rust snapshot parsing.
 4. carry #1380 into Phase 5 only if operators need new helper capacity fields;
    the current userspace command already avoids BPF-map fallback when helper
    status is available and does not synthesize percentages for dynamic tables

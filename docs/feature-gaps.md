@@ -318,8 +318,8 @@ xpf has firewall filters with source/dest addresses, prefix-lists (with except),
 
 | Feature | Junos Config Path | Description | Priority | Status |
 |---------|-------------------|-------------|----------|--------|
-| **Policer (Rate Limiting)** | `firewall policer ... bandwidth-limit N burst-size-limit N` | Token-bucket rate limiter applied to filter terms or interfaces. Single-rate two-color, three-color policers. | High | Partial for #1373: legacy eBPF/DPDK token-bucket policer support exists; userspace supports the admitted filter path but three-color behavior remains gated by #1375. |
-| **Three-Color Policer** | `firewall three-color-policer ...` | RFC 2697/2698 metering with green/yellow/red marking based on CIR/CBS/EBS or CIR/PIR | Medium | Legacy eBPF/DPDK done; userspace AF_XDP support remains a #1375 retirement blocker. |
+| **Policer (Rate Limiting)** | `firewall policer ... bandwidth-limit N burst-size-limit N` | Token-bucket rate limiter applied to filter terms or interfaces. Single-rate two-color, three-color policers. | High | Partial for #1373: legacy eBPF/DPDK token-bucket policer support exists; userspace supports the admitted filter path and the color-blind `then discard` three-color slice. #1375 still tracks unsupported color-aware/non-drop behavior and evidence. |
+| **Three-Color Policer** | `firewall three-color-policer ...` | RFC 2697/2698 metering with green/yellow/red marking based on CIR/CBS/EBS or CIR/PIR | Medium | Legacy eBPF/DPDK done; userspace AF_XDP supports color-blind `then discard` with compatible snapshot continuity. #1375 remains a retirement blocker for color-aware/non-drop action parity and integration/failover/perf evidence. |
 | **Interface Policer** | `firewall policer ... logical-interface-policer` | Aggregate rate limiting across all protocol families on a logical interface | Low | Missing |
 | **Flexible Match Conditions** | `firewall filter ... term ... from flexible-match-range ...` | Match on arbitrary byte offsets within packet header for custom protocol matching | Low | Missing |
 | **Firewall Filter on lo0** | `interfaces lo0 unit 0 family inet filter input ...` | Host-bound traffic filtering — config parsed, compiled to filter IDs, evaluated natively in xdp_forward for host-bound packets, plus kernel nftables fallback | Medium | Done |
@@ -434,7 +434,7 @@ Features most commonly used in production vSRX deployments:
 
 1. ~~**Proxy ARP/NDP for NAT**~~ - **Done** (proxy ARP with GARP; proxy NDP still missing)
 2. ~~**Session Limiting (source/dest-ip)**~~ - **Done** on the legacy BPF path (GC sweep + BPF LRU maps + xdp_screen enforcement); userspace admission is tracked in `userspace-dataplane-gaps.md`.
-3. ~~**Firewall Filter Policers**~~ - **Legacy done** (token bucket: single-rate, two-rate RFC 2698, single-rate-3c RFC 2697; eBPF + DPDK). Userspace three-color policers remain #1375.
+3. ~~**Firewall Filter Policers**~~ - **Legacy done** (token bucket: single-rate, two-rate RFC 2698, single-rate-3c RFC 2697; eBPF + DPDK). Userspace supports the color-blind `then discard` three-color slice; #1375 tracks the remaining parity/evidence work.
 4. ~~**BFD**~~ - **Done** (OSPF/IS-IS/BGP BFD via FRR profiles)
 5. **NETCONF/YANG** - Industry-standard management, enables automation tooling
 6. **Unified Policies / AppID** - Foundation of modern NGFW (long-term, high complexity)
@@ -511,8 +511,9 @@ work tracked by the linked issue.
 
 ### Firewall Filter Policers (Tier 1) -- LEGACY DONE
 - Token bucket policer with single-rate two-color, two-rate three-color (RFC 2698), and single-rate three-color (RFC 2697) modes
-- eBPF and DPDK parity; userspace three-color policers remain a #1375
-  retirement blocker
+- eBPF and DPDK parity; userspace supports the color-blind `then discard`
+  three-color slice while #1375 tracks color-aware/non-drop parity and
+  evidence
 
 ### BFD (Tier 1) -- DONE
 - OSPF BFD with interval/multiplier via FRR profiles

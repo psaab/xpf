@@ -16,7 +16,8 @@ Mirrors the BPF firewall-filter pipeline in userspace.
 - `compiler.rs` — parses the typed config's filter terms and lowers
   them to `FilterTerm`s (prefix vectors, protocol bitmap, port
   matcher, DSCP bitmap). Three-color policer snapshots are sorted by
-  name and compiled into stable runtime IDs before terms are linked.
+  name for deterministic iteration and compiled into name-derived
+  stable runtime IDs before terms are linked.
 - `engine.rs` — per-term evaluation, first-match-wins. It carries the
   matched `then policer ...` name in the filter result. Routing-instance
   evaluation can also return log/action/filter/term metadata so AF_XDP
@@ -87,13 +88,16 @@ Remaining limitations:
 - Runtime token state is one `Mutex` per logical policer, not a sharded
   or packed atomic implementation. This preserves correctness and
   stable identity but is not the final high-throughput contention model.
-- Counters and token buckets are rebuilt on snapshot replacement; they
-  are stable within one compiled runtime but not yet carried across
-  config rebuilds.
+- Equivalent snapshot replacements preserve token buckets and per-color
+  counters by reusing the same runtime handle when the name-derived runtime ID
+  and shape are unchanged. Shape changes intentionally create a fresh runtime
+  so old tokens cannot leak across a different rate/burst contract. HA
+  failover and process restart still rebuild from configured bursts until a
+  broader state-sync design exists.
 - Snapshot `then_action` handling currently wires red drop for
   `then discard`. Other actions, such as loss-priority propagation, stay
   fail-closed until downstream loss-priority behavior is wired. Color-aware
   mode also stays fail-closed until inherited packet color is carried through
   trusted metadata.
-- Traffic-level integration, failover, and performance evidence still
-  need to be collected before treating #1375 as fully retired.
+- Traffic-level integration, failover, and performance evidence still need to
+  be collected before treating #1375 as fully retired.

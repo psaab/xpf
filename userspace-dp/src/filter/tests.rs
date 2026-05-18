@@ -342,7 +342,13 @@ fn three_color_runtime_ids_and_miss_path_counters_are_stable() {
         .iter()
         .map(|runtime| (runtime.id, runtime.name.as_ref().to_string()))
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec![(1, "alpha".into()), (2, "zeta".into())]);
+    assert_eq!(
+        ids,
+        vec![
+            (three_color_policer_runtime_id("alpha"), "alpha".into()),
+            (three_color_policer_runtime_id("zeta"), "zeta".into()),
+        ]
+    );
 
     let filter = state.filters.get("inet:policed").unwrap();
     assert!(filter.has_three_color_policer_terms);
@@ -430,6 +436,320 @@ fn flow_cache_hits_run_three_color_policer() {
     assert_eq!(status[0].green_packets, 1);
     assert_eq!(status[0].red_packets, 1);
     assert_eq!(status[0].drop_packets, 1);
+}
+
+#[test]
+fn equivalent_snapshot_refresh_preserves_three_color_state_and_counters() {
+    let filters = [FirewallFilterSnapshot {
+        name: "policed".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "meter".into(),
+            action: "accept".into(),
+            policer: "stable-pol".into(),
+            ..Default::default()
+        }],
+    }];
+    let policers = [ThreeColorPolicerSnapshot {
+        name: "stable-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 100,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+
+    let state = make_filter_state_with_three_color(&filters, &policers);
+    let filter = state.filters.get("inet:policed").unwrap();
+    let green = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        100,
+        0,
+    );
+    assert!(!green.policer_drop);
+
+    let refreshed = parse_filter_state_with_three_color_preserving(
+        &filters,
+        &[],
+        &policers,
+        &[],
+        "",
+        "",
+        Some(&state),
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(
+            &state.three_color_policers[0],
+            &refreshed.three_color_policers[0]
+        ),
+        "compatible refresh must reuse the live runtime, not clone state"
+    );
+    let refreshed_filter = refreshed.filters.get("inet:policed").unwrap();
+    let red = evaluate_filter_ref_tx_selection_runtime_counted(
+        refreshed_filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        51,
+        0,
+    );
+
+    assert!(
+        red.policer_drop,
+        "equivalent snapshot refresh must preserve consumed token state"
+    );
+    let status = refreshed.three_color_policer_statuses();
+    assert_eq!(status[0].green_packets, 1);
+    assert_eq!(status[0].green_bytes, 100);
+    assert_eq!(status[0].red_packets, 1);
+    assert_eq!(status[0].red_bytes, 51);
+    assert_eq!(status[0].drop_packets, 1);
+    assert_eq!(status[0].drop_bytes, 51);
+}
+
+#[test]
+fn three_color_adding_lower_sorted_policer_does_not_reset_existing_runtime() {
+    let filters = [FirewallFilterSnapshot {
+        name: "policed".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "meter".into(),
+            action: "accept".into(),
+            policer: "stable-pol".into(),
+            ..Default::default()
+        }],
+    }];
+    let stable = ThreeColorPolicerSnapshot {
+        name: "stable-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 100,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    };
+    let inserted = ThreeColorPolicerSnapshot {
+        name: "aaa-new-pol".into(),
+        ..stable.clone()
+    };
+
+    let state = make_filter_state_with_three_color(&filters, &[stable.clone()]);
+    let filter = state.filters.get("inet:policed").unwrap();
+    let first = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        100,
+        0,
+    );
+    assert!(!first.policer_drop);
+
+    let refreshed = parse_filter_state_with_three_color_preserving(
+        &filters,
+        &[],
+        &[inserted, stable],
+        &[],
+        "",
+        "",
+        Some(&state),
+    );
+    let previous_runtime = state
+        .three_color_policer_by_name
+        .get("stable-pol")
+        .expect("previous runtime");
+    let refreshed_runtime = refreshed
+        .three_color_policer_by_name
+        .get("stable-pol")
+        .expect("refreshed runtime");
+    assert!(
+        std::sync::Arc::ptr_eq(previous_runtime, refreshed_runtime),
+        "adding an alphabetically earlier policer must not reset stable-pol"
+    );
+    assert_eq!(
+        refreshed_runtime.id,
+        three_color_policer_runtime_id("stable-pol")
+    );
+
+    let refreshed_filter = refreshed.filters.get("inet:policed").unwrap();
+    let second = evaluate_filter_ref_tx_selection_runtime_counted(
+        refreshed_filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        51,
+        0,
+    );
+    assert!(
+        second.policer_drop,
+        "refreshed stable-pol must retain tokens consumed before insertion"
+    );
+}
+
+#[test]
+fn three_color_compatible_refresh_observes_old_runtime_mutations_after_rebuild() {
+    let filters = [FirewallFilterSnapshot {
+        name: "policed".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "meter".into(),
+            action: "accept".into(),
+            policer: "stable-pol".into(),
+            ..Default::default()
+        }],
+    }];
+    let policers = [ThreeColorPolicerSnapshot {
+        name: "stable-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 100,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+
+    let state = make_filter_state_with_three_color(&filters, &policers);
+    let refreshed = parse_filter_state_with_three_color_preserving(
+        &filters,
+        &[],
+        &policers,
+        &[],
+        "",
+        "",
+        Some(&state),
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &state.three_color_policers[0],
+        &refreshed.three_color_policers[0]
+    ));
+
+    let old_filter = state.filters.get("inet:policed").unwrap();
+    let old_green = evaluate_filter_ref_tx_selection_runtime_counted(
+        old_filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        100,
+        0,
+    );
+    assert!(!old_green.policer_drop);
+
+    let refreshed_filter = refreshed.filters.get("inet:policed").unwrap();
+    let refreshed_red = evaluate_filter_ref_tx_selection_runtime_counted(
+        refreshed_filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        51,
+        0,
+    );
+
+    assert!(
+        refreshed_red.policer_drop,
+        "post-rebuild mutations through the old handle must be visible"
+    );
+    let status = refreshed.three_color_policer_statuses();
+    assert_eq!(status[0].green_packets, 1);
+    assert_eq!(status[0].red_packets, 1);
+    assert_eq!(status[0].drop_packets, 1);
+}
+
+#[test]
+fn changed_snapshot_shape_resets_three_color_runtime_state() {
+    let filters = [FirewallFilterSnapshot {
+        name: "policed".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "meter".into(),
+            action: "accept".into(),
+            policer: "stable-pol".into(),
+            ..Default::default()
+        }],
+    }];
+    let original = [ThreeColorPolicerSnapshot {
+        name: "stable-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 100,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    let changed = [ThreeColorPolicerSnapshot {
+        committed_burst_bytes: 200,
+        ..original[0].clone()
+    }];
+
+    let state = make_filter_state_with_three_color(&filters, &original);
+    let filter = state.filters.get("inet:policed").unwrap();
+    let first = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        100,
+        0,
+    );
+    assert!(!first.policer_drop);
+
+    let refreshed = parse_filter_state_with_three_color_preserving(
+        &filters,
+        &[],
+        &changed,
+        &[],
+        "",
+        "",
+        Some(&state),
+    );
+    let refreshed_filter = refreshed.filters.get("inet:policed").unwrap();
+    let second = evaluate_filter_ref_tx_selection_runtime_counted(
+        refreshed_filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        200,
+        0,
+    );
+
+    assert!(
+        !second.policer_drop,
+        "changed token shape should create a fresh runtime with new burst"
+    );
+    let status = refreshed.three_color_policer_statuses();
+    assert_eq!(status[0].green_packets, 1);
+    assert_eq!(status[0].green_bytes, 200);
 }
 
 #[test]

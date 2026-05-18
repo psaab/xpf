@@ -334,6 +334,16 @@ impl ThreeColorPolicerState {
         self.color_blind
     }
 
+    pub(crate) fn same_runtime_shape(&self, other: &Self) -> bool {
+        self.mode == other.mode
+            && self.color_blind == other.color_blind
+            && self.committed_rate_bytes_per_sec == other.committed_rate_bytes_per_sec
+            && self.committed_burst_bytes == other.committed_burst_bytes
+            && self.peak_or_excess_rate_bytes_per_sec == other.peak_or_excess_rate_bytes_per_sec
+            && self.peak_or_excess_burst_bytes == other.peak_or_excess_burst_bytes
+            && self.treatments == other.treatments
+    }
+
     fn refill(&mut self, now_ns: u64) {
         if !self.initialized {
             self.initialized = true;

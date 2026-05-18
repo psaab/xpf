@@ -32,6 +32,28 @@ pub(crate) fn parse_filter_state_with_three_color(
     lo0_filter_v4: &str,
     lo0_filter_v6: &str,
 ) -> FilterState {
+    parse_filter_state_with_three_color_preserving(
+        filters,
+        policers,
+        three_color_policers,
+        interfaces,
+        lo0_filter_v4,
+        lo0_filter_v6,
+        None,
+    )
+}
+
+/// Build the complete FilterState while preserving compatible three-color
+/// policer token/counter state across snapshot refreshes.
+pub(crate) fn parse_filter_state_with_three_color_preserving(
+    filters: &[FirewallFilterSnapshot],
+    policers: &[PolicerSnapshot],
+    three_color_policers: &[ThreeColorPolicerSnapshot],
+    interfaces: &[crate::InterfaceSnapshot],
+    lo0_filter_v4: &str,
+    lo0_filter_v6: &str,
+    previous: Option<&FilterState>,
+) -> FilterState {
     let mut state = FilterState::default();
 
     // Parse legacy token-bucket policers.
@@ -47,13 +69,15 @@ pub(crate) fn parse_filter_state_with_three_color(
         );
     }
 
-    // Parse three-color policers by stable name order. Terms store Arc
-    // handles, so cache-hit enforcement uses the same logical runtime.
+    // Parse three-color policers by stable name order. Runtime IDs are
+    // name-derived so inserting a lower-sorted policer does not reset
+    // unchanged existing runtimes.
     let mut three_color = three_color_policers.iter().collect::<Vec<_>>();
     three_color.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut used_three_color_ids = rustc_hash::FxHashSet::default();
     for snap in three_color {
-        let Some(runtime) = parse_three_color_policer(snap, state.three_color_policers.len() + 1)
-        else {
+        let id = unique_three_color_policer_runtime_id(&snap.name, &mut used_three_color_ids);
+        let Some(runtime) = parse_three_color_policer(snap, id, previous) else {
             continue;
         };
         state
@@ -199,15 +223,54 @@ pub(crate) fn parse_filter_state_with_three_color(
 
 fn parse_three_color_policer(
     snap: &ThreeColorPolicerSnapshot,
-    id: usize,
+    id: u32,
+    previous: Option<&FilterState>,
 ) -> Option<Arc<ThreeColorPolicerRuntime>> {
     let state = build_three_color_policer_state(snap)
         .unwrap_or_else(|| ThreeColorPolicerState::fail_closed(snap.color_blind));
+    if let Some(previous_runtime) =
+        previous.and_then(|prev| prev.three_color_policer_by_name.get(&snap.name))
+    {
+        if previous_runtime.reusable_for(id, &state) {
+            return Some(Arc::clone(previous_runtime));
+        }
+    }
     Some(Arc::new(ThreeColorPolicerRuntime::new(
-        id as u32,
+        id,
         snap.name.clone(),
         state,
     )))
+}
+
+fn unique_three_color_policer_runtime_id(
+    name: &str,
+    used_ids: &mut rustc_hash::FxHashSet<u32>,
+) -> u32 {
+    let mut id = three_color_policer_runtime_id(name);
+    while !used_ids.insert(id) {
+        id = id.wrapping_add(1);
+        if id == 0 {
+            id = 1;
+        }
+    }
+    id
+}
+
+pub(crate) fn three_color_policer_runtime_id(name: &str) -> u32 {
+    const FNV_OFFSET_BASIS: u32 = 0x811c_9dc5;
+    const FNV_PRIME: u32 = 0x0100_0193;
+    const NAMESPACE: &[u8] = b"xpf-three-color-policer-v1:";
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in NAMESPACE.iter().chain(name.as_bytes()) {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
 }
 
 fn build_three_color_policer_state(

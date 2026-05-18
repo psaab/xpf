@@ -403,8 +403,11 @@ impl Coordinator {
             fib_generation: snapshot.fib_generation,
         };
         self.policy_counters.reconcile_rules(&snapshot.policies);
-        self.forwarding =
-            build_forwarding_state_with_policy_counters(snapshot, &self.policy_counters);
+        self.forwarding = build_forwarding_state_with_policy_counters_and_previous(
+            snapshot,
+            &self.policy_counters,
+            Some(&self.forwarding),
+        );
         self.shared_validation.store(Arc::new(self.validation));
         self.ha.forwarding.store(Arc::new(self.forwarding.clone()));
         self.slow_path = if let Some(slow_path) = preserved_slow_path {
@@ -977,8 +980,11 @@ impl Coordinator {
         // snapshot build time. Always keep the better-resolved set.
         let preserved_fabrics = self.forwarding.fabrics.clone();
         self.policy_counters.reconcile_rules(&snapshot.policies);
-        self.forwarding =
-            build_forwarding_state_with_policy_counters(snapshot, &self.policy_counters);
+        self.forwarding = build_forwarding_state_with_policy_counters_and_previous(
+            snapshot,
+            &self.policy_counters,
+            Some(&self.forwarding),
+        );
         if self.forwarding.fabrics.is_empty() && !preserved_fabrics.is_empty() {
             self.forwarding.fabrics = preserved_fabrics;
         } else if !preserved_fabrics.is_empty() {

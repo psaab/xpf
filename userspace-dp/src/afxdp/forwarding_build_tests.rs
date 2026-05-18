@@ -4,12 +4,93 @@
 // `#[path = "forwarding_build_tests.rs"]` from forwarding_build.rs.
 
 use super::*;
+use crate::filter::evaluate_filter_ref_tx_selection_runtime_counted;
 use crate::{
     ClassOfServiceSnapshot, CoSDSCPClassifierEntrySnapshot, CoSDSCPClassifierSnapshot,
     CoSDSCPRewriteRuleEntrySnapshot, CoSDSCPRewriteRuleSnapshot, CoSForwardingClassSnapshot,
     CoSIEEE8021ClassifierEntrySnapshot, CoSIEEE8021ClassifierSnapshot,
     CoSSchedulerMapEntrySnapshot, CoSSchedulerMapSnapshot, CoSSchedulerSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, ThreeColorPolicerSnapshot,
 };
+use std::net::{IpAddr, Ipv4Addr};
+
+fn three_color_snapshot(burst: u64) -> ConfigSnapshot {
+    ConfigSnapshot {
+        filters: vec![FirewallFilterSnapshot {
+            name: "policed".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "meter".into(),
+                action: "accept".into(),
+                policer: "stable-pol".into(),
+                ..Default::default()
+            }],
+        }],
+        three_color_policers: vec![ThreeColorPolicerSnapshot {
+            name: "stable-pol".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: burst,
+            peak_or_excess_burst_bytes: 50,
+            then_action: "discard".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn forwarding_state_refresh_preserves_three_color_runtime_state() {
+    let policy_counters = PolicyCounterStore::default();
+    let snapshot = three_color_snapshot(100);
+    let state = build_forwarding_state_with_policy_counters(&snapshot, &policy_counters);
+    let refreshed = build_forwarding_state_with_policy_counters_and_previous(
+        &snapshot,
+        &policy_counters,
+        Some(&state),
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &state.filter_state.three_color_policers[0],
+        &refreshed.filter_state.three_color_policers[0]
+    ));
+
+    let filter = state.filter_state.filters.get("inet:policed").unwrap();
+    let first = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        100,
+        0,
+    );
+    assert!(!first.policer_drop);
+
+    let refreshed_filter = refreshed.filter_state.filters.get("inet:policed").unwrap();
+    let second = evaluate_filter_ref_tx_selection_runtime_counted(
+        refreshed_filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        51,
+        0,
+    );
+
+    assert!(
+        second.policer_drop,
+        "production refresh must share runtime state during publication"
+    );
+    let status = refreshed.filter_state.three_color_policer_statuses();
+    assert_eq!(status[0].green_packets, 1);
+    assert_eq!(status[0].red_packets, 1);
+    assert_eq!(status[0].drop_packets, 1);
+}
 
 #[test]
 fn build_cos_state_translates_scheduler_map_entries() {
@@ -755,18 +836,14 @@ fn build_forwarding_state_rejects_reserved_zone_ids() {
     assert_eq!(state.zone_name_to_id.get("ok").copied(), Some(5));
     assert!(state.zone_name_to_id.get("reserved-edge").is_none());
     assert!(state.zone_name_to_id.get("global-sentinel").is_none());
-    assert!(
-        state
-            .zone_id_to_name
-            .get(&crate::policy::ZONE_ID_RESERVED_MIN)
-            .is_none()
-    );
-    assert!(
-        state
-            .zone_id_to_name
-            .get(&crate::policy::JUNOS_GLOBAL_ZONE_ID)
-            .is_none()
-    );
+    assert!(state
+        .zone_id_to_name
+        .get(&crate::policy::ZONE_ID_RESERVED_MIN)
+        .is_none());
+    assert!(state
+        .zone_id_to_name
+        .get(&crate::policy::JUNOS_GLOBAL_ZONE_ID)
+        .is_none());
 }
 
 /// #921: ifindex_to_zone_id is populated at config build time

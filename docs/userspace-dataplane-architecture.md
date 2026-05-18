@@ -562,9 +562,11 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   boundary.
 - SYN-cookie flood protection closeout: #1374 still owns bounded SYN-ACK/RST
   TX, HA-safe secrets, integration evidence, and gate removal.
-- RFC 2697/2698 three-color policer closeout: #1375 still owns the remaining
-  state/counter continuity, non-drop color actions, and integration/perf
-  evidence beyond the admitted color-blind `then discard` slice.
+- RFC 2697/2698 three-color policer closeout: #1375 now preserves
+  token/counter state across compatible in-process snapshot refreshes. It still
+  owns the sharded/packed state decision, HA/restart continuity decision,
+  non-drop color actions, and integration/perf evidence beyond the admitted
+  color-blind `then discard` slice.
 - Port mirroring closeout: #1376 still owns remaining ingress/transmit
   surfaces, mirror-fidelity evidence, pressure survival, and gate removal.
 - Dataplane event closeout: #1379 still owns end-to-end syslog evidence,

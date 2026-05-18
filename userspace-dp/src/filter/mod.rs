@@ -252,6 +252,16 @@ impl ThreeColorPolicerRuntime {
         decision
     }
 
+    pub(crate) fn reusable_for(&self, id: u32, next_shape: &ThreeColorPolicerState) -> bool {
+        if self.id != id {
+            return false;
+        }
+        self.state
+            .lock()
+            .ok()
+            .is_some_and(|state| state.same_runtime_shape(next_shape))
+    }
+
     pub(crate) fn status(&self) -> crate::protocol::ThreeColorPolicerStatus {
         let (mode, color_blind) = self
             .state
@@ -375,7 +385,7 @@ pub(crate) struct FilterState {
     /// Stable three-color policer runtimes keyed by policer name.
     pub(crate) three_color_policer_by_name:
         rustc_hash::FxHashMap<String, Arc<ThreeColorPolicerRuntime>>,
-    /// Stable ID-indexed three-color policer runtimes.
+    /// Name-derived ID-indexed three-color policer runtimes.
     pub(crate) three_color_policers: Vec<Arc<ThreeColorPolicerRuntime>>,
     /// Per-interface (ifindex) input filter key for inet.
     pub(crate) iface_filter_v4: rustc_hash::FxHashMap<i32, String>,
