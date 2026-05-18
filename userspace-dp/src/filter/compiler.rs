@@ -199,8 +199,24 @@ fn parse_three_color_policer(
     snap: &ThreeColorPolicerSnapshot,
     id: usize,
 ) -> Option<Arc<ThreeColorPolicerRuntime>> {
+    let state = build_three_color_policer_state(snap)
+        .unwrap_or_else(|| ThreeColorPolicerState::fail_closed(snap.color_blind));
+    Some(Arc::new(ThreeColorPolicerRuntime::new(
+        id as u32,
+        snap.name.clone(),
+        state,
+    )))
+}
+
+fn build_three_color_policer_state(
+    snap: &ThreeColorPolicerSnapshot,
+) -> Option<ThreeColorPolicerState> {
+    if !snapshot_three_color_shape_supported(snap) {
+        return None;
+    }
+
     let treatments = treatments_from_then_action(&snap.then_action);
-    let state = match snap.mode.as_str() {
+    match snap.mode.as_str() {
         "single-rate" => ThreeColorPolicerState::sr_tcm_with_treatments(
             snap.committed_rate_bytes_per_sec,
             snap.committed_burst_bytes,
@@ -208,7 +224,7 @@ fn parse_three_color_policer(
             snap.color_blind,
             treatments,
         )
-        .ok()?,
+        .ok(),
         "two-rate" => ThreeColorPolicerState::tr_tcm_with_treatments(
             snap.committed_rate_bytes_per_sec,
             snap.committed_burst_bytes,
@@ -217,18 +233,17 @@ fn parse_three_color_policer(
             snap.color_blind,
             treatments,
         )
-        .ok()?,
-        _ => return None,
-    };
-    Some(Arc::new(ThreeColorPolicerRuntime::new(
-        id as u32,
-        snap.name.clone(),
-        state,
-    )))
+        .ok(),
+        _ => None,
+    }
+}
+
+fn snapshot_three_color_shape_supported(snap: &ThreeColorPolicerSnapshot) -> bool {
+    snap.color_blind && (snap.then_action.is_empty() || snap.then_action == "discard")
 }
 
 fn treatments_from_then_action(action: &str) -> ThreeColorTreatments {
-    if action == "discard" {
+    if action.is_empty() || action == "discard" {
         return ThreeColorTreatments {
             red: ColorTreatment::drop(),
             ..ThreeColorTreatments::default()

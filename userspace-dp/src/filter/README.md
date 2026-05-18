@@ -65,6 +65,11 @@ Implemented here:
   handle in the cached TX-selection descriptor and meter before cached
   forwarding. Packets buffered for missing-neighbor retry carry their
   session key and meter at retry dispatch time before prepared TX.
+- The Rust snapshot compiler also fail-closes unsupported or malformed
+  three-color policer snapshots. If color-aware mode, non-`discard`
+  treatment, an unknown mode, or invalid token parameters bypass Go
+  admission, matching traffic still links to an explicit unsupported runtime
+  that returns red/drop instead of silently forwarding unmetered.
 - Rust status, Go status, CLI status formatting, and Prometheus export
   expose green/yellow/red packet and byte counters plus drop counters.
 - `deriveUserspaceCapabilities()` no longer rejects the color-blind `then

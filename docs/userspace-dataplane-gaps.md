@@ -35,7 +35,7 @@ These capabilities exist in the current Rust userspace dataplane code path:
 | NPTv6 | Implemented | Stateless prefix translation |
 | Firewall filters | Implemented | Filter snapshots and evaluation in Rust |
 | Flow export | Implemented | Userspace flow export snapshot and runtime |
-| Three-color policers | Implemented with caveats | srTCM/trTCM runtime, forwarding-path and flow-cache-hit metering, red drops for `then discard`, status/CLI/Prometheus counters. Sharded state, cross-snapshot continuity, non-drop color actions, and integration evidence remain #1375 follow-up work. |
+| Three-color policers | Implemented with caveats | srTCM/trTCM runtime, forwarding-path and flow-cache-hit metering, red drops for `then discard`, status/CLI/Prometheus counters. Unsupported color-aware, non-`discard`, and malformed snapshots now fail closed in Rust if they bypass Go admission. Sharded state, cross-snapshot continuity, full non-drop action propagation, and integration evidence remain #1375 follow-up work. |
 | TCP MSS clamping | Implemented | Flow snapshot fields are delivered and used in Rust |
 | Embedded ICMP NAT reversal | Implemented | Includes reverse-session repair paths |
 | Configurable session timeouts | Implemented | Snapshot-driven timeouts in `session.rs` |
@@ -87,7 +87,7 @@ The current #1373 audit produced these tracked blockers:
 | #1378 | Finish the policy-scheduler retirement contract after #1396 userspace propagation: hit-counter survival across scheduler snapshot rebuilds and strict missing-scheduler commit behavior landed in the 2026-05-17 closeout slice; remaining blocker is integration/failover validation evidence | Phase 4 BPF source removal |
 | #1379 | Emit policy-deny, screen-drop, and filter-log dataplane events from userspace | Phase 4 BPF source removal |
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393 and the 2026-05-17 runtime slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, and a bounded validated-client cache. Lower-layer coverage in `userspace-dp/src/screen_tests.rs` pins 4-way validated-client cache replacement; poll-stage tests only pin the operational invalid-ACK drop/bypass semantics. Remaining: validated-client cache expiration semantics, secret-epoch rotation, bounded SYN-ACK TX, ACK RST emission, HA-safe secret publication/cache survivability, counters/status, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
-| #1375 | Finish userspace RFC 2697/2698 three-color policer hardening: sharded/packed state decision, cross-snapshot counter continuity decision, non-drop color action handling, and integration/failover/performance evidence | Phase 4 BPF source removal |
+| #1375 | Finish userspace RFC 2697/2698 three-color policer hardening. The current runtime admits the color-blind `then discard` slice and now fails closed for unsupported snapshot shapes that bypass Go admission. Remaining work: sharded/packed state decision, cross-snapshot counter continuity decision, full non-drop color action propagation, and integration/failover/performance evidence | Phase 4 BPF source removal |
 | #1376 | Implement userspace port mirroring or explicitly retire the feature | Phase 4 BPF source removal |
 | #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface. Userspace now renders the bounded helper status that exists and intentionally keeps session-table / flow-cache / neighbor-cache as counters rather than synthetic utilization rows until the helper exports true capacity fields. | Phase 5 CLI / observability cleanup |
 
@@ -154,7 +154,8 @@ The highest-value remaining work on current `master` is:
 3. close #1374 and #1376 before any BPF source removal, and finish the #1375
    hardening/evidence checklist. The three-color capability gate is removed
    only for the current color-blind `then discard` slice; color-aware and
-   non-drop treatments stay fail-closed.
+   non-drop treatments stay fail-closed in both Go admission and Rust snapshot
+   parsing.
 4. carry #1380 into Phase 5 only if operators need new helper capacity fields;
    the current userspace command already avoids BPF-map fallback when helper
    status is available and does not synthesize percentages for dynamic tables

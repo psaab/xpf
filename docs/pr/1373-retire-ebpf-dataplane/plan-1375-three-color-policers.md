@@ -20,6 +20,11 @@ The bounded runtime slice is implemented after #1395:
   per-color/drop counters.
 - `deriveUserspaceCapabilities()` admits the current color-blind `then
   discard` runtime slice for `firewall three-color-policer` configs.
+- Rust snapshot parsing now also fails closed for bypassed or malformed
+  three-color snapshots that request color-aware mode, non-`discard`
+  actions, unknown modes, or invalid token parameters. Matching traffic is
+  metered by an explicit unsupported runtime that returns red/drop, rather
+  than silently unlinking the policer.
 
 Remaining #1375 work is validation and hardening rather than admission:
 
@@ -78,6 +83,9 @@ packet to green.
   decision that accounts tokens.
 - Per-color counters are attached to the stable policer runtime. The current
   counters use relaxed atomics per logical policer/color.
+- Unsupported snapshot shapes that bypass Go admission must fail closed in
+  Rust: terms still link a runtime handle, and every matching packet receives
+  a red/drop decision.
 
 ## State and HA Behavior
 
@@ -99,8 +107,9 @@ packet to green.
 - Color semantics: color-aware mode must never promote incoming yellow/red
   traffic; one wrong branch turns a security control into a bandwidth grant.
 - Counter attribution: green/yellow/red/drop counters are stable inside a
-  compiled runtime. Carrying them across snapshot rebuilds remains a follow-up
-  if operators need continuity across commits.
+  compiled runtime. Carrying them across snapshot rebuilds remains a follow-up;
+  this slice deliberately preserves the existing token/counter rebuild
+  behavior and hardens unsupported-shape handling instead.
 
 ## Exact Tests
 
@@ -113,6 +122,8 @@ packet to green.
 - Cargo: `policer::three_color_dscp_rewrite`.
 - Cargo: `filter::tests::three_color_runtime_ids_and_miss_path_counters_are_stable`.
 - Cargo: `filter::tests::flow_cache_hits_run_three_color_policer`.
+- Cargo: `filter::tests::unsupported_three_color_snapshots_fail_closed_in_rust_compiler`.
+- Cargo: `filter::tests::three_color_empty_then_action_uses_default_discard`.
 - Go: userspace snapshot round-trip for three-color policer fields, per-color
   actions, and `ColorBlind`.
 - Go: compiler validation rejects zero rates/bursts, `PIR < CIR`, and

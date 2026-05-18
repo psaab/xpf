@@ -433,6 +433,261 @@ fn flow_cache_hits_run_three_color_policer() {
 }
 
 #[test]
+fn unsupported_three_color_snapshots_fail_closed_in_rust_compiler() {
+    let cases = vec![
+        (
+            "color-aware",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: false,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "non-discard-action",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "loss-priority high".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "invalid-token-shape",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 0,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "mode-drift",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "single_rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "pir-below-cir",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_rate_bytes_per_sec: 999,
+                peak_or_excess_burst_bytes: 100,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero-pir-two-rate",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_rate_bytes_per_sec: 0,
+                peak_or_excess_burst_bytes: 100,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero-committed-burst-two-rate",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 0,
+                peak_or_excess_rate_bytes_per_sec: 2_000,
+                peak_or_excess_burst_bytes: 100,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "peak-burst-below-committed-burst",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_rate_bytes_per_sec: 2_000,
+                peak_or_excess_burst_bytes: 99,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero-peak-burst-two-rate",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "two-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_rate_bytes_per_sec: 2_000,
+                peak_or_excess_burst_bytes: 0,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero-excess-burst",
+            ThreeColorPolicerSnapshot {
+                name: "bad-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 0,
+                then_action: "discard".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "serde-defaulted-malformed",
+            serde_json::from_value(serde_json::json!({
+                "name": "bad-pol",
+                "color_blind": true,
+                "then_action": "discard"
+            }))
+            .expect("defaulted malformed snapshot decodes"),
+        ),
+    ];
+
+    for (name, snapshot) in cases {
+        let state = make_filter_state_with_three_color(
+            &[FirewallFilterSnapshot {
+                name: format!("policed-{name}"),
+                family: "inet".into(),
+                terms: vec![FirewallTermSnapshot {
+                    name: "meter".into(),
+                    action: "accept".into(),
+                    policer: "bad-pol".into(),
+                    ..Default::default()
+                }],
+            }],
+            &[snapshot],
+        );
+
+        let filter = state
+            .filters
+            .get(&format!("inet:policed-{name}"))
+            .expect("compiled filter");
+        assert!(
+            filter.has_three_color_policer_terms,
+            "{name}: unsupported snapshot must still link a fail-closed runtime"
+        );
+
+        let result = evaluate_filter_ref_tx_selection_runtime_counted(
+            filter,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PROTO_UDP,
+            12345,
+            5000,
+            0,
+            1,
+            0,
+        );
+
+        assert!(
+            result.policer_drop,
+            "{name}: unsupported snapshot must drop matching traffic"
+        );
+        let status = state.three_color_policer_statuses();
+        assert_eq!(status.len(), 1, "{name}: status should expose runtime");
+        assert_eq!(status[0].mode, "unsupported", "{name}: mode");
+        assert_eq!(status[0].red_packets, 1, "{name}: red packets");
+        assert_eq!(status[0].drop_packets, 1, "{name}: drop packets");
+    }
+}
+
+#[test]
+fn three_color_empty_then_action_uses_default_discard() {
+    let state = make_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "policed".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "meter".into(),
+                action: "accept".into(),
+                policer: "default-action-pol".into(),
+                ..Default::default()
+            }],
+        }],
+        &[ThreeColorPolicerSnapshot {
+            name: "default-action-pol".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 100,
+            peak_or_excess_burst_bytes: 50,
+            then_action: String::new(),
+            ..Default::default()
+        }],
+    );
+
+    let filter = state.filters.get("inet:policed").unwrap();
+    let green = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        100,
+        0,
+    );
+    let red = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        51,
+        0,
+    );
+
+    assert!(!green.policer_drop);
+    assert!(red.policer_drop);
+    let status = state.three_color_policer_statuses();
+    assert_eq!(status[0].mode, "single-rate");
+    assert_eq!(status[0].green_packets, 1);
+    assert_eq!(status[0].red_packets, 1);
+    assert_eq!(status[0].drop_packets, 1);
+}
+
+#[test]
 fn cached_three_color_descriptor_dedupes_without_vec_allocation() {
     let state = make_filter_state_with_three_color(
         &[
