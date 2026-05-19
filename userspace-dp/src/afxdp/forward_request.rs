@@ -158,6 +158,7 @@ pub(super) fn build_live_forward_request_from_frame(
             filter_log.filter_id,
             filter_log.term_id,
             filter_log.action,
+            FilterLogSource::Output,
             now_ns,
         );
     }

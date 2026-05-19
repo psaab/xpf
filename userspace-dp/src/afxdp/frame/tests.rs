@@ -502,6 +502,7 @@ fn ingress_filter_routing_instance_steers_flow_into_native_gre_table() {
     assert_eq!(filter_event.kind, DataplaneEventKind::FilterLog);
     assert_eq!(filter_event.filter_id, 0);
     assert_eq!(filter_event.term_id, 0);
+    assert_eq!(filter_event.reason, FilterLogSource::Pbr.wire_reason());
     assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID);
     assert_eq!(filter_event.egress_zone_id, 0);
     let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
@@ -2427,6 +2428,7 @@ fn build_live_forward_request_emits_output_filter_log_event() {
     assert_eq!(filter_event.kind, DataplaneEventKind::FilterLog);
     assert_eq!(filter_event.filter_id, 0);
     assert_eq!(filter_event.term_id, 0);
+    assert_eq!(filter_event.reason, FilterLogSource::Output.wire_reason());
     assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID);
     assert_eq!(filter_event.egress_zone_id, TEST_WAN_ZONE_ID);
     assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);

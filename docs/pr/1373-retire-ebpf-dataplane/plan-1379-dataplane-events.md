@@ -44,9 +44,12 @@ Current implementation status after the 2026-05-19 closeout slice:
   counters, and per-event loss reason accounting.
 - Runtime producers cover userspace policy deny, screen drop, logged PBR
   filter hits, non-PBR input filter logs, live and cached output filter logs,
-  and lo0/local-delivery filter logs.
+  and lo0/local-delivery filter logs. Non-PBR input filter logs are emitted
+  only on the slow path after flow-cache miss; flow-cache hits do not walk the
+  input filter just to discover a log-only term.
 - Policy deny records carry the userspace snapshot's numeric policy ID. Filter
-  log records carry the compiled filter ID, term ID, and action. These IDs are
+  log records carry the compiled filter ID, term ID, action, and source
+  (`pbr`, `input`, `output`, `cached-output`, or `lo0`). These IDs are
   deterministic inside the compiled snapshot and intentionally avoid invented
   names or unstable runtime-only identifiers.
 - `pkg/dataplane/userspace/eventstream_test.go` includes a deterministic UDP
@@ -145,7 +148,9 @@ forwarding decision.
   and userspace events.
 - Go: raw userspace policy-deny, screen-drop, and filter-log frames feed
   through the event-stream callback, `EventReader.ProcessRawEvent`, and UDP
-  syslog fanout with per-event counters intact.
+  syslog fanout with per-event counters intact. FILTER_LOG syslog includes the
+  source label so operators can distinguish PBR and non-PBR hits without
+  reverse-engineering compiled term IDs.
 - Go: daemon dispatch test covers userspace source selection or fan-in without
   duplicate records.
 - Integration: userspace cluster with deny policy, screen drop, and filter log

@@ -137,6 +137,7 @@ fn emit_non_pbr_input_filter_log(
         log_match.filter_id,
         log_match.term_id,
         log_match.action,
+        FilterLogSource::Input,
         now_ns,
     );
 }
@@ -164,6 +165,7 @@ fn emit_cached_output_filter_log(
         log_match.filter_id,
         log_match.term_id,
         log_match.action,
+        FilterLogSource::CachedOutput,
         now_ns,
     );
 }
@@ -210,6 +212,7 @@ fn emit_lo0_filter_log(
         log_match.filter_id,
         log_match.term_id,
         log_match.action,
+        FilterLogSource::Lo0,
         now_ns,
     );
 }
@@ -336,14 +339,6 @@ pub(super) fn poll_binding_process_descriptor(
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
                     }
-                    emit_non_pbr_input_filter_log(
-                        worker_ctx.forwarding,
-                        worker_ctx.event_stream,
-                        flow.as_ref(),
-                        meta,
-                        ingress_zone_override,
-                        now_ns,
-                    );
                     // ── Flow cache fast path ────────────────────────────
                     // For established TCP (ACK-only) and UDP, check the per-
                     // binding flow cache before the expensive session lookup
@@ -946,6 +941,14 @@ pub(super) fn poll_binding_process_descriptor(
                                         None => resolution_target,
                                     }
                                 };
+                            emit_non_pbr_input_filter_log(
+                                worker_ctx.forwarding,
+                                worker_ctx.event_stream,
+                                Some(flow),
+                                meta,
+                                ingress_zone_override,
+                                now_ns,
+                            );
                             let route_table_override = ingress_route_table_override(
                                 worker_ctx.forwarding,
                                 meta,

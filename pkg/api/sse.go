@@ -197,6 +197,15 @@ func formatLogMessage(rec logging.EventRecord) string {
 			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
 			rec.PolicyID, rec.InZone, rec.OutZone, rec.SessionPkts, rec.SessionBytes)
 	}
+	if rec.Type == "FILTER_LOG" {
+		source := rec.Reason
+		if source == "" {
+			source = "unknown"
+		}
+		return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s zone=%d->%d source=%s filter=%d term=%d",
+			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
+			rec.InZone, rec.OutZone, source, rec.RuleID, rec.TermID)
+	}
 	return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s policy=%d zone=%d->%d",
 		rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
 		rec.PolicyID, rec.InZone, rec.OutZone)

@@ -1,6 +1,6 @@
 use super::*;
-use crate::event_stream::EventStreamWorkerHandle;
 use crate::event_stream::codec::{DataplaneEventKind, DataplaneEventPayload};
+use crate::event_stream::EventStreamWorkerHandle;
 use crate::filter::FilterAction;
 use crate::policy::PolicyAction;
 use crate::screen::ScreenPacketInfo;
@@ -29,6 +29,28 @@ const SCREEN_SYN_COOKIE: u32 = 1 << 14;
 const SCREEN_SESSION_LIMIT_SRC: u32 = 1 << 15;
 const SCREEN_SESSION_LIMIT_DST: u32 = 1 << 16;
 const SCREEN_ICMP_FRAGMENT: u32 = 1 << 17;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FilterLogSource {
+    Pbr,
+    Input,
+    Output,
+    CachedOutput,
+    Lo0,
+}
+
+impl FilterLogSource {
+    #[inline]
+    pub(super) fn wire_reason(self) -> u8 {
+        match self {
+            Self::Pbr => 1,
+            Self::Input => 2,
+            Self::Output => 3,
+            Self::CachedOutput => 4,
+            Self::Lo0 => 5,
+        }
+    }
+}
 
 #[inline]
 pub(super) fn event_now_ns_from_secs(now_secs: u64) -> u64 {
@@ -130,6 +152,7 @@ pub(super) fn emit_filter_log_event(
     filter_id: u32,
     term_id: u32,
     action: FilterAction,
+    source: FilterLogSource,
     now_ns: u64,
 ) {
     let Some(event_stream) = event_stream else {
@@ -154,7 +177,7 @@ pub(super) fn emit_filter_log_event(
         policy_id: 0,
         rule_id: 0,
         term_id,
-        reason: 0,
+        reason: source.wire_reason(),
         owner_rg_id: 0,
         application_id: 0,
         filter_id,
@@ -388,6 +411,7 @@ mod tests {
             23,
             5,
             FilterAction::Accept,
+            FilterLogSource::Input,
             789,
         );
 
@@ -400,6 +424,7 @@ mod tests {
         assert_eq!(event.action, RT_FLOW_ACTION_PERMIT);
         assert_eq!(event.filter_id, 23);
         assert_eq!(event.term_id, 5);
+        assert_eq!(event.reason, FilterLogSource::Input.wire_reason());
         assert_eq!(event.ingress_zone_id, 7);
         assert_eq!(event.egress_zone_id, 0);
         assert_eq!(handle.dataplane_event_stats().filter_log.sent, 1);

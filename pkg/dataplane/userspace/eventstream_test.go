@@ -826,10 +826,11 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 	}
 
 	frames := []struct {
-		typ     uint8
-		seq     uint64
-		payload []byte
-		want    string
+		typ       uint8
+		seq       uint64
+		payload   []byte
+		want      string
+		wantExtra string
 	}{
 		{
 			typ: EventFrameTypePolicyDeny,
@@ -889,10 +890,11 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 				0,
 				5,
 				0,
-				dataplane.CloseReasonNone,
+				1,
 				0,
 			),
-			want: "RT_FLOW FILTER_LOG",
+			want:      "RT_FLOW FILTER_LOG",
+			wantExtra: "source=pbr",
 		},
 	}
 	for _, frame := range frames {
@@ -918,7 +920,8 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 		}
 		msg := string(buf[:n])
 		for _, frame := range frames {
-			if strings.Contains(msg, frame.want) {
+			if strings.Contains(msg, frame.want) &&
+				(frame.wantExtra == "" || strings.Contains(msg, frame.wantExtra)) {
 				seen[frame.want] = true
 			}
 		}
