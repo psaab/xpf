@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	ProtocolVersion                  = 2
+	ProtocolVersion                  = 3
 	InjectPacketTupleProtocolVersion = 1
 	TypeUserspace                    = "userspace"
 )
@@ -237,20 +237,23 @@ type TunnelEndpointSnapshot struct {
 }
 
 type SourceNATRuleSnapshot struct {
-	Name                 string   `json:"name"`
-	FromZone             string   `json:"from_zone,omitempty"`
-	ToZone               string   `json:"to_zone,omitempty"`
-	SourceAddresses      []string `json:"source_addresses,omitempty"`
-	DestinationAddresses []string `json:"destination_addresses,omitempty"`
-	InterfaceMode        bool     `json:"interface_mode,omitempty"`
-	Off                  bool     `json:"off,omitempty"`
-	PoolName             string   `json:"pool_name,omitempty"`
-	PoolAddresses        []string `json:"pool_addresses,omitempty"`
-	PortLow              uint16   `json:"port_low,omitempty"`
-	PortHigh             uint16   `json:"port_high,omitempty"`
-	AddressPersistent    bool     `json:"address_persistent,omitempty"`
-	PoolUnusable         bool     `json:"pool_unusable,omitempty"`
-	PoolUnusableReason   string   `json:"pool_unusable_reason,omitempty"`
+	Name                             string   `json:"name"`
+	FromZone                         string   `json:"from_zone,omitempty"`
+	ToZone                           string   `json:"to_zone,omitempty"`
+	SourceAddresses                  []string `json:"source_addresses,omitempty"`
+	DestinationAddresses             []string `json:"destination_addresses,omitempty"`
+	InterfaceMode                    bool     `json:"interface_mode,omitempty"`
+	Off                              bool     `json:"off,omitempty"`
+	PoolName                         string   `json:"pool_name,omitempty"`
+	PoolAddresses                    []string `json:"pool_addresses,omitempty"`
+	PortLow                          uint16   `json:"port_low,omitempty"`
+	PortHigh                         uint16   `json:"port_high,omitempty"`
+	AddressPersistent                bool     `json:"address_persistent,omitempty"`
+	PersistentNAT                    bool     `json:"persistent_nat,omitempty"`
+	PersistentNATPermitAnyRemoteHost bool     `json:"persistent_nat_permit_any_remote_host,omitempty"`
+	PersistentNATInactivityTimeout   int      `json:"persistent_nat_inactivity_timeout,omitempty"`
+	PoolUnusable                     bool     `json:"pool_unusable,omitempty"`
+	PoolUnusableReason               string   `json:"pool_unusable_reason,omitempty"`
 }
 
 type StaticNATRuleSnapshot struct {
@@ -497,6 +500,7 @@ type ProcessStatus struct {
 	PolicyRuleCounters           []PolicyRuleCounterStatus         `json:"policy_rule_counters,omitempty"`
 	FilterTermCounters           []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
 	ThreeColorPolicerCounters    []ThreeColorPolicerStatus         `json:"three_color_policer_counters,omitempty"`
+	SourceNATPools               []SourceNATPoolStatus             `json:"source_nat_pools,omitempty"`
 	LastResolution               *PacketResolution                 `json:"last_resolution,omitempty"`
 	SlowPath                     SlowPathStatus                    `json:"slow_path,omitempty"`
 	LastCacheFlushAt             uint64                            `json:"last_cache_flush_at,omitempty"` // monotonic secs (#312)
@@ -504,6 +508,24 @@ type ProcessStatus struct {
 	ConfiguredMode               string                            `json:"configured_mode,omitempty"`     // Desired mode from config
 	EntryPrograms                map[int]string                    `json:"entry_programs,omitempty"`      // ifindex -> attached XDP program name
 	FallbackCounters             map[string]uint64                 `json:"fallback_counters,omitempty"`   // reason_name -> count
+}
+
+type SourceNATPoolStatus struct {
+	RuleName                         string `json:"rule_name,omitempty"`
+	PoolName                         string `json:"pool_name,omitempty"`
+	AddressCount                     int    `json:"address_count,omitempty"`
+	PortLow                          uint16 `json:"port_low,omitempty"`
+	PortHigh                         uint16 `json:"port_high,omitempty"`
+	PersistentNAT                    bool   `json:"persistent_nat,omitempty"`
+	PersistentNATPermitAnyRemoteHost bool   `json:"persistent_nat_permit_any_remote_host,omitempty"`
+	PersistentNATInactivityTimeout   int    `json:"persistent_nat_inactivity_timeout,omitempty"`
+	LiveFlows                        uint64 `json:"live_flows,omitempty"`
+	UsedPorts                        uint64 `json:"used_ports,omitempty"`
+	PersistentLeases                 uint64 `json:"persistent_leases,omitempty"`
+	MaxTrackedFlows                  uint64 `json:"max_tracked_flows,omitempty"`
+	AllocationsTotal                 uint64 `json:"allocations_total,omitempty"`
+	ReusesTotal                      uint64 `json:"reuses_total,omitempty"`
+	ExhaustionTotal                  uint64 `json:"exhaustion_total,omitempty"`
 }
 
 type EventStreamStatus struct {

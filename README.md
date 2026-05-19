@@ -79,7 +79,7 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 | Stateful forwarding | Yes | Yes |
 | Zone + global policies | Yes | Yes |
 | Application matching | Yes | Yes |
-| Source NAT (interface + pool) | Yes | Interface and pool mode yes; userspace `address-persistent` uses a documented userspace-v1 hash. Per-pool `persistent-nat`, pool exhaustion counters, and cross-backend new-flow parity remain #1377 work |
+| Source NAT (interface + pool) | Yes | Interface and pool mode yes; userspace `address-persistent` uses a documented userspace-v1 hash. Non-HA per-pool `persistent-nat` lease reuse and pool exhaustion counters are implemented in helper-local runtime state; HA/restart persistence and cross-backend new-flow parity remain outside the current contract |
 | Destination NAT | Yes | Yes |
 | Static NAT (1:1) | Yes | Yes |
 | NAT64 (IPv6↔IPv4) | Yes | Yes |
@@ -101,11 +101,12 @@ include SYN-cookie-dependent screen behavior. Port mirroring has bounded
 userspace runtime admission, but still needs mirror-fidelity and pressure
 evidence before BPF source removal. Three-color policers are admitted only for
 the bounded color-blind `then discard` runtime slice while #1375 hardening
-remains. Pool-mode SNAT is admitted, and #1385 added userspace-v1
-`address-persistent` selection. The current runtime fails closed for unusable
-source-NAT pool rules before forwarding; #1377 still owns per-pool
-`persistent-nat` lease reuse, allocator/exhaustion counters, and the
-mixed-backend rollback boundary. The exact admission boundary is documented in
+remains. Pool-mode SNAT is admitted, #1385 added userspace-v1
+`address-persistent` selection, and the runtime now fails closed for unusable
+or exhausted source-NAT pool rules before forwarding. Non-HA per-pool
+`persistent-nat` lease reuse is helper-local userspace state; it does not
+survive helper restart and HA persistent-NAT configs remain gated. The exact
+admission boundary is documented in
 [`docs/userspace-dataplane-gaps.md`](docs/userspace-dataplane-gaps.md).
 
 ## Architecture

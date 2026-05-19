@@ -194,14 +194,18 @@ fn static_nat_zone_mismatch_returns_none_for_dnat() {
         internal_ip: "192.168.1.10".to_string(),
     }]);
     // DNAT from wrong zone should fail
-    assert!(table
-        .match_dnat("203.0.113.10".parse().expect("ext"), "trust")
-        .is_none());
+    assert!(
+        table
+            .match_dnat("203.0.113.10".parse().expect("ext"), "trust")
+            .is_none()
+    );
     // SNAT does not check from_zone -- internal IP match is sufficient.
     // Traffic from internal host gets SNAT regardless of ingress zone.
-    assert!(table
-        .match_snat("192.168.1.10".parse().expect("int"), "dmz")
-        .is_some());
+    assert!(
+        table
+            .match_snat("192.168.1.10".parse().expect("int"), "dmz")
+            .is_some()
+    );
 }
 
 #[test]
@@ -212,15 +216,21 @@ fn static_nat_empty_zone_matches_any() {
         external_ip: "203.0.113.10".to_string(),
         internal_ip: "192.168.1.10".to_string(),
     }]);
-    assert!(table
-        .match_dnat("203.0.113.10".parse().expect("ext"), "untrust")
-        .is_some());
-    assert!(table
-        .match_dnat("203.0.113.10".parse().expect("ext"), "trust")
-        .is_some());
-    assert!(table
-        .match_snat("192.168.1.10".parse().expect("int"), "trust")
-        .is_some());
+    assert!(
+        table
+            .match_dnat("203.0.113.10".parse().expect("ext"), "untrust")
+            .is_some()
+    );
+    assert!(
+        table
+            .match_dnat("203.0.113.10".parse().expect("ext"), "trust")
+            .is_some()
+    );
+    assert!(
+        table
+            .match_snat("192.168.1.10".parse().expect("int"), "trust")
+            .is_some()
+    );
 }
 
 #[test]
@@ -268,12 +278,16 @@ fn static_nat_no_match_returns_none() {
         external_ip: "203.0.113.10".to_string(),
         internal_ip: "192.168.1.10".to_string(),
     }]);
-    assert!(table
-        .match_dnat("203.0.113.99".parse().expect("unknown"), "untrust")
-        .is_none());
-    assert!(table
-        .match_snat("192.168.1.99".parse().expect("unknown"), "trust")
-        .is_none());
+    assert!(
+        table
+            .match_dnat("203.0.113.99".parse().expect("unknown"), "untrust")
+            .is_none()
+    );
+    assert!(
+        table
+            .match_snat("192.168.1.99".parse().expect("unknown"), "trust")
+            .is_none()
+    );
 }
 
 #[test]
@@ -293,9 +307,11 @@ fn static_nat_invalid_ip_skipped() {
         },
     ]);
     // The bad entry should be skipped, the good one should work
-    assert!(table
-        .match_dnat("203.0.113.10".parse().expect("ext"), "any")
-        .is_some());
+    assert!(
+        table
+            .match_dnat("203.0.113.10".parse().expect("ext"), "any")
+            .is_some()
+    );
 }
 
 #[test]
@@ -378,12 +394,16 @@ fn dnat_protocol_specificity() {
         pool_port: 8080,
         ..DestinationNATRuleSnapshot::default()
     }]);
-    assert!(table
-        .lookup(PROTO_TCP, "203.0.113.10".parse().unwrap(), 80, "")
-        .is_some());
-    assert!(table
-        .lookup(PROTO_UDP, "203.0.113.10".parse().unwrap(), 80, "")
-        .is_none());
+    assert!(
+        table
+            .lookup(PROTO_TCP, "203.0.113.10".parse().unwrap(), 80, "")
+            .is_some()
+    );
+    assert!(
+        table
+            .lookup(PROTO_UDP, "203.0.113.10".parse().unwrap(), 80, "")
+            .is_none()
+    );
 }
 
 #[test]
@@ -448,13 +468,17 @@ fn dnat_no_match_returns_none() {
         ..DestinationNATRuleSnapshot::default()
     }]);
     // Different IP
-    assert!(table
-        .lookup(PROTO_TCP, "203.0.113.99".parse().unwrap(), 80, "")
-        .is_none());
+    assert!(
+        table
+            .lookup(PROTO_TCP, "203.0.113.99".parse().unwrap(), 80, "")
+            .is_none()
+    );
     // Different port (no wildcard entry)
-    assert!(table
-        .lookup(PROTO_TCP, "203.0.113.10".parse().unwrap(), 443, "")
-        .is_none());
+    assert!(
+        table
+            .lookup(PROTO_TCP, "203.0.113.10".parse().unwrap(), 443, "")
+            .is_none()
+    );
 }
 
 #[test]
@@ -521,12 +545,16 @@ fn dnat_empty_protocol_expands_to_both() {
         ..DestinationNATRuleSnapshot::default()
     }]);
     // Both TCP and UDP should match
-    assert!(table
-        .lookup(PROTO_TCP, "203.0.113.10".parse().unwrap(), 53, "")
-        .is_some());
-    assert!(table
-        .lookup(PROTO_UDP, "203.0.113.10".parse().unwrap(), 53, "")
-        .is_some());
+    assert!(
+        table
+            .lookup(PROTO_TCP, "203.0.113.10".parse().unwrap(), 53, "")
+            .is_some()
+    );
+    assert!(
+        table
+            .lookup(PROTO_UDP, "203.0.113.10".parse().unwrap(), 53, "")
+            .is_some()
+    );
 }
 
 #[test]
@@ -686,9 +714,11 @@ fn dnat_zone_mismatch_without_wildcard_returns_none() {
         pool_port: 8443,
         ..DestinationNATRuleSnapshot::default()
     }]);
-    assert!(table
-        .lookup(PROTO_TCP, "203.0.113.10".parse().unwrap(), 443, "dmz")
-        .is_none());
+    assert!(
+        table
+            .lookup(PROTO_TCP, "203.0.113.10".parse().unwrap(), 443, "dmz")
+            .is_none()
+    );
 }
 
 #[test]
@@ -824,6 +854,381 @@ fn pool_snat_multiple_addresses_round_robin() {
         "expected round-robin across all 3 addresses, got {:?}",
         seen_addrs
     );
+}
+
+fn persistent_pool_rules(timeout_secs: i64, port_low: u16, port_high: u16) -> Vec<SourceNatRule> {
+    parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "persistent-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "persistent-pool".to_string(),
+        pool_addresses: vec!["203.0.113.10".to_string()],
+        port_low,
+        port_high,
+        persistent_nat: true,
+        persistent_nat_permit_any_remote_host: true,
+        persistent_nat_inactivity_timeout: timeout_secs,
+        ..SourceNATRuleSnapshot::default()
+    }])
+}
+
+fn tuple_snat_lookup(
+    rules: &[SourceNatRule],
+    src_port: u16,
+    dst_ip: &str,
+    dst_port: u16,
+    now_ns: u64,
+) -> SourceNatLookup {
+    match_source_nat_result_for_tuple(
+        rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        dst_ip.parse().unwrap(),
+        6,
+        src_port,
+        dst_port,
+        None,
+        None,
+        now_ns,
+    )
+}
+
+fn expect_snat_decision(lookup: SourceNatLookup) -> NatDecision {
+    match lookup {
+        SourceNatLookup::Matched(decision) => decision,
+        other => panic!("expected matched SNAT decision, got {other:?}"),
+    }
+}
+
+fn session_key(src_port: u16, dst_ip: &str, dst_port: u16) -> crate::session::SessionKey {
+    crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.1.100".parse().unwrap(),
+        dst_ip: dst_ip.parse().unwrap(),
+        src_port,
+        dst_port,
+    }
+}
+
+#[test]
+fn pool_snat_persistent_reuses_same_source_tuple() {
+    let rules = persistent_pool_rules(300, 40000, 40010);
+    let first = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 1));
+    let second = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "1.1.1.1", 443, 2));
+
+    assert_eq!(first.rewrite_src, second.rewrite_src);
+    assert_eq!(first.rewrite_src_port, second.rewrite_src_port);
+
+    let status = source_nat_pool_statuses(&rules);
+    assert_eq!(status[0].allocations_total, 1);
+    assert_eq!(status[0].reuses_total, 1);
+    assert_eq!(status[0].persistent_leases, 1);
+    assert_eq!(status[0].live_flows, 2);
+}
+
+#[test]
+fn pool_snat_persistent_reassigns_after_timeout() {
+    let rules = persistent_pool_rules(2, 40000, 40001);
+    let first = expect_snat_decision(tuple_snat_lookup(
+        &rules,
+        12345,
+        "8.8.8.8",
+        53,
+        1_000_000_000,
+    ));
+    release_source_nat_allocation(
+        &rules,
+        &session_key(12345, "8.8.8.8", 53),
+        first,
+        false,
+        2_000_000_000,
+    );
+
+    let reused = expect_snat_decision(tuple_snat_lookup(
+        &rules,
+        12345,
+        "1.1.1.1",
+        443,
+        3_000_000_000,
+    ));
+    assert_eq!(first.rewrite_src_port, reused.rewrite_src_port);
+    release_source_nat_allocation(
+        &rules,
+        &session_key(12345, "1.1.1.1", 443),
+        reused,
+        false,
+        3_500_000_000,
+    );
+
+    let reassigned = expect_snat_decision(tuple_snat_lookup(
+        &rules,
+        12345,
+        "9.9.9.9",
+        853,
+        6_000_000_000,
+    ));
+    assert_eq!(reassigned.rewrite_src, first.rewrite_src);
+    assert_ne!(reassigned.rewrite_src_port, first.rewrite_src_port);
+}
+
+#[test]
+fn pool_snat_allocator_exhausted_counter_increments() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "tiny-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "tiny-pool".to_string(),
+        pool_addresses: vec!["203.0.113.10".to_string()],
+        port_low: 40000,
+        port_high: 40000,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let first = tuple_snat_lookup(&rules, 10000, "8.8.8.8", 53, 1);
+    assert!(matches!(first, SourceNatLookup::Matched(_)));
+    let second = tuple_snat_lookup(&rules, 10001, "1.1.1.1", 53, 2);
+    assert_eq!(
+        second,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "tiny-snat".to_string(),
+            pool_name: "tiny-pool".to_string(),
+            reason: SourceNatFailureReason::AllocatorExhausted,
+        })
+    );
+
+    let status = source_nat_pool_statuses(&rules);
+    assert_eq!(status[0].used_ports, 1);
+    assert_eq!(status[0].live_flows, 1);
+    assert_eq!(status[0].exhaustion_total, 1);
+}
+
+#[test]
+fn pool_snat_shared_pool_exhaustion_crosses_rules() {
+    let rules = parse_source_nat_rules(&[
+        SourceNATRuleSnapshot {
+            name: "rule-a".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.1.0/24".to_string()],
+            pool_name: "shared-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40000,
+            ..SourceNATRuleSnapshot::default()
+        },
+        SourceNATRuleSnapshot {
+            name: "rule-b".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.2.0/24".to_string()],
+            pool_name: "shared-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40000,
+            ..SourceNATRuleSnapshot::default()
+        },
+    ]);
+
+    let first = match_source_nat_result_for_tuple(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        6,
+        10000,
+        53,
+        None,
+        None,
+        1,
+    );
+    assert!(matches!(first, SourceNatLookup::Matched(_)));
+
+    let second = match_source_nat_result_for_tuple(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.2.100".parse().unwrap(),
+        "1.1.1.1".parse().unwrap(),
+        6,
+        10001,
+        53,
+        None,
+        None,
+        2,
+    );
+    assert_eq!(
+        second,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "rule-b".to_string(),
+            pool_name: "shared-pool".to_string(),
+            reason: SourceNatFailureReason::AllocatorExhausted,
+        })
+    );
+
+    let status = source_nat_pool_statuses(&rules);
+    assert_eq!(status[0].used_ports, 1);
+    assert_eq!(status[1].used_ports, 1);
+    assert_eq!(status[0].exhaustion_total, 1);
+    assert_eq!(status[1].exhaustion_total, 1);
+}
+
+#[test]
+fn pool_snat_shared_pool_exhaustion_crosses_persistence_modes() {
+    let rules = parse_source_nat_rules(&[
+        SourceNATRuleSnapshot {
+            name: "persistent-rule".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.1.0/24".to_string()],
+            pool_name: "shared-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40000,
+            persistent_nat: true,
+            persistent_nat_permit_any_remote_host: true,
+            ..SourceNATRuleSnapshot::default()
+        },
+        SourceNATRuleSnapshot {
+            name: "plain-rule".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.2.0/24".to_string()],
+            pool_name: "shared-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40000,
+            ..SourceNATRuleSnapshot::default()
+        },
+    ]);
+
+    let first = match_source_nat_result_for_tuple(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        6,
+        10000,
+        53,
+        None,
+        None,
+        1,
+    );
+    assert!(matches!(first, SourceNatLookup::Matched(_)));
+
+    let second = match_source_nat_result_for_tuple(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.2.100".parse().unwrap(),
+        "1.1.1.1".parse().unwrap(),
+        6,
+        10001,
+        53,
+        None,
+        None,
+        2,
+    );
+    assert_eq!(
+        second,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "plain-rule".to_string(),
+            pool_name: "shared-pool".to_string(),
+            reason: SourceNatFailureReason::AllocatorExhausted,
+        })
+    );
+}
+
+#[test]
+fn pool_snat_release_after_failed_session_install_frees_tuple() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "tiny-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "tiny-pool".to_string(),
+        pool_addresses: vec!["203.0.113.10".to_string()],
+        port_low: 40000,
+        port_high: 40000,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let first = expect_snat_decision(tuple_snat_lookup(&rules, 10000, "8.8.8.8", 53, 1));
+    release_source_nat_allocation(&rules, &session_key(10000, "8.8.8.8", 53), first, false, 2);
+
+    let second = expect_snat_decision(tuple_snat_lookup(&rules, 10001, "1.1.1.1", 53, 3));
+    assert_eq!(second.rewrite_src, first.rewrite_src);
+    assert_eq!(second.rewrite_src_port, first.rewrite_src_port);
+}
+
+#[test]
+fn pool_snat_persistent_rollback_removes_fresh_lease() {
+    let rules = persistent_pool_rules(300, 40000, 40000);
+    let first = expect_snat_decision(tuple_snat_lookup(&rules, 10000, "8.8.8.8", 53, 1));
+
+    rollback_source_nat_allocation(&rules, &session_key(10000, "8.8.8.8", 53), first, false, 2);
+
+    let status = source_nat_pool_statuses(&rules);
+    assert_eq!(status[0].live_flows, 0);
+    assert_eq!(status[0].used_ports, 0);
+    assert_eq!(status[0].persistent_leases, 0);
+
+    let second = expect_snat_decision(tuple_snat_lookup(&rules, 10001, "1.1.1.1", 53, 3));
+    assert_eq!(second.rewrite_src, first.rewrite_src);
+    assert_eq!(second.rewrite_src_port, first.rewrite_src_port);
+}
+
+#[test]
+fn pool_snat_release_uses_rewritten_dnat_destination_key() {
+    let rules = persistent_pool_rules(300, 40000, 40000);
+    let translated_dst: IpAddr = "10.0.0.5".parse().unwrap();
+    let first = expect_snat_decision(tuple_snat_lookup(&rules, 10000, "10.0.0.5", 443, 1));
+    let mut nat = first;
+    nat.rewrite_dst = Some(translated_dst);
+
+    release_source_nat_allocation(
+        &rules,
+        &session_key(10000, "198.51.100.5", 443),
+        nat,
+        false,
+        2,
+    );
+
+    let status = source_nat_pool_statuses(&rules);
+    assert_eq!(status[0].live_flows, 0);
+    assert_eq!(status[0].used_ports, 1);
+    assert_eq!(status[0].persistent_leases, 1);
+}
+
+#[test]
+fn pool_snat_persistent_expiry_index_is_bounded_by_leases() {
+    let rules = persistent_pool_rules(300, 40000, 40000);
+    for i in 0..10 {
+        let now_ns = 1_000_000_000 + i * 10_000_000;
+        let decision =
+            expect_snat_decision(tuple_snat_lookup(&rules, 10000, "8.8.8.8", 53, now_ns));
+        release_source_nat_allocation(
+            &rules,
+            &session_key(10000, "8.8.8.8", 53),
+            decision,
+            false,
+            now_ns + 1,
+        );
+    }
+
+    let live = rules[0]
+        .pool_allocator
+        .shared
+        .live
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(live.persistent_by_source.len(), 1);
+    assert_eq!(live.lease_expirations.len(), 1);
 }
 
 #[test]
@@ -1378,16 +1783,18 @@ fn pool_snat_zone_mismatch_returns_none() {
         port_high: 65535,
         ..SourceNATRuleSnapshot::default()
     }]);
-    assert!(match_source_nat(
-        &rules,
-        "dmz", // wrong from_zone
-        "wan",
-        "10.0.1.100".parse().unwrap(),
-        "8.8.8.8".parse().unwrap(),
-        None,
-        None,
-    )
-    .is_none());
+    assert!(
+        match_source_nat(
+            &rules,
+            "dmz", // wrong from_zone
+            "wan",
+            "10.0.1.100".parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+            None,
+            None,
+        )
+        .is_none()
+    );
 }
 
 #[test]

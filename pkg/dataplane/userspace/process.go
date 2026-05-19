@@ -329,8 +329,8 @@ func (m *Manager) syncSnapshotLocked() error {
 	// for parity with update_neighbors path.
 	publishSnap := *m.lastSnapshot
 	publishSnap.Neighbors = filterPublishableNeighbors(m.lastSnapshot.Neighbors)
-	if err := m.ensurePolicySchedulerProtocolLocked(publishSnap.Config); err != nil {
-		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+	if err := m.ensureRequiredSnapshotProtocolLocked(publishSnap.Config); err != nil {
+		if disarmErr := m.disarmSnapshotProtocolFailureLocked(err); disarmErr != nil {
 			return errors.Join(err, disarmErr)
 		}
 		return err

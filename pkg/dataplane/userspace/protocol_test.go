@@ -372,6 +372,85 @@ func TestConfigSnapshotThreeColorPolicersRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSourceNATRuleSnapshotPersistentNATRoundTrip(t *testing.T) {
+	in := SourceNATRuleSnapshot{
+		Name:                             "snat",
+		FromZone:                         "lan",
+		ToZone:                           "wan",
+		PoolName:                         "pool1",
+		PoolAddresses:                    []string{"203.0.113.10"},
+		PortLow:                          40000,
+		PortHigh:                         40010,
+		PersistentNAT:                    true,
+		PersistentNATPermitAnyRemoteHost: true,
+		PersistentNATInactivityTimeout:   600,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	for _, key := range []string{
+		"persistent_nat",
+		"persistent_nat_permit_any_remote_host",
+		"persistent_nat_inactivity_timeout",
+	} {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from SourceNATRuleSnapshot JSON: %s", key, string(raw))
+		}
+	}
+	var back SourceNATRuleSnapshot
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal SourceNATRuleSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
+	}
+}
+
+func TestProcessStatusSourceNATPoolStatusRoundTrip(t *testing.T) {
+	in := ProcessStatus{
+		SourceNATPools: []SourceNATPoolStatus{{
+			RuleName:                         "snat",
+			PoolName:                         "pool1",
+			AddressCount:                     1,
+			PortLow:                          40000,
+			PortHigh:                         40010,
+			PersistentNAT:                    true,
+			PersistentNATPermitAnyRemoteHost: true,
+			PersistentNATInactivityTimeout:   600,
+			LiveFlows:                        2,
+			UsedPorts:                        1,
+			PersistentLeases:                 1,
+			MaxTrackedFlows:                  11,
+			AllocationsTotal:                 1,
+			ReusesTotal:                      3,
+			ExhaustionTotal:                  5,
+		}},
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal obj: %v", err)
+	}
+	if _, ok := obj["source_nat_pools"]; !ok {
+		t.Fatalf("source_nat_pools missing from ProcessStatus JSON: %s", string(raw))
+	}
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if !reflect.DeepEqual(back.SourceNATPools, in.SourceNATPools) {
+		t.Fatalf("SourceNATPools = %+v, want %+v", back.SourceNATPools, in.SourceNATPools)
+	}
+}
+
 func TestProcessStatusThreeColorPolicerCountersRoundTrip(t *testing.T) {
 	in := ProcessStatus{
 		ThreeColorPolicerCounters: []ThreeColorPolicerStatus{

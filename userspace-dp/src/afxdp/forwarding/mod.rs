@@ -123,6 +123,7 @@ pub(super) fn match_source_nat_for_flow(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn match_source_nat_for_flow_result(
     forwarding: &ForwardingState,
     from_zone: &str,
@@ -130,17 +131,32 @@ pub(super) fn match_source_nat_for_flow_result(
     egress_ifindex: i32,
     flow: &SessionFlow,
 ) -> SourceNatLookup {
+    match_source_nat_for_flow_result_at(forwarding, from_zone, to_zone, egress_ifindex, flow, 0)
+}
+
+pub(super) fn match_source_nat_for_flow_result_at(
+    forwarding: &ForwardingState,
+    from_zone: &str,
+    to_zone: &str,
+    egress_ifindex: i32,
+    flow: &SessionFlow,
+    now_ns: u64,
+) -> SourceNatLookup {
     let Some(egress) = forwarding.egress.get(&egress_ifindex) else {
         return SourceNatLookup::NoMatch;
     };
-    match_source_nat_result(
+    crate::nat::match_source_nat_result_for_tuple(
         &forwarding.source_nat_rules,
         from_zone,
         to_zone,
         flow.src_ip,
         flow.dst_ip,
+        flow.forward_key.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
         egress.primary_v4,
         egress.primary_v6,
+        now_ns,
     )
 }
 

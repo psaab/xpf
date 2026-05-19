@@ -105,6 +105,10 @@ impl super::Coordinator {
         self.forwarding.filter_state.three_color_policer_statuses()
     }
 
+    pub fn source_nat_pool_statuses(&self) -> Vec<crate::protocol::SourceNatPoolStatus> {
+        crate::nat::source_nat_pool_statuses(&self.forwarding.source_nat_rules)
+    }
+
     pub fn flow_worker_map(&self) -> (Vec<crate::protocol::FlowWorkerStatus>, bool) {
         const FLOW_WORKER_MAP_MAX_ROWS: usize = 4096;
         let mut out = Vec::new();

@@ -113,6 +113,7 @@ pub(crate) fn run() -> Result<(), String> {
             policy_rule_counters: Vec::new(),
             filter_term_counters: Vec::new(),
             three_color_policer_counters: Vec::new(),
+            source_nat_pools: Vec::new(),
             last_resolution: None,
             slow_path: SlowPathStatus::default(),
             debug_worker_threads: 0,

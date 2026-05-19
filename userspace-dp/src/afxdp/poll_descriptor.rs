@@ -21,11 +21,19 @@ fn source_nat_decision_for_flow(
     to_zone: &str,
     egress_ifindex: i32,
     flow: &SessionFlow,
+    now_ns: u64,
 ) -> Result<NatDecision, SourceNatFailure> {
     if let Some(decision) = forwarding.static_nat.match_snat(flow.src_ip, from_zone) {
         return Ok(decision);
     }
-    match match_source_nat_for_flow_result(forwarding, from_zone, to_zone, egress_ifindex, flow) {
+    match match_source_nat_for_flow_result_at(
+        forwarding,
+        from_zone,
+        to_zone,
+        egress_ifindex,
+        flow,
+        now_ns,
+    ) {
         SourceNatLookup::Matched(decision) => Ok(decision),
         SourceNatLookup::NoMatch => Ok(NatDecision::default()),
         SourceNatLookup::Unavailable(failure) => Err(failure),
@@ -1451,6 +1459,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 if let PolicyAction::Permit = policy_result.action {
                                     // NAT64: cross-family translation takes
                                     // priority over same-family SNAT.
+                                    let mut source_nat_release_key = None;
                                     let nat64_info = if let Some((
                                         _,
                                         dst_v4,
@@ -1501,10 +1510,13 @@ pub(super) fn poll_binding_process_descriptor(
                                                     &to_zone,
                                                     decision.resolution.egress_ifindex,
                                                     &nat_match_flow,
+                                                    now_ns,
                                                 )
                                             }) {
                                                 Ok(snat_decision) => {
                                                     decision.nat = snat_decision;
+                                                    source_nat_release_key =
+                                                        Some(nat_match_flow.forward_key.clone());
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -1528,9 +1540,12 @@ pub(super) fn poll_binding_process_descriptor(
                                                 &to_zone,
                                                 decision.resolution.egress_ifindex,
                                                 &nat_match_flow,
+                                                now_ns,
                                             ) {
                                                 Ok(snat_decision) => {
                                                     decision.nat = decision.nat.merge(snat_decision);
+                                                    source_nat_release_key =
+                                                        Some(nat_match_flow.forward_key.clone());
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -1563,6 +1578,15 @@ pub(super) fn poll_binding_process_descriptor(
                                         now_secs,
                                     );
                                     if let Some(request) = local_icmp_te {
+                                        if let Some(release_key) = source_nat_release_key.as_ref() {
+                                            rollback_source_nat_allocation(
+                                                &worker_ctx.forwarding.source_nat_rules,
+                                                release_key,
+                                                decision.nat,
+                                                false,
+                                                now_ns,
+                                            );
+                                        }
                                         binding.scratch.scratch_forwards.push(request);
                                         recycle_now = false;
                                     } else {
@@ -1593,7 +1617,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             is_reverse: false,
                                             nat64_reverse: nat64_info,
                                         };
-                                        if track_in_userspace
+                                        let forward_installed = track_in_userspace
                                             && sessions.install_with_protocol_with_origin(
                                                 flow.forward_key.clone(),
                                                 decision,
@@ -1602,8 +1626,8 @@ pub(super) fn poll_binding_process_descriptor(
                                                 now_ns,
                                                 meta.protocol,
                                                 meta.tcp_flags,
-                                            )
-                                        {
+                                            );
+                                        if forward_installed {
                                             created += 1;
                                             let forward_entry = SyncedSessionEntry {
                                                 key: flow.forward_key.clone(),
@@ -1648,6 +1672,16 @@ pub(super) fn poll_binding_process_descriptor(
                                                     now_ns,
                                                 );
                                             }
+                                        } else {
+                                            rollback_source_nat_allocation(
+                                                &worker_ctx.forwarding.source_nat_rules,
+                                                source_nat_release_key
+                                                    .as_ref()
+                                                    .unwrap_or(&flow.forward_key),
+                                                decision.nat,
+                                                false,
+                                                now_ns,
+                                            );
                                         }
                                         let reverse_resolution = reverse_resolution_for_session(
                                             worker_ctx.forwarding,
@@ -2435,6 +2469,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // a reverse session. Without this, the SYN-ACK hits
                                 // session miss → policy deny (no rule for WAN→LAN).
                                 let mut pending_decision = decision;
+                                let mut source_nat_release_key = None;
                                 if let Some(flow) = flow.as_ref() {
                                     if let PolicyAction::Permit = evaluate_policy_with_len(
                                         &worker_ctx.forwarding.policy,
@@ -2457,9 +2492,12 @@ pub(super) fn poll_binding_process_descriptor(
                                                 &to_zone,
                                                 pending_decision.resolution.egress_ifindex,
                                                 &nat_match_flow,
+                                                now_ns,
                                             ) {
                                                 Ok(snat_decision) => {
                                                     pending_decision.nat = snat_decision;
+                                                    source_nat_release_key =
+                                                        Some(nat_match_flow.forward_key.clone());
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -2483,10 +2521,13 @@ pub(super) fn poll_binding_process_descriptor(
                                                 &to_zone,
                                                 pending_decision.resolution.egress_ifindex,
                                                 &nat_match_flow,
+                                                now_ns,
                                             ) {
                                                 Ok(snat_decision) => {
                                                     pending_decision.nat =
                                                         pending_decision.nat.merge(snat_decision);
+                                                    source_nat_release_key =
+                                                        Some(nat_match_flow.forward_key.clone());
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -2512,15 +2553,17 @@ pub(super) fn poll_binding_process_descriptor(
                                         packet_fabric_ingress,
                                         pending_decision,
                                     );
-                                    if sessions.install_with_protocol_with_origin(
-                                        flow.forward_key.clone(),
-                                        pending_decision,
-                                        sess_meta.clone(),
-                                        SessionOrigin::MissingNeighborSeed,
-                                        now_ns,
-                                        meta.protocol,
-                                        meta.tcp_flags,
-                                    ) {
+                                    let pending_installed =
+                                        sessions.install_with_protocol_with_origin(
+                                            flow.forward_key.clone(),
+                                            pending_decision,
+                                            sess_meta.clone(),
+                                            SessionOrigin::MissingNeighborSeed,
+                                            now_ns,
+                                            meta.protocol,
+                                            meta.tcp_flags,
+                                        );
+                                    if pending_installed {
                                         let entry = SyncedSessionEntry {
                                             key: flow.forward_key.clone(),
                                             decision: pending_decision,
@@ -2556,6 +2599,16 @@ pub(super) fn poll_binding_process_descriptor(
                                             pending_decision.nat,
                                         );
                                         telemetry.counters.session_creates += 1;
+                                    } else {
+                                        rollback_source_nat_allocation(
+                                            &worker_ctx.forwarding.source_nat_rules,
+                                            source_nat_release_key
+                                                .as_ref()
+                                                .unwrap_or(&flow.forward_key),
+                                            pending_decision.nat,
+                                            false,
+                                            now_ns,
+                                        );
                                     }
                                 }
                                 // Buffer the packet. The ICMP probe resolves ARP

@@ -65,9 +65,15 @@ type xpfCollector struct {
 	gcSweepDuration     *prometheus.Desc
 
 	// NAT pool utilization
-	natPoolUsedPorts         *prometheus.Desc
-	natPoolTotalPorts        *prometheus.Desc
-	natPoolDeterministicInfo *prometheus.Desc
+	natPoolUsedPorts                  *prometheus.Desc
+	natPoolTotalPorts                 *prometheus.Desc
+	natPoolDeterministicInfo          *prometheus.Desc
+	userspaceSNATPoolLiveFlows        *prometheus.Desc
+	userspaceSNATPoolUsedPorts        *prometheus.Desc
+	userspaceSNATPoolPersistentLeases *prometheus.Desc
+	userspaceSNATPoolAllocationsTotal *prometheus.Desc
+	userspaceSNATPoolReusesTotal      *prometheus.Desc
+	userspaceSNATPoolExhaustionsTotal *prometheus.Desc
 
 	// DHCP lease gauge
 	dhcpLeasesActive *prometheus.Desc
@@ -335,6 +341,36 @@ func newCollector(srv *Server) *xpfCollector {
 			"xpf_nat_pool_deterministic_info",
 			"Deterministic NAT pool configuration (1 = enabled).",
 			[]string{"pool", "block_size", "host_count"}, nil,
+		),
+		userspaceSNATPoolLiveFlows: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_live_flows",
+			"Live source NAT pool flow allocations tracked by the userspace dataplane.",
+			[]string{"pool", "rule"}, nil,
+		),
+		userspaceSNATPoolUsedPorts: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_used_ports",
+			"Source NAT pool translated ports currently owned by the userspace dataplane allocator.",
+			[]string{"pool", "rule"}, nil,
+		),
+		userspaceSNATPoolPersistentLeases: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_persistent_leases",
+			"Persistent source NAT leases retained by the userspace dataplane allocator.",
+			[]string{"pool", "rule"}, nil,
+		),
+		userspaceSNATPoolAllocationsTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_allocations_total",
+			"Total new source NAT pool translated tuple allocations by the userspace dataplane.",
+			[]string{"pool", "rule"}, nil,
+		),
+		userspaceSNATPoolReusesTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_reuses_total",
+			"Total source NAT pool live or persistent lease reuses by the userspace dataplane.",
+			[]string{"pool", "rule"}, nil,
+		),
+		userspaceSNATPoolExhaustionsTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_exhaustions_total",
+			"Total source NAT pool allocator exhaustion events in the userspace dataplane.",
+			[]string{"pool", "rule"}, nil,
 		),
 		dhcpLeasesActive: prometheus.NewDesc(
 			"xpf_dhcp_leases_active",
@@ -741,6 +777,12 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.natPoolUsedPorts
 	ch <- c.natPoolTotalPorts
 	ch <- c.natPoolDeterministicInfo
+	ch <- c.userspaceSNATPoolLiveFlows
+	ch <- c.userspaceSNATPoolUsedPorts
+	ch <- c.userspaceSNATPoolPersistentLeases
+	ch <- c.userspaceSNATPoolAllocationsTotal
+	ch <- c.userspaceSNATPoolReusesTotal
+	ch <- c.userspaceSNATPoolExhaustionsTotal
 	ch <- c.dhcpLeasesActive
 	ch <- c.sysCPUUser
 	ch <- c.sysCPUSystem
@@ -855,6 +897,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, dp da
 	c.emitBindingTXCompletionTelemetry(ch, status)
 	c.emitCoSActiveFlowCount(ch, status)
 	c.emitThreeColorPolicerCounters(ch, status)
+	c.emitUserspaceSourceNATPoolMetrics(ch, status)
 	c.emitFairnessRSSGauges(ch, status)
 	c.emitFairnessThroughputGauges(ch, status)
 }
@@ -891,6 +934,48 @@ func (c *xpfCollector) emitThreeColorPolicerCounters(ch chan<- prometheus.Metric
 			prometheus.CounterValue,
 			float64(p.DropBytes),
 			p.Name,
+		)
+	}
+}
+
+func (c *xpfCollector) emitUserspaceSourceNATPoolMetrics(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, pool := range status.SourceNATPools {
+		labels := []string{pool.PoolName, pool.RuleName}
+		ch <- prometheus.MustNewConstMetric(
+			c.userspaceSNATPoolLiveFlows,
+			prometheus.GaugeValue,
+			float64(pool.LiveFlows),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.userspaceSNATPoolUsedPorts,
+			prometheus.GaugeValue,
+			float64(pool.UsedPorts),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.userspaceSNATPoolPersistentLeases,
+			prometheus.GaugeValue,
+			float64(pool.PersistentLeases),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.userspaceSNATPoolAllocationsTotal,
+			prometheus.CounterValue,
+			float64(pool.AllocationsTotal),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.userspaceSNATPoolReusesTotal,
+			prometheus.CounterValue,
+			float64(pool.ReusesTotal),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.userspaceSNATPoolExhaustionsTotal,
+			prometheus.CounterValue,
+			float64(pool.ExhaustionTotal),
+			labels...,
 		)
 	}
 }

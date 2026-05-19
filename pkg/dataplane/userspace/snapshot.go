@@ -1290,6 +1290,9 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 			}
 			var poolAddresses []string
 			var portLow, portHigh uint16
+			var persistentNAT bool
+			var persistentNATPermitAnyRemoteHost bool
+			var persistentNATInactivityTimeout int
 			var poolUnusable bool
 			var poolUnusableReason string
 			if rule.Then.PoolName != "" {
@@ -1319,23 +1322,34 @@ func buildSourceNATSnapshots(cfg *config.Config) []SourceNATRuleSnapshot {
 						poolUnusable = true
 						poolUnusableReason = "invalid_port_range"
 					}
+					if pool.PersistentNAT != nil {
+						persistentNAT = true
+						persistentNATPermitAnyRemoteHost = pool.PersistentNAT.PermitAnyRemoteHost
+						persistentNATInactivityTimeout = pool.PersistentNAT.InactivityTimeout
+						if persistentNATInactivityTimeout <= 0 {
+							persistentNATInactivityTimeout = 300
+						}
+					}
 				}
 			}
 			out = append(out, SourceNATRuleSnapshot{
-				Name:                 rule.Name,
-				FromZone:             rs.FromZone,
-				ToZone:               rs.ToZone,
-				SourceAddresses:      sourceAddrs,
-				DestinationAddresses: destAddrs,
-				InterfaceMode:        rule.Then.Interface,
-				Off:                  rule.Then.Off,
-				PoolName:             rule.Then.PoolName,
-				PoolAddresses:        poolAddresses,
-				PortLow:              portLow,
-				PortHigh:             portHigh,
-				AddressPersistent:    cfg.Security.NAT.AddressPersistent,
-				PoolUnusable:         poolUnusable,
-				PoolUnusableReason:   poolUnusableReason,
+				Name:                             rule.Name,
+				FromZone:                         rs.FromZone,
+				ToZone:                           rs.ToZone,
+				SourceAddresses:                  sourceAddrs,
+				DestinationAddresses:             destAddrs,
+				InterfaceMode:                    rule.Then.Interface,
+				Off:                              rule.Then.Off,
+				PoolName:                         rule.Then.PoolName,
+				PoolAddresses:                    poolAddresses,
+				PortLow:                          portLow,
+				PortHigh:                         portHigh,
+				AddressPersistent:                cfg.Security.NAT.AddressPersistent,
+				PersistentNAT:                    persistentNAT,
+				PersistentNATPermitAnyRemoteHost: persistentNATPermitAnyRemoteHost,
+				PersistentNATInactivityTimeout:   persistentNATInactivityTimeout,
+				PoolUnusable:                     poolUnusable,
+				PoolUnusableReason:               poolUnusableReason,
 			})
 		}
 	}

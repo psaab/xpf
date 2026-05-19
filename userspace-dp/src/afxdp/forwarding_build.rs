@@ -393,7 +393,10 @@ pub(super) fn build_forwarding_state_with_policy_counters_and_previous(
         snapshot.flow.udp_session_timeout,
         snapshot.flow.icmp_session_timeout,
     );
-    state.source_nat_rules = parse_source_nat_rules(&snapshot.source_nat_rules);
+    state.source_nat_rules = parse_source_nat_rules_with_previous(
+        &snapshot.source_nat_rules,
+        previous.map(|state| state.source_nat_rules.as_slice()),
+    );
     state.static_nat = StaticNatTable::from_snapshots(&snapshot.static_nat_rules);
     state.dnat_table = DnatTable::from_snapshots(&snapshot.destination_nat_rules);
     state.nat64 = Nat64State::from_snapshots(&snapshot.nat64_rules);

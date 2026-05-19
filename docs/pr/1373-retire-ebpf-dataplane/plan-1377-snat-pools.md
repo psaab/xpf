@@ -2,10 +2,10 @@
 
 ## Goal
 
-Make source-NAT pool mode a first-class userspace feature so configs using
-`then source-nat pool <name>` no longer depend on the legacy eBPF dataplane for
-safe admission, address selection, port-range enforcement, durable
-translations, and operator-visible allocation failures.
+Make source-NAT pool mode a first-class userspace feature so non-HA configs
+using `then source-nat pool <name>` no longer depend on the legacy eBPF
+dataplane for safe admission, address selection, port-range enforcement,
+runtime lease reuse, and operator-visible allocation failures.
 
 ## Current Status
 
@@ -23,9 +23,19 @@ translations, and operator-visible allocation failures.
   pool-mode source-NAT rule matched but cannot produce a translation". Missing
   pools, empty pools, invalid pool inputs, wrong-family-only pools, and
   allocator failures are fail-closed before session creation or forwarding.
-- The remaining #1377 work is now contract work plus runtime work for per-pool
-  `persistent-nat`, pool allocator observability, live-port ownership, and
-  true exhaustion counters.
+- Per-pool `persistent-nat` now has explicit snapshot fields and Rust runtime
+  lease reuse. The userspace protocol is bumped so helpers that do not know
+  those fields reject the snapshot instead of silently claiming support.
+- Rust now tracks live translated tuples and reports allocator exhaustion
+  instead of wrapping into an already-owned port. Userspace status, CLI summary,
+  and Prometheus expose live-flow, used-port, persistent-lease, allocation,
+  reuse, and exhaustion counters.
+- The supported persistent-NAT slice is helper-local and non-HA. Rules that
+  reference the same concrete pool share one allocator and one lease table, so
+  duplicate rules cannot overbook the same translated tuple. Compatible
+  in-process snapshot refreshes preserve allocator state, but helper restart
+  does not. HA configs that use a persistent source-NAT pool are gated because
+  persistent leases are not synchronized.
 
 ## Current Fail-Closed Runtime Boundary
 
@@ -40,15 +50,15 @@ The current fail-closed runtime call sites are the four
 `source_nat_decision_for_flow(...)` paths in
 `userspace-dp/src/afxdp/poll_descriptor.rs`:
 
-- `poll_descriptor.rs:1214` - normal new-session path, no pre-routing DNAT:
+- `poll_descriptor.rs:1229` - normal new-session path, no pre-routing DNAT:
   source NAT lookup fails closed before the NAT decision is installed.
-- `poll_descriptor.rs:1241` - normal new-session path after pre-routing DNAT:
+- `poll_descriptor.rs:1257` - normal new-session path after pre-routing DNAT:
   the source NAT side of the merged decision fails closed before merge/session
   creation.
-- `poll_descriptor.rs:2133` - pending-neighbor/session-build retry path, no
+- `poll_descriptor.rs:2160` - pending-neighbor/session-build retry path, no
   pre-routing DNAT: source NAT lookup fails closed before the missing-neighbor
   seed session is installed.
-- `poll_descriptor.rs:2159` - pending-neighbor/session-build retry path after
+- `poll_descriptor.rs:2187` - pending-neighbor/session-build retry path after
   pre-routing DNAT: the source NAT side of the merged decision fails closed
   before the missing-neighbor seed session is installed.
 
@@ -67,10 +77,11 @@ packet; silently falling through to a later rule would mask the broken pool and
 make rule ordering dependent on address-family mistakes. Operators should split
 IPv4 and IPv6 pool rules explicitly when they want independent behavior.
 
-Residual risk: the allocator still wraps ports because Rust does not yet keep a
-live translated-tuple ownership table. The fail-closed path exists for
-allocator failure, but true live-port exhaustion detection and counters remain
-open #1377 work.
+Allocator exhaustion is now a real runtime condition. The allocator owns a
+bounded per-pool live-flow table, a translated-tuple owner table, and a
+persistent source-tuple lease table. When no translated port can be claimed for
+the matched pool family, the packet fails closed with
+`source_nat_pool_exhausted` before session creation or forwarding.
 
 ## Userspace-v1 Address-Persistent Contract
 
@@ -131,46 +142,92 @@ Junos global `source address-persistent` is not the same feature as per-pool
   across later flows until timeout, subject to pool persistence mode such as
   `permit-any-remote-host`.
 
-Current AF_XDP userspace snapshots do not carry per-pool `persistent-nat`
-configuration, and the Rust allocator does not consult the Go
-`PersistentNATTable`. The existing Go table can record expired legacy sessions,
-but that is not a userspace-v1 allocation contract. A production-ready
-userspace persistent-NAT implementation needs:
+AF_XDP userspace snapshots now carry per-pool `persistent-nat` runtime fields:
 
-- snapshot fields for pool persistence mode, inactivity timeout, and
-  `permit-any-remote-host`;
-- a bounded runtime mapping table keyed by the Junos-compatible persistence key;
-- lookup-before-allocation, collision handling, timeout/LRU reclamation, and a
-  no-alias invariant for live translated 5-tuples; and
-- HA behavior that either syncs the persistent table or explicitly limits
-  persistence to active synced sessions.
+- `persistent_nat`
+- `persistent_nat_permit_any_remote_host`
+- `persistent_nat_inactivity_timeout`
 
-Until that lands, #1377 remains open for per-pool `persistent-nat`. Configs that
-depend on persistent-NAT lease reuse must not be treated as fully owned by the
-AF_XDP userspace dataplane.
+The protocol version is `3`. A daemon with these fields will only publish to a
+helper that reports the same snapshot protocol version; older helpers reject the
+snapshot as an unsupported version instead of ignoring the persistence fields.
+
+The implemented runtime key is source tuple:
+
+- L4 protocol
+- original source IP
+- original source port
+
+That source tuple maps to one translated tuple:
+
+- selected pool IP
+- selected source port
+
+The key intentionally does not include destination address or destination port,
+because per-pool persistent NAT is source-tuple lease reuse. This is distinct
+from global `source address-persistent`, which is only source-IP to pool-address
+affinity during allocation.
+
+The userspace runtime does not consult the Go `PersistentNATTable`. The current
+contract is helper-local:
+
+- live flows hold the translated tuple until their userspace session expires;
+- persistent leases remain after the last live flow releases them and expire
+  after the configured inactivity timeout;
+- source-NAT allocations that fail before session install use a rollback path,
+  not the inactivity-release path, so a rejected new persistent tuple does not
+  pin a lease for the timeout window;
+- compatible in-process snapshot refreshes preserve allocator state;
+- helper restart loses the persistent lease table; and
+- HA configs using persistent source-NAT pools are gated because leases are not
+  synchronized to the peer.
+
+`permit any-remote-host` is represented in the snapshot/status contract and is
+accepted by this runtime slice. The allocator reuse key is already independent
+of remote host. Sessionless inbound permission semantics beyond normal
+reverse-session traffic are not claimed by this slice.
 
 ## Port Allocation and Counters
 
-Current userspace pool ports are allocated by per-pool-address atomic counters
-that wrap inside the configured range. There is no live-port ownership table in
-the Rust allocator, so it cannot currently prove exhaustion or report true pool
-exhaustion. The counter contract still needed for #1377 is:
+Tracked userspace flow allocations use per-address cursors plus recycled-port
+stacks, and translated tuple ownership is recorded before a session is
+installed. The remaining tupleless diagnostic lookup path still uses
+per-address atomic counters because it does not create a tracked session.
 
-- allocation success by pool and address family;
-- allocation failure separated into missing/invalid pool, wrong-family pool,
-  exhausted live translated tuple space, and persistence-table eviction;
-- port wrap/reuse visibility until live-port tracking exists; and
-- persistence-table size, hit, miss, timeout, and eviction counters.
+The per-pool allocator state is bounded by the smaller of pool port capacity and
+`262144` tracked live flows. This prevents attacker-controlled unbounded growth
+in the packet path. Fresh port claims use a per-address cursor and a recycled
+port stack, and persistent lease expiry uses a replace-in-place ordered expiry
+index bounded by the number of retained leases. Near-full allocation and
+timeout cleanup do not scan the whole port range or lease map on every new
+flow. The allocator reports exhaustion when:
+
+- the selected address-persistent pool address has no free port;
+- a non-address-persistent family has no free port on any family-compatible
+  pool address; or
+- the bounded live-flow table is full.
+
+Status and Prometheus expose:
+
+- live tracked flows;
+- owned translated ports;
+- retained persistent leases;
+- total new allocations;
+- total live/persistent reuses; and
+- total exhaustion events.
 
 ## Hot-Path Invariants
 
-- No global allocator lock on the packet path.
+- No global allocator lock on the packet path. Each concrete source-NAT pool
+  owns its own allocator lock and bounded maps. Multiple rules that reference
+  the same pool share that allocator.
 - Port-range validation happens before any `u16` truncation.
 - A pool-mode rule without a usable pool is fail-closed at the four runtime
   call sites listed above. The packet is dropped and a recent exception is
   recorded before session creation or forwarding.
 - Existing reverse-session NAT behavior remains the source of truth for return
-  traffic on active sessions.
+  traffic on active sessions. Persistent leases affect new source-side
+  allocation only.
 - Address-persistent pool choice is deterministic for the configured backend,
   source address, pool family, pool order, and pool size.
 - Cross-backend selector divergence is an explicit compatibility boundary, not
@@ -178,15 +235,19 @@ exhaustion. The counter contract still needed for #1377 is:
 
 ## Exact Tests
 
-Already covered by #1385 and this follow-up:
+Covered by #1385 and this closeout:
 
 - Go: userspace snapshot carries pool addresses, port low/high, rule identity,
-  and `address_persistent`.
+  `address_persistent`, and per-pool `persistent-nat` fields.
+- Go: protocol round-trip covers source-NAT persistent fields and source-NAT
+  pool status rows.
+- Go: userspace admission gates HA configs that use persistent source-NAT
+  pools because leases are not synchronized.
 - Go: snapshot builder preserves missing pool, empty pool, invalid port range,
   and nil pool entries as unusable pool-mode rules with
   `pool_unusable_reason`.
 - Cargo: missing pools, empty pools, invalid port ranges, malformed pool
-  addresses, wrong-family-only pools, and allocator failure surfaces are
+  addresses, wrong-family-only pools, and allocator exhaustion surfaces are
   distinct from no source-NAT match.
 - Cargo: source-NAT pool rules with missing pools, empty pools, invalid port
   ranges, wrong-family-only pools, or allocation failures fail closed at all
@@ -198,24 +259,36 @@ Already covered by #1385 and this follow-up:
   address.
 - Cargo: userspace-v1 fixtures explicitly differ from legacy eBPF/DPDK
   address-persistent algorithms.
+- Cargo: persistent source tuple reuses the same translated tuple across remote
+  hosts while the lease is live.
+- Cargo: persistent source tuple is reassigned after release plus inactivity
+  timeout.
+- Cargo: live allocator exhaustion increments per-pool status counters.
+- Cargo: duplicate source-NAT rules that reference the same concrete pool share
+  one allocator, so a one-port pool cannot be double-booked across rules.
+- Cargo: failed source-NAT session installation rolls back the live translated
+  tuple, making the port immediately available for a later flow.
+- Cargo: duplicate source-NAT rules that reference the same concrete pool but
+  use different persistence settings still share tuple-space ownership.
+- Cargo: DNAT+source-NAT release uses the post-DNAT destination key so normal
+  expiry and rollback release the actual allocated tuple.
+- Cargo: repeated persistent lease refresh/release churn keeps the expiry index
+  bounded by retained leases rather than by allocation count.
+- Cargo: protocol round-trip covers persistent source-NAT snapshot/status
+  fields.
 
-Still required to close the remaining #1377 runtime work:
+Still outside the current supported contract:
 
-- Go/Rust protocol tests for per-pool `persistent-nat` snapshot fields once they
-  exist.
-- Cargo: persistent key reuses the same translated tuple while live and
-  reallocates after expiry.
-- Cargo: allocator never assigns the same live translated 5-tuple to two live
-  clients and reports exhaustion instead of silent wrap reuse.
 - Integration: active userspace SNAT pool sessions preserve return traffic
   across failover, while new-flow mixed-backend rollback tests accept the
   documented selector boundary.
-- Observability: pool allocation, exhaustion, persistence hit/miss, timeout,
-  and eviction counters are visible under pressure.
+- Helper-restart persistence for the persistent-NAT lease table.
+- HA synchronization for persistent-NAT leases.
+- A shared selector algorithm across eBPF, DPDK, and userspace for new-flow
+  cross-backend parity.
 
 ## Non-Goals
 
 - Do not redesign all NAT rule matching in #1377.
 - Do not remove eBPF NAT source as part of #1377.
-- Do not claim per-pool `persistent-nat` parity from the userspace-v1
-  address-persistent selector alone.
+- Do not claim helper-restart or HA persistence for per-pool `persistent-nat`.

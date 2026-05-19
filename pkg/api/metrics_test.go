@@ -454,6 +454,80 @@ func TestEmitThreeColorPolicerCounters(t *testing.T) {
 	assertCounterClose(t, got, c.threeColorPolicerDropBytes, map[string]string{"policer": "wan-egress"}, 200)
 }
 
+func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
+	c := &xpfCollector{
+		userspaceSNATPoolLiveFlows: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_live_flows",
+			"live flows",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolUsedPorts: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_used_ports",
+			"used ports",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolPersistentLeases: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_persistent_leases",
+			"persistent leases",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolAllocationsTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_allocations_total",
+			"allocations",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolReusesTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_reuses_total",
+			"reuses",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolExhaustionsTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_exhaustions_total",
+			"exhaustions",
+			[]string{"pool", "rule"},
+			nil,
+		),
+	}
+	status := dpuserspace.ProcessStatus{
+		SourceNATPools: []dpuserspace.SourceNATPoolStatus{{
+			PoolName:         "pool-a",
+			RuleName:         "snat-a",
+			LiveFlows:        2,
+			UsedPorts:        1,
+			PersistentLeases: 1,
+			AllocationsTotal: 3,
+			ReusesTotal:      5,
+			ExhaustionTotal:  7,
+		}},
+	}
+
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitUserspaceSourceNATPoolMetrics(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 6 {
+		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 6 metrics, got %d", len(got))
+	}
+
+	labels := map[string]string{"pool": "pool-a", "rule": "snat-a"}
+	assertGaugeClose(t, got, c.userspaceSNATPoolLiveFlows, labels, 2)
+	assertGaugeClose(t, got, c.userspaceSNATPoolUsedPorts, labels, 1)
+	assertGaugeClose(t, got, c.userspaceSNATPoolPersistentLeases, labels, 1)
+	assertCounterClose(t, got, c.userspaceSNATPoolAllocationsTotal, labels, 3)
+	assertCounterClose(t, got, c.userspaceSNATPoolReusesTotal, labels, 5)
+	assertCounterClose(t, got, c.userspaceSNATPoolExhaustionsTotal, labels, 7)
+}
+
 func metricValuesByWorker(
 	t *testing.T,
 	metrics []prometheus.Metric,

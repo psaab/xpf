@@ -4,7 +4,8 @@ use super::{
 };
 use crate::nat::{
     DnatTable, NatDecision, SourceNatFailure, SourceNatLookup, SourceNatRule, StaticNatTable,
-    match_source_nat, match_source_nat_result, parse_source_nat_rules,
+    match_source_nat, parse_source_nat_rules_with_previous, release_source_nat_allocation,
+    rollback_source_nat_allocation,
 };
 use crate::nat64::{Nat64ReverseInfo, Nat64State};
 use crate::nptv6::Nptv6State;

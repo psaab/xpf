@@ -297,14 +297,17 @@ the NAT module applies it:
   modulo and IPv6 lane-XOR selection. Active synced sessions carry the chosen
   translated tuple, but new allocations after backend rollback may choose a
   different pool address. Pool-mode rules with missing pools, empty pools,
-  invalid port ranges, malformed addresses, or no address for the packet
-  family fail-closed at the current `poll_descriptor.rs` source-NAT call sites
-  before session creation or forwarding, and record recent-exception reasons
-  such as `source_nat_pool_missing`, `source_nat_pool_empty`, and
-  `source_nat_pool_invalid_port_range`. Per-pool `persistent-nat` lease reuse
-  is not part of the userspace-v1 runtime contract yet because the snapshot
-  does not carry persistence mode and the Rust allocator does not consult the
-  Go `PersistentNATTable`.
+  invalid port ranges, malformed addresses, no address for the packet family,
+  or exhausted translated tuples fail-closed at the current
+  `poll_descriptor.rs` source-NAT call sites before session creation or
+  forwarding, and record recent-exception reasons such as
+  `source_nat_pool_missing`, `source_nat_pool_empty`,
+  `source_nat_pool_invalid_port_range`, and `source_nat_pool_exhausted`.
+  Per-pool `persistent-nat` lease reuse is helper-local userspace runtime
+  state keyed by source tuple `(protocol, source IP, source port)` to
+  translated tuple. Compatible in-process snapshot refreshes preserve it;
+  helper restart does not. HA configs using persistent source-NAT pools are
+  gated because persistent leases are not synchronized.
 - **Checksum update:** Incremental RFC 1624 checksum adjustment for
   IP header + TCP/UDP pseudo-header. Avoids full recomputation.
 
@@ -384,7 +387,8 @@ contract for per-pool `persistent-nat`, allocator exhaustion counters, and
 mixed-backend rollback constraints. Port mirroring is no longer a
 `deriveUserspaceCapabilities()` gate; its remaining #1376 work is operator
 evidence for mirror fidelity and primary-forwarding survival under mirror
-pressure before BPF source removal.
+pressure before BPF source removal. HA persistent-SNAT configs remain gated;
+non-HA per-pool persistent-NAT lease reuse is helper-local userspace state.
 
 Policy scheduler state is no longer a propagation gap: #1396 carries scheduler
 state into the userspace snapshot and Rust policy evaluator, and the 2026-05-19
@@ -394,9 +398,10 @@ commit behavior, and integration/failover evidence with
 #1377 now preserves unusable pool-mode source-NAT rules in the snapshot and
 fails closed at the `poll_descriptor.rs` source-NAT call sites for missing
 pools, empty pools, invalid pool inputs, wrong-family-only pools, or allocator
-failure. #1377 still owns persistent-NAT lease reuse, allocator observability,
-live-port exhaustion counters, and the documented mixed-backend rollback
-boundary. #1386 landed
+failure. The current slice adds bounded helper-local persistent-NAT lease reuse,
+allocator observability, and live-port exhaustion counters. #1377 still owns
+helper-restart persistence, HA lease synchronization, and the documented
+mixed-backend rollback boundary. #1386 landed
 userspace buffer/status rendering; #1380 still owns
 retirement of the remaining BPF-map-oriented operator surface.
 
@@ -560,10 +565,11 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
 **Still explicitly gated or incomplete for eBPF retirement:**
 - Source NAT pool mode: userspace-v1 deterministic pool selection and
   fail-closed runtime handling for missing pools, empty pools, invalid pool
-  inputs, wrong-family-only pools, and allocator failures have landed. #1377 is
-  still required for per-pool `persistent-nat` lease reuse,
-  pool allocation/exhaustion counters, and the mixed-backend rollback test
-  boundary.
+  inputs, wrong-family-only pools, and allocator failures have landed.
+  Helper-local non-HA per-pool `persistent-nat` lease reuse and pool
+  allocation/exhaustion counters have landed. #1377 is still required for
+  helper-restart persistence, HA lease synchronization, and the mixed-backend
+  rollback test boundary.
 - SYN-cookie flood protection closeout: #1374 still owns bounded SYN-ACK/RST
   TX, HA-safe secrets, integration evidence, and gate removal.
 - RFC 2697/2698 three-color policer closeout: #1375 now preserves
