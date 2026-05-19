@@ -51,7 +51,10 @@ pub(super) use inspect::{
 //     callers continue to see it via the wider re-export path.
 //   - the remaining helpers stay at pub(super) (or fn-private for
 //     the clamp helpers, which are only used inside frame/mod.rs).
-pub(in crate::afxdp) use tcp::frame_has_tcp_rst;
+#[allow(unused_imports)]
+pub(in crate::afxdp) use tcp::{
+    build_syn_cookie_ack_rst_frame, build_syn_cookie_syn_ack_frame, frame_has_tcp_rst,
+};
 pub(super) use tcp::{extract_tcp_flags_and_window, extract_tcp_window, tcp_flags_str};
 use tcp::clamp_tcp_mss_frame;
 

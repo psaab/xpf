@@ -944,6 +944,110 @@ fn tcp_ports_ipv4(packet: &[u8]) -> (u16, u16) {
     )
 }
 
+#[test]
+fn syn_cookie_syn_ack_builder_swaps_tuple_and_preserves_vlan() {
+    let client = Ipv4Addr::new(192, 0, 2, 10);
+    let server = Ipv4Addr::new(198, 51, 100, 20);
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        80,
+        0x0800,
+    );
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&client.octets());
+    frame.extend_from_slice(&server.octets());
+    let ip_csum = checksum16(&frame[18..38]);
+    frame[28..30].copy_from_slice(&ip_csum.to_be_bytes());
+    frame.extend_from_slice(&49152u16.to_be_bytes());
+    frame.extend_from_slice(&443u16.to_be_bytes());
+    frame.extend_from_slice(&0x0102_0304u32.to_be_bytes());
+    frame.extend_from_slice(&0u32.to_be_bytes());
+    frame.extend_from_slice(&[
+        0x50,
+        TCP_FLAG_SYN,
+        0x20,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    ]);
+    recompute_l4_checksum_ipv4(&mut frame[18..], 20, PROTO_TCP, false).expect("tcp sum");
+
+    let out = build_syn_cookie_syn_ack_frame(&frame, 0xaabb_ccdd, 1460)
+        .expect("syn-cookie syn-ack");
+
+    assert_eq!(&out[0..6], &[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    assert_eq!(&out[6..12], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    assert_eq!(&out[12..18], &frame[12..18]);
+    assert_eq!(&out[30..34], &server.octets());
+    assert_eq!(&out[34..38], &client.octets());
+    assert_eq!(u16::from_be_bytes([out[20], out[21]]), 44);
+    assert_eq!(u16::from_be_bytes([out[38], out[39]]), 443);
+    assert_eq!(u16::from_be_bytes([out[40], out[41]]), 49152);
+    assert_eq!(
+        u32::from_be_bytes([out[42], out[43], out[44], out[45]]),
+        0xaabb_ccdd
+    );
+    assert_eq!(
+        u32::from_be_bytes([out[46], out[47], out[48], out[49]]),
+        0x0102_0305
+    );
+    assert_eq!(out[50] >> 4, 6);
+    assert_eq!(out[51], TCP_FLAG_SYN | 0x10);
+    assert_eq!(&out[58..62], &[2, 4, 0x05, 0xb4]);
+    assert_eq!(checksum16(&out[18..38]), 0);
+    assert!(tcp_checksum_ok_ipv4(&out[18..]));
+}
+
+#[test]
+fn syn_cookie_ack_rst_builder_uses_received_ack_as_rst_seq() {
+    let client = Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 10);
+    let server = Ipv6Addr::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 20);
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+        0,
+        0x86dd,
+    );
+    frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    frame.extend_from_slice(&20u16.to_be_bytes());
+    frame.push(PROTO_TCP);
+    frame.push(64);
+    frame.extend_from_slice(&client.octets());
+    frame.extend_from_slice(&server.octets());
+    frame.extend_from_slice(&49152u16.to_be_bytes());
+    frame.extend_from_slice(&443u16.to_be_bytes());
+    frame.extend_from_slice(&0x1111_2222u32.to_be_bytes());
+    frame.extend_from_slice(&0x3333_4444u32.to_be_bytes());
+    frame.extend_from_slice(&[0x50, 0x10, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    recompute_l4_checksum_ipv6(&mut frame[14..], PROTO_TCP).expect("tcp sum");
+
+    let out = build_syn_cookie_ack_rst_frame(&frame).expect("syn-cookie rst");
+
+    assert_eq!(&out[0..6], &[0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+    assert_eq!(&out[6..12], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    assert_eq!(&out[22..38], &server.octets());
+    assert_eq!(&out[38..54], &client.octets());
+    assert_eq!(u16::from_be_bytes([out[18], out[19]]), 20);
+    assert_eq!(u16::from_be_bytes([out[54], out[55]]), 443);
+    assert_eq!(u16::from_be_bytes([out[56], out[57]]), 49152);
+    assert_eq!(
+        u32::from_be_bytes([out[58], out[59], out[60], out[61]]),
+        0x3333_4444
+    );
+    assert_eq!(u32::from_be_bytes([out[62], out[63], out[64], out[65]]), 0);
+    assert_eq!(out[67], 0x04);
+    assert!(tcp_checksum_ok_ipv6(&out[14..]));
+}
+
 fn icmpv6_checksum_ok(packet: &[u8]) -> bool {
     let src = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).expect("src"));
     let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).expect("dst"));

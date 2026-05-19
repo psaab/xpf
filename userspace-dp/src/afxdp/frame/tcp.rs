@@ -25,6 +25,23 @@
 
 use super::*;
 
+#[cfg_attr(not(test), allow(dead_code))]
+const SYN_COOKIE_REPLY_TTL: u8 = 64;
+#[cfg_attr(not(test), allow(dead_code))]
+const SYN_COOKIE_REPLY_HOP_LIMIT: u8 = 64;
+#[cfg_attr(not(test), allow(dead_code))]
+const SYN_COOKIE_TCP_WINDOW: u16 = 64240;
+#[cfg_attr(not(test), allow(dead_code))]
+const TCP_FLAG_ACK: u8 = 0x10;
+#[cfg_attr(not(test), allow(dead_code))]
+const TCP_FLAG_RST: u8 = 0x04;
+#[cfg_attr(not(test), allow(dead_code))]
+const TCP_FLAG_SYN: u8 = 0x02;
+#[cfg_attr(not(test), allow(dead_code))]
+const TCP_MIN_HEADER_LEN: usize = 20;
+#[cfg_attr(not(test), allow(dead_code))]
+const TCP_MSS_OPTION_LEN: usize = 4;
+
 /// Check if a frame contains a TCP RST flag.
 #[inline(always)]
 pub(in crate::afxdp) fn frame_has_tcp_rst(frame: &[u8]) -> bool {
@@ -249,6 +266,254 @@ pub(super) fn clamp_tcp_mss(packet: &mut [u8], max_mss: u16) -> bool {
         pos += opt_len;
     }
     false
+}
+
+/// Build the SYN-cookie challenge reply for a threshold-exceeded SYN.
+///
+/// The caller still owns admission and TX-frame budgeting. This builder is a
+/// pure byte-construction primitive: it swaps L2/L3/L4 identity, emits a
+/// minimal SYN+ACK with the encoded cookie as the sequence number, advertises
+/// the selected MSS when present, and recomputes checksums from scratch.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::afxdp) fn build_syn_cookie_syn_ack_frame(
+    frame: &[u8],
+    cookie_isn: u32,
+    advertised_mss: u16,
+) -> Option<Vec<u8>> {
+    let parsed = parse_tcp_reply_source(frame)?;
+    if (parsed.flags & TCP_FLAG_SYN) == 0 || (parsed.flags & TCP_FLAG_ACK) != 0 {
+        return None;
+    }
+    let tcp_len = if advertised_mss > 0 {
+        TCP_MIN_HEADER_LEN + TCP_MSS_OPTION_LEN
+    } else {
+        TCP_MIN_HEADER_LEN
+    };
+    build_syn_cookie_tcp_reply(
+        frame,
+        parsed,
+        tcp_len,
+        cookie_isn,
+        parsed.seq.wrapping_add(1),
+        TCP_FLAG_SYN | TCP_FLAG_ACK,
+        advertised_mss,
+    )
+}
+
+/// Build the RST reply for a validated SYN-cookie ACK.
+///
+/// The current userspace contract mirrors the eBPF behavior: a valid cookie ACK
+/// is consumed, a RST is sent, and the client's next SYN takes the normal
+/// policy/NAT/session path. For ACK-bearing segments RFC 793 sets the RST
+/// sequence number from the received ACK and does not include an ACK field.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::afxdp) fn build_syn_cookie_ack_rst_frame(frame: &[u8]) -> Option<Vec<u8>> {
+    let parsed = parse_tcp_reply_source(frame)?;
+    if (parsed.flags & TCP_FLAG_ACK) == 0 || (parsed.flags & TCP_FLAG_SYN) != 0 {
+        return None;
+    }
+    build_syn_cookie_tcp_reply(
+        frame,
+        parsed,
+        TCP_MIN_HEADER_LEN,
+        parsed.ack,
+        0,
+        TCP_FLAG_RST,
+        0,
+    )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy)]
+struct TcpReplySource {
+    l3: usize,
+    addr_family: u8,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_tcp_reply_source(frame: &[u8]) -> Option<TcpReplySource> {
+    let l3 = frame_l3_offset(frame)?;
+    let ip = frame.get(l3..)?;
+    let addr_family = match ip.first()? >> 4 {
+        4 => libc::AF_INET as u8,
+        6 => libc::AF_INET6 as u8,
+        _ => return None,
+    };
+    let l4 = frame_l4_offset(frame, addr_family)?;
+    let tcp = frame.get(l4..l4 + TCP_MIN_HEADER_LEN)?;
+    let protocol = match addr_family as i32 {
+        libc::AF_INET => *ip.get(9)?,
+        libc::AF_INET6 => {
+            let (_, protocol) = packet_rel_l4_offset_and_protocol(ip, addr_family)?;
+            protocol
+        }
+        _ => return None,
+    };
+    if protocol != PROTO_TCP {
+        return None;
+    }
+    Some(TcpReplySource {
+        l3,
+        addr_family,
+        src_port: u16::from_be_bytes([tcp[0], tcp[1]]),
+        dst_port: u16::from_be_bytes([tcp[2], tcp[3]]),
+        seq: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
+        ack: u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]),
+        flags: tcp[13],
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_syn_cookie_tcp_reply(
+    frame: &[u8],
+    parsed: TcpReplySource,
+    tcp_len: usize,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    advertised_mss: u16,
+) -> Option<Vec<u8>> {
+    match parsed.addr_family as i32 {
+        libc::AF_INET => build_syn_cookie_tcp_reply_v4(
+            frame,
+            parsed,
+            tcp_len,
+            seq,
+            ack,
+            flags,
+            advertised_mss,
+        ),
+        libc::AF_INET6 => build_syn_cookie_tcp_reply_v6(
+            frame,
+            parsed,
+            tcp_len,
+            seq,
+            ack,
+            flags,
+            advertised_mss,
+        ),
+        _ => None,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_syn_cookie_tcp_reply_v4(
+    frame: &[u8],
+    parsed: TcpReplySource,
+    tcp_len: usize,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    advertised_mss: u16,
+) -> Option<Vec<u8>> {
+    let ip = frame.get(parsed.l3..parsed.l3 + 20)?;
+    let src = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
+    let dst = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
+    let total_len = 20usize.checked_add(tcp_len)?;
+    let frame_len = parsed.l3.checked_add(total_len)?;
+    let mut out = vec![0u8; frame_len];
+    write_reply_eth_header(frame, &mut out, parsed.l3)?;
+    let ip_out = out.get_mut(parsed.l3..parsed.l3 + total_len)?;
+    ip_out[0] = 0x45;
+    ip_out[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    ip_out[8] = SYN_COOKIE_REPLY_TTL;
+    ip_out[9] = PROTO_TCP;
+    ip_out[12..16].copy_from_slice(&dst.octets());
+    ip_out[16..20].copy_from_slice(&src.octets());
+    let ip_sum = checksum16(&ip_out[..20]);
+    ip_out[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+    write_syn_cookie_tcp_header(
+        &mut ip_out[20..20 + tcp_len],
+        parsed,
+        seq,
+        ack,
+        flags,
+        advertised_mss,
+    )?;
+    recompute_l4_checksum_ipv4(ip_out, 20, PROTO_TCP, false)?;
+    Some(out)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_syn_cookie_tcp_reply_v6(
+    frame: &[u8],
+    parsed: TcpReplySource,
+    tcp_len: usize,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    advertised_mss: u16,
+) -> Option<Vec<u8>> {
+    let ip = frame.get(parsed.l3..parsed.l3 + 40)?;
+    let src = ip.get(8..24)?;
+    let dst = ip.get(24..40)?;
+    let frame_len = parsed.l3.checked_add(40)?.checked_add(tcp_len)?;
+    let mut out = vec![0u8; frame_len];
+    write_reply_eth_header(frame, &mut out, parsed.l3)?;
+    let ip_out = out.get_mut(parsed.l3..frame_len)?;
+    ip_out[0] = 0x60;
+    ip_out[4..6].copy_from_slice(&(tcp_len as u16).to_be_bytes());
+    ip_out[6] = PROTO_TCP;
+    ip_out[7] = SYN_COOKIE_REPLY_HOP_LIMIT;
+    ip_out[8..24].copy_from_slice(dst);
+    ip_out[24..40].copy_from_slice(src);
+    write_syn_cookie_tcp_header(
+        &mut ip_out[40..40 + tcp_len],
+        parsed,
+        seq,
+        ack,
+        flags,
+        advertised_mss,
+    )?;
+    recompute_l4_checksum_ipv6(ip_out, PROTO_TCP)?;
+    Some(out)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn write_reply_eth_header(frame: &[u8], out: &mut [u8], l3: usize) -> Option<()> {
+    if l3 != 14 && l3 != 18 {
+        return None;
+    }
+    out.get_mut(0..6)?.copy_from_slice(frame.get(6..12)?);
+    out.get_mut(6..12)?.copy_from_slice(frame.get(0..6)?);
+    if l3 == 18 {
+        out.get_mut(12..18)?.copy_from_slice(frame.get(12..18)?);
+    } else {
+        out.get_mut(12..14)?.copy_from_slice(frame.get(12..14)?);
+    }
+    Some(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn write_syn_cookie_tcp_header(
+    tcp: &mut [u8],
+    parsed: TcpReplySource,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    advertised_mss: u16,
+) -> Option<()> {
+    if tcp.len() != TCP_MIN_HEADER_LEN && tcp.len() != TCP_MIN_HEADER_LEN + TCP_MSS_OPTION_LEN {
+        return None;
+    }
+    tcp[0..2].copy_from_slice(&parsed.dst_port.to_be_bytes());
+    tcp[2..4].copy_from_slice(&parsed.src_port.to_be_bytes());
+    tcp[4..8].copy_from_slice(&seq.to_be_bytes());
+    tcp[8..12].copy_from_slice(&ack.to_be_bytes());
+    tcp[12] = ((tcp.len() / 4) as u8) << 4;
+    tcp[13] = flags;
+    tcp[14..16].copy_from_slice(&SYN_COOKIE_TCP_WINDOW.to_be_bytes());
+    if tcp.len() == TCP_MIN_HEADER_LEN + TCP_MSS_OPTION_LEN {
+        tcp[20] = 2;
+        tcp[21] = 4;
+        tcp[22..24].copy_from_slice(&advertised_mss.to_be_bytes());
+    }
+    Some(())
 }
 
 /// Clamp TCP MSS in a full Ethernet frame starting at `l3_offset`.
