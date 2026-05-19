@@ -1,0 +1,17 @@
+[
+  {
+    "rule_id": "lan->wan/scheduled-allow",
+    "packets": 5,
+    "bytes": 490
+  },
+  {
+    "rule_id": "lan->wan/allow-all",
+    "packets": 95,
+    "bytes": 9022
+  },
+  {
+    "rule_id": "lan->sfmix/allow-all",
+    "packets": 0,
+    "bytes": 0
+  }
+]

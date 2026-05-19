@@ -1,0 +1,120 @@
+Services Synchronized:
+    Service name                     Sent         Received
+    Session create                   85           1918
+    Session close                    48           204
+    Config                           0            11
+    IPsec SA                         0            0
+    Bulk syncs                       1            1
+    Sessions installed                            1918
+    Errors                           0
+
+Userspace dataplane helper:
+  PID:                       260415
+  Helper mode:               rust-afxdp-bootstrap
+  io_uring active:           true
+  io_uring mode:             io_uring
+  Enabled:                   true
+  Forwarding armed:          true
+  Forwarding supported:      true
+  Workers:                   6
+  Ring entries:              16384
+  Last snapshot generation:  97
+  Last FIB generation:       11
+  Last snapshot age:         2m42s
+  Interface addresses:       29
+  Neighbor entries:          158
+  Neighbor generation:       282
+  Route entries:             15
+  Local HA forwarding role:  active
+  HA groups:                 rg0 active=false watchdog=2198308; rg1 active=true watchdog=2198308; rg2 active=true watchdog=2198308; rg3 active=false watchdog=0; rg4 active=false watchdog=0; rg5 active=false watchdog=0; rg6 active=false watchdog=0; rg7 active=false watchdog=0; rg8 active=false watchdog=0; rg9 active=false watchdog=0; rg10 active=false watchdog=0; rg11 active=false watchdog=0; rg12 active=false watchdog=0; rg13 active=false watchdog=0; rg14 active=false watchdog=0; rg15 active=false watchdog=0
+  Fabric links:              fab1 parent=ge-7-0-0 peer=10.99.13.1
+  Bound bindings:            18/18
+  XSK-registered bindings:   18/18
+  Zerocopy bindings:         12/18
+  Shared UMEM bindings:      12/18
+  Armed queues:              6/6
+  Ready queues:              6/6
+  Armed bindings:            18/18
+  Ready bindings:            18/18
+  RX packets:                445
+  Validated packets:         445
+  Forward candidates:        284
+  Route misses:              0
+  Neighbor misses:           0
+  Exception packets:         0
+  Flow cache hits:           200
+  Flow cache misses:         81
+  Flow cache evictions:      40
+  Session hits:              195
+  Session misses:            50
+  Session creates:           38
+  Session expires:           26359
+  Session delta pending:     0
+  Session delta generated:   63
+  Session delta dropped:     0
+  Session delta drained:     63
+  Event stream frames:       read=174 written=55 decode_errors=0 seq_gaps=0
+  Event stream producer:     sent=63 dropped=0
+  Event stream events:       policy_deny=0 screen_drop=0 filter_log=0 unknown_drops=0
+  Event stream drops:        policy_deny=0 screen_drop=0 filter_log=0
+  Policy denied packets:     0
+  Screen drops:              0
+  SNAT packets:              142
+  DNAT packets:              142
+  TX packets:                285
+  TX bytes:                  27374
+  TX errors:                 0
+  TX shared recycle unk:     0
+  TX completions:            285
+  Mirrored packets:          0
+  Mirrored bytes:            0
+  Mirror drops:              no-frame=0 tx-frame-reserve=0 no-binding=0 queue-full=0 same-worker=0 cross-worker=0
+  Kernel RX dropped:         0
+  Kernel RX invalid descs:   0
+  Direct TX packets:         1
+  Copy-path TX packets:      0
+  In-place TX packets:       284
+  In-place VLAN push desc:   142
+  In-place VLAN pop desc:    142
+  In-place VLAN no-headroom: 0
+  In-place L2 memmove fb:    0
+  Direct TX no-frame fb:     0
+  Direct TX build-none fb:   0
+  Direct TX disallowed fb:   0
+  Pending fill frames:       0
+  Spare fill frames:         0
+  Free TX frames:            0
+  Pending TX prepared:       0
+  Pending TX local:          0
+  Outstanding TX:            0
+  In-flight recycles:        0
+  Slow path local-delivery:  320
+  Slow path missing-neigh:   0
+  Slow path no-route:        0
+  Slow path next-table:      0
+  Slow path forward-build:   0
+  Slow path active:          true
+  Slow path device:          xpf-usp0
+  Slow path mode:            io_uring
+  Slow path queued:          0
+  Slow path injected:        320 pkts / 16292 bytes
+  Slow path dropped:         0 pkts / 0 bytes
+  Slow path rate-limited:    0
+  Slow path queue-full:      0
+  Slow path write errors:    0
+  Slow path per-binding:     320 pkts / 0 drops
+  Recent exceptions:         1
+  Worker 0 heartbeat age:    5ms
+  Worker 1 heartbeat age:    5ms
+  Worker 2 heartbeat age:    5ms
+  Worker 3 heartbeat age:    5ms
+  Worker 4 heartbeat age:    5ms
+  Worker 5 heartbeat age:    6ms
+Worker runtime (cumulative since worker start; last column is rolling ~60s CPU window):
+  Worker TID      Active%  SpinIdle%  BlockIdle%  CPU%     CPU%60s  WorkLoops    IdleLoops
+  0      260423   0.0      0.0      100.0      5.8      6.0      153          1108593
+  1      260424   0.0      0.0      100.0      5.8      5.9      203          1113283
+  2      260425   0.0      0.0      100.0      5.9      6.0      208          1112076
+  3      260426   0.0      0.0      100.0      5.8      5.9      109          1100315
+  4      260427   0.0      0.0      100.0      5.8      5.9      193          1117939
+  5      260428   0.0      0.0      100.0      5.8      6.1      126          1103434

@@ -387,9 +387,10 @@ evidence for mirror fidelity and primary-forwarding survival under mirror
 pressure before BPF source removal.
 
 Policy scheduler state is no longer a propagation gap: #1396 carries scheduler
-state into the userspace snapshot and Rust policy evaluator. #1378 remains a
-retirement blocker only for the residual contract around hit-counter lifetime,
-strict missing-scheduler commit behavior, and integration/failover evidence.
+state into the userspace snapshot and Rust policy evaluator, and the 2026-05-19
+#1378 live artifact set validates hit-counter lifetime, strict missing-scheduler
+commit behavior, and integration/failover evidence with
+`test/incus/policy_scheduler_validate.py`.
 #1377 now preserves unusable pool-mode source-NAT rules in the snapshot and
 fails closed at the `poll_descriptor.rs` source-NAT call sites for missing
 pools, empty pools, invalid pool inputs, wrong-family-only pools, or allocator

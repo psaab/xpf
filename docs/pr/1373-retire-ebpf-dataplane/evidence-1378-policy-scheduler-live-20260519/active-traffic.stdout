@@ -1,0 +1,6 @@
+PING 172.16.80.200 (172.16.80.200) 56(84) bytes of data.
+64 bytes from 172.16.80.200: icmp_seq=1 ttl=63 time=0.341 ms
+
+--- 172.16.80.200 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 0.341/0.341/0.341/0.000 ms

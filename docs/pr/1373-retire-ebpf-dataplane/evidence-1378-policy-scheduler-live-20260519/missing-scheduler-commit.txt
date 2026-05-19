@@ -1,0 +1,8 @@
+cli — connected to xpfd (uptime: 21m20s)
+Type '?' for help
+
+Entering configuration mode
+[edit]
+error: commit check failed: rpc error: code = InvalidArgument desc = policy "scheduled-allow" references undefined scheduler "workhours"
+configuration rolled back
+Exiting configuration mode

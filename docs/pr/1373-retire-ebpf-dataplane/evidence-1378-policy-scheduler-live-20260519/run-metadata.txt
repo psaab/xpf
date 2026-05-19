@@ -1,0 +1,6 @@
+pwd: /tmp/xpf-b-1378-live-evidence
+branch: codex/b-1378-live-evidence
+commit: 7465b2fdc820606af79b0896260ed90caf2bb39e
+commit_short: 7465b2fdc820
+date_utc: 2026-05-19T03:11:32Z
+cluster_env: test/incus/loss-userspace-cluster.env
