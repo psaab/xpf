@@ -49,6 +49,14 @@ the non-eBPF apply path: scheduler state is seeded before userspace compile and
 the initial userspace apply does not fall back to `UpdatePolicyScheduleState`
 legacy map updates.
 
+Closeout update, 2026-05-19: live HA evidence is captured under
+`evidence-1378-policy-scheduler-live-20260519/` and accepted by
+`test/incus/policy_scheduler_validate.py --rule-id
+'lan->wan/scheduled-allow'`. The artifact set shows the stable scheduled-rule
+counter advancing while active, surviving a full snapshot rebuild, remaining
+unchanged while inactive, advancing again on the new userspace owner after
+RG1/RG2 failover, and rejecting an undefined scheduler at commit check.
+
 On scheduler state changes, publish one atomic userspace snapshot delta that
 contains the updated inactive bits for all affected rules. Do not issue
 per-rule fast-path toggles because first-match ordering requires same-instant
@@ -159,7 +167,7 @@ Validate the directory from the repo root:
 ```bash
 python3 test/incus/policy_scheduler_validate.py \
   <artifact-dir> \
-  --rule-id 'trust->untrust/scheduled-allow'
+  --rule-id 'lan->wan/scheduled-allow'
 ```
 
 The validator intentionally fails if the artifacts show `ebpf_only`, missing
@@ -177,6 +185,10 @@ Validated in the 2026-05-18 closeout slice:
 
 - `go test ./pkg/daemon -run 'TestPolicyScheduler|TestApplyConfig.*Scheduler|TestApplyConfig.*Protocol'`
 - `python3 test/incus/policy_scheduler_validate_test.py`
+
+Validated in the 2026-05-19 live evidence slice:
+
+- `python3 test/incus/policy_scheduler_validate.py docs/pr/1373-retire-ebpf-dataplane/evidence-1378-policy-scheduler-live-20260519 --rule-id 'lan->wan/scheduled-allow'`
 
 ## Non-Goals
 

@@ -15,7 +15,7 @@ present until later phase PRs.
 |-------|---------|------------------|
 | #1381 | Runtime interface split is underway; userspace no longer embeds the old interface directly for the first operator metadata surfaces, but session/telemetry/GC/control callers still need to leave the BPF-shaped contract | Must land first; blocks Phase 3 |
 | #1377 | Userspace-v1 address-persistent SNAT pool selection and fail-closed runtime handling for unusable pool rules are implemented; remaining work is per-pool `persistent-nat`, live-port exhaustion observability, allocator counters, and documented mixed-backend rollback behavior | Before Phase 4 |
-| #1378 | Scheduler state, counter survival, strict missing-scheduler behavior, and deterministic evidence validation now exist for userspace; remaining work is live HA artifact capture | Before Phase 4 |
+| #1378 | Scheduler state, counter survival, strict missing-scheduler behavior, deterministic evidence validation, and live HA artifact capture are complete for userspace; no known #1378 blocker remains | Before Phase 4 |
 | #1379 | Policy-deny, screen-drop, PBR filter logs, non-PBR input/output/lo0 filter logs, cached input-log replay without filter rescans, source-disambiguated FILTER_LOG syslog, and deterministic fanout coverage now emit from userspace; remaining work is live userspace-cluster syslog evidence if Phase 4 requires operator artifacts | Before Phase 4 |
 | #1374 | Userspace SYN-cookie validation/admission semantics and counters exist; remaining blockers are bounded SYN-ACK/RST TX, HA-safe secrets, integration/failover validation, and gate removal | Before Phase 4 |
 | #1375 | Userspace supports the color-blind `then discard` srTCM/trTCM slice, fails closed for unsupported shapes, and preserves token/counter state across compatible in-process snapshot refreshes; remaining work is HA/restart continuity decision, non-drop color actions, and integration/perf evidence | Before Phase 4 |
@@ -26,8 +26,8 @@ present until later phase PRs.
 
 1. Land #1381 first so the daemon and dataplane interface stop assuming BPF
    map-writer methods as the abstract contract.
-2. Land #1377, #1378, and #1379 next because these are silent correctness or
-   security-visibility gaps.
+2. Land #1377 and #1379 next because these are silent correctness or
+   security-visibility gaps; #1378 is now closed by live HA evidence.
 3. Land #1374, #1375, and #1376 before Phase 4 because the current protection is
    explicit fallback to the legacy eBPF dataplane.
 4. Land #1380 in Phase 5 while replacing BPF-map observability with userspace

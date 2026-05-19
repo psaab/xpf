@@ -1,0 +1,6 @@
+fw0 clear:
+48 IPv4 and 350 IPv6 session entries cleared
+policy hit counters cleared
+fw1 clear:
+2 IPv4 and 0 IPv6 session entries cleared
+policy hit counters cleared
