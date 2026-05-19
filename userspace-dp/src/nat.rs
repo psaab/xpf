@@ -210,6 +210,7 @@ struct PortAllocatorLiveState {
     lease_expirations: BTreeSet<(u64, PersistentSourceKey)>,
     next_port_offset_by_addr: Vec<u32>,
     recycled_ports_by_addr: Vec<Vec<u16>>,
+    gc_counter: u32,
 }
 
 impl PortAllocatorLiveState {
@@ -221,6 +222,9 @@ impl PortAllocatorLiveState {
         }
     }
 }
+
+/// Run full lease-expiration GC every N release_flow calls.
+const GC_PERIOD: u32 = 10;
 
 #[derive(Debug)]
 struct PortAllocatorShared {
@@ -571,7 +575,10 @@ impl PortAllocator {
         } else {
             self.release_translated_locked(&mut live, translated);
         }
-        self.gc_expired_locked(&mut live, now_ns);
+        live.gc_counter = live.gc_counter.wrapping_add(1);
+        if live.gc_counter % GC_PERIOD == 0 {
+            self.gc_expired_locked(&mut live, now_ns);
+        }
         true
     }
 
