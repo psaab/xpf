@@ -108,11 +108,13 @@ Recommended dependency order:
    missing basic userspace propagation after #1396,
    but its remaining counter/validation/evidence contract still blocks BPF
    source removal.
-3. #1374 and #1376 before Phase 4, because these are explicit feature gaps
-   currently protected by the legacy eBPF fallback. Keep #1375 on the Phase 4
-   list for validation and hardening evidence, not as a capability gate. #1378
-   now needs the scripted scheduler artifact capture only; no additional
-   scheduler runtime code is known from the current audit.
+3. #1374 and #1376 before Phase 4. #1374 is still protected by the legacy eBPF
+   fallback; #1376 has bounded userspace runtime admission and remains listed
+   for mirror-fidelity plus pressure-survival evidence before BPF source
+   removal. Keep #1375 on the Phase 4 list for validation and hardening
+   evidence, not as a capability gate. #1378 now needs the scripted scheduler
+   artifact capture only; no additional scheduler runtime code is known from
+   the current audit.
 4. #1380 in Phase 5, after the dataplane boundary is settled but before the
    remaining operator-facing BPF map surface disappears.
 
@@ -158,10 +160,11 @@ The highest-value remaining work on current `master` is:
    current AF_XDP SNAT pool selector, not full persistent-NAT parity. Keep
    #1378 on the closeout list until the scripted userspace HA scheduler
    evidence artifact set is captured.
-3. close #1374 and #1376 before any BPF source removal, and finish the #1375
-   hardening/evidence checklist. The three-color capability gate is removed
-   only for the current color-blind `then discard` slice with compatible
-   in-process snapshot continuity; color-aware and non-drop treatments stay
+3. close #1374 and collect the remaining #1376 mirror evidence before any BPF
+   source removal, and finish the #1375 hardening/evidence checklist. The
+   three-color capability gate is removed only for the current color-blind
+   `then discard` slice with compatible in-process snapshot continuity;
+   color-aware and non-drop treatments stay
    fail-closed in both Go admission and Rust snapshot parsing.
 4. carry #1380 into Phase 5 only if operators need new helper capacity fields;
    the current userspace command already avoids BPF-map fallback when helper
