@@ -22,6 +22,12 @@ periodic ACK from the daemon.
   telemetry may also populate the non-session metadata slots used by
   the Go adapter for action, rule ID, term ID, reason, owner RG,
   ingress ifindex, and application ID.
+  `MSG_FILTER_LOG` intentionally reuses the RT_FLOW `reason` byte as
+  a filter-log source discriminator (`pbr`, `input`, `output`,
+  `cached-output`, or `lo0`). Close events still interpret that byte as
+  a close reason. The helper and daemon must therefore be upgraded
+  lockstep for this event-stream semantic; it is not governed by the
+  config snapshot protocol version.
 - `producer.rs` — non-blocking helper-side producer API for RT_FLOW
   dataplane telemetry. It rate-limits each `(event type, ingress
   zone)` bucket, encodes fixed-size frames only after the limiter

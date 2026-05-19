@@ -38,6 +38,7 @@ fn make_descriptor() -> RewriteDescriptor {
         egress_ifindex: 6,
         tx_ifindex: 6,
         target_binding_index: None,
+        input_filter_log: None,
         tx_selection: CachedTxSelectionDescriptor::default(),
         nat64: false,
         nptv6: false,
@@ -476,6 +477,7 @@ fn from_forward_decision_round_trip() {
         1,
         ingress_zone.clone(),
         Some(7),
+        None,
         &forwarding,
         &BTreeMap::from([(
             1,
@@ -746,6 +748,7 @@ fn try_build_entry(
         1,
         Some(3),
         Some(7),
+        None,
         forwarding,
         ha_state,
         false,
@@ -763,6 +766,36 @@ fn from_forward_decision_matching_family_returns_some() {
         make_v4_round_trip_inputs();
     let entry = try_build_entry(&flow, meta, validation, decision, &forwarding, &ha_state);
     assert!(entry.is_some(), "matching-family v4 NAT should be cacheable");
+}
+
+#[test]
+fn from_forward_decision_preserves_input_filter_log_for_cached_hits() {
+    let (flow, meta, validation, decision, forwarding, ha_state) =
+        make_v4_round_trip_inputs();
+    let rg_epochs = default_rg_epochs();
+    let input_log = crate::filter::FilterLogMatch {
+        filter_id: 17,
+        term_id: 23,
+        action: crate::filter::FilterAction::Accept,
+    };
+
+    let entry = FlowCacheEntry::from_forward_decision(
+        &flow,
+        meta,
+        validation,
+        decision,
+        1,
+        Some(3),
+        Some(7),
+        Some(input_log),
+        &forwarding,
+        &ha_state,
+        false,
+        &rg_epochs,
+    )
+    .expect("cacheable entry");
+
+    assert_eq!(entry.descriptor.input_filter_log, Some(input_log));
 }
 
 // The next four tests verify the family guard from both build modes.
@@ -946,6 +979,7 @@ fn from_forward_decision_returns_none_for_non_cacheable() {
         0,
         None,
         None,
+        None,
         &forwarding,
         &BTreeMap::new(),
         false,
@@ -1013,6 +1047,7 @@ fn fabric_redirect_cache_entry_uses_flow_owner_rg_for_epoch_invalidation() {
         2,
         Some(3),
         Some(3),
+        None,
         &forwarding,
         &BTreeMap::from([(
             2,

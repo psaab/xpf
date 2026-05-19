@@ -54,6 +54,7 @@ pub(super) struct RewriteDescriptor {
     pub(super) tx_ifindex: i32,
     #[allow(dead_code)] // populated for future flow-cache fast-path TX
     pub(super) target_binding_index: Option<usize>,
+    pub(super) input_filter_log: Option<crate::filter::FilterLogMatch>,
     pub(super) tx_selection: CachedTxSelectionDescriptor,
     pub(super) nat64: bool,
     pub(super) nptv6: bool,
@@ -221,6 +222,7 @@ impl FlowCacheEntry {
         flow_owner_rg_id: i32,
         ingress_zone: Option<u16>,
         target_binding_index: Option<usize>,
+        input_filter_log: Option<crate::filter::FilterLogMatch>,
         forwarding: &ForwardingState,
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
         apply_nat_on_fabric: bool,
@@ -301,6 +303,7 @@ impl FlowCacheEntry {
                 egress_ifindex: decision.resolution.egress_ifindex,
                 tx_ifindex: decision.resolution.tx_ifindex,
                 target_binding_index,
+                input_filter_log,
                 tx_selection: resolve_cached_cos_tx_selection(
                     forwarding,
                     decision.resolution.egress_ifindex,

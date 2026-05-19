@@ -44,14 +44,22 @@ Current implementation status after the 2026-05-19 closeout slice:
   counters, and per-event loss reason accounting.
 - Runtime producers cover userspace policy deny, screen drop, logged PBR
   filter hits, non-PBR input filter logs, live and cached output filter logs,
-  and lo0/local-delivery filter logs. Non-PBR input filter logs are emitted
-  only on the slow path after flow-cache miss; flow-cache hits do not walk the
-  input filter just to discover a log-only term.
+  and lo0/local-delivery filter logs. Non-PBR input filter-log matching runs
+  only on the slow path after a flow-cache miss. If the first packet installs a
+  flow-cache entry, the matched input log term is stored in that entry and
+  cached hits re-emit `source=input` without rescanning filter terms.
 - Policy deny records carry the userspace snapshot's numeric policy ID. Filter
   log records carry the compiled filter ID, term ID, action, and source
   (`pbr`, `input`, `output`, `cached-output`, or `lo0`). These IDs are
   deterministic inside the compiled snapshot and intentionally avoid invented
   names or unstable runtime-only identifiers.
+- The `lo0` source label means a userspace local-delivery packet matched the
+  configured lo0 log term. It does not claim that kernel/nft lo0 ingress
+  enforcement moved into the AF_XDP helper.
+- The event-stream wire format is a helper/daemon lockstep contract. For
+  `MSG_FILTER_LOG`, the RT_FLOW reason byte carries the source label above;
+  close events continue to interpret the same byte as a close reason. This is
+  event-stream semantics, not a config-snapshot protocol field.
 - `pkg/dataplane/userspace/eventstream_test.go` includes a deterministic UDP
   syslog harness that feeds raw userspace policy-deny, screen-drop, and
   filter-log frames through the Go event-stream callback, `EventReader`, and

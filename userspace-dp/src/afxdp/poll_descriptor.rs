@@ -93,19 +93,14 @@ fn filter_log_egress_zone_id(forwarding: &ForwardingState, egress_ifindex: i32) 
 }
 
 #[inline]
-fn emit_non_pbr_input_filter_log(
+fn evaluate_non_pbr_input_filter_log(
     forwarding: &ForwardingState,
-    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
-    now_ns: u64,
-) {
-    if event_stream.is_none() {
-        return;
-    }
+) -> Option<(crate::filter::FilterLogMatch, u16)> {
     let Some(flow) = flow else {
-        return;
+        return None;
     };
     let ingress_ifindex = resolve_ingress_logical_ifindex(
         forwarding,
@@ -114,7 +109,7 @@ fn emit_non_pbr_input_filter_log(
     )
     .unwrap_or(meta.ingress_ifindex as i32);
     let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
-    let Some(log_match) = crate::filter::evaluate_interface_filter_log_match(
+    let log_match = crate::filter::evaluate_interface_filter_log_match(
         &forwarding.filter_state,
         ingress_ifindex,
         is_v6,
@@ -125,19 +120,53 @@ fn emit_non_pbr_input_filter_log(
         flow.forward_key.dst_port,
         meta.dscp,
         true,
-    ) else {
-        return;
-    };
+    )?;
+    let ingress_zone_id =
+        filter_log_ingress_zone_id(forwarding, meta, ingress_zone_override, ingress_ifindex);
+    Some((log_match, ingress_zone_id))
+}
+
+#[inline]
+fn emit_input_filter_log_match(
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_id: u16,
+    log_match: crate::filter::FilterLogMatch,
+    now_ns: u64,
+) {
     emit_filter_log_event(
         event_stream,
         flow,
         meta,
-        filter_log_ingress_zone_id(forwarding, meta, ingress_zone_override, ingress_ifindex),
+        ingress_zone_id,
         0,
         log_match.filter_id,
         log_match.term_id,
         log_match.action,
         FilterLogSource::Input,
+        now_ns,
+    );
+}
+
+#[inline]
+fn emit_cached_input_filter_log(
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    cached_descriptor: &RewriteDescriptor,
+    cached_metadata: &SessionMetadata,
+    now_ns: u64,
+) {
+    let Some(log_match) = cached_descriptor.input_filter_log else {
+        return;
+    };
+    emit_input_filter_log_match(
+        event_stream,
+        flow,
+        meta,
+        cached_metadata.ingress_zone,
+        log_match,
         now_ns,
     );
 }
@@ -388,6 +417,14 @@ pub(super) fn poll_binding_process_descriptor(
                                         now_ns,
                                         meta.pkt_len as u64,
                                     );
+                                emit_cached_input_filter_log(
+                                    worker_ctx.event_stream,
+                                    flow,
+                                    meta,
+                                    cached_descriptor,
+                                    cached_metadata,
+                                    now_ns,
+                                );
                                 emit_cached_output_filter_log(
                                     worker_ctx.forwarding,
                                     worker_ctx.event_stream,
@@ -941,13 +978,11 @@ pub(super) fn poll_binding_process_descriptor(
                                         None => resolution_target,
                                     }
                                 };
-                            emit_non_pbr_input_filter_log(
+                            let input_filter_log = evaluate_non_pbr_input_filter_log(
                                 worker_ctx.forwarding,
-                                worker_ctx.event_stream,
                                 Some(flow),
                                 meta,
                                 ingress_zone_override,
-                                now_ns,
                             );
                             let route_table_override = ingress_route_table_override(
                                 worker_ctx.forwarding,
@@ -1538,6 +1573,18 @@ pub(super) fn poll_binding_process_descriptor(
                                                 worker_ctx.peer_worker_commands,
                                                 &forward_entry,
                                             );
+                                            if let Some((log_match, ingress_zone_id)) =
+                                                input_filter_log
+                                            {
+                                                emit_input_filter_log_match(
+                                                    worker_ctx.event_stream,
+                                                    flow,
+                                                    meta,
+                                                    ingress_zone_id,
+                                                    log_match,
+                                                    now_ns,
+                                                );
+                                            }
                                         }
                                         let reverse_resolution = reverse_resolution_for_session(
                                             worker_ctx.forwarding,
@@ -2179,6 +2226,13 @@ pub(super) fn poll_binding_process_descriptor(
                                     flow_cache_owner_rg_id,
                                     session_ingress_zone,
                                     request_target_binding_index,
+                                    evaluate_non_pbr_input_filter_log(
+                                        worker_ctx.forwarding,
+                                        Some(flow),
+                                        meta,
+                                        ingress_zone_override,
+                                    )
+                                    .map(|(log_match, _)| log_match),
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
                                     apply_nat_on_fabric,
