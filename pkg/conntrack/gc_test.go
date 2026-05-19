@@ -2,6 +2,7 @@ package conntrack
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -225,6 +226,68 @@ func (s *runtimeDomainSessionStore) SessionDeltas() dpruntime.SessionDeltaSource
 func (s *runtimeDomainSessionStore) Count() (int, int)                           { return len(s.v4), 0 }
 func (s *runtimeDomainSessionStore) Clear() (int, int, error)                    { return 0, 0, nil }
 
+type partialDeleteSessionStore struct {
+	entries     []dataplane.SessionEntryV4
+	deleted     int
+	deleteError error
+}
+
+func (s *partialDeleteSessionStore) ForEachV4(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	for _, entry := range s.entries {
+		if !fn(entry.Key, entry.Value) {
+			break
+		}
+	}
+	return nil
+}
+
+func (s *partialDeleteSessionStore) ForEachV6(func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error {
+	return nil
+}
+
+func (s *partialDeleteSessionStore) GetV4(dataplane.SessionKey) (dataplane.SessionValue, error) {
+	return dataplane.SessionValue{}, unix.ENOENT
+}
+
+func (s *partialDeleteSessionStore) GetV6(dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
+	return dataplane.SessionValueV6{}, unix.ENOENT
+}
+
+func (s *partialDeleteSessionStore) PutClusterSyncedV4(dataplane.SessionKey, dataplane.SessionValue) error {
+	return nil
+}
+
+func (s *partialDeleteSessionStore) PutClusterSyncedV6(dataplane.SessionKeyV6, dataplane.SessionValueV6) error {
+	return nil
+}
+
+func (s *partialDeleteSessionStore) DeleteV4(dataplane.SessionKey) error   { return nil }
+func (s *partialDeleteSessionStore) DeleteV6(dataplane.SessionKeyV6) error { return nil }
+func (s *partialDeleteSessionStore) DeleteKnownV4(dataplane.SessionKey, dataplane.SessionValue, dataplane.DeleteReason) error {
+	return nil
+}
+func (s *partialDeleteSessionStore) DeleteKnownV6(dataplane.SessionKeyV6, dataplane.SessionValueV6, dataplane.DeleteReason) error {
+	return nil
+}
+func (s *partialDeleteSessionStore) DeleteBatchKnownV4([]dataplane.SessionEntryV4, dataplane.DeleteReason) (int, error) {
+	return s.deleted, s.deleteError
+}
+func (s *partialDeleteSessionStore) DeleteBatchKnownV6([]dataplane.SessionEntryV6, dataplane.DeleteReason) (int, error) {
+	return 0, nil
+}
+func (s *partialDeleteSessionStore) DeleteWithCompanionsV4(dataplane.SessionKey, dataplane.DeleteReason) error {
+	return nil
+}
+func (s *partialDeleteSessionStore) DeleteWithCompanionsV6(dataplane.SessionKeyV6, dataplane.DeleteReason) error {
+	return nil
+}
+func (s *partialDeleteSessionStore) ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput) (dataplane.ClusterBulkReconcileResult, error) {
+	return dataplane.ClusterBulkReconcileResult{}, nil
+}
+func (s *partialDeleteSessionStore) SessionDeltas() dpruntime.SessionDeltaSource { return nil }
+func (s *partialDeleteSessionStore) Count() (int, int)                           { return len(s.entries), 0 }
+func (s *partialDeleteSessionStore) Clear() (int, int, error)                    { return 0, 0, nil }
+
 func TestGCDeleteCallbackV4(t *testing.T) {
 	now := monotonicSeconds()
 	fwdKey := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 1, 1}, DstIP: [4]byte{10, 0, 2, 1}, Protocol: 6, SrcPort: 1000, DstPort: 80}
@@ -260,6 +323,57 @@ func TestGCDeleteCallbackV4(t *testing.T) {
 	}
 	if callbackKeys[0] != fwdKey {
 		t.Fatalf("callback key mismatch: got %+v, want %+v", callbackKeys[0], fwdKey)
+	}
+}
+
+func TestGCReportsPartialBatchDeleteProgress(t *testing.T) {
+	now := monotonicSeconds()
+	entries := []dataplane.SessionEntryV4{
+		{
+			Key: dataplane.SessionKey{Protocol: 6, SrcPort: 1001, DstPort: 80},
+			Value: dataplane.SessionValue{
+				LastSeen: now - 200,
+				Timeout:  100,
+			},
+		},
+		{
+			Key: dataplane.SessionKey{Protocol: 6, SrcPort: 1002, DstPort: 80},
+			Value: dataplane.SessionValue{
+				LastSeen: now - 200,
+				Timeout:  100,
+			},
+		},
+		{
+			Key: dataplane.SessionKey{Protocol: 6, SrcPort: 1003, DstPort: 80},
+			Value: dataplane.SessionValue{
+				LastSeen: now - 200,
+				Timeout:  100,
+			},
+		},
+	}
+	store := &partialDeleteSessionStore{
+		entries:     entries,
+		deleted:     2,
+		deleteError: errors.New("partial batch failure"),
+	}
+	gc := NewGCWithDomains(store, nil, nil, nil, time.Minute)
+
+	var callbackKeys []dataplane.SessionKey
+	gc.OnDeleteV4 = func(key dataplane.SessionKey) {
+		callbackKeys = append(callbackKeys, key)
+	}
+
+	gc.sweep()
+
+	stats := gc.Stats()
+	if stats.ExpiredDeleted != 2 {
+		t.Fatalf("ExpiredDeleted = %d, want 2", stats.ExpiredDeleted)
+	}
+	if len(callbackKeys) != 2 {
+		t.Fatalf("callback count = %d, want 2", len(callbackKeys))
+	}
+	if callbackKeys[0] != entries[0].Key || callbackKeys[1] != entries[1].Key {
+		t.Fatalf("callback keys = %+v, want first two deleted entries", callbackKeys)
 	}
 }
 

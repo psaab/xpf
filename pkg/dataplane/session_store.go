@@ -379,7 +379,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, _ De
 		}
 	}
 
-	if err := s.batchDeleteV4(reverseKeys); err != nil {
+	if _, err := s.batchDeleteV4(reverseKeys); err != nil {
 		return 0, err
 	}
 
@@ -387,10 +387,11 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, _ De
 	for _, entry := range entries {
 		forwardKeys = append(forwardKeys, entry.Key)
 	}
-	if err := s.batchDeleteV4(forwardKeys); err != nil {
-		return 0, err
+	deleted, err := s.batchDeleteV4(forwardKeys)
+	if err != nil {
+		return deleted, err
 	}
-	return len(entries), nil
+	return deleted, nil
 }
 
 func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, _ DeleteReason) (int, error) {
@@ -415,7 +416,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, _ De
 		}
 	}
 
-	if err := s.batchDeleteV6(reverseKeys); err != nil {
+	if _, err := s.batchDeleteV6(reverseKeys); err != nil {
 		return 0, err
 	}
 
@@ -423,40 +424,45 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, _ De
 	for _, entry := range entries {
 		forwardKeys = append(forwardKeys, entry.Key)
 	}
-	if err := s.batchDeleteV6(forwardKeys); err != nil {
-		return 0, err
+	deleted, err := s.batchDeleteV6(forwardKeys)
+	if err != nil {
+		return deleted, err
 	}
-	return len(entries), nil
+	return deleted, nil
 }
 
-func (s dataPlaneSessionStore) batchDeleteV4(keys []SessionKey) error {
+func (s dataPlaneSessionStore) batchDeleteV4(keys []SessionKey) (int, error) {
+	deleted := 0
 	for len(keys) > 0 {
 		n := sessionDeleteBatchSize
 		if len(keys) < n {
 			n = len(keys)
 		}
-		_, err := s.dp.BatchDeleteSessions(keys[:n])
+		chunkDeleted, err := s.dp.BatchDeleteSessions(keys[:n])
+		deleted += chunkDeleted
 		if err := ignoreSessionNotFound(err); err != nil {
-			return err
+			return deleted, err
 		}
 		keys = keys[n:]
 	}
-	return nil
+	return deleted, nil
 }
 
-func (s dataPlaneSessionStore) batchDeleteV6(keys []SessionKeyV6) error {
+func (s dataPlaneSessionStore) batchDeleteV6(keys []SessionKeyV6) (int, error) {
+	deleted := 0
 	for len(keys) > 0 {
 		n := sessionDeleteBatchSize
 		if len(keys) < n {
 			n = len(keys)
 		}
-		_, err := s.dp.BatchDeleteSessionsV6(keys[:n])
+		chunkDeleted, err := s.dp.BatchDeleteSessionsV6(keys[:n])
+		deleted += chunkDeleted
 		if err := ignoreSessionNotFound(err); err != nil {
-			return err
+			return deleted, err
 		}
 		keys = keys[n:]
 	}
-	return nil
+	return deleted, nil
 }
 
 func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason DeleteReason) error {
@@ -566,10 +572,10 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	result.StaleV4 = len(staleV4)
 
 	var errs []error
-	if deleted, err := s.DeleteBatchKnownV4(staleV4, reason); err != nil {
+	deletedV4, err := s.DeleteBatchKnownV4(staleV4, reason)
+	result.DeletedV4 = deletedV4
+	if err != nil {
 		errs = append(errs, err)
-	} else {
-		result.DeletedV4 = deleted
 	}
 
 	var staleV6 []SessionEntryV6
@@ -589,10 +595,10 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	}
 	result.StaleV6 = len(staleV6)
 
-	if deleted, err := s.DeleteBatchKnownV6(staleV6, reason); err != nil {
+	deletedV6, err := s.DeleteBatchKnownV6(staleV6, reason)
+	result.DeletedV6 = deletedV6
+	if err != nil {
 		errs = append(errs, err)
-	} else {
-		result.DeletedV6 = deleted
 	}
 	return result, errors.Join(errs...)
 }

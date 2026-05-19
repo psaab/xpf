@@ -270,6 +270,12 @@ func (gc *GC) sweep() time.Duration {
 
 	if deleted, err := gc.sessions.DeleteBatchKnownV4(toDelete, dataplane.DeleteReasonGCExpired); err != nil {
 		slog.Debug("conntrack GC v4 delete failed", "err", err)
+		expired += deleted
+		if gc.OnDeleteV4 != nil {
+			for i := 0; i < deleted && i < len(toDelete); i++ {
+				gc.OnDeleteV4(toDelete[i].Key)
+			}
+		}
 	} else {
 		expired += deleted
 		if gc.OnDeleteV4 != nil {
@@ -347,6 +353,12 @@ func (gc *GC) sweep() time.Duration {
 
 	if deleted, err := gc.sessions.DeleteBatchKnownV6(toDeleteV6, dataplane.DeleteReasonGCExpired); err != nil {
 		slog.Debug("conntrack GC v6 delete failed", "err", err)
+		expired += deleted
+		if gc.OnDeleteV6 != nil {
+			for i := 0; i < deleted && i < len(toDeleteV6); i++ {
+				gc.OnDeleteV6(toDeleteV6[i].Key)
+			}
+		}
 	} else {
 		expired += deleted
 		if gc.OnDeleteV6 != nil {

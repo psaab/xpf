@@ -398,6 +398,42 @@ func TestDeleteBatchKnownV4UsesBatchSessionDeletes(t *testing.T) {
 	}
 }
 
+func TestDeleteBatchKnownV4ReturnsPartialForwardDeletesOnBatchError(t *testing.T) {
+	const n = sessionDeleteBatchSize + 3
+	dp := &sessionStoreTestDP{
+		v4:        make(map[SessionKey]SessionValue),
+		failDelV4: make(map[SessionKey]error),
+	}
+	entries := make([]SessionEntryV4, 0, n)
+	var failKey SessionKey
+	for i := 0; i < n; i++ {
+		key := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, byte(i + 1)}, DstIP: [4]byte{10, 0, 1, 1}, SrcPort: uint16(1000 + i), DstPort: 80}
+		dp.v4[key] = SessionValue{}
+		entries = append(entries, SessionEntryV4{Key: key})
+		if i == sessionDeleteBatchSize+1 {
+			failKey = key
+		}
+	}
+	batchErr := errors.New("batch delete failed")
+	dp.failDelV4[failKey] = batchErr
+	store := NewDataPlaneSessionStore(dp)
+
+	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired)
+	if !errors.Is(err, batchErr) {
+		t.Fatalf("DeleteBatchKnownV4 error = %v, want batch error", err)
+	}
+	wantDeleted := sessionDeleteBatchSize + 1
+	if deleted != wantDeleted {
+		t.Fatalf("deleted = %d, want %d", deleted, wantDeleted)
+	}
+	if dp.batchDelV4 != 2 {
+		t.Fatalf("BatchDeleteSessions calls = %d, want 2", dp.batchDelV4)
+	}
+	if _, ok := dp.v4[failKey]; !ok {
+		t.Fatal("failed key was deleted despite batch error")
+	}
+}
+
 func TestReconcileClusterBulkUsesIteratorValueForCompanionDeleteV4(t *testing.T) {
 	forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}
 	reverse := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 2}, DstIP: [4]byte{10, 0, 0, 1}, SrcPort: 80, DstPort: 1234}
