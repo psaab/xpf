@@ -792,7 +792,7 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test-events.sock")
 	es := NewEventStream(sockPath)
-	rawProcessed := make(chan bool, 3)
+	rawProcessed := make(chan bool, 4)
 	es.SetOnRawDataplaneEvent(func(_ uint64, payload []byte) {
 		rawProcessed <- reader.ProcessRawEvent(payload)
 	})
@@ -826,6 +826,7 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 	}
 
 	frames := []struct {
+		label     string
 		typ       uint8
 		seq       uint64
 		payload   []byte
@@ -833,8 +834,9 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 		wantExtra string
 	}{
 		{
-			typ: EventFrameTypePolicyDeny,
-			seq: 31,
+			label: "policy-deny",
+			typ:   EventFrameTypePolicyDeny,
+			seq:   31,
 			payload: buildTypedDataplaneEventV4Payload(
 				dataplane.EventTypePolicyDeny,
 				dataplane.ActionDeny,
@@ -854,8 +856,9 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 			want: "RT_FLOW POLICY_DENY",
 		},
 		{
-			typ: EventFrameTypeScreenDrop,
-			seq: 32,
+			label: "screen-drop",
+			typ:   EventFrameTypeScreenDrop,
+			seq:   32,
 			payload: buildTypedDataplaneEventV4Payload(
 				dataplane.EventTypeScreenDrop,
 				dataplane.ActionDeny,
@@ -875,8 +878,9 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 			want: "RT_FLOW SCREEN_DROP",
 		},
 		{
-			typ: EventFrameTypeFilterLog,
-			seq: 33,
+			label: "pbr-filter-log",
+			typ:   EventFrameTypeFilterLog,
+			seq:   33,
 			payload: buildTypedDataplaneEventV4Payload(
 				dataplane.EventTypeFilterLog,
 				dataplane.ActionPermit,
@@ -895,6 +899,29 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 			),
 			want:      "RT_FLOW FILTER_LOG",
 			wantExtra: "source=pbr",
+		},
+		{
+			label: "input-filter-log-reject",
+			typ:   EventFrameTypeFilterLog,
+			seq:   34,
+			payload: buildTypedDataplaneEventV4Payload(
+				dataplane.EventTypeFilterLog,
+				dataplane.ActionReject,
+				6,
+				4444, 22,
+				[4]byte{10, 0, 1, 7}, [4]byte{198, 51, 100, 30},
+				[4]byte{},
+				0,
+				1, 0,
+				42,
+				0,
+				9,
+				0,
+				2,
+				0,
+			),
+			want:      "RT_FLOW FILTER_LOG",
+			wantExtra: "source=input",
 		},
 	}
 	for _, frame := range frames {
@@ -921,8 +948,9 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 		msg := string(buf[:n])
 		for _, frame := range frames {
 			if strings.Contains(msg, frame.want) &&
-				(frame.wantExtra == "" || strings.Contains(msg, frame.wantExtra)) {
-				seen[frame.want] = true
+				(frame.wantExtra == "" || strings.Contains(msg, frame.wantExtra)) &&
+				(frame.label != "input-filter-log-reject" || strings.Contains(msg, "action=reject")) {
+				seen[frame.label] = true
 			}
 		}
 	}
@@ -943,8 +971,8 @@ func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 	if got := es.ScreenDropEvents.Load(); got != 1 {
 		t.Fatalf("ScreenDropEvents = %d, want 1", got)
 	}
-	if got := es.FilterLogEvents.Load(); got != 1 {
-		t.Fatalf("FilterLogEvents = %d, want 1", got)
+	if got := es.FilterLogEvents.Load(); got != 2 {
+		t.Fatalf("FilterLogEvents = %d, want 2", got)
 	}
 }
 

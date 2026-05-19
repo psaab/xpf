@@ -260,22 +260,19 @@ fn emit_cached_output_filter_log(
 }
 
 #[inline]
-fn emit_lo0_filter_log(
+fn apply_lo0_filter_action(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
     now_ns: u64,
-) {
-    if event_stream.is_none() {
-        return;
-    }
+) -> bool {
     let Some(flow) = flow else {
-        return;
+        return false;
     };
     let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
-    let Some(log_match) = crate::filter::evaluate_lo0_filter_log_match(
+    let result = crate::filter::evaluate_lo0_filter_counted(
         &forwarding.filter_state,
         is_v6,
         flow.src_ip,
@@ -284,26 +281,28 @@ fn emit_lo0_filter_log(
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
         meta.dscp,
-    ) else {
-        return;
-    };
-    emit_filter_log_event(
-        event_stream,
-        flow,
-        meta,
-        filter_log_ingress_zone_id(
-            forwarding,
-            meta,
-            ingress_zone_override,
-            meta.ingress_ifindex as i32,
-        ),
-        0,
-        log_match.filter_id,
-        log_match.term_id,
-        log_match.action,
-        FilterLogSource::Lo0,
-        now_ns,
+        meta.pkt_len as u64,
     );
+    if let Some(log_match) = result.log_match {
+        emit_filter_log_event(
+            event_stream,
+            flow,
+            meta,
+            filter_log_ingress_zone_id(
+                forwarding,
+                meta,
+                ingress_zone_override,
+                meta.ingress_ifindex as i32,
+            ),
+            0,
+            log_match.filter_id,
+            log_match.term_id,
+            log_match.action,
+            FilterLogSource::Lo0,
+            now_ns,
+        );
+    }
+    !matches!(result.action, crate::filter::FilterAction::Accept)
 }
 
 // Per-batch packet processing lifted from `poll_binding` (#678).
@@ -1238,6 +1237,21 @@ pub(super) fn poll_binding_process_descriptor(
                             } else {
                                 false
                             };
+                            if resolution.disposition == ForwardingDisposition::LocalDelivery
+                                && apply_lo0_filter_action(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    Some(flow),
+                                    meta,
+                                    ingress_zone_override,
+                                    now_ns,
+                                )
+                            {
+                                telemetry.dbg.local += 1;
+                                telemetry.dbg.policy_deny += 1;
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
                             if resolution.disposition == ForwardingDisposition::LocalDelivery
                                 && !is_embedded_icmp_error
                                 && should_cache_local_delivery_session_on_miss(
@@ -2365,14 +2379,6 @@ pub(super) fn poll_binding_process_descriptor(
                         match decision.resolution.disposition {
                             ForwardingDisposition::LocalDelivery => {
                                 telemetry.dbg.local += 1;
-                                emit_lo0_filter_log(
-                                    worker_ctx.forwarding,
-                                    worker_ctx.event_stream,
-                                    flow.as_ref(),
-                                    meta,
-                                    ingress_zone_override,
-                                    now_ns,
-                                );
                                 // Reinject to slow-path TUN so the kernel
                                 // processes host-bound traffic (NDP, ICMP echo,
                                 // BGP, etc.).  The first packet creates a BPF

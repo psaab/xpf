@@ -845,7 +845,7 @@ const (
 //	  [3:5]     Total record length (uint16 big-endian, includes header)
 //	  [5]       EventType
 //	  [6]       Protocol number
-//	  [7]       Action (0=permit, 1=deny, 2=reject)
+//	  [7]       Action (0=deny, 1=permit, 2=reject)
 //	  [8]       AddrFamily (2=IPv4, 10=IPv6)
 //	  [9]       Severity (syslog level)
 //	  [10:18]   Timestamp (uint64 LE, Unix nanoseconds)

@@ -284,6 +284,24 @@ fn test_filter_log_can_encode_discard_action() {
 }
 
 #[test]
+fn test_filter_log_can_encode_reject_action() {
+    let mut event = test_dataplane_event_v4(DataplaneEventKind::FilterLog);
+    event.action = RT_FLOW_ACTION_REJECT;
+    let frame = EventFrame::encode_dataplane_event(322, &event);
+    let payload = frame
+        .dataplane_event_payload()
+        .expect("security event payload");
+    assert_eq!(payload[54], RT_FLOW_ACTION_REJECT);
+    assert_eq!(
+        frame
+            .decode_dataplane_event()
+            .expect("decoded security event frame")
+            .action,
+        RT_FLOW_ACTION_REJECT
+    );
+}
+
+#[test]
 fn test_encode_session_open_v4() {
     let zones = test_zone_map();
     let frame = EventFrame::encode_session_open(

@@ -1,6 +1,6 @@
 use super::*;
-use crate::event_stream::codec::{DataplaneEventKind, DataplaneEventPayload};
 use crate::event_stream::EventStreamWorkerHandle;
+use crate::event_stream::codec::{DataplaneEventKind, DataplaneEventPayload};
 use crate::filter::FilterAction;
 use crate::policy::PolicyAction;
 use crate::screen::ScreenPacketInfo;
@@ -427,6 +427,37 @@ mod tests {
         assert_eq!(event.reason, FilterLogSource::Input.wire_reason());
         assert_eq!(event.ingress_zone_id, 7);
         assert_eq!(event.egress_zone_id, 0);
+        assert_eq!(handle.dataplane_event_stats().filter_log.sent, 1);
+    }
+
+    #[test]
+    fn filter_log_event_emit_preserves_reject_action() {
+        let (handle, rx) = unlimited_handle();
+        let flow = test_flow();
+
+        emit_filter_log_event(
+            Some(&handle),
+            &flow,
+            test_meta(),
+            7,
+            0,
+            23,
+            6,
+            FilterAction::Reject,
+            FilterLogSource::Lo0,
+            789,
+        );
+
+        let event = rx
+            .try_recv()
+            .expect("filter event frame")
+            .decode_dataplane_event()
+            .expect("filter event payload");
+        assert_eq!(event.kind, DataplaneEventKind::FilterLog);
+        assert_eq!(event.action, RT_FLOW_ACTION_REJECT);
+        assert_eq!(event.filter_id, 23);
+        assert_eq!(event.term_id, 6);
+        assert_eq!(event.reason, FilterLogSource::Lo0.wire_reason());
         assert_eq!(handle.dataplane_event_stats().filter_log.sent, 1);
     }
 }

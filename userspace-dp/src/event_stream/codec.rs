@@ -45,6 +45,8 @@ const RT_FLOW_EVENT_SCREEN_DROP: u8 = 4;
 const RT_FLOW_EVENT_FILTER_LOG: u8 = 6;
 const RT_FLOW_ACTION_DENY: u8 = 0;
 const RT_FLOW_ACTION_PERMIT: u8 = 1;
+#[allow(dead_code)]
+const RT_FLOW_ACTION_REJECT: u8 = 2;
 
 /// Disposition encoding for the wire format.
 const DISP_FORWARD_CANDIDATE: u8 = 0;
