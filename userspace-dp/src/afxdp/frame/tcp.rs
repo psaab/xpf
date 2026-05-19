@@ -32,6 +32,8 @@ const SYN_COOKIE_REPLY_HOP_LIMIT: u8 = 64;
 #[cfg_attr(not(test), allow(dead_code))]
 const SYN_COOKIE_TCP_WINDOW: u16 = 64240;
 #[cfg_attr(not(test), allow(dead_code))]
+const ETHERNET_MIN_FRAME_LEN: usize = 60;
+#[cfg_attr(not(test), allow(dead_code))]
 const TCP_FLAG_ACK: u8 = 0x10;
 #[cfg_attr(not(test), allow(dead_code))]
 const TCP_FLAG_RST: u8 = 0x04;
@@ -415,7 +417,10 @@ fn build_syn_cookie_tcp_reply_v4(
     let src = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
     let dst = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
     let total_len = 20usize.checked_add(tcp_len)?;
-    let frame_len = parsed.l3.checked_add(total_len)?;
+    let frame_len = parsed
+        .l3
+        .checked_add(total_len)?
+        .max(ETHERNET_MIN_FRAME_LEN);
     let mut out = vec![0u8; frame_len];
     write_reply_eth_header(frame, &mut out, parsed.l3)?;
     let ip_out = out.get_mut(parsed.l3..parsed.l3 + total_len)?;

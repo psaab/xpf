@@ -931,9 +931,10 @@ fn build_forwarded_frame_from_frame_clamps_tcp_mss_for_native_gre() {
 }
 fn tcp_checksum_ok_ipv4(packet: &[u8]) -> bool {
     let ihl = usize::from(packet[0] & 0x0f) * 4;
+    let total_len = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
     let src = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
     let dst = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-    checksum16_ipv4(src, dst, PROTO_TCP, &packet[ihl..]) == 0
+    checksum16_ipv4(src, dst, PROTO_TCP, &packet[ihl..total_len]) == 0
 }
 
 fn tcp_ports_ipv4(packet: &[u8]) -> (u16, u16) {
@@ -942,6 +943,39 @@ fn tcp_ports_ipv4(packet: &[u8]) -> (u16, u16) {
         u16::from_be_bytes([packet[ihl], packet[ihl + 1]]),
         u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]]),
     )
+}
+
+fn build_ipv4_tcp_frame(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+) -> Vec<u8> {
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        0,
+        0x0800,
+    );
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    let ip_csum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+    frame.extend_from_slice(&src_port.to_be_bytes());
+    frame.extend_from_slice(&dst_port.to_be_bytes());
+    frame.extend_from_slice(&seq.to_be_bytes());
+    frame.extend_from_slice(&ack.to_be_bytes());
+    frame.extend_from_slice(&[0x50, flags, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    recompute_l4_checksum_ipv4(&mut frame[14..], 20, PROTO_TCP, false).expect("tcp sum");
+    frame
 }
 
 #[test]
@@ -1003,6 +1037,59 @@ fn syn_cookie_syn_ack_builder_swaps_tuple_and_preserves_vlan() {
     assert_eq!(&out[58..62], &[2, 4, 0x05, 0xb4]);
     assert_eq!(checksum16(&out[18..38]), 0);
     assert!(tcp_checksum_ok_ipv4(&out[18..]));
+}
+
+#[test]
+fn syn_cookie_ipv4_syn_ack_builder_pads_to_ethernet_minimum() {
+    let client = Ipv4Addr::new(192, 0, 2, 10);
+    let server = Ipv4Addr::new(198, 51, 100, 20);
+    let frame = build_ipv4_tcp_frame(
+        client,
+        server,
+        49152,
+        443,
+        0x0102_0304,
+        0,
+        TCP_FLAG_SYN,
+    );
+
+    let out = build_syn_cookie_syn_ack_frame(&frame, 0xaabb_ccdd, 1460)
+        .expect("syn-cookie syn-ack");
+
+    assert_eq!(out.len(), 60);
+    assert_eq!(u16::from_be_bytes([out[16], out[17]]), 44);
+    assert_eq!(&out[54..58], &[2, 4, 0x05, 0xb4]);
+    assert_eq!(&out[58..60], &[0, 0]);
+    assert_eq!(checksum16(&out[14..34]), 0);
+    assert!(tcp_checksum_ok_ipv4(&out[14..]));
+}
+
+#[test]
+fn syn_cookie_ipv4_rst_builder_pads_to_ethernet_minimum() {
+    let client = Ipv4Addr::new(192, 0, 2, 10);
+    let server = Ipv4Addr::new(198, 51, 100, 20);
+    let frame = build_ipv4_tcp_frame(
+        client,
+        server,
+        49152,
+        443,
+        0x1111_2222,
+        0x3333_4444,
+        0x10,
+    );
+
+    let out = build_syn_cookie_ack_rst_frame(&frame).expect("syn-cookie rst");
+
+    assert_eq!(out.len(), 60);
+    assert_eq!(u16::from_be_bytes([out[16], out[17]]), 40);
+    assert_eq!(
+        u32::from_be_bytes([out[38], out[39], out[40], out[41]]),
+        0x3333_4444
+    );
+    assert_eq!(out[47], TCP_FLAG_RST);
+    assert_eq!(&out[54..60], &[0, 0, 0, 0, 0, 0]);
+    assert_eq!(checksum16(&out[14..34]), 0);
+    assert!(tcp_checksum_ok_ipv4(&out[14..]));
 }
 
 #[test]
