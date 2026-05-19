@@ -45,24 +45,27 @@ These capabilities exist in the current Rust userspace dataplane code path:
 | HA state ingestion | Implemented | Helper receives RG active/watchdog state |
 | Session delta export | Implemented | Rust helper exports open/close deltas back to Go |
 
-## Still Gated By `deriveUserspaceCapabilities()`
+## Gated Or Evidence-Only Before BPF Source Removal
 
-These are the remaining explicit configuration gates in
-[`pkg/dataplane/userspace/manager.go`](../pkg/dataplane/userspace/manager.go):
+These are the remaining explicit configuration gates, plus the runtime-admitted
+features that still need operator evidence before BPF source removal. The
+explicit gates live in
+[`pkg/dataplane/userspace/manager.go`](../pkg/dataplane/userspace/manager.go).
 
-| Feature/config shape | Gate status | Retirement blocker |
+| Feature/config shape | Userspace status | Retirement blocker |
 |----------------------|-------------|--------------------|
 | Unsupported policy shapes | Gated | Address/application expansion must succeed for userspace |
 | Screen behavior requiring SYN cookies | Gated; userspace screen runtime has fail-closed cookie challenge/ACK-validation/cache semantics and status counters, but no HA key publication or SYN-ACK/RST TX yet | #1374 |
-| Port mirroring | Gated; partial runtime | #1376 still needs full path coverage and integration evidence before the gate is removed |
+| Port mirroring | Supported; evidence pending | #1376 still needs mirror-fidelity and pressure evidence before BPF source removal |
 
-Port mirroring now has snapshot/wire plumbing plus a bounded forwarded-path
-runtime slice that samples and queues discardable full-L2 mirror clones with
-drop counters. The runtime coverage now includes the pending-forward path,
-self-target flow-cache mirror surface, and deferred neighbor-resolution retry
-path. The `deriveUserspaceCapabilities()` gate intentionally remains until
-#1376 covers the remaining ingress/transmit surfaces and has integration
-validation for mirror output fidelity and forwarding survival under mirror
+Port mirroring now has snapshot/wire plumbing plus a bounded runtime slice
+that samples and queues discardable full-L2 mirror clones with drop counters.
+Runtime coverage includes the pending-forward path, self-target flow-cache
+mirror surface, deferred neighbor-resolution retry path, CoS-bound reserve
+handling, and mirror-specific counter attribution. The
+`deriveUserspaceCapabilities()` gate has been removed; #1376 remains open for
+integration evidence that tcpdump on the mirror output sees full-frame clones
+at the expected sample rate and that primary forwarding survives mirror
 pressure.
 
 ## Features That Still Use A Mixed Boundary
@@ -91,7 +94,7 @@ The current #1373 audit produced these tracked blockers:
 | #1379 | Complete dataplane event closeout: policy-deny, screen-drop, and logged PBR filter hits emit from userspace; remaining work is end-to-end syslog evidence, broader non-PBR filter-log call sites, and richer policy/filter identity mapping | Phase 4 BPF source removal |
 | #1374 | Implement userspace SYN-cookie flood protection or an approved equivalent. #1393, the 2026-05-17 runtime slice, and the 2026-05-18 closeout slice cover deterministic cookie codec/layout, snapshot propagation, fail-closed screen challenge selection, session-miss ACK validation, bounded validated-client cache behavior, TTL-bound single-use validated-client expiration, current/previous cookie-epoch ACK validation, explicit validated-client bypass verdicts, userspace helper status counters, and legacy global sync for valid/invalid/bypass counters. Remaining: bounded SYN-ACK TX and sent/budget counters, ACK RST emission, HA-safe secret publication/cache survivability, integration/failover validation, and userspace capability gate removal. | Phase 4 BPF source removal |
 | #1375 | Finish userspace RFC 2697/2698 three-color policer hardening. The current runtime admits the color-blind `then discard` slice, fails closed for unsupported snapshot shapes that bypass Go admission, and preserves token/counter state across compatible in-process snapshot refreshes. Remaining work: sharded/packed state decision, HA/restart continuity decision, full non-drop color action propagation, and integration/failover/performance evidence | Phase 4 BPF source removal |
-| #1376 | Finish userspace port mirroring closeout. Snapshot/wire plumbing and a bounded forwarded-path runtime slice now exist, including pending-forward, self-target flow-cache, and deferred-neighbor retry surfaces. Remaining work is ingress/transmit surface coverage, mirror-fidelity evidence, forwarding survival under mirror pressure, and capability-gate removal. | Phase 4 BPF source removal |
+| #1376 | Finish userspace port mirroring evidence. Snapshot/wire plumbing, bounded runtime delivery, pending-forward, self-target flow-cache, deferred-neighbor retry, CoS reserve handling, counter attribution, and capability admission now exist. Remaining work is mirror-fidelity evidence and forwarding survival under mirror pressure. | Phase 4 BPF source removal |
 | #1380 | Retire the remaining BPF-map-oriented `show system buffers` operator surface. Userspace now renders the bounded helper status that exists and intentionally keeps session-table / flow-cache / neighbor-cache as counters rather than synthetic utilization rows until the helper exports true capacity fields. | Phase 5 CLI / observability cleanup |
 
 Recommended dependency order:
@@ -107,11 +110,13 @@ Recommended dependency order:
    missing basic userspace propagation after #1396,
    but its remaining counter/validation/evidence contract still blocks BPF
    source removal.
-3. #1374 and #1376 before Phase 4, because these are explicit feature gaps
-   currently protected by the legacy eBPF fallback. Keep #1375 on the Phase 4
-   list for validation and hardening evidence, not as a capability gate. #1378
-   now needs the scripted scheduler artifact capture only; no additional
-   scheduler runtime code is known from the current audit.
+3. #1374 and #1376 before Phase 4. #1374 is still protected by the legacy eBPF
+   fallback; #1376 has bounded userspace runtime admission and remains listed
+   for mirror-fidelity plus pressure-survival evidence before BPF source
+   removal. Keep #1375 on the Phase 4 list for validation and hardening
+   evidence, not as a capability gate. #1378 now needs the scripted scheduler
+   artifact capture only; no additional scheduler runtime code is known from
+   the current audit.
 4. #1380 in Phase 5, after the dataplane boundary is settled but before the
    remaining operator-facing BPF map surface disappears.
 
@@ -157,10 +162,11 @@ The highest-value remaining work on current `master` is:
    current AF_XDP SNAT pool selector, not full persistent-NAT parity. Keep
    #1378 on the closeout list until the scripted userspace HA scheduler
    evidence artifact set is captured.
-3. close #1374 and #1376 before any BPF source removal, and finish the #1375
-   hardening/evidence checklist. The three-color capability gate is removed
-   only for the current color-blind `then discard` slice with compatible
-   in-process snapshot continuity; color-aware and non-drop treatments stay
+3. close #1374 and collect the remaining #1376 mirror evidence before any BPF
+   source removal, and finish the #1375 hardening/evidence checklist. The
+   three-color capability gate is removed only for the current color-blind
+   `then discard` slice with compatible in-process snapshot continuity;
+   color-aware and non-drop treatments stay
    fail-closed in both Go admission and Rust snapshot parsing.
 4. carry #1380 into Phase 5 only if operators need new helper capacity fields;
    the current userspace command already avoids BPF-map fallback when helper

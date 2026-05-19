@@ -79,11 +79,12 @@ rewritten for transmit. The retry path now records the ingress mirror
 enqueue/drop counters and preserves `mirror_clone` identity on the clone while
 keeping the primary prepared TX request non-mirror.
 
-The userspace capability gate remains in place for now. This slice does not yet
-claim complete port-mirroring parity for every ingress disposition or for
-prebuilt transmit paths, and it still needs integration evidence with
-tcpdump on the mirror output plus primary forwarding survival under mirror
-pressure.
+The 2026-05-19 closeout slice removes the userspace capability gate because
+snapshot propagation, bounded full-L2 clone delivery, per-binding sampling,
+CoS reserve handling, and mirror counter attribution are wired in the userspace
+dataplane. This is runtime admission, not a BPF-removal claim: #1376 still needs
+integration evidence with tcpdump on the mirror output plus primary forwarding
+survival under mirror pressure.
 
 ## Risks
 
@@ -120,9 +121,9 @@ pressure.
   `mirror_drops_no_binding`, and `mirror_drops_queue_full`.
 - Go: commit validation rejects duplicate ingress mirror entries and logs/skips
   nonexistent output ifindex consistently with current compiler behavior.
-- Go: `deriveUserspaceCapabilities()` admits port-mirroring configs only after
-  userspace snapshot/runtime support is wired, and rejects them before that
-  point.
+- Go: `deriveUserspaceCapabilities()` admits port-mirroring configs now that
+  snapshot/runtime support is wired, without emitting the stale unsupported
+  reason.
 - Integration: userspace cluster with mirror config and tcpdump on output
   interface verifies sample ratio, full frame preservation, and primary
   forwarding survival under mirror pressure.

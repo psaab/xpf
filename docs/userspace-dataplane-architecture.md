@@ -379,9 +379,12 @@ filters, flow export, TCP MSS clamping, configurable timeouts, VLAN handling,
 route/neighbor lookup, and HA/session-delta ingestion.
 
 Remaining explicit gates include SYN-cookie-dependent screen behavior,
-three-color policers, port mirroring, dataplane event parity, and the residual
-#1377 SNAT pool contract for per-pool `persistent-nat`, allocator exhaustion
-counters, and mixed-backend rollback constraints.
+three-color policers, dataplane event parity, and the residual #1377 SNAT pool
+contract for per-pool `persistent-nat`, allocator exhaustion counters, and
+mixed-backend rollback constraints. Port mirroring is no longer a
+`deriveUserspaceCapabilities()` gate; its remaining #1376 work is operator
+evidence for mirror fidelity and primary-forwarding survival under mirror
+pressure before BPF source removal.
 
 Policy scheduler state is no longer a propagation gap: #1396 carries scheduler
 state into the userspace snapshot and Rust policy evaluator. #1378 remains a
@@ -567,8 +570,9 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   owns the sharded/packed state decision, HA/restart continuity decision,
   non-drop color actions, and integration/perf evidence beyond the admitted
   color-blind `then discard` slice.
-- Port mirroring closeout: #1376 still owns remaining ingress/transmit
-  surfaces, mirror-fidelity evidence, pressure survival, and gate removal.
+- Port mirroring closeout: #1376 now has bounded userspace runtime admission,
+  but still owns mirror-fidelity evidence and forwarding survival under mirror
+  pressure before BPF source removal.
 - Dataplane event closeout: #1379 still owns end-to-end syslog evidence,
   broader non-PBR filter-log call sites, and richer identity mapping.
 - `show system buffers` BPF-map display retirement: #1380. Userspace

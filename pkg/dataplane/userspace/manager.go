@@ -1166,9 +1166,10 @@ func deriveUserspaceCapabilities(cfg *config.Config) UserspaceCapabilities {
 	// GRE transit is now modeled as native userspace tunnel endpoints on the
 	// physical NIC path. Kernel tunnel interfaces remain only for host/control
 	// plane compatibility during migration.
-	if cfg.ForwardingOptions.PortMirroring != nil {
-		addReason("port mirroring is not implemented in the userspace dataplane")
-	}
+	// Port mirroring is supported by the userspace dataplane through the
+	// bounded mirror-clone runtime: snapshot mirror configs, per-binding
+	// sampling, full-L2 clone delivery, lossy pressure handling, and status
+	// counters are all owned by userspace-dp.
 	// Flow export (NetFlow v9) is now supported in the userspace dataplane.
 	return caps
 }

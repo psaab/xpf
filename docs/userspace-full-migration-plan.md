@@ -2,7 +2,7 @@
 
 Goal: eliminate every remaining fallback to the eBPF pipeline so the userspace dataplane handles 100% of transit traffic.
 
-## Remaining Capability Gates
+## Remaining Gates And Evidence Work
 
 ### Gate 1: NAT (fix gate — features already implemented)
 - **DNAT**: Implemented but gate at line 217 still rejects it
@@ -55,9 +55,13 @@ Goal: eliminate every remaining fallback to the eBPF pipeline so the userspace d
 - **Implement**: Detect tunnel interfaces in userspace worker, handle raw IP frames
 - **Complexity**: Medium
 
-### Gate 9: Port mirroring
+### Evidence 9: Port mirroring
 - Duplicate egress packets to a mirror port
-- **Implement**: On TX, optionally copy frame to a second TX queue
+- **Status**: Userspace runtime admission exists through bounded full-L2
+  mirror clones, per-binding sampling, CoS reserve handling, and drop
+  counters
+- **Remaining**: Collect mirror-fidelity evidence and prove primary
+  forwarding survives mirror pressure before removing the BPF source
 - **Complexity**: Low
 
 ### Gate 10: Flow export (NetFlow v9)
@@ -77,7 +81,7 @@ Goal: eliminate every remaining fallback to the eBPF pipeline so the userspace d
 |---------|-----------|------|
 | Fix NAT gate (DNAT + NATv6v4 already done) | Trivial | gate-fixes |
 | GRE acceleration (key→ports) | Low | gate-fixes |
-| Port mirroring | Low | gate-fixes |
+| Port mirroring evidence | Low | gate-fixes |
 | Policy hit counters | Low | gate-fixes |
 | Mid-stream TCP RST generation | Low | gate-fixes |
 

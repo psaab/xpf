@@ -587,12 +587,16 @@ The implementation should be explicit about what is in scope for the first usabl
 - route types not supported by the worker fast path
 - exceptional packets that fail metadata or adjacency validation
 
-#### Keep on current backend initially
+#### Original backend split
 
 - IPsec dataplane handling through `xfrmi`
 - GRE/IPIP encapsulation and decapsulation
-- TC egress mirroring / clone semantics
 - any feature that depends on skb-only helpers or existing TC hooks
+
+This historical design note predates the bounded userspace port-mirroring
+runtime. Port mirroring is now admitted by userspace-dp through full-L2 mirror
+clones and explicit drop counters; #1376 still owns mirror-fidelity evidence
+and pressure-survival validation before BPF source removal.
 
 This is important because xpf is not just a basic routed firewall. Pretending the
 first userspace backend covers every current feature would guarantee a bad rollout.
