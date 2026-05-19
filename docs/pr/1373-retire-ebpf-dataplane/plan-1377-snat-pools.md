@@ -174,6 +174,9 @@ contract is helper-local:
 - live flows hold the translated tuple until their userspace session expires;
 - persistent leases remain after the last live flow releases them and expire
   after the configured inactivity timeout;
+- source-NAT allocations that fail before session install use a rollback path,
+  not the inactivity-release path, so a rejected new persistent tuple does not
+  pin a lease for the timeout window;
 - compatible in-process snapshot refreshes preserve allocator state;
 - helper restart loses the persistent lease table; and
 - HA configs using persistent source-NAT pools are gated because leases are not
@@ -194,9 +197,10 @@ per-address atomic counters because it does not create a tracked session.
 The per-pool allocator state is bounded by the smaller of pool port capacity and
 `262144` tracked live flows. This prevents attacker-controlled unbounded growth
 in the packet path. Fresh port claims use a per-address cursor and a recycled
-port stack, and persistent lease expiry uses an expiry heap, so near-full
-allocation and timeout cleanup do not scan the whole port range or lease map on
-every new flow. The allocator reports exhaustion when:
+port stack, and persistent lease expiry uses a replace-in-place ordered expiry
+index bounded by the number of retained leases. Near-full allocation and
+timeout cleanup do not scan the whole port range or lease map on every new
+flow. The allocator reports exhaustion when:
 
 - the selected address-persistent pool address has no free port;
 - a non-address-persistent family has no free port on any family-compatible
@@ -264,6 +268,12 @@ Covered by #1385 and this closeout:
   one allocator, so a one-port pool cannot be double-booked across rules.
 - Cargo: failed source-NAT session installation rolls back the live translated
   tuple, making the port immediately available for a later flow.
+- Cargo: duplicate source-NAT rules that reference the same concrete pool but
+  use different persistence settings still share tuple-space ownership.
+- Cargo: DNAT+source-NAT release uses the post-DNAT destination key so normal
+  expiry and rollback release the actual allocated tuple.
+- Cargo: repeated persistent lease refresh/release churn keeps the expiry index
+  bounded by retained leases rather than by allocation count.
 - Cargo: protocol round-trip covers persistent source-NAT snapshot/status
   fields.
 

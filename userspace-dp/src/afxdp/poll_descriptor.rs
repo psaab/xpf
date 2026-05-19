@@ -1459,6 +1459,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 if let PolicyAction::Permit = policy_result.action {
                                     // NAT64: cross-family translation takes
                                     // priority over same-family SNAT.
+                                    let mut source_nat_release_key = None;
                                     let nat64_info = if let Some((
                                         _,
                                         dst_v4,
@@ -1514,6 +1515,8 @@ pub(super) fn poll_binding_process_descriptor(
                                             }) {
                                                 Ok(snat_decision) => {
                                                     decision.nat = snat_decision;
+                                                    source_nat_release_key =
+                                                        Some(nat_match_flow.forward_key.clone());
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -1541,6 +1544,8 @@ pub(super) fn poll_binding_process_descriptor(
                                             ) {
                                                 Ok(snat_decision) => {
                                                     decision.nat = decision.nat.merge(snat_decision);
+                                                    source_nat_release_key =
+                                                        Some(nat_match_flow.forward_key.clone());
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -1573,6 +1578,15 @@ pub(super) fn poll_binding_process_descriptor(
                                         now_secs,
                                     );
                                     if let Some(request) = local_icmp_te {
+                                        if let Some(release_key) = source_nat_release_key.as_ref() {
+                                            rollback_source_nat_allocation(
+                                                &worker_ctx.forwarding.source_nat_rules,
+                                                release_key,
+                                                decision.nat,
+                                                false,
+                                                now_ns,
+                                            );
+                                        }
                                         binding.scratch.scratch_forwards.push(request);
                                         recycle_now = false;
                                     } else {
@@ -1659,9 +1673,11 @@ pub(super) fn poll_binding_process_descriptor(
                                                 );
                                             }
                                         } else {
-                                            release_source_nat_allocation(
+                                            rollback_source_nat_allocation(
                                                 &worker_ctx.forwarding.source_nat_rules,
-                                                &flow.forward_key,
+                                                source_nat_release_key
+                                                    .as_ref()
+                                                    .unwrap_or(&flow.forward_key),
                                                 decision.nat,
                                                 false,
                                                 now_ns,
@@ -2453,6 +2469,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // a reverse session. Without this, the SYN-ACK hits
                                 // session miss → policy deny (no rule for WAN→LAN).
                                 let mut pending_decision = decision;
+                                let mut source_nat_release_key = None;
                                 if let Some(flow) = flow.as_ref() {
                                     if let PolicyAction::Permit = evaluate_policy_with_len(
                                         &worker_ctx.forwarding.policy,
@@ -2479,6 +2496,8 @@ pub(super) fn poll_binding_process_descriptor(
                                             ) {
                                                 Ok(snat_decision) => {
                                                     pending_decision.nat = snat_decision;
+                                                    source_nat_release_key =
+                                                        Some(nat_match_flow.forward_key.clone());
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -2507,6 +2526,8 @@ pub(super) fn poll_binding_process_descriptor(
                                                 Ok(snat_decision) => {
                                                     pending_decision.nat =
                                                         pending_decision.nat.merge(snat_decision);
+                                                    source_nat_release_key =
+                                                        Some(nat_match_flow.forward_key.clone());
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -2579,9 +2600,11 @@ pub(super) fn poll_binding_process_descriptor(
                                         );
                                         telemetry.counters.session_creates += 1;
                                     } else {
-                                        release_source_nat_allocation(
+                                        rollback_source_nat_allocation(
                                             &worker_ctx.forwarding.source_nat_rules,
-                                            &flow.forward_key,
+                                            source_nat_release_key
+                                                .as_ref()
+                                                .unwrap_or(&flow.forward_key),
                                             pending_decision.nat,
                                             false,
                                             now_ns,
