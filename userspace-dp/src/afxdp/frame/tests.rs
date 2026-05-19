@@ -1086,7 +1086,12 @@ fn syn_cookie_ipv4_rst_builder_pads_to_ethernet_minimum() {
         u32::from_be_bytes([out[38], out[39], out[40], out[41]]),
         0x3333_4444
     );
-    assert_eq!(out[47], TCP_FLAG_RST);
+    assert_eq!(
+        u32::from_be_bytes([out[42], out[43], out[44], out[45]]),
+        0x1111_2223
+    );
+    assert_eq!(out[47], TCP_FLAG_RST | 0x10);
+    assert_eq!(&out[48..50], &[0, 0]);
     assert_eq!(&out[54..60], &[0, 0, 0, 0, 0, 0]);
     assert_eq!(checksum16(&out[14..34]), 0);
     assert!(tcp_checksum_ok_ipv4(&out[14..]));
@@ -1131,7 +1136,12 @@ fn syn_cookie_vlan_ipv4_rst_builder_pads_to_ethernet_minimum() {
         u32::from_be_bytes([out[42], out[43], out[44], out[45]]),
         0x3333_4444
     );
-    assert_eq!(out[51], TCP_FLAG_RST);
+    assert_eq!(
+        u32::from_be_bytes([out[46], out[47], out[48], out[49]]),
+        0x1111_2223
+    );
+    assert_eq!(out[51], TCP_FLAG_RST | 0x10);
+    assert_eq!(&out[52..54], &[0, 0]);
     assert_eq!(&out[58..60], &[0, 0]);
     assert_eq!(checksum16(&out[18..38]), 0);
     assert!(tcp_checksum_ok_ipv4(&out[18..]));
@@ -1175,8 +1185,12 @@ fn syn_cookie_ack_rst_builder_uses_received_ack_as_rst_seq() {
         u32::from_be_bytes([out[58], out[59], out[60], out[61]]),
         0x3333_4444
     );
-    assert_eq!(u32::from_be_bytes([out[62], out[63], out[64], out[65]]), 0);
-    assert_eq!(out[67], 0x04);
+    assert_eq!(
+        u32::from_be_bytes([out[62], out[63], out[64], out[65]]),
+        0x1111_2223
+    );
+    assert_eq!(out[67], TCP_FLAG_RST | 0x10);
+    assert_eq!(&out[68..70], &[0, 0]);
     assert!(tcp_checksum_ok_ipv6(&out[14..]));
 }
 
@@ -1191,7 +1205,7 @@ fn apply_nat_ipv4_recomputes_tcp_checksum() {
     let mut packet = vec![
         0x45, 0x00, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00, 10, 0, 61,
         102, 172, 16, 80, 200, 0x9c, 0x40, 0x14, 0x51, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x01, 0x50, 0x18, 0x20, 0x00, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'd',
+        0x00, 0x01, 0x50, 0x18, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'd',
         b'a', b't', b'a',
     ];
     let ip_sum = checksum16(&packet[..20]);
@@ -1326,7 +1340,7 @@ fn build_forwarded_frame_keeps_tcp_checksum_valid_after_snat() {
     frame.extend_from_slice(&[
         0x45, 0x00, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00, 10, 0, 61,
         102, 172, 16, 80, 200, 0x9c, 0x40, 0x14, 0x51, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x01, 0x50, 0x18, 0x20, 0x00, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'd',
+        0x00, 0x01, 0x50, 0x18, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'd',
         b'a', b't', b'a',
     ]);
     let ip_sum = checksum16(&frame[14..34]);
@@ -1800,7 +1814,7 @@ fn enforce_expected_ports_repairs_ipv4_tcp_ports_and_checksum() {
         0x0800,
     );
     frame.extend_from_slice(&[
-        0x45, 0x00, 0x00, 0x34, 0x00, 0x01, 0x00, 0x00, 63, PROTO_TCP, 0x00, 0x00,
+        0x45, 0x00, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 63, PROTO_TCP, 0x00, 0x00,
     ]);
     frame.extend_from_slice(&src_ip.octets());
     frame.extend_from_slice(&dst_ip.octets());
@@ -4081,7 +4095,7 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_snat() {
     frame.extend_from_slice(&[
         0x45, 0x00, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00, 10, 0, 61,
         102, 172, 16, 80, 200, 0x9c, 0x40, 0x14, 0x51, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x50, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'd',
+        0x00, 0x00, 0x50, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'd',
         b'a', b't', b'a',
     ]);
     let ip_sum = checksum16(&frame[14..34]);
@@ -4156,7 +4170,7 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_dnat() {
     frame.extend_from_slice(&[
         0x45, 0x00, 0x00, 0x30, 0x00, 0x02, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00, 172, 16, 80,
         200, 172, 16, 80, 8, 0x14, 0x51, 0x9c, 0x40, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
-        0x02, 0x50, 0x12, 0x20, 0x00, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'd', b'a',
+        0x02, 0x50, 0x12, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'd', b'a',
         b't', b'a',
     ]);
     let ip_sum = checksum16(&frame[18..38]);

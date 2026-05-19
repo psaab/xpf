@@ -276,6 +276,7 @@ pub(super) fn clamp_tcp_mss(packet: &mut [u8], max_mss: u16) -> bool {
 /// pure byte-construction primitive: it swaps L2/L3/L4 identity, emits a
 /// minimal SYN+ACK with the encoded cookie as the sequence number, advertises
 /// the selected MSS when present, and recomputes checksums from scratch.
+#[inline]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn build_syn_cookie_syn_ack_frame(
     frame: &[u8],
@@ -319,8 +320,8 @@ pub(in crate::afxdp) fn build_syn_cookie_ack_rst_frame(frame: &[u8]) -> Option<V
         parsed,
         TCP_MIN_HEADER_LEN,
         parsed.ack,
-        0,
-        TCP_FLAG_RST,
+        parsed.seq.wrapping_add(1),
+        TCP_FLAG_RST | TCP_FLAG_ACK,
         0,
     )
 }
@@ -512,7 +513,12 @@ fn write_syn_cookie_tcp_header(
     tcp[8..12].copy_from_slice(&ack.to_be_bytes());
     tcp[12] = ((tcp.len() / 4) as u8) << 4;
     tcp[13] = flags;
-    tcp[14..16].copy_from_slice(&SYN_COOKIE_TCP_WINDOW.to_be_bytes());
+    let window: u16 = if flags & TCP_FLAG_RST != 0 {
+        0
+    } else {
+        SYN_COOKIE_TCP_WINDOW
+    };
+    tcp[14..16].copy_from_slice(&window.to_be_bytes());
     if tcp.len() == TCP_MIN_HEADER_LEN + TCP_MSS_OPTION_LEN {
         tcp[20] = 2;
         tcp[21] = 4;
