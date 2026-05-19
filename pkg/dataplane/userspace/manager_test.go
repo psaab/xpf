@@ -1872,10 +1872,11 @@ func TestBuildSourceNATSnapshotsPopulatesPoolFields(t *testing.T) {
 	cfg.Security.NAT.AddressPersistent = true
 	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{
 		"pool-a": {
-			Name:      "pool-a",
-			Addresses: []string{"203.0.113.10/32", "203.0.113.11/32", "2001:db8:80::10/128"},
-			PortLow:   40000,
-			PortHigh:  40100,
+			Name:          "pool-a",
+			Addresses:     []string{"203.0.113.10/32", "203.0.113.11/32", "2001:db8:80::10/128"},
+			PortLow:       40000,
+			PortHigh:      40100,
+			PersistentNAT: &config.PersistentNATConfig{PermitAnyRemoteHost: true, InactivityTimeout: 900},
 		},
 	}
 	cfg.Security.NAT.Source = []*config.NATRuleSet{{
@@ -1908,6 +1909,15 @@ func TestBuildSourceNATSnapshotsPopulatesPoolFields(t *testing.T) {
 	}
 	if got.PortLow != 40000 || got.PortHigh != 40100 {
 		t.Fatalf("port range = %d-%d, want 40000-40100", got.PortLow, got.PortHigh)
+	}
+	if !got.PersistentNAT {
+		t.Fatalf("PersistentNAT = false, want true")
+	}
+	if !got.PersistentNATPermitAnyRemoteHost {
+		t.Fatalf("PersistentNATPermitAnyRemoteHost = false, want true")
+	}
+	if got.PersistentNATInactivityTimeout != 900 {
+		t.Fatalf("PersistentNATInactivityTimeout = %d, want 900", got.PersistentNATInactivityTimeout)
 	}
 	wantAddrs := []string{"203.0.113.10/32", "203.0.113.11/32", "2001:db8:80::10/128"}
 	if !reflect.DeepEqual(got.PoolAddresses, wantAddrs) {
@@ -2675,6 +2685,68 @@ func TestDeriveUserspaceCapabilitiesAllowsHAFabricConfigs(t *testing.T) {
 	caps := deriveUserspaceCapabilities(cfg)
 	if !caps.ForwardingSupported {
 		t.Fatalf("ForwardingSupported = false, unexpected reasons: %+v", caps.UnsupportedReasons)
+	}
+}
+
+func TestDeriveUserspaceCapabilitiesRejectsHAPersistentSourceNAT(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{ClusterID: 22}
+	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{
+		"pool-a": {
+			Name:          "pool-a",
+			Addresses:     []string{"203.0.113.10"},
+			PersistentNAT: &config.PersistentNATConfig{InactivityTimeout: 300},
+		},
+	}
+	cfg.Security.NAT.Source = []*config.NATRuleSet{{
+		Name:     "rs",
+		FromZone: "trust",
+		ToZone:   "wan",
+		Rules: []*config.NATRule{{
+			Name: "snat",
+			Then: config.NATThen{
+				Type:     config.NATSource,
+				PoolName: "pool-a",
+			},
+		}},
+	}}
+
+	caps := deriveUserspaceCapabilities(cfg)
+	if caps.ForwardingSupported {
+		t.Fatal("ForwardingSupported = true, want false for HA persistent source NAT")
+	}
+	if !slices.Contains(caps.UnsupportedReasons, "userspace persistent-nat source pool leases are not HA-synchronized") {
+		t.Fatalf("unsupported reasons = %+v, missing persistent-nat HA reason", caps.UnsupportedReasons)
+	}
+}
+
+func TestEnsureRequiredSnapshotProtocolRejectsOldHelperForPersistentSourceNAT(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{
+		"pool-a": {
+			Name:          "pool-a",
+			Addresses:     []string{"203.0.113.10"},
+			PersistentNAT: &config.PersistentNATConfig{InactivityTimeout: 300},
+		},
+	}
+	cfg.Security.NAT.Source = []*config.NATRuleSet{{
+		Name:     "rs",
+		FromZone: "trust",
+		ToZone:   "wan",
+		Rules: []*config.NATRule{{
+			Name: "snat",
+			Then: config.NATThen{
+				Type:     config.NATSource,
+				PoolName: "pool-a",
+			},
+		}},
+	}}
+
+	m := New()
+	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion - 1
+	err := m.ensureRequiredSnapshotProtocolLocked(cfg)
+	if !errors.Is(err, ErrPersistentSourceNATProtocolIncompatible) {
+		t.Fatalf("error = %v, want ErrPersistentSourceNATProtocolIncompatible", err)
 	}
 }
 

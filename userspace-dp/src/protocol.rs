@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 2;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 3;
 pub(crate) const INJECT_PACKET_TUPLE_PROTOCOL_VERSION: i32 = 1;
 
 // ---------------------------------------------------------------------------
@@ -436,6 +436,12 @@ pub(crate) struct SourceNATRuleSnapshot {
     pub port_high: u16,
     #[serde(rename = "address_persistent", default)]
     pub address_persistent: bool,
+    #[serde(rename = "persistent_nat", default)]
+    pub persistent_nat: bool,
+    #[serde(rename = "persistent_nat_permit_any_remote_host", default)]
+    pub persistent_nat_permit_any_remote_host: bool,
+    #[serde(rename = "persistent_nat_inactivity_timeout", default)]
+    pub persistent_nat_inactivity_timeout: i64,
     #[serde(rename = "pool_unusable", default)]
     pub pool_unusable: bool,
     #[serde(rename = "pool_unusable_reason", default)]
@@ -837,6 +843,8 @@ pub(crate) struct ProcessStatus {
     pub filter_term_counters: Vec<FirewallFilterTermCounterStatus>,
     #[serde(rename = "three_color_policer_counters", default)]
     pub three_color_policer_counters: Vec<ThreeColorPolicerStatus>,
+    #[serde(rename = "source_nat_pools", default)]
+    pub source_nat_pools: Vec<SourceNatPoolStatus>,
     #[serde(rename = "last_resolution", skip_serializing_if = "Option::is_none")]
     pub last_resolution: Option<PacketResolution>,
     #[serde(rename = "slow_path", default)]
@@ -868,6 +876,40 @@ pub(crate) struct ProcessStatus {
     /// Monotonic timestamp (secs) of the last HA flow cache flush (#312).
     #[serde(rename = "last_cache_flush_at", default)]
     pub last_cache_flush_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct SourceNatPoolStatus {
+    #[serde(rename = "rule_name", default)]
+    pub rule_name: String,
+    #[serde(rename = "pool_name", default)]
+    pub pool_name: String,
+    #[serde(rename = "address_count", default)]
+    pub address_count: usize,
+    #[serde(rename = "port_low", default)]
+    pub port_low: u16,
+    #[serde(rename = "port_high", default)]
+    pub port_high: u16,
+    #[serde(rename = "persistent_nat", default)]
+    pub persistent_nat: bool,
+    #[serde(rename = "persistent_nat_permit_any_remote_host", default)]
+    pub persistent_nat_permit_any_remote_host: bool,
+    #[serde(rename = "persistent_nat_inactivity_timeout", default)]
+    pub persistent_nat_inactivity_timeout: i64,
+    #[serde(rename = "live_flows", default)]
+    pub live_flows: u64,
+    #[serde(rename = "used_ports", default)]
+    pub used_ports: u64,
+    #[serde(rename = "persistent_leases", default)]
+    pub persistent_leases: u64,
+    #[serde(rename = "max_tracked_flows", default)]
+    pub max_tracked_flows: u64,
+    #[serde(rename = "allocations_total", default)]
+    pub allocations_total: u64,
+    #[serde(rename = "reuses_total", default)]
+    pub reuses_total: u64,
+    #[serde(rename = "exhaustion_total", default)]
+    pub exhaustion_total: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -2276,6 +2318,53 @@ mod tests {
             back.inject_packet_tuple_protocol_version,
             INJECT_PACKET_TUPLE_PROTOCOL_VERSION
         );
+    }
+
+    #[test]
+    fn source_nat_persistent_fields_roundtrip() {
+        let rule = SourceNATRuleSnapshot {
+            name: "snat".into(),
+            pool_name: "pool1".into(),
+            persistent_nat: true,
+            persistent_nat_permit_any_remote_host: true,
+            persistent_nat_inactivity_timeout: 600,
+            ..Default::default()
+        };
+        let value: serde_json::Value =
+            serde_json::to_value(&rule).expect("serialize SourceNATRuleSnapshot");
+        assert_eq!(value["persistent_nat"], true);
+        assert_eq!(value["persistent_nat_permit_any_remote_host"], true);
+        assert_eq!(value["persistent_nat_inactivity_timeout"], 600);
+        let back: SourceNATRuleSnapshot =
+            serde_json::from_value(value).expect("deserialize SourceNATRuleSnapshot");
+        assert!(back.persistent_nat);
+        assert!(back.persistent_nat_permit_any_remote_host);
+        assert_eq!(back.persistent_nat_inactivity_timeout, 600);
+    }
+
+    #[test]
+    fn process_status_source_nat_pool_status_roundtrip() {
+        let status = ProcessStatus {
+            source_nat_pools: vec![SourceNatPoolStatus {
+                rule_name: "snat".into(),
+                pool_name: "pool1".into(),
+                persistent_nat: true,
+                live_flows: 2,
+                used_ports: 1,
+                persistent_leases: 1,
+                allocations_total: 1,
+                reuses_total: 3,
+                exhaustion_total: 5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let value: serde_json::Value =
+            serde_json::to_value(&status).expect("serialize ProcessStatus");
+        assert_eq!(value["source_nat_pools"][0]["pool_name"], "pool1");
+        let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+        assert_eq!(back.source_nat_pools.len(), 1);
+        assert_eq!(back.source_nat_pools[0].exhaustion_total, 5);
     }
 
     #[test]

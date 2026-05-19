@@ -29,15 +29,16 @@ updating the other breaks the helper.
 
 `ConfigSnapshot.version` is a compatibility gate, not just documentation.
 The helper accepts only the current snapshot protocol version; this prevents a
-new daemon from publishing fields such as policy-scheduler inactive bits to a
-helper that would silently ignore them.
+new daemon from publishing fields such as policy-scheduler inactive bits or
+source-NAT persistent-lease settings to a helper that would silently ignore
+them.
 The helper also reports `config_snapshot_protocol_version` in status so a new
-daemon can fail closed before sending scheduled-policy snapshots to an older
-helper binary that predates the gate. If the daemon detects an incompatible
-helper while scheduled policies are configured, it sends
-`set_forwarding_state armed=false` before returning the compile/publish error;
-the old helper must not keep forwarding a stale snapshot that ignores scheduler
-inactive bits.
+daemon can fail closed before sending snapshots that require newer runtime
+semantics to an older helper binary that predates the gate. If the daemon
+detects an incompatible helper while scheduled policies or per-pool source-NAT
+`persistent-nat` settings are configured, it sends `set_forwarding_state
+armed=false` before returning the compile/publish error; the old helper must
+not keep forwarding a stale snapshot that ignores those semantics.
 
 `inject_packet_tuple_protocol_version` is the corresponding status gate for
 `inject_packet` requests that set `emit_on_wire=true`. Those requests must carry

@@ -21,11 +21,19 @@ fn source_nat_decision_for_flow(
     to_zone: &str,
     egress_ifindex: i32,
     flow: &SessionFlow,
+    now_ns: u64,
 ) -> Result<NatDecision, SourceNatFailure> {
     if let Some(decision) = forwarding.static_nat.match_snat(flow.src_ip, from_zone) {
         return Ok(decision);
     }
-    match match_source_nat_for_flow_result(forwarding, from_zone, to_zone, egress_ifindex, flow) {
+    match match_source_nat_for_flow_result_at(
+        forwarding,
+        from_zone,
+        to_zone,
+        egress_ifindex,
+        flow,
+        now_ns,
+    ) {
         SourceNatLookup::Matched(decision) => Ok(decision),
         SourceNatLookup::NoMatch => Ok(NatDecision::default()),
         SourceNatLookup::Unavailable(failure) => Err(failure),
@@ -1501,6 +1509,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                     &to_zone,
                                                     decision.resolution.egress_ifindex,
                                                     &nat_match_flow,
+                                                    now_ns,
                                                 )
                                             }) {
                                                 Ok(snat_decision) => {
@@ -1528,6 +1537,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 &to_zone,
                                                 decision.resolution.egress_ifindex,
                                                 &nat_match_flow,
+                                                now_ns,
                                             ) {
                                                 Ok(snat_decision) => {
                                                     decision.nat = decision.nat.merge(snat_decision);
@@ -2457,6 +2467,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 &to_zone,
                                                 pending_decision.resolution.egress_ifindex,
                                                 &nat_match_flow,
+                                                now_ns,
                                             ) {
                                                 Ok(snat_decision) => {
                                                     pending_decision.nat = snat_decision;
@@ -2483,6 +2494,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 &to_zone,
                                                 pending_decision.resolution.egress_ifindex,
                                                 &nat_match_flow,
+                                                now_ns,
                                             ) {
                                                 Ok(snat_decision) => {
                                                     pending_decision.nat =

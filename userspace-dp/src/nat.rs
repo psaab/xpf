@@ -1,10 +1,17 @@
 use crate::prefix::{PrefixV4, PrefixV6};
-use crate::{DestinationNATRuleSnapshot, SourceNATRuleSnapshot, StaticNATRuleSnapshot};
+use crate::{
+    DestinationNATRuleSnapshot, SourceNATRuleSnapshot, SourceNatPoolStatus, StaticNATRuleSnapshot,
+};
 use ipnet::IpNet;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+const DEFAULT_PERSISTENT_NAT_TIMEOUT_SECS: i64 = 300;
+const NS_PER_SEC: u64 = 1_000_000_000;
+const MAX_SOURCE_NAT_POOL_TRACKED_FLOWS: usize = 262_144;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NatDecision {
@@ -116,45 +123,129 @@ fn source_nat_failure_reason_from_snapshot(reason: &str) -> SourceNatFailureReas
     }
 }
 
-/// Round-robin port allocator for pool-mode SNAT.
-///
-/// Each pool address gets its own atomic counter. Ports are allocated by
-/// incrementing the counter and wrapping within [port_low, port_high].
-/// No per-port tracking — session expiry naturally frees ports.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct SourceNatFlowKey {
+    pub(crate) protocol: u8,
+    pub(crate) src_ip: IpAddr,
+    pub(crate) dst_ip: IpAddr,
+    pub(crate) src_port: u16,
+    pub(crate) dst_port: u16,
+}
+
+impl SourceNatFlowKey {
+    fn persistent_source_key(self) -> PersistentSourceKey {
+        PersistentSourceKey {
+            protocol: self.protocol,
+            src_ip: self.src_ip,
+            src_port: self.src_port,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct PersistentSourceKey {
+    protocol: u8,
+    src_ip: IpAddr,
+    src_port: u16,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct TranslatedTuple {
+    ip: IpAddr,
+    port: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PoolAddressFamily<'a> {
+    V4(&'a [Ipv4Addr]),
+    V6(&'a [Ipv6Addr]),
+}
+
+impl PoolAddressFamily<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::V4(addrs) => addrs.len(),
+            Self::V6(addrs) => addrs.len(),
+        }
+    }
+
+    fn ip_at(self, index: usize) -> IpAddr {
+        match self {
+            Self::V4(addrs) => IpAddr::V4(addrs[index]),
+            Self::V6(addrs) => IpAddr::V6(addrs[index]),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum AllocationOwner {
+    Flow(SourceNatFlowKey),
+    Persistent(PersistentSourceKey),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LiveAllocation {
+    translated: TranslatedTuple,
+    persistent_key: Option<PersistentSourceKey>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PersistentLease {
+    translated: TranslatedTuple,
+    expires_at_ns: u64,
+    timeout_ns: u64,
+    active_flows: u32,
+}
+
+#[derive(Debug, Default)]
+struct PortAllocatorLiveState {
+    live_by_flow: FxHashMap<SourceNatFlowKey, LiveAllocation>,
+    owner_by_translated: FxHashMap<TranslatedTuple, AllocationOwner>,
+    persistent_by_source: FxHashMap<PersistentSourceKey, PersistentLease>,
+}
+
 #[derive(Debug)]
-pub(crate) struct PortAllocator {
+struct PortAllocatorShared {
     /// One atomic counter per pool address, used for round-robin port allocation.
     counters: Vec<AtomicU32>,
     /// Index for IPv4 round-robin address selection.
     addr_counter_v4: AtomicU32,
     /// Index for IPv6 round-robin address selection.
     addr_counter_v6: AtomicU32,
-    pub(crate) port_low: u16,
-    pub(crate) port_high: u16,
+    live: Mutex<PortAllocatorLiveState>,
+    allocations_total: AtomicU64,
+    reuses_total: AtomicU64,
+    exhaustion_total: AtomicU64,
+    max_tracked_flows: usize,
 }
 
-impl Clone for PortAllocator {
-    fn clone(&self) -> Self {
-        Self {
-            counters: self
-                .counters
-                .iter()
-                .map(|c| AtomicU32::new(c.load(Ordering::Relaxed)))
-                .collect(),
-            addr_counter_v4: AtomicU32::new(self.addr_counter_v4.load(Ordering::Relaxed)),
-            addr_counter_v6: AtomicU32::new(self.addr_counter_v6.load(Ordering::Relaxed)),
-            port_low: self.port_low,
-            port_high: self.port_high,
-        }
-    }
+/// Bounded pool-mode SNAT allocator.
+///
+/// Address selection uses atomics for stable round-robin/sticky starting
+/// points; live translated tuple ownership is tracked under a per-rule mutex
+/// so ports are not reused while sessions are alive. Persistent NAT leases are
+/// keyed by source tuple and retained until their inactivity timeout after the
+/// last live flow releases them.
+#[derive(Clone, Debug)]
+pub(crate) struct PortAllocator {
+    shared: Arc<PortAllocatorShared>,
+    pub(crate) port_low: u16,
+    pub(crate) port_high: u16,
 }
 
 impl Default for PortAllocator {
     fn default() -> Self {
         Self {
-            counters: Vec::new(),
-            addr_counter_v4: AtomicU32::new(0),
-            addr_counter_v6: AtomicU32::new(0),
+            shared: Arc::new(PortAllocatorShared {
+                counters: Vec::new(),
+                addr_counter_v4: AtomicU32::new(0),
+                addr_counter_v6: AtomicU32::new(0),
+                live: Mutex::new(PortAllocatorLiveState::default()),
+                allocations_total: AtomicU64::new(0),
+                reuses_total: AtomicU64::new(0),
+                exhaustion_total: AtomicU64::new(0),
+                max_tracked_flows: 0,
+            }),
             port_low: 1024,
             port_high: 65535,
         }
@@ -164,10 +255,19 @@ impl Default for PortAllocator {
 impl PortAllocator {
     pub(crate) fn new(num_addresses: usize, port_low: u16, port_high: u16) -> Self {
         let counters = (0..num_addresses).map(|_| AtomicU32::new(0)).collect();
+        let max_tracked_flows = allocator_capacity(num_addresses, port_low, port_high)
+            .min(MAX_SOURCE_NAT_POOL_TRACKED_FLOWS);
         Self {
-            counters,
-            addr_counter_v4: AtomicU32::new(0),
-            addr_counter_v6: AtomicU32::new(0),
+            shared: Arc::new(PortAllocatorShared {
+                counters,
+                addr_counter_v4: AtomicU32::new(0),
+                addr_counter_v6: AtomicU32::new(0),
+                live: Mutex::new(PortAllocatorLiveState::default()),
+                allocations_total: AtomicU64::new(0),
+                reuses_total: AtomicU64::new(0),
+                exhaustion_total: AtomicU64::new(0),
+                max_tracked_flows,
+            }),
             port_low,
             port_high,
         }
@@ -188,8 +288,8 @@ impl PortAllocator {
             return family_offset + sticky_pool_index(src_ip, family_len);
         }
         let counter = match src_ip {
-            IpAddr::V4(_) => &self.addr_counter_v4,
-            IpAddr::V6(_) => &self.addr_counter_v6,
+            IpAddr::V4(_) => &self.shared.addr_counter_v4,
+            IpAddr::V6(_) => &self.shared.addr_counter_v6,
         };
         let idx = counter.fetch_add(1, Ordering::Relaxed);
         family_offset + ((idx as usize) % family_len)
@@ -203,13 +303,243 @@ impl PortAllocator {
             return Err(SourceNatFailureReason::InvalidPortRange);
         }
         let range = (self.port_high as u32).saturating_sub(self.port_low as u32) + 1;
-        if range == 0 || addr_index >= self.counters.len() {
+        if range == 0 || addr_index >= self.shared.counters.len() {
             return Err(SourceNatFailureReason::AllocatorExhausted);
         }
-        let counter = &self.counters[addr_index];
+        let counter = &self.shared.counters[addr_index];
         let val = counter.fetch_add(1, Ordering::Relaxed);
         Ok(self.port_low + (val % range) as u16)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn allocate_translation(
+        &self,
+        flow: SourceNatFlowKey,
+        family_addresses: PoolAddressFamily<'_>,
+        family_offset: usize,
+        address_persistent: bool,
+        persistent_nat: bool,
+        persistent_nat_timeout_ns: u64,
+        now_ns: u64,
+    ) -> Result<TranslatedTuple, SourceNatFailureReason> {
+        if self.port_low == 0 || self.port_high == 0 || self.port_low > self.port_high {
+            return Err(SourceNatFailureReason::InvalidPortRange);
+        }
+        let family_len = family_addresses.len();
+        if family_len == 0 {
+            return Err(SourceNatFailureReason::WrongAddressFamily);
+        }
+        let range = (self.port_high as u32).saturating_sub(self.port_low as u32) + 1;
+        if range == 0 || self.shared.max_tracked_flows == 0 {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(SourceNatFailureReason::AllocatorExhausted);
+        }
+
+        let mut live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
+        self.gc_expired_locked(&mut live, now_ns);
+
+        if let Some(existing) = live.live_by_flow.get(&flow) {
+            self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+            return Ok(existing.translated);
+        }
+        if live.live_by_flow.len() >= self.shared.max_tracked_flows {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(SourceNatFailureReason::AllocatorExhausted);
+        }
+
+        let persistent_key = persistent_nat.then(|| flow.persistent_source_key());
+        if let Some(key) = persistent_key {
+            if live.persistent_by_source.contains_key(&key) {
+                let mut reusable = None;
+                let mut expired = None;
+                if let Some(lease) = live.persistent_by_source.get_mut(&key) {
+                    if lease.active_flows > 0 || lease.expires_at_ns > now_ns {
+                        let translated = lease.translated;
+                        lease.active_flows = lease.active_flows.saturating_add(1);
+                        lease.expires_at_ns =
+                            now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
+                        reusable = Some(translated);
+                    } else {
+                        expired = Some(lease.translated);
+                    }
+                }
+                if let Some(translated) = reusable {
+                    live.live_by_flow.insert(
+                        flow,
+                        LiveAllocation {
+                            translated,
+                            persistent_key: Some(key),
+                        },
+                    );
+                    self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                    return Ok(translated);
+                }
+                if let Some(translated) = expired {
+                    live.owner_by_translated.remove(&translated);
+                    live.persistent_by_source.remove(&key);
+                }
+            }
+            if live.persistent_by_source.len() >= self.shared.max_tracked_flows {
+                self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                return Err(SourceNatFailureReason::AllocatorExhausted);
+            }
+        }
+
+        let start_abs =
+            self.address_index(flow.src_ip, family_offset, family_len, address_persistent);
+        let start_rel = start_abs.saturating_sub(family_offset);
+        let address_attempts = if address_persistent { 1 } else { family_len };
+        for offset in 0..address_attempts {
+            let rel = (start_rel + offset) % family_len;
+            let abs = family_offset + rel;
+            let translated_ip = family_addresses.ip_at(rel);
+            let Some(translated) =
+                self.claim_free_port_locked(&mut live, abs, translated_ip, flow, persistent_key)
+            else {
+                continue;
+            };
+            if let Some(key) = persistent_key {
+                live.persistent_by_source.insert(
+                    key,
+                    PersistentLease {
+                        translated,
+                        expires_at_ns: now_ns
+                            .saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC)),
+                        timeout_ns: persistent_nat_timeout_ns.max(NS_PER_SEC),
+                        active_flows: 1,
+                    },
+                );
+            }
+            live.live_by_flow.insert(
+                flow,
+                LiveAllocation {
+                    translated,
+                    persistent_key,
+                },
+            );
+            self.shared
+                .allocations_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(translated);
+        }
+
+        self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+        Err(SourceNatFailureReason::AllocatorExhausted)
+    }
+
+    fn claim_free_port_locked(
+        &self,
+        live: &mut PortAllocatorLiveState,
+        addr_index: usize,
+        translated_ip: IpAddr,
+        flow: SourceNatFlowKey,
+        persistent_key: Option<PersistentSourceKey>,
+    ) -> Option<TranslatedTuple> {
+        if addr_index >= self.shared.counters.len() {
+            return None;
+        }
+        let range = (self.port_high as u32).saturating_sub(self.port_low as u32) + 1;
+        let counter = &self.shared.counters[addr_index];
+        for _ in 0..range {
+            let val = counter.fetch_add(1, Ordering::Relaxed);
+            let translated = TranslatedTuple {
+                ip: translated_ip,
+                port: self.port_low + (val % range) as u16,
+            };
+            if live.owner_by_translated.contains_key(&translated) {
+                continue;
+            }
+            let owner = persistent_key
+                .map(AllocationOwner::Persistent)
+                .unwrap_or(AllocationOwner::Flow(flow));
+            live.owner_by_translated.insert(translated, owner);
+            return Some(translated);
+        }
+        None
+    }
+
+    fn release_flow(
+        &self,
+        flow: SourceNatFlowKey,
+        translated: TranslatedTuple,
+        now_ns: u64,
+    ) -> bool {
+        let mut live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(existing) = live.live_by_flow.get(&flow).copied() else {
+            return false;
+        };
+        if existing.translated != translated {
+            return false;
+        }
+        live.live_by_flow.remove(&flow);
+        if let Some(key) = existing.persistent_key {
+            if let Some(lease) = live.persistent_by_source.get_mut(&key) {
+                lease.active_flows = lease.active_flows.saturating_sub(1);
+                lease.expires_at_ns = now_ns.saturating_add(lease.timeout_ns);
+            }
+        } else {
+            live.owner_by_translated.remove(&translated);
+        }
+        self.gc_expired_locked(&mut live, now_ns);
+        true
+    }
+
+    fn snapshot(&self) -> PortAllocatorSnapshot {
+        let live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
+        PortAllocatorSnapshot {
+            live_flows: live.live_by_flow.len() as u64,
+            used_ports: live.owner_by_translated.len() as u64,
+            persistent_leases: live.persistent_by_source.len() as u64,
+            max_tracked_flows: self.shared.max_tracked_flows as u64,
+            allocations_total: self.shared.allocations_total.load(Ordering::Relaxed),
+            reuses_total: self.shared.reuses_total.load(Ordering::Relaxed),
+            exhaustion_total: self.shared.exhaustion_total.load(Ordering::Relaxed),
+        }
+    }
+
+    fn gc_expired_locked(&self, live: &mut PortAllocatorLiveState, now_ns: u64) {
+        if now_ns == 0 {
+            return;
+        }
+        let expired = live
+            .persistent_by_source
+            .iter()
+            .filter_map(|(key, lease)| {
+                (lease.active_flows == 0 && lease.expires_at_ns <= now_ns)
+                    .then_some((*key, lease.translated))
+            })
+            .collect::<Vec<_>>();
+        for (key, translated) in expired {
+            live.persistent_by_source.remove(&key);
+            match live.owner_by_translated.get(&translated) {
+                Some(AllocationOwner::Persistent(owner)) if *owner == key => {
+                    live.owner_by_translated.remove(&translated);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PortAllocatorSnapshot {
+    pub(crate) live_flows: u64,
+    pub(crate) used_ports: u64,
+    pub(crate) persistent_leases: u64,
+    pub(crate) max_tracked_flows: u64,
+    pub(crate) allocations_total: u64,
+    pub(crate) reuses_total: u64,
+    pub(crate) exhaustion_total: u64,
+}
+
+fn allocator_capacity(num_addresses: usize, port_low: u16, port_high: u16) -> usize {
+    if num_addresses == 0 || port_low == 0 || port_high == 0 || port_low > port_high {
+        return 0;
+    }
+    let ports = (u64::from(port_high) - u64::from(port_low)) + 1;
+    ports
+        .saturating_mul(num_addresses as u64)
+        .min(usize::MAX as u64) as usize
 }
 
 fn sticky_pool_index(src_ip: IpAddr, pool_len: usize) -> usize {
@@ -250,6 +580,10 @@ pub(crate) struct SourceNatRule {
     pub(crate) pool_mode: bool,
     pub(crate) pool_failure: Option<SourceNatFailureReason>,
     pub(crate) address_persistent: bool,
+    pub(crate) persistent_nat: bool,
+    pub(crate) persistent_nat_permit_any_remote_host: bool,
+    pub(crate) persistent_nat_inactivity_timeout_secs: i64,
+    pub(crate) persistent_nat_timeout_ns: u64,
     pub(crate) pool_addresses_v4: Vec<Ipv4Addr>,
     pub(crate) pool_addresses_v6: Vec<Ipv6Addr>,
     pub(crate) pool_allocator: PortAllocator,
@@ -275,9 +609,23 @@ impl SourceNatRule {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<SourceNatRule> {
+    parse_source_nat_rules_with_previous(snaps, None)
+}
+
+pub(crate) fn parse_source_nat_rules_with_previous(
+    snaps: &[SourceNATRuleSnapshot],
+    previous: Option<&[SourceNatRule]>,
+) -> Vec<SourceNatRule> {
     let mut out = Vec::with_capacity(snaps.len());
+    let mut used_previous = vec![false; previous.map(|p| p.len()).unwrap_or(0)];
     for snap in snaps {
+        let timeout_secs = if snap.persistent_nat_inactivity_timeout > 0 {
+            snap.persistent_nat_inactivity_timeout
+        } else {
+            DEFAULT_PERSISTENT_NAT_TIMEOUT_SECS
+        };
         let mut rule = SourceNatRule {
             name: snap.name.clone(),
             from_zone: snap.from_zone.clone(),
@@ -287,6 +635,10 @@ pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<Sou
             pool_name: snap.pool_name.clone(),
             pool_mode: !snap.pool_name.is_empty() || !snap.pool_addresses.is_empty(),
             address_persistent: snap.address_persistent,
+            persistent_nat: snap.persistent_nat,
+            persistent_nat_permit_any_remote_host: snap.persistent_nat_permit_any_remote_host,
+            persistent_nat_inactivity_timeout_secs: timeout_secs,
+            persistent_nat_timeout_ns: (timeout_secs as u64).saturating_mul(NS_PER_SEC),
             ..SourceNatRule::default()
         };
         for prefix in &snap.source_addresses {
@@ -346,9 +698,98 @@ pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<Sou
         if total_pool > 0 {
             rule.pool_allocator = PortAllocator::new(total_pool, port_low, port_high);
         }
+        if let Some(prev_rules) = previous {
+            if let Some((idx, prev_rule)) = prev_rules.iter().enumerate().find(|(idx, prev)| {
+                !used_previous[*idx] && source_nat_runtime_compatible(&rule, prev)
+            }) {
+                used_previous[idx] = true;
+                rule.pool_allocator = prev_rule.pool_allocator.clone();
+            }
+        }
         out.push(rule);
     }
     out
+}
+
+fn source_nat_runtime_compatible(new_rule: &SourceNatRule, old_rule: &SourceNatRule) -> bool {
+    new_rule.name == old_rule.name
+        && new_rule.pool_name == old_rule.pool_name
+        && new_rule.pool_mode == old_rule.pool_mode
+        && new_rule.pool_failure == old_rule.pool_failure
+        && new_rule.address_persistent == old_rule.address_persistent
+        && new_rule.persistent_nat == old_rule.persistent_nat
+        && new_rule.persistent_nat_permit_any_remote_host
+            == old_rule.persistent_nat_permit_any_remote_host
+        && new_rule.persistent_nat_inactivity_timeout_secs
+            == old_rule.persistent_nat_inactivity_timeout_secs
+        && new_rule.pool_addresses_v4 == old_rule.pool_addresses_v4
+        && new_rule.pool_addresses_v6 == old_rule.pool_addresses_v6
+        && new_rule.pool_allocator.port_low == old_rule.pool_allocator.port_low
+        && new_rule.pool_allocator.port_high == old_rule.pool_allocator.port_high
+}
+
+pub(crate) fn release_source_nat_allocation(
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) {
+    if is_reverse {
+        return;
+    }
+    let Some(rewrite_src) = nat.rewrite_src else {
+        return;
+    };
+    let Some(rewrite_src_port) = nat.rewrite_src_port else {
+        return;
+    };
+    let translated = TranslatedTuple {
+        ip: rewrite_src,
+        port: rewrite_src_port,
+    };
+    let flow = SourceNatFlowKey {
+        protocol: key.protocol,
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+    };
+    for rule in rules {
+        if !rule.pool_mode {
+            continue;
+        }
+        if rule.pool_allocator.release_flow(flow, translated, now_ns) {
+            break;
+        }
+    }
+}
+
+pub(crate) fn source_nat_pool_statuses(rules: &[SourceNatRule]) -> Vec<SourceNatPoolStatus> {
+    rules
+        .iter()
+        .filter(|rule| rule.pool_mode)
+        .map(|rule| {
+            let snap = rule.pool_allocator.snapshot();
+            SourceNatPoolStatus {
+                rule_name: rule.name.clone(),
+                pool_name: rule.pool_name.clone(),
+                address_count: rule.pool_addresses_v4.len() + rule.pool_addresses_v6.len(),
+                port_low: rule.pool_allocator.port_low,
+                port_high: rule.pool_allocator.port_high,
+                persistent_nat: rule.persistent_nat,
+                persistent_nat_permit_any_remote_host: rule.persistent_nat_permit_any_remote_host,
+                persistent_nat_inactivity_timeout: rule.persistent_nat_inactivity_timeout_secs,
+                live_flows: snap.live_flows,
+                used_ports: snap.used_ports,
+                persistent_leases: snap.persistent_leases,
+                max_tracked_flows: snap.max_tracked_flows,
+                allocations_total: snap.allocations_total,
+                reuses_total: snap.reuses_total,
+                exhaustion_total: snap.exhaustion_total,
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn match_source_nat(
@@ -377,6 +818,32 @@ pub(crate) fn match_source_nat_result(
     egress_v4: Option<Ipv4Addr>,
     egress_v6: Option<Ipv6Addr>,
 ) -> SourceNatLookup {
+    match_source_nat_result_for_tuple(
+        rules, from_zone, to_zone, src_ip, dst_ip, 0, 0, 0, egress_v4, egress_v6, 0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn match_source_nat_result_for_tuple(
+    rules: &[SourceNatRule],
+    from_zone: &str,
+    to_zone: &str,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    egress_v4: Option<Ipv4Addr>,
+    egress_v6: Option<Ipv6Addr>,
+    now_ns: u64,
+) -> SourceNatLookup {
+    let flow = SourceNatFlowKey {
+        protocol,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+    };
     for rule in rules {
         if !rule.matches(from_zone, to_zone, src_ip, dst_ip) {
             continue;
@@ -404,18 +871,43 @@ pub(crate) fn match_source_nat_result(
         }
         // Pool-mode SNAT: pick address by source-IP hash when
         // address-persistent is enabled, otherwise round-robin by family.
+        let tupleless_lookup = protocol == 0 && src_port == 0 && dst_port == 0;
         match src_ip {
             IpAddr::V4(_) if !rule.pool_addresses_v4.is_empty() => {
-                let addr_idx = rule.pool_allocator.address_index(
-                    src_ip,
+                if tupleless_lookup {
+                    let addr_idx = rule.pool_allocator.address_index(
+                        src_ip,
+                        0,
+                        rule.pool_addresses_v4.len(),
+                        rule.address_persistent,
+                    );
+                    let pool_addr = rule.pool_addresses_v4[addr_idx];
+                    let port = match rule.pool_allocator.try_next_port(addr_idx) {
+                        Ok(port) => port,
+                        Err(reason) => {
+                            return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                                rule, reason,
+                            ));
+                        }
+                    };
+                    return SourceNatLookup::Matched(NatDecision {
+                        rewrite_src: Some(IpAddr::V4(pool_addr)),
+                        rewrite_dst: None,
+                        rewrite_src_port: Some(port),
+                        rewrite_dst_port: None,
+                        ..NatDecision::default()
+                    });
+                }
+                let translated = match rule.pool_allocator.allocate_translation(
+                    flow,
+                    PoolAddressFamily::V4(&rule.pool_addresses_v4),
                     0,
-                    rule.pool_addresses_v4.len(),
                     rule.address_persistent,
-                );
-                let v4_idx = addr_idx;
-                let pool_addr = rule.pool_addresses_v4[v4_idx];
-                let port = match rule.pool_allocator.try_next_port(addr_idx) {
-                    Ok(port) => port,
+                    rule.persistent_nat,
+                    rule.persistent_nat_timeout_ns,
+                    now_ns,
+                ) {
+                    Ok(translated) => translated,
                     Err(reason) => {
                         return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
                             rule, reason,
@@ -423,25 +915,50 @@ pub(crate) fn match_source_nat_result(
                     }
                 };
                 return SourceNatLookup::Matched(NatDecision {
-                    rewrite_src: Some(IpAddr::V4(pool_addr)),
+                    rewrite_src: Some(translated.ip),
                     rewrite_dst: None,
-                    rewrite_src_port: Some(port),
+                    rewrite_src_port: Some(translated.port),
                     rewrite_dst_port: None,
                     ..NatDecision::default()
                 });
             }
             IpAddr::V6(_) if !rule.pool_addresses_v6.is_empty() => {
                 let v6_offset = rule.pool_addresses_v4.len();
-                let addr_idx = rule.pool_allocator.address_index(
-                    src_ip,
+                if tupleless_lookup {
+                    let addr_idx = rule.pool_allocator.address_index(
+                        src_ip,
+                        v6_offset,
+                        rule.pool_addresses_v6.len(),
+                        rule.address_persistent,
+                    );
+                    let v6_idx = addr_idx - v6_offset;
+                    let pool_addr = rule.pool_addresses_v6[v6_idx];
+                    let port = match rule.pool_allocator.try_next_port(addr_idx) {
+                        Ok(port) => port,
+                        Err(reason) => {
+                            return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                                rule, reason,
+                            ));
+                        }
+                    };
+                    return SourceNatLookup::Matched(NatDecision {
+                        rewrite_src: Some(IpAddr::V6(pool_addr)),
+                        rewrite_dst: None,
+                        rewrite_src_port: Some(port),
+                        rewrite_dst_port: None,
+                        ..NatDecision::default()
+                    });
+                }
+                let translated = match rule.pool_allocator.allocate_translation(
+                    flow,
+                    PoolAddressFamily::V6(&rule.pool_addresses_v6),
                     v6_offset,
-                    rule.pool_addresses_v6.len(),
                     rule.address_persistent,
-                );
-                let v6_idx = addr_idx - v6_offset;
-                let pool_addr = rule.pool_addresses_v6[v6_idx];
-                let port = match rule.pool_allocator.try_next_port(addr_idx) {
-                    Ok(port) => port,
+                    rule.persistent_nat,
+                    rule.persistent_nat_timeout_ns,
+                    now_ns,
+                ) {
+                    Ok(translated) => translated,
                     Err(reason) => {
                         return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
                             rule, reason,
@@ -449,9 +966,9 @@ pub(crate) fn match_source_nat_result(
                     }
                 };
                 return SourceNatLookup::Matched(NatDecision {
-                    rewrite_src: Some(IpAddr::V6(pool_addr)),
+                    rewrite_src: Some(translated.ip),
                     rewrite_dst: None,
-                    rewrite_src_port: Some(port),
+                    rewrite_src_port: Some(translated.port),
                     rewrite_dst_port: None,
                     ..NatDecision::default()
                 });

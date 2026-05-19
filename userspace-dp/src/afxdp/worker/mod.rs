@@ -1452,6 +1452,13 @@ pub(crate) fn worker_loop(
         let expired_entries = sessions.expire_stale_entries(loop_now_ns);
         let expired = expired_entries.len() as u64;
         for expired_entry in expired_entries {
+            release_source_nat_allocation(
+                &forwarding.source_nat_rules,
+                &expired_entry.key,
+                expired_entry.decision.nat,
+                expired_entry.metadata.is_reverse,
+                loop_now_ns,
+            );
             delete_session_map_entry_for_removed_session_with_origin(
                 session_map_fd,
                 &expired_entry.key,

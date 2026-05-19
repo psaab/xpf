@@ -29,6 +29,7 @@ var _ dataplane.ConfigSink = (*Manager)(nil)
 var _ dataplane.RuntimeDataPlane = (*Manager)(nil)
 
 var ErrPolicySchedulerProtocolIncompatible = errors.New("userspace policy scheduler snapshot protocol incompatible")
+var ErrPersistentSourceNATProtocolIncompatible = errors.New("userspace persistent source NAT snapshot protocol incompatible")
 
 // DataplaneMode describes which packet-processing pipeline is active.
 type DataplaneMode int
@@ -540,8 +541,8 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// userspace-dp has entries it doesn't if apply_snapshot fails.
 	// Moved to the post-success path below (after line 343).
 	if pendingXSKStartup {
-		if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
-			if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+		if err := m.ensureRequiredSnapshotProtocolLocked(cfg); err != nil {
+			if disarmErr := m.disarmSnapshotProtocolFailureLocked(err); disarmErr != nil {
 				return result, errors.Join(err, disarmErr)
 			}
 			return result, err
@@ -584,8 +585,8 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	if err := m.ensureProcessLocked(ucfg); err != nil {
 		return result, err
 	}
-	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
-		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
+	if err := m.ensureRequiredSnapshotProtocolLocked(cfg); err != nil {
+		if disarmErr := m.disarmSnapshotProtocolFailureLocked(err); disarmErr != nil {
 			return result, errors.Join(err, disarmErr)
 		}
 		return result, err
@@ -657,12 +658,12 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return
 	}
 
-	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
-		if disarmErr := m.disarmPolicySchedulerProtocolFailureLocked(err); disarmErr != nil {
-			slog.Warn("userspace: failed to disarm helper after refusing policy scheduler publish",
+	if err := m.ensureRequiredSnapshotProtocolLocked(cfg); err != nil {
+		if disarmErr := m.disarmSnapshotProtocolFailureLocked(err); disarmErr != nil {
+			slog.Warn("userspace: failed to disarm helper after refusing snapshot publish",
 				"protocol_err", err, "err", disarmErr)
 		}
-		slog.Warn("userspace: refusing policy scheduler publish to incompatible helper", "err", err)
+		slog.Warn("userspace: refusing snapshot publish to incompatible helper", "err", err)
 		return
 	}
 	next := *m.lastSnapshot
@@ -779,6 +780,35 @@ func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error 
 	)
 }
 
+func (m *Manager) ensurePersistentSourceNATProtocolLocked(cfg *config.Config) error {
+	if !userspaceConfigUsesPersistentSourceNAT(cfg) {
+		return nil
+	}
+	if m.lastStatus.ConfigSnapshotProtocolVersion >= ProtocolVersion {
+		return nil
+	}
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+		m.recordHelperStatusLocked(&status)
+		if status.ConfigSnapshotProtocolVersion >= ProtocolVersion {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"%w: helper config snapshot protocol version %d < required %d for persistent source NAT snapshots",
+		ErrPersistentSourceNATProtocolIncompatible,
+		m.lastStatus.ConfigSnapshotProtocolVersion,
+		ProtocolVersion,
+	)
+}
+
+func (m *Manager) ensureRequiredSnapshotProtocolLocked(cfg *config.Config) error {
+	if err := m.ensurePolicySchedulerProtocolLocked(cfg); err != nil {
+		return err
+	}
+	return m.ensurePersistentSourceNATProtocolLocked(cfg)
+}
+
 func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	status.DataplaneMode = m.mode.String()
 	status.ConfiguredMode = m.configuredMode.String()
@@ -791,7 +821,7 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	m.lastStatus = *status
 }
 
-func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) error {
+func (m *Manager) disarmSnapshotProtocolFailureLocked(protocolErr error) error {
 	if m.proc == nil || m.proc.Process == nil {
 		return nil
 	}
@@ -803,13 +833,13 @@ func (m *Manager) disarmPolicySchedulerProtocolFailureLocked(protocolErr error) 
 	}
 	var status ProcessStatus
 	if err := m.requestLocked(req, &status); err != nil {
-		return fmt.Errorf("userspace: disarm helper after policy scheduler protocol error: %w", err)
+		return fmt.Errorf("userspace: disarm helper after snapshot protocol error: %w", err)
 	}
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		m.recordHelperStatusLocked(&status)
-		return fmt.Errorf("userspace: sync helper status after policy scheduler fail-closed disarm: %w", err)
+		return fmt.Errorf("userspace: sync helper status after snapshot protocol fail-closed disarm: %w", err)
 	}
-	slog.Warn("userspace: disarmed helper after policy scheduler protocol error", "err", protocolErr)
+	slog.Warn("userspace: disarmed helper after snapshot protocol error", "err", protocolErr)
 	return nil
 }
 
@@ -1156,6 +1186,9 @@ func deriveUserspaceCapabilities(cfg *config.Config) UserspaceCapabilities {
 	if !userspaceSupportsThreeColorPolicers(cfg) {
 		addReason("userspace three-color policers require color-blind mode and then discard")
 	}
+	if cfg.Chassis.Cluster != nil && userspaceConfigUsesPersistentSourceNAT(cfg) {
+		addReason("userspace persistent-nat source pool leases are not HA-synchronized")
+	}
 	// Firewall filters and legacy policers are supported in the userspace
 	// dataplane. Three-color policers are supported for the color-blind
 	// `then discard` runtime slice above; unsupported color-aware and
@@ -1172,6 +1205,27 @@ func deriveUserspaceCapabilities(cfg *config.Config) UserspaceCapabilities {
 	// counters are all owned by userspace-dp.
 	// Flow export (NetFlow v9) is now supported in the userspace dataplane.
 	return caps
+}
+
+func userspaceConfigUsesPersistentSourceNAT(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule == nil || rule.Then.PoolName == "" {
+				continue
+			}
+			pool := cfg.Security.NAT.SourcePools[rule.Then.PoolName]
+			if pool != nil && pool.PersistentNAT != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func userspaceSupportsThreeColorPolicers(cfg *config.Config) bool {

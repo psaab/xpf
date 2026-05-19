@@ -383,6 +383,31 @@ func FormatStatusSummary(status ProcessStatus) string {
 	}
 	fmt.Fprintf(&b, "  SNAT packets:              %d\n", snatPackets)
 	fmt.Fprintf(&b, "  DNAT packets:              %d\n", dnatPackets)
+	if len(status.SourceNATPools) > 0 {
+		rows := append([]SourceNATPoolStatus(nil), status.SourceNATPools...)
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].PoolName != rows[j].PoolName {
+				return rows[i].PoolName < rows[j].PoolName
+			}
+			return rows[i].RuleName < rows[j].RuleName
+		})
+		fmt.Fprintln(&b, "Source NAT pools:")
+		fmt.Fprintf(&b, "  %-20s %-20s %-6s %-11s %-10s %-10s %-10s %-10s %-10s\n",
+			"Pool", "Rule", "Persist", "LiveFlows", "UsedPorts", "Leases", "Alloc", "Reuse", "Exhaust")
+		for _, row := range rows {
+			fmt.Fprintf(&b, "  %-20s %-20s %-6t %-11d %-10d %-10d %-10d %-10d %-10d\n",
+				row.PoolName,
+				row.RuleName,
+				row.PersistentNAT,
+				row.LiveFlows,
+				row.UsedPorts,
+				row.PersistentLeases,
+				row.AllocationsTotal,
+				row.ReusesTotal,
+				row.ExhaustionTotal,
+			)
+		}
+	}
 	fmt.Fprintf(&b, "  TX packets:                %d\n", txPackets)
 	fmt.Fprintf(&b, "  TX bytes:                  %d\n", txBytes)
 	fmt.Fprintf(&b, "  TX errors:                 %d\n", txErrors)
