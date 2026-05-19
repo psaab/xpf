@@ -45,9 +45,12 @@ Current implementation status after the 2026-05-19 closeout slice:
 - Runtime producers cover userspace policy deny, screen drop, logged PBR
   filter hits, non-PBR input filter logs, live and cached output filter logs,
   and lo0/local-delivery filter logs. Non-PBR input filter-log matching runs
-  only on the slow path after a flow-cache miss. If the first packet installs a
-  flow-cache entry, the matched input log term is stored in that entry and
-  cached hits re-emit `source=input` without rescanning filter terms.
+  only on the slow path after a flow-cache miss. Non-PBR input filter
+  `discard`/`reject` actions are terminal before route lookup and policy
+  evaluation; logged terminal actions emit `source=input` with deny/reject RT_FLOW
+  action. If the first permitted packet installs a flow-cache entry, the matched
+  input log term and ingress-zone ID are stored in that entry and cached hits
+  re-emit `source=input` without rescanning filter terms.
 - Policy deny records carry the userspace snapshot's numeric policy ID. Filter
   log records carry the compiled filter ID, term ID, action, and source
   (`pbr`, `input`, `output`, `cached-output`, or `lo0`). These IDs are

@@ -253,6 +253,110 @@ fn evaluate_filter_ref_counted_v6(
 }
 
 #[inline]
+fn evaluate_filter_ref_non_routing_counted(
+    filter: &Filter,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    packet_bytes: u64,
+) -> FilterResult {
+    match (src_ip, dst_ip) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => evaluate_filter_ref_non_routing_counted_v4(
+            filter,
+            src,
+            dst,
+            protocol,
+            src_port,
+            dst_port,
+            dscp,
+            packet_bytes,
+        ),
+        (IpAddr::V6(src), IpAddr::V6(dst)) => evaluate_filter_ref_non_routing_counted_v6(
+            filter,
+            src,
+            dst,
+            protocol,
+            src_port,
+            dst_port,
+            dscp,
+            packet_bytes,
+        ),
+        _ => FilterResult::default(),
+    }
+}
+
+#[inline]
+fn evaluate_filter_ref_non_routing_counted_v4(
+    filter: &Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    packet_bytes: u64,
+) -> FilterResult {
+    for term in &filter.terms {
+        if !term_matches_v4(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp) {
+            continue;
+        }
+        if !term.routing_instance.is_empty() {
+            return FilterResult::default();
+        }
+        if term.has_count {
+            record_filter_counter(&term.counter, packet_bytes);
+        }
+        return FilterResult {
+            action: term.action,
+            dscp_rewrite: term.dscp_rewrite,
+            policer_name: term.policer_name.clone(),
+            routing_instance: String::new(),
+            forwarding_class: term.forwarding_class.clone(),
+            log: term.log,
+            log_match: filter_log_match(filter, term),
+        };
+    }
+    FilterResult::default()
+}
+
+#[inline]
+fn evaluate_filter_ref_non_routing_counted_v6(
+    filter: &Filter,
+    src_ip: Ipv6Addr,
+    dst_ip: Ipv6Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    packet_bytes: u64,
+) -> FilterResult {
+    for term in &filter.terms {
+        if !term_matches_v6(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp) {
+            continue;
+        }
+        if !term.routing_instance.is_empty() {
+            return FilterResult::default();
+        }
+        if term.has_count {
+            record_filter_counter(&term.counter, packet_bytes);
+        }
+        return FilterResult {
+            action: term.action,
+            dscp_rewrite: term.dscp_rewrite,
+            policer_name: term.policer_name.clone(),
+            routing_instance: String::new(),
+            forwarding_class: term.forwarding_class.clone(),
+            log: term.log,
+            log_match: filter_log_match(filter, term),
+        };
+    }
+    FilterResult::default()
+}
+
+#[inline]
 fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
     filter: &'a Filter,
     src_ip: Ipv4Addr,
@@ -578,6 +682,38 @@ pub(crate) fn evaluate_interface_filter_counted(
         return FilterResult::default();
     };
     evaluate_filter_ref_counted(
+        filter,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        dscp,
+        packet_bytes,
+    )
+}
+
+pub(crate) fn evaluate_interface_filter_non_routing_counted(
+    state: &FilterState,
+    ifindex: i32,
+    is_v6: bool,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    packet_bytes: u64,
+) -> FilterResult {
+    let filter = if is_v6 {
+        state.iface_filter_v6_fast.get(&ifindex).map(Arc::as_ref)
+    } else {
+        state.iface_filter_v4_fast.get(&ifindex).map(Arc::as_ref)
+    };
+    let Some(filter) = filter else {
+        return FilterResult::default();
+    };
+    evaluate_filter_ref_non_routing_counted(
         filter,
         src_ip,
         dst_ip,

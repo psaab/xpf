@@ -92,13 +92,62 @@ fn filter_log_egress_zone_id(forwarding: &ForwardingState, egress_ifindex: i32) 
         .unwrap_or(0)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NonPbrInputFilterEval {
+    action: crate::filter::FilterAction,
+    cached_log: Option<CachedInputFilterLog>,
+}
+
 #[inline]
-fn evaluate_non_pbr_input_filter_log(
+fn evaluate_non_pbr_input_filter(
     forwarding: &ForwardingState,
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
-) -> Option<(crate::filter::FilterLogMatch, u16)> {
+) -> NonPbrInputFilterEval {
+    let Some(flow) = flow else {
+        return NonPbrInputFilterEval {
+            action: crate::filter::FilterAction::Accept,
+            cached_log: None,
+        };
+    };
+    let ingress_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let result = crate::filter::evaluate_interface_filter_non_routing_counted(
+        &forwarding.filter_state,
+        ingress_ifindex,
+        is_v6,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        meta.pkt_len as u64,
+    );
+    let ingress_zone_id =
+        filter_log_ingress_zone_id(forwarding, meta, ingress_zone_override, ingress_ifindex);
+    NonPbrInputFilterEval {
+        action: result.action,
+        cached_log: result.log_match.map(|log_match| CachedInputFilterLog {
+            log_match,
+            ingress_zone_id,
+        }),
+    }
+}
+
+#[inline]
+fn evaluate_non_pbr_input_filter_log_only(
+    forwarding: &ForwardingState,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+) -> Option<CachedInputFilterLog> {
     let Some(flow) = flow else {
         return None;
     };
@@ -121,9 +170,15 @@ fn evaluate_non_pbr_input_filter_log(
         meta.dscp,
         true,
     )?;
-    let ingress_zone_id =
-        filter_log_ingress_zone_id(forwarding, meta, ingress_zone_override, ingress_ifindex);
-    Some((log_match, ingress_zone_id))
+    Some(CachedInputFilterLog {
+        log_match,
+        ingress_zone_id: filter_log_ingress_zone_id(
+            forwarding,
+            meta,
+            ingress_zone_override,
+            ingress_ifindex,
+        ),
+    })
 }
 
 #[inline]
@@ -131,19 +186,18 @@ fn emit_input_filter_log_match(
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_id: u16,
-    log_match: crate::filter::FilterLogMatch,
+    cached_log: CachedInputFilterLog,
     now_ns: u64,
 ) {
     emit_filter_log_event(
         event_stream,
         flow,
         meta,
-        ingress_zone_id,
+        cached_log.ingress_zone_id,
         0,
-        log_match.filter_id,
-        log_match.term_id,
-        log_match.action,
+        cached_log.log_match.filter_id,
+        cached_log.log_match.term_id,
+        cached_log.log_match.action,
         FilterLogSource::Input,
         now_ns,
     );
@@ -155,18 +209,16 @@ fn emit_cached_input_filter_log(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     cached_descriptor: &RewriteDescriptor,
-    cached_metadata: &SessionMetadata,
     now_ns: u64,
 ) {
-    let Some(log_match) = cached_descriptor.input_filter_log else {
+    let Some(cached_log) = cached_descriptor.input_filter_log else {
         return;
     };
     emit_input_filter_log_match(
         event_stream,
         flow,
         meta,
-        cached_metadata.ingress_zone,
-        log_match,
+        cached_log,
         now_ns,
     );
 }
@@ -422,7 +474,6 @@ pub(super) fn poll_binding_process_descriptor(
                                     flow,
                                     meta,
                                     cached_descriptor,
-                                    cached_metadata,
                                     now_ns,
                                 );
                                 emit_cached_output_filter_log(
@@ -978,12 +1029,25 @@ pub(super) fn poll_binding_process_descriptor(
                                         None => resolution_target,
                                     }
                                 };
-                            let input_filter_log = evaluate_non_pbr_input_filter_log(
+                            let input_filter_eval = evaluate_non_pbr_input_filter(
                                 worker_ctx.forwarding,
                                 Some(flow),
                                 meta,
                                 ingress_zone_override,
                             );
+                            if input_filter_eval.action != crate::filter::FilterAction::Accept {
+                                if let Some(cached_log) = input_filter_eval.cached_log {
+                                    emit_input_filter_log_match(
+                                        worker_ctx.event_stream,
+                                        flow,
+                                        meta,
+                                        cached_log,
+                                        now_ns,
+                                    );
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
                             let route_table_override = ingress_route_table_override(
                                 worker_ctx.forwarding,
                                 meta,
@@ -1573,15 +1637,14 @@ pub(super) fn poll_binding_process_descriptor(
                                                 worker_ctx.peer_worker_commands,
                                                 &forward_entry,
                                             );
-                                            if let Some((log_match, ingress_zone_id)) =
-                                                input_filter_log
+                                            if let Some(cached_log) =
+                                                input_filter_eval.cached_log
                                             {
                                                 emit_input_filter_log_match(
                                                     worker_ctx.event_stream,
                                                     flow,
                                                     meta,
-                                                    ingress_zone_id,
-                                                    log_match,
+                                                    cached_log,
                                                     now_ns,
                                                 );
                                             }
@@ -2226,13 +2289,12 @@ pub(super) fn poll_binding_process_descriptor(
                                     flow_cache_owner_rg_id,
                                     session_ingress_zone,
                                     request_target_binding_index,
-                                    evaluate_non_pbr_input_filter_log(
+                                    evaluate_non_pbr_input_filter_log_only(
                                         worker_ctx.forwarding,
                                         Some(flow),
                                         meta,
                                         ingress_zone_override,
-                                    )
-                                    .map(|(log_match, _)| log_match),
+                                    ),
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
                                     apply_nat_on_fabric,

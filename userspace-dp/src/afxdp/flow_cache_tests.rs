@@ -773,10 +773,13 @@ fn from_forward_decision_preserves_input_filter_log_for_cached_hits() {
     let (flow, meta, validation, decision, forwarding, ha_state) =
         make_v4_round_trip_inputs();
     let rg_epochs = default_rg_epochs();
-    let input_log = crate::filter::FilterLogMatch {
-        filter_id: 17,
-        term_id: 23,
-        action: crate::filter::FilterAction::Accept,
+    let input_log = CachedInputFilterLog {
+        log_match: crate::filter::FilterLogMatch {
+            filter_id: 17,
+            term_id: 23,
+            action: crate::filter::FilterAction::Accept,
+        },
+        ingress_zone_id: 7,
     };
 
     let entry = FlowCacheEntry::from_forward_decision(
