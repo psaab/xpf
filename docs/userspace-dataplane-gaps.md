@@ -45,12 +45,14 @@ These capabilities exist in the current Rust userspace dataplane code path:
 | HA state ingestion | Implemented | Helper receives RG active/watchdog state |
 | Session delta export | Implemented | Rust helper exports open/close deltas back to Go |
 
-## Still Gated By `deriveUserspaceCapabilities()`
+## Gated Or Evidence-Only Before BPF Source Removal
 
-These are the remaining explicit configuration gates in
-[`pkg/dataplane/userspace/manager.go`](../pkg/dataplane/userspace/manager.go):
+These are the remaining explicit configuration gates, plus the runtime-admitted
+features that still need operator evidence before BPF source removal. The
+explicit gates live in
+[`pkg/dataplane/userspace/manager.go`](../pkg/dataplane/userspace/manager.go).
 
-| Feature/config shape | Gate status | Retirement blocker |
+| Feature/config shape | Userspace status | Retirement blocker |
 |----------------------|-------------|--------------------|
 | Unsupported policy shapes | Gated | Address/application expansion must succeed for userspace |
 | Screen behavior requiring SYN cookies | Gated; userspace screen runtime has fail-closed cookie challenge/ACK-validation/cache semantics and status counters, but no HA key publication or SYN-ACK/RST TX yet | #1374 |

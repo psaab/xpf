@@ -2456,7 +2456,7 @@ func TestDeriveUserspaceCapabilitiesAllowsPortMirroringRuntimeSlice(t *testing.T
 		t.Fatalf("ForwardingSupported = false, reasons: %+v", caps.UnsupportedReasons)
 	}
 	for _, r := range caps.UnsupportedReasons {
-		if r == "port mirroring is not implemented in the userspace dataplane" {
+		if strings.Contains(r, "port mirroring") {
 			t.Fatalf("stale port-mirroring rejection present: %+v", caps.UnsupportedReasons)
 		}
 	}

@@ -57,7 +57,11 @@ Goal: eliminate every remaining fallback to the eBPF pipeline so the userspace d
 
 ### Gate 9: Port mirroring
 - Duplicate egress packets to a mirror port
-- **Implement**: On TX, optionally copy frame to a second TX queue
+- **Status**: Userspace runtime admission exists through bounded full-L2
+  mirror clones, per-binding sampling, CoS reserve handling, and drop
+  counters
+- **Remaining**: Collect mirror-fidelity evidence and prove primary
+  forwarding survives mirror pressure before removing the BPF source
 - **Complexity**: Low
 
 ### Gate 10: Flow export (NetFlow v9)
@@ -77,7 +81,7 @@ Goal: eliminate every remaining fallback to the eBPF pipeline so the userspace d
 |---------|-----------|------|
 | Fix NAT gate (DNAT + NATv6v4 already done) | Trivial | gate-fixes |
 | GRE acceleration (key→ports) | Low | gate-fixes |
-| Port mirroring | Low | gate-fixes |
+| Port mirroring evidence | Low | gate-fixes |
 | Policy hit counters | Low | gate-fixes |
 | Mid-stream TCP RST generation | Low | gate-fixes |
 
