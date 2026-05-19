@@ -1093,6 +1093,51 @@ fn syn_cookie_ipv4_rst_builder_pads_to_ethernet_minimum() {
 }
 
 #[test]
+fn syn_cookie_vlan_ipv4_rst_builder_pads_to_ethernet_minimum() {
+    let client = Ipv4Addr::new(192, 0, 2, 10);
+    let server = Ipv4Addr::new(198, 51, 100, 20);
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        80,
+        0x0800,
+    );
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x00, 0x00,
+        64, PROTO_TCP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&client.octets());
+    frame.extend_from_slice(&server.octets());
+    let ip_csum = checksum16(&frame[18..38]);
+    frame[28..30].copy_from_slice(&ip_csum.to_be_bytes());
+    frame.extend_from_slice(&49152u16.to_be_bytes());
+    frame.extend_from_slice(&443u16.to_be_bytes());
+    frame.extend_from_slice(&0x1111_2222u32.to_be_bytes());
+    frame.extend_from_slice(&0x3333_4444u32.to_be_bytes());
+    frame.extend_from_slice(&[
+        0x50, 0x10, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    recompute_l4_checksum_ipv4(&mut frame[18..], 20, PROTO_TCP, false)
+        .expect("tcp sum");
+
+    let out = build_syn_cookie_ack_rst_frame(&frame).expect("syn-cookie rst");
+
+    assert_eq!(out.len(), 60);
+    assert_eq!(&out[12..18], &frame[12..18]);
+    assert_eq!(u16::from_be_bytes([out[20], out[21]]), 40);
+    assert_eq!(
+        u32::from_be_bytes([out[42], out[43], out[44], out[45]]),
+        0x3333_4444
+    );
+    assert_eq!(out[51], TCP_FLAG_RST);
+    assert_eq!(&out[58..60], &[0, 0]);
+    assert_eq!(checksum16(&out[18..38]), 0);
+    assert!(tcp_checksum_ok_ipv4(&out[18..]));
+}
+
+#[test]
 fn syn_cookie_ack_rst_builder_uses_received_ack_as_rst_seq() {
     let client = Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 10);
     let server = Ipv6Addr::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 20);
