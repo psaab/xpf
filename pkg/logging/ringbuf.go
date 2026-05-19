@@ -321,7 +321,9 @@ func (er *EventReader) logEvent(data []byte) {
 		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
 		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
 		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
-		if data[134] != dataplane.CloseReasonNone {
+		if evt.EventType == dataplane.EventTypeFilterLog && data[134] != 0 {
+			rec.Reason = filterLogSourceName(data[134])
+		} else if data[134] != dataplane.CloseReasonNone {
 			rec.Reason = closeReasonName(data[134])
 		}
 	}
@@ -561,7 +563,9 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
 		rec.TermID = binary.LittleEndian.Uint32(data[60:64])
 		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
-		if evt.CloseReason != dataplane.CloseReasonNone {
+		if evt.EventType == dataplane.EventTypeFilterLog && evt.CloseReason != 0 {
+			rec.Reason = filterLogSourceName(evt.CloseReason)
+		} else if evt.CloseReason != dataplane.CloseReasonNone {
 			rec.Reason = closeReasonName(evt.CloseReason)
 		}
 	}
@@ -624,8 +628,13 @@ func formatSyslogMsg(rec EventRecord) string {
 			rec.PolicyID, inZone, outZone, rec.SessionPkts, rec.SessionBytes)
 	}
 	if rec.Type == "FILTER_LOG" {
-		return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s zone=%s",
-			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action, inZone)
+		source := rec.Reason
+		if source == "" {
+			source = "unknown"
+		}
+		return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s zone=%s->%s source=%s filter=%d term=%d",
+			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
+			inZone, outZone, source, rec.RuleID, rec.TermID)
 	}
 	return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s policy=%d zone=%s->%s",
 		rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
@@ -763,6 +772,23 @@ func eventTypeName(t uint8) string {
 		return "FILTER_LOG"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
+	}
+}
+
+func filterLogSourceName(reason uint8) string {
+	switch reason {
+	case 1:
+		return "pbr"
+	case 2:
+		return "input"
+	case 3:
+		return "output"
+	case 4:
+		return "cached-output"
+	case 5:
+		return "lo0"
+	default:
+		return fmt.Sprintf("unknown(%d)", reason)
 	}
 }
 

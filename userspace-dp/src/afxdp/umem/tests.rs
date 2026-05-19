@@ -1469,11 +1469,13 @@ fn active_flow_debug_test_entry(
             egress_ifindex: 14,
             tx_ifindex: 14,
             target_binding_index: None,
+            input_filter_log: None,
             tx_selection: CachedTxSelectionDescriptor {
                 queue_id: Some(2),
                 dscp_rewrite: Some(46),
                 filter_counter: None,
                 three_color_policers: crate::filter::CachedThreeColorPolicers::default(),
+                filter_log: None,
             },
             nat64: false,
             nptv6: false,

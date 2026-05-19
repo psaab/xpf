@@ -3308,6 +3308,9 @@ func TestBuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID(t *testing.T) 
 	if got, want := snap[0].RuleID, "trust->untrust/zone-allow"; got != want {
 		t.Fatalf("snap[0].RuleID = %q, want %q", got, want)
 	}
+	if got, want := snap[0].PolicyID, uint32(0); got != want {
+		t.Fatalf("snap[0].PolicyID = %d, want %d", got, want)
+	}
 	if got, want := snap[0].SchedulerName, "workhours"; got != want {
 		t.Fatalf("snap[0].SchedulerName = %q, want %q", got, want)
 	}
@@ -3316,6 +3319,9 @@ func TestBuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID(t *testing.T) 
 	}
 	if got, want := snap[1].RuleID, "junos-global->junos-global/global-deny-all"; got != want {
 		t.Fatalf("snap[1].RuleID = %q, want %q", got, want)
+	}
+	if got, want := snap[1].PolicyID, uint32(dataplane.MaxRulesPerPolicy); got != want {
+		t.Fatalf("snap[1].PolicyID = %d, want %d", got, want)
 	}
 	if snap[1].Inactive {
 		t.Fatalf("snap[1].Inactive = true, want false for active scheduler")
@@ -3333,9 +3339,10 @@ func TestBuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID(t *testing.T) 
 		t.Fatalf("len(roundTrip) = %d, want 2", len(roundTrip))
 	}
 	if roundTrip[0].RuleID != snap[0].RuleID ||
+		roundTrip[0].PolicyID != snap[0].PolicyID ||
 		roundTrip[0].SchedulerName != snap[0].SchedulerName ||
 		roundTrip[0].Inactive != snap[0].Inactive {
-		t.Fatalf("roundTrip[0] = %+v, want scheduler/inactive/rule_id from %+v", roundTrip[0], snap[0])
+		t.Fatalf("roundTrip[0] = %+v, want scheduler/inactive/rule_id/policy_id from %+v", roundTrip[0], snap[0])
 	}
 }
 

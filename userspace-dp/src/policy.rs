@@ -44,9 +44,16 @@ impl Default for PolicyAction {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PolicyEvaluationResult {
+    pub(crate) action: PolicyAction,
+    pub(crate) policy_id: u32,
+}
+
 #[derive(Debug)]
 pub(crate) struct PolicyRule {
     pub(crate) rule_id: String,
+    pub(crate) policy_id: u32,
     pub(crate) from_zone: String,
     pub(crate) to_zone: String,
     pub(crate) scheduler_name: String,
@@ -70,6 +77,7 @@ impl Default for PolicyRule {
     fn default() -> Self {
         Self {
             rule_id: String::new(),
+            policy_id: 0,
             from_zone: String::new(),
             to_zone: String::new(),
             scheduler_name: String::new(),
@@ -93,6 +101,7 @@ impl Clone for PolicyRule {
     fn clone(&self) -> Self {
         Self {
             rule_id: self.rule_id.clone(),
+            policy_id: self.policy_id,
             from_zone: self.from_zone.clone(),
             to_zone: self.to_zone.clone(),
             scheduler_name: self.scheduler_name.clone(),
@@ -322,6 +331,7 @@ pub(crate) fn parse_policy_state_with_counters(
         let rule_id = stable_policy_rule_id(snap);
         let mut rule = PolicyRule {
             rule_id: rule_id.clone(),
+            policy_id: snap.policy_id,
             from_zone: snap.from_zone.clone(),
             to_zone: snap.to_zone.clone(),
             scheduler_name: snap.scheduler_name.clone(),
@@ -378,9 +388,10 @@ pub(crate) fn evaluate_policy(
     src_port: u16,
     dst_port: u16,
 ) -> PolicyAction {
-    evaluate_policy_with_len(
+    evaluate_policy_result_with_len(
         state, from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port, 0,
     )
+    .action
 }
 
 pub(crate) fn evaluate_policy_with_len(
@@ -394,13 +405,30 @@ pub(crate) fn evaluate_policy_with_len(
     dst_port: u16,
     packet_len: u64,
 ) -> PolicyAction {
+    evaluate_policy_result_with_len(
+        state, from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port, packet_len,
+    )
+    .action
+}
+
+pub(crate) fn evaluate_policy_result_with_len(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_len: u64,
+) -> PolicyEvaluationResult {
     // Phase 2 optimisation: look up only the rules for this zone-pair
     // instead of scanning all rules. Global rules are checked afterward.
     // #922: zero-allocation key (packed u32).
     let key = zone_pair_key(from_id, to_id);
     if let Some(indices) = state.zone_pair_index.get(&key) {
         for &idx in indices {
-            if let Some(action) = try_match_rule(
+            if let Some(result) = try_match_rule(
                 &state.rules[idx],
                 src_ip,
                 dst_ip,
@@ -409,13 +437,13 @@ pub(crate) fn evaluate_policy_with_len(
                 dst_port,
                 packet_len,
             ) {
-                return action;
+                return result;
             }
         }
     }
     // Global policies (junos-global) apply to any zone-pair.
     for &idx in &state.global_indices {
-        if let Some(action) = try_match_rule(
+        if let Some(result) = try_match_rule(
             &state.rules[idx],
             src_ip,
             dst_ip,
@@ -424,10 +452,13 @@ pub(crate) fn evaluate_policy_with_len(
             dst_port,
             packet_len,
         ) {
-            return action;
+            return result;
         }
     }
-    state.default_action
+    PolicyEvaluationResult {
+        action: state.default_action,
+        policy_id: 0,
+    }
 }
 
 /// Try to match a single policy rule against packet fields.
@@ -441,7 +472,7 @@ fn try_match_rule(
     src_port: u16,
     dst_port: u16,
     packet_len: u64,
-) -> Option<PolicyAction> {
+) -> Option<PolicyEvaluationResult> {
     if rule.inactive {
         return None;
     }
@@ -453,13 +484,19 @@ fn try_match_rule(
             if rule.source_v4.contains(src) && rule.destination_v4.contains(dst) =>
         {
             rule.hit_counter.add(packet_len);
-            Some(rule.action)
+            Some(PolicyEvaluationResult {
+                action: rule.action,
+                policy_id: rule.policy_id,
+            })
         }
         (IpAddr::V6(src), IpAddr::V6(dst))
             if rule.source_v6.contains(src) && rule.destination_v6.contains(dst) =>
         {
             rule.hit_counter.add(packet_len);
-            Some(rule.action)
+            Some(PolicyEvaluationResult {
+                action: rule.action,
+                policy_id: rule.policy_id,
+            })
         }
         _ => None,
     }

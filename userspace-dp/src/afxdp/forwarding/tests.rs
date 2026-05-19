@@ -1936,6 +1936,7 @@ fn policy_selection_deny_emits_rt_flow_event() {
         from_id,
         to_id,
         1,
+        42,
         action,
         123,
     );
@@ -1951,6 +1952,8 @@ fn policy_selection_deny_emits_rt_flow_event() {
     assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
     assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID);
     assert_eq!(event.ingress_ifindex, 24);
+    assert_eq!(event.policy_id, 42);
+    assert_eq!(event.rule_id, 42);
     assert_eq!(event.src_port, 12345);
     assert_eq!(event.dst_port, 5201);
     assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);

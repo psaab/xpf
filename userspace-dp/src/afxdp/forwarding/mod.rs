@@ -949,6 +949,7 @@ pub(super) fn ingress_route_table_override(
             routing_result.filter_id,
             routing_result.term_id,
             routing_result.action,
+            FilterLogSource::Pbr,
             now_ns,
         );
     }

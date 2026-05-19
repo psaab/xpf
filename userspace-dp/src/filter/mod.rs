@@ -109,6 +109,7 @@ pub(crate) struct Filter {
     pub(crate) affects_tx_selection: bool,
     pub(crate) affects_route_lookup: bool,
     pub(crate) has_counter_terms: bool,
+    pub(crate) has_log_terms: bool,
     pub(crate) has_three_color_policer_terms: bool,
 }
 
@@ -460,6 +461,7 @@ pub(crate) struct FilterResult {
     pub(crate) routing_instance: String,
     pub(crate) forwarding_class: Arc<str>,
     pub(crate) log: bool,
+    pub(crate) log_match: Option<FilterLogMatch>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -471,11 +473,19 @@ pub(crate) struct FilterRoutingInstanceResult<'a> {
     pub(crate) term_id: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FilterLogMatch {
+    pub(crate) filter_id: u32,
+    pub(crate) term_id: u32,
+    pub(crate) action: FilterAction,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TxSelectionFilterResult<'a> {
     pub(crate) forwarding_class: Option<&'a str>,
     pub(crate) dscp_rewrite: Option<u8>,
     pub(crate) policer_drop: bool,
+    pub(crate) log_match: Option<FilterLogMatch>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -484,6 +494,7 @@ pub(crate) struct CachedTxSelectionFilterResult {
     pub(crate) dscp_rewrite: Option<u8>,
     pub(crate) counter: Option<Arc<FilterTermCounter>>,
     pub(crate) three_color_policers: CachedThreeColorPolicers,
+    pub(crate) log_match: Option<FilterLogMatch>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -501,6 +512,7 @@ impl Default for FilterResult {
             routing_instance: String::new(),
             forwarding_class: Arc::<str>::from(""),
             log: false,
+            log_match: None,
         }
     }
 }

@@ -29,6 +29,13 @@ pub(super) struct CachedTxSelectionDescriptor {
     pub(super) dscp_rewrite: Option<u8>,
     pub(super) filter_counter: Option<Arc<crate::filter::FilterTermCounter>>,
     pub(super) three_color_policers: crate::filter::CachedThreeColorPolicers,
+    pub(super) filter_log: Option<crate::filter::FilterLogMatch>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CachedInputFilterLog {
+    pub(super) log_match: crate::filter::FilterLogMatch,
+    pub(super) ingress_zone_id: u16,
 }
 
 /// Precomputed rewrite descriptor for an established flow.
@@ -53,6 +60,7 @@ pub(super) struct RewriteDescriptor {
     pub(super) tx_ifindex: i32,
     #[allow(dead_code)] // populated for future flow-cache fast-path TX
     pub(super) target_binding_index: Option<usize>,
+    pub(super) input_filter_log: Option<CachedInputFilterLog>,
     pub(super) tx_selection: CachedTxSelectionDescriptor,
     pub(super) nat64: bool,
     pub(super) nptv6: bool,
@@ -220,6 +228,7 @@ impl FlowCacheEntry {
         flow_owner_rg_id: i32,
         ingress_zone: Option<u16>,
         target_binding_index: Option<usize>,
+        input_filter_log: Option<CachedInputFilterLog>,
         forwarding: &ForwardingState,
         ha_state: &BTreeMap<i32, HAGroupRuntime>,
         apply_nat_on_fabric: bool,
@@ -300,6 +309,7 @@ impl FlowCacheEntry {
                 egress_ifindex: decision.resolution.egress_ifindex,
                 tx_ifindex: decision.resolution.tx_ifindex,
                 target_binding_index,
+                input_filter_log,
                 tx_selection: resolve_cached_cos_tx_selection(
                     forwarding,
                     decision.resolution.egress_ifindex,

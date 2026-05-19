@@ -621,6 +621,8 @@ pub(crate) struct FlowExportSnapshot {
 pub(crate) struct PolicyRuleSnapshot {
     #[serde(rename = "rule_id", default)]
     pub rule_id: String,
+    #[serde(rename = "policy_id", default)]
+    pub policy_id: u32,
     pub name: String,
     #[serde(rename = "from_zone", default)]
     pub from_zone: String,
@@ -2611,6 +2613,7 @@ mod tests {
     fn policy_rule_snapshot_scheduler_fields_round_trip() {
         let snap = PolicyRuleSnapshot {
             rule_id: "security-policy:trust:untrust:allow-web".into(),
+            policy_id: 17,
             name: "allow-web".into(),
             from_zone: "trust".into(),
             to_zone: "untrust".into(),
@@ -2626,12 +2629,14 @@ mod tests {
         let value: serde_json::Value =
             serde_json::to_value(&snap).expect("serialize PolicyRuleSnapshot to Value");
         assert_eq!(value["rule_id"], "security-policy:trust:untrust:allow-web");
+        assert_eq!(value["policy_id"], 17);
         assert_eq!(value["scheduler_name"], "workhours");
         assert_eq!(value["inactive"], true);
 
         let back: PolicyRuleSnapshot =
             serde_json::from_value(value).expect("deserialize PolicyRuleSnapshot");
         assert_eq!(back.rule_id, snap.rule_id);
+        assert_eq!(back.policy_id, snap.policy_id);
         assert_eq!(back.scheduler_name, snap.scheduler_name);
         assert_eq!(back.inactive, snap.inactive);
     }
@@ -2651,6 +2656,7 @@ mod tests {
         let snap: PolicyRuleSnapshot =
             serde_json::from_str(legacy_json).expect("pre-#1378 PolicyRuleSnapshot decodes");
         assert_eq!(snap.rule_id, "");
+        assert_eq!(snap.policy_id, 0);
         assert_eq!(snap.scheduler_name, "");
         assert_eq!(snap.inactive, false);
     }

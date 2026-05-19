@@ -4,8 +4,8 @@ use crate::test_zone_ids::*;
 use crate::xsk_ffi::IfInfo;
 use crate::{
     DestinationNATRuleSnapshot, FirewallFilterSnapshot, FirewallTermSnapshot,
-    InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, SourceNATRuleSnapshot,
-    StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
+    InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
+    SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
 
 #[test]
@@ -245,6 +245,7 @@ fn build_live_forward_request_from_frame_uses_precomputed_hints() {
         None,
         false,
         0,
+        None,
         Some(hints),
         None,
     )
@@ -666,7 +667,9 @@ fn rewrite_forwarded_frame_in_place_reuses_rx_frame() {
         None,
     )
     .expect("in-place forward");
-    let out = area.slice(rewrite_result.offset as usize, rewrite_result.len as usize).expect("rewritten frame");
+    let out = area
+        .slice(rewrite_result.offset as usize, rewrite_result.len as usize)
+        .expect("rewritten frame");
     assert_eq!(&out[0..6], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
     assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
     assert_eq!(u16::from_be_bytes([out[12], out[13]]), 0x0800);
@@ -2704,6 +2707,356 @@ fn poll_descriptor_policy_deny_path_emits_rt_flow_event() {
 }
 
 #[test]
+fn poll_descriptor_input_filter_log_path_emits_rt_flow_event() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.zones = vec![
+        ZoneSnapshot {
+            name: "lan".to_string(),
+            id: TEST_LAN_ZONE_ID,
+        },
+        ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+        },
+    ];
+    snapshot.interfaces[0].filter_input_v4 = "log-input".to_string();
+    snapshot.neighbors = vec![NeighborSnapshot {
+        interface: "reth0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.200".to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+    }];
+    snapshot.routes = vec![RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hops: vec!["172.16.80.200@reth0.80".to_string()],
+        discard: false,
+        next_table: String::new(),
+    }];
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "log-input".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "log-web".to_string(),
+            action: "accept".to_string(),
+            destination_ports: vec!["5201".to_string()],
+            log: true,
+            ..Default::default()
+        }],
+    }];
+
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = build_policy_deny_tcp_syn_frame();
+    let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+    let frame_offset = 128;
+    let meta_offset = frame_offset - meta_len;
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: meta_len as u16,
+        ingress_ifindex: 24,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 54,
+        pkt_len: (frame.len() - 14) as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_SYN,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let meta_bytes = unsafe {
+        std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+    };
+    unsafe {
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(meta_offset, meta_len)
+            .expect("meta slice")
+            .copy_from_slice(meta_bytes);
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(frame_offset, frame.len())
+            .expect("frame slice")
+            .copy_from_slice(&frame);
+    }
+    binding.xsk.rx.push_for_test(XdpDesc {
+        addr: frame_offset as u64,
+        len: frame.len() as u32,
+        options: 0,
+    });
+
+    let ident = binding.identity();
+    let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(VecDeque::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let worker_ctx = WorkerContext {
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding: &forwarding,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        slow_path: None,
+        event_stream: Some(&event_handle),
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+    };
+    let mut sessions = SessionTable::new();
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext {
+        dbg: &mut dbg,
+        counters: &mut batch,
+    };
+    let area_ptr = binding.umem.area() as *const MmapArea;
+
+    poll_binding_process_descriptor(
+        &mut binding,
+        0,
+        area_ptr,
+        1,
+        &mut sessions,
+        &mut screen,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        123_000_000_000,
+        123,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+    );
+
+    let event = event_rx
+        .try_recv()
+        .expect("input filter-log event from poll descriptor")
+        .decode_dataplane_event()
+        .expect("filter-log payload");
+    assert_eq!(
+        event.kind,
+        crate::event_stream::codec::DataplaneEventKind::FilterLog
+    );
+    assert_eq!(event.reason, FilterLogSource::Input.wire_reason());
+    assert_eq!(event.src_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)));
+    assert_eq!(event.dst_ip, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)));
+    assert_eq!(event.dst_port, 5201);
+    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(event.egress_zone_id, 0);
+    assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);
+}
+
+#[test]
+fn poll_descriptor_input_filter_discard_drops_and_logs() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.zones = vec![
+        ZoneSnapshot {
+            name: "lan".to_string(),
+            id: TEST_LAN_ZONE_ID,
+        },
+        ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+        },
+    ];
+    snapshot.interfaces[0].filter_input_v4 = "drop-input".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "drop-input".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "drop-web".to_string(),
+            action: "discard".to_string(),
+            destination_ports: vec!["5201".to_string()],
+            log: true,
+            ..Default::default()
+        }],
+    }];
+
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut frame = build_policy_deny_tcp_syn_frame();
+    frame[47] = 0x10;
+    let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+    let frame_offset = 128;
+    let meta_offset = frame_offset - meta_len;
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: meta_len as u16,
+        ingress_ifindex: 24,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 54,
+        pkt_len: (frame.len() - 14) as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let meta_bytes = unsafe {
+        std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+    };
+    unsafe {
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(meta_offset, meta_len)
+            .expect("meta slice")
+            .copy_from_slice(meta_bytes);
+        binding
+            .umem
+            .area()
+            .slice_mut_unchecked(frame_offset, frame.len())
+            .expect("frame slice")
+            .copy_from_slice(&frame);
+    }
+    binding.xsk.rx.push_for_test(XdpDesc {
+        addr: frame_offset as u64,
+        len: frame.len() as u32,
+        options: 0,
+    });
+
+    let ident = binding.identity();
+    let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(VecDeque::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let worker_ctx = WorkerContext {
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding: &forwarding,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        slow_path: None,
+        event_stream: Some(&event_handle),
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+    };
+    let mut sessions = SessionTable::new();
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext {
+        dbg: &mut dbg,
+        counters: &mut batch,
+    };
+    let area_ptr = binding.umem.area() as *const MmapArea;
+
+    poll_binding_process_descriptor(
+        &mut binding,
+        0,
+        area_ptr,
+        1,
+        &mut sessions,
+        &mut screen,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        123_000_000_000,
+        123,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+    );
+
+    let event = event_rx
+        .try_recv()
+        .expect("discard input filter-log event from poll descriptor")
+        .decode_dataplane_event()
+        .expect("discard filter-log payload");
+    assert_eq!(
+        event.kind,
+        crate::event_stream::codec::DataplaneEventKind::FilterLog
+    );
+    assert_eq!(event.reason, FilterLogSource::Input.wire_reason());
+    assert_eq!(event.action, 0);
+    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert!(binding.scratch.scratch_forwards.is_empty());
+    assert_eq!(sessions.len(), 0);
+    assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);
+}
+
+#[test]
 fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
     let frame =
         build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
@@ -2761,7 +3114,7 @@ fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
         meta,
         decision,
         &recent_exceptions,
-    &ForwardingState::default(),
+        &ForwardingState::default(),
     );
 
     assert_eq!(live.slow_path_packets.load(Ordering::Relaxed), 0);
@@ -2822,7 +3175,7 @@ fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
         meta,
         decision,
         &recent_exceptions,
-    &ForwardingState::default(),
+        &ForwardingState::default(),
     );
 
     assert_eq!(live.slow_path_drops.load(Ordering::Relaxed), 1);
@@ -2881,7 +3234,7 @@ fn maybe_reinject_slow_path_from_frame_records_unavailable() {
         decision,
         &recent_exceptions,
         "forward_build_slow_path",
-    &ForwardingState::default(),
+        &ForwardingState::default(),
     );
 
     assert_eq!(live.slow_path_packets.load(Ordering::Relaxed), 0);
@@ -2945,7 +3298,7 @@ fn handle_forward_build_failure_records_build_and_slow_path_failures() {
         meta,
         decision,
         true,
-    &ForwardingState::default(),
+        &ForwardingState::default(),
     );
 
     assert_eq!(dbg.build_fail, 1);
@@ -3016,7 +3369,7 @@ fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
         meta,
         decision,
         false,
-    &ForwardingState::default(),
+        &ForwardingState::default(),
     );
 
     assert_eq!(dbg.build_fail, 1);
@@ -3095,7 +3448,10 @@ fn disposition_counters_hot_accumulates_in_batch_not_live() {
         &ForwardingState::default(),
     );
 
-    assert_eq!(counters.policy_denied_packets, 1, "batch should hold the count");
+    assert_eq!(
+        counters.policy_denied_packets, 1,
+        "batch should hold the count"
+    );
     assert_eq!(
         live.policy_denied_packets.load(Ordering::Relaxed),
         0,
@@ -3105,7 +3461,10 @@ fn disposition_counters_hot_accumulates_in_batch_not_live() {
 
     // After flush: batch clears, live receives the accumulated count.
     counters.flush(&live);
-    assert_eq!(counters.policy_denied_packets, 0, "batch must be zero after flush");
+    assert_eq!(
+        counters.policy_denied_packets, 0,
+        "batch must be zero after flush"
+    );
     assert_eq!(
         live.policy_denied_packets.load(Ordering::Relaxed),
         1,
@@ -3171,11 +3530,19 @@ fn disposition_counters_hot_screen_drops_accumulate_in_batch() {
     }
 
     assert_eq!(counters.screen_drops, 3);
-    assert_eq!(live.screen_drops.load(Ordering::Relaxed), 0, "live must be 0 before flush");
+    assert_eq!(
+        live.screen_drops.load(Ordering::Relaxed),
+        0,
+        "live must be 0 before flush"
+    );
 
     counters.flush(&live);
     assert_eq!(counters.screen_drops, 0, "batch must clear after flush");
-    assert_eq!(live.screen_drops.load(Ordering::Relaxed), 3, "live must receive count after flush");
+    assert_eq!(
+        live.screen_drops.load(Ordering::Relaxed),
+        3,
+        "live must receive count after flush"
+    );
 }
 
 #[test]

@@ -12,7 +12,7 @@ use super::poll_stages::{
     stage_native_gre_decap, stage_parse_flow_and_learn, stage_screen_check,
     stage_screen_syn_cookie_ack_on_session_miss, FabricIngressOutcome, StageOutcome,
 };
-use crate::policy::evaluate_policy_with_len;
+use crate::policy::{evaluate_policy_result_with_len, evaluate_policy_with_len};
 
 #[inline]
 fn source_nat_decision_for_flow(
@@ -56,6 +56,245 @@ fn record_source_nat_failure(
         Some(&debug),
         worker_ctx.forwarding,
         failure,
+    );
+}
+
+#[inline]
+fn filter_log_ingress_zone_id(
+    forwarding: &ForwardingState,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    ingress_logical_ifindex: i32,
+) -> u16 {
+    ingress_zone_override
+        .filter(|id| forwarding.zone_id_to_name.contains_key(id))
+        .or_else(|| {
+            forwarding
+                .ifindex_to_zone_id
+                .get(&ingress_logical_ifindex)
+                .copied()
+        })
+        .or_else(|| {
+            forwarding
+                .ifindex_to_zone_id
+                .get(&(meta.ingress_ifindex as i32))
+                .copied()
+        })
+        .unwrap_or(0)
+}
+
+#[inline]
+fn filter_log_egress_zone_id(forwarding: &ForwardingState, egress_ifindex: i32) -> u16 {
+    forwarding
+        .egress
+        .get(&egress_ifindex)
+        .map(|egress| egress.zone_id)
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NonPbrInputFilterEval {
+    action: crate::filter::FilterAction,
+    cached_log: Option<CachedInputFilterLog>,
+}
+
+#[inline]
+fn evaluate_non_pbr_input_filter(
+    forwarding: &ForwardingState,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+) -> NonPbrInputFilterEval {
+    let Some(flow) = flow else {
+        return NonPbrInputFilterEval {
+            action: crate::filter::FilterAction::Accept,
+            cached_log: None,
+        };
+    };
+    let ingress_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let result = crate::filter::evaluate_interface_filter_non_routing_counted(
+        &forwarding.filter_state,
+        ingress_ifindex,
+        is_v6,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        meta.pkt_len as u64,
+    );
+    let ingress_zone_id =
+        filter_log_ingress_zone_id(forwarding, meta, ingress_zone_override, ingress_ifindex);
+    NonPbrInputFilterEval {
+        action: result.action,
+        cached_log: result.log_match.map(|log_match| CachedInputFilterLog {
+            log_match,
+            ingress_zone_id,
+        }),
+    }
+}
+
+#[inline]
+fn evaluate_non_pbr_input_filter_log_only(
+    forwarding: &ForwardingState,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+) -> Option<CachedInputFilterLog> {
+    let Some(flow) = flow else {
+        return None;
+    };
+    let ingress_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let log_match = crate::filter::evaluate_interface_filter_log_match(
+        &forwarding.filter_state,
+        ingress_ifindex,
+        is_v6,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        true,
+    )?;
+    Some(CachedInputFilterLog {
+        log_match,
+        ingress_zone_id: filter_log_ingress_zone_id(
+            forwarding,
+            meta,
+            ingress_zone_override,
+            ingress_ifindex,
+        ),
+    })
+}
+
+#[inline]
+fn emit_input_filter_log_match(
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    cached_log: CachedInputFilterLog,
+    now_ns: u64,
+) {
+    emit_filter_log_event(
+        event_stream,
+        flow,
+        meta,
+        cached_log.ingress_zone_id,
+        0,
+        cached_log.log_match.filter_id,
+        cached_log.log_match.term_id,
+        cached_log.log_match.action,
+        FilterLogSource::Input,
+        now_ns,
+    );
+}
+
+#[inline]
+fn emit_cached_input_filter_log(
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    cached_descriptor: &RewriteDescriptor,
+    now_ns: u64,
+) {
+    let Some(cached_log) = cached_descriptor.input_filter_log else {
+        return;
+    };
+    emit_input_filter_log_match(
+        event_stream,
+        flow,
+        meta,
+        cached_log,
+        now_ns,
+    );
+}
+
+#[inline]
+fn emit_cached_output_filter_log(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    cached_decision: SessionDecision,
+    cached_descriptor: &RewriteDescriptor,
+    cached_metadata: &SessionMetadata,
+    now_ns: u64,
+) {
+    let Some(log_match) = cached_descriptor.tx_selection.filter_log else {
+        return;
+    };
+    emit_filter_log_event(
+        event_stream,
+        flow,
+        meta,
+        cached_metadata.ingress_zone,
+        filter_log_egress_zone_id(forwarding, cached_decision.resolution.egress_ifindex),
+        log_match.filter_id,
+        log_match.term_id,
+        log_match.action,
+        FilterLogSource::CachedOutput,
+        now_ns,
+    );
+}
+
+#[inline]
+fn emit_lo0_filter_log(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    now_ns: u64,
+) {
+    if event_stream.is_none() {
+        return;
+    }
+    let Some(flow) = flow else {
+        return;
+    };
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let Some(log_match) = crate::filter::evaluate_lo0_filter_log_match(
+        &forwarding.filter_state,
+        is_v6,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+    ) else {
+        return;
+    };
+    emit_filter_log_event(
+        event_stream,
+        flow,
+        meta,
+        filter_log_ingress_zone_id(
+            forwarding,
+            meta,
+            ingress_zone_override,
+            meta.ingress_ifindex as i32,
+        ),
+        0,
+        log_match.filter_id,
+        log_match.term_id,
+        log_match.action,
+        FilterLogSource::Lo0,
+        now_ns,
     );
 }
 
@@ -230,6 +469,23 @@ pub(super) fn poll_binding_process_descriptor(
                                         now_ns,
                                         meta.pkt_len as u64,
                                     );
+                                emit_cached_input_filter_log(
+                                    worker_ctx.event_stream,
+                                    flow,
+                                    meta,
+                                    cached_descriptor,
+                                    now_ns,
+                                );
+                                emit_cached_output_filter_log(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    flow,
+                                    meta,
+                                    cached_decision,
+                                    cached_descriptor,
+                                    cached_metadata,
+                                    now_ns,
+                                );
                                 if policer_action.drop {
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
@@ -469,6 +725,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 Some(cached_metadata.ingress_zone),
                                                 cached_descriptor.apply_nat_on_fabric,
                                                 now_ns,
+                                                worker_ctx.event_stream,
                                                 Some(PendingForwardHints {
                                                     expected_ports,
                                                     target_binding_index: target_bi,
@@ -653,6 +910,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     None,
                                     false,
                                     now_ns,
+                                    worker_ctx.event_stream,
                                     None,
                                     None,
                                 ) {
@@ -771,6 +1029,25 @@ pub(super) fn poll_binding_process_descriptor(
                                         None => resolution_target,
                                     }
                                 };
+                            let input_filter_eval = evaluate_non_pbr_input_filter(
+                                worker_ctx.forwarding,
+                                Some(flow),
+                                meta,
+                                ingress_zone_override,
+                            );
+                            if input_filter_eval.action != crate::filter::FilterAction::Accept {
+                                if let Some(cached_log) = input_filter_eval.cached_log {
+                                    emit_input_filter_log_match(
+                                        worker_ctx.event_stream,
+                                        flow,
+                                        meta,
+                                        cached_log,
+                                        now_ns,
+                                    );
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
                             let route_table_override = ingress_route_table_override(
                                 worker_ctx.forwarding,
                                 meta,
@@ -1160,7 +1437,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // the session-install step below is skipped only when
                                 // the knob matches AND no NAT is required (to avoid
                                 // orphan NAT state without a session anchor).
-                                let policy_action = evaluate_policy_with_len(
+                                let policy_result = evaluate_policy_result_with_len(
                                     &worker_ctx.forwarding.policy,
                                     from_zone_id,
                                     to_zone_id,
@@ -1171,7 +1448,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     flow.forward_key.dst_port,
                                     desc.len as u64,
                                 );
-                                if let PolicyAction::Permit = policy_action {
+                                if let PolicyAction::Permit = policy_result.action {
                                     // NAT64: cross-family translation takes
                                     // priority over same-family SNAT.
                                     let nat64_info = if let Some((
@@ -1360,6 +1637,17 @@ pub(super) fn poll_binding_process_descriptor(
                                                 worker_ctx.peer_worker_commands,
                                                 &forward_entry,
                                             );
+                                            if let Some(cached_log) =
+                                                input_filter_eval.cached_log
+                                            {
+                                                emit_input_filter_log_match(
+                                                    worker_ctx.event_stream,
+                                                    flow,
+                                                    meta,
+                                                    cached_log,
+                                                    now_ns,
+                                                );
+                                            }
                                         }
                                         let reverse_resolution = reverse_resolution_for_session(
                                             worker_ctx.forwarding,
@@ -1566,7 +1854,8 @@ pub(super) fn poll_binding_process_descriptor(
                                         from_zone_id,
                                         to_zone_id,
                                         owner_rg_id,
-                                        policy_action,
+                                        policy_result.policy_id,
+                                        policy_result.action,
                                         now_ns,
                                     );
                                     telemetry.dbg.policy_deny += 1;
@@ -1928,6 +2217,7 @@ pub(super) fn poll_binding_process_descriptor(
                             session_ingress_zone,
                             apply_nat_on_fabric,
                             now_ns,
+                            worker_ctx.event_stream,
                             None,
                             None,
                         ) {
@@ -1999,6 +2289,12 @@ pub(super) fn poll_binding_process_descriptor(
                                     flow_cache_owner_rg_id,
                                     session_ingress_zone,
                                     request_target_binding_index,
+                                    evaluate_non_pbr_input_filter_log_only(
+                                        worker_ctx.forwarding,
+                                        Some(flow),
+                                        meta,
+                                        ingress_zone_override,
+                                    ),
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
                                     apply_nat_on_fabric,
@@ -2035,6 +2331,14 @@ pub(super) fn poll_binding_process_descriptor(
                         match decision.resolution.disposition {
                             ForwardingDisposition::LocalDelivery => {
                                 telemetry.dbg.local += 1;
+                                emit_lo0_filter_log(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    flow.as_ref(),
+                                    meta,
+                                    ingress_zone_override,
+                                    now_ns,
+                                );
                                 // Reinject to slow-path TUN so the kernel
                                 // processes host-bound traffic (NDP, ICMP echo,
                                 // BGP, etc.).  The first packet creates a BPF
