@@ -567,8 +567,9 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   owns the sharded/packed state decision, HA/restart continuity decision,
   non-drop color actions, and integration/perf evidence beyond the admitted
   color-blind `then discard` slice.
-- Port mirroring closeout: #1376 still owns remaining ingress/transmit
-  surfaces, mirror-fidelity evidence, pressure survival, and gate removal.
+- Port mirroring closeout: #1376 now has bounded userspace runtime admission,
+  but still owns mirror-fidelity evidence and forwarding survival under mirror
+  pressure before BPF source removal.
 - Dataplane event closeout: #1379 still owns end-to-end syslog evidence,
   broader non-PBR filter-log call sites, and richer identity mapping.
 - `show system buffers` BPF-map display retirement: #1380. Userspace

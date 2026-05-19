@@ -2438,7 +2438,7 @@ func TestBuildSnapshotIncludesThreeColorPolicerSchema(t *testing.T) {
 	}
 }
 
-func TestDeriveUserspaceCapabilitiesKeepsPortMirroringFailClosed(t *testing.T) {
+func TestDeriveUserspaceCapabilitiesAllowsPortMirroringRuntimeSlice(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
 		Instances: map[string]*config.PortMirrorInstance{
@@ -2452,17 +2452,13 @@ func TestDeriveUserspaceCapabilitiesKeepsPortMirroringFailClosed(t *testing.T) {
 	}
 
 	caps := deriveUserspaceCapabilities(cfg)
-	if caps.ForwardingSupported {
-		t.Fatal("ForwardingSupported = true, want false until mirror snapshot and runtime clone/inject are both wired")
+	if !caps.ForwardingSupported {
+		t.Fatalf("ForwardingSupported = false, reasons: %+v", caps.UnsupportedReasons)
 	}
-	found := false
 	for _, r := range caps.UnsupportedReasons {
 		if r == "port mirroring is not implemented in the userspace dataplane" {
-			found = true
+			t.Fatalf("stale port-mirroring rejection present: %+v", caps.UnsupportedReasons)
 		}
-	}
-	if !found {
-		t.Fatalf("expected port mirroring unsupported reason, got: %+v", caps.UnsupportedReasons)
 	}
 }
 
