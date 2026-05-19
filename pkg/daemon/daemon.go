@@ -59,7 +59,7 @@ const nodeIDFile = "/etc/xpf/node-id"
 type Daemon struct {
 	opts                       Options
 	store                      *configstore.Store
-	dp                         dataplane.DataPlane
+	dp  dataplane.RuntimeDataPlane
 	networkd                   *networkd.Manager
 	routing                    *routing.Manager
 	frr                        *frr.Manager
@@ -340,4 +340,17 @@ func New(opts Options) *Daemon {
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 		applySem:                   semaphore.NewWeighted(1),
 	}
+}
+
+// legacyDP returns the daemon's underlying dataplane.DataPlane for call sites
+// that have not yet migrated to RuntimeDataPlane domain interfaces.
+// Returns nil if d.dp is nil or the concrete type does not implement DataPlane.
+func (d *Daemon) legacyDP() dataplane.DataPlane {
+	if d.dp == nil {
+		return nil
+	}
+	if lp, ok := d.dp.(dataplane.DataPlane); ok {
+		return lp
+	}
+	return nil
 }
