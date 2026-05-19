@@ -448,7 +448,11 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 	var compileResult *dataplane.CompileResult
 	if d.dp != nil {
 		var err error
-		if compileResult, err = d.legacyDP().Compile(cfg); err != nil {
+		lp := d.legacyDP()
+		if lp == nil {
+			return errors.New("cannot compile: legacy dataplane not available")
+		}
+		if compileResult, err = lp.Compile(cfg); err != nil {
 			d.recordCompileFailure(err)
 			if compileErrorMustAbortApply(err) {
 				return err
@@ -662,8 +666,10 @@ func (d *Daemon) applyConfigLocked(cfg *config.Config) error {
 		// MAC set live (no link cycle) but workers were deferred.
 		// Trigger a re-Compile to start workers with the now-correct MAC.
 		// This is cheaper than NotifyLinkCycle (no stop_workers/rebind).
-		if _, err := d.legacyDP().Compile(cfg); err != nil {
-			slog.Warn("failed to re-compile after deferred MAC", "err", err)
+		if lp := d.legacyDP(); lp != nil {
+			if _, err := lp.Compile(cfg); err != nil {
+				slog.Warn("failed to re-compile after deferred MAC", "err", err)
+			}
 		}
 	}
 
@@ -1046,11 +1052,12 @@ func compileErrorMustAbortApply(err error) bool {
 }
 
 func (d *Daemon) publishInitialPolicySchedulerStateLocked(cfg *config.Config, activeState map[string]bool, compileResult *dataplane.CompileResult) {
-	if d.dp == nil || activeState == nil || compileResult == nil {
+	lp := d.legacyDP()
+	if lp == nil || activeState == nil || compileResult == nil {
 		return
 	}
-	if _, isUserspace := d.legacyDP().(userspaceRuntimeModeReporter); isUserspace {
+	if _, isUserspace := lp.(userspaceRuntimeModeReporter); isUserspace {
 		return
 	}
-	d.legacyDP().UpdatePolicyScheduleState(cfg, activeState)
+	lp.UpdatePolicyScheduleState(cfg, activeState)
 }

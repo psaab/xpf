@@ -1009,7 +1009,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	if d.dp != nil {
-		logFinalStats(d.legacyDP())
+		if lp := d.legacyDP(); lp != nil {
+			logFinalStats(lp)
+		}
 		if hitless {
 			// Hitless: close Go handles only — BPF programs keep running.
 			slog.Info("hitless shutdown: preserving BPF state")
