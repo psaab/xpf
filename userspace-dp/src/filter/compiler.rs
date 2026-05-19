@@ -104,6 +104,7 @@ pub(crate) fn parse_filter_state_with_three_color_preserving(
                 .any(|term| !term.forwarding_class.is_empty() || term.dscp_rewrite.is_some()),
             affects_route_lookup: terms.iter().any(|term| !term.routing_instance.is_empty()),
             has_counter_terms: terms.iter().any(|term| term.has_count),
+            has_log_terms: terms.iter().any(|term| term.log),
             has_three_color_policer_terms: terms
                 .iter()
                 .any(|term| term.three_color_policer.is_some()),
@@ -145,6 +146,7 @@ pub(crate) fn parse_filter_state_with_three_color_preserving(
             if let Some(filter) = state.filters.get(&key) {
                 if filter.affects_tx_selection
                     || filter.has_counter_terms
+                    || filter.has_log_terms
                     || filter.has_three_color_policer_terms
                 {
                     state
@@ -188,6 +190,7 @@ pub(crate) fn parse_filter_state_with_three_color_preserving(
             if let Some(filter) = state.filters.get(&key) {
                 if filter.affects_tx_selection
                     || filter.has_counter_terms
+                    || filter.has_log_terms
                     || filter.has_three_color_policer_terms
                 {
                     state

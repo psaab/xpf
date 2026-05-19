@@ -29,6 +29,7 @@ pub(super) struct CachedTxSelectionDescriptor {
     pub(super) dscp_rewrite: Option<u8>,
     pub(super) filter_counter: Option<Arc<crate::filter::FilterTermCounter>>,
     pub(super) three_color_policers: crate::filter::CachedThreeColorPolicers,
+    pub(super) filter_log: Option<crate::filter::FilterLogMatch>,
 }
 
 /// Precomputed rewrite descriptor for an established flow.

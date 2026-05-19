@@ -73,6 +73,40 @@ fn allow_all_matches_zone_pair() {
 }
 
 #[test]
+fn evaluate_policy_result_reports_snapshot_policy_id() {
+    let state = parse_policy_state(
+        "deny",
+        &[PolicyRuleSnapshot {
+            policy_id: 257,
+            name: "deny-web".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "deny".to_string(),
+            ..Default::default()
+        }],
+        &test_zone_name_to_id(),
+    );
+
+    let result = evaluate_policy_result_with_len(
+        &state,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        "10.0.61.100".parse().expect("src"),
+        "172.16.80.200".parse().expect("dst"),
+        PROTO_TCP,
+        12345,
+        443,
+        64,
+    );
+
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(result.policy_id, 257);
+}
+
+#[test]
 fn default_deny_applies_without_match() {
     let state = parse_policy_state("deny", &[], &test_zone_name_to_id());
     assert_eq!(

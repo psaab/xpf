@@ -29,7 +29,10 @@ sync.
   `docs/per-5-tuple/state.md` for the architectural ceiling.
 - `forwarding/` — FIB lookup, next-hop selection, VLAN/GRE encap.
 - `event_emit.rs` — fixed-size, non-blocking RT_FLOW event producers
-  for userspace policy-deny, screen-drop, and logged PBR filter hits.
+  for userspace policy-deny, screen-drop, logged PBR filter hits, and
+  non-PBR input/output/lo0 filter logs. Output filter-log identity is
+  carried through live TX selection and cached forwarding so flow-cache
+  hits emit the same compiled filter/term/action metadata as live paths.
   Producers must use the event-stream worker handle so rate limiting,
   queue-budget accounting, replay, and daemon callback ACK behavior stay
   centralized in `event_stream/`.

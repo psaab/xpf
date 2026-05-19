@@ -12,7 +12,7 @@ use super::poll_stages::{
     stage_native_gre_decap, stage_parse_flow_and_learn, stage_screen_check,
     stage_screen_syn_cookie_ack_on_session_miss, FabricIngressOutcome, StageOutcome,
 };
-use crate::policy::evaluate_policy_with_len;
+use crate::policy::{evaluate_policy_result_with_len, evaluate_policy_with_len};
 
 #[inline]
 fn source_nat_decision_for_flow(
@@ -56,6 +56,161 @@ fn record_source_nat_failure(
         Some(&debug),
         worker_ctx.forwarding,
         failure,
+    );
+}
+
+#[inline]
+fn filter_log_ingress_zone_id(
+    forwarding: &ForwardingState,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    ingress_logical_ifindex: i32,
+) -> u16 {
+    ingress_zone_override
+        .filter(|id| forwarding.zone_id_to_name.contains_key(id))
+        .or_else(|| {
+            forwarding
+                .ifindex_to_zone_id
+                .get(&ingress_logical_ifindex)
+                .copied()
+        })
+        .or_else(|| {
+            forwarding
+                .ifindex_to_zone_id
+                .get(&(meta.ingress_ifindex as i32))
+                .copied()
+        })
+        .unwrap_or(0)
+}
+
+#[inline]
+fn filter_log_egress_zone_id(forwarding: &ForwardingState, egress_ifindex: i32) -> u16 {
+    forwarding
+        .egress
+        .get(&egress_ifindex)
+        .map(|egress| egress.zone_id)
+        .unwrap_or(0)
+}
+
+#[inline]
+fn emit_non_pbr_input_filter_log(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    now_ns: u64,
+) {
+    if event_stream.is_none() {
+        return;
+    }
+    let Some(flow) = flow else {
+        return;
+    };
+    let ingress_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let Some(log_match) = crate::filter::evaluate_interface_filter_log_match(
+        &forwarding.filter_state,
+        ingress_ifindex,
+        is_v6,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        true,
+    ) else {
+        return;
+    };
+    emit_filter_log_event(
+        event_stream,
+        flow,
+        meta,
+        filter_log_ingress_zone_id(forwarding, meta, ingress_zone_override, ingress_ifindex),
+        0,
+        log_match.filter_id,
+        log_match.term_id,
+        log_match.action,
+        now_ns,
+    );
+}
+
+#[inline]
+fn emit_cached_output_filter_log(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    cached_decision: SessionDecision,
+    cached_descriptor: &RewriteDescriptor,
+    cached_metadata: &SessionMetadata,
+    now_ns: u64,
+) {
+    let Some(log_match) = cached_descriptor.tx_selection.filter_log else {
+        return;
+    };
+    emit_filter_log_event(
+        event_stream,
+        flow,
+        meta,
+        cached_metadata.ingress_zone,
+        filter_log_egress_zone_id(forwarding, cached_decision.resolution.egress_ifindex),
+        log_match.filter_id,
+        log_match.term_id,
+        log_match.action,
+        now_ns,
+    );
+}
+
+#[inline]
+fn emit_lo0_filter_log(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    now_ns: u64,
+) {
+    if event_stream.is_none() {
+        return;
+    }
+    let Some(flow) = flow else {
+        return;
+    };
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let Some(log_match) = crate::filter::evaluate_lo0_filter_log_match(
+        &forwarding.filter_state,
+        is_v6,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+    ) else {
+        return;
+    };
+    emit_filter_log_event(
+        event_stream,
+        flow,
+        meta,
+        filter_log_ingress_zone_id(
+            forwarding,
+            meta,
+            ingress_zone_override,
+            meta.ingress_ifindex as i32,
+        ),
+        0,
+        log_match.filter_id,
+        log_match.term_id,
+        log_match.action,
+        now_ns,
     );
 }
 
@@ -181,6 +336,14 @@ pub(super) fn poll_binding_process_descriptor(
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
                     }
+                    emit_non_pbr_input_filter_log(
+                        worker_ctx.forwarding,
+                        worker_ctx.event_stream,
+                        flow.as_ref(),
+                        meta,
+                        ingress_zone_override,
+                        now_ns,
+                    );
                     // ── Flow cache fast path ────────────────────────────
                     // For established TCP (ACK-only) and UDP, check the per-
                     // binding flow cache before the expensive session lookup
@@ -230,6 +393,16 @@ pub(super) fn poll_binding_process_descriptor(
                                         now_ns,
                                         meta.pkt_len as u64,
                                     );
+                                emit_cached_output_filter_log(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    flow,
+                                    meta,
+                                    cached_decision,
+                                    cached_descriptor,
+                                    cached_metadata,
+                                    now_ns,
+                                );
                                 if policer_action.drop {
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
@@ -469,6 +642,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 Some(cached_metadata.ingress_zone),
                                                 cached_descriptor.apply_nat_on_fabric,
                                                 now_ns,
+                                                worker_ctx.event_stream,
                                                 Some(PendingForwardHints {
                                                     expected_ports,
                                                     target_binding_index: target_bi,
@@ -653,6 +827,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     None,
                                     false,
                                     now_ns,
+                                    worker_ctx.event_stream,
                                     None,
                                     None,
                                 ) {
@@ -1160,7 +1335,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 // the session-install step below is skipped only when
                                 // the knob matches AND no NAT is required (to avoid
                                 // orphan NAT state without a session anchor).
-                                let policy_action = evaluate_policy_with_len(
+                                let policy_result = evaluate_policy_result_with_len(
                                     &worker_ctx.forwarding.policy,
                                     from_zone_id,
                                     to_zone_id,
@@ -1171,7 +1346,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     flow.forward_key.dst_port,
                                     desc.len as u64,
                                 );
-                                if let PolicyAction::Permit = policy_action {
+                                if let PolicyAction::Permit = policy_result.action {
                                     // NAT64: cross-family translation takes
                                     // priority over same-family SNAT.
                                     let nat64_info = if let Some((
@@ -1566,7 +1741,8 @@ pub(super) fn poll_binding_process_descriptor(
                                         from_zone_id,
                                         to_zone_id,
                                         owner_rg_id,
-                                        policy_action,
+                                        policy_result.policy_id,
+                                        policy_result.action,
                                         now_ns,
                                     );
                                     telemetry.dbg.policy_deny += 1;
@@ -1928,6 +2104,7 @@ pub(super) fn poll_binding_process_descriptor(
                             session_ingress_zone,
                             apply_nat_on_fabric,
                             now_ns,
+                            worker_ctx.event_stream,
                             None,
                             None,
                         ) {
@@ -2035,6 +2212,14 @@ pub(super) fn poll_binding_process_descriptor(
                         match decision.resolution.disposition {
                             ForwardingDisposition::LocalDelivery => {
                                 telemetry.dbg.local += 1;
+                                emit_lo0_filter_log(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    flow.as_ref(),
+                                    meta,
+                                    ingress_zone_override,
+                                    now_ns,
+                                );
                                 // Reinject to slow-path TUN so the kernel
                                 // processes host-bound traffic (NDP, ICMP echo,
                                 // BGP, etc.).  The first packet creates a BPF

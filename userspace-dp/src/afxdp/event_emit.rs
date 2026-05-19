@@ -43,6 +43,7 @@ pub(super) fn emit_policy_deny_event(
     ingress_zone_id: u16,
     egress_zone_id: u16,
     owner_rg_id: i32,
+    policy_id: u32,
     action: PolicyAction,
     now_ns: u64,
 ) {
@@ -65,8 +66,8 @@ pub(super) fn emit_policy_deny_event(
         ingress_zone_id,
         egress_zone_id,
         ingress_ifindex: ingress_ifindex_to_wire(meta.ingress_ifindex),
-        policy_id: 0,
-        rule_id: 0,
+        policy_id,
+        rule_id: policy_id,
         term_id: 0,
         reason: RT_FLOW_CLOSE_REASON_POLICY,
         owner_rg_id: owner_rg_id_to_wire(owner_rg_id),
@@ -276,6 +277,7 @@ mod tests {
             7,
             9,
             3,
+            101,
             PolicyAction::Deny,
             123,
         );
@@ -291,6 +293,8 @@ mod tests {
         assert_eq!(event.ingress_zone_id, 7);
         assert_eq!(event.egress_zone_id, 9);
         assert_eq!(event.ingress_ifindex, 42);
+        assert_eq!(event.policy_id, 101);
+        assert_eq!(event.rule_id, 101);
         assert_eq!(event.owner_rg_id, 3);
         assert_eq!(event.src_port, 49152);
         assert_eq!(event.dst_port, 443);

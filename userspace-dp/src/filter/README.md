@@ -21,11 +21,12 @@ Mirrors the BPF firewall-filter pipeline in userspace.
 - `engine.rs` — per-term evaluation, first-match-wins. It carries the
   matched `then policer ...` name in the filter result. Routing-instance
   evaluation can also return log/action/filter/term metadata so AF_XDP
-  can emit RT_FLOW filter-log events without re-evaluating the term or
-  allocating on the packet path. TX-selection evaluation meters
-  three-color policers on live forwarding paths and cached evaluation
-  returns runtime handles so flow-cache hits can meter the same policer
-  before forwarding.
+  can emit PBR RT_FLOW filter-log events without re-evaluating the term
+  or allocating on the packet path. No-count helper evaluation returns the
+  first logged non-PBR input or lo0 match while skipping routing-instance
+  terms to avoid double-emitting PBR logs. TX-selection evaluation meters
+  three-color policers and carries output filter-log identity through live
+  forwarding and cached flow-cache hits.
 - `policer.rs` — token-bucket implementation plus the #1375 RFC
   2697/2698 three-color meter core. Token math is integer-only:
   the legacy token bucket keeps its bits/sec constructor contract, and
@@ -43,10 +44,10 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   entries" was incorrect.
 - Hit counters live on each `FilterTerm` (`Arc<FilterTermCounter>`)
   and are surfaced through the status JSON.
-- `Filter.id` and `FilterTerm.id` are stable only within the compiled
-  snapshot order today. They are sufficient for userspace RT_FLOW
-  scaffolding, but richer policy/filter identity mapping remains #1379
-  closeout work.
+- `Filter.id` and `FilterTerm.id` are deterministic within the compiled
+  snapshot order and are carried in userspace RT_FLOW filter-log records.
+  Do not invent IDs beyond the compiled snapshot until the ApplyResult or
+  snapshot schema exposes richer stable filter-name mapping.
 - `from-interface` is matched at the binding level (caller sets the
   ingress interface; the term doesn't re-derive it).
 

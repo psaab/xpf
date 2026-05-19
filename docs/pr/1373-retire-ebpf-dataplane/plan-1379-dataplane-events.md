@@ -31,7 +31,7 @@ and destination tuple, ingress ifindex/interface name path, zone data,
 policy/rule/application identity, reason, NAT-rewritten tuple when applicable,
 and timestamp.
 
-Current implementation status after #1394 and this infrastructure slice:
+Current implementation status after the 2026-05-19 closeout slice:
 
 - Frame types 11/12/13 are reserved and covered by Rust golden tests.
 - Rust encodes and decodes fixed-size 136-byte RT_FLOW payloads for policy
@@ -42,12 +42,28 @@ Current implementation status after #1394 and this infrastructure slice:
   `try_emit_dataplane_event_at()` with fixed-size non-blocking queueing,
   per-event/per-ingress-zone rate limiting, generic producer sent/dropped
   counters, and per-event loss reason accounting.
+- Runtime producers cover userspace policy deny, screen drop, logged PBR
+  filter hits, non-PBR input filter logs, live and cached output filter logs,
+  and lo0/local-delivery filter logs.
+- Policy deny records carry the userspace snapshot's numeric policy ID. Filter
+  log records carry the compiled filter ID, term ID, and action. These IDs are
+  deterministic inside the compiled snapshot and intentionally avoid invented
+  names or unstable runtime-only identifiers.
+- `pkg/dataplane/userspace/eventstream_test.go` includes a deterministic UDP
+  syslog harness that feeds raw userspace policy-deny, screen-drop, and
+  filter-log frames through the Go event-stream callback, `EventReader`, and
+  syslog fanout path.
 
 Emission points:
 
-- policy deny path in `userspace-dp/src/policy.rs`
-- screen drop path in `userspace-dp/src/screen.rs`
-- filter log term path in `userspace-dp/src/filter/engine.rs`
+- policy deny path in `userspace-dp/src/afxdp/poll_descriptor.rs`
+- screen drop path in `userspace-dp/src/afxdp/poll_stages.rs`
+- logged PBR filter-hit path in `userspace-dp/src/afxdp/forwarding/mod.rs`
+- non-PBR input and lo0/local-delivery filter-log helpers in
+  `userspace-dp/src/afxdp/poll_descriptor.rs`
+- live output filter-log path in `userspace-dp/src/afxdp/forward_request.rs`
+  and cached output filter-log path in the flow-cache hit path in
+  `userspace-dp/src/afxdp/poll_descriptor.rs`
 
 FilterLog matches BPF semantics: emit only for `then log` / `then syslog`, not
 plain `then count`.
@@ -74,8 +90,10 @@ forwarding decision.
   open/close/update events without creating sequence gaps for limiter drops.
 - Event frames stay within the existing 256-byte-ish event budget unless the
   codec is explicitly resized and tested.
-- Policy evaluation returns enough rule/policy/app metadata for event creation;
-  no post-hoc heap lookup on the worker hot path.
+- Policy evaluation returns enough rule/policy metadata for event creation; no
+  post-hoc heap lookup on the worker hot path. Application-specific numeric
+  identity remains limited to the compiled policy slot until the snapshot schema
+  carries stable per-expansion application identity.
 
 ## State and HA Behavior
 
@@ -110,6 +128,10 @@ forwarding decision.
 - Cargo: screen drop path emits a rate-limited event and accounts drops when
   the limiter is empty.
 - Cargo: filter log emits only for log/syslog terms, not count-only terms.
+- Cargo: non-PBR input filter-log helper returns compiled filter/term/action
+  identity and skips routing-instance terms so PBR logs are not double-emitted.
+- Cargo: output filter-log forwarding emits a fixed-size event with correct
+  zone and filter identity.
 - Cargo: producer API queues admitted RT_FLOW events without blocking and
   accounts per-event sent counts.
 - Cargo: rate limiting is per event kind and ingress zone, and limiter drops do
@@ -121,6 +143,9 @@ forwarding decision.
 - Go: `pkg/logging/ringbuf_test.go` or equivalent verifies identical
   `RT_FLOW_SESSION_DENY`, screen-drop, and filter-log syslog output for eBPF
   and userspace events.
+- Go: raw userspace policy-deny, screen-drop, and filter-log frames feed
+  through the event-stream callback, `EventReader.ProcessRawEvent`, and UDP
+  syslog fanout with per-event counters intact.
 - Go: daemon dispatch test covers userspace source selection or fan-in without
   duplicate records.
 - Integration: userspace cluster with deny policy, screen drop, and filter log
@@ -129,15 +154,17 @@ forwarding decision.
 
 ## Remaining Gaps
 
-- Wire policy deny, screen drop, and filter log runtime producer call sites to
-  the Rust producer API without colliding with #1374/#1375/#1378 workstreams.
-- Surface the helper-side per-event loss reason counters in status JSON,
-  CLI/status formatting, and Prometheus if the follow-up wants operator-visible
-  attribution beyond the existing aggregate `event_stream_dropped` producer
-  counter.
-- Run end-to-end userspace syslog validation for deny policy, screen drop, and
-  filter log traffic, including a deny-storm case that proves session event
-  delivery is not starved.
+- Run live userspace-cluster syslog validation for deny policy, screen drop,
+  PBR filter log, non-PBR input/output filter log, and lo0/local-delivery filter
+  log traffic. The local UDP syslog harness proves the Go decode/fanout path,
+  but it is not operator evidence from a real cluster.
+- Run a live deny-storm validation that proves policy/screen/filter telemetry
+  does not starve session event delivery and that per-event loss counters remain
+  auditable under backpressure.
+- Carry stable per-expanded-application identity in the userspace snapshot if
+  audit parity requires distinguishing multiple application expansions within a
+  single configured policy rule. The current numeric policy ID is stable for the
+  compiled policy slot and avoids inventing unstable IDs.
 
 ## Non-Goals
 

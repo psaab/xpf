@@ -2301,6 +2301,138 @@ fn build_live_forward_request_marks_empty_cos_selection_resolved() {
 }
 
 #[test]
+fn build_live_forward_request_emits_output_filter_log_event() {
+    let src_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let dst_ip = Ipv4Addr::new(198, 51, 100, 20);
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: 10,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        pkt_len: 64,
+        dscp: 0,
+        ..UserspaceDpMeta::default()
+    };
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(src_ip),
+        dst_ip: IpAddr::V4(dst_ip),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(src_ip),
+            dst_ip: IpAddr::V4(dst_ip),
+            src_port: 49152,
+            dst_port: 443,
+        },
+    };
+    let filter_state = crate::filter::parse_filter_state(
+        &[FirewallFilterSnapshot {
+            name: "egress-log".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "log-web".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports: vec!["443".into()],
+                action: "accept".into(),
+                log: true,
+                ..Default::default()
+            }],
+        }],
+        &[],
+        &[crate::InterfaceSnapshot {
+            name: "ge-0/0/2.0".into(),
+            ifindex: 12,
+            filter_output_v4: "egress-log".into(),
+            ..Default::default()
+        }],
+        "",
+        "",
+    );
+    let mut forwarding = ForwardingState {
+        filter_state,
+        tx_selection_enabled_v4: true,
+        ..ForwardingState::default()
+    };
+    forwarding.ifindex_to_zone_id.insert(10, TEST_LAN_ZONE_ID);
+    forwarding.egress.insert(
+        12,
+        EgressInterface {
+            bind_ifindex: 12,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
+            zone_id: TEST_WAN_ZONE_ID,
+            redundancy_group: 0,
+            primary_v4: Some(Ipv4Addr::new(198, 51, 100, 1)),
+            primary_v6: None,
+        },
+    );
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(dst_ip)),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+    };
+    let ingress = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-1"),
+        ifindex: 10,
+    };
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+
+    let req = build_live_forward_request_from_frame(
+        &WorkerBindingLookup::default(),
+        0,
+        &ingress,
+        XdpDesc {
+            addr: 0,
+            len: 0,
+            options: 0,
+        },
+        &[],
+        meta,
+        &decision,
+        &forwarding,
+        Some(&flow),
+        None,
+        false,
+        123,
+        Some(&event_handle),
+        None,
+        None,
+    )
+    .expect("output filter log should not block forwarding");
+
+    assert!(req.cos_tx_selection_resolved);
+    let filter_event = event_rx
+        .try_recv()
+        .expect("output filter-log event")
+        .decode_dataplane_event()
+        .expect("filter-log payload");
+    assert_eq!(filter_event.kind, DataplaneEventKind::FilterLog);
+    assert_eq!(filter_event.filter_id, 0);
+    assert_eq!(filter_event.term_id, 0);
+    assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(filter_event.egress_zone_id, TEST_WAN_ZONE_ID);
+    assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);
+}
+
+#[test]
 fn build_live_forward_request_uses_flow_or_metadata_ports_when_frame_ports_unavailable() {
     let src_ip = "2001:559:8585:ef00::102".parse::<Ipv6Addr>().unwrap();
     let dst_ip = "2001:559:8585:80::200".parse::<Ipv6Addr>().unwrap();

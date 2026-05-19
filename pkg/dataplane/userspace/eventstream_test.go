@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -95,22 +96,59 @@ func buildDataplaneEventV4Payload(
 	policyID uint32,
 	timestampNS uint64,
 ) []byte {
-	_ = reason // RT_FLOW policy-deny records carry policy identity, not the userspace-only reason field.
+	return buildTypedDataplaneEventV4Payload(
+		dataplane.EventTypePolicyDeny,
+		dataplane.ActionDeny,
+		proto,
+		srcPort, dstPort,
+		srcIP, dstIP,
+		natSrcIP,
+		natSrcPort,
+		ingressZone, egressZone,
+		policyID,
+		0,
+		0,
+		0,
+		uint8(reason),
+		timestampNS,
+	)
+}
+
+func buildTypedDataplaneEventV4Payload(
+	eventType uint8,
+	action uint8,
+	proto uint8,
+	srcPort, dstPort uint16,
+	srcIP, dstIP [4]byte,
+	natSrcIP [4]byte,
+	natSrcPort uint16,
+	ingressZone, egressZone uint16,
+	policyOrReasonID uint32,
+	ruleID uint32,
+	termID uint32,
+	ownerRG int16,
+	reason uint8,
+	timestampNS uint64,
+) []byte {
 	buf := make([]byte, int(unsafe.Sizeof(dataplane.Event{})))
 	binary.LittleEndian.PutUint64(buf[0:8], timestampNS)
 	copy(buf[8:12], srcIP[:])
 	copy(buf[24:28], dstIP[:])
 	binary.BigEndian.PutUint16(buf[40:42], srcPort)
 	binary.BigEndian.PutUint16(buf[42:44], dstPort)
-	binary.LittleEndian.PutUint32(buf[44:48], policyID)
+	binary.LittleEndian.PutUint32(buf[44:48], policyOrReasonID)
 	binary.LittleEndian.PutUint16(buf[48:50], ingressZone)
 	binary.LittleEndian.PutUint16(buf[50:52], egressZone)
-	buf[52] = dataplane.EventTypePolicyDeny
+	buf[52] = eventType
 	buf[53] = proto
-	buf[54] = dataplane.ActionDeny
+	buf[54] = action
 	buf[55] = dataplane.AFInet
+	binary.LittleEndian.PutUint32(buf[56:60], ruleID)
+	binary.LittleEndian.PutUint32(buf[60:64], termID)
+	binary.LittleEndian.PutUint16(buf[64:66], uint16(ownerRG))
 	copy(buf[72:76], natSrcIP[:])
 	binary.BigEndian.PutUint16(buf[104:106], natSrcPort)
+	buf[134] = reason
 	return buf
 }
 
@@ -729,6 +767,181 @@ func TestEventStreamDataplaneEventRawCallbackPreferred(t *testing.T) {
 	case <-decodedGot:
 		t.Fatal("decoded callback should not fire when raw callback is installed")
 	default:
+	}
+}
+
+func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	addr := pc.LocalAddr().(*net.UDPAddr)
+
+	client, err := logging.NewSyslogClient("127.0.0.1", addr.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.MinSeverity = logging.SyslogInfo
+	client.Categories = logging.CategoryAll
+
+	reader := logging.NewEventReader(nil, logging.NewEventBuffer(8))
+	reader.SetSyslogClients([]*logging.SyslogClient{client})
+
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+	es := NewEventStream(sockPath)
+	rawProcessed := make(chan bool, 3)
+	es.SetOnRawDataplaneEvent(func(_ uint64, payload []byte) {
+		rawProcessed <- reader.ProcessRawEvent(payload)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	var conn net.Conn
+	for conn == nil {
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("dial: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	defer conn.Close()
+	for !es.IsConnected() {
+		select {
+		case <-waitCtx.Done():
+			t.Fatal("event stream did not become connected")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	frames := []struct {
+		typ     uint8
+		seq     uint64
+		payload []byte
+		want    string
+	}{
+		{
+			typ: EventFrameTypePolicyDeny,
+			seq: 31,
+			payload: buildTypedDataplaneEventV4Payload(
+				dataplane.EventTypePolicyDeny,
+				dataplane.ActionDeny,
+				6,
+				1111, 443,
+				[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+				[4]byte{},
+				0,
+				1, 2,
+				77,
+				77,
+				0,
+				3,
+				dataplane.CloseReasonPolicy,
+				0,
+			),
+			want: "RT_FLOW POLICY_DENY",
+		},
+		{
+			typ: EventFrameTypeScreenDrop,
+			seq: 32,
+			payload: buildTypedDataplaneEventV4Payload(
+				dataplane.EventTypeScreenDrop,
+				dataplane.ActionDeny,
+				6,
+				2222, 80,
+				[4]byte{203, 0, 113, 10}, [4]byte{203, 0, 113, 10},
+				[4]byte{},
+				0,
+				1, 0,
+				dataplane.ScreenLandAttack,
+				0,
+				0,
+				0,
+				dataplane.CloseReasonNone,
+				0,
+			),
+			want: "RT_FLOW SCREEN_DROP",
+		},
+		{
+			typ: EventFrameTypeFilterLog,
+			seq: 33,
+			payload: buildTypedDataplaneEventV4Payload(
+				dataplane.EventTypeFilterLog,
+				dataplane.ActionPermit,
+				6,
+				3333, 443,
+				[4]byte{10, 0, 1, 6}, [4]byte{198, 51, 100, 20},
+				[4]byte{},
+				0,
+				1, 2,
+				23,
+				0,
+				5,
+				0,
+				dataplane.CloseReasonNone,
+				0,
+			),
+			want: "RT_FLOW FILTER_LOG",
+		},
+	}
+	for _, frame := range frames {
+		if err := writeFrame(conn, frame.typ, frame.seq, frame.payload); err != nil {
+			t.Fatalf("write dataplane frame %d: %v", frame.seq, err)
+		}
+	}
+
+	seen := make(map[string]bool, len(frames))
+	deadline := time.Now().Add(2 * time.Second)
+	buf := make([]byte, 4096)
+	for len(seen) < len(frames) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for syslog fanout, saw %v", seen)
+		}
+		_ = pc.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, _, err := pc.ReadFrom(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			t.Fatalf("read syslog: %v", err)
+		}
+		msg := string(buf[:n])
+		for _, frame := range frames {
+			if strings.Contains(msg, frame.want) {
+				seen[frame.want] = true
+			}
+		}
+	}
+
+	for i := 0; i < len(frames); i++ {
+		select {
+		case ok := <-rawProcessed:
+			if !ok {
+				t.Fatal("raw dataplane event was rejected by EventReader")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for raw callback %d", i+1)
+		}
+	}
+	if got := es.PolicyDenyEvents.Load(); got != 1 {
+		t.Fatalf("PolicyDenyEvents = %d, want 1", got)
+	}
+	if got := es.ScreenDropEvents.Load(); got != 1 {
+		t.Fatalf("ScreenDropEvents = %d, want 1", got)
+	}
+	if got := es.FilterLogEvents.Load(); got != 1 {
+		t.Fatalf("FilterLogEvents = %d, want 1", got)
 	}
 }
 

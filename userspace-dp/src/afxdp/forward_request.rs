@@ -54,6 +54,7 @@ pub(super) fn build_live_forward_request(
         now_ns,
         None,
         None,
+        None,
     )
 }
 
@@ -70,6 +71,7 @@ pub(super) fn build_live_forward_request_from_frame(
     fabric_ingress_zone: Option<u16>,
     apply_nat_on_fabric: bool,
     now_ns: u64,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     hints: Option<PendingForwardHints>,
     precomputed_tx_selection: Option<&CachedTxSelectionDescriptor>,
 ) -> Option<PendingForwardRequest> {
@@ -121,6 +123,7 @@ pub(super) fn build_live_forward_request_from_frame(
             queue_id: selection.queue_id,
             dscp_rewrite: selection.dscp_rewrite,
             drop: false,
+            filter_log: selection.filter_log,
         })
         .unwrap_or_else(|| {
             resolve_cos_tx_selection_at(
@@ -131,6 +134,33 @@ pub(super) fn build_live_forward_request_from_frame(
                 now_ns,
             )
         });
+    if let (Some(filter_log), Some(flow)) = (cos.filter_log, tx_selection_flow) {
+        let ingress_zone_id = fabric_ingress_zone
+            .filter(|id| forwarding.zone_id_to_name.contains_key(id))
+            .or_else(|| {
+                forwarding
+                    .ifindex_to_zone_id
+                    .get(&(meta.ingress_ifindex as i32))
+                    .copied()
+            })
+            .unwrap_or(0);
+        let egress_zone_id = forwarding
+            .egress
+            .get(&decision.resolution.egress_ifindex)
+            .map(|egress| egress.zone_id)
+            .unwrap_or(0);
+        emit_filter_log_event(
+            event_stream,
+            flow,
+            meta,
+            ingress_zone_id,
+            egress_zone_id,
+            filter_log.filter_id,
+            filter_log.term_id,
+            filter_log.action,
+            now_ns,
+        );
+    }
     if cos.drop {
         return None;
     }

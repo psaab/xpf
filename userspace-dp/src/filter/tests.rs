@@ -19,6 +19,13 @@ fn make_filter_state_with_three_color(
     parse_filter_state_with_three_color(filters, &[], three_color_policers, &[], "", "")
 }
 
+fn make_filter_state_with_interfaces(
+    filters: &[FirewallFilterSnapshot],
+    interfaces: &[crate::InterfaceSnapshot],
+) -> FilterState {
+    parse_filter_state(filters, &[], interfaces, "", "")
+}
+
 #[test]
 fn basic_accept_discard() {
     let state = make_filter_state(
@@ -87,6 +94,86 @@ fn basic_accept_discard() {
         0,
     );
     assert_eq!(result.action, FilterAction::Accept);
+}
+
+#[test]
+fn interface_filter_log_match_returns_filter_and_term_identity() {
+    let state = make_filter_state_with_interfaces(
+        &[FirewallFilterSnapshot {
+            name: "edge-in".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "log-web".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports: vec!["443".into()],
+                action: "accept".into(),
+                log: true,
+                ..Default::default()
+            }],
+        }],
+        &[crate::InterfaceSnapshot {
+            ifindex: 7,
+            filter_input_v4: "edge-in".into(),
+            ..Default::default()
+        }],
+    );
+
+    let log_match = evaluate_interface_filter_log_match(
+        &state,
+        7,
+        false,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        PROTO_TCP,
+        49152,
+        443,
+        0,
+        true,
+    )
+    .expect("logged input filter hit");
+
+    assert_eq!(log_match.filter_id, 0);
+    assert_eq!(log_match.term_id, 0);
+    assert_eq!(log_match.action, FilterAction::Accept);
+}
+
+#[test]
+fn interface_filter_log_match_skips_pbr_terms_without_double_emit() {
+    let state = make_filter_state_with_interfaces(
+        &[FirewallFilterSnapshot {
+            name: "pbr-in".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "route-and-log".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports: vec!["443".into()],
+                action: "accept".into(),
+                log: true,
+                routing_instance: "blue".into(),
+                ..Default::default()
+            }],
+        }],
+        &[crate::InterfaceSnapshot {
+            ifindex: 7,
+            filter_input_v4: "pbr-in".into(),
+            ..Default::default()
+        }],
+    );
+
+    let log_match = evaluate_interface_filter_log_match(
+        &state,
+        7,
+        false,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        PROTO_TCP,
+        49152,
+        443,
+        0,
+        true,
+    );
+
+    assert_eq!(log_match, None);
 }
 
 #[test]

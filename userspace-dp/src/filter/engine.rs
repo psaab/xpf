@@ -215,6 +215,7 @@ fn evaluate_filter_ref_counted_v4(
             routing_instance: term.routing_instance.clone(),
             forwarding_class: term.forwarding_class.clone(),
             log: term.log,
+            log_match: filter_log_match(filter, term),
         };
     }
     FilterResult::default()
@@ -245,6 +246,7 @@ fn evaluate_filter_ref_counted_v6(
             routing_instance: term.routing_instance.clone(),
             forwarding_class: term.forwarding_class.clone(),
             log: term.log,
+            log_match: filter_log_match(filter, term),
         };
     }
     FilterResult::default()
@@ -275,6 +277,7 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
                 .then_some(term.forwarding_class.as_ref()),
             dscp_rewrite: policer_action.dscp_rewrite.or(term.dscp_rewrite),
             policer_drop: policer_action.drop,
+            log_match: filter_log_match(filter, term),
         };
     }
     TxSelectionFilterResult::default()
@@ -305,6 +308,7 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
                 .then_some(term.forwarding_class.as_ref()),
             dscp_rewrite: policer_action.dscp_rewrite.or(term.dscp_rewrite),
             policer_drop: policer_action.drop,
+            log_match: filter_log_match(filter, term),
         };
     }
     TxSelectionFilterResult::default()
@@ -364,6 +368,7 @@ fn evaluate_filter_ref_tx_selection_cached_v4(
             three_color_policers: CachedThreeColorPolicers::from_option(
                 term.three_color_policer.clone(),
             ),
+            log_match: filter_log_match(filter, term),
         };
     }
     CachedTxSelectionFilterResult::default()
@@ -390,9 +395,19 @@ fn evaluate_filter_ref_tx_selection_cached_v6(
             three_color_policers: CachedThreeColorPolicers::from_option(
                 term.three_color_policer.clone(),
             ),
+            log_match: filter_log_match(filter, term),
         };
     }
     CachedTxSelectionFilterResult::default()
+}
+
+#[inline]
+fn filter_log_match(filter: &Filter, term: &FilterTerm) -> Option<FilterLogMatch> {
+    term.log.then_some(FilterLogMatch {
+        filter_id: filter.id,
+        term_id: term.id,
+        action: term.action,
+    })
 }
 
 #[inline]
@@ -505,6 +520,26 @@ pub(crate) fn evaluate_lo0_filter_counted(
     )
 }
 
+pub(crate) fn evaluate_lo0_filter_log_match(
+    state: &FilterState,
+    is_v6: bool,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+) -> Option<FilterLogMatch> {
+    let filter = if is_v6 {
+        state.lo0_filter_v6_fast.as_deref()
+    } else {
+        state.lo0_filter_v4_fast.as_deref()
+    }?;
+    evaluate_filter_ref_log_match(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, false,
+    )
+}
+
 /// Evaluate the per-interface input filter for a given address family.
 pub(crate) fn evaluate_interface_filter(
     state: &FilterState,
@@ -551,6 +586,35 @@ pub(crate) fn evaluate_interface_filter_counted(
         dst_port,
         dscp,
         packet_bytes,
+    )
+}
+
+pub(crate) fn evaluate_interface_filter_log_match(
+    state: &FilterState,
+    ifindex: i32,
+    is_v6: bool,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    skip_routing_instance: bool,
+) -> Option<FilterLogMatch> {
+    let filter = if is_v6 {
+        state.iface_filter_v6_fast.get(&ifindex).map(Arc::as_ref)
+    } else {
+        state.iface_filter_v4_fast.get(&ifindex).map(Arc::as_ref)
+    }?;
+    evaluate_filter_ref_log_match(
+        filter,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        dscp,
+        skip_routing_instance,
     )
 }
 
@@ -656,6 +720,29 @@ pub(crate) fn evaluate_interface_filter_routing_instance_event_counted<'a>(
         ),
         _ => None,
     }
+}
+
+fn evaluate_filter_ref_log_match(
+    filter: &Filter,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    skip_routing_instance: bool,
+) -> Option<FilterLogMatch> {
+    if !filter.has_log_terms {
+        return None;
+    }
+    let first_matching_term = filter
+        .terms
+        .iter()
+        .find(|term| term_matches(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp))?;
+    if skip_routing_instance && !first_matching_term.routing_instance.is_empty() {
+        return None;
+    }
+    filter_log_match(filter, first_matching_term)
 }
 
 /// Evaluate the per-interface output filter for a given address family.

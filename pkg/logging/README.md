@@ -46,6 +46,11 @@ reports.
   syslog delivery as eBPF ring-buffer events. `DecodeRawEventRecord` is
   decode-only and must not be used as a replacement for the full reader
   path when audit delivery matters.
+- `pkg/dataplane/userspace/eventstream_test.go` owns the deterministic
+  local syslog harness for userspace RT_FLOW policy-deny, screen-drop, and
+  filter-log frames. It sends raw event-stream frames through
+  `EventReader.ProcessRawEvent` and a UDP syslog listener, so changes to
+  userspace decode or fanout should extend that harness rather than bypass it.
 - The event buffer is bounded. If a subscriber stops draining, new events
   drop silently — by design. Don't wire a slow consumer to it.
 - The session aggregator flushes on a 5-minute timer. The flushed
