@@ -47,18 +47,19 @@ Current implementation status after the 2026-05-19 closeout slice:
   and lo0/local-delivery filter logs. Non-PBR input filter-log matching runs
   only on the slow path after a flow-cache miss. Non-PBR input filter
   `discard`/`reject` actions are terminal before route lookup and policy
-  evaluation; logged terminal actions emit `source=input` with deny/reject RT_FLOW
-  action. If the first permitted packet installs a flow-cache entry, the matched
-  input log term and ingress-zone ID are stored in that entry and cached hits
-  re-emit `source=input` without rescanning filter terms.
+  evaluation; logged terminal actions emit `source=input` with deny/reject
+  RT_FLOW action. If the first permitted packet installs a flow-cache entry,
+  the matched input log term and ingress-zone ID are stored in that entry and
+  cached hits re-emit `source=input` without rescanning filter terms.
 - Policy deny records carry the userspace snapshot's numeric policy ID. Filter
   log records carry the compiled filter ID, term ID, action, and source
   (`pbr`, `input`, `output`, `cached-output`, or `lo0`). These IDs are
   deterministic inside the compiled snapshot and intentionally avoid invented
   names or unstable runtime-only identifiers.
 - The `lo0` source label means a userspace local-delivery packet matched the
-  configured lo0 log term. It does not claim that kernel/nft lo0 ingress
-  enforcement moved into the AF_XDP helper.
+  configured lo0 log term. Userspace local-delivery `discard`/`reject` actions
+  are terminal and prevent slow-path reinjection. This does not claim that
+  kernel/nft lo0 ingress enforcement moved into the AF_XDP helper.
 - The event-stream wire format is a helper/daemon lockstep contract. For
   `MSG_FILTER_LOG`, the RT_FLOW reason byte carries the source label above;
   close events continue to interpret the same byte as a close reason. This is
