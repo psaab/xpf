@@ -30,7 +30,9 @@ runtime lease reuse, and operator-visible allocation failures.
   instead of wrapping into an already-owned port. Userspace status, CLI summary,
   and Prometheus expose live-flow, used-port, persistent-lease, allocation,
   reuse, and exhaustion counters.
-- The supported persistent-NAT slice is helper-local and non-HA. Compatible
+- The supported persistent-NAT slice is helper-local and non-HA. Rules that
+  reference the same concrete pool share one allocator and one lease table, so
+  duplicate rules cannot overbook the same translated tuple. Compatible
   in-process snapshot refreshes preserve allocator state, but helper restart
   does not. HA configs that use a persistent source-NAT pool are gated because
   persistent leases are not synchronized.
@@ -76,7 +78,7 @@ make rule ordering dependent on address-family mistakes. Operators should split
 IPv4 and IPv6 pool rules explicitly when they want independent behavior.
 
 Allocator exhaustion is now a real runtime condition. The allocator owns a
-bounded per-rule live-flow table, a translated-tuple owner table, and a
+bounded per-pool live-flow table, a translated-tuple owner table, and a
 persistent source-tuple lease table. When no translated port can be claimed for
 the matched pool family, the packet fails closed with
 `source_nat_pool_exhausted` before session creation or forwarding.
@@ -184,12 +186,17 @@ reverse-session traffic are not claimed by this slice.
 
 ## Port Allocation and Counters
 
-Userspace pool ports are selected from per-address atomic counters, but
-translated tuple ownership is now recorded before a session is installed.
+Tracked userspace flow allocations use per-address cursors plus recycled-port
+stacks, and translated tuple ownership is recorded before a session is
+installed. The remaining tupleless diagnostic lookup path still uses
+per-address atomic counters because it does not create a tracked session.
 
-The per-rule allocator state is bounded by the smaller of pool port capacity and
+The per-pool allocator state is bounded by the smaller of pool port capacity and
 `262144` tracked live flows. This prevents attacker-controlled unbounded growth
-in the packet path. The allocator reports exhaustion when:
+in the packet path. Fresh port claims use a per-address cursor and a recycled
+port stack, and persistent lease expiry uses an expiry heap, so near-full
+allocation and timeout cleanup do not scan the whole port range or lease map on
+every new flow. The allocator reports exhaustion when:
 
 - the selected address-persistent pool address has no free port;
 - a non-address-persistent family has no free port on any family-compatible
@@ -207,8 +214,9 @@ Status and Prometheus expose:
 
 ## Hot-Path Invariants
 
-- No global allocator lock on the packet path. Each source-NAT pool rule owns
-  its own allocator lock and bounded maps.
+- No global allocator lock on the packet path. Each concrete source-NAT pool
+  owns its own allocator lock and bounded maps. Multiple rules that reference
+  the same pool share that allocator.
 - Port-range validation happens before any `u16` truncation.
 - A pool-mode rule without a usable pool is fail-closed at the four runtime
   call sites listed above. The packet is dropped and a recent exception is
@@ -252,6 +260,10 @@ Covered by #1385 and this closeout:
 - Cargo: persistent source tuple is reassigned after release plus inactivity
   timeout.
 - Cargo: live allocator exhaustion increments per-pool status counters.
+- Cargo: duplicate source-NAT rules that reference the same concrete pool share
+  one allocator, so a one-port pool cannot be double-booked across rules.
+- Cargo: failed source-NAT session installation rolls back the live translated
+  tuple, making the port immediately available for a later flow.
 - Cargo: protocol round-trip covers persistent source-NAT snapshot/status
   fields.
 

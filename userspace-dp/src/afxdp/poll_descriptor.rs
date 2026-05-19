@@ -1603,7 +1603,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             is_reverse: false,
                                             nat64_reverse: nat64_info,
                                         };
-                                        if track_in_userspace
+                                        let forward_installed = track_in_userspace
                                             && sessions.install_with_protocol_with_origin(
                                                 flow.forward_key.clone(),
                                                 decision,
@@ -1612,8 +1612,8 @@ pub(super) fn poll_binding_process_descriptor(
                                                 now_ns,
                                                 meta.protocol,
                                                 meta.tcp_flags,
-                                            )
-                                        {
+                                            );
+                                        if forward_installed {
                                             created += 1;
                                             let forward_entry = SyncedSessionEntry {
                                                 key: flow.forward_key.clone(),
@@ -1658,6 +1658,14 @@ pub(super) fn poll_binding_process_descriptor(
                                                     now_ns,
                                                 );
                                             }
+                                        } else {
+                                            release_source_nat_allocation(
+                                                &worker_ctx.forwarding.source_nat_rules,
+                                                &flow.forward_key,
+                                                decision.nat,
+                                                false,
+                                                now_ns,
+                                            );
                                         }
                                         let reverse_resolution = reverse_resolution_for_session(
                                             worker_ctx.forwarding,
@@ -2524,15 +2532,17 @@ pub(super) fn poll_binding_process_descriptor(
                                         packet_fabric_ingress,
                                         pending_decision,
                                     );
-                                    if sessions.install_with_protocol_with_origin(
-                                        flow.forward_key.clone(),
-                                        pending_decision,
-                                        sess_meta.clone(),
-                                        SessionOrigin::MissingNeighborSeed,
-                                        now_ns,
-                                        meta.protocol,
-                                        meta.tcp_flags,
-                                    ) {
+                                    let pending_installed =
+                                        sessions.install_with_protocol_with_origin(
+                                            flow.forward_key.clone(),
+                                            pending_decision,
+                                            sess_meta.clone(),
+                                            SessionOrigin::MissingNeighborSeed,
+                                            now_ns,
+                                            meta.protocol,
+                                            meta.tcp_flags,
+                                        );
+                                    if pending_installed {
                                         let entry = SyncedSessionEntry {
                                             key: flow.forward_key.clone(),
                                             decision: pending_decision,
@@ -2568,6 +2578,14 @@ pub(super) fn poll_binding_process_descriptor(
                                             pending_decision.nat,
                                         );
                                         telemetry.counters.session_creates += 1;
+                                    } else {
+                                        release_source_nat_allocation(
+                                            &worker_ctx.forwarding.source_nat_rules,
+                                            &flow.forward_key,
+                                            pending_decision.nat,
+                                            false,
+                                            now_ns,
+                                        );
                                     }
                                 }
                                 // Buffer the packet. The ICMP probe resolves ARP

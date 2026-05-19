@@ -977,6 +977,99 @@ fn pool_snat_allocator_exhausted_counter_increments() {
 }
 
 #[test]
+fn pool_snat_shared_pool_exhaustion_crosses_rules() {
+    let rules = parse_source_nat_rules(&[
+        SourceNATRuleSnapshot {
+            name: "rule-a".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.1.0/24".to_string()],
+            pool_name: "shared-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40000,
+            ..SourceNATRuleSnapshot::default()
+        },
+        SourceNATRuleSnapshot {
+            name: "rule-b".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.2.0/24".to_string()],
+            pool_name: "shared-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40000,
+            ..SourceNATRuleSnapshot::default()
+        },
+    ]);
+
+    let first = match_source_nat_result_for_tuple(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        6,
+        10000,
+        53,
+        None,
+        None,
+        1,
+    );
+    assert!(matches!(first, SourceNatLookup::Matched(_)));
+
+    let second = match_source_nat_result_for_tuple(
+        &rules,
+        "lan",
+        "wan",
+        "10.0.2.100".parse().unwrap(),
+        "1.1.1.1".parse().unwrap(),
+        6,
+        10001,
+        53,
+        None,
+        None,
+        2,
+    );
+    assert_eq!(
+        second,
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            rule_name: "rule-b".to_string(),
+            pool_name: "shared-pool".to_string(),
+            reason: SourceNatFailureReason::AllocatorExhausted,
+        })
+    );
+
+    let status = source_nat_pool_statuses(&rules);
+    assert_eq!(status[0].used_ports, 1);
+    assert_eq!(status[1].used_ports, 1);
+    assert_eq!(status[0].exhaustion_total, 1);
+    assert_eq!(status[1].exhaustion_total, 1);
+}
+
+#[test]
+fn pool_snat_release_after_failed_session_install_frees_tuple() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "tiny-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "tiny-pool".to_string(),
+        pool_addresses: vec!["203.0.113.10".to_string()],
+        port_low: 40000,
+        port_high: 40000,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let first = expect_snat_decision(tuple_snat_lookup(&rules, 10000, "8.8.8.8", 53, 1));
+    release_source_nat_allocation(&rules, &session_key(10000, "8.8.8.8", 53), first, false, 2);
+
+    let second = expect_snat_decision(tuple_snat_lookup(&rules, 10001, "1.1.1.1", 53, 3));
+    assert_eq!(second.rewrite_src, first.rewrite_src);
+    assert_eq!(second.rewrite_src_port, first.rewrite_src_port);
+}
+
+#[test]
 fn pool_snat_wrong_family_pool_fails_closed_before_later_rule() {
     let rules = parse_source_nat_rules(&[
         SourceNATRuleSnapshot {

@@ -5,6 +5,8 @@ use crate::{
 use ipnet::IpNet;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -142,7 +144,7 @@ impl SourceNatFlowKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct PersistentSourceKey {
     protocol: u8,
     src_ip: IpAddr,
@@ -201,7 +203,21 @@ struct PersistentLease {
 struct PortAllocatorLiveState {
     live_by_flow: FxHashMap<SourceNatFlowKey, LiveAllocation>,
     owner_by_translated: FxHashMap<TranslatedTuple, AllocationOwner>,
+    addr_index_by_translated: FxHashMap<TranslatedTuple, usize>,
     persistent_by_source: FxHashMap<PersistentSourceKey, PersistentLease>,
+    lease_expirations: BinaryHeap<Reverse<(u64, PersistentSourceKey)>>,
+    next_port_offset_by_addr: Vec<u32>,
+    recycled_ports_by_addr: Vec<Vec<u16>>,
+}
+
+impl PortAllocatorLiveState {
+    fn new(addr_count: usize) -> Self {
+        Self {
+            next_port_offset_by_addr: vec![0; addr_count],
+            recycled_ports_by_addr: vec![Vec::new(); addr_count],
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -222,7 +238,7 @@ struct PortAllocatorShared {
 /// Bounded pool-mode SNAT allocator.
 ///
 /// Address selection uses atomics for stable round-robin/sticky starting
-/// points; live translated tuple ownership is tracked under a per-rule mutex
+/// points; live translated tuple ownership is tracked under a per-pool mutex
 /// so ports are not reused while sessions are alive. Persistent NAT leases are
 /// keyed by source tuple and retained until their inactivity timeout after the
 /// last live flow releases them.
@@ -262,7 +278,7 @@ impl PortAllocator {
                 counters,
                 addr_counter_v4: AtomicU32::new(0),
                 addr_counter_v6: AtomicU32::new(0),
-                live: Mutex::new(PortAllocatorLiveState::default()),
+                live: Mutex::new(PortAllocatorLiveState::new(num_addresses)),
                 allocations_total: AtomicU64::new(0),
                 reuses_total: AtomicU64::new(0),
                 exhaustion_total: AtomicU64::new(0),
@@ -356,9 +372,11 @@ impl PortAllocator {
                     if lease.active_flows > 0 || lease.expires_at_ns > now_ns {
                         let translated = lease.translated;
                         lease.active_flows = lease.active_flows.saturating_add(1);
-                        lease.expires_at_ns =
+                        let expires_at_ns =
                             now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
+                        lease.expires_at_ns = expires_at_ns;
                         reusable = Some(translated);
+                        live.lease_expirations.push(Reverse((expires_at_ns, key)));
                     } else {
                         expired = Some(lease.translated);
                     }
@@ -375,7 +393,7 @@ impl PortAllocator {
                     return Ok(translated);
                 }
                 if let Some(translated) = expired {
-                    live.owner_by_translated.remove(&translated);
+                    self.release_translated_locked(&mut live, translated);
                     live.persistent_by_source.remove(&key);
                 }
             }
@@ -399,16 +417,18 @@ impl PortAllocator {
                 continue;
             };
             if let Some(key) = persistent_key {
+                let expires_at_ns =
+                    now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
                 live.persistent_by_source.insert(
                     key,
                     PersistentLease {
                         translated,
-                        expires_at_ns: now_ns
-                            .saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC)),
+                        expires_at_ns,
                         timeout_ns: persistent_nat_timeout_ns.max(NS_PER_SEC),
                         active_flows: 1,
                     },
                 );
+                live.lease_expirations.push(Reverse((expires_at_ns, key)));
             }
             live.live_by_flow.insert(
                 flow,
@@ -439,23 +459,69 @@ impl PortAllocator {
             return None;
         }
         let range = (self.port_high as u32).saturating_sub(self.port_low as u32) + 1;
-        let counter = &self.shared.counters[addr_index];
-        for _ in 0..range {
-            let val = counter.fetch_add(1, Ordering::Relaxed);
+        let next_offset = &mut live.next_port_offset_by_addr[addr_index];
+        if *next_offset < range {
+            let port = self.port_low + *next_offset as u16;
+            *next_offset += 1;
             let translated = TranslatedTuple {
                 ip: translated_ip,
-                port: self.port_low + (val % range) as u16,
+                port,
             };
-            if live.owner_by_translated.contains_key(&translated) {
-                continue;
+            if self.assign_owner_locked(live, addr_index, translated, flow, persistent_key) {
+                return Some(translated);
             }
-            let owner = persistent_key
-                .map(AllocationOwner::Persistent)
-                .unwrap_or(AllocationOwner::Flow(flow));
-            live.owner_by_translated.insert(translated, owner);
-            return Some(translated);
+        }
+
+        while let Some(port) = live.recycled_ports_by_addr[addr_index].pop() {
+            let translated = TranslatedTuple {
+                ip: translated_ip,
+                port,
+            };
+            if self.assign_owner_locked(live, addr_index, translated, flow, persistent_key) {
+                return Some(translated);
+            }
         }
         None
+    }
+
+    fn assign_owner_locked(
+        &self,
+        live: &mut PortAllocatorLiveState,
+        addr_index: usize,
+        translated: TranslatedTuple,
+        flow: SourceNatFlowKey,
+        persistent_key: Option<PersistentSourceKey>,
+    ) -> bool {
+        if live.owner_by_translated.contains_key(&translated) {
+            return false;
+        }
+        let owner = persistent_key
+            .map(AllocationOwner::Persistent)
+            .unwrap_or(AllocationOwner::Flow(flow));
+        live.owner_by_translated.insert(translated, owner);
+        live.addr_index_by_translated.insert(translated, addr_index);
+        true
+    }
+
+    fn release_translated_locked(
+        &self,
+        live: &mut PortAllocatorLiveState,
+        translated: TranslatedTuple,
+    ) -> bool {
+        if live.owner_by_translated.remove(&translated).is_none() {
+            return false;
+        }
+        let Some(addr_index) = live.addr_index_by_translated.remove(&translated) else {
+            return true;
+        };
+        if addr_index >= live.recycled_ports_by_addr.len() {
+            return true;
+        }
+        if translated.port < self.port_low || translated.port > self.port_high {
+            return true;
+        }
+        live.recycled_ports_by_addr[addr_index].push(translated.port);
+        true
     }
 
     fn release_flow(
@@ -475,10 +541,12 @@ impl PortAllocator {
         if let Some(key) = existing.persistent_key {
             if let Some(lease) = live.persistent_by_source.get_mut(&key) {
                 lease.active_flows = lease.active_flows.saturating_sub(1);
-                lease.expires_at_ns = now_ns.saturating_add(lease.timeout_ns);
+                let expires_at_ns = now_ns.saturating_add(lease.timeout_ns);
+                lease.expires_at_ns = expires_at_ns;
+                live.lease_expirations.push(Reverse((expires_at_ns, key)));
             }
         } else {
-            live.owner_by_translated.remove(&translated);
+            self.release_translated_locked(&mut live, translated);
         }
         self.gc_expired_locked(&mut live, now_ns);
         true
@@ -501,19 +569,22 @@ impl PortAllocator {
         if now_ns == 0 {
             return;
         }
-        let expired = live
-            .persistent_by_source
-            .iter()
-            .filter_map(|(key, lease)| {
-                (lease.active_flows == 0 && lease.expires_at_ns <= now_ns)
-                    .then_some((*key, lease.translated))
-            })
-            .collect::<Vec<_>>();
-        for (key, translated) in expired {
+        while let Some(Reverse((expires_at_ns, key))) = live.lease_expirations.peek().copied() {
+            if expires_at_ns > now_ns {
+                break;
+            }
+            live.lease_expirations.pop();
+            let Some(lease) = live.persistent_by_source.get(&key).copied() else {
+                continue;
+            };
+            if lease.active_flows != 0 || lease.expires_at_ns != expires_at_ns {
+                continue;
+            }
+            let translated = lease.translated;
             live.persistent_by_source.remove(&key);
             match live.owner_by_translated.get(&translated) {
                 Some(AllocationOwner::Persistent(owner)) if *owner == key => {
-                    live.owner_by_translated.remove(&translated);
+                    self.release_translated_locked(live, translated);
                 }
                 _ => {}
             }
@@ -589,6 +660,38 @@ pub(crate) struct SourceNatRule {
     pub(crate) pool_allocator: PortAllocator,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct SourceNatPoolAllocatorKey {
+    pool_name: String,
+    pool_addresses_v4: Vec<Ipv4Addr>,
+    pool_addresses_v6: Vec<Ipv6Addr>,
+    port_low: u16,
+    port_high: u16,
+    address_persistent: bool,
+    persistent_nat: bool,
+    persistent_nat_permit_any_remote_host: bool,
+    persistent_nat_inactivity_timeout_secs: i64,
+}
+
+impl SourceNatRule {
+    fn allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
+        let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
+        (self.pool_mode && total_pool > 0 && self.pool_failure.is_none()).then(|| {
+            SourceNatPoolAllocatorKey {
+                pool_name: self.pool_name.clone(),
+                pool_addresses_v4: self.pool_addresses_v4.clone(),
+                pool_addresses_v6: self.pool_addresses_v6.clone(),
+                port_low: self.pool_allocator.port_low,
+                port_high: self.pool_allocator.port_high,
+                address_persistent: self.address_persistent,
+                persistent_nat: self.persistent_nat,
+                persistent_nat_permit_any_remote_host: self.persistent_nat_permit_any_remote_host,
+                persistent_nat_inactivity_timeout_secs: self.persistent_nat_inactivity_timeout_secs,
+            }
+        })
+    }
+}
+
 impl SourceNatRule {
     fn matches(&self, from_zone: &str, to_zone: &str, src_ip: IpAddr, dst_ip: IpAddr) -> bool {
         if !self.from_zone.is_empty() && self.from_zone != from_zone {
@@ -619,7 +722,17 @@ pub(crate) fn parse_source_nat_rules_with_previous(
     previous: Option<&[SourceNatRule]>,
 ) -> Vec<SourceNatRule> {
     let mut out = Vec::with_capacity(snaps.len());
-    let mut used_previous = vec![false; previous.map(|p| p.len()).unwrap_or(0)];
+    let mut previous_allocators = FxHashMap::<SourceNatPoolAllocatorKey, PortAllocator>::default();
+    if let Some(prev_rules) = previous {
+        for prev in prev_rules {
+            if let Some(key) = prev.allocator_key() {
+                previous_allocators
+                    .entry(key)
+                    .or_insert_with(|| prev.pool_allocator.clone());
+            }
+        }
+    }
+    let mut pool_allocators = FxHashMap::<SourceNatPoolAllocatorKey, PortAllocator>::default();
     for snap in snaps {
         let timeout_secs = if snap.persistent_nat_inactivity_timeout > 0 {
             snap.persistent_nat_inactivity_timeout
@@ -698,12 +811,16 @@ pub(crate) fn parse_source_nat_rules_with_previous(
         if total_pool > 0 {
             rule.pool_allocator = PortAllocator::new(total_pool, port_low, port_high);
         }
-        if let Some(prev_rules) = previous {
-            if let Some((idx, prev_rule)) = prev_rules.iter().enumerate().find(|(idx, prev)| {
-                !used_previous[*idx] && source_nat_runtime_compatible(&rule, prev)
-            }) {
-                used_previous[idx] = true;
-                rule.pool_allocator = prev_rule.pool_allocator.clone();
+        if let Some(key) = rule.allocator_key() {
+            if let Some(existing) = pool_allocators.get(&key) {
+                rule.pool_allocator = existing.clone();
+            } else {
+                let allocator = previous_allocators
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| rule.pool_allocator.clone());
+                rule.pool_allocator = allocator.clone();
+                pool_allocators.insert(key, allocator);
             }
         }
         out.push(rule);
@@ -711,6 +828,7 @@ pub(crate) fn parse_source_nat_rules_with_previous(
     out
 }
 
+#[allow(dead_code)]
 fn source_nat_runtime_compatible(new_rule: &SourceNatRule, old_rule: &SourceNatRule) -> bool {
     new_rule.name == old_rule.name
         && new_rule.pool_name == old_rule.pool_name
