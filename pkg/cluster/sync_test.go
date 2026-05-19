@@ -562,6 +562,94 @@ func TestHandleMessageDeleteV4(t *testing.T) {
 	}
 }
 
+func TestHandleMessageDeleteV4RemovesCompanions(t *testing.T) {
+	forward := dataplane.SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 1},
+		DstIP:    [4]byte{172, 16, 80, 200},
+		SrcPort:  12345,
+		DstPort:  5201,
+	}
+	reverse := dataplane.SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{172, 16, 80, 200},
+		DstIP:    [4]byte{10, 0, 0, 1},
+		SrcPort:  5201,
+		DstPort:  12345,
+	}
+	const natIP = 0x2c0200c0
+	const natPort = 40443
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			forward: {
+				ReverseKey: reverse,
+				Flags:      dataplane.SessFlagSNAT,
+				NATSrcIP:   natIP,
+				NATSrcPort: natPort,
+			},
+			reverse: {IsReverse: 1},
+		},
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+
+	msg := encodeDeleteV4(forward)
+	ss.handleMessage(nil, syncMsgDeleteV4, msg[syncHeaderSize:])
+
+	if ss.stats.DeletesReceived.Load() != 1 {
+		t.Fatalf("DeletesReceived = %d, want 1", ss.stats.DeletesReceived.Load())
+	}
+	if _, ok := dp.v4sessions[forward]; ok {
+		t.Fatal("forward session still present")
+	}
+	if _, ok := dp.v4sessions[reverse]; ok {
+		t.Fatal("reverse session still present")
+	}
+	wantDNAT := dataplane.DNATKey{Protocol: 6, DstIP: natIP, DstPort: natPort}
+	if len(dp.deletedDNATV4) != 1 || dp.deletedDNATV4[0] != wantDNAT {
+		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNATV4, wantDNAT)
+	}
+}
+
+func TestHandleMessageDeleteV6RemovesCompanions(t *testing.T) {
+	forward := dataplane.SessionKeyV6{Protocol: 17, SrcPort: 12345, DstPort: 5201}
+	forward.SrcIP[15] = 1
+	forward.DstIP[15] = 2
+	reverse := dataplane.SessionKeyV6{Protocol: 17, SrcPort: 5201, DstPort: 12345}
+	reverse.SrcIP[15] = 2
+	reverse.DstIP[15] = 1
+	natIP := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99}
+	const natPort = 40443
+	dp := &mockSweepDP{
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			forward: {
+				ReverseKey: reverse,
+				Flags:      dataplane.SessFlagSNAT,
+				NATSrcIP:   natIP,
+				NATSrcPort: natPort,
+			},
+			reverse: {IsReverse: 1},
+		},
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+
+	msg := encodeDeleteV6(forward)
+	ss.handleMessage(nil, syncMsgDeleteV6, msg[syncHeaderSize:])
+
+	if ss.stats.DeletesReceived.Load() != 1 {
+		t.Fatalf("DeletesReceived = %d, want 1", ss.stats.DeletesReceived.Load())
+	}
+	if _, ok := dp.v6sessions[forward]; ok {
+		t.Fatal("forward session still present")
+	}
+	if _, ok := dp.v6sessions[reverse]; ok {
+		t.Fatal("reverse session still present")
+	}
+	wantDNAT := dataplane.DNATKeyV6{Protocol: 17, DstIP: natIP, DstPort: natPort}
+	if len(dp.deletedDNATV6) != 1 || dp.deletedDNATV6[0] != wantDNAT {
+		t.Fatalf("deleted DNATv6 = %+v, want [%+v]", dp.deletedDNATV6, wantDNAT)
+	}
+}
+
 // --- Sync sweep tests ---
 
 // mockSweepDP is a minimal mock for testing sync sweep.
