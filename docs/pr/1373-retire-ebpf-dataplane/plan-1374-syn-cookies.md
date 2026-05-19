@@ -33,11 +33,13 @@ SYN cookie behavior in `userspace-dp`.
   sync mirrors valid ACK, invalid ACK, and bypass deltas. Challenge decisions are
   deliberately not mapped to the legacy sent counter until bounded SYN-ACK TX
   exists.
-- This PR is therefore a SYN-cookie validation/admission runtime slice, not the
-  full SYN-ACK/RST TX implementation.
-- The userspace capability gate remains in place until bounded SYN-ACK TX, ACK
-  RST emission, HA-safe secret publication/cache survivability, sent/budget TX
-  counters, and integration/failover validation land.
+- The 2026-05-19 construction slice adds pure SYN-cookie SYN-ACK and validated
+  ACK RST frame builders. The builders swap Ethernet/IP/TCP identity, preserve
+  VLAN headers, emit minimal TCP replies, and recompute IPv4/IPv6 checksums
+  from scratch. This intentionally stops before TX-ring integration.
+- The userspace capability gate remains in place until bounded SYN-ACK TX,
+  bounded ACK RST emission, HA-safe secret publication/cache survivability,
+  sent/budget TX counters, and integration/failover validation land.
 
 ## Design
 
@@ -145,6 +147,8 @@ On returning ACK:
 - Cargo: `screen::syn_cookie_validated_cache_refresh_extends_ttl`.
 - Cargo: `screen::syn_cookie_ack_validation_accepts_previous_epoch_after_rotation`.
 - Cargo: `afxdp::poll_stages::session_miss_ack_stage_invokes_syn_cookie_runtime_validation`.
+- Cargo: `afxdp::frame::tests::syn_cookie_syn_ack_builder_swaps_tuple_and_preserves_vlan`.
+- Cargo: `afxdp::frame::tests::syn_cookie_ack_rst_builder_uses_received_ack_as_rst_seq`.
 - Cargo: `afxdp::tests::syn_cookie_counters_hot_path_accumulate_in_batch`.
 - Cargo: `afxdp::umem::tests::binding_live_snapshot_propagates_710_drop_counters`.
 - Cargo: `afxdp::coordinator::tests::refresh_bindings_bridges_v_min_counters_into_binding_status`.
