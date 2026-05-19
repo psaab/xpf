@@ -44,8 +44,8 @@ isolation. The current consumers are:
 | `pkg/api/server.go` (`Config.DP`, `Server.dp`) | REST handlers and metrics read sessions, counters, events, NAT/policy/filter state, and userspace status through `dataplane.DataPlane`. | `Telemetry`, `SessionStore`, plus an explicit userspace status/control extension kept out of the root interface. |
 | `pkg/grpcapi/server.go` (`Config.DP`, `Server.dp`) | gRPC show/monitor/control paths read generic counters and type-assert userspace status/control DTOs. | `Telemetry`, `SessionStore`, `LinkController`, and a backend-specific userspace control adapter. |
 | `pkg/cli/cli.go` (`CLI.dp`) | Operational commands read sessions/counters/events and some userspace-only status surfaces. | CLI should consume gRPC for remote operation; in-process CLI should use `Telemetry`, `SessionStore`, and explicit optional userspace diagnostic interfaces. |
-| `pkg/conntrack/gc.go` (`GC.dp`) | GC iterates/deletes BPF session maps and pushes per-IP session-limit state. | `SessionStore` for iteration/delete/count. Per-IP screen/session-limit publish remains backend-private config/state work. |
-| `pkg/cluster/sync.go` (`SessionSync.dp`) | HA sync exports/imports sessions, installs cluster-synced entries, type-asserts userspace sweep-profile hooks, and stale-reconcile manually deletes reverse sessions plus DNAT companions. | `SessionStore` for install/delete/export/reconcile and a narrow `SessionDeltaSource` adapter hanging off the session domain. Companion reverse/NAT cleanup must be owned by the same session/NAT delete semantics as GC. |
+| `pkg/conntrack/gc.go` | GC used to iterate/delete BPF session maps and read raw global counters through `DataPlane`. | Now adapted at construction to `SessionStore` and `Telemetry`; expiry deletes use known-value batched companion deletes, and session-limit publish is the only remaining narrow eBPF writer. |
+| `pkg/cluster/sync.go` | HA sync used to export/import sessions, type-assert userspace sweep-profile hooks, and stale-reconcile with local reverse/DNAT cleanup. | Now adapted at construction to `SessionStore` and `Telemetry`; receive, sweep, bulk export, and stale reconcile use the session domain. Companion reverse/NAT cleanup is owned by the same delete semantics as GC. |
 | Daemon HA/fabric/apply code | Calls `UpdateRGActive`, `UpdateHAWatchdog`, `UpdateFabricFwd`, `UpdateFabricFwd1`, `SyncFabricState`, BPF writers, scheduler updates, and userspace link-cycle hooks. | `HAController`, `ConfigSink`, `LinkController`; BPF writers stay inside the eBPF backend. |
 | Metrics/API/CLI session and counter readers | Mix map-backed eBPF counters, helper JSON status, and userspace formatting DTOs. | `Telemetry` owns generic counters/events; userspace-only formatting remains an extension with adapter-local DTO conversion. |
 
@@ -193,6 +193,14 @@ type SessionStore interface {
 	PutClusterSyncedV6(dataplane.SessionKeyV6, dataplane.SessionValueV6) error
 	DeleteV4(dataplane.SessionKey) error
 	DeleteV6(dataplane.SessionKeyV6) error
+	DeleteKnownV4(dataplane.SessionKey, dataplane.SessionValue, DeleteReason) error
+	DeleteKnownV6(dataplane.SessionKeyV6, dataplane.SessionValueV6, DeleteReason) error
+	DeleteBatchKnownV4([]dataplane.SessionEntryV4, DeleteReason) (int, error)
+	DeleteBatchKnownV6([]dataplane.SessionEntryV6, DeleteReason) (int, error)
+	DeleteWithCompanionsV4(dataplane.SessionKey, DeleteReason) error
+	DeleteWithCompanionsV6(dataplane.SessionKeyV6, DeleteReason) error
+	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
+	SessionDeltas() runtime.SessionDeltaSource
 	Count() (v4, v6 int)
 	Clear() (v4, v6 int, err error)
 }
@@ -202,52 +210,47 @@ The eBPF implementation wraps `sessions` and `sessions_v6`. Userspace wraps
 the helper session socket/event stream and its Rust-owned session store. GC
 must depend on `SessionStore`, not raw BPF map iteration.
 
-GC migration is not only `ForEach` plus `Delete`. The current GC also owns
-side effects that must move to explicit domain methods:
+GC migration is not only `ForEach` plus `Delete`. The current GC used to own
+side effects that now move to explicit domain methods:
 
 - session-change gating reads `GlobalCtrSessionsNew` and
-  `GlobalCtrSessionsClosed`; this becomes `Telemetry.GlobalCounter` or a
-  `SessionStore.ChangeGeneration()` helper, not a raw dataplane call;
+  `GlobalCtrSessionsClosed`; this now uses `Telemetry.GlobalCounter`, not a
+  raw dataplane call;
 - per-IP session-limit counting publishes screen/session-limit maps after the
-  sweep; this becomes backend-private config/state publish on the eBPF backend
-  and a userspace snapshot/control update on the userspace backend;
-- persistent-NAT preservation currently saves bindings before session delete;
-  `SessionStore.Delete*` must either perform the preservation atomically or
-  expose a `BeforeDelete` hook owned by the NAT/session domain;
-- DNAT reverse-entry cleanup currently calls `DeleteDNATEntry*`; delete
-  ownership must move into the backend session/NAT store so expiring a session
-  removes companion DNAT/NAT64 reverse state in the same generation; and
+  sweep; this remains a narrow compatibility publisher while backend-private
+  config/state ownership is split out;
+- persistent-NAT preservation now runs inside the known-value delete path
+  before the session disappears;
+- DNAT reverse-entry cleanup now runs inside the backend session/NAT store so
+  expiring a session removes companion DNAT/NAT64 reverse state in the same
+  generation; and
 - GC stats must still count v4/v6 entries and expired deletes without assuming
   BPF map iteration order.
 
-Cluster sync has the same delete problem through a different path. The stale
-bulk reconcile path in `pkg/cluster/sync.go` currently iterates local sessions,
-finds peer-owned entries absent from the received bulk set, then manually
-deletes:
-
-- the forward session;
-- the reverse session referenced by `SessionValue.ReverseKey`; and
-- companion DNAT/NAT64 reverse entries via `DeleteDNATEntry*`.
-
-That logic must not remain a separate BPF-shaped cleanup copy after the split.
-Move it behind a session-domain operation such as:
+Cluster sync had the same delete problem through a different path: stale bulk
+reconcile manually deleted the forward session, reverse key, and companion
+DNAT/NAT64 reverse entries. That logic now lives behind session-domain
+operations:
 
 ```go
 type SessionStore interface {
 	// ...
+	DeleteBatchKnownV4([]dataplane.SessionEntryV4, DeleteReason) (int, error)
+	DeleteBatchKnownV6([]dataplane.SessionEntryV6, DeleteReason) (int, error)
 	DeleteWithCompanionsV4(dataplane.SessionKey, DeleteReason) error
 	DeleteWithCompanionsV6(dataplane.SessionKeyV6, DeleteReason) error
 	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
 }
 ```
 
-The exact method shape can change during implementation, but the invariant is
-fixed: GC expiry and cluster stale reconciliation must use the same backend
-delete semantics so reverse-key cleanup, DNAT/NAT64 cleanup, persistent-NAT
-preservation, and generation accounting cannot drift. Existing
-`pkg/cluster/sync_test.go` mocks that record `DeleteDNATEntry*` as no-op
-callbacks are not sufficient; they let the split compile while preserving the
-duplicated cleanup path.
+The invariant is fixed: GC expiry and cluster stale reconciliation must use the
+same known-value backend delete semantics so reverse-key cleanup, DNAT/NAT64
+cleanup, persistent-NAT preservation, batching, and generation accounting
+cannot drift. Key-only `DeleteWithCompanions*` remains for explicit HA delete
+messages, but GC and stale reconciliation must not re-read the session value
+after iteration. Existing `pkg/cluster/sync_test.go` mocks that record
+`DeleteDNATEntry*` as no-op callbacks are no longer sufficient by themselves;
+tests must also drive `SessionStore` companion deletion.
 
 Userspace session deltas remain an optional extension until the generic event
 stream can carry the same information:
@@ -583,10 +586,22 @@ interface in place and adds the new contract beside it:
   `dataplane.SessionStore.ReconcileClusterBulk`, whose companion-delete path
   owns forward, reverse, and DNAT/DNATv6 cleanup. A canary fails if
   `pkg/cluster/sync.go` reintroduces local `DeleteDNATEntry*` cleanup.
+- GC now routes through `SessionStore` and `Telemetry`. The legacy
+  `NewGC(dataplane.DataPlane, ...)` constructor is only an adapter boundary;
+  the sweep body uses session-domain iteration, domain-owned
+  known-value batched companion deletes, and telemetry global counters. A
+  domain-only unit test pins that GC can expire sessions without a
+  `DataPlane`.
+- Session sync now routes receive, sweep, bulk export, and stale-reconcile
+  through `SessionStore`/`Telemetry`. The legacy constructors still accept a
+  `DataPlane` for compatibility, but immediately adapt it with
+  `SessionStoreOf`/`TelemetryOf`.
 
 Remaining Phase 1 work is still explicit: daemon/API/gRPC/CLI operator metadata
 callers now read `LastApplyResult()` and a canary prevents those packages from
-regressing to `LastCompileResult()`, but session, counter, GC, and control paths
-still need to move from BPF-shaped map methods to `SessionStore`/`Telemetry` and
-the other domain interfaces. The legacy `DataPlane` method-count canary can only
-flip after those callers no longer need the BPF-shaped surface.
+regressing to `LastCompileResult()`. GC and HA session sync have moved to the
+runtime session/telemetry domains. Remaining work is API/gRPC/CLI session and
+counter readers, daemon control paths, userspace-specific diagnostic/control
+extensions, and the final userspace `inner *dataplane.Manager` shim removal.
+The legacy `DataPlane` method-count canary can only flip after those callers no
+longer need the BPF-shaped surface.

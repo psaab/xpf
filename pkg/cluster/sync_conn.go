@@ -26,6 +26,57 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 	}
 	slog.Debug("cluster sync: repeated synced-session helper mirror failure", "af", af, "err", err)
 }
+
+func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val dataplane.SessionValue) {
+	if s.sessions == nil {
+		return
+	}
+	if err := s.sessions.PutClusterSyncedV4(key, val); err == nil {
+		s.stats.SessionsInstalled.Add(1)
+		s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, nil)
+		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
+			s.OnForwardSessionInstalled()
+		}
+	} else {
+		s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, err)
+	}
+}
+
+func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
+	if s.sessions == nil {
+		return
+	}
+	if err := s.sessions.PutClusterSyncedV6(key, val); err == nil {
+		s.stats.SessionsInstalled.Add(1)
+		s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, nil)
+		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
+			s.OnForwardSessionInstalled()
+		}
+	} else {
+		s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, err)
+	}
+}
+
+func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey) {
+	if s.sessions == nil {
+		return
+	}
+	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale); err != nil {
+		s.stats.Errors.Add(1)
+		slog.Warn("cluster sync: failed to delete v4 session", "err", err)
+	}
+}
+
+func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6) {
+	if s.sessions == nil {
+		return
+	}
+	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale); err != nil {
+		s.stats.Errors.Add(1)
+		slog.Warn("cluster sync: failed to delete v6 session", "err", err)
+	}
+}
+
 func shouldInitiateFabricDial(localAddr, peerAddr string) bool {
 	local, err := netip.ParseAddrPort(localAddr)
 	if err != nil {
@@ -275,7 +326,12 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 	slog.Info("cluster sync: sweep started")
 }
 func (s *SessionSync) sweepIntervals() (time.Duration, time.Duration) {
-	return sweepIntervalsForDataPlane(s.dp)
+	if s.sessions != nil {
+		if source := s.sessions.SessionDeltas(); source != nil {
+			return sweepIntervalsForDataPlane(source)
+		}
+	}
+	return sweepIntervalsForDataPlane(nil)
 }
 func sweepIntervalsForDataPlane(dp any) (time.Duration, time.Duration) {
 	activeInterval := time.Second
@@ -320,25 +376,27 @@ func (s *SessionSync) syncSweep() int {
 	if !s.stats.Connected.Load() {
 		return 0
 	}
-	if s.dp == nil {
+	if s.sessions == nil {
 		return 0
 	}
 	if s.lastSweepEmpty && !s.syncBackfillNeeded.Load() {
-		newCtr, err1 := s.dp.ReadGlobalCounter(dataplane.GlobalCtrSessionsNew)
-		closedCtr, err2 := s.dp.ReadGlobalCounter(dataplane.GlobalCtrSessionsClosed)
-		if err1 == nil && err2 == nil && newCtr == s.lastNewCounter && closedCtr == s.lastClosedCounter {
-			s.lastSweepTime = monotonicSeconds()
-			return 0
+		if s.telemetry != nil {
+			newCtr, err1 := s.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsNew)
+			closedCtr, err2 := s.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsClosed)
+			if err1 == nil && err2 == nil && newCtr == s.lastNewCounter && closedCtr == s.lastClosedCounter {
+				s.lastSweepTime = monotonicSeconds()
+				return 0
+			}
+			s.lastNewCounter = newCtr
+			s.lastClosedCounter = closedCtr
 		}
-		s.lastNewCounter = newCtr
-		s.lastClosedCounter = closedCtr
 	}
 	threshold := s.lastSweepTime
 	now := monotonicSeconds()
 	var count int
 	var overflow bool
 	replaying := s.syncBackfillNeeded.Load()
-	s.dp.BatchIterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
+	if err := s.sessions.ForEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		if val.IsReverse != 0 {
 			return true
 		}
@@ -351,8 +409,12 @@ func (s *SessionSync) syncSweep() int {
 			}
 		}
 		return true
-	})
-	s.dp.BatchIterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+	}); err != nil {
+		slog.Warn("cluster sync: sweep v4 iteration failed", "err", err)
+		s.stats.Errors.Add(1)
+		return count
+	}
+	if err := s.sessions.ForEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		if val.IsReverse != 0 {
 			return true
 		}
@@ -365,7 +427,11 @@ func (s *SessionSync) syncSweep() int {
 			}
 		}
 		return true
-	})
+	}); err != nil {
+		slog.Warn("cluster sync: sweep v6 iteration failed", "err", err)
+		s.stats.Errors.Add(1)
+		return count
+	}
 	if overflow {
 		s.syncBackfillNeeded.Store(true)
 		slog.Warn("cluster sync: sweep queue overflow, replaying previous window", "threshold", threshold, "queued", count, "queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
@@ -377,9 +443,9 @@ func (s *SessionSync) syncSweep() int {
 	}
 	s.lastSweepTime = now
 	s.lastSweepEmpty = (count == 0)
-	if count == 0 {
-		newCtr, err1 := s.dp.ReadGlobalCounter(dataplane.GlobalCtrSessionsNew)
-		closedCtr, err2 := s.dp.ReadGlobalCounter(dataplane.GlobalCtrSessionsClosed)
+	if count == 0 && s.telemetry != nil {
+		newCtr, err1 := s.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsNew)
+		closedCtr, err2 := s.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsClosed)
 		if err1 == nil && err2 == nil {
 			s.lastNewCounter = newCtr
 			s.lastClosedCounter = closedCtr
@@ -694,7 +760,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				slog.Info("cluster sync: bulk receive progress", "epoch", epoch, "sessions", count, "type", "v4", "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 			}
 		}
-		if s.dp != nil {
+		if s.sessions != nil {
 			if key, val, ok := decodeSessionV4Payload(payload); ok {
 				if val.IsReverse == 0 {
 					s.bulkMu.Lock()
@@ -706,57 +772,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				offset := s.peerClockOffset.Load()
 				val.Created = rebaseTimestamp(val.Created, offset)
 				val.LastSeen = rebaseTimestamp(val.LastSeen, offset)
-				if installer, ok := s.dp.(clusterSyncedSessionInstaller); ok {
-					if err := installer.SetClusterSyncedSessionV4(key, val); err == nil {
-						s.stats.SessionsInstalled.Add(1)
-						s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, nil)
-						if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
-							s.OnForwardSessionInstalled()
-						}
-					} else {
-						s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, err)
-					}
-				} else {
-					val.FibIfindex = 0
-					val.FibVlanID = 0
-					val.FibDmac = [6]byte{}
-					val.FibSmac = [6]byte{}
-					val.FibGen = 0
-					if err := s.dp.SetSessionV4(key, val); err == nil {
-						s.stats.SessionsInstalled.Add(1)
-						if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
-							s.OnForwardSessionInstalled()
-						}
-					}
-				}
-				if val.IsReverse == 0 && val.ReverseKey.Protocol != 0 {
-					revVal := val
-					revVal.IsReverse = 1
-					revVal.ReverseKey = key
-					revVal.IngressZone = val.EgressZone
-					revVal.EgressZone = val.IngressZone
-					if installer, ok := s.dp.(clusterSyncedSessionInstaller); ok {
-						if err := installer.SetClusterSyncedSessionV4(val.ReverseKey, revVal); err != nil {
-							slog.Warn("cluster sync: failed to create reverse session", "err", err)
-						}
-					} else {
-						revVal.FibIfindex = 0
-						revVal.FibVlanID = 0
-						revVal.FibDmac = [6]byte{}
-						revVal.FibSmac = [6]byte{}
-						revVal.FibGen = 0
-						if err := s.dp.SetSessionV4(val.ReverseKey, revVal); err != nil {
-							slog.Warn("cluster sync: failed to create reverse session", "err", err)
-						}
-					}
-				}
-				if val.IsReverse == 0 && val.Flags&dataplane.SessFlagSNAT != 0 && val.Flags&dataplane.SessFlagStaticNAT == 0 {
-					dnatKey := dataplane.DNATKey{Protocol: key.Protocol, DstIP: val.NATSrcIP, DstPort: val.NATSrcPort}
-					dnatVal := dataplane.DNATValue{NewDstIP: binary.NativeEndian.Uint32(key.SrcIP[:]), NewDstPort: key.SrcPort}
-					if err := s.dp.SetDNATEntry(dnatKey, dnatVal); err != nil {
-						slog.Warn("cluster sync: failed to create dnat_table entry", "err", err)
-					}
-				}
+				s.installClusterSyncedV4(key, val)
 			}
 		}
 	case syncMsgSessionV6:
@@ -770,7 +786,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				slog.Info("cluster sync: bulk receive progress", "epoch", epoch, "sessions", count, "type", "v6", "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 			}
 		}
-		if s.dp != nil {
+		if s.sessions != nil {
 			if key, val, ok := decodeSessionV6Payload(payload); ok {
 				if val.IsReverse == 0 {
 					s.bulkMu.Lock()
@@ -782,96 +798,30 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				offset := s.peerClockOffset.Load()
 				val.Created = rebaseTimestamp(val.Created, offset)
 				val.LastSeen = rebaseTimestamp(val.LastSeen, offset)
-				if installer, ok := s.dp.(clusterSyncedSessionInstaller); ok {
-					if err := installer.SetClusterSyncedSessionV6(key, val); err == nil {
-						s.stats.SessionsInstalled.Add(1)
-						s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, nil)
-						if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
-							s.OnForwardSessionInstalled()
-						}
-					} else {
-						s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, err)
-					}
-				} else {
-					val.FibIfindex = 0
-					val.FibVlanID = 0
-					val.FibDmac = [6]byte{}
-					val.FibSmac = [6]byte{}
-					val.FibGen = 0
-					if err := s.dp.SetSessionV6(key, val); err == nil {
-						s.stats.SessionsInstalled.Add(1)
-						if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
-							s.OnForwardSessionInstalled()
-						}
-					}
-				}
-				if val.IsReverse == 0 && val.ReverseKey.Protocol != 0 {
-					revVal := val
-					revVal.IsReverse = 1
-					revVal.ReverseKey = key
-					revVal.IngressZone = val.EgressZone
-					revVal.EgressZone = val.IngressZone
-					if installer, ok := s.dp.(clusterSyncedSessionInstaller); ok {
-						if err := installer.SetClusterSyncedSessionV6(val.ReverseKey, revVal); err != nil {
-							slog.Warn("cluster sync: failed to create reverse v6 session", "err", err)
-						}
-					} else {
-						revVal.FibIfindex = 0
-						revVal.FibVlanID = 0
-						revVal.FibDmac = [6]byte{}
-						revVal.FibSmac = [6]byte{}
-						revVal.FibGen = 0
-						if err := s.dp.SetSessionV6(val.ReverseKey, revVal); err != nil {
-							slog.Warn("cluster sync: failed to create reverse v6 session", "err", err)
-						}
-					}
-				}
-				if val.IsReverse == 0 && val.Flags&dataplane.SessFlagSNAT != 0 && val.Flags&dataplane.SessFlagStaticNAT == 0 {
-					dnatKey := dataplane.DNATKeyV6{Protocol: key.Protocol, DstIP: val.NATSrcIP, DstPort: val.NATSrcPort}
-					dnatVal := dataplane.DNATValueV6{NewDstIP: key.SrcIP, NewDstPort: key.SrcPort}
-					if err := s.dp.SetDNATEntryV6(dnatKey, dnatVal); err != nil {
-						slog.Warn("cluster sync: failed to create dnat_table_v6 entry", "err", err)
-					}
-				}
+				s.installClusterSyncedV6(key, val)
 			}
 		}
 	case syncMsgDeleteV4:
 		s.stats.DeletesReceived.Add(1)
-		if s.dp != nil && len(payload) >= 16 {
+		if s.sessions != nil && len(payload) >= 16 {
 			var key dataplane.SessionKey
 			copy(key.SrcIP[:], payload[0:4])
 			copy(key.DstIP[:], payload[4:8])
 			key.SrcPort = binary.LittleEndian.Uint16(payload[8:10])
 			key.DstPort = binary.LittleEndian.Uint16(payload[10:12])
 			key.Protocol = payload[12]
-			if val, err := s.dp.GetSessionV4(key); err == nil {
-				if val.ReverseKey.Protocol != 0 {
-					s.dp.DeleteSession(val.ReverseKey)
-				}
-				if val.IsReverse == 0 && val.Flags&dataplane.SessFlagSNAT != 0 && val.Flags&dataplane.SessFlagStaticNAT == 0 {
-					s.dp.DeleteDNATEntry(dataplane.DNATKey{Protocol: key.Protocol, DstIP: val.NATSrcIP, DstPort: val.NATSrcPort})
-				}
-			}
-			s.dp.DeleteSession(key)
+			s.deleteClusterSyncedV4(key)
 		}
 	case syncMsgDeleteV6:
 		s.stats.DeletesReceived.Add(1)
-		if s.dp != nil && len(payload) >= 40 {
+		if s.sessions != nil && len(payload) >= 40 {
 			var key dataplane.SessionKeyV6
 			copy(key.SrcIP[:], payload[0:16])
 			copy(key.DstIP[:], payload[16:32])
 			key.SrcPort = binary.LittleEndian.Uint16(payload[32:34])
 			key.DstPort = binary.LittleEndian.Uint16(payload[34:36])
 			key.Protocol = payload[36]
-			if val, err := s.dp.GetSessionV6(key); err == nil {
-				if val.ReverseKey.Protocol != 0 {
-					s.dp.DeleteSessionV6(val.ReverseKey)
-				}
-				if val.IsReverse == 0 && val.Flags&dataplane.SessFlagSNAT != 0 && val.Flags&dataplane.SessFlagStaticNAT == 0 {
-					s.dp.DeleteDNATEntryV6(dataplane.DNATKeyV6{Protocol: key.Protocol, DstIP: val.NATSrcIP, DstPort: val.NATSrcPort})
-				}
-			}
-			s.dp.DeleteSessionV6(key)
+			s.deleteClusterSyncedV6(key)
 		}
 	case syncMsgBulkStart:
 		var epoch uint64

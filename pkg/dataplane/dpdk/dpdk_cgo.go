@@ -41,6 +41,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"golang.org/x/sys/unix"
 )
 
 type platformState struct {
@@ -632,11 +633,47 @@ func (m *Manager) SetSessionV6(_ dataplane.SessionKeyV6, _ dataplane.SessionValu
 	return nil
 }
 
-func (m *Manager) GetSessionV4(_ dataplane.SessionKey) (dataplane.SessionValue, error) {
-	return dataplane.SessionValue{}, nil
+func (m *Manager) GetSessionV4(key dataplane.SessionKey) (dataplane.SessionValue, error) {
+	shm := m.platform.shm
+	if shm == nil {
+		return dataplane.SessionValue{}, fmt.Errorf("DPDK not initialized")
+	}
+	ck := C.struct_session_key{
+		src_ip:   C.uint32_t(bytesToUint32(key.SrcIP)),
+		dst_ip:   C.uint32_t(bytesToUint32(key.DstIP)),
+		src_port: C.uint16_t(key.SrcPort),
+		dst_port: C.uint16_t(key.DstPort),
+		protocol: C.uint8_t(key.Protocol),
+	}
+	pos := C.rte_hash_lookup(shm.sessions_v4, unsafe.Pointer(&ck))
+	if pos < 0 {
+		return dataplane.SessionValue{}, unix.ENOENT
+	}
+	sv := (*C.struct_session_value)(unsafe.Pointer(
+		uintptr(unsafe.Pointer(shm.session_values_v4)) +
+			uintptr(pos)*unsafe.Sizeof(C.struct_session_value{})))
+	return convertSessionValue(sv), nil
 }
-func (m *Manager) GetSessionV6(_ dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
-	return dataplane.SessionValueV6{}, nil
+
+func (m *Manager) GetSessionV6(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
+	shm := m.platform.shm
+	if shm == nil {
+		return dataplane.SessionValueV6{}, fmt.Errorf("DPDK not initialized")
+	}
+	var ck C.struct_session_key_v6
+	copyCBytes(ck.src_ip[:], key.SrcIP[:])
+	copyCBytes(ck.dst_ip[:], key.DstIP[:])
+	ck.src_port = C.uint16_t(key.SrcPort)
+	ck.dst_port = C.uint16_t(key.DstPort)
+	ck.protocol = C.uint8_t(key.Protocol)
+	pos := C.rte_hash_lookup(shm.sessions_v6, unsafe.Pointer(&ck))
+	if pos < 0 {
+		return dataplane.SessionValueV6{}, unix.ENOENT
+	}
+	sv := (*C.struct_session_value_v6)(unsafe.Pointer(
+		uintptr(unsafe.Pointer(shm.session_values_v6)) +
+			uintptr(pos)*unsafe.Sizeof(C.struct_session_value_v6{})))
+	return convertSessionValueV6(sv), nil
 }
 
 func (m *Manager) SessionCount() (int, int) {

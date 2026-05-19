@@ -8,6 +8,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"golang.org/x/sys/unix"
 )
 
 type platformState struct{}
@@ -156,10 +157,10 @@ func (m *Manager) SetSessionV6(_ dataplane.SessionKeyV6, _ dataplane.SessionValu
 }
 
 func (m *Manager) GetSessionV4(_ dataplane.SessionKey) (dataplane.SessionValue, error) {
-	return dataplane.SessionValue{}, nil
+	return dataplane.SessionValue{}, unix.ENOENT
 }
 func (m *Manager) GetSessionV6(_ dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
-	return dataplane.SessionValueV6{}, nil
+	return dataplane.SessionValueV6{}, unix.ENOENT
 }
 
 func (m *Manager) SessionCount() (int, int) { return 0, 0 }

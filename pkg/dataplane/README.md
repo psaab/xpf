@@ -28,6 +28,11 @@ sent while exact queues were still backlogged.
 - `DataPlane` — `dataplane.go`. Transitional abstract interface; #1381 will
   replace it with a small root interface plus config, HA, session, telemetry,
   and link-control domains.
+- `RuntimeDataPlane`, `ConfigSink`, `SessionStore`, `Telemetry`,
+  `HAController`, and `LinkController` — `apply.go` and `session_store.go`.
+  These are the #1381 split-domain interfaces. New daemon/runtime code should
+  depend on these domains rather than adding methods to the BPF-shaped
+  `DataPlane` root.
 - `Manager` — `loader.go`. eBPF implementation.
 - `New() *Manager` — `loader.go`.
 - `Compile(cfg *config.Config) (*CompileResult, error)` — multi-phase
@@ -40,6 +45,16 @@ sent while exact queues were still backlogged.
   policy-scheduler rule slots, and the per-interface networkd configs.
 - Session iteration: `IterateSessions`, `BatchIterateSessions`,
   `IterateSessionsV6`, `BatchIterateSessionsV6`.
+- Session domain adapters: `SessionStoreOf`, `TelemetryOf`, and
+  `NewDataPlaneSessionStore`. The generic `DataPlane` adapter preserves the
+  batch-iteration fast path and centralizes cluster/GC companion ownership:
+  cluster-synced forward installs create reverse and DNAT companions and roll
+  back session writes if companion creation fails. Iteration callers that
+  already have the session value must delete through `DeleteKnown*` or
+  `DeleteBatchKnown*` so reverse/DNAT cleanup uses the authoritative
+  iterator value, preserves persistent-NAT bindings, and keeps the batched
+  map-delete fast path. `DeleteWithCompanions*` is retained for key-only
+  HA delete messages.
 
 ## Callers
 

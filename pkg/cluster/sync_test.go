@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -503,8 +504,8 @@ func TestPeerIPsecSAs(t *testing.T) {
 
 func TestSetDataPlane(t *testing.T) {
 	ss := NewSessionSync(":4785", "10.0.0.2:4785", nil)
-	if ss.dp != nil {
-		t.Fatal("dp should be nil initially")
+	if ss.sessions != nil {
+		t.Fatal("session store should be nil initially")
 	}
 
 	// Simulate handleMessage without dp — should not crash
@@ -521,6 +522,35 @@ func TestSetDataPlane(t *testing.T) {
 	}
 }
 
+func TestInstallClusterSyncedV4DoesNotCountRolledBackCompanionFailure(t *testing.T) {
+	forward := dataplane.SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}
+	reverse := dataplane.SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 2}, DstIP: [4]byte{10, 0, 0, 1}, SrcPort: 80, DstPort: 1234}
+	reverseErr := errors.New("reverse install failed")
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{},
+		failSetV4:  map[dataplane.SessionKey]error{reverse: reverseErr},
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+
+	ss.installClusterSyncedV4(forward, dataplane.SessionValue{
+		State:      dataplane.SessStateEstablished,
+		ReverseKey: reverse,
+	})
+
+	if ss.stats.SessionsInstalled.Load() != 0 {
+		t.Fatalf("SessionsInstalled = %d, want 0 for rolled-back install", ss.stats.SessionsInstalled.Load())
+	}
+	if ss.stats.Errors.Load() != 1 {
+		t.Fatalf("Errors = %d, want 1", ss.stats.Errors.Load())
+	}
+	if _, ok := dp.v4sessions[forward]; ok {
+		t.Fatal("forward session remained after companion install rollback")
+	}
+	if _, ok := dp.v4sessions[reverse]; ok {
+		t.Fatal("reverse session unexpectedly installed")
+	}
+}
+
 func TestHandleMessageDeleteV4(t *testing.T) {
 	ss := NewSessionSync(":4785", "10.0.0.2:4785", nil)
 	// Without dp, should not crash
@@ -529,6 +559,94 @@ func TestHandleMessageDeleteV4(t *testing.T) {
 	ss.handleMessage(nil, syncMsgDeleteV4, msg[syncHeaderSize:])
 	if ss.stats.DeletesReceived.Load() != 1 {
 		t.Fatal("should count delete received")
+	}
+}
+
+func TestHandleMessageDeleteV4RemovesCompanions(t *testing.T) {
+	forward := dataplane.SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 1},
+		DstIP:    [4]byte{172, 16, 80, 200},
+		SrcPort:  12345,
+		DstPort:  5201,
+	}
+	reverse := dataplane.SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{172, 16, 80, 200},
+		DstIP:    [4]byte{10, 0, 0, 1},
+		SrcPort:  5201,
+		DstPort:  12345,
+	}
+	const natIP = 0x2c0200c0
+	const natPort = 40443
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			forward: {
+				ReverseKey: reverse,
+				Flags:      dataplane.SessFlagSNAT,
+				NATSrcIP:   natIP,
+				NATSrcPort: natPort,
+			},
+			reverse: {IsReverse: 1},
+		},
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+
+	msg := encodeDeleteV4(forward)
+	ss.handleMessage(nil, syncMsgDeleteV4, msg[syncHeaderSize:])
+
+	if ss.stats.DeletesReceived.Load() != 1 {
+		t.Fatalf("DeletesReceived = %d, want 1", ss.stats.DeletesReceived.Load())
+	}
+	if _, ok := dp.v4sessions[forward]; ok {
+		t.Fatal("forward session still present")
+	}
+	if _, ok := dp.v4sessions[reverse]; ok {
+		t.Fatal("reverse session still present")
+	}
+	wantDNAT := dataplane.DNATKey{Protocol: 6, DstIP: natIP, DstPort: natPort}
+	if len(dp.deletedDNATV4) != 1 || dp.deletedDNATV4[0] != wantDNAT {
+		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNATV4, wantDNAT)
+	}
+}
+
+func TestHandleMessageDeleteV6RemovesCompanions(t *testing.T) {
+	forward := dataplane.SessionKeyV6{Protocol: 17, SrcPort: 12345, DstPort: 5201}
+	forward.SrcIP[15] = 1
+	forward.DstIP[15] = 2
+	reverse := dataplane.SessionKeyV6{Protocol: 17, SrcPort: 5201, DstPort: 12345}
+	reverse.SrcIP[15] = 2
+	reverse.DstIP[15] = 1
+	natIP := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99}
+	const natPort = 40443
+	dp := &mockSweepDP{
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			forward: {
+				ReverseKey: reverse,
+				Flags:      dataplane.SessFlagSNAT,
+				NATSrcIP:   natIP,
+				NATSrcPort: natPort,
+			},
+			reverse: {IsReverse: 1},
+		},
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+
+	msg := encodeDeleteV6(forward)
+	ss.handleMessage(nil, syncMsgDeleteV6, msg[syncHeaderSize:])
+
+	if ss.stats.DeletesReceived.Load() != 1 {
+		t.Fatalf("DeletesReceived = %d, want 1", ss.stats.DeletesReceived.Load())
+	}
+	if _, ok := dp.v6sessions[forward]; ok {
+		t.Fatal("forward session still present")
+	}
+	if _, ok := dp.v6sessions[reverse]; ok {
+		t.Fatal("reverse session still present")
+	}
+	wantDNAT := dataplane.DNATKeyV6{Protocol: 17, DstIP: natIP, DstPort: natPort}
+	if len(dp.deletedDNATV6) != 1 || dp.deletedDNATV6[0] != wantDNAT {
+		t.Fatalf("deleted DNATv6 = %+v, want [%+v]", dp.deletedDNATV6, wantDNAT)
 	}
 }
 
@@ -543,6 +661,8 @@ type mockSweepDP struct {
 	sessionCounter uint64
 	deletedDNATV4  []dataplane.DNATKey
 	deletedDNATV6  []dataplane.DNATKeyV6
+	failSetV4      map[dataplane.SessionKey]error
+	failSetV6      map[dataplane.SessionKeyV6]error
 }
 
 func (m *mockSweepDP) ReadGlobalCounter(index uint32) (uint64, error) {
@@ -579,17 +699,20 @@ func (m *mockSweepDP) GetSessionV4(key dataplane.SessionKey) (dataplane.SessionV
 	if v, ok := m.v4sessions[key]; ok {
 		return v, nil
 	}
-	return dataplane.SessionValue{}, fmt.Errorf("not found")
+	return dataplane.SessionValue{}, ebpf.ErrKeyNotExist
 }
 
 func (m *mockSweepDP) GetSessionV6(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
 	if v, ok := m.v6sessions[key]; ok {
 		return v, nil
 	}
-	return dataplane.SessionValueV6{}, fmt.Errorf("not found")
+	return dataplane.SessionValueV6{}, ebpf.ErrKeyNotExist
 }
 
 func (m *mockSweepDP) SetSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) error {
+	if err, ok := m.failSetV4[key]; ok {
+		return err
+	}
 	if m.v4sessions == nil {
 		m.v4sessions = make(map[dataplane.SessionKey]dataplane.SessionValue)
 	}
@@ -598,6 +721,9 @@ func (m *mockSweepDP) SetSessionV4(key dataplane.SessionKey, val dataplane.Sessi
 }
 
 func (m *mockSweepDP) SetSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
+	if err, ok := m.failSetV6[key]; ok {
+		return err
+	}
 	if m.v6sessions == nil {
 		m.v6sessions = make(map[dataplane.SessionKeyV6]dataplane.SessionValueV6)
 	}
@@ -615,6 +741,24 @@ func (m *mockSweepDP) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 	return nil
 }
 
+func (m *mockSweepDP) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) {
+	for _, key := range keys {
+		if err := m.DeleteSession(key); err != nil {
+			return 0, err
+		}
+	}
+	return len(keys), nil
+}
+
+func (m *mockSweepDP) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int, error) {
+	for _, key := range keys {
+		if err := m.DeleteSessionV6(key); err != nil {
+			return 0, err
+		}
+	}
+	return len(keys), nil
+}
+
 func (m *mockSweepDP) DeleteDNATEntry(key dataplane.DNATKey) error {
 	m.deletedDNATV4 = append(m.deletedDNATV4, key)
 	return nil
@@ -624,6 +768,8 @@ func (m *mockSweepDP) DeleteDNATEntryV6(key dataplane.DNATKeyV6) error {
 	m.deletedDNATV6 = append(m.deletedDNATV6, key)
 	return nil
 }
+
+func (m *mockSweepDP) GetPersistentNAT() *dataplane.PersistentNATTable { return nil }
 
 func (m *mockSweepDP) SetDNATEntry(key dataplane.DNATKey, val dataplane.DNATValue) error {
 	return nil

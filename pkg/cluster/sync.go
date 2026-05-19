@@ -150,7 +150,8 @@ func (s TransferReadinessSnapshot) Reason() string {
 type SessionSync struct {
 	localAddr  string
 	peerAddr   string
-	dp         dataplane.DataPlane
+	sessions   dataplane.SessionStore
+	telemetry  dataplane.Telemetry
 	stats      SyncStats
 	mu         sync.Mutex
 	conn0      net.Conn
@@ -342,10 +343,9 @@ const deleteJournalDefaultCap = 10000
 
 // NewSessionSync creates a new single-fabric session synchronization manager.
 func NewSessionSync(localAddr, peerAddr string, dp dataplane.DataPlane) *SessionSync {
-	return &SessionSync{
+	s := &SessionSync{
 		localAddr:                  localAddr,
 		peerAddr:                   peerAddr,
-		dp:                         dp,
 		sendCh:                     make(chan []byte, 4096),
 		deleteJournalCap:           deleteJournalDefaultCap,
 		failoverWaiters:            make(map[int]failoverWaiter),
@@ -353,17 +353,18 @@ func NewSessionSync(localAddr, peerAddr string, dp dataplane.DataPlane) *Session
 		failoverBatchWaiters:       make(map[string]failoverWaiter),
 		failoverBatchCommitWaiters: make(map[string]failoverWaiter),
 	}
+	s.SetDataPlane(dp)
+	return s
 }
 
 // NewDualSessionSync creates a session sync manager with dual-fabric transport.
 // If local1 or peer1 is empty, it falls back to single-fabric behavior.
 func NewDualSessionSync(local, peer, local1, peer1 string, dp dataplane.DataPlane) *SessionSync {
-	return &SessionSync{
+	s := &SessionSync{
 		localAddr:                  local,
 		peerAddr:                   peer,
 		localAddr1:                 local1,
 		peerAddr1:                  peer1,
-		dp:                         dp,
 		sendCh:                     make(chan []byte, 4096),
 		deleteJournalCap:           deleteJournalDefaultCap,
 		failoverWaiters:            make(map[int]failoverWaiter),
@@ -371,6 +372,8 @@ func NewDualSessionSync(local, peer, local1, peer1 string, dp dataplane.DataPlan
 		failoverBatchWaiters:       make(map[string]failoverWaiter),
 		failoverBatchCommitWaiters: make(map[string]failoverWaiter),
 	}
+	s.SetDataPlane(dp)
+	return s
 }
 
 // SetVRFDevice sets the VRF device used for SO_BINDTODEVICE on sync sockets.
@@ -388,7 +391,20 @@ func (s *SessionSync) SetZoneRGMap(m map[uint16]int) {
 
 // SetDataPlane sets the dataplane used for installing received sessions.
 func (s *SessionSync) SetDataPlane(dp dataplane.DataPlane) {
-	s.dp = dp
+	if dp == nil {
+		s.SetRuntimeDomains(nil, nil)
+		return
+	}
+	s.SetRuntimeDomains(dataplane.SessionStoreOf(dp), dataplane.TelemetryOf(dp))
+}
+
+// SetRuntimeDomains sets the backend-neutral domains used by session sync.
+// The old BPF-shaped dataplane is intentionally kept outside SessionSync's
+// steady-state paths; callers that still own a legacy dataplane adapt it at the
+// boundary with dataplane.SessionStoreOf/TelemetryOf.
+func (s *SessionSync) SetRuntimeDomains(sessions dataplane.SessionStore, telemetry dataplane.Telemetry) {
+	s.sessions = sessions
+	s.telemetry = telemetry
 }
 
 // Stats returns a point-in-time snapshot of sync statistics.
@@ -536,7 +552,7 @@ func (s *SessionSync) reconcileStaleSessions() {
 		slog.Info("cluster sync: reconcile stale sessions skipped (empty bulk)")
 		return
 	}
-	if s.dp == nil {
+	if s.sessions == nil {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no dataplane)")
 		return
 	}
@@ -551,8 +567,7 @@ func (s *SessionSync) reconcileStaleSessions() {
 		return true
 	}
 	var deleted int
-	store := dataplane.NewDataPlaneSessionStore(s.dp)
-	result, err := store.ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput{
+	result, err := s.sessions.ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput{
 		ReceivedV4:     recvV4,
 		ReceivedV6:     recvV6,
 		ShouldSyncZone: shouldSyncAtBulkStart,
