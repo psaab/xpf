@@ -2147,3 +2147,13 @@
   as the #946 Phase 2 / #961 PacketContext anti-pattern (committing to an
   architectural premise before integration constraints are known).
 - **File(s)**: docs/pr/1524-multipeer-wg-dispatch/plan.md
+
+- **Timestamp**: 2026-05-25
+- **Action**: Recorded final triple-review outcome on #1524 plan as
+  PLAN-KILLED. Antigravity returned PLAN-KILL with primary-source audit;
+  Codex inconclusive due to sandbox wrapper ENOENT (infra outage, not
+  refutation). User closed issue #1524 as NOT_PLANNED at 06:47Z citing
+  both reviewer verdicts + revisit criteria. No PR opened, per skill
+  rule. Plan doc and reviewer-ids preserved on branch
+  refactor/1524-multipeer-wg-dispatch as artifact of record.
+- **File(s)**: docs/pr/1524-multipeer-wg-dispatch/plan.md, docs/pr/1524-multipeer-wg-dispatch/reviewer-ids.md

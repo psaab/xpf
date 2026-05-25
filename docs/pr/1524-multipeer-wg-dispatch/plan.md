@@ -1,7 +1,83 @@
 # #1524 — Multi-peer WG dispatch via allowed-ips LPM
 
 Status: KILLED 2026-05-25 (AGY PLAN-KILL backed by primary-source evidence; Codex infra-blocked sandbox; effectively single-reviewer KILL with infra outage on other)
-review to confirm "premature; integration PR not shipped" verdict**
+
+## Final outcome
+
+Triple-review produced an asymmetric verdict that converges on
+PLAN-KILL. Issue #1524 was closed NOT_PLANNED at 2026-05-25T06:47Z
+(comment id `IC_kwDORLJrbM8AAAABDiMszw`) with the reviewer summaries
+and revisit criteria recorded on the issue. No PR was opened — by
+design, per skill rules ("Both PLAN-KILL → stop. Do NOT open a PR.").
+
+### Reviewer verdicts (round 1)
+
+- **Antigravity** — job `adversarial-review-mpku55ss-o9t93l` —
+  **PLAN-KILL**. Independent primary-source audit confirmed the
+  integration PR is absent (no open PR matches "wireguard";
+  `try_encap` has zero call sites outside `userspace-dp/src/afxdp/wg/`;
+  `pkg/config/types.go` `TunnelConfig` has no WG fields;
+  `buildTunnelEndpointSnapshots` populates no WG fields). Verified
+  the `engine.rs:506-508` cryptokey-routing-safety comment is real
+  and load-bearing. Verified `allowed_ips.rs:11-21` documents the
+  egress-LPM-deliberately-not-consulted divergence as intentional,
+  citing #1492 r11 as precedent. Ranked options: (1) PLAN-KILL
+  "premature; re-open when integration PR has a draft branch",
+  (2) close as duplicate of "open the integration PR",
+  (3) ship engine-only partial — highly discouraged.
+
+- **Codex** — task `task-mpku4rp0-kndmxa` —
+  **PLAN-NEEDS-MAJOR (inconclusive)**. Sandbox wrapper
+  `codex-linux-sandbox` missing (`ENOENT`); every shell command
+  failed before execution. Codex explicitly stated: "I cannot
+  honestly certify PLAN-KILL from primary sources in this
+  environment" and "the hostile conclusion is: the plan's kill
+  premise remains unproven, not refuted." This is an
+  infrastructure outage, not a substantive disagreement. Per
+  `feedback_gemini_infra_outage_merge_policy.md` (extended to
+  Codex by precedent), proceeded on remaining reviewer.
+
+### Additional primary-source evidence collected after Codex outage
+
+These strengthen the kill premise further:
+
+- `pkg/dataplane/userspace/protocol.go:254-270` carries skeleton
+  WG fields (`WgListenPort`, `WgLocalPrivkeyHex`,
+  `WgPeerPubkeyHex`, `WgAllowedIPs`, `WgEndpoint`,
+  `WgKeepaliveSecs`) but they are **single-peer-per-endpoint** —
+  `WgPeerPubkeyHex` is a scalar string, not a list. Multi-peer
+  dispatch would require **protocol extension** to carry a
+  per-peer table (`[]WgPeer { PubkeyHex, AllowedIPs }`), not just
+  LPM lookup logic. The protocol skeleton matches the single-peer
+  engine API, confirming the integration PR has not been
+  re-shaped for multi-peer yet.
+- `userspace-dp/src/afxdp/wg/allowed_ips.rs:11-21` quotes the
+  integration contract verbatim: *"the runtime `TunnelEndpoint`
+  in `afxdp/types/forwarding.rs:129-140` is NOT yet extended with
+  WG fields, the integration PR will mirror them across"*.
+  In-source proof that the engine author knows the integration PR
+  is outstanding.
+
+### Revisit criteria
+
+Re-open #1524 ONLY when ALL three are true:
+
+1. The WG integration PR for #1499 has landed (slow-path
+   keepalive worker + Go control-plane WG wiring per #1501
+   Bucket B).
+2. `pkg/dataplane/userspace/snapshot.go` has actual WG
+   `TunnelEndpoint` wiring that the dispatcher needs.
+3. Operator-facing Junos config for WG `allowed-ips` per peer is
+   defined and parsed.
+
+If those conditions are met, this issue's acceptance criteria
+(LPM dispatch, single-peer fast-path, no-peer drop counter,
+commit-time overlap validation) become tractable. Until then, the
+dispatch path has no integration-layer caller to consume it.
+
+---
+
+### Original draft (preserved for context)
 
 ## TL;DR
 
