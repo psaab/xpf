@@ -2,6 +2,20 @@
 
 ## 2026-05-24
 
+- **Timestamp**: 2026-05-25T01:00:00Z
+  - **Action**: #1451 migration scope decomposition. Surveyed remaining
+    direct `dataplane.DataPlane` consumers on origin/master @
+    `da103d81`. Wrote per-subsystem scope doc covering grpcapi, cli,
+    cluster session-sync, daemon legacyDP accessor, userspace boot
+    path, userspace maps_sync, core runtime, and the conntrack GC
+    bridge tightening. Confirmed that pkg/api, pkg/fwdstatus,
+    pkg/monitoriface, and pkg/conntrack have already adopted
+    domain-specific interfaces; main remaining coupling is in
+    grpcapi/server.go, cli/cli.go, cluster/sync.go, and the daemon
+    `legacyDP()` accessor. No production code touched in this commit.
+  - **File(s)**: `docs/pr/1451-migration-scope/scope.md`, `_Log.md`
+  - **Validation**: doc-only.
+
 - **Timestamp**: 2026-05-25T00:45:00Z
   - **Action**: PR #1512 review follow-up — tightened the positional
     `dataplane.Manager` literal canary on two axes. (a) Recurse into nested
