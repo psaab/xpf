@@ -2228,3 +2228,24 @@
   slog.Warn wording to "the DPDK dataplane backend has been retired".
 - **Validation**: pkg/dataplane test suite green; no other in-tree strings
   pinned the old wording.
+
+## 2026-05-24 — #1519 plan v1 (DRAFT)
+
+- **Timestamp**: 2026-05-24
+- **Action**: Drafted plan v1 (DRAFT) for #1519 (daemon legacyDP()
+  shrink + delete, sub-#1451 S4). Audited 17 `legacyDP()` call sites
+  across 5 files in `pkg/daemon/`. 12 sites are unblocked + can shrink
+  in this PR; 4 sites are blocked by sibling sub-issues (#1516 api +
+  grpcapi, #1517 cli, #1518 cluster session-sync) which are all OPEN
+  with no PR. Plan recommends Option B (PLAN-KILL pending siblings)
+  but presents Option A (partial shrink + retain accessor) for
+  reviewer choice.
+- **File(s)**: docs/pr/1519-daemon-legacydp-shrink/plan.md,
+  docs/pr/1519-daemon-legacydp-shrink/reviewer-ids.md
+- **Why**: triple-review skill requires plan-first, code-never-first.
+  Honest audit of call sites shows the architectural milestone
+  (deleting legacyDP()) cannot complete in this PR until siblings
+  land. Partial shrink is mechanical churn without architectural
+  payoff; reviewers asked to ratify PLAN-KILL or argue for partial
+  shrink.
+- **Validation**: plan v1 self-consistent; no code touched yet.
