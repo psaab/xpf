@@ -2134,3 +2134,16 @@
   slog.Warn wording to "the DPDK dataplane backend has been retired".
 - **Validation**: pkg/dataplane test suite green; no other in-tree strings
   pinned the old wording.
+
+- **Timestamp**: 2026-05-24
+- **Action**: Drafted plan v1 for #1524 multi-peer WG dispatch as PLAN-KILL
+  candidate. Audit shows the WG engine landed in #1499 is internally callable
+  only (zero call sites outside `userspace-dp/src/afxdp/wg/`), no Go control
+  plane references to WireGuard anywhere in pkg/ or proto/, and the
+  integration PR that #1524's acceptance criteria all hinge on does not
+  exist yet (#1501 closed; only #1533 A2 mechanical follow-up shipped). Plan
+  documents the PLAN-KILL premise so Codex and Antigravity can verify from
+  primary sources, with a defensible engine-only fallback noted but flagged
+  as the #946 Phase 2 / #961 PacketContext anti-pattern (committing to an
+  architectural premise before integration constraints are known).
+- **File(s)**: docs/pr/1524-multipeer-wg-dispatch/plan.md
