@@ -1,6 +1,6 @@
 # #1524 — Multi-peer WG dispatch via allowed-ips LPM
 
-Status: **DRAFT v1 — PLAN-KILL CANDIDATE — pending adversarial plan
+Status: KILLED 2026-05-25 (AGY PLAN-KILL backed by primary-source evidence; Codex infra-blocked sandbox; effectively single-reviewer KILL with infra outage on other)
 review to confirm "premature; integration PR not shipped" verdict**
 
 ## TL;DR
