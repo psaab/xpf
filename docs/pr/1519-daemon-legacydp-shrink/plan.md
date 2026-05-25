@@ -1,12 +1,62 @@
-# #1519 daemon legacyDP() shrink + delete — plan v1 (DRAFT)
+# #1519 daemon legacyDP() shrink + delete — plan v2 (PLAN-KILL ratified)
 
-**Status:** DRAFT v1 — pending Codex + Antigravity plan-review.
+**Status:** PLAN-KILL — Option B ratified by both round-1 reviewers.
+
+- Codex round-1 (task-mpkuonx3-o3g540): PLAN-NEEDS-MINOR. "Option B
+  is the right strategic call: do not implement the partial shrink
+  now. The capstone target is deletion, and #1451 scope explicitly
+  says keep legacyDP() while S1-S3 still call it, then delete it."
+  Four factual nits flagged on v1 — all fixed in v2 below.
+- Antigravity round-1 (adversarial-review-mpkupezh-l0dy55): PLAN-KILL,
+  ratify Option B. Independently verified: dead-code claim at
+  daemon_scheduler.go:159-161, telemetry-after-Stop safety in the
+  shutdown window, typed-probe shapes for all three proposed
+  interfaces, and confirmed neither #1520 nor #1521 unblocks
+  anything via partial shrink.
+
+No PR will be opened from this branch. The plan stays on the
+branch as the audit + design notes the eventual capstone-delete
+PR will reuse once #1516, #1517, and #1518 ship.
 
 Issue: https://github.com/psaab/xpf/issues/1519
 Parent: #1451 (eBPF retirement migration scope).
 Sibling/blocker context: #1516 (grpcapi), #1517 (cli), #1518 (cluster
 session-sync). All three explicitly listed as `Depends on` in the #1519
 issue body; all three are currently OPEN with no PR.
+
+## v2 changelog (Codex round-1 nits fixed)
+
+1. **API call-site reclassification** (Codex finding #1): `api.Config.DP`
+   is already typed `apiRuntimeDataPlane` at `pkg/api/server.go:49`, a
+   structural subset of `dataplane.DataPlane`. The daemon still passes
+   `legacyDP()` because `dataplane.RuntimeDataPlane` lacks `IsLoaded` /
+   `IterateSessions` / etc, but the API consumer-side migration is
+   PARTIALLY DONE — the field is no longer typed as the legacy interface.
+   v1 lumped api alongside grpcapi+cli+sessionSync as "blocked the same
+   way"; v2 distinguishes: api needs only the daemon-side narrow
+   accessor (a `Telemetry+Sessions+IsLoaded+IterateSessions+...` typed
+   probe), while grpcapi/cli/sessionSync need the downstream-side
+   declaration change. The capstone-delete PR can shrink api alongside
+   the others, but #1516 is still authoritative for the grpcapi side.
+2. **Call-site count corrected** (Codex finding #2): 17 matches counts
+   the function definition at `daemon.go:348`; actual call
+   *expressions* are 16. `daemon_run.go` has 6 calls (line 277, 332,
+   677, 763, 849, 1043), not 5. Partition is 12 unblocked + 4 blocked
+   = 16, matching Codex's count.
+3. **Rebase-conflict argument weakened** (Codex finding #5): the
+   sibling plans for #1516 and #1517 explicitly keep the daemon-side
+   call unchanged; only #1518 touches the session-sync line. Rebase
+   conflict risk is real but small. The main reason for Option B is
+   not rebase risk; it is the lack of architectural payoff from
+   partial shrink.
+4. **Acceptance-criteria framing tightened** (Codex finding #7):
+   Option A satisfies the documented alternate path in the issue
+   body (partial shrink + document remaining deps + follow-up).
+   Option B (PLAN-KILL) does NOT "satisfy" the implementation
+   acceptance criteria — it defers them. That is the intended
+   outcome: the issue stays OPEN and the comment makes the
+   deferral explicit. The capstone-delete PR re-targets this issue
+   once siblings ship.
 
 ## 1. Issue framing
 
@@ -48,8 +98,11 @@ is worth a standalone PR.
 ## 3. Call-site audit (master @ fcd53beb)
 
 `legacyDP()` is the type assertion `d.dp.(dataplane.DataPlane)`. It
-returns nil when `d.dp` is nil or doesn't satisfy DataPlane. Every
-call site stratified by what unblocking it requires:
+returns nil when `d.dp` is nil or doesn't satisfy DataPlane.
+
+`grep -n legacyDP pkg/daemon/*.go` reports 17 matches; one is the
+function definition at `pkg/daemon/daemon.go:348`, so there are
+**16 actual call expressions** stratified below.
 
 ### 3.1 Unblocked (can shrink in this PR)
 
@@ -135,23 +188,31 @@ These do not depend on any sibling sub-issue surface:
 
 ### 3.2 Blocked by sibling issues (cannot shrink in this PR)
 
-These three call sites pass `legacyDP()` into a downstream API that
-literally declares the parameter as `dataplane.DataPlane`. Until the
-downstream package narrows its parameter type (the sibling issue's
-job), the daemon must keep producing a `dataplane.DataPlane`.
+These four call sites either pass `legacyDP()` into a downstream API
+that literally declares the parameter as `dataplane.DataPlane`, or
+require runtime methods not on `dataplane.RuntimeDataPlane`. Until
+the downstream package narrows its parameter type (sibling issue's
+job) or the daemon supplies a typed probe wider than RuntimeDataPlane,
+the daemon must keep producing a `dataplane.DataPlane`.
 
-9. `daemon_run.go:677` — `api.Config{DP: d.legacyDP()}`. The api
-   package's `Server.dp` is already typed `apiRuntimeDataPlane`
-   (`pkg/api/handlers.go:28`), a structural subset of DataPlane.
-   `dataplane.RuntimeDataPlane` does NOT cover `IsLoaded`,
-   `IterateSessions`, `IterateSessionsV6`, `ClearAllSessions`,
-   `ReadFilterConfig`, `ClearAllCounters`. Until #1516 migrates
-   those to runtime-domain surfaces, the daemon must pass a
-   DataPlane-shaped value. **Blocked by #1516.**
+9. `daemon_run.go:677` — `api.Config{DP: d.legacyDP()}`. **Partially
+   migrated already:** `api.Config.DP` is typed `apiRuntimeDataPlane`
+   at `pkg/api/server.go:49`, not `dataplane.DataPlane`. The
+   structural interface lives at `pkg/api/handlers.go:28` and lists
+   `IsLoaded`, `IterateSessions`, `IterateSessionsV6`,
+   `ClearAllSessions`, `ReadFilterConfig`, `ClearAllCounters`,
+   plus telemetry reads. `dataplane.RuntimeDataPlane` does not
+   cover that set, so the daemon still has to materialize a DataPlane-
+   shaped value (i.e. `legacyDP()`). When the capstone-delete PR
+   lands, this call site can pass a daemon-local typed probe (a
+   superset of `apiRuntimeDataPlane`) directly off `d.dp` without
+   waiting for #1516. **NOT blocked by #1516 strictly; can shrink
+   in the capstone-delete PR alongside grpcapi.**
 
 10. `daemon_run.go:763` — `grpcapi.Config{DP: d.legacyDP()}`. The
     grpcapi field is literally `DP dataplane.DataPlane`
-    (`pkg/grpcapi/server.go:40`). **Blocked by #1516.**
+    (`pkg/grpcapi/server.go:40`). **Blocked by #1516** (the grpcapi
+    migration sub-issue).
 
 11. `daemon_run.go:849` — `cli.New(..., d.legacyDP(), ...)`. The
     cli constructor parameter is literally `dp dataplane.DataPlane`
@@ -164,8 +225,24 @@ job), the daemon must keep producing a `dataplane.DataPlane`.
 ### 3.3 Summary
 
 - 12 unblocked call sites (across 5 files) can shrink in this PR.
-- 4 blocked call sites (3 in daemon_run.go, 1 in daemon_ha_sync.go)
-  remain. `legacyDP()` cannot be deleted yet.
+- 4 call sites cannot complete a clean deletion: #10 (#1516), #11
+  (#1517), #12 (#1518) need downstream narrowing; #9 is
+  internally narrowable but the daemon still needs a DataPlane-
+  shaped object until the runtime domains grow `IsLoaded` /
+  `IterateSessions` / etc.
+- `legacyDP()` cannot be deleted until all four resolve.
+
+### 3.4 daemon_run.go call-count detail (Codex round-1 nit)
+
+`daemon_run.go` is 6 calls, not 5 as v1 said. Confirmed by
+`grep -n legacyDP pkg/daemon/daemon_run.go`:
+
+  - line 277 (post-Start NAT/session-ID seed)
+  - line 332 (StartFIBSync)
+  - line 677 (api.Config{DP})
+  - line 763 (grpcapi.Config{DP})
+  - line 849 (cli.New)
+  - line 1043 (logFinalStats)
 
 ## 4. Proposed PR shape
 
@@ -200,36 +277,44 @@ This plan documents both options and asks the reviewers to choose.
 The honest comparison shows Option B saves work without losing any
 architectural ground.
 
-## 5. Recommendation
+## 5. Recommendation — RATIFIED by both reviewers
 
-**This plan recommends Option B — PLAN-KILL with explicit rationale**,
-and asks the reviewers to either ratify or argue for Option A.
+**Outcome: Option B — PLAN-KILL ratified.** Codex round-1
+PLAN-NEEDS-MINOR plus AGY round-1 PLAN-KILL, both ratifying Option B.
 
 Rationale:
 
-- Of the 17 `legacyDP()` call sites, the 4 that matter
-  architecturally (api, grpcapi, cli, sessionSync) are all blocked
-  by sibling issues that have no PR yet.
+- Of the 16 `legacyDP()` call expressions, the 4 that matter
+  architecturally (api, grpcapi, cli, sessionSync) cannot deliver
+  the capstone deletion in this PR: grpcapi, cli, sessionSync are
+  hard-blocked by sibling issues #1516/#1517/#1518 (all OPEN, no
+  PR), and api needs a daemon-local probe wider than
+  RuntimeDataPlane.
 - The 12 unblocked sites are mechanical refactors: rename a type
   assertion, swap to telemetry, delete one dead branch, introduce
-  three local typed probes. None of these unlocks any downstream
-  consumer; they are pure code-shape changes.
+  three local typed probes. AGY independently verified that none
+  of these unlocks anything in #1520 (userspace boot path) or
+  #1521 (maps_sync decouple). They are pure code-shape changes.
 - The eBPF-retirement acceptance criterion (#1451) is "the legacy
   interface stops being exposed at the daemon boundary." Shrinking
   internal call sites without deleting the accessor doesn't
   advance that criterion. The accessor disappears in one shot once
-  #1516/#1517/#1518 land.
+  the four blockers above resolve.
 - Re-opening this issue after the siblings ship lets us land a
   single tight "delete legacyDP() + narrow N call sites" PR with
   one round of plan-review, one Copilot pass, one smoke run — net
   cheaper than partial-shrink + capstone-delete.
+- Rebase-conflict argument is weak: #1516 and #1517 explicitly
+  preserve the daemon-side call expression; only #1518 touches the
+  session-sync line. Conflict risk exists but is small. The
+  primary reason for Option B is lack of architectural payoff,
+  not conflict risk.
 - The repo's #946 Phase 2 and #1211 precedents show PLAN-KILL is
   the right verdict when the proposed work cannot deliver its
   stated architectural milestone in this PR.
 
-If reviewers prefer Option A, this plan can be revised v2 to spell
-out the concrete edits for the 12 unblocked sites, the three new
-typed probes, and the smoke matrix.
+This plan is preserved on the worktree branch as the audit + design
+notes the eventual capstone-delete PR will reuse.
 
 ## 6. Hidden invariants to preserve (if Option A goes ahead)
 

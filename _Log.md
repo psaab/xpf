@@ -2249,3 +2249,23 @@
   payoff; reviewers asked to ratify PLAN-KILL or argue for partial
   shrink.
 - **Validation**: plan v1 self-consistent; no code touched yet.
+
+## 2026-05-25 — #1519 plan v2 (PLAN-KILL ratified)
+
+- **Timestamp**: 2026-05-25
+- **Action**: Plan v2 applied with Codex round-1 nits (API
+  classification, call-site count 16 not 17, rebase-risk wording,
+  acceptance-criteria framing). Both reviewers ratify Option B.
+  Codex PLAN-NEEDS-MINOR (task-mpkuonx3-o3g540), AGY PLAN-KILL
+  (adversarial-review-mpkupezh-l0dy55). No PR opened; issue stays
+  OPEN until #1516/#1517/#1518 ship and the capstone-delete PR
+  can land cleanly.
+- **File(s)**: docs/pr/1519-daemon-legacydp-shrink/plan.md,
+  docs/pr/1519-daemon-legacydp-shrink/reviewer-ids.md
+- **Why**: triple-review skill: Option B (PLAN-KILL) is the
+  documented outcome when proposed work cannot complete its
+  architectural milestone in this PR. Both reviewers verified the
+  dead-code claim, telemetry-after-Stop safety, typed-probe shapes,
+  and the sibling non-blocking for #1520/#1521. Issue intent is
+  honored by deferring rather than landing mechanical churn.
+- **Validation**: plan self-consistent; no code touched.
