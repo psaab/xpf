@@ -531,6 +531,16 @@
   - **Validation**: 6 canary tests + 24 alias-bypass sub-cases
     pass; full `go test ./...` all 33 packages green on the
     rebased branch.
+- **Timestamp**: 2026-05-25T18:00:00Z
+  - **Action**: #1530 Phase A — drafted DPDK final-validation runbook
+    + artifact stub. Worktree branched off origin/master as
+    `refactor/1530-dpdk-final-validation`. Phase B blocked on #1528
+    (Phase 3 source removal) PR merge. Sub-issues #1526, #1527,
+    #1529, #1531 already CLOSED; only #1528 outstanding.
+  - **File(s)**:
+    `docs/pr/1530-dpdk-final-validation/runbook.md`,
+    `docs/pr/1530-dpdk-final-validation/artifacts.md`,
+    `_Log.md`
 
 - **Timestamp**: 2026-05-25T15:45:00Z
   - **Action**: Addressed PR #1551 Copilot round-3 doc-comment nits by
