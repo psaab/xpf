@@ -2590,3 +2590,9 @@
   validation outcome. All three are purely cosmetic; no diff to
   pkg/logging/README.md.
 - **Validation**: cosmetic-only; no test/build rerun needed.
+
+## 2026-05-25 — #1548 canary hardening start
+
+- **Timestamp**: 2026-05-25 worktree setup
+- **Action**: Created worktree refactor/1548-canary-hardening off origin/master; wrote plan v1
+- **File(s)**: docs/pr/1548-canary-hardening/plan.md
