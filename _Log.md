@@ -2596,3 +2596,9 @@
 - **Timestamp**: 2026-05-25 worktree setup
 - **Action**: Created worktree refactor/1548-canary-hardening off origin/master; wrote plan v1
 - **File(s)**: docs/pr/1548-canary-hardening/plan.md
+
+## 2026-05-25 — #1548 PLAN-KILL
+
+- **Timestamp**: 2026-05-25 round-1 adversarial review complete
+- **Action**: PLAN-KILL converged. Codex NEEDS-MINOR with scope-reduction findings; AGY PLAN-KILL on value-vs-churn + threat model. Plan v1 marked KILLED.
+- **File(s)**: docs/pr/1548-canary-hardening/plan.md, _Log.md
