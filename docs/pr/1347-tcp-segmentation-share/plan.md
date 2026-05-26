@@ -1,6 +1,8 @@
 # Plan — #1347: share one TCP segmentation algorithm between two emission strategies
 
-**Status:** DRAFT v1 — pending adversarial plan review.
+**Status:** PLAN-KILLED v1 — both reviewers independently PLAN-KILL on
+non-overlapping fatal findings. See §10 below for verdicts verbatim.
+Refactor does NOT proceed.
 
 ## 1. Issue framing
 
@@ -477,3 +479,159 @@ want the oracle present at merge so the reviewer can re-run it).
    — Copilot's addition. The refactor must keep `#[cold]` on the
    public wrapper. Confirm the inlined-into-call-site code retains
    the cold hint in practice.
+
+## 10. PLAN-KILLED — round-1 verdicts (verbatim)
+
+Both adversarial reviewers returned **PLAN-KILL** on the plan v1 doc
+(commit 7197cc38). Findings are independent — Codex's fatal finding
+(checksum premise) and Gemini's fatal finding (GRE encap error
+propagation) are disjoint. Both are verifiable from source.
+
+### 10.1 Codex (task-mpn8yz3x-jgtqtn) — PLAN-KILL
+
+> **Verdict: PLAN-KILL**
+>
+> 1. **The checksum premise is wrong.** The plan says `frame/` uses
+>    incremental L4 adjustment on the common no-port-enforcement path
+>    and `tx/` would gain that shortcut. Current code does not support
+>    that reading. `frame/` branches on `enforced_ports.is_none()` at
+>    `frame/tcp_segmentation.rs:225`, but `enforced_ports =
+>    expected_ports.or(live_frame_ports_from_meta_bytes(...))` at
+>    `frame/tcp_segmentation.rs:124`. Given the earlier TCP parse
+>    succeeded, `live_frame_ports_from_meta_bytes` should succeed for
+>    valid TCP, so the recompute path at
+>    `frame/tcp_segmentation.rs:278` is effectively the normal path.
+>    The claimed tx CPU win is therefore not real under the current
+>    semantics.
+>
+> 2. **If the plan changes the branch to "no expected ports" to realize
+>    the win, it risks invalid checksums.** The incremental block in
+>    `frame/` adjusts only IP/port deltas at line 249. Segmentation
+>    also changes TCP seq, PSH, pseudo-header length, IP total length,
+>    and payload bytes. `tx/` correctly does a full recompute. The
+>    plan has not proven the proposed incremental strategy is
+>    equivalent for segmented packets.
+>
+> 3. **The golden-vector strategy does not prove tx byte equality.**
+>    The plan promises byte-identical old/new tx output, then weakens
+>    the PreparedEmitter test to equality "modulo checksum-strategy
+>    change" plus checksum validity. That is not byte equality. It
+>    also compares PreparedEmitter to the new Vec path, not to a
+>    preserved legacy `tx/` oracle. This misses exactly the risk
+>    under review.
+>
+> 4. **Rollback is underspecified and miscounted.** Current `tx/` has
+>    four rollback/failure paths: frame too large at line 139, pop
+>    failure at line 145, slice failure at line 151, build failure at
+>    line 250. For slice/build failure, the current offset must be
+>    pushed before staged offsets are drained in reverse, or the free
+>    list order changes. `rollback()` as specified does not state
+>    that invariant strongly enough.
+>
+> 5. **Post-recycle drain ordering is only partially preserved.**
+>    The drain is currently before the capacity recheck at line 82.
+>    The plan moves "all early returns" into `build_segmentation_plan`
+>    before `pre_check_capacity`; that shifts the drain after
+>    `neighbor_mac`, `src_mac`, header snapshot, and other validations
+>    that currently occur after the drain. That is a side-effect
+>    ordering change.
+>
+> 6. **The trait dispatch itself is not the allocation problem.**
+>    `segment_one<E: SegmentEmitter>` is statically dispatched, so no
+>    dyn vtable/Box/Arc is implied. But the plan still needs to specify
+>    exact Vec capacities. Current frame capacity is
+>    `(data.len() / segment_payload_max) + 1`, not always `div_ceil`.
+>
+> 7. **`apply_nat_on_fabric` is currently equivalent, but the plan
+>    introduces ambiguity.** The plan lists `apply_nat` both as a
+>    `SegmentationPlan` field and a `segment_one` parameter, which
+>    creates an unnecessary split-brain risk.
+>
+> 8. **Inlining/cold claims remain unproven.** `#[inline(always)]`
+>    on a large generic body is plausible but not a proof. The plan
+>    itself admits no `cargo asm` evidence.
+>
+> The strategy-pattern shape is not automatically wrong, but this
+> plan's central justification is: it is built around a
+> checksum-strategy divergence that appears misunderstood, and its
+> proposed tests would not catch old/new tx byte drift. The
+> cost-benefit also does not clear the bar as written: +400/-200 LOC
+> for a refactor whose main "drift" example is not proven to be a
+> real output divergence.
+>
+> A viable replacement plan would need to preserve full L4 recompute
+> unless a new checksum proof covers all segmentation deltas, add a
+> legacy `tx/` byte oracle, make rollback current-offset ordering
+> explicit, and split capacity-drain planning so tx side effects
+> stay in the same order.
+
+### 10.2 Gemini (task-mpn8zo6c-vt7l7b) — PLAN-KILL
+
+> **Verdict: PLAN-KILL**
+>
+> The architectural premise of unifying the fragmentation logic via a
+> generic trait and a shared `segment_one` state machine is excellent.
+> However, the specific signature proposed for `SegmentEmitter::commit`
+> structurally prevents propagating failures during GRE encapsulation,
+> leading to a silent regression where partially-encapsulated segment
+> streams are returned instead of aborting the packet.
+>
+> **1. Trait `commit` signature prevents GRE encapsulation error
+> propagation (PLAN-KILL).** Plan §4.4 proposes
+> `fn commit(&mut self, frame_len: usize, is_last: bool);`. Plan §5
+> mandates that `VecEmitter::commit()` invoke encap before pushing
+> into `out`. In `frame/tcp_segmentation.rs:275`, encapsulation is
+> fallible and uses `?`:
+> `out.push(encapsulate_native_gre_frame(...)?);`. Today this aborts
+> the entire `segment_forwarded_tcp_frames_from_frame` loop and
+> returns `None`. Because the proposed `commit` returns `()`,
+> `VecEmitter` cannot bubble this `None` back up to `segment_one`.
+> If `VecEmitter` silently drops the failed segment, `segment_one`
+> will continue emitting subsequent segments, returning a corrupted,
+> partial stream. The plan must be revised so `commit` can fail
+> (e.g. `fn commit(...) -> Result<(), SegmentationError>`).
+>
+> *(Minor related note: `is_last` is not needed in the `commit`
+> signature at all, as the `TCP_FLAG_PSH` clearing happens inside
+> `segment_one` before `commit` is called).*
+>
+> **2. Rollback ordering requires strict `current_tx_offset` state
+> tracking (PASS with caution).** `PreparedEmitter::reserve()` must
+> explicitly stash the popped `tx_offset` into a
+> `self.current_tx_offset: Option<u32>` field. If `segment_one` fails
+> and calls `rollback()`, the emitter must push the
+> `current_tx_offset` (if present) before draining
+> `prepared.drain(..).rev()`.
+>
+> *(Findings 3-5 PASS with caveats; full text in
+> `/tmp/g1.txt`.)*
+
+### 10.3 Resolution
+
+- Both findings are independently fatal. Codex's #1 invalidates the
+  refactor's stated performance benefit; Gemini's #1 makes the
+  proposed trait signature structurally unsafe for the GRE path.
+- Codex's #1 finding is verified from source:
+  `live_frame_ports_from_meta_bytes` (inspect.rs:275-290) is
+  guaranteed to return `Some` whenever the segmentation parser
+  succeeds, so `enforced_ports.is_none()` is dead code at the
+  `frame/` site. The incremental adjust branch is unreachable in
+  practice; the ~3.6%-CPU-win premise is fictional.
+- A viable v2 plan would need to:
+  1. Drop the perf-win claim. Reframe as pure drift prevention.
+  2. Preserve **full L4 recompute** on both call sites (no
+     checksum strategy reconciliation).
+  3. Change `SegmentEmitter::commit` to return `Result<(),
+     SegmentationError>` and propagate via `?` inside `segment_one`.
+  4. Add a preserved-tx-side legacy oracle for byte equality (not
+     just frame side).
+  5. Make `current_tx_offset` tracking explicit in the emitter
+     contract.
+  6. Specify Vec capacities exactly (no `div_ceil` substitution).
+  7. Provide a `cargo asm` artifact proving `segment_one<E>` inlines
+     on both call sites before merge.
+- Cost-benefit is unfavourable as proposed: ~+400/-200 LOC drift
+  prevention with no concrete drift-bug filed against the current
+  split (both functions have been stable since #1166 in 2026-05-05).
+  Refactor is **closed**; if drift later produces a concrete bug,
+  reopen with the v2 framing above.

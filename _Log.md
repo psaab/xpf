@@ -4582,3 +4582,12 @@
   - **File(s)**: userspace-dp/src/afxdp/worker/cos/{mod,interface_row,
     queue_row,status,tests}.rs; docs/pr/1349-worker-cos-status-split/
     {plan.md,reviewer-ids.md}
+
+## #1347 — TCP segmentation share between frame/ and tx/
+
+- **Timestamp**: 2026-05-26 16:14 UTC
+- **Action**: Plan v1 drafted, pushed (commit 7197cc38), Codex + Gemini round-1 PLAN reviews dispatched in parallel.
+- **File(s)**: docs/pr/1347-tcp-segmentation-share/plan.md, docs/pr/1347-tcp-segmentation-share/reviewer-ids.md
+- **Timestamp**: 2026-05-26 16:15 UTC
+- **Action**: Both reviewers returned PLAN-KILL on non-overlapping fatal findings. Codex (task-mpn8yz3x-jgtqtn): checksum-strategy premise is fictional — `enforced_ports` is `Some` in all valid TCP segmentation calls because `live_frame_ports_from_meta_bytes` succeeds on every successfully-parsed TCP frame, so the `frame/` "incremental path" at `frame/tcp_segmentation.rs:225` is dead code and the claimed ~3.6% tx/ CPU win does not exist. Gemini (task-mpn8zo6c-vt7l7b): proposed `SegmentEmitter::commit() -> ()` cannot propagate the fallible `encapsulate_native_gre_frame()?` error at `frame/tcp_segmentation.rs:275`, causing partial-stream corruption on tunnel paths. Both findings verified from source. Plan v2 path documented in §10.3, but cost-benefit unfavourable without a concrete drift-bug — refactor closed.
+- **File(s)**: docs/pr/1347-tcp-segmentation-share/plan.md (PLAN-KILLED v1 status, §10 verdicts appended)
