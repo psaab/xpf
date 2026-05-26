@@ -1,5 +1,20 @@
 # Action Log
 
+## 2026-05-26 — #1544 plan v1 drafted
+
+- **Timestamp**: 20:17 UTC
+- **Action**: Created worktree `refactor/1544-routing-mgr-split` off
+  `origin/master` (63dfe02a). Drafted plan v1 (DRAFT) under
+  `docs/pr/1544-routing-mgr-split/plan.md` proposing 9-file sibling
+  split (manager/vrf/routes/tunnel/keepalive/xfrm/pbr/bond/reth)
+  inside `pkg/routing/` — no `routing_*` prefix anti-pattern, no
+  sub-packages. Determined refactor is HA-sensitive (RETH +
+  interface monitors); plan calls for `make test-failover` + smoke
+  matrix. Created `reviewer-ids.md` to track Codex + Gemini task
+  IDs across rounds.
+- **File(s)**: `docs/pr/1544-routing-mgr-split/plan.md`,
+  `docs/pr/1544-routing-mgr-split/reviewer-ids.md`
+
 ## 2026-05-26 — #1325 implementation pushed
 
 - **Timestamp**: 2026-05-26T (UTC)
