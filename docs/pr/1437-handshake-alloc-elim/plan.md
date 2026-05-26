@@ -2,7 +2,55 @@
 
 ## Status
 
-**DRAFT v1 — PROPOSED PLAN-KILL, pending adversarial confirmation**
+**PLAN-KILLED — confirmed by Codex + AGY on 2026-05-26.**
+
+- **Codex** (task-mpmuu82l-3ypoy3): **PLAN-READY (kill confirmed).** "No
+  findings against the PLAN-KILL. The target symbols are absent. ... I do
+  not see any interpretation under which #1437 is implementable on master
+  right now without first inventing the missing
+  `construct_outer_frame_allocated`/control-frame path ourselves.
+  Retargeting would be new integration work, not an allocation-elimination
+  PR against an existing `Vec<u8>` symbol."
+- **AGY** (review-mpmusscv-yp2kpu): **PLAN-READY (kill confirmed).** "The
+  target code does not exist, and the design pattern demanded by the issue
+  has already been preemptively locked in by the new clean-room
+  architecture. Retargeting the issue is unnecessary and technically
+  impossible because the code it proposes to optimize has not been (and
+  will not be) written in the form the issue assumes. Closing #1437 as
+  overtaken by the #1499 clean-room architecture is the correct and
+  safest outcome."
+
+Both reviewers independently verified the file/symbol absence
+on `origin/master` @ `936b076d`. No PR will be opened.
+
+### Reviewer verification record
+
+Codex probes:
+
+> Probes 1, 2, 4, and 5 returned no matches. Probe 3 as written
+> returned only `grep: Cargo.toml: No such file or directory`
+> because this checkout has no root `Cargo.toml`; the material
+> checks against `userspace-dp/` and `userspace-dp/Cargo.toml`
+> both returned no `boringtun` matches. Branch code is
+> effectively master for this area: `git diff
+> origin/master..HEAD` shows only docs/log files changed.
+
+Codex source citations (file:line) of the structural blockers:
+
+- `userspace-dp/src/afxdp/wg/mod.rs:6` and
+  `userspace-dp/src/afxdp/mod.rs:115` — hot-path activation
+  explicitly deferred.
+- `userspace-dp/src/afxdp/wg/engine.rs:26` — engine does not
+  build WG handshake/control outer frames.
+- `userspace-dp/src/afxdp/wg/engine.rs:493` and
+  `engine.rs:627` — current hot API only writes data-path
+  encap/decap into caller-provided buffers.
+- `userspace-dp/src/afxdp/wg/engine.rs:777` and
+  `engine.rs:807` — handshake helpers only return
+  `snow::HandshakeState`; integration-layer work is the TODO.
+- `userspace-dp/src/afxdp/wg/scratch.rs:1,18` —
+  `WgWorkerScratch` already encodes "no per-packet `vec![]` in
+  encap/decap".
 
 ## Issue framing
 

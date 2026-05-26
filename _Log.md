@@ -3755,3 +3755,11 @@
 - **Timestamp**: 2026-05-26
 - **Action**: Initialized reviewer-ids.md
 - **File(s)**: docs/pr/1437-handshake-alloc-elim/reviewer-ids.md (created)
+
+- **Timestamp**: 2026-05-26
+- **Action**: Dispatched Codex (task-mpmuu82l-3ypoy3) and AGY (review-mpmusscv-yp2kpu) adversarial PLAN review.
+- **File(s)**: docs/pr/1437-handshake-alloc-elim/reviewer-ids.md
+
+- **Timestamp**: 2026-05-26
+- **Action**: Both reviewers returned PLAN-READY (kill confirmed). Codex: "No findings against the PLAN-KILL... I do not see any interpretation under which #1437 is implementable on master right now". AGY: "The target code does not exist... closing #1437 as overtaken by the #1499 clean-room architecture is the correct and safest outcome." Updated plan.md status to PLAN-KILLED.
+- **File(s)**: docs/pr/1437-handshake-alloc-elim/plan.md, docs/pr/1437-handshake-alloc-elim/reviewer-ids.md
