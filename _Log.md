@@ -1,5 +1,20 @@
 # Action Log
 
+## 2026-05-26 — #1207 plan v1 (DRAFT) drafted
+
+- **Timestamp**: 20:19 UTC 2026-05-26
+- **Action**: Drafted plan v1 for #1207 queue_service skeleton
+  consolidation. Strategy: non-generic shared body
+  (`service_exact_queue_skeleton`) with `&ServiceShape` fn-ptr
+  table; 2 thin entry points (`service_exact_local_queue_direct`,
+  `service_exact_prepared_queue_direct`). Baseline measurement:
+  `service_exact_guarantee_queue_direct_with_info` = 21,283 bytes
+  (3rd largest fn in binary, all four service variants currently
+  inlined into it). Target: ~10-12 KB .text reduction. Plan
+  flags 10 open questions inviting PLAN-KILL.
+- **File(s)**: docs/pr/1207-queue-service-skeleton/plan.md,
+  docs/pr/1207-queue-service-skeleton/reviewer-ids.md
+
 ## 2026-05-26 — #1325 implementation pushed
 
 - **Timestamp**: 2026-05-26T (UTC)
