@@ -2,7 +2,15 @@
 
 ## Status
 
-DRAFT v1 — pending adversarial plan review.
+**PLAN-KILLED 2026-05-26** — Codex and Gemini independently issued
+PLAN-KILL on round 1 (commit 8edc7bcc) of this draft. Both reviewers
+converged on five fatal findings; see "Round-1 adversarial review
+verdicts" at the bottom of this document. No code was written. No PR
+was opened. Issue #1545 deserves a smaller plan that first proves
+the alloc churn is a measurable tail-latency or CPU problem on a
+realistic mirror load before incurring this much schema disturbance.
+
+(Previous status line: DRAFT v1 — pending adversarial plan review.)
 
 ## Issue framing
 
@@ -507,3 +515,169 @@ Gates that must pass before merge:
    leak window (until the consumer drains and drops) acceptable?
    Yes — this is the same shape as the existing `Arc<BindingLiveState>`
    itself.
+
+---
+
+## Round-1 adversarial review verdicts (2026-05-26)
+
+Plan reviewed at commit 8edc7bcc on branch
+`refactor/1545-mirror-clone-alloc-elim`.
+
+### Codex (task-mpmuvhil-hybkhy)
+
+**Verdict: PLAN-KILL**
+
+Findings (verbatim):
+
+1. Perf case does not justify the churn. The plan's own cited win is
+   "`~1.5 ms/s at production 1-in-1000 of 10 Gbps stream`", while
+   the refactor touches the global TX schema. That is roughly 0.15%
+   of one core before subtracting the new costs. The plan removes
+   "`one frame.to_vec() per packet`", but still does "`copies the
+   source frame into [the pool]`" and the "`Owner consumer copies
+   pool buffer into UMEM`". So the payload copy cost remains; only
+   allocator/free cost changes.
+
+2. The perf model omits replacement costs. The proposed handle
+   "`holds Arc<MirrorBufPool> and slot_index`" and returns via
+   "`Drop pushes the index back to a lock-free MPMC free ring`".
+   That adds per-packet Arc refcount traffic plus MPMC pop/push
+   atomics. Those are exactly the kinds of cross-core synchronization
+   costs the plan is trying to avoid. Without a benchmark including
+   Arc clone/drop, free-ring contention, and the unchanged copy path,
+   the "zero heap alloc" result is not a dataplane win.
+
+3. Schema blast radius is excessive for mirror-only observability
+   traffic. The plan changes `TxRequest.bytes` from `Vec<u8>` to
+   `TxBytes`, touching "`coordinator/inject.rs:233, tunnel.rs:232,
+   cos/cross_binding.rs, tx/dispatch.rs, tx/transmit.rs:111+146,
+   types/tx.rs PreparedTxRequest::to_local_request:98, mirror.rs,
+   several test files`". That is global review and test surface
+   for an opt-in sampled mirror path, not the main forwarding hot
+   path.
+
+4. The unsafe lifetime model is plausible but underspecified.
+   Ordering story is directionally correct, but plan must forbid
+   `Clone` on `PooledMirrorBuf`, define free-ring-full behaviour in
+   `Drop`, document `UnsafeCell` slot ownership, and specify
+   shutdown behaviour when in-flight `TxRequest`s outlive
+   `BindingLiveState`.
+
+5. Pool sizing is arbitrary. 256 KiB per binding × 256 bindings =
+   "`64 MiB`" is only acceptable if the pool is lazy/optional for
+   bindings that actually mirror. Fixed `4096` size needs an
+   explicit jumbo/oversize policy: drop with counter, or fallback
+   to `Owned(Vec<u8>)` and lose the zero-alloc invariant.
+
+6. Ordering looks safe only if mirror remains strictly side-band.
+   Invariant must be written down: pool exhaustion may drop only
+   the mirror clone and must never stall, reorder, or backpressure
+   the original packet path.
+
+7. `PreparedTxRequest::to_local_request` needs an explicit non-goal
+   or overload. If a pooled mirror request can enter the prepared/
+   retry path, wrapping only `Vec<u8>` is semantically lossy and
+   can reintroduce allocation.
+
+8. DSCP behaviour must be specified, not incidental. Plan must
+   state whether mirror output observes pre-rewrite or post-egress
+   bytes and add a regression test.
+
+9. Use `crossbeam_queue::ArrayQueue`, not a homegrown MPMC extension.
+
+### Gemini (task-mpmuvoj4-ilby87, model gemini-3.1-pro-preview)
+
+**Verdict: PLAN-KILL**
+
+Findings (verbatim):
+
+1. Perf justification soundness: too weak to support the
+   complexity. Saving 0.15% of a core on an opt-in observability
+   path does not justify adding `UnsafeCell` lifetime management
+   and custom MPMC rings. The plan's defense — "once it's gone, the
+   inbox is fully zero-alloc and we can audit-prove that" — is
+   immediately contradicted by the out-of-scope exclusion:
+   "Non-mirror TX paths' `Vec<u8>` allocations: `coordinator/inject.rs:233`,
+   `tunnel.rs:101`, `cos/cross_binding.rs` redirect... all build
+   `TxRequest { bytes: Vec<u8>, … }`". Because paths like CoS
+   cross-binding redirect continue to allocate, the inbox is NOT
+   fully zero-alloc, completely destroying the architectural
+   payoff.
+
+2. Schema-disturbance cost: enum abstraction forces widespread
+   churn for an orthogonal feature. Polluting the core `TxRequest`
+   struct with a mirror-specific variant `TxBytes::PooledMirror`
+   is poor separation of concerns for a telemetry feature.
+
+3. Lifetime / Drop safety: memory-model correct. The existing
+   `MpscInbox` operates securely via Release/Acquire semantics; the
+   happens-before edge does extend over the pool slot writes.
+
+4. Pool sizing: memory overhead is disproportionate to the
+   benefit. 64 MiB of permanently-committed memory to avoid
+   occasional heap allocations on a 1-in-1000 sampled telemetry
+   path is an unacceptable memory/CPU tradeoff.
+
+5. Cross-binding ordering: not perturbed; the structural CoV floor
+   from #1217 holds.
+
+6. **DSCP rewrite on mirror clones — plan is demonstrably false.**
+   In `userspace-dp/src/afxdp/mirror.rs:314`,
+   `enqueue_admitted_mirror_clone_to_live` explicitly hardcodes
+   `dscp_rewrite: None`. Furthermore, `mirror.rs:870` enforces this
+   with `assert_eq!(req.dscp_rewrite, None);`. Mutation of the pool
+   buffer via DSCP rewrite is a non-issue because it never happens.
+   The plan's worry about DSCP rewrite on the pool buffer is a
+   problem the plan invented.
+
+7. Architectural mismatch vs same-worker mirror: plan over-engineers
+   the solution. While same-worker mirror clones directly into a
+   UMEM TX frame, building a parallel MPMC lock-free queue just
+   for telemetry buffers is an architectural mismatch.
+
+8. Worth-the-churn at production mirror sample rates: not worth
+   the churn. CPU savings are trivial (1.5 ms/s), memory cost is
+   high (64 MiB), schema disturbance touches the core `TxRequest`,
+   and the primary "zero-alloc" invariant justification is false
+   due to CoS redirects. PLAN-KILL is the only logical verdict.
+
+### Outcome
+
+Both reviewers PLAN-KILL independently, on first round, citing the
+same architectural defect (the "fully zero-alloc" claim is broken
+by paths the plan leaves out of scope) and the same arithmetic
+(0.15% of one core at production sample rates does not justify
+schema churn + 64 MiB memory + custom MPMC pool with `UnsafeCell`).
+
+Per [[feedback_difficult_path_pragmatism]] and the triple-review
+skill's standing rule that both PLAN-KILL ends the work, no PR will
+be opened. Issue #1545 is left open with a comment summarising the
+review for future revisitors.
+
+If this issue is reopened, a viable plan would need to:
+
+1. **Measure first.** Produce realistic perf evidence (CPU profile
+   sample, tail-latency histogram, allocator-counter snapshot) at a
+   production mirror sample rate showing that the alloc churn is a
+   measurable problem AFTER accounting for the unchanged copy cost
+   on either side.
+2. **Scope the win honestly.** Either (a) commit to eliminating
+   `Vec<u8>` allocs from ALL cross-worker `TxRequest` producers in
+   the same PR (not just mirror), so the "audit-prove zero-alloc
+   inbox" claim is real, OR (b) drop the audit-prove framing and
+   sell only the mirror-path saving on its own merits.
+3. **Avoid `UnsafeCell` and MPMC rings entirely.** A simpler design
+   that reuses the existing `MpscInbox` with pre-allocated `Box<[u8;
+   4096]>` carriers inside a fixed-capacity in-flight pool would
+   avoid the worst review surface; or use `crossbeam-queue::ArrayQueue`
+   per Codex.
+4. **Demand-allocate the pool.** Bindings that never mirror should
+   pay zero memory. Lazy allocation on first mirror config attach.
+5. **Drop the `TxBytes` enum.** Carry the pooled buffer as a
+   separate `Option<PooledMirrorBuf>` field, leave `bytes: Vec<u8>`
+   alone, and have transmit prefer the pooled slice when present.
+   Cuts the schema-disturbance dimension to one new field, zero
+   call-site changes outside mirror.
+
+These changes would address the "architectural premise is wrong"
+finding; the perf-evidence requirement is the hardest gate.

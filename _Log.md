@@ -3745,3 +3745,11 @@
 - **File(s)**: docs/pr/1545-mirror-clone-alloc-elim/plan.md
 - **Strategy**: pooled `MirrorBufPool` per `BindingLiveState`, `TxBytes` enum carries `PooledMirror` variant; non-mirror callers stay on `TxBytes::Owned(Vec<u8>)`.
 - **Status**: DRAFT v1, dispatching Codex + Gemini hostile plan review.
+
+## 2026-05-26 — #1545 PLAN-KILL round 1
+
+- **Action**: Recorded PLAN-KILL outcome for #1545 round 1
+- **File(s)**: docs/pr/1545-mirror-clone-alloc-elim/plan.md
+- **Reviewers**: Codex (task-mpmuvhil-hybkhy) + Gemini (task-mpmuvoj4-ilby87, gemini-3.1-pro-preview)
+- **Verdict**: both PLAN-KILL independently; perf gain ~0.15% of one core does not justify TxBytes schema disturbance + 64 MiB pool + UnsafeCell/MPMC ring. Plan also contained a factual error about DSCP rewrite on mirror clones (mirror.rs:314 hardcodes dscp_rewrite: None; mirror.rs:870 asserts it).
+- **Action taken**: no PR opened, no code written. Issue stays OPEN with summary comment.
