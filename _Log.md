@@ -4535,3 +4535,21 @@
     marker is in the PR body for the refactor-chain batch.
   - **File(s)**: PR #1587 at 4ff0b6c1,
     docs/pr/1547-frr-split/reviewer-ids.md
+
+- **Timestamp**: 2026-05-26 21:41 UTC
+  - **Action**: #1445 triple-review PLAN-KILLED at study time. Issue
+    asks to consolidate WireGuard / X25519 key gen + verification
+    across pkg/config/compiler_security.go (cited line 760-782),
+    pkg/cli/cli_request.go (cited 1019-1044), and
+    pkg/dataplane/userspace/snapshot.go (cited 2396-2411). At
+    origin/master cd048d2f those file lengths are 753, 1010, and
+    2404 lines respectively — every cited range starts past EOF.
+    grep across the entire Go tree confirms validatePrivateKey,
+    handleRequestSecurityWireGuard, and deriveWgPublicKey do not
+    exist; only WireGuard reference is wire-protocol JSON field
+    docstrings in pkg/dataplane/userspace/protocol.go for an
+    unimplemented clean-room termination feature. Wrong-target
+    refactor per triple-review skill standing rule and
+    difficult-path-pragmatism memory. No reviewers dispatched.
+  - **File(s)**: docs/pr/1445-key-gen-consolidate/plan.md,
+    docs/pr/1445-key-gen-consolidate/reviewer-ids.md
