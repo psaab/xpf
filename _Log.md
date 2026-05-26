@@ -1,5 +1,23 @@
 # Action Log
 
+## 2026-05-26 — #1544 plan v1 PLAN-KILLED (both reviewers)
+
+- **Timestamp**: 20:24 UTC
+- **Action**: Both Codex (task-mpn2w0bb-rmexxr) and Gemini Pro 3
+  (task-mpn2wo93-pzup4g) returned PLAN-KILL independently on plan v1.
+  Per the triple-review skill rules: stop, no PR. Updated `plan.md`
+  to record KILLED status with both verdicts verbatim and a
+  "what a future plan must change" list. Updated `reviewer-ids.md`
+  with completion timestamps and outcomes. Three load-bearing
+  findings: (1) file-motion-only side-steps the issue's "narrow
+  netlink-facing interface" ask, (2) HA-sensitivity claim was
+  hallucinated (RETH stubs are dead code with no callers), (3)
+  `pbr.go` boundary collapses three concerns the issue lists
+  separately. Locally verified all three findings against
+  `pkg/routing/routing.go`, `pkg/cluster/`, and `pkg/daemon/`.
+- **File(s)**: `docs/pr/1544-routing-mgr-split/plan.md`,
+  `docs/pr/1544-routing-mgr-split/reviewer-ids.md`
+
 ## 2026-05-26 — #1544 plan v1 drafted
 
 - **Timestamp**: 20:17 UTC
