@@ -4256,3 +4256,22 @@
     PR #1579 at b60ea4c6.
   - **File(s)**: PR #1579, userspace-dp/src/afxdp/frame/headers.rs,
     docs/pr/1440-header-serialization-consolidate/reviewer-ids.md
+
+- **Timestamp**: 2026-05-26 13:46 UTC
+  - **Action**: #1163 (next-table resolution refactor) — PLAN-KILLED
+    after two rounds. Round 1: Codex PLAN-NEEDS-MAJOR (bare-RI
+    normalization + NAT64+PBR + 100x perf math error), Gemini
+    PLAN-KILL (perf too thin for churn). Plan v2 addressed all
+    findings, reframed as "small perf win + correctness fix." Round
+    2: Codex PLAN-READY, Gemini PLAN-KILL maintained with sharper
+    counter ("ship the bug-fix as a 2-liner, do not write a v3").
+    Per skill "Don't lower the bar" + Gemini's specific 2-line
+    alternative path, plan killed. Bare-RI normalization is a
+    latent functional bug (Go strips suffix via parseNextTableInstance,
+    Rust lookup misses) that deserves its own focused PR; the
+    perf-only refactor is over-engineering for ~0.05% of one core.
+    Killed-rationale doc at
+    docs/pr/1163-next-table-resolution/PLAN-KILLED.md.
+  - **File(s)**: docs/pr/1163-next-table-resolution/plan.md,
+    docs/pr/1163-next-table-resolution/PLAN-KILLED.md,
+    docs/pr/1163-next-table-resolution/reviewer-ids.md
