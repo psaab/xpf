@@ -3805,3 +3805,7 @@
     zero allocation / HA epoch ordering / SW design pattern all verified
     MERGE-READY. AWAITING-BATCH-MERGE marker posted.
   - **File(s)**: PR #1571
+
+- **Timestamp**: 2026-05-26
+  **Action**: #1165 plan v1 drafted — empirical baseline shows only SEG_MISS_LOG + PENDING_FILTER_COUNTER_RECORD survive in release; lean PLAN-KILL with optional minimal Change 1
+  **File(s)**: docs/pr/1165-thread-local-l1i-bloat/plan.md
