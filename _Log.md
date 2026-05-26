@@ -3738,3 +3738,20 @@
 - **Timestamp**: 2026-05-26 10:00 UTC
 - **Action**: Fold Codex r-final MERGE-NEEDS-MINOR comment findings — update 2 stale comments. (1) ErrDPDKBackendRetired comment no longer references the deleted pkg/dataplane/dpdk package-local test; points to runtime/import_canary_test.go as defense-in-depth. (2) TestSchemaValidate_AcceptsLegacyDPDKSubStanza header clarifies it guards orphaned sub-stanzas that survive the rewrite bridge, not pre-bridge schema validation.
 - **File(s)**: pkg/dataplane/dataplane.go (ErrDPDKBackendRetired comment); pkg/cmdtree/schema_validate_test.go (test header).
+# _Log for #1437 — Eliminate Handshake Allocation Path
+
+- **Timestamp**: 2026-05-26
+- **Action**: Created worktree refactor/1437-handshake-alloc-elim off origin/master @ 936b076d
+- **File(s)**: (new worktree)
+
+- **Timestamp**: 2026-05-26
+- **Action**: Investigated target code; discovered issue references file/symbols not present on master. `userspace-dp/src/afxdp/wireguard.rs` and `construct_outer_frame_allocated` were created in the (unmerged) PR #1432 boringtun path. Current master has the clean-room `wg/` module from #1499 which has no such function, no `Option<Vec<u8>> control_frame`, and no outer-frame construction code yet (deferred to a future integration PR per `wg/mod.rs:8-9`). Hot-path scratch already designed in `wg/scratch.rs::WgWorkerScratch`.
+- **File(s)**: (read-only investigation)
+
+- **Timestamp**: 2026-05-26
+- **Action**: Wrote PLAN-KILL plan v1 documenting the wrong-target finding.
+- **File(s)**: docs/pr/1437-handshake-alloc-elim/plan.md (created)
+
+- **Timestamp**: 2026-05-26
+- **Action**: Initialized reviewer-ids.md
+- **File(s)**: docs/pr/1437-handshake-alloc-elim/reviewer-ids.md (created)
