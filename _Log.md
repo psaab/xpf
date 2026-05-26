@@ -3809,3 +3809,7 @@
 - **Timestamp**: 2026-05-26
   **Action**: #1165 plan v1 drafted — empirical baseline shows only SEG_MISS_LOG + PENDING_FILTER_COUNTER_RECORD survive in release; lean PLAN-KILL with optional minimal Change 1
   **File(s)**: docs/pr/1165-thread-local-l1i-bloat/plan.md
+
+- **Timestamp**: 2026-05-26
+  **Action**: #1165 plan v1 KILLED — Codex + Gemini both PLAN-KILL with empirical verification; Codex measured Change 1 GROWING enqueue_pending_forwards 15,161→15,360 B; matches #944/#966 "doesn't reproduce" pattern
+  **File(s)**: docs/pr/1165-thread-local-l1i-bloat/{plan.md,codex-round1.md,gemini-round1.md}
