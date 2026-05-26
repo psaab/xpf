@@ -1,5 +1,37 @@
 # Action Log
 
+## 2026-05-26 — #1207 plan v1 PLAN-KILLED 3-of-3
+
+- **Timestamp**: 20:32 UTC 2026-05-26
+- **Action**: 3-of-3 external adversarial reviewers (Codex
+  `task-mpn2ygzj-3koxfu`, Gemini Pro 3 `task-mpn2z9zk-628maf`,
+  AGY `adversarial-review-mpn39vc7-1z493e`) independently
+  returned PLAN-KILL on plan v1 of #1207 queue_service skeleton
+  consolidation. Overlapping fatal findings: (1) fn-ptr
+  `(shape.drain)(...)` with `#[inline(never)]` skeleton compiles
+  to indirect `callq *(reg)` — effectively dyn, violates issue
+  acceptance criterion; (2) `(shape.insert_descriptors)(&mut writer,
+  binding)` is E0502 because `writer` already holds
+  `&mut binding.xsk.tx`; (3) 7-arg skeleton exceeds x86_64 ABI
+  6-register limit, `shape` spills to stack on hot path;
+  (4) `empty_sets_error: bool` calcifies Local-vs-Prepared
+  semantic asymmetry (plan §10 Q3 misframed the split as
+  FIFO-vs-flow-fair). AGY endorses salvage pivot: non-generic
+  `ServiceVariant` enum + 4 monomorphized `#[inline(never)]`
+  variant bodies + 1 `#[inline(never)] fn
+  finish_submission_epilogue(...)` shared tail. Realistic .text
+  savings ~1.5-3 KB (not v1's optimistic 10-12 KB); source LOC
+  -220 still meets ≥200 LOC criterion. plan.md updated to
+  PLAN-KILLED status with §11 pivot pointer. Reviewer verdicts
+  persisted verbatim under
+  `docs/pr/1207-queue-service-skeleton/review-round-1/`.
+  No PR opened. Comment posted on issue #1207 with kill
+  rationale and pivot pointer.
+- **File(s)**: docs/pr/1207-queue-service-skeleton/plan.md,
+  docs/pr/1207-queue-service-skeleton/reviewer-ids.md,
+  docs/pr/1207-queue-service-skeleton/review-round-1/
+  {codex,gemini,agy}-verdict.md
+
 ## 2026-05-26 — #1207 plan v1 (DRAFT) drafted
 
 - **Timestamp**: 20:19 UTC 2026-05-26

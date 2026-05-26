@@ -1,6 +1,66 @@
 # #1207 — Consolidate queue_service/service.rs around one monomorphized service skeleton
 
-**Status:** DRAFT v1 — pending adversarial plan review (Codex + Gemini Pro 3)
+**Status:** **PLAN-KILLED v1** — 3-of-3 external adversarial
+reviewers (Codex + Gemini Pro 3 + Antigravity) independently
+returned PLAN-KILL on 2026-05-26. Reviewer verdicts preserved
+verbatim under `review-round-1/`. Salvage pivot path captured
+in §11 below; do not pick up plan v1 — open a fresh plan v2 on
+the pivot architecture.
+
+**Reviewer task IDs (round 1):**
+- Codex `task-mpn2ygzj-3koxfu` — PLAN-KILL
+- Gemini Pro 3 `task-mpn2z9zk-628maf` — PLAN-KILL
+- Antigravity `adversarial-review-mpn39vc7-1z493e` — PLAN-KILL
+  (validates kill, endorses pivot)
+- Claude SMR (in-conversation) — PLAN-NEEDS-MAJOR escalated to
+  KILL on Codex+Gemini agreement
+
+**Why v1 died (overlapping fatal findings, 3-of-3 reviewers
+agreed):**
+
+1. **fn-ptr indirection violates "no dyn on hot path."** A
+   `#[inline(never)]` skeleton receiving `&ServiceShape` cannot
+   constant-propagate the static `SHAPE_FOO` reference;
+   `(shape.drain)(...)` compiles to indirect `callq *(reg)`,
+   codegen-isomorphic to `&dyn Trait`. Violates the issue's
+   acceptance criterion "no dyn on hot path."
+2. **`insert_descriptors(&mut writer, binding)` is E0502 (hard
+   compile error).** `writer = binding.xsk.tx.transmit(...)`
+   holds `&mut binding.xsk.tx` for its lifetime; passing
+   `binding` again through an adapter while `writer` is alive
+   fails Rust's aliasing rules. The current inline code works
+   because the compiler sees disjoint field borrows
+   intra-procedurally; funneling through a fn-pointer destroys
+   that split.
+3. **7-arg skeleton exceeds x86_64 ABI 6-register limit.** The
+   `shape: &ServiceShape` parameter spills to stack on every
+   call into the hot path. Both the skeleton and the proposed
+   `drain` adapter signature take 7 arguments.
+4. **`empty_sets_error: bool` calcifies a semantic asymmetry.**
+   The flag obscures the real distinction (Local pool
+   exhaustion vs Prepared admissibility). Plan §10 Q3 framed
+   the asymmetry as FIFO-vs-flow-fair — the real split is
+   Local-vs-Prepared (both Local variants set the error; both
+   Prepared variants stay silent). §6 table is correct; §10
+   Q3 framing is wrong.
+
+**Reviewer-endorsed salvage pivot (NOT this plan, see §11):**
+non-generic `ServiceVariant` enum + 4 monomorphized inline
+bodies + 1 `#[inline(never)] fn finish_submission_epilogue(...)`
+extracting the 60-80 LOC shared tail. Direct calls, compile-safe
+disjoint field borrows, register-perfect epilogue (cold path
+after `writer.commit()`).
+
+---
+
+## DRAFT v1 — PRESERVED BELOW FOR HISTORICAL RECORD ONLY
+
+The body of this document below is the original plan v1 that
+all three reviewers killed. It is preserved verbatim. Do NOT
+implement against this plan. See §11 at the end for the salvage
+pivot pointer.
+
+---
 
 ## 1. Issue framing
 
@@ -505,3 +565,130 @@ be deleted.
     above actually meet that bar, or do we need a property
     test that drives both the old and new code paths with the
     same input and compares per-counter deltas?
+
+---
+
+## 11. Salvage pivot for a future plan v2 (NOT this plan)
+
+All three reviewers independently converged on the same
+salvage architecture. If anyone picks #1207 back up, open a
+fresh `plan-v2.md` and run a NEW adversarial review round; do
+not assume the kill-of-v1 transfers.
+
+### Pivot architecture
+
+Keep 4 fully-specialized inline-friendly variant bodies, extract
+the shared epilogue as a single non-generic out-of-line helper:
+
+```rust
+// Public entry points stay as today (thin dispatchers).
+#[inline]
+pub(super) fn service_exact_local_queue_direct(
+    binding: &mut BindingWorker,
+    root_ifindex: i32,
+    queue_idx: usize,
+    secondary_budget: u64,
+    now_ns: u64,
+    shared_recycles: &mut Vec<(u32, u64)>,
+) -> bool {
+    let flow_fair = /* read queue.flow_fair() */;
+    if flow_fair {
+        service_local_flow_fair_body(...)
+    } else {
+        service_local_fifo_body(...)
+    }
+}
+
+// Four specialized bodies — each ~60-80 LOC after epilogue
+// extraction (was ~150 LOC). Compiler sees disjoint field
+// borrows inline; no fn-pointer indirection, no E0502.
+#[inline(never)]
+fn service_local_fifo_body(...) -> bool { ... ; finish_submission_epilogue(...) }
+#[inline(never)]
+fn service_local_flow_fair_body(...) -> bool { ... ; finish_submission_epilogue(...) }
+#[inline(never)]
+fn service_prepared_fifo_body(...) -> bool { ... ; finish_submission_epilogue(...) }
+#[inline(never)]
+fn service_prepared_flow_fair_body(...) -> bool { ... ; finish_submission_epilogue(...) }
+
+// Shared epilogue (cold path — runs AFTER writer.commit()).
+// 7-arg signature is fine here because stack spill on the
+// cold path is irrelevant; the savings come from
+// deduplicating ~60-80 LOC across 4 variants.
+#[inline(never)]
+fn finish_submission_epilogue(
+    binding: &mut BindingWorker,
+    root_ifindex: i32,
+    queue_idx: usize,
+    inserted: u32,
+    sent_packets: u64,
+    sent_bytes: u64,
+    now_ns: u64,
+) -> bool {
+    let ts_submit = monotonic_nanos();
+    stamp_submits(/* per-variant iterator — needs to be variant-specific */);
+    binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
+    binding.tx_pipeline.outstanding_tx =
+        binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
+    publish_committed_queue_vtime(...);
+    apply_direct_exact_send_result(binding, root_ifindex, queue_idx,
+        sent_packets, sent_bytes);
+    maybe_wake_tx(binding, true, now_ns);
+    sent_packets > 0 || sent_bytes > 0
+}
+```
+
+**Caveat for plan v2 author:** `stamp_submits` iterates a
+variant-specific scratch buffer with variant-specific item
+shape (`req.offset` vs `(offset, req)` tuple). The epilogue
+cannot fully share that loop without re-introducing fn-pointer
+or generic dispatch. Plan v2 must either (a) keep stamp_submits
+inside each variant body and extract only the post-stamp tail,
+or (b) introduce a tagged-union iterator that LLVM can lower to
+a static match. Both reviewers flagged this; AGY suggested
+mandatory property-based differential testing for any v2
+attempt.
+
+### Why this pivot satisfies the reviewers
+
+| v1 fatal | v2 pivot fix |
+|---|---|
+| fn-ptr → indirect `callq *(reg)` | Direct `callq label` (compiler resolves at link time) |
+| E0502 on `(insert)(&mut writer, binding)` | All borrows stay inline; compiler sees disjoint fields |
+| 7-arg hot path → stack spill | 7-arg only on cold post-commit epilogue |
+| `empty_sets_error: bool` calcifies asymmetry | Each variant inlines its own empty-handling, no shared flag |
+| No dyn-equivalent on hot path | All hot-path calls are direct; only the cold epilogue is out-of-line |
+
+### Realistic .text reduction estimate (downward-revised)
+
+Without fn-ptr unification the savings are smaller. Expected:
+- 4 × ~250 byte epilogue inline → 1 × ~400 byte
+  `finish_submission_epilogue` + 4 × ~80 byte `call` frame.
+  Net: ~600 byte savings per consolidated stage, ~2.4 KB total
+  if the entire epilogue (post-commit through return) shares.
+- If `stamp_submits` cannot be unified, savings shrink further
+  to ~1.5-2 KB.
+
+**Honest estimate: 1.5-3 KB .text reduction vs the v1 plan's
+optimistic 10-12 KB.** Source-LOC reduction still meets the
+issue's "≥ 200 LOC" criterion (4 × ~70 LOC epilogue → 1 × ~60
+LOC = -220 LOC). If a future plan v2 author cannot justify
+even this churn against #1561 (or successor) divergence risk
+in the same flight, **PLAN-KILL again is the correct call.**
+
+### Required for any plan v2
+
+- Fresh round of Codex + Gemini Pro 3 + AGY adversarial review
+  before any code is written.
+- Property-based differential test harness (AGY's hard
+  requirement): identical inputs, bit-for-bit equivalent
+  outputs across old and new bodies for the ring writes,
+  telemetry deltas, and queue-state mutations.
+- Re-measure baseline against current master before quoting any
+  .text reduction number (this plan measured 21,283 bytes at
+  master 63dfe02a; that may have moved).
+- Verify #1561 (CoSBatch null-deref) is unrelated to publish
+  ordering changes in service.rs (this plan confirmed it is —
+  #1561 is about Arc/ArcSwap snapshot install, not service-path
+  reordering). If a successor fairness/CoSBatch issue does
+  affect service.rs ordering, defer #1207 behind it.
