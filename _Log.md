@@ -1,5 +1,45 @@
 # Action Log
 
+## 2026-05-26 — #1530 Phase A.5 prep scripts
+
+- **Timestamp**: 2026-05-26T07:15:00Z
+  - **Action**: #1530 Phase A.5 — pre-stage helper scripts for the
+    DPDK final-validation matrix. Added 11 helper scripts under
+    `docs/pr/1530-dpdk-final-validation/scripts/`: per-gate runners
+    (g0..g5e), a master `run-all.sh` driver, a `build-summary.sh`
+    that regenerates `summary.md` from the artifacts/ directory after
+    each gate, an `init-summary-template.sh` that creates the Phase A
+    placeholder `summary.md`, and a `g5-capture-cos-map.sh` that
+    cross-references the cluster's CoS classifier output into a
+    class=DSCP map for the iperf3 --tos sweep. Pre-created the
+    `artifacts/` directory with a `.gitkeep` documenting the file
+    layout Phase B will populate. Updated the runbook to reference
+    the new scripts. All scripts pass `bash -n` syntax check. Smoke
+    test on the pre-merge worktree: g1-grep-dpdk correctly INFRA-FAILs
+    because dpdk_worker/ and pkg/dataplane/dpdk/ still exist;
+    g3-make-dpdk-gone correctly FAILs because all three DPDK Makefile
+    targets still have rules. Both gates will flip to PASS after #1528
+    merges.
+  - **File(s)**:
+    `docs/pr/1530-dpdk-final-validation/runbook.md`,
+    `docs/pr/1530-dpdk-final-validation/summary.md`,
+    `docs/pr/1530-dpdk-final-validation/artifacts/.gitkeep`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g0-lock-commit.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g1-grep-dpdk.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g2-build-test.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g3-make-dpdk-gone.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g4-cli-reject-dpdk.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g5-cluster-deploy.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g5-capture-cos-map.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g5-smoke-cos-off.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g5-smoke-cos-on.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g5-screen-baseline.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/g5-failover.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/build-summary.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/init-summary-template.sh`,
+    `docs/pr/1530-dpdk-final-validation/scripts/run-all.sh`,
+    `_Log.md`
+
 ## 2026-05-26 — #1476 Phase B AWAITING-MERGE at f815c357
 
 - **Timestamp**: 2026-05-26T (r3 reviewers converged, posting marker)

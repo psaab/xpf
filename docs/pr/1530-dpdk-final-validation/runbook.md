@@ -42,6 +42,38 @@ into `docs/pr/1530-dpdk-final-validation/artifacts/<gate>.log`. Use
 `tee` and `script(1)` where indicated so CLI/journal output is
 preserved verbatim.
 
+### One-shot driver
+
+The entire matrix is wrapped by `scripts/run-all.sh`, which runs each
+gate, regenerates `summary.md` after every step, and aborts on the
+first failure (unless `STOP_ON_FAIL=0`). Use it once the smoke-runner
+singleton grants cluster access:
+
+```bash
+./docs/pr/1530-dpdk-final-validation/scripts/run-all.sh
+# or with explicit override
+./docs/pr/1530-dpdk-final-validation/scripts/run-all.sh <phase3-merge-sha>
+```
+
+Individual gate scripts (described below) live under
+`docs/pr/1530-dpdk-final-validation/scripts/` and can be invoked
+directly if a single gate needs to be rerun:
+
+| Gate     | Script                          |
+|----------|---------------------------------|
+| G0       | `g0-lock-commit.sh`             |
+| G1       | `g1-grep-dpdk.sh`               |
+| G2       | `g2-build-test.sh`              |
+| G3       | `g3-make-dpdk-gone.sh`          |
+| G4       | `g4-cli-reject-dpdk.sh`         |
+| G5 prep  | `g5-cluster-deploy.sh`          |
+| G5 prep  | `g5-capture-cos-map.sh`         |
+| G5.a/b   | `g5-smoke-cos-off.sh`           |
+| G5.c     | `g5-smoke-cos-on.sh`            |
+| G5.d     | `g5-screen-baseline.sh`         |
+| G5.e     | `g5-failover.sh`                |
+| summary  | `build-summary.sh`              |
+
 ### G0: Lock to the source-removal commit
 
 ```bash
