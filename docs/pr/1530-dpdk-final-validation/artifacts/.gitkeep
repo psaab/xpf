@@ -1,0 +1,32 @@
+# Placeholder so the empty artifacts/ directory survives git.
+# Phase B execution overwrites/populates files here:
+#
+#   commit.txt
+#   commit-show.txt
+#   grep-dpdk-raw.log
+#   grep-dpdk-violations.log
+#   make-build.log
+#   make-build-ctl.log
+#   make-build-userspace-dp.log
+#   make-test.log
+#   binary-hashes.txt
+#   make-n-build-dpdk.log
+#   make-n-build-dpdk-exit.txt
+#   cli-reject-dpdk.log
+#   cli-reject-dpdk.script
+#   cluster-deploy.log
+#   cos-apply-fw{0,1}.log
+#   cluster-status-fw{0,1}.txt
+#   node-binary-hashes.txt
+#   smoke-v{4,6}-cosoff-{push,reverse}.log
+#   smoke-v{4,6}-coson-<class>-{push,reverse}.log
+#   cos-interfaces-xpf-userspace-fw{0,1}.txt
+#   cos-queues-xpf-userspace-fw{0,1}.txt
+#   cos-dscp-map.txt
+#   smoke-screen-land.log
+#   smoke-screen-land-stats.log
+#   smoke-screen-synflood.log
+#   smoke-screen-synflood-stats.log
+#   smoke-screen-icmpflood.log
+#   smoke-screen-icmpflood-stats.log
+#   make-test-failover.log
