@@ -1,6 +1,17 @@
 # #1165 Plan: Inline thread_local! / Logging Branch L1-i Bloat
 
-**Status:** DRAFT v1 — pending adversarial plan review.
+**Status:** KILLED v1 — both reviewers PLAN-KILL with quote-line
+verification. Codex (task-mpmyvz2k-xr5nck) and Gemini
+(task-mpmyuva8-69u6mj) independently reproduced the empirical
+baseline and concurred that #1165's CPU-reality framing does not
+apply to this binary. Codex also implemented the proposed Change 1
+in a throwaway tree and measured `enqueue_pending_forwards`
+GROWING from 15,161 B to 15,360 B — the proposed fix fails the
+plan's own pass criterion. Full reviewer transcripts preserved at
+codex-round1.md and gemini-round1.md alongside this plan. No code
+shipped. Issue closed with empirical-finding writeup. Pattern
+matches #944 / #966-#969 ("perf issue does not reproduce on
+current codebase").
 
 > If reviewers conclude the perf gain is too small to justify the
 > churn, **PLAN-KILL is an acceptable verdict**. The drafter's prior
