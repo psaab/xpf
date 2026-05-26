@@ -3738,3 +3738,10 @@
 - **Timestamp**: 2026-05-26 10:00 UTC
 - **Action**: Fold Codex r-final MERGE-NEEDS-MINOR comment findings — update 2 stale comments. (1) ErrDPDKBackendRetired comment no longer references the deleted pkg/dataplane/dpdk package-local test; points to runtime/import_canary_test.go as defense-in-depth. (2) TestSchemaValidate_AcceptsLegacyDPDKSubStanza header clarifies it guards orphaned sub-stanzas that survive the rewrite bridge, not pre-bridge schema validation.
 - **File(s)**: pkg/dataplane/dataplane.go (ErrDPDKBackendRetired comment); pkg/cmdtree/schema_validate_test.go (test header).
+
+## 2026-05-26 — #1545 plan v1
+
+- **Action**: Drafted plan v1 for #1545 cross-worker mirror clone alloc elimination
+- **File(s)**: docs/pr/1545-mirror-clone-alloc-elim/plan.md
+- **Strategy**: pooled `MirrorBufPool` per `BindingLiveState`, `TxBytes` enum carries `PooledMirror` variant; non-mirror callers stay on `TxBytes::Owned(Vec<u8>)`.
+- **Status**: DRAFT v1, dispatching Codex + Gemini hostile plan review.
