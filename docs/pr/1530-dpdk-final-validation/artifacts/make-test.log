@@ -1,0 +1,38 @@
+go test ./...
+ok  	github.com/psaab/xpf/cmd/cli	0.007s
+?   	github.com/psaab/xpf/cmd/xpfd	[no test files]
+ok  	github.com/psaab/xpf/pkg/api	0.476s
+ok  	github.com/psaab/xpf/pkg/appid	0.003s
+ok  	github.com/psaab/xpf/pkg/cli	0.014s
+ok  	github.com/psaab/xpf/pkg/cluster	5.612s
+ok  	github.com/psaab/xpf/pkg/cmdtree	0.004s
+ok  	github.com/psaab/xpf/pkg/config	0.083s
+ok  	github.com/psaab/xpf/pkg/configstore	0.123s
+ok  	github.com/psaab/xpf/pkg/conntrack	0.208s
+ok  	github.com/psaab/xpf/pkg/daemon	0.803s
+ok  	github.com/psaab/xpf/pkg/dataplane	0.153s
+ok  	github.com/psaab/xpf/pkg/dataplane/runtime	0.003s
+ok  	github.com/psaab/xpf/pkg/dataplane/userspace	2.967s
+ok  	github.com/psaab/xpf/pkg/dhcp	0.017s
+ok  	github.com/psaab/xpf/pkg/dhcprelay	0.026s
+ok  	github.com/psaab/xpf/pkg/dhcpserver	0.006s
+?   	github.com/psaab/xpf/pkg/eventengine	[no test files]
+ok  	github.com/psaab/xpf/pkg/fairness	0.003s
+?   	github.com/psaab/xpf/pkg/feeds	[no test files]
+ok  	github.com/psaab/xpf/pkg/flowexport	0.006s
+ok  	github.com/psaab/xpf/pkg/frr	0.046s
+ok  	github.com/psaab/xpf/pkg/fwdstatus	0.005s
+ok  	github.com/psaab/xpf/pkg/grpcapi	0.019s
+?   	github.com/psaab/xpf/pkg/grpcapi/xpfv1	[no test files]
+ok  	github.com/psaab/xpf/pkg/ipsec	0.006s
+ok  	github.com/psaab/xpf/pkg/lldp	0.006s
+ok  	github.com/psaab/xpf/pkg/logging	0.289s
+ok  	github.com/psaab/xpf/pkg/monitoriface	0.009s
+ok  	github.com/psaab/xpf/pkg/networkd	0.017s
+ok  	github.com/psaab/xpf/pkg/nftables	0.007s
+ok  	github.com/psaab/xpf/pkg/ra	0.006s
+ok  	github.com/psaab/xpf/pkg/routing	0.011s
+?   	github.com/psaab/xpf/pkg/rpm	[no test files]
+ok  	github.com/psaab/xpf/pkg/scheduler	0.008s
+ok  	github.com/psaab/xpf/pkg/snmp	0.107s
+ok  	github.com/psaab/xpf/pkg/vrrp	0.377s

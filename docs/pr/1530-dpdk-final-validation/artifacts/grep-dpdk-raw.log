@@ -1,0 +1,637 @@
+./userspace-dp/README.md:18:coverage; the DPDK backend is retired under #1525.
+./docs/userspace-master-merge-20260310.md:59:- DPDK parity updates:
+./docs/userspace-master-merge-20260310.md:60:  - `dpdk_worker/forward.c`
+./docs/userspace-master-merge-20260310.md:61:  - `dpdk_worker/shared_mem.h`
+./docs/dataplane-decision-dpdk-vs-vpp.md:1:# Dataplane Decision: DPDK vs VPP
+./docs/dataplane-decision-dpdk-vs-vpp.md:3:> **Status: Retired.** The DPDK dataplane is retired under
+./docs/dataplane-decision-dpdk-vs-vpp.md:13:- DPDK is retired under #1525. There is no in-tree dataplane
+./docs/dataplane-decision-dpdk-vs-vpp.md:14:  competition between DPDK and VPP today; the userspace AF_XDP
+./docs/dataplane-decision-dpdk-vs-vpp.md:18:- The DPDK source under `dpdk_worker/` and `pkg/dataplane/dpdk/`
+./docs/dataplane-decision-dpdk-vs-vpp.md:20:  rejection of `set system dataplane-type dpdk` is planned in
+./docs/dataplane-decision-dpdk-vs-vpp.md:22:  `-tags dpdk` are not supported for production.
+./docs/dataplane-decision-dpdk-vs-vpp.md:60:> the active decision as of 2026-03-02 when DPDK was a live
+./docs/dataplane-decision-dpdk-vs-vpp.md:62:> direction. The DPDK dataplane is retired under #1525; see the
+./docs/dataplane-decision-dpdk-vs-vpp.md:71:For this project today, **DPDK is the better next dataplane path than VPP**.
+./docs/dataplane-decision-dpdk-vs-vpp.md:74:- There is already a substantial in-tree DPDK dataplane (`dpdk_worker/*` + `pkg/dataplane/dpdk/*`) that mirrors xpf semantics.
+./docs/dataplane-decision-dpdk-vs-vpp.md:75:- The current architecture (Go control plane + compiler + dataplane interface) already supports DPDK as a backend.
+./docs/dataplane-decision-dpdk-vs-vpp.md:86:#### DPDK path (secondary backend, in-tree)
+./docs/dataplane-decision-dpdk-vs-vpp.md:89:- DPDK worker builds cleanly with current tree.
+./docs/dataplane-decision-dpdk-vs-vpp.md:91:Known DPDK gaps visible in code:
+./docs/dataplane-decision-dpdk-vs-vpp.md:92:- `pkg/dataplane/dpdk/dpdk_cgo.go`
+./docs/dataplane-decision-dpdk-vs-vpp.md:97:- `pkg/dataplane/dpdk/fib.go`
+./docs/dataplane-decision-dpdk-vs-vpp.md:98:  - ifindex -> DPDK `port_id` mapping still TODO
+./docs/dataplane-decision-dpdk-vs-vpp.md:118:DPDK aligns better with these constraints than VPP right now.
+./docs/dataplane-decision-dpdk-vs-vpp.md:122:#### Option A: Continue DPDK backend evolution (recommended)
+./docs/dataplane-decision-dpdk-vs-vpp.md:156:- **Invest in completing and hardening the DPDK backend first.**
+./docs/dataplane-decision-dpdk-vs-vpp.md:163:- DPDK backend is functionally complete/parity-acceptable.
+./docs/dataplane-decision-dpdk-vs-vpp.md:164:- Throughput goals materially exceed what eBPF+DPDK path can deliver on target hardware.
+./docs/dataplane-decision-dpdk-vs-vpp.md:168:### Execution Plan (DPDK-first)
+./docs/dataplane-decision-dpdk-vs-vpp.md:170:1. Close known DPDK functional gaps:
+./docs/dataplane-decision-dpdk-vs-vpp.md:178:- eBPF vs DPDK behavior tests for NAT, policy, failover-critical flows, counters, and CLI-visible state.
+./docs/dataplane-decision-dpdk-vs-vpp.md:188:- DPDK architecture plan: `docs/dpdk-dataplane.md` (now retired —
+./docs/active-active-new-connections.md:486:| ~~`dpdk_worker/shared_mem.h`~~ | ~~`FABRIC_ZONE_MAC_MAGIC` constant (DPDK parity)~~ — DPDK retired #1525 |
+./docs/active-active-new-connections.md:487:| ~~`dpdk_worker/zone.c`~~ | ~~Zone-encoded MAC detection placeholder~~ — DPDK retired #1525 (no further parity work) |
+./docs/active-active-new-connections.md:870:**DPDK conntrack** (retired #1525): the same pattern applied at all 4 hit
+./docs/active-active-new-connections.md:871:paths in the historical `dpdk_worker/conntrack.c` (v4 forward, v4 reverse,
+./docs/active-active-new-connections.md:873:`last_seen`. The DPDK backend is removed in #1527/#1528.
+./docs/userspace-fabric-redirect-fix.md:124:| `pkg/dataplane/dpdk/dpdk_stub.go` | `SyncFabricState()` no-op stub (retired #1525, deletion in #1528) |
+./docs/userspace-fabric-redirect-fix.md:125:| `pkg/dataplane/dpdk/dpdk_cgo.go` | `SyncFabricState()` no-op stub (retired #1525, deletion in #1528) |
+./docs/session-history.md:400:### Prompt 28: DPDK dataplane (23 phases!)
+./docs/session-history.md:402:The user asked Claude to implement a full DPDK-based alternative dataplane. This resulted in 23 micro-phases in a single session.
+./docs/session-history.md:404:**Architecture Plan** (`fc338d4`, `7884313`): Documented DPDK dataplane architecture with interrupt-driven and adaptive RX modes.
+./docs/session-history.md:408:**Phase 2-5** (`f00ee7a`): Config parsing, Go DPDK manager, C worker skeleton, build system with CGo.
+./docs/session-history.md:412:**CGo Bridge** (`a8bff8a`): Shared memory bridge for Go-to-DPDK communication.
+./docs/session-history.md:489:**Lo0 Fix** (`5175d07`): Fixed lo0 nftables prefix-list expansion, DPDK source-port byte order.
+./docs/session-history.md:653:**VPP Assessment** (`38ea955`): Created `docs/vpp-dataplane-assessment.md` with 8 initial sections: architecture overview, feature coverage vs xpf requirements, performance comparison, integration strategies (4 options: full replacement, hybrid XDP+VPP, selective acceleration, DPDK worker evolution), Go control plane integration via GoVPP, operational considerations, risk assessment, and recommendation.
+./docs/session-history.md:746:- DPDK worker: Complete 23-phase C pipeline implementation
+./docs/xdp-io-uring-userspace-dataplane.md:6:> DPDK dataplane retired in #1525. References below comparing xpf
+./docs/xdp-io-uring-userspace-dataplane.md:7:> against "the DPDK backend" describe the pre-retirement state. The
+./docs/xdp-io-uring-userspace-dataplane.md:57:- a path that is lighter-weight than full DPDK/VFIO in some environments
+./docs/xdp-io-uring-userspace-dataplane.md:62:For that, the existing DPDK plan is still the cleaner end state.
+./docs/xdp-io-uring-userspace-dataplane.md:203:be treated as the performance target when comparing against the current eBPF or DPDK
+./docs/xdp-io-uring-userspace-dataplane.md:644:The userspace dataplane needs a route/adjacency mirror, similar to the DPDK plan.
+./docs/xdp-io-uring-userspace-dataplane.md:818:Keep the existing `DataPlane` interface and implement a new backend alongside eBPF and DPDK.
+./docs/xdp-io-uring-userspace-dataplane.md:1020:- can reuse much of the DPDK route/session/config backend thinking
+./docs/xdp-io-uring-userspace-dataplane.md:1022:  committing to full DPDK/VFIO deployment requirements
+./docs/xdp-io-uring-userspace-dataplane.md:1029:- if implemented poorly, it becomes "worse than DPDK and less simple than XDP"
+./docs/xdp-io-uring-userspace-dataplane.md:1031:  disappoint relative to AF_XDP or DPDK
+./docs/xdp-io-uring-userspace-dataplane.md:1062:4. ~~If this path is pursued, is it still worth carrying both this and the DPDK backend long-term?~~ — resolved: DPDK retired in #1525, only userspace AF_XDP carries forward.
+./docs/authoritative-backlog.md:77:- ~~`docs/active-active-new-connections.md`: DPDK zone-encoded path still documented with TODO placeholder~~ (DPDK retired #1525)
+./docs/authoritative-backlog.md:108:  - stores real session `app_id` across eBPF and userspace dataplanes (DPDK retired #1525)
+./docs/authoritative-backlog.md:119:  - static DNAT now keys on ingress zone with wildcard fallback for SNAT return-path entries across eBPF and userspace (DPDK retired #1525)
+./docs/refactoring-audit.md:82:tree has multiple long-standing >2000 LOC files (`pkg/cluster/cluster.go`, `pkg/dataplane/dpdk/dpdk_cgo.go` (retired #1525, pending deletion in #1528), `pkg/api/handlers.go`, `pkg/dataplane/maps.go`, `pkg/routing/routing.go`, `pkg/dataplane/userspace/snapshot.go`) that have not yet
+./docs/fabric-bridge-tuning.md:122:**Option C:** ~~DPDK vhost-user~~ — no longer a candidate (DPDK
+./docs/fabric-bridge-tuning.md:124:networking entirely for the fabric path via DPDK vhost-user.
+./docs/next-features/twice-nat.md:26:- no support matrix spelling out whether eBPF and userspace AF_XDP have the same combined-NAT behavior (DPDK retired #1525)
+./docs/next-features/twice-nat.md:60:- if eBPF and userspace AF_XDP support Twice NAT, document that and test each path (DPDK retired #1525)
+./docs/next-features/pre-id-default-policy.md:11:- Wired into flow config/runtime flags: `pkg/dataplane/compiler.go`, `bpf/xdp/xdp_policy.c` (~~`dpdk_worker/policy.c`~~ — DPDK retired #1525)
+./docs/next-features/vsrx-fabric-fab0-fab1-syntax-compat.md:26:- ~~DPDK parity is single-fabric:~~ (DPDK retired #1525)
+./docs/next-features/vsrx-fabric-fab0-fab1-syntax-compat.md:27:  - ~~`dpdk_worker/shared_mem.h` has one `fabric_port_id`.~~
+./docs/next-features/vsrx-fabric-fab0-fab1-syntax-compat.md:28:  - ~~`pkg/dataplane/dpdk/dpdk_cgo.go` updates a single `fabric_port_id`.~~
+./docs/next-features/vsrx-fabric-fab0-fab1-syntax-compat.md:54:- ~~DPDK shared memory should hold multiple fabric ports (array/bitmap), not one `fabric_port_id`.~~ (DPDK retired #1525)
+./docs/next-features/vsrx-fabric-fab0-fab1-syntax-compat.md:80:- eBPF validates/redirects using either fabric link (DPDK retired #1525).
+./docs/next-features/application-identification.md:13:- eBPF and userspace now both preserve `session.app_id` and emit it in events/session state (DPDK retired #1525)
+./docs/next-features/ipv6-session-fast-path.md:36:1. ~~No DPDK parity in phase 1.~~ — moot: DPDK retired in #1525.
+./docs/next-features/ipv6-session-fast-path.md:151:3. XDP-only for now (~~DPDK remains on the old path~~ — DPDK retired #1525).
+./docs/next-features/ha-session-ownership-and-fabric-failover.md:4:> DPDK retired in #1525. All DPDK-parity bullets/sections below are
+./docs/next-features/ha-session-ownership-and-fabric-failover.md:132:- ~~`dpdk_worker/shared_mem.h`~~ (DPDK retired #1525)
+./docs/next-features/ha-session-ownership-and-fabric-failover.md:133:- ~~`pkg/dataplane/dpdk/dpdk_cgo.go`~~ (DPDK retired #1525)
+./docs/next-features/ha-session-ownership-and-fabric-failover.md:154:- ~~DPDK equivalents in `dpdk_worker/zone.c` and metadata definitions~~ (DPDK retired #1525)
+./docs/next-features/ha-session-ownership-and-fabric-failover.md:169:~~DPDK:~~
+./docs/next-features/ha-session-ownership-and-fabric-failover.md:171:- ~~`dpdk_worker/conntrack.c`~~ (DPDK retired #1525)
+./docs/next-features/ha-session-ownership-and-fabric-failover.md:254:2. dataplane owner stamping in XDP / TC (~~DPDK~~ retired #1525)
+./docs/vpp-dataplane-assessment.md:3:> Note: this VPP assessment was written when DPDK was a live
+./docs/vpp-dataplane-assessment.md:4:> in-tree backend candidate. Both DPDK and the historical
+./docs/vpp-dataplane-assessment.md:5:> dataplane-decision document are now retired (DPDK retirement:
+./docs/vpp-dataplane-assessment.md:12:> [`docs/dataplane-decision-dpdk-vs-vpp.md`](dataplane-decision-dpdk-vs-vpp.md)
+./docs/vpp-dataplane-assessment.md:23:and custom DPDK pipelines. The analysis covers VPP's architecture, feature set,
+./docs/vpp-dataplane-assessment.md:51:XDP-processed NICs. DPDK removes the NIC from the kernel; AF_XDP replaces the existing
+./docs/vpp-dataplane-assessment.md:71:| 4       | Four integration strategies (full replacement, hybrid, selective, DPDK worker) |
+./docs/vpp-dataplane-assessment.md:115:| Aspect               | xpf (XDP)              | xpf (DPDK worker)       | VPP                           |
+./docs/vpp-dataplane-assessment.md:142:| FIB/LPM routing       | Production   | bpf_fib_lookup / DPDK rte_lpm | Built-in with VRF support                  |
+./docs/vpp-dataplane-assessment.md:173:| Workload              | xpf (XDP native) | xpf (virtio)  | xpf (DPDK worker) | VPP (DPDK)      | VPP (AF_XDP)    |
+./docs/vpp-dataplane-assessment.md:200:2. **100G+ NICs**: DPDK PMD + VPP graph = line-rate at 100 Gbps on commodity hardware.
+./docs/vpp-dataplane-assessment.md:222:Replace XDP and DPDK worker with VPP as the sole dataplane.
+./docs/vpp-dataplane-assessment.md:225:NIC -> DPDK PMD -> VPP graph (screen -> zone -> conntrack -> policy -> NAT -> forward)
+./docs/vpp-dataplane-assessment.md:238:- NICs removed from kernel (DPDK mode) or experimental (AF_XDP mode).
+./docs/vpp-dataplane-assessment.md:241:- Existing DPDK worker (~70% complete) would be abandoned.
+./docs/vpp-dataplane-assessment.md:276:- Packet crosses kernel/userspace boundary (AF_XDP overhead vs pure DPDK).
+./docs/vpp-dataplane-assessment.md:312:### Strategy D: Complete Custom DPDK Worker (Current Path)
+./docs/vpp-dataplane-assessment.md:314:Finish the existing dpdk_worker/ implementation instead of adopting VPP.
+./docs/vpp-dataplane-assessment.md:317:NIC -> DPDK PMD -> dpdk_worker (single-pass: parse -> screen -> zone ->
+./docs/vpp-dataplane-assessment.md:329:- Minimal external dependency (just DPDK libraries).
+./docs/vpp-dataplane-assessment.md:400:type DPDKBackend struct { ... }  // shared memory writes (existing)
+./docs/vpp-dataplane-assessment.md:409:| Requirement         | VPP (DPDK mode)                      | VPP (AF_XDP mode)          | xpf (XDP)             |
+./docs/vpp-dataplane-assessment.md:429:`/etc/frr/frr.conf` and the kernel FIB is used by `bpf_fib_lookup()` / DPDK
+./docs/vpp-dataplane-assessment.md:488:### Short Term (Current): Stay on XDP + Complete DPDK Worker
+./docs/vpp-dataplane-assessment.md:492:The custom DPDK worker is ~70% complete and represents 6-8 weeks of remaining work for
+./docs/vpp-dataplane-assessment.md:495:**Action:** Finish dpdk_worker (ALG, NPTv6, FRR sync) as the high-performance tier.
+./docs/vpp-dataplane-assessment.md:503:3. Benchmark against XDP and DPDK worker on same hardware.
+./docs/vpp-dataplane-assessment.md:530:| D: Complete DPDK worker     | 40+ Gbps    | 6-8 wk  | Low    | No (DPDK)       | Current path (default) |
+./docs/vpp-dataplane-assessment.md:782:Physical NIC (DPDK) → VPP WireGuard decrypt → VPP forwarding graph → VPP WireGuard encrypt
+./docs/vpp-dataplane-assessment.md:785:- VPP owns the entire data plane (DPDK or AF_XDP NIC binding)
+./docs/vpp-dataplane-assessment.md:794:### Option E: Integrate WireGuard into xpf DPDK Worker
+./docs/vpp-dataplane-assessment.md:797:Physical NIC (DPDK PMD) → dpdk_worker (parse → WG decrypt → screen → zone →
+./docs/vpp-dataplane-assessment.md:801:- Add ChaCha20-Poly1305 to the existing single-pass DPDK pipeline
+./docs/vpp-dataplane-assessment.md:802:- Use DPDK's cryptodev API for hardware offload (QAT, AESNI-MB)
+./docs/vpp-dataplane-assessment.md:817:| Long-term   | **E** (DPDK worker integration) | Highest performance under full project control       |
+./docs/vpp-dataplane-assessment.md:852:- **Current path (XDP + DPDK worker)** remains optimal for the general firewall case.
+./docs/vpp-dataplane-assessment.md:857:  first step. VPP or DPDK integration is only warranted when tunnel throughput exceeds
+./docs/vpp-dataplane-assessment.md:1126:| **DPDK worker path**                 | Stay with keepalived                     |
+./docs/vpp-dataplane-assessment.md:1131:DPDK worker, keepalived remains the better choice — it's battle-tested, requires no VPP
+./docs/vpp-dataplane-assessment.md:1150:When VPP takes over a physical NIC (via DPDK or AF_XDP), the interface disappears from
+./docs/vpp-dataplane-assessment.md:1167:(DPDK/AF_XDP)       │  (fast-path forwarding)       (punt/inject path)
+./docs/vpp-dataplane-assessment.md:1412:### 15.2 VPP DPDK Mode + XDP: Fundamentally Incompatible
+./docs/vpp-dataplane-assessment.md:1414:When VPP takes over a NIC via DPDK, the interface is **removed from the kernel entirely**
+./docs/vpp-dataplane-assessment.md:1419:VPP DPDK mode:  NIC → vfio-pci → VPP userspace (NIC invisible to kernel)
+./docs/vpp-dataplane-assessment.md:1423:**Verdict: Not possible.** DPDK and XDP compete for the same hardware resource.
+./docs/vpp-dataplane-assessment.md:1427:VPP can use AF_XDP instead of DPDK, which keeps the NIC in the kernel. However:
+./docs/vpp-dataplane-assessment.md:1454:DPDK PMDs support programming an additional MAC address."*
+./docs/vpp-dataplane-assessment.md:1566:**VPP cannot serve as a VRRP-only frontend for XDP-processed NICs.** DPDK removes the NIC
+./docs/bugs.md:4:> DPDK retired in #1525. DPDK references in bug history below are
+./docs/bugs.md:5:> historical records of fixes that applied while the DPDK backend
+./docs/bugs.md:39:- **Fix (DPDK):** Same pattern in `dpdk_worker/conntrack.c` at all 4 hit paths (v4 fwd/rev, v6 fwd/rev)
+./docs/bugs.md:775:- **Files:** `xpf_common.h` (interface_mode flag, snat_egress_key/value structs), `xpf_maps.h` (snat_egress_ips map), `xdp_policy.c` (nat_pool_alloc_iface_v4/v6, 3 SNAT call sites), `types.go`, `dataplane.go`, `maps.go`, `loader_ebpf.go`, `compiler.go`, DPDK stubs
+./docs/bugs.md:806:- **Files:** `bpf/headers/xpf_helpers.h`, `bpf/xdp/xdp_forward.c`, `dpdk_worker/forward.c`
+./docs/bugs.md:915:### DPDK fabric redirect unsupported (FIXED #126, `dc6f6bd`)
+./docs/bugs.md:916:- **Symptom:** DPDK dataplane silently drops packets on fabric redirect paths — no equivalent of BPF `try_fabric_redirect()` helpers
+./docs/bugs.md:917:- **Root cause:** DPDK zone.c programs fabric port IDs for inbound detection but lacks the actual redirect logic
+./docs/bugs.md:918:- **Fix:** Added `slog.Warn` in `UpdateFabricFwd()`/`UpdateFabricFwd1()` and comments in `dpdk_worker/zone.c` to make the limitation visible
+./docs/refactoring-audit-current.txt:3:[REFACTOR]   2305  pkg/dataplane/dpdk/dpdk_cgo.go
+./docs/cross-worker-flow-fairness-research.md:375:### 2.8 DPDK QoS Hierarchical Scheduler
+./docs/cross-worker-flow-fairness-research.md:379:DPDK's `rte_sched` library implements a 5-level hierarchical token-bucket
+./docs/cross-worker-flow-fairness-research.md:384:**Architectural fit:** the DPDK QoS scheduler is explicitly **single-thread
+./docs/cross-worker-flow-fairness-research.md:407:Sources: [DPDK QoS Framework docs](https://doc.dpdk.org/guides/prog_guide/qos_framework.html), [PSPAT (Computer Communications '18)](https://docenti.ing.unipi.it/l.rizzo/papers/20160921-pspat.pdf)
+./docs/cross-worker-flow-fairness-research.md:486:| **DPDK QoS / PSPAT** (2.8) | Single-arbiter ceiling (~25 Gbps/core) | High — architectural refactor | Excellent per-port | Yes | None | 6-10 weeks |
+./docs/cross-worker-flow-fairness-research.md:506:  a verified symmetric key (mTCP, DPDK, and Mellanox docs all publish the
+./docs/cross-worker-flow-fairness-research.md:589:   symmetric-Toeplitz?** Relevant for Rec. 1. The mlx5 DPDK docs claim
+./docs/cross-worker-flow-fairness-research.md:610:   firewall filters), we'll want an AFQ- or DPDK-QoS-style hierarchy. For
+./docs/cross-worker-flow-fairness-research.md:637:- DPDK QoS Framework — https://doc.dpdk.org/guides/prog_guide/qos_framework.html
+./docs/cross-worker-flow-fairness-research.md:639:- NVIDIA/Mellanox MLX5 DPDK driver (rte_flow, symmetric RSS) — https://doc.dpdk.org/guides/nics/mlx5.html
+./docs/userspace-dataplane-architecture.md:312:  modulo and IPv6 lane-XOR selection (DPDK retired #1525). Active synced sessions carry the chosen
+./docs/memory.md:188:- **Testing focus:** userspace AF_XDP primary; legacy eBPF for regression coverage (DPDK retired #1525)
+./docs/memory.md:189:- **Code for both:** Do not add new DPDK code (DPDK retired #1525; removed in #1527/#1528). New work targets userspace AF_XDP and, transitionally, legacy eBPF.
+./docs/deterministic-nat-cgnat.md:144:## DPDK Parity
+./docs/deterministic-nat-cgnat.md:146:DPDK retired (#1525). The historical parity work mirrored deterministic
+./docs/deterministic-nat-cgnat.md:147:NAT struct and constant changes in `dpdk_worker/` (`shared_mem.h`
+./docs/deterministic-nat-cgnat.md:149:`policy.c` inline v4 SNAT, `nat64.c` inline v6 NAT64). The DPDK
+./docs/deterministic-nat-cgnat.md:150:backend is removed in #1527/#1528; no further DPDK parity work
+./docs/phases.md:433:## DPDK Dataplane Backend
+./docs/phases.md:436:> Historical sprint records below. The DPDK dataplane backend was
+./docs/phases.md:437:> retired in #1525; the `dpdk_worker/` and `pkg/dataplane/dpdk/`
+./docs/phases.md:441:### DPDK Phase 1-5: Foundation (`0329a45`–`acec4c9`)
+./docs/phases.md:443:- Config parsing for `dataplane-type dpdk`
+./docs/phases.md:445:- CGo shared memory bridge for Go↔DPDK communication
+./docs/phases.md:449:### DPDK Phase 6-10: NAT & Routing (`ec193ac`–`3704832`)
+./docs/phases.md:456:### DPDK Phase 11-15: Session & Multi-Queue (`48c8872`–`59c3dec`)
+./docs/phases.md:463:### DPDK Phase 16-20: GC & Monitoring (`99cf3ed`–`9530e24`)
+./docs/phases.md:470:### DPDK Phase 21-23: Counters & Stats (`337c4f7`–`c16d44d`)
+./docs/phases.md:475:### DPDK GRE-out MSS Parity (`d4390c1`)
+./docs/phases.md:490:### DPDK Worker Build Fix (`8a4b0c5`)
+./docs/phases.md:491:- Fix DPDK worker build for DPDK 25.11 API changes
+./docs/phases.md:518:#### OSPF Reference-Bandwidth, BGP Graceful-Restart, DPDK Sync (`8f9d4db`)
+./docs/phases.md:521:- **DPDK struct sync:** `scan_track_key`/`scan_track_value` structs, documented `pad_meta`/`ip_ihl` divergence
+./docs/phases.md:537:#### Route-Map Attributes, BGP Neighbor Features, OSPFv3, DPDK Sync (`383173c`)
+./docs/phases.md:542:- **DPDK sync:** `nat_port_counter`, `scan_track` tables, `redirect_capable` map structs
+./docs/phases.md:551:- Full stack: config types, schema, compiler, BPF filter_rule, DPDK filter.c parity
+./docs/phases.md:562:- **DPDK parity:** port_scan_thresh/ip_sweep_thresh in SetScreenConfig, rte_ipv6_addr migration, memzone anonymous union accessor
+./docs/phases.md:587:- **DPDK interface disable docs:** Comment clarifying that `LinkSetDown` has no effect on DPDK-bound ports (VFIO/UIO bypasses kernel driver; DPDK ports disabled by excluding from worker poll set)
+./docs/phases.md:623:- **ALGType in SetApplication:** Added ALGType uint8 parameter to DataPlane.SetApplication interface for DPDK parity
+./docs/phases.md:624:- **ClearAddressBook methods:** Added ClearAddressBookV4/V6 to DataPlane interface for clean address book recompile; eBPF iterates+deletes LPM entries, DPDK calls rte_lpm_delete_all
+./docs/phases.md:639:- **Operational commands:** All request system commands verified as already implemented; DPDK struct sync confirmed complete
+./docs/phases.md:832:- **DataPlane interface update:** `SetApplication()` signature extended with `srcPortLow, srcPortHigh uint16`; eBPF + DPDK parity
+./docs/phases.md:848:- **Host-inbound router-discovery:** New `HostInboundRouterDiscovery` flag (bit 20) for `protocols router-discovery`; BPF `host_inbound_flag()` checks ICMP type 9/10 (IRDP Router Advertisement/Solicitation); both eBPF + DPDK parity
+./docs/phases.md:877:- **DPDK source-port byte order (`5175d07`):** DPDK `policy.c` source-port comparison needed byte-order alignment with BPF values
+./docs/phases.md:880:### DPDK Parity
+./docs/phases.md:904:| `pkg/dataplane/dpdk/dpdk_cgo.go` | DPDK source-port parity |
+./docs/phases.md:905:| `pkg/dataplane/dpdk/dpdk_stub.go` | DPDK stub parity |
+./docs/phases.md:1071:**Full stack:** BPF C + Go types + config compiler + dataplane compiler + DPDK parity + tests
+./docs/phases.md:1104:- **DPDK parity:** `dpdk_stub.go` + `dpdk_cgo.go` stubs; `shared_mem.h` struct + pointer fields
+./docs/phases.md:1207:  - DPDK stubs: no-op (TODO: rte_hash_add_key_data)
+./docs/phases.md:1279:| `pkg/dataplane/dpdk/dpdk_cgo.go` | +10 | DPDK stubs |
+./docs/phases.md:1280:| `pkg/dataplane/dpdk/dpdk_stub.go` | +6 | DPDK stubs |
+./docs/phases.md:1303:| `pkg/dataplane/dpdk/dpdk_stub.go` | +7 | DPDK stubs |
+./docs/phases.md:1304:| `pkg/dataplane/dpdk/dpdk_cgo.go` | +7 | DPDK CGo stubs |
+./docs/phases.md:1348:### DPDK Parity
+./docs/phases.md:1349:- `dpdk_worker/shared_mem.h`: `struct event` extended with NAT fields (matches BPF layout)
+./docs/phases.md:1350:- `dpdk_worker/events.h`: `emit_event()` and `emit_event_with_stats()` zero NAT fields
+./docs/phases.md:1351:- `pkg/dataplane/dpdk/dpdk_cgo.go`: CGo bridge copies NAT fields from event ring
+./docs/phases.md:1373:| `dpdk_worker/shared_mem.h` | +6 | NAT fields in DPDK event struct |
+./docs/phases.md:1374:| `dpdk_worker/events.h` | +14 | Zero NAT fields in DPDK emit functions |
+./docs/phases.md:1375:| `pkg/dataplane/dpdk/dpdk_cgo.go` | +5 | CGo bridge NAT field copy |
+./docs/phases.md:1382:- Both eBPF and DPDK paths updated (4 conntrack locations each + session creation)
+./docs/phases.md:1707:| `dpdk_worker/tables.h` | `GLOBAL_CTR_FABRIC_REDIRECT`, `GLOBAL_CTR_MAX` |
+./docs/phases.md:1824:### DPDK Parity
+./docs/phases.md:1825:- `SCREEN_SYN_COOKIE` and counter defines in `dpdk_worker/shared_mem.h` + `tables.h`
+./docs/phases.md:1844:| `dpdk_worker/shared_mem.h` | SCREEN_SYN_COOKIE, flood_state update |
+./docs/phases.md:1845:| `dpdk_worker/tables.h` | 4 counter defines, GLOBAL_CTR_MAX=31 |
+./docs/phases.md:1900:### DPDK Parity
+./docs/phases.md:1901:Inline deterministic v6 allocation in `dpdk_worker/nat64.c`
+./docs/phases.md:1986:no-syn-check-in-tunnel, rst-invalidate-session) in BPF and DPDK datapaths.
+./docs/phases.md:1999:  DPDK: `dpdk_worker/conntrack.c` equivalent logic.
+./docs/phases.md:2005:  DPDK: `dpdk_worker/conntrack.c` equivalent.
+./docs/phases.md:2031:- `dpdk_worker/conntrack.c` — DPDK no-syn-check + rst-invalidate-session
+./docs/phases.md:2032:- `dpdk_worker/shared_mem.h` — DPDK shared flow config struct
+./docs/phases.md:2033:- `pkg/dataplane/dpdk/dpdk_cgo.go` — CGo flow config bridge
+./docs/phases.md:2034:- `pkg/dataplane/dpdk/dpdk_stub.go` — stub for non-DPDK builds
+./docs/phases.md:2038:## Sprint FEAT-4: Proxy ARP, Session Limiting, BFD Profiles, DPDK Policer
+./docs/phases.md:2045:### Feature 1: DPDK Policer Parity
+./docs/phases.md:2047:eBPF policer (`evaluate_policer()` in `xpf_helpers.h`) already worked. DPDK had structs
+./docs/phases.md:2050:- **`dpdk_worker/policer.c`** (new) — Ports BPF token bucket to DPDK:
+./docs/phases.md:2055:- **`dpdk_worker/filter.c`** — `#include "policer.c"`, policer check after rule match/DSCP rewrite
+./docs/phases.md:2056:- **`dpdk_worker/tables.h`** — `MAX_POLICERS 64`
+./docs/phases.md:2057:- **`pkg/dataplane/dpdk/dpdk_cgo.go`** — `SetPolicerConfig()` + `ClearPolicerConfigs()`
+./docs/phases.md:2126:- **DPDK parity:**
+./docs/phases.md:2129:  - `dpdk_cgo.go` — `UpdateSessionCountSrc`/`UpdateSessionCountDst`/`ClearSessionCounts`
+./docs/phases.md:2130:  - `dpdk_stub.go` — Stubs
+./docs/phases.md:2330:| `dpdk_worker/shared_mem.h` | rg_active array, rg_id field |
+./docs/phases.md:2331:| `dpdk_worker/main.c` | Forwarding check placeholder |
+./docs/phases.md:2332:| `pkg/dataplane/dpdk/dpdk_cgo.go` | UpdateRGActive(), SetZone rgID |
+./docs/phases.md:2333:| `pkg/dataplane/dpdk/dpdk_stub.go` | Stub methods |
+./docs/phases.md:2387:| `dpdk_worker/shared_mem.h` | `FABRIC_ZONE_MAC_MAGIC` constant |
+./docs/phases.md:2388:| `dpdk_worker/zone.c` | Zone-encoded MAC detection placeholder |
+./docs/phases.md:2498:| `pkg/dataplane/dpdk/dpdk_cgo.go` | DPDK stub for SetSNATEgressIP/ClearSNATEgressIPs |
+./docs/phases.md:2499:| `pkg/dataplane/dpdk/dpdk_stub.go` | DPDK stub for SetSNATEgressIP/ClearSNATEgressIPs |
+./docs/phases.md:2687:Six improvements to fabric forwarding reliability in chassis cluster HA deployments. Focus: stale fabric_fwd entry clearing when paths die, oper-state validation before programming, event-driven fabric refresh via netlink, session sync connection stability with dual fabrics, gRPC/monitor failover across dual fabric addresses, and DPDK fabric redirect limitation documentation.
+./docs/phases.md:2729:### Fix #126: Mark DPDK fabric redirect as unsupported (`dc6f6bd`)
+./docs/phases.md:2731:**Problem:** The DPDK dataplane programs fabric port IDs for inbound zone-encoded MAC detection but has no equivalent of the BPF `try_fabric_redirect()` and `try_fabric_redirect_with_zone()` helpers. Users enabling DPDK in HA clusters would get silent packet drops on fabric redirect paths.
+./docs/phases.md:2733:**Fix:** Added `slog.Warn` calls in `UpdateFabricFwd()` and `UpdateFabricFwd1()` in DPDK CGo bridge. Clarified the limitation in `dpdk_worker/zone.c` comments. This makes the gap visible in logs rather than silently dropping.
+./docs/phases.md:2735:**Files:** `dpdk_worker/zone.c`, `pkg/dataplane/dpdk/dpdk_cgo.go`
+./docs/phases.md:2748:| `dpdk_worker/zone.c` | DPDK fabric redirect limitation comments |
+./docs/phases.md:2749:| `pkg/dataplane/dpdk/dpdk_cgo.go` | `slog.Warn` in `UpdateFabricFwd`/`UpdateFabricFwd1` |
+./docs/userspace-dataplane-gaps.md:22:DPDK is retired (#1525). The DPDK backend, `dpdk_worker/`, and
+./docs/userspace-dataplane-gaps.md:23:`pkg/dataplane/dpdk/` are removed in #1527/#1528. The historical
+./docs/userspace-dataplane-gaps.md:24:`#1475` policy that confined DPDK's root `DataPlane` dependency to
+./docs/userspace-dataplane-gaps.md:25:`pkg/dataplane/dpdk` and the `cmd/xpfd/main.go` registration import
+./docs/userspace-dataplane-gaps.md:27:AF_XDP dataplane retirement gate, not DPDK.
+./docs/userspace-dataplane-gaps.md:40:| Source NAT (pool mode) | Implemented with scoped caveats | IPv4/IPv6 pool address and port allocation. Global `source address-persistent` uses the documented userspace-v1 SHA-256 source-IP hash and is stable only within the AF_XDP backend, pool family, pool order, and pool size. Legacy eBPF uses C-word IPv4 modulo / IPv6 lane-XOR selection (DPDK retired #1525), so new-flow pool address parity is not promised across retained backend transitions. Pool-mode rules with missing pools, empty pools, invalid port ranges, malformed addresses, no address for the packet family, or exhausted live translated tuples fail closed at the `poll_descriptor.rs` source-NAT call sites before session creation or forwarding, with recent-exception reasons such as `source_nat_pool_missing`, `source_nat_pool_empty`, `source_nat_pool_invalid_port_range`, and `source_nat_pool_exhausted`. Per-pool `persistent-nat` now has snapshot fields and runtime lease reuse keyed by source tuple `(protocol, source IP, source port)` to translated tuple. The lease table is bounded in helper memory, survives compatible in-process snapshot refreshes, and expires after the configured inactivity timeout once no live flow uses the lease. It does not consult Go `PersistentNATTable` and does not survive helper restart. The closed #1449 contract gates HA behavior explicitly: HA configs that reference persistent source-NAT pools are not admitted because leases are not synchronized, and status reports `userspace persistent-nat source pool leases are not HA-synchronized`. Userspace status, CLI summary, and Prometheus expose live-flow, used-port, persistent-lease, allocation, reuse, and exhaustion counters for admitted non-HA pools. |
+./docs/userspace-dataplane-gaps.md:91:| DPDK backend | Retired in #1525. The historical #1475 backend-local exception for its root `DataPlane` dependency applied pre-retirement; #1527 removes the registration import and #1528 deletes the package. |
+./docs/dpdk-dataplane.md:1:# DPDK Dataplane for xpf — Architecture Plan
+./docs/dpdk-dataplane.md:4:> a DPDK-based xpf dataplane. The DPDK dataplane is retired under
+./docs/dpdk-dataplane.md:14:- DPDK is retired under #1525. The userspace AF_XDP dataplane
+./docs/dpdk-dataplane.md:17:- The DPDK source under `dpdk_worker/` and `pkg/dataplane/dpdk/`
+./docs/dpdk-dataplane.md:19:  builds with `-tags dpdk` are not supported for production.
+./docs/dpdk-dataplane.md:20:- Commit-time rejection of `set system dataplane-type dpdk` is
+./docs/dpdk-dataplane.md:26:  [`docs/dataplane-decision-dpdk-vs-vpp.md`](dataplane-decision-dpdk-vs-vpp.md)
+./docs/dpdk-dataplane.md:43:> the active architecture plan when DPDK was a live in-tree
+./docs/dpdk-dataplane.md:45:> DPDK dataplane is retired under #1525; see the banner at the
+./docs/dpdk-dataplane.md:49:DPDK as a separately supported backend for binaries built with
+./docs/dpdk-dataplane.md:50:`-tags dpdk`, outside the #1373 eBPF source-removal path until it
+./docs/dpdk-dataplane.md:52:bridge was confined to `pkg/dataplane/dpdk`, with only the blank
+./docs/dpdk-dataplane.md:54:and non-DPDK builds rejected DPDK startup explicitly instead of
+./docs/dpdk-dataplane.md:60:Add a DPDK-based dataplane as an alternative to the current XDP/TC eBPF pipeline. The existing `pkg/dataplane.Manager` API is already well-abstracted — the daemon, CLI, gRPC, config system, and all subsystems interact through this interface, not through BPF-specific code. A DPDK implementation would swap the packet processing engine while keeping everything else unchanged.
+./docs/dpdk-dataplane.md:62:### Why DPDK?
+./docs/dpdk-dataplane.md:64:| | XDP/TC (current) | DPDK (proposed) |
+./docs/dpdk-dataplane.md:66:| **Throughput** | 25+ Gbps native XDP | 40-100+ Gbps with DPDK PMDs |
+./docs/dpdk-dataplane.md:69:| **NIC support** | Any NIC with XDP driver | NICs with DPDK PMD (Intel, Mellanox, etc.) |
+./docs/dpdk-dataplane.md:73:| **Deployment** | Zero-dependency (kernel built-in) | Requires hugepages, DPDK libs, dedicated cores |
+./docs/dpdk-dataplane.md:114:#### Proposed Architecture (DPDK)
+./docs/dpdk-dataplane.md:129:│  │ eBPF backend  │    │    DPDK backend          │    │
+./docs/dpdk-dataplane.md:137:│                       │  │ C/Rust DPDK worker │  │    │
+./docs/dpdk-dataplane.md:147:                                    │ DPDK PMD
+./docs/dpdk-dataplane.md:214:#### Phase 2: DPDK Worker Process (C)
+./docs/dpdk-dataplane.md:216:Write the DPDK packet processing pipeline in C (or Rust). This replicates the 14 BPF programs as userspace functions.
+./docs/dpdk-dataplane.md:219:dpdk_worker/
+./docs/dpdk-dataplane.md:233:└── Makefile            — DPDK build with meson/ninja
+./docs/dpdk-dataplane.md:236:**Key DPDK APIs used:**
+./docs/dpdk-dataplane.md:245:**Data structure mapping (BPF → DPDK):**
+./docs/dpdk-dataplane.md:247:| BPF Map Type | DPDK Equivalent |
+./docs/dpdk-dataplane.md:314:#### Phase 3: Go ↔ DPDK Communication
+./docs/dpdk-dataplane.md:316:The Go control plane needs to update DPDK data structures (zones, policies, sessions) and read counters/sessions back.
+./docs/dpdk-dataplane.md:322:│   Go (xpfd)    │          │  DPDK Worker (C)  │
+./docs/dpdk-dataplane.md:324:│  DPDKManager     │◄────────►│  Shared hugepage   │
+./docs/dpdk-dataplane.md:342:- DPDK worker applies them to local tables
+./docs/dpdk-dataplane.md:345:**Option C: DPDK Secondary Process**
+./docs/dpdk-dataplane.md:347:- Go runs as DPDK secondary process (shares EAL memory)
+./docs/dpdk-dataplane.md:348:- Direct access to all DPDK data structures
+./docs/dpdk-dataplane.md:349:- Cleanest integration but requires DPDK EAL in Go process
+./docs/dpdk-dataplane.md:351:**Recommendation:** Option A (shared memory via CGo). It keeps the Go process lightweight while giving direct access to DPDK hash tables.
+./docs/dpdk-dataplane.md:356:// pkg/dataplane/dpdk/tables.go
+./docs/dpdk-dataplane.md:358:// #cgo CFLAGS: -I/usr/include/dpdk
+./docs/dpdk-dataplane.md:364:type DPDKManager struct {
+./docs/dpdk-dataplane.md:371:func (m *DPDKManager) SetZone(ifindex int, vlanID uint16, zoneID uint16, routingTable uint32) error {
+./docs/dpdk-dataplane.md:390:#### Phase 4: Go DPDKManager Implementation
+./docs/dpdk-dataplane.md:392:Implement the `DataPlane` interface for DPDK.
+./docs/dpdk-dataplane.md:395:// pkg/dataplane/dpdk/manager.go
+./docs/dpdk-dataplane.md:397:type DPDKManager struct {
+./docs/dpdk-dataplane.md:398:    worker     *exec.Cmd        // DPDK worker process
+./docs/dpdk-dataplane.md:420:func (m *DPDKManager) Load() error {
+./docs/dpdk-dataplane.md:421:    // 1. Init DPDK EAL (as secondary process or via worker)
+./docs/dpdk-dataplane.md:424:    // 4. Launch DPDK worker process
+./docs/dpdk-dataplane.md:428:func (m *DPDKManager) Compile(cfg *config.Config) error {
+./docs/dpdk-dataplane.md:430:    // But targets DPDK hash tables instead of ebpf.Map
+./docs/dpdk-dataplane.md:434:func (m *DPDKManager) AttachXDP(ifindex int, forceGeneric bool) error {
+./docs/dpdk-dataplane.md:435:    // DPDK equivalent: bind NIC port to PMD
+./docs/dpdk-dataplane.md:442:- Uses CGo for DPDK hash/LPM operations
+./docs/dpdk-dataplane.md:454:    "Dataplane backend: ebpf (default) or dpdk")
+./docs/dpdk-dataplane.md:460:    case "dpdk":
+./docs/dpdk-dataplane.md:461:        dp = dpdk.NewDPDKManager(dpdkConfig)
+./docs/dpdk-dataplane.md:467:**DPDK-specific config (in Junos syntax):**
+./docs/dpdk-dataplane.md:471:    dataplane dpdk {
+./docs/dpdk-dataplane.md:490:build-dpdk:
+./docs/dpdk-dataplane.md:491:    cd dpdk_worker && meson build && ninja -C build
+./docs/dpdk-dataplane.md:492:    CGO_ENABLED=1 CGO_CFLAGS="-I/usr/include/dpdk" \
+./docs/dpdk-dataplane.md:494:    go build -tags dpdk -o xpfd ./cmd/xpfd
+./docs/dpdk-dataplane.md:497:    make generate && make build  # Current flow, no DPDK deps
+./docs/dpdk-dataplane.md:508:DPDK: `rte_hash` with same key/value layout in hugepage memory
+./docs/dpdk-dataplane.md:521:**Lock-free update:** DPDK `rte_hash` supports RCU-based lock-free readers with `RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY_LF`. Worker threads read without locks; Go control plane writes with RCU protection.
+./docs/dpdk-dataplane.md:527:DPDK: `rte_lpm` (IPv4) / `rte_lpm6` (IPv6)
+./docs/dpdk-dataplane.md:541:DPDK: Per-lcore counter arrays — same pattern
+./docs/dpdk-dataplane.md:560:**Problem:** DPDK takes exclusive ownership of NIC ports via VFIO/UIO. The kernel loses visibility.
+./docs/dpdk-dataplane.md:562:- Management interface (mgmt0) stays in kernel (not bound to DPDK)
+./docs/dpdk-dataplane.md:564:- Or use bifurcated driver (mlx5) that shares NIC between kernel and DPDK
+./docs/dpdk-dataplane.md:567:**Problem:** FRR manages routes via kernel; DPDK bypasses kernel networking.
+./docs/dpdk-dataplane.md:570:- Maintain userspace FIB in DPDK (replicate kernel routing table)
+./docs/dpdk-dataplane.md:572:- FRR route changes → notification → update DPDK FIB
+./docs/dpdk-dataplane.md:575:**Problem:** Kernel ARP won't work for DPDK-owned interfaces.
+./docs/dpdk-dataplane.md:577:- Implement ARP responder in DPDK worker (answer ARP requests)
+./docs/dpdk-dataplane.md:585:- KNI interface: DPDK → kernel for host-inbound
+./docs/dpdk-dataplane.md:586:- Or virtio-user pair: DPDK writes to virtio-user → kernel picks up
+./docs/dpdk-dataplane.md:587:- Filter in DPDK: if dest_ip == self → punt to kernel via KNI
+./docs/dpdk-dataplane.md:590:**Problem:** DPDK doesn't use kernel VLAN sub-interfaces.
+./docs/dpdk-dataplane.md:592:- Handle VLAN tag/untag in DPDK pipeline (already done in BPF)
+./docs/dpdk-dataplane.md:596:**Problem:** DPDK process restart loses all NIC state.
+./docs/dpdk-dataplane.md:600:- New DPDK worker re-attaches to existing shared memory
+./docs/dpdk-dataplane.md:614:Pure poll-mode DPDK burns 100% CPU on dedicated cores even with zero traffic. This is unacceptable for branch/edge deployments, VMs, or any environment where power efficiency matters. xpf supports three RX modes that trade latency for power.
+./docs/dpdk-dataplane.md:620:    dataplane dpdk {
+./docs/dpdk-dataplane.md:636:Uses DPDK's `rte_eth_dev_rx_intr_*` API to sleep on an epoll fd until the NIC signals new packets.
+./docs/dpdk-dataplane.md:639:// dpdk_worker/rx_interrupt.c
+./docs/dpdk-dataplane.md:677:**Interrupt coalescing:** NICs batch interrupts to avoid per-packet overhead. Configure via ethtool before DPDK binding or via PMD-specific devargs:
+./docs/dpdk-dataplane.md:679:# Before DPDK binding
+./docs/dpdk-dataplane.md:682:# Or via DPDK devargs
+./docs/dpdk-dataplane.md:691:// dpdk_worker/rx_adaptive.c
+./docs/dpdk-dataplane.md:745:    dataplane dpdk {
+./docs/dpdk-dataplane.md:760:// dpdk_worker/power.c
+./docs/dpdk-dataplane.md:780:DPDK's `rte_power` library integrates with Linux cpufreq governors (intel_pstate, acpi-cpufreq) to scale frequency per-core. In interrupt mode at idle:
+./docs/dpdk-dataplane.md:791:    dataplane dpdk {
+./docs/dpdk-dataplane.md:829:// dpdk_worker/main.c
+./docs/dpdk-dataplane.md:858:| | XDP (current) | DPDK Poll | DPDK Interrupt | DPDK Adaptive |
+./docs/dpdk-dataplane.md:867:The interrupt and adaptive modes make DPDK viable for the same environments where XDP currently runs — without the 100% CPU penalty. Adaptive mode is the recommended default for most deployments.
+./docs/dpdk-dataplane.md:874:| 2 | DPDK worker (C packet pipeline) | 3-4 weeks | DPDK dev environment |
+./docs/dpdk-dataplane.md:875:| 3 | Go ↔ DPDK shared memory + CGo | 2-3 weeks | Phase 2 |
+./docs/dpdk-dataplane.md:876:| 4 | DPDKManager implementation | 2 weeks | Phase 1, 3 |
+./docs/dpdk-dataplane.md:883:Rather than implementing everything at once, the DPDK backend could be brought up incrementally:
+./docs/dpdk-dataplane.md:903:├── dpdk/
+./docs/dpdk-dataplane.md:904:│   ├── manager.go       # DPDKManager implementing DataPlane
+./docs/dpdk-dataplane.md:910:dpdk_worker/
+./docs/dpdk-dataplane.md:929:└── meson.build          # DPDK build file
+./docs/dpdk-dataplane.md:934:1. **Language for worker:** C (native DPDK) vs Rust (safety + performance) vs Go with DPDK bindings (simplicity but GC pauses)
+./docs/dpdk-dataplane.md:935:   - **Recommendation:** C for worker, Go for control plane. Matches DPDK ecosystem.
+./docs/dpdk-dataplane.md:937:2. **Communication model:** Shared memory vs IPC vs DPDK secondary process
+./docs/dpdk-dataplane.md:944:   - **Recommendation:** Static initially. Config specifies which cores for DPDK.
+./docs/feature-gaps.md:12:> DPDK retired in #1525. References below to "eBPF and DPDK" or
+./docs/feature-gaps.md:13:> "eBPF, DPDK, and userspace" parity describe the pre-retirement
+./docs/feature-gaps.md:14:> state; the DPDK backend is removed in #1527/#1528.
+./docs/feature-gaps.md:169:| **Twice NAT** | Combination of SNAT + DNAT rule-sets matching same traffic | Simultaneous source and destination translation in single flow. | Medium | **Done** -- Combined SNAT+DNAT flows now preserve both translations in one session path. Static DNAT is keyed by ingress zone with wildcard fallback for SNAT return-path entries across eBPF and userspace (DPDK retired #1525). Userspace post-DNAT SNAT matching now evaluates destination filters against the translated destination, and session/gRPC visibility preserves both NAT legs. |
+./docs/feature-gaps.md:173:| **Port Randomization Control** | `security nat source pool ... port-randomization disable` | Disable random port selection in SNAT (use sequential instead). Enabled by default. | Low | **Done** -- `port-randomization disable` now compiles for source pools and is enforced in XDP SNAT allocators (DPDK retired #1525). |
+./docs/feature-gaps.md:203:| **TCP No-SYN-Check** | `security flow tcp-session no-syn-check` | Allow mid-stream TCP session pickup (useful after failover or asymmetric routing) | Medium | **Done** (`2114333`) — BPF flow_config tcp_flags bit, creates ESTABLISHED state for non-SYN first packet. eBPF (DPDK retired #1525). |
+./docs/feature-gaps.md:205:| **TCP RST Invalidate Session** | `security flow tcp-session rst-invalidate-session` | Immediately invalidate session on TCP RST instead of waiting for timeout | Medium | **Done** (`2114333`) — sets timeout=0/last_seen=0 on RST so next GC sweep deletes immediately. eBPF (DPDK retired #1525). |
+./docs/feature-gaps.md:315:| **vSRX Dual Fabric Syntax Compatibility (`fab0` + `fab1`)** | `interfaces fab0/fab1 fabric-options member-interfaces ...` | Native vSRX HA syntax models two fabric links. Requires multi-fabric transport/data-plane (not single `fabric-interface`). | High | Partial (parser/compiler/runtime support `fab0` + `fab1` syntax, dual-fabric sync transport, CLI visibility, and eBPF/userspace fabric forwarding; ~~DPDK dual-fabric parity~~ — DPDK retired #1525, moot) |
+./docs/feature-gaps.md:326:| **Policer (Rate Limiting)** | `firewall policer ... bandwidth-limit N burst-size-limit N` | Token-bucket rate limiter applied to filter terms or interfaces. Single-rate two-color, three-color policers. | High | Partial for #1373: legacy eBPF/~~DPDK~~ (DPDK retired #1525) token-bucket policer support existed; userspace supports the admitted filter path and the color-blind `then discard` three-color slice. #1375 is closed; unsupported color-aware/non-drop behavior and broader Junos parity remain production/future parity work, not active #1373 source-removal blockers. |
+./docs/feature-gaps.md:327:| **Three-Color Policer** | `firewall three-color-policer ...` | RFC 2697/2698 metering with green/yellow/red marking based on CIR/CBS/EBS or CIR/PIR | Medium | Legacy eBPF/~~DPDK~~ (DPDK retired #1525) done; userspace AF_XDP supports color-blind `then discard` with compatible snapshot continuity. #1375 is closed; remaining color-aware/non-drop action parity plus integration, failover, and performance hardening are production/future parity work, not active #1373 source-removal blockers. |
+./docs/feature-gaps.md:407:xpf has hostname, domain-name, domain-search, timezone, name-servers, NTP, services (SSH, web-management, DNS), syslog, SNMP, login users/classes, root-authentication, archival, internet-options, backup-router, DHCP server (Kea), and ~~DPDK~~ config (DPDK retired #1525, removed in #1527/#1528).
+./docs/feature-gaps.md:442:3. ~~**Firewall Filter Policers**~~ - **Legacy done** (token bucket: single-rate, two-rate RFC 2698, single-rate-3c RFC 2697; eBPF + ~~DPDK~~ (DPDK retired #1525)). Userspace supports the color-blind `then discard` three-color slice; #1375 is closed. Remaining color-aware/non-drop and broader Junos parity work is production/future parity, not active #1373 source-removal work.
+./docs/feature-gaps.md:516:- eBPF parity (DPDK retired #1525); userspace supports the color-blind `then discard`
+./docs/perf-ranked-backlog.md:49:- touches eBPF and Go dataplane tooling (DPDK retired #1525)
+./CLAUDE.md:111:> DPDK dataplane retired in #1525. Do not add new DPDK code. The
+./CLAUDE.md:112:> `dpdk_worker/` C tree and `pkg/dataplane/dpdk/` Go manager are
+./README.md:327:| `bpf/headers/*.h` | Shared constants and C structs retained until userspace replacements exist (DPDK retired #1525) |
+./pkg/daemon/runtime_probes.go:44:// retained for forward compatibility (DPDK had a real one before
+./pkg/daemon/daemon_run.go:48:// (legacy eBPF retirement) and #1527 (DPDK Phase 2), the only
+./pkg/daemon/daemon_run.go:51:// ErrEBPFBackendRetired, and "dataplane-type dpdk" →
+./pkg/daemon/daemon_run.go:52:// ErrDPDKBackendRetired. Unknown/custom types and any future
+./pkg/daemon/daemon_run.go:282:		if errors.Is(err, dataplane.ErrDPDKBackendRetired) {
+./pkg/daemon/daemon_run.go:283:			// #1527 Phase 2 of the DPDK retirement (umbrella
+./pkg/daemon/daemon_run.go:284:			// #1525): the runtime DPDK backend is gone, but a
+./pkg/daemon/daemon_run.go:286:			// dpdk" persisted in the active config from before
+./pkg/daemon/daemon_run.go:296:			// `dataplane-type dpdk` to empty before compile, so
+./pkg/daemon/daemon_run.go:303:			slog.Warn("the DPDK dataplane backend has been retired; running in config-only mode until config is updated",
+./pkg/daemon/daemon_run.go:311:			// eBPF dataplane. Behaviour mirrors the DPDK arm
+./pkg/daemon/daemon_run.go:396:		// need a userspace route populator (DPDK had one; retired
+./pkg/daemon/dataplane_boot_test.go:47:// sentinel (the soft-fallback at daemon_run.go that mirrors the DPDK
+./pkg/daemon/dataplane_boot_test.go:66:// TestBuildRuntimeDataPlaneDPDKReturnsRetired asserts that the helper
+./pkg/daemon/dataplane_boot_test.go:67:// propagates dataplane.ErrDPDKBackendRetired unchanged for the retired
+./pkg/daemon/dataplane_boot_test.go:68:// DPDK selection. The daemon outer loop has an errors.Is branch that
+./pkg/daemon/dataplane_boot_test.go:70:func TestBuildRuntimeDataPlaneDPDKReturnsRetired(t *testing.T) {
+./pkg/daemon/dataplane_boot_test.go:73:	dp, err := buildRuntimeDataPlane(dataplane.TypeDPDK)
+./pkg/daemon/dataplane_boot_test.go:75:		t.Fatalf("buildRuntimeDataPlane(dpdk) = %T, nil; want ErrDPDKBackendRetired", dp)
+./pkg/daemon/dataplane_boot_test.go:77:	if !errors.Is(err, dataplane.ErrDPDKBackendRetired) {
+./pkg/daemon/dataplane_boot_test.go:78:		t.Fatalf("buildRuntimeDataPlane(dpdk) err = %v; want errors.Is(ErrDPDKBackendRetired)", err)
+./pkg/daemon/dataplane_boot_test.go:81:		t.Fatalf("buildRuntimeDataPlane(dpdk) returned non-nil dp = %T", dp)
+./pkg/daemon/dataplane_boot_test.go:90:// the DPDK retirement sentinel (sentinel reserved for "dpdk" only).
+./pkg/daemon/dataplane_boot_test.go:101:	if errors.Is(err, dataplane.ErrDPDKBackendRetired) {
+./pkg/daemon/dataplane_boot_test.go:102:		t.Fatalf("buildRuntimeDataPlane(unknown) returned ErrDPDKBackendRetired; sentinel must be reserved for dpdk")
+./pkg/daemon/rss_indirection.go:155:		// Non-userspace deploys (ebpf/dpdk) hit this path every boot —
+./pkg/daemon/host_tunables.go:337:// eBPF/DPDK/no-dataplane deploys never receive the default — their
+./pkg/daemon/README.md:17:are completed (DPDK retired #1525). Userspace currently reaches those old callers through
+./pkg/daemon/README.md:26:and retired-DPDK sentinel handling stay unchanged.
+./pkg/daemon/daemon_ha_sync.go:678:				// "system dataplane-type dpdk" config triggers
+./pkg/daemon/daemon_ha_sync.go:679:				// dataplane.ErrDPDKBackendRetired and daemon_run.go falls
+./pkg/daemon/host_tunables_test.go:73:	// eBPF/DPDK deploys MUST keep the host's native values unless the
+./pkg/cmdtree/schema_validate_test.go:9:// TestSchemaValidate_AcceptsLegacyDPDKSubStanza is the Codex r6 v3.3
+./pkg/cmdtree/schema_validate_test.go:12:// which walks `system dataplane` tolerates orphaned legacy DPDK
+./pkg/cmdtree/schema_validate_test.go:16:// bridge strips the `dataplane-type dpdk` leaf, but any nested
+./pkg/cmdtree/schema_validate_test.go:19:// preempt the operator-facing commit-time `ErrDPDKDataplaneRetired`
+./pkg/cmdtree/schema_validate_test.go:21:// blackout for pre-#1526 persisted DPDK configs).
+./pkg/cmdtree/schema_validate_test.go:26:// alongside the comprehensive legacy DPDK shape. The cos block
+./pkg/cmdtree/schema_validate_test.go:27:// forces the walker to fire; the DPDK leaves must be ignored.
+./pkg/cmdtree/schema_validate_test.go:33://     walker rejects the DPDK fixture, this test fires.
+./pkg/cmdtree/schema_validate_test.go:37://     tolerance rejects the DPDK leaves and fires this test.
+./pkg/cmdtree/schema_validate_test.go:44:func TestSchemaValidate_AcceptsLegacyDPDKSubStanza(t *testing.T) {
+./pkg/cmdtree/schema_validate_test.go:51:		// Legacy DPDK shape — must NOT be rejected.
+./pkg/cmdtree/schema_validate_test.go:52:		"set system dataplane-type dpdk",
+./pkg/cmdtree/schema_validate_test.go:82:	// legacy DPDK shape. If a future PR adds a top-level
+./pkg/cmdtree/schema_validate_test.go:86:		t.Fatalf("SchemaValidate rejected legacy DPDK sub-stanza alongside valid cos block: %v", err)
+./pkg/api/config_commit_test.go:36:// not a success-with-warning response. Mirrors the DPDK reject
+./pkg/configstore/store_test.go:1454:// #1526 — the DPDK retirement reject must fire at the Store boundary
+./pkg/configstore/store_test.go:1460:const dpdkRetirementSubstr = "the DPDK dataplane backend has been retired; use 'set system dataplane-type userspace' (see #1525)"
+./pkg/configstore/store_test.go:1462:func TestCommit_RejectsDPDKDataplaneType(t *testing.T) {
+./pkg/configstore/store_test.go:1467:	if err := s.SetFromInput("system dataplane-type dpdk"); err != nil {
+./pkg/configstore/store_test.go:1474:		t.Fatal("CommitCheck succeeded for dataplane-type dpdk; expected retirement reject")
+./pkg/configstore/store_test.go:1476:	if !strings.Contains(ccErr.Error(), dpdkRetirementSubstr) {
+./pkg/configstore/store_test.go:1477:		t.Fatalf("CommitCheck error = %q, want substring %q", ccErr.Error(), dpdkRetirementSubstr)
+./pkg/configstore/store_test.go:1488:		t.Fatal("Commit succeeded for dataplane-type dpdk; expected retirement reject")
+./pkg/configstore/store_test.go:1490:	if !strings.Contains(cmErr.Error(), dpdkRetirementSubstr) {
+./pkg/configstore/store_test.go:1491:		t.Fatalf("Commit error = %q, want substring %q", cmErr.Error(), dpdkRetirementSubstr)
+./pkg/configstore/store_test.go:1501:// commit cleanly without warnings about DPDK retirement.
+./pkg/configstore/store_test.go:1518:// TestLoad_PersistedDPDKDataplaneTypeRewrittenByLoad exercises the
+./pkg/configstore/store_test.go:1520:// retirement) and re-confirmed for DPDK at #1528. A pre-#1526
+./pkg/configstore/store_test.go:1521:// persisted `set system dataplane-type dpdk` must survive
+./pkg/configstore/store_test.go:1527:func TestLoad_PersistedDPDKDataplaneTypeRewrittenByLoad(t *testing.T) {
+./pkg/configstore/store_test.go:1531:	// Write a tree containing dataplane-type dpdk directly via
+./pkg/configstore/store_test.go:1535:	path, err := config.ParseSetCommand("set system dataplane-type dpdk")
+./pkg/configstore/store_test.go:1547:	// because rewriteRetiredDataplaneType strips the dpdk leaf to
+./pkg/configstore/store_test.go:1552:		t.Fatalf("Load() rejected persisted dpdk dataplane-type: %v", err)
+./pkg/configstore/store_test.go:1556:		t.Fatal("ActiveConfig() returned nil after Load with persisted dpdk")
+./pkg/configstore/store_test.go:1564:// TestLoad_PersistedDPDKDataplaneTypeWithSubStanzaRewrittenByLoad
+./pkg/configstore/store_test.go:1566:// comprehensive legacy DPDK shape (dataplane-type + cores + memory +
+./pkg/configstore/store_test.go:1570://  1. rewriteRetiredDataplaneType strips `system dataplane-type dpdk`
+./pkg/configstore/store_test.go:1578:func TestLoad_PersistedDPDKDataplaneTypeWithSubStanzaRewrittenByLoad(t *testing.T) {
+./pkg/configstore/store_test.go:1585:		"set system dataplane-type dpdk",
+./pkg/configstore/store_test.go:1612:		t.Fatalf("Load() rejected persisted full DPDK sub-stanza: %v", err)
+./pkg/configstore/store_test.go:1616:		t.Fatal("ActiveConfig() returned nil after Load with persisted full DPDK sub-stanza")
+./pkg/configstore/dataplane_retire_test.go:37:// TestRewriteRetiredDataplaneType_DPDK exercises the symmetric DPDK
+./pkg/configstore/dataplane_retire_test.go:39:// did not introduce DPDK rewrite but consolidated the helper so
+./pkg/configstore/dataplane_retire_test.go:41:func TestRewriteRetiredDataplaneType_DPDK(t *testing.T) {
+./pkg/configstore/dataplane_retire_test.go:44:	tree := mustParseTree(t, "set system dataplane-type dpdk")
+./pkg/configstore/dataplane_retire_test.go:130:// TestRewriteRetiredDataplaneType_ApplyGroupsDPDK is the symmetric
+./pkg/configstore/dataplane_retire_test.go:131:// DPDK case. Both retired values share the same group-walking code
+./pkg/configstore/dataplane_retire_test.go:134:func TestRewriteRetiredDataplaneType_ApplyGroupsDPDK(t *testing.T) {
+./pkg/configstore/dataplane_retire_test.go:140:            dataplane-type dpdk;
+./pkg/configstore/dataplane_retire_test.go:154:		t.Fatalf("rewriteRetiredDataplaneType = %d; want 1 (apply-groups-nested dpdk)", got)
+./pkg/configstore/dataplane_retire_test.go:158:		t.Fatalf("CompileConfigForNode after rewrite (apply-groups dpdk): %v", err)
+./pkg/configstore/dataplane_retire_test.go:161:		t.Fatalf("post-rewrite DataplaneType = %q; want empty (rewritten from group-injected dpdk)",
+./pkg/configstore/dataplane_retire.go:7:// Both #1525 (DPDK) and #1373 (legacy eBPF) intentionally keep
+./pkg/configstore/dataplane_retire.go:8:// dpdk and ebpf as recognized parser tokens so old configs do not
+./pkg/configstore/dataplane_retire.go:15://     ErrEBPFDataplaneRetired / ErrDPDKDataplaneRetired inside
+./pkg/configstore/dataplane_retire.go:51:	"dpdk": "DPDK dataplane retired (see #1525); rewriting to userspace default",
+./pkg/configstore/store.go:97:	// with `system dataplane-type ebpf` or `... dpdk` persisted
+./pkg/configstore/store.go:100:	// ErrEBPFDataplaneRetired / ErrDPDKDataplaneRetired, the daemon
+./pkg/configstore/store.go:217:	// the retired DPDK or eBPF dataplane. Strict-validator-driven
+./pkg/config/types.go:436:	DataplaneType            string   // empty defaults to "userspace"; explicit "ebpf" is legacy; "dpdk" is retired (#1525) and tolerated via rewriteRetiredDataplaneType (pkg/configstore/dataplane_retire.go) at both Store.Load and Store.SyncApply for stored-config rolling upgrade
+./pkg/config/compiler_system.go:238:			case dataplaneTypeDPDK:
+./pkg/config/compiler_system.go:239:				// DPDK retired in #1525 / #1528. This branch is reachable
+./pkg/config/compiler_system.go:241:				// carries a `dataplane-type dpdk` leaf — i.e., a commit-path
+./pkg/config/compiler_system.go:244:				// the `dataplane-type dpdk` leaf so sys.DataplaneType == ""
+./pkg/config/compiler_system.go:251:				// dropped here because the DPDKConfig type is deleted.
+./pkg/config/compiler_system.go:254:				// ErrDPDKDataplaneRetired, so the no-op here is inconsequential.
+./pkg/config/compiler_system.go:393:					"dpdk parses for legacy-config compatibility but is "+
+./pkg/config/parser_system_test.go:1383:	// The DPDKDataplane field was deleted in #1528. Omitted dataplane-type
+./pkg/config/parser_system_test.go:1384:	// defaults to userspace; nothing else to assert about DPDK here.
+./pkg/config/parser_system_test.go:1399:// after the #1476 mechanical source removal. Mirrors the DPDK reject
+./pkg/config/parser_system_test.go:1400:// pattern in TestDPDKConfigCompileRejects (#1526).
+./pkg/config/parser_system_test.go:1428:	// `dpdk` was previously included in this loop; it now hard-errors
+./pkg/config/parser_system_test.go:1430:	// reach the deprecated-eBPF warning surface. The DPDK rejection
+./pkg/config/parser_system_test.go:1431:	// is covered by TestDPDKConfigCompileRejects and by the dedicated
+./pkg/config/compiler_test.go:28:// and validateDataplaneTypeStrict only rejects explicit `dpdk`.
+./pkg/config/compiler_test.go:32:// The DPDK precheck stays fail-fast (#1526 contract pinned by
+./pkg/config/compiler_test.go:33:// TestDataplaneTypeDPDKRejectedAtCommitFiresFirst); this test
+./pkg/config/compiler_test.go:75:	// Defense-in-depth: DPDK sentinel must not surface — DPDK was
+./pkg/config/compiler_test.go:77:	if errors.Is(err, ErrDPDKDataplaneRetired) {
+./pkg/config/compiler_test.go:78:		t.Errorf("errors.Is(err, ErrDPDKDataplaneRetired) = true; DPDK was not in fixture: %q", errStr)
+./pkg/config/compiler_test.go:159:	// CompileConfig return through to ErrDPDKDataplaneRetired ==
+./pkg/config/compiler_test.go:160:	// false (DPDK not in this fixture). This is incidental
+./pkg/config/compiler_test.go:163:	if errors.Is(err, ErrDPDKDataplaneRetired) {
+./pkg/config/compiler_test.go:164:		t.Errorf("errors.Is(err, ErrDPDKDataplaneRetired) = true; DPDK not in fixture: %q", err.Error())
+./pkg/config/compiler.go:11:// ErrDPDKDataplaneRetired is the sentinel error returned at commit
+./pkg/config/compiler.go:12:// time when a configuration sets `system dataplane-type dpdk`. External
+./pkg/config/compiler.go:18:// Mirrors the runtime-side dataplane.ErrDPDKBackendRetired sentinel
+./pkg/config/compiler.go:21:var ErrDPDKDataplaneRetired = errors.New(
+./pkg/config/compiler.go:22:	"the DPDK dataplane backend has been retired; " +
+./pkg/config/compiler.go:258:	// TestDataplaneTypeDPDKRejectedAtCommitFiresFirst in
+./pkg/config/compiler.go:264:	// #1525 dpdk handle both this way). See
+./pkg/config/compiler.go:303:	// #1539: the structural invariant `cfg.System.DPDKDataplane = nil`
+./pkg/config/compiler.go:305:	// AST leakage of retired DPDK sub-tree fields. After this PR
+./pkg/config/compiler.go:306:	// deletes the DPDKDataplane field entirely (per #1539 author's
+./pkg/config/compiler.go:358:// commit time. The parse path accepts `dataplane-type dpdk` as a
+./pkg/config/compiler.go:366://	"the DPDK dataplane backend has been retired; use 'set system dataplane-type userspace' (see #1525)"
+./pkg/config/compiler.go:376:	if cfg.System.DataplaneType == dataplaneTypeDPDK {
+./pkg/config/compiler.go:377:		return ErrDPDKDataplaneRetired
+./pkg/config/compiler.go:1056:	dataplaneTypeDPDK      = "dpdk"
+./pkg/config/compiler.go:1069:	case dataplaneTypeEBPF, dataplaneTypeDPDK, dataplaneTypeUserspace:
+./pkg/config/ast.go:1389:			"socket-mem":     {args: 1, desc: "Legacy DPDK socket memory (retired, ignored)", children: nil},
+./pkg/config/parser_ast_test.go:2622:// TestDPDKConfigParsesCleanly documents that the flat-set syntax for
+./pkg/config/parser_ast_test.go:2623:// the retired DPDK dataplane stanza still parses (so `load merge`
+./pkg/config/parser_ast_test.go:2625:// TestDPDKConfigCompileRejects exercises the commit-time reject.
+./pkg/config/parser_ast_test.go:2628:// populated DPDKDataplane fields. After #1526 commit-time reject,
+./pkg/config/parser_ast_test.go:2631:func TestDPDKConfigParsesCleanly(t *testing.T) {
+./pkg/config/parser_ast_test.go:2632:	lines := []string{"set system dataplane-type dpdk", "set system dataplane cores 2-5", "set system dataplane memory 2048", "set system dataplane socket-mem \"1024,1024\"", "set system dataplane rx-mode adaptive", "set system dataplane rx-mode idle-threshold 256", "set system dataplane rx-mode resume-threshold 32", "set system dataplane rx-mode sleep-timeout 100", "set system dataplane ports 0000:03:00.0 interface wan0", "set system dataplane ports 0000:03:00.0 rx-mode polling", "set system dataplane ports 0000:03:00.0 cores 2-3", "set system dataplane ports 0000:06:00.0 interface trust0"}
+./pkg/config/parser_ast_test.go:2643:	// Tree should hold the DPDK syntax verbatim — parse must not
+./pkg/config/parser_ast_test.go:2645:	// Flat-set form represents `set system dataplane-type dpdk` as
+./pkg/config/parser_ast_test.go:2646:	// Node{Keys:[dataplane-type, dpdk], IsLeaf:true} under system.
+./pkg/config/parser_ast_test.go:2655:	// Either flat-set leaf (Keys = [dataplane-type, dpdk]) or
+./pkg/config/parser_ast_test.go:2656:	// hierarchical (Keys = [dataplane-type], Children = [Node{dpdk}]).
+./pkg/config/parser_ast_test.go:2663:	if parsedValue != "dpdk" {
+./pkg/config/parser_ast_test.go:2664:		t.Fatalf("dataplane-type dpdk did not survive parse: %+v", dpType)
+./pkg/config/parser_ast_test.go:2666:	// Compile is expected to fail; covered by TestDPDKConfigCompileRejects.
+./pkg/config/parser_ast_test.go:2669:// TestDPDKConfigCompileRejects reuses the comprehensive DPDK schema
+./pkg/config/parser_ast_test.go:2670:// fixture from TestDPDKConfigParsesCleanly and asserts the new
+./pkg/config/parser_ast_test.go:2673:func TestDPDKConfigCompileRejects(t *testing.T) {
+./pkg/config/parser_ast_test.go:2674:	lines := []string{"set system dataplane-type dpdk", "set system dataplane cores 2-5", "set system dataplane memory 2048", "set system dataplane socket-mem \"1024,1024\"", "set system dataplane rx-mode adaptive", "set system dataplane rx-mode idle-threshold 256", "set system dataplane rx-mode resume-threshold 32", "set system dataplane rx-mode sleep-timeout 100", "set system dataplane ports 0000:03:00.0 interface wan0", "set system dataplane ports 0000:03:00.0 rx-mode polling", "set system dataplane ports 0000:03:00.0 cores 2-3", "set system dataplane ports 0000:06:00.0 interface trust0"}
+./pkg/config/parser_ast_test.go:2687:		t.Fatal("CompileConfig succeeded for dataplane-type dpdk; expected retirement rejection")
+./pkg/config/parser_ast_test.go:2693:	if !strings.Contains(err.Error(), dpdkRetirementSubstr) {
+./pkg/config/parser_ast_test.go:2694:		t.Fatalf("CompileConfig error = %q, want substring %q", err.Error(), dpdkRetirementSubstr)
+./pkg/config/parser_ast_test.go:2697:	// to match the DPDK retirement reject with errors.Is rather than
+./pkg/config/parser_ast_test.go:2699:	// part of the contract (see dpdkRetirementSubstr above), but the
+./pkg/config/parser_ast_test.go:2701:	if !errors.Is(err, ErrDPDKDataplaneRetired) {
+./pkg/config/parser_ast_test.go:2702:		t.Fatalf("CompileConfig error = %v, want errors.Is(err, ErrDPDKDataplaneRetired)", err)
+./pkg/config/parser_ast_test.go:2774:// dpdkRetirementSubstr is the verbatim message #1526 contracts at
+./pkg/config/parser_ast_test.go:2779:const dpdkRetirementSubstr = "the DPDK dataplane backend has been retired; use 'set system dataplane-type userspace' (see #1525)"
+./pkg/config/parser_ast_test.go:2781:// TestDataplaneTypeDPDKRejectedAtCommit — flat-set form. Mirrors the
+./pkg/config/parser_ast_test.go:2784:func TestDataplaneTypeDPDKRejectedAtCommit(t *testing.T) {
+./pkg/config/parser_ast_test.go:2786:		"set system dataplane-type dpdk",
+./pkg/config/parser_ast_test.go:2801:		t.Fatal("CompileConfig succeeded for dataplane-type dpdk (flat-set form)")
+./pkg/config/parser_ast_test.go:2803:	if !strings.Contains(err.Error(), dpdkRetirementSubstr) {
+./pkg/config/parser_ast_test.go:2804:		t.Fatalf("CompileConfig error = %q, want substring %q", err.Error(), dpdkRetirementSubstr)
+./pkg/config/parser_ast_test.go:2808:// TestDataplaneTypeDPDKRejectedAtCommitHierarchical — same assertion
+./pkg/config/parser_ast_test.go:2809:// via the `system { dataplane-type dpdk; }` AST shape to confirm
+./pkg/config/parser_ast_test.go:2811:func TestDataplaneTypeDPDKRejectedAtCommitHierarchical(t *testing.T) {
+./pkg/config/parser_ast_test.go:2813:    dataplane-type dpdk;
+./pkg/config/parser_ast_test.go:2824:		t.Fatal("CompileConfig succeeded for hierarchical dataplane-type dpdk")
+./pkg/config/parser_ast_test.go:2826:	if !strings.Contains(err.Error(), dpdkRetirementSubstr) {
+./pkg/config/parser_ast_test.go:2827:		t.Fatalf("CompileConfig error = %q, want substring %q", err.Error(), dpdkRetirementSubstr)
+./pkg/config/parser_ast_test.go:2831:// TestDataplaneTypeDPDKRejectedAtCommitFiresFirst — locks in the
+./pkg/config/parser_ast_test.go:2832:// validator ordering decision (DPDK reject is the FIRST strict
+./pkg/config/parser_ast_test.go:2844://   1. The DPDK retirement message wins (the policer error does
+./pkg/config/parser_ast_test.go:2848://      live — otherwise removing the dpdk line would surface
+./pkg/config/parser_ast_test.go:2855:func TestDataplaneTypeDPDKRejectedAtCommitFiresFirst(t *testing.T) {
+./pkg/config/parser_ast_test.go:2883:	// Now combine the dpdk type and the bad policer. The DPDK
+./pkg/config/parser_ast_test.go:2886:    dataplane-type dpdk;
+./pkg/config/parser_ast_test.go:2907:		t.Fatal("CompileConfig succeeded for dpdk + malformed policer candidate")
+./pkg/config/parser_ast_test.go:2909:	if !strings.Contains(err.Error(), dpdkRetirementSubstr) {
+./pkg/config/parser_ast_test.go:2910:		t.Fatalf("CompileConfig error = %q, want DPDK retirement substring (policer error should not win): %q", err.Error(), dpdkRetirementSubstr)
+./pkg/config/parser_ast_test.go:2914:		t.Fatalf("policer error leaked through DPDK retirement reject: %q", err.Error())
+./pkg/config/parser_ast_test.go:2918:// TestDataplaneTypeDPDKRejectedAtCommitViaApplyGroups — verifies
+./pkg/config/parser_ast_test.go:2920:// injected `dataplane-type dpdk` is caught by the strict validator
+./pkg/config/parser_ast_test.go:2923:func TestDataplaneTypeDPDKRejectedAtCommitViaApplyGroups(t *testing.T) {
+./pkg/config/parser_ast_test.go:2927:            dataplane-type dpdk;
+./pkg/config/parser_ast_test.go:2941:		t.Fatal("CompileConfigForNode succeeded for apply-groups-injected dpdk")
+./pkg/config/parser_ast_test.go:2943:	if !strings.Contains(err.Error(), dpdkRetirementSubstr) {
+./pkg/config/parser_ast_test.go:2944:		t.Fatalf("CompileConfigForNode error = %q, want substring %q", err.Error(), dpdkRetirementSubstr)
+./pkg/config/parser_ast_test.go:2951:// validateDataplaneTypeStrict ever broadens to reject non-DPDK
+./pkg/config/parser_ast_test.go:2974:	// No mention of the DPDK retirement substring anywhere on
+./pkg/config/parser_ast_test.go:2977:		if strings.Contains(w, dpdkRetirementSubstr) {
+./pkg/config/parser_ast_test.go:2978:			t.Fatalf("DPDK retirement substring leaked into warnings on userspace path: %v", cfg.Warnings)
+./pkg/cli/runtime.go:13:// LegacyDataPlaneAdapter, the DPDK manager) already satisfies it.
+./pkg/dataplane/apply.go:16:// one domain at a time. The eBPF, DPDK, and userspace managers have
+./pkg/dataplane/retirement_boundary_canary_test.go:54:	"pkg/daemon/daemon_run.go":                 "runtime wiring still uses legacy dataplane.ErrDPDKBackendRetired sentinel handling and constructs api/grpcapi/cli configs against the daemon-local probes in runtime_probes.go (#1519 capstone)",
+./pkg/dataplane/retirement_boundary_canary_test.go:163:// TestDPDKBackendImportStaysBackendLocal was deleted in #1528 along
+./pkg/dataplane/retirement_boundary_canary_test.go:164:// with the pkg/dataplane/dpdk package itself. With the backend
+./pkg/dataplane/retirement_boundary_canary_test.go:165:// package gone, the Go compiler enforces the "no DPDK import"
+./pkg/dataplane/retirement_boundary_canary_test.go:170:// `github.com/psaab/xpf/pkg/dataplane/dpdk` in the forbidden-import
+./pkg/dataplane/retirement_boundary_canary_test.go:173:// TestDPDKEBPFArtifactImportsStayAtLegacyAdapter was deleted in
+./pkg/dataplane/retirement_boundary_canary_test.go:174:// #1528. The canary policed a package (pkg/dataplane/dpdk) that no
+./pkg/dataplane/retirement_boundary_canary_test.go:1683:// TestRetirementBoundaryDocsMentionDPDKPolicy was deleted in #1528.
+./pkg/dataplane/retirement_boundary_canary_test.go:1684:// The canary pinned a "DPDK remains a separately supported backend"
+./pkg/dataplane/compiler_iface.go:474:				// Note: For DPDK-bound ports, LinkSetDown has no effect because
+./pkg/dataplane/compiler_iface.go:475:				// DPDK takes over the NIC via VFIO/UIO, bypassing the kernel
+./pkg/dataplane/compiler_iface.go:476:				// driver. DPDK ports are disabled by not including them in the
+./pkg/dataplane/compiler_test.go:478:	// Verify the three-way semantics used in xdp_forward / dpdk forward:
+./pkg/dataplane/runtime/import_canary_test.go:14:// backend (userspace, dpdk), the root pkg/dataplane package (which contains
+./pkg/dataplane/runtime/import_canary_test.go:47:		"github.com/psaab/xpf/pkg/dataplane/dpdk",
+./pkg/dataplane/README.md:14:the old `DataPlane` surface (DPDK retired #1525; removed in #1527/#1528).
+./pkg/dataplane/README.md:19:eBPF rollback and retired-DPDK sentinel; unknown/custom types still surface the
+./pkg/dataplane/README.md:26:DPDK retirement (#1525): the historical #1475 policy that retained DPDK as
+./pkg/dataplane/README.md:27:a separately supported DPDK-build backend is no longer in force. The
+./pkg/dataplane/README.md:28:`pkg/dataplane/dpdk` bridge, the `cmd/xpfd/main.go` blank registration
+./pkg/dataplane/README.md:31:"DPDK Backend Retired (#1525)" section now describes the remaining
+./pkg/dataplane/README.md:32:Phase 1 reject machinery (commit-time `ErrDPDKDataplaneRetired`,
+./pkg/dataplane/README.md:33:`TypeDPDK` sentinel, runtime `ErrDPDKBackendRetired`) which is kept
+./pkg/dataplane/README.md:45:  legacy eBPF compiler and compatibility adapters (DPDK retired #1525). New
+./pkg/dataplane/README.md:47:- DPDK backend deleted in #1528 (umbrella #1525). The `pkg/dataplane/dpdk`
+./pkg/dataplane/README.md:56:  kept for the explicit legacy eBPF rollback, the retired-DPDK sentinel, and
+./pkg/dataplane/compiler.go:133:// It works with any DataPlane backend (eBPF or DPDK) via the interface.
+./pkg/dataplane/dataplane.go:13:// ErrDPDKBackendRetired is returned from NewDataPlane and
+./pkg/dataplane/dataplane.go:14:// NewRuntimeDataPlane when caller code still asks for the DPDK
+./pkg/dataplane/dataplane.go:15:// backend after Phase 2 of the DPDK retirement (#1527, umbrella
+./pkg/dataplane/dataplane.go:21:// still pass TypeDPDK through. Defense-in-depth against silent
+./pkg/dataplane/dataplane.go:24:// canary) after #1528 deleted pkg/dataplane/dpdk and its
+./pkg/dataplane/dataplane.go:26:var ErrDPDKBackendRetired = errors.New(
+./pkg/dataplane/dataplane.go:27:	"the DPDK dataplane backend has been retired; use " +
+./pkg/dataplane/dataplane.go:56:// TypeDPDK is preserved as a typed token for the retirement-error
+./pkg/dataplane/dataplane.go:58:// #1525.  No production code path may construct a DPDK backend
+./pkg/dataplane/dataplane.go:59:// through the registry — see ErrDPDKBackendRetired and the
+./pkg/dataplane/dataplane.go:63:	TypeDPDK      = "dpdk"
+./pkg/dataplane/dataplane.go:132:// backendRegistry holds constructors for non-eBPF, non-DPDK dataplane
+./pkg/dataplane/dataplane.go:133:// backends.  After the Phase 2 DPDK retirement (#1527, umbrella #1525)
+./pkg/dataplane/dataplane.go:141:// Panics if dpType is TypeDPDK: the DPDK backend was retired in Phase 2
+./pkg/dataplane/dataplane.go:142:// of #1525 (#1527).  NewDataPlane intercepts TypeDPDK before consulting
+./pkg/dataplane/dataplane.go:143:// the registry, so any registered DPDK constructor would be silently
+./pkg/dataplane/dataplane.go:146:	if dpType == TypeDPDK {
+./pkg/dataplane/dataplane.go:147:		panic("TypeDPDK backend registration rejected: DPDK retired in #1527 (umbrella #1525)")
+./pkg/dataplane/dataplane.go:153:// Panics if dpType is TypeDPDK for the same reason as RegisterBackend.
+./pkg/dataplane/dataplane.go:155:	if dpType == TypeDPDK {
+./pkg/dataplane/dataplane.go:156:		panic("TypeDPDK runtime backend registration rejected: DPDK retired in #1527 (umbrella #1525)")
+./pkg/dataplane/dataplane.go:176:		// removal. Mirrors the DPDK retirement pattern.
+./pkg/dataplane/dataplane.go:178:	case TypeDPDK:
+./pkg/dataplane/dataplane.go:179:		return nil, ErrDPDKBackendRetired
+./pkg/dataplane/dataplane.go:184:		// Legacy NewDataPlane retains TypeEBPF and TypeDPDK only as
+./pkg/dataplane/dataplane.go:190:		return nil, fmt.Errorf("unknown dataplane type %q (use NewRuntimeDataPlane for userspace; ebpf and dpdk are retired)", dpType)
+./pkg/dataplane/dataplane.go:204:		// ErrDPDKBackendRetired branch) and runs in config-only
+./pkg/dataplane/dataplane.go:207:	case TypeDPDK:
+./pkg/dataplane/dataplane.go:209:		// -> dpdk, so this branch cannot intercept legitimate
+./pkg/dataplane/dataplane.go:210:		// empty-default callers.  Any TypeDPDK that reaches here
+./pkg/dataplane/dataplane.go:211:		// is an explicit "set system dataplane-type dpdk" that
+./pkg/dataplane/dataplane.go:213:		return nil, ErrDPDKBackendRetired
+./pkg/dataplane/dataplane.go:235:// backend is the primary/default target after Phase 2 of the DPDK retirement.
+./pkg/dataplane/dataplane.go:391:	// that need a userspace route populator (DPDK had one; retired

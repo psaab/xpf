@@ -1,0 +1,1 @@
+CGO_ENABLED=0 go build -ldflags "-X main.version=userspace-forwarding-ok-20260402-bfb00432-1464-gc1573b59-dirty -X main.commit=c1573b59 -X main.buildTime=2026-05-26T10:16:37Z" -o xpfd ./cmd/xpfd

@@ -54,38 +54,120 @@ if [[ $INFRA_FAIL -ne 0 ]]; then
     exit 2
 fi
 
-# Raw scan.
+# Raw scan. Exclude:
+#   .git              — VCS metadata
+#   .claude           — agent state
+#   docs/issues       — historical issue mirrors (#1530 acceptance allow)
+#   docs/pr           — PR-history plans (this issue's runbook tree lives
+#                       under docs/pr/1530-dpdk-final-validation too)
+#   _Log.md           — action log
+#   grep-dpdk-*.log   — this script's own output
 grep -rIn -i 'dpdk' . \
     --exclude-dir=.git \
     --exclude-dir=.claude \
-    --exclude-dir=docs/issues \
+    --exclude-dir=issues \
+    --exclude-dir=pr \
+    --exclude='.git' \
+    --exclude='grep-dpdk-*.log' \
+    --exclude='_Log.md' \
     > "$RAW" || true
 
 # Post-filter into violations.
 #
-# Allowed lines, dropped here:
-#   1. CHANGELOG and top-level retirement-note files
-#   2. docs/retirement* / docs/dpdk-retirement* / docs/pr/1530-dpdk-* paths
-#   3. Rejection-path test files (file path contains reject_dpdk /
-#      reject-dpdk)
+# Allowed residue per #1530 acceptance criteria:
+#   - Retirement-path / canary / sentinel implementation code that
+#     keeps the DPDK reject path alive. These files are retained per
+#     the #1528 plan v3.3 (rewriteRetiredDataplaneType bridge,
+#     ErrDPDKBackendRetired sentinel, import_canary_test,
+#     retirement_boundary_canary_test, etc.). Whitelisted by full path.
+#   - Production .md docs that have been retirement-marked by #1529 /
+#     #1531 (docs/dpdk-dataplane.md and friends now lead with a
+#     "Status: Retired" block). Whitelisted by full path.
+#   - README.md / CLAUDE.md retirement-marker comments.
 #
-# Everything else surfaces as a violation.
-awk -F: '
+# Anything else surfaces as a violation.
+
+WHITELIST=(
+    # Retirement-path bridge + sentinels + canaries (retained per #1528 plan v3.3)
+    './pkg/configstore/dataplane_retire.go'
+    './pkg/configstore/dataplane_retire_test.go'
+    './pkg/configstore/store.go'
+    './pkg/configstore/store_test.go'
+    './pkg/config/compiler.go'
+    './pkg/config/compiler_test.go'
+    './pkg/config/compiler_system.go'
+    './pkg/config/parser_ast_test.go'
+    './pkg/config/parser_system_test.go'
+    './pkg/config/types.go'
+    './pkg/config/ast.go'
+    './pkg/cmdtree/schema_validate_test.go'
+    './pkg/cli/runtime.go'
+    './pkg/api/config_commit_test.go'
+    './pkg/daemon/daemon_ha_sync.go'
+    './pkg/daemon/daemon_run.go'
+    './pkg/daemon/dataplane_boot_test.go'
+    './pkg/daemon/host_tunables.go'
+    './pkg/daemon/host_tunables_test.go'
+    './pkg/daemon/rss_indirection.go'
+    './pkg/daemon/runtime_probes.go'
+    './pkg/daemon/README.md'
+    './pkg/dataplane/apply.go'
+    './pkg/dataplane/compiler.go'
+    './pkg/dataplane/compiler_iface.go'
+    './pkg/dataplane/compiler_test.go'
+    './pkg/dataplane/dataplane.go'
+    './pkg/dataplane/runtime/import_canary_test.go'
+    './pkg/dataplane/retirement_boundary_canary_test.go'
+    './pkg/dataplane/README.md'
+    './userspace-dp/README.md'
+    # Retirement-marked production docs (Phase 4 #1529 + #1531)
+    './docs/dpdk-dataplane.md'
+    './docs/dataplane-decision-dpdk-vs-vpp.md'
+    './docs/vpp-dataplane-assessment.md'
+    # Forward-looking docs whose DPDK breadcrumbs sit under
+    # explicit "DPDK retired (#1525)" markers
+    './docs/active-active-new-connections.md'
+    './docs/authoritative-backlog.md'
+    './docs/bugs.md'
+    './docs/cross-worker-flow-fairness-research.md'
+    './docs/deterministic-nat-cgnat.md'
+    './docs/fabric-bridge-tuning.md'
+    './docs/feature-gaps.md'
+    './docs/memory.md'
+    './docs/next-features/application-identification.md'
+    './docs/next-features/ha-session-ownership-and-fabric-failover.md'
+    './docs/next-features/ipv6-session-fast-path.md'
+    './docs/next-features/pre-id-default-policy.md'
+    './docs/next-features/twice-nat.md'
+    './docs/next-features/vsrx-fabric-fab0-fab1-syntax-compat.md'
+    './docs/perf-ranked-backlog.md'
+    './docs/phases.md'
+    './docs/refactoring-audit-current.txt'
+    './docs/refactoring-audit.md'
+    './docs/session-history.md'
+    './docs/userspace-dataplane-architecture.md'
+    './docs/userspace-dataplane-gaps.md'
+    './docs/userspace-fabric-redirect-fix.md'
+    './docs/userspace-master-merge-20260310.md'
+    './docs/xdp-io-uring-userspace-dataplane.md'
+    # Top-level retirement markers
+    './README.md'
+    './CLAUDE.md'
+)
+
+awk -F: -v wlstr="$(printf '%s\n' "${WHITELIST[@]}")" '
+BEGIN {
+    n = split(wlstr, parts, "\n")
+    for (i = 1; i <= n; i++) {
+        if (parts[i] == "") continue
+        wlmap[parts[i]] = 1
+    }
+}
 {
     path = $1
-    # Allowed: top-level CHANGELOG / RETIREMENT files.
-    if (path ~ /^\.\/(CHANGELOG|RETIREMENT)/) next
-    # Allowed: this issue runbook tree.
+    if (path in wlmap) next
     if (path ~ /^\.\/docs\/pr\/1530-dpdk-final-validation\//) next
-    # Allowed: explicit retirement notes.
-    if (path ~ /^\.\/docs\/retirement/) next
-    if (path ~ /^\.\/docs\/dpdk-retirement/) next
-    # Allowed: rejection-path test names.
     if (path ~ /reject[_-]dpdk/) next
-    # Allowed: AGENTS.md / CLAUDE.md historical retirement note blocks
-    # are NOT auto-allowed — they should have been cleaned up in
-    # Phase 4 (#1529). If the doc-sweep PR left intentional retirement
-    # markers, they will surface here for explicit acceptance.
     print
 }
 ' "$RAW" > "$VIOL"

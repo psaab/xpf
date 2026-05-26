@@ -1,0 +1,18 @@
+=== #1530 G4 — Daemon rejection of 'system dataplane-type dpdk' ===
+Driven via REST API (CLI -c chained-commands has unrelated readline regression)
+Node: loss:xpf-userspace-fw1 (RG0 primary after fw0 helper crash)
+Date: 2026-05-26T10:27:30Z
+
+Step 1: POST /api/v1/config/load (merge mode) with dpdk config text
+Request body: {"content":"system {\n    dataplane-type dpdk;\n}\n","mode":"merge"}
+Response: {"success":true,"data":{"status":"ok"}}
+
+Step 2: POST /api/v1/config/commit (no body)
+Response: {"success":false,"error":"commit check failed: the DPDK dataplane backend has been retired; use 'set system dataplane-type userspace' (see #1525)"}
+
+Step 3: POST /api/v1/config/commit-check (independent confirmation)
+Response: {"success":false,"error":"the DPDK dataplane backend has been retired; use 'set system dataplane-type userspace' (see #1525)"}
+
+REJECTION TOKEN: 'DPDK dataplane backend has been retired'
+REJECTION SOURCE: pkg/config/compiler.go ErrDPDKDataplaneRetired
+PASS

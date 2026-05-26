@@ -1,0 +1,25 @@
+Interface: reth0.80
+  Scheduler map:            bandwidth-limit
+  DSCP classifier:          -
+  IEEE 802.1 classifier:    -
+  DSCP rewrite-rule:        -
+  Shaping rate:             25.00 Gb/s
+  Burst size:               -
+  Output filter (inet):     bandwidth-output
+  Output filter (inet6):    bandwidth-output
+  Runtime:                  unavailable
+  Queues:
+    Queue  Owner  Class           Priority  Exact  Guarantee  Transmit rate  Buffer      Queued pkts  Queued bytes  Runnable  Parked  Next wake  Surplus deficit
+    0      -      best-effort     low       no     no         -              -           0            -             0         0       -          -
+    1      -      iperf-100m      -         yes    yes        100.00 Mb/s    488.28 KiB  0            -             0         0       -          -
+    2      -      iperf-1g        -         yes    yes        1.00 Gb/s      3.81 MiB    0            -             0         0       -          -
+    3      -      iperf-3g        -         yes    yes        3.00 Gb/s      -           0            -             0         0       -          -
+    4      -      iperf-6g        -         yes    yes        6.00 Gb/s      -           0            -             0         0       -          -
+    5      -      iperf-9g        -         yes    yes        9.00 Gb/s      -           0            -             0         0       -          -
+    6      -      iperf-12g       -         yes    yes        12.00 Gb/s     -           0            -             0         0       -          -
+    7      -      iperf-15g       -         yes    yes        15.00 Gb/s     -           0            -             0         0       -          -
+    8      -      iperf-18g       -         yes    yes        18.00 Gb/s     -           0            -             0         0       -          -
+    9      -      iperf-21g       -         yes    yes        21.00 Gb/s     -           0            -             0         0       -          -
+    10     -      iperf-24g       -         yes    yes        24.00 Gb/s     -           0            -             0         0       -          -
+    11     -      iperf-uncapped  low       no     no         -              -           0            -             0         0       -          -
+apply-cos-config: atomic commit + verification OK

@@ -1,0 +1,25 @@
+commit 936b076d9c406fee4a552bee188cd5e12cf5064a
+Author: psaab <ps@mu.org>
+Date:   Tue May 26 03:11:06 2026 -0700
+
+    #1528 DPDK retirement Phase 3: mechanical source removal (#1560)
+    
+    * Plan for #1528 Phase 3 of the DPDK retirement umbrella (#1525):
+    delete dpdk_worker/, pkg/dataplane/dpdk/, the DPDK schema in
+    pkg/config/, Makefile targets, and the retirement-boundary canary
+    entries that exist solely to police the not-yet-deleted DPDK
+    package.
+    
+    The critical plan-time decision is Option A (preserve the Phase 1
+    commit-time reject + ErrDPDKBackendRetired sentinel + TypeDPDK
+    token for one release cycle) vs Option B (generic "unknown
+    dataplane-type" rejection that replaces all of those). Plan
+    recommends Option A for:
+    
+      1. Operator-friendly migration message preserved.
+      2. Stored-config rolling-upgrade safety: daemon_run.go:247
+         soft-fallback continues to catch ErrDPDKBackendRetired and
+         run in config-only mode so the operator can fix the config
+         from CLI / gRPC.
+      3. Test-rewrite cost: 4+ TestDataplaneTypeDPDKRejected* tests
+         in parser_ast_test.go plus TestCommit_RejectsDPDKDataplaneType

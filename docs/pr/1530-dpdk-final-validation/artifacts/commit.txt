@@ -1,0 +1,6 @@
+target_sha=936b076d9c406fee4a552bee188cd5e12cf5064a
+target_subject=#1528 DPDK retirement Phase 3: mechanical source removal (#1560)
+worktree_head=c1573b59b6cd10fb47163261cec4a1b6e8ccb23c
+worktree_branch=refactor/1530-dpdk-final-validation
+phase3_in_history=yes
+checkout_date=2026-05-26T10:13:46Z

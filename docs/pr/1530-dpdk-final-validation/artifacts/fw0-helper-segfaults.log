@@ -1,0 +1,6 @@
+[   14.829224] xpf-userspace-w[879]: segfault at 0 ip 0000564a4be234b6 sp 00007fbfc39f7518 error 4
+[   14.829561] xpf-userspace-w[884]: segfault at 0 ip 0000564a4be234b6 sp 00007fbfc2ff2518 error 4
+[   14.829754] xpf-userspace-w[880]: segfault at 0 ip 0000564a4be234b6 sp 00007fbfc37f6518 error 4 in xpf-userspace-dp[32a4b6,564a4bbba000+3b3000] likely on CPU 1 (core 11, socket 0)
+[  216.405295] xpf-userspace-w[1241]: segfault at 0 ip 00005586576a94b6 sp 00007faa773f4518 error 4 in xpf-userspace-dp[32a4b6,558657440000+3b3000] likely on CPU 5 (core 15, socket 0)
+[  216.405342] xpf-userspace-w[1236]: segfault at 0 ip 00005586576a94b6 sp 00007faa77df9518 error 4
+[  216.405639] xpf-userspace-w[1237]: segfault at 0 ip 00005586576a94b6 sp 00007faa77bf8518 error 4 in xpf-userspace-dp[32a4b6,558657440000+3b3000] likely on CPU 1 (core 11, socket 0)
