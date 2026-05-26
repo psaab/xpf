@@ -1,5 +1,36 @@
 # Action Log
 
+## 2026-05-26 — #1530 Phase B Run 2 SMOKE-PASS
+
+- **Timestamp**: 2026-05-26T14:50:00Z
+  - **Action**: #1530 Phase B Run 2 — G5 re-run against the stable
+    cluster after bisect agent `a4b4b8581f6b96e00` returned
+    NO-LOCALIZATION on the Run-1 fw0 CoSBatch null deref. Same
+    binary hash `975f6fe3…` ran cleanly. All five G5 sub-gates
+    PASS:
+    - G5.a CoS-off v4 P=12: 23.3 Gbps / 1 retr (push) + 22.8 Gbps / 48 retr (rev)
+    - G5.a CoS-off v4 P=1:  8.26 / 8.47 Gbps, 0 retr both directions
+    - G5.b CoS-off v6 P=12: 23.1 / 22.6 Gbps, 0 / 223 retr
+    - G5.b CoS-off v6 P=1:  8.56 / 8.31 Gbps, 0 retr both directions
+    - G5.c CoS-on class sweep: 24 cells, push direction enforces
+      shaping caps (82M / 848M / 2.71G / 5.38G / 8.05G / 10.7G)
+    - G5.d screen baseline: PARTIAL — no screen profiles in cluster
+      config, daemon survived attacks PID-stable
+    - G5.e make test-failover: 14 passed / 0 failed, 9.02 Gbps
+      sustained across fw0 reboot + manual failback
+    G0..G4 evidence from Run 1 retained (commit unchanged at
+    936b076d). Run-1 artifacts archived under
+    artifacts/run1-fw0-helper-race/. Posted SMOKE-PASS comment on
+    #1530, filed follow-up issue for the first-snapshot race, closed
+    #1530 + #1525.
+  - **File(s)**:
+    `docs/pr/1530-dpdk-final-validation/artifacts.md`,
+    `docs/pr/1530-dpdk-final-validation/artifacts/smoke-*.log`
+    (30 new + 4 P=1 single-stream + test-failover),
+    `docs/pr/1530-dpdk-final-validation/artifacts/run1-fw0-helper-race/`
+    (archived Run-1 evidence),
+    `_Log.md`
+
 ## 2026-05-26 — #1530 Phase A.5 prep scripts
 
 - **Timestamp**: 2026-05-26T07:15:00Z

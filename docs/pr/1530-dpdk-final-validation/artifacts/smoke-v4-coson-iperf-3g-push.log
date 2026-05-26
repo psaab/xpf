@@ -1,1 +1,49 @@
-[SUM]   0.00-5.00   sec  1.54 GBytes  2.64 Gbits/sec    0             sender
+Connecting to host 172.16.80.200, port 5203
+[  5] local 10.0.61.102 port 56644 connected to 172.16.80.200 port 5203
+[  7] local 10.0.61.102 port 56648 connected to 172.16.80.200 port 5203
+[  9] local 10.0.61.102 port 56664 connected to 172.16.80.200 port 5203
+[ 11] local 10.0.61.102 port 56672 connected to 172.16.80.200 port 5203
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  5]   0.00-1.00   sec  83.4 MBytes   699 Mbits/sec    0    669 KBytes       
+[  7]   0.00-1.00   sec  83.2 MBytes   698 Mbits/sec    0    666 KBytes       
+[  9]   0.00-1.00   sec  84.2 MBytes   706 Mbits/sec    0    556 KBytes       
+[ 11]   0.00-1.00   sec  83.6 MBytes   701 Mbits/sec    0    546 KBytes       
+[SUM]   0.00-1.00   sec   334 MBytes  2.80 Gbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   1.00-2.00   sec  80.6 MBytes   677 Mbits/sec    0    755 KBytes       
+[  7]   1.00-2.00   sec  80.6 MBytes   677 Mbits/sec    0    754 KBytes       
+[  9]   1.00-2.00   sec  79.5 MBytes   667 Mbits/sec    0    659 KBytes       
+[ 11]   1.00-2.00   sec  80.8 MBytes   678 Mbits/sec    0    491 KBytes       
+[SUM]   1.00-2.00   sec   322 MBytes  2.70 Gbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   2.00-3.00   sec  80.6 MBytes   676 Mbits/sec    0    834 KBytes       
+[  7]   2.00-3.00   sec  80.6 MBytes   676 Mbits/sec    0    833 KBytes       
+[  9]   2.00-3.00   sec  81.6 MBytes   684 Mbits/sec    0    568 KBytes       
+[ 11]   2.00-3.00   sec  79.6 MBytes   667 Mbits/sec    0    605 KBytes       
+[SUM]   2.00-3.00   sec   322 MBytes  2.70 Gbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   3.00-4.00   sec  79.4 MBytes   666 Mbits/sec    0    905 KBytes       
+[  7]   3.00-4.00   sec  79.4 MBytes   666 Mbits/sec    0    904 KBytes       
+[  9]   3.00-4.00   sec  78.4 MBytes   658 Mbits/sec    0    372 KBytes       
+[ 11]   3.00-4.00   sec  80.1 MBytes   673 Mbits/sec    0    700 KBytes       
+[SUM]   3.00-4.00   sec   317 MBytes  2.66 Gbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   4.00-5.00   sec  80.8 MBytes   677 Mbits/sec    0    971 KBytes       
+[  7]   4.00-5.00   sec  80.6 MBytes   676 Mbits/sec    0    970 KBytes       
+[  9]   4.00-5.00   sec  80.6 MBytes   676 Mbits/sec    0    402 KBytes       
+[ 11]   4.00-5.00   sec  80.6 MBytes   676 Mbits/sec    0    783 KBytes       
+[SUM]   4.00-5.00   sec   323 MBytes  2.70 Gbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  5]   0.00-5.00   sec   405 MBytes   679 Mbits/sec    0            sender
+[  5]   0.00-5.00   sec   402 MBytes   674 Mbits/sec                  receiver
+[  7]   0.00-5.00   sec   404 MBytes   678 Mbits/sec    0            sender
+[  7]   0.00-5.00   sec   402 MBytes   674 Mbits/sec                  receiver
+[  9]   0.00-5.00   sec   404 MBytes   678 Mbits/sec    0            sender
+[  9]   0.00-5.00   sec   402 MBytes   674 Mbits/sec                  receiver
+[ 11]   0.00-5.00   sec   405 MBytes   679 Mbits/sec    0            sender
+[ 11]   0.00-5.00   sec   402 MBytes   674 Mbits/sec                  receiver
+[SUM]   0.00-5.00   sec  1.58 GBytes  2.71 Gbits/sec    0             sender
+[SUM]   0.00-5.00   sec  1.57 GBytes  2.69 Gbits/sec                  receiver
+
+iperf Done.

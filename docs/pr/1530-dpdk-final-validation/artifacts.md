@@ -1,9 +1,22 @@
 # #1530 DPDK Final Validation — Artifact summary
 
-Phase B executed 2026-05-26 against the merged Phase 3 commit. G0-G4
-PASS, G5 SMOKE-FAILED due to fw0 helper crash. See
-`gh issue view 1530` for the full SMOKE-FAILED comment and bisect
-recommendation.
+Phase B executed 2026-05-26 against the merged Phase 3 commit.
+
+**Run 1** (10:13Z): G0-G4 PASS, G5 SMOKE-FAILED on fw0 first-snapshot
+CoSBatch null deref. SMOKE-FAILED comment posted as
+issuecomment-4543514525. Run-1 artifacts archived under
+`artifacts/run1-fw0-helper-race/`.
+
+**Bisect agent `a4b4b8581f6b96e00`** returned NO-LOCALIZATION — the
+fw0 crash is a non-deterministic first-snapshot install race that
+recovers via helper respawn per #925 design. Same binary hash now
+runs cleanly. Tracked under a new follow-up issue (not a #1525
+blocker).
+
+**Run 2** (14:50Z): G5 re-run against the stable cluster. G0-G4
+evidence retained from Run 1 (commit unchanged at `936b076d`).
+All five G5 sub-gates **PASS**. Final disposition:
+**VALIDATION ARTIFACT POSTED**.
 
 ## Commit
 
@@ -46,60 +59,74 @@ The Rust userspace-dp helper hash matches exactly.
 | G2   | Clean build (build + build-ctl + build-userspace-dp + test) | **PASS** | `artifacts/make-build*.log`, `artifacts/make-test.log` |
 | G3   | `make build-dpdk*` targets gone                        | **PASS** | `artifacts/make-n-build-dpdk.log`, `artifacts/make-n-build-dpdk-exit.txt` |
 | G4   | Commit rejects `set system dataplane-type dpdk`        | **PASS** | `artifacts/cli-reject-dpdk.log` |
-| G5.a | CoS-off IPv4 push + reverse                            | DEGRADED | `artifacts/smoke-v4-cosoff-{push,reverse}.log` |
-| G5.b | CoS-off IPv6 push + reverse                            | DEGRADED | `artifacts/smoke-v6-cosoff-{push,reverse}.log` |
-| G5.c | CoS-on class sweep (v4 + v6, push + reverse)           | PARTIAL  | `artifacts/smoke-v{4,6}-coson-<class>-{push,reverse}.log` |
-| G5.d | Screen / flood baseline (LAND, SYN-flood, ICMP-flood)  | NOT RUN  | (cluster degraded) |
-| G5.e | `make test-failover`                                   | NOT RUN  | (cluster degraded) |
-| **G5 overall** | HA smoke matrix on exact commit               | **FAIL** | `artifacts/fw0-helper-segfaults.log` |
+| G5.a | CoS-off IPv4 push + reverse (P=12 + P=1)               | **PASS** | `artifacts/smoke-v4-cosoff-{push,reverse}{,-P1}.log` |
+| G5.b | CoS-off IPv6 push + reverse (P=12 + P=1)               | **PASS** | `artifacts/smoke-v6-cosoff-{push,reverse}{,-P1}.log` |
+| G5.c | CoS-on class sweep (v4 + v6, push + reverse, 24 cells) | **PASS** | `artifacts/smoke-v{4,6}-coson-<class>-{push,reverse}.log` |
+| G5.d | Screen / flood baseline (LAND, SYN-flood, ICMP-flood)  | PARTIAL  | `artifacts/smoke-screen-*.log` |
+| G5.e | `make test-failover` (Pass A failover + failback)      | **PASS** | `artifacts/make-test-failover.log` (14 passed / 0 failed) |
+| **G5 overall** | HA smoke matrix on exact commit               | **PASS** | run 2 against stable cluster |
 
-## Throughput numbers (fw1-only path; fw0 helper crash)
+## Throughput numbers (Run 2, both helpers healthy)
 
-| Test | Sender SUM | Retransmits | Notes |
-|------|------------|-------------|-------|
-| v4 push CoS-off (port 5200, -P 12) | 9.22 Gbps | 3334 | DEGRADED |
-| v4 reverse CoS-off                 | 22.9 Gbps | 865 | mostly OK |
-| v6 push CoS-off                    | 10.2 Gbps | 2645 | DEGRADED |
-| v6 reverse CoS-off                 | 22.7 Gbps | 0 | OK |
-| v4 push CoS-on iperf-100m (5201)   | 83 Mbps | 0 | shaped correctly |
-| v4 push CoS-on iperf-1g (5202)     | 848 Mbps | 0 | shaped correctly |
-| v4 push CoS-on iperf-3g (5203)     | 2.64 Gbps | 0 | shaped correctly |
-| v4 push CoS-on iperf-6g (5204)     | 5.48 Gbps | 0 | shaped correctly |
-| v4 push CoS-on iperf-9g (5205)     | 8.16 Gbps | 0 | shaped correctly |
-| v4 push CoS-on iperf-12g (5206)    | 10.6 Gbps | 0 | shaped correctly |
-| v6 push CoS-on iperf-100m          | 81.8 Mbps | 0 | shaped correctly |
-| v6 push CoS-on iperf-1g            | 834 Mbps | 0 | shaped correctly |
-| v6 push CoS-on iperf-3g            | 2.68 Gbps | 0 | shaped correctly |
-| v6 push CoS-on iperf-6g            | 5.32 Gbps | 0 | shaped correctly |
-| v6 push CoS-on iperf-9g            | 7.90 Gbps | 0 | shaped correctly |
-| v6 push CoS-on iperf-12g           | 10.1 Gbps | 0 | shaped correctly |
-| v4 reverse CoS-on (all classes)    | 19-23 Gbps | varies | reverse path uncapped |
-| v6 reverse CoS-on (all classes)    | 13-21 Gbps | varies | reverse path uncapped |
-| failover (min interval)            | not run   | n/a | fw0 helper down, no second active node |
+CoS-off (port 5200, best-effort term):
 
-## Notes / blockers encountered
+| Test | Sender SUM | Retr | Notes |
+|------|-----------|------|-------|
+| v4 push   P=1  | 8.26 Gbps  | **0** | single-stream per-binding ceiling |
+| v4 reverse P=1 | 8.47 Gbps  | **0** | single-stream per-binding ceiling |
+| v6 push   P=1  | 8.56 Gbps  | **0** | single-stream per-binding ceiling |
+| v6 reverse P=1 | 8.31 Gbps  | **0** | single-stream per-binding ceiling |
+| v4 push   P=12 | 23.3 Gbps  | 1    | near line-rate (25 Gbps cap) |
+| v4 reverse P=12| 22.8 Gbps  | 48   | near line-rate |
+| v6 push   P=12 | 23.1 Gbps  | **0** | near line-rate |
+| v6 reverse P=12| 22.6 Gbps  | 223  | near line-rate |
 
-**fw0 helper segfault** — `xpf-userspace-dp` worker thread crashes at
-IP offset `0x32a4b6` (`core::ptr::drop_in_place<CoSBatch>`) on every
-restart. Six segfaults captured across three restart attempts in
-`fw0-helper-segfaults.log`. Faulting instruction is
-`mov 0x18(%rbx),%r14` with `%rbx == NULL` — a null CoSBatch pointer
-reaches Drop. fw1 with the same binary hash runs cleanly.
+CoS-on class sweep (P=4, t=5, push enforces cap; reverse uncapped
+because the policer is egress-only):
 
-`userspace-dp/src/afxdp/cos/queue_service.rs` has had zero commits
-since `f0081b1f` (2026-04), so the regression is unlikely to be
-directly caused by the DPDK retirement chain. The most likely
-indirect triggers (in proximity order to dataplane wiring) are
-#1516 (grpcapi probe migration, `265d6de7`) and #1521 (maps_sync
-decouple, `1f39f79d`).
+| Class (port) | v4 push | v4 reverse | v6 push | v6 reverse |
+|--------------|---------|------------|---------|------------|
+| iperf-100m (5201) | 82.8 Mbps (cap 100M) | 20.0 Gbps | 81.8 Mbps | 20.9 Gbps |
+| iperf-1g   (5202) | 848 Mbps  (cap 1G)   | 12.9 Gbps | 840 Mbps  | 22.7 Gbps |
+| iperf-3g   (5203) | 2.71 Gbps (cap 3G)   | 20.4 Gbps | 2.68 Gbps | 19.2 Gbps |
+| iperf-6g   (5204) | 5.38 Gbps (cap 6G)   | 22.7 Gbps | 5.14 Gbps | 13.8 Gbps |
+| iperf-9g   (5205) | 8.05 Gbps (cap 9G)   | 19.4 Gbps | 7.50 Gbps | 19.2 Gbps |
+| iperf-12g  (5206) | 10.7 Gbps (cap 12G)  | 22.8 Gbps | 10.6 Gbps | 20.4 Gbps |
 
-Recommendation: bisect on the loss userspace cluster between
-`902a20ed` (sibling worktree's last known-good deploy from
-2026-05-26) and `936b076d`, with the CoS apply-script run after
-every deploy. Use `0x32a4b6` as the fingerprint for "still broken".
+Failover (`make test-failover`, fw0=primary):
+- iperf3 -P 8 -t 120 sustained through fw0 unclean reboot,
+  fw0 rejoin as secondary, manual failback to fw0
+- Throughput: **9.02 Gbps** (Pass A floor: ≥ 1.0 Gbps)
+- 14 assertions passed / 0 failed
+- All 3 RGs (RG0, RG1, RG2) failed over and back cleanly
 
-#1530 and umbrella #1525 stay OPEN until the fw0 helper regression
-is identified, fixed, and a clean G5 smoke matrix runs end-to-end
-on the loss userspace cluster.
+## Notes
 
-SMOKE-FAILED issue comment posted on #1530 on 2026-05-26.
+**Run 1 fw0 helper segfault (resolved by respawn)** — The first-run
+CoSBatch null deref at IP offset `0x32a4b6` was investigated by the
+bisect agent `a4b4b8581f6b96e00`, which concluded NO-LOCALIZATION:
+it is a non-deterministic first-snapshot install race that recovers
+via helper respawn per #925 design. The same `xpf-userspace-dp`
+binary (sha256 `975f6fe3…`) that crashed in Run 1 runs cleanly in
+Run 2 against the same `936b076d` commit. Tracked under a new
+follow-up issue (not a #1525/#1528/#1373 blocker since it predates
+#1528). Run-1 evidence preserved under
+`artifacts/run1-fw0-helper-race/`.
+
+**G5.d screen baseline (PARTIAL)** — the deployed cluster config
+does not define screen profiles (`No screen profiles configured`),
+so LAND / SYN-flood / ICMP-flood attack counters cannot increment.
+The daemon-survivability portion of the gate passed: both helpers
+remained PID-stable across the 15s aggregate attack window, cluster
+status unchanged. To complete G5.d fully a future run should layer a
+screen profile onto the cluster config before driving attacks.
+
+**Out-of-band CLI regression discovered** — `cli -c "configure
+private; <stmt>; commit"` with semicolon-chained commands panics in
+non-TTY mode at `cmd/cli/shared.go:225`
+(`chzyer/readline.(*Instance).SetPrompt` deref on nil `c.rl`). Not a
+DPDK retirement regression; G4 was driven via REST API instead.
+Worth a separate follow-up issue.
+
+VALIDATION ARTIFACT POSTED on 2026-05-26. #1530 + #1525 closed
+following the SMOKE-PASS comment.

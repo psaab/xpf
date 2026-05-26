@@ -1,0 +1,37 @@
+BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env ./test/incus/test-failover.sh
+==> Preflight checks
+Failover reset for redundancy group 0
+Failover reset for redundancy group 0
+Failover reset for redundancy group 1
+Failover reset for redundancy group 1
+Failover reset for redundancy group 2
+Failover reset for redundancy group 2
+  PASS  fw0 is primary
+  PASS  iperf3 target reachable (172.16.100.200)
+==> Starting iperf3 -P8 -t120 → 172.16.100.200
+  PASS  iperf3 running on cluster-lan-host
+  PASS  fw0 has 10 established sessions
+==> Waiting 5s for session sync to fw1
+  PASS  fw1 has 10 synced sessions
+==> Rebooting fw0 (unclean shutdown — tests worst-case failover)
+  PASS  iperf3 survived fw0 reboot (failover to fw1)
+==> Waiting for fw0 to reboot and rejoin as secondary (max 60s)
+==> fw0 xpfd active after 1s
+  PASS  fw0 xpfd restarted after reboot
+  PASS  fw0 rejoined as secondary (no auto-preempt)
+  PASS  fw1 remains primary after fw0 rejoin
+  PASS  iperf3 survived fw0 rejoin
+==> Manual failover: requesting fw1 to failover all RGs to fw0
+Manual failover triggered for redundancy group 0
+Manual failover triggered for redundancy group 1
+Manual failover triggered for redundancy group 2
+  PASS  fw0 became primary for all RGs after manual failover
+  PASS  iperf3 survived manual failover
+==> Waiting for iperf3 to complete
+  PASS  iperf3 completed successfully
+  PASS  iperf3 throughput: 9.02 Gbps (>= 1.0 Gbps)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Failover test: 14 passed, 0 failed
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+g5-failover: make test-failover exit code: 0

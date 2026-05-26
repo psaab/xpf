@@ -1,0 +1,6 @@
+HPING 172.16.80.200 (eth0 172.16.80.200): S set, 40 headers + 0 data bytes
+len=40 ip=172.16.80.200 ttl=64 id=15329 sport=80 flags=S seq=0 win=512 rtt=0.4 ms
+
+--- 172.16.80.200 hping statistic ---
+20 packets transmitted, 1 packets received, 95% packet loss
+round-trip min/avg/max = 0.4/0.4/0.4 ms

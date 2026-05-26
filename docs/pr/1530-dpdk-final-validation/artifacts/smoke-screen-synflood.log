@@ -1,0 +1,6 @@
+hping in flood mode, no replies will be shown
+
+--- 172.16.80.200 hping statistic ---
+1276478 packets transmitted, 0 packets received, 100% packet loss
+round-trip min/avg/max = 0.0/0.0/0.0 ms
+HPING 172.16.80.200 (eth0 172.16.80.200): S set, 40 headers + 0 data bytes

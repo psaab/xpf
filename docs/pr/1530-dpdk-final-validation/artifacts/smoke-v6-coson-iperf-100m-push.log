@@ -1,1 +1,49 @@
+Connecting to host 2001:559:8585:80::200, port 5201
+[  5] local 2001:559:8585:ef00:1266:6aff:fe0b:d017 port 51808 connected to 2001:559:8585:80::200 port 5201
+[  7] local 2001:559:8585:ef00:1266:6aff:fe0b:d017 port 51824 connected to 2001:559:8585:80::200 port 5201
+[  9] local 2001:559:8585:ef00:1266:6aff:fe0b:d017 port 51836 connected to 2001:559:8585:80::200 port 5201
+[ 11] local 2001:559:8585:ef00:1266:6aff:fe0b:d017 port 51838 connected to 2001:559:8585:80::200 port 5201
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  5]   0.00-1.00   sec  2.62 MBytes  22.0 Mbits/sec    0   23.7 KBytes       
+[  7]   0.00-1.00   sec  2.62 MBytes  22.0 Mbits/sec    0   32.1 KBytes       
+[  9]   0.00-1.00   sec  2.62 MBytes  22.0 Mbits/sec    0   39.0 KBytes       
+[ 11]   0.00-1.00   sec  2.50 MBytes  21.0 Mbits/sec    0   32.1 KBytes       
+[SUM]   0.00-1.00   sec  10.4 MBytes  87.0 Mbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   1.00-2.00   sec  2.25 MBytes  18.9 Mbits/sec    0   20.9 KBytes       
+[  7]   1.00-2.00   sec  2.25 MBytes  18.9 Mbits/sec    0   27.9 KBytes       
+[  9]   1.00-2.00   sec  2.38 MBytes  19.9 Mbits/sec    0   19.5 KBytes       
+[ 11]   1.00-2.00   sec  2.38 MBytes  19.9 Mbits/sec    0   34.9 KBytes       
+[SUM]   1.00-2.00   sec  9.25 MBytes  77.7 Mbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   2.00-3.00   sec  2.38 MBytes  19.9 Mbits/sec    0   33.5 KBytes       
+[  7]   2.00-3.00   sec  2.50 MBytes  21.0 Mbits/sec    0   37.7 KBytes       
+[  9]   2.00-3.00   sec  2.38 MBytes  19.9 Mbits/sec    0   39.0 KBytes       
+[ 11]   2.00-3.00   sec  2.50 MBytes  21.0 Mbits/sec    0   29.3 KBytes       
+[SUM]   2.00-3.00   sec  9.75 MBytes  81.7 Mbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   3.00-4.00   sec  2.50 MBytes  21.0 Mbits/sec    0   30.7 KBytes       
+[  7]   3.00-4.00   sec  2.38 MBytes  19.9 Mbits/sec    0   36.3 KBytes       
+[  9]   3.00-4.00   sec  2.38 MBytes  19.9 Mbits/sec    0   37.7 KBytes       
+[ 11]   3.00-4.00   sec  2.38 MBytes  19.9 Mbits/sec    0   33.5 KBytes       
+[SUM]   3.00-4.00   sec  9.62 MBytes  80.7 Mbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[  5]   4.00-5.00   sec  2.50 MBytes  21.0 Mbits/sec    0   37.7 KBytes       
+[  7]   4.00-5.00   sec  2.38 MBytes  19.9 Mbits/sec    0   20.9 KBytes       
+[  9]   4.00-5.00   sec  2.50 MBytes  21.0 Mbits/sec    0   39.0 KBytes       
+[ 11]   4.00-5.00   sec  2.38 MBytes  19.9 Mbits/sec    0   20.9 KBytes       
+[SUM]   4.00-5.00   sec  9.75 MBytes  81.8 Mbits/sec    0             
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  5]   0.00-5.00   sec  12.2 MBytes  20.5 Mbits/sec    0            sender
+[  5]   0.00-5.00   sec  12.0 MBytes  20.1 Mbits/sec                  receiver
+[  7]   0.00-5.00   sec  12.1 MBytes  20.3 Mbits/sec    0            sender
+[  7]   0.00-5.00   sec  12.0 MBytes  20.1 Mbits/sec                  receiver
+[  9]   0.00-5.00   sec  12.2 MBytes  20.5 Mbits/sec    0            sender
+[  9]   0.00-5.00   sec  12.0 MBytes  20.1 Mbits/sec                  receiver
+[ 11]   0.00-5.00   sec  12.1 MBytes  20.3 Mbits/sec    0            sender
+[ 11]   0.00-5.00   sec  12.0 MBytes  20.1 Mbits/sec                  receiver
 [SUM]   0.00-5.00   sec  48.8 MBytes  81.8 Mbits/sec    0             sender
+[SUM]   0.00-5.00   sec  48.0 MBytes  80.5 Mbits/sec                  receiver
+
+iperf Done.
