@@ -1,6 +1,51 @@
 # #1326 Phase 2+ — per-stage carve inside worker/loop_body/
 
-**Status:** DRAFT v1 — pending adversarial plan review.
+**Status:** PLAN-KILLED — both Codex and AGY ratified PLAN-KILL on round 1.
+
+- Codex r1-retry: `task-mpnhx2ga-7lerzp` — **PLAN-KILL**
+- AGY r1: `review-mpnhty2a-865y0o` — **PLAN-KILL**
+
+Both reviewers verified with quoted file:line evidence that:
+
+1. The perf-top symbol-granularity win is contradicted by the
+   required `#[inline]` annotations (§5c). Cannot have both.
+2. The 11-phase ordering in §7a is genuinely order-coupled —
+   no two phases are independently reorderable.
+3. The `WorkerLoopState` bundle vs 8-15-arg sub-fn dichotomy is real;
+   typed sub-bundles do not rescue it because the same mutable
+   fields are shared across most phases.
+4. Same architectural-mismatch pattern that PLAN-KILLED #946 Phase 2.
+5. No reviewer could name a concrete future-edit scenario that
+   Phase 2 measurably helps with.
+
+**Corrections from reviewer round:**
+
+- §7e claimed the BindingLive atomic publish throttle is ~5s.
+  Codex caught this: `DBG_REPORT_INTERVAL_NS = 1_000_000_000` (1s).
+  Verified at `userspace-dp/src/afxdp/worker/loop_body/mod.rs:213`.
+  The substantive point stands (the publish runs inside the
+  throttle branch, not every tick) but the cadence is 1s not 5s.
+
+**New finding from Codex r1-retry not in plan v1:**
+
+- The `ha_runtime = ha_state.load()` snapshot at the start of
+  command dispatch is reused by `apply_worker_commands` AND by
+  `poll_binding`. Any split design must preserve this single
+  per-tick HA snapshot — reloading inside `commands.rs` AND inside
+  `poll_drive.rs` would be a subtle ordering regression. This is
+  exactly the kind of invariant a per-stage carve makes easier to
+  break.
+
+Issue #1326 should be closed wontfix-with-rationale. Phase 1
+(PR #1569) is the final shipped scope. This plan doc is preserved
+on branch `refactor/1326-worker-loop-phase2` as the historical
+record of why Phase 2+ was not undertaken.
+
+---
+
+### Original plan content below (DRAFT v1 — left intact for the record):
+
+**Status (v1):** DRAFT v1 — pending adversarial plan review.
 
 **KILL is an explicitly invited outcome.** Phase 1 (PR #1569) already
 satisfied the original modularity-gate trigger of the issue (mod.rs
