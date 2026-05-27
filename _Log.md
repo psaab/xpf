@@ -4682,3 +4682,13 @@
   - AGY r2: MERGE-READY
   - Copilot r1: COMMENTED w/ 3 inline findings, all addressed in d013302748 + 0e2a88c8b
   - Codex: 3 consecutive sandbox failures (`unified-exec` blocked)
+
+## 2026-05-26 03:17 UTC — #1296 plan v1 DRAFT
+
+- **Timestamp**: 2026-05-26 03:17 UTC
+- **Action**: Write plan.md v1 (DRAFT) for #1296 CoS surplus-sharing
+  structural-pass / high raw CoV issue. Plan likely PLAN-KILL outcome
+  given artifact's PASS verdict satisfies #1217 contract and existing
+  `equal-flow-enforcement` knob already implements Option 2.
+- **File(s)**:
+  - `docs/pr/1296-cos-surplus-cov/plan.md` (new)
