@@ -1,6 +1,16 @@
 # #1317 — ArcSwap Guard caching across spin iterations
 
-**Status:** DRAFT v1 — pending hostile adversarial plan review (Codex + AGY)
+**Status:** **PLAN-KILLED v1** 2026-05-26 — Codex PLAN-NEEDS-MAJOR + AGY
+PLAN-KILL. Iteration-skip design has a fatal HA-state observation race
+on `DemoteOwnerRGS` / `VacateAllSharedExactSlots` commands; the
+flamegraph attribution is unverified (the perf.data in the repo root
+is from February with no userspace symbols, no ArcSwap frames); the
+12.3% claim is most plausibly an idle-spin sampling artifact that
+amortizes to ~0% under saturation — making the ≥8% acceptance gate
+mathematically unattainable on the iperf3 smoke matrix. Pivot to
+`arc_swap::Cache` is the suggested forward path, but requires fresh
+flamegraph evidence captured under saturation before any new plan
+should be written. See "Review verdicts" section appended at bottom.
 
 ## 1. Issue framing
 
@@ -469,3 +479,134 @@ invitable to PLAN-KILL)
 - **PLAN-KILL** — flamegraph attribution is bogus, OR the 8% gate is
   unattainable structurally, OR the staleness window invalidates a
   consumer invariant I missed. All acceptable verdicts.
+
+---
+
+## Review verdicts (round 1 — plan v1 @ 382f240e)
+
+### Codex (`task-mpnhwnpo-4mt856`): PLAN-NEEDS-MAJOR
+
+Blocking findings:
+
+1. **HA command ordering is unsafe as written.** `update_ha_state()`
+   stores the new HA runtime in the ArcSwap and *then* enqueues
+   `DemoteOwnerRGS`, `RefreshOwnerRGS`, and `VacateAllSharedExactSlots`
+   (`userspace-dp/src/afxdp/ha.rs:39`). The worker passes
+   `ha_runtime.as_ref()` into `apply_worker_commands()`
+   (`worker/loop_body/mod.rs:437`). `DemoteOwnerRGS` and
+   `RefreshOwnerRGS` re-resolve sessions using that HA snapshot
+   (`session_glue/commands/demote_owner_rgs.rs:46`,
+   `refresh_owner_rgs.rs:45`). If the loop skips `ha_state.load()`
+   while commands are pending, a demotion can be processed against
+   stale "active" state, or activation against stale "inactive"
+   state. That is **not 1ms observation lag — it is a one-shot
+   command doing the wrong rewrite**. Required revision: trigger
+   set must become `arc_refresh_pending || has_commands ||
+   safety_tick || post_block`.
+
+2. **Per-tick load count is 11, not 12.** Plan §3 enumerates
+   "10 via helper + 3 raw = 12"; correct count is 8 helper + 3 raw
+   = 11. `local_tunnel_deliveries` is loaded only on slow-path local
+   delivery (`tx/dispatch/slow_path.rs:159`), not in the per-tick
+   block.
+
+3. **The pseudocode does not compile as "wrap unchanged."**
+   `ha_runtime` is currently a per-iteration `Guard` from
+   `ha_state.load()`. Skipping the refresh block leaves no live
+   Guard to pass to `apply_worker_commands()` / `poll_binding()`.
+   Implementation must introduce a persistent cached
+   `Arc<BTreeMap<...>>` and refresh via `load_arc_if_changed()`.
+
+4. **Flamegraph attribution unverified.** No flamegraph artifact in
+   the repo. The `perf.data` in repo root is from Feb 2026 with no
+   userspace symbols. Without folded-stack evidence distinguishing
+   self time from inlined-caller aggregation, the 12.3% premise is
+   not reviewable. If true self-time is 2-3%, the ≥8% CPU gate is
+   structurally impossible and the plan should be killed or
+   re-scoped before code.
+
+Other notes: worst-case staleness is *not* "≤1ms" — if traffic
+arrives during a skipped idle iteration, the entire poll iteration
+can process packets with stale validation, forwarding, mirror,
+CoS, fabrics-derived forwarding, and HA state before `did_work`
+forces refresh. With `RX_BATCH_SIZE=64` and
+`MAX_RX_BATCHES_PER_POLL=4` that is up to 256 descriptors per
+binding per stale outer iteration.
+
+### AGY (`adversarial-review-mpnhwyn8-3pg74m`): PLAN-KILL (or major
+restructure to thread-local `arc_swap::Cache`)
+
+Independent confirmation of the HA race plus three additional
+hostile findings:
+
+1. **Fatal HA consistency race** — same race Codex flagged. At
+   23 Gbps peak baseline, a 1ms window leaks ~23 million bits
+   (thousands of packets) of duplicated or incorrect traffic during
+   failover.
+
+2. **Saturated throughput mismatch.** Under iperf3 saturation the
+   worker loop drains in batches; per-iteration ArcSwap-load
+   checks amortize so baseline overhead is already ~0%. The
+   12.3% is most plausibly an **idle-spin sampling artifact**,
+   not saturated-workload overhead. ≥8% CPU drop under iperf3
+   saturation is mathematically unattainable because there is no
+   12% overhead to optimize away in a busy system.
+
+3. **Physical fallacy of cache-line bouncing.** Because writes
+   are extremely rare in steady state, the pointer cache lines
+   reside in MESI Shared state across all 6 worker cores.
+   Read-only access to Shared lines incurs **zero coherency
+   traffic** and executes at L1 speeds. The plan's cross-core
+   coherency-traffic argument is wrong.
+
+4. **`arc_swap::Cache` rejected too casually.** Caches can be
+   thread-local mutable locals inside `worker_loop` — no global
+   struct encapsulation required. Provides zero-staleness on
+   rotation (no HA race) and zero atomic ops on the common path.
+   The right pivot.
+
+5. Confirmed: line numbers in issue body are stale (769-798 is
+   `partition_binding_plans` now); per-tick load count is 11 not
+   12; #1188 ptr_eq short-circuit is independent (not
+   double-counted).
+
+### Disposition
+
+Both reviewers converge on:
+
+- Iteration-skip with 1ms safety tick is unsafe (HA race) and
+  unverifiable (no flamegraph evidence) — **the v1 plan is dead**.
+- Pivot to thread-local `arc_swap::Cache` is the suggested
+  forward path, but the perf premise itself needs to be
+  re-established under saturation before the pivot becomes a
+  defensible plan.
+- The ≥8% CPU acceptance gate is most likely structurally
+  unattainable under saturation; the real win (if any) is in
+  idle-spin reduction, which is a different metric and aligns
+  with #1314 (adaptive idle-spin budget), not with the iperf3
+  saturation smoke matrix.
+
+Per the triple-review skill:
+
+> **Both PLAN-KILL → stop. Update plan.md to record the KILLED
+> status with both reviewer findings preserved verbatim. Comment
+> on the issue with the analysis. Do NOT open a PR.**
+
+This work item is closed at the plan stage. A future revival
+requires:
+
+1. A fresh flamegraph captured on the loss userspace cluster
+   **under iperf3 saturation** showing the per-frame self-time
+   attribution of `arc_swap::HybridStrategy::load` (use
+   `perf record --call-graph fp` + folded-stack post-processing
+   to distinguish self vs cumulative).
+2. If the self-time is ≥4% under saturation: write plan v2
+   targeting thread-local `arc_swap::Cache` (not iteration-skip),
+   with the HA-state field handled via a tighter primitive
+   (e.g., explicit refresh in `apply_worker_commands` regardless
+   of cache freshness, OR a generation-counter ratchet on the
+   command queue).
+3. If self-time is <4% under saturation: this is an
+   idle-spin-only optimization and should be folded into #1314,
+   not pursued as a standalone perf claim.
+
