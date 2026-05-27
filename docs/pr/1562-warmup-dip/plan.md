@@ -1,7 +1,102 @@
 # #1562 — fresh-deploy warm-up dip in cos-off-ipv4-push (#1477 Gate 6)
 
-**Status:** DRAFT v2 — addresses Codex round-1 PLAN-NEEDS-MAJOR
-(task-mpni0sde-cd5e8m).
+**Status:** KILLED v3 — both Codex (round-1 PLAN-NEEDS-MAJOR) and
+Gemini (round-1 PLAN-KILL) reject the plan's central premise. Per
+SKILL.md convergence rule, when Gemini's KILL is grounded in
+codebase evidence that invalidates the issue's framing (not just
+this plan's framing), the right outcome is to record PLAN-KILL,
+close #1562 as not-a-bug, and not re-plan around a false premise.
+
+## KILL summary
+
+The issue body and #1477 Gate 6 evidence both describe the 15.014
+Gbps dip as a **"fresh-deploy warm-up"** phenomenon — the
+hypothesis being that cold caches / first-touch AF_XDP /
+unsettled cpufreq / NUMA migration cause the second matrix
+iteration to dip 30% below iteration 1.
+
+Gemini's round-1 review (task-mpni08vw-jgfd5s, PLAN-KILL) caught
+that **the matrix runner already pre-warms the path**:
+
+```
+# scripts/userspace-ha-validation.sh:770
+warm_up_cell "$label" "$target" "$family_arg" "$direction" "$port"
+validate_cell "$label" "$target" "$family_arg" "$direction" "$min_gbps" "$port"
+```
+
+`warm_up_cell` (lines 673-688) runs a full unmeasured iperf3 pass
+via `run_iperf_json` before any measured iteration. So:
+
+- The **first measured iteration** ("iter 1 = 21.580 Gbps") was
+  actually the SECOND traffic flow on the path. The path was
+  already warm.
+- The **second measured iteration** ("iter 2 = 15.014 Gbps")
+  was the THIRD traffic flow. The path was definitively warm.
+
+`feedback_cross_binding_impossible.md` per-binding warm-up costs,
+AF_XDP first-touch TX-ring fill, cpufreq ramp on Intel, page-cache
+warmup — none of those mechanisms can cause iter 3 to dip after
+iter 2 hit 21.58 Gbps. Once warm, classical warm-up costs are
+paid.
+
+A 30% drop in iter 2 (third measured flow) after a clean iter 1
+(second measured flow) is **not** a warm-up phenomenon. It's
+either:
+
+- **Environmental flake** — thermal throttling after ~15s of
+  line-rate load (warmup 5s + iter 1 5s + ~5s ramp into iter 2);
+  kernel scheduler jitter; fabric latency spike disrupting TCP
+  RWND on iter 2.
+- **Sustained-load dataplane state** — but this would manifest
+  on every iter 2 across multiple runs, and the project has
+  many smoke matrix runs from this validator stream
+  (including #1530 Run 2 on the same code paths at 23.3 Gb/s
+  cos-off v4 P=12 push, https://github.com/psaab/xpf/issues/1530#issuecomment-4545216044)
+  that DID NOT dip. So this isn't a reproducible code path.
+
+#1562's framing as "fresh-deploy warm-up dip" is **provably
+incorrect**.
+
+## Codex round-1 findings (PLAN-NEEDS-MAJOR)
+
+Independently of Gemini's KILL premise, Codex flagged the v1
+plan as insufficient: 9 datapoints too weak, must capture iter 3,
+"warm-up" magnitude doesn't fit classical mechanisms,
+destroy/create not actually "fresh deploy". v2 of this plan
+addressed each, but Gemini's deeper finding makes the entire
+direction wrong, not just under-instrumented.
+
+## Final disposition
+
+**Close #1562 as not-a-bug** (NOT "explained by #1594 + #1598" —
+that hypothesis from the user prompt was also empirically false:
+#1594 fixed a different code path; #1598 is for the uncapped CoS
+class on port 5211; neither touches the cos-off port 5201 cell
+that recorded 15.014 Gbps).
+
+The right disposition is:
+
+1. The matrix runner already pre-warms — no "warm-up fix" can
+   help.
+2. The 15.014 Gbps reading was an environmental moment at
+   `13fa1009` validation time (likely thermal throttling /
+   kernel scheduler jitter / fabric latency spike), not a
+   reproducible code-path event.
+3. If a future Gate 6 validation reproduces the iter-2 dip on a
+   fresh deploy, the right framing is **post-iter-1 degradation**
+   (not warm-up), and the investigation should look at thermal /
+   scheduler / fabric latency state — not dataplane code.
+4. Gate 6 acceptance can either:
+   - Accept that any one cell may flake and retry once (peak ≥
+     18 Gbps + median ≥ 18 Gbps OR retry-on-fail with 2/3
+     pass), OR
+   - Stay strict and require fresh-validation reruns to drop
+     the rare flake. Either is reasonable; both belong in a
+     **runner improvement issue** filed separately, not #1562.
+
+No code changes proposed by this plan. No PR will be opened.
+
+## Round-1 review summary
 
 ## Round-1 review summary
 
@@ -17,8 +112,18 @@
   call it "cluster recreate on warm host" not "fresh deploy";
   gate-metric collection in Phase A should be sufficient to
   evaluate per-iter 18 Gbps vs median/min/peak alternatives.
-- **Gemini** (task-mpni08vw-jgfd5s): IN-FLIGHT at time of v2
-  authoring; will record verdict on completion.
+- **Gemini** (task-mpni08vw-jgfd5s, gemini-3.1-pro-preview):
+  **PLAN-KILL**. Premise itself is wrong — the matrix runner
+  already calls `warm_up_cell` at line 770 of
+  `scripts/userspace-ha-validation.sh` before `validate_cell`.
+  The first measured iteration (21.58 Gbps) was the second
+  traffic flow on the path. Iter 2's 15.014 Gbps dip is not
+  warm-up. Quoted file:line evidence for every claim.
+
+The two reviewers converge: **the issue's framing is wrong, no
+plan around the "warm-up" framing can produce a useful fix.**
+Codex's objections were on plan rigor; Gemini's KILL is on the
+premise. The Gemini PLAN-KILL is the binding outcome.
 
 ## Round-1 → v2 changes
 
