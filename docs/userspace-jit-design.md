@@ -1,7 +1,8 @@
 # Userspace Dataplane JIT Compiler Design
 
 Date: 2026-03-17
-Updated: 2026-05-26
+Updated: 2026-05-27 — Phase 4 PLAN-KILLED; Scale Target section
+added.
 
 **Tracking issue:** [#1605](https://github.com/psaab/xpf/issues/1605)
 
@@ -24,15 +25,102 @@ Non-architectural changes (perf tuning within an existing phase,
 test additions, build hygiene) do not need a doc update — say so
 explicitly in the PR review notes.
 
+## Scale Target (load-bearing, added 2026-05-27)
+
+Production firewall deployments are required to evaluate up to
+**1,000,000 active security policies at line rate on the AF_XDP
+fast path**. This applies to both the WARM path (flow-cache-hit)
+and the COLD path (cache-miss / SYN-flood / port-scan). Per-packet
+budget at 25 Gbps + 64 B frames is ~270 ns. Linear scan within a
+zone-pair (the current production shape at
+`userspace-dp/src/policy.rs:430-442`) is three orders of magnitude
+over budget at 1M policies.
+
+The 1M-policy target is the load-bearing constraint that drove
+Phase 4b (multi-stage policy DAG) design exploration. See
+`docs/pr/1605-jit-phase-4/plan.md` v4 for the architectural
+exploration and the kill verdict.
+
 ## Current Status
 
 | Phase | Description | Status | Measured Gain |
 |-------|-------------|--------|---------------|
 | 1 | Flow cache + rewrite descriptors | **DONE** — cache hit skips session/policy/NAT/FIB; `apply_rewrite_descriptor()` straight-line rewrite with precomputed csum deltas; dual-stack; cross-binding copy is inherent to AF_XDP | 23+ Gbps sustained |
-| 2 | Policy decision trees | **DONE** — zone-pair HashMap index + precompiled protocol-indexed application matcher with exact-port HashSets | O(1) zone + O(K) rules × O(1) app match |
-| 3 | Address-book trie compilation | Not started | — |
-| 4 | Cranelift JIT | Not started | — |
+| 2 | Policy decision trees | **DONE-PARTIAL** — zone-pair HashMap index + precompiled protocol-indexed application matcher with exact-port HashSets. **NOT shipped:** O(log K) bucketing within a zone-pair — current production is still a linear scan over `state.zone_pair_index[key]` (`policy.rs:430-442`). 1M-policy target requires further structural work; see Decision §K-2026-05-27. | O(1) zone + O(K) rules × O(1) app match |
+| 3 | Address-book trie compilation | **DONE (binary trie)** — `PrefixSetV4/V6::Trie` variants dispatch at `from_prefixes()` when prefix count exceeds `PREFIX_SET_LINEAR_MAX = 16`. **Inadequate for 1M-policy line rate** — uncompressed binary trie walks up to 32 `Box<TrieNode>` derefs per IPv4 lookup × 2 addresses per packet = up to 64 cache-line hops, far over the 270 ns budget. Multibit / DIR-24-8 / VPP-mtrie replacement is captured as a future prerequisite issue, NOT under this Phase 3 row. | O(log N) per match, cache-cold worst case |
+| 4 | Cranelift JIT | **KILLED 2026-05-27** — convergent PLAN-KILL on plan v4 (AGY r3 + Claude SMR r4; Codex infra-blocked across r1+r2+r3). See Decision §K-2026-05-27. | n/a |
 | 5 | Screen function specialization | **DONE** — zones without screen profiles return Pass immediately (O(1) HashMap miss); no further specialization needed | O(1) |
+
+## Decision §K-2026-05-27 — Phase 4 PLAN-KILLED
+
+After four plan-review rounds (v1 narrow → v2 1M-policies → v3
+10-PR program → v4 trimmed) and convergent hostile review (AGY r1,
+AGY r3, Claude SMR r1+r2+r3+r4; Codex infra-blocked r1+r2+r3),
+Phase 4 of the userspace JIT is **killed** in its current
+architectural framing.
+
+### Why Phase 4a (Cranelift per-flow rewrite JIT) is dead
+
+The Phase 1 descriptor path (`apply_rewrite_descriptor()` in
+`userspace-dp/src/afxdp/frame/rewrite/`) already absorbs the
+rewrite-arm win. `#[inline(always)]` family arms + precomputed
+csum deltas produce ~30 ops of straight-line code that LLVM folds
+into the per-packet loop. Cranelift's per-flow specialisation
+would save ~6-8 L1 loads per packet (~2-3 ns), at 1.92 Mpps that
+is ~0.4-0.6% of one core total — below the noise floor against
+memcpy 8% / NAPI 12% / syscalls 3%. Under churn (DDoS, SYN flood,
+port scan), 100 µs Cranelift compile-per-flow becomes a self-DoS
+vector: every new connection burns 100 µs of compile time. JIT
+compiler thread saturates a core before doing useful work.
+
+### Why Phase 4b (1M-policy DAG) is dead in its current form
+
+Two structural prerequisites are not in place on master:
+
+1. **Wire protocol pre-expands address-books.** The Go control
+   plane sends per-rule `source_addresses: Vec<String>` literal
+   CIDR strings (`userspace-dp/src/protocol/security.rs:63-66`).
+   The Rust dataplane has no notion of "address-book reference
+   ID" — every rule independently constructs its own
+   `PrefixSetV4/V6`. With DIR-24-8 LPM (16 MB worst-case TBL24
+   per book), 100k rules × 16 MB = 1.6 TB RAM. Arc-sharing across
+   rules is structurally impossible without a wire-protocol
+   redesign on BOTH Go and Rust sides.
+2. **Hardware ceiling at 49 Mpps unverified.** The 270 ns/packet
+   budget derives from 25 Gbps + 64 B = 49 Mpps. The architecture
+   doc only shows 23 Gbps at 1500 B (1.92 Mpps); per-worker
+   warm-path max ~5.91 Mpps. 49 Mpps × 6 workers = 294 Mpps
+   aggregate is unsupported by any deployed-hardware measurement.
+
+### What's required before re-planning Phase 4
+
+1. **Prereq A:** wire-protocol restructure — Go emits address-book
+   IDs + shared CIDR table; Rust reconstructs
+   `Arc<PrefixLpmV4>` per book. New issue.
+2. **Prereq B:** cold-path 64 B hardware-ceiling measurement on
+   the loss userspace cluster. Synthetic policy generator +
+   microbench harness. New issue.
+3. **Phase 4c (cold-path hardening):** can ship independently of
+   Phase 4b architecture decisions. Scope: per-source-IP
+   ingress rate-limit before policy eval + small verdict
+   micro-cache. New issue.
+
+After A and B land with measured numbers, re-plan Phase 4b's
+multi-stage DAG architecture. The architectural sketch from plan
+v3/v4 (protocol byte → port-range tree → LPM → bucket scan)
+remains a candidate but is not committed until measurement
+justifies it.
+
+### References
+
+- Plan: `docs/pr/1605-jit-phase-4/plan.md` (v4 commit
+  `031fb7ba5`)
+- Claude SMR plan-reviews: `docs/pr/1605-jit-phase-4/claude-smr-plan-r{1,2,3,4}.md`
+- AGY adversarial reviews: `adversarial-review-mpnmtxsi-no1clu` (r1
+  PLAN-KILL on v1) + `adversarial-review-mpnnu0cr-h4vt3w` (r3
+  PLAN-KILL on v4)
+- Codex (infra-blocked): `task-mpnmsryo-txokre`,
+  `task-mpnnbx8x-ze7vyo`, `task-mpnntgtw-njh67s`
 
 ### Phase 1 implementation details (as of `2f818e8`, 2026-03-22)
 
@@ -507,28 +595,62 @@ config apply time.
 **Expected gain**: O(1)-O(log N) policy evaluation vs O(N) linear scan.
 Significant for rulesets with 20+ rules per zone-pair.
 
-### Phase 3: Address-book trie compilation — NOT STARTED
+### Phase 3: Address-book trie compilation — DONE (binary trie); MULTIBIT REPLACEMENT DEFERRED
 
-**Scope**: Replace linear CIDR matching with precomputed tries.
+**Shipped**: `PrefixSetV4/V6` enum (`MatchAny | Linear | Trie`)
+dispatches to `PrefixTrieV4/V6` (uncompressed binary trie) when
+prefix count exceeds `PREFIX_SET_LINEAR_MAX = 16`. See
+`userspace-dp/src/prefix_set.rs:33-83`.
 
-1. At config compile time, build a compact IPv4/IPv6 trie for each
-   address-book entry
-2. Store tries in the ConfigSnapshot
-3. In Rust, deserialize into a flat array trie (cache-friendly)
-4. Replace `match_address()` linear scan with trie lookup
+**Known limitation**: the uncompressed binary trie walks up to 32
+`Box<TrieNode>` dereferences per IPv4 lookup × 2 addresses per
+packet = up to 64 cache-line hops. At ~3-10 ns/hop this exceeds
+the 1M-policy line-rate budget (270 ns/packet). A multibit Patricia
+or DIR-24-8-equivalent flat-vector LPM is required for the Scale
+Target (1M policies @ line rate); see Decision §K-2026-05-27.
 
-### Phase 4: Cranelift JIT for flow rewrite functions — NOT STARTED
+### Phase 4: Cranelift JIT for flow rewrite functions — KILLED 2026-05-27
 
-**Scope**: Replace rewrite descriptors with native code generation.
+**Decision**: PLAN-KILLED after four plan-review rounds across
+two reviewers (AGY r1+r3, Claude SMR r1-r4; Codex infra-blocked
+across three retries).
 
-1. Add Cranelift dependency
-2. At session creation, emit Cranelift IR for the rewrite function
-3. Compile to native code (~100us)
-4. Store function pointer in flow cache entry
-5. On cache hit, call native function directly
+**Why killed**:
 
-**Expected gain**: Additional 30-50% over descriptors for the rewrite
-path (eliminates dispatch loop overhead).
+1. The Phase 1 descriptor path
+   (`apply_rewrite_descriptor_ipv4()` at
+   `userspace-dp/src/afxdp/frame/rewrite/ipv4.rs:14-123`) is
+   already `#[inline(always)]` straight-line code with precomputed
+   csum deltas. LLVM folds the orchestrator's single call site
+   into the per-packet loop. Cranelift's per-flow specialisation
+   would save ~6-8 L1 loads per packet (~2-3 ns), at 1.92 Mpps
+   total ≈ **0.4-0.6% of one core** — below noise vs memcpy 8% /
+   NAPI 12% / syscalls 3% / poll_binding 22%.
+2. 100 µs Cranelift compile-per-flow ⇒ 33-50 k packets per flow
+   to break even. Median production flows (DNS, short HTTP, idle
+   TLS) never amortise. Under DDoS / SYN-flood, every new flow
+   burns 100 µs of compile time and the JIT thread saturates a
+   core, creating a self-DoS vector.
+3. Coordinator's 2026-05-27 reframing (1M policies at line rate)
+   does NOT change the Phase 4a verdict — cold-path packets ARE
+   flow-cache misses, so JIT-the-rewrite doesn't help.
+
+**What replaces it**: nothing in the JIT umbrella. The 1M-policy
+line-rate problem is structurally different from the rewrite-arm
+problem and requires the multi-stage policy DAG design
+documented in `docs/pr/1605-jit-phase-4/plan.md` v4 — which itself
+PLAN-KILLED on the wire-protocol pre-expansion blocker and the
+unverified 49 Mpps hardware ceiling. Future Phase 4b work is
+blocked on the two prerequisite issues (wire-protocol restructure
++ cold-path hardware ceiling measurement) documented in the
+killed plan.
+
+**Historical context**: the +30-50% Phase 4 estimate dates to
+2026-03-18, before Option C (descriptors + flow cache) was
+implemented and measured. The shipped descriptor path absorbed
+the rewrite-arm win, leaving Cranelift with no credible perf gap
+to close. This matches the #946 Phase 2 and #961 PacketContext
+patterns where Phase 1 absorbed the larger refactor's benefit.
 
 ### Phase 5: Screen function specialization — DONE (inherent)
 

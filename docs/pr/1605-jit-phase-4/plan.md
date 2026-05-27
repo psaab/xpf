@@ -1,11 +1,67 @@
-# Phase 4 JIT — Plan (DRAFT v4) — 1M policies @ line rate, trimmed scope
+# Phase 4 JIT — PLAN-KILLED (convergent)
 
-**Status:** DRAFT v4 — incorporates SMR r3 NEEDS-MAJOR feedback. v3
-proposed a 10-sub-PR program; v4 trims to a 2-sub-PR first cut
-(4b.0 measurement + 4b.3 DIR-24-8 LPM) with full architecture
-documented for later. Both prior reviewer rounds (v1 narrow framing
-→ PLAN-KILL convergent; v2 cancelled mid-review on Q8-Q13 expansion)
-are superseded.
+**Status:** **PLAN-KILLED 2026-05-27** on convergent verdicts:
+AGY r3 (`adversarial-review-mpnnu0cr-h4vt3w`) and Claude SMR r4
+(`docs/pr/1605-jit-phase-4/claude-smr-plan-r4.md`). Codex r1/r2/r3
+all returned deterministic sandbox infra failures; per
+`feedback_codex_infra_must_retry` the methodology proceeded on
+3-of-4 (Claude SMR + AGY + Copilot, with Codex infra-blocked).
+Copilot would review the closing PR if one is filed.
+
+Plan v4 (commit `031fb7ba5`) is the kill artifact. The architectural
+direction documented below is preserved for posterity; the
+specific scope (Cranelift JIT and the 4b multi-stage DAG as
+designed) is killed for the reasons summarised under "Kill
+findings" below.
+
+**Phase 4a (Cranelift per-flow rewrite JIT):** PLAN-KILL across
+v1/v2/v3/v4. Cold-path packets ARE the flow-cache miss; JIT
+doesn't help.
+
+**Phase 4b (1M-policies multi-stage DAG):** PLAN-KILL on plan v4
+because two prerequisites that the plan assumed are not actually
+in place on master:
+
+1. **Wire-protocol pre-expansion:** the Go control plane sends
+   per-rule `source_addresses: Vec<String>`
+   (`userspace-dp/src/protocol/security.rs:63-66`); there is no
+   address-book reference ID. Plan v4's CoW Arc-shared
+   LPM-per-address-book mitigation is structurally impossible
+   without a wire-protocol redesign. With pre-expansion, 100k
+   rules × 16 MB DIR-24-8 = ~1.6 TB RAM at production scale.
+2. **Hardware ceiling at 49 Mpps unverified:** the 270 ns
+   per-packet budget was derived from 25 Gbps + 64 B = 49 Mpps,
+   but the deployed mlx5 VF has only demonstrated ~5.91
+   Mpps/worker on the WARM path; the cold path has never been
+   measured at >5 Mpps. The 49 Mpps target is hypothetical.
+
+**Phase 4c (cold-path hardening):** can ship independently against
+the existing linear-scan path; file as a separate child issue.
+
+For the full rationale, kill findings, and recommended follow-up
+(close #1605 narrow scope with `plan-kill`, file prerequisite
+issues), see "Recommended next steps" at the bottom.
+
+## Historical framing (preserved for archival)
+
+Original v1 framing (narrow Phase 4 = rewrite JIT) was correctly
+PLAN-KILLED by Codex/AGY/SMR convergence on round 1. The
+coordinator then added 1M-policies at line rate as a load-bearing
+constraint (issue #1605 comment 2026-05-27), extending the original
+7 questions to Q1-Q13. v2-v4 evolved the plan under that constraint.
+v4 trimmed scope to 4b.0 (microbench) + 4b.3 (LPM); AGY r3 then
+KILLED v4 by identifying that 4b.3 alone is a regression (more
+memory, no perf gain — the linear scan over `indices` at
+`policy.rs:430-442` remains the dominant cost) AND that the
+wire-protocol pre-expansion makes the memory budget structurally
+unachievable without prerequisite work.
+
+The architecture for what a viable Phase 4b WOULD look like
+(multi-stage DAG: protocol byte → port-range tree → LPM →
+bucket scan, with wire-protocol restructure for address-book
+sharing + cold-path rate-limiting + verdict micro-cache) is
+preserved below as reference for a future re-plan once the
+prerequisites land.
 
 **Tracking issue:** #1605 (now extended to Q1-Q13).
 **Design doc:** `docs/userspace-jit-design.md` (co-canonical).
@@ -491,3 +547,125 @@ plan-review cycle.
     no regression on the warm path during 4b.0-4b.6
     integration. Reviewer to require a "regression line" in
     every 4b.x sub-PR smoke output.
+
+---
+
+## Kill findings (load-bearing)
+
+AGY r3 (`adversarial-review-mpnnu0cr-h4vt3w`) PLAN-KILL of plan v4
+identified two structural blockers that I missed in v1-v4
+self-review:
+
+### KF-1: Wire protocol pre-expands address-books
+
+`userspace-dp/src/protocol/security.rs:63-66` (also `:150-153`):
+
+```rust
+#[serde(rename = "source_addresses", default)]
+pub source_addresses: Vec<String>,
+#[serde(rename = "destination_addresses", default)]
+pub destination_addresses: Vec<String>,
+```
+
+And `userspace-dp/src/policy.rs:325-344` constructs the
+`PrefixSet*` independently for every rule:
+
+```rust
+for prefix in &snap.source_addresses {
+    parse_address(prefix, &mut src_v4, &mut src_v6);
+}
+...
+source_v4: PrefixSetV4::from_prefixes(src_v4),
+```
+
+The Rust dataplane has no notion of "address-book reference" —
+the Go side already expanded every rule's address-book to its
+literal CIDR list. Plan v4's "Arc-share LPM tables across rules
+that reference the same address-book" mitigation is structurally
+impossible without a wire-protocol redesign on BOTH the Go side
+(emit address-book IDs + a shared CIDR table) AND the Rust side
+(reconstruct shared `Arc<PrefixLpm>` from those IDs).
+
+With pre-expansion in place, plan v4's DIR-24-8 LPM hits 16 MB
+per `PrefixSetV4::Trie` (any rule with >16 unique CIDRs in its
+source or destination set). 100k rules × 16 MB = **1.6 TB RAM**.
+That's not "a memory budget issue", that's "the daemon cannot
+boot at production scale".
+
+### KF-2: 4b.3 alone is a regression
+
+The dominant cold-path cost at 1M policies in a hot zone-pair is
+the linear scan of the `indices` vector at
+`policy.rs:430-442`:
+
+```rust
+if let Some(indices) = state.zone_pair_index.get(&key) {
+    for &idx in indices {
+        if let Some(result) = try_match_rule(...) {
+            return result;
+        }
+    }
+}
+```
+
+Plan v4's first cut (4b.0 measurement + 4b.3 LPM replacement)
+addresses the per-rule address match (`PrefixSetV*::contains`)
+but **does NOT replace the linear scan**. At 1M indices × 3 ns
+short-circuit cost = 3 ms per packet = **0.0003 Mpps** — five
+orders of magnitude below the 49 Mpps target. Even a free LPM
+inside each rule cannot rescue the linear scan over indices.
+
+The viable Phase 4b therefore requires 4b.1 (protocol stage) +
+4b.2 (port-range bucketing) + 4b.4 (bucket scan) to SHIP
+TOGETHER with the LPM in 4b.3, not as separate first-cut PRs.
+Plan v4's trim is not a viable first cut.
+
+### KF-3: 49 Mpps target unverified
+
+AGY r3 finding #8 (consistent with SMR r3 F3): the architecture
+doc's 23 Gbps profile is at 1500 B (1.92 Mpps); per-worker max
+~5.91 Mpps on the warm path. 64 B at 25 Gbps = 49 Mpps × 6 =
+294 Mpps aggregate, well above any demonstrated hardware
+ceiling. The 270 ns per-packet budget is hypothetical and the
+plan cannot commit to it without measurement.
+
+## Recommended next steps
+
+1. **Close #1605 narrow scope with `plan-kill`** (or keep open
+   as umbrella; either is defensible — plan author recommends
+   "keep open as umbrella because the doc-coherency contract
+   still requires a tracking surface").
+2. **Phase 4a Cranelift per-flow rewrite JIT** — hard KILLED.
+   Flip `docs/userspace-jit-design.md` Phase 4 row to "KILLED
+   2026-05-27 — descriptor path already saturates the rewrite
+   arm at ≤0.6% of one core remaining; Cranelift's per-flow
+   compile-storm vulnerability under DDoS makes the cure worse
+   than the disease".
+3. **File prerequisite issues for any future Phase 4b
+   resurrection**:
+   - **Prereq A: wire-protocol restructure** — Go control plane
+     emits address-book IDs + a shared CIDR table; Rust
+     reconstructs `Arc<PrefixLpm>` per book. Without this, no
+     1M-policy memory budget is achievable. File as a new
+     issue.
+   - **Prereq B: cold-path 64 B hardware ceiling measurement**
+     — synthetic policy generator + microbench harness on the
+     loss userspace cluster. Without this, no 270 ns/packet
+     design target is defensible. File as a new issue (some
+     overlap with v3's 4b.0 deliverable).
+4. **Phase 4c (cold-path hardening)** can ship independently
+   against the existing linear-scan path. File as a new issue
+   scoped to: (a) per-source-IP rate-limit at ingress (before
+   policy eval); (b) small verdict micro-cache between flow
+   cache and full policy eval, sized for ~10k-source small
+   botnet attacks (not large-botnet uniform-spoof). This
+   limits blast radius if no Phase 4b plan ever ships.
+5. **Update `docs/userspace-jit-design.md`** in the closing PR:
+   - Add "Scale target" section: 1M policies is a first-class
+     production constraint.
+   - Flip Phase 4 row to "KILLED 2026-05-27".
+   - Mark Phase 3 row as "DONE (binary trie shipped) — see
+     prerequisite B for 1M-policy scale-up requirements
+     unaddressed by the binary trie".
+   - Add Decision-section entry citing this plan's verdict +
+     AGY r3 + SMR r4 task IDs.
