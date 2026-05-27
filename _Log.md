@@ -4692,3 +4692,22 @@
   `equal-flow-enforcement` knob already implements Option 2.
 - **File(s)**:
   - `docs/pr/1296-cos-surplus-cov/plan.md` (new)
+
+## 2026-05-26 21:10 UTC — #1296 plan v1 round-1 outcome: PLAN-NEEDS-MAJOR ×2
+
+- **Timestamp**: 2026-05-26 21:10 UTC
+- **Action**: Both reviewers landed (Codex task-mpnhvhnt-d8pfry,
+  AGY adversarial-review-mpnhwmkc-ce8q3k). Both PLAN-NEEDS-MAJOR,
+  NOT PLAN-KILL. Convergent finding: Option 2 is a real,
+  AF_XDP-physics-compatible work surface (logical egress rate cap,
+  not packet steering); existing equal-flow-enforcement is
+  mutually exclusive with surplus-sharing and is therefore a
+  non-work-conserving suppressor — not Option 2 as the issue
+  describes. Plan v1 status updated to record both verdicts;
+  reviewer result files saved alongside plan.md. Reporting to
+  parent for direction rather than driving v2 plan unilaterally.
+- **File(s)**:
+  - `docs/pr/1296-cos-surplus-cov/plan.md` (status header updated)
+  - `docs/pr/1296-cos-surplus-cov/reviewer-ids.md` (round-1 outcome)
+  - `docs/pr/1296-cos-surplus-cov/codex-r1-result.md` (new)
+  - `docs/pr/1296-cos-surplus-cov/agy-r1-result.md` (new)

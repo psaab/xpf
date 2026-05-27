@@ -1,5 +1,39 @@
 # #1296 — CoS surplus-sharing: structural pass still allows high raw per-flow CoV
 
+**Status:** v1 PLAN-NEEDS-MAJOR — both reviewers rejected the
+PLAN-KILL framing 2026-05-26. Reporting v1 round-1 verdict to parent
+for direction; v2 plan not yet drafted.
+
+- Codex round-1 (task-mpnhvhnt-d8pfry): PLAN-NEEDS-MAJOR
+- AGY round-1 (adversarial-review-mpnhwmkc-ce8q3k): PLAN-NEEDS-MAJOR
+
+Convergent finding reached **independently** by both reviewers:
+Option 2 in the issue body (work-conserving surplus donation gated by
+a per-flow cap) is **NOT shipped**. The existing
+`equal-flow-enforcement` knob is **mutually exclusive** with
+`surplus-sharing` (`pkg/config/compiler.go:432` rejects the
+combination) and the lease shuts the surplus path off entirely when
+enforcement is active (`userspace-dp/src/afxdp/types/
+shared_cos_lease/mod.rs:1186` — `surplus_open = bypass &&
+!equal_flow_enforced`). The shipped feature is a *non*-work-conserving
+equal-flow suppressor — strict-exact-like.
+
+AGY further provided a worked 2-worker example proving the hybrid
+mode (`surplus-sharing` + per-flow cap) can achieve CoV = 0 with full
+class-cap utilization where the current code strands `0.5 * T` of
+capacity. AGY also pushed back on the AF_XDP-ZC-physics argument: a
+per-flow grant cap is a **logical egress rate cap**, not packet
+steering, and is therefore not in the same kill set as
+#937/#1203/#1215/#840/#836/#838/#1211.
+
+Both reviewers' full results saved under `codex-r1-result.md` and
+`agy-r1-result.md` in this directory.
+
+Plan v1 below preserved verbatim as the round-1 historical record of
+the rejected PLAN-KILL framing.
+
+---
+
 **Status:** DRAFT v1 — pending adversarial plan review
 
 ## Issue framing
