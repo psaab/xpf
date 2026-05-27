@@ -4686,3 +4686,7 @@
 - **Timestamp**: 03:17 UTC 2026-05-26
 - **Action**: #1319 Phase 3a (chassis cluster typed leaves) plan v1 DRAFT
 - **File(s)**: docs/pr/1319-typed-leaf-schema/plan.md
+
+- **Timestamp**: 03:24 UTC 2026-05-26
+- **Action**: #1319 Phase 3a PLAN-KILLED — Codex PLAN-NEEDS-MAJOR + AGY PLAN-KILL converge; per-subtree walker wrong for 5-deep chassis AST, range bounds contradict Junos vSRX, plan AST shape sketches wrong, hold-down-interval not compiled today.
+- **File(s)**: docs/pr/1319-typed-leaf-schema/plan.md

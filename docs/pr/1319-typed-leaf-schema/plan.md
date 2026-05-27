@@ -1,6 +1,62 @@
 # #1319 Phase 3a — typed leaf-value schema for chassis cluster numeric knobs
 
-**Status:** DRAFT v1 — pending adversarial plan review (Codex + AGY hostile)
+**Status:** PLAN-KILLED v1 (2026-05-26) — both reviewers reject as
+unsafe-to-implement. Codex: PLAN-NEEDS-MAJOR (6 majors). AGY:
+PLAN-KILL (architecture + 5 range correctness bugs).
+
+The two verdicts converge on:
+
+1. Per-subtree walker (`walkChassisCluster`) is the wrong abstraction
+   for the 5-deep chassis-cluster AST (`chassis -> cluster ->
+   redundancy-group -> <rg-id> -> node -> <node-id> -> priority`).
+   The shallow 2-deep `walkSchedulers` shape does not generalise.
+   Both reviewers want a reusable recursive
+   `walkAST(astNode, schemaNode)` helper before any new typed
+   leaves land.
+2. Proposed integer ranges contradict Junos vSRX semantics.
+   `cluster-id` — Junos 0..15 (encoded into low 4 bits of RETH
+   virtual MAC) or 1..255 with 0=disable; plan picked 1..255 with
+   no justification. `heartbeat-interval` — Junos 1000..2000 ms;
+   plan picked 50..2000 which conflicts with the repo's own
+   `docs/vrrp-elimination-study.md` mentioning 30 ms lab values.
+   `heartbeat-threshold` — Junos 3..8; plan 3..255.
+   `reth-count` — Junos 1..128 (active range); plan 0..128.
+   Per-RG `priority` — Junos 1..254 (255 reserved); plan 1..255.
+   `takeover-hold-time` — no such global Junos statement; should
+   be per-RG `hold-down-interval` in seconds.
+3. `hold-down-interval` is not compiled today, so typing it
+   violates `pkg/cmdtree/README.md:47` (typed-leaf-only-on-
+   compiled-leaves invariant).
+4. `SchemaValidate` early-returns when `class-of-service` is
+   absent (`schema_validate.go:43-46`); the plan's "after
+   schedulers walk" snippet does not address this — chassis-only
+   configs would bypass validation entirely. Plan needed to
+   rework the early-return into independent subtree fan-out.
+5. The plan's AST shape sketches misrepresent how flat-set
+   actually lands. `set chassis cluster heartbeat-interval 100`
+   yields `chassis -> cluster -> leaf Keys=["heartbeat-interval",
+   "100"]`, not `Keys=["cluster","heartbeat-interval"]` with
+   child `["100"]` as drawn. The walker descent in the plan
+   would not even find these leaves.
+
+**Outcome:** the work is not killed permanently. The right next
+step is a separate, narrower issue that establishes the generic
+walker infrastructure FIRST (no new typed leaves — pure
+refactor of `walkSchedulers` into a generic recursive engine
+with the existing test suite proving parity), THEN a follow-on
+PR adding chassis-cluster typed leaves with corrected ranges
+sourced from real Junos vSRX CLI references (cluster-id 0..15,
+heartbeat-interval 1000..2000, priority 1..254, etc) and the
+silently-coerce-to-zero gap on each leaf demonstrated via
+fixture.
+
+Both reviewers' verdict transcripts are preserved in the
+review-archive section at the bottom of this file for the next
+attempt to use as a reference.
+
+---
+
+**Original Status (superseded):** DRAFT v1 — pending adversarial plan review (Codex + AGY hostile)
 
 ## Issue framing
 
@@ -422,3 +478,129 @@ the silent-zero case for cluster-id; the others permit 0).
    priorities), or is that out of scope (and a separate follow-up
    issue)? Current plan: out of scope — Phase 3a is value-level
    schema, not cross-reference schema.
+
+---
+
+## Review archive — verdicts preserved verbatim
+
+### Codex hostile plan-review (task-mpnhv0ui-j30019)
+
+**Verdict: PLAN-NEEDS-MAJOR**
+
+Not PLAN-KILL on architecture alone. A per-subtree entry point is
+acceptable for Phase 3a, but the plan as written is not implementable
+safely. It has incorrect Junos range claims, an incorrect AST model,
+and an ambiguous `SchemaValidate` fan-out that can leave chassis-only
+configs unvalidated.
+
+**Findings**
+
+- Major: `SchemaValidate` currently returns early when
+  `class-of-service` is absent, so the plan's "after schedulers walk"
+  snippet is insufficient. A chassis-only config would still bypass
+  validation unless the early return is reworked into independent
+  subtree fan-out. See `pkg/cmdtree/schema_validate.go:43` and plan
+  lines 217+.
+
+- Major: the proposed Junos ranges are not correct as stated.
+  Juniper documents `heartbeat-interval` as `1000..2000`,
+  `heartbeat-threshold` as `3..8`, `reth-count` configured range as
+  `1..128`, RG node `priority` as `1..254`, `gratuitous-arp-count`
+  as `1..16`, and `hold-down-interval` as `0..1800` with RG0 nuance.
+  The plan's `50..2000`, `3..255`, `0..128`, and `1..255` are either
+  xpf policy choices or wrong. Do not claim they match Junos vSRX
+  semantics.
+
+- Major: `cluster-id` zero semantics are not settled. Juniper says
+  cluster ID `0` disables clustering, while active cluster IDs are
+  `1..255`. In xpf, `cluster-id 0` currently appears to compile into
+  an active cluster object with byte-zero MAC material, not
+  "disabled." I would reject `0` unless this PR also implements
+  disable semantics, but the plan must admit that this is an xpf
+  divergence, not "matches Junos."
+
+- Major: the AST shape in the plan is wrong. With current
+  `setSchema`, `set chassis cluster heartbeat-interval 100` becomes
+  `chassis -> cluster -> leaf Keys=["heartbeat-interval","100"]`,
+  not `Keys=["cluster","heartbeat-interval"]` with child `["100"]`.
+  For per-RG priority, flat set is
+  `chassis -> cluster -> ["redundancy-group","0"] -> ["node","0"] -> ["priority","100"]`;
+  hierarchical inline can be `["node","0","priority","100"]`. The
+  compiler explicitly handles both inline and child priority forms
+  at `pkg/config/compiler_system.go:977`. The walker plan must do
+  the same.
+
+- Major: `hold-down-interval` is planned as typed, but xpf does not
+  compile it today. The local typed-leaf invariant says leaves are
+  typed only when the compiler consumes them; see
+  `pkg/cmdtree/README.md:47`. Either drop `hold-down-interval` from
+  Phase 3a or add compiler/runtime support in the same PR.
+
+- Major: `heartbeat-interval 50` lower bound conflicts with repo
+  intent. Local docs explicitly discuss `heartbeat-interval 30` for
+  VRRP-like detection. If xpf wants fast HA semantics, use an xpf
+  range and document it as such; if it wants Junos compatibility,
+  use Junos' `1000..2000`. The current plan mixes both and invents
+  `50`.
+
+- Minor but required: rolling-upgrade tolerance language is
+  directionally right, but tests must cover unknowns at every
+  chassis depth: `chassis cluster fictional`,
+  `redundancy-group 0 fictional`, and `node 0 fictional`. Also
+  distinguish unknown future children from extra tokens on a typed
+  leaf, which should probably still fail.
+
+**Architecture Call**
+
+Do not force all of Phase 3 into one giant PR. Deferring firewall
+cross-reference and interface CIDR validation is correct.
+
+But Phase 3a should not add another hand-shaped walker like
+`walkSchedulers`. Add a reusable recursive "walk this AST subtree
+against this `cmdtree.Node` subtree" helper that understands
+placeholders, inline key tails, child value nodes, and unknown-child
+tolerance. Keep the top-level fan-out per subtree for now; require
+the generic full-tree walker before Phase 3b/3c if more bespoke
+descent appears.
+
+### AGY adversarial plan-review (review-mpnhva3y-h1n07y)
+
+**Verdict: PLAN-KILL**
+
+While the scope discipline of targeting only the chassis cluster
+knobs in this phase is correct, the proposed technical
+implementation of a custom per-subtree walker pattern
+(`walkChassisCluster`) is a dead-end abstraction that is completely
+unfit to handle the complex, deep structure of chassis redundancy
+configurations. Implementing this custom walker would introduce
+highly fragile, bug-prone AST-descent boilerplate that fails to
+scale.
+
+Furthermore, the plan contains multiple critical correctness bugs
+where the proposed schema constraints directly contradict standard
+Junos vSRX semantics, which would result in either rejecting valid
+configurations (e.g., `cluster-id 0`) or accepting dangerously
+invalid configurations (e.g., sub-RFC 10ms advertisements or
+invalid priorities).
+
+Therefore, this plan is rejected (PLAN-KILL). The author must scrap
+the incremental subtree-specific walker in favor of a generic
+AST-against-cmdtree walking algorithm before proceeding, and
+correct all range validations to align with Junos vSRX standards.
+
+Detailed findings: per-subtree walker is the wrong abstraction
+(architectural defect), integer range bounds vs Junos vSRX
+semantics (critical correctness bugs — heartbeat-interval min too
+low, reth-advertise-interval min dangerous,
+takeover-hold-time does not exist globally in Junos, cluster-id
+range over-permissive, per-RG priority allows reserved values),
+zero-as-default semantics violations on cluster-id, hand-waving
+and logically impossible descent in walkChassisCluster, scope
+discipline approved.
+
+Remediation: kill walkChassisCluster, replace with generic
+walkAST. Correct ranges: cluster-id 0..15, heartbeat-interval
+100..2000, reth-advertise-interval moved per-RG with 100..1000,
+takeover-hold-time deleted globally and hold-down-interval added
+per-RG with 0..1800 s, priority 1..254. Add mixed AST shape tests.
+
