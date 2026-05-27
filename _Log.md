@@ -4725,3 +4725,28 @@
   PRIMARY risk; verification on smoke matrix is the gate.
 - **File(s)**:
   - `docs/pr/1296-cos-surplus-cov/plan-v2.md` (new, 280 lines)
+
+## 2026-05-26 21:50 UTC — #1296 plan v2 round-2 outcome: PLAN-KILLED
+
+- **Timestamp**: 2026-05-26 21:50 UTC
+- **Action**: Both round-2 reviewers (Codex task-mpnjv3mp-bw37nw +
+  AGY adversarial-review-mpnjvioo-t18ynf) returned PLAN-NEEDS-MAJOR
+  with convergent fatal findings that together amount to a
+  PLAN-KILL.
+  - Codex blocker: `acquire_v8` is the wrong layer for #915 surplus
+    bytes (queue_service/mod.rs:830 + tx_completion.rs:321 +
+    tx_completion_tests.rs:60 explicit test).
+  - AGY worked numeric trace: hybrid mode has a mathematical
+    deadlock between work-conservation and CoV reduction (donor
+    slack is consumed by cap math; consumer ends up capped below
+    primary share; donor slack stranded; CoV pinned at ~0.47 by
+    donor/consumer rate spread).
+  - AGY explicit recommendation: pivot to #1304 strict-exact
+    Phase 1 (no hybrid).
+  - User's mandate "stop and report rather than push through" if
+    implementation reveals framing was wrong — fires now.
+- **File(s)**:
+  - `docs/pr/1296-cos-surplus-cov/plan-v2.md` (status header → KILLED)
+  - `docs/pr/1296-cos-surplus-cov/reviewer-ids.md` (round-2 outcome)
+  - `docs/pr/1296-cos-surplus-cov/codex-r2-result.md` (new)
+  - `docs/pr/1296-cos-surplus-cov/agy-r2-result.md` (new)

@@ -1,0 +1,25 @@
+PLAN-NEEDS-MAJOR.
+
+The hybrid mechanism is not killed, but plan v2 is not ready. The biggest defect is that the planned enforcement boundary is wrong for `surplus-sharing`.
+
+Major blockers:
+
+1. `acquire_v8` is not the #915 surplus-sharing byte path. Plan v2 says `acquire_v8` will enforce `total_granted[i] <= worker_cap_i` across primary + surplus ([plan-v2.md](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/docs/pr/1296-cos-surplus-cov/plan-v2.md:58)). But current surplus-sharing exact queues explicitly bypass the per-queue lease in surplus phase: `select_cos_surplus_batch` says they consume root tokens + surplus deficit only and keep the per-queue cap as guarantee-phase-only ([queue_service/mod.rs](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/userspace-dp/src/afxdp/cos/queue_service/mod.rs:830)); completion also refuses to consume the queue lease in surplus phase ([tx_completion.rs](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/userspace-dp/src/afxdp/cos/tx_completion.rs:321)). There is even a direct test asserting surplus phase must not free queue-lease headroom ([tx_completion_tests.rs](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/userspace-dp/src/afxdp/cos/tx_completion_tests.rs:60)). So capping `acquire_v8` alone will not cap actual #915 surplus bytes.
+
+2. The smoke gate does not actually enable hybrid. The plan says hybrid means both flags set ([plan-v2.md](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/docs/pr/1296-cos-surplus-cov/plan-v2.md:228)), but the command only says to add `equal-flow-enforcement` and calls `apply-cos-config.sh` without `--surplus-sharing` ([plan-v2.md](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/docs/pr/1296-cos-surplus-cov/plan-v2.md:241)). That would validate strict equal-flow, not hybrid. The script only appends surplus lines when `--surplus-sharing` is present ([apply-cos-config.sh](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/test/incus/apply-cos-config.sh:88)).
+
+3. Publish/rotate mode plumbing is under-specified. Plan says `publish_equal_flow_epoch_v8` needs no change ([plan-v2.md](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/docs/pr/1296-cos-surplus-cov/plan-v2.md:147)), but rotation only publishes for `V8RateMode::EqualFlowSuppress` and disables otherwise ([rotate_epoch_v8.rs](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/userspace-dp/src/afxdp/types/shared_cos_lease/rotate_epoch_v8.rs:123)). The same equality mistake exists in `v8_equal_flow_active` ([mod.rs](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/userspace-dp/src/afxdp/types/shared_cos_lease/mod.rs:1332)) and `equal_flow_cap_v8` ([mod.rs](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/userspace-dp/src/afxdp/types/shared_cos_lease/mod.rs:1458)). A three-way enum is fine, but only with helper predicates so this is not missed again.
+
+4. #1304 alignment is false as written. Local #1304 docs define enforcement as intentionally non-work-conserving and reject `surplus-sharing` ([docs/pr/1304-equal-flow-estimator/plan.md](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/docs/pr/1304-equal-flow-estimator/plan.md:94), [plan.md](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/docs/pr/1304-equal-flow-estimator/plan.md:98)). `per-5-tuple/state.md` says the same: reduce below `Cstruct` only by giving up aggregate throughput ([state.md](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/docs/per-5-tuple/state.md:435)). Plan v2’s work-conserving hybrid is a sibling to #1304 Phase 1, not Phase 1 itself, unless #1304 is explicitly re-scoped.
+
+Other findings:
+
+- Target stability is only valid if every hybrid surplus byte is included in `worker_grants`. Current #915 surplus bytes are not, so the worked trace does not prove the real system.
+- Donor starvation is not proven away. Primary and surplus both contend on the same class CAS; the cap may bound damage, but plan needs a returning-donor test under armed bypass.
+- Compiler rollback looks acceptable for checked fixtures: master’s `cos-iperf-config.set` has exact rates but no equal-flow/surplus combination, and `loss-userspace-cluster.env` has no CoS config. The only intentional existing reject is the parser test at [parser_class_of_service_test.go](/home/ps/git/bpfrx/.claude/worktrees/1296-cos-surplus-cov/pkg/config/parser_class_of_service_test.go:308).
+- The CoV gate is not honest yet. `<= 0.10` may be too tight if applied per queue, since the strict baseline cited for q6 is already ~0.136. Also, as written, the smoke can pass without testing surplus at all.
+
+Required revision: move the hybrid cap to the actual surplus-sharing service path, or make hybrid surplus bytes acquire/account through the v8 lease before send. Then update rotate/status/metrics mode predicates, fix the smoke command to set both flags, and reframe this as a #1296 sibling/follow-up unless #1304 is formally amended.
+
+Codex session ID: 019e67a3-e7eb-7882-9804-1f2179479add
+Resume in Codex: codex resume 019e67a3-e7eb-7882-9804-1f2179479add

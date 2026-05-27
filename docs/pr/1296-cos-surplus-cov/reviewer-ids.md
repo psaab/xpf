@@ -13,6 +13,55 @@ Plan expectation: PLAN-KILL is the high-probability outcome. Grounds:
 3. Seven cross-worker mechanisms PLAN-KILLED on AF_XDP ZC physics
 4. #1211 archive revisit criterion 1 (harness FAIL) not met
 
+## Plan v2 review round 2 (commit 385934e6b)
+
+- **Codex hostile plan review**: `task-mpnjv3mp-bw37nw`
+- **AGY adversarial plan review**: `adversarial-review-mpnjvioo-t18ynf`
+
+Dispatched 2026-05-26 21:36 UTC.
+
+Plan v2 hypothesis: hybrid Option 2 (surplus-open + per-worker cap)
+is implementable as a new `V8RateMode::EqualFlowWorkConserving`
+variant. Acceptance gate is raw per-flow CoV ≤ 0.10 mean on
+q2/q3/q6 fairness-eval runs with hybrid enabled.
+
+### Outcome (2026-05-26, round-2): PLAN-KILLED ×2
+
+Both reviewers landed PLAN-NEEDS-MAJOR with convergent fatal
+findings that together amount to a PLAN-KILL for plan v2:
+
+- **Codex (task-mpnjv3mp-bw37nw)**: blocking finding is enforcement
+  layer mismatch. `acquire_v8` is the wrong boundary for #915
+  surplus bytes; those bypass the per-queue lease and consume root
+  tokens via `select_cos_surplus_batch` (queue_service/mod.rs:830).
+  `tx_completion_tests.rs:60` has an explicit test asserting that
+  the surplus phase must NOT free queue-lease headroom. Capping
+  `acquire_v8` alone does nothing to cap actual surplus bytes.
+  Also: #1304 alignment is false (#1304 docs explicitly reject
+  work-conserving hybrid).
+
+- **AGY (adversarial-review-mpnjvioo-t18ynf)**: AGY round-1 authored
+  the hybrid argument; in round 2 it provided a worked numeric trace
+  proving the design has a mathematical deadlock. Two simultaneous
+  failures:
+  1. If cap math reacts to donor demand, consumer is throttled BELOW
+     its own primary share → work-conservation destroyed AND donor
+     slack stranded.
+  2. With donor demand naturally low, CoV is structurally pinned at
+     ~0.47 by donor/consumer rate spread — ≤ 0.10 is impossible
+     without strict-exact (which is the existing
+     `EqualFlowSuppress`).
+
+  Closing recommendation: "Pivot the implementation away from the
+  speculative work-conserving hybrid, and focus purely on delivering
+  the robust, non-work-conserving Phase 1 strict-exact equal-flow
+  suppression as originally framed in #1304."
+
+The user's explicit kill clause fires: "If implementation reveals
+the egress-logical-cap framing is wrong … STOP and report rather
+than push through." Hybrid Option 2 is mathematically deadlocked;
+both reviewers agree.
+
 ## Outcome (2026-05-26, round-1, both reviewers landed)
 
 - **Codex (task-mpnhvhnt-d8pfry): PLAN-NEEDS-MAJOR**

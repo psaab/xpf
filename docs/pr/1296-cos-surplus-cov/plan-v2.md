@@ -1,6 +1,70 @@
 # #1296 — Plan v2: hybrid work-conserving equal-flow mode
 
-**Status:** DRAFT v2 — pending adversarial plan review.
+**Status:** PLAN-KILLED v2 — both round-2 reviewers convergently
+proved the hybrid design has a mathematical deadlock between
+work-conservation and CoV reduction. Reviewers also identified that
+the planned enforcement boundary (`acquire_v8`) is the WRONG layer
+for surplus bytes — current #915 surplus-sharing explicitly bypasses
+the per-queue lease and consumes root tokens via
+`select_cos_surplus_batch`.
+
+- Codex round-2 (task-mpnjv3mp-bw37nw): PLAN-NEEDS-MAJOR with
+  blocking finding: "`acquire_v8` is not the #915 surplus-sharing
+  byte path. Plan v2 says `acquire_v8` will enforce
+  `total_granted[i] <= worker_cap_i` across primary + surplus
+  ([plan-v2.md:58]). But current surplus-sharing exact queues
+  explicitly bypass the per-queue lease in surplus phase:
+  `select_cos_surplus_batch` says they consume root tokens + surplus
+  deficit only and keep the per-queue cap as guarantee-phase-only
+  ([queue_service/mod.rs:830]); completion also refuses to consume
+  the queue lease in surplus phase ([tx_completion.rs:321]). There
+  is even a direct test asserting surplus phase must not free
+  queue-lease headroom ([tx_completion_tests.rs:60]). So capping
+  `acquire_v8` alone will not cap actual #915 surplus bytes."
+
+- AGY round-2 (adversarial-review-mpnjvioo-t18ynf): PLAN-NEEDS-MAJOR
+  with a worked numeric trace proving the deadlock. Asymmetric-demand
+  case (Worker A 4 flows unbounded; Worker B 2 flows demand-bound at
+  15/flow): Epoch 1, A consumes 80 primary + 10 surplus = 90 total,
+  B consumes 30. Epoch 2 cap math: `per_flow_A = 90/4 = 22.5`,
+  `per_flow_B = 30/2 = 15`, `target = min = 15`. Worker A's epoch-2
+  cap = 15×4 = 60, which is BELOW its primary fair share of 80 →
+  Worker A throttled below structural floor → surplus blocked →
+  aggregate drops from 120 to 90, and donor slack (30 units) is
+  stranded. **The hybrid mode actively suppresses active workers
+  below their primary shares, destroying work-conservation.**
+
+  AGY also closed the CoV ≤ 0.10 gate honesty question: with a
+  donor flow naturally rate-limited at 5/flow and a consumer
+  saturated at 20/flow under a 4+2 split, mean=15, std=7.07,
+  CoV=0.471 — structurally impossible to reach ≤ 0.10 without
+  forcing the consumer down to donor rate (strict-exact). The hybrid
+  cannot deliver both high aggregate AND low CoV simultaneously.
+
+  **AGY's explicit recommendation** (round-2 closing line):
+  "Pivot the implementation away from the speculative
+  work-conserving hybrid, and focus purely on delivering the robust,
+  non-work-conserving **Phase 1 strict-exact equal-flow suppression**
+  as originally framed in #1304."
+
+This is the **mathematical-deadlock kill** the user's mandate
+explicitly anticipated: "If implementation reveals the
+egress-logical-cap framing is wrong … STOP and report rather than
+push through."
+
+Plan v2 is therefore KILLED. Strict-exact equal-flow-enforcement
+already ships today (round-1 findings confirmed end-to-end wire is
+intact). The residual #1296 work surface — product-contract
+clarification + harness mode-label + verification campaign under
+existing equal-flow — is doc-and-harness-only, not a refactor PR.
+
+Full reviewer evidence preserved at `codex-r2-result.md` and
+`agy-r2-result.md` in this directory.
+
+---
+
+**Status:** DRAFT v2 — pending adversarial plan review (preserved
+verbatim below as the round-2 historical record).
 
 This supersedes the PLAN-KILL framing in plan v1 (preserved as the
 historical record on disk). Both Codex round-1
