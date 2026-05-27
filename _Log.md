@@ -14,6 +14,33 @@
     hostile plan-review from Codex + AGY.
   - **File(s)**: `docs/pr/1314-adaptive-idle-spin/plan.md`
 
+## 2026-05-26 03:35 UTC — #1314 PLAN-KILLED v2 after AGY adversarial review
+
+- **Timestamp**: 2026-05-26 03:35 UTC
+  - **Action**: PLAN-KILLED #1314 after AGY adversarial-review
+    (`adversarial-review-mpnhvfdv-39wrwy`) returned PLAN-NEEDS-MINOR
+    with a major hidden-finding: the dominant CPU consumer in idle
+    workers is NOT the userspace spin loop (~3-4% wall CPU
+    achievable) but a hidden **~22% aggregate syscall tax from
+    `maybe_wake_rx`'s 200µs probe schedule**
+    (`userspace-dp/src/afxdp/tx/rings.rs:164-171`), which the plan
+    does NOT touch. AGY confirmed per-empty-iter cost is
+    ~200-600ns (not 1-2µs as the issue body claims), Design B is a
+    trap (50µs SO_BUSY_POLL costs 15% CPU per `bind.rs:470`), and
+    cross-binding fairness is preserved. Plan v2 raised
+    `IDLE_BUDGET_MIN` from 16 to 64 per AGY recommendation. Despite
+    the v1 findings being correctable, the absolute win from the
+    spin-budget fix alone (~3-4% wall CPU) is below the issue's
+    ≥30% acceptance criterion and would close #1314 prematurely.
+    Reopen with a combined spin-budget + wake-schedule plan OR
+    after Phase 0 falsifies AGY's 22% syscall-tax estimate. Codex
+    hostile plan-review was attempted 4× via codex-companion but
+    every dispatch silently dropped from the registry; AGY-only is
+    accepted for a KILL verdict where AGY's evidence is the case
+    for killing.
+  - **File(s)**: `docs/pr/1314-adaptive-idle-spin/plan.md`,
+    `_Log.md`
+
 ## 2026-05-26 23:10 UTC — #1578 cluster perf root-cause (smoke target IP misalignment)
 
 - **Timestamp**: 2026-05-26 23:10 UTC

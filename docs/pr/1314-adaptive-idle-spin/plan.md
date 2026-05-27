@@ -2,11 +2,94 @@
 
 ## Status
 
-**DRAFT v1 — pending adversarial plan review** by Codex (hostile) and
-Antigravity (adversarial). This is a Bucket-D perf-driven plan; the
-issue itself acknowledges PLAN-KILL is an acceptable outcome if the
-projected gain doesn't justify the churn or the proposed mechanism
-brings worse failure modes than the status quo.
+**PLAN-KILLED v2 (2026-05-26)** — after AGY adversarial plan-review
+(job `adversarial-review-mpnhvfdv-39wrwy`, verdict PLAN-NEEDS-MINOR
+with major hidden-finding) the realistic absolute win from the
+adaptive-spin-budget alone is **~3-4% wall CPU**, not the issue's
+stated ≥30% acceptance criterion. AGY revealed the dominant CPU
+consumer in the idle worker is NOT the userspace spin loop but a
+**~22% aggregate syscall tax from `maybe_wake_rx`'s 200µs probe
+schedule** (`userspace-dp/src/afxdp/tx/rings.rs:164-171`), which
+this plan does NOT touch. Shipping the spin-budget fix alone would
+close #1314 prematurely while leaving the bulk of the CPU
+consumption in place.
+
+PLAN-KILL rationale (also see §"Honest scope/value framing — v2"
+and §"Why PLAN-KILL"):
+
+1. **Per-empty-iter cost is ~200-600 ns, not 1-2 µs** (AGY walked
+   `poll_binding`). The 256-iter spin window is ~50-150 µs of
+   hedge per cycle, not 256-512 µs. Spin window is smaller than
+   billed.
+2. **22% aggregate CPU tax is in `maybe_wake_rx` syscalls**, not
+   the spin loop. Fixing the spin budget without fixing the
+   wake-schedule doesn't move the dial.
+3. **Five prior PLAN-KILLs** in this area (#1211, #1236, #1237,
+   #1239, #1243, #1244 per `MEMORY.md`) for "auto-tune dataplane
+   hot-path param" pitches. AGY's evidence is exactly the kind of
+   "the obvious bottleneck isn't where you think it is" finding
+   that the methodology is built to catch.
+4. **Codex hostile plan-review unavailable** — companion CLI in
+   this session repeatedly dropped my dispatches (4 attempts).
+   Per [[feedback_codex_infra_must_retry]] AGY-only is not
+   sufficient to bless a merge, BUT for a KILL verdict where
+   AGY's evidence is the case for killing, a single hostile
+   reviewer with quoted-line code-walk is acceptable.
+
+The killed plan is preserved in this doc for archival. Reopen
+#1314 only when:
+
+- A combined spin-budget + `maybe_wake_rx`-schedule plan exists,
+  measured to recover ≥30% wall CPU on the loss userspace cluster
+  in Phase 0,
+- OR Phase 0 measurement on master falsifies AGY's 22% syscall-tax
+  claim (in which case the spin-budget fix is the right scope and
+  this plan can be revived).
+
+Codex hostile plan-review pending (the codex-companion CLI registry
+was contended with ~5 concurrent reviewer tasks from other sessions;
+my dispatched task-ids didn't always persist).
+
+AGY v1 verdict: `PLAN-NEEDS-MINOR`. Confirmed findings:
+
+1. Per-empty-iter cost is **200-600 ns**, matching the plan's
+   suspicion and falsifying the issue body's 1-2 µs claim. AGY
+   walked `poll_binding` (`userspace-dp/src/afxdp/worker/lifecycle.rs`)
+   and decomposed each call:
+   `maybe_touch_heartbeat ≈1-2ns`, `drain_pending_tx ≈2ns`,
+   `apply_shared_recycles ≈1ns`, `drain_pending_fill ≈1ns`,
+   `rx.available() ≈10-20ns`, `maybe_wake_rx ≈2ns`,
+   `retry_pending_neigh ≈1ns`. **18 bindings × 20-30ns = 360-540ns
+   per empty iter.**
+
+2. **Hidden ~22% aggregate CPU syscall tax** in `maybe_wake_rx`'s
+   `last_rx_wake_ns` 200µs probe schedule
+   (`userspace-dp/src/afxdp/tx/rings.rs:164-171`). Every 32 empty
+   polls (`RX_WAKE_IDLE_POLLS`), `maybe_wake_rx` fires `poll(2)` +
+   `sendto(2)` per binding. With 18 bindings × ~5000 fires/s ×
+   ~200ns/syscall = ~3.6% per worker = ~22% across 6 workers. This
+   is an **independent CPU floor not addressed by the spin-budget
+   alone**.
+
+3. `IDLE_BUDGET_MIN = 16` is **too low**. In low-binding (1-2
+   bindings) deployments, 16 iters × 20-40ns = 320-640ns, too short
+   to absorb typical 1-5µs TCP ACK gaps. **AGY recommends MIN = 64**
+   (1.3µs hedge in 1-binding case, 19µs in 18-binding case).
+
+4. **Design B is a trap.** Confirms the in-tree comment at
+   `bind.rs:470-471`: 50µs `SO_BUSY_POLL` cost 15% CPU. 25µs not
+   safe-by-default.
+
+5. **Cross-binding fairness preserved.** Bindings loop iterates over
+   `0..bindings.len()` every tick (`loop_body/mod.rs:567-609`); the
+   `poll_start` rotation is just the start offset. Reducing the
+   budget does not change which bindings get polled.
+
+This is a Bucket-D perf-driven plan; the issue itself acknowledges
+PLAN-KILL is an acceptable outcome if the projected gain doesn't
+justify the churn or the proposed mechanism brings worse failure
+modes than the status quo. The v2 changes below address the v1
+findings; v2 remains adversarially-reviewable.
 
 ## Issue framing
 
@@ -33,25 +116,39 @@ without regressing:
    *"Firewall-local TCP flows are ACK-latency-sensitive; blocking
    immediately on the first empty poll collapses cwnd badly."*).
 
-## Honest scope/value framing
+## Honest scope/value framing — v2 (post-AGY)
 
-**At absolute scale** the win is bounded by:
+AGY's per-call walk of `poll_binding` confirmed each empty loop
+iter is **~200-600 ns**, not 1-2 µs as the issue body claims.
+The current 256-iter spin window is **~50-150 µs of CPU hedge**
+per spin-out cycle, NOT 256-512 µs. Combined with AGY's finding
+of the hidden ~22% aggregate CPU syscall tax from
+`maybe_wake_rx`'s 200 µs probes (which this plan does NOT touch),
+the realistic win from the adaptive-spin-budget alone is:
 
-- The cluster has 6 workers. Going from ~100% to e.g. ~30% per worker
-  on idle, on a ~12-core test machine, saves ~4 cores of wall CPU.
-- In a production HA pair sized at 6-12 workers, the absolute win is
-  4-10 cores worth of CPU at idle. On a 96-core host, that's 4-10%
-  of host CPU.
-- During saturated line-rate operation, the worker is in the `Active`
-  branch (not the spin branch), so this change should be **neutral
-  at line rate**.
-- The win is concentrated in low-rate / mostly-idle deployments
-  (lab, ISSU testbeds, low-traffic firewalls). At high
-  packet-per-second rates the hedge is mostly displaced anyway.
+- **Per-worker spin floor**: at the bottom of the adaptive ramp
+  (`current = 64`, AGY-revised floor), a worker holding 18 bindings
+  spins for `~64 × 30 ns × ~1 cycle/ms = ~2 µs/ms = 0.2 %` of
+  wall in spin. Today at `current = 256`, it's `~256 × 30 ns ×
+  cycles/ms = 7.7 µs/ms = 0.8 %`. **Per-worker savings ≈ 0.6 %**
+  on idle. Across 6 workers, ≈ 3.6 % wall CPU.
+- **The 22 % syscall tax stays.** Even at floor=64, the worker
+  blocks in `poll(2)` ~1ms later; `maybe_wake_rx` still fires its
+  200 µs probes from inside `drain_pending_fill`. To recover that
+  CPU, a separate change to the `RX_WAKE_MIN_INTERVAL_NS` /
+  `RX_WAKE_IDLE_POLLS` schedule is needed.
+- **At line rate**, the worker is in `Active`, so this change is
+  neutral.
 
-If reviewers conclude the perf gain is too small to justify the churn,
-or that the latency-hedge risk on the idle→active transition is worse
-than 4-10% of idle host CPU, **PLAN-KILL is an acceptable verdict.**
+So the absolute win is **~3-4 % wall CPU on a 6-worker idle host**,
+not the originally-implied "recover 600% CPU". The 22 % syscall
+tax is a separate follow-up issue. **If reviewers conclude this
+~3-4 % win doesn't justify the churn + latency-hedge risk, or
+that the right move is a combined spin+wake-schedule rework
+rather than a spin-only change, PLAN-KILL is an acceptable
+verdict.** v2 explicitly does NOT close #1314 by itself; a
+follow-up issue for `maybe_wake_rx` schedule tuning is required
+to hit the original ≥30 % CPU-reduction acceptance criterion.
 
 ## What is already shipped / partially batched
 
@@ -131,7 +228,12 @@ struct IdleBudget {
     /// spin window), else 0. Window K = 32.
     recent_outcomes: u32,
 }
-const IDLE_BUDGET_MIN: u32 = 16;
+// AGY v1 review: 16 was too low for low-binding (1-2 binding)
+// deployments where a single empty iter is ~20-40ns; 16 × 30ns =
+// ~0.5µs is insufficient to absorb a 1-5µs TCP ACK gap. 64 gives
+// a 1.3µs hedge in the 1-binding case and a 19µs hedge in the
+// 18-binding case, both safely above typical ACK arrival gaps.
+const IDLE_BUDGET_MIN: u32 = 64;
 const IDLE_BUDGET_MAX: u32 = IDLE_SPIN_ITERS; // = 256
 const IDLE_BUDGET_INITIAL: u32 = IDLE_SPIN_ITERS;
 ```
@@ -167,13 +269,12 @@ not every iter).
 **Hysteresis**: shrink at ≤8/32, grow at ≥24/32, hold in between.
 This 50% deadband prevents thrashing.
 
-**Floor of 16**: empirically chosen to preserve the in-tree latency
-hedge comment. At ~50-100ns per empty iter on the lab (NOT 1-2µs as
-the issue body claims — see Phase 0 verification), 16 iters is
-~0.8-1.6µs of spin, still long enough to absorb back-to-back ACK
-arrivals across a single TCP flow's ACK gap on most networks. The
-floor sets the worst-case latency-hedge degradation per the issue's
-"≤5% p99" criterion.
+**Floor of 64** (AGY-revised from v1's 16): preserves the in-tree
+latency hedge comment. At ~20-40 ns per empty iter (1-2 bindings,
+AGY-confirmed), 64 iters = ~1.3-2.6 µs, safely above typical
+1-5 µs TCP ACK gaps. At ~360-540 ns/iter (18 bindings),
+64 iters = ~23-35 µs, still bounded but generous. v1's 16-iter
+floor would have collapsed the hedge in low-binding configs.
 
 ### Design B — kernel-side hedge via SO_BUSY_POLL (issue's alternative)
 
@@ -236,7 +337,9 @@ is in fact the dominant consumer.
    to `IDLE_SPIN_ITERS * spin_cost`". Under Design A, the actual
    staleness bound becomes `idle_budget.current * spin_cost`, which
    is `≤ IDLE_SPIN_ITERS * spin_cost`, so the existing comment's
-   bound remains valid (it's an upper bound). Add a clarifying note.
+   bound remains valid (it's an upper bound). **Plan v2 updates
+   that comment to explicitly note the new tighter bound** so
+   future readers see the budget is dynamic.
 5. **`BusyPoll` mode untouched**: operators in BusyPoll explicitly
    want 100% CPU. The transition update fires unconditionally but
    the branch that uses `idle_budget.current` is `Interrupt` only.
@@ -286,9 +389,15 @@ is in fact the dominant consumer.
 
 ## Out of scope (explicitly)
 
-- Design B (`SO_BUSY_POLL = 25µs` shift) — separate issue / measurement
-  pass once Design A confirms the userspace spin is the dominant
-  consumer.
+- Design B (`SO_BUSY_POLL = 25µs` shift) — AGY confirmed Design B
+  is a trap (50µs costs 15% CPU per `bind.rs:470-471`; 25µs not
+  safe-by-default on mlx5). Closed; not a follow-up.
+- **`maybe_wake_rx` syscall tax (~22% aggregate CPU)** — AGY's
+  hidden-finding. Separate follow-up issue is required to recover
+  this; current PR does NOT address it. The `RX_WAKE_IDLE_POLLS`
+  (32) + `RX_WAKE_MIN_INTERVAL_NS` (200 µs) schedule is the lever;
+  re-spec that schedule under load-aware throttling in a
+  successor issue.
 - Changing `PollMode::BusyPoll` behavior — opt-in 100% CPU contract.
 - Removing the per-binding `poll_binding` sweep on empty iters
   (which is the other lever the issue mentions in the alternative
@@ -335,6 +444,42 @@ is in fact the dominant consumer.
    four prior PLAN-KILLs landed (per `MEMORY.md`). Does this fit
    the pattern of "auto-tune NIC/loop param" pitches that need
    empirical bias evidence before triple-review?
+
+## Why PLAN-KILL (summary)
+
+The issue's premise — that the userspace idle-spin hedge is the
+dominant CPU consumer post-#1301 — is **partially falsified** by
+AGY's per-call walk. The spin loop itself contributes ~3-4% wall
+CPU on a 6-worker idle host; the dominant consumer is the
+`maybe_wake_rx` 200 µs probe schedule (~22% aggregate). Fixing
+the spin budget alone does NOT hit the issue's stated ≥30%
+recovery acceptance criterion, and risks closing #1314 with a
+band-aid PR while the real CPU sink stays in place.
+
+The right shape of the fix is a **combined** `(adaptive spin
+budget) + (wake-schedule throttling)` plan. That requires:
+
+1. Phase 0 measurement on master (loss userspace cluster) to
+   independently verify AGY's 22% syscall-tax estimate via
+   flamegraph + `perf stat`.
+2. A combined design that throttles `maybe_wake_rx` under
+   sustained idle (e.g. `RX_WAKE_IDLE_POLLS` scaled by the same
+   adaptive budget, or load-aware `RX_WAKE_MIN_INTERVAL_NS`).
+3. Smoke-matrix verification that the throttled wake schedule
+   doesn't lose wakeups on the lost-wakeup race already mitigated
+   by `FILL_WAKE_SAFETY_INTERVAL_NS = 500 µs`
+   (`afxdp/mod.rs:249`).
+
+Reopen #1314 with that combined plan, OR open a new issue scoped
+to the `maybe_wake_rx` schedule alone and revisit #1314 after that
+ships.
+
+This PLAN-KILL also dovetails with #1317 (ArcSwap Guard caching
+across spin iterations, also in adversarial review at time of
+KILL): both target the same idle-worker CPU footprint, but
+#1317's approach (cache the Arc load across spin iters) avoids
+the wake-schedule question entirely. #1317 may turn out to be the
+better single-PR target.
 
 ## References
 
