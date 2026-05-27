@@ -4682,3 +4682,7 @@
   - AGY r2: MERGE-READY
   - Copilot r1: COMMENTED w/ 3 inline findings, all addressed in d013302748 + 0e2a88c8b
   - Codex: 3 consecutive sandbox failures (`unified-exec` blocked)
+
+- **Timestamp**: 03:17 UTC 2026-05-26
+- **Action**: #1319 Phase 3a (chassis cluster typed leaves) plan v1 DRAFT
+- **File(s)**: docs/pr/1319-typed-leaf-schema/plan.md
