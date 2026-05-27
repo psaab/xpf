@@ -1,5 +1,93 @@
 # #1304 CoS equal-flow mode: explicit rate suppression for raw per-flow fairness under RSS skew
 
+**Status:** PLAN-KILLED v1 — Codex + AGY both PLAN-KILL 2026-05-26
+
+## PLAN-KILL VERDICT — both reviewers, independent kill paths
+
+Both Codex (task-mpni7elw-ttz2dv) and AGY
+(adversarial-review-mpni164z-itqplj) returned PLAN-KILL on plan v1
+@ commit 3ec4d0996dc8.
+
+**Codex kill reason (summary):**
+
+- *Strict-exact already satisfies the stated raw-CoV goal.* The plan
+  admits raw CoV 0.039/0.088/0.136 is reachable today via strict-exact
+  (plan §2 table). Plan provides no measured >5pp recovery proof for
+  the proposed surgical estimator. §11 question 1 → KILL.
+- *Plan is stale against the repo.* The mechanism is already partly
+  implemented:
+  - `V8RateMode::EqualFlowSuppress` at
+    `userspace-dp/src/afxdp/types/shared_cos_lease/mod.rs:368`
+  - `V8EqualFlowSuppressState` at mod.rs:418
+  - Scheduler-level `equal-flow-enforcement` config knob at
+    `pkg/config/compiler.go:429-434`
+  - Bottleneck-picking estimator at
+    `publish_equal_flow_epoch_v8.rs:105`
+  The plan's "What's missing" §4 is incorrect.
+- *Bottleneck-worker hazard confirmed in shipped code.*
+  `candidate_target = candidate_target.min(per_flow)` at
+  `publish_equal_flow_epoch_v8.rs:105` with **no upward probe** to
+  detect recovery after a transient slowdown. §11 question 3 → KILL.
+- *Estimator self-reference confirmed in shipped code.*
+  `prev_grants[id] / active_flows` at
+  `publish_equal_flow_epoch_v8.rs:77`, then enforces
+  `target * active_flows` at mod.rs:1491. Once capped, measurement is
+  the cap. No escape mechanism specified. §11 question 6 → KILL.
+- *Per-5-tuple contract is narrower than plan claims.*
+  `docs/per-5-tuple/state.md:467` documents implemented contract as
+  "per active SFQ bucket" with collisions counted as one unit — NOT
+  per-5-tuple. §11 question 5 → MAJOR/KILL.
+- *Control cadence wrong in plan.* Plan claims 40ms epochs; code uses
+  `EPOCH_DURATION_NS = 200_000` (200µs) at mod.rs:241. Plan reviews
+  TCP CUBIC interaction at the wrong cadence.
+
+**AGY kill reason (summary, all 8 §11 questions resolved KILL):**
+
+1. Strict-exact CoS already delivers raw CoV ≤0.14 — the 1500+ LOC
+   estimator framework is unjustified.
+2. TCP CUBIC sawtooth amplification on the proposed control loop
+   creates positive feedback (post-drop throughput valley sampled →
+   tighter cap → more drop → harmonic limit-cycle).
+3. `min_active(r_i)` bottleneck-worker hazard is fail-deadly; a
+   transient NIC pause frame drags all peers down for >100ms.
+4. Mode-OFF hot-path overhead is 2-5 ns (7-18% of 28ns budget).
+5. Per-worker cap doesn't equalize per-flow rates; aggressive flow on
+   a worker can consume 5× fair share → raw CoV ≈ 1.5.
+6. Estimator self-reference creates degenerate fixed-point;
+   controller cannot detect bottleneck recovery.
+7. V_min and equal-flow are independent feedback loops that fight
+   each other — V_min sees artificial vtime lag from rate suppression
+   and throttles peers, compounding suppression.
+8. Cache-line bouncing on `[AtomicU64; MAX_WORKERS]` — same kill class
+   that took out #1211 race-safe AFD ECN.
+
+## Convergent recommendation
+
+Abort #1304. The structural ceiling established by #1217
+(`observed_CoV ≤ Cstruct + 0.05`) is the right default contract. The
+existing `equal-flow-enforcement` scheduler knob (already in
+compiler.go and mod.rs) is the right opt-in surface for operators who
+want strict-exact raw fairness at the documented throughput cost.
+
+**This is the 9th consecutive PLAN-KILL on per-5-tuple fairness
+mechanisms.** The kill chain is now: #1287, #1288, #1215, #836, #840
+(reverted), #1203, #937, #1211, #1243, #1244 — and now #1304.
+
+Future fairness work in this space should NOT propose new
+cross-worker control loops without first answering:
+
+1. What does strict-exact (already shipped) leave on the table?
+2. What measured workload demonstrates that gap?
+3. Why does the proposed mechanism escape the AF_XDP UMEM ownership
+   physics that killed prior 8 attempts?
+
+If those three questions don't have measured answers, ship a doc
+update to `docs/fairness-regimes.md` instead of code.
+
+---
+
+## Original plan v1 below (preserved for reviewer reference)
+
 **Status:** DRAFT v1 — pending adversarial plan review (Codex + AGY hostile)
 
 > Plan author note to reviewers: this is the **8th attempt at a per-5-tuple
