@@ -1,5 +1,34 @@
 # Action Log
 
+## 2026-05-27 03:37 UTC — #1561 CoSBatch first-snapshot null deref triage PLAN-KILLED
+
+- **Timestamp**: 2026-05-27 03:37 UTC
+  - **Action**: Drafted plan v1 for #1561 (userspace-dp first-snapshot
+    CoSBatch null deref on fresh VM boot) and dispatched hostile
+    adversarial plan review to Codex (task-mpni4rdg-285gk5) plus AGY
+    (review-mpni517x-6yp34f) in parallel. Both reviewers returned
+    PLAN-KILL with concurring analysis: the three candidate fixes
+    (publish barrier, atomic publish, lazy init) all assume an
+    ArcSwap publish ordering bug, but a null Vec / VecDeque drop
+    receiver on a stack-local CoSBatch is a stack-local condition
+    that no ArcSwap race can produce. AGY proposed an explicit
+    counter-trace pointing at FFI stack clobber from userspace-xdp
+    as the more plausible mechanism. Both reviewers endorsed
+    diagnostic-only follow-up (systemd-coredump + build-id capture +
+    debuginfod) as the highest-EV next step. Codex added the caveat
+    that addr2line attribution near tightly packed `drop_in_place`
+    instantiations is approximate — the
+    `drop_in_place<VecDeque<TxRequest>>` identification is plausible
+    but not proven without a captured core.
+  - **Files**:
+    - `docs/pr/1561-cosbatch-first-snapshot-race/plan.md` (new,
+      PLAN-KILLED v1 with both verdicts preserved)
+    - `_Log.md` (this entry)
+  - **Outcome**: PLAN-KILL × 2. Issue #1561 to be closed with the
+    "supervisor-respawn recovery per #925 is the correct design at
+    this layer; no production-code change without a captured core"
+    rationale.
+
 ## 2026-05-26 23:10 UTC — #1578 cluster perf root-cause (smoke target IP misalignment)
 
 - **Timestamp**: 2026-05-26 23:10 UTC

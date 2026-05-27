@@ -1,8 +1,32 @@
 # #1561 — userspace-dp first-snapshot CoSBatch null deref on fresh VM boot
 
-Status: DRAFT v1 — pending adversarial plan review. Expected outcome
-on this round is **PLAN-KILL** with rationale recorded; this plan is
-written as a hostile-review fixture, not a proposed merge.
+Status: **PLAN-KILLED v1** — 2/2 hostile-review verdicts concur.
+
+- Codex task `task-mpni4rdg-285gk5` — PLAN-KILL (3m20s)
+- AGY job `review-mpni517x-6yp34f` — PLAN-KILL
+
+Both reviewers ratified the structural argument that a null Vec /
+VecDeque drop receiver is a stack-local condition not reachable from
+any ArcSwap publish race, and agreed that the three candidate fixes
+(barrier, atomic publish, lazy init) do not target the observed
+fingerprint. Both also endorsed PLAN-KILL plus a diagnostic-only
+follow-up (install `systemd-coredump`, retain build-id, preserve
+debuginfo) as the highest-EV next step. AGY added an explicit
+counter-trace: an FFI stack clobber in `userspace-xdp` could zero
+adjacent stack slots and produce exactly this fingerprint — which
+none of the three publish-side candidates would fix.
+
+Codex's caveat (preserved as record): `addr2line` symbol attribution
+near tightly packed `drop_in_place` instantiations is approximate;
+the "drop_in_place&lt;VecDeque&lt;TxRequest&gt;&gt;" identification
+is plausible but not proven without a captured core. The diagnostic
+follow-up must capture build-id, registers, crashing instruction
+bytes, and ideally debuginfod access — not just install
+`systemd-coredump`.
+
+#1561 closed as "supervisor-respawn recovery per #925 is the
+correct design at this layer; no production-code change without a
+captured core." Issue link will reference this plan doc.
 
 ## Issue framing
 
