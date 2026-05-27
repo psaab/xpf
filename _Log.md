@@ -4711,3 +4711,17 @@
   - `docs/pr/1296-cos-surplus-cov/reviewer-ids.md` (round-1 outcome)
   - `docs/pr/1296-cos-surplus-cov/codex-r1-result.md` (new)
   - `docs/pr/1296-cos-surplus-cov/agy-r1-result.md` (new)
+
+## 2026-05-26 21:30 UTC — #1296 plan v2 DRAFT (hybrid Option 2)
+
+- **Timestamp**: 2026-05-26 21:30 UTC
+- **Action**: User authorized drafting plan v2 implementing hybrid
+  Option 2 per AGY/Codex round-1 verdicts. Plan v2 adds new
+  V8RateMode::EqualFlowWorkConserving variant, relaxes compiler
+  mutual-exclusion check at compiler.go:432, modifies acquire_v8
+  surplus loop to enforce per-worker cap from existing
+  publish_equal_flow_epoch_v8 machinery. Stability of
+  target_per_flow under surplus-driven prev_grant boost flagged as
+  PRIMARY risk; verification on smoke matrix is the gate.
+- **File(s)**:
+  - `docs/pr/1296-cos-surplus-cov/plan-v2.md` (new, 280 lines)
