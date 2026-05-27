@@ -1,6 +1,43 @@
 # #1562 — fresh-deploy warm-up dip in cos-off-ipv4-push (#1477 Gate 6)
 
-**Status:** DRAFT v1 — pending adversarial plan review.
+**Status:** DRAFT v2 — addresses Codex round-1 PLAN-NEEDS-MAJOR
+(task-mpni0sde-cd5e8m).
+
+## Round-1 review summary
+
+- **Codex** (task-mpni0sde-cd5e8m): PLAN-NEEDS-MAJOR. Major
+  objections: 9 datapoints is too weak to PLAN-KILL (~28% upper
+  bound on failure probability remains); must capture iter 3 not
+  abort at iter 2; "warm-up" is wrong frame for a 30% iter-2 drop
+  (AF_XDP first-touch / cpufreq / NUMA all settle in <1s or show
+  chronic skew, not iter-2-specific dip); Phase B must be
+  pre-shaped (decision table mapping evidence → fix path);
+  destroy/create may leave host-side state warm (CPU governor,
+  IRQ placement, bridges/veth, caches, qdisc/offload) — must
+  call it "cluster recreate on warm host" not "fresh deploy";
+  gate-metric collection in Phase A should be sufficient to
+  evaluate per-iter 18 Gbps vs median/min/peak alternatives.
+- **Gemini** (task-mpni08vw-jgfd5s): IN-FLIGHT at time of v2
+  authoring; will record verdict on completion.
+
+## Round-1 → v2 changes
+
+1. Raised sample size: **3 deploys × 5 iters = 15 datapoints** with
+   a continue-on-failure runner that records iter 3 (and iters 4-5)
+   even after a sub-threshold iter.
+2. Reframed "warm-up" as **"fresh-cycle iter-2 degradation pattern"**;
+   the design space now includes RG transition state, server
+   lifecycle (iperf3 backend state across iterations), and lab
+   environment volatility, not just classical cold-cache.
+3. **Pre-shaped Phase B decision table** mapping evidence pattern
+   to candidate fix.
+4. Renamed reproduction step to **"Cluster recreate on warm host"**
+   to acknowledge incus VM recreate does not reset host CPU
+   governor, IRQ, bridge state, qdisc, or page cache. Added
+   explicit pre-condition logging for those.
+5. Phase A also now collects **all five iteration measurements per
+   cell + cell-level statistics (peak/median/min)** so the gate
+   metric design can be reviewed without a separate measurement.
 
 This plan answers the question: **what should we do about #1562?** The
 default proposed action is *not* a code fix but a reproduction sweep
@@ -145,7 +182,7 @@ matrix runs.
 
 ## Proposed action: reproduction sweep on current master
 
-### Step 1 — Tear down + recreate (truly fresh)
+### Step 1 — Cluster recreate on warm host
 
 ```bash
 export BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env
@@ -154,59 +191,79 @@ sg incus-admin -c "./test/incus/cluster-setup.sh create"
 sg incus-admin -c "./test/incus/cluster-setup.sh deploy all"
 ```
 
+Naming note: this is **cluster recreate on warm host**, not
+"fresh deploy." Incus VM `destroy → create` resets the VM kernel
+and userspace but does NOT reset the incus host's CPU frequency
+governor, IRQ placement, bridges/veth plumbing, qdisc state, or
+page cache. A production fresh deploy is on cold hardware; this
+reproduction is on warm hardware. We acknowledge the limitation
+and capture host-side state to disambiguate (Step 3).
+
 Do *not* apply CoS config (matches cos-off precondition). Do *not*
-run any iperf3 before the measurement (no human warm-up).
+run any iperf3 before the measurement.
 
-### Step 2 — Run the actual matrix smoke
+### Step 2 — Direct iperf3 loop (5 iterations, continue-on-failure)
 
-```bash
-sg incus-admin -c "BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-  ./scripts/userspace-phase-cycle.sh --smoke-matrix" \
-  2>&1 | tee /tmp/1562-reproduction-run1.log
-```
-
-This is the same script that produced the 15.014 Gbps measurement.
-It runs cos-off-ipv4-push at port 5201, 3 iterations, 5s each.
-Capture all three iterations even if one passes the 18 Gbps gate
-(the smoke runner aborts on first sub-threshold, but we want the
-full distribution — so wrap iperf3 manually if the runner short-
-circuits).
-
-### Step 3 — Repeat reproduction 3 times
-
-A single run is not enough to distinguish "real warm-up" from
-"environmental flake". Run the destroy-create-deploy-matrix loop
-three times. Record all 9 iterations (3 fresh deploys × 3
-iterations).
-
-### Step 4 — Interpret
-
-Outcomes:
-
-| All 9 iterations ≥ 18 Gbps | → PLAN-KILL. #1562 is explained by something between `13fa1009` and current master (could be #1594-adjacent fixes, could be Linux/firmware/lab change). Close as superseded. |
-| First iteration ≥ 18, iter 2-3 dips on every fresh deploy | → Real warm-up phenomenon, repeatable. Upgrade plan into Phase B: instrument to find root cause (per-binding TX-ring fill state, page-cache, cpufreq governor, ksoftirqd migration). |
-| Sporadic dip (1 of 3 deploys) | → Environmental flake. Document and either relax Gate 6 (peak/median pass criterion) or add a documented warm-up sweep before Gate 6 measurement. Close #1562 with documented relaxation. |
-| Different cell fails (e.g. iter 1 dips, iter 2 OK) | → Not warm-up but something else (RG transition state, neighbor table, cpufreq). Investigate. |
-
-### Pre-conditions on master
-
-Capture environment state per reproduction run:
+The standard matrix runner aborts on the first sub-threshold cell.
+For root-cause work we want all iterations. Drive iperf3 directly:
 
 ```bash
-# Per VM:
-incus exec loss:xpf-userspace-fw0 -- cat /proc/cpuinfo | grep -E "MHz|model name" | head
-incus exec loss:xpf-userspace-fw0 -- cpupower frequency-info 2>&1 | head -20
-incus exec loss:xpf-userspace-fw0 -- ip -d link show ge-0-0-2  # WAN
-incus exec loss:xpf-userspace-fw0 -- ip -d link show ge-0-0-0  # fab0 IPVLAN parent
-incus exec loss:xpf-userspace-fw0 -- ethtool -i ge-0-0-2
-incus exec loss:xpf-userspace-fw0 -- ethtool -k ge-0-0-2 | grep -i offload
-incus exec loss:xpf-userspace-fw0 -- cat /proc/sys/net/core/busy_poll
-incus exec loss:xpf-userspace-fw0 -- numactl --hardware | head -10
+# 5 iterations of cos-off-ipv4-push on port 5201 against the
+# canonical target. All iterations captured regardless of result.
+for iter in 1 2 3 4 5; do
+  echo "=== iter $iter ==="
+  sg incus-admin -c "incus exec loss:cluster-userspace-host -- \
+    iperf3 -J -c 172.16.80.200 -P 12 -t 5 -p 5201" \
+    | tee /tmp/1562-run${RUN}-iter${iter}.json
+done
 ```
 
-These attach to the reproduction log so reviewers can cross-check
-"the WAN interface in production-like state" before/after each
-iteration.
+Notes:
+- `-P 12` matches the smoke matrix's parallel stream count
+  (canonical 12-stream gate from SKILL.md).
+- `-t 5` matches the 5s iteration duration in Gate 6.
+- Port 5201 matches the failing cell.
+- 5 iterations (not 3) so we see whether iter 2 is a *specific*
+  event or whether iter ≥2 stays in the dip regime.
+
+### Step 3 — Pre-condition state capture before each iteration
+
+```bash
+# Per VM, before each iteration:
+sg incus-admin -c "incus exec loss:xpf-userspace-fw0 -- \
+  bash -c 'cat /proc/loadavg; \
+            grep MHz /proc/cpuinfo | head; \
+            cpupower frequency-info 2>&1 | grep -E \"current CPU|governor\"; \
+            ip -s link show ge-0-0-2 2>&1; \
+            ethtool -S ge-0-0-2 2>&1 | grep -iE \"rx_packets|tx_packets|drop|error|xdp\" | head -20'" \
+  | tee /tmp/1562-run${RUN}-iter${iter}-fw0-precond.txt
+
+# Host-side state (incus host, captures the warm-host limitation):
+cat /proc/loadavg /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>&1 || true
+```
+
+### Step 4 — Repeat 3 times (3 destroy/create cycles)
+
+15 iterations total (3 cycles × 5 iters). Far stronger statistical
+power than v1's 9 datapoints. If all 15 ≥ 18 Gbps, the 95% upper
+bound on per-iteration failure probability is ~18% — still not
+"impossible" but well below the failing-cell-every-deploy regime.
+
+### Step 5 — Interpret with decision table
+
+| Pattern | Verdict | Phase B path |
+|---|---|---|
+| All 15 ≥ 18 Gbps | **PLAN-KILL.** Close #1562 as superseded by unknown post-`13fa1009` change OR environmental change. Document. | None — issue closed. |
+| Iter 1 ≥ 18, iter 2 always dips (<18) across all 3 cycles, iter 3-5 recover ≥18 | Real **iter-2 specific** pattern, not classical warm-up. | **Phase B-1**: iperf3 backend state across iterations / RG transition diagnosis / neighbor table flap. NOT a dataplane fix. |
+| Iter 1 ≥ 18, iter 2-5 all dip across all 3 cycles | Sustained degradation after iter 1; not warm-up but post-iter-1 regime change. | **Phase B-2**: instrument xpf-userspace-dp counters (per-binding TX-ring, scratch_*, retry counters) to see what changed at iter 2. |
+| Iter 1 mixed (≥18 sometimes, <18 sometimes), no consistent iter index | Environmental flake. Lab / kernel / firmware noise. | **Phase B-3**: relax Gate 6 to peak ≥ 18 + median ≥ 18 instead of per-iter, OR add documented pre-warm sweep. |
+| Iter 1 dips, iter 2+ recover | Cold-cache / cpufreq / NUMA warm-up classical pattern. | **Phase B-4**: pre-warm 1s iperf3 before Gate 6 OR threshold relaxation. |
+| Dip correlates with cpufreq state (governor lag, MHz mismatch with load) | cpufreq governor issue. | **Phase B-5**: lab cpufreq fix / governor pinning. Outside #1562 scope (lab config). |
+| Dip correlates with NIC counter anomaly (xdp drops, TX errors, retransmits in dipped iter) | Hardware / firmware path. | **Phase B-6**: NIC-specific characterization. Outside #1562 scope. |
+| Dip correlates with RG transition / VRRP role flap during iter 2 | Cluster state transition. | **Phase B-7**: HA quiet-period before Gate 6 matrix. |
+
+The decision table makes Phase B's space concrete without
+committing to a specific fix.
 
 ## Concrete design
 
@@ -260,15 +317,16 @@ If Phase B ends up modifying the smoke matrix runner:
 ## Test plan
 
 Phase A (this plan):
-- [ ] cargo build clean on master (sanity)
-- [ ] cargo test --release pass (sanity)
-- [ ] Cluster destroy/create/deploy clean × 3 runs
-- [ ] Smoke matrix → capture all iterations of cos-off-ipv4-push
-- [ ] Capture pre-condition state per run (cpufreq, ethtool, NUMA)
-- [ ] Tabulate 9 iterations + summarize verdict
+- [x] cargo build clean on master (sanity, verified)
+- [ ] Cluster destroy/create/deploy clean × 3 cycles
+- [ ] Direct iperf3 loop 5 iterations per cycle (continue-on-failure)
+- [ ] Capture pre-condition state per iteration (load, cpufreq,
+      ethtool counters, NIC stats)
+- [ ] Capture host-side cpufreq governor + load
+- [ ] Tabulate 15 iterations + classify against decision table
 
-Phase B (only if Phase A reproduces dip):
-- Plan v2 follows from root-cause hypothesis.
+Phase B (only if Phase A reproduces a non-environmental pattern):
+- Plan v3 follows from the decision-table verdict (B-1..B-7).
 
 ## Out of scope (explicitly)
 
@@ -324,9 +382,32 @@ Phase B (only if Phase A reproduces dip):
    throughput.
 
 6. **Is "destroy/create/deploy" actually representative of fresh
-   deploy semantics?** A production fresh deploy is on a brand-
-   new VM with no prior kernel/firmware/JIT state. Incus VMs
-   reset to a snapshot, which is similar but not identical.
-   If the warm-up phenomenon is rooted in something that
-   doesn't reset across `destroy → create` (e.g. host-side
-   caches), the reproduction won't reflect production.
+   deploy semantics?** *(v1 question, retained.)* Plan v2
+   acknowledges the gap in Step 1 naming and captures host-side
+   state in Step 3.
+
+7. **(NEW in v2)** Is the 30% iter-2 drop magnitude consistent
+   with any single classical warm-up mechanism? AF_XDP first-touch
+   TX-ring fill: should settle in <100ms, well within iter 1.
+   cpufreq ramp on Intel: <500ms with ondemand governor.
+   Page-cache for the dataplane binary: filled by deploy. NUMA
+   migration: chronic skew, not iter-2-specific. The plan
+   acknowledges this in the "honest scope" section but the
+   reframing question deserves explicit reviewer pushback —
+   should the issue be renamed away from "warm-up"?
+
+8. **(NEW in v2)** Is 15 datapoints enough for PLAN-KILL when the
+   alternative hypothesis is "rare flake"? With 15 clean
+   datapoints, the 95% one-sided upper bound on failure
+   probability is ~18%. If the iter-2 event has true probability
+   <18% it can still survive Phase A. Is that acceptable?
+   Reviewer judgment: yes, if all 15 pass we close #1562 with
+   "could not reproduce; if dip returns, reopen with fresh
+   evidence."
+
+9. **(NEW in v2)** The plan does not propose modifying
+   `userspace-ha-validation.sh` to capture iter 3+. Instead Step 2
+   bypasses the matrix runner with a direct iperf3 loop.
+   Should the runner itself learn continue-on-failure to make
+   future Gate 6 evidence richer? Reviewer call: in scope for
+   #1562 or separate runner-improvement issue?
