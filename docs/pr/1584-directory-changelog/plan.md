@@ -2,8 +2,67 @@
 
 ## Status
 
-DRAFT v1 — pending adversarial plan review (Codex + AGY hostile;
-Claude SMR + Gemini-Pro-3 secondary).
+**PLAN-KILLED v1 — 2026-05-27 03:25 UTC**
+
+- **AGY** (review-mpnhx7m5-s7qu58): **PLAN-KILL** — "the cure proposed
+  in #1584 is significantly worse than the disease"
+- **Codex** (task-mpnhwj7v-lbe4tu): **PLAN-NEEDS-MAJOR** — "directory
+  architecture is the right direction… but this plan is not ready"
+
+Both reviewers independently flagged the same structural issues
+(detailed in `kill-analysis.md`). The dominant blockers:
+
+1. **Naming-key mismatch.** Current `_Log.md` uses **issue numbers**,
+   not PR numbers, in headings (verified at lines 28, 261). Routing
+   the migration on first-`#N` produces wrong-named files (e.g.
+   `PR-1348.md` when the actual PR is #1596).
+2. **Circular dependency on PR numbers.** PR numbers are allocated by
+   GitHub at PR-open time. Log entries are written DURING local
+   development BEFORE PR creation. Forcing PR-number filenames
+   either requires premature draft-PR creation (CI spam, offline
+   blocker) or stale-rename force-pushes.
+3. **`merge-prs/SKILL.md:61-63`** has a hardcoded `_Log.md` conflict
+   resolver (`git checkout --theirs _Log.md`) that silently breaks
+   under the new layout. Both reviewers caught this; the plan's
+   skill audit missed it.
+4. **`MISC-YYYY-MM-DD.md` reintroduces the exact same parallel-append
+   conflict surface** for non-PR / multi-PR / cross-cutting sessions.
+   33 of 87 existing top-level sections lack a single-`#N` header.
+5. **The freeze-footer edit is itself a final-tail-append conflict
+   hazard** against every active in-flight branch (~30 PRs across
+   Waves 3-5). Queue-depth ≤ 3 mitigation insufficient given
+   dormant / offline branches.
+6. **Better alternative not yet explored:** AGY proposes a
+   transitional **dual-read / dual-write grace period** — tooling
+   reads from BOTH `_Log.md` and `_Log/*.md`, allowing in-flight
+   branches to drain naturally without coordinated force-pushes.
+
+See `kill-analysis.md` for the full reviewer transcripts and the
+prerequisites that a v2 plan would have to satisfy before
+re-dispatch.
+
+### Revisit criteria
+
+A v2 plan should be opened ONLY when ALL of the following hold:
+
+- Naming scheme is **issue-based** (`_Log/ISSUE-<N>.md`) or
+  **branch-based with rename** (`_Log/BRANCH-<slug>.md` → renamed
+  after PR open), not raw `PR-<N>`.
+- Migration script demonstrably attributes the existing 87 sections
+  correctly against a manifest of issue-number-to-PR-number lookups
+  (use `git log --grep="#1325"` + `gh pr list --search` cross-ref).
+- `merge-prs/SKILL.md` conflict resolver is updated in the same PR
+  with explicit path-glob match for `_Log/**/*.md`.
+- `MISC-YYYY-MM-DD.md` is replaced with `SESSION-<UTC>-<slug>.md` or
+  similar uniqueness-preserving scheme.
+- Transition strategy explicitly evaluates dual-read/dual-write and
+  documents why a cutover is preferred (if it is).
+- Freeze-footer is generic (no merge-commit-SHA reference) or
+  applied via a post-merge follow-up commit, not the migration PR
+  itself.
+
+DRAFT v1 was authored 2026-05-26 23:50 UTC and pushed at SHA
+5ab2ec15497c36311bb70f2c72d1e7bc1a3fe60c.
 
 ## Issue framing
 

@@ -4682,3 +4682,39 @@
   - AGY r2: MERGE-READY
   - Copilot r1: COMMENTED w/ 3 inline findings, all addressed in d013302748 + 0e2a88c8b
   - Codex: 3 consecutive sandbox failures (`unified-exec` blocked)
+
+## 2026-05-27 03:30 UTC — #1584 directory-changelog plan v1 PLAN-KILLED
+
+- **Action**: Drafted v1 plan for `_Log/PR-<N>.md` directory layout
+  per #1584 + AGY's #1582 KILL recommendation. Dispatched hostile
+  plan-review.
+- **Reviewers**:
+  - AGY (review-mpnhx7m5-s7qu58): **PLAN-KILL** — "the cure is
+    worse than the disease"; 10 substantive findings including
+    circular PR-number dependency, merge-prs/SKILL.md hardcoded
+    `_Log.md` resolver breakage, MISC-date collision class,
+    freeze-footer hazard
+  - Codex (task-mpnhwj7v-lbe4tu): **PLAN-NEEDS-MAJOR** — directory
+    architecture is right direction but plan not implementation
+    ready; 9 findings overlapping 7/9 with AGY
+- **Verdict**: PLAN-KILLED. Dominant blockers:
+  1. `_Log.md` headings use ISSUE numbers (e.g. `#1348` for a PR
+     opened as #1596), so first-`#N` routing produces wrong-named
+     files
+  2. PR numbers don't exist during local development → circular
+     dependency on `PR-<N>` filename
+  3. `merge-prs/SKILL.md:61-63` has hardcoded `git checkout
+     --theirs _Log.md` resolver that silently does nothing under
+     new layout
+  4. `MISC-YYYY-MM-DD.md` reintroduces the parallel-append
+     conflict for non-PR / multi-PR / date-only sections
+     (33 of 87 existing sections)
+  5. Freeze-footer edit on `_Log.md` is itself a final-tail
+     conflict hazard vs ~30 active in-flight branches
+- **Better alternative (AGY)**: transitional dual-read/dual-write
+  grace period — tooling reads from BOTH `_Log.md` and
+  `_Log/*.md` simultaneously, in-flight branches drain naturally
+  without coordinated force-pushes. To be explored in any v2 plan.
+- **Revisit criteria** documented in `plan.md` Status section.
+- **File(s)**: `docs/pr/1584-directory-changelog/{plan,reviewer-ids,kill-analysis}.md`, `_Log.md`
+- **Status**: PLAN-KILLED at v1. No PR opened.
