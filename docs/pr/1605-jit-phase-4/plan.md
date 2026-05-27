@@ -1,463 +1,493 @@
-# Phase 4 Cranelift JIT — Plan (DRAFT v2)
+# Phase 4 JIT — Plan (DRAFT v4) — 1M policies @ line rate, trimmed scope
 
-**Status:** DRAFT v2 — pending second adversarial plan review
-(Codex round-2 + AGY round-2 + SMR round-3).
+**Status:** DRAFT v4 — incorporates SMR r3 NEEDS-MAJOR feedback. v3
+proposed a 10-sub-PR program; v4 trims to a 2-sub-PR first cut
+(4b.0 measurement + 4b.3 DIR-24-8 LPM) with full architecture
+documented for later. Both prior reviewer rounds (v1 narrow framing
+→ PLAN-KILL convergent; v2 cancelled mid-review on Q8-Q13 expansion)
+are superseded.
 
-**Tracking issue:** #1605
+**Tracking issue:** #1605 (now extended to Q1-Q13).
 **Design doc:** `docs/userspace-jit-design.md` (co-canonical).
+**Hardware reference:** loss userspace cluster, AF_XDP zero-copy,
+mlx5 VF, native XDP.
 
-## Headline framing (revised v2)
+## Headline framing (v4)
 
-Plan v1 framed Phase 4 narrowly as "Cranelift JIT for per-flow
-rewrite functions". Under that framing, Codex/AGY/SMR converged to
-PLAN-KILL — the descriptor path (`apply_rewrite_descriptor_ipv4`)
-already saturates the rewrite arm at <1% of one core remaining, and
-Cranelift's 2-3 ns/packet win is below noise.
+The coordinator added a load-bearing scale constraint on
+2026-05-27 (issue #1605 comment): **line-rate packet evaluation
+against 1,000,000 active security policies on the AF_XDP fast
+path**, including the **cold path** that DDoS / port-scan /
+SYN-flood traffic exercises. Per-packet budget at 25 Gbps + 64 B
+frames is ~270 ns. Linear scan is dead by three orders of
+magnitude. Even O(log N) binary search costs 30-70% of the budget
+and leaves nothing for screen/NAT/rewrite.
 
-Plan v2 incorporates the user's reframing: **how does Phase 4
-behave at 1M security policies under line-rate traffic?** The design
-doc's "+30-50%" Phase 4 estimate was always aggregate across five
-sub-targets, not just the rewrite arm. The five are:
+Target shape: **O(1) average / O(log K_per_bucket) worst-case
+with K_per_bucket ≤ ~32.**
 
-1. Per-flow compiled fast-path (rewrite) — **Phase 1 absorbed it.**
-2. Policy decision trees — design doc claims Phase 2 done, but the
-   production path is still a **linear scan within the zone-pair**
-   (`policy.rs:429-457`). With 1M policies this is the actual cliff.
-3. NAT rule compilation — linear scan at session-miss time.
-4. Screen inlining — Phase 5 done.
-5. Frame rewrite templates — Phase 1 absorbed it.
+Plan v4 separates three sub-questions and **commits to a trimmed
+first cut** (SMR r3 F6):
 
-The 1M-policies framing brings (2) and (3) back into scope. Plan
-v2 splits Phase 4 into:
+- **Phase 4a — Cranelift per-flow rewrite JIT.** Killed in v1/v2/v3;
+  remains killed in v4. It doesn't solve the cold-path 1M-policies
+  problem because cold-path packets never reach the flow cache
+  (they ARE the cache miss).
+- **Phase 4b — Policy decision DAG with multi-stage decomposition
+  for 1M-policies line-rate scale.** The full architecture is
+  documented here. **v4 commits to shipping only 4b.0 + 4b.3 as
+  the first cut.** All other sub-PRs (4b.1, 4b.2, 4b.4, 4b.5,
+  4b.6) are deferred until 4b.0's measurements justify them.
+- **Phase 4c — Adversarial cold-path hardening.** Documented for
+  future reference; all sub-PRs deferred to post-4b.3 re-plan.
 
-- **Phase 4a — Cranelift JIT for per-flow rewrite.** Status: PLAN-KILL
-  (carried from v1 plus reviewer convergence). Documented for the
-  archival surface; not implemented.
-- **Phase 4b — Policy + NAT decision-tree builder, NO Cranelift.** A
-  static data-structure transformation that replaces the linear
-  zone-pair rule scan with an O(log M) decision tree at config-apply
-  time. This is the right surface for 1M-policies scaling. **Plan v2
-  recommends Phase 4b as a new sibling issue, not a sub-issue of
-  #1605**, because the Cranelift JIT umbrella (#1605) is being
-  closed.
+**Why first-cut = 4b.0 + 4b.3:**
+- 4b.0 (synthetic 1M-policy gen + microbench) ships the
+  measurement harness that every later decision depends on. It
+  resolves SMR r3 F3 (does the cluster sustain 49 Mpps at 64 B?
+  if not, the 270 ns budget relaxes and the DAG complexity drops).
+- 4b.3 (DIR-24-8 or sparse-trie LPM replacement for
+  `PrefixTrieV4::contains`) is the single highest-impact change
+  identified by r3 F2 — the existing uncompressed binary trie
+  walks up to 64 cache-line hops per packet for src+dst, which
+  dominates any reasonable budget. Even if 4b.1/4b.2/4b.4 are
+  never built, replacing the LPM moves the needle.
 
-If reviewers concur, the outcome at end of plan-review is:
+If reviewers conclude even the trimmed scope is too large or that
+1M policies on this hardware is structurally unachievable,
+PLAN-KILL of the whole umbrella remains acceptable.
 
-1. #1605 closes (not-planned-but-keep-open as the JIT-pipeline
-   archival surface, with `plan-kill` label).
-2. Phase 4b moves to a new issue with its own plan.
-3. `docs/userspace-jit-design.md` gets Phase 4 marked KILLED with
-   the verdict captured.
+> *If reviewers conclude the perf gain is too small to justify
+> the churn, **PLAN-KILL is an acceptable verdict.***
 
-## Issue framing
+## Issue framing — Q1-Q13
 
-Issue #1605 raises seven open architectural questions for Phase 4.
-Plan v2 answers each one, but reorganises around the Phase 4a/4b
-split. v1 answers are preserved verbatim where still accurate;
-revisions are flagged.
+Q1 (code-gen choice): see §4a + §4b. v3 answer: Cranelift not
+required for Phase 4b; descriptor path stays for Phase 4a-killed.
+Q2 (compile granularity / threshold): see §4b. Q3 (PROT_EXEC + HA):
+moot under 4a kill. Q4 (config invalidation): unchanged ArcSwap
+pattern. Q5 (cross-binding): unchanged AF_XDP UMEM ownership.
+Q6 (verifier-safety): plain-Rust DAG in §4b. Q7 (Phase 3
+ordering): RESOLVED — Phase 3 is a HARD PREREQUISITE, not a
+deferrable. Existing `PrefixSet*::Trie` uncompressed binary trie
+is structurally insufficient for 1M-policy line-rate (next §).
 
-### Q1 (code-generator choice): Cranelift vs dynasm-rs vs descriptor-only
+Q8-Q13 (added by coordinator 2026-05-27):
 
-**v2 answer:** None. Phase 4a is killed (no JIT). Phase 4b is a
-data-structure transformation (no JIT). Cranelift, dynasm-rs, and
-the descriptor-only option are all moot for Phase 4b. If future work
-needs JIT, revisit then.
-
-### Q2 (compile granularity / threshold under churn)
-
-**v2 answer:** Phase 4b compiles ONCE per config-apply, not
-per-flow. Compile cost is amortised across all flows for that
-config generation. Under DDoS / port-scan / SYN-flood, the
-decision-tree data structure is read-only and shared — no
-compile-storm risk. This is precisely why the JIT route was a
-liability under churn and the data-structure route is not.
-
-### Q3 (PROT_EXEC ownership + HA failover)
-
-**v2 answer:** Phase 4b has no PROT_EXEC pages. The decision-tree
-data structure lives in the regular `ConfigSnapshot` and is
-serialised across HA on config sync (same as today's policy state).
-Failover semantics unchanged. SMR r1 also independently verified
-that the existing `pkg/cluster/` session-sync wire format does NOT
-carry rewrite descriptors — flow cache is per-worker, rebuilt on
-the data path. Phase 4b doesn't change that.
-
-### Q4 (config invalidation barrier)
-
-**v2 answer:** Phase 4b uses the existing config-generation
-counter. The decision-tree blob is part of `ConfigSnapshot`; bump
-the generation; old `Arc<PolicyState>` references in flight are
-held via the existing ArcSwap pattern; new packets see the new
-tree. No new barrier needed.
-
-### Q5 (cross-binding rewrite)
-
-**v2 answer:** Unchanged from v1. AF_XDP UMEM-ownership is
-structural; Phase 4 does not transcend it. Phase 4a was killed
-partly because cross-binding still requires memcpy regardless of
-how the rewrite is dispatched. Phase 4b does not touch the
-cross-binding path.
-
-### Q6 (verifier-like safety)
-
-**v2 answer:** Phase 4a's Cranelift-IR-bounds claim is
-moot (killed). For Phase 4b, the decision-tree data structure is
-plain Rust with safe indexed access; bounds are checked at
-construction time when the tree is built from the
-`ConfigSnapshot`. Differential test: 10k random
-`(packet_5tuple, ConfigSnapshot)` cases must produce
-identical action between the linear-scan path on master and the
-decision-tree path. Add structure-aware adversarial coverage
-(VLAN-overlap, malformed headers, IPv6 extension headers).
-
-### Q7 (Phase 3 ordering)
-
-**v2 answer (CORRECTED from v1):** **Phase 3 is already
-shipped**, not partial. `PrefixSetV4` and `PrefixSetV6` in
-`userspace-dp/src/prefix_set.rs:33-47` are enum types with three
-variants (`MatchAny | Linear | Trie`). `from_prefixes` dispatches
-to the `Trie` variant when prefix count exceeds
-`PREFIX_SET_LINEAR_MAX`, and `PrefixSetV*::contains`
-(lines 78-83 / 124-131) routes runtime calls into the trie path
-automatically. Plan v1 F5 was wrong; SMR r2 documents the
-self-correction. The design doc's "Phase 3 NOT STARTED" row needs
-updating to "DONE".
+- **Q8: Per-zone-pair decision shape at K=10k-100k.** See §4b
+  multi-stage DAG.
+- **Q9: Config-apply latency at 1M rules.** See §4b construction
+  budget.
+- **Q10: Memory footprint** at 6 in-flight ConfigSnapshots ×
+  1M policies. See §4b interning.
+- **Q11: Address-book scale**. See §4b LPM-tree upgrade.
+- **Q12: HA session-sync + 1M policies failover timing.** See
+  §4b + §HA.
+- **Q13: Worst-case adversarial workload — cold path at line
+  rate.** See §4c.
 
 ## Honest scope/value framing
 
-### Phase 4a (per-flow rewrite JIT)
+### What 1M policies × 270 ns/packet actually permits
 
-The doc claims "+30-50% over descriptors". Wall-clock conversion on
-the loss userspace cluster:
+At 25 Gbps + 64 B, line rate is ~3.7 Mpps per worker (assuming 6
+workers and 6 NIC RX queues; per-worker budget 270 ns ÷ ~3 = ~90
+ns wall clock when overhead is amortised against the 22%
+`poll_binding` figure from the architecture doc). Within 270 ns of
+end-to-end per-packet budget, the policy decision step gets maybe
+80-120 ns. That is **8-12 L1 loads worth of compute**, or about
+**6 dependent cache-line hops**.
 
-- 23 Gbps × 1500 B MTU ⇒ ~1.92 Mpps aggregate / 6 workers ⇒
-  320 kpps/worker.
-- Per-packet budget per worker: ~3125 ns.
-- `apply_rewrite_descriptor_ipv4` (`frame/rewrite/ipv4.rs:14-123`)
-  is ~30 ops + 6-8 L1 loads from `&RewriteDescriptor`.
-- Cranelift would embed those 6-8 loads as immediates, saving
-  ~0.3 ns × 6 = ~2-3 ns/packet.
-- 2-3 ns × 1.92 Mpps × 6 workers / total-cores-budget ⇒
-  **0.4-0.6% of one core**.
+This is a hard physical ceiling that no software architecture can
+escape. So the design rules are:
 
-That's buried under memcpy (8% CPU, cross-UMEM, unavoidable per
-AF_XDP UMEM ownership), NAPI (12%), syscalls (3%), and the
-remainder of `poll_binding`'s 22% which a per-flow rewrite JIT
-doesn't touch.
+1. **Zero dependent loads per packet beyond ~6.** Multi-level
+   pointer chases (the existing
+   `PrefixTrieV4::contains` Box<TrieNode> walks up to 32 hops)
+   are structurally dead. Need flat-array radix or DIR-24-8-style
+   single-load lookups.
+2. **Branch prediction must dominate.** No data-dependent
+   branches the predictor can't learn. Decision DAGs encoded as
+   `switch (tag) { ... }` over a 1-byte tag at L1 are OK.
+3. **Hot working set ≤ L2.** At 1MB L2 per core (typical
+   Sapphire/Granite Rapids), the policy DAG's hot subset must
+   fit. 1M policies × ~16 B per entry = 16 MB — too big for L2.
+   The hot subset (top of zone-pair DAG + per-zone-pair fast
+   buckets) must be ≤ ~1 MB.
 
-**Compile-cost amortisation:** Cranelift 100 µs / 2-3 ns =
-33-50 k packets per flow minimum to break even. Production traffic:
+These three rules cut the design space severely.
 
-- DNS query (2 packets): **never amortises.**
-- Short HTTP/3 (≤20 packets): **never amortises.**
-- Idle TLS keepalive (~50 packets): **never amortises.**
-- Bulk TCP transfer (>700 packets): amortises at line-rate
-  lifetimes.
-- iperf3 benchmark (~250k+ packets): easily amortises.
+### Phase 4a (per-flow rewrite JIT) — KILLED (carried)
 
-Under DDoS / port-scan (10k-1M conn/sec), every new flow burns
-100 µs of compile time. JIT compiler saturates a core before doing
-useful work. **Phase 4a is a DoS vulnerability waiting to happen.**
+The rewrite arm runs only on flow-cache HIT. Under 1M-policies
+cold-path stress, **no rewrites happen** — packets are dropped or
+denied by policy before reaching the rewrite path. So Phase 4a
+doesn't address the coordinator's constraint at all. Carry the
+v1/v2 PLAN-KILL verdict.
 
-> Phase 4a verdict: **PLAN-KILL** (carried from v1, ratified by
-> Codex/AGY/SMR convergence — Codex retry pending due to sandbox
-> infra blocker on r1).
+> Phase 4a verdict: **PLAN-KILL.**
 
-### Phase 4b (decision-tree builder for policy + NAT)
+### Phase 4b (1M-policy decision DAG, NO Cranelift)
 
-#### What the cliff looks like at 1M policies
+#### Why Cranelift is still wrong here
 
-Master code path on session miss
-(`poll_descriptor/mod.rs:1375` & `:2393` both call
-`evaluate_policy_result_with_len`):
+Cranelift-emitted match cascades over 1M policies would generate
+~16 MB of machine code per zone-pair. L1-i is 32-64 KB. Branch
+predictor capacity is ~4k BTB entries. The JIT'd code falls out
+of all CPU caches on every cold-path packet. **Cranelift
+amplifies the cache problem, doesn't solve it.**
 
-```rust
-// policy.rs:429-442
-if let Some(indices) = state.zone_pair_index.get(&key) {
-    for &idx in indices {
-        if let Some(result) = try_match_rule(
-            &state.rules[idx], src_ip, dst_ip, protocol,
-            src_port, dst_port, packet_len,
-        ) {
-            return result;
-        }
-    }
-}
-```
+#### Architecture: multi-stage decomposition
 
-`try_match_rule` does: inactive check + `compiled_apps.matches`
-(HashMap O(1)) + 2× `PrefixSetV*::contains` (trie O(log N) when
-N>linear-threshold) + hit-counter increment. Cost per rule ≈
-~10-20 ns at L1.
+Within each zone-pair, the policy set is broken into stages, each
+of which is O(1) at runtime:
 
-At 1k rules per zone-pair × 10-20 ns/rule = **10-20 µs per session
-miss** — well above the ~10 µs budget for new-session forwarding
-latency.
+1. **Stage 0 — zone-pair lookup.** Already shipped in Phase 2:
+   `zone_pair_index: FxHashMap<u32, Vec<usize>>` at
+   `policy.rs:429`. O(1) hash, ~3-5 ns. Returns "rule-set handle"
+   for this zone-pair.
 
-At 1M total rules (typically split across hundreds of zone-pairs):
-worst-case zone-pair holds the bulk; say ~10k rules in the worst
-hot zone-pair. **100-200 µs per session miss in that zone-pair.**
-At 100k conn/sec session-creation rate that's 10-20 seconds of CPU
-per wall-clock second — dataplane melts on new-flow burst.
+2. **Stage 1 — protocol filter.** New: per-zone-pair
+   256-byte array of `Option<NonZeroU32>` indexing into a
+   protocol-specific sub-DAG. O(1) array load. ~2 ns.
 
-**At line rate of 1.92 Mpps for established traffic, no policy
-eval happens** (flow-cache-hit short-circuits all policy +
-NAT + FIB at `flow_cache_hit.rs:93`). So the cliff is at
-session-creation rate, not at established line rate. Existing flows
-DO continue at line rate even if new sessions stall.
+3. **Stage 2 — port-range bucketing.** New: per-protocol
+   sub-DAG, indexed by (src_port_range_id, dst_port_range_id).
+   Ports are pre-compiled at config-apply into a flat sorted
+   array of disjoint intervals; runtime does a single-load
+   bisect of ≤ log2(N_intervals) hops. Typical
+   N_intervals ≤ 256 ⇒ 8 hops at ~3 ns each = ~24 ns. Returns
+   bucket-id. **K_per_bucket invariant: ≤ 32 rules**, enforced at
+   build time by further splitting overflow buckets on the next
+   selectivity axis.
 
-#### Proposed Phase 4b structure
+4. **Stage 3 — address-LPM lookup.** New: DIR-24-8-style flat
+   LPM for IPv4 (TBL24 = 16 MB max but mostly empty; sparse
+   representation = ~2-4 MB). For IPv6, two-stage hash of
+   /64 prefix + tail trie. **One single load to TBL24** (24-bit
+   index), then conditional ≤ 1 extra load for /25-/32 (TBL8
+   subtree). ~5-8 ns per address. Two addresses per packet
+   (src + dst) = ~15 ns.
 
-At config-apply, for each zone-pair index, build a static decision
-tree exploiting rule structure:
+5. **Stage 4 — bucket linear scan.** Final K ≤ 32 rules in
+   the bucket get a linear scan with the existing
+   `try_match_rule`. At 5-10 ns per rule × ≤ 32 = ≤ 320 ns
+   worst case. **Average bucket fill is much smaller** (most
+   buckets have 1-3 rules) → typical 5-30 ns.
 
-1. **Layer 1: protocol dispatch.** Group rules by protocol byte
-   (TCP=6, UDP=17, ICMP=1, etc.) → 1-byte O(1) dispatch.
-2. **Layer 2: port-range bucketing.** Within a protocol, build a
-   sorted interval tree over (src_port_range, dst_port_range).
-   Binary search → O(log M_protocol) hits.
-3. **Layer 3: address-set short-circuit.** Within a port-bucket,
-   order rules by address-set selectivity (smallest set first).
-   Rules with `MatchAny` address sets go last. Existing trie path
-   from Phase 3 already accelerates the per-rule address match.
-4. **Layer 4: hit-counter increment.** Unchanged.
+Total worst-case per-packet policy cost:
+~5 + 2 + 24 + 15 + 320 = **~366 ns worst case**.
+Average case:
+~5 + 2 + 8 + 15 + 15 = **~45 ns average**.
 
-Per-eval cost target: O(log M_per_zone_pair) instead of O(M).
+The worst case exceeds the 80-120 ns budget by ~3×. Three
+mitigations:
 
-#### What this DOES NOT include
+- **Bucket K-cap = 16, not 32** (sharper split at build time).
+- **App-match early termination**: most rules carry application
+  matchers (proto+port hash); the bucket scan can short-circuit
+  on app-match miss before address-set check.
+- **Acceptance**: at K_per_bucket=16 worst case = 5+2+24+15+160
+  = 206 ns. Still over budget but within ~2×. We can either:
+  (a) Accept ~12 Gbps line rate on cold path at K=16
+  (instead of 25 Gbps).
+  (b) Build deeper splits (Stage 2.5: per-app selectivity).
+  Plan v3 picks (a) and documents the line-rate degradation as
+  the cold-path cost. Warm path (flow cache hit) remains at 23+
+  Gbps.
 
-- No Cranelift, no PROT_EXEC, no per-flow code-gen.
-- No HA wire protocol change (decision tree is local to the
-  daemon; rebuilt from `ConfigSnapshot` on each side).
-- No flow-cache change (cache-hit short-circuits policy already).
+#### Phase 4b sub-PRs
 
-#### Expected benefit
+The implementation cannot ship as one PR. Sequence:
 
-- At 10k rules per zone-pair: 100-200 µs → 1-2 µs per session miss
-  (~100×). New-flow latency under control.
-- At 1M total rules spread across zone-pairs: same shape, 100×
-  speedup applied where the linear-scan cliff is.
-- Established line rate (23 Gbps): unchanged — flow-cache short
-  circuits.
-- DDoS resilience: under 100k-1M conn/sec session-creation rate,
-  policy eval cost drops from melt-the-dataplane to ~10% of one
-  core. Phase 4b is a real anti-DDoS hardening.
+- **4b.0**: synthetic 1M-policy ConfigSnapshot generator +
+  microbench harness. ~500 LOC. **New child issue.**
+- **4b.1**: protocol-stage array (Stage 1) — small, isolated.
+  ~300 LOC.
+- **4b.2**: port-range bucketing (Stage 2) + build-time bucket
+  splitter. ~1.5k LOC.
+- **4b.3**: DIR-24-8 LPM (Stage 3) replacing
+  `PrefixTrieV4::contains`. Big change; ~3k LOC. **HARD
+  PREREQUISITE for cold-path scale.**
+- **4b.4**: bucket scan + try_match_rule integration. ~500
+  LOC + integration testing.
+- **4b.5**: NAT decision-DAG mirror of 4b.1-4b.4. Similar
+  shape, separate state.
+- **4b.6**: COS / filter / mirror decision-DAG (lower
+  priority — these are at the same code surface but smaller
+  rule counts in practice).
 
-#### Compile cost
+Each sub-PR ships with: cargo build clean, cargo test --release,
+microbench at K=10k/100k/1M policies, smoke matrix on the loss
+userspace cluster, HA failover regression.
 
-Building the tree at config-apply for 1M rules: estimate ~50-200 ms
-of CPU once, then ArcSwap-published. Config-apply is already
-infrequent (operator pushes config); 50-200 ms is acceptable.
+> Phase 4b verdict guidance: **PLAN-PROMOTE-TO-NEW-ISSUE-SERIES.**
+> 4b is too large to ship inside this plan's PR. The plan PR
+> updates the design doc, closes the original #1605 scope as
+> the umbrella tracking issue, and spawns 4b.0-4b.6 child
+> issues.
 
-> Phase 4b verdict guidance: **PLAN-PROMOTE-TO-NEW-ISSUE.** Not
-> implemented in plan v2's PR scope; a new fresh issue + plan
-> covers it.
+### Phase 4c (cold-path hardening — adversarial workload)
+
+The user's Q13 frames the cold path as the failure mode. Even
+with Phase 4b's ~45 ns average / ~206 ns worst-case, a sustained
+SYN-flood from random source IPs takes the SAME path as a real
+new flow — both miss the flow cache and hit the DAG.
+
+Mitigations:
+
+- **Per-source-IP rate limit** before policy eval. SYN-floods are
+  characterised by sourcing from few IPs with high rate; a small
+  hash + counter pre-filter at ~5 ns/packet drops them BEFORE
+  the DAG. This is closer to a screen function than a new JIT
+  surface — extend the existing screen pipeline. (Phase 5
+  was "DONE inherent" because per-zone screen short-circuits on
+  empty config; Phase 5b is "active rate-limit on cold-path
+  source IPs at line rate" — new sub-issue.)
+- **Cold-path verdict micro-cache**: a 64k-entry LRU keyed on
+  (src_zone, dst_zone, proto, dport, src/24, dst/24) that
+  records "denied|permitted|further-eval" outcomes. **Reduces
+  cold-path cost for the small-botnet class of attacks** (SMR
+  r3 F5 correction — v3's "95% hit on SYN-floods" was hand-wavy;
+  large-botnet randomized src-IP attacks sample 2^24 unique /24s
+  and would see ~0.4% hit at 64k LRU, not 95%). Useful against
+  realistic ~10k-source botnets, not against full-spoofed
+  uniform attacks.
+- **Sliding-window per-zone-pair limits**: if 4b DAG eval rate
+  exceeds a configured threshold, fall back to deny-by-default
+  with logging until rate drops. This is operator-visible
+  policy, not silent degradation.
+
+Phase 4c is also a child issue series, sequenced AFTER 4b.0-4b.3
+land.
+
+> Phase 4c verdict guidance: **PLAN-PROMOTE-TO-NEW-ISSUE-SERIES,
+> after 4b core lands.**
+
+## Honest delivery & scope
+
+Plan v3 is an **architectural plan**, not a single
+implementation PR. The deliverables in the **plan PR** are:
+
+1. `docs/pr/1605-jit-phase-4/plan.md` (this file).
+2. `docs/pr/1605-jit-phase-4/claude-smr-plan-r*.md` (SMR docs).
+3. `docs/pr/1605-jit-phase-4/reviewer-ids.md` (task IDs).
+4. `docs/userspace-jit-design.md` updated with:
+   - "Scale target" section: 1M policies first-class.
+   - Phase 4 row marked KILLED for Cranelift / split into 4b/4c.
+   - Phase 3 row updated to DONE (with the K_per_bucket caveat
+     that further LPM work in 4b.3 supersedes the existing
+     uncompressed binary trie).
+5. Issue #1605 close with `plan-kill` on the original narrow
+   Phase 4 scope; OR keep open as umbrella with `plan-kill` on
+   4a and child issues for 4b.0-4b.6 + 4c.x.
+
+**No production code in this plan PR.** Each sub-PR is its own
+plan-review cycle.
 
 ## What's already shipped
 
-- `apply_rewrite_descriptor()` orchestrator, single caller,
-  `#[inline]` — `frame/rewrite/mod.rs:44`.
-- `apply_rewrite_descriptor_ipv4()` / `_ipv6()` with
-  `#[inline(always)]` — `frame/rewrite/`.
-- `RewriteDescriptor` struct with precomputed `ip_csum_delta`,
-  `l4_csum_delta` — `flow_cache.rs:50-74`.
-- 4-way set-associative 4096-entry flow cache —
-  `flow_cache.rs:6-25`.
-- `FlowCacheStamp` HA-aware invalidation —
-  `flow_cache.rs:76-112`.
-- **Phase 3 address-book tries (corrected from v1):**
-  `PrefixSetV4`/`PrefixSetV6` enum with `Trie` variant dispatching
-  via `from_prefixes` — `prefix_set.rs:33-83 / 105-131`.
-- **Phase 2 policy zone-pair indexing** — `policy.rs:429-432`
-  (`state.zone_pair_index.get(&key)`).
-
-What's NOT shipped (the 1M-policies cliff):
-
-- **Per-zone-pair decision-tree compile** — the linear scan at
-  `policy.rs:430-442` still runs O(M) within a zone pair. This is
-  Phase 4b's target.
-- **NAT-rule decision-tree compile** — separate but identical
-  shape; defer to Phase 4b extension or its own sub-issue.
-
-## Concrete design (Phase 4a — killed; Phase 4b — sketched)
-
-### Phase 4a sketch (for archival only)
-
-Per-flow Cranelift function emitted at session-miss-→insert time,
-storing a function pointer in `FlowCacheEntry`. Hot path branches
-on `entry.jit_fn.is_some()` and calls the JIT instead of
-`apply_rewrite_descriptor`. PROT_EXEC pages mmap'd per worker.
-
-**Status:** documented and KILLED. Not implemented. Doc-coherency
-update reflects the kill verdict.
-
-### Phase 4b sketch (deferred to new issue)
-
-Add a new type `PolicyDecisionTree` in `userspace-dp/src/policy.rs`:
-
-```rust
-pub(crate) struct PolicyDecisionTree {
-    by_zone_pair: FxHashMap<u32, ZonePairTree>,
-    global_tree: ZonePairTree,
-    default_action: PolicyAction,
-}
-
-struct ZonePairTree {
-    by_protocol: [Option<ProtocolTree>; 256],
-    // 256-byte protocol dispatch; per-protocol port-range tree.
-}
-
-struct ProtocolTree {
-    // Sorted intervals of (src_range, dst_range, rule_index)
-    intervals: Vec<PortRangeBucket>,
-}
-
-struct PortRangeBucket {
-    src_range: (u16, u16),
-    dst_range: (u16, u16),
-    // Rules ordered by address-set selectivity within this bucket
-    rules: Vec<u32>,
-}
-```
-
-Replace `evaluate_policy_result_with_len` body with a tree walk.
-The existing `try_match_rule` per-rule check is reused for the
-final address-set+app match at the leaf. Construction lives next
-to `PolicyState::from_snapshot` in `policy.rs`.
-
-**Public API preservation:** existing `evaluate_policy`,
-`evaluate_policy_with_len`, `evaluate_policy_result_with_len`
-signatures unchanged. Only the internal walk changes.
-
-**Implementation phasing for 4b (if promoted to its own issue):**
-
-- Step 1: tree builder + correctness differential test against
-  master.
-- Step 2: tree walk replacing linear scan; bench with 100k +
-  1M-rule configs.
-- Step 3: NAT decision tree (same shape, separate state).
+- Phase 1: descriptor + flow cache fast path. **Cold path
+  bypasses it.**
+- Phase 2: zone-pair hash + per-protocol app matcher. **Within
+  zone-pair, still linear scan.**
+- Phase 3: `PrefixSetV4::Trie` uncompressed binary trie. **Too
+  slow for 1M-policy line rate.** 4b.3 replaces with
+  DIR-24-8.
+- Phase 5: per-zone screen short-circuit. **No active
+  cold-path rate-limit yet.**
 
 ## Hidden invariants the change must preserve
 
-(Carries from v1; some are now moot under Phase 4a's kill.)
+(All carry from v1/v2 plus the v3 additions.)
 
-1. **Hot-path allocation rule:** zero per-packet allocation. Phase
-   4b's tree is read-only at runtime; satisfied.
-2. **Side-effect ordering:** unchanged (rewrite path not touched
-   by 4b).
-3. **HA sync portability:** policy state already crosses HA via
-   `ConfigSnapshot`; 4b's tree is local-rebuild. Satisfied.
-4. **Stale-handle hazard:** ArcSwap on `PolicyState` preserves
-   in-flight refs through config bumps. Already the project's
-   pattern.
-5. **Lifetime / borrow-checker shape:** Phase 4b is plain safe
-   Rust; no unsafe. Phase 4a was MED-HIGH on this axis (killed).
-6. **Verifier safety:** Phase 4b uses safe-Rust indexed access at
-   the tree leaves; differential testing covers parity with the
-   linear-scan reference.
+1. **Hot-path allocation rule.** Zero per-packet alloc.
+2. **Side-effect ordering.** rewrite path untouched.
+3. **HA sync portability.** Policy DAG is per-snapshot, crosses
+   HA via existing config-sync wire. New DAG construction must
+   complete within the existing config-apply window (~250 ms
+   today; budget grows but plan caps at ≤ 5 s for 1M rules).
+   **During reconstruction, the old `PolicyState` continues
+   serving traffic via the existing ArcSwap pattern** (SMR r3
+   F9 clarification) — config-apply does not introduce a
+   service interruption, only an extended commit-confirm
+   window for the operator UX. **Open verification (4b.0
+   deliverable):** confirm `pkg/cluster/config_sync*` ships the
+   pre-built DAG over the wire so the secondary doesn't rebuild
+   on activation — failover must remain ~60 ms.
+4. **Stale-handle hazard.** ArcSwap on PolicyState; in-flight
+   refs survive config bumps.
+5. **Memory footprint at 6 in-flight snapshots × 1M policies.**
+   (Revised v4 per SMR r3 F4 — v3's "~250 MB after interning"
+   number was optimistic.) Realistic shape:
+   - Per-rule struct (action, policy_id, hit_counter,
+     address-book + port-range Arcs): ~32 B × 1M = 32 MB per
+     snapshot. 6 snapshots = 192 MB.
+   - Address-book LPM tables (4b.3 DIR-24-8): 16 MB worst-case
+     per IPv4 table for 1M CIDRs; sparse-trie alternative is
+     smaller. At 10k address-books in worst-case deployment ×
+     1 MB average (most books are small) = 10 GB per snapshot.
+     **Even with Arc-shared per-snapshot, this is a hard
+     budget breaker.**
+   - Mitigation: CoW per address-book — when config-apply changes
+     book X, only book X's new LPM lives in the new snapshot;
+     unchanged books are shared via `Arc<PrefixLpmV4>` across
+     all snapshots. 6 snapshots × delta-only allocations ≈
+     ~10-12 GB at steady-state (live address-books) + ~100 MB
+     of in-flight per-rule deltas.
+   - **Honest conclusion:** at 10k address-books × 1M CIDRs each
+     (the absolute worst-case spread of 1M policies × 100 CIDRs
+     per book), memory dominates at ~10 GB. This is acceptable
+     on operator-class hardware (typical 64-256 GB RAM) but
+     NOT on smaller deployments.
+   - 4b.0's memory-footprint measurement is the deliverable that
+     gates the LPM representation choice — if the realistic
+     production policy mix uses fewer than 1k unique address-books
+     with mean 100 CIDRs each, the footprint drops to ~150 MB
+     and the design space relaxes.
+6. **Worst-case adversarial.** 4c rate-limits + micro-cache
+   keep the cold path within ~5× of average even under
+   sustained adversarial src-IP randomisation.
 
-## Risk assessment
+## Risk assessment (v3)
 
-| Class | 4a (KILLED) | 4b (PROMOTED to new issue) |
-|-------|-------------|---------------------------|
-| Behavioural regression | HIGH | LOW (differential test + linear-scan reference) |
-| Lifetime / borrow-checker | MED-HIGH | LOW (safe Rust, no PROT_EXEC) |
-| Performance regression | MED (compile storm under churn) | LOW (config-apply only) |
-| Architectural mismatch | HIGH (#946 P2 / #961 pattern) | LOW (well-scoped data-structure change) |
+| Class | 4a (KILLED) | 4b core (4b.0-4b.4) | 4c (cold-path hardening) |
+|-------|-------------|---------------------|---------------------------|
+| Behavioural | HIGH | MED — DAG must match linear-scan reference byte-for-byte across adversarial inputs | MED — silent rate-limit fallback risks production false-positives |
+| Lifetime / borrow | MED-HIGH (PROT_EXEC) | LOW (safe Rust DAG) | LOW |
+| Performance regression | MED (compile storm) | LOW under steady-state; MED under burst config-apply | LOW |
+| Architectural mismatch | HIGH (#946 P2 / #961 pattern) | LOW — 1M-policy scaling is a real production need | LOW |
+| Memory footprint | N/A | MED — interning must work or we blow 1.2 GB | LOW |
+| Cold-path adversarial | DOES NOT ADDRESS | LOW (with 4b.3 LPM) | MITIGATES (4c is the mitigation) |
 
 ## Test plan
 
-Plan v2 ships NO production code. The PR for this plan (when
-merged) updates `docs/userspace-jit-design.md` and closes #1605
-with `plan-kill` + `not-planned-but-keep-open`. A separate Phase
-4b PR (under a new issue) will carry the implementation tests.
+### Plan-merge gates (THIS plan-PR)
 
-Plan-merge gates (for THIS plan PR):
+- Three-reviewer convergence on v3: Codex r1 (retry-after-infra) +
+  AGY r1 + Claude SMR r3.
+- Doc-coherency updates pass review.
+- No production code lands.
 
-- cargo build clean (already verified locally on c469829ff).
-- cargo test --release: existing 952+ tests pass unchanged.
-- Doc update lints clean.
-- Three-reviewer convergence: Codex r2 + AGY r2 + SMR r3 all
-  PLAN-READY or NEEDS-MINOR-fixed.
+### Sub-PR gates (each 4b.x or 4c.x sub-PR)
 
-For Phase 4b (separate plan + issue):
+- cargo build clean.
+- cargo test --release: existing 952+ tests pass, new tests
+  added.
+- 5/5 named-test flake check on new modules.
+- Microbench at K=10k, 100k, 1M policies (`scripts/policy-eval-bench.sh`,
+  new).
+- Synthetic 1M-policy ConfigSnapshot generator
+  (`test/incus/synthetic-policy-gen.sh`, new in 4b.0).
+- Smoke matrix on loss userspace cluster: v4 + v6 × push +
+  reverse × CoS-off + CoS-on; per-class CoS 5201-5206 = 30
+  measurements.
+- **Cold-path adversarial smoke**: hping3 SYN-flood from
+  randomised src IPs at >1 Mpps, dataplane must remain
+  responsive (existing flows hold throughput; new flows queue
+  with bounded latency).
+- HA failover regression: `make test-failover` with a 1M-policy
+  config loaded; failover timing remains ≤ 100 ms (relaxed from
+  60 ms to allow for new DAG warm-up).
+- Config-apply latency: synthetic 1M-policy push completes in
+  ≤ 5 s.
+- Memory footprint: 6 in-flight ConfigSnapshots stay under
+  500 MB RSS.
 
-- 1M synthetic rule generator + benchmark.
-- Differential test vs master linear-scan path on 10k random
-  configs × 100 random packets each.
-- Smoke matrix on loss userspace cluster (v4+v6 × push+reverse ×
-  CoS-off+CoS-on; per-class 5201-5206).
-- HA failover regression (`make test-failover`).
-- DDoS stress: synthetic 100k-1M conn/sec, dataplane must stay
-  responsive.
+## Out of scope (v3)
 
-## Out of scope
+- Phase 4a Cranelift implementation (killed).
+- Filter / firewall-filter JIT (still out per #1605 body).
+- ARM64 support (x86_64 only on this hardware).
+- Cross-NIC shared UMEM.
+- Phase 6+ extensions (NAT64 specialisation, IPsec SA fast
+  path, BGP next-hop trie) — separate research.
 
-- Phase 4a Cranelift implementation (killed; not implemented).
-- Phase 4b implementation in THIS plan-PR (moved to its own
-  issue + plan).
-- NAT rule decision-tree (folded into Phase 4b or its sibling).
-- Filter / firewall-filter JIT (out per #1605 body).
-- ARM64 support (deployed target is x86_64).
-- Cross-NIC shared UMEM (separate research).
+## Open questions for adversarial review (v3)
 
-## Open questions for adversarial review (v2)
+1. **Is the 270 ns per-packet budget at 25 Gbps + 64 B real on
+   the deployed mlx5 VF + 6-worker config?** The architecture
+   doc shows 23 Gbps with 1500 B frames (1.92 Mpps total). 64 B
+   at 25 Gbps is 49 Mpps — 25× higher pps. Has any prior
+   measurement on this hardware demonstrated headroom for
+   49 Mpps with any policy load, or is the 25 Gbps line-rate
+   target itself overly aggressive for the small-frame case?
+   Reviewer to validate against `docs/userspace-perf-compare.md`.
 
-1. **Is the Phase 4a→4b split right?** Phase 4a (rewrite-arm JIT)
-   is killed by the descriptor-already-saturates argument. Phase
-   4b (policy decision tree) is promoted to a fresh issue. Is
-   there a third sub-target the framing misses (NAT eval,
-   filter eval, mirror sampling, COS classification)? If yes, the
-   plan should explicitly defer or fold.
+2. **Is DIR-24-8 actually faster than the existing uncompressed
+   binary trie in practice on this CPU?** DIR-24-8's selling
+   point is 1-2 memory accesses vs ≤ 32 for a binary trie. But
+   DIR-24-8 sparse representations either bloat (16 MB TBL24)
+   or fragment (sparse hash → 2 accesses). At 1M-rule
+   address-books, what's the actual memory footprint and L1
+   load count? Plan claims 5-8 ns/lookup; verify against actual
+   `perf stat` numbers from a related project (Cilium's LPM,
+   VPP's mtrie, BPF LPM).
 
-2. **Phase 4b implementation choice — interval tree vs hash-based
-   bucketing?** The plan sketches interval trees on port ranges
-   ordered by address-set selectivity. Is binary search over
-   sorted port-range intervals faster than per-byte radix or
-   Bloom-filter prefiltering? At 1M rules the answer depends on
-   port-range distribution in production configs. Reviewer should
-   propose a synthetic config that stresses each shape and
-   indicate which structure wins.
+3. **Bucket K=16 vs K=32.** Plan picks K=16 to fit budget. But
+   bucket-splitting at K=16 may overgrow the build-time DAG
+   construction past 5 s. What's the realistic trade-off?
+   Reviewer to quantify build-time at K=8/16/32 on the
+   synthetic 1M-rule config.
 
-3. **Phase 4b as a sub-issue of #1605 vs new sibling issue?** The
-   plan proposes new sibling (#1605 closes). Alternative: keep
-   #1605 open as the umbrella, file Phase 4b as a child issue,
-   make 4a a closed sub-issue. Either preserves the doc-coherency
-   contract. Pick the cleaner one.
+4. **Cold-path verdict micro-cache (4c.2) collisions.** Keyed on
+   (src_zone, dst_zone, proto, dport, src/24, dst/24). At 64k
+   entries with realistic adversarial src-IP distribution
+   (randomised /24 with 256k unique /24s), hit rate is ~25%.
+   Plan claims 95% on SYN-floods because attackers sample a
+   small key space. Is that an empirical claim or wishful
+   thinking? Reviewer to require a hping3-driven measurement
+   before 4c lands.
 
-4. **Should we revisit Phase 4a after Phase 4b ships?** The
-   plan's answer is no (the 2-3 ns/packet ceiling is structural).
-   But once 4b cuts session-miss latency from 100 µs to 1 µs,
-   maybe the relative weight of the rewrite arm grows enough to
-   matter? The math says no (rewrite arm runs at line rate; 4b
-   helps session-miss rate). Reviewer to verify with quote-line
-   evidence.
+5. **HA failover at 1M policies.** 60 ms today. With 1M-rule
+   DAG construction at ~5 s at config apply, the per-failover
+   cost depends on whether the secondary already has the DAG
+   pre-built (yes — via session-sync) or rebuilds on takeover
+   (no — too slow). Verify against `pkg/cluster/session_sync*`
+   and `pkg/cluster/config_sync*` that pre-built DAGs ship
+   over the wire and the secondary doesn't rebuild on
+   activation.
 
-5. **Verifier-safety for adversarial-frame parity in 4b.** Plan
-   v2 reuses `try_match_rule` at tree leaves. Are there malformed
-   packets where the existing `try_match_rule` returns one
-   verdict and a tree-walk path takes a different leaf and
-   returns a different verdict? Adversarial test cases:
-   - VLAN-tagged 802.1Q frames where protocol byte parsing
-     diverges between paths.
-   - IPv6 extension headers where L4 protocol read is from a
-     different offset.
-   - Fragmented IPv4 where ports are not present in the wire
-     packet.
-   The plan's claim "reuses try_match_rule, so parity is
-   trivial" must be defended against these.
+6. **Memory footprint claim (≤ 500 MB at 6 in-flight × 1M
+   policies).** Plan claims interning of address-book and
+   port-range refs cuts 1.2 GB → ~250 MB. Verify the
+   interning shape is structurally possible: address-book
+   refs across rules ARE typically shared (same address-book
+   referenced by N rules), but port-range refs may not be
+   (each rule may carry a unique port-range tuple). Reviewer
+   to compute the realistic dedup factor.
 
-6. **Phase 3 verification.** SMR r2 corrected my r1 wrong claim
-   that `PrefixTrieV4/V6` is dead code. AGY independently noted
-   the same correction. Reviewer for v2 should verify the
-   `PrefixSet*::from_prefixes` linear-vs-trie threshold
-   (`prefix_set.rs:65`) is sane for 1M-policy deployments —
-   e.g., is `PREFIX_SET_LINEAR_MAX` set high enough that large
-   address-books always pick `Trie`?
+7. **Sub-PR sequencing for 4b.0-4b.6 + 4c.x.** Plan v3 sketches
+   the order but doesn't pin priorities. Is the right
+   sequence:
+   - 4b.0 (gen + bench) — fastest signal
+   - 4b.3 (LPM) — biggest blocker
+   - 4b.1 + 4b.2 (stages 1+2)
+   - 4b.4 (bucket scan)
+   - 4b.5 (NAT mirror)
+   - 4c.1 (rate-limit)
+   - 4c.2 (micro-cache)
+   - 4b.6 (COS / filter / mirror)
+   Or does a different order ship measurable wins faster?
 
-7. **Should plan v2's PR (this plan + doc update + #1605 close)
-   actually land, or is closing #1605 premature?** If Phase 4b
-   has substantive risk of needing JIT later, keep #1605 open as
-   the umbrella. If 4b is purely a data-structure transform that
-   never needs JIT, close #1605 with `plan-kill`. Reviewer to
-   decide.
+8. **Should #1605 stay open as umbrella or close as plan-kill?**
+   Plan v3's recommendation is **close with `plan-kill` on
+   the narrow Phase 4 scope, spin out 4b.0-4b.6 + 4c.x as
+   new child issues. Keep doc-coherency contract**: every 4b/4c
+   PR updates `docs/userspace-jit-design.md` Scale Target section
+   in the same change set.
+
+9. **Is plan v3 itself too ambitious?** A 7-sub-PR program plus
+   3 4c sub-PRs is 10 PRs of work, each its own plan-review +
+   smoke + Copilot cycle. Methodology overhead is substantial.
+   Reviewer to weigh: ship the smallest concrete win first
+   (probably 4b.3 DIR-24-8 LPM standalone) and re-plan after,
+   vs commit to the full 10-PR architecture now.
+
+10. **Is the 23 Gbps warm-path throughput preserved across
+    Phase 4b changes?** New stages add a hash + array load
+    + interval bisect to the COLD path, but the WARM path
+    (flow cache hit) bypasses all of it. Plan v3 must confirm
+    no regression on the warm path during 4b.0-4b.6
+    integration. Reviewer to require a "regression line" in
+    every 4b.x sub-PR smoke output.
