@@ -4095,3 +4095,9 @@ top.
 - **Timestamp**: 2026-05-27 03:48 UTC
   - **Action**: Address Copilot inline comments (5 numbering inconsistencies, 2 'descendent'->'descendant' spellings). Pass numbering now consistent everywhere: 1=FuncDecl, 2=StructType.Fields, 3=CallExpr, 4=SelectorExpr, 5=bare Ident. All 8 canary tests still pass, 5/5 flake clean.
   - **File(s)**: pkg/daemon/legacy_dataplane_canary_test.go, pkg/daemon/legacy_dataplane_canary_synthetic_test.go
+
+## 2026-05-27 04:30 — #1608 v2 plan written
+
+- **Timestamp**: 2026-05-27 04:30 UTC
+  - **Action**: v1 PLAN-KILLED 3/3 (Codex+AGY+Claude SMR). Wrote v2 plan addressing all 6 fatal axes: (1) per-DESTINATION-IP keying + per-worker aggregate cap instead of broken per-source semantic; (2) full-policy-key verdict cache (from_zone_id, to_zone_id, src_ip, dst_ip, proto, sport, dport) with compile-time const_assert on PolicyRule size mirroring #1431; (3) insertion at the actual policy scan sites (line 1375 + 2393, NOT 605); (4) fixed-point token-bucket accumulator with worked traces for 50us/10s/100s windows; (5) corrected mem::size_of math, 184 KB total within 256 KB budget; (6) deferred wire-line CPU% gate to #1607-v2 follow-up, ship with O(1) microbench only.
+  - **File(s)**: docs/pr/1608-cold-path-hardening/plan.md

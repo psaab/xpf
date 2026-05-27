@@ -1,480 +1,690 @@
-# #1608 — Phase 4c cold-path hardening — plan v1
+# #1608 — Phase 4c cold-path hardening — plan **v2**
 
-Per-source-IP ingress rate-limit (4c.1) plus per-(src, dst, dport)
-verdict micro-cache (4c.2). Both are defensive depth in front of the
-existing linear-scan policy backend; the goal is "small-botnet floods
-do not saturate one worker."
+> **v1 PLAN-KILLED 2026-05-27** (Codex + AGY + Claude SMR 3/3 converge).
+> See `PLAN-KILL.md` + `claude-smr-plan-r1.md` + `codex-plan-r1.md` +
+> `agy-plan-r1.md` for the six fatal axes. This file is the v2 redesign.
+> v1 must NOT be resurrected — its semantic ("per-source-IP per-worker
+> bucket") is structurally broken on AF_XDP zero-copy.
 
-This plan was drafted with `userspace-dp/src/afxdp/poll_stages.rs` and
-`flow_cache.rs` in front of me; symbol references are exact at HEAD
-b1d738d20.
+## 0 v2 thesis
 
-## 0 Goal and honest framing
+The cold path that #1608 is trying to defend lives at
+`userspace-dp/src/policy.rs:414 evaluate_policy_result_with_len` —
+called from `poll_descriptor/mod.rs:1375` (ForwardCandidate slow path)
+and `poll_descriptor/mod.rs:2393` (session-install slow path). The
+policy matcher (`policy.rs:467 try_match_rule`) consumes ONLY
+`(from_zone_id, to_zone_id, src_ip, dst_ip, protocol, src_port,
+dst_port, packet_len)`. It has NO DSCP, NO TCP-flag, NO routing-
+instance, NO time-of-day match dimensions today — those are firewall-
+filter (`filter/mod.rs`) dimensions, a different code path that runs
+BEFORE flow-cache and is not what #1608 is about.
 
-The cold path runs the full policy eval pipeline on every flow-cache
-miss. Workloads that miss every packet (SYN-flood with random 5-tuples,
-port scans, source-spoofed DNS amplification) exercise the policy linear
-scan at line rate. The current code path passes a 1 Mpps cold-path
-flood through `resolve_flow_session_decision` → policy `indices` linear
-scan → NAT → FIB lookup, every packet.
+That observation removes the v1-fatal axis 2 "wrong verdicts" risk
+for the policy verdict cache provided the key covers every actual
+policy-match input AND a compile-time gate fires if any future field
+is added to `PolicyRule`. The #1431 cache-key invariant pattern
+applies here at full strength.
 
-The two mechanisms below are NOT a replacement for screen profiles or
-for the underlying policy backend — they are a 5-cycle drop-and-stop
-filter (4c.1) and a 30–50 cycle skip-the-scan filter (4c.2) layered
-before the existing pipeline. Both are opt-in; default-off; sized to
-fit in L2 cache; configured per-zone (4c.1) or globally (4c.2).
+v2 ships **two independent mechanisms**. Either can land alone if the
+other PLAN-KILLs again:
 
-**What this issue does NOT deliver:** a measured CPU% number against
-a real 1 Mpps cold-path flood, because the synthetic flood harness
-(`test/incus/synthetic-policy-gen.sh` / `cold-path-microbench.sh`)
-belongs to issue #1607 and is explicitly out of scope here. This plan
-proposes a substitute: an in-tree cargo benchmark (`benches/cold_path_4c.rs`)
-that drives the rate-limit + verdict cache directly from a synthetic
-descriptor stream. The bench produces the ≥50% / ≥30% acceptance
-numbers; the full 1 Mpps wire-line measurement waits on #1607 and is
-documented as a follow-up.
+1. **4c.1 v2 — per-DESTINATION-IP cold-path rate limit.** Per-worker
+   bucket. RSS sprays sources but the DESTINATION is invariant
+   (the victim service). 10× the protection of v1 with the same
+   per-worker locality. Plus a per-worker AGGREGATE cold-path
+   guard as a last-resort cap.
+2. **4c.2 v2 — full-policy-key verdict micro-cache.** Key covers
+   every `try_match_rule` input dimension (`from_zone_id`,
+   `to_zone_id`, `src_ip`, `dst_ip`, `protocol`, `src_port`,
+   `dst_port`). Compile-time `const_assert!` against
+   `mem::size_of::<PolicyRule>` so any future field forces a
+   v3 redesign.
 
-If the reviewers reject the cargo-bench substitute, the right pivot is
-to gate this PR's merge on #1607 landing first, NOT to ship #1608
-without an acceptance-grade measurement.
+Both are opt-in (default-off), per-zone-pair-overridable, sized to fit
+in L2 cache with corrected `mem::size_of` math.
 
-## 1 What changes
+## 1 v1 PLAN-KILL kill-axis resolution
 
-### 1.1 New module `userspace-dp/src/afxdp/cold_path_gate/`
+This section is mandatory per the protocol contract. Each of the six
+fatal axes from `PLAN-KILL.md` is addressed below with a concrete v2
+fix and the line-anchored justification.
 
-- `mod.rs` — `ColdPathGate` struct (owns rate-limit + verdict cache)
-- `source_bucket.rs` — fixed-size source-IP token-bucket table
-- `verdict_cache.rs` — 4K-entry 4-way set-associative verdict cache
-- `tests.rs` — unit tests for bucket refill, cache hit/miss/eviction,
-  generation invalidation
+### Axis 1 (FATAL v1) — Per-source-IP semantics unimplementable
 
-Per-worker (one `ColdPathGate` per binding). Lives on
-`BindingScratch` (already per-worker, allocation-free).
+**v1 broke:** "per source IP, per worker" bucket sees only 1/N of an
+attacker spraying random src_ports across N workers. The acceptance
+criterion was unmeetable.
 
-### 1.2 Wire-protocol
+**v2 fix: switch to per-DESTINATION-IP keying.**
 
-`ScreenProfileSnapshot` gains a single optional field. The plan keeps
-the field on the existing per-zone struct (which is the canonical
-per-zone container) rather than introducing a new top-level snapshot,
-to minimise wire churn and avoid file-zone overlap with #1606 (which
-is touching `protocol/security.rs` for the address-book rewrite —
-adding a single Option field at the end is mechanical and won't merge
-conflict).
+The attack class #1608 defends against is "cold-path flood saturates
+the policy linear scan." Every such flood has a finite set of
+DESTINATIONS (the victim services). Even a 1-Mpps source-spoofed flood
+with 10⁹ random src_ips converges on a small set of dst_ips: that's
+what the attacker is targeting.
+
+A per-destination-IP per-worker token bucket sees **all** packets
+targeting a given destination on that worker. RSS still sprays across
+workers, BUT each worker now sees its share of the attack on the
+victim. Aggregate cap = `dst_pps × N_workers` — much closer to what
+the operator means than v1's `src_pps × N_workers` overshoot.
+
+**Layered backstop: per-worker AGGREGATE cold-path rate cap.** A
+single `u64` counter per worker counts cold-path misses per
+`now_ns / 1_000_000_000` second-bucket. If it crosses a configured
+`cold_path_aggregate_pps` threshold, ALL further cold-path packets
+drop until the next second-bucket. No per-IP state — single load +
+branch on the hot path. Defends against the "attacker sprays 10⁶
+destinations to defeat per-dst keying" case.
+
+**CLI semantic (honest):**
+
+```
+set security screen ids-option <profile> \
+    cold-path-rate-limit per-destination <pps>
+set security screen ids-option <profile> \
+    cold-path-rate-limit aggregate <pps>
+```
+
+Knob documentation explicitly states **per-worker semantics** with N
+multiplier. Operators sizing for a 4-worker firewall set `per-dst 250`
+to allow 1000 pps total per destination. The honest framing was Claude
+SMR F1 option (b); v2 picks it AND combines it with the better
+destination key.
+
+Rejected alternatives:
+- Cross-worker shared atomic — adds 50-100 cycles MESI per cold-path
+  miss; the cold path already pays >500 cycles for the policy scan but
+  MESI ping-pong across 12 workers is structurally worse than the
+  policy scan it's trying to short-circuit (the policy scan is at
+  least worker-local cache). Codex-killed.
+- Pre-RSS aggregation at userspace-xdp shim — adds eBPF map writes per
+  packet; perf regression for legitimate traffic. AGY-killed.
+- Entropy-based detection — too much state, too many tunables, FN/FP
+  risk. Out for v2.
+
+### Axis 2 (FATAL v1) — Verdict cache key incomplete
+
+**v1 broke:** 3-tuple `(src_ip, dst_ip, dst_port)` ignored zone IDs,
+src_port, protocol, and any per-packet dimension.
+
+**v2 fix: key covers every `try_match_rule` input.**
+
+```rust
+#[repr(C)]
+struct VerdictCacheKey {
+    from_zone_id: u16,
+    to_zone_id: u16,
+    protocol: u8,
+    _pad0: u8,
+    src_port: u16,
+    dst_port: u16,
+    _pad1: u16,
+    src_ip: IpAddr,  // 17 bytes
+    dst_ip: IpAddr,  // 17 bytes
+}
+// mem::size_of = 16 (head) + 17 + 17 = 50 bytes raw; aligned to 51 → 56.
+```
+
+This covers every dimension that `policy.rs:467 try_match_rule`
+matches on TODAY:
+
+| Field | Matches in `try_match_rule`? | In v2 key? |
+|---|---|---|
+| `from_zone_id` | yes (via `zone_pair_index.get(key)`) | yes |
+| `to_zone_id` | yes (via zone_pair_key) | yes |
+| `src_ip` | yes (`source_v4/v6.contains(src)`) | yes |
+| `dst_ip` | yes (`destination_v4/v6.contains(dst)`) | yes |
+| `protocol` | yes (`compiled_apps.matches`) | yes |
+| `src_port` | yes (`compiled_apps.matches`) | yes |
+| `dst_port` | yes (`compiled_apps.matches`) | yes |
+| `packet_len` | NO (only used for `hit_counter.add`) | NO — bypass cache for the counter side |
+| `inactive` | yes (gates rule) | covered by `config_generation` stamp |
+| DSCP | NO — not in policy matcher | NO — filter dimension |
+| TCP flags | NO | NO |
+| forwarding-class | NO | NO |
+| routing-instance | NO (decided pre-policy) | NO |
+| time-of-day | NO | NO |
+
+**Compile-time invariant** to catch silent breakage if a future PR
+adds a per-packet dimension to `PolicyRule`:
+
+```rust
+// In policy.rs at PolicyRule struct end.
+const _: () = {
+    // Bumping this requires updating verdict cache key in
+    // userspace-dp/src/afxdp/cold_path_gate/verdict_cache.rs
+    // (#1608 CACHE-KEY INVARIANT, mirrors #1431).
+    assert!(std::mem::size_of::<PolicyRule>() <= EXPECTED_POLICY_RULE_SIZE);
+};
+```
+
+Plus a comment block on `PolicyRule` mirroring the
+`filter/mod.rs:48-76` CACHE-KEY INVARIANT block, referencing #1608.
+
+**Path (b) fallback (`has_<X>_match_terms` gate):** not needed for v2
+because no in-key dimensions exist that vary per packet within a
+(zone-pair, 5-tuple) group. If a future field is added, the
+`assert!` fires at build time and either the key is extended OR a
+per-field `policy.has_<X>_match_terms` aggregate flag gates the
+cache off (path (b) per #1431).
+
+**Wire-protocol scope:** the cache key uses runtime zone IDs from
+`worker_ctx.forwarding.zone_name_to_id`. NO new wire fields needed
+for the cache itself — no overlap with #1606.
+
+### Axis 3 (FATAL v1) — Wrong insertion point
+
+**v1 broke:** placed gate at `poll_descriptor/mod.rs:~605`, between
+flow-cache miss and `resolve_flow_session_decision`. That's the
+session-table lookup, NOT the policy linear scan.
+
+**v2 fix: gate immediately wraps the policy eval calls.**
+
+There are two `evaluate_policy_*_with_len` call sites in
+`poll_descriptor/mod.rs`:
+
+1. Line 1375 — `evaluate_policy_result_with_len` (ForwardCandidate
+   slow path; the canonical "policy decision on new flow").
+2. Line 2393 — `evaluate_policy_with_len` (session-install slow path
+   for sessionless or NAT-driven forwarding).
+
+v2 wraps BOTH via a single helper:
+
+```rust
+// In afxdp/cold_path_gate/mod.rs
+pub(crate) fn evaluate_policy_with_verdict_cache(
+    cold_gate: &mut ColdPathGate,
+    state: &PolicyState,
+    config_generation: u64,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_len: u64,
+    counters: &mut BatchCounters,
+) -> PolicyEvaluationResult {
+    // 4c.1 a) per-destination + aggregate rate gate. Returns Deny
+    //        directly if rate-limited. Counts in BatchCounters.
+    if let Some(deny) = cold_gate.check_rate(dst_ip, counters) {
+        return deny;
+    }
+    // 4c.2 verdict cache lookup. On hit, packet_len is added to the
+    //      cached rule's hit_counter (the only packet_len-dependent
+    //      behavior in try_match_rule) so accounting is preserved.
+    if let Some(hit) = cold_gate.lookup_verdict(
+        from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+        config_generation,
+    ) {
+        counters.cold_path_verdict_cache_hits += 1;
+        state.rules[hit.rule_idx as usize].hit_counter.add(packet_len);
+        return PolicyEvaluationResult {
+            action: hit.action,
+            policy_id: hit.policy_id,
+        };
+    }
+    counters.cold_path_verdict_cache_misses += 1;
+    let result = evaluate_policy_result_with_len(
+        state, from_id, to_id, src_ip, dst_ip, protocol,
+        src_port, dst_port, packet_len,
+    );
+    // Insert only on Permit/Deny by rule (skip default_action with id=0,
+    // since that's "no match" — caching it would block adding new rules
+    // from taking effect on the cold path until eviction).
+    if result.policy_id != 0 {
+        cold_gate.insert_verdict(
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            config_generation, result, /* rule_idx */ /* ... */,
+        );
+    }
+    result
+}
+```
+
+The two call sites become 9-arg → 11-arg (add `cold_gate` and
+`counters` references; `config_generation` comes from `worker_ctx`).
+Mechanical edit.
+
+**Rate limit BEFORE cache lookup** — the cache hit must NOT bypass
+the rate limit. Otherwise an attacker who can prime the cache with a
+single "permit" verdict then floods that 7-tuple gets per-worker
+free-pass at cache-lookup cost (still cheaper than policy scan but
+defeats the rate-limit goal).
+
+### Axis 4 (FATAL v1) — Token-bucket refill arithmetic loses sub-token quanta
+
+**v1 broke:** `elapsed_ns * rate_pps / 1e9` returns 0 for typical
+50 µs poll gaps at 1000 pps, but unconditionally bumps `last_refill_ns
+= now_ns`. Permanent DoS.
+
+**v2 fix: fixed-point token accumulator + conditional refill.**
+
+```rust
+struct TokenBucket {
+    /// Tokens × 1_000_000_000 — fixed-point. One token-ns = 1 ns of
+    /// budget. Refills add `elapsed_ns × rate_pps` (no division).
+    /// Take subtracts `1_000_000_000` per packet.
+    tokens_ns: u64,
+    /// Cap = `burst_pps × 1_000_000_000`. Default burst = rate.
+    burst_ns: u64,
+    /// Wall-clock monotonic snapshot of last refill.
+    last_refill_ns: u64,
+    /// Configured rate (PPS) cached for refill math.
+    rate_pps: u32,
+}
+
+impl TokenBucket {
+    fn refill_and_take(&mut self, now_ns: u64) -> TakeResult {
+        let elapsed = now_ns.saturating_sub(self.last_refill_ns);
+        // elapsed (u64) × rate_pps (u32 ≤ 2³² − 1) fits in u128.
+        let add = (elapsed as u128).saturating_mul(self.rate_pps as u128);
+        let new_tokens = (self.tokens_ns as u128).saturating_add(add)
+            .min(self.burst_ns as u128) as u64;
+        // Critical: only update last_refill_ns AFTER we credit. This
+        // guarantees no lost sub-token quanta — every nanosecond between
+        // refills contributes exactly `rate_pps` to the accumulator.
+        self.tokens_ns = new_tokens;
+        self.last_refill_ns = now_ns;
+        if self.tokens_ns >= 1_000_000_000 {
+            self.tokens_ns -= 1_000_000_000;
+            TakeResult::Allow
+        } else {
+            TakeResult::Deny
+        }
+    }
+}
+```
+
+**Worked trace for 50 µs poll cadence at 1000 PPS:**
+- Initial: `tokens_ns = burst_ns = 1_000_000_000_000` (1000 token-ns
+  burst).
+- Poll t=0: take 1 pkt → `tokens_ns = 999_000_000_000`.
+- Poll t=50µs (50,000 ns): elapsed=50_000, add=50_000×1000=50_000_000
+  → `tokens_ns = 999_050_000_000`. Take 1 → 998_050_000_000. Allow.
+- After 1000 packets (~50ms), each tick credits 50M, bucket drains
+  exactly 1B per packet at 1000 pps steady state. Bucket converges
+  to ~burst_ns – 1_000_000_000 once steady. No drift.
+
+**Worked trace for slow trickle (1 pkt every 10s at 1000 PPS):**
+- t=0: bucket=burst, take 1 → bucket=burst − 1B.
+- t=10s: elapsed=10⁹×10. add = 10¹⁰ × 1000 = 10¹³ — caps at `burst_ns`.
+- Take 1, bucket=burst − 1B. Trickle source never goes negative.
+
+**Worked trace for overflow (100s of inactivity):**
+- elapsed = 10¹¹ ns, add = 10¹⁴ ≤ u64::MAX (1.8×10¹⁹). Saturating
+  multiply is defensive only.
+
+Critically — `last_refill_ns = now_ns` is set AFTER the refill credit
+is applied, NOT before. The credit always reflects the full elapsed
+window. There is no quantization loss because `tokens_ns` is in ns
+units, not whole tokens.
+
+### Axis 5 (FATAL v1) — 416 KB storage exceeds 256 KB budget
+
+**v1 broke:** corrected `mem::size_of` math: `Option<IpAddr>=24` +
+`TokenBucket=24` (with new fixed-point fields) → 48 B/entry; 4096 ×
+48 = 192 KB just for bucket table. Plus 4096 × 64 verdict cache =
+256 KB. Total 448 KB.
+
+**v2 fix: per-table sizing with `mem::size_of` proofs + compile-time
+budget assertions.**
+
+```rust
+// 4c.1 per-destination table: 1024 sets × 4 ways = 4096 entries.
+// Per-entry: VerdictCacheKey approach NOT applicable; this table
+// keys on dst_ip + bucket fields only.
+#[repr(C)]
+struct DestBucketEntry {
+    dst_ip: Option<IpAddr>,    // 24 B (17 + tag + 6 pad)
+    bucket: TokenBucket,       // 24 B (8+8+8 nicely aligned)
+}
+// mem::size_of::<DestBucketEntry>() = 48 (verified by const_assert)
+const _: () = assert!(std::mem::size_of::<DestBucketEntry>() == 48);
+
+// Drop to 2048 entries × 4 ways = 8192 sets total? — 8192 × 48 = 384 KB.
+// Too big. Use 512 sets × 4 ways = 2048 entries.
+//   2048 × 48 = 96 KB.  ✓
+const DEST_TABLE_SETS: usize = 512;
+const DEST_TABLE_WAYS: usize = 4;
+const DEST_TABLE_ENTRIES: usize = DEST_TABLE_SETS * DEST_TABLE_WAYS; // 2048
+const _: () = assert!(
+    DEST_TABLE_ENTRIES * std::mem::size_of::<DestBucketEntry>() <= 96 * 1024
+);
+
+// Aggregate cap: single u64 + epoch + count
+struct AggregateGate {
+    epoch_ns: u64,    // start of current second-bucket
+    count_pps: u32,   // cold-path packets observed this epoch
+    cap_pps: u32,     // configured threshold
+}
+// Total = 16 B.  ✓
+```
+
+```rust
+// 4c.2 verdict cache: 1024 entries (256 sets × 4 ways).
+// Compact entry: hash(key) → bucket; full key stored in entry for
+// verification. Per-entry budget aim: 80 B.
+#[repr(C)]
+struct VerdictCacheEntry {
+    // Tagged 'empty' if key_hash == 0; reserved hash 0 is never
+    // returned (re-hashed to 1 if it falls on 0).
+    key_hash: u64,                // 8
+    from_zone_id: u16,            // 2
+    to_zone_id: u16,              // 2
+    src_port: u16,                // 2
+    dst_port: u16,                // 2
+    protocol: u8,                 // 1
+    _pad: u8,                     // 1
+    src_ip: IpAddr,               // 24 (17 + tag + 6 pad)
+    dst_ip: IpAddr,               // 24
+    config_generation: u64,       // 8 (stamp)
+    rule_idx: u32,                // 4 (index into PolicyState.rules)
+    policy_id: u32,               // 4
+    action: u8,                   // 1
+    _pad2: [u8; 7],               // 7
+}
+const _: () = assert!(std::mem::size_of::<VerdictCacheEntry>() == 88);
+
+const VERDICT_TABLE_SETS: usize = 256;
+const VERDICT_TABLE_WAYS: usize = 4;
+const VERDICT_TABLE_ENTRIES: usize = VERDICT_TABLE_SETS * VERDICT_TABLE_WAYS; // 1024
+const _: () = assert!(
+    VERDICT_TABLE_ENTRIES * std::mem::size_of::<VerdictCacheEntry>() <= 96 * 1024
+);
+```
+
+**Total per worker:** 96 KB (dest bucket) + 88 KB (verdict cache) + 16 B
+(aggregate) ≈ **184 KB**, within the 256 KB budget. 72 KB headroom.
+
+If reviewers want tighter — drop verdict cache to 128 sets × 4 = 512
+entries = 44 KB; total 140 KB. Pick the larger sizing for v2 since
+smaller hits eviction faster and a port-scan over 1024 ports holds
+1024 verdicts which fits the 1024-entry cache.
+
+### Axis 6 (MAJOR v1) — Wire-line acceptance gate depends on #1607
+
+**v1 broke:** acceptance criterion "≥50% CPU drop under 1 Mpps flood"
+required #1607's microbench harness which is itself in plan-kill /
+v2 redesign.
+
+**v2 fix: defer empirical CPU% gate to follow-up; ship mechanism
+with local microbench proving O(1) behavior.**
+
+v2 acceptance:
+
+- [ ] `cargo bench --bench cold_path_4c` shows verdict cache hit is
+  O(1) hash + memcmp, ≤30 ns per hit on standard test box. The bench
+  measures the cache structure in isolation; it does NOT claim a 1
+  Mpps wire-line number.
+- [ ] Token bucket refill+take is O(1), ≤15 ns per call (cargo bench).
+- [ ] Unit-tested correctness: refill arithmetic under fast-poll, slow-
+  trickle, and 100s-idle windows (each as named tests).
+- [ ] Cluster smoke matrix (v4/v6 × push/-R × CoS-off/CoS-on) on
+  loss userspace cluster — no regression vs master.
+- [ ] `make test-failover` passes (cold-path-gate is per-worker, HA
+  unaffected).
+- [ ] **NEW follow-up issue** filed against #1607-v2: "Once
+  cold-path microbench harness lands, gate Phase 4c.x defensive
+  effectiveness with synthetic flood at 1 Mpps."
+
+This is the honest framing per Claude SMR F3 v1 recommendation.
+
+## 2 Implementation outline
+
+### 2.1 New module layout (matches `feedback_refactor_module_dir_layout`)
+
+```
+userspace-dp/src/afxdp/cold_path_gate/
+    mod.rs                  -- ColdPathGate struct + entry helper
+    dest_bucket.rs          -- 4c.1 per-destination + aggregate
+    verdict_cache.rs        -- 4c.2 verdict micro-cache
+    tests.rs                -- unit tests
+```
+
+### 2.2 Per-worker storage
+
+`ColdPathGate` lives on `BindingWorker` (per-worker, allocation-free)
+beside `binding.flow.flow_cache`. Field name `cold_gate`.
+
+### 2.3 Wire protocol (single Option field, end of struct)
 
 ```rust
 // userspace-dp/src/protocol/security.rs
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub(crate) struct ScreenProfileSnapshot {
-    // ... existing fields
-    /// #1608 4c.1: per-source-IP cold-path rate-limit, packets/sec.
-    /// `None` disables; `Some(0)` is treated as `None` (defensive).
-    #[serde(rename = "cold_path_rate_limit_per_source_pps", default)]
-    pub cold_path_rate_limit_per_source_pps: Option<u32>,
-}
+// Add to ScreenProfileSnapshot at end (avoids #1606 merge conflict).
+#[serde(rename = "cold_path_rate_limit_per_destination_pps", default)]
+pub cold_path_rate_limit_per_destination_pps: Option<u32>,
+
+#[serde(rename = "cold_path_rate_limit_aggregate_pps", default)]
+pub cold_path_rate_limit_aggregate_pps: Option<u32>,
+
+#[serde(rename = "cold_path_verdict_cache_enabled", default)]
+pub cold_path_verdict_cache_enabled: bool,
 ```
 
-### 1.3 Junos CLI binding (Go side)
+Three fields. `Some(0)` is treated as "drop everything matching this
+gate" (no silent reinterpretation; F7 recovery).
 
-- `pkg/config/typed.go` — new field on the per-zone screen struct:
-  `ColdPathRateLimitPerSourcePPS *uint32`
-- `pkg/cmdtree/tree.go` — entry under
-  `security screen ids-option <profile> cold-path-rate-limit per-source <pps>`
-- `pkg/config/compiler.go` — emit the field when present
-
-### 1.4 Insertion point in the dataplane
-
-In `userspace-dp/src/afxdp/poll_descriptor/mod.rs` after the screen
-check at line 521 and BEFORE the flow-cache fast path at line 571.
-This ordering is deliberate:
-
-- Screen runs FIRST because it owns syn-flood / icmp-flood / land /
-  source-spoof / IDS — the rate-limit gate is a backstop, not a
-  replacement.
-- The flow-cache check stays AFTER because legitimate cached flows
-  must NOT pay the gate cost. The gate only fires on cache misses,
-  which is exactly the cold path.
-
-Actually — re-reading: the flow-cache hit logic is at line 571, AFTER
-screen. So the correct placement is:
+### 2.4 Junos CLI (new entries, not overlap with #1606)
 
 ```
-stage_screen_check        (line 521) — existing, untouched
-stage_ipsec_passthrough   (line 553) — existing, untouched
-stage_flow_cache_hit      (line 574) — existing fast path; cache HITS exit early
-  → if FlowCacheOutcome::FallThrough, we are on the cold path
-stage_cold_path_gate      (NEW) — 4c.1 rate-limit + 4c.2 verdict cache
-resolve_flow_session_decision  (line 613) — existing policy eval
+set security screen ids-option <profile> \
+    cold-path-rate-limit per-destination <pps>
+set security screen ids-option <profile> \
+    cold-path-rate-limit aggregate <pps>
+set security screen ids-option <profile> \
+    cold-path-verdict-cache  (boolean, default off)
 ```
 
-This is the cheapest correct insertion: the rate-limit only fires on
-true cold-path packets, and the verdict cache only persists outputs
-of the actual policy eval below it.
+Wire-protocol both-sides check per `feedback_wire_protocol_both_sides`:
+both `pkg/config/typed.go` (Go) and
+`userspace-dp/src/protocol/security.rs` (Rust) get updated in same PR.
 
-### 1.5 Verdict cache: what we cache and what we don't
+### 2.5 Insertion site exact edits
 
-The 4c.2 micro-cache stores ONLY the policy permit/deny verdict (plus
-optional NAT rewrite tuple). It does NOT cache:
+Two call sites in `poll_descriptor/mod.rs`:
 
-- Frame-rewrite descriptors (those belong on the per-flow cache)
-- NAT pool slot allocations (must run real session install)
-- FIB-resolved next-hop + neighbor MAC
+- Line 1375: replace `evaluate_policy_result_with_len(state, from_id,
+  to_id, src_ip, dst_ip, proto, sport, dport, len)` with
+  `cold_path_gate::evaluate_policy_with_verdict_cache(&mut
+  binding.cold_gate, state, validation.config_generation, from_id,
+  to_id, src_ip, dst_ip, proto, sport, dport, len, &mut counters)`.
+- Line 2393: same edit for `evaluate_policy_with_len` site.
 
-The verdict cache is consulted on cache miss; a hit lets the cold
-path SHORTCUT the policy linear scan but still runs the rest of the
-pipeline (NAT pool, FIB, neighbor learn, session install). The win is
-in cycles, not full-pipeline elimination. This is structurally
-narrower than the issue body implies; that narrowing is intentional
-and matches what cache-correctness allows.
+### 2.6 Generation invalidation
 
-## 2 Per-source token-bucket design (4c.1)
+The verdict cache stamps `config_generation: u64`. Lazy invalidation
+on lookup (entry's stamp ≠ current → miss + evict). No bucket stamp:
+buckets are policy-independent; an operator who changes
+`cold_path_rate_limit_per_destination_pps` mid-run sees new rate
+applied at next refill (rate stored on the bucket and re-read from
+the snapshot per lookup is too expensive — instead, on snapshot
+reload we walk the bucket table once and update each `rate_pps`
+field. One-time cost on commit, ~µs).
 
-### 2.1 Bounded storage
-
-A `HashMap<IpAddr, TokenBucket>` is itself a DDoS vector — SYN-flood
-with random source IPs grows the map without bound. Use a FIXED-SIZE
-open-addressed table:
-
-```rust
-const SOURCE_TABLE_WAYS: usize = 4;
-const SOURCE_TABLE_SETS: usize = 1024;  // 4K entries, ~96 KB
-                                        // (24 B/entry: IpAddr=17 + bucket=8)
-                                        // padded to 32 → 128 KB worst case
-const SOURCE_TABLE_SIZE: usize = SOURCE_TABLE_WAYS * SOURCE_TABLE_SETS;
-
-struct TokenBucket {
-    tokens: u32,           // current bucket level, in PPS units
-    last_refill_ns: u64,   // timestamp of last refill computation
-}
-
-struct SourceBucketEntry {
-    src_ip: Option<IpAddr>,  // None = empty slot
-    bucket: TokenBucket,
-}
-```
-
-Same 4-way set-associative layout as `flow_cache.rs`. On collision,
-LRU eviction within the set. Aging is implicit: an inactive entry
-gets evicted when a new source maps to its set.
-
-Memory: 4 K × 32 B = 128 KB per worker (within the 256 KB combined
-acceptance budget; 4c.2 gets the other 128 KB).
-
-### 2.2 Refill math
-
-No per-packet wall-clock read. Refill happens lazily on every lookup
-using the cached `now_ns` already computed once per `poll_descriptor`
-batch:
-
-```
-elapsed_ns = now_ns - bucket.last_refill_ns
-refill_tokens = elapsed_ns * rate_pps / 1_000_000_000
-bucket.tokens = min(burst, bucket.tokens + refill_tokens)
-bucket.last_refill_ns = now_ns
-```
-
-`burst = rate_pps` (1-second burst window). On overflow / wraparound,
-saturate at `u32::MAX`.
-
-Edge case (raised as Q1 in section 7): if a source is hit by a single
-packet, parked, and re-hit 10 minutes later, `elapsed_ns` is large but
-the refill arithmetic must NOT panic on integer overflow. Use
-`u128::from(elapsed_ns).saturating_mul(rate_pps as u128) / 1e9` to
-absorb the overflow.
-
-### 2.3 Hash + cache aliasing
-
-`set_index = FxHasher(src_ip) & (SOURCE_TABLE_SETS - 1)`. FxHasher
-on IpAddr produces good distribution; 12-bit index ensures legitimate
-sources will not all collapse onto one set absent specific adversarial
-choice of source IPs.
-
-**Adversarial input warning:** An attacker who knows the FxHasher seed
-and the SETS constant CAN choose source IPs to all collide on one set,
-defeating the per-source isolation. Mitigation is to use a per-process
-random seed (FxHasher already uses one if seeded — confirm at impl
-time) and to fall back to per-set LRU eviction so a colliding-source
-attack degrades to "newest source dropped" not "all sources of one
-victim get parked."
-
-### 2.4 IPv6 handling
-
-Each `/128` host is a distinct key. The issue body's reference to
-"/64 prefixes vs /128 hosts" raises whether to collapse v6 sources by
-/64. This plan does NOT collapse — collapsing a /64 means a single
-malicious /128 inside a legitimate /64 can starve all legitimate /128
-hosts in that prefix. The /128 keying matches how screen profiles
-already do source tracking (`session_limit_src`). If operators want
-/64 aggregation, that's a follow-up issue (separate semantic decision).
-
-## 3 Verdict micro-cache design (4c.2)
-
-### 3.1 Key
-
-`(src_ip, dst_ip, dst_port)`. 3-tuple is the issue body's spec; this
-narrows over the flow-cache 5-tuple by collapsing src_port + protocol
-into the cache value side. The narrowing is correct for the workload:
-port scans hold src_ip fixed and sweep dst_port; the verdict is the
-same for src_port=49152 and src_port=49153 against the same dst_port,
-because the policy rules in zone-pair → indices scan don't typically
-match on src_port. (When they do, this cache will produce wrong
-verdicts. See Q4 in section 7.)
-
-Wait — that's a real problem. Policies CAN match on src_port. The
-verdict cache key must include src_port, OR the cache must be gated
-off when any active policy rule references src_port. The issue body's
-3-tuple spec is wrong on this point.
-
-**Plan resolution:** key is 4-tuple `(src_ip, dst_ip, src_port, dst_port)`,
-and the cache stores protocol in the value side (verdict varies by
-protocol; cache must verify the protocol matches before returning a
-hit). Memory budget unchanged: 4 K × 28 B = 112 KB per worker.
-
-### 3.2 Storage
-
-```rust
-struct VerdictCacheKey {
-    src_ip: IpAddr,        // 17 B (1 tag + 16 max)
-    dst_ip: IpAddr,        // 17 B
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    ingress_zone_id: u16,  // zones change verdict; key MUST include
-}
-// Cache stores tuple → CachedVerdict + stamp
-struct CachedVerdict {
-    verdict: Verdict,           // permit / deny + optional NAT rewrite ID
-    config_generation: u64,
-}
-enum Verdict {
-    Permit { policy_id: u32 },
-    Deny,
-}
-```
-
-Same 4-way 1024-set layout as `source_bucket.rs`. Generation
-invalidation is LAZY (on lookup): if `entry.config_generation !=
-current_config_generation`, treat as miss and evict. Active clear is
-NOT used because config bumps must NOT stop the world.
-
-### 3.3 What hits the cache
-
-Cache insertion happens AFTER `resolve_flow_session_decision` returns
-a policy verdict, BEFORE flow-cache insertion of the rewrite
-descriptor. The cache stores the policy decision only; the rest of
-the slow path (NAT pool, FIB, session install) still runs. On the
-SECOND port scan probe, the verdict cache hit lets us skip the
-linear scan over `indices` in `policy.rs:430-442` — the ≥30%
-policy-eval cycle drop target.
-
-### 3.4 Why this isn't just the flow-cache
-
-The flow-cache already gates the fast path on a 5-tuple (`SessionKey`)
-match. The verdict cache is a SUPERSET-COVERAGE cache: it matches
-flows that have NO session entry (SYN with no prior handshake, scan
-probes that get dropped before session install). The flow-cache misses
-these because there's no session to cache against; the verdict cache
-catches them because it's a pure-policy cache below the session layer.
-
-If reviewers ask "isn't this just a duplicate of the flow-cache" — no,
-the flow-cache caches session-install OUTPUT (rewrite descriptor for
-an installed session); the verdict cache caches policy-eval OUTPUT
-(rule selection) before the session decision is made.
-
-## 4 Generation invalidation interaction with HA
-
-The flow-cache already handles config_generation + fib_generation +
-owner_rg_epoch + lease invalidation (see `FlowCacheStamp::capture`).
-The verdict cache only stamps `config_generation` because:
-
-- A verdict-cache hit does NOT skip FIB lookup (FIB still runs after
-  the verdict gate)
-- The verdict cache returns a policy decision, not a rewrite descriptor;
-  RG ownership doesn't affect the decision (the decision is "permit
-  with these NAT rewrites" — the RG-dependent question is "do I install
-  the session", which the verdict cache doesn't answer)
-- Owner_rg_lease_until is similarly irrelevant — the verdict cache
-  doesn't gate the session install
-
-The rate-limit bucket has NO stamp because rate limits are per-source
-counters, not policy-dependent. A config update that changes the
-per-source PPS rate updates the rate live (the rate is read from
-`screen_profiles` on every cold-path lookup); existing bucket levels
-are NOT reset (in the same way RateCounter in screen/rate.rs doesn't
-reset on threshold change).
-
-**HA failover edge case:** during failover, the new master starts
-with cold cold-path-gate state. An attacker mid-flood will get a fresh
-empty bucket on the new master and one burst-window's worth of
-unfiltered cold-path traffic. This is the same property the rest of
-the dataplane has on failover (flow cache cold-starts too); not a
-regression.
-
-The verdict cache is similarly cold on failover. Acceptable.
-
-## 5 Counters and observability
-
-New `BatchCounters` fields:
-
-- `cold_path_rate_limit_drops: u64` — packets dropped by 4c.1
-- `cold_path_verdict_cache_hits: u64` — 4c.2 cache hits
-- `cold_path_verdict_cache_misses: u64` — 4c.2 cache misses
-
-Surfaced via Prometheus + `show security flow` (alongside existing
-screen_drops). No new CLI commands required for v1; status output is
-sufficient.
-
-## 6 Files touched (exact list)
+## 3 Files touched (exact list)
 
 Rust dataplane:
 - NEW `userspace-dp/src/afxdp/cold_path_gate/mod.rs`
-- NEW `userspace-dp/src/afxdp/cold_path_gate/source_bucket.rs`
+- NEW `userspace-dp/src/afxdp/cold_path_gate/dest_bucket.rs`
 - NEW `userspace-dp/src/afxdp/cold_path_gate/verdict_cache.rs`
 - NEW `userspace-dp/src/afxdp/cold_path_gate/tests.rs`
 - EDIT `userspace-dp/src/afxdp/mod.rs` — `pub(super) mod cold_path_gate;`
-- EDIT `userspace-dp/src/afxdp/worker/` — add `cold_path_gate: ColdPathGate`
-  to per-binding state
-- EDIT `userspace-dp/src/afxdp/poll_descriptor/mod.rs` — insertion at
-  line ~605 (after flow-cache miss, before resolve_flow_session_decision)
-- EDIT `userspace-dp/src/afxdp/disposition.rs` — counters
-- EDIT `userspace-dp/src/protocol/security.rs` — `Option<u32>` field on
-  `ScreenProfileSnapshot`
+  + add 3 fields to `BatchCounters` (cold_path_rate_limit_drops,
+  cold_path_verdict_cache_hits, cold_path_verdict_cache_misses)
+- EDIT `userspace-dp/src/afxdp/worker/mod.rs` — add `cold_gate:
+  ColdPathGate` to `BindingWorker`
+- EDIT `userspace-dp/src/afxdp/poll_descriptor/mod.rs` — two call-site
+  edits (line 1375 + line 2393)
+- EDIT `userspace-dp/src/policy.rs` — add CACHE-KEY INVARIANT block
+  mirroring `filter/mod.rs:48-76`; add `const _:() = assert!()` on
+  `PolicyRule` size; export `EXPECTED_POLICY_RULE_SIZE`
+- EDIT `userspace-dp/src/protocol/security.rs` — three `Option`/`bool`
+  fields at end of `ScreenProfileSnapshot`
 
 Go control plane:
-- EDIT `pkg/config/typed.go` — `ColdPathRateLimitPerSourcePPS *uint32`
-  on per-zone screen struct
-- EDIT `pkg/cmdtree/tree.go` — CLI tree entry
-- EDIT `pkg/config/compiler.go` — emit field on ScreenProfileSnapshot
+- EDIT `pkg/config/typed.go` — three new fields on per-zone screen
+  struct
+- EDIT `pkg/cmdtree/tree.go` — three CLI entries
+- EDIT `pkg/config/compiler.go` — emit on snapshot
 
-Tests:
-- NEW `userspace-dp/src/afxdp/cold_path_gate/tests.rs` (unit)
-- NEW `userspace-dp/benches/cold_path_4c.rs` (synthetic flood + scan)
-- EDIT existing flow_cache tests (verify no interaction)
+Benchmarks:
+- NEW `userspace-dp/benches/cold_path_4c.rs` — O(1) microbench, no
+  wire-line claims
 
 Docs:
-- EDIT `docs/userspace-jit-design.md` — Phase 4c row
-- NEW `docs/cold-path-gate.md` — operator-facing brief
+- EDIT `docs/userspace-jit-design.md` — Phase 4c row (note: empirical
+  CPU% gate deferred to #1607-follow-up)
+- NEW `docs/cold-path-gate.md` — operator-facing brief documenting
+  per-worker semantics + N multiplier explicitly
 
-## 7 Open questions for reviewers (must answer before PLAN-READY)
+## 4 Open questions for reviewers (must answer before PLAN-READY)
 
-**Q1 — Token-bucket refill cadence and false-drop risk.**
-Plan §2.2 says refill uses the cached `now_ns` from the poll batch.
-That cadence is the worker tick — typically <1 ms under load, longer
-when idle. A source that sends 1 packet, parks, returns 10 s later
-sees `elapsed_ns = 10e9`, refill of `10e9 * rate_pps / 1e9 = 10 *
-rate_pps` tokens (clamped to `burst`). This is correct, not a false
-drop. The only false-drop risk would be in the OPPOSITE direction:
-if `now_ns` lagged behind real time, we'd undercount refill. Since
-`now_ns` is monotonic and only stale by one poll tick (sub-ms), the
-undercount is bounded to one poll tick's worth of tokens, which at
-1 Kpps is sub-token. **OK by analysis** — call out and confirm.
+**Q1 v2 — Per-destination keying vs per-{dest, dport} keying.**
+v2 keys the rate-limit on `dst_ip` alone. An attacker spraying
+random dst_ports against the same dst_ip drains one bucket. Is
+`dst_ip` alone the right granularity, or should we use `(dst_ip,
+dst_port)` so a flood on port 80 doesn't rate-limit legitimate
+traffic on port 443 to the same host? Trade-off: per-(ip,port)
+doubles the key space (more entries, more collisions); per-ip
+catches all-ports-of-victim floods more aggressively. My read: ship
+v2 with per-ip; if operators report per-port granularity is needed,
+add as a follow-up knob. **Hostile-pick please.**
 
-**Q2 — Cache aliasing on FxHasher.**
-For both source-bucket and verdict-cache, set_index is the low 10
-bits of FxHasher. If FxHasher is seeded per-process, an adversary can
-not pre-compute collisions. If it's unseeded (deterministic), an
-adversary can. Confirm FxHasher use here is seeded; if not, switch
-to SipHash with a per-binding random key (small one-time cost).
+**Q2 v2 — `policy_id == 0` (default-action) cache exclusion.**
+v2 §1 axis 3 helper skips cache insert when `result.policy_id == 0`
+(default action, no matching rule). Without that skip, a flood
+matching the default-deny gets cached, then a config change adding
+a permit-rule for that flow doesn't take effect until eviction.
+Skipping costs 2× the policy-scan work for unmatched packets (no
+cache hit ever). Is this the right trade or should the
+default-action be cached with a special path that re-validates on
+config bump? My read: skip; the default-action path is supposed to
+be infrequent in production configs (most flows match a real rule).
 
-**Q3 — HA peer rate-limit synchronization.**
-Plan §4 explicitly says cold-path-gate state is NOT synced across
-HA peers. An attacker that can force failover gets a fresh bucket on
-the new master. Is this acceptable, or do reviewers want a sync
-shim? My read: not acceptable to add HA sync for this (flow-cache
-already cold-starts on failover; this is consistent), but flag it
-as a design choice rather than an oversight.
+**Q3 v2 — `packet_len` semantic in the cache.**
+The policy matcher's `packet_len` parameter is consumed ONLY by
+`hit_counter.add(packet_len)`. v2 helper preserves correct accounting
+by calling `state.rules[hit.rule_idx].hit_counter.add(packet_len)`
+on every cache hit. That requires storing the `rule_idx` in the
+cache entry (4 B field already accounted in §1 axis 5 layout). Is
+this the right approach, or should the verdict cache also cache the
+`hit_counter` Arc? My read: rule_idx is correct — Arc clone on insert
+is O(1) but ~8 B more per entry; index is cheaper.
 
-**Q4 — Verdict cache key includes src_port.**
-The issue body specifies 3-tuple `(src_ip, dst_ip, dst_port)`. Plan
-§3.1 widens this to 4-tuple to handle policies that match on
-src_port. Is this widening correct, or should the cache instead be
-GATED OFF whenever any active policy rule references src_port? The
-gate-off approach is more conservative but pushes detection to
-config-compile time. Recommend: 4-tuple key (gives the verdict
-cache wider coverage), gate-off as a fallback if the 4-tuple proves
-not to cover other per-packet match dimensions.
+**Q4 v2 — Bucket size for IPv6 source variety.**
+The dest-bucket table has 512 sets × 4 ways = 2048 entries. A single
+WAN-facing firewall serving 8 victim services from 8 distinct dst_ip
+addresses uses 8 entries. A multi-tenant firewall fronting 200 VMs
+uses 200 entries. Both fit comfortably. The pathological case (a
+firewall fronting 50k loadbalancer VIPs) overflows; eviction is set-
+LRU. Is 2048 entries enough, or should we extend to 4096? My read:
+2048 is enough for the small-botnet flood case #1608 is about; large-
+fleet deployments are a separate sizing concern.
 
-**Q5 — Where does this interact with NAT pool exhaustion?**
-A verdict cache hit returns a policy verdict including "permit with
-NAT rewrite X". On the cold path, the NAT pool allocation still runs
-after the cache hit. If the pool is exhausted, the NAT decision will
-differ from the cached verdict (the cached verdict said "permit"; the
-actual pool says "no slots"). What does the dataplane do? Today
-without the cache: NAT pool exhaustion drops the packet at the NAT
-allocation step. With the cache: same behavior, because we still run
-the NAT allocation. **No regression** — confirm with reviewers.
+**Q5 v2 — `make test-failover` interaction.**
+The cold-path-gate state is per-worker, per-binding, not synced
+across HA peers. On failover, the new master starts with empty
+buckets and an empty verdict cache. An attacker mid-flood gets one
+burst-window of unfiltered cold-path traffic on the new master
+(same property as flow-cache). Is the right answer (a) document and
+move on, (b) add HA sync for buckets/cache, or (c) something else?
+My read: (a). Adding HA sync for a defensive-depth knob is over-
+engineering; the empty bucket gives the attacker a few packets, not
+a full bypass.
 
-## 8 Acceptance criteria (concrete)
+**Q6 v2 — Aggregate cap semantics under second-boundary jitter.**
+The aggregate gate epochs on `now_ns / 1_000_000_000`. Across the
+boundary, an attacker pacing exactly to land on the boundary gets
+nearly 2× the configured rate (full cap from second N + full cap
+from second N+1 in a sub-ms burst). Token-bucket-shaped aggregate
+gate would fix this but doubles the storage. Acceptable jitter or
+tighten? My read: 2× burst on second boundaries is fine for a
+defensive-depth gate; the underlying per-destination buckets are the
+primary mechanism.
+
+## 5 Acceptance criteria (concrete, defer-microbench-to-#1607-v2)
 
 - [ ] `cargo build --release -p userspace-dp` clean
-- [ ] `cargo test --release -p userspace-dp` clean, 5/5 flake check
-  on new tests
+- [ ] `cargo test --release -p userspace-dp` clean, 5/5 flake check on
+  new tests
 - [ ] `go test ./...` clean
-- [ ] Cargo bench `cold_path_4c` shows ≥50% CPU% drop under 1 Mpps
-  10-source flood (in-process synthetic)
-- [ ] Cargo bench shows ≥30% policy-eval cycles drop on second-pass
-  port scan (in-process synthetic)
-- [ ] Cargo bench memory footprint ≤256 KB per worker for 4c.1 + 4c.2
-  combined
-- [ ] `make cluster-deploy` + Pass A (v4/v6 push/-R) full smoke,
-  CoS-off and CoS-on, no regression
-- [ ] `make test-failover` ≤ 60 ms (cold-path-gate state is per-worker,
-  failover unaffected)
-- [ ] `docs/userspace-jit-design.md` Phase 4c row added with measured
-  numbers
-- [ ] `docs/cold-path-gate.md` operator-facing brief
-- [ ] No file-zone overlap with #1606 or #1607 (verified)
+- [ ] `cargo bench --bench cold_path_4c` shows O(1) verdict-cache hit
+  (≤30 ns) + O(1) bucket refill (≤15 ns). No wire-line claims.
+- [ ] `make cluster-deploy` + Pass A full smoke matrix on loss
+  userspace cluster (v4/v6 × push/-R × CoS-off/CoS-on); no regression
+- [ ] `make test-failover` clean
+- [ ] `docs/userspace-jit-design.md` Phase 4c row updated with
+  honest framing
+- [ ] `docs/cold-path-gate.md` operator-facing brief written
+- [ ] Compile-time `assert!` on `mem::size_of::<PolicyRule>` lands
+  with cited #1431-style invariant comment
+- [ ] Follow-up issue filed: "Gate 4c defensive effectiveness with
+  #1607-v2 microbench"
+- [ ] No file-zone overlap with #1606 (verified — different field
+  block + different file region in `protocol/security.rs`)
+- [ ] No file-zone overlap with #1607-v2 (test/incus/ vs
+  cold_path_gate/)
+- [ ] No touch of `pkg/cluster/` (verified)
 
-## 9 Risks and PLAN-KILL exposure
+## 6 PLAN-KILL exposure
 
-- **R1: cargo-bench substitute for 1 Mpps wire-line measurement.**
-  Plan §0 calls this out. Reviewers may reject the substitute and
-  demand we gate on #1607. If so: this plan converts to "land code +
-  unit tests; defer acceptance smoke to #1607-follow-up issue."
-- **R2: per-worker rate-limit is per-AF_XDP-queue, not per-flow-source.**
-  RSS hashing on 5-tuple sprays a single source IP's SYN-flood
-  (random src_port) across all N workers. The per-worker bucket is
-  effectively N× the configured rate. This is structural physics
-  documented in `feedback_per5tuple_fairness_killed`. Operators
-  configuring `cold-path-rate-limit per-source 1000` are getting
-  ~1000 × N pps total for an attacker spraying 5-tuples; ~1000 pps
-  total for an attacker holding 5-tuple constant. The CLI knob's
-  semantic is "per-source per-worker", which is what AF_XDP physics
-  allows. Must be documented in operator brief.
-- **R3: verdict cache correctness when policy includes per-packet match.**
-  Q4 above. If policy matches on a field not in the 4-tuple key
-  (e.g. DSCP — currently flow-cache-DSCP-gated, would need same
-  treatment here), cache returns wrong verdict. Plan: reuse the
-  `has_dscp_match` gate that flow-cache uses (in
-  `userspace-dp/src/filter/mod.rs`); skip cache insertion when any
-  per-packet match is active. Same gate, same code path.
-- **R4: cache pollution under burst.**
-  4 K entries × 4 ways = 16 K distinct verdicts before set-LRU
-  eviction. A scan over 65 K ports holds 16 K verdicts and evicts
-  the previous 16 K — on the second pass, set-LRU has already
-  rotated. Real port scans (1024 ports, common) fit comfortably.
-  Scan over 65 K ports gets ~25% hit rate on second pass instead of
-  ~95%. Bench must measure this; if acceptance is missed, increase
-  ways or size (within 256 KB budget).
-- **R5: file-zone overlap with #1606.**
-  Plan §1.2 adds a single Option<u32> field at the END of
-  `ScreenProfileSnapshot`. #1606 is rewriting `protocol/security.rs`
-  for AddressBookSnapshot. The Option-at-end pattern minimises
-  merge-conflict risk. If #1606 lands first, the conflict is
-  mechanical. If #1608 lands first, #1606's struct rewrite has to
-  preserve the new field. Coordinate via comment on #1606's PR.
+- **R1 v2: per-destination keying could miss spray-dst attacks.**
+  If an attacker has access to 10k distinct dst_ips on the firewall,
+  per-dst buckets each see 1/10k of the flood and never trip. The
+  aggregate cap is the backstop for this case. Both are needed.
+- **R2 v2: verdict cache pollution under SCAN.**
+  A horizontal port-scan over 1024 ports against one dst_ip fills
+  1024 distinct verdict-cache entries (same (zone-pair, src_ip,
+  dst_ip, proto) but varying dst_port + src_port). With 1024
+  entries × 4 ways = 4096 slots, the scan fits comfortably. A
+  source-spray scan (random src_ip × all dst_ports) overflows the
+  cache rapidly; second-pass hit rate drops to ~25%. The bench must
+  measure this. If reviewer pushes, tighten to "verdict cache
+  enabled per zone-pair" so operator can disable on the noisy edge.
+- **R3 v2: compile-time `assert!` on `PolicyRule` size is brittle.**
+  Any cosmetic refactor of `PolicyRule` field order changes the
+  computed size and breaks the assert. Mitigation: pick a generous
+  `EXPECTED_POLICY_RULE_SIZE` that covers known fields with 8 B
+  headroom; document on the assert that the value is a build-time
+  CACHE-KEY INVARIANT trip and the right response is "add field to
+  verdict cache key OR add path-(b) `has_<X>_match_terms` gate, not
+  bump the constant."
+- **R4 v2: per-zone-pair-overridable knob shape not in v2.**
+  v2 keeps the knob per-screen-profile (matches `ids-option
+  <profile>` shape). Operator wanting per-zone-pair tuning files
+  follow-up. Acceptable scope.
+- **R5 v2: aggregate gate sub-second jitter.**
+  See Q6.
+- **R6 v2: `now_ns` cadence under flood.**
+  Claude SMR F4 (v1) raised this. Confirmed by re-reading
+  `poll_descriptor/mod.rs:448-460`: `now_ns` is captured once per
+  `poll_binding_process_descriptor` batch invocation. Under a
+  policy-scan-bound flood, the batch IS the policy scan — but each
+  batch is bounded by the AF_XDP rx ring size (typically 2048 desc).
+  Per-batch `now_ns` lag is ≤ (2048 packets × policy_scan_ns/packet)
+  ≈ 2048 × 500 ns = ~1ms. Acceptable for second-grained PPS gates.
+  Sub-ms-grained gates would need mid-batch `now_ns` refresh which
+  is not what 4c.1 is asking for.
 
-## 10 Out of scope (filed as follow-up issues if reviewers want)
+## 7 Out of scope (filed as follow-ups if reviewers want)
 
-- Per-/64 IPv6 source aggregation
-- HA peer rate-limit synchronization
-- 1 Mpps wire-line measurement (waits on #1607)
-- Verdict cache learning across HA peers (similar story to flow cache)
-- Per-source-IP allowlist / never-drop list
-- Adaptive PPS based on observed legitimate-cold-path rate
+- Per-zone-pair tuning of the knobs (currently profile-level)
+- Per-/64 IPv6 dest aggregation (the issue is one /128 per service)
+- HA peer cold-gate state sync
+- Cross-worker shared per-destination atomic bucket (would meet
+  aggregate-precise semantic but pays MESI cost)
 - Operator-facing `clear security cold-path-gate` command
-- Per-zone (not per-profile) configuration shape
+- 1 Mpps wire-line acceptance — gated on #1607-v2 microbench
+- Adaptive PPS based on observed legitimate-cold-path rate
+- Per-source allowlist (`never-rate-limit-source` knob)
+- Token-bucket-shaped aggregate gate (replaces second-bucket counter)
 
-## 11 Plan version
+## 8 Plan version
 
-v1 — initial draft. Will iterate on reviewer feedback before any
-code lands.
+v2 — addresses all six v1 PLAN-KILL fatal axes with concrete fixes
+and worked traces. Drafted with policy.rs:414/467 and
+poll_descriptor/mod.rs:1375 + 2393 in front of me; symbol refs at HEAD
+28421304e.
