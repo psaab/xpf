@@ -1,5 +1,19 @@
 # Action Log
 
+## 2026-05-26 03:16 UTC — #1314 plan v1 drafted (adaptive idle-spin budget)
+
+- **Timestamp**: 2026-05-26 03:16 UTC
+  - **Action**: Drafted plan v1 for #1314 "Adaptive idle-spin budget
+    to recover CPU after copy-elimination". Plan picks Design A
+    (adaptive userspace budget, bitmap-of-32 EWMA with hysteresis,
+    floor 16 / ceiling 256) over Design B (kernel-side
+    `SO_BUSY_POLL=25µs + IDLE_SPIN_ITERS=0`) and explicitly invites
+    reviewers to push back if Design B is the cleaner architecture.
+    Plan includes Phase 0 measurement to verify the issue's
+    "1-2µs per empty iter" claim BEFORE writing code. Pending
+    hostile plan-review from Codex + AGY.
+  - **File(s)**: `docs/pr/1314-adaptive-idle-spin/plan.md`
+
 ## 2026-05-26 23:10 UTC — #1578 cluster perf root-cause (smoke target IP misalignment)
 
 - **Timestamp**: 2026-05-26 23:10 UTC
