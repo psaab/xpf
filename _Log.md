@@ -4225,3 +4225,22 @@ top.
     constructor), userspace-dp/src/policy_tests.rs (+~600 LOC:
     19 new tests + compile-time const _ size_of guards +
     v3_rule_full helper)
+
+## 2026-05-28 — #1622 PLAN-KILL round 1 (synthetic-policy-gen + Scale Target table)
+
+- **Timestamp**: 2026-05-28T17:30 UTC
+- **Action**: Drove #1622 plan v1 through round-1 reviewer convergence. AGY (adversarial-review-mppr5rgp-f7fmdp) returned PLAN-KILL with 6 findings; Claude SMR plan-r1 returned PLAN-NEEDS-MAJOR, then plan-r2 retracted to PLAN-KILL after re-reading the issue out-of-scope contract. Codex CLI exited mid-investigation without structured verdict (treated as INFRA per session-wide pattern). 2-of-3 PLAN-KILL convergence is decisive.
+- **Decisive findings**:
+  1. 24-bucket histogram bucket-0 covers [0, 1024) ns → 10/100-rule cells collapse to 512 ns midpoint artifact regardless of true latency.
+  2. 16-slot splitmix64 zone-pair hash has 88.2% collision probability at 8 active zone-pairs → high-rule-count vs low-rule-count collisions bias published aggregate downward via alias_seen exclusion.
+  3. Aggregate p50 over union-of-disjoint-zone-pair-histograms is a packet-mix-ratio artifact, not a per-zone-pair latency.
+- **Why hard-kill not needs-major**: both remedies require modifying #1619 cold_path_hist.rs + #1621 wire-protocol — explicitly out-of-scope per issue #1622 contract.
+- **File(s)**:
+  - docs/pr/1622-scale-target-measurement-v2/plan.md (archived v1)
+  - docs/pr/1622-scale-target-measurement-v2/claude-smr-plan-r1.md
+  - docs/pr/1622-scale-target-measurement-v2/claude-smr-plan-r2.md
+  - docs/pr/1622-scale-target-measurement-v2/reviewer-ids.md
+- **Issue actions**: gh issue close 1622 --reason "not planned"; gh issue edit 1622 --add-label "plan-kill"; PR not created (PLAN-KILL halts at Step 4).
+- **Follow-up**: filed #1635 umbrella for the cold-path histogram bucket layout + per-zone-pair slot map redesign that must land before #1622 can be retried.
+- **Branch**: perf/1622-scale-target-measurement-v2 pushed to origin @ cee1e8830 for archival.
+
