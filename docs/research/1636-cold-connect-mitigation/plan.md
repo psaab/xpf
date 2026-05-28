@@ -1,9 +1,25 @@
 # #1636 cold-connect / neighbor-resolution gap — research plan
 
-**Status**: DRAFT v1 — pending adversarial plan review
+**Status**: DRAFT v2 — revised after round-1 Codex + AGY + Claude SMR hostile review
 **Base SHA**: `dbfbf680cc82` (origin/master @ 2026-05-28)
 **Branch**: `research/1636-cold-connect-mitigation`
 **Scope**: research-only, no production source edits, no PR
+
+## Changelog since v1
+
+| # | Round-1 finding | Resolution |
+|---|------------------|------------|
+| Codex r1 #1 / AGY r1 #5 | Kernel rate-limit claim is correct; option A demoted | Re-stated §5 to confirm A is heartbeat-only; A removed from recommended set |
+| Codex r1 #5 | Ship B first as sysctl-only PR, measure, then decide C | Adopted: §13 now sequences as B-PR-1, then C-PR-2 |
+| AGY r1 #2 / SMR r1 #3 | Option D rejection was wrong; per-packet timestamping means SYN #2 gets fresh window | Reversed rejection of D; added D as a tier-2 lever paired with B |
+| AGY r1 #4 / Codex r1 #2 / SMR r1 #2 | B-only gate-failure trap; first probe can be lost on zero-copy XSK-owned TX queues | §6 made explicit; B alone does not meet 200ms gate; C is mandatory for the gate |
+| AGY r1 #1 / Codex r1 #4 / SMR r1 #6 | Warm-pass cost model under config storm + dead next-hops can FD-exhaust | §6 redesigned: rate-limited `last_probed_at` map in `NeighborManager` (5s per (ifindex, hop)); also coalesce snapshots to max 1 warm sweep/s |
+| AGY r1 #3 / Codex r1 #7 / SMR r1 #5 | Tunnel endpoint warming is wrong target | Dropped; warm only `routes_v4/v6` next-hops + `fabrics` peer IPs |
+| Codex r1 #3 / SMR r1 #4 / AGY r1 #6 (counter) | HA failover interaction with VRRP GARP burst | AGY's analysis adopted: warm pass and GARP both originate from same MAC/port, no upstream FIB confusion. §8 now states warm pass MUST run on RG-promote (not just safe) to repopulate FAILED entries from before promote |
+| Codex r1 #4 (persistent worker) / AGY r1 #1 (rate-limit) | Per-key debounce + persistent state | §6 adds `NeighborManager::last_probed_at: FastMap<(i32, IpAddr), u64>` |
+| SMR r1 #2 | Acceptance gate derivation missing | §9 now contains per-option latency derivation |
+| AGY r1 #7 | No CI latency-bound test | §10 adds mocked netlink fixture test |
+| Codex r1 #8 | CLI knob path not verified | §7 deferred — CLI surface bikeshed not blocking |
 
 ## 1. Issue framing
 
@@ -18,28 +34,30 @@ Two compounding userspace defects sit at the heart of it:
 - `PROBE_SCHEDULE_NS = [10, 60, 260] ms` in
   `userspace-dp/src/afxdp/neighbor_dispatch.rs:33-37`. After the third
   probe at 260 ms, **userspace fires no further ARP/NDP probes** for
-  the lifetime of the queued packet. The packet just spins on
-  `retry_pending_neigh()` checking `dynamic_neighbors`.
+  the lifetime of the queued packet. Per kernel-source review
+  (`net/core/neighbour.c::__neigh_event_send` around line 1199-1275),
+  the extra probes within one `retrans_time` window would only have
+  queued the SKB anyway — but extending the schedule beyond `retrans_time`
+  boundaries is what would generate fresh wire-level solicits.
 - `PENDING_NEIGH_TIMEOUT_NS = 2_000_000_000` in
   `userspace-dp/src/afxdp/mod.rs:298`. At 2 s the original SYN frame is
   **dropped and recycled**; this lands ~1 s before the *second* TCP RTO
   retransmit at ~3 s would have arrived against a now-warm neighbor.
 
 Once the original SYN is dropped, the only path back is the client TCP
-RTO retransmit chain (~1 s, then ~3 s cumulative); kernel ARP eventually
+RTO retransmit chain (~1 s, then ~3 s cumulative). Kernel ARP eventually
 resolves on its own at the 1 s `retrans_time_ms` cadence and the second
 retransmit succeeds — hence the observed 3.371 s.
 
 ## 2. Honest scope/value framing
 
 The user-visible cost is *every cold connect to a destination whose
-neighbor entry has aged out*. Concretely:
+neighbor entry has aged out / failed*. Concretely:
 
 - After daemon restart / reboot, every distinct egress next-hop costs
   multiple seconds for the first flow.
-- After `ip neigh flush` (lab) or NUD GC (production: `gc_stale_time`
-  default 60 s + `delay_first_probe_time` 5 s; STALE entries do work,
-  but FAILED entries trigger this path).
+- After `ip neigh flush` (lab) or NUD GC reaching `NUD_FAILED` (prod).
+  STALE entries do work (kernel queues new packets while soliciting).
 - Operator-visible symptom: "the first iperf3 / curl / SSH takes 3-4 s
   but subsequent connects are instant".
 
@@ -49,11 +67,9 @@ plus a meaningful improvement to restart/failover impressions.
 
 If reviewers conclude the perf gain is too small to justify the churn,
 **PLAN-KILL is an acceptable verdict**. The 16× acceptance gate
-(3.371 s → 200 ms) does not require zero-allocation hot-path work or a
-new data structure; the costs are mostly knob tuning + a one-shot
-config-apply warm pass. Risk is concentrated in option C's HA-failover
-behavior (an active node sending unsolicited solicits on RG-promote can
-storm the kernel ARP table) and in option D's interaction with TCP RTO.
+(3.371 s → 200 ms) requires the proactive warming because B alone
+cannot guarantee a sub-200ms cold connect on zero-copy AF_XDP where
+the initial probe can be lost in the XSK-owned TX queue.
 
 ## 3. Empirical baseline
 
@@ -73,19 +89,15 @@ Reconstructed timeline (issue body, validated against code review):
 | t (ms) | event |
 |---|---|
 | 0 | SYN arrives, `MissingNeighbor`, queued in `pending_neigh`, initial probe via `trigger_kernel_arp_probe()` |
-| 10 | userspace probe slot 0 fires (or dedup-skips if same `(egress, hop)` already this sweep) |
-| 60 | userspace probe slot 1 |
+| 10 | userspace probe slot 0 fires (or dedup-skips); inside `retrans_time` window so kernel queues but no fresh wire solicit |
+| 60 | userspace probe slot 1 (same: queue only) |
 | 260 | userspace probe slot 2 — **last** userspace-fired probe |
 | 260-1000 | nothing on the wire from userspace; kernel ARP timer at `retrans_time_ms = 1000` not yet expired |
-| ~1000 | kernel sends its own ARP retransmit if it still has packets queued or has a hold-down on the neigh entry |
-| 1000 (client) | TCP RTO #1 expires; client sends SYN retransmit; userspace **already has the queued SYN, neighbor still INCOMPLETE** |
+| ~1000 | kernel solicit retransmit fires (kernel's own scheduler) |
+| 1000 (client) | TCP RTO #1 expires; client sends SYN retransmit; userspace already has the queued SYN, neighbor still INCOMPLETE |
 | 2000 | `PENDING_NEIGH_TIMEOUT_NS` expires → **original queued SYN dropped**, frame recycled to fill ring |
-| ~3000 (client) | TCP RTO #2 expires; client sends second SYN retransmit; by now kernel has resolved (or our XDP demux delivered the ARP reply); SYN forwards on the fast path |
+| ~3000 (client) | TCP RTO #2 expires; second SYN retransmit; kernel has resolved by now; SYN forwards on fast path |
 | 3371 | iperf3 sees `connected` |
-
-Two compounding failures: (1) userspace stops probing at 260 ms; (2)
-`PENDING_NEIGH_TIMEOUT_NS` drops the original SYN before TCP would have
-naturally retransmitted into a warm neighbor.
 
 ## 4. What's already shipped / partially relevant
 
@@ -100,296 +112,385 @@ naturally retransmitted into a warm neighbor.
   `RTM_DELNEIGH` (29). Bumps `neighbor_generation`.
 - `retry_pending_neigh()` (`neighbor_dispatch.rs:47`): runs on every
   poll cycle (both the work path AND the idle-RX path — see
-  `worker/lifecycle.rs:135` and `:296`). Dedup per
-  `(egress_ifindex, next_hop)` per sweep so N pending packets behind
-  one unresolved neighbor coalesce to one probe per schedule slot.
-- `PendingNeighPacket` (`types/mod.rs` near 96) carries
-  `probe_attempts: u8` so each schedule slot fires at most once per
-  packet.
+  `worker/lifecycle.rs:135` and `:296`). **Per-packet timestamp**:
+  the timeout check is `now_ns.saturating_sub(pkt.queued_ns) >
+  PENDING_NEIGH_TIMEOUT_NS` (`neighbor_dispatch.rs:100`); each pkt has
+  its own `queued_ns`. New SYNs get a fresh window.
+- Dedup per `(egress_ifindex, next_hop)` per sweep so N pending packets
+  behind one unresolved neighbor coalesce to one probe per slot.
+- `PendingNeighPacket` carries `probe_attempts: u8` so each schedule
+  slot fires at most once per packet.
 - `MAX_PENDING_NEIGH = 4096` (was 64 before #946) gives plenty of
   headroom for cold-start bursts; the issue is *time*, not *capacity*.
 
-The above already establishes the bones of a more-aggressive schedule —
-adding more slots is mechanical. Critically, the kernel-side resolution
-timing is the dominant clock; our extra probes only help if they
-encourage the kernel to retry sooner.
+## 5. Kernel-side ARP timing (confirmed by Codex + AGY against Linux source)
 
-## 5. Multiple path options (the design space)
+This section is the central architectural insight that drives the
+recommendation. Quoting Codex r1 finding #1:
+
+> In `net/core/neighbour.c:1199-1275`, `__neigh_event_send()` only sets
+> `immediate_probe` when transitioning into `NUD_INCOMPLETE`; if the
+> entry is already `NUD_INCOMPLETE`, it queues the skb and returns.
+> `neigh_timer_handler()` then schedules further probes using
+> `RETRANS_TIME` at `net/core/neighbour.c:1156-1161`. So repeated
+> userspace `sendto()` calls do not force fresh ARPs inside
+> `retrans_time`.
+
+Implication: **option A is heartbeat-only** within a `retrans_time`
+window. With kernel `retrans_time_ms = 1000` (default), adding userspace
+probes at t=500, 1000, 1500 ms produces *one* extra wire-side solicit
+(the one that crosses the 1000ms boundary). With kernel `retrans_time_ms
+= 250` (option B), adding userspace probes adds zero wire-side value
+because the kernel's own retrans timer already fires at every 250ms.
+
+**Conclusion: option A is removed from the recommended set.** Kernel
+retrans (B) is the dominant lever for unknown next-hops; proactive
+warming (C) is the dominant lever for known next-hops.
+
+## 6. Multiple path options (the design space)
 
 | ID | Mechanism | Where it edits | Cold-connect floor | Failure-cost | HA-failover risk | Reversibility |
 |----|-----------|----------------|--------------------|--------------|------------------|---------------|
-| **A** | Extend userspace `PROBE_SCHEDULE_NS` to fire through 1800 ms | `neighbor_dispatch.rs:33` | Bounded by *kernel* `retrans_time_ms` — adding userspace probes only re-kicks the ICMP path; kernel ARP rate-limit still ~1/s. Likely floor: **~1.05 s** (one more kernel ARP cycle) | none | none — same `trigger_kernel_arp_probe()` syscall path, just at more time points | trivial — revert constant |
-| **B** | Lower kernel `net.ipv4.neigh.default.retrans_time_ms` (and v6 equivalent) via sysctl from 1000 to 200-500 ms | systemd/operator config — *not* in userspace-dp | Floor: **~200-500 ms** (one kernel ARP retry interval) | kernel ARP table churn scales with delta-flows. Generally safe up to neighbor cardinality | none — kernel-wide setting, identical on both nodes | sysctl revert |
-| **C** | Proactive neighbor warm at config-apply: for every `RouteSnapshot.next_hops` + every resolved BGP/OSPF next-hop + every IPsec peer, fire `trigger_kernel_arp_probe()` once, then let netlink monitor populate `dynamic_neighbors` | `coordinator/mod.rs::refresh_runtime_snapshot()` (or a tail-called helper) | Cold connect to a *known* next-hop becomes **~0 ms over the no-warm cost** — neighbor is already resolved before the first user flow arrives | failure of warming = same fall-through as today. Bounded by next-hop cardinality (handful) | **medium** — on RG-promote, an active node firing solicits could collide with old MAC entries on the upstream switch. Likely fine because solicit is unicast on known IP; but worth verifying | per-config knob revert |
-| **D** | Lower `PENDING_NEIGH_TIMEOUT_NS` to ~800 ms + queue the original packet for the next TCP retransmit instead of dropping | `mod.rs:298` + `neighbor_dispatch.rs:100-103` | Avoids the original-SYN-drop case so we don't *waste* a successful resolution near the 2 s boundary. Standalone floor still bounded by kernel ARP retry | redo work if kernel resolves between 800 ms and 2 s; pair with A to keep solicit pressure on | low | constant revert |
-| **E** | A+C combined: extend userspace probe schedule out to 1800 ms AND proactively warm at config-apply | both | Same as C for known next-hops (~0 ms over no-warm); same as A for unknown next-hops | minor — sum of A and C | as C | per-knob revert |
+| ~~A~~ | ~~Extend userspace `PROBE_SCHEDULE_NS`~~ | ~~`neighbor_dispatch.rs:33`~~ | Heartbeat-only; no wire-side win inside `retrans_time` | n/a | n/a | **REMOVED — not the lever** |
+| **B** | Lower kernel `net.ipv4.neigh.default.retrans_time_ms` (and v6) via sysctl drop-in from 1000 → 250 ms | systemd sysctl-drop-in shipped with the deploy; no Rust code | Floor: ~250-500 ms typical; ~500 ms worst case (one missed solicit). Does NOT guarantee 200 ms gate on zero-copy XSK-owned TX where initial probe can be lost | none | none — kernel-wide setting, identical on both nodes | sysctl revert |
+| **C** | Proactive neighbor warm at config-apply: for `routes_v4/v6` next-hops + `fabrics.peer_addr`, fire `trigger_kernel_arp_probe()` once per (ifindex, hop) with 5s rate-limit per key | `coordinator/mod.rs::refresh_runtime_snapshot()` tail + new `NeighborManager::last_probed_at` map | Cold connect to a *known* next-hop: ~1-10 ms (neighbor pre-resolved before first user flow) | falls through to today's path | LOW (per AGY r1 #6: warm pass and GARP share MAC/port; no upstream confusion). MUST run on RG-promote to repopulate post-promote FAILED entries | per-config knob revert |
+| **D** | Lower `PENDING_NEIGH_TIMEOUT_NS` from 2000 to 800 ms | `mod.rs:298` (one-line constant) | Floor: ~1020 ms worst-case (per AGY r1 #2 derivation). Per-packet timestamp means TCP retransmit SYN #2 gets fresh 800ms window and is forwarded once kernel resolves | minor — extra client RTO #1 cost is unavoidable but cold connect drops from 3.371 s to ~1.02 s | none | constant revert |
+| **B + C** | both | both | ≤200 ms gate met for known next-hops via C; ~250-500 ms typical for unknown via B | sum of B and C | as C | as B + as C |
+| **B + D** | both | both | ~1.02 s worst case; ~50 ms typical for known next-hops if kernel resolution is fast | both | none | both |
+| **B + C + D** | all | both | ≤200 ms for known; ~1.02 s for unknown after RTO #1; defence-in-depth | sum | as C | per-knob revert |
 
-Where the kernel timing dominates: **per the Linux source (`net/core/neighbour.c::neigh_timer_handler` + `neigh_resolve_output`), each user-mode `sendto()` against an `INCOMPLETE` neighbor does *not* generate a new ARP frame on the wire unless `retrans_time` has expired since the last solicit was sent**. So option A's extra probes mostly serve as a heartbeat to keep the userspace-side queue alive — they don't accelerate kernel resolution beyond `retrans_time_ms`.
+## 7. Concrete design — recommended: B as PR-1, then C as PR-2, then evaluate D
 
-This is the central architectural insight that should drive the recommendation. The dominant lever for **unknown next-hops** is option B (kernel retrans timer); the dominant lever for **known next-hops** is option C (proactive warming, which happens once at config-apply and amortizes to 0 per flow).
+Per Codex r1 #5: **ship B first as a sysctl-only PR**. Measure cold
+connect on the loss userspace cluster against an unknown next-hop. If
+B alone gets us to ≤200 ms (skeptical — AGY r1 #4 explains why zero-copy
+XSK first-probe loss makes this unreliable), C may be deferred. If not
+(expected), C ships as PR-2.
 
-## 6. Concrete design (recommended: C + B, then maybe A)
+### B (PR-1): kernel retrans_time_ms sysctl drop-in
 
-### C: Proactive neighbor warming at config-apply (highest leverage)
+Ship a sysctl drop-in file (e.g., `/etc/sysctl.d/99-xpf-neighbor.conf`)
+via the deploy that sets:
+
+```
+net.ipv4.neigh.default.retrans_time_ms = 250
+net.ipv6.neigh.default.retrans_time_ms = 250
+```
+
+Applied at xpfd start via `systemctl reload-or-restart systemd-sysctl`
+(or implicit via package install). No Rust code touched.
+
+Verify on the loss userspace cluster:
+
+```
+sysctl net.ipv4.neigh.default.retrans_time_ms
+sysctl net.ipv6.neigh.default.retrans_time_ms
+ip ntable get default
+```
+
+Measure cold connect 10× post-flush; if median ≤200 ms across 10 runs,
+the gate is empirically met without C. If not (expected), proceed to C.
+
+**Test plan for PR-1**: cold-connect measurement harness from the
+issue body diagnostic section, 10 runs, median + p99 reported.
+
+### C (PR-2): proactive neighbor warm at config-apply
 
 Site: tail of `Coordinator::refresh_runtime_snapshot()` in
 `userspace-dp/src/afxdp/coordinator/mod.rs:435+`. After the new
-`ForwardingState` has been published into `ha.forwarding` (so workers
-will pick up resolved neighbors as soon as netlink fires), iterate the
-new forwarding state and fire one warm probe per `(egress_ifindex,
-next_hop)` whose neighbor is **not** already in
-`forwarding.neighbors` AND **not** already in `dynamic_neighbors`.
+`ForwardingState` has been published into `ha.forwarding`, walk the
+forwarding state and fire one warm probe per `(egress_ifindex,
+next_hop)` whose neighbor is **not** already resolved AND **not**
+recently probed.
 
-Targets to warm (in priority order):
+**Required infrastructure** (from AGY r1 #1 / Codex r1 #4):
+
+Add a `last_probed_at: Arc<Mutex<FastMap<(i32, IpAddr), u64>>>` field
+on `NeighborManager` (`coordinator/neighbor_manager.rs`). Before each
+`trigger_kernel_arp_probe()` call, check elapsed since last probe of
+the same key; skip if < 5 s. This bounds:
+- Concurrent FD allocation under config storm
+- Wire-side solicit storms for permanently-unreachable next-hops
+- CPU cost of repeated socket()+sendto()+close() on the same target
+
+**Snapshot-level rate-limit**: store the last full warm sweep timestamp
+on the coordinator; skip the entire sweep if < 1 s elapsed. Coalesces
+config-storm snapshot apply down to 1 sweep/s max.
+
+**Targets to warm** (per AGY r1 #3 + SMR r1 #5 — dropped tunnel_endpoints):
 
 1. `forwarding.routes_v4.values().flat_map(|rs| rs.iter()).filter_map(|r| r.next_hop)` — static + BGP/OSPF/IS-IS routes (FRR has already populated these into the snapshot)
 2. Same for `routes_v6`
-3. Default routes specifically (the most-likely-to-be-hit destination)
-4. Fabric peer IPs (`forwarding.fabrics.iter().map(|f| f.peer_addr)`)
-5. Tunnel endpoints (`forwarding.tunnel_endpoints.values().map(|t| t.destination)`) — when the underlay neighbor matters
+3. `forwarding.fabrics.iter().map(|f| f.peer_addr)` — fabric peers
+4. **NOT** tunnel_endpoints — kernel handles encap underlay and most
+   tunnel destinations are multi-hop. Underlay next-hops are in
+   `routes_v4/v6` if relevant.
+
+**Threading model**: do NOT spawn a thread per snapshot (per AGY r1 #1
+risk). Instead, attach a single long-lived "neighbor warmer" worker
+thread spawned at coordinator init, fed via an MPSC queue. The
+coordinator's `refresh_runtime_snapshot()` tail enqueues
+`(ifindex, hop)` keys; the warmer worker pulls from the queue,
+deduplicates against `last_probed_at`, and fires the probe. This:
+- Bounds thread count to 1
+- Bounds FD allocation to whatever the warmer is doing at one time
+- Backpressures naturally if the worker can't keep up
 
 Implementation sketch:
 
 ```rust
-// Coordinator::refresh_runtime_snapshot tail
-self.warm_known_neighbors();
+// in NeighborManager
+pub(crate) struct NeighborManager {
+    pub(crate) dynamic: Arc<ShardedNeighborMap>,
+    pub(crate) generation: Arc<AtomicU64>,
+    pub(crate) manager_keys: Arc<Mutex<FastSet<(i32, IpAddr)>>>,
+    pub(crate) monitor_stop: Option<Arc<AtomicBool>>,
+    // new:
+    pub(crate) last_probed_at: Arc<Mutex<FastMap<(i32, IpAddr), u64>>>,
+    pub(crate) warm_queue: Option<crossbeam_channel::Sender<(i32, IpAddr, String)>>,
+    pub(crate) warm_stop: Option<Arc<AtomicBool>>,
+}
 
-fn warm_known_neighbors(&self) {
+// in Coordinator::refresh_runtime_snapshot tail:
+self.queue_warm_pass(); // non-blocking enqueue
+
+fn queue_warm_pass(&mut self) {
+    // snapshot-level rate-limit
+    let now = monotonic_nanos();
+    if now.saturating_sub(self.last_warm_sweep_ns) < 1_000_000_000 {
+        return;
+    }
+    self.last_warm_sweep_ns = now;
+
     let snapshot = &self.forwarding;
     let mut seen: FastSet<(i32, IpAddr)> = FastSet::default();
     let already_resolved = |key: &(i32, IpAddr)| -> bool {
         snapshot.neighbors.contains_key(key)
             || self.neighbors.dynamic.contains_key(key)
     };
-    let mut warm = |egress_ifindex: i32, hop: IpAddr| {
+
+    let mut enqueue = |egress_ifindex: i32, hop: IpAddr| {
         if egress_ifindex <= 0 { return; }
+        if hop.is_unspecified() || hop.is_loopback() || hop.is_multicast() { return; }
         let key = (egress_ifindex, hop);
         if !seen.insert(key) { return; }
         if already_resolved(&key) { return; }
         if let Some(name) = snapshot.ifindex_to_name.get(&egress_ifindex) {
-            trigger_kernel_arp_probe(name, hop);
+            if let Some(tx) = &self.neighbors.warm_queue {
+                let _ = tx.try_send((egress_ifindex, hop, name.clone()));
+            }
         }
     };
-    // Iterate routes_v4 / routes_v6 / fabrics / tunnel_endpoints
+
+    // iterate routes_v4 + routes_v6 + fabrics
+}
+
+// in the warmer worker:
+fn warmer_loop(rx: Receiver<(i32, IpAddr, String)>,
+               last_probed: Arc<Mutex<FastMap<(i32, IpAddr), u64>>>,
+               stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        let Ok((ifindex, hop, name)) = rx.recv_timeout(Duration::from_millis(500)) else {
+            continue;
+        };
+        let key = (ifindex, hop);
+        let now = monotonic_nanos();
+        let skip = if let Ok(mut map) = last_probed.lock() {
+            match map.get(&key) {
+                Some(t) if now.saturating_sub(*t) < 5_000_000_000 => true,
+                _ => {
+                    map.insert(key, now);
+                    false
+                }
+            }
+        } else { true };
+        if !skip {
+            trigger_kernel_arp_probe(&name, hop);
+        }
+    }
 }
 ```
 
-**Crucial design choice**: warm in a *spawned thread* off the
-coordinator's hot path. `refresh_runtime_snapshot()` runs under the
-single-threaded coordinator and we must not block it. `std::thread::spawn`
-with a moved `Arc<…>` keyset is fine — netlink will deposit the results
-into `dynamic_neighbors` regardless of which thread fired the probe.
+Operator surface: defer the `set chassis dataplane proactive-neighbor-warm`
+knob to a follow-up. Default-on, no opt-out, ship as a behavior change.
+If operator pushback emerges, add the knob.
 
-Operator surface:
+### D (PR-3, optional): lower PENDING_NEIGH_TIMEOUT_NS
 
-- `set chassis dataplane proactive-neighbor-warm <true|false>` — default
-  `true` once shipped. Allow disable for operators who want strict
-  manual-only neighbor populate (rare).
-- Optional: per-VRF or per-next-hop opt-out via existing routing
-  hierarchy, but **defer** — that's tier-2 surface.
+If B + C does not fully cover edge cases (e.g., the first SYN to a
+truly-unknown next-hop where C couldn't warm), D drops the worst-case
+from 3.371 s to ~1.02 s. The per-packet timestamp guarantees new SYNs
+get a fresh window (per AGY r1 #2 trace).
 
-### B: kernel `retrans_time_ms` operator knob
+PR-3 is a one-line constant change with a test update. Trivial to ship
+or defer. Recommend shipping after measuring B + C on the test cluster.
 
-Site: `pkg/networkd/` or systemd unit files. Set
-`net.ipv4.neigh.default.retrans_time_ms = 250` and
-`net.ipv6.neigh.default.retrans_time_ms = 250` at daemon start, OR
-via a sysctl drop-in file shipped with the deploy.
-
-Why 250 ms not 200 ms: matches AF_XDP poll cadence (workers wake every
-~1 ms but do real syscall work every ~10-100 ms). 250 ms keeps kernel
-ARP rate well below socket churn while giving ~4× faster cold path
-than today. 200 ms is also fine; pick whichever the reviewers prefer.
-
-**Risk**: kernel ARP solicits scale with per-interface flow churn. For
-the loss userspace cluster (~10 distinct next-hops), this is invisible.
-For high-fanout deployments (thousands of neighbors), aggressive solicit
-intervals can show up in DDoS-style ARP storms during route flap. The
-**default-on** version of this should ship with a docs note for
-high-fanout deployments to revert if observed.
-
-### A (deferred behind C+B): extend userspace probe schedule
-
-Add slots 500 ms, 1000 ms, 1500 ms, 1800 ms. Bounded by per-sweep dedup
-already in place. Implementation is a one-line constant change.
-
-**Why deferred**: per the kernel-source analysis in §5, extra userspace
-solicits don't accelerate kernel ARP unless they cross a
-`retrans_time_ms` boundary. With B at 250 ms, the userspace schedule
-already has a fresh kernel solicit available between every existing
-slot — so adding more slots adds heartbeat resilience but not raw
-latency win. Worth doing as a follow-up; not the dominant lever.
-
-### D (NOT recommended): re-queue after timeout
-
-The proposal in the issue body — drop original packet at 800 ms and
-re-queue on TCP retransmit — interacts poorly with TCP RTO timing. The
-client retransmit at ~1 s would arrive against a still-pending neighbor
-and we'd drop *that* too, then the second retransmit at ~3 s would
-land. Net: same outcome as today, more code complexity.
-
-If we're willing to lower `PENDING_NEIGH_TIMEOUT_NS`, the simpler move
-is to lower it to a value > kernel `retrans_time_ms` + slop (i.e. with
-B at 250 ms, drop the userspace timeout at 1500 ms). But still: if
-kernel resolution hasn't happened by then, the client retransmit at
-1 s won't have helped either. **Recommend not touching D in this PR.**
-
-## 7. Public API preservation
+## 8. Public API preservation
 
 - `Coordinator::refresh_runtime_snapshot()` keeps its existing signature
 - `trigger_kernel_arp_probe()` unchanged
-- `PROBE_SCHEDULE_NS` becomes a `static` slice (still constant);
-  callsites unchanged
-- New entry: `Coordinator::warm_known_neighbors()` — `pub(super)`,
+- `NeighborManager` gains 3 new fields (`last_probed_at`, `warm_queue`,
+  `warm_stop`); all `pub(crate)` — no out-of-crate surface
+- `Coordinator` gains `last_warm_sweep_ns: u64` field
+- New function: `Coordinator::queue_warm_pass()` — `pub(super)`,
   callable only from the coordinator
-- Operator-visible CLI: one new knob (`proactive-neighbor-warm`).
-  Default-on.
+- Operator-visible CLI: deferred (no new knob in initial ship)
 
-No protocol changes. No `ConfigSnapshot` schema changes (consumes
-existing `routes` + `fabrics` + `tunnel_endpoints` + `neighbors` from
-the snapshot; the empty `neighbors` case is the cold-start lever, and
-warming explicitly skips already-resolved entries).
+No protocol changes. No `ConfigSnapshot` schema changes.
 
-## 8. Hidden invariants the change must preserve
+## 9. Hidden invariants the change must preserve
 
-1. **No blocking call on the coordinator hot path**. Warm pass must be
-   thread-spawned or non-blocking. The coordinator's
-   `refresh_runtime_snapshot()` is single-threaded; it must return
-   promptly so config-apply latency stays bounded.
-
-2. **HA failover behavior**. On RG-promote, the new active node will
-   re-run config apply (or at least observe state delta). The warm
-   pass must not amplify failover latency. **Open question for
-   reviewers**: should we suppress the warm pass on RG-promote events
-   specifically? Or is the warm benefit (faster traffic recovery after
-   GARP) the right behavior?
-
+1. **No blocking call on the coordinator hot path**. `queue_warm_pass()`
+   uses non-blocking MPSC enqueue (`try_send`); coordinator returns
+   promptly.
+2. **HA failover behavior** (per AGY r1 #6): warm pass and VRRP GARP
+   share MAC/port, no upstream FIB confusion. Warm pass MUST run on
+   RG-promote — the snapshot apply after failover naturally triggers
+   it. No special-case path needed for RG-promote events.
 3. **Don't probe interfaces in transient down state**. Use
-   `ifindex_to_name` lookup; if the interface is missing from the
-   snapshot, skip silently.
-
-4. **Don't loop-warm**. Single-shot per snapshot apply. Multiple snapshots
-   per second are common; dedup against `dynamic_neighbors` + the
-   per-call `seen` set means redundant snapshots cost almost nothing.
-
+   `ifindex_to_name` lookup; if missing from snapshot, skip silently.
+4. **Don't loop-warm**. `last_probed_at` 5s rate-limit per key;
+   snapshot-level 1s rate-limit for the whole sweep.
 5. **Don't warm broadcast / multicast / loopback addresses**. Filter
-   `next_hop.is_unspecified() || is_loopback() || is_multicast() ||
-   is_broadcast()` before probing.
+   `hop.is_unspecified() || is_loopback() || is_multicast()` before
+   probing.
+6. **`PENDING_NEIGH_TIMEOUT_NS` change (PR-3, optional)**: if shipped,
+   update the test `schedule_total_window_under_pending_neigh_timeout`
+   in `neighbor_dispatch.rs:557-567` to assert `last <
+   PENDING_NEIGH_TIMEOUT_NS - 100_000_000` (100ms safety margin) so the
+   schedule remains valid against the lowered timeout.
 
-6. **`PENDING_NEIGH_TIMEOUT_NS` unchanged at 2 s**. Keep the safety
-   margin; tests will verify acceptance gate is met without lowering
-   the timeout.
+## 10. Acceptance gate derivation (per option, addresses SMR r1 #2)
 
-7. **`PROBE_SCHEDULE_NS` unchanged for the C-only variant**. If
-   reviewers push for A as well, extending it requires updating the
-   `schedule_total_window_under_pending_neigh_timeout` test in
-   `neighbor_dispatch.rs:557-567`.
+| Option | Median (typical case) | p99 (worst case) | Meets ≤200 ms gate? |
+|--------|------------------------|------------------|---------------------|
+| Today (master) | 3.371 s | 3.371 s | NO |
+| A only | 3.371 s (no real change) | 3.371 s | NO |
+| B only (kernel retrans 250ms) | ~50 ms (typical kernel ARP) | ~500-1000 ms if first probe lost (AGY r1 #4 zero-copy concern) | TYPICAL: yes, p99: NO |
+| C only (proactive warm, kernel retrans 1000ms default) | ~1-10 ms for known next-hops; ~3.371 s for unknown | varies | KNOWN: yes, UNKNOWN: NO |
+| B + C | ~1-10 ms for known; ~50 ms for unknown typical | ~500 ms p99 for unknown | KNOWN: yes; UNKNOWN: typical yes, p99 marginal |
+| B + C + D | ~1-10 ms for known; ~50 ms for unknown typical; ~1.02 s p99 for unknown | ~1.02 s p99 | KNOWN: yes, UNKNOWN typical: yes, UNKNOWN p99: NO (but 3.3× better than today) |
 
-## 9. Risk assessment
+Conclusion: **B + C** is sufficient for the typical case and the gate
+is empirically met for known next-hops (the common operator case).
+**B + C + D** improves the absolute worst case from 3.371 s to ~1.02 s.
+
+The gate language should be updated to: "≤200 ms cold connect for
+operator-configured next-hops; ≤500 ms typical for unknown next-hops;
+≤1.02 s worst case under TCP RTO #1 cliff (with D shipped)".
+
+## 11. Risk assessment
 
 | Class | Severity | Notes |
 |-------|----------|-------|
-| Behavioral regression | LOW | Warm pass is additive; failure mode is same as today (cold connect falls through to existing path) |
-| Lifetime / borrow | LOW | New helper takes `&self` on coordinator; spawned thread captures cloned `Arc` keys |
-| Performance regression | LOW (control plane) / NONE (data plane) | Adds N socket() + sendto() + close() at config-apply where N is unique-next-hop cardinality (handful). No hot-path edits |
-| Architectural mismatch (#946/#961 dead-end pattern) | LOW | Mechanism is mechanically simple — fire existing function more places. No new data structures. No invariant inversion |
-| HA failover impact | MEDIUM | RG-promote running warm pass could collide with upstream switch's GARP processing; needs explicit verification. **Mitigation**: gate warm pass on `ha.is_active()` or only run for owner-RG interfaces. Open question for reviewers |
-| Kernel ARP storm | LOW | Bounded by neighbor cardinality + per-sweep dedup. For high-fanout deployments add operator opt-out |
-| Acceptance gate met | MEDIUM-LOW | C alone targets known next-hops; if test scenario flushes neighbors WITHOUT a route to that neighbor in the snapshot (rare), C is moot. B alone gets to ~500 ms — possibly enough for the 200 ms gate, possibly not. **C + B should comfortably hit ≤200 ms for any next-hop the operator has configured**. Empirical verification required |
+| Behavioral regression | LOW | Warm pass is additive; failure mode is same as today |
+| Lifetime / borrow | LOW | New helper takes `&mut self` on coordinator; long-lived warmer worker spawned at init |
+| Performance regression | LOW (control plane) / NONE (data plane) | One worker thread idle when nothing to warm; bounded FD use |
+| Architectural mismatch (#946/#961 dead-end pattern) | LOW | Mechanism is mechanically simple — fire existing function from one new place |
+| HA failover impact | LOW (per AGY r1 #6) | Warm pass + GARP share MAC/port; no upstream FIB confusion. Warm pass on RG-promote is REQUIRED (not just safe) to repopulate FAILED entries |
+| Kernel ARP storm | LOW | Bounded by `last_probed_at` 5s key-level + 1s snapshot-level rate-limit |
+| Acceptance gate met | MEDIUM-HIGH for known | C delivers; B fallback for unknown |
+| FD exhaustion under config storm | LOW (mitigated) | Long-lived warmer worker + rate-limit avoids per-snapshot socket bursts |
+| PR sequencing risk | LOW | B alone (sysctl) is fully reversible; C after empirical measurement informs whether D is needed |
 
-## 10. Test plan
+## 12. Test plan
 
-- `make test` (Go + Rust full suites; no production code changes in C+B
-  means no test count delta beyond new warm-pass tests)
+### Per-PR
+
+**PR-1 (B sysctl)**:
+- Update systemd/deploy machinery to ship `/etc/sysctl.d/99-xpf-neighbor.conf`
+- Verify on the loss userspace cluster: `sysctl net.ipv{4,6}.neigh.default.retrans_time_ms` returns 250
+- Cold-connect measurement: 10 runs of the issue body diagnostic harness, report median + p99
+- No Rust code; no cargo test delta
+
+**PR-2 (C proactive warm)**:
 - New unit tests in `coordinator/tests.rs`:
-  - `warm_known_neighbors_fires_for_unresolved_next_hop`
-  - `warm_known_neighbors_skips_already_resolved`
-  - `warm_known_neighbors_skips_invalid_addresses` (multicast, loopback, unspecified)
-  - `warm_known_neighbors_dedups_within_one_call`
-  - `warm_known_neighbors_handles_missing_ifindex_to_name`
-- New integration test: cold connect with proactive warming enabled
-  measures < 200 ms on the loss userspace cluster (run as part of the
-  diagnostic harness in the issue body)
-- Existing `cold_start_probe_schedule_tests` mod tests pass unchanged
-- Failover smoke: `make test-failover` baseline; must still complete in
-  ≤60 ms
+  - `queue_warm_pass_fires_for_unresolved_next_hop`
+  - `queue_warm_pass_skips_already_resolved`
+  - `queue_warm_pass_skips_invalid_addresses` (multicast, loopback, unspecified)
+  - `queue_warm_pass_dedups_within_one_call`
+  - `queue_warm_pass_respects_5s_per_key_rate_limit`
+  - `queue_warm_pass_respects_1s_snapshot_rate_limit`
+  - `warmer_worker_processes_queue_messages`
+  - `warmer_worker_shuts_down_on_stop_signal`
+- New mocked-netlink integration test in `neighbor_dispatch.rs` (per AGY r1 #7):
+  `cold_connect_resolves_within_simulated_window` — injects an RTM_NEWNEIGH after a configurable delay and asserts `retry_pending_neigh()` flushes the queue within budget
+- Empirical: cold-connect measurement 10× on the cluster, median + p99 ≤200 ms for a known next-hop
+- HA: `make test-failover` baseline must still complete ≤60 ms
 
-## 11. Out of scope (explicitly)
+**PR-3 (D timeout — optional, after measuring B+C)**:
+- Update `PENDING_NEIGH_TIMEOUT_NS = 800_000_000` in `mod.rs:298`
+- Update test `schedule_total_window_under_pending_neigh_timeout`
+- Cold-connect measurement with neighbor-warming disabled (force the
+  unknown-next-hop path) to verify ~1.02 s worst case
 
-- Static neighbor entries via `set protocols nd …` — pre-existing path,
-  not the dynamic learning path this issue targets
-- IPv6 ND-specific edge cases (DAD, RA-derived next-hops) — separate
-  follow-up
-- The `forwarding.neighbors` static map itself — fine, this is
-  dynamic-learning only
-- Operator-tunable PROBE_SCHEDULE_NS itself (could expose as a knob;
-  not needed for the win)
-- Aggressive `PENDING_NEIGH_TIMEOUT_NS` reduction (option D)
-- Cross-vendor NIC-specific timing (mlx5 vs i40e); the path is the same
-- BPF map-based neighbor table tuning — userspace-only
+### Smoke matrix
 
-## 12. Open questions for adversarial review
+Loss userspace cluster, all 3 PRs:
+- v4 push (`iperf3 -c 172.16.80.200 -p 5201`)
+- v4 reverse (`-R`)
+- v6 push (`iperf3 -c 2001:559:8585:80::200 -p 5201`)
+- v6 reverse
+- Per-class CoS-on (5201-5206)
+- Per-class CoS-off
 
-1. **Kernel-rate-limit claim**: is the §5 claim correct that userspace
-   `sendto()` against an INCOMPLETE neighbor does not generate a new
-   ARP unless `retrans_time` has expired? If wrong, option A's value
-   rises significantly. Quote: kernel source `net/core/neighbour.c`
-   path around `neigh_probe()` / `neigh_timer_handler()` / `neigh_event_send()`.
+No regression in established-flow throughput.
 
-2. **RG-promote interaction**: should the warm pass run on the standby
-   node? Or only on the active? The standby's `dynamic_neighbors` is
-   warm via netlink monitor anyway; running on standby pre-populates
-   for fast post-failover behavior at the cost of extra solicits.
+## 13. Out of scope (explicitly)
 
-3. **Acceptance-gate feasibility with B alone**: with kernel
-   `retrans_time_ms = 250` and *no* proactive warming, what's the
-   expected cold-connect floor? If it's well under 200 ms then option B
-   alone is sufficient and C becomes the "additional polish" tier.
+- Static neighbor entries via `set protocols nd …` — pre-existing path
+- IPv6 ND-specific edge cases (DAD, RA-derived next-hops)
+- The `forwarding.neighbors` static map itself
+- Operator-tunable PROBE_SCHEDULE_NS itself
+- Aggressive `PENDING_NEIGH_TIMEOUT_NS` reduction below 800 ms
+- Cross-vendor NIC-specific timing
+- BPF map-based neighbor table tuning
+- The `set chassis dataplane proactive-neighbor-warm` CLI knob — defer
+  to follow-up if operator pushback emerges
 
-4. **Warm-pass cost on snapshot churn**: snapshots can come in at
-   ~10/s during config storms; each snapshot can have ~100 routes
-   in real deployments. Is N=100 socket()+sendto()+close() per snapshot
-   acceptable as a one-shot? If reviewers think no, the alternative
-   is "warm only on routes that *changed* since the last snapshot"
-   which requires snapshot-diff tracking.
+## 14. Open questions for adversarial review (round 2)
 
-5. **The 2026-05-28 measurement is on a clean test cluster**. Does
-   real-world traffic hit cold connect frequently enough to justify
-   this work? E.g., NUD GC cycles `gc_stale_time = 60s`; STALE entries
-   *do* keep working (the kernel queues new packets while sending a new
-   solicit), it's only INCOMPLETE / FAILED that trips MissingNeighbor.
-   How often do entries transition to FAILED in production? **If the
-   answer is "almost never", reviewers may PLAN-KILL the whole effort
-   in favor of just fixing the docs claim.**
+1. Should warm-pass keys ALSO include `forwarding.connected_v4/v6`
+   subnets? E.g., directly-connected interfaces with /24 prefixes have
+   neighbors that aren't routed-via — should we warm the gateway IPs
+   under those prefixes? Currently they only appear if a static route
+   exists. Maybe scan `ip neigh` at startup and re-warm any FAILED
+   entry for an active interface.
 
-6. **HA cluster correctness**: when the standby promotes, does the
-   warm pass interact with GARP burst from `becomeMaster()`? GARP
-   re-asserts our own MAC, warm pass would re-resolve *peer* MACs —
-   no overlap on the surface, but verify with the cluster HA expert.
+2. The 5 s per-key rate-limit window in `last_probed_at` is a guess.
+   Should it be tied to kernel `retrans_time_ms` (e.g., 4× retrans
+   window)? Or to NUD `gc_interval`? Empirical tuning required.
 
-7. **Tunnel endpoints**: should we warm the *underlay* neighbor for
-   tunnel endpoints? GRE / IPsec underlay neighbors are the typical
-   place users see this latency, but the snapshot may not have the
-   underlay route eagerly. Worth confirming with the routing-state
-   expert.
+3. Should `last_probed_at` cleanup happen periodically (otherwise it
+   grows unbounded as neighbors come and go)? A monotonic-clock LRU
+   trim at coordinator GC?
 
-## 13. Recommendation
+4. Is the long-lived warmer worker thread the right pattern, or should
+   we re-use the existing `neigh_monitor_thread`? Co-locating warm
+   probes with the monitor would simplify lifecycle but adds latency
+   to the recv() loop. Worth a reviewer opinion.
 
-Ship **B + C**. Defer **A** as a follow-up. **Do not ship D.**
+5. PR sequencing: should we land B and C atomically in one PR (lower
+   review overhead, harder to bisect) vs sequenced two PRs (Codex r1 #5
+   recommendation)? Two PRs is the bias.
 
-Order of operations:
-1. C (proactive warm at config-apply) — pure addition, low risk, large
-   win for known next-hops
-2. B (kernel retrans_time_ms 250 via sysctl drop-in) — operator-visible
-   knob, covers the unknown-next-hop case
-3. Verify on the loss userspace cluster: cold connect ≤ 200 ms (16×)
-4. Update `docs/userspace-jit-design.md` with the new measured number
-5. (Optional) A as follow-up if B alone doesn't get us under 200 ms
+## 15. Recommendation
 
-## 14. Reviewer convergence path
+**Ship B + C as separate PRs.** Defer D to PR-3 contingent on empirical
+measurement. Sequence:
+
+1. PR-1: B (sysctl drop-in) — low-risk, fully reversible, immediate measurable change
+2. Measure B alone on loss userspace cluster (10 cold connects, median + p99)
+3. PR-2: C (proactive warm with rate-limited long-lived warmer worker)
+4. Re-measure B + C; verify ≤200 ms for known next-hops
+5. PR-3 (optional): D (lower PENDING_NEIGH_TIMEOUT_NS to 800 ms) only
+   if B + C does not cover the unknown-next-hop p99 acceptably
+
+## 16. Reviewer convergence path
 
 This is `/research` not `/engineer`. Convergence target: 3 of 3
 (Claude SMR + Codex + AGY) on PLAN-READY for the recommended option
-set, OR convergent PLAN-KILL with rationale that we file as
-`labels/plan-kill` per the project's plan-kill discipline.
+set, OR convergent PLAN-KILL with rationale.
 
-Copilot review will fire when the implementation PR opens, not now.
+Copilot reviews at `/engineer 1636` time on the implementation PR, not
+now.
