@@ -1,9 +1,20 @@
 # #1636 cold-connect / neighbor-resolution gap — research plan
 
-**Status**: DRAFT v6 — revised after round-5 reviewer findings (HA per-RG, dual-stack sysctl, cached-once)
+**Status**: DRAFT v7 — revised after round-6 AGY findings (warm trigger on RG-promote, ForwardingState placement, force flag, type names)
+**Convergence target**: Codex r6 PLAN-READY; AGY round-7 check pending; SMR r6 PLAN-READY contingent on v7 fold-in
 **Base SHA**: `dbfbf680cc82` (origin/master @ 2026-05-28)
 **Branch**: `research/1636-cold-connect-mitigation`
 **Scope**: research-only, no production source edits, no PR
+
+## Changelog since v6
+
+| # | Round-6 finding | Resolution |
+|---|------------------|------------|
+| AGY r6 #1 (MEDIUM) | `Arc<HaSnapshot>` is placeholder; real type is `Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>` | §7 pseudocode uses real type |
+| AGY r6 #2 (MEDIUM) | warm pass must TRIGGER on RG-promote, not just clear cache | §7 `on_rg_promote_active()` calls `queue_warm_pass(force=true)` after clearing |
+| AGY r6 #3 (LOW) | 1s snapshot rate-limit blocks promotion warming if snapshot just applied | §7 `queue_warm_pass(force: bool)` parameter; promote-side passes `force=true`; `last_warm_sweep_ns: AtomicU64` so `queue_warm_pass` takes `&self` |
+| AGY r6 #4 (LOW) | `OnceLock` placement for `PENDING_NEIGH_TIMEOUT_NS` is over-global; ForwardingState placement allows per-snapshot re-eval | §7 + ForwardingState gains `pending_neigh_timeout_ns: u64`; computed in `build_forwarding_state_with_policy_counters_and_previous()` |
+| Codex r6 (nit) | "takes max" in pseudocode but returns fixed 800ms is unclear wording | Pseudocode rewritten to drop the unused max accumulation |
 
 ## Changelog since v5
 
@@ -350,6 +361,9 @@ pub(crate) struct NeighborManager {
     pub(crate) warm_stop: Option<Arc<AtomicBool>>,
     pub(crate) warm_generation: Arc<AtomicU64>,
     pub(crate) warm_drops: Arc<AtomicU64>, // channel-full telemetry
+    pub(crate) warm_disconnected: Arc<AtomicU64>, // r4 #3 disconnect telemetry
+    pub(crate) warned_disconnect: Arc<AtomicBool>, // r4 #3 once-only log gate
+    pub(crate) last_warm_sweep_ns: Arc<AtomicU64>, // AGY r6 #3 — was &mut self field
 }
 
 #[derive(Clone)]
@@ -364,19 +378,31 @@ pub(crate) struct WarmItem {
 // in Coordinator::refresh_runtime_snapshot tail:
 self.queue_warm_pass(); // non-blocking enqueue
 
-fn queue_warm_pass(&mut self) {
-    // Per-RG active gate is checked PER-KEY below (the global is_active()
-    // shorthand from v4-v5 was a placeholder; the real xpf architecture
-    // is per-RG via HAGroupRuntime::is_forwarding_active(now_secs) — per
-    // AGY r5 #1). We still rate-limit at sweep level here, then dispatch
-    // per-RG via the rg_id field on WarmItem.
-    //
-    // snapshot-level rate-limit (returns BEFORE generation bump per Codex r4 #2).
+// `force: bool` (AGY r6 #3): RG-promote callers pass `force=true` to bypass
+// the 1s sweep-level rate-limit so newly-active RGs get warmed
+// immediately. `last_warm_sweep_ns` is `AtomicU64` so `queue_warm_pass`
+// can take `&self` and be called from both `refresh_runtime_snapshot()`
+// (which has `&mut self`) and `handle_activated_rgs()`.
+fn queue_warm_pass(&self, force: bool) {
+    // Per-RG active gate is checked PER-KEY below (per AGY r5 #1: real
+    // xpf architecture is per-RG via HAGroupRuntime::is_forwarding_active).
+    // Sweep-level rate-limit gates only non-forced calls.
     let now = monotonic_nanos();
-    if now.saturating_sub(self.last_warm_sweep_ns) < 1_000_000_000 {
-        return;
+    if !force {
+        let last = self.last_warm_sweep_ns.load(Ordering::Acquire);
+        if now.saturating_sub(last) < 1_000_000_000 {
+            return;
+        }
+        // Compare-and-swap to claim the sweep slot.
+        if self.last_warm_sweep_ns
+            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return; // another caller raced; let them do the sweep
+        }
+    } else {
+        self.last_warm_sweep_ns.store(now, Ordering::Release);
     }
-    self.last_warm_sweep_ns = now;
 
     // Generation bump: only on ADMITTED sweeps (Codex r4 #2). Any
     // in-flight queue items from previous snapshot are now stale and
@@ -397,10 +423,11 @@ fn queue_warm_pass(&mut self) {
         let key = (egress_ifindex, hop);
         if !seen.insert(key) { return; }
         if already_resolved(&key) { return; }
-        // Per-RG HA check (AGY r5 #1): resolve egress to its owning RG;
-        // only enqueue if that RG is currently ACTIVE on this node.
+        // Per-RG HA check (AGY r5 #1 + AGY r6 #1): resolve egress to
+        // its owning RG; only enqueue if that RG is currently ACTIVE
+        // on this node. Uses real type Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>.
         let rg_id = owner_rg_for_flow(snapshot, egress_ifindex);
-        let rg_active = self.ha.rg_runtime.load()
+        let rg_active = self.ha_rg_runtime.load()
             .get(&rg_id)
             .map(|g| g.is_forwarding_active(now_secs))
             .unwrap_or(false);
@@ -434,7 +461,9 @@ fn queue_warm_pass(&mut self) {
 fn warmer_loop(rx: Receiver<WarmItem>,
                last_probed: Arc<Mutex<FastMap<(i32, IpAddr), u64>>>,
                warm_generation: Arc<AtomicU64>,
-               ha: Arc<HaSnapshot>, // reference to HA active flag
+               // AGY r6 #1: real type from bringup.rs ~199 is
+               // Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>.
+               rg_runtime: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
                stop: Arc<AtomicBool>) {
     let mut last_gc_ns = monotonic_nanos();
     while !stop.load(Ordering::Relaxed) {
@@ -462,9 +491,10 @@ fn warmer_loop(rx: Receiver<WarmItem>,
         // item queued under the active generation but dequeued after
         // demotion would still fire trigger_kernel_arp_probe(); §9
         // invariant 2 stated but not mechanically guaranteed otherwise.
-        // Per-RG check via item.rg_id (AGY r5 #1).
+        // Per-RG check via item.rg_id (AGY r5 #1) using real type
+        // Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>> (AGY r6 #1).
         let now_secs = monotonic_nanos() / 1_000_000_000;
-        let rg_active = ha.rg_runtime.load()
+        let rg_active = rg_runtime.load()
             .get(&item.rg_id)
             .map(|g| g.is_forwarding_active(now_secs))
             .unwrap_or(false);
@@ -559,9 +589,14 @@ existing netlink RTM_NEWLINK monitor:
 ```rust
 // Coordinator gets methods called from the cluster + link state paths:
 pub(super) fn on_rg_promote_active(&self) {
+    // Clear stale rate-limit entries (AGY r2 #2).
     if let Ok(mut map) = self.neighbors.last_probed_at.lock() {
         map.clear();
     }
+    // Trigger warm pass immediately (AGY r6 #2) — bypass the 1s
+    // rate-limit so the newly-active RG's neighbors get warmed without
+    // waiting for the next snapshot apply.
+    self.queue_warm_pass(true);
 }
 
 pub(super) fn on_link_up(&self, ifindex: i32) {
@@ -750,41 +785,32 @@ case but does not eliminate pathological loss scenarios."
 - **Mitigation**: at daemon init, read `/proc/sys/net/ipv4/neigh/default/retrans_time_ms`
   (and v6). If > 250, fall back to PENDING_NEIGH_TIMEOUT_NS=2000ms
   (today's value). Emit operator-visible warning on fallback.
-- Pseudocode (per Codex r5 #1 + AGY r5 #2-#3 — dual-stack + per-interface +
-  fail-closed + cached-once):
+- Pseudocode (per Codex r5 #1 + AGY r5 #2-#3 + AGY r6 #4 — dual-stack +
+  per-interface + fail-closed + computed-per-snapshot + ForwardingState
+  placement):
   ```rust
-  use std::sync::OnceLock;
-  static PENDING_NEIGH_TIMEOUT_NS: OnceLock<u64> = OnceLock::new();
+  // ForwardingState gains a new field:
+  // pub(in crate::afxdp) pending_neigh_timeout_ns: u64,
 
-  fn init_pending_neigh_timeout_ns(dataplane_ifindexes: &[i32]) -> u64 {
-      // Read effective per-interface retrans_time_ms for BOTH v4 and v6
-      // across every dataplane interface. Fail closed (= use 2_000_000_000)
-      // on ANY missing file, parse error, or value > 250.
-      let mut max_retrans: u32 = 0;
+  // Computed during build_forwarding_state_with_policy_counters_and_previous
+  // — workers atomically load forwarding and read the field directly.
+  // Re-evaluated every snapshot, so sysctl changes mid-life are picked up.
+  fn compute_pending_neigh_timeout_ns(dataplane_ifindexes: &[i32]) -> u64 {
       for ifx in dataplane_ifindexes {
           let iface_name = match resolve_ifindex_to_name(*ifx) {
-              Some(n) => n,
-              None => return fallback(),
+              Some(n) => n, None => return fallback(),
           };
           for family in ["ipv4", "ipv6"] {
               let path = format!("/proc/sys/net/{}/neigh/{}/retrans_time_ms", family, iface_name);
-              let v = match read_sysctl_u32(&path) {
-                  Ok(v) => v,
-                  Err(_) => return fallback(),
-              };
+              let v = match read_sysctl_u32(&path) { Ok(v) => v, Err(_) => return fallback() };
               if v > 250 { return fallback(); }
-              max_retrans = max_retrans.max(v);
           }
       }
-      // Also check default in case interfaces are created later.
+      // Also check default to catch interfaces created post-init.
       for family in ["ipv4", "ipv6"] {
           let path = format!("/proc/sys/net/{}/neigh/default/retrans_time_ms", family);
-          let v = match read_sysctl_u32(&path) {
-              Ok(v) => v,
-              Err(_) => return fallback(),
-          };
+          let v = match read_sysctl_u32(&path) { Ok(v) => v, Err(_) => return fallback() };
           if v > 250 { return fallback(); }
-          max_retrans = max_retrans.max(v);
       }
       // All checks passed; use 800ms timeout.
       800_000_000
@@ -800,15 +826,17 @@ case but does not eliminate pathological loss scenarios."
       2_000_000_000
   }
 
-  // Called once at daemon init:
-  PENDING_NEIGH_TIMEOUT_NS.set(init_pending_neigh_timeout_ns(&ifxs))
-      .expect("PENDING_NEIGH_TIMEOUT_NS already initialized");
-
   // Hot-path callsite (was: `> PENDING_NEIGH_TIMEOUT_NS`):
-  if now_ns.saturating_sub(pkt.queued_ns) > *PENDING_NEIGH_TIMEOUT_NS.get().unwrap_or(&2_000_000_000) {
+  if now_ns.saturating_sub(pkt.queued_ns) > forwarding.pending_neigh_timeout_ns {
       // drop
   }
   ```
+
+  Per-snapshot re-eval discipline (AGY r6 #4): if an admin changes
+  the sysctl at runtime (e.g., to revert PR-1), the *next* snapshot
+  apply will recompute `pending_neigh_timeout_ns` and propagate it
+  atomically via `ha.forwarding.store(Arc::new(self.forwarding.clone()))`.
+  Workers read the new value on the next descriptor poll cycle.
 - This is a runtime guard — operator does not have to rebuild the binary
   to revert; the sysctl is the single point of truth.
 - Update test `schedule_total_window_under_pending_neigh_timeout` to
