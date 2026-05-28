@@ -42,10 +42,20 @@ Tracks task IDs across rounds for long-running session resumption.
 | AGY (adversarial) | adversarial-review-mppt55mr-9htu20 | PLAN-READY (with 3 findings to fold for full convergence) |
 | Claude SMR | (deferred to r6 cycle) | n/a |
 
-## Round 6 (plan v6 @ 268fb607243a) — final convergence
+## Round 6 (plan v6 @ 268fb607243a)
 
 | Reviewer | Task ID | Verdict |
 |----------|---------|--------|
-| Codex | task-mpptb9hy-236nc7 | dispatched |
-| AGY (adversarial) | adversarial-review-mpptbh1g-iqbqdj | dispatched |
-| Claude SMR | (claude-smr-plan-r6.md) | TBD |
+| Codex | task-mpptb9hy-236nc7 | PLAN-READY |
+| AGY (adversarial) | adversarial-review-mpptbh1g-iqbqdj | PLAN-NEEDS-MINOR (4 findings folded into v7) |
+| Claude SMR | (claude-smr-plan-r6.md) | PLAN-READY contingent on v7 fold-in |
+
+## Round 7 (plan v7 @ 3f9aecc700c9) — CONVERGED PLAN-READY
+
+| Reviewer | Task ID | Verdict |
+|----------|---------|--------|
+| Codex | (not re-dispatched; r6 PLAN-READY stands; v7 only touches AGY r6 findings) | PLAN-READY (r6) |
+| AGY (adversarial) | adversarial-review-mpptjf39-5ajzfe | **PLAN-READY** |
+| Claude SMR | (claude-smr-plan-r7.md) | **PLAN-READY** |
+
+**3-of-3 convergence achieved.** Proceeding to issue comment + final return.
