@@ -1,9 +1,17 @@
 # #1636 cold-connect / neighbor-resolution gap — research plan
 
-**Status**: DRAFT v5 — revised after round-4 Codex + AGY findings (precision tightening)
+**Status**: DRAFT v6 — revised after round-5 reviewer findings (HA per-RG, dual-stack sysctl, cached-once)
 **Base SHA**: `dbfbf680cc82` (origin/master @ 2026-05-28)
 **Branch**: `research/1636-cold-connect-mitigation`
 **Scope**: research-only, no production source edits, no PR
+
+## Changelog since v5
+
+| # | Round-5 finding | Resolution |
+|---|------------------|------------|
+| AGY r5 #1 (MEDIUM) | HA architecture mismatch: `ha.is_active()` is placeholder; real arch is per-RG via `HAGroupRuntime::is_forwarding_active(now_secs)` | §7 + §9: `WarmItem` carries `rg_id`; queue_warm_pass + warmer pre-fire both check per-RG via `owner_rg_for_flow` + `HAGroupRuntime::is_forwarding_active` |
+| Codex r5 #1 + AGY r5 #3 (LOW) | Sysctl validation must read BOTH IPv4 and IPv6 retrans_time_ms; fail closed on any value >250 or parse error | §7 PR-3 section reads both sysctls + takes max; fails closed |
+| AGY r5 #2 (LOW) | Sysctl read must be cached at init in a `OnceLock`, not done in hot paths | §7 explicit OnceLock pattern |
 
 ## Changelog since v4
 
@@ -350,16 +358,19 @@ pub(crate) struct WarmItem {
     hop: IpAddr,
     iface_name: String,
     generation: u64, // queued under this snapshot gen
+    rg_id: i32,      // owning routing group (per AGY r5 #1: HA is per-RG, not global)
 }
 
 // in Coordinator::refresh_runtime_snapshot tail:
 self.queue_warm_pass(); // non-blocking enqueue
 
 fn queue_warm_pass(&mut self) {
-    // Standby/demote guard: skip warm pass entirely.
-    if !self.ha.is_active() {
-        return;
-    }
+    // Per-RG active gate is checked PER-KEY below (the global is_active()
+    // shorthand from v4-v5 was a placeholder; the real xpf architecture
+    // is per-RG via HAGroupRuntime::is_forwarding_active(now_secs) — per
+    // AGY r5 #1). We still rate-limit at sweep level here, then dispatch
+    // per-RG via the rg_id field on WarmItem.
+    //
     // snapshot-level rate-limit (returns BEFORE generation bump per Codex r4 #2).
     let now = monotonic_nanos();
     if now.saturating_sub(self.last_warm_sweep_ns) < 1_000_000_000 {
@@ -379,15 +390,27 @@ fn queue_warm_pass(&mut self) {
             || self.neighbors.dynamic.contains_key(key)
     };
 
+    let now_secs = monotonic_nanos() / 1_000_000_000;
     let mut enqueue = |egress_ifindex: i32, hop: IpAddr| {
         if egress_ifindex <= 0 { return; }
         if hop.is_unspecified() || hop.is_loopback() || hop.is_multicast() { return; }
         let key = (egress_ifindex, hop);
         if !seen.insert(key) { return; }
         if already_resolved(&key) { return; }
+        // Per-RG HA check (AGY r5 #1): resolve egress to its owning RG;
+        // only enqueue if that RG is currently ACTIVE on this node.
+        let rg_id = owner_rg_for_flow(snapshot, egress_ifindex);
+        let rg_active = self.ha.rg_runtime.load()
+            .get(&rg_id)
+            .map(|g| g.is_forwarding_active(now_secs))
+            .unwrap_or(false);
+        if !rg_active { return; }
         if let Some(name) = snapshot.ifindex_to_name.get(&egress_ifindex) {
             if let Some(tx) = &self.neighbors.warm_queue {
-                let item = WarmItem { ifindex: egress_ifindex, hop, iface_name: name.clone(), generation: gen };
+                let item = WarmItem {
+                    ifindex: egress_ifindex, hop,
+                    iface_name: name.clone(), generation: gen, rg_id,
+                };
                 if tx.try_send(item).is_err() {
                     // Bounded-channel full or worker disconnected: log + telemetry.
                     self.neighbors.warm_drops.fetch_add(1, Ordering::Relaxed);
@@ -435,11 +458,17 @@ fn warmer_loop(rx: Receiver<WarmItem>,
             }
         };
         // Re-check active state + generation IMMEDIATELY before firing
-        // (per Codex r4 #1 + AGY r4 #1). Without this, an item queued
-        // under the active generation but dequeued after demotion would
-        // still fire trigger_kernel_arp_probe(); §9 invariant 2 stated
-        // but not mechanically guaranteed otherwise.
-        if !ha.is_active() {
+        // (per Codex r4 #1 + AGY r4 #1 + AGY r5 #1). Without this, an
+        // item queued under the active generation but dequeued after
+        // demotion would still fire trigger_kernel_arp_probe(); §9
+        // invariant 2 stated but not mechanically guaranteed otherwise.
+        // Per-RG check via item.rg_id (AGY r5 #1).
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let rg_active = ha.rg_runtime.load()
+            .get(&item.rg_id)
+            .map(|g| g.is_forwarding_active(now_secs))
+            .unwrap_or(false);
+        if !rg_active {
             continue;
         }
         // Generation collapse: drop stale items (Codex r2 #3).
@@ -575,20 +604,24 @@ No protocol changes. No `ConfigSnapshot` schema changes.
    uses non-blocking MPSC enqueue (`try_send`); coordinator returns
    promptly.
 2. **HA failover ordering** (per Codex r2 #4 + AGY r1 #6 + AGY r2 #2
-   + Codex r4 #1 + AGY r4 #1):
-   Warm pass runs only AFTER RG-promote has committed:
-   - ACTIVE dataplane ownership (`ha.is_active() == true`)
-   - Interface / MAC / VIP state programmed
-   - Egress maps populated
-   - On STANDBY or DEMOTE, the warm pass is suppressed (skip the
-     `queue_warm_pass()` call when `ha.is_active() == false`).
-   - **Worker re-check before fire** (Codex r4 #1 + AGY r4 #1): the
-     warmer worker re-checks `ha.is_active()` AND generation immediately
-     before calling `trigger_kernel_arp_probe()`. Without this, an item
-     queued under the active generation but dequeued after demotion
-     would still fire — invariant is stated but not mechanically
-     guaranteed.
-   - On RG-promote to ACTIVE, `last_probed_at.clear()` is called via
+   + Codex r4 #1 + AGY r4 #1 + AGY r5 #1):
+   xpf HA is **per Routing Group (RG)**, NOT a global active flag.
+   Each WarmItem carries `rg_id`. The active check at both queue and
+   pre-fire uses `HAGroupRuntime::is_forwarding_active(now_secs)` for
+   the item's specific RG.
+   - Queue side: `queue_warm_pass()` resolves egress to its RG via
+     `owner_rg_for_flow(snapshot, egress_ifindex)` and only enqueues
+     when that RG's `HAGroupRuntime::is_forwarding_active(now_secs)`
+     is `true`. Standby RGs are silently skipped per key.
+   - Worker side: warmer re-checks the same `HAGroupRuntime::is_forwarding_active`
+     for `item.rg_id` IMMEDIATELY before calling
+     `trigger_kernel_arp_probe()`. Without this, an item queued under
+     an active RG but dequeued after demotion would still fire.
+   - Interface / MAC / VIP / egress maps are programmed before the RG
+     is marked active in `HAGroupRuntime` (existing xpf invariant), so
+     the per-RG active check implies the dataplane prerequisites are in
+     place.
+   - On RG-promote, `last_probed_at.clear()` is called via
      `Coordinator::on_rg_promote_active()` to avoid 5s lockout of
      probes that failed during transient down state.
 3. **Don't probe interfaces in transient down state**. Use
@@ -717,16 +750,63 @@ case but does not eliminate pathological loss scenarios."
 - **Mitigation**: at daemon init, read `/proc/sys/net/ipv4/neigh/default/retrans_time_ms`
   (and v6). If > 250, fall back to PENDING_NEIGH_TIMEOUT_NS=2000ms
   (today's value). Emit operator-visible warning on fallback.
-- Pseudocode:
+- Pseudocode (per Codex r5 #1 + AGY r5 #2-#3 — dual-stack + per-interface +
+  fail-closed + cached-once):
   ```rust
-  fn pending_neigh_timeout_ns() -> u64 {
-      let retrans = read_sysctl_u32("net/ipv4/neigh/default/retrans_time_ms").unwrap_or(1000);
-      if retrans <= 250 {
-          800_000_000
-      } else {
-          eprintln!("xpf-userspace-dp: WARNING: net.ipv4.neigh.default.retrans_time_ms={} > 250 — using PENDING_NEIGH_TIMEOUT_NS=2000ms (PR-3 inactive). Apply PR-1 sysctl drop-in to enable.", retrans);
-          2_000_000_000
+  use std::sync::OnceLock;
+  static PENDING_NEIGH_TIMEOUT_NS: OnceLock<u64> = OnceLock::new();
+
+  fn init_pending_neigh_timeout_ns(dataplane_ifindexes: &[i32]) -> u64 {
+      // Read effective per-interface retrans_time_ms for BOTH v4 and v6
+      // across every dataplane interface. Fail closed (= use 2_000_000_000)
+      // on ANY missing file, parse error, or value > 250.
+      let mut max_retrans: u32 = 0;
+      for ifx in dataplane_ifindexes {
+          let iface_name = match resolve_ifindex_to_name(*ifx) {
+              Some(n) => n,
+              None => return fallback(),
+          };
+          for family in ["ipv4", "ipv6"] {
+              let path = format!("/proc/sys/net/{}/neigh/{}/retrans_time_ms", family, iface_name);
+              let v = match read_sysctl_u32(&path) {
+                  Ok(v) => v,
+                  Err(_) => return fallback(),
+              };
+              if v > 250 { return fallback(); }
+              max_retrans = max_retrans.max(v);
+          }
       }
+      // Also check default in case interfaces are created later.
+      for family in ["ipv4", "ipv6"] {
+          let path = format!("/proc/sys/net/{}/neigh/default/retrans_time_ms", family);
+          let v = match read_sysctl_u32(&path) {
+              Ok(v) => v,
+              Err(_) => return fallback(),
+          };
+          if v > 250 { return fallback(); }
+          max_retrans = max_retrans.max(v);
+      }
+      // All checks passed; use 800ms timeout.
+      800_000_000
+  }
+
+  fn fallback() -> u64 {
+      eprintln!(
+          "xpf-userspace-dp: WARNING: kernel retrans_time_ms not <= 250 \
+           on all dataplane interfaces (v4 AND v6) — using \
+           PENDING_NEIGH_TIMEOUT_NS=2000ms (PR-3 inactive). Apply PR-1 \
+           sysctl drop-in to enable."
+      );
+      2_000_000_000
+  }
+
+  // Called once at daemon init:
+  PENDING_NEIGH_TIMEOUT_NS.set(init_pending_neigh_timeout_ns(&ifxs))
+      .expect("PENDING_NEIGH_TIMEOUT_NS already initialized");
+
+  // Hot-path callsite (was: `> PENDING_NEIGH_TIMEOUT_NS`):
+  if now_ns.saturating_sub(pkt.queued_ns) > *PENDING_NEIGH_TIMEOUT_NS.get().unwrap_or(&2_000_000_000) {
+      // drop
   }
   ```
 - This is a runtime guard — operator does not have to rebuild the binary

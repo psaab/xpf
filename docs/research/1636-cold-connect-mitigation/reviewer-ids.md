@@ -26,10 +26,18 @@ Tracks task IDs across rounds for long-running session resumption.
 | AGY (adversarial) | adversarial-review-mppssucj-nhfik0 | PLAN-NEEDS-MINOR |
 | Claude SMR | (skipped; addressed by AGY r3 findings only) | n/a |
 
-## Round 4 (plan v4 @ d5a4a5eb87b5) — convergence check (Codex retry with inlined sections per feedback_codex_infra_must_retry)
+## Round 4 (plan v4 @ d5a4a5eb87b5)
 
 | Reviewer | Task ID | Verdict |
 |----------|---------|--------|
-| Codex | task-mppsygv9-n0gwuq | dispatched |
-| AGY (adversarial) | adversarial-review-mppsyvbf-55nkt6 | dispatched |
-| Claude SMR | (claude-smr-plan-r4.md) | TBD |
+| Codex | task-mppsygv9-n0gwuq (retry with inlined sections) | PLAN-NEEDS-MINOR |
+| AGY (adversarial) | adversarial-review-mppsyvbf-55nkt6 | PLAN-NEEDS-MINOR |
+| Claude SMR | (claude-smr-plan-r4.md) | PLAN-READY (pending r4 fold-in confirmation) |
+
+## Round 5 (plan v5 @ 1016ccfca89f) — final convergence
+
+| Reviewer | Task ID | Verdict |
+|----------|---------|--------|
+| Codex | task-mppt4xl4-tf0zaj | dispatched |
+| AGY (adversarial) | adversarial-review-mppt55mr-9htu20 | dispatched |
+| Claude SMR | (claude-smr-plan-r5.md) | TBD |
