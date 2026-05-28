@@ -14,6 +14,14 @@ Tracks task IDs across rounds for long-running session resumption.
 
 | Reviewer | Task ID | Verdict |
 |----------|---------|--------|
-| Codex | task-mppsidkk-vifkld | dispatched |
-| AGY (adversarial) | adversarial-review-mppsizqg-9swuak | dispatched |
-| Claude SMR | (claude-smr-plan-r2.md) | TBD |
+| Codex | task-mppsidkk-vifkld | PLAN-NEEDS-MINOR |
+| AGY (adversarial) | adversarial-review-mppsizqg-9swuak | PLAN-NEEDS-MINOR |
+| Claude SMR | (claude-smr-plan-r2.md) | PLAN-NEEDS-MINOR |
+
+## Round 3 (plan v3 @ a43fd6f9cb6d) — convergence check
+
+| Reviewer | Task ID | Verdict |
+|----------|---------|--------|
+| Codex | task-mppssk54-u12emq | dispatched |
+| AGY (adversarial) | adversarial-review-mppssucj-nhfik0 | dispatched |
+| Claude SMR | (claude-smr-plan-r3.md) | TBD |

@@ -1,11 +1,20 @@
 # #1636 cold-connect / neighbor-resolution gap — research plan
 
-**Status**: DRAFT v3 — revised after round-2 Codex + AGY + Claude SMR hostile review
+**Status**: DRAFT v4 — revised after round-3 AGY findings (Codex r3 REVIEW-BLOCKED by tooling)
 **Base SHA**: `dbfbf680cc82` (origin/master @ 2026-05-28)
 **Branch**: `research/1636-cold-connect-mitigation`
 **Scope**: research-only, no production source edits, no PR
 
-## Changelog since v2
+## Changelog since v3
+
+| # | Round-3 finding | Resolution |
+|---|------------------|------------|
+| AGY r3 #1 | Disconnect vs Full distinction + production-level error log + Prometheus exposure | §7 worker error handling expanded; warm_drops + warm_disconnected counters; production-level log on disconnect |
+| AGY r3 #2 | GC bypass under continuous load (Timeout path never hit) | §7 GC check runs on EVERY iteration (idle + dequeue), keyed off `last_gc_ns` |
+| AGY r3 #3 | Link UP transition needs to clear `last_probed_at` for ifindex | §9 invariant 7 expanded; new `Coordinator::on_link_up(ifindex)` |
+| AGY r3 #4 | D=800ms is mathematically superior to D=700ms (kernel state machine async; late resolution preservation) | §5.1 + §9 + PR-3 reverted to 800ms |
+
+## Changelog v2 → v3
 
 | # | Round-2 finding | Resolution |
 |---|------------------|------------|
@@ -182,13 +191,23 @@ For cold UNKNOWN next-hops, the path is `mcast_solicit` (3 attempts) at
 3.371s behavior).
 
 This directly informs:
-- **D timing choice**: dropping at 800ms with B=250ms lands AFTER kernel
-  gives up at ~750ms. The SYN #2 retransmit at t=1000ms then encounters
-  a `NUD_FAILED` neighbor. The dataplane's `MissingNeighbor` path will
-  re-call `trigger_kernel_arp_probe()` which transitions the neighbor
-  back to INCOMPLETE — but we've added a 250ms+ latency penalty.
-  **Recommendation**: lower D to 700ms (drop while neighbor is still
-  INCOMPLETE, before kernel marks FAILED).
+- **D timing choice (revised per AGY r3 #4)**: The kernel neighbor
+  state machine is async and unaware of userspace queue state. The
+  kernel transitions to NUD_FAILED at ~750ms regardless of when
+  userspace drops the packet. Two timing choices:
+  - **D=700ms**: drop before kernel gives up. Loses 50ms window
+    (700-750ms) where late resolution could have delivered the
+    queued SYN #1. SYN #2 at t=1000ms encounters NUD_FAILED →
+    fresh probe → resolve → forward.
+  - **D=800ms**: drop after kernel marks FAILED. Preserves the
+    50ms window where late kernel resolution between 700-750ms
+    could have flushed the queue successfully. SYN #2 at t=1000ms
+    encounters NUD_FAILED (same as 700ms case) → fresh probe →
+    resolve → forward.
+  - The 800ms case is strictly **>= 700ms case** in expected
+    outcome (it preserves an extra 50ms window of opportunity to
+    deliver SYN #1 without affecting the SYN #2 path).
+  - **Recommendation**: D = **800ms**.
 - **Snapshot warm-pass interaction**: when the warmer worker fires a
   probe, the kernel runs its own 3-attempt × `retrans_time_ms` schedule.
   Userspace need not retry — kernel handles. (Per AGY r2 #4 framing.)
@@ -374,20 +393,24 @@ fn warmer_loop(rx: Receiver<WarmItem>,
                stop: Arc<AtomicBool>) {
     let mut last_gc_ns = monotonic_nanos();
     while !stop.load(Ordering::Relaxed) {
+        // Run GC at the top of EVERY iteration (idle + dequeue path).
+        // Per AGY r3 #2: GC keyed off a Timeout-only path is bypassed
+        // under continuous load.
+        let now = monotonic_nanos();
+        if now.saturating_sub(last_gc_ns) >= 60_000_000_000 {
+            if let Ok(mut map) = last_probed.lock() {
+                map.retain(|_k, &mut t| now.saturating_sub(t) < 300_000_000_000);
+            }
+            last_gc_ns = now;
+        }
         let item = match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(it) => it,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                // Idle: prune last_probed_at entries older than 5 min (AGY r2 #3).
-                let now = monotonic_nanos();
-                if now.saturating_sub(last_gc_ns) >= 60_000_000_000 {
-                    if let Ok(mut map) = last_probed.lock() {
-                        map.retain(|_k, &mut t| now.saturating_sub(t) < 300_000_000_000);
-                    }
-                    last_gc_ns = now;
-                }
-                continue;
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                // Coordinator gone — clean exit.
+                eprintln!("xpf-userspace-dp: neighbor warmer worker: channel disconnected; exiting");
+                return;
             }
-            Err(_) => return, // disconnected — coordinator gone
         };
         // Generation collapse: drop stale items (Codex r2 #3).
         if item.generation != warm_generation.load(Ordering::Acquire) {
@@ -413,6 +436,36 @@ fn warmer_loop(rx: Receiver<WarmItem>,
 }
 ```
 
+**Producer-side error handling** (per AGY r3 #1): the `try_send` failure
+mode must distinguish between channel-Full (queue saturation) and
+channel-Disconnected (worker thread died — fatal). The producer:
+
+```rust
+match tx.try_send(item) {
+    Ok(()) => {}
+    Err(crossbeam_channel::TrySendError::Full(_)) => {
+        self.neighbors.warm_drops.fetch_add(1, Ordering::Relaxed);
+        if cfg!(feature = "debug-log") {
+            eprintln!("xpf-userspace-dp: warm queue full (cap=4096); dropping {:?}", key);
+        }
+    }
+    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+        self.neighbors.warm_disconnected.fetch_add(1, Ordering::Relaxed);
+        // Not debug-gated — this is a fatal-class error operators must see.
+        eprintln!(
+            "xpf-userspace-dp: ERROR: neighbor warmer worker disconnected; \
+             proactive neighbor warming is DISABLED until restart. key={:?}",
+            key
+        );
+    }
+}
+```
+
+Both `warm_drops` and `warm_disconnected` exposed as Prometheus
+counters via the existing dataplane metrics endpoint. Mandatory not
+optional — Prometheus surface is the only operator-visible signal in
+production builds (where `debug-log` is off).
+
 **Channel sizing**: bounded `crossbeam_channel::bounded(4096)`. Plan
 accommodates 4096 items in flight which exceeds typical FRR snapshot
 route counts (handful to dozens). On overflow, the new item is dropped
@@ -421,14 +474,25 @@ and `warm_drops` is incremented; debug log fires (when
 
 **RG-promote cache clear** (AGY r2 #2): on cluster state transition to
 ACTIVE/PRIMARY, clear `last_probed_at` to avoid 5s lockout of probes
-that failed during the transient down state. This is wired through
-the existing cluster state callback into `Coordinator`. Implementation:
+that failed during the transient down state.
+
+**Link-UP cache clear** (AGY r3 #3): when an interface transitions
+DOWN→UP, clear all `last_probed_at` entries whose `ifindex` matches
+the now-UP interface. This catches the post-promote link negotiation
+window (LACP / STP / VLAN negotiation 1-2 sec). Wired through the
+existing netlink RTM_NEWLINK monitor:
 
 ```rust
-// Coordinator gets a new method called from the cluster state path:
+// Coordinator gets methods called from the cluster + link state paths:
 pub(super) fn on_rg_promote_active(&self) {
     if let Ok(mut map) = self.neighbors.last_probed_at.lock() {
         map.clear();
+    }
+}
+
+pub(super) fn on_link_up(&self, ifindex: i32) {
+    if let Ok(mut map) = self.neighbors.last_probed_at.lock() {
+        map.retain(|&(ifx, _), _| ifx != ifindex);
     }
 }
 ```
@@ -482,11 +546,9 @@ No protocol changes. No `ConfigSnapshot` schema changes.
 5. **Don't warm broadcast / multicast / loopback / unspecified
    addresses**. Filter before enqueue.
 6. **`PENDING_NEIGH_TIMEOUT_NS` change (PR-3)**: if shipped, lower to
-   **700 ms** (NOT 800 ms — per §5.1 / SMR r2 #10) so the drop happens
-   while the kernel neighbor is still in NUD_INCOMPLETE (kernel marks
-   NUD_FAILED at roughly `mcast_solicit × retrans_time_ms = 3 × 250ms
-   = 750ms`). Drop before kernel gives up keeps SYN #2 on the natural
-   resolution path. Update the test
+   **800 ms** (per AGY r3 #4 — kernel state machine is async; 800ms
+   preserves the late-resolution window 700-750ms without affecting
+   the SYN #2 path). Update the test
    `schedule_total_window_under_pending_neigh_timeout` in
    `neighbor_dispatch.rs:557-567` accordingly.
 7. **Generation collapse**: `warm_generation` is bumped on each
@@ -497,8 +559,16 @@ No protocol changes. No `ConfigSnapshot` schema changes.
    kernel runs its own 3-attempt × `retrans_time_ms` schedule. No
    userspace retry loop.
 9. **Bounded queue + telemetry**: bounded `crossbeam_channel::bounded(4096)`;
-   on `try_send` failure increment `warm_drops` atomic counter (exposed
-   via Prometheus if desired) and log under `debug-log` feature.
+   distinguish `TrySendError::Full` (counted as `warm_drops`, log gated
+   on `debug-log`) from `TrySendError::Disconnected` (counted as
+   `warm_disconnected`, log NOT gated — operators must see). Both
+   counters MANDATORILY exposed as Prometheus metrics.
+10. **`last_probed_at` cleared on link-UP for that ifindex** (AGY r3 #3):
+    avoids the transient-down lockout window where probes fired during
+    link negotiation get rate-limited for 5s.
+11. **GC pruning runs every iteration of the warmer loop** (idle OR
+    dequeue), keyed off `last_gc_ns` (AGY r3 #2). Under continuous load
+    where Timeout is never hit, the GC still runs on each dequeue.
 
 ## 10. Acceptance gate derivation (qualified per Codex r2 #5 + SMR r2 #2)
 
@@ -581,8 +651,9 @@ shipped)".
 - HA: `make test-failover` baseline must still complete ≤60 ms
 
 **PR-3 (D timeout — optional, after measuring B+C)**:
-- Update `PENDING_NEIGH_TIMEOUT_NS = 700_000_000` (per §5.1: drop while
-  kernel still INCOMPLETE, before NUD_FAILED at 750ms with B=250ms)
+- Update `PENDING_NEIGH_TIMEOUT_NS = 800_000_000` (per AGY r3 #4 — kernel
+  state machine is async; 800ms strictly dominates 700ms by preserving
+  late-resolution 700-750ms window)
 - Update test `schedule_total_window_under_pending_neigh_timeout` to
   assert `last < PENDING_NEIGH_TIMEOUT_NS - 100_000_000`
 - Cold-connect measurement with neighbor-warming disabled (force the
