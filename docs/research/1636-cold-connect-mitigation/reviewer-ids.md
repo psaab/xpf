@@ -22,6 +22,14 @@ Tracks task IDs across rounds for long-running session resumption.
 
 | Reviewer | Task ID | Verdict |
 |----------|---------|--------|
-| Codex | task-mppssk54-u12emq | dispatched |
-| AGY (adversarial) | adversarial-review-mppssucj-nhfik0 | dispatched |
-| Claude SMR | (claude-smr-plan-r3.md) | TBD |
+| Codex | task-mppssk54-u12emq | REVIEW-BLOCKED (tooling) |
+| AGY (adversarial) | adversarial-review-mppssucj-nhfik0 | PLAN-NEEDS-MINOR |
+| Claude SMR | (skipped; addressed by AGY r3 findings only) | n/a |
+
+## Round 4 (plan v4 @ d5a4a5eb87b5) — convergence check (Codex retry with inlined sections per feedback_codex_infra_must_retry)
+
+| Reviewer | Task ID | Verdict |
+|----------|---------|--------|
+| Codex | task-mppsygv9-n0gwuq | dispatched |
+| AGY (adversarial) | adversarial-review-mppsyvbf-55nkt6 | dispatched |
+| Claude SMR | (claude-smr-plan-r4.md) | TBD |

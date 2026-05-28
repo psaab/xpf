@@ -1,11 +1,22 @@
 # #1636 cold-connect / neighbor-resolution gap — research plan
 
-**Status**: DRAFT v4 — revised after round-3 AGY findings (Codex r3 REVIEW-BLOCKED by tooling)
+**Status**: DRAFT v5 — revised after round-4 Codex + AGY findings (precision tightening)
 **Base SHA**: `dbfbf680cc82` (origin/master @ 2026-05-28)
 **Branch**: `research/1636-cold-connect-mitigation`
 **Scope**: research-only, no production source edits, no PR
 
-## Changelog since v3
+## Changelog since v4
+
+| # | Round-4 finding | Resolution |
+|---|------------------|------------|
+| Codex r4 #1 / AGY r4 #1 | HA demotion + mutex poisoning leave silent in-flight warming | §7 worker re-checks `ha.is_active()` AND generation immediately before fire; mutex `.expect()` on poison (lets worker die loudly so channel breaks) |
+| Codex r4 #2 | Generation bump must be per ADMITTED sweep, not every `queue_warm_pass()` call | §7 generation bump moves AFTER the 1s snapshot rate-limit check |
+| Codex r4 #3 / AGY r4 #3 | Disconnected log floods under route churn | `warned_disconnect: AtomicBool` once-only transition log |
+| Codex r4 #4 | §10 "first-probe-LOST" label imprecise | §10 renamed "initial-resolution-train-failed"; sustained-loss note added |
+| Codex r4 #5 | IPv6 NDP warming must be explicit | §7 notes `trigger_kernel_arp_probe()` already handles both AF_INET ICMP + AF_INET6 ICMPv6 in source (`userspace-dp/src/afxdp/neighbor.rs:36`) — confirmed dual-stack |
+| AGY r4 #2 | D=800ms is operational hazard if PR-1 sysctl fails to apply at runtime | §7 / PR-3 adds runtime sysctl validation; if `retrans_time_ms > 250`, fall back to 2000ms timeout |
+
+## Changelog v3 → v4
 
 | # | Round-3 finding | Resolution |
 |---|------------------|------------|
@@ -345,15 +356,20 @@ pub(crate) struct WarmItem {
 self.queue_warm_pass(); // non-blocking enqueue
 
 fn queue_warm_pass(&mut self) {
-    // snapshot-level rate-limit
+    // Standby/demote guard: skip warm pass entirely.
+    if !self.ha.is_active() {
+        return;
+    }
+    // snapshot-level rate-limit (returns BEFORE generation bump per Codex r4 #2).
     let now = monotonic_nanos();
     if now.saturating_sub(self.last_warm_sweep_ns) < 1_000_000_000 {
         return;
     }
     self.last_warm_sweep_ns = now;
 
-    // Generation bump: any in-flight queue items from previous snapshot
-    // are now stale and will be dropped on dequeue (Codex r2 #3).
+    // Generation bump: only on ADMITTED sweeps (Codex r4 #2). Any
+    // in-flight queue items from previous snapshot are now stale and
+    // will be dropped on dequeue.
     let gen = self.neighbors.warm_generation.fetch_add(1, Ordering::Release) + 1;
 
     let snapshot = &self.forwarding;
@@ -387,9 +403,15 @@ fn queue_warm_pass(&mut self) {
 }
 
 // in the warmer worker (long-lived, single thread):
+//
+// IPv6 NDP: trigger_kernel_arp_probe in userspace-dp/src/afxdp/neighbor.rs:36
+// dispatches on IpAddr variant — AF_INET → SOCK_RAW ICMP echo; AF_INET6 →
+// SOCK_RAW ICMPv6 echo. The same function handles both protocols; no separate
+// trigger_ndp_probe needed. (Confirmed dual-stack per Codex r4 #5.)
 fn warmer_loop(rx: Receiver<WarmItem>,
                last_probed: Arc<Mutex<FastMap<(i32, IpAddr), u64>>>,
                warm_generation: Arc<AtomicU64>,
+               ha: Arc<HaSnapshot>, // reference to HA active flag
                stop: Arc<AtomicBool>) {
     let mut last_gc_ns = monotonic_nanos();
     while !stop.load(Ordering::Relaxed) {
@@ -412,13 +434,28 @@ fn warmer_loop(rx: Receiver<WarmItem>,
                 return;
             }
         };
+        // Re-check active state + generation IMMEDIATELY before firing
+        // (per Codex r4 #1 + AGY r4 #1). Without this, an item queued
+        // under the active generation but dequeued after demotion would
+        // still fire trigger_kernel_arp_probe(); §9 invariant 2 stated
+        // but not mechanically guaranteed otherwise.
+        if !ha.is_active() {
+            continue;
+        }
         // Generation collapse: drop stale items (Codex r2 #3).
         if item.generation != warm_generation.load(Ordering::Acquire) {
             continue;
         }
         let key = (item.ifindex, item.hop);
         let now = monotonic_nanos();
-        let skip = if let Ok(mut map) = last_probed.lock() {
+        // expect() on lock poison (AGY r4 #1): if a coordinator-side
+        // panic poisoned the mutex, silently skipping forever would
+        // leave warming "alive but disabled" — invisible. Panic-on-poison
+        // kills the worker, breaking the MPSC channel; the next try_send
+        // hits TrySendError::Disconnected, increments warm_disconnected,
+        // and emits the operator-visible warning.
+        let skip = {
+            let mut map = last_probed.lock().expect("last_probed mutex poisoned — neighbor warming forcibly disabled");
             match map.get(&key) {
                 Some(t) if now.saturating_sub(*t) < 5_000_000_000 => true,
                 _ => {
@@ -426,7 +463,7 @@ fn warmer_loop(rx: Receiver<WarmItem>,
                     false
                 }
             }
-        } else { true };
+        };
         if !skip {
             trigger_kernel_arp_probe(&item.iface_name, item.hop);
             // Per AGY r2 #4: fire ONE probe; kernel handles its own
@@ -451,15 +488,23 @@ match tx.try_send(item) {
     }
     Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
         self.neighbors.warm_disconnected.fetch_add(1, Ordering::Relaxed);
-        // Not debug-gated — this is a fatal-class error operators must see.
-        eprintln!(
-            "xpf-userspace-dp: ERROR: neighbor warmer worker disconnected; \
-             proactive neighbor warming is DISABLED until restart. key={:?}",
-            key
-        );
+        // Once-only transition log (AGY r4 #3 + Codex r4 #3): under
+        // route churn this can fire 100× per snapshot otherwise.
+        if !self.neighbors.warned_disconnect.swap(true, Ordering::Relaxed) {
+            // Not debug-gated — operators must see ONCE.
+            eprintln!(
+                "xpf-userspace-dp: ERROR: neighbor warmer worker disconnected; \
+                 proactive neighbor warming is DISABLED until restart"
+            );
+        }
     }
 }
 ```
+
+`warned_disconnect` is an `AtomicBool` on `NeighborManager`. `swap(true)`
+returns the prior value; the inner `eprintln` runs only on the first
+transition from false→true. Prometheus surface (`warm_disconnected`
+counter) still reflects per-key totals.
 
 Both `warm_drops` and `warm_disconnected` exposed as Prometheus
 counters via the existing dataplane metrics endpoint. Mandatory not
@@ -529,13 +574,20 @@ No protocol changes. No `ConfigSnapshot` schema changes.
 1. **No blocking call on the coordinator hot path**. `queue_warm_pass()`
    uses non-blocking MPSC enqueue (`try_send`); coordinator returns
    promptly.
-2. **HA failover ordering** (per Codex r2 #4 + AGY r1 #6 + AGY r2 #2):
+2. **HA failover ordering** (per Codex r2 #4 + AGY r1 #6 + AGY r2 #2
+   + Codex r4 #1 + AGY r4 #1):
    Warm pass runs only AFTER RG-promote has committed:
    - ACTIVE dataplane ownership (`ha.is_active() == true`)
    - Interface / MAC / VIP state programmed
    - Egress maps populated
    - On STANDBY or DEMOTE, the warm pass is suppressed (skip the
      `queue_warm_pass()` call when `ha.is_active() == false`).
+   - **Worker re-check before fire** (Codex r4 #1 + AGY r4 #1): the
+     warmer worker re-checks `ha.is_active()` AND generation immediately
+     before calling `trigger_kernel_arp_probe()`. Without this, an item
+     queued under the active generation but dequeued after demotion
+     would still fire — invariant is stated but not mechanically
+     guaranteed.
    - On RG-promote to ACTIVE, `last_probed_at.clear()` is called via
      `Coordinator::on_rg_promote_active()` to avoid 5s lockout of
      probes that failed during transient down state.
@@ -575,7 +627,7 @@ No protocol changes. No `ConfigSnapshot` schema changes.
 Assumptions used in each row:
 - "first probe succeeds" = SYN's initial `trigger_kernel_arp_probe()`
   reaches the wire and elicits a reply
-- "first probe LOST" = the SYN-triggered probe is dropped (e.g., XSK-owned
+- "initial-resolution-train failed" = the SYN-triggered probe is dropped (e.g., XSK-owned
   TX queue contention on mlx5 zero-copy bind window per AGY r1 #4)
 - "known next-hop" = the next-hop appears in `routes_v4/v6` or `fabrics`
   at the time of the most recent `queue_warm_pass()` AND that warm pass
@@ -589,12 +641,12 @@ Assumptions used in each row:
 | Today (master) | 3.371 s | 3.371 s | NO |
 | A only | 3.371 s | 3.371 s | NO (kernel rate-limit) |
 | B only — first probe succeeds | ~50 ms | ~250-300 ms (one missed solicit + retrans + netlink + retry sweep) | TYPICAL: marginal, p99: NO |
-| B only — first probe LOST | ~750 ms (3 × 250ms before NUD_FAILED) | up to PENDING_NEIGH_TIMEOUT_NS = 2 s (then ~1 s extra for TCP RTO #2) | NO |
+| B only — initial-resolution-train failed | ~750 ms (3 × 250ms before NUD_FAILED) | up to PENDING_NEIGH_TIMEOUT_NS = 2 s (then ~1 s extra for TCP RTO #2) | NO |
 | C only (post-warm-complete, kernel retrans 1000ms default) | ~1-10 ms (neighbor pre-resolved into `dynamic_neighbors`) | varies | KNOWN+post-warm: YES, concurrent-with-warm: NO |
 | B + C — post-warm-complete | ~1-10 ms | ~50 ms (netlink propagation tail) | YES |
-| B + C — concurrent-with-warm or unknown | ~50 ms typical (B path with first-probe-succeeds) | ~500-1000 ms (first probe LOST + kernel gives up at 750ms + 2s PENDING_NEIGH_TIMEOUT) | TYPICAL: yes, p99: NO |
+| B + C — concurrent-with-warm or unknown | ~50 ms typical (B path with first-probe-succeeds) | ~500-1000 ms (initial-resolution-train failed + kernel gives up at 750ms + 2s PENDING_NEIGH_TIMEOUT) | TYPICAL: yes, p99: NO |
 | B + C + D (PENDING_NEIGH_TIMEOUT_NS=700ms) — concurrent-with-warm or unknown — first probe succeeds | ~50 ms | ~250-300 ms | YES |
-| B + C + D — first probe LOST | ~700 ms (dropped while kernel still INCOMPLETE), then SYN #2 at t=1000ms triggers fresh probe sequence, neighbor resolves by t=~1050ms (kernel has cached partial state) | ~1.02 s (matches AGY r1 #2 derivation) | NO for p99, but 3.3× better than today |
+| B + C + D — initial-resolution-train failed | ~700 ms (dropped while kernel still INCOMPLETE), then SYN #2 at t=1000ms triggers fresh probe sequence, neighbor resolves by t=~1050ms (kernel has cached partial state) | ~1.02 s (matches AGY r1 #2 derivation) | NO for p99, but 3.3× better than today |
 | B + C + D + NUD_FAILED kicker | as above + dataplane re-fires probe on netlink RTM_NEWNEIGH state=NUD_FAILED (out of scope for initial ship) | ~1.0 s | borderline |
 
 Conclusion:
@@ -608,8 +660,11 @@ Conclusion:
 
 Gate language updated to: "≤200 ms cold connect for operator-configured
 next-hops with warm pass complete; ≤500 ms typical for unknown
-next-hops; ≤1.02 s worst case under first-probe-lost path (with D
-shipped)".
+next-hops; ≤1.02 s worst case under initial-resolution-train-failed
+path (with D shipped). **Sustained packet loss is NOT bounded by D**:
+if both the initial and SYN #2 resolution trains fail, the cold connect
+falls back to TCP RTO #3 cliff at t=7s — D narrows the typical worst-
+case but does not eliminate pathological loss scenarios."
 
 ## 11. Risk assessment
 
@@ -651,13 +706,38 @@ shipped)".
 - HA: `make test-failover` baseline must still complete ≤60 ms
 
 **PR-3 (D timeout — optional, after measuring B+C)**:
-- Update `PENDING_NEIGH_TIMEOUT_NS = 800_000_000` (per AGY r3 #4 — kernel
-  state machine is async; 800ms strictly dominates 700ms by preserving
-  late-resolution 700-750ms window)
+- Update `PENDING_NEIGH_TIMEOUT_NS` to 800ms ONLY if PR-1 sysctl is
+  empirically applied at runtime. Per AGY r4 #2 operational hazard: if
+  PR-1 sysctl fails to apply (restricted container, sysctl namespace
+  permission errors, admin overrides), kernel `retrans_time_ms` stays
+  at 1000ms default. Then dropping at 800ms BEFORE the kernel's first
+  wire-side solicit at t=1000ms means SYN #2 at t=1000ms still hits
+  INCOMPLETE → kernel queues → SYN #2 dropped at t=1800ms → resolution
+  lands at t=3000ms (SYN #3). **Regresses baseline.**
+- **Mitigation**: at daemon init, read `/proc/sys/net/ipv4/neigh/default/retrans_time_ms`
+  (and v6). If > 250, fall back to PENDING_NEIGH_TIMEOUT_NS=2000ms
+  (today's value). Emit operator-visible warning on fallback.
+- Pseudocode:
+  ```rust
+  fn pending_neigh_timeout_ns() -> u64 {
+      let retrans = read_sysctl_u32("net/ipv4/neigh/default/retrans_time_ms").unwrap_or(1000);
+      if retrans <= 250 {
+          800_000_000
+      } else {
+          eprintln!("xpf-userspace-dp: WARNING: net.ipv4.neigh.default.retrans_time_ms={} > 250 — using PENDING_NEIGH_TIMEOUT_NS=2000ms (PR-3 inactive). Apply PR-1 sysctl drop-in to enable.", retrans);
+          2_000_000_000
+      }
+  }
+  ```
+- This is a runtime guard — operator does not have to rebuild the binary
+  to revert; the sysctl is the single point of truth.
 - Update test `schedule_total_window_under_pending_neigh_timeout` to
-  assert `last < PENDING_NEIGH_TIMEOUT_NS - 100_000_000`
+  assert `last < min(PENDING_NEIGH_TIMEOUT_NS) - 100_000_000` (use min
+  to handle both 800ms and 2000ms paths)
 - Cold-connect measurement with neighbor-warming disabled (force the
-  unknown-next-hop path) to verify ~1.02 s worst case
+  unknown-next-hop path) to verify ~1.02 s worst case under correct
+  sysctl configuration AND verify NO regression under degraded sysctl
+  configuration (B unapplied → fallback to 2000ms)
 
 ### Smoke matrix
 
