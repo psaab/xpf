@@ -389,8 +389,18 @@ connect, dump `USERSPACE_TRACE` from Go (a throwaway readback over the pinned ma
 (src=client:ephemeral, dst=172.16.80.200:5201). Its `stage`/`reason` field is the
 DEFINITIVE window pin: `BINDING_MISSING`(2)→W-BIND, `BINDING_NOT_READY`(3)→W-READY,
 `HEARTBEAT_MISSING`(4)/`HEARTBEAT_STALE`(5)→W-HB, `REDIRECT_ERR`(11)→W-XSK,
-`CTRL_DISABLED` (the ctrl-disabled path records via `degraded_ctrl_disabled_action`
-→ its trace stage)→W-CTRL. **Caveat (Claude SMR r1 MINOR-1/2):** the trace map is
+`REDIRECT_ERR`(11)→W-XSK. **W-CTRL is NOT pinnable via the trace map** — when
+`ctrl.enabled==0` the shim takes the early return at `lib.rs:345-347` into
+`degraded_ctrl_disabled_action` (`:867`), which does NOT call `record_trace` (and
+the trace flag lives in `ctrl.flags`, moot while disabled). So W-CTRL leaves NO
+trace entry. W-CTRL is instead pinned by the **B-1 timeline**: the data-SYN
+tcpdump arrival ts falls BEFORE T_ctrl-enabled (`maps_sync.go:692`), corroborated
+by a non-zero `ctrl_disabled`(reason 0) cumulative-counter delta across the
+window. Thus the attribution decision tree is: trace entry present → its stage
+gives W-BIND/W-READY/W-HB/W-XSK; trace entry ABSENT + SYN arrived before
+T_ctrl-enabled → W-CTRL; trace entry ABSENT + SYN arrived after T_ctrl-enabled +
+ingress-iface-miss counter incremented → W-PASS-KERNEL (see B-4).
+**Caveat (Claude SMR r1 MINOR-1/2):** the trace map is
 keyed by a 4-field hash and is last-writer-wins per key, so confirm no other live
 flow collides on the same hash during the window (the iperf3 control SYN on a
 different port hashes differently; verify the dumped entry's stored 5-tuple
