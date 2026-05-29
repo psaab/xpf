@@ -10,4 +10,4 @@ Companions:
 
 | Round | Codex task-id | AGY task-id | Claude SMR doc | Verdicts |
 |-------|---------------|-------------|----------------|----------|
-| r1    | (pending)     | (pending)   | claude-smr-plan-r1.md | (pending) |
+| r1    | task-mpr8kuzq-r91m4a | adversarial-review-mpr8kvm9-jrcxvc | claude-smr-plan-r1.md | (pending) |

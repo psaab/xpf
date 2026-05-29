@@ -1,7 +1,16 @@
 # #1648 — Dataplane bringup-readiness: first cold connect drops a single SYN (~1s RTO) after `systemctl restart`/deploy
 
-**Status:** v1 (DRAFT) — research-only (`/research`, not `/engineer`). Gate-B
+**Status:** v2 — research-only (`/research`, not `/engineer`). Gate-B
 (cluster measurement) is the decider and runs FIRST. No production code, no PR.
+v2 folds r1: Codex PLAN-NEEDS-REVISION + AGY PLAN-NEEDS-MINOR + Claude SMR
+PLAN-NEEDS-MINOR. Three convergent corrections: (a) the XDP shim is `#![no_std]`/
+`#![no_main]` — Gate-B CANNOT use eprintln in the shim; it must use the existing
+`USERSPACE_TRACE` eBPF map for per-flow attribution; (b) the
+`maps_sync.go:597` "chicken-and-egg" comment is REFUTED — `Bound`/`XSKRegistered`
+are set inside the worker thread independent of RX, so gating Go's BPF READY on
+the helper's already-existing `XSKRegistered`/`Ready` is safe (Path 1.A is "use
+existing state," not "add a field"); (c) Path 1.B must require the SELECTED-QUEUE
+binding redirectable, not "one binding globally."
 **Branch:** `research/1648-bringup-readiness` (off origin/master @ `da88f1ab1`, incl. #1660 B3 merge)
 **Worktree:** `.claude/worktrees/1648-research-bringup`
 **Reviewers:** Codex + AGY + Claude SMR (3-way at /research; Copilot joins at /engineer)
@@ -66,14 +75,20 @@ artifact.
 
 `Manager.LoadUserspaceShim()` calls `SelectUserspaceXDPShimEntryProgram()`
 (`pkg/dataplane/loader.go:129`) and `CompileUserspaceShim()` calls it again
-(`:159`) before `attachUserspaceShimXDP(result)` (`:165`). So the
-`xdp_userspace_prog` shim (`userspace-xdp/src/lib.rs:336`) is the attached entry
-program on the dataplane interfaces from the moment the interface is brought up
-on restart. **The first cold SYN after restart is seen by the shim, not by a
-passthrough/kernel-only program.** (To be re-confirmed by Gate-B because there is
-a `SwapToUserspaceXDPShimEntryProgram` dance in `maps_sync.go` — see §2.4.)
+(`:159`) before `attachUserspaceShimXDP(result)` (`:165`). `AttachXDP`
+(`loader.go:462`) attaches `m.XDPEntryProgram()` directly, and the swap method
+returns early when the program is already selected (`loader.go:581-582 if
+m.XDPEntryProgram() == name { return nil }`). So the `xdp_userspace_prog` shim
+(`userspace-xdp/src/lib.rs:336`) is the attached entry program on the dataplane
+interfaces once the interface is brought up on restart, and the
+`SwapToUserspaceXDPShimEntryProgram` calls in `maps_sync.go:392/400/407` are
+**no-ops on a fresh boot** (verified by all three r1 reviewers). Caveat (do NOT
+overclaim "from the first packet"): there may be a sub-window between
+interface-up and `attachUserspaceShimXDP` where a different program (or none) is
+attached and the kernel default applies. **Gate-B Q1 must confirm the attach
+timeline; the plan does not assert first-packet coverage without that evidence.**
 
-### 2.2 The shim's transit-SYN disposition is gated on four conditions
+### 2.2 The shim's transit-SYN disposition is gated on several conditions
 
 Walking `try_xdp_userspace` (`userspace-xdp/src/lib.rs:343`) for a transit TCP
 SYN to a cold non-local target:
@@ -142,12 +157,26 @@ loop** (`process.go:381 time.NewTicker(time.Second)`):
   ctrl is already 1 once the gates pass.
 - Per-binding `USERSPACE_BINDINGS` flags are written at `:591–627`: `flags =
   userspaceBindingReady` iff `binding.Registered && binding.Armed` (`:596`).
-  Note: this does NOT wait for `Bound` (deliberate, `:597–601`, to avoid the
-  chicken-and-egg where the shim drops packets so the socket never RXes).
+  The inline comment (`:597–601`) claims this must NOT wait for `Bound` to avoid a
+  "chicken-and-egg where the shim drops packets so the socket never RXes."
+  **This comment is REFUTED (Codex + AGY r1, verified):** `Bound` and
+  `XSKRegistered` are set inside the worker thread during socket
+  creation/registration, BEFORE any packet RX — `live.set_bound(user_fd)`
+  (`worker/mod.rs:328`, `set_bound` stores `bound=true` immediately at
+  `umem/mod.rs:761-764`) and `live.set_xsk_registered(true)`
+  (`worker/mod.rs:746`). They are independent of the packet-receiving liveness
+  probe (`xskReceiveLive`, `maps_sync.go:372`). The comment conflated `Bound`
+  with `xskReceiveLive`. So gating the BPF READY write on the helper-reported
+  `XSKRegistered`/`Ready` does NOT deadlock startup — it is the safe fix
+  (Path 1.A). Crucially, the helper ALREADY computes and ships the stronger
+  state: `refresh_bindings.rs:225-228 ready = registered && bound &&
+  xsk_registered && heartbeat_fresh(...)`, and the wire `BindingStatus` carries
+  `Ready`, `Bound`, `XSKRegistered` (`protocol.go:1012-1016`). Go simply ignores
+  the stronger fields today.
 - `SwapToUserspaceXDPShimEntryProgram` (`:392/400/407`) is invoked while
-  enabling — but per §2.1 the shim is already the selected entry program from
-  load, so this is idempotent on a fresh boot (confirm in Gate-B; if the swap is
-  a real transition there may be a brief non-shim window).
+  enabling — per §2.1 the shim is already the selected entry program from load,
+  so this is a no-op on a fresh boot (all three r1 reviewers verified via
+  `loader.go:581-582`).
 - The bindings watchdog `verifyBindingsMapLocked` (`:1053`) repairs zeroed
   binding entries, but only when `m.ctrlWasEnabled` (`:1059`) — i.e. it does not
   help the very first enable.
@@ -157,10 +186,16 @@ loop** (`process.go:381 time.NewTicker(time.Second)`):
 Given §2.2–2.4, on the first connect after restart the SYN can be dropped at:
 
 - **W-CTRL**: SYN arrives while `ctrl.enabled == 0` (before the poll loop flips
-  it). The gap is bounded by the 1s poll cadence + the readiness gates. This is
-  the **prime suspect** — a single 1s poll tick aligns exactly with the ~1.007s
-  RTO recovery (the SYN is dropped in tick N; ctrl enables at tick N+1 ~1s later;
-  the +1.007s retransmit lands just after and is redirected). → `XDP_DROP` via
+  it). The gap is bounded by the 1s poll cadence + the readiness gates. A prime
+  suspect. **Caution (Claude SMR r1 MINOR-3):** do NOT infer the gap size from
+  the ~1.007s RTO. ~1.007s is the *client's* RFC 6298 initial TCP RTO — it would
+  be ~1s regardless of whether the actual not-ready gap is 50ms or 950ms, as long
+  as the gap < 1s and the binding is ready by the retransmit. The RTO is the
+  *recovery* clock, not the *gap* clock. Gate-B must MEASURE the actual gap
+  (T_ctrl-enabled − T_first-cold-SYN, or T_XSK-registered − T_SYN), not assume it
+  equals the poll cadence. This matters for path selection: Path 1.C
+  (event-driven enable) only helps if the gap is poll-dominated; if the gap is
+  the worker's XSK-bind latency, the poll cadence is irrelevant. → `XDP_DROP` via
   `degraded_ctrl_disabled_action`.
 - **W-BIND**: ctrl already enabled but `USERSPACE_BINDINGS[idx].flags == 0` for
   the SYN's (ifindex,queue) — binding not yet written or written for a different
@@ -227,21 +262,35 @@ single dropped SYN falls in. The fix target depends entirely on the answer.
 
 ### Path 1 — Tighten the readiness ORDERING so the SYN is redirected, not dropped
 
-**1.A — Make the XSK slot + heartbeat precede the binding-READY flag.**
-If Gate-B pins W-XSK (or the W-HB→W-XSK inversion), the fix is to ensure the
-worker has populated `USERSPACE_XSK_MAP[slot]` AND written a live heartbeat
-BEFORE the Go side writes `flags = READY` for that binding. Today
-`applyHelperStatusLocked` sets READY on `Registered && Armed` (`maps_sync.go:596`)
-which can be true before the worker's `register_xsk_slot` lands (worker/mod.rs
-order is bind→heartbeat→XSK). Option: gate the Go READY write on a helper-reported
-`XSKRegistered` flag (add to `BindingStatus`) so READY implies a populated XSK
-slot. Cost: one more status field + a one-tick (≤1s) delay to first-READY. Keeps
-fail-closed correct (READY now strictly implies redirectable).
+**1.A — Gate the Go BPF READY write on the helper's existing `XSKRegistered`
+(FAVORED, if Gate-B pins W-XSK / the W-HB→W-XSK inversion).**
+The helper ALREADY ships `XSKRegistered` and a strong `Ready` (= registered &&
+bound && xsk_registered && heartbeat_fresh) in the wire `BindingStatus`
+(`protocol.go:1012-1016`, computed at `refresh_bindings.rs:225-228`). Go ignores
+them and writes `flags = READY` on only `Registered && Armed`
+(`maps_sync.go:596`). The fix is to change that condition to also require
+`binding.XSKRegistered` (or use `binding.Ready` directly). Because §2.4 refutes
+the chicken-and-egg comment, this does NOT deadlock startup — `XSKRegistered`
+becomes true inside the worker before any RX. After the change, `flags & READY`
+strictly implies a populated `USERSPACE_XSK_MAP[slot]`, so the shim's
+binding-ready gate (`lib.rs:409`) can never pass while the XSK slot is empty →
+the W-XSK redirect-Err drop is eliminated. **No new status field needed** (Codex
+r1). Cost: at most a one-poll-tick (≤1s) delay to first-READY — addressed by
+Path 1.C if Gate-B shows the gap is poll-dominated. Update the now-wrong inline
+comment at `maps_sync.go:597`.
 
-**1.B — Enable ctrl only after at least one binding is fully redirectable.**
-If Gate-B pins W-CTRL with a binding/XSK gap at enable time, require that the
-first ctrl-enable also see ≥1 binding with XSKRegistered+live-heartbeat. This
-narrows the W-CTRL→W-XSK race at the cost of a possible extra poll tick.
+**1.B — Enable ctrl / write READY only after the SELECTED-QUEUE binding for the
+ingress surface is redirectable (not "one binding globally").**
+The shim indexes the EXACT binding for the packet's queue:
+`binding_idx = ingress_ifindex * BINDING_QUEUES_PER_IFACE + selected_queue`
+(`lib.rs:383`), `selected_queue = rx_queue_index % queue_count`
+(`select_userspace_queue`, `lib.rs:1308-1330`). So "≥1 binding ready" is
+insufficient — the SYN's specific queue binding must be redirectable. If Gate-B
+pins W-CTRL with a per-queue gap, the ctrl-enable / per-binding-READY logic must
+require every eligible ingress-surface binding (or at minimum the selected queue)
+to be XSKRegistered+heartbeat-live, per Codex r1. (In practice 1.A already does
+this per-binding, since READY is written per (ifindex,queue); 1.B is the
+ctrl-enable analogue.)
 
 **1.C — Drive the enable off an event, not the 1s poll.** The 1s poll cadence is
 the dominant term in the ~1.007s gap (the RTO recovers right after the next
@@ -261,7 +310,13 @@ during not-ready from `XDP_DROP` to a non-lossy outcome. Options:
     CAN resolve the cold target — if not, this just moves the drop). This
     **weakens the fail-closed contract** (transit leaks to kernel during the
     window) and is the issue body's implicit assumption — only viable if Gate-B
-    proves the kernel path resolves.
+    proves the kernel path resolves. **Additional caveat (Claude SMR r1):** even
+    if the kernel CAN forward, doing so during the W-CTRL window forwards transit
+    WITHOUT SNAT (the documented reason for the 3s/15s prewarm delay,
+    `maps_sync.go:300-310`) → return traffic blackholes. So Path 2.A is strictly
+    MORE dangerous for W-CTRL than a plain drop; reject it for that window. AGY r1
+    independently flagged Path 2.A as compromising the firewall's core security
+    boundary.
   - Redirect-on-first-success buffering inside the dataplane (`pending_neigh`)
     requires the packet to first reach the worker, which it cannot if the XSK
     slot isn't registered — so this does not help W-XSK / W-CTRL. Only relevant
@@ -297,46 +352,85 @@ the chosen Path-1 variant.
 Throwaway instrumentation, reverted after; verify `strings <bin> | grep
 <marker>` = 0 on BOTH nodes; restore cluster healthy. Marker: `BRINGUP-1648`.
 
-**B-1. Instrument the bringup T-timeline (Rust + Go, eprintln/slog with the
-marker + CLOCK_MONOTONIC ns):**
-- T_worker-spawn (bringup.rs:281 "started worker thread").
-- T_heartbeat-first-write (worker/mod.rs:355, after `touch_heartbeat`).
-- T_XSK-slot-registered (worker/mod.rs:746, after `set_xsk_registered`).
+**CONSTRAINT (Codex r1):** the XDP shim is `#![no_std]`/`#![no_main]`
+(`lib.rs:1-2`). **No `eprintln!`/`println!`/`slog` is possible inside the shim.**
+All shim-side instrumentation MUST be eBPF-safe (BPF map writes via the existing
+counter/trace maps, or `bpf_printk`/trace_pipe). Go-side timeline logging can use
+`slog`. The original v1 "throwaway eprintln in the SYN-matching branch" is
+withdrawn.
+
+**B-1. Instrument the bringup T-timeline (Go via slog; Rust helper threads via
+eprintln to journald; CLOCK_MONOTONIC ns, marker `BRINGUP-1648`):**
+- T_worker-spawn (bringup.rs:281 "started worker thread" — Rust helper thread,
+  eprintln OK; this is NOT the shim).
+- T_heartbeat-first-write (worker/mod.rs:355, after `touch_heartbeat` — Rust
+  helper thread, eprintln OK).
+- T_XSK-slot-registered (worker/mod.rs:742-746, after `set_xsk_registered` —
+  there is already an eprintln "registered slot=… in XSKMAP" at `:742`; add the
+  ns timestamp).
 - T_binding-flags-READY (maps_sync.go:620, when `flags == READY` is first written
-  per (ifindex,queue) — log idx+slot+flags).
-- T_ctrl-enabled (maps_sync.go:692, ctrl.Enabled=1 commit).
+  per (ifindex,queue) — slog idx+slot+flags).
+- T_ctrl-enabled (maps_sync.go:692, ctrl.Enabled=1 commit — slog).
 - T_first-cold-SYN-arrives: see B-2.
 
-**B-2. Count first-SYN outcomes at the shim during the bringup window.**
-The shim already has degraded-path counters (`USERSPACE_FALLBACK_STATS`,
-reasons in `maps_sync.go:707`). Read the per-reason deltas across the restart
-window (snapshot before connect, after the dropped SYN, after recovery):
-- `ctrl_disabled` (0), `binding_missing` (2), `binding_not_ready` (3),
-  `heartbeat_missing` (4), `heartbeat_stale` (5), `redirect_err` (10),
-  `transit_drop` (15), `pass_to_kernel` (14).
-- Additionally add a throwaway eprintln in the SYN-matching branch that logs
-  ingress_ifindex + selected_queue + binding.flags + heartbeat-present +
-  XDP-action for TCP-SYN-no-ACK to the iperf3 target IP/port, so the dropped SYN
-  is attributable to a specific gate. (Restrict to the target 5-tuple to avoid
-  flooding.)
+**B-2. Attribute the dropped SYN to one shim exit using the existing
+`USERSPACE_TRACE` eBPF map (PRIMARY attribution; eBPF-safe).**
+The shim already records a per-flow trace entry on every gate exit via
+`record_trace(...)` into `USERSPACE_TRACE` (`lib.rs:329-330,959-1004`), keyed on
+an avalanche hash of (ingress_ifindex, protocol, src_port, dst_port) and carrying
+`stage`, `reason`, `selected_queue`, `slot`, `vlan_id`, and the full 5-tuple.
+Enable it by setting `USERSPACE_CTRL_FLAG_TRACE` (bit 2) in `userspace_ctrl.flags`
+during the experiment (Go can set this in `applyHelperStatusLocked`/bootstrap, or
+a throwaway one-shot map write). Note: `binding_missing` and `early_filter` traces
+are FORCED regardless of the trace flag (`record_trace` `:969-972`), and ICMP is
+skipped (`:976`), so a TCP SYN is captured. After the restart + the dropped-SYN
+connect, dump `USERSPACE_TRACE` from Go (a throwaway readback over the pinned map
+`UserspaceTracePinPath`) and find the entry matching the iperf3 data-SYN 5-tuple
+(src=client:ephemeral, dst=172.16.80.200:5201). Its `stage`/`reason` field is the
+DEFINITIVE window pin: `BINDING_MISSING`(2)→W-BIND, `BINDING_NOT_READY`(3)→W-READY,
+`HEARTBEAT_MISSING`(4)/`HEARTBEAT_STALE`(5)→W-HB, `REDIRECT_ERR`(11)→W-XSK,
+`CTRL_DISABLED` (the ctrl-disabled path records via `degraded_ctrl_disabled_action`
+→ its trace stage)→W-CTRL. **Caveat (Claude SMR r1 MINOR-1/2):** the trace map is
+keyed by a 4-field hash and is last-writer-wins per key, so confirm no other live
+flow collides on the same hash during the window (the iperf3 control SYN on a
+different port hashes differently; verify the dumped entry's stored 5-tuple
+matches the data SYN exactly). The cumulative `USERSPACE_FALLBACK_STATS`
+per-reason deltas (`maps_sync.go:707`) are CORROBORATING only — they are shared
+across all packets (VRRP/ARP/control) and cannot by themselves attribute the data
+SYN.
 
-**B-3. Confirm whether the SYN reaches the dataplane at all.**
-Add a throwaway counter at the worker `poll_descriptor`/RX path
-(`loop_body/mod.rs`) and at `pending_neigh` enqueue, keyed on the target
-5-tuple. If the count is 0 for the dropped SYN, the drop is at XDP (W-CTRL/
-W-BIND/W-READY/W-HB/W-XSK); if >0, the drop is inside the dataplane (re-targets
-the fix away from the readiness gate).
+**B-3. Confirm whether the SYN reaches the dataplane at all (eBPF-safe / helper).**
+The worker RX/`pending_neigh` path is in the Rust HELPER (not the shim), so an
+eprintln keyed on the target 5-tuple IS viable there
+(`worker/loop_body/mod.rs`). Add a throwaway helper-side log at the RX descriptor
+ingest and at `pending_neigh` enqueue for the target 5-tuple. If neither fires for
+the dropped SYN, the drop is at the shim (W-CTRL/W-BIND/W-READY/W-HB/W-XSK,
+corroborated by B-2's trace stage); if the RX log fires but `pending_neigh`
+doesn't (or it does and the packet is dropped later), the drop is INSIDE the
+dataplane → re-target the fix away from the readiness gate.
 
-**B-4. Kernel-side check (only if B-2 shows `pass_to_kernel` for the SYN).**
-If the SYN was XDP_PASS'd, inspect `nstat`/`/proc/net/snmp` and a host tcpdump
-on the egress path: did the kernel forward-then-fail (no neighbor) or drop at
-input? This distinguishes W-PASS-KERNEL from the XDP-drop windows and decides
-Path 2.A viability (kernel must be able to resolve the cold target).
+**B-4. Kernel-side check (only if B-2's trace shows the SYN took a PASS path).**
+If the trace stage is a local/control PASS or the SYN hit the ingress-iface-miss
+fast path (`lib.rs:364-366`, which returns `cpumap_or_pass` with NO trace/counter
+— so a SYN that vanishes with NO trace entry implicates this path), inspect
+`nstat`/`/proc/net/snmp` + a host tcpdump on the egress path: did the kernel
+forward-then-fail (no neighbor) or drop at input? This distinguishes
+W-PASS-KERNEL from the XDP-drop windows and decides Path 2.A viability. NOTE
+(Codex r1): the ingress-iface-miss pass path has no counter; a SYN that is
+PASS'd there leaves NO trace entry — so "no trace entry for the data SYN AND the
+shim was the entry program" is itself the signature of W-PASS-KERNEL via the
+ingress-iface gate. A throwaway counter at `lib.rs:366` (eBPF map increment, NOT
+eprintln) closes this gap if the no-trace case appears.
 
-**B-5. Correlate + pin.** ≥7 restarts, each with `ip neigh flush all` on fw0 +
-the LAN client. Client tcpdump captures the SYN-RTO signature; record the SYN's
-arrival ts and the T-timeline. **Pin the drop to exactly one window.** State the
-per-reason counter that incremented for the dropped SYN.
+**B-5. Correlate + pin + MEASURE THE GAP.** ≥7 restarts, each with `ip neigh
+flush all` on fw0 + the LAN client. Client tcpdump captures the SYN-RTO signature;
+record the SYN's arrival ts and the full T-timeline. **Pin the drop to exactly one
+window** via B-2's trace stage for the data-SYN 5-tuple. **Also record the actual
+not-ready gap** (T of the matching readiness producer − T_first-cold-SYN, e.g.
+T_XSK-registered − T_SYN for W-XSK, or T_ctrl-enabled − T_SYN for W-CTRL) — do NOT
+infer it from the ~1.007s RTO (SMR MINOR-3). The gap magnitude decides whether
+Path 1.C (event-driven enable) is needed (gap poll-dominated, ~hundreds of ms) or
+whether Path 1.A alone suffices (gap is the worker XSK-bind latency, ~ms).
 
 **B-6. Honesty gate (Gate-R precedent).** If the measurement shows the drop is
 NOT in a readiness gap that any §5 path can close (e.g. it is a kernel-side
