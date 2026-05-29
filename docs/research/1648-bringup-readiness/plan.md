@@ -1,16 +1,23 @@
 # #1648 — Dataplane bringup-readiness: first cold connect drops a single SYN (~1s RTO) after `systemctl restart`/deploy
 
-**Status:** v2 — research-only (`/research`, not `/engineer`). Gate-B
+**Status:** v3 — research-only (`/research`, not `/engineer`). Gate-B
 (cluster measurement) is the decider and runs FIRST. No production code, no PR.
-v2 folds r1: Codex PLAN-NEEDS-REVISION + AGY PLAN-NEEDS-MINOR + Claude SMR
-PLAN-NEEDS-MINOR. Three convergent corrections: (a) the XDP shim is `#![no_std]`/
-`#![no_main]` — Gate-B CANNOT use eprintln in the shim; it must use the existing
-`USERSPACE_TRACE` eBPF map for per-flow attribution; (b) the
-`maps_sync.go:597` "chicken-and-egg" comment is REFUTED — `Bound`/`XSKRegistered`
-are set inside the worker thread independent of RX, so gating Go's BPF READY on
-the helper's already-existing `XSKRegistered`/`Ready` is safe (Path 1.A is "use
-existing state," not "add a field"); (c) Path 1.B must require the SELECTED-QUEUE
-binding redirectable, not "one binding globally."
+v3 folds r2: Codex PLAN-NEEDS-REVISION + AGY PLAN-NEEDS-REVISION (both converged
+on the SAME critical blocker). The fix: the Gate-B throwaway shim must record
+ONLY drop/error trace stages (skip RECEIVED/REDIRECT) — otherwise the +1.007s
+retransmit (same 5-tuple → same trace key, last-writer-wins) OVERWRITES the
+dropped SYN's drop-stage trace before any dump can read it. Also: B-2 no longer
+claims the trace map pins all six windows (W-CTRL via timeline+`ctrl_disabled`
+counter; W-PASS-KERNEL via an up-front ingress-iface-miss counter); Path 1.A
+must update ALL four READY-write sites uniformly (primary `:596`, alias `:633`,
+watchdog `:1072/:1101`, watchdog-alias `:1122/:1145`); and AGY's crash-blind
+deadlock (finding C) is added as a bonus correctness argument for Path 1.A.
+
+v2 folded r1: (a) the XDP shim is `#![no_std]`/`#![no_main]` — no eprintln in the
+shim, use the `USERSPACE_TRACE` eBPF map; (b) the `maps_sync.go:597`
+"chicken-and-egg" comment is REFUTED, so gating Go's BPF READY on the helper's
+already-existing `XSKRegistered`/`Ready` is safe (Path 1.A = "use existing
+state"); (c) Path 1.B must require the SELECTED-QUEUE binding redirectable.
 **Branch:** `research/1648-bringup-readiness` (off origin/master @ `da88f1ab1`, incl. #1660 B3 merge)
 **Worktree:** `.claude/worktrees/1648-research-bringup`
 **Reviewers:** Codex + AGY + Claude SMR (3-way at /research; Copilot joins at /engineer)
@@ -71,7 +78,7 @@ artifact.
 
 ## 2. Architecture walk (verified against source, with file:line)
 
-### 2.1 The XDP shim is the entry program from the first packet
+### 2.1 The XDP shim is the entry program once the interface is up (first-packet coverage pending Gate-B Q1)
 
 `Manager.LoadUserspaceShim()` calls `SelectUserspaceXDPShimEntryProgram()`
 (`pkg/dataplane/loader.go:129`) and `CompileUserspaceShim()` calls it again
@@ -286,7 +293,28 @@ at `:746`, so the alias path carries the SAME W-XSK inversion and needs
 `XSKRegistered` too. The repair-only bindings watchdog (`verifyBindingsMapLocked`,
 `maps_sync.go:1101`, also `Registered && Armed`) runs only post-first-enable
 (`m.ctrlWasEnabled` gate `:1059`) so it does not affect the first-SYN window, but
-should get the same condition for consistency at /engineer time.
+MUST get the same condition for consistency (Codex r2 + AGY r2): leaving it on
+`Registered && Armed` would re-open the W-XSK race during a rebind/worker-restart.
+The uniform set of READY-write sites Path 1.A must update: primary
+(`:596`), VLAN-alias-child (`:633`), watchdog primary repair (`:1072/:1101`),
+watchdog alias repair (`:1122`/`:1145`).
+
+**Bonus correctness argument FOR Path 1.A (AGY r2 finding C — crash-blind
+deadlock):** today Go writes `userspaceBindingReady` on `Registered && Armed`,
+which are CONFIGURED target states, NOT live worker health. If a worker thread
+crashes or fails to bind (helper reports `Bound=false`, `XSKRegistered=false`,
+`Ready=false`), Go KEEPS writing READY → the shim keeps redirecting to the dead
+slot → silent permanent `REDIRECT_ERR`/`XDP_DROP` for all transit on that
+binding, with the control plane blind to the failure. Gating READY on the
+helper-reported `binding.Ready` fixes BOTH the first-SYN W-XSK race AND this
+latent crash-blind blackhole: a crashed worker immediately clears READY, letting
+traffic fail-closed and the health subsystem react. This strengthens the case for
+Path 1.A beyond the deploy-time symptom. (Verify at /engineer that clearing READY
+on a transient `Ready=false` does not flap during normal rebind — the
+`Ready=registered&&bound&&xsk_registered&&heartbeat_fresh` definition includes a
+heartbeat-freshness term that could flap if a worker is briefly stalled; the
+/engineer impl must confirm `Ready` is stable enough not to oscillate the BPF
+flag per poll.)
 
 **1.B — Enable ctrl / write READY only after the SELECTED-QUEUE binding for the
 ingress surface is redirectable (not "one binding globally").**
@@ -382,23 +410,40 @@ eprintln to journald; CLOCK_MONOTONIC ns, marker `BRINGUP-1648`):**
 - T_ctrl-enabled (maps_sync.go:692, ctrl.Enabled=1 commit — slog).
 - T_first-cold-SYN-arrives: see B-2.
 
-**B-2. Attribute the dropped SYN to one shim exit using the existing
-`USERSPACE_TRACE` eBPF map (PRIMARY attribution; eBPF-safe).**
-The shim already records a per-flow trace entry on every gate exit via
-`record_trace(...)` into `USERSPACE_TRACE` (`lib.rs:329-330,959-1004`), keyed on
-an avalanche hash of (ingress_ifindex, protocol, src_port, dst_port) and carrying
-`stage`, `reason`, `selected_queue`, `slot`, `vlan_id`, and the full 5-tuple.
-Enable it by setting `USERSPACE_CTRL_FLAG_TRACE` (bit 2) in `userspace_ctrl.flags`
-during the experiment (Go can set this in `applyHelperStatusLocked`/bootstrap, or
-a throwaway one-shot map write). Note: `binding_missing` and `early_filter` traces
-are FORCED regardless of the trace flag (`record_trace` `:969-972`), and ICMP is
-skipped (`:976`), so a TCP SYN is captured. After the restart + the dropped-SYN
-connect, dump `USERSPACE_TRACE` from Go (a throwaway readback over the pinned map
-`UserspaceTracePinPath`) and find the entry matching the iperf3 data-SYN 5-tuple
-(src=client:ephemeral, dst=172.16.80.200:5201). Its `stage`/`reason` field is the
-DEFINITIVE window pin: `BINDING_MISSING`(2)→W-BIND, `BINDING_NOT_READY`(3)→W-READY,
-`HEARTBEAT_MISSING`(4)/`HEARTBEAT_STALE`(5)→W-HB, `REDIRECT_ERR`(11)→W-XSK,
-`REDIRECT_ERR`(11)→W-XSK. **W-CTRL is NOT pinnable via the trace map** — when
+**B-2. Attribute the dropped SYN to the right window. The `USERSPACE_TRACE` eBPF
+map pins W-BIND/W-READY/W-HB/W-XSK ONLY; W-CTRL and W-PASS-KERNEL are pinned by
+the timeline + dedicated counters (the trace map does NOT cover all six
+windows).**
+The shim records a per-flow trace entry on gate exits via `record_trace(...)`
+into `USERSPACE_TRACE` (`lib.rs:329-330,959-1004`), keyed on an avalanche hash of
+(ingress_ifindex, protocol, src_port, dst_port) (`:999-1002`) and carrying
+`seq`(ktime), `stage`, `reason`, `tcp_flags`, `selected_queue`, `slot`, and the
+full 5-tuple.
+
+**CRITICAL — retransmit overwrite (Codex r2 + AGY r2 blocker, both verbatim
+agreed):** the first SYN (dropped) and the +1.007s retransmit (REDIRECT, the one
+that recovers) share the SAME 5-tuple → SAME `trace_key` → the trace insert is
+last-writer-wins (`USERSPACE_TRACE.insert(&trace_key, &value, 0)`, `:1003`). The
+successful retransmit's `USERSPACE_TRACE_STAGE_REDIRECT` (or `RECEIVED`, `:373`)
+entry OVERWRITES the dropped SYN's drop-stage entry before any post-hoc dump can
+read it. A naive "dump after the connect" reads the retransmit's REDIRECT and the
+drop evidence is erased. **Mandatory mitigation:** the throwaway Gate-B shim build
+must make `record_trace` write ONLY the drop/error stages
+(`BINDING_MISSING`/`BINDING_NOT_READY`/`HEARTBEAT_MISSING`/`HEARTBEAT_STALE`/
+`REDIRECT_ERR`) and early-return for `RECEIVED`/`REDIRECT` during the experiment,
+so the retransmit's success cannot clobber the first SYN's drop trace. (The `seq`
+field is a secondary discriminator but is insufficient alone — once overwritten
+the drop entry is gone; the write-only-drop-stages filter is the real fix.)
+
+Enable tracing by setting `USERSPACE_CTRL_FLAG_TRACE` (bit 2) in
+`userspace_ctrl.flags`. Note: `binding_missing` and `early_filter` traces are
+FORCED regardless of the flag (`:969-972`); ICMP is skipped (`:976`), so a TCP SYN
+is captured. After the restart + dropped-SYN connect, dump `USERSPACE_TRACE` from
+Go (throwaway readback over `UserspaceTracePinPath`) and find the entry whose
+stored 5-tuple matches the iperf3 data SYN (dst=172.16.80.200:5201). Its `stage`
+is the window pin: `BINDING_MISSING`(2)→W-BIND, `BINDING_NOT_READY`(3)→W-READY,
+`HEARTBEAT_MISSING`(4)/`HEARTBEAT_STALE`(5)→W-HB, `REDIRECT_ERR`(11)→W-XSK.
+**W-CTRL is NOT pinnable via the trace map** — when
 `ctrl.enabled==0` the shim takes the early return at `lib.rs:345-347` into
 `degraded_ctrl_disabled_action` (`:867`), which does NOT call `record_trace` (and
 the trace flag lives in `ctrl.flags`, moot while disabled). So W-CTRL leaves NO
@@ -438,13 +483,18 @@ W-PASS-KERNEL from the XDP-drop windows and decides Path 2.A viability. NOTE
 (Codex r1): the ingress-iface-miss pass path has no counter; a SYN that is
 PASS'd there leaves NO trace entry — so "no trace entry for the data SYN AND the
 shim was the entry program" is itself the signature of W-PASS-KERNEL via the
-ingress-iface gate. A throwaway counter at `lib.rs:366` (eBPF map increment, NOT
-eprintln) closes this gap if the no-trace case appears.
+ingress-iface gate. **Add the throwaway eBPF counter at `lib.rs:366` UP FRONT
+(Codex r2)** — an eBPF map increment (NOT eprintln) on the ingress-iface-miss
+pass path, so W-PASS-KERNEL is positively confirmed rather than inferred from the
+absence of a trace entry. Build it into the Gate-B throwaway shim from the start
+since W-PASS-KERNEL is a live candidate.
 
 **B-5. Correlate + pin + MEASURE THE GAP.** ≥7 restarts, each with `ip neigh
 flush all` on fw0 + the LAN client. Client tcpdump captures the SYN-RTO signature;
 record the SYN's arrival ts and the full T-timeline. **Pin the drop to exactly one
-window** via B-2's trace stage for the data-SYN 5-tuple. **Also record the actual
+window** via the B-2 decision tree (trace stage for W-BIND/W-READY/W-HB/W-XSK;
+timeline + `ctrl_disabled` counter for W-CTRL; no-trace + ingress-iface-miss
+counter for W-PASS-KERNEL). **Also record the actual
 not-ready gap** (T of the matching readiness producer − T_first-cold-SYN, e.g.
 T_XSK-registered − T_SYN for W-XSK, or T_ctrl-enabled − T_SYN for W-CTRL) — do NOT
 infer it from the ~1.007s RTO (SMR MINOR-3). The gap magnitude decides whether
