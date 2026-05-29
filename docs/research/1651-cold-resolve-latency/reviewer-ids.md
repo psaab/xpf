@@ -10,3 +10,8 @@ task-id so a continuation can `result <id>` instead of re-dispatching.
 
 ## Round N
 - (append per round)
+
+## Round 2 (plan v3)
+- Codex plan-review: task-mpr2kffx-2oi3s0
+- AGY adversarial plan-review: adversarial-review-mpr2kq48-576cue
+- Claude SMR: docs/research/1651-cold-resolve-latency/claude-smr-plan-r2.md (PLAN-READY)

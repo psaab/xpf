@@ -1,6 +1,6 @@
 # Plan of Action — #1651 cold-resolve latency (REOPENED)
 
-- **Revision:** v3 (Codex-r1 + AGY-r1 findings folded in)
+- **Revision:** v4 (Codex-r2 consistency fix: B3 disposition propagated to §0/§8/§11)
 - **Branch:** `research/1651-cold-resolve-latency`
 - **Base:** origin/master @ `a107e7489`
 - **Issue:** #1651 (reopened 2026-05-29 on operator feedback: *"it still
@@ -43,8 +43,13 @@ the `PENDING_NEIGH_TIMEOUT_FAST_NS = 800_000_000` ns drop
 (`forwarding_build/mod.rs:401`) firing because the host genuinely never
 ARP-replies.
 
-**Recommended disposition: Path C (do-nothing on the dataplane resolve
-mechanism) + one small, defensible lever if the user wants it (Path B1).**
+**Recommended disposition: Path C for the resolve *latency* (do-nothing on
+the dataplane resolve mechanism) + B3 (dead-host fast-fail / negative
+cache) as the one recommended shippable code change; B1 (netlink fd in the
+worker poll set) is optional ≤1 ms polish.** B3 is elevated because AGY-r1
+surfaced a real availability hazard: a dead-host SYN storm saturates the
+bounded `pending_neigh` queue (cap 4096, 800 ms hold) and starves LIVE cold
+connects (§6 Path B3, AGY-r1 HIGH).
 The headline "~1 s vs ~1 ms" framing is NOT reproducible for live targets
 on this cluster — live cold connect is already 1–9 ms. The only ~800 ms
 case is unreachable destinations, where ~800 ms-then-drop is arguably
@@ -434,7 +439,17 @@ on that topology as the gate.
 
 - Path C: none (close-out); the Gate-M' transcript in this doc is the
   evidence.
-- Path B1: re-run the §2 Gate-M' matrix before/after; assert the REDRIVE
+- **Path B3 (recommended deliverable):** add a unit/property test that a
+  dead-host (never-resolving) key is negatively cached so its
+  `pending_neigh` slot is freed / not re-occupied before the full timeout,
+  AND that a subsequent `RTM_NEWNEIGH` (or static/Go-push) for that key
+  invalidates the negative entry so a recovered host connects promptly
+  (the SMR-r2 short-TTL + monitor-invalidation caveat). Add a
+  queue-saturation test: a dead-host SYN storm must NOT drop a concurrent
+  live cold connect. Re-run the §2 Gate-M' matrix (live cells unchanged;
+  dead cells fail fast); `make test-failover`; full loss-cluster smoke
+  (v4+v6 × push/-R × CoS-off/on).
+- Path B1 (optional polish): re-run the §2 Gate-M' matrix before/after; assert the REDRIVE
   latency distribution shifts toward 0 and no behavioral regression; run
   `make test-failover` (touches the worker loop / poll set). Smoke on the
   loss userspace cluster (v4+v6 × push/-R × CoS-off/on per the standing
@@ -478,9 +493,10 @@ recommended.)
 
 | Gate-M' outcome | Disposition |
 |-----------------|-------------|
-| Live cells all 1–9 ms, DROP_TIMEOUT only on dead hosts (**OBSERVED**) | **Path C** (+ optional B1); KILL Path A; #1648 stays open |
+| Live cells all 1–9 ms, DROP_TIMEOUT only on dead hosts (**OBSERVED**) | **Path C for latency + B3 negative-cache as the recommended shippable change** (dead-host queue-starvation hazard, AGY-r1 HIGH); B1 optional polish; KILL Path A; #1648 stays open; spin off the 2 cache-correctness bugs |
 | Live cells show a reproducible ~1 s with DROP_TIMEOUT on a LIVE host | investigate why the live host's kernel resolve is slow; B1/B2 or Path A conditional |
 | Kernel resolve itself dominant (high-RTT next-hop) | Path A becomes viable; answer §6 hostile Qs first |
 | Slow ONLY post-restart | that is #1648, not #1651 |
 
-**Observed row: Path C (+ optional B1).**
+**Observed row: Path C for latency + B3 negative-cache (recommended
+shippable change); B1 optional.**
