@@ -1,6 +1,9 @@
 # #1651 — Native dataplane ARP/NDP active resolution — plan-of-action
 
-**Status**: DRAFT v1 — pending 3-way hostile review (Codex + AGY + Claude SMR).
+**Status**: v2 — revised after 3-way round-1 (Codex 2C/2H/1M, AGY, Claude
+SMR). v1 overstated "AF_PACKET RX cannot fix VLAN"; v2 retracts that, adds
+the shim XSK-redirect path, and promotes the ifindex key-mismatch to the
+lead §6 hypothesis. Three-way convergence on the ifindex-mismatch + Gate-M.
 **Base SHA**: `0e5bb3812` (origin/master @ 2026-05-28).
 **Research branch**: `research/1651-native-arp-resolution`. Docs only.
 **Scope**: research-only. STOP at PLAN-READY/KILL. No code, no PR.
@@ -24,12 +27,22 @@ building block.
    §4 "AF_PACKET `send_raw_frame` Silently Drops on VLAN Sub-Interfaces."
    The issue cites a tombstone as a live primitive.
 
-2. **The proposed "AF_PACKET RX tap, no shim change" was already tried and
-   abandoned** for the exact reason it is proposed (VLAN demux). See §3 +
-   §4 + Key Learnings 1–2 of that same doc. cpumap/XDP_PASS of ARP/NDP
-   replies on mlx5 zero-copy does not drive `vlan_do_receive()`, so the
-   reply never matches the VLAN sub-interface and the kernel entry sticks
-   in `INCOMPLETE`.
+2. **The AF_PACKET RX path on VLAN is UNCERTAIN, not dead** (v1 overstated
+   this; corrected per Codex CRITICAL-1). The cold-start doc §3/§4 evidence
+   is about AF_PACKET **TX** failure and **XDP_PASS/cpumap IP-stack demux**
+   failure — NOT AF_PACKET **RX with PROMISC**. In fact `docs/bugs.md:580,
+   591` documents an in-tree working counter-example: the VRRP receiver uses
+   `AF_PACKET SOCK_RAW + ETH_P_ALL + PACKET_MR_PROMISC + BPF filter` to
+   RECEIVE multicast on VLAN sub-interfaces, precisely because raw IP
+   sockets fail there (bugs.md:585: "AF_PACKET on VLAN sub-interfaces
+   requires PACKET_MR_PROMISC to receive multicast from remote peers").
+   **Caveat**: that VRRP path runs under *generic* XDP (`xdpgeneric`), where
+   AF_PACKET ptype_all taps fire before generic XDP. The WAN smoke iface is
+   *mlx5 native/zero-copy* XDP, where the program runs in the driver before
+   the skb ptype_all hook. An XDP_PASS'd ARP reply DOES enter the skb stack
+   and hit ptype_all, so an AF_PACKET PROMISC socket on the sub-iface MAY
+   still see it even when the kernel can't demux it to the sub-iface IP
+   stack — but this is genuinely unknown and is a Gate-M sub-measurement.
 
 3. **The on-link smoke target `172.16.80.200` is on VLAN 80**
    (`ge-0-0-2.80` / `ge-7-0-2.80`), the *exact* sub-interface class where
@@ -42,13 +55,18 @@ drop → client TCP RTO #1** path, which fires because the on-link host is on
 a VLAN sub-interface where the kernel ARP entry does NOT get learned in
 time (or at all on the first probe) due to the ZC-VLAN-demux gap.
 
-This reframes #1651 entirely. **This plan's recommendation hinges on a
-single measurement** (§3, §11 Gate-M): does on-link cold-resolve in the
-smoke env actually resolve in the kernel in <10ms (→ the SYN-survival /
-re-drive logic is the fix, a small tweak — and native resolution is
-**unnecessary**), or does it genuinely fail to resolve in the kernel
-(→ the VLAN-demux gap is the fix, which AF_PACKET RX *cannot* solve, so the
-native design as proposed is **PLAN-KILL** and the real fix is elsewhere)?
+This reframes #1651. **The recommendation hinges on Gate-M** (§3, §11): the
+lead hypothesis — converged on independently by all three reviewers (SMR
+OQ-3, Codex HIGH-2, AGY §4) — is an **ifindex key-mismatch**: the kernel
+learns the on-link neighbor in ~5ms but stores it (via netlink
+`parse_neighbor_msg`) under the *physical parent* ifindex, while
+`retry_pending_neigh` looks up under the *logical VLAN* `egress_ifindex`, so
+the buffered SYN never finds the resolved MAC and drops at the 800ms
+D-timeout → client TCP RTO #1 ≈ the observed 1.016s. If Gate-M confirms
+this, the fix is a ~5-line parent-ifindex fallback in the retry lookup and
+the native resolver is **unnecessary** (PLAN-KILL #1651-as-written, ship a
+focused re-drive fix). The native paths (§4/§5) are only authorized if
+Gate-M shows genuine kernel ARP latency on-link (the least likely outcome).
 
 This doc designs the native resolver fully (so /engineer can proceed if the
 measurement supports it), AND designs the measurement that gates it, AND
@@ -108,7 +126,7 @@ on-link VLAN case bypasses it.
 | Issue claim | Reality (origin/master) | Evidence |
 |---|---|---|
 | `send_raw_frame` via AF_PACKET at `neighbor.rs:29` is an existing primitive for raw ARP TX | No such function exists anywhere (`rg send_raw_frame` → only a dangling doc comment at `:29` + a stale mention at `:275`). It was built then **deleted**. | `rg -n send_raw_frame userspace-dp/`; cold-start doc §4 |
-| AF_PACKET RX tap "likely safer, no shim change" | Tried and abandoned: ZC-VLAN-demux drops it; `send()`/`sendto()` report success but frames never reach the wire on VLAN sub-ifaces | cold-start doc §3, §4, Key Learnings 1–2 |
+| AF_PACKET RX tap "likely safer, no shim change" | UNCERTAIN (v1 overstated as dead). AF_PACKET **TX** on VLAN failed; XDP_PASS/cpumap IP-stack demux failed. But AF_PACKET **RX + PROMISC** works on VLAN in-tree (VRRP receiver). The native-vs-generic-XDP ptype_all ordering for the smoke iface is a Gate-M question. | cold-start §3,§4 (TX); `docs/bugs.md:580,585,591` (RX counter-example) |
 | Probe re-fire schedule is 250ms | Schedule is **10/60/260 ms** | `neighbor_dispatch.rs:33` |
 
 ---
@@ -126,23 +144,35 @@ two mutually-exclusive root causes with **opposite** fixes:
   **Native ARP is unnecessary** — the fix is a small `pending_neigh`
   survival/timeout tweak (§6).
 
-- **Root cause B — kernel never learns the on-link neighbor in time
-  (VLAN-demux gap).** If the on-link host is on a VLAN sub-interface and the
-  ARP/NDP reply is silently dropped by the ZC-VLAN-demux path (cold-start
-  doc §3), the kernel entry sticks `INCOMPLETE`, no `RTM_NEWNEIGH` fires,
-  the SYN drops at D-timeout, and the client RTO #1 re-drives (by which
-  time a *second* kernel solicit + the warmer or retry has resolved it).
-  **AF_PACKET RX cannot fix this** — the reply still does not reach an
-  AF_PACKET socket on the VLAN sub-iface for the same kernel reason.
-  Native resolution as proposed is then a **PLAN-KILL**; the real fix is
-  the VLAN-demux delivery path (a shim/driver concern, out of #1651 scope).
+- **Root cause A′ — ifindex key-mismatch (the lead hypothesis).** A
+  specialization of A. The kernel resolves the on-link neighbor in ~5ms and
+  emits `RTM_NEWNEIGH`, but `parse_neighbor_msg` (`neighbor.rs:306,357`)
+  single-inserts into `dynamic_neighbors` under the **kernel-reported
+  ifindex**. For an XDP_PASS'd VLAN reply that the kernel demuxes to the
+  *physical parent* (`ge-0-0-2`, ifindex e.g. 5), that is the parent
+  ifindex — but `retry_pending_neigh` looks up `(egress_ifindex, hop)` with
+  `egress_ifindex` = the *logical VLAN* sub-iface (e.g. 12)
+  (`neighbor_dispatch.rs:118`). Miss → SYN waits → drops at 800ms → client
+  RTO. Notably the **passive XSK learn** (`learn_dynamic_neighbor`:320)
+  ALREADY dual-inserts the logical ifindex (`:328-344`), so the asymmetry is
+  **netlink-path-only**. Fix candidate: dual-insert / parent-fallback in the
+  netlink path or the retry lookup (~5 lines). **Native resolver
+  unnecessary.** All three reviewers converged here.
 
-The #1636 timeline (plan.md:165–178) and cold-start doc §6 ("ARP resolved
-in ~5ms") strongly suggest a **hybrid**: kernel resolution is fast on a
-*plain* interface, but the smoke target is on VLAN 80, so the smoke number
-reflects the VLAN gap (Root cause B), while a non-VLAN on-link host would
-already resolve fast (Root cause A path, already handled). The measurement
-(§11 Gate-M) must distinguish these on BOTH a plain and a VLAN egress.
+- **Root cause B — kernel never learns at all (VLAN-demux delivery gap).**
+  If the ARP/NDP reply is genuinely never delivered to the kernel L2 state
+  machine for the sub-iface (cold-start §3), the kernel entry sticks
+  `INCOMPLETE` and no `RTM_NEWNEIGH` fires. In this case a native path
+  COULD help IF it can receive the reply where the kernel cannot —
+  candidates: AF_PACKET PROMISC RX on the sub-iface (Path A, viability per
+  §4 / Codex CRITICAL-1) or shim XSK-redirect (Path B, §4.3). v1's claim
+  that "AF_PACKET cannot fix this" is RETRACTED — it is a Gate-M question.
+
+The #1636 timeline (plan.md:165–178) and cold-start §6 ("ARP resolved in
+~5ms") favor Root cause A′ (kernel resolves; userspace fails to find it).
+Gate-M must distinguish A′ vs B by instrumenting **which ifindex the kernel
+reports** and whether `RTM_NEWNEIGH` fires at all, on BOTH a plain and a
+VLAN egress.
 
 ---
 
@@ -166,6 +196,16 @@ branch only for the measurement run, discarded after):
 - Concurrent host-side captures on BOTH the firewall egress
   (`tcpdump -e -n -i ge-0-0-2.80 arp or icmp6` and the parent `ge-0-0-2`)
   and the target host, plus `ip -ts neigh show` polling at 1ms.
+- **The ifindex instrumentation (decides A′)**: log the `ifindex` field
+  the kernel reports in the `RTM_NEWNEIGH` for the resolved hop
+  (`neighbor.rs:306`) AND the `egress_ifindex` the retry looks up
+  (`neighbor_dispatch.rs:118`). If they differ for the VLAN case, A′ is
+  confirmed and the fix is the dual-insert/fallback.
+- **The AF_PACKET-PROMISC-RX probe (decides Path A viability for B)**:
+  bind a throwaway `AF_PACKET SOCK_RAW + ETH_P_ALL + PACKET_MR_PROMISC` +
+  ARP/ICMPv6-NA BPF filter to `ge-0-0-2.80` during the cold connect and
+  count whether it receives the reply. This directly answers Codex
+  CRITICAL-1 / the v1 retraction for the mlx5 native-XDP case.
 
 **Two scenarios, post `ip neigh flush all` on client + firewall:**
 - **S1 (VLAN egress)**: cold connect to `172.16.80.200` (VLAN 80) — the
@@ -178,15 +218,18 @@ branch only for the measurement run, discarded after):
 
 | Observed | Root cause | Implied fix | #1651 verdict |
 |---|---|---|---|
-| S1: T1 (kernel learn) lands <10ms, but T3 (drop) precedes T2 (re-drive); connect on RTO#1 | A (re-drive/timeout coupling) | §6 SYN-survival tweak ONLY | native ARP **unnecessary** → KILL-as-overkill |
-| S1: T1 never fires (no RTM_NEWNEIGH) within 800ms; reply seen on parent but not sub-iface | B (VLAN-demux gap) | shim/driver VLAN delivery (out of scope) | native AF_PACKET RX **cannot fix** → KILL-as-wrong-layer |
-| S2: kernel learn <10ms AND re-drive <15ms (already fast) | plain on-link already solved | none for plain; S1 is VLAN-specific | confirms problem is VLAN-only |
-| S1: kernel genuinely slow (>100ms) to resolve on-link even on parent capture | C (kernel ARP latency) | native resolver *could* help | the ONLY case that supports #1651 as written |
+| S1: kernel `RTM_NEWNEIGH` lands <10ms but under a DIFFERENT ifindex than the retry lookup; SYN drops at 800ms | **A′ (ifindex key-mismatch)** | netlink dual-insert / retry parent-fallback (~5 lines, §6) | native resolver **unnecessary** → **PLAN-KILL**, ship key fix |
+| S1: T1 lands <10ms, ifindex MATCHES, but T3 (drop) still precedes T2 (re-drive) | A (re-drive cadence) | event-driven wake on RTM_NEWNEIGH (§6) | native ARP **unnecessary** → KILL-as-overkill |
+| S1: T1 never fires within 800ms AND the AF_PACKET-PROMISC-RX probe ALSO receives nothing | B (delivery gap, native-blocked) | shim/driver VLAN delivery (out of scope) | native AF_PACKET RX cannot help → KILL-as-wrong-layer |
+| S1: T1 never fires BUT the AF_PACKET-PROMISC-RX probe DOES receive the reply | B (delivery gap, native-rescuable) | Path A (AF_PACKET PROMISC RX) or Path B (shim XSK-redirect) | native resolver **VIABLE** → conditional PLAN-READY for §4 |
+| S2: kernel learn <10ms AND re-drive <15ms (already fast) | plain on-link already solved | none for plain; problem is VLAN-specific | confirms VLAN-specific |
+| S1: kernel genuinely slow (>100ms) on-link even on parent capture | C (kernel ARP latency) | native resolver could help | supports #1651 as written |
 
-Only the last row supports building the native resolver as proposed.
-Given the cold-start doc's "ARP resolved in ~5ms" and the #1636 timeline,
-the last row is the least likely outcome. **The measurement is therefore a
-genuine kill-gate, not a formality.**
+Only the 4th and 6th rows support building the native resolver. Given
+cold-start §6 "ARP resolved in ~5ms" and the #1636 timeline, **A′ is the
+expected outcome** and the most likely verdict is PLAN-KILL-native +
+ship-the-key-fix. **The measurement is a genuine kill-gate, not a
+formality.**
 
 ---
 
@@ -247,6 +290,32 @@ cadence, not by the delivery mechanism. The "no netlink" framing does not
 buy measurable latency. **This is a core reason the design may not clear
 its own bar.**
 
+### 4.3 Path B — shim XSK-redirect (the AGY alternative)
+
+Rather than an AF_PACKET socket, modify the shim (`lib.rs:358` for ARP,
+`:492` for NDP) to **redirect** ARP replies / NDP NAs to the XSK ring
+instead of `XDP_PASS`/`cpumap`. Frames arrive in the worker RX ring with
+802.1Q tags intact; `classify_arp` / `parse_ndp_neighbor_advert`
+(`parser.rs:80,130`) already parse tagged frames, and
+`stage_link_layer_classify` (`poll_stages.rs:78`) already learns +
+`add_kernel_neighbor`-syncs. This sidesteps the kernel L2 demux entirely.
+
+**The serious objection (why this is not free):** the shim comment at
+`lib.rs:898` warns cpumap-redirect of ARP "breaks ARP neighbor resolution
+because the remote-CPU path does not drive the local L2 state machine."
+XSK-redirect is a different action than cpumap but has the same
+consequence — the **kernel never sees the reply**, so its neighbor table is
+never populated and slow-path/cpumap-reinjected traffic (ESP, NDP RS/RA)
+has no kernel entry. XDP has **no cheap clone** (`bpf_clone_redirect` is
+TC-only), so keeping the kernel warm requires the dataplane to re-program
+the kernel via `add_kernel_neighbor` RTM_NEWNEIGH after learning — which is
+exactly what `poll_stages.rs:92` already does on the XSK learn path. So
+Path B is workable (redirect → learn natively → netlink-sync the kernel),
+but it is a shim change: it re-enters BPF-verifier + per-packet-cost review
+(the redirect predicate runs on every non-IP / NDP frame) and must prove no
+steady-state regression. Path B is the most promising native option IF
+Gate-M shows Root cause B.
+
 ---
 
 ## 5. § IPv6 NDP design (full)
@@ -290,30 +359,59 @@ matters (VLAN).
 
 ---
 
-## 6. § Buffered-SYN survival (the likely-actual fix)
+## 6. § Buffered-SYN survival + ifindex key-mismatch (the likely-actual fix)
 
-If Gate-M shows Root cause A (kernel resolves fast, SYN dropped early), the
-fix is small and does NOT need native ARP:
+**Lead hypothesis (3-way convergence — SMR OQ-3, Codex HIGH-2, AGY §4):
+ifindex key-mismatch on the netlink learn path.**
 
-- **The drop at `neighbor_dispatch.rs:110` recycles the frame at D-timeout
-  (800ms).** If the kernel/native resolve lands at, say, 5ms but a *later*
-  poll missed it, raising survival is about ensuring the re-drive sweep
-  runs promptly after `RTM_NEWNEIGH` (it does, every 1ms) — so a true Root
-  cause A would already forward at ~6ms. **If it doesn't, that's the
-  bug to find** (e.g., the netlink learn updates `dynamic_neighbors` under
-  the *logical* ifindex but `retry_pending_neigh` looks up under the
-  *physical* egress ifindex, or vice versa — a key-mismatch). §11 Gate-M
-  T1-vs-T2 gap pinpoints this.
-- **Candidate tweak**: on `RTM_NEWNEIGH` for a hop that has a pending
-  packet, proactively wake the owning worker's retry (event-driven
-  re-drive) instead of relying on the 1ms poll. Marginal (<1ms) — only
-  worth it if the poll cadence is shown to be the gap.
-- **Do NOT lengthen D-timeout**: that regresses the SYN#2 path (#1636
-  §5.1 analysis — D=800ms is already the tuned optimum vs the kernel
-  NUD_FAILED at ~750ms).
+Mechanism, verified against code:
+- `parse_neighbor_msg` reads `ifindex` from the netlink body
+  (`neighbor.rs:306`) and `update_dynamic_neighbor`s a **single** entry
+  `(ifindex, ip)` (`:357`).
+- For an on-link VLAN host whose ARP reply is XDP_PASS'd, the kernel
+  resolves the entry on the **physical parent** (`ge-0-0-2`) because the
+  ZC→skb path doesn't drive `vlan_do_receive()` for the sub-iface
+  (cold-start §3) — so the `RTM_NEWNEIGH` carries the *parent* ifindex.
+- `retry_pending_neigh` looks up `(egress_ifindex, hop)` where
+  `egress_ifindex` is the **logical VLAN sub-iface** ifindex
+  (`neighbor_dispatch.rs:118`). Parent ≠ logical → `dynamic_neighbors.get`
+  misses → SYN stays queued → drops at the 800ms D-timeout → client TCP
+  RTO #1 (~1000ms) re-drives. **This reproduces the observed 1.016s exactly
+  and needs NO native resolver.**
+- **Asymmetry evidence**: the *passive XSK learn* (`learn_dynamic_neighbor`,
+  `:320`) ALREADY dual-inserts under both the ingress ifindex AND the
+  resolved logical ifindex (`:328-344`, "#949 multi-ifindex insert"). The
+  **netlink path does not** — it is single-insert. So the fix is to make the
+  netlink path symmetric, OR add a parent-fallback in the retry lookup.
 
-This section is the **most likely real deliverable** of #1651, and it is a
-~20-line change, not a native-resolver subsystem.
+**Candidate fix (~5–15 lines, two options):**
+1. *Retry-side parent-fallback* (AGY's sketch): in `retry_pending_neigh`,
+   after the `(egress_ifindex, hop)` miss, also try `(parent_ifindex, hop)`
+   where parent = the egress iface's bind/physical ifindex (resolvable via
+   `forwarding`'s egress/bind map — verify the exact field;
+   `resolve_tx_binding_ifindex` / the egress table exists at
+   `neighbor_dispatch.rs:215`).
+2. *Netlink-side dual-insert*: in `parse_neighbor_msg`, when the resolved
+   ifindex is a VLAN parent, also insert under the logical sub-iface(s) —
+   reusing the `learn_dynamic_neighbor` multi-ifindex logic. Cleaner
+   (symmetry with the passive path) but needs a parent→logical reverse map.
+
+**GATE**: this fix is only correct if Gate-M's ifindex instrumentation
+confirms the mismatch. If the ifindexes MATCH and the SYN still drops, the
+residual is re-drive cadence (below).
+
+**Secondary (only if ifindexes match):**
+- **Event-driven re-drive**: on `RTM_NEWNEIGH` for a hop with a pending
+  packet, wake the owning worker's retry instead of waiting for the 1ms
+  poll. Marginal (<1ms); only worth it if Gate-M shows the poll cadence is
+  the gap.
+- **Do NOT lengthen D-timeout**: regresses the SYN#2 path (#1636 §5.1 —
+  D=800ms is the tuned optimum vs kernel NUD_FAILED at ~750ms).
+
+This section is the **most likely real deliverable** of #1651: a focused
+~5–15-line ifindex/re-drive fix, NOT a native-resolver subsystem. If Gate-M
+confirms A′, #1651-as-written is PLAN-KILL and this ships as a new
+focused issue.
 
 ---
 
@@ -362,7 +460,10 @@ Replacing the kernel path is rejected outright.
 The dataplane already accepts ARP replies and NDP NAs it observes on the
 RX path (`stage_link_layer_classify`, `poll_stages.rs:79–113`) with NO
 validation today — it trusts any ARP reply / NA-with-TLLA on the ingress
-ifindex. A native solicit-then-accept path is **no worse** but should add:
+ifindex (Codex MEDIUM-1 concurs). A native solicit-then-accept path
+**MUST** add (mandatory, not optional); and these hardenings are
+independently shippable against the existing passive path even if #1651 is
+killed:
 - **ARP**: accept only replies whose `sender_ip == solicited target` AND
   `sender_ip` is on the egress iface's configured subnet (on-link check).
   Drop replies for IPs we did not solicit (track outstanding solicits in a
@@ -436,19 +537,25 @@ and pivot to §6 (or out-of-scope VLAN-demux).
 
 ## 12. Recommendation (provisional, pre-review)
 
-**Provisional PLAN-KILL-leaning**, pending Gate-M. The evidence on
-`origin/master` is that:
+**PLAN-KILL-leaning for the native resolver as written; PLAN-READY for the
+Gate-M measurement + the §6 ifindex/re-drive fix.** Pending the one bounded
+measurement. The evidence on `origin/master`:
 - The headline primitive (`send_raw_frame`) does not exist; it was deleted.
-- The proposed AF_PACKET RX-tap approach was already tried and abandoned
-  for the exact VLAN case that is the smoke target.
-- The on-link bottleneck is almost certainly the D-timeout-drop → TCP-RTO
-  path (Root cause A) or the VLAN-demux gap (Root cause B), neither of
-  which native ARP resolution fixes — A is fixed by a small §6 tweak, B is
-  a shim/driver layer concern outside #1651.
+  The issue cites a tombstone.
+- The lead hypothesis (Root cause A′, 3-way convergence) is an **ifindex
+  key-mismatch** on the netlink learn path that fully explains the 1.016s
+  with NO native resolver. The fix is ~5–15 lines (§6).
+- v1's "AF_PACKET RX cannot fix VLAN" is **retracted** (Codex CRITICAL-1):
+  AF_PACKET PROMISC RX works on VLAN in-tree (VRRP), and the shim
+  XSK-redirect (Path B, §4.3) is a real native alternative IF Gate-M shows
+  a genuine delivery gap (Root cause B) rather than A′.
 
-The honest path: **run Gate-M first.** If it confirms A/B (expected),
-PLAN-KILL #1651 as written and either (a) open a focused §6 SYN-survival /
-re-drive-key issue, or (b) confirm #1648's on-link warming is the pragmatic
-mitigation after all (do NOT close #1648 as superseded). Only if Gate-M
-shows genuine kernel ARP latency on-link (row 4) does the §4/§5 native
-resolver earn its complexity.
+**The honest path: run Gate-M first** (one bounded cluster step). Expected
+outcome (per cold-start §6 "ARP resolved in ~5ms" + the #1636 timeline):
+A′ confirmed → **PLAN-KILL the native resolver**, open a focused issue for
+the §6 ifindex/re-drive fix, and **do NOT close #1648 as superseded** (its
+on-link warming is orthogonal; keep it as a separate mitigation track).
+Only if Gate-M shows Root cause B-native-rescuable (row 4) or C (row 6)
+does the §4 (Path A or B) / §5 native resolver earn its complexity — and
+even then Path B (shim) is preferred over Path A (AF_PACKET) on the
+VLAN case, with the kernel-warm-via-netlink-sync caveat.
