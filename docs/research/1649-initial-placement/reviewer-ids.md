@@ -15,8 +15,10 @@ continuations can re-fetch by id rather than re-dispatch.
 - AGY: adversarial-review-mpqehy8u-aywovr (PLAN-READY) — saved agy-plan-r1.md
 - Claude SMR: claude-smr-plan-r1.md (PLAN-NEEDS-WORK → resolved in r2)
 
-## Round 2
+## Round 2 (CONVERGED — all three PLAN-READY on the KILL)
 
-- Codex: (pending — confirmation that §6/§7.0 addresses the residue counter-example)
-- AGY: (pending — confirmation r2 still PLAN-READY)
-- Claude SMR: claude-smr-plan-r2.md (pending)
+- Codex: codex exec read-only confirmation — VERDICT: PLAN-READY (kill correct) — saved codex-plan-r2.md
+- AGY: adversarial-review-mpqeu1la-c6tr50 — PLAN-READY (kill correct, rationale sound) — saved agy-plan-r2.md
+- Claude SMR: claude-smr-plan-r2.md — PLAN-READY (kill correct)
+
+Convergence SHA recorded at commit of r2-final.

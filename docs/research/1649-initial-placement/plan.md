@@ -233,17 +233,25 @@ are an effectively-random draw — the **same multinomial collision** as RSS, ju
 keyed differently. Monte-Carlo (200k trials, N=6 flows):
 
 ```
-P(6 flows all distinct residues, B=8 classes)   = 0.077   (only 7.7%)
-Mean bucket-count CoV (src_port mod 8, 6 flows)  = 1.05
-Mean bucket-count CoV (RSS uniform into 6)       = 0.87    <- residue is WORSE
+P(6 flows distinct over 8 residue classes)            = 0.077
+Mean CoV of the 8 residue-bucket counts (mod 8)       = 1.05
+Mean CoV if residues 6,7 fall through to RSS (6 queues)= 0.87  (≈ RSS)
+Mean CoV (RSS uniform into 6)                          = 0.87
 ```
 
-Residue steering is *worse* than default RSS here: 8 residue classes for 6
-queues wastes 2 classes (residues 6,7 fall through to default RSS), and a
-single weak field hashes worse than 4-field Toeplitz. **It does not beat the
-floor — it can move below it.** AGY's independent round-1 computation
-(P=6!/6^6 ≈ 1.54% perfect spread for the exact-hash variant) reaches the same
-multinomial conclusion: no *static* hash flattens N≤M for arbitrary src-ports.
+**General theorem (Codex r2):** any *static* mapping `f(5-tuple) → queue`
+produces i.i.d. queue draws with some fixed per-queue probability vector. A
+balanced vector gives exactly the RSS floor; an imbalanced one is worse. No
+static scheme — more residue classes, a wider hashed port field, or an
+RSS-context indirection-table layout — can create the **negative dependence**
+between flows that would be required to make N≤M flows *avoid already-occupied
+queues*. Only a per-flow decision that observes the current occupancy (i.e. a
+reactive controller = §5 re-steer) produces that negative dependence. So
+masked-residue steering is **same-as-RSS at best** (residues that map 1:1 to
+queues) or **worse** (the mod-8 layout that wastes 2 classes); it never beats
+the floor for uncontrolled src-ports. AGY's independent round-1 computation
+(P = 6!/6⁶ ≈ 1.54% perfect spread for the exact-hash variant) and Codex's r2
+mixture re-derivation both confirm.
 
 The residue mechanism beats the floor ONLY when the **generator deliberately
 assigns distinct residues** (e.g. `iperf3 --cport` stepping by 1 across 6
@@ -267,9 +275,13 @@ count. So for the realistic flow mix the mechanism cannot beat the floor.
   boot). Not load-bearing for the kill — the multinomial math is.
 - **HA failover:** the 6 residue rules must re-arm on the new primary's NIC
   (empty at takeover). Cheap (6 rules) but pointless given §7.0.
-- **mlx5 vs i40e:** moot — the loss-cluster dataplane is mlx5 on both nodes
-  (verified ge-0-0-1/2 on fw0, ge-7-0-1/2 on fw1); CLAUDE.md's "i40e PF
-  passthrough" is stale doc-drift for this cluster.
+- **mlx5-VF vs i40e-PF:** the loss-cluster dataplane is **mlx5_core SR-IOV VF**
+  on both nodes (worktree CLAUDE.md: ge-0-0-1 reth1.0 LAN, ge-0-0-2 reth0 WAN
+  VLAN 50/80, native XDP; fw1 mirrors as ge-7-0-1/2). The top-level CLAUDE.md
+  "i40e PF passthrough" describes the standalone VM, not this cluster — confirmed
+  doc-drift. All ethtool capability tests above ran on the actual mlx5 VF and
+  confirm the VF exposes the same ntuple ETHTOOL_SRXCLSRLINS path + 1024 cap
+  (VF flow-steering is NOT degraded vs PF here). i40e is not in the loss path.
 
 ## 8. Recommendation — PLAN-KILL
 
