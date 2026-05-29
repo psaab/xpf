@@ -385,12 +385,16 @@ Mechanism, verified against code:
   netlink path symmetric, OR add a parent-fallback in the retry lookup.
 
 **Candidate fix (~5–15 lines, two options):**
-1. *Retry-side parent-fallback* (AGY's sketch): in `retry_pending_neigh`,
-   after the `(egress_ifindex, hop)` miss, also try `(parent_ifindex, hop)`
-   where parent = the egress iface's bind/physical ifindex (resolvable via
-   `forwarding`'s egress/bind map — verify the exact field;
-   `resolve_tx_binding_ifindex` / the egress table exists at
-   `neighbor_dispatch.rs:215`).
+1. *Retry-side parent-fallback* (AGY's sketch — **building blocks
+   verified**): in `retry_pending_neigh`, after the `(egress_ifindex, hop)`
+   miss, also try `(parent_ifindex, hop)` where
+   `parent_ifindex = forwarding.egress.get(&egress_ifindex).bind_ifindex`.
+   `ForwardingState.egress: FastMap<i32, EgressInterface>`
+   (`types/forwarding.rs:36`) is keyed by the **logical** (VLAN sub-iface)
+   ifindex, and `EgressInterface.bind_ifindex` (`:133`) is the **physical
+   parent** the XSK binds to — exactly the ifindex the kernel reports for a
+   VLAN-resolved entry. So the fallback compiles and is semantically
+   correct.
 2. *Netlink-side dual-insert*: in `parse_neighbor_msg`, when the resolved
    ifindex is a VLAN parent, also insert under the logical sub-iface(s) —
    reusing the `learn_dynamic_neighbor` multi-ifindex logic. Cleaner
