@@ -1,6 +1,6 @@
 # External codebase review (2026-05-28) — triage + prioritized action plan
 
-**Revision**: r1
+**Revision**: r2 (converged — Codex + AGY + Claude SMR all PLAN-READY-WITH-NITS; nits folded)
 **Mode**: `/research` (research-only; STOP at PLAN-READY; no production code)
 **Source**: `/tmp/latest-review.md` (576 lines: §1 bugs/security 1.1–1.10, §2 modularization 2.1–2.11, §3 test-coverage gaps)
 **Verification base**: `origin/master` @ `0e5bb3812` (docs drift fixes #1639/#1644/#1645 via #1647)
@@ -34,7 +34,7 @@ loop_body have zero unit tests).
 | service.rs unreachable | 2 (451/617) | confirmed `"prepared CoS queues do not drain local mirror clones"` | contract guards |
 | dispatch unreachable | 1 (188) | confirmed `PendingForwardFrame::Prebuilt(_) => unreachable!()` | needs read |
 | `stage_flow_cache_hit` params | 22 | 21 counted (close) | real |
-| `worker_loop` params | 34 | ~37 — but it is the **thread-spawn entry**, called ONCE/worker, all `Arc` handles | misframed as "hot path" |
+| `worker_loop` params | 34 | 36 (Codex count) — thread-spawn entry, spawned once/worker from reconcile/bringup.rs:168/233, all `Arc` handles | misframed as "hot path" |
 | `Rc::get_mut().expect()` umem | line 107 | confirmed line 106–108 `.expect("single-owner umem")` | real but low-risk |
 | wg `.unwrap()` on locks | 10+ | 18 in engine.rs | real; **but wg not wired to hot path** |
 | `Result<_, String>` | 51 | 51 exactly | real, style |
@@ -58,12 +58,12 @@ loop_body have zero unit tests).
 | # | Finding | Classification | Evidence (origin/master) | Disposition |
 |---|---|---|---|---|
 | 1.1 | `unsafe` without `// SAFETY:` (~180) | **REAL-actionable (discipline, MINOR)** | mmap raw-ptr derefs in afxdp/poll_descriptor, tx/rings, frame/* | Documentation sweep, not a bug. Prior full-codebase review did NOT file as a bug. Worth a bounded "annotate hot-path unsafe" PR; low urgency. |
-| 1.2 | `unreachable!()` "in hot path match arms" | **INTENTIONAL-BY-DESIGN** (6 cos_classify + 2 service) / needs-verify (1 dispatch) | cos_classify.rs:488-494 etc match `Err(Prepared)` *after constructing `Local`* — the Local/Prepared asymmetry from #1207. service.rs:451/617 `"prepared CoS queues do not drain local mirror clones"` per #913 R4/#925 | These are believed-unreachable contract guards on a closed 2-variant enum, NOT a `#[non_exhaustive]` wildcard risk. Adding a variant is a compile error at the *construction* site too. Recommend: leave as-is; optionally add `// guard:` doc comments. dispatch/mod.rs:188 bare `unreachable!()` w/o message → tiny REAL nit (add message). |
+| 1.2 | `unreachable!()` "in hot path match arms" | **INTENTIONAL-BY-DESIGN** (6 cos_classify + 2 service) / needs-verify (1 dispatch) | cos_classify.rs:488-494 etc match `Err(Prepared)` *after constructing `Local`* — `enqueue_cos_item` returns the *same* `item` on early `Err` and never converts variants (cos_classify.rs:809/830). **Correction (AGY r1):** the 2 service.rs guards (451/617) match `ExactCoSScratchBuild` (a *3*-variant enum {Ready, Drop, MirrorTxFrameReserve}, queue_service/mod.rs:108), NOT `CoSPendingTxItem` — the prepared-drain path (drain.rs) never constructs `MirrorTxFrameReserve` (only local-drain at drain.rs:79 does), so the arm is structurally unreachable; the enum is still closed/exhaustively-matched so a new variant is a compile error. Per #1207 Local/Prepared asymmetry + #913 R4/#925. | The 6 cos_classify guards are believed-unreachable guards on the closed 2-variant `CoSPendingTxItem{Local,Prepared}` (cos.rs:1026); the 2 service.rs guards are believed-unreachable on the closed 3-variant `ExactCoSScratchBuild`. Neither is a `#[non_exhaustive]` wildcard risk. **Correction (Codex r1):** adding a 3rd variant does NOT break the *construction* site — the construction (e.g. cos_classify.rs:483) still compiles; it is the *exhaustive matches* elsewhere that fail to compile. The point stands: the compiler forces a sweep, the guard is not silently bypassed. Recommend: leave as-is; add `// guard:` doc comments. dispatch/mod.rs:188 bare `unreachable!()` w/o message → tiny REAL nit (add message + a one-line proof why `Prebuilt` cannot arrive there; note `PendingForwardFrame` is a *3*-variant enum so this is a data-flow assertion, not a 2-variant asymmetry). |
 | 1.3 | 22-/16-param functions | **REAL-actionable** (overlaps §2.3) | flow_cache_hit.rs:64 (21 params), poll_descriptor:440 (16) | Real testability blocker. Fold into the §2.4 poll_descriptor scratch-struct work; not a standalone bug. |
 | 1.4 | WG lock `.unwrap()` poisoning | **PARTIAL — misframed** | 18 in wg/engine.rs; wg has 0 references in poll_descriptor (NOT on hot path) | wg is the not-yet-wired #1432/#1434 module. A panic-poison crash is a real robustness concern *if/when wired*, but "crashes the dataplane hot path" is false today. Fold into #1432/#1434 hardening; do not file standalone. |
 | 1.5 | `Result<_, String>` (51) | **REAL-actionable (style, LOW)** | 51 confirmed | Typed-error refactor is legitimate cleanup but large surface, low urgency. Backlog candidate; not ship-blocking. |
 | 1.6 | Protocol constants duplicated | **REAL-actionable (QUICK WIN)** | 8 `const PROTO_TCP` sites | Centralize into one `pub(crate)` module. ~0.5d, low-risk. Good first action item. |
-| 1.7 | `Rc::get_mut().expect()` umem | **REAL but LOW-risk / arguably INTENTIONAL** | umem/mod.rs:106 `.expect("single-owner umem")` | The `.expect()` *is* the single-owner invariant assertion — `make_mut()` would silently clone the entire UMEM (catastrophic). The expect is correct fail-fast. Optionally add `debug_assert_eq!(strong_count,1)` for earlier detection. NEEDS-NO-FIX leaning. |
+| 1.7 | `Rc::get_mut().expect()` umem | **REAL but LOW-risk / arguably INTENTIONAL** | umem/mod.rs:106 `.expect("single-owner umem")`; `WorkerUmem = Rc<WorkerUmemInner>` (umem/mod.rs:47) | The `.expect()` *is* the single-owner invariant assertion. **Correction (Codex r1):** `make_mut()` is not even a drop-in — `WorkerUmemInner`/`MmapArea`/`Umem` are NOT `Clone` (mmap.rs:11, xsk_ffi.rs:317), so `make_mut` would not compile; the review's implied "switch to make_mut" is wrong on two counts (won't compile AND a clone would be catastrophic). Shared-UMEM clones use raw shared pointers, not mutable access (worker/mod.rs:916, bind.rs:380), so the `Rc` is genuinely single-owner here. The expect is correct fail-fast. Optionally add `debug_assert_eq!(strong_count,1)`. NEEDS-NO-FIX leaning. |
 | 1.8 | `#[allow(dead_code)]` on WG (~3500L) | **ALREADY-EXPLAINED (pending #1432/#1434)** | wg/mod.rs:28 `#![allow(dead_code)] // Most of this module is not yet wired` | Not dead — pending integration. event_stream/producer.rs:1 similar ("status surfaces consume only part"). Periodic `deny(dead_code)` CI gate is a reasonable suggestion but low ROI now. Relate to #1432/#1434; do not file. |
 | 1.9 | `clone()` in per-packet hot path | **MOSTLY FALSE-POSITIVE** | `SessionKey` (key.rs:9) derives `Clone` NOT `Copy`, contains `IpAddr` — **stack memcpy ~40B, no allocator call**. `flow_key`/`forward_key` clones are stack copies. The mirror `.to_vec()` (flow_cache_hit) is plan-killed #1545. | Per-tuple-key clones are not heap allocs; "10 Mpps × alloc" cost claim is wrong. `binding.interface.clone()` (:817) needs per-site check. Net: ~no real per-packet heap alloc here; the one real alloc (mirror to_vec) is PLAN-KILLED #1545. |
 | 1.10 | WG scratch `RefCell<Vec<u8>>` realloc | **PARTIAL — pending #1432/#1434** | scratch.rs:30 `vec![0u8; max_frame]` pre-sized to max_frame | Pre-sized to max frame; realloc only if a write exceeds max_frame (shouldn't happen). wg not wired. ArrayVec swap is reasonable hardening folded into #1432/#1434. Not standalone. |
@@ -74,7 +74,7 @@ loop_body have zero unit tests).
 |---|---|---|---|---|
 | 2.1 | `ForwardingState` god object | **REAL but OVERSTATED** | 44 fields (not 111), 349-line file (not ~500) | Decomp into RouteState/NatState/InterfaceState/ScreenState/CoSState has a LIVE consumer (independent unit testing of NAT/route/screen). Viable, but re-scope to the real 44 fields. Medium ROI. Note scaffolding-toward-dead-consumer risk: the sub-structs must be consumed by new tests, else low-value. |
 | 2.2 | `Coordinator` god object | **REAL** | 1458 lines; sub-managers (NeighborManager/SessionManager/WorkerManager/SharedCoSState) already exist | Incremental delegation continues #1189 Phase-1 pattern (shipped). Real but Phase-2 follow-ups were deferred; pursue only with a live test consumer. |
-| 2.3 | `worker_loop` 34 params | **REAL-actionable but MISFRAMED** | ~37 params; thread-spawn ENTRY (called once/worker), all Arc handles | "Makes hot path testable" is wrong — it's the spawn entry, not per-tick. Grouping Arc handles into config structs improves call-site readability (real win) but does NOT unlock hot-path unit testing. Re-scope the justification. |
+| 2.3 | `worker_loop` 34 params | **REAL-actionable but MISFRAMED** | 36 params (Codex count); thread-spawn ENTRY spawned once/worker (bringup.rs:168/233), all Arc handles | "Makes hot path testable" is wrong — it's the spawn entry, not per-tick. Grouping Arc handles into config structs improves call-site readability (real win) but does NOT unlock hot-path unit testing. Re-scope the justification. |
 | 2.4 | poll_descriptor 2906L stage extraction | **REAL, HIGH-VALUE** | 2906L confirmed; comment "blocked by mutable-locals coupling" | The genuine hot path. Scratch-struct extraction (mirror WorkerScratch) is the right pattern; this is where §1.3 (22-param fn) belongs. Highest-effort but highest test-unlock. |
 | 2.5 | checksum.rs L4Protocol trait | **REAL, MEDIUM** | 7 match sites (278/307/367/417/444/471/506) | Trait-based dispatch eliminates dup. Caution: trait dispatch must stay monomorphized/inlined (no dyn on hot path per engineering-style). Viable if `<P: L4Protocol>` generic, NOT `dyn`. |
 | 2.6 | filter/eval.rs v4/v6 generic | **REAL, MEDIUM** | 6 near-identical fn pairs | Generic over addr family. Same monomorphization caveat. |
@@ -122,12 +122,13 @@ Headline: **the test-coverage roadmap (§3) is the real prize.** Most §1 "CRITI
 **Tier A — bugs/correctness (small, do first)**
 1. §1.6 Centralize protocol constants (8→1) — 0.5d, low-risk QUICK WIN.
 2. §1.2 dispatch/mod.rs:188 — add a message to the bare `unreachable!()` (nit). Add `// guard:` doc comments to the 8 CoS contract-guard `unreachable!`s clarifying they are believed-unreachable on a closed enum (documentation, not behavior change).
-3. §1.1 Bounded SAFETY-comment sweep on the hottest afxdp/ unsafe blocks (poll_descriptor, tx/rings, frame/*). Discipline PR, no behavior change.
+3. §1.1 Bounded SAFETY-comment sweep — scope tightly to blocks doing **runtime-offset pointer arithmetic** (frame/headers, tx/rings, poll_descriptor mmap derefs) where an off-by-one is plausible; SKIP trivially-safe `repr(C)` POD transmutes. Discipline PR, no behavior change.
 
 **Tier B — test coverage (highest value)**
 4. §3.1 server/ control-plane tests (~20 tests) — pairs with §2.11 helpers split.
 5. §3.2 protocol/ binding/control/snapshot direct tests + round-trip (wire contract).
-6. §3.1 worker/loop_body harness — coordinate with §2.4 poll_descriptor scratch extraction (testability is gated on the refactor).
+6a. §3.1 worker/loop_body **integration harness now** (spin a binding, inject frames) — does NOT need the §2.4 refactor and gives the highest-criticality module coverage immediately.
+6b. §3.1 per-stage **unit** tests — gated on §2.4 poll_descriptor scratch extraction (per-stage testability requires the mutable-locals split first).
 7. §3.3 Add `proptest` for prefix_set/NAT/protocol round-trips; fuzz target for frame/inspect; document the 2 `#[ignore]`d queue_ops tests.
 
 **Tier C — refactors WITH a live consumer (medium, ROI-gated)**
@@ -139,7 +140,7 @@ Headline: **the test-coverage roadmap (§3) is the real prize.** Most §1 "CRITI
 **Tier D — backlog (low urgency)**
 12. §1.5 typed-error refactor (51 sites) — large surface, low risk, do incrementally.
 13. §2.2 Coordinator continued delegation (#1189 Phase-2).
-14. §2.10 cold_path_hist split — DEFER until #1635 (redesign) resolves to avoid churn.
+14. §2.10 cold_path_hist split — **BLOCKED on #1635** (redesign of this exact file). Do NOT touch cold_path_hist.rs until #1635 closes, or the split is thrown away.
 
 **Do NOT action**: §1.9 (stack-copy clones — false), §1.7 (correct fail-fast), §1.4/§1.8/§1.10 standalone (→ #1432/#1434), neighbor.rs:721 (doc comment), §1.9 mirror to_vec (#1545 killed).
 
