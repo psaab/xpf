@@ -10,4 +10,5 @@ Companions:
 
 | Round | Codex task-id | AGY task-id | Claude SMR doc | Verdicts |
 |-------|---------------|-------------|----------------|----------|
-| r1    | task-mpr8kuzq-r91m4a | adversarial-review-mpr8kvm9-jrcxvc | claude-smr-plan-r1.md | (pending) |
+| r1    | task-mpr8kuzq-r91m4a | adversarial-review-mpr8kvm9-jrcxvc | claude-smr-plan-r1.md | Codex NEEDS-REVISION / AGY NEEDS-MINOR / SMR NEEDS-MINOR |
+| r2    | task-mpr95o2f-s8p39f | adversarial-review-mpr95owr-8zip3v | claude-smr-plan-r2.md | (pending) |

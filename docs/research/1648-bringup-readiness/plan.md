@@ -278,6 +278,15 @@ the W-XSK redirect-Err drop is eliminated. **No new status field needed** (Codex
 r1). Cost: at most a one-poll-tick (≤1s) delay to first-READY — addressed by
 Path 1.C if Gate-B shows the gap is poll-dominated. Update the now-wrong inline
 comment at `maps_sync.go:597`.
+**Scope (Claude SMR r2):** the change must cover BOTH READY-write sites — the
+primary binding (`maps_sync.go:596`, currently `Registered && Armed`) AND the
+VLAN-alias-child binding (`maps_sync.go:634`, currently `Registered && Armed &&
+Bound`). Note `Bound` is set at `worker/mod.rs:328` BEFORE `set_xsk_registered`
+at `:746`, so the alias path carries the SAME W-XSK inversion and needs
+`XSKRegistered` too. The repair-only bindings watchdog (`verifyBindingsMapLocked`,
+`maps_sync.go:1101`, also `Registered && Armed`) runs only post-first-enable
+(`m.ctrlWasEnabled` gate `:1059`) so it does not affect the first-SYN window, but
+should get the same condition for consistency at /engineer time.
 
 **1.B — Enable ctrl / write READY only after the SELECTED-QUEUE binding for the
 ingress surface is redirectable (not "one binding globally").**
