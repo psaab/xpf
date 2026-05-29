@@ -1,6 +1,12 @@
 # #1648 — Dataplane bringup-readiness: first cold connect drops a single SYN (~1s RTO) after `systemctl restart`/deploy
 
-**Status:** v3.1 — research-only (`/research`, not `/engineer`). Gate-B
+**Status:** v3.1 — KILLED at /engineer Gate-B (2026-05-29). Gate-B pinned the
+single bringup transit drop to W-CTRL (not a closeable readiness gate) AND found
+the ~1.016s single-SYN-RTO symptom no longer reproduces on master (#1636/#1647);
+honesty kill-gate B-6 → Path 3 (accept/close), no code, no PR. See §10. The
+pre-kill convergence note follows for the record.
+
+**Pre-kill status:** v3.1 — research-only (`/research`, not `/engineer`). Gate-B
 (cluster measurement) is the decider and runs FIRST. No production code, no PR.
 **3-WAY CONVERGED at r3+v3.1: Codex PLAN-NEEDS-MINOR(folded) + AGY PLAN-READY +
 Claude SMR PLAN-READY.** v3.1 folds the sole Codex r3 minor: the drop-stages-only
@@ -576,11 +582,43 @@ v4+v6 push/-R smoke), before returning.
 5. Cost/benefit: is removing a single deploy-time RTO worth any change to the
    fail-closed bringup path (BPF-verifier + failover-budget risk)? (Path 3)
 
-## 10. Decision record (to be filled at convergence)
+## 10. Decision record (filled at /engineer Gate-B, 2026-05-29)
 
-- Gate-B pinned window: (pending Gate-B)
-- Chosen path: (pending)
-- Reviewer verdicts at convergence: (pending)
+**OUTCOME: PLAN-KILL the readiness-gate framing → Path 3 (accept/close).**
+
+Gate-B ran first on `loss:xpf-userspace-fw0/1` using the already-shipped pinned
+per-reason drop counters (`/sys/fs/bpf/xpf/userspace_fallback_stats`, read-only
+`bpftool`) + `userspace_ctrl.enabled` at ~30ms resolution + client tcpdump. No
+throwaway shim instrumentation was built — the cumulative per-reason counters
+already distinguish all six candidate windows and are immune to the retransmit-
+overwrite hazard (the successful retransmit takes the REDIRECT path and bumps no
+drop reason). `strings | grep BRINGUP-1648` = 0 on both nodes (no rebuild).
+
+- **Gate-B pinned window:** W-CTRL. Exactly one `transit_drop` (reason 15) per
+  bringup, co-incident with `ctrl_disabled` (reason 0); `redirect_err`
+  (reason 10, W-XSK) = 0, `binding_not_ready` (reason 3, W-READY) = 0,
+  `binding_missing` (reason 2, W-BIND) = 0, `heartbeat_*` (reasons 4/5, W-HB)
+  = 0 across all trials. ctrl flips 0→1 at restart+5.2–5.45s; the drop is in the
+  shim-attached/ctrl=0 window (`lib.rs:345`).
+- **Symptom not reproducible:** the issue's ~1.016s single-SYN-RTO does NOT
+  occur on current master (incl. #1636/#1647). 7/7 first-connect-after-restart
+  trials: 1 SYN, 0 retrans, SYN→SYN-ACK 0.3–6.0 ms. 5/5 settled-daemon cold:
+  1.3–4.5 ms. 3/3 single connects timed squarely into the ctrl=0 window: clean,
+  0 retrans. The ≤200ms acceptance gate is met by ~1000×.
+- **Why Path 1.A is rejected:** W-CTRL fires at the `ctrl.enabled==0` gate,
+  upstream of the binding-ready gate (`lib.rs:409`) that Path 1.A would tighten.
+  Path 1.A structurally cannot close a W-CTRL drop, and that single stray drop
+  (a stray transit packet, not the user flow) causes no observable RTO. Shipping
+  it would perturb the fail-closed bringup path (BPF-verifier + failover-budget
+  risk) for no measurable benefit.
+- **Chosen path:** Path 3 — accept + close. The latent crash-blind-blackhole
+  hardening (gate READY on helper-reported `binding.Ready` so a crashed worker
+  clears READY) is a real, separate correctness improvement — file it on its own
+  issue if pursued, NOT smuggled through #1648's deploy-time symptom.
+- **Reviewer verdicts at convergence:** /research was 3-way PLAN-READY; the
+  /engineer Gate-B honesty kill-gate (B-6) overrode the implementation path with
+  measured cluster evidence. No code changed; no PR opened. Cluster restored
+  healthy (both nodes active/converged; quick v4+v6 push/-R smoke clean).
 
 ## 11. Reviewer ledger
 
