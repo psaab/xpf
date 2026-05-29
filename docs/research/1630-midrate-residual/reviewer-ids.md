@@ -28,6 +28,25 @@ show origin/master:.../queue_service/mod.rs` has the waterfill dispatch
 at :608 and the fn at :771; the stale checkout has neither. v3 re-grounds
 on the waterfill selector (H-WATERFILL) and folds AGY #3/#4/#6.
 
+| r3 | Codex | codex exec (read-only sandbox), prompt /tmp/codex-1630-c2-r3.txt | **PLAN-NEEDS-MAJOR** (BLOCKING-1 — H-WATERFILL FALSIFIED: quantum_sum over STATIC configured exact set, full-config Phase-1 budget honors 3g/6g; MAJOR-1 Phase-2 lossiness unproven; MAJOR-2 F-W1 oversubscription gate underspecified) |
+| r3 | AGY | `adversarial-review-mpqcyavq-io08la` (succeeded; full result) | **PLAN-READY — REJECTED** (rested on a FALSE config assumption: "solo 3g ⇒ quantum_sum=75000"; the harness loads all 10 classes. Non-§1 findings valid.) |
+| r3 | Claude SMR | docs claude-smr-plan-r3.md | **PLAN-NEEDS-MAJOR → converge measurement-first** (concur Codex r3 B1; verified the harness loads full config so 3g/6g ARE Phase-1-honored; all 3 mechanisms now falsified; ship §5 measurement, defer fix) |
+
+## r3 convergence → v4 (measurement-first)
+
+Codex r3 BLOCKING-1 (H-WATERFILL falsified) + Claude SMR r3 concur =
+2-of-3 decisive PLAN-NEEDS-MAJOR against the v3 mechanism. AGY r3
+PLAN-READY rejected (false stripped-config assumption — verified the
+harness `load merge`s the full `cos-iperf-config.set`, so `quantum_sum`
+covers all 10 classes and the Phase-1 budget honors 3g/6g every epoch).
+
+**All three derived mechanisms (timer-wheel r1/r2, lease-target r2,
+waterfill-relegation r3) are now code-falsified.** No code-derived
+mechanism survives static analysis. v4 converges to a MEASUREMENT-FIRST
+plan: §5 instrumented bisection is the deliverable; the fix is deferred
+to whatever layer the four ratios name. This is PLAN-READY as a
+measurement plan, NOT as a fix.
+
 ## r1 convergence
 
 2-of-3 decisive PLAN-NEEDS-MAJOR (Codex + Claude SMR, both quoted-line
