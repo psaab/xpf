@@ -1,6 +1,6 @@
 # Plan of Action — #1651 cold-resolve latency (REOPENED)
 
-- **Revision:** v2 (SMR-r1 findings folded in)
+- **Revision:** v3 (Codex-r1 + AGY-r1 findings folded in)
 - **Branch:** `research/1651-cold-resolve-latency`
 - **Base:** origin/master @ `a107e7489`
 - **Issue:** #1651 (reopened 2026-05-29 on operator feedback: *"it still
@@ -145,13 +145,35 @@ dataplane monitor consumes as `29 => remove_dynamic_neighbor`
 the prior Gate-M's "retained stale entry" blind spot.
 
 **Truly-cold verification.** The proactive neighbor warmer
-(`coordinator/mod.rs:585 queue_warm_pass`) warms **route next-hops only**
-(gateways) — it iterates `routes_v4/_v6` `route.next_hop` (`:713-723`),
-skips already-resolved entries (`:651`), and is HA-RG-gated (`:656-663`).
-On-link /24 destinations are reached via a scope-link route with
-`next_hop = None`, so **arbitrary on-link host IPs are NOT pre-warmed** —
-my on-link host flushes were genuinely cold. Confirmed: the dataplane
-buffered each cold connect (`GATEM1651 QUEUE` fired).
+(`coordinator/mod.rs:585 queue_warm_pass`) warms **route next-hops AND
+fabric peers** (Codex-r1 MEDIUM correction) — it iterates `routes_v4/_v6`
+`route.next_hop` (`:713-730`) and `snapshot.fabrics` `(parent_ifindex,
+peer_addr)` (`:733`), skips already-resolved entries (`:651`), and is
+HA-RG-gated (`:656-663`). On-link /24 destinations are reached via a
+**scope-link route with `route.next_hop = None`** (the connected-route
+path sets `next_hop` to the destination host itself only at forwarding
+time, `forwarding/mod.rs:1220,1231` — the warmer iterates `route.next_hop`,
+NOT connected-route destinations). So **arbitrary on-link host IPs are NOT
+pre-warmed** (AGY-r1 confirmed this independently: "CONFIRMED IMMUNE"), and
+the tested on-link hosts were neither route next-hops nor fabric peers.
+My on-link host flushes were genuinely cold. Confirmed: the dataplane
+buffered each cold connect (`GATEM1651 QUEUE` fired). This is load-bearing:
+`lookup_neighbor_entry` checks static/Go-pushed `forwarding.neighbors`
+BEFORE `dynamic_neighbors` (`forwarding/mod.rs:1529`), so if a Go-push or a
+stale `dynamic_neighbors` had warmed the path, `MissingNeighbor` would not
+have fired at all — the `QUEUE` event proves the path was cold for those
+trials.
+
+**Raw counter snippets (Codex-r1 LOW — representative lines):**
+```
+GATEM1651 QUEUE   t=… egress_if=14 next_hop=Some(172.16.80.200) qlen=1
+GATEM1651 REDRIVE t=… queued=… latency_us=0   egress_if=14 next_hop=Some(172.16.80.200) attempts=0
+GATEM1651 REDRIVE t=… queued=… latency_us=403 egress_if=14 next_hop=Some(172.16.80.200) attempts=0
+GATEM1651 DROP_TIMEOUT t=… queued=… held_us=800740 egress_if=14 next_hop=Some(172.16.80.137) attempts=3
+```
+`egress_if=14` = the logical VLAN ifindex (ge-7-0-2.80), not the physical
+parent (6) — reconfirming no ifindex key-mismatch (the prior research's
+dead lead).
 
 **Active owner discipline.** The cluster's active RG owner moved between
 nodes during the session (restarts trigger failover). All latency cells
@@ -282,10 +304,28 @@ netlink-multicast → monitor-learn round-trip.
     `PROBE_SCHEDULE_NS` already does for the kernel path).
   - VLAN demux on TX/RX in zero-copy mode (the historical reason the
     XDP_PASS reinject was abandoned — `poll_descriptor/mod.rs:2640-2643`).
+- **AGY-r1 CRITICAL — CAP_NET_RAW dependency (reframed, NOT a showstopper
+  for this product):** `trigger_kernel_arp_probe` opens a `SOCK_RAW`
+  socket (`neighbor.rs:42,75`); under a hardened cap-dropped deployment
+  (no `CAP_NET_RAW`) the socket fails `EPERM`, the function silently
+  returns (`:43-44,:76-77`), no probe fires, and every cold connect would
+  block until the 800 ms/2 s drop. **Reality check (SMR):** xpfd runs as
+  **root** on the firewall appliance — it owns ALL interfaces, attaches
+  XDP, opens AF_PACKET/AF_NETLINK/SOCK_RAW sockets, and writes netlink
+  routes. It already requires `CAP_NET_ADMIN` + `CAP_NET_RAW`; it is NOT a
+  cap-dropped container workload. So the CRITICAL is hypothetical for the
+  shipped deployment model. **However**, AGY's underlying point stands as
+  a genuine *robustness argument for Path A*: active XSK-TX resolution does
+  not need a per-probe `SOCK_RAW` syscall (the AF_XDP socket is bound once
+  by the privileged coordinator), so Path A is strictly more robust if the
+  product ever moves to a cap-constrained model. Documented as an
+  assumption + a Path-A pro, not a Path-C blocker.
 - **Recommendation:** **conditional KILL.** Only revisit if the user
   produces a reproduction (i40e PF-passthrough standalone VM, or a
   high-RTT WAN next-hop) where the *kernel resolve itself* is the
-  dominant multi-hundred-ms term. On the supported smoke cluster it
+  dominant multi-hundred-ms term, OR if the product moves to a
+  cap-dropped deployment (then Path A becomes the resolution mechanism,
+  not just a latency optimization). On the supported root smoke cluster it
   solves a non-problem.
 
 ### Path B — Cheaper levers
@@ -319,6 +359,20 @@ netlink-multicast → monitor-learn round-trip.
     short-circuits hosts that *already* failed to resolve).
   **This is a real, scoped option — not pre-dismissed.** Whether to ship
   it depends on the operator's answer to the §10 reachability question.
+- **B3 is ELEVATED by AGY-r1 HIGH (dead-host queue-starvation DoS).**
+  `pending_neigh` is capped at `MAX_PENDING_NEIGH = 4096` (`mod.rs:342`);
+  full-queue connects are dropped without buffering or probing
+  (`poll_descriptor/mod.rs:2644` gate). With the 800 ms hold, a sustained
+  ~5,120 dead-host SYN/s (a port scan, a failover storm, or a subnet of
+  down hosts) keeps the queue saturated and **starves LIVE cold connects**
+  — they get dropped at the full-queue gate. This is a genuine
+  availability hazard independent of the operator's perceived latency, and
+  it makes a fast-fail negative cache (so dead hosts free their queue slot
+  quickly / never re-occupy it) the strongest single defensible change in
+  this whole issue. **Verdict: B3-negative-cache moves from "optional" to
+  "recommended if the user wants any code shipped from #1651."** It does
+  not regress the live-but-slow case (it only short-circuits hosts that
+  already failed to resolve within the timeout).
 
 ### Path C — Do nothing on the resolve mechanism
 Gate-M' shows live cold connect is already 1–9 ms. Close #1651 as
@@ -338,9 +392,32 @@ unreachable. This one question routes the disposition: reachable+slow on a
 different topology → re-measure there (possibly Path A); unreachable →
 Path B3; reachable+fast everywhere → Path C close.
 
-**Primary (given the loss-cluster evidence): Path C** (do-nothing on the
-resolve mechanism), because the operator's "long time" does not reproduce
-for live targets here and the only slow path is dead-host behavior.
+**Primary (given the loss-cluster evidence): Path C** for the *resolve
+latency* (live cold connect is already 1–9 ms; the "~1 s" does not
+reproduce for reachable destinations) — **paired with B3
+(dead-host fast-fail / negative cache)** as the one code change worth
+shipping, because AGY-r1 surfaced a real availability hazard (dead-host
+SYN storm starves the bounded `pending_neigh` queue and blocks live cold
+connects). B3 is the highest-value, lowest-risk deliverable from this
+issue and is the right answer if the operator's "slow new connections"
+are to intermittently-unreachable hosts.
+
+**Spin-off issues (out of #1651 scope — file separately, AGY-r1
+findings 3 & 4):** these are latent neighbor-cache *correctness* bugs,
+not cold-resolve *latency*:
+- **dynamic-neighbor leak on `update_neighbors` replace**
+  (`coordinator/mod.rs:148-178`): a netlink-monitor-learned entry in
+  `dynamic_neighbors` is never added to `manager_keys`, so a Go-push
+  `replace=true` cannot evict it — a dropped `RTM_DELNEIGH` becomes a
+  permanent stale entry (blackhole risk).
+- **Rust netlink monitor socket lacks `SO_RCVBUF` tuning**
+  (`neighbor.rs:505-513` sets only `SO_RCVTIMEO`), unlike the Go listener's
+  1 MiB buffer (`daemon_neighbor_listener.go:132`) — a bulk
+  `ip neigh flush` burst can overflow and drop `RTM_DELNEIGH`, feeding the
+  leak above.
+  These deserve their own tracking issue; they do not change the #1651
+  latency conclusion (and did not perturb Gate-M', which used
+  modest-size flushes and verified `Deleted` events were observed).
 
 **Optional polish if the user wants a defensible latency win: Path B1**
 (monitor-fd in the worker poll set), accepting that the measured headroom
