@@ -1,7 +1,7 @@
 # Research plan — #1649 Per-flow evenness via better INITIAL placement (no mid-flight re-steer)
 
-- **Revision**: r1 (DRAFT — pre first reviewer round)
-- **Status**: DRAFT → awaiting Codex + AGY + Claude SMR round 1
+- **Revision**: r2 (post round-1: Codex PLAN-NEEDS-WORK, AGY PLAN-READY, Claude SMR PLAN-NEEDS-WORK)
+- **Status**: PLAN-KILL (rationale re-grounded on the multinomial argument; verdict unchanged from r1, mechanism analysis corrected)
 - **Skill**: `/research` (research-only; stop at PLAN-READY or PLAN-KILL; no code; docs only)
 - **Issue**: #1649 (label `perf`)
 - **Worktree**: `.claude/worktrees/1649-research-initial-placement`, branch `research/1649-initial-placement`
@@ -123,7 +123,9 @@ exec overhead but NOT the ~1.1 ms firmware programming.
 (set by HW RSS or ntuple) → `select_userspace_queue()` → `binding.slot` →
 `USERSPACE_XSK_MAP.redirect(binding.slot, 0)`. Each AF_XDP socket is bound to
 `ifname:queue_id` (`xsk_ffi.rs`, `bind.rs:82` `info.set_queue(binding.queue_id)`).
-**RX queue N ⇒ worker N, deterministically.** So an ntuple rule pinning a
+**The binding is queue-bound and deterministic: RX queue N ⇒ the worker whose
+XSK is bound to queue N** (the slot layout is stable per interface; HA/interface
+changes re-derive it). So an ntuple rule pinning a
 5-tuple to RX queue N delivers every packet of that flow to worker N. The lever
 is real and direct. `userspace-xdp/src/lib.rs:1322`: "AF_XDP delivery is
 queue-bound … redirect to a socket bound to a *different* queue silently
@@ -193,60 +195,106 @@ connection-accept case.
 HW-RSS means the FIRST packet's placement is owned by RSS, and any correction is
 by definition a re-steer.**
 
-## 6. Mechanism (if any path survived §5)
+## 6. Mechanism — the one non-reactive mechanism that exists: masked source-port-residue
 
-The ONLY non-re-steer use of ntuple is **structural pre-partitioning that does
-NOT depend on per-flow identity** — e.g. pinning a *destination-port* or
-*subnet* class to a queue subset. That is coarse (not per-5-tuple), helps only
-when the workload's flows differ in the pinned field, and does NOT address the
-N-into-M multinomial collision for flows that share dst-port (the iperf P=6
-case has identical dst-port 5210 → all 6 flows hash on src-port only → the very
-collision we cannot pre-partition without knowing src-port, which is ephemeral).
-No viable per-flow non-re-steer mechanism exists.
+There IS a non-reactive, non-re-steer ntuple mechanism (round-1 Codex
+counter-example, confirmed on the hardware): **masked source-port-residue
+rules**. Install once at boot, before any SYN:
+
+```
+$ ethtool -K ge-0-0-2 ntuple on
+$ ethtool -N ge-0-0-2 flow-type tcp4 src-port 0 m 0xfff8 dst-port 5210 m 0x0000 action 0
+  Added rule with ID 1023
+$ ... src-port {0..5} m 0xfff8 -> queue {0..5}   # 6 rules, all accepted
+  Filter: Src port: 0 mask: 0xfff8  ->  matches (src_port & 0x0007) == 0
+```
+
+mlx5 accepts masked src-port rules (verified). These six rules partition the
+**future** src-port space by `src_port & 0x07` (low 3 bits) → RX queue. Because
+a flow's src-port is fixed for its lifetime, the flow's queue never changes:
+this is **genuinely not a re-steer** and **not reactive** — it does not need to
+know the ephemeral port in advance, it classifies by residue. RSS-context
+(`ethtool -X context` + a wildcard rule steering dst-port 5210 into the context)
+is a second variant of the same idea (a static per-class hash). r1 §6 wrongly
+claimed "no viable per-flow non-re-steer mechanism exists" — corrected here.
+
+The kill is therefore NOT "no mechanism exists." The kill is that this mechanism
+**relocates the multinomial draw without flattening it** for realistic traffic
+(§7.0).
 
 ## 7. Honest viability (falsify the design)
 
-- **Beats the floor?** Only via re-steer (forbidden) per §5; the one
-  non-re-steer lever (port/subnet pre-partition) does not apply to the
-  same-dst-port iperf workload that defines the symptom.
-- **Even if re-steer were allowed (it is not):** #1203 already measured
-  49-55% at P=12 — placement flattening does not beat the floor when N>M,
-  because within-queue scheduling dominates. The N≤M 3.8% Phase-0 number is
-  real but only reachable by *deterministic pre-assignment* (knowing the port
-  map in advance) — not by a reactive controller, which is back to §5's
-  re-steer.
-- **Capacity:** 1024 rules (measured), not 32k. Past 1024 long-lived flows →
-  RSS floor. Acceptable for ≤K elephants, irrelevant given §5/§6.
-- **Per-rule cost:** ~1.1 ms firmware + ~4 ms exec. At any real connection rate
-  (10K conn/s) this is fatal even before §5; even at the elephant-only rate it
-  adds setup latency and a 1 Hz control loop's worth of complexity for no win.
-- **HA failover:** ntuple rules are NIC-local; the new primary's NIC starts
-  empty. Re-arming per-RG on failover is extra cost + a correctness surface
-  (rules referencing evicted sessions), all for a mechanism that does not beat
-  the floor.
-- **mlx5-VF vs i40e-PF asymmetry:** moot — both the FW dataplane and the #1615
-  flooder are mlx5 here; production parity is mlx5; i40e is not in this path.
+### 7.0 The load-bearing kill: residue steering relocates the multinomial, does not flatten it
+
+The §6 residue mechanism is a *different hash* (1 field: low-3-bits of src-port)
+substituted for the NIC's *4-field Toeplitz*. For any workload whose clients use
+**ephemeral src-ports** (iperf3 default; every production client), the residues
+are an effectively-random draw — the **same multinomial collision** as RSS, just
+keyed differently. Monte-Carlo (200k trials, N=6 flows):
+
+```
+P(6 flows all distinct residues, B=8 classes)   = 0.077   (only 7.7%)
+Mean bucket-count CoV (src_port mod 8, 6 flows)  = 1.05
+Mean bucket-count CoV (RSS uniform into 6)       = 0.87    <- residue is WORSE
+```
+
+Residue steering is *worse* than default RSS here: 8 residue classes for 6
+queues wastes 2 classes (residues 6,7 fall through to default RSS), and a
+single weak field hashes worse than 4-field Toeplitz. **It does not beat the
+floor — it can move below it.** AGY's independent round-1 computation
+(P=6!/6^6 ≈ 1.54% perfect spread for the exact-hash variant) reaches the same
+multinomial conclusion: no *static* hash flattens N≤M for arbitrary src-ports.
+
+The residue mechanism beats the floor ONLY when the **generator deliberately
+assigns distinct residues** (e.g. `iperf3 --cport` stepping by 1 across 6
+streams). That is exactly the Phase-0 "deterministic per-port-mod → 3.8% CoV"
+result: a **controlled-test-harness artifact**, not a property of real traffic.
+Production clients never coordinate src-port residues with the firewall's queue
+count. So for the realistic flow mix the mechanism cannot beat the floor.
+
+### 7.1 Secondary nails (not load-bearing, but corroborating)
+
+- **#1203 prior art:** the reactive closed-loop form already measured 49-55% at
+  P=12, closed with "per-flow CoV is bounded by within-queue scheduling, not
+  placement" — confirming placement-only can't fix N>M.
+- **Capacity:** 1024 rules (measured) = mlx5 driver `MLX5E_ETHTOOL_FLOW_SPEC_NUM`
+  (AGY-verified), not the 32k #1203 assumed. Residue steering needs only 6-8
+  rules, so capacity is NOT the binding constraint for residue (it is for an
+  exact-5-tuple controller, which §5 already kills).
+- **Per-rule cost (DEMOTED per round-1):** ~1 ms-class firmware-synchronous
+  command per ethtool insert. Fatal for an exact-5-tuple-per-flow controller at
+  real conn rates; **irrelevant for the residue mechanism** (6 static rules at
+  boot). Not load-bearing for the kill — the multinomial math is.
+- **HA failover:** the 6 residue rules must re-arm on the new primary's NIC
+  (empty at takeover). Cheap (6 rules) but pointless given §7.0.
+- **mlx5 vs i40e:** moot — the loss-cluster dataplane is mlx5 on both nodes
+  (verified ge-0-0-1/2 on fw0, ge-7-0-1/2 on fw1); CLAUDE.md's "i40e PF
+  passthrough" is stale doc-drift for this cluster.
 
 ## 8. Recommendation — PLAN-KILL
 
 The #937-named hardware prerequisite (exact-5-tuple→queue steering) **exists**
-on the deployed mlx5 NIC, which is the new fact this research contributes. But:
+on the deployed mlx5 NIC, and so does a genuinely **non-reactive, non-re-steer**
+mechanism — masked src-port-residue rules (§6). These are the new facts this
+research contributes. The kill stands anyway, on the multinomial math:
 
-1. **Reactive flow-setup placement is structurally a re-steer** (§5) — the SYN
-   is RSS-placed before any rule can exist, so every correction moves an
-   established flow. That is the forbidden killed pattern, not a fresh angle.
-2. **#1203 already built + measured the closed-loop form on this cluster**
-   (49-55% CoV at P=12) and was closed with the convergent structural verdict
-   that **per-flow CoV is bounded by within-queue scheduling, not placement**
-   for N>M. #1649's only fresh sub-case (N≤M) is reachable in a hand-experiment
-   (3.8%) but ONLY via deterministic pre-assignment, which a reactive controller
-   cannot do without re-steering.
-3. **Capacity (1024, not 32k) and cost (~1.1 ms/rule)** further bound it to a
-   narrow long-lived-elephant case that does not match the same-dst-port iperf
-   symptom.
+1. **The non-reactive residue mechanism does not beat the floor for realistic
+   traffic** (§7.0) — for client-assigned ephemeral src-ports it is the same
+   (or worse) multinomial draw as RSS (CoV 1.05 vs RSS 0.87 at N=6). It beats
+   the floor only when the *generator* coordinates src-port residues with the
+   queue count, which is a controlled-harness artifact (the Phase-0 3.8%), not a
+   production-traffic property.
+2. **Reactive exact-5-tuple placement is structurally a re-steer** (§5) — the
+   SYN is RSS-placed before any exact rule can exist, so every correction moves
+   an established flow (the forbidden killed pattern). aRFS, dynamic RSS-context
+   reweighting, and tc-flower wildcard all reduce to this or to the static hash
+   of point 1 (round-1 reviewers confirmed; no falsifying primitive found).
+3. **#1203 already built + measured the reactive closed-loop form on this
+   cluster** (49-55% CoV at P=12), closed with "per-flow CoV is bounded by
+   within-queue scheduling, not placement" for N>M.
 
-There is no initial-placement-only mechanism that beats the floor for the
-realistic flow mix without re-steering. **PLAN-KILL.**
+No initial-placement-only mechanism beats the floor for the realistic flow mix.
+**PLAN-KILL.**
 
 ## 9. PLAN-KILL deliverable — document the floor curve
 
@@ -257,9 +305,14 @@ On kill, add to `docs/fairness-regimes.md`:
   it; include the closed-form multinomial CoV for N=2..24 at M=6) so the
   bimodal unevenness is documented as expected, not a bug.
 - A new **"Why HW ntuple steering does not help"** subsection citing: (a) this
-  research's capability findings (mlx5 supports it, cap 1024, ~1.1 ms/rule);
-  (b) the §5 reactive-is-a-re-steer argument; (c) the #1203 empirical
-  49-55% result and its within-queue-scheduling verdict.
+  research's capability findings (mlx5 supports exact AND masked steering,
+  cap 1024 = `MLX5E_ETHTOOL_FLOW_SPEC_NUM`, ~1 ms-class firmware/rule);
+  (b) the **multinomial result** — masked src-port-residue is a static hash on
+  the same (or worse) floor for ephemeral ports (CoV 1.05 vs RSS 0.87 at N=6),
+  beating the floor only with generator-coordinated src-ports (harness
+  artifact); (c) the §5 reactive-exact-5-tuple-is-a-re-steer argument;
+  (d) the #1203 empirical 49-55% result and its within-queue-scheduling verdict.
+  Pre-empt the "couldn't we just steer by port?" question explicitly.
 - Cross-link #1649, #1203/#789, #840, #937 so the next person who sees the
   bimodal iperf output finds the closed rationale immediately.
 
@@ -269,19 +322,29 @@ On kill, add to `docs/fairness-regimes.md`:
 |------|---------|
 | Reactive per-5-tuple ntuple at first SYN | KILL — §5, it is a re-steer |
 | Proactive per-5-tuple ntuple | Impossible — future ports unknowable |
-| dst-port / subnet pre-partition (non-re-steer) | No win for same-dst-port symptom (§6) |
+| **Masked src-port-residue ntuple (non-reactive, non-re-steer)** | **Real mechanism (verified on NIC), but a static 1-field hash: same/worse multinomial as RSS for ephemeral ports (CoV 1.05 vs 0.87 at N=6); beats floor only with generator-coordinated src-ports = harness artifact (§7.0). KILL.** |
+| RSS-context + dst-port wildcard into context | Same as residue — static hash inside the context, same multinomial floor; dynamic reweight re-hashes active flows = re-steer |
+| dst-port / subnet pre-partition (non-re-steer) | No win for same-dst-port symptom |
 | Symmetric Toeplitz RSS key | Helps RX/TX same-queue symmetry, NOT N-into-M collision; current key already `symmetric-or-xor`. Refuted as a fix for the symptom. |
 | RSS indirection-table reshape (#840) | Already reverted, net-negative on fairness |
 | Document the floor (PLAN-KILL) | RECOMMENDED |
 
-## 11. Open questions for reviewers
+## 11. Round-1 reviewer resolution
 
-1. Is the §5 "reactive = re-steer" argument airtight, or is there an
-   ethtool/devlink/TC primitive that pre-commits a queue for a *wildcard*
-   src-port accept that I missed?
-2. Does the N≤M sub-case deserve a *non-reactive* treatment (e.g. operator
-   hand-pinned rules for known long-lived flows) shipped as an explicit
-   opt-in tool rather than an automatic controller — or is even that a
-   re-tread of #1203's CLI knob that was withdrawn?
-3. Is 1024-rule capacity firmware-bumpable (newer mlx5 FW) in a way that
-   changes the calculus? (Believed no — the defect is §5, not capacity.)
+1. **Codex (PLAN-NEEDS-WORK):** correctly found that r1 §6's "no non-re-steer
+   mechanism exists" was false — masked src-port-residue is a valid non-reactive
+   classifier. RESOLVED: §6 rewritten to acknowledge + verify the mechanism;
+   §7.0 added showing it does not beat the floor for ephemeral ports
+   (multinomial CoV 1.05 vs 0.87). The kill spine moved from "no mechanism" to
+   "the mechanism is on the same/worse floor."
+2. **AGY (PLAN-READY):** independently verified the KILL — §5 airtight (no
+   wildcard-pre-commit primitive: aRFS/RSS-context/tc-flower all reactive or
+   static-hash), N≤M unreachable by static hash (1.54% perfect spread), all
+   empirical claims verified (1024 = `MLX5E_ETHTOOL_FLOW_SPEC_NUM`, ~1 ms
+   firmware, queue-bound `xsk_rcv_check`). No salvage.
+3. **Claude SMR (PLAN-NEEDS-WORK → resolved):** agreed the KILL is correct but
+   flagged §6 false + the 1.1 ms cost as non-load-bearing; both addressed in r2.
+
+**Convergence:** all three agree the verdict is PLAN-KILL. The only round-1
+divergence was rationale (mechanism existence), now corrected. No mechanism
+beats the floor for the realistic (ephemeral-port) flow mix without a re-steer.
