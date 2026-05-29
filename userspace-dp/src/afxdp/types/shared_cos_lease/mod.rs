@@ -240,6 +240,42 @@ impl SharedCoSExactBacklog {
 /// Epoch duration. Picked to match existing refill cadence.
 pub(in crate::afxdp) const EPOCH_DURATION_NS: u64 = 200_000;
 
+/// #1630 §3.6 MEASUREMENT PROBE (throwaway): bounded rotation-lag width
+/// in epochs. `elapsed = min(lag, K × EPOCH)`. K=1 reproduces the
+/// master clamp. Selectable at build time via the `XPF_COS_K` env var so
+/// the §3.6 A/B can sweep K∈{1,8,64} from a single source tree. Parsed
+/// from the option_env! string at const-eval; defaults to 1.
+pub(in crate::afxdp) const MAX_ROTATION_LAG_EPOCHS: u64 = parse_env_u64_or(
+    option_env!("XPF_COS_K"),
+    1,
+);
+
+/// #1630 §3.6: const-eval parse of an optional decimal env string into
+/// a u64, returning `default` when unset or unparseable. const fn so it
+/// can initialize a `const`. (throwaway measurement scaffolding)
+const fn parse_env_u64_or(s: Option<&str>, default: u64) -> u64 {
+    match s {
+        None => default,
+        Some(s) => {
+            let bytes = s.as_bytes();
+            if bytes.is_empty() {
+                return default;
+            }
+            let mut acc: u64 = 0;
+            let mut i = 0;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b < b'0' || b > b'9' {
+                    return default;
+                }
+                acc = acc * 10 + (b - b'0') as u64;
+                i += 1;
+            }
+            if acc == 0 { default } else { acc }
+        }
+    }
+}
+
 /// Bound on seqlock-snapshot retries.
 const MAX_SEQ_SPINS: u32 = 64;
 
@@ -691,10 +727,25 @@ const COS_ROOT_LEASE_TARGET_US: u64 = 200;
 const COS_ROOT_LEASE_MIN_BYTES: u64 = 1500;
 const COS_ROOT_LEASE_MAX_BYTES: u64 = 512 * 1024;
 
+/// #1630: per-queue exact leases bank an N-frame burst
+/// (`COS_EXACT_QUEUE_LEASE_BANK_BYTES`); the root lease does not. The
+/// `bank_floor` flag selects whether the outstanding-credit cap is
+/// floored at the bank. It MUST be the same for a given lease across
+/// rebuilds (it is fixed by the lease kind), so `matches_config*`
+/// passes the same value the constructor did.
 fn compute_shared_cos_lease_config(
     rate_bytes: u64,
     burst_bytes: u64,
     active_shards: usize,
+) -> SharedCoSLeaseConfig {
+    compute_shared_cos_lease_config_with_bank(rate_bytes, burst_bytes, active_shards, false)
+}
+
+fn compute_shared_cos_lease_config_with_bank(
+    rate_bytes: u64,
+    burst_bytes: u64,
+    active_shards: usize,
+    bank_floor: bool,
 ) -> SharedCoSLeaseConfig {
     let burst_bytes = burst_bytes
         .max(COS_ROOT_LEASE_MIN_BYTES)
@@ -709,10 +760,40 @@ fn compute_shared_cos_lease_config(
     let lease_bytes = target_lease_bytes
         .max(COS_ROOT_LEASE_MIN_BYTES)
         .min(lease_ceiling);
-    let max_frame_lease_bytes = lease_bytes.max(tx_frame_capacity() as u64);
+    // #1630: the per-queue exact lease token bucket is now watermarked at
+    // an N-frame burst bank (COS_EXACT_QUEUE_LEASE_BANK_BYTES, see
+    // afxdp::mod / maybe_top_up_cos_queue_lease). The v8/legacy QUEUE
+    // lease refuses grants once outstanding credit reaches
+    // `max_total_leased`, so the outstanding-credit cap must rise in
+    // lock-step or a low-`active_shards` queue can never bank the full N
+    // frames (at active_shards=6 the old floor was 4096×6=24 KB < the 32
+    // KB bank). The ROOT lease is NOT bank-watermarked (its top-up uses
+    // `lease_bytes.max(tx_frame_capacity)`), so `bank_floor` is false for
+    // it and its cap is unchanged. Raising the per-frame floor only
+    // widens the outstanding window; the rate is still metered by the
+    // refill rate (`rate_bytes`) and the actual-byte `consume`, so the
+    // hard-cap (Gate 4) is preserved.
+    let bank_bytes = if bank_floor {
+        COS_EXACT_QUEUE_LEASE_BANK_BYTES
+    } else {
+        0
+    };
+    let max_frame_lease_bytes = lease_bytes
+        .max(tx_frame_capacity() as u64)
+        .max(bank_bytes);
+    // The base cap keeps the lease from handing out more than a quarter of
+    // the burst pool. #1630: that `burst/4` term (≈24 KB at the 96 KB
+    // burst floor) is BELOW the N-frame bank (32 KB at N=8), so the cap
+    // alone defeats the watermark even though `max_frame_lease_bytes` was
+    // raised. For queue leases, floor the outstanding cap at one full bank
+    // so a single shard can hold N frames of credit, but never exceed the
+    // credit pool (`burst_bytes`) — outstanding credit can never exceed
+    // available tokens, so flooring at the bank only relaxes the safety
+    // margin, it does not raise the steady-state rate.
     let max_total_leased = burst_bytes
         .saturating_div(4)
-        .min(max_frame_lease_bytes.saturating_mul(active_shards as u64));
+        .min(max_frame_lease_bytes.saturating_mul(active_shards as u64))
+        .max(bank_bytes.min(burst_bytes));
     debug_assert!(max_total_leased <= u32::MAX as u64);
     SharedCoSLeaseConfig {
         rate_bytes,
@@ -888,7 +969,14 @@ fn refill_shared_cos_lease_state(
 
 impl SharedCoSQueueLease {
     pub(in crate::afxdp) fn new(rate_bytes: u64, burst_bytes: u64, active_shards: usize) -> Self {
-        let config = compute_shared_cos_lease_config(rate_bytes, burst_bytes, active_shards);
+        // #1630: queue leases bank an N-frame burst, so the cap is floored
+        // at the bank (bank_floor = true).
+        let config = compute_shared_cos_lease_config_with_bank(
+            rate_bytes,
+            burst_bytes,
+            active_shards,
+            true,
+        );
         Self {
             config,
             state: SharedCoSLeaseState {
@@ -927,7 +1015,13 @@ impl SharedCoSQueueLease {
         max_worker_id: usize,
         rate_mode: V8RateMode,
     ) -> Self {
-        let config = compute_shared_cos_lease_config(rate_bytes, burst_bytes, active_shards);
+        // #1630: queue leases bank an N-frame burst (bank_floor = true).
+        let config = compute_shared_cos_lease_config_with_bank(
+            rate_bytes,
+            burst_bytes,
+            active_shards,
+            true,
+        );
         let len = max_worker_id + 1;
         let worker_grants = (0..len)
             .map(|_| PackedEpochGrant::new())
@@ -985,7 +1079,15 @@ impl SharedCoSQueueLease {
         active_shards: usize,
     ) -> bool {
         // Legacy match: ignores v8 mode. v8 callers use `matches_config_v8`.
-        self.config == compute_shared_cos_lease_config(rate_bytes, burst_bytes, active_shards)
+        // #1630: queue leases use the bank-floored config (bank_floor =
+        // true) — must match what `new`/`new_v8*` constructed.
+        self.config
+            == compute_shared_cos_lease_config_with_bank(
+                rate_bytes,
+                burst_bytes,
+                active_shards,
+                true,
+            )
             && self.v8.is_none()
     }
 
@@ -1002,7 +1104,15 @@ impl SharedCoSQueueLease {
         let Some(v8) = self.v8.as_ref() else {
             return false;
         };
-        self.config == compute_shared_cos_lease_config(rate_bytes, burst_bytes, active_shards)
+        // #1630: queue leases use the bank-floored config (bank_floor =
+        // true) — must match what `new_v8*` constructed.
+        self.config
+            == compute_shared_cos_lease_config_with_bank(
+                rate_bytes,
+                burst_bytes,
+                active_shards,
+                true,
+            )
             && v8.worker_grants.len() == max_worker_id + 1
             && v8.rate_mode == rate_mode
     }

@@ -315,6 +315,21 @@ const fn tx_frame_capacity() -> usize {
     UMEM_FRAME_SIZE as usize
 }
 
+/// #1630 (P1): exact-queue lease top-up watermark expressed in UMEM
+/// frames. The per-queue token bucket for a hard-cap exact guarantee
+/// class was previously watermarked at `lease_bytes` (= `rate × 200 µs`,
+/// floored at one frame); a low-rate class could bank only ~1-2 frames
+/// and lost the unspent per-epoch lease cap at every rotation. Banking N
+/// frames lets a small class accrue enough to send whole frames at its
+/// full average rate. The long-run RATE is unchanged: the v8 per-epoch
+/// grant is still `rate × elapsed` and `consume(sent_bytes)` debits
+/// actual bytes, so the hard-cap (Gate 4) holds. Consumed by
+/// `maybe_top_up_cos_queue_lease` AND `compute_shared_cos_lease_config`
+/// (the `max_total_leased` cap), which rise in lock-step.
+const COS_EXACT_QUEUE_LEASE_BANK_FRAMES: u64 = 8;
+const COS_EXACT_QUEUE_LEASE_BANK_BYTES: u64 =
+    COS_EXACT_QUEUE_LEASE_BANK_FRAMES * UMEM_FRAME_SIZE as u64;
+
 #[path = "coordinator/mod.rs"]
 mod coordinator;
 #[cfg(test)]

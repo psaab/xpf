@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::afxdp::tx_frame_capacity;
+use crate::afxdp::{tx_frame_capacity, COS_EXACT_QUEUE_LEASE_BANK_BYTES};
 use crate::afxdp::types::{
     CoSInterfaceRuntime, CoSQueueRuntime, SharedCoSQueueLease, SharedCoSRootLease,
 };
@@ -181,8 +181,21 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
         let Some(shared_queue_lease) = shared_queue_lease else {
             return CoSQueueLeaseAcquireTelemetry::default();
         };
+        // #1630 (P1): raise the exact-queue top-up watermark from
+        // `lease_bytes` (= rate × 200 µs, floored at one frame) to an
+        // N-frame burst bank. A low-rate class could otherwise bank only
+        // ~1-2 frames and lost the unspent per-epoch lease cap at each
+        // rotation, pinning it near 60-70 % of its configured rate. The
+        // bucket accumulates the surplus across epochs via the
+        // `saturating_add` below; the long-run rate stays metered by the
+        // v8 per-epoch grant (`rate × elapsed`) and the actual-byte debit
+        // in tx_completion, so the hard-cap (Gate 4) is preserved. The
+        // companion `max_total_leased` raise in
+        // `compute_shared_cos_lease_config` keeps the outstanding-credit
+        // cap from defeating this watermark at low `active_shards`.
         let lease_bytes = shared_queue_lease
             .lease_bytes()
+            .max(COS_EXACT_QUEUE_LEASE_BANK_BYTES)
             .max(tx_frame_capacity() as u64)
             .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
         if queue.hot.tokens >= lease_bytes {

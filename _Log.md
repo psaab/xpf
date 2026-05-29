@@ -4249,3 +4249,7 @@ top.
 - **Timestamp**: 2026-05-28
   **Action**: AGY r2 re-review (adversarial-review-mpq2jl5d-sqd223): all 4 round-1 fixes verified correct/complete, no new defect, ran Go+Rust suites clean — MERGE-READY. Copilot r2 doc nits fixed (plan path refs + converged status). Post-fix cluster re-validation: cold connect 1.016s, smoke reverse healthy, make test-failover 13/0. Added SMR r2 + AGY r2 docs.
   **File(s)**: docs/pr/1636-cold-connect-mitigation/{claude-smr-code-r2.md,agy-code-r2.md,reviewer-ids.md}, _Log.md
+
+- **Timestamp**: 2026-05-28
+  **Action**: #1630 §3.6 measurement gate (pre-impl). Built env-gated K/P2 probe (option_env! XPF_COS_K bounded-elapsed + XPF_COS_P2 frame cap + P1 bank from b29fdb344), ran SOLO A/B on loss userspace cluster (push v4, guarantee-rate 0.7). Matrix master/K8/K64 x P2 off/on: NO variant clears Gate 1 (each >=95%). Clamp fix (K=64) lifts 100m +13pp (82->95, clears) but 3g/6g only +3-5pp (89->94, no clear) -- separate K-independent ~6% residual on mid-rate classes. R6/BLOCKING-2 fired: 3g loss is NOT the rotation clamp. Fork resolves to NEITHER A nor B; bounded credit carry insufficient for Gate 1. STOP, posted measurement table to #1630, escalated to parent. No production fix written, no PR.
+  **File(s)**: userspace-dp/src/afxdp/{mod.rs,cos/queue_service/mod.rs,cos/token_bucket.rs,types/shared_cos_lease/{mod.rs,rotate_epoch_v8.rs}}, test/incus/{measure-variant.sh,cos-gate1-small-four-alone.sh}, docs/pr/1630-v8-credit-carry/{claude-smr-measurement-r1.md,reviewer-ids.md,plan.md,evidence/}

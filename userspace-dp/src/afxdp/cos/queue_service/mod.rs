@@ -548,10 +548,12 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
             continue;
         }
         root.legacy_guarantee_rr = (start + offset + 1) % queue_count;
+        // #1630 (P2): per-visit FRAME-count cap, not the rate-scaled
+        // quantum (which discarded the sub-frame remainder each visit).
         let guarantee_budget = queue
             .hot
             .tokens
-            .min(cos_guarantee_quantum_bytes(queue))
+            .min(cos_guarantee_visit_cap_bytes())
             .max(head_len);
         if let Some(batch) = build_cos_batch_from_queue(
             queue,
@@ -719,10 +721,14 @@ fn select_exact_cos_guarantee_queue_with_lease_telemetry(
             continue;
         }
         root.exact_guarantee_rr = (start + offset + 1) % queue_count;
+        // #1630 (P2): per-visit FRAME-count cap, not the rate-scaled
+        // quantum. Combined with #1630 (P1)'s N-frame token bank, a
+        // low-rate exact class can now drain its banked frames whole
+        // instead of losing the sub-frame remainder each visit.
         let secondary_budget = queue
             .hot
             .tokens
-            .min(cos_guarantee_quantum_bytes(queue))
+            .min(cos_guarantee_visit_cap_bytes())
             .max(head_len);
         let kind = match head {
             CoSPendingTxItem::Local(_) => ExactCoSQueueKind::Local,
@@ -873,20 +879,31 @@ fn select_exact_cos_guarantee_queue_waterfill(
             }
             continue;
         }
-        // Picked. Compute the per-visit secondary_budget first so
-        // we can apply Phase 1 budget gating before committing the
-        // selection.
-        let candidate_budget = queue
+        // Picked. #1630 (P2): decouple the two roles the quantum used
+        // to play. The Phase-1 budget gate / consumption stays on the
+        // RATE-SCALED quantum (`phase1_cost`) so the small-first
+        // ordering and the `quantum_sum × fraction` Phase-1 budget
+        // remain consistent with `oversubscription_guarantee_fraction`.
+        // The actual per-visit send budget (`send_budget`) is the
+        // FRAME-count cap so a queue whose token bucket has banked
+        // several frames (#1630 P1) drains them whole instead of
+        // discarding the sub-frame remainder of the small quantum.
+        let phase1_cost = queue
             .hot
             .tokens
             .min(cos_guarantee_quantum_bytes(queue))
             .max(head_len);
-        // Phase 1 gate: if budget for this queue exceeds the
-        // remaining Phase 1 byte budget, this queue is past the
+        let send_budget = queue
+            .hot
+            .tokens
+            .min(cos_guarantee_visit_cap_bytes())
+            .max(head_len);
+        // Phase 1 gate: if the rate-scaled cost for this queue exceeds
+        // the remaining Phase 1 byte budget, this queue is past the
         // Phase 1 boundary. Mark all queues up to this point as
         // honored (they're the small classes that fit), break to
         // Phase 2 descending walk.
-        if candidate_budget > root.waterfill_pass1_remaining_bytes {
+        if phase1_cost > root.waterfill_pass1_remaining_bytes {
             // Budget exhausted before this ascending queue could
             // be honored. Fall through to Phase 2 (descending
             // walk over queues NOT in honored_mask).
@@ -895,7 +912,7 @@ fn select_exact_cos_guarantee_queue_waterfill(
         // Phase 1 honor: consume the budget, mark honored, return.
         root.waterfill_pass1_remaining_bytes = root
             .waterfill_pass1_remaining_bytes
-            .saturating_sub(candidate_budget);
+            .saturating_sub(phase1_cost);
         if queue_idx < 64 {
             honored_mask |= 1u64 << queue_idx;
         }
@@ -906,7 +923,7 @@ fn select_exact_cos_guarantee_queue_waterfill(
         };
         return Some(ExactCoSQueueSelection {
             queue_idx,
-            secondary_budget: candidate_budget,
+            secondary_budget: send_budget,
             kind,
         });
     }
@@ -981,11 +998,13 @@ fn select_exact_cos_guarantee_queue_waterfill(
             }
             continue;
         }
-        // Phase 2 selection: return and advance cursor.
+        // Phase 2 selection: return and advance cursor. #1630 (P2):
+        // per-visit FRAME-count cap (Phase 2 has no Phase-1 budget
+        // accounting, so there is no rate-scaled cost to preserve here).
         let candidate_budget = queue
             .hot
             .tokens
-            .min(cos_guarantee_quantum_bytes(queue))
+            .min(cos_guarantee_visit_cap_bytes())
             .max(head_len);
         root.waterfill_phase2_cursor = (phase2_idx + 1) % sorted_indices.len();
         root.exact_guarantee_rr = (queue_idx + 1) % queue_count;
@@ -1061,10 +1080,14 @@ pub(in crate::afxdp) fn select_nonexact_cos_guarantee_batch(
             continue;
         }
         root.nonexact_guarantee_rr = (start + offset + 1) % queue_count;
+        // #1630 (P2): per-visit FRAME-count cap. The non-exact guarantee
+        // bucket already accumulates to `buffer_bytes` (refill_cos_tokens),
+        // so it needs only this P2 half — the quantum clamp was its sole
+        // sub-frame-discard cause.
         let guarantee_budget = queue
             .hot
             .tokens
-            .min(cos_guarantee_quantum_bytes(queue))
+            .min(cos_guarantee_visit_cap_bytes())
             .max(head_len);
         if let Some(batch) = build_cos_batch_from_queue(
             queue,
@@ -1539,6 +1562,50 @@ pub(in crate::afxdp) fn cos_guarantee_quantum_bytes(queue: &CoSQueueRuntime) -> 
         COS_GUARANTEE_QUANTUM_MAX_BYTES,
     )
 }
+
+/// #1630 (P2): per-VISIT budget cap for guarantee-phase service.
+///
+/// The selectors previously clamped each visit's `secondary_budget` to
+/// `cos_guarantee_quantum_bytes` (= `rate × 200 µs`). For a low-rate
+/// class that quantum (e.g. 2500 B for 100 Mbps) is below two MTUs, so
+/// the drain sent one frame and DISCARDED the sub-frame remainder every
+/// visit — a per-visit efficiency ceiling that rose with the configured
+/// rate (100m → ~60 %, 1g → ~96 %, ≥3g → ~100 %) and, under saturation,
+/// read as proportional equalization.
+///
+/// The fix turns the per-visit bound into a FRAME-COUNT cap: a visit may
+/// drain up to `TX_BATCH_SIZE` frames, bounded in bytes here so a banked
+/// queue (#1630 P1 raised the token watermark to an N-frame bank) cannot
+/// monopolize a drain pass. `TX_BATCH_SIZE × tx_frame_capacity()` is a
+/// clean multiple of the frame size and at least 64 max-MTU frames, so
+/// the `items.len() < TX_BATCH_SIZE` loop bound in the drain is the
+/// binding per-visit constraint and no sub-frame remainder is lost. The
+/// RR cursor still advances after each visit, preserving round-robin
+/// fairness across queues. The long-run rate is unchanged — it is
+/// metered by `queue.hot.tokens` (refilled at the configured rate via
+/// the v8 lease) and the actual-byte debit in tx_completion.
+#[inline]
+pub(in crate::afxdp) fn cos_guarantee_visit_cap_bytes() -> u64 {
+    // #1630 §3.6 MEASUREMENT PROBE (throwaway): P2 is compile-time
+    // selected via the XPF_COS_P2 env at build time (matching XPF_COS_K)
+    // so the baked binary needs no runtime env on the daemon. P2 ON =
+    // frame-count cap; OFF returns u64::MAX so the call-site
+    // `.min(tokens)` ignores it and the per-visit send budget reverts to
+    // the token bucket alone (the phase1_cost / quantum gate is untouched
+    // by this helper).
+    if P2_FRAME_CAP_ON {
+        (TX_BATCH_SIZE as u64) * (tx_frame_capacity() as u64)
+    } else {
+        u64::MAX
+    }
+}
+
+/// #1630 §3.6 MEASUREMENT PROBE (throwaway): P2 frame-count cap enabled
+/// when XPF_COS_P2 is set to a non-empty, non-"0" string at build time.
+const P2_FRAME_CAP_ON: bool = match option_env!("XPF_COS_P2") {
+    None => false,
+    Some(s) => !s.is_empty() && !matches!(s.as_bytes(), [b'0']),
+};
 
 pub(in crate::afxdp) fn estimate_cos_queue_wakeup_tick(
     root_tokens: u64,

@@ -1,0 +1,6 @@
+variant	100m_pct	1g_pct	3g_pct	6g_pct	gate1
+master_K1	79.2	72.6	86.5	84.2	FAIL
+K8_P2off	91.5	93.9	91.2	90.5	FAIL
+K8_P2on	93.2	93.9	91.0	90.2	FAIL
+K64_P2off	95.0	95.3	88.6	88.4	FAIL
+K64_P2on	95.0	95.3	90.2	90.3	FAIL

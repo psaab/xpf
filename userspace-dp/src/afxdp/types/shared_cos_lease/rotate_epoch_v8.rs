@@ -212,10 +212,14 @@ impl SharedCoSQueueLease {
             .map(|c| c.load(Ordering::Relaxed) as u64)
             .sum::<u64>()
             .max(1);
+        // #1630 §3.6 MEASUREMENT PROBE (throwaway): bounded-elapsed with
+        // K = MAX_ROTATION_LAG_EPOCHS selectable at build time via
+        // XPF_COS_K (default 1 == master clamp). The probe tests the
+        // §3.4 conceptual core (no carry, no regimes) to pick the fork.
         let elapsed_ns = if start == 0 {
             EPOCH_DURATION_NS
         } else {
-            (now_ns - start).min(EPOCH_DURATION_NS)
+            (now_ns - start).min(EPOCH_DURATION_NS.saturating_mul(MAX_ROTATION_LAG_EPOCHS))
         };
         let new_cap_raw =
             ((self.config.rate_bytes as u128) * (elapsed_ns as u128) / 1_000_000_000u128) as u64;
