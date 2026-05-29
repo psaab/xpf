@@ -1,8 +1,14 @@
 # #1648 — Dataplane bringup-readiness: first cold connect drops a single SYN (~1s RTO) after `systemctl restart`/deploy
 
-**Status:** v3 — research-only (`/research`, not `/engineer`). Gate-B
+**Status:** v3.1 — research-only (`/research`, not `/engineer`). Gate-B
 (cluster measurement) is the decider and runs FIRST. No production code, no PR.
-v3 folds r2: Codex PLAN-NEEDS-REVISION + AGY PLAN-NEEDS-REVISION (both converged
+**3-WAY CONVERGED at r3+v3.1: Codex PLAN-NEEDS-MINOR(folded) + AGY PLAN-READY +
+Claude SMR PLAN-READY.** v3.1 folds the sole Codex r3 minor: the drop-stages-only
+trace filter (B-2) suppresses the local/control-PASS trace stages, so
+W-PASS-KERNEL's local-misclassification sub-branch (B-4b) must be pinned by a
+dedicated counter, not the trace map — B-4 now splits into B-4a (ingress-iface
+miss) + B-4b (local misclassification), both counter-pinned.
+v3 folded r2: Codex PLAN-NEEDS-REVISION + AGY PLAN-NEEDS-REVISION (both converged
 on the SAME critical blocker). The fix: the Gate-B throwaway shim must record
 ONLY drop/error trace stages (skip RECEIVED/REDIRECT) — otherwise the +1.007s
 retransmit (same 5-tuple → same trace key, last-writer-wins) OVERWRITES the
@@ -452,8 +458,9 @@ tcpdump arrival ts falls BEFORE T_ctrl-enabled (`maps_sync.go:692`), corroborate
 by a non-zero `ctrl_disabled`(reason 0) cumulative-counter delta across the
 window. Thus the attribution decision tree is: trace entry present → its stage
 gives W-BIND/W-READY/W-HB/W-XSK; trace entry ABSENT + SYN arrived before
-T_ctrl-enabled → W-CTRL; trace entry ABSENT + SYN arrived after T_ctrl-enabled +
-ingress-iface-miss counter incremented → W-PASS-KERNEL (see B-4).
+T_ctrl-enabled + `ctrl_disabled` counter incremented → W-CTRL; trace entry ABSENT
++ SYN arrived after T_ctrl-enabled + a B-4 W-PASS-KERNEL counter incremented
+(ingress-iface-miss B-4a OR local-misclassification B-4b) → W-PASS-KERNEL.
 **Caveat (Claude SMR r1 MINOR-1/2):** the trace map is
 keyed by a 4-field hash and is last-writer-wins per key, so confirm no other live
 flow collides on the same hash during the window (the iperf3 control SYN on a
@@ -473,21 +480,35 @@ corroborated by B-2's trace stage); if the RX log fires but `pending_neigh`
 doesn't (or it does and the packet is dropped later), the drop is INSIDE the
 dataplane → re-target the fix away from the readiness gate.
 
-**B-4. Kernel-side check (only if B-2's trace shows the SYN took a PASS path).**
-If the trace stage is a local/control PASS or the SYN hit the ingress-iface-miss
-fast path (`lib.rs:364-366`, which returns `cpumap_or_pass` with NO trace/counter
-— so a SYN that vanishes with NO trace entry implicates this path), inspect
+**B-4. Kernel-side check (W-PASS-KERNEL, two sub-branches).** W-PASS-KERNEL has
+two distinct sub-branches, and **neither is pinnable by the drop-stages-only trace
+filter** (B-2 suppresses the PASS/RECEIVED stages to defeat the retransmit
+overwrite). Both must be pinned by dedicated counters, not the trace map (Codex
+r3 — resolves the internal inconsistency between the drop-only filter and a
+local/control-PASS trace stage):
+  - **B-4a — ingress-iface miss** (`lib.rs:364-366`): returns `cpumap_or_pass`
+    with NO trace and NO counter today. **Add a throwaway eBPF counter at
+    `lib.rs:366` UP FRONT (Codex r2)** so this sub-branch is positively counted,
+    not inferred from a missing trace.
+  - **B-4b — SYN misclassified as local/control PASS**
+    (`is_local_destination`/`interface-NAT-local`/`live-session PASS_TO_KERNEL`,
+    e.g. `lib.rs:504/520/533/565`). These do record trace stages
+    (`LOCAL_DESTINATION`/`INTERFACE_NAT_LOCAL`) — but the drop-only filter
+    suppresses them. The `live_userspace_session_action == PASS_TO_KERNEL` and the
+    `pass_local_control` paths increment `pass_to_kernel`(reason 14)
+    (`lib.rs:514/575/903-906`); the direct `is_local_destination`/`interface-NAT`
+    `cpumap_or_pass` returns (`lib.rs:530/543`) do NOT, so **add a throwaway eBPF
+    counter on those direct-local-PASS returns too** so B-4b is positively
+    counted. (For Gate-B simplicity, the throwaway shim may instead record the
+    local-PASS stages into a SEPARATE throwaway trace map that the retransmit
+    cannot clobber — but a counter is simpler and sufficient.)
+
+If either sub-branch counter fires for the data SYN, inspect
 `nstat`/`/proc/net/snmp` + a host tcpdump on the egress path: did the kernel
-forward-then-fail (no neighbor) or drop at input? This distinguishes
-W-PASS-KERNEL from the XDP-drop windows and decides Path 2.A viability. NOTE
-(Codex r1): the ingress-iface-miss pass path has no counter; a SYN that is
-PASS'd there leaves NO trace entry — so "no trace entry for the data SYN AND the
-shim was the entry program" is itself the signature of W-PASS-KERNEL via the
-ingress-iface gate. **Add the throwaway eBPF counter at `lib.rs:366` UP FRONT
-(Codex r2)** — an eBPF map increment (NOT eprintln) on the ingress-iface-miss
-pass path, so W-PASS-KERNEL is positively confirmed rather than inferred from the
-absence of a trace entry. Build it into the Gate-B throwaway shim from the start
-since W-PASS-KERNEL is a live candidate.
+forward-then-fail (no neighbor) or drop at input? This decides Path 2.A viability.
+Per §2.2 a correctly-classified transit SYN should NOT take either sub-branch, so
+a non-zero B-4 counter is itself a finding (misclassification or a transient
+ingress-iface-map gap).
 
 **B-5. Correlate + pin + MEASURE THE GAP.** ≥7 restarts, each with `ip neigh
 flush all` on fw0 + the LAN client. Client tcpdump captures the SYN-RTO signature;

@@ -12,4 +12,5 @@ Companions:
 |-------|---------------|-------------|----------------|----------|
 | r1    | task-mpr8kuzq-r91m4a | adversarial-review-mpr8kvm9-jrcxvc | claude-smr-plan-r1.md | Codex NEEDS-REVISION / AGY NEEDS-MINOR / SMR NEEDS-MINOR |
 | r2    | task-mpr95o2f-s8p39f | adversarial-review-mpr95owr-8zip3v | claude-smr-plan-r2.md | Codex NEEDS-REVISION / AGY NEEDS-REVISION / SMR NEEDS-MINOR (caught W-CTRL hole) |
-| r3    | (pending)            | (pending)                          | claude-smr-plan-r3.md | SMR PLAN-READY (pending Codex/AGY) |
+| r3    | task-mpr9d44w-h7n11p | adversarial-review-mpr9d523-jkr7lr | claude-smr-plan-r3.md | Codex NEEDS-MINOR (B-4b trace/filter inconsistency) / AGY PLAN-READY / SMR PLAN-READY |
+| r4    | (pending)            | n/a (AGY already PLAN-READY)       | claude-smr-plan-r4.md | confirm Codex r3-minor folded |
