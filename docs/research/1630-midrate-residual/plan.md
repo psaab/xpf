@@ -7,8 +7,42 @@
   committed.
 - Author: Claude SMR (CoS-shaper / token-bucket / rate-accuracy /
   AF_XDP-drain / timer-wheel domain).
-- Rev: **v1 (DRAFT — pre-review).** Status: NOT YET REVIEWED. Drafted
-  to be falsified by Codex + AGY + a hostile Claude SMR self-review.
+- Rev: **v2 (r1 reviews folded).** Status after r1: **PLAN-NEEDS-MAJOR,
+  converged on a corrected-mechanism + measurement-gated bisection.**
+  r1: Codex PLAN-NEEDS-MAJOR (BLOCKING-1 park basis is `head_len` not
+  `quantum` → §3 derivation wrong; BLOCKING-3 `bytes_consumed` ≠ TX
+  bytes; MAJOR-1/2/3; BLOCKING-2 HALLUCINATED — no waterfill drain path,
+  rejected with grep evidence); Claude SMR PLAN-NEEDS-MAJOR (concur +3
+  own); AGY succeeded but `agy_result` infra-timed-out 3× (investigation
+  trace verified converging on the same park-basis defect, see
+  `agy-plan-r1.md`). v2 rewrites §3 around `head_len`, drops the false
+  "200/225 = 88.9% matches" precision, recasts §5 as a THREE-way
+  TX-grounded split + goodput, demotes the defective F-A/F-B, and
+  promotes the lease-target / sub-tick-wake mechanisms.
+
+## v2 changelog (r1 response)
+
+- **[Codex BLOCKING-1 / Claude MAJOR-1] §3 derivation FIXED.** The wake
+  estimator is called with `head_len` (one frame), NOT the quantum. v2
+  rewrites §3 (the park basis is `head_len/rate ≈ 2-4µs`, floored to a
+  50µs tick) and DROPS the "t_refill = quantum/rate = 200µs → 88.9%"
+  false precision. The corrected period model has explicit unknowns the
+  §5 counters resolve.
+- **[Codex BLOCKING-2] REJECTED as hallucinated.** No waterfill drain
+  path exists on origin/master (§3.0). v2 does NOT add waterfill
+  instrumentation.
+- **[Codex BLOCKING-3 / Claude MAJOR-2] §5 recast as THREE-way.**
+  `cap_granted` / `total_granted` / `drain_sent_bytes` + iperf3 goodput;
+  the four ratios localize meter-under-grant vs grant-not-drawn vs
+  drawn-not-sent vs TCP-artifact.
+- **[Codex MAJOR-1 / Claude] lease-target promoted to first-class
+  competing hypothesis** (§3.3, §6).
+- **[Codex MAJOR-2/3 / Claude MAJOR-1] F-A/F-B DEMOTED** (F-A no-op
+  same-tick; F-B busy-polls a cap-exhausted lease). Primary candidates
+  are now the lease-target raise (F-C') and the sub-tick wake
+  representation (F-E), §6.
+- **[Claude MINOR-2] §9 layering re-argued** for the lease-target branch
+  (shared meter config, not seqlock payload).
 
 > Companion: cause 1 (rotation clamp at `rotate_epoch_v8.rs:218`) is
 > owned by `docs/research/1630-v8-credit-carry/plan.md` @ `852cf014c`.
@@ -116,8 +150,9 @@ binding limiter for 3g/6g. (Hypothesis 6 is therefore weak a priori;
 2. If `root.tokens < head_len`: park on root starvation.
 3. If `queue.hot.tokens < head_len` (non-surplus-sharing exact): bump
    `drain_park_queue_tokens`, **park** with
-   `estimate_cos_queue_wakeup_tick(..., require_queue_tokens=true)`
-   (line 688).
+   `estimate_cos_queue_wakeup_tick(..., head_len, now_ns, true)`
+   (line 688 — **note the bytes arg is `head_len`, one frame, NOT the
+   quantum; this is the v2 correction**).
 4. Else service `secondary_budget = tokens.min(quantum).max(head_len)`.
 
 `estimate_cos_queue_wakeup_tick` (`queue_service/mod.rs:1255`):
@@ -139,113 +174,134 @@ A parked queue is service-eligible only when
 
 ---
 
-## 3. Leading hypothesis (the one the bisection must confirm or kill)
+## 3. Leading hypothesis cluster (the bisection must confirm or kill — v2 CORRECTED)
 
-### 3.1 H-WHEEL — 50µs timer-wheel park quantization + `now_tick+1` floor
+> **v2 correction (Codex BLOCKING-1 / Claude MAJOR-1).** v1 derived the
+> residual from `t_refill = quantum/rate = 200µs`. **That is wrong about
+> the park basis.** The wake estimator is called with **`head_len`** (one
+> frame), NOT the quantum. The quantum is only the *service batch size*.
+> v2 rewrites the mechanism around the verified call and DROPS the false
+> "200/225 = 88.9% matches" precision. The corrected model has explicit
+> unknowns that §5 resolves — the plan no longer claims a quantitative
+> match it cannot derive.
 
-**Claim:** for a mid-rate exact class that is *bucket-bound* (its TCP
-offered load exceeds its configured rate, so it runs `queue.hot.tokens`
-to below `head_len` and parks), the park wake is quantized to the next
-50µs timer-wheel tick boundary, **and is floored at `now_tick + 1`**.
-Both rounding effects bleed TX-eligible time, and the bleed is a
-*roughly fixed fraction* of the service period — matching P4 (flat
-across rates) and P1/P2/P3 (independent of the clamp, the selector frame
-cap, and contention).
+### 3.0 First: there is NO waterfill drain path (reject Codex BLOCKING-2)
 
-**Why a mid-rate class parks but 24g/100m behave differently:**
+Codex r1 BLOCKING-2 asserted `guarantee-rate 0.7` dispatches the drain
+into `select_exact_cos_guarantee_queue_waterfill` with park sites at
+`queue_service/mod.rs:603-613/:853-872/:973-982`. **Verified absent on
+origin/master `0e5bb3812`:**
 
-- A bucket-bound exact queue with offered load > rate refills `tokens`
-  at `rate` and drains it at line-rate whenever serviced. Steady state:
-  drain a quantum, starve, park for `~refill_ns(quantum)`, repeat. The
-  *park* is where time is lost to quantization.
-- **6g**: `quantum = cos_guarantee_quantum_bytes = rate×VISIT_NS.clamp(1500, 512KB)`
-  with `COS_GUARANTEE_VISIT_NS = 200_000` →
-  `750e6 × 2e5 / 1e9 = 150_000 B`. To refill 150_000 B at 6g takes
-  `150_000 / 750e6 = 200µs`. The wheel rounds that 200µs park to a
-  50µs-granular tick. The rounding error is bounded by one tick (50µs)
-  per park; a 200µs park rounded to the next 50µs boundary loses on
-  average ~0..50µs depending on phase — **but the `now_tick + 1` floor
-  (line 1288) forces a *minimum* one-tick (50µs) park even when the
-  computed refill is shorter**, and `cos_tick_for_ns` *truncates*
-  `wake_ns` (floor) while `cos_root_can_service_after_prime` requires
-  `next_wakeup_tick <= now_tick` (so the queue cannot run until the
-  wheel's integer tick counter reaches the target). The net is a
-  per-park dead interval whose *expected* length is a fixed fraction of
-  the tick (≈ half a tick mean), and the number of parks per second
-  scales with rate — so the *fractional* loss `(dead_time / service_period)`
-  is approximately rate-INDEPENDENT (a fixed fraction). **This is the
-  P4 signature.**
+- `grep -rn "waterfill" userspace-dp/src/` → ONE hit, a COMMENT
+  (`forwarding_build/cos.rs:424`): "the v5 two-phase waterfill allocator.
+  **The Go control plane is responsible**…". Waterfill is a CONTROL-PLANE
+  allocator, not a Rust drain path.
+- `oversubscription_policy` is written to `CoSInterfaceConfig`
+  (`forwarding_build/cos.rs:443`) but **never read** in the drain
+  (`grep` of `userspace-dp/src/afxdp/` outside forwarding_build/README =
+  0 consumer hits). The drain selector
+  `select_exact_cos_guarantee_queue_with_lease_telemetry`
+  (`queue_service/mod.rs:590`) has NO oversubscription branch.
 
-**Worked fractional-loss estimate (the falsifiable number):**
+So `guarantee-rate 0.7`'s dataplane effect arrives entirely as the
+per-class v8 lease *rates* the Go allocator computes; 3g/6g traverse the
+SINGLE exact-queue park branch (`:665-700`). **v2 does NOT add
+waterfill instrumentation, and records this rejection so a later round
+does not re-add it.** That the reviewers disagreed on which path runs is
+itself the argument for §5: a counter on the ACTUAL drain path settles
+it empirically.
 
-Let a bucket-bound class drain `quantum` bytes per service then park for
-the refill. Park interval before quantization `t_refill = quantum/rate`.
-The wheel can only wake on tick boundaries every `T = 50µs`, and the
-`now_tick+1` floor adds a guaranteed extra wait when `t_refill < T` or
-when the phase offset within the current tick is small. Model the dead
-time per park as the wait from `now` to the first tick boundary `≥ now +
-t_refill`, plus the floor. With `t_refill` near a multiple of `T` the
-expected extra wait is ~`T/2 = 25µs`. The effective period becomes
-`t_refill + E[dead]`, and throughput = `rate × t_refill / (t_refill +
-E[dead])`.
+### 3.1 The corrected per-visit cycle (verified call, `head_len` basis)
 
-- 6g: `quantum = 150 000 B`, `t_refill = 200µs`, `E[dead] ≈ 25µs` ⇒
-  efficiency `200/225 = 88.9%` — **matches measured 6g solo ~89-93%.**
-- 3g: `quantum = rate×VISIT = 375e6×2e5/1e9 = 75 000 B`, `t_refill =
-  75 000 / 375e6 = 200µs` (same VISIT_NS ⇒ same `t_refill`!), `E[dead]
-  ≈ 25µs` ⇒ `200/225 = 88.9%` — **matches measured 3g ~89-93% AND
-  explains P4 (flat): because `quantum` scales with rate, `t_refill =
-  quantum/rate = VISIT_NS = 200µs` is CONSTANT across rates.** The flat
-  residual falls directly out of `COS_GUARANTEE_VISIT_NS` being a fixed
-  time quantum.
+For a bucket-bound exact class (offered load > configured rate), one
+worker visit to its queue does
+(`select_exact_cos_guarantee_queue_with_lease_telemetry`,
+`queue_service/mod.rs:611-716`):
 
-This is the single most important derivation in the plan: **the per-visit
-service quantum is sized in *time* (`VISIT_NS = 200µs`), so every
-bucket-bound class — regardless of rate — services for 200µs-worth of
-bytes then parks for ~one tick of quantization overhead, giving a
-rate-independent fractional loss.** That is exactly P1+P2+P3+P4.
+1. top-up bucket to `lease_bytes = config.lease_bytes = rate×200µs`
+   (75K for 3g, 150K for 6g), gated by `acquire_v8` (cap + share).
+2. if `root.tokens < head_len` → park on ROOT (different counter).
+3. if `queue.hot.tokens < head_len` (one frame, `cos_item_len(head)`):
+   bump `drain_park_queue_tokens`, **park** with
+   `estimate_cos_queue_wakeup_tick(..., head_len, now_ns, true)`
+   (verified: the 4th positional arg is `head_len`, NOT the quantum).
+4. else service `secondary_budget = tokens.min(quantum).max(head_len)`.
 
-**Why 100m and 24g don't show it (consistency check, not proof):**
-- 100m: `quantum = clamp(100e6/8 × 2e5/1e9 = 2500, 1500, 512K) = 2500 B`
-  but `t_refill = 2500 / 12.5e6 = 200µs` again — so 100m would ALSO show
-  the wheel loss. It does (cause-1 measured 100m at 82% solo, lifted to
-  95% by the K=64 clamp fix). **Caution (self-hostile):** if 100m's loss
-  were ALSO the wheel, the clamp fix would NOT have lifted it to 95%.
-  The fact that the clamp fix DID clear 100m but NOT 3g/6g is the
-  central puzzle this hypothesis must survive — see §3.2.
-- 24g: offered load ≈ shape; under 25g root cap the 24g class is
-  root-bound, parks on ROOT tokens (different counter, different wake
-  path with `require_queue_tokens=false`), so its quantization
-  interacts with the root meter not the per-queue bucket.
+`estimate_cos_queue_wakeup_tick` computes
+`queue_refill_ns = cos_refill_ns_until(tokens, head_len, rate)` =
+`(head_len − tokens)/rate` ≈ **2µs for 6g** (`1500/750e6`), ~4µs for 3g.
+Then `wake_ns = now + max(root_refill, queue_refill)` and
+`wake_tick = cos_tick_for_ns(wake_ns).max(now_tick+1)` — quantized to a
+**50µs** wheel tick, floored at `now_tick+1`. A parked queue is
+service-eligible only when `next_wakeup_tick <= now_tick`.
 
-### 3.2 The hostile tension H-WHEEL must survive (do not hand-wave)
+**So the dominant rounding is the `now_tick+1` floor: a ~2µs real refill
+is rounded up to a full 50µs park.** This is H-WHEEL restated correctly:
+the loss is the floor + tick granularity, NOT a 200µs quantum.
 
-If H-WHEEL (a fixed 200µs-quantum + 50µs-wheel loss) applied uniformly,
-100m would not have been cleared by the cause-1 K=64 clamp fix. Two
-candidate reconciliations, BOTH of which the §5 instrumentation must
-disambiguate:
+### 3.2 The corrected period model — and why its magnitude is UNKNOWN without §5
 
-- **(a) 100m is dominated by the clamp, 3g/6g by the wheel.** At 100m
-  the per-epoch cap is 2500 B < one 4096 frame, so the class is
-  *grant-bound* (cause 1) far more than *bucket-park-bound*: it cannot
-  even assemble a frame most epochs, so the clamp loss (rate×(lag−EPOCH))
-  dwarfs the wheel loss. At 3g/6g the per-epoch cap (75k/150k) is many
-  frames, the clamp loss is a smaller fraction (visited more often →
-  smaller lag/EPOCH, exactly the cause-1 efficiency curve), and the
-  *residual* after the clamp is removed is the wheel quantization. This
-  predicts: cause-1 carry lifts 100m a lot (grant-bound → fixed) and
-  3g/6g a little (already mostly grant-served, leaving the wheel floor).
-  **Consistent with the measured +13pp / +3-5pp split.** This is the
-  PRIMARY reconciliation.
-- **(b) 3g/6g loss is something else entirely** (grant under-published,
-  fair-share rounding, grace interaction). §5's bisection (cap-granted
-  vs bytes-consumed) settles (a) vs (b) in ONE measurement.
+Naïve corrected cycle for a queue that drains its bucket then parks:
+- **Service phase**: drains up to `min(tokens, quantum)` =
+  `quantum` = `rate×VISIT_NS` (75K/150K). At line-rate the bytes leave in
+  `quantum/rate = VISIT_NS = 200µs` of *credit* — but the worker emits
+  them across whatever poll passes happen in that window.
+- **Park phase**: floored to ≥1 tick = 50µs even though the real refill
+  is ~2µs.
 
-**I am not asserting H-WHEEL is proven.** I am asserting it is the
-leading hypothesis with a quantitative match to P4, and that §5's
-instrumentation is the cheap experiment that confirms or kills it before
-/engineer commits a mechanism.
+If the queue drained a full quantum (200µs of bytes) then parked one
+tick (50µs), efficiency would be `200/250 = 80%` — **WORSE than the
+measured ~93-94% solo.** So the real behavior must be ONE of:
 
+- (a) the queue does NOT drain a full quantum before parking (root-token
+  interleave, cap exhaustion, or the bucket only ever holds `lease_bytes`
+  = 200µs and refills incrementally), so the park fires more often but
+  each park bleeds less; OR
+- (b) the queue does NOT park every cycle — it stays runnable and the
+  bucket refills across sub-µs poll passes faster than a tick, so the
+  floor rarely bites; OR
+- (c) the loss is NOT the wheel at all (lease-target starvation §3.3, or
+  TCP burstiness §4-H-TCP).
+
+**v2's honest position: the DIRECTION (sub-tick park floored to 50µs) is
+the leading candidate, but no closed-form magnitude reproduces 6% from
+first principles.** The number `6%` is an empirical fact; the mechanism
+is a hypothesis; §5's counters (parks/sec, bytes-sent-per-park,
+cap/granted/sent ratios) are what turn the hypothesis into a proof. The
+plan deliberately stops short of claiming a derived match.
+
+### 3.3 Competing first-class hypothesis: the lease target is the limiter
+
+`config.lease_bytes = min(rate×COS_ROOT_LEASE_TARGET_US, burst/8, 512K)`
+with `COS_ROOT_LEASE_TARGET_US = 200` (`mod.rs:690-711`). This is BOTH
+the bucket top-up watermark (`token_bucket.rs:184` early-returns when
+`tokens >= lease_bytes`) AND therefore the maximum credit the bucket can
+hold. For 3g/6g that is 75K/150K = exactly 200µs of rate. **If the
+bucket can never hold more than 200µs of credit, it ALWAYS starves
+between visits regardless of the wheel** — and the fix is to raise
+`COS_ROOT_LEASE_TARGET_US` (let the bucket bank 2-3 ticks), not touch
+the wheel. This is Codex MAJOR-1 promoted to a co-equal hypothesis;
+§5 counter 6 (bucket high-water vs `lease_bytes`) + the park rate
+discriminate it from the wheel-floor hypothesis.
+
+### 3.4 Reconciling with cause-1: why 100m was cleared but 3g/6g were not
+
+The cause-1 K=64 clamp fix lifted 100m +13pp (→95, clears) but 3g/6g only
++3-5pp (→94, does not clear). Corrected explanation:
+- 100m: per-epoch cap = 2500 B < one 4096 frame → the class is
+  *grant-bound* (cause 1): it cannot assemble a frame most epochs, so the
+  clamp loss dominates and the carry fixes it.
+- 3g/6g: per-epoch cap = 75K/150K = many frames → the class is NOT
+  grant-bound; the clamp loss is a small fraction (visited often), and
+  the RESIDUAL after the clamp is removed is the §3.1/§3.3 drain-or-lease
+  quantization. The carry cannot touch it (it enlarges the grant, not the
+  bucket refill cadence or the park floor). **This is exactly the
+  K-independent, flat residual the engineer measured.**
+
+This reconciliation is consistent with the data but NOT proven; §5
+settles it.
+
+---
 ---
 
 ## 4. Hypothesis table — falsify each (HOSTILE: every row needs a kill or a keep)
@@ -259,171 +315,191 @@ instrumentation is the cheap experiment that confirms or kills it before
 | H5 | Effective cap < shape due to a hidden reserve (priority min-share, root overhead, fair-share rounding) | **PLAUSIBLE secondary.** `worker_fair_share = new_cap × my_count / total_flows` (`rotate_epoch_v8.rs` STEP 6) is integer-divided per worker; if 12 streams split across N workers, per-worker share rounding could under-grant. But P3 (solo, persists) and the fact that solo single-port still shows it argue the split is not the cause unless RSS spreads even a single-port iperf across workers. | §5 counter 4 (`my_effective_share` sum vs cap) + worker-count check. If the 12 streams land on 1 worker, fair-share rounding is 0; if spread, measure the under-grant. |
 | H6 | Buffer/burst depth limits sustained throughput | **KILLED by arithmetic.** 3g buffer = 3.75 MB, 6g = 7.5 MB ≫ per-epoch grant; `max_total_leased = burst/4` ≫ lease. Bucket never clips. | Killed in §2.1. §5 counter 6 (bucket high-water vs buffer) confirms headroom. |
 | H7 | **NEW — `now_tick+1` minimum-park floor** | **PLAUSIBLE — the sharp edge of H-WHEEL.** Even when `t_refill < 50µs`, the floor forces a full-tick park. For a class whose refill is *just under* a tick this doubles the dead time. | §5 counter 7: histogram of `(wake_tick − now_tick)` deltas at park time; if the mode is 1 and refill < tick, the floor dominates. |
-| H8 | **NEW — per-poll `now_ns` granularity vs wheel** | **PLAUSIBLE — coupling.** The wheel only advances when a poll iteration samples a `now_ns` in a new tick. Under saturation the poll loop spins sub-µs so the wheel is "fresh", BUT if the worker spends a whole tick servicing OTHER classes (11 classes RR), a parked 3g/6g queue's wake tick may already be past when revisited, adding RR-latency on top of the wheel. | §5 counter 8: time-between-service-visits histogram for 3g/6g vs `t_refill`. Distinguishes wheel-floor (H-WHEEL/H7) from RR-revisit-latency. Note: P3 (solo) weakens H8 because solo has few competing classes. |
+| H8 | **per-poll `now_ns` granularity vs wheel** | **PLAUSIBLE — coupling.** The wheel only advances when a poll iteration samples a `now_ns` in a new tick. Under saturation the poll loop spins sub-µs so the wheel is "fresh", BUT if the worker spends a whole tick servicing OTHER classes (11 classes RR), a parked 3g/6g queue's wake tick may already be past when revisited, adding RR-latency on top of the wheel. | §5 counter 8: time-between-service-visits histogram for 3g/6g vs the refill. Distinguishes wheel-floor (H7) from RR-revisit-latency. Note: P3 (solo) weakens H8 because solo has few competing classes. |
+| H-LEASE | **lease target `rate×200µs` caps bucket credit (§3.3)** | **FIRST-CLASS (Codex MAJOR-1).** The bucket can never hold > 200µs of credit, so it starves between visits independent of the wheel. Different fix (raise `COS_ROOT_LEASE_TARGET_US`). | §5 counter 6: bucket high-water ≈ `lease_bytes` AND queue still parks ⇒ lease target is the limiter, not the wheel. |
+| H-TCP | **NEW (Claude MAJOR-2) — the 6% is a TCP goodput artifact, not a shaper grant loss** | **MUST be ruled out.** 50µs-quantized bursty delivery inflates RTT/jitter → depresses the TCP window → iperf3 reports < shaper TX. If so, cause 2 is OUTSIDE the shaper. | §5 ratio `goodput/drain_sent`: if shaper grants AND sends ~100% but iperf3 reports 94%, the loss is TCP. **The single most important falsifier — it could move cause 2 out of the shaper entirely.** |
 
 **Net a-priori:** H1, H6 killed by arithmetic. H2, H4 killed by
-code-path / P1. H5, H8 are secondary, measured. **H3≡H-WHEEL + H7 is the
-leading cluster.** The bisection (§5) is designed to separate "the cap
-is under-granted" (H1/H4/H5 family — cause is in rate-calc/rotation)
-from "the cap is granted but not consumed because the queue is parked on
-the wheel" (H-WHEEL/H7/H3 family — cause is in drain/park quantization).
-**That single counter pair (cap-granted vs bytes-consumed) bisects the
-entire space.**
+code-path / P1. H5, H8 are secondary, measured. **H7 (now_tick+1 floor),
+H-LEASE (lease-target cap), and H-TCP (goodput artifact) are the three
+live candidates** after the v2 correction. The bisection (§5) separates
+FOUR layers — meter-under-grants / grant-not-drawn / drawn-not-sent /
+sent-but-TCP-loses — with a THREE-way internal byte split + goodput. The
+old v1 "single counter pair bisects" claim was too weak: it conflated
+drawn vs sent and could not see the TCP artifact.
 
 ---
 
-## 5. The instrumented bisection (the verified second-root-cause proof)
+## 5. The instrumented bisection (the verified second-root-cause proof — v2 THREE-way)
 
 All counters are **env-gated debug counters in a LOCAL throwaway build,
-NOT committed.** They piggyback on the existing `owner_profile`
-telemetry block (`types/cos.rs:914` already has `drain_park_*`) so the
-build change is additive `AtomicU64` fields + `fetch_add` calls behind
-`option_env!("XPF_COS_MIDRATE_DEBUG")`, exported via the existing
-per-queue Prometheus/status path so they read out per-class.
+NOT committed** (additive `AtomicU64` behind `option_env!("XPF_COS_MIDRATE_DEBUG")`,
+piggybacked on the existing `owner_profile` block in `types/cos.rs` so
+they read out per-class via the existing per-queue status/Prometheus
+path). They are removed before the /engineer PR.
 
-### 5.1 The one bisecting measurement
+### 5.1 The four quantities (THREE internal byte counters + goodput)
 
-Per 3g and 6g queue, per 1s window, accumulate:
+Per 3g and 6g queue, per 1s window:
 
-1. **cap_granted_bytes** — sum of `new_cap` published by rotation
-   (i.e. what the meter *allowed* this class to send).
-2. **bytes_consumed** — sum of `total_granted` returned by `acquire_v8`
-   (i.e. what the class actually drew). Already partly tracked as
-   `v8_granted_bytes` in `CoSQueueLeaseAcquireTelemetry`.
-3. **park_queue_count / park_root_count** — `drain_park_queue_tokens` /
-   `drain_park_root_tokens` (already exist).
-4. **sum_my_effective_share** vs **cap** (H5).
-5. **cap_vs_rate_x_wall** — published cap compared to `rate ×
-   wall_elapsed` over the window (H1/H4 — proves the meter granted the
-   full rate-time product).
-6. **bucket_high_water / buffer_bytes** (H6).
-7. **wake_delta_histogram** — `(wake_tick − now_tick)` at each park (H7).
-8. **service_gap_histogram** — ns between successive services of the
-   same queue (H8), vs `t_refill = quantum/rate`.
+1. **cap_granted_bytes** — Σ `new_cap` published by rotation (the meter
+   ceiling; what the class was *allowed*). Source: `rotate_epoch_v8.rs`
+   STEP 6 `new_cap`.
+2. **total_granted_bytes** — Σ `acquire_v8` return (lease *authorization*
+   drawn). Source: existing `CoSQueueLeaseAcquireTelemetry.v8_granted_bytes`
+   (`token_bucket.rs`).
+3. **drain_sent_bytes** — bytes ACTUALLY submitted to TX. Source:
+   **existing** `owner_profile.drain_sent_bytes` / `drain_guarantee_sent_bytes`
+   (`tx_completion.rs:483-489`, written post-submit). No new code needed —
+   already plumbed.
+4. **iperf3 goodput** — the externally measured ~94% (the gate metric).
 
-### 5.2 The bisection truth table
+Plus diagnostic counters:
+5. **cap_vs_rate_x_wall** — cap_granted vs `rate × wall_elapsed` (proves
+   H1/H4: meter granted the full rate-time product).
+6. **bucket_high_water vs lease_bytes** (H-LEASE: if high-water ≈
+   `lease_bytes` AND the queue parks, the lease target is the limiter).
+7. **park_queue / park_root counts** — existing `drain_park_{queue,root}_tokens`.
+8. **wake_delta histogram** `(wake_tick − now_tick)` at park (H7).
+9. **service_gap histogram** ns between successive services of the queue (H8).
+
+### 5.2 The FOUR-layer bisection truth table
 
 Run 3g-solo and 6g-solo on the free loss cluster (single port, push, v4,
-guarantee-rate 0.7) and read the counters:
+guarantee-rate 0.7). The three internal ratios + goodput localize the
+cause to ONE layer:
 
-| Observation | Conclusion |
-|-------------|------------|
-| `cap_granted ≈ rate × wall` (counter 5 ≈ 1.0) AND `bytes_consumed / cap_granted ≈ 0.94` | **GRANT IS FULL, CONSUMPTION IS SHORT** ⇒ cause is in DRAIN/PARK (H-WHEEL/H7). Counter 7's mode + counter 3's park_queue rate localize it to the wheel floor. **Expected primary outcome.** |
-| `cap_granted < rate × wall` (counter 5 ≈ 0.94) | **GRANT IS SHORT** ⇒ cause is in rate-calc/rotation despite K-independence — re-open H4/H5; inspect fair-share split (counter 4) and worker count. |
-| `park_queue_count` high AND counter-7 mode = 1 tick AND `t_refill < 50µs` | **H7 (now_tick+1 floor) dominates.** |
-| `park_queue_count` high AND counter-7 mode > 1 AND counter-8 gap ≈ `t_refill` rounded up to tick | **H-WHEEL (tick rounding) dominates.** |
-| `park_root_count > 0` for SOLO 3g/6g | root shaper IS throttling — re-confirm against prior "park_root=0" claim; if nonzero re-open root-meter hypothesis. |
+| Ratio | If ≈ 1.0 | If ≈ 0.94 ⇒ cause is here |
+|-------|----------|--------------------------|
+| `cap_granted / (rate×wall)` (5) | meter grants full rate-time | **METER under-grants** ⇒ rate-calc/rotation/fair-share (H4/H5). Folds into cause-1. |
+| `total_granted / cap_granted` | class draws all it's allowed | **GRANT NOT DRAWN** ⇒ drain can't pull the grant — bucket/park (H7/H-LEASE). |
+| `drain_sent / total_granted` | drawn bytes are sent | **DRAWN NOT SENT** ⇒ TX-ring refusal / scratch-build fail / restore-retry. |
+| `goodput / drain_sent` | TX bytes become goodput | **SHAPER IS FINE, TCP LOSES IT** (H-TCP) ⇒ cause 2 is OUTSIDE the shaper (pacing/burst-smoothing, not grant/park). |
 
-This table is the deliverable. The ~6% MUST appear as either (a) under
-counter 5 (under-granted cap → rotation/rate-calc) or (b) the gap
-between counter 1 and counter 2 (granted-but-not-consumed → drain/park).
-**One read bisects the hypothesis space.**
+**Expected primary outcome (the hypothesis to confirm):**
+`cap_granted/(rate×wall) ≈ 1.0` AND `total_granted/cap_granted ≈ 0.94`
+AND high `park_queue` ⇒ grant-not-drawn via park. Then counter 6
+(H-LEASE) vs counter 8 (H7) decides whether the limiter is the lease
+target or the wheel floor:
+- high-water ≈ `lease_bytes` (bucket maxed at 200µs) ⇒ **H-LEASE** (fix:
+  raise lease target).
+- high-water ≪ `lease_bytes` but park fires with wake-delta mode = 1 tick
+  and refill ≪ tick ⇒ **H7** (fix: sub-tick wake, §6).
+
+**This four-layer table is the deliverable.** It cannot be short-cut: the
+v1 two-way split conflated draw-vs-send and could not see TCP. One read
+of these ratios on the free cluster names the layer.
 
 ### 5.3 Confirm root is not the limiter (re-verify the prior claim)
 
-Prior runs showed `park_root = 0`. Re-confirm for 3g/6g SOLO: counter 3
-(`drain_park_root_tokens`) must be ~0 and counter 5b (root lease grant
-vs `shaping_rate × wall`) ≈ 1.0. If the root meter throttles a SOLO
-single-class run, the residual is a root-shaper artifact (different fix:
-`EPOCH`/burst on the root lease), and H-WHEEL is demoted.
+Prior runs showed `park_root = 0`. Re-confirm for 3g/6g SOLO: counter 7
+(`drain_park_root_tokens`) ~0 and root-lease grant vs `shaping_rate ×
+wall` ≈ 1.0. If the root meter throttles a SOLO single-class run, the
+residual is a root-shaper artifact (fix: root `EPOCH`/burst), and all
+per-queue hypotheses are demoted.
 
 ---
 
-## 6. Fix mechanism (conditioned on §5 outcome — primary = H-WHEEL)
+## 6. Fix mechanism (conditioned on the §5 layer — v2: defective F-A/F-B DEMOTED)
 
-> The plan commits to the §5 bisection as the gate. The mechanism below
-> is the PRIMARY (H-WHEEL-confirmed) design; §6.4 lists the alternate
-> mechanisms for the non-primary §5 outcomes so /engineer is not blocked.
+> v2 demotes v1's F-A and F-B (Codex MAJOR-2/3 + Claude MAJOR-1): F-A is
+> a no-op for same-tick future wakes; F-B busy-polls a cap-exhausted
+> lease. The mechanism is now chosen by the §5 layer, with the
+> lease-target raise and the sub-tick wake as the two primary candidates.
 
-### 6.1 PRIMARY — eliminate the park-quantization dead time for bucket-bound exact classes
+### 6.1 If §5 layer = "grant-not-drawn, H-LEASE" — raise the lease target (PRIMARY candidate)
 
-If §5 confirms "granted-but-not-consumed via wheel park" (the expected
-outcome), the fix targets `estimate_cos_queue_wakeup_tick` /
-`cos_root_can_service_after_prime`, NOT the rate meter. Three composable
-sub-fixes, smallest first:
+Raise `COS_ROOT_LEASE_TARGET_US` (or the per-queue `config.lease_bytes`
+target) so the bucket can bank ≥2-3 wheel ticks of credit (e.g. 600µs
+instead of 200µs). Then the queue parks far less often and the 50µs floor
+amortizes over more sent bytes. **Burst-bound proof required:** a larger
+bucket holds more burst. The per-queue `buffer_bytes` (3.75/7.5 MB) and
+`max_total_leased = burst/4` already bound it; the cause-1 grant cap still
+meters the *rate*. Gate (§8) must prove no class exceeds shape over any
+10ms window. This touches `compute_shared_cos_lease_config` (meter-side
+config) — see §9 for the revised layering argument.
 
-- **F-A (remove the `now_tick+1` floor when refill is sub-tick):**
-  the floor (`queue_service/mod.rs:1288`) exists to guarantee forward
-  progress (never wake in the past). But it forces a *full* 50µs park
-  even when `t_refill ≪ 50µs`. Replace the floor with "wake at
-  `now_tick + 1` only if the *computed* wake tick is `<= now_tick`;
-  otherwise honor the computed tick." This is a no-op for correctness
-  (still never wakes in the past) but stops rounding a 5µs refill up to
-  a 50µs park. **Smallest, safest.** Kills H7.
-- **F-B (sub-tick re-service via a "soon" fast-path):** a queue whose
-  `t_refill < TICK` should not park on the wheel at all — it should stay
-  *runnable* and be re-tried on the next poll iteration (which is
-  sub-µs under saturation), letting the bucket refill naturally between
-  poll passes. Mechanism: in the exact-queue park branch
-  (`queue_service/mod.rs:688`), if
-  `queue_refill_ns < COS_TIMER_WHEEL_TICK_NS`, do NOT park; `continue`
-  and let the RR revisit it (the bucket top-up at line 611 refills it on
-  the next visit with a fresher `now_ns`). Bounded by the existing
-  drain-loop budget so it cannot spin. Kills H-WHEEL + H7 together.
-- **F-C (shrink `COS_TIMER_WHEEL_TICK_NS`):** rejected as primary — a
-  finer tick raises wheel-advance cost on every poll and changes the
-  L0/L1 horizon math (`COS_TIMER_WHEEL_L0_SLOTS = 256`); orthogonal,
-  global, and risky. Keep only as a fallback if F-A/F-B underperform.
+### 6.2 If §5 layer = "grant-not-drawn, H7 (wheel floor)" — sub-tick wake (PRIMARY candidate)
 
-**Recommended primary:** F-B (stay-runnable for sub-tick refills) with
-F-A as the belt. Both are confined to the drain/park path and do **not
-touch the seqlock or the rate meter** — so they compose cleanly with
-cause 1 (§9).
+The defect is that a ~2µs refill is rounded to a 50µs park. Two correct
+fixes (NOT v1's F-A/F-B):
 
-### 6.2 Burst-safety of F-A/F-B (the hostile constraint)
+- **F-E (stay-runnable ONLY when grant is available AND refill < tick):**
+  unlike v1's F-B, gate the stay-runnable on BOTH `queue_refill_ns < TICK`
+  AND the class cap NOT being exhausted this epoch (so it cannot
+  busy-poll a cap-exhausted lease — kills Codex MAJOR-3). Mechanism: in
+  the exact park branch, if `queue_refill_ns < TICK && class_granted < cap`,
+  `continue` (let RR revisit) instead of parking; bounded by the existing
+  drain budget. When the cap IS exhausted, park to the epoch boundary
+  (not the wheel), which is the correct wake.
+- **F-F (sub-tick wake representation):** represent `next_wakeup_tick` at
+  finer resolution for the bucket-refill case, OR shrink only the L0
+  horizon. Heavier (touches the wheel L0/L1 math); fallback to F-E.
 
-Staying runnable for a sub-tick refill does NOT raise the class's
-average rate above shape, because the **per-queue token bucket still
-gates every send**: `queue.hot.tokens < head_len` still blocks the send
-on the very next visit if the bucket hasn't actually refilled (the
-`refill_cos_tokens`/lease top-up only adds `rate × (now − last_refill)`).
-F-B only removes the *artificial 50µs floor* between a refill that has
-already happened in wall-clock and the queue being allowed to notice it.
-The bucket + the cause-1 grant cap remain the rate enforcers. **No new
-burst surface.** Gate (§8) re-measures aggregate + retransmits to prove
-this.
+F-E is confined to the drain/park path — NO seqlock, NO atomic, NO shared
+state (§7).
 
-### 6.3 Why this is NOT cause 1 and does NOT need the carry
+### 6.3 If §5 layer = "drawn-not-sent" — TX submit path
 
-Cause 1 enlarges the *grant* (`epoch_total_grant_cap`) so the class is
-*allowed* to send the lagged bytes. Cause 2 is downstream: even with a
-full grant, the class can't *emit* it because the drain parks it on the
-wheel. The two are orthogonal layers (meter vs drain). The carry without
-F-A/F-B leaves 3g/6g at ~94% (measured); F-A/F-B without the carry
-leaves 100m at ~82% (measured). **Both are required for Gate 1.**
+TX-ring refusal or scratch-build failure under bursty 200µs delivery.
+Fix is in the submit path (`tx_completion.rs` apply paths), orthogonal to
+both causes. Re-scope at /engineer.
 
-### 6.4 Alternate mechanisms (non-primary §5 outcomes)
+### 6.4 If §5 layer = "sent-but-TCP-loses (H-TCP)" — the honest PLAN-KILL branch
 
-- If §5 shows **under-granted cap** (counter 5 < 1.0): the residual is
-  in the meter. Sub-case fair-share rounding (H5): change per-worker
-  share from floor-division to a remainder-distributing split, or grant
-  the class-cap directly when `total_flows` is concentrated on one
-  worker. Sub-case rotation-lag-without-clamp (H4): fold into the
-  cause-1 carry (it already recovers lag). Either way it MERGES into the
-  cause-1 seqlock change, not the drain path.
-- If §5 shows **root throttling** (counter 3/5b): raise the root lease
-  burst or epoch; orthogonal to both causes.
+If the shaper grants AND sends ~100% of shape but iperf3 still reports
+94%, cause 2 is NOT a shaper bug. The residual is TCP's response to
+50µs-quantized bursty delivery. Dispositions, in order of preference:
+- (i) smooth delivery (smaller service quantum / sub-tick wake) to reduce
+  burstiness — overlaps F-E/F-F, may recover goodput without a grant
+  change;
+- (ii) accept ~94% as the AF_XDP-per-CPU + TCP-pacing physics floor for
+  mid-rate single-flow-bundle classes and **re-frame Gate 1** (requires
+  charter authorization — this is the documented PLAN-KILL exit, matching
+  the cause-1 §12 "neither fork" honesty).
+This branch is why §5's goodput ratio is load-bearing: it is the
+difference between "fixable shaper defect" and "rate-accuracy physics."
 
----
+### 6.5 Why this is NOT cause 1 and (mostly) does NOT need the carry
+
+Cause 1 enlarges the *grant*; cause 2 (except the H-LEASE branch) is
+downstream of the grant. With a full grant the class still cannot emit it
+if the drain parks it (H7) or the bucket can't bank it (H-LEASE). The
+carry without a cause-2 fix leaves 3g/6g at ~94% (measured); a cause-2
+fix without the carry leaves 100m at ~82% (measured). **Both are required
+for Gate 1** — UNLESS §5 shows H-TCP, in which case neither shaper fix
+helps and §6.4 applies.
+
 
 ## 7. Seqlock / concurrency surface (composing with cause-1 + #1643)
 
-The PRIMARY fix (F-A/F-B) touches `estimate_cos_queue_wakeup_tick` and
-the exact-queue park branch — **single-worker, per-binding runtime
-state** (`queue.hot.tokens`, `next_wakeup_tick`, the timer wheel). These
-are NOT shared across workers and NOT in the v8 seqlock payload. So:
+**Branch-dependent (v2).** The seqlock surface depends on which §5 layer
+the bisection picks:
 
-- **Zero new seqlock surface.** F-A/F-B add no atomic, no published
-  field, no reader. The #1643 fence (cause-1 plan §4.0) is untouched and
-  unaffected.
-- **No interaction with the carry's `epoch_carry_bytes`** (cause-1
-  rotation-private field). Cause 2 lives entirely below the meter.
+- **Drain-park branch (§6.2, H7/F-E):** touches
+  `estimate_cos_queue_wakeup_tick` + the exact park branch —
+  **single-worker, per-binding runtime state** (`queue.hot.tokens`,
+  `next_wakeup_tick`, the timer wheel). NOT shared, NOT in the v8 seqlock
+  payload. **Zero new seqlock surface**; the #1643 fence and the carry's
+  `epoch_carry_bytes` are untouched. This is the cleanest composition.
+- **Lease-target branch (§6.1, H-LEASE):** raises
+  `COS_ROOT_LEASE_TARGET_US` / `config.lease_bytes` in
+  `compute_shared_cos_lease_config`. `lease_bytes` IS read by the meter
+  path (`token_bucket.rs:184` watermark, `max_total_leased`), so this is
+  **meter-side config, NOT a drain-path constant.** It is still NOT in
+  the v8 seqlock payload (the seqlock publishes `cap/share/grace/tag`,
+  not `lease_bytes`), and it is set once at lease construction (immutable
+  per lease), so it adds no new atomic and no torn-read surface. But it
+  is NOT as cleanly disjoint from cause-1 as the drain fix — the lease
+  config object is shared by all workers (Arc), so a change to its sizing
+  interacts with the carry's grant sizing. Review must treat the combined
+  meter change (carry + lease-target) as one surface.
+- **TX-submit / TCP branches (§6.3/§6.4):** orthogonal to the seqlock
+  entirely.
 
-This is the strongest argument for the F-A/F-B drain-path fix over any
-meter-side mechanism: cause 2 can be made **orthogonal** to the
-seqlock-sensitive cause-1 change, so the combined PR's seqlock review
-surface is exactly cause-1's surface (carry + #1643 fence), with cause 2
-as an independent, non-atomic drain-path delta.
+**The drain-park branch is preferred precisely because it is
+seqlock-orthogonal.** If §5 forces the lease-target branch, §9's layering
+claim weakens (see §9).
 
 ---
 
@@ -437,24 +513,29 @@ binding gate and now requires BOTH causes fixed.
   is the gate cause-1 alone CANNOT pass (3g/6g plateau ~90-94) and
   cause-2 alone CANNOT pass (100m ~82). Combined MUST clear all four.
 - **Cause-1 lowest-class preserved** — 100m must remain ≥95 (the carry's
-  +13pp must not regress when F-A/F-B changes the park cadence).
+  +13pp must not regress when the cause-2 fix changes the park/lease
+  cadence).
 - **Burst bound held** — Gate 5 (single-class stall→resume ≤ K×rate×EPOCH,
-  per cause-1 plan §7) AND a NEW cause-2 burst check: F-B "stay-runnable"
-  must not let any class exceed shape over any 10ms window (counter:
-  per-class TX bytes / 10ms ≤ shape × 1.05). Proves §6.2.
+  per cause-1 plan §7) AND a NEW cause-2 burst check: the cause-2 fix
+  (F-E stay-runnable OR the larger lease target) must not let any class
+  exceed shape over any 10ms window (counter: per-class TX bytes / 10ms ≤
+  shape × 1.05). Proves §6.1/§6.2 burst-safety.
 - **`make test-failover`** — mandatory (TX-shaping change). Zero-drop;
-  cause-1's reused-lease unit test passes; F-A/F-B park changes do not
-  alter failover behavior (park state is per-binding, rebuilt on
+  cause-1's reused-lease unit test passes; the cause-2 park/lease change
+  does not alter failover (park + lease state is per-binding, rebuilt on
   promote).
 - **Full matrix** — v4+v6 × push+`-R` × CoS-off+CoS-on, per memory
   feedback. Gate 2 (priority-low ≥5%), Gate 3 (retransmits ≤100/30s),
   Gate 4 (aggregate ≥19.5G) must not regress.
-- **Cause-2 regression test** — a Rust unit test on
-  `estimate_cos_queue_wakeup_tick`: assert that a sub-tick refill
-  (`queue_refill_ns < COS_TIMER_WHEEL_TICK_NS`) under F-A returns the
-  computed tick (not `now_tick+1` floored) — pins F-A. And a drain-path
-  test that a bucket-bound exact queue with a sub-tick refill stays
-  runnable (F-B), bounded by the drain budget.
+- **Cause-2 regression test (branch-dependent):**
+  - drain-park branch: a Rust unit test that a bucket-bound exact queue
+    with `queue_refill_ns < TICK` AND `class_granted < cap` stays runnable
+    (F-E, NOT parked), bounded by the drain budget; and that a
+    cap-exhausted queue parks to the EPOCH boundary (not busy-poll) —
+    pins the Codex-MAJOR-3 fix.
+  - lease-target branch: a unit test that the bucket high-water can reach
+    ≥2 ticks of credit and that `max_total_leased`/buffer still bound the
+    burst.
 
 ---
 
@@ -476,68 +557,91 @@ ONE combined seqlock change ships:
    `fence(Acquire)` between payload loads and `seq_after` re-read; payload
    stores downgraded to `Relaxed`. **Meter layer, seqlock-correctness.**
    `Closes #1643`.
-3. **Cause-2 F-A/F-B drain-park fix** (`estimate_cos_queue_wakeup_tick`
-   + exact-queue park branch) — fixes the mid-rate (3g/6g)
-   park-quantization loss. **Drain layer — NO seqlock, NO atomic, NO
-   shared state.**
+3. **Cause-2 fix — branch-dependent on §5:**
+   - if drain-park (H7): F-E in `estimate_cos_queue_wakeup_tick` + the
+     exact park branch. **Drain layer — NO seqlock, NO atomic, NO shared
+     state.** Cleanest composition.
+   - if lease-target (H-LEASE): raise `COS_ROOT_LEASE_TARGET_US` /
+     `config.lease_bytes`. **Meter-config layer** — immutable per lease,
+     not in the seqlock payload, but shared (Arc) so it co-reviews with
+     the carry's grant sizing.
+   - if TX-submit / TCP: orthogonal (or §6.4 PLAN-KILL exit).
 
-**Composition is clean by layering:** (1)+(2) are the meter/seqlock
-surface (carry + fence, the only concurrency-sensitive code); (3) is a
-disjoint, single-threaded drain-path change. They share NO field. The
-combined PR's hostile concurrency review is bounded to (1)+(2); (3) is
-reviewed as ordinary single-worker logic. Gate 1 requires all three.
+**Composition by layer (drain-park branch — the preferred outcome):**
+(1)+(2) are the meter/seqlock surface (carry + fence, the only
+concurrency-sensitive code); (3) is a disjoint single-threaded drain
+change sharing NO field. The combined PR's hostile concurrency review is
+bounded to (1)+(2).
+
+**If §5 forces the lease-target branch:** the "clean layering" claim is
+WEAKER — the lease config is shared meter state whose sizing interacts
+with the carry. It is still seqlock-payload-disjoint (immutable per
+lease, not seq-guarded), but the combined meter change (carry +
+lease-target) must be reviewed as ONE sizing surface, and the burst-bound
+proof (§8) must cover the carry's grant AND the larger bucket together.
+
+Gate 1 requires cause-1 + the §5-selected cause-2 fix + #1643 — UNLESS §5
+shows H-TCP, in which case §6.4 (smooth-or-reframe) applies and the
+combined PR may not be able to clear Gate 1 as currently scoped (an
+honest possible outcome, flagged in §10-R7).
 
 ---
 
 ## 10. Risks & residuals
 
-- **R1 — H-WHEEL not the cause (§5 shows under-granted cap).** Then the
-  primary §6.1 mechanism is wrong and §6.4's meter-side fix applies
-  (merges into cause-1). Mitigation: §5 runs FIRST at /engineer; the
-  plan does not commit code before the bisection.
-- **R2 — F-B "stay-runnable" busy-loops a starved queue.** If the bucket
-  genuinely cannot refill (root-bound), staying runnable wastes poll
-  cycles. Mitigation: F-B fires ONLY when `queue_refill_ns < TICK`
-  (bucket WILL refill within a tick); a longer refill still parks. The
-  drain-loop budget (`should_enter_shaped_drain` + REINGEST_BUDGET=4)
-  bounds spins. Gate 4 (aggregate, CPU) catches a regression.
-- **R3 — interaction with the 11-class full simul.** Solo clears the
-  wheel hypothesis, but under 11 classes the RR-revisit latency (H8) may
-  re-introduce a gap F-B cannot close (the worker is busy with other
-  classes when the bucket refills). Mitigation: Gate 1b (full simul) is
-  a gate; measure. If H8 dominates under load, F-B helps less and a
-  finer-grained scheduler (out of scope, #1614) may be needed — call it
-  out, do not silently pass.
-- **R4 — `now_tick+1` floor exists for a reason.** Removing/relaxing it
-  (F-A) could wake a queue in the same tick repeatedly. Mitigation: F-A
-  preserves "never wake in the past" (still floors at `now_tick+1` when
-  the computed tick ≤ now_tick); it only stops rounding a future sub-tick
-  refill UP. The regression test (§8) pins this.
+- **R1 — the §5 layer is meter-under-grant, not drain.** Then the
+  drain-park fix is wrong and the fix merges into cause-1
+  (rate-calc/fair-share). Mitigation: §5 runs FIRST at /engineer; the
+  plan commits NO mechanism before the bisection names the layer.
+- **R2 — F-E "stay-runnable" busy-loops.** Mitigation (Codex MAJOR-3):
+  F-E fires ONLY when `queue_refill_ns < TICK` AND `class_granted < cap`
+  (grant available). A cap-exhausted queue parks to the EPOCH boundary,
+  NOT the wheel — so it cannot busy-poll an exhausted lease. The drain
+  budget (`should_enter_shaped_drain` + REINGEST_BUDGET=4) bounds spins.
+  Gate 4 (CPU/aggregate) catches a regression.
+- **R3 — 11-class full simul (H8).** Solo isolates the per-queue
+  hypothesis, but under 11 classes the RR-revisit latency may re-open a
+  gap F-E cannot close (worker busy elsewhere when the bucket refills).
+  Mitigation: Gate 1b (full simul) is a gate; if H8 dominates under load
+  a finer scheduler (#1614) may be needed — call it out, do not silently
+  pass.
+- **R4 — the lease-target raise increases burst.** A bigger bucket banks
+  more credit. Mitigation: `buffer_bytes` (3.75/7.5 MB) +
+  `max_total_leased = burst/4` already bound it, and the cause-1 grant
+  cap still meters rate. Gate 5/8 burst checks are mandatory for this
+  branch.
 - **R5 — cause-1's reduced scope.** Cause-1's plan claimed Gate 1; with
-  cause 2 split out, cause-1 only owns 100m/1g. /engineer MUST update the
-  cause-1 plan's Gate-1 claim or the combined PR will appear to fail
-  cause-1's own gate. Documented in §9 note.
-- **R6 — VISIT_NS coupling.** If §5 confirms the residual is exactly
-  `TICK/(VISIT_NS+TICK/2)`, an alternate one-line fix is to make
+  cause 2 split out, cause-1 only owns 100m/1g. /engineer MUST re-scope
+  the cause-1 plan's Gate-1 claim or the combined PR appears to fail
+  cause-1's own gate. Documented §9.
+- **R6 — VISIT_NS / TICK alignment (F-D).** A cheap alternate: make
   `COS_GUARANTEE_VISIT_NS` an integer multiple of the wheel tick so the
-  park always lands on a boundary with zero rounding. This is a
-  candidate F-D to evaluate at /engineer (cheaper than F-B but couples
-  two constants). Listed for completeness.
+  park lands on a boundary with less rounding. Couples two constants;
+  evaluate only if §5 shows the wheel-floor is the layer and F-E is
+  rejected. Listed for completeness.
+- **R7 — H-TCP: the residual may be OUTSIDE the shaper.** If §5's
+  `goodput/drain_sent < 1` while the shaper grants and sends full shape,
+  cause 2 is TCP's response to bursty 50µs-quantized delivery, not a
+  shaper defect. Then §6.4 applies: smooth delivery (may recover it) OR
+  re-frame Gate 1 (charter-authorized PLAN-KILL exit). The combined PR
+  may NOT clear Gate 1 at 95% if this is the physics floor — this is the
+  honest worst case, matching the cause-1 §12 "neither fork" precedent.
 
 ---
 
 ## 11. 5+ hostile open questions (for the reviewers to attack)
 
-1. **Is `t_refill` really rate-independent?** §3.1 claims `t_refill =
-   quantum/rate = VISIT_NS = 200µs` for ALL rates because `quantum =
-   rate×VISIT_NS`. But `cos_guarantee_quantum_bytes` *clamps* quantum to
-   `[1500, 512K]`. At 100m, `quantum = 2500` (unclamped); at 24g,
-   `quantum = 24e9/8 × 2e5/1e9 = 600 000 > 512K` → CLAMPED to 512K, so
-   `t_refill = 512K / 3e9 = 170µs ≠ 200µs`. **Does the clamp break P4's
-   flatness at the high end?** 3g (75K) and 6g (150K) are both UNDER the
-   512K clamp, so the flat residual holds for THEM — but a reviewer
-   should verify the clamp does not also distort 6g (150K < 512K, safe)
-   and that the "flat across 3g/6g" claim is not coincidental.
+1. **What sets the park CADENCE, given the basis is `head_len` not the
+   quantum?** v2 corrected the park-refill basis to `head_len` (~2µs),
+   so the per-park dead time is the 50µs floor — but how OFTEN does the
+   queue park? That depends on how much credit the bucket holds when it
+   starts draining (the service quantum 75K/150K, OR `lease_bytes`
+   200µs-of-credit, whichever the bucket actually reaches). The flat-loss
+   intuition only survives if `parks_per_second × 50µs` is a
+   rate-independent fraction — which the v2 plan explicitly says it CANNOT
+   derive and must MEASURE (counter 7 park rate). **A reviewer should
+   attack whether the flatness across 3g/6g is mechanistic or
+   coincidental, given the magnitude is now admittedly unknown.**
 2. **Why does the wheel hurt a SOLO single-class run (P3)?** With one
    class the worker RR has nothing else to do — so why park at all
    instead of immediately re-servicing? Answer hinges on: does the
@@ -546,8 +650,9 @@ reviewed as ordinary single-worker logic. Gate 1 requires all three.
    the NEXT frame? If the poll loop spins faster than `t_refill`, the
    wheel floor (`now_tick+1`) is what forces the 50µs park even with
    nothing else to do. **A reviewer must confirm the queue genuinely
-   parks (counter 3 > 0) rather than staying runnable in the solo case;
-   if it stays runnable, H-WHEEL is wrong and the loss is elsewhere.**
+   parks (`drain_park_queue_tokens` > 0) rather than staying runnable in
+   the solo case; if it stays runnable, the wheel-floor hypothesis is
+   wrong and the loss is elsewhere (H-LEASE or H-TCP).**
 3. **Is the loss in the bucket refill cadence or the wheel?** H3 (bucket
    top-up early-return) and H-WHEEL (park quantization) are two views of
    the same starvation. Could the real cause be that the lease top-up
@@ -558,26 +663,33 @@ reviewed as ordinary single-worker logic. Gate 1 requires all three.
    still parks, the lease target is the limiter, not the wheel — and the
    fix is to raise `COS_ROOT_LEASE_TARGET_US`, not touch the wheel.**
    This is a genuinely different fix and the plan must not prejudge it.
-4. **Does F-B violate work-conservation or fairness under contention?**
+4. **Does F-E violate work-conservation or fairness under contention?**
    Staying runnable for a sub-tick refill means a 3g queue could be
    re-serviced ahead of an 11-class RR cycle. Under full load this could
-   steal service from other classes. **Is F-B's "stay runnable" actually
+   steal service from other classes. **Is F-E's "stay runnable" actually
    a priority inversion that helps solo but hurts the simul (Gate 1b)?**
-5. **Is the 6% an artifact of TCP, not the shaper?** The measurement is
-   iperf3 TCP goodput. 200µs park × periodic = bursty delivery → could
-   inflate RTT/jitter and depress the TCP window, costing throughput
-   that is NOT the shaper's grant. **Counter 1 vs 2 (cap vs consumed) at
-   the SHAPER layer settles this: if the shaper grants AND the class
-   consumes ~100% of grant but iperf3 still reports 94%, the loss is in
-   TCP/delivery-burstiness, and the fix is pacing/burst-smoothing, not
-   the grant or the park.** This is the single most important falsifier:
-   it could move cause 2 out of the shaper entirely.
-6. **Does the cause-1 carry CHANGE the wheel behavior?** The carry
-   enlarges `cap`, which enlarges the bucket top-up `lease_bytes`? No —
-   `lease_bytes` is `config.lease_bytes` (static), not `cap`. So the
-   carry does NOT refill the bucket more. **Confirm the carry and the
-   park fix are truly independent (they touch different quantities), or
-   the §9 "clean layering" claim is false.**
+   (Note the F-E `class_granted < cap` guard caps it at the class rate,
+   so it cannot exceed shape — but RR-ORDER fairness vs other classes is
+   a separate concern the reviewer should attack.)
+5. **Is the 6% an artifact of TCP, not the shaper? (H-TCP — the killer
+   question.)** The measurement is iperf3 TCP goodput. 50µs-quantized
+   bursty delivery could inflate RTT/jitter and depress the TCP window,
+   costing throughput that is NOT the shaper's grant. **The §5
+   `goodput/drain_sent` ratio settles this: if the shaper grants AND
+   SENDS ~100% of shape (drain_sent ≈ rate×wall) but iperf3 still reports
+   94%, the loss is in TCP/delivery-burstiness, and the fix is
+   pacing/burst-smoothing (or re-framing Gate 1), not the grant or the
+   park.** This could move cause 2 out of the shaper entirely (§6.4 /
+   §10-R7).
+6. **Does the cause-1 carry CHANGE the cause-2 behavior?** The carry
+   enlarges `cap` (the grant), NOT `lease_bytes` (the bucket top-up
+   target = `config.lease_bytes`, static). So the carry does NOT refill
+   the bucket more — confirming drain-park independence. BUT if §5 picks
+   the H-LEASE branch (raise `lease_bytes`), the carry's larger grant AND
+   the larger bucket BOTH increase burst — so on THAT branch the §9
+   "clean layering" is false and the burst proof must cover both. **A
+   reviewer should pick the branch and check the carry-interaction
+   claim per branch, not in general.**
 
 ---
 
@@ -593,8 +705,20 @@ reviewed as ordinary single-worker logic. Gate 1 requires all three.
 - Per-visit quantum: `cos_guarantee_quantum_bytes`
   (`queue_service/mod.rs:1246`); `COS_GUARANTEE_VISIT_NS = 200_000`,
   `QUANTUM_MIN = 1500`, `QUANTUM_MAX = 512K` (`tx/drain/mod.rs:561-563`).
-- Exact-queue park branch (the H-WHEEL site): `queue_service/mod.rs:665-700`
-  (`drain_park_queue_tokens` + park), `:688` wake-tick call.
+- Exact-queue park branch (the wheel-floor site): `queue_service/mod.rs:665-700`
+  (`drain_park_queue_tokens` + park), `:688` wake-tick call. **Verified
+  the 4th positional arg to `estimate_cos_queue_wakeup_tick` here is
+  `head_len`, NOT the quantum** (Codex BLOCKING-1 — the v2 correction).
+- Service batch (the ONLY quantum user): `secondary_budget =
+  tokens.min(cos_guarantee_quantum_bytes).max(head_len)`,
+  `queue_service/mod.rs:702-707`.
+- **TX-sent counter for the §5 bisection:** `owner_profile.drain_sent_bytes`
+  / `drain_guarantee_sent_bytes`, written post-submit at
+  `cos/tx_completion.rs:483-489`; `lease.consume(sent_bytes)` `:540-549`.
+- **No waterfill drain path (reject Codex BLOCKING-2):** `grep waterfill
+  userspace-dp/src/` = 1 comment hit (`forwarding_build/cos.rs:424`);
+  `oversubscription_policy` written `forwarding_build/cos.rs:443`, read in
+  drain = 0 hits.
 - Bucket top-up + early-return: `cos/token_bucket.rs:154,184`.
 - Lease target: `compute_shared_cos_lease_config` `mod.rs:694`
   (`COS_ROOT_LEASE_TARGET_US = 200`, `mod.rs:690`); `lease_bytes`
