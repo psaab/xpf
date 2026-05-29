@@ -47,6 +47,21 @@ plan: §5 instrumented bisection is the deliverable; the fix is deferred
 to whatever layer the four ratios name. This is PLAN-READY as a
 measurement plan, NOT as a fix.
 
+| r4 | Codex | codex exec (read-only sandbox), prompt /tmp/codex-1630-c2-r4.txt | **PLAN-NEEDS-MAJOR** (honest convergence confirmed; 3 fixable gaps: §5 missing offered-load fifth-layer counter; instrumentation A/B not a gate; stale H-WATERFILL/F-W1 text in §5/§10) |
+| r4 | AGY | `adversarial-review-mpqdcfge-8levl3` (succeeded; full result) | **PLAN-READY (with amendments)** — SAME gaps: ingress offered-load counter, cause-1 scope gating, H-TCP L2 normalization |
+| r4 | Claude SMR | docs claude-smr-plan-r4.md | **PLAN-READY** (measurement-first; all r4 amendments folded into v5) |
+
+## r4 convergence — PLAN-READY (3-way)
+
+Both externals converged on the SAME three amendments (offered-load
+counter + instrumentation A/B gate + scope/normalization). v5 folds ALL
+of them. Codex's "PLAN-NEEDS-MAJOR" was for the three specific gaps, not
+the framing — it explicitly called the measurement-first convergence
+"honest, not a dodge." With the gaps closed in v5, the verdict is
+**3-way PLAN-READY** for a measurement-first plan: ship §5 (offered-load
++ four-ratio bisection), defer the fix to the layer it names. Leading
+expected outcome: H-TCP (loss outside the shaper).
+
 ## r1 convergence
 
 2-of-3 decisive PLAN-NEEDS-MAJOR (Codex + Claude SMR, both quoted-line

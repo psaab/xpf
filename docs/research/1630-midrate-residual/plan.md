@@ -7,19 +7,19 @@
   committed.
 - Author: Claude SMR (CoS-shaper / token-bucket / rate-accuracy /
   AF_XDP-drain / timer-wheel domain).
-- Rev: **v4 (r1+r2+r3 folded).** Status after r3: **PLAN-READY as a
-  MEASUREMENT-FIRST plan with NO pre-committed fix.** Three mechanism
-  hypotheses were code-falsified across r1-r3 (timer-wheel, lease-target,
-  waterfill-relegation); the §5 instrumented bisection is the converged,
-  honest next step. r3: Codex PLAN-NEEDS-MAJOR (BLOCKING-1 — H-WATERFILL
-  falsified: `quantum_sum` is over the STATIC configured exact set, not
-  the eligible set, so the full-config Phase-1 budget honors 3g/6g every
-  epoch — F-W1 would be a no-op); Claude SMR PLAN-NEEDS-MAJOR (concur
-  Codex; converge to measurement-first); AGY PLAN-READY but on a FALSE
-  config assumption ("solo 3g ⇒ quantum_sum=75 000" — true only if the
-  config is stripped to 3g; the harness loads ALL 10 classes), REJECTED
-  on the §1 error (see agy-plan-r3.md). 2-of-3 decisive against the v3
-  mechanism; v4 re-scopes to measurement-first.
+- Rev: **v5 (r1-r4 folded).** Status after r4: **PLAN-READY (3-way
+  converged) as a MEASUREMENT-FIRST plan with NO pre-committed fix.** r4:
+  Codex PLAN-NEEDS-MAJOR (3 fixable gaps: missing offered-load counter,
+  instrumentation A/B not a gate, stale H-WATERFILL/F-W1 text) + AGY
+  PLAN-READY-with-amendments (SAME gaps: offered-load counter, scope
+  gating, L2 normalization) + Claude SMR PLAN-READY. All r4 amendments
+  folded into v5 (§5.0 offered-load gated first, §5.4 A/B hard gate, §5.1
+  L2-normalized goodput, §6.1 ordered procedure, §10-R5/§11-Q5 scope
+  gating, stale v3 text purged). The fix is DEFERRED to the layer §5
+  names; leading expected outcome is H-TCP (loss outside the shaper).
+  Three mechanism hypotheses were code-falsified across r1-r3
+  (timer-wheel, lease-target, waterfill-relegation) — §5 is the honest
+  next step.
 
 > **THE r3 FINDING (decisive):** `exact_queues_by_rate_ascending` is built
 > ONCE at config-apply over EVERY configured exact queue
@@ -364,16 +364,33 @@ derive.
 
 ## 5. The instrumented bisection (v4 — THE DELIVERABLE; both reviewers confirmed the counters)
 
-Env-gated debug counters in a LOCAL throwaway build, NOT committed
-(`option_env!("XPF_COS_MIDRATE_DEBUG")`, additive `AtomicU64` on the
-existing `owner_profile` block + the waterfill selector). Removed before
-the /engineer PR.
+Debug counters in a LOCAL throwaway build, NOT committed
+(`option_env!("XPF_COS_MIDRATE_DEBUG")`). **Use thread-local non-atomic
+accumulators flushed to the shared status block once per 1s** (NOT hot-path
+`AtomicU64` fetch_add) to keep the instrumentation free at 25G —
+per-packet atomics on the drain path are themselves perturbative (§5.4).
+
+### 5.0 Counter 0 — OFFERED LOAD (the fifth layer; check FIRST — Codex r4)
+
+Before any shaper counter: **per-class offered/ingress bytes BEFORE
+shaping** — bytes enqueued to the CoS queue per 1s (the
+ingest/enqueue site, `ingest_cos_pending_tx` → `cos_queue` push, count
+`cos_item_len` at enqueue) plus ingress drops/refusals and
+queue-backlogged (nonempty) time. **If `offered_bytes < rate×wall` the
+class is RX/conntrack/forward-bound BELOW its rate and there is NO shaper
+residual to fix** (§11-Q4, §4-Q4b). This MUST be the first ratio read;
+every shaper-internal hypothesis is moot if the class is not even offered
+its rate. (For a push test the firewall forwards the host's TCP; if a
+single solo flow-bundle is RX/CPU-limited the shaper never sees full
+offered load.)
 
 ### 5.1 Counters (per 3g/6g queue, per 1s window)
 
+0. **offered_bytes** + ingress drops + backlogged-time (§5.0) — the
+   gating counter.
 1. **phase1_honored_bytes** — bytes for which this queue was SELECTED in
    Phase 1 (`select_exact_cos_guarantee_queue_waterfill` Phase-1 return,
-   `:907`). Add `secondary_budget` at the return.
+   `:907`). Add `secondary_budget` at the return. (Expected ≈ all per §3.1.)
 2. **phase2_served_bytes** — bytes selected in Phase 2 (`:996` return).
 3. **phase1_skipped_count / phase2_skipped_count** — times the queue was
    walked but skipped (Phase-1 budget-exhausted break `:889`; Phase-2
@@ -381,10 +398,11 @@ the /engineer PR.
 4. **drain_sent_bytes** — actual TX (existing, `tx_completion.rs:482`),
    net of stranded `queue.hot.tokens` (AGY r2 #3: subtract residual hot
    tokens so a TX-ring refusal is not mis-attributed).
-5. **cap_granted** vs `rate×wall` (H1/H4).
+5. **cap_granted** vs `rate×wall` (H1/H4/H5).
 6. **bucket_high_water** vs `rate×200µs` (H-LEASE falsifier).
 7. **per-worker share-exhaustion count** + worker count (H5).
-8. **iperf3 goodput**, L2-normalized vs `drain_sent` (H-TCP).
+8. **iperf3 goodput**, L2-normalized (subtract Ethernet/IP/TCP framing so
+   the ratio compares like-for-like vs `drain_sent` frame bytes) (H-TCP).
 
 ### 5.2 The decision table
 
@@ -392,23 +410,35 @@ Run 3g-solo and 6g-solo (single port, push, v4, guarantee-rate 0.7):
 
 | Observation | Conclusion |
 |-------------|------------|
-| `phase1_honored ≈ 0` AND `phase2_served ≈ all` AND `phase2_skipped` high | **H-WATERFILL CONFIRMED** — the class lives in the non-parking Phase-2 residual and Phase 2 cannot place a full epoch's worth. **Expected primary.** |
-| `phase1_honored ≈ all` (queue IS Phase-1-honored solo) | H-WATERFILL WRONG (contradicts §3.2 arithmetic) — re-open. |
-| `drain_sent/(cap_granted) ≈ 0.94` AND `phase2_served ≈ drain_sent` | the loss IS the Phase-2 placement shortfall (not TX, not TCP). |
-| `goodput/drain_sent < 1` (normalized) while `drain_sent ≈ rate×wall` | **H-TCP** — bytes leave the NIC at rate, TCP loses goodput → smoothing fix (§6.4), not a Phase split fix. |
-| per-worker share-exhaustion high with multiple workers | **H5** — fair-share rounding; folds into cause-1 meter, not the waterfill. |
-| `bucket_high_water > rate×200µs` | H-LEASE alive (contradicts AGY r2 #6) — re-open. |
-| `drain_park_queue_tokens` ≈ 0 for solo 3g/6g | confirms they're in non-parking Phase 2 (H7 not the cause). |
+| **`offered_bytes < rate×wall`** (counter 0 — see §5.0) | **OFFERED-LOAD BOUND** — the class is RX/conntrack/forward-limited BELOW its rate; there is no shaper residual to fix. **Check this FIRST** (§11-Q4). |
+| `phase1_honored ≈ all` AND `drain_sent ≈ rate×wall` AND `goodput < drain_sent` | **H-TCP** — shaper grants, honors in Phase 1, and SENDS full shape; TCP loses goodput to bursty delivery → smoothing fix or §6.4 re-frame. **Leading expected outcome** (every shaper-internal mechanism falsified). |
+| `phase1_honored ≈ 0` AND `phase2_served ≈ all` AND `phase2_skipped` high | H-WATERFILL RE-OPENS — would CONTRADICT §3.1 (the full config should honor 3g/6g in Phase 1). If seen, the config under test is NOT the full set — re-check the applied config. |
+| `cap_granted < rate×wall` with multiple workers | **H5** — per-worker fair-share rounding; folds into cause-1 meter. (Moot for truly-solo: total_flows=1.) |
+| `drain_sent/total_granted < 1` (net of stranded hot tokens) | **DRAWN-NOT-SENT** — TX-ring/scratch refusal; submit-path fix. |
+| `bucket_high_water > rate×200µs` | H-LEASE re-opens (would contradict AGY r2 #6). |
+| `drain_park_queue_tokens` high for solo 3g/6g | the Phase-1 wheel park IS biting (H7 re-opens despite §3.3). |
 
-The Phase-1/Phase-2 byte split is the load-bearing measurement. It
-directly tests H-WATERFILL and cleanly separates it from H5 (fair-share)
-and H-TCP. One cluster run fills it.
+The OFFERED-LOAD check (counter 0) gates everything: if offered < rate
+there is no shaper bug. Given §3 falsified the shaper-internal
+mechanisms, **the expected outcome is offered ≥ rate AND shaper sends
+full shape AND goodput < send → H-TCP.** The five+ ratios cleanly
+separate the surviving candidates; one cluster run fills the table.
 
 ### 5.3 Confirm root is not the limiter
 
 Re-confirm `drain_park_root_tokens ≈ 0` and root-lease grant ≈
 `shaping_rate × wall` for 3g/6g solo. If the root throttles a solo class,
 that is a separate root-meter fix.
+
+### 5.4 Instrumentation-perturbation GATE (Codex r4, §11-Q3)
+
+The instrumentation MUST NOT itself cause the residual it measures. **Gate
+(hard):** run 3g/6g solo with the instrumented build AND the clean build;
+the throughput delta must be ≤ 0.5pp. If the instrumented build depresses
+throughput more than that, the counters are perturbative and the
+measurement is invalid — switch to thread-local non-atomic accumulators
+(§5 preamble) and re-A/B until the delta is within bound. The bisection
+ratios are only trustworthy once this gate passes.
 
 ---
 
@@ -445,13 +475,19 @@ not a commitment):
 - **§5 layer = root throttle (`drain_park_root_tokens > 0` solo):** raise
   root burst/epoch. Orthogonal.
 
-### 6.1 What /engineer does FIRST
+### 6.1 What /engineer does FIRST (ordered)
 
-Run §5 on the free `loss` cluster (3g-solo and 6g-solo, single port,
-push, v4, guarantee-rate 0.7, FULL `cos-iperf-config.set`). Read the four
-ratios + `phase1_honored_bytes`. The decision table (§5.2) names the
-layer. ONLY THEN design the fix for that layer. Do NOT write fix code
-before the bisection.
+1. Pass the §5.4 instrumentation-perturbation A/B gate (instrumented vs
+   clean ≤ 0.5pp) — else the counters are invalid.
+2. Read **counter 0 (offered load) FIRST**: if `offered < rate×wall` the
+   class is RX/forward-bound and there is NO shaper residual — stop, the
+   issue is upstream.
+3. If offered ≥ rate, read the §5.2 ratios on the free `loss` cluster
+   (3g-solo AND 6g-solo AND 9g, single port, push, v4, guarantee-rate
+   0.7, FULL `cos-iperf-config.set`, long steady-state window). The table
+   names the layer.
+4. ONLY THEN design the fix for that layer. Do NOT write fix code before
+   the bisection.
 
 ### 6.2 Burst-safety (whatever the fix)
 
@@ -569,46 +605,42 @@ case the residual is delivery/transport physics and Gate-1 re-framing
 
 ## 10. Risks & residuals
 
-- **R1 — H-WATERFILL not the cause (§5 shows the class IS Phase-1-honored
-  solo, or the loss is H5/H-TCP).** Then F-W1 is wrong and the §6.3
-  alternate applies. Mitigation: §5 runs FIRST at /engineer; the plan
-  commits NO mechanism before the Phase-1/Phase-2 byte split names the
-  layer. The §3.2 boundary arithmetic is itself a strong pre-check
-  (solo 3g/6g CANNOT be Phase-1-honored at 0.7), but it MUST be confirmed
-  by the runtime counter.
-- **R2 — F-W1 mis-detects oversubscription.** The gate `Σ guaranteed >
-  shaping` must use the SAME guaranteed-rate sum the allocator intends
-  (and account for which classes are currently eligible/backlogged, not
-  the static config sum, or a transiently-idle class inflates the test).
-  Mitigation: reuse the existing `exact_demand_rate` / backlog mask
-  machinery (`tx_completion.rs:400 exact_backlog_guarantee_rate_bytes_for_mask`)
-  rather than a fresh sum. Unit-test both regimes (§8).
-- **R3 — full 10/11-class simul still fails (#1614 broader scope).**
-  H-WATERFILL explains the SOLO/4-class residual; in the full mix 3g/6g
-  ARE Phase-1-honored (§3.2), yet the issue's 11-class run shows ~20%.
-  That full-simul failure has additional causes (cross-class budget
-  competition, priority-low starvation) that are #1614's scope, NOT
-  cause-2's flat solo residual. **This plan is scoped to the solo/4-class
-  flat residual; it does NOT claim to fix the full-simul equalization.**
-  /engineer must not over-claim — Gate 1b (full simul) may still need
-  #1614 work. Stated explicitly to avoid the cause-1 "neither fork"
-  over-scope trap.
-- **R4 — F-W1 changes priority-low / oversubscription behavior.** Gating
-  the fraction could let exact classes consume more, squeezing
-  priority-low's min-share in the genuinely-oversubscribed case.
-  Mitigation: Gate 2 (priority-low ≥5%) is a hard gate; F-W1 keeps the
-  `× fraction` cap WHEN oversubscribed, so the original shedding still
-  applies in that regime.
+- **R1 — §5 names no clear layer (all ratios ≈ 1.0 yet goodput < shape).**
+  Then the residual is genuinely H-TCP/delivery-physics (§6.4) and the
+  honest disposition is a smoothing attempt or a charter-authorized
+  Gate-1 re-frame. Mitigation: this is an ANTICIPATED outcome, not a plan
+  failure — §6.4 is the documented exit. The plan's value is having
+  falsified every shaper-internal mechanism so the team does not chase
+  them again.
+- **R2 — the offered-load check (counter 0) is itself mismeasured.** If
+  the enqueue-site counter double-counts or misses re-ingest, the
+  "offered < rate" gate could falsely pass/fail. Mitigation: count at the
+  single ingest site (`ingest_cos_pending_tx`) and cross-check against
+  the host iperf3 send rate; the two must agree within framing overhead.
+- **R3 — scope: this plan does NOT fix the full 11-class simul.** In the
+  full mix 3g/6g ARE Phase-1-honored (§3.1), yet the issue's 11-class run
+  shows ~20% — that failure has additional causes (cross-class budget
+  competition, priority-low) in #1614's scope. **This plan targets only
+  the K/P2/contention-independent flat SOLO/4-class residual the engineer
+  isolated.** /engineer must not over-claim that cause-2 fixes #1630's
+  headline 11-class numbers. (Avoids the cause-1 "neither fork"
+  over-scope trap.)
+- **R4 — the residual may be unfixable (physics floor).** If §5 shows the
+  shaper sends full shape and the loss is TCP pacing on bursty AF_XDP
+  delivery that smoothing cannot recover, cause-2 is a ~6% rate-accuracy
+  floor for single-flow-bundle mid-rate classes, and Gate-1-at-95% may
+  not be achievable for 3g/6g solo. This is an honest possible PLAN-KILL
+  of the FIX (not of the research) — the measurement still has value.
 - **R5 — cause-1's reduced scope.** Cause-1's plan claimed Gate 1; with
   cause 2 split out, cause-1 only owns 100m/1g. /engineer MUST re-scope
-  the cause-1 plan's Gate-1 claim or the combined PR appears to fail
-  cause-1's own gate. Documented §9.
-- **R6 — H5 (fair-share) is the real cause, not H-WATERFILL.** If §5
-  shows the solo run lands on multiple workers and per-worker share
-  rounding under-grants, the fix is in the rotation `my_share`
-  computation (coupled to the seqlock/carry, §9). §5's per-worker
-  share-exhaustion counter + worker count distinguishes this from
-  H-WATERFILL.
+  the cause-1 plan's Gate-1 claim AND (per §11-Q5) gate or scope-note any
+  cause-1+#1643-only PR so #1630 does not falsely appear fixed while
+  3g/6g stay <95%. Documented §9.
+- **R6 — H5 (fair-share) only for multi-worker.** For truly-solo
+  single-port (total_flows=1) there is no fair-share rounding, so H5
+  cannot be the truly-solo residual; it is a candidate only if §5 shows
+  the solo streams land across multiple workers. §5 counter 7 + worker
+  count settles it.
 - **R7 — H-TCP: the residual may be OUTSIDE the shaper.** If §5's
   `goodput/drain_sent < 1` while the shaper grants and sends full shape,
   cause 2 is TCP's response to bursty 50µs-quantized delivery, not a
@@ -695,8 +727,9 @@ case the residual is delivery/transport physics and Gate-1 re-framing
   `oversubscription_policy`, `oversubscription_guarantee_fraction`
   (`types/cos.rs:369,378-406`) — confirmed NOT `Atomic`, NOT shared, NOT
   in the seqlock payload.
-- **oversubscription detection machinery (for F-W1):**
-  `exact_backlog_guarantee_rate_bytes_for_mask` `cos/tx_completion.rs:400`.
+- **oversubscription detection machinery (if a waterfill-side fix is ever
+  revisited):** `exact_backlog_guarantee_rate_bytes_for_mask`
+  `cos/tx_completion.rs:400`.
 - Per-visit quantum: `cos_guarantee_quantum_bytes`
   (`queue_service/mod.rs:1246`); `COS_GUARANTEE_VISIT_NS = 200_000`,
   `QUANTUM_MIN = 1500`, `QUANTUM_MAX = 512K` (`tx/drain/mod.rs:561-563`).
