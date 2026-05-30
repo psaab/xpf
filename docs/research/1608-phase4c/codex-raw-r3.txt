@@ -1,3 +1,20 @@
+Reading additional input from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: /home/ps/git/bpfrx/.claude/worktrees/1608-research
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e7710-2cab-7033-b35f-a2d22f05385c
+--------
+user
+Final re-confirmation of docs/research/1608-phase4c/plan.md (research-only). You returned PLAN-NEEDS-MAJOR twice; the sole remaining issue was a stale clause at line 180 of Path A rationale ('#1615 still caps the only flooder at 870 K pps'). It has been rewritten to: '#1607/#1612 never populated the Scale Target table, and although #1615 has since lifted the flooder ceiling to ~2.94-4.4 M pps, the saturating cold-path measurement was never run.' Confirm there are no remaining false/stale measurement premises in the plan (grep '870' should only appear in Section 3's historical-context correction at ~line 79). Output exactly one verdict label: PLAN-KILL-CONFIRMED, PLAN-READY, or PLAN-NEEDS-MAJOR, with one line of evidence. Do not modify files.
+exec
+/bin/bash -lc "sed -n '1,240p' docs/research/1608-phase4c/plan.md" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
 # #1608 — Phase 4c cold-path hardening — research plan **v3 (research-only)**
 
 > **History:** v1 PLAN-KILLED 2026-05-27 (6 fatal axes), v2 PLAN-KILLED
@@ -170,9 +187,7 @@ Convergent fatals the v3 design space inherits as hard constraints:
   blew the L2 budget).
 - **Acceptance can't be a single-thread cargo bench** (v1 fatal #6 /
   v2 fatal — must gate on a wire-line harness or downgrade to cycle
-  counts. The #1607 harness is no longer TX-capped (#1615 lifted it to
-  ~2.94-4.4 M pps), so a wire-line acceptance gate is now feasible —
-  it has simply never been run for the cold path).
+  counts; the #1607 harness is still TX-capped per #1615).
 
 ## Section 6 — Multiple Path Options
 
@@ -239,6 +254,73 @@ on the firewall's own service IP would throttle legitimate cold connects;
 must be default-off and documented as an attack-mitigation knob, not a
 general policy.
 
+**Structural hazard (AGY r1) — bottleneck-shifting.** Even if 4c.1
+
+exec
+/bin/bash -lc 'rg -n "870" docs/research/1608-phase4c/plan.md' in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+exec
+/bin/bash -lc 'rg -n "#1615|#1607|#1612|Scale Target|flooder|cold-path|saturat|pps|measurement" docs/research/1608-phase4c/plan.md' in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
+79:flooder ceiling (~870 K pps, #1611) that #1612 cited as the blocker no
+
+ succeeded in 0ms:
+1:# #1608 — Phase 4c cold-path hardening — research plan **v3 (research-only)**
+4:> 2026-05-27 (10 new fatals), then PARKED pending #1606 + #1607 v2 + #1609.
+17:  eval) to bound cold-path work under a cold-flow flood.
+25:cache) + #1620/#1635 (cold-path latency instrumentation) do not already
+28:## Section 2 — Current cold-path topology (verified against origin/master @ 6bdf9d73e)
+39:   new flow". **Wrapped by the #1620/#1635 cold-path latency histogram**
+47:   - `try_match_rule` (`policy.rs:926`): inactive gate → `compiled_apps`
+67:## Section 3 — The measurement gap (load-bearing for the whole issue)
+71:supply the baseline — #1607/#1611/#1612 hardware-ceiling measurement —
+72:**did not produce a populated Scale Target table.** Verified:
+77:**Correction (Codex r1 finding #1) — #1615 is RESOLVED, so the
+78:measurement is now ACHIEVABLE but was never run.** The single-thread
+79:flooder ceiling (~870 K pps, #1611) that #1612 cited as the blocker no
+80:longer holds: the #1615 multi-thread flooder (CLOSED) reaches
+81:**~2.94 M pps aggregate at 4 threads (BLOCKING GATE PASS ≥2.5 M) and
+82:~4.4 M pps at 8 threads** (`docs/pr/1615-flooder-multithread-virtio/
+83:measurements.md:23,55`). At ~2.94 M pps across 6 workers ≈ 490 K
+84:pps/worker — still below the ~5 Mpps/worker cold-path saturation point,
+85:but with 8 threads (~4.4 M / ~733 K pps/worker) and a focused single-
+87:cold-path saturation is now within reach of the harness. **Nobody has
+88:run that measurement and populated the Scale Target table.** So the
+91:measurement step was never executed. This makes the measurement-first
+99:in-tree cold-path instrument is the #1620/#1635 latency histogram, which
+102:**Hostile framing:** absent a measured cold-path saturation profile,
+105:either (a) cite a real measurement, or (b) justify the mechanisms as
+156:  `elapsed_ns × pps / 1e9` truncates to 0 under fast polling, permanent
+173:  counts; the #1607 harness is still TX-capped per #1615).
+177:### Path A — PLAN-KILL (recommended default unless measurement appears)
+180:1. The cold-path bottleneck is **unmeasured** on supported hardware
+181:   (Section 3); #1607/#1612 never populated the Scale Target table, and
+182:   although #1615 has since lifted the flooder ceiling to ~2.94-4.4 M
+183:   pps, the saturating cold-path measurement was never run.
+187:   genuine availability concern but is **not demonstrated** to saturate
+197:research so a future author with a real measurement can resurrect it.
+202:entirely. Justified ONLY if a measurement (Path D first) shows the
+203:zone-pair linear scan is a real cold-path cost at the operator's rule
+221:the attack the verdict cache *increases* cold-path cost and *decreases*
+224:lifetime), which is not the saturation threat. This is a fundamental
+241:drops post-policy, for a flood to a *live* dst the saturation cost is
+247:install is actually the per-worker saturation cost, which is exactly
+248:what Path D would measure. Without that measurement, 4c.1's benefit is
+255:Do NOT ship either mechanism until a cold-path saturation profile exists
+256:on real hardware. **This is now ACHIEVABLE: #1615 is CLOSED and the
+257:multi-thread flooder reaches ~2.94-4.4 M pps** (Section 3), enough to
+258:drive a single-zone-pair cold flood toward per-worker saturation. The
+259:remaining work is purely to *run* it: focus the flooder on one zone-pair
+261:flood, populate the Scale Target table, and confirm the policy scan +
+272:"narrow" (#1607 measurement, #1609 DAG) both failed to deliver their
+274:Scale Target measurement was never run — even though #1615 has since
+275:made the harness capable of >2.5 M pps. The mechanisms therefore still
+278:future measurement shows the live-dst flood saturates a worker, Path C
+332:lands (no saturating flooder). Until then, acceptance MUST be downgraded
+337:acceptance criteria stay TBD pending #1615 resolution.
+
+exec
+/bin/bash -lc "sed -n '240,380p' docs/research/1608-phase4c/plan.md" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
 **Structural hazard (AGY r1) — bottleneck-shifting.** Even if 4c.1
 drops post-policy, for a flood to a *live* dst the saturation cost is
 not only the policy scan; the next pipeline stage is session install
@@ -331,14 +413,12 @@ re-derived if B or C proceeds.
 ## Section 10 — Acceptance criteria (only if B or C proceeds)
 
 The issue's CPU-% and cycle-count criteria are unmeetable until Path D
-is actually run (the saturating-flood flamegraph + Scale Target table
-that #1615's now-uncapped harness can produce but nobody has produced).
-Until that measurement exists, acceptance MUST be downgraded to: (a)
-unit-level cycle counts via `core::arch` rdtsc microbench on the gate
-primitive in isolation, AND (b) a smoke proof that the established-flow
-hot path (v4+v6, push+reverse, all CoS classes) and `make test-failover`
-≤60 ms are unchanged. The flood-mitigation acceptance criteria stay TBD
-until the Path D measurement is run on the #1615 multi-thread harness.
+lands (no saturating flooder). Until then, acceptance MUST be downgraded
+to: (a) unit-level cycle counts via `core::arch` rdtsc microbench on the
+gate primitive in isolation, AND (b) a smoke proof that the
+established-flow hot path (v4+v6, push+reverse, all CoS classes) and
+`make test-failover` ≤60 ms are unchanged. The flood-mitigation
+acceptance criteria stay TBD pending #1615 resolution.
 
 ## Section 11 — Reviewer questions (must be answered at convergence)
 
@@ -353,3 +433,9 @@ until the Path D measurement is run on the #1615 multi-thread harness.
    and C?
 5. Is the right outcome PLAN-KILL with a Path-D reopen criterion, or is
    there a measured win that makes B or C ship now?
+
+codex
+PLAN-NEEDS-MAJOR — Evidence: `870` only appears at line 79, but stale #1615 measurement premises remain at lines 173 and 332-337 (`still TX-capped`, `no saturating flooder`, `pending #1615 resolution`).
+tokens used
+12,367
+PLAN-NEEDS-MAJOR — Evidence: `870` only appears at line 79, but stale #1615 measurement premises remain at lines 173 and 332-337 (`still TX-capped`, `no saturating flooder`, `pending #1615 resolution`).
