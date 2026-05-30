@@ -70,14 +70,27 @@ production cold path is **still the linear zone-pair scan**.
 deltas under synthetic floods. The prerequisite that was supposed to
 supply the baseline — #1607/#1611/#1612 hardware-ceiling measurement —
 **did not produce a populated Scale Target table.** Verified:
-`docs/userspace-jit-design.md` has a "Measurement plan" section but
-**zero populated A1/A2/B1/B2 rows** (grep: no `p50`/`p99`/`ns/packet`
-table). #1612's closing comment states the flooder capped at **~870 K
-pps** (container IPVLAN/virtio TX ceiling, #1615), which is **~145 K
-pps/worker** across 6 workers — *far below* the ~5 Mpps/worker cold-path
-saturation observed in smoke baselines. **The cold path was never driven
-to saturation on this hardware, so its per-packet cost and its position
-on the bottleneck frontier are unmeasured.**
+`docs/userspace-jit-design.md` has a "Measurement plan" section
+(`:637-644`) but **zero populated A1/A2/B1/B2 rows** (no
+`p50`/`p99`/`ns/packet` table).
+
+**Correction (Codex r1 finding #1) — #1615 is RESOLVED, so the
+measurement is now ACHIEVABLE but was never run.** The single-thread
+flooder ceiling (~870 K pps, #1611) that #1612 cited as the blocker no
+longer holds: the #1615 multi-thread flooder (CLOSED) reaches
+**~2.94 M pps aggregate at 4 threads (BLOCKING GATE PASS ≥2.5 M) and
+~4.4 M pps at 8 threads** (`docs/pr/1615-flooder-multithread-virtio/
+measurements.md:23,55`). At ~2.94 M pps across 6 workers ≈ 490 K
+pps/worker — still below the ~5 Mpps/worker cold-path saturation point,
+but with 8 threads (~4.4 M / ~733 K pps/worker) and a focused single-
+zone-pair flood (all packets to one worker's queue share) per-worker
+cold-path saturation is now within reach of the harness. **Nobody has
+run that measurement and populated the Scale Target table.** So the
+cold path's per-packet cost and its position on the bottleneck frontier
+remain unmeasured — not because the tooling can't, but because the
+measurement step was never executed. This makes the measurement-first
+precondition (Path D) *available today*, which strengthens rather than
+weakens the case against shipping a mechanism blind.
 
 The #1605 kill verdict already quantified the established-flow side:
 JIT-the-rewrite saves 0.4-0.6% of one core because the dominant costs
@@ -197,6 +210,19 @@ hazard: staleness across config reload — must invalidate on
 `config_generation` bump, which is already the flow-cache invalidation
 primitive.
 
+**Structural hazard (AGY r1) — the verdict cache is worse than useless
+under the exact attack it targets.** Under a random-source SYN flood
+(the issue's headline), the 5-tuple varies every packet → the cache hit
+rate is **~0%** (every cold packet is a unique key). The cache then adds
+a hash lookup + a set-eviction + a heavy write-cycle *insertion* on
+every packet, and those writes pollute the worker's L1/L2 data cache —
+degrading the established-flow hot path that shares the core. So under
+the attack the verdict cache *increases* cold-path cost and *decreases*
+hot-path throughput. It only helps the narrow repeated-tuple case (a
+slow port scan that revisits the same (src,dst,dport) within the cache
+lifetime), which is not the saturation threat. This is a fundamental
+reason Path B is the weaker of the two.
+
 ### Path C — 4c.1 silent per-destination rate-limit ONLY
 
 Ship the rate-limit against live-dst floods only, deferring 4c.2. All
@@ -210,24 +236,44 @@ on the firewall's own service IP would throttle legitimate cold connects;
 must be default-off and documented as an attack-mitigation knob, not a
 general policy.
 
+**Structural hazard (AGY r1) — bottleneck-shifting.** Even if 4c.1
+drops post-policy, for a flood to a *live* dst the saturation cost is
+not only the policy scan; the next pipeline stage is session install
+(`MissingNeighborSeed` seed at `poll_descriptor/mod.rs:2652-2657`,
+conntrack-table allocation). A rate-limit that drops *before* policy
+eval does avoid the scan + the install, so 4c.1 is structurally the
+*right* place to cut — but the win is only real if the policy scan +
+install is actually the per-worker saturation cost, which is exactly
+what Path D would measure. Without that measurement, 4c.1's benefit is
+unquantified; with it, 4c.1 is the higher-value mechanism (it cuts the
+whole tail, not just the scan, and has no L1/L2-pollution downside that
+Path B carries).
+
 ### Path D — Measurement-first (precondition for B or C)
 
 Do NOT ship either mechanism until a cold-path saturation profile exists
-on real hardware. This means resolving #1615 (flooder TX ceiling) OR
-running the flooder from a non-container source that can push >2.5 Mpps,
-then populating the Scale Target table. Only then is the bottleneck
-claim falsifiable and the acceptance criteria meetable. This is the
-honest precondition the v2 kill and the parking decision both gestured
-at; it has not been satisfied.
+on real hardware. **This is now ACHIEVABLE: #1615 is CLOSED and the
+multi-thread flooder reaches ~2.94-4.4 M pps** (Section 3), enough to
+drive a single-zone-pair cold flood toward per-worker saturation. The
+remaining work is purely to *run* it: focus the flooder on one zone-pair
+(steer to one worker's queue share), capture a flamegraph under the
+flood, populate the Scale Target table, and confirm the policy scan +
+session install is the dominant per-worker cost. Only then is the
+bottleneck claim falsifiable and the acceptance criteria meetable. This
+is the honest precondition the v2 kill and the parking decision both
+gestured at; **it has not been satisfied, even though the tooling now
+exists to satisfy it.**
 
 ### Recommendation
 
 **Path A (PLAN-KILL) as the default**, with Path D as the documented
 reopen criterion. The two gating issues that were supposed to make a v3
 "narrow" (#1607 measurement, #1609 DAG) both failed to deliver their
-deliverable — the measurement is still absent and the DAG never shipped.
-The mechanisms therefore still sit in front of an unmeasured cold path,
-and the strongest attack example is already covered by #1660. If a
+*deliverable*: the DAG never shipped (only #1623 scaffolding), and the
+Scale Target measurement was never run — even though #1615 has since
+made the harness capable of >2.5 M pps. The mechanisms therefore still
+sit in front of an unmeasured cold path, and the strongest attack
+example is already covered by #1660. If a
 future measurement shows the live-dst flood saturates a worker, Path C
 (rate-limit only) is the higher-value reopen; Path B (verdict cache) is
 second and depends on rule-count-linear scan cost being demonstrated.

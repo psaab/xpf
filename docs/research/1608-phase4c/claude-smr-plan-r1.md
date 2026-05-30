@@ -44,15 +44,19 @@ this PR (zero-touch on `evaluate_policy`)". The multi-stage DAG is absent
 from `evaluate_policy_result_with_len`. **The chartered fix for the
 rule-count-linear cost (#1609/#1623) was PLAN-KILLED; the cost remains.**
 
-### Claim: cold-path bottleneck unmeasured — TRUE
+### Claim: cold-path bottleneck unmeasured — TRUE (premise corrected r1→r2)
 `docs/userspace-jit-design.md` "Measurement plan" (~:639) lists the
-*method* (`iperf3 -P 4`, perf record, flow-cache hit rate) but has **no
-populated Scale Target A1/A2/B1/B2 rows** — grep finds no `p50`/`p99`/
-`ns/packet` table. #1612's closing comment confirms the flooder capped at
-~870 Kpps (#1615 container TX ceiling), ~145 Kpps/worker — an order of
-magnitude below the ~5 Mpps/worker cold-path saturation. **The cold path
-was never driven to saturation; its position on the bottleneck frontier
-is unknown.**
+*method* but has **no populated Scale Target A1/A2/B1/B2 rows**. My r1
+draft cited #1615's 870 Kpps container ceiling as the blocker; **Codex
+r1 correctly flagged that as stale** — #1615 is CLOSED and the
+multi-thread flooder now reaches ~2.94-4.4 M pps
+(`docs/pr/1615-flooder-multithread-virtio/measurements.md:23,55`). I
+accept the correction. It does NOT change my verdict — it strengthens
+it: the measurement is now *achievable* and was simply never run, so
+there is no tooling excuse for shipping a mechanism against an
+unmeasured cold path. **The cold path was never driven to saturation;
+its position on the bottleneck frontier is unknown despite the tooling
+now existing.**
 
 ### Claim: VerdictCacheEntry math exceeds 256 KB budget — PLAUSIBLE, carry-forward
 v2's reviewers established `VerdictCacheEntry`=96 B with alignment padding
