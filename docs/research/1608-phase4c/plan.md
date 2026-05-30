@@ -105,6 +105,14 @@ attack classes #1608 names:
 | Port scan, single src, sweeping dport, **live dst** | YES — policy eval per packet | NO |
 | DNS amplification inbound, source-spoofed, **live dst** | YES — policy eval per packet | NO |
 
+The mechanism: an **unresolved** dst is dispatched as
+`ForwardingDisposition::MissingNeighbor`, where the neg-cache gate at
+`:2418` fires and `continue`s (`:2442`) before the session-install
+policy eval at `:2522`. A **resolved** dst is dispatched as
+`ForwardCandidate` and reaches the canonical policy eval at `:1393`,
+which never consults `neg_neigh`. So the dead-host class is covered by
+the disposition split, and the live-dst class is not.
+
 So #1608 is NOT a duplicate of #1660, but its *most-cited* example
 (SYN flood to random/dead hosts) is already handled. The residual
 threat #1608 uniquely addresses is **flood to a LIVE, resolvable dst**
@@ -238,9 +246,12 @@ Both mechanisms claim near-zero steady-state cost. Verified concerns:
 
 ## Section 8 — Memory bounds
 
-Per-worker, not per-binding (v2 fatal #7). With corrected Rust layout
-(v2 established `TokenBucket`=32 B, `DestBucketEntry`=56 B,
-`VerdictCacheEntry`=96 B): a 4 K-entry verdict cache alone is ~384 KB,
+Per-worker, not per-binding (v2 fatal #7). The v2 convergent layout
+numbers this plan inherits verbatim (do not re-derive): `TokenBucket`
+= 32 B (3×u64 + u32, aligns to 32), `DestBucketEntry` = 56 B,
+`VerdictCacheEntry` = 96 B (two `IpAddr` at 17 B each + both zone IDs
++ src/dst ports + protocol + verdict + generation stamp, with
+alignment padding). With that layout: a 4 K-entry verdict cache alone is ~384 KB,
 already over the 256 KB issue budget. Path B must either halve entries
 (2 K × 96 B = 192 KB) or split v4/v6 tables. Path C's per-dst bucket
 table at 56 B × 2 K = 112 KB. Combined exceeds 256 KB → the issue's own
