@@ -1,11 +1,30 @@
 # #1692 — Path A: instrument-first isolation of the 3g/6g guarantee-rate under-protection (§3.B)
 
-Revision: v1 (DRAFT — pre-review)
+Revision: v2 (Codex r1 + Claude-SMR r1 folded)
 Branch: research/1692-3g6g-guarantee-instr
 Base: origin/master @ ea0a670bd (#1628 counters live; #1643 fence live)
 Status: PLAN-READY candidate — INSTRUMENT-FIRST measurement design, NOT a
 fix. Explicit PLAN-KILL exit if the disambiguating data shows ~52% is
 structurally inherent.
+
+> v2 CHANGE LOG: Codex r1 + Claude-SMR r1 both PLAN-NEEDS-MAJOR with a
+> shared CRITICAL: §4 v1's `Σ share_i vs class_rate` discriminator is
+> mathematically CONSTANT (`Σ my_share_i = cap` by construction —
+> `total_flows = Σ my_count`, so the per-worker shares sum to the full cap
+> every epoch regardless of distribution; `rotate_epoch_v8.rs:306-312`).
+> That column could never be `< class_rate`, so v1 could not separate
+> L1-by-design from L1-fixable, and §8 KILL-exit #1 was unreachable.
+> v2 DELETES that column and rebuilds §4 around `granted_i vs share_i` +
+> per-worker BACKLOG (`queued_bytes_i`) + per-worker DEMAND. Other folded
+> findings: (Codex F4 / SMR F5) L2 root-FCFS is DEAD not provisional —
+> aggregate `park_root=0` over a monotonic saturating-add sum proves every
+> per-worker term is 0; (Codex F2 / SMR F3) `share_i` is a 200µs epoch
+> gauge, must be windowed-integrated, bank depth is sub-noise; (Codex F3 /
+> SMR F4) the `my_share` read must use the seqlock pattern
+> (`mod.rs:1561`), NOT a bare Relaxed load; (SMR F2) v1's table was blind
+> to per-worker DEMAND and aliased a gated worker with a cwnd-starved one
+> — the #1630 cause-2 transport-physics floor, a FOURTH (PLAN-KILL)
+> outcome now added as decision precedence-0.
 
 > This is a `/research` deliverable. It STOPS at PLAN-READY/PLAN-KILL. No
 > production source is modified by `/research`. The instrumentation
@@ -129,20 +148,27 @@ its proportional slice and surplus never opens → the class delivers
 work intentionally chose — and it would mean §3.B is BY DESIGN, a
 PLAN-KILL.
 
-### Layer L2 — root FCFS pool ordering (root token bucket / `SharedCoSRootLease`)
+### Layer L2 — root FCFS pool ordering (root token bucket / `SharedCoSRootLease`) — CONFIRMED DEAD
 
 `token_bucket.rs:54` `maybe_top_up_cos_root_lease` + the per-worker
 `select_*` walk consuming `root.tokens` (`queue_service/mod.rs:856`,
 `:1034`). The root pool is the 25 G shaping rate, shared across all
-classes on the interface. **But `park_root = 0` everywhere** (#1614 §2.1
-+ §2.4): the root token bucket NEVER throttled any class in any scenario.
-So L2 is PROVISIONALLY ruled out by existing telemetry — BUT the #1614
-data is per-class SUMMED-across-workers (see §3 below). A per-WORKER
-`drain_park_root_tokens` split could still reveal a single worker hitting
-root starvation that the SUM hides. L2 stays a candidate only on the
-narrow chance that the aggregate `park_root=0` masks a per-worker
-imbalance; the instrumentation must be able to confirm or kill it
-per-worker.
+classes on the interface. **`park_root = 0` everywhere** (#1614 §2.1 +
+§2.4).
+
+v1 kept L2 alive "on the narrow chance the aggregate masks a per-worker
+imbalance." **Codex r1 + Claude-SMR r1 both REFUTED that** and they are
+correct: `drain_park_root_tokens` is a monotonic non-negative counter
+bumped per-(queue,worker) at `queue_service/mod.rs:856-861`, then folded
+to the per-class number by SATURATING-ADD (`worker/cos/queue_row.rs:228`,
+`coordinator/mod.rs:1039`). A saturating-add sum of non-negative terms is
+zero IFF every term is zero. So aggregate `park_root=0` already PROVES no
+worker hit root starvation — the SUM cannot hide a per-worker imbalance
+because there is nothing to hide. **L2 is dead, not provisional.** The
+instrument emits the per-worker `park_root_i` for completeness only; it is
+a confirmation column, not a live discriminator. This tightens the live
+candidate set to: the demand-bound null (precedence-0), L3 (per-worker
+budget), and L1 (v8 share-cap).
 
 ### Layer L3 — per-worker waterfill Phase-1 budget (selector)
 
@@ -196,59 +222,101 @@ Verified this research against master @ ea0a670bd:
 
 3. **`drain_park_root_tokens` / `drain_park_queue_tokens` are per-queue
    but folded to per-class** via `merge_cos_queue_owner_profile_sum`
-   (`worker/cos/mod.rs:481-486`). The aggregate `park_root=0` cannot
-   confirm no SINGLE worker hit root starvation (L2).
+   (`worker/cos/mod.rs:481-486`). For L2 (root) the aggregate `park_root=0`
+   is conclusive (monotonic-sum, §2-L2); for L3 (queue-token) the
+   per-worker `park_queue_i` split is still informative.
 
 4. **`drain_sent_bytes` is per-queue, summed across workers.** We have
    the class total but not the per-worker split, so we cannot compute
-   per-worker delivered-vs-`my_share` (the L1 deciding ratio).
+   per-worker `delivered_i` vs `share_integral_i` (the L1 deciding ratio).
+
+5. **No per-worker BACKLOG (DEMAND) signal is exported at all.**
+   `queue.hot.queued_bytes` is worker-local and never surfaced
+   per-(class,worker). Without it, an under-delivering worker that is
+   simply cwnd/generator-bound (the #1630 cause-2 transport floor) is
+   indistinguishable from one the lease or selector is gating (SMR r1 F2).
+   This is the SINGLE most important new column — it is the precedence-0
+   demand-bound discriminator (§4 outcome 0).
 
 The gap is uniform: **everything is per-class-summed; nothing is
-per-(class, worker).** The shared-exact tier needs per-(class, worker)
-visibility to decide which of L1/L2/L3 gates a specific worker's 3g/6g
-shard. That is the single instrumentation deliverable.
+per-(class, worker), and DEMAND is invisible entirely.** The shared-exact
+tier needs per-(class, worker) visibility — including backlog — to decide
+which of {demand-bound, L1, L3} explains a specific worker's 3g/6g shard.
+That is the single instrumentation deliverable.
 
-## 4. Worked distinct-signature table (the disambiguation proof)
+## 4. Worked distinct-signature table (the disambiguation proof) — REBUILT v2
 
-For the `small4+24g` scenario, on each worker `i` that has ≥1 active 3g
-flow, the proposed per-(class,worker) counters (defined in §5) would read
-as follows under each hypothesis. `delivered_i` = per-worker 3g
-`drain_sent_bytes`; `share_i` = per-worker v8 `my_share` snapshot;
-`granted_i` = per-worker-per-class v8 `acquire_v8` granted bytes;
-`p1_admit_i` = per-worker 3g Phase-1 admissions; `bypass_arms` = v8
-`bypass_grace_arm_count` (already exists, per-lease).
+The v1 table is discarded: its `Sum share_i vs class_rate` discriminator
+was a CONSTANT (`Sum my_share_i = cap` always — see v2 CHANGE LOG), and it
+had no DEMAND column, so it aliased a gated worker with a cwnd-starved
+one. v2 rebuilds around columns that are actually independent.
 
-| Hypothesis | `delivered_i` vs `share_i` | `granted_i` vs `share_i` | `p1_admit_i` | `park_root_i` | `bypass_arms` | Σ`share_i` vs class_rate |
-|---|---|---|---|---|---|---|
-| **L1 v8-lease cap (BY-DESIGN, PLAN-KILL)** | `delivered_i ≈ share_i` (each worker delivers its full share, no more) | `granted_i ≈ share_i` (lease grants exactly the share; primary path hits `my_room=0`) | high (admitted every epoch) | 0 | ~0 (surplus never armed; shaper-bound) | **Σ`share_i` < class_rate** because idle-worker shares (0 flows → 0 share) leave the rate undistributed; busy workers capped at their slice | 
-| **L1 v8-lease cap (FIXABLE: share misallocation)** | `delivered_i ≈ share_i` | `granted_i ≈ share_i` | high | 0 | ~0 | **Σ`share_i` ≈ class_rate** (rate IS fully allocated across workers) but `delivered < Σshare` → workers leave granted tokens unspent → look at L3/drain |
-| **L2 root FCFS** | `delivered_i < share_i` | `granted_i ≈ share_i` (queue lease grants, but…) | high | **>0 on ≥1 worker** | any | n/a | 
-| **L3 Phase-1 budget fault** | `delivered_i < share_i` AND `delivered_i < granted_i` | `granted_i ≈ share_i` (v8 willing to grant) | **LOW relative to eligible_visits_i** — the selector visits 3g but the Phase-1 budget is spent before honoring it past one frame | 0 | any | n/a |
+**All comparisons are over the WINDOWED steady-state (bytes / 30 s), NOT
+instantaneous** (Codex r1 F2 / SMR F3): `share_i` is recomputed every
+200us epoch (`rotate_epoch_v8.rs:293`), so the instrument accumulates a
+per-worker `share_integral_i` = the lease's TOTAL grant CEILING the worker
+was entitled to over the window, in bytes (sum over epochs of
+my_share x epoch_elapsed). The N-frame token bank
+(`COS_EXACT_QUEUE_LEASE_BANK_BYTES`, N=8 ~= 12 KB, `token_bucket.rs:196`)
+lets `granted` and `delivered` diverge by <= bank-depth instantaneously,
+which is sub-noise against a 3 G x 30 s window — stated explicitly so it
+is not re-flagged.
 
-Decision rule (the consumer criterion, made operational):
-- **`granted_i ≈ share_i` AND `delivered_i ≈ granted_i` AND
-  Σ`share_i` < class_rate AND `bypass_arms ≈ 0`** → **L1 by-design →
-  PLAN-KILL** (strict per-flow fairness leaving idle-worker share
-  unclaimed; the #1304/Cstruct trade, the #1220 precedent). The fix
-  would be a non-work-conserving→work-conserving policy change, a
-  different issue.
-- **`granted_i ≈ share_i` AND `delivered_i ≈ granted_i` AND
-  Σ`share_i` ≈ class_rate** → L1 share-allocation is correct but the
-  bytes are not delivered; recurse into L3 drain accounting (selector
-  not requesting enough / dropping sub-budget). FIXABLE.
-- **any worker `park_root_i > 0`** → **L2** root FCFS contention hidden
-  by the SUM. FIXABLE (root pool ordering / per-worker root reservation).
-- **`p1_admit_i` low vs `eligible_visits_i` AND `granted_i > delivered_i`**
-  → **L3** Phase-1 budget spends before honoring 3g past one frame.
-  FIXABLE (re-derive Phase-1 boundary from configured rates — #1614
-  Path A candidate 4).
+Per-(class,worker) columns (defined in section 5), for each worker `i`
+with >=1 active flow of the class, over the 30 s window:
+- `backlog_i` — per-worker class backlog presence
+  (`queue.hot.queued_bytes` > 0 for a sustained fraction of the window).
+  The DEMAND proxy: a worker with persistent backlog has offered load it
+  could not ship; a worker with ~0 backlog is demand-bound
+  (cwnd/generator-limited), not gated.
+- `granted_i` — per-(class,worker) v8 `acquire_v8` granted bytes (NEW).
+- `share_integral_i` — windowed lease entitlement ceiling (NEW).
+- `delivered_i` — per-(class,worker) `drain_sent_bytes`.
+- `p1_admit_i`, `p2_admit_i`, `eligible_visits_i` — per-(class,worker)
+  waterfill admits/visits (split out of the existing SUM-fold).
+- `park_root_i` — confirmation only (L2 dead, section 2-L2).
+- `bypass_arms` — v8 `bypass_grace_arm_count` (per-lease, already exists).
 
-If two layers light up together (e.g. L1 share correct + L3 low admit),
-the table's columns still order them: L2 (park) is checked first because
-it is a hard stop; then L3 (admit vs visit) because it gates whether the
-v8 grant is even requested; then L1 (granted vs share + Σshare) as the
-residual. The instrumentation produces all columns in ONE scrape so the
-ordering is decidable post-hoc, not by re-running.
+| Outcome | `backlog_i` (busy workers) | `granted_i` vs `share_integral_i` | `delivered_i` vs `granted_i` | `p1_admit_i` vs `eligible_visits_i` | `park_root_i` |
+|---|---|---|---|---|---|
+| **(0) DEMAND-BOUND null -> PLAN-KILL** | **~0 on the under-delivering workers** (no backlog; #1630 cause-2 transport floor) | `granted_i < share_integral_i` (lease WILLING, worker did not ask) | `delivered_i ~= granted_i` | `p1_admit_i ~= eligible_visits_i` (visits + admits, but queue empties) | 0 |
+| **(L1) v8 share-cap** | **> 0 sustained** on workers whose `delivered_i ~= share_integral_i` (capped WITH backlog) AND >=1 OTHER worker has `granted_i < share_integral_i` (idle slice the capped worker cannot borrow) | `granted_i ~= share_integral_i` on busy workers (lease grants exactly the ceiling, my_room->0) | `delivered_i ~= granted_i` | `p1_admit_i ~= eligible_visits_i` | 0 |
+| **(L3) Phase-1 budget fault** | **> 0 sustained** | `granted_i < share_integral_i` (lease willing, selector under-requests) | `delivered_i ~= granted_i` | **`p1_admit_i << eligible_visits_i`** — selector VISITS 3g every epoch but Phase-1 budget exhausts before honoring it past <=1 frame | 0 |
+
+The three live outcomes are DISTINCT on independent columns:
+- **`backlog_i ~= 0`** uniquely fingerprints outcome (0): no other outcome
+  leaves the under-delivering busy workers with empty queues.
+- **`p1_admit_i << eligible_visits_i`** uniquely fingerprints (L3): the
+  selector visits but does not honor (budget fault). (0) and (L1) both
+  admit on every visit.
+- **`granted_i ~= share_integral_i` WITH backlog AND a peer with
+  `granted_i < share_integral_i`** uniquely fingerprints (L1): the lease
+  is binding and there is idle peer slice the capped worker cannot reach
+  (surplus bypass-gated, shaper-bound -> `bypass_arms ~= 0`).
+
+Decision rule (consumer criterion, ordered so a multi-signal read is still
+decidable from ONE scrape):
+1. If the under-delivering busy workers have `backlog_i ~= 0` ->
+   **DEMAND-BOUND** -> not a CoS defect -> **PLAN-KILL** (#1630 cause-2 /
+   #1220). Confirm with `p1_admit_i ~= eligible_visits_i`.
+2. Else if `p1_admit_i << eligible_visits_i` on a backlogged worker ->
+   **L3** Phase-1 budget fault. FIXABLE (re-derive the Phase-1 boundary
+   from configured guarantee RATES rather than `quantum x fraction` —
+   #1614 Path A candidate 4).
+3. Else (`granted_i ~= share_integral_i` WITH backlog, some peer under its
+   ceiling, `bypass_arms ~= 0`) -> **L1** v8 share-cap. Sub-decide:
+   - if the desired behavior is "let the backlogged worker borrow the idle
+     peer's slice" — that is a non-work-conserving -> work-conserving
+     policy change (the surplus path), a SEPARATE design issue (#1211
+     warns this space is hard) -> **PLAN-KILL #1692**, file the policy
+     issue;
+   - the strict-per-flow-fairness floor is the #1304/Cstruct/#1220
+     precedent and is BY-DESIGN -> PLAN-KILL.
+
+`park_root_i` is a sanity confirmation that L2 is dead (must be 0;
+non-zero would mean the section 2-L2 monotonic-sum argument is wrong and
+the model is incomplete — a #1630-style "add a candidate" finding, not a
+fix).
 
 ## 5. Instrumentation design — Multiple Path Options
 
@@ -283,15 +351,28 @@ holds locally on its `CoSQueueRuntime`/`CoSInterfaceRuntime`:
    `CoSQueueLeaseAcquireTelemetry` → `queue.telemetry`. ~1 u64 add per
    top-up, no new atomics on `acquire_v8` (the worker-local accumulator
    pattern from `token_bucket.rs:27-35` is preserved).
-4. `v8_my_share_snapshot_i` — NEW: sample `worker_fair_share[worker_id]`
-   for this queue's lease at status-snapshot time (a single Relaxed load
-   off the Arc the worker already holds in `queue.queue_lease_v8`). No
-   hot-path cost; read only on the 1/s status path.
+4. `share_integral_i` — NEW: the windowed lease entitlement ceiling.
+   `worker_fair_share[worker_id]` is recomputed every 200µs epoch
+   (`rotate_epoch_v8.rs:293,308`), so a single end-of-window gauge read is
+   NOT comparable to 30 s `granted`/`delivered` deltas (Codex r1 F2 / SMR
+   F3). The instrument instead accumulates, on the OWNING worker (the only
+   writer of `queue.hot.tokens`/`telemetry`), `share_integral_i +=
+   my_share` each epoch its lease rotates — yielding the total bytes the
+   worker was ENTITLED to over the window. The per-epoch `my_share` read
+   must use the existing seqlock snapshot path (`snapshot_epoch_v8`,
+   `mod.rs:1561`), NOT a bare Relaxed load (Codex r1 F3 / SMR F4): the
+   worker already calls `acquire_v8` → `snapshot_epoch_v8` on the hot path,
+   so the integral can piggyback that snapshot's `share` field at zero
+   extra synchronization cost — no new seqlock read is introduced. All new
+   per-(queue,worker) counters are single-writer (owning worker) /
+   single-reader (status path) → Relaxed accumulator + the status path's
+   existing ArcSwap publish boundary suffices; no new atomic on
+   `acquire_v8`.
 
 - **Pros:** reuses the per-(class,worker) snapshot key that already
   works for `cos_active_flow_count`; minimal new hot-path code (one u64
-  add); the `my_share` + `granted` + `delivered` triple is exactly the
-  L1 decision columns; `bypass_arms` already exists per-lease.
+  add); the `backlog` + `share_integral` + `granted` + `delivered` set is
+  exactly the §4 decision columns; `bypass_arms` already exists per-lease.
 - **Cons:** widens the per-queue status row by 6 u64 × workers; must not
   break the existing SUM-fold for the single-owner tier (100m/1g) that
   operators already read. Mitigation: keep the per-class SUM AND add the
@@ -307,9 +388,10 @@ holds locally on its `CoSQueueRuntime`/`CoSInterfaceRuntime`:
 
 Add a one-shot `cli -c "show class-of-service guarantee-trace reth0.80"`
 that walks every worker's `CoSInterfaceRuntime` for the target interface
-and dumps the per-(queue,worker) `{phase1_admit, phase2_admit,
-eligible_visits, drain_sent, v8_granted, my_share, park_root,
-park_queue}` octuple as a table. Bypasses the Prometheus
+and dumps the per-(queue,worker) `{backlog (queued_bytes), phase1_admit,
+phase2_admit, eligible_visits, drain_sent, v8_granted, share_integral,
+park_root, park_queue}` set as a table — the §4 columns plus the DEMAND
+proxy (`backlog`) added per SMR r1 F2. Bypasses the Prometheus
 truncation/cardinality concern entirely; it is a debug RPC, run pre/post
 the iperf window like the #1614 `diag_*.sh` scripts.
 
@@ -323,11 +405,14 @@ the iperf window like the #1614 `diag_*.sh` scripts.
   ~52%), so a pre/post delta is sufficient for the §4 decision rule.
   Per `feedback_control_socket_contention`, a 1-shot debug RPC at run
   boundaries does NOT contend with the 1/s status poll.
-- **PLAN-KILL trigger:** if the worker does NOT actually hold a
-  per-(queue,worker) `my_share` readable without racing the rotation —
-  but it does: `worker_fair_share[worker_id]` is a Relaxed-loadable
-  AtomicU64 (`shared_cos_lease/mod.rs:409`, read via the seqlock-free
-  accessor pattern), and `v8_granted` is worker-local accumulated.
+- **PLAN-KILL trigger:** if the worker cannot read its per-(queue,worker)
+  `my_share` without racing rotation. It CAN, but ONLY via the seqlock
+  snapshot (`snapshot_epoch_v8`, `mod.rs:1561`), which the worker already
+  performs every `acquire_v8` call — the `share_integral_i` accumulator
+  piggybacks that snapshot, adding zero new synchronization (Codex r1 F3 /
+  SMR F4). A bare Relaxed load of `worker_fair_share[worker_id]` would tear
+  against the rotation's cross-epoch write and is explicitly NOT used.
+  `v8_granted` is worker-local accumulated (single-writer).
 
 ### Option C — REJECTED: add the disambiguation as production Prometheus gauges feeding nothing
 
@@ -346,10 +431,11 @@ Option A's single genuinely-new field (per-(queue,worker) v8 granted
 bytes accumulator) folded in if Option B's pre/post snapshot proves
 insufficient.** Rationale: Option B avoids the Prometheus
 cardinality/truncation hazard (the one real risk in Option A), needs the
-least new hot-path code (the `my_share`, `phase1/2_admit`,
-`eligible_visits`, `park_*`, `drain_sent` octuple all ALREADY exist on
-worker-local state; only `v8_granted` per-class needs a 1-u64-add
-accumulator), and the §1 signal is steady-state so a pre/post delta
+least new hot-path code (`backlog`/`phase1/2_admit`/`eligible_visits`/
+`park_*`/`drain_sent` all ALREADY exist on worker-local state; only
+`v8_granted` per-class needs a 1-u64-add accumulator and `share_integral`
+needs a per-epoch add that piggybacks the existing `snapshot_epoch_v8`
+seqlock read), and the §1 signal is steady-state so a pre/post delta
 satisfies the §4 decision rule. The harness wraps it exactly like the
 #1614 `diag_gr2.sh` script: snapshot → 30 s iperf → snapshot → diff.
 
@@ -383,33 +469,59 @@ smoke; it still queues behind any active smoke. Post
 
 The instrumentation is ACCEPTED at `/engineer` STEP 0 iff the post-run
 data satisfies the §4 decision rule UNAMBIGUOUSLY — i.e. exactly one of
-{L1-by-design, L1-fixable, L2, L3} is selected, OR the data is
-internally contradictory (which would itself be a finding: the three-
-layer model is incomplete and a fourth candidate must be added before any
-fix). A counter set that produces all-zero or all-equal columns across
-L1/L2/L3 — unable to decide — is a FAILED instrument and must be
+the four outcomes {(0) demand-bound, (L1) v8 share-cap, (L3) Phase-1
+budget fault, (L2-confirm) park_root non-zero ⇒ model incomplete} is
+selected by the §4 fingerprint columns. The columns were chosen to be
+INDEPENDENT: `backlog_i≈0` uniquely picks (0), `p1_admit_i≪
+eligible_visits_i` uniquely picks (L3), and `granted_i≈share_integral_i`
+with backlog + an under-ceiling peer uniquely picks (L1). A counter set
+that produces all-zero or all-equal columns across the three live
+outcomes — unable to decide — is a FAILED instrument and must be
 redesigned, NOT papered over with a fix. This is the explicit guard
 against the `feedback_review_scaffolding_against_consumer` failure: the
 counters are judged by whether they DECIDE, not by whether they are
-individually correct.
+individually correct. If `park_root_i > 0` anywhere (contradicting the
+§2-L2 monotonic-sum proof) the three-layer model is incomplete → file a
+"add a 4th candidate" follow-up, do NOT ship a fix against an undecided
+model (#1630 four-mechanism-falsification discipline).
 
 ## 8. PLAN-KILL exits (all expected, all valid)
 
-1. **L1 by-design** (§4 row 1): if `granted_i ≈ share_i ≈ delivered_i`
-   AND `Σ share_i < class_rate` AND `bypass_arms ≈ 0`, the ~52% is the
-   strict per-flow-fairness floor leaving idle-worker share unclaimed —
-   the #1304/Cstruct trade, the #1220 precedent. PLAN-KILL #1692; if a
-   work-conserving surplus policy is desired it is a SEPARATE design
-   issue with its own plan (and the #1211 race-safe-AFD kill warns that
-   space is hard).
-2. **Σ share_i ≈ class_rate but instrument can't separate L1/L3** — the
-   three-layer model is wrong; file a follow-up to add the fourth
-   candidate, do NOT ship a fix against an undecided model
+1. **DEMAND-BOUND (§4 outcome 0):** the under-delivering busy workers
+   have `backlog_i ≈ 0` AND `p1_admit_i ≈ eligible_visits_i`. The 3g/6g
+   flows simply do not offer the bytes on the workers they RSS-landed on —
+   the #1630 cause-2 transport-physics floor (single-flow-bundle,
+   ACK-clocked, worsens at low per-worker parallelism), NOT a CoS defect.
+   PLAN-KILL #1692. This is the SINGLE MOST LIKELY outcome given #1630's
+   prior finding that mid-rate classes sit on a transport floor.
+2. **L1 v8 share-cap, BY-DESIGN (§4 outcome L1):** `granted_i ≈
+   share_integral_i` WITH sustained `backlog_i`, ≥1 peer under its
+   ceiling, `bypass_arms ≈ 0`. The lease holds each worker to its
+   active-flow-proportional slice and refuses to let a backlogged worker
+   borrow an idle peer's slice (surplus bypass-gated, shaper-bound never
+   arms it). This is the #1304/Cstruct strict-per-flow-fairness trade and
+   the #1220 precedent. PLAN-KILL #1692; a work-conserving surplus policy
+   is a SEPARATE design issue with its own plan (the #1211 race-safe-AFD
+   kill warns that space is hard).
+3. **Model incomplete:** `park_root_i > 0` anywhere (contradicting the
+   §2-L2 proof) OR the fingerprint columns are mutually contradictory
+   (e.g. backlog>0 AND p1_admit≈visits AND granted<share_integral with no
+   peer slack). The three-layer model is wrong; file a follow-up to add
+   the missing candidate, do NOT ship a fix against an undecided model
    (#1630 four-mechanism-falsification discipline).
-3. **Snapshot/cardinality blocker** (Option A): if the per-queue status
+4. **Snapshot/cardinality blocker** (Option A): if the per-queue status
    row cannot carry the per-worker breakdown without truncation, fall to
    Option B; if Option B's control-socket dump also can't read
-   `my_share` race-free, the instrument is infeasible → re-scope.
+   `share_integral` via the seqlock snapshot, the instrument is infeasible
+   → re-scope.
+
+The ONLY non-KILL outcome is **(L3) Phase-1 budget fault** (`p1_admit_i ≪
+eligible_visits_i` on a backlogged worker): the selector visits 3g every
+epoch but the `quantum × fraction` Phase-1 budget exhausts before honoring
+it past ≤1 frame. That is the one genuinely fixable layer, and even then
+the fix (re-derive the Phase-1 boundary from configured RATES — #1614
+Path A candidate 4) is bounded by §3.A's ~24 G ceiling and trades 24g for
+3g/6g, the documented `guarantee-rate` intent.
 
 ## 9. What this plan explicitly does NOT do
 
@@ -426,16 +538,22 @@ individually correct.
 
 ## 10. Acceptance criteria for the `/engineer` STEP 0 (instrument-only)
 
-- [ ] Per-(class, worker) `{phase1_admit, phase2_admit, eligible_visits,
-      drain_sent, v8_granted, my_share, park_root, park_queue}` octuple is
-      observable for the shared-exact tier (≥2.5G classes) on reth0.80.
-- [ ] Hot-path cost: ≤ 1 u64 add per lease top-up (the only new counter);
-      all others reuse existing worker-local state read on the 1/s or
-      on-demand path.
-- [ ] No new atomic on `acquire_v8` (worker-local accumulator preserved).
-- [ ] The §4 decision rule selects exactly one layer on the `small4+24g`
+- [ ] Per-(class, worker) `{backlog (queued_bytes), phase1_admit,
+      phase2_admit, eligible_visits, drain_sent, v8_granted,
+      share_integral, park_root, park_queue}` is observable for the
+      shared-exact tier (≥2.5G classes) on reth0.80. `backlog` (the DEMAND
+      proxy) and `share_integral` (windowed lease ceiling) are the two
+      load-bearing additions; the rest split out of the existing SUM-fold.
+- [ ] Hot-path cost: ≤ 1 u64 add per lease top-up (`v8_granted`) + a
+      per-epoch `share_integral` add that piggybacks the EXISTING
+      `snapshot_epoch_v8` seqlock read (no new seqlock read, no new atomic
+      on `acquire_v8`); all other columns reuse existing worker-local
+      state read on the 1/s or on-demand path.
+- [ ] The §4 decision rule selects exactly one of {(0) demand-bound, (L1)
+      v8 share-cap, (L3) Phase-1 budget fault} on the `small4+24g`
       falsifier (v4 AND v6), confirmed on the full 11-class scenario.
-- [ ] If the rule selects L1-by-design → PLAN-KILL #1692 with the data.
+- [ ] If the rule selects (0) demand-bound or (L1) by-design → PLAN-KILL
+      #1692 with the data. Only (L3) leads to a fix.
 - [ ] `make test` green; `make test-failover` ≤ 60 ms unchanged
       (instrument-only, no scheduler change).
 - [ ] Default proportional mode unchanged bit-for-bit.
