@@ -1,4 +1,10 @@
-# #1608 — Phase 4c cold-path hardening — research plan **v3 (research-only)**
+# #1608 — Phase 4c cold-path hardening — research plan **v3 (research-only) — CONVERGED PLAN-KILL**
+
+> **Convergence (2026-05-29):** Codex r4 + AGY r1 + Claude SMR r1 all
+> **PLAN-KILL-CONFIRMED (Path A)**. Reopen only via Path D
+> (run the now-uncapped #1615 flooder to a per-worker saturating
+> cold-flood, populate the Scale Target table, demonstrate the policy
+> scan + session install is the dominant per-worker cost).
 
 > **History:** v1 PLAN-KILLED 2026-05-27 (6 fatal axes), v2 PLAN-KILLED
 > 2026-05-27 (10 new fatals), then PARKED pending #1606 + #1607 v2 + #1609.
