@@ -1,11 +1,29 @@
 # #1692 — Path A: instrument-first isolation of the 3g/6g guarantee-rate under-protection (§3.B)
 
-Revision: v2 (Codex r1 + Claude-SMR r1 folded)
+Revision: v3 (PLAN-KILLED — Codex r2 + AGY r2 + Claude-SMR r3 converged)
 Branch: research/1692-3g6g-guarantee-instr
 Base: origin/master @ ea0a670bd (#1628 counters live; #1643 fence live)
-Status: PLAN-READY candidate — INSTRUMENT-FIRST measurement design, NOT a
-fix. Explicit PLAN-KILL exit if the disambiguating data shows ~52% is
-structurally inherent.
+Status: **PLAN-KILLED.** The passive per-(class,worker) instrument CANNOT
+disambiguate the three candidate gating layers — they are serially coupled
+(L1 v8 lease → `queue.hot.tokens` → L3 selector gate → drain) and the only
+independent demand signal is collapsed by TCP closed-loop pacing. This is
+a STRUCTURAL failure of the instrument against its consumer criterion
+(`feedback_review_scaffolding_against_consumer`), the #1211 lesson in
+measurement form. See §12 KILL SUMMARY.
+
+> v3 KILL RATIONALE (3 reviewers, 3 rounds — see §12 for the full trace):
+> Codex r2 CRITICAL-1 (verified): `p1_admit_i ≪ eligible_visits_i` — v2's
+> claimed UNIQUE L3 fingerprint — is ALSO produced by L1, because the
+> queue-token gate (`queue_service/mod.rs:879`) that the v8 lease (L1)
+> starves sits BETWEEN the `eligible_visits` bump (`:851`) and the
+> `phase1_admissions` bump (`:947`). L1 and L3 are aliased on the only
+> column meant to separate them. Codex r2 CRITICAL-2 + AGY r2 F1
+> (verified): `backlog_i ≈ 0` does NOT separate demand-bound (0) from L1,
+> because under TCP closed-loop the sender paces down to the L1 cap and the
+> CoS queue empties. Codex r2 F2 + AGY r2 F2: `share_integral_i` is
+> unmeasurable soundly (acquire-cadence not epoch-cadence; multi-epoch cap
+> per delayed acquire; dimensional double-count). Net: the three layers are
+> not separable by passive counters.
 
 > v2 CHANGE LOG: Codex r1 + Claude-SMR r1 both PLAN-NEEDS-MAJOR with a
 > shared CRITICAL: §4 v1's `Σ share_i vs class_rate` discriminator is
@@ -294,6 +312,19 @@ The three live outcomes are DISTINCT on independent columns:
   is binding and there is idle peer slice the capped worker cannot reach
   (surplus bypass-gated, shaper-bound -> `bypass_arms ~= 0`).
 
+REDUNDANT CROSS-CHECK on the (0)-vs-(L1) split (SMR r2): the same
+queue-token park branch (`queue_service/mod.rs:879-901`) bumps
+`drain_park_queue_tokens` per-(queue,worker). An L1 share-capped worker
+shows `park_queue_i > 0` (its v8-gated bucket starves while items stay
+enqueued — verified: the gate `continue`s WITHOUT popping, so backlog
+accumulates to the admission cap, NOT empty); a demand-bound (0) worker
+shows `park_queue_i ~= 0` (never token-starved). This is an INDEPENDENT
+second discriminator for (0)-vs-(L1), hardening the decision against
+`backlog_i` sampling noise. It also proves `backlog_i` is a SOUND demand
+proxy: a share-capped worker cannot show `backlog_i ~= 0`, because the
+park-without-pop path keeps its queue full — so there is no (0)<->(L1)
+aliasing.
+
 Decision rule (consumer criterion, ordered so a multi-signal read is still
 decidable from ONE scrape):
 1. If the under-delivering busy workers have `backlog_i ~= 0` ->
@@ -572,3 +603,72 @@ Path A candidate 4) is bounded by §3.A's ~24 G ceiling and trades 24g for
 - contract: `docs/fairness-regimes.md` (#1217 Cstruct, #1304 equal-flow,
   #1630 cause-1/cause-2 floors).
 - KILL lineage: #1211 #1236 #1237 #1239 #936 #937 #1220 #1244.
+
+## 12. KILL SUMMARY (v3 — converged 3-of-3)
+
+**PLAN-KILLED as a passive-instrumentation effort.** The chartered
+deliverable — per-(class,worker) counters off worker-local state that
+disambiguate L1 (v8 lease) / L3 (selector budget) / demand-bound — is not
+achievable, for a structural reason established across three hostile
+rounds:
+
+1. **The three layers are serially coupled.** L1's output (the v8 lease's
+   per-worker grant) IS L3's input (`queue.hot.tokens`). The selector's
+   token gate (`queue_service/mod.rs:879`) sits between the
+   `eligible_visits` counter (`:851`) and the `phase1_admissions` counter
+   (`:947`). So when L1 starves the bucket, the selector skips admission
+   and produces `p1_admit ≪ eligible_visits` — the exact signature v2
+   claimed was UNIQUE to an L3 budget fault. Any passive counter
+   downstream of L1 measures the COMPOSITION L1∘L3, not either layer.
+   (Codex r2 CRITICAL-1, verified at the cited lines.)
+
+2. **The one independent signal — demand — is closed-loop-collapsed.**
+   Under TCP, a share-capped flow's sender paces down to the L1 bottleneck,
+   so the CoS queue (`queue.hot.queued_bytes`) empties and `backlog_i ≈ 0`
+   — identical to a genuinely demand-bound flow. (Codex r2 CRITICAL-2 +
+   AGY r2 F1, verified against `tx/cos_classify.rs:887,915` /
+   `cos/tx_completion.rs:511`.)
+
+3. **The lease-isolating counter is unmeasurable soundly.**
+   `share_integral_i` would isolate L1, but `acquire_v8`-driven rotation
+   makes it acquire-cadence not epoch-cadence (banked-token workers skip
+   acquires → undercount; one delayed acquire grants a multi-epoch cap),
+   and v2's formula double-counted dimensionally. (Codex r2 F2 + AGY r2
+   F2.)
+
+This is the #1211 lesson in instrument form: do not build a measurement
+whose target separation does not exist (here, is not observable with
+passive counters). It is consistent with #1630's finding that mid-rate
+3g/6g sit on a transport-physics floor — the most probable real cause
+(demand-bound, outcome 0) is itself a documented PLAN-KILL and this
+instrument could not have confirmed it cleanly anyway.
+
+### What a future revisit needs (NOT this issue)
+
+Not a richer passive-counter table. Either:
+- **(A) a controlled active A/B**, not an instrument: pin ONE 3g flow to
+  ONE worker (one flow → `my_share = full class cap`, token gate cannot
+  starve from the lease split), measure whether 3g reaches shape. Reaches
+  shape ⇒ multi-worker under-delivery is the v8 active-flow-proportional
+  share split (L1 by-design, the #1304/Cstruct/#1220 trade). Does not ⇒
+  L3 or demand. This is a fresh issue with its own plan; OR
+- **(B) sender-side offered-load instrumentation** to break the
+  closed-loop demand ambiguity — a much larger harness, out of scope for
+  a userspace-dp counter PR.
+
+Both are larger than the charter and neither is justified before the
+cheaper #1614 **Path B** (re-scope the #1614 gates to per-CLASS
+achievement, drop the structurally-unreachable per-flow-CoV gate, document
+the ~22-24 G push ceiling as the per-class denominator) lands. **Recommend:
+do #1614 Path B first; file the controlled-A/B (option A) as a fresh issue
+only if the by-design L1 answer is unacceptable to the operator.**
+
+### Reviewer convergence
+
+| round | Codex | AGY | Claude-SMR |
+|-------|-------|-----|------------|
+| r1 (v1) | PLAN-NEEDS-MAJOR (Σshare constant) | trace corroborated facts; verdict timed out | PLAN-NEEDS-MAJOR (Σshare constant) |
+| r2 (v2) | PLAN-NEEDS-MAJOR (L1↔L3 admit alias; backlog↔0 alias; share_integral unsound) | PLAN-NEEDS-MAJOR (backlog↔0 alias; share_integral undercount) | — |
+| r3 (v2) | — | — | PLAN-KILL (self-corrected r2; coupling is structural) |
+
+Convergent verdict: the instrument cannot decide; PLAN-KILL.
