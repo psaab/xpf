@@ -1,3 +1,123 @@
+Reading additional input from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: /home/ps/git/bpfrx/.claude/worktrees/1608-research
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e770f-3811-7fa0-b884-060a6a4e4f9f
+--------
+user
+You previously reviewed docs/research/1608-phase4c/plan.md (research-only, no code) and returned PLAN-NEEDS-MAJOR with ONE substantive finding: the plan's #1615/870-Kpps premise was materially false because the #1615 multi-thread flooder now reaches ~2.94-4.4 Mpps (docs/pr/1615-flooder-multithread-virtio/measurements.md:23,55), so Path D measurement is achievable-but-unrun, not blocked. Your other 7 findings were confirmations of the plan's claims. The plan has been revised: Section 3 now states '#1615 is RESOLVED ... the measurement is now ACHIEVABLE but was never run' citing measurements.md:23,55; Path D now says 'This is now ACHIEVABLE: #1615 is CLOSED'; the Recommendation reflects it. Two AGY structural hazards were also folded (verdict-cache 0% hit-rate + L1/L2 pollution into Path B; rate-limit bottleneck-shift to session install at poll_descriptor/mod.rs:2652-2657 into Path C). Re-review ONLY whether your MAJOR finding #1 is now closed and the KILL recommendation is sound. Output one verdict label: PLAN-KILL-CONFIRMED, PLAN-READY, or PLAN-NEEDS-MAJOR, with brief quoted evidence. Do not modify files.
+codex
+I’ll re-read the revised plan and the cited #1615 measurement lines only, then check whether the previous premise error is actually corrected and whether the resulting kill recommendation follows.
+exec
+/bin/bash -lc "sed -n '1,140p' docs/pr/1615-flooder-multithread-virtio/measurements.md" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
+# #1615 measurements — multi-thread cold-path-flooder sweep
+
+## Test environment
+
+- Host: loss
+- Generator: `loss:cluster-userspace-host` (Incus container with
+  direct SR-IOV mlx5 VF on parent mlx1, VLAN 3667, 11 TX queues,
+  qdisc fq, 16 CPUs visible)
+- Target firewall: `loss:xpf-userspace-fw0`, ge-0-0-1 MAC `02:bf:72:16:02:00`
+- Frame: 64 B Ethernet (14+20+8+22 = MIN_ETH_FRAME)
+- Cohort: unbounded (default, AGY r3 axis 1)
+- Source IP/port: defaults (10.42.0.0/16, src-port [1024, 65536))
+- Duration: 10 s + 2 s warmup
+- Batch: 32 (sendmmsg)
+- All runs `--cpu-base 0`
+
+## Sweep (post r1-fix; warmup excluded from avg_pps)
+
+| --threads | aggregate steady-state pps | ratio | gate |
+|-----------|----------------------------|-------|------|
+| 1         | ~858 K                     | 1.000 | regression check ✓ matches #1611 ~870 K |
+| 2         | ~1.65 M                    | 1.057 | scaling sanity ✓ (1.94× from 1) |
+| 4         | **~2.94 M aggregate**      | 1.615 | **BLOCKING GATE PASS** (≥ 2.5 M, ratio ≤ 2.0) |
+| 8         | ~4.4 M (estimated)         | ~1.5  | headroom confirmed |
+
+Note: pre-r1-fix sweep reported ~3.58 M at threads=4 because warmup-
+phase tx_packets were included in the duration-divisor denominator,
+inflating the avg_pps by ~21%. The post-r1-fix number 2.94 M is the
+accurate steady-state. Gate margin over 2.5 M = 1.18×.
+
+Raw avg_pps reports the duration-window average; per-second progress
+JSON lines show steady-state. Both reported above.
+
+Salient summary (post r1-fix; warmup correctly excluded from
+avg_pps via the per-worker baseline subtraction):
+- threads=1 avg_pps ~858 K (matches #1611 single-thread ceiling)
+- threads=2 avg_pps ~1.65 M
+- threads=4 avg_pps **2.94-2.96 M** — gate passes by 1.18×
+- threads=8 avg_pps ~4.4 M — gate passes by 1.76×
+
+The pre-r1-fix sweep reported ~3.58 M at threads=4 because warmup
+tx_packets were folded into the duration-window denominator; the
+post-fix 2.94 M is the accurate steady-state number.
+
+## Gate verdict
+
+**PASS**.
+
+Plan-v4 §5.2 BLOCKING smoke gate (threads=4 row, post r1-fix):
+- Aggregate `avg_pps` ≥ 2_500_000 → **2.96 M ✓**
+- Per-thread max/min ratio ≤ 2.0 (warning band (1.5, 2.0]) →
+  **1.609 ✓** (warn band, hard-fail threshold 2.0 not reached)
+- `err_eagain < 0.1%` of total tx_packets → **0 ✓**
+
+Multi-thread design empirically breaks the ~870 K pps single-thread
+ceiling on the mlx5 VF (2.96 M / 858 K ≈ 3.45×). The ratio of 1.609
+indicates moderate skew across at least 3 of the 11 TX queues — well
+below the queue-collision hard-fail at 2.0×.
+
+threads=8 ratio sits closer to the warning boundary; this is the
+expected behaviour for 8 threads over 11 queues (probability of zero
+collisions = 11!/(3! · 11^8) ≈ 19%) — most runs see 1-2 thread pairs
+share a queue, producing the modest spread. The aggregate ~4.4 M pps
+still passes by a wide margin.
+
+## CODEX-r3-1 caveat verification
+
+Per plan-v4 §3.7 caveat: per-thread parity is necessary-not-sufficient.
+The threads=4 result with ratio 1.609 (moderate spread) AND aggregate
+2.96 M (well above single-queue ~860 K) confirms threads landed on at
+least 3 distinct TX queues. If all 4 threads had collided on one
+queue under HARD_TX_LOCK, ratio would be ~1.0 (balanced wait queue)
+but aggregate would have collapsed to single-queue ceiling — not
+observed. Both gates working in concert as designed.
+
+## AGY-3 SLUB / MSI-X note
+
+Not gated; informational only. The aggregate ~2.96 M pps at threads=4
+was achieved without manually pinning host-side mlx5 VF MSI-X vectors
+to the container's worker CPUs. The host's default `irqbalance` distribution
+is sufficient at this scale. Manual IRQ alignment would likely buy
+another 10-30% but is out of scope for this PR.
+
+## Reproducer
+
+```bash
+sg incus-admin -c "incus exec loss:cluster-userspace-host -- \
+    /usr/local/bin/cold-path-flooder \
+    --iface eth0 \
+    --dst-mac 02:bf:72:16:02:00 \
+    --dst-ip 172.16.80.200 \
+    --threads 4 \
+    --cpu-base 0 \
+    --duration-secs 10 \
+    --warmup-secs 2 \
+    --batch 32"
+```
+
+exec
+/bin/bash -lc "sed -n '1,260p' docs/research/1608-phase4c/plan.md" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
 # #1608 — Phase 4c cold-path hardening — research plan **v3 (research-only)**
 
 > **History:** v1 PLAN-KILLED 2026-05-27 (6 fatal axes), v2 PLAN-KILLED
@@ -178,9 +298,8 @@ Convergent fatals the v3 design space inherits as hard constraints:
 
 Close-with-rationale. Rationale:
 1. The cold-path bottleneck is **unmeasured** on supported hardware
-   (Section 3); #1607/#1612 never populated the Scale Target table, and
-   although #1615 has since lifted the flooder ceiling to ~2.94-4.4 M
-   pps, the saturating cold-path measurement was never run.
+   (Section 3); #1607/#1612 never populated the Scale Target table and
+   #1615 still caps the only flooder at 870 K pps.
 2. The most-cited attack (flood to dead/random dst) is **already
    handled by #1660** (Section 4).
 3. The residual threat (flood to a *live* dst reaching policy eval) is a
@@ -258,6 +377,49 @@ multi-thread flooder reaches ~2.94-4.4 M pps** (Section 3), enough to
 drive a single-zone-pair cold flood toward per-worker saturation. The
 remaining work is purely to *run* it: focus the flooder on one zone-pair
 (steer to one worker's queue share), capture a flamegraph under the
+flood, populate the Scale Target table, and confirm the policy scan +
+
+exec
+/bin/bash -lc 'rg -n "1615|870|Path D|ACHIEVABLE|Recommendation|KILL|verdict-cache|poll_descriptor|rate-limit|RESOLVED" docs/research/1608-phase4c/plan.md' in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
+3:> **History:** v1 PLAN-KILLED 2026-05-27 (6 fatal axes), v2 PLAN-KILLED
+7:> Claude SMR) ending at PLAN-READY **or** PLAN-KILL. No PR, no production
+16:- **4c.1** per-source ingress rate-limit (token bucket before policy
+21:This research asks the prior-to-design question the two PLAN-KILLs and
+32:1. `poll_descriptor/mod.rs:2392` `ForwardingDisposition::MissingNeighbor`
+37:2. `poll_descriptor/mod.rs:1393` `evaluate_policy_result_with_len`
+41:3. `poll_descriptor/mod.rs:2522` `evaluate_policy_with_len`
+64:multi-stage DAG (#1609 → #1623) was PLAN-KILLED after 6 rounds. The
+77:**Correction (Codex r1 finding #1) — #1615 is RESOLVED, so the
+78:measurement is now ACHIEVABLE but was never run.** The single-thread
+79:flooder ceiling (~870 K pps, #1611) that #1612 cited as the blocker no
+80:longer holds: the #1615 multi-thread flooder (CLOSED) reaches
+82:~4.4 M pps at 8 threads** (`docs/pr/1615-flooder-multithread-virtio/
+92:precondition (Path D) *available today*, which strengthens rather than
+173:  counts; the #1607 harness is still TX-capped per #1615).
+177:### Path A — PLAN-KILL (recommended default unless measurement appears)
+182:   #1615 still caps the only flooder at 870 K pps.
+195:PLAN-KILL leaves the issue OPEN with `plan-kill`, preserving the v3
+201:entirely. Justified ONLY if a measurement (Path D first) shows the
+226:### Path C — 4c.1 silent per-destination rate-limit ONLY
+228:Ship the rate-limit against live-dst floods only, deferring 4c.2. All
+242:(`MissingNeighborSeed` seed at `poll_descriptor/mod.rs:2652-2657`,
+243:conntrack-table allocation). A rate-limit that drops *before* policy
+247:what Path D would measure. Without that measurement, 4c.1's benefit is
+252:### Path D — Measurement-first (precondition for B or C)
+255:on real hardware. **This is now ACHIEVABLE: #1615 is CLOSED and the
+267:### Recommendation
+269:**Path A (PLAN-KILL) as the default**, with Path D as the documented
+273:Scale Target measurement was never run — even though #1615 has since
+278:(rate-limit only) is the higher-value reopen; Path B (verdict cache) is
+291:  insert cost. Unquantified without Path D.
+330:The issue's CPU-% and cycle-count criteria are unmeetable until Path D
+336:acceptance criteria stay TBD pending #1615 resolution.
+349:5. Is the right outcome PLAN-KILL with a Path-D reopen criterion, or is
+
+exec
+/bin/bash -lc "sed -n '260,380p' docs/research/1608-phase4c/plan.md" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
 flood, populate the Scale Target table, and confirm the policy scan +
 session install is the dominant per-worker cost. Only then is the
 bottleneck claim falsifiable and the acceptance criteria meetable. This
@@ -349,3 +511,138 @@ acceptance criteria stay TBD pending #1615 resolution.
    and C?
 5. Is the right outcome PLAN-KILL with a Path-D reopen criterion, or is
    there a measured win that makes B or C ship now?
+
+codex
+The revised measurement sections now say the right thing, but I found the old false premise still present in the Path A rationale itself. I’m checking exact line numbers so the verdict can stay narrow.
+exec
+/bin/bash -lc "nl -ba docs/research/1608-phase4c/plan.md | sed -n '74,96p'" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
+    74	(`:637-644`) but **zero populated A1/A2/B1/B2 rows** (no
+    75	`p50`/`p99`/`ns/packet` table).
+    76	
+    77	**Correction (Codex r1 finding #1) — #1615 is RESOLVED, so the
+    78	measurement is now ACHIEVABLE but was never run.** The single-thread
+    79	flooder ceiling (~870 K pps, #1611) that #1612 cited as the blocker no
+    80	longer holds: the #1615 multi-thread flooder (CLOSED) reaches
+    81	**~2.94 M pps aggregate at 4 threads (BLOCKING GATE PASS ≥2.5 M) and
+    82	~4.4 M pps at 8 threads** (`docs/pr/1615-flooder-multithread-virtio/
+    83	measurements.md:23,55`). At ~2.94 M pps across 6 workers ≈ 490 K
+    84	pps/worker — still below the ~5 Mpps/worker cold-path saturation point,
+    85	but with 8 threads (~4.4 M / ~733 K pps/worker) and a focused single-
+    86	zone-pair flood (all packets to one worker's queue share) per-worker
+    87	cold-path saturation is now within reach of the harness. **Nobody has
+    88	run that measurement and populated the Scale Target table.** So the
+    89	cold path's per-packet cost and its position on the bottleneck frontier
+    90	remain unmeasured — not because the tooling can't, but because the
+    91	measurement step was never executed. This makes the measurement-first
+    92	precondition (Path D) *available today*, which strengthens rather than
+    93	weakens the case against shipping a mechanism blind.
+    94	
+    95	The #1605 kill verdict already quantified the established-flow side:
+    96	JIT-the-rewrite saves 0.4-0.6% of one core because the dominant costs
+
+exec
+/bin/bash -lc "nl -ba docs/research/1608-phase4c/plan.md | sed -n '177,190p'" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
+   177	### Path A — PLAN-KILL (recommended default unless measurement appears)
+   178	
+   179	Close-with-rationale. Rationale:
+   180	1. The cold-path bottleneck is **unmeasured** on supported hardware
+   181	   (Section 3); #1607/#1612 never populated the Scale Target table and
+   182	   #1615 still caps the only flooder at 870 K pps.
+   183	2. The most-cited attack (flood to dead/random dst) is **already
+   184	   handled by #1660** (Section 4).
+   185	3. The residual threat (flood to a *live* dst reaching policy eval) is a
+   186	   genuine availability concern but is **not demonstrated** to saturate
+   187	   a worker at realistic rule counts: post-#1606 the per-rule cost is a
+   188	   match-any flag + a trie `contains` + a shared-book `contains`, and
+   189	   the rule-count-linear part is the zone-pair index scan — which #1609's
+   190	   DAG was the chartered fix for (killed, but the cost was never shown to
+
+exec
+/bin/bash -lc "nl -ba docs/pr/1615-flooder-multithread-virtio/measurements.md | sed -n '20,60p'" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
+    20	|-----------|----------------------------|-------|------|
+    21	| 1         | ~858 K                     | 1.000 | regression check ✓ matches #1611 ~870 K |
+    22	| 2         | ~1.65 M                    | 1.057 | scaling sanity ✓ (1.94× from 1) |
+    23	| 4         | **~2.94 M aggregate**      | 1.615 | **BLOCKING GATE PASS** (≥ 2.5 M, ratio ≤ 2.0) |
+    24	| 8         | ~4.4 M (estimated)         | ~1.5  | headroom confirmed |
+    25	
+    26	Note: pre-r1-fix sweep reported ~3.58 M at threads=4 because warmup-
+    27	phase tx_packets were included in the duration-divisor denominator,
+    28	inflating the avg_pps by ~21%. The post-r1-fix number 2.94 M is the
+    29	accurate steady-state. Gate margin over 2.5 M = 1.18×.
+    30	
+    31	Raw avg_pps reports the duration-window average; per-second progress
+    32	JSON lines show steady-state. Both reported above.
+    33	
+    34	Salient summary (post r1-fix; warmup correctly excluded from
+    35	avg_pps via the per-worker baseline subtraction):
+    36	- threads=1 avg_pps ~858 K (matches #1611 single-thread ceiling)
+    37	- threads=2 avg_pps ~1.65 M
+    38	- threads=4 avg_pps **2.94-2.96 M** — gate passes by 1.18×
+    39	- threads=8 avg_pps ~4.4 M — gate passes by 1.76×
+    40	
+    41	The pre-r1-fix sweep reported ~3.58 M at threads=4 because warmup
+    42	tx_packets were folded into the duration-window denominator; the
+    43	post-fix 2.94 M is the accurate steady-state number.
+    44	
+    45	## Gate verdict
+    46	
+    47	**PASS**.
+    48	
+    49	Plan-v4 §5.2 BLOCKING smoke gate (threads=4 row, post r1-fix):
+    50	- Aggregate `avg_pps` ≥ 2_500_000 → **2.96 M ✓**
+    51	- Per-thread max/min ratio ≤ 2.0 (warning band (1.5, 2.0]) →
+    52	  **1.609 ✓** (warn band, hard-fail threshold 2.0 not reached)
+    53	- `err_eagain < 0.1%` of total tx_packets → **0 ✓**
+    54	
+    55	Multi-thread design empirically breaks the ~870 K pps single-thread
+    56	ceiling on the mlx5 VF (2.96 M / 858 K ≈ 3.45×). The ratio of 1.609
+    57	indicates moderate skew across at least 3 of the 11 TX queues — well
+    58	below the queue-collision hard-fail at 2.0×.
+    59	
+    60	threads=8 ratio sits closer to the warning boundary; this is the
+
+exec
+/bin/bash -lc "nl -ba docs/research/1608-phase4c/plan.md | sed -n '252,276p'" in /home/ps/git/bpfrx/.claude/worktrees/1608-research
+ succeeded in 0ms:
+   252	### Path D — Measurement-first (precondition for B or C)
+   253	
+   254	Do NOT ship either mechanism until a cold-path saturation profile exists
+   255	on real hardware. **This is now ACHIEVABLE: #1615 is CLOSED and the
+   256	multi-thread flooder reaches ~2.94-4.4 M pps** (Section 3), enough to
+   257	drive a single-zone-pair cold flood toward per-worker saturation. The
+   258	remaining work is purely to *run* it: focus the flooder on one zone-pair
+   259	(steer to one worker's queue share), capture a flamegraph under the
+   260	flood, populate the Scale Target table, and confirm the policy scan +
+   261	session install is the dominant per-worker cost. Only then is the
+   262	bottleneck claim falsifiable and the acceptance criteria meetable. This
+   263	is the honest precondition the v2 kill and the parking decision both
+   264	gestured at; **it has not been satisfied, even though the tooling now
+   265	exists to satisfy it.**
+   266	
+   267	### Recommendation
+   268	
+   269	**Path A (PLAN-KILL) as the default**, with Path D as the documented
+   270	reopen criterion. The two gating issues that were supposed to make a v3
+   271	"narrow" (#1607 measurement, #1609 DAG) both failed to deliver their
+   272	*deliverable*: the DAG never shipped (only #1623 scaffolding), and the
+   273	Scale Target measurement was never run — even though #1615 has since
+   274	made the harness capable of >2.5 M pps. The mechanisms therefore still
+   275	sit in front of an unmeasured cold path, and the strongest attack
+   276	example is already covered by #1660. If a
+
+codex
+PLAN-NEEDS-MAJOR
+
+The #1615 correction is present in Section 3 and Path D: “#1615 is RESOLVED” and “measurement is now ACHIEVABLE but was never run” ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1608-research/docs/research/1608-phase4c/plan.md:77)); Path D says “This is now ACHIEVABLE” ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1608-research/docs/research/1608-phase4c/plan.md:254)).
+
+But the recommended Path A rationale still contains the false premise: “#1615 still caps the only flooder at 870 K pps” ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1608-research/docs/research/1608-phase4c/plan.md:180)), contradicted by #1615 measurements: “~2.94 M aggregate” and “breaks the ~870 K pps single-thread ceiling” ([measurements.md](/home/ps/git/bpfrx/.claude/worktrees/1608-research/docs/pr/1615-flooder-multithread-virtio/measurements.md:23)). So finding #1 is not fully closed as written, and the KILL recommendation cannot be confirmed until that stale rationale is removed.
+tokens used
+26,911
+PLAN-NEEDS-MAJOR
+
+The #1615 correction is present in Section 3 and Path D: “#1615 is RESOLVED” and “measurement is now ACHIEVABLE but was never run” ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1608-research/docs/research/1608-phase4c/plan.md:77)); Path D says “This is now ACHIEVABLE” ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1608-research/docs/research/1608-phase4c/plan.md:254)).
+
+But the recommended Path A rationale still contains the false premise: “#1615 still caps the only flooder at 870 K pps” ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1608-research/docs/research/1608-phase4c/plan.md:180)), contradicted by #1615 measurements: “~2.94 M aggregate” and “breaks the ~870 K pps single-thread ceiling” ([measurements.md](/home/ps/git/bpfrx/.claude/worktrees/1608-research/docs/pr/1615-flooder-multithread-virtio/measurements.md:23)). So finding #1 is not fully closed as written, and the KILL recommendation cannot be confirmed until that stale rationale is removed.
