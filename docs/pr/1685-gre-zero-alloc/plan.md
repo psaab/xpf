@@ -1,6 +1,56 @@
 # #1685 — Native GRE decap/encap per-packet `Vec` elimination
 
-**Status:** DRAFT v1 — pending adversarial plan review
+**Status:** PLAN-KILLED v1 (2026-05-30) — unanimous 3-of-3 (Claude-SMR
++ Codex + AGY). The issue's "mirror #1433 WG scratch" premise is wrong
+against the actual data flow, and the perf case is unmeasured /
+sub-threshold (#1545 pattern). Verdicts and evidence below; reviewer
+detail in `claude-smr-plan-r1.md` and `reviewer-ids.md`.
+
+## PLAN-KILL summary (round 1, unanimous)
+
+Three independent reviewers converged on PLAN-KILL with the same
+code-verified fatal grounds:
+
+1. **Batching defeats the single-buffer scratch pattern.** Decap output
+   moves into `PendingForwardFrame::Owned(Vec)` and lives in
+   `scratch_forwards` (up to `RX_BATCH_SIZE = 64` concurrent,
+   drained at end-of-batch in `tx/dispatch/mod.rs:176-189`,
+   `worker/lifecycle.rs:112,208`); encap output moves into
+   `TxRequest.bytes` until UMEM TX completes (`tx/dispatch/mod.rs:545`,
+   `tx/transmit/mod.rs:129`), and TSO fans out N owned Vecs
+   (`tcp_segmentation.rs:309`). A single per-worker reused buffer would
+   alias and corrupt live frames. WG is safe only because it consumes
+   its output inline before the next packet; GRE explicitly defers via
+   the `owned_packet_frame.take()` contract (`poll_stages.rs:118-153`).
+2. **The #1433 WG precedent is a phantom.** `WgWorkerScratch`
+   (`wg/scratch.rs`) is constructed only in `wg/tests.rs`, never wired
+   into a live worker poll path; its own doc says the integration "will
+   wire" it later. Citing it as a shipped architecture is unsound.
+3. **Perf is unmeasured and structurally sub-threshold (#1545).** The
+   decap alloc fires only for `meta.protocol == PROTO_GRE`
+   (`gre.rs:186-188`); encap only for `tunnel_endpoint_id != 0`
+   (`frame/mod.rs:236`). The loss smoke path (plain-IP forward to
+   172.16.80.200) never exercises GRE; GRE is a separate validation
+   target (`testing-docs/userspace-dataplane.md:193`,
+   `testing-docs/performance.md:164`). No in-repo flamegraph shows GRE
+   alloc as a hot frame. The only sound zero-alloc shapes are an arena
+   (relocates the alloc; ~256 KiB/worker resident) or a direct-TX
+   rewrite (HIGH risk; far beyond the issue's framing) — exactly the
+   #1545 cost/benefit that was killed.
+
+**Opportunistic follow-up (NOT this issue):** AGY found a genuine,
+zero-risk redundant allocation at `gre.rs:317` — `inner_frame.get(..)?
+.to_vec()` copies the inner packet only to pass it to
+`packet_trimmed_len(&[u8])`, then immediately re-slices. Dropping
+`.to_vec()` (borrow `inner_frame` directly; it lives for the whole fn)
+removes one of the two encap-path allocations with no architectural
+churn. This can ship as a trivial one-line micro-PR independent of the
+killed plan.
+
+---
+
+## (Original DRAFT v1 below — preserved for the archive)
+
 
 ## 1. Issue framing
 
