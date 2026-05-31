@@ -7,13 +7,36 @@ topology, which IS #1614's environment)
 Branch: refactor/1693-rate-aware-placement
 Base: origin/master @ b0bd988fa (#1691 Path B merged; #1692 Path A
 PLAN-KILLED; master GREEN, canary fixed #1723)
-Status: **PLAN-KILL CANDIDATE.** This plan argues the issue should be
-PLAN-KILLED on a TOPOLOGY-CONDITIONAL architectural-mismatch leg
-(verified for #1614's loss-cluster single-egress-NIC symmetric topology),
-hardened by the unmet-prerequisite leg (#1692) and the #761 transaction-
-safety leg. An active perturbative experiment is specified (§5) as the
-mandated confirmer of the symmetric-binding invariant, but §3 shows it
-cannot point at placement as the §3.B gating layer.
+Status: **PLAN-KILLED (3-of-3 converged: Codex r2 + AGY r2 + Claude-SMR
+r2 all PLAN-READY = ratify the KILL for #1614's loss-cluster topology).**
+The issue is PLAN-KILLED on a TOPOLOGY-CONDITIONAL architectural-mismatch
+leg (verified for #1614's loss-cluster single-egress-NIC symmetric
+topology), hardened by the unmet-prerequisite leg (#1692) and the #761
+transaction-safety leg. An active perturbative experiment is specified
+(§5) as the empirical confirmer of the symmetric-binding invariant, but
+§3 shows it cannot point at placement as the §3.B gating layer — both
+reviewers independently confirmed it can only land on L1/L3/demand, none
+of which is placement.
+
+> KILL SUMMARY (see §3 + §12): The Path C lever, `owner_worker_by_queue`,
+> does not place #1614's under-protected shared-exact tier (3g/6g, ≥2.5
+> G). On the loss cluster (`worker_id = queue_id % workers`,
+> `server/helpers.rs:618-636`; 6 queues → 6 workers) every worker binds
+> reth0, so `tx_owner_live` is `Some` on every worker for reth0.80, the
+> shared-exact owner-redirect bail (`cross_binding.rs:69,123,187`) always
+> fires, and 3g/6g drain RSS-local gated by the v8 per-worker share lease
+> (L1) — not by the owner map (`tx/dispatch/cos.rs:91-99`). #1598
+> deliberately REMOVED owner-routing for this tier (funnel regression).
+> The only path that consults the owner map (foreign-egress,
+> `tx_owner_live==None`) is unreachable for #1614's single-egress
+> workload and is a cross-binding HANDOFF target that does not change the
+> v8 share split (`total_flows`/`my_count`/`new_cap` unaffected,
+> `rotate_epoch_v8.rs:308`). #1692 already established 3-of-3 that the
+> §3.B gating layer is L1 (by-design, #1304/#1220) / L3 (selector — a
+> separate #1614 Path A issue) / demand (#1630 cause-2) — none placement.
+> The current owner builder is the #761-killed round-robin (mid-flight
+> slot shift → HA misroute), so even granting placement mattered, the
+> mechanism needs a tombstoned ledger #761 already killed. PLAN-KILL.
 
 > v2 CHANGE LOG: v1's §3.A claimed `owner_worker_by_queue` has an
 > ABSOLUTE "zero effect on shared-exact drain." Codex r1
@@ -152,15 +175,31 @@ worker holds a binding whose `ifindex == egress tx_ifindex`
 
 #1614 runs on the loss userspace cluster (CLAUDE.md topology): reth0 (WAN
 egress, ge-0-0-2/enp9s0) is a single mlx5 VF exposing **6 combined RX
-queues → 6 workers**; each worker binds one queue of reth0. Therefore
-EVERY worker holds a reth0 binding ⇒ `tx_owner_live` for reth0's
-tx_ifindex is `Some` on every worker ⇒ the shared-exact bail
+queues → 6 workers**; the planner creates a binding per (interface,
+queue) and assigns `worker_id = queue_id % workers`
+(`server/helpers.rs:618,625,636`; `workers 6` per
+`docs/ha-cluster-userspace.conf:286` /
+`loss-userspace-shared-umem-phase0-node0.json:29`), so queue IDs 0-5
+give workers 0-5 a reth0 binding (Codex r2 verified). Therefore EVERY
+worker holds a reth0 binding ⇒ `tx_owner_live` for reth0's tx_ifindex is
+`Some` on every worker ⇒ the shared-exact bail
 (`cross_binding.rs:69,123,187`) ALWAYS fires for reth0.80's 3g/6g
 queues ⇒ the foreign-egress owner path (§3.D) is unreachable for the
 #1614 workload. The 3g/6g iperf flows egress ONLY reth0.80 (single
 egress NIC; no transit to a foreign egress). This invariant is the one
 empirical fact the active experiment (§5) confirms: 3g/6g drain
 RSS-local, owner map unused.
+
+**Degraded-state caveat (Codex r2):** a partial-binding state CAN make
+`tx_owner_live == None` even on the loss cluster — `set_binding_state`
+can unregister one binding (`server/handlers/binding.rs:27`), bringup
+skips unregistered bindings (`coordinator/reconcile/bringup.rs:42`), and
+a worker binding-creation failure leaves it out of the worker-local map
+(`worker/loop_body/mod.rs:115`). That is a DEGRADED topology, not the
+chartered healthy loss-cluster steady state, and the §5 experiment's
+job-(a) empirical invariant check (every worker carries 3g/6g shards)
+guards against silently reasoning over a degraded binding set. It does
+not change the verdict for the healthy environment #1614 measures.
 
 ### 3.D — the foreign-egress owner path exists but is out of #1614 scope
 (Codex r1 + AGY r1 finding, folded)
@@ -177,17 +216,22 @@ v1's ABSOLUTE "zero effect" claim. Two reasons it does not revive #1693:
    path is unreachable there. A foreign-egress fairness concern is a
    DIFFERENT, UNFILED question; #1693's title and the #1614 Path C note
    are both about the loss-cluster simul-load case.
-2. **Even there, the owner map is a cross-binding HANDOFF target, not a
-   fairness placement lever.** When `tx_owner_live == None` the request
-   MUST be handed to some binding that owns the egress; `owner_worker_id`
-   selects WHICH one. That is correctness routing (get the frame to a
-   worker that can TX the egress), not a per-class fairness control. The
-   §3.B gating layer (L1 v8 share / L3 selector / demand — §4) is
-   downstream of and independent of this handoff: once the frame reaches
-   an egress-owning worker it is RSS/lease-gated exactly as in §3.C. So
-   even on an asymmetric topology, making the handoff "rate-aware" does
-   not change the v8 per-worker share split that #1692 fingered as the
-   probable cause.
+2. **Even there, the owner map is primarily a cross-binding HANDOFF
+   target, not the §3.B fairness lever.** When `tx_owner_live == None` the
+   request MUST be handed to some binding that owns the egress;
+   `owner_worker_id` selects WHICH one (`cross_binding.rs:71`;
+   `tx/drain/mod.rs:517`). That is correctness routing (get the frame to a
+   worker that can TX the egress). CAVEAT (Codex r2): off-topology, the
+   chosen destination worker's queue runtime DOES update the v8
+   per-worker active-flow counters that feed `my_share`
+   (`cos/queue_ops/accounting.rs:70`; `rotate_epoch_v8.rs:306`), so the
+   handoff is not entirely fairness-neutral in the abstract. It does NOT
+   revive #1693 because §3.C makes this path unreachable for reth0.80 in
+   #1614, and because a "rate-aware handoff" would still only choose
+   among egress-OWNING workers (a correctness-constrained set), not
+   re-place the RSS-distributed shards that the v8 share split actually
+   gates. An off-topology multi-egress fairness concern is a separate,
+   unfiled issue — NOT the #1614 loss-cluster §3.B gap #1693 charters.
 
 ### 3.E — the project DELIBERATELY removed owner-routing for this tier
 
@@ -390,3 +434,52 @@ to refute the kill)
   (`my_share`), `mod.rs:1152` (`acquire_v8`).
 - KILL lineage: #1211 #761 #836 #840 #1203 #937 #1215 #1692 #1236 #1237
   #1239 #936 #1220 #1244.
+
+## 12. KILL SUMMARY (converged 3-of-3)
+
+**PLAN-KILLED.** Rate-aware queue→worker placement cannot address the
+#1614 §3.B 3g/6g guarantee under-protection on the environment #1614
+measures. Three independent legs, all reviewer-verified:
+
+1. **Architectural mismatch (primary, §3):** the lever
+   (`owner_worker_by_queue`) does not place the under-protected
+   shared-exact tier on #1614's loss-cluster symmetric single-egress
+   topology. Verified: `worker_id = queue_id % workers` ⇒ all 6 workers
+   bind reth0 ⇒ `tx_owner_live` always `Some` ⇒ shared-exact bail always
+   fires ⇒ 3g/6g drain RSS-local, owner map unused. #1598 deliberately
+   removed owner-routing for this tier.
+2. **Unmet prerequisite (§4):** #1692 (3-of-3 PLAN-KILL) established the
+   §3.B gating layer is L1 (v8 share, by-design) / L3 (selector, a
+   separate #1614 Path A issue) / demand (#1630 cause-2) — none placement.
+3. **Transaction-safety (§6):** the current owner builder is the
+   #761-killed round-robin (mid-flight slot shift → HA misroute); a
+   tombstoned ledger would be required even if placement mattered.
+
+The mandated active experiment (§5) was specified as the empirical
+confirmer of the symmetric invariant; both reviewers independently
+confirmed no E1/E2 outcome can implicate the owner map (it can only land
+on L1/L3/demand), so the kill stands on the code-level invariant and the
+experiment can only harden it. No production source changed; no mechanism
+shipped (so no CoS smoke / `test-failover` needed — those gate a shipping
+mechanism).
+
+### Reviewer convergence
+
+| round | Codex | AGY | Claude-SMR |
+|-------|-------|-----|------------|
+| r1 (v1) | PLAN-NEEDS-MAJOR (absolute §3.A false; bail conditional on `tx_owner_live`) | PLAN-KILL-IS-WRONG (absolute §3.A false) + matrix: symmetric ⇒ KILL | found the conditional bail independently; drove the v2 narrowing |
+| r2 (v2) | **PLAN-READY** (ratify KILL; §3.C invariant verified via `worker_id=queue_id%workers`) | **PLAN-READY** (ratify KILL; §3.C sound, §3.D handoff-not-lever correct) | **PLAN-READY** (verified `tx_owner_live` setter chain + v8 share split independence) |
+
+Convergent verdict: the Path C lever is structurally bypassed for
+#1614's tier on its own environment; PLAN-KILL.
+
+### What a future revisit needs (NOT this issue)
+
+- An ASYMMETRIC / multi-egress topology where 3g/6g traffic actually
+  takes the `tx_owner_live==None` foreign-egress owner path AND where the
+  destination-worker v8 active-flow accounting (Codex r2 / AGY r3
+  caveat) measurably skews per-class delivery. That is a separate,
+  unfiled question, not #1614's loss-cluster §3.B gap.
+- OR the #1614 Path A successor (a controlled active A/B, #1692 §12
+  option A) fingering the **L3 selector** budget as fixable — which is a
+  selector change (#1614 Path A candidate 4), NOT placement.

@@ -16,7 +16,19 @@
 - Claude-SMR r1: in-conversation. Verified the conditional bail
   independently before reviewers returned; ratifies the v2 narrowing.
 
-## Plan review round 2 (v2 — §3 narrowed to topology-conditional)
-- Codex r2: (pending)
-- AGY r2: (pending)
-- Claude-SMR r2: (pending)
+## Plan review round 2 (v2 @ db1013506 — §3 narrowed to topology-conditional)
+- Codex r2: isolated foreground session `codex-1693-plan-r2-*`. Verdict
+  **PLAN-READY** — ratify KILL on §3.C basis; verified `worker_id =
+  queue_id % workers` (server/helpers.rs:618-636) ⇒ symmetric invariant
+  holds. Two non-blocking caveats (degraded partial-binding; off-topology
+  handoff feeds v8 counters) folded into v2. See codex-plan-r2.md.
+- AGY r2: job `adversarial-review-mptuwo4g-hxaiuy`. Verdict **PLAN-READY**
+  — ratify KILL for symmetric topology; §3.C sound, §3.D handoff-not-lever
+  technically correct (owner map doesn't alter total_flows/my_count/
+  new_cap). See agy-plan-r2.md.
+- Claude-SMR r2: in-conversation. **PLAN-READY** — independently verified
+  the tx_owner_live setter chain + symmetric binding + v8 share-split
+  independence. See claude-smr-plan.md.
+
+## Convergence: 3-of-3 PLAN-READY = ratify PLAN-KILL #1693 for #1614's
+loss-cluster topology. No mechanism shipped; no production source changed.
