@@ -1,7 +1,17 @@
 # #1432 — WireGuard S2 datapath consolidation: reconcile #1432 / #1434 / #1389 against the #1703 S-step plan
 
-Status: **PLAN-READY v1 (DRAFT)** — awaiting 3-way hostile review (Codex + AGY +
-Claude-SMR). This is a **consolidation/issue-structure research**, NOT an
+Status: **PLAN-READY v2** — 3-way hostile review CONVERGED. Codex
+(`research-1432-r1`) PLAN-NEEDS-MINOR, AGY (`adversarial-review-mptapuvt-0sfa24`)
+PLAN-NEEDS-MINOR, Claude-SMR (r1) PLAN-NEEDS-MINOR — all three confirm **Option
+A** is correct and reject Options B/C, and all three verified the §3/§4 code
+evidence (snow-not-boringtun, engine unwired top-to-bottom, dead Wg* DTOs, no Go
+population, no UDP/CLI). All minor findings folded in v2: S-step relabel to the
+canonical `wireguard-interop.md` ladder (S4=PSK, S5=timers/persistence, S6=Junos
+config, no S3), perf item preserved as a measurement-gated post-S2 follow-up,
+full-tunnel >MTU live-interop acceptance (SMR F3), and #1432 discoverability
+(SMR F6). v1 history: drafted + committed @ b8b64a63e.
+
+This is a **consolidation/issue-structure research**, NOT an
 implementation plan. The deliverable is: (a) the verified relationship between
 the four pre-existing WireGuard issues, (b) a recommended issue structure with
 concrete dedup actions, and (c) the S2 scope boundary so the next `/engineer`
@@ -180,9 +190,20 @@ boundary item (b+): the live kernel-wg interop test lands in S2.
 | Issue | Title | Claimed state | Actual state vs master | True overlap |
 |---|---|---|---|---|
 | **#1703** | WG interop umbrella | S1 merged, S2–S6 parked | Accurate. S-step plan in comments. | The umbrella. Owns the S-step ladder. |
-| **#1432** | "High-Performance WG in userspace DP" | boringtun engine + RX/TX/protocol **done**; Go compiler + CLI + perf **open** | "done" items are **fiction** (boringtun never landed; design doc absent). The shipped engine is snow-based S1. The OPEN items (Go compiler, CLIS, perf) are real future work. | **The datapath-wiring + activation half of S2**, mislabeled as "done via boringtun." Its OPEN items straddle S2 (no items), S4 (Go config), and a *future* perf step. |
-| **#1434** | Multi-Tunnel WG | multiple wgN, per-iface keys/ports, port-keyed engine map, public-key CLI, generate-private-key | None of it exists on master; the engine is single-instance, no port demux map, no CLI. "Restore generate-private-key" has nothing to restore. | **S4 (config surface, multi-peer) + S5 (responder/multi-instance).** Pure future work; no overlap with S2's single-tunnel wiring. |
+| **#1432** | "High-Performance WG in userspace DP" | boringtun engine + RX/TX/protocol **done**; Go compiler + CLI + perf **open** | "done" items are **fiction** (boringtun never landed; design doc absent). The shipped engine is snow-based S1. The OPEN items (Go compiler, CLI, perf) are real future work. | **The datapath-wiring + activation half of S2**, mislabeled as "done via boringtun." Its OPEN items map to S6 (Go config + key CLI) and a *post-S2 measured-perf follow-up* — none belong IN S2 except the wiring its `[x]` items describe. |
+| **#1434** | Multi-Tunnel WG | multiple wgN, per-iface keys/ports, port-keyed engine map, public-key CLI, generate-private-key | None of it exists on master; the engine is single-instance, no port demux map, no CLI. "Restore generate-private-key" has nothing to restore. | **S6 (Junos config surface + key CLI) plus a multi-instance/port-keyed-engine-map extension on top of it.** Pure future work; no overlap with S2's single-tunnel wiring. |
 | **#1389** | Edge gateway bundle | broad 6-feature product ask; Phase 5 = "easy WG" via **kernel-WG + veth** | Architecturally **divergent** — recommends kernel WG + veth re-entry, which the clean-room userspace-dp engine SUPERSEDES. The WG portion is a product/UX wrapper. | **References WG; does not implement it.** Should depend on #1703, not duplicate it. Its kernel-WG+veth recommendation is stale and must be annotated superseded. |
+
+> **S-step numbering (canonical, per `docs/wireguard-interop.md:15-21`):**
+> S1 = wire-protocol compliance (DONE, #1709/#1716); **S2** = dataplane
+> activation (AF_XDP encap/decap) + live kernel-WG-on-VM interop; **S4** =
+> non-zero PSK plumbing; **S5** = persistent-keepalive + REKEY/REJECT-AFTER
+> timers + endpoint roaming + empty-record handling + TAI64N disk persistence;
+> **S6** = Junos config surface (grammar + compiler + snapshot population,
+> base64↔hex keys); **S7** = type-3 CookieReply + MAC2 + IPv6 outer + DSCP/ECN;
+> **S8** = HA RG WG-session migration. (The authoritative landed doc has **no
+> S3**; the #1703 umbrella comment used an ad-hoc renumbering — this plan
+> follows `wireguard-interop.md`, the merged artifact.)
 
 ### 4.1 Hostile test of the user's hypothesis ("#1432 IS S2")
 
@@ -206,19 +227,23 @@ boundary item (b+): the live kernel-wg interop test lands in S2.
   kernel-WG+veth, contra #1389), not a distinct deliverable. (b) The
   per-MEMORY.md SIMD/perf history (#966–#969 all PLAN-KILLED: ChaCha20-Poly1305
   is already AVX-512 in the crate; there is no userspace crypto hot-loop to
-  hand-optimize) means a standalone "WG perf" issue would almost certainly
-  PLAN-KILL. So #1432's perf framing is best treated as the *rationale* for
-  doing WG in userspace-dp at all, and its one real open perf item folds into
-  S2's acceptance (the live interop must sustain a transport-record round-trip;
-  any throughput target is a later, separately-justified step — NOT a blocker
-  for S2).
+  hand-optimize) means a *speculative* standalone "WG SIMD perf" issue opened
+  with no measurement would likely PLAN-KILL. So #1432's perf framing is the
+  *rationale* for doing WG in userspace-dp at all (userspace crypto on the
+  AF_XDP path vs kernel-WG+veth), not a distinct S2 deliverable. **The perf item
+  is preserved, not dismissed:** it is retained as a *post-S2 measured
+  throughput/CPU validation* — run only once S2 has a live tunnel, and pursued
+  as its own work item only if that measurement shows a real bottleneck (the
+  #966–#969 precedent forbids only the *unmeasured-speculative* form, not a
+  measurement-gated one).
 
 - **Caveat the structure must encode:** #1432's three OPEN items are NOT all S2.
-  "Go control-plane compiler for WireGuard config" = **S4**. "CLI for key
-  management" = **S4/S5** (and overlaps #1434). "Performance benchmarking" =
-  later/optional, likely-KILL as a standalone. So #1432 cannot be re-scoped to
-  S2 *as-is* without amputating its S4/perf items — they must be migrated to
-  #1434/#1703-S4 to keep S2's boundary clean.
+  "Go control-plane compiler for WireGuard config" = **S6** (Junos config
+  surface). "CLI for key management" = **S6** (and overlaps #1434).
+  "Performance benchmarking and optimization" = a **post-S2 measured follow-up**
+  (kept on #1432-as-S2 as a non-blocking acceptance note, NOT a third track, NOT
+  hand-waved away). So #1432 cannot be re-scoped to S2 *as-is* without migrating
+  its S6 config/CLI items to #1434/#1703-S6 to keep S2's boundary clean.
 
 ---
 
@@ -229,9 +254,10 @@ boundary item (b+): the live kernel-wg interop test lands in S2.
 - **Option A — #1432 BECOMES #1703 S2 (re-scope in place).** Relabel #1432 to
   "#1703 S2: wire the S1 wire-compliant engine into the AF_XDP datapath
   (encap/decap) + live kernel-WireGuard interop test." Strip its fictional
-  `[x]` boringtun items, migrate its Go-compiler/CLI open items to #1434, drop
-  perf to a footnote. #1434 → S4/S5. #1389 → annotate (depends-on #1703,
-  kernel-WG+veth superseded). **No third track.**
+  `[x]` boringtun items, migrate its Go-compiler/CLI open items to #1434/S6,
+  keep perf as a non-blocking post-S2 measured-validation note. #1434 → S6 +
+  multi-instance extension. #1389 → annotate (depends-on #1703, kernel-WG+veth
+  superseded). **No third track.**
 - **Option B — S2 is a fresh sub-issue; #1432 closed-as-superseded.** Open a
   clean `#1703 S2` issue mirroring §3.5; close #1432 as superseded (its premise
   — boringtun, kernel-WG+veth-era — is obsolete). Pro: clean slate, no fictional
@@ -250,7 +276,8 @@ Rationale: #1432's *work description* already IS S2 (§4.1); re-scoping in place
 preserves the issue's history/backlinks while removing the fictional status, and
 costs one issue edit + comment rather than a close+open churn. Option B's only
 real advantage (no fictional history) is achieved by Option A's "strip the `[x]`
-items" edit anyway. Option C is structurally wrong.
+items" edit anyway, and Option A also preserves #1432's discoverability as the
+most-findable WG issue by title (Claude-SMR F6). Option C is structurally wrong.
 
 **Concrete dedup actions (research output — to be executed by the human/operator
 or the subsequent `/engineer`, NOT by this research run):**
@@ -260,20 +287,24 @@ or the subsequent `/engineer`, NOT by this research run):**
      snow-based clean-room engine via #1499/#1709); the real remaining work is
      S2 datapath activation per §3.3–§3.5 + §5.3 below.
    - Re-scope its checklist to the S2 boundary (§5.3). Migrate "Go control-plane
-     compiler" + "CLI key management" out to #1434/#1703-S4. Demote "perf
-     benchmarking" to a non-blocking footnote (revisit only with a measured
-     bottleneck, per the #966–#969 KILL precedent).
+     compiler" + "CLI key management" out to #1434/#1703-S6. Keep "perf
+     benchmarking" as a non-blocking post-S2 measured-validation acceptance note
+     (run after a live tunnel exists; spin a dedicated perf item ONLY on a
+     measured bottleneck — the #966–#969 precedent bars only the unmeasured-
+     speculative form).
    - Add `Part of #1703` and link as the S2 deliverable.
-2. **#1434 — relabel as #1703 S4/S5 (config surface + multi-peer/responder).**
-   Comment: nothing to "restore" on master; this is net-new work that depends on
-   S2 (single-tunnel datapath) landing first. Sequence after S2.
+2. **#1434 — relabel as #1703 S6 (config surface + key CLI) + a multi-instance/
+   port-keyed-engine extension.** Comment: nothing to "restore" on master; this
+   is net-new work that depends on S2 (single-tunnel datapath) landing first.
+   Sequence after S2/S6.
 3. **#1389 — keep as the broad edge-gateway umbrella; annotate.** Comment: its
    Phase-5 WireGuard work is delivered by the #1703 S-step chain (userspace-dp
    engine), NOT by the stale kernel-WG+veth recommendation in
    `docs/vpp-dataplane-assessment.md:716-849`; mark that recommendation
    superseded. #1389 *consumes* #1703; it must not spawn a parallel WG impl.
 4. **#1703 — record the consolidation** in the umbrella: S2 = #1432
-   (re-scoped); S4/S5 absorb #1434; #1389 depends-on, does not duplicate.
+   (re-scoped); S6 (+ multi-instance extension) absorbs #1434; #1389 depends-on,
+   does not duplicate.
 
 ### 5.3 The S2 scope boundary (so the next /engineer has a clean target)
 
@@ -295,21 +326,27 @@ S1 §3.5 deferrals):
   directions handshake-complete + one transport-record round-trip. Verify a free
   mlx1 VF at provision time.
 - DF/PMTUD/MSS-clamp wiring on the WG path (`wg/mss.rs` already correct, just
-  unwired); document "no userspace IP reassembly" (S1 research bonus gap).
+  unwired); document "no userspace IP reassembly" (S1 research bonus gap). **S2
+  live-interop acceptance MUST include a full-tunnel `AllowedIPs=0.0.0.0/0` case
+  pushing >MTU inner traffic** so the no-reassembly limitation is *observed and
+  bounded* (an inbound fragmented outer-UDP WG datagram is undecryptable and
+  silently black-holes — Claude-SMR F3), not merely doc'd.
 
-**S2 OUT of scope** (stays in later S-steps — prevents S2 from sprawling):
+**S2 OUT of scope** (stays in later S-steps — prevents S2 from sprawling;
+S-step numbers per the canonical `wireguard-interop.md` ladder above):
 - Multiple WG interfaces / port-keyed engine map / per-interface keys (**#1434
-  → S4/S5**).
-- Junos `wireguard` config grammar + Go compiler + base64↔hex (**S4**; #1432's
+  → S6 config + multi-instance extension**).
+- Junos `wireguard` config grammar + Go compiler + base64↔hex (**S6**; #1432's
   migrated open item).
-- WG CLI (`generate-private-key`, `show security wireguard`) (**S4/S5**; #1434).
+- WG CLI (`generate-private-key`, `show security wireguard`) (**S6**; #1434).
 - persistent-keepalive timer emit, REKEY/REJECT-AFTER timers, endpoint
-  re-resolution/roaming, empty-record (keepalive/key-confirm) acceptance
-  (**S3/S5**).
-- Non-zero PSK plumbing (**S5**); cookie-reply type-3 + IPv6 outer + DSCP/ECN
-  (**S7**); HA RG WG-session migration + TAI64N disk persistence (**S6/S8**).
+  re-resolution/roaming, empty-record (keepalive/key-confirm) acceptance,
+  TAI64N disk persistence (**S5**).
+- Non-zero PSK plumbing (**S4**); cookie-reply type-3 + MAC2 + IPv6 outer +
+  DSCP/ECN (**S7**); HA RG WG-session migration (**S8**).
 - Transport-flow saturation / CoS-iperf3 throughput targets + any "high-
-  performance" benchmarking (**later/optional, likely-KILL standalone**).
+  performance" benchmarking (**post-S2 measured follow-up on #1432-as-S2;
+  dedicated perf item only on a measured bottleneck**).
 
 ### 5.4 Why NOT a third track (the user's stated fear)
 
@@ -352,8 +389,10 @@ N/A — no code changes in this research. The S2 *implementation* (separate
   `#[serde(default)]`; `wg_local_privkey_hex` is `skip_serializing` + redacted
   in Debug. S2 must keep both.
 - **Consolidation must not orphan unique scope** — before relabeling #1434 to
-  S4/S5, confirm its multi-instance/port-demux requirements are captured in the
-  S4/S5 charter (they are net-new, so labeling, not closing).
+  S6, confirm its multi-instance/port-demux requirements are captured in the S6
+  + multi-instance-extension charter (they are net-new, so labeling, not
+  closing). Likewise #1432's perf item is retained on #1432-as-S2 as a post-S2
+  measured note, not deleted.
 
 ---
 
@@ -362,7 +401,7 @@ N/A — no code changes in this research. The S2 *implementation* (separate
 | Class | Level | Notes |
 |---|---|---|
 | Mis-dedup: closing/repurposing an issue that holds unique scope | **MED** | Mitigated by §4 table + §5.3 boundary: #1434's multi-instance scope is migrated (relabeled), not closed; #1389 stays open as the consumer umbrella. Nothing is closed-as-dup in Option A. |
-| Hypothesis wrong (#1432 ≠ S2) | **LOW** | §4.1 hostile test confirms #1432's work description IS S2; the only correction (its perf framing ≠ a distinct step, and its Go/CLI items are S4) is encoded in §5.2/§5.3. |
+| Hypothesis wrong (#1432 ≠ S2) | **LOW** | §4.1 hostile test confirms #1432's work description IS S2; the only correction (its perf framing ≠ a distinct step, and its Go/CLI items are S6) is encoded in §5.2/§5.3. |
 | S2 scope sprawl if boundary is loose | **MED** | §5.3 IN/OUT list pins S2 to single-tunnel + live interop; multi-tunnel/config/CLI/PSK/perf are explicitly OUT. |
 | Stale architecture leaks (kernel-WG+veth from #1389) | **LOW** | §5.2 action 3 annotates `vpp-dataplane-assessment.md:716-849` superseded; userspace-dp engine is the decided path. |
 | Live-interop harness blocked (no free mlx1 VF) | **MED** | Inherited from S1 §5.4c; S2 must verify VF id ≥4 free or reuse a spare VM. This is an S2-implementation risk, surfaced here so the boundary names it. |
@@ -388,8 +427,9 @@ This is a consolidation research — **no build/test of code**. Validation is:
 
 - Implementing S2 (datapath wiring) — that is a separate `/engineer` run against
   the re-scoped #1432.
-- Implementing S3–S8 (timers/roaming, config, responder/PSK, cookie/IPv6/DSCP,
-  HA migration).
+- Implementing S4–S8 (S4 PSK; S5 timers/roaming/persistence; S6 Junos config +
+  CLI + multi-instance; S7 cookie/MAC2/IPv6/DSCP; S8 HA migration). There is no
+  S3 in the canonical ladder.
 - Executing the issue edits — this research RECOMMENDS them; the operator/`/engineer`
   applies them. (Per /research contract: deliverable is the plan + verdicts +
   issue comment, not the GitHub mutations to other issues.)
@@ -408,8 +448,9 @@ This is a consolidation research — **no build/test of code**. Validation is:
    belongs AFTER S2 (Option C)?** I argue NO (§4.1: crypto already vectorized;
    SIMD/perf precedent is PLAN-KILL). Counter-example wanted: a concrete WG
    userspace-dp hot-loop that would benefit from a dedicated perf issue.
-3. **Should #1434 fold into S4/S5, or is multi-tunnel a fundamental S2
-   requirement** (i.e. must S2 wire a port-keyed engine *map* from day one to
+3. **Should #1434 fold into S6 (+ multi-instance extension), or is multi-tunnel
+   a fundamental S2 requirement** (i.e. must S2 wire a port-keyed engine *map*
+   from day one to
    avoid a painful single→multi refactor later)? I scope S2 single-tunnel; argue
    the engine's `sessions_by_local_index` demux already keys on receiver_index
    (not port), so single→multi is additive, not a rewrite. Kill if the

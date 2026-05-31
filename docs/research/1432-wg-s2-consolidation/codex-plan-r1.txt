@@ -1,0 +1,91 @@
+[codex] Starting Codex task thread.
+[codex] Thread ready (019e7c54-dc3b-70a0-8acd-65d69631d116).
+[codex] Turn started (019e7c54-dcff-7193-b26b-d1f810ceda69).
+[codex] Assistant message captured: I’ll audit the plan against the local tree and the referenced S1/S2 docs, then attack the opt...
+[codex] Running command: /bin/bash -lc "nl -ba docs/research/1432-wg-s2-consolidation/plan.md | sed -n '1,260p'"
+[codex] Command completed: /bin/bash -lc "nl -ba docs/research/1432-wg-s2-consolidation/plan.md | sed -n '1,260p'" (exit 0)
+[codex] Running command: /bin/bash -lc 'pwd && git rev-parse HEAD && git status --short'
+[codex] Command completed: /bin/bash -lc 'pwd && git rev-parse HEAD && git status --short' (exit 0)
+[codex] Running command: /bin/bash -lc 'rg -n "boringtun|snow|WgEngine::new|try_encap|try_decap|wireguard|WireGuard|Tu...
+[codex] Command failed: /bin/bash -lc 'rg -n "boringtun|snow|WgEngine::new|try_encap|try_decap|wireguard|WireGuard|Tu... (exit 2)
+[codex] Assistant message captured: The initial pass confirms the plan is using the right local branch, but I need tighter eviden...
+[codex] Running command: /bin/bash -lc "nl -ba docs/research/1432-wg-s2-consolidation/plan.md | sed -n '260,460p'"
+[codex] Running command: /bin/bash -lc 'rg -n "WgEngine::new|try_encap|try_decap|install_session|reconcile_peers|mod w...
+[codex] Command completed: /bin/bash -lc "nl -ba docs/research/1432-wg-s2-consolidation/plan.md | sed -n '260,460p'" (exit 0)
+[codex] Command completed: /bin/bash -lc 'rg -n "WgEngine::new|try_encap|try_decap|install_session|reconcile_peers|mod w... (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba userspace-dp/Cargo.toml | sed -n '1,180p'"
+[codex] Command completed: /bin/bash -lc "nl -ba userspace-dp/Cargo.toml | sed -n '1,180p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba userspace-dp/src/afxdp/mod.rs | sed -n '110,140p' && nl -ba userspace-d...
+[codex] Command completed: /bin/bash -lc "nl -ba userspace-dp/src/afxdp/mod.rs | sed -n '110,140p' && nl -ba userspace-d... (exit 0)
+[codex] Running command: /bin/bash -lc 'rg -n "#1434|Issue #1434|Multi-Tunnel WireGuard|multiple wg|port-keyed|wiregua...
+[codex] Command completed: /bin/bash -lc 'rg -n "#1434|Issue #1434|Multi-Tunnel WireGuard|multiple wg|port-keyed|wiregua... (exit 0)
+[codex] Running command: /bin/bash -lc 'rg -n "#1432|Issue #1432|Implement High-Performance WireGuard|High-Performance...
+[codex] Command completed: /bin/bash -lc 'rg -n "#1432|Issue #1432|Implement High-Performance WireGuard|High-Performance... (exit 0)
+[codex] Running command: /bin/bash -lc "rg -n \"S2|S3|S4|S5|dataplane tunnel wiring|live kernel|kernel-WireGuard|Debia...
+[codex] Command completed: /bin/bash -lc "rg -n \"S2|S3|S4|S5|dataplane tunnel wiring|live kernel|kernel-WireGuard|Debia... (exit 0)
+[codex] Running command: /bin/bash -lc 'rg -n "#1389|Issue #1389|edge gateway|Phase 5|kernel.*WireGuard|veth|WireGuard...
+[codex] Command completed: /bin/bash -lc 'rg -n "#1389|Issue #1389|edge gateway|Phase 5|kernel.*WireGuard|veth|WireGuard... (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/issues/pr-history.md | sed -n '24090,24135p'"
+[codex] Running command: /bin/bash -lc "nl -ba docs/issues/pr-history.md | sed -n '23040,23080p'"
+[codex] Command completed: /bin/bash -lc "nl -ba docs/issues/pr-history.md | sed -n '23040,23080p'" (exit 0)
+[codex] Command completed: /bin/bash -lc "nl -ba docs/issues/pr-history.md | sed -n '24090,24135p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/wireguard-interop.md | sed -n '1,95p'"
+[codex] Command completed: /bin/bash -lc "nl -ba docs/wireguard-interop.md | sed -n '1,95p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/issues/issue-history.md | sed -n '22105,22355p'"
+[codex] Command completed: /bin/bash -lc "nl -ba docs/issues/issue-history.md | sed -n '22105,22355p'" (exit 0)
+[codex] Assistant message captured: One possible numbering inconsistency is already visible: the public `docs/wireguard-interop.m...
+[codex] Running command: /bin/bash -lc 'rg -n "#1703|WireGuard interop|S1|S2|S3|S4|S5|S6|S7|S8|dataplane activation|Ju...
+[codex] Command completed: /bin/bash -lc 'rg -n "#1703|WireGuard interop|S1|S2|S3|S4|S5|S6|S7|S8|dataplane activation|Ju... (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/pr/1709-wireguard-s1-wire-protocol-compliance/plan.md | sed -n '52...
+[codex] Command completed: /bin/bash -lc "nl -ba docs/pr/1709-wireguard-s1-wire-protocol-compliance/plan.md | sed -n '52... (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/pr/1709-wireguard-s1-wire-protocol-compliance/plan.md | sed -n '40...
+[codex] Command completed: /bin/bash -lc "nl -ba docs/pr/1709-wireguard-s1-wire-protocol-compliance/plan.md | sed -n '40... (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/pr/1709-wireguard-s1-wire-protocol-compliance/plan.md | sed -n '73...
+[codex] Command completed: /bin/bash -lc "nl -ba docs/pr/1709-wireguard-s1-wire-protocol-compliance/plan.md | sed -n '73... (exit 0)
+[codex] Running command: /bin/bash -lc 'rg -n "## #1703|#1703 —|WireGuard interop" docs/issues/issue-history.md docs/i...
+[codex] Command failed: /bin/bash -lc 'rg -n "## #1703|#1703 —|WireGuard interop" docs/issues/issue-history.md docs/i... (exit 1)
+[codex] Running command: /bin/bash -lc "nl -ba docs/pr/wireguard-clean/plan.md | sed -n '470,490p'"
+[codex] Command completed: /bin/bash -lc "nl -ba docs/pr/wireguard-clean/plan.md | sed -n '470,490p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/pr/wireguard-clean/plan.md | sed -n '388,430p'"
+[codex] Command completed: /bin/bash -lc "nl -ba docs/pr/wireguard-clean/plan.md | sed -n '388,430p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/pr/wireguard-clean/plan.md | sed -n '240,335p'"
+[codex] Command completed: /bin/bash -lc "nl -ba docs/pr/wireguard-clean/plan.md | sed -n '240,335p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba docs/vpp-dataplane-assessment.md | sed -n '716,865p'"
+[codex] Command completed: /bin/bash -lc "nl -ba docs/vpp-dataplane-assessment.md | sed -n '716,865p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba pkg/dataplane/userspace/protocol.go | sed -n '285,320p'"
+[codex] Command completed: /bin/bash -lc "nl -ba pkg/dataplane/userspace/protocol.go | sed -n '285,320p'" (exit 0)
+[codex] Running command: /bin/bash -lc 'rg -n "type TunnelEndpointSnapshot|WgListen|WgLocal|WgPeer|WgAllowed|WgEndpoin...
+[codex] Command completed: /bin/bash -lc 'rg -n "type TunnelEndpointSnapshot|WgListen|WgLocal|WgPeer|WgAllowed|WgEndpoin... (exit 0)
+[codex] Running command: /bin/bash -lc "rg -n \"TunnelEndpointSnapshot\\{|Mode:|mode\\s*==\\s*\\\"|Mode\\s*==\\s*\\\"|...
+[codex] Command completed: /bin/bash -lc "rg -n \"TunnelEndpointSnapshot\\{|Mode:|mode\\s*==\\s*\\\"|Mode\\s*==\\s*\\\"|... (exit 0)
+[codex] Running command: /bin/bash -lc "rg -n \"UdpSocket|bind\\(|listen_port|wg_listen_port|UDP|udp\" userspace-dp/sr...
+[codex] Command completed: /bin/bash -lc "rg -n \"UdpSocket|bind\\(|listen_port|wg_listen_port|UDP|udp\" userspace-dp/sr... (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba userspace-dp/src/afxdp/wg/engine.rs | sed -n '160,185p'"
+[codex] Command completed: /bin/bash -lc "nl -ba userspace-dp/src/afxdp/wg/engine.rs | sed -n '160,185p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba userspace-dp/src/afxdp/wg/session.rs | sed -n '58,72p'"
+[codex] Running command: /bin/bash -lc "nl -ba userspace-dp/src/afxdp/wg/engine.rs | sed -n '285,330p'"
+[codex] Command completed: /bin/bash -lc "nl -ba userspace-dp/src/afxdp/wg/session.rs | sed -n '58,72p'" (exit 0)
+[codex] Command completed: /bin/bash -lc "nl -ba userspace-dp/src/afxdp/wg/engine.rs | sed -n '285,330p'" (exit 0)
+[codex] Running command: /bin/bash -lc "nl -ba pkg/dataplane/userspace/tunnels.go | sed -n '60,92p'"
+[codex] Command completed: /bin/bash -lc "nl -ba pkg/dataplane/userspace/tunnels.go | sed -n '60,92p'" (exit 0)
+[codex] Assistant message captured: **Findings** 1. **MINOR: the plan corrupts the #1703 S-step labels after S2.** The plan says ...
+[codex] Turn completed.
+**Findings**
+1. **MINOR: the plan corrupts the #1703 S-step labels after S2.**  
+   The plan says Go compiler/config is S4 and #1434 is S4/S5: [plan.md:217](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/research/1432-wg-s2-consolidation/plan.md:217), [plan.md:267](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/research/1432-wg-s2-consolidation/plan.md:267), [plan.md:303](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/research/1432-wg-s2-consolidation/plan.md:303). Canonical docs say S4 is PSK, S5 is timers/roaming/persistence, and S6 is Junos config: [docs/wireguard-interop.md:17](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/wireguard-interop.md:17), [docs/wireguard-interop.md:19](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/wireguard-interop.md:19), also [1709 plan:752](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/pr/1709-wireguard-s1-wire-protocol-compliance/plan.md:752)-[757](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/pr/1709-wireguard-s1-wire-protocol-compliance/plan.md:757). This does not kill Option A, but it is bad issue-graph hygiene.
+
+2. **MINOR: do not demote #1432’s perf item to “likely-KILL” without preserving it as measured follow-up scope.**  
+   #1432 explicitly leaves “Performance benchmarking and optimization” open: [issue-history.md:22315](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22315)-[22317](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22317). The plan says to “Demote ‘perf benchmarking’ to a non-blocking footnote” and calls standalone perf “likely-KILL”: [plan.md:263](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/research/1432-wg-s2-consolidation/plan.md:263)-[265](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/research/1432-wg-s2-consolidation/plan.md:265), [plan.md:311](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/research/1432-wg-s2-consolidation/plan.md:311)-[312](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/research/1432-wg-s2-consolidation/plan.md:312). Correct disposition: not S2-blocking, not a third implementation track, but retain as “post-S2 measured throughput/CPU validation only if S2 shows a bottleneck.”
+
+3. **No major defect: Option A is the right structure.**  
+   #1432’s checked items are exactly S2-shaped work: RX decap, TX encap, protocol snapshot: [issue-history.md:22310](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22310)-[22314](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22314). But the old boringtun premise is dead: Cargo uses `snow`, not boringtun: [userspace-dp/Cargo.toml:24](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/userspace-dp/Cargo.toml:24)-[28](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/userspace-dp/Cargo.toml:28), and PR #1499 explicitly did not reuse `feature/wireguard-support`: [pr-history.md:24098](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/pr-history.md:24098)-[24104](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/pr-history.md:24104). Closing #1432 and opening fresh S2 is administratively cleaner, but semantically worse.
+
+4. **No major defect: #1434 can stay OUT of S2, but S2 should not hard-code an unrecoverable singleton.**  
+   #1434 really asks for a port-indexed engine map and RX/TX lookup by port: [issue-history.md:22336](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22336)-[22339](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22339). But the current engine is explicitly single-listen-port with multi-peer support: [engine.rs:177](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/userspace-dp/src/afxdp/wg/engine.rs:177)-[182](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/userspace-dp/src/afxdp/wg/engine.rs:182), and demux after socket selection is by receiver index, not `(port,index)`: [session.rs:62](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/userspace-dp/src/afxdp/wg/session.rs:62)-[69](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/userspace-dp/src/afxdp/wg/session.rs:69). So multi-tunnel is not required for S2 correctness.
+
+5. **No orphaning from #1389.**  
+   #1389 is a product umbrella and says “easy WireGuard setup”: [issue-history.md:22117](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22117)-[22124](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22124). Its WireGuard architecture note is explicitly “no implementation” and points at kernel WG + veth research: [issue-history.md:22138](/home/ps/git/bpfrx/.claude/worktrees/1432-research-wg-s2-consolidation/docs/issues/issue-history.md:22138). Annotating it as a consumer umbrella is correct.
+
+VERDICT: PLAN-NEEDS-MINOR
+
+Option A survives hostile review: #1432 is the right S2 consolidation target, #1434 is later multi-instance/config/CLI work, and #1389 is a stale consumer umbrella. The required fixes are issue-hygiene fixes, not design reversals: repair the post-S2 S-step labels to match canonical #1703 docs, and preserve #1432’s perf benchmark item as a measured follow-up rather than hand-waving it into “likely-KILL.”
