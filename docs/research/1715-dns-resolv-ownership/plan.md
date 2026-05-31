@@ -129,7 +129,9 @@ resolved features (LLMNR, per-link DNS, DNSSEC stub, split-DNS). − Must
 define DHCP-vs-static precedence + dual-stack merge. − Race with any
 other writer of resolv.conf (mitigated: xpf owns the box).
 
-### Option B — Commit to systemd-resolved as sole owner
+### Option B — Commit to systemd-resolved as sole owner (REJECTED — documented alternative only)
+NOT shipped in #1715. Documented as a rejected alternative; nothing in
+the normative sections (§5b, §6, §9, §10) selects this at runtime.
 Make resolved authoritative; `/etc/resolv.conf` stays the resolved
 symlink and we guarantee resolved is up.
 - `applySystemDNS` writes `xpf.conf` (renderer shared with #1713).
@@ -160,14 +162,18 @@ Leave applySystemDNS/applyDNSService as-is.
   (`applyDNSService` re-breaks it on the next commit). − Leaves three
   owners. **Insufficient alone** — at best a sub-component of A.
 
-### Option D — (found) Merge into one DNS state machine + renderer extraction
-The cleanest framing of A: extract `pkg/daemon/system/dns.go` with (1) a
-pure renderer (shared with #1713's Domains= fix) and (2) a single
-`reconcileDNS(cfg)` that owns the full decision: pick owner model from
-config, do exactly one of {write managed file + disable resolved} or
-{write drop-in + enable resolved}, never both, and run at startup +
-every apply. `applySystemDNS` + `applyDNSService` collapse into it.
-This is Option A's implementation shape and is the recommended vehicle.
+### Option D — (recommended vehicle) Single DNS reconciler + renderer extraction
+The cleanest framing of pure Option A: extract `pkg/daemon/system/dns.go`
+with (1) a pure renderer (shared with #1713's Domains= fix, plus
+`RenderResolvConf`) and (2) a single `reconcileDNS` that ALWAYS owns
+`/etc/resolv.conf` as a managed plain file and ALWAYS disables+masks
+resolved — it does NOT pick an owner model from config and never writes
+a resolved drop-in. `applySystemDNS` + `applyDNSService` collapse into
+it (the lock contract `reconcileDNSLocked` / `reconcileDNSFromDHCP` of
+§5b.3); it runs at startup + every apply + every DHCP change. A
+`system services dns` stanza yields only a commit-check warning (§6.4),
+NOT a runtime resolved branch. This is the recommended implementation
+shape.
 
 ## 5b. ROUND-1 OUTCOME — hybrid killed; converged remediation
 
@@ -350,20 +356,27 @@ renderer is correct in both output formats. **Not one PR** — sequence
 
 ## 9. Risks / gotchas
 - **Deploy-wipe**: deploy may reset /etc; the boot reconcile must run
-  early in daemon init so DNS is repaired before anything needs it.
+  early in daemon init so a dangling/stub symlink is repaired (per the
+  §5b.4 empty-merge policy — repair the bad symlink, do not over-claim
+  boot-time DNS for a DHCP-only box).
 - **Atomic write across symlink**: must `Lstat` + `Remove` the symlink
   BEFORE writing, then write temp + `Rename` onto the path; never
   `WriteFile` through a symlink (the silent-ENOENT bug).
 - **Dual-stack / DHCP timing**: v4 + v6 leases can land at different
   times; reconciler must merge (not clobber) and define precedence
   (static name-server first, then v4 DHCP, then v6 — documented).
-- **Idempotence**: compare-before-write; no `restartResolved` churn.
-- **Hybrid branch correctness**: when `DNSEnabled == true`, do NOT also
-  write the plain file (would fight resolved) — exactly one owner.
+- **Idempotence**: compare-before-write; no `restartResolved` churn
+  (`restartResolved` is removed along with `applyDNSService`).
+- **No hybrid**: there is NO `DNSEnabled`-selected resolved branch in
+  #1715. `reconcileDNS` ALWAYS writes the managed plain file and ALWAYS
+  disables+masks resolved; `system services dns` is a commit warning
+  only (§6.4). Option B (commit-to-resolved) is a rejected alternative,
+  not a config-selected runtime path here.
 - **Don't break #1713**: renderer must emit combined Domains=/search.
-- **Masking resolved**: decide mask vs. plain-disable; masking is more
-  robust against socket-activation re-creating the stub dir, but is
-  heavier-handed — evaluate at engineer time.
+- **Masking resolved**: `disable --now` + `mask` (decided, §5b);
+  masking defeats socket-activation re-creating the stub dir. `mask` is
+  sticky across reboots — document an `unmask` path for a future
+  resolved-owner PR.
 
 ## 10. Acceptance criteria
 1. On a box with `name-server` set and no `services dns`:
