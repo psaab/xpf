@@ -1,7 +1,7 @@
 # Plan: #1715 — DNS broken: dangling /etc/resolv.conf, 3 conflicting DNS owners
 
 - **Issue**: #1715
-- **Revision**: r1 (DRAFT — pre-review)
+- **Revision**: r2 (post round-1 — hybrid dropped, single locked reconciler)
 - **Branch**: research/1715-dns-resolv-ownership
 - **Coordinate with**: #1713 (same `applySystemDNS` renderer / proposed `pkg/daemon/system/dns.go`)
 - **Mode**: /research — STOPS at PLAN-READY; no PR, no production code.
@@ -111,17 +111,15 @@ xpf becomes the single owner of `/etc/resolv.conf`.
   - Idempotent: compare via `Lstat`+read; only rewrite on change.
 - `applySystemDNS` renders from `system name-server` + domain config and
   calls `reconcileResolvConf`. **Remove `restartResolved()`.**
-- `applyDNSService`: when `DNSEnabled == false` (the documented default
-  for "xpf owns resolv.conf"), deterministically `disable --now`
-  resolved AND mask it so nothing re-creates the stub symlink war.
-  When `DNSEnabled == true`, fall back to Option-B behavior (see hybrid).
-- `installDNS` (DHCP) routed through the same `reconcileResolvConf`
-  (Lstat-guard + atomic write), merging DHCP-learned servers with
-  static `name-server` per a documented precedence. Wire it for **both**
-  v4 and v6 (`daemon_dhcp.go:65` set `UpdateDNS` from v4 req-options).
-- **Startup reconcile** (Option C, folded in): at daemon init, if
-  `/etc/resolv.conf` is a dangling/resolved-stub symlink, repair to a
-  managed file immediately — independent of DHCP/commit timing.
+- Resolved is deterministically `disable --now` + **masked** (no
+  hybrid; see §5b). 
+- **DHCP does NOT write the file.** It stores DNS in the lease and fires
+  the existing debounced `onAddressChange` (`dhcp.go:1172`); the central
+  locked `reconcileDNS` reads `dhcpMgr.Leases()` and merges. `installDNS`
+  file write is removed. (See §5b for the full converged design.)
+- **Startup reconcile** (Option C, folded in): `reconcileDNS` runs at
+  daemon init, repairing a dangling/resolved-stub symlink to a managed
+  merged file immediately — independent of DHCP/commit timing.
 - Remove legacy `bpfrx.conf` drop-in on startup.
 
 **Tradeoffs**: + Deterministic, no resolved race, no stub dependency,
@@ -171,7 +169,65 @@ config, do exactly one of {write managed file + disable resolved} or
 every apply. `applySystemDNS` + `applyDNSService` collapse into it.
 This is Option A's implementation shape and is the recommended vehicle.
 
-## 6. Recommendation: **Option A (implemented as Option D's single reconciler)**
+## 5b. ROUND-1 OUTCOME — hybrid killed; converged remediation
+
+Round-1 reviewers (Claude-SMR + AGY, both PLAN-NEEDS-MAJOR) verified the
+diagnosis but found the r1 *implementation shape* reintroduced the
+multi-owner bug. Verified flaws:
+- **F1 hidden third owner**: `dhcp.Manager` is config-blind
+  (`dhcp.New(stateDir, onAddressChange)`, `dhcp.go:103` — no `cfg`/
+  `DNSEnabled`). A hybrid that keeps resolved when `services dns` is set
+  would still have the async DHCP path delete the resolved symlink and
+  write a plain file → breaks resolved mode.
+- **F2 async write outside the lock**: `applyConfig` holds `applySem`
+  (`daemon_apply.go:69-70`); `installDNS` runs in the per-iface DHCP
+  goroutine (`runDHCPv6` `dhcp.go:728`) with no shared lock → clobber
+  race even with atomic rename.
+- **F3 dual-stack clobber**: v4 + v6 goroutines each write only their
+  own lease's servers → mutual wipe; `installDNS(lease)` takes one lease
+  and has no merge.
+- **F4 boot/commit blank-write**: first `applyConfig` runs before DHCP
+  clients start; a DHCP-only box (no static `name-server`) gets a blank
+  file on boot and on every later commit.
+
+**Feasibility confirmed**: `dhcp.Manager.Leases()` (`dhcp.go:428`)
+returns `[]*Lease`, each with `DNS []netip.Addr` + `Family` — a central
+reconciler can read ALL v4+v6 leases and merge. The debounced
+`onAddressChange` callback already exists (`dhcp.go:1172-1181`, wired at
+`daemon_dhcp.go:36-41`) — the right hook to route DNS reconcile through
+the locked path.
+
+### Converged r2 design (REPLACES the r1 hybrid)
+1. **Pure Option A only — drop the hybrid in this PR.** xpf owns
+   `/etc/resolv.conf` as a managed plain file. `systemd-resolved` is
+   `disable --now` + **masked** (defeats socket-activation re-creating
+   the stub). Document: "resolved is not the DNS owner; remove the
+   `services dns` resolved path or treat it as a separate future PR."
+   Do NOT ship Option B's resolved-owner branch here.
+2. **One `reconcileDNS(cfg)` under `applySem`.** Collapse
+   `applySystemDNS` + `applyDNSService` into a single function called
+   from `applyConfigLocked`. It: (a) merges static `cfg.System.NameServers`
+   + live `dhcpMgr.Leases()` DNS (precedence: static first, then v4,
+   then v6, de-duplicated); (b) renders via `pkg/daemon/system/dns.go`
+   `RenderResolvConf`; (c) Lstat-guards (`os.Lstat`, no follow), removes
+   a symlink, writes temp + `os.Rename` atomically, compare-before-write
+   for idempotence; (d) disables+masks resolved deterministically;
+   (e) removes legacy `bpfrx.conf`.
+3. **DHCP never writes resolv.conf.** Delete the `installDNS` file
+   write; the DHCP path stores DNS in the lease (already does) and fires
+   the existing debounced `onAddressChange`. Route that callback so it
+   triggers `reconcileDNS` (directly or via the recompile path) under
+   `applySem`. Wire v4 DNS into the lease so v4 contributes
+   (close the `DHCPv4Options.UpdateDNS` gap or always-merge from leases).
+4. **Boot reconcile + merge**: `reconcileDNS` runs early in daemon init
+   AND merges leases, so neither boot nor a later unrelated commit ever
+   blanks the file. Because it reads live leases (not just `cfg`), a
+   DHCP-only box stays resolvable across commits.
+
+This eliminates F1-F4: one writer, one lock, full v4+v6+static merge,
+no resolved dependency, idempotent, boot-safe.
+
+## 6. Recommendation: **Option A via a single locked `reconcileDNS` (no hybrid)**
 
 Rationale:
 1. xpf already owns ALL interfaces, FRR, networkd configs (CLAUDE.md).
@@ -188,10 +244,13 @@ Rationale:
    path) remains the explicit opt-in to the resolved-owner branch
    (hybrid), so we don't regress operators who want it.
 
-**Keep a hybrid escape hatch**: if `system services dns` is configured
-(`DNSEnabled == true`), use the resolved-owner branch (Option B
-behavior) instead — but the *default* (no stanza) is the managed-file
-branch. This makes the two former functions one deterministic switch.
+**No hybrid in this PR** (killed round 1, §5b). If `system services dns`
+is configured, the simplest correct behavior is a commit-check warning
+("`services dns` resolved-owner mode not supported; xpf manages
+`/etc/resolv.conf` directly") rather than a config-blind DHCP path that
+fights resolved. A true resolved-owner mode, if ever wanted, is a
+separate future PR with DHCP→`resolvectl` push (NOT file writes) and
+must not share the file-writing reconciler.
 
 ## 7. Coordination with #1713 — SEQUENCE, shared renderer
 #1713 fixes the `Domains=` `else-if` drop in the *resolved drop-in*
@@ -256,17 +315,18 @@ renderer is correct in both output formats. **Not one PR** — sequence
 7. #1713 Domains= fix preserved/included.
 8. Render + reconcile unit tests pass; smoke passes on loss cluster.
 
-## 11. Open questions for reviewers
-- A vs B: is committing to resolved (B) actually preferable for an
-  operator who expects standard systemd DNS tooling
-  (`resolvectl status`)? The recommendation says default-A + hybrid-B;
-  is the hybrid worth the complexity vs. pure-A + document "use
-  `services dns` only if you need resolved"?
-- Mask vs disable resolved — which is the robust deterministic off?
-- DHCP-vs-static precedence: is "static first, then v4, then v6"
-  correct, or should DHCP override static when present?
-- Should the v4 `UpdateDNS` wiring be opt-in (req-options `dns-server`)
-  mirroring v6, or always-on for fxp0 bootstrap so the box is never
-  resolver-less? (Leaning always-reconcile from static name-server +
-  opt-in DHCP merge.)
-- One PR or sequence with #1713 — confirm sequence is right.
+## 11. Resolved decisions (were open questions; settled round 1)
+- **A vs B**: ship pure A (single locked file reconciler). No hybrid.
+  A resolved-owner mode is a separate future PR if ever needed
+  (DHCP→`resolvectl`, not file writes).
+- **Mask vs disable**: mask AND disable — masking defeats
+  socket-activation (`systemd-resolved-varlink.socket` /
+  `-monitor.socket`, seen on fw0) re-creating the stub dir.
+- **Precedence**: static `name-server` first, then DHCPv4, then DHCPv6,
+  de-duplicated. Static is authoritative; DHCP augments. (DHCP does not
+  override static.)
+- **v4 DNS**: always merge DHCP-learned DNS from `Leases()` regardless
+  of a req-options flag, so the box is never resolver-less; the
+  `DHCPv4Options.UpdateDNS` field can be retired or repurposed.
+- **#1713**: sequence #1713 (renderer extraction + Domains= fix) before
+  #1715; #1715 absorbs the #1713 fix if not yet landed. Not one PR.
