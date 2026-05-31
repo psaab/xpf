@@ -378,6 +378,26 @@ renderer is correct in both output formats. **Not one PR** — sequence
   sticky across reboots — document an `unmask` path for a future
   resolved-owner PR.
 
+## 9b. Engineer-time refinements (AGY round-2, non-blocking)
+These do not change the design; capture at implementation:
+1. **Empty-merge clobber scope**: the "do not clobber a good file on
+   empty merge" rule applies ONLY to the early boot-reconcile (before
+   the first DHCP lease). At an explicit runtime commit OR a lease
+   expiration that empties the set, an empty merge IS a declarative
+   "clear DNS" — write a comment-only managed file (so deleting all
+   `name-server` / expiring the last lease actually clears resolv.conf,
+   not leaks stale servers).
+2. **Rename EXDEV/EBUSY fallback**: `/etc/resolv.conf` is often a bind
+   mount in CI/containers; `rename(2)` over a mount point fails
+   `EXDEV`/`EBUSY`. On those errors, fall back to truncate-and-write the
+   target in place (log a WARN), so apply does not fail in dev/CI.
+3. **Symlink replace is one atomic rename**: `rename(2)` atomically
+   replaces a symlink target WITHOUT following it, so do NOT
+   `os.Remove` the symlink before `os.Rename` (that opens a
+   microsecond ENOENT window). Use `os.Lstat` for detection/logging
+   only; then `os.Rename(temp, target)` directly — zero-downtime
+   replacement. (Supersedes the §5b "Remove then Rename" wording.)
+
 ## 10. Acceptance criteria
 1. On a box with `name-server` set and no `services dns`:
    `/etc/resolv.conf` is a real file with the configured servers; no
