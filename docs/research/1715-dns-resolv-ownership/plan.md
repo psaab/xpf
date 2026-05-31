@@ -1,7 +1,7 @@
 # Plan: #1715 — DNS broken: dangling /etc/resolv.conf, 3 conflicting DNS owners
 
 - **Issue**: #1715
-- **Revision**: r2 (post round-1 — hybrid dropped, single locked reconciler)
+- **Revision**: r3 (post round-1 3-way — hybrid fully purged, lock contract + boot policy pinned)
 - **Branch**: research/1715-dns-resolv-ownership
 - **Coordinate with**: #1713 (same `applySystemDNS` renderer / proposed `pkg/daemon/system/dns.go`)
 - **Mode**: /research — STOPS at PLAN-READY; no PR, no production code.
@@ -214,18 +214,65 @@ the locked path.
    for idempotence; (d) disables+masks resolved deterministically;
    (e) removes legacy `bpfrx.conf`.
 3. **DHCP never writes resolv.conf.** Delete the `installDNS` file
-   write; the DHCP path stores DNS in the lease (already does) and fires
-   the existing debounced `onAddressChange`. Route that callback so it
-   triggers `reconcileDNS` (directly or via the recompile path) under
-   `applySem`. Wire v4 DNS into the lease so v4 contributes
-   (close the `DHCPv4Options.UpdateDNS` gap or always-merge from leases).
-4. **Boot reconcile + merge**: `reconcileDNS` runs early in daemon init
-   AND merges leases, so neither boot nor a later unrelated commit ever
-   blanks the file. Because it reads live leases (not just `cfg`), a
-   DHCP-only box stays resolvable across commits.
+   write. The DHCP path already extracts DNS into `lease.DNS` for BOTH
+   families (v4: `dhcp.go:657-662`; v6: existing) — so no v4 extraction
+   gap exists; `DHCPv4Options.UpdateDNS` is dead and can be retired. The
+   reconciler reads `dhcpMgr.Leases()` directly, so DHCP only needs to
+   fire the existing debounced `onAddressChange`.
 
-This eliminates F1-F4: one writer, one lock, full v4+v6+static merge,
-no resolved dependency, idempotent, boot-safe.
+   **Lock contract (non-reentrant `applySem`, `daemon_apply.go:69`,
+   `applyConfigLocked` MUST hold it `:157-159`):**
+   - `reconcileDNSLocked(cfg)` — does the render+write+systemd work;
+     callable ONLY with `applySem` held. Called from
+     `applyConfigLocked` (replacing the `applySystemDNS`/`applyDNSService`
+     calls at `daemon_apply.go:886,888`).
+   - `reconcileDNSFromDHCP()` — acquires `applySem` once, reads
+     `store.ActiveConfig()`, calls `reconcileDNSLocked`, releases.
+   - `reconcileDNSLocked` MUST NOT call `applyConfig`/anything that
+     re-acquires `applySem` (deadlock). `applyConfigLocked` MUST NOT
+     call `reconcileDNSFromDHCP` (double-acquire).
+   - **DHCP callback fix (CRITICAL — fw0 class):** the current callback
+     (`daemon_dhcp.go:40-47`) only `applyConfig`s when
+     `dhcpLeaseChangeRequiresRecompile` is true, and for management-only
+     interfaces takes the `else` branch (`applyMgmtVRFRoutes`) that
+     NEVER touches DNS. fxp0 is exactly this class. Fix: call
+     `reconcileDNSFromDHCP()` on EVERY DHCP address change, in BOTH
+     branches (or unconditionally before the branch), so DHCP-learned
+     DNS always reconciles even on mgmt-only interfaces.
+4. **Boot reconcile + explicit empty-merge policy.** Startup applies
+   config (`daemon_run.go:368-370`) BEFORE DHCP clients start
+   (`:572-575`), so at first apply there are NO leases. Policy to avoid
+   a false invariant / blank-write:
+   - **Repair-only-when-bad on empty merge**: if the merged nameserver
+     set is empty (no static `name-server`, no leases yet), `reconcileDNS`
+     repairs ONLY a dangling/resolved-stub symlink (Lstat: remove the
+     bad symlink, write a comment-only managed file or leave a minimal
+     valid file) and does NOT clobber an existing non-dangling
+     `/etc/resolv.conf`. It does NOT assert "DNS available at boot" for a
+     DHCP-only box — DNS becomes available once the first lease fires
+     `reconcileDNSFromDHCP`.
+   - This makes boot SAFE (never dangling, never blanks a good file) and
+     commit SAFE (reads live leases), without the false "resolves before
+     anything needs DNS" claim Codex flagged.
+
+**Exact runtime ops** (idempotent, warn-on-failure, never silent):
+- Resolved off: `systemctl disable --now systemd-resolved.service` then
+  `systemctl mask systemd-resolved.service`. Masking the unit defeats
+  socket-activation (`systemd-resolved-varlink.socket` /
+  `-monitor.socket` seen on fw0) re-creating the stub dir. Log a WARN on
+  any non-zero exit; do NOT proceed assuming resolved is off if mask
+  failed (it would be a second owner).
+- File write: render to a temp file in `/etc` (same filesystem as
+  `/etc/resolv.conf`, so `Rename` is atomic), mode 0644, then `os.Lstat`
+  the target, `os.Remove` it if it is a symlink, then `os.Rename` the
+  temp over it. Compare-before-write (read current real file; skip if
+  identical) for idempotence — no needless rewrites.
+
+This eliminates F1-F4: one writer, one non-reentrant lock with an
+explicit two-function contract, full v4+v6+static merge from live
+leases, DHCP-callback reconcile on every change (incl. mgmt-only), no
+resolved dependency, idempotent, and a boot policy that never blanks a
+good file nor over-claims boot-time DNS.
 
 ## 6. Recommendation: **Option A via a single locked `reconcileDNS` (no hybrid)**
 
@@ -240,9 +287,16 @@ Rationale:
    AND the silent installDNS failure (atomic write, MkdirAll-free since
    /etc exists, no symlink follow).
 4. Resolved's advanced features (split-DNS, DNSSEC stub) are unused on
-   this appliance; `system services dns` (DNSEnabled, the dns-proxy
-   path) remains the explicit opt-in to the resolved-owner branch
-   (hybrid), so we don't regress operators who want it.
+   this appliance. **`system services dns` (DNSEnabled) NO LONGER selects
+   a resolved-owner runtime branch** — that hybrid is removed. At commit
+   time, a `system services dns` stanza emits a commit-check WARNING
+   ("`system services dns` resolved-owner mode is not supported; xpf
+   manages `/etc/resolv.conf` directly; resolved stays disabled+masked")
+   alongside the existing `dns-proxy` warning (`compiler.go:875-876`).
+   `applyDNSService` is deleted; `reconcileDNS` always disables+masks
+   resolved regardless of `DNSEnabled`. A true resolved-owner mode, if
+   ever wanted, is a separate future PR (DHCP→`resolvectl` push, never
+   file writes) and must not share this file-writing reconciler.
 
 **No hybrid in this PR** (killed round 1, §5b). If `system services dns`
 is configured, the simplest correct behavior is a commit-check warning
@@ -272,11 +326,22 @@ renderer is correct in both output formats. **Not one PR** — sequence
 - Reconciler unit tests (tempdir, not /etc): dangling symlink → managed
   file; resolved-stub symlink → managed file; existing managed file
   unchanged → no rewrite (idempotent); file content change → rewrite.
-- DHCP install test: `installDNS` through a symlinked path replaces the
-  symlink atomically and does not ENOENT; v4 + v6 both wired.
-- Apply-order test / assertion: with no `services dns`, after apply
-  resolved is disabled AND `/etc/resolv.conf` is a real file (no
-  enable-then-disable).
+- Reconciler test (daemon, tempdir target — NOT real /etc): seed fake
+  `dhcp.Leases()` with v4 + v6 DNS + static `name-server`; assert
+  symlink replacement (dangling + resolved-stub), static>v4>v6
+  ordering, de-duplication, idempotent no-rewrite on identical content,
+  and NO direct DHCP file-write path remains (the old `installDNS`
+  write is deleted).
+- Empty-merge boot policy test: with no static + no leases, a dangling
+  symlink is repaired (removed + minimal valid file) but a pre-existing
+  non-dangling good file is NOT clobbered.
+- Lock-contract test/assertion: `reconcileDNSLocked` requires `applySem`
+  held; `reconcileDNSFromDHCP` acquires it once; no path double-acquires
+  (deadlock) — covered by a test that calls both ordering and a race
+  check under `-race`.
+- DHCP-callback test: an address change on a management-only interface
+  (the fxp0 class) triggers `reconcileDNSFromDHCP` (DNS refreshed), not
+  just `applyMgmtVRFRoutes`.
 - Smoke (loss userspace cluster, at /engineer time): after
   `cluster-deploy`, on both nodes `cat /etc/resolv.conf` is a real file
   with `nameserver 1.1.1.1`, `getent hosts` resolves, resolved stays
@@ -306,12 +371,17 @@ renderer is correct in both output formats. **Not one PR** — sequence
    dangling symlink; resolved inactive; resolution works.
 2. Re-running commit/apply does not re-break DNS (no enable→disable
    race); idempotent (no needless rewrites/restarts).
-3. Startup repairs a pre-existing dangling/stub symlink.
+3. Startup repairs a pre-existing dangling/stub symlink (replaces with a
+   managed file); on an empty merge it does NOT clobber an existing
+   good non-dangling file, and does NOT claim boot-time DNS for a
+   DHCP-only box (DNS arrives with the first lease).
 4. DHCP-learned DNS (v4 AND v6) installs without ENOENT through a
    symlink; merges with static name-server.
 5. Legacy `bpfrx.conf` drop-in removed.
-6. `system services dns` opt-in still selects the resolved-owner branch
-   with exactly one owner (no file+drop-in conflict).
+6. `system services dns` does NOT select a resolved-owner runtime branch;
+   it emits a commit-check warning and the runtime still owns
+   `/etc/resolv.conf` as a managed file with resolved disabled+masked
+   (exactly one owner, no resolved branch).
 7. #1713 Domains= fix preserved/included.
 8. Render + reconcile unit tests pass; smoke passes on loss cluster.
 
