@@ -3,7 +3,7 @@
 - **Issue**: #1742 (label `perf`)
 - **Branch**: `research/1742-same-queue-xsk-fanout`
 - **Base**: origin/master @ e4556085a
-- **Revision**: r1 (DRAFT)
+- **Revision**: r2 (folds Codex + AGY + Claude-SMR r1 corrections)
 - **Mode**: `/research` — stops at PLAN-READY or PLAN-KILL. No PR, no production code.
 
 ## 1. Problem statement
@@ -34,15 +34,29 @@ floor.
 The issue worried that AF_XDP RX rings are SPSC so "you can't have two
 threads consume one RX ring." Correct — but that is **not** what
 same-queue fanout requires. Under `XDP_SHARED_UMEM`, binding a second
-socket to the same `(dev, queue_id)` gives that socket its **own**
-RX/TX/FILL/COMPLETION rings while sharing only the UMEM frame area
-(kernel `xsk_bind`/`xp_assign_dev_shared`; libxdp
-`xsk_socket__create_shared`). So two workers each own a **distinct** RX
-ring on the same queue → two SPSC consumers, no shared-ring contention.
-The XDP `bpf_redirect_map(xskmap, slot, 0)` picks which socket's RX ring
-each frame lands in. Both slots have `queue_id == rxq->queue_index`, so
-`xsk_rcv_check` passes for both → **genuinely not the killed cross-queue
-path**.
+socket to the same `(dev, queue_id)` gives that socket its **own RX/TX
+rings** but the UMEM keeps **ONE shared FILL ring and ONE shared
+COMPLETION ring**, tied to the first socket
+(kernel.org/doc/html/latest/networking/af_xdp.html: *"The UMEM (tied to
+the first socket created) will only have a single FILL ring and a single
+COMPLETION ring as there is only one unique netdev,queue_id tuple that
+we have bound to"*). So two workers each own a **distinct RX ring** on
+the same queue → two SPSC RX consumers (this DOES resolve the issue's
+SPSC-RX worry). The XDP `bpf_redirect_map(xskmap, slot, 0)` picks which
+socket's RX ring each frame lands in. Both slots have `queue_id ==
+rxq->queue_index`, so `xsk_rcv_check` passes for both → **genuinely not
+the killed cross-queue path**.
+
+**BUT** the single shared FILL/COMPLETION rings are themselves **SPSC**.
+Two workers on the same queue must both produce empty frames to the one
+FILL ring (to keep RX fed) and consume the one COMPLETION ring (on TX).
+That violates SPSC and forces either a lock or a dedicated single filler
+thread — i.e. **cross-worker hot-path synchronization on the FILL/CQ**,
+exactly the shared-state contention the fairness lineage repeatedly
+killed (#836 shared HOL, #1211 AQM cache-bounce). This is a first-class
+feasibility blocker, not just a frame-allocator footnote: the
+synchronization overhead also drags the effective per-queue service
+capacity back down (see Section 4.1, β).
 
 Evidence in-tree:
 - `userspace-xdp/src/lib.rs:312` already declares `USERSPACE_XSK_MAP:
@@ -92,7 +106,7 @@ subsystems**. Same-queue fanout makes the mapping `(ifindex, queue_id) →
 | **CoS shared-lease v8** | `cos_owner_worker_by_queue: (egress_ifindex,queue_id) → ONE worker` (coordinator/mod.rs:1305, :1358 `eligible_workers[next % len]`). `unique_interface_owner_worker_id` (mod.rs:1247) asserts one owner per interface. | A queue now has 2 RX-owning workers. CoS lease arbitration, cross-binding redirect (`cross_binding.rs` routes TX to `owner_worker_id`), and the v8 epoch rate-meter all key on a *single* owner. Two ingress workers feeding one egress CoS queue is exactly the cross-binding funnel that caused the **#1183 10× reverse regression**. |
 | **Session table** | Worker-local `SessionTable` per worker; a flow's forward+reverse entries live on the worker that owns its RX queue (`session/entry.rs`, `worker/lifecycle.rs:22`). | Fanout splits flows of one queue across 2 workers' session tables. First-packet→session-create races if hash assignment changes (it must not), and conntrack lookups stay worker-local only if the hash is *perfectly* stable across config reload, GC, and HA failover. |
 | **HA session sync** | `owner_rg_id` + shared synced maps `Arc<Mutex<FastMap>>` (session_manager.rs:13-15); peer reconstructs ownership by RG, not by sub-queue slot. | A synced session arriving on the peer must map back to the *same* sub-slot the hash would pick, or post-failover the flow lands on the wrong worker and either duplicates session state or strands the fast path (the `try_fabric_redirect` class of bug). Hash function must be byte-identical and config-stable across both nodes. |
-| **FILL/COMPLETION ring ownership** | Each binding owns its FILL/CQ; mlx5 ZC posts RX WQEs from the fill ring during NAPI (`bind.rs:248`). | Two same-queue sockets each have their own FILL ring but **share one UMEM frame pool**. Frame-leak/double-free risk if both workers recycle into the same UMEM region; needs a partitioned frame allocator per secondary (net-new; the cross-NIC path never had two consumers racing one pool on one queue). |
+| **FILL/COMPLETION ring ownership** | Each binding owns its FILL/CQ; mlx5 ZC posts RX WQEs from the fill ring during NAPI (`bind.rs:248`). | Two same-queue sockets **share ONE FILL ring and ONE COMPLETION ring** (kernel: per netdev,queue_id, tied to first socket — see Section 2.1) AND one UMEM frame pool. Both rings are SPSC, so two workers feeding/draining them need a lock or a dedicated filler thread (cross-worker hot-path sync), plus a partitioned frame allocator to avoid double-free. The cross-NIC shared-UMEM path never had two consumers racing one queue's FILL/CQ — this is net-new and is a feasibility blocker, not a footnote. |
 | **Status/metrics/fairness telemetry** | `xpf_userspace_cos_active_flow_count{ifindex,queue_id,worker_id}` and the whole #1217/#1220 fairness harness assume `{a_i}` is per-worker == per-queue. | `Cstruct` computation, the `aggregate_per_worker()` helper, and `cos_owner_worker_by_queue` all need a sub-queue dimension. The harness merge-bar would have to be re-derived. |
 
 ## 4. Does fanout actually beat the multinomial floor? (the math)
@@ -119,38 +133,60 @@ mlx5 RX ring fill) is still serialized. The second worker can only
 process frames the first didn't, but they both pull from one hardware
 queue's bandwidth.
 
-### 4.1 Simulation (run, per state.md "show the math first")
+### 4.1 Simulation reframed around the capacity ratio β
 
-`/tmp/fanout_sim.py` (seed=42, population CoV, matching
+`fanout_sim.py` (in this dir; seed=42, population CoV matching
 `fairness.rs::compute_observed_cov`). Baseline reproduces the documented
-floor exactly (N=12,K=6 → 0.5105 vs state.md closed-form 0.5106).
+floor exactly (N=12,K=6 → 0.5105 vs state.md closed-form 0.5106). The
+model splits the single hottest RSS queue into 2 slots and parameterizes:
 
-Three models of the fairness floor under fanout:
+- **split**: the real proposal is a stateless per-5-tuple XDP hash, so
+  conditional on `c` flows in the hot queue the sub-split is
+  **Binomial(c, 0.5)** — NOT the perfect `c//2` the r1 draft used. The
+  perfect split materially overstated the result (Codex + AGY both
+  flagged this; both reproduced the binomial numbers below).
+- **β** = (fanned hot queue's effective service capacity) / baseline.
+  β=1.0 is the **bandwidth/NAPI-bound** regime: two slots share the one
+  hardware queue's existing bandwidth, NO new core. β>1.0 is the
+  **processing-bound** regime: the second worker runs on a *spare* core
+  and adds real policy/conntrack/TX-prep CPU.
 
-| Model | N=12 | N=24 | N=48 |
+**β=1.0 (no new core), realistic binomial split:**
+
+| | N=12 | N=24 | N=48 |
 |---|---|---|---|
-| Baseline floor (K=6) | 0.510 | 0.503 | 0.346 |
-| **(a)** Naive "fanout = K=12, each slot a fresh core" | 0.424 (−0.086) | 0.547 (+0.044) | **0.546 (+0.199, WORSE)** |
-| **(b)** Lazy split hottest queue, each slot a fresh core | 0.395 (−0.115) | 0.395 (−0.108) | 0.288 (−0.059) |
-| **(c)** Capacity-aware: 2 slots SHARE one hw-queue bw, NO new core | 0.519 (+0.008) | 0.505 (+0.002) | **0.347 (+0.001, ZERO)** |
+| Baseline floor | 0.5106 | 0.5035 | 0.3464 |
+| perfect split (r1 model, overstated) | +0.008 | +0.002 | +0.001 |
+| **binomial split (correct)** | **+0.040** | **+0.027** | **+0.022** |
 
-**Model (c) is the physical reality** and it is decisive. Adding a
-software XSK slot to an existing RX queue creates **no** new core, IRQ,
-or NAPI context — the two slots split that queue's *existing* hardware
-bandwidth. Under that constraint the per-flow CoV floor is **unchanged**
-(delta ≈ 0 at every N). The apparent wins in models (a)/(b) come
-**entirely** from the false premise that each new software slot brings a
-fresh capacity-1.0 core. This is the **#1243 cancellation, restated**:
-changing K without adding physical capacity moves nothing.
+So with the *correct* stateless-hash split and no added capacity,
+same-queue fanout makes per-flow CoV **strictly worse** at every N. The
+r1 "unchanged floor" was an artifact of the perfect-split model.
 
-Model (a) further shows that at the *motivating* `-P48` workload, even
-the fresh-core fantasy makes the floor **worse** (+0.199), because 48
-flows over 6 queues are already well-averaged and splitting each queue
-into 2 slots of ~4 flows raises per-flow rate variance.
+**β sweep (binomial split) — when DOES it help?**
+
+| Δfloor at | β=1.0 | β=1.25 | β=1.4 | β=2.0 |
+|---|---|---|---|---|
+| N=12 | +0.040 | −0.004 | −0.024 | −0.065 |
+| N=24 | +0.027 | −0.009 | −0.025 | −0.042 |
+| N=48 | +0.022 | −0.010 | −0.021 | −0.002 |
+
+The floor only drops once β ≳ 1.25 — i.e. the second worker must add
+**real extra service capacity ≈ 25%+**. That requires a **spare physical
+core**. The cluster is 6 RX queues ↔ 6 workers pinned 1:1 on ~6 cores,
+so a second same-queue worker must **steal a core from another queue's
+worker**, dropping that worker's β below 1 and raising imbalance
+elsewhere — the **#1243 dedicated-CPU cancellation**, restated exactly.
+And the shared-FILL/CQ SPSC synchronization (Section 2.1) imposes its
+own per-packet overhead that pushes the *achievable* β back toward 1.0,
+erasing the software gain even if a spare core existed.
 
 **Conclusion: same-queue fanout fails state.md's "Bar for future
-fairness pitches" — it changes K but adds no physical capacity, so by
-the project's own formal prior it cannot move the floor.**
+fairness pitches."** In the bandwidth-bound regime (β=1) it makes
+fairness *worse*. In the processing-bound regime it needs β≥1.25, which
+on this 6-core/6-queue cluster means stealing a core (#1243
+cancellation), and the FILL/CQ contention erodes whatever β it buys. It
+changes K without net new physical capacity → cannot move the floor.
 
 ## 5. Scope justification (settle FIRST per issue)
 
@@ -163,12 +199,17 @@ Is single-source-many-flows a real production workload?
   bites only at **low N** (N≈6–12), and the floor *shrinks* as N grows
   (state.md table: N=24 occupancy-CoV 0.44, N=48 lower). A real
   high-fan-in proxy has **high N**, where the floor is already mild.
-- **The synthetic `iperf3 -P48`**: the only workload where the floor is
-  both reproducible and "bad," and #1220's empirical sweep already
-  returns **PASS** on every tested class (P=12/6/24/12-push) because
-  observed_CoV sits *below* Cstruct. There is **no empirically failing
-  production workload on record** (state.md "Open work": "As of the
-  2026-05-07 sweep, NO empirically failing workload exists").
+- **The synthetic `iperf3 -P48`**: the issue's motivating probe. NOTE
+  the recorded #1220 sweep (state.md:583) covers P=12/6/24/12-push — NOT
+  P=48 — and every covered class returns **PASS** because observed_CoV
+  sits *below* Cstruct. There is **no empirically failing production
+  workload on record** (state.md:545: "As of the 2026-05-07 sweep, NO
+  empirically failing workload exists"). The honest statement: the
+  contract is not known to fail even at P=48 (untested), and the
+  Section 4.1 math shows fanout would *worsen* CoV there at β=1 anyway.
+  If a P=48 (or named real-workload) FAIL is ever produced, that is the
+  revisit trigger — but it must come *with* a β>1.25 spare-core budget,
+  or the math still kills it.
 
 This is the same wall that killed #1211 (Path 2 AFD): the harness PASSes
 the real workloads, so a redesign "solving" the synthetic probe is
@@ -198,24 +239,38 @@ solving a non-existent problem.
   to close the "same-queue (not cross-queue)" gap explicitly so the
   lineage is complete.
 
-## 7. Recommendation (DRAFT — pending reviewer rounds)
+## 7. Recommendation (converged across Codex + AGY + Claude-SMR)
 
-**Path C (PLAN-KILL with documentation).** The lever is genuinely
-different and AF_XDP-feasible (resolving the issue's SPSC and
-cross-queue worries), but it fails the project's own
-"Bar for future fairness pitches": it changes K *without* adding
-physical capacity (#1243 cancellation), and there is no empirically
-failing production workload (#1211 closure rationale). The one honest
-deliverable is to **close the lineage gap**: state.md and
-fairness-regimes.md currently document only *cross-queue* kills; adding
-the same-queue-fanout analysis makes the kill archive complete and
-prevents a sixth re-attempt.
+**Path C — PLAN-KILL with lineage-completing documentation.** The lever
+is genuinely different from the killed cross-queue chain and is
+AF_XDP-feasible for RX (XDP_SHARED_UMEM, own RX ring per socket, queue_id
+matches → `xsk_rcv_check` passes). It is killed by the convergence of
+three independent results:
 
-This recommendation is explicitly subject to the **Section 4 simulation
-being run** — if a closed-form/Monte-Carlo model shows same-queue fanout
-beats the floor by a margin that survives the shared-hardware-bandwidth
-penalty on a *named real workload*, the recommendation flips to a
-scoped Path B feasibility prototype.
+1. **Fairness math (Section 4.1).** With the correct stateless-hash
+   binomial sub-split and no added capacity (β=1), fanout makes per-flow
+   CoV **worse** (+0.022 to +0.040). It only improves at β≥1.25, which
+   on a 6-queue/6-core cluster means **stealing a core** → #1243
+   cancellation.
+2. **Feasibility (Section 2.1).** Same-queue sockets share ONE SPSC
+   FILL ring and ONE SPSC COMPLETION ring; two workers feeding them need
+   cross-worker hot-path synchronization that erodes effective β back
+   toward 1 — the shared-state contention the lineage keeps killing.
+3. **Scope (Section 5).** No empirically failing production workload
+   exists; the #1217 contract PASSes every recorded class. Paying the
+   CoS-v8/session/HA ownership rewrite + #1183-funnel risk for a
+   synthetic probe that the math says wouldn't even improve is the
+   #1211 "solving a non-existent problem" pattern.
+
+Deliverable: **close the lineage gap.** state.md and fairness-regimes.md
+document only *cross-queue* kills today; add a "same-queue XSK fanout"
+row to the killed-mechanisms table with the β-reframed math and the
+shared-FILL/CQ constraint, so a sixth re-attempt is pre-empted.
+
+**Revisit trigger (narrow):** a named real workload (not iperf) that
+empirically FAILs the #1217 contract AND a spare-core budget giving
+β≥1.25 per fanned queue AND a lock-free shared-FILL/CQ discipline. Open
+a fresh issue; do not reopen #1742.
 
 ## 8. Validation plan (if it were to ship — for completeness)
 
@@ -250,4 +305,17 @@ Per docs/fairness-regimes.md + state.md "How to apply":
 
 ## 11. Decision
 
-DRAFT — awaiting Codex + AGY + Claude-SMR round 1.
+**PLAN-KILL (Path C)** — converged r2 across all three reviewers:
+- **Codex r1**: PLAN-NEEDS-MAJOR with three corrections (β-regime, binomial
+  split, shared FILL/CQ); all folded into r2; Codex's own hostile read
+  said "after those fixes, this probably still kills on blast radius plus
+  no failing production workload."
+- **AGY r1**: PLAN-KILL (Path C) — independently reproduced the binomial
+  β=1 zero/negative result and the shared-FILL/CQ SPSC blocker.
+- **Claude-SMR r1**: PLAN-NEEDS-MAJOR → PLAN-KILL after the four required
+  revisions (all applied in r2).
+
+Action items: label #1742 `plan-kill`; add the same-queue-fanout row to
+the killed-mechanisms tables in `docs/per-5-tuple/state.md` and
+`docs/fairness-regimes.md` (lineage-completion, separate trivial doc PR —
+NOT part of this research). Close #1742.
