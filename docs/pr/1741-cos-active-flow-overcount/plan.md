@@ -1,5 +1,44 @@
 # #1741 — CoS active-flow count over-counts (reverse-direction entries)
 
+Status: DRAFT v2 — revised after Codex PLAN-NEEDS-MAJOR (round 1)
+
+## Round-1 review outcome (why v2 changes the fix)
+
+Codex round 1 = PLAN-NEEDS-MAJOR. Key correct objection: the fairness
+harness defaults to **reverse iperf (`-R`)**
+(`test/incus/fairness-harness.sh:88`) and the CoS-headroom harness
+explicitly drives reverse data
+(`test/incus/fairness-cos-throughput-headroom.sh:17`). The fairness
+contract counts the **data-direction** flows on the selected CoS queue,
+not "canonical forward half"
+(`fairness_eval/mod.rs:33,59`, `verdict.rs:62`). A blanket
+`!entry.metadata.is_reverse` filter (v1) would EXCLUDE the real
+data-direction queue when the data flows reverse, undercounting `-R`
+tests. Codex confirmed v1's other claims: not correct-by-design (don't
+move to the gauge derivation), `is_reverse` is dead state on the
+flow-cache datapath/TX/HA path, and no two-forward-install counterexample
+exists.
+
+Also relevant (found while revising): `verdict.rs` already carries a
+`direction_multiplier` (1 for iface-filtered, 2 for bidirectional) and a
+`GUARD_OVERCOUNT_DIVISOR`/#1281 "stale entry" overcount tolerance — these
+are downstream *compensation* for exactly this double-count. They do NOT
+save the symmetric-key case: under symmetric hashing BOTH directions land
+on the SAME interface AND the SAME worker, so iface filtering (which
+keeps `dir_mult=1`) still sees two entries per session → 49/75. The fix
+must make the snapshot itself report one count per session.
+
+### v2 fix: per-session dedup (direction-independent), NOT forward-only
+
+The real bug is **both halves of one session counted twice when they
+share a worker+queue**, not "reverse is bad." Dedup the CoS count by a
+direction-independent canonical session identity so each distinct session
+on a queue counts exactly once — regardless of whether the data direction
+is forward or reverse, and regardless of whether one or both halves
+landed on this worker.
+
+Original v1 status line preserved below for history.
+
 Status: DRAFT v1 — pending adversarial plan review
 
 ## Issue framing
@@ -81,133 +120,175 @@ KILL would instead argue the count is correct-by-design as bidirectional
 - `cos_active_flow_counts_truncated` (#1247) — the FLOW_WORKER_MAP cap
   path, confirmed 0 in the issue, so out of scope here.
 
-## Concrete design
+## Concrete design (v2 — per-session canonical dedup)
 
-### 1. Record the session direction on the cache entry
+The fix is contained entirely in `active_flow_debug_entries`
+(flow_cache.rs:465). No change to `from_forward_decision`, no new
+parameter, no call-site threading — the v1 direction-threading is
+DROPPED. We do not need to know the session direction at all; we need a
+direction-independent identity so the two halves of one session collapse
+to one count.
 
-`FlowCacheEntry` already carries `metadata: SessionMetadata` whose
-`is_reverse` field exists but is hardcoded `false` for cache entries.
-Thread the real direction in.
+### Canonical per-session dedup key
 
-`from_forward_decision` gains a parameter `flow_is_reverse: bool` and
-stores it into `metadata.is_reverse` instead of the hardcoded `false`:
+Each flow cache entry's `key` is the wire 5-tuple as observed on ingress.
+For a non-NAT bidirectional flow the forward half is
+`(cIP:cPort, sIP:sPort)` and the reverse half is `(sIP:sPort, cIP:cPort)`
+— the same *unordered* endpoint pair. Define a canonical, order-independent
+session identity by sorting the two `(ip, port)` endpoints:
 
 ```rust
-pub(super) fn from_forward_decision(
-    ...,
-    flow_is_reverse: bool,      // NEW
-    rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
-) -> Option<Self> {
-    ...
-    metadata: SessionMetadata {
-        ...
-        is_reverse: flow_is_reverse,   // was: false
-        ...
-    },
+#[inline]
+fn canonical_session_id(key: &SessionKey) -> (u8, (IpAddr, u16), (IpAddr, u16)) {
+    let a = (key.src_ip, key.src_port);
+    let b = (key.dst_ip, key.dst_port);
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    (key.protocol, lo, hi)   // addr_family is implied by IpAddr variant
 }
 ```
 
-### 2. Thread direction from the session-hit at the call site
+Both halves of a non-NAT session map to the **same** `canonical_session_id`.
+(`IpAddr` and `u16` derive `Ord`, so the tuple comparison is total and
+stable.)
 
-In `poll_descriptor/mod.rs`, a new mutable flag mirrors the existing
-`flow_cache_owner_rg_id` / `apply_nat_on_fabric` flags:
+### Dedup the CoS count per (egress_ifindex, queue_id)
 
-```rust
-let mut flow_cache_is_reverse = false;   // NEW, alongside :230-231
-```
-
-Set on the session-hit arm (where `resolved` is in scope, ~:293):
-
-```rust
-flow_cache_is_reverse = resolved.metadata.is_reverse;
-```
-
-The session-MISS arm creates the session from the first (forward) packet
-and installs `ForwardFlow` (or `ReverseFlow` on specific cluster-return /
-NAT64-reply seeds). For the miss path, default `false` is correct for the
-normal new-forward-flow case. The explicit-reverse-install cases
-(`is_reverse: true` at :1373, the `ReverseFlow` fabric-return at :465)
-already set their own metadata; we mirror that into
-`flow_cache_is_reverse` at each such arm so the cached entry reflects the
-true direction.
-
-Pass `flow_cache_is_reverse` to `from_forward_decision` at :1925.
-
-### 3. Count forward-direction entries only in the CoS snapshot
-
-In `active_flow_debug_entries` (flow_cache.rs), gate the `cos_counts`
-increment on forward direction:
+Replace the `cos_counts: BTreeMap<(i32,u8),u32>` running counter with a
+per-queue *set* of canonical session ids during the scan, then collapse
+each set's cardinality to the published count:
 
 ```rust
-if !entry.metadata.is_reverse {
+let mut cos_sessions =
+    BTreeMap::<(i32, u8), std::collections::BTreeSet<CanonId>>::new();
+...
+for slot in self.entries.iter() {
+    // ... existing active_entry_age gate ...
+    active = active.saturating_add(1);
     if let Some(queue_id) = entry.descriptor.tx_selection.queue_id {
-        let key = (entry.descriptor.egress_ifindex, queue_id);
-        *cos_counts.entry(key).or_insert(0) += 1;
+        let qkey = (entry.descriptor.egress_ifindex, queue_id);
+        cos_sessions
+            .entry(qkey)
+            .or_default()
+            .insert(canonical_session_id(&entry.key));
     }
+    // ... existing rows.push (unchanged) ...
 }
+let cos_counts = cos_sessions
+    .into_iter()
+    .map(|((ifindex, queue_id), ids)| CoSActiveFlowCount {
+        ifindex,
+        queue_id,
+        active_flow_count: ids.len() as u32,
+    })
+    .collect();
 ```
 
-`active` (the total active-flow count) and the bounded `rows` debug map
-KEEP counting both directions — those are diagnostics and the flow-worker
-map intentionally shows both halves (it exposes `forward_wire_key` AND
+This counts **distinct sessions per (egress_ifindex, queue_id) cell**,
+which is exactly the fairness-contract definition of `{a_i}` for the
+data-direction interface, and is correct for BOTH forward (`push`) and
+reverse (`-R`) data directions: a single session contributes 1 whether
+the worker holds its forward half, its reverse half, or both.
+
+**Why dedup is per-cell and therefore safe across RSS regimes.** The
+dedup happens *inside* each `(egress_ifindex, queue_id)` bucket. Two
+cache entries collapse to one count only if they share both the same
+egress+queue cell AND the same canonical session id — i.e. they are the
+two halves of one session that were both classified onto the SAME queue
+on the SAME worker. That is precisely the symmetric-key double-count bug
+(the harness applies reverse source-port CoS filters via `--symmetric`
+so both the data direction and its ACK/return direction can match the
+same shaped queue when they hash to the same worker). Under the MS key
+the two halves hash to different workers, so no single cell ever holds
+both halves → dedup is a no-op there and the existing clean `sum == N`
+(48) is preserved. Dedup never crosses worker, interface, or queue
+boundaries, so it cannot turn the MS `N` into `2N` or undercount a
+flow that legitimately occupies two distinct cells.
+
+The total `active` count and the bounded `rows` debug map are UNCHANGED —
+they still enumerate every active cache entry (the flow-worker map
+intentionally shows both halves with `forward_wire_key` +
 `reverse_canonical_key` per row for operator inspection). Only the
-**CoS active-flow-count series that feeds the fairness gauges** is
-restricted to forward-direction flows, because that series is defined as
-"distinct flows per queue."
+CoS-count series that feeds the fairness gauges is deduped.
+
+### NAT caveat (explicit, bounded)
+
+With NAT the two halves' wire tuples may not form the same unordered pair
+(forward ingress sees the pre-SNAT internal tuple; reverse ingress sees
+the post-SNAT public tuple), so a NAT'd session whose both halves land on
+one worker could still count as 2. This is acceptable and a strict
+improvement: (a) the regression target is the iperf smoke path
+(reth0.80, no NAT on the data path), where dedup fully resolves to N;
+(b) for NAT'd flows the two halves are *distinct observed wire flows on
+the queue* and counting each is defensible; (c) v1's forward-only filter
+would have MIS-counted NAT'd reverse-data flows worse. Documented as a
+known bound, not silently ignored.
+
+### Memory / cost
+
+The per-queue `BTreeSet<CanonId>` lives only for the duration of one
+periodic owner-only scan (already cold, ~once per ~65ms tick, off the
+packet path). Bounded by active-flow count (≤ 4096 cache entries). One
+`CanonId` is `(u8, (IpAddr,u16), (IpAddr,u16))` — at most ~40 bytes; the
+set is dropped at end of scan. No hot-path allocation, no per-packet cost,
+no struct size change.
 
 ### Invariant
 
-For N pinned forward iperf streams on one CoS queue, summed per-worker
-`cos_active_flow_count == N` (was: up to 2N under symmetric hashing).
-More generally: `sum(cos_active_flow_count for queue q) <=
-live_forward_session_count_for_queue_q`.
+For N distinct pinned iperf streams (forward OR reverse data) on one CoS
+queue, summed per-worker `cos_active_flow_count == N` once steady-state
+(within the 650ms active window). More generally, on the non-NAT data
+path: `sum(cos_active_flow_count for queue q) ==
+distinct_live_sessions_on_queue_q`, never `2×`.
 
 ## Public API preservation
 
-- `from_forward_decision` gains one `bool` param (internal `pub(super)`;
-  the only call site is poll_descriptor/mod.rs:1925). No protocol/gRPC
-  schema change.
+- `from_forward_decision`: UNCHANGED (v1's new param dropped).
 - `CoSActiveFlowCountStatus` wire/JSON shape unchanged.
 - `active_flow_debug_entries` signature unchanged; only the internal
-  cos_counts filter changes.
-- No change to `count_active_flows` (test-only total) semantics.
+  cos-count accumulation changes from a counter to a per-queue set whose
+  cardinality is published.
+- `count_active_flows` (test-only total): UNCHANGED.
+- No call-site changes in poll_descriptor/mod.rs.
 
 ## Hidden invariants preserved
 
-- **Side-effect ordering**: no change — the filter is read-only over the
-  same owner-only scan.
-- **Allocation rules**: no new hot-path allocation; the change is a
-  branch in an already-cold periodic scan and a stored bool in an
-  existing struct field (zero size change — `is_reverse` already exists).
+- **Side-effect ordering**: no change — dedup is read-only over the same
+  owner-only scan; only the local accumulator type changes.
+- **Allocation rules**: the per-queue `BTreeSet` is a short-lived
+  scan-local allocation in an already-cold periodic scan (off the packet
+  path). No hot-path allocation, no struct size change.
 - **HA sync portability**: untouched. Flow cache is worker-local; HA sync
   uses the session table, not the flow cache.
-- **Scheduling / datapath behavior**: UNCHANGED. `is_reverse` on a flow
-  cache entry is consumed nowhere on the forward/TX path (verified: grep
-  shows `metadata.is_reverse` on cache entries is currently dead — only
-  the debug/CoS scan reads metadata). So this is telemetry-only; no
-  failover/datapath behavior change → `make test-failover` not required.
-- **Stale-handle hazards**: none; no handles added.
-- **Borrow shape**: `entry.metadata.is_reverse` is read under the same
-  `&FlowCacheEntry` borrow already held in the scan loop.
+- **Scheduling / datapath behavior**: UNCHANGED. v2 touches ONLY the
+  periodic debug/CoS scan accumulation. No `from_forward_decision` change,
+  no poll-path change, no field read on the TX/cache-hit path. Pure
+  telemetry; no failover/datapath behavior change → `make test-failover`
+  not required.
+- **Stale-handle hazards**: none.
+- **Borrow shape**: `entry.key` read under the same `&FlowCacheEntry`
+  borrow already held in the scan loop.
 
 ## Risk assessment
 
 | Class | Level | Notes |
 |---|---|---|
-| Behavioral regression | LOW | Telemetry-only; datapath untouched. `is_reverse` on cache entries is currently dead state. |
-| Lifetime / borrow-checker | LOW | One extra bool param + one field read; no new borrows. |
-| Performance regression | LOW | One bool branch in a cold periodic scan; param is register-passed at a single non-hot call site. |
-| Architectural mismatch | LOW | Uses the existing `SessionMetadata.is_reverse` already on the struct; no new architecture. |
+| Behavioral regression | LOW | Telemetry-only; datapath and poll path entirely untouched in v2. |
+| Lifetime / borrow-checker | LOW | Scan-local `BTreeSet`; one extra read of `entry.key`. No new borrows escape the loop. |
+| Performance regression | LOW | A per-queue set in a cold ~65ms periodic scan; bounded by ≤4096 entries; dropped at scan end. |
+| Architectural mismatch | LOW | Reuses the existing wire-key on cache entries; canonical-id is a pure function. No new architecture. |
 
 ## Test plan
 
 - `cargo build` clean.
 - New unit test in `flow_cache_tests.rs`: insert one forward + one reverse
-  entry for the same logical session (same queue_id, opposite tuples),
-  both freshly hit; assert `active_flow_debug_entries` returns
-  `cos_counts` summing to 1 for the queue (forward-only), while `active`
-  (total) is 2 and the debug `rows` show both. Also assert N forward
-  entries → cos count N.
+  entry for the same logical session (same queue_id, swapped src/dst
+  tuples), both freshly hit; assert `active_flow_debug_entries` returns a
+  CoS count of **1** for the queue (deduped), while `active` (total) is 2
+  and the debug `rows` show both. Add: N distinct sessions (each as its
+  fwd+rev pair) on one queue → CoS count **N** (not 2N). Add: a
+  reverse-only session (only the reverse half cached) still counts 1
+  (proves `-R` data direction is not undercounted). Add: two genuinely
+  distinct sessions sharing no endpoints → count 2 (no false dedup).
 - 5/5 flake check on the new named test.
 - Full cargo `--release` suite.
 - Go suite (30 packages) — no Go change expected, run for safety.
@@ -223,27 +304,47 @@ live_forward_session_count_for_queue_q`.
 
 ## Out of scope
 
-- The ~650ms aging window second-order overshoot (the MS-key 62). If the
-  forward-only filter does not fully eliminate transient overshoot under
-  rapid flow churn, a follow-up could tie aging to session close; not
-  needed for the N-pinned-stream invariant which uses long-lived flows.
+- The ~650ms aging-window second-order transient (the MS-key 62). Dedup
+  removes the systematic 2× term; any residual brief overshoot under rapid
+  flow churn is bounded by the active window and not the N-pinned-stream
+  (long-lived) invariant this PR proves.
 - `cos_active_flow_counts_truncated` path (#1247) — confirmed 0, unrelated.
-- Any change to the fairness verdict math itself (#1217 contract).
+- Any change to the fairness verdict math itself (#1217 contract). The
+  `direction_multiplier` in `verdict.rs` becomes a no-op-ish 1× under
+  iface filtering after dedup; we leave it (harmless) rather than churn
+  the contract evaluator in a telemetry-source fix.
 
-## Open questions for adversarial review
+## Open questions for adversarial review (v2)
 
-1. **Is the over-count correct-by-design?** Could the fairness contract
-   intend to count bidirectional half-flows separately (i.e. is the
-   "distinct flows per queue" definition actually "distinct cache entries
-   per queue")? If so the FIX should instead be in the #1247 gauge
-   derivation (divide by 2 / forward-only there), not the snapshot. Check
-   `fairness_eval/verdict.rs` and `inputs.rs` semantics.
-2. **Is `resolved.metadata.is_reverse` the right signal?** On a session
-   hit, does `is_reverse` reliably mean "this packet is the reply
-   direction of a session whose forward half is also (or could be) on
-   this worker"? Are there sessions where BOTH installed entries are
-   `is_reverse: false` (e.g. two forward installs), which would defeat the
-   filter?
+1. **Canonical-id correctness across NAT.** v2 documents that NAT'd
+   sessions whose halves land on one worker may still count 2 because the
+   wire tuples don't unordered-match. Is that acceptable for the
+   contract, or does any production CoS-shaped path apply NAT such that
+   this re-introduces a systematic 2× on a queue the fairness gate reads?
+   (Claim: smoke data path reth0.80 is non-NAT.)
+2. **False-dedup hazard.** Could two genuinely distinct sessions ever
+   produce the same `canonical_session_id` on one queue (e.g. a flow and
+   its own mirror, or A→B and B→A as separate real sessions), causing an
+   UNDER-count? Enumerate when `(proto, {endpointA, endpointB})` collides
+   for non-partner flows.
+3. **Reverse-data (`-R`) direction.** Confirm v2 counts a reverse-only
+   data flow as 1 (the v1 defect Codex caught). Does any path cache ONLY
+   the reverse half with a queue_id and never the forward half, such that
+   dedup-by-set still yields 1 (correct) rather than 0?
+4. **Aging residual.** Does dedup alone satisfy `sum == N` for N
+   long-lived pinned streams within the 650ms window, or is a churn
+   transient still observable at scrape time?
+5. **MS-key semantics.** Under the MS key the two halves are on different
+   workers; each worker's set has 1 element for that flow, so the
+   cross-worker SUM is 2 for one logical flow. Wait — is that an
+   over-count under MS? (Analysis: the contract sums per-worker counts;
+   under MS the flow legitimately occupies two workers' queues with one
+   wire-flow each, so 2 is the correct per-queue-occupancy sum. Under
+   symmetric, both wire-flows are on ONE worker and dedup to 1. Confirm
+   this is the intended `{a_i}` semantics and not a new MS over-count.)
+6. **`active` vs CoS divergence.** v2 keeps `active` (total) counting both
+   halves while CoS counts deduped. Any consumer that assumes
+   `sum(cos_counts) == active`? (Claim: none; they are separate series.)
 3. **Miss-path direction**: on the session-miss new-flow path, is
    defaulting `flow_cache_is_reverse = false` always correct, or are there
    reverse-seeding miss arms (NAT64 reverse, cluster-return ReverseFlow)
