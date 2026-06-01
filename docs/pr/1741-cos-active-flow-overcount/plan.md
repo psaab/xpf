@@ -1,6 +1,78 @@
 # #1741 — CoS active-flow count over-counts (reverse-direction entries)
 
-Status: DRAFT v2 — revised after Codex PLAN-NEEDS-MAJOR (round 1)
+Status: PLAN-KILLED (v2) — approach wrong-targeted; symptom not reproducible
+
+## PLAN-KILL summary (2026-06-01)
+
+Both the v1 (forward-only filter) and v2 (per-FlowCache canonical-pair
+dedup) designs are killed. Verdicts:
+
+- **Codex round 1 (v1): PLAN-NEEDS-MAJOR** — a blanket `!is_reverse`
+  filter undercounts the reverse-data (`-R`) direction, which the
+  fairness harness defaults to (`fairness-harness.sh:88`,
+  `fairness-cos-throughput-headroom.sh:17`).
+- **Codex round 2 (v2): PLAN-NEEDS-MAJOR**, two findings CONFIRMED
+  against the live loss cluster:
+  1. **Dedup domain mismatch.** `active_flow_debug_entries` runs
+     per-`FlowCache`, but each `BindingWorker` owns multiple bindings
+     (one per interface) each with its own flow cache, and the public
+     metric is summed at the COORDINATOR by `(ifindex, queue_id,
+     worker_id)` (`coordinator/status.rs:190-198`) AFTER per-binding
+     canonical ids are discarded. Per-FlowCache dedup cannot collapse
+     duplicate counts that arise across bindings on the same worker that
+     map to the same public cell. To dedup at the right layer the
+     canonical ids would have to be carried up to the coordinator — a
+     wire/protocol change far beyond this telemetry fix.
+  2. **NAT breaks the canonical-pair identity on the acceptance path.**
+     The loss cluster applies `lan -> wan` interface SNAT
+     (`test/incus/xpf-cluster-fw0.conf:146`); the WAN egress (ifindex 14
+     = reth0.80) is the SNAT interface (`nat_src_ip 172.16.80.8`,
+     confirmed live: `cos_active_flow_count{ifindex="14",...}`). The
+     forward half's wire key `{client, server}` and the reverse half's
+     wire key `{server, 172.16.80.8}` do NOT form the same unordered
+     pair, so the canonical-pair dedup is a no-op exactly where the v4
+     acceptance proof runs. The plan's "reth0.80 is non-NAT" premise is
+     false.
+- **AGY rounds 1 and 2: PLAN-READY** — NOT credible. AGY reviewed v1 in
+  round 1 (missing the `-R` undercount Codex caught) and in round 2
+  argued forward/reverse always land in different `(ifindex,queue_id)`
+  cells so "the count stays 1" — which, taken to its conclusion, says
+  the over-count does not exist. AGY never explained the actual 49/75
+  mechanism and its NAT analysis is wrong for this path. Per
+  `feedback_gemini_low_signal_on_refactor` / AGY-never-blesses-alone,
+  AGY's PLAN-READY does not override Codex's quoted, live-confirmed
+  MAJOR findings.
+
+### Symptom not reproducible on master
+
+Deployed master on `loss:xpf-userspace-fw0`, applied the documented
+`--symmetric` CoS fixture (`apply-cos-config.sh --symmetric`), and ran
+the pinned-`--cport` repro (`iperf3 -R`) at N=24 and N=48 to shaped port
+5202. The summed `cos_active_flow_count` was a stable, severe
+**UNDER-count** (2 active flows for 48 pinned `-R` streams), never the
+reported 49/75 over-count. The shaped 1g queue throttles most flows out
+of the 650ms active window. The issue's repro context ("Codex
+fresh-review session rss-evenness-fresh-view", a specific RSS-key +
+sequential-`--cport` arrangement) is not captured in a runnable form, so
+no fix can be validated against the actual symptom.
+
+### Recommendation
+
+Re-open with a CAPTURED, runnable reproduction (exact RSS key config,
+ports, stream count, scrape timing, and the raw per-(ifindex,queue,worker)
+rows showing the over-count) BEFORE attempting a fix. The correct fix
+layer is almost certainly the coordinator aggregation
+(`coordinator/status.rs:cos_active_flow_counts`) or the fairness-eval
+`--iface`/`--cos-ifindex` selection (`fairness_eval/`), not the
+per-worker flow cache — and any session-identity dedup must be
+NAT-aware (use the post-NAT wire key / `forward_wire_key` +
+`reverse_canonical_key` consistently, not the raw observed tuple). The
+650ms active-window aging is a separate, second-order contributor to the
+MS-key 62 outlier.
+
+---
+
+(Historical) Status: DRAFT v2 — revised after Codex PLAN-NEEDS-MAJOR (round 1)
 
 ## Round-1 review outcome (why v2 changes the fix)
 
