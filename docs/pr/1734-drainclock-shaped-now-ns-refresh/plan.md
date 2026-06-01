@@ -1,6 +1,46 @@
 # #1734 — DrainClock: bounded `now_ns` refresh across shaped drain
 
-**Status:** DRAFT v1 — pending adversarial plan review
+**Status:** PLAN-KILLED (round 1) — AGY PLAN-KILL + Claude-SMR PLAN-KILL;
+Codex PLAN-NEEDS-MAJOR whose findings, worked quantitatively, converge on
+the same kill. See `agy-plan-r1.md`, `claude-smr-plan-r1.md`,
+`codex-plan-r1.md`.
+
+## KILL SUMMARY (round 1)
+
+The frozen `now_ns` is structurally real but a **no-op at realistic batch
+sizes**, and the proposed mid-pass refresh would **introduce** a cross-worker
+shared-lease skew regression:
+
+- **Token refill no-op:** refill during one batch transmission is
+  `T·R = B·S·(R/L)` with shaped `R ≪ L`, far below one batch's cost — a pass
+  cannot accrue another batch mid-pass; residual refills on the next poll tick
+  (µs) vs ms-scale shaping (`token_bucket.rs:267`).
+- **EWMA unchanged within a pass:** inter-selection `dt` is one batch
+  (~0.3–80 µs) `< EWMA_MIN_DT_NS = 100 µs` (`fairness.rs:26,74`), so the
+  scheduler-affecting `observed_bps` roll is deferred whether the clock is
+  frozen OR advanced — the fix changes nothing for the cap-aware MQFQ selector
+  (`queue_ops/mod.rs:113-117,147`).
+- **Park/wake marginal:** 50 µs tick (`tx_completion.rs:104`) is rarely
+  crossed in a single pass; the next poll tick recovers.
+- **New regression hazard:** the shaped drain reaches `acquire_v8(.., now_ns,
+  ..)` → `maybe_rotate_epoch_v8(now_ns)` (`shared_cos_lease/mod.rs:1176`;
+  `rotate_epoch_v8.rs:39`; `EPOCH_DURATION_NS = 200 µs`). An advanced
+  per-worker clock crossing the epoch boundary mid-pass rotates the SHARED
+  lease ahead of peers still on their poll-loop clock → torn fair-share,
+  breaking #1231/#1219/#1217 — the opposite of the goal.
+
+This is the MEMORY #1317 unverified-perf-claim kill class: a real-but-
+inconsequential freeze whose remedy adds risk. The #1731 plan pre-flagged
+finding #5 as possibly a no-op; the measurement (the math above + threshold
+analysis) confirms it. **No PR opened.**
+
+If revisited: reopen only with a captured perf trace / live counter proving a
+real CoS-load drain pass that runs many selections AND advances real time past
+100 µs in one pass without peer-skewing epoch rotation.
+
+---
+
+**Status (original draft, preserved below):** DRAFT v1 — pending adversarial plan review
 
 ## 1. Issue framing
 
