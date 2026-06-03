@@ -111,6 +111,20 @@ Per tick (coordinator status cadence, ~1 Hz — never per-packet):
      transient burst never triggers a move. Each subsequent move independently
      re-requires a full dwell window (the dwell counter is reset after every
      move), so the controller cannot rapid-fire moves down a noisy gradient.
+   **Flow-close rule reclamation (every tick).** Before the move decision, the
+   controller reconciles its ledger against the currently-PRESENT flows (the
+   same presence-windowed set the count uses). For every ledger entry whose
+   5-tuple is no longer present — the flow ended and its flow-cache entry aged
+   out of the presence window (or was explicitly invalidated) — the controller
+   DELETES that ntuple rule, frees its location, and drops the ledger entry.
+   This is the simple flow-close path: the flow is gone, so there is no
+   ownership to hand back (no reverse barrier). It runs on every non-truncated
+   tick, including balanced/settled ones, so under steady flow churn the live
+   rule count returns toward baseline instead of marching to the cap. Without it
+   a rule was only ever freed on a second-move re-pin or on teardown, so ended
+   flows leaked rules until the cap filled and no further flow could be
+   rebalanced. Reclamation is SKIPPED on a truncated snapshot (an absent flow
+   may merely be missing from the truncated rows, not ended).
 3. Move one flow from the highest-count worker (`hi`) to the lowest-count
    worker (`lo`), subject to:
    - **overshoot guard** — require `c_hi − c_lo ≥ 2`, so moving one flow cannot

@@ -13,7 +13,7 @@
 // Default-OFF: when the knob is unset the Coordinator never constructs a
 // controller, so there is zero extra per-tick work and zero ioctl sockets.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use super::ntuple::{FlowProto, FlowSpec5Tuple};
@@ -401,10 +401,22 @@ impl RebalanceController {
         // #1751 truncation defer (plan §2.3/§6.2): a truncated flow-worker-map
         // snapshot would understate the per-worker row count, so defer rather
         // than act on a wrong count. Cannot fire at the P12 gate (24 << 256).
+        // Reclamation below is ALSO gated on this: a flow absent only because
+        // the snapshot truncated has NOT ended, so we must not delete its rule.
         if input.truncated {
             self.metrics.record_skip(SkipReason::Truncated);
             return None;
         }
+
+        // #1751 r4 (plan §4.5): reclaim ntuple rules whose flow has ENDED. This
+        // runs on EVERY non-truncated tick, BEFORE the balance/dwell early
+        // returns below — otherwise a balanced/settled fleet would never free
+        // the rules of flows that finished, and the table would march to the
+        // cap under flow churn. Build the presence set once from the same
+        // presence-windowed flow snapshot the count uses.
+        let present: HashSet<SessionKey> =
+            input.flows.iter().map(|f| f.key.clone()).collect();
+        self.reclaim_ended_flows(&present, tx);
 
         // #1751 r2 anti-churn gate: deadband hysteresis + sustained-imbalance
         // dwell. The live regression was perpetual install->delete->install
@@ -727,6 +739,48 @@ impl RebalanceController {
 
     fn expire_cooldowns(&mut self, now_secs: u64) {
         self.cooldown.retain(|_, &mut until| until > now_secs);
+    }
+
+    /// #1751 r4 (plan §4.5) FLOW-CLOSE rule reclamation. A rule is installed
+    /// when a flow is MOVED but, before this, was only ever DELETED on a
+    /// second-move re-pin or on controller teardown — never when the flow
+    /// itself ENDED. So as flows came and went their rules accumulated and
+    /// marched to the `max_rules` cap, after which no further flow could be
+    /// rebalanced (live regression: 16/16 rules persisted 25 s after a -P12
+    /// run finished; the next run started against a full table and got stuck).
+    ///
+    /// Per tick, reconcile the ledger against the currently-PRESENT flows (the
+    /// same presence-windowed `input.flows` set the count is derived from). For
+    /// each ledger entry whose 5-tuple is no longer present, the flow has ended
+    /// (its flow-cache entry aged out of the presence window or was explicitly
+    /// invalidated) — there is no ownership to hand back (the RebalancedOwner
+    /// copy is gone too), so this is the simple "flow-close → delete the rule"
+    /// path: drop the ntuple rule, free its location, remove the ledger entry.
+    ///
+    /// Caller MUST NOT invoke this on a truncated snapshot — a flow absent only
+    /// because the snapshot was truncated has NOT ended, and deleting its rule
+    /// would wrongly un-pin a live flow. The tick gates this on `!truncated`.
+    fn reclaim_ended_flows<T: BarrierTransport>(&mut self, present: &HashSet<SessionKey>, tx: &mut T) {
+        let mut reclaimed = 0u64;
+        self.ledger.retain(|entry| {
+            if present.contains(&entry.key) {
+                return true;
+            }
+            // Flow ended: plain rule delete, no reverse barrier (no live owner
+            // to restore). delete_rule maps ENOENT->Ok, so a rule the NIC
+            // already dropped is not an error.
+            let _ = tx.delete_rule(entry.loc);
+            reclaimed += 1;
+            debug_log_rebalance!(
+                "REBALANCE_RECLAIM loc={} new_worker={} src_port={} reason=flow_ended",
+                entry.loc, entry.new_worker, entry.key.src_port
+            );
+            false
+        });
+        if reclaimed > 0 {
+            self.metrics.deletes_total += reclaimed;
+            self.metrics.rules_active = self.ledger.len() as u32;
+        }
     }
 
     /// #1751 count-balancing selection (replaces #1748's byte-rate selection).

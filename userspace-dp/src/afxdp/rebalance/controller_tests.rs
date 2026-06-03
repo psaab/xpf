@@ -803,25 +803,48 @@ fn free_loc_top_down_full_ledger_is_none() {
 fn installs_consume_ledger_slots_top_down() {
     let mut c = test_controller(cfg());
     let mut tx = MockTransport::good();
-    // First move: empty ledger -> loc 1023.
-    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("first move");
+    // First move: empty ledger -> loc 1023. [3,0] picks the lowest key on
+    // worker 0 (port 1000) and moves it to worker 1.
+    let mv1 = drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("first move");
     assert!(
         tx.calls.iter().any(|s| s == "install:q1:loc1023"),
         "first install at top slot 1023: {:?}", tx.calls
     );
-    // Second move of a DIFFERENT key: 1023 is now in the ledger -> picks 1022.
-    // Use a fresh count vector with a new hottest worker so a distinct flow is
-    // chosen, and advance time past the install cadence.
+
+    // Second move of a DIFFERENT key. Build the vector by hand so the FIRST
+    // moved flow STAYS PRESENT (on its new worker 1) — otherwise #1751 r4
+    // flow-close reclamation would correctly free slot 1023. A new hot worker 2
+    // supplies the second-move candidate; a fresh idle worker 3 is the lo.
     tx.calls.clear();
     c.clear_cooldown_for_test();
-    drive_one_move(&mut c, &mut tx, &[0, 0, 3, 0], 100).expect("second move");
-    // The next free ledger slot below 1023 is 1022, regardless of which
-    // count-0 destination queue the selector picks.
+    let workers: Vec<WorkerByteRate> = (0..4).map(|w| worker(w, 0.0)).collect();
+    let mut flows = vec![
+        // The first-moved flow, still alive on worker 1 (keeps slot 1023).
+        FlowSample { key: key(mv1.key.src_port), worker_id: 1, byte_rate: 0.0, origin: None },
+    ];
+    // Worker 2 is the new hottest (3 flows); workers 0/1/3 idle-ish.
+    flows.extend(flows_on(2, 3));
+    let mk = |now| RebalanceTickInput {
+        ifindex: 5,
+        workers: workers.clone(),
+        flows: flows.clone(),
+        now_secs: now,
+        truncated: false,
+    };
+    let mut moved = false;
+    for t in 0..(DWELL_TICKS_REQUIRED as u64 + 8) {
+        if c.tick(&mk(100 + t), &mut tx).is_some() {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "second move commits");
+    // The next free ledger slot below the still-held 1023 is 1022.
     assert!(
         tx.calls.iter().any(|s| s.starts_with("install:") && s.ends_with(":loc1022")),
         "second install reuses next free slot 1022: {:?}", tx.calls
     );
-    assert_eq!(c.metrics().rules_active, 2);
+    assert_eq!(c.metrics().rules_active, 2, "both rules persist (neither flow ended)");
 }
 
 /// Install with a FULL location space aborts as BudgetExhausted BEFORE the
@@ -841,14 +864,27 @@ fn full_capacity_skips_budget_exhausted_without_barrier() {
     });
     let mut tx = MockTransport::good();
     // First move commits at the cap.
-    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("first move at cap");
+    let mv1 = drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("first move at cap");
     assert_eq!(c.metrics().rules_active, 1);
     tx.calls.clear();
     // Now at the cap: a further imbalance must skip BudgetExhausted with NO
-    // barrier calls (the budget gate is checked before select/barrier).
+    // barrier calls (the budget gate is checked before select/barrier). Keep the
+    // first-moved flow PRESENT (on worker 1) so #1751 r4 flow-close reclamation
+    // does NOT free its rule — the cap must stay full for this test.
     c.clear_cooldown_for_test();
+    let workers: Vec<WorkerByteRate> = (0..4).map(|w| worker(w, 0.0)).collect();
+    let mut flows = vec![
+        FlowSample { key: key(mv1.key.src_port), worker_id: 1, byte_rate: 0.0, origin: None },
+    ];
+    flows.extend(flows_on(2, 3));
     for t in 0..8u64 {
-        let input = count_input(5, &[0, 0, 3, 0], 100 + t);
+        let input = RebalanceTickInput {
+            ifindex: 5,
+            workers: workers.clone(),
+            flows: flows.clone(),
+            now_secs: 100 + t,
+            truncated: false,
+        };
         assert!(c.tick(&input, &mut tx).is_none(), "no move past the cap");
     }
     assert!(
@@ -879,6 +915,136 @@ fn install_is_decoupled_from_nic_location_query() {
         "install carries the ledger-picked loc: {:?}", tx.calls
     );
     assert_eq!(c.metrics().installs_total, 1);
+}
+
+// ── #1751 r4 FLOW-CLOSE rule reclamation (plan §4.5) ────────────────────
+
+/// A ledgered/ruled flow that DISAPPEARS from the presence flow set (connection
+/// ended / flow-cache entry aged out) has its ntuple rule reclaimed on the next
+/// tick: delete the rule, free the location, drop the ledger entry, decrement
+/// rules_active. The freed slot is then reusable by a later move.
+#[test]
+fn ended_flow_rule_is_reclaimed_and_slot_freed() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // Move a flow -> rule at the top slot 1023.
+    let mv = drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("first move");
+    assert_eq!(c.metrics().rules_active, 1);
+    assert_eq!(mv.loc, 1023);
+    let deletes_before = c.metrics().deletes_total;
+    tx.calls.clear();
+
+    // Next tick: the moved flow is GONE from the presence set (it ended). With
+    // an otherwise-balanced, present-flow-free snapshot the controller must
+    // reclaim its rule.
+    let workers: Vec<WorkerByteRate> = (0..2).map(|w| worker(w, 0.0)).collect();
+    let input = RebalanceTickInput {
+        ifindex: 5,
+        workers: workers.clone(),
+        flows: Vec::new(), // the moved flow (and all flows) ended
+        now_secs: 20,
+        truncated: false,
+    };
+    assert!(c.tick(&input, &mut tx).is_none(), "no move; just reclamation");
+    assert_eq!(c.metrics().rules_active, 0, "ended flow's rule reclaimed");
+    assert_eq!(c.metrics().deletes_total, deletes_before + 1, "one delete recorded");
+    assert!(
+        tx.calls.iter().any(|s| s == "delete:1023"),
+        "the freed rule was at slot 1023: {:?}", tx.calls
+    );
+    // No reverse-barrier on a flow-close reclamation (no live owner to restore).
+    assert!(!tx.calls.iter().any(|s| s.starts_with("restore:")), "no restore on flow-close: {:?}", tx.calls);
+    assert!(!tx.calls.iter().any(|s| s.starts_with("replica:")), "no replica demote on flow-close: {:?}", tx.calls);
+
+    // The freed slot 1023 is reusable: a new imbalance re-pins at the top slot.
+    tx.calls.clear();
+    c.clear_cooldown_for_test();
+    let mv2 = drive_one_move(&mut c, &mut tx, &[3, 0], 30).expect("re-pin after reclaim");
+    assert_eq!(mv2.loc, 1023, "the reclaimed top slot is reused");
+    assert_eq!(c.metrics().rules_active, 1);
+}
+
+/// Reclamation does NOT fire on a TRUNCATED snapshot — a flow absent only
+/// because the snapshot truncated has not ended; deleting its rule would
+/// wrongly un-pin a live flow.
+#[test]
+fn truncated_snapshot_does_not_reclaim_rules() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("move");
+    assert_eq!(c.metrics().rules_active, 1);
+    tx.calls.clear();
+    // Truncated snapshot with NO flows: must NOT reclaim (the flow may still be
+    // live, just not in the truncated rows).
+    let mut input = count_input(5, &[0, 0], 20);
+    input.flows = Vec::new();
+    input.truncated = true;
+    assert!(c.tick(&input, &mut tx).is_none());
+    assert_eq!(c.metrics().rules_active, 1, "no reclamation on a truncated snapshot");
+    assert!(!tx.calls.iter().any(|s| s.starts_with("delete:")), "no delete on truncation: {:?}", tx.calls);
+}
+
+/// Repeated move/end CYCLES do not accumulate rules toward the cap: each cycle's
+/// flow is reclaimed when it ends, so the live rule count returns to baseline
+/// and the budget is never exhausted (the live #1751 r4 cap-march regression).
+#[test]
+fn repeated_move_end_cycles_do_not_accumulate_rules() {
+    let mut c = test_controller(RebalanceConfig {
+        count_delta_k: 2,
+        rebalance_interval_secs: 1,
+        max_rules: 4, // small cap: a leak would hit it within a few cycles
+    });
+    let mut tx = MockTransport::good();
+    let workers: Vec<WorkerByteRate> = (0..2).map(|w| worker(w, 0.0)).collect();
+
+    let mut now = 10u64;
+    for cycle in 0..12u64 {
+        // A fresh batch of flows on worker 0 (distinct keys per cycle so each is
+        // a genuinely new connection), worker 1 idle -> imbalance -> one move.
+        let base_port = 2000 + (cycle as u16) * 10;
+        let mut moved = false;
+        for t in 0..(DWELL_TICKS_REQUIRED as u64 + 6) {
+            let flows = vec![
+                flow(base_port, 0, 0.0),
+                flow(base_port + 1, 0, 0.0),
+                flow(base_port + 2, 0, 0.0),
+            ];
+            let input = RebalanceTickInput {
+                ifindex: 5,
+                workers: workers.clone(),
+                flows,
+                now_secs: now,
+                truncated: false,
+            };
+            if c.tick(&input, &mut tx).is_some() {
+                moved = true;
+            }
+            now += 1;
+        }
+        assert!(moved, "cycle {cycle} made a move");
+        // The whole batch ENDS: tick a few empty-flow snapshots so the moved
+        // flow is reclaimed before the next cycle's batch arrives.
+        for _ in 0..2 {
+            let input = RebalanceTickInput {
+                ifindex: 5,
+                workers: workers.clone(),
+                flows: Vec::new(),
+                now_secs: now,
+                truncated: false,
+            };
+            c.tick(&input, &mut tx);
+            now += 1;
+        }
+        // After each cycle's flows end, the rule is reclaimed -> back to 0.
+        assert_eq!(
+            c.metrics().rules_active, 0,
+            "cycle {cycle}: rules return to baseline (no accumulation toward the cap)"
+        );
+    }
+    // 12 cycles each installed and reclaimed; never stuck at the cap.
+    assert!(c.metrics().rules_active < 4, "never marched to the cap");
+    assert!(c.metrics().installs_total >= 12, "each cycle installed");
+    assert!(c.metrics().deletes_total >= 12, "each cycle reclaimed");
 }
 
 /// Teardown of a live move uses the reverse barrier (restore W_old -> delete ->
