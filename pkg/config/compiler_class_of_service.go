@@ -454,11 +454,21 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig) error {
 			return ""
 		}
 		if v := leafVal("imbalance-threshold"); v != "" {
+			// #1748 byte-rate threshold — retained for config back-compat but
+			// IGNORED by the #1751 count-balancing decision.
 			n, err := strconv.Atoi(v)
 			if err != nil || n < 101 || n > 1000 {
 				return fmt.Errorf("class-of-service flow-rebalance imbalance-threshold %q: expected 101..1000", v)
 			}
 			fr.ImbalanceThresholdPercent = uint32(n)
+		}
+		if v := leafVal("count-delta"); v != "" {
+			// #1751 count-delta threshold K (max_count - min_count >= K).
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 2 || n > 64 {
+				return fmt.Errorf("class-of-service flow-rebalance count-delta %q: expected 2..64", v)
+			}
+			fr.CountDelta = uint32(n)
 		}
 		if v := leafVal("rebalance-interval"); v != "" {
 			n, err := strconv.Atoi(v)

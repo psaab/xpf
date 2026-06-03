@@ -886,16 +886,26 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 				"scheduler-map": {args: 1, children: nil},
 			}},
 		}},
-		// #1748: default-OFF opt-in reactive cross-worker ntuple rebalance
+		// #1748/#1751: default-OFF opt-in reactive cross-worker ntuple rebalance
 		// controller. Absent => the userspace-dp controller is never
-		// constructed (byte-identical default path). imbalance-threshold is
-		// expressed as a percent of the mean per-worker byte-rate (e.g. 130
-		// means move when the hottest worker exceeds 1.30x the mean).
+		// constructed (byte-identical default path). #1751 redesigned the
+		// selector to COUNT-balancing: it moves a flow from the highest- to the
+		// lowest-flow-count worker, gated by the integer count-delta `count-delta`
+		// (K). `imbalance-threshold` is retained for config back-compat but is
+		// IGNORED by the count-balancing decision.
 		"flow-rebalance": {children: map[string]*schemaNode{
+			"count-delta": {
+				args:          1,
+				valueType:     ValueInteger,
+				valueDesc:     "Count-delta threshold K: move when the busiest worker has >= K more flows than the idlest (2..64; default 2)",
+				valueExamples: []string{"2", "3", "4"},
+				validator:     ValidateInteger(2, 64),
+				children:      nil,
+			},
 			"imbalance-threshold": {
 				args:          1,
 				valueType:     ValueInteger,
-				valueDesc:     "Hottest-worker byte-rate as a percent of the mean that triggers a move (101..1000; e.g. 130 = 1.30x)",
+				valueDesc:     "DEPRECATED (#1748 byte-rate threshold, ignored by the #1751 count-balancer); retained for config back-compat (101..1000)",
 				valueExamples: []string{"120", "130", "150"},
 				validator:     ValidateInteger(101, 1000),
 				children:      nil,

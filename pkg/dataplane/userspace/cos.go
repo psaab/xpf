@@ -180,6 +180,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 	if cos.FlowRebalance != nil {
 		snap.FlowRebalance = &CoSFlowRebalanceSnapshot{
 			ImbalanceThresholdPercent: cos.FlowRebalance.ImbalanceThresholdPercent,
+			CountDelta:                cos.FlowRebalance.CountDelta,
 			RebalanceIntervalSecs:     cos.FlowRebalance.RebalanceIntervalSecs,
 			MaxRules:                  cos.FlowRebalance.MaxRules,
 		}

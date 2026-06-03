@@ -21,14 +21,19 @@ type ClassOfServiceConfig struct {
 	FlowRebalance *CoSFlowRebalance
 }
 
-// CoSFlowRebalance holds the #1748 reactive cross-worker ntuple rebalance
-// controller knobs. Presence of the block (even with all defaults) enables
-// the controller; absence keeps it off.
+// CoSFlowRebalance holds the #1748/#1751 reactive cross-worker ntuple
+// rebalance controller knobs. Presence of the block (even with all defaults)
+// enables the controller; absence keeps it off.
 type CoSFlowRebalance struct {
-	// ImbalanceThresholdPercent: hottest-worker byte-rate as a percent of
-	// the mean that triggers a move (e.g. 130 = 1.30x). 0 => controller
-	// default (130).
+	// ImbalanceThresholdPercent: #1748 byte-rate threshold, RETAINED for
+	// config back-compat but IGNORED by the #1751 count-balancing decision.
 	ImbalanceThresholdPercent uint32
+	// CountDelta: #1751 count-delta threshold K — the controller moves a flow
+	// from the highest-flow-count worker to the lowest only when
+	// max_count - min_count >= K. 0 => controller default (2); the selector
+	// floors it at 2 (a smaller K cannot admit a move under the overshoot
+	// guard).
+	CountDelta uint32
 	// RebalanceIntervalSecs: minimum seconds between rule installs. 0 =>
 	// controller default (1).
 	RebalanceIntervalSecs uint32

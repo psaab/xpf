@@ -185,10 +185,15 @@ type ClassOfServiceSnapshot struct {
 
 // CoSFlowRebalanceSnapshot mirrors config.CoSFlowRebalance over the wire.
 // Zero sub-fields tell the Rust controller to use its built-in defaults.
+// JSON tags MUST match the Rust serde rename(...) exactly.
 type CoSFlowRebalanceSnapshot struct {
+	// #1748 byte-rate threshold — retained for wire back-compat, ignored by
+	// the #1751 count-balancing decision.
 	ImbalanceThresholdPercent uint32 `json:"imbalance_threshold_percent,omitempty"`
-	RebalanceIntervalSecs     uint32 `json:"rebalance_interval_secs,omitempty"`
-	MaxRules                  uint32 `json:"max_rules,omitempty"`
+	// #1751 count-delta threshold K (0 => Rust default 2).
+	CountDelta            uint32 `json:"count_delta,omitempty"`
+	RebalanceIntervalSecs uint32 `json:"rebalance_interval_secs,omitempty"`
+	MaxRules              uint32 `json:"max_rules,omitempty"`
 }
 
 type CoSForwardingClassSnapshot struct {

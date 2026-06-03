@@ -1470,6 +1470,9 @@ func TestCompileClassOfServiceRejectsThreeFCsOnOneQueue(t *testing.T) {
 // #1748: flow-rebalance leaf compiles to CoSFlowRebalance; absent => nil.
 func TestCompileClassOfServiceFlowRebalanceSetSyntax(t *testing.T) {
 	lines := []string{
+		// #1751: count-delta is the live knob; imbalance-threshold is retained
+		// for config back-compat but ignored by the count-balancing decision.
+		"set class-of-service flow-rebalance count-delta 3",
 		"set class-of-service flow-rebalance imbalance-threshold 130",
 		"set class-of-service flow-rebalance rebalance-interval 2",
 		"set class-of-service flow-rebalance max-rules 64",
@@ -1493,14 +1496,55 @@ func TestCompileClassOfServiceFlowRebalanceSetSyntax(t *testing.T) {
 		t.Fatal("expected FlowRebalance set")
 	}
 	fr := cfg.ClassOfService.FlowRebalance
+	if fr.CountDelta != 3 {
+		t.Errorf("count-delta = %d, want 3", fr.CountDelta)
+	}
 	if fr.ImbalanceThresholdPercent != 130 {
-		t.Errorf("imbalance-threshold = %d, want 130", fr.ImbalanceThresholdPercent)
+		t.Errorf("imbalance-threshold = %d, want 130 (parsed but ignored)", fr.ImbalanceThresholdPercent)
 	}
 	if fr.RebalanceIntervalSecs != 2 {
 		t.Errorf("rebalance-interval = %d, want 2", fr.RebalanceIntervalSecs)
 	}
 	if fr.MaxRules != 64 {
 		t.Errorf("max-rules = %d, want 64", fr.MaxRules)
+	}
+}
+
+// #1751: count-delta validation (2..64) + a single count-delta sub-leaf
+// enables the controller with the rest at defaults.
+func TestCompileClassOfServiceFlowRebalanceCountDelta(t *testing.T) {
+	compile := func(t *testing.T, line string) (*Config, error) {
+		t.Helper()
+		tree := &ConfigTree{}
+		for _, l := range []string{line, "set system dataplane-type userspace"} {
+			path, err := ParseSetCommand(l)
+			if err != nil {
+				t.Fatalf("ParseSetCommand(%q): %v", l, err)
+			}
+			if err := tree.SetPath(path); err != nil {
+				t.Fatalf("SetPath(%q): %v", l, err)
+			}
+		}
+		return CompileConfig(tree)
+	}
+	// Valid: count-delta 4 enables the controller.
+	cfg, err := compile(t, "set class-of-service flow-rebalance count-delta 4")
+	if err != nil {
+		t.Fatalf("compile error: %v", err)
+	}
+	if cfg.ClassOfService == nil || cfg.ClassOfService.FlowRebalance == nil {
+		t.Fatal("count-delta sub-leaf must enable the controller")
+	}
+	if cfg.ClassOfService.FlowRebalance.CountDelta != 4 {
+		t.Errorf("count-delta = %d, want 4", cfg.ClassOfService.FlowRebalance.CountDelta)
+	}
+	// Below floor (1 < 2) rejected.
+	if _, err := compile(t, "set class-of-service flow-rebalance count-delta 1"); err == nil {
+		t.Fatal("count-delta 1 (< 2) must be rejected")
+	}
+	// Above range (65 > 64) rejected.
+	if _, err := compile(t, "set class-of-service flow-rebalance count-delta 65"); err == nil {
+		t.Fatal("count-delta 65 (> 64) must be rejected")
 	}
 }
 
