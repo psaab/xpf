@@ -1,6 +1,21 @@
 # #1758 — Path E follow-up: session-refresh secondary-index re-assert
 
-**Status: DRAFT v1 (pending Codex + AGY + Claude SMR).**
+**Status: v2 (Codex r1 PLAN-KILL folded — broadened collision set; AGY r1
+ran out of step budget mid-exploration, no verdict emitted; Claude SMR
+PLAN-KILL).**
+
+> v2 changelog (Codex r1): the collision set is BROADER than interface-mode
+> SNAT. Codex found three more live K-collision vectors, all of which leave
+> `rewrite_src_port=None` (no port disambiguation): **NAT64**
+> (`nat64.rs:97/109`, round-robin pool v4 address, no port), **DNAT to a
+> shared backend** (`destination.rs:126`, two VIPs → one backend → identical
+> reverse wire key), and **non-bijective static NAT** (`static_nat.rs:42/70`,
+> port-preserving; safe only IF upstream config enforces 1:1 — not proven in
+> `static_nat.rs`). Also: the dual reverse-entry path collides at the
+> `key_to_handle` primary index too (§4a), so the defect is not confined to
+> `nat_reverse_index`. Disposition strengthened: a counter is **telemetry,
+> not a resolution** — the correctness tracker must require an injectivity
+> fix or an explicit install-time collision policy.
 
 **Reachability verdict (Step 1): REACHABLE.** Two *live* sessions CAN
 derive the same secondary key `K` in the `nat_reverse_index` —
@@ -128,6 +143,43 @@ and unbounded over time at scale** — and become *likely* for workloads
 with fixed/low-entropy source ports (e.g. clients binding a fixed source
 port, some VoIP/RTP, hashed L4 source-port pinning).
 
+## 4a. Other live collision vectors (Codex r1) — all `rewrite_src_port=None`
+
+The interface-mode case (§4) is one of FOUR. All share the root cause:
+the translation leaves the L4 source port unrewritten / unallocated, so
+distinct forward flows map to a non-injective reverse wire tuple.
+
+- **NAT64** (`nat64.rs:96-115`): `allocate_v4_source` round-robins a pool
+  v4 address (`pool_v4[idx % len]`) and `forward_decision` sets
+  `rewrite_src_port: None`. Two IPv6 clients with the same source port to
+  the same IPv4 server, assigned the same `snat_v4`, collide on K.
+- **DNAT to a shared backend** (`destination.rs:116-130`): `rewrite_dst =
+  new_dst_ip`, `rewrite_src_port: None`. `VIP1:443→backend:8443` and
+  `VIP2:443→backend:8443` from one client/source-port have distinct
+  forward keys but identical reverse wire key `backend:8443→client:port`.
+- **Static NAT** (`static_nat.rs:42,70`): port-preserving 1:1; safe ONLY
+  if upstream config guarantees external/internal bijection. `static_nat.rs`
+  itself does not establish that invariant; the correctness tracker must
+  either quote the config-layer guarantee or treat static NAT as a vector.
+- **Pool-mode SNAT** (`source.rs:494`, `allocator.rs:461`): IMMUNE (§3) —
+  the only mode that allocates and uniqueness-tracks the external port.
+
+**Dual reverse-entry interaction:** a forward flow also installs a
+separate reverse `SessionEntry` (`poll_descriptor/mod.rs:1376-1390`,
+`is_reverse:true`) whose **primary key IS the reply tuple**. For two
+flows sharing K, those reverse entries share the same primary key, so
+`key_to_handle` (also single-valued) collides too:
+`install_with_protocol`'s `remove_entry(&key)` (`session/mod.rs:682`)
+evicts the prior reverse entry. So the collision is present at BOTH the
+`nat_reverse_index` AND the `key_to_handle` level — the re-assert is a
+symptom, not the root, and `nat_reverse_index` is only the *fallback*
+resolution path (`shared_ops.rs:425`, after the primary `lookup_with_origin`
+at `:384`). This *narrows the observable blast radius* (steady-state
+forward traffic re-installs the reverse entry) but does NOT make it safe:
+whichever reverse entry / index lost the last write is dead until its
+flow's next forward packet re-installs, and a forward-silent / reverse-
+active flow (server push, UDP) stays dead.
+
 ## 5. Why "remove the re-assert" is NOT a clean fix
 
 The re-assert is **load-bearing**. Probe `displacement_victim` (reverted):
@@ -167,7 +219,14 @@ it must not be smuggled in under a ~1% perf banner.
   regression. All four #1753 reviewers verified parity — correctly.
 
 Net: a real but **narrow, bounded, self-healing-on-active-flows** latent
-bug in the *default* SNAT mode. Not a fire; not nothing.
+bug. Not a fire; not nothing.
+
+**Vector likelihood ranking (Claude SMR r1):** DNAT-to-shared-backend is
+the most operationally likely (multi-VIP→one-backend load balancing is
+common, client keep-alive pools often pin source ports) > interface-mode
+SNAT source-port collision (ephemeral-port birthday, rare but unbounded
+over time) > NAT64 (same as interface, IPv6-only deployments) >
+non-bijective static NAT (config-dependent; should be config-prevented).
 
 ## 7. Recommendation
 
@@ -176,18 +235,26 @@ bug in the *default* SNAT mode. Not a fire; not nothing.
    trading one corruption for another. Label `plan-kill` + keep the perf
    issue closed.
 2. **Spin a separate correctness tracker** for the structural 1:N
-   interface-mode-SNAT reverse-index collision, carrying §4 conditions +
-   §6 severity + the four reverted probes as the repro spec. Decide fix
-   (multi-valued index / collision chain) vs documented-accept there, with
-   its own gated /research. Do **not** auto-escalate to a rearchitecture.
-3. **Optional small, safe, shippable now:** add a release-mode counter
-   incremented when `index_forward_nat_key_parts` overwrites a *different*
-   live handle on `nat_reverse_index` (collision-displacement counter),
-   exported via the existing session-stats path. This makes the collision
-   *observable in production* so the fix-vs-accept decision in (2) is
-   data-driven rather than speculative. This is the one change that earns
-   its keep; it is not part of #1758's perf ask and can be its own tiny
-   PR.
+   non-injective-reverse-tuple collision covering ALL FOUR vectors
+   (interface-mode SNAT, NAT64, DNAT-to-shared-backend, non-bijective
+   static NAT — §4 + §4a), carrying the conditions + §6 severity + the
+   reverted probes as the repro spec. The tracker MUST require either an
+   **injectivity fix** (e.g. allocate/track an external port for the
+   unrewritten-port modes, or make the reverse index multi-valued *with*
+   a per-packet discriminator — note a bare set does NOT disambiguate two
+   truly identical reverse tuples; Codex r1) or an **explicit install-time
+   collision policy** (reject/log the second colliding live session). A
+   counter alone is NOT the resolution. Own gated /research; do not
+   auto-escalate to a rearchitecture without the measurement in (3).
+3. **Telemetry first (shippable now, separate tiny PR):** a release-mode
+   collision-displacement counter incremented when an index insert
+   (`index_forward_nat_key_parts` / `key_to_handle` install) overwrites a
+   *different live* handle. Makes the collision observable so the
+   fix-vs-accept decision in (2) is data-driven. This is **telemetry, not
+   the fix** (Codex r1). Cost is ~0 on the refresh hot path #1753
+   optimized: `FxHashMap::insert` already returns the displaced value, so
+   the counter inspects that return rather than adding a separate `get`
+   (Claude SMR r1) — no new lookup, no reintroduced per-packet cost.
 
 ## 8. Repro (the reverted probes — to be re-added by the fix PR, if any)
 
