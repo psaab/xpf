@@ -169,17 +169,18 @@ fn cfg() -> RebalanceConfig {
     }
 }
 
-/// Drive the controller through the dwell (DWELL_TICKS_REQUIRED=2) and the
-/// interval gate by ticking the SAME count vector at 1s spacing until a move
-/// is committed or `max_ticks` is hit. Returns the first committed outcome.
-/// Used by the convergence tests where we want one accepted move at a time.
+/// Drive the controller through the anti-churn dwell (DWELL_TICKS_REQUIRED
+/// sustained arm-threshold ticks) and the interval gate by ticking the SAME
+/// count vector at 1s spacing until a move is committed or the tick budget is
+/// hit. Returns the first committed outcome. Used by the convergence tests
+/// where we want one accepted move at a time.
 fn drive_one_move<T: BarrierTransport>(
     c: &mut RebalanceController,
     tx: &mut T,
     counts: &[u32],
     start_secs: u64,
 ) -> Option<MoveOutcome> {
-    for t in 0..8u64 {
+    for t in 0..(DWELL_TICKS_REQUIRED as u64 + 8) {
         let input = count_input(5, counts, start_secs + t);
         if let Some(mv) = c.tick(&input, tx) {
             return Some(mv);
@@ -359,6 +360,169 @@ fn even_counts_yield_no_move() {
     assert_eq!(c.metrics().installs_total, 0);
     let bal = c.metrics().moves_skipped.get(&SkipReason::Balanced).copied().unwrap_or(0);
     assert!(bal >= 1, "even counts recorded Balanced");
+}
+
+// ── #1751 r2 ANTI-CHURN (sustained dwell + deadband + strong cooldown) ──
+
+/// A SINGLE-TICK imbalance must NOT move (the bursty-traffic blip). Only an
+/// imbalance SUSTAINED across >= DWELL_TICKS_REQUIRED ticks may move.
+#[test]
+fn transient_single_tick_imbalance_does_not_move() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // One imbalanced tick, then immediately balanced again (a burst blip).
+    assert!(c.tick(&count_input(5, &[4, 0, 2, 2, 2, 2], 10), &mut tx).is_none(),
+        "first imbalanced tick only accrues dwell, never moves");
+    assert!(c.tick(&count_input(5, &[2, 2, 2, 2, 2, 2], 11), &mut tx).is_none(),
+        "next tick is balanced -> settle, no move");
+    assert_eq!(c.metrics().installs_total, 0, "a single-tick blip installs nothing");
+    assert!(!tx.calls.iter().any(|s| s.starts_with("install:")));
+}
+
+/// A SUSTAINED imbalance (held >= DWELL_TICKS_REQUIRED ticks) DOES move, and the
+/// dwell is exactly the debounce: no move before the required tick count.
+#[test]
+fn sustained_imbalance_moves_after_dwell() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // Hold a clear imbalance. No move may commit before DWELL_TICKS_REQUIRED
+    // arm-threshold ticks have elapsed.
+    let mut moved_at = None;
+    for t in 0..(DWELL_TICKS_REQUIRED as u64 + 4) {
+        let r = c.tick(&count_input(5, &[4, 0, 2, 2, 2, 2], 10 + t), &mut tx);
+        if r.is_some() {
+            moved_at = Some(t);
+            break;
+        }
+    }
+    let moved_at = moved_at.expect("a sustained imbalance must eventually move");
+    assert!(
+        moved_at >= (DWELL_TICKS_REQUIRED as u64 - 1),
+        "no move before the dwell window elapsed (moved at tick {moved_at}, need >= {})",
+        DWELL_TICKS_REQUIRED - 1
+    );
+    assert_eq!(c.metrics().installs_total, 1);
+}
+
+/// A CONVERGED placement produces ZERO further installs AND ZERO deletes across
+/// many ticks — steady state is zero churn (the core live regression). Drive an
+/// imbalance to even, then tick the even vector for a long time and assert the
+/// install/delete counters STOP climbing.
+#[test]
+fn converged_placement_has_zero_churn() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // Converge [4,0,2,2,2,2] -> even, applying each move to a sim vector.
+    let mut counts: Vec<u32> = vec![4, 0, 2, 2, 2, 2];
+    let mut now = 10u64;
+    loop {
+        let Some(mv) = drive_one_move(&mut c, &mut tx, &counts, now) else { break; };
+        counts[mv.old_worker as usize] -= 1;
+        counts[mv.new_worker as usize] += 1;
+        c.clear_cooldown_for_test();
+        now += 5;
+        assert!(now < 200, "must converge");
+    }
+    let max = *counts.iter().max().unwrap();
+    let min = *counts.iter().min().unwrap();
+    assert!(max - min <= 1, "converged within +-1: {counts:?}");
+    let installs_converged = c.metrics().installs_total;
+    let deletes_converged = c.metrics().deletes_total;
+    assert!(installs_converged >= 1, "at least one move happened");
+
+    // Now hold the converged (even) vector for a LONG run. With cooldown
+    // cleared each iteration (so cooldown is NOT what stops us), the deadband +
+    // settle must be what keeps churn at zero.
+    for t in 0..50u64 {
+        c.clear_cooldown_for_test();
+        assert!(
+            c.tick(&count_input(5, &counts, now + t), &mut tx).is_none(),
+            "no move on an already-converged vector at tick {t}"
+        );
+    }
+    assert_eq!(c.metrics().installs_total, installs_converged, "installs STOP climbing once converged");
+    assert_eq!(c.metrics().deletes_total, deletes_converged, "deletes STOP climbing once converged");
+    // Rules are bounded: at most a handful (the flows actually relocated), far
+    // below max_rules, and not climbing. [4,0,2,2,2,2] needs ~2 relocations.
+    let rules = c.metrics().rules_active;
+    assert!(rules <= 4, "rules bounded to the few relocated flows, not the cap: {rules}");
+    assert!(rules >= 1, "at least one rule installed");
+}
+
+/// A BURSTY count sequence that oscillates around even (+-1, occasional +-2)
+/// must NOT thrash: zero installs, zero deletes, no barrier churn. This is the
+/// deadband doing its job — it does not chase fluctuations around convergence.
+#[test]
+fn bursty_oscillation_around_even_does_not_thrash() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // Oscillating vectors, all within delta <= 2, never SUSTAINED at the arm
+    // threshold for a full dwell window: balanced, +1 blip, +2 blip, back.
+    let seq: [&[u32]; 6] = [
+        &[2, 2, 2, 2, 2, 2],
+        &[3, 1, 2, 2, 2, 2],
+        &[2, 2, 2, 2, 2, 2],
+        &[2, 2, 2, 2, 3, 1],
+        &[2, 2, 2, 2, 2, 2],
+        &[1, 3, 2, 2, 2, 2],
+    ];
+    let mut now = 10u64;
+    for cycle in 0..6u64 {
+        for v in seq.iter() {
+            assert!(
+                c.tick(&count_input(5, v, now), &mut tx).is_none(),
+                "bursty oscillation must never move (cycle {cycle}, v={v:?})"
+            );
+            now += 1;
+        }
+    }
+    assert_eq!(c.metrics().installs_total, 0, "no install on bursty oscillation");
+    assert_eq!(c.metrics().deletes_total, 0, "no delete on bursty oscillation");
+    assert!(!tx.calls.iter().any(|s| s.starts_with("install:") || s.starts_with("delete:")));
+}
+
+/// The strong per-flow cooldown blocks an IMMEDIATE re-move of the same flow,
+/// preventing the install->delete->install ping-pong. After a move the moved
+/// flow is ineligible for COOLDOWN_MIN_SECS (>= 30 s) even if the controller
+/// would otherwise re-select it.
+#[test]
+fn cooldown_blocks_immediate_re_move_of_same_flow() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // Move one flow off the hot worker.
+    let mv = drive_one_move(&mut c, &mut tx, &[4, 0, 2, 2, 2, 2], 10).expect("first move");
+    let moved_port = mv.key.src_port;
+    let installs_after_first = c.metrics().installs_total;
+
+    // Re-present an imbalance that would re-select the SAME flow (it now lives
+    // on its new worker). Do NOT clear the cooldown. The move committed around
+    // now=12, so its cooldown runs until ~12 + COOLDOWN_MIN_SECS. Tick a window
+    // that stays STRICTLY inside the cooldown so the moved flow must never be
+    // re-selected. (now starts at 20, stays well below 12 + 30 = 42.)
+    let new_worker = mv.new_worker;
+    let mut now = 20u64;
+    for _ in 0..15u64 {
+        // Build a vector where the moved flow's new worker is hottest, with the
+        // moved flow as a candidate, plus a fresh idle worker as lo.
+        let mut flows = vec![
+            FlowSample { key: key(moved_port), worker_id: new_worker, byte_rate: 0.0, origin: None },
+            flow(8001, new_worker, 0.0),
+            flow(8002, new_worker, 0.0),
+        ];
+        // Some other workers carry 0 so there is a real imbalance.
+        flows.extend(flows_on(0, 1));
+        let workers: Vec<WorkerByteRate> = (0..6).map(|w| worker(w, 0.0)).collect();
+        let input = RebalanceTickInput { ifindex: 5, workers, flows, now_secs: now, truncated: false };
+        if let Some(mv2) = c.tick(&input, &mut tx) {
+            assert_ne!(
+                mv2.key.src_port, moved_port,
+                "the just-moved flow must be in cooldown and not re-selected"
+            );
+        }
+        now += 1;
+    }
+    // The moved flow itself was never re-pinned within its cooldown window.
+    let _ = installs_after_first;
 }
 
 /// A truncated snapshot defers — no decision on understated counts.
@@ -804,9 +968,16 @@ fn second_move_chain_replaces_rule_and_reverse_barriers_prior_owner() {
     };
     // worker 2 has 3 flows, worker 3 has 0 -> hi=2, lo=3. The selector picks
     // the lowest session_key on worker 2; that may or may not be moved_port,
-    // but if it IS moved_port the second-move unwind path fires.
-    c.tick(&mk(20), &mut tx);
-    let mv2 = c.tick(&mk(21), &mut tx).expect("second move");
+    // but if it IS moved_port the second-move unwind path fires. Tick through
+    // the anti-churn dwell window (#1751 r2) until the second move commits.
+    let mut mv2 = None;
+    for t in 0..(DWELL_TICKS_REQUIRED as u64 + 8) {
+        if let Some(mv) = c.tick(&mk(20 + t), &mut tx) {
+            mv2 = Some(mv);
+            break;
+        }
+    }
+    let mv2 = mv2.expect("second move");
     // Whatever flow is chosen, the ledger must still hold exactly one rule per
     // distinct key (replace-not-append for a repeated key).
     assert!(c.metrics().installs_total > installs_before);

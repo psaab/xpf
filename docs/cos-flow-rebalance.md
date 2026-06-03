@@ -79,8 +79,21 @@ Per tick (coordinator status cadence, ~1 Hz — never per-packet):
    for the ~650 ms active-flow window, which made the controller keep moving
    flows off an already-drained worker, over-install ntuple rules, and never
    converge.
-2. If `max_count − min_count ≥ K` **and** it has persisted for at least two
-   consecutive ticks (hysteresis), consider a move.
+2. **Anti-churn gate (deadband + sustained dwell).** The controller treats the
+   imbalance magnitude `delta = max_count − min_count` through a deadband so it
+   does NOT chase the tick-to-tick count fluctuations bursty traffic throws off
+   around the even partition:
+   - **settle / stop band** — as soon as `delta ≤ 1` (the even-partition
+     target) the placement is marked SETTLED and the controller stops. This is
+     what makes `installs_total` and `deletes_total` STOP climbing the instant
+     the fleet is balanced (steady state = zero churn).
+   - **arm threshold + sustained dwell** — while SETTLED, a move is reconsidered
+     only when a *real* imbalance `delta ≥ K_high` (`K_high = max(K, 2)`)
+     reappears **and persists for `DWELL_TICKS_REQUIRED` (3) consecutive
+     evaluation ticks**. A single-tick blip resets the dwell counter, so a
+     transient burst never triggers a move. Each subsequent move independently
+     re-requires a full dwell window (the dwell counter is reset after every
+     move), so the controller cannot rapid-fire moves down a noisy gradient.
 3. Move one flow from the highest-count worker (`hi`) to the lowest-count
    worker (`lo`), subject to:
    - **overshoot guard** — require `c_hi − c_lo ≥ 2`, so moving one flow cannot
@@ -88,16 +101,26 @@ Per tick (coordinator status cadence, ~1 Hz — never per-packet):
      decreases the sum-of-squares potential `Ψ = Σ count²` by at least 2
      (`ΔΨ = 2 − 2(c_hi − c_lo) ≤ −2`), so the process terminates at the even
      partition (mean-independent — holds for a non-integer mean too);
-   - **per-flow cooldown** — a flow re-pinned within several intervals is
-     ineligible (oscillation guard);
-   - **one move per `rebalance-interval`** (dwell);
+   - **strong per-flow cooldown** — a moved flow is ineligible to move again for
+     `max(rebalance-interval × 20, 30 s)` (the oscillation guard). This is what
+     prevents the install → delete → install ping-pong (a climbing
+     `deletes_total`): once a flow is pinned it stays pinned for a long window,
+     so bursty count fluctuations cannot drive it back and forth;
+   - **one move per `rebalance-interval`** (install-cadence dwell);
    - **truncation defer** — if the flow-worker-map snapshot is truncated (so the
      row count would understate the true count) the controller skips the tick.
 4. At `max-rules`, STOP (no eviction).
 
 Because `Ψ` is a non-negative integer that drops by ≥ 2 every accepted move and
 no move is accepted once the counts are within ±1 of even, the controller
-converges in a bounded number of moves and cannot oscillate.
+converges in a bounded number of moves and cannot oscillate. The deadband and
+the sustained-imbalance dwell ensure that once converged it issues ZERO further
+installs/deletes (no churn) and that the live ntuple-rule count stays bounded to
+roughly the number of flows actually relocated — never climbing toward the cap.
+Because the per-tick controller work runs on the ~1 Hz status thread and the
+ownership barrier blocks that thread on worker acks, keeping the steady-state
+move rate at zero is also what keeps the controller from adding latency to new
+connection setup when it is enabled.
 
 **Limitation (heterogeneous traffic).** Equal *count* ≠ equal *rate*. For
 homogeneous traffic (e.g. iperf `-P`, all flows ≈ equal rate) count-balancing

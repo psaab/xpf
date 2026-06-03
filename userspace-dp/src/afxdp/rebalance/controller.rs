@@ -276,14 +276,50 @@ pub(in crate::afxdp) struct RebalanceController {
     cooldown: HashMap<SessionKey, u64>,
     /// Monotonic secs of the last install (dwell gate).
     last_move_secs: u64,
-    /// Ticks the imbalance has persisted above threshold (hysteresis).
+    /// Consecutive evaluation ticks the count imbalance has stayed at/above the
+    /// ARM threshold (`K_high`). Reset to 0 on any tick whose imbalance is below
+    /// `K_high`, AND after every accepted move — so EACH move (not just the
+    /// first) requires the imbalance to persist `DWELL_TICKS_REQUIRED` ticks.
+    /// This is the anti-churn debounce on the imbalance itself (#1751 r2 fix 1):
+    /// a single-tick bursty blip never triggers a move.
     dwell_ticks: u32,
+    /// #1751 r2 fix 2 (deadband hysteresis): false while the controller is
+    /// actively rebalancing an imbalance down to even; true once the placement
+    /// has SETTLED (imbalance fell to the stop band `<= K_low`). While settled
+    /// the controller refuses to engage until a SUSTAINED imbalance `>= K_high`
+    /// reappears — it does NOT chase the ±1 count fluctuations that bursty
+    /// traffic produces around the even partition. Starts settled (an
+    /// already-balanced fleet must not move on the first imbalanced tick).
+    settled: bool,
     metrics: RebalanceMetrics,
 }
 
-/// Number of consecutive count-imbalanced ticks required before the first move
-/// (hysteresis floor — absorbs a single-tick RSS-count blip; #1751 §3.3).
-const DWELL_TICKS_REQUIRED: u32 = 2;
+/// Consecutive ARM-threshold-imbalanced ticks required before EACH move
+/// (hysteresis / anti-churn debounce — absorbs transient RSS-count blips on
+/// bursty traffic; #1751 §3.3 + r2 fix 1). Ticks fire at the rebalance-interval
+/// cadence (>= 1 s), so this is a multi-second sustained-imbalance requirement.
+const DWELL_TICKS_REQUIRED: u32 = 3;
+
+/// #1751 r2 fix 2 (deadband): margin that keeps the ARM threshold strictly
+/// ABOVE the stop band. The arm threshold is
+/// `K_high = max(effective_k, K_LOW_STOP_BAND + REARM_DELTA_MARGIN)` and the
+/// stop band is `delta <= K_LOW_STOP_BAND`. With the defaults
+/// (effective_k = 2, K_LOW_STOP_BAND = 1) this yields `K_high = 2`, so the
+/// controller re-engages on a real `delta >= 2` imbalance but only when it is
+/// SUSTAINED (DWELL_TICKS_REQUIRED) — convergence still drives all the way to
+/// `delta <= 1`. The deadband proper is the SETTLED-state requirement that the
+/// `delta >= K_high` imbalance persist a full dwell window before re-arming, so
+/// the controller does not chase the single-tick +-1/+-2 count fluctuations
+/// bursty traffic throws off around the even partition. A larger configured
+/// `count-delta` K raises K_high directly.
+const REARM_DELTA_MARGIN: u32 = 1;
+
+/// #1751 r2 fix 2 (deadband): the stop band. Convergence drives the imbalance
+/// down to `delta <= K_LOW_STOP_BAND`; reaching it marks the placement SETTLED.
+/// 1 == the even-partition target (`max - min <= 1`), so the controller stops
+/// exactly at convergence and does not waste a move trying to flatten an
+/// already-even +-1 vector.
+const K_LOW_STOP_BAND: u32 = 1;
 
 /// #1751: ntuple location-space depth (mlx5 `MAX_NUM_OF_ETHTOOL_RULES =
 /// BIT(10)`). Locations are in `[0, MAX_NTUPLE_LOCATION)`. The controller picks
@@ -301,8 +337,23 @@ impl RebalanceController {
             cooldown: HashMap::new(),
             last_move_secs: 0,
             dwell_ticks: 0,
+            // Start SETTLED: an already-balanced fleet at startup must not move
+            // on the first imbalanced tick — it must first observe a SUSTAINED
+            // arm-threshold imbalance.
+            settled: true,
             metrics: RebalanceMetrics::default(),
         }
+    }
+
+    /// #1751 r2 fix 2: the ARM threshold `K_high` — the count delta a SETTLED
+    /// controller must see (sustained) before it re-engages. Held strictly
+    /// above the stop band so re-arming requires a real imbalance, not a delta
+    /// at the convergence edge.
+    #[inline]
+    fn arm_threshold(&self) -> u32 {
+        self.config
+            .effective_k()
+            .max(K_LOW_STOP_BAND + REARM_DELTA_MARGIN)
     }
 
     pub(in crate::afxdp) fn metrics(&self) -> &RebalanceMetrics {
@@ -355,21 +406,70 @@ impl RebalanceController {
             return None;
         }
 
-        // Hysteresis: the COUNT imbalance must persist >= DWELL_TICKS_REQUIRED
-        // consecutive ticks before the first move (absorbs a one-tick RSS-count
-        // blip; #1751 §3.3). is_count_imbalanced replaces #1748's byte-rate
-        // is_over_threshold.
-        let imbalanced = self.is_count_imbalanced(&input.workers, &input.flows);
-        if imbalanced {
-            self.dwell_ticks = self.dwell_ticks.saturating_add(1);
-        } else {
+        // #1751 r2 anti-churn gate: deadband hysteresis + sustained-imbalance
+        // dwell. The live regression was perpetual install->delete->install
+        // churn (installs_total AND deletes_total both climbing forever, rules
+        // pinned near the cap, CoV never settling) because the controller
+        // reacted to every transient single-tick count blip on bursty traffic.
+        //
+        // Two guards work together:
+        //   1. DEADBAND: once the placement SETTLES (imbalance fell to the stop
+        //      band `delta <= K_LOW_STOP_BAND`), the controller will not engage
+        //      again until a SUSTAINED imbalance at/above the ARM threshold
+        //      `K_high` reappears. It does NOT chase the +-1 (or delta-2) count
+        //      fluctuations bursty traffic throws off around the even partition.
+        //   2. SUSTAINED DWELL: arming requires the imbalance to stay >= K_high
+        //      for DWELL_TICKS_REQUIRED consecutive ticks (a single-tick burst
+        //      blip resets the counter), AND each subsequent move re-requires a
+        //      full dwell window (dwell_ticks is reset to 0 after every move).
+        let delta = self.count_delta(&input.workers, &input.flows);
+        // Settle as soon as the imbalance reaches the stop band, regardless of
+        // whether we are mid-rebalance — this is what makes installs+deletes
+        // STOP climbing the instant the fleet is balanced.
+        if delta <= K_LOW_STOP_BAND {
+            self.settled = true;
             self.dwell_ticks = 0;
             self.metrics.record_skip(SkipReason::Balanced);
             return None;
         }
-        if self.dwell_ticks < DWELL_TICKS_REQUIRED {
-            self.metrics.record_skip(SkipReason::Balanced);
-            return None;
+        // SETTLED: only a SUSTAINED arm-threshold imbalance may re-engage. A
+        // delta in the deadband (K_LOW_STOP_BAND < delta < K_high) is ignored
+        // entirely while settled — no dwell accrual, no move.
+        if self.settled {
+            if delta >= self.arm_threshold() {
+                self.dwell_ticks = self.dwell_ticks.saturating_add(1);
+                if self.dwell_ticks >= DWELL_TICKS_REQUIRED {
+                    // Sustained arm-threshold imbalance confirmed: leave the
+                    // deadband and start rebalancing this episode.
+                    self.settled = false;
+                }
+            } else {
+                // Deadband: below the arm threshold while settled — do nothing,
+                // and do not let a flicker at K_high accumulate dwell.
+                self.dwell_ticks = 0;
+            }
+            if self.settled {
+                self.metrics.record_skip(SkipReason::Balanced);
+                return None;
+            }
+        } else {
+            // ACTIVELY REBALANCING (not settled): keep converging while the
+            // imbalance stays >= effective_k, but still require each move to be
+            // dwell-debounced so a one-tick count blip cannot trigger it.
+            if delta >= self.config.effective_k() {
+                self.dwell_ticks = self.dwell_ticks.saturating_add(1);
+            } else {
+                // Above the stop band but below K: not worth a move and not
+                // sustained — hold (do not move, do not re-settle yet; the stop
+                // band above is the only settle trigger).
+                self.dwell_ticks = 0;
+                self.metrics.record_skip(SkipReason::Balanced);
+                return None;
+            }
+            if self.dwell_ticks < DWELL_TICKS_REQUIRED {
+                self.metrics.record_skip(SkipReason::Balanced);
+                return None;
+            }
         }
 
         // One move per rebalance_interval (dwell gate on install cadence).
@@ -508,13 +608,15 @@ impl RebalanceController {
                     new_worker: candidate.new_worker,
                     loc,
                 });
-                self.cooldown.insert(
-                    candidate.key.clone(),
-                    input.now_secs
-                        + self.config.rebalance_interval_secs
-                            * COOLDOWN_INTERVAL_MULTIPLIER,
-                );
+                let cooldown_secs = (self.config.rebalance_interval_secs
+                    * COOLDOWN_INTERVAL_MULTIPLIER)
+                    .max(COOLDOWN_MIN_SECS);
+                self.cooldown
+                    .insert(candidate.key.clone(), input.now_secs + cooldown_secs);
                 self.last_move_secs = input.now_secs;
+                // Require the imbalance to persist ANOTHER full dwell window
+                // before the NEXT move (anti-churn: each move is independently
+                // debounced, not just the first).
                 self.dwell_ticks = 0;
                 self.metrics.installs_total += 1;
                 self.metrics.rules_active = self.ledger.len() as u32;
@@ -601,8 +703,16 @@ impl RebalanceController {
     /// the workers that appear in `per_worker_counts` — otherwise a `[3,0]`
     /// vector (worker 1 absent from the count map) would look balanced.
     fn is_count_imbalanced(&self, workers: &[WorkerByteRate], flows: &[FlowSample]) -> bool {
+        self.count_delta(workers, flows) >= self.config.effective_k()
+    }
+
+    /// The per-worker steerable-flow count SPREAD (`max_count - min_count`) over
+    /// ALL `workers` (a worker with no steerable rows counts 0 and is a valid
+    /// `lo`). This is the single imbalance magnitude the anti-churn deadband and
+    /// dwell gate decide on. Returns 0 for a degenerate (< 2 workers) fleet.
+    fn count_delta(&self, workers: &[WorkerByteRate], flows: &[FlowSample]) -> u32 {
         if workers.len() < 2 {
-            return false;
+            return 0;
         }
         let counts = per_worker_counts(flows);
         let mut max = 0u32;
@@ -612,7 +722,7 @@ impl RebalanceController {
             max = max.max(c);
             min = min.min(c);
         }
-        max.saturating_sub(min) >= self.config.effective_k()
+        max.saturating_sub(min)
     }
 
     fn expire_cooldowns(&mut self, now_secs: u64) {
@@ -767,9 +877,18 @@ impl RebalanceController {
     }
 }
 
-/// Cooldown is several rebalance intervals so a flow re-pinned cannot
-/// immediately thrash back (oscillation guard, research §4 R6).
-const COOLDOWN_INTERVAL_MULTIPLIER: u64 = 5;
+/// #1751 r2 fix 3 (strong per-flow cooldown): a moved flow is ineligible to
+/// move again for `max(interval * COOLDOWN_INTERVAL_MULTIPLIER,
+/// COOLDOWN_MIN_SECS)` seconds. This is the oscillation guard that prevents the
+/// install -> delete -> install ping-pong (the climbing deletes_total seen
+/// live): once a flow is pinned it stays pinned for a long window, so bursty
+/// count fluctuations cannot drive it back and forth. The absolute floor makes
+/// the cooldown many seconds even when `rebalance_interval_secs == 1`.
+const COOLDOWN_INTERVAL_MULTIPLIER: u64 = 20;
+
+/// #1751 r2 fix 3: absolute minimum per-flow cooldown in seconds, so a small
+/// configured rebalance-interval still yields a long anti-thrash window.
+const COOLDOWN_MIN_SECS: u64 = 30;
 
 #[derive(Clone, Debug)]
 struct MoveCandidate {
