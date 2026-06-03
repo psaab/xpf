@@ -1,12 +1,23 @@
 # #1756 Path C — control-plane CPU isolation (dedicate core 0 to Go)
 
-**Status: PLAN-KILL candidate (v1, DRAFT). Recommendation: PLAN-KILL.**
+**Status: PLAN-KILL (v2). Recommendation: PLAN-KILL.**
 PLAN-KILL is the explicitly acceptable and likely outcome per the issue
 and the #1752 umbrella. The A/B bar (the GC-preemption jitter Go steals
 from the workers must cost MORE than the ~16.7% raw capacity cut of
-going 6→5 workers) is **not cleared by the live measurement**, and the
-levers that *would* matter (kernel-cmdline `isolcpus`/`nohz_full`,
-already filed as #739) do not require giving up a worker at all.
+going 6→5 workers) is **not cleared by the live measurement**, the exact
+variant was **already PLAN-KILLED at #1243** ("5-worker dedicated CPU
+mode … −17% saturation throughput, zero quantitative gain"), and the
+levers that *would* matter — (a) pinning Go to core 0 while KEEPING all
+6 workers (the #1244-era recipe measured +30%, see §3a), and (b)
+kernel-cmdline `isolcpus`/`nohz_full` (#739) — do **not** require giving
+up a worker at all. Path C is the one framing of control-plane isolation
+that pays a worker; that is precisely why it loses.
+
+> v2 incorporates Codex + AGY + SMR round-1: cites the #1243 precedent
+> and the #1244 keep-6-workers +30% recipe, softens "softirq invariant"
+> to "inferred (unchanged unless IRQ/RSS reshaped)", corrects the
+> `poll-mode interrupt` (NAPI, not pure busy-poll) wording, fixes the
+> `manager.go` line refs and the `Nth-allowed-CPU` off-by-one note.
 
 ## 1. Issue framing
 
@@ -34,15 +45,19 @@ be proven to cost more than that before it nets positive.
   correctly. **There is no per-worker core MAP** — pinning is purely
   positional within the inherited mask; the lever for "which cores
   workers may use" is the systemd unit mask + the worker COUNT.
-- **Worker count** = `--workers N` (`server/lifecycle.rs:269`),
-  fed from Go `cfg.Workers` (`process.go:79`), derived from
-  `system.userspace-dataplane workers` (`manager.go:1191`). Cluster
+- **Worker count** = `--workers N`
+  (`userspace-dp/src/server/lifecycle.rs:269`), fed from Go `cfg.Workers`
+  (`pkg/dataplane/userspace/process.go:79`), derived from
+  `system.userspace-dataplane workers` in `deriveUserspaceConfig`
+  (`pkg/dataplane/userspace/manager.go:1196-1198`; the `Workers: 1` at
+  `:1191` is only the default before the config override). Cluster
   config sets `workers 6;` (`docs/ha-cluster-userspace.conf:286`).
-- **Queue→worker map**: `worker_id = queue_id % workers`
-  (`server/helpers.rs` `replan_bindings_from_candidates`). With 6 RX
-  queues and `workers=5`, queue 5 wraps onto worker 0 → worker 0 owns
-  TWO queues while workers 1-4 own one each. This is not a clean
-  5-way split; it concentrates load on worker 0 (see §6 risk).
+- **Queue→worker map**: `binding.worker_id = (queue_id %
+  workers.max(1))` in `replan_bindings_from_candidates`
+  (`userspace-dp/src/server/helpers.rs:636`). With 6 RX queues and
+  `workers=5`, queue 5 % 5 = 0 → worker 0 owns queues 0 AND 5 while
+  workers 1-4 own one each. This is not a clean 5-way split; it
+  concentrates load on worker 0 (see §6 risk).
 - **Go daemon process model**: `cmd/xpfd` is a normal Go binary,
   `GOMAXPROCS` unset (= NumCPU = 6), 39 OS threads observed live, no
   `CPUAffinity=` in `test/incus/xpfd.service`. The Rust `userspace-dp`
@@ -55,6 +70,50 @@ mask `1-5` so its workers pin to cores 1-5 — but the helper is a child
 of xpfd and inherits xpfd's affinity unless explicitly re-masked, so
 this needs a per-process affinity split (spawn the helper with
 `sched_setaffinity(1-5)` or its own cpuset), PLUS `--workers 5`.
+
+A note on "busy-polling": the cluster config runs `poll-mode interrupt;`
+(`docs/ha-cluster-userspace.conf:288`), so workers are interrupt-driven
+NAPI threads, not pure 100%-spin busy-poll. The preemption argument is
+unchanged — a descheduled NAPI worker still misses its RX service
+window and lets the ring drain — but the 92-94% per-core busy is NAPI
+processing under load, not idle spinning.
+
+## 3a. Prior art — the keep-6-workers pin already WON (+30%), Path C's worker-drop is the part that loses
+
+`docs/per-5-tuple/even-flows-recipe.md:214-238` ("Daemon CPU pinning —
+additional finding, 2026-05-07 round 3"): pinning ALL xpfd daemon +
+helper aux threads to CPU 0 **while keeping all 6 workers** (worker 0
+still co-resident with the daemon on CPU 0) took aggregate from
+`17 Gbps → 22.7 Gbps (+30%)` on the saturated push iperf-c workload.
+This proves daemon contention CAN cost real throughput — but it was
+recovered **without surrendering a worker**. Path C's distinguishing
+move (drop to 5 workers, give core 0 to Go *exclusively*) is exactly the
+part that is NOT supported by this result. The honest read: there is a
+real, free, no-worker-sacrifice daemon-pinning win available (pin Go to
+core 0, keep `workers 6`), and Path C throws it away by also cutting a
+worker.
+
+## 3b. Prior art — the exact 5-worker variant was already PLAN-KILLED at #1243
+
+`docs/per-5-tuple/state.md:144`: #1243 "5-worker dedicated CPU mode"
+was **PLAN-KILLED 2026-05-08**: "multinomial(12,5)+uniform vs
+(12,6)+skew CoV cancels (~55.5% vs ~55.8%). **Zero quantitative gain to
+justify −17% saturation throughput.** Plus single-CPU control-plane
+**VRRP-starvation risk** + i40e ethtool-order disagreement between
+reviewers." This is the same lever #1756 proposes (5 workers + dedicated
+control-plane CPU). It was killed on: (i) no fairness gain, (ii) −17%
+throughput, (iii) starving VRRP/HA on a single control CPU. #1756 adds
+nothing new to overturn that; the live measurement here re-confirms it
+at the mechanism level. **#1756 is a re-litigation of #1243 and should
+be killed by reference plus the fresh measurement.**
+
+The single-CPU control-plane VRRP/HA-starvation risk (#1243's point
+iii) is independently disqualifying: confining all 39 xpfd threads —
+including the 30 ms RETH VRRP advertiser, the 200 ms heartbeat, session
+sync, and FRR reload — to one core that also runs a worker invites
+missed VRRP adverts under load → spurious failover. The whole point of
+the HA timing budget (~60 ms failover) assumes the control plane is not
+CPU-starved.
 
 ## 3. Prior art on master — this lever was already measured (and reverted)
 
@@ -131,6 +190,13 @@ not `sched_switch`). Under sustained P48 on port 5210:
    re-introduces exactly the cross-binding funnel that #1183 showed
    causes a 10× reverse-throughput regression when one worker is
    overloaded. The 5-worker layout is *worse than uniform* 16.7% loss.
+   Additionally, `pin_current_thread` picks the Nth ALLOWED CPU
+   (`neighbor.rs` `nth_allowed_cpu`), so with helper mask `1-5` worker 0
+   lands on CPU 1, worker 1 on CPU 2, etc. — the queue→core mapping
+   shifts by one relative to the RX-queue IRQ affinity unless IRQ/RSS is
+   also reshaped, so the double-loaded worker 0 no longer sits on the
+   core handling its own queues' softirq. Another reason B underperforms
+   a clean −16.7%.
 3. **0 retransmits at baseline** means the jitter is not currently
    manifesting as ring starvation / loss at this offered load — there
    is no observed throughput pathology for Path C to fix.
@@ -171,9 +237,22 @@ If run anyway, the A/B is:
   `rcu_nocbs`, kernel cmdline + reboot) — it quiets worker cores
   WITHOUT surrendering a worker, and it is already filed and OPEN.
 
-**Disposition:** PLAN-KILL #1756 with `plan-kill` label. Redirect the
-control-plane-jitter concern to #739 (kernel-cmdline isolation, no
-worker sacrifice). Do not implement core-0 Go isolation.
+- The exact 5-worker dedicated-CPU variant was **already PLAN-KILLED at
+  #1243** (−17% saturation throughput, zero gain, VRRP-starvation risk);
+  #1756 is a re-litigation with no new overturning evidence.
+- There is a **real, free, no-worker-sacrifice win** instead: pin Go to
+  core 0 while keeping `workers 6` (the #1244-era recipe measured
+  17→22.7 Gbps, §3a). That is the version worth pursuing — and it is NOT
+  Path C. If anything ships from the control-plane-isolation idea, it is
+  this keep-6-workers daemon pin, tracked separately, not #1756.
+
+**Disposition:** PLAN-KILL #1756 with `plan-kill` label. Redirect: (a)
+control-plane-jitter on worker cores → #739 (kernel-cmdline
+`isolcpus`/`nohz_full`, no worker sacrifice); (b) the daemon-contention
+throughput win → a keep-6-workers "pin Go to core 0" experiment (§3a),
+which does not drop a worker and therefore does not trip #1243's −17%
+penalty or the VRRP-starvation risk. Do not implement Path C's 6→5
+worker core-0 dedication.
 
 ## 9. If reviewers want to resurrect it
 

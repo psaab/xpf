@@ -33,10 +33,17 @@ psr), and `/proc/stat` per-core counters instead.
 | cpu5 | 93 | 8 | 24 |
 
 All six cores ~92-94% busy under load (near-saturated, consistent with
-#1752's "6/6 no-headroom"). **softirq ≈ 25% on EVERY core** — mlx5 NAPI +
-virtio RX/TX processing, distributed across all cores. This load does
-**not** move when Go is isolated; it is bound to the RX-queue→core IRQ
-affinity, not to the Go scheduler.
+#1752's "6/6 no-headroom"). **softirq ≈ 25% on EVERY core** (measured) —
+mlx5 NAPI + virtio RX/TX processing, distributed across all cores.
+**Inferred** (not separately measured in a Go-isolated B run): this
+softirq volume is a function of pps, not scheduler pressure, and is
+bound to the RX-queue→core IRQ affinity. #741 documents affinity changes
+alone do not move it (`cos-validation-notes.md:587`). It would move only
+if IRQ/RSS affinity were also reshaped — which Path C does not do.
+
+Note: workers are interrupt-driven NAPI (`poll-mode interrupt;`,
+`ha-cluster-userspace.conf:288`), not pure busy-poll spin; the 92-94%
+is NAPI processing under load.
 
 ## Per-worker CPU (8 s window)
 
