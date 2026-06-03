@@ -1782,6 +1782,97 @@ fn invalidate_slot_drops_flow_from_active_count_immediately() {
     assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_none(), "the entry is gone");
 }
 
+/// #1751 r3 COUNT STABILITY (the live 5211 over-install bug): a bursty flow
+/// that idles past the ~650 ms ACTIVE window but is still PRESENT in the cache
+/// must keep appearing in the flow-worker-map ROWS (the rebalance controller's
+/// count source) so the per-worker count does NOT flicker as flows go idle and
+/// burst again. The activity metric (`active`) still drops to 0 while idle.
+#[test]
+fn presence_window_keeps_idle_flow_in_controller_rows_but_not_active_count() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    // A burst: a packet hit stamps last_used_epoch at the current epoch.
+    cache.tick_advance_epoch();
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+
+    // While active: counted in BOTH the activity metric and the controller rows.
+    let (active, rows, _, _) = cache.active_flow_debug_entries(8);
+    assert_eq!(active, 1, "active while just touched");
+    assert_eq!(rows.len(), 1, "present while just touched");
+
+    // Idle gap: advance the epoch PAST the active window (~650 ms) but well
+    // within the presence window (~10 s) — no further packets/hits.
+    for _ in 0..(ACTIVE_WINDOW_EPOCHS + 5) {
+        cache.tick_advance_epoch();
+    }
+    let (active_idle, rows_idle, _, _) = cache.active_flow_debug_entries(8);
+    assert_eq!(active_idle, 0, "idle past 650 ms -> NOT in the activity metric");
+    assert_eq!(
+        rows_idle.len(),
+        1,
+        "STILL PRESENT in the controller row set across the idle gap (no count flicker)"
+    );
+
+    // It bursts again: a hit refreshes presence and re-enters the active window.
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    let (active_burst, rows_burst, _, _) = cache.active_flow_debug_entries(8);
+    assert_eq!(active_burst, 1, "burst re-activates the activity metric");
+    assert_eq!(rows_burst.len(), 1, "still present");
+}
+
+/// #1751 r3 sanity: presence is BOUNDED, not "forever". A flow that genuinely
+/// stops (no packets for longer than the presence window) ages out of the
+/// controller row set, so its rule can be freed. An explicit invalidate (RST /
+/// teardown / RG change / rebalance demote) drops it immediately — covered by
+/// `invalidate_slot_drops_flow_from_active_count_immediately`.
+#[test]
+fn presence_window_ages_out_a_genuinely_ended_flow() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    cache.tick_advance_epoch();
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    assert_eq!(cache.active_flow_debug_entries(8).1.len(), 1, "present while live");
+
+    // The flow ends: no more packets. Advance past the PRESENCE window.
+    for _ in 0..(PRESENCE_WINDOW_EPOCHS + 5) {
+        cache.tick_advance_epoch();
+    }
+    let (active_end, rows_end, _, _) = cache.active_flow_debug_entries(8);
+    assert_eq!(active_end, 0, "ended flow not active");
+    assert!(
+        rows_end.is_empty(),
+        "ended flow ages out of the controller row set (rule can be freed) — presence is bounded"
+    );
+}
+
 #[test]
 fn active_flow_debug_entries_report_truncation_without_losing_count() {
     let rg_epochs = default_rg_epochs();

@@ -67,18 +67,35 @@ Per tick (coordinator status cadence, ~1 Hz — never per-packet):
 
 1. Count the steerable flows per worker, from the SAME flow-worker-map snapshot
    the candidate 5-tuples come from (count and rows are one object, so the
-   count can never disagree with the available rows). **Each flow is counted
-   exactly once, at its current owner.** When a flow is rebalanced, the old
-   worker keeps an abandoned forward copy (origin `RebalancedOut`) for local-only
-   cleanup; that copy must NOT be counted (the flow now lives on the new worker's
-   `RebalancedOwner` copy). The old worker therefore EVICTS the abandoned copy
-   from its flow cache the instant it is demoted, so the very next snapshot
-   reflects the flow's departure — and the selector additionally refuses to count
-   or re-select any `RebalancedOut` row that might briefly linger. Without this
-   exactly-once rule a recently-moved flow was double-counted (old + new worker)
-   for the ~650 ms active-flow window, which made the controller keep moving
-   flows off an already-drained worker, over-install ntuple rules, and never
-   converge.
+   count can never disagree with the available rows).
+
+   **PRESENCE, not recent activity.** The flow-worker-map rows that feed this
+   count include every flow PRESENT in a worker's flow cache within a ~10 s
+   presence window — NOT only flows that saw a packet in the last ~650 ms.
+   These are two distinct windows over the same scan: the narrow ~650 ms
+   *active* window still backs the `binding_active_flow_count` /
+   `cos_active_flow_count` activity metrics, while the wide ~10 s *presence*
+   window backs the rebalance count. The reason: the controller must select on
+   the FIXED, deterministic RSS placement of live flows, not momentary packet
+   activity. On bursty/uncapped traffic a flow briefly idles past 650 ms, drops
+   out of a narrow activity window, then bursts again and reappears — which made
+   the per-worker count FLICKER even though placement never changed, so the
+   controller made redundant moves and over-installed ntuple rules to the cap
+   (live regression on the uncapped port). The presence window is wider than any
+   burst-idle gap, so the count is stable; it is still BOUNDED — a genuinely
+   ended flow ages out within ~10 s and its rule is freed, and an explicit
+   RST/teardown/RG-change/rebalance-demote eviction drops it immediately.
+
+   **Each flow is counted exactly once, at its current owner.** When a flow is
+   rebalanced, the old worker keeps an abandoned forward copy (origin
+   `RebalancedOut`) for local-only cleanup; that copy must NOT be counted (the
+   flow now lives on the new worker's `RebalancedOwner` copy). The old worker
+   therefore EVICTS the abandoned copy from its flow cache the instant it is
+   demoted, so the very next snapshot reflects the flow's departure — and the
+   selector additionally refuses to count or re-select any `RebalancedOut` row
+   that might briefly linger. Without this exactly-once rule a recently-moved
+   flow was double-counted (old + new worker), which made the controller keep
+   moving flows off an already-drained worker and never converge.
 2. **Anti-churn gate (deadband + sustained dwell).** The controller treats the
    imbalance magnitude `delta = max_count − min_count` through a deadband so it
    does NOT chase the tick-to-tick count fluctuations bursty traffic throws off

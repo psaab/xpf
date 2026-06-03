@@ -3,7 +3,7 @@
 // LOC threshold. Loaded as a sibling submodule via
 // `#[path = "tests.rs"]` from umem/mod.rs.
 
-use super::super::flow_cache::ACTIVE_WINDOW_EPOCHS;
+use super::super::flow_cache::{ACTIVE_WINDOW_EPOCHS, PRESENCE_WINDOW_EPOCHS};
 use super::*;
 
 #[test]
@@ -1636,14 +1636,32 @@ fn idle_debug_updater_ages_active_flow_snapshots() {
         update_binding_idle_debug_state(&mut binding, now_ns);
     }
 
+    // #1751 r3: the ACTIVE-flow telemetry (active_flow_count + CoS counts) ages
+    // out at the ~650 ms active window, but the flow-worker-map ROWS now persist
+    // through the wider ~10 s PRESENCE window (so the rebalance controller's
+    // per-worker count does not flicker as a bursty flow goes idle). So at the
+    // active-window mark the activity metrics are 0 while the row is STILL
+    // present.
     assert_eq!(
         active_flow_debug_snapshot(&binding),
-        (0, 0, 0),
-        "idle wall-clock publishes must age stale active-flow telemetry out without packet RX"
+        (0, 1, 0),
+        "active-flow telemetry ages at the active window; the flow-worker-map row persists in the presence window"
     );
     assert_eq!(
         binding.live.snapshot().active_flow_count,
         0,
         "operator binding snapshot must observe the aged-out active-flow count"
+    );
+
+    // Advancing past the PRESENCE window ages the flow-worker-map row out too,
+    // so a genuinely-ended idle flow eventually drops from the controller count.
+    for _ in 0..PRESENCE_WINDOW_EPOCHS {
+        now_ns = now_ns.saturating_add(IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS);
+        update_binding_idle_debug_state(&mut binding, now_ns);
+    }
+    assert_eq!(
+        active_flow_debug_snapshot(&binding),
+        (0, 0, 0),
+        "past the presence window the flow-worker-map row ages out as well (bounded presence)"
     );
 }

@@ -15,6 +15,24 @@ const FLOW_CACHE_WAYS: usize = 4;
 const FLOW_CACHE_SETS: usize = FLOW_CACHE_SIZE / FLOW_CACHE_WAYS;
 const FLOW_CACHE_SET_MASK: usize = FLOW_CACHE_SETS - 1;
 pub(super) const ACTIVE_WINDOW_EPOCHS: u16 = 10;
+/// #1751 r3 count-stability: the PRESENCE window for the flow-worker-map rows
+/// that feed the rebalance controller's per-worker COUNT. Epochs advance at the
+/// debug-state cadence (~65 ms hot AND idle), so this is ~10 s of wall-clock.
+///
+/// Why this differs from `ACTIVE_WINDOW_EPOCHS` (~650 ms): the rebalance
+/// controller selects on a per-worker flow COUNT that must reflect the FIXED,
+/// deterministic RSS placement of live flows — not momentary packet activity.
+/// On bursty/uncapped traffic a flow briefly idles (>650 ms with no packets),
+/// drops out of the narrow active window, then bursts again and reappears. That
+/// FLICKER made the per-worker count oscillate even though placement never
+/// changed, so the controller made redundant moves and over-installed ntuple
+/// rules to the cap (live #1751 r3 regression on port 5211). Counting a flow by
+/// PRESENCE over a window much wider than a burst-idle gap gives the controller
+/// a stable count. The window is still BOUNDED (not "forever"): a genuinely
+/// ended flow ages out within ~10 s and its rule is freed — and an explicit
+/// RST/teardown/RG-change/rebalance-demote `invalidate_slot` drops the entry
+/// (hence the count) immediately, well before this timer.
+pub(super) const PRESENCE_WINDOW_EPOCHS: u16 = 160;
 pub(super) const FLOW_WORKER_MAP_MAX_PER_BINDING: usize = 256;
 const _: () = assert!(FLOW_CACHE_SETS.is_power_of_two());
 const _: () = assert!(FLOW_CACHE_WAYS == 4);
@@ -451,12 +469,20 @@ impl FlowCache {
     }
 
     fn active_entry_age(&self, entry: &FlowCacheEntry) -> Option<u16> {
-        // last_used_epoch == 0 marks "never touched"; skip.
+        self.entry_age_within(entry, ACTIVE_WINDOW_EPOCHS)
+    }
+
+    /// Age (in epochs) of `entry` if it was last touched within `window` epochs,
+    /// else `None`. `window == ACTIVE_WINDOW_EPOCHS` is the ~650 ms activity
+    /// window backing `binding_active_flow_count`; `PRESENCE_WINDOW_EPOCHS` is
+    /// the ~10 s presence window backing the rebalance controller's count
+    /// (#1751 r3). last_used_epoch == 0 marks "never touched" → skip.
+    fn entry_age_within(&self, entry: &FlowCacheEntry, window: u16) -> Option<u16> {
         if entry.last_used_epoch == 0 {
             return None;
         }
         let age = self.current_epoch.wrapping_sub(entry.last_used_epoch);
-        (age < ACTIVE_WINDOW_EPOCHS).then_some(age)
+        (age < window).then_some(age)
     }
 
     /// #1249: return a bounded active-flow debug map from the same
@@ -475,15 +501,30 @@ impl FlowCache {
             let Some(entry) = slot else {
                 continue;
             };
-            let Some(age_epochs) = self.active_entry_age(entry) else {
+            // #1751 r3: TWO windows over the same single owner-only scan.
+            //  - The ACTIVE window (~650 ms) backs `active` (the
+            //    `binding_active_flow_count` metric) and `cos_counts` (the CoS
+            //    active-flow metric) — activity-based, unchanged semantics.
+            //  - The PRESENCE window (~10 s) backs the flow-worker-map ROWS that
+            //    feed the rebalance controller's per-worker COUNT — presence-
+            //    based, so a bursty flow that idles past 650 ms keeps counting
+            //    at its (fixed RSS) worker and the count does not FLICKER.
+            // An entry present-but-not-active becomes a row (controller counts
+            // it) without inflating the activity metrics.
+            let presence_age = self.entry_age_within(entry, PRESENCE_WINDOW_EPOCHS);
+            let active_age = self.entry_age_within(entry, ACTIVE_WINDOW_EPOCHS);
+            if active_age.is_some() {
+                active = active.saturating_add(1);
+                if let Some(queue_id) = entry.descriptor.tx_selection.queue_id {
+                    let key = (entry.descriptor.egress_ifindex, queue_id);
+                    let count = cos_counts.entry(key).or_insert(0);
+                    *count = count.saturating_add(1);
+                }
+            }
+            // Rows are presence-windowed (the controller count signal).
+            let Some(age_epochs) = presence_age else {
                 continue;
             };
-            active = active.saturating_add(1);
-            if let Some(queue_id) = entry.descriptor.tx_selection.queue_id {
-                let key = (entry.descriptor.egress_ifindex, queue_id);
-                let count = cos_counts.entry(key).or_insert(0);
-                *count = count.saturating_add(1);
-            }
             if rows.len() >= limit {
                 truncated = true;
                 continue;
