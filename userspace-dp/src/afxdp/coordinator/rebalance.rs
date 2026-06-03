@@ -336,6 +336,17 @@ impl super::Coordinator {
                 key,
                 worker_id: row.worker_id,
                 byte_rate: rate,
+                // #1751 exactly-once count: the flow-worker-map snapshot is
+                // built from each worker's flow CACHE, and the worker now
+                // EVICTS the abandoned RebalancedOut copy from its flow cache
+                // the moment it is demoted (worker/loop_body), so a
+                // RebalancedOut row never reaches this snapshot — the row set
+                // here is already exactly-once at the current owner. `origin`
+                // is therefore None (counted). The FlowSample.origin filter in
+                // per_worker_counts / select_move is the defensive layer that
+                // keeps the count exactly-once even if a stray in-flight packet
+                // briefly re-touched a W_old cache entry before it aged out.
+                origin: None,
             });
         }
         // Prune previous-sample entries for flows that disappeared this tick so

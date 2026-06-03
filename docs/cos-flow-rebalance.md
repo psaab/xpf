@@ -67,7 +67,18 @@ Per tick (coordinator status cadence, ~1 Hz — never per-packet):
 
 1. Count the steerable flows per worker, from the SAME flow-worker-map snapshot
    the candidate 5-tuples come from (count and rows are one object, so the
-   count can never disagree with the available rows).
+   count can never disagree with the available rows). **Each flow is counted
+   exactly once, at its current owner.** When a flow is rebalanced, the old
+   worker keeps an abandoned forward copy (origin `RebalancedOut`) for local-only
+   cleanup; that copy must NOT be counted (the flow now lives on the new worker's
+   `RebalancedOwner` copy). The old worker therefore EVICTS the abandoned copy
+   from its flow cache the instant it is demoted, so the very next snapshot
+   reflects the flow's departure — and the selector additionally refuses to count
+   or re-select any `RebalancedOut` row that might briefly linger. Without this
+   exactly-once rule a recently-moved flow was double-counted (old + new worker)
+   for the ~650 ms active-flow window, which made the controller keep moving
+   flows off an already-drained worker, over-install ntuple rules, and never
+   converge.
 2. If `max_count − min_count ≥ K` **and** it has persisted for at least two
    consecutive ticks (hysteresis), consider a move.
 3. Move one flow from the highest-count worker (`hi`) to the lowest-count

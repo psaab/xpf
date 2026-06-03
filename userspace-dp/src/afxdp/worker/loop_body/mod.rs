@@ -632,6 +632,33 @@ pub(crate) fn worker_loop(
         if !rebalance_acks.is_empty() {
             for ack in rebalance_acks {
                 let seq = ack.seq;
+                // #1751 exactly-once count fix: when a DemoteRebalanced ack
+                // reports the flow is now RebalancedOut on THIS worker (W_old),
+                // evict its abandoned forward copy from every local flow cache
+                // immediately. The ntuple HW rule has already steered new
+                // packets of this 5-tuple to W_new, so W_old's flow-cache entry
+                // would otherwise linger for the ~650ms active-flow window and
+                // be DOUBLE-COUNTED by `active_flow_debug_entries` — inflating
+                // the per-worker count the rebalance controller selects on, so
+                // it keeps moving flows off an already-drained W_old and never
+                // converges (over-installs ntuple rules). Dropping the entry
+                // here means W_old's count reflects the flow's departure on the
+                // very next debug-state publish. Session ownership/state is
+                // untouched (the SessionTable still holds the RebalancedOut
+                // entry for local-only GC) — only the fast-path cache copy that
+                // drives the count is removed. Mirrors the RST-teardown and
+                // cancelled-keys eviction patterns (invalidate_slot is keyed by
+                // (forward_key, ingress_ifindex)).
+                if ack.result
+                    && ack.origin == Some(crate::session::SessionOrigin::RebalancedOut)
+                {
+                    for binding in bindings.iter_mut() {
+                        binding
+                            .flow
+                            .flow_cache
+                            .invalidate_slot(&ack.key, binding.ifindex);
+                    }
+                }
                 if let Ok(mut slot) = rebalance_ack.lock() {
                     *slot = Some(ack);
                 }

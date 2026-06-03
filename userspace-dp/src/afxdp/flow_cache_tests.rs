@@ -1737,6 +1737,51 @@ fn active_flow_debug_entries_include_worker_join_keys() {
     assert_eq!(row.observed_bytes, 0);
 }
 
+/// #1751 exactly-once count at the SOURCE: when a flow is rebalanced away, the
+/// worker evicts the abandoned forward copy from its flow cache
+/// (`invalidate_slot`) the moment it is demoted. After that eviction the flow
+/// MUST disappear from `active_flow_debug_entries` — both the row set (the
+/// rebalance controller's per-worker count source) and the `active` total (the
+/// `binding_active_flow_count` metric source) — so the old worker's count
+/// reflects the flow's departure immediately instead of double-counting it for
+/// the ~650ms active window. This is the primitive the DemoteRebalanced ack
+/// handler invokes in `worker/loop_body`.
+#[test]
+fn invalidate_slot_drops_flow_from_active_count_immediately() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    cache.insert(make_entry(key.clone(), stamp, 0));
+    cache.tick_advance_epoch();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    // Touch it so it is inside the active window, then confirm it is counted.
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    let (active_before, rows_before, _, _) = cache.active_flow_debug_entries(8);
+    assert_eq!(active_before, 1, "the flow is counted while in the active window");
+    assert_eq!(rows_before.len(), 1);
+
+    // Demote eviction: drop the abandoned copy (ingress_ifindex 7 == make_entry).
+    cache.invalidate_slot(&key, 7);
+
+    // Now it contributes 0 to BOTH the count total and the row set — without
+    // waiting for the active window to age out.
+    let (active_after, rows_after, _, _) = cache.active_flow_debug_entries(8);
+    assert_eq!(active_after, 0, "evicted flow is no longer counted (was double-counted before #1751)");
+    assert!(rows_after.is_empty(), "evicted flow no longer appears in the controller's row set");
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_none(), "the entry is gone");
+}
+
 #[test]
 fn active_flow_debug_entries_report_truncation_without_losing_count() {
     let rg_epochs = default_rg_epochs();

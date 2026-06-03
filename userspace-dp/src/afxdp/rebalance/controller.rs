@@ -170,6 +170,33 @@ pub(in crate::afxdp) struct FlowSample {
     pub key: SessionKey,
     pub worker_id: u32,
     pub byte_rate: f64,
+    /// #1751 exactly-once count: the session origin of this flow on
+    /// `worker_id`. `Some(RebalancedOut)` marks the ABANDONED forward copy
+    /// left on the OLD worker after a rebalance move — it must NOT be counted
+    /// (the flow's current owner is the NEW worker's `RebalancedOwner` copy)
+    /// and must NEVER be re-selected as a move source. The live worker path
+    /// already evicts the abandoned flow-cache copy at demote (see
+    /// `worker/loop_body`), so a RebalancedOut row normally never reaches the
+    /// controller; this field is the defensive belt-and-suspenders that makes
+    /// the count exactly-once even if a stray in-flight packet briefly
+    /// re-touched the W_old cache entry before it aged out. `None` (the common
+    /// case for plain forward flows whose origin the snapshot did not carry)
+    /// is COUNTED — only an explicit RebalancedOut is excluded.
+    pub origin: Option<crate::session::SessionOrigin>,
+}
+
+impl FlowSample {
+    /// #1751: a flow is counted at exactly one worker — its CURRENT owner.
+    /// The abandoned `RebalancedOut` copy on the old worker is not counted
+    /// (and is never a move source). Every other origin (ForwardFlow,
+    /// RebalancedOwner, WorkerLocalImport, …) is the flow's live placement and
+    /// IS counted.
+    pub(in crate::afxdp) fn is_counted(&self) -> bool {
+        !matches!(
+            self.origin,
+            Some(crate::session::SessionOrigin::RebalancedOut)
+        )
+    }
 }
 
 /// Per-tick input snapshot the Coordinator assembles from existing
@@ -662,17 +689,27 @@ impl RebalanceController {
         // Choose a flow on `hi` not in cooldown. Homogeneous traffic: any flow
         // is equally good; pick the lowest session_key deterministically for
         // reproducibility (plan §3.2).
+        // #1751: never re-select the abandoned RebalancedOut copy as a move
+        // source (it is not the flow's current owner). Matches the count filter
+        // in per_worker_counts so the source set and the count agree.
         let mut candidates: Vec<&FlowSample> = input
             .flows
             .iter()
-            .filter(|f| f.worker_id == hi.worker_id && !self.cooldown.contains_key(&f.key))
+            .filter(|f| {
+                f.worker_id == hi.worker_id
+                    && f.is_counted()
+                    && !self.cooldown.contains_key(&f.key)
+            })
             .collect();
         candidates.sort_by(|a, b| session_key_order(&a.key, &b.key));
 
         let Some(flow) = candidates.first() else {
             // Every steerable flow on `hi` is in cooldown (or — structurally
             // unlikely under same-snapshot counting — `hi` had no rows).
-            let had_any_on_hi = input.flows.iter().any(|f| f.worker_id == hi.worker_id);
+            let had_any_on_hi = input
+                .flows
+                .iter()
+                .any(|f| f.worker_id == hi.worker_id && f.is_counted());
             let reason = if had_any_on_hi {
                 SkipReason::Cooldown
             } else {
@@ -758,6 +795,14 @@ pub(in crate::afxdp) struct MoveOutcome {
 pub(in crate::afxdp) fn per_worker_counts(flows: &[FlowSample]) -> HashMap<u32, u32> {
     let mut counts: HashMap<u32, u32> = HashMap::new();
     for f in flows {
+        // #1751: exactly-once accounting — skip the abandoned RebalancedOut
+        // copy on the old worker so a recently-moved flow is counted only at
+        // its current owner. Counting it at W_old too inflated W_old's count,
+        // made the controller keep moving flows off an already-drained worker,
+        // and prevented convergence (over-installed ntuple rules).
+        if !f.is_counted() {
+            continue;
+        }
         *counts.entry(f.worker_id).or_insert(0) += 1;
     }
     counts

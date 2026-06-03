@@ -30,7 +30,19 @@ fn worker(worker_id: u32, byte_rate: f64) -> WorkerByteRate {
 // #1751: byte_rate is observability-only on the decision path; for count tests
 // it is irrelevant, so flow() takes a byte_rate but most tests pass 0.0.
 fn flow(src_port: u16, worker_id: u32, byte_rate: f64) -> FlowSample {
-    FlowSample { key: key(src_port), worker_id, byte_rate }
+    FlowSample { key: key(src_port), worker_id, byte_rate, origin: None }
+}
+
+// #1751: a flow whose copy on `worker_id` is the abandoned RebalancedOut copy
+// left after a move — it must contribute 0 to the per-worker count and never be
+// chosen as a move source.
+fn rebalanced_out_flow(src_port: u16, worker_id: u32) -> FlowSample {
+    FlowSample {
+        key: key(src_port),
+        worker_id,
+        byte_rate: 0.0,
+        origin: Some(crate::session::SessionOrigin::RebalancedOut),
+    }
 }
 
 /// Build `n_flows` flows on `worker_id` with distinct src_ports derived from
@@ -777,7 +789,7 @@ fn second_move_chain_replaces_rule_and_reverse_barriers_prior_owner() {
     // moved flow as the candidate. Build the flows by hand so the moved flow
     // is on worker 2 and worker 2 is hi.
     let mut flows = vec![
-        FlowSample { key: key(moved_port), worker_id: 2, byte_rate: 0.0 },
+        FlowSample { key: key(moved_port), worker_id: 2, byte_rate: 0.0, origin: None },
         flow(7001, 2, 0.0),
         flow(7002, 2, 0.0),
     ];
@@ -840,6 +852,118 @@ fn per_worker_counts_matches_row_count() {
     assert_eq!(counts.get(&1).copied().unwrap_or(0), 1);
     assert_eq!(counts.get(&2).copied().unwrap_or(0), 0); // no rows => absent => 0
     assert_eq!(counts.get(&3).copied().unwrap_or(0), 2);
+}
+
+/// #1751 EXACTLY-ONCE COUNT (the live 5211 over-install bug): a flow that was
+/// rebalanced leaves an abandoned RebalancedOut copy on the OLD worker AND a
+/// live copy on the new worker. The old copy must contribute 0 to
+/// per_worker_counts so each flow is counted ONCE, at its current owner.
+///
+/// Construct a worker set that is TRULY even (2 flows each across 6 workers =
+/// 12 real flows) but where 6 extra RebalancedOut copies linger on various
+/// workers — the pre-fix double-count that made the live count read 18 and the
+/// vector look like [3,1,3,4,4,3]. With exactly-once accounting the count reads
+/// a flat [2,2,2,2,2,2] and select_move returns NO further move (no churn).
+#[test]
+fn rebalanced_out_copies_are_not_counted_so_even_placement_holds() {
+    // 12 real owners: 2 counted flows per worker (ports 1000+w*100+i).
+    let mut flows = Vec::new();
+    for w in 0..6u32 {
+        flows.push(flow(1000 + (w as u16) * 100, w, 0.0));
+        flows.push(flow(1001 + (w as u16) * 100, w, 0.0));
+    }
+    // 6 abandoned RebalancedOut copies scattered so that, if counted, the
+    // vector would be the lumpy [3,1,3,4,4,3]=18 the live run reported. They
+    // sit on workers 0,2,3,3,4,4 (distinct keys so they are real rows).
+    flows.push(rebalanced_out_flow(9000, 0));
+    flows.push(rebalanced_out_flow(9002, 2));
+    flows.push(rebalanced_out_flow(9003, 3));
+    flows.push(rebalanced_out_flow(9013, 3));
+    flows.push(rebalanced_out_flow(9004, 4));
+    flows.push(rebalanced_out_flow(9014, 4));
+
+    // Exactly-once count: every worker reads 2, never the inflated value.
+    let counts = per_worker_counts(&flows);
+    for w in 0..6u32 {
+        assert_eq!(
+            counts.get(&w).copied().unwrap_or(0),
+            2,
+            "worker {w} counts its 2 real owners only (RebalancedOut excluded): {counts:?}"
+        );
+    }
+    assert_eq!(count_sum_of_squares(&counts), 24, "6*2^2 = 24 (not 1+9+... = 60)");
+
+    // The controller sees a flat vector and takes NO move (no over-install /
+    // no churn). Drive several ticks at the dwell+interval cadence to be sure.
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    let workers: Vec<WorkerByteRate> = (0..6u32).map(|w| worker(w, 0.0)).collect();
+    for t in 0..6u64 {
+        let input = RebalanceTickInput {
+            ifindex: 5,
+            workers: workers.clone(),
+            flows: flows.clone(),
+            now_secs: 10 + t,
+            truncated: false,
+        };
+        assert!(
+            c.tick(&input, &mut tx).is_none(),
+            "even-after-exactly-once placement takes no move at tick {t}"
+        );
+    }
+    assert_eq!(c.metrics().installs_total, 0, "no install on a truly-even vector");
+    assert!(!tx.calls.iter().any(|s| s.starts_with("install:")), "no churn: {:?}", tx.calls);
+}
+
+/// #1751 EXACTLY-ONCE selection: an abandoned RebalancedOut copy on the hottest
+/// worker is never chosen as a move SOURCE — only a real (counted) owner is.
+#[test]
+fn rebalanced_out_copy_is_never_a_move_source() {
+    // Worker 0 has ONE real owner (port 1000) + ONE abandoned RebalancedOut
+    // copy (port 9000). Worker 1 is empty. If the abandoned copy were counted
+    // and movable, worker 0 would read count 2 and the controller could pick
+    // the abandoned copy. With exactly-once accounting worker 0 reads count 1,
+    // worker 1 reads 0 — delta 1 < K=2 — so NO move is admitted at all, and
+    // critically the abandoned key 9000 is never the selected source.
+    let flows = vec![
+        flow(1000, 0, 0.0),
+        rebalanced_out_flow(9000, 0),
+    ];
+    let counts = per_worker_counts(&flows);
+    assert_eq!(counts.get(&0).copied().unwrap_or(0), 1, "only the real owner counts");
+    assert_eq!(counts.get(&1).copied().unwrap_or(0), 0);
+
+    // Even if we force a genuine imbalance by adding a second real owner on
+    // worker 0 (count 2 vs 0), the move source must be a real owner (1000/1001),
+    // never the abandoned 9000.
+    let flows2 = vec![
+        flow(1000, 0, 0.0),
+        flow(1001, 0, 0.0),
+        rebalanced_out_flow(9000, 0),
+    ];
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    let workers = vec![worker(0, 0.0), worker(1, 0.0)];
+    let mut moved_key_port = None;
+    for t in 0..8u64 {
+        let input = RebalanceTickInput {
+            ifindex: 5,
+            workers: workers.clone(),
+            flows: flows2.clone(),
+            now_secs: 10 + t,
+            truncated: false,
+        };
+        if let Some(mv) = c.tick(&input, &mut tx) {
+            moved_key_port = Some(mv.key.src_port);
+            break;
+        }
+    }
+    let port = moved_key_port.expect("a 2-vs-0 imbalance admits one move");
+    assert!(
+        port == 1000 || port == 1001,
+        "the move source is a real owner, never the abandoned RebalancedOut copy (got port {port})"
+    );
+    assert_ne!(port, 9000, "RebalancedOut copy must never be selected as a source");
 }
 
 /// count_sum_of_squares matches the test-local sum_of_squares (the in-tree
