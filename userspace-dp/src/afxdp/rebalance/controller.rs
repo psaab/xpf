@@ -389,6 +389,10 @@ impl RebalanceController {
             // routes traffic to it).
             if tx.delete_rule(prior.loc).is_err() {
                 self.metrics.record_skip(SkipReason::BarrierFailed);
+                debug_log_rebalance!(
+                    "REBALANCE_BARRIER step=second_move_delete ifindex={} loc={} src_port={} result=failed",
+                    input.ifindex, prior.loc, prior.key.src_port
+                );
                 return None;
             }
             tx.demote_replica(prior.new_worker, &prior.key);
@@ -397,12 +401,17 @@ impl RebalanceController {
             self.metrics.rules_active = self.ledger.len() as u32;
         }
 
-        // Forward barrier: promote W_new BEFORE the rule, then demote W_old,
-        // then install. Both before the rule so a racing GC on either side
-        // sees a safe origin (the applied-command ack serializes promote
-        // before demote so there is always >= 1 cleanup owner).
+        // Forward barrier: promote (claim) W_new BEFORE the rule, then demote
+        // W_old, then install. The promote is CLAIM-ONLY (#1751) — for a
+        // same-node move W_new does not pre-hold the flow, so promote no longer
+        // fails on an absent entry; it only fails if the worker queue/ack
+        // itself broke.
         if !tx.promote(candidate.new_worker, &candidate.key) {
             self.metrics.record_skip(SkipReason::BarrierFailed);
+            debug_log_rebalance!(
+                "REBALANCE_BARRIER step=promote ifindex={} new_worker={} src_port={} result=failed",
+                input.ifindex, candidate.new_worker, candidate.key.src_port
+            );
             // Nothing to roll back: the only mutation attempted was the
             // promote, which failed to commit. Reverse it defensively.
             tx.demote_replica(candidate.new_worker, &candidate.key);
@@ -410,6 +419,10 @@ impl RebalanceController {
         }
         if !tx.demote(candidate.old_worker, &candidate.key) {
             self.metrics.record_skip(SkipReason::BarrierFailed);
+            debug_log_rebalance!(
+                "REBALANCE_BARRIER step=demote ifindex={} old_worker={} src_port={} result=failed",
+                input.ifindex, candidate.old_worker, candidate.key.src_port
+            );
             // Reverse barrier: restore W_old to owner FIRST, and only demote
             // W_new back to a replica if that restore is acked (#1748 #4). If
             // the restore fails (timeout / key absent on W_old), keep W_new as
@@ -448,8 +461,13 @@ impl RebalanceController {
                     loc,
                 })
             }
-            Err(_) => {
+            Err(_e) => {
                 self.metrics.record_skip(SkipReason::BarrierFailed);
+                debug_log_rebalance!(
+                    "REBALANCE_BARRIER step=install ifindex={} new_worker={} queue={} src_port={} result=failed err={:?}",
+                    input.ifindex, candidate.new_worker, candidate.new_queue,
+                    candidate.key.src_port, _e.raw_os_error()
+                );
                 // Rule install failed: reverse the ownership transfer with the
                 // reverse barrier so >= 1 cleanup owner remains. Gate the W_new
                 // demote on the W_old restore ack (#1748 #4).

@@ -593,12 +593,28 @@ pub(super) fn apply_worker_commands(
             // state before the barrier proceeds. `result=false` when the key is
             // absent (the controller rolls back).
             WorkerCommand::PromoteRebalanced { seq, key } => {
-                let result = sessions.promote_rebalanced_owner(&key, now_ns);
+                // #1751 live BLOCKER: for a SAME-NODE count-balance move the
+                // destination worker (W_new) does NOT pre-hold the flow's
+                // session — the flow currently lives on W_old, and W_new only
+                // materializes a fresh ForwardFlow entry once the ntuple rule
+                // steers packets there. promote_rebalanced_owner flips an
+                // EXISTING entry to RebalancedOwner (the HA case where a
+                // peer-synced replica is present), but when the key is ABSENT
+                // that is the EXPECTED same-node case, NOT a failure — the
+                // ownership is established on arrival. So a promote is a
+                // best-effort claim: result=true whether the entry was present
+                // (flipped) or absent (will materialize). The controller no
+                // longer fails the move on an absent W_new entry.
+                let _present = sessions.promote_rebalanced_owner(&key, now_ns);
                 rebalance_acks.push(crate::afxdp::RebalanceAck {
                     seq,
+                    // Some(RebalancedOwner) if we flipped an existing replica;
+                    // None if the key is absent (same-node, materialize later).
                     origin: sessions.origin_of(&key),
                     key,
-                    result,
+                    // A promote claim always succeeds; the move's correctness
+                    // does not require W_new to pre-hold the entry (same-node).
+                    result: true,
                 });
             }
             WorkerCommand::DemoteRebalanced { seq, key } => {

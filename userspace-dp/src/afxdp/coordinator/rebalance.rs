@@ -484,12 +484,18 @@ impl super::Coordinator {
 
     /// Send a single rebalance WorkerCommand to `worker_id` and block until
     /// its structured ack confirms the EXACT key reached `expected` (or until
-    /// the deadline). Returns the ack's `result && origin == expected`.
+    /// the deadline). `expected = Some(origin)` requires the ack's origin to
+    /// match (the demote/restore/replica steps, which act on an entry that MUST
+    /// already be present). `expected = None` is a CLAIM-ONLY confirmation —
+    /// it accepts any acked result, used by the promote step which, for a
+    /// same-node move, may target a worker that does not yet hold the flow
+    /// (the entry materializes when the rule steers packets there — #1751).
+    /// Returns the ack's `result && (expected.is_none() || origin == expected)`.
     fn barrier_command(
         &self,
         worker_id: u32,
         key: &SessionKey,
-        expected: SessionOrigin,
+        expected: Option<SessionOrigin>,
         make_cmd: impl FnOnce(u64, SessionKey) -> WorkerCommand,
     ) -> bool {
         let Some(handle) = self.workers.handles.get(&worker_id) else {
@@ -505,11 +511,21 @@ impl super::Coordinator {
         // seq is delivered to the worker via the command queue (Mutex), which
         // establishes the necessary happens-before for the worker's ack.
         let seq = handle.rebalance_cmd_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let cmd = make_cmd(seq, key.clone());
+        // #1751 instrumentation: the command name for the debug log.
+        #[cfg(feature = "debug-log")]
+        let cmd_name = match &cmd {
+            WorkerCommand::PromoteRebalanced { .. } => "promote",
+            WorkerCommand::DemoteRebalanced { .. } => "demote",
+            WorkerCommand::RestoreRebalancedOwner { .. } => "restore_owner",
+            WorkerCommand::DemoteRebalancedReplica { .. } => "demote_replica",
+            _ => "other",
+        };
         {
             let Ok(mut pending) = handle.commands.lock() else {
                 return false;
             };
-            pending.push_back(make_cmd(seq, key.clone()));
+            pending.push_back(cmd);
         }
         let deadline = Instant::now() + REBALANCE_ACK_TIMEOUT;
         loop {
@@ -524,12 +540,21 @@ impl super::Coordinator {
                         // ack.seq < seq  → stale ack from a prior command;
                         //   keep polling until the worker writes our seq.
                         if ack.seq == seq {
-                            return ack_confirms(ack, key, expected);
+                            let ok = ack_confirms(ack, key, expected);
+                            debug_log_rebalance!(
+                                "REBALANCE_BARRIER step={} worker={} seq={} result=acked ok={} ack_origin={:?} ack_result={} expected={:?}",
+                                cmd_name, worker_id, seq, ok, ack.origin, ack.result, expected
+                            );
+                            return ok;
                         }
                     }
                 }
             }
             if Instant::now() >= deadline {
+                debug_log_rebalance!(
+                    "REBALANCE_BARRIER step={} worker={} seq={} result=timed_out after={:?}",
+                    cmd_name, worker_id, seq, REBALANCE_ACK_TIMEOUT
+                );
                 return false;
             }
             thread::sleep(REBALANCE_ACK_POLL);
@@ -537,9 +562,16 @@ impl super::Coordinator {
     }
 }
 
-/// Confirm a structured ack matches the expected key + origin.
-fn ack_confirms(ack: &RebalanceAck, key: &SessionKey, expected: SessionOrigin) -> bool {
-    ack.result && &ack.key == key && ack.origin == Some(expected)
+/// Confirm a structured ack matches the expected key (and origin when an
+/// origin is required). `expected = None` is a claim-only check (used by
+/// promote on a same-node move where W_new may not yet hold the entry).
+fn ack_confirms(ack: &RebalanceAck, key: &SessionKey, expected: Option<SessionOrigin>) -> bool {
+    ack.result
+        && &ack.key == key
+        && match expected {
+            Some(origin) => ack.origin == Some(origin),
+            None => true,
+        }
 }
 
 /// The Coordinator-backed BarrierTransport: drives the worker command queues
@@ -552,10 +584,16 @@ struct CoordinatorBarrierTransport<'a> {
 
 impl BarrierTransport for CoordinatorBarrierTransport<'_> {
     fn promote(&mut self, worker_id: u32, key: &SessionKey) -> bool {
+        // #1751: CLAIM-ONLY (expected = None). For a same-node move W_new does
+        // not pre-hold the flow's session — it materializes when the rule
+        // steers packets there — so the promote must not require the entry to
+        // already exist (that was the 100%-BarrierFailed root cause). The HA
+        // case (W_new holds a peer-synced replica) still flips it to
+        // RebalancedOwner; either way the claim is accepted.
         self.coord.barrier_command(
             worker_id,
             key,
-            SessionOrigin::RebalancedOwner,
+            None,
             |seq, key| WorkerCommand::PromoteRebalanced { seq, key },
         )
     }
@@ -563,7 +601,7 @@ impl BarrierTransport for CoordinatorBarrierTransport<'_> {
         self.coord.barrier_command(
             worker_id,
             key,
-            SessionOrigin::RebalancedOut,
+            Some(SessionOrigin::RebalancedOut),
             |seq, key| WorkerCommand::DemoteRebalanced { seq, key },
         )
     }
@@ -571,7 +609,7 @@ impl BarrierTransport for CoordinatorBarrierTransport<'_> {
         self.coord.barrier_command(
             worker_id,
             key,
-            SessionOrigin::ForwardFlow,
+            Some(SessionOrigin::ForwardFlow),
             |seq, key| WorkerCommand::RestoreRebalancedOwner { seq, key },
         )
     }
@@ -579,12 +617,30 @@ impl BarrierTransport for CoordinatorBarrierTransport<'_> {
         self.coord.barrier_command(
             worker_id,
             key,
-            SessionOrigin::WorkerLocalImport,
+            Some(SessionOrigin::WorkerLocalImport),
             |seq, key| WorkerCommand::DemoteRebalancedReplica { seq, key },
         )
     }
     fn install_rule(&mut self, flow: &FlowSpec5Tuple, queue: u32) -> std::io::Result<u32> {
-        self.socket.insert_rule(flow, queue)
+        let r = self.socket.insert_rule(flow, queue);
+        // #1751 instrumentation: log the ioctl outcome (loc or errno) so a
+        // debug-log deploy shows exactly whether the SRXCLSRLINS succeeds.
+        #[cfg(feature = "debug-log")]
+        match &r {
+            Ok(loc) => {
+                debug_log_rebalance!(
+                    "REBALANCE_BARRIER step=install queue={} result=ok loc={}",
+                    queue, loc
+                );
+            }
+            Err(e) => {
+                debug_log_rebalance!(
+                    "REBALANCE_BARRIER step=install queue={} result=err errno={:?} msg={}",
+                    queue, e.raw_os_error(), e
+                );
+            }
+        }
+        r
     }
     fn delete_rule(&mut self, loc: u32) -> std::io::Result<()> {
         self.socket.delete_rule(loc)
