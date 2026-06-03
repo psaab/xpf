@@ -98,3 +98,14 @@ cold. The forced TX kicks come entirely from the CoS-drain path
 primary lever) is a **no-op under the measured workload**. The recoverable
 forced kicks live in `drain_shaped_tx` / `service_exact_*`, which are
 correctness-coupled to the CoS exact-guarantee quantum (the #1207/#1545 trap).
+
+## Methodology caveat (Claude SMR F1)
+The RX-vs-TX split tags a `sendto` as RX-wake iff `xsk_poll` fired <5 µs earlier
+on the same tid. Interrupt-mode workers also `libc::poll` the XSK fds in the
+idle path (worker/loop_body/mod.rs:1429), so an idle-poll → TX-submit-sendto
+within 5 µs would be MIS-tagged as RX-wake, under-counting TX-kick. That idle
+poll only fires after `idle_iters > IDLE_SPIN_ITERS` (256, loop_body:1420),
+i.e. only when the worker is idle — rare under saturating -P48. The qualitative
+conclusion (TX-kick dominates; CoS-drain is the hot forced site) is
+independently confirmed by Step 1b's uprobe and does NOT depend on the exact
+5.32-vs-0.61 ratio. Treat the precise split as approximate.

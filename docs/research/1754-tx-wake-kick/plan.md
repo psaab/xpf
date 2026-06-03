@@ -1,6 +1,13 @@
 # #1754 — Reduce AF_XDP TX-wake `sendto()` kick CPU (Path B of #1752)
 
-**Status: v1 (DRAFT) — awaiting Codex + AGY + Claude-SMR hostile review.**
+**Status: v2 — CONVERGED. Codex r1 PLAN-NEEDS-MAJOR, AGY r1 PLAN-NEEDS-MAJOR
+(both with a narrow defensible V-B path), Claude SMR r1 PLAN-KILL-LEANING. All
+three agree: the research (Step 1 + 1b) is sound and the lever is correctly
+re-aimed; the only ship candidate is V-B (`needs_wakeup()`-only gate); the
+default outcome is PLAN-KILL unless a clean V-B A/B (idle-binding latency +
+per-CoS-class CoV + contention-rebound) clears a high bar. v2 addressed every
+finding: §4/§5 contradiction, V-A/V-B split, idle-binding proof, contention
+rebound (AGY), tid-filtered re-attribution (AGY).**
 
 Research-only. Stops at PLAN-READY or PLAN-KILL. No production code ships from
 this doc; the implementation (if approved) is a separate `/engineer 1754`.
@@ -112,11 +119,29 @@ fairness/exact-guarantee-coupled path with the #1207/#1545 PLAN-KILL history.
 
 **Re-aimed primary lever (HIGH RISK):** on the CoS-drain *post-successful-submit*
 kicks only (`service.rs:193,367,543,716` — the unconditional end-of-function
-kicks after a `commit()`), change `force = true` → `force = false` so they pass
-through `needs_wakeup()` + `TX_WAKE_MIN_INTERVAL_NS`. **Keep `force = true` on
-the ring-full / no-free-frame error kicks** (`service.rs:107,159,281,326,511,
-675`) — those must drain. Expected upper bound on the win: the ~83 % non-wakeup
-fraction of the CoS post-submit kicks, skewed to the cheap [1K,4K) ns bucket.
+kicks after a `commit()`). **Keep `force = true` on the ring-full / no-free-frame
+error kicks** (`service.rs:107,159,281,326,511,675`) — those must drain.
+
+Two candidate variants, NOT equivalent (Codex F4):
+- **V-A (`force = false`):** routes through `needs_wakeup() || interval`. This
+  STILL kicks every `TX_WAKE_MIN_INTERVAL_NS` (50 µs) even when `needs_wakeup()`
+  is clear — so it can defer a doorbell up to 50 µs (the cadence risk) AND, at
+  50 µs/binding = ~20K kicks/s/binding vs observed ~12.7K TX-kicks/s/worker
+  (76K/s ÷ 6, step1b), the interval may already be *looser* than the current
+  rate — meaning V-A could suppress far LESS than the headline 83 %. V-A is the
+  worst of both: real cadence risk, uncertain win.
+- **V-B (`needs_wakeup()`-only, NO interval delay):** a NEW `maybe_wake_tx` mode
+  that kicks iff `needs_wakeup()` is set, else skips entirely (no 50 µs timer).
+  This preserves every kernel-requested doorbell and suppresses exactly the
+  wasted non-wakeup kicks — the cleanest map onto the "recoverable population".
+  **V-B is the only variant worth A/B-ing**, but it requires (i) a new gate arm
+  in `maybe_wake_tx` and (ii) a proof that the idle-binding stall (§5,
+  transmit/mod.rs:258) cannot recur when no interval timer backstops a binding
+  that committed with `needs_wakeup()` momentarily clear.
+
+Expected upper bound on the win: the ~83 % non-wakeup fraction of the CoS
+post-submit kicks (step1:49-55), skewed to the cheap [1K,4K) ns bucket — so the
+recoverable *time* is materially below 83 % of 5.32 core-s.
 
 **Important gate nuance (`force=false` is NOT a blind delay).** The
 `maybe_wake_tx` condition (rings.rs:239-243) fires the kick when
@@ -167,16 +192,21 @@ documented at rings.rs:155-163).
 ## 5. Invariants that MUST hold
 
 - **No idle-binding TX stall.** A binding that commits descriptors and goes idle
-  must still get its TX doorbell within bounded latency (≤ one poll cycle +
-  `TX_WAKE_MIN_INTERVAL_NS`). This is the invariant `force = true` currently
-  guarantees trivially; the change must preserve it via the gated re-kick.
+  must still get its TX doorbell within bounded latency. `force = true`
+  guarantees this trivially today (transmit/mod.rs:258-260 documents the stall it
+  prevents). Any candidate variant (§4) MUST separately prove a bounded idle
+  safety path (the `phase_trivial.rs:31` gated re-kick fires only when
+  `outstanding_tx > 0 && pending empty`, so it may NOT cover the commit-then-idle
+  window — this must be measured, not assumed).
 - **Ring-full paths stay forced.** `inserted == 0` / no-free-frame must keep
-  `force = true` so the kernel drains and frees completions.
-- **`needs_wakeup()` semantics unchanged.** The change only chooses `force`;
-  it does not alter the gate logic in `maybe_wake_tx`.
-- **CoS exact-guarantee timing unchanged.** The CoS-drain kicks
-  (`service.rs:*`) stay forced in v1 (they are correctness-coupled to the
-  guarantee quantum); only the two generic post-submit sites change.
+  `force = true` so the kernel drains and frees completions
+  (`service.rs:107,159,281,326,511,675`).
+- **CoS exact-guarantee cadence preserved.** `publish_committed_queue_vtime`
+  (service.rs:359) + `apply_direct_exact_send_result` (service.rs:366) run
+  immediately BEFORE the post-submit kick (service.rs:367); V_min relies on
+  post-settle commit boundaries (v_min.rs:32-46). The candidate variant MUST NOT
+  decouple vtime accounting from the physical TX doorbell by more than the
+  per-class CoV gate tolerates — validated per CoS class in the A/B, not assumed.
 - **Telemetry parity.** `tx_kick_latency_*` / `dbg_sendto_*` counters keep
   counting actual `sendto` calls; a drop in count is the *expected* signal, not
   a regression.
@@ -185,8 +215,10 @@ documented at rings.rs:155-163).
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Idle-binding TX stall (latency-sensitive replies) | HIGH | gated re-kick (§4a/b); A/B measures TX latency + retrans; KILL if regresses |
-| CoS fairness perturbation if a CoS site is mis-gated | MED | v1 leaves all `service.rs` kicks forced |
+| Idle-binding TX stall (latency-sensitive replies) | HIGH | V-B has NO interval backstop — must prove bounded idle path (transmit/mod.rs:258); A/B TCP_RR; KILL if regresses |
+| CoS exact-guarantee cadence skew (vtime decoupled from doorbell) | HIGH | V-B preserves kernel doorbells; per-CoS-class CoV A/B; KILL on any CoV regression (#1207/#1545 trap) |
+| V-A interval may already be looser than the rate → tiny win + cadence risk | MED | prefer V-B; V-A only as a measured comparison arm |
+| **Contention rebound (AGY r1):** suppressing ~83 % of syscalls runs worker loops faster → MORE polls of shared `shared_exact_backlogs` (service.rs:236) / `shared_queue_leases` (queue_service/mod.rs:406) → cacheline bouncing + atomic contention across 6 workers, which can ITSELF perturb the #1207/#1545 cadence | HIGH | A/B must track atomic-contention / loop-frequency + per-class CoV; a CPU "win" that just moves into contention is a net loss |
 | Win too small to justify (cheap-bucket skew) | MED | A/B with explicit % threshold; PLAN-KILL exit |
 | Run-to-run throughput noise masks the delta | MED | ≥3 paired runs each arm; report CoV |
 | Interrupt-mode vs busy-poll changes the picture | LOW | deployed mode is interrupt; measure as-deployed |
@@ -199,13 +231,28 @@ For BOTH arms, on `loss:xpf-userspace-fw0`, CoS ON, ≥3 paired 30 s runs:
    CPU%. Primary metric: TX-kick core-seconds delta.
 2. **Driver-wakeup ratio:** `mlx5e_xsk_wakeup` count — expect it ~unchanged
    (real doorbells preserved) while `sendto` count drops (the win).
-3. **TX latency:** `iperf3` is throughput-biased; add a latency probe — e.g.
-   `sockperf`/`ping -f` RTT through the box, or netperf TCP_RR — to catch the
-   idle-binding stall. **This is the kill-deciding metric.**
+3. **TX latency + idle-binding stall:** `iperf3` is throughput-biased; add a
+   latency probe — netperf TCP_RR / `sockperf` — to catch the idle-binding stall
+   V-B's missing interval backstop risks (transmit/mod.rs:258). Run a
+   low-rate single-flow + idle-then-burst pattern specifically, not just
+   saturating load. **This is a kill-deciding metric.**
+3b. **Per-CoS-class fairness:** run the per-class iperf3 matrix (one flow per
+   configured CoS class, ports 5201-5211) and compute per-class CoV against the
+   `docs/fairness-regimes.md` gate. Any CoV regression vs the master baseline is
+   a hard KILL (the #1207/#1545 trap). **Also kill-deciding.**
 4. **Throughput + retransmits:** `iperf3 -P48` SUM Gbit/s + retransmit count,
    v4 AND v6, push AND `-R`.
+4b. **Contention rebound (AGY r1):** track cross-worker atomic-contention /
+   loop-frequency (e.g. `perf c2c` or a worker-loop-iters counter) to confirm
+   the faster loop does NOT trade syscall CPU for cacheline-bounce CPU on
+   `shared_exact_backlogs` / `shared_queue_leases`. A win that moves into
+   contention is a net loss.
 5. **Full smoke matrix** before any merge (v4/v6 × push/`-R` × CoS-off/CoS-on),
    per the per-class iperf3 requirement.
+6. **Clean re-attribution (AGY r1):** before committing to V-B, re-run Step 1
+   with a tid/fd-filtered .bt that excludes the worker idle-loop `libc::poll`
+   (loop_body:1429) from the RX-wake tag, removing the F1 contamination, to pin
+   the true TX-kick fraction.
 
 **Pass:** net CPU recovered (TX-kick core-seconds ↓ by a stated threshold, e.g.
 ≥2 % of box) with **zero** measurable TX-latency / retransmit / throughput
@@ -262,12 +309,24 @@ per-class fairness-cadence regression those issues died on, for a win that is
 (a) bounded by the cheap [1K,4K) ns bucket and (b) may convert to worker spin
 rather than throughput on a worker-bound box.
 
-**Recommended disposition: PLAN-KILL** unless a reviewer produces a concrete
-argument that the CoS post-submit kick can be gated WITHOUT perturbing the
-exact-guarantee cadence (e.g. a `needs_wakeup()`-only gate with NO interval
-delay, which suppresses the wasted ~83 % non-wakeup kicks while preserving the
-doorbell whenever the kernel actually asks). If that variant is defensible, the
-fallback is a narrow, CoS-class-validated A/B (§7) with a hard KILL exit on any
-per-class CoV / latency / retransmit regression. The honest bottom line: this is
-a few-percent CPU lever guarded by a high-consequence fairness invariant — the
-bar to ship is high and PLAN-KILL is the well-evidenced default.
+**Recommended disposition: PLAN-KILL-LEANING.** The only candidate worth an A/B
+is V-B (`needs_wakeup()`-only gate, NO interval delay) on the four CoS
+post-submit kicks — it maps exactly onto the recoverable ~83 % non-wakeup kicks
+while preserving every kernel-requested doorbell. Plain `force=false` (V-A) is
+rejected: it keeps the 50 µs interval (real cadence risk) AND at ~20K
+kicks/s/binding the interval may already be looser than the ~12.7K/s/worker
+rate, so its win is uncertain (Codex F4).
+
+Even V-B is guarded by TWO high-consequence invariants: (1) the idle-binding TX
+stall (transmit/mod.rs:258) — V-B removes the interval backstop, so a binding
+that commits with `needs_wakeup()` momentarily clear could stall until the next
+poll cycle; this must be proven bounded, not assumed; and (2) the CoS
+exact-guarantee cadence — vtime is published/accounted at service.rs:359-366
+immediately before the doorbell, the #1207/#1545 trap. The win is a few percent
+of CPU that may convert to worker spin, not throughput, on a worker-bound box
+(Codex F6 / Q3).
+
+**Ship gate (high bar):** proceed to `/engineer` ONLY with V-B, a proof of the
+bounded idle path, and a per-CoS-class A/B (§7) measuring CoV + TCP_RR latency +
+retransmit + throughput with a hard KILL exit on ANY regression. Absent a clean
+V-B A/B, **PLAN-KILL** is the well-evidenced default outcome.

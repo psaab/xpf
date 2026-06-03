@@ -1,0 +1,128 @@
+I will list the directory contents of `/home/ps/git/bpfrx` to locate the research files and verify the workspace layout.
+I will list the directory contents of `/home/ps/git/bpfrx/.claude/worktrees/1754-research` to locate the research plan and evidence files.
+I will list the contents of the research folder in the worktree to identify the files containing the research plan and the evidence.
+I will list the contents of the `evidence` subdirectory to find the step1-tx-vs-rx-attribution.md file.
+I will read the research plan `plan.md` to understand the proposed direction, steps, and background context.
+I will read the Step 1 evidence document to review the data, methodology, and measurements compiled so far.
+I will search for `maybe_wake_tx` using `grep_search` to find its definition and callers.
+I will view `userspace-dp/src/afxdp/tx/rings.rs` around lines 200-260 to examine the implementation of `maybe_wake_tx` and the wakeup checking logic.
+I will view lines 266-310 of `userspace-dp/src/afxdp/tx/rings.rs` to see the remainder of `maybe_wake_tx`.
+I will search for the definition of `TX_WAKE_MIN_INTERVAL_NS` in the codebase.
+I will view the contents of `userspace-dp/src/afxdp/cos/queue_service/service.rs` from lines 95 to 210 to examine the callers of `maybe_wake_tx`.
+I will view `userspace-dp/src/afxdp/cos/queue_service/service.rs` from lines 211 to 380 to trace `maybe_wake_tx` usage inside `service_exact_local_queue_direct_flow_fair`.
+I will view lines 500 to 719 of `userspace-dp/src/afxdp/cos/queue_service/service.rs` to review the other places where `maybe_wake_tx` is called.
+I will search for `drain_shaped_tx` to see its context and implementation.
+I will view `userspace-dp/src/afxdp/cos/queue_service/mod.rs` around lines 150-250 to check the entry point and structure of `drain_shaped_tx`.
+I will search for `service_exact_guarantee_queue_direct_with_info` inside `mod.rs` to see its definition.
+I will view lines 390 to 500 of `userspace-dp/src/afxdp/cos/queue_service/mod.rs` to understand the exact-guarantee queue service routing.
+I will search for `service_exact_local_queue_direct` to trace its definition.
+I will view lines 1 to 94 of `userspace-dp/src/afxdp/cos/queue_service/service.rs` to examine the entry functions for service of local queues.
+I will search for `poll` or `epoll` in the worker source directory to see if poll calls are invoked outside `maybe_wake_rx`.
+I will view lines 160 to 220 of `userspace-dp/src/afxdp/worker/loop_body/mod.rs` to examine the main loop's polling mechanism.
+I will search for `interrupt_poll_fds` inside `userspace-dp/src/afxdp/worker/loop_body/mod.rs` to find the main loop polling code.
+I will view lines 1400 to 1454 of `userspace-dp/src/afxdp/worker/loop_body/mod.rs` to review the worker loop's polling block.
+I will search for callers of `maybe_wake_rx` to see when and where RX wakeups are triggered in the worker loop.
+I will view lines 100 to 150 of `userspace-dp/src/afxdp/worker/lifecycle.rs` to see how `maybe_wake_rx` is called.
+I will search the repository for mentions of issues `#1207` and `#1545` to understand their context and the risks they present.
+I will list the available permissions to check if I can run git commands or read files.
+I will run `git log` to search for mentions of issues `#1207` or `#1545` to locate historical context about the exact-guarantee fairness coupling.
+I will run `git log` to search for mentions of issue `#1545` to trace its context.
+I will view `userspace-dp/src/afxdp/tx/drain/phase_trivial.rs` to see how the gated re-kick handles the idle-binding TX stall.
+I will view the benchmark file `userspace-dp/benches/tx_kick_latency.rs` to see what is measured and how.
+# AGY Adversarial Review: #1754 TX-wake `sendto()` kick CPU reduction
+
+**VERDICT: PLAN-NEEDS-MAJOR**
+
+While the transition from Master/umbrella assumptions to the CoS post-submit kick path is directional progress, the current research plan suffers from several severe methodological blind spots, unquantified concurrency risks, and telemetry vulnerabilities. It must not proceed to implementation without addressing these findings.
+
+---
+
+### Findings & Detailed Attacks
+
+#### (1) Methodology Contamination in TX-vs-RX bpftrace Attribution
+The heuristic tagging of `RX-wake` vs `TX-kick` based on a thread-local `xsk_poll` firing $<5\ \mu\text{s}$ before `sendto` is **contaminated and mathematically compromised**, though in a way that conservatively favors the plan's conclusion.
+
+* **The Contamination Vector**:
+  Under `--poll-mode interrupt`, when the worker runs out of work, it blocks on the global `libc::poll` call in the main worker loop at [loop_body/mod.rs:L1429](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/worker/loop_body/mod.rs#L1429):
+  ```rust
+  1429:                         libc::poll(
+  1430:                             interrupt_poll_fds.as_mut_ptr(),
+  1431:                             interrupt_poll_fds.len() as libc::nfds_t,
+  1432:                             INTERRUPT_POLL_TIMEOUT_MS,
+  1433:                         );
+  ```
+  This poll monitors the raw AF_XDP socket file descriptors, triggering `xsk_poll` in the kernel. 
+  When the worker wakes up (due to a packet arrival or a timer event) and immediately processes a packet to transmit, it enqueues it, commits the ring, and calls `maybe_wake_tx` at [rings.rs:L237](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/tx/rings.rs#L237). 
+  In this high-performance dataplane, the entire sequence from exiting the main loop `poll` to invoking the `sendto` syscall in `maybe_wake_tx` easily executes in **$< 5\ \mu\text{s}$**.
+* **Methodology Impact**: 
+  Any genuine `maybe_wake_tx` kick firing immediately upon wake-from-interrupt will be falsely classified as an `RX-wake` by the bpftrace heuristic.
+  * **Result**: The reported TX-kick count of $762,132$ in `evidence/step1-tx-vs-rx-attribution.md` is a **conservative lower bound** (underreported), while the RX-wake count of $163,928$ is an **upper bound** (inflated by false positives).
+  * **Verdict**: The attribution methodology is contaminated, but it underrepresents the problem. The actual dominance of TX-kicks is even higher than the reported 8.7:1 ratio.
+
+---
+
+#### (2) Inflation of `xsk_sendmsg` Cost by kprobe/kretprobe Overhead
+The reported $\sim 6.5\ \mu\text{s}$ mean latency is partially inflated, but the underlying overhead remains highly material.
+
+* **Probe Overhead Analysis**:
+  A kprobe + kretprobe pair on `xsk_sendmsg` incurs two trap transitions (or return trampolines) per syscall. In a virtualized `mlx5` SR-IOV VF VM box environment, VM exit costs can add 200–500 ns (or up to $1\ \mu\text{s}$) of execution jitter.
+* **Impact on the Bins**:
+  The mode of the distribution is in the `[2K, 4K) ns` bin ([step1-tx-vs-rx-attribution.md:L38](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/docs/research/1754-tx-wake-kick/evidence/step1-tx-vs-rx-attribution.md#L38)). If we assume $1\ \mu\text{s}$ of cumulative kprobe overhead, the actual syscall duration is closer to $1.5\ \text{--}\ 3.0\ \mu\text{s}$.
+* **Significance**:
+  Even adjusting the mean down to a conservative $5.5\ \mu\text{s}$ to account for probe overhead, the aggregate CPU time spent on TX-kicks remains:
+  $$\frac{762,132 \times 5.5\ \mu\text{s}}{10\text{ seconds}} \approx 4.19\text{ core-seconds/10s} \implies \sim 7.0\% \text{ of the 6-core box}$$
+  The cost is real. The userspace microbenchmark at [tx_kick_latency.rs](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/benches/tx_kick_latency.rs) isolates the instrumentation overhead to $< 60\text{ ns}$ (p99), proving that the measured kernel latency is not an artifact of userspace telemetry.
+
+---
+
+#### (3) The Core/Worker Spin Tradeoff vs. Headroom
+On a worker-bound box, the "recoverable fraction" is highly real, but it presents differently depending on the traffic regime:
+
+* **Worker-bound Regime (Saturation)**:
+  If the workers are at 100% CPU and dropping packets due to processing limits, eliminating the $5.32\text{ s}$ of kernel syscall execution time returns those cycles to userspace. The worker will spend those cycles processing packets from the RX ring, directly **increasing system throughput**.
+* **Sub-saturation Regime**:
+  If the box has spare capacity, the worker loop will complete its work faster and enter the `IdleBlock` state sooner, **reducing aggregate CPU usage**.
+* **The High-Risk Regression Mode**:
+  If the kick suppression is too aggressive, the kernel NAPI thread may experience delays in picking up TX descriptors, starving the TX ring and delaying completions. If the worker runs out of completions, it cannot reclaim frames, forcing the worker loop to spin unproductively at 100% CPU while waiting for free frames. This converts productive cycle savings into **useless worker spin**, regressing both throughput and latency.
+
+---
+
+#### (4) Safety of Gating CoS Post-Submit Kicks and the #1207/#1545 Trap
+Changing `force = true` to `force = false` on the four post-successful-submit kicks in [service.rs:L193, 367, 543, 716](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/cos/queue_service/service.rs#L193) is logically guarded by `needs_wakeup()`, but introduces a major concurrency risk.
+
+* **Why the `needs_wakeup()` Guard Nuance Works**:
+  The condition in `maybe_wake_tx` ([rings.rs:L239-243](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/tx/rings.rs#L239-L243)) reads:
+  ```rust
+  239:     if !bind_mode.is_zerocopy()
+  240:         || binding.xsk.tx.needs_wakeup()
+  241:         || force
+  242:         || now_ns.saturating_sub(binding.timers.last_tx_wake_ns) >= TX_WAKE_MIN_INTERVAL_NS
+  ```
+  If `force = false`, a kick still fires immediately when `needs_wakeup()` is set (meaning NAPI is asleep). If `needs_wakeup()` is clear, NAPI is already active and will pull the newly committed descriptors without a syscall. 
+* **The Idle-Binding Safety Net is Solid**:
+  If a queue commits descriptors and immediately goes idle, and NAPI subsequently goes to sleep without transmitting them, the `drain_phase_maybe_rekick` helper ([phase_trivial.rs:L26-33](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/tx/drain/phase_trivial.rs#L26-L33)) will capture it on the next loop cycle because `outstanding_tx > 0` and the pending queues are empty, issuing a gated kick.
+* **The Hidden Threat: Cacheline Bouncing and Atomic Contention**:
+  By suppressing $\sim 83\%$ of the `sendto` syscalls, the worker loop will execute its iterations **much faster** (no longer blocked by the $6.5\ \mu\text{s}$ syscall overhead). 
+  However, in CoS-ON mode, the workers continuously poll shared structures, such as `shared_exact_backlogs` ([service.rs:L236](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/cos/queue_service/service.rs#L236)) and `shared_queue_leases` ([mod.rs:L406](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/cos/queue_service/mod.rs#L406)).
+  Running the worker loops at a significantly higher frequency will **increase cacheline bouncing and atomic contention** across the 6 workers. This can introduce scheduling jitter and perturb the exact-guarantee cadence (violating the #1207/#1545 fairness constraints).
+
+---
+
+#### (5) Verdict & Defensible Ship Path
+The plan's default recommendation of **PLAN-KILL** is appropriate given the risk profile, but there is a defensible, narrow path to validation.
+
+* **Defensible Action Plan**:
+  Rather than a blind `force = false` switch which couples the safety net to the $50\ \mu\text{s}$ interval, implement a strict **`needs_wakeup()`-only bypass** for the post-submit path that suppresses kicks when `needs_wakeup()` is clear, but does not enforce any minimum interval delay if the kernel actually requests a wakeup.
+* **Mandatory Gates to Move from PLAN-NEEDS-MAJOR to PLAN-READY**:
+  1. **Contention Monitoring**: Add atomic contention metrics or track loop frequency changes to ensure the faster userspace loop does not degrade the L3 cache/bus performance.
+  2. **CoS Jitter / Fairness CoV Gate**: The A/B plan must explicitly track the Coefficient of Variation (CoV) of the exact-guarantee queue scheduling latency under load to verify that cadence is not perturbed.
+  3. **Tid-Filtered Attribution**: Re-run the Step 1 attribution using a BPF script that filters out the main loop's `libc::poll` call (by tracking syscall file descriptor targets) to obtain a clean, uncontaminated baseline.
+
+---
+
+### Summary of Work Done
+* Reviewed the implementation of `maybe_wake_tx` and `maybe_wake_rx` in [rings.rs](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/tx/rings.rs).
+* Analyzed the CoS queue service structure and identify the exact points of forced kicks in [service.rs](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/cos/queue_service/service.rs).
+* Traced the worker's interrupt-mode polling logic in [loop_body/mod.rs](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/worker/loop_body/mod.rs) and the safety-net re-kick in [phase_trivial.rs](file:///home/ps/git/bpfrx/.claude/worktrees/1754-research/userspace-dp/src/afxdp/tx/drain/phase_trivial.rs).
+* Researched Git history for issues `#1207` and `#1545` to locate structural regression precedents.
+* Documented the VM-exit/kprobe overhead calculations and the cacheline contention risks associated with the proposed changes.
