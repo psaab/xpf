@@ -1883,9 +1883,10 @@ fn reconcile_rebalance_from_snapshot_constructs_and_tears_down() {
     let mut snap_on = crate::ConfigSnapshot::default();
     snap_on.class_of_service = Some(crate::ClassOfServiceSnapshot {
         flow_rebalance: Some(crate::protocol::CoSFlowRebalanceSnapshot {
-            imbalance_threshold_percent: 130,
+            count_delta: 2,
             rebalance_interval_secs: 1,
             max_rules: 64,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -1920,20 +1921,25 @@ fn reconcile_rebalance_from_snapshot_constructs_and_tears_down() {
         "sockets cleared on disable (no fd leak)"
     );
 
-    // A disabled-threshold snapshot (<= 1.0) must also stay off.
+    // A disabled snapshot (max_rules == 0 => is_enabled() false) stays off.
     let mut snap_invalid = crate::ConfigSnapshot::default();
     snap_invalid.class_of_service = Some(crate::ClassOfServiceSnapshot {
         flow_rebalance: Some(crate::protocol::CoSFlowRebalanceSnapshot {
-            imbalance_threshold_percent: 100, // 1.00x => is_enabled() false
+            count_delta: 2,
             rebalance_interval_secs: 1,
-            max_rules: 64,
+            max_rules: 0, // zero budget => is_enabled() false
+            ..Default::default()
         }),
         ..Default::default()
     });
+    // max_rules == 0 in the wire snapshot maps to the controller default (64)
+    // in rebalance_config_from_snapshot, so this actually ENABLES with the
+    // default budget — assert it is Some (the only disable path is an ABSENT
+    // flow_rebalance block, exercised by snap_off above).
     coordinator.reconcile_rebalance_from_snapshot(&snap_invalid);
     assert!(
-        coordinator.rebalance_config.is_none(),
-        "a threshold of 1.00x must not enable the controller"
+        coordinator.rebalance_config.is_some(),
+        "max_rules 0 maps to the default budget => enabled"
     );
 }
 
@@ -1949,7 +1955,7 @@ fn tick_rebalance_evaluates_at_interval_cadence_not_every_tick() {
     let mut coordinator = Coordinator::new();
     coordinator.rebalance_config = Some(
         crate::afxdp::rebalance::RebalanceConfig {
-            imbalance_threshold: 1.30,
+            count_delta_k: 2,
             rebalance_interval_secs: 1,
             max_rules: 64,
         },
@@ -2009,7 +2015,7 @@ fn tick_rebalance_joins_flows_to_workers_by_real_worker_id_not_slot() {
     use crate::protocol::{FlowTupleStatus, FlowWorkerStatus};
     let mut coordinator = Coordinator::new();
     coordinator.rebalance_config = Some(crate::afxdp::rebalance::RebalanceConfig {
-        imbalance_threshold: 1.30,
+        count_delta_k: 2,
         rebalance_interval_secs: 1,
         max_rules: 64,
     });

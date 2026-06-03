@@ -16,19 +16,26 @@ flows — slow flows on the crowded worker, fast flows on the idle one.
 The #1746 equal-flow cap can only clip fast flows *down*; it cannot lift slow
 flows. The only lever that lifts slow flows **and** preserves aggregate
 throughput is moving an established flow off an overloaded worker onto an idle
-one. This controller does that automatically: it observes per-worker byte-rate
-imbalance and, when the imbalance persists, installs one exact-5-tuple ntuple
-flow-steering rule (`ethtool -N`-style, via a direct `SIOCETHTOOL` ioctl) that
-re-pins the heaviest flow on the hottest worker to the least-loaded worker's RX
-queue.
+one. This controller does that automatically: it **count-balances** — it
+observes the per-worker steerable-flow COUNT, and when the busiest worker
+carries materially more flows than the idlest, it installs one exact-5-tuple
+ntuple flow-steering rule (`ethtool -N`-style, via a direct `SIOCETHTOOL`
+ioctl) that re-pins one flow from the highest-count worker to the lowest-count
+worker. Over a few moves the count partition converges toward even (e.g.
+`2,2,2,2,2,2` across 6 queues), which for homogeneous (equal-rate) traffic is
+the fair floor.
 
-Measured in the R1 spike: established-flow mid-flight re-pin took per-flow CoV
-from 16.8% → 2.3–4.2% while *raising* aggregate throughput.
+> **#1751 design note.** The selector is COUNT-based, not byte-rate-based. The
+> earlier byte-rate selector never installed a rule under load because the
+> per-flow byte-rate signal was unreliable (the flow-cache `observed_bytes`
+> counter resets on eviction). The per-worker flow COUNT is reliable, and a
+> manual count-balanced re-pin on the cluster drove per-flow CoV to ~3% with
+> aggregate preserved (the R1 spike + the #1751 CoS-ON pre-code gate).
 
 ## Configuration
 
 ```
-set class-of-service flow-rebalance imbalance-threshold 130
+set class-of-service flow-rebalance count-delta 2
 set class-of-service flow-rebalance rebalance-interval 1
 set class-of-service flow-rebalance max-rules 64
 ```
@@ -39,7 +46,8 @@ controller; the unset sub-leaves take the defaults below.
 
 | Leaf | Units | Default | Range | Meaning |
 |---|---|---|---|---|
-| `imbalance-threshold` | percent of mean | 130 | 101–1000 | Move only when the hottest worker's byte-rate exceeds this percent of the mean (130 = 1.30×). |
+| `count-delta` | flows (K) | 2 | 2–64 | Move only when the busiest worker carries at least K more steerable flows than the idlest (`max_count − min_count ≥ K`). |
+| `imbalance-threshold` | percent | — | 101–1000 | **Deprecated** (the #1748 byte-rate threshold). Parsed for config back-compat but **ignored** by the count-balancing decision. |
 | `rebalance-interval` | seconds | 1 | 1–3600 | Minimum dwell between rule installs (one move per interval). |
 | `max-rules` | rules | 64 | 1–1024 | Hard cap on concurrently-installed ntuple rules per interface. At the cap the controller STOPS — it never evicts an existing rule. |
 
@@ -53,27 +61,39 @@ On disable (or any config change to the block), every installed rule is torn
 down — a still-live move hands ownership back to the original worker before its
 rule is removed, so no flow is dropped and no orphan hardware rule survives.
 
-## Selection logic (why it does not thrash)
+## Selection logic (why it converges and does not thrash)
 
 Per tick (coordinator status cadence, ~1 Hz — never per-packet):
 
-1. Derive per-worker byte-rate over the window.
-2. If `max_worker / mean > imbalance-threshold` **and** it has persisted for at
-   least two consecutive ticks (hysteresis), consider a move.
-3. Pick the **heaviest** flow on the **hottest** worker whose move to the
-   **least-loaded** worker most flattens the per-worker byte-rate vector,
-   subject to:
-   - **magnitude guard** — the flow's rate must be ≤ ½ the source-destination
-     gap, so the move cannot make the destination the new hottest worker;
-   - **ε-band** — the projected byte-rate CoV must improve by more than a small
-     epsilon, so marginal moves are skipped;
+1. Count the steerable flows per worker, from the SAME flow-worker-map snapshot
+   the candidate 5-tuples come from (count and rows are one object, so the
+   count can never disagree with the available rows).
+2. If `max_count − min_count ≥ K` **and** it has persisted for at least two
+   consecutive ticks (hysteresis), consider a move.
+3. Move one flow from the highest-count worker (`hi`) to the lowest-count
+   worker (`lo`), subject to:
+   - **overshoot guard** — require `c_hi − c_lo ≥ 2`, so moving one flow cannot
+     make `lo` the new max. This guarantees each accepted move strictly
+     decreases the sum-of-squares potential `Ψ = Σ count²` by at least 2
+     (`ΔΨ = 2 − 2(c_hi − c_lo) ≤ −2`), so the process terminates at the even
+     partition (mean-independent — holds for a non-integer mean too);
    - **per-flow cooldown** — a flow re-pinned within several intervals is
      ineligible (oscillation guard);
-   - **one move per `rebalance-interval`** (dwell).
+   - **one move per `rebalance-interval`** (dwell);
+   - **truncation defer** — if the flow-worker-map snapshot is truncated (so the
+     row count would understate the true count) the controller skips the tick.
 4. At `max-rules`, STOP (no eviction).
 
-The objective is monotone under the ε-band over a finite flow set, so it
-terminates and cannot oscillate.
+Because `Ψ` is a non-negative integer that drops by ≥ 2 every accepted move and
+no move is accepted once the counts are within ±1 of even, the controller
+converges in a bounded number of moves and cannot oscillate.
+
+**Limitation (heterogeneous traffic).** Equal *count* ≠ equal *rate*. For
+homogeneous traffic (e.g. iperf `-P`, all flows ≈ equal rate) count-balancing
+reaches the fair floor. For an elephant + several mice on one worker, an even
+count partition does not flatten per-flow rate; count-balancing cannot fix
+within-worker rate skew. A rate-aware tiebreak among count-eligible candidates
+is a documented follow-up gated on a reliable per-flow byte feed (#1750).
 
 ## Correctness: the move is a barriered ownership transfer
 
@@ -124,14 +144,16 @@ Per-interface Prometheus gauges/counters (`{ifindex}` label):
 - `xpf_userspace_flow_rebalance_rules_active` — installed rules now.
 - `xpf_userspace_flow_rebalance_installs_total` / `_deletes_total`.
 - `xpf_userspace_flow_rebalance_moves_skipped_total{reason}` — why a candidate
-  move was not taken (`balanced`, `cooldown`, `magnitude`, `epsilon`,
-  `no_eligible_flow`, `budget_exhausted`, `barrier_failed`, `dwell`,
-  `restore_failed`). `no_eligible_flow` (distinct from `epsilon`) means the
-  hottest worker had no movable flow with a positive rate — a per-flow signal
-  problem, not a too-conservative move threshold.
+  move was not taken. #1751 count-balancing labels: `balanced` (count delta
+  `< K`, or counts already even), `magnitude` (count overshoot guard —
+  `c_hi − c_lo < 2`), `cooldown`, `no_eligible_flow`, `budget_exhausted`,
+  `barrier_failed`, `dwell`, `restore_failed`, `truncated` (deferred on a
+  truncated flow-worker-map snapshot). `epsilon` is retained for metric ABI
+  but is never recorded by the count selector.
 - `xpf_userspace_flow_rebalance_worker_byterate_cov` — the live per-worker
-  byte-rate CoV the controller observed at the last tick (this is the metric
-  the feature is trying to drive down).
+  byte-rate CoV at the last tick. **Observability only** under #1751 (the
+  decision is count-driven); it tracks the byte-rate imbalance the operator
+  ultimately wants to see fall as the counts balance.
 
 ## Hardware support
 

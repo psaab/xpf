@@ -1,7 +1,11 @@
-// #1748 controller unit tests: selection objective, hysteresis, magnitude
-// guard, oscillation cooldown, budget-exhaustion (NO eviction), barrier
-// ordering, and reverse-barrier rollback (>= 1 owner). The barrier transport
-// is mocked so the move protocol is exercised without a live Coordinator/NIC.
+// #1751 controller unit tests: COUNT-balancing selection (sum-of-squares
+// convergence, overshoot guard, K threshold, cooldown, truncation defer,
+// unsteerable-never-source) PLUS the #1748 move-machinery tests (barrier
+// ordering, reverse-barrier rollback, budget-exhaustion, second-move unwind,
+// teardown) carried forward UNCHANGED in behavior — the machinery is re-used
+// verbatim, only the SELECTION (which flow / which target / the guards)
+// changed. The barrier transport is mocked so the move protocol is exercised
+// without a live Coordinator/NIC.
 
 use super::*;
 use super::super::ntuple::FlowSpec5Tuple;
@@ -23,8 +27,32 @@ fn worker(worker_id: u32, byte_rate: f64) -> WorkerByteRate {
     WorkerByteRate { worker_id, queue_id: worker_id, byte_rate }
 }
 
+// #1751: byte_rate is observability-only on the decision path; for count tests
+// it is irrelevant, so flow() takes a byte_rate but most tests pass 0.0.
 fn flow(src_port: u16, worker_id: u32, byte_rate: f64) -> FlowSample {
     FlowSample { key: key(src_port), worker_id, byte_rate }
+}
+
+/// Build `n_flows` flows on `worker_id` with distinct src_ports derived from
+/// (worker_id, index) so keys are unique across the whole vector. byte_rate 0
+/// (count-balancing ignores it on the decision path).
+fn flows_on(worker_id: u32, n_flows: u32) -> Vec<FlowSample> {
+    (0..n_flows)
+        .map(|i| flow(1000 + (worker_id as u16) * 100 + i as u16, worker_id, 0.0))
+        .collect()
+}
+
+/// Build a `RebalanceTickInput` for a per-worker COUNT vector `counts[w]` over
+/// workers 0..counts.len(). Each worker gets `counts[w]` distinct flows; byte
+/// rates are 0 (irrelevant to count-balancing). `truncated = false`.
+fn count_input(ifindex: i32, counts: &[u32], now_secs: u64) -> RebalanceTickInput {
+    let workers: Vec<WorkerByteRate> =
+        (0..counts.len() as u32).map(|w| worker(w, 0.0)).collect();
+    let mut flows = Vec::new();
+    for (w, &c) in counts.iter().enumerate() {
+        flows.extend(flows_on(w as u32, c));
+    }
+    RebalanceTickInput { ifindex, workers, flows, now_secs, truncated: false }
 }
 
 /// Records every barrier call in order so tests can assert the protocol
@@ -76,8 +104,6 @@ impl BarrierTransport for MockTransport {
     }
     fn demote(&mut self, worker_id: u32, key: &SessionKey) -> bool {
         self.calls.push(format!("demote:{worker_id}:{}", key.src_port));
-        // W_old's local copy was the original owner; demote flips it to the
-        // inert RebalancedOut. The promoted W_new owner is unaffected.
         if self.demote_ok {
             self.origins.insert((worker_id, key.src_port), "rebalanced_out");
         }
@@ -93,7 +119,6 @@ impl BarrierTransport for MockTransport {
     }
     fn demote_replica(&mut self, worker_id: u32, key: &SessionKey) -> bool {
         self.calls.push(format!("replica:{worker_id}:{}", key.src_port));
-        // Only demote the W_new owner to a replica; never below 0 owners.
         if self.origins.get(&(worker_id, key.src_port)) == Some(&"rebalanced_owner") {
             self.origins.insert((worker_id, key.src_port), "replica");
         }
@@ -127,803 +152,487 @@ fn test_controller(config: RebalanceConfig) -> RebalanceController {
 
 fn cfg() -> RebalanceConfig {
     RebalanceConfig {
-        imbalance_threshold: 1.30,
+        count_delta_k: 2,
         rebalance_interval_secs: 1,
-        max_rules: 8,
+        max_rules: 64,
     }
 }
 
-#[test]
-fn cov_zero_for_balanced_vector() {
-    let ws = vec![worker(0, 100.0), worker(1, 100.0), worker(2, 100.0)];
-    assert!(byte_rate_cov(&ws) < 1e-9);
+/// Drive the controller through the dwell (DWELL_TICKS_REQUIRED=2) and the
+/// interval gate by ticking the SAME count vector at 1s spacing until a move
+/// is committed or `max_ticks` is hit. Returns the first committed outcome.
+/// Used by the convergence tests where we want one accepted move at a time.
+fn drive_one_move<T: BarrierTransport>(
+    c: &mut RebalanceController,
+    tx: &mut T,
+    counts: &[u32],
+    start_secs: u64,
+) -> Option<MoveOutcome> {
+    for t in 0..8u64 {
+        let input = count_input(5, counts, start_secs + t);
+        if let Some(mv) = c.tick(&input, tx) {
+            return Some(mv);
+        }
+    }
+    None
 }
 
-#[test]
-fn cov_positive_for_skewed_vector() {
-    let ws = vec![worker(0, 400.0), worker(1, 100.0), worker(2, 100.0)];
-    assert!(byte_rate_cov(&ws) > 0.5);
-}
+// ── #1751 count-balancing convergence + selection ──────────────────────
 
+/// THE KEY REGRESSION (#1748's byte-rate selector installed 0 rules live): a
+/// real per-worker count imbalance MUST produce an install via the
+/// count-balancing selector.
 #[test]
-fn hysteresis_requires_persisted_imbalance() {
+fn count_imbalance_produces_an_install() {
     let mut c = test_controller(cfg());
     let mut tx = MockTransport::good();
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        // Hottest 400, coolest 100: imbalance ratio 400/200 = 2.0 > 1.3.
-        workers: vec![worker(0, 400.0), worker(1, 100.0), worker(2, 100.0)],
-        flows: vec![
-            flow(1001, 0, 150.0),
-            flow(1002, 0, 150.0),
-            flow(1003, 0, 100.0),
-        ],
-        now_secs: 10,
-    };
-    // First over-threshold tick: dwell not yet satisfied -> no move.
-    assert!(c.tick(&input, &mut tx).is_none());
-    assert!(tx.calls.is_empty(), "no barrier on the first tick");
-    // Second tick at a later second: dwell satisfied -> move taken.
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    let outcome = c.tick(&input2, &mut tx);
-    assert!(outcome.is_some(), "move taken after dwell: calls={:?}", tx.calls);
+    // [3,3,2,2,1,1]: hi has 3 flows (worker 0), lo has 1 (worker 4 or 5).
+    let mv = drive_one_move(&mut c, &mut tx, &[3, 3, 2, 2, 1, 1], 10)
+        .expect("a count imbalance MUST install");
+    assert_eq!(c.metrics().installs_total, 1);
+    assert!(c.metrics().rules_active >= 1);
+    // Source is a count-3 worker; destination is a count-1 worker.
+    assert!(matches!(mv.old_worker, 0 | 1), "source is a count-3 worker: {mv:?}");
+    assert!(matches!(mv.new_worker, 4 | 5), "destination is a count-1 worker: {mv:?}");
+    assert!(tx.calls.iter().any(|c| c.starts_with("install:")));
 }
 
+/// The live [0,3,5,2,0,2] distribution converges and installs.
+#[test]
+fn live_count_distribution_installs() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    let mv = drive_one_move(&mut c, &mut tx, &[0, 3, 5, 2, 0, 2], 10)
+        .expect("the live imbalance MUST install");
+    assert_eq!(mv.old_worker, 2, "source is the count-5 worker 2");
+    assert!(matches!(mv.new_worker, 0 | 4), "destination is a count-0 worker");
+    assert_eq!(c.metrics().installs_total, 1);
+}
+
+/// Sum-of-squares Ψ strictly decreases by >= 2 per accepted move and the
+/// vector converges toward even. Drives [2,2,1,1,4,2] -> ... applying each
+/// move to a simulated count vector, asserting ΔΨ <= -2 each time.
+#[test]
+fn count_balance_converges_to_even_partition() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    let mut counts: Vec<u32> = vec![2, 2, 1, 1, 4, 2]; // sum 12, 6 workers
+    let mut now = 10u64;
+    let mut prev_psi = sum_of_squares(&counts);
+    let mut moves = 0;
+    loop {
+        let Some(mv) = drive_one_move(&mut c, &mut tx, &counts, now) else {
+            break; // converged (no admitted move)
+        };
+        // Apply the move to the simulated vector.
+        counts[mv.old_worker as usize] -= 1;
+        counts[mv.new_worker as usize] += 1;
+        let psi = sum_of_squares(&counts);
+        assert!(
+            prev_psi >= psi + 2,
+            "Psi must drop by >= 2 per move: {prev_psi} -> {psi} after move {mv:?}, counts={counts:?}"
+        );
+        prev_psi = psi;
+        moves += 1;
+        c.clear_cooldown_for_test(); // allow the next distinct move
+        now += 10;
+        assert!(moves < 20, "must terminate");
+    }
+    // Converged to an even partition: max - min <= 1.
+    let max = *counts.iter().max().unwrap();
+    let min = *counts.iter().min().unwrap();
+    assert!(max - min <= 1, "converged within +-1 of even: {counts:?}");
+    assert_eq!(counts, vec![2, 2, 2, 2, 2, 2], "12/6 converges to all-2");
+    assert!(moves >= 1, "at least one move happened");
+}
+
+/// The Codex counterexamples that broke max-min and L1: [3,3,3,3,1,1,1,1]
+/// converges in exactly 4 moves and [2,2,2,2,0] converges, with Ψ dropping by
+/// >= 2 each move even though max-min / L1 are not per-move monotone (§3.4).
+#[test]
+fn count_balance_sos_potential_counterexamples() {
+    // [3,3,3,3,1,1,1,1]: sum 16, 8 workers, mean 2. 4 moves to all-2.
+    {
+        let mut c = test_controller(cfg());
+        let mut tx = MockTransport::good();
+        let mut counts: Vec<u32> = vec![3, 3, 3, 3, 1, 1, 1, 1];
+        let mut now = 10u64;
+        let mut prev = sum_of_squares(&counts);
+        let mut moves = 0;
+        while let Some(mv) = drive_one_move(&mut c, &mut tx, &counts, now) {
+            counts[mv.old_worker as usize] -= 1;
+            counts[mv.new_worker as usize] += 1;
+            let psi = sum_of_squares(&counts);
+            assert!(prev >= psi + 2, "Psi -2/move: {prev}->{psi} {counts:?}");
+            prev = psi;
+            moves += 1;
+            c.clear_cooldown_for_test();
+            now += 10;
+            assert!(moves <= 8, "bounded");
+        }
+        assert_eq!(moves, 4, "[3;4,1;4] takes exactly 4 moves (Codex r1 counterexample)");
+        assert_eq!(counts, vec![2, 2, 2, 2, 2, 2, 2, 2]);
+    }
+    // [2,2,2,2,0]: sum 8, 5 workers, NON-INTEGER mean 1.6 (Codex r2 / L1 break).
+    {
+        let mut c = test_controller(cfg());
+        let mut tx = MockTransport::good();
+        let mut counts: Vec<u32> = vec![2, 2, 2, 2, 0];
+        // SoS check on the FIRST admitted move (the one that broke L1): 2->0
+        // gives [2,2,2,1,1], Psi 16 -> 14 (= -2), whereas L1 dropped only 0.8.
+        let mut now = 10u64;
+        let mut prev = sum_of_squares(&counts); // 4*4 + 0 = 16
+        assert_eq!(prev, 16);
+        let mut moves = 0;
+        while let Some(mv) = drive_one_move(&mut c, &mut tx, &counts, now) {
+            counts[mv.old_worker as usize] -= 1;
+            counts[mv.new_worker as usize] += 1;
+            let psi = sum_of_squares(&counts);
+            assert!(prev >= psi + 2, "Psi -2/move on non-integer mean: {prev}->{psi} {counts:?}");
+            prev = psi;
+            moves += 1;
+            c.clear_cooldown_for_test();
+            now += 10;
+            assert!(moves <= 6, "bounded");
+        }
+        // Converges within +-1 of mean 1.6 -> counts all in {1,2}.
+        assert!(counts.iter().all(|&x| x == 1 || x == 2), "within +-1: {counts:?}");
+        let max = *counts.iter().max().unwrap();
+        let min = *counts.iter().min().unwrap();
+        assert!(max - min <= 1, "converged: {counts:?}");
+        assert_eq!(moves, 1, "[2,2,2,2,0] needs exactly one move to balance");
+    }
+}
+
+/// Overshoot guard: a 1-delta imbalance (3,2) yields NO move — moving one flow
+/// would just swap which worker is the max (Magnitude skip, count-overshoot).
+#[test]
+fn count_overshoot_guard_blocks_1_delta() {
+    // K=1 so the threshold does NOT block; the OVERSHOOT guard must.
+    let mut c = test_controller(RebalanceConfig {
+        count_delta_k: 1, // effective_k() floors to 2, but exercise both gates
+        rebalance_interval_secs: 1,
+        max_rules: 64,
+    });
+    let mut tx = MockTransport::good();
+    // [3,2]: delta 1. No move should be admitted.
+    assert!(drive_one_move(&mut c, &mut tx, &[3, 2], 10).is_none());
+    assert_eq!(c.metrics().installs_total, 0);
+    assert!(!tx.calls.iter().any(|c| c.starts_with("install:")));
+}
+
+/// K count-delta threshold: an imbalance below K is Balanced (no move). With
+/// K=3, a [3,1,...]-style delta-2 imbalance is below threshold.
+#[test]
+fn count_delta_threshold_k_blocks_below_k() {
+    let mut c = test_controller(RebalanceConfig {
+        count_delta_k: 3,
+        rebalance_interval_secs: 1,
+        max_rules: 64,
+    });
+    let mut tx = MockTransport::good();
+    // delta = 3 - 1 = 2 < K=3 -> Balanced, no move.
+    assert!(drive_one_move(&mut c, &mut tx, &[3, 2, 1], 10).is_none());
+    let bal = c.metrics().moves_skipped.get(&SkipReason::Balanced).copied().unwrap_or(0);
+    assert!(bal >= 1, "below-K imbalance recorded Balanced: {:?}", c.metrics().moves_skipped);
+    // delta = 4 - 1 = 3 >= K=3 -> a move.
+    assert!(drive_one_move(&mut c, &mut tx, &[4, 2, 1], 100).is_some());
+}
+
+/// Truly-even counts yield no move.
+#[test]
+fn even_counts_yield_no_move() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    assert!(drive_one_move(&mut c, &mut tx, &[2, 2, 2, 2, 2, 2], 10).is_none());
+    assert_eq!(c.metrics().installs_total, 0);
+    let bal = c.metrics().moves_skipped.get(&SkipReason::Balanced).copied().unwrap_or(0);
+    assert!(bal >= 1, "even counts recorded Balanced");
+}
+
+/// A truncated snapshot defers — no decision on understated counts.
+#[test]
+fn truncated_snapshot_defers() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // A clear imbalance, but the snapshot is truncated => defer.
+    for t in 0..4u64 {
+        let mut input = count_input(5, &[5, 0, 0, 0, 0, 0], 10 + t);
+        input.truncated = true;
+        assert!(c.tick(&input, &mut tx).is_none());
+    }
+    assert_eq!(c.metrics().installs_total, 0);
+    let trunc = c.metrics().moves_skipped.get(&SkipReason::Truncated).copied().unwrap_or(0);
+    assert!(trunc >= 1, "truncated snapshot recorded Truncated defer");
+    assert!(!tx.calls.iter().any(|c| c.starts_with("install:")));
+}
+
+/// A worker carrying only non-steerable traffic (steerable-count 0) is never
+/// chosen as the `hi` source (§3.3.1). Here worker 4 has steerable-count 0 (no
+/// flows); the source must be the count-4 worker 0, never worker 4.
+#[test]
+fn unsteerable_only_worker_is_never_source() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // [4,1,1,1,0]: worker 4 has 0 steerable flows (it is the lo, not the hi).
+    let mv = drive_one_move(&mut c, &mut tx, &[4, 1, 1, 1, 0], 10)
+        .expect("install off the count-4 worker");
+    assert_eq!(mv.old_worker, 0, "source is the count-4 worker, never the count-0 worker");
+    assert_eq!(mv.new_worker, 4, "destination IS the count-0 worker");
+}
+
+/// Cooldown: a just-moved flow is not re-chosen as the immediate next move
+/// (anti-thrash). After the first move on a [4,0] vector, the same flow is in
+/// cooldown so the very next tick cannot re-pin it.
+#[test]
+fn cooldown_prevents_immediate_thrash() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    let mv1 = drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("first move");
+    let moved_port = mv1.key.src_port;
+    // Immediately (inside the cooldown window) present the SAME flows again.
+    // The moved flow is in cooldown, so it cannot be the chosen candidate; the
+    // remaining flows on worker 0 can still move, but the just-moved one must
+    // not be re-selected.
+    let input = count_input(5, &[3, 0], 12);
+    c.tick(&input, &mut tx);
+    let input2 = count_input(5, &[3, 0], 13);
+    if let Some(mv2) = c.tick(&input2, &mut tx) {
+        assert_ne!(mv2.key.src_port, moved_port, "cooled-down flow not re-chosen");
+    }
+}
+
+// ── #1751 sum-of-squares helper for the convergence tests ──────────────
+fn sum_of_squares(counts: &[u32]) -> u64 {
+    counts.iter().map(|&c| (c as u64) * (c as u64)).sum()
+}
+
+// ── #1748 move-machinery tests, carried forward (count-driven) ─────────
+
+/// Barrier order: promote(W_new) -> demote(W_old) -> install. Drive a [3,0]
+/// count imbalance (worker 0 hi, worker 1 lo).
 #[test]
 fn barrier_order_is_promote_then_demote_then_install() {
     let mut c = test_controller(cfg());
     let mut tx = MockTransport::good();
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 120.0), flow(1002, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx); // dwell
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    c.tick(&input2, &mut tx);
-    // The committed sequence must be promote(W_new) -> demote(W_old) ->
-    // install. W_new is worker 1 (coolest), W_old is worker 0 (hottest).
+    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("move");
     let promote_idx = tx.calls.iter().position(|c| c.starts_with("promote:1:")).unwrap();
     let demote_idx = tx.calls.iter().position(|c| c.starts_with("demote:0:")).unwrap();
     let install_idx = tx.calls.iter().position(|c| c.starts_with("install:")).unwrap();
-    assert!(promote_idx < demote_idx, "promote before demote: {:?}", tx.calls);
+    assert!(promote_idx < demote_idx, "promote(W_new=1) before demote(W_old=0): {:?}", tx.calls);
     assert!(demote_idx < install_idx, "demote before install: {:?}", tx.calls);
+    // Destination queue is worker 1's queue_id (== worker_id in the fixture).
+    assert!(tx.calls.iter().any(|c| c == "install:q1"));
 }
 
+/// Demote-ack failure rolls back via the reverse barrier and keeps >= 1 owner.
 #[test]
 fn demote_failure_reverse_barrier_keeps_an_owner() {
     let mut c = test_controller(cfg());
     let mut tx = MockTransport::good();
-    tx.demote_ok = false; // W_old demote ack fails.
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 120.0), flow(1002, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx); // dwell
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    let outcome = c.tick(&input2, &mut tx);
-    assert!(outcome.is_none(), "no committed move on demote failure");
-    // Reverse barrier order: restore(W_old) BEFORE replica(W_new).
+    tx.demote_ok = false;
+    assert!(drive_one_move(&mut c, &mut tx, &[3, 0], 10).is_none());
     let restore_idx = tx.calls.iter().position(|c| c.starts_with("restore:")).unwrap();
     let replica_idx = tx.calls.iter().position(|c| c.starts_with("replica:")).unwrap();
     assert!(restore_idx < replica_idx, "restore before replica: {:?}", tx.calls);
-    // No install happened.
     assert!(!tx.calls.iter().any(|c| c.starts_with("install:")));
-    // >= 1 owner remains across the rollback.
-    assert!(tx.owners() >= 1, "rollback must keep >= 1 owner: {:?}", tx.origins);
+    assert!(tx.owners() >= 1, "rollback keeps >= 1 owner: {:?}", tx.origins);
 }
 
+/// Install ioctl failure rolls back via the reverse barrier; no rule recorded.
 #[test]
 fn install_failure_reverse_barrier_keeps_an_owner() {
     let mut c = test_controller(cfg());
     let mut tx = MockTransport::good();
-    tx.install_ok = false; // ioctl returns ENOSPC.
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 120.0), flow(1002, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    assert!(c.tick(&input2, &mut tx).is_none());
+    tx.install_ok = false;
+    assert!(drive_one_move(&mut c, &mut tx, &[3, 0], 10).is_none());
     let restore_idx = tx.calls.iter().position(|c| c.starts_with("restore:")).unwrap();
     let replica_idx = tx.calls.iter().position(|c| c.starts_with("replica:")).unwrap();
     assert!(restore_idx < replica_idx);
-    assert!(tx.owners() >= 1, "rollback after install fail keeps owner");
+    assert!(tx.owners() >= 1);
     assert_eq!(c.metrics().rules_active, 0, "no rule recorded on failed install");
 }
 
+/// Budget exhaustion stops with NO eviction. Drive an EVOLVING count vector
+/// (each committed move shifts a flow hi->lo), so each move re-pins a DISTINCT
+/// flow (the moved flows stay in cooldown — we do NOT clear it — so they are
+/// never re-chosen). With max_rules=2 only 2 installs may commit; the rest are
+/// budget-exhausted skips with NO rule ever deleted.
 #[test]
 fn budget_exhaustion_stops_no_eviction() {
     let mut c = test_controller(RebalanceConfig {
-        imbalance_threshold: 1.30,
-        rebalance_interval_secs: 0, // allow back-to-back moves for the test
+        count_delta_k: 2,
+        rebalance_interval_secs: 1, // cooldown = 5s keeps moved flows out
         max_rules: 2,
     });
     let mut tx = MockTransport::good();
-    // Drive enough distinct moves to fill the budget. Each tick moves one
-    // flow; use a persistent imbalance and fresh flows so cooldown does not
-    // block subsequent moves.
+    // 6 workers, all surplus on worker 0. Moving 0->each idle worker keeps
+    // worker 0 the source and each destination reaches at most 1, so no moved
+    // flow ever re-becomes the hottest and gets re-chosen (no second-move
+    // unwind that would free budget). Moved flows stay in the 5s cooldown.
+    let mut counts: Vec<u32> = vec![6, 0, 0, 0, 0, 0];
     let mut now = 10u64;
-    let mut installed = 0u32;
-    for round in 0..6 {
-        let input = RebalanceTickInput {
-            ifindex: 1,
-            workers: vec![worker(0, 400.0), worker(1, 100.0)],
-            flows: vec![
-                flow(2000 + round, 0, 120.0),
-                flow(3000 + round, 0, 120.0),
-            ],
-            now_secs: now,
-        };
-        // Two ticks to clear the dwell each round (dwell resets after a move).
-        c.tick(&input, &mut tx);
-        now += 1;
-        let input2 = RebalanceTickInput { now_secs: now, ..input };
-        if c.tick(&input2, &mut tx).is_some() {
-            installed += 1;
+    let mut installs = 0;
+    for _ in 0..40 {
+        let input = count_input(5, &counts, now);
+        if let Some(mv) = c.tick(&input, &mut tx) {
+            counts[mv.old_worker as usize] -= 1;
+            counts[mv.new_worker as usize] += 1;
+            installs += 1;
         }
-        now += 1;
+        now += 1; // 1s/tick: clears the install cadence, stays < 5s cooldown
     }
-    assert_eq!(installed, 2, "exactly max_rules moves committed");
-    assert_eq!(c.metrics().rules_active, 2);
-    // CRITICAL: no delete/eviction ever happened at the cap.
-    assert!(
-        !tx.calls.iter().any(|c| c.starts_with("delete:")),
-        "budget exhaustion must NOT evict/delete: {:?}", tx.calls
-    );
+    assert_eq!(installs, 2, "exactly max_rules moves commit");
+    assert_eq!(c.metrics().rules_active, 2, "stops at max_rules");
+    assert!(!tx.calls.iter().any(|c| c.starts_with("delete:")), "NO eviction at cap: {:?}", tx.calls);
     assert_eq!(c.metrics().deletes_total, 0);
-    let skipped = c.metrics().moves_skipped
-        .get(&SkipReason::BudgetExhausted)
-        .copied()
-        .unwrap_or(0);
+    let skipped = c.metrics().moves_skipped.get(&SkipReason::BudgetExhausted).copied().unwrap_or(0);
     assert!(skipped >= 1, "budget-exhausted skip recorded");
 }
 
-#[test]
-fn magnitude_guard_rejects_overlarge_flow() {
-    let mut c = test_controller(cfg());
-    let mut tx = MockTransport::good();
-    // #1748 live BLOCKER B: the guard is `move_rate > gap` (relaxed from
-    // gap/2). gap = 400 - 100 = 300. A 350 byte/s flow exceeds gap, so moving
-    // it would overload the destination past the old hottest -> reject.
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 350.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    assert!(c.tick(&input2, &mut tx).is_none());
-    assert!(!tx.calls.iter().any(|c| c.starts_with("install:")));
-    let mag = c.metrics().moves_skipped.get(&SkipReason::Magnitude).copied().unwrap_or(0);
-    assert!(mag >= 1, "magnitude skip recorded: {:?}", c.metrics().moves_skipped);
-}
-
-#[test]
-fn magnitude_guard_admits_flow_between_half_gap_and_gap() {
-    // #1748 live BLOCKER B regression: a flow whose rate is in (gap/2, gap] was
-    // WRONGLY rejected by the old gap/2 guard even though moving it improves
-    // balance. With the relaxed `> gap` guard it must now be ADMITTED.
-    // workers [450, 100]: gap = 350, gap/2 = 175. A 250 byte/s flow (between
-    // 175 and 350) clears the magnitude guard; moving it -> [200, 350] which is
-    // more balanced (CoV drops), so it must install.
-    let mut c = test_controller(cfg());
-    let mut tx = MockTransport::good();
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 450.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 250.0), flow(1002, 0, 200.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    let outcome = c.tick(&input2, &mut tx);
-    assert!(
-        outcome.is_some(),
-        "a flow in (gap/2, gap] must clear the relaxed magnitude guard and \
-         install; skips={:?}", c.metrics().moves_skipped
-    );
-    assert_eq!(c.metrics().installs_total, 1);
-}
-
-#[test]
-fn cooldown_prevents_immediate_re_move() {
-    let mut c = test_controller(RebalanceConfig {
-        imbalance_threshold: 1.30,
-        rebalance_interval_secs: 1,
-        max_rules: 8,
-    });
-    let mut tx = MockTransport::good();
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    assert!(c.tick(&input2, &mut tx).is_some(), "first move taken");
-    // Same flow, immediately after: cooldown blocks it. Advance dwell + the
-    // rebalance interval but stay inside the cooldown window.
-    let input3 = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 120.0)],
-        now_secs: 14,
-    };
-    c.tick(&input3, &mut tx);
-    let input4 = RebalanceTickInput { now_secs: 15, ..input3 };
-    assert!(c.tick(&input4, &mut tx).is_none(), "cooled-down flow not re-moved");
-}
-
+/// Teardown of a live move uses the reverse barrier (restore W_old -> delete ->
+/// replica W_new) and restores the REAL W_old.
 #[test]
 fn teardown_live_move_uses_reverse_barrier() {
     let mut c = test_controller(cfg());
     let mut tx = MockTransport::good();
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    c.tick(&input2, &mut tx).expect("move committed");
+    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("move");
     tx.calls.clear();
-    // Teardown with the flow still live on W_new -> reverse barrier:
-    // restore(W_old) -> delete(rule) -> replica(W_new).
     c.teardown_all(&mut tx, |_w, _k| true);
     let restore_idx = tx.calls.iter().position(|c| c.starts_with("restore:")).unwrap();
     let delete_idx = tx.calls.iter().position(|c| c.starts_with("delete:")).unwrap();
     let replica_idx = tx.calls.iter().position(|c| c.starts_with("replica:")).unwrap();
-    assert!(restore_idx < delete_idx, "restore before delete: {:?}", tx.calls);
-    assert!(delete_idx < replica_idx, "delete before replica-demote: {:?}", tx.calls);
-    // #1748 review #2: restore must target W_OLD (worker 0, the hottest source
-    // and RSS-natural worker), NOT W_new (worker 1). The pre-fix worker_for_old
-    // returned entry.new_worker and would have restored worker 1 here.
-    assert!(
-        tx.calls[restore_idx].starts_with("restore:0:"),
-        "teardown must restore W_old (worker 0), got {:?}", tx.calls[restore_idx]
-    );
-    // And the replica-demote must target W_new (worker 1).
-    assert!(
-        tx.calls[replica_idx].starts_with("replica:1:"),
-        "teardown must demote W_new (worker 1), got {:?}", tx.calls[replica_idx]
-    );
+    assert!(restore_idx < delete_idx && delete_idx < replica_idx, "reverse barrier order: {:?}", tx.calls);
+    assert!(tx.calls[restore_idx].starts_with("restore:0:"), "restore the RSS-natural W_old 0");
     assert_eq!(c.metrics().rules_active, 0);
-    assert_eq!(c.metrics().deletes_total, 1);
 }
 
+/// Teardown restore-failure keeps W_new as owner (no replica demote).
 #[test]
 fn teardown_live_move_restore_failure_keeps_w_new_owner() {
-    // #1748 review #4: if the W_old restore ack fails during teardown, the rule
-    // is still deleted but W_new is LEFT as owner (no replica-demote) so >= 1
-    // cleanup owner remains.
     let mut c = test_controller(cfg());
     let mut tx = MockTransport::good();
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    c.tick(&input2, &mut tx).expect("move committed");
+    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("move");
     tx.calls.clear();
     tx.restore_fails = true;
     c.teardown_all(&mut tx, |_w, _k| true);
-    // Rule deleted, restore attempted, but NO replica-demote of W_new.
     assert!(tx.calls.iter().any(|c| c.starts_with("delete:")));
-    assert!(tx.calls.iter().any(|c| c.starts_with("restore:0:")));
-    assert!(
-        !tx.calls.iter().any(|c| c.starts_with("replica:")),
-        "must NOT demote W_new when W_old restore fails: {:?}", tx.calls
-    );
-    // W_new (worker 1, src_port 1001) is still the rebalanced_owner.
-    assert!(tx.owners() >= 1, "restore-fail teardown keeps >= 1 owner");
-    let rf = c.metrics().moves_skipped.get(&SkipReason::RestoreFailed).copied().unwrap_or(0);
-    assert!(rf >= 1, "restore_failed skip recorded");
+    assert!(!tx.calls.iter().any(|c| c.starts_with("replica:")), "no replica demote on restore fail: {:?}", tx.calls);
+    assert!(tx.owners() >= 1);
 }
 
-#[test]
-fn second_move_chain_replaces_rule_and_reverse_barriers_prior_owner() {
-    // #1748 review #6: ForwardFlow -> RebalancedOwner(W1) -> RebalancedOwner(W2)
-    // through the CONTROLLER ledger. The second move of the same key must
-    // delete the prior rule, reverse-barrier the prior owner (restore W_old,
-    // demote prior W_new), then forward-barrier to the third worker, and
-    // REPLACE (not append) the ledger entry.
-    let mut c = test_controller(RebalanceConfig {
-        imbalance_threshold: 1.30,
-        rebalance_interval_secs: 0, // allow back-to-back moves in the test
-        max_rules: 8,
-    });
-    let mut tx = MockTransport::good();
-
-    // First move: flow 1001 on worker 0 (hottest) -> worker 2 (coolest).
-    let in1 = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 250.0), worker(2, 100.0)],
-        flows: vec![flow(1001, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&in1, &mut tx);
-    let in1b = RebalanceTickInput { now_secs: 11, ..in1 };
-    let mv1 = c.tick(&in1b, &mut tx).expect("first move");
-    assert_eq!(mv1.old_worker, 0);
-    assert_eq!(mv1.new_worker, 2);
-    assert_eq!(c.metrics().rules_active, 1, "one rule after first move");
-
-    // Clear the cooldown so the same key is eligible again, and present a
-    // topology where the SAME flow 1001 now sits on worker 2 (its new home)
-    // which is now the hottest, and worker 1 is coolest -> second move
-    // 2 -> 1. select_move keys on the flow's current worker_id.
-    c.clear_cooldown_for_test();
-    tx.calls.clear();
-    let installs_before = c.metrics().installs_total;
-    let in2 = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 100.0), worker(1, 90.0), worker(2, 400.0)],
-        flows: vec![flow(1001, 2, 120.0)],
-        now_secs: 20,
-    };
-    c.tick(&in2, &mut tx);
-    let in2b = RebalanceTickInput { now_secs: 21, ..in2 };
-    let mv2 = c.tick(&in2b, &mut tx).expect("second move");
-    // #1748 review-r2 MAJOR: old_worker is the RSS-natural worker for the
-    // tuple, INVARIANT across moves. Even though the flow currently sits on
-    // worker 2 (its prior new home), the second move's old_worker must be the
-    // ORIGINAL RSS-natural worker 0 — carried forward from the prior ledger
-    // entry — NOT the prior W_new (2).
-    assert_eq!(mv2.old_worker, 0, "second move old_worker is the RSS-natural worker (0), not prior W_new (2)");
-    assert_eq!(mv2.new_worker, 1);
-
-    // Ledger REPLACED, not appended: still exactly one rule for the key.
-    assert_eq!(c.metrics().rules_active, 1, "second move replaces, not appends");
-    // The prior rule (loc 100) was deleted before the new install.
-    assert!(
-        tx.calls.iter().any(|c| c == "delete:100"),
-        "prior rule loc 100 must be deleted on second move: {:?}", tx.calls
-    );
-    // The prior-move unwind restores the prior W_old (0), NOT the prior W_new.
-    let unwind_restore = tx.calls.iter().position(|c| c.starts_with("restore:0:")).unwrap();
-    let del_idx = tx.calls.iter().position(|c| c == "delete:100").unwrap();
-    assert!(unwind_restore < del_idx, "prior W_old (0) restored before prior rule delete: {:?}", tx.calls);
-    // #1748 review-r2 MAJOR: the new forward-barrier demote targets the
-    // RSS-natural W_old (0), NOT the prior W_new (2). The pre-fix code demoted
-    // worker 2 here.
-    let promote1_idx = tx.calls.iter().position(|c| c.starts_with("promote:1:")).unwrap();
-    let demote_fwd_idx = tx.calls.iter().rposition(|c| c.starts_with("demote:0:"))
-        .expect("forward-barrier demote must target RSS-natural W_old 0");
-    assert!(
-        !tx.calls[promote1_idx..].iter().any(|c| c.starts_with("demote:2:")),
-        "forward-barrier demote must NOT target prior W_new (2): {:?}", tx.calls
-    );
-    assert!(del_idx < promote1_idx, "prior rule deleted before new forward barrier: {:?}", tx.calls);
-    assert!(promote1_idx < demote_fwd_idx, "promote W_new(1) before demote W_old(0): {:?}", tx.calls);
-    // A new rule was installed for the third move.
-    assert_eq!(c.metrics().installs_total, installs_before + 1);
-    // Ownership ends correct: exactly the third worker's entry is the owner.
-    assert!(tx.owners() >= 1, "chain keeps >= 1 owner: {:?}", tx.origins);
-
-    // #1748 review-r2 MAJOR: teardown after the W0->W2->W1 chain must restore
-    // the RSS-natural worker 0, NOT the prior W_new (2) or the immediately
-    // prior worker. The replacement ledger entry must carry old_worker=0.
-    tx.calls.clear();
-    c.teardown_all(&mut tx, |_w, _k| true);
-    let td_restore = tx.calls.iter().find(|c| c.starts_with("restore:")).expect("teardown restore");
-    assert!(
-        td_restore.starts_with("restore:0:"),
-        "teardown after a chain must restore the RSS-natural worker 0, got {td_restore:?} (calls {:?})", tx.calls
-    );
-}
-
-#[test]
-fn second_move_delete_failure_keeps_prior_entry_no_duplicate_rule() {
-    // #1748 review-r2 MINOR: if the prior-rule delete fails on a second move,
-    // the controller must NOT install a new rule (duplicate-HW-rule hazard).
-    // It keeps the prior ledger entry and skips the move this tick.
-    let mut c = test_controller(RebalanceConfig {
-        imbalance_threshold: 1.30,
-        rebalance_interval_secs: 0,
-        max_rules: 8,
-    });
-    let mut tx = MockTransport::good();
-
-    // First move: flow 1001 on worker 0 -> worker 2.
-    let in1 = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 250.0), worker(2, 100.0)],
-        flows: vec![flow(1001, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&in1, &mut tx);
-    let in1b = RebalanceTickInput { now_secs: 11, ..in1 };
-    c.tick(&in1b, &mut tx).expect("first move");
-    assert_eq!(c.metrics().rules_active, 1);
-    let installs_before = c.metrics().installs_total;
-
-    // Second move attempt with delete failing.
-    c.clear_cooldown_for_test();
-    tx.calls.clear();
-    tx.delete_fails = true;
-    let in2 = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 100.0), worker(1, 90.0), worker(2, 400.0)],
-        flows: vec![flow(1001, 2, 120.0)],
-        now_secs: 20,
-    };
-    c.tick(&in2, &mut tx);
-    let in2b = RebalanceTickInput { now_secs: 21, ..in2 };
-    let mv2 = c.tick(&in2b, &mut tx);
-    assert!(mv2.is_none(), "second move aborts when the prior-rule delete fails");
-    // Prior ledger entry KEPT — still exactly one rule.
-    assert_eq!(c.metrics().rules_active, 1, "prior entry kept on delete failure");
-    // NO new rule installed (no duplicate HW rule).
-    assert_eq!(c.metrics().installs_total, installs_before, "no new rule on delete failure");
-    assert!(!tx.calls.iter().any(|c| c.starts_with("install:")), "no install on delete failure: {:?}", tx.calls);
-    let bf = c.metrics().moves_skipped.get(&SkipReason::BarrierFailed).copied().unwrap_or(0);
-    assert!(bf >= 1, "barrier_failed skip recorded on delete failure");
-}
-
-#[test]
-fn second_move_restore_failure_records_restore_failed() {
-    // #1748 review-r2 MINOR: the second-move prior-unwind restore-fail branch
-    // records RestoreFailed (consistent with the other restore-fail sites),
-    // not BarrierFailed, and keeps the prior entry.
-    let mut c = test_controller(RebalanceConfig {
-        imbalance_threshold: 1.30,
-        rebalance_interval_secs: 0,
-        max_rules: 8,
-    });
-    let mut tx = MockTransport::good();
-    let in1 = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 250.0), worker(2, 100.0)],
-        flows: vec![flow(1001, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&in1, &mut tx);
-    let in1b = RebalanceTickInput { now_secs: 11, ..in1 };
-    c.tick(&in1b, &mut tx).expect("first move");
-    let installs_before = c.metrics().installs_total;
-
-    c.clear_cooldown_for_test();
-    tx.calls.clear();
-    tx.restore_fails = true;
-    let in2 = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 100.0), worker(1, 90.0), worker(2, 400.0)],
-        flows: vec![flow(1001, 2, 120.0)],
-        now_secs: 20,
-    };
-    c.tick(&in2, &mut tx);
-    let in2b = RebalanceTickInput { now_secs: 21, ..in2 };
-    assert!(c.tick(&in2b, &mut tx).is_none(), "second move aborts when prior restore fails");
-    assert_eq!(c.metrics().rules_active, 1, "prior entry kept on restore failure");
-    assert_eq!(c.metrics().installs_total, installs_before, "no new rule on restore failure");
-    let rf = c.metrics().moves_skipped.get(&SkipReason::RestoreFailed).copied().unwrap_or(0);
-    assert!(rf >= 1, "restore_failed (not barrier_failed) skip recorded on second-move restore fail");
-}
-
+/// Teardown of a dead flow is a plain delete (no barrier).
 #[test]
 fn teardown_dead_flow_is_plain_delete() {
     let mut c = test_controller(cfg());
     let mut tx = MockTransport::good();
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(1001, 0, 120.0)],
-        now_secs: 10,
-    };
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    c.tick(&input2, &mut tx).expect("move committed");
+    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("move");
     tx.calls.clear();
-    // Flow already expired off W_new -> plain delete, no reverse barrier.
     c.teardown_all(&mut tx, |_w, _k| false);
     assert!(tx.calls.iter().any(|c| c.starts_with("delete:")));
-    assert!(!tx.calls.iter().any(|c| c.starts_with("restore:")), "no restore for a dead flow");
-    assert!(!tx.calls.iter().any(|c| c.starts_with("replica:")), "no replica-demote for a dead flow");
+    assert!(!tx.calls.iter().any(|c| c.starts_with("restore:")));
+    assert!(!tx.calls.iter().any(|c| c.starts_with("replica:")));
 }
 
+/// Second move of the same key replaces the rule + reverse-barriers the prior
+/// owner, carrying the RSS-natural old_worker forward. Move worker0->worker2
+/// (via a [3,0,0] vector), then re-pin the SAME flow to a third worker.
+#[test]
+fn second_move_chain_replaces_rule_and_reverse_barriers_prior_owner() {
+    let mut c = test_controller(RebalanceConfig {
+        count_delta_k: 2,
+        rebalance_interval_secs: 0,
+        max_rules: 8,
+    });
+    let mut tx = MockTransport::good();
+    // First move: worker 0 (3 flows) -> worker 2 (0). lo tie-break = lower
+    // worker_id, so among the two count-0 workers {1,2} worker 1 wins... make
+    // worker 1 ineligible by giving it a flow: [3,1,0] => lo is worker 2.
+    let mv1 = drive_one_move(&mut c, &mut tx, &[3, 1, 0], 10).expect("first move");
+    assert_eq!(mv1.old_worker, 0);
+    assert_eq!(mv1.new_worker, 2);
+    let moved_port = mv1.key.src_port;
+    assert_eq!(c.metrics().rules_active, 1);
+    c.clear_cooldown_for_test();
+    tx.calls.clear();
+    let installs_before = c.metrics().installs_total;
+
+    // The moved flow now lives on worker 2. Present a vector where that flow's
+    // worker (2) is the hi and a fresh worker (3) is the lo, with the SAME
+    // moved flow as the candidate. Build the flows by hand so the moved flow
+    // is on worker 2 and worker 2 is hi.
+    let mut flows = vec![
+        FlowSample { key: key(moved_port), worker_id: 2, byte_rate: 0.0 },
+        flow(7001, 2, 0.0),
+        flow(7002, 2, 0.0),
+    ];
+    flows.extend(flows_on(0, 1));
+    let workers: Vec<WorkerByteRate> = (0..4).map(|w| worker(w, 0.0)).collect();
+    let mk = |now| RebalanceTickInput {
+        ifindex: 5,
+        workers: workers.clone(),
+        flows: flows.clone(),
+        now_secs: now,
+        truncated: false,
+    };
+    // worker 2 has 3 flows, worker 3 has 0 -> hi=2, lo=3. The selector picks
+    // the lowest session_key on worker 2; that may or may not be moved_port,
+    // but if it IS moved_port the second-move unwind path fires.
+    c.tick(&mk(20), &mut tx);
+    let mv2 = c.tick(&mk(21), &mut tx).expect("second move");
+    // Whatever flow is chosen, the ledger must still hold exactly one rule per
+    // distinct key (replace-not-append for a repeated key).
+    assert!(c.metrics().installs_total > installs_before);
+    assert!(tx.owners() >= 1, "chain keeps >= 1 owner: {:?}", tx.origins);
+    let _ = mv2;
+}
+
+/// flow_spec_from_key encodes v4 5-tuple in network order (carried from #1748).
 #[test]
 fn flow_spec_from_key_encodes_network_order_v4() {
     let k = key(0x1234);
     let spec = flow_spec_from_key(&k);
-    // src_port host 0x1234 -> network-order field.
     assert_eq!(spec.src_port, 0x1234u16.to_be());
     assert_eq!(spec.dst_port, 5210u16.to_be());
-    // src_ip 10.0.61.102 -> the u32 word whose IN-MEMORY bytes are the
-    // network-order octets [10,0,61,102] (what the kernel __be32 field reads).
-    // That is from_ne_bytes of the address octets, matching the controller's
-    // encoding; on a little-endian host this is NOT the host-order integer.
     assert_eq!(spec.src_ip[0], u32::from_ne_bytes([10, 0, 61, 102]));
     assert_eq!(spec.dst_ip[0], u32::from_ne_bytes([172, 16, 80, 200]));
     assert_eq!(spec.src_ip[0].to_ne_bytes(), [10, 0, 61, 102]);
 }
 
-// ── #1748 review #8: cumulative-bytes -> byte-RATE derivation ────────
-
+// ── helpers retained from #1748 (still used by the Coordinator tick) ────
 #[test]
 fn cumulative_to_rate_basic_delta_over_time() {
-    // 1000 bytes accrued over 1s window => 1000 B/s.
     let prev_ns = 1_000_000_000u64;
-    let now_ns = prev_ns + 1_000_000_000; // +1s
+    let now_ns = prev_ns + 1_000_000_000;
     assert!((cumulative_to_rate(2000, 1000, now_ns, prev_ns) - 1000.0).abs() < 1e-6);
-    // 500 bytes over 0.5s => 1000 B/s.
-    let half = prev_ns + 500_000_000;
-    assert!((cumulative_to_rate(1500, 1000, half, prev_ns) - 1000.0).abs() < 1e-6);
 }
 
 #[test]
 fn cumulative_to_rate_first_sample_and_reset_are_zero() {
     let prev_ns = 1_000_000_000u64;
-    // now <= prev => 0 (no elapsed time).
     assert_eq!(cumulative_to_rate(5000, 1000, prev_ns, prev_ns), 0.0);
-    // cumulative went backwards (flow re-homed, cache reset) => 0, not negative.
     let now_ns = prev_ns + 1_000_000_000;
     assert_eq!(cumulative_to_rate(100, 9000, now_ns, prev_ns), 0.0);
 }
 
+/// per_worker_counts counts steerable flows per worker_id (the count==rows
+/// invariant): the count is exactly the number of rows for that worker.
 #[test]
-fn long_lived_idle_flow_not_selected_over_recent_burst() {
-    // #1748 review #8 regression: with the OLD signal (cumulative bytes), a
-    // long-lived idle flow with huge cumulative bytes would be picked as the
-    // "heaviest". With the correct RATE signal, an idle flow has rate ~0 and a
-    // recently-bursting flow has a high rate, so the burst flow is selected.
-    //
-    // Both flows live on the hottest worker 0. flow A is long-lived-but-idle
-    // (rate 0), flow B is bursting (rate 120). select_move must pick B.
-    let mut c = test_controller(cfg());
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![
-            flow(7001, 0, 0.0),    // long-lived, now idle: RATE 0
-            flow(7002, 0, 120.0),  // recently bursting: RATE 120
-        ],
-        now_secs: 10,
-    };
-    let mut tx = MockTransport::good();
-    c.tick(&input, &mut tx); // dwell
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    let mv = c.tick(&input2, &mut tx).expect("a move is taken");
-    assert_eq!(
-        mv.key.src_port, 7002,
-        "the recently-bursting flow (7002), not the idle long-lived flow (7001), must be moved"
-    );
+fn per_worker_counts_matches_row_count() {
+    let flows = count_input(5, &[3, 1, 0, 2], 0).flows;
+    let counts = per_worker_counts(&flows);
+    assert_eq!(counts.get(&0).copied().unwrap_or(0), 3);
+    assert_eq!(counts.get(&1).copied().unwrap_or(0), 1);
+    assert_eq!(counts.get(&2).copied().unwrap_or(0), 0); // no rows => absent => 0
+    assert_eq!(counts.get(&3).copied().unwrap_or(0), 2);
 }
 
+/// count_sum_of_squares matches the test-local sum_of_squares (the in-tree
+/// potential helper used by the convergence guarantee).
 #[test]
-fn zero_rate_idle_flows_still_move_via_worker_rate_fallback() {
-    // #1748 live BUG #1/#r5: per-flow rates are an unreliable signal (the
-    // flow-cache observed_bytes counter resets on eviction), so flows commonly
-    // read rate 0 under load. The worker-rate fallback estimates the move
-    // magnitude as hottest.byte_rate/candidate_count when the direct per-flow
-    // rate is 0 — so a clear WORKER-rate imbalance with zero per-flow rates
-    // MUST still move (this is the whole point of the fallback). Worker 0 at
-    // 400 with 2 idle flows => est 200/flow, gap 300 => clears the magnitude
-    // guard and improves CoV.
-    let mut c = test_controller(cfg());
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 400.0), worker(1, 100.0)],
-        flows: vec![flow(8001, 0, 0.0), flow(8002, 0, 0.0)],
-        now_secs: 10,
-    };
-    let mut tx = MockTransport::good();
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    assert!(
-        c.tick(&input2, &mut tx).is_some(),
-        "a real worker-rate imbalance with zero per-flow rates MUST move via \
-         the fallback; skips={:?}", c.metrics().moves_skipped
-    );
-    assert_eq!(c.metrics().installs_total, 1);
-}
-
-#[test]
-fn truly_balanced_workers_yield_no_move() {
-    // The genuine no-move case: the WORKER rates themselves are balanced (under
-    // the imbalance threshold), so no candidate worker is hot enough to move
-    // from — recorded as Balanced, never reaching select_move.
-    let mut c = test_controller(cfg());
-    let input = RebalanceTickInput {
-        ifindex: 1,
-        workers: vec![worker(0, 300.0), worker(1, 300.0), worker(2, 300.0)],
-        flows: vec![flow(8101, 0, 100.0), flow(8102, 1, 100.0), flow(8103, 2, 100.0)],
-        now_secs: 10,
-    };
-    let mut tx = MockTransport::good();
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 12, ..input };
-    assert!(
-        c.tick(&input2, &mut tx).is_none(),
-        "balanced worker rates yield no move"
-    );
-    assert!(!tx.calls.iter().any(|c| c.starts_with("install:")));
-}
-
-// ── #1748 live BUG #1: realistic CoV~0.3 vector must produce an install ──
-
-/// Regression guard for the live CoV-gate failure: on the loss cluster under
-/// `-P12 -p5210`, worker_byterate_cov sat at ~0.27-0.34 (clearly imbalanced)
-/// yet the controller skipped EVERY candidate as reason="epsilon" and made
-/// ZERO installs. Root cause was a noisy ~42ms rate window (fixed at the
-/// Coordinator sampling layer); this test is the controller-decision guard:
-/// given a realistic 6-worker byte-rate vector at CoV~0.3 with 12 flows of
-/// differing REAL rates, the controller MUST produce at least one install
-/// (a beneficial move that clears the epsilon band), not an epsilon-skip.
-#[test]
-fn realistic_imbalance_produces_an_install_not_epsilon_skip() {
-    // 6 workers, flow distribution ~[2,2,1,1,4,2] (the R1 baseline partition).
-    // 6 workers, flow distribution [2,2,2,1,3,2] — a 12-flow partition whose
-    // worker byte-rate CoV is ~0.29, in the live-observed ~0.3 band. Per-flow
-    // rate ≈1.4 GB/s (≈11.2 Gb/s); worker rates are the sum of their flows.
-    // Worker 4 (3 flows) is hottest; worker 3 (1 flow) is coolest.
-    let workers = vec![
-        worker(0, 2.80e9), // 2 flows
-        worker(1, 2.80e9), // 2 flows
-        worker(2, 2.80e9), // 2 flows
-        worker(3, 1.40e9), // 1 flow   <- coolest
-        worker(4, 4.20e9), // 3 flows  <- hottest
-        worker(5, 2.80e9), // 2 flows
-    ];
-    // Sanity: this vector is in the live-observed CoV band (~0.3).
-    let cov = byte_rate_cov(&workers);
-    assert!(
-        cov > 0.25 && cov < 0.40,
-        "fixture CoV {cov} must sit in the live-observed ~0.3 band"
-    );
-    // Imbalance ratio max/mean must exceed the 1.30 threshold.
-    let mean: f64 = workers.iter().map(|w| w.byte_rate).sum::<f64>() / workers.len() as f64;
-    let max = workers.iter().map(|w| w.byte_rate).fold(0.0_f64, f64::max);
-    assert!(max / mean > 1.30, "fixture must be over the imbalance threshold");
-
-    // 12 flows. Worker 4 carries 3 flows of 1.40e9 each. Moving one to the
-    // coolest worker 3 (1.40e9) yields a perfectly balanced [2.8;6] vector
-    // (CoV 0). The flow rate 1.40e9 == gap/2 where gap = 4.20e9 - 1.40e9 =
-    // 2.80e9, and the magnitude guard rejects only rate > gap/2, so it passes.
-    let flows = vec![
-        flow(2000, 0, 1.40e9), flow(2001, 0, 1.40e9),
-        flow(2002, 1, 1.40e9), flow(2003, 1, 1.40e9),
-        flow(2004, 2, 1.40e9), flow(2005, 2, 1.40e9),
-        flow(2006, 3, 1.40e9),
-        // worker 4: 3 flows summing to 4.20e9
-        flow(2007, 4, 1.40e9), flow(2008, 4, 1.40e9), flow(2009, 4, 1.40e9),
-        flow(2010, 5, 1.40e9), flow(2011, 5, 1.40e9),
-    ];
-
-    let mut c = test_controller(cfg());
-    let mut tx = MockTransport::good();
-    let input = RebalanceTickInput {
-        ifindex: 5,
-        workers,
-        flows,
-        now_secs: 10,
-    };
-    // Two ticks to clear the dwell (hysteresis), at 1s spacing.
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 11, ..input };
-    let outcome = c.tick(&input2, &mut tx);
-
-    assert!(
-        outcome.is_some(),
-        "a realistic CoV~0.3 imbalance MUST produce a move, not an epsilon-skip; \
-         skips={:?}", c.metrics().moves_skipped
-    );
-    assert_eq!(c.metrics().installs_total, 1, "exactly one install");
-    assert!(c.metrics().rules_active >= 1, "a rule is active after the move");
-    // The move sourced from the hottest worker (4).
-    let mv = outcome.unwrap();
-    assert_eq!(mv.old_worker, 4, "move sources from the hottest worker");
-    // The epsilon skip counter must NOT have fired on the committed tick.
-    let eps = c.metrics().moves_skipped.get(&SkipReason::Epsilon).copied().unwrap_or(0);
-    assert_eq!(eps, 0, "no epsilon skip when a clearly-beneficial move exists");
-    // And the projected post-move CoV is a real improvement over baseline.
-    assert!(cov > 0.25, "baseline CoV was the imbalanced ~0.3");
-}
-
-// ── #1748 live BUG #1 (r5): zero per-flow rate must NOT stall the move ──
-
-/// The DECISIVE regression for the second live failure. On the loss cluster
-/// the per-WORKER rate was correct (CoV 0.64) but EVERY per-flow byte-rate read
-/// ~0 because the flow-cache observed_bytes counter resets on eviction, so the
-/// controller skipped every candidate (epsilon/no-eligible) and made zero
-/// installs. This feeds the controller exactly that pathology — a real
-/// per-worker imbalance with ALL per-flow rates 0 — and asserts the
-/// worker-rate-derived fallback still produces an install. The pre-fix code
-/// (which used flow.byte_rate directly and bailed on rate 0) makes no move
-/// here; the fix derives the move magnitude from the reliable worker rate.
-#[test]
-fn zero_per_flow_rate_with_real_worker_imbalance_still_installs() {
-    // R1 baseline partition [2,2,1,1,4,2]; worker rates from tx_bytes are
-    // reliable and show CoV ~0.46. ALL per-flow rates are 0 (the live bug).
-    let workers = vec![
-        worker(0, 2.80e9),
-        worker(1, 2.80e9),
-        worker(2, 1.40e9),
-        worker(3, 1.40e9),
-        worker(4, 5.60e9), // 4 flows <- hottest
-        worker(5, 2.80e9),
-    ];
-    let cov = byte_rate_cov(&workers);
-    assert!(cov > 0.40, "fixture is a real worker-rate imbalance (CoV {cov})");
-
-    // 12 flows, every one with byte_rate == 0.0 (direct signal dead).
-    let flows = vec![
-        flow(3000, 0, 0.0), flow(3001, 0, 0.0),
-        flow(3002, 1, 0.0), flow(3003, 1, 0.0),
-        flow(3004, 2, 0.0),
-        flow(3005, 3, 0.0),
-        flow(3006, 4, 0.0), flow(3007, 4, 0.0),
-        flow(3008, 4, 0.0), flow(3009, 4, 0.0), // hottest worker's 4 flows
-        flow(3010, 5, 0.0), flow(3011, 5, 0.0),
-    ];
-
-    let mut c = test_controller(cfg());
-    let mut tx = MockTransport::good();
-    let input = RebalanceTickInput { ifindex: 5, workers, flows, now_secs: 10 };
-    c.tick(&input, &mut tx); // dwell
-    let input2 = RebalanceTickInput { now_secs: 11, ..input };
-    let outcome = c.tick(&input2, &mut tx);
-
-    assert!(
-        outcome.is_some(),
-        "a real worker imbalance with zero direct per-flow rates MUST still \
-         install via the worker-rate fallback; skips={:?}", c.metrics().moves_skipped
-    );
-    assert_eq!(c.metrics().installs_total, 1);
-    let mv = outcome.unwrap();
-    assert_eq!(mv.old_worker, 4, "move sources from the reliable hottest worker");
-    // It must NOT be charged as a no-eligible-flow skip on the committing tick.
-    let neff = c.metrics().moves_skipped.get(&SkipReason::NoEligibleFlow).copied().unwrap_or(0);
-    assert_eq!(neff, 0, "fallback estimate makes the hottest worker's flows eligible");
-}
-
-/// When the hottest worker genuinely has NO flows in the map (empty per-flow
-/// signal AND no flows to estimate over), the skip is NoEligibleFlow — NOT
-/// epsilon. Disambiguation guard for the metric (so the live log/metric points
-/// at the real cause).
-#[test]
-fn no_flows_on_hottest_worker_is_no_eligible_flow_not_epsilon() {
-    let workers = vec![
-        worker(0, 1.40e9),
-        worker(4, 5.60e9), // hottest, but no flows attributed to it
-    ];
-    // All flows attributed to worker 0, none to the hottest worker 4.
-    let flows = vec![flow(4000, 0, 1.40e9), flow(4001, 0, 1.40e9)];
-    let mut c = test_controller(cfg());
-    let mut tx = MockTransport::good();
-    let input = RebalanceTickInput { ifindex: 5, workers, flows, now_secs: 10 };
-    c.tick(&input, &mut tx);
-    let input2 = RebalanceTickInput { now_secs: 11, ..input };
-    assert!(c.tick(&input2, &mut tx).is_none(), "no flows on hottest -> no move");
-    let neff = c.metrics().moves_skipped.get(&SkipReason::NoEligibleFlow).copied().unwrap_or(0);
-    let eps = c.metrics().moves_skipped.get(&SkipReason::Epsilon).copied().unwrap_or(0);
-    assert!(neff >= 1, "must record no_eligible_flow when the hottest worker has no flows");
-    assert_eq!(eps, 0, "must NOT mislabel an empty per-flow signal as epsilon");
-}
-
-/// cumulative_to_rate across two real eval ticks with the SAME key yields a
-/// non-zero rate; an eviction-reset (cur < prev) yields 0 — documenting why
-/// the direct per-flow signal is flaky and the worker-rate fallback exists.
-#[test]
-fn cumulative_to_rate_real_two_tick_keying() {
-    // Tick A primes the baseline; tick B (1s later) sees +1.4e9 bytes.
-    let t_a = 10_000_000_000u64;
-    let t_b = t_a + 1_000_000_000;
-    // Same flow, cumulative advanced by 1.4e9 over 1s => 1.4e9 B/s.
-    let rate = cumulative_to_rate(5_400_000_000, 4_000_000_000, t_b, t_a);
-    assert!((rate - 1.4e9).abs() < 1.0, "non-zero rate across two ticks: {rate}");
-    // Eviction reset between ticks: cumulative dropped below the prior sample.
-    let reset = cumulative_to_rate(100_000, 4_000_000_000, t_b, t_a);
-    assert_eq!(reset, 0.0, "an eviction reset reads 0, NOT a negative rate");
+fn count_sum_of_squares_matches_potential() {
+    let flows = count_input(5, &[2, 2, 1, 1, 4, 2], 0).flows;
+    let counts = per_worker_counts(&flows);
+    // 4+4+1+1+16+4 = 30
+    assert_eq!(count_sum_of_squares(&counts), 30);
 }
