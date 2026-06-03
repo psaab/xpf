@@ -1,0 +1,60 @@
+ Percent |	Source code & Disassembly of xpf-userspace-dp for cpu/cycles/P (4579 samples, percent: local period)
+--------------------------------------------------------------------------------------------------------------------
+         : 3      Disassembly of section .text:
+         : 5      000000000036fa80 <xpf_userspace_dp::afxdp::cos::queue_ops::pop::cos_queue_pop_front_inner_with_cap>:
+    0.04 :   36fa80: push   %rbp
+    0.09 :   36fa81: push   %r15
+    0.09 :   36fa83: push   %r14
+    0.00 :   36fa85: push   %r13
+    0.02 :   36fa87: push   %r12
+    0.04 :   36fa89: push   %rbx
+    0.15 :   36fa8a: sub    $0xf8,%rsp
+    0.11 :   36fa91: mov    %rdi,0x10(%rsp)
+    0.07 :   36fa96: mov    0x80(%rsi),%rbp
+    0.04 :   36fa9d: lea    0x48(%rsp),%rbx
+    0.02 :   36faa2: test   %rbp,%rbp
+    0.00 :   36faa5: je     36fcfe <xpf_userspace_dp::afxdp::cos::queue_ops::pop::cos_queue_pop_front_inner_with_cap+0x27e>
+    0.00 :   36faab: movzwl 0x5602a(%rbp),%edi
+    0.08 :   36fab2: test   %rdi,%rdi
+    0.00 :   36fab5: je     36fd47 <xpf_userspace_dp::afxdp::cos::queue_ops::pop::cos_queue_pop_front_inner_with_cap+0x2c7>
+    0.20 :   36fabb: movzwl 0x56028(%rbp),%r10d
+    0.00 :   36fac3: mov    $0xffffffffffffffff,%r11
+    0.02 :   36faca: xor    %r9d,%r9d
+    0.02 :   36facd: mov    $0xffffffffffffffff,%r13
+    0.11 :   36fad4: xor    %r12d,%r12d
+    0.00 :   36fad7: mov    %rbp,0x8(%rsp)
+    0.02 :   36fadc: nopl   0x0(%rax)
+    0.77 :   36fae0: mov    %r10d,%eax
+    1.90 :   36fae3: and    $0xfff,%eax
+    0.87 :   36fae8: movzwl 0x54028(%rbp,%rax,2),%eax
+    0.40 :   36faf0: cmp    $0x1000,%rax
+    0.00 :   36faf6: jae    37037d <xpf_userspace_dp::afxdp::cos::queue_ops::pop::cos_queue_pop_front_inner_with_cap+0x8fd>
+    1.12 :   36fafc: mov    0x28028(%rbp,%rax,8),%r14
+    2.39 :   36fb04: cmp    %r13,%r14
+    0.78 :   36fb07: cmovb  %r14,%r13
+    1.25 :   36fb0b: setb   %bl
+    1.04 :   36fb0e: cmovb  %eax,%r8d
+    1.88 :   36fb12: or     %bl,%r9b
+    0.40 :   36fb15: cmp    %rcx,0x40028(%rbp,%rax,8)
+    1.51 :   36fb1d: setbe  %bl
+    2.29 :   36fb20: cmp    %r11,%r14
+    0.40 :   36fb23: setb   %bpl
+    1.07 :   36fb27: and    %bl,%bpl
+    1.79 :   36fb2a: or     %bpl,%r12b
+    1.38 :   36fb2d: test   %bpl,%bpl
+    0.58 :   36fb30: mov    0x8(%rsp),%rbp
+    0.87 :   36fb35: cmovne %eax,%r15d
+    2.03 :   36fb39: cmovne %r14,%r11
+    0.50 :   36fb3d: inc    %r10
+    0.46 :   36fb40: dec    %rdi
+    0.00 :   36fb43: jne    36fae0 <xpf_userspace_dp::afxdp::cos::queue_ops::pop::cos_queue_pop_front_inner_with_cap+0x60>
+    0.09 :   36fb45: or     %r12b,%r9b
+    0.05 :   36fb48: test   $0x1,%r12b
+    0.10 :   36fb4c: mov    %r8d,%ebx
+    0.00 :   36fb4f: cmovne %r15d,%ebx
+    0.00 :   36fb53: test   $0x1,%r9b
+    0.00 :   36fb57: je     36fd47 <xpf_userspace_dp::afxdp::cos::queue_ops::pop::cos_queue_pop_front_inner_with_cap+0x2c7>
+    0.13 :   36fb5d: movzwl %bx,%r15d
+    0.08 :   36fb61: test   %dl,%dl
+    0.00 :   36fb63: je     36fbec <xpf_userspace_dp::afxdp::cos::queue_ops::pop::cos_queue_pop_front_inner_with_cap+0x16c>
+    0.00 :   36fb69: mov    0x28028(%rbp,%r15,8),%r13

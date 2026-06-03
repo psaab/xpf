@@ -1,0 +1,30 @@
+ Percent |	Source code & Disassembly of xpf-userspace-dp for cpu/cycles/P (6744 samples, percent: local period)
+--------------------------------------------------------------------------------------------------------------------
+         : 3      Disassembly of section .text:
+         : 5      00000000003703a0 <xpf_userspace_dp::afxdp::cos::queue_ops::push::cos_queue_push_back>:
+    0.12 :   3703a0: push   %rbp
+    0.15 :   3703a1: push   %r15
+    0.24 :   3703a3: push   %r14
+    0.02 :   3703a5: push   %r13
+    0.02 :   3703a7: push   %r12
+    0.03 :   3703a9: push   %rbx
+    0.14 :   3703aa: mov    %rsp,%r11
+    0.00 :   3703ad: sub    $0x56000,%r11
+   10.98 :   3703b4: sub    $0x1000,%rsp
+    7.23 :   3703bb: movq   $0x0,(%rsp)
+   43.23 :   3703c3: cmp    %r11,%rsp
+    0.03 :   3703c6: jne    3703b4 <xpf_userspace_dp::afxdp::cos::queue_ops::push::cos_queue_push_back+0x14>
+    0.07 :   3703c8: sub    $0xa8,%rsp
+    0.01 :   3703cf: mov    %rsi,%r12
+    0.00 :   3703d2: mov    %rdi,%r14
+    0.11 :   3703d5: cmpb   $0x1,0x7c(%rdi)
+    0.35 :   3703d9: jne    3704c1 <xpf_userspace_dp::afxdp::cos::queue_ops::push::cos_queue_push_back+0x121>
+    0.05 :   3703df: cmpq   $0x0,0x80(%r14)
+    0.05 :   3703e7: jne    3704c1 <xpf_userspace_dp::afxdp::cos::queue_ops::push::cos_queue_push_back+0x121>
+    0.00 :   3703ed: cmpq   $0x0,0x18(%r14)
+    0.00 :   3703f2: je     3704c1 <xpf_userspace_dp::afxdp::cos::queue_ops::push::cos_queue_push_back+0x121>
+    0.00 :   3703f8: mov    0x10(%r14),%rax
+    0.00 :   3703fc: mov    (%r14),%rcx
+    0.00 :   3703ff: xor    %edx,%edx
+    0.00 :   370401: cmp    %rcx,%rax
+    0.00 :   370404: cmovae %rcx,%rdx
