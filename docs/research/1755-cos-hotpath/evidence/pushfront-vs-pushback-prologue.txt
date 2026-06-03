@@ -1,0 +1,15 @@
+===push_front prologue control no-probe===
+/usr/local/sbin/xpf-userspace-dp:     file format elf64-x86-64
+0000000000370b80 <_ZN16xpf_userspace_dp5afxdp3cos9queue_ops4push20cos_queue_push_front17hf5a256953c5c0263E>:
+  370b8a:	48 83 ec 58          	sub    $0x58,%rsp
+  370b9b:	0f 85 80 00 00 00    	jne    370c21 <_ZN16xpf_userspace_dp5afxdp3cos9queue_ops4push20cos_queue_push_front17hf5a256953c5c0263E+0xa1>
+  370bbc:	0f 84 93 00 00 00    	je     370c55 <_ZN16xpf_userspace_dp5afxdp3cos9queue_ops4push20cos_queue_push_front17hf5a256953c5c0263E+0xd5>
+  370bc5:	0f 84 1d 01 00 00    	je     370ce8 <_ZN16xpf_userspace_dp5afxdp3cos9queue_ops4push20cos_queue_push_front17hf5a256953c5c0263E+0x168>
+  370bce:	7c 4a                	jl     370c1a <_ZN16xpf_userspace_dp5afxdp3cos9queue_ops4push20cos_queue_push_front17hf5a256953c5c0263E+0x9a>
+
+===push_back prologue 352KB probe===
+  3703aa:	49 89 e3             	mov    %rsp,%r11
+  3703ad:	49 81 eb 00 60 05 00 	sub    $0x56000,%r11
+  3703b4:	48 81 ec 00 10 00 00 	sub    $0x1000,%rsp
+  3703c3:	4c 39 dc             	cmp    %r11,%rsp
+  3703c8:	48 81 ec a8 00 00 00 	sub    $0xa8,%rsp

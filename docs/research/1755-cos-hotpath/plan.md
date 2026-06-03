@@ -1,13 +1,18 @@
 # #1755 — CoS exact-guarantee hot-path CPU reduction (Path A of #1752)
 
-**Status: v1 (DRAFT — pending 3-reviewer round).**
+**Status: v2 (PLAN-READY — converged after round-1 review: Codex PLAN-READY for
+Change A / NEEDS-MAJOR if Change B unspecified; AGY PLAN-NEEDS-MAJOR for a second
+probe site; Claude SMR PLAN-READY). v2 folds in (1) the second live probe site
+`ensure_cos_interface_runtime` AGY found, (2) a properly-specified `MaybeUninit`
+heap constructor for Change B per Codex, (3) a ≥1 pp ship gate per all three.**
 
-**Recommendation: PLAN-READY for a single, narrow, fairness-neutral codegen
-lever — eliminate the 352 KB stack-probe frame from `cos_queue_push_back`.
-PLAN-KILL the issue's four headline candidate sub-levers (flow-hash caching,
-structural-compare bypass, descriptor-indexed queuing) as not-the-dominant-cost
-and/or fairness-perturbing — they are the #1207/#1545 trap. One secondary lever
-(O(1)/heap min-bucket) is PLAN-DEFER pending its own measured case.**
+**Recommendation: PLAN-READY for a narrow, fairness-neutral codegen lever —
+eliminate TWO live `__rust_probestack` frames on the per-packet path:
+`cos_queue_push_back` (352 KB) and `ensure_cos_interface_runtime` (36 KB).
+PLAN-KILL the issue's three schema/hash headline candidate sub-levers (flow-hash
+caching, structural-compare bypass, descriptor-indexed queuing) as
+not-the-dominant-cost and/or fairness-perturbing — they are the #1207/#1545 trap.
+The min-bucket O(1)/heap lever is PLAN-DEFER pending its own measured case.**
 
 ## 1. Issue framing and the kill-risk it carries
 
@@ -98,6 +103,33 @@ class of defect the codebase already fixes elsewhere with
 `#[cold] #[inline(never)]` (`poll_descriptor/cookie_reply.rs:46`,
 `poll_descriptor/nat_exception.rs`, `tx/dispatch/mod.rs:17`).
 
+### 2.2a Second live probe site — `ensure_cos_interface_runtime` (36 KB, ingress per-packet) [AGY round-1]
+
+AGY round-1 found, and §`evidence/ensure-cos-iface-annotate.txt` confirms live, a
+**second instance of the identical defect** on the ingress/classify hot path:
+
+```
+000000000036f410 <…cos::builders::ensure_cos_interface_runtime>:
+    0.00 : 36f41d: sub    $0x9000,%r11          ; reserve 36 KB frame
+    5.42 : 36f424: sub    $0x1000,%rsp          ; probe loop
+    1.41 : 36f42b: movq   $0x0,(%rsp)
+   18.43 : 36f433: cmp    %r11,%rsp
+    0.00 : 36f436: jne    36f424 ...
+```
+
+5.42 + 1.41 + 18.43 = **25.3% of `ensure_cos_interface_runtime`'s self-time**
+(1.12% of total, `evidence/flat-report.txt`) is a 36 KB probe loop. Root cause is
+identical: `ensure_cos_interface_runtime` is `#[inline]` (builders.rs:21), is
+called per-packet from `tx/cos_classify.rs:443` and `:579` (before
+`enqueue_cos_item`), and inlines the cold builder branch
+(`build_cos_interface_runtime` → `CoSInterfaceRuntime` ~36 KB by value,
+builders.rs:51,66). The probe runs on every packet **before** the
+`cos_interfaces.contains_key` early-exit at builders.rs:37 — pure waste on the
+>99.99% hot path where the interface runtime already exists.
+
+This is the same fix pattern (out-line the cold builder) and is folded into the
+scope below.
+
 ### 2.3 `cos_queue_pop_front` — self-time is the O(N) min-finish scan over active buckets
 
 `perf annotate` (verbatim in `evidence/pop-annotate.txt`): pop has a normal 0xf8
@@ -130,6 +162,12 @@ VecDeque ops.
   `promote_to_flow_fair` re-enqueue (push.rs:80-85) silently invalidate it.
   Carrying a seed-tag to detect staleness reintroduces a compare and grows the
   already-100+-byte `CoSPendingTxItem`. Low gain, real soundness risk → KILL.
+  *Note (Codex round-1):* a **safe local** reuse does exist — `cos_queue_push_back`
+  currently hashes the key twice within one call (once in
+  `account_cos_queue_flow_enqueue` at accounting.rs:29, once at push.rs:132) under
+  the same `ff.flow_hash_seed`; these could be computed once and threaded. That is
+  sound (single seed epoch, intra-call) but it is < 0.4 pp and not worth doing
+  before/with the probe fix; recorded for the #4-follow-up, not this PR.
 
 - **Structural-compare bypass in `maybe_promote_best_effort` (candidate #2) —
   PLAN-KILL.** The annotate shows the `SessionKey` compare at push.rs:50 is a
@@ -153,33 +191,67 @@ VecDeque ops.
   gate. It is a separate, smaller, higher-risk PR. Defer to its own follow-up
   after the §4 codegen win lands and is re-measured. Do **not** bundle it.
 
-## 4. The chosen lever — remove the 352 KB stack-probe frame from `cos_queue_push_back`
+## 4. The chosen lever — remove the two per-packet `__rust_probestack` frames
 
-Single, narrow, **fairness-neutral by construction** (it changes only where a
-352 KB temporary is materialized; it does not touch any vtime, finish-time,
-bucket, active-count, V_min, or lease arithmetic).
+Narrow, **fairness-neutral by construction** (it changes only where large
+temporaries are materialized; it does not touch any vtime, finish-time, bucket,
+active-count, V_min, or lease arithmetic, nor any classify decision).
 
 ### 4.1 Design
 
-Two complementary, independently-validatable changes; ship the minimal one that
-the post-change annotate proves sufficient.
+**Change A1 — out-line `promote_to_flow_fair`** (push.rs:77, the 352 KB
+push_back probe). Add `#[cold] #[inline(never)]`. `maybe_promote_best_effort`
+stays `#[inline]` (its hot path is the `is_some()` short-circuit + SSE key
+compare); only the genuinely-cold `promote_to_flow_fair` body out-lines.
 
-**Change A (primary): `#[inline(never)]` on `promote_to_flow_fair`** (push.rs:77).
-Pulls the `FlowFairState::new()` by-value return frame out of
-`cos_queue_push_back` into `promote_to_flow_fair`'s own (cold, ~once-per-queue)
-frame. `maybe_promote_best_effort` stays `#[inline]` (its hot path is just the
-`is_some()` short-circuit + the SSE key compare); only the genuinely-cold
-`promote_to_flow_fair` body is out-lined. Add `#[cold]` to match the existing
-`cookie_reply`/`nat_exception` pattern.
+**Change A2 — out-line the cold builder branch of `ensure_cos_interface_runtime`**
+(builders.rs, the 36 KB ingress probe; AGY round-1). Keep the `#[inline]` outer
+fn doing only the `egress_ifindex <= 0` and `cos_interfaces.contains_key`
+early-exits, and move the `build_cos_interface_runtime` + insert/sort tail into a
+`#[cold] #[inline(never)] fn ensure_cos_interface_runtime_cold(...)`. The 36 KB
+`CoSInterfaceRuntime` by-value return then lives only in the cold callee's frame,
+which fires at most once per (binding, egress-ifindex) — not per packet.
 
-**Change B (belt-and-suspenders, only if A alone doesn't clear the probe):**
-give `FlowFairState` a `Box`-returning constructor that builds the arrays
-directly on the heap and avoids the 352 KB by-value stack return entirely
-(`Box::new_zeroed` + field init, or per-field heap init). This removes the giant
-frame from `promote_to_flow_fair` and `admission.rs:526` too, not just relocates
-it. Lower priority because the build-time site is off the hot path and Change A
-already gets the hot-path win; include only if the post-A annotate still shows a
-probe in any hot caller.
+Both A1 and A2 are the same #1207-reviewer-endorsed salvage direction (out-line a
+cold large-stack body) and match the existing `#[cold] #[inline(never)]` sites
+(`cookie_reply.rs:46`, `nat_exception.rs`, `tx/dispatch/mod.rs:17`).
+
+**Change B — `MaybeUninit` heap constructor for `FlowFairState`** (Codex
+round-1; AGY wants it mandatory). Rust has **no guaranteed placement-new into
+`Box`**, so A1 alone may only *relocate* the 352 KB by-value return slot into
+`promote_to_flow_fair`'s frame rather than eliminate it. On the profiled exact
+path that is already sufficient (promote is build-time only), but to guarantee
+the giant frame never lands on any thread's stack (and to fix the build-time
+`admission.rs:526` site), add:
+
+```rust
+impl FlowFairState {
+    pub(in crate::afxdp) fn new_boxed(flow_hash_seed: u64) -> Box<Self> {
+        // SAFETY contract: build into an uninit heap allocation, writing
+        // every field exactly once via raw ptr writes, THEN assume_init.
+        // Per-field writes are mandatory — a zeroed Vec/VecDeque is NOT a
+        // valid initialized representation (Codex round-1 finding 3), so
+        // Box::new_zeroed + transmute is unsound. Use addr_of_mut! writes
+        // for the Vec/VecDeque fields and ptr::write_bytes(0) only for the
+        // [u64;N]/[u32;N] POD arrays. Drop-safety: no field is initialized
+        // twice; if a future panic is introduced between writes, guard with
+        // a drop-on-unwind scaffold or keep the body panic-free (it is —
+        // all writes are infallible).
+        ...
+    }
+}
+```
+
+Call `FlowFairState::new_boxed(seed)` at push.rs:79, admission.rs:526, and the
+`fairness.rs`/`test_support.rs` sites. **Change B is REQUIRED, not optional**
+(decision per §4.3 procedure): the by-value `new()` return slot is the actual
+352 KB temporary; A1 only moves which function reserves it. Keep `new()` as a
+thin `*Self::new_boxed(seed)` for any caller that genuinely needs an owned value
+(tests), or delete it if unused.
+
+**Implementation guard (Codex finding 3):** do NOT improvise Change B from a
+`Box::new_zeroed + field init` sketch. Use `Box<MaybeUninit<FlowFairState>>` +
+`addr_of_mut!` per-field writes + `assume_init`, miri-verified.
 
 ### 4.2 Why this is not the #1207 trap
 
@@ -192,18 +264,31 @@ ends up *shorter* (no probe loop), not longer. It is the #1207 reviewer-endorsed
 salvage direction ("out-line the cold large-stack body"), applied to a different
 function.
 
-### 4.3 Expected gain
+### 4.3 Expected gain + decision procedure
 
-If the probe is fully removed and push_back's remaining self-time tracks its
-non-probe instructions, push_back drops from 5.94% toward ~2.3% self-time — a
-**~3.6 percentage-point** total-CPU reduction on this profile (≈ the single
-largest line item on the whole -P48 -p5210 CoS-on profile). This is the honest
-ceiling for Change A alone; the true number is whatever the post-change live
-annotate shows. **PLAN-KILL-acceptable exit:** if the post-change annotate shows
-the probe re-appears in another hot caller (push_front, or an inlined service
-path) such that net total CPU does not drop ≥ ~2 pp, or if LLVM reorganizes and
-the win evaporates, KILL with the evidence — this is a measured-gain gate, not a
-hope.
+push_back probe = 61.4% × 5.94% ≈ **3.65 pp**; ensure_cos_interface_runtime
+probe = 25.3% × 1.12% ≈ **0.28 pp**. Combined ceiling ≈ **~3.9 pp** total CPU on
+this profile — the single largest reducible line item on the whole -P48 -p5210
+CoS-on profile. The true number is whatever the post-change live annotate shows.
+
+**Decision procedure (resolves Codex/SMR/AGY F1 — Change B mandatory-ness is
+measured, not assumed):**
+1. Land A1 + A2 alone. `objdump`/annotate `cos_queue_push_back`,
+   `cos_queue_push_front`, `promote_to_flow_fair`, `ensure_cos_interface_runtime`,
+   and `ensure_cos_interface_runtime_cold`.
+2. If push_back has no probe and a < 1 KB frame AND no probe reappears in any
+   per-packet caller → A-only is sufficient; B becomes optional cleanup.
+3. If the 352 KB probe merely relocated into `promote_to_flow_fair` AND that
+   function is reachable per-packet on best-effort queues (it is, on 1↔2-flow
+   transitions, though rare with #1735 hysteresis), OR if any hot path still
+   probes → **Change B is mandatory**, implement the `MaybeUninit` constructor.
+4. Re-measure live A/B per §2 method.
+
+**Ship gate (all three reviewers converge): ≥ 1 pp** net total-CPU reduction at
+zero fairness/correctness risk is worth shipping (it's free codegen).
+**PLAN-KILL-acceptable exit:** if the post-change annotate shows the probe is
+genuinely irreducible (LLVM keeps the frame for an unavoidable reason) OR net win
+< ~1 pp, KILL with the evidence — measured-gain gate, not a hope.
 
 ## 5. Correctness / fairness invariants preserved
 
@@ -223,9 +308,12 @@ hope.
    byte-for-byte. `promote_to_flow_fair` is exercised by the best-effort
    promotion tests; assert they still pass. No new behavior to test — assert
    absence of behavior change.
-2. **Codegen proof:** post-build `objdump`/`perf annotate` of
-   `cos_queue_push_back` MUST show no `__rust_probestack`/`sub $0x…,%r11` loop
-   and a small frame (target < 1 KB). Capture before/after into `evidence/`.
+2. **Codegen proof:** post-build `objdump`/`perf annotate` of BOTH
+   `cos_queue_push_back` AND `ensure_cos_interface_runtime` MUST show no
+   `__rust_probestack`/`sub $0x…,%r11` loop and a small frame (target < 1 KB).
+   Verify the relocated frame (if Change B is skipped) lives only in the
+   `_cold` callees. miri the `new_boxed` constructor. Capture before/after into
+   `evidence/`.
 3. **Live A/B:** re-run the §2 method (perf record under -P48 -p5210). Gate:
    push_back self-time drops materially AND no probe re-appears elsewhere.
 4. **Full CoS smoke matrix** (per repo policy): v4 + v6 × push + `-R` ×
@@ -246,10 +334,16 @@ hope.
 
 ## 8. Scope boundary
 
-IN: `userspace-dp/src/afxdp/cos/queue_ops/push.rs` (inline attrs), optionally
-`userspace-dp/src/afxdp/types/cos.rs` (`FlowFairState` Box constructor) for
-Change B. Docs: a note in `queue_ops/README.md` (or the module header) recording
-the stack-probe gotcha + the `#[cold] #[inline(never)]` rationale.
+IN:
+- `userspace-dp/src/afxdp/cos/queue_ops/push.rs` — `#[cold] #[inline(never)]` on
+  `promote_to_flow_fair` (Change A1).
+- `userspace-dp/src/afxdp/cos/builders.rs` — split out
+  `ensure_cos_interface_runtime_cold` (Change A2).
+- `userspace-dp/src/afxdp/types/cos.rs` — `FlowFairState::new_boxed` `MaybeUninit`
+  constructor (Change B, mandatory per §4.3 if A relocates rather than
+  eliminates), and callers at admission.rs:526 / fairness.rs / test_support.rs.
+- Docs: stack-probe gotcha + `#[cold] #[inline(never)]` rationale in
+  `queue_ops/README.md` / module headers; the engineering-style hot-path note.
 
 OUT: flow-hash caching, structural-compare bypass, descriptor-indexed queuing
 (KILLed §3), min-bucket heap (DEFERed §3), any `TxRequest`/`CoSPendingTxItem`
@@ -258,9 +352,9 @@ schema change, any service.rs skeleton change (#1207).
 ## 9. PLAN-KILL conditions (explicit)
 
 KILL the whole issue (no code) if any of:
-- post-change annotate shows the probe is not removable (LLVM keeps the 352 KB
-  frame for an unavoidable reason) — irreducible codegen.
-- removing it yields < ~2 pp net total-CPU win on the live A/B — churn > gain.
+- post-change annotate shows both probes are not removable (LLVM keeps the
+  frames for an unavoidable reason) — irreducible codegen.
+- removing them yields < ~1 pp net total-CPU win on the live A/B — churn > gain.
 - the only remaining lever after the codegen win is candidate #4 (min-bucket),
   which is its own gated PR, so #1755 itself closes as "codegen win shipped,
   residual is #4-follow-up" rather than staying open.

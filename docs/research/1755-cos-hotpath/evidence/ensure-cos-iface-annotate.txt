@@ -1,0 +1,16 @@
+ Percent |	Source code & Disassembly of xpf-userspace-dp for cpu/cycles/P (1265 samples, percent: local period)
+--------------------------------------------------------------------------------------------------------------------
+         : 3      Disassembly of section .text:
+         : 5      000000000036f410 <xpf_userspace_dp::afxdp::cos::builders::ensure_cos_interface_runtime>:
+    0.39 :   36f410: push   %rbp
+    1.33 :   36f411: push   %r15
+    1.26 :   36f413: push   %r14
+    0.99 :   36f415: push   %r13
+    0.48 :   36f417: push   %r12
+    0.57 :   36f419: push   %rbx
+    0.65 :   36f41a: mov    %rsp,%r11
+    0.00 :   36f41d: sub    $0x9000,%r11
+    5.42 :   36f424: sub    $0x1000,%rsp
+    1.41 :   36f42b: movq   $0x0,(%rsp)
+   18.43 :   36f433: cmp    %r11,%rsp
+    0.00 :   36f436: jne    36f424 <xpf_userspace_dp::afxdp::cos::builders::ensure_cos_interface_runtime+0x14>
