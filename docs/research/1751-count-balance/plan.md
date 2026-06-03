@@ -1,10 +1,15 @@
 # #1751 — count-balancing selection for the #1748 ntuple rebalance controller
 
-- **Status**: **PLAN-READY v2** — converged after round 1. Codex r1
-  PLAN-NEEDS-MAJOR (4 findings, all folded), AGY r1 PLAN-READY, Claude-SMR r1
-  PLAN-NEEDS-MINOR (converged with Codex). v2 fixes: (1) convergence proof
-  rewritten to the L1-to-target potential (the max-min `Φ` claim was wrong —
-  Codex counterexample `[3,3,3,3,1,1,1,1]`); (2) the per-worker count is now
+- **Status**: **PLAN-READY v3** — CONVERGED after 2 rounds (all 3 reviewers).
+  **r2**: Codex PLAN-NEEDS-MINOR + AGY PLAN-NEEDS-MINOR converged on the SAME
+  single point (the convergence proof) with the SAME fix (sum-of-squares);
+  Claude-SMR r2 re-derived it → PLAN-READY. **r1**: Codex PLAN-NEEDS-MAJOR
+  (4 findings), AGY PLAN-READY, Claude-SMR PLAN-NEEDS-MINOR. Cumulative fixes:
+  (1) convergence proof rewritten to the **sum-of-squares** potential (max-min
+  was wrong — Codex r1 `[3,3,3,3,1,1,1,1]`; L1-to-target was ALSO insufficient
+  for a non-integer mean — Codex r2 `[2,2,2,2,0]` + AGY r2 `[2,2,1,1,1,0]`;
+  sum-of-squares is mean-independent and drops by ≥2 every admitted move,
+  `ΔΨ = 2 − 2(c_hi−c_lo) ≤ −2`); (2) the per-worker count is now
   unambiguously over POST-FILTER steerable `FlowSample`s, and the plan no longer
   implies a #1750 staleness guard Path A does not have; (3) the
   unsteerable-count divergence is documented + a unit test added; (4) #1735
@@ -202,7 +207,8 @@ move F: hi -> lo  (queue = workers[lo].queue_id)
   `counts[hi] - counts[lo] >= 2` (equivalently `counts[lo] + 1 < counts[hi]`).
   This is the count analogue of "don't make the destination the new hottest
   worker" and needs NO rates. It guarantees each admitted move strictly reduces
-  `max - min` (the convergence potential, §3.4).
+  the **sum-of-squares convergence potential** (§3.4) — NOT necessarily `max-min`
+  (Codex r1/r2: `max-min` is not a per-move-monotone potential).
 - **Candidate flow choice on `hi`.** Homogeneous (equal-rate) traffic: any
   non-cooldown flow on `hi` is equally good — pick deterministically (e.g.
   lowest `session_key`) for reproducibility. Heterogeneous: §3.6 optional
@@ -238,31 +244,41 @@ carrying only non-steerable traffic (ICMP, unsteered ports) has steerable-count
   worker) needs a per-worker total-load signal — out of scope; documented
   follow-up alongside the heterogeneous tiebreak (§11).
 
-### 3.4 Convergence / anti-thrash (formal — corrected v2)
+### 3.4 Convergence / anti-thrash (formal — corrected v3, sum-of-squares)
 v1 used `Φ = max counts - min counts` and claimed termination in `≤ Φ₀` moves.
-**That is wrong** (Codex r1): counterexample `[3,3,3,3,1,1,1,1]`, `K=2`, `Φ₀=2`
-takes **four** admitted moves to reach `[2,2,2,2,2,2,2,2]` while `Φ` stays at 2
-until the very last move — so `Φ = max - min` is NOT strictly decreasing per move
-and the `≤ Φ₀` bound is false. The algorithm still terminates; the correct
-potential is the **L1 distance to the balanced target**:
+**That is wrong** (Codex r1): `[3,3,3,3,1,1,1,1]`, `K=2`, `Φ₀=2` takes **four**
+admitted moves while `Φ` stays at 2 until the last move — `Φ = max - min` is not
+per-move monotone. The L1 distance to the target is ALSO not guaranteed to drop
+by ≥2 per move (Codex r2): `[2,2,2,2,0]`, mean `1.6`, the admitted move `2→0`
+gives `[2,2,2,1,1]` and L1 drops only `3.2 → 2.4` (by 0.8), and the source `2→1`
+goes *below* the mean — so "neither overshoots the mean / `≥2` L1 drop" is false
+for a non-integer mean. **The correct, clean potential is sum-of-squares:**
 ```
-Ψ = Σ_w | counts[w] - mean |          (mean = N / Nᵥ; integer-rounded target)
+Ψ = Σ_w (counts[w] - μ)²          (μ = N / Nᵥ, the true mean; need NOT be integer)
 ```
-(equivalently sum-of-squares `Σ (counts[w] - mean)²`). The overshoot guard admits
-a move only when `counts[hi] - counts[lo] >= 2`, which guarantees `counts[hi]-1 ≥
-counts[lo]+1`: the source steps one toward the mean and the destination steps one
-toward the mean, **neither overshoots the mean**, so each admitted move **strictly
-decreases `Ψ` by ≥ 2**. `Ψ` is a non-negative integer bounded by ~`2N`, so the
-process **terminates** in `≤ Ψ₀/2 ≤ N` admitted moves at the even partition
-(counts within ±1 of the mean ⇒ no pair has `delta ≥ 2` ⇒ no further move). The
+The overshoot guard admits a move only when `c_hi - c_lo ≥ 2`. A move takes
+`c_hi → c_hi-1` and `c_lo → c_lo+1`; the change in `Ψ` is exactly (the `μ` and all
+other workers' terms cancel):
+```
+ΔΨ = [(c_hi-1-μ)² + (c_lo+1-μ)²] − [(c_hi-μ)² + (c_lo-μ)²]
+   = (−2(c_hi−μ)+1) + (2(c_lo−μ)+1)
+   = 2 − 2(c_hi − c_lo)
+```
+With `c_hi − c_lo ≥ 2`, `ΔΨ ≤ 2 − 4 = −2 < 0` — **every admitted move strictly
+decreases `Ψ` by at least 2, independent of where `μ` sits** (the mean cancels in
+`ΔΨ`). This handles Codex r2's `[2,2,2,2,0]` counterexample that broke L1:
+`μ = 1.6`, SoS before `= 4·(0.4)² + (1.6)² = 0.64 + 2.56 = 3.2`; the admitted move
+`2→0` gives `[2,2,2,1,1]` with SoS `= 3·(0.4)² + 2·(0.6)² = 0.48 + 0.72 = 1.2`;
+`ΔΨ = −2.0 ✓` (whereas L1 dropped only `3.2 → 2.4`). `Ψ ≥ 0` and strictly
+decreases by ≥2 every admitted move, so the process **terminates** in `≤ Ψ₀/2`
+admitted moves at the balanced partition (counts
+within ±1 of `μ` ⇒ no pair has `delta ≥ 2` ⇒ no further admitted move). The
 per-flow cooldown plus the `delta ≥ 2` overshoot guard make **oscillation
-impossible**: once balanced, no move passes the `K`-threshold or the overshoot
-guard; a just-moved flow is in cooldown and cannot be re-chosen as the immediate
-next move, so the controller cannot ping-pong a flow between two equal-count
-workers. (AGY r1's "proof" already used this L1 potential — the correct one;
-only the v1 plan TEXT stated the wrong max-min potential, now fixed.) This is the
-count analogue of v1's ε-band monotone-objective termination, on an integer
-potential (no floating-point ε) — strictly cleaner.
+impossible**: once balanced no move passes the threshold/overshoot guard, and a
+just-moved flow is in cooldown so it cannot be re-chosen as the immediate next
+move — no ping-pong between two equal-count workers. This is the count analogue of
+v1's ε-band monotone-objective termination, on a clean integer-stepped
+sum-of-squares potential (no floating-point ε, mean-independent).
 
 ### 3.5 What is REMOVED vs v1
 - `project_move` (byte-rate vector projection) — gone from the decision.
@@ -385,7 +401,7 @@ replaced by per-flow MQFQ on shared_exact since #911/#913/#914/#1735.
 **Yes, with one honestly-stated live precondition.** v2 avoids #1203's failure
 mode along three axes:
 1. **Count-balance is the part #1203 got right** (it flattened the count). v2
-   does the same, more cleanly (integer L1-to-target convergence §3.4 vs #1203's
+   does the same, more cleanly (sum-of-squares convergence §3.4 vs #1203's
    K=4 thrash +
    the sticky-cooldown bug that put 50+ rules on the NIC). The convergence/anti-
    thrash machinery (§3.4) is strictly better than #1203's.
@@ -426,7 +442,7 @@ R1.
 - `select_move` v2 per §3; per-worker count = POST-FILTER steerable
   `FlowSample`s-per-worker from the existing `flow_worker_map()` load (no #1750
   hard dependency, §2.2 option 1 / §2.4); `K=2`, count overshoot guard, integer
-  L1-to-target convergence (§3.4); truncation defer + dwell/cooldown blip
+  sum-of-squares convergence (§3.4); truncation defer + dwell/cooldown blip
   absorption (NOT a snapshot-age staleness guard — §2.4); reuse ALL existing move
   machinery. Heterogeneous tiebreak documented as a #1750-gated follow-up.
 - **Pros:** unblocks installs with NO byte-rate signal; smallest change to a
@@ -574,11 +590,12 @@ operators see the count imbalance the controller is acting on.
   the reliable signal that unblocks installs).
 - **Unit (`controller_tests.rs`):**
   - `count_balance_converges_to_even_partition` (drive `[2,2,1,1,4,2]` →
-    `[2,2,2,2,2,2]` over N ticks, assert the **L1-to-target `Ψ`** is
+    `[2,2,2,2,2,2]` over N ticks, assert the **sum-of-squares `Ψ`** is
     monotone-decreasing by ≥2 per admitted move, terminates).
-  - `count_balance_l1_potential_counterexample` (drive `[3,3,3,3,1,1,1,1]` →
-    even in 4 moves, asserting `Ψ` strictly decreases each move even though
-    `max-min` does NOT — pins the corrected §3.4 potential).
+  - `count_balance_sos_potential_counterexamples` (drive `[3,3,3,3,1,1,1,1]` →
+    even in 4 moves AND `[2,2,2,2,0]` → even, asserting SoS `Ψ` strictly
+    decreases by ≥2 each move even though `max-min` and L1 do NOT — pins the
+    corrected §3.4 sum-of-squares potential against both Codex counterexamples).
   - `count_overshoot_guard_blocks_1_delta` (`3,2` → no move).
   - `count_delta_threshold_K` (imbalance `< K` → Balanced).
   - `cooldown_prevents_immediate_thrash` (moved flow not re-chosen next move).
