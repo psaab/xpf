@@ -453,6 +453,105 @@ fn install_failure_reverse_barrier_keeps_an_owner() {
     assert_eq!(c.metrics().rules_active, 0, "no rule recorded on failed install");
 }
 
+/// #1751 live BLOCKER — FULL SUCCESS PATH end to end. A count imbalance drives
+/// the complete forward barrier promote -> demote -> install and records a
+/// ledger entry. (The barrier machinery was carried from #1748 and never ran
+/// live; this pins the success wiring: ordered promote(W_new) -> demote(W_old)
+/// -> install + a recorded rule.)
+#[test]
+fn full_barrier_success_path_installs_and_records_ledger() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    let mv = drive_one_move(&mut c, &mut tx, &[3, 0], 10)
+        .expect("the full barrier must commit a move");
+    // Ordered: promote(W_new=1) -> demote(W_old=0) -> install.
+    let p = tx.calls.iter().position(|c| c.starts_with("promote:1:")).unwrap();
+    let d = tx.calls.iter().position(|c| c.starts_with("demote:0:")).unwrap();
+    let i = tx.calls.iter().position(|c| c.starts_with("install:")).unwrap();
+    assert!(p < d && d < i, "promote -> demote -> install order: {:?}", tx.calls);
+    // A rule was installed and recorded in the ledger.
+    assert_eq!(c.metrics().installs_total, 1);
+    assert_eq!(c.metrics().rules_active, 1, "ledger entry recorded");
+    assert_eq!(mv.old_worker, 0);
+    assert_eq!(mv.new_worker, 1);
+    // No rollback calls on the success path.
+    assert!(!tx.calls.iter().any(|c| c.starts_with("restore:")), "no rollback: {:?}", tx.calls);
+}
+
+/// #1751 live BLOCKER ROOT-CAUSE FIX — a SAME-NODE move where W_new does NOT
+/// pre-hold the flow's session. The worker-side promote returns a CLAIM
+/// (result=true) with origin None (the entry materializes when the rule steers
+/// packets there), so the controller's claim-only promote must accept it and
+/// the move must still install. The pre-fix promote required
+/// origin==RebalancedOwner and failed 100% on this (the live BarrierFailed).
+#[test]
+fn promote_claim_succeeds_when_w_new_does_not_hold_the_flow() {
+    // A mock that models the same-node worker: promote does NOT create/flip an
+    // entry (W_new has none) but the worker still ACKs the claim as success.
+    #[derive(Default)]
+    struct SameNodeMock {
+        calls: Vec<String>,
+        next_loc: u32,
+    }
+    impl BarrierTransport for SameNodeMock {
+        fn promote(&mut self, w: u32, k: &SessionKey) -> bool {
+            // W_new does not hold the flow: no origin flip, but the claim is
+            // accepted (this is what the worker-side handler now returns).
+            self.calls.push(format!("promote:{w}:{}", k.src_port));
+            true
+        }
+        fn demote(&mut self, w: u32, k: &SessionKey) -> bool {
+            self.calls.push(format!("demote:{w}:{}", k.src_port));
+            true
+        }
+        fn restore_owner(&mut self, w: u32, k: &SessionKey) -> bool {
+            self.calls.push(format!("restore:{w}:{}", k.src_port));
+            true
+        }
+        fn demote_replica(&mut self, w: u32, k: &SessionKey) -> bool {
+            self.calls.push(format!("replica:{w}:{}", k.src_port));
+            true
+        }
+        fn install_rule(&mut self, _f: &FlowSpec5Tuple, q: u32) -> std::io::Result<u32> {
+            self.calls.push(format!("install:q{q}"));
+            let loc = 200 + self.next_loc;
+            self.next_loc += 1;
+            Ok(loc)
+        }
+        fn delete_rule(&mut self, loc: u32) -> std::io::Result<()> {
+            self.calls.push(format!("delete:{loc}"));
+            Ok(())
+        }
+    }
+    let mut c = test_controller(cfg());
+    let mut tx = SameNodeMock::default();
+    let mv = drive_one_move(&mut c, &mut tx, &[3, 0], 10)
+        .expect("a same-node move (W_new absent) MUST still install via the claim-only promote");
+    assert_eq!(c.metrics().installs_total, 1);
+    assert_eq!(c.metrics().rules_active, 1);
+    assert_eq!(mv.new_worker, 1);
+    assert!(tx.calls.iter().any(|c| c.starts_with("install:")));
+}
+
+/// Promote-ack failure (the worker queue/ack broke — NOT an absent entry)
+/// rolls back cleanly: no install, no ledger entry, W_new defensively demoted
+/// back to a replica.
+#[test]
+fn promote_failure_rolls_back_clean() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    tx.promote_ok = false; // simulate a promote ack timeout / queue failure
+    assert!(drive_one_move(&mut c, &mut tx, &[3, 0], 10).is_none());
+    // No demote of W_old, no install (the move aborts at the promote step).
+    assert!(!tx.calls.iter().any(|c| c.starts_with("demote:0:")), "no W_old demote: {:?}", tx.calls);
+    assert!(!tx.calls.iter().any(|c| c.starts_with("install:")), "no install: {:?}", tx.calls);
+    // Defensive replica-demote of W_new is the only cleanup.
+    assert!(tx.calls.iter().any(|c| c.starts_with("replica:1:")), "defensive W_new replica-demote: {:?}", tx.calls);
+    assert_eq!(c.metrics().rules_active, 0, "no rule recorded");
+    let bf = c.metrics().moves_skipped.get(&SkipReason::BarrierFailed).copied().unwrap_or(0);
+    assert!(bf >= 1, "BarrierFailed recorded on promote failure");
+}
+
 /// Budget exhaustion stops with NO eviction. Drive an EVOLVING count vector
 /// (each committed move shifts a flow hi->lo), so each move re-pins a DISTINCT
 /// flow (the moved flows stay in cooldown — we do NOT clear it — so they are
