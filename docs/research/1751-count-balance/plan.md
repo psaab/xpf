@@ -1,8 +1,17 @@
 # #1751 — count-balancing selection for the #1748 ntuple rebalance controller
 
-- **Status**: **PLAN-DRAFT v1** — pre-review. Awaiting Codex + AGY + Claude-SMR
-  hostile rounds. `/research` mode: STOP at PLAN-READY / PLAN-KILL. No PR, no
-  production code touched.
+- **Status**: **PLAN-READY v2** — converged after round 1. Codex r1
+  PLAN-NEEDS-MAJOR (4 findings, all folded), AGY r1 PLAN-READY, Claude-SMR r1
+  PLAN-NEEDS-MINOR (converged with Codex). v2 fixes: (1) convergence proof
+  rewritten to the L1-to-target potential (the max-min `Φ` claim was wrong —
+  Codex counterexample `[3,3,3,3,1,1,1,1]`); (2) the per-worker count is now
+  unambiguously over POST-FILTER steerable `FlowSample`s, and the plan no longer
+  implies a #1750 staleness guard Path A does not have; (3) the
+  unsteerable-count divergence is documented + a unit test added; (4) #1735
+  shared_exact MQFQ phrased precisely (eager exact/shared_exact vs lazy
+  non-exact); (5) a pre-code CoS-ON manual re-pin gate is added as §10 item 1
+  (the decisive cheap de-risk both Codex + SMR endorsed). `/research` mode: STOP
+  at PLAN-READY / PLAN-KILL. No PR, no production code touched.
 - **Issue**: #1751
 - **Mode**: `/research`
 - **Branch (docs only)**: `research/1751-count-balance` (off `origin/master`
@@ -121,12 +130,34 @@ regime. The plan MUST assert this precondition (and degrade gracefully — treat
 `truncated` snapshot as a defer, not a decision) so a future high-flow-count
 workload does not silently feed a truncated count into the balancer.
 
+### 2.4 What Path A gets and does NOT get (Codex r1 / SMR r1 — honesty fix)
+
+Option 1 (same-snapshot count) gives **count-vs-rows self-consistency** — the
+count and the candidate rows are the same object for that tick, so the #1748
+`NoEligibleFlow` skew (count says N, rows say empty) is structurally impossible.
+It does **NOT** give:
+- a **freshness / snapshot-age staleness guard** — that needs #1750 Path 1's
+  `published_ns` bundle. Path A has no timestamp, so it cannot defer on "this
+  snapshot is stale." The mitigations against acting on a transiently-empty or
+  lagging snapshot are the existing `DWELL_TICKS_REQUIRED = 2` hysteresis + the
+  per-flow cooldown (a one-tick blip cannot trigger a move), NOT a staleness
+  gate. If live tracing shows publish-cadence lag causes bad decisions, adopt
+  #1750 Path 1 (the bundle) — that is the recommended hardening, not a Path-A
+  feature.
+- a **"true active count"** — the count is the count of **post-filter steerable
+  rows** (TCP/UDP, valid ifindex, parseable 5-tuple — `coordinator/rebalance.rs:
+  286-293`), which is exactly the count the decision needs (a worker is only a
+  valid *source* if it has a movable flow). It is NOT the Prometheus
+  `binding_active_flow_count` (which includes ICMP / non-steerable flows). See
+  §3.3.1 for the consequence (the unsteerable-count divergence).
+
 **Verdict on the dependency:** **#1751 can land INDEPENDENTLY of #1750** by
 sourcing the count from the same row snapshot (option 1). #1750 remains the
 *recommended* companion because its atomic bundle + snapshot-age defer hardens
 the feed against publish-cadence skew and gives a principled staleness gate, but
-it is **not a hard blocker**. Land #1751 with the option-1 self-consistent count
-and the truncation/staleness guards; adopt #1750's bundle when it ships.
+it is **not a hard blocker**. Land #1751 with the option-1 self-consistent
+**post-filter steerable** count and the truncation/dwell guards; adopt #1750's
+bundle when it ships.
 
 ## 3. select_move v2 — count-balancing design
 
@@ -137,8 +168,14 @@ The tick already assembles, per ifindex:
   retained ONLY for the metric gauge + optional heterogeneous tiebreak (§3.6),
   NOT for the count decision.
 - `flows: Vec<FlowSample>` — each `{key, worker_id, byte_rate}`, one per
-  `flow_worker_map` row. **v2 adds a derived per-worker count** = number of
-  `flows` whose `worker_id == w`. (No new wire field; counted from `flows`.)
+  **post-filter steerable** `flow_worker_map` row (TCP/UDP, valid ifindex,
+  parseable 5-tuple — the existing filter at `coordinator/rebalance.rs:286-293`).
+  **v2 adds a derived per-worker count** = number of these steerable `flows`
+  whose `worker_id == w`. (No new wire field; counted from `flows` AFTER the
+  filter — Codex/SMR r1.) This is deliberately NOT the Prometheus
+  `binding_active_flow_count` (which counts ICMP / non-steerable flows too): a
+  worker is only a valid *source* if it has a steerable flow to move, so the
+  decision MUST be driven by the steerable count.
 
 ### 3.2 The decision (replaces the byte-rate hottest/coolest + project_move)
 ```
@@ -183,20 +220,49 @@ move F: hi -> lo  (queue = workers[lo].queue_id)
   re-pinned cannot thrash back for several intervals.
 - **Budget/cap** (`max_rules`, STOP-on-exhaustion, NO eviction) — unchanged.
 
-### 3.4 Convergence / anti-thrash (formal)
-Define the potential `Φ = max_w counts[w] - min_w counts[w]`. The overshoot
-guard admits a move only when `counts[hi] - counts[lo] >= 2`, and a move
-decrements `counts[hi]` by 1 and increments `counts[lo]` by 1, so post-move
-`max - min` is `≤ Φ - 1` for the (hi,lo) pair (other workers unchanged ⇒ global
-`Φ` is non-increasing and strictly decreases whenever the (hi,lo) pair was the
-unique extremal pair). `Φ` is a non-negative integer bounded by `N` (flow count)
-⇒ the process **terminates** in `≤ Φ₀` admitted moves at `Φ ≤ 1` (an even
-partition up to ±1). The per-flow cooldown plus the `Φ ≥ 2` overshoot guard make
-**oscillation impossible**: once balanced, no move passes the `K`-threshold; a
-moved flow is in cooldown and cannot be re-chosen as the immediate next move, so
-the controller cannot ping-pong a flow between two equal-count workers. This is
-the count analogue of v1's ε-band monotone-objective termination argument, but
-on an integer potential (no floating-point ε needed) — strictly cleaner.
+### 3.3.1 The unsteerable-count divergence (AGY r1 / SMR r1 — documented limitation)
+Because the per-worker count is over **steerable** flows (§3.1), a worker
+carrying only non-steerable traffic (ICMP, unsteered ports) has steerable-count
+0. Consequence:
+- It can **never be the `hi` source** (steerable-count 0 is the minimum) — so the
+  controller never tries to move a flow off it and finds none. **No livelock**
+  (this is the lesson the #1750-r2 stale-snapshot livelock taught, but it does
+  not apply here because steerable-count 0 cannot be `hi`).
+- It **can be the `lo` destination**. If that worker is actually CPU-saturated by
+  heavy non-steerable background traffic, steering a TCP flow onto it overloads
+  it. **This is a real limitation:** count-balance balances STEERABLE-flow count,
+  not total CPU load. It cannot mislead the homogeneous iperf gate (no ICMP in
+  the fixture), but the operator doc MUST state it, and a unit test
+  (`unsteerable_only_worker_is_never_source`) pins the "never-source" half.
+  Closing the destination half (don't steer onto a non-steerable-saturated
+  worker) needs a per-worker total-load signal — out of scope; documented
+  follow-up alongside the heterogeneous tiebreak (§11).
+
+### 3.4 Convergence / anti-thrash (formal — corrected v2)
+v1 used `Φ = max counts - min counts` and claimed termination in `≤ Φ₀` moves.
+**That is wrong** (Codex r1): counterexample `[3,3,3,3,1,1,1,1]`, `K=2`, `Φ₀=2`
+takes **four** admitted moves to reach `[2,2,2,2,2,2,2,2]` while `Φ` stays at 2
+until the very last move — so `Φ = max - min` is NOT strictly decreasing per move
+and the `≤ Φ₀` bound is false. The algorithm still terminates; the correct
+potential is the **L1 distance to the balanced target**:
+```
+Ψ = Σ_w | counts[w] - mean |          (mean = N / Nᵥ; integer-rounded target)
+```
+(equivalently sum-of-squares `Σ (counts[w] - mean)²`). The overshoot guard admits
+a move only when `counts[hi] - counts[lo] >= 2`, which guarantees `counts[hi]-1 ≥
+counts[lo]+1`: the source steps one toward the mean and the destination steps one
+toward the mean, **neither overshoots the mean**, so each admitted move **strictly
+decreases `Ψ` by ≥ 2**. `Ψ` is a non-negative integer bounded by ~`2N`, so the
+process **terminates** in `≤ Ψ₀/2 ≤ N` admitted moves at the even partition
+(counts within ±1 of the mean ⇒ no pair has `delta ≥ 2` ⇒ no further move). The
+per-flow cooldown plus the `delta ≥ 2` overshoot guard make **oscillation
+impossible**: once balanced, no move passes the `K`-threshold or the overshoot
+guard; a just-moved flow is in cooldown and cannot be re-chosen as the immediate
+next move, so the controller cannot ping-pong a flow between two equal-count
+workers. (AGY r1's "proof" already used this L1 potential — the correct one;
+only the v1 plan TEXT stated the wrong max-min potential, now fixed.) This is the
+count analogue of v1's ε-band monotone-objective termination, on an integer
+potential (no floating-point ε) — strictly cleaner.
 
 ### 3.5 What is REMOVED vs v1
 - `project_move` (byte-rate vector projection) — gone from the decision.
@@ -289,13 +355,26 @@ within-queue scheduler was rebuilt:
   inversion (`cos/queue_ops/pop.rs:112`). #913 is the exact bug #1203's
   adversarial reviewer pointed at ("the temporal inversion bug, Issue #913").
 - **#911 / #914**: same-class HOL fix + shared_exact per-flow share cap.
-- **#1735** (current master, `cos/README.md:50-66`): **"Per-flow MQFQ runs on
-  ALL shaped queues, not just exact."** `promote_cos_queue_flow_fair` now marks
-  every queue (exact AND non-exact) `flow_fair_eligible`; exact/`shared_exact`
-  queues promote EAGERLY at build and allocate `FlowFairState` immediately. The
-  `flow_fair() == flow_fair_state.is_some()` invariant means a `shared_exact`
-  queue now dispatches the **per-flow MQFQ** branch, NOT the single-FIFO branch
-  #1203 was bounded by.
+- **#1735** (current master): **per-flow MQFQ runs on ALL shaped queues, not
+  just owner-local exact** — but the promotion timing differs by queue type, and
+  the precise phrasing matters (Codex/SMR r1):
+  - **exact AND `shared_exact` queues promote EAGERLY at build** —
+    `promote_cos_queue_flow_fair` allocates `FlowFairState` immediately and never
+    demotes (their V_min / v8-lease coordination assumes stable state). Policy is
+    `flow_fair = queue.exact` for BOTH `shared_exact` and owner-local-exact; the
+    historical `!shared_exact` exclusion is GONE (`cos/admission.rs:413-415,
+    458-460`). So a `shared_exact` queue has `flow_fair_state.is_some()` from
+    build.
+  - **non-exact shaped queues (best-effort / residual) promote LAZILY** — a
+    hash-free front-key contention probe in `cos_queue_push_back` promotes only
+    on the first genuinely-distinct flow (`cos/README.md:50-66`).
+  - The runtime gate is `CoSQueueRuntime::flow_fair() == flow_fair_state.is_some()`
+    (`cos/types/cos.rs:612-613`); the pop path takes the cheap FIFO branch ONLY
+    when `!flow_fair()` (`cos/queue_ops/pop.rs:59-70`). Since `shared_exact`
+    promotes eagerly, it dispatches the **per-flow MQFQ** branch at runtime, NOT
+    the single-FIFO branch #1203 was bounded by. (Independently verified by Codex
+    r1 `cos/queue_service/drain.rs:46-51` "shared_exact unreachable" on the FIFO
+    drain path, and AGY r1.)
 
 **So the precise thing #1203's close comment blamed — "the within-queue path …
 is single-FIFO-per-worker … gated to `exact && !shared_exact`" — is no longer
@@ -306,7 +385,8 @@ replaced by per-flow MQFQ on shared_exact since #911/#913/#914/#1735.
 **Yes, with one honestly-stated live precondition.** v2 avoids #1203's failure
 mode along three axes:
 1. **Count-balance is the part #1203 got right** (it flattened the count). v2
-   does the same, more cleanly (integer-`Φ` convergence vs #1203's K=4 thrash +
+   does the same, more cleanly (integer L1-to-target convergence §3.4 vs #1203's
+   K=4 thrash +
    the sticky-cooldown bug that put 50+ rules on the NIC). The convergence/anti-
    thrash machinery (§3.4) is strictly better than #1203's.
 2. **The within-queue floor that bounded #1203 is fixed** (§4.3) — the residual
@@ -343,11 +423,12 @@ R1.
 ## 5. Multiple Path Options
 
 ### Path A — Count-balance v2, count sourced from the same row snapshot, ship (a) homogeneous (RECOMMENDED)
-- `select_move` v2 per §3; per-worker count = rows-per-worker from the existing
-  `flow_worker_map()` load (no #1750 hard dependency, §2.2 option 1); `K=2`,
-  count overshoot guard, integer-`Φ` convergence; truncation/staleness guards
-  (§2.3); reuse ALL existing move machinery. Heterogeneous tiebreak documented as
-  a #1750-gated follow-up.
+- `select_move` v2 per §3; per-worker count = POST-FILTER steerable
+  `FlowSample`s-per-worker from the existing `flow_worker_map()` load (no #1750
+  hard dependency, §2.2 option 1 / §2.4); `K=2`, count overshoot guard, integer
+  L1-to-target convergence (§3.4); truncation defer + dwell/cooldown blip
+  absorption (NOT a snapshot-age staleness guard — §2.4); reuse ALL existing move
+  machinery. Heterogeneous tiebreak documented as a #1750-gated follow-up.
 - **Pros:** unblocks installs with NO byte-rate signal; smallest change to a
   heavily-reviewed controller (swaps the `select_move` body, keeps the barrier /
   ioctl / suppression / teardown verbatim); decouples from #1750; integer
@@ -405,10 +486,13 @@ unwind, forward barrier, install) is **unchanged** — only `is_over_threshold` 
   it feeds the CoV gauge + tiebreak only.
 - The per-flow loop (lines ~256-330) stays, but the controller no longer needs
   the per-flow `byte_rate` for the decision; keep populating `FlowSample.byte_rate`
-  for the gauge/tiebreak (cheap; already computed) but the decision counts rows.
-- Add a **truncation/staleness guard**: if `flow_worker_map()` returns
+  for the gauge/tiebreak (cheap; already computed) but the decision counts the
+  POST-FILTER steerable `FlowSample`s per worker (§3.1).
+- Add a **truncation defer guard**: if `flow_worker_map()` returns
   `truncated == true`, record a defer skip and do NOT run the balancer this tick
-  (the row count would understate the true count, §2.3).
+  (the row count would understate the true count, §2.3). This is a truncation
+  guard, NOT a snapshot-age staleness guard (Path A has no `published_ns` — §2.4);
+  transient publish lag is absorbed by `DWELL_TICKS_REQUIRED = 2` + cooldown.
 
 ### 6.3 Config knob (`pkg/config/schema.go`) — unchanged from #1748
 Same `class-of-service flow-rebalance` leaf. v2 re-interprets sub-leaves:
@@ -457,25 +541,50 @@ operators see the count imbalance the controller is acting on.
 |---|---|---|
 | Behavioral regression | LOW (OFF) | default-OFF byte-identical; ON re-uses reviewed move machinery |
 | #1203 within-queue floor recurs on CoS-on (shared_exact) | **MED** | §4 argues fixed by #913/#1735; UNPROVEN with count-balanced placement until live A/B in BOTH CoS modes; documented PLAN-OUTCOME if it recurs |
-| Count-vs-rows skew | LOW | structurally avoided by same-snapshot count (§2.2 option 1) |
-| Truncation feeds bad count | LOW | guarded (§2.3); cannot fire at P12 |
+| Count-vs-rows skew | LOW | structurally avoided by same-snapshot POST-FILTER steerable count (§2.2 opt 1 / §2.4) |
+| Truncation feeds bad count | LOW | truncation defer guard (§2.3/§6.2); cannot fire at P12 (24 ≪ 256) |
+| Snapshot publish-lag (no staleness guard) | LOW | dwell(2)+cooldown absorb a one-tick blip; adopt #1750 Path 1 bundle if live lag observed (§2.4) |
+| Unsteerable-count misleads destination | LOW (documented) | steerable-count-0 worker never source (§3.3.1 + unit test); destination-overload half is a documented follow-up |
 | Heterogeneous traffic unfair | MED (documented) | count-balance cannot fix within-worker rate skew; §3.6 follow-up gated on #1750 |
 | Hot-path perf | NONE | coordinator-cadence O(rows) count; no per-packet work |
 | Live gate still 0 installs | LOW | count signal is reliable (proven); the byte-rate stall that caused 0 installs is removed entirely |
 
 ## 10. Test plan (for the eventual `/engineer` increment)
-- **Pre-code live trace:** `--features debug-log` deploy on loss cluster, P12
-  -p5210; capture `REBALANCE_EVAL` and confirm per-worker ROW counts match
-  `xpf_userspace_binding_active_flow_count` (proves the same-snapshot count is
-  the reliable signal) and that `flows_per_worker` is non-empty on the hottest
-  worker.
+- **(1) Pre-code CoS-ON manual re-pin GATE (decisive de-risk — Codex/SMR r1,
+  RUN FIRST, BEFORE writing any selector code).** R1 proved count-balanced
+  placement → 3.8% CoV **CoS-OFF**. The single largest un-de-risked assumption is
+  that this extends to the **CoS-ON shared_exact** path (the live gate routes
+  `-p5210` through `iperf-24g` shared_exact). Measure it directly by repeating
+  R1's manual ethtool round-robin exact-5-tuple re-pin on current master **with
+  CoS loaded** (`./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0`) at
+  `-P12 -p5210`. Decision:
+  - manual CoS-ON re-pin → **~3-4% CoV** ⇒ post-#1735 shared_exact MQFQ +
+    count-balanced placement reaches R1-class fairness ⇒ the whole plan is
+    de-risked; implement Path A with confidence.
+  - manual CoS-ON re-pin → **~50% CoV** ⇒ the #1203 within-queue floor recurs on
+    the #1735 scheduler at runtime (README claim does not hold under load); do
+    NOT write selector code expecting it to fix shared_exact. Ship CoS-OFF scope
+    only (still the R1-validated win for a default-OFF knob) + file the
+    shared_exact within-queue follow-up (§11). This is the §4.4 documented
+    PLAN-OUTCOME, surfaced cheaply BEFORE implementation instead of after.
+- **(2) Pre-code live trace:** `--features debug-log` deploy on loss cluster, P12
+  -p5210; capture `REBALANCE_EVAL` and confirm per-worker POST-FILTER STEERABLE
+  row counts match the hottest-worker expectation and that `flows_per_worker` is
+  non-empty on the hottest worker (proves the same-snapshot steerable count is
+  the reliable signal that unblocks installs).
 - **Unit (`controller_tests.rs`):**
   - `count_balance_converges_to_even_partition` (drive `[2,2,1,1,4,2]` →
-    `[2,2,2,2,2,2]` over N ticks, assert `Φ` monotone-decreasing, terminates).
+    `[2,2,2,2,2,2]` over N ticks, assert the **L1-to-target `Ψ`** is
+    monotone-decreasing by ≥2 per admitted move, terminates).
+  - `count_balance_l1_potential_counterexample` (drive `[3,3,3,3,1,1,1,1]` →
+    even in 4 moves, asserting `Ψ` strictly decreases each move even though
+    `max-min` does NOT — pins the corrected §3.4 potential).
   - `count_overshoot_guard_blocks_1_delta` (`3,2` → no move).
   - `count_delta_threshold_K` (imbalance `< K` → Balanced).
   - `cooldown_prevents_immediate_thrash` (moved flow not re-chosen next move).
   - `truncated_snapshot_defers` (no decision on truncated rows).
+  - `unsteerable_only_worker_is_never_source` (a worker with steerable-count 0 is
+    never chosen as `hi`; §3.3.1).
   - `slot_ne_worker_id_still_selects` (keying regression, carried from #1748).
   - the existing second-move-chain + budget-exhaustion + barrier-order tests
     pass UNCHANGED (move machinery untouched).
@@ -494,8 +603,13 @@ operators see the count imbalance the controller is acting on.
 - **Heterogeneous rate-aware tiebreak** (§3.6(b)) — gated on a reliable per-flow
   byte feed (#1750 Path 2 cold-path eviction side-table or ordinal signal); no
   current heterogeneous live gate. Documented follow-up.
-- **#1750 atomic bundle adoption** — recommended hardening; adopt when #1750
-  ships (Path B becomes free).
+- **#1750 atomic bundle adoption** — recommended hardening (adds the
+  snapshot-age staleness guard Path A lacks, §2.4); adopt when #1750 ships (Path
+  B becomes free).
+- **Unsteerable-saturated destination guard** (§3.3.1) — don't steer a TCP flow
+  onto a worker that is CPU-saturated by non-steerable (ICMP/unsteered) traffic;
+  needs a per-worker total-load signal. Cannot bite the homogeneous iperf gate;
+  documented follow-up alongside the heterogeneous tiebreak.
 - **shared_exact within-queue follow-up** — IFF the live A/B gate shows
   count-balanced placement + post-#1735 shared_exact MQFQ does not reach
   R1-class CoV on the CoS-on path, file a within-queue scheduler issue (the

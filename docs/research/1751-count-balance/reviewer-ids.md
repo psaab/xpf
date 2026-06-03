@@ -7,9 +7,9 @@ a long-running session can fetch results by id after Codex `status` forgets.
 
 | Reviewer | Tool | Task / session id | Verdict |
 |---|---|---|---|
-| Codex | codex (isolated fg, unique CODEX_COMPANION_SESSION_ID) | _pending_ | _pending_ |
-| AGY | agy_adversarial_review | _pending_ | _pending_ |
-| Claude-SMR | self (docs/research/1751-count-balance/claude-smr-plan-r1.md) | n/a | _pending_ |
+| Codex | codex exec (isolated fg, CODEX_COMPANION_SESSION_ID=research-1751-r1-*) | research-1751-r1 (codex-cli 0.135.0) | **PLAN-NEEDS-MAJOR** (4 findings: #1203 not-kill but rephrase; count must be post-filter steerable + no staleness guard; convergence proof wrong (max-min counterexample [3,3,3,3,1,1,1,1]); add pre-code CoS-ON manual re-pin gate) |
+| AGY | agy_adversarial_review | adversarial-review-mpxeval5-4q2iwn | **PLAN-READY** (verified #1735 shared_exact MQFQ on master; flagged unsteerable-count divergence + shared_exact vtime_floor sync risk as documented-not-blocking) |
+| Claude-SMR | self (claude-smr-plan-r1.md) | n/a | **PLAN-NEEDS-MINOR** (converges with Codex: fix convergence proof to L1-to-target; post-filter steerable count; phrase #1735 precisely; endorse pre-code CoS-ON re-pin gate) |
 
 ## Notes
 - `/research` mode: stop at PLAN-READY / PLAN-KILL. No PR, no production code.
