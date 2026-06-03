@@ -38,8 +38,13 @@ pub(in crate::afxdp) use debug_log_rebalance;
 /// config leaf. Absent leaf => `None` controller => default path untouched.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::afxdp) struct RebalanceConfig {
-    /// `max_worker_rate / mean_rate` must exceed this to consider a move.
-    pub imbalance_threshold: f64,
+    /// #1751 count-balancing: the count-delta threshold `K`. A move is only
+    /// considered when the highest-flow-count worker carries at least `K` more
+    /// steerable flows than the lowest. `K=2` is the default; it converges a
+    /// count partition to even in the minimum number of moves and stops
+    /// cleanly (the overshoot guard requires `delta >= 2` to admit a move, so
+    /// `K < 2` would never produce an admitted move anyway).
+    pub count_delta_k: u32,
     /// Minimum seconds between rule installs (dwell / one-move-per-interval).
     pub rebalance_interval_secs: u64,
     /// Hard cap on concurrently-installed xpf rules per interface.
@@ -49,7 +54,7 @@ pub(in crate::afxdp) struct RebalanceConfig {
 impl Default for RebalanceConfig {
     fn default() -> Self {
         Self {
-            imbalance_threshold: 1.30,
+            count_delta_k: 2,
             rebalance_interval_secs: 1,
             max_rules: 64,
         }
@@ -57,9 +62,18 @@ impl Default for RebalanceConfig {
 }
 
 impl RebalanceConfig {
-    /// A config is meaningful only with a positive threshold and budget.
+    /// A config is meaningful only with a positive budget. (`count_delta_k` is
+    /// clamped to `>= 2` at use, since the overshoot guard cannot admit a move
+    /// below a delta of 2.)
     pub(in crate::afxdp) fn is_enabled(&self) -> bool {
-        self.imbalance_threshold > 1.0 && self.max_rules > 0
+        self.max_rules > 0
+    }
+
+    /// The effective count-delta threshold, clamped to the floor of 2 (a `K`
+    /// below 2 can never produce an admitted move under the overshoot guard).
+    #[inline]
+    pub(in crate::afxdp) fn effective_k(&self) -> u32 {
+        self.count_delta_k.max(2)
     }
 }
 
@@ -67,20 +81,25 @@ impl RebalanceConfig {
 /// `moves_skipped_total{reason}` metric label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::afxdp) enum SkipReason {
-    /// Imbalance below threshold or not yet persisted past the dwell.
+    /// #1751: the per-worker flow-count imbalance is below the `K` threshold
+    /// (`max_count - min_count < K`), or the counts are already even — no move
+    /// worthwhile. (Was the byte-rate "below imbalance ratio" reject in #1748.)
     Balanced,
     /// Within the per-flow cooldown window.
     Cooldown,
-    /// Moving the flow would make the destination the new hottest worker.
+    /// #1751: count overshoot guard — moving one flow would make the
+    /// destination worker the new max count (requires `c_hi - c_lo >= 2`).
+    /// Re-purposed from #1748's byte-rate magnitude guard; same metric label
+    /// `magnitude` for ABI stability.
     Magnitude,
-    /// Projected byte-rate CoV improvement did not exceed epsilon.
+    /// #1748 byte-rate epsilon reject. UNUSED on the #1751 count-balancing
+    /// decision path; retained only for `moves_skipped_total` metric ABI
+    /// stability (never recorded by the count selector).
     Epsilon,
-    /// #1748 live BUG #1 disambiguation: the hottest worker had NO eligible
-    /// candidate flow with a positive byte-rate to move — distinct from a real
-    /// epsilon reject (a candidate existed but its projected CoV gain was too
-    /// small). A high rate here while worker CoV is large means the per-flow
-    /// rate signal is broken (flows missing from the map, mismatched worker_id,
-    /// or zero per-flow rate), NOT that the move math is too conservative.
+    /// The highest-count source worker had no movable (non-cooldown) flow.
+    /// Under the same-snapshot count (#1751 §2.2 opt 1) this is structurally
+    /// near-impossible — the count IS the row count — so a non-zero rate here
+    /// means every flow on the source is in cooldown.
     NoEligibleFlow,
     /// Rule budget exhausted (STOP — no eviction).
     BudgetExhausted,
@@ -93,6 +112,11 @@ pub(in crate::afxdp) enum SkipReason {
     /// cleanup owner remains (#1748 review #4). Operator-visible: a non-zero
     /// rate here means worker command acks are stalling under load.
     RestoreFailed,
+    /// #1751: the `flow_worker_map` snapshot was truncated (row count caps at
+    /// FLOW_WORKER_MAP_MAX_ROWS / per-binding 256), so the per-worker row count
+    /// would understate the true active count. Defer the balancer this tick
+    /// rather than act on an understated count (plan §2.3/§6.2).
+    Truncated,
 }
 
 impl SkipReason {
@@ -107,6 +131,7 @@ impl SkipReason {
             Self::BarrierFailed => "barrier_failed",
             Self::Dwell => "dwell",
             Self::RestoreFailed => "restore_failed",
+            Self::Truncated => "truncated",
         }
     }
 }
@@ -155,6 +180,11 @@ pub(in crate::afxdp) struct RebalanceTickInput {
     pub flows: Vec<FlowSample>,
     /// Monotonic seconds (for cooldown / dwell timing).
     pub now_secs: u64,
+    /// #1751: true when the `flow_worker_map` snapshot was truncated (the
+    /// per-worker row count would understate the true active count). The
+    /// controller defers the balancer this tick rather than act on an
+    /// understated count (plan §2.3).
+    pub truncated: bool,
 }
 
 /// The transport the controller uses to drive the barriered move and program
@@ -221,12 +251,9 @@ pub(in crate::afxdp) struct RebalanceController {
     metrics: RebalanceMetrics,
 }
 
-/// Number of consecutive over-threshold ticks required before the first move
-/// (hysteresis floor — avoids reacting to a single noisy sample).
+/// Number of consecutive count-imbalanced ticks required before the first move
+/// (hysteresis floor — absorbs a single-tick RSS-count blip; #1751 §3.3).
 const DWELL_TICKS_REQUIRED: u32 = 2;
-
-/// Minimum fractional CoV improvement a move must project to be worth doing.
-const EPSILON_COV_IMPROVEMENT: f64 = 0.02;
 
 impl RebalanceController {
     pub(in crate::afxdp) fn new(config: RebalanceConfig) -> Self {
@@ -259,15 +286,28 @@ impl RebalanceController {
         input: &RebalanceTickInput,
         tx: &mut T,
     ) -> Option<MoveOutcome> {
-        // Always refresh the CoV gauge so operators see the live imbalance
-        // even when no move is taken.
+        // Always refresh the CoV gauge so operators see the live byte-rate
+        // imbalance even when no move is taken. (#1751: the gauge is now
+        // observability only — the DECISION is driven by the flow COUNT, not
+        // byte-rate.)
         let cov = byte_rate_cov(&input.workers);
         self.metrics.worker_byterate_cov = cov;
         self.expire_cooldowns(input.now_secs);
 
-        // Hysteresis: count consecutive over-threshold ticks.
-        let over_threshold = self.is_over_threshold(&input.workers);
-        if over_threshold {
+        // #1751 truncation defer (plan §2.3/§6.2): a truncated flow-worker-map
+        // snapshot would understate the per-worker row count, so defer rather
+        // than act on a wrong count. Cannot fire at the P12 gate (24 << 256).
+        if input.truncated {
+            self.metrics.record_skip(SkipReason::Truncated);
+            return None;
+        }
+
+        // Hysteresis: the COUNT imbalance must persist >= DWELL_TICKS_REQUIRED
+        // consecutive ticks before the first move (absorbs a one-tick RSS-count
+        // blip; #1751 §3.3). is_count_imbalanced replaces #1748's byte-rate
+        // is_over_threshold.
+        let imbalanced = self.is_count_imbalanced(&input.workers, &input.flows);
+        if imbalanced {
             self.dwell_ticks = self.dwell_ticks.saturating_add(1);
         } else {
             self.dwell_ticks = 0;
@@ -468,176 +508,170 @@ impl RebalanceController {
         self.metrics.rules_active = 0;
     }
 
-    fn is_over_threshold(&self, workers: &[WorkerByteRate]) -> bool {
-        let (max, mean) = max_and_mean(workers);
-        mean > 0.0 && (max / mean) > self.config.imbalance_threshold
+    /// #1751: the per-worker steerable-flow COUNT imbalance exceeds the `K`
+    /// threshold (`max_count - min_count >= K`). The count is over POST-FILTER
+    /// steerable `flows` (the same rows the candidate is drawn from), keyed by
+    /// the real worker_id — so count and rows are the same object (plan §2.2
+    /// opt 1) and the #1748 count-vs-rows skew is structurally impossible.
+    ///
+    /// The min/max range MUST be taken over ALL `workers` (a worker with no
+    /// steerable rows has count 0 and is a valid `lo` destination), NOT just
+    /// the workers that appear in `per_worker_counts` — otherwise a `[3,0]`
+    /// vector (worker 1 absent from the count map) would look balanced.
+    fn is_count_imbalanced(&self, workers: &[WorkerByteRate], flows: &[FlowSample]) -> bool {
+        if workers.len() < 2 {
+            return false;
+        }
+        let counts = per_worker_counts(flows);
+        let mut max = 0u32;
+        let mut min = u32::MAX;
+        for w in workers {
+            let c = counts.get(&w.worker_id).copied().unwrap_or(0);
+            max = max.max(c);
+            min = min.min(c);
+        }
+        max.saturating_sub(min) >= self.config.effective_k()
     }
 
     fn expire_cooldowns(&mut self, now_secs: u64) {
         self.cooldown.retain(|_, &mut until| until > now_secs);
     }
 
-    /// Byte-rate-aware selection: among flows on the hottest worker, pick the
-    /// one whose move to the least-loaded worker most reduces the per-worker
-    /// byte-rate CoV, subject to magnitude guard + cooldown + epsilon band.
-    /// Records the precise skip reason on the no-move paths.
+    /// #1751 count-balancing selection (replaces #1748's byte-rate selection).
+    /// Move a flow from the highest-steerable-flow-COUNT worker (`hi`) to the
+    /// lowest-count worker (`lo`), converging toward an even count partition.
+    /// NO per-flow byte-rates and NO byte-rate magnitude guard on the decision
+    /// path — the count comes from the same `flows` snapshot the candidate is
+    /// drawn from (plan §2.2 opt 1, §3.2). Records the precise skip reason on
+    /// the no-move paths.
     fn select_move(&mut self, input: &RebalanceTickInput) -> Option<MoveCandidate> {
         if input.workers.len() < 2 {
             self.metrics.record_skip(SkipReason::Balanced);
             return None;
         }
-        // Hottest (source) and least-loaded (destination) workers.
-        let hottest = input
+        // Per-worker steerable-flow count, over ALL workers in the rate vector
+        // (a worker with no steerable rows has count 0 and IS a valid `lo`
+        // destination). Counted from the post-filter `flows` (same object as
+        // the candidate rows) so count==rows by construction.
+        let counts = per_worker_counts(&input.flows);
+        // hi = argmax count (tie-break: higher byte_rate, then lower worker_id);
+        // lo = argmin count (tie-break: lower byte_rate, then lower worker_id).
+        // Deterministic tie-breaks make the selection reproducible.
+        let hi = input
             .workers
             .iter()
-            .max_by(|a, b| a.byte_rate.total_cmp(&b.byte_rate))?;
-        let coolest = input
+            .max_by(|a, b| {
+                let ca = counts.get(&a.worker_id).copied().unwrap_or(0);
+                let cb = counts.get(&b.worker_id).copied().unwrap_or(0);
+                ca.cmp(&cb)
+                    .then(a.byte_rate.total_cmp(&b.byte_rate))
+                    .then(b.worker_id.cmp(&a.worker_id))
+            })?;
+        let lo = input
             .workers
             .iter()
-            .min_by(|a, b| a.byte_rate.total_cmp(&b.byte_rate))?;
-        if hottest.worker_id == coolest.worker_id {
+            .min_by(|a, b| {
+                let ca = counts.get(&a.worker_id).copied().unwrap_or(0);
+                let cb = counts.get(&b.worker_id).copied().unwrap_or(0);
+                ca.cmp(&cb)
+                    .then(a.byte_rate.total_cmp(&b.byte_rate))
+                    .then(a.worker_id.cmp(&b.worker_id))
+            })?;
+        let c_hi = counts.get(&hi.worker_id).copied().unwrap_or(0);
+        let c_lo = counts.get(&lo.worker_id).copied().unwrap_or(0);
+
+        // Same worker as both hi and lo => fully even => nothing to do.
+        if hi.worker_id == lo.worker_id {
             self.metrics.record_skip(SkipReason::Balanced);
+            self.log_skip(input, SkipReason::Balanced, hi, lo, c_hi, c_lo);
             return None;
         }
-        let gap = hottest.byte_rate - coolest.byte_rate;
-        let baseline_cov = byte_rate_cov(&input.workers);
+        // K count-delta threshold: only act if the imbalance is worth a move.
+        if c_hi.saturating_sub(c_lo) < self.config.effective_k() {
+            self.metrics.record_skip(SkipReason::Balanced);
+            self.log_skip(input, SkipReason::Balanced, hi, lo, c_hi, c_lo);
+            return None;
+        }
+        // Count overshoot guard (plan §3.2, §3.4): admit a move only when
+        // `c_hi - c_lo >= 2`, so moving ONE flow does not make `lo` the new max
+        // — and so the sum-of-squares potential strictly drops by >= 2 per move
+        // (ΔΨ = 2 - 2(c_hi - c_lo) <= -2). With K defaulting to 2 this is
+        // implied by the threshold, but the guard is explicit and independent
+        // so a configured K < 2 still cannot admit an overshooting move.
+        if c_hi.saturating_sub(c_lo) < 2 {
+            self.metrics.record_skip(SkipReason::Magnitude);
+            self.log_skip(input, SkipReason::Magnitude, hi, lo, c_hi, c_lo);
+            return None;
+        }
 
-        // Candidate flows: those currently on the hottest worker, heaviest
-        // first, not in cooldown.
+        // Choose a flow on `hi` not in cooldown. Homogeneous traffic: any flow
+        // is equally good; pick the lowest session_key deterministically for
+        // reproducibility (plan §3.2).
         let mut candidates: Vec<&FlowSample> = input
             .flows
             .iter()
-            .filter(|f| f.worker_id == hottest.worker_id)
+            .filter(|f| f.worker_id == hi.worker_id && !self.cooldown.contains_key(&f.key))
             .collect();
-        candidates.sort_by(|a, b| b.byte_rate.total_cmp(&a.byte_rate));
+        candidates.sort_by(|a, b| session_key_order(&a.key, &b.key));
 
-        let candidate_count = candidates.len();
-        // #1748 live BUG #1 ROOT-CAUSE FIX: the direct per-flow byte-rate
-        // (observed_bytes delta) is an unreliable signal under real traffic —
-        // the per-flow-cache `observed_bytes` counter RESETS whenever the entry
-        // is evicted + re-inserted (LRU / generation / collision), so across a
-        // 1s eval window a heavy flow frequently reads rate ~0 (cur < prev =>
-        // saturating_sub => 0). That made every candidate look like a 0-rate
-        // flow, project_move shifted ~0 bytes, and the move never cleared the
-        // epsilon band (installs=0 on the live gate). The per-WORKER rate
-        // (tx_bytes delta) IS reliable (CoV 0.64 was computed from it), so when
-        // a flow's direct rate is missing we ESTIMATE it from the reliable
-        // worker rate: the hottest worker's rate divided evenly across its
-        // candidate flows. This is the physically-correct expectation for
-        // RSS-hashed equal flows and lets the controller make a beneficial move
-        // off the reliable signal instead of stalling on the flaky one.
-        let fallback_per_flow_rate = if candidate_count > 0 {
-            hottest.byte_rate / candidate_count as f64
-        } else {
-            0.0
-        };
-        let mut had_cooldown_skip = false;
-        let mut had_magnitude_skip = false;
-        // #1748 live BUG #1: track whether ANY candidate flow reached the
-        // epsilon comparison with a POSITIVE (estimated) byte-rate. If none did
-        // (no flows on the hottest worker at all, or a zero hottest rate), the
-        // skip is NoEligibleFlow, NOT a genuine epsilon reject.
-        let mut reached_epsilon_with_positive_rate = false;
-        let mut best: Option<(MoveCandidate, f64)> = None;
-        for flow in candidates {
-            if self.cooldown.contains_key(&flow.key) {
-                had_cooldown_skip = true;
-                continue;
-            }
-            // Effective move magnitude: the direct per-flow rate when present,
-            // else the reliable worker-rate-derived estimate (see above).
-            let move_rate = if flow.byte_rate > 0.0 {
-                flow.byte_rate
+        let Some(flow) = candidates.first() else {
+            // Every steerable flow on `hi` is in cooldown (or — structurally
+            // unlikely under same-snapshot counting — `hi` had no rows).
+            let had_any_on_hi = input.flows.iter().any(|f| f.worker_id == hi.worker_id);
+            let reason = if had_any_on_hi {
+                SkipReason::Cooldown
             } else {
-                fallback_per_flow_rate
+                SkipReason::NoEligibleFlow
             };
-            // A zero-rate move cannot improve CoV (project_move shifts ~0
-            // bytes); only possible if the hottest worker's own rate is 0.
-            if move_rate <= 0.0 {
-                continue;
-            }
-            // Magnitude guard (#1748 live BLOCKER B — relaxed from gap/2 to
-            // gap). `gap = hottest - coolest`. The guard's purpose is anti-
-            // thrash: a move must not make the DESTINATION more loaded than the
-            // SOURCE was before the move. That bound is `coolest + move_rate <=
-            // hottest`, i.e. `move_rate <= gap` — NOT `gap/2`. The old `gap/2`
-            // ("don't overshoot the midpoint") rejected the worker-rate fallback
-            // estimate (hottest/candidate_count) whenever the hottest worker had
-            // few but heavy flows: e.g. hottest 4.5G with 2 flows => est 2.25G
-            // vs (4.5-1.0)/2 = 1.75G => rejected, even though moving it clearly
-            // improves balance. The epsilon band below already guarantees the
-            // move REDUCES CoV, and the per-flow cooldown prevents oscillation,
-            // so gap/2 was redundant AND too strict — it dominated the live skip
-            // counter (magnitude) and blocked every beneficial move.
-            if move_rate > gap {
-                had_magnitude_skip = true;
-                continue;
-            }
-            // Project the post-move byte-rate vector and its CoV.
-            let projected = project_move(
-                &input.workers,
-                hottest.worker_id,
-                coolest.worker_id,
-                move_rate,
-            );
-            let projected_cov = byte_rate_cov(&projected);
-            let improvement = baseline_cov - projected_cov;
-            reached_epsilon_with_positive_rate = true;
-            if improvement <= EPSILON_COV_IMPROVEMENT {
-                continue;
-            }
-            let cand = MoveCandidate {
-                key: flow.key.clone(),
-                old_worker: hottest.worker_id,
-                new_worker: coolest.worker_id,
-                new_queue: coolest.queue_id,
-            };
-            match &best {
-                Some((_, best_imp)) if *best_imp >= improvement => {}
-                _ => best = Some((cand, improvement)),
-            }
-        }
-
-        if let Some((cand, _)) = best {
-            return Some(cand);
-        }
-        // No winning move — attribute the dominant skip reason. Magnitude and
-        // cooldown are real eligibility rejects on a positive-rate flow. A real
-        // epsilon reject requires a positive-rate candidate that reached the
-        // projection. Otherwise the hottest worker simply had no movable flow
-        // with a positive rate -> NoEligibleFlow (the live-BUG-1 signature).
-        let reason = if reached_epsilon_with_positive_rate {
-            SkipReason::Epsilon
-        } else if had_magnitude_skip {
-            SkipReason::Magnitude
-        } else if had_cooldown_skip {
-            SkipReason::Cooldown
-        } else {
-            SkipReason::NoEligibleFlow
+            self.metrics.record_skip(reason);
+            self.log_skip(input, reason, hi, lo, c_hi, c_lo);
+            return None;
         };
-        // #1748 live BUG #1 instrumentation: when imbalanced but no move is
-        // taken, emit ONE debug line per eval with the ground-truth vectors so
-        // a single deploy disambiguates "per-flow rate is zero" (NoEligibleFlow)
-        // from "move math too conservative" (Epsilon). Gated to the
-        // `debug-log` feature so it is OFF in normal release builds.
-        debug_log_rebalance!(
-            "REBALANCE_SKIP ifindex={} reason={} baseline_cov={:.4} eps={:.4} \
-             hottest_w={} hottest_rate={:.3e} coolest_w={} coolest_rate={:.3e} gap={:.3e} \
-             candidate_flows_on_hottest={} flows_total={}",
-            input.ifindex,
-            reason.as_str(),
-            baseline_cov,
-            EPSILON_COV_IMPROVEMENT,
-            hottest.worker_id,
-            hottest.byte_rate,
-            coolest.worker_id,
-            coolest.byte_rate,
-            gap,
-            candidate_count,
-            input.flows.len(),
-        );
-        self.metrics.record_skip(reason);
-        None
+
+        Some(MoveCandidate {
+            key: flow.key.clone(),
+            old_worker: hi.worker_id,
+            new_worker: lo.worker_id,
+            new_queue: lo.queue_id,
+        })
+    }
+
+    /// #1751 instrumentation: emit ONE debug line per eval when no move is
+    /// taken, with the count vectors so a single `--features debug-log` deploy
+    /// gives ground truth (per-worker counts + the chosen hi/lo + skip reason).
+    /// Gated to the `debug-log` feature — compiled out of release builds.
+    #[inline]
+    fn log_skip(
+        &self,
+        input: &RebalanceTickInput,
+        reason: SkipReason,
+        hi: &WorkerByteRate,
+        lo: &WorkerByteRate,
+        c_hi: u32,
+        c_lo: u32,
+    ) {
+        let _ = (input, reason, hi, lo, c_hi, c_lo);
+        #[cfg(feature = "debug-log")]
+        {
+            let counts = per_worker_counts(&input.flows);
+            let mut per_worker: std::collections::BTreeMap<u32, u32> =
+                std::collections::BTreeMap::new();
+            for w in &input.workers {
+                per_worker.insert(w.worker_id, counts.get(&w.worker_id).copied().unwrap_or(0));
+            }
+            debug_log_rebalance!(
+                "REBALANCE_SKIP ifindex={} reason={} K={} counts={:?} hi_w={} hi_count={} lo_w={} lo_count={} flows_total={}",
+                input.ifindex,
+                reason.as_str(),
+                self.config.effective_k(),
+                per_worker,
+                hi.worker_id,
+                c_hi,
+                lo.worker_id,
+                c_lo,
+                input.flows.len(),
+            );
+        }
     }
 }
 
@@ -662,17 +696,29 @@ pub(in crate::afxdp) struct MoveOutcome {
     pub loc: u32,
 }
 
-/// Compute the max and mean of a per-worker byte-rate vector.
-fn max_and_mean(workers: &[WorkerByteRate]) -> (f64, f64) {
-    if workers.is_empty() {
-        return (0.0, 0.0);
+/// #1751: per-worker steerable-flow COUNT, counted from the POST-FILTER
+/// `flows` (the same row set the candidate is drawn from — plan §2.2 opt 1, so
+/// count==rows by construction). Keyed by the real `worker_id`. A worker with
+/// no steerable rows simply does not appear (callers treat absent as count 0).
+pub(in crate::afxdp) fn per_worker_counts(flows: &[FlowSample]) -> HashMap<u32, u32> {
+    let mut counts: HashMap<u32, u32> = HashMap::new();
+    for f in flows {
+        *counts.entry(f.worker_id).or_insert(0) += 1;
     }
-    let sum: f64 = workers.iter().map(|w| w.byte_rate).sum();
-    let max = workers
-        .iter()
-        .map(|w| w.byte_rate)
-        .fold(0.0_f64, f64::max);
-    (max, sum / workers.len() as f64)
+    counts
+}
+
+/// Deterministic total order on `SessionKey` for reproducible candidate-flow
+/// selection (homogeneous traffic: any flow on `hi` is equally good, so pick
+/// the lowest key). Orders on the wire-relevant fields.
+fn session_key_order(a: &SessionKey, b: &SessionKey) -> std::cmp::Ordering {
+    a.addr_family
+        .cmp(&b.addr_family)
+        .then(a.protocol.cmp(&b.protocol))
+        .then(a.src_ip.cmp(&b.src_ip))
+        .then(a.dst_ip.cmp(&b.dst_ip))
+        .then(a.src_port.cmp(&b.src_port))
+        .then(a.dst_port.cmp(&b.dst_port))
 }
 
 /// Coefficient of variation (stddev / mean) of the per-worker byte-rates.
@@ -719,26 +765,16 @@ pub(in crate::afxdp) fn cumulative_to_rate(
     cumulative.saturating_sub(prev_cumulative) as f64 / dt
 }
 
-/// Project the per-worker byte-rate vector after moving `flow_rate` from
-/// `from` to `to`. Returns a fresh vector (cheap — ~6 workers).
-fn project_move(
-    workers: &[WorkerByteRate],
-    from: u32,
-    to: u32,
-    flow_rate: f64,
-) -> Vec<WorkerByteRate> {
-    workers
-        .iter()
-        .map(|w| {
-            let mut nw = *w;
-            if w.worker_id == from {
-                nw.byte_rate = (w.byte_rate - flow_rate).max(0.0);
-            } else if w.worker_id == to {
-                nw.byte_rate = w.byte_rate + flow_rate;
-            }
-            nw
-        })
-        .collect()
+/// #1751 convergence potential: the sum-of-squares of the per-worker counts,
+/// `Ψ = Σ_w count_w²` (mean-independent — `Σ(count-μ)²` differs from `Σcount²`
+/// only by the constant `−N²/Nᵥ`, so the PER-MOVE change `ΔΨ` is identical;
+/// the plain `Σcount²` form avoids a float mean). Each admitted move
+/// (`c_hi − c_lo ≥ 2`) strictly decreases this by `≥ 2`
+/// (`ΔΨ = 2 − 2(c_hi − c_lo) ≤ −2`), guaranteeing termination at the even
+/// partition (plan §3.4). Test helper + an optional anti-thrash invariant
+/// check; not on the hot path.
+pub(in crate::afxdp) fn count_sum_of_squares(counts: &HashMap<u32, u32>) -> u64 {
+    counts.values().map(|&c| (c as u64) * (c as u64)).sum()
 }
 
 /// Translate a SessionKey to the ethtool 5-tuple, converting host-order ports

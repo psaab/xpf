@@ -29,13 +29,19 @@ pub(crate) struct ClassOfServiceSnapshot {
     pub flow_rebalance: Option<CoSFlowRebalanceSnapshot>,
 }
 
-/// #1748: rebalance controller config, mirrored from
+/// #1748/#1751: rebalance controller config, mirrored from
 /// `config.CoSFlowRebalance`. Zero sub-fields mean "use the controller's
 /// built-in defaults".
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub(crate) struct CoSFlowRebalanceSnapshot {
+    /// #1748 byte-rate threshold — RETAINED for wire back-compat but IGNORED by
+    /// the #1751 count-balancing decision. Kept so older configs still parse.
     #[serde(rename = "imbalance_threshold_percent", default)]
     pub imbalance_threshold_percent: u32,
+    /// #1751 count-delta threshold K (move only when max_count - min_count >=
+    /// K). 0 => controller default (2); the selector floors it at 2.
+    #[serde(rename = "count_delta", default)]
+    pub count_delta: u32,
     #[serde(rename = "rebalance_interval_secs", default)]
     pub rebalance_interval_secs: u32,
     #[serde(rename = "max_rules", default)]

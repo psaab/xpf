@@ -27,10 +27,13 @@ pub(super) fn rebalance_config_from_snapshot(
     snap: CoSFlowRebalanceSnapshot,
 ) -> RebalanceConfig {
     let defaults = RebalanceConfig::default();
-    let imbalance_threshold = if snap.imbalance_threshold_percent == 0 {
-        defaults.imbalance_threshold
+    // #1751: the count-delta threshold K (was #1748's byte-rate
+    // imbalance_threshold_percent, now ignored on the decision path). 0 => the
+    // controller default (2). The selector also clamps K to a floor of 2.
+    let count_delta_k = if snap.count_delta == 0 {
+        defaults.count_delta_k
     } else {
-        snap.imbalance_threshold_percent as f64 / 100.0
+        snap.count_delta
     };
     let rebalance_interval_secs = if snap.rebalance_interval_secs == 0 {
         defaults.rebalance_interval_secs
@@ -43,7 +46,7 @@ pub(super) fn rebalance_config_from_snapshot(
         snap.max_rules
     };
     RebalanceConfig {
-        imbalance_threshold,
+        count_delta_k,
         rebalance_interval_secs,
         max_rules,
     }
@@ -270,7 +273,12 @@ impl super::Coordinator {
         // - last_sample_cumulative) / elapsed, maintaining a per-flow previous
         // sample across ticks (the controller runs at a fixed cadence).
         let mut per_iface_flows: BTreeMap<i32, Vec<FlowSample>> = BTreeMap::new();
-        let (rows, _truncated) = self.flow_worker_map();
+        // #1751 §2.3/§6.2: the row count drives the count-balance decision, so a
+        // truncated snapshot (row count understates the true active count) must
+        // make the controller DEFER this tick (handled in tick()). Cannot fire
+        // at the P12 gate (<=24 entries << 256 per-binding cap). Plumb the flag
+        // through to every per-ifindex RebalanceTickInput.
+        let (rows, truncated) = self.flow_worker_map();
         let mut seen_flow_keys: std::collections::HashSet<SessionKey> =
             std::collections::HashSet::new();
         for row in rows {
@@ -414,7 +422,7 @@ impl super::Coordinator {
                 }
             }
 
-            let input = RebalanceTickInput { ifindex, workers, flows, now_secs };
+            let input = RebalanceTickInput { ifindex, workers, flows, now_secs, truncated };
             // #1748 review-r3 (soundness): take BOTH the controller and its
             // socket out as independent owned locals, run the tick (transport
             // borrows the local socket + `&self`; controller is borrowed `&mut`
