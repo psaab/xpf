@@ -66,7 +66,9 @@ fn build_flow_spec_tcp4_exact_match_encoding() {
     let fs = build_flow_spec(&flow, 3);
     assert_eq!(fs.flow_type, TCP_V4_FLOW);
     assert_eq!(fs.ring_cookie, 3, "ring_cookie carries the queue index");
-    assert_eq!(fs.location, RX_CLS_LOC_ANY, "auto-assign rule location");
+    // #1751: build_flow_spec leaves location 0; insert_rule sets a concrete
+    // free slot (mlx5 rejects RX_CLS_LOC_ANY).
+    assert_eq!(fs.location, 0, "location is set by insert_rule, not build_flow_spec");
 
     // Decode the tcp_ip4_spec back out of the h_u union bytes.
     let ip4src = u32::from_ne_bytes(fs.h_u.hdata[0..4].try_into().unwrap());
@@ -173,4 +175,60 @@ fn live_insert_list_delete_round_trip() {
         !cleaned.contains(&loc),
         "deleted rule loc {loc} must be gone: {cleaned:?}"
     );
+}
+
+// ── #1751: ethtool-compatible free-location picker ─────────────────────
+
+/// find_empty_slot_top_down picks the highest free location (ethtool order,
+/// which is why a manual insert on an empty table lands at size-1), skips used
+/// locations, and a "delete" (removing a loc from the used set) frees it.
+#[test]
+fn find_empty_slot_top_down_picks_highest_free_and_frees_on_delete() {
+    let size = 1024u32;
+
+    // Empty table -> the very top slot (matches the live `ethtool -N` = 1023).
+    assert_eq!(find_empty_slot_top_down(size, &[]), Some(1023));
+
+    // With 1023 used, the next pick is 1022 (top-down).
+    assert_eq!(find_empty_slot_top_down(size, &[1023]), Some(1022));
+
+    // Used set need not be sorted/contiguous; pick the highest free.
+    let mut used = vec![1023u32, 1022, 1020];
+    assert_eq!(
+        find_empty_slot_top_down(size, &used),
+        Some(1021),
+        "1021 is the highest free location"
+    );
+
+    // "Install" 1021, then "delete" 1022 (free it): the next pick is the
+    // freed 1022 (now the highest free).
+    used.push(1021);
+    assert_eq!(find_empty_slot_top_down(size, &used), Some(1019));
+    used.retain(|&l| l != 1022); // delete frees 1022
+    assert_eq!(
+        find_empty_slot_top_down(size, &used),
+        Some(1022),
+        "deleting a loc frees it for the next pick"
+    );
+}
+
+/// A full location space yields None (caller maps to ENOSPC); a zero size
+/// falls back to the mlx5 default depth (1024).
+#[test]
+fn find_empty_slot_top_down_full_and_zero_size() {
+    // Tiny full table: size 2, both used -> None.
+    assert_eq!(find_empty_slot_top_down(2, &[0, 1]), None);
+    // size 2, only 1 used -> the other.
+    assert_eq!(find_empty_slot_top_down(2, &[1]), Some(0));
+    // size 0 falls back to 1024 depth -> top slot 1023 when empty.
+    assert_eq!(find_empty_slot_top_down(0, &[]), Some(1023));
+}
+
+/// RX_CLS_LOC_SPECIAL flag bits on a returned location do not make a candidate
+/// miss-compare (defensive mask in the picker).
+#[test]
+fn find_empty_slot_top_down_masks_special_flag() {
+    // A used entry with the SPECIAL flag set still occupies its concrete slot.
+    let used = vec![0x8000_0000u32 | 1023];
+    assert_eq!(find_empty_slot_top_down(1024, &used), Some(1022));
 }
