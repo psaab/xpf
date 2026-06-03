@@ -63,7 +63,6 @@ struct MockTransport {
     promote_ok: bool,
     demote_ok: bool,
     install_ok: bool,
-    next_loc: u32,
     /// When true, restore_owner returns false (simulates an ack timeout / key
     /// absent on W_old) so tests can exercise the gated reverse barrier.
     restore_fails: bool,
@@ -82,7 +81,6 @@ impl MockTransport {
             promote_ok: true,
             demote_ok: true,
             install_ok: true,
-            next_loc: 100,
             ..Default::default()
         }
     }
@@ -124,11 +122,12 @@ impl BarrierTransport for MockTransport {
         }
         true
     }
-    fn install_rule(&mut self, _flow: &FlowSpec5Tuple, queue: u32) -> std::io::Result<u32> {
-        self.calls.push(format!("install:q{queue}"));
+    fn install_rule(&mut self, _flow: &FlowSpec5Tuple, queue: u32, loc: u32) -> std::io::Result<u32> {
+        // #1751: the controller now picks the concrete loc and passes it in;
+        // the mock returns it verbatim (the real ioctl returns the loc it
+        // installed at, == the requested loc for a concrete request).
+        self.calls.push(format!("install:q{queue}:loc{loc}"));
         if self.install_ok {
-            let loc = self.next_loc;
-            self.next_loc += 1;
             Ok(loc)
         } else {
             Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
@@ -421,8 +420,10 @@ fn barrier_order_is_promote_then_demote_then_install() {
     let install_idx = tx.calls.iter().position(|c| c.starts_with("install:")).unwrap();
     assert!(promote_idx < demote_idx, "promote(W_new=1) before demote(W_old=0): {:?}", tx.calls);
     assert!(demote_idx < install_idx, "demote before install: {:?}", tx.calls);
-    // Destination queue is worker 1's queue_id (== worker_id in the fixture).
-    assert!(tx.calls.iter().any(|c| c == "install:q1"));
+    // Destination queue is worker 1's queue_id (== worker_id in the fixture);
+    // #1751 the install also carries the ledger-picked loc (top slot 1023).
+    assert!(tx.calls.iter().any(|c| c.starts_with("install:q1:loc")), "install on q1: {:?}", tx.calls);
+    assert!(tx.calls.iter().any(|c| c == "install:q1:loc1023"), "first install at top slot 1023: {:?}", tx.calls);
 }
 
 /// Demote-ack failure rolls back via the reverse barrier and keeps >= 1 owner.
@@ -491,7 +492,6 @@ fn promote_claim_succeeds_when_w_new_does_not_hold_the_flow() {
     #[derive(Default)]
     struct SameNodeMock {
         calls: Vec<String>,
-        next_loc: u32,
     }
     impl BarrierTransport for SameNodeMock {
         fn promote(&mut self, w: u32, k: &SessionKey) -> bool {
@@ -512,10 +512,8 @@ fn promote_claim_succeeds_when_w_new_does_not_hold_the_flow() {
             self.calls.push(format!("replica:{w}:{}", k.src_port));
             true
         }
-        fn install_rule(&mut self, _f: &FlowSpec5Tuple, q: u32) -> std::io::Result<u32> {
-            self.calls.push(format!("install:q{q}"));
-            let loc = 200 + self.next_loc;
-            self.next_loc += 1;
+        fn install_rule(&mut self, _f: &FlowSpec5Tuple, q: u32, loc: u32) -> std::io::Result<u32> {
+            self.calls.push(format!("install:q{q}:loc{loc}"));
             Ok(loc)
         }
         fn delete_rule(&mut self, loc: u32) -> std::io::Result<()> {
@@ -587,6 +585,124 @@ fn budget_exhaustion_stops_no_eviction() {
     assert_eq!(c.metrics().deletes_total, 0);
     let skipped = c.metrics().moves_skipped.get(&SkipReason::BudgetExhausted).copied().unwrap_or(0);
     assert!(skipped >= 1, "budget-exhausted skip recorded");
+}
+
+// ── #1751 ledger-based ntuple location picking (decoupled from GRXCLSRLALL) ──
+
+/// The location picker reads the controller's LEDGER used-set, never the NIC.
+/// Top-down from MAX-1: an empty used-set yields 1023, then 1022, skipping
+/// occupied slots; a freed (deleted) loc becomes pickable again.
+#[test]
+fn free_loc_top_down_picks_highest_free_skipping_used() {
+    // Empty ledger -> top slot.
+    assert_eq!(free_loc_top_down(MAX_NTUPLE_LOCATION, &[]), Some(1023));
+    // 1023 taken -> next is 1022.
+    assert_eq!(free_loc_top_down(MAX_NTUPLE_LOCATION, &[1023]), Some(1022));
+    // 1023+1022 taken -> 1021.
+    assert_eq!(free_loc_top_down(MAX_NTUPLE_LOCATION, &[1023, 1022]), Some(1021));
+    // Occupied slots are skipped regardless of insertion order; the gap at 1022
+    // (freed by a delete) is re-picked before descending further.
+    assert_eq!(free_loc_top_down(MAX_NTUPLE_LOCATION, &[1021, 1023]), Some(1022));
+    // A non-contiguous used-set still returns the single highest free slot.
+    assert_eq!(free_loc_top_down(MAX_NTUPLE_LOCATION, &[1023, 1021, 1020]), Some(1022));
+}
+
+/// A FULL location space (every loc in [0, MAX) used) yields None, which the
+/// caller maps to ENOSPC / BudgetExhausted — no NIC query involved.
+#[test]
+fn free_loc_top_down_full_ledger_is_none() {
+    let all_used: Vec<u32> = (0..MAX_NTUPLE_LOCATION).collect();
+    assert_eq!(free_loc_top_down(MAX_NTUPLE_LOCATION, &all_used), None);
+    // One free slot in the middle is still found.
+    let mut minus_one = all_used.clone();
+    minus_one.retain(|&l| l != 500);
+    assert_eq!(free_loc_top_down(MAX_NTUPLE_LOCATION, &minus_one), Some(500));
+}
+
+/// Successive installs consume the top-down ledger slots (1023, 1022, ...);
+/// a delete (second-move unwind) frees a slot that the next install reuses.
+/// This exercises the integration of next_free_ledger_loc through tick without
+/// any GRXCLSRLALL/NIC query.
+#[test]
+fn installs_consume_ledger_slots_top_down() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    // First move: empty ledger -> loc 1023.
+    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("first move");
+    assert!(
+        tx.calls.iter().any(|s| s == "install:q1:loc1023"),
+        "first install at top slot 1023: {:?}", tx.calls
+    );
+    // Second move of a DIFFERENT key: 1023 is now in the ledger -> picks 1022.
+    // Use a fresh count vector with a new hottest worker so a distinct flow is
+    // chosen, and advance time past the install cadence.
+    tx.calls.clear();
+    c.clear_cooldown_for_test();
+    drive_one_move(&mut c, &mut tx, &[0, 0, 3, 0], 100).expect("second move");
+    // The next free ledger slot below 1023 is 1022, regardless of which
+    // count-0 destination queue the selector picks.
+    assert!(
+        tx.calls.iter().any(|s| s.starts_with("install:") && s.ends_with(":loc1022")),
+        "second install reuses next free slot 1022: {:?}", tx.calls
+    );
+    assert_eq!(c.metrics().rules_active, 2);
+}
+
+/// Install with a FULL location space aborts as BudgetExhausted BEFORE the
+/// barrier (no promote/demote side-effects to roll back). We model "full" by
+/// configuring max_rules == MAX_NTUPLE_LOCATION is impractical (1024 installs),
+/// so this drives the picker contract directly: a synthetic full ledger has no
+/// free slot, and the controller skip path records BudgetExhausted. The unit
+/// above (free_loc_top_down_full_ledger_is_none) proves None on a full set;
+/// here we confirm the controller's budget gate (max_rules) reaches the same
+/// skip reason before the location space could ever exhaust.
+#[test]
+fn full_capacity_skips_budget_exhausted_without_barrier() {
+    let mut c = test_controller(RebalanceConfig {
+        count_delta_k: 2,
+        rebalance_interval_secs: 1,
+        max_rules: 1,
+    });
+    let mut tx = MockTransport::good();
+    // First move commits at the cap.
+    drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("first move at cap");
+    assert_eq!(c.metrics().rules_active, 1);
+    tx.calls.clear();
+    // Now at the cap: a further imbalance must skip BudgetExhausted with NO
+    // barrier calls (the budget gate is checked before select/barrier).
+    c.clear_cooldown_for_test();
+    for t in 0..8u64 {
+        let input = count_input(5, &[0, 0, 3, 0], 100 + t);
+        assert!(c.tick(&input, &mut tx).is_none(), "no move past the cap");
+    }
+    assert!(
+        !tx.calls.iter().any(|s| s.starts_with("promote:") || s.starts_with("install:")),
+        "no barrier side-effects past the cap: {:?}", tx.calls
+    );
+    let skipped = c.metrics().moves_skipped
+        .get(&SkipReason::BudgetExhausted).copied().unwrap_or(0);
+    assert!(skipped >= 1, "BudgetExhausted recorded past the cap");
+}
+
+/// #1751 PIVOT: the install path is fully decoupled from any NIC location
+/// query (GRXCLSRLALL/reconcile_orphans). The BarrierTransport surface the
+/// controller drives has NO list/reconcile method — install_rule takes the
+/// loc the controller already picked from its ledger. A successful committed
+/// move therefore PROVES installs never consult the NIC for a free slot, so a
+/// GRXCLSRLALL EINVAL (which only the swallowed startup reconcile uses) cannot
+/// block a move. The loc carried into install_rule is the ledger pick (1023 on
+/// an empty table), confirming the picker, not the NIC, is the source.
+#[test]
+fn install_is_decoupled_from_nic_location_query() {
+    let mut c = test_controller(cfg());
+    let mut tx = MockTransport::good();
+    let mv = drive_one_move(&mut c, &mut tx, &[3, 0], 10).expect("move installs");
+    assert_eq!(mv.loc, 1023, "loc comes from the ledger picker, not a NIC query");
+    assert!(
+        tx.calls.iter().any(|s| s == "install:q1:loc1023"),
+        "install carries the ledger-picked loc: {:?}", tx.calls
+    );
+    assert_eq!(c.metrics().installs_total, 1);
 }
 
 /// Teardown of a live move uses the reverse barrier (restore W_old -> delete ->

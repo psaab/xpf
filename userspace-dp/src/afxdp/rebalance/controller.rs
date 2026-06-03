@@ -203,9 +203,12 @@ pub(in crate::afxdp) trait BarrierTransport {
     /// Reverse-barrier: demote W_new back to a worker-local replica; block
     /// until acked.
     fn demote_replica(&mut self, worker_id: u32, key: &SessionKey) -> bool;
-    /// Install the exact-5-tuple rule steering the flow to `queue`. Returns
-    /// the rule location on success.
-    fn install_rule(&mut self, flow: &FlowSpec5Tuple, queue: u32) -> std::io::Result<u32>;
+    /// Install the exact-5-tuple rule steering the flow to `queue` at the
+    /// CONCRETE location `loc` (#1751: the controller picks `loc` from its
+    /// ledger used-set; the transport does NOT query the NIC for a location).
+    /// Returns the location the rule was installed at on success.
+    fn install_rule(&mut self, flow: &FlowSpec5Tuple, queue: u32, loc: u32)
+        -> std::io::Result<u32>;
     /// Delete the rule at `loc`.
     fn delete_rule(&mut self, loc: u32) -> std::io::Result<()>;
 }
@@ -255,6 +258,14 @@ pub(in crate::afxdp) struct RebalanceController {
 /// (hysteresis floor — absorbs a single-tick RSS-count blip; #1751 §3.3).
 const DWELL_TICKS_REQUIRED: u32 = 2;
 
+/// #1751: ntuple location-space depth (mlx5 `MAX_NUM_OF_ETHTOOL_RULES =
+/// BIT(10)`). Locations are in `[0, MAX_NTUPLE_LOCATION)`. The controller picks
+/// a concrete location below this from its LEDGER used-set — it does NOT query
+/// the NIC (GRXCLSRLALL is unreliable on this mlx5 path and is NOT on the
+/// install critical path). The controller's `max_rules` cap (<= 1024) keeps the
+/// in-use count well under this depth.
+const MAX_NTUPLE_LOCATION: u32 = 1024;
+
 impl RebalanceController {
     pub(in crate::afxdp) fn new(config: RebalanceConfig) -> Self {
         Self {
@@ -276,6 +287,21 @@ impl RebalanceController {
     #[cfg(test)]
     pub(in crate::afxdp) fn clear_cooldown_for_test(&mut self) {
         self.cooldown.clear();
+    }
+
+    /// #1751: pick the highest free ntuple location from the controller's own
+    /// LEDGER used-set (top-down from MAX-1, skipping ledger locs). The ledger
+    /// is the authoritative used-set: the controller is the only ntuple-rule
+    /// user, the table starts empty, and every install/delete is tracked. This
+    /// does NOT query the NIC (the GRXCLSRLALL path is unreliable on mlx5 and
+    /// is decoupled from installs). `None` only when all MAX locations are in
+    /// the ledger (caller -> ENOSPC); the `max_rules` cap makes that impossible
+    /// in practice. The second-move unwind has ALREADY removed the prior entry
+    /// from the ledger before this is called, so a re-pin of the same key does
+    /// not collide with its own freed loc.
+    fn next_free_ledger_loc(&self) -> Option<u32> {
+        let used: Vec<u32> = self.ledger.iter().map(|e| e.loc).collect();
+        free_loc_top_down(MAX_NTUPLE_LOCATION, &used)
     }
 
     /// One controller tick. Pure decision + barriered move. `tx` drives the
@@ -401,6 +427,17 @@ impl RebalanceController {
             self.metrics.rules_active = self.ledger.len() as u32;
         }
 
+        // #1751: pick the concrete ntuple location from the LEDGER used-set
+        // BEFORE the barrier, so a full location space aborts cleanly with no
+        // barrier side-effects (no promote/demote to roll back). The
+        // second-move unwind above has already removed any prior entry for this
+        // key, so a re-pin reuses the freed loc. None => location space full
+        // (cannot happen under the max_rules cap) => BudgetExhausted.
+        let Some(chosen_loc) = self.next_free_ledger_loc() else {
+            self.metrics.record_skip(SkipReason::BudgetExhausted);
+            return None;
+        };
+
         // Forward barrier: promote (claim) W_new BEFORE the rule, then demote
         // W_old, then install. The promote is CLAIM-ONLY (#1751) — for a
         // same-node move W_new does not pre-hold the flow, so promote no longer
@@ -434,9 +471,9 @@ impl RebalanceController {
             }
             return None;
         }
-        // Only after BOTH acks: install the rule.
+        // Only after BOTH acks: install the rule at the ledger-chosen loc.
         let spec = flow_spec_from_key(&candidate.key);
-        match tx.install_rule(&spec, candidate.new_queue) {
+        match tx.install_rule(&spec, candidate.new_queue, chosen_loc) {
             Ok(loc) => {
                 self.ledger.push(LedgerEntry {
                     key: candidate.key.clone(),
@@ -793,6 +830,18 @@ pub(in crate::afxdp) fn cumulative_to_rate(
 /// check; not on the hot path.
 pub(in crate::afxdp) fn count_sum_of_squares(counts: &HashMap<u32, u32>) -> u64 {
     counts.values().map(|&c| (c as u64) * (c as u64)).sum()
+}
+
+/// #1751: pick the highest free ntuple location in `[0, size)` not present in
+/// the `used` set, top-down (from `size-1`). Top-down matches ethtool's
+/// `rmgr_find_empty_slot` order (lowest priority first → 1023 on an empty
+/// table). The `used` set is the controller's LEDGER (the authoritative
+/// used-set for our rules — the controller is the only ntuple-rule user and
+/// the table starts empty), NOT a NIC query. `None` when all `size` locations
+/// are used (caller → ENOSPC). The used set is tiny (bounded by `max_rules`),
+/// so a linear scan is trivially cheap.
+pub(in crate::afxdp) fn free_loc_top_down(size: u32, used: &[u32]) -> Option<u32> {
+    (0..size).rev().find(|loc| !used.contains(loc))
 }
 
 /// Translate a SessionKey to the ethtool 5-tuple, converting host-order ports

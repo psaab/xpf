@@ -393,17 +393,22 @@ impl super::Coordinator {
                 };
                 match NtupleSocket::open(&ifname) {
                     Ok(sock) => {
-                        // #1748 AGY minor: clear any orphan ntuple rules left
-                        // by a previous (crashed) daemon run on this interface
-                        // before we start installing fresh ones, so stale HW
-                        // rules cannot accumulate or exhaust the rule-table cap.
+                        // #1748 AGY minor / #1751: best-effort cleanup of orphan
+                        // ntuple rules left by a previous (crashed) daemon. This
+                        // uses GRXCLSRLALL, which is unreliable on this mlx5 path
+                        // (it can EINVAL) — so it is BEST-EFFORT and MUST NOT
+                        // block installs. On error we log a warning and proceed;
+                        // installs do not depend on it (the controller picks
+                        // locations from its own ledger, not the NIC). A leaked
+                        // orphan only happens after a crash-without-cleanup
+                        // (rare) and is a minor edge, not a feature blocker.
                         match sock.reconcile_orphans() {
                             Ok(0) => {}
                             Ok(n) => eprintln!(
                                 "xpf-rebalance: cleared {n} orphan ntuple rule(s) on {ifname} (ifindex {ifindex}) at startup"
                             ),
                             Err(e) => eprintln!(
-                                "xpf-rebalance: startup orphan reconcile on {ifname} (ifindex {ifindex}) failed: {e}"
+                                "xpf-rebalance: startup orphan reconcile on {ifname} (ifindex {ifindex}) skipped (best-effort, GRXCLSRLALL failed: {e}) — installs are unaffected"
                             ),
                         }
                         // Keep the two maps in lockstep: socket in
@@ -621,22 +626,30 @@ impl BarrierTransport for CoordinatorBarrierTransport<'_> {
             |seq, key| WorkerCommand::DemoteRebalancedReplica { seq, key },
         )
     }
-    fn install_rule(&mut self, flow: &FlowSpec5Tuple, queue: u32) -> std::io::Result<u32> {
-        let r = self.socket.insert_rule(flow, queue);
+    fn install_rule(
+        &mut self,
+        flow: &FlowSpec5Tuple,
+        queue: u32,
+        loc: u32,
+    ) -> std::io::Result<u32> {
+        // #1751: install at the CONCRETE location the controller picked from
+        // its ledger — no NIC location query (GRXCLSRLALL is unreliable on this
+        // mlx5 path and is off the install critical path).
+        let r = self.socket.insert_rule(flow, queue, loc);
         // #1751 instrumentation: log the ioctl outcome (loc or errno) so a
         // debug-log deploy shows exactly whether the SRXCLSRLINS succeeds.
         #[cfg(feature = "debug-log")]
         match &r {
-            Ok(loc) => {
+            Ok(got) => {
                 debug_log_rebalance!(
-                    "REBALANCE_BARRIER step=install queue={} result=ok loc={}",
-                    queue, loc
+                    "REBALANCE_BARRIER step=install queue={} loc={} result=ok got={}",
+                    queue, loc, got
                 );
             }
             Err(e) => {
                 debug_log_rebalance!(
-                    "REBALANCE_BARRIER step=install queue={} result=err errno={:?} msg={}",
-                    queue, e.raw_os_error(), e
+                    "REBALANCE_BARRIER step=install queue={} loc={} result=err errno={:?} msg={}",
+                    queue, loc, e.raw_os_error(), e
                 );
             }
         }

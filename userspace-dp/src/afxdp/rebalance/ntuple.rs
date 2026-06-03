@@ -46,10 +46,6 @@ const UDP_V6_FLOW: u32 = 0x06;
 /// requires the caller to supply a concrete location — so for mlx5 we always
 /// pick the slot ourselves (#1751).
 const RX_CLS_LOC_SPECIAL: u32 = 0x8000_0000;
-/// Fallback location-space depth (mlx5 `MAX_NUM_OF_ETHTOOL_RULES = BIT(10)`)
-/// used only if GRXCLSRLALL returns `data == 0` (it normally returns the real
-/// table size). Locations are in `[0, size)`.
-const DEFAULT_RULE_TABLE_SIZE: u32 = 1024;
 
 /// `struct ethtool_tcpip4_spec` (ethtool.h) — 16 B. Network-order fields.
 #[repr(C)]
@@ -330,30 +326,29 @@ impl NtupleSocket {
         Ok(())
     }
 
-    /// Insert an exact-5-tuple rule steering the flow to `queue`. Returns the
-    /// rule location it was installed at. Structured errno: `ENOSPC` when the
-    /// location space is full, `EOPNOTSUPP` on a NIC that does not support flow
-    /// steering.
+    /// Insert an exact-5-tuple rule steering the flow to `queue` at the
+    /// CONCRETE `loc`. Returns the location the rule was installed at.
+    /// Structured errno: `ENOSPC`/`EINVAL` if the driver rejects the location,
+    /// `EOPNOTSUPP` on a NIC that does not support flow steering.
     ///
     /// #1751 live BLOCKER — mlx5 does NOT auto-assign a location for
     /// `RX_CLS_LOC_ANY`: `mlx5e_ethtool_flow_replace` validates
     /// `fs.location < MAX_NUM_OF_ETHTOOL_RULES` (= 1024) and rejects
-    /// `RX_CLS_LOC_ANY` (0xFFFF_FFFF >= 1024) as "flow is not valid" → -ENOSPC
-    /// (confirmed in dmesg). ethtool(8) does NOT pass ANY to the driver either:
-    /// its userspace rule manager (rxclass.c `rmgr_*`) reads the used-location
-    /// set and picks a CONCRETE free location top-down (from `size-1`), sets
-    /// `fs.location` to it, THEN issues SRXCLSRLINS. We mirror that here.
+    /// `RX_CLS_LOC_ANY` (0xFFFF_FFFF >= 1024) → -ENOSPC (confirmed in dmesg).
+    /// ethtool(8) doesn't pass ANY either — its userspace rule manager picks a
+    /// concrete slot. We do the same, but the CALLER (the controller) picks the
+    /// slot from its own LEDGER used-set — we do NOT query the NIC here, because
+    /// the raw `GRXCLSRLALL` ioctl is unreliable on this mlx5 path (it EINVALs)
+    /// and is off the install critical path. The ledger is the authoritative
+    /// used-set (the controller is the only ntuple-rule user; the table starts
+    /// empty). `loc` is guaranteed `< 1024` by the controller's
+    /// `MAX_NTUPLE_LOCATION` picker.
     pub(crate) fn insert_rule(
         &self,
         flow: &FlowSpec5Tuple,
         queue: u32,
+        loc: u32,
     ) -> io::Result<u32> {
-        // Read the table size + the currently-used locations (matches
-        // ethtool rmgr_init: GRXCLSRLCNT then GRXCLSRLALL).
-        let (size, used) = self.table_size_and_used_locations()?;
-        let loc = find_empty_slot_top_down(size, &used).ok_or_else(|| {
-            io::Error::from_raw_os_error(libc::ENOSPC)
-        })?;
         let mut rxnfc = EthtoolRxnfc {
             cmd: ETHTOOL_SRXCLSRLINS,
             ..EthtoolRxnfc::default()
@@ -417,11 +412,16 @@ impl NtupleSocket {
     /// returns `data` = the table size and `rule_locs[0..count]` = the used
     /// locations.
     ///
-    /// #1751 live BLOCKER — this MUST work on mlx5 (the earlier "driver-select
-    /// skip" was the WRONG fix: mlx5 is NOT driver-select for inserts, so the
-    /// userspace rule manager NEEDS the used-location set to pick a free slot).
-    /// The original GRXCLSRLALL EINVAL was a setup bug, not a driver signal;
-    /// the buffer/rule_cnt layout below matches ethtool byte-for-byte.
+    /// #1751: GRXCLSRLALL is BEST-EFFORT only on this path. It is NOT on the
+    /// install hot path — the controller picks free locations from its own
+    /// in-memory ledger (`free_loc_top_down`), not from a NIC query — and the
+    /// only caller of this function is the startup `reconcile_orphans` cleanup,
+    /// whose error is swallowed (see coordinator/rebalance.rs). GRXCLSRLALL has
+    /// persistently EINVAL'd on the live mlx5 VF despite the buffer/rule_cnt
+    /// layout matching ethtool(8) byte-for-byte; rather than block installs on
+    /// a stubborn ioctl, installs are fully decoupled from it. An Err here only
+    /// means orphan cleanup is skipped (a rare crash-recovery edge), never that
+    /// a rebalance install fails.
     pub(crate) fn table_size_and_used_locations(&self) -> io::Result<(u32, Vec<u32>)> {
         // Step 1: GRXCLSRLCNT for the count (matches rxclass_get_dev_info).
         let count = self.rule_count_and_driver_select()?.0;
@@ -538,25 +538,6 @@ impl NtupleSocket {
 /// 0xff) on the live mlx5 VF. The `lo` round-trip unit test did not exercise
 /// the mlx5 validate path so it could not catch it.
 ///
-/// #1751: ethtool-compatible free-location picker. Mirrors `rxclass.c`
-/// `rmgr_find_empty_slot`: scan from the TOP of the location space
-/// (`size - 1`) downward and return the first location NOT in `used`. Top-down
-/// is ethtool's order (lowest priority first), which is why a manual
-/// `ethtool -N` on the empty table lands at 1023. Returns `None` only when
-/// every location in `[0, size)` is occupied (caller maps to ENOSPC).
-///
-/// `size == 0` (a driver that did not report a table size) falls back to the
-/// mlx5 `MAX_NUM_OF_ETHTOOL_RULES` depth. The used set is tiny (bounded by the
-/// controller's `max_rules`, default 16), so a linear scan is trivially cheap.
-pub(crate) fn find_empty_slot_top_down(size: u32, used: &[u32]) -> Option<u32> {
-    let size = if size == 0 { DEFAULT_RULE_TABLE_SIZE } else { size };
-    // RX_CLS_LOC_SPECIAL flag bits never appear in a returned concrete
-    // location, but mask defensively so a stray flag can't make a `used`
-    // entry miss-compare against a candidate.
-    let is_used = |loc: u32| used.iter().any(|&u| (u & !RX_CLS_LOC_SPECIAL) == loc);
-    (0..size).rev().find(|&loc| !is_used(loc))
-}
-
 /// `ring_cookie` carries the destination RX queue (must be < num_channels, or
 /// the driver EINVALs). `location` is left 0 here and set to a CONCRETE free
 /// slot by `insert_rule` (#1751 — mlx5 does NOT auto-assign RX_CLS_LOC_ANY).
