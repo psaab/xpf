@@ -174,8 +174,8 @@ make it fail *open* (revert to v8 proportional) rather than mis-clip.
 
 | | n | CoV mean | CoV median | CoV max | SUM mean |
 |---|---|---|---|---|---|
-| EF-OFF | 13 | 12.0% | 9.7% | 20.9% | 14.86 G |
-| EF-ON | 8 | 6.4% | 4.3% | **17.9%** | 14.82 G |
+| EF-OFF | 13 | 12.0% | 9.8% | 20.9% | 14.86 G |
+| EF-ON | 8 | 6.4% | 5.0% | **17.9%** | 14.82 G |
 
 - **Typical CoV roughly halved** (12.0→6.4% mean), consistent with the
   prior ~22%→8.6% direction.
@@ -183,10 +183,12 @@ make it fail *open* (revert to v8 proportional) rather than mis-clip.
   the *reason* is more nuanced than "cwnd-bound" (Codex finding 1 —
   corrected). By the contract's structural-cap definition
   (`fairness-regimes.md:322`, `fairness.rs:106`: cap =
-  `(Nₐ/Nᵥ)×shaper`, saturated iff ≥95% of cap), the **5-active runs are
-  saturated** (cap = 15G; r4/r6/r7/r9/r10/offkill*, ef1/ef8/efkill2 all
-  hit ≥98% of 15G — see `runs/sat.tsv`), while the **6-active runs sit
-  at ~82–88% of their 18G cap (non-saturated/cwnd-bound)**. The regime
+  `(Nₐ/Nᵥ)×shaper`, saturated iff ≥95% of cap), a **subset of the
+  5-active runs is saturated** (cap = 15G;
+  r4/r6/r7/r9/r10/offkill1/offkill2, ef1/ef8/efkill2 hit ≥98% of 15G —
+  10 of 25 runs, see `runs/sat.tsv`), while the other 5-active runs
+  (r1 90%, r2 94%, r11 94%, r13 91%, ef2 89%) **and all 6-active runs
+  (~82–88% of 18G) are non-saturated/cwnd-bound**. The regime
   is therefore *mixed*, not uniformly cwnd-bound. The aggregate-neutral
   EF result still holds empirically on this set: even on the saturated
   5-active runs the structural cap (15G) is the binding constraint, and
@@ -275,8 +277,10 @@ used here.
    daemon-gauge cross-check (matched to displayed precision) bounds
    this; per-stream iperf rates are the independent CoV source.
 4. **Saturation labeling — corrected (Codex finding 1).** Against the
-   scaled structural cap `(Nₐ/Nᵥ)×18G`, the 5-active runs ARE saturated
-   (15G cap, ≥98% hit) and 6-active runs are not (~82–88% of 18G). The
+   scaled structural cap `(Nₐ/Nᵥ)×18G`, a subset of the 5-active runs
+   is saturated (15G cap, 10/25 runs ≥98% hit; the rest of the 5-active
+   runs are 89–94%) and all 6-active runs are non-saturated (~82–88% of
+   18G). The
    set is mixed. This strengthens the physics verdict (CoV stays far
    below Cstruct *even at the structural ceiling*) and is reflected in
    the corrected §4 EF discussion.
@@ -355,6 +359,15 @@ examples). 6 findings, all addressed in r2:
 None of the findings overturn the PHYSICS verdict (Codex: "the raw runs
 still all sit below Cstruct + 0.05"); they are over-claim / methodology
 corrections, now applied. r2 pushed for re-review.
+
+**Codex round 2: PLAN-NEEDS-MINOR.** Independently re-verified all 6
+r1 corrections + both AGY refutations against the artifacts
+(grant-per-flow examples reproduced, 6-pile=0.707107, surplus=0 on every
+prom file, min-stream 75–80%). Two remaining nits, both fixed in r3:
+(1) saturation wording — only a *subset* of 5-active runs is saturated
+(r1/r2/r11/r13/ef2 are 89–94%, below the 95% line); corrected. (2) clean
+EF medians 9.80%/4.95%, not 9.7%/4.3%; corrected. Codex: "the data
+supports ACCEPT-AS-PHYSICS."
 
 ## 11. AGY review — round 1: PLAN-KILL (`adversarial-review-mpz7rcgf-f5k0j2`)
 AGY's KILL overlaps Codex's already-addressed findings (saturation, V_min
