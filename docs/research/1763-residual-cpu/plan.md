@@ -131,41 +131,68 @@ during the saturated transfer.
 
 ## 4. Disposition
 
-### Path 1 — PLAN-KILL
+### Path 1 — PLAN-READY (fused select+pop, NOT a heap)
 
-1. **N is tiny (measured peak = 14).** The scan is 14 × (one `& 0xfff` mask +
-   two strided u64 loads + two compares). At N=14, a min-heap or incremental
-   min-pointer is *slower or equal*: a binary heap pays pointer-chasing /
-   non-contiguous loads and a sift-up/sift-down per push AND per pop (the
-   head-finish key changes on every pop at pop.rs:163, so the heap key is
-   mutated every dequeue → a decrease/increase-key + re-heapify every single
-   pop, not amortized). The `FlowRrRing` is a flat `[u16; …]` — 14 contiguous
-   u16s are one cache line; the strided u64 loads into the two big arrays are
-   the only misses and a heap does not remove them (it still must read
-   `flow_bucket_head_finish_bytes[b]` for the key). An incremental min-pointer
-   is invalidated on every pop (the winning bucket's key advances, possibly
-   making another bucket the new min) → it degenerates to a re-scan. At N=14
-   the linear scan over a hot contiguous ring is at or near optimal.
+**The data-structure framing is a KILL; the redundant-work framing is a
+PLAN-READY win.** Round-1 hostile review (Codex + AGY + Claude SMR) converged:
+replacing the scan with a heap/incremental-pointer/SoA structure is correctly
+killed at N=14, but the scan **runs twice per successful dequeue** on both hot
+paths and that redundancy is a safe, fairness-neutral lever.
 
-2. **It touches the MQFQ selection key — the #1207/#1545/#915/#911 fairness
-   trap.** `cos_queue_min_finish_bucket` *is* the exact-guarantee / vtime
-   head-finish ordering. The #1755 plan already classified candidate #4 as
-   fairness-sensitive and DEFER-not-bundle. Any structure that changes tie-break
-   order, the `eligible`-vs-`fallback` (over-cap skip) two-pass semantics
-   (mod.rs:114), or the head-key advance interaction (pop.rs:153-164) is a
-   correctness regression on the equalizers shipped in #911/#915/#1743/#1745.
-   The `fallback` second pass means a heap would need TWO keys (finish, and
-   finish-among-eligible) — a single-key heap cannot reproduce the work-
-   conserving over-cap fallback without a full second structure.
+**Why the heap idea is dead (KILL retained for that sub-option):** N peaks at 14
+(§3.1). At N=14 a min-heap is no faster — the head-finish key mutates on every
+pop (pop.rs:163), forcing a re-heapify per dequeue, and the `eligible`/`fallback`
+two-pass (over-cap skip, mod.rs:114) cannot be a single-key heap. The
+`FlowRrRing` is a flat `[u16; …]`; 14 contiguous u16s are one cache line. An
+incremental min-pointer is invalidated on every pop (winning bucket's key
+advances). Structure replacement: KILL.
 
-3. **4.28% self-time on a 6/6-saturated box, with N=14, gates behind a
-   property-differential + CoV-neutrality smoke** for a structure that is
-   provably not faster at the measured N. Cost/benefit and risk both say KILL.
+**The actual lever — fuse the double scan (Codex/AGY/SMR-verified):** both hot
+drain paths peek then pop with NO queue mutation between, so the second scan
+re-derives the identical bucket:
 
-Documented floor: at realistic load the min-finish scan is an O(14) hot
-contiguous-ring scan whose only cache cost (two strided big-array loads per
-bucket) is intrinsic to MQFQ selection and not removed by any alternative
-structure. This is the floor on this hardware.
+- Cap-aware drain: `cos_queue_front_with_cap` (drain.rs:209, and Prepared :461)
+  → inspect len/type/mirror_clone → `cos_queue_pop_front_with_cap` (drain.rs:234,
+  :472) re-scans. `target_bps` is sampled once and constant for the batch
+  (drain.rs:206-208) → same winner both times.
+- No-cap best-effort builder: `cos_queue_front` (mod.rs:1605/1646) →
+  `cos_queue_pop_front` (mod.rs:1617/1658) re-scans.
+
+Each `front*`/`pop*` calls `cos_queue_min_finish_bucket` (mod.rs:81/136/158), so
+the 4.28% pop self-time pays the scan **once for the peek and once for the pop**.
+
+Two complementary, composable sub-levers, both **fairness-neutral by
+construction** (they reuse the exact same scan result / skip provably-dead work;
+they do not touch selection order, the head-key advance, the cap arithmetic, or
+the eligible/fallback semantics):
+
+- **Lever A — fused `peek_min_bucket` + `pop_known_bucket(bucket)`.** Peek
+  returns the *bucket id*; the caller inspects `flow_bucket_items[bucket].front()`
+  for len/type/budget/mirror gating; if it commits, `pop_known_bucket` pops that
+  exact bucket with NO re-scan. Removes one full scan per committed pop. The
+  abandon paths (drain.rs:217 budget break, :221 mirror reserve) stay at exactly
+  1 scan (same as today) → strictly non-regressing. A `debug_assert` that the
+  known bucket is still the active-front guards the no-mutation invariant.
+- **Lever B — `target_bps == u64::MAX` no-cap fast path.** For every
+  `cos_queue_front`/`cos_queue_pop_front` caller (the whole best-effort builder,
+  mod.rs:1597-1658), `observed <= u64::MAX` is always true so `eligible ==
+  fallback` always — the `flow_bucket_observed_bps` load (mod.rs:113) and the
+  two-pass are dead. A no-cap branch that scans only
+  `flow_bucket_head_finish_bytes` removes the second strided big-array load per
+  bucket (the two arrays are on different cache lines), halving the per-bucket
+  cache-miss exposure with zero ordering change.
+
+Combined, a fused no-cap pop does ~1 single-array O(14) scan instead of 2
+double-array O(14) scans on the best-effort path (up to ~3-4× less scan work);
+the cap-aware path gets Lever A's ~2× on the scan. Realistic upside on the 4.28%
+is meaningful and the change is fairness-neutral by construction.
+
+**Risk gate (mandatory before merge):** property-differential test (fused vs
+current produce byte-identical dequeue order on randomized backlogs incl.
+over-cap mixes and equal-depth flows), CoV-neutrality on the full
+v4/v6 × push/-R × CoS-on matrix, `make test-failover` (exact-queue HA sync), and
+a live re-measure of pop self-time to confirm the win. This is a separate,
+narrow PR — do NOT bundle with anything else.
 
 ### Path 2 — PLAN-KILL
 
@@ -180,17 +207,18 @@ flood *could* storm `rtnl_mutex`), but it does not fire on the forwarding hot
 path at steady state and is a robustness item, not a throughput lever. KILL for
 throughput; note the dedup gap for a possible separate robustness issue.
 
-## 5. Why the residual is the floor
+## 5. Why the rest of the residual is the floor
 
-The remaining worker time is: driver RX (`mlx5e_xsk_skb_from_cqe_linear` +
-`xp_raw_get_dma` + irq/poll_rx_cq ≈ inherent ~16% at 1.39 Mpps — not
-addressable), the per-packet poll dispatch (`poll_binding_process_descriptor`
-8.93% — our own per-packet work, not a clean lever), and the MQFQ
-enqueue/dequeue (pop 4.28% over an O(14) scan that no structure beats). None of
-these is a clean software lever on a 6/6 box. **16.6 Gb/s is the floor on this
-hardware with this feature set.**
+After the Path 1 fused-scan win, the remaining worker time is: driver RX
+(`mlx5e_xsk_skb_from_cqe_linear` + `xp_raw_get_dma` + irq/poll_rx_cq ≈ inherent
+~16% at 1.39 Mpps — not addressable), the per-packet poll dispatch
+(`poll_binding_process_descriptor` 8.93% — our own per-packet work, not a clean
+lever), and the irreducible single min-finish scan (an O(14) selection that no
+structure beats). Removing the *redundant* second scan is the one clean software
+lever; the single scan itself, the RX path, and the poll dispatch are the floor
+on this 6/6 box.
 
-## 6. Alternatives considered (Path 1)
+## 6. Alternatives considered (Path 1) — all structure-replacement options rejected; the chosen lever (§4) is redundant-scan removal, not any of these
 
 - **Min-heap keyed by head-finish:** rejected — key mutates every pop →
   re-heapify per dequeue; cannot express the eligible/fallback two-pass; pointer
@@ -236,16 +264,59 @@ exact-queue sync). None run because both paths KILL.
 
 ## 10. Recommendation
 
-**PLAN-KILL on both paths.** Path 1: the O(N) min-finish scan runs at N≈14 (peak
-14 measured under -P48), a regime where the contiguous-ring linear scan equals
-or beats any heap/incremental structure, and the scan is the fairness-critical
-MQFQ selection key (the #1207/#1545 trap). Path 2: the netlink/rtnl write fires
-0/s at steady state — the 45 ops/s was a cold-start transient. 16.6 Gb/s on a
-6/6-saturated box is the floor on this hardware. Do **not** `/engineer 1763`.
-Optionally file a separate low-priority robustness issue for the missing per-key
-dedup on the `stage_link_layer_classify` netlink write (ARP-flood hardening),
-unrelated to throughput.
+**Path 1: PLAN-READY. Path 2: PLAN-KILL.**
+
+Path 1 — the *heap* idea is dead (N=14 measured under -P48; a heap is no faster
+and the selection key is the #1207/#1545 fairness trap), but the min-finish scan
+**runs twice per dequeue** on both hot paths (peek then pop, no mutation
+between). Fusing them (Lever A: `peek_min_bucket` + `pop_known_bucket`) plus a
+`target_bps == u64::MAX` no-cap fast path (Lever B: skip the dead
+`observed_bps` load + fallback pass) removes the redundant scan / dead load,
+fairness-neutral by construction, up to ~3-4× less scan work on the best-effort
+path against the 4.28% pop self-time. **`/engineer 1763` is warranted for this
+narrow, gated refactor.** Do NOT replace the data structure with a heap.
+
+Path 2 — KILL. The netlink/rtnl `neigh_add` write fires **0/s** at steady state
+and under churn (measured); the issue's 45 ops/s was a cold-start ARP/NDP
+transient. No steady-state churn to batch. Separately, file a low-priority
+robustness issue for the missing per-key dedup on the `stage_link_layer_classify`
+netlink write (poll_stages.rs:92/113, ARP-flood hardening) — unrelated to
+throughput.
+
+Measured active-bucket N (Path 1): **14** (peak under iperf3 -P48, exact queue).
 
 ## 11. Reviewer verdicts
 
-(Filled per round below.)
+### Round 1 (against v1, which had killed both paths)
+
+All three reviewers KILLED the v1 Path-1 KILL and confirmed Path-2 KILL.
+
+- **Codex (foreground, task this session):** "PLAN-KILL-THE-KILL. Path 2 KILL
+  stands, but Path 1 KILL is defective. The plan argues heap vs linear scan, but
+  misses a safer lever: the hot drain paths do the same min-finish selection
+  twice, back-to-back, before one pop." Quoted the front+pop pairs at
+  drain.rs:209/234, drain.rs:461/472, mod.rs:1605/1617. "A fused
+  select/check/pop helper can preserve the exact MQFQ key and tie behavior while
+  removing one full scan per successful pop. No heap, no new ordering, no
+  eligible/fallback semantic change." Confirmed N=14 not undercut by #1735
+  (exact queues return before demotion at mod.rs:223). Confirmed `neigh_add` is
+  the correct RTM_NEWNEIGH kprobe (neighbour.c:3916 registration, RTNL assert).
+
+- **AGY (background adversarial-review-mpz0f3xy-diho0y):** PLAN-KILL-THE-KILL.
+  Confirmed Path 2 KILL and the `neigh_add` kprobe. For Path 1 proposed a
+  complementary lever: split a `target_bps == u64::MAX` no-cap fast path that
+  loads only `flow_bucket_head_finish_bytes` and skips `flow_bucket_observed_bps`
+  + the eligible/fallback pass — "reducing memory loads and cache-line misses by
+  50% per active bucket… does not alter selection priority or equal-share
+  ordering… no data-structure layout changes." Confirmed exact queues never
+  demote/reset peak.
+
+- **Claude SMR (claude-smr-plan-r1.md):** PLAN-NEEDS-WORK. v1 evaluated only
+  data-structure replacement and never asked how many times the scan runs per
+  pop — it runs twice on both hot paths. Endorsed both Lever A (fuse) and Lever
+  B (no-cap fast path) as complementary and composable, fairness-neutral by
+  construction; required property-differential + CoV-neutrality + test-failover
+  gates and a non-regression contract for the peek-then-abandon paths.
+
+**Convergence:** 3/3 → Path 1 PLAN-READY (fused select+pop + no-cap fast path,
+NOT a heap), Path 2 PLAN-KILL. v2 incorporates both levers and the gates.
