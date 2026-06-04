@@ -1,0 +1,1197 @@
+# HELP xpf_cos_drain_invocations_total Total CoS owner-drain invocations per (ifindex, queue_id) (#709).
+# TYPE xpf_cos_drain_invocations_total counter
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="0"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="1"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="10"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="11"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="2"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="3"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="4"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="5"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="6"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="7"} 0
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="8"} 2.940965e+06
+xpf_cos_drain_invocations_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_cos_drain_latency_ns_bucket CoS owner-drain latency histogram — power-of-two ns buckets (#709).
+# TYPE xpf_cos_drain_latency_ns_bucket counter
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="8"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="8"} 140
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="8"} 115706
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="8"} 723975
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="8"} 1
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="8"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="8"} 108
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="8"} 13709
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="8"} 1.479426e+06
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="8"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="8"} 17
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="8"} 104
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="8"} 355
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="8"} 294748
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="8"} 312646
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="9"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="0"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="1"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="10"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="11"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="2"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="3"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="4"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="5"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="6"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="7"} 0
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="8"} 30
+xpf_cos_drain_latency_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="9"} 0
+# HELP xpf_cos_owner_pps CoS owner-local pps (window accumulator, cleared by operator) (#709).
+# TYPE xpf_cos_owner_pps gauge
+xpf_cos_owner_pps{ifindex="14",queue_id="0"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="1"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="10"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="11"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="2"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="3"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="4"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="5"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="6"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="7"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="8"} 0
+xpf_cos_owner_pps{ifindex="14",queue_id="9"} 0
+# HELP xpf_cos_peer_pps CoS peer-redirected pps (window accumulator, cleared by operator) (#709).
+# TYPE xpf_cos_peer_pps gauge
+xpf_cos_peer_pps{ifindex="14",queue_id="0"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="1"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="10"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="11"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="2"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="3"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="4"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="5"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="6"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="7"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="8"} 0
+xpf_cos_peer_pps{ifindex="14",queue_id="9"} 0
+# HELP xpf_cos_redirect_acquire_ns_bucket CoS redirect-acquire latency histogram — power-of-two ns buckets, sampled 1-in-256 (#709).
+# TYPE xpf_cos_redirect_acquire_ns_bucket counter
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1024",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="1048576",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="131072",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16384",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="16777216",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2048",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="2097152",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="262144",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="32768",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="33554432",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4096",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="4194304",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="524288",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="65536",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8192",ifindex="14",queue_id="9"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="0"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="1"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="10"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="11"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="2"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="3"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="4"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="5"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="6"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="7"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="8"} 0
+xpf_cos_redirect_acquire_ns_bucket{bucket_hi_ns="8388608",ifindex="14",queue_id="9"} 0
+# HELP xpf_daemon_memory_rss_bytes Daemon resident set size in bytes.
+# TYPE xpf_daemon_memory_rss_bytes gauge
+xpf_daemon_memory_rss_bytes 4.2754048e+07
+# HELP xpf_daemon_uptime_seconds Daemon uptime in seconds.
+# TYPE xpf_daemon_uptime_seconds gauge
+xpf_daemon_uptime_seconds 1329.881741894
+# HELP xpf_dhcp_leases_active Number of active DHCP leases.
+# TYPE xpf_dhcp_leases_active gauge
+xpf_dhcp_leases_active{family="inet"} 1
+xpf_dhcp_leases_active{family="inet6"} 0
+# HELP xpf_drops_total Total packets dropped.
+# TYPE xpf_drops_total counter
+xpf_drops_total 0
+# HELP xpf_fairness_active_flows Total active flows observed for this egress CoS queue in the current userspace snapshot (#1247).
+# TYPE xpf_fairness_active_flows gauge
+xpf_fairness_active_flows{ifindex="14",queue_id="8"} 12
+# HELP xpf_fairness_active_workers Number of workers with at least one active flow for this egress CoS queue (#1247).
+# TYPE xpf_fairness_active_workers gauge
+xpf_fairness_active_workers{ifindex="14",queue_id="8"} 5
+# HELP xpf_fairness_cos_active_flow_counts_truncated 1 when the userspace CoS active-flow snapshot was truncated before fairness RSS gauges were derived; 0 otherwise (#1247).
+# TYPE xpf_fairness_cos_active_flow_counts_truncated gauge
+xpf_fairness_cos_active_flow_counts_truncated 0
+# HELP xpf_fairness_cstruct Structural per-flow CoV ceiling for this egress CoS queue, derived from xpf_userspace_cos_active_flow_count and the fairness-regimes contract (#1247).
+# TYPE xpf_fairness_cstruct gauge
+xpf_fairness_cstruct{ifindex="14",queue_id="8"} 0.6752777206453653
+# HELP xpf_fairness_equal_flow_capped_bps Estimated aggregate bits per second across currently-active-flow workers after applying the measurement-only equal-flow suppression cap; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).
+# TYPE xpf_fairness_equal_flow_capped_bps gauge
+xpf_fairness_equal_flow_capped_bps{ifindex="14",queue_id="8"} 6.606365519720794e+08
+# HELP xpf_fairness_equal_flow_estimate_valid 1 when the measurement-only equal-flow suppression estimator has at least two currently-active-flow workers with rolling byte samples for this egress CoS queue (#1304).
+# TYPE xpf_fairness_equal_flow_estimate_valid gauge
+xpf_fairness_equal_flow_estimate_valid{ifindex="14",queue_id="8"} 1
+# HELP xpf_fairness_equal_flow_observed_bps Observed aggregate bits per second across currently-active-flow workers in the rolling estimator window before hypothetical equal-flow suppression (#1304).
+# TYPE xpf_fairness_equal_flow_observed_bps gauge
+xpf_fairness_equal_flow_observed_bps{ifindex="14",queue_id="8"} 1.0831033374902053e+09
+# HELP xpf_fairness_equal_flow_sampled_active_workers Currently-active-flow workers with non-zero rolling byte samples in the measurement-only equal-flow suppression estimator (#1304).
+# TYPE xpf_fairness_equal_flow_sampled_active_workers gauge
+xpf_fairness_equal_flow_sampled_active_workers{ifindex="14",queue_id="8"} 4
+# HELP xpf_fairness_equal_flow_suppressed_bps Estimated currently-active-flow worker bits per second that would be withheld by the measurement-only equal-flow suppression cap; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).
+# TYPE xpf_fairness_equal_flow_suppressed_bps gauge
+xpf_fairness_equal_flow_suppressed_bps{ifindex="14",queue_id="8"} 4.224667855181257e+08
+# HELP xpf_fairness_equal_flow_target_per_flow_bps Slowest sampled currently-active worker's observed per-flow bit rate used as the measurement-only equal-flow suppression target for this egress CoS queue; low values may reflect source artifacts such as idle or receiver-limited flows, not only dataplane unfairness (#1304).
+# TYPE xpf_fairness_equal_flow_target_per_flow_bps gauge
+xpf_fairness_equal_flow_target_per_flow_bps{ifindex="14",queue_id="8"} 6.0057868361098126e+07
+# HELP xpf_fairness_equal_flow_throughput_loss_ratio Estimated suppressed_bps / observed_bps ratio for the measurement-only equal-flow suppression cap; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).
+# TYPE xpf_fairness_equal_flow_throughput_loss_ratio gauge
+xpf_fairness_equal_flow_throughput_loss_ratio{ifindex="14",queue_id="8"} 0.3900521500534534
+# HELP xpf_fairness_equal_flow_unsampled_active_workers Currently-active-flow workers with no rolling byte samples in the measurement-only equal-flow suppression estimator (#1304).
+# TYPE xpf_fairness_equal_flow_unsampled_active_workers gauge
+xpf_fairness_equal_flow_unsampled_active_workers{ifindex="14",queue_id="8"} 1
+# HELP xpf_fairness_equal_flow_worker_cap_bps Estimated bits-per-second cap for one currently-active-flow worker under measurement-only equal-flow suppression; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).
+# TYPE xpf_fairness_equal_flow_worker_cap_bps gauge
+xpf_fairness_equal_flow_worker_cap_bps{ifindex="14",queue_id="8",worker_id="0"} 3.002893418054906e+08
+xpf_fairness_equal_flow_worker_cap_bps{ifindex="14",queue_id="8",worker_id="1"} 6.0057868361098126e+07
+xpf_fairness_equal_flow_worker_cap_bps{ifindex="14",queue_id="8",worker_id="2"} 6.0057868361098126e+07
+xpf_fairness_equal_flow_worker_cap_bps{ifindex="14",queue_id="8",worker_id="3"} 1.2011573672219625e+08
+xpf_fairness_equal_flow_worker_cap_bps{ifindex="14",queue_id="8",worker_id="5"} 1.801736050832944e+08
+# HELP xpf_fairness_equal_flow_worker_observed_bps Observed bits per second for one currently-active-flow worker in the rolling equal-flow suppression estimator (#1304).
+# TYPE xpf_fairness_equal_flow_worker_observed_bps gauge
+xpf_fairness_equal_flow_worker_observed_bps{ifindex="14",queue_id="8",worker_id="0"} 3.002893418054906e+08
+xpf_fairness_equal_flow_worker_observed_bps{ifindex="14",queue_id="8",worker_id="1"} 0
+xpf_fairness_equal_flow_worker_observed_bps{ifindex="14",queue_id="8",worker_id="2"} 2.0238879041707692e+08
+xpf_fairness_equal_flow_worker_observed_bps{ifindex="14",queue_id="8",worker_id="3"} 2.050395682367222e+08
+xpf_fairness_equal_flow_worker_observed_bps{ifindex="14",queue_id="8",worker_id="5"} 3.753856370309154e+08
+# HELP xpf_fairness_equal_flow_worker_observed_per_flow_bps Observed per-flow bits per second for one currently-active-flow worker in the rolling equal-flow suppression estimator (#1304).
+# TYPE xpf_fairness_equal_flow_worker_observed_per_flow_bps gauge
+xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="14",queue_id="8",worker_id="0"} 6.0057868361098126e+07
+xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="14",queue_id="8",worker_id="1"} 0
+xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="14",queue_id="8",worker_id="2"} 2.0238879041707692e+08
+xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="14",queue_id="8",worker_id="3"} 1.025197841183611e+08
+xpf_fairness_equal_flow_worker_observed_per_flow_bps{ifindex="14",queue_id="8",worker_id="5"} 1.251285456769718e+08
+# HELP xpf_fairness_equal_flow_worker_suppressed_bps Estimated bits per second withheld from one currently-active-flow worker by measurement-only equal-flow suppression; artifact-sensitive because the cap follows the slowest sampled per-flow rate (#1304).
+# TYPE xpf_fairness_equal_flow_worker_suppressed_bps gauge
+xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="14",queue_id="8",worker_id="0"} 0
+xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="14",queue_id="8",worker_id="1"} 0
+xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="14",queue_id="8",worker_id="2"} 1.4233092205597878e+08
+xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="14",queue_id="8",worker_id="3"} 8.492383151452595e+07
+xpf_fairness_equal_flow_worker_suppressed_bps{ifindex="14",queue_id="8",worker_id="5"} 1.95212031947621e+08
+# HELP xpf_fairness_max_worker_flow_share Largest fraction of this egress CoS queue's active flows owned by one worker (#1247).
+# TYPE xpf_fairness_max_worker_flow_share gauge
+xpf_fairness_max_worker_flow_share{ifindex="14",queue_id="8"} 0.4166666666666667
+# HELP xpf_fairness_observed_cov Rolling observed coefficient of variation across per-flow byte totals for this egress CoS queue (#1264).
+# TYPE xpf_fairness_observed_cov gauge
+xpf_fairness_observed_cov{ifindex="14",queue_id="8"} 0.036935041883325935
+# HELP xpf_fairness_saturated 1 when the rolling per-flow byte window is at or above 95% of the configured egress CoS queue transmit rate (#1264).
+# TYPE xpf_fairness_saturated gauge
+xpf_fairness_saturated{ifindex="14",queue_id="8"} 0
+# HELP xpf_fairness_starved_flows Monotonic count of flows that enter below 1% of the rolling mean per-flow bytes for this egress CoS queue, de-duplicated while the flow remains in the rolling window (#1264).
+# TYPE xpf_fairness_starved_flows counter
+xpf_fairness_starved_flows{ifindex="14",queue_id="8"} 0
+# HELP xpf_flow_cache_total Flow cache counters by type (IPv4 + IPv6).
+# TYPE xpf_flow_cache_total counter
+xpf_flow_cache_total{type="flush"} 0
+xpf_flow_cache_total{type="hit"} 0
+xpf_flow_cache_total{type="invalidate"} 0
+xpf_flow_cache_total{type="miss"} 0
+# HELP xpf_gc_sweep_duration_seconds Duration of the last GC sweep in seconds.
+# TYPE xpf_gc_sweep_duration_seconds gauge
+xpf_gc_sweep_duration_seconds 0
+# HELP xpf_host_inbound_denies_total Total host-inbound traffic denials.
+# TYPE xpf_host_inbound_denies_total counter
+xpf_host_inbound_denies_total 0
+# HELP xpf_interface_bytes_total Total bytes per interface.
+# TYPE xpf_interface_bytes_total counter
+xpf_interface_bytes_total{direction="rx",iface="em0"} 0
+xpf_interface_bytes_total{direction="rx",iface="fab0"} 0
+xpf_interface_bytes_total{direction="rx",iface="fab1"} 0
+xpf_interface_bytes_total{direction="rx",iface="fxp0"} 0
+xpf_interface_bytes_total{direction="rx",iface="ge-0/0/1"} 0
+xpf_interface_bytes_total{direction="rx",iface="ge-0/0/2"} 0
+xpf_interface_bytes_total{direction="rx",iface="gr-0/0/0"} 0
+xpf_interface_bytes_total{direction="rx",iface="gr-0/0/0.0"} 0
+xpf_interface_bytes_total{direction="rx",iface="reth0"} 0
+xpf_interface_bytes_total{direction="rx",iface="reth0.50"} 0
+xpf_interface_bytes_total{direction="rx",iface="reth0.80"} 0
+xpf_interface_bytes_total{direction="rx",iface="reth1"} 0
+xpf_interface_bytes_total{direction="tx",iface="em0"} 0
+xpf_interface_bytes_total{direction="tx",iface="fab0"} 0
+xpf_interface_bytes_total{direction="tx",iface="fab1"} 0
+xpf_interface_bytes_total{direction="tx",iface="fxp0"} 0
+xpf_interface_bytes_total{direction="tx",iface="ge-0/0/1"} 0
+xpf_interface_bytes_total{direction="tx",iface="ge-0/0/2"} 0
+xpf_interface_bytes_total{direction="tx",iface="gr-0/0/0"} 0
+xpf_interface_bytes_total{direction="tx",iface="gr-0/0/0.0"} 0
+xpf_interface_bytes_total{direction="tx",iface="reth0"} 0
+xpf_interface_bytes_total{direction="tx",iface="reth0.50"} 0
+xpf_interface_bytes_total{direction="tx",iface="reth0.80"} 0
+xpf_interface_bytes_total{direction="tx",iface="reth1"} 0
+# HELP xpf_interface_packets_total Total packets per interface.
+# TYPE xpf_interface_packets_total counter
+xpf_interface_packets_total{direction="rx",iface="em0"} 0
+xpf_interface_packets_total{direction="rx",iface="fab0"} 0
+xpf_interface_packets_total{direction="rx",iface="fab1"} 0
+xpf_interface_packets_total{direction="rx",iface="fxp0"} 0
+xpf_interface_packets_total{direction="rx",iface="ge-0/0/1"} 0
+xpf_interface_packets_total{direction="rx",iface="ge-0/0/2"} 0
+xpf_interface_packets_total{direction="rx",iface="gr-0/0/0"} 0
+xpf_interface_packets_total{direction="rx",iface="gr-0/0/0.0"} 0
+xpf_interface_packets_total{direction="rx",iface="reth0"} 0
+xpf_interface_packets_total{direction="rx",iface="reth0.50"} 0
+xpf_interface_packets_total{direction="rx",iface="reth0.80"} 0
+xpf_interface_packets_total{direction="rx",iface="reth1"} 0
+xpf_interface_packets_total{direction="tx",iface="em0"} 0
+xpf_interface_packets_total{direction="tx",iface="fab0"} 0
+xpf_interface_packets_total{direction="tx",iface="fab1"} 0
+xpf_interface_packets_total{direction="tx",iface="fxp0"} 0
+xpf_interface_packets_total{direction="tx",iface="ge-0/0/1"} 0
+xpf_interface_packets_total{direction="tx",iface="ge-0/0/2"} 0
+xpf_interface_packets_total{direction="tx",iface="gr-0/0/0"} 0
+xpf_interface_packets_total{direction="tx",iface="gr-0/0/0.0"} 0
+xpf_interface_packets_total{direction="tx",iface="reth0"} 0
+xpf_interface_packets_total{direction="tx",iface="reth0.50"} 0
+xpf_interface_packets_total{direction="tx",iface="reth0.80"} 0
+xpf_interface_packets_total{direction="tx",iface="reth1"} 0
+# HELP xpf_nat_alloc_failures_total Total NAT port allocation failures.
+# TYPE xpf_nat_alloc_failures_total counter
+xpf_nat_alloc_failures_total 0
+# HELP xpf_packets_total Total packets processed.
+# TYPE xpf_packets_total counter
+xpf_packets_total{direction="rx"} 1.53286421e+09
+xpf_packets_total{direction="tx"} 1.532848024e+09
+# HELP xpf_policy_denies_total Total packets denied by policy.
+# TYPE xpf_policy_denies_total counter
+xpf_policy_denies_total 0
+# HELP xpf_policy_hits_total Total policy rule hits.
+# TYPE xpf_policy_hits_total counter
+xpf_policy_hits_total{from_zone="lan",rule="allow-all",to_zone="sfmix"} 0
+xpf_policy_hits_total{from_zone="lan",rule="allow-all",to_zone="wan"} 0
+# HELP xpf_screen_drops_total Total packets dropped by screen/IDS checks.
+# TYPE xpf_screen_drops_total counter
+xpf_screen_drops_total 0
+# HELP xpf_screen_syncookie_total SYN cookie counters by type.
+# TYPE xpf_screen_syncookie_total counter
+xpf_screen_syncookie_total{type="bypass"} 0
+xpf_screen_syncookie_total{type="invalid"} 0
+xpf_screen_syncookie_total{type="sent"} 0
+xpf_screen_syncookie_total{type="valid"} 0
+# HELP xpf_sessions_active Current number of active session entries.
+# TYPE xpf_sessions_active gauge
+xpf_sessions_active 0
+# HELP xpf_sessions_closed_total Total sessions closed.
+# TYPE xpf_sessions_closed_total counter
+xpf_sessions_closed_total 2554
+# HELP xpf_sessions_created_total Total sessions created.
+# TYPE xpf_sessions_created_total counter
+xpf_sessions_created_total 608
+# HELP xpf_sessions_dnat Current number of DNAT sessions.
+# TYPE xpf_sessions_dnat gauge
+xpf_sessions_dnat 0
+# HELP xpf_sessions_established Current number of established sessions.
+# TYPE xpf_sessions_established gauge
+xpf_sessions_established 0
+# HELP xpf_sessions_ipv4 Current number of IPv4 sessions.
+# TYPE xpf_sessions_ipv4 gauge
+xpf_sessions_ipv4 0
+# HELP xpf_sessions_ipv6 Current number of IPv6 sessions.
+# TYPE xpf_sessions_ipv6 gauge
+xpf_sessions_ipv6 0
+# HELP xpf_sessions_snat Current number of SNAT sessions.
+# TYPE xpf_sessions_snat gauge
+xpf_sessions_snat 0
+# HELP xpf_system_cpu_system_percent System CPU utilization percentage.
+# TYPE xpf_system_cpu_system_percent gauge
+xpf_system_cpu_system_percent 32.325433790192946
+# HELP xpf_system_cpu_user_percent User CPU utilization percentage.
+# TYPE xpf_system_cpu_user_percent gauge
+xpf_system_cpu_user_percent 133.25754959942213
+# HELP xpf_system_memory_available_bytes Available system memory in bytes.
+# TYPE xpf_system_memory_available_bytes gauge
+xpf_system_memory_available_bytes 2.309513216e+09
+# HELP xpf_system_memory_total_bytes Total system memory in bytes.
+# TYPE xpf_system_memory_total_bytes gauge
+xpf_system_memory_total_bytes 8.260780032e+09
+# HELP xpf_tc_egress_packets_total Total TC egress packets processed.
+# TYPE xpf_tc_egress_packets_total counter
+xpf_tc_egress_packets_total 0
+# HELP xpf_userspace_binding_active_flow_count Distinct active flows observed in this binding's flow_cache in the last ~650ms (10 epoch ticks × ~65ms debug-state tick; snapshot refreshed on each tick). Read by the fairness harness to compute the structural CoV ceiling per docs/fairness-regimes.md (#1219).
+# TYPE xpf_userspace_binding_active_flow_count gauge
+xpf_userspace_binding_active_flow_count{binding_slot="0",iface="ge-0-0-1",queue_id="0",worker_id="0"} 5
+xpf_userspace_binding_active_flow_count{binding_slot="1",iface="ge-0-0-2",queue_id="0",worker_id="0"} 5
+xpf_userspace_binding_active_flow_count{binding_slot="10",iface="ge-0-0-2",queue_id="3",worker_id="3"} 1
+xpf_userspace_binding_active_flow_count{binding_slot="11",iface="ge-0-0-0",queue_id="3",worker_id="3"} 0
+xpf_userspace_binding_active_flow_count{binding_slot="12",iface="ge-0-0-1",queue_id="4",worker_id="4"} 0
+xpf_userspace_binding_active_flow_count{binding_slot="13",iface="ge-0-0-2",queue_id="4",worker_id="4"} 1
+xpf_userspace_binding_active_flow_count{binding_slot="14",iface="ge-0-0-0",queue_id="4",worker_id="4"} 0
+xpf_userspace_binding_active_flow_count{binding_slot="15",iface="ge-0-0-1",queue_id="5",worker_id="5"} 3
+xpf_userspace_binding_active_flow_count{binding_slot="16",iface="ge-0-0-2",queue_id="5",worker_id="5"} 4
+xpf_userspace_binding_active_flow_count{binding_slot="17",iface="ge-0-0-0",queue_id="5",worker_id="5"} 0
+xpf_userspace_binding_active_flow_count{binding_slot="2",iface="ge-0-0-0",queue_id="0",worker_id="0"} 0
+xpf_userspace_binding_active_flow_count{binding_slot="3",iface="ge-0-0-1",queue_id="1",worker_id="1"} 1
+xpf_userspace_binding_active_flow_count{binding_slot="4",iface="ge-0-0-2",queue_id="1",worker_id="1"} 1
+xpf_userspace_binding_active_flow_count{binding_slot="5",iface="ge-0-0-0",queue_id="1",worker_id="1"} 0
+xpf_userspace_binding_active_flow_count{binding_slot="6",iface="ge-0-0-1",queue_id="2",worker_id="2"} 1
+xpf_userspace_binding_active_flow_count{binding_slot="7",iface="ge-0-0-2",queue_id="2",worker_id="2"} 0
+xpf_userspace_binding_active_flow_count{binding_slot="8",iface="ge-0-0-0",queue_id="2",worker_id="2"} 0
+xpf_userspace_binding_active_flow_count{binding_slot="9",iface="ge-0-0-1",queue_id="3",worker_id="3"} 2
+# HELP xpf_userspace_binding_flow_cache_capacity Flow-cache capacity published by the userspace helper for this binding.
+# TYPE xpf_userspace_binding_flow_cache_capacity gauge
+xpf_userspace_binding_flow_cache_capacity{binding_slot="0",iface="ge-0-0-1",queue_id="0",worker_id="0"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="1",iface="ge-0-0-2",queue_id="0",worker_id="0"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="10",iface="ge-0-0-2",queue_id="3",worker_id="3"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="11",iface="ge-0-0-0",queue_id="3",worker_id="3"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="12",iface="ge-0-0-1",queue_id="4",worker_id="4"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="13",iface="ge-0-0-2",queue_id="4",worker_id="4"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="14",iface="ge-0-0-0",queue_id="4",worker_id="4"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="15",iface="ge-0-0-1",queue_id="5",worker_id="5"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="16",iface="ge-0-0-2",queue_id="5",worker_id="5"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="17",iface="ge-0-0-0",queue_id="5",worker_id="5"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="2",iface="ge-0-0-0",queue_id="0",worker_id="0"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="3",iface="ge-0-0-1",queue_id="1",worker_id="1"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="4",iface="ge-0-0-2",queue_id="1",worker_id="1"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="5",iface="ge-0-0-0",queue_id="1",worker_id="1"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="6",iface="ge-0-0-1",queue_id="2",worker_id="2"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="7",iface="ge-0-0-2",queue_id="2",worker_id="2"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="8",iface="ge-0-0-0",queue_id="2",worker_id="2"} 4096
+xpf_userspace_binding_flow_cache_capacity{binding_slot="9",iface="ge-0-0-1",queue_id="3",worker_id="3"} 4096
+# HELP xpf_userspace_binding_tx_completion_ring_available Last sampled AF_XDP TX completion-ring descriptors available before the owner worker drained completions (#1241).
+# TYPE xpf_userspace_binding_tx_completion_ring_available gauge
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="0",iface="ge-0-0-1",queue_id="0",worker_id="0"} 28
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="1",iface="ge-0-0-2",queue_id="0",worker_id="0"} 60
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="10",iface="ge-0-0-2",queue_id="3",worker_id="3"} 49
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="11",iface="ge-0-0-0",queue_id="3",worker_id="3"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="12",iface="ge-0-0-1",queue_id="4",worker_id="4"} 5
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="13",iface="ge-0-0-2",queue_id="4",worker_id="4"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="14",iface="ge-0-0-0",queue_id="4",worker_id="4"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="15",iface="ge-0-0-1",queue_id="5",worker_id="5"} 5
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="16",iface="ge-0-0-2",queue_id="5",worker_id="5"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="17",iface="ge-0-0-0",queue_id="5",worker_id="5"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="2",iface="ge-0-0-0",queue_id="0",worker_id="0"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="3",iface="ge-0-0-1",queue_id="1",worker_id="1"} 1
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="4",iface="ge-0-0-2",queue_id="1",worker_id="1"} 25
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="5",iface="ge-0-0-0",queue_id="1",worker_id="1"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="6",iface="ge-0-0-1",queue_id="2",worker_id="2"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="7",iface="ge-0-0-2",queue_id="2",worker_id="2"} 27
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="8",iface="ge-0-0-0",queue_id="2",worker_id="2"} 0
+xpf_userspace_binding_tx_completion_ring_available{binding_slot="9",iface="ge-0-0-1",queue_id="3",worker_id="3"} 1
+# HELP xpf_userspace_binding_tx_completion_ring_available_max Maximum sampled AF_XDP TX completion-ring descriptors available in the last debug window (#1241).
+# TYPE xpf_userspace_binding_tx_completion_ring_available_max gauge
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="0",iface="ge-0-0-1",queue_id="0",worker_id="0"} 71
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="1",iface="ge-0-0-2",queue_id="0",worker_id="0"} 494
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="10",iface="ge-0-0-2",queue_id="3",worker_id="3"} 336
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="11",iface="ge-0-0-0",queue_id="3",worker_id="3"} 0
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="12",iface="ge-0-0-1",queue_id="4",worker_id="4"} 34
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="13",iface="ge-0-0-2",queue_id="4",worker_id="4"} 0
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="14",iface="ge-0-0-0",queue_id="4",worker_id="4"} 0
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="15",iface="ge-0-0-1",queue_id="5",worker_id="5"} 63
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="16",iface="ge-0-0-2",queue_id="5",worker_id="5"} 150
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="17",iface="ge-0-0-0",queue_id="5",worker_id="5"} 0
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="2",iface="ge-0-0-0",queue_id="0",worker_id="0"} 0
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="3",iface="ge-0-0-1",queue_id="1",worker_id="1"} 6
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="4",iface="ge-0-0-2",queue_id="1",worker_id="1"} 128
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="5",iface="ge-0-0-0",queue_id="1",worker_id="1"} 0
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="6",iface="ge-0-0-1",queue_id="2",worker_id="2"} 0
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="7",iface="ge-0-0-2",queue_id="2",worker_id="2"} 128
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="8",iface="ge-0-0-0",queue_id="2",worker_id="2"} 0
+xpf_userspace_binding_tx_completion_ring_available_max{binding_slot="9",iface="ge-0-0-1",queue_id="3",worker_id="3"} 10
+# HELP xpf_userspace_binding_tx_completions_total Cumulative AF_XDP TX completions reaped by this binding's owner worker (#1241).
+# TYPE xpf_userspace_binding_tx_completions_total counter
+xpf_userspace_binding_tx_completions_total{binding_slot="0",iface="ge-0-0-1",queue_id="0",worker_id="0"} 1.9222352e+07
+xpf_userspace_binding_tx_completions_total{binding_slot="1",iface="ge-0-0-2",queue_id="0",worker_id="0"} 2.12142358e+08
+xpf_userspace_binding_tx_completions_total{binding_slot="10",iface="ge-0-0-2",queue_id="3",worker_id="3"} 2.64849689e+08
+xpf_userspace_binding_tx_completions_total{binding_slot="11",iface="ge-0-0-0",queue_id="3",worker_id="3"} 0
+xpf_userspace_binding_tx_completions_total{binding_slot="12",iface="ge-0-0-1",queue_id="4",worker_id="4"} 2.9581786e+07
+xpf_userspace_binding_tx_completions_total{binding_slot="13",iface="ge-0-0-2",queue_id="4",worker_id="4"} 2.36964397e+08
+xpf_userspace_binding_tx_completions_total{binding_slot="14",iface="ge-0-0-0",queue_id="4",worker_id="4"} 0
+xpf_userspace_binding_tx_completions_total{binding_slot="15",iface="ge-0-0-1",queue_id="5",worker_id="5"} 1.6155461e+07
+xpf_userspace_binding_tx_completions_total{binding_slot="16",iface="ge-0-0-2",queue_id="5",worker_id="5"} 2.4274973e+08
+xpf_userspace_binding_tx_completions_total{binding_slot="17",iface="ge-0-0-0",queue_id="5",worker_id="5"} 0
+xpf_userspace_binding_tx_completions_total{binding_slot="2",iface="ge-0-0-0",queue_id="0",worker_id="0"} 0
+xpf_userspace_binding_tx_completions_total{binding_slot="3",iface="ge-0-0-1",queue_id="1",worker_id="1"} 2.4023607e+07
+xpf_userspace_binding_tx_completions_total{binding_slot="4",iface="ge-0-0-2",queue_id="1",worker_id="1"} 2.27381179e+08
+xpf_userspace_binding_tx_completions_total{binding_slot="5",iface="ge-0-0-0",queue_id="1",worker_id="1"} 0
+xpf_userspace_binding_tx_completions_total{binding_slot="6",iface="ge-0-0-1",queue_id="2",worker_id="2"} 2.0918476e+07
+xpf_userspace_binding_tx_completions_total{binding_slot="7",iface="ge-0-0-2",queue_id="2",worker_id="2"} 2.14611707e+08
+xpf_userspace_binding_tx_completions_total{binding_slot="8",iface="ge-0-0-0",queue_id="2",worker_id="2"} 0
+xpf_userspace_binding_tx_completions_total{binding_slot="9",iface="ge-0-0-1",queue_id="3",worker_id="3"} 2.4546397e+07
+# HELP xpf_userspace_cos_active_flow_count Distinct active flows observed for this egress CoS queue on this worker in the last ~650ms. This class-specific distribution is the preferred fairness harness input for mixed workloads (#1248).
+# TYPE xpf_userspace_cos_active_flow_count gauge
+xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="8",worker_id="0"} 5
+xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="8",worker_id="1"} 1
+xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="8",worker_id="2"} 1
+xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="8",worker_id="3"} 2
+xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="8",worker_id="5"} 3
+# HELP xpf_userspace_cos_drain_guarantee_sent_bytes_total Bytes sent by this CoS queue during guarantee-phase service (#1369).
+# TYPE xpf_userspace_cos_drain_guarantee_sent_bytes_total counter
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="0"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="11"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="8"} 1.89064129794e+11
+xpf_userspace_cos_drain_guarantee_sent_bytes_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total Non-exact CoS queue bytes sent while at least one exact queue on the same shaped interface still had backlog; non-zero deltas indicate best-effort/uncapped service competing with exact demand (#1369).
+# TYPE xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total counter
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="0"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="11"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="8"} 0
+xpf_userspace_cos_drain_nonexact_sent_bytes_while_exact_backlogged_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_drain_surplus_sent_bytes_total Bytes sent by this CoS queue during surplus-phase service (#1369).
+# TYPE xpf_userspace_cos_drain_surplus_sent_bytes_total counter
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="0"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="11"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="8"} 0
+xpf_userspace_cos_drain_surplus_sent_bytes_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_equal_flow_cap_hit_events_total Acquire calls denied by the opt-in shared v8 equal-flow cap while class capacity remained (#1304).
+# TYPE xpf_userspace_cos_equal_flow_cap_hit_events_total counter
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="8"} 1.2144577e+07
+xpf_userspace_cos_equal_flow_cap_hit_events_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_equal_flow_enforced 1 when this exact CoS queue's current shared v8 lease epoch is actively applying equal-flow suppression; 0 when configured but failed open (#1304).
+# TYPE xpf_userspace_cos_equal_flow_enforced gauge
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="8"} 1
+xpf_userspace_cos_equal_flow_enforced{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_equal_flow_enforcement_enabled 1 when this exact CoS queue's shared v8 lease is configured for opt-in equal-flow suppression (#1304).
+# TYPE xpf_userspace_cos_equal_flow_enforcement_enabled gauge
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="1"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="10"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="2"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="3"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="4"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="5"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="6"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="7"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="8"} 1
+xpf_userspace_cos_equal_flow_enforcement_enabled{ifindex="14",queue_id="9"} 1
+# HELP xpf_userspace_cos_equal_flow_fail_open 1 for the current bounded fail-open reason on an opt-in shared v8 equal-flow queue; absent for queues without equal-flow enforcement (#1304).
+# TYPE xpf_userspace_cos_equal_flow_fail_open gauge
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="1",reason="disabled"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="10",reason="disabled"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="2",reason="disabled"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="3",reason="disabled"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="4",reason="disabled"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="5",reason="disabled"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="6",reason="disabled"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="7",reason="disabled"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="8",reason="none"} 1
+xpf_userspace_cos_equal_flow_fail_open{ifindex="14",queue_id="9",reason="disabled"} 1
+# HELP xpf_userspace_cos_equal_flow_max_worker_cap_bytes Maximum per-worker bytes-per-epoch cap currently published by the shared v8 equal-flow suppressor (#1304).
+# TYPE xpf_userspace_cos_equal_flow_max_worker_cap_bytes gauge
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="8"} 116442
+xpf_userspace_cos_equal_flow_max_worker_cap_bytes{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total Acquire-side stale/tag-mismatch equal-flow cap reads that failed open without overwriting the rotation-published epoch reason (#1304).
+# TYPE xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total counter
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="8"} 925
+xpf_userspace_cos_equal_flow_stale_or_tag_mismatch_events_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total Requested queue-lease bytes withheld by the opt-in shared v8 equal-flow suppressor while class capacity remained (#1304).
+# TYPE xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total counter
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="8"} 2.00998691707e+12
+xpf_userspace_cos_equal_flow_suppressed_grant_bytes_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_equal_flow_target_per_flow_bps Current Rust-enforced equal-flow per-flow target in bits per second, derived from shared v8 lease grants rather than the measurement-only Go estimator (#1304).
+# TYPE xpf_userspace_cos_equal_flow_target_per_flow_bps gauge
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="8"} 1.55256e+09
+xpf_userspace_cos_equal_flow_target_per_flow_bps{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_waterfill_eligible_visits_total Times the guarantee-rate waterfill selector reached this CoS queue eligible (nonempty/runnable/guarantee/exact) and evaluated it (both phases, before the token gate). Low value + high *_starvation_parks = backlogged-but-parked; low + low parks + zero queued = idle on this owner (#1628).
+# TYPE xpf_userspace_cos_waterfill_eligible_visits_total counter
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="0"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="11"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="8"} 1.2625686e+07
+xpf_userspace_cos_waterfill_eligible_visits_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_waterfill_epochs_total Completed guarantee-rate waterfill epochs (Phase-1 budget refills) on this CoS interface, summed across workers (#1628).
+# TYPE xpf_userspace_cos_waterfill_epochs_total counter
+xpf_userspace_cos_waterfill_epochs_total{ifindex="14"} 6.7181e+06
+# HELP xpf_userspace_cos_waterfill_min_epochs_per_worker Minimum waterfill_epochs across workers/bindings WITH active exact-guarantee backlog on this CoS interface. A worker/binding locked in Phase-2 keeps its epochs frozen, dropping this MIN even while the summed epochs climb; a value of 0 is a hard lock-in (a backlogged binding that completed zero epochs). The gauge is SUPPRESSED (no series) for an idle interface with no active-backlog candidate, so any emitted value — including 0 — is a real lock-in signal and alertable with `< N` (#1628).
+# TYPE xpf_userspace_cos_waterfill_min_epochs_per_worker gauge
+xpf_userspace_cos_waterfill_min_epochs_per_worker{ifindex="14"} 229162
+# HELP xpf_userspace_cos_waterfill_phase1_admissions_total Times this CoS queue was admitted by the guarantee-rate waterfill Phase-1 (small-first honored) walk. Combine with phase2_admissions + queued_bytes + *_starvation_parks to diagnose Phase-2 lock-in (#1628).
+# TYPE xpf_userspace_cos_waterfill_phase1_admissions_total counter
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="0"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="11"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="8"} 0
+xpf_userspace_cos_waterfill_phase1_admissions_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_cos_waterfill_phase1_budget_breaks_total Times the guarantee-rate waterfill Phase-1 walk broke into Phase 2 because the next ascending queue's cost exceeded the remaining Phase-1 budget, summed across workers. High breaks-per-epoch means Phase 1 routinely exhausts its budget mid-walk (#1628).
+# TYPE xpf_userspace_cos_waterfill_phase1_budget_breaks_total counter
+xpf_userspace_cos_waterfill_phase1_budget_breaks_total{ifindex="14"} 2.954022e+06
+# HELP xpf_userspace_cos_waterfill_phase2_admissions_total Times this CoS queue was admitted by the guarantee-rate waterfill Phase-2 (descending residual) walk. Climbing while phase1_admissions stays flat is evidence (not proof) of Phase-2 lock-in for a small class within the Phase-1 budget (#1628).
+# TYPE xpf_userspace_cos_waterfill_phase2_admissions_total counter
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="0"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="1"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="10"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="11"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="2"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="3"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="4"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="5"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="6"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="7"} 0
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="8"} 2.954022e+06
+xpf_userspace_cos_waterfill_phase2_admissions_total{ifindex="14",queue_id="9"} 0
+# HELP xpf_userspace_event_stream_dataplane_event_drops_total RT_FLOW dataplane events dropped by the userspace event-stream decoder.
+# TYPE xpf_userspace_event_stream_dataplane_event_drops_total counter
+xpf_userspace_event_stream_dataplane_event_drops_total{type="filter_log"} 0
+xpf_userspace_event_stream_dataplane_event_drops_total{type="policy_deny"} 0
+xpf_userspace_event_stream_dataplane_event_drops_total{type="screen_drop"} 0
+# HELP xpf_userspace_event_stream_dataplane_events_total Decoded RT_FLOW dataplane events received over the userspace event stream.
+# TYPE xpf_userspace_event_stream_dataplane_events_total counter
+xpf_userspace_event_stream_dataplane_events_total{type="filter_log"} 0
+xpf_userspace_event_stream_dataplane_events_total{type="policy_deny"} 0
+xpf_userspace_event_stream_dataplane_events_total{type="screen_drop"} 0
+# HELP xpf_userspace_event_stream_decode_errors_total Daemon-side userspace event-stream decode errors.
+# TYPE xpf_userspace_event_stream_decode_errors_total counter
+xpf_userspace_event_stream_decode_errors_total 0
+# HELP xpf_userspace_event_stream_frames_total Daemon-side userspace event-stream frames by direction.
+# TYPE xpf_userspace_event_stream_frames_total counter
+xpf_userspace_event_stream_frames_total{direction="read"} 622
+xpf_userspace_event_stream_frames_total{direction="written"} 183
+# HELP xpf_userspace_event_stream_producer_frames_total Userspace helper event-stream producer counters by outcome.
+# TYPE xpf_userspace_event_stream_producer_frames_total counter
+xpf_userspace_event_stream_producer_frames_total{outcome="dropped"} 0
+xpf_userspace_event_stream_producer_frames_total{outcome="sent"} 532
+# HELP xpf_userspace_event_stream_sequence_gaps_total Daemon-side userspace event-stream sequence gaps.
+# TYPE xpf_userspace_event_stream_sequence_gaps_total counter
+xpf_userspace_event_stream_sequence_gaps_total 0
+# HELP xpf_userspace_event_stream_unknown_frame_drops_total Userspace event-stream frames dropped because their frame type is unknown.
+# TYPE xpf_userspace_event_stream_unknown_frame_drops_total counter
+xpf_userspace_event_stream_unknown_frame_drops_total 0
+# HELP xpf_userspace_flow_cache_active_flows Aggregate active userspace flow-cache entries across bindings.
+# TYPE xpf_userspace_flow_cache_active_flows gauge
+xpf_userspace_flow_cache_active_flows 24
+# HELP xpf_userspace_flow_cache_capacity Aggregate userspace flow-cache capacity across bindings.
+# TYPE xpf_userspace_flow_cache_capacity gauge
+xpf_userspace_flow_cache_capacity 73728
+# HELP xpf_userspace_neighbor_warm_disconnected_total Proactive neighbor-warm requests dropped because the warmer worker thread died; warming is disabled until daemon restart (#1636).
+# TYPE xpf_userspace_neighbor_warm_disconnected_total counter
+xpf_userspace_neighbor_warm_disconnected_total 0
+# HELP xpf_userspace_neighbor_warm_drops_total Proactive neighbor-warm requests dropped because the bounded warmer queue was full (transient saturation under route churn) (#1636).
+# TYPE xpf_userspace_neighbor_warm_drops_total counter
+xpf_userspace_neighbor_warm_drops_total 0
+# HELP xpf_userspace_session_nat_reverse_key_collisions_total Aggregate NAT reverse-key (nat_reverse_index) 1:N collision displacement events across userspace workers (#1758 latent corruption made observable; near-precise upper bound on live collisions). A nonzero value warrants the structural-fix research.
+# TYPE xpf_userspace_session_nat_reverse_key_collisions_total counter
+xpf_userspace_session_nat_reverse_key_collisions_total 0
+# HELP xpf_userspace_session_table_capacity Aggregate userspace session-table capacity across workers.
+# TYPE xpf_userspace_session_table_capacity gauge
+xpf_userspace_session_table_capacity 786432
+# HELP xpf_userspace_session_table_entries Aggregate live userspace session-table entries across workers.
+# TYPE xpf_userspace_session_table_entries gauge
+xpf_userspace_session_table_entries 723
+# HELP xpf_userspace_worker_active_seconds_total Seconds the userspace-dp worker spent processing packets (#869).
+# TYPE xpf_userspace_worker_active_seconds_total counter
+xpf_userspace_worker_active_seconds_total{worker_id="0"} 907.358591332
+xpf_userspace_worker_active_seconds_total{worker_id="1"} 1033.205924901
+xpf_userspace_worker_active_seconds_total{worker_id="2"} 910.264291494
+xpf_userspace_worker_active_seconds_total{worker_id="3"} 1089.309154014
+xpf_userspace_worker_active_seconds_total{worker_id="4"} 1021.130738705
+xpf_userspace_worker_active_seconds_total{worker_id="5"} 977.6010983
+# HELP xpf_userspace_worker_cold_path_clock_source 1 when this worker's clock source has the value of the `source` label. Operators gate Scale Target table publication on every worker reporting source='tsc'. Always emitted (uncalibrated workers report source='unset').
+# TYPE xpf_userspace_worker_cold_path_clock_source gauge
+xpf_userspace_worker_cold_path_clock_source{source="tsc",worker_id="0"} 1
+xpf_userspace_worker_cold_path_clock_source{source="tsc",worker_id="1"} 1
+xpf_userspace_worker_cold_path_clock_source{source="tsc",worker_id="2"} 1
+xpf_userspace_worker_cold_path_clock_source{source="tsc",worker_id="3"} 1
+xpf_userspace_worker_cold_path_clock_source{source="tsc",worker_id="4"} 1
+xpf_userspace_worker_cold_path_clock_source{source="tsc",worker_id="5"} 1
+# HELP xpf_userspace_worker_cold_path_layout_version 1 when this worker's cold-path wire layout has the value of the `version` label (#1635: 3 = sparse log-linear).
+# TYPE xpf_userspace_worker_cold_path_layout_version gauge
+xpf_userspace_worker_cold_path_layout_version{version="3",worker_id="0"} 1
+xpf_userspace_worker_cold_path_layout_version{version="3",worker_id="1"} 1
+xpf_userspace_worker_cold_path_layout_version{version="3",worker_id="2"} 1
+xpf_userspace_worker_cold_path_layout_version{version="3",worker_id="3"} 1
+xpf_userspace_worker_cold_path_layout_version{version="3",worker_id="4"} 1
+xpf_userspace_worker_cold_path_layout_version{version="3",worker_id="5"} 1
+# HELP xpf_userspace_worker_cold_path_ns_per_tsc_q32 Q32 fixed-point ns_per_tsc multiplier from worker startup calibration. 0 when TSC unavailable. Operators compare across workers to detect calibration anomalies.
+# TYPE xpf_userspace_worker_cold_path_ns_per_tsc_q32 gauge
+xpf_userspace_worker_cold_path_ns_per_tsc_q32{worker_id="0"} 1.871610066e+09
+xpf_userspace_worker_cold_path_ns_per_tsc_q32{worker_id="1"} 1.871586716e+09
+xpf_userspace_worker_cold_path_ns_per_tsc_q32{worker_id="2"} 1.871560928e+09
+xpf_userspace_worker_cold_path_ns_per_tsc_q32{worker_id="3"} 1.871650329e+09
+xpf_userspace_worker_cold_path_ns_per_tsc_q32{worker_id="4"} 1.871588649e+09
+xpf_userspace_worker_cold_path_ns_per_tsc_q32{worker_id="5"} 1.87168147e+09
+# HELP xpf_userspace_worker_cold_path_overflow_active 1 if a configured zone-pair could not be assigned a cold-path histogram slot — either the 255-slot capacity was exhausted OR the pair references a zone-id outside the 0..=64 direct-table range. 0 otherwise.
+# TYPE xpf_userspace_worker_cold_path_overflow_active gauge
+xpf_userspace_worker_cold_path_overflow_active{worker_id="0"} 0
+xpf_userspace_worker_cold_path_overflow_active{worker_id="1"} 0
+xpf_userspace_worker_cold_path_overflow_active{worker_id="2"} 0
+xpf_userspace_worker_cold_path_overflow_active{worker_id="3"} 0
+xpf_userspace_worker_cold_path_overflow_active{worker_id="4"} 0
+xpf_userspace_worker_cold_path_overflow_active{worker_id="5"} 0
+# HELP xpf_userspace_worker_cold_path_sample_phase_total Per-worker monotonic count of eligible cold-path sampling attempts. Increment on every session-miss pass through the policy-eval pre-eval gate. Denominator for actual_sampling_rate = sum(samples[]) / sample_phase.
+# TYPE xpf_userspace_worker_cold_path_sample_phase_total counter
+xpf_userspace_worker_cold_path_sample_phase_total{worker_id="0"} 60
+xpf_userspace_worker_cold_path_sample_phase_total{worker_id="1"} 41
+xpf_userspace_worker_cold_path_sample_phase_total{worker_id="2"} 47
+xpf_userspace_worker_cold_path_sample_phase_total{worker_id="3"} 60
+xpf_userspace_worker_cold_path_sample_phase_total{worker_id="4"} 51
+xpf_userspace_worker_cold_path_sample_phase_total{worker_id="5"} 45
+# HELP xpf_userspace_worker_cold_path_snapshot_failed_total Per-worker monotonic count of snapshot() calls at the coordinator status path that exhausted their retry budget (publish contention / scheduler preemption). Distinguishes 'no data this scrape' from 'transient starvation'.
+# TYPE xpf_userspace_worker_cold_path_snapshot_failed_total counter
+xpf_userspace_worker_cold_path_snapshot_failed_total{worker_id="0"} 0
+xpf_userspace_worker_cold_path_snapshot_failed_total{worker_id="1"} 0
+xpf_userspace_worker_cold_path_snapshot_failed_total{worker_id="2"} 0
+xpf_userspace_worker_cold_path_snapshot_failed_total{worker_id="3"} 0
+xpf_userspace_worker_cold_path_snapshot_failed_total{worker_id="4"} 0
+xpf_userspace_worker_cold_path_snapshot_failed_total{worker_id="5"} 0
+# HELP xpf_userspace_worker_cold_path_wrapper_ns_baseline Calibrated cost of the sample_tsc_start + sample_tsc_end fence pair, measured once per worker post pthread affinity at startup. Subtracted from every recorded delta_ns on the hot path.
+# TYPE xpf_userspace_worker_cold_path_wrapper_ns_baseline gauge
+xpf_userspace_worker_cold_path_wrapper_ns_baseline{worker_id="0"} 43
+xpf_userspace_worker_cold_path_wrapper_ns_baseline{worker_id="1"} 43
+xpf_userspace_worker_cold_path_wrapper_ns_baseline{worker_id="2"} 43
+xpf_userspace_worker_cold_path_wrapper_ns_baseline{worker_id="3"} 43
+xpf_userspace_worker_cold_path_wrapper_ns_baseline{worker_id="4"} 43
+xpf_userspace_worker_cold_path_wrapper_ns_baseline{worker_id="5"} 43
+# HELP xpf_userspace_worker_cold_path_wrapper_underflow_count_total Per-worker monotonic count of samples where raw_ns < wrapper_ns_baseline. Indicates baseline drift (frequency scaling, OoO jitter, ultra-fast policy_eval).
+# TYPE xpf_userspace_worker_cold_path_wrapper_underflow_count_total counter
+xpf_userspace_worker_cold_path_wrapper_underflow_count_total{worker_id="0"} 0
+xpf_userspace_worker_cold_path_wrapper_underflow_count_total{worker_id="1"} 0
+xpf_userspace_worker_cold_path_wrapper_underflow_count_total{worker_id="2"} 0
+xpf_userspace_worker_cold_path_wrapper_underflow_count_total{worker_id="3"} 0
+xpf_userspace_worker_cold_path_wrapper_underflow_count_total{worker_id="4"} 0
+xpf_userspace_worker_cold_path_wrapper_underflow_count_total{worker_id="5"} 0
+# HELP xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total V8 CoS queue-lease acquire calls made by this worker (#1240).
+# TYPE xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total counter
+xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id="0"} 2.0850507e+07
+xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id="1"} 2.6252488e+07
+xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id="2"} 2.1654846e+07
+xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id="3"} 2.8157157e+07
+xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id="4"} 2.5128816e+07
+xpf_userspace_worker_cos_queue_lease_acquire_v8_calls_total{worker_id="5"} 2.3731475e+07
+# HELP xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total Bytes granted by v8 CoS queue-lease acquire calls for this worker (#1240).
+# TYPE xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total counter
+xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total{worker_id="0"} 3.21763965545e+11
+xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total{worker_id="1"} 3.45080383832e+11
+xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total{worker_id="2"} 3.25746675751e+11
+xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total{worker_id="3"} 4.01861944916e+11
+xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total{worker_id="4"} 3.59766889876e+11
+xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total{worker_id="5"} 3.68272373438e+11
+# HELP xpf_userspace_worker_dead 1 if the userspace-dp worker thread has panicked and been caught by the supervisor; 0 otherwise. Cleared only by daemon restart in Phase 1 (#925).
+# TYPE xpf_userspace_worker_dead gauge
+xpf_userspace_worker_dead{worker_id="0"} 0
+xpf_userspace_worker_dead{worker_id="1"} 0
+xpf_userspace_worker_dead{worker_id="2"} 0
+xpf_userspace_worker_dead{worker_id="3"} 0
+xpf_userspace_worker_dead{worker_id="4"} 0
+xpf_userspace_worker_dead{worker_id="5"} 0
+# HELP xpf_userspace_worker_idle_block_seconds_total Seconds the userspace-dp worker spent blocked in poll()/sleep (#869).
+# TYPE xpf_userspace_worker_idle_block_seconds_total counter
+xpf_userspace_worker_idle_block_seconds_total{worker_id="0"} 289.387453902
+xpf_userspace_worker_idle_block_seconds_total{worker_id="1"} 256.829475496
+xpf_userspace_worker_idle_block_seconds_total{worker_id="2"} 290.46995537
+xpf_userspace_worker_idle_block_seconds_total{worker_id="3"} 240.88593971
+xpf_userspace_worker_idle_block_seconds_total{worker_id="4"} 260.504743017
+xpf_userspace_worker_idle_block_seconds_total{worker_id="5"} 260.795232936
+# HELP xpf_userspace_worker_idle_loops_total Worker-loop iterations with no useful work (#869).
+# TYPE xpf_userspace_worker_idle_loops_total counter
+xpf_userspace_worker_idle_loops_total{worker_id="0"} 2.01644826e+08
+xpf_userspace_worker_idle_loops_total{worker_id="1"} 5.9966362e+07
+xpf_userspace_worker_idle_loops_total{worker_id="2"} 1.95919454e+08
+xpf_userspace_worker_idle_loops_total{worker_id="3"} 283958
+xpf_userspace_worker_idle_loops_total{worker_id="4"} 7.3672735e+07
+xpf_userspace_worker_idle_loops_total{worker_id="5"} 1.37262991e+08
+# HELP xpf_userspace_worker_idle_spin_seconds_total Seconds the userspace-dp worker spent idle-spinning on empty rings (#869).
+# TYPE xpf_userspace_worker_idle_spin_seconds_total counter
+xpf_userspace_worker_idle_spin_seconds_total{worker_id="0"} 133.632422619
+xpf_userspace_worker_idle_spin_seconds_total{worker_id="1"} 40.191214379
+xpf_userspace_worker_idle_spin_seconds_total{worker_id="2"} 129.576599357
+xpf_userspace_worker_idle_spin_seconds_total{worker_id="3"} 0.077443204
+xpf_userspace_worker_idle_spin_seconds_total{worker_id="4"} 48.679090145
+xpf_userspace_worker_idle_spin_seconds_total{worker_id="5"} 91.908056673
+# HELP xpf_userspace_worker_session_nat_reverse_key_collisions_total Cumulative NAT reverse-key (nat_reverse_index) 1:N collision displacement events on this userspace worker's session table (#1758 latent corruption made observable; near-precise upper bound on live collisions).
+# TYPE xpf_userspace_worker_session_nat_reverse_key_collisions_total counter
+xpf_userspace_worker_session_nat_reverse_key_collisions_total{worker_id="0"} 0
+xpf_userspace_worker_session_nat_reverse_key_collisions_total{worker_id="1"} 0
+xpf_userspace_worker_session_nat_reverse_key_collisions_total{worker_id="2"} 0
+xpf_userspace_worker_session_nat_reverse_key_collisions_total{worker_id="3"} 0
+xpf_userspace_worker_session_nat_reverse_key_collisions_total{worker_id="4"} 0
+xpf_userspace_worker_session_nat_reverse_key_collisions_total{worker_id="5"} 0
+# HELP xpf_userspace_worker_session_table_capacity Maximum session-table entries supported by this userspace worker.
+# TYPE xpf_userspace_worker_session_table_capacity gauge
+xpf_userspace_worker_session_table_capacity{worker_id="0"} 131072
+xpf_userspace_worker_session_table_capacity{worker_id="1"} 131072
+xpf_userspace_worker_session_table_capacity{worker_id="2"} 131072
+xpf_userspace_worker_session_table_capacity{worker_id="3"} 131072
+xpf_userspace_worker_session_table_capacity{worker_id="4"} 131072
+xpf_userspace_worker_session_table_capacity{worker_id="5"} 131072
+# HELP xpf_userspace_worker_session_table_entries Live session-table entries published by this userspace worker.
+# TYPE xpf_userspace_worker_session_table_entries gauge
+xpf_userspace_worker_session_table_entries{worker_id="0"} 119
+xpf_userspace_worker_session_table_entries{worker_id="1"} 115
+xpf_userspace_worker_session_table_entries{worker_id="2"} 121
+xpf_userspace_worker_session_table_entries{worker_id="3"} 127
+xpf_userspace_worker_session_table_entries{worker_id="4"} 121
+xpf_userspace_worker_session_table_entries{worker_id="5"} 120
+# HELP xpf_userspace_worker_thread_cpu_seconds_last_60s CLOCK_THREAD_CPUTIME_ID consumed by the worker thread over the most recent rolling ~60s window (gauge, not counter; 0 until ~60s after worker start).
+# TYPE xpf_userspace_worker_thread_cpu_seconds_last_60s gauge
+xpf_userspace_worker_thread_cpu_seconds_last_60s{worker_id="0"} 58.942646201
+xpf_userspace_worker_thread_cpu_seconds_last_60s{worker_id="1"} 49.015381277
+xpf_userspace_worker_thread_cpu_seconds_last_60s{worker_id="2"} 59.008338298
+xpf_userspace_worker_thread_cpu_seconds_last_60s{worker_id="3"} 59.014003132
+xpf_userspace_worker_thread_cpu_seconds_last_60s{worker_id="4"} 56.947454362
+xpf_userspace_worker_thread_cpu_seconds_last_60s{worker_id="5"} 59.340573322
+# HELP xpf_userspace_worker_thread_cpu_seconds_total CLOCK_THREAD_CPUTIME_ID sample for the userspace-dp worker thread (#869).
+# TYPE xpf_userspace_worker_thread_cpu_seconds_total counter
+xpf_userspace_worker_thread_cpu_seconds_total{worker_id="0"} 1012.25731488
+xpf_userspace_worker_thread_cpu_seconds_total{worker_id="1"} 1067.863795389
+xpf_userspace_worker_thread_cpu_seconds_total{worker_id="2"} 1033.80301023
+xpf_userspace_worker_thread_cpu_seconds_total{worker_id="3"} 1087.170107862
+xpf_userspace_worker_thread_cpu_seconds_total{worker_id="4"} 1062.829512627
+xpf_userspace_worker_thread_cpu_seconds_total{worker_id="5"} 1061.825812122
+# HELP xpf_userspace_worker_thread_cpu_window_seconds Wall-clock width of the rolling thread-CPU window matching xpf_userspace_worker_thread_cpu_seconds_last_60s; 0 until ~60s after worker start. Operators compute live CPU% as last_60s / this gauge.
+# TYPE xpf_userspace_worker_thread_cpu_window_seconds gauge
+xpf_userspace_worker_thread_cpu_window_seconds{worker_id="0"} 60.004776306
+xpf_userspace_worker_thread_cpu_window_seconds{worker_id="1"} 60.016035943
+xpf_userspace_worker_thread_cpu_window_seconds{worker_id="2"} 60.003724401
+xpf_userspace_worker_thread_cpu_window_seconds{worker_id="3"} 60.003899341
+xpf_userspace_worker_thread_cpu_window_seconds{worker_id="4"} 60.012669635
+xpf_userspace_worker_thread_cpu_window_seconds{worker_id="5"} 60.008404344
+# HELP xpf_userspace_worker_wall_seconds_total Monotonic wall seconds observed by the userspace-dp worker loop (#869).
+# TYPE xpf_userspace_worker_wall_seconds_total counter
+xpf_userspace_worker_wall_seconds_total{worker_id="0"} 1330.378467853
+xpf_userspace_worker_wall_seconds_total{worker_id="1"} 1330.226614776
+xpf_userspace_worker_wall_seconds_total{worker_id="2"} 1330.310846221
+xpf_userspace_worker_wall_seconds_total{worker_id="3"} 1330.272536928
+xpf_userspace_worker_wall_seconds_total{worker_id="4"} 1330.314571867
+xpf_userspace_worker_wall_seconds_total{worker_id="5"} 1330.304387909
+# HELP xpf_userspace_worker_work_loops_total Worker-loop iterations that did useful packet/ring work (#869).
+# TYPE xpf_userspace_worker_work_loops_total counter
+xpf_userspace_worker_work_loops_total{worker_id="0"} 2.92941676e+08
+xpf_userspace_worker_work_loops_total{worker_id="1"} 4.01633108e+08
+xpf_userspace_worker_work_loops_total{worker_id="2"} 2.94424739e+08
+xpf_userspace_worker_work_loops_total{worker_id="3"} 3.89006675e+08
+xpf_userspace_worker_work_loops_total{worker_id="4"} 3.18829688e+08
+xpf_userspace_worker_work_loops_total{worker_id="5"} 3.46510687e+08
+# HELP xpf_zone_bytes_total Total bytes per zone.
+# TYPE xpf_zone_bytes_total counter
+xpf_zone_bytes_total{direction="egress",zone="control"} 0
+xpf_zone_bytes_total{direction="egress",zone="lan"} 0
+xpf_zone_bytes_total{direction="egress",zone="mgmt"} 0
+xpf_zone_bytes_total{direction="egress",zone="sfmix"} 0
+xpf_zone_bytes_total{direction="egress",zone="wan"} 0
+xpf_zone_bytes_total{direction="ingress",zone="control"} 0
+xpf_zone_bytes_total{direction="ingress",zone="lan"} 0
+xpf_zone_bytes_total{direction="ingress",zone="mgmt"} 0
+xpf_zone_bytes_total{direction="ingress",zone="sfmix"} 0
+xpf_zone_bytes_total{direction="ingress",zone="wan"} 0
+# HELP xpf_zone_packets_total Total packets per zone.
+# TYPE xpf_zone_packets_total counter
+xpf_zone_packets_total{direction="egress",zone="control"} 0
+xpf_zone_packets_total{direction="egress",zone="lan"} 0
+xpf_zone_packets_total{direction="egress",zone="mgmt"} 0
+xpf_zone_packets_total{direction="egress",zone="sfmix"} 0
+xpf_zone_packets_total{direction="egress",zone="wan"} 0
+xpf_zone_packets_total{direction="ingress",zone="control"} 0
+xpf_zone_packets_total{direction="ingress",zone="lan"} 0
+xpf_zone_packets_total{direction="ingress",zone="mgmt"} 0
+xpf_zone_packets_total{direction="ingress",zone="sfmix"} 0
+xpf_zone_packets_total{direction="ingress",zone="wan"} 0
