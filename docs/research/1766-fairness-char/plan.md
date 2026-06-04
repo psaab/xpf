@@ -293,6 +293,28 @@ used here.
    zero-retrans: r3=19622, r5=4544 (the rest 0). These do not change
    any Gate-2 verdict but the earlier "0 retrans on clean runs" blanket
    wording was wrong; corrected here.
+7. **Starved-keepalive masking (AGY finding 3) — refuted by data.** AGY
+   argued a flow starved by a scheduler bug could send 1 pkt/650 ms,
+   count as `active=1` in `{a_i}` (keeping Cstruct low) while its
+   throughput CoV is huge. This is exactly the Gate-1 starved-flow
+   case, and it **did not occur**: across all runs the slowest
+   per-stream rate is 75–86% of mean (r2 min 0.885 G / mean 1.176 G =
+   75.3%; r13 77.4%; ef2 80.0%) — never remotely near the <1%-of-mean
+   starved threshold. A keepalive-masked starved flow would appear as a
+   ~0 G iperf stream; none exists. Gate 1 = 0 starved flows on every
+   run. Refuted.
+8. **Bypass-grace surplus spike on high skew (AGY finding 4) — refuted
+   for the measured regime.** AGY argued an extreme draw arms the
+   5-rotation bypass grace (`rotate_epoch_v8.rs:194`), opening the
+   surplus path and spiking CoV non-monotonically. If that path opened,
+   `cos_drain_surplus_sent_bytes_total{q8}` would be nonzero. It is
+   **0 on every run including all five 5-pile draws** (r1 `[0,1,5,1,1,4]`,
+   r8 `[1,3,5,1,1,1]`, r11 `[2,1,0,5,3,1]`, r13 `[3,5,1,2,1,0]`,
+   ef2 `[5,1,1,2,0,3]`). The bypass did not arm even at the worst
+   observed skew. AGY is right that this is *why* I must NOT extrapolate
+   a formal monotonicity claim to the unobserved 6-pile (already dropped
+   in §6.1); the verdict for the *measured* regime stands on the surplus
+   counter being identically zero.
 
 ## 7. Recommendation / next step
 
@@ -334,8 +356,37 @@ None of the findings overturn the PHYSICS verdict (Codex: "the raw runs
 still all sit below Cstruct + 0.05"); they are over-claim / methodology
 corrections, now applied. r2 pushed for re-review.
 
-## 11. AGY review
-_pending (background `adversarial-review-mpz7rcgf-f5k0j2`)_
+## 11. AGY review — round 1: PLAN-KILL (`adversarial-review-mpz7rcgf-f5k0j2`)
+AGY's KILL overlaps Codex's already-addressed findings (saturation, V_min
+non-export, default-OFF) plus two new substantive ones, both **refuted
+by run data** (§6.7, §6.8):
+- AGY-3 (starved-keepalive masks `{a_i}`): refuted — slowest per-stream
+  is 75–86% of mean on every run; Gate-1 starved count = 0; no near-zero
+  iperf stream exists.
+- AGY-4 (bypass-grace opens surplus → CoV spike on high skew): refuted —
+  `cos_drain_surplus_sent_bytes_total{q8}=0` on all runs including all
+  five 5-pile draws; the bypass path never armed.
+- AGY-5 (default-ON): same as Codex-4; rebutted in §4 (non-work-
+  conserving by contract, regime-specific zero-cost, doesn't bound
+  worst case).
+- AGY-6 (V_min Prometheus blind spot): same as Codex-3; conceded as an
+  observability gap + bounded indirectly in §3.3.
+- AGY's "fix the double-load race condition / rework the codebase"
+  demand is out of scope: this is a research/characterization plan with
+  no code change; AGY hallucinated a code-fix mandate. The KILL is
+  downgraded by the data refutations of its only two original findings;
+  no finding produces a Gate-2 counterexample (consistent with Codex,
+  who also found none). r2 corrections + §6.7/§6.8 address every
+  data-grounded point.
+
+**Reviewer reconciliation:** Codex (NEEDS-MAJOR, no counterexample) and
+AGY (KILL, two new findings both refuted by data) converge on the same
+substrate: the verdict's *direction* is correct and unbroken, but r1
+over-claimed (proof vs evidence, cwnd-bound vs mixed-saturation,
+monotonicity, V_min "clean"). After r2 the over-claims are removed and
+the two novel AGY hypotheses are empirically closed with the surplus
+and starved-flow counters. Net: **ACCEPT-AS-PHYSICS holds; no Gate-2
+counterexample was produced by any reviewer.**
 
 ## 12. Claude SMR
 See `claude-smr-plan-r1.md`.
