@@ -83,26 +83,58 @@ workers even on skewed draws:
 - r9 `[2,1,0,3,4,2]`: grant-per-flow CoV 8.4% ≈ observed 9.8%.
 
 The v8 grant-per-flow CoV tracks the observed per-flow CoV within
-~2–4 pp on every run. That is the smoking gun: **the v8 lease grant is
-the dominant determinant of per-flow rate, and it is functioning as
-designed** (flow-proportional, not leaking). The residual ~8–20% band
-split is (a) the per-worker scheduler's within-worker division plus
-(b) TCP cwnd jitter on the slightly-reduced crowded-worker per-flow
-share — both bounded well under Cstruct.
+~2–4 pp on every run. **This is strong evidence, not proof.** Caveat
+(Codex finding 2): the granted-bytes metric counts bytes *granted by
+acquire calls*, not bytes *transmitted*; both the grant and the
+observed throughput are downstream of the same `my_count/total_flows`
+input (`rotate_epoch_v8.rs:323`), so a shared active-count accounting
+bug could in principle make both correlate. What the correlation *does*
+establish: the per-flow rate is set by the flow-proportional grant
+share (not by an unmodeled scheduler path), and the grant share is
+itself ~flat-per-flow — i.e. the lease is behaving as the design
+specifies. The independent disconfirmation of a *leak* is in §3.3
+(direction of the residual): a v8/V_min *gap* that mis-credited
+crowded workers would manifest as crowded-worker flows running *faster*
+or solo-worker flows being *held back*; the data shows the opposite
+(solo workers get the highest grant-per-flow, crowded the lowest),
+which is the designed flow-proportional split, not a leak.
+The residual ~8–20% band split is (a) the per-worker scheduler's
+within-worker division plus (b) TCP cwnd jitter on the
+slightly-reduced crowded-worker per-flow share — both bounded well
+under Cstruct.
 
-### V_min / parks / stalls: clean
+### 3.3 V_min / parks / stalls
 
 - `xpf_userspace_cos_drain_surplus_sent_bytes_total{q8} = 0` and
   `..._nonexact_sent_..._while_exact_backlogged = 0` on every run: all
   q8 bytes flow via the exact guarantee path; no surplus borrowing, no
   cross-class steal.
 - No `*_starvation_parks` counters emitted for q8 (zero parks).
-- No V_min throttle/hard-cap/suspend telemetry surfaced (V_min
-  hard-cap counter is internal `consecutive_v_min_skips`, not a
-  Prometheus series); the absence of parks + the flat grant-per-flow
-  show V_min is not throttling these draws into starvation.
-- Drain latency p~ buckets concentrated ≤32µs; no TX-ring stall
+- Drain latency buckets concentrated ≤32µs; no TX-ring stall
   signature.
+- **V_min throttle observability limitation (Codex finding 3 —
+  acknowledged).** The V_min throttle / hard-cap / suspend counters
+  (`v_min_throttles`, `v_min_throttle_hard_cap_overrides`,
+  `cos.rs:1047/1059/1069`; flushed to `BindingLiveState` and carried on
+  the binding wire `protocol.go:1116-1117`) are **NOT exported to
+  Prometheus, CLI, or any HTTP/gRPC endpoint** on the deployed binary —
+  they live only in the internal binding-status JSON snapshot. I
+  therefore **could not directly read V_min throttle counts**, and the
+  absence of a `v_min` Prometheus series is NOT direct proof of zero
+  throttles. What bounds the V_min concern *indirectly*: (1) V_min
+  throttling delays a worker whose `queue_vtime` runs *ahead* of peers
+  — its effect is to *slow the fastest worker*, pulling its per-flow
+  rate down toward peers. If V_min were over-throttling it would
+  *compress* the spread (lower CoV), not inflate it, so it cannot be
+  the cause of a *too-high* CoV. (2) The hard-cap escape
+  (`v_min.rs:213-216`, force-continue after
+  `V_MIN_CONSECUTIVE_SKIP_HARD_CAP`) recovers ~99% throughput under
+  persistent spread (#942), bounding any stall. (3) Aggregate sits at
+  the cwnd/structural ceiling (§4, with the saturation correction
+  below), so V_min is not suppressing aggregate below what the active
+  workers can deliver. A direct read would require exporting these
+  counters (a code change, out of scope); recommended as an optional
+  observability follow-up in §7.
 
 ### Conclusion Q1
 
@@ -147,13 +179,24 @@ make it fail *open* (revert to v8 proportional) rather than mis-clip.
 
 - **Typical CoV roughly halved** (12.0→6.4% mean), consistent with the
   prior ~22%→8.6% direction.
-- **Aggregate cost ≈ zero in this regime** (14.86→14.82 G): the 18G
-  exact queue is cwnd-bound at ~15 G (SUM < shape, 0 retrans), so the
-  "withheld surplus" EF gives up is surplus the queue was not
-  achieving anyway. *This is regime-specific* — under a genuinely
-  saturated exact queue EF trades aggregate for equality (the
-  documented non-work-conserving tradeoff); do not generalize the
-  "free" result.
+- **Aggregate cost ≈ zero across this run set** (14.86→14.82 G), but
+  the *reason* is more nuanced than "cwnd-bound" (Codex finding 1 —
+  corrected). By the contract's structural-cap definition
+  (`fairness-regimes.md:322`, `fairness.rs:106`: cap =
+  `(Nₐ/Nᵥ)×shaper`, saturated iff ≥95% of cap), the **5-active runs are
+  saturated** (cap = 15G; r4/r6/r7/r9/r10/offkill*, ef1/ef8/efkill2 all
+  hit ≥98% of 15G — see `runs/sat.tsv`), while the **6-active runs sit
+  at ~82–88% of their 18G cap (non-saturated/cwnd-bound)**. The regime
+  is therefore *mixed*, not uniformly cwnd-bound. The aggregate-neutral
+  EF result still holds empirically on this set: even on the saturated
+  5-active runs the structural cap (15G) is the binding constraint, and
+  clipping the fastest worker to the slowest worker's per-flow rate
+  redistributes *within* that cap rather than lowering it, because the
+  idle 6th worker's share is unclaimable regardless. **Do NOT
+  generalize "EF is free" to a fully-saturated 6-active draw** — there
+  EF trades aggregate for equality (the documented non-work-conserving
+  tradeoff); this set simply did not produce a saturated 6-active P12
+  draw to exercise that cost.
 - **It does NOT cap the worst draw.** The one 5-pile EF-ON run
   (`[5,1,1,2,0,3]`) still showed 17.9% CoV — within ε of its 67.5%
   Cstruct, but no better than the EF-OFF 5-pile draws. EF lowers the
@@ -170,11 +213,25 @@ make it fail *open* (revert to v8 proportional) rather than mis-clip.
 `equal-flow-enforcement` is the **correct optional lever** for an
 operator who explicitly wants tighter low-P per-flow equality on an
 exact shaped class and accepts the non-work-conserving semantics. It
-is **not** the right *default*: (a) it is non-work-conserving by
-contract (sacrifices aggregate under saturation), (b) it only halves
-typical CoV and does not bound worst-case skew, and (c) the product
-contract (`docs/fairness-regimes.md` Non-goals) explicitly does not
-promise work-conserving equal per-flow throughput beyond `Cstruct`.
+is **not** the right *default*:
+
+- **Does the ~zero aggregate cost argue for default-ON? No (Codex
+  finding 4 — addressed).** The zero-cost result is *regime-specific*
+  to this P12 set (mixed cwnd-bound 6-active + cap-bound 5-active, no
+  saturated 6-active draw). EF is non-work-conserving *by contract*
+  (`publish_equal_flow_epoch_v8.rs` clips every worker to the *slowest*
+  worker's per-flow rate); on a saturated draw with uneven per-worker
+  demand it *will* sacrifice aggregate — that is its defined purpose.
+  Defaulting it ON would silently impose that tradeoff on workloads
+  that never asked for it and would violate the product contract's
+  work-conserving default posture (`fairness-regimes.md` Non-goals:
+  xpf does not promise equal per-flow throughput beyond `Cstruct`
+  without an explicit non-work-conserving opt-in).
+- It only halves *typical* CoV and **does not bound worst-case skew**
+  (the EF-ON 5-pile `[5,1,1,2,0,3]` still showed 17.9%), so even as a
+  fairness tool it is not a guarantee — another reason it is an
+  operator policy choice, not a default correctness fix.
+
 Default-OFF is the right shipped posture; keep it.
 
 ## 5. Q3 — test-contract
@@ -197,10 +254,16 @@ used here.
    (issue's 25.4% case) has P≈few-% and did not occur in 25 draws. But
    I captured multiple 5-piles (`0,1,5,1,1,4`; `1,3,5,1,1,1`;
    `2,1,0,5,3,1`; `5,1,1,2,0,3`; `3,5,1,2,1,0`) — Cstruct 67–81%, obs
-   CoV 12–21% — all PHYSICS with 45–65 pp margin. A 6-pile has *higher*
-   Cstruct (~0.91 for `[0,0,1,2,3,6]`), so a 25% observed CoV is even
-   *more* PHYSICS, not less. The verdict is monotone in the direction
-   of the unobserved draw.
+   CoV 12–21% — all PHYSICS with 45–65 pp margin. The 6-pile
+   `[0,0,1,2,3,6]` has `Cstruct = 0.707` (Codex finding 5 — corrected;
+   the earlier "~0.91" was wrong, recomputed via the documented formula
+   and `analyze.py`), still comfortably above the issue's reported
+   25.4% observed CoV (gap −45 pp). The verdict's *direction* is sound
+   — every higher-skew draw raises Cstruct faster than it raises the
+   v8-mitigated observed CoV — but I am not claiming a formal
+   monotonicity theorem; the empirical 5-pile coverage (5 distinct
+   5-pile draws, all 45–65 pp under ceiling) is the actual basis, and a
+   6-pile would have an *even larger* margin.
 2. **Forward vs reverse.** I measured forward (5208 dst-port → WAN
    egress q8), matching the operator repro. Reverse (`-R`, ge-0-0-1
    egress) is a different shaped path; #1765's table mixed both. The
@@ -211,10 +274,25 @@ used here.
    within ~650 ms; a flow briefly idle could under-count `{a_i}`. The
    daemon-gauge cross-check (matched to displayed precision) bounds
    this; per-stream iperf rates are the independent CoV source.
-4. **Saturation labeling.** SUM ~15G < 18G shape, 0 retrans on clean
-   runs ⇒ non-saturated/cwnd-bound. Gate 3 (aggregate) does not apply;
-   Gates 1/2 do and pass. The "EF is free" result is therefore a
-   non-saturated property — flagged in §4.
+4. **Saturation labeling — corrected (Codex finding 1).** Against the
+   scaled structural cap `(Nₐ/Nᵥ)×18G`, the 5-active runs ARE saturated
+   (15G cap, ≥98% hit) and 6-active runs are not (~82–88% of 18G). The
+   set is mixed. This strengthens the physics verdict (CoV stays far
+   below Cstruct *even at the structural ceiling*) and is reflected in
+   the corrected §4 EF discussion.
+5. **Window alignment (Codex finding 4).** `{a_i}` is two scrapes
+   (t≈12s, steady) of a ~650 ms recency proxy; observed CoV is the
+   full iperf `end.streams` (start 0 → 75s). These are not
+   window-identical. Codex independently recomputed CoV with 5s warmup
+   + 1s final exclusion and headline CoVs barely moved; the gap to
+   Cstruct (45–65 pp) dwarfs any window-alignment noise. The daemon
+   `xpf_fairness_cstruct` gauge (steady-window-internal) matching my
+   offline Cstruct is the cross-check that the `{a_i}` proxy is
+   representative.
+6. **Retrans (Codex finding 6).** Not all clean runs were
+   zero-retrans: r3=19622, r5=4544 (the rest 0). These do not change
+   any Gate-2 verdict but the earlier "0 retrans on clean runs" blanket
+   wording was wrong; corrected here.
 
 ## 7. Recommendation / next step
 
@@ -237,8 +315,27 @@ used here.
 ## 9. Reviewer verdicts
 (filled in §10/§11 after Codex + AGY + Claude-SMR rounds.)
 
-## 10. Codex review
-_pending_
+## 10. Codex review — round 1: PLAN-NEEDS-MAJOR (`codex-1766-fairness-review-a4591a419`)
+No reproducible Gate-2 counterexample (all runs confirmed below
+Cstruct+0.05; `analyze.py` Cstruct math matched the documented worked
+examples). 6 findings, all addressed in r2:
+1. (Major) saturation labeling wrong — 5-active runs ARE saturated vs
+   scaled cap → §4 corrected, `runs/sat.tsv` added.
+2. (Major) grant↔observed correlation is evidence not proof → §3
+   softened to "strong evidence", added direction-of-residual
+   disconfirmation.
+3. (Major) V_min not cleared by Prometheus artifacts → §3.3 rewritten
+   to acknowledge the observability gap + indirect bound.
+4. (Major→soft) window mixing → §6.5 acknowledged; Codex's own
+   warmup-excluded recompute barely moved CoV.
+5. (Minor) 6-pile Cstruct = 0.707 not 0.91 → §6.1 corrected.
+6. (Minor) "0 retrans on clean runs" false (r3/r5) → §6.6 corrected.
+None of the findings overturn the PHYSICS verdict (Codex: "the raw runs
+still all sit below Cstruct + 0.05"); they are over-claim / methodology
+corrections, now applied. r2 pushed for re-review.
 
 ## 11. AGY review
-_pending_
+_pending (background `adversarial-review-mpz7rcgf-f5k0j2`)_
+
+## 12. Claude SMR
+See `claude-smr-plan-r1.md`.
