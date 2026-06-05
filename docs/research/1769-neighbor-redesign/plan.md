@@ -244,27 +244,66 @@ To be authored by Codex. Must cover, at minimum:
 
 Smallest change that removes the wedge without the full redesign.
 
-**Codex r1 recommendation (lead architect, accepted):** the minimal
-correct fix is a **targeted single-key `RTM_GETNEIGH`** on negative
-fast-fail, rate-limited per `(ifindex, next_hop)`, that re-populates
-`dynamic_neighbors` if the kernel returns a usable lladdr (anything
-except FAILED/INCOMPLETE — matches existing usable-state policy
-`forwarding/mod.rs:45`, `neighbor.rs:346`); plus fire the existing
-ARP/NDP probe on a GET miss/unusable. Rationale:
-- It directly attacks the strongest failure mode "kernel knows the
-  lladdr, the userspace mirror does not" — which probe-only does NOT
-  fix, because the TTL already reopens a probe window each cycle yet the
-  dst stayed wedged live.
-- It preserves the #1651 dead-host storm defense: packets still
-  fast-fail (no `pending_neigh` slot consumed); only an off-hot-path,
-  rate-limited GET is added.
-- Candidate (iii) "don't refresh on hit" is dropped — Codex confirmed
-  it's already true (`neg_neigh` not refreshed on hits).
+**CONVERGED design (Codex r2 + AGY KILL findings folded in).** AGY r1
+PLAN-KILLed the original "cache any non-FAILED GET reply" because it
+races the multicast monitor (the out-of-order GET race, §F1 below) and
+could permanently cache a stale MAC. The race-safe immediate fix is:
 
-Probe-only (candidate i alone) is smaller but weaker and was REJECTED by
-Codex as insufficient for the observed live failure. The GET must run
-off the hot path (e.g. queued to the existing warmer/resolver thread or
-a dedicated single-key resolver), never inline in the worker poll loop.
+On a negative-cache fast-fail, BEFORE recycling, enqueue a **shared,
+per-key, rate-limited resolver request** (not a per-binding GET — the
+`neg_neigh_cache` is per-binding across 6 WAN workers, `worker/mod.rs:135`,
+so a per-binding GET would be 6× rtnl; route it through ONE shared
+resolver). The resolver:
+1. Issues a **single-key `RTM_GETNEIGH`** (`NLM_F_REQUEST` + `NDA_DST`,
+   NO dump flags — distinct from the startup dump's
+   `NLM_F_ROOT|NLM_F_MATCH`, `neighbor.rs:364-372`; a direct lookup, not
+   the RTNL-mutex dump path).
+2. Caches the lladdr into `dynamic_neighbors` **ONLY if the GET returns
+   `REACHABLE` or `PERMANENT`** AND a per-key/global neighbor epoch has
+   not advanced since the request was issued (guards the out-of-order
+   race vs a concurrent monitor FAILED/DELNEIGH removal).
+3. If the GET returns `STALE|DELAY|PROBE` with an lladdr (the LIVE bug
+   state), it does **NOT** insert that MAC — it treats it as
+   "candidate only", fires `trigger_kernel_arp_probe` to **force kernel
+   revalidation**, and lets the resulting confirmed multicast
+   `RTM_NEWNEIGH` (or a follow-up confirming GET) populate the map. This
+   fixes the observed DELAY wedge (the negative gate currently
+   suppresses exactly this probe) WITHOUT ever forwarding to an
+   unconfirmed stale MAC.
+4. Does NOT call `add_kernel_neighbor` with a GET-derived MAC — that path
+   writes `NUD_REACHABLE` (`neighbor.rs:222,244`) and would bless a
+   potentially stale MAC.
+5. Uses a persistent non-blocking / short-timeout netlink socket reused
+   across queries (no per-query open/close), and must NOT block the
+   existing warmer sweep.
+
+This preserves the #1651 dead-host storm defense (packets still
+fast-fail, no `pending_neigh` slot consumed) and the immediate-revocation
+firewall posture (§F3). Probe-only (no GET) was rejected by Codex as
+insufficient; blind-GET-cache was killed by AGY as racy; the
+REACHABLE-only-cache + probe-on-DELAY synthesis satisfies both.
+
+### AGY r1 findings adjudication (3-way converged)
+
+- **F1 (Critical, out-of-order GET race): REFINE → resolved** by the
+  REACHABLE/PERMANENT-only cache + epoch guard + probe-on-DELAY above.
+  Note: the same insert-vs-monitor race already exists today for
+  `learn_dynamic_neighbor_from_packet` / Go-manager inserts; the epoch
+  guard is the general fix.
+- **F2 (High, RTNL contention): REFINE.** AGY conflated single-key GET
+  with a `NLM_F_DUMP` full dump. Single-key GET is NOT the dump path. But
+  AGY is right that an *unbounded ENOBUFS-triggered full re-dump* would
+  take the RTNL mutex and starve the Go coordinator's netlink ops
+  (CLAUDE.md:44). Resolution: ENOBUFS increments a counter and schedules
+  a THROTTLED family re-dump (AGY rec #1), never dump-on-every-error.
+- **F3 (High, FAILED-grace = confidentiality leak): ACCEPT.** Drop the
+  removal-grace proposal entirely. Immediate revocation on
+  FAILED/INCOMPLETE/DELNEIGH is the correct firewall posture and is the
+  current behavior (`neighbor.rs:351-359`,
+  `pkg/daemon/daemon_neighbor_listener.go:258-260,289-291`).
+- **F4 (Medium, blocking warmer / socket churn): ACCEPT.** Shared
+  resolver, persistent non-blocking socket, no per-query open/close, must
+  not block warm sweeps.
 
 ## 10a. Codex r1 redesign refinements (lead architect, accepted)
 
@@ -281,12 +320,17 @@ Per-key neighbor **resolver state machine**, not packet-buffering alone:
 - Backoff coalesces all packet pressure into ONE in-flight GET/probe per
   key; today retry dedups probes only within a single sweep
   (`neighbor_dispatch.rs:81,152`).
-- Netlink mirror: detect `recv` errors, count ENOBUFS, trigger
-  full/targeted re-dump — startup-only dump + multicast is insufficient
-  (`neighbor.rs:616,629`).
-- Removal grace: a transient FAILED/INCOMPLETE marks the entry suspect
-  and forces a GET/probe BEFORE deleting a previously usable lladdr;
-  DELNEIGH removes immediately unless a same-key GET says usable.
+- Netlink mirror: detect `recv` errors, count ENOBUFS, schedule a
+  **throttled** family re-dump (NOT dump-on-every-error — AGY F2 RTNL
+  contention) plus targeted single-key GET for hot keys — startup-only
+  dump + multicast is insufficient (`neighbor.rs:616,629`).
+- Removal: **immediate revocation** on FAILED/INCOMPLETE/DELNEIGH (AGY
+  F3 — removal grace was KILLED as a confidentiality leak). Recovery
+  comes from the resolver/probe + the next CONFIRMED event, never from
+  forwarding-grace.
+- Out-of-order safety: a per-key/global neighbor **epoch** so any
+  asynchronously-arriving insert (GET reply or packet-learn) that is
+  older than the latest monitor event for that key is dropped (AGY F1).
 - Export counters (Prometheus): pending depth, negative-cache size,
   fast-fail, resolver GET/probe attempts, timeouts, successful
   kernel-lladdr pulls, netlink ENOBUFS/dumps. Today only warm
@@ -303,9 +347,36 @@ single-key GET adds rtnl traffic, so it MUST be rate-limited per key.
 
 ## 11. Verdict
 
-- **Codex r1 (lead): PLAN-READY**, with conditions: fix the D2 wording,
-  make targeted single-key `RTM_GETNEIGH` the immediate fix, preserve
-  dead-host duplicate dropping, make ENOBUFS/re-dump/counters first-class
-  in the redesign. (All folded into §2, §9, §10a above.)
-- **AGY:** _pending._
-- **Claude SMR:** _pending._
+**3-way converged: PLAN-READY** (after the round-2 refinements, all
+folded into §9 and §10a above).
+
+- **Codex (lead architect, r2): PLAN-READY** after the round-2
+  refinements. F1 REFINE (REACHABLE/PERMANENT-only GET cache +
+  probe-on-DELAY + epoch guard), F2 REFINE (single-key GET ≠ dump;
+  throttled ENOBUFS re-dump), F3 ACCEPT (drop removal grace; immediate
+  revocation), F4 ACCEPT (shared resolver, persistent non-blocking
+  socket). Final immediate fix: shared per-key resolver queue, single-key
+  GET caching only confirmed REACHABLE/PERMANENT, probe to force
+  revalidation on DELAY/STALE, no warm-path blocking.
+- **AGY (r1): PLAN-KILL** on the original blind-GET-cache + removal-grace
+  design (out-of-order GET stale-MAC race, RTNL contention, FAILED-grace
+  confidentiality leak, blocking warmer). All four findings adjudicated
+  and folded in (§9 adjudication). The KILL applied to the r1 design; the
+  r2-refined design removes every cited counter-example.
+- **Claude SMR: PLAN-READY** (after r2 refinements). I independently
+  confirmed: `neg_neigh_cache` is per-binding × 6 workers
+  (`worker/mod.rs:135`) so the resolver MUST be shared; the warmer MPSC
+  channel already exists as the off-hot-path home
+  (`coordinator/neighbor_manager.rs:49`, `neighbor.rs:143`); single-key
+  `RTM_GETNEIGH` is not the dump path (refuting AGY F2 as stated). I
+  concur the immediate fix (§9) is separable and sufficient to close the
+  live #1769 wedge, and the larger resolver-state-machine redesign (§10a)
+  should be a follow-up issue.
+
+### Disposition
+- **Immediate fix (§9):** PLAN-READY → `/engineer 1769` (race-safe
+  single-key GET + probe-on-DELAY + epoch guard + shared resolver +
+  fast-fail counter export).
+- **Full redesign (§10a):** PLAN-READY as a SEPARATE follow-up issue
+  (per-key resolver state machine, per-key pending bound, throttled
+  ENOBUFS re-dump, full Prometheus counter set).
