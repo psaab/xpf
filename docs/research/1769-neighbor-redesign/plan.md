@@ -39,11 +39,16 @@ The dataplane resolves a neighbor MAC via two maps only
 
 1. `state.neighbors` — the Go-pushed snapshot (static/connected
    neighbors at snapshot time).
-2. `dynamic_neighbors` — a `ShardedNeighborMap` populated **only** by
+2. `dynamic_neighbors` — a `ShardedNeighborMap` populated by:
    (a) the netlink monitor thread on `RTM_NEWNEIGH`
-   (`neighbor.rs:280/562`), and (b) `learn_dynamic_neighbor_from_packet`
-   on an **inbound** packet whose L2 src is that neighbor
-   (`neighbor_dispatch.rs:288`).
+   (`neighbor.rs:280/562`), (b) `learn_dynamic_neighbor_from_packet` on
+   an **inbound** packet whose L2 src is that neighbor
+   (`neighbor_dispatch.rs:288`), (c) **Codex r1:** Go-manager neighbor
+   updates that insert into both dynamic + forwarding maps
+   (`coordinator/mod.rs:177,192`), and (d) **Codex r1:** ARP/NA
+   classification in the RX path (`poll_stages.rs:80,103`). None of
+   these fire for an outbound-only, directly-connected target whose
+   kernel entry silently went away.
 
 The kernel having a valid lladdr in **`DELAY`/`STALE`/`PROBE`** is NOT
 sufficient — the dataplane only knows the MAC if one of those two events
@@ -70,16 +75,25 @@ neighbor cache with the loss of the dynamic entry**:
   probe site (`:2097-2116`) and BEFORE the `pending_neigh` buffer
   (`:2341`). So while the negative entry is live, **no new ARP probe is
   ever fired** for that dst, and the packet is never buffered/retried.
-- The SYN storm (12 parallel streams retransmitting) keeps re-recording
-  / refreshing the 3s negative entry faster than it can expire (storm
-  interval << 3s). The negative cache is **self-sustaining under load**.
+- The SYN storm (12 parallel streams retransmitting) re-enters the
+  blackout repeatedly: after each 3s TTL lapses, one buffered SYN
+  re-probes, times out again (kernel lladdr never read), and re-arms a
+  fresh 3s negative entry → repeated blackout *cycles*.
+
+  **Codex r1 correction (accepted):** the cache is NOT refreshed on a
+  fast-fail *hit* (`neg_neigh_active` only checks/evicts by TTL,
+  `neg_neigh.rs:45-47`; `neg_neigh_record` runs ONLY on a real timeout,
+  `neighbor_dispatch.rs:110,121`). So "self-sustaining / continuous
+  refresh before expiry" is OVERSTATED — it is repeated 3s blackout
+  cycles, not a never-lapsing entry. Candidate fix (iii) "don't refresh
+  on hit" is a no-op (already true).
 
 So once `dynamic_neighbors` loses (or never had) the entry AND the
-negative cache is primed, the dataplane will:
+negative cache is primed, in each blackout window the dataplane will:
 - never re-probe (gate short-circuits before the probe),
 - never buffer/retry (gate short-circuits before the buffer),
-- keep the negative entry alive indefinitely (storm refresh < TTL),
-- and only `is_resolved()` returning true can break the loop — which
+- re-arm the 3s blackout on the next timeout cycle, and
+- only `is_resolved()` returning true can break the loop — which
   requires an **external** `RTM_NEWNEIGH` or an **inbound** packet from
   the dst. For an outbound-only iperf target on a directly-connected
   VLAN, neither is guaranteed; the only thing that broke it live was the
@@ -229,19 +243,69 @@ To be authored by Codex. Must cover, at minimum:
 ## 9. IMMEDIATE stuck-state fix (separable, `/engineer 1769`)
 
 Smallest change that removes the wedge without the full redesign.
-Candidate (to be ratified by reviewers):
-- Make the `MissingNeighbor` arm, on a negative-cache fast-fail, STILL
-  fire the (deduped, rate-limited) ARP/NDP probe so the dst keeps getting
-  nudged — i.e. move the probe above the gate or fall through to it. This
-  alone re-establishes the resolution feedback loop.
-- AND/OR: on a negative-cache fast-fail (or periodically), issue a
-  single-key `RTM_GETNEIGH` for the dst so a kernel-known DELAY/STALE
-  lladdr re-populates `dynamic_neighbors` and evicts the negative entry.
-- Do NOT refresh the negative-cache timestamp on a fast-fail hit (only
-  on a genuine timeout) so the storm cannot keep it alive past TTL.
-The exact minimal form is the convergence question for the reviewers.
 
-## 10. Verdict
+**Codex r1 recommendation (lead architect, accepted):** the minimal
+correct fix is a **targeted single-key `RTM_GETNEIGH`** on negative
+fast-fail, rate-limited per `(ifindex, next_hop)`, that re-populates
+`dynamic_neighbors` if the kernel returns a usable lladdr (anything
+except FAILED/INCOMPLETE — matches existing usable-state policy
+`forwarding/mod.rs:45`, `neighbor.rs:346`); plus fire the existing
+ARP/NDP probe on a GET miss/unusable. Rationale:
+- It directly attacks the strongest failure mode "kernel knows the
+  lladdr, the userspace mirror does not" — which probe-only does NOT
+  fix, because the TTL already reopens a probe window each cycle yet the
+  dst stayed wedged live.
+- It preserves the #1651 dead-host storm defense: packets still
+  fast-fail (no `pending_neigh` slot consumed); only an off-hot-path,
+  rate-limited GET is added.
+- Candidate (iii) "don't refresh on hit" is dropped — Codex confirmed
+  it's already true (`neg_neigh` not refreshed on hits).
 
-To be filled at convergence: PLAN-READY or PLAN-KILL, with the 3
-verbatim verdicts (Codex / AGY / Claude SMR).
+Probe-only (candidate i alone) is smaller but weaker and was REJECTED by
+Codex as insufficient for the observed live failure. The GET must run
+off the hot path (e.g. queued to the existing warmer/resolver thread or
+a dedicated single-key resolver), never inline in the worker poll loop.
+
+## 10a. Codex r1 redesign refinements (lead architect, accepted)
+
+Per-key neighbor **resolver state machine**, not packet-buffering alone:
+- Lookup order unchanged (snapshot → dynamic), but a miss
+  creates/updates per-key resolver state for `(egress_ifindex,
+  next_hop)` (`forwarding/mod.rs:1535,1541`).
+- Negative policy becomes "do not buffer duplicate SYNs", NOT "stop
+  resolution": a negative-active key may drop duplicate packets, but the
+  resolver GET/probe/backoff keeps running.
+- Pending queue bounded per-key (one representative packet per key) under
+  a fair global cap; today it admits every packet up to 4096
+  (`poll_descriptor/mod.rs:2341`, `mod.rs:342`).
+- Backoff coalesces all packet pressure into ONE in-flight GET/probe per
+  key; today retry dedups probes only within a single sweep
+  (`neighbor_dispatch.rs:81,152`).
+- Netlink mirror: detect `recv` errors, count ENOBUFS, trigger
+  full/targeted re-dump — startup-only dump + multicast is insufficient
+  (`neighbor.rs:616,629`).
+- Removal grace: a transient FAILED/INCOMPLETE marks the entry suspect
+  and forces a GET/probe BEFORE deleting a previously usable lladdr;
+  DELNEIGH removes immediately unless a same-key GET says usable.
+- Export counters (Prometheus): pending depth, negative-cache size,
+  fast-fail, resolver GET/probe attempts, timeouts, successful
+  kernel-lladdr pulls, netlink ENOBUFS/dumps. Today only warm
+  drops/disconnects are exported (`pkg/api/metrics_descriptors.go:782,788`);
+  `neg_neigh_fast_fail` is debug-only (`types/runtime.rs:256`).
+
+**Codex r1 correction (D7, accepted):** the "rtnl churn" wording was
+imprecise — `retry_pending_neigh` fires ICMP sockets, not rtnl
+(`neighbor.rs:36`, `neighbor_dispatch.rs:166`);
+`learn_dynamic_neighbor_from_packet` only updates the in-memory map
+(`neighbor_dispatch.rs:325,356`); the only rtnl WRITE path is
+`add_kernel_neighbor` (`neighbor.rs:211,255`). The redesign's new
+single-key GET adds rtnl traffic, so it MUST be rate-limited per key.
+
+## 11. Verdict
+
+- **Codex r1 (lead): PLAN-READY**, with conditions: fix the D2 wording,
+  make targeted single-key `RTM_GETNEIGH` the immediate fix, preserve
+  dead-host duplicate dropping, make ENOBUFS/re-dump/counters first-class
+  in the redesign. (All folded into §2, §9, §10a above.)
+- **AGY:** _pending._
+- **Claude SMR:** _pending._
