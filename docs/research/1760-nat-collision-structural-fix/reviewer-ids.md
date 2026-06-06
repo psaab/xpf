@@ -15,3 +15,6 @@ Operator chose: engineer stage-2 despite 0 incidence.
 - v2 folds: node-level refusal (owner-RG dropped), shared-map guard, real drop disposition, displaceable-incumbent predicate, key_to_handle fallback, publish-path determinism argument
 
 ## Round 2 (v2) — pending
+- Codex r2: task-mq21h0of-mwuoqd
+- AGY r2: adversarial-review-mq21h0zr-pvh7px
+- Claude SMR r2: claude-smr-plan-r2.md (PLAN-NEEDS-MINOR — pin Q2 keep-both)
