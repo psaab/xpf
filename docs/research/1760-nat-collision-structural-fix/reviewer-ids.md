@@ -18,3 +18,7 @@ Operator chose: engineer stage-2 despite 0 incidence.
 - Codex r2: task-mq21h0of-mwuoqd
 - AGY r2: adversarial-review-mq21h0zr-pvh7px
 - Claude SMR r2: claude-smr-plan-r2.md (PLAN-NEEDS-MINOR — pin Q2 keep-both)
+- Codex r2: task-mq21h0of-mwuoqd — PLAN-NEEDS-MAJOR bordering KILL
+- AGY r2: adversarial-review-mq21h0zr-pvh7px — PLAN-NEEDS-MAJOR (BPF-offload kills TCP-state liveness)
+- Claude SMR r2: self-corrected MINOR->MAJOR (keep-both refuted, liveness predicate unsafe)
+- Converged: PLAN-NEEDS-MAJOR, did NOT reach READY; decision pending (redesign / standalone-only / PLAN-KILL)

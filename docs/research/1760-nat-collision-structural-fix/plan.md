@@ -1,8 +1,11 @@
 # #1760 — NAT reverse-key 1:N collision: structural fix
 
-**Status:** DRAFT v2 — round-1 3-way review (Codex PLAN-NEEDS-MAJOR-bordering-KILL,
-Claude SMR PLAN-NEEDS-MAJOR, AGY PLAN-NEEDS-MINOR). §2 validated by all three;
-v2 addresses the HA + shared-map + disposition + liveness gaps. See §1.5.
+**Status:** v3 — **round-2 converged PLAN-NEEDS-MAJOR** (Codex
+NEEDS-MAJOR-bordering-KILL, AGY NEEDS-MAJOR, Claude SMR self-corrected from
+MINOR→MAJOR). §2 validated by all three; but v2's HA arbitration + liveness
+model are **not implementable as written** in this architecture. Did NOT
+reach PLAN-READY. Decision pending (see §1.6): major HA redesign vs shelve
+at 0 incidence. PLAN-KILL is a live option.
 **Branch:** `research/1760-nat-collision-counter`
 **Issue:** #1760 (stage-1 counter shipped in #1762; this is stage-2)
 
@@ -55,6 +58,43 @@ re-insert with a displaced-handle guard, exported per-worker + aggregate to
 Prometheus. **Live incidence on the loss cluster: 0** (interface-SNAT
 config, idle/steady-state scrape). The operator chose to engineer the
 structural fix now despite 0 observed incidence (latent-bug hardening).
+
+## 1.6 Round-2 disposition (v3) — converged PLAN-NEEDS-MAJOR
+
+Round-2 (Codex `task-mq21h0of-mwuoqd`, AGY `adversarial-review-mq21h0zr-pvh7px`,
+Claude SMR r2) did **not** reach PLAN-READY. Both external reviewers landed
+PLAN-NEEDS-MAJOR; Codex twice stated PLAN-KILL is the honest call at 0 live
+incidence. Two of my v2 design choices were **refuted**:
+
+| v2 choice | Why it's wrong (reviewer) | Status |
+|---|---|---|
+| **"keep-both" for the active/active window** (my SMR r2 recommendation) | Keep-both is NOT convergence — it IS today's single-valued-overwrite corruption; `index_forward_nat_key_parts` overwrites the reverse index either way (Codex 3). | **Refuted.** Self-corrected. |
+| **Displaceable-incumbent predicate** (closing/half-open/peer-synced displaceable) | **bpfrx offloads the fast path to BPF — userspace never sees SYN-ACK/ACK, so an established TCP session is indistinguishable from a SYN-only half-open one** (AGY). Treating half-open as displaceable would let live connections be displaced. `closing` is *deliberately* kept alive (immediate teardown collapses valid traffic, Codex 5). `SessionEntry` has no half-open/confirmed state to test (Codex 5). | **Refuted.** The predicate must collapse to **expiry-only** (displace only if expired). |
+| **Prefer-synced self-correction via SYN retransmit** | No deterministic global winner ⇒ "A drops S1 for B's S2 while B drops S2 for A's S1" — swapped divergence (Codex 3). UDP has no retransmit ⇒ no recovery (Codex 3, AGY). | **Needs a deterministic cluster-wide tiebreaker** — undesigned. |
+| **Shared-map liveness check** (§5b "different *live* entry") | `SyncedSessionEntry` carries no `last_seen`/timeout/`closing` (`worker/mod.rs:262`) — liveness is **undefinable** on the shared map; presence-only false-refuses prewarm entries (Codex 2). | Shared-map guard can only be **presence-based**, which is unsafe for prewarm. Open. |
+| **Guard placement** | Must run **before** BPF publish + local commit, else partial state (BPF publish already happened before shared publish, `poll_descriptor:1247/1253`); the missing-neighbor path has the same continue-after-false bug (Codex 4). | Real control-flow rework required. |
+
+**What survives:** §2 (Path C rejected — unanimous), the *existence* of the
+shared-map surface (Codex 2, now in scope), and AGY's point that the
+control-flow bug (failed install still proceeds to reverse-session work,
+`poll_descriptor:1227`) is real and worth fixing independently.
+
+**Honest conclusion.** A correct Path A is a genuine **HA-protocol
+redesign**: expiry-only liveness (the only signal userspace has), a
+deterministic cluster-wide arbitration winner (not keep-both, not
+naive-prefer-synced), guard-before-commit ordering, and a presence-only
+shared-map guard whose prewarm false-refusals are bounded. That is a large
+effort for a bug with **0 observed incidence** (loss cluster, interface-SNAT).
+Both reviewers put PLAN-KILL on the table. **Decision required** (not a
+reviewer call): (A) commit to the HA-redesign round; (B) ship a reduced
+**standalone-only** scope (local-table expiry-only guard, refusal **disabled
+in clustered mode**) — fixes the single-node case, punts the cluster; or
+(C) **PLAN-KILL / shelve** — keep the #1762 counter watching, revisit if
+incidence becomes nonzero. The mechanism is slow-path-only and cheap, but
+its correctness preconditions are not met by the current architecture
+without the redesign in (A).
+
+---
 
 ## 2. The decisive architectural finding (changes the recommended fix)
 
