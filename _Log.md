@@ -4623,3 +4623,7 @@ top.
   tests/fixtures/protocol_wire_v1.json, pkg/dataplane/userspace/{protocol,buffersfmt}.go,
   pkg/api/{metrics,metrics_descriptors,metrics_userspace}.go,
   docs/userspace-cold-start-resolution.md, docs/pr/1772-neighbor-latency-metrics/plan.md.
+
+- **Timestamp**: 2026-06-06
+  **Action**: #1760 stage-2 structural-fix plan v1 — KEY FINDING: reverse_wire_key is the full reply 5-tuple, so K-colliding sessions are genuinely wire-ambiguous; multi-valued index (issue's suggestion) is architecturally wrong; only install-time prevention (Path A refuse / Path B PAT) is correct
+  **File(s)**: docs/research/1760-nat-collision-structural-fix/plan.md
