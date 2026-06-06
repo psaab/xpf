@@ -1,8 +1,41 @@
 # #1760 — NAT reverse-key 1:N collision: structural fix
 
-**Status:** DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR)
+**Status:** DRAFT v2 — round-1 3-way review (Codex PLAN-NEEDS-MAJOR-bordering-KILL,
+Claude SMR PLAN-NEEDS-MAJOR, AGY PLAN-NEEDS-MINOR). §2 validated by all three;
+v2 addresses the HA + shared-map + disposition + liveness gaps. See §1.5.
 **Branch:** `research/1760-nat-collision-counter`
 **Issue:** #1760 (stage-1 counter shipped in #1762; this is stage-2)
+
+---
+
+## 1.5 Round-1 disposition (v2 changes)
+
+All three reviewers **validated §2** (the architectural finding: `K` is the
+full reply tuple, so colliding sessions are wire-indistinguishable and a
+multi-valued index — Path C — is wrong). All three **killed the owner-RG
+gating** I proposed for HA. Codex bordered PLAN-KILL on the unaddressed
+shared-map + sync-replay + disposition gaps; AGY said MINOR; my SMR said
+MAJOR on HA divergence. Net: the mechanism (install-time refusal) is sound
+and worth shipping (AGY: slow-path-only, zero fast-path cost), but v1's
+scope was incomplete. v2 disposition:
+
+| r1 finding (reviewer) | v2 disposition |
+|---|---|
+| **Shared HA reverse map has the SAME single-valued bug** — `publish_shared_session` inserts reverse keys with plain `insert`; `lookup_shared_forward_nat_match` returns one (`shared_ops.rs:641,277`). A local `SessionTable` guard does NOT fix cluster lookup corruption (Codex 2). | **v2 extends the guard to the shared-publish path.** The install-time collision check must run before `publish_shared_session` too; a colliding session is neither installed locally NOR published to `shared_nat_sessions`. §5 rewritten to guard both maps. |
+| **Owner-RG gating is UNSOUND** — non-owners intentionally keep synced sessions for standby/prewarm (`shared_ops.rs:148`, `ha.rs` prewarm) (Codex 3, AGY, Claude SMR). | **Dropped.** Replaced with **node-level refusal** + a determinism argument (§7): a refused session is *never published*, so the peer never learns it → **symmetric absence, not divergence**. The only divergence window is active/active or failover transition where both nodes independently install; there, drop-and-retry (§5) self-corrects once the table converges. |
+| **HA refusal "replay reproduces refusal" not proven** — sync imports shared state then queues `UpsertSynced`; worker import depends on `synced_entry_allows_local_replace` (`ha.rs:266,318`, `upsert_synced.rs:28`) (Codex 3). | §7 now argues from the *publish* path: `UpsertSynced` only ever carries sessions the owner actually installed+published; a refused session produces no delta, so there is nothing to replay divergently. The guard is **not** applied on the `UpsertSynced` import path (synced sessions are authoritative — the owner already arbitrated). |
+| **Caller disposition underdesigned** — install returns `bool`; on failure the packet path rolls back SNAT alloc but **continues into reverse-session work**, does not drop (`poll_descriptor/mod.rs:1227,1293,1376`) (Codex 4). | §5 specifies a real terminal outcome: a new `InstallOutcome::RefusedReverseKeyCollision` that the packet path treats as a **hard drop** — roll back SNAT allocation, skip reverse-session install, recycle the frame. Not "return false and continue." |
+| **Liveness is not just `entries.get && !expired`** — no `is_expired` helper; expiry is inline `now-last_seen>expires_after`; TCP `closing` keeps the tuple 30s, half-open 300s (`mod.rs:437,567,1513`) (Codex 5). | §5 defines the exact predicate: refuse only if the incumbent is **present, not expired, not `closing`, and not peer-synced-unconfirmed**. A `closing`/half-open/unconfirmed incumbent is **displaceable** (TIME_WAIT-reuse must not be refused). |
+| **Asymmetric lifecycle gap** — reverse entries register only in `key_to_handle`, not `nat_reverse_index`; a reverse entry whose forward was GC'd is missed (AGY 1). | §5 guard checks `nat_reverse_index.get(&k).or_else(|| key_to_handle.get(&k))`. |
+| **Drop is correct; no-NAT fallback is wrong** — Junos: source-NAT port-allocation failure ⇒ session not created ⇒ packet dropped (Codex 6, AGY). | Confirmed; §5 disposition = drop (matches Junos PAT-exhaustion semantics). |
+| **Path B (PAT) is not a casual follow-up** — touches allocation, checksum/port rewrite, flow-cache eligibility, ALGs, peer-visible behavior (`source.rs:431`, `allocator.rs:461`, `frame/*`) (Codex 7). | §4/§9 reworded: Path B is a **substantial separate feature**, explicitly out of scope, blast radius enumerated. |
+| §2 / Path C rejection validated; ICMP id is inside the tuple not beside it (Codex 1, AGY 3). | No change — §2 stands. |
+
+**Net:** v2 keeps Path A (install-time refusal) but makes it **node-level,
+two-map (local + shared-publish), with a real drop disposition and a
+precise displaceable-incumbent predicate**, and argues HA determinism from
+the publish path. PLAN-KILL remains on the table if round-2 finds the
+active/active divergence window unacceptable.
 
 ---
 
@@ -119,36 +152,64 @@ issue, gated on whether refusal-drops are observed via the new counter.
 
 ## 5. Concrete design (Path A)
 
-**Install site.** Forward-NAT install flows through
-`index_forward_nat_key_parts` (re-assert) and the initial install in
-`update_session` / the install entrypoint. Add a pre-install guard in the
-**non-reverse, NAT-present** branch only:
+**v2: node-level, two-map guard with a displaceable-incumbent predicate.**
+
+**(a) Local SessionTable install.** Pre-install guard in the **non-reverse,
+NAT-present, NEW-handle** branch only (re-asserts of an existing handle are
+exempt):
 
 ```rust
-// pseudocode, in the install path BEFORE committing the new handle:
+// in the install path BEFORE committing the new handle:
 if !is_reverse && nat_rewrites_identity(&decision.nat) {
     let k = reverse_wire_key(key, decision.nat);
-    if let Some(&incumbent) = self.nat_reverse_index.get(&k) {
-        if incumbent != new_handle && self.is_live(incumbent) {
-            self.nat_reverse_key_refused = self.nat_reverse_key_refused.saturating_add(1);
-            return InstallOutcome::RefusedReverseKeyCollision; // drop trigger pkt
+    // AGY-1 lifecycle gap: reverse entries live only in key_to_handle.
+    let incumbent = self.nat_reverse_index.get(&k)
+        .or_else(|| self.key_to_handle.get(&k)).copied();
+    if let Some(h) = incumbent {
+        if h != new_handle && self.is_displaceable_blocker(h, now) == false {
+            self.nat_reverse_key_refused =
+                self.nat_reverse_key_refused.saturating_add(1);
+            return InstallOutcome::RefusedReverseKeyCollision;
         }
-        // incumbent dead/stale → fall through, new session displaces it
+        // displaceable incumbent (dead / closing / half-open / unconfirmed)
+        // → fall through, the new session takes K.
     }
 }
 ```
 
-- `is_live(handle)`: `entries.get(handle).filter(|r| !r.entry.is_expired(now))`.
-- `nat_rewrites_identity`: true when the NAT changes the external tuple
-  such that the reverse key is shared-able (i.e. not a no-op NAT). Pool-mode
-  is already filtered out upstream by `owner_by_translated`; the guard is a
-  cheap second line.
-- The benign re-assert (S1 re-winning its own `K`) is `incumbent ==
-  new_handle` → no refusal. Verified against #1762's existing guard.
+- **Displaceable-incumbent predicate (Codex 5).** There is no `is_expired`
+  helper today (expiry is inline `now - last_seen > expires_after`,
+  `mod.rs:437`). Define `is_displaceable_blocker(h, now)` = **NOT** a
+  blocker, i.e. the incumbent is displaceable, when ANY of: absent from the
+  slab; expired (`now - last_seen > expires_after`); `closing == true`
+  (FIN/RST seen, 30 s tuple, `mod.rs:567/1513`); half-open (SYN-only, not
+  yet established); or peer-synced-but-unconfirmed
+  (`origin.is_peer_synced()` and not locally confirmed). Only a
+  **present, established, confirmed, unexpired** incumbent blocks. This
+  prevents false refusals on TIME_WAIT reuse.
+- `nat_rewrites_identity`: the NAT changes the external tuple so the reverse
+  key is share-able (not a no-op). Pool-mode is already filtered upstream by
+  `owner_by_translated` — this is a cheap second line.
 
-**Caller handling.** The install entrypoint returns the refusal outcome up
-to the packet path, which drops the trigger packet (SYN) — same disposition
-as a policy deny / no-route. No partial session state is left behind.
+**(b) Shared HA publish (Codex 2 — the v1 gap).** The same collision exists
+in `shared_nat_sessions` (`publish_shared_session` plain-`insert`s reverse
+keys, `shared_ops.rs:641`; `lookup_shared_forward_nat_match` returns one,
+`:277`). The guard must therefore also run **before publishing** a forward
+NAT session to the shared map: if `k` is already owned in the shared map by
+a different live entry, **do not publish** (and, having refused locally in
+(a), there is nothing to publish anyway — the two are consistent). The
+guard is **NOT** applied on the `UpsertSynced` import path: synced sessions
+are authoritative (the owner already arbitrated), so the importer installs
+them verbatim (§7).
+
+**(c) Caller disposition (Codex 4).** The current install returns `bool`
+and the packet path rolls back SNAT alloc but **continues into
+reverse-session work** (`poll_descriptor/mod.rs:1227/1293/1376`). v2 adds
+`InstallOutcome::RefusedReverseKeyCollision`; the packet path treats it as a
+**hard drop**: roll back the SNAT allocation, **skip** reverse-session
+install, recycle the frame, return `XDP_DROP`-equivalent. No partial state.
+Same disposition as Junos source-NAT port-allocation failure (session not
+created → packet dropped).
 
 **Counter.** Add `nat_reverse_key_refused` mirroring the #1762 counter end
 to end: `SessionTable` field + accessor, worker snapshot
@@ -172,48 +233,89 @@ exact template — same wiring, new name.)
 | Class | Level | Note |
 |---|---|---|
 | Behavioral regression | **MED** | A refusal drops a flow that today installs (and silently corrupts). Correct, but it IS a behavior change for the colliding case. Gate: counter shows refusals are as rare as collisions (0 live). |
-| HA divergence | **HIGH** | If node A installed S1 but the sync to node B is in-flight when B installs S2, B's incumbent check misses S1 → B admits S2, A refuses it → divergent tables. Mitigation: the refusal must be **reproducible on reverse-sync replay** and the bulk-sync hold must settle incumbents first. Needs explicit design + `make test-failover`. |
-| Borrow/lifetime | LOW | Guard is a `get` + `filter` before the `&mut` install; no aliasing. |
-| Perf | LOW | One extra `FxHashMap::get` + liveness check on the **install** slow path only (not per-packet). |
+| HA divergence | **MED** (was HIGH) | See the determinism argument below. Node-level refusal + publish-path gating reduces this from "divergent tables" to "a bounded, self-correcting active/active window." Still gated on `make test-failover` with collision injection. |
+| Borrow/lifetime | LOW | Guard is a `get`/`or_else`/predicate before the `&mut` install; no aliasing. |
+| Perf | LOW | One extra `FxHashMap::get` (+ the `key_to_handle` fallback) + predicate on the **install** slow path only (not per-packet). |
 | Architectural mismatch | LOW | Path A generalizes the already-proven pool-mode `owner_by_translated` immunity. |
+
+**HA determinism argument (v2 — replaces the dead owner-RG gating).**
+The key realization: **a refused session is never published.** Sync deltas
+(`UpsertSynced`) only ever carry sessions the owner actually installed and
+published to `shared_nat_sessions`. So:
+
+- *Steady state (one active node per RG):* only the active node installs new
+  flows. It either admits S2 (publishes it → peer replays it) or refuses S2
+  (publishes nothing → peer simply never has S2). Both nodes end with the
+  **same** set — admit→both-have, refuse→neither-has. **No divergence.** The
+  importer applies synced sessions verbatim (guard NOT run on import), so a
+  synced S1 that aliases nothing on the peer installs cleanly.
+- *Active/active or failover transition (both nodes install independently):*
+  node A installs+publishes S1; before A's delta reaches B, B installs S2
+  (collides) and, not yet seeing S1, **admits** S2. Now A has S1, B has S2.
+  This is the residual window. It is **bounded and self-correcting**:
+  (1) it requires two genuinely-colliding flows landing on two nodes inside
+  one sync interval (rare — counter is 0 live); (2) when A's S1 delta
+  arrives at B, the importer either keeps S1 alongside S2 (the pre-existing
+  single-valued-overwrite behavior — no *worse* than today) or, with the
+  guard, B can detect the conflict on import and drop its locally-admitted
+  S2 in favor of the authoritative synced S1, converging deterministically;
+  (3) the dropped flow's SYN retransmit re-installs against the now-converged
+  table and gets a consistent verdict. **This is strictly better than
+  today's symmetric silent dual-corruption**, never worse. The exact
+  import-time conflict resolution (keep-both vs prefer-synced) is the one
+  open design choice for round-2 (§10 Q2).
 
 ## 8. Test plan
 
-- Unit: reproduce the #1760 mechanical scenario (S1 install→`K→S1`; S2
-  install collides → **refused**, S1 intact, `refused` counter = 1).
-  Incumbent-dead variant (S1 expired → S2 admitted, displaces). Re-assert
-  variant (S1 re-install → no refusal). One per reachable mode
-  (interface-SNAT, DNAT-shared, NAT64, static).
+- Unit (local table): S1 install→`K→S1`; S2 collides → **refused**, S1
+  intact, counter=1. Displaceable variants — incumbent **expired**,
+  **closing** (FIN/RST), **half-open**, **peer-synced-unconfirmed** → S2
+  admitted, displaces (no false refusal). Re-assert variant (S1 re-install →
+  no refusal). AGY-1 variant (reverse entry in `key_to_handle` only, forward
+  GC'd → still caught). One per reachable mode (interface-SNAT, DNAT-shared,
+  NAT64, static).
+- Unit (shared map): collision at `publish_shared_session` → not published;
+  `UpsertSynced` import is NOT guarded (synced session installs verbatim).
+- Import-conflict resolution test: locally-admitted S2 + authoritative
+  synced S1 on the same `K` → converges per the chosen rule (§10 Q2).
 - Differential vs master: non-colliding workloads install identically
   (counter stays 0, no behavior change).
-- `cargo test` full + 5× flake on the new named tests; Go suite.
-- **HA**: `make test-failover` — install collisions across a failover,
-  assert no table divergence (the §7 HIGH risk). v4 + v6.
+- `cargo test` full + 5× flake on new named tests; Go suite.
+- **HA**: `make test-failover` with **collision injection across the
+  failover** — assert tables converge (the §7 MED window self-corrects),
+  no permanent divergence. v4 + v6. **Gating** per project rule (touches
+  session-sync/failover).
 - Smoke matrix on loss cluster (deploy wipes CoS — re-apply): v4/v6 ×
-  push/reverse × CoS off/on. Confirm `refused` counter stays 0 under
-  normal traffic (no false refusals).
+  push/reverse × CoS off/on. Confirm `refused` counter stays 0 under normal
+  traffic (no false refusals).
 
 ## 9. Out of scope
 
-- Path B (PAT disambiguation) — separate Junos-parity follow-up.
+- Path B (PAT disambiguation) — **substantial separate feature**, not a
+  casual follow-up (Codex 7): adding a port allocator to interface-mode
+  SNAT touches allocation (`source.rs:431`, `allocator.rs:461`),
+  checksum/port rewrite (`frame/rewrite/mod.rs`), flow-cache eligibility,
+  ALGs, and peer-visible on-wire behavior. Its own issue + `/research`.
 - Multi-valued index (Path C) — rejected, §2.
 - Changing pool-mode SNAT (already immune).
 
 ## 10. Open questions for adversarial review
 
-1. Is the §2 claim airtight — is there ANY reply-packet field (ICMP id,
-   the `reverse_canonical_key` alias) that distinguishes two `K`-colliding
-   sessions and would make a multi-valued index viable after all? If so,
-   Path C reopens.
-2. §7 HA divergence: is install-time refusal safe under reverse-sync
-   replay + bulk-sync hold, or does the non-determinism make refusal worse
-   than today's silent corruption on a cluster? Could the fix be
-   **owner-RG-gated** (only the RG owner refuses)?
-3. Is dropping the trigger SYN the right disposition, or should the refused
-   session fall back to **no-NAT pass / policy deny** semantics?
-4. Incumbent-liveness check: is `is_expired(now)` sufficient, or are there
-   closing/half-open states where the incumbent is "live" but its `K` is
-   already reclaimable?
-5. Given live incidence is 0, is even Path A justified, or is the correct
-   research outcome "document + keep gated" (PLAN-KILL of the code change,
-   keep the counter watching)? PLAN-KILL is an acceptable verdict.
+1. *(round-1 resolved — §2 validated by all three; Path C stays rejected.)*
+2. **(THE round-2 question)** Import-time conflict resolution for the
+   active/active window (§7): when a node holding a locally-admitted S2
+   imports an authoritative synced S1 on the same `K`, should it (a)
+   keep-both (status quo single-valued overwrite — no worse than today), or
+   (b) prefer-synced and drop the local S2 (deterministic convergence)?
+   Is (b) safe given the importer must not itself create a new divergence?
+   Owner-RG gating is OFF the table (round-1: non-owners keep synced for
+   prewarm).
+3. Is the §7 active/active window genuinely self-correcting via SYN
+   retransmit, or are there flows (long-lived UDP, no retransmit) where the
+   dropped side never recovers?
+4. Is the displaceable-incumbent predicate (§5: expired/closing/half-open/
+   peer-synced-unconfirmed are displaceable) complete, or is there a state
+   where displacing the incumbent corrupts an in-flight reply?
+5. Given live incidence is 0 + the residual active/active window, is Path A
+   justified, or is PLAN-KILL (keep the #1762 counter watching, ship no
+   code) the honest verdict? PLAN-KILL remains acceptable.
