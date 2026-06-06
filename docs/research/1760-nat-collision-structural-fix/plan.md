@@ -1,11 +1,11 @@
 # #1760 — NAT reverse-key 1:N collision: structural fix
 
-**Status:** v3 — **round-2 converged PLAN-NEEDS-MAJOR** (Codex
-NEEDS-MAJOR-bordering-KILL, AGY NEEDS-MAJOR, Claude SMR self-corrected from
-MINOR→MAJOR). §2 validated by all three; but v2's HA arbitration + liveness
-model are **not implementable as written** in this architecture. Did NOT
-reach PLAN-READY. Decision pending (see §1.6): major HA redesign vs shelve
-at 0 incidence. PLAN-KILL is a live option.
+**Status:** SHELVED (PLAN-KILL) 2026-06-06 — operator decision. Round-2
+3-way converged PLAN-NEEDS-MAJOR (Codex bordering-KILL, AGY MAJOR, Claude
+SMR MINOR→MAJOR); §2 validated but a correct fix needs a full HA-protocol
+redesign for a 0-incidence bug. Shelved: the #1762 counter keeps watching;
+revisit only if `xpf_userspace_session_nat_reverse_key_collisions_total`
+goes nonzero. §2 + §1.6 preserved as the design-of-record for any revisit.
 **Branch:** `research/1760-nat-collision-counter`
 **Issue:** #1760 (stage-1 counter shipped in #1762; this is stage-2)
 
