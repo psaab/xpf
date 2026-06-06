@@ -1,8 +1,10 @@
 # #1776 — Decompose `worker_loop` (~1440 LOC single fn), loop_body Phase 2
 
-**Status:** v2 — **NARROWED** after round-1 (Codex PLAN-NEEDS-MAJOR, AGY
-worth-doing-with-caveats, Claude SMR NEEDS-MINOR). v2 drops the risky
-per-tick extraction and keeps only the two safe, high-value moves. See §0.1.
+**Status:** v3.1 — **CONVERGED PLAN-READY (narrowed scope)**. Round-2: Codex
+PLAN-NEEDS-MINOR (doc fixes applied), AGY PLAN-NEEDS-MINOR (CORRECTNESS-1
+folded), Claude SMR PLAN-READY. Scope = `setup.rs` + `debug_report.rs`
+(cfg-gated subset) only; per-tick + `poll_binding` stay inline; perf-neutral.
+See §0.1.
 **Branch:** `research/1776-loop-body-decomp`
 **Issue:** #1776 (follow-up to #1326 Phase 1, CLOSED)
 
@@ -20,7 +22,8 @@ high-value**. v2 narrows to those.
 | **Worst borrow offender is config refresh** (touches cached state + shared ArcSwap simultaneously) — borrow-checkable but fragile (Codex 1). | Moot — config stays inline (no `(&ctx,&mut st)` split needed). |
 | **The extraction doesn't solve the fn-size problem** — the ~500-line debug/report/reset block (~L906–1174) is the real bulk; v1 didn't list it (Codex 5 + Claude SMR + AGY converge). | **PRIMARY extraction: `debug_report.rs`** — but see the v3 refinement below: the L906–1174 region is **NOT wholly cfg-gated**. |
 | **v3 (Codex r2-3): the L906 region MIXES cfg-gated verbose `debug-log` reporting/stall-dumps with ALWAYS-ON release behavior** — binding diagnostics/syscalls (~L914) + per-second `BindingLiveState` publish/reset (~L1298). "Zero release risk" is FALSE for the whole block. | `debug_report.rs` extracts **only the `#[cfg(feature="debug-log")]` verbose-reporting + stall-dump subset** (truly zero release-path risk). The always-on per-second `BindingLiveState` publish/reset + binding diagnostics **STAY INLINE** in `mod.rs` (they're release hot-ish maintenance, not debug). The release LOC reduction is therefore smaller than "~500" — it's the cfg-gated subset only. |
-| **43-line manual `dbg_* = 0` reset is a forget-a-counter bug risk** (AGY). | `DbgCounters` struct lives in `debug_report.rs` under the same cfg; `st.dbg = DbgCounters::default()` single-line reset. |
+| **43-line manual `dbg_* = 0` reset is a forget-a-counter bug risk** (AGY). | `DbgCounters` struct holds **only the per-interval counters** (the ones zeroed each report cycle); `st.dbg = DbgCounters::default()` single-line reset. |
+| **v3.1 (AGY r2 CORRECTNESS-1): `DbgCounters::default()` must NOT wipe PERSISTENT debug state.** `dbg_last_report_ns` (L186) and the stall-detection baselines `prev_rx_total`/`prev_fwd_total`/`stall_prev_fwd`/`stall_reported` (L272–275) survive across report intervals. If bundled into `DbgCounters` and `default()`-reset, `elapsed` goes huge every tick → the expensive debug/getsockopt block runs **every tick** (real regression) AND stall detection breaks. | Those 5 persistent fields live **directly in `WorkerLoopState` (or a `StallState` sub-struct), NOT in `DbgCounters`**. Only interval counters (reset-to-0) go in `DbgCounters`. Verified by AGY against L186/L272–275/L1131/L1177–1279. |
 | **Perf gate insufficient** — `userspace-perf-compare.sh` is one 8s `-P4` run, no repeated stats/thresholds/`perf stat`/asm-diff/CoS matrix (Codex 6). | §9 strengthened: repeated before/after runs + `perf stat` + CoS matrix + codegen/asm spot-check. |
 | Keep `poll_binding` inline (AGY + Codex agree). | Unchanged. |
 | Retract any perf-*improvement* claim — LTO/PGO may already cold-split (AGY + Codex 4 + Claude SMR). | v2 claims **readability + reset-safety + zero release risk only**; perf-neutral by construction. |

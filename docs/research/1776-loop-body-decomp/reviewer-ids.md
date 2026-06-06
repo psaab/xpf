@@ -12,3 +12,7 @@ Source: AGY audit agy-review-006 (Part II target 1); verified worker_loop ~1440 
 - Claude SMR r1: NEEDS-MINOR (debug block is cfg-gated, do it first)
 - v2 NARROWED to debug_report.rs + setup.rs (= Codex Required Revision)
 - Claude SMR r2: PLAN-READY (narrowed)
+- Codex r2: task-mq2hcwg7-mwmrm5 — PLAN-NEEDS-MINOR (narrowing removes hot-path risk; doc fixes: stale v1 text, debug-block-not-wholly-cfg-gated, perf-gate wording)
+- AGY r2: adversarial-review-mq2hcwr2-b577hu — PLAN-NEEDS-MINOR (CORRECTNESS-1: DbgCounters::default must not wipe persistent dbg_last_report_ns + stall baselines)
+- Claude SMR r2: PLAN-READY (narrowed)
+- v3/v3.1: all r2 minors applied -> CONVERGED PLAN-READY (narrowed)
