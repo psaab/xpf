@@ -1,8 +1,43 @@
 # #1776 — Decompose `worker_loop` (~1440 LOC single fn), loop_body Phase 2
 
-**Status:** DRAFT v1 — pending 3-way hostile plan-review (Codex + AGY + Claude SMR)
+**Status:** v2 — **NARROWED** after round-1 (Codex PLAN-NEEDS-MAJOR, AGY
+worth-doing-with-caveats, Claude SMR NEEDS-MINOR). v2 drops the risky
+per-tick extraction and keeps only the two safe, high-value moves. See §0.1.
 **Branch:** `research/1776-loop-body-decomp`
 **Issue:** #1776 (follow-up to #1326 Phase 1, CLOSED)
+
+## 0.1 Round-1 disposition (v2 — NARROWED scope)
+
+Round-1 converged on a sharp conclusion: the v1 5-way split was too
+aggressive for the hottest loop, but **two extractions are clearly safe and
+high-value**. v2 narrows to those.
+
+| r1 finding (reviewer) | v2 disposition |
+|---|---|
+| **`#[inline(never)]` on per-tick telemetry/config/commands adds an unconditional CALL every tick in front of `load_arc_if_changed`, which was explicitly optimized for 10K–100K ticks/s — could REGRESS** (Codex 4). | **DROP the per-tick telemetry/config/commands extraction.** Keep those blocks inline in the loop. |
+| **"Pure code-motion" is FALSE for fabrics** — the real fabric refresh is at ~L715 (after commands/heartbeat/expiry/BPF refresh), NOT in the early config block; grouping it into `config.rs` reorders side effects (Codex 2). | Moot — `config.rs` is dropped. |
+| **`ha_runtime` straddles cold+hot** — loaded ~L594, used by command handling ~L599 AND `poll_binding` ~L747; a `drain_commands(ctx,st)` that reloads HA changes snapshot semantics (Codex 3). | Moot — `commands.rs` is dropped; HA load + command drain stay inline. |
+| **Worst borrow offender is config refresh** (touches cached state + shared ArcSwap simultaneously) — borrow-checkable but fragile (Codex 1). | Moot — config stays inline (no `(&ctx,&mut st)` split needed). |
+| **The extraction doesn't solve the fn-size problem** — the ~500-line debug/report/reset block (~L906–1174) is the real bulk; v1 didn't list it (Codex 5 + Claude SMR + AGY converge). | **PRIMARY extraction: `debug_report.rs`** — the cfg-gated debug/report/reset block. ~500 lines out, `#[cfg(feature="debug-log")]` so **zero release-path risk**. |
+| **43-line manual `dbg_* = 0` reset is a forget-a-counter bug risk** (AGY). | `DbgCounters` struct lives in `debug_report.rs` under the same cfg; `st.dbg = DbgCounters::default()` single-line reset. |
+| **Perf gate insufficient** — `userspace-perf-compare.sh` is one 8s `-P4` run, no repeated stats/thresholds/`perf stat`/asm-diff/CoS matrix (Codex 6). | §9 strengthened: repeated before/after runs + `perf stat` + CoS matrix + codegen/asm spot-check. |
+| Keep `poll_binding` inline (AGY + Codex agree). | Unchanged. |
+| Retract any perf-*improvement* claim — LTO/PGO may already cold-split (AGY + Codex 4 + Claude SMR). | v2 claims **readability + reset-safety + zero release risk only**; perf-neutral by construction. |
+
+**v2 scope = exactly two extractions:**
+1. **`debug_report.rs`** — move the `#[cfg(feature="debug-log")]` debug/report/
+   reset block (~L906–1174) + a `DbgCounters` struct. Release-DCE'd, zero
+   hot-path risk, removes the single largest chunk.
+2. **`setup.rs`** — the one-shot setup (~L60–308): thread pin, TSC calibration,
+   ArcSwap `load_full`s, bindings build, BPF-map-FD cache. Returns the loop's
+   initial state. Cold, runs once.
+
+Everything else (per-tick telemetry/config/command checks, HA load, the hot
+`poll_binding` sweep, heartbeat, idle regulation) **stays inline in `mod.rs`**.
+Net: `worker_loop` ~1440 → ~700 LOC; `mod.rs` 1453 → ~750 — a real fn-size cut
+with no call boundary added to the per-tick path. This is exactly Codex's
+"Required Revision" (keep setup; extract the debug block; do NOT extract
+per-tick config/commands).
 
 ## 1. Issue framing
 `userspace-dp/src/afxdp/worker/loop_body/mod.rs` is 1453 LOC and is one
