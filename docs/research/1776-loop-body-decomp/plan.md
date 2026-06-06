@@ -18,7 +18,8 @@ high-value**. v2 narrows to those.
 | **"Pure code-motion" is FALSE for fabrics** — the real fabric refresh is at ~L715 (after commands/heartbeat/expiry/BPF refresh), NOT in the early config block; grouping it into `config.rs` reorders side effects (Codex 2). | Moot — `config.rs` is dropped. |
 | **`ha_runtime` straddles cold+hot** — loaded ~L594, used by command handling ~L599 AND `poll_binding` ~L747; a `drain_commands(ctx,st)` that reloads HA changes snapshot semantics (Codex 3). | Moot — `commands.rs` is dropped; HA load + command drain stay inline. |
 | **Worst borrow offender is config refresh** (touches cached state + shared ArcSwap simultaneously) — borrow-checkable but fragile (Codex 1). | Moot — config stays inline (no `(&ctx,&mut st)` split needed). |
-| **The extraction doesn't solve the fn-size problem** — the ~500-line debug/report/reset block (~L906–1174) is the real bulk; v1 didn't list it (Codex 5 + Claude SMR + AGY converge). | **PRIMARY extraction: `debug_report.rs`** — the cfg-gated debug/report/reset block. ~500 lines out, `#[cfg(feature="debug-log")]` so **zero release-path risk**. |
+| **The extraction doesn't solve the fn-size problem** — the ~500-line debug/report/reset block (~L906–1174) is the real bulk; v1 didn't list it (Codex 5 + Claude SMR + AGY converge). | **PRIMARY extraction: `debug_report.rs`** — but see the v3 refinement below: the L906–1174 region is **NOT wholly cfg-gated**. |
+| **v3 (Codex r2-3): the L906 region MIXES cfg-gated verbose `debug-log` reporting/stall-dumps with ALWAYS-ON release behavior** — binding diagnostics/syscalls (~L914) + per-second `BindingLiveState` publish/reset (~L1298). "Zero release risk" is FALSE for the whole block. | `debug_report.rs` extracts **only the `#[cfg(feature="debug-log")]` verbose-reporting + stall-dump subset** (truly zero release-path risk). The always-on per-second `BindingLiveState` publish/reset + binding diagnostics **STAY INLINE** in `mod.rs` (they're release hot-ish maintenance, not debug). The release LOC reduction is therefore smaller than "~500" — it's the cfg-gated subset only. |
 | **43-line manual `dbg_* = 0` reset is a forget-a-counter bug risk** (AGY). | `DbgCounters` struct lives in `debug_report.rs` under the same cfg; `st.dbg = DbgCounters::default()` single-line reset. |
 | **Perf gate insufficient** — `userspace-perf-compare.sh` is one 8s `-P4` run, no repeated stats/thresholds/`perf stat`/asm-diff/CoS matrix (Codex 6). | §9 strengthened: repeated before/after runs + `perf stat` + CoS matrix + codegen/asm spot-check. |
 | Keep `poll_binding` inline (AGY + Codex agree). | Unchanged. |
@@ -96,22 +97,40 @@ Helpers take `(&WorkerContext, &mut WorkerLoopState)` — ≤2 args, no 34-arg
 spill, no per-packet indirection (structs are stack-local; the hot
 `poll_binding` call is unchanged).
 
-**Step B — extract cold blocks to sibling files**, each `#[inline(never)]`:
+**NOTE (v2/v3): this §5 describes the SUPERSEDED v1 5-way split. The
+authoritative scope is §0.1.** v1's `telemetry.rs`/`config.rs`/`commands.rs`
+extractions are **DROPPED** (Codex r1-4: an `#[inline(never)]` call boundary
+in front of the per-tick `load_arc_if_changed`, optimized for 10–100K
+ticks/s, risks regression; plus the fabrics-reorder and `ha_runtime`-straddle
+hazards). v2/v3 extract only:
+
 ```text
 worker/loop_body/
-  ├── mod.rs        # worker_loop facade: setup() then loop { … } with the
-  │                 #   hot poll_binding sweep kept inline
-  ├── setup.rs      # build WorkerLoopState from WorkerContext (the L60–308 block)
-  ├── telemetry.rs  # publish_telemetry(ctx, st, now)  (block a)
-  ├── config.rs     # refresh_shared_config(ctx, st)    (block b)
-  └── commands.rs   # drain_commands(ctx, st)           (block f command part)
+  ├── mod.rs           # worker_loop: setup() then loop { … }; ALL per-tick
+  │                    #   telemetry/config/command checks + poll_binding +
+  │                    #   heartbeat + the always-on BindingLiveState publish
+  │                    #   stay INLINE here
+  ├── setup.rs         # one-shot cold setup (L60–308) → returns initial WorkerLoopState
+  └── debug_report.rs  # ONLY the #[cfg(feature="debug-log")] verbose report /
+                       #   stall-dump subset + DbgCounters (release-DCE'd)
 ```
-The hot `poll_binding` sweep (e) + heartbeat (c) stay in `mod.rs`'s loop
-body — NOT extracted (avoid any call-boundary on the per-packet path).
+
+**v3 refinement (Codex r2-3):** the L906–1174 region is NOT wholly
+cfg-gated. It interleaves cfg-gated verbose `debug-log` reporting (→
+`debug_report.rs`, zero release risk) with **always-on release behavior** —
+binding diagnostics/syscalls (~L914) and the per-second `BindingLiveState`
+publish/reset (~L1298). The always-on parts **stay inline**; only the
+`#[cfg(feature="debug-log")]` subset moves. So the release LOC reduction is
+the cfg-gated subset, not the full ~500 lines.
+
+`WorkerContext`/`WorkerLoopState` (Step A) is OPTIONAL in v2 — with only
+setup + debug_report extracted, the borrow-split is not forced; it can be
+introduced later if/when more is extracted. `DbgCounters` (under the same
+cfg) is the one struct worth adding now for the single-line reset.
 
 **Pure code-motion discipline:** each extracted block is moved verbatim
-(same statements, same order, same side-effect sequence) — only the
-variable access changes (`x` → `st.x`). No logic change.
+(same statements, order, side-effect sequence) — only variable access
+changes. No logic change.
 
 ## 6. Public API preservation
 `worker_loop`'s signature is unchanged (still called from the coordinator
@@ -140,23 +159,34 @@ spawn). `WorkerContext`/`WorkerLoopState`/`DbgCounters` are private to
 ## 9. Test plan
 - `cargo build` + full `cargo test --release` + 5× flake on worker/loop_body tests.
 - Go suite.
-- **Perf gate (mandatory):** `userspace-perf-compare.sh` (or equivalent) before/after — assert no throughput/latency regression on the hot path. This is the kill-or-ship signal.
-- Smoke on loss cluster: v4+v6 × push+reverse × CoS off/on; `make test-failover` (worker loop touches HA/command drain).
+- **Perf regression guard (not auto-kill — v2 is perf-neutral by construction):**
+  `userspace-perf-compare.sh` is one 8s `-P4` v4/v6 run — insufficient alone
+  (Codex r1-6/r2-5). Strengthen to: **repeated** before/after runs (≥3 each)
+  with a variance threshold; `perf stat` (IPC/cache-miss counters) +
+  `perf record` on the hot loop; the **CoS off/on matrix**; and a
+  codegen/asm spot-check of the `worker_loop` hot block before/after. Treat a
+  flagged delta as a **triage signal**, not an automatic kill (since the
+  release loop body is unchanged except setup hoisted to a one-shot call).
+- Smoke on loss cluster: v4+v6 × push+reverse × CoS off/on; `make test-failover`
+  (worker loop touches HA/command drain).
 
 ## 10. Out of scope
 - forwarding/mod.rs (#1661 item 7), compiler.go (#1661) — already tracked.
 - Any logic change / optimization (AVX2 etc. — speculative, not this).
 
-## 11. Open questions for adversarial review
-1. Is the ctx/state split borrow-checkable without clones/RefCell given the
-   blocks that touch both shared handles and mutable state? Worst offender?
-2. Does extracting telemetry/config/commands to `#[inline(never)]` cold fns
-   actually help, or does the current compiler already cold-split them via
-   PGO/layout — i.e., is the perf rationale real or speculative?
-3. Is keeping `poll_binding` inline in `mod.rs` sufficient to guarantee no
-   hot-path regression, or does moving setup/telemetry out shift the hot
-   block's address/layout enough to matter?
-4. Given the file is UNDER the 2000-LOC trigger (only the fn-size rule
-   fires), is the hot-path churn-risk worth it — or is PLAN-KILL right?
-5. Is `DbgCounters` worth structifying, or should the ~40 `dbg_*` just move
-   into `WorkerLoopState` flat (fewer indirections to reason about)?
+## 11. Open questions (round-1/2 RESOLVED — kept for the record)
+1. ~~ctx/state borrow-split~~ — DROPPED in v2 (config/commands stay inline, no
+   split forced). Optional later.
+2. ~~`#[inline(never)]` telemetry/config/commands~~ — DROPPED (Codex r1-4:
+   regression risk in front of `load_arc_if_changed`).
+3. Keeping `poll_binding` inline — CONFIRMED correct (Codex + AGY).
+4. Sub-2000-LOC file: the value is **readability + reset-safety**, perf-neutral;
+   PLAN-KILL was on the table but the narrowed scope (debug_report.rs + setup.rs)
+   is low-risk enough to be worth it. Not killed.
+5. `DbgCounters` struct — YES, for the single-line `default()` reset (AGY), under
+   the `debug-log` cfg.
+
+**Remaining for /engineer-time review (v3):** precisely partition the L906–1174
+region — confirm exactly which lines are `#[cfg(feature="debug-log")]`
+(→ `debug_report.rs`) vs always-on `BindingLiveState` publish/diagnostics
+(→ stay inline) — Codex r2-3. This is a code-review boundary task, not a plan gap.
