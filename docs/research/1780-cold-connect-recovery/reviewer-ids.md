@@ -12,3 +12,8 @@ warmer-stall letting .200 fully age overnight. Multi-path A/B/C.
 - AGY r1: adversarial-review-mq4o5gc3-yuenj5 — INFRA-TIMEOUT (retry round-2)
 - Claude SMR r1: PLAN-NEEDS-MAJOR (root cause unpinned; keep Path A, defer Path B)
 - v2: Path A retargeted to Go periodic-resolver stall-hardening + watchdog gauge (committable); resolver-fix dropped/deferred + capture-gated
+
+## Round 2 (v2) — pending confirm
+- Codex r2: task-mq4ohvhy-pkje1d
+- AGY r2: adversarial-review-mq4ohvta-7zmm4x (retry after r1 infra-timeout)
+- Claude SMR r2: PLAN-READY (Path A committable; resolver-fix capture-gated)
