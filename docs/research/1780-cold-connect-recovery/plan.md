@@ -1,8 +1,10 @@
 # #1780 — Cold-connect idle/overnight hang to data-path next-hops
 
-**Status:** v2 — round-1 (Codex PLAN-NEEDS-MAJOR/rewrite, Claude SMR
-PLAN-NEEDS-MAJOR; AGY infra-timeout, retry round-2). v2 corrects two factual
-errors and re-scopes. See §0.1.
+**Status:** v3 — **CONVERGED** for Path A. Round-2: Codex PLAN-NEEDS-MINOR,
+AGY PLAN-NEEDS-MINOR, Claude SMR PLAN-READY — all minors folded (cleanFailedNeighbors
+in scope; guarded-goroutine+deadline+last-success not bare context.WithTimeout;
+per-phase in-flight guards; phase-labeled gauge; regenDebouncer/warmNeighborCache
+documented). Path A is PLAN-READY + committable; resolver/probe fix capture-gated.
 **Branch:** `research/1780-cold-connect-recovery`
 **Issue:** #1780 (residual after #1769 + #1771 Phases 1-2 / PR #1779)
 
@@ -88,22 +90,40 @@ factor dominates before code.
 **Path A — Go periodic-resolver stall-hardening (prevention; PRIMARY,
 committable, root-cause-independent).** A periodic neighbor-maintenance loop
 that can be frozen 17.5h by one hung handler is a bug **regardless** of the
-cold-connect hang. Harden `runPeriodicNeighborResolution`
-(`daemon_neighbor.go:353`):
-- **Timeout-bound / isolate the synchronous handlers** (`resolveNeighbors`,
-  `forceProbeNeighbors`) so a hung netlink/probe op cannot freeze the
-  `for-select` loop — run each under a `context.WithTimeout` (or in a guarded
-  goroutine with a deadline) so the next tick always fires.
-- **Watchdog the `neighborWarmupInFlight` guard** so a hung `warmNeighborCache`
-  can't wedge cluster warmups forever (deadline + reset, or skip-and-relaunch
-  after N missed ticks).
-- **Add a `neighbor_periodic_last_pass_age_seconds` gauge** (per family) — both
-  the observability for "is the warmer stalled" AND the live diagnostic the
-  capture needs. (This is the only metric Path A adds; it belongs here, not in
-  #1771 §2.6.)
+cold-connect hang. Harden `runPeriodicNeighborResolution` (`daemon_neighbor.go:352`):
+- **Supervise EACH periodic phase from the loop with a guarded goroutine +
+  deadline + last-success/last-start timestamp + skip-if-still-in-flight**
+  (Codex r2: `context.WithTimeout` alone is insufficient — the netlink/probe
+  callees don't honor context, so a timeout can't cancel a stuck syscall; the
+  guarded-goroutine keeps the `for-select` loop alive without pretending to
+  cancel). Phases to isolate: **`resolveNeighbors`, `forceProbeNeighbors`, AND
+  `cleanFailedNeighbors`** (Codex+AGY: `cleanFailedNeighbors` is also
+  synchronous + netlink-heavy at `:293`, so leaving it inline still leaves a
+  loop-freeze vector). Per-phase in-flight atomics (`resolveNeighborsInFlight`,
+  `forceProbeInFlight`, mirroring `neighborWarmupInFlight`) prevent overlapping
+  goroutines + netlink-socket leakage if a prior pass is hung (AGY).
+- **Watchdog the in-flight guards**: a stuck guard (hung phase) must not wedge
+  that phase forever — re-launch after the deadline elapses (bounded relaunch),
+  so a transient hang self-heals.
+- **Add a phase-labeled `neighbor_periodic_last_success_age_seconds{phase=...}`
+  gauge** (Codex r2: phase-labeled last-success/age, NOT per-family — record
+  per-phase pass completion). This is the fix's observability AND the live
+  diagnostic the capture needs. (Only metric Path A adds; not #1771 §2.6.)
 
 If the periodic loop reliably keeps the data-path next-hops warm, the
 cold-connect path never triggers — the highest-leverage, lowest-risk fix.
+
+**Additional stall vectors (AGY r2) — documented, scoped:**
+- **`regenDebouncer`** (`daemon_neighbor_listener.go:171`→`RegenerateNeighborSnapshot`
+  :203 → synchronous `LinkByName`/`NeighList`, `neighbors.go:185`): a netlink
+  hang freezes event-driven snapshot regen (not the main loop). Apply the same
+  guarded-goroutine+deadline treatment OR explicitly note as a separate
+  follow-up if out of Path A's scope.
+- **`warmNeighborCache` UDP-probe flood** (`daemon_ha.go:1081`): sends a 1-byte
+  UDP-to-port-1 per unique src/dst IP across ALL sessions — under high session
+  counts this looks like a port scan to external hosts and is redundant for
+  routed/gateway traffic (only on-link IPs need per-IP ARP warming). NOT a
+  Path A fix; flagged as a future scoping follow-up (own issue).
 
 **Resolver/probe fix — DEFERRED, diagnostic-gated.** Round-1 established the
 resolver already probes immediately on the first cold fast-fail and the 1s
@@ -123,9 +143,11 @@ follow-up.
 ## 6. Public API / invariants
 - Hot path stays cheap: all changes are on the `MissingNeighbor` / resolver
   slow path or the warm-pass driver — never per-forwarded-packet.
-- Warmer fix must not warm on a standby RG (preserve `skips_when_owning_rg_inactive`).
-- First-probe-bypass must not reintroduce SYN-storm probe amplification (cap:
-  one immediate probe per cold key, then normal throttle).
+- Path A must NOT change WHAT is warmed/cleaned (no standby-RG warming, no new
+  probe targets) — only HOW the loop is supervised (guard + deadline + relaunch).
+  The 5s/15s cadences and per-phase target sets are preserved.
+- Per-phase guards must not allow overlapping passes (netlink-socket leak); each
+  phase relaunches only after the prior pass returns or its deadline elapses.
 
 ## 7. Risk
 | Class | Level |
@@ -136,8 +158,11 @@ follow-up.
 | Architectural | LOW — extends #1769/#1771/#1636 mechanisms |
 
 ## 8. Test plan
-- Unit: resolver first-probe-bypass; warm-pass driver resumes after a simulated
-  peer-disconnect/RG-churn.
+- Unit: a hung phase handler (injected blocking netlink/probe) does NOT freeze
+  the `for-select` loop — the next tick still fires and the other phases still
+  run; the in-flight guard relaunches the hung phase after its deadline; the
+  `neighbor_periodic_last_success_age{phase}` gauge advances for healthy phases
+  and grows for the stuck one (so a stall is observable). No overlapping passes.
 - **Live repro (the hard part) + dominance capture:** overnight-scale idle then
   a cold connect, capturing (Codex D) — **ARP/NDP tcpdump on the egress**
   (is `.200` silent, or is the firewall not soliciting?), `neighbor_pending_*`
@@ -154,20 +179,21 @@ follow-up.
 
 ## 9. Out of scope
 - #1771 §2.1 per-key epoch (Phase 4, separately gated on `epoch_rejects`).
-- #1771 §2.6 counters (separate follow-up) — though a `neighbor_warm_last_pass_age`
-  gauge belongs in Path A.
+- #1771 §2.6 counters (separate follow-up) — though the phase-labeled
+  `neighbor_periodic_last_success_age{phase}` gauge belongs in Path A.
 
-## 10. Open questions for adversarial review
-1. **Does the smoking-gun capture show the resolver engaged-but-slow (Path B)
-   or the warmer-off-and-aged (Path A) as the dominant factor?** (Gate.)
-2. Why did `queue_warm_pass` stall for 17.5h after an 8s peer-disconnect with
-   the daemon up — what's the exact gate, and is it the coordinator tick or the
-   `skips_when_owning_rg_inactive` RG-state stuck "inactive"?
-3. Is first-probe-bypass safe vs SYN-storm probe amplification (one probe/cold
-   key)? Does it interact with the per-key pending bound (#1779)?
-4. Is the TCP-SYN-backoff-compounding analysis the real "a while," or is there
-   a genuine stuck state (resolver spinning, get_attempts climbing without
-   resolve)? The capture decides.
-5. Is fixing only the warmer (Path A) sufficient, making Path B unnecessary
-   churn on the resolver hot-ish path? Or is B needed for the
-   warmer-lapses-anyway case?
+## 10. Open questions (round-2 RESOLVED — kept for record)
+1. ~~Path B vs Path A dominance~~ — Path B dropped; the capture now only gates
+   the SEPARATE deferred resolver/probe fix (names silent-peer vs probe-loss vs
+   monitor/HA), not Path A.
+2. **Which exact phase hung for 17.5h** — `resolveNeighbors` /
+   `forceProbeNeighbors` / `cleanFailedNeighbors` (loop-freeze) or
+   `warmNeighborCache` (guard-wedge)? The phase-labeled gauge + the capture's
+   journal will name it; Path A hardens all of them regardless.
+3. ~~first-probe-bypass safety~~ — DROPPED (the first probe is already
+   immediate; the limiter only throttles subsequent; bypass risks amplification).
+4. Is the "a while" purely TCP-SYN-backoff-compounding after warmer-off aging,
+   or a genuine resolver/probe stall? **Capture-gated** for the deferred
+   resolver fix — does NOT block Path A.
+5. Scope: `regenDebouncer` hardening (same vector) and `warmNeighborCache`
+   UDP-flood scoping — fold into Path A or split as follow-ups? (AGY r2.)

@@ -17,3 +17,9 @@ warmer-stall letting .200 fully age overnight. Multi-path A/B/C.
 - Codex r2: task-mq4ohvhy-pkje1d
 - AGY r2: adversarial-review-mq4ohvta-7zmm4x (retry after r1 infra-timeout)
 - Claude SMR r2: PLAN-READY (Path A committable; resolver-fix capture-gated)
+
+## Round 2 (v2) — CONVERGED on Path A
+- Codex r2: task-mq4ohvhy-pkje1d — PLAN-NEEDS-MINOR (add cleanFailedNeighbors; guarded-goroutine not bare ctx-timeout; phase-labeled gauge; scrub stale first-probe refs)
+- AGY r2: adversarial-review-mq4ohvta-7zmm4x — PLAN-NEEDS-MINOR (per-phase in-flight guards; document regenDebouncer + warmNeighborCache UDP-flood)
+- Claude SMR r2: PLAN-READY
+- v3 folds all r2 minors -> CONVERGED PLAN-READY for Path A (resolver/probe fix capture-gated follow-up)
