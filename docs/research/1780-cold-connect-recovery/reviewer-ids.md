@@ -8,3 +8,7 @@ warmer-stall letting .200 fully age overnight. Multi-path A/B/C.
 - Codex r1: task-mq4o5g1g-phbr6p
 - AGY r1: adversarial-review-mq4o5gc3-yuenj5
 - Claude SMR r1: claude-smr-plan-r1.md (PLAN-NEEDS-MAJOR — root cause unpinned; 3rd hypothesis; Path B premise unverified; keep Path A, defer/diagnose Path B)
+- Codex r1: task-mq4o5g1g-phbr6p — PLAN-NEEDS-MAJOR/rewrite (warmer is GO runPeriodicNeighborResolution not Rust queue_warm_pass; first-probe-bypass wrong target; capture gates dominance)
+- AGY r1: adversarial-review-mq4o5gc3-yuenj5 — INFRA-TIMEOUT (retry round-2)
+- Claude SMR r1: PLAN-NEEDS-MAJOR (root cause unpinned; keep Path A, defer Path B)
+- v2: Path A retargeted to Go periodic-resolver stall-hardening + watchdog gauge (committable); resolver-fix dropped/deferred + capture-gated

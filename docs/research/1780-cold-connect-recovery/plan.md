@@ -1,8 +1,35 @@
 # #1780 — Cold-connect idle/overnight hang to data-path next-hops
 
-**Status:** DRAFT v1 — pending 3-way hostile plan-review (Codex + AGY + Claude SMR)
+**Status:** v2 — round-1 (Codex PLAN-NEEDS-MAJOR/rewrite, Claude SMR
+PLAN-NEEDS-MAJOR; AGY infra-timeout, retry round-2). v2 corrects two factual
+errors and re-scopes. See §0.1.
 **Branch:** `research/1780-cold-connect-recovery`
 **Issue:** #1780 (residual after #1769 + #1771 Phases 1-2 / PR #1779)
+
+## 0.1 Round-1 disposition (v2 — corrected + re-scoped)
+
+| r1 finding (reviewer) | v2 disposition |
+|---|---|
+| **The "#1636 warmer driven every 15s" premise is WRONG** — Rust `queue_warm_pass` is event-driven (snapshot refresh `coordinator/mod.rs:724` + RG promotion `:907`), NOT periodic. The actual 15s periodic neighbor maintenance is **Go-side `runPeriodicNeighborResolution`** (`pkg/daemon/daemon_neighbor.go:353`) (Codex B). | **Path A retargeted to the Go periodic resolver.** The "neighbor cache warmup complete" log that stalled 17.5h is the Go loop, not Rust warm-pass. |
+| **Path B first-probe-bypass aimed at the wrong delay** — the FIRST resolver request per key is already admitted (the 1s `last_resolved` limiter only suppresses *subsequent* requests, `neighbor_resolver.rs:563/630`); the first MissingNeighbor already probes immediately (`poll_descriptor:2174`) + at 10/60/260ms. The 100ms enqueue-throttle is per-binding → bypassing it amplifies across workers (Codex C, Claude SMR). | **Path B (first-probe-bypass) DROPPED.** The resolver/probe is already fast on the first attempt; the multi-second delay is elsewhere. |
+| **No self-sustaining neg-cache stuck state** (Codex A confirms the resolved-wins check + evict-before-TTL). | Confirmed; removed from the hypothesis set. |
+| **Root cause of the multi-second delay NOT established by code** — candidates: probe loss, raw-socket/probe failure, monitor/update loss, HA gating, or a genuinely silent `.200` (Codex A/D, Claude SMR). | **Capture is a HARD gate** for any resolver/probe fix; expanded to ARP tcpdump + full counter set (§8). |
+| Don't wait for capture to fix factual errors; do wait for it to choose dominance (Codex D). | v2 fixes the errors now; the capture chooses which delay-source dominates. |
+| Not PLAN-KILL; rewrite before implementation (Codex E). | v2 rewrite. |
+
+**Corrected mechanism.** The Go `runPeriodicNeighborResolution`
+(`daemon_neighbor.go:353`) is the 15s keep-warm loop (`resolveNeighbors` +
+`forceProbeNeighbors` + `maintainClusterNeighborReadiness`→`warmNeighborCache`)
++ a 5s `cleanFailedNeighbors`. The first two handlers run **synchronously
+inside the `for-select` loop**; `warmNeighborCache` runs in a goroutine guarded
+by `neighborWarmupInFlight` (CAS true; `defer Store(false)`). **Stall modes:**
+(1) a synchronous handler (`resolveNeighbors`/`forceProbeNeighbors`) that blocks
+on a hung netlink/probe call **freezes the entire loop** — clean+resolve+probe
+all stop (matches a total 17.5h stall); (2) `warmNeighborCache` hangs → the
+goroutine never returns → `neighborWarmupInFlight` stuck true → every later
+`maintainClusterNeighborReadiness` skips. Either way the periodic keep-warm
+stops, neighbors age over overnight idle, and a cold connect drops into the
+slow-resolution path.
 
 ## 1. Issue framing
 Operator-confirmed: `iperf3 -c 172.16.80.200 -p5212 -P12` **hangs at connect
@@ -56,33 +83,42 @@ factor dominates before code.
 - #1636: neighbor-warmer (`queue_warm_pass`, coordinator-driven, 15s, gated
   `skips_when_owning_rg_inactive`).
 
-## 5. Path options (multi-factor — likely ship BOTH A+B)
+## 5. Path options (v2 — Path A committable now; resolver-fix diagnostic-gated)
 
-**Path A — Warmer reliability (prevention; primary).** Find why
-`queue_warm_pass` stopped being driven for 17.5h after a peer-disconnect with
-the daemon up (NRestarts=0). Candidate: the coordinator tick that drives warm
-passes is gated on a cluster-sync/RG-active state that stays stuck after
-failover churn. Fix: make the warm-pass driver resume reliably after HA events
-(+ a `neighbor_warm_last_pass_age` gauge / watchdog so a stalled warmer is
-observable). If the warmer keeps `.200` REACHABLE, the cold-connect path never
-triggers — the highest-leverage fix.
+**Path A — Go periodic-resolver stall-hardening (prevention; PRIMARY,
+committable, root-cause-independent).** A periodic neighbor-maintenance loop
+that can be frozen 17.5h by one hung handler is a bug **regardless** of the
+cold-connect hang. Harden `runPeriodicNeighborResolution`
+(`daemon_neighbor.go:353`):
+- **Timeout-bound / isolate the synchronous handlers** (`resolveNeighbors`,
+  `forceProbeNeighbors`) so a hung netlink/probe op cannot freeze the
+  `for-select` loop — run each under a `context.WithTimeout` (or in a guarded
+  goroutine with a deadline) so the next tick always fires.
+- **Watchdog the `neighborWarmupInFlight` guard** so a hung `warmNeighborCache`
+  can't wedge cluster warmups forever (deadline + reset, or skip-and-relaunch
+  after N missed ticks).
+- **Add a `neighbor_periodic_last_pass_age_seconds` gauge** (per family) — both
+  the observability for "is the warmer stalled" AND the live diagnostic the
+  capture needs. (This is the only metric Path A adds; it belongs here, not in
+  #1771 §2.6.)
 
-**Path B — Fast cold-connect resolution (recovery; the #1771 §10a part).**
-When aging DOES occur, make recovery sub-second so the first/second TCP SYN
-lands post-resolution instead of compounding to 10-30s:
-- On a FRESH cold key (first fast-fail), probe IMMEDIATELY — bypass the 1s
-  `last_resolved` rate-limit + 100ms enqueue-throttle for the first
-  GET/probe per key (§2.3 cross-sweep backoff: aggressive early, then back
-  off). The throttles exist to prevent SYN-storm probe amplification; an
-  exception for the first probe per cold key is safe (one probe).
-- Optionally don't let the first buffered SYN time out into the neg-cache
-  before the probe has had a chance (couple the 2s `PENDING_NEIGH_TIMEOUT`
-  with the probe schedule).
-- §2.4 negative-keeps-probing: a neg-cached key keeps the resolver GET/probe
-  on the backoff so it resolves promptly (already probes — tighten cadence).
+If the periodic loop reliably keeps the data-path next-hops warm, the
+cold-connect path never triggers — the highest-leverage, lowest-risk fix.
 
-**Path C — Both A+B (recommended, pending capture).** A prevents the common
-case; B bounds the worst case when prevention lapses.
+**Resolver/probe fix — DEFERRED, diagnostic-gated.** Round-1 established the
+resolver already probes immediately on the first cold fast-fail and the 1s
+limiter does NOT block it, so the "first-probe-bypass" idea is dropped. IF the
+capture (§8) shows the multi-second delay is in resolution itself (not the
+warmer-off aging), the fix target will be whichever the data names —
+probe-loss / raw-socket failure / monitor-update loss / HA gating / silent peer
+— NOT a blanket rate-limit bypass. No resolver-path code is proposed until the
+capture pins the dominant delay source. (Storm-safety note for any future probe
+change: cap one immediate probe per `(ifindex, hop)` cold epoch centralized in
+the resolver, never a per-binding bypass.)
+
+**Recommendation:** ship **Path A** now (independently-correct stall fix +
+watchdog gauge); treat the resolver/probe fix as a **separate, capture-gated**
+follow-up.
 
 ## 6. Public API / invariants
 - Hot path stays cheap: all changes are on the `MissingNeighbor` / resolver
@@ -102,9 +138,15 @@ case; B bounds the worst case when prevention lapses.
 ## 8. Test plan
 - Unit: resolver first-probe-bypass; warm-pass driver resumes after a simulated
   peer-disconnect/RG-churn.
-- **Live repro (the hard part):** overnight-scale idle then a cold connect, with
-  the resolver-counter capture (`get_attempts` climbs / `get_resolved` lags =
-  resolver-engaged-but-slow → Path B; warmer-last-pass-age large = Path A).
+- **Live repro (the hard part) + dominance capture:** overnight-scale idle then
+  a cold connect, capturing (Codex D) — **ARP/NDP tcpdump on the egress**
+  (is `.200` silent, or is the firewall not soliciting?), `neighbor_pending_*`
+  (timeout_drops, dwell, max_depth), resolver `get_attempts`/`get_resolved`/
+  `probe_on_stale`/`get_failures`/`epoch_rejects`/enqueue_drops/disconnected,
+  the new `neighbor_periodic_last_pass_age` gauge (Path A), HA
+  `forwarding_active`/`lease_until`, and the Go 15s neighbor logs. This names
+  the dominant delay source: warmer-stalled-and-aged (Path A) vs
+  resolver/probe/monitor/HA (the deferred resolver-fix target) vs silent peer.
   Captures: `/tmp/idle-hang-longcapture.out` (running) + the operator's overnight
   capture.
 - `make test-failover` (warm-pass gating is HA-coupled) — gating.
