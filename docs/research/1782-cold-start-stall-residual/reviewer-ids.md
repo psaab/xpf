@@ -20,3 +20,14 @@ Branch: `research/1782-cold-start-stall-residual`
 - **Codex**: `task-mq6600fx-mjvpfq`
 - **AGY**: `adversarial-review-mq6600qy-1jh8bl`
 - **Claude SMR**: `claude-smr-plan-r2.md` — **PLAN-READY** (v2 folds all r1; no new findings).
+
+## Round 2 outcome
+- Codex `task-mq6600fx-mjvpfq`: **PLAN-NEEDS-MAJOR** — H3 timing-signal is pending_dwell not get_rtt (first-miss path is kernel-ARP+buffer, resolver Stage-2-only); Option B trigger-point (must add early first-miss reuse, can't async-fix H5 siblings); 2s/800ms timeout; dup-counter specificity.
+- AGY `adversarial-review-mq6600qy-1jh8bl`: **PLAN-READY** — verified all v2 claims + Q7 deep-dive (DELAY-reuse self-heals, acceptable tradeoff). (Missed both Codex MAJORs — AGY-soft-pass again.)
+- Claude SMR: **PLAN-READY** (no new findings on v2).
+- Codex MAJORs folded into v3 `99e7dbfd0`.
+
+## Round 3 (plan v3 `99e7dbfd0`)
+- **Codex**: `task-mq66ct2w-8n2ot5`
+- **AGY**: `adversarial-review-mq66ctcy-7umrjn`
+- **Claude SMR**: `claude-smr-plan-r3.md` — **PLAN-READY** (v3 folds both Codex r2 MAJORs; verified two-stage path + pending_dwell signal).
