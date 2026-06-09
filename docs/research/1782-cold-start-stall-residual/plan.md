@@ -1,6 +1,6 @@
 # #1782 — Residual cold-start stall (post-#1780 Path A): capture-first research plan
 
-**Status:** DRAFT v2 — folds r1 (Codex PLAN-NEEDS-MAJOR + AGY PLAN-READY + Claude SMR PLAN-NEEDS-MINOR). Pending r2.
+**Status:** DRAFT v3 — folds r2 (Codex PLAN-NEEDS-MAJOR on H3-timing-signal + Option-B-trigger-point; AGY PLAN-READY incl. Q7 deep-dive; Claude SMR PLAN-READY). Pending r3.
 
 ## 1. Issue framing
 
@@ -56,25 +56,39 @@ the dataplane is *dropping* parallel cold SYNs (H5) or fast-failing retransmits
 
 ## 4. Code map (the cold path, end to end)
 
-Per-worker, worker-owned, no cross-core sync (`worker/mod.rs`):
-- **`pending_neigh`** keyed `(egress_ifindex, next_hop)` — **one representative
-  packet per unresolved next-hop** (#1771 §2.2, `worker/mod.rs:124-137`).
-  Admission keeps the OLDEST packet for a key and **drops+recycles duplicates**
-  (`poll_descriptor/mod.rs:2435` `if !pending_neigh.contains_key(key)`). This is
-  a deliberate anti-DoS design (a SYN flood to one dead host pins ≤1 UMEM
-  frame).
-- **`neg_neigh_cache`** keyed `(egress_ifindex, next_hop)`, `NEG_NEIGH_TTL_NS =
-  3 s` (`mod.rs:363`). Armed by `neg_neigh_record` (`neighbor_dispatch.rs:121`)
-  **only when a `pending_neigh` entry times out** in `retry_pending_neigh`
-  (`neighbor_dispatch.rs:105`) at `PENDING_NEIGH_TIMEOUT_NS` (~800 ms, tied to
-  kernel `retrans_time_ms`, `neighbor_dispatch.rs:80-87`). While active,
-  `neg_neigh_gate` (`poll_descriptor/mod.rs:2038`) fast-fails further packets to
-  that key — but per #1769 still routes the key through the resolver.
-- **Per-key resolver** (#1769, `neighbor_resolver.rs`): confirms only
-  **REACHABLE/PERMANENT** into `dynamic_neighbors` (`classify_nud:375-393`);
+Per-worker, worker-owned, no cross-core sync (`worker/mod.rs`). The cold path
+has **two distinct stages** — getting this wrong was the v2 error (Codex r2):
+
+- **Stage 1 — first MissingNeighbor packet (NOT the resolver).** On a
+  `dynamic_neighbors` miss the hot path inserts an **INCOMPLETE kernel neighbor
+  so the kernel itself sends the ARP/NDP solicitation** through the normal stack
+  (`poll_descriptor/mod.rs:2168-2174`), and buffers **one representative packet**
+  per `(egress_ifindex, next_hop)` in `pending_neigh` (#1771 §2.2,
+  `worker/mod.rs:124-137`); duplicate siblings for the same key are
+  **dropped+recycled** (`poll_descriptor/mod.rs:2434` `if
+  !pending_neigh.contains_key(key) && len < MAX_PENDING_NEIGH`). The #1769
+  shared resolver is **NOT** invoked here. The netlink monitor publishes the
+  entry once the kernel resolves it; the buffered packet is replayed and its
+  wait is recorded as **`neighbor_pending_dwell`** (#1772,
+  `neighbor_dispatch.rs:152`) = `now_ns − queued_ns`. **This dwell is THE
+  initial-resolution timing signal**, not the resolver RTT.
+- **Stage 2 — neg-cache fast-fail (where the #1769 resolver lives).**
+  `neg_neigh_cache` keyed `(egress_ifindex, next_hop)`, `NEG_NEIGH_TTL_NS = 3 s`
+  (`mod.rs:363`), is armed by `neg_neigh_record` (`neighbor_dispatch.rs:121`)
+  **only when the `pending_neigh` entry times out** in `retry_pending_neigh`
+  (`neighbor_dispatch.rs:105`) at `PENDING_NEIGH_TIMEOUT_NS` — **2 s default
+  fallback** (`mod.rs:332`), **800 ms fast path** only when
+  `compute_pending_neigh_timeout_ns` validates the kernel retrans sysctls
+  (`forwarding_build/mod.rs:454`). While active, `neg_neigh_gate`
+  (`poll_descriptor/mod.rs:2038`) fast-fails further packets AND **only here**
+  routes the key through the #1769 resolver (`poll_descriptor/mod.rs:2100`).
+- **Per-key resolver** (#1769, `neighbor_resolver.rs`, Stage-2-only): confirms
+  only **REACHABLE/PERMANENT** into `dynamic_neighbors` (`classify_nud:375-393`);
   on STALE/DELAY/PROBE it is **probe-only** (`:700`) — it does NOT reuse the
   kernel's existing usable lladdr. Inserts are epoch/generation-guarded
-  (`sharded_neighbor.rs:120 insert_confirmed_if_unchanged`).
+  (`sharded_neighbor.rs:120 insert_confirmed_if_unchanged`). Its RTT is
+  `neighbor_resolver_get_rtt` — which measures the **Stage-2** path, not the
+  first-miss resolution.
 - **DELNEIGH** removes from `dynamic_neighbors` (`neighbor.rs:359`).
 
 ## 5. The causal model (one chain, not independent hypotheses)
@@ -89,12 +103,17 @@ separately falsifiable:
   idle (Codex: "not DELNEIGH alone"). *Signature:* keyed `dynamic_neighbors`
   miss at t0 for an IP the kernel shows DELAY/STALE-usable; a DELNEIGH/GC for it
   in the timestamped idle-window `ip monitor neigh` log.
-- **WHY SLOW — H3: the resolver waits for REACHABLE instead of reusing the
-  kernel's DELAY-usable lladdr.** Even though the kernel can forward
-  immediately, userspace waits a full DELAY→PROBE→REACHABLE round-trip before
-  `dynamic_neighbors` is populated. That round-trip is the core latency.
-  *Signature:* kernel DELAY-usable at t0; `dynamic_neighbors` populated only
-  after the REACHABLE transition; `neighbor_resolver_get_rtt` ≈ resolution time.
+- **WHY SLOW — H3: resolution waits for the kernel REACHABLE transition instead
+  of reusing the kernel's already-usable DELAY/STALE lladdr.** On the first miss
+  (Stage 1) the hot path inserts INCOMPLETE and waits for the kernel
+  ARP/NDP→REACHABLE round-trip + netlink publish before `dynamic_neighbors` is
+  populated, even though the kernel often already holds a usable DELAY/STALE
+  lladdr it could forward on. That round-trip is the core latency. (If Stage 2
+  is reached, the #1769 resolver also refuses DELAY/STALE — `:700` probe-only —
+  compounding it.) *Signature:* kernel DELAY/STALE-usable at t0;
+  `dynamic_neighbors` populated only after the REACHABLE transition; the latency
+  is measured by **`neighbor_pending_dwell`** (Stage-1 buffered-packet wait),
+  NOT `neighbor_resolver_get_rtt` (which only covers the Stage-2 resolver path).
 - **WHY MULTI-FLOW — H5 (new, Codex): one-representative `pending_neigh` per
   `(worker, next_hop)` drops sibling cold SYNs.** Parallel cold flows to the
   same next-hop on the same worker: ONE SYN is buffered (drives the probe), the
@@ -103,44 +122,53 @@ separately falsifiable:
   **zero** neg-cache fast-fails. *Signature:* a pending-duplicate-drop counter
   climbs at t0 while `neg_neigh_fast_fail` stays low; pcap shows sibling SYN
   retransmits while one flow connects promptly.
-- **AMPLIFIER — H1: per-worker 3 s neg lockout**, armed only after the ~800 ms
-  pending timeout, fast-fails further packets (resolver still nudged). NOTE
-  (Codex): the cache is **per-binding/per-worker**, not one global entry —
-  flows on different RSS queues/bindings each arm their own; common recovery is
-  via the shared `dynamic_neighbors`. *Signature:* `neg_neigh_fast_fail` climbs
-  after ~800 ms; lockout clears on the REACHABLE re-add, not at the 3 s TTL.
+- **AMPLIFIER — H1: per-worker 3 s neg lockout**, armed only after the pending
+  timeout (**2 s default / 800 ms validated-sysctl fast path**), fast-fails
+  further packets (resolver nudged in Stage 2). NOTE (Codex): the cache is
+  **per-binding/per-worker**, not one global entry — flows on different RSS
+  queues/bindings each arm their own; common recovery is via the shared
+  `dynamic_neighbors`. *Signature:* `neg_neigh_fast_fail` climbs after the
+  pending timeout; lockout clears on the REACHABLE re-add, not at the 3 s TTL.
 - **AMPLIFIER — H4: TCP SYN-RTO.** The first SYN is *buffered* (H5), not
-  dropped, so RTO only fires for (a) the buffered SYN if resolution > ~800 ms
-  pending timeout, or (b) the dropped sibling SYNs (H5) immediately. Linux RTO
-  ~1 s, 2 s. *Signature:* pcap SYN-retransmit pattern; resolution timestamp vs
-  the SYN that succeeds.
+  dropped, so RTO only fires for (a) the buffered SYN if resolution exceeds the
+  pending timeout (2 s default / 800 ms fast path), or (b) the dropped sibling
+  SYNs (H5) immediately. Linux RTO ~1 s, 2 s. *Signature:* pcap SYN-retransmit
+  pattern; resolution timestamp vs the SYN that succeeds.
 
-Net wall-clock ≈ **resolution latency (H3)** + **sibling SYN-RTO (H5)**, with H1
-a secondary amplifier once the 800 ms pending timeout is crossed. The capture
-measures the split.
+Net wall-clock ≈ **first-miss resolution dwell (H3, `neighbor_pending_dwell`)**
++ **sibling SYN-RTO (H5)**, with H1 a secondary amplifier only once the pending
+timeout (2 s / 800 ms) is crossed. The capture measures the split.
 
 ## 6. The capture harness (first deliverable)
 
 `test/incus/capture-cold-stall.sh` (research-branch only). Run at the next
-overnight idle; on a cold connect record, per flow and at t0 (stall start) / t1
-(recovery):
+overnight idle; record a **pre-connect t0′ sample** (just before the cold
+connect, while still idle — Codex r2: needed to separate H2 from H3) plus
+per-flow at t0 (stall start) / t1 (recovery):
 
 1. per-flow connect→first-byte wall time;
-2. **keyed** `dynamic_neighbors contains(ifindex, ip)` at t0 (see §7 — needs the
-   query) + `ip neigh` NUD state/lladdr at t0 and t1;
-3. counter deltas t0→t1:
-   `neighbor_resolver_{get_attempts,get_resolved,probe_on_stale,epoch_rejects,get_rtt_*}_total`,
-   `neighbor_pending_timeout_drops_total`, **per-worker
+2. **keyed** `dynamic_neighbors contains(ifindex, ip)` at **t0′ (pre-connect)**
+   and t0 (see §7 — needs the query) + `ip neigh` NUD state/lladdr at t0′/t0/t1.
+   A miss at t0′ with the kernel showing DELAY/STALE-usable is the H2 fingerprint
+   (absence pre-existed the connect, not caused by it);
+3. counter deltas t0→t1: **`neighbor_pending_dwell_*`** (the Stage-1 H3 signal,
+   #1772), `neighbor_pending_timeout_drops_total`, **per-worker
    `neg_neigh_fast_fail`** and **pending-duplicate-drop** counters (§7),
+   `neighbor_resolver_{get_attempts,get_resolved,probe_on_stale,epoch_rejects,get_rtt_*}_total`
+   (Stage-2 only — nonzero ⇒ the neg-fast-fail path was reached),
    `neighbor_warm_*`;
 4. **timestamped `ip monitor neigh` started BEFORE the idle window** (Codex —
    otherwise H2 is guesswork): catches the DELNEIGH/GC that removes the entry;
 5. `tcpdump` of the SYN exchange for the connecting flow AND a sibling
    (measures H5/H4 SYN-RTO contribution);
-6. the Path-A `{phase}` gauge at t0 (regression guard — must be healthy).
+6. the actual `pending_neigh` timeout / retrans-sysctl state (2 s vs 800 ms —
+   §4) so the H1-arming threshold is known;
+7. the Path-A `{phase}` gauge at t0 (regression guard — must be healthy).
 
-Per-mechanism column mapping so one capture is conclusive: H2←(2)+(4),
-H3←(2)+get_rtt, H5←dup-drop counter + sibling pcap, H1←neg_fast_fail, H4←pcap.
+Per-mechanism column mapping so one capture is conclusive: **H2**←(2) t0′ miss +
+(4) DELNEIGH; **H3**←`neighbor_pending_dwell` ≈ stall + DELAY→REACHABLE
+transition timing (NOT get_rtt); **H5**←dup-drop counter + sibling pcap;
+**H1**←`neg_fast_fail` nonzero (only if dwell > the §6.6 timeout); **H4**←pcap.
 
 ## 7. Instrumentation gaps → capture-instrumentation PR-1 (small, observability-only)
 
@@ -151,8 +179,12 @@ The harness depends on code that must merge first. This is an explicit
   - Expose **`xpf_userspace_neg_neigh_fast_fail_total`** (today debug-only,
     `types/runtime.rs:261` aggregated in `worker/loop_body/mod.rs:789`),
     per-worker if cheap.
-  - Expose a **pending-duplicate-drop counter** (the H5 sibling-drop site at
-    `poll_descriptor/mod.rs:2435`) — without it H5 vs H1 is indistinguishable.
+  - Expose a **pending-duplicate-drop counter** at the H5 sibling-drop site
+    (`poll_descriptor/mod.rs:2434`). It must count the **`contains_key`
+    duplicate** case *specifically* — NOT the co-located `len >=
+    MAX_PENDING_NEIGH` capacity-drop case, which is a different condition (Codex
+    r2). Per-worker, so RSS-fan-out (Q5) is separable from true H5. Without it,
+    H5 vs H1 is indistinguishable.
   - Extend **`dynamic_neighbor_status`** (`coordinator/status.rs:12`, today
     returns `(len, generation)`) with a **keyed `contains(ifindex, ip)`** query
     (gRPC debug RPC or targeted surface) so the harness can confirm the t0 miss.
@@ -173,19 +205,38 @@ hypothesis/signature table — NOT a runnable end-to-end capture today.
 - **#1769** resolver inserts are epoch/generation-guarded; an Option B
   DELAY-reuse insert MUST go through `insert_confirmed_if_unchanged`
   (`sharded_neighbor.rs:120`) or it can resurrect a MAC the monitor just
-  removed (Codex).
+  removed (Codex). **Necessary but not sufficient** (Codex r2) — see Q7 below.
+- **Q7 — DELAY/STALE-reuse semantics is a FIX-GATING decision, not a footnote**
+  (Codex r2). Reusing a DELAY/STALE kernel lladdr relaxes #1769's deliberate
+  REACHABLE-only rule. AGY r2 deep-dive (to be ratified at PR-2): because the
+  AF_XDP datapath bypasses the kernel TCP stack, a DELAY entry never gets
+  `dst_confirm`, so the kernel still runs its own DELAY→PROBE cycle
+  (`delay_probe_time`, ~5 s) and, on a silent MAC change during idle (VM
+  migration / failover without GARP), userspace would transiently TX to a stale
+  MAC — but it **self-heals**: the kernel's unicast probe fails → falls back to
+  multicast → the host's reply drives a REACHABLE netlink update → the monitor
+  corrects `dynamic_neighbors`. AGY's verdict: a bounded transient wrong-MAC
+  window is an acceptable trade vs a guaranteed multi-second cold-start stall.
+  PR-2 must ratify this explicitly.
 - **HA:** cold path runs on both nodes; `make test-failover` (13/0 on Path A)
   must stay green.
 
 ## 9. Path Options for the EVENTUAL fix (capture picks; NOT chosen here)
 
-- **Option B (leading) — reuse a DELAY/STALE-usable kernel lladdr.** Have the
-  resolver confirm the kernel's existing usable MAC into `dynamic_neighbors`
-  (via `insert_confirmed_if_unchanged`) instead of waiting for REACHABLE. This
-  attacks H3 at the source AND **indirectly defuses H5/H1/H4**: if resolution is
-  sub-millisecond, the one-rep-pending window is tiny, siblings' SYNs largely
-  succeed, the 800 ms pending timeout is never crossed, and the neg cache never
-  arms. Must respect the #1769 epoch guard (§8).
+- **Option B (leading) — reuse a DELAY/STALE-usable kernel lladdr at the
+  FIRST-miss site.** CRITICAL framing correction (Codex r2): the first miss is
+  Stage 1 (insert INCOMPLETE + buffer), and the #1769 resolver is Stage-2-only
+  — so modifying *only the resolver* would NOT touch the first miss. B must add
+  an **early first-miss path**: on a `dynamic_neighbors` miss, before inserting
+  INCOMPLETE and buffering, do a synchronous/inline check for a kernel-usable
+  (DELAY/STALE) lladdr (e.g. an `RTM_GETNEIGH` / cached kernel-table read) and
+  confirm it into `dynamic_neighbors` via `insert_confirmed_if_unchanged`,
+  forwarding immediately. This attacks H3 at Stage 1 and **shrinks the H5/H1/H4
+  window** — but does **not** fully eliminate H5: same-poll-burst siblings can
+  still be dropped before the (possibly async) confirm populates the map, so
+  PR-2 must state whether the first-miss reuse is inline-synchronous within the
+  poll batch. Subject to the Q7 semantic ratification + the #1769 epoch guard
+  (§8).
 - **Option D (compound with B) — don't keep the neg entry armed while a probe
   is progressing / when the kernel has a usable lladdr.** Narrow H1 mitigation
   that preserves the dead-host defense (only suppresses the false lockout when
@@ -198,10 +249,13 @@ hypothesis/signature table — NOT a runnable end-to-end capture today.
 - **H5-direct (multi-pending / sibling-replay) — avoid** unless B is
   insufficient; conflicts with #1771 §2.2 (§8).
 
-**Lean (capture to confirm): B + D.** B shrinks the entire vulnerable window so
-the H5/H1/H4 amplifiers rarely engage; D removes the residual false lockout. C
-only if the capture shows H2's absence is structural rather than a transient
-re-add miss.
+**Lean (capture to confirm): B (first-miss reuse) + D.** B at the Stage-1
+first-miss site shrinks the vulnerable window so the H5/H1/H4 amplifiers rarely
+engage; D removes the residual false lockout. If the capture shows H2's absence
+is structural (the re-add is never published), **C** moves up — keeping the
+entry warm so it never goes absent is then more robust than reusing it on miss.
+The capture's t0′ (pre-connect) `dynamic_neighbors` sample + the `ip monitor`
+DELNEIGH log decide B-vs-C.
 
 ## 10. Out of scope (explicitly)
 
@@ -225,6 +279,11 @@ re-add miss.
    split tell us?
 6. Does `forceProbeNeighbors`/the warm set even target directly-connected
    data-path hosts like .200, or only configured next-hops (bears on Option C)?
-7. Is Option B's DELAY-reuse semantically safe — can the kernel's DELAY lladdr
-   be stale/wrong at the moment we confirm it, vs the REACHABLE-only guarantee
-   #1769 deliberately chose?
+7. **[Answered r2, ratify at PR-2]** Is Option B's DELAY-reuse semantically
+   safe? AGY r2 deep-dive (§8): the kernel self-heals a transient stale-MAC via
+   its own DELAY→PROBE cycle + netlink REACHABLE update; bounded wrong-MAC
+   window is an acceptable trade vs a guaranteed multi-second stall. PR-2 must
+   ratify this as the explicit fix-gating decision.
+8. **[r2]** Does the first-miss reuse (Option B) need to be inline-synchronous
+   within the poll batch to stop same-poll-burst sibling drops (H5), or is an
+   async confirm enough? The sibling pcap + dup-drop counter answer this.
