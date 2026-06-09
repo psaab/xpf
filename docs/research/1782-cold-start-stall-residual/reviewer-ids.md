@@ -31,3 +31,9 @@ Branch: `research/1782-cold-start-stall-residual`
 - **Codex**: `task-mq66ct2w-8n2ot5`
 - **AGY**: `adversarial-review-mq66ctcy-7umrjn`
 - **Claude SMR**: `claude-smr-plan-r3.md` — **PLAN-READY** (v3 folds both Codex r2 MAJORs; verified two-stage path + pending_dwell signal).
+
+## Round 3 outcome — CONVERGED PLAN-READY
+- Codex `task-mq66ct2w-8n2ot5`: **PLAN-READY** — both r2 MAJORs resolved; one non-blocking nit (phrase Stage-1 as "triggers kernel ARP/NDP resolution" not "inserts INCOMPLETE" — folded into v3.1).
+- AGY `adversarial-review-mq66ctcy-7umrjn`: **PLAN-READY** — PR-1 proceed immediately; hard PR-2 constraint: first-miss reuse MUST be non-blocking (no synchronous RTM_GETNEIGH on poll thread) — folded into §8/§9.
+- Claude SMR `claude-smr-plan-r3.md`: **PLAN-READY**.
+- v3.1 = v3 + AGY blocking-syscall hazard (§8/§9) + Codex wording nit (trigger_kernel_arp_probe).

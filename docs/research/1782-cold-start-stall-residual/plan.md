@@ -60,9 +60,11 @@ Per-worker, worker-owned, no cross-core sync (`worker/mod.rs`). The cold path
 has **two distinct stages** — getting this wrong was the v2 error (Codex r2):
 
 - **Stage 1 — first MissingNeighbor packet (NOT the resolver).** On a
-  `dynamic_neighbors` miss the hot path inserts an **INCOMPLETE kernel neighbor
-  so the kernel itself sends the ARP/NDP solicitation** through the normal stack
-  (`poll_descriptor/mod.rs:2168-2174`), and buffers **one representative packet**
+  `dynamic_neighbors` miss the hot path **triggers kernel ARP/NDP resolution**
+  (`trigger_kernel_arp_probe`, `poll_descriptor/mod.rs:2193`) so the kernel
+  itself sends the solicitation through the normal stack (which may create/
+  advance the kernel INCOMPLETE→… NUD state as a consequence), and buffers
+  **one representative packet**
   per `(egress_ifindex, next_hop)` in `pending_neigh` (#1771 §2.2,
   `worker/mod.rs:124-137`); duplicate siblings for the same key are
   **dropped+recycled** (`poll_descriptor/mod.rs:2434` `if
@@ -105,8 +107,8 @@ separately falsifiable:
   in the timestamped idle-window `ip monitor neigh` log.
 - **WHY SLOW — H3: resolution waits for the kernel REACHABLE transition instead
   of reusing the kernel's already-usable DELAY/STALE lladdr.** On the first miss
-  (Stage 1) the hot path inserts INCOMPLETE and waits for the kernel
-  ARP/NDP→REACHABLE round-trip + netlink publish before `dynamic_neighbors` is
+  (Stage 1) the hot path triggers kernel ARP/NDP resolution and waits for the
+  kernel ARP/NDP→REACHABLE round-trip + netlink publish before `dynamic_neighbors` is
   populated, even though the kernel often already holds a usable DELAY/STALE
   lladdr it could forward on. That round-trip is the core latency. (If Stage 2
   is reached, the #1769 resolver also refuses DELAY/STALE — `:700` probe-only —
@@ -218,6 +220,12 @@ hypothesis/signature table — NOT a runnable end-to-end capture today.
   corrects `dynamic_neighbors`. AGY's verdict: a bounded transient wrong-MAC
   window is an acceptable trade vs a guaranteed multi-second cold-start stall.
   PR-2 must ratify this explicitly.
+- **Hot-path non-blocking (AGY r3, hard):** anything the Option-B first-miss
+  path does on the poll thread MUST be non-blocking — no synchronous netlink
+  (`RTM_GETNEIGH`) send/recv, no lock that the monitor thread can hold across a
+  syscall. A blocking transaction in the poll loop stalls the whole RSS ring
+  (ms-scale) and collapses warm-flow throughput. Use a lockless local mirror
+  fed by the async netlink monitor.
 - **HA:** cold path runs on both nodes; `make test-failover` (13/0 on Path A)
   must stay green.
 
@@ -225,18 +233,24 @@ hypothesis/signature table — NOT a runnable end-to-end capture today.
 
 - **Option B (leading) — reuse a DELAY/STALE-usable kernel lladdr at the
   FIRST-miss site.** CRITICAL framing correction (Codex r2): the first miss is
-  Stage 1 (insert INCOMPLETE + buffer), and the #1769 resolver is Stage-2-only
+  Stage 1 (trigger kernel ARP probe + buffer), and the #1769 resolver is Stage-2-only
   — so modifying *only the resolver* would NOT touch the first miss. B must add
   an **early first-miss path**: on a `dynamic_neighbors` miss, before inserting
-  INCOMPLETE and buffering, do a synchronous/inline check for a kernel-usable
-  (DELAY/STALE) lladdr (e.g. an `RTM_GETNEIGH` / cached kernel-table read) and
-  confirm it into `dynamic_neighbors` via `insert_confirmed_if_unchanged`,
-  forwarding immediately. This attacks H3 at Stage 1 and **shrinks the H5/H1/H4
-  window** — but does **not** fully eliminate H5: same-poll-burst siblings can
-  still be dropped before the (possibly async) confirm populates the map, so
-  PR-2 must state whether the first-miss reuse is inline-synchronous within the
-  poll batch. Subject to the Q7 semantic ratification + the #1769 epoch guard
-  (§8).
+  the kernel ARP probe and buffering, check a **non-blocking local userspace mirror** of
+  the kernel neighbor table (populated asynchronously by the netlink monitor
+  thread) for a usable (DELAY/STALE) lladdr and confirm it into
+  `dynamic_neighbors` via `insert_confirmed_if_unchanged`, forwarding
+  immediately. **HARD CONSTRAINT (AGY r3): the first-miss check MUST be
+  strictly non-blocking — NO synchronous `RTM_GETNEIGH`/netlink transaction on
+  the poll thread.** A blocking netlink send+recv in the poll loop freezes the
+  worker core for milliseconds during a miss, dropping packets and collapsing
+  throughput on every warm flow sharing that RSS ring. Read a lockless local
+  mirror, never issue a blocking syscall. This attacks H3 at Stage 1 and
+  **shrinks the H5/H1/H4 window** — but does **not** fully eliminate H5:
+  same-poll-burst siblings can still be dropped before the confirm propagates,
+  so PR-2 must state whether the first-miss reuse populates the map
+  inline-synchronously within the poll batch or asynchronously. Subject to the
+  Q7 semantic ratification + the #1769 epoch guard (§8).
 - **Option D (compound with B) — don't keep the neg entry armed while a probe
   is progressing / when the kernel has a usable lladdr.** Narrow H1 mitigation
   that preserves the dead-host defense (only suppresses the false lockout when
