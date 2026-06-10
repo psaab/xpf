@@ -2,11 +2,33 @@
 
 ## 1. Status
 
-DRAFT v1.1 — pending adversarial plan review (Claude SMR + Codex + AGY, research mode, no PR).
-v1.1 incorporates Claude SMR r1 findings F1–F5 (`claude-smr-plan-r1.md`):
-P-N1 re-specified off the one's-complement zero boundary; P-I5 generator
-constraint made explicit; S3 pre-committed to fixture mutation; shrink-path
-cost stated; convergence comment must enumerate undelivered #1669 §12 bullets.
+DRAFT v2 — post round-1 (Claude SMR r1 PLAN-NEEDS-REVISION + Codex r1
+PLAN-NEEDS-REVISION task-mq8eallo-ig9zmu + AGY r1 PLAN-NEEDS-REVISION
+adversarial-review-mq8eiccu-dallbv); pending round-2 convergence.
+
+v1.1 folded SMR r1 F1–F5. v2 folds Codex r1 (1–6) + AGY r1 (1–4):
+- **S3 DROPPED** (Codex 5 + AGY Q4 + SMR Q4 convergent): `ConfigSnapshot`
+  has no `PartialEq` (protocol/snapshot.rs:182) so P-W1 doesn't even compile
+  without a production derive change, the Rust crate has no decoder, and Go
+  contract tests cover the schema. §5.3-S3 retained as a tombstone.
+- **P-N3 re-specified** (Codex 1+2, AGY 1+2): `verify_built_frame_checksums`
+  is v4-TCP-only (frame/mod.rs:1129–1131 early-returns `(true,true)` for
+  everything else) → replaced by a test-local full-recompute oracle; byte
+  equality now excludes L4 checksum bytes (two legitimate production
+  divergences found by review: rewrite/ipv6.rs:98 canonicalizes 0→0xFFFF for
+  ALL v6 protocols vs generic UDP/ICMPv6-only at checksum.rs:88; the
+  family-ungated UDP `current == 0` bypass at frame/mod.rs:906); success
+  property runs both paths with `expected_ports=None`; decline conditions
+  moved to deterministic example tests.
+- **P-N1 inverse(D)** (Codex 3, AGY 3): harness-defined same-packet undo,
+  explicitly NOT `NatDecision::reverse` (nat/mod.rs:71–74 is reverse-flow).
+- **Generator** (Codex 4, AGY 4): structured v6 ext-header chain strategy is
+  the primary generator — forced routing(43)/AH(51)/fragment(44)/
+  no-next-header(59), >6-header chains; llvm-cov spot-check during
+  implementation.
+- Layout switched to `frame/prop_tests/` directory module (Codex Q6 + AGY
+  Q6); RNG-determinism wording fixed; cargo-fuzz "blocked" reworded to
+  "not worth the facade/shims now".
 
 Worktree: `.claude/worktrees/research-1824-fuzz` @ `d30cfab84` (origin/master).
 All file/line references below are to that SHA.
@@ -67,9 +89,9 @@ is explicitly out of scope (§10). It is also not coverage-guided fuzzing;
 proptest explores randomly, not by branch feedback (§5.1 explains why that
 trade is right for this crate today).
 
-Expected size: ~3 new test files, ~600–900 LOC of test code, one
-dev-dependency, ≤10s added `cargo test` wall-clock at the default case
-counts.
+Expected size: one new `frame/prop_tests/` directory module (~5 files,
+~600–900 LOC of test code), one dev-dependency, ≤10s added `cargo test`
+wall-clock at the default case counts.
 
 *If reviewers conclude the bug-finding value is too small to justify the
 churn and the new dependency, PLAN-KILL is an acceptable verdict.*
@@ -149,10 +171,13 @@ lane would have no scheduled executor.
 boundary-biased random generation is real for deep parsers (ASN.1, TLS), but
 the parsers here are shallow (≤6 extension-header iterations, fixed-offset
 field reads, all already behind `get()`/length checks); the structural cost
-(lib facade reversing an intentionally compiler-enforced boundary) plus the
-missing CI home outweigh it. If a future lib split happens for other reasons,
-re-evaluate via a fresh issue. This is *not* Option C — we do not pre-commit
-to a fuzz follow-up nobody will schedule.
+plus the missing CI home outweigh it. Precision (Codex r1 finding 6):
+"blocked" means *not worth the workarounds*, not impossible — a lib facade,
+`#[cfg(fuzzing)]` visibility shims, or source-inclusion (`include!`) fuzz
+targets are all technically feasible and all ugly enough to need their own
+justification. If a future lib split happens for other reasons, re-evaluate
+via a fresh issue. This is *not* Option C — we do not pre-commit to a fuzz
+follow-up nobody will schedule.
 
 `proptest` enters as `[dev-dependencies] proptest = { version = "1",
 default-features = false, features = ["std"] }` — drops the `fork`/`timeout`
@@ -164,38 +189,33 @@ byte-for-byte except for nothing — it does not see the dep at all).
 
 ### 5.2 Harness layout
 
-Follow the existing sibling-`*_tests.rs`-with-`#[path]` convention (e.g.
-frame/mod.rs:1301):
+Directory module under `frame/` (module-dir layout convention; ratified by
+Codex r1 Q6 + AGY r1 Q6 over sibling flat files):
 
 ```
-userspace-dp/src/afxdp/frame/prop_inspect_tests.rs   # §5.3-S1 (parse)
-userspace-dp/src/afxdp/frame/prop_rewrite_tests.rs   # §5.3-S2 (NAT)
-userspace-dp/src/afxdp/frame/prop_segment_tests.rs   # §5.3-S4 (TSO)
-userspace-dp/proptest-regressions/…                  # committed shrunk failures
+userspace-dp/src/afxdp/frame/prop_tests/mod.rs        # includes + ProptestConfig consts
+userspace-dp/src/afxdp/frame/prop_tests/strategies.rs # shared generators (§ below)
+userspace-dp/src/afxdp/frame/prop_tests/inspect.rs    # §5.3-S1 (parse)
+userspace-dp/src/afxdp/frame/prop_tests/rewrite.rs    # §5.3-S2 (NAT)
+userspace-dp/src/afxdp/frame/prop_tests/oracle.rs     # full-recompute checksum oracle (§5.3-S2)
+userspace-dp/src/afxdp/frame/prop_tests/segment.rs    # §5.3-S4 (TSO)
+userspace-dp/proptest-regressions/…                   # committed shrunk failures
 ```
 
 included from `frame/mod.rs`:
 
 ```rust
 #[cfg(all(test, not(miri)))]
-#[path = "prop_inspect_tests.rs"]
-mod prop_inspect_tests;
-// … same for the other two
+mod prop_tests;
 ```
 
 `not(miri)` because proptest's case loops are intractable under miri and the
 project does run targeted `cargo +nightly miri test --bin` passes (#1755
 lesson); the deterministic example tests keep miri coverage of the same fns.
 
-The S3 snapshot/serde properties live in
-`userspace-dp/src/prop_state_tests.rs` included from `main.rs` next to the
-existing `main_tests.rs` include, same `cfg(all(test, not(miri)))` gate.
-
-Shared strategies (tuple/packet generators) live in a
-`#[cfg(test)] pub(in crate::afxdp) mod prop_strategies` block at the top of
-`prop_inspect_tests.rs` and are reused by the other two frame files via
-`super::prop_inspect_tests::prop_strategies` — no production module is
-created for test plumbing.
+Shared strategies and the checksum oracle are private to `prop_tests/`
+(`pub(super)` inside the directory module) — no production module is created
+for test plumbing, and nothing leaks outside `frame/`.
 
 Generator design (the part that determines whether these tests find
 anything): two strategy families per surface —
@@ -212,13 +232,21 @@ anything): two strategy families per surface —
 - **`arb_valid_packet()`** — wraps the existing builders
   (`build_ipv4_tcp_frame` etc.) over generated tuples: addrs from
   `any::<u32>()`/`any::<[u8;16]>()`, ports `any::<u16>()`, payload len
-  `0..1600`, IHL ∈ {20, 24, 60}, optional VLAN tag, IPv6 with 0–2 extension
-  headers (hop-by-hop/dest-opts) and optional fragment header. The v6
-  ext-header generator is new (existing builders don't emit ext headers) and
-  is the highest-value generator in the plan — the ext-header walk in
-  `frame_l4_offset`/`packet_rel_l4_offset` (inspect.rs:44–137) is the most
-  branch-dense parse code with zero current test coverage of AH (51) and
-  fragment (44) arms.
+  `0..1600`, IHL ∈ {20, 24, 60}, optional VLAN tag.
+- **`arb_v6_ext_chain()`** — a dedicated *structured* IPv6 extension-header
+  chain strategy, the primary generator for the v6 parse arms (Codex r1
+  finding 4 + AGY r1 finding 4: stamped garbage will not reliably reach
+  them). Generates chains drawn from {hop-by-hop(0), routing(43),
+  dest-opts(60), AH(51), fragment(44), no-next-header(59)} with: forced-AH
+  cases (the `(len+2)*4` arithmetic at inspect.rs:60–67 differs from the
+  `(len+1)*8` options arithmetic), forced-fragment cases (fixed 8-byte
+  advance, inspect.rs:68–75), chains **longer than 6** (the loop bound at
+  inspect.rs:50 — pins the `Some(offset)` post-loop behavior), oversized
+  hdr-ext-len values that walk past the buffer, and truncated chains. The
+  ext-header walk is the most branch-dense parse code with zero current test
+  coverage of the AH/fragment/no-next arms. Acceptance evidence during
+  implementation: one `cargo llvm-cov` spot-run over the prop tests showing
+  the 43/51/44/59 arms executed (documented in the PR, not wired into CI).
 
 ### 5.3 Property list per surface
 
@@ -239,22 +267,25 @@ flag readers reached through the same entry points):
 
 | ID | Property | Inputs |
 |----|----------|--------|
-| P-N1 | Round-trip identity **on non-checksum bytes**: for valid v4/v6 TCP/UDP packets and NAT decision D (any non-empty subset of {src ip, dst ip, sport, dport} rewritten), after `apply_nat(apply_nat(pkt, D), inverse(D))` the addresses, ports, every other header field, and the payload are byte-identical to the original. **Checksum fields are explicitly excluded from byte comparison** — one's-complement zero has two encodings (0x0000/0xFFFF) and the code deliberately maps across them (rewrite/ipv4.rs:113–118, rewrite/ipv6.rs:96, generic UDP `keep_zero`), so byte round-trip on checksum fields is legitimately violable; instead each hop's checksums must pass the P-N2 full-recompute validity oracle (i.e. "valid before, valid after fwd, valid after rev"). This is the issue's "NAT fwd∘rev == identity on the rewritten fields" stated on the actual unit the code exposes (`NatDecision` is direction-agnostic; the session-reverse-entry composition is out of scope, §10) | valid packets × arb NatDecision |
-| P-N2 | Checksum validity oracle: after `apply_nat`, full recompute (`checksum16` over IP header; `checksum16_ipv4`/`checksum16_ipv6` pseudo-header over L4) matches the stored checksums — i.e. the incremental `adjust_l4_checksum_*` deltas equal ground truth. UDP/v4 zero-checksum packets stay zero (RFC 768); UDP/v6 and rewritten-UDP/v4 never end at 0x0000 | valid packets × arb NatDecision |
-| P-N3 | **Differential, descriptor vs generic**: build the same valid TCP/UDP frame into two `MmapArea`s; apply the generic in-place path (`rewrite_forwarded_frame_in_place`) and the descriptor path (`apply_rewrite_descriptor` with `RewriteDescriptor` whose deltas come from `compute_l4_csum_delta` exactly as flow_cache.rs:339 builds them); assert the resulting frames are byte-identical and both pass `verify_built_frame_checksums` (frame/mod.rs:1120). Cases where the descriptor path declines (`None`: TTL≤1, port mismatch, nat64/nptv6) assert the generic path is the only writer | valid packets × arb NAT × arb TTL/ports |
-| P-N4 | Payload immutability: bytes after the L4 header are untouched by either path | same |
+| P-N1 | Round-trip identity **on non-checksum bytes**: for valid v4/v6 TCP/UDP packets and NAT decision D (any non-empty subset of {src ip, dst ip, sport, dport} rewritten), after `apply_nat(apply_nat(pkt, D), undo(D, pkt))` the addresses, ports, every other header field, and the payload are byte-identical to the original. **`undo` is a harness-defined same-packet inverse** — `NatDecision { rewrite_src: D.rewrite_src.map(\|_\| orig_src), rewrite_dst: D.rewrite_dst.map(\|_\| orig_dst), … }` — explicitly NOT `NatDecision::reverse` (nat/mod.rs:71–74), which builds the reverse-FLOW decision (src↔dst swapped) for reply packets and would corrupt a same-direction packet (Codex r1 finding 3, AGY r1 finding 3). **Checksum fields are excluded from byte comparison** — one's-complement zero has two encodings (0x0000/0xFFFF) and the code deliberately maps across them (rewrite/ipv4.rs:113–118, rewrite/ipv6.rs:96–98, generic UDP `keep_zero`); instead each hop's checksums must pass the P-N2 oracle ("valid before, valid after fwd, valid after undo"; v4 UDP zero-checksum stays zero across both hops). The session-level fwd/rev composition via `NatDecision::reverse` gets ONE deterministic example test (forward packet through D, synthesized reply through `D.reverse(...)`, assert the reply's rewritten tuple maps back to the original flow) — example, not property, because it needs a semantically-built reply packet | valid packets × arb NatDecision |
+| P-N2 | Checksum validity oracle (`prop_tests/oracle.rs`): a test-local full recompute — `checksum16` over the IP header (v4), `checksum16_ipv4`/`checksum16_ipv6` pseudo-header over the L4 segment with checksum field zeroed — compared against stored values, treating 0x0000/0xFFFF as the defined-equal pair where the protocol permits both. **NOT** `verify_built_frame_checksums`: that helper early-returns `(true, true)` for everything except IPv4 TCP (frame/mod.rs:1129–1131 "Only handle IPv4 TCP for now") and would make the v6/UDP arms vacuous (Codex r1 finding 1). Asserts: incremental `adjust_l4_checksum_*` deltas equal ground truth; UDP/v4 zero-checksum stays zero (RFC 768); UDP/v6 stored checksum never 0x0000 | valid packets × arb NatDecision |
+| P-N3 | **Differential, descriptor vs generic — success cases**: build the same valid TCP/UDP frame (TTL ≥ 2, v6 UDP checksum non-zero) into two `MmapArea`s; apply the generic path (`rewrite_forwarded_frame_in_place`) and the descriptor path (`apply_rewrite_descriptor`, deltas from `compute_l4_csum_delta` exactly as flow_cache.rs:339 builds them), both with `expected_ports = None` (the two paths check expected ports at different pipeline points — descriptor pre-NAT as a DMA-race guard at rewrite/ipv4.rs:36, generic post-NAT via `enforce_expected_ports` at frame/mod.rs:526 — so port-mismatch inputs are NOT differential-comparable; Codex r1 finding 2); assert both succeed and the frames are **byte-identical except the L4 checksum bytes**, with both checksums passing the P-N2 oracle. The L4-checksum byte exclusion is forced by two real, review-discovered production divergences documented in §10-D: rewrite/ipv6.rs:98 canonicalizes 0→0xFFFF for ALL v6 protocols while the generic policy does so only for UDP/ICMPv6 (checksum.rs:88), and frame/mod.rs:906's UDP `current == 0` skip is not family-gated | valid packets × arb NAT |
+| P-N3b | Decline conditions as **deterministic example tests**, not properties: (a) TTL/hop-limit ≤ 1 → BOTH paths return `None` and neither writes (the v1 claim "generic is the only writer" was wrong — frame/mod.rs:495 declines too); (b) descriptor port-mismatch (expected_ports set, frame differs) → descriptor `None`, frame untouched by it; (c) `rd.nat64`/`rd.nptv6` → descriptor `None` at rewrite/mod.rs:55, and note the flow cache never builds descriptors for them anyway (`should_cache` gates at flow_cache.rs:223–224) | fixed examples |
+| P-N4 | Payload immutability: bytes after the L4 header are untouched by either path | valid packets × arb NAT |
 
-**S3 — state encode (re-scoped per §4.2):**
-
-| ID | Property | Inputs |
-|----|----------|--------|
-| P-W1 | Serde round-trip: `serde_json::from_*(serde_json::to_*(x)) == x` for `BindingCountersSnapshot` (full per-field strategy — small struct) and for `ConfigSnapshot` via **field-wise mutation of the two existing `test_fixtures.rs` fixtures** (randomize scalar/string/vec-length fields of fixture clones), NOT full-shape hand-rolled strategies and NOT `derive(Arbitrary)` on production types. Full-shape ConfigSnapshot strategies would be ~150 LOC of generator for marginal value; fixture mutation keeps S3 inside its ~80-LOC budget. Generalizes the existing single-example round-trips at main_tests.rs:906/1432 | mutated fixtures |
-| P-W2 | Deterministic (non-prop) StateWriter durability test: `persist()` to a tempdir path → read-back equals payload; `temporary_path` never equals its input and stays in the same directory (state_writer.rs:183–192 extension edge cases: no extension, dotfile, multi-dot) | fixed examples |
-
-P-W1/P-W2 are deliberately the smallest slice of this plan (~80 LOC). If
-reviewers judge even that as ballast given the existing example tests and the
-Go-side contract tests, dropping S3 entirely is a fine outcome — say so in
-review rather than nodding it through.
+**S3 — state encode: DROPPED in v2** (Codex r1 finding 5 + AGY r1 Q4 + SMR
+r1 Q4, unanimous). Three independent reasons: (1) §4.2 — the premise was
+wrong; `state_writer.rs` is a persister, there is no Rust decode
+counterpart; (2) the proposed `== x` round-trip does not even compile —
+`ConfigSnapshot` derives `Clone, Debug, Serialize, Deserialize, Default`
+with **no `PartialEq`** (protocol/snapshot.rs:182), and adding one for tests
+would be a production-type change this plan forbids; (3) the schema is
+already pinned by Go-side contract tests
+(pkg/dataplane/userspace/cold_path_status_test.go) and the existing
+example round-trips (main_tests.rs:906/1432). A plain `StateWriter::persist`
+read-back unit test remains a legitimate ordinary-test follow-up outside
+this harness's scope (§10). The convergence comment on #1824 must state that
+the issue-title surface "state_writer encode" is descoped and why.
 
 **S4 — TCP segmentation** (`frame/tcp_segmentation.rs::segment_forwarded_tcp_frames_from_frame`,
 pure: `&[u8] → Option<Vec<Vec<u8>>>`; needs only a fixture `ForwardingState`
@@ -264,7 +295,7 @@ for the MTU lookup and a `SessionDecision`):
 |----|----------|--------|
 | P-T1 | No panic for garbage frames × arbitrary meta × fixture forwarding state | garbage |
 | P-T2 | Reassembly identity: when `Some(segs)`, concatenating per-segment TCP payloads == original TCP payload | valid oversized TCP packets (payload 1×–4× MTU, MTU ∈ 1280..9216, TCP options 0..40B, v4 IHL 20..60) |
-| P-T3 | Per-segment wellformedness: every segment ≤ eth_len+MTU; `seq_i == orig_seq.wrapping_add(cumulative_offset)` (incl. seq wrap near u32::MAX); PSH cleared on all but last; SYN/FIN/RST never present (precondition gate at :69 declines them — asserted as `None`); IP total-length/payload-length fields consistent; both checksums verify via `verify_built_frame_checksums`; segment count == `ceil(payload/segment_max)` | same |
+| P-T3 | Per-segment wellformedness: every segment ≤ eth_len+MTU; `seq_i == orig_seq.wrapping_add(cumulative_offset)` (incl. seq wrap near u32::MAX); PSH cleared on all but last; SYN/FIN/RST never present (precondition gate at :69 declines them — asserted as `None`); IP total-length/payload-length fields consistent; per-segment IP + L4 checksums verify via the **P-N2 test-local oracle** (not `verify_built_frame_checksums` — v4-TCP-only, see S2); segment count == `ceil(payload/segment_max)` | same |
 | P-T4 | NAT composition: with a NAT decision in the `SessionDecision`, every segment carries the rewritten tuple and valid checksums (composes S2's oracle) | same × arb NAT |
 
 The UMEM-coupled twin (`tx/tcp_segmentation.rs::…_into_prepared`) is **out of
@@ -277,7 +308,7 @@ is recorded as a candidate follow-up in §10, not silently absorbed.
   `ProptestConfig { cases: N, max_shrink_iters: 4096, .. }`. N = 512 for
   cheap parse properties (P-I*), 256 for S2/S4 (packet build + dual rewrite +
   full-recompute oracle per case), 128 for P-N3 (two MmapAreas per case),
-  64 for P-W1. Measured target: **≤10s added to `cargo test --release`
+  Measured target: **≤10s added to `cargo test --release`
   wall-clock total**; if a property exceeds ~2s at these counts, the count is
   halved and the halving justified in the test header comment.
 - Failure-path cost is different and unbounded-ish by design: a failing
@@ -285,11 +316,13 @@ is recorded as a candidate follow-up in §10, not silently absorbed.
   low minutes shrinking before it reports. That cost is paid only on a real
   counterexample (or a property bug) and buys a minimal repro; it is
   accepted, not hidden.
-- Determinism: proptest's default RNG is deterministic per-seed with
-  failure persistence; `proptest-regressions/**/*.txt` files are
-  **committed** so every previously-found counterexample replays first on
-  every future run (the actual regression-pinning mechanism). No
-  time-dependent or env-dependent generation.
+- Determinism, stated precisely (Codex r1 finding 6): **passing runs use a
+  fresh random seed each run** — that is the point (continuous exploration);
+  what is deterministic is (a) the committed
+  `proptest-regressions/**/*.txt` corpus, replayed FIRST on every run, which
+  is the actual regression-pinning mechanism, and (b) the fixed case counts.
+  We do not fix the run seed. Generation logic itself is pure (no
+  time/env-dependent strategies).
 - Soak knob: `PROPTEST_CASES=100000 cargo test -p … prop_` documented in the
   test-file headers for operator-driven deep runs; never wired into any gate.
 - Gates: the new tests run wherever `cargo test --manifest-path
@@ -305,8 +338,8 @@ layout in §5.2 places files inside the same module tree, exactly like
 `Cargo.lock` gains proptest's dev-graph (compiled for tests only). The
 release binary, the control protocol, and all module docs' behavioral
 contracts are untouched. Docs: `userspace-dp/src/afxdp/frame/README.md`
-gains a short "property tests" section describing the three prop files and
-the regression-corpus convention (module-doc contract per CLAUDE.md).
+gains a short "property tests" section describing the `prop_tests/` module
+and the regression-corpus convention (module-doc contract per CLAUDE.md).
 
 ## 7. Hidden invariants the change must preserve
 
@@ -318,9 +351,8 @@ the regression-corpus convention (module-doc contract per CLAUDE.md).
 - **`debug-log` feature build stays green** — P-N3 calls paths that contain
   `cfg!(feature = "debug-log")` checksum verification; tests must pass both
   with and without the feature (`make build-userspace-dp-debug-log` parity).
-- **Test determinism under parallel `cargo test`** — no shared tempdir
-  collisions (reuse the TempGuard pattern from `fairness_eval_blackbox.rs`
-  for P-W2); no reliance on thread-local debug counters.
+- **Test determinism under parallel `cargo test`** — no shared state across
+  prop tests; no reliance on thread-local debug counters.
 - **`unsafe` discipline** — P-N3 exercises `slice_mut_unchecked` through the
   same call shapes as production (via the public-ish entry fns), never adds
   new unsafe in test code beyond what existing tests already do.
@@ -353,12 +385,42 @@ the harness PR pins it (tests must land green; we don't commit xfail).
    one bounds check, confirm P-N3/P-I1 actually fail, revert. This proves
    the oracle bites — the most common failure mode of property-test PRs is
    vacuous properties.
+4b. Coverage spot-check (manual, documented in PR): one `cargo llvm-cov`
+   run over the prop tests showing the IPv6 ext-header arms 43/51/44/59 in
+   `frame_l4_offset`/`packet_rel_l4_offset` executed (Codex r1 finding 4 /
+   AGY r1 Q3 acceptance evidence). Not wired into any gate.
 5. Standard repo gates: `make build`, `make test` (Go suite unaffected),
    `make audit-check`.
 6. No smoke/cluster run needed (test-only, no dataplane artifact change) —
    consistent with the batch-smoke policy for non-runtime PRs.
 
 ## 10. Out of scope (explicitly)
+
+### §10-D — Review-discovered production divergences (documented, NOT fixed here)
+
+Round-1 review surfaced two real behavioral divergences between the
+descriptor fast path and the generic NAT path. This plan documents and
+test-accommodates them (P-N3's checksum-byte exclusion); it does **not**
+change production code. Each gets a small standalone issue filed at
+implementation time so the divergences are owned, not buried in a test
+comment:
+
+- **D1 — v6 zero-checksum canonicalization scope**: rewrite/ipv6.rs:96–98
+  maps a computed 0x0000 L4 checksum to 0xFFFF for ALL v6 protocols
+  (including TCP), while the generic policy (`adjust_zero_checksum_illegal`,
+  checksum.rs:85–90) canonicalizes only UDP/ICMPv6. Both encodings are valid
+  one's-complement zero, so this is wire-harmless, but it breaks bit-exact
+  path equivalence. (AGY r1 finding 1, Codex r1 finding 1.)
+- **D2 — family-ungated UDP zero-checksum skip on port rewrite**:
+  `adjust_l4_checksum_port` (frame/mod.rs:~906) skips the checksum update
+  when `protocol == UDP && current == 0` without checking address family;
+  the comment says "optional for IPv4 UDP" but v6 UDP (where 0 is
+  malformed input) takes the same skip, while the descriptor path applies
+  its delta. Only reachable on malformed input; the harness's valid-packet
+  generators never emit v6 UDP checksum 0, and one deterministic example
+  pins current behavior. (AGY r1 finding 2.)
+
+### Deferred / rejected
 
 - **cargo-fuzz / coverage-guided lane** — rejected for now (§5.1); revisit
   only if a lib split lands for independent reasons.
@@ -369,6 +431,9 @@ the harness PR pins it (tests must land green; we don't commit xfail).
 - **`tx/tcp_segmentation.rs::…_into_prepared`** and a differential test
   against its pure twin — blocked on a `BindingWorker`/tx_pipeline fixture;
   candidate follow-up issue.
+- **S3 / state encode** — dropped in v2 (see §5.3-S3 tombstone); an
+  ordinary `StateWriter::persist` read-back unit test is a legitimate
+  follow-up outside this harness.
 - **NAT64/NPTv6 translation properties** (`nat64.rs`, `nptv6.rs`) — real
   candidates (NAT64 has its own checksum16 clones at nat64.rs:408+) but
   header-size-changing translation needs its own generator design; keep this
@@ -386,34 +451,44 @@ the umbrella residue stays honest (SMR r1 F5).
 
 ## 11. Open questions for adversarial review (PLAN-KILL invitable on each)
 
-1. **Is the whole thing worth it?** 78+24+20+13 example tests already cover
-   these files; the parse fns are short and `get()`-disciplined. If you
-   believe random+shrinking adds ~nothing over the existing examples plus
-   review discipline, say PLAN-KILL — "genuinely new" (the #1669 claim) is
-   not the same as "genuinely valuable".
-2. **Is P-N3 (descriptor-vs-generic differential) sound as specified?** The
-   two paths intentionally differ in *when* they decline (descriptor declines
-   on port mismatch/nat64/nptv6/TTL and falls back). Is "byte-identical when
-   both succeed; assert decline conditions otherwise" the right contract, or
-   does hidden legitimate divergence (e.g. UDP zero-checksum handling
-   differences between rewrite/ipv4.rs:108–118 and the generic
-   `adjust_l4_checksum_*` path) make the property unprovable-as-stated?
-   Reviewers should check those two code paths' UDP-0 semantics specifically.
-3. **Strategy realism**: does the 25%-stamped garbage generator actually
-   reach the deep ext-header arms (AH/fragment), or do we need a dedicated
-   structured-v6-ext-header strategy as the primary generator (and is 512
-   cases enough to mean anything there)? Is there a measurement we should
-   demand (e.g. `llvm-cov` over one prop run) before trusting the harness?
-4. **S3 scope**: keep the ~80-LOC serde/persist slice, or drop it entirely
-   given §4.2 (no Rust decoder; Go contract tests exist)? Keeping a
-   misnamed surface alive just because the issue title names it is cargo
-   culting; killing it changes the issue's deliverable list.
-5. **proptest-regressions in-repo**: committed corpus files are the pinning
-   mechanism but also accumulate; is the team willing to review/own them, or
-   should we set `failure_persistence` to a custom path and rely on
-   re-finding (weaker)?
-6. **Module-include shape**: three sibling `prop_*_tests.rs` files in
-   `frame/` (consistent with `*_tests.rs` convention) vs one
-   `frame/prop_tests/` directory module (consistent with the module-dir
-   refactor preference) — which does the repo's layout contract actually
-   demand for *new* multi-file test additions?
+### Resolved in round 1 (all three reviewers)
+
+- ~~Q1 worth it?~~ — Codex: "Worth it after revision for S1/S2/S4; not
+  PLAN-KILL." AGY: "highly valuable… permanent regression guards." SMR:
+  architecture sound. Resolved: proceed with S1/S2/S4.
+- ~~Q2 P-N3 sound?~~ — No as v1.1-written; re-specified in v2 (success-only
+  differential, expected_ports=None, L4-checksum bytes excluded, oracle
+  replaced, declines → examples). D1/D2 divergences documented in §10-D.
+- ~~Q3 generator reach?~~ — structured `arb_v6_ext_chain()` is primary;
+  llvm-cov spot-check is acceptance evidence (§9 step 4b).
+- ~~Q4 S3?~~ — dropped, unanimous (also: would not compile — no PartialEq).
+- ~~Q5 regressions policy?~~ — commit them; RNG-determinism wording fixed;
+  only minimal shrunk failures checked in.
+- ~~Q6 layout?~~ — `frame/prop_tests/` directory module.
+
+### Open for round 2
+
+1. **P-N3 v2 soundness re-check**: with `expected_ports = None` and
+   L4-checksum bytes excluded, is the remaining byte-equality claim
+   (addresses, ports, TTL/hop, IP header checksum for v4, payload) actually
+   provable for every valid generated input — or is there a third hidden
+   divergence (e.g. the v4 IP-header checksum: descriptor folds
+   `rd.ip_csum_delta + 0xFEFF` while generic recomputes via
+   `adjust_ipv4_header_checksum` — same value always?)? PLAN-KILL the
+   property (not the plan) if a reviewer can show a valid-input divergence
+   outside the excluded bytes.
+2. **P-N1 undo semantics**: the harness `undo(D, pkt)` only restores fields
+   D rewrote. Is "non-rewritten fields never change" sufficiently covered
+   between P-N1 and P-N4, or does the round-trip need an explicit
+   frame-diff mask?
+3. **D1/D2 handling**: is "document + accommodate in tests + file issues at
+   implementation time" right, or should D1/D2 be fixed in production FIRST
+   so the differential property can be strengthened to full byte-equality
+   (smaller test, stronger contract, but couples this test-only plan to a
+   production change)?
+4. **Budget honesty**: 512/256/128 case counts at ≤10s total — anyone want
+   to argue the counts are too low to mean anything for the v6 ext-header
+   space (combinatorially the largest) and the budget should be spent
+   asymmetrically (e.g. 1024 on P-I1/P-I3, 64 elsewhere)?
+5. **Anything else that makes this not worth shipping?** PLAN-KILL remains
+   acceptable.
