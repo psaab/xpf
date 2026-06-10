@@ -27,3 +27,12 @@ v3 folds all round-2 findings.
 - Claude SMR: `claude-smr-plan-r3.md` — PLAN-READY
 - AGY: `adversarial-review-mq8f83e5-sx5ivx` — PLAN-READY (all four r2 conditions confirmed faithfully folded; Codex r2 folds introduce no new defect)
 - Codex: round-3 convergence check dispatched (id recorded on completion)
+
+## Round 3/4 completion — CONVERGED PLAN-READY
+
+- Codex r3: `task-mq8fdraf-59fj4s` — PLAN-NEEDS-REVISION (one Medium: explicit probe table range) → folded in v3.1 (`608b90e82`)
+- Codex r4 (final confirm on v3.1): `task-mq8fhmf7-xhqfvs` — **PLAN-READY, no findings**
+- AGY r3: `adversarial-review-mq8f83e5-sx5ivx` — **PLAN-READY** (v3; the v3→v3.1 delta is solely the table-range numeric fold inside the 50-99/per-test allocation AGY already approved, and AGY r3 confirmed the Codex pin-allocation folds introduce no new defect)
+- Claude SMR r3: `claude-smr-plan-r3.md` — **PLAN-READY**
+
+Converged at plan v3.1, commit 608b90e82 (+ r4 archive commit on top).
