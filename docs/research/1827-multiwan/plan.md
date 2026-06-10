@@ -1,9 +1,12 @@
 # #1827 Multi-WAN: uplink model, health probes, failover + PBR policy layer
 
-**Status:** DRAFT v2.1 — v2 revised after round-1 adversarial review (Claude
-SMR + Codex + AGY all PLAN-NEEDS-REVISION; r1 docs + verdicts beside this
-file); v2.1 folds Claude SMR r2 findings A/B (RPM gating scope precision,
-sustained-flap guidance)
+**Status:** DRAFT v3 — v2 revised after round-1 review (all three reviewers
+PLAN-NEEDS-REVISION); v2.1 folded Claude SMR r2 findings A/B; v3 folds
+round-2 findings: Codex r2 (pin-route multiplicity/ranges, named
+`PublishRouteOverlaySnapshot` API, complete `assembleFRRConfig` contract)
+and AGY r2 PLAN-READY conditions (snapshot-push-before-FIB-bump ordering,
+**operator-commit overlay preservation**, pin-rule crash cleanup, minimum
+inter-actuation throttle)
 
 This is a **multi-PR feature program** plan. The deliverable of this research
 pass is an honest staging: the PR-1 unit small and shippable, later PRs
@@ -199,14 +202,25 @@ independently:
    name for all three probe types.
 3. **`target address <ip>`** — canonical Junos form accepted alongside the
    existing bare form.
-4. **`next-hop`** — probe pin plumbing with **zero transit impact**:
-   pin /32 (/128) host routes to the probe target via the configured
-   next-hop go into a **dedicated kernel routing table** with an `ip rule`
-   `fwmark <probe-mark> lookup <table>`; probe sockets set `SO_MARK`.
-   Managed by `pkg/routing` (rules.go machinery exists). NOT in FRR, NOT
-   in the snapshot — transit traffic (fast path AND kernel slow path) is
-   untouched, satisfying AGY-7 and Codex-3 strictly. Pin state follows the
-   prober lifecycle (primary-only, §4.4), not config lifecycle.
+4. **`next-hop`** — probe pin plumbing with **zero transit impact**,
+   specified per-test (Codex r2-1, AGY r2-3): each test with `next-hop`
+   gets a deterministic **per-test fwmark + per-test kernel routing
+   table** (mark `0x1000 + idx`, table `probe-table-base + idx`, idx
+   assigned in sorted probe/test order), one `ip rule` per test
+   (`fwmark <mark> lookup <table>`) in the vacant **priority band 50-99**
+   (outside the existing next-table 100-199 / PBR 31000+ / rib-group
+   33000+ clear windows in `pkg/routing/rules.go`), and the pinned
+   /32 (/128) route installed with explicit `dev` + `onlink`. Per-test
+   tables make "same target via two uplinks" (the normal dual-WAN
+   pattern) first-class; table IDs are collision-checked against
+   routing-instance `TableID`s at commit. Probe sockets set `SO_MARK`.
+   NOT in FRR, NOT in the snapshot — transit traffic (fast path AND
+   kernel slow path) untouched. Startup runs a `clear()` pass over the
+   50-99 band and flushes probe tables so a crashed daemon never leaks
+   stale pins (AGY r2-3). Pin state follows the prober lifecycle
+   (primary-only within the §4.4 gating scope), not config lifecycle.
+   Named tests: two probes to the same target via different next-hops;
+   band/table cleanup on restart.
 5. **RPM re-apply on commit, config-hash-gated** — applyConfig re-applies
    RPM only when the rendered RPM stanza actually changed, so probe state
    (and the future ip-monitoring engine's sensor input) is never wiped by
@@ -244,32 +258,55 @@ the set of currently-injected preferred routes after winner resolution
 rejected):** a dedicated routes-only function that, under the SAME apply
 semaphore as operator commits:
 
-1. re-renders FRR via `ApplyFull` with the active config + overlay
-   (touches only the managed frr.conf section; differential frr-reload);
-2. rebuilds + pushes the dataplane snapshot (generation bump; content
-   hash covers overlay routes — named test that an overlay-only change
-   produces a hash delta and a sync);
-3. explicitly calls `BumpFIBGeneration()` (existing lightweight
-   `bump_fib_generation` control message) so established cached flows
-   re-resolve — the invariant Codex-2 flagged as unproven is made
-   explicit and tested rather than assumed.
+1. re-renders FRR via `ApplyFull` with `assembleFRRConfig(cfg, overlay)`
+   — a new helper extracted from `daemon_apply.go:740-776` that becomes
+   the **sole** `frr.FullConfig` constructor for BOTH the full apply path
+   and the actuator (DHCPRoutes, RethMap, IPv6NextHopInterfaces,
+   BackupRouter, GenerateRoutes, policy export, ClusterMode, instances —
+   the complete contract, per Codex r2-3), with the post-`ApplyFull`
+   consistent-hash sysctl handling shared as well;
+2. publishes the dataplane snapshot via a **named userspace Manager API**
+   `PublishRouteOverlaySnapshot(cfg, overlay, schedulerState)` (Codex
+   r2-2) modeled on the policy-scheduler partial republish
+   (`manager.go:700-740`): clone `lastSnapshot`, refresh `Routes` via
+   `buildRouteSnapshots` with the overlay, bump generation,
+   `apply_snapshot`. It must NOT call `Compile` (which detaches links /
+   restarts the helper) and reuses the existing hash/publish bookkeeping.
+   Tests: overlay-only content-hash delta, duplicate-publish skip,
+   established-flow re-resolution;
+3. **only after `apply_snapshot` returns success**, calls
+   `BumpFIBGeneration()` (existing lightweight `bump_fib_generation`
+   message). Ordering is load-bearing (AGY r2-1 High): bumping before the
+   helper has the new routes would re-resolve flows against the OLD
+   routes and the later snapshot would not re-invalidate — traffic stays
+   pinned to the dead uplink. Named test enforces the order.
+
+**Operator-commit overlay preservation (AGY r2-2 — defect in v2, fixed):**
+the FULL apply path (`applyConfigLocked`) must also consume
+`d.ipmon.ActiveOverlay()` — through the same `assembleFRRConfig` and the
+same overlay-aware `buildRouteSnapshots` — so an unrelated operator commit
+while a policy is FAILED does not wipe the injected route and revert
+traffic to the dead uplink until the next engine tick. One overlay, one
+constructor, two triggers (commit, transition).
 
 It does NOT touch networkd, ipsec, RPM, event-options, or the cluster /
 heartbeat paths — eliminating the r1 Critical feedback loops (heartbeat
 restart at `daemon_apply.go:718`; probe-state wipe via `rpm.Apply`).
 
-**Coalescing (Codex-7):** dirty-bit + bounded debounce (default 1 s); at
-most one actuation in flight; the actuator snapshots the overlay at run
-time (last-writer-wins), so a flap storm across N policies collapses to
-one FRR render + one snapshot push per debounce window. Never queues
+**Coalescing (Codex-7, AGY r2-4):** dirty-bit + bounded debounce (default
+1 s) **plus a minimum inter-actuation throttle (default 3 s)** so
+consecutive frr-reloads always have a cooling window; at most one
+actuation in flight; the actuator snapshots the overlay at run time
+(last-writer-wins), so a flap storm across N policies collapses to
+one FRR render + one snapshot push per throttle window. Never queues
 unbounded applies. Hold-down applies to recovery only (parity); fail is
 acted on at the next debounce tick. **Sustained-flap floor (SMR r2 fold
 B):** with hold-down 0, a per-cycle pass/fail flapper produces one
-frr-reload + one snapshot push per debounce window indefinitely — bounded
-and observable via `transitions_total`; operator guidance in
-`docs/multi-wan.md`: set `hold-down` on known-flappy links. The smoke flap
-test asserts the bound (≤1 actuation per window), not just "damping
-holds".
+frr-reload + one snapshot push per throttle window indefinitely — bounded
+and observable via `transitions_total` plus a reload-duration/churn metric
+(Codex r2 Q5); operator guidance in `docs/multi-wan.md`: set a non-zero
+`hold-down` (e.g. 5 s) on known-flappy links. The smoke flap test asserts
+the bound (≤1 actuation per throttle window), not just "damping holds".
 
 **Snapshot-side template:** the actuator's snapshot step follows the
 existing policy-scheduler partial republish at
@@ -327,7 +364,7 @@ re-apply). PR-1b: `pkg/config` (ip-monitoring stanza), new `pkg/ipmon`,
 | PR | Scope | Gate to start | PLAN-KILL criteria (stage-local) |
 |----|-------|---------------|----------------------------------|
 | **PR-1a** | RPM hardening: real ICMP echo, `destination-interface`, `next-hop` pin plumbing (fwmark table), `target address`, config-hash-gated re-apply, transition hook | This plan PLAN-READY | Kill if real ICMP echo cannot be validated through the AF_XDP local-delivery path on the loss cluster (smoke gate, run first). |
-| **PR-1b** | `services ip-monitoring` config + engine + routes-only actuator + FRR/snapshot overlay + FIB-generation bump + show/metrics + HA primary-only gating | PR-1a merged | Kill if the routes-only actuator cannot be carved out of applyConfig without duplicating reconciliation logic reviewers deem unmaintainable, or the overlay content-hash/fib-generation tests reveal the snapshot path cannot guarantee transition delivery. |
+| **PR-1b** | `services ip-monitoring` config + engine + routes-only actuator + FRR/snapshot overlay + FIB-generation bump + show/metrics + HA primary-only gating | PR-1a merged | Kill if the routes-only actuator cannot be carved out of applyConfig without duplicating reconciliation logic reviewers deem unmaintainable, or the overlay content-hash/fib-generation tests reveal the snapshot path cannot guarantee transition delivery. **First-week checks (Codex r2 Q7):** `PublishRouteOverlaySnapshot` lands with its three named tests, and PR-1a's same-target-two-uplinks pin test passes — both before the engine work proceeds. |
 | **PR-2** | Per-policy uplink selection = FBF composition: fix the `instance-type forwarding` FRR-default-table vs dp-`<ri>.inet.0` divergence, lift the PR-1b forwarding-type commit-rejection, `preferred-route routing-instance` into FBF instances, per-policy counters, operator recipe (`docs/multi-wan.md`), **two-upstream incus topology** (`test/incus/`) + smoke | PR-1b merged + smoke-proven flip | Kill/re-stage if the FBF fix requires Rust FIB table-semantics rework larger than the Go-side fix — PR-2 shrinks to a documented vrf-instance-type recipe and the FBF fix becomes its own issue. |
 | **PR-3** | NAT interplay: per-uplink SNAT pools (verify existing zone/rule-set matchers suffice), defined session behavior on uplink transition (fib-generation re-resolution + invalidation of sessions whose SNAT binding references the failed uplink, via existing filtered session-clear), counters + show reason | PR-2 merged; semantics mini-review in its PR plan | Kill if NAT-binding-keyed invalidation needs per-packet hot-path state the dp doesn't carry — fallback is Junos-like timeout behavior (document, don't build). |
 | **PR-4** | Weights/load-share: health-gated ECMP overlay, weighted flow-hash. Requires auditing dp ECMP next-hop determinism + HA symmetry first | PR-3 merged + a fresh /research round (NOT pre-authorized) | Kill if dp ECMP selection is not per-flow stable across nodes without Rust work; weighted hashing may not justify churn at 2 uplinks. |
@@ -502,8 +539,13 @@ re-enter plan review.
 
 ---
 
-*Round-1 verdicts: Claude SMR PLAN-NEEDS-REVISION
-(`claude-smr-plan-r1.md`), Codex PLAN-NEEDS-REVISION
-(`task-mq8el1x7-umm9hr`), AGY PLAN-NEEDS-REVISION
-(`adversarial-review-mq8ejo4w-90m0gs`); all r1 findings addressed above.
-Reviewer IDs in `reviewer-ids.md`.*
+*Round-1 verdicts: Claude SMR / Codex / AGY all PLAN-NEEDS-REVISION (docs
+beside this file). Round-2 verdicts on v2/v2.1: Claude SMR PLAN-READY
+contingent (`claude-smr-plan-r2.md`), AGY PLAN-READY with fold-in
+conditions (`agy-plan-r2.md`, `adversarial-review-mq8f0ig9-f1m1v7`),
+Codex PLAN-NEEDS-REVISION (`codex-plan-r2.md`, `task-mq8f0ald-x9h2je`).
+v3 folds every round-2 finding; the §12 questions are answered in the
+round-2 docs (winner-resolution: accepted by both; takeover window:
+accepted; debounce+throttle: accepted as revised; split: accepted; pin
+plumbing: revised per Codex r2-1/AGY r2-3). Reviewer IDs in
+`reviewer-ids.md`.*
