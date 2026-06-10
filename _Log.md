@@ -4894,3 +4894,6 @@ top.
 - **Timestamp**: 2026-06-10
   **Action**: /research #1838+#1839+#1840 — wrote converged-plan draft v1 (NAT/checksum v6 trio: thread rel_l4 into generic v6 NAT path; descriptor canonicalization scoped to adjust_zero_checksum_illegal; family-gate RFC 768 UDP-zero skip)
   **File(s)**: docs/research/1838-nat-v6-trio/plan.md
+- **Timestamp**: 2026-06-10
+  **Action**: round-1 reviews (Codex NEEDS-REVISION, AGY NEEDS-REVISION on 1838, Claude SMR NEEDS-REVISION) folded into plan v2 — icmp_embed pulled into scope (§5.7, G8), same-port stored-zero parity rule (§5.5), Q1-Q7 resolutions
+  **File(s)**: docs/research/1838-nat-v6-trio/{plan.md,claude-smr-plan-r1.md,codex-plan-r1.md,agy-plan-r1.md,reviewer-ids.md}

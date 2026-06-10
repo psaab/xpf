@@ -2,7 +2,26 @@
 
 ## 1. Status
 
-DRAFT v1 — pending adversarial plan review (Claude SMR + Codex + AGY).
+DRAFT v2 — round-1 review folds applied; pending round-2 convergence
+(Claude SMR + Codex + AGY).
+
+Round-1 verdicts: Codex PLAN-NEEDS-REVISION (2 findings), AGY
+PLAN-NEEDS-REVISION on #1838 / PLAN-READY on #1839+#1840 (5 findings),
+Claude SMR PLAN-NEEDS-REVISION (F1-F3). All three converged on the same two
+deltas; v2 folds:
+
+- **icmp_embed v6 fixed-40 pair pulled INTO #1838 scope** (Codex high + AGY
+  1/2 + SMR F2): the outer ICMPv6-error NAT match is ext-aware
+  (`icmp_embed/mod.rs:135-150` uses `meta.l4_offset`; the XDP shim walks ext
+  headers) but `build_nat_reversed_icmp_error_v6` hardcodes
+  `icmp_offset = 40` (`builders.rs:170-178`) — outer-ext errors are MATCHED
+  then corrupted (reachable, valid traffic). New §5.7 spec; new §5.1 G8 row.
+- **Same-port × stored-zero v6 UDP residual divergence closed by a parity
+  rule** (Codex medium + SMR F1): §5.6 matrix split + the no-op-port
+  canonicalization rule in §5.5.
+- AGY 3 (test-caller updates), AGY 4/Q1 resolution (meta-led precedence
+  kept, with rationale), AGY 5 + Codex Q7 (empty mask achievable) folded
+  into §5.2/§9/§11.
 
 One plan, one future PR. The three defects live in the same files
 (`userspace-dp/src/afxdp/frame/{mod.rs,checksum.rs,rewrite/ipv6.rs}`), share
@@ -50,7 +69,8 @@ Three divergences between the **generic** NAT rewrite path and the
   SNAT, `:502-531` v6 pool with `rewrite_src: Some(IpAddr::V6(..)),
   rewrite_src_port: Some(port)`), and the generic path carries every flow's
   first packets, all descriptor fallbacks, all TCP segmentation, the
-  pending-neighbor flush, and the slow path. Ext-headered TCP/UDP is rare in
+  pending-neighbor flush, the slow path, and (round-1 addition) the
+  ICMPv6-error NAT reversal builder. Ext-headered TCP/UDP is rare in
   the wild but trivially peer-constructible; the consequence is per-packet
   corruption (receiver discard), not a panic or memory-safety issue (all
   writes are bounds-checked within the packet).
@@ -113,6 +133,7 @@ cache gates on ACK-only TCP + UDP; NAT64 and NPTv6 decline up front
 | G5 | `tx/tcp_segmentation.rs:231/244` + `frame/tcp_segmentation.rs:291/304` | oversized forwarded TCP (> egress MTU) — per-segment NAT + full recompute |
 | G6 | `tx/dispatch/slow_path.rs:142` → `extract_l3_packet_with_nat` (:288) | slow-path reinject + local tunnel delivery |
 | G7 | fabric forwards with `apply_nat_on_fabric` (via G1/G2) | cross-chassis HA path |
+| G8 | ICMPv6-error NAT reversal: `icmp_embed/mod.rs:124-150` match (ext-aware via `meta.l4_offset`) → `poll_descriptor/mod.rs:867-919` → `icmp_embed/builders.rs:123` `build_nat_reversed_icmp_error_v6` (fixed-40 outer + embedded offsets) | inbound ICMPv6 errors (unreachable/too-big/etc.) for NAT-ed v6 flows — own builder, not `apply_nat_ipv6`, but same fixed-40 class (§5.7) |
 
 **Severity verdict**: every v6 NAT66/port-NAT flow's early packets traverse
 G1/G2; a cached flow's packets revert to generic on G3 conditions. So the
@@ -245,7 +266,14 @@ NAT64 is NOT in the blast radius: `nat64.rs` carries its own local
 `checksum16*` helpers (nat64.rs:323-438) and builds fresh base-header frames
 with full recomputes; it never calls the `frame/checksum.rs` adjusters.
 `build_injected_ipv6` and the syn-cookie builders construct base-40 headers
-from scratch — correct at 40 by construction.
+from scratch — correct at 40 by construction. `gre.rs:41` reads only the
+fixed-offset v6 addresses (correct regardless of ext headers);
+`icmp.rs:196-221` builds a fresh base-40 error packet.
+
+Two further same-class sites found in round 1 are dispositioned as follows:
+the icmp_embed v6 pair is IN scope (§5.7, reachable corruption); the MSS
+clamp v6 arm (`frame/tcp.rs:213` — `(40, packet[6])` then bails when
+`packet[6]` is an ext type) is a safe-bail feature gap, OUT of scope (§10).
 
 ### 5.4 #1839 fix spec — scope the descriptor canonicalization to the shared predicate
 
@@ -309,6 +337,33 @@ pub(super) fn adjust_l4_checksum_port(
 //          through the predicate for one-source-of-truth uniformity)
 ```
 
+**No-op-port parity rule (round-1 fold — Codex medium / SMR F1).** The
+generic path's `old_port != new_port` short-circuits (`frame/mod.rs:870`,
+`:879`) never call the adjuster, while the descriptor applies its ≡0 delta
+(`l4_csum_delta == 0xFFFF` passes the `rewrite/ipv6.rs:81` `!= 0` gate —
+pinned at `prop_tests/rewrite.rs:526`) and canonicalizes. On the one input
+where that is byte-visible — **malformed v6 UDP stored 0x0000 × identity
+port rewrite** — the paths would stay divergent (generic 0x0000, descriptor
+0xFFFF) even after the family gate. Close it with one slow-path branch at
+the end of `apply_nat_port_rewrite`:
+
+```rust
+// v6 UDP: a port-NAT decision is present (even if value-identity) —
+// mirror the descriptor's ≡0-delta application, which canonicalizes a
+// stored 0x0000 to 0xFFFF. v4 UDP stored-0 keeps the RFC 768 skip.
+if family == ChecksumFamily::V6
+    && protocol == PROTO_UDP
+    && (nat.rewrite_src_port.is_some() || nat.rewrite_dst_port.is_some())
+    && stored_l4_checksum(packet, l4_offset) == Some(0)
+{
+    write_l4_checksum(packet, l4_offset, 0xFFFF);
+}
+```
+
+(If an old≠new adjust already ran, the stored value is no longer literal
+0x0000 — the adjusters canonicalize their own computed zeros — so the rule
+only fires on the short-circuited identity case. v4 behavior untouched.)
+
 Plumbing: `apply_nat_port_rewrite` gains `family: ChecksumFamily`
 (`apply_nat_ipv4` passes `V4`, `apply_nat_ipv6` passes `V6`);
 `enforce_expected_ports` / `enforce_expected_ports_at` map their
@@ -323,7 +378,8 @@ fails other families). `enforce_expected_ports_at`'s currently-unused
 | Case | Generic path | Descriptor path | Identical? |
 |------|--------------|-----------------|------------|
 | v4 UDP stored 0x0000 (RFC 768 "no checksum") + NAT | skip update, stays 0 | skip (`rewrite/ipv4.rs:104`) | yes |
-| v6 UDP stored 0x0000 (malformed per RFC 8200) + port NAT | adjust from 0 (#1840 fix), canonicalize if result 0 | apply delta, canonicalize | yes — `checksum16_adjust(0, …)` and the delta fold are the same one's-complement arithmetic |
+| v6 UDP stored 0x0000 (malformed per RFC 8200) + port NAT, old≠new | adjust from 0 (#1840 fix), canonicalize if result 0 | apply delta, canonicalize | yes — `checksum16_adjust(0, …)` and the delta fold are the same one's-complement arithmetic, and for a pre-complement sum ≥ 1 the fold maps each congruence class to a unique representative, so the representations match |
+| v6 UDP stored 0x0000 + IDENTITY port NAT (old==new) | short-circuit would keep 0x0000 → **no-op-port parity rule (§5.5) writes 0xFFFF** | ≡0 delta applied, canonicalize → 0xFFFF | yes (after the §5.5 rule; divergent without it — round-1 catch) |
 | v6 UDP stored 0x0000 + address-only NAT | adjust (no skip exists in `_words`/`_addr_bytes` today — unchanged) | apply delta | yes |
 | v6 UDP/ICMPv6 computed 0x0000 | → 0xFFFF (`adjust_zero_checksum_illegal` V6) | → 0xFFFF (#1839 fix, same predicate) | yes |
 | v6 TCP computed 0x0000 | stays 0x0000 | stays 0x0000 (#1839 fix) | yes |
@@ -332,6 +388,51 @@ fails other families). `enforce_expected_ports_at`'s currently-unused
 Deliberate non-goal: the generic path does NOT drop v6-UDP-zero datagrams
 (RFC 8200 says *receivers* should discard; this is a middlebox rewrite layer
 and admission/screen owns drop policy — Open Question Q6).
+
+### 5.7 #1838 scope extension — ICMPv6-error NAT reversal (icmp_embed)
+
+Round-1 fold (Codex high; AGY findings 1+2; SMR F2). Reachability, verified
+against the code:
+
+- The outer match IS ext-aware: `try_embedded_icmp_nat_match_from_frame`
+  reads the ICMP type at `meta.l4_offset` (`icmp_embed/mod.rs:135-137`) and
+  the XDP shim's parser walks v6 ext chains, so a valid outer-ext ICMPv6
+  error matches a NAT-ed session.
+- The v6 builder then hardcodes `let icmp_offset = 40;` and
+  `emb_ip_offset = icmp_offset + 8` / `emb_l4_offset = emb_ip_offset + 40`
+  (`icmp_embed/builders.rs:170-178`): for an outer-ext error the embedded
+  un-NAT writes and the full ICMPv6 checksum recompute land inside the
+  outer ext chain → **matched-then-corrupted, valid traffic** (worse than
+  the parse-gated theory: only the EMBEDDED-ext case is gated).
+- The embedded parser reads `proto = frame[embedded_ip_start + 6]` and
+  `l4_off = embedded_ip_start + 40` (`icmp_embed/parse.rs:93-100`): an
+  embedded-ext quoted packet yields an ext-header type as "proto" → tuple
+  garbage → session lookup miss → NAT reversal silently skipped (feature
+  gap, no corruption).
+
+Fix spec (same PR, separate logical commit):
+
+1. `parse_embedded_v6` (parse.rs:87): derive `(rel, proto)` via
+   `packet_rel_l4_offset_and_protocol(&frame[embedded_ip_start..],
+   AF_INET6)`; `l4_off = embedded_ip_start + rel`. The existing
+   `embedded_ip_start + 48` minimum-length guard stays (40 + 8 quoted-bytes
+   floor); port/ident reads keep their `.get()?` bounds style.
+2. `build_nat_reversed_icmp_error_v6` (builders.rs:123): outer
+   `icmp_offset` = `v6_rel_l4_offset(pkt, meta.l3_offset, meta.l4_offset,
+   meta.addr_family)?` (the same shared helper from §5.2 — meta is already
+   a parameter); `emb_ip_offset = icmp_offset + 8`; embedded L4 offset via
+   the same ext-aware walk on `pkt[emb_ip_offset..]`. The final ICMPv6
+   checksum recompute (`checksum16_ipv6(src, dst, PROTO_ICMPV6,
+   pkt[icmp_offset..])`) becomes RFC-correct automatically: upper-layer
+   length = `len − icmp_offset`, Next Header = ICMPv6.
+3. The v4 builder is already IHL-correct (`builders.rs:6` uses `ihl`) — no
+   change.
+4. Outer v6 addresses at fixed `8..40` are correct regardless of ext
+   headers — unchanged.
+
+This subsystem has no descriptor-path twin (errors always take the
+exception path), so the parity property does not extend here; coverage is
+deterministic example tests (§9.4).
 
 ## 6. Public API preservation
 
@@ -421,7 +522,17 @@ and admission/screen owns drop policy — Open Question Q6).
      skip / v6 no-skip pair;
    - descriptor canonicalization scope per protocol (TCP no, UDP/ICMPv6 yes);
    - segmentation: ext-headered oversized v6 TCP → every segment passes the
-     full-recompute oracle AND carries the correct payload-length field.
+     full-recompute oracle AND carries the correct payload-length field;
+   - **same-port residual pin** (round-1): malformed v6 UDP stored-0 ×
+     identity port rewrite → BOTH paths emit 0xFFFF (§5.5 rule); v4
+     counterpart stays 0x0000 on both;
+   - **icmp_embed** (§5.7): outer-ext ICMPv6 error NAT reversal → embedded
+     un-NAT lands at the real offsets, output passes the full-recompute
+     oracle; embedded-ext quoted packet → parse now recovers the true
+     proto/ports (match succeeds where it silently missed before).
+   All existing test callers of the re-signatured helpers (e.g. the
+   `recompute_l4_checksum_ipv6` calls in `frame/tests.rs`) are updated in
+   the same commit as the signature change — AGY r1 finding 3.
 5. **Suites/gates**: `cargo build` clean; full `userspace-dp` cargo test
    (incl. the not(miri) prop tests, 256 cases each); 5× repeat of the flipped
    pins + new prop properties (flake guard); `make test` (Go untouched but
@@ -443,38 +554,59 @@ and admission/screen owns drop policy — Open Question Q6).
   pathological chains — pre-existing, shared by both paths (parity holds),
   pinned by the #1824 parse properties. Not changed here.
 - **Non-first-fragment NAT** (§7.9) — pre-existing on v4 AND v6 AND the
-  descriptor path; needs its own admission-layer answer. Follow-up issue.
+  descriptor path; needs its own admission-layer answer. Follow-up issue
+  filed at PR time (round-1 consensus: Codex Q4 + plan).
+- **MSS clamp v6 ext-header gap** (`frame/tcp.rs:213` — safe bail, no
+  corruption: `packet[6]` ext type ≠ TCP → clamp no-ops on ext-headered
+  SYNs). Folded into the same follow-up issue as the fragment item.
 - **Drop policy for malformed v6-UDP-zero ingress** — admission/screen
   domain, not the rewrite layer.
 - **`verify_built_frame_checksums` being v4-TCP-only** (mod.rs:1120) —
   debug-only helper, already superseded by the prop-test oracle.
-- **ICMPv6 recompute canonicalization** if reviewers strike Q2's rider.
 
-## 11. Open questions for adversarial review
+## 11. Open questions — round-1 resolutions + remaining
 
-1. **Q1 — meta-trust precedence**: `v6_rel_l4_offset` trusts a meta-led
-   offset ≥40 even when it disagrees with the parseable chain (today's
-   behavior in BOTH paths). Should the fix instead always parse when ext
-   headers could be present (cost: ext walk on every v6 NAT packet)?
-   Counter-argument: meta comes from our own XDP shim parse; distrusting it
-   here without distrusting it everywhere is incoherent. PLAN-KILL bait if
-   reviewers find a producer that emits ≥40-but-wrong `l4_offset`.
-2. **Q2 — recompute ICMPv6 canonicalization rider** (§5.4): include the
-   one-line unification or preserve the documented asymmetry?
-3. **Q3 — dead-trio deletion**: delete `adjust_l4_checksum_ipv6{,_src,_dst}`
-   vs thread offsets through them for symmetry. Deletion preferred; any
-   reviewer objection on future-use grounds?
-4. **Q4 — fragment follow-up**: agree the non-first-fragment port-NAT hazard
-   is pre-existing/out-of-scope and should be FILED as a new issue at PR
-   time, not folded in?
-5. **Q5 — segmentation payload-length fold-in** (§5.3): same-root same-files
-   fix folded into this PR, or does it need its own issue number for
-   tracking? (Plan recommends fold-in with explicit mention in the PR body.)
-6. **Q6 — middlebox stance on v6-UDP-zero**: adjust-for-parity (chosen) vs
-   pass-through-untouched vs drop. Is adjust-for-parity defensible given the
-   packet remains invalid either way?
-7. **Q7 — empty P-N3 mask**: is full byte-equality (including v4 header
-   checksum bytes) actually achievable, i.e., is the descriptor's
-   `ip_csum_delta` application provably equal to the generic
-   `adjust_ipv4_header_checksum` for the whole generator domain, or does a
-   residual mask survive?
+Resolved in round 1 (all three reviewers consistent unless noted):
+
+1. **Q1 — meta-trust precedence: RESOLVED, keep meta-led.** Codex verified
+   no producer emits a ≥40-but-wrong `l4_offset`. AGY proposed a
+   `meta_rel == 40 && packet[6] != meta.protocol → re-parse` coherence
+   check; REJECTED with rationale: it validates only the no-ext claim while
+   leaving every `meta_rel > 40` value unvalidated — a partial defense that
+   implies distrust without delivering it, and a behavior change to the
+   descriptor hot path with no demonstrated producer. The systemic guards
+   are (a) the shared helper making both paths identical, (b) the existing
+   #1824 P-I5 meta-arbitration pin, (c) the un-masked differential. If AGY
+   r2 still wants it, the bar is a quoted producer that emits contradictory
+   meta.
+2. **Q2 — recompute ICMPv6 canonicalization rider: RESOLVED, include**
+   (Codex: include if recompute is touched — it is, for #1838 offset
+   threading).
+3. **Q3 — dead-trio deletion: RESOLVED, delete** (Codex concurs).
+4. **Q4 — fragment follow-up: RESOLVED, file separately at PR time**, with
+   a pin documenting current behavior (Codex), plus the MSS-clamp gap
+   (§10).
+5. **Q5 — segmentation payload-length fold-in: RESOLVED, fold in**
+   ("arithmetic is right" — Codex).
+6. **Q6 — middlebox stance on v6-UDP-zero: RESOLVED, adjust-for-parity**,
+   now including the §5.5 no-op-port rule so parity holds on the identity
+   corner too (Codex's caveat).
+7. **Q7 — empty P-N3 mask: RESOLVED, achievable.** AGY verified the v4
+   `ip_csum_delta + 0xFEFF` application equals the incremental adjust;
+   Codex concurs for the valid domain given the same-port fix. The
+   fold-representation argument (§5.6 row 2) covers the L4 side.
+
+Remaining for round 2:
+
+8. **Q8 — §5.5 no-op-port rule shape**: the rule canonicalizes generic-side
+   (one slow-path branch). Codex's alternative — descriptor skips
+   ≡0-deltas — was rejected because a ≡0 delta also arises from
+   addr+port-cancelling rewrites where skipping changes which (congruent)
+   representation is emitted relative to the generic per-step path; the
+   generic-side rule is strictly narrower. Any counter-example where the
+   chosen rule still diverges?
+9. **Q9 — icmp_embed fold-in scope** (§5.7): in-PR-separate-commit is the
+   round-1 consensus (Codex demanded in-scope; SMR initially preferred a
+   follow-up issue and concedes). Objections to the parse/builder split as
+   specced — in particular reusing `v6_rel_l4_offset` for the OUTER offset
+   while the embedded offset re-walks the quoted chain?
