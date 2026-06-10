@@ -2,9 +2,23 @@
 
 ## 1. Status
 
-DRAFT v1 — pending adversarial plan review (Claude SMR + Codex + AGY, /research mode).
+DRAFT v2 — round-1 findings folded; pending round-2 adversarial plan review.
 
 Research-only. No production code on this branch. Base: master `d30cfab84`.
+
+Round-1 verdicts (plan v1 @ `70fb61dd6`): Claude SMR PLAN-READY-WITH-FINDINGS
+(F1-F6, `claude-smr-plan-r1.md`); AGY PLAN-READY-WITH-FINDINGS (3 findings,
+`agy-plan-r1.md`); Codex PLAN-NEEDS-MAJOR (8 findings, `codex-plan-r1.md` —
+its two HIGHs endorse the plan's premises: the missing enqueue timestamp IS
+Phase 1a, and "admission AQM is not a substitute for dequeue-time control" is
+the plan's §3 argument; the remaining findings demand explicitness, folded
+below). v2 deltas: #1359 attribution-correlation gate (SMR F1); AoS
+`CodelBucketState` (AGY F1); admission per-flow-ECN suppression on
+codel-enabled queues (AGY F2 HIGH); drop-and-continue side-effect ownership
+table (SMR F3 / AGY F3); FIFO index-walk drains scoped OUT as
+production-dead (SMR F5, resolving Q6); single-place enable gate, wire-field
+enumeration, pop-commit-only state writes, Phase-1 standalone perf gate,
+non-ECT smoke leg, narrowed #1828 claim wording (Codex 3-8, SMR F2/F4).
 
 ## 2. Issue framing
 
@@ -68,13 +82,17 @@ all real but narrow:
   surplus/residual regime, under V_min throttling, or when several queues contend
   for the same physical line, a queue's *actual* service rate is below configured —
   the byte-denominated bound then under-bounds real delay. Sojourn measured at
-  dequeue is actual-rate-aware by construction. This is not hypothetical:
+  dequeue is actual-rate-aware by construction. The motivating measurement:
   **#1359** (OPEN) shows the 100E100M matrix passing the p99.9 mouse-latency gate
-  under strict-exact but **failing under surplus-sharing** — exactly the regime
-  where byte-denominated admission bounds decouple from time. p99.9 even in the
-  passing exact run is ~7 ms loaded (~6.9 ms idle); the failing surplus runs blow
-  the 2× ratio gate. **#1365** (OPEN) shows high-rate classes can't even settle.
-  These are the motivating measurements.
+  under strict-exact but **failing under surplus-sharing**. The
+  time-vs-bytes decoupling above is a **candidate mechanism** for that failure,
+  not a proven attribution (SMR r1 F1: it is equally attributable to
+  queue-level surplus *service scheduling*, #1743 lineage — under MQFQ a mouse
+  bucket's HOL wait at 1 Gbps / 100 elephants is ~1.2 ms, not 7 ms; Phase 1's
+  instrumentation is precisely the experiment that discriminates the two).
+  p99.9 even in the passing exact run is ~7 ms loaded (~6.9 ms idle); the
+  failing surplus runs blow the 2× ratio gate. **#1365** (OPEN) shows
+  high-rate classes can't even settle.
 - **Burst-tolerant standing-queue discrimination.** Admission ECN fires on
   instantaneous depth; CoDel's interval logic (only act when the *minimum*
   sojourn over a 100 ms window exceeds target) ignores transient bursts and
@@ -109,9 +127,16 @@ Phase 2 dies and Phase 1 remains as operator delay-visibility telemetry.
 
 ## 4. #1828 engine boundary — kernel qdisc is a NO-OP for forwarded traffic (decisive)
 
-**Claim:** attaching fq_codel or CAKE to the WAN uplink via tc/networkd would
-shape essentially none of the traffic #1828 cares about, because the dataplane's
-TX path bypasses the kernel qdisc layer entirely in both AF_XDP modes.
+**Claim (scoped per Codex r1 #3):** attaching fq_codel or CAKE to the WAN
+uplink via tc/networkd would shape essentially none of the traffic #1828 cares
+about, because **every forwarded-traffic TX in this codebase terminates at the
+AF_XDP socket TX ring** (fast path, CoS-shaped path, cross-binding, mirror,
+tunnel and coordinator-inject paths all submit XSK descriptors — there is no
+forwarded-traffic code path that hands an skb to `dev_queue_xmit`), and the
+XSK ring TX path bypasses the kernel qdisc layer in both AF_XDP modes. The
+claim is about the XSK ring data path plus the absence of any other forwarded
+TX path here — not a claim that nothing on the host traverses qdiscs
+(control-plane traffic does; see item 4).
 
 **Evidence:**
 
@@ -169,10 +194,10 @@ prefers one tracking surface. It must not proceed as a tc/networkd feature.
   4 fused peek+pop pairs: `queue_service/mod.rs:1610/1622, 1653/1665` (non-exact
   Local/Prepared), `queue_service/drain.rs:217/241, 472/483` (exact Local/
   Prepared flow-fair — also reached via `queue_service/service.rs:226,573`);
-  plus the FIFO index-walk drains
-  (`drain_exact_*_fifo_items_to_scratch`) which build scratch without popping
-  and settle later. The AQM check must not reintroduce the double-scan #1763
-  removed and must not mutate the queue between peek and pop.
+  (the FIFO index-walk drains `drain_exact_*_fifo_items_to_scratch` exist but
+  are production-unreachable post-#1735 — see §6 2b-scope). The AQM check must
+  not reintroduce the double-scan #1763 removed and must not mutate the queue
+  between peek and pop.
 - **#913/#1355 pop-snapshot rollback** — popped items can be `push_front`ed back
   on TX-ring-full (LIFO snapshots, `pop_snapshot_stack`). Existing drop sites
   (frame-capacity, slice-range) already handle "pop then drop" via
@@ -231,14 +256,25 @@ updated per pop), `sojourn_peak_ns` (lifetime max, same contract as
 sites). Surfaced through the existing CoS status snapshot →
 `protocol/cos.rs` → `show class-of-service interface` + Prometheus, exactly
 like `admission_ecn_marked` (protocol/cos.rs:253). Update is owner-only,
-non-atomic, allocation-free.
+non-atomic, allocation-free. Cost is asserted ~3-5 ns/pop and **must be
+measured, not asserted** (SMR r1 F4): Phase 1 ships only if the #1763 pop
+self-time measurement shows no regression beyond noise; fallback if it does
+regress is gating the EWMA on `codel_target_ns != 0` and keeping only the
+peak (one cmp+cmov) unconditional.
 
-**1d. Gate evidence.** Re-run the #1359 100E100M surplus-sharing matrix and the
-standard per-class sweep with Phase 1 deployed; capture per-queue sojourn EWMA/
-peak per regime. **Kill criterion for Phase 2:** if no shaped queue sustains
-sojourn above `codel-target` (default candidate 5 ms) for ≥ one interval
-(100 ms) in any regime including surplus-sharing, Phase 2 is PLAN-KILLED and
-#1829 closes with Phase 1 as the deliverable.
+**1d. Gate evidence (tightened per SMR r1 F1: attribution, not existence).**
+Re-run the #1359 100E100M surplus-sharing matrix and the standard per-class
+sweep with Phase 1 deployed; capture per-queue sojourn EWMA/peak per regime
+**concurrently with the mouse-latency probes**. Phase 2 proceeds only if BOTH
+hold: (a) shaped queues sustain sojourn above `codel-target` (default
+candidate 5 ms) for ≥ one interval (100 ms) in a regime we care about, AND
+(b) the sojourn excursions correlate in time with the failing p99.9 probe
+cells (i.e., standing queue — not scheduler service gaps — is at least a
+co-cause). If (a) fails everywhere, Phase 2 is PLAN-KILLED and #1829 closes
+with Phase 1 as the deliverable. If (a) holds but (b) fails, Phase 2 is still
+viable as bufferbloat control (the queues DO stand) but must not be sold as
+the #1359 fix — and the #1359 residual goes back to the surplus-scheduling
+lineage (#1743).
 
 ### Phase 2 — CoDel control law at dequeue (gated on 1d)
 
@@ -247,14 +283,27 @@ sojourn above `codel-target` (default candidate 5 ms) for ≥ one interval
 - **FIFO (unpromoted) queues**: one `CodelState` inline in `CoSQueueHotState` —
   a FIFO queue is single-flow by the #1735 probe invariant, so per-queue state
   IS per-flow state. ~32 B.
-- **Flow-fair (promoted) queues**: per-bucket parallel arrays in
-  `FlowFairState`, sized `COS_FLOW_FAIR_BUCKETS = 4096`, allocated only when
-  `codel_target_ns > 0` (an `Option<Box<CodelBucketState>>` so queues without
-  the knob pay nothing):
-  `first_above_ns: [u64; 4096]`, `drop_next_ns: [u64; 4096]`,
-  `count: [u16; 4096]`, `lastcount: [u16; 4096]`, `dropping: [bit; 4096]`
-  ≈ 84 KB. Initialized via the #1755 `new_boxed`-style heap construction
-  (never on the stack); zeroed (POD) so `MaybeUninit` init is trivial. State
+- **Flow-fair (promoted) queues**: per-bucket **array-of-structs** (AGY r1
+  Finding 1 — the MQFQ parallel-array layout is right for the min-finish SCAN
+  across buckets, but CoDel state is accessed for exactly ONE bucket per
+  dequeue, so AoS gives one cache line per access instead of up to five):
+  `Option<Box<[CodelBucketState; 4096]>>` on `FlowFairState`, allocated only
+  when `codel_target_ns > 0` (queues without the knob pay a null-test):
+
+  ```rust
+  #[repr(C)]
+  struct CodelBucketState {       // 24 B (8+8+2+2+1, padded to 24)
+      first_above_ns: u64,
+      drop_next_ns: u64,
+      count: u16,
+      lastcount: u16,
+      dropping: bool,
+  }
+  ```
+
+  4096 × 24 B ≈ 96 KB per codel-enabled promoted queue. Zero-init is the
+  valid disabled state (POD), so #1755 `new_boxed`-style heap construction is
+  trivial (`Box<MaybeUninit<...>>` + zeroing, never on the stack). State
   resets on demote (whole box dropped) — correct, since the queue is fully
   drained at demote by definition.
 
@@ -265,9 +314,23 @@ FQ-CoDel's whole point is per-flow CoDel state; we have the bucket structure,
 use it. Collisions at 4096 buckets are the same risk MQFQ already accepts
 (#1731 finding 6, telemetry tracked under #1830).
 
+**2b-scope (SMR r1 F5 — FIFO index-walk drains are OUT).** The exact-FIFO
+index-walk drains (`drain_exact_*_fifo_items_to_scratch`,
+`queue_service/drain.rs:37,301`) are **production-unreachable post-#1735**:
+exact queues always promote eagerly (`admission.rs:525-532`) and
+`service_exact_local_queue_direct` dispatches to the flow-fair variant whenever
+`flow_fair()` (`service.rs:21-27`). Unpromoted single-flow NON-exact queues are
+served by `build_cos_batch_from_queue`, which already flows through the fused
+peek+pop with the `MIN_FINISH_BUCKET_FIFO` sentinel
+(`queue_service/mod.rs:1610,1653`) — covered by the per-queue `CodelState` in
+`CoSQueueHotState` at the same choke points. So CoDel scopes to the **4 fused
+peek+pop pairs only**; v1's Q6 (scratch-build vs settle timing on index-walk
+drains) is moot. (AGY r1 F3's FIFO accounting concern is thereby resolved by
+scoping, not by new accounting.)
+
 **2b. The check (O(1), allocation-free, at the fused-pop boundary).** A single
-helper, called at each of the 4 fused peek+pop pairs and the FIFO drains, AFTER
-peek and BEFORE the commit decision:
+helper, called at each of the 4 fused peek+pop pairs, AFTER peek and BEFORE
+the commit decision:
 
 ```rust
 enum CodelVerdict { Transmit, MarkAndTransmit, DropHead }
@@ -285,9 +348,26 @@ fn cos_codel_check(
 Standard CoDel (RFC 8289) with the standard `count` reuse on re-entry and
 `interval/sqrt(count)` spacing via the incremental Newton step (no f64 sqrt on
 the hot path — use the classic `rec_inv_sqrt` u32 fixed-point recurrence from
-the reference implementation). Disabled (`target_ns == 0`, today's only
-shipped value) short-circuits to `Transmit` on the first compare — one
-predictable branch, preserving current behavior exactly.
+the reference implementation).
+
+**Single-place enable gate (Codex r1 #4):** the ONE behavior gate is
+`queue.config.codel_target_ns > 0`, tested as the helper's first compare —
+`target_ns == 0` (today's only shipped value, and the default) short-circuits
+to `Transmit`: one predictable branch, current behavior preserved exactly.
+No second enable bit; the compiler side keeps its existing transport role
+plus a commit-check range validation (`codel-target` 1..=1000 ms when set).
+State allocation keys off the same predicate at build/promote time, so
+"enabled" is structurally `state.is_some() ↔ target_ns > 0` — same
+invariant-pairing discipline as #1735's `flow_fair()`.
+
+**State-write discipline (Codex r1 #7):** CoDel state writes happen ONLY at
+the pop-commit point (after `cos_queue_pop_known_bucket` returns the item, or
+in the drop arm immediately around it) — never at peek. The peek-to-pop
+window therefore stays read-only and the #1763 debug_assert re-scan remains
+valid. Rollback (`push_front` after TX-ring-full) does NOT rewind CoDel state
+— a mark/drop decision already taken is a delivered congestion signal, and
+CoDel's interval logic absorbs the small bias (same semantics as fq_codel
+under driver-ring pushback).
 
 **2c. Verdict handling per call site:**
 
@@ -301,14 +381,42 @@ predictable branch, preserving current behavior exactly.
   always preferred marking. Per RFC 8289 §4.1 we still fall through to DropHead
   while in dropping mode if marking shows no effect — Phase 2 keeps it simple:
   mark ECT, drop non-ECT, identical control law.
-- `DropHead` — for non-ECT packets: pop the peeked bucket, recycle (Prepared:
-  `recycle_cancelled_prepared_offset_with_shared`; Local: drop the Vec),
-  `cos_queue_clear_orphan_snapshot_after_drop`, bump `codel_dropped` +
-  `dropped_bytes` accounting like the existing capacity-drop sites, then
-  **continue the drain loop** (re-peek is the next loop iteration's normal
-  work — NOT a reintroduced double-scan; CoDel drops are rare by design,
-  ~once per interval/sqrt(count)). MQFQ "drops consume virtual service"
-  semantics already hold on this path (pop advanced vtime).
+- `DropHead` — for non-ECT packets: pop the peeked bucket, recycle, account,
+  then **continue the drain loop** (re-peek is the next loop iteration's
+  normal work — NOT a reintroduced double-scan; CoDel drops are rare by
+  design, ~once per interval/sqrt(count)). MQFQ "drops consume virtual
+  service" semantics already hold (pop advanced vtime).
+
+  **Side-effect ownership on drop-and-continue (SMR r1 F3 — normative).**
+  Unlike the existing capacity-drop sites, which RETURN
+  `ExactCoSScratchBuild::Drop { dropped_bytes }` and let the caller settle,
+  the CoDel drop arm stays in the loop and must own every side effect inline:
+
+  | Side effect | Owner on CoDel drop |
+  |---|---|
+  | flow accounting (`flow_bucket_bytes`, active set, vtime, `local_item_count`) | already done by `cos_queue_pop_known_bucket` (same as any pop) |
+  | snapshot stack | `cos_queue_clear_orphan_snapshot_after_drop` immediately after the pop (vtime-clamp semantics included) |
+  | `queue.hot.queued_bytes` | decremented inline by the drop arm with the popped item's len (mirrors what the caller's settle does for transmitted items) |
+  | Prepared frame recycle | `recycle_cancelled_prepared_offset_with_shared` inline (Local: Vec drop) |
+  | root/iface `nonempty_queues` / `runnable_queues` / parked transitions | NOT touched inline — the drain loop's normal exit path re-evaluates emptiness exactly as it does when the loop drains the queue by transmitting (verified at /engineer time; the §10 differential test pins it) |
+  | counters | `codel_dropped` (+`codel_dropped_bytes`) on `queue.telemetry.drop_counters` |
+  | shaper budget / tokens | NOT decremented — dropped bytes consume no shape (matches existing drop sites, which also skip the `remaining_root` subtraction) |
+
+  The §10 differential test must diff `queued_bytes`, `local_item_count`,
+  `nonempty_queues`, `runnable` and the FlowFairState fields against the
+  reference capacity-drop path — not FlowFairState alone.
+
+**2c-bis. Admission-ECN double-signal suppression (AGY r1 Finding 2, HIGH).**
+On owner-local-exact queues the admission path CE-marks on the per-flow depth
+arm (`apply_cos_admission_ecn_policy`, admission.rs:349). Stacking per-flow
+dequeue-time CoDel marking on top re-creates the #784 double-signal cwnd
+collapse (bimodal winners/losers). Remedy adopted: when
+`codel_target_ns > 0` on a queue, the admission per-flow ECN arm is bypassed
+for that queue — time-domain marking is delegated entirely to CoDel. The
+aggregate admission arm (shared_exact / FIFO) is retained as the
+buffer-protection backstop (it fires at depths CoDel should prevent from
+ever forming; if both fire, the queue is genuinely overloaded and a second
+mark is then correct). This is a config-time branch, not a hot-path cost.
 
 This placement keeps the #1763 invariant intact: peek → (codel decision, no
 queue mutation) → pop-known-bucket → mutate. The debug_assert re-scan still
@@ -330,7 +438,21 @@ interval 100 ms) fit: target matches the existing
 `codel-target` stays operator-set per scheduler (existing knob, 0 = off —
 **default remains off**; no behavior change without explicit config).
 Interval: hardcoded 100 ms const with a compile-time assert `interval >
-target`; a config knob only if live evidence demands it (Phase 3).
+target`; a config knob only if live evidence demands it (Phase 3 — note the
+#1828 WAN use case is where operator RTTs can approach 100 ms, so the knob
+likely arrives WITH #1828's config-surface work; SMR r1 F6).
+
+**Target-vs-admission-BDP interplay (SMR r1 F2 — must be documented at the
+knob).** Admission sizes per-flow buffering for cwnd at `RTT_TARGET_NS =
+10 ms` (admission.rs:94,118); a 5 ms CoDel target signals before a flow
+reaches the occupancy admission was sized to allow. For ECT flows this is the
+intended SQM behavior (mark, cwnd adapts, throughput holds). For **non-ECT**
+flows it is a drop regime, and the #704/#707/#754 history shows low-rate
+classes oscillate near the fast-retransmit floor under loss signaling.
+Operator guidance shipped with the knob: codel-target ≥ 5 ms; treat non-ECT-
+dominant low-rate classes with care (watch `codel_dropped` vs retransmits);
+§10 adds an explicit non-ECT smoke leg to catch this class of regression
+before merge.
 
 ### Phase 3 (follow-up issues, not this plan)
 
@@ -343,11 +465,17 @@ target`; a config knob only if live evidence demands it (Phase 3).
 - All `cos_queue_*` queue-ops signatures preserved except mechanical `now_ns`
   threading additions on drain/service helpers (internal `pub(in crate::afxdp)`
   surface, not a public API).
-- Wire protocol: `codel_target_ns` field already exists both sides (no wire
-  change for Phase 2). Phase 1 adds **new optional status fields** (sojourn
-  EWMA/peak; later codel_ce_marked/codel_dropped) — additive, `#[serde(default)]`
-  both sides, old/new mixed-version safe (same pattern as every prior counter
-  addition; both-sides grep per `feedback_wire_protocol_both_sides` mandatory).
+- Wire protocol: `codel_target_ns` field already exists both sides (no
+  enforcement-side wire change for Phase 2). New **optional status fields**,
+  enumerated explicitly per Codex r1 #5, added to BOTH
+  `userspace-dp/src/protocol/cos.rs` (queue status snapshot, next to
+  `admission_ecn_marked`) AND `pkg/dataplane/userspace/protocol.go`:
+  - Phase 1: `sojourn_ewma_ns: u64`, `sojourn_peak_ns: u64`
+  - Phase 2: `codel_ce_marked: u64`, `codel_dropped: u64`,
+    `codel_dropped_bytes: u64`
+  All additive, `#[serde(default)]` / `omitempty`, old/new mixed-version safe
+  (same pattern as every prior counter addition; both-sides grep per
+  `feedback_wire_protocol_both_sides` mandatory at /engineer time).
 - Junos config grammar: unchanged (knob exists). `show class-of-service
   interface` gains lines; no existing output removed.
 - Go control plane: no RPC changes; Prometheus adds gauges/counters.
@@ -403,9 +531,12 @@ target`; a config knob only if live evidence demands it (Phase 3).
   `enqueue_ns == 0` guard; per-bucket state independence (elephant in dropping
   state, mouse bucket unaffected); drop-path differential test in the
   `fused_diff_tests.rs` style proving queue bookkeeping (vtime, active set,
-  queued_bytes, local_item_count, snapshot stack) after a CoDel drop is
-  byte-identical to the existing capacity-drop path; promote/demote state
-  lifecycle; rollback (pop→mark→push_front→re-pop) idempotence.
+  **queued_bytes, local_item_count, nonempty/runnable transitions**, snapshot
+  stack) after a CoDel drop is byte-identical to the existing capacity-drop
+  path (SMR r1 F3); admission-ECN suppression branch (codel-enabled queue
+  never per-flow-marks at admission; aggregate arm retained — AGY r1 F2);
+  promote/demote state lifecycle; rollback (pop→mark→push_front→re-pop)
+  idempotence.
 - **Build/test suites:** `cargo build` clean, full cargo test (1000+),
   `cargo +nightly miri` for the new boxed-state constructor, 30 Go packages,
   `make audit-check`.
@@ -414,6 +545,11 @@ target`; a config knob only if live evidence demands it (Phase 3).
   (verifies default-off no-op — counters all zero, throughput/CoV unchanged);
   then codel-target 5 on one 1 Gbps class: shape held, `codel_ce_marked > 0`
   under -P 12, `codel_dropped == 0` for ECT iperf3, no #784 bimodal signature.
+  **Plus a non-ECT leg** (SMR r1 F2): same codel-enabled low-rate class with
+  ECN negotiation disabled — verify no #704/#707-style throughput oscillation
+  and `codel_dropped` stays proportionate (drops spaced per control law, not
+  drop storms). **Phase 1 standalone** also runs the pop self-time
+  measurement (1c gate).
 - **The decisive measurement:** #1359 100E100M surplus-sharing mouse-latency
   matrix, before/after Phase 2 on the same build — the gate is the p99.9
   loaded/idle ratio moving toward the ≤2.0 pass line without throughput loss.
@@ -434,6 +570,19 @@ target`; a config knob only if live evidence demands it (Phase 3).
 - Cross-worker anything (#1211/#937/#1693 wall).
 
 ## 12. Open questions for adversarial review
+
+> **Round-1 resolutions:** Q1 → Option A, unanimous (AGY verified all
+> construction sites incl. `coordinator/inject.rs:232` hold `now_ns`; test
+> constructors default 0 → legacy-guard Transmit). Q2 → Phase 2 retained,
+> gated by the tightened §6.1d attribution criterion (Codex r1 #2 + AGY Q2
+> both reject redundancy; SMR demands attribution). Q3 → resolved as AoS
+> `CodelBucketState` (AGY r1 F1). Q4 → mark-ECT/drop-nonECT retained,
+> unanimous (per-flow share cap bounds unresponsive-ECT). Q5 → fused-peek
+> boundary confirmed unanimous (in-pop placement would make drop
+> indistinguishable from queue-empty — AGY). Q6 → moot; FIFO index-walk
+> drains scoped out as production-dead (SMR r1 F5). Q7 → verdict confirmed
+> airtight by all three, with Codex's scoping language folded into §4.
+> Remaining open for round 2: re-verify the v2 deltas themselves.
 
 1. **Q1 (carrier):** Option A (+8 B on TxRequest/PreparedTxRequest, set only on
    CoS enqueue) vs Option B (CoS-local wrapper). Is there a construction site
