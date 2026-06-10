@@ -2,8 +2,22 @@
 
 ## 1. Status
 
-DRAFT v2 — round-1 review folds applied; pending round-2 convergence
-(Claude SMR + Codex + AGY).
+DRAFT v3 — round-2 folds applied; pending round-3 convergence on the §5.7
+deltas (Codex).
+
+Round-2 verdicts: AGY PLAN-READY ×3 (Q1/Q8/Q9 explicitly ACCEPTED; 3
+compile-level nits folded into §5.7 notes); Claude SMR PLAN-READY
+(worked-trace table over every §5.5 corner in claude-smr-plan-r2.md);
+Codex PLAN-NEEDS-REVISION with two §5.7 mediums, both folded in v3:
+1. the embedded walk must be **fragment-aware** (non-first quoted
+   fragments must return None — bare `packet_rel_l4_offset_and_protocol`
+   would expose payload bytes as ports and create false matches that
+   today's fixed-40 read accidentally avoids);
+2. the v6 builder's final ICMPv6 checksum recompute gains the
+   `0 → 0xFFFF` canonicalization + a stored-field representation test.
+
+Codex r2 also confirmed Q8 (generic-side rule is the right shape) and the
+v2 premises in code.
 
 Round-1 verdicts: Codex PLAN-NEEDS-REVISION (2 findings), AGY
 PLAN-NEEDS-REVISION on #1838 / PLAN-READY on #1839+#1840 (5 findings),
@@ -410,25 +424,49 @@ against the code:
   garbage → session lookup miss → NAT reversal silently skipped (feature
   gap, no corruption).
 
-Fix spec (same PR, separate logical commit):
+Fix spec (same PR, separate logical commit; r2 folds marked):
 
-1. `parse_embedded_v6` (parse.rs:87): derive `(rel, proto)` via
-   `packet_rel_l4_offset_and_protocol(&frame[embedded_ip_start..],
-   AF_INET6)`; `l4_off = embedded_ip_start + rel`. The existing
-   `embedded_ip_start + 48` minimum-length guard stays (40 + 8 quoted-bytes
-   floor); port/ident reads keep their `.get()?` bounds style.
+1. `parse_embedded_v6` (parse.rs:87): derive `(rel, proto)` via a
+   **fragment-aware** embedded walker, NOT bare
+   `packet_rel_l4_offset_and_protocol` (Codex r2 medium 1: that helper's
+   fragment arm advances past the header without checking the
+   fragment-offset bits, inspect.rs:184-193 — a quoted NON-FIRST fragment
+   would have payload bytes exposed as "ports", enabling false NAT/session
+   matches where today's fixed-40 read leaves proto=44 and accidentally
+   never matches). Spec: a small `parse_embedded_v6_l4(packet) ->
+   Option<(usize, u8)>` in `icmp_embed/parse.rs` that walks the chain like
+   `packet_rel_l4_offset_and_protocol(.., libc::AF_INET6 as u8)` but, on
+   the fragment header (44), reads the fragment-offset bits and returns
+   `None` unless they are zero (first/atomic fragments allowed). Then
+   `l4_off = embedded_ip_start + rel`. The existing
+   `embedded_ip_start + 48` minimum-length guard stays; port/ident reads
+   keep their `.get()?` bounds style.
 2. `build_nat_reversed_icmp_error_v6` (builders.rs:123): outer
    `icmp_offset` = `v6_rel_l4_offset(pkt, meta.l3_offset, meta.l4_offset,
    meta.addr_family)?` (the same shared helper from §5.2 — meta is already
-   a parameter); `emb_ip_offset = icmp_offset + 8`; embedded L4 offset via
-   the same ext-aware walk on `pkt[emb_ip_offset..]`. The final ICMPv6
-   checksum recompute (`checksum16_ipv6(src, dst, PROTO_ICMPV6,
-   pkt[icmp_offset..])`) becomes RFC-correct automatically: upper-layer
-   length = `len − icmp_offset`, Next Header = ICMPv6.
+   a parameter; the helper must be declared `pub(in crate::afxdp)` in
+   `frame/mod.rs` so the `icmp_embed` sibling sees it — AGY r2 nit 3);
+   `emb_ip_offset = icmp_offset + 8`; embedded L4 offset via the same
+   fragment-aware walker on `pkt[emb_ip_offset..]` (a `None` skips the
+   embedded port restore, as today's non-matching protos do). The final
+   ICMPv6 checksum recompute (`checksum16_ipv6(src, dst, PROTO_ICMPV6,
+   pkt[icmp_offset..])`) gets correct coverage automatically (upper-layer
+   length = `len − icmp_offset`, Next Header = ICMPv6) — **and gains the
+   `0 → 0xFFFF` canonicalization** (Codex r2 medium 2: builders.rs:202-209
+   writes the raw sum today; a computed-zero would contradict the §5.6
+   matrix, and the recompute-oracle alone cannot see the representation —
+   the test must assert the stored field).
 3. The v4 builder is already IHL-correct (`builders.rs:6` uses `ihl`) — no
    change.
 4. Outer v6 addresses at fixed `8..40` are correct regardless of ext
    headers — unchanged.
+
+Implementation notes from AGY r2 (compile-level): use
+`libc::AF_INET6 as u8` (no bare `AF_INET6` constant exists in
+icmp_embed); the §5.5 rule's `stored_l4_checksum`/`write_l4_checksum`
+pseudo-helpers are to be inlined as bounds-checked two-byte slice reads/
+writes in the style of the surrounding code (or added as tiny private
+helpers) — they do not exist today.
 
 This subsystem has no descriptor-path twin (errors always take the
 exception path), so the parity property does not extend here; coverage is
@@ -529,7 +567,13 @@ deterministic example tests (§9.4).
    - **icmp_embed** (§5.7): outer-ext ICMPv6 error NAT reversal → embedded
      un-NAT lands at the real offsets, output passes the full-recompute
      oracle; embedded-ext quoted packet → parse now recovers the true
-     proto/ports (match succeeds where it silently missed before).
+     proto/ports (match succeeds where it silently missed before);
+     **embedded first/atomic fragment** → match allowed; **embedded
+     NON-FIRST fragment** → must NOT match or rewrite (Codex r2 —
+     negative coverage guarding the fragment-aware walker);
+     **builder computed-zero ICMPv6 checksum** → balancing test forcing
+     the recomputed sum to zero, asserting the STORED field is 0xFFFF
+     (representation assertion — the oracle alone accepts both).
    All existing test callers of the re-signatured helpers (e.g. the
    `recompute_l4_checksum_ipv6` calls in `frame/tests.rs`) are updated in
    the same commit as the signature change — AGY r1 finding 3.
@@ -596,17 +640,18 @@ Resolved in round 1 (all three reviewers consistent unless noted):
    Codex concurs for the valid domain given the same-port fix. The
    fold-representation argument (§5.6 row 2) covers the L4 side.
 
-Remaining for round 2:
+Resolved in round 2:
 
-8. **Q8 — §5.5 no-op-port rule shape**: the rule canonicalizes generic-side
-   (one slow-path branch). Codex's alternative — descriptor skips
-   ≡0-deltas — was rejected because a ≡0 delta also arises from
-   addr+port-cancelling rewrites where skipping changes which (congruent)
-   representation is emitted relative to the generic per-step path; the
-   generic-side rule is strictly narrower. Any counter-example where the
-   chosen rule still diverges?
-9. **Q9 — icmp_embed fold-in scope** (§5.7): in-PR-separate-commit is the
-   round-1 consensus (Codex demanded in-scope; SMR initially preferred a
-   follow-up issue and concedes). Objections to the parse/builder split as
-   specced — in particular reusing `v6_rel_l4_offset` for the OUTER offset
-   while the embedded offset re-walks the quoted chain?
+8. **Q8 — §5.5 no-op-port rule shape: RESOLVED, generic-side rule.** Codex
+   r2: "the generic-side no-op-port rule is the right shape"; AGY r2
+   ACCEPTED with the no-counter-example confirmation; SMR r2 worked-trace
+   table covers every corner.
+9. **Q9 — icmp_embed spec: RESOLVED with two r2 amendments** (now in
+   §5.7): the embedded walk is fragment-aware (non-first quoted fragments
+   → None, preserving today's accidental never-match safety), and the
+   builder's ICMPv6 recompute canonicalizes computed-zero with a
+   stored-field representation test. AGY r2 ACCEPTED the outer/embedded
+   offset split as such.
+
+Remaining for round 3: none new — round 3 is a targeted Codex confirmation
+of the two §5.7 amendments.

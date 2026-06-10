@@ -4897,3 +4897,6 @@ top.
 - **Timestamp**: 2026-06-10
   **Action**: round-1 reviews (Codex NEEDS-REVISION, AGY NEEDS-REVISION on 1838, Claude SMR NEEDS-REVISION) folded into plan v2 — icmp_embed pulled into scope (§5.7, G8), same-port stored-zero parity rule (§5.5), Q1-Q7 resolutions
   **File(s)**: docs/research/1838-nat-v6-trio/{plan.md,claude-smr-plan-r1.md,codex-plan-r1.md,agy-plan-r1.md,reviewer-ids.md}
+- **Timestamp**: 2026-06-10
+  **Action**: round-2 folds → plan v3 (fragment-aware embedded walker; builder ICMPv6 0→0xFFFF canonicalization + representation test; AGY compile nits). AGY r2 PLAN-READY x3, SMR r2 PLAN-READY, Codex r2 NEEDS-REVISION (both mediums folded)
+  **File(s)**: docs/research/1838-nat-v6-trio/{plan.md,claude-smr-plan-r2.md,codex-plan-r2.md,agy-plan-r2.md,reviewer-ids.md}
