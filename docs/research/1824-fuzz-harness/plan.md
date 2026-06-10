@@ -2,7 +2,11 @@
 
 ## 1. Status
 
-DRAFT v1 — pending adversarial plan review (Claude SMR + Codex + AGY, research mode, no PR).
+DRAFT v1.1 — pending adversarial plan review (Claude SMR + Codex + AGY, research mode, no PR).
+v1.1 incorporates Claude SMR r1 findings F1–F5 (`claude-smr-plan-r1.md`):
+P-N1 re-specified off the one's-complement zero boundary; P-I5 generator
+constraint made explicit; S3 pre-committed to fixture mutation; shrink-path
+cost stated; convergence comment must enumerate undelivered #1669 §12 bullets.
 
 Worktree: `.claude/worktrees/research-1824-fuzz` @ `d30cfab84` (origin/master).
 All file/line references below are to that SHA.
@@ -227,7 +231,7 @@ flag readers reached through the same entry points):
 | P-I2 | Bounds: every returned offset `o` satisfies `o <= frame.len()` and `l4 >= l3 >= 14`; `parse_flow_ports` only ever reads inside the slice (implied by P-I1 + `get()`, asserted explicitly on returns) | garbage frame × arbitrary meta |
 | P-I3 | Offset consistency: `frame_l4_offset(f, af) == frame_l3_offset(f).and_then(\|l3\| packet_rel_l4_offset(&f[l3..], af).map(\|r\| l3+r))` | garbage + valid frames |
 | P-I4 | Parse round-trip: for a synthesized valid packet from tuple T (v4/v6 × TCP/UDP/ICMP × VLAN × ext-headers), `parse_session_flow_from_bytes(frame, consistent_meta) == Some(flow(T))` and with zeroed/garbled meta the frame-led path recovers the same tuple | valid packets |
-| P-I5 | Meta independence: for valid packets, the result with consistent meta equals the result with `l3_offset`/`l4_offset` zeroed (frame-led fallback agreement, inspect.rs:336–356 arbitration) | valid packets |
+| P-I5 | Meta independence: for valid packets **with generator-enforced `meta.protocol == frame[l3+9]` (v4) / final next-header (v6)**, the result with consistent meta equals the result with `l3_offset`/`l4_offset`/meta tuple zeroed (frame-led fallback agreement, inspect.rs:336–356 arbitration). The two paths source `protocol` differently — meta-led key uses `meta.protocol` (inspect.rs:329–334 → from_meta), v4 frame-led key uses `frame[l3+9]` (inspect.rs:614) — so the property only holds under that constraint; the inconsistent-protocol divergence is pinned by one deterministic example test documenting current arbitration behavior, not hidden by the generator | valid packets |
 
 **S2 — NAT forward/reverse rewrite** (`apply_nat_ipv4`/`apply_nat_ipv6` +
 `apply_nat_port_rewrite` in frame/mod.rs:696+/849+; descriptor path
@@ -235,7 +239,7 @@ flag readers reached through the same entry points):
 
 | ID | Property | Inputs |
 |----|----------|--------|
-| P-N1 | Round-trip identity: for valid v4/v6 TCP/UDP packets and NAT decision D (any non-empty subset of {src ip, dst ip, sport, dport} rewritten), `apply_nat(apply_nat(pkt, D), inverse(D)) == pkt` byte-for-byte (incl. IP + L4 checksums), where `inverse(D)` rewrites back to the original values. This is the issue's "NAT fwd∘rev == identity on the rewritten fields" stated on the actual unit the code exposes (`NatDecision` is direction-agnostic; the session-reverse-entry composition is out of scope, §10) | valid packets × arb NatDecision |
+| P-N1 | Round-trip identity **on non-checksum bytes**: for valid v4/v6 TCP/UDP packets and NAT decision D (any non-empty subset of {src ip, dst ip, sport, dport} rewritten), after `apply_nat(apply_nat(pkt, D), inverse(D))` the addresses, ports, every other header field, and the payload are byte-identical to the original. **Checksum fields are explicitly excluded from byte comparison** — one's-complement zero has two encodings (0x0000/0xFFFF) and the code deliberately maps across them (rewrite/ipv4.rs:113–118, rewrite/ipv6.rs:96, generic UDP `keep_zero`), so byte round-trip on checksum fields is legitimately violable; instead each hop's checksums must pass the P-N2 full-recompute validity oracle (i.e. "valid before, valid after fwd, valid after rev"). This is the issue's "NAT fwd∘rev == identity on the rewritten fields" stated on the actual unit the code exposes (`NatDecision` is direction-agnostic; the session-reverse-entry composition is out of scope, §10) | valid packets × arb NatDecision |
 | P-N2 | Checksum validity oracle: after `apply_nat`, full recompute (`checksum16` over IP header; `checksum16_ipv4`/`checksum16_ipv6` pseudo-header over L4) matches the stored checksums — i.e. the incremental `adjust_l4_checksum_*` deltas equal ground truth. UDP/v4 zero-checksum packets stay zero (RFC 768); UDP/v6 and rewritten-UDP/v4 never end at 0x0000 | valid packets × arb NatDecision |
 | P-N3 | **Differential, descriptor vs generic**: build the same valid TCP/UDP frame into two `MmapArea`s; apply the generic in-place path (`rewrite_forwarded_frame_in_place`) and the descriptor path (`apply_rewrite_descriptor` with `RewriteDescriptor` whose deltas come from `compute_l4_csum_delta` exactly as flow_cache.rs:339 builds them); assert the resulting frames are byte-identical and both pass `verify_built_frame_checksums` (frame/mod.rs:1120). Cases where the descriptor path declines (`None`: TTL≤1, port mismatch, nat64/nptv6) assert the generic path is the only writer | valid packets × arb NAT × arb TTL/ports |
 | P-N4 | Payload immutability: bytes after the L4 header are untouched by either path | same |
@@ -244,7 +248,7 @@ flag readers reached through the same entry points):
 
 | ID | Property | Inputs |
 |----|----------|--------|
-| P-W1 | Serde round-trip: `serde_json::from_*(serde_json::to_*(x)) == x` for proptest-generated `ConfigSnapshot` and `BindingCountersSnapshot` values (generated via small per-field strategies over the existing `test_fixtures.rs` shapes, not `derive(Arbitrary)` — no production derive changes). Generalizes the existing single-example round-trips at main_tests.rs:906/1432 | generated snapshots |
+| P-W1 | Serde round-trip: `serde_json::from_*(serde_json::to_*(x)) == x` for `BindingCountersSnapshot` (full per-field strategy — small struct) and for `ConfigSnapshot` via **field-wise mutation of the two existing `test_fixtures.rs` fixtures** (randomize scalar/string/vec-length fields of fixture clones), NOT full-shape hand-rolled strategies and NOT `derive(Arbitrary)` on production types. Full-shape ConfigSnapshot strategies would be ~150 LOC of generator for marginal value; fixture mutation keeps S3 inside its ~80-LOC budget. Generalizes the existing single-example round-trips at main_tests.rs:906/1432 | mutated fixtures |
 | P-W2 | Deterministic (non-prop) StateWriter durability test: `persist()` to a tempdir path → read-back equals payload; `temporary_path` never equals its input and stays in the same directory (state_writer.rs:183–192 extension edge cases: no extension, dotfile, multi-dot) | fixed examples |
 
 P-W1/P-W2 are deliberately the smallest slice of this plan (~80 LOC). If
@@ -276,6 +280,11 @@ is recorded as a candidate follow-up in §10, not silently absorbed.
   64 for P-W1. Measured target: **≤10s added to `cargo test --release`
   wall-clock total**; if a property exceeds ~2s at these counts, the count is
   halved and the halving justified in the test header comment.
+- Failure-path cost is different and unbounded-ish by design: a failing
+  P-N3 case can spend `max_shrink_iters` × (2 mmaps + dual rewrite) ≈
+  low minutes shrinking before it reports. That cost is paid only on a real
+  counterexample (or a property bug) and buys a minimal repro; it is
+  accepted, not hidden.
 - Determinism: proptest's default RNG is deterministic per-seed with
   failure persistence; `proptest-regressions/**/*.txt` files are
   **committed** so every previously-found counterexample replays first on
@@ -370,6 +379,10 @@ the harness PR pins it (tests must land green; we don't commit xfail).
   embedded-JSON contract tests cover the schema; generating on one side and
   decoding on the other requires build orchestration out of proportion to
   the risk.
+
+The convergence comment on #1824 must enumerate which #1669 §12 bullets this
+plan does NOT deliver (session-table stateful property; cargo-fuzz lane) so
+the umbrella residue stays honest (SMR r1 F5).
 
 ## 11. Open questions for adversarial review (PLAN-KILL invitable on each)
 
