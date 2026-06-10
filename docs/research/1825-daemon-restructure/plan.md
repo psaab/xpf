@@ -2,7 +2,10 @@
 
 ## 1. Status
 
-`DRAFT v1 — pending adversarial plan review (Claude SMR + Codex + AGY)`
+`DRAFT v2 — round-1 verdicts: Claude SMR PLAN-READY(D), AGY PLAN-READY(D),
+Codex PLAN-NEEDS-REVISION (measurement corrections, endorses D after fixes).
+v2 applies all Codex r1 corrections + both SMR amendments. Pending round-2
+confirmation.`
 
 Research-only (`/research`). No production code on this branch. The
 recommendation below is **Option D (PLAN-KILL)** with a narrowly scoped
@@ -86,10 +89,16 @@ Natural clusters (production LOC):
 
 ### 5.2 The structural blocker: Daemon is a 116-field god object
 
-- `type Daemon struct` (daemon.go:66) has **116 fields**.
-- **167 methods** on `*Daemon` across ~25 of the 30 production files.
-- **272 distinct unexported selector spellings** (`d.<lowerIdent>`) across
-  the production sources.
+- `type Daemon struct` (daemon.go:66-324) has **116 fields**.
+- **167 methods** on `*Daemon` across ~25 of the 30 production files
+  (receiver-uniform: every one is spelled `func (d *Daemon)`; verified
+  with a receiver-name-agnostic match). The only other method-bearing
+  type of note is `*rgStateMachine` (20 methods, self-contained in
+  `rg_state.go`) — the exception that proves the rule.
+- **269 distinct unexported selector spellings** (`\bd\.<lowerIdent>`)
+  across the production sources (272 total including 3 exported
+  Daemon-receiver selectors: `d.RefreshFabricFwd`,
+  `d.CompileHealthSnapshot`, `d.NeighborPeriodicPhaseAges`).
 
 Go forbids defining methods on a type outside its defining package.
 Therefore **no Daemon-method file can move to a subpackage as a file move**.
@@ -103,19 +112,30 @@ restructure.
 
 (b) **Daemon-as-interface seam** (the #1669 §9 sketch) — subpackages accept
 a `Daemon`-shaped interface. Measured against the most "cohesive" candidate,
-the neighbor cluster: its 2 files touch **36 distinct `d.*` members** —
-~13 Daemon fields spanning 8 unrelated subsystems (`d.cluster`, `d.dhcp`,
-`d.dp`, `d.store`, `d.rs`, `d.neighborProvider`, `d.regenDebouncer`,
+the neighbor cluster: its 2 files touch **35 distinct `d.*` members** —
+~12 Daemon fields spanning 7+ unrelated subsystems (`d.cluster`, `d.dhcp`,
+`d.dp`, `d.store`, `d.neighborProvider`, `d.regenDebouncer`,
 `d.fabricMu`/`d.fabricOverlay`/`d.fabricOverlay1`/`d.fabricPeerIP`/
 `d.fabricPeerIP1`, `d.startTime`), ~10 guard atomics, and cross-cluster
-method calls in **both directions**: apply/ha_vip/health/run call 7
-unexported neighbor methods (`resolveNeighbors`, `forceProbeNeighbors`,
-`maintainClusterNeighborReadiness`, `collectNeighborProbeTargets`,
-`runPeriodicNeighborResolution`, `resolveNeighborsInner`,
-`neighborListener` wiring), while neighbor methods call back into regen
-(`d.triggerRegen`, `d.shouldTriggerRegen`) and fabric state. The interface
+method calls in **both directions**: apply/ha_vip/health/run call 6
+unexported neighbor methods (`resolveNeighbors` — daemon_apply.go:834,
+daemon_ha_vip.go; `forceProbeNeighbors` — daemon_ha_vip.go:178;
+`maintainClusterNeighborReadiness` and `resolveNeighborsInner` —
+daemon_health.go:84, daemon_ha.go; `runPeriodicNeighborResolution` —
+daemon_run.go:742, daemon.go; `neighborListener` wiring — daemon_run.go),
+while neighbor methods call back into regen (`d.triggerRegen`,
+`d.shouldTriggerRegen`) and into **HA** (`d.warmNeighborCache()` at
+daemon_neighbor.go:551 is *defined in daemon_ha.go:1081*). The interface
 seam for the *easiest* cluster is ~20 methods wide and bidirectional. The
 HA cluster (92 methods, the heaviest) is strictly worse.
+
+Measurement note (round-1 corrections): selector counts use
+word-boundary-anchored grep; comment-only mentions are excluded from the
+cross-caller lists (`collectNeighborProbeTargets` is internal to the
+neighbor cluster — its sole non-comment external "reference" was a
+comment in daemon_apply.go:801). The per-file cross-reference counts in
+the Option C table are grep-derived **upper bounds** that may include
+comment mentions; treat them as sizing, not exact export lists.
 
 (c) **internal/ leaf extraction of free-function files only** — the only
 mechanically honest variant; sized in Option C below.
@@ -191,7 +211,7 @@ these verbatim. This is also the strongest argument that subpackage
 ### Option A — full `pkg/daemon/internal/{ha,neighbor,apply,linkmgmt}` split
 
 The #1669 §9 sketch. **Costs**: god-object decomposition of 116 fields;
-conversion of up to 167 methods; export/rename churn across 272 unexported
+conversion of up to 167 methods; export/rename churn across 269 unexported
 selector spellings; bidirectional seams (neighbor alone needs ~20 exported
 entry points + accessors); 41 test files relocated; multi-PR series
 (realistically 6-10 PRs / weeks of reviewer time) colliding with all
@@ -225,6 +245,16 @@ call-site rename):
 | `rg_state.go` → `internal/rgstate` | 365 + 929 | 7 / 3 | none |
 | `linksetup.go` | 357 | 14 / 2 | n/a |
 | `daemon_reth.go` | 331 | 12 / **9** | — too entangled, skip |
+| `daemon_dhcp.go` | 215 | narrowest seam: only **9** `d.*` members, 3 methods | — too small to justify a package; pure helpers (`resolveJunosIfName`, `stripCIDR`) are shared with the neighbor cluster |
+
+Caveat on `internal/nictune` (round-1 correction): it is **not**
+zero-coupling. `applyCoalescence` takes `*priorHostTunables`
+(coalescence.go:55) and captures `mlx5CoalesceState` (coalescence.go:110),
+both defined in host_tunables.go (:549, :580); host-tunables restore
+depends back on `rssExecutor`/`isExecNotFound` (host_tunables.go:672,
+:776). Extracting nictune alone forces type hoisting or dragging the
+whole host_tunables cluster along — the real unit is the combined
+~2,147-LOC host/link cluster, at the top of the cost range above.
 
 **Costs**: per extraction, ~5-15 identifier exports + call-site renames, a
 test-file move, one PR each through quad review. **Benefit**: ~2-3K LOC
@@ -242,7 +272,7 @@ Close #1825 with the `plan-kill` label and this rationale:
 
 1. Methods-on-Daemon make the proposed `ha/`/`neighbor/`/`apply/`
    subpackages a god-object rewrite, not a restructure (Go's
-   cross-package-method prohibition; 167 methods, 116 fields, 272
+   cross-package-method prohibition; 167 methods, 116 fields, 269
    selector spellings, bidirectional cluster coupling).
 2. The package has one importer and three public identifiers — internal
    boundaries add unobservable encapsulation.
@@ -286,7 +316,7 @@ HA-adjacent file moves — and per-PR quad review under `/engineer`.
    missed — e.g. moving only *leaf callees* (pure functions called by
    methods) rather than the methods themselves, achieving most of the
    navigability win at Option-C cost?
-3. Is the neighbor-cluster coupling measurement (36 `d.*` members,
+3. Is the neighbor-cluster coupling measurement (35 `d.*` members,
    bidirectional calls) representative, or is there a cluster with a
    genuinely narrow seam that was overlooked (dhcp glue at 215 LOC /
    3 methods)?
@@ -299,5 +329,5 @@ HA-adjacent file moves — and per-PR quad review under `/engineer`.
    than KILL, i.e. should this close as deferred rather than killed?
 6. The kill rationale leans on "one importer, three identifiers." If a
    future consumer (e.g. a test harness or a second binary) needed daemon
-   internals, would flat-71 with 272 unexported spellings become a real
+   internals, would flat-71 with 269 unexported spellings become a real
    cost — and does that change the verdict today?
