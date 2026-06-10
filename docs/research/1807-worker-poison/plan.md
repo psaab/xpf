@@ -44,8 +44,9 @@ it silently stops.
 
 ## Honest scope/value framing
 
-Small, surgical: 4 sites, one policy ("poison = recover via into_inner,
-consistent with #1790's coordinator policy"). The queue data is plain
+Surgical but wider than v1 thought: 9 site groups, one policy ("poison =
+recover via into_inner + clear_poison, one shared helper, coordinator
+retrofitted"). The queue data is plain
 `VecDeque<WorkerCommand>` — a panic mid-`push_back` can at worst leave a
 fully-pushed or not-pushed element (VecDeque push_back has no
 partially-visible state observable after into_inner; the deque may have
@@ -114,10 +115,10 @@ sides grep rule applies).
 
 ## Public API preservation
 
-No signature changes (internal match arms only). Counter addition follows
-the existing status/protocol pattern ONLY if exposed; default: log-only
-eprintln + static counter readable via existing debug surface — decide
-with reviewers (wire-protocol changes need both-sides grep per memory).
+No signature changes at converted sites (internal match arms only). The
+counter IS wire-exposed (decided round 1): status/protocol plumbing per
+the U4 pattern — protocol.rs AND protocol.go both change (both-sides
+grep rule).
 
 ## Hidden invariants
 
