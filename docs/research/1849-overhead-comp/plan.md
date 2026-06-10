@@ -2,7 +2,12 @@
 
 ## 1. Status
 
-- Revision: v1 (initial draft for hostile 3-way review)
+- Revision: v1 — **CONVERGED PLAN-KILL round 1 (3/3: Claude SMR + Codex +
+  AGY, all defer-on-demand per §4 Option D).** This doc is retained as the
+  implementation recipe if framed-uplink demand ever materializes; any
+  future implementer MUST first repair the r1 inventory findings (Codex C1,
+  AGY C1/C3/M4, SMR F1-F4 — see codex-plan-r1.md / agy-plan-r1.md /
+  claude-smr-plan-r1.md in this directory).
 - Branch: `research/1849-overhead-comp` (plan docs only, no production code)
 - Issue: #1849, split from #1828 Option D at its convergence
   (`docs/research/1828-wan-sq/plan.md` v3, §4 Option D + §3 inventory row
