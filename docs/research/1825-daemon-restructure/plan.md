@@ -2,10 +2,9 @@
 
 ## 1. Status
 
-`DRAFT v2 — round-1 verdicts: Claude SMR PLAN-READY(D), AGY PLAN-READY(D),
-Codex PLAN-NEEDS-REVISION (measurement corrections, endorses D after fixes).
-v2 applies all Codex r1 corrections + both SMR amendments. Pending round-2
-confirmation.`
+`DRAFT v3 — round-2: AGY PLAN-READY(D) confirmed; Codex PLAN-NEEDS-REVISION
+on one residual comment-only citation in the §5.2 cross-caller list,
+fixed in v3. Claude SMR PLAN-READY(D). Pending Codex round-3 confirmation.`
 
 Research-only (`/research`). No production code on this branch. The
 recommendation below is **Option D (PLAN-KILL)** with a narrowly scoped
@@ -120,9 +119,11 @@ the neighbor cluster: its 2 files touch **35 distinct `d.*` members** —
 method calls in **both directions**: apply/ha_vip/health/run call 6
 unexported neighbor methods (`resolveNeighbors` — daemon_apply.go:834,
 daemon_ha_vip.go; `forceProbeNeighbors` — daemon_ha_vip.go:178;
-`maintainClusterNeighborReadiness` and `resolveNeighborsInner` —
-daemon_health.go:84, daemon_ha.go; `runPeriodicNeighborResolution` —
-daemon_run.go:742, daemon.go; `neighborListener` wiring — daemon_run.go),
+`resolveNeighborsInner` — daemon_health.go:84;
+`maintainClusterNeighborReadiness` — daemon_health.go:85;
+`runPeriodicNeighborResolution` — daemon_run.go:742;
+`neighborListener` wiring — daemon_run.go; mentions in daemon_ha.go:367
+and daemon.go:109/127 are comment-only and excluded),
 while neighbor methods call back into regen (`d.triggerRegen`,
 `d.shouldTriggerRegen`) and into **HA** (`d.warmNeighborCache()` at
 daemon_neighbor.go:551 is *defined in daemon_ha.go:1081*). The interface
