@@ -10,3 +10,8 @@
 | r2 | Claude SMR | in-conversation (claude-smr-plan-r2.md) | PLAN-READY on v2.1 — SELF-CORRECTED in r3: "cannot construct divergence" claim refuted by Codex r2 |
 | r2 | Codex | task-mq8evi7r-vd8x4k (session 019eb2d3-80ec-7f61-8763-a038c01692a8) | PLAN-NEEDS-REVISION (2 HIGH, both verified; codex-plan-r2.md) |
 | r2 | AGY | adversarial-review-mq8euds7-fy9qg1 | PLAN-READY (F1-F5 folds verified; Q1 answer refuted by Codex counterexample; agy-plan-r2.md) |
+| r3 | Claude SMR | in-conversation (claude-smr-plan-r3.md) | PLAN-READY (with r2 self-correction) |
+| r3 | Codex | task-mq8f5joq-qmbo0i (session 019eb2da-adca-7270-839e-be408f18020b) | PLAN-READY (no blocking findings; codex-plan-r3.md) |
+| r3 | AGY | adversarial-review-mq8f4t3l-0dz8k8 | PLAN-READY (confirmed D3 sites; agy-plan-r3.md) |
+
+**CONVERGED round 3 — PLAN-READY, plan v3.1.**

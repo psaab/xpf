@@ -2,11 +2,17 @@
 
 ## 1. Status
 
-DRAFT v3 — post round-2 (Codex r2 PLAN-NEEDS-REVISION task-mq8evi7r-vd8x4k:
-2 HIGH, both verified; AGY r2 PLAN-READY adversarial-review-mq8euds7-fy9qg1
-but its Q1 "byte-equality provable" answer is refuted by Codex's
-counterexample; Claude SMR r2 self-corrected — my "cannot construct a
-divergence outside the excluded bytes" claim was wrong). v3 folds:
+**PLAN-READY v3.1 — CONVERGED 2026-06-10 (round 3, 3-way)**
+- Claude SMR r3: PLAN-READY (claude-smr-plan-r3.md)
+- Codex r3: PLAN-READY (task-mq8f5joq-qmbo0i, codex-plan-r3.md)
+- AGY r3: PLAN-READY (adversarial-review-mq8f4t3l-0dz8k8, agy-plan-r3.md)
+
+History: v3 was post round-2 (Codex r2 PLAN-NEEDS-REVISION
+task-mq8evi7r-vd8x4k: 2 HIGH, both verified; AGY r2 PLAN-READY
+adversarial-review-mq8euds7-fy9qg1 but its Q1 "byte-equality provable"
+answer was refuted by Codex's counterexample; Claude SMR r2 self-corrected —
+the "cannot construct a divergence outside the excluded bytes" claim was
+wrong). v3 folded:
 
 - **D3 (NEW, Codex r2 finding 1 + Claude blast-radius extension)**: the
   generic v6 NAT path assumes L4 at fixed offset 40 — port rewrite at
@@ -452,8 +458,9 @@ comment:
   `apply_nat_port_rewrite(packet, 40, protocol, nat)` (frame/mod.rs:840–841,
   comment "IPv6 header is always 40 bytes (no IHL)"), and both generic v6
   checksum adjusters compute `checksum_offset = 40usize.checked_add(delta)`
-  (`adjust_l4_checksum_ipv6_words` checksum.rs:490,
-  `adjust_l4_checksum_ipv6_addr_bytes` checksum.rs:516–517). The caller
+  (`adjust_l4_checksum_ipv6_words` **frame/**checksum.rs:490,
+  `adjust_l4_checksum_ipv6_addr_bytes` **frame/**checksum.rs:516–517 — NOT
+  the sibling `afxdp/checksum.rs`, Codex r3 nit). The caller
   `rewrite_apply_v6` parses the REAL ext-header-aware `rel_l4`
   (frame/mod.rs:550–555) but only uses it for tuple restore — then hands the
   packet to the 40-assuming helpers. The descriptor path parses real offsets
@@ -529,10 +536,19 @@ the umbrella residue stays honest (SMR r1 F5).
   llvm-cov spot-check.
 - ~~Q5 kill?~~ — Codex: "Not PLAN-KILL overall"; AGY: "highly valuable".
 
-### Open for round 3 (final convergence check)
+### Resolved in round 3 (CONVERGED)
 
-1. Does v3 correctly and completely fold Codex r2's two findings (D3
-   exclusion + L3+-only decline assertions)? Any remaining valid-input
-   divergence inside the v3-restricted generator domain (v4 any-IHL,
-   ext-header-free v6, TTL ≥ 2, valid checksums, `expected_ports=None`)?
-2. Anything else blocking PLAN-READY? PLAN-KILL remains acceptable.
+1. ~~v3 folds complete? remaining divergence?~~ — Codex r3
+   (task-mq8f5joq-qmbo0i): "Yes, v3 folds both r2 findings; I cannot
+   construct a valid-input divergence inside the restricted domain"
+   (checked VLAN/tx-offset shifts via shared
+   `rewrite_prepare_eth_from_parts` + `classify_in_place_l2_rewrite`, v4
+   IHL>20 options on both paths, `trim_l3_payload`, expected_ports=None
+   enforcement). AGY r3 (adversarial-review-mq8f4t3l-0dz8k8): confirmed the
+   D3 sites it previously missed, "no remaining valid-input divergences can
+   be constructed inside the v3-restricted domain".
+2. ~~anything else blocking?~~ — Codex: "Nothing else blocks PLAN-READY;
+   implementation should compare returned `offset,len` output slices and
+   use the promised shared byte-mask helper" (adopted: P-N3 compares the
+   `InPlaceRewriteResult` offset/len-delimited output slices, not raw
+   areas). AGY: "Nothing else is blocking, the plan is fully convergent."
