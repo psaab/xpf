@@ -1,7 +1,9 @@
 # #1827 Multi-WAN: uplink model, health probes, failover + PBR policy layer
 
-**Status:** DRAFT v2 — revised after round-1 adversarial review (Claude SMR +
-Codex + AGY all PLAN-NEEDS-REVISION; r1 docs + verdicts beside this file)
+**Status:** DRAFT v2.1 — v2 revised after round-1 adversarial review (Claude
+SMR + Codex + AGY all PLAN-NEEDS-REVISION; r1 docs + verdicts beside this
+file); v2.1 folds Claude SMR r2 findings A/B (RPM gating scope precision,
+sustained-flap guidance)
 
 This is a **multi-PR feature program** plan. The deliverable of this research
 pass is an honest staging: the PR-1 unit small and shippable, later PRs
@@ -261,7 +263,20 @@ most one actuation in flight; the actuator snapshots the overlay at run
 time (last-writer-wins), so a flap storm across N policies collapses to
 one FRR render + one snapshot push per debounce window. Never queues
 unbounded applies. Hold-down applies to recovery only (parity); fail is
-acted on at the next debounce tick.
+acted on at the next debounce tick. **Sustained-flap floor (SMR r2 fold
+B):** with hold-down 0, a per-cycle pass/fail flapper produces one
+frr-reload + one snapshot push per debounce window indefinitely — bounded
+and observable via `transitions_total`; operator guidance in
+`docs/multi-wan.md`: set `hold-down` on known-flappy links. The smoke flap
+test asserts the bound (≤1 actuation per window), not just "damping
+holds".
+
+**Snapshot-side template:** the actuator's snapshot step follows the
+existing policy-scheduler partial republish at
+`pkg/dataplane/userspace/manager.go:700-740` (clone `lastSnapshot`,
+refresh one section — here `Routes` via `buildRouteSnapshots` with the
+overlay — bump generation, `apply_snapshot`), so no full recompile is
+needed and the mechanism is already proven in-tree.
 
 **Observability:** `show services ip-monitoring status` (cmdtree +
 grpcapi + both CLIs; prefix-collision audit vs `show chassis cluster
@@ -271,8 +286,13 @@ transitions logged at Info, probe detail at Debug.
 
 ### 4.4 HA model — primary-only probing (Junos parity)
 
-Probes and pin plumbing run **only** on the node that is primary for the
-data RG; overlay publication likewise. Rationale (SMR-2, Codex-9): uplink
+**Gating scope (precise — SMR r2 fold A):** primary-only gating applies
+ONLY to probes that are (a) referenced by an ip-monitoring policy, or
+(b) bound via `destination-interface`/`source-address` to a VIP-owned
+(RETH) interface. All other RPM probes keep today's run-everywhere
+behavior — cluster users running plain RPM monitoring/eventengine probes
+see no change. Within that scope: probes and pin plumbing run **only** on
+the node that is primary for the data RG; overlay publication likewise. Rationale (SMR-2, Codex-9): uplink
 addresses are VRRP-owned VIPs; the standby holds no usable source address
 on a RETH uplink, so standby probes would fail structurally, not
 informatively (the HA code asserts secondary never owns VIPs —
