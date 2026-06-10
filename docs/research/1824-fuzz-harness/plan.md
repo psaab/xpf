@@ -2,9 +2,30 @@
 
 ## 1. Status
 
-DRAFT v2.1 — post round-1 (Claude SMR r1 PLAN-NEEDS-REVISION + Codex r1
-PLAN-NEEDS-REVISION task-mq8eallo-ig9zmu + AGY r1 PLAN-NEEDS-REVISION
-adversarial-review-mq8eiccu-dallbv); pending round-2 convergence.
+DRAFT v3 — post round-2 (Codex r2 PLAN-NEEDS-REVISION task-mq8evi7r-vd8x4k:
+2 HIGH, both verified; AGY r2 PLAN-READY adversarial-review-mq8euds7-fy9qg1
+but its Q1 "byte-equality provable" answer is refuted by Codex's
+counterexample; Claude SMR r2 self-corrected — my "cannot construct a
+divergence outside the excluded bytes" claim was wrong). v3 folds:
+
+- **D3 (NEW, Codex r2 finding 1 + Claude blast-radius extension)**: the
+  generic v6 NAT path assumes L4 at fixed offset 40 — port rewrite at
+  `apply_nat_port_rewrite(packet, 40, …)` (frame/mod.rs:840–841) AND both
+  checksum adjusters at `40usize.checked_add(delta)` (checksum.rs:490,
+  516–517) — while the descriptor path parses real ext-header offsets
+  (rewrite/ipv6.rs:35–41). On v6 + ext headers + NAT the generic path
+  writes into extension-header bytes: a latent production defect, §10-D D3.
+  ALL NAT-applying properties (P-N1..P-N4, P-T4) now generate v6 packets
+  WITHOUT extension headers; ext-header packets remain in the read-only S1
+  parse properties.
+- **P-N3b corrected (Codex r2 finding 2)**: both paths write the Ethernet
+  header in prep BEFORE TTL/port validation (frame/mod.rs:403/413 via
+  mod.rs:581, rewrite/mod.rs:56), so "neither writes" was false; decline
+  assertions now cover bytes from L3 onward only, with a note that the L2
+  scribble on a declined frame is harmless in production (caller drops on
+  `None`).
+
+Prior round-1 folds (v2/v2.1) retained below in this section's history.
 
 v1.1 folded SMR r1 F1–F5. v2 folds Codex r1 (1–6) + AGY r1 (1–4):
 - **S3 DROPPED** (Codex 5 + AGY Q4 + SMR Q4 convergent): `ConfigSnapshot`
@@ -51,7 +72,8 @@ This plan answers the harness-selection design question (proptest vs
 cargo-fuzz vs both), gives a concrete per-surface property list, the harness
 layout, and the CI/runtime budget — and corrects two factual premises in the
 issue residue (see §4: `state_writer.rs` has no encode/decode pair; cargo-fuzz
-is structurally blocked by the bin-only crate).
+requires a lib facade or visibility shims the bin-only crate deliberately
+avoids).
 
 ## 3. Honest scope/value framing
 
@@ -232,7 +254,12 @@ anything): two strategy families per surface —
 - **`arb_valid_packet()`** — wraps the existing builders
   (`build_ipv4_tcp_frame` etc.) over generated tuples: addrs from
   `any::<u32>()`/`any::<[u8;16]>()`, ports `any::<u16>()`, payload len
-  `0..1600`, IHL ∈ {20, 24, 60}, optional VLAN tag.
+  `0..1600`, IHL ∈ {20, 24, 60}, optional VLAN tag. **v6 variants used by
+  any NAT-applying property (P-N1..P-N4, P-T4) carry NO extension headers**
+  — the generic v6 NAT path hardcodes L4 at offset 40 (§10-D D3), so
+  ext-header × NAT inputs are a known production divergence, not a property
+  violation. Ext-header packets feed only the read-only S1 parse properties
+  (and the P-N3b D3 pin example).
 - **`arb_v6_ext_chain()`** — a dedicated *structured* IPv6 extension-header
   chain strategy, the primary generator for the v6 parse arms (Codex r1
   finding 4 + AGY r1 finding 4: stamped garbage will not reliably reach
@@ -269,8 +296,8 @@ flag readers reached through the same entry points):
 |----|----------|--------|
 | P-N1 | Round-trip identity **on non-checksum bytes**: for valid v4/v6 TCP/UDP packets and NAT decision D (any non-empty subset of {src ip, dst ip, sport, dport} rewritten), after `apply_nat(apply_nat(pkt, D), undo(D, pkt))` the addresses, ports, every other header field, and the payload are byte-identical to the original. **`undo` is a harness-defined same-packet inverse** — `NatDecision { rewrite_src: D.rewrite_src.map(\|_\| orig_src), rewrite_dst: D.rewrite_dst.map(\|_\| orig_dst), … }` — explicitly NOT `NatDecision::reverse` (nat/mod.rs:71–74), which builds the reverse-FLOW decision (src↔dst swapped) for reply packets and would corrupt a same-direction packet (Codex r1 finding 3, AGY r1 finding 3). **Checksum fields are excluded from byte comparison** — one's-complement zero has two encodings (0x0000/0xFFFF) and the code deliberately maps across them (rewrite/ipv4.rs:113–118, rewrite/ipv6.rs:96–98, generic UDP `keep_zero`); instead each hop's checksums must pass the P-N2 oracle ("valid before, valid after fwd, valid after undo"; v4 UDP zero-checksum stays zero across both hops). The session-level fwd/rev composition via `NatDecision::reverse` gets ONE deterministic example test (forward packet through D, synthesized reply through `D.reverse(...)`, assert the reply's rewritten tuple maps back to the original flow) — example, not property, because it needs a semantically-built reply packet | valid packets × arb NatDecision |
 | P-N2 | Checksum validity oracle (`prop_tests/oracle.rs`): a test-local full recompute — `checksum16` over the IP header (v4), `checksum16_ipv4`/`checksum16_ipv6` pseudo-header over the L4 segment with checksum field zeroed — compared against stored values, treating 0x0000/0xFFFF as the defined-equal pair where the protocol permits both. **NOT** `verify_built_frame_checksums`: that helper early-returns `(true, true)` for everything except IPv4 TCP (frame/mod.rs:1129–1131 "Only handle IPv4 TCP for now") and would make the v6/UDP arms vacuous (Codex r1 finding 1). Asserts: incremental `adjust_l4_checksum_*` deltas equal ground truth; UDP/v4 zero-checksum stays zero (RFC 768); UDP/v6 stored checksum never 0x0000 | valid packets × arb NatDecision |
-| P-N3 | **Differential, descriptor vs generic — success cases**: build the same valid TCP/UDP frame (TTL ≥ 2, v6 UDP checksum non-zero) into two `MmapArea`s; apply the generic path (`rewrite_forwarded_frame_in_place`) and the descriptor path (`apply_rewrite_descriptor`, deltas from `compute_l4_csum_delta` exactly as flow_cache.rs:339 builds them), both with `expected_ports = None` (the two paths check expected ports at different pipeline points — descriptor pre-NAT as a DMA-race guard at rewrite/ipv4.rs:36, generic post-NAT via `enforce_expected_ports` at frame/mod.rs:526 — so port-mismatch inputs are NOT differential-comparable; Codex r1 finding 2); assert both succeed and the frames are **byte-identical except ALL checksum fields (v4 IP header checksum + L4 checksum)**, with every checksum passing the P-N2 oracle. The L4 exclusion is forced by two review-discovered production divergences documented in §10-D (rewrite/ipv6.rs:98 canonicalizes 0→0xFFFF for ALL v6 protocols vs generic UDP/ICMPv6-only at checksum.rs:88; frame/mod.rs:906's UDP `current == 0` skip is not family-gated). The v4 IP-header exclusion is the RFC 1624 zero-representation ambiguity (SMR r2): both paths are incremental, but the descriptor folds `!old + rd.ip_csum_delta + 0xFEFF` in one pass (rewrite/ipv4.rs:79–91) while the generic chains three `checksum16_adjust` calls with intermediate refolds (checksum.rs:291–312); end-around-carry totals ≡ 0 (mod 0xFFFF) can surface as 0x0000 in one path and 0xFFFF in the other (~2⁻¹⁶ of inputs — exactly the kind of case shrinking gravitates to). Validity-oracle-on-both is strictly the right contract; byte-equality on checksum fields is not a property the code promises | valid packets × arb NAT |
-| P-N3b | Decline conditions as **deterministic example tests**, not properties: (a) TTL/hop-limit ≤ 1 → BOTH paths return `None` and neither writes (the v1 claim "generic is the only writer" was wrong — frame/mod.rs:495 declines too); (b) descriptor port-mismatch (expected_ports set, frame differs) → descriptor `None`, frame untouched by it; (c) `rd.nat64`/`rd.nptv6` → descriptor `None` at rewrite/mod.rs:55, and note the flow cache never builds descriptors for them anyway (`should_cache` gates at flow_cache.rs:223–224) | fixed examples |
+| P-N3 | **Differential, descriptor vs generic — success cases**: build the same valid TCP/UDP frame (TTL ≥ 2, v6 UDP checksum non-zero, **v6 WITHOUT extension headers** — the generic v6 NAT path hardcodes L4 at offset 40 (§10-D D3) so ext-header × NAT inputs diverge outside checksum bytes; they are excluded here and pinned by one deterministic D3 example documenting current behavior) into two `MmapArea`s; apply the generic path (`rewrite_forwarded_frame_in_place`) and the descriptor path (`apply_rewrite_descriptor`, deltas from `compute_l4_csum_delta` exactly as flow_cache.rs:339 builds them), both with `expected_ports = None` (the two paths check expected ports at different pipeline points — descriptor pre-NAT as a DMA-race guard at rewrite/ipv4.rs:36, generic post-NAT via `enforce_expected_ports` at frame/mod.rs:526 — so port-mismatch inputs are NOT differential-comparable; Codex r1 finding 2); assert both succeed and the frames are **byte-identical except ALL checksum fields (v4 IP header checksum + L4 checksum)**, with every checksum passing the P-N2 oracle. The L4 exclusion is forced by two review-discovered production divergences documented in §10-D (rewrite/ipv6.rs:98 canonicalizes 0→0xFFFF for ALL v6 protocols vs generic UDP/ICMPv6-only at checksum.rs:88; frame/mod.rs:906's UDP `current == 0` skip is not family-gated). The v4 IP-header exclusion is the RFC 1624 zero-representation ambiguity (SMR r2): both paths are incremental, but the descriptor folds `!old + rd.ip_csum_delta + 0xFEFF` in one pass (rewrite/ipv4.rs:79–91) while the generic chains three `checksum16_adjust` calls with intermediate refolds (checksum.rs:291–312); end-around-carry totals ≡ 0 (mod 0xFFFF) can surface as 0x0000 in one path and 0xFFFF in the other (~2⁻¹⁶ of inputs — exactly the kind of case shrinking gravitates to). Validity-oracle-on-both is strictly the right contract; byte-equality on checksum fields is not a property the code promises | valid packets × arb NAT |
+| P-N3b | Decline conditions as **deterministic example tests**, not properties — asserting **bytes from the L3 offset onward are untouched** (NOT the whole frame: both paths write the Ethernet/VLAN header during `rewrite_prepare_eth*` BEFORE TTL/port validation — frame/mod.rs:403/413, called from mod.rs:581 and rewrite/mod.rs:56 — so a declined frame legitimately carries a rewritten L2 header; harmless in production because the caller drops the frame on `None`; Codex r2 finding 2): (a) TTL/hop-limit ≤ 1 → BOTH paths return `None` with L3+ untouched (the v1 claim "generic is the only writer" was wrong — frame/mod.rs:495 declines too); (b) descriptor port-mismatch (expected_ports set, frame differs) → descriptor `None`, L3+ untouched by it; (c) `rd.nat64`/`rd.nptv6` → descriptor `None` at rewrite/mod.rs:55 (before prep — frame fully untouched in this one case), and note the flow cache never builds descriptors for them anyway (`should_cache` gates at flow_cache.rs:223–224); (d) **D3 pin**: one v6+hop-by-hop+port-NAT example documenting that the generic path currently writes at offset 40 (ext-header bytes) — marked as pinning a defect, referencing the D3 issue | fixed examples |
 | P-N4 | Payload immutability: bytes after the L4 header are untouched by either path | valid packets × arb NAT |
 
 **S3 — state encode: DROPPED in v2** (Codex r1 finding 5 + AGY r1 Q4 + SMR
@@ -296,7 +323,7 @@ for the MTU lookup and a `SessionDecision`):
 | P-T1 | No panic for garbage frames × arbitrary meta × fixture forwarding state | garbage |
 | P-T2 | Reassembly identity: when `Some(segs)`, concatenating per-segment TCP payloads == original TCP payload | valid oversized TCP packets (payload 1×–4× MTU, MTU ∈ 1280..9216, TCP options 0..40B, v4 IHL 20..60) |
 | P-T3 | Per-segment wellformedness: every segment ≤ eth_len+MTU; `seq_i == orig_seq.wrapping_add(cumulative_offset)` (incl. seq wrap near u32::MAX); PSH cleared on all but last; SYN/FIN/RST never present (precondition gate at :69 declines them — asserted as `None`); IP total-length/payload-length fields consistent; per-segment IP + L4 checksums verify via the **P-N2 test-local oracle** (not `verify_built_frame_checksums` — v4-TCP-only, see S2); segment count == `ceil(payload/segment_max)` | same |
-| P-T4 | NAT composition: with a NAT decision in the `SessionDecision`, every segment carries the rewritten tuple and valid checksums (composes S2's oracle) | same × arb NAT |
+| P-T4 | NAT composition: with a NAT decision in the `SessionDecision`, every segment carries the rewritten tuple and valid checksums (composes S2's oracle). v6 inputs ext-header-free (the splitter calls `apply_nat_ipv6` which assumes L4 at 40 — same D3 constraint) | same × arb NAT |
 
 The UMEM-coupled twin (`tx/tcp_segmentation.rs::…_into_prepared`) is **out of
 scope** (needs a `BindingWorker` + tx_pipeline harness); the twin-drift risk
@@ -419,6 +446,24 @@ comment:
   its delta. Only reachable on malformed input; the harness's valid-packet
   generators never emit v6 UDP checksum 0, and one deterministic example
   pins current behavior. (AGY r1 finding 2.)
+- **D3 — generic v6 NAT path assumes L4 at fixed offset 40**: the worst of
+  the three — affects VALID traffic, not just representation or malformed
+  input. `apply_nat_ipv6` rewrites ports via
+  `apply_nat_port_rewrite(packet, 40, protocol, nat)` (frame/mod.rs:840–841,
+  comment "IPv6 header is always 40 bytes (no IHL)"), and both generic v6
+  checksum adjusters compute `checksum_offset = 40usize.checked_add(delta)`
+  (`adjust_l4_checksum_ipv6_words` checksum.rs:490,
+  `adjust_l4_checksum_ipv6_addr_bytes` checksum.rs:516–517). The caller
+  `rewrite_apply_v6` parses the REAL ext-header-aware `rel_l4`
+  (frame/mod.rs:550–555) but only uses it for tuple restore — then hands the
+  packet to the 40-assuming helpers. The descriptor path parses real offsets
+  (rewrite/ipv6.rs:35–41). Consequence: a valid IPv6 packet with any
+  extension header that takes the generic NAT path gets its first
+  ext-header bytes overwritten (port rewrite) and/or a non-checksum word
+  "adjusted". Reachability (does NAT66/SNAT-v6 traffic with ext headers
+  reach this path in production?) is assessed in the filed issue, not here.
+  (Codex r2 finding 1; blast radius extended to the checksum adjusters by
+  Claude verification.)
 
 ### Deferred / rejected
 
@@ -466,29 +511,28 @@ the umbrella residue stays honest (SMR r1 F5).
   only minimal shrunk failures checked in.
 - ~~Q6 layout?~~ — `frame/prop_tests/` directory module.
 
-### Open for round 2
+### Resolved in round 2
 
-1. **P-N3 v2.1 soundness re-check**: SMR r2 already extended the exclusion
-   to the v4 IP-header checksum (RFC 1624 zero-representation ambiguity
-   between the descriptor's single fold and the generic path's chained
-   refolds — see the P-N3 row). With ALL checksum fields validity-oracle-only
-   and `expected_ports = None`, is the remaining byte-equality claim
-   (addresses, ports, TTL/hop, payload, all other header bytes) provable for
-   every valid generated input — or is there a fourth hidden divergence?
-   PLAN-KILL the property (not the plan) if a reviewer can show a
-   valid-input divergence outside the excluded bytes.
-2. **P-N1 undo semantics**: the harness `undo(D, pkt)` only restores fields
-   D rewrote. Is "non-rewritten fields never change" sufficiently covered
-   between P-N1 and P-N4, or does the round-trip need an explicit
-   frame-diff mask?
-3. **D1/D2 handling**: is "document + accommodate in tests + file issues at
-   implementation time" right, or should D1/D2 be fixed in production FIRST
-   so the differential property can be strengthened to full byte-equality
-   (smaller test, stronger contract, but couples this test-only plan to a
-   production change)?
-4. **Budget honesty**: 512/256/128 case counts at ≤10s total — anyone want
-   to argue the counts are too low to mean anything for the v6 ext-header
-   space (combinatorially the largest) and the budget should be spent
-   asymmetrically (e.g. 1024 on P-I1/P-I3, 64 elsewhere)?
-5. **Anything else that makes this not worth shipping?** PLAN-KILL remains
-   acceptable.
+- ~~Q1 (r2) divergence outside excluded bytes?~~ — YES, Codex r2 constructed
+  it: v6 ext-headers × port NAT (generic path hardcodes L4 at 40). Verified
+  in source, blast radius extended to the checksum adjusters; recorded as
+  §10-D D3; NAT-applying generators restricted to ext-header-free v6. AGY
+  r2's contrary "provable, identical write helpers" answer was refuted by
+  this counterexample.
+- ~~Q2 frame-diff mask?~~ — Codex: add explicit mask (cheap, unambiguous);
+  AGY: P-N1+P-N4 suffice. Resolution: implement P-N1/P-N3 comparisons via
+  one shared explicit byte-mask helper in `prop_tests/oracle.rs` (Codex's
+  position — it costs ~20 LOC and makes the excluded-byte set auditable).
+- ~~Q3 D1/D2 document-and-file?~~ — both reviewers: yes, with Codex's
+  condition that the new D3 class be excluded from P-N3 (done in v3).
+- ~~Q4 budget?~~ — both: counts fine given structured ext-header weighting +
+  llvm-cov spot-check.
+- ~~Q5 kill?~~ — Codex: "Not PLAN-KILL overall"; AGY: "highly valuable".
+
+### Open for round 3 (final convergence check)
+
+1. Does v3 correctly and completely fold Codex r2's two findings (D3
+   exclusion + L3+-only decline assertions)? Any remaining valid-input
+   divergence inside the v3-restricted generator domain (v4 any-IHL,
+   ext-header-free v6, TTL ≥ 2, valid checksums, `expected_ports=None`)?
+2. Anything else blocking PLAN-READY? PLAN-KILL remains acceptable.
