@@ -213,7 +213,9 @@ independently:
    /32 (/128) route installed with explicit `dev` + `onlink`. Per-test
    tables make "same target via two uplinks" (the normal dual-WAN
    pattern) first-class; table IDs are collision-checked against
-   routing-instance `TableID`s at commit. Probe sockets set `SO_MARK`.
+   routing-instance `TableID`s at commit, and the band size caps
+   `next-hop`-pinned tests at 50 (commit error past the cap — far above
+   any realistic uplink count). Probe sockets set `SO_MARK`.
    NOT in FRR, NOT in the snapshot — transit traffic (fast path AND
    kernel slow path) untouched. Startup runs a `clear()` pass over the
    50-99 band and flushes probe tables so a crashed daemon never leaks
