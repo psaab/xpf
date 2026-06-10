@@ -2,9 +2,10 @@
 
 ## 1. Status
 
-`DRAFT v3 — round-2: AGY PLAN-READY(D) confirmed; Codex PLAN-NEEDS-REVISION
-on one residual comment-only citation in the §5.2 cross-caller list,
-fixed in v3. Claude SMR PLAN-READY(D). Pending Codex round-3 confirmation.`
+`CONVERGED v3 — PLAN-KILL (Option D). Claude SMR PLAN-READY(D) (r1, r2),
+AGY PLAN-READY(D) (r1 @ v1, r2 @ v2), Codex PLAN-READY(D) (r3 @ v3 after
+measurement corrections in r1/r2 were applied). #1825 closes with the
+plan-kill label; section 9 Option D rationale is the converged verdict.`
 
 Research-only (`/research`). No production code on this branch. The
 recommendation below is **Option D (PLAN-KILL)** with a narrowly scoped
