@@ -1,6 +1,6 @@
 # #1807 — Worker-side command-queue poison recovery (permanent deafness + silent producer drops)
 
-Status: DRAFT v1 — pending adversarial plan review
+Status: DRAFT v2 — round-1 findings folded (Codex + AGY both PLAN-NEEDS-MAJOR: audit was incomplete), pending round-2 confirm
 
 ## Issue framing
 
@@ -16,14 +16,25 @@ treats poison as absence-of-work, permanently:
    Err arm returns empty results; same deafness (this is the arm actually
    consuming the queue when called).
 
-Additionally (found during this research, same family, MISSED by U9 —
-these are producer-side in session_glue, not ha.rs):
+Additionally — full production audit (round-1: BOTH reviewers found the
+v1 "4 sites" scope false; complete inventory):
 
-3. `session_glue/mod.rs:598` (`replicate_session_upsert`) —
-   `if let Ok(mut pending) = commands.lock()` silently DROPS the
-   UpsertSynced replica for a poisoned worker.
+3. `session_glue/mod.rs:598` (`replicate_session_upsert`) — `if let Ok`
+   silently DROPS the UpsertSynced replica for a poisoned worker.
 4. `session_glue/mod.rs:609` (`replicate_session_delete`) — same, drops
    DeleteSynced.
+5. `shared_ops.rs:180` and `shared_ops.rs:216` — drop activation prewarm
+   `UpsertSynced` on poison.
+6. `tunnel.rs:322` — drops `UpsertLocal`; `tunnel.rs:354` treats poison
+   as "not drained" until timeout.
+7. `cos/cross_binding.rs:136` — treats poison as enqueue failure
+   (cross-worker shaped-TX request lost).
+8. `tx/drain/mod.rs:519` — same, and the comment at :523 calls a
+   poisoned mutex "unrecoverable" — that comment directly contradicts
+   the recovery invariant and must be removed/rewritten.
+9. Coordinator retrofit: the five #1790 ha.rs sites (:58, :129, :203,
+   :358, :420) recover WITHOUT clear_poison — retrofit them to the
+   shared helper for one consistent policy.
 
 Combined effect after one worker panic mid-push: coordinator pushes
 accumulate unboundedly in a queue the worker never drains (the #835
@@ -53,36 +64,53 @@ acceptable if they show recovery is unsound for this data structure.
 
 ## Concrete design
 
-Site 1 (loop_body:597):
+**One shared helper pair (round-1 Codex requirement), e.g. in a small
+`worker_queue.rs` module (or alongside the WorkerCommand type):**
+
 ```rust
-let has_commands = match commands.try_lock() {
-    Ok(q) => !q.is_empty(),
-    Err(std::sync::TryLockError::WouldBlock) => false, // unchanged: skip this tick
-    Err(std::sync::TryLockError::Poisoned(p)) => !p.into_inner().is_empty(),
-};
+/// Lock a worker-command queue, recovering and CLEARING poison.
+/// Policy (#1807, extends #1790): a panic that poisoned the queue
+/// already happened and was contained ([#925] supervisor); the deque
+/// holds the committed prefix of every completed push — discarding it
+/// would lose acknowledged HA/session commands. clear_poison restores
+/// the fast unpoisoned path for subsequent accesses.
+fn lock_recover<'m>(m: &'m Mutex<VecDeque<WorkerCommand>>) -> MutexGuard<'m, VecDeque<WorkerCommand>> {
+    match m.lock() {
+        Ok(g) => g,
+        Err(p) => { m.clear_poison(); POISON_RECOVERIES.fetch_add(1, Relaxed); p.into_inner() }
+    }
+}
+/// try_lock variant: WouldBlock → None (unchanged skip semantics);
+/// Poisoned → recover + clear + Some(guard).
+fn try_lock_recover<'m>(...) -> Option<MutexGuard<'m, ...>> { ... }
 ```
-(into_inner on TryLockError::Poisoned yields the guard; q dropped
-immediately — this also CLEARS the poison? No: into_inner does not clear
-poison; `Mutex::clear_poison` exists since 1.77. Decision point: call
-`commands.clear_poison()` after first recovery so subsequent ticks take the
-fast Ok path, or recover on every access. RECOMMENDED: clear_poison once
-recovered — matches intent, removes per-tick Err-path cost. Verify #1790
-coordinator-side precedent: if coordinator did NOT clear, choose one policy
-and apply to both sides in this PR for consistency, coordinator included
-if trivial.)
 
-Site 2 (session_glue:472): same match shape; Poisoned arm proceeds with
-`p.into_inner()` exactly as the Ok arm (take the deque, process), then
-clear_poison per the chosen policy. WouldBlock arm unchanged (empty
-results).
+DECIDED (round-1, both reviewers): **clear-after-recovery**, applied
+uniformly — without it the hot-loop "Poisoned arm is cold" claim is false
+forever after the first poison. The coordinator ha.rs sites are
+retrofitted to the same helper in this PR.
 
-Sites 3+4 (replicate_session_*): replace `if let Ok` with the #1790
-match-recover pattern so replicas are pushed even to a poisoned queue.
+Application: site 1 (loop_body:597) uses try_lock_recover for the
+has-commands peek; site 2 (session_glue:472) uses try_lock_recover and
+processes the recovered deque; producer sites (session_glue:598/:609,
+shared_ops:180/:216, tunnel:322, cos/cross_binding:136, tx/drain:519)
+use lock_recover (or try_lock_recover preserving each site's current
+WouldBlock disposition — audit each); tunnel.rs:354 drain-wait treats a
+recovered guard as a normal read. Any production access intentionally
+left unconverted must be explicitly justified in the PR body.
 
-Counters: add `worker_command_queue_poison_recoveries` (per-worker or
-global static following U4's SESSION_PUBLISH_ERRORS_SHARED pattern) so
-operators can see recovery happened. Optional but cheap; recommended since
-poison indicates a prior panic worth alerting on.
+Data-integrity wording (round-1 Codex): the recovered deque holds the
+**committed prefix** of any multi-push section that panicked between
+pushes (e.g. ha.rs:61+:68, tunnel.rs:323+:325) — not just "fully pushed
+or not pushed". Consumers already tolerate partial command batches
+(commands are individually self-contained); document this at the helper.
+
+Counter (round-1 Codex): a hidden static is NOT an operator surface.
+Wire `worker_command_queue_poison_recoveries_total` deliberately through
+the existing status path — the U4 SESSION_PUBLISH_ERRORS_SHARED pattern:
+static in the helper module → coordinator/status.rs accessor →
+server/helpers.rs → protocol.go → pkg/api/metrics_userspace.go (both-
+sides grep rule applies).
 
 ## Public API preservation
 
@@ -130,16 +158,18 @@ with reviewers (wire-protocol changes need both-sides grep per memory).
 
 ## Open questions for adversarial review
 
-1. clear_poison after recovery vs recover-every-access — and should the
-   coordinator side (U9) adopt the same in this PR for consistency?
-2. Is processing a deque recovered from a mid-push panic sound, or should
-   the recovery policy be drain-discard + log (lose the queue once but
-   restore liveness)? #1790 chose process-as-is coordinator-side — does the
-   worker consume path raise new concerns (commands acted on vs just
-   exported)?
-3. Counter exposure: static + log only, or full status/protocol plumbing?
-4. Are there MORE worker-side queue accesses this audit missed? Reviewers
-   should grep `commands.lock\|commands.try_lock` across userspace-dp
-   themselves.
-5. Hot-loop codegen: does the 3-arm match keep the empty-queue fast path
-   branch-predictable (it should — Poisoned is cold)?
+1. RESOLVED round 1: clear-after-recovery, uniformly, coordinator
+   retrofitted in this PR.
+2. RESOLVED round 1 (Codex): process recovered queues — WorkerCommand is
+   an owned enum (types/runtime.rs:215); #1790 tests already assert
+   recovery preserves commands (ha_tests.rs:414); drain-discard would
+   lose committed HA commands. Wording: committed prefix.
+3. RESOLVED round 1: full status/protocol plumbing per the U4 pattern.
+4. RESOLVED round 1: complete inventory above (sites 1-9); round-2
+   reviewers verify NO production access remains unconverted/unjustified.
+5. Open: hot-loop codegen — confirm the helper keeps the empty-queue
+   fast path tight (helper #[inline]; Poisoned arm cold).
+6. Open (new): is clear_poison correct when MULTIPLE threads race the
+   recovery (clear_poison is idempotent; two recoverers both take
+   committed state — confirm no double-processing hazard given guards
+   serialize)?
