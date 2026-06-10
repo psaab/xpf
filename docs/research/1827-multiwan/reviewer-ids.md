@@ -21,3 +21,9 @@ Plan v2 addresses all; preferred-metric semantics corrected against Juniper docs
 - Claude SMR: `claude-smr-plan-r2.md` — PLAN-READY contingent on folds A/B (applied in v2.1)
 
 v3 folds all round-2 findings.
+
+## Round 3 (plan v3, 08978fc4d + SMR-r3/pin-cap fold)
+
+- Claude SMR: `claude-smr-plan-r3.md` — PLAN-READY
+- AGY: `adversarial-review-mq8f83e5-sx5ivx` — PLAN-READY (all four r2 conditions confirmed faithfully folded; Codex r2 folds introduce no new defect)
+- Codex: round-3 convergence check dispatched (id recorded on completion)
