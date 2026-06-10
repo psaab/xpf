@@ -1,6 +1,6 @@
 # #1805 — Bound gRPC/HTTP request-path exec sites
 
-Status: DRAFT v1 — pending adversarial plan review
+Status: DRAFT v2 — round-1 findings folded (Codex PLAN-NEEDS-MAJOR; AGY Option-A confirmed), pending round-2 confirm
 
 ## Issue framing
 
@@ -46,28 +46,53 @@ the pattern wrong (e.g. request ctx should be plumbed instead of a fresh
 15s ctx), iterate; PLAN-KILL is acceptable if they conclude the risk of
 changing show-command semantics outweighs the hang fix.
 
-## Concrete design
+## Concrete design (v2 — round-1 folds)
 
-Import direction: pkg/daemon imports grpcapi/api, so the U3 helpers in
-pkg/daemon/exec_timeout.go CANNOT be imported here (cycle). Options:
+Import direction: pkg/daemon imports grpcapi/api (daemon_run.go:21,:33),
+so the U3 helpers CANNOT be imported here (cycle). **Option A decided**
+(AGY confirmed + structural-mirroring precedent runtime_probes.go:7-10):
+unexported per-package helpers in pkg/grpcapi/exec_timeout.go and
+pkg/api/exec_timeout.go — but NOT a byte-mirror of the daemon helper
+(round-1 Codex finding 1): the request-path sites use THREE distinct
+output modes that must be preserved exactly:
 
-- **Option A (recommended): unexported per-package helper copies.** ~30
-  lines each in pkg/grpcapi/exec_timeout.go and pkg/api/exec_timeout.go,
-  byte-mirroring the daemon helper (15s ctx + WaitDelay 5s + doc comment
-  pointing at the daemon original). Precedent: the project favored local
-  helpers over new micro-packages in U3 review.
-- Option B: new shared package pkg/execto with RunTimeout()/
-  RunStdinTimeout(); migrate daemon callers too. More churn, one SSOT.
+- `outputTimeout(ctx, name, args...) ([]byte, error)` — wraps
+  `cmd.Output()` (stdout-only) for the 4 server_show_status.go sites,
+  which today feed stdout directly into user-visible responses; a
+  CombinedOutput mirror would leak stderr into them.
+- `combinedOutputTimeout(ctx, name, args...) ([]byte, error)` — for the
+  sites that use CombinedOutput today (chronyc/ntpq/timedatectl, ip neigh
+  flush, journalctl, tail).
+- `runTimeout(ctx, name, args...) error` — wraps `.Run()` for the
+  deferred power actions (errors remain IGNORED exactly as today —
+  round-1 fold: v1 wrongly said "log-only as today"; today they are
+  ignored, and this plan does not change that).
 
-Where a request ctx is naturally available (gRPC handler methods), derive:
-`ctx, cancel := context.WithTimeout(reqCtx, 15*time.Second)` so client
-cancellation also kills the child. The helper takes a parent ctx parameter
-to support this: `runCommandTimeoutCtx(ctx, name, args...)`; nil/Background
-for the goroutine-deferred power actions.
+All three: `context.WithTimeout(parent, 15s)` + `cmd.WaitDelay = 5s`.
+Parent ctx: the request ctx where in scope (derive — client cancellation
+kills the child); `showNTP` has no ctx today → plumb the handler ctx down
+(round-1 fold); `GetSystemInfo` discards ctx with `_` → use it;
+`context.Background()` for the deferred reboot/halt/poweroff goroutines
+(client disconnect must not cancel a confirmed power action).
 
-Semantics preserved: every call site keeps its exact current error
-handling (most log-and-continue or return partial output); only the
-unbounded wait changes.
+Additional round-1 folds:
+- **U3-parity completion**: the three existing CommandContext sites
+  (server_diag.go:132, api/system.go:133,:171) get `WaitDelay = 5s` added
+  (they are request-ctx-bounded but can still hang on inherited pipes
+  with zero WaitDelay).
+- **tail -n N cap** (server_show.go:435,:445): N is request-controlled
+  with only Atoi validation; a time cap does not bound a huge fast read.
+  Clamp N to [1, 10000] before exec and note the byte-bound rationale at
+  the site.
+- Site count corrected: **17 raw exec.Command call expressions** (4
+  status, 4 NTP, 5 diag incl 3 power, 2 show, 2 api incl 1 power pair) —
+  the implementer re-greps and reconciles the table before starting.
+
+Semantics preserved per site AS-IS (v1 overgeneralized — round-1 fold):
+some sites return gRPC errors on failure (server_show_status.go:171,
+server_show.go:391), some substitute fallback text, power goroutines
+ignore errors. Only the unbounded wait changes; every site keeps its
+exact current error disposition.
 
 ## Public API preservation
 
@@ -111,15 +136,15 @@ No exported signature changes. Wire formats untouched.
 
 ## Open questions for adversarial review
 
-1. Option A (local copies) vs Option B (shared pkg) — which fits project
-   convention? Is a third duplicate (after daemon's) acceptable?
-2. Should gRPC sites derive from the request ctx (cancellation propagation)
-   or use a detached 15s ctx (uniform with daemon)? Recommended: derive
-   where a ctx is in scope, detached otherwise — confirm.
-3. Any site where a 15s bound is WRONG (journalctl --boot on a huge journal
-   legitimately >15s? tail -n on a giant log?) — should any get a larger
-   bound or a size cap instead?
-4. The reboot/halt/poweroff bounding — any shutdown-ordering hazard?
-5. Did the audit miss request-reachable exec in other packages (pkg/cli
-   server-side? pkg/routing called from handlers?) — reviewers should
-   re-grep with their own boundary.
+1. RESOLVED round 1: Option A, with three output-mode-preserving helper
+   variants (not a byte-mirror).
+2. RESOLVED round 1: derive from request ctx where in scope (plumb ctx
+   into showNTP; stop discarding in GetSystemInfo); Background for
+   deferred power actions.
+3. RESOLVED round 1: 15s fine for ps/df/ss/journalctl -n/neigh flush;
+   NTP fallback chain worst-case stacking documented at the site; tail
+   gets an N clamp in addition to the time bound.
+4. Open: reboot/halt/poweroff bounding — confirm no shutdown-ordering
+   hazard (the bound only fires if systemctl wedges).
+5. Open: audit completeness — round-2 reviewers re-grep
+   pkg/grpcapi+pkg/api and flag any miss vs the 17-site table.
