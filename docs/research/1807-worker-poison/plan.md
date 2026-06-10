@@ -1,7 +1,6 @@
 # #1807 — Worker-side command-queue poison recovery (permanent deafness + silent producer drops)
 
-Status: DRAFT v3 — r2 wire-contract test fold, pending round-3 confirm
-
+Status: CONVERGED PLAN-READY (Codex + AGY + Claude SMR)
 ## Issue framing
 
 U9/#1790 (PR #1806) made the COORDINATOR side recover poisoned
