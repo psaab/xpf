@@ -9,3 +9,16 @@
 | AGY | adversarial-review-mq8ehs5l-cnc8vg | PLAN-READY-WITH-FINDINGS (3 findings) |
 
 All r1 findings folded into plan v2.
+
+## Round 2 (plan v2 @ 3f517d48c)
+
+| Reviewer | Task id | Verdict |
+|---|---|---|
+| Claude SMR | in-conversation (claude-smr-plan-r2.md) | PLAN-READY (3 MUST-PINs for /engineer) |
+| Codex (spark, high) | task-mq8f8tpv-pubylf | PLAN-READY-WITH-FINDINGS (r1 resolved; 1 MED-HIGH phase-coupling) |
+| AGY | adversarial-review-mq8f8new-gtjb29 | PLAN-READY-WITH-FINDINGS (r1 resolved + FIFO-scoping conceded; 3 findings) |
+
+All r2 residual findings folded into plan v3 — **CONVERGED** (the one
+substantive residual, the Phase-1/Phase-2 admission-ECN suppression coupling
+window, was independently identified by all three reviewers with the same
+remedy, now normative in §6.2c-bis).

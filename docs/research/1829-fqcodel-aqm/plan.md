@@ -2,7 +2,18 @@
 
 ## 1. Status
 
-DRAFT v2 — round-1 findings folded; pending round-2 adversarial plan review.
+**v3 — CONVERGED (3-way PLAN-READY family, all findings folded).**
+
+Round-2 verdicts on v2 @ `3f517d48c`: Claude SMR **PLAN-READY** (3 MUST-PINs,
+`claude-smr-plan-r2.md`); Codex **PLAN-READY-WITH-FINDINGS** (r1's 8 findings
+verified resolved; 1 remaining MED-HIGH = phase-coupling window,
+`codex-plan-r2.md`); AGY **PLAN-READY-WITH-FINDINGS** (r1 findings verified
+resolved incl. conceding the FIFO-scoping with call-chain evidence; 3 findings,
+`agy-plan-r2.md`). v3 folds the entire residual: phase-coupling guard in
+§6.2c-bis (Codex r2 #2 = AGY r2 F3 = SMR r2 P1 — three-way convergent on the
+same hazard and the same remedy), inline-CodelState lifecycle reset (AGY r2
+F1), windowed-minimum sojourn as the gate metric (AGY r2 F2). No design
+changes remain contested.
 
 Research-only. No production code on this branch. Base: master `d30cfab84`.
 
@@ -262,6 +273,16 @@ self-time measurement shows no regression beyond noise; fallback if it does
 regress is gating the EWMA on `codel_target_ns != 0` and keeping only the
 peak (one cmp+cmov) unconditional.
 
+**Windowed-minimum sojourn (AGY r2 Finding 2 — required for the gate to be
+valid).** CoDel acts on the windowed *minimum* sojourn; EWMA and peak are
+both biased high by transient scheduler gaps (a single 10 ms service gap
+inflates them while the true standing queue is zero). Phase 1 therefore also
+exports `sojourn_windowed_min_ns`: the classic two-bucket flip-flop minimum
+(current-window running min + previous-window min, window = 100 ms flipped
+off the pass `now_ns`) — O(1) per pop (one cmp), two u64 fields + one
+flip-timestamp per queue, no allocation. The §6.1d gate criteria evaluate on
+the windowed minimum, with EWMA/peak as supporting context only.
+
 **1d. Gate evidence (tightened per SMR r1 F1: attribution, not existence).**
 Re-run the #1359 100E100M surplus-sharing matrix and the standard per-class
 sweep with Phase 1 deployed; capture per-queue sojourn EWMA/peak per regime
@@ -282,7 +303,13 @@ lineage (#1743).
 
 - **FIFO (unpromoted) queues**: one `CodelState` inline in `CoSQueueHotState` —
   a FIFO queue is single-flow by the #1735 probe invariant, so per-queue state
-  IS per-flow state. ~32 B.
+  IS per-flow state. ~24 B. **Lifecycle reset (AGY r2 Finding 1):** the inline
+  state is explicitly reset to default at BOTH promotion (`promote_to_flow_fair`,
+  the `#[cold]` path) and demotion (`maybe_demote_drained_best_effort`) so a
+  dropping-mode/high-`count` state accumulated in one FIFO epoch can never leak
+  into a later epoch across a promote/demote cycle. (Config rebuilds are safe
+  by construction — `reset_binding_cos_runtime` drops the whole runtime,
+  verified by AGY r2.)
 - **Flow-fair (promoted) queues**: per-bucket **array-of-structs** (AGY r1
   Finding 1 — the MQFQ parallel-array layout is right for the min-finish SCAN
   across buckets, but CoDel state is accessed for exactly ONE bucket per
@@ -418,6 +445,17 @@ buffer-protection backstop (it fires at depths CoDel should prevent from
 ever forming; if both fire, the queue is genuinely overloaded and a second
 mark is then correct). This is a config-time branch, not a hot-path cost.
 
+**Phase-coupling guard (Codex r2 #2 MED-HIGH = SMR r2 MUST-PIN P1 —
+normative).** The suppression branch and the CoDel enforcement MUST land in
+the same PR and key off the same runtime predicate, so a build where
+`codel_target_ns > 0` suppresses admission per-flow marking WITHOUT a
+dequeue-time replacement is structurally impossible. Phase 1 (telemetry-only)
+does NOT touch the admission policy — an operator setting `codel-target` on a
+Phase-1-only build keeps today's admission marking unchanged, exactly as on
+master today (the field is already settable and inert). A unit test asserts
+the no-signal window cannot exist: codel-enabled queue under standing delay
+produces ≥1 signal (admission aggregate, CoDel mark, or CoDel drop).
+
 This placement keeps the #1763 invariant intact: peek → (codel decision, no
 queue mutation) → pop-known-bucket → mutate. The debug_assert re-scan still
 validates every pop.
@@ -470,7 +508,8 @@ before merge.
   enumerated explicitly per Codex r1 #5, added to BOTH
   `userspace-dp/src/protocol/cos.rs` (queue status snapshot, next to
   `admission_ecn_marked`) AND `pkg/dataplane/userspace/protocol.go`:
-  - Phase 1: `sojourn_ewma_ns: u64`, `sojourn_peak_ns: u64`
+  - Phase 1: `sojourn_ewma_ns: u64`, `sojourn_peak_ns: u64`,
+    `sojourn_windowed_min_ns: u64` (AGY r2 F2 — the gate metric)
   - Phase 2: `codel_ce_marked: u64`, `codel_dropped: u64`,
     `codel_dropped_bytes: u64`
   All additive, `#[serde(default)]` / `omitempty`, old/new mixed-version safe
