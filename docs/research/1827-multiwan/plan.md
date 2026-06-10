@@ -1,6 +1,8 @@
 # #1827 Multi-WAN: uplink model, health probes, failover + PBR policy layer
 
-**Status:** DRAFT v3 — v2 revised after round-1 review (all three reviewers
+**Status:** DRAFT v3.1 — v3 + Codex r3 fold (explicit probe table range
+7000-7049 with reserved-table collision checks). v2 revised after
+round-1 review (all three reviewers
 PLAN-NEEDS-REVISION); v2.1 folded Claude SMR r2 findings A/B; v3 folds
 round-2 findings: Codex r2 (pin-route multiplicity/ranges, named
 `PublishRouteOverlaySnapshot` API, complete `assembleFRRConfig` contract)
@@ -205,14 +207,20 @@ independently:
 4. **`next-hop`** — probe pin plumbing with **zero transit impact**,
    specified per-test (Codex r2-1, AGY r2-3): each test with `next-hop`
    gets a deterministic **per-test fwmark + per-test kernel routing
-   table** (mark `0x1000 + idx`, table `probe-table-base + idx`, idx
-   assigned in sorted probe/test order), one `ip rule` per test
+   table** (mark `0x1000 + idx`, table from the **reserved probe table
+   range 7000-7049** (`probeTableBase = 7000`), idx assigned in sorted
+   probe/test order — clear of Linux reserved tables 0/253/254/255, the
+   mgmt VRF table 999 (`daemon_apply.go:185`), and the routing-instance
+   auto-assignment that grows upward from 100
+   (`compiler_routing.go:275`); commit-time collision check covers
+   explicit routing-instance `TableID`s AND these reserved daemon
+   tables), one `ip rule` per test
    (`fwmark <mark> lookup <table>`) in the vacant **priority band 50-99**
    (outside the existing next-table 100-199 / PBR 31000+ / rib-group
    33000+ clear windows in `pkg/routing/rules.go`), and the pinned
    /32 (/128) route installed with explicit `dev` + `onlink`. Per-test
    tables make "same target via two uplinks" (the normal dual-WAN
-   pattern) first-class; table IDs are collision-checked against
+   pattern) first-class; the 7000-7049 range is collision-checked against
    routing-instance `TableID`s at commit, and the band size caps
    `next-hop`-pinned tests at 50 (commit error past the cap — far above
    any realistic uplink count). Probe sockets set `SO_MARK`.
