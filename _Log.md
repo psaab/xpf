@@ -4891,3 +4891,6 @@ top.
 - **Timestamp**: 2026-06-10
   **Action**: "#1831 commit 2 — apply-cos-config.sh opt-in equal-flow injector: COS_EQUAL_FLOW=1 env var appends `set class-of-service schedulers <name> equal-flow-enforcement` (knob spelling per schema.go:880 / compiler_equal_flow_worker_cap_test.go) for every transmit-rate-exact scheduler in the selected fixture, mirroring the --surplus-sharing awk injector; fail-fast exit 2 on COS_EQUAL_FLOW=1 + --surplus-sharing (compiler rejects both knobs on one scheduler, compiler.go:573); default behavior unchanged; usage header + cos-validation-notes.md injector paragraph"
   **File(s)**: test/incus/apply-cos-config.sh, docs/cos-validation-notes.md
+- **Timestamp**: 2026-06-10
+  **Action**: /research #1838+#1839+#1840 — wrote converged-plan draft v1 (NAT/checksum v6 trio: thread rel_l4 into generic v6 NAT path; descriptor canonicalization scoped to adjust_zero_checksum_illegal; family-gate RFC 768 UDP-zero skip)
+  **File(s)**: docs/research/1838-nat-v6-trio/plan.md
