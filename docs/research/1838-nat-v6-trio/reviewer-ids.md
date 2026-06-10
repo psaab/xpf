@@ -8,3 +8,5 @@
 | r2 | AGY | adversarial-review-mq8kcboh-fchk59 | PLAN-READY x3 (3 impl nits; Q1/Q8/Q9 ACCEPTED) |
 | r2 | Claude SMR | claude-smr-plan-r2.md | PLAN-READY conditional on Q8/Q9 |
 | r2 | Codex | (flock'd adversarial-review, see codex-plan-r2.md) | PLAN-NEEDS-REVISION (2 mediums on §5.7: embedded non-first fragments; builder ICMPv6 zero canonicalization) |
+| r3 | Codex | (flock'd targeted confirmation, see codex-plan-r3.md) | PLAN-READY (approve, no material findings) |
+| r3 | Claude SMR | claude-smr-plan-r3.md | PLAN-READY |

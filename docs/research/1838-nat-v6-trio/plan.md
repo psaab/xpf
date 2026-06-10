@@ -2,8 +2,10 @@
 
 ## 1. Status
 
-DRAFT v3 — round-2 folds applied; pending round-3 convergence on the §5.7
-deltas (Codex).
+**PLAN-READY v3.1** — converged 3-way (Codex r3 PLAN-READY/approve, AGY r2
+PLAN-READY ×3, Claude SMR r3 PLAN-READY). Awaiting `/engineer 1838` for
+implementation (one PR closing #1838 + #1839 + #1840; Copilot joins as the
+4th reviewer on the implementation PR).
 
 Round-2 verdicts: AGY PLAN-READY ×3 (Q1/Q8/Q9 explicitly ACCEPTED; 3
 compile-level nits folded into §5.7 notes); Claude SMR PLAN-READY
@@ -457,7 +459,12 @@ Fix spec (same PR, separate logical commit; r2 folds marked):
    matrix, and the recompute-oracle alone cannot see the representation —
    the test must assert the stored field).
 3. The v4 builder is already IHL-correct (`builders.rs:6` uses `ihl`) — no
-   change.
+   change. Note (SMR r3): `parse_embedded_v4` (parse.rs:36-60) reads ports
+   at `ihl` without checking the IPv4 fragment-offset field — the same
+   non-first-fragment exposure, PRE-EXISTING and family-symmetric; it
+   belongs to the Q4 fragment follow-up issue and is NOT regressed (or
+   fixed) by this PR. The new v6 walker simply avoids INTRODUCING the v6
+   twin of it.
 4. Outer v6 addresses at fixed `8..40` are correct regardless of ext
    headers — unchanged.
 
