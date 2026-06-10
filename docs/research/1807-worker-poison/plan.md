@@ -1,6 +1,6 @@
 # #1807 — Worker-side command-queue poison recovery (permanent deafness + silent producer drops)
 
-Status: DRAFT v2 — round-1 findings folded (Codex + AGY both PLAN-NEEDS-MAJOR: audit was incomplete), pending round-2 confirm
+Status: DRAFT v3 — r2 wire-contract test fold, pending round-3 confirm
 
 ## Issue framing
 
@@ -110,8 +110,13 @@ Counter (round-1 Codex): a hidden static is NOT an operator surface.
 Wire `worker_command_queue_poison_recoveries_total` deliberately through
 the existing status path — the U4 SESSION_PUBLISH_ERRORS_SHARED pattern:
 static in the helper module → coordinator/status.rs accessor →
-server/helpers.rs → protocol.go → pkg/api/metrics_userspace.go (both-
-sides grep rule applies).
+server/helpers.rs → protocol.rs ProcessStatus → protocol.go →
+pkg/api/metrics_userspace.go (both-sides grep rule applies).
+Wire-contract test surface (r2 fold): the new ProcessStatus field
+trips protocol/tests.rs:769 and
+userspace-dp/tests/fixtures/protocol_wire_v1.json — update both; add
+the matching Go decode coverage and the Prometheus descriptor/coverage
+tests in pkg/api (mirror how SESSION_PUBLISH_ERRORS landed in U4).
 
 ## Public API preservation
 
@@ -154,8 +159,8 @@ grep rule).
 
 - Bounding the queues (#835 plan-kill stands).
 - Supervisor/restart policy changes (#925).
-- New wire-protocol status fields (unless reviewers demand observability
-  beyond a counter/log).
+- Any new wire fields beyond the single poison-recovery counter decided
+  above.
 
 ## Open questions for adversarial review
 
