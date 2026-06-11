@@ -1,12 +1,48 @@
 # Plan: #1870 — local-tunnel `UpsertLocal` pair dropped at `max_sessions` while shared maps hold both entries
 
-**Revision:** v1
+**Revision:** v2
+v2 folds round-1 convergence (Claude SMR PLAN-NEEDS-CHANGES, Codex
+PLAN-NEEDS-CHANGES, AGY PLAN-READY-with-findings):
+- **SMR F1 = Codex 1 = AGY 1 (all three independently):** the v1 §2.3 "HA
+  bulk-export gap" claim was FALSE — `export_forward_sessions_for_owner_rgs`
+  skips `is_peer_synced()` origins (`session_glue/mod.rs:439-441`), so
+  local-tunnel `SyncImport` entries are never bulk-exported at any occupancy.
+  HA-implications leg deleted; §2.3 rewritten.
+- **SMR F2 (AGY E.2 concurs):** "unbounded divergence window" was
+  overstated — `materialize_shared_session_hit` (`session_glue/mod.rs:949` →
+  `:850-876`) already installs shared-scope hits into the worker table via
+  the UNCAPPED upsert on the first traversing packet, so the at-cap drop
+  self-heals per flow per worker almost immediately. Severity reframed to
+  Low-Medium; the fix is now argued as coherence + counter hygiene.
+- **Codex 2 (Medium, accepted):** `session_create_drops` descriptor text
+  (`pkg/api/metrics_descriptors.go:553-560`) and the session README
+  (`session/README.md:88-99`) explicitly name "UpsertLocal replicas" — Path A
+  requires Go-side help-text + README updates; v1's "no Go-side" claim
+  corrected (§6/§8). No wire change.
+- **Codex 3 (Medium, accepted):** add an explicit pin that
+  `UpsertLocal(SyncImport)` entries are NOT bulk-exported (permanent
+  by-origin design, not a cap artifact) so the expected behavior is decided
+  and guarded (§5 test 5).
+- **Codex 4 (Low, accepted):** add a two-worker fan-out pin (one table at
+  cap, one below) pinning the per-worker divergence class end-to-end through
+  `apply_worker_commands` (§5 test 2).
+- **AGY 2 (Low, accepted):** tests assert install outcomes with `assert!`
+  (release-profile-effective per the #1855 contract); production keeps
+  `debug_assert!` (§5).
+- **SMR F4:** Q2 resolved — `allow_replace_local=true` is correct; producer
+  cannot run unless the tunnel resolution is `ForwardCandidate`
+  (`tunnel.rs:171-175`), so the data is authoritative-local (§4). Codex
+  Checks concur ("correct for preserving current replacement semantics").
+- **SMR F6:** pins assert hot-path reachability + origin, not just `len()`.
+- **SMR F7:** Q4 resolved — all `max_sessions` consumers are telemetry-only
+  (AGY C concurs, including the Go side); no `len() <= max_sessions`
+  invariant consumer exists.
+
 **Date:** 2026-06-11
 **Branch:** `research/1870-local-tunnel-pair` (off origin/master `9a536f810`)
 **Issue:** #1870 (I13 exclusion follow-up from the #1861 converged plan, Codex
 r1 C3 disposition; filed before #1861 /engineer per the §10 scope commitment)
-**Mode:** /research — PLAN-READY or PLAN-KILL only. PLAN-KILL / close-as-fixed
-is explicitly invited (§11 Q1). No production code in this phase.
+**Mode:** /research — PLAN-READY or PLAN-KILL only.
 
 ---
 
@@ -20,15 +56,22 @@ three shared maps **unconditionally** (`tunnel.rs:306-321` via
 apply side (`session_glue/mod.rs:556-569`) routes through the **capped**
 `SessionTable::install_with_protocol_with_origin` (`session/mod.rs:748`, cap
 check at `:758`) and discards the `bool` result. At `max_sessions` the pair is
-not installed in any at-cap worker table while the shared maps already hold
+not installed in an at-cap worker's table while the shared maps already hold
 both entries.
+
+**Severity (verified, round 1): Low-Medium.** The same entries re-enter the
+worker table almost immediately through the **uncapped** reactive
+materialization path (§2.3), and the drop is already counted via #1871's
+`create_drops` export (§2.4). What remains is an incoherence — the proactive
+prewarm is capped while the reactive install of identical state is not — plus
+a polluted counter signal and a transient partial-pair window. The fix is
+~12 lines and provably behavior-identical below cap.
 
 #1871 (merged 2026-06-11, `6a11c52f5`) shipped the install-transaction
 machinery for the packet hot path — `can_admit` pair preflight,
 drop-on-refusal, the `create_drops`/`admission_refused`/`install_partial`
 counter trio exported end-to-end — but **left the `UpsertLocal` arm
-untouched** (verified on current master: the arm still calls the capped
-install and drops the result).
+untouched** (verified on current master).
 
 ## 2. Verified current behavior (origin/master `9a536f810`)
 
@@ -36,16 +79,19 @@ install and drops the result).
 
 `run_local_tunnel_endpoint`'s read loop (`tunnel.rs:73-95`) builds a
 `LocalTunnelTxPlan` per local-origin packet
-(`build_local_origin_tunnel_tx_request`, `tunnel.rs:146`). Both pair entries
-carry `origin: SessionOrigin::SyncImport` — the forward entry at
-`tunnel.rs:202`, the synthesized reverse at `shared_ops.rs:668`
-(`synthesized_synced_reverse_entry`). Per-key re-enqueue is gated at ≥5 s
-(TCP) / ≥1 s (other) by the `local_sessions` last-seen map
-(`tunnel.rs:294-305`).
+(`build_local_origin_tunnel_tx_request`, `tunnel.rs:146`), and errors out
+unless the tunnel resolution disposition is `ForwardCandidate`
+(`tunnel.rs:171-175`) — so the producer only runs where the tunnel's RG
+resolution permits local forwarding (modulo the deliberate
+`allow_unseeded_tunnel_local` prewarm window, `shared_ops.rs:693-708`). Both
+pair entries carry `origin: SessionOrigin::SyncImport` — the forward entry at
+`tunnel.rs:202`, the synthesized reverse at `shared_ops.rs:668`. Per-key
+re-enqueue is gated at ≥5 s (TCP) / ≥1 s (other) by the `local_sessions`
+last-seen map (`tunnel.rs:294-305`).
 
 ### 2.2 The exact at-cap interleaving
 
-With every worker table at `max_sessions` (`len() == max_sessions`):
+With a worker table at `max_sessions` (`len() == max_sessions`):
 
 1. `local_sessions.insert(key, now_ns)` — re-enqueue suppressed for 1 s/5 s
    (`tunnel.rs:305`).
@@ -56,76 +102,71 @@ With every worker table at `max_sessions` (`len() == max_sessions`):
    queues (`tunnel.rs:327-333`).
 4. Each worker's `apply_worker_commands` consumes both commands;
    `install_with_protocol_with_origin` hits `len() >= max_sessions` at
-   `session/mod.rs:758-761`, bumps `create_drops` (NEW since #1871 — this was
-   the write-only counter), returns `false`; the arm discards it
-   (`session_glue/mod.rs:560`).
+   `session/mod.rs:758-761`, bumps `create_drops` (exported since #1871),
+   returns `false`; the arm discards it (`session_glue/mod.rs:560`).
 5. `wait_for_local_tunnel_session_install` (`tunnel.rs:335,353`) returns as
    soon as the queues drain — drain ≠ install success, so the 1 ms wait
-   provides no protection.
-
-Result: shared maps hold the pair; **zero** worker tables hold either entry.
+   provides no protection (and does not hang either).
 
 **Partial variant:** with exactly one free slot (`len() == max_sessions - 1`)
-the forward install succeeds and the reverse fails — a worker table holding
-the forward entry only, shared maps holding both. The pair has no preflight
+the forward install succeeds and the reverse fails. The pair has no preflight
 (`can_admit(2)` is never consulted on this path).
 
-**Per-worker variant:** worker tables are independent; workers below cap admit
-the pair while at-cap workers drop it — divergence is per-worker, not global.
+**Per-worker variant:** worker tables are independent; below-cap workers
+admit the pair while at-cap workers drop it.
 
-### 2.3 What diverges, and for how long
+### 2.3 What actually diverges, and for how long (corrected in v2)
 
-- **Worker fast path:** per-worker `SessionTable` misses fall back to
-  shared-map lookups (mutex per packet) — traffic still flows, degraded
-  (verified in the #1861 research walk, plan row I13: "YES-ish — per-packet
-  shared-map lookups service traffic").
-- **HA bulk export:** `handle_export_owner_rg_sessions` exports from the
-  **worker table** — while all workers are at cap, local-tunnel sessions are
-  absent from owner-RG bulk exports even though the shared maps (and the
-  owner-RG shared indexes) hold them.
-- **Incremental HA deltas:** unaffected either way — `SyncImport` origin
-  suppresses `push_delta` in the install path (`session/mod.rs:797`), and the
-  uncapped upsert path pushes no deltas at all.
-- **Self-healing:** the install retries on the next ≥1 s/5 s re-enqueue window
-  once table capacity frees; while the table stays at cap the divergence
-  window is unbounded.
+- **Worker fast path:** the first packet of the flow that traverses an
+  at-cap worker's session resolution hits the shared scope
+  (`lookup_session_across_scopes`) and — unless
+  `should_keep_synced_hit_transient` applies (`session_glue/mod.rs:932-945`,
+  an HA-arbitration arm that deliberately keeps the hit shared-only) — is
+  installed into the worker table by `materialize_shared_session_hit`
+  (`session_glue/mod.rs:949` → `:850-876`) via the **uncapped**
+  `upsert_synced_with_origin(…, false)`, origin relabeled `SharedMaterialize`.
+  The divergence window is therefore ~one packet per worker per flow, not
+  unbounded; the cost is one shared-map mutex traversal plus the prewarm
+  failing its purpose.
+- **HA:** none. Incremental deltas are suppressed for `SyncImport` origin
+  (`session/mod.rs:797`), and bulk export skips all peer-synced origins
+  permanently (`export_forward_sessions_for_owner_rgs`,
+  `session_glue/mod.rs:439-441`) — local-tunnel sessions are never
+  bulk-exported at any occupancy, by origin design, cap-independent. (v1
+  claimed an at-cap bulk-export gap here; refuted independently by all three
+  round-1 reviewers.)
+- **Counter signal:** each at-cap prewarm attempt bumps `create_drops` for an
+  event that self-reverses on the next data packet — at cap with active
+  local-tunnel traffic this steadily inflates a counter whose other
+  contributors are genuine losses.
 
 ### 2.4 Honest residue vs #1871
 
-#1871 closed the **silence** half of the original filing, partially:
+#1871 closed the **silence** half of the original filing: the at-cap
+`UpsertLocal` drop increments `create_drops` (`session/mod.rs:758-761`),
+exported per-worker as `session_create_drops` → `ProcessStatus` → Prometheus
+(verified end-to-end by Codex and AGY round 1: `worker/loop_body/mod.rs:198`,
+`server/helpers.rs:148`). The issue's "minimum first step: count the dropped
+`UpsertLocal` installs" is **already shipped**, modulo attribution.
 
-- The at-cap `UpsertLocal` drop now increments `create_drops`
-  (`session/mod.rs:759`), which is exported per-worker as
-  `session_create_drops` → `ProcessStatus` → Prometheus. The issue's "minimum
-  first step regardless of the chosen semantics: count the dropped
-  `UpsertLocal` installs" is therefore **already shipped**, modulo
-  attribution (the counter aggregates all non-preflighted at-cap install
-  refusals; post-#1871 the packet hot path refuses via `admission_refused`
-  *before* install, so `create_drops` increments now come predominantly from
-  the `UpsertLocal` arm — making it a usable, if unlabeled, signal).
-- The **divergence behavior is unchanged**: shared maps and worker tables
-  still disagree at cap, partial forward-only installs still occur, and the
-  bulk-export gap remains. That behavioral residue is this plan's target.
+The behavioral residue this plan targets: the capped/uncapped incoherence
+between the proactive prewarm and the reactive materialization of the same
+entries (§2.3), the partial forward-only interleaving at cap-1, and the
+misleading `create_drops` contributions.
 
 ## 3. Why the #1871 pattern does not transplant directly
 
 The #1871 fix is a **preflight before side effects** on the packet hot path:
-`can_admit(needed)` runs on the same thread that owns the `&mut SessionTable`,
-before any shared/NAT/flow-cache mutation, so refusal can drop the packet with
-zero published state. The local-tunnel path inverts the topology:
-
-- The **producer** (TUN reader thread) performs the side effects (shared-map
-  publish) but cannot see any worker's table occupancy — tables are per-worker
-  `&mut`-exclusive.
-- The **consumers** (N workers) see occupancy but run after the publish, and
-  each can independently admit or refuse.
-
-A coordinator-side preflight is impossible without new cross-thread occupancy
-plumbing; a consumer-side refusal cannot unwind the publish (another worker
-may have admitted — rollback is incoherent at N>1). The design space is
-therefore the arbitration the issue names: align `UpsertLocal` with the
-capped family (and keep divergence) or with the uncapped sync family (and
-eliminate it).
+`can_admit(needed)` runs on the thread that owns the `&mut SessionTable`,
+before any shared/NAT/flow-cache mutation, so refusal drops the packet with
+zero published state. The local-tunnel path inverts the topology: the
+producer (TUN reader thread) performs the side effects but cannot see any
+worker's occupancy; the N consumers see occupancy but run after the publish
+and admit/refuse independently. A coordinator-side preflight needs new
+cross-thread occupancy plumbing and is racy anyway; a consumer-side refusal
+cannot unwind a publish another worker may have admitted. The design space is
+the arbitration the issue names: align `UpsertLocal` with the capped family
+(keep the incoherence) or the uncapped sync family (eliminate it).
 
 ## 4. Design paths
 
@@ -136,15 +177,16 @@ Replace the arm's capped install with the sync-family entry point:
 ```rust
 WorkerCommand::UpsertLocal(entry) => {
     // #1870: local-tunnel pair entries are coordinator-authoritative
-    // replicas of state ALREADY published to the shared maps — the
-    // same family as the UpsertSynced replica fan-out (entries carry
-    // SessionOrigin::SyncImport, tunnel.rs:202 / shared_ops.rs:668).
-    // Routing them through the capped install let max_sessions refuse
-    // the worker-table copy while the shared maps kept both entries
-    // (unbounded shared-map/local-table divergence at cap).
+    // replicas of state ALREADY published to the shared maps. Routing
+    // them through the capped install let max_sessions refuse the
+    // worker-table copy while the reactive shared-hit materialization
+    // (materialize_shared_session_hit) installs the same state
+    // uncapped on the next data packet — a futile cap that only
+    // polluted create_drops and delayed the prewarm by one packet.
     // allow_replace_local=true preserves the pre-#1870 replace
-    // semantics of install_with_protocol_with_origin (which clobbers
-    // any same-key entry below cap); the data is locally generated,
+    // semantics (the capped install clobbers any same-key entry below
+    // cap); the data is locally generated — the producer only runs
+    // when the tunnel resolution is ForwardCandidate (tunnel.rs:171),
     // so the "don't let peer data clobber local sessions" guard does
     // not apply.
     debug_assert!(
@@ -168,171 +210,179 @@ WorkerCommand::UpsertLocal(entry) => {
 }
 ```
 
-**Equivalence proof below cap** (`install_with_protocol_with_origin` vs
-`upsert_synced_with_origin(…, true)`, for entries with `SyncImport` origin):
+**Equivalence proof below cap** (`install_with_protocol_with_origin`,
+`session/mod.rs:748` vs `upsert_synced_with_origin(…, true)`,
+`session/mod.rs:834`, for `SyncImport`-origin entries) — independently
+re-verified by all three round-1 reviewers, no divergence found:
 
-| Step | capped install (`session/mod.rs:748`) | uncapped upsert (`session/mod.rs:834`) |
+| Step | capped install | uncapped upsert |
 |---|---|---|
 | cap check + `create_drops` | yes (`:758-761`) | none |
 | local-clobber guard | none | bypassed by `allow_replace_local=true` (`:855-860`) |
-| `remove_entry(&key)` | yes (`:775`) | yes (`:866`) |
-| epoch, record fields (`closing`, timeouts, wheel_tick) | identical | identical |
+| `remove_entry(&key)` | yes | yes |
+| epoch, record fields (`closing`, timeouts, `wheel_tick`) | identical | identical |
 | slab insert + `key_to_handle` + `index_forward_nat_key` + `push_to_wheel` | identical | identical |
-| `push_delta` | suppressed: `origin.is_peer_synced()` is true for `SyncImport` (`:797`) | never pushes |
+| `push_delta` | suppressed: `SyncImport.is_peer_synced()` (`:797`) | never pushes |
 | return | `true` below cap | `true` always (only `false` exit is the bypassed guard) |
 
-So below cap the change is **behavior-identical**; at cap the install now
-proceeds, eliminating the divergence class. The discarded result becomes
-provably-infallible (pinned by `debug_assert!` per the #1855 contract — both
-asserts compile out in release, where the behavior is identical anyway).
+**Why uncapping is sound here:**
 
-**Why uncapping is sound here (the arbitration argument):**
-
-1. The entries are already in the **uncapped** shared maps — worker-table
-   refusal does not bound memory, it only creates disagreement. The
-   worker-table copy is a bounded echo (≤ shared-map content).
-2. The `UpsertSynced` replica fan-out (`replicate_session_upsert`,
-   `session_glue/mod.rs:596`) already installs **every locally-created
-   session** into **every other worker** uncapped (#1861 row I11). The
-   local-tunnel pair joining that family adds ≤ 2 entries per distinct
-   local-origin tunnel flow per ≥1 s/5 s window — a strict subset of an
-   existing, much larger uncapped surface.
-3. Entries expire via the timer wheel like any session; the producer is
-   rate-limited per key and prunes its dedupe map (`tunnel.rs:339-351`).
+1. The entries are already in the **uncapped** shared maps; worker-table
+   refusal does not bound memory, it only creates disagreement.
+2. The reactive materialization of these exact entries is already uncapped
+   (`materialize_shared_session_hit`, §2.3) — at cap the entry lands in the
+   same table either way; Path A only makes it arrive proactively, under the
+   intended origin label (`SyncImport` instead of `SharedMaterialize` — both
+   peer-synced, both delta-suppressed, both excluded from bulk export).
+3. The `UpsertSynced` replica fan-out (`replicate_session_upsert`,
+   `session_glue/mod.rs:596`) already installs every locally-created session
+   into every other worker uncapped (#1861 row I11); local-tunnel pairs are
+   a strict subset of an existing, much larger uncapped surface, rate-limited
+   per key (≥1 s/5 s) and expired by the timer wheel like any session.
 4. **It does not preempt the I11 arbitration — it centralizes it.** Whatever
-   the eventual sync-family cap decision is (cap, soft-cap, headroom), it
-   will then cover `UpsertLocal` automatically instead of leaving a second,
-   differently-divergent path.
+   the eventual sync-family cap decision is, it will then cover `UpsertLocal`
+   automatically instead of leaving a second, differently-divergent path.
 
-**Counter semantics ride-along:** after Path A, `UpsertLocal` stops
-contributing to `session_create_drops`. That is a *truthful* change — the
-event is no longer a drop — and restores the trio's intended semantics:
-`create_drops` = at-cap refusals of non-preflighted *capped* installs.
-Document in `userspace-dp/src/session/README.md` (#1861 section).
+**Counter + docs ride-along (Codex 2):** after Path A, `UpsertLocal` stops
+contributing to `session_create_drops` — truthful, since the event is no
+longer a drop. Two existing doc surfaces explicitly name "UpsertLocal
+replicas" as a covered site and must be updated in the same PR:
+`pkg/api/metrics_descriptors.go:553-560` (help text only — **no wire or
+series change**) and `userspace-dp/src/session/README.md:88-99`.
 
 ### Path B: keep the cap, add attribution
 
-Keep the capped install; on `false`, bump a dedicated
-`local_tunnel_install_drops` counter (new wire field via the additive
-pattern). Rejected as primary: the observability half is already ~shipped by
-#1871 (§2.4), the divergence and partial-pair behavior remain, the HA
-bulk-export gap remains, and it spends a wire field on attributing an event
-Path A removes outright.
+Keep the capped install; bump a dedicated counter on `false`. Rejected: the
+observability is already ~shipped (§2.4), the incoherence and partial-pair
+window remain, and it spends a wire field attributing an event Path A removes.
 
 ### Path C: rollback the shared publish on refusal
 
-Producer publishes, workers refuse, someone unpublishes. Incoherent: workers
-admit/refuse independently, so the shared entry must stay if *any* worker
-admitted; the producer would need an N-way ack aggregation for two map
-entries' worth of state, on a path with a 1 ms drain wait. Killed on
-complexity-to-benefit.
+Workers admit/refuse independently; the shared entry must stay if any worker
+admitted; requires N-way ack aggregation for two map entries. Killed.
 
 ### Path D: coordinator-side preflight
 
-Requires cross-thread occupancy visibility (atomic len mirrors per worker) and
-is still racy against in-flight packet-path installs between check and apply.
-Killed.
+Needs cross-thread occupancy mirrors and is racy against packet-path installs
+between check and apply. Killed.
 
-## 5. Test plan (deterministic at-cap pins, debug AND release — #1855 contract)
+### Path E: close-as-fixed (#1871 counted it; materialization heals it)
 
-New tests in `userspace-dp/src/afxdp/tests.rs` (reusing the #1871 at-cap
+Seriously weighed in round 1; rejected by all three reviewers. Do-nothing
+leaves (a) `create_drops` polluted at cap by self-reversing non-drops inside
+the trio #1871 just shipped, (b) the capped/uncapped incoherence between the
+proactive and reactive installs of the same state, (c) the partial
+forward-only interleaving. Path A is ~12 lines and provably equivalent below
+cap; the consistency fix is worth that much churn (AGY: "Path A is the only
+logically coherent architecture"; Codex: "#1871 fixed visibility, not the
+shared-map/worker-table disagreement").
+
+## 5. Test plan (deterministic pins, debug AND release — #1855 contract)
+
+Tests use `assert!` on outcomes (release-effective; AGY 2); production code
+keeps `debug_assert!`. New tests in `userspace-dp/src/afxdp/tests.rs` (or
+`session_glue/tests.rs` where the fixtures live — reuse the #1871 at-cap
 harness style: `set_max_sessions_for_test`, direct `apply_worker_commands`
-invocation with a rigged queue) — names indicative:
+with a rigged queue):
 
-1. `upsert_local_pair_installs_at_cap` — fill table to cap with distinct
-   entries; enqueue the `UpsertLocal` forward+reverse pair (SyncImport
-   origin, reverse via `synthesized_synced_reverse_entry` shape); apply;
-   assert **both** keys resolve in the table, `len() == cap + 2`,
-   `create_drops()` unchanged, `admission_refused()` unchanged,
-   `install_partial()` unchanged. This pins the exact §2.2 interleaving
-   through the fixed code.
-2. `upsert_local_pair_no_partial_at_cap_minus_one` — one free slot; apply the
-   pair; assert both installed (pre-fix this was the forward-only partial
-   pin; the test documents the old failure mode in a comment).
-3. `upsert_local_below_cap_replaces_existing_local_entry` — pre-install a
-   `ForwardFlow`-origin session under the same key below cap; apply
-   `UpsertLocal`; assert the entry is replaced and carries `SyncImport`
-   origin (pins `allow_replace_local=true` = pre-change replace semantics,
-   guarding against a future "tidy-up" to `false`).
-4. Session-level: `upsert_synced_with_origin_allow_replace_is_infallible_at_cap`
-   in `userspace-dp/src/session/tests.rs` if not already pinned by #1871's
-   additions (verify before writing; do not duplicate).
+1. `upsert_local_pair_installs_at_cap` — fill table to cap; apply the
+   `UpsertLocal` forward+reverse pair (SyncImport origin, reverse via the
+   `synthesized_synced_reverse_entry` shape); assert both keys resolve via
+   the hot-path lookups (`find_forward_wire_match` / reverse-key lookup) with
+   `SyncImport` origin, `len() == cap + 2`, and `create_drops()` /
+   `admission_refused()` / `install_partial()` all unchanged. Pins the §2.2
+   interleaving through the fixed code.
+2. `upsert_local_fanout_diverged_workers_converge` (Codex 4) — two worker
+   queues + two tables, one at cap and one below; fan the pair out to both
+   (as `tunnel.rs:327-333` does); apply on both; assert both tables hold
+   both entries. Pins the per-worker divergence class end-to-end.
+3. `upsert_local_pair_no_partial_at_cap_minus_one` — one free slot; apply the
+   pair; assert both installed (pre-fix: forward-only partial; documented in
+   a comment).
+4. `upsert_local_below_cap_replaces_existing_local_entry` — pre-install a
+   `ForwardFlow`-origin same-key session below cap; apply; assert replaced
+   with `SyncImport` origin and `create_drops()` still 0 (pins
+   `allow_replace_local=true` = status-quo replace semantics, and guards
+   against a future revert to the capped install).
+5. `upsert_local_entries_stay_out_of_owner_rg_bulk_export` (Codex 3) —
+   install the pair via the new arm, run
+   `export_forward_sessions_for_owner_rgs` for the owning RG, assert no
+   delta is emitted for either entry. Decides and pins the expected behavior:
+   exclusion is permanent by-origin design (`session_glue/mod.rs:439-441`),
+   not a cap artifact.
+6. Session-level `upsert_synced_with_origin_allow_replace_is_infallible_at_cap`
+   in `userspace-dp/src/session/tests.rs` (verified round 1: no existing pin).
 
-Both profiles: `cargo test --release` (full suite) and debug
-`cargo test session::` + the new afxdp tests run in both via the standard
-gates. No live-cluster dependency — the interleaving is fully deterministic
-in-process. Parent smokes post-merge; **failover smoke is warranted** since
-the change touches a session-install path with HA bulk-export implications
-(noted for the parent in the return).
+Gates: full `cargo test --release` + debug `cargo test session::` + the new
+tests in both profiles; `go test ./...` (descriptor text change touches
+`pkg/api`). No live-cluster dependency for the pins. Parent smokes
+post-merge; failover smoke recommended since a session-install path changes,
+even though the verified HA delta/export surfaces are untouched.
 
 ## 6. Observability
 
-No new wire fields, no protocol bump. Changes are semantic only:
-`session_create_drops` stops counting `UpsertLocal` refusals because they no
-longer occur (§4 Path A ride-along). The #1871 trio descriptors in
-`pkg/api/metrics_descriptors.go` stay accurate (they describe at-cap install
-refusals — still true). README note per §4.
+No new wire fields, no protocol bump, no metric series change. Semantic doc
+updates only: `session_create_drops` help text in
+`pkg/api/metrics_descriptors.go:553-560` drops the "UpsertLocal replicas"
+clause (Codex 2); the #1861 trio descriptors otherwise stay accurate.
 
 ## 7. Documentation
 
-- `userspace-dp/src/session/README.md` — extend the #1861
-  admission/transaction-boundary section: `UpsertLocal` is in the uncapped
-  sync-family (with the §4 rationale), `create_drops` no longer includes it.
-- `session_glue/mod.rs` arm comment (in the code, per the snippet).
-- `worker_queue.rs:1-21` poison-recovery comment mentions the UpsertLocal
-  pair — unaffected (commands remain individually self-contained); no edit.
+- `userspace-dp/src/session/README.md` (#1861 section, `:88-99`) —
+  `UpsertLocal` moves to the uncapped sync-family with the §4 rationale;
+  `create_drops` no longer includes it.
+- `session_glue/mod.rs` arm comment (per the §4 snippet).
+- `pkg/api/metrics_descriptors.go` help text (§6).
+- `worker_queue.rs:1-21` poison-recovery comment — unaffected (commands
+  remain individually self-contained); no edit.
 
 ## 8. Blast radius
 
-- One arm in `session_glue/mod.rs` (~15 lines), tests, README. No protocol,
-  no Go-side, no coordinator/producer change, no hot-path packet code.
-- Risk surface: worker tables can now exceed `max_sessions` by local-tunnel
-  pair volume — bounded by the §4 argument; identical in kind to the
-  pre-existing I11 surface.
-- Behavior below cap: provably identical (§4 table).
+One arm in `session_glue/mod.rs` (~15 lines), tests, README, one Go help-text
+string. No protocol change, no producer change, no hot-path packet code.
+Worker tables can exceed `max_sessions` by local-tunnel pair volume — bounded
+by §4 arguments; identical in kind to the pre-existing I11 surface, and all
+`max_sessions` consumers are telemetry-only (round-1 verified, both Rust and
+Go sides; slab grows dynamically, no `len() <= max_sessions` invariant
+consumer exists).
 
 ## 9. Failure modes considered
 
 - **Same-key collision with a live local session:** preserved replace
-  semantics (test 3). A refusal semantics (`allow_replace_local=false`) would
-  *newly* let a stale non-tunnel session block the tunnel steering decision
-  after a route change — a regression; rejected.
+  semantics (test 4). Refusal semantics would newly let a stale non-tunnel
+  session block the tunnel steering decision after a route change; rejected.
 - **Future producer enqueues `UpsertLocal` with a local origin:** the old
-  path would have pushed an HA delta, the new one never does — caught by the
+  path would have pushed an HA delta, the new one never does — caught by
   `debug_assert!(entry.origin.is_peer_synced())`.
 - **Memory exhaustion via local-tunnel flow spray:** requires the local host
   stack to originate unbounded distinct flows into a TUN endpoint; those
-  flows already grow the uncapped shared maps today. No new surface.
+  flows already grow the uncapped shared maps today, and the reactive
+  materialization already installs them uncapped per worker. No new surface.
 
 ## 10. Non-goals / scope
 
-- The global sync-family cap arbitration (#1861 row I11: should
-  `upsert_synced_with_origin` be capped at all, and how, across HA activation
-  prewarm + replica fan-out) stays open — this plan deliberately joins the
-  existing family rather than deciding its future. If reviewers want it
-  tracked, a dedicated I11 issue gets filed at /engineer time.
-- No kernel/BPF `session_map_fd` publish from the `UpsertLocal` arm (the
-  existing asymmetry vs `handle_upsert_synced` is pre-existing and
-  unobserved-broken; out of scope).
+- The global sync-family cap arbitration (#1861 row I11) stays open — this
+  plan joins the existing family rather than deciding its future. A dedicated
+  I11 issue gets filed at /engineer time if reviewers want it tracked.
+- No change to bulk-export origin semantics (local-tunnel sessions remain
+  excluded by design — now pinned by test 5, not silently assumed).
+- No kernel/BPF `session_map_fd` publish from the `UpsertLocal` arm
+  (pre-existing asymmetry vs `handle_upsert_synced`; out of scope).
 - No change to the producer (publish ordering, 1 ms drain wait, refresh
   windows).
 
-## 11. Open questions for adversarial review (PLAN-KILL invited)
+## 11. Open questions for adversarial review
 
-1. **Close-as-fixed instead?** Is §2.4's "create_drops now counts it" enough
-   to close #1870 with only a pin test of current behavior? The plan says no
-   — the divergence/bulk-export residue is real and the fix is ~15 lines —
-   but a reviewer may weigh the at-cap scenario as rare enough to not touch.
-2. **`allow_replace_local=true` vs HA-computed:** `handle_upsert_synced`
-   computes it from HA state (`synced_entry_allows_local_replace`). The plan
-   argues constant `true` because the data is locally generated, not peer
-   data — is there an HA interleaving (e.g. standby receiving peer-synced
-   state for the same inner-flow key) where clobbering is wrong?
-3. **Is the SyncImport origin itself correct for local-tunnel entries?**
-   Pre-existing choice (delta suppression + peer-replace semantics ride on
-   it). Out of scope to change, but a reviewer may argue the fix should not
-   further entrench it.
-4. **`len() > max_sessions` consumers:** does anything assume
-   `len() <= max_sessions` as an invariant (allocation sizing, telemetry,
-   percentage gauges)? Walk during /engineer; the I11 surface already
-   violates it today, so any such consumer is already broken.
+1. **Close-as-fixed** — weighed as Path E, rejected 3-of-3 in round 1.
+2. **`allow_replace_local=true` vs HA-computed** — resolved round 1 (SMR F4,
+   Codex Checks, AGY B): the producer only runs under `ForwardCandidate`
+   resolution; the data is authoritative-local; the guard only protects
+   non-peer-synced entries anyway, so the flag choice only governs the
+   local-collision case where replace is the status quo.
+3. **Is `SyncImport` the right origin for local-tunnel entries?**
+   Pre-existing choice (delta suppression + bulk-export exclusion + replace
+   semantics ride on it). Out of scope to change; test 5 pins its export
+   consequence so the choice is at least explicit. A reviewer arguing for a
+   dedicated origin variant should weigh it as a separate issue.
+4. **`len() > max_sessions` consumers** — resolved round 1 (SMR F7, AGY C):
+   telemetry-only on both sides; no invariant consumer.
