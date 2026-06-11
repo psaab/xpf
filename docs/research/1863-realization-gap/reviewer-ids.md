@@ -8,4 +8,4 @@
 ## Round 2 (plan v3 @ 0b209c7a4)
 - Claude SMR: claude-smr-plan-r2.md — PLAN-READY (self-correction on the 22.72G citation recorded)
 - Codex: (dispatched on v3)
-- AGY: (dispatched on v3)
+- AGY: adversarial-review-mq9ecagd-zof1oq — PLAN-READY (all r1 findings verified folded; data recomputed clean)
