@@ -163,10 +163,19 @@ incident shows the arm firing in release, the contract decision reopens).
 ## 8. Docs
 - `userspace-dp/src/session/mod.rs` doc-comments (the invariant decision —
   module contract lives next to the arms).
+- `userspace-dp/src/session/README.md` — add a short "Corruption contract"
+  note (stale `key_to_handle` impossible-by-construction; debug asserts,
+  release tolerates + returns false/None). The README is the module
+  contract doc per project rules.
 - `_Log.md` entry.
-- No README delta: no operator-visible behavior change (review note: the
-  session module has no standalone README; `docs/pr/1752-session-inplace-refresh/plan.md`
-  is historical and stays as-written).
+- `docs/pr/1752-session-inplace-refresh/plan.md` is historical and stays
+  as-written.
+
+Ownership note verified for §2: the table is owned by value per worker
+(`src/afxdp/worker/loop_body/setup.rs:40`, `pub(super) sessions:
+SessionTable`); the `Arc<Mutex<FastMap<...>>>` shared maps elsewhere in
+`session_glue`/`tunnel.rs` are the *synced-session* side tables, not this
+`SessionTable`.
 
 ## 9. Out of scope
 - `worker_queue` load flake (issue notes it separately).
