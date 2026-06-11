@@ -1,7 +1,12 @@
 # Plan: #1870 — local-tunnel `UpsertLocal` pair dropped at `max_sessions` while shared maps hold both entries
 
-**Revision:** v4
-v4 folds round-3 (Codex PLAN-NEEDS-CHANGES ×2 Low, AGY PLAN-READY no
+**Revision:** v5
+v5 folds round-4 (Codex PLAN-NEEDS-CHANGES ×1 Low): the two remaining
+absolute "no worker-RX consumer" shorthands (§2.3 counter-signal bullet, §4
+point 2) qualified to "no normal local-origin worker-RX path/consumer" with
+a §2.3 back-reference. Codex r4 confirmed r3-1/r3-2 otherwise fully folded.
+
+v4 folded round-3 (Codex PLAN-NEEDS-CHANGES ×2 Low, AGY PLAN-READY no
 findings):
 - **Codex r3-1 (Low, accepted):** stale full-pair self-heal wording in §1,
   the §2.3 counter-signal bullet, the §4 arm comment, and Path E narrowed to
@@ -198,7 +203,8 @@ admit the pair while at-cap workers drop it.
   round-1 reviewers.)
 - **Counter signal:** each at-cap prewarm attempt bumps `create_drops` twice
   (once per pair entry) — the reverse half self-reverses on the next reply
-  packet and the forward half is functionally inert (no worker-RX consumer),
+  packet and the forward half is functionally inert (no normal local-origin
+  worker-RX path reaches it, §2.3),
   yet at cap with active local-tunnel traffic this steadily inflates a
   counter whose other contributors are genuine losses.
 
@@ -297,8 +303,9 @@ re-verified by all three round-1 reviewers, no divergence found:
    the intended origin label (`SyncImport` instead of `SharedMaterialize` —
    residency-equivalent across promotion, demote/refresh, export, GC, and
    BPF-map deletion; verified independently by SMR r2 and AGY r2). The
-   forward entry has no reactive path (§2.3) but also no RX consumer; Path A
-   simply makes the prewarm do what it was written to do.
+   forward entry has no reactive path and no normal local-origin worker-RX
+   consumer (§2.3); Path A simply makes the prewarm do what it was written
+   to do.
 3. The `UpsertSynced` replica fan-out (`replicate_session_upsert`,
    `session_glue/mod.rs:596`) already installs every locally-created session
    into every other worker uncapped (#1861 row I11); local-tunnel pairs are

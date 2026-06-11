@@ -15,3 +15,6 @@
 ## Round 3 (plan v3 @ 07ccbb976)
 - Codex: task (session 019eb8b6-90f9-7012-a26d-ad8bf6154ccc) — PLAN-NEEDS-CHANGES (2 Low: stale full-pair wording; "no RX consumer" too absolute + test-1 find_forward_wire_match spec bug)
 - AGY: adversarial-review-mqa1nspp-379tpi — PLAN-READY (no findings)
+
+## Round 4 (plan v4 @ dd83445db)
+- Codex: session 019eb8bc-bffd-7590-ba84-c5dd36e9310f — PLAN-NEEDS-CHANGES (1 Low: two residual absolute shorthands at plan.md:201/:300) — folded as v5
