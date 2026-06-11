@@ -184,10 +184,17 @@ safe, so it does not replace A or C.
   non-mutating spec checks production runs
   (`validateUserspaceShimSpec`, loader_userspace_shim.go:138-162) so a
   PASS attests production-load viability, not just verifier acceptance
-  (Codex r1 F4). Verify-only load touches no pins and detaches
-  nothing — an existing good loaded program keeps forwarding
-  (lenient-boot doctrine intact; anonymous maps are freed on process
-  exit). Two live-node hardening measures
+  (Codex r1 F4). **Ordering trap (SMR r2): `validateUserspaceShimSpec`
+  checks `dnat_table.MaxEntries == userspaceShimMaxSessions`
+  (loader_userspace_shim.go:151) — the spec validation must run on the
+  UNMODIFIED spec first, and the MaxEntries shrink applied after,
+  immediately before `NewCollection`.** Verify-only load touches no
+  pins and detaches nothing — an existing good loaded program keeps
+  forwarding (lenient-boot doctrine intact; anonymous maps are freed
+  on process exit). Scope caveat (SMR r2): C1 verifies on the build
+  box's kernel — necessary but not sufficient for the cluster kernel;
+  C2 on the target node is the authoritative gate, which is why both
+  exist. Two live-node hardening measures
   (AGY r1 F2/F3): before loading, the verify path mutates the spec
   in-memory to shrink the large **hash** maps' MaxEntries to 1
   (`dnat_table` 10 M no-prealloc still allocates its bucket array
