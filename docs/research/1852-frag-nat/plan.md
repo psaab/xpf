@@ -2,13 +2,32 @@
 
 ## 1. Status
 
-**PLAN v2** — round-1 3-way review folded (Codex PLAN-NEEDS-REVISION ×6,
-AGY PLAN-NEEDS-REVISION, Claude SMR PLAN-NEEDS-REVISION F1-F4). All three
-converged: **revise, then Path A, do NOT kill** (AGY: "Proceed with Path
-A"; Codex/SMR findings are all revision, not kill). Two pre-existing,
-family-symmetric defects collected from the #1838/#1839/#1840 trio plan
-(`docs/research/1838-nat-v6-trio/plan.md` §7.9, §10, §5.7 note 3 — merged
-as #1853 on master `36dc00953`).
+**PLAN v3** — round-2 3-way review folded (Codex PLAN-NEEDS-REVISION ×3,
+AGY PLAN-NEEDS-REVISION ×1 critical, Claude SMR r2 PLAN-READY — premature,
+self-corrected here). All reviewers still converge on **Path A, do NOT
+kill**; r2 found two real design gaps in v2 that v3 fixes. Two
+pre-existing, family-symmetric defects collected from the
+#1838/#1839/#1840 trio plan (`docs/research/1838-nat-v6-trio/plan.md`
+§7.9, §10, §5.7 note 3 — merged as #1853 on master `36dc00953`).
+
+Round-2 deltas folded in v3:
+- **Defect-2 fix re-designed** (Codex + AGY, critical): do NOT make
+  `packet_rel_l4_offset_and_protocol` fragment-aware — GRE decap
+  (`gre.rs:149`) and tunnel local-origin (`tunnel.rs:256`) READ the
+  offset to FORWARD legitimately-fragmented inner packets; returning
+  `None` would drop all fragmented IPv6-in-GRE + local-origin fragments.
+  Instead gate `clamp_tcp_mss` itself (both families) with the fragment
+  predicate; the shared helper stays unchanged.
+- **SNAT allocator-leak fix added** (Codex MED-HIGH): the dynamic pool
+  SNAT allocation (`source_nat_decision_for_flow`,
+  `poll_descriptor/mod.rs:1146-1156`) runs BEFORE the rewrite leaf, so a
+  leaf-only gate stops the payload port write but not the per-fragment
+  port allocation/leak. v3 adds a pre-allocation fragment gate + a policy
+  decision for dynamic-pool-SNAT non-first fragments (new §7 + Q6).
+- v4 clamp fragment guard made explicit; caller audit completed (GRE
+  inner, tunnel local-origin, `parse_tcp_reply_source` — §7).
+
+Round-1 deltas (carried from v2):
 
 Round-1 deltas folded in v2:
 - **Port-write narrowing RETRACTED** (Codex HIGH + AGY): new-flow pool
@@ -83,7 +102,8 @@ fragment as a normal L4 packet. Every downstream rewrite leaf then trusts
 | S7 | descriptor fast path v6 | `rewrite/ipv6.rs:63-108` | inline port writes + precomputed L4-csum delta |
 | S8 | `parse_embedded_v4` | `icmp_embed/parse.rs:36-81` | reads ports at `ihl` (no frag-offset check) — the v4 twin of the #1853 v6 fix |
 | S9 | `build_nat_reversed_icmp_error_v4` | `icmp_embed/builders.rs:7-119` | embedded un-NAT at `emb_ip_offset + emb_ihl` (no frag check on the QUOTED v4 packet); reads `emb_l4_offset` directly, NOT via `parse_embedded_v4`, so it needs its OWN guard (SMR nit) |
-| S10 | TCP segmentation orchestrator | `tx/dispatch/mod.rs:1031-1055` (admission) → `frame/tcp_segmentation.rs:48-79,192-303` + `tx/tcp_segmentation.rs:201-237` | segmentation admission gates only on `meta.protocol != PROTO_TCP` + `len-l3 > mtu` — fragment-blind. `meta.protocol` for a non-first TCP fragment IS `PROTO_TCP` (shim reads it from the IP header / v6 frag header next-hdr), so a large non-first fragment can enter segmentation, which parses "TCP" at `frame_l4_offset` and runs NAT/checksum at the fake offset (Codex MED) |
+| S10 | TCP segmentation orchestrator | `tx/dispatch/mod.rs:1025-1055` (`forwarded_tcp_may_need_segmentation` admission) → `frame/tcp_segmentation.rs:48-79,192-303` + `tx/tcp_segmentation.rs:201-237` | segmentation admission gates only on `meta.protocol != PROTO_TCP` + `len-l3 > mtu` — fragment-blind. `meta.protocol` for a non-first TCP fragment IS `PROTO_TCP` (shim reads it from the IP header / v6 frag header next-hdr), so a large non-first fragment can enter segmentation, which parses "TCP" at `frame_l4_offset` and runs NAT/checksum at the fake offset (Codex MED) |
+| S11 | dynamic pool SNAT allocation (pre-rewrite) | `poll_descriptor/mod.rs:1146-1156` (`source_nat_decision_for_flow`) → `nat/source.rs:478-498` | the SNAT mapping is ALLOCATED from the (garbage) fragment tuple BEFORE any rewrite leaf runs. A leaf-level fragment gate stops the payload port write (S3) but NOT the allocation — each surviving non-first fragment leaks a pool port (Codex r2 MED-HIGH). Needs a PRE-allocation gate, not just a rewrite gate |
 
 Orchestrators that reach S1-S7/S10 (each is a distinct entry that needs a
 gate; Path A gates the shared leaves + the descriptor path + the
@@ -308,35 +328,44 @@ leaf).
   DIRECTLY (not via `parse_embedded_v4`), so it needs its OWN symmetric
   guard (SMR nit) — add a fragment-offset check on the quoted v4 header
   before the embedded un-NAT writes.
-- **Defect 2**: make `packet_rel_l4_offset_and_protocol`
-  (`inspect.rs:145`) **fragment-aware** — on the fragment header (44),
-  read the offset bits and `return None` unless zero (the same guard
-  #1853 added to `parse_embedded_v6_l4`):
-  ```
-  44 => {
-      let frag = packet.get(offset..offset + 8)?;
-      if (u16::from_be_bytes([frag[2], frag[3]]) & 0xFFF8) != 0 {
-          return None;
-      }
-      protocol = frag[0];
-      offset = offset.checked_add(8)?;
-      …
-  }
-  ```
-  Then `clamp_tcp_mss`'s v6 arm derives the offset via this now-safe
-  helper instead of fixed `(40, packet[6])`. This closes the ext-header
-  feature gap AND naturally gates the clamp (and every other inspect
-  caller of this helper) from misinterpreting non-first-fragment payload
-  as L4 (Codex + AGY MED). NOTE: audit the helper's existing callers
-  (GRE inner parse, `parse_tcp_reply_source` v6 at `tcp.rs:355`) — none
-  should legitimately want a non-first fragment's L4, so `None` is the
-  correct answer for all; confirm in implementation.
+- **S11 — dynamic pool SNAT allocation (pre-rewrite gate)**: the SNAT
+  mapping is allocated at `poll_descriptor/mod.rs:1146-1156` BEFORE the
+  rewrite leaf, so the leaf gate cannot prevent the per-fragment port
+  leak (Codex r2 MED-HIGH). Gate the allocation: when the
+  forwarding-decision flow is a non-first fragment, do NOT call
+  `source_nat_decision_for_flow` / do NOT allocate. Policy for what
+  happens then is **Q6** — recommended: **drop** the non-first fragment
+  for dynamic (port-translating) pool SNAT (it cannot be correctly
+  port-mapped without reassembly; the firewall has no reassembly), and
+  count it (`frag_dynamic_snat_dropped`). Static/interface NAT
+  (address-only, port-blind) is UNAFFECTED — those keep the
+  IP-rewrite-all-fragments + leaf-gate path (§4c) and continue to work.
+- **Defect 2 (re-designed, Codex + AGY r2)**: do NOT make
+  `packet_rel_l4_offset_and_protocol` fragment-aware. That helper is READ
+  by legitimate fragment-forwarding callers — GRE decap (`gre.rs:149`,
+  forwards the fragmented inner packet) and tunnel local-origin
+  (`tunnel.rs:256`); returning `None` there drops all fragmented
+  IPv6-in-GRE + local-origin fragments (AGY critical). The ONLY mutating
+  consumer that misbehaves is `clamp_tcp_mss`. Fix the clamp directly:
+  - v6 arm: derive the ext-aware offset (via the unchanged helper or an
+    inline walk) AND, before mutating, check `ipv6_is_non_first_fragment`
+    (or the threaded predicate) → bail on non-first fragment. This closes
+    the ext-header feature gap (clamp now reaches ext-headered v6 SYNs)
+    without touching the shared helper.
+  - v4 arm: add the `(frag_off & 0x1FFF) != 0` bail (a non-first v4
+    fragment carries no SYN, but make the guard explicit for symmetry and
+    to remove the asymmetry Codex flagged).
+  - `parse_tcp_reply_source` (`tcp.rs:355`) keeps using the helper
+    unchanged — a non-first fragment naturally produces no SYN-cookie
+    reply via the downstream flag checks; no change needed.
 
-Pros: one predicate per packet (threaded); IP NAT of fragmented flows
-starts working; preserves descriptor↔generic parity by fall-back;
-contained to `userspace-dp` (issue scope). Cons: per-packet v6 ext-walk
-on the NAT path (bounded 6 iterations); if review flags the cost,
-escalate to Path A′.
+Pros: one predicate per packet (threaded); IP NAT of fragmented flows via
+static/interface NAT works; dynamic-pool-SNAT fragment leak closed at the
+allocation site; GRE/tunnel fragment forwarding preserved (helper
+untouched); descriptor↔generic parity preserved by fall-back; contained
+to `userspace-dp` (issue scope). Cons: per-packet v6 ext-walk on the NAT
+path (bounded 6 iterations); if review flags the cost, escalate to Path
+A′.
 
 ### Path A′ — meta-flag from the shim (perf-optimal variant of A)
 
@@ -410,8 +439,10 @@ fall-back rather than delta re-derivation.
    - `ipv4_is_non_first_fragment` / `ipv6_is_non_first_fragment` truth
      table (offset 0 MF=0/1, offset>0, no-frag-header, truncated chain);
    - **pool-SNAT on a non-first fragment**: NO port allocated (no leak),
-     payload byte-identical (the §4b regression guard);
+     fragment dropped + counted per Q6 — the §4b/§S11 regression guard;
    - **wildcard-DNAT on a non-first fragment**: no port write;
+   - **GRE decap / tunnel local-origin of a fragmented inner v6 packet**:
+     still forwards (helper unchanged) — the r2 regression guard;
    - static-DNAT on a 2-fragment TCP flow: fragment 1 fully NAT'd
      (IP+checksum), fragment 2 IP-only, payload byte-identical;
    - **S10 segmentation**: a large non-first TCP fragment is NOT segmented
@@ -421,11 +452,10 @@ fall-back rather than delta re-derivation.
      `None` / skip for a quoted non-first fragment; first/atomic quoted
      fragment still parses (mirror the #1853 v6 tests at
      `icmp_embed/parse.rs:262-298`);
-   - `packet_rel_l4_offset_and_protocol` returns `None` for a non-first
-     fragment (first/atomic still walks) + every existing caller audited
-     (GRE inner, `parse_tcp_reply_source` v6) behaves correctly;
    - `clamp_tcp_mss` on an ext-headered v6 SYN now finds + clamps the MSS;
-     a non-first fragment / non-SYN still no-ops.
+     a non-first fragment (v4 frag-off / v6 fragment header) and non-SYN
+     still no-op; `packet_rel_l4_offset_and_protocol` is UNCHANGED (verify
+     GRE/tunnel fragment forwarding still works).
 3. **Suites/gates**: `cargo build --release` clean; full `cargo test
    --release` with awk-aggregated pass/fail over all `test result` lines;
    `go test ./...`; the known-flaky ledger (inplace_*, worker_queue
@@ -476,6 +506,18 @@ fall-back rather than delta re-derivation.
 - **Q4** — Scope: fix both defects in one PR (they share `frame/` and the
   fragment predicate), or split defect 2 (MSS, trivial, independent) into
   its own commit/PR? Lean: one PR, two logical commits.
+- **Q6 (round-2, NEEDS A DECISION)** — Dynamic (port-translating) pool
+  SNAT on a non-first fragment: the firewall has no reassembly, so it
+  cannot correctly port-map a non-first fragment, and allocating from the
+  garbage tuple both leaks a pool port and corrupts payload.
+  Recommended: **drop + count** the non-first fragment for dynamic pool
+  SNAT (the flow cannot work without reassembly regardless). Alternatives:
+  (a) implement a fragment-ID → session map (large, out of scope); (b)
+  forward without SNAT (wrong — IP not rewritten, breaks the half-NAT'd
+  flow). Static/interface (address-only) NAT is unaffected and keeps
+  working via IP-rewrite-all. Confirm "drop dynamic-SNAT non-first
+  fragments" is acceptable Junos-parity behavior (SRX with flow-based
+  reassembly disabled drops/​bypasses similarly).
 - **Q5 (PLAN-KILL) — RESOLVED round 1: proceed with Path A, do NOT kill.**
   AGY: "Proceed with Path A (do NOT kill) … silent dropping of fragmented
   transit flows through static NAT / interface NAT is highly disruptive
