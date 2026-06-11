@@ -2,11 +2,32 @@
 
 ## 1. Status
 
-**PLAN-DRAFT v1** — awaiting 3-way hostile review (Codex + AGY + Claude
-SMR). Two pre-existing, family-symmetric defects collected from the
-#1838/#1839/#1840 trio plan (`docs/research/1838-nat-v6-trio/plan.md`
-§7.9, §10, §5.7 note 3 — now merged as #1853 on master `36dc00953`).
-PLAN-KILL or partial (fix one, defer the other) is a legitimate outcome.
+**PLAN v2** — round-1 3-way review folded (Codex PLAN-NEEDS-REVISION ×6,
+AGY PLAN-NEEDS-REVISION, Claude SMR PLAN-NEEDS-REVISION F1-F4). All three
+converged: **revise, then Path A, do NOT kill** (AGY: "Proceed with Path
+A"; Codex/SMR findings are all revision, not kill). Two pre-existing,
+family-symmetric defects collected from the #1838/#1839/#1840 trio plan
+(`docs/research/1838-nat-v6-trio/plan.md` §7.9, §10, §5.7 note 3 — merged
+as #1853 on master `36dc00953`).
+
+Round-1 deltas folded in v2:
+- **Port-write narrowing RETRACTED** (Codex HIGH + AGY): new-flow pool
+  SNAT (`nat/source.rs:478-498`) and wildcard DNAT
+  (`nat/destination.rs:92-121`) emit port-rewriting decisions WITHOUT an
+  established-session lookup, so S3/S6/S7 port writes ARE reachable on
+  non-first fragments — §4 + §5 re-graded up.
+- **Shim partial-drop nuance added** (AGY): the shim drops a substantial
+  fraction of non-first fragments before userspace (TCP `data_offset < 20`
+  ≈31%, short reads), narrowing — not eliminating — reachability.
+- **TCP segmentation orchestrator added as an exposure site** (Codex MED)
+  with an explicit no-segment gate.
+- **Defect-2 fix changed** to make `packet_rel_l4_offset_and_protocol`
+  fragment-aware (Codex + AGY MED), which also gates other inspect callers.
+- S5 re-graded LOW (no cross-fragment shim state — SMR F3 / Codex / AGY);
+  A′ text corrected (parse_ipv4 does NOT read frag_off today; free
+  `meta_flags` bits 0x01-0x40 named); S9 line range fixed; predicate
+  threaded once per orchestrator (SMR F1); descriptor fall-back call site
+  confirmed (SMR F2, `poll_descriptor/flow_cache_hit.rs:264-280`).
 
 All file/line references are to master `5b3f9501e` (worktree
 `.claude/worktrees/1852-research`).
@@ -61,16 +82,21 @@ fragment as a normal L4 packet. Every downstream rewrite leaf then trusts
 | S6 | descriptor fast path v4 | `rewrite/ipv4.rs:62-121` | inline port writes + precomputed L4-csum delta at `l4+16/+6` |
 | S7 | descriptor fast path v6 | `rewrite/ipv6.rs:63-108` | inline port writes + precomputed L4-csum delta |
 | S8 | `parse_embedded_v4` | `icmp_embed/parse.rs:36-81` | reads ports at `ihl` (no frag-offset check) — the v4 twin of the #1853 v6 fix |
-| S9 | `build_nat_reversed_icmp_error_v4` | `icmp_embed/builders.rs:60-108` | embedded un-NAT at `emb_ip_offset + emb_ihl` (no frag check on the QUOTED v4 packet) |
+| S9 | `build_nat_reversed_icmp_error_v4` | `icmp_embed/builders.rs:7-119` | embedded un-NAT at `emb_ip_offset + emb_ihl` (no frag check on the QUOTED v4 packet); reads `emb_l4_offset` directly, NOT via `parse_embedded_v4`, so it needs its OWN guard (SMR nit) |
+| S10 | TCP segmentation orchestrator | `tx/dispatch/mod.rs:1031-1055` (admission) → `frame/tcp_segmentation.rs:48-79,192-303` + `tx/tcp_segmentation.rs:201-237` | segmentation admission gates only on `meta.protocol != PROTO_TCP` + `len-l3 > mtu` — fragment-blind. `meta.protocol` for a non-first TCP fragment IS `PROTO_TCP` (shim reads it from the IP header / v6 frag header next-hdr), so a large non-first fragment can enter segmentation, which parses "TCP" at `frame_l4_offset` and runs NAT/checksum at the fake offset (Codex MED) |
 
-Orchestrators that call S1-S7 (each is a distinct entry that would need a
-gate if gating at the orchestrator level rather than the leaf):
+Orchestrators that reach S1-S7/S10 (each is a distinct entry that needs a
+gate; Path A gates the shared leaves + the descriptor path + the
+segmentation admission):
 
 - `rewrite_apply_v4` / `rewrite_apply_v6` (generic in-place, mod.rs:504/560)
 - `build_forwarded_frame_into_ipv4` / `_ipv6` (copy builder, build/ipv4.rs / ipv6.rs)
-- `apply_rewrite_descriptor_ipv4` / `_ipv6` (descriptor fast path)
+- `apply_rewrite_descriptor_ipv4` / `_ipv6` (descriptor fast path; reached
+  only for flow-cached entries, falls back to generic via
+  `apply_rewrite_descriptor(...).or_else(rewrite_forwarded_frame_in_place)`
+  at `poll_descriptor/flow_cache_hit.rs:264-280` — confirmed)
 - `extract_l3_packet_with_nat` (slow_path.rs:278)
-- tcp segmentation v4/v6 (`frame/tcp_segmentation.rs`, `tx/tcp_segmentation.rs`)
+- TCP segmentation v4/v6 (S10) — separate admission gate, not a leaf
 
 The forwarding/NAT pipeline has **zero** fragment awareness today
 (`grep is_fragment userspace-dp/src/afxdp` → only `event_emit.rs`). Only
@@ -88,77 +114,126 @@ checks — it does not unconditionally drop non-first fragments.
   used here — the clamp keeps its own fixed-40 derivation, so the gap
   remains in exactly this one function.
 
-## 4. Reachability analysis (the honest narrowing)
+## 4. Reachability analysis (round-1-corrected)
 
-The filed issue says "the REAL exposure may be narrower than filed." It
-is — but a real, reachable corruption survives the narrowing.
+The filed issue says "the REAL exposure may be narrower than filed." Two
+opposing corrections from round 1: the shim drops *some* non-first
+fragments (narrows), but port writes are reachable via NEW-flow NAT
+allocation (widens — my v1 narrowing was wrong).
 
-**Port-write sites (S3, S6/S7 port writes, S4) are mostly self-gating.**
-A non-first fragment carries garbage ports (payload bytes). The
-session/flow lookup that produces a port-rewriting `NatDecision`
-(`nat.rewrite_*_port = Some`) or `expected_ports = Some` keys on those
-garbage ports → the session lookup **misses** → no port-NAT decision is
-produced → S3/S6/S7 port writes and S4 enforcement never fire. Crafting
-payload bytes that collide with a live port-NAT session only corrupts the
-attacker's own flow. **LOW / effectively unreachable** for S3, S4 (port
-arm), S6/S7 (port arm).
+### 4a. Shim partial-drop (AGY) — narrows, does not eliminate
 
-**Address-only NAT (S1, S2 IP-NAT branch) IS reachable and corrupts.**
+The shim parses every fragment without checking the fragment-offset bits
+(`userspace-xdp/src/lib.rs:1115-1117` v4; `:1185-1188` v6 walks past
+NEXTHDR_FRAGMENT without offset inspection), so a non-first fragment is
+parsed as if it had an L4 header at the post-IP offset. But `parse_l4`'s
+own length/sanity checks drop a fraction:
+
+- TCP: `read_bytes(.., 14)?` + `data_offset = (bytes[12]>>4)*4; if
+  data_offset < 20 { return None }` (`lib.rs:1396-1400`) → ~31% of
+  non-first TCP fragments (those whose payload byte 12 high-nibble < 5)
+  are dropped at the shim → packet dropped (`lib.rs:378-380`
+  `drop_degraded_transit`).
+- short non-first fragments (< 14 B TCP / < 8 B UDP/ICMP payload at the
+  fake L4 offset) fail `read_bytes` → dropped.
+
+So NOT every non-first fragment reaches userspace — but **large-payload
+fragments with surviving garbage bit patterns DO**, which is the common
+case for bulk-data fragmentation (large MTU-exceeding payloads). The
+exposure is real, just not 100% of fragments.
+
+### 4b. Port-write sites ARE reachable via new-flow NAT (Codex HIGH + AGY)
+
+My v1 claim that S3/S6/S7 port writes are unreachable (garbage-port
+session miss) was WRONG. Port-rewriting decisions are produced WITHOUT an
+established-session lookup:
+
+- **Pool-mode dynamic SNAT**: the cold path matches a SNAT rule by
+  IP/zone (`nat/source.rs:151` `matches(from_zone, to_zone, src_ip,
+  dst_ip)` — port-blind) and ALLOCATES a fresh translation
+  (`nat/source.rs:478-498` → `rewrite_src: Some(ip), rewrite_src_port:
+  Some(translated.port)`). A non-first fragment misses the session cache
+  (garbage ports), hits the cold path, the rule matches on src IP, a new
+  port is allocated, and `apply_nat_port_rewrite` writes that port into
+  payload bytes at the fake L4 offset — AND leaks an allocator port per
+  fragment.
+- **Wildcard DNAT**: `nat/destination.rs:92-121` exact-then-wildcard
+  (port=0) lookup → `rewrite_dst_port: Some(value.new_dst_port)`. A
+  non-first fragment to a wildcard-DNAT'd dst → port write into payload.
+
+So S3 (`apply_nat_port_rewrite` writes at `rel_l4` / `rel_l4+2`), S6/S7
+(descriptor inline port writes) are reachable. S4 (`enforce_expected_ports`)
+remains gated by `expected_ports` (set only on a flow-cache hit, which a
+non-first fragment misses) — S4 stays LOW.
+
+### 4c. Address-only NAT (S1/S2 IP-NAT branch) — reachable, corrupts
+
 Static 1:1 NAT (`nat/static_nat.rs:49-75`) and interface NAT produce
-**port-blind** decisions keyed purely on IP (`match_dnat` / `match_snat`
-set `rewrite_dst`/`rewrite_src`, ports `None`). The XDP shim redirects a
-non-first fragment to a static-NAT'd / interface-NAT'd IP to userspace
-(`USERSPACE_INTERFACE_NAT_V4/V6` and `USERSPACE_LOCAL_V4/V6` are keyed on
-dst IP, port-blind; static external IPs register for local delivery via
-`StaticNatTable::external_ips`). In userspace the IP-only NAT decision
-flows to `apply_nat_ipv4`/`_ipv6`, which:
+port-blind IP-only decisions (`match_dnat`/`match_snat` set
+`rewrite_dst`/`rewrite_src`, ports `None`). The shim redirects to
+userspace via the port-blind `USERSPACE_INTERFACE_NAT_V4/V6` /
+`USERSPACE_LOCAL_V4/V6` maps; static external IPs register for local
+delivery (`StaticNatTable::external_ips`). The userspace miss path
+installs the decision (`poll_descriptor/mod.rs:543-550,682-685`).
+`apply_nat_ipv4`/`_ipv6` then (1) rewrites the IP (CORRECT — every
+fragment carries the IP header and must be rewritten consistently), then
+(2) calls `adjust_l4_checksum_ipv4_dst`/`_ipv6_*` at the L4 offset
+(`frame/mod.rs:748-755` v4; `:833-846` v6) folding the address-change
+delta into "the L4 checksum" — 2 **payload** bytes on a non-first
+fragment.
 
-  1. rewrites the IP address (CORRECT — every fragment carries the IP
-     header and must be rewritten consistently), then
-  2. calls `adjust_l4_checksum_ipv4_dst` / `_ipv6_*` at the L4 offset to
-     fold the address-change delta into "the L4 checksum" — but on a
-     non-first fragment those 2 bytes are **payload**, so 2 payload bytes
-     are mutated.
+The L4 checksum lives only in the FIRST fragment; it is NAT'd correctly
+there. Each non-first fragment gets correct IP rewrite **plus 2 corrupted
+payload bytes** → on reassembly the receiver's L4 checksum (carried in
+fragment 1) no longer matches → **silent drop of fragmented NAT'd TCP/UDP
+flows.** Reachable with static/interface NAT + any flow ≥ 2 fragments
+(modulo §4a shim drop). **MED.**
 
-The L4 checksum lives only in the FIRST fragment. The first fragment is
-NAT'd correctly (real L4 header present, delta folded in). Each non-first
-fragment gets its IP rewritten (correct) **plus 2 corrupted payload
-bytes** (wrong). On reassembly the receiver's L4 checksum (covering the
-whole datagram, carried in fragment 1) no longer matches the
-payload-corrupted reassembly → **silent drop of fragmented, statically
-NAT'd TCP/UDP flows.** Reachable with `static nat` (or interface NAT) +
-any fragmented flow ≥ 2 fragments. **MED.**
+### 4d. ICMP ident restore (S5) — LOW, no cross-fragment state
 
-**ICMP ident restore (S5) is reachable, lower impact.** Fragmented ICMP
-echo (large ping) through NAT: a non-first ICMP fragment gets
-`meta.flow_src_port` (the echo id from the metadata) written at
-`rel_l4+4` → 2 payload bytes corrupted, same reassembly-drop class.
-ICMP-error embedded restore (S8/S9) requires the QUOTED packet inside an
-ICMP error to itself be a non-first fragment, which then mostly produces
-a session-lookup miss (garbage embedded ports) — **LOW**, but it is the
-exact v4 twin of the bug #1853 judged worth fixing on v6, so closing it
-restores family symmetry cheaply.
+The shim is stateless per-packet (`lib.rs:646` `meta_flags: 0`; `parse_l4`
+ICMP arm `:1420-1426` reads the ident from each packet's OWN bytes). So a
+non-first ICMP fragment's `meta.flow_src_port` = its own payload bytes,
+not fragment 1's echo id. `restore_l4_tuple_from_meta` (`frame/mod.rs:
+1116-1122`) writes `meta.flow_src_port` at `rel_l4+4` only if it differs
+from the current bytes — for the shim-origin same-packet path that is a
+no-op. My v1 "writes the echo id from frag 1" claim was wrong (SMR F3 /
+Codex / AGY). **S5 → LOW.** S8/S9 (embedded ICMPv4) likewise narrow but
+are the v4 twin of the #1853 v6 fix — closing them restores family
+symmetry cheaply. **LOW.**
 
-**Defect 2 is not corruption.** An ext-headered v6 SYN whose clamp is
-skipped simply keeps its original MSS — a feature gap, **LOW**. (A
-non-first fragment never carries a SYN, so the fragment question does not
-add to defect 2.)
+### 4e. Defect 2 — not corruption, but its FIX has a fragment trap
+
+An ext-headered v6 SYN whose clamp is skipped keeps its original MSS — a
+feature gap, **LOW**. BUT the naive fix (swap the fixed `(40, packet[6])`
+for `packet_rel_l4_offset_and_protocol`) introduces a NEW corruption risk:
+that helper ALSO walks past the fragment header without an offset check
+(`inspect.rs:184-188`), so a non-first TCP fragment would resolve
+protocol=TCP at a fake offset, and if the payload's "TCP flags" byte
+happens to set SYN, the clamp mutates payload (Codex + AGY MED). The fix
+MUST make the helper fragment-aware (see §7).
 
 ## 5. Severity — honest framing
 
 | Defect / site | Reachable? | Impact | Severity |
 |---------------|-----------|--------|----------|
-| S1/S2 address-NAT L4-csum adjust on non-first frag (static/interface NAT) | YES | 2 payload bytes/frag corrupted → reassembly checksum mismatch → silent drop of fragmented NAT'd flows | **MED** |
-| S5 ICMP ident restore on non-first ICMP frag | YES | payload corruption on fragmented ICMP echo through NAT | **LOW-MED** |
-| S3/S4/S6/S7 port writes on non-first frag | Effectively no (session/expected-ports lookup misses on garbage ports) | self-inflicted only | **LOW** |
-| S8/S9 embedded v4 non-first-fragment parse | YES (narrow) | session-lookup miss / no false match in practice; family asymmetry vs #1853 | **LOW** |
-| Defect 2 — MSS clamp v6 ext gap | YES | clamp silently skipped; no corruption | **LOW** |
+| S3/S6/S7 port writes on non-first frag (new-flow pool SNAT / wildcard DNAT) | YES (cold path allocates a port; §4b) | payload corruption + per-fragment SNAT allocator-port LEAK | **MED-HIGH** |
+| S1/S2 address-NAT L4-csum adjust on non-first frag (static/interface NAT) | YES (§4c) | 2 payload bytes/frag corrupted → reassembly checksum mismatch → silent drop of fragmented NAT'd flows | **MED** |
+| S10 TCP segmentation on a large non-first frag | YES (`meta.protocol==TCP`; admission fragment-blind) | parses payload as TCP, runs NAT/checksum at fake offset | **MED** |
+| Defect 2 FIX trap (naive helper swap walks past fragment) | YES if fix is naive | new payload-corruption risk on non-first frag | **MED** (avoided by the §7 fragment-aware helper) |
+| S4 `enforce_expected_ports` | NO (expected_ports only on flow-cache hit, which a non-first frag misses) | — | **LOW** |
+| S5 / S8 / S9 ICMP ident + embedded v4 | YES (narrow) | shim same-packet no-op (§4d) / session miss; family asymmetry vs #1853 | **LOW** |
+| Defect 2 baseline — MSS clamp v6 ext gap | YES | clamp silently skipped; no corruption | **LOW** |
 
 No defect is a security-critical RCE/escape; the headline is a
-**correctness** bug: static/interface NAT silently breaks fragmented
-flows. This was masked because (a) fragmentation is uncommon on the
-loss-cluster smoke path (MSS-clamped, MTU-clean), and (b) the trio prop
-harness pins *current* behavior, so it is not a regression.
+**correctness + resource-leak** bug: NAT silently breaks fragmented flows
+AND pool SNAT leaks an allocator port per surviving non-first fragment.
+The SNAT port leak (§4b) is the most operationally serious consequence —
+sustained fragmented traffic through pool SNAT can exhaust the port pool.
+This was masked because (a) fragmentation is uncommon on the loss-cluster
+smoke path (MSS-clamped, MTU-clean), (b) ~31% of TCP non-first fragments
+drop at the shim (§4a), and (c) the trio prop harness pins *current*
+behavior, so none of this is a regression.
 
 ## 6. Design — the correct rewrite semantics for fragments
 
@@ -189,68 +264,96 @@ The discriminator is a single per-packet predicate:
 
 ## 7. Path options
 
-### Path A — leaf-level family-gated fragment guard (RECOMMENDED)
+### Path A — orchestrator-computed, threaded fragment guard (RECOMMENDED)
 
-Gate the shared leaf functions; all five orchestrators inherit the fix at
-one point each.
+Compute the non-first-fragment predicate ONCE per packet in each
+orchestrator and thread a `non_first_fragment: bool` into the leaves
+(SMR F1 — never re-derive; one bounded read/walk per packet, not per
+leaf).
 
-- New private helpers in `frame/inspect.rs` (read-only, no mutation):
-  `ipv4_is_non_first_fragment(packet: &[u8]) -> bool` and
-  `ipv6_is_non_first_fragment(packet: &[u8]) -> bool` (bounded ext walk,
-  reuses the §6 logic; mirrors `screen/extract.rs` semantics).
-- `apply_nat_ipv4`/`apply_nat_ipv6`: after the IP-address rewrite branch,
-  compute the predicate once; when non-first fragment, **return `Some(())`
-  before the L4-checksum-adjust call and before `apply_nat_port_rewrite`**
-  — but keep the IP byte writes. (Restructure so the IP writes happen,
-  then `if !non_first { adjust_csum…; }`, then
-  `if !non_first { apply_nat_port_rewrite… }`.)
-- `enforce_expected_ports` / `_at`: early `return Some(false)` when the
-  frame is a non-first fragment (no enforcement, no checksum touch).
-- `restore_l4_tuple_from_meta`: early `return Some(false)` for non-first
-  fragments (ICMP arm).
-- Descriptor fast path (`rewrite/ipv4.rs`, `rewrite/ipv6.rs`): these do
-  inline writes and do NOT call the leaves, so add the predicate there —
-  when non-first fragment, perform the IP byte writes + the v4 IP-header
-  checksum (delta is IP-only) + TTL, and **skip** the port writes and the
-  `rd.l4_csum_delta` block. NOTE: `rd.l4_csum_delta` and `ip_csum_delta`
-  are precomputed by the Go/decision layer assuming a normal L4 header;
-  for the descriptor path the cleanest guard is: on a non-first fragment,
-  **return `None`** so the caller falls back to the generic path
-  (`rewrite_apply_*`), which then applies the leaf-level gate. This avoids
-  re-deriving the precomputed deltas and keeps the fast path
-  byte-for-byte equal to the generic path on the shared domain (preserves
-  the #1838 P-N3 parity invariant).
+- New private helpers in `frame/inspect.rs` (read-only):
+  `ipv4_is_non_first_fragment(packet: &[u8]) -> bool` (reads `frag_off =
+  u16::from_be_bytes([ip[6], ip[7]]); (frag_off & 0x1FFF) != 0`) and
+  `ipv6_is_non_first_fragment(packet: &[u8]) -> bool` (bounded ext walk
+  for header 44, `(frag_off_field & 0xFFF8) != 0`; mirrors
+  `screen/extract.rs:50-55,99-109`).
+- The five orchestrators (`rewrite_apply_v4`/`v6`,
+  `build_forwarded_frame_into_*`, `extract_l3_packet_with_nat`) compute
+  the predicate once and pass it down.
+- `apply_nat_ipv4`/`apply_nat_ipv6` gain a `non_first_fragment: bool`
+  param: keep the IP byte writes always; wrap the L4-checksum-adjust call
+  AND `apply_nat_port_rewrite` in `if !non_first_fragment { … }`.
+- `enforce_expected_ports` / `_at`: early `return Some(false)` when
+  `non_first_fragment` (S4 stays LOW but gate it for defense-in-depth).
+- `restore_l4_tuple_from_meta`: early `return Some(false)` when
+  `non_first_fragment` (ICMP arm).
+- Descriptor fast path: compute the predicate in `apply_rewrite_descriptor`
+  (orchestrator, `rewrite/mod.rs`) and **return `None`** on a non-first
+  fragment so the caller falls back to the generic path. The fall-back is
+  CONFIRMED real: `poll_descriptor/flow_cache_hit.rs:264-280`
+  `apply_rewrite_descriptor(...).or_else(|| rewrite_forwarded_frame_in_place(...))`
+  re-runs the generic rewrite (which carries the leaf-level gate). This
+  avoids re-deriving `rd.l4_csum_delta`/`ip_csum_delta` (precomputed
+  assuming a normal L4 header) and preserves the #1838 P-N3 byte parity
+  by construction (both reviewers confirmed §2).
+- **S10 — TCP segmentation**: add an explicit non-first-fragment check to
+  the segmentation admission (`tx/dispatch/mod.rs:1031-1055`): a non-first
+  fragment must NOT be segmented (it has no TCP header). Treat it as the
+  normal forwarding path (which then applies the leaf gate), or pass it
+  un-segmented. Leaf gates alone do not cover this orchestrator (Codex
+  MED).
 - `parse_embedded_v4` (S8): add the IPv4 fragment-offset check, mirroring
   #1853's `parse_embedded_v6_l4` — return `None` for a quoted non-first
-  fragment (no L4 header to read). `build_nat_reversed_icmp_error_v4` (S9)
-  inherits the guard via the parse path / adds a symmetric check.
-- **Defect 2**: change `clamp_tcp_mss`'s v6 arm to derive the offset via
-  the shared `packet_rel_l4_offset_and_protocol` (ext-aware) instead of
-  `(40, packet[6])`. A non-first fragment is naturally excluded (no SYN /
-  no TCP header after the walk → the SYN-flag check no-ops). Closes the
-  feature gap with no fragment-specific code.
+  fragment. `build_nat_reversed_icmp_error_v4` (S9) reads `emb_l4_offset`
+  DIRECTLY (not via `parse_embedded_v4`), so it needs its OWN symmetric
+  guard (SMR nit) — add a fragment-offset check on the quoted v4 header
+  before the embedded un-NAT writes.
+- **Defect 2**: make `packet_rel_l4_offset_and_protocol`
+  (`inspect.rs:145`) **fragment-aware** — on the fragment header (44),
+  read the offset bits and `return None` unless zero (the same guard
+  #1853 added to `parse_embedded_v6_l4`):
+  ```
+  44 => {
+      let frag = packet.get(offset..offset + 8)?;
+      if (u16::from_be_bytes([frag[2], frag[3]]) & 0xFFF8) != 0 {
+          return None;
+      }
+      protocol = frag[0];
+      offset = offset.checked_add(8)?;
+      …
+  }
+  ```
+  Then `clamp_tcp_mss`'s v6 arm derives the offset via this now-safe
+  helper instead of fixed `(40, packet[6])`. This closes the ext-header
+  feature gap AND naturally gates the clamp (and every other inspect
+  caller of this helper) from misinterpreting non-first-fragment payload
+  as L4 (Codex + AGY MED). NOTE: audit the helper's existing callers
+  (GRE inner parse, `parse_tcp_reply_source` v6 at `tcp.rs:355`) — none
+  should legitimately want a non-first fragment's L4, so `None` is the
+  correct answer for all; confirm in implementation.
 
-Pros: one gate per leaf covers all five orchestrators; IP NAT of
-fragmented flows starts working; preserves descriptor↔generic parity by
-falling back (no delta re-derivation); contained entirely to
-`userspace-dp` (matches the issue scope). Cons: per-packet v6 ext-walk
-for NAT'd v6 packets in `apply_nat_ipv6` / `enforce_expected_ports`
-(bounded 6 iterations; only on the NAT/enforcement path, not every
-packet); the predicate is computed up to twice per packet (apply_nat +
-enforce) — acceptable, or thread it once from the orchestrator.
+Pros: one predicate per packet (threaded); IP NAT of fragmented flows
+starts working; preserves descriptor↔generic parity by fall-back;
+contained to `userspace-dp` (issue scope). Cons: per-packet v6 ext-walk
+on the NAT path (bounded 6 iterations); if review flags the cost,
+escalate to Path A′.
 
 ### Path A′ — meta-flag from the shim (perf-optimal variant of A)
 
 Have `parse_ipv4`/`parse_ipv6` in `userspace-xdp/src/lib.rs` set a
-`UserspaceDpMeta.meta_flags` non-first-fragment bit during parse (it
-already reads the v4 `frag_off` field and walks the v6 fragment header).
-Userspace then checks one bit — zero extra parsing on any path. This is
-arguably "the admission-layer answer" the trio plan asked for (the shim
-IS the admission layer). Cons: wire-protocol extension — touches the shim
-+ the meta struct (`protocol.rs`/`protocol.go` BOTH sides per
-`feedback_wire_protocol_both_sides`) + a free `meta_flags` bit must
-exist. Broader blast radius than the issue scope; defer unless the v6
-ext-walk cost in Path A is shown to matter.
+`UserspaceDpMeta.meta_flags` non-first-fragment bit during parse.
+Correction (Codex/SMR): `parse_ipv4` does NOT read the v4 `frag_off`
+field today (`lib.rs:1103-1117` reads version/IHL/protocol only) — A′
+must ADD that 2-byte read; `parse_ipv6` already walks the fragment header
+(`:1185`) but does not read the offset bits. A free `meta_flags` bit
+exists: only `FABRIC_INGRESS_FLAG = 0x80` is used (`afxdp/icmp.rs:3`), so
+e.g. `0x40` is free. Userspace then checks one bit — zero extra parsing.
+This is arguably "the admission-layer answer" the trio plan asked for
+(the shim IS the admission layer). Cons: wire-protocol extension —
+touches the shim + the meta struct (`protocol.rs`/`protocol.go` BOTH
+sides per `feedback_wire_protocol_both_sides`). Broader blast radius than
+the issue scope; defer unless the v6 ext-walk cost in Path A is shown to
+matter.
 
 ### Path B — fragment-aware offset helpers that DROP
 
@@ -306,12 +409,21 @@ fall-back rather than delta re-derivation.
 2. **Deterministic unit tests**:
    - `ipv4_is_non_first_fragment` / `ipv6_is_non_first_fragment` truth
      table (offset 0 MF=0/1, offset>0, no-frag-header, truncated chain);
+   - **pool-SNAT on a non-first fragment**: NO port allocated (no leak),
+     payload byte-identical (the §4b regression guard);
+   - **wildcard-DNAT on a non-first fragment**: no port write;
    - static-DNAT on a 2-fragment TCP flow: fragment 1 fully NAT'd
      (IP+checksum), fragment 2 IP-only, payload byte-identical;
+   - **S10 segmentation**: a large non-first TCP fragment is NOT segmented
+     / not NAT-parsed at the fake offset;
    - ICMP echo non-first fragment: `restore_l4_tuple_from_meta` no-ops;
-   - `parse_embedded_v4` returns `None` for a quoted non-first fragment;
-     first/atomic quoted fragment still parses (mirror the #1853 v6 tests
-     at `icmp_embed/parse.rs:262-298`);
+   - `parse_embedded_v4` + `build_nat_reversed_icmp_error_v4` return
+     `None` / skip for a quoted non-first fragment; first/atomic quoted
+     fragment still parses (mirror the #1853 v6 tests at
+     `icmp_embed/parse.rs:262-298`);
+   - `packet_rel_l4_offset_and_protocol` returns `None` for a non-first
+     fragment (first/atomic still walks) + every existing caller audited
+     (GRE inner, `parse_tcp_reply_source` v6) behaves correctly;
    - `clamp_tcp_mss` on an ext-headered v6 SYN now finds + clamps the MSS;
      a non-first fragment / non-SYN still no-ops.
 3. **Suites/gates**: `cargo build --release` clean; full `cargo test
@@ -364,12 +476,14 @@ fall-back rather than delta re-derivation.
 - **Q4** — Scope: fix both defects in one PR (they share `frame/` and the
   fragment predicate), or split defect 2 (MSS, trivial, independent) into
   its own commit/PR? Lean: one PR, two logical commits.
-- **Q5 (PLAN-KILL)** — Given S3/S4/S6/S7 are effectively unreachable and
-  the realized corruption (S1/S2/S5) requires fragmented traffic through
-  static/interface NAT (uncommon on MSS-clamped paths), is the MED
-  severity high enough to justify Path A's breadth, or should this be
-  **Path C (partial)** or **closed as documented-known-limitation**?
-  Reviewers may PLAN-KILL to C or to doc-only.
+- **Q5 (PLAN-KILL) — RESOLVED round 1: proceed with Path A, do NOT kill.**
+  AGY: "Proceed with Path A (do NOT kill) … silent dropping of fragmented
+  transit flows through static NAT / interface NAT is highly disruptive
+  and difficult for operators to diagnose; Path A's implementation is
+  low-risk and localized." Codex/SMR findings were all revision, none a
+  kill. The round-1 retraction of the port-write narrowing (§4b) plus the
+  SNAT port-leak (§5) RAISED the realized severity to MED-HIGH, removing
+  the doc-only option. Path C is no longer recommended.
 
 ## Appendix — reviewer task IDs
 
