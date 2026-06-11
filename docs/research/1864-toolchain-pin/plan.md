@@ -1,6 +1,6 @@
 # #1864 — `make generate` produces a verifier-killing userspace-xdp shim: pin the BPF toolchain + add load guards
 
-Revision: r3 (2026-06-11) — r2 + Codex r1 F1-F8 + AGY r2 F7-F9 + SMR r2 folds
+Revision: r4 (2026-06-11) — r3 + Codex r2 findings 1-5 (C1 shares the full verify core incl. spec validation; shrink-equivalence gate-proven via preserved REJECT testdata + root-gated test; deploy CPU mask derived from live worker Cpus_allowed_list with nice-only fail-safe; ordering invariant broadened to any dataplane stop/cleanup/pkill/replacement/legacy-migration; TOML parse requires exactly one channel key in [toolchain])
 Branch: `research/1864-toolchain-pin`
 Status: round 2 — awaiting 3-way convergence (Codex + AGY + Claude SMR)
 
@@ -106,7 +106,9 @@ rust-analyzer/IDE and ad-hoc `cargo` invocations in the crate dir
   `^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$`, failing loudly on
   empty/garbled parse — never falling back to an unpinned toolchain
   (AGY r2 F8; same fail-loud contract as the existing MAX_INTERFACES
-  awk parse). `TOOLCHAIN="${RUST_BPF_TOOLCHAIN:-<parsed pin>}"`. Explicit
+  awk parse). Scoped to the `[toolchain]` table and requiring EXACTLY
+  ONE `channel` key (duplicates or wrong-table keys fail, Codex r2
+  F5). `TOOLCHAIN="${RUST_BPF_TOOLCHAIN:-<parsed pin>}"`. Explicit
   `RUST_BPF_TOOLCHAIN=...` override still allowed (needed for bisects
   and pin bumps) — the Path-C gate still applies either way. Because
   the script always passes an explicit `+${TOOLCHAIN}`, the override
@@ -159,9 +161,12 @@ safe, so it does not replace A or C.
 
 - **C1 — build-time gate, verify-then-install.** Productionize the
   research harness as a small Go command (`cmd/shimverify` or
-  `tools/`-scoped) that loads a candidate object via
-  `ebpf.NewCollection` (anonymous maps, no pinning, no attach) and
-  exits nonzero with the verifier log tail on rejection.
+  `tools/`-scoped) sharing ONE verify core with C2 (Codex r2 F1):
+  validate the unmodified spec via `validateUserspaceShimSpec` (the
+  production-load viability checks), then shrink, then load via
+  `ebpf.NewCollection` (anonymous maps, no pinning, no attach); exits
+  nonzero with the verifier log tail on rejection. A C1 PASS therefore
+  attests the same contract as C2.
   `build-userspace-xdp.sh` verifies the **candidate at the cargo
   output path** and only `install`s over the tracked
   `pkg/dataplane/userspace_xdp_bpfel.o` on PASS (Claude SMR F1 + AGY
@@ -204,12 +209,21 @@ safe, so it does not replace A or C.
   (`dnat_table` 10 M no-prealloc still allocates its bucket array
   ~128 MB+ even empty; `userspace_sessions` 262144 is preallocated —
   hash-map max_entries does not feed program safety analysis, so the
-  verifier outcome is unchanged; array maps are left alone), and the
+  verifier outcome is unchanged; array maps are left alone — and this
+  is GATE-PROVEN, not asserted: the preserved incident REJECT object
+  ships as inert testdata and a root-gated test loads PASS and REJECT
+  objects both unmodified and shrunk, asserting identical verdicts,
+  Codex r2 F2), and the
   deploy hook runs the subcommand under `nice -n 19` **and `taskset`
   pinned away from the AF_XDP worker cores** (AGY r2 F7: nice alone
   still grants minimum-granularity timeslices on a worker core — a
-  1-6 ms preemption overflows NIC RX rings at line rate; affinity to
-  a housekeeping core removes the hazard entirely). `deploy_vm()` in
+  1-6 ms preemption overflows NIC RX rings at line rate). CPU contract
+  (Codex r2 F3): worker cores are derived from the live
+  xpf-userspace-dp tasks whose Cpus_allowed_list is a single CPU
+  (workers pin worker-i to the i-th allowed CPU, so a fixed
+  housekeeping core is NOT guaranteed); the verify walk runs on the
+  complement, falling back fail-safe to `nice -n 19` on all CPUs when
+  the complement is empty or derivation fails. `deploy_vm()` in
   `test/incus/cluster-setup.sh` pushes the new binary to a temp path
   and runs `verify-dataplane` on the node **before** `systemctl stop
   xpfd`; failure aborts that node's deploy with the old daemon still
@@ -267,7 +281,9 @@ the known trigger, so ship all three layers:
   `xpfd cleanup` may appear before the `verify-dataplane` pre-flight;
   the review checklist names this line ordering, since the current
   script's stop-clean-push ordering (cluster-setup.sh:668-682) is the
-  exact incident shape.
+  exact incident shape. Broadened per Codex r2 F4: NO dataplane stop,
+  cleanup, pkill, binary replacement, or legacy-name (bpfrxd)
+  migration may precede the pre-flight.
 - Cargo gates with the pinned toolchain and the build-script env
   (Codex r1 F8 — `lib.rs:81-84` requires `MAX_INTERFACES` via `env!`):
   `MAX_INTERFACES=$(awk ... bpf/headers/xpf_common.h)
@@ -306,7 +322,8 @@ the known trigger, so ship all three layers:
   running collection is untouched. Memory hazard from the 10 M-entry
   hash bucket array and the preallocated `userspace_sessions` is
   removed by the MaxEntries=1 spec shrink (§4 C2); CPU hazard from a
-  ~17 s REJECT walk is bounded by `nice -n 19`. Residual: a PASS walk
+  ~17 s REJECT walk is bounded by the derived-complement `taskset` +
+  `nice -n 19` fail-safe (§4 C2, Codex r2 F3). Residual: a PASS walk
   is seconds and once-per-push.
 - **R4: B is semantics-sensitive code review surface.** Both rewrites
   are proven-identical by case analysis (§4B) and the object diff;

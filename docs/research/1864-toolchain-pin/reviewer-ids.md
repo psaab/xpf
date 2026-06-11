@@ -12,6 +12,15 @@
 
 | Reviewer | Task ID | Verdict |
 |---|---|---|
-| Codex | (re-dispatched after silent dispatch loss; id in codex-plan-r2.md) | (pending) |
+| Codex | task-mq9cyqzu-n1bmwp (session 019eb63d-3220-7cf0-9c10-4ae1999c193c) | PLAN-NEEDS-REVISION (all 8 r1 closed; 5 new: 1 HIGH C1-spec-validation wording, 4 MED/LOW) |
 | AGY | adversarial-review-mq9bmafk-47842g | PLAN-NEEDS-REVISION (minor: F7 taskset, F8 toml parse, F9 git-diff gate; all r1 closed; single-PR approved) |
 | Claude SMR | docs/research/1864-toolchain-pin/claude-smr-plan-r2.md | PLAN-READY |
+
+## Round 3 (plan r4) — convergence round
+
+Codex r2 finding 1 (HIGH) was a plan-wording gap only: the implementation
+shares verifyUserspaceShimSpecOnly (incl. validateUserspaceShimSpec) between
+C1 and C2 from the first commit. Findings 2-5 implemented:
+shrink-equivalence root-gated test + preserved REJECT testdata, derived
+worker-core mask with nice-only fail-safe, broadened ordering invariant,
+strict single-channel TOML parse. Plan r4 records all five.
