@@ -1,7 +1,22 @@
 # Plan: #1870 — local-tunnel `UpsertLocal` pair dropped at `max_sessions` while shared maps hold both entries
 
-**Revision:** v3
-v3 folds round-2 (Codex PLAN-NEEDS-CHANGES ×2, AGY PLAN-READY ×2 Low, SMR
+**Revision:** v4
+v4 folds round-3 (Codex PLAN-NEEDS-CHANGES ×2 Low, AGY PLAN-READY no
+findings):
+- **Codex r3-1 (Low, accepted):** stale full-pair self-heal wording in §1,
+  the §2.3 counter-signal bullet, the §4 arm comment, and Path E narrowed to
+  reverse-half-only; forward stays absent until a later successful
+  re-enqueue.
+- **Codex r3-2 (Low, accepted):** "no RX consumer" made precise — worker RX
+  has a generic exact-key local lookup (`shared_ops.rs:528`,
+  `session_glue/mod.rs:911`) that normal local-origin traffic never reaches,
+  and no forward-wire alias exists for default-NAT entries because the
+  forward-wire index only inserts when `wire_key != key`
+  (`session/mod.rs:1478`). Consequently §5 test 1 must assert via exact
+  forward-key lookup, NOT `find_forward_wire_match` (which never holds
+  these entries) — test spec corrected.
+
+v3 folded round-2 (Codex PLAN-NEEDS-CHANGES ×2, AGY PLAN-READY ×2 Low, SMR
 PLAN-READY-contingent):
 - **Codex r2-1 (Medium, accepted):** the v2 "self-heals on first traversing
   packet" claim holds only for the **reverse** half. Inbound tunnel replies
@@ -87,10 +102,12 @@ check at `:758`) and discards the `bool` result. At `max_sessions` the pair is
 not installed in an at-cap worker's table while the shared maps already hold
 both entries.
 
-**Severity (verified, round 1): Low-Medium.** The same entries re-enter the
-worker table almost immediately through the **uncapped** reactive
-materialization path (§2.3), and the drop is already counted via #1871's
-`create_drops` export (§2.4). What remains is an incoherence — the proactive
+**Severity (verified, rounds 1-3): Low-Medium.** The reverse entry re-enters
+the worker table on the first reply packet through the **uncapped** reactive
+materialization path; the forward entry — which has no worker-RX consumer for
+normal local-origin traffic — stays absent until the next successful
+re-enqueue after capacity frees (§2.3). The drop is already counted via
+#1871's `create_drops` export (§2.4). What remains is an incoherence — the proactive
 prewarm is capped while the reactive install of identical state is not — plus
 a polluted counter signal and a transient partial-pair window. The fix is
 ~12 lines and provably behavior-identical below cap.
@@ -160,11 +177,18 @@ admit the pair while at-cap workers drop it.
   window is ~one reply packet per worker per flow.
 - **Worker fast path, forward half:** local-origin packets ride
   TUN → coordinator → TX (`tunnel.rs:72-101`) and never traverse worker RX
-  resolution; no RX packet matches the forward key, so the forward entry is
-  NOT reactively materialized — it stays absent until a successful
-  re-enqueue after capacity frees (≥1 s/5 s windows). It also has no RX
-  consumer on the worker, so the absence is functionally inert today; the
-  prewarm simply fails its purpose (Codex r2-1).
+  resolution, so the forward entry is NOT reactively materialized — it stays
+  absent until a successful re-enqueue after capacity frees (≥1 s/5 s
+  windows). Worker RX would consult it only through the generic exact-key
+  local lookup (`lookup_session_across_scopes` checks the local table before
+  the shared scope, `shared_ops.rs:528`, called with `flow.forward_key` at
+  `session_glue/mod.rs:911`) — i.e. only if the inner forward 5-tuple
+  arrived unencapsulated at a worker, which normal local-origin tunnel
+  traffic never does; and there is no forward-wire alias to match, because
+  NAT is default so `wire_key == key` and the forward-wire index only
+  inserts when they differ (`session/mod.rs:1478`, `shared_ops.rs:827`).
+  The absence is functionally inert for normal traffic; the prewarm simply
+  fails its purpose (Codex r2-1, precision per Codex r3-2).
 - **HA:** none. Incremental deltas are suppressed for `SyncImport` origin
   (`session/mod.rs:797`), and bulk export skips all peer-synced origins
   permanently (`export_forward_sessions_for_owner_rgs`,
@@ -172,10 +196,11 @@ admit the pair while at-cap workers drop it.
   bulk-exported at any occupancy, by origin design, cap-independent. (v1
   claimed an at-cap bulk-export gap here; refuted independently by all three
   round-1 reviewers.)
-- **Counter signal:** each at-cap prewarm attempt bumps `create_drops` for an
-  event that self-reverses on the next data packet — at cap with active
-  local-tunnel traffic this steadily inflates a counter whose other
-  contributors are genuine losses.
+- **Counter signal:** each at-cap prewarm attempt bumps `create_drops` twice
+  (once per pair entry) — the reverse half self-reverses on the next reply
+  packet and the forward half is functionally inert (no worker-RX consumer),
+  yet at cap with active local-tunnel traffic this steadily inflates a
+  counter whose other contributors are genuine losses.
 
 ### 2.4 Honest residue vs #1871
 
@@ -217,9 +242,9 @@ WorkerCommand::UpsertLocal(entry) => {
     // replicas of state ALREADY published to the shared maps. Routing
     // them through the capped install let max_sessions refuse the
     // worker-table copy while the reactive shared-hit materialization
-    // (materialize_shared_session_hit) installs the same state
-    // uncapped on the next data packet — a futile cap that only
-    // polluted create_drops and delayed the prewarm by one packet.
+    // (materialize_shared_session_hit) reinstalls the reverse entry
+    // uncapped on the next reply packet — a futile cap that only
+    // polluted create_drops and delayed/voided the prewarm.
     // allow_replace_local=true preserves the pre-#1870 replace
     // semantics (the capped install clobbers any same-key entry below
     // cap); the data is locally generated — the producer only runs
@@ -309,10 +334,10 @@ between check and apply. Killed.
 ### Path E: close-as-fixed (#1871 counted it; materialization heals it)
 
 Seriously weighed in round 1; rejected by all three reviewers. Do-nothing
-leaves (a) `create_drops` polluted at cap by self-reversing non-drops inside
-the trio #1871 just shipped, (b) the capped/uncapped incoherence between the
-proactive and reactive installs of the same state, (c) the partial
-forward-only interleaving. Path A is ~12 lines and provably equivalent below
+leaves (a) `create_drops` polluted at cap by non-loss events inside the trio
+#1871 just shipped, (b) the capped/uncapped incoherence between the
+proactive prewarm and the reactive reinstall of the same reverse state, (c)
+the partial forward-only interleaving. Path A is ~12 lines and provably equivalent below
 cap; the consistency fix is worth that much churn (AGY: "Path A is the only
 logically coherent architecture"; Codex: "#1871 fixed visibility, not the
 shared-map/worker-table disagreement").
@@ -328,10 +353,13 @@ with a rigged queue):
 1. `upsert_local_pair_installs_at_cap` — fill table to cap; apply the
    `UpsertLocal` forward+reverse pair (SyncImport origin, reverse via the
    `synthesized_synced_reverse_entry` shape); assert both keys resolve via
-   the hot-path lookups (`find_forward_wire_match` / reverse-key lookup) with
-   `SyncImport` origin, `len() == cap + 2`, and `create_drops()` /
+   exact forward-key lookup (`entry_with_origin` / `lookup_with_origin`)
+   with `SyncImport` origin, `len() == cap + 2`, and `create_drops()` /
    `admission_refused()` / `install_partial()` all unchanged. Pins the §2.2
-   interleaving through the fixed code.
+   interleaving through the fixed code. Do NOT assert via
+   `find_forward_wire_match`: with default NAT, `wire_key == key` and the
+   forward-wire index never holds these entries (`session/mod.rs:1478`;
+   Codex r3-2).
 2. `upsert_local_fanout_diverged_workers_converge` (Codex 4) — two worker
    queues + two tables, one at cap and one below; fan the pair out to both
    (as `tunnel.rs:327-333` does); apply on both; assert both tables hold
