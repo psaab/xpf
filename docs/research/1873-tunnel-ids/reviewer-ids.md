@@ -8,3 +8,6 @@
 | 2 | Claude SMR | (in-conversation) claude-smr-plan-r2.md | PLAN-NEEDS-REVISION (R-C cold-path rescope; R-B groups union) |
 | 2 | Codex | task-mqa5478t-h5yale | PLAN-NEEDS-REVISION (R-C must be slow-path-boundary invariant; full caller enumeration) |
 | 2 | AGY | adversarial-review-mqa540ex-4eud0g | PLAN-NEEDS-REVISION (retry_pending_neigh plaintext MAJOR; Q1-Q8 ratified) |
+| 3 | Claude SMR | (in-conversation) claude-smr-plan-r3.md | PLAN-READY-conditional, then SELF-RETRACTED anti-blanket argument (wg_control.rs:592) |
+| 3 | Codex | task-mqa5gfj5-ceos57 | PLAN-READY (ratified conditional gate on refuted premise — superseded by v4) |
+| 3 | AGY | adversarial-review-mqa5g6f6-abtkjf | PLAN-NEEDS-REVISION (verified admin-down plaintext trace kills conditional gate; netlink/oper-state revisions REJECTED as superseded by blanket) |
