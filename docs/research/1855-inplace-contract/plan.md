@@ -91,6 +91,19 @@ Rejected:
   widening a test-only fix into a behavior-contract change across the #964
   invariant machinery.
 
+**Path B-lite (release-arm `eprintln!`/local log — AGY r1 finding 1):
+considered and rejected.** `update_session` is the per-packet refresh
+path; under a real corruption bug the affected flow would hit the arm on
+EVERY packet, turning an `eprintln!` into a journald flood — exactly what
+the project logging rules prohibit on per-packet paths. An unthrottled
+log is worse than silence here; a throttle adds state to a hot function
+for an unreachable branch. The `remove_entry` #964 arms shipped silent
+for the same reason and have stayed silent through multiple review
+rounds. If a future incident ever shows the arm firing in release, the
+right instrument is a local saturating counter (#1760 pattern: ship,
+watch, escalate) — that trigger reopens the decision; pre-installing it
+now is dead telemetry.
+
 ### Path H (CHOSEN) — ratify the existing hybrid contract; fix the tests
 The code contract is already correct and consistent: **debug asserts
 loudly, release tolerates + returns false.** Only the tests contradict it,
@@ -121,6 +134,12 @@ test-only + documentation:
      (the last adds debug coverage for an arm the release tests never
      reached; symmetric four-arm coverage, ~10 lines each reusing the
      existing rig helpers)
+   - AGY r1 finding 2 (accepted): the release set also gains symmetric
+     `refresh_for_ha_transition` stale-handle coverage — extend the
+     `cfg(not(debug_assertions))` stale test to assert
+     `refresh_for_ha_transition` returns false on the rigged
+     reused-slot mapping too (mirroring the vacant test, which already
+     covers both functions).
 2. **Doc-comments** on `update_session` + `refresh_for_ha_transition`
    guard arms (and the test pairs) stating the contract in one place:
    stale/vacant `key_to_handle` is impossible-by-construction
