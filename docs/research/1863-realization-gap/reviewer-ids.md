@@ -7,5 +7,10 @@
 
 ## Round 2 (plan v3 @ 0b209c7a4)
 - Claude SMR: claude-smr-plan-r2.md — PLAN-READY (self-correction on the 22.72G citation recorded)
-- Codex: (dispatched on v3)
+- Codex: task-mq9egjec-wojv3l — PLAN-NEEDS-CHANGES (1 residual: three stale passages vs mandatory Step-0)
+
+## Round 3 (plan v3.1 @ 7c340eee6) — CONVERGED 3-of-3 PLAN-READY
+- Codex: task-mq9eoto0-sn5ewn (session 019eb669-636b-78a1-9cb5-3f623e1af2ea) — PLAN-READY, findings none
+- AGY: adversarial-review-mq9emrsq-d5pfuo — PLAN-READY
+- Claude SMR: r2 PLAN-READY stands; v3.1 delta implements findings SMR co-signed (verified diff-only change)
 - AGY: adversarial-review-mq9ecagd-zof1oq — PLAN-READY (all r1 findings verified folded; data recomputed clean)
