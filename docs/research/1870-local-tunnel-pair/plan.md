@@ -1,7 +1,35 @@
 # Plan: #1870 — local-tunnel `UpsertLocal` pair dropped at `max_sessions` while shared maps hold both entries
 
-**Revision:** v2
-v2 folds round-1 convergence (Claude SMR PLAN-NEEDS-CHANGES, Codex
+**Revision:** v3
+v3 folds round-2 (Codex PLAN-NEEDS-CHANGES ×2, AGY PLAN-READY ×2 Low, SMR
+PLAN-READY-contingent):
+- **Codex r2-1 (Medium, accepted):** the v2 "self-heals on first traversing
+  packet" claim holds only for the **reverse** half. Inbound tunnel replies
+  are decapped and traverse `resolve_flow_session_decision`
+  (`poll_descriptor/mod.rs:121,257`) and materialize the reverse shared hit;
+  but local-origin packets ride TUN → coordinator → TX (`tunnel.rs:72-101`)
+  and never traverse worker RX resolution, and no RX packet matches the
+  forward key — so the **forward** entry stays absent until a successful
+  re-enqueue after capacity frees (≥1 s/5 s windows). §2.3 reworded
+  accordingly; severity framing unchanged (the forward entry has no RX
+  consumer on the worker, which is also why its absence was never observed).
+- **Codex r2-2 = AGY r2-1 (Low, accepted):** `allow_replace_local=true` also
+  changes **at-cap same-key replacement**: the old capped install refused
+  before reaching `remove_entry` (`session/mod.rs:758` precedes `:775`), so
+  at cap a stale same-key local entry could never be replaced (and a local
+  hit shadows the shared scope, blocking materialization too —
+  `shared_ops.rs:528`); the new path replaces it without growing the table.
+  Pinned by new test 4b (at-cap replace, `len()` stays at cap).
+- **AGY r2 verification adopted:** `should_keep_synced_hit_transient` can
+  NEVER apply to local-tunnel entries — it requires
+  `is_translated_forward_session_key`, and local-tunnel decisions carry
+  `NatDecision::default()` (no rewrites; `tunnel.rs:176`,
+  `promote.rs:32-59`). The §2.3 exception caveat is deleted as impossible
+  for this traffic class. AGY r2 also independently confirmed
+  SyncImport/SharedMaterialize residency equivalence across promotion,
+  demote/refresh, export, GC, and BPF-map deletion (matches SMR r2 C1).
+
+v2 folded round-1 convergence (Claude SMR PLAN-NEEDS-CHANGES, Codex
 PLAN-NEEDS-CHANGES, AGY PLAN-READY-with-findings):
 - **SMR F1 = Codex 1 = AGY 1 (all three independently):** the v1 §2.3 "HA
   bulk-export gap" claim was FALSE — `export_forward_sessions_for_owner_rgs`
@@ -117,17 +145,26 @@ admit the pair while at-cap workers drop it.
 
 ### 2.3 What actually diverges, and for how long (corrected in v2)
 
-- **Worker fast path:** the first packet of the flow that traverses an
-  at-cap worker's session resolution hits the shared scope
-  (`lookup_session_across_scopes`) and — unless
-  `should_keep_synced_hit_transient` applies (`session_glue/mod.rs:932-945`,
-  an HA-arbitration arm that deliberately keeps the hit shared-only) — is
-  installed into the worker table by `materialize_shared_session_hit`
+- **Worker fast path, reverse half:** inbound tunnel replies are decapped
+  and traverse `resolve_flow_session_decision`
+  (`poll_descriptor/mod.rs:121,257`); the first reply at an at-cap worker
+  hits the shared scope (`lookup_session_across_scopes`) and is installed
+  into the worker table by `materialize_shared_session_hit`
   (`session_glue/mod.rs:949` → `:850-876`) via the **uncapped**
-  `upsert_synced_with_origin(…, false)`, origin relabeled `SharedMaterialize`.
-  The divergence window is therefore ~one packet per worker per flow, not
-  unbounded; the cost is one shared-map mutex traversal plus the prewarm
-  failing its purpose.
+  `upsert_synced_with_origin(…, false)`, origin relabeled
+  `SharedMaterialize`. The `should_keep_synced_hit_transient` arm
+  (`session_glue/mod.rs:932-945`) can never block this for local-tunnel
+  entries: it requires `is_translated_forward_session_key`, and local-tunnel
+  decisions carry `NatDecision::default()` — no rewrites (`tunnel.rs:176`,
+  `promote.rs:32-59`; verified AGY r2). So the reverse-half divergence
+  window is ~one reply packet per worker per flow.
+- **Worker fast path, forward half:** local-origin packets ride
+  TUN → coordinator → TX (`tunnel.rs:72-101`) and never traverse worker RX
+  resolution; no RX packet matches the forward key, so the forward entry is
+  NOT reactively materialized — it stays absent until a successful
+  re-enqueue after capacity frees (≥1 s/5 s windows). It also has no RX
+  consumer on the worker, so the absence is functionally inert today; the
+  prewarm simply fails its purpose (Codex r2-1).
 - **HA:** none. Incremental deltas are suppressed for `SyncImport` origin
   (`session/mod.rs:797`), and bulk export skips all peer-synced origins
   permanently (`export_forward_sessions_for_owner_rgs`,
@@ -229,11 +266,14 @@ re-verified by all three round-1 reviewers, no divergence found:
 
 1. The entries are already in the **uncapped** shared maps; worker-table
    refusal does not bound memory, it only creates disagreement.
-2. The reactive materialization of these exact entries is already uncapped
-   (`materialize_shared_session_hit`, §2.3) — at cap the entry lands in the
-   same table either way; Path A only makes it arrive proactively, under the
-   intended origin label (`SyncImport` instead of `SharedMaterialize` — both
-   peer-synced, both delta-suppressed, both excluded from bulk export).
+2. The reactive materialization of the reverse entry is already uncapped
+   (`materialize_shared_session_hit`, §2.3) — at cap the reverse entry lands
+   in the same table either way; Path A makes it arrive proactively, under
+   the intended origin label (`SyncImport` instead of `SharedMaterialize` —
+   residency-equivalent across promotion, demote/refresh, export, GC, and
+   BPF-map deletion; verified independently by SMR r2 and AGY r2). The
+   forward entry has no reactive path (§2.3) but also no RX consumer; Path A
+   simply makes the prewarm do what it was written to do.
 3. The `UpsertSynced` replica fan-out (`replicate_session_upsert`,
    `session_glue/mod.rs:596`) already installs every locally-created session
    into every other worker uncapped (#1861 row I11); local-tunnel pairs are
@@ -304,6 +344,16 @@ with a rigged queue):
    with `SyncImport` origin and `create_drops()` still 0 (pins
    `allow_replace_local=true` = status-quo replace semantics, and guards
    against a future revert to the capped install).
+   4b. `upsert_local_at_cap_replaces_existing_local_entry_without_growth`
+   (Codex r2-2 / AGY r2-1) — table AT cap including a same-key
+   `ForwardFlow`-origin entry; apply `UpsertLocal`; assert the entry is
+   replaced (`SyncImport` origin) and `len()` stays exactly at cap. This is
+   a deliberate at-cap semantic change vs the old capped install, which
+   refused before reaching `remove_entry` (`session/mod.rs:758` precedes
+   `:775`) and so could never replace at cap — leaving a stale local entry
+   that also shadowed the shared scope (`shared_ops.rs:528`), blocking
+   reactive materialization until expiry. The new behavior is strictly
+   better (replacement does not grow the table) and is pinned explicitly.
 5. `upsert_local_entries_stay_out_of_owner_rg_bulk_export` (Codex 3) —
    install the pair via the new arm, run
    `export_forward_sessions_for_owner_rgs` for the owning RG, assert no
