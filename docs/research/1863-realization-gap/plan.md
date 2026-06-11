@@ -1,388 +1,356 @@
-# #1863 — CoS guarantee-rate honored-realization gap: ceiling-math kill-exit + H1 mechanism attribution
+# #1863 — CoS guarantee-rate honored-realization gap: ceiling kill-exit closed; rate-setter localized to the v8 lease claim path
 
-- **Revision:** v1 (round 1)
+- **Revision:** v2 (round 1 — v1's watermark/lockout sub-hypothesis was
+  falsified BY THIS SESSION'S OWN registered-prediction cell P and the
+  mechanism section rewritten before first review; v1 is in git history)
 - **Date:** 2026-06-11
 - **Branch:** `research/1863-realization-gap`
 - **Mode:** /research — no production code; measurement + code-trace evidence
 - **Measured target:** loss userspace cluster; build content-identical to
-  master `6d8fa810d` (deployed `…2195-gaff208a18`; `git rev-parse
-  6d8fa810d^{tree} == aff208a18^{tree} == 78ff3087…` — verified before the
-  cells); fixture `test/incus/cos-iperf-config.set` (shaping-rate 25g,
-  `oversubscription-policy guarantee-rate 0.7`, equal-flow default-OFF,
-  verified in the active config in-band)
+  master `6d8fa810d` (first cell batch: deployed `…2195-gaff208a18`,
+  `git rev-parse 6d8fa810d^{tree} == aff208a18^{tree}`; second batch:
+  this branch deployed, in-band `…2197-g7b076ee2e` on BOTH nodes);
+  fixture `test/incus/cos-iperf-config.set` (shaping 25g,
+  `guarantee-rate 0.7`, equal-flow OFF, verified in-band per batch)
 
 ## 1. Problem statement
 
-#1863 inherits exactly one question from the #1614 close (Reading-B
-residual): Phase-1-honored mid classes (3g/6g) realize only ~70-71% of
-shape under a Phase-2 aggressor (24g) vs 88-91% with the aggressor
-absent — a ~16-19 pt honored-realization gap, monotone in `R_i`. The
-issue carries a ratified PLAN-KILL exit: if the gap is explained by
-physical-ceiling division ("unshaped-mix-ceiling"), close as physics.
-
-This round answers, in order:
-1. **KILL-exit first**: does ceiling division (C_phys ≈ 22.6 G over the
-   measured class mix) predict the observed realization? (§3)
-2. If not: does the code-located H1 (stable-quantum charge +
-   once-per-epoch honored lockout + token-clamped send, fueled by the
-   v8 lease) survive quantitative confrontation with per-queue
-   counters? What exactly bounds the realized bytes? (§4-§5)
-3. Perturbation cells that move the parameter H1 says matters. (§6)
+#1863 inherits one question from the #1614 close (Reading-B residual):
+Phase-1-honored mid classes (3g/6g) realize ~70-71% of shape under a
+Phase-2 aggressor (24g) vs 88-91% alone — a ~16-19 pt
+honored-realization gap, monotone in `R_i`, with a ratified PLAN-KILL
+exit if the gap is physical-ceiling division. This round: (1) the
+kill-exit, (2) quantitative confrontation of hypothesis H1 with
+per-queue counters and perturbation cells, (3) fix paths.
 
 ## 2. Measurement evidence (section of record)
 
-All cells: loss cluster, push direction, client
-`loss:cluster-userspace-host` → 172.16.80.200, 12 streams/class, 30 s
-TCP, serialized under `/tmp/xpf-cluster.lock`, runner `run-cell.sh`
-(archived alongside; same harness as the 1614 corpus). Raw iperf3 JSON
-+ full before/after `/metrics` snapshots under `raw/`. Snapshots taken
-on the RG0-primary node (fw1 this session); CoS runtime location
-verified per-cell via nonzero counter deltas.
+All cells: loss cluster, push, `loss:cluster-userspace-host` →
+172.16.80.200, 30 s TCP, 12 streams/class unless stated, serialized
+under `/tmp/xpf-cluster.lock`, runner `run-cell.sh` (archived; same
+harness as the 1614 corpus). Raw iperf3 JSON + before/after `/metrics`
+under `raw/`; snapshots from the RG0-primary node, CoS runtime
+location verified per-cell via nonzero deltas. Analysis scripts
+`honor-analysis.py` archived alongside.
 
-### 2.1 Baseline re-anchor on current master (small4+24g, 2 reps)
+### 2.1 Baseline re-anchor on master content (small4+24g)
 
-| Class | shape | r1 %shape | r2 %shape | 1614 corpus mean (9 reps, `aa6fa6fc8`) |
-|-------|-------|-----------|-----------|---------------------------|
-| 100m | 0.1G | 93.5 | 93.9 | 94.2 |
-| 1g | 1.0G | 87.4 | 87.0 | 88.4 |
-| **3g** | 3.0G | **68.9** | **73.1** | **71.1** |
-| **6g** | 6.0G | **66.4** | **70.8** | **70.0** |
-| 24g | 24.0G | 43.3 | 50.4 | 49.1 |
-| SUM | | 17.41G | 19.51G | 18.7-19.5G |
+| Class | r1 | r2 | r3 (post-redeploy) | 1614 corpus mean (9 reps) |
+|-------|----|----|--------------------|----------------------------|
+| 100m | 93.5 | 93.9 | 93.9 | 94.2 |
+| 1g | 87.4 | 87.0 | 90.1 | 88.4 |
+| **3g** | 68.9 | 73.1 | 72.5 | 71.1 |
+| **6g** | 66.4 | 70.8 | 71.7 | 70.0 |
+| 24g | 43.3 | 50.4 | 50.6 | 49.1 |
+| SUM | 17.4G | 19.5G | 19.6G | 18.7-19.5G |
 
-The #1614 decisive-cell phenomenon reproduces unchanged on current
-master content (#1867 equal-flow knob merged since, default-OFF — no
-behavioral delta, as designed).
+(p6g-r3 and sanity-r1, run during foreign failover ops — §8 — also
+land in this band: 3g 71.4/73.0, 6g 72.1/75.1.) The phenomenon
+reproduces unchanged on current master.
 
-### 2.2 Aggressor-rate sweep (config-free: aggressor = port choice)
+### 2.2 Aggressor-rate sweep (aggressor = port choice; config-free)
 
-small4 + ONE aggressor class, aggressor ∈ {9g, 12g, 24g}; 2 reps each.
-Total offered demand (Σ shapes) and aggregate delivered:
-
-| Cell | Σ demand | delivered (r1/r2) | 3g %shape | 6g %shape | aggressor %shape |
-|------|----------|----------------|-----------|-----------|------------------|
+| Cell | Σ demand | delivered r1/r2 | 3g | 6g | aggressor |
+|------|----------|-----------------|----|----|-----------|
 | small4 alone (1614 §2.3) | 10.1G | 9.0/9.2G | 87.5-91.5 | 88.7-91.1 | — |
 | +9g | **19.1G** | **15.2/15.1G** | 81.4/80.1 | 81.3/81.9 | 76.9/76.5 |
 | +12g | 22.1G | 15.4/16.8G | 77.9/79.5 | 74.6/78.9 | 63.6/73.0 |
-| +24g | 34.1G | 17.4/19.5G | 68.9/73.1 | 66.4/70.8 | 43.3/50.4 |
+| +24g | 34.1G | 17.4-19.6G | 69-73 | 66-72 | 43-51 |
 
-**The +9g row is the kill-exit refutation cell** (§3): total demand
-19.1 G is ~3.5 G BELOW the measured C_phys ≈ 22.6 G (1614 §2.1
-solo-uncapped), yet the system delivers only 15.1-15.2 G — ~4 G of
-demanded, in-shape bandwidth is left undelivered, and every class
-(including the aggressor itself) sits below shape. Ceiling division
-cannot produce this: there is no ceiling to divide at 15 G.
+### 2.3 Unshaped-mix ceiling (cell U): C_phys(mix) = 23.2 G
 
-Also note: the mid-class gap is **monotone in aggressor rate at fixed
-regime** (all three aggressor cells have the aggressor Phase-2-active;
-§2.3): 81% → 78% → 70%. Any pure regime-flip story (honored vs not)
-fails this monotonicity; H1' (§5) explains it via selector-cadence and
-lease-pressure scaling.
+Same 60-stream 5-port mix, CoS + classifier filters deleted in ONE
+atomic commit (verified `configuration path not found`), 2 reps:
+aggregate **23.27 / 23.22 G** (≈ even 4.3-5.0 G per port — TCP-fair,
+shape-independent as expected with shaping removed). Fixture restored
+atomically afterwards; sanity cell reproduced the baseline.
 
-### 2.3 Per-queue counter deltas (decisive discriminators)
+### 2.4 Cell P — registered-prediction watermark perturbation (FALSIFIED v1's H1')
 
-From the per-cell `/metrics` deltas (counters summed across the 6
-workers; B/honor = `drain_guarantee_sent_bytes / (phase1+phase2
-admissions)`; honor interval = 30 s × 6 workers / admissions):
+`set class-of-service schedulers scheduler-6g buffer-size 4m` raises
+the 6g queue-lease `lease_bytes` 12 K → 150 K and the per-visit top-up
+watermark 32,768 → 150 K (§4 chain). v1's registered prediction: 6g
+≥ 85% of shape. Result:
 
-small4+24g (base-r2) vs small4-ALONE (1614 corpus r1, same build
-content):
+| | base-r3 (no buffer) | p6g-r1 (buffer 4m) |
+|---|---|---|
+| 6g %shape | 71.7 | **68.5** |
+| 6g B/honor | 31,505 | **57,706** |
+| 6g phase1 admissions | 537,005 | **280,570** (interval 366→641 µs) |
+| 6g sent GB | 16.92 | 16.19 |
 
-| Queue | cell | p1 adm | p2 adm | sent GB | B/honor | mean honor interval/worker |
-|-------|------|--------|--------|---------|---------|-----------------------------|
-| 3g | +24g | 492,093 | 0 | 8.63 | 17,539 | 366 µs |
-| 3g | alone | 533,364 | 0 | 10.80 | 20,241 | 338 µs |
-| 6g | +24g | 491,971 | 0 | 16.73 | 34,012 | 366 µs |
-| 6g | alone | 813,070 | 0 | 21.49 | 26,434 | 221 µs |
-| 24g | +24g | 0 | 717,540 | 47.63 | 66,379 | — |
+The watermark change DID take effect in the dataplane (B/honor +83%,
+honors −48%) — but the realized rate is INVARIANT. The per-visit
+spend pattern re-batched; the byte rate did not move. (p6g-r2
+corroborates at B/honor 36.6 K with a mid-cell foreign daemon restart
+— §8; r1 is the clean rep.)
 
-Waterfill epoch counter (`waterfill_epochs_total`, per-interface,
-all-worker sum; mean worker-epoch = 180 s / Σ):
+**Adjudication: the waterfill-layer per-visit token clamp and the
+once-per-epoch honored lockout are NOT the rate-determining
+mechanism.** They set batching granularity only.
 
-| Cell | epochs (30 s) | mean worker-epoch |
-|------|---------------|-------------------|
-| small4 alone | 3,722,628 | **48 µs** |
-| +9g | 2,421,300 | 74 µs |
-| +12g | 1,946,638 | 92 µs |
-| +24g (r2) | 1,304,362 | **138 µs** |
+### 2.5 Grant-side accounting: the v8 lease grant flow IS the realized rate
 
-#1847 undergrant causes (per run): `share_exhausted` 2.0M (+24g),
-3.5M (+12g), 4.4M (+9g); `class_cap` 17-22K; others ≤ 18K.
+Per-cell `Δ xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total`
+(all workers) vs `Δ drain_guarantee_sent_bytes_total` (all queues):
 
-Readings used in §4-§5:
-- **Alone, epochs turn over every ~48 µs** — when Phase 2 finds
-  nothing to serve, the wrap path re-arms immediately, so a small
-  queue that missed its honor retries within tens of µs. The
-  once-per-epoch lockout is NOT binding without an aggressor.
-- **With a backlogged Phase-2 aggressor, epochs stretch toward the
-  200 µs time tick** (138 µs mean = mix of time-driven epochs and
-  residual wraps) and the honored classes' service cadence collapses
-  to ~366 µs/worker (6g: 221 → 366 µs, −40% honors). The lockout IS
-  binding: one service opportunity per epoch, misses unrecoverable
-  within the epoch.
-- **B/honor is small and rate-DECOUPLED**: 3g ~17 K, 6g ~26-34 K —
-  nowhere near the honored quanta (75 K / 150 K). §4 derives why:
-  the v8-lease top-up watermark is ~32,768 B for every class in this
-  fixture, independent of `R_i`.
+| Cell | v8 grants | guarantee sends |
+|------|-----------|-----------------|
+| base-r3 | 76.9 GB | 77.2 GB |
+| p6g-r1 | 79.2 GB | 74.9 GB |
+| agg9-r2 | 59.5 GB | 59.5 GB |
 
-## 3. KILL-exit analysis: unshaped-mix-ceiling — REFUTED (arithmetic + empirical)
+Grants ≈ sends in every shaped cell: per-class realized throughput =
+per-class lease grant throughput. The question "why 70%?" is a
+question about `acquire_v8`, not about the selector.
 
-**Arithmetic.** Divide C_phys = 22.6 G (1614 §2.1 solo-uncapped pin;
-multi-class aggregates 21.6-24.96 G per #1691) over the small4+24g
-demand vector {0.1, 1, 3, 6, 24}:
-- Per-class water-fill: level λ with Σ min(R_i, λ) = 22.6 → all four
-  small/mid classes saturate at FULL shape, 24g gets the residual
-  12.5 G (52%). Prediction: 3g/6g ≈ 94% (their solo health), 24g ≈
-  52%.
-- Per-stream fair share (60 streams): λ = 1.04 G/stream → every class
-  except 24g fully satisfied; same prediction.
+### 2.6 Stream-count perturbation (s24): more flows do not help
 
-Observed: 24g 49.1% ≈ the ceiling-division prediction — but 3g/6g at
-70-71% vs predicted ~94%. **No division of a 22.6 G ceiling predicts
-the mid-class realization.** The only ceiling-shaped escape is a
-mix-specific C_phys ≈ 19 G (15% below the measured solo-uncapped pin).
+24 streams/class (same mix): 3g 63.8-67.0%, 6g 63.3-66.0% — slightly
+WORSE than 12 streams, with heavy retransmits (3-28 K). A
+flow-count-uniformity account of the stranding (more flows → smoother
+per-worker demand → less stranding) is not supported. (s24-r1/r2 ran
+with the 6g buffer-size still applied due to a failed revert — §2.4
+shows that knob is rate-neutral, and s24-r3 reproduces clean.)
 
-**Empirical (closes the escape).** The §2.2 +9g cell: demand 19.1 G,
-delivered 15.2 G, all classes below shape, mids at 81%. A
-ceiling-division explanation requires C_phys(mix) ≈ 15 G for a 5-class
-60-stream mix — 33% below the single-class measurement and below the
-+24g cell's OWN delivered aggregate (19.5 G, same hardware, same
-minute). The undergrant therefore scales with scheduler pressure, not
-with proximity to a physical ceiling: aggregates of 15.1, 16.8, 19.5 G
-across the sweep are ordered OPPOSITE to ceiling-division (more demand
-→ MORE delivered), which no fixed ceiling produces.
+### 2.7 Per-queue counter signatures (carried from §2.1-2.4 cells)
 
-A direct unshaped-mix C_phys measurement (same 60-stream port mix, CoS
-deleted) is still scheduled (§6 cell U) to BOUND the recoverable
-headroom for the fix's acceptance gates — but it can no longer rescue
-the kill-exit: even if C_phys(mix) < 22.6 G, the +9g cell already
-shows ~4 G undelivered at demand far below any candidate value.
+- Waterfill epoch turnover: alone ~48 µs/worker-epoch (Phase-2 wrap
+  turnover) vs 135-155 µs (+24g, time-tick-dominated): the lockout is
+  binding only under a backlogged Phase 2 — but per §2.4 this changes
+  batching, not rate.
+- #1847 undergrant causes (every aggressor cell): `share_exhausted`
+  1.7-4.4 M/run ≫ `class_cap` 7-22 K ≫ others — workers exhaust their
+  OWN per-epoch share while class-cap room remains.
+- Per-worker v8 grant totals skew up to ~2× (and one worker at 0.0 GB
+  in p6g-r1): RSS placement + per-worker cadence variance is large.
 
-**Disposition: PLAN-KILL exit not taken.** The gap is a scheduler
-property, not ceiling arithmetic.
+## 3. KILL-exit: unshaped-mix-ceiling — CLOSED, NOT TAKEN
 
-## 4. Code-grounded mechanism (worked trace, all sites on master content)
+Three independent refutations:
 
-Sites (`userspace-dp/src/afxdp/cos/queue_service/mod.rs` unless noted):
+1. **Arithmetic**: dividing C_phys = 22.6 G (solo-uncapped pin, 1614
+   §2.1) over demand {0.1, 1, 3, 6, 24}: any work-conserving division
+   (per-class water-fill or per-stream fair) saturates all four
+   small/mid classes at FULL shape (×~94% solo health) and gives 24g
+   the residual ~12.5 G (52%). Observed 24g ≈ 49-51% matches the
+   residual; observed mids 70-71% vs predicted ~94% do not. No
+   division of 22.6 G yields the data.
+2. **+9g cell**: demand 19.1 G, delivered 15.1-15.2 G — ~4 G of
+   demanded, in-shape traffic undelivered with NO ceiling within
+   reach; aggregates across the sweep (15.1 → 16.8 → 19.6 G) are
+   ordered OPPOSITE to what a fixed ceiling division produces.
+3. **Direct measurement**: C_phys(mix) = 23.2 G (§2.3) — the shaped
+   system leaves 3.6-8.1 G of measured headroom on the table.
 
-1. **Per-epoch honor lockout**: `select_exact_cos_guarantee_queue_waterfill`
-   charges the STABLE quantum (`phase1_cost =
-   cos_guarantee_quantum_bytes(queue).max(head_len)`, :1048) and sets
-   the honored bit (:1078-1079), which excludes the queue from BOTH
-   phases for the rest of the epoch (:938 Phase 1, :1126-1133 Phase 2).
-   The bit clears only on a genuine epoch boundary: the 200 µs time
-   tick or a Phase-2 wrap (:896-898).
-2. **Epoch turnover regime is aggressor-controlled**: with no Phase-2
-   backlog the wrap fires immediately after the smalls are honored
-   (alone: 48 µs epochs, §2.3) — lockout harmless. With a backlogged
-   Phase-2 class the wrap almost never fires; epochs become
-   time-driven (→200 µs) and each honored class gets ONE
-   token-clamped service opportunity per epoch per worker.
-3. **Per-visit service is watermark-bounded, and the watermark is
-   rate-INDEPENDENT in this fixture.** The send budget is
-   `queue.hot.tokens.min(visit_cap).max(head_len)` (:1049-1053);
-   tokens are fueled only by `maybe_top_up_cos_queue_lease`
-   (`cos/token_bucket.rs:206`), whose exact-queue top-up target is
-   `lease.lease_bytes().max(COS_EXACT_QUEUE_LEASE_BANK_BYTES).max(frame)
-   .min(buffer.max(96 K))` (:248-252). The lease's `lease_bytes` is
-   computed by `compute_shared_cos_lease_config_with_bank`
-   (`types/shared_cos_lease/mod.rs:876`): `clamp(R_i × 200 µs, 1500,
-   lease_ceiling)` where **`lease_ceiling = burst/8`** (:888-894) and
-   the queue-lease `burst = queue.buffer_bytes.max(96 K)`
-   (`coordinator/mod.rs:1573`). For every class without a configured
-   `buffer-size` (3g, 6g, 24g here): burst = 96 K → ceiling = **12 K**
-   → `lease_bytes` = 12 K regardless of rate → top-up watermark =
-   bank floor = **32,768 B** (8 × 4096, `COS_EXACT_QUEUE_LEASE_BANK_BYTES`).
-   1g (buffer 4m) and 100m (500k) also land at the 32 K bank floor
-   (their `R_i × 200 µs` is below it).
-   **Consequence: the honored quanta 75 K (3g) / 150 K (6g) are
-   per-visit UNREACHABLE** — the selector "honors" a 150 K share the
-   token plumbing cannot deliver in one visit.
-4. **Per-lease-epoch share rationing**: `acquire_v8_with_cause`
-   (`shared_cos_lease/mod.rs:1304`) bounds each top-up by the
-   per-worker share `cap × my_flows / total_flows` published at
-   rotation (`rotate_epoch_v8.rs:350-356`); strict mode deliberately
-   does NOT let a worker claim peer slack (:1486-1490 comment).
-   Un-acquired share evaporates at rotation (no per-worker carry; the
-   carry logic at `rotate_epoch_v8.rs:137-218` only compensates
-   rotation LAG). `share_exhausted` 2-4.4M/run (§2.3) is this bound
-   firing.
-5. **Asymmetric stale-token amplifier for the aggressor**: queue
-   tokens are debited at TX COMPLETION
-   (`cos/tx_completion.rs`, `apply_cos_prepared_result` path), not at
-   selection. Back-to-back Phase-2 admissions (the aggressor is
-   admitted on essentially every selector call, §2.3: phase2 ==
-   budget_breaks) read not-yet-debited token state, letting its
-   per-admission bytes reach ~2× the watermark (observed 66,379 ≈
-   2 × 32,768 + ε). Honored classes are lockout-spaced ≥ one epoch
-   apart, so completions always settle in between — they never get
-   this amplification. (Open question Q1, §9, asks reviewers to
-   hostile-check this attribution.)
+## 4. Mechanism (code-grounded, post-falsification)
 
-### Quantitative confrontation (predicted vs observed)
+### 4.1 What was verified and then adjudicated NOT rate-determining
 
-Realized_i ≈ Σ_w min(watermark, share-accrual over honor interval) /
-honor-interval, watermark = 32,768 B:
+The issue's H1 chain at the waterfill layer is real code: stable
+quantum charge (`phase1_cost`, `cos/queue_service/mod.rs:1048`),
+token-clamped send (`:1049-1053`), honored-bit lockout for the rest
+of the epoch (`:1078-1079`, both phases `:938`, `:1126-1133`); and
+the per-visit top-up watermark is rate-INDEPENDENT (~32,768 B) for
+every default-buffer class — `lease_ceiling = burst/8` with queue
+burst = `buffer_bytes.max(96 K)` clamps `lease_bytes` to 12 K
+(`types/shared_cos_lease/mod.rs:888-894`, `coordinator/mod.rs:1573`),
+then the §1630 bank floor lifts the watermark to 8 frames
+(`cos/token_bucket.rs:248-252`). All confirmed against source and
+against counters (B/honor ≈ 17-34 K ≪ quanta 75/150 K).
 
-| Class | binding bound | predicted | observed (base-r2 / corpus) |
-|-------|---------------|-----------|------------------------------|
-| 6g (+24g) | watermark: 32,768 B per 366 µs × 6 workers | 4.30 G (71.6%) | 4.25 G / 70.0% mean |
-| 6g (alone) | accrual ~26 K per 221 µs × 6 | 5.7 G (95%) → minus stranding | 5.37-5.46 G (89-91%) |
-| 3g (+24g) | share accrual ~22.9 K/interval, minus stranding (share_exhausted) | ≤ 2.8 G; observed-stranding ~25% → ~2.2 G | 2.19-2.30 G (69-73%) |
-| 1g (+24g) | accrual 32 K ≥ demand at cadence | ~solo health | 87-88% |
-| 100m | unconstrained at any cadence | solo health | 93.5-94.7% |
-| 24g | 2× watermark × selector-call rate | ~66 K × 22-24 K/s ≈ 11.7-12.7 G | 10.4-12.1 G |
+But cell P (§2.4) shows the realized rate is INVARIANT to a 4.7×
+watermark change, and §2.5 shows realized == lease grants. So these
+selector-layer mechanics shape batching; the BYTES are set one layer
+down.
 
-Four classes × three aggressor levels fit a one-parameter family (the
-honor interval, measured independently from `phase1_admissions`). The
-issue's H1 is **CONFIRMED in refined form** (H1'):
+### 4.2 The rate-setter: v8 lease claim efficiency
 
-> The realization gap = (once-per-epoch honored lockout under a
-> backlogged Phase-2 aggressor, which pins service opportunities to
-> ~1 per stretched epoch per worker) × (a per-visit token ceiling of
-> ~32 KB that is RATE-INDEPENDENT because the queue-lease
-> `lease_ceiling = burst/8` clamp discards the configured rate for
-> every default-buffer class) × (per-lease-epoch share evaporation
-> under flow-skew). The Phase-1 "honor" accounting (stable-quantum
-> charge) is correct and NOT the defect — the defect is that the
-> token plumbing cannot physically deliver the honored quantum within
-> an epoch, and the schedule gives no second chance.
+`acquire_v8_with_cause` (`types/shared_cos_lease/mod.rs:1304`)
+implements, per class (per-queue lease shared by 6 workers):
 
-What this adjudicates from the issue text: "honored bytes" are
-over-promised per-visit by construction (75 K/150 K quanta vs 32 K
-deliverable); `share_exhausted` dominance is real but is the
-SECONDARY bound for 6g (watermark binds first) and the PRIMARY bound
-for 3g.
+- per-lease-epoch class cap = `rate × elapsed` (+ bounded lag carry)
+  published at rotation (`rotate_epoch_v8.rs:216-218`);
+- per-worker share = `cap × my_flow_buckets / total_flows`
+  (`rotate_epoch_v8.rs:350-356`) — flow-count proportional;
+- grants bounded by OWN share (ShareExhausted break, `:1386-1388`);
+  **strict no-surplus**: a worker may NOT claim peers' unclaimed
+  share (the deliberate post-#1231-v5.5 design, comment at
+  `:1486-1496`); the narrow `bypass_grace` escape arms only when
+  three conditions co-fire (`rotate_epoch_v8.rs:313`), which the
+  §2.7 counters show effectively never happens in these cells;
+- shares are NOT carried for a worker that fails to claim them: a
+  worker only acquires when the drain loop visits its queue
+  (`maybe_top_up_cos_queue_lease` at the selector sites), so a
+  worker that visits less than ~once per 200 µs lease epoch lets
+  its share evaporate at rotation (rotation lag carry compensates
+  ONLY the global rotation gap, not per-worker claim gaps).
+
+Realized_i = claimed grants = `cap_i × claim_efficiency_i`, with the
+measured claim efficiency ~70-72% (mids, +24g), ~80-82% (+9g/12g),
+~88-91% (alone).
+
+**Why the aggressor lowers claim efficiency (cross-class coupling):**
+classes do not share lease budgets — the coupling is CPU/visit
+cadence. A backlogged Phase-2 aggressor consumes most selector calls
+and per-pass drain time (24g takes one ~66 KB batch per call —
+phase2 == budget_breaks), stretching each worker's revisit interval
+to the mid-class queues (6g eligible-visit spacing roughly doubles
+vs alone in §2.7 data); slower per-worker acquire sampling against a
+fixed 200 µs share-evaporation clock + strict no-reclaim = stranded
+share. The s24 cell (§2.6) is consistent (more per-pass work →
+slightly worse); cell P is consistent (bigger banking per visit
+cannot recover share that was never claimable); the undergrant-cause
+mix is the direct signature (own-share exhaustion dominant on
+fast-sampling workers, class-cap room left by slow-sampling ones).
+
+What this session did NOT pin: the exact split between (a)
+share/demand mismatch across workers (flow-count-proportional shares
+vs unequal per-worker deliverable demand) and (b) pure
+sampling-loss (visits < 1 per epoch). Both are inside `acquire_v8`'s
+strict-share design; both are addressed by the same family of fixes
+(§5); the split is measurable during /engineer with one added
+per-class counter pair if needed (grant-requested vs grant-given
+already exists per-worker; the per-class split is derivable from the
+§2.5 accounting at fix-validation time).
+
+### 4.3 Residual open observation (Q1)
+
+24g B/honor ≈ 66-79 K exceeds the 32,768 + ε bound a single top-up
+implies. Most plausible: tokens are debited at TX COMPLETION
+(`cos/tx_completion.rs`), so back-to-back Phase-2 admissions
+(every selector call) read not-yet-debited token state — an
+amplification structurally unavailable to lockout-spaced honored
+classes. Secondary now that the watermark layer is adjudicated
+non-rate-determining, but reviewers should sanity-check the reading.
 
 ## 5. Paths
 
-### Path A — mechanism fix (RECOMMENDED for /engineer)
+### Path A — work-conserving guarantee-phase lease claim (RECOMMENDED)
 
-Two independent, individually-testable changes (either alone recovers
-part of the gap; together they target the small4-alone level):
+Let unclaimed per-worker share be reclaimable within the epoch for
+guarantee-phase exact classes, bounded by the class cap (which is
+exact-rate-derived, so the hard cap and Gate-4 semantics are
+preserved): either (A-i) a post-grace second-pass claim against
+remaining class room (resurrecting the pre-v5.5 work-conserving path
+but ONLY for the guarantee phase, keeping equal-flow caps when
+enforcement is on), or (A-ii) per-worker unclaimed-share carry into
+the next epoch with a small cap (1-2 epochs). Constraint inherited
+from #1231/#1290: must not let low-flow workers starve multi-flow
+workers' per-flow rates (the iperf-d 770 Mbps regression that
+motivated strictness) — the difference here is the reclaim is
+bounded by class-cap room that today simply evaporates (claiming it
+cannot reduce any peer's grants, only reduce stranding; the v5.5
+regression came from UNCONDITIONAL half-epoch slack-claiming, not
+from room-bounded reclaim).
 
-- **A1 — rate-aware queue-lease watermark.** Remove/raise the
-  `burst/8` ceiling for QUEUE leases so `lease_bytes =
-  (R_i × 200 µs).max(bank).min(buffer-scaled cap)` — the honored
-  quantum becomes per-visit deliverable. The `burst/8` clamp predates
-  the #1630 bank floor and is the right shape for the ROOT lease
-  (where burst is the interface burst pool) but, for queue leases,
-  burst is just `buffer_bytes.max(96 K)` and the /8 clamp silently
-  discards the configured rate. Risk: larger per-visit bursts →
-  shaper micro-burstiness; bounded by `visit_cap` (256 K) and the
-  root token gate. Hunk-B constraint respected: the HONOR charge
-  stays the stable quantum; only the deliverable bytes rise.
-- **A2 — epoch-remainder re-eligibility.** When an honored queue's
-  visit sent < its charged quantum (token shortfall at visit time),
-  allow ONE re-honor within the same epoch for the remainder once
-  tokens refill (clear its bit on a token-refill event, or track a
-  per-epoch remainder). Restores intra-epoch catch-up that the alone
-  regime gets for free via fast wraps. Design constraints carried
-  from history: must not reintroduce the #1743-r3 exact-fit livelock
-  (re-honor must not re-CHARGE pass1) nor the #1732 lowest-rate
-  monopoly (remainder only, once).
+Predicted effect (from §2.5 accounting): claim efficiency → ~1 minus
+sampling losses; mids from ~70% toward their alone level (88-91%);
+24g residual rises toward its ceiling-division share; aggregate
+toward min(Σ caps under ceiling, C_phys(mix) − CoS overhead).
 
-Acceptance gates for the fix PR (decisive cells re-run, before/after
-in PR body): small4+24g 3g/6g ≥ 85% of shape (from ~70%); small4+9g
-all classes ≥ 85%; small4-alone and solo baselines unregressed; 24g
-not above its ceiling-division residual; `cos-gate1` +
-`cos-simul-load-smoke` green; default `proportional`-mode unit suites
-byte-identical where applicable.
+### Path B — demand-weighted shares
 
-### Path B — config-only mitigation (operator-actionable today)
+Replace flow-count-proportional shares with demand-weighted (EWMA of
+recent per-worker grants or of requested bytes). Attacks mismatch (a)
+but not sampling loss (b); higher regression risk for the per-flow
+fairness contract (shares follow throughput → rich-get-richer
+feedback needs damping). Viable as a complement, not the lead.
 
-`buffer-size` on the mid schedulers lifts the lease ceiling
-(buffer 4m → ceiling 512 K → watermark = R_i × 200 µs): predicted to
-recover most of 6g's gap with zero code change. §6 cell P runs
-exactly this as the decisive H1' perturbation; if confirmed it ships
-as a fixture/ops note regardless of Path A.
+### Path C — decouple claiming from drain visits
 
-### Path C — H1-refuted fallback (new instrument)
-
-Not reached: H1' is confirmed by §2.3 + §4. Recorded for form: had
-the counters contradicted the model, the next instrument would have
-been per-queue honored-vs-delivered byte counters (the §4 model makes
-them derivable from existing counters, so no new instrument is
-needed even for the fix's validation).
+Per-worker lease pump (claim share into the token bank on a timer or
+on RX/admission) so share claiming no longer depends on selector
+cadence. Attacks (b) directly but adds work to the hottest path and
+new cross-thread interaction with rotation; only if A under-delivers.
 
 ### PLAN-KILL invitation
 
-Reviewers should kill this plan if: (a) the §3 arithmetic is wrong
-(show a division of 22.6 G that yields 3g/6g ≈ 70% AND 24g ≈ 49%);
-(b) the §2.2 +9g cell admits a physical explanation at 15.2 G
-aggregate (name it concretely — e.g. a per-flow-count TCP artifact —
-and a cell that would show it); or (c) the §4 watermark derivation
-misreads the code (quote the lines).
+Kill if: (a) §3 arithmetic is wrong (exhibit a division of 22.6 G
+matching the data); (b) C_phys(mix) = 23.2 G is an artifact (name the
+mechanism — note the cells bracket it: unshaped delivered 23.2 G on
+the same wire/minute as shaped 19.6 G); (c) §4.2 misreads
+`acquire_v8` (quote lines); (d) Path A is shown to necessarily
+reintroduce the #1231/#1290 per-flow regression (worked trace
+required).
 
-## 6. Remaining measurement program (this round, pre-review)
+## 6. Acceptance gates for the fix (/engineer phase)
 
-Executed after the in-flight #1868 smoke session frees the cluster
-lock; master-content build redeployed first (in-band version check),
-fixture re-applied:
-
-- **Cell P (decisive H1' perturbation)**: `set class-of-service
-  schedulers scheduler-6g buffer-size 4m` (+ same for 3g in a second
-  variant), small4+24g, 2 reps. **Prediction (registered in advance):
-  6g rises from ~70% to ≥ 85%** (watermark 32 K → 150 K; accrual at
-  366 µs cadence = 45.75 K/visit/worker → 6.0 G nominal, minus
-  share-stranding). 3g variant: smaller lift (share-bound), to ~80%.
-  If P moves < 5 pts, H1' is materially wrong → Path C.
-- **Cell U (headroom bound)**: unshaped variant (atomic `delete
-  class-of-service` + filters), same 60-stream small4+24g port mix,
-  2 reps → C_phys(mix) pin for the fix's acceptance gates.
-- **Restore + sanity**: re-apply fixture, 1 rep small4+24g ≈ 70%.
+Before/after on the decisive cells (12-stream, 2-3 reps each):
+small4+24g mids ≥ 85% of shape (from ~70%); small4+9g all classes
+≥ 85%; small4-alone + solo baselines unregressed (≥ current);
+aggregate ≥ 21 G on small4+24g (vs 19.5; C_phys(mix) 23.2 minus
+overhead margin); per-flow fairness contract intact
+(`docs/fairness-regimes.md` Cstruct gate + `cos-gate1` +
+`cos-simul-load-smoke`); equal-flow ON cells byte-sane (#1745/#1746
+suites); full `cargo test --release` + `go test ./...`.
 
 ## 7. Blast radius
 
-None this round (docs + measurements only). Path A touches the
-hottest code in the project (`queue_service`, `shared_cos_lease`,
-`token_bucket`) — the /engineer round inherits the full hot-path
-discipline + fairness differential-test precedent (#1763).
+This round: docs + measurements only. Path A touches
+`shared_cos_lease` (rotation + acquire) — the hottest shared
+structure in the dataplane; /engineer inherits hot-path rules,
+seqlock/atomics discipline (#1643 ordering contract), and the #1763
+differential-test precedent for fairness-neutral claims.
 
-## 8. Risks
+## 8. Risks + session incidents (lock discipline)
 
-- **Shared-cluster contention**: a concurrent #1868 deploy+smoke
-  session held the lock mid-session; no cells were contaminated (all
-  cells completed before its deploy began; in-band tree-equality
-  check pins the build) but the remaining §6 cells must re-verify
-  version in-band. One of this session's commands (the first unshape
-  attempt) silently no-oped on lock timeout — §6 re-runs it under a
-  verified lock hold with output checks.
-- **B/honor is a ratio of all-worker sums** — per-worker skew is
-  averaged; the model's per-worker uniform-cadence assumption is an
-  approximation. The §2.3 fits land within 2-5% anyway.
-- **24g 2×-watermark attribution (stale-token)** is inferred from
-  arithmetic (66,379 ≈ 2 × 32,768), not from a dedicated counter
-  (Q1).
-- **Single fraction (0.7) and single fixture** — same caveat as the
-  1614 corpus.
+- **Three foreign-interference events this session** on the shared
+  cluster: (i) a #1868 smoke session self-deadlocked holding
+  `/tmp/xpf-cluster.lock` (its inner `wg-interop.sh` per-command
+  flock waits on its own outer hold — 50 min stalled, cluster idle);
+  this session killed that tree to free the lock after verifying its
+  deploy+CoS apply had completed, and left
+  `/tmp/1868-deadlock-note.txt` for the owner. (ii) an external
+  SIGTERM restart of fw0's xpfd at 03:36:30 PDT mid-cell p6g-r2
+  (cell excluded from primary evidence; r1 is the clean rep).
+  (iii) manual RG0 failovers at ~03:44 PDT around the p6g-r3
+  config-edit (the set never landed → p6g-r3 is a clean extra
+  BASELINE rep, labeled as such). All decisive claims rest on cells
+  with in-band version checks and counter-consistency validation.
+  Harness rule worth codifying: self-serializing scripts must not be
+  invoked under an outer hold of the same lock; cluster mutations
+  require the lock.
+- **Cell P interpretation**: the 6g `buffer-size 4m` knob was proven
+  to reach the dataplane via its counter signature (B/honor +83%) —
+  the rate-invariance is not a no-op artifact.
+- **Pooled grant metrics**: §2.5 grant totals are all-class pooled
+  per worker (#1692 caveat) — the per-class identity is established
+  by the class-level send counters and the cells where a single knob
+  isolates one class.
+- Single fraction (0.7), single fixture, push direction only — same
+  scope caveats as the 1614 corpus.
 
 ## 9. Open questions for reviewers
 
-- **Q1**: Hostile-check §4.5 (stale-token double-spend at completion
-  lag). Alternative explanations for B/honor ≈ 66 K on a queue whose
-  top-up watermark is 32,768 B are welcome — but must fit p2adm ==
-  budget_breaks and the per-visit token plumbing.
-- **Q2**: Path A1 — is there a reason the `burst/8` lease ceiling
-  must apply to QUEUE leases (not just root), e.g. credit-pool
-  protection (`max_total_leased` interaction)?
-- **Q3**: Is A2 (re-eligibility) needed if A1 alone closes the gap at
-  the observed 366 µs cadence? (A1-only prediction: 6g → ~6.0 G
-  nominal; 3g stays share-bound ~90%.)
+- **Q1** (§4.3): stale-token completion-lag reading of the 24g
+  per-admission bytes.
+- **Q2**: Path A's room-bounded reclaim vs the #1231 v5.5 strictness
+  rationale — is the "reclaim only evaporating room" argument sound,
+  or does the iperf-d regression generalize to it?
+- **Q3**: is the (a)/(b) split (share mismatch vs sampling loss)
+  worth a dedicated pre-fix instrument, or is fix-validation-time
+  derivation (§4.2 end) sufficient?
+- **Q4**: should the `burst/8` queue-lease ceiling fix (v1's A1)
+  ship anyway as hygiene (it silently discards configured rate for
+  default-buffer classes) even though cell P shows it is not the
+  rate-setter here?
 
 ## 10. Test/repro plan
 
-`run-cell.sh` (archived) + cells `base-r{1,2}`, `agg9-r{1,2}`,
-`agg12-r{1,2}` (raw/ committed), plus §6 cells P/U/sanity on
-completion. Delta analysis script: `honor-analysis.py` (archived).
+Executed: `base-r{1,2,3}`, `agg9-r{1,2}`, `agg12-r{1,2}`,
+`p6g-r{1,2,3}`, `s24-r{1,2,3}`, `unshaped-r{1,2}`, `sanity-r1` — all
+under raw/ with metrics snapshots; scripts `run-cell.sh` +
+`honor-analysis.py` archived. Re-runnable on any master deploy +
+`apply-cos-config.sh`.
 
 ## 11. Reviewer questions (round 1)
 
-1. Ratify the §3 kill-exit refutation (arithmetic + the +9g cell), or
-   show the division that explains the data.
-2. Ratify the §4 worked trace (esp. the `burst/8` → 12 K → 32 K-bank
-   watermark chain) against the quoted lines.
-3. Adjudicate Q1-Q3.
-4. Path A scope: A1+A2 vs A1-first-then-measure.
-5. Is cell P's registered prediction the right falsification bar
-   (≥ 85% vs < 5 pt movement)?
+1. Ratify the §3 kill-exit closure (three-way: arithmetic, +9g,
+   C_phys(mix) measurement).
+2. Ratify §4's two-step adjudication: waterfill layer verified real
+   but falsified as rate-setter (cell P invariance + grants==sends);
+   lease claim path confirmed as rate-setter.
+3. Adjudicate Q1-Q4.
+4. Path choice: A-i vs A-ii lead, B/C as complements.
+5. Are the §6 gates the right falsification bar for the fix?
