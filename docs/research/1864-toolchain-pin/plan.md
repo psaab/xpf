@@ -1,8 +1,8 @@
 # #1864 — `make generate` produces a verifier-killing userspace-xdp shim: pin the BPF toolchain + add load guards
 
-Revision: r1 (2026-06-11)
+Revision: r2 (2026-06-11) — folds in AGY r1 findings 2-5, Claude SMR F1/F2
 Branch: `research/1864-toolchain-pin`
-Status: DRAFT — awaiting 3-way hostile plan review (Codex + AGY + Claude SMR)
+Status: round 2 — awaiting 3-way convergence (Codex + AGY + Claude SMR)
 
 ## 1. Problem
 
@@ -93,20 +93,41 @@ Any guard must load through cilium/ebpf, exactly like production.
 
 ### Path A — pin the toolchain, fail loudly on mismatch
 
-`build-userspace-xdp.sh`:
+Single source of truth: a new `userspace-xdp/rust-toolchain.toml`
+pinning `channel = "nightly-2026-05-23"` (latest dated nightly
+verified to PASS with **both** the current source and the
+Path-B-patched source — maximal safety margin; bump deliberately,
+never implicitly) with `components = ["rust-src"]`. This also fixes
+rust-analyzer/IDE and ad-hoc `cargo` invocations in the crate dir
+(AGY r1 F4a). `build-userspace-xdp.sh`:
 
-- `TOOLCHAIN="${RUST_BPF_TOOLCHAIN:-${PINNED}}"` where
-  `PINNED=nightly-2026-05-23` (latest dated nightly verified to PASS
-  with **both** the current source and the Path-B-patched source —
-  maximal safety margin; bump deliberately, never implicitly).
-- Refuse to build if `cargo +${TOOLCHAIN}` is unavailable, printing the
-  exact `rustup toolchain install ${PINNED} --component rust-src` line.
-- Record/check `bpf-linker --version` against a pinned expectation
-  (`0.10.2`); mismatch ⇒ hard fail with install instructions
-  (`cargo install bpf-linker --version 0.10.2 --locked`). bpf-linker
-  embeds its own LLVM; it is as much a codegen input as rustc.
-- Explicit `RUST_BPF_TOOLCHAIN=...` override still allowed (needed for
-  bisects and pin bumps) — but the Path-C gate still applies.
+- Parses the pin from `rust-toolchain.toml` (one authority);
+  `TOOLCHAIN="${RUST_BPF_TOOLCHAIN:-<parsed pin>}"`. Explicit
+  `RUST_BPF_TOOLCHAIN=...` override still allowed (needed for bisects
+  and pin bumps) — the Path-C gate still applies either way. Because
+  the script always passes an explicit `+${TOOLCHAIN}`, the override
+  works even with the toolchain file present.
+- Refuses to build if the resolved toolchain is unavailable, printing
+  the exact `rustup toolchain install <pin> --component rust-src` line.
+- Checks the **exact linker binary cargo will execute** (Codex r1 F2:
+  today the script checks `${HOME}/.cargo/bin/bpf-linker` while
+  `.cargo/config.toml` hardcodes an absolute `/home/ps/...` path — the
+  check and the build can disagree). The fix: `.cargo/config.toml`
+  becomes `linker = "bpf-linker"` (AGY r1 F4b — also removes the
+  non-portable home path); the script resolves `bpf-linker` via the
+  same PATH cargo will see (prepending `~/.cargo/bin` deterministically)
+  and runs `--version` on **that resolved path**, requiring an exact
+  match with the pinned expectation (`0.10.2`); missing binary OR
+  version mismatch ⇒ hard fail with
+  `cargo install bpf-linker --version 0.10.2 --locked` instructions
+  (Claude SMR F2). bpf-linker embeds its own LLVM; it is as much a
+  codegen input as rustc.
+- **Override builds cannot silently update the tracked artifact**
+  (Codex r1 F6): when `RUST_BPF_TOOLCHAIN` differs from the pin, the
+  script builds and verifies but refuses the final install unless an
+  explicit, grep-able `XPF_SHIM_ALLOW_UNPINNED_INSTALL=1` is also set,
+  and prints the toolchain provenance either way. Bisects stay easy;
+  accidental unpinned commits do not.
 
 ### Path B — fix the source so reasonable compilers emit prunable code
 
@@ -115,8 +136,11 @@ at `docs/research/1864-toolchain-pin/optionB.diff`):
 
 - lib.rs:467: `saturating_sub` → `wrapping_sub`. Semantics identical:
   the short-circuit `now_ns < *last_heartbeat` clause already handles
-  the underflow case, and even if evaluated, a wrapped huge value still
-  compares `> timeout_ns` → same branch. No behavior change.
+  the underflow case; on the evaluated path `now_ns >= *last_heartbeat`
+  so `wrapping_sub == saturating_sub == exact`. No behavior change.
+  (Codex r1 F7: the r1 "even if evaluated, a wrapped value still
+  compares > timeout_ns" side-claim is removed — it only holds under
+  domain assumptions; the short-circuit guard is the proof.)
 - lib.rs:484: `data_end.saturating_sub(data)` →
   `if data_end > data { data_end - data } else { 0 }`. Identical
   result for all inputs.
@@ -129,26 +153,49 @@ safe, so it does not replace A or C.
 
 ### Path C — verifier load guards (fail the build/deploy, never the dataplane)
 
-- **C1 — build-time gate.** Productionize the research harness as a
-  small Go command (`cmd/shimverify` or `tools/`-scoped) that loads the
-  freshly-built object via `ebpf.NewCollection` (anonymous maps, no
-  pinning, no attach) and exits nonzero with the verifier log tail on
-  rejection. `build-userspace-xdp.sh` runs it after `install`:
-  - with CAP_BPF/root available: gate is mandatory — rejection fails
-    `make generate` loudly *before* the bad object can be committed,
-    and the script restores the previous `.o` (or instructs
-    `git checkout -- pkg/dataplane/userspace_xdp_bpfel.o`).
-  - without privileges: print an UNMISSABLE warning that the object is
-    UNVERIFIED plus the exact sudo command to verify. (Static insn
-    counting is **not** a substitute — good and bad objects differ by
-    7 static insns; only a real BPF_PROG_LOAD walk is honest.)
+- **C1 — build-time gate, verify-then-install.** Productionize the
+  research harness as a small Go command (`cmd/shimverify` or
+  `tools/`-scoped) that loads a candidate object via
+  `ebpf.NewCollection` (anonymous maps, no pinning, no attach) and
+  exits nonzero with the verifier log tail on rejection.
+  `build-userspace-xdp.sh` verifies the **candidate at the cargo
+  output path** and only `install`s over the tracked
+  `pkg/dataplane/userspace_xdp_bpfel.o` on PASS (Claude SMR F1 + AGY
+  r1 F5 — the tracked artifact is never transiently bad, so there is
+  no restore step to get wrong and no committable-escape window):
+  - with CAP_BPF/root available (the script may attempt `sudo -n`
+    for the verify step only): rejection fails `make generate` loudly,
+    tracked `.o` untouched.
+  - without privileges: the tracked `.o` is **not** updated; the
+    candidate stays at the cargo output path; the script exits nonzero
+    with the exact privileged command to verify+install. Regeneration
+    *requires* verification — there is no unverified-install path.
+    (Static insn counting is **not** a substitute — good and bad
+    objects differ by 7 static insns; only a real BPF_PROG_LOAD walk
+    is honest.)
 - **C2 — deploy-time pre-flight.** New `xpfd verify-dataplane`
   subcommand (pattern already exists: `version`, `cleanup` in
   `cmd/xpfd/main.go`): loads the **embedded** collection anonymously,
-  prints PASS/REJECT + verifier tail, exits 0/nonzero. Verify-only
-  load touches no pins and detaches nothing — an existing good loaded
-  program keeps forwarding (lenient-boot doctrine intact; anonymous
-  maps are freed on process exit). `deploy_vm()` in
+  prints PASS/REJECT + verifier tail, exits 0/nonzero. **Hard
+  invariant (Codex r1 F3): the verify path must NOT call
+  `LoadUserspaceShim`/`loadUserspaceShimObjectsOnce` or anything that
+  sets `PinByName`/`PinPath`/`MapReplacements`** — it is a dedicated
+  verify-only function on a bare `ebpf.NewCollection`. It DOES run the
+  non-mutating spec checks production runs
+  (`validateUserspaceShimSpec`, loader_userspace_shim.go:138-162) so a
+  PASS attests production-load viability, not just verifier acceptance
+  (Codex r1 F4). Verify-only load touches no pins and detaches
+  nothing — an existing good loaded program keeps forwarding
+  (lenient-boot doctrine intact; anonymous maps are freed on process
+  exit). Two live-node hardening measures
+  (AGY r1 F2/F3): before loading, the verify path mutates the spec
+  in-memory to shrink the large **hash** maps' MaxEntries to 1
+  (`dnat_table` 10 M no-prealloc still allocates its bucket array
+  ~128 MB+ even empty; `userspace_sessions` 262144 is preallocated —
+  hash-map max_entries does not feed program safety analysis, so the
+  verifier outcome is unchanged; array maps are left alone), and the
+  deploy hook runs the subcommand under `nice -n 19` so a ~17 s REJECT
+  walk cannot starve dataplane cores. `deploy_vm()` in
   `test/incus/cluster-setup.sh` pushes the new binary to a temp path
   and runs `verify-dataplane` on the node **before** `systemctl stop
   xpfd`; failure aborts that node's deploy with the old daemon still
@@ -180,10 +227,9 @@ the known trigger, so ship all three layers:
 - No attempt to upstream the rustc/LLVM regression report (worth doing
   separately; the window (05-23, 05-27] and the saturating-sub
   lowering diff are captured here for that purpose).
-- No `rust-toolchain.toml` in `userspace-xdp/` — the build script's
-  explicit `+${TOOLCHAIN}` overrides it anyway, and a toolchain file
-  would also capture unrelated `cargo` invocations in that directory.
-  (Reviewers: disagree if you think the file is the better pin point.)
+- (r1 stance reversed in r2 per AGY F4a:) `rust-toolchain.toml` IS now
+  the pin's single source of truth — see Path A. The build script
+  parses it rather than duplicating the version string.
 
 ## 6. Gates (Phase 2, all unmasked)
 
@@ -191,18 +237,33 @@ the known trigger, so ship all three layers:
 - `make generate` both arms proven in the PR:
   - correct toolchain (pinned, auto-checked): produces an object that
     passes C1 verification; record md5 + xlated insn count in the PR.
-  - wrong toolchain (e.g. `RUST_BPF_TOOLCHAIN=nightly` with the
-    current bad nightly **and Path B reverted locally** — or simulated
-    missing toolchain): clean, actionable refusal; no bad `.o` left
-    behind in the worktree.
+  - wrong/missing toolchain: clean, actionable refusal; no bad `.o`
+    left behind in the worktree. Proven via (a) missing-pin simulation
+    (bogus `RUSTUP_HOME` or uninstalled pin) and (b)
+    `RUST_BPF_TOOLCHAIN` override **without**
+    `XPF_SHIM_ALLOW_UNPINNED_INSTALL` ⇒ install refused with
+    provenance printed (Codex r1 F6 — refusal semantics are the
+    contract, not re-triggering the blowup; the preserved bad object
+    already proves the REJECT arm of the verifier gate).
 - `xpfd verify-dataplane` demonstrated on both a PASS object and a
   REJECT object (the bad object from this research is preserved for
   the test).
+- **Deploy-ordering invariant reviewed explicitly (Codex r1 F5):** in
+  the revised `deploy_vm()`, no `systemctl stop xpfd` and no
+  `xpfd cleanup` may appear before the `verify-dataplane` pre-flight;
+  the review checklist names this line ordering, since the current
+  script's stop-clean-push ordering (cluster-setup.sh:668-682) is the
+  exact incident shape.
+- Cargo gates with the pinned toolchain and the build-script env
+  (Codex r1 F8 — `lib.rs:81-84` requires `MAX_INTERFACES` via `env!`):
+  `MAX_INTERFACES=$(awk ... bpf/headers/xpf_common.h)
+  cargo +<pin> fmt --check / clippy --release / test` exactly as the
+  PR documents them; gates must not be run against the floating
+  `nightly`.
 - New tracked `.o` (regenerated with B + pinned toolchain) must PASS
   C1 locally AND be smoke-validated by the parent on the loss cluster
   (one guarded `make generate` + deploy cycle under the cluster lock)
-  before merge. cargo gates (`fmt --check`, `clippy`, `test`) for the
-  `userspace-xdp` crate since Rust source is touched.
+  before merge.
 - Performance: B touches the per-packet prologue. The rewritten
   expressions are branch-equivalent or cheaper (6620 vs 6632 xlated
   insns); parent smoke (line-rate iperf3 v4/v6) is the gate — any
@@ -219,18 +280,22 @@ the known trigger, so ship all three layers:
   is exactly the operation that caused the incident — mitigated by C1
   PASS locally + the parent's guarded deploy smoke before merge.
 - **R3: C2 verify-load on a live node races the running program.**
-  Verify-only load creates anonymous maps (incl. a 10 M-entry
-  no-prealloc hash — same as production spec, trivial memory when
-  empty) and never pins/attaches; the running collection is untouched.
-  A REJECT walk costs ~17 s of one CPU on the node — acceptable for a
-  deploy-time, once-per-push check.
+  Verify-only load creates anonymous maps and never pins/attaches; the
+  running collection is untouched. Memory hazard from the 10 M-entry
+  hash bucket array and the preallocated `userspace_sessions` is
+  removed by the MaxEntries=1 spec shrink (§4 C2); CPU hazard from a
+  ~17 s REJECT walk is bounded by `nice -n 19`. Residual: a PASS walk
+  is seconds and once-per-push.
 - **R4: B is semantics-sensitive code review surface.** Both rewrites
   are proven-identical by case analysis (§4B) and the object diff;
   hostile review should re-derive both.
-- **R5: sudo/CAP_BPF unavailable at build time** ⇒ C1 soft-fails to a
-  warning. Residual risk accepted: C2 still blocks the deploy, and the
-  privileged path is the documented default for artifact-regenerating
-  PRs.
+- **R5: sudo/CAP_BPF unavailable at build time** ⇒ C1 fails closed
+  (Codex r1 F1 + AGY r1 F5): the tracked `.o` is never updated without
+  a verified PASS; the unprivileged arm exits nonzero with the
+  candidate left at the cargo output path and exact instructions.
+  Residual: an unprivileged box cannot regenerate the artifact at all
+  — by design; C2 still independently blocks any escaped bad binary at
+  deploy.
 
 ## 8. Blast radius
 
@@ -262,11 +327,27 @@ the known trigger, so ship all three layers:
 
 One PR (`Closes #1864`): Path D as above, with the verified evidence
 from this research (optionB.diff, bisect table, harness) referenced.
-Logical commits: (1) B source fix + regenerated verified `.o`;
-(2) A pin + loud checks; (3) C1 harness + build hook; (4) C2
-subcommand + deploy hook (+C3 test); (5) docs.
+Logical commits, **gates first, artifact bump last** (Codex r1
+closing condition: gates must fail closed and the regenerated object
+must not sit ahead of the guard in bisect order): (1) C1 harness +
+verify-then-install build hook; (2) A pin (rust-toolchain.toml +
+script checks + .cargo/config.toml fix); (3) C2 subcommand + deploy
+pre-flight (+C3 test); (4) B source fix + regenerated verified `.o`;
+(5) docs.
 
 ## 11. Decision asked of reviewers
+
+**Open question for round 2 (AGY F6 vs Codex/Claude SMR): one PR or
+two?** AGY r1 recommends gates-first PR then a separate artifact-bump
+PR. Codex r1 accepts same-PR regeneration "only if the gates fail
+closed" and notes shipping the B source fix without the object would
+be misleading (the binary embeds the `.o` — userspace_xdp_rust.go:11).
+SMR position: single PR, commits ordered gates-first /
+artifact-bump-last (§10), gate proven against the preserved bad object
+within the PR, parent's guarded deploy smoke gating the merge. r2
+adopts the single-PR fail-closed shape; AGY round 2 is asked to
+re-judge with the fail-closed C1 (no unverified-install path) now in
+the plan.
 
 PLAN-KILL is explicitly invited if you believe any of:
 
