@@ -1,8 +1,10 @@
 # #1863 — CoS guarantee-rate honored-realization gap: ceiling kill-exit closed; rate-setter localized to the v8 lease claim path
 
-- **Revision:** v2 (round 1 — v1's watermark/lockout sub-hypothesis was
-  falsified BY THIS SESSION'S OWN registered-prediction cell P and the
-  mechanism section rewritten before first review; v1 is in git history)
+- **Revision:** v3 (round 1 reviews folded: Codex task-mq9e1trx-7ojkuy
+  PLAN-NEEDS-CHANGES ×6, AGY adversarial-review-mq9dmdjw-pyccjl
+  PLAN-NEEDS-CHANGES ×4, Claude SMR ×4 — all doc-level; v1's
+  watermark/lockout sub-hypothesis was falsified by this session's own
+  registered-prediction cell P before first review; v1/v2 in git history)
 - **Date:** 2026-06-11
 - **Branch:** `research/1863-realization-gap`
 - **Mode:** /research — no production code; measurement + code-trace evidence
@@ -94,15 +96,22 @@ mechanism.** They set batching granularity only.
 Per-cell `Δ xpf_userspace_worker_cos_queue_lease_acquire_v8_granted_bytes_total`
 (all workers) vs `Δ drain_guarantee_sent_bytes_total` (all queues):
 
-| Cell | v8 grants | guarantee sends |
-|------|-----------|-----------------|
-| base-r3 | 76.9 GB | 77.2 GB |
-| p6g-r1 | 79.2 GB | 74.9 GB |
-| agg9-r2 | 59.5 GB | 59.5 GB |
+| Cell | v8 grants | guarantee sends | slack |
+|------|-----------|-----------------|-------|
+| base-r3 | 76.9 GB | 77.2 GB | ~0% |
+| p6g-r1 | 79.2 GB | 74.9 GB | 5.4% |
+| p6g-r3 | 83.6 GB | 77.3 GB | 7.5% |
+| agg9-r2 | 59.5 GB | 59.5 GB | 0% |
 
-Grants ≈ sends in every shaped cell: per-class realized throughput =
-per-class lease grant throughput. The question "why 70%?" is a
-question about `acquire_v8`, not about the selector.
+Grants track sends within 0-8% in every shaped cell — but these
+counters are WORKER-POOLED across classes (Codex r1 F2), so this
+establishes "the lease grant path is implicated as the aggregate
+rate-setter", NOT a proven per-class identity. The per-class
+identity is exactly what the Path-A Step-0 instrumentation (§5)
+must capture before the fix is coded. Combined with cell P's
+invariance (the selector layer demonstrably not rate-determining)
+and §2.7 (supply-side proven), `acquire_v8` is where the remaining
+mechanism question lives.
 
 ### 2.6 Stream-count perturbation (s24): more flows do not help
 
@@ -162,8 +171,13 @@ Three independent refutations:
    demanded, in-shape traffic undelivered with NO ceiling within
    reach; aggregates across the sweep (15.1 → 16.8 → 19.6 G) are
    ordered OPPOSITE to what a fixed ceiling division produces.
-3. **Direct measurement**: C_phys(mix) = 23.2 G (§2.3) — the shaped
-   system leaves 3.6-8.1 G of measured headroom on the table.
+3. **Direct measurement**: C_phys(mix) = 23.2 G (§2.3). Caveat
+   (Codex r1 F1): the unshaped run also removes CoS/classifier CPU
+   cost, so 23.2 G is an UPPER bound on shaped-recoverable headroom,
+   not a direct target; the demonstrated shaped capacity is 19.6 G
+   (base-r3) and the work-conservation deficit proof rests on leg 2
+   (+9g: 15.1 G delivered, below the system's own demonstrated
+   shaped 19.6 G, with demand 19.1 G).
 
 ## 4. Mechanism (code-grounded, post-falsification)
 
@@ -247,32 +261,75 @@ implies. Most plausible: tokens are debited at TX COMPLETION
 (every selector call) read not-yet-debited token state — an
 amplification structurally unavailable to lockout-spaced honored
 classes. Secondary now that the watermark layer is adjudicated
-non-rate-determining, but reviewers should sanity-check the reading.
+non-rate-determining. RATIFIED in round 1 by AGY (r1 F4) against
+`queue_service/mod.rs:1192-1195` + `tx_completion.rs:799`: Phase 2
+has no honored-bit lockout, so the same worker pass re-selects 24g
+against stale, not-yet-debited token state.
 
 ## 5. Paths
 
-### Path A — work-conserving guarantee-phase lease claim (RECOMMENDED)
+### Path A — work-conserving guarantee-phase lease claim (RECOMMENDED: A-ii)
 
-Let unclaimed per-worker share be reclaimable within the epoch for
-guarantee-phase exact classes, bounded by the class cap (which is
-exact-rate-derived, so the hard cap and Gate-4 semantics are
-preserved): either (A-i) a post-grace second-pass claim against
-remaining class room (resurrecting the pre-v5.5 work-conserving path
-but ONLY for the guarantee phase, keeping equal-flow caps when
-enforcement is on), or (A-ii) per-worker unclaimed-share carry into
-the next epoch with a small cap (1-2 epochs). Constraint inherited
-from #1231/#1290: must not let low-flow workers starve multi-flow
-workers' per-flow rates (the iperf-d 770 Mbps regression that
-motivated strictness) — the difference here is the reclaim is
-bounded by class-cap room that today simply evaporates (claiming it
-cannot reduce any peer's grants, only reduce stranding; the v5.5
-regression came from UNCONDITIONAL half-epoch slack-claiming, not
-from room-bounded reclaim).
+Round-1 adjudication (AGY r1 F1, verified against source by the SMR
+pass): two variants were on the table and only one survives.
 
-Predicted effect (from §2.5 accounting): claim efficiency → ~1 minus
-sampling losses; mids from ~70% toward their alone level (88-91%);
-24g residual rises toward its ceiling-division share; aggregate
-toward min(Σ caps under ceiling, C_phys(mix) − CoS overhead).
+- **A-i (class-room second-pass reclaim) — REJECTED.** v1 argued
+  "reclaiming room that would otherwise evaporate cannot reduce any
+  peer's grants" — false: the PRIMARY path also breaks on
+  `class_granted >= cap` (`shared_cos_lease/mod.rs:1396-1398`), so a
+  fast worker that claims class room mid-epoch starves a slower
+  worker's not-yet-claimed PRIMARY share — exactly the #1231 v5.5
+  peer-starvation race the strict design exists to prevent.
+- **A-ii (per-worker unclaimed-share carry) — PRIMARY.** A worker's
+  unclaimed share carries into the next epoch with a small cap (1-2
+  epochs), preserving worker-share isolation (no cross-worker claim
+  ordering race). Long-run rate stays hard-capped regardless of
+  epoch-local carry by the credit-pool refill + `try_bump_outstanding`
+  (`max_total_leased`) — Gate-4 semantics preserved; design must
+  state whether carry draws against the next epoch's class cap and
+  bound transient burst (visit_cap + root tokens already bound the
+  wire burst). Codex r1 F4 conditions for A-ii to remain the lead:
+  preserve per-worker isolation, respect `equal_flow_cap_v8` when
+  enforcement is on, and bound carry against BOTH future class cap
+  and outstanding credit (`max_total_leased`).
+
+**Path-A Step 0 (mandatory, pre-fix — AGY r1 F2 + SMR F2): the
+(a)/(b) attribution instrument.** A-ii only recovers SAMPLING loss
+(b) — share that the same worker could have claimed later. If
+share/demand MISMATCH (a) dominates, A-ii under-delivers and Path B
+must lead. Before coding the fix: add the minimal per-class
+requested-vs-granted (or per-worker per-class grant) counters with a
+REGISTERED decision rule — (b)-dominant → A-ii proceeds;
+(a)-dominant → Path B promoted. This is differentiated from
+PLAN-KILLED #1692 (passive counters, no decision rule): it is a
+scoped instrument with a pre-registered branch condition and a
+removal/keep decision at fix time. The Step-0 capture set must also
+include the admission-drop counter family (Codex r1 F3:
+`admission.rs:218` shows `buffer_limit` ALSO scales with
+`buffer_bytes`, so cell P does not fully exclude admission-side
+effects; the snapshot scrape currently carries no admission-drop
+counters — export or document).
+
+Predicted effect (from §2.5 accounting, conditional on (b)-dominant):
+claim efficiency → ~1 minus mismatch losses; mids from ~70% toward
+their alone level (88-91%); 24g residual rises toward its
+ceiling-division share; aggregate toward min(Σ caps under ceiling,
+C_phys(mix) − CoS overhead). Known second-order risk (SMR F4): more
+grants → more sends → more per-pass CPU on the reclaiming worker →
+cadence side-effects on other classes sharing that worker; fenced by
+the §6 multi-class + fairness gates.
+
+### Sibling hygiene fix (decoupled PR — AGY r1 F3, SMR Q4 answer)
+
+Raise/remove the `burst/8` queue-lease ceiling
+(`shared_cos_lease/mod.rs:888-894`) for QUEUE leases: it silently
+clamps `lease_bytes` to 12 K for every default-buffer class,
+discarding the configured rate. Cell P proves it is not the
+rate-setter here, but it is load-bearing for batching granularity
+(B/honor, honor cadence, and AGY's sojourn observation: 6g sojourn
+EWMA 23.0 → 9.6 ms under cell P's re-batching) — i.e. it shapes
+latency/jitter. Ship as its own small PR with latency-focused
+validation, independent of the Path-A schedule.
 
 ### Path B — demand-weighted shares
 
@@ -304,8 +361,13 @@ required).
 Before/after on the decisive cells (12-stream, 2-3 reps each):
 small4+24g mids ≥ 85% of shape (from ~70%); small4+9g all classes
 ≥ 85%; small4-alone + solo baselines unregressed (≥ current);
-aggregate ≥ 21 G on small4+24g (vs 19.5; C_phys(mix) 23.2 minus
-overhead margin); per-flow fairness contract intact
+aggregate on small4+24g strictly above the demonstrated shaped
+baseline (≥ 20.5 G vs 19.6 best observed; the 23.2 G unshaped bound
+minus CoS overhead is the ceiling — NOTE Codex r1 F5: the #1691
+22.72 G figure is REVERSE-direction sanity, not push, and is not
+usable as a push reachability proof; the v2 SMR citation was wrong
+and is corrected here. The aggregate gate is secondary; the
+per-class mid gates are primary); per-flow fairness contract intact
 (`docs/fairness-regimes.md` Cstruct gate + `cos-gate1` +
 `cos-simul-load-smoke`); equal-flow ON cells byte-sane (#1745/#1746
 suites); full `cargo test --release` + `go test ./...`.
@@ -336,6 +398,13 @@ differential-test precedent for fairness-neutral claims.
   Harness rule worth codifying: self-serializing scripts must not be
   invoked under an outer hold of the same lock; cluster mutations
   require the lock.
+- **udp3g drop-site (SMR r1 F3)**: the 37-38% inelastic loss is
+  internal to the shaped pipeline (wire loss otherwise 0), which is
+  sufficient for the §2.7 discrimination, but the snapshot capture
+  regex carried no admission-drop counter family — round-2/engineer
+  captures should include it (or document why it is not exported).
+  AGY's client-side check (retr 0/1 in base-r3/p6g-r1 TCP cells) and
+  sojourn-EWMA data refute admission-masking for cell P itself.
 - **Cell P interpretation**: the 6g `buffer-size 4m` knob was proven
   to reach the dataplane via its counter signature (B/honor +83%) —
   the rate-invariance is not a no-op artifact.
@@ -343,6 +412,9 @@ differential-test precedent for fairness-neutral claims.
   per worker (#1692 caveat) — the per-class identity is established
   by the class-level send counters and the cells where a single knob
   isolates one class.
+- **raw/MANIFEST.md** (Codex r1 F6) records per-cell incident labels
+  machine-auditably: which cells are decisive, corroborating,
+  tainted-excluded, or mislabeled-baseline.
 - Single fraction (0.7), single fixture, push direction only — same
   scope caveats as the 1614 corpus.
 
@@ -356,10 +428,9 @@ differential-test precedent for fairness-neutral claims.
 - **Q3**: is the (a)/(b) split (share mismatch vs sampling loss)
   worth a dedicated pre-fix instrument, or is fix-validation-time
   derivation (§4.2 end) sufficient?
-- **Q4**: should the `burst/8` queue-lease ceiling fix (v1's A1)
-  ship anyway as hygiene (it silently discards configured rate for
-  default-buffer classes) even though cell P shows it is not the
-  rate-setter here?
+- **Q4** (RESOLVED round 1 — AGY F3 + SMR concur): the `burst/8`
+  queue-lease ceiling fix ships as a decoupled hygiene PR with
+  latency-focused validation (see §5 sibling item).
 
 ## 10. Test/repro plan
 
@@ -377,5 +448,6 @@ under raw/ with metrics snapshots; scripts `run-cell.sh` +
    but falsified as rate-setter (cell P invariance + grants==sends);
    lease claim path confirmed as rate-setter.
 3. Adjudicate Q1-Q4.
-4. Path choice: A-i vs A-ii lead, B/C as complements.
+4. Path choice: ratify A-ii as lead (A-i rejected round 1), B/C as
+   conditional complements per the Step-0 decision rule.
 5. Are the §6 gates the right falsification bar for the fix?
