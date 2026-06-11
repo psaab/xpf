@@ -267,6 +267,20 @@ tunnel": the same commit that removes the endpoint row removes the
 netdev/route. (Conditional-vs-blanket is pinned as §11 Q1 for round
 3.)
 
+*Known residual (Claude SMR r3): VRF-table divergence.* The slow-path
+reinjector is a plain `IFF_TUN` with no VRF binding
+(`slowpath.rs:17-19`) — reinjected packets are routed in the main
+table. A tunnel whose INNER route exists only in a routing-instance
+table could have its reinjected packets default-routed. This is
+PRE-EXISTING, tunnel-agnostic (non-tunnel VRF traffic reinjects the
+same way), strictly REDUCED by the gate (absent ids now drop), not
+fixable by blanket-drop (which only masks the tunnel-flavored
+instance while regressing cold start), and owned by the S6/#1434
+VRF-binding work. The conditional gate's correctness domain is
+"kernel main-table view matches the userspace FIB for tunnel inner
+routes" — true for the default-table tunnel configs supported on
+this path today.
+
 **R-E: keep tunnel-marked frames out of in-place TX paths (AGY r2
 MAJOR, verified).** `pending_neigh` buffers frames awaiting OUTER
 neighbor resolution; `retry_pending_neigh` then TXes them via
@@ -559,6 +573,9 @@ cross-node divergence. Rejected for the same reason.)
   three-pass reconcile mirroring #1866's wg_control work — its own
   plan + review cycle. **A follow-up issue with AGY's full trace will
   be filed at /engineer time and cross-linked here.**
+- Slow-path VRF binding (reinjected packets route in the main table —
+  pre-existing for ALL slow-path traffic, see §5 R-C residual; owned
+  by the S6/#1434 VRF work).
 - Carrying tunnel NAMES on the cluster/event-stream wire (Path B
   machinery) — unnecessary under Path A.
 - Session migration for genuinely-changed WG identities (#1432 S5).
