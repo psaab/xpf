@@ -1,0 +1,22 @@
+diff --git a/userspace-xdp/src/lib.rs b/userspace-xdp/src/lib.rs
+index 045abcad7..62efdc3e3 100644
+--- a/userspace-xdp/src/lib.rs
++++ b/userspace-xdp/src/lib.rs
+@@ -464,7 +464,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
+     };
+     let timeout_ns = (timeout_ms as u64) * 1_000_000;
+     let now_ns = unsafe { bpf_ktime_get_ns() };
+-    if now_ns < *last_heartbeat || now_ns.saturating_sub(*last_heartbeat) > timeout_ns {
++    if now_ns < *last_heartbeat || now_ns.wrapping_sub(*last_heartbeat) > timeout_ns {
+         record_trace(
+             ctrl.flags,
+             ingress_ifindex,
+@@ -481,7 +481,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
+         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE);
+     }
+ 
+-    let packet_len = data_end.saturating_sub(data);
++    let packet_len = if data_end > data { data_end - data } else { 0 };
+     // ESP still relies on the kernel XFRM path. Use cpumap_or_pass
+     // directly. cpumap_or_pass delivers to the kernel stack reliably.
+     if parsed.protocol == PROTO_ESP {
