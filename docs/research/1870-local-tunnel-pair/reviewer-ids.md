@@ -18,3 +18,9 @@
 
 ## Round 4 (plan v4 @ dd83445db)
 - Codex: session 019eb8bc-bffd-7590-ba84-c5dd36e9310f — PLAN-NEEDS-CHANGES (1 Low: two residual absolute shorthands at plan.md:201/:300) — folded as v5
+  (round-4 Codex id: task-mqa1x3wl-k121qf)
+
+## Round 5 / convergence (plan v5 @ c728c4142)
+- Codex: task-mqa20uuj-emlwfm (session 019eb8bf-6b84-75e2-94b8-a1dabc4ad90e) — PLAN-READY
+- AGY: PLAN-READY at r3 (adversarial-review-mqa1nspp-379tpi, no findings; v4/v5 changes are Codex-requested wording folds only)
+- Claude SMR: PLAN-READY at r3 (claude-smr-plan-r3.md)
