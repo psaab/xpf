@@ -1,8 +1,10 @@
 # #1741 — CoS active-flow over-count: u16 epoch-wrap ghost resurrection
 
-Revision: v1 (2026-06-10)
+Revision: v2 (2026-06-10) — round-1 findings folded in (Codex
+PLAN-NEEDS-MAJOR HIGH-1/HIGH-2: close-path taxonomy corrected, clean-close
+choreography repro added; Codex+AGY MEDIUM: Path-A borrow shape spelled out)
 Branch: `research/1741-flow-count`
-Status: DRAFT — round 1 review pending
+Status: round 2 review pending
 
 ## 1. Problem
 
@@ -40,14 +42,41 @@ The activity stamp is a **u16** (`FlowCacheEntry::last_used_epoch`,
 u16 advanced once per debug-publish tick (`tick_advance_epoch`, skipping
 the 0 sentinel — cycle length 65535).
 
-Dead flows are NOT removed from the cache: FIN-closed/expired flows leave
-their entries behind (eviction happens only on RST teardown
-(`worker/lifecycle.rs:235`), HA-invalid (`poll_descriptor/
-flow_cache_hit.rs:113`), stale-stamp lookup, or 4-way set-collision LRU).
-A dead entry's `last_used_epoch` is frozen at its last hit.
+Dead flows are NOT removed from the cache. Production eviction paths are
+only: stale-stamp on lookup (`flow_cache.rs:614-653`), HA-invalid
+(`poll_descriptor/flow_cache_hit.rs:113`), and 4-way set-collision LRU.
+The RST-teardown eviction (`worker/lifecycle.rs:235`) is currently DEAD
+in production: `should_teardown_tcp_rst` unconditionally returns `false`
+(`session_glue/mod.rs:621-634`, the #stray-RST mitigation), so
+`rst_teardowns` is always empty. [v2: corrected per Codex r1 HIGH-2.]
 
-**Therefore: every dead entry resurrects into the active window for
-exactly 10 epochs, once per 65535-tick cycle**, when `current_epoch`
+**Which dead flows bank a nonzero (ghost-able) stamp** [v2: narrowed per
+Codex r1 HIGH-1]. A FIN/RST packet is NOT `packet_eligible`
+(`flow_cache.rs:216` requires TCP flags & 0x17 == 0x10), so it takes the
+slow path, whose cache population is gated only by `should_cache`
+(`flow_cache.rs:221`: protocol + disposition, flags not consulted) —
+the FIN therefore RE-INSERTS the entry, and dedup-on-insert REPLACES it
+with `last_used_epoch: 0` (`flow_cache.rs:373`, `:689-690`;
+`poll_descriptor/mod.rs:1992-2016`). The FIN itself sentinel-clears.
+BUT the close choreography continues: in a client-initiated close
+(iperf3's shape — the client closes data streams at `-t` expiry), the
+LAST forward-direction packet is the client's final pure ACK (ACKing
+the server's FIN-ACK), which IS `packet_eligible` → fast-path lookup
+HIT → re-stamps `last_used_epoch = current_epoch` nonzero
+(`flow_cache.rs:665-668`). Proven by the v2 choreography repro (below):
+insert → data-ACK hit → FIN re-insert (assert: count drops to 0,
+Codex's step confirmed) → final-ACK hit (assert: count back to 1) →
+idle → wrap → **10 resurrections**. Additionally frozen-nonzero with no
+choreography needed: UDP flows (no close packets), TCP flows that die
+abruptly (peer vanish, timeout, mid-transfer reset of the *other*
+direction), and any flow whose last same-direction packet was data/ACK.
+NOT ghost-able: a flow whose last forward-direction packet was the
+FIN/RST itself (e.g., server-initiated close where the client never
+sends a final same-direction ACK) — those end sentinel-cleared.
+
+**Therefore: every dead entry left with a nonzero stamp resurrects into
+the active window for exactly 10 epochs, once per 65535-tick cycle**,
+when `current_epoch`
 sweeps back past its frozen stamp. A run of K flows that ended together
 freezes K entries into a ~10-epoch-wide cohort; one wrap-cycle later the
 whole cohort re-enters the window for ~10 ticks and any scrape landing in
@@ -57,19 +86,27 @@ its own phase, so per-worker rows spike independently — exactly the
 observed shape (`{22,4,8,19,4,5}=62`, `{16,26,9,24}=75`: a subset of
 workers carrying ghost cohorts on top of the live 48).
 
-### Deterministic repro (3/3, `docs/research/1741-flow-count/repro-test.patch`)
+### Deterministic repros (both FAIL on master; patches in this directory)
 
-A unit test inserts one entry, hits it once (stamping epoch 1), ages it
-out, then keeps ticking with the cache untouched:
+1. `repro-test.patch` — minimal: insert one entry, hit it once (stamping
+   epoch 1), age it out, keep ticking untouched:
 
-```
-assertion failed: dead entry resurrected into the active window 10 times
-(first at tick Some(65519)) — #1741 ghost over-count
-```
+   ```
+   assertion failed: dead entry resurrected into the active window 10
+   times (first at tick Some(65519)) — #1741 ghost over-count
+   ```
+
+   Run 3×, identical output (deterministic — no timing dependence).
+
+2. `repro-test-v2-clean-close.patch` [v2, answers Codex r1 HIGH-1] —
+   models the production clean client-initiated close choreography:
+   data-ACK hits, FIN slow-path re-insert (asserts the sentinel-clear
+   Codex identified), final pure-ACK fast-path hit (asserts the
+   re-stamp), then idle across the wrap → 10 resurrections. Run 2×,
+   identical.
 
 The dead entry counts as active for exactly `ACTIVE_WINDOW_EPOCHS` ticks
-per wrap cycle, forever. Run 3×, identical output (deterministic — no
-timing dependence).
+per wrap cycle, forever.
 
 ### Why it was intermittent / unreproducible before
 
@@ -81,6 +118,15 @@ timing dependence).
   accumulating cohorts) and 1 Hz scrape luck — the 2026-06-01 dig-in had
   both; the kill-round repro (fresh deploy, scrape minutes later) had
   neither.
+- [v2 honesty hedge, per Codex r1 MEDIUM] The mechanism + the observed
+  SHAPE (per-worker spikes, intermittency, truncated=0, sums exceeding N
+  by cohort-sized amounts) are proven; per-scrape ATTRIBUTION of the
+  specific 3-of-6 dig-in rows is plausible but NOT demonstrated — it
+  requires multiple phased cohorts across 6 bindings and/or faster
+  effective tick cadence under load. The plan does not rest on it: the
+  bug exists and is fixed regardless of whether some of those scrapes
+  had an additional cause; no other over-count mechanism was found by
+  three reviewers (see §5 and round-1 docs).
 - The symmetric-key correlation in the issue is coincidental sequencing
   (those runs came later in the session, more dead cohorts banked), not
   mechanism: the wrap ghost is direction- and RSS-key-agnostic.
@@ -149,6 +195,15 @@ never be re-matched by a wrapped `current_epoch`.
   (passes only with the clamp).
 - Risk: requires `&mut` borrow at the single call site, which already
   holds `&mut BindingWorker`. No API fan-out (single caller).
+- Implementation shape [v2, per Codex r1 MEDIUM + AGY r1 HIGH-resolved]:
+  the `&self` helper `active_entry_age` cannot be called while
+  `self.entries.iter_mut()` is alive — copy `current_epoch` into a
+  local before the loop and inline the age computation
+  (`current.wrapping_sub(entry.last_used_epoch)`) inside the `iter_mut`
+  body; clamp with a direct field store. AGY round-1 compiled and
+  green-suite-validated exactly this shape (its reverted diff is kept
+  as `agy-impl-reference.patch` — reference only; Phase 2 authors
+  fresh).
 - Subtlety to encode in the test: `count_active_flows` (#[cfg(test)])
   and `active_flow_debug_entries` must agree post-clamp; and the clamp
   must NOT fire for age exactly 9 (boundary test).
@@ -242,11 +297,12 @@ One small PR (Phase 2): the Path-A clamp + tests + doc notes,
 
 ## 11. Repro/validation harness (preserved)
 
-- **Deterministic unit repro**: `docs/research/1741-flow-count/
-  repro-test.patch` (apply to `flow_cache_tests.rs`, run
-  `cargo test --release issue_1741_epoch_wrap_resurrects_dead_entry`;
-  FAILS on master with "resurrected ... 10 times (first at tick 65519)";
-  must PASS post-fix when flipped into the suite).
+- **Deterministic unit repros**: `repro-test.patch` (minimal) and
+  `repro-test-v2-clean-close.patch` (production close choreography) in
+  this directory; apply to `flow_cache_tests.rs`, run
+  `cargo test --release issue_1741`; both FAIL on master with
+  "resurrected ... 10 times"; both must PASS post-fix when flipped into
+  the suite (plus the boundary/sentinel-recovery tests of §6).
 - **Live steady-state validation** (run 2026-06-10, passed): apply CoS
   (`./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0` if absent),
   `iperf3 -c 172.16.80.200 -p 5211 -P 24 -t 22` from

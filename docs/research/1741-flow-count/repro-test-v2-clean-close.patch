@@ -1,0 +1,72 @@
+diff --git a/userspace-dp/src/afxdp/flow_cache_tests.rs b/userspace-dp/src/afxdp/flow_cache_tests.rs
+index da07e525a..41a841ab9 100644
+--- a/userspace-dp/src/afxdp/flow_cache_tests.rs
++++ b/userspace-dp/src/afxdp/flow_cache_tests.rs
+@@ -1906,3 +1906,67 @@ fn count_active_flows_entry_at_epoch_max_not_confused_with_sentinel() {
+     cache.tick_advance_epoch(); // skips 0 → 1
+     assert_eq!(cache.count_active_flows(), 1, "entry at epoch MAX must be active after 1-tick advance");
+ }
++
++// ----------------------------------------------------------------
++// #1741 round-2 repro: model the PRODUCTION clean client-initiated
++// TCP close choreography (iperf3 shape) instead of an untouched
++// stale entry (Codex r1 HIGH-1):
++//   data ACKs  -> fast-path hit (stamps epoch)
++//   client FIN -> slow path -> re-INSERT replaces entry with
++//                 last_used_epoch = 0 (sentinel)
++//   server FIN-ACK -> reverse direction (other cell, not modeled)
++//   final client ACK -> fast-path HIT -> re-stamps nonzero
++// Then idle across the u16 wrap. EXPECTED TO FAIL on master.
++// ----------------------------------------------------------------
++#[test]
++fn issue_1741_clean_close_choreography_still_ghosts() {
++    let rg_epochs = default_rg_epochs();
++    let mut cache = FlowCache::new();
++    let key = make_key();
++    let stamp = FlowCacheStamp {
++        config_generation: 5,
++        fib_generation: 3,
++        owner_rg_id: 1,
++        owner_rg_epoch: 0,
++        owner_rg_lease_until: 0,
++    };
++    let lookup = FlowCacheLookup {
++        ingress_ifindex: 7,
++        config_generation: 5,
++        fib_generation: 3,
++    };
++    // Established flow: insert + data ACK hits.
++    cache.insert(make_entry(key.clone(), stamp, 1));
++    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
++    cache.tick_advance_epoch();
++    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
++    // Client FIN: slow-path re-insert REPLACES the entry, resetting
++    // last_used_epoch to the 0 sentinel (insert dedup path).
++    cache.insert(make_entry(key.clone(), stamp, 1));
++    {
++        // The replaced entry must be sentinel-cleared (Codex r1 claim).
++        assert_eq!(cache.count_active_flows(), 0, "FIN re-insert must sentinel-clear");
++    }
++    // Final client ACK (pure ACK, packet_eligible): fast-path hit
++    // re-stamps the entry with the current epoch.
++    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
++    assert_eq!(cache.count_active_flows(), 1, "final ACK re-stamps");
++    // Flow is now fully closed; no further packets. Age out.
++    for _ in 0..(ACTIVE_WINDOW_EPOCHS + 5) {
++        cache.tick_advance_epoch();
++    }
++    assert_eq!(cache.count_active_flows(), 0);
++    // Idle across the wrap: the closed flow must never count again.
++    let mut resurrections = 0u32;
++    for _ in 0..70_000u32 {
++        cache.tick_advance_epoch();
++        if cache.count_active_flows() != 0 {
++            resurrections += 1;
++        }
++    }
++    assert_eq!(
++        resurrections, 0,
++        "clean-closed (FIN + final ACK) flow resurrected {} times — #1741 ghost",
++        resurrections
++    );
++}
