@@ -7,7 +7,9 @@ Codex (GLOBALLY SERIALIZED via flock /tmp/xpf-codex.lock):
 | r1 | task-mq8wfs3n-c5eg6a | PLAN-NEEDS-REVISION (HIGH port-write reachable; MED address-NAT, segmentation, defect-2 helper trap; LOW S5/A′) |
 | r2 | task-mq8wsliq-uqsza3 | PLAN-NEEDS-REVISION (MED-HIGH SNAT alloc-leak pre-rewrite; MED defect-2 helper trap/v4 gap; LOW tunnel caller) |
 | r3 | task-mq8x1be1-15jar6 | PLAN-NEEDS-REVISION (2 doc-precision: stale §4e helper text; S11 must be dynamic-pool-only) — fixed in v3.1 |
-| r4 | (pending) | confirm v3.1 doc fixes |
+| r4 | task-mq8x6rg5-9fagl9 | PLAN-READY (both doc-precision blockers resolved; no remaining blocking finding) |
+
+CONVERGED at v3.1: Codex r4 PLAN-READY + AGY r3 PLAN-READY + Claude SMR r3 PLAN-READY.
 
 AGY adversarial-review (result: /home/ps/.claude/plugins/data/gemini-abiswas97-gemini/state/jobs/<id>.result.md):
 

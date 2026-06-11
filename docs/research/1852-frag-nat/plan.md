@@ -2,6 +2,9 @@
 
 ## 1. Status
 
+> **CONVERGED PLAN-READY v3.1** — Codex r4 + AGY r3 + Claude SMR r3 all PLAN-READY.
+
+
 **PLAN v3.1** — round-3 review: AGY PLAN-READY, Claude SMR r3 PLAN-READY,
 Codex PLAN-NEEDS-REVISION on two doc-precision points (now fixed in v3.1):
 (1) stale §4e "make the helper fragment-aware" text removed — defect-2 is
