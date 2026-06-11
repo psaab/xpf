@@ -23,12 +23,14 @@ session::tests::inplace_vacant_handle_returns_false_no_panic  FAILED
 Reproduced on this branch (origin/master @ 79dd55e53): `cargo test inplace_`
 → 12 passed, 2 failed, both at the `debug_assert!(false, ...)` arms.
 
-The tests (added d1e2ba33d, #1752 Path E differential tests) deliberately
-corrupt `key_to_handle` via private-field access and assert `update_session`
-returns `false` **without panicking**. The defensive arms in `update_session`
-(added 5d81c3ed9, same day, 5 minutes EARLIER) are `debug_assert!(false, ...)`
-— so the tests were red in debug from birth; the d1e2ba33d message's "All 11
-pass" can only have been a release-profile run. Release gates stayed green
+The tests (#1752 Path E differential tests: the stale test added in
+d1e2ba33d, the vacant test added in fdb4ddb3e — Codex r1 correction)
+deliberately corrupt `key_to_handle` via private-field access and assert
+`update_session` returns `false` **without panicking**. The defensive arms
+in `update_session` (added 5d81c3ed9, same day, EARLIER than both) are
+`debug_assert!(false, ...)` — so the tests were red in debug from birth;
+the d1e2ba33d message's "All 11 pass" can only have been a release-profile
+run. Release gates stayed green
 because `debug_assert!` compiles out (no `[profile.release]` override of
 `debug-assertions` in `userspace-dp/Cargo.toml`).
 
@@ -185,7 +187,13 @@ incident shows the arm firing in release, the contract decision reopens).
 - `userspace-dp/src/session/README.md` — add a short "Corruption contract"
   note (stale `key_to_handle` impossible-by-construction; debug asserts,
   release tolerates + returns false/None). The README is the module
-  contract doc per project rules.
+  contract doc per project rules. ALSO (Codex r1 finding 2, accepted):
+  correct the stale ownership wording — "Owned by the coordinator;
+  per-worker handles read and update under shared locks" conflicts with
+  the verified model (per-worker owned by value,
+  `src/afxdp/worker/loop_body/setup.rs:40`; mutation only via `&mut self`
+  on the worker thread), which is precisely the invariant this contract
+  rests on.
 - `_Log.md` entry.
 - `docs/pr/1752-session-inplace-refresh/plan.md` is historical and stays
   as-written.
