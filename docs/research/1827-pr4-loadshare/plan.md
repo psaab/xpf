@@ -1,6 +1,7 @@
 # #1827 PR-4: weights/load-share — mandated audit + kill/ship decision
 
-**Status:** DRAFT v2 — r1 fold. Round-1 verdicts: Claude SMR
+**Status:** DRAFT v2.1 — r1 fold + SMR r2 F1 (synced-session
+NoRoute/MissingNeighbor fallback to carried resolution noted in §3.3). Round-1 verdicts: Claude SMR
 PLAN-NEEDS-REVISION (F1-F6), Codex PLAN-NEEDS-REVISION (8 findings, 1
 High), AGY PLAN-READY (endorsing the kill). v2 folds: **§3.3 rewritten**
 (Codex High 1 + SMR F1 — synced sessions ARE re-resolved locally; the
@@ -178,7 +179,11 @@ description was wrong** (Codex r1 High; SMR F1). Verified mechanics:
    (`session_glue/mod.rs:122-134`); `docs/multi-wan.md:231-234`
    documents the consequence (peer-synced and tunnel-backed sessions DO
    move onto an injected route; locally-created direct sessions stay
-   pinned).
+   pinned). One nuance (SMR r2 F1): if the local re-lookup returns
+   NoRoute/MissingNeighbor, the synced session falls BACK to the
+   carried owner-derived resolution
+   (`session_glue/mod.rs:114-117`) — the sync-carried fields are
+   bootstrap/fallback, not the steady-state decision.
 
 **HA symmetry today is therefore achieved by deterministic
 re-resolution from the config-derived snapshot**, not by carrying the
