@@ -1,0 +1,58 @@
+diff --git a/userspace-dp/src/afxdp/flow_cache_tests.rs b/userspace-dp/src/afxdp/flow_cache_tests.rs
+index da07e525a..ceb16eeb7 100644
+--- a/userspace-dp/src/afxdp/flow_cache_tests.rs
++++ b/userspace-dp/src/afxdp/flow_cache_tests.rs
+@@ -1906,3 +1906,53 @@ fn count_active_flows_entry_at_epoch_max_not_confused_with_sentinel() {
+     cache.tick_advance_epoch(); // skips 0 → 1
+     assert_eq!(cache.count_active_flows(), 1, "entry at epoch MAX must be active after 1-tick advance");
+ }
++
++// ----------------------------------------------------------------
++// #1741 repro: u16 epoch-wrap resurrects dead entries into the
++// active window ("ghost flows"). EXPECTED TO FAIL on master.
++// ----------------------------------------------------------------
++#[test]
++fn issue_1741_epoch_wrap_resurrects_dead_entry() {
++    let rg_epochs = default_rg_epochs();
++    let mut cache = FlowCache::new();
++    let key = make_key();
++    let stamp = FlowCacheStamp {
++        config_generation: 5,
++        fib_generation: 3,
++        owner_rg_id: 1,
++        owner_rg_epoch: 0,
++        owner_rg_lease_until: 0,
++    };
++    cache.insert(make_entry(key.clone(), stamp, 1));
++    let lookup = FlowCacheLookup {
++        ingress_ifindex: 7,
++        config_generation: 5,
++        fib_generation: 3,
++    };
++    // Flow is live: one hit stamps last_used_epoch = current_epoch (1).
++    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
++    // Flow dies (FIN-closed; entry persists). Age out of the window.
++    for _ in 0..(ACTIVE_WINDOW_EPOCHS + 5) {
++        cache.tick_advance_epoch();
++    }
++    assert_eq!(cache.count_active_flows(), 0, "aged-out entry must be inactive");
++    // Keep ticking. At every subsequent epoch the dead entry must STAY
++    // inactive — including across the u16 wrap ~65535 ticks later.
++    let mut resurrections = 0u32;
++    let mut first_resurrection_tick = None;
++    for tick in 0..70_000u32 {
++        cache.tick_advance_epoch();
++        let active = cache.count_active_flows();
++        if active != 0 {
++            resurrections += 1;
++            if first_resurrection_tick.is_none() {
++                first_resurrection_tick = Some(tick);
++            }
++        }
++    }
++    assert_eq!(
++        resurrections, 0,
++        "dead entry resurrected into the active window {} times (first at tick {:?}) — #1741 ghost over-count",
++        resurrections, first_resurrection_tick
++    );
++}
