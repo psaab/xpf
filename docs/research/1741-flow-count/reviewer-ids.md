@@ -6,6 +6,6 @@
 - Claude SMR: claude-smr-plan-r1.md (in-conversation, hostile)
 
 ## Round 2 (plan v2 @ e7c739019)
-- Codex: (pending — recorded on dispatch completion; see codex-plan-r2.md)
+- Codex: task-mq91ul6e-5ylq0v
 - AGY: adversarial-review-mq91os4y-mkv4iw
 - Claude SMR: claude-smr-plan-r2.md (PLAN-READY)
