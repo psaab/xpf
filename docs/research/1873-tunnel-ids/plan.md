@@ -2,10 +2,50 @@
 
 ## 1. Status
 
-DRAFT v2 — round-1 verdicts: Claude SMR PLAN-NEEDS-REVISION, Codex
-PLAN-NEEDS-REVISION (task-mqa4p6jy-k0oi3a), AGY PLAN-NEEDS-REVISION
-(adversarial-review-mqa4memd-n0t6xo). All round-1 required changes
-incorporated below; pending round-2 review.
+DRAFT v3 — round-2 verdicts: Claude SMR PLAN-NEEDS-REVISION
+(claude-smr-plan-r2.md), Codex PLAN-NEEDS-REVISION
+(task-mqa5478t-h5yale), AGY PLAN-NEEDS-REVISION
+(adversarial-review-mqa540ex-4eud0g). All round-2 required changes
+incorporated; pending round-3 review.
+
+### Round-2 convergence summary
+
+- **All three converge on the same R-C defect**: v2 scoped the drop
+  gate to forwarded-frame BUILD FAILURES, but tunnel-marked decisions
+  reach slow-path reinjection through more doors — Codex enumerated
+  them all (build failure `tx/dispatch/mod.rs:575,855`; FabricRedirect
+  missing-binding `Owned` frames `tx/dispatch/mod.rs:223-225`;
+  `poll_descriptor/mod.rs:2164` LocalDelivery; `poll_descriptor/
+  mod.rs:2763` non-forward dispositions — `resolve_tunnel_forwarding_
+  resolution` preserves `tunnel_endpoint_id` on NoRoute/
+  MissingNeighbor, `forwarding/mod.rs:1534,1539`). v3 R-C is a single
+  invariant at the `maybe_reinject_slow_path_from_frame` chokepoint.
+- **Claude SMR r2 MAJOR (cold-path preservation)**: a BLANKET
+  tunnel-marked drop would break the designed cold path — slow-path
+  reinjection of a RESOLVABLE tunnel's inner packet is how
+  pre-handshake WG traffic reaches the kernel wgN route → TUN →
+  `wg_control` encrypt (`wg_control.rs:120-126,214-249,547`) and how
+  GRE corner traffic reaches the kernel GRE netdev. v3's gate is
+  therefore CONDITIONAL: reinject iff the id resolves in the current
+  `ForwardingState`, drop+count otherwise. The conditional-vs-
+  unconditional question is pinned for round 3 (§11 Q1).
+- **AGY r2 MAJOR (verified)**: `retry_pending_neigh`
+  (`neighbor_dispatch.rs:200-260`) TXes buffered frames via
+  `rewrite_forwarded_frame_in_place` (MAC/VLAN/NAT only — no encap);
+  tunnel-marked packets buffered on outer MissingNeighbor would be
+  transmitted PLAINTEXT on neighbor resolution (no tunnel gate exists
+  at the `pending_neigh` enqueue — verified). v3 adds R-E.
+- **Claude SMR r2 MINOR**: R-B commit check must be symmetric across
+  cluster nodes — run it over the union of tunnel names across all
+  `groups` blocks + main hierarchy, not the per-node effective config.
+- Codex/AGY r2 ratified with file:line evidence: Q1 mixed-version
+  window (self-healing — per-packet re-resolution), Q2 fail-closed,
+  Q3 R-D propagation (Close deltas → `daemon_ha_userspace.go:765` →
+  `sync_conn.go:832` `DeleteWithCompanions*`; standby purge does not
+  resync back, `daemon_ha_userspace.go:566`), Q4 no dense-id
+  consumer, Q5 no FibGen re-stamp, Q7 R-D necessary (wrong-tunnel
+  encap on reuse is invisible to R-C), Q8/AGY GRE-origin out-of-scope
+  call CORRECT.
 
 ### Round-1 convergence summary
 
@@ -95,9 +135,12 @@ the defect: any multi-tunnel deployment that edits tunnel config at
 runtime. Single-tunnel deployments (the current smoke topology) never
 hit it — which is why it survived. The fix (Path A v2) is: a small
 pure-function allocator change + commit check in Go (R-A/R-B), a
-drop gate on the Rust forward-build failure path (R-C — also closes
-a verified pre-existing plaintext-leak fallback), and an apply-time
-session purge for remapped ids (R-D). No wire-format change, no
+conditional tunnel gate at the slow-path reinjection chokepoint
+(R-C — closes a verified pre-existing plaintext-leak fallback while
+preserving the designed kernel cold path), tunnel exclusion from the
+in-place pending-neighbor TX path (R-E — a second verified plaintext
+door), and an apply-time session purge for remapped ids (R-D). No
+wire-format change, no
 steady-state hot-path change. The risk is concentrated in the two
 Rust guards (failure-path semantics, purge correctness) and the
 documented upgrade-boundary residuals.
@@ -132,7 +175,7 @@ acceptable verdict.*
 
 ### Path A (RECOMMENDED, v2): pure hash ids, fail-closed collisions, remap purge
 
-Four coordinated pieces (R-A..R-D). The id of a tunnel endpoint is the
+Five coordinated pieces (R-A..R-E). The id of a tunnel endpoint is the
 hash of its config name, full stop — no probing, no history, no
 runtime-state input.
 
@@ -171,29 +214,75 @@ configured tunnel names with equal folds (verified example:
 `pkg/config` validation pass over all unit-qualified tunnel names
 (same place other commit rejections live), with remediation in the
 message: "tunnel endpoint id collision between X and Y — rename one
-interface". Deterministic, config-content-only (after R-A), identical
-on both HA nodes. Belt-and-braces: `buildTunnelEndpointSnapshots`
+interface". The check runs over the UNION of tunnel names across all
+`groups` blocks plus the main hierarchy (raw config), NOT the
+per-node effective config (Claude SMR r2 MINOR): a collision
+involving a `groups node0`-scoped name must fail commit identically
+on BOTH nodes, or config-sync would split (originator accepts, peer
+rejects). Union-checking is strictly more conservative and
+config-content-deterministic. Belt-and-braces: `buildTunnelEndpointSnapshots`
 independently drops the later-sorting collider with an Error log (a
 snapshot must never carry two rows with one id even if validation is
 bypassed). With probing gone, `id == StableTunnelEndpointID(name)`
 is an unconditional invariant — an id can never silently migrate to
 a different live name.
 
-**R-C: tunnel-aware slow-path drop gate (AGY r1 Finding 1,
-CRITICAL).** Today a tunnel-marked decision
-(`resolution.tunnel_endpoint_id != 0`) whose encap build fails is
-reinjected UNENCAPSULATED into the slow-path TUN
-(`tx/dispatch/mod.rs:575-578` → `slow_path.rs:60-73` →
-`maybe_reinject_slow_path_from_frame`, which has no
-disposition/tunnel gate) — the kernel then routes the inner packet,
-a plaintext leak. Fix: every site that maps a forwarded-frame build
-failure to `fallback_to_slow_path = true` must instead DROP (+ a new
-exception reason `tunnel_encap_unresolved` and counter) when
-`decision.resolution.tunnel_endpoint_id != 0`. Tunnel traffic must
-never fall back to kernel forwarding of the inner packet — this is a
-strict security tightening independent of the allocator, and Path A
-makes the absent-id path more traveled (removal ⇒ absent id), so it
-ships in the same PR.
+**R-C (v3): conditional tunnel gate at the slow-path chokepoint (AGY
+r1 Finding 1 CRITICAL; rescoped per round-2 convergence).** Today a
+tunnel-marked decision (`resolution.tunnel_endpoint_id != 0`) can
+reach slow-path TUN reinjection of the UNENCAPSULATED inner packet
+through four doors (Codex r2 enumeration): forwarded-frame build
+failure (`tx/dispatch/mod.rs:575,855` → `slow_path.rs:60-73`),
+FabricRedirect missing-binding `Owned` frames
+(`tx/dispatch/mod.rs:223-225`), `poll_descriptor/mod.rs:2164`
+(LocalDelivery), and `poll_descriptor/mod.rs:2763` (non-forward
+dispositions — `resolve_tunnel_forwarding_resolution` returns
+NoRoute/MissingNeighbor WITH the id preserved,
+`forwarding/mod.rs:1534,1539`). If the tunnel's kernel netdev/route
+are gone (removed tunnel), the kernel default-routes the inner
+packet: plaintext leak.
+
+Fix — ONE invariant enforced at the single chokepoint
+`maybe_reinject_slow_path_from_frame` (every door above funnels
+through it), after the `local_tunnel_deliveries` LocalDelivery branch
+(which must stay open — GRE local-origin inbound delivery, keyed by
+`local_ifindex`), before `slow_path.enqueue`:
+
+> A tunnel-marked inner packet may be reinjected to the kernel
+> slow path ONLY while its `tunnel_endpoint_id` resolves in the
+> CURRENT `ForwardingState`; otherwise drop + bump a new
+> `tunnel_encap_unresolved` counter/exception.
+
+The gate is CONDITIONAL, not blanket (Claude SMR r2 MAJOR): for a
+RESOLVABLE id, kernel reinjection is the designed cold/slow path —
+the kernel routes the inner packet into the wgN TUN, which
+`wg_control` reads and ENCRYPTS (`wg_control.rs:120-126` open_tun,
+`:214-249` TUN read, `:547` encap-and-send), or into the kernel GRE
+netdev which encapsulates natively (`pkg/routing/tunnel.go`
+tunnelManager). Pre-handshake WG traffic (`EncapError::NoSession` →
+build None, `frame/wg.rs:101-106`) and missing-outer-neighbor
+transit DEPEND on this; a blanket drop would regress cold-start.
+Resolvability is the correct proxy for "the kernel still has the
+tunnel": the same commit that removes the endpoint row removes the
+netdev/route. (Conditional-vs-blanket is pinned as §11 Q1 for round
+3.)
+
+**R-E: keep tunnel-marked frames out of in-place TX paths (AGY r2
+MAJOR, verified).** `pending_neigh` buffers frames awaiting OUTER
+neighbor resolution; `retry_pending_neigh` then TXes them via
+`rewrite_forwarded_frame_in_place` — MAC/VLAN/NAT rewrite only, NO
+encapsulation (`frame/mod.rs:630-660`), so a tunnel-marked buffered
+frame would go out PLAINTEXT on the physical wire when the neighbor
+resolves (`neighbor_dispatch.rs:200-260`; no tunnel gate exists at
+the enqueue sites — verified). Fix, two layers:
+1. At the `pending_neigh` admission sites
+   (`poll_descriptor/mod.rs:~2377,~2695`): tunnel-marked decisions
+   are NOT buffered — route them to the R-C-gated reinjector instead
+   (the kernel path performs its own neighbor resolution, so
+   buffering is unnecessary for tunnel egress).
+2. Defense-in-depth in `retry_pending_neigh`: a tunnel-marked entry
+   (should now be unreachable) is dropped + counted, never
+   in-place-TXed.
 
 **R-D: apply-time session purge on id remap (Codex r1 MAJOR 1
 required-change option, adopted).** Hash stability makes remaps rare
@@ -331,10 +420,12 @@ cross-node divergence. Rejected for the same reason.)
   `SessionSyncRequest`: byte-identical schemas.
 - Rust (v2): three bounded functional changes, none wire-visible:
   internal `TunnelEndpoint` gains the logical `interface` name field
-  (R-D owner identity); the forward-build-failure path gains the
-  tunnel drop gate (R-C); the coordinator apply paths gain the remap
-  purge (R-D). No serde struct changes; no hot-path steady-state
-  changes.
+  (R-D owner identity); the slow-path reinjection chokepoint gains
+  the conditional tunnel gate (R-C); the pending-neighbor
+  admission/retry paths gain tunnel exclusion (R-E); the coordinator
+  apply paths gain the remap purge (R-D). No serde struct changes;
+  no steady-state hot-path changes (gates sit on failure/cold
+  paths).
 - New `pkg/config` exported helper `StableTunnelEndpointID` + a
   commit-check validation (R-B) — additive API.
 
@@ -358,12 +449,12 @@ cross-node divergence. Rejected for the same reason.)
 5. **No Manager state / no locks**: builder runs on the commit path
    and in tests without a Manager; keeping the function pure preserves
    that.
-6. **Tunnel traffic never falls back to kernel forwarding of the
-   inner packet** (R-C — new invariant, replacing v1's incorrect
-   "absent id ⇒ drop" claim). The builders' `?` returns
-   (`frame/wg.rs:52`, `gre.rs:308`) are necessary but NOT sufficient;
-   the dispatch-level fallback mapping is where the guarantee must be
-   enforced.
+6. **A tunnel-marked inner packet leaves the box either ENCAPSULATED
+   or NOT AT ALL** (R-C+R-E — replacing v1's incorrect "absent id ⇒
+   drop" claim). Kernel reinjection counts as encapsulated ONLY while
+   the id resolves (the kernel then owns the wgN/GRE encap); an
+   unresolvable id drops at the chokepoint, and no in-place TX path
+   may transmit a tunnel-marked frame.
 7. **Node-scoped config caveat** (Claude SMR r1 R2): `groups nodeN`
    tunnel stanzas make the EFFECTIVE config differ per node by
    design; a node-scoped tunnel exists only in that node's id domain.
@@ -378,7 +469,7 @@ cross-node divergence. Rejected for the same reason.)
 
 | Class | Level | Notes |
 |---|---|---|
-| Behavioral regression | MED | Ids change once at upgrade (one-time engine rebuild + synced-session resync — equivalent to what every commit does today). R-C converts a (wrong) plaintext-forward behavior into a drop — strictly safer but observable. R-D purge must not over-purge (guarded by logical-name identity, §7.8) or under-purge (guarded by tests). |
+| Behavioral regression | MED | Ids change once at upgrade (one-time engine rebuild + synced-session resync — equivalent to what every commit does today). R-C converts a (wrong) plaintext-forward behavior into a drop for unresolvable ids only — cold-path reinjection for resolvable ids is preserved (blanket drop would regress WG cold start). R-E drops tunnel frames that today would leak plaintext from the neighbor-retry path. R-D purge must not over-purge (guarded by logical-name identity, §7.8) or under-purge (guarded by tests). |
 | Lifetime / borrow-checker | LOW | R-D needs prev/next state access in the coordinator apply paths — coordinator already holds both (`populate_wg_engines(state, previous)` pattern). No new shared ownership. |
 | Performance regression | NONE | Commit-path + failure-path only; one FNV hash per tunnel per snapshot build; purge walk is O(sessions) once per apply with changed tunnel set. |
 | Architectural mismatch | LOW | Numeric u16 identity is kept (hot-path + wire constraints demand it); the allocator becomes content-addressed and the runtime gains the two guards (drop gate, purge) that make numeric identity safe. B/C/D evaluated and rejected above, not deferred. |
@@ -406,10 +497,20 @@ cross-node divergence. Rejected for the same reason.)
   - `forwarding_build/tests.rs`: two snapshots where a middle endpoint
     is removed but the others keep their ids — `populate_wg_engines`
     preserves engine Arc identity (`Arc::ptr_eq`) for survivors.
-  - **R-C pin**: a forward request with `tunnel_endpoint_id != 0`
-    whose id is absent from `tunnel_endpoints` is DROPPED — no
-    slow-path enqueue (assert the reinjector saw nothing /
-    `tunnel_encap_unresolved` counter increments).
+  - **R-C pins (Codex r2 required-change test matrix)**: a
+    tunnel-marked packet with an ABSENT id is dropped (no slow-path
+    enqueue, `tunnel_encap_unresolved` increments) through each
+    door: (a) build-failure fallback, (b) NoRoute disposition,
+    (c) MissingNeighbor disposition, (d) FabricRedirect
+    missing-binding `Owned` frame. PLUS the cold-path preservation
+    pin: a tunnel-marked packet whose id RESOLVES (e.g. WG
+    NoSession build failure) IS reinjected — blanket-drop
+    regressions fail this test.
+  - **R-E pins**: a tunnel-marked decision with outer
+    MissingNeighbor is never admitted to `pending_neigh` (goes to
+    the gated reinjector); a synthetic tunnel-marked entry forced
+    into `pending_neigh` is dropped by `retry_pending_neigh`, never
+    in-place-TXed.
   - **R-D pins**: apply a next-state where (a) an id vanished — its
     sessions are purged; (b) an id's logical name changed — purged;
     (c) an id's linux_name changed but logical name didn't — NOT
@@ -465,56 +566,47 @@ cross-node divergence. Rejected for the same reason.)
 - Mixed-version compat shim for the one-time upgrade re-id (documented
   instead).
 
-## 11. Open questions for adversarial review round 2 (each may PLAN-KILL)
+## 11. Open questions for adversarial review round 3 (each may PLAN-KILL)
 
-1. Is the **mixed-version upgrade window** (residual 3) acceptable
-   without a shim? The HA pair will degrade tunnel-session sync until
-   both nodes run the new allocator. If a reviewer can show a
-   persistent (not window-bounded) failure mode, that kills Path A as
-   specified.
-2. **R-B fail-closed**: is a commit error the right collision policy
-   for an UPGRADING user whose existing config already collides
-   (their next commit fails until they rename an interface — a
-   user-visible regression on a previously-working config)? The
-   alternative (drop-later-sorting + error log only) keeps commits
-   green but installs fewer tunnels than configured. We chose loud
-   failure; argue otherwise with a worked operator scenario.
-3. **R-D purge propagation**: the plan routes purges through the
-   existing session-delete machinery so HA delete-sync and the Go
-   shadow conntrack stay coherent. Evidence the path exists:
-   `SessionDeltaKind::Close` deltas flow through
-   `flush_session_deltas` (`session_delta.rs:164-192` — live-table
-   delete + shared-map removal + peer-worker replication + event
-   stream) and the Go side maps close/delete events to
-   `SessionDeltaReasonClose` (`runtime_delta.go:121`). R-D's purge
-   must inject Close-class deltas through THAT machinery (not a
-   bespoke walk). Reviewers should verify the standby-side synced
-   entries are likewise purged (the standby also applies snapshots,
-   so its own R-D walk covers entries the active never deletes) and
-   kill R-D's design if purged sessions would linger on the peer and
-   resync back.
-4. Did the consumer map miss an id surface? Specifically checked:
-   flow cache (generation-stamped, safe), routes (rebuilt per state),
-   telemetry (#1876, name-keyed), `wgfmt.go`/status display
-   (informational), `bpf_map`/segmentation/dispatch boolean gates;
-   Codex r1 confirmed no dense/array-by-id consumer. Round 2 should
-   hunt specifically around the R-C/R-D touch points.
-5. Should the Go side ALSO re-stamp `val.FibGen` on snapshot change
-   (Go shadow conntrack entries keep the id the helper reported at
-   session creation)? Under Path A the stored id stays correct for
-   surviving tunnels; removed/remapped ids are purged by R-D (and the
-   purge propagates per Q3). We claim no re-stamping is needed.
-   Counter-trace welcome.
-6. **R-C completeness**: are there OTHER sites beyond
-   `tx/dispatch/mod.rs` build-failure handling where a tunnel-marked
-   decision can reach `maybe_reinject_slow_path*` (e.g.
-   `poll_descriptor` slow-path callers with NoRoute disposition from
-   `resolve_tunnel_forwarding_resolution`)? The implementation must
-   enumerate every caller; reviewers should verify the enumeration.
-7. Is R-D **over-engineering** for a ~1/65535 event given R-C already
-   prevents the plaintext leak and wrong-tunnel encap requires the
-   reuse coincidence? Counter-argument to dropping R-D: the one-time
-   positional→hash upgrade re-id makes EVERY existing tunnel session
-   remap exactly once per upgrade, and R-D is what makes that
-   boundary clean. PLAN-KILL of R-D alone (descope) is a valid
-   verdict if the upgrade boundary is shown safe without it.
+Settled in rounds 1-2 (do not re-litigate without NEW evidence):
+mixed-version window acceptable/self-healing (r2 Q1, both
+reviewers); fail-closed commit error correct (r2 Q2); R-D
+propagation sound via Close deltas, standby purge does not resync
+back (`daemon_ha_userspace.go:566,765`, `sync_conn.go:832`); no
+dense/array-by-id consumer (r1+r2 Q4); no FibGen re-stamp (r2 Q5);
+R-D necessary, not over-engineering (r2 Q7); GRE local-origin
+lifecycle out-of-scope call correct (AGY r2 Q8).
+
+1. **Conditional vs blanket R-C gate** — the one open design
+   divergence. Codex r2's required change asked for "any
+   tunnel-marked decision must not enqueue to the kernel slow-path
+   TUN"; v3 implements a CONDITIONAL gate (reinject iff id resolves)
+   because the resolvable-id reinjection is the designed cold path:
+   kernel routes the inner packet into the wgN TUN that `wg_control`
+   reads and encrypts (`wg_control.rs:214-249,547`) or into the
+   kernel GRE netdev that encapsulates natively. A blanket drop
+   black-holes pre-handshake WG traffic and missing-outer-neighbor
+   transit. Counter-evidence that the conditional gate still leaks
+   plaintext somewhere (e.g. a case where the id resolves in
+   `ForwardingState` but the kernel lacks the tunnel netdev/route
+   for the inner destination NON-transiently) would force blanket +
+   a userspace cold-path queue — a much bigger change. Reviewers:
+   trace it or ratify the conditional gate.
+2. **R-E admission rerouting**: v3 sends tunnel-marked
+   MissingNeighbor packets to the gated reinjector instead of
+   `pending_neigh`. Is any tunnel mode harmed by skipping the
+   userspace outer-neighbor buffering (e.g. a transport table whose
+   kernel-side route differs from the userspace FIB view)? Worked
+   trace required to object.
+3. **R-C/R-E counter visibility**: `tunnel_encap_unresolved` (+ the
+   R-E drop counter) should surface in status/telemetry so the live
+   validation can pin them. Any objection to extending
+   `ProcessStatus` (additive JSON, both-sides serde default)?
+4. **Purge-walk coverage**: R-D purges shared synced/NAT/forward-wire
+   maps + worker session tables via Close deltas. Are there OTHER
+   session stores holding `tunnel_endpoint_id` that the walk must
+   visit (e.g. `recent_session_deltas` ring, eventstream replay
+   buffers)? They are display/telemetry-only by our reading —
+   confirm.
+5. Any remaining hole in the v3 design that makes Path A worse than
+   shipping nothing? PLAN-KILL remains a valid verdict.
