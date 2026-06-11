@@ -1,6 +1,6 @@
 # #1864 — `make generate` produces a verifier-killing userspace-xdp shim: pin the BPF toolchain + add load guards
 
-Revision: r2 (2026-06-11) — folds in AGY r1 findings 2-5, Claude SMR F1/F2
+Revision: r3 (2026-06-11) — r2 + Codex r1 F1-F8 + AGY r2 F7-F9 + SMR r2 folds
 Branch: `research/1864-toolchain-pin`
 Status: round 2 — awaiting 3-way convergence (Codex + AGY + Claude SMR)
 
@@ -101,8 +101,12 @@ never implicitly) with `components = ["rust-src"]`. This also fixes
 rust-analyzer/IDE and ad-hoc `cargo` invocations in the crate dir
 (AGY r1 F4a). `build-userspace-xdp.sh`:
 
-- Parses the pin from `rust-toolchain.toml` (one authority);
-  `TOOLCHAIN="${RUST_BPF_TOOLCHAIN:-<parsed pin>}"`. Explicit
+- Parses the pin from `rust-toolchain.toml` (one authority) with a
+  quote/comment-tolerant extraction AND validates the result against
+  `^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$`, failing loudly on
+  empty/garbled parse — never falling back to an unpinned toolchain
+  (AGY r2 F8; same fail-loud contract as the existing MAX_INTERFACES
+  awk parse). `TOOLCHAIN="${RUST_BPF_TOOLCHAIN:-<parsed pin>}"`. Explicit
   `RUST_BPF_TOOLCHAIN=...` override still allowed (needed for bisects
   and pin bumps) — the Path-C gate still applies either way. Because
   the script always passes an explicit `+${TOOLCHAIN}`, the override
@@ -201,8 +205,11 @@ safe, so it does not replace A or C.
   ~128 MB+ even empty; `userspace_sessions` 262144 is preallocated —
   hash-map max_entries does not feed program safety analysis, so the
   verifier outcome is unchanged; array maps are left alone), and the
-  deploy hook runs the subcommand under `nice -n 19` so a ~17 s REJECT
-  walk cannot starve dataplane cores. `deploy_vm()` in
+  deploy hook runs the subcommand under `nice -n 19` **and `taskset`
+  pinned away from the AF_XDP worker cores** (AGY r2 F7: nice alone
+  still grants minimum-granularity timeslices on a worker core — a
+  1-6 ms preemption overflows NIC RX rings at line rate; affinity to
+  a housekeeping core removes the hazard entirely). `deploy_vm()` in
   `test/incus/cluster-setup.sh` pushes the new binary to a temp path
   and runs `verify-dataplane` on the node **before** `systemctl stop
   xpfd`; failure aborts that node's deploy with the old daemon still
@@ -267,6 +274,14 @@ the known trigger, so ship all three layers:
   cargo +<pin> fmt --check / clippy --release / test` exactly as the
   PR documents them; gates must not be run against the floating
   `nightly`.
+- **Reproducibility gate (AGY r2 F9):** the PR validation runs
+  `make generate` with the pinned toolchain and asserts
+  `git diff --exit-code pkg/dataplane/userspace_xdp_bpfel.o` — the
+  committed object must be bit-for-bit what the pinned toolchain
+  produces, closing the `XPF_SHIM_ALLOW_UNPINNED_INSTALL` commit
+  escape. Feasibility verified in this research: same pin ⇒ identical
+  md5 across consecutive rebuilds AND across a different checkout
+  path (no workdir leakage into the object).
 - New tracked `.o` (regenerated with B + pinned toolchain) must PASS
   C1 locally AND be smoke-validated by the parent on the loss cluster
   (one guarded `make generate` + deploy cycle under the cluster lock)
