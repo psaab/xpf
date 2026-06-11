@@ -113,7 +113,29 @@ per-worker demand → less stranding) is not supported. (s24-r1/r2 ran
 with the 6g buffer-size still applied due to a failed revert — §2.4
 shows that knob is rate-neutral, and s24-r3 reproduces clean.)
 
-### 2.7 Per-queue counter signatures (carried from §2.1-2.4 cells)
+### 2.7 Inelastic-demand discriminator (udp3g): supply-side confirmed
+
+The strongest alternative to a lease-side account is demand-side: TCP
+cwnd/RTT collapse under aggressor-inflated queueing could depress
+demand so grants merely FOLLOW it (grants==sends would hold either
+way). Discriminator: 3g as open-loop UDP at 110% of shape (~3.3 G
+offered; generator ceiling ~2.9 G/process is still well above the
+~2.1 G supply-side prediction) against a FULL-strength 24 G TCP
+aggressor — 2 reps:
+
+| | 3g delivered | 3g loss | 6g (TCP) | prediction if demand-side | if supply-side |
+|---|---|---|---|---|---|
+| udp3g-r1 | 2.07 G (68.9%) | **37.4%** | 69.0% | ~2.9 G, ~0-3% loss | ~2.1 G, ~25-30% loss |
+| udp3g-r2 | 2.04 G (68.0%) | **38.1%** | 66.9% | | |
+
+Inelastic constant-pressure demand is dropped down to the SAME ~69%
+level as elastic TCP. The constraint is the supply path, not TCP
+dynamics. (The 1614 corpus's UDP cell showed 3g at 85-88% — but its
+24g sender was generator-capped at ~2.9 G, i.e. a weak aggressor;
+these two cells bracket the variable: weak aggressor 85-88%, full
+aggressor 68-69%, inelastic demand in both.)
+
+### 2.8 Per-queue counter signatures (carried from §2.1-2.4 cells)
 
 - Waterfill epoch turnover: alone ~48 µs/worker-epoch (Phase-2 wrap
   turnover) vs 135-155 µs (+24g, time-tick-dominated): the lockout is
@@ -178,7 +200,7 @@ implements, per class (per-queue lease shared by 6 workers):
   share (the deliberate post-#1231-v5.5 design, comment at
   `:1486-1496`); the narrow `bypass_grace` escape arms only when
   three conditions co-fire (`rotate_epoch_v8.rs:313`), which the
-  §2.7 counters show effectively never happens in these cells;
+  §2.8 counters show effectively never happens in these cells;
 - shares are NOT carried for a worker that fails to claim them: a
   worker only acquires when the drain loop visits its queue
   (`maybe_top_up_cos_queue_lease` at the selector sites), so a
@@ -196,9 +218,12 @@ cadence. A backlogged Phase-2 aggressor consumes most selector calls
 and per-pass drain time (24g takes one ~66 KB batch per call —
 phase2 == budget_breaks), stretching each worker's revisit interval
 to the mid-class queues (6g eligible-visit spacing roughly doubles
-vs alone in §2.7 data); slower per-worker acquire sampling against a
+vs alone in §2.8 data); slower per-worker acquire sampling against a
 fixed 200 µs share-evaporation clock + strict no-reclaim = stranded
-share. The s24 cell (§2.6) is consistent (more per-pass work →
+share — and §2.7 proves the depressed delivery is supply-side (an
+inelastic 110%-offered 3g is dropped to the same ~69%), closing the
+demand-side (TCP cwnd/RTT) alternative. The s24 cell (§2.6) is
+consistent (more per-pass work →
 slightly worse); cell P is consistent (bigger banking per visit
 cannot recover share that was never claimable); the undergrant-cause
 mix is the direct signature (own-share exhaustion dominant on
