@@ -1,0 +1,73 @@
+diff --git a/userspace-dp/src/afxdp/flow_cache.rs b/userspace-dp/src/afxdp/flow_cache.rs
+index 5205a5bf2..a02bb8cf1 100644
+--- a/userspace-dp/src/afxdp/flow_cache.rs
++++ b/userspace-dp/src/afxdp/flow_cache.rs
+@@ -438,32 +438,30 @@ impl FlowCache {
+     /// periodic scan; not on the hot path.
+     /// O(N) over `FLOW_CACHE_SIZE` (4096 entries, see top of this file).
+     #[cfg(test)]
+-    pub(super) fn count_active_flows(&self) -> u32 {
++    pub(super) fn count_active_flows(&mut self) -> u32 {
+         let mut active = 0u32;
+-        for slot in self.entries.iter() {
++        let current = self.current_epoch;
++        for slot in self.entries.iter_mut() {
+             if let Some(entry) = slot {
+-                if self.active_entry_age(entry).is_some() {
+-                    active = active.saturating_add(1);
++                if entry.last_used_epoch != 0 {
++                    let age = current.wrapping_sub(entry.last_used_epoch);
++                    if age < ACTIVE_WINDOW_EPOCHS {
++                        active = active.saturating_add(1);
++                    } else {
++                        // Clamp: sentinel-clear expired entry to prevent wrap resurrection
++                        entry.last_used_epoch = 0;
++                    }
+                 }
+             }
+         }
+         active
+     }
+ 
+-    fn active_entry_age(&self, entry: &FlowCacheEntry) -> Option<u16> {
+-        // last_used_epoch == 0 marks "never touched"; skip.
+-        if entry.last_used_epoch == 0 {
+-            return None;
+-        }
+-        let age = self.current_epoch.wrapping_sub(entry.last_used_epoch);
+-        (age < ACTIVE_WINDOW_EPOCHS).then_some(age)
+-    }
+-
+     /// #1249: return a bounded active-flow debug map from the same
+     /// owner-only scan that backs `count_active_flows`. This runs on
+     /// the worker's debug/status cadence, not in the packet path.
+     pub(super) fn active_flow_debug_entries(
+-        &self,
++        &mut self,
+         limit: usize,
+     ) -> (u32, Vec<FlowCacheDebugEntry>, Vec<CoSActiveFlowCount>, bool) {
+         let limit = limit.min(FLOW_CACHE_SIZE);
+@@ -471,13 +469,20 @@ impl FlowCache {
+         let mut truncated = false;
+         let mut rows = Vec::with_capacity(limit.min(64));
+         let mut cos_counts = BTreeMap::<(i32, u8), u32>::new();
+-        for slot in self.entries.iter() {
++        let current = self.current_epoch;
++        for slot in self.entries.iter_mut() {
+             let Some(entry) = slot else {
+                 continue;
+             };
+-            let Some(age_epochs) = self.active_entry_age(entry) else {
++            if entry.last_used_epoch == 0 {
+                 continue;
+-            };
++            }
++            let age_epochs = current.wrapping_sub(entry.last_used_epoch);
++            if age_epochs >= ACTIVE_WINDOW_EPOCHS {
++                // Clamp: sentinel-clear expired entry to prevent wrap resurrection
++                entry.last_used_epoch = 0;
++                continue;
++            }
+             active = active.saturating_add(1);
+             if let Some(queue_id) = entry.descriptor.tx_selection.queue_id {
+                 let key = (entry.descriptor.egress_ifindex, queue_id);
