@@ -1,6 +1,6 @@
 # #1863 — CoS guarantee-rate honored-realization gap: ceiling kill-exit closed; rate-setter localized to the v8 lease claim path
 
-- **Revision:** v3 (round 1 reviews folded: Codex task-mq9e1trx-7ojkuy
+- **Revision:** v3.1 (Codex r2 residual folded — three stale v2.1 passages aligned with the mandatory Step-0 instrument; round 1 reviews folded: Codex task-mq9e1trx-7ojkuy
   PLAN-NEEDS-CHANGES ×6, AGY adversarial-review-mq9dmdjw-pyccjl
   PLAN-NEEDS-CHANGES ×4, Claude SMR ×4 — all doc-level; v1's
   watermark/lockout sub-hypothesis was falsified by this session's own
@@ -247,11 +247,10 @@ What this session did NOT pin: the exact split between (a)
 share/demand mismatch across workers (flow-count-proportional shares
 vs unequal per-worker deliverable demand) and (b) pure
 sampling-loss (visits < 1 per epoch). Both are inside `acquire_v8`'s
-strict-share design; both are addressed by the same family of fixes
-(§5); the split is measurable during /engineer with one added
-per-class counter pair if needed (grant-requested vs grant-given
-already exists per-worker; the per-class split is derivable from the
-§2.5 accounting at fix-validation time).
+strict-share design. Resolving this split is MANDATORY before the
+fix is coded — it is the Path-A Step-0 instrument (§5) with a
+registered decision rule (b-dominant → A-ii; a-dominant → Path B);
+it is NOT deferred to fix-validation time.
 
 ### 4.3 Residual open observation (Q1)
 
@@ -409,9 +408,10 @@ differential-test precedent for fairness-neutral claims.
   to reach the dataplane via its counter signature (B/honor +83%) —
   the rate-invariance is not a no-op artifact.
 - **Pooled grant metrics**: §2.5 grant totals are all-class pooled
-  per worker (#1692 caveat) — the per-class identity is established
-  by the class-level send counters and the cells where a single knob
-  isolates one class.
+  per worker (#1692 caveat) — they establish a worker-pooled
+  implication only. The per-class grant identity is NOT established
+  by existing counters; capturing it is the mandatory Path-A Step-0
+  instrument (§5).
 - **raw/MANIFEST.md** (Codex r1 F6) records per-cell incident labels
   machine-auditably: which cells are decisive, corroborating,
   tainted-excluded, or mislabeled-baseline.
@@ -425,9 +425,10 @@ differential-test precedent for fairness-neutral claims.
 - **Q2**: Path A's room-bounded reclaim vs the #1231 v5.5 strictness
   rationale — is the "reclaim only evaporating room" argument sound,
   or does the iperf-d regression generalize to it?
-- **Q3**: is the (a)/(b) split (share mismatch vs sampling loss)
-  worth a dedicated pre-fix instrument, or is fix-validation-time
-  derivation (§4.2 end) sufficient?
+- **Q3** (RESOLVED round 1 — AGY F2 + Codex F2 + SMR F2 concur):
+  the (a)/(b) split instrument is MANDATORY pre-fix (Path-A Step 0,
+  §5) with the registered A-ii-vs-B decision rule; fix-validation-
+  time derivation is insufficient.
 - **Q4** (RESOLVED round 1 — AGY F3 + SMR concur): the `burst/8`
   queue-lease ceiling fix ships as a decoupled hygiene PR with
   latency-focused validation (see §5 sibling item).
