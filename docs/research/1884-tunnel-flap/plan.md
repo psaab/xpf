@@ -2,10 +2,12 @@
 
 ## 1. Status
 
-DRAFT v2 — r1 verdicts: Codex PLAN-NEEDS-REVISION (5 findings), AGY
-PLAN-NEEDS-REVISION (2 critical + Q-answers), Claude SMR
-PLAN-NEEDS-REVISION (2 MAJOR; its Q3 answer was refuted by AGY/Codex
-and retracted). All r1 findings folded below; revision markers `[r1:*]`.
+DRAFT v3 — r2 verdicts: AGY PLAN-READY (ratified all six §11 r2
+questions; one nil-guard note folded), Codex PLAN-NEEDS-REVISION (5
+mechanics findings, all folded, markers `[r2:*]`), Claude SMR
+PLAN-READY-contingent (SMR2-1 = Codex r2 F1, SMR2-2 stop-helper map
+delete — both folded). r1 history: all three PLAN-NEEDS-REVISION,
+folded in v2 (`[r1:*]`).
 
 ## 2. Issue framing
 
@@ -49,9 +51,12 @@ This is a correctness/operational-stability fix, not a perf change. The
 win: commit-time invariant "untouched tunnel ⇒ untouched netdev"
 (matching the project's established networkd idempotency pattern —
 `.link`/`.network` files are diffed and `networkctl reload` runs only
-when files actually change). The cost: ~200 lines of reconcile logic in
-one file plus tests. Blast radius is `pkg/routing/tunnel.go` only (plus
-the `linkOps` test fake). No Rust-side change: the #1881/#1887 lane owns
+when files actually change). The cost: ~250 lines of reconcile logic
+plus tests. Blast radius: `pkg/routing/tunnel.go` (the mechanism), plus
+two small additive touches for the desired-MTU plumbing [r2: Codex F2]
+— a `TunnelConfig.MTU` field (`pkg/config/types_routing.go`) and its
+population in `collectAppliedTunnels` (`pkg/daemon/daemon_run.go`) —
+and the `linkOps` test fake. No Rust-side change: the #1881/#1887 lane owns
 the TUN-reader lifecycle; this fix simply makes Go-side recreates rare,
 and on a legitimate recreate the contract is #1887's tombstone→respawn.
 
@@ -80,12 +85,16 @@ PLAN-KILL is an acceptable verdict.
   tunnel is a TUN anchor. The non-anchor kernel GRE/IPIP branch remains
   reachable only via the legacy standalone-CLI path
   (`pkg/cli/apply.go:83`, which never sets AnchorOnly).
-- **MTU ownership** [r1: Codex F3 / AGY Q7]: tunnel-anchor MTU is owned
-  DOWNSTREAM of ApplyTunnels — `pkg/dataplane/compiler_iface.go:351,
-  452,553` apply config-driven `LinkSetMTU` later in the same
-  applyConfig run, and the userspace snapshot reads the LIVE link MTU
-  into tunnel endpoints (`pkg/dataplane/userspace/interfaces.go:375`,
-  `tunnels.go:113`). The reconcile must not fight that owner.
+- **MTU ownership** [r1: Codex F3 / AGY Q7; refined r2: Codex F2]:
+  ongoing config-MTU reconcile is owned DOWNSTREAM of ApplyTunnels —
+  `pkg/dataplane/compiler_iface.go:351,452,553` apply config-driven
+  `LinkSetMTU` later in the same applyConfig run, BUT only through the
+  ZONE interface path (compiler_iface.go:299,449): an UNZONED tunnel's
+  configured MTU is never restored by that stage. The userspace
+  snapshot reads the LIVE link MTU into tunnel endpoints
+  (`pkg/dataplane/userspace/interfaces.go:368`, `tunnels.go:106`).
+  Hence A.3 writes the DESIRED MTU on adoption (not a blanket 1500)
+  and never writes on owned reuse.
 
 ## 5. Concrete design
 
@@ -155,19 +164,37 @@ desired := make(map[string]bool, len(tunnels))
 for _, tc := range tunnels {
     if tc.Mode != "wireguard" { desired[tc.Name] = true }
 }
-for name := range t.ownedNames {
+oldOwned := t.ownedNames // [r2: Codex F1] entry-time snapshot — the
+                         // ADOPTION authority for A.3; never consult
+                         // the rewritten set for adoption decisions.
+next := make(map[string]bool, len(desired))
+for k := range desired { next[k] = true }
+for name := range oldOwned {
     if desired[name] { continue }
-    t.stopKeepaliveLocked(name)          // new: per-name stop+drain
-    delete(t.appliedAddrs, name)
+    t.stopKeepaliveLocked(name)  // new: cancel + drain + DELETE the
+                                 // t.keepalives entry [r2: SMR2-2 —
+                                 // a corpse left in the map makes
+                                 // GetKeepaliveState lie and lets A.7
+                                 // "retain" a cancelled runner]
     if link, err := t.ops.LinkByName(name); err == nil {
-        _ = t.ops.LinkDel(link)          // log per current clearLocked
+        if delErr := t.ops.LinkDel(link); delErr != nil {
+            // [r2: Codex F5] retain ownership on failed delete so the
+            // next Apply retries instead of orphaning the link.
+            next[name] = true
+            slog.Warn(...)
+            continue
+        }
     }
+    delete(t.appliedAddrs, name) // only once gone/deleted
 }
-t.ownedNames = desired
+t.ownedNames = next
 t.tunnels = nil // rebuilt by the loop (GetStatus source, as today)
 ```
 
 Restart bootstrap: empty `ownedNames` ⇒ deletes nothing ⇒ adoption.
+Name-only ownership cannot detect an external same-name replacement
+between applies — identical to today's clearLocked-by-name behavior
+(Codex r2 Q4), documented, not a regression.
 `Clear()`/`clearLocked()` keep delete-everything semantics (clearLocked
 additionally clears `ownedNames`/`appliedAddrs`); note
 `Manager.ClearTunnels` currently has ZERO callers (routing.go:148
@@ -196,6 +223,14 @@ Any check fails ⇒ `LinkDel` + recreate (`replacing non-TUN tunnel
 anchor` log, with reason). All pass ⇒ reuse:
 
 ```go
+// [r2: Codex F1 / SMR2-1] adoption authority is the ENTRY-TIME
+// ownership snapshot — A.1 has already rewritten t.ownedNames by the
+// time the loop runs, which would mark every desired tunnel "owned"
+// and make adoption unreachable (and, via the EEXIST path, would
+// conversely fire the MTU write on an owned tunnel during a transient
+// race). One flag, both reuse paths:
+adopting := !oldOwned[tc.Name]
+
 link, err := t.ops.LinkByName(tc.Name)
 mustCreate := err != nil
 if err == nil && !anchorReusable(link) { LinkDel; mustCreate = true }
@@ -207,26 +242,41 @@ if mustCreate {
         // anything else ⇒ warn + continue (no unbounded retry).
         if existing, lkErr := t.ops.LinkByName(tc.Name); lkErr == nil && anchorReusable(existing) {
             link = existing
-            adopted = true
+            reused = true
         } else { warn; continue }
     } else { closeTuntapFiles(anchor.Fds); link = anchor; created = true }
-} else { adopted = (not in t.ownedNames); slog.Debug("tunnel anchor reused", ...) }
+} else { reused = true; slog.Debug("tunnel anchor reused", ...) }
 
-// [r1: Codex F3] MTU-reset-on-ADOPT: when reusing/adopting a TUN this
-// manager did NOT own at last apply (restart adoption, wireguard→gre
-// same-name flip, foreign-but-compatible TUN), reset MTU to the TUN
-// default 1500 iff it differs. Owned reuse (name ∈ ownedNames at
-// entry) NEVER touches MTU — config-driven MTU is owned downstream
-// (compiler_iface LinkSetMTU, same applyConfig run, AFTER this), so a
-// per-commit reset here would bounce MTU against that owner every
-// commit. Adoption-reset bounces at most once per daemon lifetime and
-// is corrected by the compiler stage milliseconds later, with no
-// ifindex change. Closes the WG→GRE leak: the dataplane snapshot
-// reads live MTU (interfaces.go:375, tunnels.go:113) and must not
-// inherit the WG-reduced ~1420.
-if adopted && link.Attrs().MTU != 1500 { t.ops.LinkSetMTU(link, 1500) }
+// [r1: Codex F3][r2: Codex F2] MTU-set-on-ADOPT, to the DESIRED value:
+// when reusing a TUN this manager did NOT own at last apply (restart
+// adoption, wireguard→gre same-name flip, foreign-but-compatible TUN),
+// set MTU to the config-desired value — tc.MTU (new field, populated
+// by collectAppliedTunnels from the interface/unit MTU config),
+// defaulting to the TUN default 1500 when unconfigured. Setting the
+// DESIRED value (not blanket 1500) closes the r2 hole: the compiler
+// MTU stage runs through the ZONE interface path
+// (compiler_iface.go:299,449), so an UNZONED tunnel's configured MTU
+// would never be restored after a 1500 reset, and the userspace
+// snapshot would publish 1500 (live-MTU reads at interfaces.go:368,
+// tunnels.go:106). Owned reuse (adopting == false) NEVER touches MTU —
+// ongoing config-MTU reconcile stays owned by the compiler stage, and
+// a per-commit write here would fight it. Closes the WG→GRE leak (the
+// snapshot must not inherit the WG-reduced ~1420) with NO transient
+// bounce at all.
+if reused && adopting {
+    if want := tc.MTU; want == 0 { want = 1500 }
+    if link.Attrs().MTU != want { t.ops.LinkSetMTU(link, want) }
+}
 // shared tail: LinkSetUp, reconcileLinkAddrs, VRF bind/unbind
 ```
+
+`tc.MTU` plumbing: `config.TunnelConfig` gains an `MTU int` field
+(additive; zero = unconfigured) and `collectAppliedTunnels`
+(daemon_run.go:83-119) copies the owning interface's `ifc.MTU` (or the
+unit's `unit.MTU` when the tunnel is unit-level and unit MTU is set —
+the compiler's unit-overrides-interface precedence,
+compiler_iface.go:545-553) into each emitted TunnelConfig. The legacy
+CLI path leaves it 0 ⇒ default 1500 on adopt, today's effective value.
 
 This preserves the #1706 invariant (operate on the kernel-fetched link;
 the `hiddenUntil`/`addExisting` race tests in iface_reuse_test.go:29,
@@ -241,14 +291,22 @@ folded]. Extract a helper
   repair, as the WG block does today);
 - delete a present-but-unconfigured LINK-LOCAL address ONLY if it is in
   `applied` — the per-link record `t.appliedAddrs[name]` of addresses
-  this manager itself configured. Blanket-skipping link-local (the WG
+  this manager itself configured (`applied == nil` is the WG sentinel:
+  skip ALL link-local deletion, current WG semantics — guard is
+  `applied != nil && applied[key]` to avoid the nil-map read [r2: AGY
+  note]). Blanket-skipping link-local (the WG
   precedent, tunnel.go:452-453) would leak CONFIGURED fe80 addresses
   forever once removed from config (GRE unit tunnels DO configure fe80
   — compiler_interfaces.go:648 populates unit addresses; e.g.
   parser_cluster_test.go:1143 `fe80::8/64`), while deleting ALL stale
   link-local would tear down the kernel's autoconf fe80 (which the WG
   comment correctly protects). The applied-set split serves both.
-- update `t.appliedAddrs[name]` to the addresses now ensured.
+- update `t.appliedAddrs[name]` to: addresses now ensured (successful
+  or already-present adds of configured addresses) **∪ link-local
+  addresses whose stale-delete FAILED** [r2: Codex F4] — dropping a
+  failed-delete LL from `applied` would orphan it forever (still
+  present in the kernel, never again deletable by the LL rule); keep it
+  tracked until `AddrDel` succeeds or the address is observed absent.
 
 WG branch: extraction reuses the helper but passes a nil applied-set
 sentinel preserving its current blanket-LL-skip behavior byte-identical
@@ -259,18 +317,30 @@ Restart residual: `appliedAddrs` is not persisted; a configured fe80
 removed from config WHILE the daemon was down survives adoption. Same
 residual class as stale-anchor orphans (§10), documented.
 
-**A.5 — VRF bind AND unbind** [r1: Codex OQ2 invariant stated]. All
+**A.5 — VRF bind, and unbind ONLY what this manager bound** [r2: Codex
+F3 folded — the v2 "exclusive ownership" invariant was FALSE]. All
 branches keep `BindInterfaceToVRF` when `tc.RoutingInstance != ""`.
-When `tc.RoutingInstance == ""` and the reused link reports
-`MasterIndex != 0`, call `t.ops.LinkSetNoMaster(link)` — the recreate
-this replaces implicitly cleared VRF membership. **Stated ownership
-invariant**: a tunnel link's master is owned EXCLUSIVELY by
-`TunnelConfig.RoutingInstance` — tunnel interfaces are `daemonOwned`
-and excluded from networkd management
-(compiler_iface.go:1065-1081, AGY r1 Q2 evidence), and the
-routing-instance binds at daemon_apply.go:216 run BEFORE ApplyTunnels
-and target non-tunnel member interfaces. Pinned by a unit test (RI
-removed ⇒ LinkSetNoMaster; RI present ⇒ bind; no other master writer).
+Unbind rule: the daemon's step 0a (`daemon_apply.go:216-231`) binds
+`routing-instances <ri> interface` members — explicitly INCLUDING
+tunnel names (`gr-0/0/0.0` → `gr-0-0-0` unit-strip in that loop) —
+BEFORE ApplyTunnels runs, so a tunnel bound via the RI interface list
+but carrying no `tunnel routing-instance` stanza would be bound at 0a
+and then wrongly unbound by a blanket
+`RoutingInstance=="" ∧ MasterIndex!=0 ⇒ LinkSetNoMaster`. (Today's
+recreate also destroys the 0a binding — the tunnel ends every apply
+unbound — but re-breaking it deliberately is not "preserving"
+anything.) Instead the manager tracks `t.appliedRI map[string]string`
+— the RI IT bound per tunnel — and calls `LinkSetNoMaster` only when
+`appliedRI[name] != "" ∧ tc.RoutingInstance == ""` (then clears the
+entry). Net effect: tunnel-stanza RI removal unbinds (recreate-parity
+where it was OUR bind); 0a-list bindings are never touched (strict
+improvement: they now survive the apply). networkd never manages
+tunnel masters (tunnels are `daemonOwned`, compiler_iface.go:1065-1081,
+AGY r1 Q2). Restart residual: `appliedRI` is not persisted — an RI
+removed while the daemon was down leaves the adopted anchor bound
+until the operator intervenes (same restart-residual class as §10).
+Pinned by unit tests: stanza-RI removed ⇒ unbind; 0a-style foreign
+master + empty stanza ⇒ NOT unbound; RI present ⇒ bind.
 
 **A.6 — non-anchor (legacy) branch: compare-then-decide** [r1: AGY Q4 /
 Codex OQ4 normalization spec]. Build the desired link as today, then if
@@ -324,8 +394,9 @@ preserves that exactly (no probes are added to anchors).
 **A.8 — daemon-restart adoption falls out.** After restart `ownedNames`
 is empty; A.1 deletes nothing; A.3 finds the existing TUN anchor by
 name, passes the reuse checks (it was created by this code: TUN, NO_PI,
-persistent) and adopts it — with the one-time MTU normalization to
-1500. Anchors survive daemon restarts with stable ifindex.
+persistent) and adopts it — with the one-time MTU set to the
+config-desired value (tc.MTU, else 1500). Anchors survive daemon
+restarts with stable ifindex.
 
 ### Log contract
 
@@ -342,10 +413,12 @@ persistent) and adopts it — with the one-time MTU normalization to
 Unchanged: `Manager.ApplyTunnels`, `Manager.ClearTunnels`,
 `Manager.GetTunnelStatus`, `Manager.GetKeepaliveState`,
 `tunnelManager.Apply/Clear/stopAll/GetStatus/GetKeepaliveState`
-signatures, `config.TunnelConfig`. Internal-only: `linkOps` gains
-`LinkSetNoMaster`; `tunnelManager` gains `ownedNames`, `appliedAddrs`;
-`keepaliveRunner` gains normalized identity fields;
-`stopKeepaliveLocked` + `reconcileLinkAddrsLocked` + `anchorReusable`
+signatures. `config.TunnelConfig` gains an additive `MTU int` field
+(zero = unconfigured; existing constructors unaffected) [r2: Codex
+F2]. Internal-only: `linkOps` gains `LinkSetNoMaster`; `tunnelManager`
+gains `ownedNames`, `appliedAddrs`, `appliedRI`; `keepaliveRunner`
+gains normalized identity fields; `stopKeepaliveLocked` (cancel +
+drain + map delete) + `reconcileLinkAddrsLocked` + `anchorReusable`
 helpers added.
 
 ## 7. Hidden invariants the change must preserve
@@ -370,7 +443,7 @@ helpers added.
 - **encaplimit exec** (ip6gre, tunnel.go:253-270) runs only when the
   device was actually (re)created.
 - **MTU ownership**: owned-reuse never writes MTU (compiler_iface owns
-  it); only adoption normalizes, once.
+  ongoing reconcile); only adoption writes, once, to the desired value.
 - **Cross-side contract (#1881/#1887)**: anchor delete remains the ONLY
   signal the Rust TUN reader gets; legitimate recreates still produce a
   clean delete→create sequence, never a mutate of an incompatible
@@ -393,17 +466,26 @@ Tuntap flags/persist/MTU; new `pkg/routing/tunnel_reconcile_test.go`):
 1. Same config applied twice → zero LinkDel/LinkAdd on second apply;
    LinkSetUp on the SEEDED (kernel-fetched) object; no MTU write.
 2. Fresh manager + seeded compatible TUN (restart adoption) → reused,
-   tracked; MTU 1400 seeded → LinkSetMTU(1500) exactly once; second
-   apply (now owned) with MTU re-seeded 1400 → NO MTU write.
+   tracked; MTU 1400 seeded, no config MTU → LinkSetMTU(1500) exactly
+   once; config MTU 9000 (unzoned-tunnel case) → LinkSetMTU(9000);
+   second apply (now owned) with MTU re-seeded differently → NO MTU
+   write; EEXIST-race reuse on an OWNED name → NO MTU write [r2:
+   Codex F1].
 3. Seeded dummy / PI-TUN (no NO_PI) / NonPersist TUN with anchor name →
    deleted + recreated.
-4. Tunnel removed from config → deleted + keepalive stopped, others
-   untouched; removal after a FAILED intermediate apply (ownedNames vs
-   success-set: seed LinkDel failure on a collision) → still deleted.
+4. Tunnel removed from config → deleted + keepalive stopped AND its
+   `t.keepalives` entry removed (GetKeepaliveState returns nil) [r2:
+   SMR2-2], others untouched; removal after a FAILED intermediate
+   apply (ownedNames vs success-set) → still deleted; removal whose
+   LinkDel FAILS → name retained in ownedNames and deletion retried
+   on the next Apply [r2: Codex F5].
 5. Address edit → AddrAdd new + AddrDel stale; configured fe80 removed
    → deleted (in appliedAddrs); foreign/kernel fe80 never deleted;
-   zero LinkDel.
-6. RI removed → LinkSetNoMaster; RI present → BindInterfaceToVRF.
+   fe80 stale-delete failure → stays in appliedAddrs and is retried
+   [r2: Codex F4]; zero LinkDel.
+6. Stanza-RI removed (appliedRI nonempty) → LinkSetNoMaster; 0a-style
+   master with empty stanza-RI (appliedRI empty) → NOT unbound [r2:
+   Codex F3]; RI present → BindInterfaceToVRF.
 7. Legacy: identical GRE attrs (kernel-shaped: 4-byte IPs, TTL 64,
    round-tripped keys) → reuse; changed Destination → delete+recreate;
    v4→v6 endpoints → recreate (Type() flip); Key set↔unset → recreate;
@@ -445,32 +527,33 @@ may hold the lock — WAIT; deploy wipes CoS — re-apply after):
   `appliedAddrs` link-local across restart. Separate issue if it bites.
 - `pkg/cli/apply.go` legacy path behavior beyond what A.6 changes.
 
-## 11. Open questions for adversarial review (round 2)
+## 11. Open questions for adversarial review (round 3)
 
-1. A.3 MTU-reset-on-adopt: is `adopted ∧ MTU≠1500 ⇒ LinkSetMTU(1500)`
-   the right ownership boundary, or does any path exist where the
-   compiler stage does NOT follow in the same applyConfig run to
-   restore a config-driven MTU (leaving the one-time 1500 reset live on
-   an operator-MTU tunnel until the next commit)?
-2. A.4 applied-set link-local rule: any hole where a CONFIGURED fe80 is
-   absent from `appliedAddrs` at removal time other than the documented
-   daemon-restart residual (e.g. AddrAdd transient failure on the apply
-   that introduced it)? Is best-effort acceptable there?
-3. A.7 skip-LinkSetUp-on-down-runner: does skipping LinkSetUp interact
-   badly with a tunnel whose link someone ELSE downed (operator
-   `ip link set down`) while the keepalive runner is up — i.e. should
-   the skip be keyed strictly on runner-down, as proposed?
-4. A.1 ownedNames: any caller sequence (Apply → Clear → Apply, CLI
-   standalone path) where ownedNames goes stale relative to the kernel
-   in a way that deletes a link the manager should not own?
-5. A.6: any remaining kernel-normalization trap in Gretun/Iptun/Ip6tnl
-   readback (e.g. EncapType/EncapFlags defaults, LinkAttrs.Flags) that
-   makes the field-list comparison return false-"changed" and silently
-   restore the per-commit flap?
-6. Is the one-time adoption MTU bounce (1500 → compiler-restored value,
-   same apply run) acceptable for FRR/dataplane consumers, or must
-   adoption read the desired MTU from somewhere to avoid the bounce
-   entirely?
+Settled in r2 (AGY ratified; Codex refinements folded): skip-LinkSetUp
+keyed strictly on runner-down; appliedAddrs best-effort EXCEPT the
+AddrDel-failure retention now specified; A.6 comparison field list
+complete; ownedNames staleness bounded to the documented same-name
+external-replacement case (today-parity).
+
+1. A.3 desired-MTU plumbing [r2: Codex F2 fold]: is
+   `tc.MTU = unit.MTU > 0 ? unit.MTU : ifc.MTU` the correct precedence
+   for unit-level tunnels, and is there any consumer of
+   `config.TunnelConfig` (HA config sync, dataplane snapshot builders)
+   that the additive field could confuse?
+2. A.5 appliedRI [r2: Codex F3 fold]: any sequence where the
+   manager-bound RI is REPLACED by a 0a-list bind to a DIFFERENT VRF
+   between applies, making `appliedRI[name] != ""` unbind a master the
+   0a loop just set? Is bind-wins-last (today's implicit semantics)
+   acceptable there?
+3. A.1 LinkDel-failure retention [r2: Codex F5 fold]: retained names
+   whose link never reappears (deleted out-of-band after the failure)
+   — confirm the next-Apply `LinkByName` not-found path drops them
+   cleanly (no permanent ownedNames growth).
+4. Adoption trigger remains name-not-in-oldOwned. On the FIRST apply
+   of a fresh boot this daemon's OWN just-created anchors from a
+   pre-fix binary (upgrade case) are adopted and MTU-normalized — is
+   any upgrade scenario harmed by that single desired-MTU write?
+5. Anything in the r2 folds that re-opens a closed r1 finding?
 
 If any answer exposes a structural flaw, PLAN-KILL remains an
 acceptable verdict.
