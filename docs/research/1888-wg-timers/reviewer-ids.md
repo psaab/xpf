@@ -7,3 +7,13 @@
 
 ## Round 1 outcome
 - All three: PLAN-NEEDS-REVISION. Plan revised v1→v2 (Codex+SMR fold)→v3 (AGY fold + Codex×AGY clock + stamp-placement adjudications).
+
+## Round 2 (plan v3/v4)
+- Codex: task-mqakwdfu-3sr6n7 (session 019ebaa3-2d69-7843-a294-610db1b8fe5d) — PLAN-NEEDS-REVISION (C1 BLOCKER identity check, C2 clock reversal, C3 sentinel, C4 post-msg2 keepalive, C5 third stop path); all r1 RESOLVED
+- AGY: adversarial-review-mqakwegj-v0kzc7 — PLAN-NEEDS-REVISION (A1 BLOCKER T5 give-up loop, A2 usable-session, A3 UDP POLLNVAL, A4 T6 predicate, A5 tick anchor); all r1 RESOLVED
+- Claude SMR: claude-smr-plan-r2.md — PLAN-NEEDS-REVISION (narrow; folded as v4)
+
+## Round 3 (plan v5, 482232480)
+- Codex: task-mqam6cfx-u0qots — PLAN-NEEDS-REVISION (C1-C5 RESOLVED; new F1 BLOCKER armed-T7, F2 MINOR T6 first-fire)
+- AGY: adversarial-review-mqalylq1-aj96mw — PLAN-NEEDS-REVISION (A1-A5 RESOLVED, clock reversal ACCEPTED, no ABA; new G1 MAJOR skip-pacing, G2 MINOR is_some clause, G3 NIT ns→ms)
+- Claude SMR: claude-smr-plan-r3.md — PLAN-READY on v6 (audited both folds + new attacks)

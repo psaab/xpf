@@ -1,6 +1,38 @@
 # Plan: #1888 WireGuard timers (rekey / expiry / keepalive) + #1889 wg_control blocking poll(2)
 
-**Status: DRAFT v5 — round-2 fold (Codex r2: 1 BLOCKER + 3 MAJOR + 1 MINOR; AGY r2: 1 BLOCKER + 3 MAJOR + 1 MINOR; SMR r2: F1-F3). Every r1 finding attested RESOLVED by both external reviewers. Pending round-3 convergence.**
+**Status: DRAFT v6 — round-3 fold. Codex r3: C1-C5 RESOLVED + 1 new BLOCKER + 1 MINOR; AGY r3: A1-A5 RESOLVED, clock reversal ACCEPTED with its own cost/correctness trace, baseline-identity check cleared of ABA + 1 new MAJOR + 1 MINOR + 1 NIT. Pending round-4 convergence (expected confirm — every v6 delta follows a reviewer's own fix direction).**
+
+v6 (round-3 fold — ARMED-TIMER model for T6/T7 + skip-pacing):
+- Codex r3 F1 BLOCKER: T7 was modeled on the LATEST data send, so
+  continuous outbound-only traffic refreshes the stamp every packet and
+  the 15s threshold never accrues — the dead-peer repair never fires and
+  the blackhole lasts until T3. v6 replaces `last_send_data_ns` with
+  **`t7_armed_send_ns`** (Linux pending-timer parity, timers.c:147/:176):
+  SET only when unarmed (CAS from 0) on a successful non-empty data
+  encap; CLEARED (0) by any authenticated receive and by attempt start
+  (the AGY r2 A1 consumption, unchanged in spirit); T7 fires when
+  `armed != 0 && now − armed ≥ 15s`.
+- Codex r3 F2 MINOR: T6 gets the same armed model —
+  **`t6_armed_recv_ns`**: SET when unarmed on an authenticated,
+  replay-accepted, non-empty data receive (pre-AllowedIPs, Codex r1 M3
+  unchanged); CLEARED by any authenticated send; fires when
+  `armed != 0 && now − armed ≥ 10s`. This restores the kernel's
+  receive-time+10s first-fire (the v5 send-anchored predicate could fire
+  immediately on the first inbound packet after long idle) while keeping
+  AGY r2 A4's inbound-only-stream behavior (keepalive every ~10s: each
+  fire's own send clears, the next inbound re-arms).
+- AGY r3 G1 MAJOR (skip-pacing rule): any due action that CANNOT act
+  must advance its pacing anchor so its next deadline is strictly
+  future — a fired T6/T8 with no endpoint (or a failed send) re-arms
+  to `now`; `timer_pass` emits NO initiation deadlines for peers whose
+  §3 endpoint predicate fails. Without this, the recomputed deadline
+  stays in the past and the loop spins at timeout 0.
+- AGY r3 G2 MINOR: attempt success is
+  `current.is_some() && current_index != baseline` — a mid-attempt
+  `expire_sessions` clearing current to `None` must NOT read as success
+  (the attempt keeps retrying; we WANT a session).
+- AGY r3 G3 NIT: poll timeout sketch converts ns→ms explicitly before
+  clamping to the cap.
 
 v5 (round-2 fold):
 - Codex C1 BLOCKER (subsumes SMR r2 F1): attempt success is now an
@@ -162,8 +194,8 @@ the #1888 body.
 | T3 | REJECT_AFTER_TIME | 180s | Session keys older than 180s MUST NOT be used to send **or** receive | Both roles, both directions | Refuse use; discard session | Exact gate in `try_encap`/`try_decap` (compare against `created_ns`); control-thread timer pass additionally tears down expired sessions (removes demux entries, clears `current`/`previous`) within ≤ ~1.1s |
 | T4 | REKEY_TIMEOUT | 5s (+ jitter ≤ 333ms in spec) | After sending a handshake initiation with no response | Initiator of the handshake | Retransmit initiation | Control-loop pacing: re-drive initiation no more often than 5s. **Jitter omitted** — sub-granularity at our tick and pointless at single-digit tunnel counts; documented deviation |
 | T5 | REKEY_ATTEMPT_TIME | 90s | Retransmissions (T4) have continued for 90s with no completed handshake | Initiator | Give up; resume only when there is new data to send | Control-loop attempt window; the existing worker `request_handshake` NoSession edge is the "new data" resume signal |
-| T6 | KEEPALIVE_TIMEOUT (passive keepalive) | 10s | After **receiving** a data message, if we have **sent nothing** (any authenticated packet) within 10s. Predicate pinned (AGY r2 A4): `last_recv_data_ns > last_send_any_ns && now − last_send_any_ns ≥ 10s` — anchored on our LAST SEND so an inbound-only stream emits one keepalive per 10s (kernel-equivalent); a recv-anchored reading would never fire under continuous inbound data and would trip the peer's T7 | Both roles | Send a keepalive (authenticated empty transport message) | Timer pass, 1s granularity |
-| T7 | No-reply reinit ("suspect dead session") | KEEPALIVE_TIMEOUT + REKEY_TIMEOUT = 15s (+ jitter ≤ 333ms in spec/wireguard-go — **omitted**, documented deviation like T4) | After **sending** a transport data message, if we have **received no authenticated packet** (data, keepalive, or valid handshake message) within 15s | Either side may detect | Initiate new handshake | Timer pass, 1s granularity. This is the rule that makes the #1868 P6 no-flush branch obsolete-but-harmless |
+| T6 | KEEPALIVE_TIMEOUT (passive keepalive) | 10s | After **receiving** a data message, if we have **sent nothing** (any authenticated packet) within 10s. v6 predicate: armed timer `t6_armed_recv_ns` (see stamp table — set-if-unarmed on data receive, cleared by any authenticated send, fires at armed+10s). Kernel-faithful first-fire at receive+10s; emits one keepalive per ~10s under an inbound-only stream (AGY r2 A4 behavior, Codex r3 F2 timing) | Both roles | Send a keepalive (authenticated empty transport message) | Timer pass, 1s granularity |
+| T7 | No-reply reinit ("suspect dead session") | KEEPALIVE_TIMEOUT + REKEY_TIMEOUT = 15s (+ jitter ≤ 333ms in spec/wireguard-go — **omitted**, documented deviation like T4) | After **sending** a transport data message, if we have **received no authenticated packet** (data, keepalive, or valid handshake message) within 15s. v6 predicate: armed timer `t7_armed_send_ns` (set-if-unarmed on data send, cleared by any authenticated receive or attempt start, fires at armed+15s — Codex r3 F1: a latest-send stamp would be refreshed by continuous outbound traffic and never fire, leaving the blackhole until T3) | Either side may detect | Initiate new handshake | Timer pass, 1s granularity. This is the rule that makes the #1868 P6 no-flush branch obsolete-but-harmless |
 | T8 | persistent_keepalive | configured per peer (0 = off) | Every N seconds, if there has been **no authenticated packet traversal in EITHER direction** within N seconds (wireguard-go `timersAnyAuthenticatedPacketTraversal` — sent OR received, transport OR handshake, resets the pacing; Codex r2 confirmed against Linux `timers.c:215-219`) | Both roles | Send a keepalive; if no **usable** session exists, initiate a handshake (NAT pinhole maintenance is the whole point). **"Usable" DEFINED (AGY r2 A2): confirmed AND unexpired** — an unconfirmed responder-role current session is NOT usable (its keepalive would silently fail `try_encap`'s confirmed gate), so T8 initiates | Timer pass, 1s granularity |
 | T9 | Session-state zeroing | REJECT_AFTER_TIME × 3 = 540s | No successful handshake for 540s | Both | Zero all session state | Collapses into T3: we tear down (drop) sessions at 180s, which zeroizes via `Zeroizing`/drop semantics earlier than the spec requires. Pending-handshake state is already bounded (at-most-one-per-peer) and aborted/replaced on each new attempt |
 
@@ -174,21 +206,29 @@ data only) and `timersAnyAuthenticatedPacketSent`/`...Received`/`...Traversal`
 (transport data, keepalives, AND authenticated handshake messages — Codex r1
 B1/B2 corrected v1, which omitted handshake traffic entirely):
 
-- `last_send_data_ns` — successful encap of a **non-empty** inner (transport
-  data only). Arms T7. A sent keepalive or handshake does NOT arm T7.
-  **CONSUMED (set to 0) when a handshake attempt starts** (AGY r2 A1): the
-  T7 obligation transfers to the attempt machine; without this reset, a T5
-  give-up would observe the same stale stamp and immediately re-open a
-  fresh 90s window, looping forever — post-give-up re-initiation must
-  require NEW egress data, per the spec's "tries again when wanting to
-  send".
-- `last_recv_data_ns` — **authenticated, replay-accepted, non-empty**
-  transport plaintext. Stamped immediately after the replay-window accept
-  with `n > 0` — **before** the inner-parse/AllowedIPs gates (Codex r1 M3:
-  wireguard-go fires `timersDataReceived` once the packet authenticates,
-  before routing delivery; an AllowedIPs-rejected packet still proves the
-  peer is alive and sending on this session). Arms T6. A received keepalive
-  does NOT arm T6 (no keepalive ping-pong).
+- `t7_armed_send_ns` — **armed timer, not a latest-stamp** (Codex r3 F1
+  BLOCKER: a latest-send stamp is refreshed by every outbound packet, so
+  continuous outbound-only traffic suppresses the 15s dead-peer reinit
+  forever; Linux arms its new-handshake timer only `if !pending`,
+  timers.c:147, and clears it on authenticated receive, timers.c:176).
+  SET to now only when currently 0, on a successful **non-empty** data
+  encap (a sent keepalive or handshake does NOT arm it). CLEARED (0) by
+  any authenticated receive AND by attempt start (AGY r2 A1: the T7
+  obligation transfers to the attempt machine; a T5 give-up must not
+  re-trigger without NEW egress data). T7 fires when
+  `armed != 0 && now − armed ≥ 15s`.
+- `t6_armed_recv_ns` — armed timer, same model (Codex r3 F2): SET to now
+  only when currently 0, on an **authenticated, replay-accepted,
+  non-empty** transport plaintext — stamped immediately after the
+  replay-window accept with `n > 0`, **before** the inner-parse/AllowedIPs
+  gates (Codex r1 M3: an AllowedIPs-rejected packet still proves the peer
+  is alive on this session). A received keepalive does NOT arm it (no
+  keepalive ping-pong). CLEARED by any authenticated send. T6 fires when
+  `armed != 0 && now − armed ≥ 10s` — the kernel's receive-time+10s
+  first-fire (the earlier send-anchored predicate could fire instantly on
+  the first inbound packet after long idle); under an inbound-only stream
+  each fire's own keepalive send clears the arm and the next inbound
+  re-arms ⇒ one keepalive per ~10s (AGY r2 A4 behavior preserved).
 - `last_send_any_ns` — **any authenticated packet sent**: transport data,
   keepalive, handshake initiation, or handshake response (stamped at the
   call-site on `wg_send_to` success for handshake messages; inside
@@ -281,15 +321,18 @@ the engine's cached clock — see "Engine clock" below) and stores `role`
 (today the role only picks the initial `confirmed` value and is discarded).
 Both handshake completion paths already call `new_with_role`.
 
-**`Peer` additions** (`wg/peer.rs`) — the four activity stamps from §3, all
-relaxed `AtomicU64`, 0 = never:
+**`Peer` additions** (`wg/peer.rs`) — the §3 stamp set, all relaxed
+`AtomicU64`, 0 = never/unarmed (armed timers SET via CAS-from-0 so a
+concurrent stamp cannot push an armed deadline forward):
 
 ```rust
-pub(crate) last_send_any_ns:  AtomicU64,
-pub(crate) last_send_data_ns: AtomicU64,
-pub(crate) last_recv_any_ns:  AtomicU64,
-pub(crate) last_recv_data_ns: AtomicU64,
+pub(crate) last_send_any_ns:   AtomicU64, // any authenticated send (T8 pacing, clears t6 arm)
+pub(crate) last_recv_any_ns:   AtomicU64, // any authenticated receive (T8 pacing, clears t7 arm)
+pub(crate) t6_armed_send_keepalive_ns: AtomicU64, // t6_armed_recv_ns in §3
+pub(crate) t7_armed_reinit_ns:         AtomicU64, // t7_armed_send_ns in §3
 ```
+
+(Field names final at engineer phase; semantics are §3's.)
 
 **`WgEngine` additions** (`wg/engine.rs`):
 
@@ -332,18 +375,20 @@ if age >= REJECT_AFTER_TIME_NS {
 if session.role == SessionRole::Initiator && age >= REKEY_AFTER_TIME_NS {
     self.request_rekey();           // T1 — exact spec "on send" semantics
 }
-// on success: peer.last_send_any_ns.store(now_ns); and if inner non-empty,
-// peer.last_send_data_ns.store(now_ns)
+// on success: peer.last_send_any_ns.store(now_ns);
+//             peer.t6_arm.store(0)  (any authenticated send clears T6);
+//             if inner non-empty: peer.t7_arm CAS(0 -> now_ns)  (arm-if-unarmed)
 ```
 
 `try_decap`: T3 gate before AEAD — **drop + count ONLY, no rekey arm**
 (Codex r1 M4: wireguard-go's receive path drops expired keypairs and leaves
 initiation to the send side; an attacker replaying old ciphertext at an
 expired session must not be able to drive our handshake cadence). T2 arm
-after successful authentication on an initiator-role session;
-`last_recv_data_ns` stamped post-replay-accept, pre-AllowedIPs (§3);
-`last_recv_any_ns` stamped in the keepalive arm (with its own `peer_arc`
-lookup) and the handshake-consume wrappers. Ordering note: the encap T3 gate
+after successful authentication on an initiator-role session; on a
+non-empty authenticated record, `t6_arm CAS(0 → now)` post-replay-accept,
+pre-AllowedIPs (§3); `last_recv_any_ns` stamped + `t7_arm := 0` in the
+non-empty success path, the keepalive arm (with its own `peer_arc`
+lookup), and the handshake-consume wrappers. Ordering note: the encap T3 gate
 must fire **before** `next_tx_counter()`/header writes so the "on Err the
 buffer and counter are untouched" contract holds; the decap T3 gate fires
 before AEAD so expired keys do no crypto work.
@@ -398,8 +443,14 @@ pub(crate) struct TimerActions {
     pub send_keepalive: Option<KeepaliveKind>, // Passive | Persistent
     pub next_deadline_ns: u64,    // earliest future deadline; u64::MAX = none (Codex r2 C3)
 }
-pub(crate) fn timer_pass(&self, now_ns: u64) -> TimerActions;
+pub(crate) fn timer_pass(&self, now_ns: u64, endpoint_known: bool) -> TimerActions;
 ```
+
+`endpoint_known` is passed by the control loop (SMR r3: the LEARNED
+endpoint is control-thread-local `effective_endpoint` state — the engine
+only knows the CONFIGURED endpoint, so it cannot evaluate the §3 endpoint
+predicates alone). With `endpoint_known == false`, `timer_pass` emits no
+initiation or keepalive deadlines at all (AGY r3 G1(b)).
 
 `timer_pass` reads peer stamps + session age + `persistent_keepalive` and
 computes T6/T7/T8 plus the next deadline. It performs no IO — the control
@@ -409,7 +460,7 @@ and hand-set stamps. `InitiateReason` feeds the per-reason counters (§5.3).
 ### 5.2 Control-loop conversion to poll(2) (#1889) + timer arm rewrite
 
 ```rust
-const WG_POLL_CAP: Duration = Duration::from_millis(100);
+const WG_POLL_CAP_MS: i32 = 100;             // poll(2) timeout cap
 const WG_TIMER_TICK_NS: u64 = 1_000_000_000; // timer pass granularity
 
 // Deadline sentinel discipline (Codex r2 C3): u64::MAX = "no deadline";
@@ -446,7 +497,9 @@ while !stop.load(Ordering::Relaxed) {
     }
 
     if !did_work {
-        let timeout = next_deadline.saturating_sub(now).min(WG_POLL_CAP);
+        // AGY r3 G3: explicit ns→ms conversion before clamping to the cap.
+        let timeout_ms =
+            ((next_deadline.saturating_sub(now) / 1_000_000).min(WG_POLL_CAP_MS as u64)) as i32;
         // libc::poll over [socket_fd: POLLIN, tun_fd: POLLIN]
         match poll(&mut fds, timeout_ms) {
             -1 if errno == EINTR => continue,
@@ -455,6 +508,18 @@ while !stop.load(Ordering::Relaxed) {
     }
 }
 ```
+
+**Skip-pacing rule (AGY r3 G1 MAJOR):** any due action that CANNOT act
+must advance its own pacing anchor, or the recomputed deadline stays in
+the past and the loop spins at timeout 0. Concretely: (a) a fired T6/T8
+keepalive with no configured-or-learned endpoint, or whose socket send
+fails, re-arms its anchor to `now` (`t6_arm := now`; T8 paces on a
+`t8_last_attempt_ns` that advances on skip/fail too); (b) `timer_pass`
+emits NO initiation deadline for a peer whose §3 endpoint predicate
+fails (an endpoint-less peer has no actionable initiation timer at all);
+(c) a `drive_initiation` whose send fails still advances
+`attempt.last_tx_ns` (the existing exception/`hs_send_errors` accounting
+covers visibility — today's behavior, wg_control.rs:439-447).
 
 **Post-msg2 key-confirmation keepalive (Codex r2 C4):** on
 `consume_response` Ok the control loop immediately sends ONE keepalive
@@ -481,10 +546,10 @@ struct HandshakeAttempt {
 // thread-local: attempt: Option<HandshakeAttempt>
 ```
 
-Starting an attempt also CONSUMES the T7 trigger stamp
-(`peer.last_send_data_ns := 0`, AGY r2 A1 — see §3) so a give-up cannot
-immediately re-trigger; the obligation lives in the attempt while one is
-active, and only new egress data re-arms T7 afterward.
+Starting an attempt also CONSUMES the T7 arm (`peer.t7_arm := 0`, AGY r2
+A1 — see §3) so a give-up cannot immediately re-trigger; the obligation
+lives in the attempt while one is active, and only new egress data re-arms
+T7 afterward.
 
 - **Start** a new attempt (if none active) from any §3 trigger class whose
   predicate passes: NoSession edge, rekey edge, T7, T8-no-session, or the
@@ -501,8 +566,11 @@ active, and only new egress data re-arms T7 afterward.
 - **End on success — IDENTITY check, no clock (Codex r2 C1 BLOCKER,
   subsumes SMR r2 F1):** at attempt start record
   `baseline_session = current session's local_index (or None)`; the
-  attempt succeeds when the peer's current session's `local_index`
-  differs from the baseline (or current became `Some`). `local_index` is
+  attempt succeeds when `current.is_some() && current_index !=
+  baseline_session` (AGY r3 G2: the `is_some()` clause is REQUIRED — a
+  mid-attempt `expire_sessions` clearing current to `None` must not read
+  as success; the attempt keeps retrying, since a session is exactly what
+  it exists to obtain). `local_index` is
   unique per live session by the engine's collision-refusing installer
   (engine.rs `install_session_locked`), so ANY fresh install — our msg2
   completing, or the peer beating us with its own initiation — flips the
@@ -730,8 +798,19 @@ collector (both-sides grep is an engineer-phase gate):
     keepalive emitted; two-engine rig asserts the responder side flips
     confirmed and its egress unblocks without any data packet.
   - T6 inbound-only stream (AGY r2 A4): continuous inbound data with zero
-    egress ⇒ one keepalive per ~10s anchored on our last send (NOT
+    egress ⇒ one keepalive per ~10s (armed at first unanswered receive,
+    cleared by each fire's own send, re-armed by the next inbound — NOT
     suppressed by the ongoing receives).
+  - T6 first-fire timing (Codex r3 F2): inbound data after long idle ⇒
+    keepalive at receive+10s, NOT immediately.
+  - T7 outbound-only stream (Codex r3 F1 BLOCKER regression): continuous
+    outbound data with ZERO inbound ⇒ T7 fires at armed+15s (the armed
+    stamp is NOT refreshed by subsequent sends).
+  - Skip-pacing (AGY r3 G1): T6/T8 due with no endpoint ⇒ no
+    zero-timeout spin (anchor advances; deadline strictly future).
+  - Expiry mid-attempt (AGY r3 G2): `expire_sessions` clears current
+    during an active attempt ⇒ attempt does NOT declare success and keeps
+    retrying.
   - T8: persistent_keepalive=N paces sends at N; reset by authenticated
     traversal in EITHER direction including handshake messages (Codex r1
     B1/B2 test: inbound-only transport traffic suppresses persistent
