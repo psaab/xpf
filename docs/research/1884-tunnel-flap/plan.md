@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-DRAFT v9 — r8 verdicts: Codex PLAN-NEEDS-REVISION (r7 closures
+CONVERGED v9 (PLAN-READY ×3 at r9 — see §12) — r8 verdicts: Codex PLAN-NEEDS-REVISION (r7 closures
 confirmed; ONE narrower counterexample in the BOTH-KNOBS overlap —
 stanza-B-bind-failure + list-C retains a stale claim A while the
 kernel is on C — folded as the OBSERVATION FALLBACK + stanza-wins
@@ -730,13 +730,15 @@ String() explicit); ownedNames growth bounded (not-found path prunes);
 upgrade-boot adoption write is convergence not churn; no r1 closure
 re-opened.
 
-1. A.5 master-identity check [r3: Codex blocker fold]: is
-   `LinkByName(appliedRI[name]).Index == link.Attrs().MasterIndex` the
-   correct identity test (VRF rename edge? index reuse within one
-   apply?), and is clear-claim-on-empty-stanza in ALL branches the
-   right lapse rule?
-2. Any defect introduced by the r3 folds, or any earlier closure
-   re-opened?
+(The r3-era questions that previously closed this section were
+answered and superseded across r4-r8; see the per-round review docs.)
 
-If either answer exposes a structural flaw, PLAN-KILL remains an
-acceptable verdict.
+## 12. Convergence record
+
+CONVERGED at round 9 on v9 @ b2163ce9509b: Codex
+(task-mqangyjc-do7knl) PLAN-READY; AGY (adversarial-review-
+mqan7eor-goab38) PLAN-READY with a full 27-cell claim-procedure sweep
+(no cell strands an owned master or unbinds a foreign one); Claude SMR
+(claude-smr-plan-r9.md) PLAN-READY with the matching induction
+argument. Codex's only residual note was this section's stale r3 text
+(non-blocking, fixed in this revision).
