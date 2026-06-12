@@ -1,12 +1,12 @@
 # #1880 — first xpfd boot after deploy intermittently exceeds the failover harness's 60s comeback budget
 
-Revision: r3 (2026-06-12) — r2 addressed Codex/AGY/SMR r1; r3 addresses
-Codex r2 (H: degraded fallback loses bounded convergence once Path A
-removes the accidental FRR-restart convergence; M: timeout must not
-leave frr-reload.py's vtysh children racing the fallback; L: risk-section
-sysrq attribution). AGY r2: PLAN-READY.
+Revision: r4 (2026-06-12) — r2 addressed Codex/AGY/SMR r1; r3 addressed
+Codex r2 (bounded convergence, pgroup teardown, sysrq attribution); r4
+addresses Codex r3 (H: retry lifecycle bound to daemon lifetime; M:
+stale-success/generation race between retry and concurrent ApplyFull;
+L: exact timeout bound incl. WaitDelay). AGY r2: PLAN-READY.
 Branch: `research/1880-boot-budget`
-Status: awaiting round-3 convergence
+Status: awaiting round-4 convergence
 
 ## 1. Problem
 
@@ -123,7 +123,9 @@ additive caveat documented. Exact semantics (r2, per Codex/AGY/SMR r1):
 - **Independent contexts** (Codex H1 / AGY n2): primary gets its own
   `reloadTimeout` (15s) context; the fallback, when taken, gets a FRESH
   15s context — never the primary's possibly-dead one. Worst case on the
-  commit path becomes 30s; `reload()` is on the apply path only (verified:
+  commit path becomes 30s plus up to two 5s `WaitDelay` windows (the
+  executor precedent at `vtysh.go:88`), i.e. ≤40s; `reload()` is on the
+  apply path only (verified:
   xpfd's shutdown never touches FRR — the deploy-window reload came from
   `xpfd cleanup`, not the unit stop), so the shutdown-correctness
   invariant behind `reloadTimeout` is untouched.
@@ -146,13 +148,38 @@ additive caveat documented. Exact semantics (r2, per Codex/AGY/SMR r1):
   be terminal. `Manager` gains a single-flight degraded-retry loop:
   when `reload()` returns degraded, a goroutine retries the PRIMARY
   (`FrrReloadPy` only, no nested fallback) at 15s/30s/60s then every
-  5min until it succeeds; frr.conf on disk is the SSOT, so a newer
-  ApplyFull/Clear supersedes automatically (the retry always reloads
-  the current file). A manager-level `reloadMu` serializes the retry
-  against applySem-driven reloads. ErrNotFound (pythontools absent)
-  goes straight to the slow cadence. Success logs convergence; the
-  degraded state is exported as a Prometheus gauge
-  (`xpf_frr_reload_degraded`) so it is alarmed, not silent.
+  5min until it succeeds. ErrNotFound (pythontools absent) goes
+  straight to the slow cadence. Success logs convergence; the degraded
+  state is exported as a Prometheus gauge (`xpf_frr_reload_degraded`,
+  0/1, no labels) so it is alarmed, not silent.
+- **Retry lifecycle bound to daemon lifetime** (Codex r3 H): the daemon
+  constructs the manager as plain `frr.New()` (`daemon_run.go:241`) and
+  shutdown today only cancels the daemon context — nothing would stop
+  the retry goroutine. r4 contract: the retry goroutine runs under a
+  manager-owned context; `Manager` gains `Stop()` (cancel + wait) wired
+  into the daemon shutdown sequence; cancellation kills any in-flight
+  `frr-reload.py` process group (the same `cmd.Cancel` teardown);
+  the one-shot `xpfd cleanup` process NEVER schedules a retry (Clear's
+  degraded result there is log-only, bounded by the deploy flow below).
+  `Stop()` also makes the retry loop test-hygienic: unit tests stop the
+  manager in cleanup so no 5-minute-backoff goroutine leaks across test
+  cases racing the shared mock executor (AGY r3 f1).
+- **Success cancels the retry episode** (AGY r3 f2): ANY `reload()` that
+  returns full convergence (nil) — including a newer applySem-driven
+  ApplyFull — clears the degraded gauge and cancels the pending retry
+  episode; a woken retry that observes the episode cancelled exits
+  without exec'ing, so an idle redundant retry can never spuriously
+  re-set the gauge via its own transient failure.
+- **Write/reload generation contract** (Codex r3 M): `writeManagedSection`
+  uses atomic rename (`manager.go:379`), which prevents torn reads but
+  not this race: retry loads conf A → concurrent ApplyFull renames
+  conf B → retry succeeds ON A → degraded clears with B unconverged.
+  r4 contract: `reloadMu` covers the FULL write+reload critical section
+  in ApplyFull/Clear, and a monotonically increasing `confGen`
+  (incremented under `reloadMu` by every write) is captured by the
+  retry before it invokes the primary; on success the retry clears
+  degraded ONLY if `confGen` is unchanged, otherwise it loops again.
+  Unit test required for exactly this stale-success edge (§7 gate 1).
 - **Degraded-mode signal** (Codex r1 H3): `reload()` returns nil only on
   full diff convergence; fallback success returns a wrapped sentinel
   (`ErrFRRReloadDegraded`) so callers can distinguish. `ApplyFull`
