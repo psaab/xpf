@@ -1,0 +1,7 @@
+r6 MAJOR is RESOLVED.
+
+Evidence: v9 explicitly moves success cleanup out of `attempt.drive`; lines 637-645 say success only clears `attempt`, with `t7_arm` clear and request-edge drain happening inline at `consume_response` / `consume_initiation_create_response` Ok. The required ordering is supported by current `wg_control` topology: socket inbound is drained before TUN egress, and the timer/attempt arm runs after both. The regression is pinned in §9 lines 895-899: peer msg1 installs an unconfirmed responder session, same-iteration TUN egress arms `NoSession`, and that edge survives because completion-site drain already ran.
+
+No new evidenced finding. The older §9 phrase “edges drained at attempt end” is sloppy shorthand, but the adjacent v9-specific regression and the main invariant are unambiguous enough that I would not block on it.
+
+PLAN-READY — The r6 failure mode is directly addressed by relocating success-side cleanup to the authenticated completion site before same-iteration TUN egress, while leaving `attempt.drive` success unable to erase new post-burst state. The test plan now includes the responder-success edge-survival regression that would catch a reintroduction of the bug.

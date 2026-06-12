@@ -886,8 +886,8 @@ collector (both-sides grep is an engineer-phase gate):
   - Attempt-boundary hygiene (AGY r4 H1/H2): egress data sent DURING an
     active attempt, then give-up ⇒ NO new attempt on the next tick (t7
     arm cleared at give-up); attempt success with a re-armed rekey edge ⇒
-    NO second handshake against the fresh session (edges drained at
-    attempt end).
+    NO second handshake against the fresh session (stale edges drained
+    inline at the completion site, v9).
   - Success-boundary ordering (Codex r5): msg2 completes in the socket
     burst, post-completion data egresses on the fresh session in the SAME
     iteration ⇒ that data's T7 arm SURVIVES the attempt-success cleanup
