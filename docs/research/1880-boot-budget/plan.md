@@ -1,8 +1,9 @@
 # #1880 — first xpfd boot after deploy intermittently exceeds the failover harness's 60s comeback budget
 
-Revision: r1 (2026-06-12)
+Revision: r2 (2026-06-12) — addresses Codex r1 (PLAN-NEEDS-REVISION),
+AGY r1 (PLAN-READY w/ nuances), Claude SMR r1 (PLAN-NEEDS-REVISION)
 Branch: `research/1880-boot-budget`
-Status: DRAFT — awaiting 3-way hostile plan review (Claude SMR + Codex + AGY)
+Status: awaiting round-2 convergence
 
 ## 1. Problem
 
@@ -106,16 +107,56 @@ FRR reload *duration*, bulk-sync hold) is the consumer.
 
 Stop using `systemctl reload frr` from the daemon entirely. Primary reload
 becomes a direct bounded invocation of
-`/usr/lib/frr/frr-reload.py --reload /etc/frr/frr.conf` (the same diff
+`/usr/lib/frr/frr-reload.py --reload <frr.conf>` (the same diff
 engine frrinit.sh uses, minus the watchfrr bounce and minus systemd job
 machinery). Keep `vtysh -f` as the existing last-resort fallback with its
-additive caveat documented. Concretely:
+additive caveat documented. Exact semantics (r2, per Codex/AGY/SMR r1):
 
-- `pkg/frr/vtysh.go`: add `FrrReloadPy(ctx)` to the `frrExecutor`
-  interface (mockable like `SystemctlReload`); drop `SystemctlReload`.
-- `pkg/frr/manager.go reload()`: try `frr-reload.py --reload` (15s ctx,
-  same `reloadTimeout` shutdown-correctness invariant), fall back to
-  `VtyshLoad`. Binary-missing (frr-pythontools absent) → fallback, warn.
+- `pkg/frr/vtysh.go`: replace `SystemctlReload(ctx)` in `frrExecutor`
+  with `FrrReloadPy(ctx context.Context, conf string) error` — the config
+  path is a parameter (tests override `m.frrConf`; no hardcoded
+  `/etc/frr/frr.conf`). Real impl: `exec.CommandContext(ctx,
+  "/usr/lib/frr/frr-reload.py", "--reload", conf)`.
+- **Independent contexts** (Codex H1 / AGY n2): primary gets its own
+  `reloadTimeout` (15s) context; the fallback, when taken, gets a FRESH
+  15s context — never the primary's possibly-dead one. Worst case on the
+  commit path becomes 30s; `reload()` is on the apply path only (verified:
+  xpfd's shutdown never touches FRR — the deploy-window reload came from
+  `xpfd cleanup`, not the unit stop), so the shutdown-correctness
+  invariant behind `reloadTimeout` is untouched.
+- **Fallback policy** (Codex H1): fall back to `VtyshLoad` on ANY primary
+  failure, including timeout. Safety argument for the partial-diff case:
+  `vtysh -f` after an interrupted diff is additive-convergent — every
+  desired line is (re)applied; only stale removals can be missed — which
+  is exactly the status-quo outcome (the systemctl branch has been
+  100%-failing since April, so today EVERY reload is `vtysh -f`). The
+  fallback can never make convergence worse than it is now.
+- **Degraded-mode signal** (Codex H3): `reload()` returns nil only on
+  full diff convergence; fallback success returns a wrapped sentinel
+  (`ErrFRRReloadDegraded`) so callers can distinguish. `ApplyFull`
+  propagates it; `applyFRRConfig` keeps warn-and-continue for commits
+  (an FRR hiccup must not fail an otherwise-valid commit — explicit,
+  documented decision) but the warning now names the degraded mode.
+  `Clear()` stops discarding the reload error (`_ = m.reload()` →
+  return it); `xpfd cleanup` logs a loud failure line but still exits 0
+  (deploy_vm wraps it in `|| true`; aborting deploys on a transiently
+  down FRR would be a regression) — documented in the cleanup help text.
+- **Binary-missing detection** (Codex H2 / AGY n3): catch
+  `exec.ErrNotFound`/ENOENT explicitly → warn once ("frr-pythontools
+  not installed — FRR reload degraded to additive vtysh -f") → fallback.
+  AND fix provisioning: add `frr-pythontools` to the apt install list in
+  `test/incus/cluster-setup.sh` (it is present on the loss cluster VMs
+  today — frr 10.6.0-2 pulled it in — but the script must guarantee it).
+- **Stale comments** (Codex L2 / SMR f6): update `manager.go:38`
+  (reloadTimeout rationale), `pkg/frr/README.md:84`, and the `vtysh.go`
+  header, which reference xpfd's `TimeoutStopSec=20` — not FRR's
+  measured 120s stop window.
+- Concurrency (Codex M1, answered): every daemon FRR writer serializes
+  under `applySem` (`daemon.go:160`, `daemon_apply.go:111`,
+  `daemon_ipmon.go:179`); `frr-reload.py` is the same engine
+  `systemctl reload` invoked via frrinit.sh, so Path A does not widen
+  the concurrency surface. Operator-driven vtysh is a pre-existing,
+  unchanged exposure.
 - Validated on the VM: `frr-reload.py --test --stdout /etc/frr/frr.conf`
   exits 0 in <1s, computes the diff via the vtysh socket, does not touch
   unit state, and works even while frr.service shows `deactivating`.
@@ -131,15 +172,21 @@ burst", but `incus exec fw0 -- reboot` is a graceful systemd reboot: xpfd
 is stopped cleanly (and therefore DOES emit the planned-shutdown
 priority-0 burst, taking the ~1ms takeover path instead of the ~60ms
 worst-case detection the test claims to exercise) and the shutdown queues
-behind any wedged stop job. Change Phase 3 to a forced reboot
-(`systemctl reboot --force --force` inside the VM — no unit stops, no
-unmount, immediate reset), which (i) restores the test's stated intent and
-(ii) makes the comeback immune to ANY shutdown-job hang, present or
-future. Forced-reboot comeback ≈ firmware 16s + boot 10s + agent ≈ 20s.
+behind any wedged stop job. Change Phase 3 to the repo's PROVEN unclean
+primitive (Codex M2 / SMR f3): `echo b > /proc/sysrq-trigger`, exactly as
+`test-double-failover.sh:187` already does ("sysrq reboot — unclean
+shutdown, tests worst-case failover") — no unit stops, no unmount,
+immediate reset. This (i) restores the test's stated intent, (ii) makes
+the comeback immune to ANY shutdown-job hang, present or future, and
+(iii) introduces no new primitive. Expected comeback ≈ firmware 16s +
+boot 10s + agent ≈ 20s; Phase 2 re-measures it under sysrq before
+finalizing the budget.
 
 Also fix accounting: time the Phase-4 wait on wall-clock seconds
-(`SECONDS`/epoch) instead of iteration count, keep `REBOOT_WAIT=60` (3×
-headroom over the ~22s clean comeback), and log the true elapsed time.
+(`SECONDS`/epoch) instead of iteration count, keep `REBOOT_WAIT=60`
+(2.7× headroom over the ~22.2s measured clean comeback — Codex L1; to be
+re-confirmed against the measured sysrq comeback in Phase 2, raised only
+if that measurement exceeds 30s), and log the true elapsed time.
 
 Side benefit: the current graceful reboot has a Phase-4 false-positive
 race — the poll starts 3s after `reboot`, and `systemctl is-active xpfd`
@@ -176,7 +223,11 @@ Ship **A + B together** (independent, both small):
 
 ## 7. Validation plan (Phase 2 gates)
 
-1. Unit: `go test ./pkg/frr/...` (new executor mock paths) + full suite.
+0. Provisioning: `/usr/lib/frr/frr-reload.py` exists on both nodes
+   (and `frr-pythontools` added to cluster-setup.sh apt list).
+1. Unit: `go test ./pkg/frr/...` (new executor mock paths: primary
+   success; primary timeout → fresh-ctx fallback; ErrNotFound →
+   warn-once fallback; degraded sentinel propagation) + full suite.
 2. Live: deploy to loss userspace cluster; assert `frr.service` stays
    `active/running` on both nodes through deploy + apply-cos commit
    (`systemctl show frr -p ActiveState,SubState` polled for 150s — today
@@ -191,15 +242,19 @@ Ship **A + B together** (independent, both small):
 
 ## 8. Risks
 
-- `frr-reload.py` runtime on large diffs: bounded by the 15s ctx; on
-  timeout we fall back to `vtysh -f` (additive but never worse than the
-  status quo, which ALWAYS took that fallback).
-- frr-pythontools not installed on some target: explicit binary-existence
-  check → fallback + warn once (status quo behavior).
-- Forced reboot leaves dirty filesystems: ext4 journal recovery on these
-  VMs is sub-second and this is precisely the power-fail scenario the test
-  claims to cover; the standalone/legacy regression environments inherit
-  the same script — verify `CLUSTER_ENV=` legacy path still passes once.
+- `frr-reload.py` runtime on large diffs: bounded by its own 15s ctx; on
+  any failure (incl. timeout) we fall back to `vtysh -f` under a fresh
+  15s ctx (additive-convergent, never worse than the status quo, which
+  ALWAYS took that fallback) and surface `ErrFRRReloadDegraded`.
+- frr-pythontools not installed on some target: explicit ErrNotFound
+  detection → warn once + degraded fallback; provisioning fixed in the
+  same PR so the supported environments never take this path silently.
+- sysrq reboot leaves dirty filesystems: ext4 journal recovery on these
+  VMs is sub-second, this is precisely the power-fail scenario the test
+  claims to cover, and `test-double-failover.sh`/`test-ha-crash.sh`
+  have crashed these same VMs this way repeatedly; the legacy regression
+  environment inherits the same script — verify `CLUSTER_ENV=` legacy
+  path still passes once.
 - Path A changes the reload path for ALL commits, not just deploys —
   mitigated by gate 2/3 above and the fact that the current "primary" path
   has been 100%-failing since April (every reload already runs the
