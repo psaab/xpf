@@ -1,6 +1,47 @@
 # Plan: #1888 WireGuard timers (rekey / expiry / keepalive) + #1889 wg_control blocking poll(2)
 
-**Status: DRAFT v1 — pending adversarial plan review**
+**Status: DRAFT v3 — revised per Codex r1 (2 BLOCKER, 5 MAJOR) + Claude SMR r1 (F1-F7) + AGY r1 (3 BLOCKER, 2 MAJOR, 4 MINOR); pending round-2 convergence**
+
+v3 (AGY r1 fold + Codex/AGY conflict adjudications):
+- AGY F1 (peer-stamp infinite T7 loop) — superseded by the v2 traversal
+  stamps (AGY reviewed v1): an inbound valid msg2 now stamps
+  `last_recv_any_ns` and clears T7. Peer placement RETAINED (moving stamps
+  to `WgSession` would zero them on rekey, losing the T6 obligation and
+  letting T8 fire immediately post-rekey); AGY's exact trace added as a §9
+  regression test for r2 re-verification.
+- AGY F2 (BLOCKER, rekey retry starves after a lost initiation) — fixed by
+  an explicit control-loop ATTEMPT STATE MACHINE (§5.2): while an attempt
+  is active, retries pace at REKEY_TIMEOUT bypassing the confirmed gate,
+  until success (fresh `created_ns`) or the 90s window ends.
+- AGY F3 (BLOCKER, busy-spin when a deadline lands mid-tick) — timer pass
+  now runs when `now >= next_deadline` OR the 1s tick elapses.
+- AGY F4 (T8 lock-out after give-up) — T8-due starts a NEW attempt window;
+  give-up never permanently disables pinhole maintenance.
+- AGY F5/F8 (fatal-fd busy spin) — TUN `POLLERR|POLLHUP|POLLNVAL` revents
+  or repeated fatal TUN reads exit the thread; UDP errors never do.
+- AGY F6 vs Codex M7 clock conflict ADJUDICATED: exact per-use T3
+  enforcement locus (Codex) using an engine-resident CACHED coarse clock
+  (`cached_now_ns: AtomicU64`, AGY) published by the control loop each
+  iteration — no per-packet vDSO reads, enforcement slop ≤ ~0.2s, and the
+  cached atomic doubles as the mock clock for deterministic tests.
+- AGY F7 (serial join latency) — multi-entry stop paths signal ALL stop
+  flags before joining any (bounds reload latency at ~one cap, not N×cap).
+- AGY F9 — old-xpf permanent-blackhole upgrade note strengthened in §8.
+
+Revision log:
+- v2: T8 paces on *any authenticated traversal* (sent OR received, incl.
+  handshakes) per wireguard-go `timersAnyAuthenticatedPacketTraversal`
+  (Codex B1); stamp table extended to authenticated handshake send/receive
+  (Codex B2); T6 arming moved before AllowedIPs/inner-parse (Codex M3);
+  expired decap is drop-only — initiation is send-side-only (Codex M4); T5
+  give-up releases the pending reservation (Codex M5); fd-specific poll
+  error guard (Codex M6); Q1 closed — per-use T3 enforcement required
+  (Codex M7); T7 jitter deviation documented (Codex m8); initiation
+  predicate table added (SMR F1); two-edge truth table added (SMR F2);
+  100ms-cap honesty note (SMR F3); keepalive-arm stamp site made explicit
+  (SMR F4); keepalive-interval-in-identity-tuple note (SMR F5); per-engine
+  edge S6 scoping note (SMR F6); rekeys_initiated split by reason (Codex
+  Q7 + SMR F7).
 
 Combined lane: #1888 (S5 timer semantics — bug, forward-secrecy degradation)
 and #1889 (1ms idle busy-poll → blocking `poll(2)` — perf). They are one lane
@@ -78,27 +119,61 @@ the #1888 body.
 | T4 | REKEY_TIMEOUT | 5s (+ jitter ≤ 333ms in spec) | After sending a handshake initiation with no response | Initiator of the handshake | Retransmit initiation | Control-loop pacing: re-drive initiation no more often than 5s. **Jitter omitted** — sub-granularity at our tick and pointless at single-digit tunnel counts; documented deviation |
 | T5 | REKEY_ATTEMPT_TIME | 90s | Retransmissions (T4) have continued for 90s with no completed handshake | Initiator | Give up; resume only when there is new data to send | Control-loop attempt window; the existing worker `request_handshake` NoSession edge is the "new data" resume signal |
 | T6 | KEEPALIVE_TIMEOUT (passive keepalive) | 10s | After **receiving** a data message, if we have **sent nothing** (data or keepalive) within 10s | Both roles | Send a keepalive (authenticated empty transport message) | Timer pass, 1s granularity |
-| T7 | No-reply reinit ("suspect dead session") | KEEPALIVE_TIMEOUT + REKEY_TIMEOUT = 15s | After **sending** a data message, if we have **received nothing** (data or keepalive) within 15s | Either side may detect | Initiate new handshake | Timer pass, 1s granularity. This is the rule that makes the #1868 P6 no-flush branch obsolete-but-harmless |
-| T8 | persistent_keepalive | configured per peer (0 = off) | Every N seconds, if nothing **sent** within N seconds | Both roles | Send a keepalive; if no usable session exists, initiate a handshake (NAT pinhole maintenance is the whole point) | Timer pass, 1s granularity |
+| T7 | No-reply reinit ("suspect dead session") | KEEPALIVE_TIMEOUT + REKEY_TIMEOUT = 15s (+ jitter ≤ 333ms in spec/wireguard-go — **omitted**, documented deviation like T4) | After **sending** a transport data message, if we have **received no authenticated packet** (data, keepalive, or valid handshake message) within 15s | Either side may detect | Initiate new handshake | Timer pass, 1s granularity. This is the rule that makes the #1868 P6 no-flush branch obsolete-but-harmless |
+| T8 | persistent_keepalive | configured per peer (0 = off) | Every N seconds, if there has been **no authenticated packet traversal in EITHER direction** within N seconds (wireguard-go `timersAnyAuthenticatedPacketTraversal` — sent OR received, transport OR handshake, resets the pacing) | Both roles | Send a keepalive; if no usable session exists, initiate a handshake (NAT pinhole maintenance is the whole point) | Timer pass, 1s granularity |
 | T9 | Session-state zeroing | REJECT_AFTER_TIME × 3 = 540s | No successful handshake for 540s | Both | Zero all session state | Collapses into T3: we tear down (drop) sessions at 180s, which zeroizes via `Zeroizing`/drop semantics earlier than the spec requires. Pending-handshake state is already bounded (at-most-one-per-peer) and aborted/replaced on each new attempt |
 
-**Activity-stamp semantics** (which sends/receives feed which timers —
-this is where naive implementations get T6/T7 wrong):
+**Activity-stamp semantics** (which packets feed which timers — this is
+where naive implementations get T6/T7/T8 wrong). The stamp set mirrors
+wireguard-go's timer events: `timersDataSent`/`timersDataReceived` (transport
+data only) and `timersAnyAuthenticatedPacketSent`/`...Received`/`...Traversal`
+(transport data, keepalives, AND authenticated handshake messages — Codex r1
+B1/B2 corrected v1, which omitted handshake traffic entirely):
 
-- `last_recv_data_ns` — set on successful `try_decap` of a **non-empty**
-  inner. Arms T6. A received *keepalive* does NOT arm T6 (you don't keepalive
-  a keepalive; that would ping-pong forever).
-- `last_send_any_ns` — set on any successful encap, data **or** keepalive.
-  Clears T6; paces T8.
-- `last_send_data_ns` — set on successful encap of a non-empty inner only.
-  Arms T7. A *sent keepalive* does not arm T7.
-- `last_recv_any_ns` — set on any authenticated inbound transport record
-  (including keepalives — `decap_keepalives` site). Clears T7.
+- `last_send_data_ns` — successful encap of a **non-empty** inner (transport
+  data only). Arms T7. A sent keepalive or handshake does NOT arm T7.
+- `last_recv_data_ns` — **authenticated, replay-accepted, non-empty**
+  transport plaintext. Stamped immediately after the replay-window accept
+  with `n > 0` — **before** the inner-parse/AllowedIPs gates (Codex r1 M3:
+  wireguard-go fires `timersDataReceived` once the packet authenticates,
+  before routing delivery; an AllowedIPs-rejected packet still proves the
+  peer is alive and sending on this session). Arms T6. A received keepalive
+  does NOT arm T6 (no keepalive ping-pong).
+- `last_send_any_ns` — **any authenticated packet sent**: transport data,
+  keepalive, handshake initiation, or handshake response (stamped at the
+  call-site on `wg_send_to` success for handshake messages; inside
+  `encap_inner` for transport). Clears T6.
+- `last_recv_any_ns` — **any authenticated packet received**: transport data,
+  keepalive (the `decap_keepalives` arm — which must look up
+  `peer_arc(&session.peer_pubkey)` before its early return at
+  engine.rs:958-961, SMR F4), or a valid handshake message
+  (`consume_response` Ok / `consume_initiation_create_response` Ok — stamped
+  in the #1865 counting wrappers). Clears T7.
+- T8 paces on `max(last_send_any_ns, last_recv_any_ns)` — i.e. any
+  authenticated traversal in either direction resets the persistent-keepalive
+  countdown (Codex r1 B1).
 
-These four stamps live on **`Peer`** (not `WgSession`) so a rekey does not
-reset keepalive pacing or the dead-peer detector — matching wireguard-go,
-where all timers hang off the peer. `created_ns` + `role` live on
-**`WgSession`** because age and initiator-ness are per-session facts.
+These stamps live on **`Peer`** (not `WgSession`) so a rekey does not reset
+keepalive pacing or the dead-peer detector — matching wireguard-go, where all
+timers hang off the peer. `created_ns` + `role` live on **`WgSession`**
+because age and initiator-ness are per-session facts.
+
+**Initiation predicate table** (SMR F1 — today's code distinguishes
+configured vs learned endpoints at wg_control.rs:274; the new trigger classes
+must each state their rule):
+
+| Trigger | Endpoint required | Confirmed-session gate |
+|---------|------------------|------------------------|
+| NoSession edge (`take_handshake_request`) | configured OR learned (today's `requested` rule) | gated: only if `!peer_has_confirmed_session` (unchanged) |
+| Rekey edge (`take_rekey_request`, T1/T2 + send-side T3) | configured OR learned | **ungated** — a confirmed-but-stale session is exactly what is being replaced (paced by T4 only) |
+| Unconfirmed-retry timer (T4/T5 attempt window) | configured ONLY (today's `allow_timer` rule — never spam a designated-initiator peer) | gated (unchanged) |
+| T7 no-reply reinit | configured OR learned (we were just exchanging data with this endpoint) | ungated (the session is suspect) |
+| T8 keepalive-due with no usable session | configured OR **learned, iff `persistent_keepalive > 0`** — without this the stated NAT-pinhole purpose fails for learned-endpoint peers | gated |
+
+A consumed rekey edge with no known endpoint is dropped, not re-queued: any
+subsequent send on the stale session re-arms it (try_encap arms
+unconditionally past the age threshold), so the edge cannot be permanently
+lost (SMR F2).
 
 ## 4. What's already shipped / partially batched (compose with, don't touch)
 
@@ -151,9 +226,10 @@ pub(crate) struct WgSession {
 }
 ```
 
-`new_with_role` stamps `created_ns` via `counters::monotonic_now_ns()` and
-stores `role` (today the role only picks the initial `confirmed` value and is
-discarded). Both handshake completion paths already call `new_with_role`.
+`new_with_role` gains `created_ns` as a parameter (the completion paths pass
+the engine's cached clock — see "Engine clock" below) and stores `role`
+(today the role only picks the initial `confirmed` value and is discarded).
+Both handshake completion paths already call `new_with_role`.
 
 **`Peer` additions** (`wg/peer.rs`) — the four activity stamps from §3, all
 relaxed `AtomicU64`, 0 = never:
@@ -170,16 +246,30 @@ pub(crate) last_recv_data_ns: AtomicU64,
 ```rust
 /// Worker/encap → control "session is stale, rekey" edge. Same relaxed
 /// AtomicBool + consume pattern as handshake_request_pending. Armed by
-/// try_encap (T1) and try_decap (T2); consumed by the control loop,
-/// which initiates WITHOUT the !peer_has_confirmed_session gate.
+/// try_encap (T1 age threshold + send-side T3 expiry) and try_decap
+/// (T2 receive-horizon); consumed by the control loop, which initiates
+/// WITHOUT the !peer_has_confirmed_session gate (see the §3 initiation
+/// predicate table). Per-ENGINE (single peer in S2a); the per-peer
+/// generalization is #1434/S6's, same as handshake_request_pending
+/// (SMR F6).
 pub(in crate::afxdp::wg) rekey_request_pending: AtomicBool,
 ```
+
+**Engine clock** — adjudicated Codex M7 × AGY F6 synthesis: the engine
+holds `cached_now_ns: AtomicU64`, initialized to `monotonic_now_ns()` in
+`WgEngine::new` and re-published (relaxed store) by the control loop once
+per iteration (≤100ms staleness idle, less under load). `try_encap` /
+`try_decap` read it with one relaxed load — exact-locus T3 enforcement with
+zero per-packet clock reads, no S3 hot-path trap, and the atomic doubles as
+the mock clock for deterministic engine tests. Worst-case T3 slop is the
+poll cap + burst time (~0.2s), far inside the protocol's tolerance (the
+peer's own REJECT_AFTER_TIME gives a 60s margin past REKEY_AFTER_TIME).
 
 **Hot-path enforcement** — `try_encap` success path gains (after the
 existing confirmed gate, before counter consume):
 
 ```rust
-let now_ns = super::counters::monotonic_now_ns();   // vDSO, ~20ns
+let now_ns = self.cached_now_ns.load(Ordering::Relaxed); // coarse, see above
 let age = now_ns.saturating_sub(session.created_ns);
 if age >= REJECT_AFTER_TIME_NS {
     WgCounters::bump(&self.counters.encap_drops_expired);
@@ -193,16 +283,23 @@ if session.role == SessionRole::Initiator && age >= REKEY_AFTER_TIME_NS {
 // peer.last_send_data_ns.store(now_ns)
 ```
 
-`try_decap` symmetric: T3 gate before AEAD (drop + count, arm rekey edge),
-T2 arm after successful authentication, `last_recv_any/data` stamps at the
-existing success/keepalive sites. Ordering note: the T3 gate must fire
-**before** `next_tx_counter()`/header writes (encap) so the "on Err the
-buffer and counter are untouched" contract holds, and before AEAD (decap) so
-expired keys do no crypto work.
+`try_decap`: T3 gate before AEAD — **drop + count ONLY, no rekey arm**
+(Codex r1 M4: wireguard-go's receive path drops expired keypairs and leaves
+initiation to the send side; an attacker replaying old ciphertext at an
+expired session must not be able to drive our handshake cadence). T2 arm
+after successful authentication on an initiator-role session;
+`last_recv_data_ns` stamped post-replay-accept, pre-AllowedIPs (§3);
+`last_recv_any_ns` stamped in the keepalive arm (with its own `peer_arc`
+lookup) and the handshake-consume wrappers. Ordering note: the encap T3 gate
+must fire **before** `next_tx_counter()`/header writes so the "on Err the
+buffer and counter are untouched" contract holds; the decap T3 gate fires
+before AEAD so expired keys do no crypto work.
 
-This costs one `clock_gettime(CLOCK_MONOTONIC)` vDSO call per encap/decap.
-Both paths are control-thread or already-allocating transit today (§4); no
-AF_XDP steady-state path is touched.
+Per-packet cost is one relaxed atomic load (the cached clock) plus the
+stamp stores — no clock syscalls, no allocation; no AF_XDP steady-state
+path is touched. `created_ns` is stamped from the same cached clock at the
+two handshake-completion install sites (engine impl methods, which have
+`&self`), keeping every age comparison in one clock domain.
 
 **Keepalive emission** — extract `try_encap`'s body into
 `encap_inner(peer, inner_ip, out, is_keepalive)`:
@@ -224,11 +321,25 @@ AF_XDP steady-state path is touched.
 pub(crate) fn expire_sessions(&self, now_ns: u64) -> usize;
 ```
 
+**Pending-handshake attempt window (T5)** — Codex r1 M5: without cleanup, a
+forged-or-stale msg2 can complete a handshake long after the 90s give-up
+(`pending` entries live until response/re-add/restart,
+handshake_session.rs:202, :362). The control loop owns the attempt window
+(thread-local `attempt_started_ns` / `last_initiation_ns`); on T5 give-up it
+calls a new engine API `abort_pending_for_peer(&pubkey)` (a thin public
+wrapper over the existing `release_pending` path via the `pending_by_peer`
+marker, under `reconcile_lock`) so the reservation — and with it the ability
+of a late msg2 to complete — dies with the attempt. A msg2 arriving after
+release hits the existing `NoPendingHandshake` drop. Thread respawn
+(#1872) resetting the thread-local window merely restarts an attempt cycle —
+benign, and today's behavior.
+
 **Timer decision pass** — pure, deterministically testable:
 
 ```rust
+pub(crate) enum InitiateReason { Age, DeadPeer, KeepaliveNoSession }
 pub(crate) struct TimerActions {
-    pub initiate: bool,           // T7 / T8-no-session / rekey edge
+    pub initiate: Option<InitiateReason>, // T7 / T8-no-session (T1/T2/T3 come in via the rekey edge)
     pub send_keepalive: Option<KeepaliveKind>, // Passive | Persistent
     pub next_deadline_ns: u64,    // earliest future deadline, for poll timeout
 }
@@ -238,7 +349,7 @@ pub(crate) fn timer_pass(&self, now_ns: u64) -> TimerActions;
 `timer_pass` reads peer stamps + session age + `persistent_keepalive` and
 computes T6/T7/T8 plus the next deadline. It performs no IO — the control
 loop owns sends — so mock-clock unit tests drive it with synthetic `now_ns`
-and hand-set stamps.
+and hand-set stamps. `InitiateReason` feeds the per-reason counters (§5.3).
 
 ### 5.2 Control-loop conversion to poll(2) (#1889) + timer arm rewrite
 
@@ -250,18 +361,20 @@ while !stop.load(Ordering::Relaxed) {
     let mut did_work = false;
     // --- socket burst, TUN burst: UNCHANGED (WG_RX_BURST drains) ---
 
+    engine.publish_now(now);   // cached_now_ns store, one relaxed store/iter
+
     // --- timer arm (replaces the :261-283 re-init block) ---
-    // Runs at most once per WG_TIMER_TICK_NS, including under sustained
-    // bursts (one monotonic read + compare per iteration).
-    if now - last_timer_pass_ns >= WG_TIMER_TICK_NS {
+    // Runs when the 1s tick elapses OR a computed deadline is due (AGY
+    // r1 F3: gating on the tick alone lets a mid-tick deadline saturate
+    // the poll timeout to 0 and busy-spin until the tick boundary).
+    if now - last_timer_pass_ns >= WG_TIMER_TICK_NS || now >= next_deadline {
         engine.expire_sessions(now);
         let actions = engine.timer_pass(now);
-        // initiation: NoSession edge OR rekey edge OR timer actions,
-        // paced by REKEY_TIMEOUT (5s), capped by REKEY_ATTEMPT_TIME (90s)
-        // since attempt_started; rekey edge bypasses the
-        // !peer_has_confirmed_session gate (that is the whole point).
+        attempt.drive(now, &actions, ...);   // see attempt machine below
         // keepalives: create_keepalive + wg_send_to toward
         // effective_endpoint (skip if none learned/configured).
+        next_deadline = actions.next_deadline_ns.min(attempt.next_retry_ns);
+        last_timer_pass_ns = now;
     }
 
     if !did_work {
@@ -275,6 +388,40 @@ while !stop.load(Ordering::Relaxed) {
 }
 ```
 
+**Handshake attempt state machine** (AGY r1 F2 BLOCKER + F4; replaces the
+bare `last_initiate_ns` thread-local). The v2 edge wiring had a starvation
+hole: the rekey edge is consumed on the first initiation, and if that
+datagram is lost while traffic then goes idle, the confirmed-session gate
+blocks every retry until the session hard-expires at 180s.
+
+```rust
+struct HandshakeAttempt {
+    started_ns: u64,        // attempt window start (T5 anchor)
+    last_tx_ns: u64,        // last initiation send (T4 pacing anchor)
+    reason: InitiateReason, // counter attribution
+}
+// thread-local: attempt: Option<HandshakeAttempt>
+```
+
+- **Start** a new attempt (if none active) from any §3 trigger class whose
+  predicate passes: NoSession edge, rekey edge, T7, T8-no-session, or the
+  configured-initiator unconfirmed-retry. Starting sends the first
+  initiation immediately.
+- **While active:** retry `drive_initiation` every REKEY_TIMEOUT (5s),
+  **bypassing `peer_has_confirmed_session`** — the attempt itself encodes
+  the decision to replace the current session; losing one datagram no
+  longer starves the rekey (AGY F2). The unconsumed-edge state is
+  irrelevant during an active attempt.
+- **End on success:** the peer's current session's `created_ns` >
+  `started_ns` (a fresh session installed — works for both roles, including
+  the peer beating us with its own initiation).
+- **End on give-up:** `now - started_ns >= REKEY_ATTEMPT_TIME` (90s) ⇒
+  call `abort_pending_for_peer` (Codex r1 M5) and clear `attempt`. A LATER
+  trigger (including the next T8 due-tick, AGY F4) starts a fresh window —
+  give-up never permanently disables initiation.
+- Thread respawn resets the machine; the first trigger re-starts it
+  (benign, today's behavior).
+
 Design points, mapped to #1889's stated constraints:
 
 1. **Stop/join latency:** poll timeout is capped at 100ms regardless of the
@@ -283,6 +430,12 @@ Design points, mapped to #1889's stated constraints:
    stop sites are reconcile-time and rare; 100ms join is well inside the
    #1866/#1872 teardown budget and avoids a new fd lifecycle + a change to
    the shared `LocalTunnelSourceHandle` stop contract.
+   **Honesty note (SMR F3):** with a 100ms cap and every §3 deadline ≥1s
+   out, the idle timeout is effectively the constant cap — the
+   `min(next_deadline, cap)` term only becomes load-bearing if the cap is
+   ever raised (eventfd variant). The design is accurately described as
+   "poll(…, 100ms) + 1s-throttled timer pass": ~10 wakeups/s/tunnel idle,
+   a 100× reduction, not zero.
 2. **Burst path unchanged:** the `WG_RX_BURST` drain loops are untouched;
    poll only gates the `!did_work` case. Under load the loop never blocks.
 3. **No per-packet syscalls added** to any AF_XDP worker path. The control
@@ -293,13 +446,25 @@ Design points, mapped to #1889's stated constraints:
    an otherwise idle tunnel (today ≤1ms). Handshake bring-up is 1s+-paced
    already; ≤100ms extra on the *first* packet after deep idle is
    acceptable and goes in the PR notes.
-5. **POLLERR/POLLHUP/POLLNVAL discipline:** ERR/HUP on the UDP socket is
-   normal (ICMP errors) — drain via the existing `recv_from` error arm.
-   ERR/HUP/NVAL on the TUN (device destroyed under us) makes poll return
-   instantly while reads keep failing — a spin hazard. Guard: count
-   consecutive poll-ready-but-zero-progress iterations; past a small bound
-   (e.g. 8) exit the thread cleanly. The #1872 tombstone + backoff respawn
-   machinery is the designed recovery path for exactly this.
+5. **POLLERR/POLLHUP/POLLNVAL discipline — fd-specific (Codex r1 M6):**
+   a generic zero-progress exit guard could tombstone the thread on a
+   transient UDP `POLLERR` (ICMP port-unreachable bursts are normal and
+   already drained via the `recv_from` error arm at wg_control.rs:200).
+   The guard is therefore scoped to the TUN fd only: `POLLERR`/`POLLNVAL`/
+   `POLLHUP` in the TUN's revents (AGY r1 F8: inspect revents directly), or
+   N consecutive TUN-ready iterations whose reads all fail with a
+   non-`WouldBlock` error (device destroyed under us), exit the thread
+   cleanly — the #1872 tombstone + backoff respawn machinery is the
+   designed recovery path (a transient operator link-down self-heals via
+   respawn backoff). UDP revents never exit the thread; its errors surface
+   through the existing per-read exception accounting.
+7. **Multi-entry stop is signal-then-join (AGY r1 F7):** the stale-prune
+   loop in `spawn_wg_control_threads` and `stop_all_wg_control_threads`
+   currently stop+join one entry at a time; with a 100ms poll cap that
+   serializes to N×~100ms. Both multi-entry paths set ALL relevant `stop`
+   flags first, then join — total stop latency ≈ one cap regardless of
+   tunnel count. (`stop_remove_wg_control_entry` keeps its single-entry
+   shape for the one-off callers.)
 6. **fd-close-during-poll:** both fds are owned by the loop's stack frame
    and closed only after the loop returns; the coordinator never closes
    them externally (it only flips `stop` and joins). No external-close race
@@ -318,14 +483,17 @@ New `WgCounters` fields → `status.rs` snapshot → `protocol.rs`
 `WgTunnelStatus` → `protocol.go` (omitempty) → `pkg/api` Prometheus
 collector (both-sides grep is an engineer-phase gate):
 
-- `rekeys_initiated` — timer/age-driven initiations (T1+T2+T7 fold; reason
-  split deferred until field need — counters are cheap but wire fields are
-  forever).
-- `sessions_expired` — T3 teardowns + expired-use refusals
-  (`encap_drops_expired`/`decap_drops_expired` feed it or stand alone —
-  engineer phase picks one shape and documents it).
+- `rekeys_initiated_age` (T1+T2 — session-age-driven), `rekeys_initiated_dead_peer`
+  (T7), `rekeys_initiated_keepalive_no_session` (T8) — split by reason per
+  Codex r1 Q7 + SMR F7: a fielded "tunnel re-handshakes too often" incident
+  is undebuggable with a folded counter, and the wire is omitempty-additive.
+- `sessions_expired` — T3 control-pass teardowns; the per-use refusals get
+  their own drop counters `encap_drops_expired` / `decap_drops_expired`
+  (new `DecapError::Expired` mapper arm keeps the mapping compile-total).
 - `keepalives_tx_passive`, `keepalives_tx_persistent` — T6 / T8 sends.
   (RX side already exists: `decap_keepalives`.)
+- `pending_aborted_attempt_window` — T5 give-up reservation releases
+  (Codex r1 M5 visibility).
 
 ### 5.4 Path options
 
@@ -375,11 +543,12 @@ collector (both-sides grep is an engineer-phase gate):
 4. **`reconcile_lock` discipline:** `expire_sessions` takes it (serialized
    with install/reconcile); demux-entry removal mirrors the reconcile
    peer-removal drain so no demux entry can orphan.
-5. **No allocation on hot paths; no syscalls on AF_XDP worker paths.** The
-   only clock reads added are vDSO calls on control-thread/transit paths
-   (§5.1). **S3 migration flag:** if decap ever moves onto AF_XDP workers,
-   the per-packet clock read must convert to a control-thread-published
-   coarse `AtomicU64` now — record this in the module doc.
+5. **No allocation on hot paths; no syscalls on AF_XDP worker paths.** v3:
+   engine time is the control-loop-published `cached_now_ns` (one relaxed
+   load per use) — zero clock syscalls anywhere in the engine, so an S3
+   move of decap onto AF_XDP workers inherits a hot-path-safe clock for
+   free. The only real clock reads are the control loop's per-iteration
+   `monotonic_nanos()` (already present) and engine construction.
 6. **Control-socket contention rule:** everything here runs in the
    per-tunnel control thread; zero new control-socket requests.
 7. **Keepalives consume tx counters** (spec) and obey
@@ -388,10 +557,13 @@ collector (both-sides grep is an engineer-phase gate):
 8. **Endpoint-learning gate (:176-196) untouched** — keepalive/rekey sends
    target `effective_endpoint` exactly like data sends; no new
    endpoint-mutation site.
-9. **Responder-only peers never timer-initiate cold** (today's rule,
-   preserved): T1/T2 fire only on Initiator-role sessions; T7/T8/NoSession
-   re-initiation toward a *learned* endpoint is allowed exactly where
-   `requested` initiation is allowed today.
+9. **Initiation predicates follow the §3 table** (SMR F1 replaced v1's
+   blanket "responder-only peers never timer-initiate cold"): the bare
+   unconfirmed-retry timer stays configured-endpoint-only (today's
+   wg_control.rs:274 rule); edges and T7 may target a learned endpoint;
+   T8-with-no-session may initiate toward a learned endpoint iff
+   `persistent_keepalive > 0` — otherwise its NAT-pinhole purpose fails
+   for exactly the peers that need it.
 10. **eprintln discipline:** timer events log nothing per-tick; rekey/expiry
     are counter-visible, not journald-visible (rare one-line exceptions go
     through `record_local_tunnel_exception` as today).
@@ -400,7 +572,7 @@ collector (both-sides grep is an engineer-phase gate):
 
 | Class | Level | Notes |
 |-------|-------|-------|
-| Behavioral regression | **MED** | (a) Sessions now die at 180s — against an *old-xpf* peer (zero timers, responder side with no endpoint configured) an idle tunnel that today "works" insecurely forever will need traffic-driven re-establishment after expiry; spec-correct, release-noted. (b) Bring-up retry pacing 1s→5s. (c) Keepalives add ~32-byte datagrams on idle tunnels (the configured intent). Kernel-peer interop is exercised live by wg-interop.sh P1-P7. |
+| Behavioral regression | **MED** | (a) Sessions now die at 180s. Against an *old-xpf* peer (zero timers): if WE have its endpoint (configured or learned), our T1/T7/T8/NoSession initiations re-establish; but an idle tunnel where the old-xpf side is the only possible initiator and never re-initiates is **permanently blackholed after expiry** until its traffic triggers a NoSession edge on its side — AGY r1 F9: this is a rolling-upgrade ordering note for the release notes (upgrade both ends, or accept traffic-driven re-establishment). Spec-correct behavior. (b) Bring-up retry pacing 1s→5s. (c) Keepalives add ~32-byte datagrams on idle tunnels (the configured intent). Kernel-peer interop is exercised live by wg-interop.sh P1-P7. |
 | Lifetime / borrow-checker | **LOW** | New state is atomics + two plain fields on existing structs; `expire_sessions` copies the reconcile drain pattern; no new lock orders (reconcile_lock → demux write, already established). |
 | Performance regression | **LOW** | One vDSO clock read per encap/decap on non-hot paths; one poll syscall per idle interval replacing 1000 sleep syscalls/s; burst path byte-identical. P7 fast-path no-regress gate covers the transit path. |
 | Architectural mismatch (#961-pattern) | **LOW-MED** | The one real question: enforcing T3 in the engine (per-use exact) vs purely in the control thread (tick-quantized). §5.1 picks exact-in-engine because decap is control-thread-only in S2a; if reviewers judge the S3 hot-path future makes engine-side clock reads a trap, the fallback (tick-only enforcement, ≤1.1s slop) is a 30-line delta. Invited as Q1. |
@@ -422,14 +594,32 @@ collector (both-sides grep is an engineer-phase gate):
     `expire_sessions` removes demux entries for both current and previous;
     expired previous does not orphan demux.
   - T4/T5: pacing — two initiations <5s apart collapse; attempts stop after
-    90s; NoSession edge re-arms a fresh attempt window.
+    90s; NoSession edge re-arms a fresh attempt window; **T5 give-up
+    releases the pending reservation and a subsequently delivered valid
+    msg2 is dropped as `NoPendingHandshake`** (Codex r1 M5 regression
+    test).
   - T6: recv data then 10s with no send ⇒ passive keepalive; a sent
-    keepalive clears it; a *received keepalive* does NOT arm it (ping-pong
-    guard).
-  - T7: send data then 15s of silence ⇒ initiate; an inbound keepalive
-    clears it (this is the keepalive's protocol purpose).
-  - T8: persistent_keepalive=N paces sends at N; suppressed by data sends;
-    fires handshake when no session; `persistent_keepalive=0` ⇒ fully off.
+    keepalive OR a sent handshake initiation clears it; a *received
+    keepalive* does NOT arm it (ping-pong guard); an
+    **AllowedIPs-rejected but authenticated** data packet DOES arm it
+    (Codex r1 M3 stamp-ordering test).
+  - T7: send data then 15s of silence ⇒ initiate; an inbound keepalive OR
+    an inbound valid handshake message clears it. **AGY r1 F1 regression
+    trace:** send data on S1 → silence → T7 initiates → valid msg2 installs
+    S2 → assert T7 does NOT re-fire on the next tick (the msg2 stamped
+    `last_recv_any_ns`).
+  - Attempt machine (AGY r1 F2/F4): rekey-edge attempt whose first
+    initiation is "lost" (no msg2 delivered) retries at 5s with a confirmed
+    session still installed; attempt ends at 90s with the pending
+    reservation released; a subsequent T8 due-tick starts a fresh window.
+  - T8: persistent_keepalive=N paces sends at N; reset by authenticated
+    traversal in EITHER direction including handshake messages (Codex r1
+    B1/B2 test: inbound-only transport traffic suppresses persistent
+    keepalives); fires handshake when no session (including learned-only
+    endpoint); `persistent_keepalive=0` ⇒ fully off.
+  - T3 decap: expired-session inbound is dropped WITHOUT arming the rekey
+    edge (Codex r1 M4 — replay-at-expired-session must not drive handshake
+    cadence).
   - Keepalive encode: `create_keepalive` ⇒ 32-byte record, counter
     consumed, `encap_packets` NOT bumped, kernel-side decodes as keepalive
     (round-trip via existing two-engine test rig in wg/tests.rs).
@@ -441,8 +631,12 @@ collector (both-sides grep is an engineer-phase gate):
     fd (pipe), assert `stop`→join completes < 500ms while idle-blocked.
   - readiness wakeup: datagram arrival while blocked wakes and processes
     within the burst (no 1s timer wait).
-  - poll-ready-zero-progress guard: erroring fd ⇒ thread exits within the
-    bounded spin count (no busy loop).
+  - TUN-fatal guard: erroring/closed TUN-side fd ⇒ thread exits within the
+    bounded spin count (no busy loop); a UDP-side transient error does NOT
+    exit the thread.
+  - Mid-tick deadline (AGY r1 F3): a deadline landing between ticks must
+    not produce a zero-timeout spin window (assert the timer pass runs and
+    the recomputed timeout is positive).
 - Counter-mapper exhaustiveness tests extended for new variants (existing
   pattern in counters_tests).
 - Smoke (deferred to engineer phase, runs on loss userspace cluster under
@@ -457,7 +651,14 @@ collector (both-sides grep is an engineer-phase gate):
 - **Cookie/MAC2 under-load machinery (S7)** — type-3 stays drop+count.
 - **Per-peer TAI64N anti-replay on the responder path** — rides with
   responder hardening (S1 boundary note in handshake_session.rs).
-- **Handshake-retransmit jitter (≤333ms)** — documented deviation, §3 T4.
+- **Handshake-retransmit + T7 jitter (≤333ms)** — documented deviation for
+  BOTH T4 and T7 (Codex r1 m8: wireguard-go jitters both); sub-granularity
+  at our 1s tick and pointless at single-digit tunnel counts.
+- **Narrowing `wg_keepalive_secs` out of the engine identity tuple** (SMR
+  F5): today a keepalive-interval-only config change rebuilds the engine and
+  drops live sessions (forwarding_build/wg.rs:93); `Peer::update_config`
+  could absorb it in place. Pre-existing behavior; candidate follow-up
+  issue, not this lane.
 - **Multi-tunnel scale work (#1434 S6)** — per-tunnel thread model
   unchanged; poll conversion reduces idle cost per thread, it does not
   consolidate threads.
@@ -473,22 +674,24 @@ collector (both-sides grep is an engineer-phase gate):
 
 ## 11. Open questions for adversarial review
 
-1. **T3 enforcement locus.** Exact per-use gate inside `try_encap`/`try_decap`
-   (one vDSO clock read per packet on today's non-hot paths) vs
-   control-thread tick-only teardown (zero engine changes, ≤1.1s
-   enforcement slop)? The plan picks exact-in-engine. If you believe the S3
-   hot-path future or the clock-read cost makes this wrong, say so —
-   PLAN-KILL the locus, not the lane.
-2. **Stop wakeup: 100ms poll cap vs eventfd in the poll set.** Cap-only is
-   chosen (no new fd lifecycle, no shared-handle changes, ~100ms join is
-   inside every existing teardown budget, and it bounds worker-edge latency
-   anyway). Is there a teardown path where 100ms×N serial joins on the
-   control-socket thread is unacceptable? (N = WG tunnel count, single-digit
-   today.)
-3. **Stamp placement.** Activity stamps on `Peer` (survive rekey) vs
-   `WgSession` (reset on rekey)? §3 argues Peer, matching wireguard-go. A
-   concrete counter-example where peer-level stamps mis-fire a timer across
-   a rekey boundary would change the design.
+1. **T3 enforcement locus — CLOSED in v3.** Exact per-use gate inside
+   `try_encap`/`try_decap` (Codex r1 M7) reading the engine's
+   control-loop-published `cached_now_ns` (AGY r1 F6) — exact locus,
+   coarse clock, ≤ ~0.2s slop, zero per-packet clock syscalls. r2
+   reviewers: confirm the synthesis (each of you got half of it in r1).
+2. **Stop wakeup — CLOSED in v3:** 100ms cap, no eventfd (Codex Q2 + AGY Q2
+   concurred), PLUS signal-then-join on multi-entry stop paths (AGY F7) so
+   reload latency is ~one cap, not N×cap.
+3. **Stamp placement — adjudicated v3, NEEDS r2 RE-VERIFICATION.** AGY r1
+   called PLACEMENT-FAIL on `Peer` via the infinite-T7 trace, but that
+   trace was built against v1 stamps (no handshake traversal). With v2/v3
+   stamps a valid msg2 stamps `last_recv_any_ns` and clears T7. Peer
+   placement is retained because `WgSession` placement zeroes the stamps on
+   rekey: the T6 obligation (data received on the old session, nothing sent
+   yet) would be silently dropped, and T8's pacing would misread a fresh
+   session as fresh traversal. r2: attack the v3 stamp table again —
+   construct a trace that mis-fires WITH handshake-traversal stamps
+   included, or confirm.
 4. **Initiation pacing 1s → REKEY_TIMEOUT (5s) + REKEY_ATTEMPT_TIME (90s)
    give-up.** Spec-correct but slows worst-case bring-up retry. Keep today's
    1s instead (spec deviation), or adopt spec pacing? Plan adopts spec.
@@ -496,10 +699,21 @@ collector (both-sides grep is an engineer-phase gate):
    repairs the #1868 confirmed-but-dead blackhole *without* peer
    cooperation. Plan includes it; killing it shrinks the diff but leaves
    dead-session detection to T3 expiry (up to 180s of blackhole).
-6. **Expired-decap error shape.** New `DecapError::Expired` variant (clean
-   telemetry, +1 enum churn) vs folding into `UnknownSession`? Plan prefers
-   the new variant; the counters mapper makes it a compile-time-complete
-   change.
-7. **Counter granularity.** `rekeys_initiated` folded (T1+T2+T7) vs split by
-   reason? Wire fields are forever; plan folds and documents. Live-debug
-   value of the split: is one fielded incident worth three wire fields?
+6. **Expired-decap error shape — CLOSED in v2.** New `DecapError::Expired`
+   variant (Codex Q6 + SMR Q6 converged); the counters mapper makes it a
+   compile-time-complete change.
+7. **Counter granularity — CLOSED in v2.** Split by reason
+   (`rekeys_initiated_{age,dead_peer,keepalive_no_session}`) per Codex Q7;
+   SMR concurred once attribution existed in `TimerActions`.
+8. **(NEW, v2) T8 traversal-pacing fidelity.** v2 paces persistent
+   keepalive on any authenticated traversal (either direction, incl.
+   handshakes) per wireguard-go. The whitepaper's own §6.1 text is terser
+   ("a keepalive is sent every N seconds, when there is no other traffic").
+   Is max(send_any, recv_any) the right reading, or should T8 pace on sends
+   only (kernel behavior reading welcome)? Codex r1 B1 says traversal;
+   counter-evidence with a kernel-source citation would reopen it.
+9. **(NEW, v2) handshake-stamp sites.** v2 stamps `last_send_any_ns` at
+   call-site send-success for handshake messages and `last_recv_any_ns` in
+   the engine consume wrappers. Asymmetric (send at IO site, recv at engine
+   site) but matches where authentication is actually known. Cleaner
+   alternative welcome.
