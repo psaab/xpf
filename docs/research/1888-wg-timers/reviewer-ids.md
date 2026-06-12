@@ -28,3 +28,13 @@
 
 ## Round 6 (plan v8, 894695f3f)
 - Codex: task-mqao5oso-90lnsz — PLAN-NEEDS-REVISION (r5 t7_arm RESOLVED; new MAJOR responder-success edge drain — fixed in v9)
+
+## Round 5-7 + convergence
+- Codex r5: task-mqanru0k-ek8ohk — PLAN-NEEDS-REVISION (success-boundary t7_arm)
+- Codex r6: task-mqao5oso-90lnsz — PLAN-NEEDS-REVISION (responder-success edge drain)
+- Codex r7: task-mqaobjue-3oycnw — **PLAN-READY** on v9
+- AGY r5: adversarial-review-mqanb1it-szk3nj — **PLAN-READY** on v7 (zero new findings)
+- AGY final delta-attest: adversarial-review-mqaofuz8-9i2bmb — **PLAN-READY** on v9 (H1/H2 preserved)
+- Claude SMR: claude-smr-plan-r3.md (v6) + claude-smr-plan-r4.md (v9) — **PLAN-READY**
+
+CONVERGED at plan v9 (c0ad0bd07): 3/3 PLAN-READY. Path A (combined timers + poll).
