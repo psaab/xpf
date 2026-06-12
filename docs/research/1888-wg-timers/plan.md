@@ -1,6 +1,6 @@
 # Plan: #1888 WireGuard timers (rekey / expiry / keepalive) + #1889 wg_control blocking poll(2)
 
-**Status: DRAFT v3 — revised per Codex r1 (2 BLOCKER, 5 MAJOR) + Claude SMR r1 (F1-F7) + AGY r1 (3 BLOCKER, 2 MAJOR, 4 MINOR); pending round-2 convergence**
+**Status: DRAFT v4 — v3 + Claude SMR r2 narrow fixes (attempt success uses `>=` across the cached-clock seam; bring-up initiation folded into the attempt machine; unconfirmed-responder attempt-end documented); pending Codex/AGY round-2 verdicts**
 
 v3 (AGY r1 fold + Codex/AGY conflict adjudications):
 - AGY F1 (peer-stamp infinite T7 loop) — superseded by the v2 traversal
@@ -406,15 +406,27 @@ struct HandshakeAttempt {
 - **Start** a new attempt (if none active) from any §3 trigger class whose
   predicate passes: NoSession edge, rekey edge, T7, T8-no-session, or the
   configured-initiator unconfirmed-retry. Starting sends the first
-  initiation immediately.
+  initiation immediately. The pre-loop bring-up initiation
+  (wg_control.rs:160-166) IS an attempt start of the configured-initiator
+  class (SMR r2 F2) so the 5s/90s discipline applies from packet one and
+  boot does not double-fire.
 - **While active:** retry `drive_initiation` every REKEY_TIMEOUT (5s),
   **bypassing `peer_has_confirmed_session`** — the attempt itself encodes
   the decision to replace the current session; losing one datagram no
   longer starves the rekey (AGY F2). The unconsumed-edge state is
   irrelevant during an active attempt.
-- **End on success:** the peer's current session's `created_ns` >
+- **End on success:** the peer's current session's `created_ns` **>=**
   `started_ns` (a fresh session installed — works for both roles, including
-  the peer beating us with its own initiation).
+  the peer beating us with its own initiation; the resulting session may be
+  responder-role and unconfirmed, which is correct — key-confirmation is an
+  egress gate, and a NoSession edge re-arms if needed, SMR r2 F3).
+  Equality is REQUIRED, not strict `>` (SMR r2 F1): `created_ns` comes from
+  the cached clock published from the same iteration `now` that stamps
+  `started_ns`, so a same-tick completion yields equal stamps; strict
+  comparison would retry against a healthy fresh session (the #1745
+  wrap-safe-equality lesson). The false-accept direction (session installed
+  same-tick just before the trigger) ends an attempt that fresh keys
+  already satisfy — benign.
 - **End on give-up:** `now - started_ns >= REKEY_ATTEMPT_TIME` (90s) ⇒
   call `abort_pending_for_peer` (Codex r1 M5) and clear `attempt`. A LATER
   trigger (including the next T8 due-tick, AGY F4) starts a fresh window —
