@@ -1,6 +1,10 @@
 # Plan: #1888 WireGuard timers (rekey / expiry / keepalive) + #1889 wg_control blocking poll(2)
 
-**Status: DRAFT v7 — round-4 fold. Codex r4: F1/F2 RESOLVED + 1 sketch-integration MAJOR (fixed); AGY r4: G1-G3 RESOLVED, armed model verified across all traffic shapes + 2 attempt-edge-state findings + 1 NIT (fixed). Pending round-5 confirmation.**
+**Status: DRAFT v8 — round-5 fold. AGY r5: PLAN-READY (H1-H3 RESOLVED, zero new findings, concurrency audit of skip anchors clean). Codex r5: F3 RESOLVED + 1 ordering MAJOR (fixed): the success-path `t7_arm` clear is REMOVED — the authenticated completion site already clears it (§3 any-authenticated-receive rule) BEFORE any same-iteration egress, so an `attempt.drive`-time clear would erase a legitimate post-completion arm; success drains only the request edges. Pending final Codex confirm.**
+
+v8 (round-5 fold): success/give-up boundary split in the attempt
+machine ("Attempt-boundary state hygiene" bullet) + §9 regression test
+for post-completion same-iteration egress retaining its T7 arm.
 
 v7 (round-4 fold — attempt-boundary state hygiene):
 - Codex r4 F3 MAJOR: §5.2 loop sketch now calls
@@ -618,15 +622,29 @@ T7 afterward.
   call `abort_pending_for_peer` (Codex r1 M5) and clear `attempt`. A LATER
   trigger (including the next T8 due-tick, AGY F4) starts a fresh window —
   give-up never permanently disables initiation.
-- **Attempt-boundary state hygiene (AGY r4 H1+H2):** BOTH attempt-end
-  paths (success and give-up) clear `t7_arm` and drain both request edges
-  (`take_rekey_request`, `take_handshake_request`). During the 90s window,
-  egress on the stale-but-unexpired session keeps CAS-arming T7 and
-  re-arming the rekey edge; carried across the boundary, the stale arm
-  would reopen a fresh window the tick after give-up (recreating the A1
-  loop), and the stale edge would fire a pointless second handshake the
-  tick after success. Only traffic AFTER the boundary may re-trigger —
-  wireguard-go zeroes its timers at give-up the same way.
+- **Attempt-boundary state hygiene (AGY r4 H1+H2, ordering corrected per
+  Codex r5):** the two end paths differ —
+  - **Give-up:** clear `t7_arm` AND drain both request edges
+    (`take_rekey_request`, `take_handshake_request`). During the 90s
+    window, egress on the stale-but-unexpired session keeps CAS-arming T7
+    and re-arming the rekey edge; carried across the boundary, the stale
+    arm would reopen a fresh window the very next tick (recreating the A1
+    loop). Only traffic AFTER give-up may re-trigger — wireguard-go
+    zeroes its timers at give-up the same way.
+  - **Success:** drain the request edges ONLY — do **NOT** clear
+    `t7_arm` here. The stale during-attempt arm is already cleared at the
+    authenticated completion site itself (§3: a valid msg2/msg1 consume
+    IS an authenticated receive and clears `t7_arm`), which orders
+    BEFORE any same-iteration TUN egress; `attempt.drive` runs AFTER the
+    bursts, so clearing there would erase a LEGITIMATE arm set by
+    post-completion data on the fresh session (Codex r5 trace: msg2
+    installs S2 in the socket burst → queued TUN egress arms T7 on S2 →
+    a success-path clear would lose the 15s dead-peer detection for that
+    very data). Linux/wireguard-go do handshake-complete timer cleanup
+    in the receive path, before later data-send arming — same split.
+    Draining the edges at `attempt.drive` is safe: post-completion sends
+    on the fresh session cannot legitimately re-arm them (age ≈ 0,
+    session confirmed).
 - Thread respawn resets the machine; the first trigger re-starts it
   (benign, today's behavior).
 
@@ -858,6 +876,10 @@ collector (both-sides grep is an engineer-phase gate):
     arm cleared at give-up); attempt success with a re-armed rekey edge ⇒
     NO second handshake against the fresh session (edges drained at
     attempt end).
+  - Success-boundary ordering (Codex r5): msg2 completes in the socket
+    burst, post-completion data egresses on the fresh session in the SAME
+    iteration ⇒ that data's T7 arm SURVIVES the attempt-success cleanup
+    (and fires at +15s if the peer goes silent).
   - T8: persistent_keepalive=N paces sends at N; reset by authenticated
     traversal in EITHER direction including handshake messages (Codex r1
     B1/B2 test: inbound-only transport traffic suppresses persistent

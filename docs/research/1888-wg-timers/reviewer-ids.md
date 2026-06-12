@@ -21,3 +21,7 @@
 ## Round 4 (plan v6, 684daf017)
 - Codex: task-mqan3mak-ek57ie — PLAN-NEEDS-REVISION (F1/F2 RESOLVED; new F3 MAJOR sketch call-path/mutation-locus — fixed in v7)
 - AGY: adversarial-review-mqamv1f5-jc2wtv — PLAN-NEEDS-REVISION (G1-G3 RESOLVED, armed model verified; new H1 MAJOR give-up t7-arm clear, H2 MINOR edge drain at attempt end, H3 NIT t8 field — all fixed in v7)
+
+## Round 5 (plan v7, 47b30db00)
+- Codex: task-mqanru0k-ek8ohk — PLAN-NEEDS-REVISION (F3 RESOLVED; new MAJOR success-boundary t7-arm loss — fixed in v8)
+- AGY: adversarial-review-mqanb1it-szk3nj — PLAN-READY (H1-H3 RESOLVED, zero new findings)
