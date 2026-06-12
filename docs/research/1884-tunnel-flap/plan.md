@@ -2,22 +2,17 @@
 
 ## 1. Status
 
-DRAFT v6 — r5 verdicts: all three PLAN-NEEDS-REVISION with a
-CONVERGENT counterexample (Codex r5 Q2 = Claude SMR5-1: the list-veto
-claim-clear leaks a permanent stale master once list membership is
-later removed — 0a has no unbind leg); AGY r5 added the unit>0 naming
-divergence (0a binds the literal `.N` form while per-unit tunnel
-devices are named `uN` — a PRE-EXISTING 0a bind bug) and the
-owned-unzoned MTU-change gap. v6 folds: claim TRANSFER on list-veto
-(appliedRI tracks the config-desired RI — Codex's "explicit
-applied-list ownership with symmetric unbind" option, SMR5-1's
-transfer rule); SHARED normalization helper at exact 0a parity
-(Codex's parity requirement) with the 0a unit>0 fix deferred to a
-follow-up issue (AGY's concern, resolved structurally — one helper,
-both callers); owned-reuse MTU reconcile when tc.MTU > 0 (closes the
-unzoned MTU-change gap; compiler writes the same value, both guarded
-by `!=` ⇒ no fighting). Markers `[r5:*]`. History: r4 `[r4:*]`, r3
-`[r3:*]`, r2 `[r2:*]`, r1 `[r1:*]`.
+DRAFT v7 — r6 verdicts: Codex PLAN-NEEDS-REVISION (one new
+counterexample: BLIND claim transfer when 0a's bind to the list RI
+FAILED records a claim the kernel never took, stranding the prior
+master — folded as the master-observed transfer guard `[r6]` — plus a
+stale-MTU-text sync, fixed); Claude SMR PLAN-READY on v6 (missed the
+blind-transfer edge — superseded); AGY r6 job FAILED (companion auth
+timeout, no review content; retry dispatched on v7 per
+codex-infra-must-retry discipline). r5 history: three-way convergent
+clear-on-veto counterexample + unit>0 parity + owned-unzoned MTU,
+folded in v6 `[r5:*]`. Earlier: r4 `[r4:*]`, r3 `[r3:*]`, r2
+`[r2:*]`, r1 `[r1:*]`.
 
 ## 2. Issue framing
 
@@ -103,8 +98,10 @@ PLAN-KILL is an acceptable verdict.
   configured MTU is never restored by that stage. The userspace
   snapshot reads the LIVE link MTU into tunnel endpoints
   (`pkg/dataplane/userspace/interfaces.go:368`, `tunnels.go:106`).
-  Hence A.3 writes the DESIRED MTU on adoption (not a blanket 1500)
-  and never writes on owned reuse.
+  Hence A.3 writes the configured MTU on create and reconciles it on
+  every reuse when `tc.MTU > 0` (idempotent vs the compiler — same
+  source value, both `!=`-guarded), and writes the 1500 default ONLY
+  on adoption when no MTU is configured [r5: AGY Q2; r6 text sync].
 
 ## 5. Concrete design
 
@@ -406,19 +403,28 @@ Claim rule — TRANSFER, never veto-clear [r5: convergent Codex r5 Q2 =
 SMR5-1; r4 AGY F4]: `appliedRI[name]` tracks the config-DESIRED RI as
 applied each round. Per-tunnel update:
 - stanza nonempty ⇒ bind (as today) and `appliedRI[name] = stanza RI`;
-- stanza empty ∧ `RIListMember != ""` ⇒ no bind (0a did it), no
-  unbind (the veto), and `appliedRI[name] = RIListMember` — the claim
-  is TRANSFERRED, not cleared. v5's clear-on-veto leaked a permanent
+- stanza empty ∧ `RIListMember != ""` ⇒ no bind, no unbind (the
+  veto), and the claim is TRANSFERRED **only after observing the
+  transfer target is real** [r6: Codex]: set
+  `appliedRI[name] = RIListMember` only if the link's current
+  `MasterIndex` equals the index of `vrf-<RIListMember>`; otherwise
+  (0a's bind to the list RI FAILED — daemon_apply.go:229-236 logs and
+  continues — or the VRF device is missing) RETAIN the previous
+  nonempty claim. Without this guard, commit 1 stanza-binds A, commit
+  2 lists B but 0a's bind fails (kernel still mastered to vrf-A),
+  the blind transfer records B, and commit 3 (list removed) compares
+  claim B to master A ⇒ mismatch ⇒ clears ⇒ vrf-A is stranded
+  forever (Codex r6 counterexample). v5's clear-on-veto leaked a permanent
   stale master: commit 1 stanza-binds A, commit 2 moves A to the RI
   list (veto, claim cleared), commit 3 removes the list membership —
   0a has only a bind loop (daemon_apply.go:218-237, no unbind leg),
   the manager's claim is gone, and the tunnel stays slaved to vrf-A
   forever, where today's recreate would have freed it. With transfer,
   commit 3 unbinds via the normal path; a list-ONLY tunnel (never
-  stanza-bound) likewise gains correct unbind-on-list-removal,
-  still guarded by the identity check (if 0a's bind failed — e.g. the
-  unit>0 naming bug — `MasterIndex` is 0/foreign and the identity
-  check refuses, then clears the false claim as a mismatch);
+  stanza-bound) likewise gains correct unbind-on-list-removal — and
+  the master-observed transfer guard means a FAILED 0a bind (e.g. the
+  unit>0 naming bug) never creates a claim at all [r6: supersedes the
+  v6 "self-clears via mismatch" story];
 - stanza empty ∧ list empty ∧ `appliedRI[name] != ""` ⇒ unbind, gated
   by the identity check. Clear the entry only on (a) successful
   `LinkSetNoMaster`, (b) identity mismatch (master not ours), or (c)
@@ -544,8 +550,10 @@ helpers added.
 - **clearLocked semantics for explicit Clear()/shutdown unchanged**.
 - **encaplimit exec** (ip6gre, tunnel.go:253-270) runs only when the
   device was actually (re)created.
-- **MTU ownership**: owned-reuse never writes MTU (compiler_iface owns
-  ongoing reconcile); only adoption writes, once, to the desired value.
+- **MTU ownership**: with `tc.MTU > 0` the manager and the compiler
+  write the SAME config-derived value (`!=`-guarded, idempotent, no
+  fighting); with `tc.MTU == 0` the manager writes only the one-time
+  adoption normalization to 1500 and never touches an owned reuse.
 - **Cross-side contract (#1881/#1887)**: anchor delete remains the ONLY
   signal the Rust TUN reader gets; legitimate recreates still produce a
   clean delete→create sequence, never a mutate of an incompatible
@@ -592,8 +600,10 @@ Tuntap flags/persist/MTU; new `pkg/routing/tunnel_reconcile_test.go`):
    convergent]; stanza→list→list-removed across three commits →
    unbound at the third (the v5 clear-on-veto leak, pinned) [r5:
    Codex Q2 / SMR5-1]; list-ONLY bind then list removed → unbound via
-   transferred claim; transferred claim with 0a bind FAILED
-   (MasterIndex 0) → identity mismatch, no unbind, claim cleared;
+   transferred claim; stanza-A → list-B with 0a bind FAILED (master
+   still vrf-A) → claim RETAINED as A (guarded transfer), then list
+   removed → A unbound [r6: Codex counterexample]; list-veto with 0a
+   bind failed and NO prior claim → no claim created;
    stanza removed, master replaced same-apply by a DIFFERENT VRF →
    NOT unbound (identity mismatch), entry cleared [r3: Codex blocker];
    0a-style master with appliedRI empty → NOT unbound [r2: Codex F3];
@@ -659,20 +669,20 @@ may hold the lock — WAIT; deploy wipes CoS — re-apply after):
   with it.
 - `pkg/cli/apply.go` legacy path behavior beyond what A.6 changes.
 
-## 11. Open questions for adversarial review (round 6 — ratification)
+## 11. Open questions for adversarial review (round 7 — ratification)
 
-Folded from r5 (Codex task-mqalegbz-xh6amz + AGY
-adversarial-review-mqalbucn-cypwte + Claude SMR5-1 convergent): claim
-TRANSFER on list-veto (appliedRI = config-desired RI; unbind on
-config-wants-none gated by identity); shared 0a-parity normalization
-helper (NOT ResolveKernelIfName — Codex r5 Q1) with the 0a unit>0
-naming bug deferred to a follow-up (§10); owned-reuse MTU reconcile
-when tc.MTU > 0. r6 asks:
+Folded from r6 (Codex task-mqalrlpj-qznpem): the claim transfer on the
+list-veto branch is now GUARDED — `appliedRI[name] = RIListMember`
+only when the link's current master is observed to BE
+`vrf-<RIListMember>`; otherwise the previous nonempty claim is
+retained (veto still suppresses unbind for the apply). Codex r6 Q1
+ratified no over-unbind hazard from transfer per se (identity gate +
+networkd exclusion + `vrf-*` ownership contract, daemon_apply.go:170).
 
-1. Does claim TRANSFER introduce any new unbind hazard the identity
-   check does not catch (e.g. a transferred claim against a master
-   that a NON-tunnel owner later legitimately sets)?
-2. Do the r5 folds introduce any other defect or re-open any earlier
+1. Is the guarded transfer complete — any sequence where the retained
+   OLD claim plus a later-succeeding 0a bind to the NEW list RI
+   produces a wrong unbind or a stuck claim?
+2. Do the r6 folds introduce any other defect or re-open any earlier
    closure?
 
 Settled r2: LinkSetUp skip keyed on runner-down; appliedAddrs

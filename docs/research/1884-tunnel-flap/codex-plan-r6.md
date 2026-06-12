@@ -1,0 +1,16 @@
+Codex Task started in the background as task-mqalrlpj-qznpem. Check /codex:status task-mqalrlpj-qznpem for progress.
+CODEX_ID=task-mqalrlpj-qznpem
+verdict — PLAN-NEEDS-REVISION
+
+Your r5 blocker is closed for the direct stanza→list→removed case: v6 transfers `appliedRI` instead of clearing it, and the test row pins stanza→list→list-removed plus list-only removal ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:405), [plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:588)).
+
+Q1: I do not see an over-unbind hazard for a non-tunnel owner setting a different master. The identity check requires current `MasterIndex` to equal `vrf-<claim>` ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:397)), and networkd skips daemon-owned tunnel devices ([compiler_iface.go](/home/ps/git/bpfrx/.claude/worktrees/1884-research/pkg/dataplane/compiler_iface.go:1064)). A manual same-VRF bind cannot be distinguished, but that is outside the repo’s ownership contract: xpfd claims `vrf-*` ([daemon_apply.go](/home/ps/git/bpfrx/.claude/worktrees/1884-research/pkg/daemon/daemon_apply.go:170)).
+
+Q2: there is a new transfer-overwrite stale-master counterexample. If commit 1 owns `vrf-A`, commit 2 moves desired list ownership to `B`, and step 0a’s bind to `B` fails, daemon_apply only logs and continues ([daemon_apply.go](/home/ps/git/bpfrx/.claude/worktrees/1884-research/pkg/daemon/daemon_apply.go:216), [vrf.go](/home/ps/git/bpfrx/.claude/worktrees/1884-research/pkg/routing/vrf.go:129)). v6 then unconditionally sets `appliedRI=B` on the list-veto path ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:409)), forgetting prior owned `A` while the kernel is still mastered to `vrf-A`. If commit 3 removes the list, the identity check compares claim `B` to current master `A`, treats it as mismatch, clears the claim, and never unbinds `A` ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:422)). Step 0a has no unbind pass, so the stale master persists.
+
+Revision: in the `RIListMember != ""` veto branch, transfer the claim to the list RI only after observing the current master is actually `vrf-<RIListMember>`; otherwise veto unbind for this apply but retain the previous nonempty `appliedRI`. Add a test for `A -> list B with 0a bind failure -> list removed` unbinding `A`.
+
+Also clean the stale MTU text: v6 A.3/test 6b says owned reuse reconciles when `tc.MTU > 0` ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:287), [plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:604)), but older wording still says owned reuse never writes MTU ([plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:98), [plan.md](/home/ps/git/bpfrx/.claude/worktrees/1884-research/docs/research/1884-tunnel-flap/plan.md:547)). This is fixable, not PLAN-KILL.
+
+Codex session ID: 019ebab9-69ae-7f62-84e7-1ab6e6c169d6
+Resume in Codex: codex resume 019ebab9-69ae-7f62-84e7-1ab6e6c169d6
