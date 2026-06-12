@@ -2,12 +2,15 @@
 
 ## 1. Status
 
-DRAFT v4 — round-3 verdicts SPLIT: Codex PLAN-READY ratifying the
-conditional R-C gate (task-mqa5gfj5-ceos57), AGY PLAN-NEEDS-REVISION
-with a verified admin-down plaintext trace AGAINST the conditional
-gate (adversarial-review-mqa5g6f6-abtkjf), Claude SMR PLAN-READY-
-conditional then SELF-RETRACTED on new evidence. v4 resolves the
-split by adopting the BLANKET gate; pending round-4 convergence.
+PLAN-READY (v4 final) — round-4 convergence: Codex PLAN-READY
+(task-mqa5sc25-bz2mkx: "I could not produce a tunnel-marked transit
+delivery trace that depends on kernel slow-path reinjection"), AGY
+PLAN-READY (adversarial-review-mqa5s52d-b8j1xm), Claude SMR
+PLAN-READY (claude-smr-plan-r4.md). Recommendation: implement Path A
+v4 (R-A config-pure hash ids, R-B fail-closed union-of-groups commit
+check, R-C blanket slow-path tunnel gate, R-D apply-time remap purge,
+R-E pending-neigh tunnel exclusion) exactly as specified in §5.
+Awaiting manual approval via /engineer 1873.
 
 ### Round-3 resolution: the R-C gate goes BLANKET
 
@@ -318,6 +321,10 @@ Why blanket costs nothing functionally (round-3 evidence):
   cold-start semantics. (R-E keeps the probe firing; see below.)
 - *Worker TX backpressure build failures*: dropped instead of
   kernel-shuttled — backpressure drops are normal and counted.
+- *No ICMP unreachable is generated* for gated drops (the kernel
+  might have emitted one post-reinjection today). Silent
+  drop-with-counter is standard stateful-firewall behavior;
+  `tunnel_encap_unresolved` is the operator surface.
 - *Locally-originated host traffic* (firewall's own packets through
   wgN/grN) never traverses the xpf-usp0 reinjector and is
   unaffected.

@@ -11,3 +11,8 @@
 | 3 | Claude SMR | (in-conversation) claude-smr-plan-r3.md | PLAN-READY-conditional, then SELF-RETRACTED anti-blanket argument (wg_control.rs:592) |
 | 3 | Codex | task-mqa5gfj5-ceos57 | PLAN-READY (ratified conditional gate on refuted premise — superseded by v4) |
 | 3 | AGY | adversarial-review-mqa5g6f6-abtkjf | PLAN-NEEDS-REVISION (verified admin-down plaintext trace kills conditional gate; netlink/oper-state revisions REJECTED as superseded by blanket) |
+| 4 | Claude SMR | (in-conversation) claude-smr-plan-r4.md | PLAN-READY |
+| 4 | Codex | task-mqa5sc25-bz2mkx | PLAN-READY |
+| 4 | AGY | adversarial-review-mqa5s52d-b8j1xm | PLAN-READY |
+
+Converged: PLAN-READY 3-of-3 at round 4 on plan v4 (blanket R-C gate).
