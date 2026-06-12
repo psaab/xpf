@@ -2,11 +2,27 @@
 
 ## 1. Status
 
-DRAFT v2 — round-1 verdicts: Codex PLAN-NEEDS-REVISION
+PLAN-READY (v3 final) — round-2 convergence: Codex PLAN-READY
+(task-mqaef55e-uplldr, session 019eb9fd-23dc-7171-bfae-e0ac340f3bab:
+"I did not find a verified counterexample to v2. The two round-1
+MAJOR issues are closed by the new design, assuming implementation
+follows the ordering exactly"), AGY PLAN-READY
+(adversarial-review-mqaefesm-x8e5e8: D.1b/unpublish-before-join/SMR-1
+gate all trace-verified, all 5 open questions ratified), Claude SMR
+PLAN-READY (claude-smr-plan-r2.md, contingent edits SMR2-1 + SMR2-2
+folded into this v3). Recommendation: implement Path D exactly as
+specified in §5 (D.1 ArcSwap state + D.1b rotation gate + D.2
+three-pass reconcile with two-store delivery publication + D.3 call
+sites including defer-prune and periodic liveness).
+v3-over-v2 deltas: store #1 rule precision (SMR2-1), disarmed-leg
+empty delivery-map store (SMR2-2), FastMap correction in Q4 (Codex
+r2 minor). Awaiting /engineer 1881.
+
+Round-1 verdicts (history): Codex PLAN-NEEDS-REVISION
 (task-mqadzerl-ygdn95), AGY PLAN-NEEDS-REVISION
 (adversarial-review-mqadzm2h-gy3pg0), Claude SMR PLAN-NEEDS-REVISION
-(claude-smr-plan-r1.md). All three endorse the Path D architecture.
-v2 incorporates every required revision; pending round-2 review.
+(claude-smr-plan-r1.md). All three endorsed the Path D architecture;
+v2 incorporated every required revision.
 
 ### v1 → v2 changes (mapped to reviewer findings)
 
@@ -331,9 +347,11 @@ delivery-map publication discipline (Codex r1 MAJOR 2):
      is bound to the old netdev).
    Content changes (destination/source/key, routes, CoS) are
    deliberately NOT stale conditions — D.1 handles them in-place.
-   **Ordering within the pass**: first **unpublish** — store the
-   delivery map REBUILT WITHOUT the stale entries (store #1) — then
-   stop+join each stale thread, then remove the entries. Unpublish-
+   **Ordering within the pass**: first **unpublish** — store #1 is
+   the live-handle-only rule applied to (entries − stale set): pass-1
+   tombstones and failed spawns are excluded exactly as in store #2,
+   not just the pass-2 stale entries (SMR2-1) — then stop+join each
+   stale thread, then remove the entries. Unpublish-
    before-join bounds the join: workers loading the map after store
    #1 cannot enqueue into a pruned thread's channel, and the drain
    loop's new stop check (below) breaks out even if the queue was
@@ -388,7 +406,9 @@ conflate them with WG control lines (AGY R4).
     mirrors WG (#1866 Codex code-r2 rule): a disarmed helper must
     not hold TUN reader fds; in practice a no-op (threads are gone
     via `reconcile_status_bindings → stop()`), kept for race-proof
-    symmetry.
+    symmetry. It also stores the EMPTY delivery map
+    (`local_tunnel_deliveries.store(Arc::new(BTreeMap::new()))`),
+    exactly as `stop_inner` does (SMR2-2).
 - `stop_inner` (mod.rs:368-378): unchanged semantics — stop + join +
   clear ALL entries (including tombstones), store empty delivery
   map. Adjust for the new entry type (and add the drain stop check's
@@ -599,8 +619,10 @@ New questions for round 2 (each an invitation to PLAN-KILL):
    right predicate, or should the gate mirror whatever bring-up
    guarantees about `live`/`identities` population?
 4. **Rotation-gate cost honesty**: `endpoint_attachment_valid` does
-   two BTreeMap lookups + a string compare, but only on Arc
-   rotation (config applies). Any objection?
+   two FastMap lookups (`tunnel_endpoints`/`ifindex_to_name` are
+   FastMap, `types/forwarding.rs:23,36` — Codex r2 correction) + a
+   string compare, but only on Arc rotation (config applies). Any
+   objection? — RATIFIED by all three reviewers in round 2.
 5. **Anything still missed in the failure matrix** — e.g. RG-promote
    path (`queue_warm_pass(force=true)` caller) or
    `refresh_fabric_links` interactions with the rotation gate?
