@@ -17,3 +17,7 @@
 - Codex: task-mqam6cfx-u0qots — PLAN-NEEDS-REVISION (C1-C5 RESOLVED; new F1 BLOCKER armed-T7, F2 MINOR T6 first-fire)
 - AGY: adversarial-review-mqalylq1-aj96mw — PLAN-NEEDS-REVISION (A1-A5 RESOLVED, clock reversal ACCEPTED, no ABA; new G1 MAJOR skip-pacing, G2 MINOR is_some clause, G3 NIT ns→ms)
 - Claude SMR: claude-smr-plan-r3.md — PLAN-READY on v6 (audited both folds + new attacks)
+
+## Round 4 (plan v6, 684daf017)
+- Codex: task-mqan3mak-ek57ie — PLAN-NEEDS-REVISION (F1/F2 RESOLVED; new F3 MAJOR sketch call-path/mutation-locus — fixed in v7)
+- AGY: adversarial-review-mqamv1f5-jc2wtv — PLAN-NEEDS-REVISION (G1-G3 RESOLVED, armed model verified; new H1 MAJOR give-up t7-arm clear, H2 MINOR edge drain at attempt end, H3 NIT t8 field — all fixed in v7)

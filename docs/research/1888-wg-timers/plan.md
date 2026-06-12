@@ -1,6 +1,28 @@
 # Plan: #1888 WireGuard timers (rekey / expiry / keepalive) + #1889 wg_control blocking poll(2)
 
-**Status: DRAFT v6 — round-3 fold. Codex r3: C1-C5 RESOLVED + 1 new BLOCKER + 1 MINOR; AGY r3: A1-A5 RESOLVED, clock reversal ACCEPTED with its own cost/correctness trace, baseline-identity check cleared of ABA + 1 new MAJOR + 1 MINOR + 1 NIT. Pending round-4 convergence (expected confirm — every v6 delta follows a reviewer's own fix direction).**
+**Status: DRAFT v7 — round-4 fold. Codex r4: F1/F2 RESOLVED + 1 sketch-integration MAJOR (fixed); AGY r4: G1-G3 RESOLVED, armed model verified across all traffic shapes + 2 attempt-edge-state findings + 1 NIT (fixed). Pending round-5 confirmation.**
+
+v7 (round-4 fold — attempt-boundary state hygiene):
+- Codex r4 F3 MAJOR: §5.2 loop sketch now calls
+  `engine.timer_pass(now, endpoint_known)` with `endpoint_known =
+  effective_endpoint.is_some()` computed in the loop, and the mutation
+  locus is explicit: `timer_pass` is READ-ONLY; the loop reports send
+  outcomes (success stamps via `encap_inner`; skip/fail calls
+  `pace_keepalive_skip(now)`).
+- AGY r4 H1 MAJOR: T5 GIVE-UP also clears `t7_arm` (not just attempt
+  start) — egress data sent DURING the active attempt re-arms T7 via
+  `try_encap`'s unconditional CAS, and without the give-up clear that
+  stale arm immediately reopens a fresh 90s window, recreating the A1
+  loop. wireguard-go parity: give-up zeroes the timers; only data sent
+  AFTER give-up re-triggers.
+- AGY r4 H2 MINOR: attempt END (success or give-up) also drains both
+  request edges (`take_rekey_request` + `take_handshake_request`) —
+  during-attempt sends on the stale session keep re-arming the rekey
+  edge, and an undrained edge would fire a second handshake against the
+  brand-new session immediately after success.
+- AGY r4 H3 NIT: `t8_last_attempt_ns` added to the §5.1 `Peer` additions
+  (it must be engine-visible — `timer_pass` reads it for T8 due-ness and
+  skip-pacing).
 
 v6 (round-3 fold — ARMED-TIMER model for T6/T7 + skip-pacing):
 - Codex r3 F1 BLOCKER: T7 was modeled on the LATEST data send, so
@@ -330,6 +352,7 @@ pub(crate) last_send_any_ns:   AtomicU64, // any authenticated send (T8 pacing, 
 pub(crate) last_recv_any_ns:   AtomicU64, // any authenticated receive (T8 pacing, clears t7 arm)
 pub(crate) t6_armed_send_keepalive_ns: AtomicU64, // t6_armed_recv_ns in §3
 pub(crate) t7_armed_reinit_ns:         AtomicU64, // t7_armed_send_ns in §3
+pub(crate) t8_last_attempt_ns:         AtomicU64, // T8 skip/fail pacing anchor (AGY r4 H3)
 ```
 
 (Field names final at engineer phase; semantics are §3's.)
@@ -483,10 +506,20 @@ while !stop.load(Ordering::Relaxed) {
     let tick_due = now - last_timer_pass_ns >= WG_TIMER_TICK_NS;
     if tick_due || now >= next_deadline {
         engine.expire_sessions(now);
-        let actions = engine.timer_pass(now);
+        // endpoint_known: configured OR learned (effective_endpoint is
+        // control-thread-local state — Codex r4 F3 call-path fix).
+        let endpoint_known = effective_endpoint.is_some();
+        let actions = engine.timer_pass(now, endpoint_known);
         attempt.drive(now, &actions, ...);   // see attempt machine below
         // keepalives: create_keepalive + wg_send_to toward
-        // effective_endpoint (skip if none learned/configured).
+        // effective_endpoint. timer_pass is READ-ONLY (mutation locus,
+        // Codex r4 F3): only the loop knows the send outcome —
+        //   - send OK: encap_inner already stamped last_send_any and
+        //     cleared the t6 arm (nothing else to do);
+        //   - send FAILED or skipped: loop calls
+        //     engine.pace_keepalive_skip(now) → t6_arm := now + advance
+        //     the t8 pacing anchor, so the recomputed deadline is
+        //     strictly future (AGY r3 G1(a)).
         next_deadline = actions.next_deadline_ns.min(attempt.next_retry_ns);
         if tick_due {
             // AGY r2 A5: only tick-condition runs advance the 1s anchor;
@@ -585,6 +618,15 @@ T7 afterward.
   call `abort_pending_for_peer` (Codex r1 M5) and clear `attempt`. A LATER
   trigger (including the next T8 due-tick, AGY F4) starts a fresh window —
   give-up never permanently disables initiation.
+- **Attempt-boundary state hygiene (AGY r4 H1+H2):** BOTH attempt-end
+  paths (success and give-up) clear `t7_arm` and drain both request edges
+  (`take_rekey_request`, `take_handshake_request`). During the 90s window,
+  egress on the stale-but-unexpired session keeps CAS-arming T7 and
+  re-arming the rekey edge; carried across the boundary, the stale arm
+  would reopen a fresh window the tick after give-up (recreating the A1
+  loop), and the stale edge would fire a pointless second handshake the
+  tick after success. Only traffic AFTER the boundary may re-trigger —
+  wireguard-go zeroes its timers at give-up the same way.
 - Thread respawn resets the machine; the first trigger re-starts it
   (benign, today's behavior).
 
@@ -811,6 +853,11 @@ collector (both-sides grep is an engineer-phase gate):
   - Expiry mid-attempt (AGY r3 G2): `expire_sessions` clears current
     during an active attempt ⇒ attempt does NOT declare success and keeps
     retrying.
+  - Attempt-boundary hygiene (AGY r4 H1/H2): egress data sent DURING an
+    active attempt, then give-up ⇒ NO new attempt on the next tick (t7
+    arm cleared at give-up); attempt success with a re-armed rekey edge ⇒
+    NO second handshake against the fresh session (edges drained at
+    attempt end).
   - T8: persistent_keepalive=N paces sends at N; reset by authenticated
     traversal in EITHER direction including handshake messages (Codex r1
     B1/B2 test: inbound-only transport traffic suppresses persistent
