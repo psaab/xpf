@@ -25,3 +25,6 @@
 ## Round 5 (plan v7, 47b30db00)
 - Codex: task-mqanru0k-ek8ohk — PLAN-NEEDS-REVISION (F3 RESOLVED; new MAJOR success-boundary t7-arm loss — fixed in v8)
 - AGY: adversarial-review-mqanb1it-szk3nj — PLAN-READY (H1-H3 RESOLVED, zero new findings)
+
+## Round 6 (plan v8, 894695f3f)
+- Codex: task-mqao5oso-90lnsz — PLAN-NEEDS-REVISION (r5 t7_arm RESOLVED; new MAJOR responder-success edge drain — fixed in v9)

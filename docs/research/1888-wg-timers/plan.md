@@ -1,10 +1,13 @@
 # Plan: #1888 WireGuard timers (rekey / expiry / keepalive) + #1889 wg_control blocking poll(2)
 
-**Status: DRAFT v8 — round-5 fold. AGY r5: PLAN-READY (H1-H3 RESOLVED, zero new findings, concurrency audit of skip anchors clean). Codex r5: F3 RESOLVED + 1 ordering MAJOR (fixed): the success-path `t7_arm` clear is REMOVED — the authenticated completion site already clears it (§3 any-authenticated-receive rule) BEFORE any same-iteration egress, so an `attempt.drive`-time clear would erase a legitimate post-completion arm; success drains only the request edges. Pending final Codex confirm.**
+**Status: DRAFT v9 — round-6 fold. AGY r5: PLAN-READY (zero new findings). Codex r6: r5 t7_arm ordering RESOLVED; the SAME after-bursts hazard applied to the success edge-drain in the peer-initiated case (unconfirmed responder session → legitimate same-iteration NoSession edge) — v9 moves ALL success-side cleanup inline to the authenticated completion site; `attempt.drive` success now only clears `attempt`. Pending final Codex confirm + AGY delta-attest.**
 
 v8 (round-5 fold): success/give-up boundary split in the attempt
 machine ("Attempt-boundary state hygiene" bullet) + §9 regression test
 for post-completion same-iteration egress retaining its T7 arm.
+v9 (round-6 fold): success-side edge drain relocated from
+`attempt.drive` to the completion site (Codex r6 — the responder-role
+peer-beat-us trace); give-up cleanup unchanged.
 
 v7 (round-4 fold — attempt-boundary state hygiene):
 - Codex r4 F3 MAJOR: §5.2 loop sketch now calls
@@ -631,20 +634,29 @@ T7 afterward.
     arm would reopen a fresh window the very next tick (recreating the A1
     loop). Only traffic AFTER give-up may re-trigger — wireguard-go
     zeroes its timers at give-up the same way.
-  - **Success:** drain the request edges ONLY — do **NOT** clear
-    `t7_arm` here. The stale during-attempt arm is already cleared at the
-    authenticated completion site itself (§3: a valid msg2/msg1 consume
-    IS an authenticated receive and clears `t7_arm`), which orders
-    BEFORE any same-iteration TUN egress; `attempt.drive` runs AFTER the
-    bursts, so clearing there would erase a LEGITIMATE arm set by
-    post-completion data on the fresh session (Codex r5 trace: msg2
-    installs S2 in the socket burst → queued TUN egress arms T7 on S2 →
-    a success-path clear would lose the 15s dead-peer detection for that
-    very data). Linux/wireguard-go do handshake-complete timer cleanup
-    in the receive path, before later data-send arming — same split.
-    Draining the edges at `attempt.drive` is safe: post-completion sends
-    on the fresh session cannot legitimately re-arm them (age ≈ 0,
-    session confirmed).
+  - **Success:** `attempt.drive` ONLY clears `attempt` — no stamp or
+    edge mutation at all (Codex r5 + r6: `attempt.drive` runs AFTER the
+    bursts, so ANY cleanup there can erase legitimate post-completion
+    state from the same iteration). ALL success-side cleanup happens
+    inline at the authenticated completion site (the control loop's
+    `consume_response` / `consume_initiation_create_response` Ok
+    handling, which orders BEFORE the TUN burst): the §3
+    any-authenticated-receive rule clears the stale `t7_arm`, and the
+    completion handling drains both request edges right there. Two
+    traces this ordering protects (both verified by Codex):
+    (a) msg2 installs S2 in the socket burst → queued TUN egress arms T7
+    on S2 → an `attempt.drive` clear would lose that 15s dead-peer
+    detection; (b) the PEER's msg1 installs an unconfirmed
+    responder-role S2 → same-iteration TUN egress hits the unconfirmed
+    gate (`NoSession`) and legitimately arms the handshake-request
+    edge → an `attempt.drive` drain would erase it (bounded loss — the
+    1/s rate-limited edge re-arms on the next egress packet — but the
+    cleanup pattern is wrong). Linux/wireguard-go do handshake-complete
+    timer cleanup in the receive path, before later data-send arming —
+    same split. Inline draining at completion is safe in the no-attempt
+    case too (peer-driven rekey): any pre-completion edge is obsoleted by
+    the completion itself, and post-completion egress re-arms within the
+    rate limit if the fresh session is unconfirmed.
 - Thread respawn resets the machine; the first trigger re-starts it
   (benign, today's behavior).
 
@@ -880,6 +892,11 @@ collector (both-sides grep is an engineer-phase gate):
     burst, post-completion data egresses on the fresh session in the SAME
     iteration ⇒ that data's T7 arm SURVIVES the attempt-success cleanup
     (and fires at +15s if the peer goes silent).
+  - Responder-success edge survival (Codex r6): the PEER's msg1 installs
+    an unconfirmed responder session mid-attempt; same-iteration TUN
+    egress arms the NoSession edge ⇒ that edge SURVIVES attempt success
+    (the completion-site drain ran before the TUN burst, `attempt.drive`
+    touches nothing).
   - T8: persistent_keepalive=N paces sends at N; reset by authenticated
     traversal in EITHER direction including handshake messages (Codex r1
     B1/B2 test: inbound-only transport traffic suppresses persistent
