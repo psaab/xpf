@@ -1,9 +1,12 @@
 # #1880 — first xpfd boot after deploy intermittently exceeds the failover harness's 60s comeback budget
 
-Revision: r2 (2026-06-12) — addresses Codex r1 (PLAN-NEEDS-REVISION),
-AGY r1 (PLAN-READY w/ nuances), Claude SMR r1 (PLAN-NEEDS-REVISION)
+Revision: r3 (2026-06-12) — r2 addressed Codex/AGY/SMR r1; r3 addresses
+Codex r2 (H: degraded fallback loses bounded convergence once Path A
+removes the accidental FRR-restart convergence; M: timeout must not
+leave frr-reload.py's vtysh children racing the fallback; L: risk-section
+sysrq attribution). AGY r2: PLAN-READY.
 Branch: `research/1880-boot-budget`
-Status: awaiting round-2 convergence
+Status: awaiting round-3 convergence
 
 ## 1. Problem
 
@@ -129,9 +132,28 @@ additive caveat documented. Exact semantics (r2, per Codex/AGY/SMR r1):
   `vtysh -f` after an interrupted diff is additive-convergent — every
   desired line is (re)applied; only stale removals can be missed — which
   is exactly the status-quo outcome (the systemctl branch has been
-  100%-failing since April, so today EVERY reload is `vtysh -f`). The
-  fallback can never make convergence worse than it is now.
-- **Degraded-mode signal** (Codex H3): `reload()` returns nil only on
+  100%-failing since April, so today EVERY reload is `vtysh -f`).
+- **Process-group teardown on timeout** (Codex r2 M): `frr-reload.py`
+  spawns `vtysh` children; `exec.CommandContext` kills only the python
+  process. The real executor sets `SysProcAttr{Setpgid: true}` and
+  `cmd.Cancel = kill(-pgid, SIGKILL)` (+ `WaitDelay`), and the fallback
+  is entered only after `Wait()` returns — no orphaned child writer can
+  overlap the fallback `vtysh -f` (which preserves the "Path A does not
+  widen the concurrency surface" claim under timeout, not just success).
+- **Bounded convergence after degraded fallback** (Codex r2 H): today's
+  stale removals "eventually converge" ONLY via the accidental FRR
+  murder+restart that Path A removes — so a degraded fallback must not
+  be terminal. `Manager` gains a single-flight degraded-retry loop:
+  when `reload()` returns degraded, a goroutine retries the PRIMARY
+  (`FrrReloadPy` only, no nested fallback) at 15s/30s/60s then every
+  5min until it succeeds; frr.conf on disk is the SSOT, so a newer
+  ApplyFull/Clear supersedes automatically (the retry always reloads
+  the current file). A manager-level `reloadMu` serializes the retry
+  against applySem-driven reloads. ErrNotFound (pythontools absent)
+  goes straight to the slow cadence. Success logs convergence; the
+  degraded state is exported as a Prometheus gauge
+  (`xpf_frr_reload_degraded`) so it is alarmed, not silent.
+- **Degraded-mode signal** (Codex r1 H3): `reload()` returns nil only on
   full diff convergence; fallback success returns a wrapped sentinel
   (`ErrFRRReloadDegraded`) so callers can distinguish. `ApplyFull`
   propagates it; `applyFRRConfig` keeps warn-and-continue for commits
@@ -140,7 +162,10 @@ additive caveat documented. Exact semantics (r2, per Codex/AGY/SMR r1):
   `Clear()` stops discarding the reload error (`_ = m.reload()` →
   return it); `xpfd cleanup` logs a loud failure line but still exits 0
   (deploy_vm wraps it in `|| true`; aborting deploys on a transiently
-  down FRR would be a regression) — documented in the cleanup help text.
+  down FRR would be a regression). The one-shot `cleanup` process cannot
+  host a retry loop; its bounded-convergence argument is the deploy flow
+  itself: deploy starts the new daemon seconds later and the first
+  ApplyFull (full diff against the new frr.conf) converges any residue.
 - **Binary-missing detection** (Codex H2 / AGY n3): catch
   `exec.ErrNotFound`/ENOENT explicitly → warn once ("frr-pythontools
   not installed — FRR reload degraded to additive vtysh -f") → fallback.
@@ -251,8 +276,9 @@ Ship **A + B together** (independent, both small):
   same PR so the supported environments never take this path silently.
 - sysrq reboot leaves dirty filesystems: ext4 journal recovery on these
   VMs is sub-second, this is precisely the power-fail scenario the test
-  claims to cover, and `test-double-failover.sh`/`test-ha-crash.sh`
-  have crashed these same VMs this way repeatedly; the legacy regression
+  claims to cover, and `test-double-failover.sh:187` has crashed these
+  same VMs with sysrq-b repeatedly (`test-ha-crash.sh` uses the
+  equivalently-unclean `incus stop --force`); the legacy regression
   environment inherits the same script — verify `CLUSTER_ENV=` legacy
   path still passes once.
 - Path A changes the reload path for ALL commits, not just deploys —
