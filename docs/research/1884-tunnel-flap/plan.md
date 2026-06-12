@@ -2,18 +2,16 @@
 
 ## 1. Status
 
-DRAFT v8 — r7 verdicts: AGY PLAN-READY (full state-machine traces:
-guarded transfer complete across bind-failure/recovery/removal; VRF
-rename/delete safe via kernel auto-unslave; r5 closures confirmed);
-Claude SMR PLAN-READY; Codex PLAN-NEEDS-REVISION with two folds: the
-STANZA-branch claim needed the same success guard as the r6 list
-transfer (blind claim=B on a failed stanza re-bind strands vrf-A —
-`[r7]`), and two leftover MTU text/test contradictions (A.3 prose +
-test row 2) — both fixed. r6: Codex blind-transfer counterexample
-folded as the master-observed guard `[r6]`; AGY r6 job failed on
-companion auth (retried r7, succeeded). r5: three-way convergent
-clear-on-veto counterexample `[r5:*]`. Earlier: r4 `[r4:*]`, r3
-`[r3:*]`, r2 `[r2:*]`, r1 `[r1:*]`.
+DRAFT v9 — r8 verdicts: Codex PLAN-NEEDS-REVISION (r7 closures
+confirmed; ONE narrower counterexample in the BOTH-KNOBS overlap —
+stanza-B-bind-failure + list-C retains a stale claim A while the
+kernel is on C — folded as the OBSERVATION FALLBACK + stanza-wins
+precedence `[r8]`); Claude SMR PLAN-READY (missed the overlap —
+superseded); AGY r8 job DEGENERATE (succeeded-with-empty-result;
+retried in r9 per the one-retry discipline). r7: stanza success-guard
++ MTU text sync `[r7]`. r6: master-observed list transfer `[r6]`.
+r5: convergent clear-on-veto counterexample `[r5:*]`. Earlier: r4
+`[r4:*]`, r3 `[r3:*]`, r2 `[r2:*]`, r1 `[r1:*]`.
 
 ## 2. Issue framing
 
@@ -407,11 +405,27 @@ applied each round. Per-tunnel update:
 - stanza nonempty ⇒ bind (as today) and `appliedRI[name] = stanza RI`
   **only when `BindInterfaceToVRF` SUCCEEDS**; on bind failure (vrf.go
   lookup or LinkSetMaster error — tunnel apply logs and continues,
-  tunnel.go:183-188) RETAIN the previous claim [r7: Codex — symmetric
-  with the r6 transfer guard: commit 1 binds A, commit 2's stanza
-  re-bind to B FAILS leaving the kernel on vrf-A, a blind claim=B
-  would mismatch-clear at commit 3 and strand vrf-A; the claim must
-  only ever name a master we bound successfully or observed];
+  tunnel.go:183-188) fall through to the OBSERVATION FALLBACK below
+  [r7: Codex — symmetric with the r6 transfer guard: commit 1 binds
+  A, commit 2's stanza re-bind to B FAILS leaving the kernel on
+  vrf-A, a blind claim=B would mismatch-clear at commit 3 and strand
+  vrf-A; the claim must only ever name a master we bound successfully
+  or observed];
+- OBSERVATION FALLBACK (stanza bind failed, or stanza empty with a
+  list member) [r8: Codex — overlap case]: if `RIListMember != ""`
+  AND the link's current master is observed to be
+  `vrf-<RIListMember>` ⇒ `appliedRI[name] = RIListMember`; otherwise
+  RETAIN the previous nonempty claim. The stanza and list knobs can
+  legally coexist (tunnel stanza RI compiles independently of RI
+  interface lists — compiler_interfaces.go:189, compiler_routing.go:
+  295; validation only warns on unknown RI interfaces, compiler.go:
+  915). Without the fallback, commit 2 with stanza-B-bind-FAILURE
+  plus list-C (0a bound C) retains a stale claim A while the kernel
+  is on C; commit 3 removing both then mismatch-clears and strands C
+  (Codex r8 counterexample). With it, the claim becomes C and the
+  removal unbinds C. Both-present with stanza bind SUCCESS: stanza
+  wins (bind overwrote 0a's list bind in apply order — today's
+  effective precedence), claim = stanza RI;
 - stanza empty ∧ `RIListMember != ""` ⇒ no bind, no unbind (the
   veto), and the claim is TRANSFERRED **only after observing the
   transfer target is real** [r6: Codex]: set
@@ -614,8 +628,12 @@ Tuntap flags/persist/MTU; new `pkg/routing/tunnel_reconcile_test.go`):
    still vrf-A) → claim RETAINED as A (guarded transfer), then list
    removed → A unbound [r6: Codex counterexample]; list-veto with 0a
    bind failed and NO prior claim → no claim created; stanza re-bind
-   A→B where BindInterfaceToVRF FAILS → claim retained as A, later
-   stanza/list removal unbinds A [r7: Codex stanza-guard symmetry];
+   A→B where BindInterfaceToVRF FAILS (no list member) → claim
+   retained as A, later stanza/list removal unbinds A [r7: Codex
+   stanza-guard symmetry]; stanza-B-bind-FAILS + list-C with 0a bound
+   C (overlap) → claim becomes C via observation fallback, removing
+   both then unbinds C [r8: Codex counterexample]; stanza-B bind
+   SUCCESS + list-C → claim B (stanza wins);
    stanza removed, master replaced same-apply by a DIFFERENT VRF →
    NOT unbound (identity mismatch), entry cleared [r3: Codex blocker];
    0a-style master with appliedRI empty → NOT unbound [r2: Codex F3];
@@ -681,20 +699,24 @@ may hold the lock — WAIT; deploy wipes CoS — re-apply after):
   with it.
 - `pkg/cli/apply.go` legacy path behavior beyond what A.6 changes.
 
-## 11. Open questions for adversarial review (round 8 — final ratification)
+## 11. Open questions for adversarial review (round 9 — final ratification)
 
-Folded from r7 (Codex task-mqamjz9g-nsa3ii; AGY
-adversarial-review-mqam1n3o-u4dlp9 PLAN-READY): the appliedRI claim is
-now success/observation-guarded on BOTH branches — stanza claims
-update only on a successful `BindInterfaceToVRF`, list claims update
-only on an observed `vrf-<RIListMember>` master; failure paths retain
-the previous nonempty claim. The claim invariant is now: appliedRI
-names a master we successfully bound or directly observed — never an
-intent. MTU prose/tests fully synced to the A.3 switch.
+Folded from r8 (Codex task-mqan0vrp-wpr5br): the claim-update rule is
+now a single ordered procedure — (1) stanza nonempty: bind; success ⇒
+claim = stanza RI; (2) on stanza-bind failure OR stanza empty: if
+`RIListMember != ""` and the observed master IS `vrf-<RIListMember>`
+⇒ claim = RIListMember; (3) otherwise retain the previous nonempty
+claim; (4) config wants none ⇒ identity-gated unbind with the
+established lapse/retention rules. Invariant: a claim is written only
+from a successful bind or a direct observation; both-knobs overlap is
+legal config and resolves stanza-wins on success, observation on
+failure.
 
-1. With both claim branches guarded, is any remaining
-   stale-claim/stale-master sequence reachable?
-2. Any other defect or re-opened closure in the r7 folds?
+1. Is the ordered claim procedure now exhaustive over (stanza ∈
+   {∅, bind-ok, bind-fail}) × (list ∈ {∅, 0a-ok, 0a-fail}) ×
+   (prior claim ∈ {∅, stale, fresh}) — any cell that strands an
+   owned master or unbinds a foreign one?
+2. Any other defect or re-opened closure in the r8 fold?
 
 Settled r2: LinkSetUp skip keyed on runner-down; appliedAddrs
 best-effort + AddrDel-failure retention; A.6 field list; ownedNames
