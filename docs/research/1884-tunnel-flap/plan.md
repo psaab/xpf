@@ -2,12 +2,13 @@
 
 ## 1. Status
 
-DRAFT v3 — r2 verdicts: AGY PLAN-READY (ratified all six §11 r2
-questions; one nil-guard note folded), Codex PLAN-NEEDS-REVISION (5
-mechanics findings, all folded, markers `[r2:*]`), Claude SMR
-PLAN-READY-contingent (SMR2-1 = Codex r2 F1, SMR2-2 stop-helper map
-delete — both folded). r1 history: all three PLAN-NEEDS-REVISION,
-folded in v2 (`[r1:*]`).
+DRAFT v4 — r3 verdicts: AGY PLAN-READY (all five §11 r3 questions
+ratified; appliedRI-delete hygiene folded), Claude SMR PLAN-READY,
+Codex PLAN-NEEDS-REVISION (ONE blocker: appliedRI master-identity
+check + lifecycle cleanup — folded as `[r3: Codex]`, superseding the
+bind-wins-last acceptance AGY/SMR had offered). r2: AGY PLAN-READY,
+Codex 5 mechanics findings + SMR 2 (folded, `[r2:*]`). r1: all three
+PLAN-NEEDS-REVISION (folded, `[r1:*]`).
 
 ## 2. Issue framing
 
@@ -186,6 +187,7 @@ for name := range oldOwned {
         }
     }
     delete(t.appliedAddrs, name) // only once gone/deleted
+    delete(t.appliedRI, name)    // [r3] ditto; clearLocked clears both
 }
 t.ownedNames = next
 t.tunnels = nil // rebuilt by the loop (GetStatus source, as today)
@@ -331,10 +333,25 @@ recreate also destroys the 0a binding — the tunnel ends every apply
 unbound — but re-breaking it deliberately is not "preserving"
 anything.) Instead the manager tracks `t.appliedRI map[string]string`
 — the RI IT bound per tunnel — and calls `LinkSetNoMaster` only when
-`appliedRI[name] != "" ∧ tc.RoutingInstance == ""` (then clears the
-entry). Net effect: tunnel-stanza RI removal unbinds (recreate-parity
-where it was OUR bind); 0a-list bindings are never touched (strict
-improvement: they now survive the apply). networkd never manages
+ALL of [r3: Codex blocker — the bare appliedRI check still unbound a
+0a bind made EARLIER IN THE SAME APPLY when the stanza moved to a
+list-bind of a different VRF in one commit]:
+- `appliedRI[name] != ""` (we bound it),
+- `tc.RoutingInstance == ""` (stanza no longer wants it), and
+- **the link's CURRENT master is still the VRF we bound**: resolve
+  `t.ops.LinkByName(appliedRI[name])` and require its `Index` ==
+  `link.Attrs().MasterIndex`. Any mismatch (0a already rebound the
+  tunnel to a different VRF this apply; master removed out-of-band;
+  VRF device lookup fails) ⇒ do NOT unbind — the master is no longer
+  ours.
+In every case where the stanza is empty, the `appliedRI[name]` entry
+is cleared (our claim lapses regardless of whether we issued the
+unbind). Lifecycle [r3: Codex + AGY hygiene]: A.1 removal-deletion
+and `clearLocked` also `delete(t.appliedRI, name)` alongside
+`appliedAddrs`. Net effect: tunnel-stanza RI removal unbinds
+(recreate-parity where the master is still OUR bind); 0a-list
+bindings — including a same-apply replacement bind — are never
+touched (strict improvement: they now survive the apply). networkd never manages
 tunnel masters (tunnels are `daemonOwned`, compiler_iface.go:1065-1081,
 AGY r1 Q2). Restart residual: `appliedRI` is not persisted — an RI
 removed while the daemon was down leaves the adopted anchor bound
@@ -483,9 +500,14 @@ Tuntap flags/persist/MTU; new `pkg/routing/tunnel_reconcile_test.go`):
    → deleted (in appliedAddrs); foreign/kernel fe80 never deleted;
    fe80 stale-delete failure → stays in appliedAddrs and is retried
    [r2: Codex F4]; zero LinkDel.
-6. Stanza-RI removed (appliedRI nonempty) → LinkSetNoMaster; 0a-style
-   master with empty stanza-RI (appliedRI empty) → NOT unbound [r2:
-   Codex F3]; RI present → BindInterfaceToVRF.
+6. Stanza-RI removed, master still ours (MasterIndex == index of the
+   appliedRI VRF) → LinkSetNoMaster + entry cleared; stanza removed
+   but master REPLACED same-apply by a 0a bind to a different VRF →
+   NOT unbound, entry cleared [r3: Codex blocker]; 0a-style master
+   with appliedRI empty → NOT unbound [r2: Codex F3]; VRF lookup
+   failure → NOT unbound, entry cleared; RI present →
+   BindInterfaceToVRF; tunnel removed/cleared → appliedRI entry
+   deleted.
 7. Legacy: identical GRE attrs (kernel-shaped: 4-byte IPs, TTL 64,
    round-tripped keys) → reuse; changed Destination → delete+recreate;
    v4→v6 endpoints → recreate (Type() flip); Key set↔unset → recreate;
@@ -527,33 +549,27 @@ may hold the lock — WAIT; deploy wipes CoS — re-apply after):
   `appliedAddrs` link-local across restart. Separate issue if it bites.
 - `pkg/cli/apply.go` legacy path behavior beyond what A.6 changes.
 
-## 11. Open questions for adversarial review (round 3)
+## 11. Open questions for adversarial review (round 4 — ratification)
 
-Settled in r2 (AGY ratified; Codex refinements folded): skip-LinkSetUp
-keyed strictly on runner-down; appliedAddrs best-effort EXCEPT the
-AddrDel-failure retention now specified; A.6 comparison field list
-complete; ownedNames staleness bounded to the documented same-name
-external-replacement case (today-parity).
+Settled r2: LinkSetUp skip keyed on runner-down; appliedAddrs
+best-effort + AddrDel-failure retention; A.6 field list; ownedNames
+staleness today-parity. Settled r3 (Codex + AGY convergent evidence):
+MTU precedence `unit.MTU > 0 ? unit.MTU : ifc.MTU` matches the
+compiler (compiler_iface.go:449→549 ordering, inet6-min parse at
+compiler_interfaces.go:537); TunnelConfig.MTU additive-safe (HA sync
+is config-text — daemon_ha_sync.go:335 / cluster sync.go:172;
+userspace snapshot maps explicit fields; configstore JSON additive;
+String() explicit); ownedNames growth bounded (not-found path prunes);
+upgrade-boot adoption write is convergence not churn; no r1 closure
+re-opened.
 
-1. A.3 desired-MTU plumbing [r2: Codex F2 fold]: is
-   `tc.MTU = unit.MTU > 0 ? unit.MTU : ifc.MTU` the correct precedence
-   for unit-level tunnels, and is there any consumer of
-   `config.TunnelConfig` (HA config sync, dataplane snapshot builders)
-   that the additive field could confuse?
-2. A.5 appliedRI [r2: Codex F3 fold]: any sequence where the
-   manager-bound RI is REPLACED by a 0a-list bind to a DIFFERENT VRF
-   between applies, making `appliedRI[name] != ""` unbind a master the
-   0a loop just set? Is bind-wins-last (today's implicit semantics)
-   acceptable there?
-3. A.1 LinkDel-failure retention [r2: Codex F5 fold]: retained names
-   whose link never reappears (deleted out-of-band after the failure)
-   — confirm the next-Apply `LinkByName` not-found path drops them
-   cleanly (no permanent ownedNames growth).
-4. Adoption trigger remains name-not-in-oldOwned. On the FIRST apply
-   of a fresh boot this daemon's OWN just-created anchors from a
-   pre-fix binary (upgrade case) are adopted and MTU-normalized — is
-   any upgrade scenario harmed by that single desired-MTU write?
-5. Anything in the r2 folds that re-opens a closed r1 finding?
+1. A.5 master-identity check [r3: Codex blocker fold]: is
+   `LinkByName(appliedRI[name]).Index == link.Attrs().MasterIndex` the
+   correct identity test (VRF rename edge? index reuse within one
+   apply?), and is clear-claim-on-empty-stanza in ALL branches the
+   right lapse rule?
+2. Any defect introduced by the r3 folds, or any earlier closure
+   re-opened?
 
-If any answer exposes a structural flaw, PLAN-KILL remains an
+If either answer exposes a structural flaw, PLAN-KILL remains an
 acceptable verdict.
