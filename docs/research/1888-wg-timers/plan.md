@@ -1,6 +1,50 @@
 # Plan: #1888 WireGuard timers (rekey / expiry / keepalive) + #1889 wg_control blocking poll(2)
 
-**Status: DRAFT v4 — v3 + Claude SMR r2 narrow fixes (attempt success uses `>=` across the cached-clock seam; bring-up initiation folded into the attempt machine; unconfirmed-responder attempt-end documented); pending Codex/AGY round-2 verdicts**
+**Status: DRAFT v5 — round-2 fold (Codex r2: 1 BLOCKER + 3 MAJOR + 1 MINOR; AGY r2: 1 BLOCKER + 3 MAJOR + 1 MINOR; SMR r2: F1-F3). Every r1 finding attested RESOLVED by both external reviewers. Pending round-3 convergence.**
+
+v5 (round-2 fold):
+- Codex C1 BLOCKER (subsumes SMR r2 F1): attempt success is now an
+  IDENTITY check, not a clock inequality — record the current session's
+  `local_index` (or None) at attempt start; success when it changes.
+  (v4's `>=` was still fragile: a fast msg2 processed in the next burst
+  installs with the PREVIOUS published timestamp, strictly older than
+  `started_ns`.)
+- Codex C2 MAJOR: the v3 cached-clock adjudication is REVERSED for T3
+  enforcement — `try_encap`/`try_decap` read CLOCK_MONOTONIC per use
+  (vDSO; both paths are control-thread or already-allocating transit). No
+  publisher cadence can hard-bound staleness when the control thread
+  stalls, and workers must never send past REJECT_AFTER_TIME. A
+  `#[cfg(test)]`-gated mock-clock override preserves deterministic tests;
+  AGY's S3 hot-path concern stays as the §7.5 documented flag.
+- Codex C3 MAJOR: deadline sentinel specified — `u64::MAX` means "no
+  deadline"; `next_deadline` initialized to 0 forces one pass on the
+  first iteration; every pass recomputes from scratch so no stale
+  past-deadline can survive a pass (no zero-timeout poll loop).
+- Codex C4 MAJOR: post-msg2 immediate keepalive — on `consume_response`
+  Ok the control loop sends one keepalive (Linux receive.c sends a
+  keepalive after a handshake response when no data is queued); without
+  it the peer's responder-role session stays unconfirmed and ITS egress
+  blackholes until our next send.
+- Codex C5 + AGY r1 F7 completion: ONE bulk signal-then-join helper used
+  by stale-prune, `stop_all_wg_control_threads`, AND
+  `prune_wg_control_threads_for_snapshot` (the third serial stop path).
+- AGY A1 BLOCKER: T7's trigger stamp is CONSUMED on attempt start
+  (`last_send_data_ns := 0`), so T5 give-up cannot immediately re-trigger
+  a fresh 90s window — post-give-up re-initiation requires NEW egress
+  data (spec: "tries again when wanting to send").
+- AGY A2 MAJOR: T8's "usable session" DEFINED = confirmed AND unexpired.
+  An unconfirmed responder-role current session ⇒ T8 initiates (else the
+  keepalive silently fails the confirmed gate and pinhole maintenance
+  breaks).
+- AGY A3 MAJOR: UDP `POLLNVAL` (fd invalid) EXITS the thread; only
+  transient UDP `POLLERR`/`POLLHUP` remain non-fatal drains.
+- AGY A4 MAJOR: T6 predicate pinned:
+  `last_recv_data_ns > last_send_any_ns && now − last_send_any_ns ≥ 10s` —
+  under an inbound-only stream this emits one keepalive per 10s anchored
+  on our last send (kernel-equivalent); the naive recv-anchored reading
+  never fires and trips the peer's T7.
+- AGY A5 MINOR: `last_timer_pass_ns` advances ONLY on tick-condition
+  runs; deadline-driven passes do not reset the 1s anchor.
 
 v3 (AGY r1 fold + Codex/AGY conflict adjudications):
 - AGY F1 (peer-stamp infinite T7 loop) — superseded by the v2 traversal
@@ -118,9 +162,9 @@ the #1888 body.
 | T3 | REJECT_AFTER_TIME | 180s | Session keys older than 180s MUST NOT be used to send **or** receive | Both roles, both directions | Refuse use; discard session | Exact gate in `try_encap`/`try_decap` (compare against `created_ns`); control-thread timer pass additionally tears down expired sessions (removes demux entries, clears `current`/`previous`) within ≤ ~1.1s |
 | T4 | REKEY_TIMEOUT | 5s (+ jitter ≤ 333ms in spec) | After sending a handshake initiation with no response | Initiator of the handshake | Retransmit initiation | Control-loop pacing: re-drive initiation no more often than 5s. **Jitter omitted** — sub-granularity at our tick and pointless at single-digit tunnel counts; documented deviation |
 | T5 | REKEY_ATTEMPT_TIME | 90s | Retransmissions (T4) have continued for 90s with no completed handshake | Initiator | Give up; resume only when there is new data to send | Control-loop attempt window; the existing worker `request_handshake` NoSession edge is the "new data" resume signal |
-| T6 | KEEPALIVE_TIMEOUT (passive keepalive) | 10s | After **receiving** a data message, if we have **sent nothing** (data or keepalive) within 10s | Both roles | Send a keepalive (authenticated empty transport message) | Timer pass, 1s granularity |
+| T6 | KEEPALIVE_TIMEOUT (passive keepalive) | 10s | After **receiving** a data message, if we have **sent nothing** (any authenticated packet) within 10s. Predicate pinned (AGY r2 A4): `last_recv_data_ns > last_send_any_ns && now − last_send_any_ns ≥ 10s` — anchored on our LAST SEND so an inbound-only stream emits one keepalive per 10s (kernel-equivalent); a recv-anchored reading would never fire under continuous inbound data and would trip the peer's T7 | Both roles | Send a keepalive (authenticated empty transport message) | Timer pass, 1s granularity |
 | T7 | No-reply reinit ("suspect dead session") | KEEPALIVE_TIMEOUT + REKEY_TIMEOUT = 15s (+ jitter ≤ 333ms in spec/wireguard-go — **omitted**, documented deviation like T4) | After **sending** a transport data message, if we have **received no authenticated packet** (data, keepalive, or valid handshake message) within 15s | Either side may detect | Initiate new handshake | Timer pass, 1s granularity. This is the rule that makes the #1868 P6 no-flush branch obsolete-but-harmless |
-| T8 | persistent_keepalive | configured per peer (0 = off) | Every N seconds, if there has been **no authenticated packet traversal in EITHER direction** within N seconds (wireguard-go `timersAnyAuthenticatedPacketTraversal` — sent OR received, transport OR handshake, resets the pacing) | Both roles | Send a keepalive; if no usable session exists, initiate a handshake (NAT pinhole maintenance is the whole point) | Timer pass, 1s granularity |
+| T8 | persistent_keepalive | configured per peer (0 = off) | Every N seconds, if there has been **no authenticated packet traversal in EITHER direction** within N seconds (wireguard-go `timersAnyAuthenticatedPacketTraversal` — sent OR received, transport OR handshake, resets the pacing; Codex r2 confirmed against Linux `timers.c:215-219`) | Both roles | Send a keepalive; if no **usable** session exists, initiate a handshake (NAT pinhole maintenance is the whole point). **"Usable" DEFINED (AGY r2 A2): confirmed AND unexpired** — an unconfirmed responder-role current session is NOT usable (its keepalive would silently fail `try_encap`'s confirmed gate), so T8 initiates | Timer pass, 1s granularity |
 | T9 | Session-state zeroing | REJECT_AFTER_TIME × 3 = 540s | No successful handshake for 540s | Both | Zero all session state | Collapses into T3: we tear down (drop) sessions at 180s, which zeroizes via `Zeroizing`/drop semantics earlier than the spec requires. Pending-handshake state is already bounded (at-most-one-per-peer) and aborted/replaced on each new attempt |
 
 **Activity-stamp semantics** (which packets feed which timers — this is
@@ -132,6 +176,12 @@ B1/B2 corrected v1, which omitted handshake traffic entirely):
 
 - `last_send_data_ns` — successful encap of a **non-empty** inner (transport
   data only). Arms T7. A sent keepalive or handshake does NOT arm T7.
+  **CONSUMED (set to 0) when a handshake attempt starts** (AGY r2 A1): the
+  T7 obligation transfers to the attempt machine; without this reset, a T5
+  give-up would observe the same stale stamp and immediately re-open a
+  fresh 90s window, looping forever — post-give-up re-initiation must
+  require NEW egress data, per the spec's "tries again when wanting to
+  send".
 - `last_recv_data_ns` — **authenticated, replay-accepted, non-empty**
   transport plaintext. Stamped immediately after the replay-window accept
   with `n > 0` — **before** the inner-parse/AllowedIPs gates (Codex r1 M3:
@@ -255,21 +305,24 @@ pub(crate) last_recv_data_ns: AtomicU64,
 pub(in crate::afxdp::wg) rekey_request_pending: AtomicBool,
 ```
 
-**Engine clock** — adjudicated Codex M7 × AGY F6 synthesis: the engine
-holds `cached_now_ns: AtomicU64`, initialized to `monotonic_now_ns()` in
-`WgEngine::new` and re-published (relaxed store) by the control loop once
-per iteration (≤100ms staleness idle, less under load). `try_encap` /
-`try_decap` read it with one relaxed load — exact-locus T3 enforcement with
-zero per-packet clock reads, no S3 hot-path trap, and the atomic doubles as
-the mock clock for deterministic engine tests. Worst-case T3 slop is the
-poll cap + burst time (~0.2s), far inside the protocol's tolerance (the
-peer's own REJECT_AFTER_TIME gives a 60s margin past REKEY_AFTER_TIME).
+**Engine clock** — v5 (Codex r2 C2 reversed the v3 cached-clock
+adjudication): `WgEngine::now_ns()` reads CLOCK_MONOTONIC per use
+(`counters::monotonic_now_ns()`, a vDSO call, ~20-25ns). The v3 publisher
+design had no hard staleness bound — `frame/wg.rs:108` worker encap runs
+with whatever the control loop last published, and a descheduled/stalled
+control thread would let workers send past REJECT_AFTER_TIME indefinitely.
+Both consuming paths are the control thread and the already-per-packet-
+allocating transit path, so the read is in budget. Deterministic tests use
+a `#[cfg(test)]`-gated override inside `now_ns()` (engine-resident
+`Option<AtomicU64>`-style mock, compiled out of release builds — zero
+release cost). AGY's S3 hot-path concern (per-packet clock reads if decap
+ever moves onto AF_XDP workers) remains the §7.5 documented flag.
 
 **Hot-path enforcement** — `try_encap` success path gains (after the
 existing confirmed gate, before counter consume):
 
 ```rust
-let now_ns = self.cached_now_ns.load(Ordering::Relaxed); // coarse, see above
+let now_ns = self.now_ns();         // CLOCK_MONOTONIC vDSO; cfg(test) mock
 let age = now_ns.saturating_sub(session.created_ns);
 if age >= REJECT_AFTER_TIME_NS {
     WgCounters::bump(&self.counters.encap_drops_expired);
@@ -295,11 +348,13 @@ must fire **before** `next_tx_counter()`/header writes so the "on Err the
 buffer and counter are untouched" contract holds; the decap T3 gate fires
 before AEAD so expired keys do no crypto work.
 
-Per-packet cost is one relaxed atomic load (the cached clock) plus the
-stamp stores — no clock syscalls, no allocation; no AF_XDP steady-state
-path is touched. `created_ns` is stamped from the same cached clock at the
-two handshake-completion install sites (engine impl methods, which have
-`&self`), keeping every age comparison in one clock domain.
+Per-packet cost is one vDSO clock read plus the stamp stores — no
+allocation; no AF_XDP steady-state path is touched (decap is control-thread
+only in S2a; the worker transit encap already heap-allocates per packet).
+`created_ns` is stamped via the same `now_ns()` at the two
+handshake-completion install sites (engine impl methods, which have
+`&self`), keeping every age comparison in one clock domain — including
+under the test mock.
 
 **Keepalive emission** — extract `try_encap`'s body into
 `encap_inner(peer, inner_ip, out, is_keepalive)`:
@@ -341,7 +396,7 @@ pub(crate) enum InitiateReason { Age, DeadPeer, KeepaliveNoSession }
 pub(crate) struct TimerActions {
     pub initiate: Option<InitiateReason>, // T7 / T8-no-session (T1/T2/T3 come in via the rekey edge)
     pub send_keepalive: Option<KeepaliveKind>, // Passive | Persistent
-    pub next_deadline_ns: u64,    // earliest future deadline, for poll timeout
+    pub next_deadline_ns: u64,    // earliest future deadline; u64::MAX = none (Codex r2 C3)
 }
 pub(crate) fn timer_pass(&self, now_ns: u64) -> TimerActions;
 ```
@@ -357,24 +412,37 @@ and hand-set stamps. `InitiateReason` feeds the per-reason counters (§5.3).
 const WG_POLL_CAP: Duration = Duration::from_millis(100);
 const WG_TIMER_TICK_NS: u64 = 1_000_000_000; // timer pass granularity
 
+// Deadline sentinel discipline (Codex r2 C3): u64::MAX = "no deadline";
+// next_deadline initialized to 0 so the FIRST iteration always runs a
+// pass and computes real deadlines. Every pass recomputes next_deadline
+// from scratch (timer_pass + attempt state both return future-or-MAX
+// values for inactive timers), so a stale past-deadline cannot survive a
+// pass and produce a permanent 0-timeout poll loop.
+let mut next_deadline: u64 = 0;
+let mut last_timer_pass_ns: u64 = 0;
+
 while !stop.load(Ordering::Relaxed) {
     let mut did_work = false;
     // --- socket burst, TUN burst: UNCHANGED (WG_RX_BURST drains) ---
-
-    engine.publish_now(now);   // cached_now_ns store, one relaxed store/iter
 
     // --- timer arm (replaces the :261-283 re-init block) ---
     // Runs when the 1s tick elapses OR a computed deadline is due (AGY
     // r1 F3: gating on the tick alone lets a mid-tick deadline saturate
     // the poll timeout to 0 and busy-spin until the tick boundary).
-    if now - last_timer_pass_ns >= WG_TIMER_TICK_NS || now >= next_deadline {
+    let tick_due = now - last_timer_pass_ns >= WG_TIMER_TICK_NS;
+    if tick_due || now >= next_deadline {
         engine.expire_sessions(now);
         let actions = engine.timer_pass(now);
         attempt.drive(now, &actions, ...);   // see attempt machine below
         // keepalives: create_keepalive + wg_send_to toward
         // effective_endpoint (skip if none learned/configured).
         next_deadline = actions.next_deadline_ns.min(attempt.next_retry_ns);
-        last_timer_pass_ns = now;
+        if tick_due {
+            // AGY r2 A5: only tick-condition runs advance the 1s anchor;
+            // frequent sub-second deadline runs must not starve the
+            // periodic tick work.
+            last_timer_pass_ns = now;
+        }
     }
 
     if !did_work {
@@ -388,6 +456,15 @@ while !stop.load(Ordering::Relaxed) {
 }
 ```
 
+**Post-msg2 key-confirmation keepalive (Codex r2 C4):** on
+`consume_response` Ok the control loop immediately sends ONE keepalive
+(stamped through `last_send_any_ns`, counted under `keepalives_tx_passive`).
+Linux does exactly this (`receive.c`: keepalive after processing a
+handshake response with no queued data) because the responder's fresh
+session is UNCONFIRMED until it authenticates our first transport record —
+without this, a handshake we initiated with nothing to send (e.g.
+T8-no-session) leaves the peer's egress blackholed until our next send.
+
 **Handshake attempt state machine** (AGY r1 F2 BLOCKER + F4; replaces the
 bare `last_initiate_ns` thread-local). The v2 edge wiring had a starvation
 hole: the rekey edge is consumed on the first initiation, and if that
@@ -396,12 +473,18 @@ blocks every retry until the session hard-expires at 180s.
 
 ```rust
 struct HandshakeAttempt {
-    started_ns: u64,        // attempt window start (T5 anchor)
-    last_tx_ns: u64,        // last initiation send (T4 pacing anchor)
-    reason: InitiateReason, // counter attribution
+    started_ns: u64,            // attempt window start (T5 anchor)
+    last_tx_ns: u64,            // last initiation send (T4 pacing anchor)
+    reason: InitiateReason,     // counter attribution
+    baseline_session: Option<u32>, // current session local_index at start
 }
 // thread-local: attempt: Option<HandshakeAttempt>
 ```
+
+Starting an attempt also CONSUMES the T7 trigger stamp
+(`peer.last_send_data_ns := 0`, AGY r2 A1 — see §3) so a give-up cannot
+immediately re-trigger; the obligation lives in the attempt while one is
+active, and only new egress data re-arms T7 afterward.
 
 - **Start** a new attempt (if none active) from any §3 trigger class whose
   predicate passes: NoSession edge, rekey edge, T7, T8-no-session, or the
@@ -415,18 +498,21 @@ struct HandshakeAttempt {
   the decision to replace the current session; losing one datagram no
   longer starves the rekey (AGY F2). The unconsumed-edge state is
   irrelevant during an active attempt.
-- **End on success:** the peer's current session's `created_ns` **>=**
-  `started_ns` (a fresh session installed — works for both roles, including
-  the peer beating us with its own initiation; the resulting session may be
-  responder-role and unconfirmed, which is correct — key-confirmation is an
-  egress gate, and a NoSession edge re-arms if needed, SMR r2 F3).
-  Equality is REQUIRED, not strict `>` (SMR r2 F1): `created_ns` comes from
-  the cached clock published from the same iteration `now` that stamps
-  `started_ns`, so a same-tick completion yields equal stamps; strict
-  comparison would retry against a healthy fresh session (the #1745
-  wrap-safe-equality lesson). The false-accept direction (session installed
-  same-tick just before the trigger) ends an attempt that fresh keys
-  already satisfy — benign.
+- **End on success — IDENTITY check, no clock (Codex r2 C1 BLOCKER,
+  subsumes SMR r2 F1):** at attempt start record
+  `baseline_session = current session's local_index (or None)`; the
+  attempt succeeds when the peer's current session's `local_index`
+  differs from the baseline (or current became `Some`). `local_index` is
+  unique per live session by the engine's collision-refusing installer
+  (engine.rs `install_session_locked`), so ANY fresh install — our msg2
+  completing, or the peer beating us with its own initiation — flips the
+  identity regardless of clock-stamp ordering. (Both clock formulations,
+  `>` and `>=`, were proven fragile across the publish seam: a fast msg2
+  processed in the next burst installs with the previous published
+  timestamp.) The resulting session may be responder-role and unconfirmed,
+  which is correct — key-confirmation is an egress gate, the post-msg2
+  keepalive (Codex C4) confirms the peer's side, and a NoSession edge
+  re-arms if needed (SMR r2 F3).
 - **End on give-up:** `now - started_ns >= REKEY_ATTEMPT_TIME` (90s) ⇒
   call `abort_pending_for_peer` (Codex r1 M5) and clear `attempt`. A LATER
   trigger (including the next T8 due-tick, AGY F4) starts a fresh window —
@@ -462,21 +548,26 @@ Design points, mapped to #1889's stated constraints:
    a generic zero-progress exit guard could tombstone the thread on a
    transient UDP `POLLERR` (ICMP port-unreachable bursts are normal and
    already drained via the `recv_from` error arm at wg_control.rs:200).
-   The guard is therefore scoped to the TUN fd only: `POLLERR`/`POLLNVAL`/
-   `POLLHUP` in the TUN's revents (AGY r1 F8: inspect revents directly), or
-   N consecutive TUN-ready iterations whose reads all fail with a
-   non-`WouldBlock` error (device destroyed under us), exit the thread
-   cleanly — the #1872 tombstone + backoff respawn machinery is the
-   designed recovery path (a transient operator link-down self-heals via
-   respawn backoff). UDP revents never exit the thread; its errors surface
-   through the existing per-read exception accounting.
-7. **Multi-entry stop is signal-then-join (AGY r1 F7):** the stale-prune
-   loop in `spawn_wg_control_threads` and `stop_all_wg_control_threads`
-   currently stop+join one entry at a time; with a 100ms poll cap that
-   serializes to N×~100ms. Both multi-entry paths set ALL relevant `stop`
-   flags first, then join — total stop latency ≈ one cap regardless of
-   tunnel count. (`stop_remove_wg_control_entry` keeps its single-entry
-   shape for the one-off callers.)
+   The fatal-exit guard covers: the TUN fd's `POLLERR`/`POLLNVAL`/
+   `POLLHUP` revents (AGY r1 F8: inspect revents directly), N consecutive
+   TUN-ready iterations whose reads all fail with a non-`WouldBlock` error
+   (device destroyed under us), AND the UDP fd's `POLLNVAL` specifically
+   (AGY r2 A3: NVAL means the fd is invalid/closed — poll returns
+   instantly forever, a guaranteed 100% spin; nothing transient produces
+   NVAL). Exit ⇒ the #1872 tombstone + backoff respawn machinery recovers
+   (a transient operator link-down self-heals via respawn backoff). UDP
+   `POLLERR`/`POLLHUP` never exit the thread; those errors surface through
+   the existing per-read exception accounting.
+7. **Multi-entry stop is signal-then-join (AGY r1 F7 + Codex r2 C5):** the
+   stale-prune loop in `spawn_wg_control_threads`,
+   `stop_all_wg_control_threads`, AND
+   `prune_wg_control_threads_for_snapshot` (coordinator/mod.rs:952-970 —
+   the third serial path Codex r2 found) currently stop+join one entry at
+   a time; with a 100ms poll cap that serializes to N×~100ms. ONE shared
+   bulk helper collects the affected entries, sets ALL their `stop` flags,
+   then joins+removes — total stop latency ≈ one cap regardless of tunnel
+   count. (`stop_remove_wg_control_entry` keeps its single-entry shape for
+   the one-off callers.)
 6. **fd-close-during-poll:** both fds are owned by the loop's stack frame
    and closed only after the loop returns; the coordinator never closes
    them externally (it only flips `stop` and joins). No external-close race
@@ -555,12 +646,16 @@ collector (both-sides grep is an engineer-phase gate):
 4. **`reconcile_lock` discipline:** `expire_sessions` takes it (serialized
    with install/reconcile); demux-entry removal mirrors the reconcile
    peer-removal drain so no demux entry can orphan.
-5. **No allocation on hot paths; no syscalls on AF_XDP worker paths.** v3:
-   engine time is the control-loop-published `cached_now_ns` (one relaxed
-   load per use) — zero clock syscalls anywhere in the engine, so an S3
-   move of decap onto AF_XDP workers inherits a hot-path-safe clock for
-   free. The only real clock reads are the control loop's per-iteration
-   `monotonic_nanos()` (already present) and engine construction.
+5. **No allocation on hot paths; no syscalls on AF_XDP worker paths.** v5:
+   engine time is a per-use CLOCK_MONOTONIC vDSO read (`WgEngine::now_ns`,
+   `#[cfg(test)]` mock override). In S2a no AF_XDP steady-state path calls
+   it: decap is control-thread-only and the worker transit encap already
+   heap-allocates per packet (frame/wg.rs precedent: it calls
+   `monotonic_nanos()` today on the NoSession arm). **S3 flag:** if decap
+   ever moves onto AF_XDP workers, `now_ns()` must convert to a published
+   coarse clock WITH a hard publisher-cadence bound — record in the module
+   doc (this is the AGY r1 F6 concern, deliberately deferred after Codex
+   r2 C2 showed an unbounded publisher violates T3).
 6. **Control-socket contention rule:** everything here runs in the
    per-tunnel control thread; zero new control-socket requests.
 7. **Keepalives consume tx counters** (spec) and obey
@@ -624,6 +719,19 @@ collector (both-sides grep is an engineer-phase gate):
     initiation is "lost" (no msg2 delivered) retries at 5s with a confirmed
     session still installed; attempt ends at 90s with the pending
     reservation released; a subsequent T8 due-tick starts a fresh window.
+  - Attempt success identity (Codex r2 C1): a fresh session installed
+    immediately after attempt start (same-tick AND next-burst orderings)
+    ends the attempt — no retry fires at +5s; works when the PEER's
+    initiation (not ours) created the session.
+  - T5 no-retrigger loop (AGY r2 A1): T7-triggered attempt → give-up at
+    90s → assert NO new attempt starts on subsequent ticks without new
+    egress data; a new data send re-arms T7 normally.
+  - Post-msg2 keepalive (Codex r2 C4): `consume_response` Ok ⇒ exactly one
+    keepalive emitted; two-engine rig asserts the responder side flips
+    confirmed and its egress unblocks without any data packet.
+  - T6 inbound-only stream (AGY r2 A4): continuous inbound data with zero
+    egress ⇒ one keepalive per ~10s anchored on our last send (NOT
+    suppressed by the ongoing receives).
   - T8: persistent_keepalive=N paces sends at N; reset by authenticated
     traversal in EITHER direction including handshake messages (Codex r1
     B1/B2 test: inbound-only transport traffic suppresses persistent
@@ -645,7 +753,7 @@ collector (both-sides grep is an engineer-phase gate):
     within the burst (no 1s timer wait).
   - TUN-fatal guard: erroring/closed TUN-side fd ⇒ thread exits within the
     bounded spin count (no busy loop); a UDP-side transient error does NOT
-    exit the thread.
+    exit the thread; a UDP-side `POLLNVAL` DOES exit (AGY r2 A3).
   - Mid-tick deadline (AGY r1 F3): a deadline landing between ticks must
     not produce a zero-timeout spin window (assert the timer pass runs and
     the recomputed timeout is positive).
@@ -686,24 +794,25 @@ collector (both-sides grep is an engineer-phase gate):
 
 ## 11. Open questions for adversarial review
 
-1. **T3 enforcement locus — CLOSED in v3.** Exact per-use gate inside
-   `try_encap`/`try_decap` (Codex r1 M7) reading the engine's
-   control-loop-published `cached_now_ns` (AGY r1 F6) — exact locus,
-   coarse clock, ≤ ~0.2s slop, zero per-packet clock syscalls. r2
-   reviewers: confirm the synthesis (each of you got half of it in r1).
-2. **Stop wakeup — CLOSED in v3:** 100ms cap, no eventfd (Codex Q2 + AGY Q2
-   concurred), PLUS signal-then-join on multi-entry stop paths (AGY F7) so
-   reload latency is ~one cap, not N×cap.
-3. **Stamp placement — adjudicated v3, NEEDS r2 RE-VERIFICATION.** AGY r1
-   called PLACEMENT-FAIL on `Peer` via the infinite-T7 trace, but that
-   trace was built against v1 stamps (no handshake traversal). With v2/v3
-   stamps a valid msg2 stamps `last_recv_any_ns` and clears T7. Peer
-   placement is retained because `WgSession` placement zeroes the stamps on
-   rekey: the T6 obligation (data received on the old session, nothing sent
-   yet) would be silently dropped, and T8's pacing would misread a fresh
-   session as fresh traversal. r2: attack the v3 stamp table again —
-   construct a trace that mis-fires WITH handshake-traversal stamps
-   included, or confirm.
+1. **T3 enforcement locus — RE-CLOSED in v5.** Exact per-use gate inside
+   `try_encap`/`try_decap` (Codex r1 M7) reading CLOCK_MONOTONIC per use.
+   The v3 cached-clock half of the synthesis was REVERSED by Codex r2 C2
+   (no publisher cadence hard-bounds staleness when the control thread
+   stalls; workers must never send past REJECT_AFTER_TIME); deterministic
+   tests use a `#[cfg(test)]` mock override instead. r3/AGY: this
+   deliberately un-does your r1 F6 cached-clock fix for the ENFORCEMENT
+   reads — object only with a trace where the vDSO read on the
+   control-thread/transit paths is a real cost.
+2. **Stop wakeup — CLOSED:** 100ms cap, no eventfd (Codex Q2 + AGY Q2
+   concurred), PLUS one bulk signal-then-join helper across all THREE
+   multi-entry stop paths (AGY r1 F7 + Codex r2 C5) so reload latency is
+   ~one cap, not N×cap.
+3. **Stamp placement — CLOSED in round 2.** AGY r2 attested its r1 F1
+   RESOLVED with the v3 handshake-traversal stamps and did not produce a
+   new mis-fire trace; Codex r2 attested B1/B2 RESOLVED against Linux
+   timers.c/send.c/receive.c. Peer placement stands (WgSession placement
+   would zero stamps on rekey — dropped T6 obligation, distorted T8
+   pacing).
 4. **Initiation pacing 1s → REKEY_TIMEOUT (5s) + REKEY_ATTEMPT_TIME (90s)
    give-up.** Spec-correct but slows worst-case bring-up retry. Keep today's
    1s instead (spec deviation), or adopt spec pacing? Plan adopts spec.
