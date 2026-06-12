@@ -1,12 +1,13 @@
 # #1880 — first xpfd boot after deploy intermittently exceeds the failover harness's 60s comeback budget
 
-Revision: r4 (2026-06-12) — r2 addressed Codex/AGY/SMR r1; r3 addressed
-Codex r2 (bounded convergence, pgroup teardown, sysrq attribution); r4
-addresses Codex r3 (H: retry lifecycle bound to daemon lifetime; M:
-stale-success/generation race between retry and concurrent ApplyFull;
-L: exact timeout bound incl. WaitDelay). AGY r2: PLAN-READY.
+Revision: r5 (2026-06-12) — r2 addressed Codex/AGY/SMR r1; r3 addressed
+Codex r2; r4 addressed Codex r3 + AGY r3 (retry lifecycle/Stop(),
+confGen stale-success contract, success-cancels-episode, ≤40s bound,
+0/1 unlabeled gauge); r5 addresses Codex r4 (retry integrated into the
+concurrency claim — all reloads under reloadMu, pre-cancel before
+acquire, ≤45s commit bound — and stale-success test named in §7 gate 1).
 Branch: `research/1880-boot-budget`
-Status: awaiting round-4 convergence
+Status: awaiting round-5 convergence
 
 ## 1. Problem
 
@@ -203,12 +204,19 @@ additive caveat documented. Exact semantics (r2, per Codex/AGY/SMR r1):
   (reloadTimeout rationale), `pkg/frr/README.md:84`, and the `vtysh.go`
   header, which reference xpfd's `TimeoutStopSec=20` — not FRR's
   measured 120s stop window.
-- Concurrency (Codex M1, answered): every daemon FRR writer serializes
-  under `applySem` (`daemon.go:160`, `daemon_apply.go:111`,
-  `daemon_ipmon.go:179`); `frr-reload.py` is the same engine
-  `systemctl reload` invoked via frrinit.sh, so Path A does not widen
-  the concurrency surface. Operator-driven vtysh is a pre-existing,
-  unchanged exposure.
+- Concurrency (Codex r1 M1 / r4): apply-path writers serialize under
+  `applySem` (`daemon.go:160`, `daemon_apply.go:111`,
+  `daemon_ipmon.go:179`). The degraded retry IS a new in-daemon writer,
+  so the serialization point for FRR writes moves down into the
+  manager: ALL reloads — applySem-driven ApplyFull/Clear AND the retry
+  — execute under `reloadMu`, preserving single-writer semantics.
+  Latency coupling is bounded: ApplyFull/Clear cancel the retry episode
+  BEFORE acquiring `reloadMu`; cancellation pgroup-kills an in-flight
+  retry, so an apply waits at most one `WaitDelay` teardown window
+  (~5s) behind it — commit-path worst case ≤45s total (40s own budget +
+  5s teardown wait). `frr-reload.py` itself is the same engine
+  `systemctl reload` invoked via frrinit.sh. Operator-driven vtysh is a
+  pre-existing, unchanged exposure.
 - Validated on the VM: `frr-reload.py --test --stdout /etc/frr/frr.conf`
   exits 0 in <1s, computes the diff via the vtysh socket, does not touch
   unit state, and works even while frr.service shows `deactivating`.
@@ -279,7 +287,10 @@ Ship **A + B together** (independent, both small):
    (and `frr-pythontools` added to cluster-setup.sh apt list).
 1. Unit: `go test ./pkg/frr/...` (new executor mock paths: primary
    success; primary timeout → fresh-ctx fallback; ErrNotFound →
-   warn-once fallback; degraded sentinel propagation) + full suite.
+   warn-once fallback; degraded sentinel propagation; stale-success /
+   confGen edge — retry succeeds against an older generation and must
+   NOT clear degraded; success-cancels-episode; Stop() terminates a
+   pending retry without leaking) + full suite.
 2. Live: deploy to loss userspace cluster; assert `frr.service` stays
    `active/running` on both nodes through deploy + apply-cos commit
    (`systemctl show frr -p ActiveState,SubState` polled for 150s — today
