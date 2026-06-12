@@ -12,3 +12,8 @@
 | r3 | AGY | adversarial-review-mqac16pn-s3k0rg | PLAN-NEEDS-REVISION |
 | r4 | Codex | task-mqacg6th-vgftt3 (session 019eb9ca-9fb5-71c1-a3ba-bb1db4fcd80a) | PLAN-NEEDS-REVISION (2 textual-coherence items) |
 | r4 | AGY | adversarial-review-mqac8gwf-7rdmks | PLAN-READY |
+| r5 | Codex | task-mqacm8ay-gj863y (session 019eb9ce-f603-7ee0-a0c8-0b5653811c00) | PLAN-READY (findings none) |
+| r5 | AGY | adversarial-review-mqacpdjl-lb9e7w | PLAN-READY |
+| r5 | Claude SMR | claude-smr-plan-r4.md | PLAN-READY |
+
+CONVERGED at r5, commit ab9a363bcbde (plan) — 3/3 PLAN-READY.
