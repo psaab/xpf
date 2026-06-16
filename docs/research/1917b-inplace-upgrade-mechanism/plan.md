@@ -491,8 +491,10 @@ N-readable state BEFORE booting the N (previous) daemon. Concretely:
 
 - `findBinary` helper resolution (`process.go:168-191`,
   `dir(os.Args[0])` + PATH) — the daemon's `ExecStart` is pinned to the
-  versioned `/var/lib/xpf/versions/current/xpfd` so `dir(os.Args[0])` is
-  the version dir; `/usr/local/sbin/*` remain valid for operator tools.
+  CONCRETE versioned path `/var/lib/xpf/versions/<ver>/xpfd` (NOT the
+  `current` symlink — systemd does not symlink-resolve `argv[0]`, §5A/§6.1
+  6c) so `dir(os.Args[0])` is the concrete version dir; `/usr/local/sbin/*`
+  remain valid for operator tools.
 - `ProtocolVersion = 3` (`protocol.go:11`) / `CONFIG_SNAPSHOT_PROTOCOL_VERSION`
   matched-set lockstep — xpfd + helper cut together, never split.
 - `CurrentHAProtocolVersion` (`heartbeat.go:27`) session-sync contract.

@@ -20,3 +20,7 @@ Plan: `docs/research/1917b-inplace-upgrade-mechanism/plan.md`
 - Codex: session 019ed0e5 (resumed) — PLAN-NEEDS-REVISION (3 refinements: postinst stage-only on node-id alone; ExecStart-template journaled substep; PREFLIGHT account DB snapshot). 5/6 r1 findings confirmed resolved.
 - AGY: adversarial-review-mqgrjndm-y3bv6k succeeded but result flaked (no capture); re-dispatched round 2b below.
 - Claude SMR: claude-smr-r2.md — PLAN-READY (folded the argv[0]/ExecStart hard-step it surfaced).
+
+## Round 3
+- Codex: session 019ed0e5 (resumed) round 3 — PLAN-NEEDS-REVISION → only a stale §7 doc contradiction (ExecStart said 'current' symlink); fixed in v4. Codex: "Fixing the stale §7 current path should make this PLAN-READY."
+- AGY: adversarial-review-mqgrqf8j-y14zjg (round 2b on v3)
