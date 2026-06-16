@@ -1,7 +1,8 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v4 — folds r3 (AGY + Codex PLAN-NEEDS-WORK; SMR PLAN-READY+N1).
+- **Status:** v4.1 — (folds r4 SMR N2: A/B "active-slot kernel never pruned" invariant + atomic ESP grub.cfg rename). r4 SMR = PLAN-READY; awaiting r4 AGY + Codex.
+- **(v4)** folds r3 (AGY + Codex PLAN-NEEDS-WORK; SMR PLAN-READY+N1).
   r3 killed the loose BootNext/ESP-grubenv sketches: Secure-Boot GRUB **lockdown
   blocks `save_env` even on a FAT ESP**; firmware **deletes `BootNext` before
   GRUB can read it**; a bare-`vmlinuz` UEFI entry **fails Secure-Boot signature**
@@ -232,6 +233,18 @@ SAFE, no lockout loop).
 pre-assert (§3.1 pre-asserts) must cover the slot staging, and the GC prunes the
 inactive slot's stale staging. (The kernel images themselves live in `/boot`, not
 the ESP — only shim/grub/`grub.cfg` are staged per slot.)
+
+**A/B safety invariants (r4 SMR N2 — state them so they aren't lost):**
+- **The ACTIVE slot's kernel is NEVER pruned.** GC prunes only the *un-promoted
+  candidate* (and its inactive-slot staging); the active slot + the immediate
+  rollback slot always retain a known-good kernel in `/boot`. This is the A/B
+  rollback guarantee — without it a later-bad promoted kernel could find no good
+  slot.
+- **Slot `grub.cfg` rewrite is atomic.** Staging the inactive slot's `grub.cfg`
+  on the FAT ESP is a Linux-side write (no GRUB-at-boot lockdown issue), but MUST
+  be write-temp + rename + `fsync`/`sync` BEFORE arming `BootNext`, so a crash
+  mid-stage leaves the inactive slot pointing at its previous valid kernel, never
+  a truncated file. Reuse the `pkg/fsatomic` discipline for the ESP write.
 
 **Dropped substrates (do not reintroduce — each killed with a reason):** GRUB
 grubenv one-shot on ext4 (r1) AND on the ESP (r3 AGY Hazard B, Secure-Boot
@@ -675,6 +688,12 @@ signed repo.
 - **HA both-node reboot = full outage** — kernel moves MUST be one-at-a-time via
   the EXTERNAL orchestrator (not in-process `rolling.go`, which dies at reboot);
   external driver holds a cluster-wide kernel-lane lock (risk #5).
+- **A/B: the ACTIVE slot's kernel is NEVER pruned** (r4 SMR N2) — GC prunes only
+  the un-promoted candidate + its inactive-slot staging; active + rollback slots
+  always retain a known-good kernel. The A/B rollback guarantee.
+- **Slot `grub.cfg` staging on the ESP is atomic** (r4 SMR N2) — write-temp +
+  rename + `fsync` BEFORE arming `BootNext` (a Linux-side FAT write, reusing
+  `pkg/fsatomic`); never a truncated slot config.
 - **`bake.py` GRUB drop-in lives in `/etc/default/grub.d/99-xpf.cfg`** (Ubuntu
   cloudimg overrides `/etc/default/grub` via `50-cloudimg-settings.cfg`) — the
   `GRUB_DEFAULT=<stable-known-good-id>` pin + `GRUB_DISABLE_SUBMENU=y` MUST go in
