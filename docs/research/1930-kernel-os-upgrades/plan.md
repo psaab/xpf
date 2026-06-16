@@ -1,12 +1,17 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v3.1 — folds r2 (the early-hang loop) + the r3 SMR N1 topology
-  refinement (the GRUB cloud image has no per-kernel UEFI entries, so the
-  loop-safe one-shot is ESP-grubenv (form 1) as PRIMARY, `BootNext`-to-a-second-
-  entry as the alternative; per-kernel-UEFI/UKI is the future). r3 SMR =
-  PLAN-READY; awaiting r3 AGY + Codex on this fold.
-- **(history)** v3 folds r2 reviews (Claude SMR B4 + AGY converged
+- **Status:** v4 — folds r3 (AGY + Codex PLAN-NEEDS-WORK; SMR PLAN-READY+N1).
+  r3 killed the loose BootNext/ESP-grubenv sketches: Secure-Boot GRUB **lockdown
+  blocks `save_env` even on a FAT ESP**; firmware **deletes `BootNext` before
+  GRUB can read it**; a bare-`vmlinuz` UEFI entry **fails Secure-Boot signature**
+  (Canonical key is in shim's MOK, not firmware `db`); per-upgrade UEFI entries
+  **wear NVRAM**. v4's single coherent Secure-Boot-correct substrate: **FIXED A/B
+  UEFI slots, each shim→grub→a slot-private `grub.cfg` staged on the ESP,
+  `BootNext`-selected, non-destructive `BootOrder` promotion** — threaded through
+  EVERY section (Codex F13). Scrubbed the non-existent `deploy_rolling()` (Codex
+  F12) + the §7 `master.key`-carries leftover (Codex F11).
+- **(history)** v3/v3.1 folded r2 (Claude SMR B4 + AGY converged
   PLAN-NEEDS-WORK on the SAME residual brick-loop). LANE-1 one-shot revert moves
   to **UEFI `BootNext`** (firmware clears it before boot → watchdog reset
   auto-falls-back to known-good `BootOrder`, no bootloader write — closes the
@@ -84,7 +89,7 @@ All of the following are MERGED on `origin/master` (verified by `git ls-tree`):
 | `pkg/dataplane/verify_userspace_shim.go` | `VerifyEmbeddedUserspaceShim()` / `VerifyUserspaceShimObject()` — kernel verify-only load, anonymous maps, never attaches; exit-code contract via `ErrUserspaceShimVerifierReject`. | The **kernel-side gate** the one-shot boot channel must invoke on the candidate kernel. |
 | `cmd/xpfd/upgrade.go` + `pkg/upgrade/` | `xpfd upgrade [--rolling]` — staged→runtime-version copy, verify, atomic symlink flip, journal, auto-rollback, HA rolling drain. (`runner.go`, `cutover.go`, `flip.go`, `rolling.go`, `state.go`, `system_linux.go`.) | The **mechanism to reuse**: the kernel channel is a sibling state-machine; base-OS image-replace HA sequencing mirrors `rolling.go`. |
 | `scripts/image/bake.py` | virt-customize: installs `linux-generic`, **HARD-ASSERTs newest kernel ≥ 6.18**, asserts `linux-modules-extra` (mlx5/i40e), purges all-but-newest kernel + **asserts exactly one kernel**, GRUB drop-in (`/etc/default/grub.d/99-xpf.cfg` = `init_on_alloc=0` only), build-host `verify-dataplane` pre-gate. | The **image-replace substrate** (Path C) + the place to add the kernel hold (`apt-mark hold $(dpkg-query …)`), `GRUB_DISABLE_SUBMENU=y` + pinned stable known-good default, the persistent-watchdog config, the UEFI `BootNext` per-kernel boot entries, the promotion oneshot unit, and the image **version manifest** (LANE-2 mixed-base gate). |
-| `scripts/deploy/xpf-deploy.py` | `deploy`/`launch`/`inventory` + `deploy_rolling()` at **VM granularity** (recreate from image + day-0 ISO of `xpf.conf`+`node-id`). Does NOT do an in-place base-OS swap or a rejoin-confirm gate today. | LANE 2 reuses `deploy_rolling()` (recreate-from-image) and ADDS the rejoin-confirm + mixed-base + kernel-rolling gates (INC-2/3). Do not over-attribute live-swap capability (r2 Codex NEW-F12). |
+| `scripts/deploy/xpf-deploy.py` | Exposes ONLY `deploy`/`launch`/`inventory` (verified: `cmd_deploy`/`cmd_launch`/`cmd_inventory`; **no `deploy_rolling`**) — a `launch` recreates ONE VM from an image + a day-0 ISO of `xpf.conf`+`node-id`. No rolling driver, no in-place OS swap, no rejoin gate today. | LANE 2/3 ADDS a NEW rolling image-replace driver (recreate-each-node-from-image + rejoin-confirm + mixed-base gate, INC-2/3) on top of the existing per-VM `launch`. Do not attribute a rolling/live-swap capability that does not exist (r2 Codex NEW-F12, r3 confirmed). |
 | `scripts/image/validate.py` | Factory-boot + in-guest `verify-dataplane` validation gate. | The acceptance gate for "xpf still loads + forwards on the new base." |
 | `docs/in-place-upgrade.md` | The #1917 operator doc. Line 169 hands kernel/OS to #1930. | The doc to extend with the kernel channel + base-OS playbook. |
 | `pkg/dataplane/README.md` §`#1864` | Toolchain pin + 3 verify gates (build, install, deploy pre-flight). | The contract the kernel channel must not break (verify is the only install gate). |
@@ -177,65 +182,70 @@ changed from v1 are the **one-shot-revert substrate** (now UEFI `BootNext`, NOT
 any GRUB-cleared or Linux-cleared marker — invariant 2) and the **HA
 orchestration** (no longer the in-process `rolling.go` — §3.1-HA below).
 
-**One-shot-revert substrate — UEFI `BootNext` (resolves invariant 2 — brick-loop;
-r2 SMR B4 + AGY converged):** v2's "A1'" (a `next_entry` marker cleared by
-Linux) was KILLED in r2 because it still boot-loops on an *early-hang* candidate:
-GRUB cannot clear `next_entry` on this image (ext4 `metadata_csum` / Secure
-Boot), so a watchdog reset re-reads the still-set marker and re-enters the hung
-candidate forever — the "known-good boot's Linux clears it" step is never
-reached. **The fix is the standard UEFI one-shot: `BootNext`.** UEFI Boot
-variables live in firmware NVRAM (writable from Linux via `efibootmgr`, and OK
-under Secure Boot for variable writes); critically, **the UEFI boot manager
-itself clears `BootNext` before handing control to that entry** — so a candidate
-that hangs and is watchdog-reset comes up with `BootNext` already gone, and the
-firmware falls through to the permanent `BootOrder`, which points at the
-**known-good** entry. No bootloader write is needed at the failing-boot moment;
-the clear happened in firmware before the hang.
+**One-shot-revert substrate — FIXED A/B UEFI slots, shim-staged, `BootNext`-
+selected (resolves invariant 2 — brick-loop; r2 SMR B4 + AGY + Codex converged,
+and r3 AGY Secure-Boot-corrected):** the chain of kills forced this design:
+- r1 killed "GRUB clears its own grubenv one-shot" (can't write ext4
+  `metadata_csum` / Secure-Boot lockdown).
+- r2 killed "Linux clears the marker" (an early-hang candidate never reaches
+  Linux → loop).
+- r3 AGY killed the loose "BootNext + single-GRUB-entry / ESP-grubenv" sketches:
+  (a) **GRUB cannot read `BootNext`** — the firmware DELETES it before launching
+  the EFI binary, so a single GRUB entry cannot tell "candidate boot" from
+  "normal boot"; (b) **Secure-Boot GRUB lockdown blocks `save_env` even on a
+  FAT32 ESP** — so the ESP-grubenv fallback is also unviable under Secure Boot;
+  (c) a UEFI entry pointing straight at `vmlinuz` fails Secure-Boot signature
+  (Canonical kernels are trusted via shim's MOK, not the firmware `db`).
 
-**Topology note (r3 SMR N1):** the bake base is the stock Ubuntu cloud image,
-which boots via a SINGLE `ubuntu` UEFI entry → GRUB → menu and does NOT ship
-per-kernel UEFI entries (those need UKIs / systemd-boot). So on the cloud-image
-base the loop-safe one-shot is, in recommended order: **(1) grubenv on the FAT32
-ESP** (PRIMARY for the GRUB cloud image — GRUB writes FAT fine, so its own
-`save_env next_entry=` succeeds; smallest change), **(2) `BootNext` to a SECOND
-fixed UEFI "try-candidate" entry** (firmware-cleared), **(3) per-kernel UEFI
-entries / UKIs** (future, A3). All three are loop-safe — the one-shot is consumed
-by firmware (2/3) or by GRUB on a writable FS (1), never by GRUB-on-ext4 or by
-reaching Linux (what r1 A1 / r2 A1' got wrong). The sequence below is written
-generically over "the one-shot substrate"; the verify+forward-beacon promotion
-owns the DURABLE default flip and is orthogonal to the one-shot form (r3 SMR m1).
-INC-1 defaults to form (1) for the cloud image. Concretely:
-- Each kernel gets its **own UEFI boot entry** (or one GRUB entry whose target
-  is selected via a stable GRUB id — but the SELECTION is via `BootNext` to a
-  per-kernel UEFI entry, or via a GRUB id that GRUB reads from a one-shot it does
-  NOT have to clear, because the firmware already cleared `BootNext`). The
-  appliance's permanent `BootOrder` lists the **known-good** entry first.
-- A kernel bump: `efibootmgr --create` a boot entry for the candidate (if not
-  using a single shim+GRUB entry), then `efibootmgr --bootnext <candidate>` to
-  request it ONCE. The permanent `BootOrder` is NOT changed. Promotion = on
-  verify+forward PASS, `efibootmgr --bootorder` puts the candidate first
-  (durable). The known-good entry stays in `BootOrder` as the rollback target.
-- If the single-shim+GRUB topology is kept (one UEFI entry → GRUB → menu), the
-  one-shot must still be firmware-owned: use `BootNext` to a **second** UEFI
-  entry that chainloads GRUB with a candidate-selecting argument, OR move the
-  GRUB grubenv to the **FAT32 ESP** (GRUB *can* write FAT — no `metadata_csum`),
-  so GRUB's own `save_env next_entry=` succeeds and the one-shot is consumed
-  reliably. Either keeps the clear OFF the un-writable ext4 path. **The plan
-  RECOMMENDS the `BootNext`-to-per-kernel-UEFI-entry form** (firmware clears it,
-  zero bootloader-write dependency); the ESP-grubenv form is the fallback if
-  per-kernel UEFI entries are impractical.
-- **Stable GRUB id / submenu (r2 AGY new):** if GRUB still resolves the menu,
-  set `GRUB_DISABLE_SUBMENU=y` in `/etc/default/grub.d/99-xpf.cfg` so candidate
-  entries are top-level and the menuentry id is directly resolvable; otherwise
-  `grub-reboot`/`set default` must use the hierarchical `gnulinux-advanced-…>…`
-  id. `GRUB_DEFAULT` is pinned to the stable known-good id and re-asserted
-  unchanged after the candidate dpkg postinst's `update-grub` (SMR B2).
-- **Secure Boot lockout (r2 AGY new):** an *unsigned* candidate under Secure
-  Boot is refused by firmware and, with `BootNext` already cleared by firmware,
-  the next reset falls back to known-good (no lockout loop — another reason
-  `BootNext` is correct over `next_entry`). LANE 1 is still scoped to
-  Canonical-signed `apt` kernels (risk #8); the `BootNext` substrate makes an
-  accidental unsigned candidate fail SAFE rather than brick.
+**The design that survives all of these: two FIXED, permanently-registered UEFI
+boot slots — `xpf-A` and `xpf-B`** (A/B, NOT per-upgrade entries — avoids r3 AGY
+NVRAM-wear Risk 2). Each slot is a UEFI `Boot####` entry that launches
+`shimx64.efi` → `grubx64.efi` → a **slot-private `grub.cfg` staged on the ESP**
+(`\EFI\xpf-A\grub.cfg` / `\EFI\xpf-B\grub.cfg`), each hardcoding ONE kernel as
+its boot target (so no runtime GRUB menu selection / no GRUB env read is needed —
+the slot's `grub.cfg` is static and points at exactly its kernel). This satisfies
+Secure Boot (shim→grub→Canonical-signed kernel via MOK) and needs no boot-time
+bootloader write.
+
+**One-shot + revert flow (loop-safe by firmware):**
+- The "active/known-good" slot is first in the permanent `BootOrder`.
+- A kernel bump: stage the candidate kernel + a slot-private `grub.cfg` into the
+  **INACTIVE** slot's ESP dir; `efibootmgr --bootnext <inactive-slot>` to boot it
+  ONCE. The firmware **clears `BootNext` before launching the slot** — so if the
+  candidate hangs at ANY stage (including pre-Linux) and the watchdog resets, the
+  firmware finds no `BootNext` and falls through `BootOrder` to the known-good
+  slot. **No bootloader/OS write at the failing moment → no loop, ever.**
+- Promotion (on verify+forward PASS, from Linux): a **non-destructive**
+  `BootOrder` edit that moves the candidate slot to the front while **preserving
+  all other entries** (PXE, recovery, firmware — r3 AGY Risk 1: read current
+  `BootOrder`, reorder, never blindly overwrite). The other slot becomes the
+  rollback target. Demotion on REJECT is a no-op (BootNext already consumed).
+
+**Secure Boot posture (r3 AGY Hazard C / r2 SMR M1):** LANE 1 is scoped to
+Canonical-signed `apt` kernels reached via shim+grub; the slot `grub.cfg`
+hardcodes the slot's kernel. An accidentally-unsigned candidate is refused by
+firmware AFTER `BootNext` is already cleared → falls back to known-good (fail
+SAFE, no lockout loop).
+
+**ESP capacity (r3 AGY Hazard C):** two slots each stage shim+grub+`grub.cfg`
+(+ the slot points at the kernel/initramfs in `/boot`); the ESP free-space
+pre-assert (§3.1 pre-asserts) must cover the slot staging, and the GC prunes the
+inactive slot's stale staging. (The kernel images themselves live in `/boot`, not
+the ESP — only shim/grub/`grub.cfg` are staged per slot.)
+
+**Dropped substrates (do not reintroduce — each killed with a reason):** GRUB
+grubenv one-shot on ext4 (r1) AND on the ESP (r3 AGY Hazard B, Secure-Boot
+lockdown); Linux-cleared marker (r2); single-GRUB-entry reads `BootNext` (r3 AGY
+Hazard A); per-upgrade dynamic UEFI entries (r3 AGY Risk 2 NVRAM wear); UEFI
+entry → bare `vmlinuz` (r3 AGY Hazard C signature). The **A/B fixed-slot
+shim-staged** design is the single surviving form and is threaded through every
+section below.
+
+**Stable GRUB id / submenu:** within each slot's private `grub.cfg` there is one
+hardcoded entry, so submenu ordering is irrelevant; `GRUB_DISABLE_SUBMENU=y`
+remains set for the *primary* `/boot/grub/grub.cfg` hygiene. The candidate dpkg
+postinst's `update-grub` regenerates the primary menu but does NOT touch the slot
+`grub.cfg`s (they are xpf-owned, staged by `xpfd upgrade kernel`).
 
 **Persistent-watchdog requirement (resolves invariant 3 — clean-shutdown
 disarm):** with `BootNext` the firmware already falls back to known-good on ANY
@@ -372,16 +382,13 @@ substrate: `bake.py` produces a new image with the new kernel (verify-dataplane
 gated at bake AND validate.py boot-gate), and the deploy driver brings it up.
 
 **Capability gap to close (r2 Codex NEW-F12):** today `scripts/deploy/
-xpf-deploy.py` does `deploy`/`launch`/`inventory` + a `deploy_rolling()` that
-operates at **VM granularity** (recreate/relaunch a VM from an image + day-0
-drive), NOT an *in-place base-OS swap with a rejoin-confirm gate*. For VM/cloud
-appliances "replace the image" = recreate the instance (boot disk swap), which
-the existing rolling path supports; for bare-metal it is a re-flash. #1930 does
-NOT invent a new in-place-base-OS-swap mechanism — it specifies that LANE 2 HA
-reuses `deploy_rolling()` (recreate-from-new-image) and ADDS the rejoin-confirm +
-mixed-base gate (INC-3) on top. The plan must NOT claim `xpf-deploy.py` already
-performs a live in-place OS swap; it performs an image-granular recreate + day-0
-re-apply, which is the supported "image-replace."
+xpf-deploy.py` exposes ONLY `deploy`/`launch`/`inventory` (verified — there is
+NO `deploy_rolling`). A `launch` recreates ONE VM/instance from an image + a
+day-0 drive (boot-disk swap); for bare-metal it is a re-flash. #1930 does NOT
+invent an in-place-base-OS-swap; it ADDS a NEW **rolling image-replace driver**
+(recreate-each-node-from-image, sequenced, with a rejoin-confirm + mixed-base
+gate, INC-2/3) built ON the existing per-VM `launch`. The plan must NOT claim
+`xpf-deploy.py` already does a rolling or live in-place swap.
 - **HA:** recreate secondary from the new image (day-0 re-applies `xpf.conf` +
   `node-id`) → it boots, verifies, rejoins → failover (VRRP demote, ~60ms) →
   recreate primary → fail back. Rejoin-confirm + version-check gate as §3.1-HA.
@@ -474,46 +481,32 @@ v2's "A1' = Linux-cleared marker" too: it still loops when the candidate hangs
 discriminator: who clears the one-shot when the candidate NEVER reaches Linux.**
 Only the FIRMWARE qualifies.
 
-| Option | Mechanism | Clears one-shot how? | Verdict |
+| Option | Mechanism | Why killed / kept | Verdict |
 |---|---|---|---|
-| **A1 (KILLED): GRUB grubenv, GRUB clears at boot** | `grub-reboot`, `save_env next_entry=` at boot. | GRUB-at-boot — FAILS on metadata_csum/Secure Boot → loop. | **REJECT** (r1). |
-| **A1' (KILLED): pinned default + Linux-cleared marker** | Marker GRUB reads, early-Linux clears. | Linux — but an **early-hang candidate never reaches Linux** → marker stays set → loop. | **REJECT** (r2 unanimous). |
-| **A1'' (RECOMMENDED): UEFI `BootNext`** | `efibootmgr --bootnext <cand-entry>`; permanent `BootOrder` = known-good first; promote = `efibootmgr --bootorder` cand-first on verify+forward PASS. | **UEFI FIRMWARE clears `BootNext` before booting the entry** — so ANY reset (watchdog or otherwise), at ANY boot stage including pre-Linux hang, falls through to `BootOrder` (known-good). No bootloader/OS write at the failing moment. | **RECOMMENDED.** |
-| **A1''-fallback: GRUB grubenv on the FAT32 ESP** | Move grubenv to the ESP (FAT, GRUB-writable, no metadata_csum) so GRUB's own `save_env` succeeds. | GRUB-at-boot, but on a writable FS → succeeds → one-shot consumed. | Fallback if per-kernel UEFI entries are impractical. |
-| **A2 (KILLED): softdog** | Software watchdog only. | N/A — can't fire pre-load + disarmed by clean reboot. | **REJECT** (r1 AGY). |
-| **A3 (future): systemd-boot/UKI boot-counting** | Switch bootloader; tries-counter on EFI vars/ESP. | Firmware/ESP-owned. | **DEFER** — bootloader migration is a large separate change; boot-counting reverts on *boot* not *verify* failure (mitigate: promotion unit marks good ONLY on forward-beacon PASS). The clean long-term answer; A1'' achieves the same brick-safety on the existing GRUB image NOW. |
+| **A1 (KILLED): GRUB grubenv on ext4, GRUB clears at boot** | `grub-reboot`, `save_env` at boot. | GRUB can't write ext4 `metadata_csum` / Secure-Boot lockdown → loop. | **REJECT** (r1). |
+| **A1' (KILLED): Linux-cleared marker** | Marker GRUB reads, early-Linux clears. | Early-hang candidate never reaches Linux → loop. | **REJECT** (r2). |
+| **A1''-ESP (KILLED): GRUB grubenv on the FAT32 ESP** | GRUB `save_env` on FAT. | **Secure-Boot GRUB LOCKDOWN blocks `save_env` even on FAT** (r3 AGY Hazard B). | **REJECT** (r3 AGY). |
+| **A1''-single (KILLED): `BootNext` + single GRUB entry reads it** | GRUB decides from `BootNext`. | Firmware DELETES `BootNext` before GRUB runs → GRUB can't read it (r3 AGY Hazard A). | **REJECT** (r3 AGY). |
+| **A1''-dyn (KILLED): per-upgrade dynamic UEFI entry → vmlinuz** | `efibootmgr --create` per bump. | NVRAM wear (r3 AGY Risk 2); bare vmlinuz fails Secure-Boot sig (Hazard C). | **REJECT** (r3 AGY). |
+| **A4 (RECOMMENDED): FIXED A/B UEFI slots, shim-staged, `BootNext`-selected** | Two permanent `Boot####` slots `xpf-A`/`xpf-B`, each shim→grub→a **slot-private `grub.cfg` on the ESP** hardcoding one kernel. Arm = stage candidate into the inactive slot + `efibootmgr --bootnext <inactive>`. Promote = NON-destructive `BootOrder` reorder (preserve PXE/recovery). | **Firmware clears `BootNext` before launch** → pre-Linux hang + reset falls through `BootOrder` to known-good, NO loop. Shim→grub→MOK-signed kernel = Secure-Boot-OK. Fixed slots = no NVRAM wear. Static slot `grub.cfg` = no GRUB env read. | **RECOMMENDED.** |
+| **A2 (KILLED): softdog** | Software watchdog only. | Can't fire pre-load + disarmed by clean reboot. | **REJECT** (r1 AGY). |
+| **A3 (future): systemd-boot/UKI boot-counting** | Switch bootloader; tries-counter on EFI vars/ESP. | Cleaner long-term but a bootloader migration; A4 gives the same brick-safety on the existing shim+GRUB image NOW. | **DEFER.** |
 
-**Recommendation: a FIRMWARE-or-ESP-cleared one-shot (loop-safe by construction);
-the concrete form depends on the boot topology (r3 SMR N1).** The bake base is
-the stock **Ubuntu cloud image**, which boots via a SINGLE `ubuntu` UEFI entry →
-shim → GRUB → menu — it does NOT ship per-kernel UEFI entries (those need UKIs /
-systemd-boot, a separate change). So on the cloud-image base the loop-safe
-one-shot is one of, in recommended order:
-1. **ESP-grubenv one-shot (PRIMARY for the GRUB cloud image):** move grubenv to
-   the FAT32 ESP (GRUB *can* write FAT — no `metadata_csum`), so GRUB's own
-   `save_env next_entry=` succeeds and the one-shot is consumed reliably at boot;
-   permanent default stays known-good. Smallest change to the existing image.
-2. **`BootNext` to a SECOND fixed UEFI entry (alternative):** two fixed UEFI
-   entries ("normal" → known-good GRUB default; "try-candidate" → GRUB with a
-   candidate-selecting arg); `efibootmgr --bootnext try-candidate`; firmware
-   clears `BootNext` → any reset returns to "normal". No per-kernel entries
-   needed; firmware-cleared = loop-safe even on a pre-Linux hang.
-3. **`BootNext` to per-kernel UEFI entries / UKIs (FUTURE):** the cleanest if the
-   image adopts UKIs or systemd-boot (A3); out of scope for the GRUB cloud image.
-
-All three are **loop-safe** (the one-shot is cleared by firmware (2/3) or by GRUB
-on a writable FS (1), NOT by GRUB-on-ext4 or by reaching Linux — which is what r1
-A1 / r2 A1' got wrong). The watchdog (Path D) only converts a *hang* into the
-*reset* that triggers the fallback; the loop is gone regardless. The verify+
-forward-beacon promotion owns the DURABLE default flip (BootOrder or
-`grub-set-default`) and is orthogonal to which one-shot form is chosen (r3 SMR
-m1) — do not couple them. **INC-1 picks form (1) for the cloud-image base** and
-keeps (2) as the alternative where per-image-entry control is available.
+**Recommendation: A4 — fixed A/B UEFI slots, shim-staged, `BootNext`-selected,
+non-destructive `BootOrder` promotion.** It is the ONLY form that survives every
+review round: firmware-cleared one-shot (loop-safe even on a pre-Linux hang —
+r1/r2), Secure-Boot-correct (shim→grub→MOK kernel, not bare vmlinuz — r3 AGY C),
+no NVRAM wear (fixed slots, not per-upgrade — r3 AGY Risk 2), no GRUB-env read
+(static slot `grub.cfg`, since firmware already consumed `BootNext` — r3 AGY A),
+no GRUB write (so Secure-Boot lockdown is irrelevant — r3 AGY B). The watchdog
+(Path D) only converts a *hang* into the *reset* that triggers the firmware
+fallback; the loop is gone regardless. The verify+forward-beacon promotion owns
+the DURABLE `BootOrder` reorder and is orthogonal to the one-shot (r3 SMR m1).
 
 ### Path Option B — base-OS major upgrade
 | Option | Mechanism | Verdict |
 |---|---|---|
-| **B1: image-replace only** | Bake N+1 image (validate.py-gated); `deploy_rolling()` recreate-from-image + day-0 re-apply (`xpf.conf`+`node-id`); HA mixed-base gate (§3.2). | **RECOMMENDED — the ONLY supported path.** |
+| **B1: image-replace only** | Bake N+1 image (validate.py-gated); a NEW rolling driver recreates each node from the image (built on `xpf-deploy.py launch`) + day-0 re-apply (`xpf.conf`+`node-id`); HA mixed-base gate (§3.2). | **RECOMMENDED — the ONLY supported path.** |
 | **B2: `do-release-upgrade` in-place** | Ubuntu release upgrader. | **DROPPED / UNSUPPORTED** (r1 SMR M4 + AGY Hazard D + Codex F8 — unanimous). Irreversible userspace move; half-upgraded under kernel hold; N+1-userspace-on-N-kernel mixed-state brick; untestable. Documented "unsupported, re-image instead." |
 
 **Recommendation: B1 only.** B2 is explicitly unsupported. The appliance model is
@@ -550,33 +543,33 @@ signed repo.
 - **INC-0 (image hardening, no daemon code, closes the biggest hole alone):**
   `bake.py` holds the kernel via `apt-mark hold $(dpkg-query -W -f='${Package}\n'
   'linux-*')` (NOT a raw glob — r2 AGY); sets `GRUB_DISABLE_SUBMENU=y` + pins
-  `GRUB_DEFAULT` to the STABLE known-good id (r2 AGY/SMR B2/B3); installs the
-  **loop-safe one-shot substrate for the GRUB cloud image — grubenv on the FAT32
-  ESP (form 1, r3 SMR N1)** so GRUB's own one-shot clear succeeds (NOT per-kernel
-  UEFI entries, which the cloud image lacks); permanent default/`BootOrder`
-  known-good-first; installs the **persistent-watchdog** config (firmware/
-  hypervisor `nowayout`,
-  initramfs early-arm fallback — r2 AGY persistence caveat); records the bake
-  **watchdog-persistence platform flag** + the **image version manifest** (xpf
-  ver, HA protocol ver, session-sync frame ver, config-DB min-reader ver — for
-  the LANE-2 gate); disables `unattended-upgrades` for `linux-*`; ships the
-  `needrestart` blacklist. Closes "unattended apt moves the floor" alone. (FIRST.)
+  `GRUB_DEFAULT` to the STABLE known-good id (r2 AGY/SMR B2/B3); **registers the
+  two FIXED A/B UEFI slots (`xpf-A`/`xpf-B`), each shim→grub→a slot-private
+  `grub.cfg` on the ESP, with the active slot first in `BootOrder`** (the A4
+  substrate — r3 AGY; NOT per-kernel/per-upgrade entries, NOT ESP-grubenv); seeds
+  both slots pointing at the shipped known-good kernel; installs the
+  **persistent-watchdog** config (firmware/hypervisor `nowayout`, initramfs
+  early-arm fallback); records the bake **watchdog-persistence platform flag** +
+  the **image version manifest** (xpf ver, HA protocol ver, session-sync frame
+  ver, config-DB min-reader ver — LANE-2 gate); disables `unattended-upgrades`
+  for `linux-*`; ships the `needrestart` blacklist. Closes "unattended apt moves
+  the floor" alone. (FIRST.)
 - **INC-1 (LANE 1 in-guest mechanism):** `pkg/upgrade` kernel verb + `xpfd
-  upgrade kernel <ver>`: **pre-asserts** (the chosen one-shot substrate is the
-  ESP-grubenv form and the ESP is writable, OR UEFI+`efibootmgr` for forms 2/3;
-  permanent default known-good; GRUB submenu disabled + pinned id resolves;
-  watchdog present + persistence flag OR Path-D2 override; free `/boot`/ESP ≥
-  image+initramfs+margin BEFORE install) → unhold→install→rehold (verify
-  update-initramfs/update-grub succeeded) → **re-assert the permanent known-good
-  default did NOT move** after the candidate postinst → arm the one-shot (ESP
-  grubenv `next_entry=<cand-stable-id>` for form 1; `efibootmgr --bootnext` for
-  forms 2/3) → confirm watchdog → reboot. Promotion oneshot: assert
-  `uname -r`==candidate → `verify-dataplane` → **forward** beacon (tight budget,
-  stable peer-link target) → only-on-beacon-PASS promote (durable default flip:
-  `grub-set-default` / `efibootmgr --bootorder` cand-first) + durable marker +
-  disarm watchdog; else clean reboot → firmware/GRUB falls through to known-good.
-  Journal + GC prune of un-promoted candidate (kernel pkg + any UEFI entry).
-  Command `xpfd upgrade kernel`.
+  upgrade kernel <ver>`: **pre-asserts** (UEFI + `efibootmgr` OK; both A/B slots
+  registered + active slot first in `BootOrder`; GRUB submenu disabled; watchdog
+  present + persistence flag OR Path-D2 override; free `/boot` ≥ kernel+initramfs
+  AND free ESP ≥ slot shim/grub/`grub.cfg` staging, BEFORE install) →
+  unhold→install→rehold (verify update-initramfs/update-grub succeeded) → **stage
+  the candidate kernel + a slot-private `grub.cfg` into the INACTIVE slot's ESP
+  dir** → `efibootmgr --bootnext <inactive-slot>` (firmware-cleared one-shot) →
+  confirm watchdog → reboot. Promotion oneshot: assert `uname -r`==candidate →
+  `verify-dataplane` → **forward** beacon (tight budget, stable peer-link target)
+  → only-on-beacon-PASS promote (**non-destructive `BootOrder` reorder** moving
+  the candidate slot to front, preserving PXE/recovery/firmware entries — r3 AGY
+  Risk 1) + durable marker + disarm watchdog; else clean reboot → firmware finds
+  no `BootNext` → falls through `BootOrder` to the known-good slot. Journal + GC
+  prune of the stale inactive-slot staging + un-promoted kernel pkg. Command
+  `xpfd upgrade kernel`.
 - **INC-2 (LANE 1 HA — EXTERNAL orchestration):** the cross-node kernel-rolling
   sequence lives in `scripts/deploy/xpf-deploy.py` (survives reboots — r2/r1),
   NOT in-process `rolling.go`. Implements: drain A → confirm peer holds all RGs →
@@ -592,8 +585,8 @@ signed repo.
   **mixed-base HA compatibility gate** reads the new image's HA/session-sync
   protocol from the bake **version manifest** (a file read, NOT a boot — r2 AGY/
   Codex F11/F12) and fails-closed to a documented connection-drop if not
-  back-compat with the running peer; LANE 2 HA reuses `deploy_rolling()`
-  (recreate-from-image) + the rejoin gate; operator playbook in a new
+  back-compat with the running peer; LANE 2 HA adds a NEW rolling driver (recreate-each-node
+  from-image via `xpf-deploy.py launch`) + the rejoin gate; operator playbook in a new
   `docs/os-kernel-upgrades.md` (3-lane tree; the TEXT-config state-carry contract
   — `xpf.conf`+`node-id`, NOT `.configdb`/`master.key`, r2 Codex NEW-F11; the
   do-release-upgrade UNSUPPORTED statement); link from `docs/in-place-upgrade.md`.
@@ -615,7 +608,7 @@ signed repo.
 |---|---|---|
 | 1 | **One-shot boot-loop** — GRUB-cleared (r1) AND Linux-cleared (r2) markers both loop on an EARLY-HANG candidate (cleared only if the candidate reaches Linux). | **UEFI `BootNext` (A1'')**: FIRMWARE clears the one-shot before booting the entry, so ANY reset at ANY stage falls through `BootOrder` to known-good. Loop closed unconditionally. §2 inv 2 / §3.1 / Path A. |
 | 2 | **dpkg `linux-image` postinst `update-grub` moves the default** (r1 SMR B2 / Codex F2). | Pin `GRUB_DEFAULT`/`BootOrder` to the stable known-good entry; re-assert unchanged after the candidate install; promote only via `efibootmgr --bootorder` on verify+forward PASS. |
-| 3 | **Candidate menuentry id wrong/unresolvable** after `update-grub` submenu reorder (r1 SMR B3 / Codex F5; r2 AGY submenu). | `GRUB_DISABLE_SUBMENU=y`; resolve the STABLE id from the regenerated `grub.cfg` and assert it exists; per-kernel UEFI entries via `efibootmgr` sidestep menu ordering. |
+| 3 | **Candidate menuentry id wrong/unresolvable** after `update-grub` submenu reorder (r1 SMR B3 / Codex F5; r2 AGY submenu). | Each A/B slot has a STATIC slot-private `grub.cfg` hardcoding ONE kernel — no runtime menu selection, so submenu ordering is irrelevant to the candidate boot. `GRUB_DISABLE_SUBMENU=y` kept for primary-menu hygiene. |
 | 4 | **Early-boot HANG unprotected** — clean reboot disarms a non-persistent watchdog; warm-reset may reset board watchdog; persistence not SW-verifiable (r1 AGY C / Codex F3; r2 AGY). | `BootNext` already closes the LOOP. The watchdog only converts a HANG→reset; require a verified-persistent firmware/hypervisor watchdog (Path D1) for unattended early-hang recovery, else Path-D2 documented "one external reset" caveat. Honest: not fully SW-guaranteeable. |
 | 5 | **HA in-process `rolling.go` dies at the reboot it sequences → node stuck drained, both-down if driver proceeds** (r1 SMR B1 / AGY Hazard B / Codex F4). | LANE 1 HA orchestration is **EXTERNAL** (`xpf-deploy.py`, survives reboots) with a post-reboot rejoin-confirm gate + a cluster-wide kernel-lane lock. §3.1-HA. |
 | 6 | **Candidate boots but REJECTs/can't-forward the shim** (verify-structural ≠ forwards). | Promotion gated on the **forward health beacon**, not just structural `verify-dataplane`; disarm only on beacon PASS (r1 SMR M2). |
@@ -629,7 +622,7 @@ signed repo.
 | 14 | **Installed-kernel + `/var/lib/xpf/versions/` accumulation** fills `/var`/`/boot`. | #1917 §6.3c retention + kernel-channel prune of un-promoted candidate packages (mandatory — `/boot` is small). |
 | 15 | **`apt-mark hold linux-*` shell-glob failure** — the glob expands against the cwd, holds nothing (r2 AGY). | `apt-mark hold $(dpkg-query -W -f='${Package}\n' 'linux-*')` — a concrete package query, never a bare glob. INC-0. |
 | 16 | **Image-replace assumes `.configdb`/`master.key` carry — they DON'T** (r2 Codex NEW-F11). The portable artifact is the TEXT config; a re-imaged node has a new `master.key` and would fail to decrypt a carried encrypted DB. | LANE 2/3 carries `xpf.conf`+`node-id` via day-0; the new image factory-bootstraps `.configdb` from text and re-derives `master.key`. §3.3 + INC-3. Documented in the state-carry contract. |
-| 17 | **`xpf-deploy.py` over-attributed live in-place OS swap** (r2 Codex NEW-F12) — it does VM-granular `deploy_rolling()` recreate + day-0, not a live swap or rejoin gate. | LANE 2 reuses recreate-from-image; the rejoin-confirm + version-check + mixed-base gates are NEW (INC-2/3), not existing capability. §3.2 grounding cell corrected. |
+| 17 | **`xpf-deploy.py` over-attributed** (r2 Codex NEW-F12, r3 confirmed) — it has ONLY `deploy`/`launch`/`inventory`, NO `deploy_rolling`, no rolling/live-swap/rejoin gate. | LANE 2/3 ADDS a NEW rolling image-replace driver (recreate-each-node via `launch`) + rejoin/version/mixed-base gates (INC-2/3); the plan never attributes these to the current script. §2 + §3.2 corrected. |
 | 18 | **External orchestrator crash → orphaned drain / leaked lock / false "healthy" advance** (r2 AGY). | Version-check anchor (running kernel == target + promotion marker) before advancing; leased TTL cluster lock on `em0` store; bounded local self-recovery in xpfd for an orphaned drain. INC-2. |
 
 ---
@@ -648,8 +641,12 @@ signed repo.
   (it dies at the reboot — §3.1-HA); kernel HA sequencing is external.
 - `bake.py` single-kernel assert + ≥6.18 floor + modules-extra assert — INC-0
   adds to these, never removes them.
-- The day-0 config drive + `/etc/xpf` state contract (`.configdb`, `node-id`,
-  `master.key`) — carries across all lanes unchanged.
+- The day-0 config drive + `/etc/xpf` state contract. **Note the per-lane
+  difference (r2 Codex NEW-F11):** in-place (#1917) PERSISTS `.configdb` +
+  `master.key`; image-replace (LANE 2/3) carries only the TEXT config
+  (`xpf.conf` + `node-id`) and RE-DERIVES `.configdb`/`master.key` on the new
+  image. The day-0 + factory-bootstrap path is the unchanged contract; the
+  encrypted DB is NOT a carried artifact across an image-replace (§3.3).
 - #1917 §6.5 session-sync wire back-compat rule — LANE 2 HA image-replace
   depends on it AND on the new pre-swap mixed-base compatibility gate (§3.2).
 
@@ -691,7 +688,7 @@ signed repo.
   (a carried encrypted DB can't decrypt under a fresh `master.key`). In-place
   (#1917) persists the DB; image-replace re-bootstraps it (risk #16, §3.3).
 - **`xpf-deploy.py` does VM-granular recreate, not a live in-place OS swap** —
-  LANE 2/3 reuses `deploy_rolling()` recreate-from-image; the rejoin/version/
+  LANE 2/3 adds a NEW rolling driver (recreate-each-node via `launch`); the rejoin/version/
   mixed-base gates are new (risk #17).
 
 ---
@@ -700,10 +697,10 @@ signed repo.
 
 1. INC-0: a deployed image has the kernel held (concrete dpkg-query, not a
    glob); `GRUB_DEFAULT` pins a stable known-good id + `GRUB_DISABLE_SUBMENU=y`;
-   permanent known-good default + the chosen loop-safe one-shot substrate
-   (ESP-grubenv form 1 for the cloud image); persistent-watchdog config + bake
-   persistence flag; image version manifest; `unattended-upgrades` excludes
-   `linux-*`.
+   two FIXED A/B UEFI slots registered (shim→grub→slot-private `grub.cfg`), active
+   slot first in a `BootOrder` that preserves platform entries; persistent-
+   watchdog config + bake persistence flag; image version manifest;
+   `unattended-upgrades` excludes `linux-*`.
 2. LANE 1 happy: `xpfd upgrade kernel <ver>` on a same-series candidate boots it
    once via `BootNext`, verify+forward-beacon PASS, candidate promoted (BootOrder
    moved), dataplane forwards; pinned known-good did NOT move at install time.
@@ -735,10 +732,11 @@ signed repo.
   `runner_test.go`/`rolling_test.go`): pre-assert failures abort cleanly;
   journal crash-recovery resumes; revert path leaves default unchanged.
 - **Image:** `bake.py` produces an image with held kernel + pinned stable
-  default + `GRUB_DISABLE_SUBMENU=y` + per-kernel UEFI entries + persistent-
-  watchdog config + version manifest; asserts catch a missing hold (and that the
-  hold used the dpkg-query form, not a glob), a moved default, a missing UEFI
-  entry, or a missing manifest.
+  default + `GRUB_DISABLE_SUBMENU=y` + the two FIXED A/B UEFI slots (shim→grub→
+  slot `grub.cfg`, both seeded to the known-good kernel) + persistent-watchdog
+  config + version manifest; asserts catch a missing hold (and that it used the
+  dpkg-query form, not a glob), a moved default, a missing/extra UEFI slot, a
+  `BootOrder` not listing the active slot first, or a missing manifest.
 - **Live — STANDALONE wipeable test VM (`xpf-fw`, `make test-vm`/`test-deploy`),
   NOT the shared loss cluster's primary:** this is where the NEW boot channel is
   actually exercised end-to-end (per the §10 directive — passing regression
@@ -774,16 +772,19 @@ Ship #1930 as **three lanes by blast radius**, defaulting to image-replace and
 treating in-place kernel moves as a tightly-gated channel:
 
 - **LANE 1** (same-series kernel CVE bumps): verify-gated one-shot-boot via
-  **Path Option A1'' (UEFI `BootNext`)** — the firmware clears the one-shot
-  before boot, so any reset (incl. a pre-Linux early-hang watchdog reset) falls
-  through `BootOrder` to the known-good kernel: the boot-LOOP is closed
-  unconditionally, on the existing GRUB image, no bootloader migration. Kernel
-  held-by-default; promotion gated on a **forward** health beacon + `uname -r`
-  match; HA sequencing **EXTERNAL** (`deploy_rolling()` recreate + a rejoin/
-  version/lease gate), not in-process `rolling.go`. The watchdog (Path D)
-  converts a hang→reset; "fully-unattended early-hang recovery" needs a
-  verified-persistent watchdog, else a documented one-external-reset (still no
-  loop, no brick).
+  **Path Option A4 — fixed A/B UEFI slots, shim→grub→slot-private `grub.cfg`,
+  `BootNext`-selected, non-destructive `BootOrder` promotion.** The firmware
+  clears `BootNext` before launch, so any reset (incl. a pre-Linux early-hang
+  watchdog reset) falls through `BootOrder` to the known-good slot: the boot-LOOP
+  is closed unconditionally, on the existing shim+GRUB image, no bootloader
+  migration, Secure-Boot-correct (shim→grub→MOK kernel), no NVRAM wear (fixed
+  slots), no GRUB env read/write (static slot `grub.cfg`). Kernel held-by-default;
+  promotion gated on a **forward** health beacon + `uname -r` match; HA sequencing
+  **EXTERNAL** (a NEW rolling driver: recreate-each-node via `xpf-deploy.py
+  launch` + a rejoin/version/lease gate), not in-process `rolling.go`. The
+  watchdog (Path D) converts a hang→reset; "fully-unattended early-hang recovery"
+  needs a verified-persistent watchdog, else a documented one-external-reset
+  (still no loop, no brick).
 - **LANE 2** (new kernel series / heavy moves): image-replace (Path C, #1879) —
   decision rule + the **pre-swap mixed-base HA gate** reading the bake **version
   manifest** (no boot).
@@ -834,8 +835,8 @@ runs). v3 dispositions:
   hardware-dependence explicit. §3.1, risk #4.
 - **`apt-mark hold linux-*` glob expansion** (AGY r2): use `apt-mark hold
   $(dpkg-query -W -f='${Package}\n' 'linux-*')`. INC-0, risk #15.
-- **GRUB submenu pathing** (AGY r2): `GRUB_DISABLE_SUBMENU=y` + per-kernel UEFI
-  entries. INC-0, risk #3.
+- **GRUB submenu pathing** (AGY r2): `GRUB_DISABLE_SUBMENU=y`; the A4 slots use a
+  static slot-private `grub.cfg` so menu ordering is moot. INC-0, risk #3.
 - **Secure Boot lockout loop** (AGY r2): `BootNext` makes an unsigned candidate
   fail SAFE (firmware already cleared the one-shot). §3.1, risk #8.
 - **External-orchestrator crash / lock-leak / false-healthy advance** (AGY r2):
@@ -847,7 +848,34 @@ runs). v3 dispositions:
   config (`xpf.conf`+`node-id`), NOT `.configdb`/`master.key` (re-derived on the
   new image). §3.3, risk #16.
 - **`xpf-deploy.py` over-attributed live-swap** (Codex NEW-F12): it does
-  VM-granular `deploy_rolling()` recreate; rejoin/version/mixed-base gates are
+  per-VM `launch` only (NO `deploy_rolling`); a rolling driver + rejoin/version/mixed-base gates are
   new. §2 grounding + §3.2, risk #17.
 - **do-release-upgrade lane-summary contradiction** (Codex F8): removed the
   "gated fallback" line in §3; UNSUPPORTED everywhere. §3 diagram, §3.3.
+
+### r3 → v4 disposition (what changed and why)
+r3 split: **SMR = PLAN-READY** (verified `BootNext` closes the early-hang loop)
+**+ N1**; **AGY = PLAN-NEEDS-WORK** (Secure-Boot detail on the BootNext sketch);
+**Codex = PLAN-NEEDS-WORK** (the substrate was inconsistent across sections +
+two false attributions). v4 adopts a SINGLE coherent substrate threaded
+everywhere:
+- **Secure-Boot GRUB lockdown blocks `save_env` even on the ESP** (r3 AGY Hazard
+  B): the ESP-grubenv form is KILLED. Path A, §3.1.
+- **GRUB cannot read `BootNext`** (firmware deletes it pre-launch — r3 AGY Hazard
+  A): the single-GRUB-entry-reads-BootNext sketch is KILLED → static slot
+  `grub.cfg` per slot. Path A, §3.1, risk #3.
+- **Bare-`vmlinuz` UEFI entry fails Secure-Boot signature** (r3 AGY Hazard C):
+  each slot is shim→grub→kernel (MOK-signed), staged on the ESP. §3.1, risk #8.
+- **NVRAM wear from per-upgrade UEFI entries** (r3 AGY Risk 2): FIXED A/B slots,
+  not per-bump entries. Path A, §3.1.
+- **`BootOrder` corruption** (r3 AGY Risk 1): promotion is a NON-destructive
+  reorder preserving platform entries. §3.1, INC-1, risk (folded into #2).
+- **Substrate inconsistency across sections** (Codex F13): the A4 fixed-slot
+  design is now in §2/§3.1/Path A/INC-0/INC-1/risks/acceptance/tests/§8/§11 —
+  no residual ESP-grubenv / per-kernel-UEFI / single-entry framing.
+- **`deploy_rolling()` does not exist** (Codex F12, r3 confirmed): scrubbed; the
+  script has only `deploy`/`launch`/`inventory`; the rolling driver is NEW.
+- **§7 `master.key`-carries leftover** (Codex F11): corrected to the per-lane
+  TEXT-vs-DB contract.
+- **r3 SMR N1 (no per-kernel UEFI entries on the cloud image):** subsumed by the
+  A/B fixed-slot design (which does not use per-kernel entries at all).
