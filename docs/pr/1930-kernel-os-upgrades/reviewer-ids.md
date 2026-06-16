@@ -23,3 +23,7 @@ Records Codex + AGY task IDs per round (per feedback_codex_session_loss_continua
 | r5 | Claude SMR | (in-conversation) | PLAN-READY (+N3 folded) |
 | r6 | AGY | adversarial-review-mqha4jpk-tqpy44 (retry; first run empty-result infra) | PLAN-READY |
 | r6 | Codex | thread 019ed2c7-f57a-72e3-83f6-83daed5d4223 (agent) | PLAN-NEEDS-WORK -> 2 fixes folded v6.2 |
+| r6-final | Codex | confirm-only on v6.2 | PLAN-READY |
+| r6-final | Claude SMR | (in-conversation) | PLAN-READY |
+
+## CONVERGED at v6.2 (30bfc5794): Claude SMR + AGY + Codex all PLAN-READY.
