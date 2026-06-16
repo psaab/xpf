@@ -1,7 +1,8 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v5.1 — folds r4 Codex (F13 inconsistency + NEW-F15..F20): committed fully to the $cmdpath A4 substrate, scrubbed all static-per-slot-grub.cfg + per-candidate-entry residue; fixed LANE-1-HA-uses-launch error (F17, LANE 1 is in-place); added BootCurrent slot-detection (F18) + BootNext power-loss durability (F19) + the $cmdpath-as-/etc/grub.d-fragment-survives-update-grub detail + the install-images.md doc-fix (F20). r5 reviewers in flight on v5.
+- **Status:** v5.2 — (folds r5 SMR N3: first-boot NVRAM registration is idempotent + self-healing on a NVRAM wipe). r5 SMR = PLAN-READY; r5 AGY + Codex in flight.
+- **(v5.1)** folds r4 Codex — folds r4 Codex (F13 inconsistency + NEW-F15..F20): committed fully to the $cmdpath A4 substrate, scrubbed all static-per-slot-grub.cfg + per-candidate-entry residue; fixed LANE-1-HA-uses-launch error (F17, LANE 1 is in-place); added BootCurrent slot-detection (F18) + BootNext power-loss durability (F19) + the $cmdpath-as-/etc/grub.d-fragment-survives-update-grub detail + the install-images.md doc-fix (F20). r5 reviewers in flight on v5.
 - **(v5)** folds r4 — folds r4 (AGY PLAN-NEEDS-WORK 4 UEFI flaws + SMR PLAN-READY
   N2). A4 corrected for real signed-GRUB/UEFI behavior: signed `grubx64.efi`
   ignores a per-dir `grub.cfg` (hardcoded signed prefix) → the SHARED
@@ -274,7 +275,12 @@ would hit the build host's NVRAM anyway). So **bake only STAGES the ESP files**
 `/boot/grub/grub.cfg`); the `efibootmgr` registration of the two slots + the
 initial `BootOrder` is done by a **first-boot in-guest service** (extend
 `xpf-day0-config` / a oneshot) on real hardware. INC-0 stages; the first-boot
-service registers.
+service registers. **The registration MUST be idempotent (r5 SMR N3):** on every
+boot it verifies the two slots exist in NVRAM with the right loader paths and an
+active-slot-reachable `BootOrder`, re-creating/repairing ONLY if missing — so a
+firmware reset / VM-redefinition that wipes NVRAM self-heals, and repeated boots
+never duplicate slots. (It runs independently of the #1922 SAFE-BOOTSTRAP mgmt
+lifeline; no ordering conflict.)
 
 **Secure Boot posture (r3 AGY Hazard C / r2 SMR M1):** LANE 1 is scoped to
 Canonical-signed `apt` kernels reached via shim→grub→MOK. An accidentally-
