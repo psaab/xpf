@@ -1,8 +1,16 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v5.2 — (folds r5 SMR N3: first-boot NVRAM registration is idempotent + self-healing on a NVRAM wipe). r5 SMR = PLAN-READY; r5 AGY + Codex in flight.
-- **(v5.1)** folds r4 Codex — folds r4 Codex (F13 inconsistency + NEW-F15..F20): committed fully to the $cmdpath A4 substrate, scrubbed all static-per-slot-grub.cfg + per-candidate-entry residue; fixed LANE-1-HA-uses-launch error (F17, LANE 1 is in-place); added BootCurrent slot-detection (F18) + BootNext power-loss durability (F19) + the $cmdpath-as-/etc/grub.d-fragment-survives-update-grub detail + the install-images.md doc-fix (F20). r5 reviewers in flight on v5.
+- **Status:** v6 — folds r5 (AGY PLAN-NEEDS-WORK 4 impl-detail flaws; SMR
+  PLAN-READY+N3). A4 implementation nailed: (a) `$cmdpath` referenced as a path
+  (`source "$cmdpath/xpf.selector"`), never string-compared (device prefix +
+  lockdown `regexp`); (b) the branch is an `/etc/grub.d/09_xpf` drop-in (survives
+  `update-grub`); (c) NVRAM slot registration is a SEPARATE `.deb`-shipped
+  NON-BLOCKING oneshot (NOT `xpf-day0-config`, NOT `Before=xpfd`, `timeout 5` +
+  non-fatal — never blocks the SAFE-BOOTSTRAP lifeline; works on foreign hosts);
+  (d) the selector is a GRUB-script (`set xpf_slot_kernel=…`) loaded via `source`.
+  r5 SMR N3 (idempotent self-healing registration) folded.
+- **(v5.2)** r5 SMR N3; **(v5.1)** folds r4 Codex (F13 + NEW-F15..F20):
 - **(v5)** folds r4 — folds r4 (AGY PLAN-NEEDS-WORK 4 UEFI flaws + SMR PLAN-READY
   N2). A4 corrected for real signed-GRUB/UEFI behavior: signed `grubx64.efi`
   ignores a per-dir `grub.cfg` (hardcoded signed prefix) → the SHARED
@@ -223,20 +231,28 @@ signed, hardcoded `prefix`** — launched from `\EFI\xpf-A\` it does NOT read a
 `grub.cfg` sitting in `\EFI\xpf-A\`; it loads the SHARED `/boot/grub/grub.cfg`.
 So a slot-private `grub.cfg` is IGNORED and both slots would boot identically.
 The correct mechanism: the **shared `/boot/grub/grub.cfg` branches on
-`$cmdpath`** (the dir GRUB was launched from — `\EFI\xpf-A\` vs `\EFI\xpf-B\`) to
-select that slot's kernel. The per-slot state is a tiny xpf-owned **selector
-file** (which kernel each slot points at) that the shared `grub.cfg` reads by
-`$cmdpath`; no GRUB env write is needed (read-only at boot). Kernels stay in
-`/boot` (r4 AGY Flaw 3 — NEVER copied to the ESP, which is too small); only
-shim+grub + the `$cmdpath` selector live per-slot on the ESP.
+`$cmdpath`** (the dir GRUB was launched from) to select that slot's kernel. The
+per-slot state is a tiny xpf-owned **selector file** that the shared `grub.cfg`
+reads by `$cmdpath`; no GRUB env write is needed (read-only at boot). Kernels
+stay in `/boot` (r4 AGY Flaw 3 — NEVER copied to the ESP); only shim+grub + the
+selector live per-slot on the ESP.
 
-**The `$cmdpath` branch MUST survive `update-grub` (r5 pre-empt):** Ubuntu's
-`update-grub` regenerates `/boot/grub/grub.cfg` from `/etc/grub.d/` fragments, so
-the `$cmdpath`-branching logic CANNOT be a hand-edit of `grub.cfg` (it would be
-clobbered by the candidate dpkg postinst's `update-grub`). It MUST be shipped as
-an xpf-owned `/etc/grub.d/` fragment (e.g. `09_xpf_cmdpath`, ordered before
-`10_linux`) so every regeneration re-emits it. INC-0 ships the fragment; INC-1
-asserts it is present + emitted after the candidate install.
+Three implementation details the design MUST nail (r5 AGY a/b/d):
+- **(a) `$cmdpath` carries the device prefix** (`(hd0,gpt1)/EFI/xpf-A`) and drive
+  enumeration is not stable, so the fragment MUST NOT string-compare `$cmdpath`.
+  It references it directly as a path: **`source "$cmdpath/xpf.selector"`**
+  (expands natively to the launched slot's selector, device-agnostic; no `regexp`
+  module needed — it may be unavailable under Secure-Boot lockdown).
+- **(b) the branch ships as `/etc/grub.d/09_xpf`** (executable drop-in, emitted
+  at the top of grub.cfg) so `update-grub` re-emits it on every kernel
+  install/purge — a hand-edit of `grub.cfg` would be clobbered. INC-0 ships it;
+  INC-1 asserts it is present + emitted after the candidate install.
+- **(d) the selector is a GRUB-SCRIPT file** (`\EFI\xpf-A\xpf.selector`), not raw
+  text — it sets GRUB vars the fragment consumes: `set
+  xpf_slot_kernel="vmlinuz-<ver>"; set xpf_slot_initrd="initrd.img-<ver>"`,
+  loaded via `source "$cmdpath/xpf.selector"` (parseable under lockdown; raw text
+  is not). The `09_xpf` fragment then does `linux $xpf_slot_kernel …; initrd
+  $xpf_slot_initrd`.
 
 **Slot-detection + power-loss (r4 Codex NEW-F18/F19):** the promotion oneshot
 proves it actually booted the INACTIVE/candidate slot before reordering
@@ -267,20 +283,27 @@ bricks.
   `BootOrder`, reorder, never blindly overwrite). The other slot becomes the
   rollback target. Demotion on REJECT is a no-op (BootNext already consumed).
 
-**NVRAM registration is FIRST-BOOT, not bake (r4 AGY Flaw 2):** UEFI Boot
-variables live in the target's firmware NVRAM, which `bake.py`'s offline
-`virt-customize` cannot write (no `/sys/firmware/efi/efivars` in the chroot; it
-would hit the build host's NVRAM anyway). So **bake only STAGES the ESP files**
-(`\EFI\xpf-A\`, `\EFI\xpf-B\` shim+grub+selector + the `$cmdpath` branch in
-`/boot/grub/grub.cfg`); the `efibootmgr` registration of the two slots + the
-initial `BootOrder` is done by a **first-boot in-guest service** (extend
-`xpf-day0-config` / a oneshot) on real hardware. INC-0 stages; the first-boot
-service registers. **The registration MUST be idempotent (r5 SMR N3):** on every
-boot it verifies the two slots exist in NVRAM with the right loader paths and an
-active-slot-reachable `BootOrder`, re-creating/repairing ONLY if missing — so a
-firmware reset / VM-redefinition that wipes NVRAM self-heals, and repeated boots
-never duplicate slots. (It runs independently of the #1922 SAFE-BOOTSTRAP mgmt
-lifeline; no ordering conflict.)
+**NVRAM registration is an INDEPENDENT, NON-BLOCKING, .deb-PACKAGED oneshot (r4
+AGY Flaw 2 + r5 AGY Flaw c):** UEFI Boot variables live in the target's firmware
+NVRAM, which `bake.py`'s offline `virt-customize` cannot write. So **bake only
+STAGES the ESP files** (`\EFI\xpf-A\`, `\EFI\xpf-B\` shim+grub+selector + the
+`/etc/grub.d/09_xpf` fragment); the `efibootmgr` registration of the two slots +
+the initial `BootOrder` runs in-guest on real hardware. **It is NOT folded into
+`xpf-day0-config`** (r5 AGY Flaw c — that script exits early once `.configdb`
+exists, so a SAFE-BOOTSTRAP node that configured via the lifeline would NEVER get
+its slots registered; it is also an image-only helper not in the `.deb`, and is
+`Before=xpfd` so a hanging `efibootmgr` would block the lifeline = brick).
+Instead it is a **separate oneshot SHIPPED IN THE `xpf` `.deb`** (so manual /
+foreign-host installs get it too), `WantedBy=multi-user.target`, **NOT ordered
+`Before=xpfd`** (must never block the SAFE-BOOTSTRAP lifeline), with **`timeout 5
+efibootmgr …` + non-fatal error handling** (read-only / no-efivars platforms log
+a warning, mark LANE 1 unavailable, and boot in degraded mode — never crash).
+**Idempotent + self-healing (r5 SMR N3):** every run verifies the two slots exist
+with the right loader paths + an active-slot-reachable `BootOrder`, re-creating
+ONLY if missing (a NVRAM wipe / VM-redefinition self-heals; repeated boots never
+duplicate slots). xpfd's LANE-1 pre-assert checks the slots are registered before
+arming, so a degraded (unregistered) box refuses LANE 1 and points the operator
+at LANE 2.
 
 **Secure Boot posture (r3 AGY Hazard C / r2 SMR M1):** LANE 1 is scoped to
 Canonical-signed `apt` kernels reached via shim→grub→MOK. An accidentally-
@@ -629,14 +652,15 @@ signed repo.
   'linux-*')` (NOT a raw glob — r2 AGY); sets `GRUB_DISABLE_SUBMENU=y` + pins
   `GRUB_DEFAULT` to the STABLE known-good id (r2 AGY/SMR B2/B3); **STAGES the two
   FIXED A/B UEFI slot dirs on the ESP (`\EFI\xpf-A\`, `\EFI\xpf-B\` = shim+grub +
-  a `$cmdpath` selector) and ships the `$cmdpath` branch as a
-  `/etc/grub.d/09_xpf_cmdpath` fragment (so `update-grub` re-emits it — r5)**,
-  both selectors seeded to the shipped known-good kernel
-  (the A4 substrate — r3/r4 AGY; NOT per-kernel/per-upgrade entries, NOT
-  ESP-grubenv, NOT per-slot grub.cfg). **NVRAM `efibootmgr` registration of the
-  slots + the initial active-first `BootOrder` is done by a FIRST-BOOT in-guest
-  service (extend `xpf-day0-config`), NOT in the offline bake** (r4 AGY F2 —
-  virt-customize can't write the target's NVRAM). Installs the
+  a GRUB-script `xpf.selector` setting `xpf_slot_kernel`/`xpf_slot_initrd` — r5
+  AGY d) and ships the `$cmdpath` branch as an executable `/etc/grub.d/09_xpf`
+  drop-in that `source "$cmdpath/xpf.selector"`s (no string-compare — r5 AGY a;
+  survives `update-grub` — r5 AGY b)**, both selectors seeded to the shipped
+  known-good kernel (the A4 substrate; NOT per-kernel/per-upgrade entries, NOT
+  ESP-grubenv, NOT per-slot grub.cfg). **NVRAM `efibootmgr` slot registration +
+  the initial active-first `BootOrder` is a SEPARATE, NON-BLOCKING, `.deb`-shipped
+  oneshot (NOT `xpf-day0-config`, NOT `Before=xpfd`, `timeout 5` + non-fatal —
+  r5 AGY c), run in-guest, NOT in the offline bake** (r4 AGY F2). Installs the
   **persistent-watchdog** config (firmware/hypervisor `nowayout`, initramfs
   early-arm fallback); records the bake **watchdog-persistence platform flag** +
   the **image version manifest** (xpf ver, HA protocol ver, session-sync frame
@@ -715,6 +739,10 @@ signed repo.
 | 16 | **Image-replace assumes `.configdb`/`master.key` carry — they DON'T** (r2 Codex NEW-F11). The portable artifact is the TEXT config; a re-imaged node has a new `master.key` and would fail to decrypt a carried encrypted DB. | LANE 2/3 carries `xpf.conf`+`node-id` via day-0; the new image factory-bootstraps `.configdb` from text and re-derives `master.key`. §3.3 + INC-3. Documented in the state-carry contract. |
 | 17 | **`xpf-deploy.py` over-attributed** (r2 Codex NEW-F12, r3 confirmed) — it has ONLY `deploy`/`launch`/`inventory`, NO `deploy_rolling`, no rolling/live-swap/rejoin gate. | LANE 2/3 ADDS a NEW rolling image-replace driver (recreate-each-node via `launch`) + rejoin/version/mixed-base gates (INC-2/3); the plan never attributes these to the current script. §2 + §3.2 corrected. |
 | 18 | **External orchestrator crash → orphaned drain / leaked lock / false "healthy" advance** (r2 AGY). | Version-check anchor (running kernel == target + promotion marker) before advancing; leased TTL cluster lock on `em0` store; bounded local self-recovery in xpfd for an orphaned drain. INC-2. |
+| 19 | **`$cmdpath` string-compare fails / `regexp` unavailable under lockdown** (r5 AGY a). | Reference `$cmdpath` directly as a path (`source "$cmdpath/xpf.selector"`), never a string compare; no `regexp` dependency. |
+| 20 | **`$cmdpath` branch clobbered by `update-grub`** (r5 AGY b). | Ship as `/etc/grub.d/09_xpf` executable drop-in (re-emitted by `update-grub`); assert present after the candidate install. |
+| 21 | **Slot registration via `xpf-day0-config` is bypassed / image-only / blocks the lifeline** (r5 AGY c). | Separate `.deb`-shipped NON-BLOCKING oneshot, NOT `Before=xpfd`, `timeout 5` + non-fatal (degrade LANE 1, never crash), idempotent. The SAFE-BOOTSTRAP lifeline is never blocked. |
+| 22 | **Selector file unparseable by GRUB under lockdown** (r5 AGY d). | The selector is a GRUB-SCRIPT (`set xpf_slot_kernel=…; set xpf_slot_initrd=…`) loaded via `source`, not raw text. |
 
 ---
 
@@ -1003,3 +1031,23 @@ Codex r4 pending at v5 draft. v5 corrects A4 for real signed-GRUB/UEFI behavior:
   image-replace recovery. §3.1.
 - **r4 SMR N2** (active-slot-kernel-never-pruned invariant + atomic ESP selector
   rename via `pkg/fsatomic`): folded. §3.1, §8.
+
+### r5 → v6 disposition (what changed and why)
+r5: **SMR = PLAN-READY+N3**; **AGY = PLAN-NEEDS-WORK** (4 implementation-detail
+flaws found by reading the real `xpf-day0-config` script + GRUB `$cmdpath`
+behavior); Codex r5 pending at v6 draft. v6 folds:
+- **(a) `$cmdpath` carries the device prefix; no string-compare; `regexp` may be
+  locked out** → reference it directly: `source "$cmdpath/xpf.selector"`. §3.1,
+  risk #19.
+- **(b) `update-grub` clobbers a hand-edited `grub.cfg`** → the branch is an
+  executable `/etc/grub.d/09_xpf` drop-in. §3.1, INC-0/INC-1, risk #20.
+- **(c) slot registration via `xpf-day0-config` is bypassed (early-exit once
+  `.configdb` exists, on a SAFE-BOOTSTRAP node), image-only (not in the `.deb`),
+  and `Before=xpfd` (a hanging `efibootmgr` blocks the lifeline = brick)** →
+  a SEPARATE `.deb`-shipped NON-BLOCKING oneshot, NOT `Before=xpfd`, `timeout 5`
+  + non-fatal (degrade LANE 1, never crash on read-only NVRAM), idempotent.
+  §3.1, INC-0, risk #21.
+- **(d) selector format underspecified** → a GRUB-script (`set xpf_slot_kernel`/
+  `xpf_slot_initrd`) loaded via `source`. §3.1, INC-0, risk #22.
+- **r5 SMR N3** (idempotent self-healing registration on a NVRAM wipe): folded
+  into the oneshot. §3.1.
