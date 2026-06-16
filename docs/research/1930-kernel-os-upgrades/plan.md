@@ -1,7 +1,10 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v1 DRAFT — pre-review
+- **Status:** v2 — folds r1 reviews (Claude SMR + AGY converged PLAN-NEEDS-WORK).
+  Major LANE-1 pivot: the bootloader one-shot revert moves OFF GRUB-grubenv
+  (brick-loop under Secure Boot / ext4 `metadata_csum`) and the HA reboot
+  orchestration moves OFF the in-process `rolling.go` (process dies at reboot).
 - **Branch:** `research/1930-kernel-os-upgrades`
 - **Scope discipline:** `/research` only. STOP at PLAN-READY. No production
   source touched, no PR opened. User approves via `/engineer 1930`.
@@ -41,11 +44,14 @@ The three problems:
    is a high-blast-radius, multi-reboot, interactive-by-default operation. The
    question is whether to support it in-place at all, vs mandating image-replace.
 
-3. **Boot-loader / watchdog footguns.** The #1917 research (§6.3c, §6.7)
-   surfaced concrete bricking hazards in any one-shot kernel-boot mechanism:
-   `GRUB_DEFAULT=saved` + `GRUB_SAVEDEFAULT=false` requirement, `softdog`
-   early-boot insufficiency, and `needrestart` mid-transaction restarts. These
-   must be designed-in, not discovered live.
+3. **Boot-loader / watchdog footguns.** The #1917 research (§6.3c, §6.7) and the
+   r1 reviews surfaced concrete bricking hazards in any one-shot kernel-boot
+   mechanism: GRUB cannot clear its own one-shot flag at boot on ext4
+   `metadata_csum` / Secure Boot (boot-loop), a clean reboot disarms a
+   non-persistent watchdog (early-boot unprotected), the dpkg kernel postinst's
+   `update-grub` can move the boot default, `grub-reboot` needs a stable
+   menuentry id, and `needrestart` mid-transaction restarts. These must be
+   designed-in, not discovered live.
 
 ### What is explicitly OUT of scope (already owned elsewhere)
 - In-place xpfd + dataplane cut-over → #1917 (MERGED, `pkg/upgrade/`).
@@ -65,7 +71,7 @@ All of the following are MERGED on `origin/master` (verified by `git ls-tree`):
 |---|---|---|
 | `pkg/dataplane/verify_userspace_shim.go` | `VerifyEmbeddedUserspaceShim()` / `VerifyUserspaceShimObject()` — kernel verify-only load, anonymous maps, never attaches; exit-code contract via `ErrUserspaceShimVerifierReject`. | The **kernel-side gate** the one-shot boot channel must invoke on the candidate kernel. |
 | `cmd/xpfd/upgrade.go` + `pkg/upgrade/` | `xpfd upgrade [--rolling]` — staged→runtime-version copy, verify, atomic symlink flip, journal, auto-rollback, HA rolling drain. (`runner.go`, `cutover.go`, `flip.go`, `rolling.go`, `state.go`, `system_linux.go`.) | The **mechanism to reuse**: the kernel channel is a sibling state-machine; base-OS image-replace HA sequencing mirrors `rolling.go`. |
-| `scripts/image/bake.py` | virt-customize: installs `linux-generic`, **HARD-ASSERTs newest kernel ≥ 6.18**, asserts `linux-modules-extra` (mlx5/i40e), purges all-but-newest kernel + **asserts exactly one kernel**, GRUB drop-in (`/etc/default/grub.d/99-xpf.cfg` = `init_on_alloc=0` only), build-host `verify-dataplane` pre-gate. | The **image-replace substrate** (Path C) + the place to add `apt-mark hold linux-*`, `GRUB_DEFAULT=saved`, and a kernel-channel oneshot unit. |
+| `scripts/image/bake.py` | virt-customize: installs `linux-generic`, **HARD-ASSERTs newest kernel ≥ 6.18**, asserts `linux-modules-extra` (mlx5/i40e), purges all-but-newest kernel + **asserts exactly one kernel**, GRUB drop-in (`/etc/default/grub.d/99-xpf.cfg` = `init_on_alloc=0` only), build-host `verify-dataplane` pre-gate. | The **image-replace substrate** (Path C) + the place to add `apt-mark hold linux-*`, a pinned stable known-good `GRUB_DEFAULT` id, the persistent-watchdog + Linux-cleared one-shot substrate, and the promotion oneshot unit. |
 | `scripts/deploy/xpf-deploy.py` | Pushes a baked image to incus / a target; HA two-node deploy. | The Path-C deploy driver the base-OS-major and heavy-kernel paths reuse. |
 | `scripts/image/validate.py` | Factory-boot + in-guest `verify-dataplane` validation gate. | The acceptance gate for "xpf still loads + forwards on the new base." |
 | `docs/in-place-upgrade.md` | The #1917 operator doc. Line 169 hands kernel/OS to #1930. | The doc to extend with the kernel channel + base-OS playbook. |
@@ -74,24 +80,59 @@ All of the following are MERGED on `origin/master` (verified by `git ls-tree`):
 ### Concrete gaps in the current substrate (the #1930 work surface)
 - **No `apt-mark hold linux-*`** anywhere in `bake.py` — the floor is asserted
   at bake time but nothing prevents `apt upgrade` from moving it post-deploy.
-- **GRUB drop-in is `init_on_alloc=0` only** — no `GRUB_DEFAULT=saved`, no
-  `GRUB_SAVEDEFAULT` assertion. The one-shot `grub-reboot` channel cannot
-  function and would silently no-op or boot-loop (per #1917 §6.3c).
-- **No HW/hypervisor watchdog config** in the image — no `/dev/watchdog`,
-  `RuntimeWatchdogSec`, nor a softdog-vs-hardware decision.
+- **GRUB drop-in is `init_on_alloc=0` only** — no pinned `GRUB_DEFAULT`, no
+  stable known-good menuentry id, no Linux-cleared one-shot substrate. A naive
+  `grub-reboot` channel would boot-loop on this image (§2 invariant 2).
+- **No persistent watchdog config** in the image — no firmware/hypervisor
+  watchdog, no `nowayout`, no initramfs early-arm. A clean reboot would leave the
+  candidate's early boot unprotected (§2 invariant 3).
 - **No `needrestart` blacklist** for the kernel-channel reboot window (#1917
   shipped one only for the binary-cut window per §6.3c; needs re-verification it
   also covers an apt-driven kernel install).
 - **No base-OS major-upgrade playbook** — `do-release-upgrade` is unmodeled.
 - **No `xpfd upgrade kernel` subcommand** — `pkg/upgrade` has no kernel verb.
 
-### The load-bearing invariant for the design
-`verify-dataplane` **cannot validate an unbooted kernel** (the BPF verifier is
-kernel-space; `ebpf.NewCollection` loads into the *running* kernel). Therefore
-the kernel channel is fundamentally **"boot the candidate once, verify from
-inside it, promote-or-revert"** — NOT "verify-then-set-default." This is the
-single fact that forces the one-shot-boot + watchdog design over any
-verify-first design. (#1917 §6.7, round-2 AGY blocker, restated and adopted.)
+### Load-bearing invariants for the design (three, all verified)
+
+1. **`verify-dataplane` cannot validate an unbooted kernel** (the BPF verifier is
+   kernel-space; `ebpf.NewCollection` loads into the *running* kernel). The
+   kernel channel is fundamentally **"boot the candidate once, verify from
+   inside it, promote-or-revert"** — NOT "verify-then-set-default." This forces
+   one-shot-boot over verify-first. (#1917 §6.7, restated.)
+
+2. **GRUB cannot reliably clear its own one-shot variable at boot on this image
+   (r1 AGY Hazard A, SMR B2/B3).** GRUB's one-shot (`next_entry` via
+   `grub-reboot`) depends on GRUB *itself* running `save_env next_entry=` early
+   in boot to consume the flag. On the appliance that write FAILS for two
+   independent reasons: (a) Ubuntu formats the boot ext4 with `metadata_csum`,
+   which **GRUB's ext4 driver cannot write** (it has no checksum support → treats
+   the FS read-only); (b) under UEFI **Secure Boot**, GRUB's env-write path is
+   locked down. If the candidate hangs and the watchdog resets, GRUB re-reads the
+   still-set `next_entry` and **boots the failing candidate again → infinite
+   boot-loop / brick.** This is documented upstream (rear#3578, k3os#804, Arch
+   forum 266415). **CONSEQUENCE: a pure GRUB-grubenv one-shot is NOT brick-safe
+   on this image.** The design must either (i) write the one-shot marker to a
+   GRUB-*writable* location, or (ii) clear it from *Linux userspace* on the
+   known-good fallback boot (Linux's ext4 driver writes `metadata_csum` fine;
+   `grub-editenv` from userspace also writes fine — the limitation is GRUB-at-
+   boot only), or (iii) use a boot-counter the firmware/ESP owns. See §3.1 +
+   Path Option A (rewritten).
+
+3. **A clean reboot disarms the watchdog before the candidate boots (r1 AGY
+   Hazard C).** `xpfd upgrade kernel` triggers a normal systemd reboot; the
+   watchdog driver is cleanly stopped on shutdown, so the candidate kernel's
+   *early* boot (decompression, initramfs, pre-systemd init) runs with **no armed
+   watchdog**. A pure "arm watchdog before reboot" does not survive the reboot.
+   **CONSEQUENCE:** the watchdog must be either (i) a firmware/BMC/hypervisor
+   watchdog that persists across the OS reset (a true HW watchdog with
+   `nowayout` that the OS shutdown cannot disarm), or (ii) re-armed extremely
+   early on the candidate boot (initramfs hook) — and the brick-proof guarantee
+   is only as strong as the earliest point the watchdog is armed. The honest
+   bound (§6.7 of #1917) tightens: "never brick" holds ONLY where a persistent
+   firmware/hypervisor watchdog exists; otherwise LANE 1 degrades to "GRUB
+   default preserved, early hang needs operator recovery" — and on THIS image
+   even "GRUB default preserved" is not guaranteed (invariant 2). So absent a
+   persistent watchdog AND a non-GRUB one-shot, LANE 1 is unavailable → LANE 2.
 
 ---
 
@@ -103,7 +144,7 @@ The design splits by how far the kernel moves, mirroring #1917's Path-B
 ```
   Kernel CVE point-release (same series, e.g. 6.18.x -> 6.18.y or 7.0.z)
       -> LANE 1: verify-gated one-shot-boot in-place kernel channel
-                 (xpf-upgrade kernel <ver> + watchdog + grub-reboot)
+                 (xpfd upgrade kernel <ver> + watchdog + grub-reboot)
 
   Heavy/uncertain kernel move (new series the shim has never seen, or kernel
   pulled by base-OS upgrade)
@@ -118,51 +159,111 @@ The design splits by how far the kernel moves, mirroring #1917's Path-B
 
 ### 3.1 LANE 1 — verify-gated one-shot-boot kernel channel (in-place)
 
-**Mechanism (the brick-proof sequence):**
+The mechanism is built around the three invariants of §2. The two parts that
+changed from v1 are the **one-shot-revert substrate** (no longer trusts GRUB to
+clear its own flag — invariant 2) and the **HA orchestration** (no longer the
+in-process `rolling.go` — invariant in §3.1-HA below).
 
-1. **Default posture: `apt-mark hold linux-*`** (added to `bake.py`). Unattended
-   apt cannot move the kernel. A kernel bump is an explicit operator action.
-2. Operator runs `xpfd upgrade kernel <candidate-version>` (new subcommand,
-   `pkg/upgrade` kernel verb). It:
-   a. **Pre-asserts boot-loader invariants** (fail-closed, before touching
-      anything): `GRUB_DEFAULT=saved` present, `GRUB_SAVEDEFAULT` absent/false,
-      a HW/hypervisor watchdog device present. If any fails → ABORT with an
-      actionable message ("kernel channel not armed; use image-replace").
-   b. `apt-mark unhold linux-*` → install the candidate kernel package(s) →
-      re-`apt-mark hold`. The candidate is installed but NOT the boot default.
-   c. **Arms a one-shot boot** of the candidate via `grub-reboot <candidate>`
-      (one-shot; default unchanged — REQUIRES `GRUB_DEFAULT=saved`).
-   d. **Arms the HW/hypervisor watchdog** so that if the candidate kernel never
-      reaches the promotion oneshot (early-boot hang, no systemd), the box
-      resets and — because the GRUB *default* was never changed — boots the OLD
-      known-good kernel.
-   e. **HA:** does the one-shot boot on the **drained/secondary node only**,
-      sequenced inside the rolling drive (reuse `pkg/upgrade/rolling.go`'s drain
-      → act → restore primitive) so both nodes never reboot together.
-   f. Reboots.
-3. On the candidate boot, a **promotion oneshot systemd unit** runs early,
+**One-shot-revert substrate (resolves invariant 2 — brick-loop):** the design
+does NOT rely on GRUB clearing `next_entry` at boot. Instead it uses
+**"counted/userspace-cleared" semantics**: the known-good entry remains the
+permanent GRUB default at all times; the candidate is reached via a marker that
+is **consumed/cleared from Linux userspace**, never by GRUB-at-boot. Concretely
+(Path Option A, rewritten — A1' is the recommendation):
+- The permanent default is the **known-good** kernel menuentry (a STABLE id,
+  not `0`, not "newest" — invariant 2 + SMR B3). `apt`-installing a new kernel
+  must NOT change this (SMR B2): `GRUB_DEFAULT` is pinned to the known-good id,
+  and the candidate-kernel `dpkg` postinst's `update-grub` regenerates the menu
+  but the pinned default does not move.
+- The candidate boot is requested by writing a marker that GRUB reads but
+  **Linux clears**: either a one-shot `next_entry` whose clear is performed by
+  an **early Linux userspace/initramfs unit** (Linux's ext4 driver writes
+  `metadata_csum` fine; the GRUB-at-boot clear is the only thing that fails), or
+  a boot-counter on a GRUB-writable medium. On a fallback (watchdog/clean reset
+  to the known-good default), the known-good boot's **early Linux unit clears the
+  marker** so a subsequent reboot does not re-enter the candidate. Net: a hung
+  candidate that triggers a reset comes up on the known-good default and the
+  known-good Linux clears the candidate request — NO boot-loop.
+
+**Persistent-watchdog requirement (resolves invariant 3 — clean-shutdown
+disarm):** LANE 1's "never brick on early hang" guarantee requires a watchdog
+that **persists across the OS reset** — a firmware/BMC/hypervisor watchdog with
+`nowayout=1` that a clean systemd shutdown cannot disarm, OR the candidate's
+**initramfs re-arms a watchdog at the earliest possible point**. `softdog` armed
+from systemd is INSUFFICIENT for early-boot hangs (it isn't loaded yet) AND is
+disarmed by the clean reboot. The pre-assert (below) checks for a persistent
+watchdog; absent one, LANE 1 refuses to arm and the operator uses LANE 2.
+
+**Mechanism sequence:**
+
+1. **Default posture: `apt-mark hold linux-*`** (added to `bake.py`, INC-0).
+   Unattended apt cannot move the kernel. `unattended-upgrades` is also
+   configured to never touch `linux-*` (SMR m4 / risk #8). A kernel bump is an
+   explicit operator action.
+2. Operator runs `xpfd upgrade kernel <candidate-version>` (new `pkg/upgrade`
+   kernel verb). It **pre-asserts, fail-closed, before touching anything**:
+   - `GRUB_DEFAULT` is pinned to a STABLE known-good menuentry id (NOT `0`/
+     newest) and that id resolves in the current `grub.cfg`;
+   - a **persistent** (firmware/BMC/hypervisor) watchdog device is present, OR
+     an initramfs early-arm hook is installed;
+   - **free `/boot` space** ≥ (candidate kernel image + initramfs + margin)
+     BEFORE installing (SMR M3 / AGY Hazard E — prune-before-install);
+   - the one-shot marker substrate (early Linux clear unit / boot-counter) is
+     installed.
+   Any failed assert → ABORT with an actionable message ("kernel channel not
+   armed; use image-replace / LANE 2").
+3. `apt-mark unhold linux-*` → install the candidate kernel package(s) →
+   re-`apt-mark hold`. Assert the pinned default did NOT move after the
+   candidate postinst's `update-grub` (SMR B2). The candidate is installed but
+   NOT the boot default.
+4. Write the candidate one-shot marker (substrate above). Arm/confirm the
+   persistent watchdog. Reboot.
+5. On the candidate boot, a **promotion oneshot systemd unit** runs early,
    before xpfd's `ExecStartPre` admits traffic:
-   a. Runs `xpfd verify-dataplane` against the now-running candidate kernel
-      (exit 0 PASS / 3 REJECT / 1 error).
-   b. On PASS: runs a bounded **health beacon** (dataplane loads + forwards a
-      probe), then `grub-set-default <candidate>` (promote), writes a durable
-      promotion marker, pets/disarms the watchdog, and `apt-mark hold` stays.
-   c. On REJECT/error/timeout: does NOTHING to promote. The watchdog fires (or
-      a clean reboot is issued) → boots the OLD default kernel → shim verifies
-      → dataplane restored. The candidate kernel package stays installed but
-      un-defaulted; a retention prune removes it later.
-4. **HA failback:** after the secondary promotes the candidate and rejoins, the
-   rolling drive fails traffic back and repeats on the (now drained) primary.
+   - Runs `xpfd verify-dataplane` against the now-running candidate kernel
+     (exit 0 PASS / 3 REJECT / 1 error).
+   - On PASS: runs a bounded **health beacon** (dataplane loads + forwards a
+     real probe). **Only on health-beacon PASS** does it `grub-set-default
+     <candidate-stable-id>` (promote), write a durable promotion marker, clear
+     the one-shot marker, and disarm the watchdog. The disarm is gated on the
+     *forward* beacon, NOT the structural verify alone (SMR M2 / AGY Hazard C
+     refinement) — a kernel that verifies-structurally but can't forward is
+     reverted, not kept.
+   - On REJECT/error/timeout: does NOTHING to promote; issues a clean reboot
+     (or lets the watchdog fire) → boots the known-good default → the known-good
+     Linux clears the candidate marker → dataplane restored. No boot-loop.
+6. The candidate kernel package, if not promoted, is pruned (`apt-get purge` the
+   un-promoted `linux-*` version) by the `pkg/upgrade` GC (SMR M3 / AGY Hazard
+   E) — both to free `/boot` and to avoid accrual.
 
-**Honest bounds (carried verbatim from #1917 §6.7, do not soften):**
-- With a **HW/hypervisor watchdog** this is brick-proof against boot hangs.
-- **`softdog` is INSUFFICIENT** — a kernel software watchdog cannot fire if the
-  candidate kernel hangs in decompression / early init *before* the softdog
-  module + systemd load and arm it. That path bricks. LANE 1 REQUIRES the
-  HW/hypervisor watchdog for the "never brick" guarantee; on platforms without
-  one, LANE 1 is unavailable and the operator MUST use LANE 2 (image-replace).
-- With only `grub-reboot` (no watchdog), the GRUB default is preserved but an
-  early-boot hang needs external/operator recovery (console/hypervisor reset).
+**Honest bound (do not soften):** "never brick on early hang" holds ONLY with a
+persistent firmware/hypervisor watchdog (invariant 3) AND the userspace-cleared
+one-shot substrate (invariant 2). With neither, LANE 1 is UNAVAILABLE and the
+pre-assert refuses to arm — there is no half-safe mode that silently bricks.
+
+#### 3.1-HA — HA orchestration is EXTERNAL, not in-process `rolling.go`
+
+`pkg/upgrade/rolling.go`'s `RunRolling` (verified runner.go/rolling.go:62-82)
+does drain → **STOP→FLIP→START** (a fast in-process binary cut) → restore, all
+inside ONE local Go process. A kernel bump's "act" is a **reboot**, which kills
+that process mid-sequence (SMR B1 / AGY Hazard B): the node would come up still
+`ForceSecondary`-drained, never calling `ResetFailover`, and if a driver blindly
+upgrades node B next, **both nodes are down → full outage**. Therefore LANE 1 HA
+is driven by an **external orchestrator** (`scripts/deploy/xpf-deploy.py`, the
+#1879 deploy driver) that survives node reboots:
+
+```
+drain node A (ForceSecondary) -> confirm peer B holds PRIMARY for all RGs ->
+arm candidate + watchdog on A -> reboot A -> POLL A until it boots, verifies,
+promotes (or reverts) -> confirm A healthy + rejoined + sync re-established ->
+ResetFailover A (rejoin as eligible) -> ONLY THEN repeat for node B.
+```
+
+The in-guest `xpfd upgrade kernel` handles ONE node's local
+arm/verify/promote/revert; the cross-node sequencing + "never both down" gate is
+the external driver's job. `pkg/upgrade/rolling.go` is reused for the *binary*
+cut (#1917) but NOT for the *kernel* reboot cut. INC-2 implements the external
+driver's kernel-rolling sequence + the post-reboot rejoin-confirm gate.
 
 ### 3.2 LANE 2 — image-replace for heavy/uncertain kernel moves (Path C)
 
@@ -171,12 +272,26 @@ arriving as part of a base-OS upgrade, goes through the fully-tested image
 substrate: `bake.py` produces a new image with the new kernel (verify-dataplane
 gated at bake AND validate.py boot-gate), `xpf-deploy.py` swaps it in.
 - **HA:** replace secondary node's image → failover (VRRP demote, ~60ms) →
-  replace primary → fail back. Connections survive via session-sync (subject to
-  the #1917 §6.5 session-sync wire back-compat rule for the xpf version delta).
+  replace primary → fail back.
 - **Standalone:** documented reboot gap (image swap + factory boot).
-No new mechanism — this is #1879 + #1917 Path C reused verbatim. #1930's
-contribution here is the **decision rule** ("series change ⇒ LANE 2") and the
-operator doc.
+
+**Mixed-base HA session survival is GATED, not assumed (r1 Codex Finding 7).**
+The v1 claim "connections survive via session-sync" was an overclaim. An
+image-replace can move the **xpf version AND the base** on the replaced node
+while the peer still runs the old image — a *mixed-base* cluster. The existing
+guard (`rolling.go:109` / `docs/in-place-upgrade.md:147`) only checks the
+*running local↔peer* HA protocol AFTER a mixed cluster already exists, and only
+for the binary rolling cut — it does NOT introspect a *staged new image's* HA
+protocol before the swap. #1930 therefore REQUIRES, before the LANE-2 HA swap of
+the second node: (a) introspect the new image's HA/session-sync protocol version
+and **fail-closed if it is not back-compatible with the still-running peer**
+(fall to "replace both nodes, connections drop, documented"); (b) extend the
+mixed-base session-sync + failover validation in the test plan (§10). Only with
+that gate PASS does the plan claim connection survival; otherwise it is a
+documented connection-drop. No new *forwarding* mechanism — this is #1879 +
+#1917 Path C reused — but the **mixed-base compatibility gate is new** and is
+INC-3's responsibility. #1930's contribution to LANE 2 is the **decision rule**
+("series change ⇒ LANE 2"), the **mixed-base gate**, and the operator doc.
 
 ### 3.3 LANE 3 — base-OS major-version upgrade (Ubuntu N → N+1)
 
@@ -193,42 +308,55 @@ the swap (the appliance state contract — already preserved by #1879/#1917):
 Validation: `validate.py` factory-boot + in-guest `verify-dataplane` + a forward
 probe on the N+1 base proves xpf still loads + forwards.
 
-**Fallback (Path Option B, see §6): gated `do-release-upgrade`.** Offered only
-as a documented, console-attended, non-HA, single-node path for operators who
-cannot re-image (e.g. a hand-built box). It MUST: `apt-mark hold linux-*` first
-(do-release-upgrade pulls a kernel — route that kernel through LANE 1's verify
-gate, NOT do-release-upgrade's blind reboot), neutralize `needrestart`
-interactive prompts, and end with a LANE-1-style verify-gated kernel boot rather
-than do-release-upgrade's own final reboot. This path is explicitly **not
-HA-safe and not the recommended path** — it is a documented escape hatch.
+**In-place `do-release-upgrade` is UNSUPPORTED (r1 SMR M4 + AGY Hazard D — both
+reviewers converged to drop it).** It is removed from the design rather than
+offered as a fragile escape hatch, because: (a) it modifies the entire userspace
+(glibc, systemd, FRR, strongSwan, kea, xpfd) in-place and **irreversibly** —
+there is no rollback if the new userspace fails to forward; (b) constrained with
+`apt-mark hold linux-*` it leaves the release **half-upgraded** (the release
+upgrader expects to own the kernel); (c) it can leave the box running **N+1
+userspace on the old N kernel** (the AGY Hazard-D mixed-state brick) where the
+new xpfd/shim may not verify on the old kernel → config-only mode with no
+automated restore; (d) it cannot be tested in CI. `docs/` will state plainly:
+**"In-place base-OS major upgrade (`do-release-upgrade`) is UNSUPPORTED on the
+appliance — re-image (LANE 2 / Path C). Operators who run it anyway do so at
+their own risk and should re-image afterward."** A documented *unsupported* path
+is safer than a documented *fragile* one.
 
 ---
 
 ## 4. Multiple Path Options (where the design genuinely branches)
 
-### Path Option A — one-shot-boot mechanism for LANE 1
-The candidate-kernel one-shot boot + revert can be built three ways:
+### Path Option A — one-shot-boot revert substrate for LANE 1
+The r1 reviewers (all three) killed the v1 "A1 = GRUB grubenv one-shot"
+recommendation: GRUB cannot clear its own one-shot flag at boot on this image
+(ext4 `metadata_csum` + Secure Boot, §2 invariant 2) → boot-loop. The substrate
+is re-evaluated; **the discriminator is "what clears the candidate request so a
+reset goes back to known-good without re-entering the candidate."**
 
-| Option | Mechanism | Pros | Cons | Verdict |
-|---|---|---|---|---|
-| **A1: GRUB `grub-reboot` + HW/hypervisor watchdog** | `GRUB_DEFAULT=saved`, `grub-reboot <cand>` one-shot, HW watchdog armed pre-reboot, promote via `grub-set-default` on verify PASS. | Default never changes until PASS; HW watchdog brick-proof against early hang; reuses GRUB the image already has. | Requires HW/hypervisor watchdog present; GRUB env is a known footgun set (`GRUB_SAVEDEFAULT` must be false). | **RECOMMENDED.** |
-| **A2: softdog + GRUB** | Same as A1 but `softdog` instead of HW watchdog. | No HW watchdog dependency. | **Bricks on early-boot hang** — softdog can't fire before its own module loads. Fails the "never brick" bar. | REJECT (use only where no HW watchdog AND operator accepts manual recovery — effectively LANE 2 territory). |
-| **A3: systemd-boot `boot-counting` (`bootctl` auto-revert)** | systemd-boot's built-in tries-counter auto-reverts a candidate after N failed boots. | Native auto-revert, no GRUB env footguns. | The image uses GRUB, not systemd-boot — switching the bootloader is a large, separate, risky change; boot-counting reverts on *boot* failure not on *verify* failure (a kernel that boots fine but REJECTs the shim would be counted "good"). | REJECT for now; note as a possible future if the image ever moves to systemd-boot. |
+| Option | Mechanism | Clears one-shot how? | Verdict |
+|---|---|---|---|
+| **A1 (v1, KILLED): GRUB grubenv one-shot, GRUB clears at boot** | `grub-reboot <cand>`, GRUB `save_env next_entry=` at boot. | GRUB-at-boot — **FAILS** on ext4 `metadata_csum` / Secure Boot → boot-loop. | **REJECT** (r1 unanimous). |
+| **A1' (RECOMMENDED): pinned known-good default + Linux-cleared candidate marker** | `GRUB_DEFAULT` pinned to a STABLE known-good menuentry id (never moves on apt kernel install). Candidate requested via a marker GRUB reads once; the **known-good boot's early Linux unit** (initramfs/early systemd) clears the marker (Linux ext4 writes `metadata_csum` fine; `grub-editenv` from userspace writes fine). Promote = `grub-set-default <cand-id>` from Linux on verify+health PASS. | **Linux userspace**, never GRUB-at-boot. A reset → known-good default boots → known-good Linux clears marker → no re-entry → no loop. | **RECOMMENDED.** |
+| **A2 (KILLED): softdog** | Software watchdog only. | N/A — softdog can't fire pre-load AND is disarmed by clean reboot (§2 invariant 3). | **REJECT** (r1 AGY Hazard C). |
+| **A3 (future): systemd-boot boot-counting on the ESP** | Switch bootloader to systemd-boot; native tries-counter writes EFI vars / ESP (FAT32, writable under Secure Boot). | Firmware/ESP-owned counter; brick-safe by design. | **DEFER** — switching the appliance bootloader is a large separate change; boot-counting reverts on *boot* failure not *verify* failure (a kernel that boots but REJECTs the shim would be miscounted "good" unless the promotion unit explicitly fails the boot on REJECT). Noted as the clean long-term answer if/when the image moves to systemd-boot + UKI. |
 
-**Recommendation: A1.** It is the only option that satisfies both "default never
-changes until verify PASS" and "brick-proof against early-boot hang," and it
-reuses the bootloader already in the image. A2/A3 are documented as rejected with
-reasons so a future reviewer doesn't relitigate.
+**Recommendation: A1'** for this issue (works with the GRUB bootloader the image
+already has, and is brick-safe because the clear is done by Linux, not GRUB),
+**plus the persistent-watchdog requirement** (firmware/BMC/hypervisor watchdog
+with `nowayout`, OR initramfs early-arm) for the early-hang guarantee. A3 is the
+documented future direction. The pre-assert (§3.1) refuses to arm LANE 1 if
+neither a persistent watchdog nor the A1' clear-substrate is present.
 
 ### Path Option B — base-OS major upgrade
-| Option | Mechanism | Pros | Cons | Verdict |
-|---|---|---|---|---|
-| **B1: image-replace only** | Bake N+1 image; `xpf-deploy.py` swap; HA rolling. | One tested unit; reuses #1879/#1917; validate.py-gated; HA-safe. | Requires re-imaging infra (bake host); not viable for hand-built boxes. | **RECOMMENDED default.** |
-| **B2: `do-release-upgrade` in-place** | Ubuntu's own release upgrader, hold-kernel, route kernel through LANE 1, neutralize needrestart. | Works on hand-built boxes with no re-image infra. | High blast radius (FRR/strongSwan/kea/systemd all move untested); interactive by default; multi-reboot; NOT HA-safe; config-file merge prompts. | Offer as a **documented, gated, non-HA escape hatch ONLY** (§3.3). |
+| Option | Mechanism | Verdict |
+|---|---|---|
+| **B1: image-replace only** | Bake N+1 image (validate.py-gated); `xpfd`-driven `xpf-deploy.py` swap; HA mixed-base gate (§3.2). | **RECOMMENDED — the ONLY supported path.** |
+| **B2: `do-release-upgrade` in-place** | Ubuntu release upgrader. | **DROPPED / UNSUPPORTED** (r1 SMR M4 + AGY Hazard D + Codex F8 — unanimous). Irreversible userspace move; half-upgraded under kernel hold; N+1-userspace-on-N-kernel mixed-state brick; untestable. Documented as "unsupported, re-image instead." |
 
-**Recommendation: B1 default, B2 documented escape hatch.** Do not invest
-mechanism in B2 beyond the doc + the kernel-hold guard; the appliance model is
-image-replace-first.
+**Recommendation: B1 only.** B2 is explicitly unsupported (not a gated escape
+hatch — the reviewers showed the gated form is incoherent). The appliance model
+is image-replace-first.
 
 ### Path Option C — kernel hold scope
 | Option | What is held | Verdict |
@@ -246,29 +374,50 @@ signed repo.
 > All increments are **#1930 design**; this plan stops at PLAN-READY. The
 > increments below are the proposed `/engineer 1930` work breakdown.
 
-- **INC-0 (image hardening, low risk):** `bake.py` adds `apt-mark hold linux-*`
-  after the single-kernel assert; sets `GRUB_DEFAULT=saved` + ensures
-  `GRUB_SAVEDEFAULT` unset in the GRUB drop-in; installs a HW/hypervisor
-  watchdog config (and documents the softdog-insufficiency); ships the
-  `needrestart` blacklist covering the kernel-channel window. **No new daemon
-  code.** This alone closes the "unattended apt moves the floor" hole.
-- **INC-1 (LANE 1 mechanism):** `pkg/upgrade` kernel verb + `xpfd upgrade
-  kernel <ver>` subcommand: boot-loader/watchdog pre-asserts, unhold→install→
-  rehold, `grub-reboot`, arm watchdog, reboot. Promotion oneshot systemd unit
-  (verify-dataplane + health beacon → `grub-set-default` + marker + disarm; else
-  revert). Journal entries for crash-recovery (reuse `pkg/upgrade/state.go`).
-- **INC-2 (LANE 1 HA sequencing):** wire the kernel verb into
-  `pkg/upgrade/rolling.go` so a clustered kernel bump drains the secondary,
-  one-shot-boots it, promotes/reverts, fails back, repeats on the primary —
-  never both nodes down together.
-- **INC-3 (LANE 3 / base-OS doc + Path C reuse):** operator playbook in
-  `docs/in-place-upgrade.md` (or a new `docs/os-kernel-upgrades.md`): the
-  3-lane decision tree, the B1 image-replace base-OS procedure (reusing
-  `xpf-deploy.py`), the B2 gated escape hatch, the state-carry contract.
-- **INC-4 (validation):** extend `validate.py` / a new harness to (a) prove
-  LANE 1 revert actually boots the old kernel and restores the dataplane after a
-  *deliberately-REJECTed* candidate, and (b) prove a baked N+1-base image
-  forwards. The deliberate-REJECT test is the brick-proof proof.
+- **INC-0 (image hardening, no daemon code, closes the biggest hole alone):**
+  `bake.py` adds `apt-mark hold linux-*` after the single-kernel assert; pins
+  `GRUB_DEFAULT` to the STABLE known-good menuentry id (NOT `0`/saved-without-a-
+  pinned-entry — Codex F2/F5, SMR B2/B3) and ensures `GRUB_SAVEDEFAULT` unset;
+  installs the **persistent-watchdog** config (firmware/hypervisor + `nowayout`,
+  with initramfs early-arm as the fallback) and the **A1' one-shot clear
+  substrate** (the early-Linux marker-clear unit); disables
+  `unattended-upgrades` for `linux-*`; ships the `needrestart` blacklist
+  covering the kernel-channel window. This alone closes "unattended apt moves
+  the floor." (Ship FIRST.)
+- **INC-1 (LANE 1 in-guest mechanism):** `pkg/upgrade` kernel verb + `xpfd
+  upgrade kernel <ver>`: **pre-asserts** (pinned stable default id resolves;
+  persistent watchdog OR initramfs early-arm present; free `/boot` ≥ image+
+  initramfs+margin BEFORE install — Codex F6/SMR M3; A1' clear-substrate
+  present) → unhold→install→rehold → **re-assert pinned default did NOT move
+  after the candidate dpkg postinst's `update-grub`** (Codex F2/SMR B2) →
+  resolve candidate to a STABLE menuentry id from the regenerated `grub.cfg`
+  (Codex F5/SMR B3) → write Linux-cleared one-shot marker → confirm watchdog →
+  reboot. Promotion oneshot systemd unit: `verify-dataplane` → **forward** health
+  beacon → only-on-beacon-PASS `grub-set-default <cand-id>` + durable marker +
+  clear one-shot + disarm watchdog; else clean reboot to known-good. Journal +
+  GC prune of un-promoted candidate kernel (Codex F6/AGY E). Single command
+  name `xpfd upgrade kernel` (Codex F9).
+- **INC-2 (LANE 1 HA — EXTERNAL orchestration):** the cross-node kernel-rolling
+  sequence + "never both down" gate lives in `scripts/deploy/xpf-deploy.py` (it
+  survives node reboots — Codex F4/SMR B1/AGY B), NOT in-process `rolling.go`.
+  Implements: drain A → confirm peer holds all RGs → arm+reboot A → poll A until
+  booted+verified+promoted (or reverted) → confirm rejoin + sync re-established →
+  `ResetFailover` A → only then node B. Add a **cluster-wide lock so two nodes
+  cannot start kernel lanes concurrently** (Codex F4). `pkg/upgrade/rolling.go`
+  unchanged (it remains the binary-cut path).
+- **INC-3 (LANE 2/3 — image-replace + mixed-base gate + base-OS doc):** add the
+  **mixed-base HA compatibility gate** (introspect the new image's HA/session-
+  sync protocol; fail-closed to documented connection-drop if not back-compat
+  with the running peer — Codex F7); operator playbook in a new
+  `docs/os-kernel-upgrades.md` (3-lane decision tree, B1 image-replace base-OS
+  procedure via `xpf-deploy.py`, the do-release-upgrade UNSUPPORTED statement,
+  the state-carry contract); extend `docs/in-place-upgrade.md:169` to link it.
+- **INC-4 (validation — the NEW path, not regression):** (a) live LANE 1 happy +
+  **deliberate-REJECT revert** proof (the brick-proof proof — old kernel boots,
+  marker cleared by Linux, dataplane restored, NO operator action) on the
+  wipeable standalone test VM; (b) mixed-base session-sync + failover validation
+  (Codex F7); (c) a baked N+1-base image factory-boots + forwards (validate.py);
+  (d) unit tests for the pre-assert/journal/revert state machine.
 
 ---
 
@@ -276,16 +425,20 @@ signed repo.
 
 | # | Risk | Mitigation |
 |---|---|---|
-| 1 | **Brick on early-boot kernel hang.** Candidate kernel hangs before systemd → no promotion oneshot, no software watchdog. | HW/hypervisor watchdog armed pre-reboot (A1). GRUB default unchanged ⇒ reset boots old kernel. LANE 1 unavailable (forced to LANE 2) where no HW watchdog. |
-| 2 | **`GRUB_SAVEDEFAULT=true` boot-loop.** GRUB writes the candidate as permanent default at boot, so a failing candidate is retried forever. | Pre-assert `GRUB_SAVEDEFAULT` unset/false; bake sets it false; `xpfd upgrade kernel` aborts if true. |
-| 3 | **`needrestart` cuts the dataplane mid-apt** during the candidate kernel install. | Ship `/etc/needrestart/conf.d/xpf.conf` blacklist; verify it covers an apt-driven `linux-*` install (extend the #1917 §6.3c blacklist). |
-| 4 | **Candidate kernel boots fine but REJECTs the shim** (verify fail, not boot fail) — A3's blind spot. | Promotion oneshot runs `verify-dataplane` and promotes ONLY on PASS; a booted-but-rejecting kernel is reverted, not counted "good." |
-| 5 | **HA both-nodes-reboot.** A cluster-wide kernel bump reboots both nodes → full outage. | Kernel verb is driven through `rolling.go` drain/act/restore; one node at a time; the un-drained node holds traffic. |
-| 6 | **Base-OS upgrade breaks FRR/strongSwan/kea config compat** (systemd/service-file moves). | B1 image-replace is gated by `validate.py` (factory boot + forward probe) BEFORE the image is published; B2 is non-HA, console-attended, documented-risk only. |
-| 7 | **Config-DB rollback across an OS/kernel move.** A new xpf binary on the new base writes new-syntax config the old (reverted) binary can't parse. | Already mitigated by #1917 §8 embedded config-DB version manifest (min-reader gate). #1930 must NOT regress it; INC-4 validates a revert re-reads the DB. |
-| 8 | **`apt-mark hold` defeated by unattended-upgrades.** `unattended-upgrades` can be configured to ignore holds for security. | Bake disables/constrains `unattended-upgrades` for `linux-*`; document that kernel CVEs flow through LANE 1, not unattended-upgrades. |
-| 9 | **Watchdog fires during a legitimately-slow-but-fine boot** (false brick-avoidance reboot that loses the candidate). | Watchdog deadline tuned with margin; promotion oneshot pets early on first liveness, only disarms on verify PASS — distinguish "alive" (pet) from "promoted" (disarm). |
-| 10 | **`/var/lib/xpf/versions/` + installed-kernel accumulation** fills `/var` or `/boot`. | Reuse #1917 §6.3c retention (keep active + N-1 + candidate); kernel channel prunes un-promoted candidate kernel packages. `/boot` is small — prune is mandatory. |
+| 1 | **GRUB-grubenv one-shot boot-loop** (r1 unanimous FATAL). GRUB can't clear `next_entry` at boot under ext4 `metadata_csum` / Secure Boot → failing candidate re-entered forever. | **A1' substrate:** pinned known-good default + candidate marker cleared by **Linux userspace** on the known-good boot, never by GRUB-at-boot. §2 invariant 2 / §3.1. |
+| 2 | **dpkg `linux-image` postinst `update-grub` moves the default** before `grub-reboot` is armed (r1 SMR B2 / Codex F2). | Pin `GRUB_DEFAULT` to a STABLE known-good menuentry id; re-assert it did NOT move after the candidate install; only `grub-set-default` to the candidate on verify+health PASS. |
+| 3 | **`grub-reboot <ver>` picks the wrong/no entry** after `update-grub` reorders the submenu (r1 SMR B3 / Codex F5). | Resolve the candidate to a STABLE menuentry **id** from the regenerated `grub.cfg` and assert it exists before arming; never a numeric index/title. |
+| 4 | **Watchdog disarmed by clean shutdown → early candidate boot unprotected** (r1 AGY Hazard C / Codex F3). | Require a **persistent** firmware/BMC/hypervisor watchdog (`nowayout`) that the OS reset cannot disarm, OR an initramfs early-arm hook; pre-assert presence; honest bound = guarantee only as early as the watchdog is armed. |
+| 5 | **HA in-process `rolling.go` dies at the reboot it sequences → node stuck drained, both-down if driver proceeds** (r1 SMR B1 / AGY Hazard B / Codex F4). | LANE 1 HA orchestration is **EXTERNAL** (`xpf-deploy.py`, survives reboots) with a post-reboot rejoin-confirm gate + a cluster-wide kernel-lane lock. §3.1-HA. |
+| 6 | **Candidate boots but REJECTs/can't-forward the shim** (verify-structural ≠ forwards). | Promotion gated on the **forward health beacon**, not just structural `verify-dataplane`; disarm only on beacon PASS (r1 SMR M2). |
+| 7 | **`/boot` exhaustion / failed initramfs / broken apt state** during candidate install (r1 SMR M3 / Codex F6 / AGY E). | Pre-assert free `/boot` ≥ image+initramfs+margin and **prune BEFORE install**; validate `update-initramfs`/`update-grub` succeed; GC `apt-get purge` of un-promoted candidate kernels. |
+| 8 | **Secure Boot refuses an unsigned candidate kernel** (r1 SMR M1). | State the appliance Secure Boot posture; scope LANE 1 to Canonical-signed `apt` kernels; an unsigned candidate fails cleanly to GRUB (recoverable), document it. |
+| 9 | **`needrestart` cuts the dataplane mid-apt** during the candidate install. | `/etc/needrestart/conf.d/xpf.conf` blacklist; verify it covers an apt-driven `linux-*` install (extend the #1917 §6.3c blacklist). |
+| 10 | **LANE 2 mixed-base HA drops connections** — new-image HA protocol not introspected before the swap (r1 Codex F7). | Pre-swap mixed-base compatibility gate; fail-closed to a documented connection-drop if not back-compat with the running peer (INC-3). Do NOT claim survival without the gate. |
+| 11 | **`apt-mark hold` defeated by unattended-upgrades.** | Bake disables `unattended-upgrades` for `linux-*`; kernel CVEs flow through LANE 1, not unattended-upgrades. |
+| 12 | **Config-DB rollback across an OS/kernel move** — new binary writes config the reverted binary can't parse. | #1917 §8 embedded config-DB version manifest (min-reader gate); #1930 must not regress it; INC-4 validates a revert re-reads the DB. |
+| 13 | **`do-release-upgrade` mixed-state brick** (N+1 userspace on N kernel; irreversible). | DROPPED/UNSUPPORTED (r1 unanimous). LANE 3 = image-replace only. |
+| 14 | **Installed-kernel + `/var/lib/xpf/versions/` accumulation** fills `/var`/`/boot`. | #1917 §6.3c retention + kernel-channel prune of un-promoted candidate packages (mandatory — `/boot` is small). |
 
 ---
 
@@ -298,35 +451,42 @@ signed repo.
 - The #1864 toolchain pin + verifier floor (≥ 6.18) — LANE 1 never lowers it.
 - `pkg/upgrade` journal / atomic-flip / rollback primitives — the kernel verb is
   a sibling state machine, not a rewrite.
-- `pkg/upgrade/rolling.go` drain/act/restore HA primitive — reused for LANE 1 HA
-  + LANE 2 image-replace HA.
+- `pkg/upgrade/rolling.go` drain/act/restore HA primitive — reused UNCHANGED for
+  the #1917 *binary* cut. The LANE 1 *kernel reboot* cut is NOT run through it
+  (it dies at the reboot — §3.1-HA); kernel HA sequencing is external.
 - `bake.py` single-kernel assert + ≥6.18 floor + modules-extra assert — INC-0
   adds to these, never removes them.
 - The day-0 config drive + `/etc/xpf` state contract (`.configdb`, `node-id`,
-  `master.key`) — carries across all three lanes unchanged.
+  `master.key`) — carries across all lanes unchanged.
 - #1917 §6.5 session-sync wire back-compat rule — LANE 2 HA image-replace
-  depends on N↔N+1 sessions syncing during the rolling swap.
+  depends on it AND on the new pre-swap mixed-base compatibility gate (§3.2).
 
 ---
 
 ## 8. Hidden invariants / gotchas
 
 - **verify-dataplane is kernel-space** — cannot validate an unbooted kernel.
-  This is THE invariant forcing one-shot-boot over verify-first (§2).
-- **GRUB default must never change until verify PASS** — `grub-reboot` is
-  one-shot; promotion is `grub-set-default` AFTER verify. `GRUB_SAVEDEFAULT=true`
-  silently breaks this (risk #2).
-- **softdog cannot protect early boot** — the watchdog must be HW/hypervisor for
-  the "never brick" claim (risk #1). State this in the doc; do not overclaim.
+  This is THE invariant forcing one-shot-boot over verify-first (§2 inv 1).
+- **GRUB cannot clear its own one-shot at boot on this image** (ext4
+  `metadata_csum` / Secure Boot) — the candidate marker MUST be cleared from
+  Linux userspace, and the known-good default must be a STABLE pinned menuentry
+  id that the dpkg kernel postinst's `update-grub` does not move (§2 inv 2,
+  risks #1/#2/#3).
+- **A clean reboot disarms a non-persistent watchdog** — only a firmware/
+  hypervisor watchdog (or initramfs early-arm) protects the candidate's early
+  boot; softdog does not (§2 inv 3, risk #4). Do not overclaim "never brick."
 - **The shim travels embedded in xpfd** (`//go:embed`), so a kernel move does
   NOT change the shim bytes — only whether the *running kernel* accepts them.
   The verify is against the kernel, with the xpf version fixed.
-- **HA both-node reboot = full outage** — kernel moves MUST be one-at-a-time
-  through `rolling.go` (risk #5).
+- **HA both-node reboot = full outage** — kernel moves MUST be one-at-a-time via
+  the EXTERNAL orchestrator (not in-process `rolling.go`, which dies at reboot);
+  external driver holds a cluster-wide kernel-lane lock (risk #5).
 - **`bake.py` GRUB drop-in lives in `/etc/default/grub.d/99-xpf.cfg`** (Ubuntu
   cloudimg overrides `/etc/default/grub` via `50-cloudimg-settings.cfg`) — the
-  `GRUB_DEFAULT=saved` change MUST go in the drop-in too, not a sed on the main
-  file, or cloudimg clobbers it.
+  `GRUB_DEFAULT=<stable-known-good-id>` pin MUST go in the drop-in too (with a
+  higher-numbered filename than cloudimg's), not a sed on the main file, or
+  cloudimg clobbers it. Verify `GRUB_DISABLE_SUBMENU`/`GRUB_DEFAULT` interaction
+  yields a resolvable stable id.
 - **`apt-mark hold` is per-package-name** — `linux-*` glob must cover
   `linux-image-*`, `linux-headers-*`, `linux-modules-*`, `linux-generic`, and
   the meta-packages; verify the hold actually pins what apt would move.
@@ -336,18 +496,24 @@ signed repo.
 ## 9. Acceptance criteria (for `/engineer 1930`, NOT this research)
 
 1. INC-0: a deployed image has `linux-*` held; `apt upgrade` does not move the
-   kernel; `GRUB_DEFAULT=saved` + `GRUB_SAVEDEFAULT` false verified.
+   kernel; `GRUB_DEFAULT` pins a stable known-good id; `GRUB_SAVEDEFAULT` unset;
+   persistent watchdog + A1' clear substrate present; `unattended-upgrades`
+   excludes `linux-*`.
 2. LANE 1 happy path: `xpfd upgrade kernel <ver>` on a same-series candidate
-   boots it once, verify PASSes, candidate promoted, dataplane forwards.
-3. LANE 1 brick-proof: a deliberately-REJECTing candidate kernel is reverted —
-   the box boots the old kernel and the dataplane is restored, NO manual
-   intervention (with HW watchdog).
-4. LANE 1 HA: a clustered kernel bump never has both nodes down simultaneously;
-   traffic survives (failover-test green).
-5. LANE 3: a baked N+1-base image factory-boots and forwards (validate.py
-   green); the state contract (`.configdb`/`node-id`/`master.key`) carries.
-6. Docs: the 3-lane decision tree + operator playbook land in
-   `docs/in-place-upgrade.md` / `docs/os-kernel-upgrades.md`.
+   boots it once, verify+forward-beacon PASS, candidate promoted, dataplane
+   forwards; pinned default did NOT move at install time.
+3. LANE 1 brick-proof: a deliberately-REJECTing candidate is reverted — the box
+   boots the known-good kernel, Linux clears the candidate marker, dataplane
+   restored, NO manual intervention, NO boot-loop (with persistent watchdog).
+4. LANE 1 HA: the external orchestrator never has both nodes down; a node stuck
+   reverted does not advance the sequence; traffic survives (failover-test green).
+5. LANE 2 mixed-base gate: an incompatible new-image HA protocol fails the
+   pre-swap gate (documented drop), a compatible one survives session-sync.
+6. LANE 3: a baked N+1-base image factory-boots and forwards (validate.py
+   green); state contract (`.configdb`/`node-id`/`master.key`) carries;
+   do-release-upgrade documented UNSUPPORTED.
+7. Docs: 3-lane decision tree + playbook in `docs/os-kernel-upgrades.md`,
+   linked from `docs/in-place-upgrade.md`.
 
 ---
 
@@ -356,16 +522,32 @@ signed repo.
 - **Unit:** `pkg/upgrade` kernel-verb state-machine tests (mirror
   `runner_test.go`/`rolling_test.go`): pre-assert failures abort cleanly;
   journal crash-recovery resumes; revert path leaves default unchanged.
-- **Image:** `bake.py` produces an image with held kernel + correct GRUB env +
-  watchdog config; an assert catches a missing hold or a `GRUB_SAVEDEFAULT=true`.
-- **Live (loss userspace cluster, the only smoke env):**
-  - LANE 1 same-series bump on the secondary, verify promote, fail back, repeat.
-  - LANE 1 deliberate-REJECT candidate → confirm revert restores dataplane.
-  - `make test-failover` green across a kernel rolling bump.
+- **Image:** `bake.py` produces an image with held kernel + pinned stable
+  default + persistent-watchdog + A1' clear substrate; asserts catch a missing
+  hold, a moved default, or a missing watchdog.
+- **Live — STANDALONE wipeable test VM (`xpf-fw`, `make test-vm`/`test-deploy`),
+  NOT the shared loss cluster's primary:** this is where the NEW boot channel is
+  actually exercised end-to-end (per the §10 directive — passing regression
+  tests proves no-regression, NOT that the new channel works):
+  - LANE 1 happy: drive a real same-series candidate through arm → one-shot boot
+    → verify+forward-beacon → promote; capture evidence (booted kernel version,
+    promotion marker, dataplane forwards).
+  - LANE 1 **deliberate-REJECT revert**: arm a candidate the shim rejects (or
+    force a verify fail), confirm the box reboots to the known-good kernel, the
+    Linux marker-clear ran, NO boot-loop, dataplane restored — the brick-proof
+    proof. This is mandatory live evidence.
+  - Watchdog path: force an early-boot hang (or simulate), confirm the
+    persistent watchdog resets to known-good (where the test VM exposes one;
+    otherwise document the limitation and rely on the initramfs-early-arm unit
+    test + a hypervisor-watchdog manual check).
+- **Live — HA:** mixed-base session-sync + the external-orchestrator
+  rejoin-confirm + "never both down" sequence on a wipeable two-VM env (NOT the
+  shared loss primary).
 - **Base-OS:** bake an N+1 image in a scratch env, `validate.py` boot+forward
-  gate, confirm state carry.
-- **Negative:** no-HW-watchdog platform → `xpfd upgrade kernel` aborts with the
-  "use image-replace" message (LANE 1 correctly refuses to arm).
+  gate, confirm state carry. A real Ubuntu N→N+1 `do-release-upgrade` is NOT
+  tested (it is UNSUPPORTED by design — §3.3).
+- **Negative:** no-persistent-watchdog / no-clear-substrate platform → `xpfd
+  upgrade kernel` aborts with the "use image-replace" message (refuses to arm).
 
 ---
 
@@ -375,15 +557,42 @@ Ship #1930 as **three lanes by blast radius**, defaulting to image-replace and
 treating in-place kernel moves as a tightly-gated channel:
 
 - **LANE 1** (same-series kernel CVE bumps): verify-gated one-shot-boot via
-  **Path Option A1** (GRUB `grub-reboot` + HW/hypervisor watchdog), held-by-
-  default kernel, HA-sequenced through `rolling.go`. Brick-proof only with a HW
-  watchdog; refuses to arm without one.
-- **LANE 2** (new kernel series / heavy moves): image-replace (Path C, #1879)
-  unchanged — decision rule + doc only.
-- **LANE 3** (base-OS N→N+1): **Path Option B1 image-replace by default**; B2
-  `do-release-upgrade` is a documented, non-HA, console-attended escape hatch
-  with the kernel routed through LANE 1's gate.
+  **Path Option A1'** — pinned known-good default + **Linux-cleared** candidate
+  marker (NOT GRUB-clears-its-own-flag, which boot-loops on ext4 `metadata_csum`
+  / Secure Boot) + a **persistent firmware/hypervisor watchdog** (or initramfs
+  early-arm). Held-by-default kernel; promotion gated on a **forward** health
+  beacon; HA sequencing is **EXTERNAL** (`xpf-deploy.py`, survives reboots), not
+  in-process `rolling.go`. Refuses to arm without the watchdog + clear substrate.
+- **LANE 2** (new kernel series / heavy moves): image-replace (Path C, #1879) —
+  decision rule + the new **pre-swap mixed-base HA compatibility gate**.
+- **LANE 3** (base-OS N→N+1): **image-replace ONLY (Path Option B1)**.
+  `do-release-upgrade` is **UNSUPPORTED** (documented, not offered as a hatch).
 
-Start with **INC-0** (image hardening — closes the unattended-apt hole with zero
-daemon code), then INC-1/2 (LANE 1 mechanism + HA), then INC-3/4 (base-OS doc +
-validation).
+Start with **INC-0** (image hardening — closes the unattended-apt hole with no
+daemon code), then INC-1 (LANE 1 in-guest mechanism), INC-2 (external HA
+orchestration), then INC-3/4 (LANE 2/3 gate + base-OS doc + live validation).
+
+### r1 → v2 disposition (what changed and why)
+All three r1 reviewers (Claude SMR, AGY, Codex) returned PLAN-NEEDS-WORK and
+converged on the same three FATALs plus overlapping MAJORs. v2 dispositions:
+- **GRUB one-shot boot-loop** (SMR B2/B3, AGY Hazard A, Codex F2): A1 GRUB-grubenv
+  one-shot KILLED → A1' Linux-cleared marker + pinned stable default. §2 inv 2,
+  §3.1, Path A, risks #1/#2/#3.
+- **Watchdog disarm on clean reboot** (AGY Hazard C, Codex F3): persistent
+  firmware/hypervisor watchdog (or initramfs early-arm) required; softdog
+  rejected. §2 inv 3, §3.1, risk #4.
+- **HA rolling.go dies at reboot** (SMR B1, AGY Hazard B, Codex F4): external
+  orchestration + rejoin-confirm gate + cluster lock. §3.1-HA, INC-2, risk #5.
+- **/boot + initramfs + dpkg preflight** (SMR M3, Codex F6, AGY E): prune-before-
+  install + capacity assert + GC purge. INC-1, risk #7.
+- **Pinned-default not moved by dpkg postinst** (SMR B2, Codex F2/F5): stable
+  menuentry id + post-install re-assert. INC-1, risks #2/#3.
+- **Forward-beacon gating** (SMR M2): disarm/promote on forward beacon, not
+  structural verify alone. §3.1, risk #6.
+- **Secure Boot posture** (SMR M1): stated; LANE 1 scoped to Canonical-signed
+  kernels. Risk #8.
+- **LANE 2 mixed-base overclaim** (Codex F7): pre-swap compatibility gate; no
+  survival claim without it. §3.2, INC-3, risk #10.
+- **do-release-upgrade** (SMR M4, AGY Hazard D, Codex F8): DROPPED/UNSUPPORTED.
+  §3.3, Path B, risk #13.
+- **Command name** (Codex F9): normalized to `xpfd upgrade kernel`.
