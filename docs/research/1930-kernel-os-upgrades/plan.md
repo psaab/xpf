@@ -1,14 +1,23 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v4.1 — (folds r4 SMR N2: A/B "active-slot kernel never pruned" invariant + atomic ESP grub.cfg rename). r4 SMR = PLAN-READY; awaiting r4 AGY + Codex.
-- **(v4)** folds r3 (AGY + Codex PLAN-NEEDS-WORK; SMR PLAN-READY+N1).
+- **Status:** v5 — folds r4 (AGY PLAN-NEEDS-WORK 4 UEFI flaws + SMR PLAN-READY
+  N2). A4 corrected for real signed-GRUB/UEFI behavior: signed `grubx64.efi`
+  ignores a per-dir `grub.cfg` (hardcoded signed prefix) → the SHARED
+  `/boot/grub/grub.cfg` **branches on `$cmdpath`** per slot; NVRAM `efibootmgr`
+  registration moves to a **first-boot** service (offline bake can't write target
+  NVRAM); kernels stay in `/boot` (never copied to the small ESP); shared-`/boot`
+  SPOF documented (A4 = boot-selection channel, not disk-level failover). r4 SMR
+  N2 (active-slot-kernel-never-pruned + atomic ESP selector rename) folded.
+- **(v4.1)** r4 SMR N2 fold; **(v4)** folds r3 (AGY + Codex PLAN-NEEDS-WORK; SMR
+  PLAN-READY+N1).
   r3 killed the loose BootNext/ESP-grubenv sketches: Secure-Boot GRUB **lockdown
   blocks `save_env` even on a FAT ESP**; firmware **deletes `BootNext` before
   GRUB can read it**; a bare-`vmlinuz` UEFI entry **fails Secure-Boot signature**
   (Canonical key is in shim's MOK, not firmware `db`); per-upgrade UEFI entries
   **wear NVRAM**. v4's single coherent Secure-Boot-correct substrate: **FIXED A/B
-  UEFI slots, each shim→grub→a slot-private `grub.cfg` staged on the ESP,
+  UEFI slots, each shim→grub staged on the ESP with a `$cmdpath`-branched
+  shared `/boot/grub/grub.cfg` (signed-GRUB ignores per-dir cfg — r4 AGY),
   `BootNext`-selected, non-destructive `BootOrder` promotion** — threaded through
   EVERY section (Codex F13). Scrubbed the non-existent `deploy_rolling()` (Codex
   F12) + the §7 `master.key`-carries leftover (Codex F11).
@@ -89,7 +98,7 @@ All of the following are MERGED on `origin/master` (verified by `git ls-tree`):
 |---|---|---|
 | `pkg/dataplane/verify_userspace_shim.go` | `VerifyEmbeddedUserspaceShim()` / `VerifyUserspaceShimObject()` — kernel verify-only load, anonymous maps, never attaches; exit-code contract via `ErrUserspaceShimVerifierReject`. | The **kernel-side gate** the one-shot boot channel must invoke on the candidate kernel. |
 | `cmd/xpfd/upgrade.go` + `pkg/upgrade/` | `xpfd upgrade [--rolling]` — staged→runtime-version copy, verify, atomic symlink flip, journal, auto-rollback, HA rolling drain. (`runner.go`, `cutover.go`, `flip.go`, `rolling.go`, `state.go`, `system_linux.go`.) | The **mechanism to reuse**: the kernel channel is a sibling state-machine; base-OS image-replace HA sequencing mirrors `rolling.go`. |
-| `scripts/image/bake.py` | virt-customize: installs `linux-generic`, **HARD-ASSERTs newest kernel ≥ 6.18**, asserts `linux-modules-extra` (mlx5/i40e), purges all-but-newest kernel + **asserts exactly one kernel**, GRUB drop-in (`/etc/default/grub.d/99-xpf.cfg` = `init_on_alloc=0` only), build-host `verify-dataplane` pre-gate. | The **image-replace substrate** (Path C) + the place to add the kernel hold (`apt-mark hold $(dpkg-query …)`), `GRUB_DISABLE_SUBMENU=y` + pinned stable known-good default, the persistent-watchdog config, the UEFI `BootNext` per-kernel boot entries, the promotion oneshot unit, and the image **version manifest** (LANE-2 mixed-base gate). |
+| `scripts/image/bake.py` | virt-customize: installs `linux-generic`, **HARD-ASSERTs newest kernel ≥ 6.18**, asserts `linux-modules-extra` (mlx5/i40e), purges all-but-newest kernel + **asserts exactly one kernel**, GRUB drop-in (`/etc/default/grub.d/99-xpf.cfg` = `init_on_alloc=0` only), build-host `verify-dataplane` pre-gate. | The **image-replace substrate** (Path C) + the place to add the kernel hold (`apt-mark hold $(dpkg-query …)`), `GRUB_DISABLE_SUBMENU=y` + pinned stable known-good default, the persistent-watchdog config, the staged A/B UEFI slot files (shim+grub+`$cmdpath` selector; NVRAM registration is first-boot, not bake — r4 AGY), the promotion oneshot unit, and the image **version manifest** (LANE-2 mixed-base gate). |
 | `scripts/deploy/xpf-deploy.py` | Exposes ONLY `deploy`/`launch`/`inventory` (verified: `cmd_deploy`/`cmd_launch`/`cmd_inventory`; **no `deploy_rolling`**) — a `launch` recreates ONE VM from an image + a day-0 ISO of `xpf.conf`+`node-id`. No rolling driver, no in-place OS swap, no rejoin gate today. | LANE 2/3 ADDS a NEW rolling image-replace driver (recreate-each-node-from-image + rejoin-confirm + mixed-base gate, INC-2/3) on top of the existing per-VM `launch`. Do not attribute a rolling/live-swap capability that does not exist (r2 Codex NEW-F12, r3 confirmed). |
 | `scripts/image/validate.py` | Factory-boot + in-guest `verify-dataplane` validation gate. | The acceptance gate for "xpf still loads + forwards on the new base." |
 | `docs/in-place-upgrade.md` | The #1917 operator doc. Line 169 hands kernel/OS to #1930. | The doc to extend with the kernel channel + base-OS playbook. |
@@ -200,39 +209,70 @@ and r3 AGY Secure-Boot-corrected):** the chain of kills forced this design:
 
 **The design that survives all of these: two FIXED, permanently-registered UEFI
 boot slots — `xpf-A` and `xpf-B`** (A/B, NOT per-upgrade entries — avoids r3 AGY
-NVRAM-wear Risk 2). Each slot is a UEFI `Boot####` entry that launches
-`shimx64.efi` → `grubx64.efi` → a **slot-private `grub.cfg` staged on the ESP**
-(`\EFI\xpf-A\grub.cfg` / `\EFI\xpf-B\grub.cfg`), each hardcoding ONE kernel as
-its boot target (so no runtime GRUB menu selection / no GRUB env read is needed —
-the slot's `grub.cfg` is static and points at exactly its kernel). This satisfies
-Secure Boot (shim→grub→Canonical-signed kernel via MOK) and needs no boot-time
-bootloader write.
+NVRAM-wear Risk 2). Each slot is a UEFI `Boot####` entry that launches a
+**slot-private copy of `shimx64.efi` → `grubx64.efi`** staged in its ESP dir
+(`\EFI\xpf-A\` / `\EFI\xpf-B\`), satisfying Secure Boot (shim→grub→Canonical-
+signed kernel via MOK).
+
+**Slot selection uses `$cmdpath`, NOT a per-slot `grub.cfg` (r4 AGY Flaw 1 — the
+fatal gotcha):** the Canonical-signed `grubx64.efi` has a **cryptographically
+signed, hardcoded `prefix`** — launched from `\EFI\xpf-A\` it does NOT read a
+`grub.cfg` sitting in `\EFI\xpf-A\`; it loads the SHARED `/boot/grub/grub.cfg`.
+So a slot-private `grub.cfg` is IGNORED and both slots would boot identically.
+The correct mechanism: the **shared `/boot/grub/grub.cfg` branches on
+`$cmdpath`** (the dir GRUB was launched from — `\EFI\xpf-A\` vs `\EFI\xpf-B\`) to
+select that slot's kernel. The per-slot state is a tiny xpf-owned **selector
+file** (which kernel each slot points at) that the shared `grub.cfg` reads by
+`$cmdpath`; no GRUB env write is needed (read-only at boot). Kernels stay in
+`/boot` (r4 AGY Flaw 3 — NEVER copied to the ESP, which is too small); only
+shim+grub + the `$cmdpath` selector live per-slot on the ESP.
 
 **One-shot + revert flow (loop-safe by firmware):**
 - The "active/known-good" slot is first in the permanent `BootOrder`.
-- A kernel bump: stage the candidate kernel + a slot-private `grub.cfg` into the
-  **INACTIVE** slot's ESP dir; `efibootmgr --bootnext <inactive-slot>` to boot it
-  ONCE. The firmware **clears `BootNext` before launching the slot** — so if the
-  candidate hangs at ANY stage (including pre-Linux) and the watchdog resets, the
-  firmware finds no `BootNext` and falls through `BootOrder` to the known-good
-  slot. **No bootloader/OS write at the failing moment → no loop, ever.**
+- A kernel bump (all in-guest, on running hardware): point the **INACTIVE** slot's
+  selector at the candidate kernel (atomic rename, §3.1 N2); `efibootmgr
+  --bootnext <inactive-slot>` to boot it ONCE. The firmware **clears `BootNext`
+  before launching the slot** — so if the candidate hangs at ANY stage (including
+  pre-Linux) and the watchdog resets, the firmware finds no `BootNext` and falls
+  through `BootOrder` to the known-good slot. **No bootloader/OS write at the
+  failing moment → no loop, ever.**
 - Promotion (on verify+forward PASS, from Linux): a **non-destructive**
   `BootOrder` edit that moves the candidate slot to the front while **preserving
   all other entries** (PXE, recovery, firmware — r3 AGY Risk 1: read current
   `BootOrder`, reorder, never blindly overwrite). The other slot becomes the
   rollback target. Demotion on REJECT is a no-op (BootNext already consumed).
 
-**Secure Boot posture (r3 AGY Hazard C / r2 SMR M1):** LANE 1 is scoped to
-Canonical-signed `apt` kernels reached via shim+grub; the slot `grub.cfg`
-hardcodes the slot's kernel. An accidentally-unsigned candidate is refused by
-firmware AFTER `BootNext` is already cleared → falls back to known-good (fail
-SAFE, no lockout loop).
+**NVRAM registration is FIRST-BOOT, not bake (r4 AGY Flaw 2):** UEFI Boot
+variables live in the target's firmware NVRAM, which `bake.py`'s offline
+`virt-customize` cannot write (no `/sys/firmware/efi/efivars` in the chroot; it
+would hit the build host's NVRAM anyway). So **bake only STAGES the ESP files**
+(`\EFI\xpf-A\`, `\EFI\xpf-B\` shim+grub+selector + the `$cmdpath` branch in
+`/boot/grub/grub.cfg`); the `efibootmgr` registration of the two slots + the
+initial `BootOrder` is done by a **first-boot in-guest service** (extend
+`xpf-day0-config` / a oneshot) on real hardware. INC-0 stages; the first-boot
+service registers.
 
-**ESP capacity (r3 AGY Hazard C):** two slots each stage shim+grub+`grub.cfg`
-(+ the slot points at the kernel/initramfs in `/boot`); the ESP free-space
-pre-assert (§3.1 pre-asserts) must cover the slot staging, and the GC prunes the
-inactive slot's stale staging. (The kernel images themselves live in `/boot`, not
-the ESP — only shim/grub/`grub.cfg` are staged per slot.)
+**Secure Boot posture (r3 AGY Hazard C / r2 SMR M1):** LANE 1 is scoped to
+Canonical-signed `apt` kernels reached via shim→grub→MOK. An accidentally-
+unsigned candidate is refused by firmware AFTER `BootNext` is already cleared →
+falls back to known-good (fail SAFE, no lockout loop).
+
+**ESP capacity (r4 AGY Flaw 3):** each slot stages only shim+grub + the small
+`$cmdpath` selector — **kernels/initramfs are NEVER copied to the ESP** (they
+stay in `/boot`; the ESP is typically ≤100 MB). The ESP free-space pre-assert
+covers shim+grub+selector ×2; the `/boot` free-space pre-assert covers the
+candidate kernel+initramfs. GC prunes stale slot staging + the un-promoted
+kernel from `/boot`.
+
+**Shared `/boot` is a SPOF — A/B is a boot-SELECTION channel, not disk-level
+failover (r4 AGY Flaw 4):** both slots read their kernels from the same `/boot`
+(ext4). `/boot` corruption or exhaustion during `apt install` breaks BOTH
+kernels → the firmware would loop on the default slot. The plan documents this
+limit explicitly: A4 closes the *boot-loop / wrong-kernel* hazard, NOT a `/boot`
+filesystem failure. Mitigations: the `/boot` capacity pre-assert + prune-before-
+install (risk #7) reduce the exhaustion path; true disk-level A/B (separate
+`/boot` per slot) is out of scope and noted as a possible future with the
+image-replace lane (LANE 2) as the recovery for a corrupt `/boot`.
 
 **A/B safety invariants (r4 SMR N2 — state them so they aren't lost):**
 - **The ACTIVE slot's kernel is NEVER pruned.** GC prunes only the *un-promoted
@@ -240,11 +280,11 @@ the ESP — only shim/grub/`grub.cfg` are staged per slot.)
   rollback slot always retain a known-good kernel in `/boot`. This is the A/B
   rollback guarantee — without it a later-bad promoted kernel could find no good
   slot.
-- **Slot `grub.cfg` rewrite is atomic.** Staging the inactive slot's `grub.cfg`
-  on the FAT ESP is a Linux-side write (no GRUB-at-boot lockdown issue), but MUST
-  be write-temp + rename + `fsync`/`sync` BEFORE arming `BootNext`, so a crash
-  mid-stage leaves the inactive slot pointing at its previous valid kernel, never
-  a truncated file. Reuse the `pkg/fsatomic` discipline for the ESP write.
+- **Slot selector rewrite is atomic.** Pointing the inactive slot's `$cmdpath`
+  selector at the candidate is a Linux-side ESP (FAT) write — write-temp +
+  rename + `fsync`/`sync` BEFORE arming `BootNext`, so a crash mid-stage leaves
+  the inactive slot at its previous valid kernel, never a truncated file. Reuse
+  the `pkg/fsatomic` discipline for the ESP write.
 
 **Dropped substrates (do not reintroduce — each killed with a reason):** GRUB
 grubenv one-shot on ext4 (r1) AND on the ESP (r3 AGY Hazard B, Secure-Boot
@@ -501,7 +541,7 @@ Only the FIRMWARE qualifies.
 | **A1''-ESP (KILLED): GRUB grubenv on the FAT32 ESP** | GRUB `save_env` on FAT. | **Secure-Boot GRUB LOCKDOWN blocks `save_env` even on FAT** (r3 AGY Hazard B). | **REJECT** (r3 AGY). |
 | **A1''-single (KILLED): `BootNext` + single GRUB entry reads it** | GRUB decides from `BootNext`. | Firmware DELETES `BootNext` before GRUB runs → GRUB can't read it (r3 AGY Hazard A). | **REJECT** (r3 AGY). |
 | **A1''-dyn (KILLED): per-upgrade dynamic UEFI entry → vmlinuz** | `efibootmgr --create` per bump. | NVRAM wear (r3 AGY Risk 2); bare vmlinuz fails Secure-Boot sig (Hazard C). | **REJECT** (r3 AGY). |
-| **A4 (RECOMMENDED): FIXED A/B UEFI slots, shim-staged, `BootNext`-selected** | Two permanent `Boot####` slots `xpf-A`/`xpf-B`, each shim→grub→a **slot-private `grub.cfg` on the ESP** hardcoding one kernel. Arm = stage candidate into the inactive slot + `efibootmgr --bootnext <inactive>`. Promote = NON-destructive `BootOrder` reorder (preserve PXE/recovery). | **Firmware clears `BootNext` before launch** → pre-Linux hang + reset falls through `BootOrder` to known-good, NO loop. Shim→grub→MOK-signed kernel = Secure-Boot-OK. Fixed slots = no NVRAM wear. Static slot `grub.cfg` = no GRUB env read. | **RECOMMENDED.** |
+| **A4 (RECOMMENDED): FIXED A/B UEFI slots, shim-staged, `$cmdpath`-selected** | Two permanent `Boot####` slots `xpf-A`/`xpf-B` (registered at FIRST BOOT, not bake — r4 AGY F2), each launching ESP-staged shim→grub; the SHARED `/boot/grub/grub.cfg` branches on `$cmdpath` to that slot's kernel (signed GRUB ignores per-dir cfg — r4 AGY F1); kernels stay in `/boot` (r4 AGY F3). Arm = point the inactive slot's selector at the candidate + `efibootmgr --bootnext <inactive>`. Promote = NON-destructive `BootOrder` reorder. | **Firmware clears `BootNext` before launch** → pre-Linux hang + reset falls through `BootOrder` to known-good, NO loop. Shim→grub→MOK kernel = Secure-Boot-OK. Fixed slots = no NVRAM wear. `$cmdpath` branch = no GRUB env read/write. | **RECOMMENDED.** |
 | **A2 (KILLED): softdog** | Software watchdog only. | Can't fire pre-load + disarmed by clean reboot. | **REJECT** (r1 AGY). |
 | **A3 (future): systemd-boot/UKI boot-counting** | Switch bootloader; tries-counter on EFI vars/ESP. | Cleaner long-term but a bootloader migration; A4 gives the same brick-safety on the existing shim+GRUB image NOW. | **DEFER.** |
 
@@ -556,11 +596,15 @@ signed repo.
 - **INC-0 (image hardening, no daemon code, closes the biggest hole alone):**
   `bake.py` holds the kernel via `apt-mark hold $(dpkg-query -W -f='${Package}\n'
   'linux-*')` (NOT a raw glob — r2 AGY); sets `GRUB_DISABLE_SUBMENU=y` + pins
-  `GRUB_DEFAULT` to the STABLE known-good id (r2 AGY/SMR B2/B3); **registers the
-  two FIXED A/B UEFI slots (`xpf-A`/`xpf-B`), each shim→grub→a slot-private
-  `grub.cfg` on the ESP, with the active slot first in `BootOrder`** (the A4
-  substrate — r3 AGY; NOT per-kernel/per-upgrade entries, NOT ESP-grubenv); seeds
-  both slots pointing at the shipped known-good kernel; installs the
+  `GRUB_DEFAULT` to the STABLE known-good id (r2 AGY/SMR B2/B3); **STAGES the two
+  FIXED A/B UEFI slot dirs on the ESP (`\EFI\xpf-A\`, `\EFI\xpf-B\` = shim+grub +
+  a `$cmdpath` selector) and adds the `$cmdpath` branch to the shared
+  `/boot/grub/grub.cfg`**, both selectors seeded to the shipped known-good kernel
+  (the A4 substrate — r3/r4 AGY; NOT per-kernel/per-upgrade entries, NOT
+  ESP-grubenv, NOT per-slot grub.cfg). **NVRAM `efibootmgr` registration of the
+  slots + the initial active-first `BootOrder` is done by a FIRST-BOOT in-guest
+  service (extend `xpf-day0-config`), NOT in the offline bake** (r4 AGY F2 —
+  virt-customize can't write the target's NVRAM). Installs the
   **persistent-watchdog** config (firmware/hypervisor `nowayout`, initramfs
   early-arm fallback); records the bake **watchdog-persistence platform flag** +
   the **image version manifest** (xpf ver, HA protocol ver, session-sync frame
@@ -573,8 +617,8 @@ signed repo.
   present + persistence flag OR Path-D2 override; free `/boot` ≥ kernel+initramfs
   AND free ESP ≥ slot shim/grub/`grub.cfg` staging, BEFORE install) →
   unhold→install→rehold (verify update-initramfs/update-grub succeeded) → **stage
-  the candidate kernel + a slot-private `grub.cfg` into the INACTIVE slot's ESP
-  dir** → `efibootmgr --bootnext <inactive-slot>` (firmware-cleared one-shot) →
+  the candidate kernel into `/boot` (NOT the ESP — r4 AGY F3) + point the INACTIVE
+  slot's `$cmdpath` selector at it (atomic ESP write)** → `efibootmgr --bootnext <inactive-slot>` (firmware-cleared one-shot) →
   confirm watchdog → reboot. Promotion oneshot: assert `uname -r`==candidate →
   `verify-dataplane` → **forward** beacon (tight budget, stable peer-link target)
   → only-on-beacon-PASS promote (**non-destructive `BootOrder` reorder** moving
@@ -621,7 +665,7 @@ signed repo.
 |---|---|---|
 | 1 | **One-shot boot-loop** — GRUB-cleared (r1) AND Linux-cleared (r2) markers both loop on an EARLY-HANG candidate (cleared only if the candidate reaches Linux). | **UEFI `BootNext` (A1'')**: FIRMWARE clears the one-shot before booting the entry, so ANY reset at ANY stage falls through `BootOrder` to known-good. Loop closed unconditionally. §2 inv 2 / §3.1 / Path A. |
 | 2 | **dpkg `linux-image` postinst `update-grub` moves the default** (r1 SMR B2 / Codex F2). | Pin `GRUB_DEFAULT`/`BootOrder` to the stable known-good entry; re-assert unchanged after the candidate install; promote only via `efibootmgr --bootorder` on verify+forward PASS. |
-| 3 | **Candidate menuentry id wrong/unresolvable** after `update-grub` submenu reorder (r1 SMR B3 / Codex F5; r2 AGY submenu). | Each A/B slot has a STATIC slot-private `grub.cfg` hardcoding ONE kernel — no runtime menu selection, so submenu ordering is irrelevant to the candidate boot. `GRUB_DISABLE_SUBMENU=y` kept for primary-menu hygiene. |
+| 3 | **Candidate menuentry id wrong/unresolvable** after `update-grub` submenu reorder (r1 SMR B3 / Codex F5; r2 AGY submenu). | The shared `/boot/grub/grub.cfg` branches on `$cmdpath` (which slot launched GRUB) to a fixed per-slot kernel — no dependence on menu ordering. `GRUB_DISABLE_SUBMENU=y` kept for hygiene. |
 | 4 | **Early-boot HANG unprotected** — clean reboot disarms a non-persistent watchdog; warm-reset may reset board watchdog; persistence not SW-verifiable (r1 AGY C / Codex F3; r2 AGY). | `BootNext` already closes the LOOP. The watchdog only converts a HANG→reset; require a verified-persistent firmware/hypervisor watchdog (Path D1) for unattended early-hang recovery, else Path-D2 documented "one external reset" caveat. Honest: not fully SW-guaranteeable. |
 | 5 | **HA in-process `rolling.go` dies at the reboot it sequences → node stuck drained, both-down if driver proceeds** (r1 SMR B1 / AGY Hazard B / Codex F4). | LANE 1 HA orchestration is **EXTERNAL** (`xpf-deploy.py`, survives reboots) with a post-reboot rejoin-confirm gate + a cluster-wide kernel-lane lock. §3.1-HA. |
 | 6 | **Candidate boots but REJECTs/can't-forward the shim** (verify-structural ≠ forwards). | Promotion gated on the **forward health beacon**, not just structural `verify-dataplane`; disarm only on beacon PASS (r1 SMR M2). |
@@ -716,8 +760,9 @@ signed repo.
 
 1. INC-0: a deployed image has the kernel held (concrete dpkg-query, not a
    glob); `GRUB_DEFAULT` pins a stable known-good id + `GRUB_DISABLE_SUBMENU=y`;
-   two FIXED A/B UEFI slots registered (shim→grub→slot-private `grub.cfg`), active
-   slot first in a `BootOrder` that preserves platform entries; persistent-
+   two FIXED A/B UEFI slots STAGED on the ESP (shim+grub+`$cmdpath` selector) and a
+   `$cmdpath` branch in the shared `grub.cfg`; first-boot service registers the
+   slots + a `BootOrder` (active-first) preserving platform entries; persistent-
    watchdog config + bake persistence flag; image version manifest;
    `unattended-upgrades` excludes `linux-*`.
 2. LANE 1 happy: `xpfd upgrade kernel <ver>` on a same-series candidate boots it
@@ -751,11 +796,13 @@ signed repo.
   `runner_test.go`/`rolling_test.go`): pre-assert failures abort cleanly;
   journal crash-recovery resumes; revert path leaves default unchanged.
 - **Image:** `bake.py` produces an image with held kernel + pinned stable
-  default + `GRUB_DISABLE_SUBMENU=y` + the two FIXED A/B UEFI slots (shim→grub→
-  slot `grub.cfg`, both seeded to the known-good kernel) + persistent-watchdog
-  config + version manifest; asserts catch a missing hold (and that it used the
-  dpkg-query form, not a glob), a moved default, a missing/extra UEFI slot, a
-  `BootOrder` not listing the active slot first, or a missing manifest.
+  default + `GRUB_DISABLE_SUBMENU=y` + the two staged A/B ESP slot dirs (shim+grub
+  + `$cmdpath` selector, both seeded to the known-good kernel) + the `$cmdpath`
+  branch in `/boot/grub/grub.cfg` + persistent-watchdog config + version manifest;
+  asserts catch a missing hold (dpkg-query form, not a glob), a moved default, a
+  missing slot dir / `$cmdpath` branch, or a missing manifest. **First-boot
+  test:** the day-0 service registers the two `efibootmgr` slots + active-first
+  `BootOrder` on real (virtual UEFI) hardware, preserving platform entries.
 - **Live — STANDALONE wipeable test VM (`xpf-fw`, `make test-vm`/`test-deploy`),
   NOT the shared loss cluster's primary:** this is where the NEW boot channel is
   actually exercised end-to-end (per the §10 directive — passing regression
@@ -791,8 +838,10 @@ Ship #1930 as **three lanes by blast radius**, defaulting to image-replace and
 treating in-place kernel moves as a tightly-gated channel:
 
 - **LANE 1** (same-series kernel CVE bumps): verify-gated one-shot-boot via
-  **Path Option A4 — fixed A/B UEFI slots, shim→grub→slot-private `grub.cfg`,
-  `BootNext`-selected, non-destructive `BootOrder` promotion.** The firmware
+  **Path Option A4 — fixed A/B UEFI slots, shim→grub staged on the ESP, the
+  SHARED `grub.cfg` `$cmdpath`-branched per slot (signed-GRUB-correct), kernels
+  in `/boot`, `BootNext`-selected, NVRAM registered at first boot, non-destructive
+  `BootOrder` promotion.** The firmware
   clears `BootNext` before launch, so any reset (incl. a pre-Linux early-hang
   watchdog reset) falls through `BootOrder` to the known-good slot: the boot-LOOP
   is closed unconditionally, on the existing shim+GRUB image, no bootloader
@@ -854,8 +903,8 @@ runs). v3 dispositions:
   hardware-dependence explicit. §3.1, risk #4.
 - **`apt-mark hold linux-*` glob expansion** (AGY r2): use `apt-mark hold
   $(dpkg-query -W -f='${Package}\n' 'linux-*')`. INC-0, risk #15.
-- **GRUB submenu pathing** (AGY r2): `GRUB_DISABLE_SUBMENU=y`; the A4 slots use a
-  static slot-private `grub.cfg` so menu ordering is moot. INC-0, risk #3.
+- **GRUB submenu pathing** (AGY r2): `GRUB_DISABLE_SUBMENU=y`; the shared
+  `grub.cfg` `$cmdpath`-branches per slot so menu ordering is moot. INC-0, risk #3.
 - **Secure Boot lockout loop** (AGY r2): `BootNext` makes an unsigned candidate
   fail SAFE (firmware already cleared the one-shot). §3.1, risk #8.
 - **External-orchestrator crash / lock-leak / false-healthy advance** (AGY r2):
@@ -898,3 +947,23 @@ everywhere:
   TEXT-vs-DB contract.
 - **r3 SMR N1 (no per-kernel UEFI entries on the cloud image):** subsumed by the
   A/B fixed-slot design (which does not use per-kernel entries at all).
+
+### r4 → v5 disposition (what changed and why)
+r4: **SMR = PLAN-READY+N2**; **AGY = PLAN-NEEDS-WORK** (4 deep UEFI flaws in A4);
+Codex r4 pending at v5 draft. v5 corrects A4 for real signed-GRUB/UEFI behavior:
+- **Signed `grubx64.efi` ignores a per-dir `grub.cfg`** (hardcoded signed prefix
+  — r4 AGY Flaw 1, FATAL): the per-slot `grub.cfg` is dropped; the SHARED
+  `/boot/grub/grub.cfg` **branches on `$cmdpath`** (the dir GRUB launched from) to
+  the slot's kernel via a tiny per-slot selector. §3.1, Path A, risk #3.
+- **Offline bake can't write target NVRAM** (r4 AGY Flaw 2): bake only STAGES the
+  ESP slot dirs + the `$cmdpath` branch; `efibootmgr` slot registration + initial
+  `BootOrder` move to a **first-boot** service (`xpf-day0-config`). §3.1, INC-0,
+  tests.
+- **Kernels never on the ESP** (r4 AGY Flaw 3): the INC-1 contradiction is fixed —
+  candidate kernel goes to `/boot`; only shim+grub+selector are per-slot on the
+  ESP; separate `/boot` vs ESP capacity pre-asserts. §3.1, INC-1.
+- **Shared `/boot` SPOF** (r4 AGY Flaw 4): documented — A4 is a boot-SELECTION /
+  loop-recovery channel, not disk-level A/B; `/boot` corruption ⇒ LANE 2
+  image-replace recovery. §3.1.
+- **r4 SMR N2** (active-slot-kernel-never-pruned invariant + atomic ESP selector
+  rename via `pkg/fsatomic`): folded. §3.1, §8.
