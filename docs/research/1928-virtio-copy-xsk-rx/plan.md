@@ -1,6 +1,39 @@
 # #1928 — virtio_net AF_XDP copy-mode XSK RX delivery gap: plan of action
 
-**Status:** DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR)
+**Status:** DRAFT v2 — Phase-0 live probe DONE (results below); pending review.
+
+## Phase 0 RESULTS (live, t1921-fw 4-queue virtio, dedup+probe binary)
+
+Ran the Path-1 probe (virtio native → `EXPLICIT_MODE_BIND_FLAGS=[ZC, COPY]`):
+- **virtio REJECTS zero-copy**: the ZC bind returns `libxdp private
+  bind(flags=0x000c): Invalid argument` on every queue → falls back to copy.
+  **Path 1 (ZC) is OUT for virtio_net on this venue/kernel.** (RX-ZC may exist
+  upstream ~6.11+, but this virtio backend does not negotiate it.)
+- **`AUTO_BIND_FLAGS=[0]` vs explicit `XSK_BIND_FLAGS_COPY` behave
+  DIFFERENTLY**: with AUTO (the current code) the dataplane forwarded NOTHING
+  (0 sessions, 0 tx_completions). After the probe (which falls back to explicit
+  `XSK_BIND_FLAGS_COPY`), the dataplane began forwarding *some* traffic —
+  sessions + `tx_completions_total` went nonzero. So the bind flag is genuinely
+  load-bearing: **virtio needs the explicit COPY flag, not flags=0.**
+- **v4 transit still fails** (0%, SNAT hits=0, no v4 transit session) even with
+  explicit copy, while v6 transit improved. So there is a SECOND v4-specific
+  layer beyond the bind flag (SNAT and/or dataplane ARP resolution for the WAN
+  next-hop — resolver `get_attempts` stayed 0, which is itself suspicious).
+
+**Revised lead = Path 2-variant:** virtio native should bind with explicit
+`XSK_BIND_FLAGS_COPY` (not `AUTO_BIND_FLAGS`); keep generic/fabric virtio on
+AUTO via the `interface_uses_generic_xdp` guard. THEN investigate the residual
+v4-transit-specific failure (SNAT / dataplane neighbor resolution). The
+forwarding signal calibrated against the working mlx5 cluster is
+**sessions + `tx_completions_total`** (NOT `rx_packets_total`, which is 0 even
+when forwarding works). NOTE: the live picture is still partly murky (v6 6/6
+ping but only a v4 wan-local session visible) — Phase-0 needs a cleaner pass
+isolating dataplane-vs-kernel per family before committing the exact fix.
+
+---
+
+(original v1 framing below)
+
 
 ## 1. Issue framing
 
