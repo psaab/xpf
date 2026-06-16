@@ -147,15 +147,16 @@ the daemon's binary identity to an absolute versioned path (A2 folded
 in):**
 
 **Option A2 — versioned ExecStart (FOLDED INTO THE RECOMMENDED A1).** The
-xpfd unit's `ExecStart` points at the **absolute** current-version path
-`/var/lib/xpf/versions/current/xpfd` (a symlink resolved AT systemd-exec
-time, so `os.Args[0]` is `/var/lib/xpf/versions/<ver>/xpfd` AFTER systemd
-resolves it — verify at /engineer that systemd passes the resolved path;
-if not, template `ExecStart` to the concrete `<ver>` path and
-`daemon-reload`). Then `dir(os.Args[0])` is the version dir and a respawn
-resolves the MATCHING-version helper, never the flipped `/usr/local/sbin`
-link. The `/usr/local/sbin/*` symlinks then serve ONLY operator tools
-(`cli`, day-0), not the running daemon's helper resolution.
+xpfd unit's `ExecStart` is templated to the **CONCRETE** version path
+`/var/lib/xpf/versions/<ver>/xpfd` (NOT the `current` symlink — systemd
+does NOT symlink-resolve `argv[0]`, so a symlink ExecStart would leave
+`os.Args[0]` = the symlink and `dir(os.Args[0])` = the symlink dir; SMR r2
+confirmed against `test/incus/xpfd.service:8` + `debian/rules:56`). The
+template + `daemon-reload` is a journaled FLIP substep (§6.1 step 6c).
+Then `dir(os.Args[0])` is the version dir and a respawn resolves the
+MATCHING-version helper, never the flipped `/usr/local/sbin` link. The
+`/usr/local/sbin/*` symlinks then serve ONLY operator tools (`cli`,
+day-0), not the running daemon's helper resolution.
 
 **The amended A1 cut ordering is STOP → FLIP → START:**
 1. `systemctl stop xpfd` (old daemon + its helper exit cleanly; no live
@@ -292,10 +293,13 @@ pure/abortable:
 
 1. `STAGED` — apt has written `staged/`. `xpf-upgrade` reads the staged
    version.
-2. `PREFLIGHT` — check free space on `/var` ≥ `size(staged)` + margin;
-   if a version dir would not fit, GC GC-eligible versions (never the
-   running or its predecessor) and re-check; if still short, ABORT here
-   (no live mutation). (Codex#4)
+2. `PREFLIGHT` — check free space on `/var` ≥ `size(staged)` +
+   `size(config-DB snapshot)` + margin (the rollback DB snapshot below
+   also consumes space, Codex r2#3); if it would not fit, GC GC-eligible
+   versions (never the running or its predecessor) and re-check; if still
+   short, ABORT here (no live mutation). ALSO take the pre-upgrade config-DB
+   snapshot here (for rollback, §6.4), written via `.partial`+fsync+rename
+   so a crash never leaves a torn snapshot. (Codex#4, r2#3)
 3. `COPIED` — copy `staged/` → a `versions/.<ver>.partial/` temp dir,
    fsync, checksum, then **atomic `rename(2)`** to `versions/<ver>/` so a
    crash never leaves an ambiguous half-populated `versions/<ver>`; a
@@ -332,12 +336,18 @@ pure/abortable:
    immediate predecessor).
 
 **Crash-safety:** every transition is journaled and re-runs from the
-journal. PREFLIGHT/COPY/VERIFY are pure (abort leaves live untouched).
-The COPY uses `.partial`+rename so a crash never yields a half-`<ver>`.
-A crash after STOPPED but before STARTED is recovered by re-running:
-either complete FLIP→START to the new version, or (if FLIP not yet
-journaled) START the OLD version still pointed-to by `current`. Never
-delete the running OR the rollback version mid-flow.
+journal. The FLIP step has THREE journaled substeps that must be
+individually recoverable (Codex r2#2): (6a) rename `versions/current`,
+(6b) repoint `/usr/local/sbin/*`, (6c) template the unit `ExecStart`/
+`ExecStartPre` to the concrete `<ver>` path + `daemon-reload`. A crash
+between any substep re-runs idempotently to the journaled target version
+(the unit template is derived from the journaled `current` target, so 6c
+always matches 6a). PREFLIGHT/COPY/VERIFY are pure (abort leaves live
+untouched). COPY uses `.partial`+rename so a crash never yields a
+half-`<ver>`. A crash after STOPPED but before STARTED is recovered by
+re-running: complete FLIP→START to the journaled version, or (if FLIP not
+yet journaled) START the OLD version still pointed-to by `current` + its
+unstaged unit. Never delete the running OR the rollback version mid-flow.
 
 **mgmt-never-stranded (#1922):** `xpf-upgrade` never touches interface
 config; the verify gate runs before any stop; on standalone auto-rollback
@@ -402,11 +412,15 @@ covers the FIB-miss window, `forwarding/mod.rs`). MUST pass
 contradiction).** The `.deb` postinst must NOT perform a local single-node
 cut on a clustered node, or it bypasses the rolling mechanism (one node
 down uncoordinated):
-- On UPGRADE, the postinst detects cluster membership (presence of
-  `/etc/xpf/node-id` + a live cluster) and, if clustered, is **STAGE-ONLY**
-  — it refreshes `staged/` and EXITS without invoking the cut. Cutting a
-  clustered node is done ONLY by `xpf-upgrade --rolling` (driven by the
-  operator or the dogfood driver), which sequences the drain.
+- On UPGRADE, the postinst is **STAGE-ONLY whenever the node is configured
+  as a cluster member — keyed on `/etc/xpf/node-id` (or cluster config)
+  ALONE, NOT on a "live cluster"** (Codex r2#1). A degraded-HA node
+  (node-id present but peer/daemon down at `apt install` time) must NOT
+  fall through to a standalone cut — "live cluster" is a ROLLING-readiness
+  check, not postinst cut permission. So: node-id present → stage-only,
+  exit; cutting a clustered node is done ONLY by `xpf-upgrade --rolling`
+  (operator or dogfood driver), which sequences the drain and itself
+  checks peer liveness.
 - On a STANDALONE node, the postinst MAY invoke `xpf-upgrade` (single-node
   STOP→FLIP→START), or leave it to an explicit operator `xpf-upgrade` —
   TBD at /engineer, but the standalone gap must be documented either way.
@@ -657,10 +671,11 @@ N-readable state BEFORE booting the N (previous) daemon. Concretely:
    #1922 lifeline shipped, does this strand mgmt worse than the
    silent-empty-load it replaces? Defend the ordering (floor release
    depends on #1922) or this trades one footgun for a worse one.
-7. **[PARTIALLY RESOLVED v2]** N=3 retention + PREFLIGHT disk check +
-   `.partial`+rename copy (§6.1) make disk-full ABORT cleanly pre-mutation.
-   REMAINING question: is N=3 the right number, and does the DB snapshot
-   taken at PREFLIGHT (for rollback) itself need disk-space accounting?
+7. **[RESOLVED v3]** N=3 retention + PREFLIGHT disk check (now including
+   the rollback DB-snapshot size, Codex r2#3) + `.partial`+rename for both
+   the version dir AND the DB snapshot (§6.1). Disk-full ABORTs cleanly
+   pre-mutation. REMAINING (minor): is N=3 the right number? (tunable; not
+   blocking.)
 8. **Does the controlled-promotion forward-verify (§6.2 step 7) itself
    cause an EXTRA client-visible failover** (promote upgraded node →
    verify → maybe demote again)? If verifying the upgrade costs a second

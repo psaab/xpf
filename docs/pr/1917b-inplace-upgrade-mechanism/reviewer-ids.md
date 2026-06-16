@@ -15,3 +15,8 @@ Plan: `docs/research/1917b-inplace-upgrade-mechanism/plan.md`
 ## Round 2
 - AGY: adversarial-review-mqgrjndm-y3bv6k
 - Claude SMR: docs/research/1917b-inplace-upgrade-mechanism/claude-smr-r2.md — PLAN-READY
+
+## Round 2 verdicts
+- Codex: session 019ed0e5 (resumed) — PLAN-NEEDS-REVISION (3 refinements: postinst stage-only on node-id alone; ExecStart-template journaled substep; PREFLIGHT account DB snapshot). 5/6 r1 findings confirmed resolved.
+- AGY: adversarial-review-mqgrjndm-y3bv6k succeeded but result flaked (no capture); re-dispatched round 2b below.
+- Claude SMR: claude-smr-r2.md — PLAN-READY (folded the argv[0]/ExecStart hard-step it surfaced).
