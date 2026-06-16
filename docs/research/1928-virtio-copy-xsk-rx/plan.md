@@ -1,6 +1,23 @@
 # #1928 — virtio_net AF_XDP copy-mode XSK RX delivery gap: plan of action
 
-**Status:** DRAFT v2 — Phase-0 live probe DONE (results below); pending review.
+**Status:** DRAFT v3 — Codex + AGY r1 both PLAN-NEEDS-MAJOR (converged on
+concrete candidate root causes). Lead REVISED to Path 3: FIX the copy-mode
+fallback (ZC EINVALs on virtio, confirmed). Converged candidate roots, all
+code-grounded, to be isolated by an expanded instrumented Phase 0:
+  (a) startup fill-prime may reserve only a partial batch and NOT retain the
+      uninserted offsets in pending_fill_frames (Codex: xsk_ffi.rs:514-541 +
+      worker/mod.rs:395-402; AGY: prime must not exceed fill-ring capacity);
+  (b) copy-mode bind may omit XDP_USE_NEED_WAKEUP so NAPI isn't driven (AGY) —
+      a likely explanation for the AUTO(flags=0) vs explicit-COPY behavior delta
+      I saw in the v2 probe (which my own notes flagged as murky/unrigorous);
+  (c) XSKMAP slot<->queue<->bound-ring mismatch — rx_xdp_redirects counts the
+      XDP redirect ACTION, not delivery; the kernel drops post-redirect if the
+      XSK at the slot isn't bound to the arriving (netdev,queue) (Codex #3).
+EXPANDED Phase 0 (mandatory before any fix): capture forced-ZC errno [done:
+EINVAL flags=0x000c], negotiated XDP_OPTIONS, rx_fill_ring_empty_descs, raw
+fill/RX ring producer-consumer, shim-trace slot/selected_queue, and the socket
+binding tuple (ifindex, socket_queue_id) — per Codex #4. AGY rejects PLAN-KILL:
+virtio is the only portable virtual driver, so the copy path MUST be fixed.
 
 ## Phase 0 RESULTS (live, t1921-fw 4-queue virtio, dedup+probe binary)
 
