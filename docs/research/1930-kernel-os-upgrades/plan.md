@@ -1,7 +1,12 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v3 — folds r2 reviews (Claude SMR B4 + AGY converged
+- **Status:** v3.1 — folds r2 (the early-hang loop) + the r3 SMR N1 topology
+  refinement (the GRUB cloud image has no per-kernel UEFI entries, so the
+  loop-safe one-shot is ESP-grubenv (form 1) as PRIMARY, `BootNext`-to-a-second-
+  entry as the alternative; per-kernel-UEFI/UKI is the future). r3 SMR =
+  PLAN-READY; awaiting r3 AGY + Codex on this fold.
+- **(history)** v3 folds r2 reviews (Claude SMR B4 + AGY converged
   PLAN-NEEDS-WORK on the SAME residual brick-loop). LANE-1 one-shot revert moves
   to **UEFI `BootNext`** (firmware clears it before boot → watchdog reset
   auto-falls-back to known-good `BootOrder`, no bootloader write — closes the
@@ -185,8 +190,21 @@ itself clears `BootNext` before handing control to that entry** — so a candida
 that hangs and is watchdog-reset comes up with `BootNext` already gone, and the
 firmware falls through to the permanent `BootOrder`, which points at the
 **known-good** entry. No bootloader write is needed at the failing-boot moment;
-the clear happened in firmware before the hang. Concretely (Path Option A1'',
-rewritten):
+the clear happened in firmware before the hang.
+
+**Topology note (r3 SMR N1):** the bake base is the stock Ubuntu cloud image,
+which boots via a SINGLE `ubuntu` UEFI entry → GRUB → menu and does NOT ship
+per-kernel UEFI entries (those need UKIs / systemd-boot). So on the cloud-image
+base the loop-safe one-shot is, in recommended order: **(1) grubenv on the FAT32
+ESP** (PRIMARY for the GRUB cloud image — GRUB writes FAT fine, so its own
+`save_env next_entry=` succeeds; smallest change), **(2) `BootNext` to a SECOND
+fixed UEFI "try-candidate" entry** (firmware-cleared), **(3) per-kernel UEFI
+entries / UKIs** (future, A3). All three are loop-safe — the one-shot is consumed
+by firmware (2/3) or by GRUB on a writable FS (1), never by GRUB-on-ext4 or by
+reaching Linux (what r1 A1 / r2 A1' got wrong). The sequence below is written
+generically over "the one-shot substrate"; the verify+forward-beacon promotion
+owns the DURABLE default flip and is orthogonal to the one-shot form (r3 SMR m1).
+INC-1 defaults to form (1) for the cloud image. Concretely:
 - Each kernel gets its **own UEFI boot entry** (or one GRUB entry whose target
   is selected via a stable GRUB id — but the SELECTION is via `BootNext` to a
   per-kernel UEFI entry, or via a GRUB id that GRUB reads from a one-shot it does
@@ -465,13 +483,32 @@ Only the FIRMWARE qualifies.
 | **A2 (KILLED): softdog** | Software watchdog only. | N/A — can't fire pre-load + disarmed by clean reboot. | **REJECT** (r1 AGY). |
 | **A3 (future): systemd-boot/UKI boot-counting** | Switch bootloader; tries-counter on EFI vars/ESP. | Firmware/ESP-owned. | **DEFER** — bootloader migration is a large separate change; boot-counting reverts on *boot* not *verify* failure (mitigate: promotion unit marks good ONLY on forward-beacon PASS). The clean long-term answer; A1'' achieves the same brick-safety on the existing GRUB image NOW. |
 
-**Recommendation: A1'' (UEFI `BootNext`).** It is the only substrate that closes
-the boot-LOOP unconditionally — including the pre-Linux early-hang case r2
-killed — because the firmware, not GRUB or Linux, consumes the one-shot. It works
-on the existing GRUB image (no bootloader migration). The ESP-grubenv form is the
-fallback. The watchdog (Path Option D) remains needed to convert a *hang* into
-the *reset* that triggers the firmware fallback — but the loop itself is gone
-regardless of the watchdog.
+**Recommendation: a FIRMWARE-or-ESP-cleared one-shot (loop-safe by construction);
+the concrete form depends on the boot topology (r3 SMR N1).** The bake base is
+the stock **Ubuntu cloud image**, which boots via a SINGLE `ubuntu` UEFI entry →
+shim → GRUB → menu — it does NOT ship per-kernel UEFI entries (those need UKIs /
+systemd-boot, a separate change). So on the cloud-image base the loop-safe
+one-shot is one of, in recommended order:
+1. **ESP-grubenv one-shot (PRIMARY for the GRUB cloud image):** move grubenv to
+   the FAT32 ESP (GRUB *can* write FAT — no `metadata_csum`), so GRUB's own
+   `save_env next_entry=` succeeds and the one-shot is consumed reliably at boot;
+   permanent default stays known-good. Smallest change to the existing image.
+2. **`BootNext` to a SECOND fixed UEFI entry (alternative):** two fixed UEFI
+   entries ("normal" → known-good GRUB default; "try-candidate" → GRUB with a
+   candidate-selecting arg); `efibootmgr --bootnext try-candidate`; firmware
+   clears `BootNext` → any reset returns to "normal". No per-kernel entries
+   needed; firmware-cleared = loop-safe even on a pre-Linux hang.
+3. **`BootNext` to per-kernel UEFI entries / UKIs (FUTURE):** the cleanest if the
+   image adopts UKIs or systemd-boot (A3); out of scope for the GRUB cloud image.
+
+All three are **loop-safe** (the one-shot is cleared by firmware (2/3) or by GRUB
+on a writable FS (1), NOT by GRUB-on-ext4 or by reaching Linux — which is what r1
+A1 / r2 A1' got wrong). The watchdog (Path D) only converts a *hang* into the
+*reset* that triggers the fallback; the loop is gone regardless. The verify+
+forward-beacon promotion owns the DURABLE default flip (BootOrder or
+`grub-set-default`) and is orthogonal to which one-shot form is chosen (r3 SMR
+m1) — do not couple them. **INC-1 picks form (1) for the cloud-image base** and
+keeps (2) as the alternative where per-image-entry control is available.
 
 ### Path Option B — base-OS major upgrade
 | Option | Mechanism | Verdict |
@@ -513,28 +550,33 @@ signed repo.
 - **INC-0 (image hardening, no daemon code, closes the biggest hole alone):**
   `bake.py` holds the kernel via `apt-mark hold $(dpkg-query -W -f='${Package}\n'
   'linux-*')` (NOT a raw glob — r2 AGY); sets `GRUB_DISABLE_SUBMENU=y` + pins
-  `GRUB_DEFAULT` to the STABLE known-good id (r2 AGY/SMR B2/B3); creates the
-  per-kernel **UEFI boot entry** + permanent `BootOrder` known-good-first;
-  installs the **persistent-watchdog** config (firmware/hypervisor `nowayout`,
+  `GRUB_DEFAULT` to the STABLE known-good id (r2 AGY/SMR B2/B3); installs the
+  **loop-safe one-shot substrate for the GRUB cloud image — grubenv on the FAT32
+  ESP (form 1, r3 SMR N1)** so GRUB's own one-shot clear succeeds (NOT per-kernel
+  UEFI entries, which the cloud image lacks); permanent default/`BootOrder`
+  known-good-first; installs the **persistent-watchdog** config (firmware/
+  hypervisor `nowayout`,
   initramfs early-arm fallback — r2 AGY persistence caveat); records the bake
   **watchdog-persistence platform flag** + the **image version manifest** (xpf
   ver, HA protocol ver, session-sync frame ver, config-DB min-reader ver — for
   the LANE-2 gate); disables `unattended-upgrades` for `linux-*`; ships the
   `needrestart` blacklist. Closes "unattended apt moves the floor" alone. (FIRST.)
 - **INC-1 (LANE 1 in-guest mechanism):** `pkg/upgrade` kernel verb + `xpfd
-  upgrade kernel <ver>`: **pre-asserts** (UEFI + `efibootmgr` OK; `BootOrder`
-  known-good-first; GRUB submenu disabled + pinned id resolves; watchdog present
-  + persistence flag OR Path-D2 operator override; free `/boot`/ESP ≥ image+
-  initramfs+margin BEFORE install) → unhold→install→rehold (verify
-  update-initramfs/update-grub succeeded) → **re-assert `BootOrder`/`GRUB_DEFAULT`
-  known-good did NOT move** after the candidate postinst → create candidate UEFI
-  entry → `efibootmgr --bootnext <cand>` (firmware-cleared one-shot) → confirm
-  watchdog → reboot. Promotion oneshot: assert `uname -r`==candidate →
-  `verify-dataplane` → **forward** beacon (tight budget, stable peer-link target)
-  → only-on-beacon-PASS promote (`efibootmgr --bootorder` cand-first) + durable
-  marker + disarm watchdog; else clean reboot → firmware falls through to
-  known-good. Journal + GC prune of un-promoted candidate (kernel pkg + UEFI
-  entry). Command `xpfd upgrade kernel`.
+  upgrade kernel <ver>`: **pre-asserts** (the chosen one-shot substrate is the
+  ESP-grubenv form and the ESP is writable, OR UEFI+`efibootmgr` for forms 2/3;
+  permanent default known-good; GRUB submenu disabled + pinned id resolves;
+  watchdog present + persistence flag OR Path-D2 override; free `/boot`/ESP ≥
+  image+initramfs+margin BEFORE install) → unhold→install→rehold (verify
+  update-initramfs/update-grub succeeded) → **re-assert the permanent known-good
+  default did NOT move** after the candidate postinst → arm the one-shot (ESP
+  grubenv `next_entry=<cand-stable-id>` for form 1; `efibootmgr --bootnext` for
+  forms 2/3) → confirm watchdog → reboot. Promotion oneshot: assert
+  `uname -r`==candidate → `verify-dataplane` → **forward** beacon (tight budget,
+  stable peer-link target) → only-on-beacon-PASS promote (durable default flip:
+  `grub-set-default` / `efibootmgr --bootorder` cand-first) + durable marker +
+  disarm watchdog; else clean reboot → firmware/GRUB falls through to known-good.
+  Journal + GC prune of un-promoted candidate (kernel pkg + any UEFI entry).
+  Command `xpfd upgrade kernel`.
 - **INC-2 (LANE 1 HA — EXTERNAL orchestration):** the cross-node kernel-rolling
   sequence lives in `scripts/deploy/xpf-deploy.py` (survives reboots — r2/r1),
   NOT in-process `rolling.go`. Implements: drain A → confirm peer holds all RGs →
@@ -658,9 +700,10 @@ signed repo.
 
 1. INC-0: a deployed image has the kernel held (concrete dpkg-query, not a
    glob); `GRUB_DEFAULT` pins a stable known-good id + `GRUB_DISABLE_SUBMENU=y`;
-   `BootOrder` known-good-first + per-kernel UEFI entries; persistent-watchdog
-   config + bake persistence flag; image version manifest; `unattended-upgrades`
-   excludes `linux-*`.
+   permanent known-good default + the chosen loop-safe one-shot substrate
+   (ESP-grubenv form 1 for the cloud image); persistent-watchdog config + bake
+   persistence flag; image version manifest; `unattended-upgrades` excludes
+   `linux-*`.
 2. LANE 1 happy: `xpfd upgrade kernel <ver>` on a same-series candidate boots it
    once via `BootNext`, verify+forward-beacon PASS, candidate promoted (BootOrder
    moved), dataplane forwards; pinned known-good did NOT move at install time.
