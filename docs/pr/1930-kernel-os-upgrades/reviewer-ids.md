@@ -19,5 +19,5 @@ Records Codex + AGY task IDs per round (per feedback_codex_session_loss_continua
 | r4 | Codex | (codex-rescue agent, pending) | pending (vs v4) |
 | r4 | Codex | thread 019ed2bc-ca6c-7e30-88a0-abed56e2f243 | PLAN-NEEDS-WORK (F13 inconsistency, NEW-F15..F20) |
 | r5 | AGY | adversarial-review-mqh9solm-xj17td | PLAN-NEEDS-WORK (4 impl flaws a-d) |
-| r5 | Codex | (codex-rescue agent, pending) | pending (vs v5) |
+| r5 | Codex | thread 019ed2c2-0074-7d21-a061-6c54e83d9f0f | PLAN-NEEDS-WORK (FLAW-1..4) |
 | r5 | Claude SMR | (in-conversation) | PLAN-READY (+N3 folded) |

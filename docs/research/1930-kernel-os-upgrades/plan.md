@@ -1,7 +1,8 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v6 — folds r5 (AGY PLAN-NEEDS-WORK 4 impl-detail flaws; SMR
+- **Status:** v6.1 — (folds r5 Codex: FLAW-1 the 09_xpf fragment must emit a self-contained default menuentry with implicit boot, not bare linux/initrd; FLAW-2 scrubbed last "slot grub.cfg" residue; FLAW-3 already fixed in v6 [separate non-blocking oneshot]; FLAW-4 install-images.md doc fix promoted to an acceptance item). r5 SMR+AGY+Codex folded; r6 in flight.
+- **(v6)** folds r5 AGY — folds r5 (AGY PLAN-NEEDS-WORK 4 impl-detail flaws; SMR
   PLAN-READY+N3). A4 implementation nailed: (a) `$cmdpath` referenced as a path
   (`source "$cmdpath/xpf.selector"`), never string-compared (device prefix +
   lockdown `regexp`); (b) the branch is an `/etc/grub.d/09_xpf` drop-in (survives
@@ -347,11 +348,23 @@ entry → bare `vmlinuz` (r3 AGY Hazard C signature). The **A/B fixed-slot
 shim-staged** design is the single surviving form and is threaded through every
 section below.
 
-**Stable GRUB id / submenu:** within each slot's private `grub.cfg` there is one
-hardcoded entry, so submenu ordering is irrelevant; `GRUB_DISABLE_SUBMENU=y`
-remains set for the *primary* `/boot/grub/grub.cfg` hygiene. The candidate dpkg
-postinst's `update-grub` regenerates the primary menu but does NOT touch the slot
-`grub.cfg`s (they are xpf-owned, staged by `xpfd upgrade kernel`).
+**The `/etc/grub.d/09_xpf` fragment must emit a COMPLETE boot path (r5 Codex
+FLAW-1, fatal):** a bare `linux`/`initrd` at top level would let GRUB fall
+through into the rest of the generated menu and boot the WRONG kernel. The
+fragment MUST emit a self-contained, FIRST, default `menuentry` that boots the
+slot-selected kernel, e.g.:
+```
+menuentry 'xpf-slot' --id xpf-slot {
+    source "$cmdpath/xpf.selector"      # sets xpf_slot_kernel / xpf_slot_initrd
+    linux  /boot/$xpf_slot_kernel  ro ...
+    initrd /boot/$xpf_slot_initrd
+}                                        # `boot` is implicit at menuentry end
+```
+with `GRUB_DEFAULT=xpf-slot` (the stable id) so this entry is the default. Only
+ONE entry runs the slot kernel; `GRUB_DISABLE_SUBMENU=y` keeps the rest of the
+generated menu flat for hygiene. `update-grub` re-emits `09_xpf` (it is in
+`/etc/grub.d/`); the per-slot state is the ESP `xpf.selector` GRUB-script, not a
+per-slot `grub.cfg`.
 
 **Persistent-watchdog requirement (resolves invariant 3 — clean-shutdown
 disarm):** with `BootNext` the firmware already falls back to known-good on ANY
@@ -797,9 +810,9 @@ signed repo.
 - **A/B: the ACTIVE slot's kernel is NEVER pruned** (r4 SMR N2) — GC prunes only
   the un-promoted candidate + its inactive-slot staging; active + rollback slots
   always retain a known-good kernel. The A/B rollback guarantee.
-- **Slot `grub.cfg` staging on the ESP is atomic** (r4 SMR N2) — write-temp +
+- **Slot `xpf.selector` rewrite on the ESP is atomic** (r4 SMR N2) — write-temp +
   rename + `fsync` BEFORE arming `BootNext` (a Linux-side FAT write, reusing
-  `pkg/fsatomic`); never a truncated slot config.
+  `pkg/fsatomic`); never a truncated selector.
 - **`bake.py` GRUB drop-in lives in `/etc/default/grub.d/99-xpf.cfg`** (Ubuntu
   cloudimg overrides `/etc/default/grub` via `50-cloudimg-settings.cfg`) — the
   `GRUB_DEFAULT=<stable-known-good-id>` pin + `GRUB_DISABLE_SUBMENU=y` MUST go in
@@ -848,7 +861,10 @@ signed repo.
    TEXT config (`xpf.conf`+`node-id`) — validate.py green; `.configdb`/
    `master.key` are re-derived, NOT carried; do-release-upgrade UNSUPPORTED.
 8. Docs: 3-lane tree + state-carry contract + playbook in
-   `docs/os-kernel-upgrades.md`, linked from `docs/in-place-upgrade.md`.
+   `docs/os-kernel-upgrades.md`, linked from `docs/in-place-upgrade.md`; AND the
+   stale `deploy_rolling()` reference in `docs/install-images.md` is replaced with
+   the real rolling image-replace wording (r4/r5 Codex F20/FLAW-4 — an explicit
+   acceptance item, not just INC-3 prose).
 
 ---
 
