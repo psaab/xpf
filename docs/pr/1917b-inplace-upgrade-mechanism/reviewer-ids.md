@@ -24,3 +24,8 @@ Plan: `docs/research/1917b-inplace-upgrade-mechanism/plan.md`
 ## Round 3
 - Codex: session 019ed0e5 (resumed) round 3 — PLAN-NEEDS-REVISION → only a stale §7 doc contradiction (ExecStart said 'current' symlink); fixed in v4. Codex: "Fixing the stale §7 current path should make this PLAN-READY."
 - AGY: adversarial-review-mqgrqf8j-y14zjg (round 2b on v3)
+
+## CONVERGED — 3-way PLAN-READY
+- Codex: round 4 (session 019ed0e5) — PLAN-READY (v4)
+- AGY: adversarial-review-mqgrqf8j-y14zjg (round 2b on v3) — PLAN-READY
+- Claude SMR: claude-smr-r2.md — PLAN-READY

@@ -10,9 +10,26 @@
 
 ## 1. Status
 
-PLAN-DRAFT (v2). Round-1 hostile review complete — all three reviewers
-PLAN-NEEDS-REVISION (no kill; A1+B1+C1+D1 direction endorsed). v2 folds
-every converged round-1 blocker:
+**PLAN-READY (v4) — 3-way converged.** Codex PLAN-READY (round 4), AGY
+PLAN-READY (round 2b, code-verified), Claude SMR PLAN-READY (round 2). No
+reviewer ever KILLed; the A1+B1+C1+D1 composition is endorsed by all
+three. Awaiting manual approval — `/engineer 1917 B`; Copilot joins as the
+4th reviewer then. Reviewer ledger:
+`docs/pr/1917b-inplace-upgrade-mechanism/reviewer-ids.md`.
+
+Round history (every blocker code-grounded and folded):
+- **Round 1** — all three PLAN-NEEDS-REVISION (no kill). Blockers:
+  respawn-mismatch race (flip-before-restart), weak HA drain predicate,
+  envelope-format rollback brick, passive-forward-verify impossibility,
+  postinst-vs-rolling contradiction, disk-full/partial-copy, session-sync
+  fixtures, #1922 gate, verify isolation.
+- **Round 2** — Codex confirmed 5/6 resolved + 3 refinements (postinst
+  stage-only on node-id alone; ExecStart-template journaled substep;
+  PREFLIGHT account DB snapshot); AGY (re-run) PLAN-READY; SMR PLAN-READY.
+- **Rounds 3-4** — folded the 3 refinements + a stale §7 ExecStart wording
+  fix; Codex PLAN-READY.
+
+v2-v4 fold every converged blocker:
 - **stop-before-flip** ordering (was flip-before-restart) — closes the
   respawn-mismatch race (Codex#1, AGY#1, SMR);
 - a **strong HA drain predicate + peer-takeover-ack BEFORE demote** (was
