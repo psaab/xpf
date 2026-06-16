@@ -312,9 +312,17 @@ pure/abortable:
    respawn a helper, so the flip is safe (Codex#1/AGY#1). (HA: this node
    is already drained to the peer per §6.2 BEFORE this step.)
 6. `FLIPPED` — atomic-rename `versions/current` → `<ver>` AND repoint the
-   `/usr/local/sbin/*` operator-tool links. (The daemon resolves its
-   helper via the versioned `ExecStart` path, §5A/A2, so this flip cannot
-   strand a running daemon — it is stopped.)
+   `/usr/local/sbin/*` operator-tool links. **ALSO template the xpfd unit's
+   `ExecStart` + `ExecStartPre verify-dataplane` to the CONCRETE
+   `/var/lib/xpf/versions/<ver>/xpfd` path and `systemctl daemon-reload`**
+   — systemd does NOT resolve symlinks in `ExecStart`, so `argv[0]` is the
+   literal configured path; the current unit `ExecStart=/usr/local/sbin/xpfd`
+   (`test/incus/xpfd.service:8`, `debian/rules:56`) would make
+   `dir(os.Args[0])` = `/usr/local/sbin` and a respawn resolve the flipped
+   helper. Pinning the concrete versioned path makes `dir(os.Args[0])` the
+   version dir so even a transient respawn grabs the matching-version
+   helper (defense-in-depth atop STOP-before-FLIP). (SMR r2 confirmed this
+   against the live unit — it is a HARD step, not an open question.)
 7. `STARTED` — `systemctl start xpfd`; wait for the helper `ping` to
    report the new version + healthy NAPI bootstrap within a deadline; on
    failure → AUTO-ROLLBACK (standalone-only): stop → DB-restore (§6.4) →
@@ -621,13 +629,12 @@ N-readable state BEFORE booting the N (previous) daemon. Concretely:
    standalone just a worse `apt install + reboot`? Defend why the
    verify-gate + atomic-flip + rollback earns its complexity over
    image-replace for standalone. (KILL if it doesn't.)
-2. **[RESOLVED v2 — respawn race]** Round 1 confirmed the race is REAL
-   (a live old xpfd resolves the flipped `/usr/local/sbin/xpf-userspace-dp`
-   on a helper respawn). v2 closes it with STOP-before-FLIP + versioned
-   `ExecStart` (§5A/§6.1). REMAINING question: does systemd pass the
-   SYMLINK-RESOLVED absolute path as `argv[0]` (so `dir(os.Args[0])` is the
-   version dir), or the symlink path? If the latter, `ExecStart` must be
-   templated to the concrete `<ver>` path — verify at /engineer.
+2. **[RESOLVED v2 — respawn race]** Round 1 confirmed the race is REAL.
+   v2 closes it with STOP-before-FLIP + concrete-versioned `ExecStart`
+   (§6.1 step 6). SMR r2 confirmed systemd does NOT symlink-resolve
+   `argv[0]`, so the unit MUST template the concrete `versions/<ver>/xpfd`
+   path (now a hard FLIP-step, not relying on symlink resolution). Fully
+   resolved.
 3. **[RESOLVED v2 — drain predicate]** Round 1 confirmed `ForceSecondary()`
    weight-0 alone is insufficient (`rg_state.go:13` forwards while VRRP
    MASTER). v2 mandates the strong drain predicate + peer-ready precheck
