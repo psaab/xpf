@@ -1,7 +1,8 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v5 — folds r4 (AGY PLAN-NEEDS-WORK 4 UEFI flaws + SMR PLAN-READY
+- **Status:** v5.1 — folds r4 Codex (F13 inconsistency + NEW-F15..F20): committed fully to the $cmdpath A4 substrate, scrubbed all static-per-slot-grub.cfg + per-candidate-entry residue; fixed LANE-1-HA-uses-launch error (F17, LANE 1 is in-place); added BootCurrent slot-detection (F18) + BootNext power-loss durability (F19) + the $cmdpath-as-/etc/grub.d-fragment-survives-update-grub detail + the install-images.md doc-fix (F20). r5 reviewers in flight on v5.
+- **(v5)** folds r4 — folds r4 (AGY PLAN-NEEDS-WORK 4 UEFI flaws + SMR PLAN-READY
   N2). A4 corrected for real signed-GRUB/UEFI behavior: signed `grubx64.efi`
   ignores a per-dir `grub.cfg` (hardcoded signed prefix) → the SHARED
   `/boot/grub/grub.cfg` **branches on `$cmdpath`** per slot; NVRAM `efibootmgr`
@@ -171,7 +172,8 @@ The design splits by how far the kernel moves, mirroring #1917's Path-B
 ```
   Kernel CVE point-release (same series, e.g. 6.18.x -> 6.18.y or 7.0.z)
       -> LANE 1: verify-gated one-shot-boot in-place kernel channel
-                 (xpfd upgrade kernel <ver> + watchdog + grub-reboot)
+                 (xpfd upgrade kernel <ver> + watchdog + A/B UEFI slot
+                  via efibootmgr --bootnext; firmware-cleared one-shot)
 
   Heavy/uncertain kernel move (new series the shim has never seen, or kernel
   pulled by base-OS upgrade)
@@ -226,6 +228,28 @@ file** (which kernel each slot points at) that the shared `grub.cfg` reads by
 `$cmdpath`; no GRUB env write is needed (read-only at boot). Kernels stay in
 `/boot` (r4 AGY Flaw 3 — NEVER copied to the ESP, which is too small); only
 shim+grub + the `$cmdpath` selector live per-slot on the ESP.
+
+**The `$cmdpath` branch MUST survive `update-grub` (r5 pre-empt):** Ubuntu's
+`update-grub` regenerates `/boot/grub/grub.cfg` from `/etc/grub.d/` fragments, so
+the `$cmdpath`-branching logic CANNOT be a hand-edit of `grub.cfg` (it would be
+clobbered by the candidate dpkg postinst's `update-grub`). It MUST be shipped as
+an xpf-owned `/etc/grub.d/` fragment (e.g. `09_xpf_cmdpath`, ordered before
+`10_linux`) so every regeneration re-emits it. INC-0 ships the fragment; INC-1
+asserts it is present + emitted after the candidate install.
+
+**Slot-detection + power-loss (r4 Codex NEW-F18/F19):** the promotion oneshot
+proves it actually booted the INACTIVE/candidate slot before reordering
+`BootOrder` — it reads **`BootCurrent`** (the UEFI var naming the entry the
+firmware just booted) and/or `$cmdpath`-derived state, and requires BOTH
+`BootCurrent`==candidate-slot AND `uname -r`==candidate before promoting; a boot
+that did NOT come from the candidate slot (e.g. firmware ignored `BootNext`, or a
+fallback) is treated as a non-candidate boot and does not promote. A power loss
+between the `efibootmgr --bootnext` write and the reboot is safe: `BootNext` is a
+firmware NVRAM var (durable across power loss) AND single-shot — on the next
+power-on the firmware either honors it once (→ candidate boot) or, if it was
+never consumed, the operator/orchestrator re-issues the arm; either way the
+permanent `BootOrder` (known-good) is the fallback, so no power-loss window
+bricks.
 
 **One-shot + revert flow (loop-safe by firmware):**
 - The "active/known-good" slot is first in the permanent `BootOrder`.
@@ -361,7 +385,7 @@ the early-HANG auto-recovery depends on the watchdog.
    - On PASS: runs a **bounded** (tight budget — r2 AGY standalone-outage)
      **forward health beacon** probing a STABLE destination (HA peer link, not
      an external gateway — r2 AGY). **Only on beacon PASS** does it promote
-     (`efibootmgr --bootorder` candidate-first / durable `grub-set-default`),
+     (`efibootmgr --bootorder` candidate-slot-first, non-destructive),
      write a durable promotion marker, and disarm the watchdog. Disarm/promote
      gated on the *forward* beacon, not structural verify alone (SMR M2).
    - On REJECT/error/timeout: does NOT promote; issues a clean reboot. Because
@@ -369,7 +393,8 @@ the early-HANG auto-recovery depends on the watchdog.
      `BootOrder` to the **known-good** entry → dataplane restored. No boot-loop.
 6. The candidate kernel package, if not promoted, is pruned (`apt-get purge` the
    un-promoted version) by the `pkg/upgrade` GC (SMR M3 / AGY E) — frees
-   `/boot`, avoids accrual, and removes the candidate UEFI boot entry.
+   `/boot`, avoids accrual; the A/B slots are FIXED (never removed) — GC resets
+  the un-promoted slot's selector back to the known-good kernel.
 
 **Honest bound (do not soften):** with `BootNext` the **boot-LOOP is closed
 unconditionally** (firmware-cleared one-shot + permanent known-good `BootOrder`).
@@ -550,7 +575,7 @@ non-destructive `BootOrder` promotion.** It is the ONLY form that survives every
 review round: firmware-cleared one-shot (loop-safe even on a pre-Linux hang —
 r1/r2), Secure-Boot-correct (shim→grub→MOK kernel, not bare vmlinuz — r3 AGY C),
 no NVRAM wear (fixed slots, not per-upgrade — r3 AGY Risk 2), no GRUB-env read
-(static slot `grub.cfg`, since firmware already consumed `BootNext` — r3 AGY A),
+(`$cmdpath`-branched shared `grub.cfg`, no GRUB env read — r3/r4 AGY A/B/F1),
 no GRUB write (so Secure-Boot lockdown is irrelevant — r3 AGY B). The watchdog
 (Path D) only converts a *hang* into the *reset* that triggers the firmware
 fallback; the loop is gone regardless. The verify+forward-beacon promotion owns
@@ -598,8 +623,9 @@ signed repo.
   'linux-*')` (NOT a raw glob — r2 AGY); sets `GRUB_DISABLE_SUBMENU=y` + pins
   `GRUB_DEFAULT` to the STABLE known-good id (r2 AGY/SMR B2/B3); **STAGES the two
   FIXED A/B UEFI slot dirs on the ESP (`\EFI\xpf-A\`, `\EFI\xpf-B\` = shim+grub +
-  a `$cmdpath` selector) and adds the `$cmdpath` branch to the shared
-  `/boot/grub/grub.cfg`**, both selectors seeded to the shipped known-good kernel
+  a `$cmdpath` selector) and ships the `$cmdpath` branch as a
+  `/etc/grub.d/09_xpf_cmdpath` fragment (so `update-grub` re-emits it — r5)**,
+  both selectors seeded to the shipped known-good kernel
   (the A4 substrate — r3/r4 AGY; NOT per-kernel/per-upgrade entries, NOT
   ESP-grubenv, NOT per-slot grub.cfg). **NVRAM `efibootmgr` registration of the
   slots + the initial active-first `BootOrder` is done by a FIRST-BOOT in-guest
@@ -646,7 +672,9 @@ signed repo.
   from-image via `xpf-deploy.py launch`) + the rejoin gate; operator playbook in a new
   `docs/os-kernel-upgrades.md` (3-lane tree; the TEXT-config state-carry contract
   — `xpf.conf`+`node-id`, NOT `.configdb`/`master.key`, r2 Codex NEW-F11; the
-  do-release-upgrade UNSUPPORTED statement); link from `docs/in-place-upgrade.md`.
+  do-release-upgrade UNSUPPORTED statement); link from `docs/in-place-upgrade.md`;
+  **and fix the stale `deploy_rolling()` reference in `docs/install-images.md`**
+  (r4 Codex NEW-F20 — that doc still names a non-existent function).
 - **INC-4 (validation — the NEW path, not regression):** (a) live LANE 1 happy +
   **deliberate-REJECT revert** proof (firmware-cleared `BootNext` → known-good
   boots, dataplane restored, NO operator action, NO loop) on the wipeable
@@ -846,10 +874,12 @@ treating in-place kernel moves as a tightly-gated channel:
   watchdog reset) falls through `BootOrder` to the known-good slot: the boot-LOOP
   is closed unconditionally, on the existing shim+GRUB image, no bootloader
   migration, Secure-Boot-correct (shim→grub→MOK kernel), no NVRAM wear (fixed
-  slots), no GRUB env read/write (static slot `grub.cfg`). Kernel held-by-default;
+  slots), no GRUB env read/write (`$cmdpath`-branched shared `grub.cfg`). Kernel held-by-default;
   promotion gated on a **forward** health beacon + `uname -r` match; HA sequencing
-  **EXTERNAL** (a NEW rolling driver: recreate-each-node via `xpf-deploy.py
-  launch` + a rejoin/version/lease gate), not in-process `rolling.go`. The
+  **EXTERNAL** (a NEW orchestrator drives `xpfd upgrade kernel` per node IN PLACE:
+  drain → `bootnext`+reboot → poll-until-promoted-or-reverted → rejoin/version/
+  lease gate → next node — NOT a recreate-from-image, which is LANE 2's mechanism;
+  r4 Codex NEW-F17), not in-process `rolling.go`. The
   watchdog (Path D) converts a hang→reset; "fully-unattended early-hang recovery"
   needs a verified-persistent watchdog, else a documented one-external-reset
   (still no loop, no brick).

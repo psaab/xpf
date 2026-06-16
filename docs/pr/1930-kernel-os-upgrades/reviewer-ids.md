@@ -17,3 +17,6 @@ Records Codex + AGY task IDs per round (per feedback_codex_session_loss_continua
 | r4 | Claude SMR | (in-conversation) | PLAN-READY (+N2 folded) |
 | r4 | AGY | adversarial-review-mqh9l2wv-eo29da | PLAN-NEEDS-WORK (4 UEFI flaws) |
 | r4 | Codex | (codex-rescue agent, pending) | pending (vs v4) |
+| r4 | Codex | thread 019ed2bc-ca6c-7e30-88a0-abed56e2f243 | PLAN-NEEDS-WORK (F13 inconsistency, NEW-F15..F20) |
+| r5 | AGY | adversarial-review-mqh9solm-xj17td | pending (vs v5) |
+| r5 | Codex | (codex-rescue agent, pending) | pending (vs v5) |
