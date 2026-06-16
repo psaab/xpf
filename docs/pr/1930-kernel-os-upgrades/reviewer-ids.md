@@ -22,4 +22,4 @@ Records Codex + AGY task IDs per round (per feedback_codex_session_loss_continua
 | r5 | Codex | thread 019ed2c2-0074-7d21-a061-6c54e83d9f0f | PLAN-NEEDS-WORK (FLAW-1..4) |
 | r5 | Claude SMR | (in-conversation) | PLAN-READY (+N3 folded) |
 | r6 | AGY | adversarial-review-mqha4jpk-tqpy44 (retry; first run empty-result infra) | PLAN-READY |
-| r6 | Codex | (codex-rescue agent, pending) | pending |
+| r6 | Codex | thread 019ed2c7-f57a-72e3-83f6-83daed5d4223 (agent) | PLAN-NEEDS-WORK -> 2 fixes folded v6.2 |

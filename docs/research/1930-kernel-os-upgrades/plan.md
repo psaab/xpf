@@ -1,7 +1,8 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v6.1 — (folds r5 Codex: FLAW-1 the 09_xpf fragment must emit a self-contained default menuentry with implicit boot, not bare linux/initrd; FLAW-2 scrubbed last "slot grub.cfg" residue; FLAW-3 already fixed in v6 [separate non-blocking oneshot]; FLAW-4 install-images.md doc fix promoted to an acceptance item). r5 SMR+AGY+Codex folded; r6 in flight.
+- **Status:** v6.2 — folds r6 Codex agent (2 residual cross-section contradictions): INC-1 ESP sizing no longer mentions per-slot grub.cfg (shim+grub+xpf.selector only); §10 first-boot test exercises the SEPARATE non-blocking .deb oneshot, NOT the day-0 service. r6: SMR PLAN-READY (carried from r4/r5), AGY PLAN-READY, Codex 2-fixes-folded (final verdict pending on v6.2).
+- **(v6.1)** folds r5 Codex — (folds r5 Codex: FLAW-1 the 09_xpf fragment must emit a self-contained default menuentry with implicit boot, not bare linux/initrd; FLAW-2 scrubbed last "slot grub.cfg" residue; FLAW-3 already fixed in v6 [separate non-blocking oneshot]; FLAW-4 install-images.md doc fix promoted to an acceptance item). r5 SMR+AGY+Codex folded; r6 in flight.
 - **(v6)** folds r5 AGY — folds r5 (AGY PLAN-NEEDS-WORK 4 impl-detail flaws; SMR
   PLAN-READY+N3). A4 implementation nailed: (a) `$cmdpath` referenced as a path
   (`source "$cmdpath/xpf.selector"`), never string-compared (device prefix +
@@ -684,7 +685,8 @@ signed repo.
   upgrade kernel <ver>`: **pre-asserts** (UEFI + `efibootmgr` OK; both A/B slots
   registered + active slot first in `BootOrder`; GRUB submenu disabled; watchdog
   present + persistence flag OR Path-D2 override; free `/boot` ≥ kernel+initramfs
-  AND free ESP ≥ slot shim/grub/`grub.cfg` staging, BEFORE install) →
+  AND free ESP ≥ slot shim/grub + `xpf.selector` staging, BEFORE install — no
+  per-slot `grub.cfg` and no kernel on the ESP) →
   unhold→install→rehold (verify update-initramfs/update-grub succeeded) → **stage
   the candidate kernel into `/boot` (NOT the ESP — r4 AGY F3) + point the INACTIVE
   slot's `$cmdpath` selector at it (atomic ESP write)** → `efibootmgr --bootnext <inactive-slot>` (firmware-cleared one-shot) →
@@ -879,8 +881,10 @@ signed repo.
   branch in `/boot/grub/grub.cfg` + persistent-watchdog config + version manifest;
   asserts catch a missing hold (dpkg-query form, not a glob), a moved default, a
   missing slot dir / `$cmdpath` branch, or a missing manifest. **First-boot
-  test:** the day-0 service registers the two `efibootmgr` slots + active-first
-  `BootOrder` on real (virtual UEFI) hardware, preserving platform entries.
+  test:** the SEPARATE non-blocking `.deb`-shipped slot-registration oneshot
+  (NOT `xpf-day0-config`, NOT `Before=xpfd`) registers the two `efibootmgr` slots
+  + active-first `BootOrder` on real (virtual UEFI) hardware, preserving platform
+  entries, idempotently, and degrades (does not crash) on read-only NVRAM.
 - **Live — STANDALONE wipeable test VM (`xpf-fw`, `make test-vm`/`test-deploy`),
   NOT the shared loss cluster's primary:** this is where the NEW boot channel is
   actually exercised end-to-end (per the §10 directive — passing regression
