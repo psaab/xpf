@@ -26,7 +26,7 @@ A password configured under `system login user <name>` never reaches
   and writes `~/.ssh/authorized_keys` (@708) — **but never sets a
   password.**
 
-The `LoginUser` type (`pkg/config/types_system.go:282`) carries only
+The `LoginUser` type (`pkg/config/types_system.go:302`) carries only
 `Name / UID / Class / SSHKeys`. The compiler
 (`pkg/config/compiler_system.go:94-102`) parses only `ssh-ed25519 /
 ssh-rsa / ssh-dsa` under `user … authentication`; it does **not** parse
@@ -119,7 +119,8 @@ surfaced during #1922 SAFE-BOOTSTRAP / #1930.
   flat-set shapes; `nodeVal(authChild)` (compiler.go:1698-1704) is
   shape-agnostic. Same accessor root-auth uses.
 - **Typed-leaf machinery** (#1319): `schemaNode.isTypedLeaf()` (true when
-  `valueType != ValueAny`) drives `SchemaValidate` (schema_walk.go:40) to
+  `valueType != ValueAny`) drives `SchemaValidate` (schema_walk.go:236
+  typed-leaf dispatch) to
   invoke `validator` at commit-check. Setting `valueType: ValueCryptHash,
   validator: ValidateCryptHash` on the leaf is the complete wiring.
 - **Apply ordering** (daemon_apply.go:1021 `applySystemLogin`, :1027
@@ -293,8 +294,8 @@ case pwLock:
     deleted/recreated), it MAY rewrite/remove the stale marker inline.
     No dependency on the early-return path.
   This makes "xpf-managed-this-exact-account" **enforced**, not asserted.
-- **Never** lock root (root is excluded from this loop at @668; handled by
-  `applyRootAuth`).
+- **Never** lock root (root is excluded from this loop at @662-663;
+  handled by `applyRootAuth`).
 - `<user>:!` via `chpasswd -e` produces a locked entry — verified live by
   AGY in r2. (`usermod -L`/`passwd -l` equivalent; chpasswd keeps one
   idiom.)
