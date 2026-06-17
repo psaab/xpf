@@ -3,8 +3,9 @@
 - **Issue**: #1918 (bug) — `probeICMP` (`pkg/routing/tunnel.go`) never sends/receives an
   ICMP echo; both code paths return `true` on socket-open, so a dead GRE/IPIP peer behind a
   valid route is reported up forever and `LinkSetDown` never fires.
-- **Revision**: r2 (SMR r2 PLAN-READY; N1 folded; pending Codex+AGY r2 re-review)
-- **Status**: PLAN-READY candidate (pending r2 three-way re-review)
+- **Revision**: r3 (AGY r2 #5 source-bind folded; SMR r2 PLAN-READY + N1 folded; pending
+  Codex r2 + AGY r3 re-review on this revision)
+- **Status**: PLAN-READY candidate (pending three-way re-review of r3)
 - **Branch**: `research/1918-probe-real-liveness`
 - **Mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
 
@@ -37,6 +38,15 @@
   status string disambiguates.
 - **Nits (Codex F6):** fixed dangling "§6 Option F" → "Axis C"; `pkg/rpm` function is
   `probeDialer` (rpm.go:21) not `vrfDialer`.
+
+## Changelog r2 → r3
+
+- **AGY r2 #5 (source-address bind, MAJOR):** the probe socket must bind to the tunnel's local
+  source IP (`TunnelConfig.Source`), not the wildcard the `monitor.go` precedent uses, so the
+  echo egresses from the tunnel endpoint and the reply routes back correctly (new §5c). Threads
+  `tc.Source` through `startKeepalive` → runner → prober; adds `source` to `keepaliveRunner` and
+  `matches()` so a source change restarts the runner. Prober signature gains a `source` arg.
+- **SMR r2 N1 (startup posture):** folded into §6 Axis C / §10 R1 (already in r2's late edit).
 
 ---
 
@@ -129,6 +139,23 @@ This is the pattern to follow — with the two precedent gaps fixed (§5).
   (documented follow-up); it would need a custom pre-bind socket constructor analogous to
   `pkg/rpm`'s `probeDialer` (`rpm.go:21`, which sets `SO_BINDTODEVICE` in `Dialer.Control` —
   correct for RPM because RPM probes *inside* a routing instance, unlike a tunnel underlay probe).
+- **(5c) Bind the probe socket to the tunnel's local SOURCE IP (AGY r2 #5).** The probe MUST
+  egress from the tunnel's configured local endpoint, `TunnelConfig.Source`
+  (`pkg/config/types_routing.go:296`, "local tunnel endpoint IP"). Bind it via the
+  `ListenPacket` listen address: `icmp.ListenPacket("udp4", tc.Source)` (the library's own
+  documented form, `x/net/icmp/listen_posix.go:32` `ListenPacket("udp4", "192.168.0.1")`), NOT
+  the wildcard `0.0.0.0`/`::` the `monitor.go` precedent uses. Wildcard would let the kernel pick
+  any local egress IP, which on a multi-homed / secondary-IP / policy-routed firewall can differ
+  from the tunnel source — causing (1) ingress-filter drops at the peer/path when the echo does
+  not originate from the expected endpoint, (2) the reply routing back to the wrong local IP and
+  failing the probe, and (3) validating a path different from the one the encapsulated tunnel
+  traffic actually uses. Binding to `tc.Source` makes the probe traverse the same source→dest
+  path as the tunnel's outer encap. This requires threading `tc.Source` into `startKeepalive`
+  (→ runner → prober). Because Source is now a probe input, a Source change must restart the
+  runner: add `source` to `keepaliveRunner` and to `matches()` (`tunnel.go:78-86`) so an
+  apply that changes only the tunnel source re-creates the keepalive. (Edge case: if `tc.Source`
+  is empty/unset — auto-selected tunnels — fall back to wildcard bind and note it in status; a
+  bind error on `tc.Source` is classified `ProbeUnsupported(structural)` per Axis C.)
 
 ## 6. Design — Multiple Path Options
 
@@ -219,7 +246,8 @@ a separate Refactor issue if the `pkg/routing/tunnel/keepalive/` split is still 
 
 ## 7. Recommended Combination
 
-**A1 + (auto A2 if CAP_NET_RAW) + B1 + C1(with transient-escalation) + D + 5a + 5b**, in-package.
+**A1 + (auto A2 if CAP_NET_RAW) + B1 + C1(with transient-escalation) + D + 5a + 5b + 5c**,
+in-package.
 
 1. New typed prober with injected transport in `pkg/routing`:
    ```
@@ -228,11 +256,14 @@ a separate Refactor issue if the `pkg/routing/tunnel/keepalive/` split is still 
    // (optionally carry an UnsupportedKind: Structural | Transient)
 
    type tunnelProber interface {
-       Probe(addr string, seq int, nonce []byte, deadline time.Duration) (ProbeResult, error)
+       // source = tunnel local endpoint IP (TunnelConfig.Source) bound as the
+       // listen address; "" → wildcard. dst = underlay Destination.
+       Probe(source, dst string, seq int, nonce []byte, deadline time.Duration) (ProbeResult, error)
    }
    ```
-   Production impl: `icmp.ListenPacket("udp4"/"udp6", ...)` (NO `SO_BINDTODEVICE`; global table —
-   §5b), build `icmp.Echo{Seq, Data: nonce}`, `WriteTo` the underlay `Destination`, set the
+   Production impl: `icmp.ListenPacket("udp4"/"udp6", source)` — bind to the tunnel local
+   source IP (§5c), NO `SO_BINDTODEVICE`; global table (§5b) — build `icmp.Echo{Seq, Data: nonce}`,
+   `WriteTo` the underlay `Destination`, set the
    absolute deadline, `ReadFrom`-loop discarding datagrams until one has matching `Seq` AND
    `Data==nonce` → Alive; deadline with no match → Dead; `ListenPacket`/socket error →
    Unsupported (classify errno structural vs transient). A test prober is injected on
@@ -242,8 +273,11 @@ a separate Refactor issue if the `pkg/routing/tunnel/keepalive/` split is still 
 4. `GetStatus` keepalive rendering gains the unknown arm; `KeepaliveUp` stays `*bool`, left
    `nil` for unknown.
 
-`startKeepalive` / `matches()` are **unchanged** (VRF is not a probe input — §5b), so Codex F3
-does not require a runner-identity change.
+VRF is NOT a probe input (§5b), so Codex F3's VRF-in-identity concern does not apply. However,
+the tunnel **source** IS now a probe input (§5c): `startKeepalive` gains a `source` parameter
+threaded from `tc.Source` at the call site (`tunnel.go:547`), `keepaliveRunner` gains a `source`
+field, and `matches()` (`tunnel.go:78-86`) gains a `r.source == tc.Source` clause so a
+source-only config change restarts the runner.
 
 ## 8. Blast Radius / Files
 
@@ -276,6 +310,9 @@ Unit (deterministic, injected prober — no real network):
 - Lock-scope regression: a `LinkSetDown` parked in a blocking fake `ops` must NOT block a
   concurrent `GetStatus` (assert `GetStatus` returns within a short timeout while down is parked).
 - Same-name TOCTOU: runner sees an ifindex change → drops its `LinkSet*`.
+- Source bind (§5c): injected prober asserts it receives the tunnel's `tc.Source` as the bind
+  arg; `matches()` returns false when only `tc.Source` changes (runner restarts); empty
+  `tc.Source` → wildcard fallback, bind error on a set source → `ProbeUnsupported(structural)`.
 
 Integration / manual (at `/engineer`; tunnel test path, NOT smoke-cluster-blocking):
 - GRE tunnel to a live peer → keepalive up. Kill the peer (firewall echo / down far end) while
