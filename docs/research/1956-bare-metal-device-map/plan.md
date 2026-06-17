@@ -642,3 +642,78 @@ quick fix — consistent with the issue's "deserves a thorough pass, not a quick
 fix" framing. The PLAN-KILL floor (§11) is unchanged: if even this is judged
 too large, ship ONLY the `unmapped-interface-policy` guard (F2 fix) and accept
 that F1 + the HA/rollback edges stay unsolved.
+
+## 15. r3 review convergence + open implementation-strategy decisions
+
+After r3, the three reviewers converge on the DESIGN being sound; the residual
+items are implementation-strategy choices, not architectural defects:
+
+- **Claude SMR r3: PLAN-READY** (re-verified the HA-sync + rollback gaps it
+  missed in r2; confirms v3 closes them).
+- **Codex r3 companion: PLAN-NEEDS-MINOR**, per-finding text grades the v3
+  designs "directionally sound" and anchored to real code sites. (The Codex
+  agent-wrapper re-graded to MAJOR by applying an IMPLEMENTATION rubric —
+  "the code isn't written yet" — to a research-only plan; that is a category
+  error for a /research plan-review and is recorded but not adopted. See
+  codex-plan-r3.md methodology note.)
+- **AGY r3: PLAN-NEEDS-MAJOR**, but the three findings are framed as
+  "Decision Needed" implementation-strategy tradeoffs, not new architectural
+  defects. They are captured below as OQs to resolve at /engineer time.
+
+These do NOT trip the §11 PLAN-KILL criteria (architecture wrong / identity
+key fragile / breaks the #1922 lifeline). The plan is therefore PLAN-READY
+with the following explicit open implementation-strategy decisions to settle
+in the first implementation increment (and re-review there):
+
+### OQ-15.1 (AGY r3 #1) — HA device-map validation: passive-gate vs distributed pre-commit
+v3's V-1 passive-node admission gate prevents the peer persisting a self-
+lockout map, but AGY notes it can cause node0/node1 config DIVERGENCE (the
+peer holds a different effective map; a later peer commit pushes its config
+back). **Two implementable options, decide at /engineer:**
+(a) **passive gate + health alarm** (v3 as written): simplest, but the peer's
+local section is effectively quarantined until fixed — divergence is surfaced
+loudly, not silent.
+(b) **distributed pre-commit validation**: `commit check` on the active node
+RPCs the peer to validate the peer's device-map section against the peer's
+local hardware before promoting — keeps both stores identical and safe, at the
+cost of a new cross-node commit-time RPC and a peer-unreachable fallback
+policy. **Recommendation: (b) is the cleaner end state** (no divergence), but
+(a) is an acceptable first increment if the cross-node RPC is deferred —
+provided the divergence is alarmed, never silent. The cluster config-sync
+machinery (`daemon_ha_sync.go`) already has a peer channel to build (b) on.
+
+### OQ-15.2 (AGY r3 #2) — rollback split-brain: validate-at-commit-confirmed, apply-unconditionally
+AGY notes that if `executeConfirmedRollback` (daemon_apply.go:222) ABORTS the
+rollback apply for safety, the store (already promoted by `PromoteRollback`)
+diverges from the running dataplane → split-brain. **Decision (adopt AGY's own
+recommendation): do NOT abort at rollback time.** Instead validate the
+rollback target at `commit confirmed` time (v3 V-3(a) already requires this),
+so that by the time a timeout fires the target is KNOWN-safe and is applied
+UNCONDITIONALLY — no rollback-time abort, no split-brain. The v3 V-3(b)
+"conservative branch in executeConfirmedRollback" is therefore narrowed to: it
+fires ONLY for the pre-existing #1922 first-commit-rollback case
+(prevCfg==nil, daemon_apply.go:232) which already has a defined non-apply
+path; for a non-nil validated rollback target it applies unconditionally.
+This supersedes the looser V-3(b) wording.
+
+### OQ-15.3 (AGY r3 #3) — temp-rename stranding of unmapped NICs
+v3's V-2 multi-pass rename moves a name-conflicting NIC to `xpf-tmp-<n>`; AGY
+notes an unmapped NIC left at `xpf-tmp-0` could later confuse the V-4 teardown
+name-matching (which keys off the `.link` set). **Decision:** the multi-pass
+rename phase MUST, in the SAME pass, rename any temp-stranded NIC that is
+unmapped/leave-alone back to its host-predictable name (via the OQ V-6 udev-db
+discovery) rather than leaving it as `xpf-tmp-*`. The "previously managed"
+state source for teardown (V-4) is the `10-xpf-*.link` glob, and a leave-alone
+NIC must have its `.link` removed in this same pass so it is never matched as
+"managed". This tightens V-2+V-4 into a single coherent rename/teardown pass.
+
+### Convergence statement
+The architecture (hybrid stable-identity managed allowlist; PCI-primary +
+permanent-MAC fallback; opt-in stanza; `leave-alone` default flipping the
+dangerous bring-down) is endorsed by all three reviewers across three rounds.
+The identity key is durable for the primary target (PF/onboard NICs) with
+loud, explicit handling of the cases it is not (VFs, slot swaps, empty
+perm-MAC). The #1922 lifeline composition is preserved and EXTENDED to the
+HA-sync and rollback paths. The three open items above are implementation
+sequencing/strategy choices with recommended resolutions, to be locked and
+re-reviewed in the first /engineer increment. **PLAN-READY.**
