@@ -1,7 +1,13 @@
 # #1930 — Major underlying VM/OS + kernel upgrades (plan-of-action)
 
 - **Issue:** #1930 (deferred from #1917)
-- **Status:** v6.2 — folds r6 Codex agent (2 residual cross-section contradictions): INC-1 ESP sizing no longer mentions per-slot grub.cfg (shim+grub+xpf.selector only); §10 first-boot test exercises the SEPARATE non-blocking .deb oneshot, NOT the day-0 service. r6: SMR PLAN-READY (carried from r4/r5), AGY PLAN-READY, Codex 2-fixes-folded (final verdict pending on v6.2).
+- **Status:** v6.2 — CONVERGED PLAN-READY (Claude SMR + AGY + Codex all
+  re-reviewed the FINAL revision). r6 Codex agent found 2 residual cross-section
+  contradictions (INC-1 ESP sizing still mentioned per-slot grub.cfg; §10
+  first-boot test assigned NVRAM registration to the day-0 service); both folded
+  in v6.2, and the Codex r6-final confirm-only re-check on v6.2 returned
+  PLAN-READY ("the two residual contradictions are resolved"). Ready for
+  /engineer.
 - **(v6.1)** folds r5 Codex — (folds r5 Codex: FLAW-1 the 09_xpf fragment must emit a self-contained default menuentry with implicit boot, not bare linux/initrd; FLAW-2 scrubbed last "slot grub.cfg" residue; FLAW-3 already fixed in v6 [separate non-blocking oneshot]; FLAW-4 install-images.md doc fix promoted to an acceptance item). r5 SMR+AGY+Codex folded; r6 in flight.
 - **(v6)** folds r5 AGY — folds r5 (AGY PLAN-NEEDS-WORK 4 impl-detail flaws; SMR
   PLAN-READY+N3). A4 implementation nailed: (a) `$cmdpath` referenced as a path
