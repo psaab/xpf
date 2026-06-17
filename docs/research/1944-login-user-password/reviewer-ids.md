@@ -26,3 +26,10 @@ Records Codex task ids + AGY job ids per round.
 | r5 | Codex | (pending) | pending |
 | r5 | AGY | (pending) | pending |
 | r5 | Claude SMR | claude-smr-plan-r4.md (carries r5 reqs) | pending |
+
+## r5 (CONVERGED — PLAN-READY x3)
+| Round | Reviewer | ID / artifact | Verdict |
+|-------|----------|---------------|---------|
+| r5 | Codex | task 019ed4a6-162a-7a83-8f96-48e7524a42ea / codex-plan-r5 (in reviewer-ids) | PLAN-READY |
+| r5 | AGY | adversarial-review-mqht5t9s-7x8euk / agy-plan-r5.md (attempt 1 mqhsosc4 timed out, retried) | PLAN-READY |
+| r5 | Claude SMR | claude-smr-plan-r5.md | PLAN-READY |
