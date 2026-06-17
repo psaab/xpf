@@ -3,9 +3,9 @@
 - **Issue**: #1918 (bug) — `probeICMP` (`pkg/routing/tunnel.go`) never sends/receives an
   ICMP echo; both code paths return `true` on socket-open, so a dead GRE/IPIP peer behind a
   valid route is reported up forever and `LinkSetDown` never fires.
-- **Revision**: r6 (AGY r5 deadlock note folded — runner never takes `t.mu`, gen token is
-  `atomic.Uint64`; AGY r5 PLAN-READY; SMR r5 PLAN-READY; pending Codex r5 confirmation on r5/r6)
-- **Status**: PLAN-READY candidate (AGY r5 + SMR r5 READY; Codex r5 in flight)
+- **Revision**: r6 — CONVERGED (Codex + AGY + Claude SMR all PLAN-READY on r6)
+
+- **Status**: PLAN-READY (3-way converged; awaiting manual /engineer 1918)
 - **Branch**: `research/1918-probe-real-liveness`
 - **Mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
 

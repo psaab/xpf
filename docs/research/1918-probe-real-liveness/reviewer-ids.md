@@ -23,3 +23,16 @@ AGY result files: ~/.claude/plugins/data/agy-claude-code-agy/state/jobs/<id>.res
   independently regards as correct and non-controversial — SMR has no objection to r3. PLAN-READY.
 - Codex: r1 PLAN-NEEDS-WORK fully addressed across r2/r3; r3 confirmation pending the in-flight
   Codex r3 agent.
+
+## FINAL convergence — r6 (all three re-reviewed the FINAL revision)
+| r4 | Codex | 019ed443 (codex-plan-r4.md) | PLAN-NEEDS-WORK (F7) |
+| r4 | AGY | adversarial-review-mqhouo86-sagjkm (agy-plan-r4.md) | PLAN-READY |
+| r4 | Claude SMR | claude-smr-plan-r4.md | PLAN-READY |
+| r5 | Codex | 019ed448 (codex-plan-r5.md) | PLAN-KILL (deadlock == AGY r5 #1; fixed in r6) |
+| r5 | AGY | adversarial-review-mqhp1w6s-iwct4x (agy-plan-r5.md) | PLAN-READY (+deadlock note) |
+| r5 | Claude SMR | claude-smr-plan-r5.md | PLAN-READY |
+| **r6** | **Codex** | **019ed44d (codex-plan-r6.md)** | **PLAN-READY** |
+| **r6** | **AGY** | **adversarial-review-mqhp84x7-b0wx28 (agy-plan-r6.md)** | **PLAN-READY** |
+| **r6** | **Claude SMR** | **claude-smr-plan-r6.md** | **PLAN-READY** |
+
+CONVERGED at r6: all three reviewers PLAN-READY on the FINAL revision.
