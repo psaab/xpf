@@ -2,7 +2,7 @@
 
 - **Issue**: #1944
 - **Branch**: `research/1944-login-user-password`
-- **Revision**: r3 (addresses convergent r2 D2-logic findings from Codex + AGY + Claude SMR)
+- **Revision**: r4 (addresses convergent r3 provenance + validator findings from Codex + AGY + Claude SMR)
 - **Mode**: `/research` — STOPS at PLAN-READY. No PR, no production code.
 - **Base**: origin/master `004c6eaf4` — all code refs anchored to this base.
 
@@ -62,8 +62,10 @@ surfaced during #1922 SAFE-BOOTSTRAP / #1930.
    "-e")`** (NOT a raw `exec.Command` — r1/S-2,F-3 fix), idempotent, logs
    on apply, warns on failure.
 3. Commit-check **hard-rejects** (at operator commit; warning-only on
-   boot/peer-sync — see §5.6) a value that is not a recognizable crypt(3)
-   hash, including rejecting bare locked sentinels and plaintext.
+   boot/peer-sync — see §5.6) **plaintext and other unrecognized
+   non-hash values**. Bare lock sentinels (`*`, `!`, `!!`) are
+   deliberately **accepted** (the intentional way to lock an account /
+   the only way to lock root via config — r3 Minor-1).
 4. Tab-completion + `?` help under `login user … authentication` lists
    `encrypted-password` and the `ssh-*` leaves (closes the schema
    asymmetry the compiler already half-implements).
@@ -99,11 +101,11 @@ surfaced during #1922 SAFE-BOOTSTRAP / #1930.
 | File | Location | Role |
 |------|----------|------|
 | `pkg/config/types_system.go` | `LoginUser` @302; `RootAuthConfig` @151 | Add `EncryptedPassword string` to `LoginUser`. |
-| `pkg/config/compiler_system.go` | `case "authentication":` @94-102; root-auth @130-141 | Add `case "encrypted-password":` → `user.EncryptedPassword = nodeVal(authChild)`. |
+| `pkg/config/compiler_system.go` | `case "authentication":` @94-102; root-auth @131-141 | Add `case "encrypted-password":` → `user.EncryptedPassword = nodeVal(authChild)`. |
 | `pkg/config/schema_system.go` | `login user` @66-71; `root-authentication` @31-36 | Give `authentication` under `login user` a children map (encrypted-password typed leaf + ssh-ed25519/rsa/dsa). E1: add typed-leaf to root-auth `encrypted-password` @32. |
 | `pkg/config/schema_validators.go` | new `ValidateCryptHash` | crypt(3) hash validator (precise spec §5.5). |
 | `pkg/config/value_type.go` | `ValueType` enum + `Placeholder()` | Add `ValueCryptHash` + a `Placeholder()` arm. |
-| `pkg/config/schema_walk.go` | typed-leaf dispatch @40,89,298,331 | No change (consumes `valueType`+`validator`). |
+| `pkg/config/schema_walk.go` | typed-leaf dispatch @236 (`isTypedLeaf()` @schema.go:97); validator invocation downstream | No change (consumes `valueType`+`validator`). |
 | `pkg/daemon/daemon_system.go` | `applySystemLogin` @656-721; `applyRootAuth` @774; `exec_timeout.go` `runCommandStdinTimeout` | Apply/lock password via `runCommandStdinTimeout(…, "chpasswd","-e")`, idempotent; new pure `passwordAction` decision helper + `currentShadowHash` (direct `/etc/shadow` read) + `isLockedShadow` + provenance marker. |
 | `pkg/configstore/check.go` | SchemaValidate gate @13 | No change (validator auto-runs through the gate). |
 | `pkg/daemon/daemon_apply.go` | apply calls @1021 (`applySystemLogin`), @1027 (`applyRootAuth`) | No change (call sites; ordering unchanged). |
@@ -224,10 +226,11 @@ case pwApply:
         slog.Warn("failed to set user password", "user", user.Name,
             "err", err, "output", strings.TrimSpace(string(out)))
     } else {
+        markProvisioned(user.Name) // xpf now manages this password (r3/Major-1)
         slog.Info("user encrypted-password applied", "user", user.Name)
     }
 case pwLock:
-    if !xpfProvisioned(user.Name) { break } // only lock accounts xpf created (S2-2)
+    if !xpfProvisioned(user.Name) { break } // only lock accounts xpf manages
     stdin := strings.NewReader(user.Name + ":!\n")
     if out, err := runCommandStdinTimeout(stdin, "chpasswd", "-e"); err != nil {
         slog.Warn("failed to lock user password", "user", user.Name,
@@ -247,13 +250,25 @@ case pwLock:
   passwordless (`passwd -d`), the MOST permissive state — NOT locked, so
   D2 locks it (r2/S2-1, Codex New-Fatal-1 + AGY Finding-1, found
   independently). (`!!` and `!<hash>` match `HasPrefix("!")`.)
-- **Provenance** (r2/S2-2, Codex New-Fatal-2): on `useradd` success drop a
-  marker `/var/lib/xpf/provisioned-users/<name>` (dir 0700);
-  `xpfProvisioned(name)` checks it. `pwLock` runs ONLY for provisioned
-  accounts — never locks a pre-existing out-of-band account referenced in
-  config. `pwApply` does NOT require the marker (an explicitly-configured
-  password is the operator's intent regardless of who created the user).
-  This makes "provisioned-only" **enforced**, not asserted.
+- **Provenance** (r2/S2-2 + r3 Major-1/AGY-r3-defect-1 + AGY-r3-defect-2):
+  a marker `/var/lib/xpf/provisioned-users/<name>` (dir 0700) records
+  that **xpf manages this account's password**. `markProvisioned(name)`
+  drops it; `xpfProvisioned(name)` checks it. Lifecycle:
+  - Dropped on **both** successful `useradd` AND successful `pwApply` —
+    so once xpf has written a password (even to a pre-existing or
+    pre-r3/marker-wiped account), removing the directive will lock it.
+    Fixes the r3 Major-1 orphan (set-then-remove never revoking)
+    independently flagged by Codex (Major-1) and AGY (defect-1).
+  - **GC'd** (marker file removed) for any username present in
+    `/var/lib/xpf/provisioned-users/` but **no longer in**
+    `cfg.System.Login.Users`, at the top of `applySystemLogin`. Prevents
+    the stale-marker leakage AGY-r3-defect-2 (operator removes a user,
+    `userdel`s + recreates out-of-band, re-references in config without a
+    password → stale marker would otherwise lock the new account). After
+    GC, a re-added out-of-band account has no marker → `pwLock` skips it.
+  - `pwLock` runs ONLY when the marker exists → never locks an
+    out-of-band account xpf never wrote a password for.
+  This makes "xpf-managed-only" **enforced**, not asserted.
 - **Never** lock root (root is excluded from this loop at @668; handled by
   `applyRootAuth`).
 - `<user>:!` via `chpasswd -e` produces a locked entry — verified live by
@@ -267,26 +282,35 @@ func ValidateCryptHash(raw string, _ *Config) error
 ```
 Accept (case-sensitive):
 1. **Modular crypt**: optional leading `!` or `!!` (locked-but-restorable
-   form), then `$<id>$` with `<id>` ∈ {`1`,`2a`,`2b`,`2y`,`5`,`6`,`7`,
-   `y`,`gy`}, then a non-empty body using the alphabet
-   `[./0-9A-Za-z$=,+-]` (crypt base64 is `./0-9A-Za-z`; `$` separates
-   fields; `=` and `,` appear in `rounds=` / yescrypt params), with at
-   least one `$` after the id (salt present). **`=` MUST be in the
-   alphabet** (AGY #1 / S-5).
-2. **Legacy DES**: 13 chars from `[./0-9A-Za-z]` (optional leading `!`).
-3. **Explicit lock sentinels**: a bare `*`, `!`, or `!!` (r2/S2-3, AGY
-   Finding-2). These are the *intentional* Unix way to lock an account
-   and are the ONLY way to lock root via `root-authentication
-   encrypted-password "*"` (root is excluded from D2 auto-lock). Accepting
-   them is NOT the original F-1 footgun — that footgun was **plaintext**
-   being silently accepted, not a deliberate sentinel.
+   form), then `$<id>$<salt>$<checksum>` where `<id>` ∈ {`1`,`2a`,`2b`,
+   `2y`,`5`,`6`,`7`,`y`,`gy`}, `<salt>` is non-empty (may itself contain
+   `$`-separated params such as `rounds=N` for `$5$`/`$6$` or yescrypt
+   `$y$` params), and **`<checksum>` (the segment after the FINAL `$`) is
+   non-empty** (r3 Major-3 — `$6$salt$` with an empty checksum is
+   rejected: it would write a malformed shadow field PAM rejects). The
+   alphabet for salt/checksum is `[./0-9A-Za-z]`; field separators are
+   `$`; `rounds=N` introduces `=` so `=` is allowed **inside a param
+   field only** (AGY r2 #1). Concretely: at least two `$` after the id,
+   and a non-empty final field.
+2. **Explicit lock sentinels**: a bare `*`, `!`, or `!!` (r2/S2-3, AGY
+   r2 Finding-2). The *intentional* Unix way to lock an account, and the
+   ONLY way to lock root via `root-authentication encrypted-password "*"`
+   (root is excluded from D2 auto-lock). Accepting these is NOT the F-1
+   footgun — that was **plaintext** silently accepted, not a deliberate
+   sentinel.
+**Legacy DES dropped** (r3 Major-2): a 13-char crypt-base64 string was
+in r3, but it makes plaintext-rejection non-absolute — `"password12345"`
+(13 alnum) would pass and write garbage to shadow. No Junos operator
+ships DES; dropping it makes "reject plaintext" a hard guarantee.
 Reject:
-- Anything not matching cases 1-3 — in particular **plaintext** (no `$`,
-  not a 13-char DES hash, not a bare sentinel). This is the real F-1
-  footgun: an operator pasting their cleartext password into
-  `encrypted-password`. Empty string is also rejected at the leaf (a
-  typed leaf requires a value; "no password" is expressed by omitting
-  the directive, which D2 handles).
+- Anything not matching cases 1-2 — in particular **plaintext** (no `$`,
+  not a bare sentinel). This is the real F-1 footgun: an operator pasting
+  cleartext into `encrypted-password`. With DES gone this is now
+  absolute. Empty string is also rejected at the leaf (a typed leaf
+  requires a value; "no password" is expressed by omitting the directive,
+  which D2 handles).
+- A modular hash with an empty final field (`$6$salt$`, `$6$$x` where the
+  salt is empty) — r3 Major-3.
 - `:` anywhere (would corrupt `chpasswd` stdin `user:hash`) — excluded
   by the alphabet; add an explicit negative test (S-7/M-2).
 - Control chars are independently hard-rejected at strict commit by the
@@ -320,10 +344,12 @@ validator to keep dummy values green (AGY #4). Update both the input
 string and the assertion.
 
 ### 5.8 Commit-check warning (optional, parity with root warning)
-A commit warning when a `login user` has neither `encrypted-password`
-nor `ssh-*` keys (account unreachable) mirrors the existing root warning
-style (compiler.go:699-707). **Decision**: include it — directly
-addresses the "can't log in" bug class. Low cost.
+A commit warning when a `login user` has **no usable auth method** —
+i.e. no `ssh-*` keys AND (no `encrypted-password` OR an
+`encrypted-password` that is a bare lock sentinel `*`/`!`/`!!`) (r3
+Minor-2 — a sentinel password is not a usable login path). Mirrors the
+existing root warning style (compiler.go:699-707). **Decision**: include
+it — directly addresses the "can't log in" bug class. Low cost.
 
 ---
 
@@ -382,10 +408,12 @@ only) rejected — leaves root unvalidated for no real saving.
    flat-set compiled output equals the hierarchical compiled output.
 3. **Validator table test** (`ValidateCryptHash`):
    - Accept: `$6$salt$hash`, `$6$rounds=656000$salt$hash` (the `=` case),
-     `$y$j9T$…`, `$2b$…`, 13-char DES, `!$6$salt$hash` (locked-restorable),
+     `$y$j9T$salt$hash`, `$2b$10$…`, `!$6$salt$hash` (locked-restorable),
      **bare `*`, `!`, `!!`** (explicit lock — r2/S2-3).
-   - Reject: `plaintext`, ``(empty), `$99$bogus`, `$6$` (no salt body),
-     `$6$salt:hash` (colon), `$6$ab cd` (space).
+   - Reject: `plaintext`, `password12345` (13 alnum — r3 Major-2, the
+     DES-drop case), ``(empty), `$99$bogus`, `$6$` (no salt body),
+     **`$6$salt$`** (empty checksum — r3 Major-3), **`$6$$hash`** (empty
+     salt), `$6$salt:hash` (colon), `$6$ab cd` (space).
 4. **SchemaValidate / commit-check**: a config with a plaintext per-user
    `encrypted-password` fails `SchemaValidate` (hard gate); a valid hash
    passes. Mirror for root-auth (E1) — including that
@@ -405,8 +433,18 @@ only) rejected — leaves root unvalidated for no real saving.
 7. **`isLockedShadow` table test**: `""`→false, `"*"`→true, `"!"`→true,
    `"!!"`→true, `"!$6$x"`→true, `"$6$x"`→false.
 8. **`currentShadowHash` parse**: given a sample `/etc/shadow` line, returns
-   field-2 + ok; missing user → `("",false)`. (`chpasswd` exec +
-   provenance marker IO are integration/smoke.)
+   field-2 + ok; missing user → `("",false)`. (`chpasswd` exec is
+   integration/smoke.)
+9. **Provenance marker lifecycle** (r3 Major-1 / AGY-r3 defects) — use a
+   temp marker dir injected for the test:
+   - `markProvisioned` then `xpfProvisioned` → true; absent → false.
+   - **Set-then-marker invariant**: after a `pwApply`, the marker exists
+     (so a subsequent directive removal would `pwLock`). Covers the
+     orphan: apply on an initially-unmarked user, then remove → lock
+     fires (Codex Major-1 + AGY defect-1).
+   - **GC**: marker present for a user NOT in `cfg.System.Login.Users` →
+     `applySystemLogin`'s GC removes it; a later out-of-band re-add with
+     no password → no marker → `pwLock` skips (AGY-r3 defect-2).
 
 ### Smoke (loss userspace cluster — confirmatory, optional)
 Control-plane-only change, no dataplane/forwarding impact → no perf
@@ -456,19 +494,21 @@ smoke. Minimal live check:
 
 ---
 
-## 9. Open Questions for Reviewers (r3 — narrowed)
+## 9. Open Questions for Reviewers (r4 — narrowed)
 
 1. **Provenance store**: marker file `/var/lib/xpf/provisioned-users/<name>`
-   vs an `/etc/shadow` comment vs reusing the sudoers file we already own.
-   Plan leans the marker dir (survives reboot, explicit, no parse of
-   another file). OK, or prefer a different provenance store?
-2. **Validator id superset**: accept `$7$` (scrypt) + `$gy$` in addition
-   to the universal set? Plan says accept (OS is final authority).
-3. **D2 scope**: lock-on-removal applies only to xpf-provisioned users
-   still in config. Confirm we are NOT taking on full deprovisioning
-   (`userdel`) here, and that out-of-band accounts are left alone.
-4. **Commit warning** (§5.8) for users with no auth method at all —
-   include? Plan says yes.
+   (dropped on useradd AND pwApply, GC'd when the user leaves config) vs
+   an `/etc/shadow` comment vs reusing the sudoers file. Plan leans the
+   marker dir (survives reboot, explicit, no parse of another file). OK,
+   or prefer a different store? Note `/var/lib/xpf` must be persistent
+   (it already holds the config DB + archive — confirmed durable).
+2. **Validator id superset**: accept `$7$` (scrypt) + `$gy$` beyond the
+   universal set? Plan says accept (OS is final authority).
+3. **Legacy DES drop** (r3 Major-2): plan drops 13-char DES support to
+   make plaintext-rejection absolute. Confirm no operator relies on DES
+   (none should on Debian 13). If any did, they would re-hash.
+4. **Commit warning** (§5.8) for users with no *usable* auth method
+   (no keys AND no non-sentinel password) — include? Plan says yes.
 
 ## 10. Documentation Updates
 
@@ -502,4 +542,5 @@ AGY all PLAN-READY on the final revision.
 |-------|-----------|-------|-----|
 | r1    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
 | r2    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
-| r3    | pending | pending | pending |
+| r3    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
+| r4    | pending | pending | pending |

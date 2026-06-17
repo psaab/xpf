@@ -10,6 +10,9 @@ Records Codex task ids + AGY job ids per round.
 | r2 | Codex | task 019ed488-dcaf-7ad1-9e62-193a57045937 / codex-plan-r2.md | PLAN-NEEDS-WORK |
 | r2 | AGY | adversarial-review-mqhrjlym-hk0rff / agy-plan-r2.md | PLAN-NEEDS-WORK |
 | r2 | Claude SMR | claude-smr-plan-r2.md | PLAN-NEEDS-WORK |
-| r3 | Codex | (pending) | pending |
-| r3 | AGY | (pending) | pending |
-| r3 | Claude SMR | claude-smr-plan-r2.md (carries r3 reqs) | pending |
+| r3 | Codex | task 019ed492-c170-72a0-a794-229b20731d8e / codex-plan-r3.md | PLAN-NEEDS-WORK |
+| r3 | AGY | adversarial-review-mqhrxltf-cdo2ji / agy-plan-r3.md | PLAN-NEEDS-WORK |
+| r3 | Claude SMR | claude-smr-plan-r3.md | PLAN-NEEDS-WORK |
+| r4 | Codex | (pending) | pending |
+| r4 | AGY | (pending) | pending |
+| r4 | Claude SMR | claude-smr-plan-r3.md (carries r4 reqs) | pending |
