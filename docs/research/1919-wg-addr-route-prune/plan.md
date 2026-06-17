@@ -2,7 +2,8 @@
 
 - **Issue**: #1919 — routing: removing a WireGuard tunnel leaks its kernel
   addresses + FRR routes (persistent wgN bypasses address reconcile)
-- **Revision**: r1 (DRAFT — pre-review)
+- **Revision**: r2 (post-r1 triple review — Claude SMR + Codex + AGY all
+  PLAN-NEEDS-MAJOR; three converged findings folded in)
 - **Branch**: `research/1919-wg-addr-route-prune` off `origin/master`
   @ `ee3f336d3` (post-#1918, post-#1947)
 - **Status**: PLAN DRAFT — research-only; STOP at PLAN-READY
@@ -103,9 +104,25 @@ routes" portion of the issue by clarification rather than code.
 
 A reviewer who insists on an FRR code path must produce a concrete code
 location where WG config synthesizes a managed-section route. None was
-found in `pkg/frr/` (config_render.go, manager.go, daemon_ipmon.go all
-walked). If one is produced during review, this plan escalates to add a
-withdrawal hook; until then, the address prune is the complete fix.
+found — confirmed independently by all three r1 reviewers. Grep evidence:
+`assembleFRRConfig` (`daemon_ipmon.go:89-153`, the SOLE production
+FullConfig constructor — guarded by `frr_fullconfig_guard_test.go`) reads
+only `RoutingOptions.{StaticRoutes,Inet6StaticRoutes,GenerateRoutes}` +
+per-instance static routes + protocols/DHCP/policy/interface-hints —
+never tunnel/WG config; `WgAllowedIPs` is decap-only
+(`types_routing.go:325-332`, confirmed in `userspace-dp` wg engine.rs —
+AllowedIPs is a decap inner-src gate, not egress LPM).
+
+**r1 nuance (Codex/AGY)**: FRR CAN redistribute the kernel **connected**
+route of a wgN address if a `direct`→`connected` redistribution policy is
+configured (`policy_render.go:62`). But that route exists ONLY because of
+the leaked kernel connected route, which is auto-removed by the kernel the
+instant its address is `AddrDel`'d. So fixing the address leak ALSO
+removes any redistributed-connected FRR route — no separate FRR
+withdrawal hook is needed. This strengthens, not weakens, the "address
+prune is the complete fix" conclusion. If a reviewer produces a WG→FRR
+**static** route path, this plan escalates to add a withdrawal hook;
+none exists today.
 
 ---
 
@@ -185,31 +202,72 @@ loop). Each `Apply`:
 1. Build `wgDesired` = set of `tc.Name` for current `Mode=="wireguard"`.
 2. **Prune phase** (new), run alongside the existing GRE removal loop:
    for each `name` in the **old** `wgConfigured` not in `wgDesired`:
-   - look up the link (`LinkByName`); if found, call
-     `reconcileLinkAddrsLocked(link, name, nil, t.appliedAddrs[name],
-     "wireguard tun")` → strips manager-applied addresses (empty desired
-     set), honoring the link-local applied gate (kernel autoconf fe80
-     never touched).
-   - **Keep the link** — never `LinkDel` (that is the #1432 invariant).
-   - Optionally VRF-unbind (see §4a) — keep narrow for now.
-   - `delete(t.appliedAddrs, name)` once pruned (idempotent: a second
-     commit finds `name` no longer in old `wgConfigured`, so no-op).
-   - If `LinkByName` fails (device already gone — manual `ip link del`),
-     just `delete(t.appliedAddrs, name)` and drop tracking.
-   - If `reconcileLinkAddrsLocked` leaves residual tracked addresses
-     because an `AddrDel` failed, **retain** the name in the next
-     `wgConfigured` so the next commit retries (mirrors GRE
-     removal-retry at :197). Detect residual via the returned applied
-     set being non-empty.
-3. After the per-tunnel apply loop, set `t.wgConfigured = wgDesired`
-   plus any retained-for-retry names.
+   - look up the link (`LinkByName`):
+     - On **success**: call the **new dedicated prune helper**
+       `pruneAppliedAddrsLocked(link, name, t.appliedAddrs[name])`
+       (see r2 design note below). It deletes every present non-link-
+       local address (matching the steady-state reconcile's
+       non-link-local semantics) plus configured/applied link-locals,
+       honoring the same autoconf-fe80 gate, and **returns the set of
+       addresses whose `AddrDel` FAILED across ALL families**. **Keep
+       the link** — never `LinkDel` (#1432 invariant).
+     - If the returned failed-set is **non-empty**: retain
+       `t.appliedAddrs[name] = failedSet` and `nextWG[name] = true`
+       (retry next apply — mirrors GRE removal-retry at :194-198).
+     - If the failed-set is empty (clean prune): `delete(t.appliedAddrs,
+       name)` and DROP `name` from `nextWG`.
+     - On **`LinkByName` error**: gate on `isLinkNotFound(err)`
+       (`pkg/routing/vrf.go:151`). If **not-found** (device genuinely
+       gone via manual `ip link del`): `delete(t.appliedAddrs, name)`
+       and drop. If a **transient** error (EBUSY/netlink/timeout):
+       RETAIN `nextWG[name] = true` and keep `appliedAddrs[name]` so the
+       next apply retries — do NOT drop tracking on a transient lookup
+       failure (r1 Codex/AGY MAJOR: dropping would forget a still-leaked
+       address forever).
+   - VRF residual: left as-is (see §4a A1).
+3. After the per-tunnel apply loop, set `t.wgConfigured = nextWG`
+   (= `wgDesired` ∪ retained-for-retry names).
+
+#### r2 design note — why a dedicated `pruneAppliedAddrsLocked`, NOT `reconcileLinkAddrsLocked(…, nil, …)`
+
+r1 review (all three reviewers, MAJOR) proved the original idea —
+inferring "AddrDel failed, retry" from `len(remaining)>0` of
+`reconcileLinkAddrsLocked` — is **broken**: that function only records a
+failed delete into its returned `newApplied` when the address is
+**link-local** (`tunnel.go:618`); a failed `AddrDel` of a regular v4/v6
+address returns an **empty** set, so the retry signal never fires and the
+leaked address is silently dropped from tracking and never retried.
+
+Two ways to fix; r2 chooses (b):
+
+- **(a)** change `reconcileLinkAddrsLocked` to also record non-link-local
+  failed deletes — REJECTED: that function's return contract is consumed
+  by the GRE/anchor/still-configured-WG callers and is carefully
+  specified per #1884/#1905; widening its semantics risks rippling into
+  those paths.
+- **(b CHOSEN)** add a small, removal-only helper
+  `pruneAppliedAddrsLocked(link, name, applied) (failed map[string]bool)`
+  that:
+  1. `AddrList`s the device,
+  2. for each present address: skip autoconf/foreign link-local
+     (`a.IP.IsLinkLocalUnicast() && (applied==nil || !applied[key])` —
+     identical gate to `reconcileLinkAddrsLocked:611`), otherwise
+     `AddrDel`,
+  3. on `AddrDel` failure record `failed[key]=true` for **every** family
+     (the fix — not just link-local),
+  4. returns `failed`.
+  `reconcileLinkAddrsLocked` is left **untouched** (frozen contract).
+
+This makes the retry signal correct **by construction** for all families
+and keeps the steady-state reconcile contract stable.
 
 **Pros**: symmetric with the existing `ownedNames` retry pattern; reuses
-`reconcileLinkAddrsLocked` and `appliedAddrs` verbatim; idempotent;
-link preserved; minimal new state (one map). Tested pattern in this file.
+`appliedAddrs` + the link-local gate; idempotent; link preserved; the new
+helper is ~15 lines and isolates removal-prune failure tracking from the
+steady-state reconcile contract.
 
-**Cons**: one more reconcile map to keep in sync across `clearLocked`
-(must reset it too) and `ensureReconcileStateLocked` (must lazily init).
+**Cons**: one new small helper + one new reconcile map to keep in sync
+across `clearLocked` (reset) and `ensureReconcileStateLocked` (lazy init).
 
 ### Path B — Flush all addresses on any wgN that is up-but-unconfigured
 
@@ -234,6 +292,28 @@ already maintains, keeps the persistent link per #1432, and adds one
 narrowly-scoped state map with the same retry discipline as the existing
 GRE removal loop.
 
+### 4b. Prune scope — what addresses get deleted (r2 correction)
+
+r1 review (all three) flagged that the plan said "manager-applied
+addresses only". That is **wrong** and now corrected: the removal prune
+deletes **every present non-link-local address** on the device
+(`AddrDel` for all of them), and for **link-local** it deletes only the
+configured/applied ones (autoconf/foreign fe80 gated out). The
+`appliedAddrs[name]` set gates link-local deletion ONLY — it does NOT
+restrict non-link-local deletion. This is **identical** to the
+steady-state reconcile (`reconcileLinkAddrsLocked` deletes all present-
+but-unwanted non-link-local addresses regardless of `applied`), so the
+removal prune is consistent with how the manager already treats the
+device while configured. Consequence to STATE in the PR + docs: if an
+operator manually `ip addr add`'d a non-fe80 address to a configured wgN,
+that address would also be removed on tunnel-removal prune — exactly as
+it would be removed on any steady-state reconcile today. This is intended
+"the manager owns the device's non-link-local address set" behavior, not
+a new hazard. (If reviewers want strict applied-only deletion, the helper
+can intersect with `applied`, but that would DIVERGE from steady-state
+semantics and risk leaving a manager-applied address behind if it fell
+out of `applied` tracking — not recommended.)
+
 ### 4a. VRF unbind on WG removal — scope decision
 
 `applyWireguardTunLocked` VRF-binds at `:883-888` but does NOT use
@@ -255,6 +335,14 @@ enslaved to `vrf-<ri>`. Two choices:
 Decision: **A1** — addresses only, VRF residual documented. If a
 reviewer demands VRF unbind, escalate to A2 as a follow-up, not this PR.
 
+**r2 nit (AGY)**: a RELATED pre-existing gap to call out (NOT introduced
+by this PR, NOT fixed by it): a WG tunnel that STAYS configured but has
+its `routing-instance` removed also never unbinds (`applyWireguardTunLocked`
+binds at `:883-888` but has no unbind-on-empty path). This is the same
+root cause (WG bypasses `reconcileVRFClaimLocked`/`appliedRI`) and is in
+scope for the A2 / #1434 VRF follow-up, not this address-leak fix.
+Document both VRF residuals together so the follow-up has a clear target.
+
 ---
 
 ## 5. Detailed implementation sketch (Path A)
@@ -270,7 +358,46 @@ wgConfigured map[string]bool
 
 `ensureReconcileStateLocked`: add `if t.wgConfigured == nil { … }`.
 
-`Apply`:
+New helper (removal-only; leaves `reconcileLinkAddrsLocked` untouched):
+```go
+// pruneAppliedAddrsLocked deletes the addresses this manager owns from a
+// link being pruned (WG removal), keeping the link. Deletes every
+// present non-link-local address, plus configured/applied link-locals;
+// the kernel autoconf/foreign fe80 is never touched (same gate as
+// reconcileLinkAddrsLocked). Returns the set of addresses whose AddrDel
+// FAILED — across ALL families — so the caller can retain+retry. Caller
+// MUST hold mu.
+func (t *tunnelManager) pruneAppliedAddrsLocked(link netlink.Link, name string, applied map[string]bool) map[string]bool {
+    failed := map[string]bool{}
+    list, err := t.ops.AddrList(link, netlink.FAMILY_ALL)
+    if err != nil {
+        // Could not enumerate — treat as "all still present": retain the
+        // tracked set so the next apply retries. (If applied is empty,
+        // returns empty → caller drops, which is correct: nothing to do.)
+        for k := range applied { failed[k] = true }
+        return failed
+    }
+    for i := range list {
+        a := list[i]
+        if a.IP == nil { continue } // unclassifiable: never delete
+        key := a.IPNet.String()
+        if a.IP.IsLinkLocalUnicast() && (applied == nil || !applied[key]) {
+            continue // kernel autoconf / foreign link-local: never delete
+        }
+        if delErr := t.ops.AddrDel(link, &a); delErr != nil {
+            slog.Warn("failed to prune wireguard tun address",
+                "name", name, "addr", key, "err", delErr)
+            failed[key] = true // ALL families (the r1-MAJOR fix)
+        } else {
+            slog.Info("pruned wireguard tun address (removed from config)",
+                "name", name, "addr", key)
+        }
+    }
+    return failed
+}
+```
+
+`Apply` (prune phase + state, GRE loop & per-tunnel loop unchanged):
 ```go
 wgDesired := map[string]bool{}
 for _, tc := range tunnels {
@@ -279,28 +406,38 @@ for _, tc := range tunnels {
 oldWG := t.wgConfigured
 nextWG := map[string]bool{}
 for n := range wgDesired { nextWG[n] = true }
-// prune phase
 for name := range oldWG {
     if wgDesired[name] { continue }
-    if link, err := t.ops.LinkByName(name); err == nil {
-        remaining := t.reconcileLinkAddrsLocked(link, name, nil,
-            t.appliedAddrs[name], "wireguard tun")
-        if len(remaining) > 0 {
-            t.appliedAddrs[name] = remaining
-            nextWG[name] = true // AddrDel failed → retry next apply
-            continue
+    link, err := t.ops.LinkByName(name)
+    if err != nil {
+        if isLinkNotFound(err) {
+            delete(t.appliedAddrs, name) // device genuinely gone; drop
+        } else {
+            // transient lookup error: retain + retry (r1 Codex/AGY MAJOR)
+            nextWG[name] = true
         }
+        continue
     }
-    delete(t.appliedAddrs, name)
+    failed := t.pruneAppliedAddrsLocked(link, name, t.appliedAddrs[name])
+    if len(failed) > 0 {
+        t.appliedAddrs[name] = failed
+        nextWG[name] = true // AddrDel failed → retry next apply
+        continue
+    }
+    delete(t.appliedAddrs, name) // clean prune; drop tracking
 }
 // ... existing GRE removal loop unchanged ...
-// ... per-tunnel apply loop unchanged (still-configured WG re-tracked) ...
+// ... per-tunnel apply loop unchanged (still-configured WG re-tracked
+//     via applyWireguardTunLocked → reconcileLinkAddrsLocked at :880) ...
 t.wgConfigured = nextWG
 ```
 
-Note: `nextWG` is rebuilt from `wgDesired` at entry; the per-tunnel loop
-already re-applies still-configured WG (no change there). The prune loop
-runs against `oldWG` so it sees exactly the names that disappeared.
+Note: `nextWG` starts as `wgDesired`; the per-tunnel loop already
+re-applies still-configured WG (no change there). The prune loop runs
+against `oldWG` so it sees exactly the names that disappeared. On a clean
+prune the name is in neither `wgDesired` nor retained → dropped from
+`nextWG` → next `Apply` is a no-op for it (idempotent ✔). On AddrDel/
+transient-lookup failure the name is retained in `nextWG` and retried.
 
 `clearLocked`: add `t.wgConfigured = nil` to the reset block (:1109).
 ClearTunnels still does not delete WG links (unchanged) — but on a full
@@ -332,15 +469,30 @@ Using the existing fake `linkOps` harness:
    → assert NO further AddrDel / LinkByName churn for the pruned name
    (name dropped from tracking).
 4. **`TestWireguardRemovalAddrDelFailureRetried`**: fake AddrDel returns
-   error on first removal Apply → assert name retained, second removal
-   Apply retries AddrDel.
-5. **`TestWireguardRemovalDeviceAlreadyGone`**: LinkByName returns
-   not-found on removal → assert no panic, tracking dropped, no-op next.
-6. **`TestWireguardReAddAfterRemovalTracksFresh`**: add → remove (prune)
+   error on first removal Apply for a **non-link-local** address
+   (`172.16.0.1/30` — r1 review: the retry MUST be proven for the
+   regular-address case, not only fe80) → assert name retained in
+   tracking, second removal Apply retries AddrDel, third (success) drops
+   it. This test is the direct regression guard for the r1 MAJOR.
+5. **`TestWireguardRemovalDeviceNotFoundDropsTracking`**: LinkByName
+   returns a not-found error on removal → assert no panic, tracking
+   dropped, no-op next apply.
+6. **`TestWireguardRemovalTransientLookupRetained`**: LinkByName returns
+   a NON-not-found (transient) error on removal → assert name RETAINED
+   in tracking and a subsequent Apply (link now resolvable) prunes the
+   address. (Direct guard for r1 Codex/AGY MAJOR #2.) Requires the fake
+   `linkOps` to support an injectable non-not-found LinkByName error.
+7. **`TestWireguardReAddAfterRemovalTracksFresh`**: add → remove (prune)
    → re-add same name with a NEW address → assert new addr applied and
    old addr not re-leaked (appliedAddrs correctly reset/repopulated).
-7. **Regression guard**: existing `TestWireguardConfiguredLinkLocalRemoved`
-   and friends must still pass (still-configured reconcile unchanged).
+8. **`TestWireguardRemovedWhileDaemonDownNotPruned`** (R5 boundary): on a
+   FRESH manager (empty `wgConfigured`) with a wgN carrying addresses
+   present in the kernel + an empty tunnel list → assert NO AddrDel
+   (the manager only prunes what it tracked applying; restart-time
+   removal is #1434 scope). Encodes the deferral.
+9. **Regression guard**: existing `TestWireguardConfiguredLinkLocalRemoved`
+   and friends must still pass (still-configured reconcile unchanged;
+   `reconcileLinkAddrsLocked` is NOT modified).
 
 All tests assert via the fake's recorded `AddrAdd`/`AddrDel`/`LinkDel`
 call logs. No live netlink.
@@ -348,6 +500,12 @@ call logs. No live netlink.
 ---
 
 ## 7. Open questions / decisions for reviewer
+
+> r2 status: the three r1 MAJOR/MED findings (broken retry signal,
+> transient-lookup drop, applied-only overclaim) are RESOLVED in §4/§5/§4b
+> above. The items below are residual design choices, all with a stated
+> default.
+
 
 1. **ClearTunnels + WG addresses**: should the explicit delete-everything
    path also flush WG addresses (and/or delete the WG link)? Current
@@ -375,9 +533,11 @@ call logs. No live netlink.
 
 - **R1 — pruning an address still in use by a live flow**: removing a WG
   tunnel from config IS the operator declaring it gone; stripping its
-  addresses is the intended effect. Mitigation: only addresses in
-  `appliedAddrs[name]` (manager-applied) are eligible; foreign/autoconf
-  link-local is gated out by `reconcileLinkAddrsLocked`.
+  addresses is the intended effect. Scope (corrected per r1 review, §4b):
+  the prune deletes ALL present non-link-local addresses (the manager
+  owns the device's non-link-local set, same as steady-state reconcile),
+  and only configured/applied link-locals; the kernel autoconf/foreign
+  fe80 is gated out by the shared link-local check.
 - **R2 — touching the wrong device** (Path B hazard): avoided by Path A
   keying off the exact tracked name set, not netdev heuristics.
 - **R3 — retry storms on persistent AddrDel failure**: bounded by the
