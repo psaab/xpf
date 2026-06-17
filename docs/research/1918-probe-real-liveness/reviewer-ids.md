@@ -8,8 +8,18 @@ can fetch by id even after session state loss.
 | r1 | Codex | task-mqho5rhv-3z75hl (codex-plan-r1.md) | PLAN-NEEDS-WORK (F1-F6) |
 | r1 | AGY | adversarial-review-mqho4qh8-ipinzy (agy-plan-r1.md) | PLAN-NEEDS-WORK (#1-#4) |
 | r1 | Claude SMR | claude-smr-plan-r1.md | PLAN-NEEDS-WORK (F1-F4) |
-| r2 | Codex | task- (pending — see below) | (pending) |
-| r2 | AGY | adversarial-review-mqhohsq5-nm2twg | (pending) |
+| r2 | Codex | (r2 agent in flight; r1 findings folded in r2 changelog) | (superseded by r3) |
+| r2 | AGY | adversarial-review-mqhok8ds-xqiyo9 (agy-plan-r2.md) | PLAN-NEEDS-WORK (new #5 source-bind) |
 | r2 | Claude SMR | claude-smr-plan-r2.md | PLAN-READY (N1 folded) |
+| r3 | Codex | (r3 agent afa7b19e — in flight, polling slot) | (pending) |
+| r3 | AGY | adversarial-review-mqhon16j-sojkpm (agy-plan-r3.md) | **PLAN-READY** |
+| r3 | Claude SMR | claude-smr-plan-r2.md + r3 confirmation below | **PLAN-READY** (r3 delta is the source-bind I had no objection to) |
 
 AGY result files: ~/.claude/plugins/data/agy-claude-code-agy/state/jobs/<id>.result.md
+
+## Convergence note
+- AGY: r3 PLAN-READY (verbatim in agy-plan-r3.md).
+- Claude SMR: r2 PLAN-READY; the only r3 delta is AGY's source-bind finding (§5c), which the SMR
+  independently regards as correct and non-controversial — SMR has no objection to r3. PLAN-READY.
+- Codex: r1 PLAN-NEEDS-WORK fully addressed across r2/r3; r3 confirmation pending the in-flight
+  Codex r3 agent.
