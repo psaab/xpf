@@ -3,10 +3,40 @@
 - **Issue**: #1918 (bug) — `probeICMP` (`pkg/routing/tunnel.go`) never sends/receives an
   ICMP echo; both code paths return `true` on socket-open, so a dead GRE/IPIP peer behind a
   valid route is reported up forever and `LinkSetDown` never fires.
-- **Revision**: r3 (converged)
-- **Status**: PLAN-READY (pending 3-way convergence)
+- **Revision**: r2 (post-r1 three-way review: Codex + AGY + Claude SMR all PLAN-NEEDS-WORK)
+- **Status**: PLAN-READY candidate (pending r2 three-way re-review)
 - **Branch**: `research/1918-probe-real-liveness`
 - **Mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
+
+## Changelog r1 → r2
+
+- **F1 (all three reviewers):** removed the contradictory `echo.ID == want.ID` predicate. The
+  authoritative reply-match is now **Seq + Data-nonce only**; ID is ignored on datagram sockets
+  (kernel rewrites it to the socket port) and advisory-only on raw. §5a/§7/R3 made consistent.
+- **AGY #2 (decisive architectural correction):** the keepalive probes the tunnel's **outer
+  underlay `Destination`**, which routes in the **global/underlay** table — NOT the tunnel's
+  overlay VRF. r1's §5b "bind the probe socket to `vrf-<instance>`" was backwards and is
+  **removed**. Default: no `SO_BINDTODEVICE`; the probe routes exactly like the encapsulated
+  tunnel traffic does (global FIB). See new §5b.
+- **AGY #3 + Codex F2 (privilege catch-22 / no Control hook):** dissolved for the common case
+  by dropping overlay-VRF binding. The rare "underlay itself lives in a VRF" case is documented
+  as out-of-scope (follow-up), so no custom pre-bind socket constructor is needed now.
+- **Codex F3 (VRF in runner identity):** mostly moot now that VRF is not a probe input. The
+  runner identity (`matches()`, `tunnel.go:78-86`) is unchanged; §5b documents why VRF need not
+  enter it.
+- **Codex F4 + AGY #5 (Axis D over-claim):** Axis D rewritten. Added explicit handling for
+  `LinkByName` failure (do NOT latch `Up=false` on a netlink lookup error — retry next tick) and
+  a same-name link-replacement TOCTOU guard (ifindex/generation check). The "exactly one
+  LinkSet*" claim is now scoped to "per *successful* transition" with the invariant stated.
+- **C1 rename + transient/structural split (Codex F5 + AGY #4):** renamed C1 to
+  **hold-on-unknown**. Split `ProbeUnsupported` into **structural** (no `ping_group_range` / no
+  cap — a config problem, hold) vs **transient** (EMFILE/ENOBUFS/FD exhaustion — a local
+  resource problem). Transient unsupported is bounded: after a sustained-unknown window it
+  escalates to a loud status + does NOT silently hold up forever. `KeepaliveUp==nil` contract
+  clarified: nil now means "configured but liveness unknown" as well as "not configured";
+  status string disambiguates.
+- **Nits (Codex F6):** fixed dangling "§6 Option F" → "Axis C"; `pkg/rpm` function is
+  `probeDialer` (rpm.go:21) not `vrfDialer`.
 
 ---
 
@@ -19,252 +49,258 @@
   socket and returns `true` the instant the socket opens. No `WriteTo`, no `ReadFrom`. A dead
   peer behind a valid route reads up.
 - **Fallback path** (no `CAP_NET_RAW`): `net.DialTimeout("udp", addr:1, 3s)` — a connectionless
-  UDP "dial" never touches the wire; it returns `true` whenever a route to `addr` exists. The
-  inline comment concedes "only means the route exists… close enough."
+  UDP "dial" never touches the wire; it returns `true` whenever a route to `addr` exists.
 
 Net effect: the keepalive is a **route-existence check, not a liveness check.**
 
-The consumer `keepaliveLoop` (`tunnel.go:980-1021`) treats this boolean as ground truth:
-- On `ok==true`: resets `Failures`, and on a prior-down→up edge calls `LinkSetUp`.
-- On `ok==false`: increments `Failures`; at `Failures >= MaxRetries` (default 3) flips `Up=false`
-  and calls `LinkSetDown`.
-
-Because `ok` is structurally always `true` whenever the route exists, the fail-safe
-`LinkSetDown` is unreachable for the common "route up, peer dead" failure. Traffic keeps flowing
-to a black hole; no operator/HA reaction is triggered. Status (`KeepaliveUp`/`KeepaliveInfo`,
-`tunnel.go:1116+ GetStatus`) reports `up` forever.
+Consumer `keepaliveLoop` (`tunnel.go:980-1021`) treats this boolean as ground truth:
+on `ok==true` it resets `Failures` and on a down→up edge calls `LinkSetUp`; on `ok==false` it
+increments `Failures` and at `Failures >= MaxRetries` (default 3) flips `Up=false` +
+`LinkSetDown`. Because `ok` is structurally always true when the route exists, the fail-safe
+`LinkSetDown` is unreachable for the common "route up, peer dead" failure. Traffic black-holes;
+status (`KeepaliveUp`/`KeepaliveInfo`, `GetStatus` ~`tunnel.go:1116`) reports up forever.
 
 **Secondary defect (real, in scope):** `keepaliveLoop` holds `state.mu` (`tunnel.go:991`
 `Lock` → `:1019` `Unlock`) **across** the netlink side effects `LinkByName` + `LinkSetUp`
 (`:1001`) / `LinkSetDown` (`:1015`). A slow/blocked netlink op therefore blocks `GetStatus`'s
-`ks.mu.Lock()` (`GetStatus` reads each `KeepaliveState` under `mu`), turning a status read into
-a netlink-latency hazard. This grows as more readers/policy hooks touch keepalive state.
+`ks.mu.Lock()`, turning a status read into a netlink-latency hazard.
 
 ## 2. Root Cause
 
-The original author wrote a reachability *probe stub* and never finished it: the socket is
-opened but the echo round-trip was left as a TODO ("ping utility would be better but adds exec
-overhead"). The fallback compounds the error by treating a connectionless UDP dial — which does
-zero network I/O — as a reachability signal. The boolean return type also erases the
-distinction between "confirmed dead" and "could not probe (no privilege)", so the loop has no
-way to choose a safe default for the un-probeable case; it defaults to up.
+An unfinished probe stub: the socket is opened but the echo round-trip was left as a TODO. The
+fallback compounds the error by treating a connectionless UDP dial — zero network I/O — as
+reachability. The `bool` return also erases "confirmed dead" vs "could not probe", so the loop
+defaults to up.
 
-## 3. In-Repo Precedent (the design anchor)
+## 3. In-Repo Precedent (design anchor)
 
-A **correct, tested** ICMP liveness prober already exists at `pkg/cluster/monitor.go:341-422`
-(`Monitor.probeICMP`). It:
+`pkg/cluster/monitor.go:341-422` (`Monitor.probeICMP`) is a correct, tested ICMP prober:
+- Unprivileged **datagram ICMP**: `udp4`/`udp6` via `icmp.ListenPacket` from `golang.org/x/net/icmp`
+  (`go.mod:14` `golang.org/x/net v0.47.0`). No `CAP_NET_RAW` when `net.ipv4.ping_group_range`
+  admits the daemon gid; not root.
+- Real `icmp.Message{Echo}` → `WriteTo` → **800 ms read deadline** → `ReadFrom` →
+  `icmp.ParseMessage` → `parsed.Type == replyType`.
+- Injected `icmpConn` interface + `icmpDialer` field for deterministic tests
+  (`monitor.go:81-87`).
 
-- Uses **unprivileged datagram ICMP** sockets: `udp4` / `udp6` via `icmp.ListenPacket` from
-  `golang.org/x/net/icmp` (already a direct dep, `go.mod:14` `golang.org/x/net v0.47.0`). This
-  needs **no `CAP_NET_RAW`** when the kernel `net.ipv4.ping_group_range` admits the daemon's
-  gid (Linux datagram-ICMP "ping sockets"); it does NOT require root.
-- Builds a real `icmp.Message{Type: Echo, Body: &icmp.Echo{ID, Seq, Data}}`, `WriteTo` the
-  destination, sets an **800 ms read deadline**, `ReadFrom`, `icmp.ParseMessage`, and validates
-  `parsed.Type == replyType`.
-- Injects an `icmpConn` interface + `icmpDialer func(network) (icmpConn, error)` field for
-  deterministic tests (`monitor.go:81-87`).
-
-**This is the pattern to follow.** The tunnel fix is essentially "port the monitor prober into
-the tunnel domain, fix the two gaps the monitor prober itself has (see §5), and add a typed
-result + safe default for the un-probeable case."
+This is the pattern to follow — with the two precedent gaps fixed (§5).
 
 ## 4. Goal / Success Criteria
 
-1. The tunnel keepalive sends a real ICMP echo and only reports the peer **alive** on a
-   matching echo reply within a bounded deadline.
-2. When ICMP cannot be performed (no `ping_group_range`, no `CAP_NET_RAW`, socket error), the
-   prober returns a distinct **Unsupported** result; the loop applies an explicit, configurable
-   policy (default: fail-safe — see §6 Option F) and surfaces it distinctly in status
-   (`KeepaliveInfo = "unknown (ICMP probe unavailable)"`), never `up`.
-3. A dead peer behind a valid route transitions the tunnel to down after `MaxRetries`
-   consecutive failures, firing **exactly one** `LinkSetDown`.
-4. The up/down transition is computed under `state.mu`; the lock is released **before** any
-   netlink call. `GetStatus` never blocks behind a netlink op.
-5. Reply matching binds the reply to *this* probe (ID + Seq), so concurrent tunnel probers on a
-   shared socket / stray replies cannot satisfy the wrong probe.
-6. Deterministic unit tests via an injected prober cover: alive, dead→down-after-N + exactly
-   one `LinkSetDown`, recovery→up + exactly one `LinkSetUp`, Unsupported→not-up, and
-   status-read-does-not-block-behind-slow-netlink.
+1. The keepalive sends a real ICMP echo and reports the peer **alive** only on a reply that
+   matches *this* probe within a bounded deadline.
+2. When ICMP cannot be performed, the prober returns a distinct **Unsupported** result; the loop
+   applies hold-on-unknown (§6 Axis C, C1) and surfaces it as `KeepaliveInfo = "unknown (ICMP
+   probe unavailable)"` with `KeepaliveUp = nil`, never `up`.
+3. A dead peer behind a valid route transitions to down after `MaxRetries` consecutive
+   real-Dead probes, firing **exactly one** `LinkSetDown` per successful transition.
+4. The up/down decision is computed under `state.mu`; the lock is released **before** any netlink
+   call. `GetStatus` never blocks behind a netlink op.
+5. Reply matching binds the reply to *this* probe via **Seq + a per-probe nonce in `Echo.Data`**
+   (NOT ID — datagram sockets rewrite ID to the socket port).
+6. A `LinkByName` lookup error during a transition does NOT latch `Up` to the new value — it is
+   retried next tick (no spurious permanent down/up from a transient netlink hiccup).
+7. Deterministic unit tests via an injected prober cover alive / dead→down + exactly-one
+   LinkSetDown / recovery→up + exactly-one LinkSetUp / unsupported→not-up / Seq+nonce mismatch →
+   not-alive / status-read-does-not-block-behind-slow-netlink / LinkByName-error→no-latch.
 
-## 5. Gaps in the precedent that THIS fix must NOT inherit
+## 5. Gaps in the precedent THIS fix must NOT inherit
 
-The monitor prober is the right shape but has two latent defects a hostile reviewer will (and
-did) flag — the tunnel prober must fix them, and a follow-up should fix the monitor:
-
-- **(5a) No reply ID/Seq match.** `monitor.go` accepts any `EchoReply` of the right type. On a
-  shared datagram-ICMP socket the kernel demuxes by the kernel-assigned port→ID, but two probes
-  on the *same* `icmpConn` (or a delayed reply to a prior probe) can cross-satisfy. The tunnel
-  prober MUST set a unique `Seq` per probe and a stable per-prober `ID`, and require
-  `echo.ID == want.ID && echo.Seq == want.Seq` on the reply, looping `ReadFrom` until deadline
-  to discard non-matching datagrams. (Datagram-ICMP rewrites the on-wire ID to the socket port;
-  on read, `x/net/icmp` returns the *kernel-substituted* ID. Plan must verify this empirically
-  during /engineer and match on the value the kernel actually returns — see §10 Risk R3.)
-- **(5b) No VRF binding.** Tunnels can be bound to a routing-instance VRF (`tunnel.go:106`
-  `vrfBinder`, `:126` `appliedRI`). An unbound probe socket routes via the default FIB, which
-  may reach (or fail to reach) the peer by a path unrelated to the tunnel's VRF — producing a
-  false up/down. The prober must be able to bind the probe socket to the tunnel's VRF device
-  (`SO_BINDTODEVICE` to `vrf-<instance>`), analogous to `pkg/rpm`'s `vrfDialer`. The keepalive
-  must therefore be told the tunnel's `appliedRI` (thread it through `startKeepalive`).
+- **(5a) Reply matching — Seq + Data-nonce, NOT ID.** Linux `IPPROTO_ICMP` datagram ("ping")
+  sockets overwrite the outbound echo `id` with the socket's source port (`ping_v4_sendmsg`
+  sets `id = inet->inet_sport`; IPv6 likewise); `x/net/icmp`'s `ParseMessage`/`parseEcho`
+  returns the bytes as received, i.e. the kernel-substituted port-id, not any
+  application-chosen id (verified against `x/net@v0.47.0/icmp/echo.go:39-50`). Therefore the
+  prober MUST set a unique monotonic **Seq** per probe AND carry a random per-probe **nonce in
+  `Echo.Data`**, and require BOTH to match on the reply. ID is ignored on datagram sockets
+  (advisory-only on the raw fallback). The `ReadFrom` loop discards non-matching datagrams until
+  the absolute deadline. (`monitor.go` matches only `Type` — the defect this fix avoids; a
+  separate follow-up applies 5a to monitor.go.)
+- **(5b) Probe target is the UNDERLAY endpoint; route it in the underlay/global table — do NOT
+  bind to the overlay VRF.** The keepalive pings the tunnel's outer `Destination` (the remote
+  underlay endpoint), which the kernel resolves in the underlay routing domain (default/global
+  table) — exactly where the tunnel's own encapsulated packets are resolved. Binding the probe
+  socket to the tunnel's *overlay* VRF (`vrf-<instance>`, the routing-instance for inner traffic)
+  would look up the underlay peer in a table that does not contain it → false Dead/Unsupported.
+  **Default design: no `SO_BINDTODEVICE`; the probe socket uses the global table, matching tunnel
+  encap.** This also dissolves the unprivileged-`SO_BINDTODEVICE` catch-22 (datagram ping sockets
+  bind on `ListenPacket`; an unprivileged post-bind `SO_BINDTODEVICE` would `EPERM`). The rare
+  case where the *underlay* itself lives in a management/underlay VRF is **out of scope** here
+  (documented follow-up); it would need a custom pre-bind socket constructor analogous to
+  `pkg/rpm`'s `probeDialer` (`rpm.go:21`, which sets `SO_BINDTODEVICE` in `Dialer.Control` —
+  correct for RPM because RPM probes *inside* a routing instance, unlike a tunnel underlay probe).
 
 ## 6. Design — Multiple Path Options
 
-The design branches on three independent axes. The plan recommends one combination (§7) but
-records all so the user can choose at `/engineer` time.
-
 ### Axis A — Probe mechanism
 
-- **Option A1 — datagram ICMP (`udp4`/`udp6`) via `x/net/icmp` [RECOMMENDED].** Mirrors
-  `pkg/cluster/monitor.go`. No `CAP_NET_RAW` when `ping_group_range` admits the gid. Lowest
-  overhead, no fork. Already proven in-tree.
-- **Option A2 — raw ICMP (`ip4:icmp`) via `x/net/icmp`.** Works only with `CAP_NET_RAW`.
-  Strictly worse than A1 for privilege; keep only as an *automatic* second attempt if datagram
-  open fails AND the daemon happens to hold `CAP_NET_RAW` (some deploys grant it for LLDP/VRRP,
-  see `pkg/lldp/README.md`).
-- **Option A3 — exec `ping`.** Fork per probe; VRF handled by `ip vrf exec` (the existing
-  `pkg/cli/cli_request.go:49` pattern). Rejected as the *primary* mechanism: fork overhead per
-  tunnel per interval, brittle output parsing, busybox/iputils ping divergence. Keep documented
-  as a last-resort manual escape hatch only; do NOT implement now.
+- **A1 — datagram ICMP (`udp4`/`udp6`) via `x/net/icmp` [RECOMMENDED].** Mirrors `monitor.go`.
+  No `CAP_NET_RAW` when `ping_group_range` admits the gid. Lowest overhead, no fork.
+- **A2 — raw ICMP (`ip4:icmp`) auto-fallback if datagram open fails AND `CAP_NET_RAW` held.**
+  Some deploys grant `CAP_NET_RAW` (LLDP/VRRP, `pkg/lldp/README.md`). On raw sockets a
+  self-chosen ID *is* preserved, so the raw path may also match on ID; keep the match predicate
+  Seq+nonce for uniformity.
+- **A3 — exec `ping`.** Rejected as primary (fork-per-tick at N tunnels, output parsing,
+  busybox/iputils divergence). Not implemented.
 
 ### Axis B — Result type
 
-- **Option B1 — typed enum [RECOMMENDED].** `type ProbeResult int` with
-  `ProbeAlive | ProbeDead | ProbeUnsupported`. The loop switches on it. Cleanly carries the
-  "could not probe" signal that the bool destroys.
-- **Option B2 — `(alive bool, err error)`.** `err != nil` means unsupported/transport failure.
-  Workable but conflates "dead" (no reply, `err==nil`, `alive=false`) with "unsupported"
-  (`err!=nil`) less legibly than B1. Slightly less ceremony. Acceptable fallback.
+- **B1 — typed enum [RECOMMENDED].** `ProbeAlive | ProbeDead | ProbeUnsupported`. Carries the
+  "could not probe" signal the bool destroys. (Optionally split `ProbeUnsupported` into
+  `Structural` vs `Transient` — see Axis C — via a sub-field or two enum members.)
+- **B2 — `(alive bool, err error)`.** Acceptable fallback; less legible than B1.
 
 ### Axis C — Policy for `ProbeUnsupported`
 
-- **Option C1 — fail-safe-on-unknown but DO NOT count as failure / DO NOT flap
-  [RECOMMENDED].** On `ProbeUnsupported`: do **not** increment `Failures`, do **not** call
-  `LinkSetDown`, do **not** call `LinkSetUp`; hold the prior `Up` value but set
-  `KeepaliveInfo = "unknown (ICMP probe unavailable)"` and `KeepaliveUp = nil` (the original
-  "no signal" sentinel) so status never lies "up". Rationale: an unprobeable host is a
-  *configuration/privilege* problem, not a peer-death signal — repeatedly tearing the link down
-  because we lack privilege would be a self-inflicted outage. Surface it loudly in status +
-  one-shot `slog.Warn` (deduped) so the operator fixes `ping_group_range`/caps.
-- **Option C2 — fail-closed (treat Unsupported as Dead).** Counts toward `MaxRetries` → tunnel
-  goes down. Rejected: turns a missing capability into a guaranteed tunnel outage on every
-  deploy that didn't set `ping_group_range`; far worse than the status quo for availability.
-- **Option C3 — operator-selectable.** Add `set ... keepalive on-probe-unavailable
-  (hold|down)` config knob. Defer — out of scope for the bug fix; file as follow-up if an
-  operator actually wants fail-closed. Default behavior is C1.
+- **C1 — hold-on-unknown [RECOMMENDED] (renamed from r1's "fail-safe").** On
+  *structural* Unsupported (`ping_group_range` unset / missing cap — a configuration problem):
+  do NOT increment `Failures`, do NOT `LinkSetDown`/`LinkSetUp`; hold the prior `Up` value, set
+  `KeepaliveUp = nil` and `KeepaliveInfo = "unknown (ICMP probe unavailable)"`; emit a deduped
+  one-shot `slog.Warn` so the operator fixes the sysctl/caps. Rationale: tearing the link down
+  because the daemon lacks probe privilege is a self-inflicted outage worse than the status quo.
+  - **Transient Unsupported escalation (addresses AGY #4):** if Unsupported is caused by a
+    *transient local resource* error (EMFILE/ENOBUFS/ENFILE on `ListenPacket`), treat it as
+    "unknown" for status but bound the hold: after a sustained-unknown window (e.g.
+    `MaxRetries × interval`) escalate to a louder status (`KeepaliveInfo = "unknown (probe
+    socket error: <errno>)"`) and a `slog.Error`. Do NOT silently hold "up" forever on a
+    resource error that may be masking a real peer death. We still do not `LinkSetDown` purely
+    on inability-to-probe (that would amplify a local FD leak into a network outage), but the
+    operator is now alarmed. (Distinguishing structural vs transient is by errno classification
+    at `ListenPacket` time.)
+- **C2 — fail-closed (Unsupported ⇒ Dead, counts toward MaxRetries).** Rejected as default:
+  a missing `ping_group_range` on a deploy takes every keepalive tunnel down. Strictly worse
+  for availability than today.
+- **C3 — operator-selectable `set ... keepalive on-probe-unavailable (hold|down)`.** Deferred
+  follow-up; default behavior is C1.
 
-### Axis D (lock fix, not optional) — transition-under-lock, netlink-outside-lock
+### Axis D (mandatory) — transition-under-lock, netlink-outside-lock, with error + TOCTOU guards
 
-Restructure `keepaliveLoop` tick body to: (1) take `state.mu`, compute the new `Up` value +
-whether a `LinkSetUp`/`LinkSetDown`/none transition is needed + snapshot fields, (2) `Unlock`,
-(3) perform the single netlink call outside the lock. This both fixes the secondary bug and
-guarantees "exactly one LinkSet* per transition" (the decision is made once under the lock).
+Rewrite the `keepaliveLoop` tick body:
 
-### Axis E — package split (issue's optional suggestion)
+1. Under `state.mu`: classify the probe result, update `Failures`/`LastSuccess`/`LastFailure`,
+   and decide the transition. The transition is recorded as an intent
+   (`wantUp bool` + `changed bool`) and `state.Up` is flipped to the new value **in the same
+   locked section** so a later tick observing the new `Up` will not re-fire. Preserve the
+   existing edge guards (`if !state.Up` for recovery, `if state.Up && Failures>=MaxRetries`
+   for down). Snapshot the fields status needs.
+2. `Unlock`.
+3. If `changed`: `LinkByName(tunnelName)`; **if the lookup errors, do NOT keep the flipped `Up`
+   committed** — re-acquire `mu`, revert `state.Up` to its pre-decision value (so the transition
+   is retried next tick), and skip the netlink call. (Fixes Codex F4: a transient `LinkByName`
+   failure must not permanently strand the in-memory state out of sync with the link.)
+4. **Same-name TOCTOU guard (Codex F4 / #1884 recreate race):** the link may have been deleted
+   and recreated under the same name by a concurrent `Apply` while this stale runner ran.
+   Capture the link's `ifindex` (or a per-runner generation token set at `startKeepalive`) and
+   only apply `LinkSetUp/Down` if it still matches; otherwise drop the action (the new runner
+   owns the new link). The existing #848 drain already bounds this, but the ifindex check makes
+   it explicit and cheap.
+5. Perform the single `LinkSetUp`/`LinkSetDown` outside the lock.
 
-The audit floated a `pkg/routing/tunnel/keepalive/` package. **Rejected for this fix.** The
-probe semantics + lock scope are the substance; a package move is churn that complicates review
-and bisect. Keep everything in `tunnel.go` (or a sibling `tunnel_keepalive.go` in the same
-package if `tunnel.go` size warrants — a pure file split, no new package). File a separate
-Refactor issue if the split is still wanted.
+Invariant (now provable): *for each runner, the (decision + `Up` write) is a single locked
+section; netlink runs after unlock keyed to `changed`; on `LinkByName` error the `Up` write is
+reverted so no transition is lost; the ifindex guard prevents acting on a replaced link.* Hence
+at most one **successful** `LinkSet*` per real transition, and no permanent desync from a
+transient netlink error. (AGY #5 confirmed there is no concurrent writer to `state.Up` other
+than this goroutine, so step 1's in-lock flip is race-free; `Apply` only *reads* `state.Up`
+under the lock. Redundant `LinkSetUp` on an already-up link is a kernel no-op, a benign backstop.)
+
+### Axis E — package split
+
+Rejected for this fix (churn, harder bisect). Keep in `tunnel.go` or a sibling
+`tunnel_keepalive.go` **in the same `routing` package** (pure file split, no new package). File
+a separate Refactor issue if the `pkg/routing/tunnel/keepalive/` split is still wanted.
 
 ## 7. Recommended Combination
 
-**A1 + (auto A2 fallback if CAP_NET_RAW present) + B1 + C1 + D + 5a + 5b**, kept in-package.
+**A1 + (auto A2 if CAP_NET_RAW) + B1 + C1(with transient-escalation) + D + 5a + 5b**, in-package.
 
-Concretely:
-
-1. New typed prober with injected transport, in `pkg/routing`:
+1. New typed prober with injected transport in `pkg/routing`:
    ```
    type ProbeResult int
    const ( ProbeAlive ProbeResult = iota; ProbeDead; ProbeUnsupported )
+   // (optionally carry an UnsupportedKind: Structural | Transient)
 
    type tunnelProber interface {
-       Probe(addr string, vrf string, id int, seq int, deadline time.Duration) ProbeResult
+       Probe(addr string, seq int, nonce []byte, deadline time.Duration) (ProbeResult, error)
    }
    ```
-   Production impl uses `icmp.ListenPacket("udp4"/"udp6", ...)`, optional
-   `SO_BINDTODEVICE(vrf-<instance>)`, `WriteTo`, deadline `ReadFrom`-loop matching ID+Seq,
-   `ParseMessage`, returns Alive on matched reply, Dead on deadline-with-no-match, Unsupported
-   on `ListenPacket`/socket error. A test prober is injected on `tunnelManager`.
-2. `keepaliveLoop` calls `prober.Probe(...)`, switches on the result per C1, computes the
-   transition under `state.mu`, releases, then does the single netlink call (D).
-3. `startKeepalive` gains the tunnel's `appliedRI` (VRF) so the prober binds correctly; thread
-   it from the apply site that already knows the routing-instance.
-4. `GetStatus` keepalive rendering gains an `Unsupported`/`unknown` arm; `KeepaliveUp` stays
-   `*bool` and is left `nil` for the unknown case.
-5. Per-prober monotonic `Seq` (atomic) + stable `ID` (e.g. derived from tunnel name hash, low
-   16 bits) so replies bind to the probe.
+   Production impl: `icmp.ListenPacket("udp4"/"udp6", ...)` (NO `SO_BINDTODEVICE`; global table —
+   §5b), build `icmp.Echo{Seq, Data: nonce}`, `WriteTo` the underlay `Destination`, set the
+   absolute deadline, `ReadFrom`-loop discarding datagrams until one has matching `Seq` AND
+   `Data==nonce` → Alive; deadline with no match → Dead; `ListenPacket`/socket error →
+   Unsupported (classify errno structural vs transient). A test prober is injected on
+   `tunnelManager`.
+2. `keepaliveLoop` calls `prober.Probe(...)` and runs the Axis-D tick.
+3. Per-prober/runner monotonic `Seq` (atomic) + fresh random nonce per probe.
+4. `GetStatus` keepalive rendering gains the unknown arm; `KeepaliveUp` stays `*bool`, left
+   `nil` for unknown.
+
+`startKeepalive` / `matches()` are **unchanged** (VRF is not a probe input — §5b), so Codex F3
+does not require a runner-identity change.
 
 ## 8. Blast Radius / Files
 
-- `pkg/routing/tunnel.go` — replace `probeICMP`; restructure `keepaliveLoop` tick; extend
-  `KeepaliveState`/`startKeepalive` with VRF; add prober field + injection. (Possibly split the
-  keepalive bits into `pkg/routing/tunnel_keepalive.go`, same package.)
-- `pkg/routing/routing.go` — `GetKeepaliveState` passthrough unchanged; verify apply site
-  passes VRF into `startKeepalive`.
-- `pkg/routing/tunnel_test.go` / `routing_test.go` — `routing_test.go:896,901` currently call
-  `probeICMP("127.0.0.1")` / `probeICMP("not-an-ip")` expecting the old bool. These tests
-  **encode the bug** (127.0.0.1 "responds" only because the socket opens). They MUST be
-  rewritten against the injected prober. New tests per §4.6.
+- `pkg/routing/tunnel.go` — replace `probeICMP`; restructure `keepaliveLoop` tick per Axis D;
+  add prober field + injection; status unknown arm. (Optional same-package
+  `tunnel_keepalive.go` split.)
+- `pkg/routing/routing.go` — `GetKeepaliveState` passthrough unchanged.
+- `pkg/routing/routing_test.go:896,901` — currently call `probeICMP("127.0.0.1")` /
+  `probeICMP("not-an-ip")` expecting the old bool; these **encode the bug** and MUST be rewritten
+  against the injected prober. New tests per §4.7.
 - `pkg/cli/cli_show_interfaces.go:54`, `pkg/grpcapi/server_show_security_text.go:115` — consume
-  `KeepaliveInfo`; no signature change, but verify the "unknown" string renders sensibly.
-- Docs: tunnel/keepalive module doc (find under `docs/`) updated to state real-liveness
-  semantics + `ping_group_range` requirement + Unsupported behavior.
-- **Follow-up (separate issue, do NOT fix here):** apply 5a (ID/Seq match) to
-  `pkg/cluster/monitor.go:341`.
+  `KeepaliveInfo`; verify the "unknown" string renders sensibly (no signature change).
+- Docs: tunnel/keepalive module doc updated — real-liveness semantics, `ping_group_range`
+  requirement, underlay-table probe (not overlay VRF), Unsupported behavior.
+- **Follow-ups (separate issues, NOT here):** apply 5a (Seq/nonce match) to `pkg/cluster/monitor.go`;
+  C3 config knob; underlay-in-a-VRF binding case; `pkg/routing/tunnel/keepalive/` package split.
 
 ## 9. Test Plan
 
 Unit (deterministic, injected prober — no real network):
 - `Alive` every tick → `Up` stays true, zero `LinkSet*`.
-- `Dead` for `MaxRetries` ticks → exactly one `LinkSetDown`, `Up=false`, `Failures==MaxRetries`.
+- `Dead` ×`MaxRetries` → exactly one `LinkSetDown`, `Up=false`, `Failures==MaxRetries`.
 - `Dead`×N then `Alive` → exactly one `LinkSetUp` on recovery, `Failures` reset.
-- `Unsupported` → never `LinkSetDown`/`LinkSetUp`, `KeepaliveUp==nil`,
-  `KeepaliveInfo` contains "unknown", `Failures` not incremented (C1).
-- ID/Seq match: prober fed a reply with wrong ID/Seq → treated as no-match (Dead path), correct
-  reply → Alive.
-- Lock-scope: a netlink op blocked in `LinkSetDown` (fake `ops` that blocks) must NOT block a
-  concurrent `GetStatus` (assert `GetStatus` returns within a short timeout while
-  `LinkSetDown` is parked). This is the regression test for the secondary bug.
+- `Unsupported(structural)` → never `LinkSet*`, `KeepaliveUp==nil`, info contains "unknown",
+  `Failures` unchanged.
+- `Unsupported(transient)` sustained ≥ window → escalated status string + still no `LinkSetDown`.
+- Seq/nonce match: reply with wrong Seq or wrong nonce → not Alive; correct → Alive.
+- `LinkByName` error on a transition tick → `Up` not latched, retried next tick, eventual
+  exactly-one `LinkSet*` when lookup succeeds.
+- Lock-scope regression: a `LinkSetDown` parked in a blocking fake `ops` must NOT block a
+  concurrent `GetStatus` (assert `GetStatus` returns within a short timeout while down is parked).
+- Same-name TOCTOU: runner sees an ifindex change → drops its `LinkSet*`.
 
-Integration / manual (at `/engineer`, on a tunnel test path — NOT smoke-cluster-blocking):
-- Bring up a GRE tunnel to a live peer → keepalive up.
-- Drop the peer (firewall the echo / down the far end) while the route stays → after
-  `MaxRetries*interval` the tunnel goes admin-down (one `LinkSetDown`), status shows
-  "down (N consecutive failures)".
-- Restore peer → recovers, one `LinkSetUp`.
-- Run as a non-root daemon with `ping_group_range` unset → status shows "unknown (ICMP probe
-  unavailable)", tunnel NOT torn down (C1).
+Integration / manual (at `/engineer`; tunnel test path, NOT smoke-cluster-blocking):
+- GRE tunnel to a live peer → keepalive up. Kill the peer (firewall echo / down far end) while
+  the route stays → after `MaxRetries×interval` the tunnel goes admin-down (one `LinkSetDown`),
+  status "down (N consecutive failures)". Restore → recovers, one `LinkSetUp`.
+- Non-root daemon with `ping_group_range` unset → status "unknown (ICMP probe unavailable)",
+  tunnel NOT torn down (C1 structural).
 
 ## 10. Risks & Mitigations
 
-- **R1 — `ping_group_range` not set in test/prod env.** Datagram ICMP fails → everything
-  Unsupported → C1 holds links up but status screams "unknown". Mitigation: document the sysctl
-  in the module doc + systemd unit notes; the A2 auto-fallback covers `CAP_NET_RAW` deploys;
-  C1 ensures no self-outage. Verify the test VM's `net.ipv4.ping_group_range` during /engineer.
-- **R2 — VRF probe binding.** `SO_BINDTODEVICE` to `vrf-<instance>` requires the device to
-  exist when the prober opens the socket. For a tunnel not in a VRF, no bind (default FIB).
-  Mitigation: open the socket per-probe (cheap) so a late-created VRF is picked up; tolerate
-  bind failure as Unsupported rather than crashing.
-- **R3 — datagram-ICMP ID rewrite.** The kernel substitutes the on-wire ID with the socket's
-  ephemeral port for `udp4`/`udp6` ping sockets; `x/net/icmp` returns that substituted ID on
-  read. Matching on a *self-chosen* ID may therefore never match. Mitigation: match primarily
-  on **Seq** (preserved end-to-end) and on Data payload echo (carry a per-probe nonce in
-  `Echo.Data` and require it back); treat ID as advisory. Empirically confirm during /engineer
-  with a loopback echo before locking the match predicate. (This is why §5a says "verify what
-  the kernel actually returns".)
-- **R4 — read-loop starvation / deadline.** If many stray datagrams arrive, the
-  match-or-discard `ReadFrom` loop must respect the absolute deadline (set once,
-  `SetReadDeadline(now+T)`, re-check each iteration) so a flood can't extend a probe past its
-  budget. Bound total probe time to one interval minus margin.
-- **R5 — interval vs deadline coupling.** A 1 s interval with an 800 ms deadline leaves little
-  slack. Keep the deadline a fraction of interval (e.g. `min(800ms, interval/2)`) and document
-  the floor.
+- **R1 — `ping_group_range` not set in test/prod.** Datagram ICMP fails → structural Unsupported
+  → C1 holds links up, status "unknown". Mitigation: document the sysctl in the module doc +
+  systemd notes; A2 covers `CAP_NET_RAW` deploys; verify the test VM's
+  `net.ipv4.ping_group_range` during /engineer.
+- **R2 — underlay-in-a-VRF.** If the tunnel's *underlay* is itself in a VRF, the unbound global
+  probe takes the wrong table → false Unsupported/Dead. Out-of-scope (follow-up, §5b); the
+  common deployment has the underlay in the global table where the tunnel encap resolves.
+- **R3 — datagram-ICMP ID rewrite (the F1 root).** Resolved: match on Seq + Data-nonce only; ID
+  ignored on datagram. Confirm round-trip on loopback during /engineer before locking the
+  predicate; keep the nonce small (~8 bytes) so responders echo it faithfully.
+- **R4 — read-loop starvation / deadline.** Set `SetReadDeadline(now+T)` once; re-check the
+  absolute deadline each `ReadFrom` iteration so a datagram flood can't extend a probe past its
+  budget. Bound total probe time below the interval.
+- **R5 — interval vs deadline coupling.** Keep the deadline a fraction of interval
+  (`min(800ms, interval/2)`); document the floor.
+- **R6 — transient FD exhaustion masking real death (AGY #4).** Mitigated by C1's
+  transient-escalation: bounded-window loud status + `slog.Error`, never a silent forever-hold.
 
 ## 11. Rollback / Out-of-Scope
 
 - Rollback: pure Go change in `pkg/routing`; revert the commit. No persisted state, no wire
-  protocol, no config grammar change (C1/C3 keeps the bug fix knob-free; C3 deferred).
-- Out of scope: package split (E, separate Refactor issue); monitor.go 5a fix (separate
-  follow-up issue); `on-probe-unavailable` config knob (C3, follow-up); IPv6-only nuances
-  beyond mirroring the monitor's `udp6` path; #1912 cold-ENCAP blackhole and #1914 endpoint-ID
-  collision (explicitly distinct per the issue).
+  protocol, no config grammar change (C3 deferred).
+- Out of scope: package split (E); `monitor.go` 5a fix; `on-probe-unavailable` knob (C3);
+  underlay-in-a-VRF binding (R2); #1912 cold-ENCAP blackhole and #1914 endpoint-ID collision
+  (distinct per the issue).
