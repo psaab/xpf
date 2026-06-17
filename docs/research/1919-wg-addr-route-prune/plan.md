@@ -2,8 +2,9 @@
 
 - **Issue**: #1919 — routing: removing a WireGuard tunnel leaks its kernel
   addresses + FRR routes (persistent wgN bypasses address reconcile)
-- **Revision**: r2 (post-r1 triple review — Claude SMR + Codex + AGY all
-  PLAN-NEEDS-MAJOR; three converged findings folded in)
+- **Revision**: r3 (post-r2 Codex re-review — one residual MAJOR on the
+  AddrList-error fallback; fixed. r1 had 3 converged MAJORs, all resolved
+  in r2; r3 closes the last edge case)
 - **Branch**: `research/1919-wg-addr-route-prune` off `origin/master`
   @ `ee3f336d3` (post-#1918, post-#1947)
 - **Status**: PLAN DRAFT — research-only; STOP at PLAN-READY
@@ -205,16 +206,18 @@ loop). Each `Apply`:
    - look up the link (`LinkByName`):
      - On **success**: call the **new dedicated prune helper**
        `pruneAppliedAddrsLocked(link, name, t.appliedAddrs[name])`
-       (see r2 design note below). It deletes every present non-link-
+       (see design note below). It deletes every present non-link-
        local address (matching the steady-state reconcile's
        non-link-local semantics) plus configured/applied link-locals,
-       honoring the same autoconf-fe80 gate, and **returns the set of
-       addresses whose `AddrDel` FAILED across ALL families**. **Keep
+       honoring the same autoconf-fe80 gate, and **returns
+       `(failed, retry)`** — the all-family failed-`AddrDel` set, plus a
+       `retry` bool that is true whenever the device could not be proven
+       clean (any `AddrDel` failed, OR `AddrList` itself failed). **Keep
        the link** — never `LinkDel` (#1432 invariant).
-     - If the returned failed-set is **non-empty**: retain
-       `t.appliedAddrs[name] = failedSet` and `nextWG[name] = true`
-       (retry next apply — mirrors GRE removal-retry at :194-198).
-     - If the failed-set is empty (clean prune): `delete(t.appliedAddrs,
+     - If `retry` is **true**: retain `t.appliedAddrs[name] = failed`
+       (or the prior set on an `AddrList` failure) and `nextWG[name] =
+       true` (retry next apply — mirrors GRE removal-retry at :194-198).
+     - If `retry` is **false** (proven clean): `delete(t.appliedAddrs,
        name)` and DROP `name` from `nextWG`.
      - On **`LinkByName` error**: gate on `isLinkNotFound(err)`
        (`pkg/routing/vrf.go:151`). If **not-found** (device genuinely
@@ -358,25 +361,42 @@ wgConfigured map[string]bool
 
 `ensureReconcileStateLocked`: add `if t.wgConfigured == nil { … }`.
 
-New helper (removal-only; leaves `reconcileLinkAddrsLocked` untouched):
+New helper (removal-only; leaves `reconcileLinkAddrsLocked` untouched).
+r3 fix (Codex r2 MAJOR): the helper returns `(failed, retry)` where
+`retry` is true whenever the prune could NOT prove the device is clean —
+either an `AddrDel` failed OR `AddrList` itself failed (cannot enumerate
+⇒ cannot conclude clean, regardless of whether `applied` is empty). The
+caller retains tracking on `retry`, NOT on `len(failed)>0` — decoupling
+the "enumerate failed" case from the "delete failed" set fixes the r2
+counterexample (stale non-link-local present, `applied` empty, transient
+`AddrList` failure → r2 returned empty → caller dropped → leak).
+
 ```go
 // pruneAppliedAddrsLocked deletes the addresses this manager owns from a
 // link being pruned (WG removal), keeping the link. Deletes every
 // present non-link-local address, plus configured/applied link-locals;
 // the kernel autoconf/foreign fe80 is never touched (same gate as
-// reconcileLinkAddrsLocked). Returns the set of addresses whose AddrDel
-// FAILED — across ALL families — so the caller can retain+retry. Caller
-// MUST hold mu.
-func (t *tunnelManager) pruneAppliedAddrsLocked(link netlink.Link, name string, applied map[string]bool) map[string]bool {
-    failed := map[string]bool{}
+// reconcileLinkAddrsLocked). Returns (failed, retry):
+//   - failed: addresses whose AddrDel FAILED, across ALL families
+//     (carried forward as the new appliedAddrs[name] for the link-local
+//     gate on the next attempt).
+//   - retry:  true if the device could not be proven clean this pass —
+//     any AddrDel failed OR AddrList itself failed. The caller retains
+//     the name in wgConfigured when retry is true.
+// Caller MUST hold mu.
+func (t *tunnelManager) pruneAppliedAddrsLocked(link netlink.Link, name string, applied map[string]bool) (map[string]bool, bool) {
     list, err := t.ops.AddrList(link, netlink.FAMILY_ALL)
     if err != nil {
-        // Could not enumerate — treat as "all still present": retain the
-        // tracked set so the next apply retries. (If applied is empty,
-        // returns empty → caller drops, which is correct: nothing to do.)
-        for k := range applied { failed[k] = true }
-        return failed
+        // Cannot enumerate ⇒ cannot conclude the device is clean. Keep
+        // the existing tracked set (so the link-local gate stays correct
+        // next pass) and signal retry unconditionally — even if applied
+        // is empty (Codex r2 MAJOR: an empty applied with a real stale
+        // address must still retry).
+        slog.Warn("failed to list wireguard tun addresses for prune",
+            "name", name, "err", err)
+        return applied, true
     }
+    failed := map[string]bool{}
     for i := range list {
         a := list[i]
         if a.IP == nil { continue } // unclassifiable: never delete
@@ -393,7 +413,7 @@ func (t *tunnelManager) pruneAppliedAddrsLocked(link netlink.Link, name string, 
                 "name", name, "addr", key)
         }
     }
-    return failed
+    return failed, len(failed) > 0
 }
 ```
 
@@ -418,13 +438,13 @@ for name := range oldWG {
         }
         continue
     }
-    failed := t.pruneAppliedAddrsLocked(link, name, t.appliedAddrs[name])
-    if len(failed) > 0 {
-        t.appliedAddrs[name] = failed
-        nextWG[name] = true // AddrDel failed → retry next apply
+    failed, retry := t.pruneAppliedAddrsLocked(link, name, t.appliedAddrs[name])
+    if retry {
+        t.appliedAddrs[name] = failed // = old applied if AddrList failed
+        nextWG[name] = true           // could not prove clean → retry
         continue
     }
-    delete(t.appliedAddrs, name) // clean prune; drop tracking
+    delete(t.appliedAddrs, name) // proven clean; drop tracking
 }
 // ... existing GRE removal loop unchanged ...
 // ... per-tunnel apply loop unchanged (still-configured WG re-tracked
@@ -485,12 +505,17 @@ Using the existing fake `linkOps` harness:
 7. **`TestWireguardReAddAfterRemovalTracksFresh`**: add → remove (prune)
    → re-add same name with a NEW address → assert new addr applied and
    old addr not re-leaked (appliedAddrs correctly reset/repopulated).
-8. **`TestWireguardRemovedWhileDaemonDownNotPruned`** (R5 boundary): on a
+8. **`TestWireguardRemovalAddrListFailureRetained`** (Codex r2 MAJOR):
+   on removal, fake `AddrList` returns an error AND `appliedAddrs[name]`
+   is empty (the edge case) → assert name RETAINED in tracking (retry),
+   no panic; a subsequent Apply where AddrList succeeds prunes the
+   address. Proves the `(failed, retry)` decoupling.
+9. **`TestWireguardRemovedWhileDaemonDownNotPruned`** (R5 boundary): on a
    FRESH manager (empty `wgConfigured`) with a wgN carrying addresses
    present in the kernel + an empty tunnel list → assert NO AddrDel
    (the manager only prunes what it tracked applying; restart-time
    removal is #1434 scope). Encodes the deferral.
-9. **Regression guard**: existing `TestWireguardConfiguredLinkLocalRemoved`
+10. **Regression guard**: existing `TestWireguardConfiguredLinkLocalRemoved`
    and friends must still pass (still-configured reconcile unchanged;
    `reconcileLinkAddrsLocked` is NOT modified).
 
