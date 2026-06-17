@@ -459,8 +459,11 @@ on the final rev. Round verdicts recorded per round below.
 | Round | Claude SMR | Codex | AGY |
 |-------|-----------|-------|-----|
 | r1 | PLAN-NEEDS-REVISION | PLAN-NEEDS-REVISION | PLAN-NEEDS-REVISION |
-| r2 | PLAN-READY | PLAN-NEEDS-REVISION (2 precision bugs) | pending |
-| r3 | pending | pending | pending |
+| r2 | PLAN-READY | PLAN-NEEDS-REVISION (2 precision bugs) | PLAN-READY |
+| r3 | **PLAN-READY** | **PLAN-READY** | **PLAN-READY** |
+
+**CONVERGED at r3** — all three reviewers PLAN-READY on the final revision.
+Awaiting manual approval via `/engineer 1914`.
 
 ### r2 → r3 correction (Codex r2)
 
