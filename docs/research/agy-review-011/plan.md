@@ -1,6 +1,6 @@
 # AGY review-011 — plan of action (Part I hardening + Part II refactor assessment)
 
-**Status:** DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR)
+**Status:** DRAFT v1.1 — SMR r1 PLAN-READY (2 refinements folded); pending Codex + AGY (Codex + AGY + Claude SMR)
 **Base:** `3cd181323` (origin/master)
 **Outcome shape:** Part I → one LOW defensive-hardening issue (both findings are
 **latent**, not live bugs); Part II → **KILL/DEFER all 5** (all under the
@@ -62,10 +62,15 @@ rolling.go:101/168) — a wrong parse would drain a node whose sync link is Down
 (status.go:496, "Status: unreachable") is a **separate** function not folded
 into `FormatInformation`. The hazard is the unenforced assumption — a future
 merge of IP-monitoring (or any pre-sync section with `Status:`) into
-`FormatInformation` would silently mis-gate drains. **Fix (defensive):** scope
-the match to the `Sync link statistics:` / `Fabric link statistics:` section
-(find the header, scan until the next blank/header); add a test asserting
-`FormatInformation` emits exactly one `Status:` and that it is the sync link.
+`FormatInformation` would silently mis-gate drains. **Conditional severity
+(SMR-r1):** LOW *today* (single `Status:`), but the failure mode is MEDIUM-class
+(a wrong drain drops cluster connections) — it becomes MEDIUM the instant any
+pre-sync section with `Status:` is folded into `FormatInformation`. **Fix
+(defensive), lead with the test:** add a test asserting `FormatInformation`
+emits exactly one `Status:` (it fails loudly the day a collision is introduced),
+then scope the match to the `Sync link statistics:` / `Fabric link statistics:`
+section (find the header, scan until the next blank/header), keeping the
+conservative not-synced fallback.
 
 ### Disposition
 File **one** issue: *"Upgrade durability + drain-gate parser: latent
@@ -98,7 +103,10 @@ here, not filed (marginal; let the audit drive it).
   are already decomposed; #1/#5 are hot-path/cohesive. Do not file refactor
   issues (filing them would invite churn the project's own discipline rejects).
   If a reviewer insists on a future target, it is store.go @ 2011, via the
-  audit.
+  audit. **Note (SMR-r1):** this KILL has **no filed issues** to close/label
+  (`feedback_plan_kill_label_required` does not apply) — it is a documented
+  recommendation in this plan + the issue/return comments, not an issue-state
+  change.
 
 ## 7. Public API / contract preservation
 No API changes. Part I fixes are internal (copyTree fsync set; parser scoping).
