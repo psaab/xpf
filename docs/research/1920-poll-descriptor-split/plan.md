@@ -1,10 +1,10 @@
 # #1920 — poll_descriptor/mod.rs over the 2000-LOC modularity threshold
 
-**Revision:** v2 (post round-1: Codex PLAN-KILL-CORRECT, AGY NEEDS-WORK
-refuted on the code, Claude SMR PLAN-KILL-CORRECT — applied Codex's two
-factual corrections)
+**Revision:** v3 (CONVERGED — 3-way PLAN-KILL: Codex PLAN-KILL-CORRECT,
+Claude SMR PLAN-KILL-CORRECT, AGY PLAN-KILL-CORRECT after round-2 withdrawal
+of its round-1 PLAN-NEEDS-WORK dissent)
 **Branch:** `research/1920-poll-descriptor-split` (off origin/master `62c1ddc66`)
-**Status:** RESEARCH — PLAN-KILL is an explicitly-allowed outcome.
+**Status:** RESEARCH COMPLETE — **PLAN-KILL (Path A)**, 3-way converged.
 **Target:** `userspace-dp/src/afxdp/poll_descriptor/mod.rs`, 3122 file lines /
 3054 production LOC (the `#[cfg(test)] mod` begins at line 3055).
 
