@@ -3,9 +3,9 @@
 - **Issue**: #1918 (bug) — `probeICMP` (`pkg/routing/tunnel.go`) never sends/receives an
   ICMP echo; both code paths return `true` on socket-open, so a dead GRE/IPIP peer behind a
   valid route is reported up forever and `LinkSetDown` never fires.
-- **Revision**: r3 (AGY r2 #5 source-bind folded; SMR r2 PLAN-READY + N1 folded; pending
-  Codex r2 + AGY r3 re-review on this revision)
-- **Status**: PLAN-READY candidate (pending three-way re-review of r3)
+- **Revision**: r4 (Codex r2 NF1-NF4 folded; AGY r3 PLAN-READY; SMR PLAN-READY; pending
+  Codex r4 confirmation)
+- **Status**: PLAN-READY candidate (pending Codex r4 confirmation; AGY + SMR already READY)
 - **Branch**: `research/1918-probe-real-liveness`
 - **Mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
 
@@ -47,6 +47,21 @@
   `tc.Source` through `startKeepalive` → runner → prober; adds `source` to `keepaliveRunner` and
   `matches()` so a source change restarts the runner. Prober signature gains a `source` arg.
 - **SMR r2 N1 (startup posture):** folded into §6 Axis C / §10 R1 (already in r2's late edit).
+
+## Changelog r3 → r4
+
+- **Codex r2 NF1 (HIGH, source bind):** independently converged with AGY r2 #5 — already folded
+  as §5c in r3. (Two reviewers caught the same gap → high confidence.)
+- **Codex r2 NF2 (MEDIUM, optimistic-flip window):** Axis D rewritten to **commit-after-success**
+  — `Up` is mutated only after the netlink op succeeds, so a racing `Apply`/`GetStatus` never
+  observes an uncommitted `Up`. The flip-then-revert design is gone (nothing to revert).
+- **Codex r2 NF3 (HIGH, ifindex-reuse bypass):** the recreate guard is now a per-tunnel
+  monotonic **generation token** captured at `startKeepalive` and bumped by `Apply` on
+  create/recreate — NOT an action-time `LinkByName().Index`, which a stale runner would read as
+  the new link and wrongly pass.
+- **Codex r2 NF4 (MEDIUM, errno classification):** §6 Axis C now gives a complete structural vs
+  transient errno table with **UNRECOGNIZED → TRANSIENT (escalate)** as the total default, so a
+  resource storm cannot be silently held as structural.
 
 ---
 
@@ -192,8 +207,15 @@ This is the pattern to follow — with the two precedent gaps fixed (§5).
     socket error: <errno>)"`) and a `slog.Error`. Do NOT silently hold "up" forever on a
     resource error that may be masking a real peer death. We still do not `LinkSetDown` purely
     on inability-to-probe (that would amplify a local FD leak into a network outage), but the
-    operator is now alarmed. (Distinguishing structural vs transient is by errno classification
-    at `ListenPacket` time.)
+    operator is now alarmed.
+  - **Errno classification at `ListenPacket`/bind time (Codex r2 NF4 — must be complete and
+    total).** STRUCTURAL (config/capability — one-shot Warn, hold indefinitely):
+    `EPERM`, `EACCES` (no `ping_group_range`/cap), `EAFNOSUPPORT`, `EPROTONOSUPPORT`,
+    `EPROTOTYPE`, `EADDRNOTAVAIL` (the bound `tc.Source` is not a local address — a config
+    error). TRANSIENT (local resource — bounded-window escalation to `slog.Error`):
+    `EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`, `EINTR`. **Default for any UNRECOGNIZED errno =
+    TRANSIENT** (escalate), so a resource storm can never be silently mis-bucketed as a held
+    structural — this closes NF4's `ENOMEM`-mis-as-structural counterexample by construction.
   - **Startup posture (SMR r2 N1):** `startKeepalive` initializes `state.Up = true`
     (`tunnel.go:955`). On a daemon restart under structural-Unsupported (no `ping_group_range`),
     every keepalive therefore starts at `Up=true` and C1 holds it there — the kernel link
@@ -207,36 +229,64 @@ This is the pattern to follow — with the two precedent gaps fixed (§5).
 - **C3 — operator-selectable `set ... keepalive on-probe-unavailable (hold|down)`.** Deferred
   follow-up; default behavior is C1.
 
-### Axis D (mandatory) — transition-under-lock, netlink-outside-lock, with error + TOCTOU guards
+### Axis D (mandatory) — transition-under-lock, netlink-outside-lock, COMMIT-AFTER-SUCCESS
 
-Rewrite the `keepaliveLoop` tick body:
+r3's "flip `Up` under lock, then revert on `LinkByName` error" exposed a window where a
+concurrent `Apply` reads the optimistically-flipped `Up` (`tunnel.go:531-538` `skipUp`) and acts
+on it before the revert lands (Codex r2 **NF2**). r4 uses a **commit-after-success** order
+instead: the in-memory `Up` is mutated only once the netlink op has succeeded. Rewrite the
+`keepaliveLoop` tick body:
 
-1. Under `state.mu`: classify the probe result, update `Failures`/`LastSuccess`/`LastFailure`,
-   and decide the transition. The transition is recorded as an intent
-   (`wantUp bool` + `changed bool`) and `state.Up` is flipped to the new value **in the same
-   locked section** so a later tick observing the new `Up` will not re-fire. Preserve the
-   existing edge guards (`if !state.Up` for recovery, `if state.Up && Failures>=MaxRetries`
-   for down). Snapshot the fields status needs.
-2. `Unlock`.
-3. If `changed`: `LinkByName(tunnelName)`; **if the lookup errors, do NOT keep the flipped `Up`
-   committed** — re-acquire `mu`, revert `state.Up` to its pre-decision value (so the transition
-   is retried next tick), and skip the netlink call. (Fixes Codex F4: a transient `LinkByName`
-   failure must not permanently strand the in-memory state out of sync with the link.)
-4. **Same-name TOCTOU guard (Codex F4 / #1884 recreate race):** the link may have been deleted
-   and recreated under the same name by a concurrent `Apply` while this stale runner ran.
-   Capture the link's `ifindex` (or a per-runner generation token set at `startKeepalive`) and
-   only apply `LinkSetUp/Down` if it still matches; otherwise drop the action (the new runner
-   owns the new link). The existing #848 drain already bounds this, but the ifindex check makes
-   it explicit and cheap.
-5. Perform the single `LinkSetUp`/`LinkSetDown` outside the lock.
+1. Under `state.mu`: classify the probe result; update `Failures`/`LastSuccess`/`LastFailure`
+   (pure counters, safe to commit now); compute the **transition intent** without yet writing
+   `Up`: `wantUp := <recovery edge: !Up && alive>` or `wantDown := <Up && Failures>=MaxRetries>`.
+   Snapshot the fields status needs and the runner's `gen` token (see step 4). `Unlock`.
+   *`Up` is NOT changed yet* — so a racing `Apply`/`GetStatus` sees the still-current value, never
+   an uncommitted one (fixes NF2).
+2. If neither `wantUp` nor `wantDown`: done (no netlink, no `Up` write).
+3. Else `LinkByName(tunnelName)`. On error: do nothing (no `Up` write, no netlink) — the
+   transition is naturally retried next tick because `Up` was never changed. (This also fixes
+   Codex F4 without the revert window: there is nothing to revert.)
+4. **Same-name recreate guard via generation token, captured at `startKeepalive` (Codex r2
+   **NF3**).** An action-time `LinkByName().Attrs().Index` is NOT a safe guard: a stale runner
+   ticking after a delete+recreate would read the *new* link's ifindex and the guard would pass,
+   letting it `LinkSetDown` the replacement. Instead: `tunnelManager` holds a per-tunnel
+   monotonic `linkGen map[string]uint64`, bumped under `t.mu` every time `Apply` creates/recreates
+   the link (`finishTunnelLocked`/the recreate path near `tunnel.go:461-481`). `startKeepalive`
+   captures the current `linkGen[tunnelName]` into the runner. Before the netlink op, the runner
+   re-reads `t.linkGen[tunnelName]` under `t.mu`; if it differs from the captured value, a
+   recreate happened → **drop the action** (the new runner, started by the same `Apply` that
+   recreated, owns the new link). This is correct regardless of ifindex reuse. The #848 drain
+   still bounds the lifetime; the gen check closes the in-flight-tick window the drain cannot.
+5. Perform the single `LinkSetUp`/`LinkSetDown` outside `state.mu`, **capturing its error**.
+   `LinkSetUp`/`LinkSetDown` themselves return errors (`tunnel.go:24-25`) — those errors are
+   handled here, not ignored (Codex r3 blocker).
+6. **Commit ONLY on netlink success:** if the `LinkSet*` call returned nil, re-acquire `state.mu`,
+   set `state.Up = wantUp_value`, `Unlock`. **If `LinkSet*` returned an error: log it and DO NOT
+   write `Up`** — `Up` retains its pre-transition value, so the guard in step 1
+   (`Up && Failures>=MaxRetries` for down, `!Up && alive` for recovery) still fires next tick and
+   the transition is retried until the netlink op succeeds. This is the key difference from r3,
+   which committed `Up` before the netlink op and only reverted on `LinkByName` failure — leaving
+   a permanent desync when `LinkSetDown`/`LinkSetUp` itself errored (Codex r3 counterexample:
+   dead peer → `Up=false` committed → `LinkSetDown` transient error → kernel stays up but later
+   dead ticks see `Up==false` and never retry). In r4, `Up` is never written until the kernel op
+   succeeds, so a `LinkSet*` error is just a retried transition, never a lost one. `Failures`
+   for the down case is committed in step 1 (status shows climbing failures even while
+   `LinkSetDown` keeps erroring — desired); `Failures` reset happens on the alive branch in step 1.
 
-Invariant (now provable): *for each runner, the (decision + `Up` write) is a single locked
-section; netlink runs after unlock keyed to `changed`; on `LinkByName` error the `Up` write is
-reverted so no transition is lost; the ifindex guard prevents acting on a replaced link.* Hence
-at most one **successful** `LinkSet*` per real transition, and no permanent desync from a
-transient netlink error. (AGY #5 confirmed there is no concurrent writer to `state.Up` other
-than this goroutine, so step 1's in-lock flip is race-free; `Apply` only *reads* `state.Up`
-under the lock. Redundant `LinkSetUp` on an already-up link is a kernel no-op, a benign backstop.)
+Invariant (now provable): *`Up` transitions to its new value only after the keying netlink op
+has been issued for the still-current link generation; no observer ever sees an uncommitted
+`Up`; a `LinkByName`/netlink error leaves `Up` unchanged so the transition retries; the
+generation guard prevents a stale runner from acting on a recreated link.* Hence at most one
+**successful** `LinkSet*` per real transition, no NF2 optimistic-flip window, and no NF3
+ifindex-reuse bypass. (There is no concurrent writer to `state.Up` other than this goroutine —
+`Apply` and `GetStatus` only read it under the lock — so the two short locked sections in steps
+1 and 6 cannot race a competing writer. Redundant `LinkSetUp` on an already-up link is a kernel
+no-op, a benign backstop.)
+
+> Note: `Failures` for the down case is committed in step 1 before the netlink op, so status can
+> show climbing failures even if `LinkByName` is transiently failing — desired. The `Up` flip is
+> the only state gated on netlink success.
 
 ### Axis E — package split
 
@@ -281,8 +331,11 @@ source-only config change restarts the runner.
 
 ## 8. Blast Radius / Files
 
-- `pkg/routing/tunnel.go` — replace `probeICMP`; restructure `keepaliveLoop` tick per Axis D;
-  add prober field + injection; status unknown arm. (Optional same-package
+- `pkg/routing/tunnel.go` — replace `probeICMP`; restructure `keepaliveLoop` tick per Axis D
+  (commit-after-success); add prober field + injection; add `source` to `keepaliveRunner` +
+  `matches()` (§5c); add `linkGen map[string]uint64` to `tunnelManager` bumped in `Apply` on
+  link create/recreate and captured at `startKeepalive` (§6 Axis D step 4); thread `tc.Source`
+  at the `startKeepalive` call site (`tunnel.go:547`); status unknown arm. (Optional same-package
   `tunnel_keepalive.go` split.)
 - `pkg/routing/routing.go` — `GetKeepaliveState` passthrough unchanged.
 - `pkg/routing/routing_test.go:896,901` — currently call `probeICMP("127.0.0.1")` /
@@ -309,7 +362,15 @@ Unit (deterministic, injected prober — no real network):
   exactly-one `LinkSet*` when lookup succeeds.
 - Lock-scope regression: a `LinkSetDown` parked in a blocking fake `ops` must NOT block a
   concurrent `GetStatus` (assert `GetStatus` returns within a short timeout while down is parked).
-- Same-name TOCTOU: runner sees an ifindex change → drops its `LinkSet*`.
+- Same-name recreate (NF3): bump `linkGen[tunnel]` mid-flight → runner's gen mismatch → drops
+  its `LinkSet*` (does not down/up the replacement link).
+- `LinkSet*` error retry (Codex r3 blocker): fake `ops.LinkSetDown` returns an error on the
+  transition tick → `state.Up` stays `true` → next dead tick retries; when `LinkSetDown` later
+  succeeds, exactly one effective down transition. Symmetric for `LinkSetUp` on recovery.
+- NF2 no-uncommitted-`Up`: a concurrent `GetStatus`/`Apply`-`skipUp` read interleaved between the
+  probe classification and the netlink op must observe the pre-transition `Up` (never an
+  optimistic value) — assert via a fake `ops` that signals when it is inside `LinkSetDown` and a
+  concurrent `GetStatus` reads the old `Up`.
 - Source bind (§5c): injected prober asserts it receives the tunnel's `tc.Source` as the bind
   arg; `matches()` returns false when only `tc.Source` changes (runner restarts); empty
   `tc.Source` → wildcard fallback, bind error on a set source → `ProbeUnsupported(structural)`.
