@@ -16,3 +16,13 @@ Records Codex task ids + AGY job ids per round.
 | r4 | Codex | (pending) | pending |
 | r4 | AGY | (pending) | pending |
 | r4 | Claude SMR | claude-smr-plan-r3.md (carries r4 reqs) | pending |
+
+## r4
+| Round | Reviewer | ID / artifact | Verdict |
+|-------|----------|---------------|---------|
+| r4 | Codex | task 019ed49c-892f-7c53-8a8a-9388403b3189 / codex-plan-r4.md | PLAN-NEEDS-WORK |
+| r4 | AGY | adversarial-review-mqhsbgfn-mwr446 / agy-plan-r4.md | PLAN-NEEDS-WORK |
+| r4 | Claude SMR | claude-smr-plan-r4.md | PLAN-NEEDS-WORK |
+| r5 | Codex | (pending) | pending |
+| r5 | AGY | (pending) | pending |
+| r5 | Claude SMR | claude-smr-plan-r4.md (carries r5 reqs) | pending |

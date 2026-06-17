@@ -2,7 +2,7 @@
 
 - **Issue**: #1944
 - **Branch**: `research/1944-login-user-password`
-- **Revision**: r4 (addresses convergent r3 provenance + validator findings from Codex + AGY + Claude SMR)
+- **Revision**: r5 (UID-keyed provenance marker dissolves the r4 GC-bypass + leave-rejoin tension; §6 DES consistency fix)
 - **Mode**: `/research` — STOPS at PLAN-READY. No PR, no production code.
 - **Base**: origin/master `004c6eaf4` — all code refs anchored to this base.
 
@@ -106,7 +106,7 @@ surfaced during #1922 SAFE-BOOTSTRAP / #1930.
 | `pkg/config/schema_validators.go` | new `ValidateCryptHash` | crypt(3) hash validator (precise spec §5.5). |
 | `pkg/config/value_type.go` | `ValueType` enum + `Placeholder()` | Add `ValueCryptHash` + a `Placeholder()` arm. |
 | `pkg/config/schema_walk.go` | typed-leaf dispatch @236 (`isTypedLeaf()` @schema.go:97); validator invocation downstream | No change (consumes `valueType`+`validator`). |
-| `pkg/daemon/daemon_system.go` | `applySystemLogin` @656-721; `applyRootAuth` @774; `exec_timeout.go` `runCommandStdinTimeout` | Apply/lock password via `runCommandStdinTimeout(…, "chpasswd","-e")`, idempotent; new pure `passwordAction` decision helper + `currentShadowHash` (direct `/etc/shadow` read) + `isLockedShadow` + provenance marker. |
+| `pkg/daemon/daemon_system.go` | `applySystemLogin` @656-721 (early-return @657-659); `applyRootAuth` @774; `exec_timeout.go` `runCommandStdinTimeout` | Apply/lock password via `runCommandStdinTimeout(…, "chpasswd","-e")`, idempotent; new pure `passwordAction` decision helper + `currentShadowHash` (direct `/etc/shadow` read) + `isLockedShadow` + `lookupUID` + UID-keyed provenance marker (`markProvisioned`/`xpfProvisioned`). |
 | `pkg/configstore/check.go` | SchemaValidate gate @13 | No change (validator auto-runs through the gate). |
 | `pkg/daemon/daemon_apply.go` | apply calls @1021 (`applySystemLogin`), @1027 (`applyRootAuth`) | No change (call sites; ordering unchanged). |
 | `pkg/config/compiler.go` | root-auth warning style @699-707 | Reference for the §5.8 "no auth method" warning. |
@@ -122,9 +122,11 @@ surfaced during #1922 SAFE-BOOTSTRAP / #1930.
   `valueType != ValueAny`) drives `SchemaValidate` (schema_walk.go:40) to
   invoke `validator` at commit-check. Setting `valueType: ValueCryptHash,
   validator: ValidateCryptHash` on the leaf is the complete wiring.
-- **Apply ordering** (daemon_apply.go:912-918): `applySystemLogin` runs
-  before `applyRootAuth`; both best-effort, log-on-failure, no hard
-  commit error. We stay inside `applySystemLogin`.
+- **Apply ordering** (daemon_apply.go:1021 `applySystemLogin`, :1027
+  `applyRootAuth`): `applySystemLogin` runs before `applyRootAuth`; both
+  best-effort, log-on-failure, no hard commit error; both serialized
+  under the apply lock (`applyConfigLocked`/`d.applySem`) so there is no
+  marker/shadow race. We stay inside `applySystemLogin`.
 - **Timeout wrappers** (`pkg/daemon/exec_timeout.go`):
   `runCommandTimeout(name,args…)` and `runCommandStdinTimeout(stdin,name,
   args…)` bound apply-path commands. `applyRootAuth` uses the latter for
@@ -218,6 +220,7 @@ Apply shell inside `applySystemLogin`, per user (pwLock gated on
 provenance — see below):
 ```go
 desired := user.EncryptedPassword
+curUID, uidOK := lookupUID(user.Name)        // user.Lookup → current OS UID
 cur, ok := currentShadowHash(user.Name)
 switch passwordAction(cur, ok, desired) {
 case pwApply:
@@ -226,11 +229,11 @@ case pwApply:
         slog.Warn("failed to set user password", "user", user.Name,
             "err", err, "output", strings.TrimSpace(string(out)))
     } else {
-        markProvisioned(user.Name) // xpf now manages this password (r3/Major-1)
+        if uidOK { markProvisioned(user.Name, curUID) } // xpf manages this exact account's password
         slog.Info("user encrypted-password applied", "user", user.Name)
     }
 case pwLock:
-    if !xpfProvisioned(user.Name) { break } // only lock accounts xpf manages
+    if !uidOK || !xpfProvisioned(user.Name, curUID) { break } // only lock this exact xpf-managed account
     stdin := strings.NewReader(user.Name + ":!\n")
     if out, err := runCommandStdinTimeout(stdin, "chpasswd", "-e"); err != nil {
         slog.Warn("failed to lock user password", "user", user.Name,
@@ -250,25 +253,46 @@ case pwLock:
   passwordless (`passwd -d`), the MOST permissive state — NOT locked, so
   D2 locks it (r2/S2-1, Codex New-Fatal-1 + AGY Finding-1, found
   independently). (`!!` and `!<hash>` match `HasPrefix("!")`.)
-- **Provenance** (r2/S2-2 + r3 Major-1/AGY-r3-defect-1 + AGY-r3-defect-2):
-  a marker `/var/lib/xpf/provisioned-users/<name>` (dir 0700) records
-  that **xpf manages this account's password**. `markProvisioned(name)`
-  drops it; `xpfProvisioned(name)` checks it. Lifecycle:
-  - Dropped on **both** successful `useradd` AND successful `pwApply` —
-    so once xpf has written a password (even to a pre-existing or
-    pre-r3/marker-wiped account), removing the directive will lock it.
-    Fixes the r3 Major-1 orphan (set-then-remove never revoking)
-    independently flagged by Codex (Major-1) and AGY (defect-1).
-  - **GC'd** (marker file removed) for any username present in
-    `/var/lib/xpf/provisioned-users/` but **no longer in**
-    `cfg.System.Login.Users`, at the top of `applySystemLogin`. Prevents
-    the stale-marker leakage AGY-r3-defect-2 (operator removes a user,
-    `userdel`s + recreates out-of-band, re-references in config without a
-    password → stale marker would otherwise lock the new account). After
-    GC, a re-added out-of-band account has no marker → `pwLock` skips it.
-  - `pwLock` runs ONLY when the marker exists → never locks an
-    out-of-band account xpf never wrote a password for.
-  This makes "xpf-managed-only" **enforced**, not asserted.
+- **Provenance — UID-keyed marker** (r2/S2-2 + r3 Major-1 + AGY-r3
+  defect-1/-2 + r4 Codex/AGY GC-bypass + AGY-r4 leave-rejoin): a marker
+  file `/var/lib/xpf/provisioned-users/<name>` (dir 0700) records that
+  **xpf manages this account's password**, and its **content is the
+  numeric UID** of the account at the time xpf wrote the password.
+  - `markProvisioned(name, uid)` writes the UID to the marker on **both**
+    successful `useradd` AND successful `pwApply` — so once xpf has
+    written a password (even to a pre-existing or marker-wiped account),
+    removing the directive will lock it (fixes r3 Major-1, Codex Major-1
+    + AGY defect-1).
+  - `xpfProvisioned(name, curUID)` returns true ONLY if the marker exists
+    **and its recorded UID equals the current OS account's UID**. The
+    current UID is obtained from `user.Lookup(name)` (or parsing
+    `/etc/passwd`) — the daemon already shells `id` here.
+  - `pwLock` runs ONLY when `xpfProvisioned(name, curUID)` is true.
+  - **Why UID-keyed instead of name-only + GC** (r4): a name-only marker
+    forced an impossible choice — keep it and a `userdel`+out-of-band
+    recreate gets locked (AGY-r3 defect-2); GC it and a leave-then-rejoin
+    of the *same* account orphans the old password (AGY-r4 leave-rejoin);
+    and GC-at-top collides with the empty-login early-return (Codex/AGY-r4
+    GC-bypass). The UID disambiguates all three **without any GC**:
+    - Leave-then-rejoin same account: UID unchanged → `pwLock` fires →
+      old password revoked (D2 honored).
+    - `userdel` + out-of-band recreate: new account gets a different UID
+      (or the operator chose a fixed UID — see edge case) → UID mismatch
+      → `pwLock` skips → out-of-band account untouched.
+    - Empty-login early-return: irrelevant — no GC pass to bypass; the
+      marker simply persists and is re-validated by UID on the next apply
+      that includes the user.
+  - **Edge case (documented)**: if an out-of-band recreate happens to
+    reuse the *exact same UID* xpf recorded, the marker would match and
+    `pwLock` would fire. This is acceptable and arguably correct — same
+    name + same UID is indistinguishable from the original xpf-managed
+    account; the operator can re-add `encrypted-password` to restore it.
+    Note in docs.
+  - **Marker cleanup** is opportunistic, not a separate GC pass: when
+    `xpfProvisioned` finds a marker whose UID no longer matches (account
+    deleted/recreated), it MAY rewrite/remove the stale marker inline.
+    No dependency on the early-return path.
+  This makes "xpf-managed-this-exact-account" **enforced**, not asserted.
 - **Never** lock root (root is excluded from this loop at @668; handled by
   `applyRootAuth`).
 - `<user>:!` via `chpasswd -e` produces a locked entry — verified live by
@@ -368,25 +392,26 @@ Decision encapsulated in the pure `passwordAction` helper (§5.4). B2
 proves problematic in smoke.
 
 ### Path C — validation strictness: **C1 permissive recognizer** (decided)
-Accept known crypt id formats + DES + optional `!`-prefix + **bare lock
-sentinels `*`/`!`/`!!`** (r2/S2-3); reject **plaintext** (the real
-footgun — §5.5). C2 strict per-id structural parse rejected (brittle
-across libc / yescrypt params). C3 no validation rejected (reproduces
-the plaintext footgun).
+Accept modular crypt ids with a non-empty checksum + optional `!`-prefix
++ **bare lock sentinels `*`/`!`/`!!`** (r2/S2-3); **reject plaintext**
+(the real footgun) and **legacy DES** (dropped in r4 so the
+plaintext-rejection is absolute — §5.5, r3 Major-2). C2 strict per-id
+structural parse rejected (brittle across libc / yescrypt params). C3 no
+validation rejected (reproduces the plaintext footgun).
 
 ### Path D — directive removal: **D2 lock the account** (decided — flipped from r1)
 Removing `encrypted-password` from a configured user locks password
-login (`<user>:!`), idempotently, **only for xpf-provisioned accounts**
-(enforced by the `/var/lib/xpf/provisioned-users/<name>` marker — r2/S2-2),
-never root, and **never on a shadow read error** (r2/S2-1 — `passwordAction`
-returns `pwNoop` when `ok==false`). D1 (do nothing) **rejected** — orphans
-a live credential outside config control (Codex F-2 + AGY #2 + SMR S-3,
-three-way convergence). D3 (passwordless) rejected. This makes the
-*password* attribute declarative while SSH-keys/sudoers remain additive
-— a deliberate, documented asymmetry (a live password is a
-higher-severity orphan than a stale key). An operator can also lock
-explicitly via `encrypted-password "*"` (Path C accepts the sentinel)
-without removing the directive.
+login (`<user>:!`), idempotently, **only for the exact xpf-managed
+account** (enforced by the **UID-keyed** `/var/lib/xpf/provisioned-users/
+<name>` marker — §5.4, r4), never root, and **never on a shadow read
+error** (r2/S2-1 — `passwordAction` returns `pwNoop` when `ok==false`).
+D1 (do nothing) **rejected** — orphans a live credential outside config
+control (Codex F-2 + AGY #2 + SMR S-3, three-way convergence). D3
+(passwordless) rejected. This makes the *password* attribute declarative
+while SSH-keys/sudoers remain additive — a deliberate, documented
+asymmetry (a live password is a higher-severity orphan than a stale
+key). An operator can also lock explicitly via `encrypted-password "*"`
+(Path C accepts the sentinel) without removing the directive.
 
 ### Path E — root-auth parity: **E1 share the validator** (decided)
 One validator + consistent errors; closes root's identical plaintext
@@ -435,16 +460,24 @@ only) rejected — leaves root unvalidated for no real saving.
 8. **`currentShadowHash` parse**: given a sample `/etc/shadow` line, returns
    field-2 + ok; missing user → `("",false)`. (`chpasswd` exec is
    integration/smoke.)
-9. **Provenance marker lifecycle** (r3 Major-1 / AGY-r3 defects) — use a
-   temp marker dir injected for the test:
-   - `markProvisioned` then `xpfProvisioned` → true; absent → false.
+9. **Provenance UID-keyed marker** (r3 Major-1 + AGY-r3/-r4 + r4
+   GC-bypass) — temp marker dir injected for the test:
+   - `markProvisioned(name, 1001)` then `xpfProvisioned(name, 1001)` →
+     true; `xpfProvisioned(name, 2002)` (UID mismatch) → false; no marker
+     → false.
    - **Set-then-marker invariant**: after a `pwApply`, the marker exists
-     (so a subsequent directive removal would `pwLock`). Covers the
-     orphan: apply on an initially-unmarked user, then remove → lock
-     fires (Codex Major-1 + AGY defect-1).
-   - **GC**: marker present for a user NOT in `cfg.System.Login.Users` →
-     `applySystemLogin`'s GC removes it; a later out-of-band re-add with
-     no password → no marker → `pwLock` skips (AGY-r3 defect-2).
+     with the right UID (so a subsequent directive removal locks). Covers
+     the orphan on an initially-unmarked account (Codex Major-1 + AGY
+     defect-1).
+   - **Leave-then-rejoin same account**: marker UID == current UID →
+     `pwLock` fires (D2 honored) — no orphan (AGY-r4 leave-rejoin).
+   - **userdel + out-of-band recreate (different UID)**: marker UID !=
+     current UID → `pwLock` skips → out-of-band account untouched
+     (AGY-r3 defect-2 / AGY-r4).
+   - **Empty-login config**: removing all users does NOT strand the
+     mechanism — no GC pass exists to be bypassed by the early-return
+     (Codex/AGY-r4 GC-bypass); markers persist and are UID-revalidated on
+     the next apply that includes the user.
 
 ### Smoke (loss userspace cluster — confirmatory, optional)
 Control-plane-only change, no dataplane/forwarding impact → no perf
@@ -453,7 +486,7 @@ smoke. Minimal live check:
    authentication encrypted-password "<known $6$ hash for 'test123'>"`;
    commit.
 2. `cluster-ssh` → `getent shadow op` shows the hash in field 2; marker
-   `/var/lib/xpf/provisioned-users/op` exists.
+   `/var/lib/xpf/provisioned-users/op` exists and contains `op`'s UID.
 3. Console / `su - op`: authenticate with `test123` — succeeds.
 4. Re-commit unchanged → journal shows **no** "user encrypted-password
    applied" (idempotency B1).
@@ -463,7 +496,10 @@ smoke. Minimal live check:
 6. **Provenance**: manually create an out-of-band account `extuser` with
    a password (no marker), then add `set system login user extuser` (no
    encrypted-password), commit → `extuser`'s password is **untouched**
-   (no marker → no D2 lock).
+   (no marker → no D2 lock). Then `userdel op` + recreate `op`
+   out-of-band with a new UID + password, re-commit the (still
+   password-less) `op` config → `op` password untouched (marker UID !=
+   new UID → skip).
 7. Root login + SSH-key login + sudo unchanged (no regression).
 
 `make test` is the gate; smoke is confirmatory per reviewer call.
@@ -494,14 +530,15 @@ smoke. Minimal live check:
 
 ---
 
-## 9. Open Questions for Reviewers (r4 — narrowed)
+## 9. Open Questions for Reviewers (r5 — narrowed)
 
-1. **Provenance store**: marker file `/var/lib/xpf/provisioned-users/<name>`
-   (dropped on useradd AND pwApply, GC'd when the user leaves config) vs
-   an `/etc/shadow` comment vs reusing the sudoers file. Plan leans the
-   marker dir (survives reboot, explicit, no parse of another file). OK,
-   or prefer a different store? Note `/var/lib/xpf` must be persistent
-   (it already holds the config DB + archive — confirmed durable).
+1. **Provenance store**: **UID-keyed** marker file
+   `/var/lib/xpf/provisioned-users/<name>` (content = UID; written on
+   useradd AND pwApply; validated by UID at lock time; no separate GC
+   pass). Alternatives considered + rejected: name-only marker (forces an
+   unwinnable keep-vs-GC choice — see §5.4), `/etc/shadow` comment, or
+   the sudoers file. `/var/lib/xpf` is persistent (holds the config DB +
+   archive — confirmed durable). OK, or prefer a different store?
 2. **Validator id superset**: accept `$7$` (scrypt) + `$gy$` beyond the
    universal set? Plan says accept (OS is final authority).
 3. **Legacy DES drop** (r3 Major-2): plan drops 13-char DES support to
@@ -526,7 +563,11 @@ smoke. Minimal live check:
     not paste plaintext into `encrypted-password`.
   - **D2 reconciliation**: removing the directive **locks** the password
     (does not silently keep it); re-adding restores it; SSH-key + sudo
-    are independent.
+    are independent. The lock applies only to xpf-managed accounts
+    (UID-keyed marker); an account `userdel`'d + recreated out-of-band
+    with a new UID is left alone. **Edge case**: if the recreate reuses
+    the same name + same UID, xpf treats it as the original managed
+    account and may lock it — re-add `encrypted-password` to restore.
   - `chpasswd` invocation note for #1916 (password path is a process,
     not a file write; sudoers/keys in the same function still are file
     writes — Codex M-6).
@@ -543,4 +584,5 @@ AGY all PLAN-READY on the final revision.
 | r1    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
 | r2    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
 | r3    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
-| r4    | pending | pending | pending |
+| r4    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
+| r5    | pending | pending | pending |
