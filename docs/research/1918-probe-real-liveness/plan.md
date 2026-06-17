@@ -3,9 +3,9 @@
 - **Issue**: #1918 (bug) — `probeICMP` (`pkg/routing/tunnel.go`) never sends/receives an
   ICMP echo; both code paths return `true` on socket-open, so a dead GRE/IPIP peer behind a
   valid route is reported up forever and `LinkSetDown` never fires.
-- **Revision**: r4 (Codex r2 NF1-NF4 folded; AGY r3 PLAN-READY; SMR PLAN-READY; pending
-  Codex r4 confirmation)
-- **Status**: PLAN-READY candidate (pending Codex r4 confirmation; AGY + SMR already READY)
+- **Revision**: r5 (Codex r4 F7 folded — drain-before-recreate; AGY r4 PLAN-READY; SMR
+  PLAN-READY; pending Codex r5 confirmation)
+- **Status**: PLAN-READY candidate (pending Codex r5 confirmation; AGY r4 + SMR r4 already READY)
 - **Branch**: `research/1918-probe-real-liveness`
 - **Mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
 
@@ -62,6 +62,19 @@
 - **Codex r2 NF4 (MEDIUM, errno classification):** §6 Axis C now gives a complete structural vs
   transient errno table with **UNRECOGNIZED → TRANSIENT (escalate)** as the total default, so a
   resource storm cannot be silently held as structural.
+
+## Changelog r4 → r5
+
+- **Codex r4 F7 (HIGH, gen-guard TOCTOU):** the generation check (step 4, under `t.mu`) cannot
+  protect a `LinkSet*` syscall (step 5, outside any lock) that a concurrent `Apply` recreate
+  races — if the kernel reuses the ifindex, a stale runner downs the replacement. Verified real
+  against the actual code: `Apply` recreates the link (`tunnel.go:461-482`) **before** it drains
+  the old runner (`startKeepalive`'s `<-runner.done`, `tunnel.go:519`, reached only at
+  `tunnel.go:542+`). r5 resolves it by an `Apply` **reordering**: cancel + drain the existing
+  runner BEFORE the `LinkByName`/`LinkDel`/`LinkAdd` recreate, so no stale runner goroutine
+  exists during the recreate. The drain is the real serializer (it already exists; it just runs
+  too late). `linkGen` is kept as defense-in-depth. Codex's alternative ("hold `t.mu` across the
+  `LinkSet*`") is rejected — it reintroduces the lock-across-netlink hazard #1918 exists to fix.
 
 ---
 
@@ -274,15 +287,42 @@ instead: the in-memory `Up` is mutated only once the netlink op has succeeded. R
    for the down case is committed in step 1 (status shows climbing failures even while
    `LinkSetDown` keeps erroring — desired); `Failures` reset happens on the alive branch in step 1.
 
-Invariant (now provable): *`Up` transitions to its new value only after the keying netlink op
-has been issued for the still-current link generation; no observer ever sees an uncommitted
-`Up`; a `LinkByName`/netlink error leaves `Up` unchanged so the transition retries; the
-generation guard prevents a stale runner from acting on a recreated link.* Hence at most one
-**successful** `LinkSet*` per real transition, no NF2 optimistic-flip window, and no NF3
-ifindex-reuse bypass. (There is no concurrent writer to `state.Up` other than this goroutine —
-`Apply` and `GetStatus` only read it under the lock — so the two short locked sections in steps
-1 and 6 cannot race a competing writer. Redundant `LinkSetUp` on an already-up link is a kernel
-no-op, a benign backstop.)
+**F7 (Codex r4) — the gen guard alone is NOT race-free; the real serializer is draining the
+stale runner BEFORE the recreate.** Codex r4's counterexample: the step-4 gen check is under
+`t.mu`, but the step-5 `LinkSet*` syscall is outside any lock; a concurrent `Apply` can run its
+`LinkDel`+`LinkAdd` recreate (`tunnel.go:461-482`) in the window between the stale runner's gen
+check and its `LinkSet*` syscall, and if the kernel reuses the ifindex, the stale runner downs
+the *replacement* link. This is real because today `Apply` recreates the link
+(`tunnel.go:461-482`) **before** it drains the old runner — the drain happens inside
+`startKeepalive` (`<-runner.done`, `tunnel.go:519`) which `Apply` only reaches at
+`tunnel.go:542+`. So a stale runner can be mid-`LinkSet*` while `Apply` recreates the link.
+
+The gen token cannot fix a syscall that is already in flight. The correct fix is a small
+**`Apply` reordering** (in scope for /engineer): when a per-tunnel apply is going to recreate or
+replace the link, **cancel + drain the existing keepalive runner FIRST** (move the
+cancel/`<-done` ahead of the `LinkByName`/`LinkDel`/`LinkAdd` block, `tunnel.go:461`), so no
+stale runner goroutine exists during the recreate. After the drain, the old runner is guaranteed
+not to issue any further `LinkSet*` (its goroutine has returned). The new runner is started after
+`finishTunnelLocked` as today. This makes "at most one runner can act on the link" true by
+construction — the drain is the serializer, and it already exists; it just runs too late.
+
+The `linkGen` token is retained as a **defense-in-depth** belt-and-suspenders for the identity-
+unchanged retain path and any future code path that does not drain-before-recreate, but the
+*primary* guarantee is drain-before-recreate. (Alternative considered and rejected: holding
+`t.mu` across the keepalive `LinkSet*` — that reintroduces the exact lock-across-netlink hazard
+this issue exists to fix, and Codex's "hold t.mu across check AND LinkSet*" suggestion is
+therefore not acceptable. Drain-before-recreate achieves the same safety without any
+lock-across-netlink.)
+
+Invariant (now provable): *a runner only issues `LinkSet*` while it is the live runner for the
+current link generation, because `Apply` drains the prior runner before recreating the link;
+`Up` transitions only after the keying netlink op succeeds; no observer ever sees an uncommitted
+`Up`; a `LinkByName`/netlink error leaves `Up` unchanged so the transition retries.* Hence at
+most one **successful** `LinkSet*` per real transition, no NF2 optimistic-flip window, no NF3
+ifindex-reuse bypass, and no F7 recreate-during-syscall window. (No concurrent writer to
+`state.Up` other than this goroutine — `Apply`/`GetStatus` only read it under the lock — so the
+two short locked sections in steps 1 and 6 cannot race a competing writer. Redundant `LinkSetUp`
+on an already-up link is a kernel no-op, a benign backstop.)
 
 > Note: `Failures` for the down case is committed in step 1 before the netlink op, so status can
 > show climbing failures even if `LinkByName` is transiently failing — desired. The `Up` flip is
@@ -334,9 +374,11 @@ source-only config change restarts the runner.
 - `pkg/routing/tunnel.go` — replace `probeICMP`; restructure `keepaliveLoop` tick per Axis D
   (commit-after-success); add prober field + injection; add `source` to `keepaliveRunner` +
   `matches()` (§5c); add `linkGen map[string]uint64` to `tunnelManager` bumped in `Apply` on
-  link create/recreate and captured at `startKeepalive` (§6 Axis D step 4); thread `tc.Source`
-  at the `startKeepalive` call site (`tunnel.go:547`); status unknown arm. (Optional same-package
-  `tunnel_keepalive.go` split.)
+  link create/recreate and captured at `startKeepalive` (§6 Axis D step 4, defense-in-depth);
+  **reorder `Apply` to cancel+drain the existing keepalive runner BEFORE the
+  `LinkByName`/`LinkDel`/`LinkAdd` recreate block (`tunnel.go:461`)** so no stale runner issues
+  `LinkSet*` during a recreate (§6 Axis D F7); thread `tc.Source` at the `startKeepalive` call
+  site (`tunnel.go:547`); status unknown arm. (Optional same-package `tunnel_keepalive.go` split.)
 - `pkg/routing/routing.go` — `GetKeepaliveState` passthrough unchanged.
 - `pkg/routing/routing_test.go:896,901` — currently call `probeICMP("127.0.0.1")` /
   `probeICMP("not-an-ip")` expecting the old bool; these **encode the bug** and MUST be rewritten
@@ -364,6 +406,11 @@ Unit (deterministic, injected prober — no real network):
   concurrent `GetStatus` (assert `GetStatus` returns within a short timeout while down is parked).
 - Same-name recreate (NF3): bump `linkGen[tunnel]` mid-flight → runner's gen mismatch → drops
   its `LinkSet*` (does not down/up the replacement link).
+- Drain-before-recreate (F7): a fake `ops` that blocks inside `LinkSetDown` simulates a stale
+  runner mid-syscall; assert `Apply`'s recreate path cancels+drains the runner before issuing
+  `LinkDel`, so the recreate cannot interleave with the stale runner's `LinkSet*` (the drain
+  blocks `Apply` until the parked `LinkSetDown` returns and the goroutine exits). Verifies the
+  reordering, not just the gen token.
 - `LinkSet*` error retry (Codex r3 blocker): fake `ops.LinkSetDown` returns an error on the
   transition tick → `state.Up` stays `true` → next dead tick retries; when `LinkSetDown` later
   succeeds, exactly one effective down transition. Symmetric for `LinkSetUp` on recovery.
