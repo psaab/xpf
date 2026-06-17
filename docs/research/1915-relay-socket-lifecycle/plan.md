@@ -2,7 +2,7 @@
 
 - **Issue**: #1915 — DHCP relay: multi-interface groups fail (EADDRINUSE) and
   `Stop()`/reapply can hang (blocking `ReadFromUDP`, no close-on-cancel)
-- **Revision**: r1 (DRAFT — pre first review round)
+- **Revision**: r2 (post round-1: Codex + AGY + Claude SMR all PLAN-NEEDS-WORK)
 - **Branch**: `research/1915-relay-socket-lifecycle`
 - **Scope mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
 
@@ -74,10 +74,19 @@ read deadline) does.
 
 ### Wiring / reachability
 
-- `pkg/daemon/daemon_run.go:640-641`:
+- `pkg/daemon/daemon_run.go:877-878` (verified against `origin/master` in this
+  worktree):
   `d.dhcpRelay = dhcprelay.NewManager(); d.dhcpRelay.Apply(ctx, cfg.ForwardingOptions.DHCPRelay)`.
-  (The issue body cited lines 763-764; on current master the live wiring is
-  640-641. Same call, same reachability — verified.)
+  (The issue body cited 763-764; an earlier r1 draft cited 640-641 from a
+  *dirty* main checkout whose uncommitted edits shifted line numbers. The
+  canonical clean-tree location is 877-878 — corrected per Codex r1.)
+- **`Apply` is called exactly ONCE, at daemon start** (daemon_run.go:878).
+  There is no commit-driven reapply for the relay today, and no `Stop()` on
+  shutdown. This has a consequence beyond Defect 2: an interface that is not
+  yet ready at boot (no IPv4 address — `interfaceIPv4` fails at
+  relay.go:174) makes `runRelay` log-and-return permanently; the relay for
+  that interface is **dead forever** because nothing re-runs `Apply` (see
+  §4 Axis C — startup readiness, raised by AGY r1 3.3).
 - `relay.go:102` iterates `group.Interfaces` → multi-interface groups are
   operator-reachable via `set forwarding-options dhcp-relay group <g>
   interface <if>` (compiler at `pkg/config/compiler_services.go:608`).
@@ -142,7 +151,7 @@ collision is the common case, not an edge case.
 
 | File | Change |
 |------|--------|
-| `pkg/dhcprelay/relay.go` | socket creation via `ListenConfig.Control`; cancelable reads; WaitGroup for the response goroutine; an injectable conn factory seam. |
+| `pkg/dhcprelay/relay.go` | socket creation via `ListenConfig.Control`; program to `net.PacketConn` (`ReadFrom`/`WriteTo`); close-on-cancel watcher (closes both conns, started last); WaitGroup join for the response goroutine; bounded ctx-cancelable giaddr-retry (Axis C1); injectable `packetConnFactory` seam; remove the `default:` no-op. |
 | `pkg/dhcprelay/sockopt_linux.go` | add `SO_REUSEADDR`+`SO_REUSEPORT` setters (the pre-bind control body). |
 | `pkg/dhcprelay/relay_test.go` | new lifecycle + multi-interface regression tests using the injected factory. |
 | `pkg/dhcprelay/README.md` | document the REUSEPORT+BINDTODEVICE listener model + bounded-Stop contract. |
@@ -159,21 +168,43 @@ end of each axis; the combined recommended design is in §5.
 
 ### Axis A — how the sockets are created (fixes Defect 1)
 
-**A1 — `net.ListenConfig.Control` (RECOMMENDED).**
+**A1 — `net.ListenConfig.Control`, programmed to `net.PacketConn` (RECOMMENDED).**
 Use `net.ListenConfig{Control: func(network, address string, c syscall.RawConn) error}`
 and call `lc.ListenPacket(ctx, "udp4", "0.0.0.0:67")`. Inside `Control`, run
 `c.Control(fd -> setsockopt)` to set `SO_REUSEADDR`, `SO_REUSEPORT`, and
 `SO_BINDTODEVICE` **before** the runtime calls `bind`. This is the idiomatic
-Go way, keeps `*net.UDPConn` (so `ReadFromUDP`/`WriteToUDP`/`SetReadDeadline`
-all still work unchanged), and keeps the netpoller integration. `ListenPacket`
-returns `net.PacketConn`; type-assert to `*net.UDPConn`.
+Go way, keeps netpoller integration, and `SetReadDeadline` remains available.
 
-- Pros: minimal blast radius, keeps idiomatic conn type, netpoller intact,
-  `SetReadDeadline` available for free, testable via a factory that wraps
-  `lc.ListenPacket`.
+**In-repo precedent (this is NOT speculative):** the codebase already does
+exactly A1 twice:
+- `pkg/cluster/heartbeat_manager.go:74` `vrfListenConfig` — sets
+  `SO_REUSEADDR`+`SO_REUSEPORT`+`SO_BINDTODEVICE` inside `Control`, then
+  `lc.ListenPacket(ctx, "udp4", addr)` (heartbeat_manager.go:38,46). Its
+  empty-device branch (no `SO_BINDTODEVICE` when `vrfDevice == ""`) maps
+  **directly** onto the relay's `serverConn`, which needs no BINDTODEVICE.
+- `pkg/grpcapi/server.go:179-184` — `SO_REUSEADDR`+`SO_REUSEPORT` in `Control`.
+The relay's default factory should mirror `vrfListenConfig`'s shape.
+
+**CRITICAL (per AGY r1 §2.5): program `runRelay`/`handleServerResponses` to the
+`net.PacketConn` interface, NOT the concrete `*net.UDPConn`.** Because all
+three sockopts are set inside `ListenConfig.Control`, there is **no need for
+any post-creation type assertion** in `runRelay` at all. Use the interface
+methods `ReadFrom(buf) (n, net.Addr, err)` and `WriteTo(buf, addr)` instead of
+`ReadFromUDP`/`WriteToUDP`. This is what makes G4 (mockable factory) actually
+work: a test factory can return a fake `net.PacketConn` whose `ReadFrom`
+blocks until `Close()`, with zero real sockets and no root. The r1 plan's
+"type-assert to `*net.UDPConn`" was a real testability defect — REMOVED.
+
+- The `*net.UDPAddr` destinations for `WriteTo` (servers, client broadcast)
+  satisfy `net.Addr` directly — no conversion needed.
+- Pros: minimal blast radius, netpoller intact, `SetReadDeadline` available,
+  **fully mockable** (no concrete-type leak), in-repo proven.
 - Cons: `SO_BINDTODEVICE` inside `Control` requires the ifname before bind —
-  trivial, it is `ir.ifaceName`. Must assert `*net.UDPConn` (handle the
-  unlikely assert failure).
+  trivial (`ir.ifaceName`). Switching `ReadFromUDP`→`ReadFrom` means the
+  source addr is `net.Addr` not `*net.UDPAddr`; the relay only logs `srcAddr`
+  (relay.go:243,261,315,332) so this is cosmetic — no behavioral dependency
+  on the concrete addr type. Verify no code path does a `*net.UDPAddr`
+  field-access on the read source (it does not).
 
 **A2 — manual `socket()` + `setsockopt` + `bind()` + `os.NewFile` +
 `net.FilePacketConn`.**
@@ -191,10 +222,22 @@ reads.
 the exact, minimal correction.
 
 Note: the `serverConn` (relay.go:206, bound to `giaddr:0`) does **not** need
-REUSEPORT — it binds a unique ephemeral port per interface. It still needs the
-same cancelable-read treatment (Axis B). Keep its creation as-is (or route it
-through the same factory for test symmetry) but it is not part of the
-EADDRINUSE fix.
+REUSEPORT — it binds a unique ephemeral port per interface (confirmed by Codex
+r1). It still needs the same cancelable-read treatment (Axis B) AND should be
+routed through the same factory (with `reusePort=false`, `ifaceName=""`) so the
+test seam covers it too. It is not part of the EADDRINUSE fix.
+
+**Why REUSEPORT does not cause double-relay (kernel mechanism, confirmed by
+AGY r1 §2.1):** when multiple sockets are bound to wildcard `0.0.0.0:67` with
+`SO_REUSEPORT`, the Linux socket-lookup algorithm discards candidate sockets
+whose `SO_BINDTODEVICE` does **not** match the incoming packet's
+`skb->dev->ifindex` *before* computing the REUSEPORT load-balancing hash. So a
+broadcast ingressing interface A has exactly one eligible socket (the one bound
+to device A). The hard invariant: **every client-facing socket MUST have
+`SO_BINDTODEVICE` set**; a client socket without it would join the REUSEPORT
+group unfiltered and steal/load-balance other interfaces' packets. The default
+factory enforces this (BINDTODEVICE whenever `ifaceName != ""`); the D2 test
+asserts it (now a MUST — see §6).
 
 ### Axis B — how `Stop()` unblocks the blocking reads (fixes Defect 2)
 
@@ -249,61 +292,176 @@ returning so `close(relay.done)` (in `Apply`'s wrapper) happens only after
 *both* the read loop and the response goroutine have exited. This makes
 `<-ir.done` in `Stop()` a true join of the whole interface relay.
 
+**Liveness invariant (Claude SMR r1 F2; AGY r1 §2.3 independently verified the
+ordering):** `wg.Wait()` only terminates if the response goroutine's
+`ReadFrom` is unblocked, which only happens when the watcher closes
+`serverConn`. So the watcher MUST close BOTH `conn` and `serverConn` on
+cancel. If it closed only `conn`, `wg.Wait()` would hang forever — relocating
+Defect 2, not fixing it. The full shutdown chain that MUST hold:
+
+1. `Stop()` → `ir.cancel()`.
+2. watcher wakes on `ctx.Done()`, closes `conn` AND `serverConn`.
+3. main read loop's `ReadFrom` → `ErrClosed` → `ctx.Err()!=nil` → returns.
+4. response goroutine's `ReadFrom` → `ErrClosed` → returns → `wg.Done()`.
+5. `runRelay` runs `wg.Wait()` (joins response goroutine), then returns.
+6. Apply wrapper's `defer close(relay.done)` fires.
+7. `Stop()`'s `<-ir.done` unblocks — true join of both goroutines.
+
+### Axis C — startup readiness / Apply-called-once (fixes the "dead relay" gap, AGY r1 §3.3)
+
+`Apply` runs once at boot (daemon_run.go:878). If an interface lacks its IPv4
+address at that instant (carrier wait, DHCP-learned address not yet bound,
+late link bring-up by networkd), `interfaceIPv4` fails and `runRelay`
+log-and-returns — the relay for that interface is **permanently dead**; no
+later event re-runs `Apply`. This is a latent correctness gap distinct from
+the two filed defects but in the same function, so it is in scope.
+
+**C1 — bounded retry inside `runRelay` (RECOMMENDED).** Before socket
+creation, resolve `giaddr` in a retry loop: try `interfaceIPv4`; on failure,
+`select { case <-ctx.Done(): return; case <-time.After(interval): }` and retry
+(e.g. 5s interval, log at most once per N tries to avoid log spam per the
+project Logging Rules — use `slog.Debug` for the per-retry line, `slog.Warn`
+once on first failure). The loop is `ctx`-cancelable so `Stop()` still unwinds
+it promptly (the existing `done` join covers it). Once the address appears,
+proceed to socket creation as normal.
+
+- Pros: self-heals the boot race with no external wiring; bounded; cancelable.
+- Cons: a relay configured on an interface that NEVER gets an address spins a
+  cheap 5s-interval goroutine forever (acceptable; it is one parked goroutine
+  per misconfigured interface, and the operator config is wrong).
+
+**C2 — defer readiness to a commit-driven reapply.** Wire the daemon to call
+`Apply` again on config commit / interface-up events; rely on reapply to start
+late relays.
+
+- Pros: no retry loop; consistent with how other services reconcile.
+- Cons: requires daemon-side wiring that does not exist today (N5 says we are
+  not adding reapply wiring in this PR); and even with reapply, a transient
+  boot race with no subsequent commit leaves the relay dead until the next
+  commit. Larger blast radius. **Deferred** — file as a follow-up if C1's
+  parked-goroutine cost is judged unacceptable.
+
+**Axis C recommendation: C1** — bounded cancelable retry. It is local to
+`runRelay`, requires no daemon wiring, and is `ctx`-safe so it composes with
+the Axis B teardown. (If reviewers prefer to keep r2 strictly to the two filed
+defects, C1 can be carved into its own commit within the same PR, or split to
+a follow-up issue — see §10 Q6. The plan RECOMMENDS including C1 because it is
+a few lines in the same function and the "dead relay on boot" failure is
+operator-invisible.)
+
+### Axis D — VRRP/HA backup-node duplicate relaying (AGY r1 §3.2)
+
+AGY flags that on an HA pair, a relay running on a VRRP **Backup** node would
+also receive segment broadcasts and relay duplicates to the server. Assessment:
+
+- This is a **real but separate** concern, and the correct scope call is to
+  **document + defer**, not fix here. Rationale:
+  - The relay binds the *physical/logical* interface, not the RETH VIP. On the
+    loss userspace cluster, dataplane interfaces are RETH members; whether the
+    relay is even configured on a RETH interface in an HA deployment is a
+    deployment question, not a code invariant.
+  - Suppressing forwarding on Backup requires a VRRP-state hook
+    (`pkg/vrrp` / `pkg/cluster` event subscription) — a meaningful new
+    integration that is out of proportion to a socket-lifecycle bug fix, and
+    risks the HA path (which mandates `make test-failover`).
+  - DHCP itself tolerates duplicate relayed requests (servers dedupe on xid +
+    chaddr; clients dedupe offers). The failure mode is extra traffic /
+    occasional duplicate OFFER, not a broken lease — acceptable interim.
+- **Decision**: §11 DoD does NOT require HA suppression. The plan documents
+  the behavior (README + a code comment) and files a **follow-up issue** for
+  "suppress DHCP relay forwarding on VRRP Backup interfaces" gated on
+  `make test-failover`. This keeps #1915 a clean, smoke-free control-plane fix.
+  Reviewers: confirm defer is acceptable (§10 Q5/Q7).
+
 ---
 
-## 5. Recommended design (A1 + B1 + WaitGroup)
+## 5. Recommended design (A1 + B1 + WaitGroup + C1)
 
 Concrete shape (illustrative, not final code):
 
 1. **Socket factory seam (for tests, G4).** Add an unexported function field
-   on `Manager` (or a package-level var defaulting to the real impl):
+   on `Manager` (default = real impl; tests overwrite it):
 
    ```go
    type packetConnFactory func(ctx context.Context, ifaceName string,
        reusePort bool, bindAddr *net.UDPAddr) (net.PacketConn, error)
    ```
 
-   Default impl builds a `net.ListenConfig` whose `Control` sets
-   `SO_REUSEADDR`+`SO_REUSEPORT` (when `reusePort`) and `SO_BINDTODEVICE`
-   (when `ifaceName != ""`), then `lc.ListenPacket`. Tests inject a factory
-   returning in-memory/loopback conns to assert "two interfaces, no
-   collision" and "Stop bounded".
+   Default impl mirrors `vrfListenConfig` (heartbeat_manager.go:74): builds a
+   `net.ListenConfig` whose `Control` sets `SO_REUSEADDR`+`SO_REUSEPORT` (when
+   `reusePort`) and `SO_BINDTODEVICE` (when `ifaceName != ""`), then
+   `lc.ListenPacket(ctx, "udp4", bindAddr.String())`. Returns the
+   `net.PacketConn` **as-is — no `*net.UDPConn` assertion**. Tests inject a
+   factory returning a fake `net.PacketConn` whose `ReadFrom` blocks until
+   `Close()`; this gives "two interfaces / no collision" and "Stop bounded"
+   coverage with zero real sockets and no root.
 
-2. **`runRelay` socket creation.**
+2. **`runRelay` programs to `net.PacketConn`.** Local vars are
+   `conn, serverConn net.PacketConn`. The read loops call
+   `conn.ReadFrom(buf)` / `serverConn.ReadFrom(buf)` and writes call
+   `serverConn.WriteTo(data, srv)` / `conn.WriteTo(data, dst)` where `srv`
+   and `dst` are `*net.UDPAddr` (which satisfy `net.Addr`). The read source is
+   `net.Addr` (only logged — no concrete-type access; verified against
+   relay.go:243,261,315,332).
+
+3. **Socket creation order (startup readiness first).**
+   - Resolve `giaddr` via the Axis C1 bounded retry loop (ctx-cancelable).
    - client conn: `factory(ctx, ifaceName, /*reusePort*/true, {0.0.0.0:67})`.
-   - server conn: `factory(ctx, "", /*reusePort*/false, {giaddr:0})`
-     (no BINDTODEVICE, no REUSEPORT — unique ephemeral port).
-   - assert both to `*net.UDPConn` where the loop needs `ReadFromUDP`.
+   - server conn: `factory(ctx, "", /*reusePort*/false, {giaddr:0})`.
+   - **Then, LAST (Claude SMR r1 F3), start the cancel watcher** — only after
+     BOTH conns are successfully created. Every early-return path in
+     `runRelay` that runs before this point (interface lookup, giaddr,
+     client-conn create, server-conn create) therefore has nothing for the
+     watcher to double-close, and `defer conn.Close()`/`defer
+     serverConn.Close()` cover their own partial-init cleanup.
 
-3. **Cancel watcher.** After both conns exist:
+4. **Cancel watcher (B1) — closes BOTH conns:**
 
    ```go
-   go func() { <-ctx.Done(); conn.Close(); serverConn.Close() }()
+   go func() { <-ctx.Done(); _ = conn.Close(); _ = serverConn.Close() }()
    ```
 
-4. **WaitGroup for response goroutine.**
+   Closing both is REQUIRED for the `wg.Wait()` liveness chain (§4 Axis B
+   liveness invariant). Double-close is a safe idempotent no-op on
+   `net.PacketConn` (returns `ErrClosed`); the read loops ignore post-cancel
+   errors.
+
+5. **WaitGroup for the response goroutine (G3):**
 
    ```go
    var wg sync.WaitGroup
    wg.Add(1)
    go func() { defer wg.Done(); handleServerResponses(ctx, serverConn, conn, ir) }()
    // ... main read loop ...
-   wg.Wait() // before runRelay returns
+   wg.Wait() // runRelay blocks here until the response goroutine exits
    ```
 
-5. **Read loop.** Keep the `select { case <-ctx.Done(): return; default: }`
-   as a cheap fast-path (it is harmless), but rely on `Close()` to unblock the
-   read. The existing `if ctx.Err() != nil { return }` after a read error
-   already handles the woken `ErrClosed`. Optionally drop the `default:`
-   no-op since `Close()` is now the real cancellation mechanism — but keeping
-   it is also fine and avoids a one-tick race where a packet arrives exactly
-   as ctx cancels.
+6. **Read loop — REMOVE the `default:` no-op (Claude SMR r1 F4).** The
+   non-blocking `select { ...; default: }` was the original bug's fig leaf and
+   misrepresents the cancellation mechanism. The real and only cancellation is
+   `Close()` waking `ReadFrom` with `ErrClosed`. The loop becomes:
 
-6. **`sockopt_linux.go`** gains `setReusePort(fd)` (`SO_REUSEADDR` +
-   `SO_REUSEPORT`). Keep `setBindToDevice`.
+   ```go
+   for {
+       n, src, err := conn.ReadFrom(buf)
+       if err != nil {
+           if ctx.Err() != nil { return } // woken by watcher Close()
+           slog.Warn("dhcp-relay: read error", ...); continue
+       }
+       ... // existing parse/relay logic, unchanged
+   }
+   ```
 
-7. **Public API unchanged.** `NewManager/Apply/Stats/Stop` signatures
-   preserved; daemon + CLI untouched.
+   Same treatment for `handleServerResponses`. No `SetReadDeadline`, no
+   periodic wakeups — close-on-cancel is deterministic.
+
+7. **`sockopt_linux.go`** gains a `setReusePort(fd)` helper (`SO_REUSEADDR` +
+   `SO_REUSEPORT`); keep `setBindToDevice`. (Both are invoked from the
+   factory's `Control` body.)
+
+8. **Public API unchanged.** `NewManager/Apply/Stats/Stop` signatures
+   preserved; daemon + CLI untouched. The factory field is unexported and
+   defaulted in `NewManager`, so no caller sees it.
 
 ### Open design decision for reviewers
 
@@ -315,11 +473,13 @@ Concrete shape (illustrative, not final code):
   watcher** — fewer shared fields, no new lock interactions, and it ties conn
   lifetime to the same `ctx`/goroutine that created them. Reviewers should
   confirm this over the store-on-struct alternative.
-- **D2**: REUSEPORT on `0.0.0.0:67` means multiple sockets in the same group
-  can receive the *same* broadcast if BINDTODEVICE were ever misapplied.
-  Confirm BINDTODEVICE is always set on the client conn (it is, in the
-  factory when `ifaceName != ""`) so each socket only sees its interface's
-  traffic — no duplicate relaying. Add an assertion/test for this invariant.
+- **D2 (RESOLVED — was open)**: REUSEPORT on `0.0.0.0:67` does NOT cause
+  duplicate relay because the kernel filters by `SO_BINDTODEVICE` before
+  REUSEPORT fanout (see Axis A serverConn note; AGY r1 §2.1 confirmed). The
+  hard invariant — every client conn has BINDTODEVICE — is enforced by the
+  factory (`ifaceName != ""`) and is now a **MUST-test** in §6 (the factory
+  must be called with `reusePort=true` AND a non-empty `ifaceName` for every
+  client listener).
 
 ---
 
@@ -328,11 +488,14 @@ Concrete shape (illustrative, not final code):
 Unit tests in `relay_test.go`, no root, no real NICs, via the injected
 factory:
 
-1. **`TestApply_MultiInterface_NoCollision`** — factory records each
+1. **`TestApply_MultiInterface_NoCollision`** (MUST) — factory records each
    `(ifaceName, bindAddr, reusePort)` request and returns a fake conn. Apply a
    group with 2 interfaces; assert two factory calls for `0.0.0.0:67` both
-   with `reusePort=true` + correct ifnames, and **no** error / both relays in
-   `m.relays`.
+   with `reusePort=true` AND a **non-empty distinct `ifaceName`** (the D2
+   BINDTODEVICE invariant) + both relays in `m.relays`, no error. The fake
+   factory must NOT return EADDRINUSE — proving the design avoids the real-
+   socket collision by construction (the real collision is exercised only by
+   the optional root-gated test 6).
 2. **`TestStop_BoundedNoPackets`** — start a relay whose fake conn's
    `ReadFromUDP` blocks until closed; call `Stop()`; assert it returns within
    a bounded deadline (e.g. `select` with 2s timeout) with **zero** packets
@@ -344,10 +507,18 @@ factory:
 4. **`TestServerGoroutine_Joined`** — instrument the fake server conn; after
    `Stop()`, assert `handleServerResponses` returned (Done flag set) — proves
    the WaitGroup join.
-5. **(Optional, build-tagged/root) `TestRealReusePort_TwoListeners`** — on a
+5. **`TestRunRelay_StartupRetry`** (C1) — fake `interfaceIPv4`-equivalent
+   (inject a giaddr resolver seam, or use the factory + a resolver hook)
+   returns "no address" for the first K calls then succeeds; assert the relay
+   does NOT die, eventually creates sockets, and `Stop()` during the retry
+   wait returns promptly (ctx-cancel unwinds the retry `select`). This guards
+   the AGY §3.3 dead-relay gap.
+6. **(Optional, build-tagged/root) `TestRealReusePort_TwoListeners`** — on a
    host with two dummy interfaces, real `ListenConfig` binds two `0.0.0.0:67`
    sockets. Skipped by default (needs CAP_NET_RAW / root). Keep as a manual
-   integration check, not in `make test`.
+   integration check, not in `make test`. This is the only test that
+   exercises the *real* EADDRINUSE-vs-REUSEPORT kernel behavior; the unit
+   tests prove the control-flow/wiring, this proves the syscall semantics.
 
 Retain existing Option 82 / loopback tests unchanged.
 
@@ -363,13 +534,16 @@ forwarding-options service.)
 
 | Risk | Mitigation |
 |------|-----------|
-| `lc.ListenPacket` returns a non-`*net.UDPConn` | Type-assert with `ok`; on failure close + error log (cannot happen for udp4 but guard anyway). |
-| Double-close of conn (defer + watcher) | `*net.UDPConn.Close()` is idempotent (returns `ErrClosed`); read loop already ignores post-cancel errors. Verified safe. |
-| REUSEPORT lets two sockets in the same group both receive a broadcast | BINDTODEVICE on each client conn restricts to one interface; D2 test asserts no duplicate relaying. |
-| Cancel-watcher goroutine leak | It waits on `ctx.Done()` exactly once then returns; `ctx` is always cancelled by `Stop()`/`Apply`. |
+| Concrete-type leak breaks mocking | Program to `net.PacketConn` (`ReadFrom`/`WriteTo`); NO `*net.UDPConn` assertion in `runRelay`. All sockopts set in `Control`, so no post-create assertion is needed (AGY §2.5). |
+| Double-close of conn (defer + watcher) | `net.PacketConn.Close()` is idempotent (returns `ErrClosed`); read loops ignore post-cancel errors. Watcher started LAST so early-return paths have nothing to double-close (SMR F3). AGY §2.2 confirms Go's ref-counted FD wrapper makes double-close safe against fd reuse. |
+| `wg.Wait()` becomes the NEW hang | Watcher MUST close BOTH `conn` and `serverConn` (§4 liveness invariant). Closing only `conn` would wedge the response goroutine and hang `wg.Wait()` forever (SMR F2). |
+| REUSEPORT lets two sockets both receive a broadcast | Kernel discards BINDTODEVICE-mismatched candidates before REUSEPORT fanout (AGY §2.1). Hard invariant: every client conn has BINDTODEVICE — factory-enforced, D2 MUST-test. |
+| Cancel-watcher goroutine leak | It waits on `ctx.Done()` exactly once then returns; `ctx` is always cancelled by `Stop()`/`Apply` (AGY §2.2 verified). |
+| Dead relay on boot (no IPv4 yet, Apply runs once) | Axis C1 bounded ctx-cancelable retry loop around giaddr resolution (AGY §3.3). |
+| Kea + relay both bind `:67` | Operationally mutually exclusive; commit-check or README note + follow-up (Q4). |
+| VRRP-Backup duplicate relay | Documented; deferred to follow-up gated on `make test-failover` (Axis D / Q5). DHCP tolerates dup requests (xid/chaddr dedupe) — acceptable interim. |
 | `SO_REUSEPORT` not available on the build target | Linux-only package (`sockopt_linux.go`); REUSEPORT is in `golang.org/x/sys/unix`. No portability concern (firewall is Linux). |
-| Behavior regression in forwarding | No forwarding-path code changes; tests N1 guard Option 82/giaddr/hop logic remains untouched. |
-| Server conn also needs cancel | The watcher closes `serverConn` too; response goroutine's `ReadFromUDP` unblocks identically. |
+| Behavior regression in forwarding | No forwarding-path logic change; Option 82/giaddr/hop tests (N1) unchanged. `ReadFromUDP`→`ReadFrom` only changes the logged source addr type (`net.Addr`), never accessed concretely. |
 
 ---
 
@@ -398,33 +572,68 @@ listeners + bounded stop.
 
 ---
 
-## 10. Reviewer questions
+## 10. Reviewer questions (status after r1)
 
-1. Is the cancel-watcher goroutine (B1) preferred over storing `*net.UDPConn`
-   on `interfaceRelay` and closing in `Stop()`? (§5 D1)
-2. Should the `default:` no-op be removed from the read loop now that
-   `Close()` is the real cancellation, or kept as a cheap fast-path? (§5.5)
-3. Is the injectable-factory seam (`packetConnFactory` field/var) the right
-   test seam, or would a real-`ListenConfig` + dummy-interface integration
-   test (root-gated) be preferred as the primary guard? (§6)
-4. Any reason the relay would ever need to coexist with the embedded DHCP
-   *server* (`pkg/dhcpserver`/Kea) on `:67`? If so, REUSEPORT semantics across
-   processes need a note. (Believed mutually exclusive — confirm.)
-5. Confirm the relay is off the HA/failover/VRRP path so no smoke is required.
+1. **(RESOLVED r1, all 3)** cancel-watcher (B1) preferred over store-on-struct
+   (D1). AGY §2.2 explicitly endorsed the watcher as race-superior (store-on-
+   struct has a Stop-before-init hang window). Keeping B1.
+2. **(RESOLVED r1, SMR F4)** the `default:` no-op is REMOVED. Close-on-cancel
+   is the honest cancellation mechanism. (§5.6)
+3. **(RESOLVED r1, AGY §2.5)** the injectable `net.PacketConn` factory is the
+   primary test seam; the real-socket REUSEPORT test is optional/root-gated
+   (test 6). Programming to `net.PacketConn` (not `*net.UDPConn`) is what makes
+   the seam actually mockable.
+4. **(OPEN — needs confirmation)** Kea/relay coexistence on `:67`. Codex, AGY
+   §3.1, and SMR F6 all flagged this. AGY notes Kea does NOT set
+   REUSEPORT/BINDTODEVICE so one service would fail `EADDRINUSE`. Plan position:
+   they are operationally mutually exclusive; **the plan recommends adding a
+   commit-check that rejects configuring `dhcp-relay` and `dhcp-server` (Kea)
+   such that they bind the same interface's `:67`** — OR, if that is judged out
+   of scope, documenting the conflict in README + filing a follow-up. Reviewers
+   decide: commit-check in this PR vs follow-up. (Leaning: follow-up — it is a
+   config-schema change orthogonal to the socket-lifecycle fix.)
+5. **(RESOLVED → reframed as Axis D)** relay-on-VRRP-Backup duplicate relaying
+   (AGY §3.2). Plan defers HA suppression to a follow-up issue gated on
+   `make test-failover`; #1915 stays smoke-free. Reviewers: confirm defer is
+   acceptable.
+6. **(NEW)** Axis C1 startup-retry: include in this PR (recommended — same
+   function, operator-invisible failure) or split to a follow-up? The plan
+   recommends including it as its own commit within the PR.
+7. **(NEW)** Is the parked-goroutine cost of C1 (one 5s-interval goroutine per
+   never-addressed interface) acceptable, or should C1 cap total retries and
+   then exit (turning "no address ever" into a logged permanent failure)? Plan
+   leans: keep retrying (ctx-bounded) — an interface CAN get an address later
+   (DHCP, manual config) and there is no reapply to restart it.
 
 ---
 
 ## 11. Definition of done (for the eventual /engineer pass)
 
-- [ ] Multi-interface group starts all N listeners (G1) — test 1 green.
+- [ ] Multi-interface group starts all N listeners, each with REUSEPORT +
+      non-empty BINDTODEVICE ifname (G1 + D2 invariant) — test 1 green.
 - [ ] `Stop()` bounded with no packets (G2) — test 2 green.
-- [ ] Response goroutine tracked + joined (G3) — tests 3,4 green.
-- [ ] Injectable factory seam in place (G4).
-- [ ] `make test` green; `go vet` clean.
-- [ ] README updated (REUSEPORT+BINDTODEVICE model, bounded-Stop contract).
+- [ ] Response goroutine tracked + joined; reapply does not hang (G3) — tests
+      3,4 green.
+- [ ] Startup retry: late-addressed interface eventually binds; Stop during
+      retry returns promptly (Axis C1) — test 5 green.
+- [ ] `runRelay`/`handleServerResponses` programmed to `net.PacketConn` (no
+      `*net.UDPConn` assertion); injectable factory seam in place (G4).
+- [ ] `default:` no-op removed from both read loops.
+- [ ] Watcher started LAST (after both conns exist); closes BOTH conns.
+- [ ] `make test` green; `go vet` clean. (No smoke — control-plane only,
+      off the HA/dataplane path; Axis D defers VRRP suppression.)
+- [ ] README updated: REUSEPORT+BINDTODEVICE listener model, bounded-Stop
+      contract, Kea-:67 mutual-exclusion note, VRRP-Backup duplicate-relay
+      caveat.
 - [ ] Public `Manager` API unchanged; daemon/CLI untouched.
+- [ ] Follow-up issues filed: (a) VRRP-Backup relay suppression (gated on
+      `make test-failover`); (b) commit-check for dhcp-relay/dhcp-server :67
+      conflict — IF reviewers chose follow-up over in-PR (Q4/Q5).
 - [ ] 4-way review (Codex + AGY + Claude SMR + Copilot) converged on the PR.
 
 ---
 
-*Awaiting plan-review rounds (Codex + AGY + Claude SMR). STOP at PLAN-READY.*
+*r2 incorporates all three r1 reviews (Codex line-fix + serverConn confirm;
+AGY testability/PacketConn + startup-retry + VRRP + Kea; Claude SMR liveness-
+chain + watcher-last + remove-default + cite-vrfListenConfig). Awaiting r2
+re-review. STOP at PLAN-READY.*
