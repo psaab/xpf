@@ -3,16 +3,22 @@
 RESEARCH-ONLY. Plan-of-action for manual approval. No code in this branch
 beyond this doc + reviewer docs. Base: origin/master @ 62c1ddc66.
 
-**v2 (post-r1 review).** r1 reviewers (Codex + AGY) both returned
-**PLAN-NEEDS-MAJOR**; Claude SMR returned PLAN-READY-with-minors. The
-reviews converge on five blocker-class gaps the v1 plan glossed. v2 folds
-all of them. The full r1 disposition + resolutions is §13; the section
-bodies below are updated in place. Read §13 first for what changed and why.
+**v3 (post-r2 review).** r1 reviewers both returned PLAN-NEEDS-MAJOR → v2
+folded five first-order gaps (§13). r2 reviewers AGAIN returned
+PLAN-NEEDS-MAJOR — v2 RESOLVED R-3/R-4/R-7 but they surfaced second-order
+blockers visible only after the first-order ones closed: an HA peer-node
+lockout via lenient SyncApply (AGY CRITICAL), an unvalidated commit-confirmed
+rollback target (Codex), a current-boot udev/EEXIST window, and teardown
+ordering. v3 folds all of them (§14). The honest takeaway: this is a
+substantial multi-part feature, NOT a quick fix — exactly as the issue
+predicted. Read §13 (first-order) then §14 (second-order) for the full
+disposition; the section bodies below are updated in place.
 
 ## 0. Status / TL;DR recommendation
 
-**Recommendation: ship the narrow MVP first — a stable-identity managed
-allowlist — not the full positional-replacement device-map.**
+**Recommendation: implement the stable-identity managed allowlist as a
+substantial multi-part feature (the §14 irreducible safe bundle) — NOT a
+quick fix, NOT the full positional-replacement device-map.**
 
 - **Primary identity key: PCI bus address (`DDDD:BB:DD.F`), with MAC as an
   explicit per-entry fallback, and an operator-overridable priority chain.**
@@ -509,3 +515,130 @@ cut reproduces the hazard it set out to remove. The PLAN-KILL criterion (§11)
 still stands: if reviewers judge even this bundle premature, the floor is the
 F2-only fix (`unmapped-interface-policy` as a guard with NO per-NIC pinning),
 accepting that F1 (unstable names) stays unsolved.
+
+## 14. r2 review convergence + v3 resolutions
+
+r2 (Codex + AGY, both **PLAN-NEEDS-MAJOR**) confirmed v2 RESOLVED R-3, R-4,
+R-7, but surfaced second-order blockers that only became visible once v1's
+first-order hazards were closed. All re-verified against code before folding.
+v3 adopts all of them. (SMR r2 was PLAN-READY but did not catch the HA-sync
+and rollback-target gaps — those are credited to the companions.)
+
+### V-1 (AGY r2 CRITICAL — HA peer-node lockout via lenient SyncApply)
+**Verified.** `SyncApply` and `Store.Load` use `compileTreeLenient` /
+`CompileConfigForNodeLenient` (compiler.go:159-166, store.go:232,
+freetext.go:28) which DOWNGRADE the strict commit-check to a warning. A
+commit on node 0 (primary) can only validate node 0's LOCAL hardware (the
+R-8 pre-flight queries local sysfs/PCI); it cannot see node 1's NICs, so it
+must WARN-not-fail on node 1's section. config-sync then pushes the config to
+node 1, whose `SyncApply` (lenient) persists the invalid map → node 1 takes a
+deferred-reboot lockout OUTSIDE node 0's commit-confirmed window.
+**Resolution (v3).** The pre-flight is **node-local on each node**:
+(a) on the active node, the strict commit-check validates ONLY the local
+node's resolved device-map section against local hardware; the peer's section
+is intentionally NOT failed at commit (cannot be — different box).
+(b) On the PASSIVE node, `SyncApply` gains a **device-map admission gate**:
+after compiling the synced tree for its OWN node-id, it resolves its local
+device-map section against its own present NICs and, if that would strand the
+management/lifeline NIC on next boot, it **refuses the sync for the device-map
+delta and raises a loud HA-health alarm** rather than silently persisting the
+hazard. This is a NARROW exception to lenient-SyncApply, scoped to the exact
+class (management-lockout) that lenient ingest must not swallow — analogous to
+how #1922 makes the lifeline config-independent. The peer never silently
+persists a map that would lock itself out.
+
+### V-2 (Codex r2 STILL-OPEN R-2 + AGY r2 HIGH-3 — current-boot udev window + EEXIST deadlock)
+**Verified.** udev applies `.link` rules at uevent time, before xpfd
+(rename branch at daemon_run.go:336,345; `.link` matches `OriginalName=` at
+linksetup.go:270). The daemon-start scrub only fixes the NEXT boot's disk
+state; it does not undo a wrong LIVE rename udev already applied, and a stale
+`.link` that renamed NIC-A to `ge-0-0-3` makes the daemon's attempt to rename
+NIC-B to `ge-0-0-3` fail with EEXIST.
+**Resolution (v3).** `enumerateAndRenameMapped` MUST implement a
+**collision-safe multi-pass rename** at daemon start: (1) compute the desired
+identity→logical-name binding; (2) detect any present interface whose CURRENT
+name equals a desired name but whose identity does NOT match the binding (a
+stale-udev misrename); (3) move every such conflicting interface to a unique
+temporary name (`xpf-tmp-<n>`) FIRST, breaking the cycle; (4) then rename each
+mapped NIC to its final name; (5) scrub+rewrite the `.link` set last so the
+NEXT boot's udev is correct. This is the standard rename-cycle break and is
+explicitly part of the MVP. The one-boot window is acknowledged and
+CONTAINED: the daemon corrects the live state within its start sequence
+(before dataplane arm / before the box forwards), and the protected lifeline
+(#1922) shields management throughout. We do NOT claim zero live-misrename;
+we claim the daemon deterministically converges and never deadlocks on EEXIST.
+
+### V-3 (Codex r2 STILL-OPEN R-8 — rollback target unvalidated)
+**Verified.** `executeConfirmedRollback` (daemon_apply.go:222) calls
+`PromoteRollback` (store.go) and applies the PREVIOUS config directly under
+applySem, WITHOUT re-running the strict commit-check. CLI has no `force` bit
+(cli_config.go:176). So the R-8 candidate-only pre-flight does not see the
+rollback target; a confirmed-commit timeout that reverts to an absent-map
+(positional claim-all) config can silently down a revenue/mgmt NIC.
+**Resolution (v3).** (a) At `commit confirmed` time, the pre-flight validates
+BOTH the candidate AND the rollback target (the currently-active config that
+will be restored on timeout) against present hardware — if EITHER would strand
+mgmt on next boot, refuse/force-gate the commit while the operator is still
+connected. (b) `executeConfirmedRollback` gains a device-map safety check: if
+promoting the rollback target would transition device-map→positional-claim-all
+and that would down a currently-up in-config NIC, it logs loudly and (matching
+the #1922 first-commit-rollback precedent at daemon_apply.go:232) takes the
+conservative path rather than blindly applying. The #1922 protected set
+remains the backstop for mgmt specifically.
+
+### V-4 (Codex r2 STILL-OPEN R-5 — teardown ordering vs networkd.Apply)
+**Verified.** `networkd.Apply` sweeps stale `10-xpf-*` and reloads
+(networkd.go:133-145,185); the compiler still appends unmanaged + strips +
+downs (compiler_iface.go:1165,1172). v2 named the teardown but not its order.
+**Resolution (v3).** Pin the order explicitly: in the apply path
+(daemon_apply.go ~:624, under applySem) the managed→unmapped **teardown hook
+runs BEFORE `d.networkd.Apply`** and is the single authority for the
+transition — it (1) reads the "previously managed" state from the on-disk
+`10-xpf-<name>.link` set (the durable record of what xpf renamed), (2) renames
+the device back to its host-predictable name, (3) removes the xpf `.link`/
+`.network` for it, so that by the time `networkd.Apply` runs, the interface is
+already absent from both the desired set AND the on-disk xpf set — Apply's
+sweep then has nothing to half-clean. The "previously managed" state source is
+the `10-xpf-*.link` glob, NOT the (now-absent) config.
+
+### V-5 (Codex r2 R-1 blocker — empty-PermHWAddr under PCI cross-check + missing `key` field)
+**Verified.** `getPermAddr` returns "" when netlink lacks `PermHWAddr`
+(compiler.go:1623). v2 said empty perm-MAC disables MAC fallback but not what
+the PCI-primary cross-check does then; and the grammar/struct preview omitted
+the `key` order field.
+**Resolution (v3).** (a) When perm-MAC is empty (common on some VFs/virtio),
+the PCI-primary cross-check **cannot verify identity**, so the binding is
+PCI-ONLY and `show` marks it `bound (PCI-only, unverified — no permanent MAC)`;
+a `key mac` override on such a NIC is REJECTED at commit (no key to match).
+(b) The grammar/types gain the explicit key-order field:
+`set chassis device-map interface <name> key [pci|mac|pci-then-mac|mac-then-pci]`
+(default `pci-then-mac`), and `DeviceMapEntry` gains `KeyOrder string`. §8
+grammar and the §12 types list are updated to include it.
+
+### V-6 (AGY r2 MEDIUM — general FPC/node alignment, not just RETH + predictable-name discovery)
+**Verified gap.** v2's FPC validation (R-6/§6.6) only covered RETH members; a
+plain revenue/fabric interface mapped to a wrong-FPC name (`ge-7/0/3` on node
+0) would pass and silently misattribute to the peer node. And R-5's "rename
+back to a stable predictable name" did not say HOW the daemon learns that name.
+**Resolution (v3).** (a) Generalize the FPC validator: in cluster mode EVERY
+device-map logical name's FPC slot must align with the target node-id
+(`SlotToNodeID`, types.go:55) — not just RETH members — else commit FATAL.
+(b) The predictable-name teardown (V-4) discovers the host's name via the udev
+database (`udevadm info` / `ID_NET_NAME_PATH` / `ID_NET_NAME_ONBOARD` under
+`/run/udev/data/`), NOT a hand-computed pattern, so it matches the host's own
+naming policy. If discovery fails, leave the device under its current xpf name
+but drop xpf management of it (do not guess a name that could collide).
+
+### Net effect on scope (v3)
+The MVP bundle grows to the irreducible safe set:
+device-map grammar (+`key` order) → independent compile + `len(Entries)>0`
+mode → dedicated perm-MAC resolver with empty-MAC PCI-only handling →
+topology-change REFUSE → collision-safe multi-pass rename (V-2) → branch both
+rename sites → managed→unmapped teardown ordered before networkd.Apply (V-4) →
+node-local pre-flight that also validates the rollback target (V-3) + a
+passive-node SyncApply admission gate (V-1) → generalized FPC/node validation
+(V-6) → `show device-map [candidates]`. This is a substantial feature, not a
+quick fix — consistent with the issue's "deserves a thorough pass, not a quick
+fix" framing. The PLAN-KILL floor (§11) is unchanged: if even this is judged
+too large, ship ONLY the `unmapped-interface-policy` guard (F2 fix) and accept
+that F1 + the HA/rollback edges stay unsolved.
