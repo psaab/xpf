@@ -3,9 +3,9 @@
 - **Issue**: #1918 (bug) — `probeICMP` (`pkg/routing/tunnel.go`) never sends/receives an
   ICMP echo; both code paths return `true` on socket-open, so a dead GRE/IPIP peer behind a
   valid route is reported up forever and `LinkSetDown` never fires.
-- **Revision**: r5 (Codex r4 F7 folded — drain-before-recreate; AGY r4 PLAN-READY; SMR
-  PLAN-READY; pending Codex r5 confirmation)
-- **Status**: PLAN-READY candidate (pending Codex r5 confirmation; AGY r4 + SMR r4 already READY)
+- **Revision**: r6 (AGY r5 deadlock note folded — runner never takes `t.mu`, gen token is
+  `atomic.Uint64`; AGY r5 PLAN-READY; SMR r5 PLAN-READY; pending Codex r5 confirmation on r5/r6)
+- **Status**: PLAN-READY candidate (AGY r5 + SMR r5 READY; Codex r5 in flight)
 - **Branch**: `research/1918-probe-real-liveness`
 - **Mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
 
@@ -75,6 +75,14 @@
   exists during the recreate. The drain is the real serializer (it already exists; it just runs
   too late). `linkGen` is kept as defense-in-depth. Codex's alternative ("hold `t.mu` across the
   `LinkSet*`") is rejected — it reintroduces the lock-across-netlink hazard #1918 exists to fix.
+
+## Changelog r5 → r6
+
+- **AGY r5 Finding #1 (deadlock note):** r5's gen-token step-4 said the runner "re-reads
+  `t.linkGen[tunnelName]` under `t.mu`". If a tick blocks on `t.mu.Lock()` while `Apply` blocks
+  on `<-runner.done` (the drain), they deadlock. r6 makes the gen token an **`atomic.Uint64`**
+  the runner reads lock-free (`Load()`); the runner **never acquires `t.mu`**. AGY r5 was
+  otherwise PLAN-READY; this is the one implementation constraint it surfaced.
 
 ---
 
@@ -260,17 +268,21 @@ instead: the in-memory `Up` is mutated only once the netlink op has succeeded. R
 3. Else `LinkByName(tunnelName)`. On error: do nothing (no `Up` write, no netlink) — the
    transition is naturally retried next tick because `Up` was never changed. (This also fixes
    Codex F4 without the revert window: there is nothing to revert.)
-4. **Same-name recreate guard via generation token, captured at `startKeepalive` (Codex r2
-   **NF3**).** An action-time `LinkByName().Attrs().Index` is NOT a safe guard: a stale runner
-   ticking after a delete+recreate would read the *new* link's ifindex and the guard would pass,
-   letting it `LinkSetDown` the replacement. Instead: `tunnelManager` holds a per-tunnel
-   monotonic `linkGen map[string]uint64`, bumped under `t.mu` every time `Apply` creates/recreates
-   the link (`finishTunnelLocked`/the recreate path near `tunnel.go:461-481`). `startKeepalive`
-   captures the current `linkGen[tunnelName]` into the runner. Before the netlink op, the runner
-   re-reads `t.linkGen[tunnelName]` under `t.mu`; if it differs from the captured value, a
-   recreate happened → **drop the action** (the new runner, started by the same `Apply` that
-   recreated, owns the new link). This is correct regardless of ifindex reuse. The #848 drain
-   still bounds the lifetime; the gen check closes the in-flight-tick window the drain cannot.
+4. **Defense-in-depth recreate guard via generation token — the runner MUST NOT take `t.mu`
+   (Codex r2 NF3 + AGY r5 deadlock note).** With drain-before-recreate (the F7 fix below) the
+   primary guarantee already holds; the gen token is belt-and-suspenders. It must be implemented
+   so the runner tick **never acquires `t.mu`** — otherwise a tick blocked on `t.mu.Lock()` while
+   `Apply` blocks on `<-runner.done` deadlocks (AGY r5 Finding #1). Implementation: the
+   `tunnelManager`'s per-tunnel generation counter is an **`atomic.Uint64`** (e.g.
+   `linkGen map[string]*atomic.Uint64`, the map structure mutated only under `t.mu` by `Apply`,
+   but the counter `.Add(1)`/`.Load()` are atomic). `startKeepalive` captures the current
+   `.Load()` value into the runner (by value, no shared map access at tick time — pass the
+   `*atomic.Uint64` into the runner). Before the netlink op the runner does a lock-free
+   `gen.Load()` and, if it differs from its captured value, **drops the action**. Note: an
+   action-time `LinkByName().Attrs().Index` is NOT a safe substitute (a stale runner would read
+   the *new* link's reused ifindex and pass). The gen `Load()` plus drain-before-recreate is the
+   correct combination; the gen check alone is insufficient (that was F7), and `t.mu` in the
+   runner is forbidden (AGY r5).
 5. Perform the single `LinkSetUp`/`LinkSetDown` outside `state.mu`, **capturing its error**.
    `LinkSetUp`/`LinkSetDown` themselves return errors (`tunnel.go:24-25`) — those errors are
    handled here, not ignored (Codex r3 blocker).
@@ -373,7 +385,7 @@ source-only config change restarts the runner.
 
 - `pkg/routing/tunnel.go` — replace `probeICMP`; restructure `keepaliveLoop` tick per Axis D
   (commit-after-success); add prober field + injection; add `source` to `keepaliveRunner` +
-  `matches()` (§5c); add `linkGen map[string]uint64` to `tunnelManager` bumped in `Apply` on
+  `matches()` (§5c); add `linkGen map[string]*atomic.Uint64` to `tunnelManager` (map mutated under `t.mu`, counter Add/Load atomic; runner reads lock-free — never takes `t.mu`, AGY r5) bumped in `Apply` on
   link create/recreate and captured at `startKeepalive` (§6 Axis D step 4, defense-in-depth);
   **reorder `Apply` to cancel+drain the existing keepalive runner BEFORE the
   `LinkByName`/`LinkDel`/`LinkAdd` recreate block (`tunnel.go:461`)** so no stale runner issues
