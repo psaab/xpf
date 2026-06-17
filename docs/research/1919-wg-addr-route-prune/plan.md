@@ -249,8 +249,8 @@ Two ways to fix; r2 chooses (b):
   specified per #1884/#1905; widening its semantics risks rippling into
   those paths.
 - **(b CHOSEN)** add a small, removal-only helper
-  `pruneAppliedAddrsLocked(link, name, applied) (failed map[string]bool)`
-  that:
+  `pruneAppliedAddrsLocked(link, name, applied) (failed map[string]bool, retry bool)`
+  (the `retry` return is the r3 refinement — see §5) that:
   1. `AddrList`s the device,
   2. for each present address: skip autoconf/foreign link-local
      (`a.IP.IsLinkLocalUnicast() && (applied==nil || !applied[key])` —
