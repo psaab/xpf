@@ -10,18 +10,38 @@ first; this doc builds the cross-substrate model on top of it and pins only
 the net-new pieces (container alias-mode, substrate detector,
 `platform-profile`, the generalized reachability contract).
 
-**v2 (post-r1 review).** r1: Claude SMR + Codex = PLAN-READY; AGY =
-PLAN-NEEDS-MAJOR with two real catches, both FOLDED here: (1) the substrate
-detector's "PCI-empty + veths" container tell false-positives on
-Hyper-V/Azure (VMBus) and AWS-Xen (XenBus) VMs, which also have no PCI NICs —
-fixed by making positive container signals authoritative, running
-`vmHeuristic` (which DOES detect those VMs) BEFORE the PCI-empty hint, and
-demoting PCI-empty to a non-authoritative hint (§6.2). (2) "empty protected
-set for console-only/delegate" was a lockout regression — fixed by making the
-#1922 boot-recorded default-route lifeline UNCONDITIONALLY protected
-regardless of contract (§7 CRITICAL FAIL-SAFE). Also folded the three SMR
-clarifications (§5.3 audit list, detector-is-advisory invariant,
-binding-delivery recommendation in §2.1).
+**v3 (post-r2 review).** r1: Claude SMR + Codex = PLAN-READY; AGY =
+PLAN-NEEDS-MAJOR (2 catches folded). r2: Claude SMR + Codex = PLAN-READY; AGY
+= PLAN-NEEDS-MAJOR with three SECOND-ORDER catches that survived only because
+the first-order ones were closed — all FOLDED v3:
+- **r1 fold A (§6.2):** detector "PCI-empty + veths" tell false-positives on
+  Hyper-V/Azure (VMBus) + AWS-Xen (XenBus) VMs (also PCI-less). Fixed:
+  positive container signals authoritative; `vmHeuristic` before the demoted
+  PCI-empty hint.
+- **r1 fold B (§7):** "empty protected set for console-only/delegate" lockout
+  regression. Fixed: #1922 boot-recorded lifeline UNCONDITIONALLY protected.
+- **r2 fold A (§6.2):** `vmHeuristic` is x86-only — **ARM64 VMs** (Graviton,
+  Azure-ARM, Apple-Silicon QEMU) have no cpuinfo `hypervisor` flag and no
+  `/sys/hypervisor/type`, so they'd misclassify → lockout. Fixed: add
+  `systemd-detect-virt` (bare) as the cross-arch VM-detection fallback.
+- **r2 fold B (§7):** the #1922 lifeline record is **PCI-keyed**
+  (`bootstrap.go:465` skips persisting when no PCI addr), so the
+  "unconditional" fail-safe is NON-FUNCTIONAL on the non-PCI substrates
+  (veth/VMBus/XenBus) the umbrella targets. Fixed: generalize the lifeline
+  record to a `pci → perm-mac → kernel-name` identity chain. (Codex r2
+  independently flagged the same gap.)
+- **r2 fold C (§7):** unconditional protection permanently welds a
+  bootstrap-DHCP NIC out of the dataplane with no CLI to release it. Fixed:
+  explicit `force-release-lifeline` override leaf.
+Plus three r1 SMR clarifications (§5.3 audit list, detector-advisory
+invariant, §2.1 binding-delivery) and Codex's fxp0-narrowing-vs-lifeline
+implementation note (§7).
+
+**Honest scope note:** r2 fold B is the one that crosses from "plan text" into
+"this expands Slice B/C implementation surface" — the lifeline record and its
+resolver must be generalized beyond PCI. This is consistent with the
+binding-identity-chain the umbrella already requires (§3 A1), so it is a fold
+not a redesign, but /engineer should size it as real work, not a doc tweak.
 
 ---
 
@@ -352,14 +372,26 @@ function over the same `hostTunableFS` mock interface:
      lxc/incus-container/systemd-nspawn).
    These three are *authoritative* — they are true only inside a container.
 2. **VM — runs and WINS over the weak container corroborator (AGY r1
-   Attack 3):** `vmHeuristic` non-empty (`/sys/hypervisor/type`, cpuinfo
-   hypervisor flag) — reuse verbatim. Critically, `vmHeuristic` detects
-   Hyper-V/Azure (VMBus) and AWS-Xen (XenBus) VMs via the hypervisor flag /
-   `/sys/hypervisor/type` **even though those VMs have NO PCI NICs**
-   (`hv_netvsc`/`xen-netfront` are not on the PCI bus, so `enumeratePCINICs`
-   returns empty on them too). So VM detection MUST be consulted before the
-   PCI-empty heuristic below, or a Hyper-V/Xen VM running Docker would be
-   misclassified as a container and lose VM provisioning.
+   Attack 3 + r2 ARM64 catch):** VM detection is a LADDER, not just
+   `vmHeuristic`, because `vmHeuristic`'s signals are x86-centric:
+   a. `vmHeuristic` (`host_tunables.go:126` — `/sys/hypervisor/type` +
+      `/proc/cpuinfo` `hypervisor` flag). Catches x86 KVM/QEMU/VMware/Hyper-V
+      HVM and Xen (PV via `/sys/hypervisor/type=xen`).
+   b. **`systemd-detect-virt` (bare form, NOT `--container`) as the
+      cross-arch fallback (AGY r2).** The cpuinfo `hypervisor` flag is the
+      x86 CPUID.1:ECX.bit31 flag and is **absent on ARM64 guests**
+      (`/proc/cpuinfo` has no `flags` section, `Features` lacks it), and
+      `/sys/hypervisor/type` is not present on plain KVM/Hyper-V/VMware. So on
+      an ARM64 VM (AWS Graviton, Azure ARM64, GCP T2A, Apple-Silicon QEMU)
+      `vmHeuristic` returns `""` and would misclassify the VM as bare-metal
+      or (via the PCI-empty hint) container → **management lockout on first
+      boot**. `systemd-detect-virt` queries DMI/SMBIOS + arch-specific signals
+      and reports `kvm`/`qemu`/`microsoft`/`amazon`/`xen` cross-arch, so it is
+      the required ARM64 VM tell. The detector MUST consult (a) OR (b) before
+      the PCI-empty hint.
+   This ladder MUST run before the PCI-empty heuristic below, or a
+   Hyper-V/Xen/ARM64 VM (with or without Docker) would be misclassified as a
+   container/bare-metal and lose VM provisioning.
 3. **Bare metal:** none of the above → physical DMI. Optionally corroborate
    with `/sys/class/dmi/id/sys_vendor` + `product_name` (e.g. not "QEMU"/
    "KVM"/"VMware"/"Bochs"/"Microsoft Corporation"), but default-by-
@@ -452,6 +484,49 @@ The ONLY case where the protected set is legitimately empty is a genuinely
 console-attached box with NO default route at boot — exactly the
 `detectLifelineInterface` returns-`ok=false` path
 (`bootstrap.go:455-461`), where there is no remote lifeline to lose.
+
+**IMPLEMENTATION GAP — the lifeline record is PCI-keyed and must be
+generalized to non-PCI identities (AGY r2 catch 2, FOLDED v3).** As written,
+`setupBootstrapLifeline` only persists the lifeline when
+`pciAddrForInterface(lifeline)` returns `ok=true` (`bootstrap.go:465`); for a
+container `veth` or a VMBus/XenBus VM NIC (no PCI address) the record is
+**never written**, so `resolveLifelineCurrentName` returns `("", false)` and
+the "unconditionally protected" lifeline is **non-functional on exactly the
+non-PCI substrates this umbrella targets.** This is the same PCI-only
+assumption that breaks `enumeratePCINICs` (§1.1) surfacing again in the
+lifeline path. The fix (a Slice-B/C task, NOT just plan text): extend
+`lifelineRecord` + `writeLifelineRecord`/`readLifelineRecord` +
+`resolveLifelineCurrentName` to persist and resolve a **MAC-or-kernel-name
+identity when no PCI address exists** (priority chain `pci → perm-mac →
+kernel-name`, mirroring the device-map identity chain §3 A1). For a container
+the kernel name is stable within the netns lifetime, which is the relevant
+horizon. Without this fold the §7 fail-safe is bare-metal/VM-PCI only —
+unacceptable for the container/non-PCI-VM cases the umbrella exists to serve.
+
+**Lifeline override — repurposing the bootstrap NIC (AGY r2 catch 3,
+FOLDED v3).** "Unconditionally protected" creates a new operational trap: a
+bare-metal box that booted with a *temporary* DHCP default route on `eth0`
+(e.g. PXE/network install) records `eth0` as the lifeline; if the operator
+later wants `console-only` and to repurpose `eth0` as a dataplane/revenue
+port, the unconditional protection blocks it and there is no CLI to clear
+`/etc/xpf/lifeline-interface` (forcing manual root FS surgery). The
+resolution: an explicit, auditable override leaf —
+`set system management reachability console-only force-release-lifeline`
+(or a dedicated `clear system management lifeline` operational command) —
+that lets a *deliberate* operator action drop the boot-recorded lifeline from
+protection. The default (no override) keeps the unconditional fail-safe; the
+override is the escape valve, exactly analogous to #1922's OQ-D
+`management-interface` fxp0-narrowing escape valve. This keeps the safe
+default safe while not permanently welding the bootstrap NIC out of the
+dataplane.
+
+**Implementation note (Codex r2):** the existing #1922 fxp0-narrowing
+exception (`narrowFxp0` in `protectedInterfacesWith`, `bootstrap.go:419-436`)
+must NOT be applied against the boot-recorded lifeline contribution — the
+lifeline is protected on its own merit regardless of the fxp0/mgmt-leaf
+narrowing logic. The protected set is `boot-recorded lifeline UNION declared
+mgmt contract`, with the lifeline removable ONLY by the explicit override
+above.
 
 **Residual guard (from #1956 §9.6):** make the console/delegate intent
 explicit and auditable so a typo fails loudly; but safety no longer DEPENDS
@@ -546,12 +621,17 @@ unsound, the fallbacks:
 
 ## 11. Open questions for reviewers
 
-- **OQ-1 (RESOLVED v2):** the "`enumeratePCINICs` empty + veths" tell DOES
-  false-positive on VMBus/XenBus VMs (AGY r1 Attack 3). Resolved by demoting
-  it to a non-authoritative hint behind positive container signals +
-  `vmHeuristic` (§6.2). Residual: confirm `vmHeuristic` fires on the target
-  Hyper-V/Xen kernels at /engineer (the cpuinfo hypervisor flag is reliable
-  on both).
+- **OQ-1 (RESOLVED v2+v3):** the "`enumeratePCINICs` empty + veths" tell DOES
+  false-positive on VMBus/XenBus VMs (AGY r1 Attack 3) AND `vmHeuristic` is
+  x86-only so ARM64 VMs misclassify (AGY r2). Resolved by the VM-detection
+  ladder `vmHeuristic` → `systemd-detect-virt` (bare, cross-arch) before the
+  demoted PCI-empty hint (§6.2). Residual: confirm `systemd-detect-virt`
+  exit-code/output on the actual target ARM64 + Hyper-V/Xen images at
+  /engineer.
+- **OQ-7 (NEW, resolved-in-plan):** the #1922 lifeline record is PCI-keyed
+  and must be generalized to `pci → perm-mac → kernel-name` for the fail-safe
+  to work on non-PCI substrates (§7 implementation gap). Sized as real
+  Slice-B/C work, not a doc tweak.
 - **OQ-2:** Should `rename no` live on the `chassis device-map` entry, or is
   a container binding conceptually different enough to warrant its own stanza
   (`set system interface-alias …`)? The doc recommends reusing device-map
