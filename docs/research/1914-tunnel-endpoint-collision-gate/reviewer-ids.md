@@ -7,16 +7,19 @@ Records task IDs / SHAs so continuations can fetch by id (per
 
 | Round | Task ID | Verdict |
 |-------|---------|---------|
-| r1 | (pending) | |
+| r1 | foreground nohup (codex exec, /tmp/codex-1914-r1.out) | PLAN-NEEDS-REVISION |
+| r2 | (pending) | |
 
 ## AGY (adversarial-review)
 
 | Round | Task ID | Verdict |
 |-------|---------|---------|
-| r1 | (pending) | |
+| r1 | adversarial-review-mqi20z89-0y1ddu | PLAN-NEEDS-REVISION |
+| r2 | (pending) | |
 
 ## Claude SMR (hostile, in-conversation)
 
 | Round | Doc | Verdict |
 |-------|-----|---------|
-| r1 | claude-smr-plan-r1.md | (pending) |
+| r1 | claude-smr-plan-r1.md | PLAN-NEEDS-REVISION |
+| r2 | claude-smr-plan-r2.md | (pending) |
