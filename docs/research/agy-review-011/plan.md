@@ -11,12 +11,6 @@ wording, "defer-until-touched" not "no gap" — all folded here).
 project's 2000-prod-LOC modularity threshold; no refactor issues filed).
 `/research` only — no code, no PR.
 
-**Status:** DRAFT v1.1 — SMR r1 PLAN-READY (2 refinements folded); pending Codex + AGY (Codex + AGY + Claude SMR)
-**Base:** `3cd181323` (origin/master)
-**Outcome shape:** Part I → one LOW defensive-hardening issue (both findings are
-**latent**, not live bugs); Part II → **KILL/DEFER all 5** (all under the
-project's 2000-prod-LOC modularity threshold). `/research` only — no code.
-
 ## 1. Issue framing
 
 AGY review-011 (`/tmp/agy-review-011.md`) has two parts: **Part I** = 2 claimed
