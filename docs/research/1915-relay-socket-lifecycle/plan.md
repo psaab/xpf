@@ -2,8 +2,8 @@
 
 - **Issue**: #1915 — DHCP relay: multi-interface groups fail (EADDRINUSE) and
   `Stop()`/reapply can hang (blocking `ReadFromUDP`, no close-on-cancel)
-- **Revision**: r3 (post round-2: AGY r2 cross-cancel/hot-spin/late-iface +
-  SO_BROADCAST; Claude SMR r2 PLAN-READY; awaiting r3 confirm)
+- **Revision**: r4 (post Codex r3 BLOCKER: cancel-before-wait ordering fixed +
+  test/loop-policy aligned + C1 re-resolve-each-attempt; awaiting r4 confirm)
 - **Branch**: `research/1915-relay-socket-lifecycle`
 - **Scope mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
 
@@ -341,10 +341,12 @@ runs at boot; `InterfaceByName` failing outside the retry would re-create the
 dead-relay bug). Structure:
 
 ```go
-var iface *net.Interface
 var giaddr net.IP
 for {
-    if iface == nil { iface, err = net.InterfaceByName(ifaceName) }
+    // Re-resolve InterfaceByName EVERY attempt (Codex r3 #3): a dynamic
+    // interface can disappear and be recreated under the same name with a
+    // new Index — a cached *net.Interface would carry a stale Index.
+    iface, err := net.InterfaceByName(ifaceName)
     if err == nil { giaddr, err = interfaceIPv4(iface) }
     if err == nil { break }
     select {
@@ -465,31 +467,49 @@ Concrete shape (illustrative, not final code):
    `net.PacketConn` (returns `ErrClosed`); the read loops ignore post-cancel
    errors.
 
-5. **WaitGroup + CROSS-CANCELLATION (G3; AGY r2 Finding 2).** Both the main
-   read loop and the response goroutine MUST `defer cancel()` so that if
-   **either** loop exits first on a non-cancel error, it cancels the shared
-   `ctx`, which the watcher observes → closes BOTH conns → unblocks the peer
-   loop. Without this, an early error in one loop leaves the other blocked in
-   `ReadFrom` forever and `wg.Wait()` becomes the new hang.
+5. **WaitGroup + CROSS-CANCELLATION (G3; AGY r2 Finding 2; ordering fixed per
+   Codex r3 BLOCKER).** Both the main read loop and the response goroutine
+   MUST cancel the shared `ctx` **on exit, BEFORE the runner joins**, so that
+   if **either** loop exits first (error or normal), it cancels → the watcher
+   closes BOTH conns → unblocks the peer loop → `wg.Wait()` can complete.
+
+   **The naive shape is WRONG.** A function-scope `defer cancel()` in
+   `runRelay` runs at `runRelay` *return* — which is AFTER an explicit
+   `wg.Wait()`. So: if the main loop `break`s into `wg.Wait()`, cancel has NOT
+   fired and the response goroutine stays blocked → `wg.Wait()` hangs (the bug
+   relocated). If the main loop `return`s, the explicit `wg.Wait()` is SKIPPED
+   → `relay.done` closes before the response goroutine is joined (violates G3
+   true-join). The cancel MUST run before the wait. Scope the main loop in an
+   inner function so its `defer cancel()` fires on inner-func return, which is
+   *before* the outer `wg.Wait()`:
 
    ```go
-   // rctx already derived in Apply: rctx, cancel := context.WithCancel(ctx)
-   // Pass `cancel` (or a context.CancelFunc) into runRelay.
+   // rctx, cancel := context.WithCancel(ctx) — derived in Apply, passed in.
    var wg sync.WaitGroup
    wg.Add(1)
    go func() {
        defer wg.Done()
-       defer cancel()                 // exit of response loop cancels everyone
+       defer cancel()                 // response-loop exit cancels everyone
        handleServerResponses(rctx, serverConn, conn, ir)
    }()
-   defer cancel()                     // exit of main read loop cancels everyone
-   // ... main read loop ...
-   wg.Wait()                          // joins the response goroutine
+
+   func() {                           // main read loop in its OWN func scope
+       defer cancel()                 // fires on THIS func's return, before wg.Wait
+       for {
+           // ... ReadFrom loop; `return` exits this inner func ...
+       }
+   }()
+
+   wg.Wait()                          // now safe: cancel already fired → both
+                                      // conns closed → response loop unblocked
    ```
 
-   The watcher (§5.4) already does `<-ctx.Done(); Close(conn); Close(serverConn)`,
-   so `cancel()` from either loop drives both sockets closed. `wg.Wait()` then
-   terminates because the response loop's `ReadFrom` is unblocked by the close.
+   (Equivalently, `defer wg.Wait()` then `defer cancel()` in `runRelay` —
+   LIFO runs `cancel()` first. The inner-func form is clearer.) The invariant
+   to state in the implementation: **the main-loop exit cancels the shared
+   context BEFORE the runner waits on the response goroutine.** The watcher
+   (§5.4) does `<-ctx.Done(); Close(conn); Close(serverConn)`, so either loop's
+   cancel drives both sockets closed and `wg.Wait()` terminates.
 
 6. **Read loop — REMOVE the `default:` no-op (Claude SMR r1 F4) + handle
    `ErrClosed` explicitly (AGY r2 Finding 3 — hot-spin guard).** The
@@ -564,9 +584,9 @@ payload for the relay-forwarding assertions.
    socket collision by construction (the real collision is exercised only by
    the optional root-gated test 6).
 2. **`TestStop_BoundedNoPackets`** — start a relay whose fake conn's
-   `ReadFromUDP` blocks until closed; call `Stop()`; assert it returns within
+   `ReadFrom` blocks until closed; call `Stop()`; assert it returns within
    a bounded deadline (e.g. `select` with 2s timeout) with **zero** packets
-   delivered. Closing the fake conn must unblock the fake `ReadFromUDP`.
+   delivered. Closing the fake conn must unblock the fake `ReadFrom`.
 3. **`TestApply_Reapply_DoesNotHang`** — `Apply` twice (second triggers
    `Stop()` of gen 1); assert the second `Apply` returns bounded and gen-1
    goroutines are gone (response goroutine joined — check via a leak counter
@@ -581,11 +601,24 @@ payload for the relay-forwarding assertions.
    (ctx-cancel unwinds the retry `select`). Include a sub-case where the
    *interface itself* is missing for the first K calls (AGY r2 #4) — proves
    `InterfaceByName` is inside the retry.
-6. **`TestRunRelay_OneSidedErrorNoHang`** (AGY r2 #2) — make the response
-   goroutine's fake `ReadFrom` return a non-cancel error immediately; assert
-   the main loop ALSO exits (via the shared `cancel()` → watcher → conn close)
-   and `Stop()`/`done` completes bounded. Guards the cross-cancellation
-   deadlock.
+6. **`TestRunRelay_OneSidedExitNoHang`** (AGY r2 #2; aligned with loop policy
+   per Codex r3 #2) — make the response goroutine's fake `serverConn.ReadFrom`
+   return `net.ErrClosed` (or close the fake serverConn) while `ctx` is NOT
+   yet cancelled. Per §5.6 the response loop returns (ErrClosed branch) →
+   `defer cancel()` fires → watcher closes BOTH conns → the MAIN loop's
+   `ReadFrom` also returns → `runRelay` completes and `done` closes bounded.
+   Asserts the cross-cancellation path WITHOUT relying on a continue-logged
+   transient error (which by policy would NOT trigger cancel — the loop only
+   returns on cancel or ErrClosed, so the test must use ErrClosed, not an
+   arbitrary error). This makes the test and the read-loop contract
+   consistent.
+
+   **Read-loop error contract (made explicit per Codex r3 #2):** a transient
+   non-cancel, non-ErrClosed read error is logged and the loop CONTINUES (does
+   not return) — this is intentional (a single bad datagram or transient
+   socket hiccup should not kill a relay). Loop EXIT is driven ONLY by
+   ctx-cancel or socket-close (`ErrClosed`). Cross-cancellation therefore
+   propagates via Close→ErrClosed, never via an arbitrary logged error.
 7. **`TestRunRelay_ClosedNoSpin`** (AGY r2 #3) — close the fake conn while
    `ctx` is NOT cancelled; assert the loop returns (does not spin) by counting
    `ReadFrom` calls stays bounded after close.
@@ -676,14 +709,14 @@ listeners + bounded stop.
    (AGY §3.2). Plan defers HA suppression to a follow-up issue gated on
    `make test-failover`; #1915 stays smoke-free. Reviewers: confirm defer is
    acceptable.
-6. **(NEW)** Axis C1 startup-retry: include in this PR (recommended — same
-   function, operator-invisible failure) or split to a follow-up? The plan
-   recommends including it as its own commit within the PR.
-7. **(NEW)** Is the parked-goroutine cost of C1 (one 5s-interval goroutine per
-   never-addressed interface) acceptable, or should C1 cap total retries and
-   then exit (turning "no address ever" into a logged permanent failure)? Plan
-   leans: keep retrying (ctx-bounded) — an interface CAN get an address later
-   (DHCP, manual config) and there is no reapply to restart it.
+6. **(RESOLVED — DoD includes it)** Axis C1 startup-retry is included in this
+   PR as its own commit (same function, operator-invisible failure otherwise).
+   Reviewers may still elect to split it to a follow-up; plan default = include.
+7. **(RESOLVED — plan default: keep retrying)** C1 parked-goroutine cost: one
+   ctx-bounded 5s-interval goroutine per never-addressed interface. Plan keeps
+   retrying (no retry cap) because an interface CAN get an address later (DHCP,
+   manual config) and there is no reapply to restart it. Reviewers may request
+   a cap; not a blocker either way.
 
 ---
 
@@ -702,8 +735,14 @@ listeners + bounded stop.
 - [ ] `SO_BROADCAST` set on the client conn (fixes pre-existing dropped
       broadcast OFFER/ACK to 255.255.255.255:68).
 - [ ] Watcher started LAST (after both conns exist); closes BOTH conns.
-- [ ] Cross-cancellation: both loops `defer cancel()`; early one-sided error
-      does not hang `wg.Wait()` (AGY r2 #2).
+- [ ] Cross-cancellation with CORRECT ordering: main loop in an inner func so
+      `cancel()` fires BEFORE the outer `wg.Wait()` (Codex r3 BLOCKER); both
+      loops cancel on exit; one-sided exit does not hang `wg.Wait()` (AGY r2 #2).
+- [ ] Read-loop error contract: transient non-cancel/non-ErrClosed error logs +
+      continues; exit ONLY on ctx-cancel or ErrClosed; test uses ErrClosed for
+      cross-cancel (Codex r3 #2).
+- [ ] C1 retry re-resolves `InterfaceByName` EACH attempt (no cached stale
+      Index) (Codex r3 #3).
 - [ ] Loop returns on `ctx.Err()!=nil` OR `errors.Is(err, net.ErrClosed)` —
       no hot-spin (AGY r2 #3).
 - [ ] C1 retry wraps `InterfaceByName` + `interfaceIPv4` (AGY r2 #4).
@@ -720,8 +759,12 @@ listeners + bounded stop.
 
 ---
 
-*r3 incorporates round-2 reviews: AGY r2 (cross-cancellation `defer cancel()`
-in both loops; `errors.Is(net.ErrClosed)` hot-spin guard; `InterfaceByName`
-inside the C1 retry; SO_BROADCAST made explicit in §5) + Claude SMR r2
-(PLAN-READY; confirmed C1/done-channel + PacketConn/broadcast correctness).
-Codex r2 pending re-dispatch. STOP at PLAN-READY on the final rev.*
+*r4 incorporates Codex r3 (the only round-3 BLOCKER): the §5.5 cancel/wait
+ordering was mechanically unsafe (`defer cancel()` at function scope runs
+AFTER `wg.Wait()`, or `return` skips the wait) — fixed by scoping the main
+loop in an inner func so `cancel()` fires before the outer `wg.Wait()`. Also
+aligned the one-sided-exit test with the read-loop error contract (exit only on
+cancel/ErrClosed) and made C1 re-resolve `InterfaceByName` each attempt.
+Prior: Claude SMR r2 = PLAN-READY; AGY r2 findings all folded; Codex confirmed
+daemon wiring 877-878, PacketConn has no concrete dependency, SO_BROADCAST on
+the correct (client) conn, watcher ownership correct. STOP at PLAN-READY.*
