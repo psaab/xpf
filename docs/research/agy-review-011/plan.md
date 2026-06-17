@@ -1,5 +1,16 @@
 # AGY review-011 — plan of action (Part I hardening + Part II refactor assessment)
 
+**Status:** PLAN-READY (v1.2, converged 2026-06-17). r1: Claude SMR PLAN-READY,
+AGY PLAN-READY (conceded both its own Part I findings latent + all 5 refactors
+KILL/DEFER), Codex PLAN-NEEDS-MINOR (5 accuracy fixes — kernel file count,
+.configdb master.key inventory, exact-`up` parse, store.go "only-in-vicinity"
+wording, "defer-until-touched" not "no gap" — all folded here).
+**Base:** `3cd181323` (origin/master)
+**Outcome:** Part I → one LOW defensive-hardening issue #1968 (both findings
+**latent**, not live bugs); Part II → **KILL/DEFER all 5** (all under the
+project's 2000-prod-LOC modularity threshold; no refactor issues filed).
+`/research` only — no code, no PR.
+
 **Status:** DRAFT v1.1 — SMR r1 PLAN-READY (2 refinements folded); pending Codex + AGY (Codex + AGY + Claude SMR)
 **Base:** `3cd181323` (origin/master)
 **Outcome shape:** Part I → one LOW defensive-hardening issue (both findings are
@@ -28,7 +39,7 @@ against `3cd181323`.
 
 - **#1916** (closed) covered the fsatomic canary for pkg/daemon+pkg/api + TLS
   cert/key atomicity — **unrelated** to AGY-I-1 (copyTree dir-fsync). Not a dup.
-- `pkg/upgrade/kernel_*.go` is **already split 6 ways** (kernel.go 334,
+- `pkg/upgrade/kernel_*.go` is **already split into 5 production files** (kernel.go 334,
   kernel_linux.go 665, kernel_run.go 555, kernel_drain.go 134,
   kernel_selfrecover.go 249) — AGY Part-II-3's "~1937 LOC" is a SUM of these
   already-separate files.
@@ -44,8 +55,10 @@ against `3cd181323`.
 caller's top-level `SyncDir(partial)`/`SyncDir(snapPartial)` runs (cutover.go
 ~285). **Cannot trigger today:** `.configdb/` is flat (active.json,
 candidate.json, rollback.N.json — verified pkg/configstore/db.go:56-68; the
-journal is a sibling `.config.journal`, not nested), and the staged→versions
-copy is flat binaries — so the single top-level SyncDir covers every entry. It
+flat `master.key` for encrypted configs (crypto.go:34) is also non-nested; the
+journal is a sibling `.config.journal`, not inside .configdb), and the
+staged→versions copy is flat binaries — so the single top-level SyncDir covers
+every entry. It
 becomes a real power-loss corruption hazard only if `.configdb/` (or staged)
 ever gains a subdir. **Fix (cheap, future-proofing):** in `copyTree`, collect
 the set of `dirname(target)` created during the walk and fsync each, top-down,
@@ -70,7 +83,10 @@ pre-sync section with `Status:` is folded into `FormatInformation`. **Fix
 emits exactly one `Status:` (it fails loudly the day a collision is introduced),
 then scope the match to the `Sync link statistics:` / `Fabric link statistics:`
 section (find the header, scan until the next blank/header), keeping the
-conservative not-synced fallback.
+conservative not-synced fallback. **Also (Codex-r1):** parse the value as an
+**exact `up`**, not `strings.Contains(ll, "up")` — the current substring match
+(cluster_cli.go:187) would accept a future `Status: startup`. Exact-match within
+the scoped section.
 
 ### Disposition
 File **one** issue: *"Upgrade durability + drain-gate parser: latent
@@ -82,15 +98,17 @@ this hardens against future schema/format drift.
 
 | # | Target | Largest prod LOC | >2000? | Already split? | Hot path | Verdict | Why |
 |---|---|---|---|---|---|---|---|
-| 1 | `wg_control.rs` | 1411 | no | no | **yes** | **DEFER** | Under threshold; cohesive single control loop; splitting risks per-poll indirection (the #1207 hot-path precedent). No testability gap at this size. |
+| 1 | `wg_control.rs` | 1411 | no | no | **yes** | **DEFER** | Under threshold; cohesive single control loop; splitting risks per-poll indirection (the #1207 hot-path precedent). Has long coordinator fns (style guide flags >100-line fns, engineering-style.md:226) → **defer until touched**, not "no gap"; no measured perf case for AGY's broad split now. |
 | 2 | `routing/tunnel.go` | 1748 | no | no | no | **DEFER** | Under threshold (closest); three apply-phases already helper-factored; operator-paced, not per-packet. Revisit only if it crosses 2000. |
-| 3 | `kernel_*.go` | 665 | no | **yes (6 files)** | no | **KILL** | Already decomposed; the "~1937" is a sum of existing files. Proposal is stale namespace churn on the freshly-shipped #1930 subsystem. |
+| 3 | `kernel_*.go` | 665 | no | **yes (5 files)** | no | **KILL** | Already decomposed across 5 files (sum=1937); the "~1937" is that sum, not one file. Proposal is stale namespace churn on the freshly-shipped #1930 subsystem. |
 | 4 | `configstore/secure/` | 262 | no | **yes (3 files)** | no | **KILL** | Already 3 files <300 LOC each. Cosmetic subdir move. |
 | 5 | `tunnel_supervision.rs` | 863 | no | no | per-apply | **DEFER** | Under threshold; cohesive three-pass reconcile; intentional GRE/WG parallel structure. |
 
-**The one real modularity finding AGY missed:** `pkg/configstore/store.go` is
-**2,011 prod LOC — the only file at/over the 2000 threshold** in this vicinity
-(AGY targeted the already-tiny `secure/` files instead). It is borderline (just
+**The one real modularity finding AGY missed in this vicinity:**
+`pkg/configstore/store.go` is **2,011 prod LOC — over the 2000 threshold**, while
+AGY targeted the already-tiny `secure/` files instead. (It is **not** the only
+`[REFACTOR]`-flagged file repo-wide — `scripts/refactoring-audit.sh` lists
+others; store.go is the one AGY should have caught here.) It is borderline (just
 over) and the scheduled fortnightly modularity audit will flag it; if any
 decomposition is pursued, store.go is the legitimate target, not AGY's. Noted
 here, not filed (marginal; let the audit drive it).
