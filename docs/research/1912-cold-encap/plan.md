@@ -1,6 +1,8 @@
 # Plan of action — #1912: cold ENCAP outer next-hop blackholes tunnel-bound replies
 
-- **Status**: DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR)
+- **Status**: r2 PLAN-READY — 3-way converged (Codex + AGY + Claude SMR all
+  PLAN-NEEDS-MINOR on r1 with the SAME convergent minors; r2 resolves them).
+  Root cause independently code-verified by all three reviewers.
 - **Issue**: #1912 — encap-bound transit replies blackhole for the full
   cold window when the tunnel's OUTER next-hop neighbor is flushed; the
   documented "#1769 resolver + kernel ARP probe recover the outer hop"
@@ -114,9 +116,72 @@ The bug is purely that the probe + resolver are keyed by the **tunnel
 logical ifindex** instead of the **outer L3 egress ifindex**. Fix the
 ifindex and the documented recovery actually engages.
 
-## 4. Design
+## 4. Design — CONVERGED (r2)
 
-### Option A (recommended) — carry the outer-neighbor ifindex on the resolution
+**Converged choice: Option B (on-demand helper), NOT a struct field.** All
+three r1 reviewers independently refuted the r1 "~15 literals" estimate:
+`ForwardingResolution` has **100+ literal construction sites** (AGY counted,
+Codex confirmed), almost all in tests, and Rust requires every literal to
+set a new field (no `..Default::default()` update syntax in use), so Option
+A is high mechanical churn for no functional benefit. Both reviewers also
+confirmed the field would be **local-only** anyway (it is never serialized).
+So r2 commits to a helper, computed on demand on the cold path:
+
+```rust
+/// The ifindex on which `next_hop` must be neighbor-resolved (ARP/NDP
+/// probe + neighbor-map key + neg-cache key). For a normal resolution
+/// this is `egress_ifindex`. For a tunnel-marked resolution it is the
+/// OUTER transport's L3 egress ifindex (where the outer next-hop neighbor
+/// lives) — which differs from `egress_ifindex` (the tunnel logical
+/// ifindex) and from `tx_ifindex` (the VLAN parent for a VLAN outer
+/// transport). Computed from LIVE forwarding state, so it is inherently
+/// peer-local and needs no wire field / HA-sync trust (the synced session
+/// re-resolves on upsert anyway).
+fn outer_neighbor_ifindex(state: &ForwardingState, resolution: &ForwardingResolution) -> i32 {
+    if resolution.tunnel_endpoint_id == 0 {
+        return resolution.egress_ifindex;
+    }
+    // Re-resolve the tunnel endpoint's OUTER transport egress. To avoid
+    // duplicating logic, factor the "resolve outer egress ifindex for a
+    // tunnel id" step OUT of resolve_tunnel_forwarding_resolution into a
+    // shared `resolve_tunnel_outer(state, id) -> Option<ForwardingResolution>`
+    // that BOTH that function AND this helper call. Returns the outer
+    // resolution's egress_ifindex; on a missing endpoint fall back to
+    // resolution.egress_ifindex (a `> 0` guard, per Codex r1 — safer than
+    // `== 0`).
+}
+```
+
+- **Cold-path only**: the helper is called solely in the MissingNeighbor
+  arm (per cold packet on an unresolved hop), never on the fast path. The
+  outer re-resolution is the same `lookup_forwarding_resolution_*` the
+  original resolution ran; factoring `resolve_tunnel_outer` shared between
+  the two removes the Option-C logic-duplication objection. No struct field,
+  no 100+-literal churn, no wire change.
+- In the MissingNeighbor arm, replace the `egress_ifindex` uses that drive
+  **outer-hop** resolution with `outer_neighbor_ifindex(state, &resolution)`:
+  - kernel ARP probe iface lookup (poll_descriptor/mod.rs:2520-2528);
+  - `neg_key` / resolver enqueue iface / resolved-wins (mod.rs:2376-2496);
+  - `already_probing` dedup (mod.rs:2515-2518).
+  `pending_neigh` insertion stays keyed by `egress_ifindex` and is never
+  reached for tunnel-marked (R-E, gated on `tunnel_endpoint_id == 0` at
+  mod.rs:2780). For non-tunnel the helper returns `egress_ifindex`, so
+  non-tunnel behavior is byte-identical.
+
+### HA-sync — RESOLVED (no field, no trust issue)
+
+`SessionSyncRequest` carries `egress_ifindex`, `tx_ifindex`,
+`tunnel_endpoint_id`, VLAN, hop, MAC — but **no neighbor ifindex** (Rust
+control.rs:692, Go protocol.go:1664). Imported/peer-synced sessions
+**re-resolve** on worker upsert (session_glue/commands/upsert_synced.rs:39)
+and on peer-synced hit (session_glue/mod.rs:1021). Because the helper
+computes from live forwarding state at use time, there is nothing to
+serialize and nothing to trust from the wire — the r1 HA-sync open question
+(Q4) is moot under Option B. The existing re-resolution path is preserved.
+
+---
+
+### (superseded) Option A — carry the outer-neighbor ifindex on the resolution
 
 Add a field to `ForwardingResolution`:
 
@@ -154,7 +219,7 @@ neigh_ifindex: i32,
   tunnel-resolution site sets it explicitly to `outer.egress_ifindex`
   regardless.
 
-### Option C (lower-churn alternative) — arm-local re-derivation
+### (superseded) Option C — arm-local re-derivation
 
 Leave `ForwardingResolution` unchanged. In the MissingNeighbor arm, when
 `decision.resolution.tunnel_endpoint_id != 0`, look up
@@ -214,9 +279,15 @@ blackhole, the resolver enqueue hardens the STALE case.
   `neigh_ifindex == outer.egress_ifindex` (≠ `egress_ifindex` = tunnel
   logical) for a GRE endpoint; for a VLAN outer transport `neigh_ifindex`
   is the subif, `tx_ifindex` the parent.
-- **Unit (arm keying)**: a tunnel-marked MissingNeighbor resolution drives
-  the probe + resolver enqueue + neg-cache key on `neigh_ifindex` (assert
-  via the existing probe/resolver seams / counters).
+- **Unit (arm keying, Codex r1 ask)**: a tunnel-marked MissingNeighbor
+  resolution drives the probe + resolver enqueue + neg-cache key on the
+  OUTER L3 ifindex (`outer_neighbor_ifindex`), while the frame is STILL NOT
+  buffered (R-E preserved) — assert via the existing probe/resolver seams /
+  counters.
+- **Unit (helper)**: `outer_neighbor_ifindex` returns `egress_ifindex` for a
+  non-tunnel resolution and the outer transport's egress ifindex for a
+  tunnel-marked one (incl. a VLAN outer transport: subif, not parent); the
+  `> 0` fallback on a missing endpoint.
 - **Regression (non-tunnel)**: existing MissingNeighbor tests unchanged
   (neigh_ifindex == egress_ifindex).
 - **cargo**: full `cargo test --release` + 5× flake on the new tests.
@@ -230,6 +301,10 @@ blackhole, the resolver enqueue hardens the STALE case.
   while tcpdumping lanhost eth0 for reply GRE frames AND who-has
   10.0.61.102. **Pass = who-has 10.0.61.102 NOW appears from fw0 on
   ge-0-0-1 after flush, reply leg recovers within ~1 ping** (was 6/6 loss).
+  Also record `tunnel_encap_unresolved_drops` (slow_path.rs:232) during the
+  windows — NONZERO before the fix (proves the R-C drop is the death site,
+  the localization the issue asked for) and trending to zero after (Claude
+  SMR r1).
 - **Failover**: `make test-failover` — the change touches tunnel egress
   resolution; expected green (mechanism unchanged, only the probe iface).
 - Standard smoke matrix (v4+v6, push+reverse, CoS off+on) — no fast-path
@@ -242,7 +317,32 @@ blackhole, the resolver enqueue hardens the STALE case.
 - The inner-hop path (already recovers correctly).
 - A general neighbor-resolution redesign (#1771 territory).
 
-## 9. Open questions for adversarial review
+### Resolver-for-tunnel enhancement — INCLUDE (r2)
+
+All three reviewers accepted including it. With `outer_neighbor_ifindex`
+giving the correct key, also enqueue the rate-limited #1769 resolver for a
+tunnel-marked MissingNeighbor (keyed by `(outer_neighbor_ifindex,
+next_hop)`), not only on the neg-cache fast-fail — this hardens the
+STALE/DELAY outer-entry case (the issue's one partially-successful round had
+10.0.61.102 STALE). Cheap (cold-path try_send), no new failure mode.
+
+## 9. Open questions — RESOLVED at r2 convergence
+
+1. **Option A vs C → Option B (helper).** Resolved: field-add is 100+
+   literals (AGY/Codex), so a cold-path helper `outer_neighbor_ifindex`
+   wins; share `resolve_tunnel_outer` to avoid logic duplication.
+2. **Sentinel vs explicit → moot** (no field). The helper uses a `> 0`
+   guard (Codex r1) on the re-resolved outer egress, falling back to
+   `egress_ifindex`.
+3. **Resolver-for-tunnel → INCLUDE** (§4 enhancement).
+4. **HA-sync field-trust → moot** (no serialized field; existing
+   re-resolution on upsert/peer-sync-hit preserved).
+5. **VLAN outer transport → confirmed** by all three: neighbor keyed by L3
+   egress (subif), `outer.egress_ifindex` correct, `tx_ifindex` (parent)
+   wrong.
+6. **First-packet loss → accept** one-RTT recovery (R-E forbids buffering).
+
+### Residual open questions for `/engineer` (none block PLAN-READY)
 
 1. **Option A vs C**: dedicated `neigh_ifindex` field (touches ~15 literals
    or needs a sentinel+fallback) vs arm-local re-derivation (smaller diff,
