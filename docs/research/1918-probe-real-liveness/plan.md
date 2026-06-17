@@ -3,7 +3,7 @@
 - **Issue**: #1918 (bug) — `probeICMP` (`pkg/routing/tunnel.go`) never sends/receives an
   ICMP echo; both code paths return `true` on socket-open, so a dead GRE/IPIP peer behind a
   valid route is reported up forever and `LinkSetDown` never fires.
-- **Revision**: r2 (post-r1 three-way review: Codex + AGY + Claude SMR all PLAN-NEEDS-WORK)
+- **Revision**: r2 (SMR r2 PLAN-READY; N1 folded; pending Codex+AGY r2 re-review)
 - **Status**: PLAN-READY candidate (pending r2 three-way re-review)
 - **Branch**: `research/1918-probe-real-liveness`
 - **Mode**: `/research` — STOP at PLAN-READY. No PR, no production code.
@@ -167,6 +167,13 @@ This is the pattern to follow — with the two precedent gaps fixed (§5).
     on inability-to-probe (that would amplify a local FD leak into a network outage), but the
     operator is now alarmed. (Distinguishing structural vs transient is by errno classification
     at `ListenPacket` time.)
+  - **Startup posture (SMR r2 N1):** `startKeepalive` initializes `state.Up = true`
+    (`tunnel.go:955`). On a daemon restart under structural-Unsupported (no `ping_group_range`),
+    every keepalive therefore starts at `Up=true` and C1 holds it there — the kernel link
+    retains its apply-time admin state (up), and status reads `"unknown (ICMP probe
+    unavailable)"`, NOT `"up"`. This is intentional: it matches the pre-fix availability posture
+    while telling the truth in status. /engineer must NOT "fix" this into start-down-when-
+    unprobeable, which would black-hole every tunnel on a privilege-less boot.
 - **C2 — fail-closed (Unsupported ⇒ Dead, counts toward MaxRetries).** Rejected as default:
   a missing `ping_group_range` on a deploy takes every keepalive tunnel down. Strictly worse
   for availability than today.
