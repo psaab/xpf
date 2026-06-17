@@ -2,9 +2,10 @@
 
 - **Issue:** #1914
 - **Mode:** `/research` — STOP at PLAN-READY. No PR, no production code.
-- **Revision:** r2 (incorporates Claude SMR + Codex + AGY r1 — three-way
-  PLAN-NEEDS-REVISION converged on recursion hazard, pre-`usedIDs`
-  enumeration, peer-group expansion-error handling, and the O1 crux)
+- **Revision:** r3 (r2 corrected after Codex r2 caught two precision bugs:
+  Defect B is NOT fixed by an unchanged view 1 even for applied groups — it
+  is document-only entirely; and the SSOT emitter must return `{Name,
+  *TunnelConfig}` not bare names so the builder can populate snapshot fields)
 - **Branch:** `research/1914-tunnel-endpoint-collision-gate`
 - **Base:** `origin/master` @ `26e4a112d`
 - **Author:** Claude (research driver)
@@ -149,46 +150,28 @@ symmetric. node0 expanding "what would node1 see" is deterministic (it is
 just `ExpandGroupsWithVars(node1)` on the shared candidate). The gate
 rejects if ANY of the three views contains a fold collision.
 
-To make (2)/(3) faithful to the builder — including the src/dst gate
-(Defect B), the WG single-lowest-unit pick, the leading-zero/overflow unit
-canonicalization, and last-wins duplicate-unit — the cleanest realization
-is to **reuse the actual builder path**: for each node, clone → expand →
-`CompileConfig*` → `buildTunnelEndpointSnapshots` → read back the emitted
-endpoint names, OR factor the name-emission out of `addEndpoint` into a
-pure `config`-package helper the builder also calls (single source of
-truth). See §4 for the SSOT factoring.
+Because (2) and (3) are *both* computed on *both* nodes from the *same*
+candidate config, the union is still a pure function of config ⇒ still
+symmetric. The realization is the SSOT emitter in §4.1 (a recursion-free,
+config-pure, pre-`usedIDs` helper), NOT a re-call of `CompileConfig*` (that
+recurses — see §3.5-O2). See §4 for the full reconciled shape.
 
-- **Defect A:** FIXED — post-expansion views contain `wg78.0`, collision
-  with `wg1408.0` detected → commit rejected.
-- **Defect B:** FIXED — views are built through the real src/dst gate, so
-  incomplete non-WG tunnels are not registered (and group-supplied src/dst
-  IS modeled, because expansion ran first). No phantom refs.
+- **Defect A:** FIXED — post-expansion views contain the concrete `wg78.0`,
+  collision with `wg1408.0` (824) detected → commit rejected.
+- **Defect B:** NOT fixed — document-only (see §3.5-O1/O4). View 1 stays
+  presence-only (required so the Defect-A fix does not re-open a
+  false-accept), so the incomplete-non-WG phantom persists for all cases.
 - **HA-symmetry:** PRESERVED — all three views are pure functions of the
-  shared candidate config; both nodes compute the identical union.
-- **Complexity:** Medium-high. Needs the builder's name-emission logic
-  reachable from the gate (SSOT factoring) and two extra expand+compile
-  passes at commit time (cost: commit is not hot-path; acceptable).
-- **Risk:** the pre-expansion union (view 1) must STAY, or a collision
-  hidden entirely in an un-applied `groups node1` block (no apply-groups on
-  either node — see the existing symmetry test) would stop being caught.
-  Keep all three; the union is monotone (more refs ⇒ stricter), so adding
-  views can only ADD rejects, never remove the existing ones. That makes
-  Defect-B's de-registration the ONLY direction that could *relax* a
-  reject — and it only relaxes phantom (never-emitted) refs, which is
-  correct.
-
-  Subtle interaction: view 1 (pre-expansion, presence-only) STILL
-  over-registers incomplete GRE refs. So keeping view 1 unchanged does NOT
-  fix Defect B by itself — view 1 would still phantom-reject. **Resolution:**
-  view 1's role narrows to "catch group-scoped collisions invisible to any
-  single node's expansion"; to avoid re-introducing the Defect-B phantom,
-  view 1 must ALSO be built through a src/dst-aware collector — but
-  pre-expansion it cannot judge group-supplied src/dst. **This is the crux
-  the reviewers must rule on** (see §3.5 open question O1). The honest
-  framing: Path 1 fixes A cleanly; fixing B fully requires either dropping
-  view 1's incomplete-GRE refs (re-opening the theoretical group-supplied
-  under-register — but views 2/3 now cover the applied cases) or accepting
-  that view 1 still over-registers for the *un-applied-group* corner only.
+  shared candidate config; both nodes compute the identical union (with
+  identical per-node-expansion-error→empty-set handling, §4.3).
+- **Complexity:** Medium. SSOT emitter + two extra clone+`compileInterfaces`
+  passes per commit (not hot-path; `Clone()` is deep so no mutation).
+- **Risk:** view 1 MUST stay byte-identical, or an un-applied-group
+  cross-node collision (the `TestTunnelEndpointIDCollisionAcrossGroupsIsSymmetric`
+  guarantee) stops being caught, AND narrowing it to src/dst-aware
+  re-opens a false-accept (split-supply / un-applied nested-apply-groups —
+  proven in §3.5-O1). The union is monotone over view 1 (adding views 2/3
+  only ADDS rejects), so the existing reject set is strictly preserved.
 
 ### Path 2 — Expand wildcards inside the collision pass only
 
@@ -256,12 +239,23 @@ below; they are now design decisions, not open questions.
     expand the un-applied group, the ref is registered NOWHERE → **false
     ACCEPT**, violating the #1873 group-symmetry invariant.
 
-  Therefore view 1 MUST remain the existing presence-only union. Its
-  Defect-B over-registration (phantom for an incomplete non-WG tunnel that
-  is never emitted by any node) is the price of preserving cross-node
-  symmetry for un-applied groups, and is **accepted + documented (Path 4
-  for B's residual)**. Views 2/3 fix Defect B for every applied-group case
-  for free (they run the real src/dst gate post-expansion).
+  Therefore view 1 MUST remain the existing presence-only union, AND
+  because view 1 includes EVERY group (applied or not — `tunnelid.go:165`)
+  and registers tunnel presence with no src/dst check (`tunnelid.go:73,120`),
+  **Defect B is NOT fixed by this design at all — it is document-only,
+  entirely** (Codex r2 F1). Concrete proof (verified): `set groups g
+  interfaces gr-0/0/0 unit 0 tunnel mode gre` + `set apply-groups g` + `set
+  interfaces wg29715 unit 0 tunnel mode wireguard` — `gr-0/0/0.0` and
+  `wg29715.0` both fold to 44687; view 1 registers the incomplete-GRE
+  phantom even though it is APPLIED, the builder drops it (`tunnels.go:61`),
+  and the union still false-REJECTS. Views 2/3 correctly exclude it, but
+  view 1's union with them cannot un-register what view 1 added. So the
+  earlier r2 claim "Defect B fixed for applied-group cases" was WRONG.
+  Defect B's phantom false-reject (any config — main, applied group, or
+  un-applied group — with an incomplete non-WG tunnel that folds onto a
+  real ref) is accepted as a documented limitation (Path 4 for B), backed
+  by the runtime belt. Fixing it would require narrowing view 1, which
+  provably re-opens a false-ACCEPT (above) — strictly worse.
 - **O2 — RESOLVED: NO double-`CompileConfig`.** Reading back
   `buildTunnelEndpointSnapshots` is WRONG for two independent reasons the
   reviewers proved: (a) `CompileConfig*` call the gate FIRST
@@ -282,41 +276,53 @@ below; they are now design decisions, not open questions.
   only; runtime filtering stays in the builder. Mandatory: the builder is
   refactored to call the emitter (not a parallel copy) + a differential
   parity test guards drift (the #1910 r2-r6 drift class).
-- **O4 — RESOLVED: Defect B is fixed for applied-group cases by views 2/3,
-  and document-only for its un-applied-group residual.** The residual
-  phantom false-reject requires an incomplete non-WG tunnel that (a)
-  appears in view 1's presence union, (b) is emitted by no node, AND (c)
-  folds onto a real emitted ref — joint probability negligible (1/65535 ×
-  half-configured-and-never-applied). The runtime belt + the new doc
-  comment cover it.
+- **O4 — RESOLVED: Defect B is document-only, entirely** (corrected after
+  Codex r2 F1). Because view 1 stays unchanged (required to fix Defect A
+  without re-opening a false-accept, see O1), the incomplete-non-WG phantom
+  false-reject persists for ALL cases — main config, applied group, AND
+  un-applied group. Fixing it is mutually exclusive with the Defect-A fix
+  under the pre-expansion-union design. The residual requires an incomplete
+  non-WG tunnel whose unit-ref folds onto a real emitted ref (1/65535 per
+  pair) — a rare, operator-visible-at-runtime (`slog.Error` belt) condition.
+  Accepted + documented; the remediation is the same "rename one interface"
+  the error already prints.
 
 ---
 
 ## 4. Recommended approach (RECONCILED with r1 three-way review)
 
 **Path 1 for Defect A** (the High false accept) via a recursion-free,
-pre-`usedIDs` three-view union; **document-only for Defect B's
-un-applied-group residual** (views 2/3 fix the applied-group cases for
-free). Concrete, reviewer-corrected shape:
+pre-`usedIDs` three-view union; **Defect B is document-only, entirely**
+(view 1 stays unchanged, so the incomplete-non-WG phantom persists — fixing
+it is mutually exclusive with the Defect-A fix, see §3.5-O1/O4). Concrete,
+reviewer-corrected shape:
 
-### 4.1 SSOT name emitter (config-pure, pre-`usedIDs`)
+### 4.1 SSOT emitter (config-pure, pre-`usedIDs`, returns Name+Tunnel)
 
-Add `pkg/config.EmitTunnelEndpointNames(cfg *config.Config) []string` (or a
-`map[string]struct{}`): given a typed, already-expanded `*config.Config`, it
-returns the exact set of unit-qualified endpoint names the builder would
-emit FROM CONFIG ALONE — same non-WG src/dst gate (drop if src or dst
-empty), same WG single-lowest-unit pick, same canonical decimal unit
-formatting, same last-wins duplicate-unit. It does **NOT** apply the
-`usedIDs` collision drop and does **NOT** consult runtime
+Add a `pkg/config` emitter that, given a typed, already-expanded
+`*config.Config`, returns the exact set of CONFIGURED tunnel endpoints the
+builder would emit — each as a `{Name string, Tunnel *config.TunnelConfig}`
+pair (Codex r2 F2: the builder needs the matching `*TunnelConfig` to
+populate snapshot fields at `tunnels.go:106-129`, so a names-only return is
+insufficient). The emitter applies the same non-WG src/dst gate (drop if
+src or dst empty, `tunnels.go:61`), the same WG single-lowest-unit pick
+(`tunnels.go:148-170`), and the same `%s.%d` canonical formatting. It does
+**NOT** apply the `usedIDs` collision drop and does **NOT** consult runtime
 `InterfaceSnapshot` rows (AGY F4, Codex F4 — those don't exist at commit).
 
-`buildTunnelEndpointSnapshots` is refactored to call
-`EmitTunnelEndpointNames` for its name set, then intersect with runtime
-`ifaceByName`, then apply `usedIDs`. One name-emission truth; the runtime
-filtering + drop stay in the builder. A differential parity test
-(`tunnelid_test.go`) asserts the gate's emitter output == the builder's
-configured-name set over a tunnel-config corpus (kills the #1910 r2-r6
-drift class).
+Note: the leading-zero / overflow / last-wins unit canonicalization is
+already resolved by `compileInterfaces` when it builds the int-keyed
+`Units` map, so the emitter inherits it for free and does NOT re-implement
+the AST-level logic the gate's view-1 collector carries.
+
+`buildTunnelEndpointSnapshots` is refactored to call the emitter for its
+`{Name, Tunnel}` set, then intersect with runtime `ifaceByName`, then apply
+`usedIDs`. One emission truth; runtime filtering + drop stay in the builder.
+The gate (views 2/3) uses only the `Name` field of the emitter output. A
+differential parity test (`tunnelid_test.go`) asserts the emitter's
+`{Name,Tunnel}` set == the builder's configured set (pre runtime-intersect,
+pre `usedIDs`) over a tunnel-config corpus (kills the #1910 r2-r6 drift
+class).
 
 ### 4.2 Gate computes a recursion-free three-view union
 
@@ -392,9 +398,12 @@ divergence under this construction).
    error; must WARN (not error) on the lenient path.
 3. **Defect A symmetry:** the wildcard config must reject identically under
    `CompileConfigForNode(tree, 0)` and `CompileConfigForNode(tree, 1)`.
-4. **Defect B:** a half-configured GRE (no src/dst) that folds onto a real
-   emitted ref must NOT falsely reject (phantom shed); a COMPLETE GRE that
-   genuinely collides must still reject.
+4. **Defect B (document-only — pin CURRENT behavior):** a half-configured
+   non-WG tunnel (no src/dst) whose unit-ref folds onto a real emitted ref
+   STILL rejects (the accepted residual; view 1 unchanged). This test pins
+   the limitation so a future reader knows it is intentional, not a bug;
+   the doc comment + `slog.Error` belt are the operator's recourse. A
+   COMPLETE GRE that genuinely collides must of course still reject.
 5. **No false positives:** the existing non-colliding multi-tunnel config
    stays clean; a WG wildcard group applied to a single interface (no
    second colliding ref) compiles clean.
@@ -450,7 +459,22 @@ on the final rev. Round verdicts recorded per round below.
 | Round | Claude SMR | Codex | AGY |
 |-------|-----------|-------|-----|
 | r1 | PLAN-NEEDS-REVISION | PLAN-NEEDS-REVISION | PLAN-NEEDS-REVISION |
-| r2 | pending | pending | pending |
+| r2 | PLAN-READY | PLAN-NEEDS-REVISION (2 precision bugs) | pending |
+| r3 | pending | pending | pending |
+
+### r2 → r3 correction (Codex r2)
+
+Codex r2 confirmed the r2 design core (recursion-free path, error-handling,
+boundary, O1 symmetry, Defect-A fix) but caught two precision bugs in the
+plan TEXT, both verified against the code:
+
+- **Defect B is document-only, ENTIRELY** (not "fixed for applied-group
+  cases"). View 1 includes every group with no src/dst check, so an APPLIED
+  incomplete GRE (`gr-0/0/0.0`/`wg29715.0` both fold 44687) still
+  false-rejects. r3 §3.5-O1/O4 + §4 + §6.4 corrected; §6.4 now pins the
+  residual as intentional.
+- **SSOT emitter returns `{Name, *TunnelConfig}`** (not bare names) — the
+  builder needs the TunnelConfig to populate snapshot fields. r3 §4.1.
 
 ### r1 convergence summary
 
