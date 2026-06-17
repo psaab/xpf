@@ -10,6 +10,19 @@ first; this doc builds the cross-substrate model on top of it and pins only
 the net-new pieces (container alias-mode, substrate detector,
 `platform-profile`, the generalized reachability contract).
 
+**v2 (post-r1 review).** r1: Claude SMR + Codex = PLAN-READY; AGY =
+PLAN-NEEDS-MAJOR with two real catches, both FOLDED here: (1) the substrate
+detector's "PCI-empty + veths" container tell false-positives on
+Hyper-V/Azure (VMBus) and AWS-Xen (XenBus) VMs, which also have no PCI NICs —
+fixed by making positive container signals authoritative, running
+`vmHeuristic` (which DOES detect those VMs) BEFORE the PCI-empty hint, and
+demoting PCI-empty to a non-authoritative hint (§6.2). (2) "empty protected
+set for console-only/delegate" was a lockout regression — fixed by making the
+#1922 boot-recorded default-route lifeline UNCONDITIONALLY protected
+regardless of contract (§7 CRITICAL FAIL-SAFE). Also folded the three SMR
+clarifications (§5.3 audit list, detector-is-advisory invariant,
+binding-delivery recommendation in §2.1).
+
 ---
 
 ## 0. TL;DR recommendation
@@ -166,6 +179,22 @@ the rename loop and before the reconcile. The umbrella keeps that invariant
 and only varies the *source* and the *rename axis*. The lifeline/console is
 the reachability guarantee that lets the operator fix a wrong binding.
 
+**Container binding-delivery recommendation (Claude SMR r1 fold 3,
+resolving OQ-6):** for containers, the binding must exist before the daemon
+reads the configstore (it is needed to bring up the interface the operator
+would commit config over). Recommended two-phase delivery: (1) **first
+boot** — the orchestrator injects the alias-map via a mounted file (e.g.
+`/etc/xpf/binding.d/*.conf`) or an entrypoint that writes it before `xpfd`
+starts; the daemon reads it start-of-boot like the #1922 lifeline record.
+(2) **thereafter** — the binding lives in the configstore as a normal
+`chassis device-map` stanza, synced/persisted with the rest of the config.
+This is bootstrap-safe in containers specifically because reachability is
+`delegate` (orchestrator `exec` is the lifeline), so there is no
+chicken-and-egg on the *first* commit — the operator always has
+`exec` access. A mounted file is the least-surprise channel for
+incus/docker/k8s (k8s `configMap` volume, docker `-v`, incus
+`raw.mount`/`devices`).
+
 ---
 
 ## 3. The three substrate axes (independent, per the issue)
@@ -261,12 +290,29 @@ status-quo.
      fxp0, no mgmt NIC" (already true on the console-only path per #1956 §9.6
      and `setupBootstrapLifeline` lines 455-461).
   5. RETH-member `OriginalName=` matching — N/A in containers (no RETH).
-- **Risk caveat (must verify at /engineer):** some consumers may assume the
-  *Junos* name shape (`ge-N/0/N`) for slot/FPC math — e.g. `InterfaceSlot`
-  (`types.go:35`), `SlotToNodeID` (`types.go:55`), RSS indirection's mlx5
-  filter (`rss_indirection.go`). A container interface named `eth0` returns
-  `InterfaceSlot=-1`, which the callers must treat gracefully (no FPC ⇒ no
-  cluster slot ⇒ standalone). Auditing these "-1 / no-slot" branches is a
+- **Risk caveat (must verify at /engineer):** some consumers assume a
+  *vSRX name shape* for slot/FPC math or for name-prefix classification. The
+  audit list (all VERIFIED benign for a literal `eth0`/`lan0` — see below):
+  - **Slot/FPC math (all guard `slot >= 0`):** `InterfaceSlot`
+    (`types.go:35`), `SlotToNodeID` (`types.go:55`), callers at
+    `cluster/monitor.go:258,446`, `grpcapi/server_diag.go:361`,
+    `config/compiler.go:347`, `config/types.go:75`. `eth0` → `slot=-1` → the
+    branch is skipped (standalone). Safe by construction.
+  - **Name-prefix classification (produce absence-of-match for `eth0`,
+    which is the CORRECT outcome for a container data port):**
+    `daemon_apply.go:308` (`fxp`/`fab`/`em` → mgmt-VRF — `eth0` is not a
+    mgmt port, so not placed in vrf-mgmt: correct), `compiler_services.go:493-510`
+    (`fxp`/`em`/`fab`/`lo`/`st`/`gr-`/`ip-`/`fti` service-interface filter),
+    `compiler_iface.go:954`, `maps_sync.go:1506-1510` (fxp/em/fab
+    classification), and all `reth`-prefix HA sites (HA-only; HA-in-container
+    is out of scope §10). Codex r1+r2 grepped these exhaustively and found
+    **no site that produces wrong/dangerous behavior** for a literal `eth0` —
+    only benign absence-of-match.
+  - Conclusion: the de-risking claim STANDS (Codex r3 + Claude SMR concur).
+    /engineer must still re-confirm the absence-of-match assumption holds
+    for each site when implementing, but no counter-example exists today.
+
+  Original caveat retained: auditing these "-1 / no-slot" branches is a
   named Slice-B task, not a blocker — containers are standalone by assumption
   (HA-in-container is out of scope, §10).
 
@@ -299,29 +345,44 @@ can be wrong, and a wrong auto-detect must be correctable with one leaf.
 Extend `vmHeuristic` (`host_tunables.go:126`) into a `detectSubstrate`
 function over the same `hostTunableFS` mock interface:
 
-1. **Container (highest priority — most specific):**
+1. **Container — ONLY positive container signals (highest priority):**
    - `/.dockerenv` exists (Docker), OR
    - `/run/.containerenv` exists (Podman), OR
    - `systemd-detect-virt --container --quiet` exits 0 (catches
-     lxc/incus-container/systemd-nspawn), OR
-   - cgroup-v2 hint + **no PCI NICs at all** (`enumeratePCINICs` returns
-     empty) while `/sys/class/net` has non-`lo` entries. The "PCI-empty but
-     veths present" signal is the strongest container tell and the one that
-     directly explains the "manages nothing" bug.
-2. **VM:** `vmHeuristic` non-empty (`/sys/hypervisor/type`, cpuinfo
-   hypervisor flag) — reuse verbatim.
+     lxc/incus-container/systemd-nspawn).
+   These three are *authoritative* — they are true only inside a container.
+2. **VM — runs and WINS over the weak container corroborator (AGY r1
+   Attack 3):** `vmHeuristic` non-empty (`/sys/hypervisor/type`, cpuinfo
+   hypervisor flag) — reuse verbatim. Critically, `vmHeuristic` detects
+   Hyper-V/Azure (VMBus) and AWS-Xen (XenBus) VMs via the hypervisor flag /
+   `/sys/hypervisor/type` **even though those VMs have NO PCI NICs**
+   (`hv_netvsc`/`xen-netfront` are not on the PCI bus, so `enumeratePCINICs`
+   returns empty on them too). So VM detection MUST be consulted before the
+   PCI-empty heuristic below, or a Hyper-V/Xen VM running Docker would be
+   misclassified as a container and lose VM provisioning.
 3. **Bare metal:** none of the above → physical DMI. Optionally corroborate
    with `/sys/class/dmi/id/sys_vendor` + `product_name` (e.g. not "QEMU"/
-   "KVM"/"VMware"/"Bochs"), but the default-by-elimination is sufficient.
+   "KVM"/"VMware"/"Bochs"/"Microsoft Corporation"), but default-by-
+   elimination is sufficient.
 
-**Priority rationale:** container detection MUST outrank VM detection,
-because an incus/kvm-backed *VM* and an incus *container* both can show a
-hypervisor-ish ancestry; the container-specific signals (`/.dockerenv`,
-`detect-virt --container`, PCI-empty+veths) are unambiguous and must win.
-`systemd-detect-virt` semantics: `--container` reports only container techs;
-bare `systemd-detect-virt` reports VM techs first and falls through to
-container — so call `--container` explicitly for the container test and the
-bare form (or `vmHeuristic`) for the VM test, never conflate them.
+**The "PCI-empty + veths" signal is DEMOTED to a non-authoritative hint
+(AGY r1 Attack 3, FOLDED v2).** It may ONLY *corroborate* a container
+classification that step 1 already made on a positive signal, or — when NO
+positive container signal AND NO VM signal fires — bias the bare-metal
+default toward `container` *as a soft default the operator can override*. It
+must NEVER override a step-1 or step-2 result. A PCI-less VMBus/XenBus VM is
+caught by step 2 (`vmHeuristic`) before this hint is consulted.
+
+**Detector-is-advisory invariant (Claude SMR r1 fold 2):** the detector ONLY
+selects DEFAULTS. An explicit binding entry or an explicit `platform-profile`
+leaf ALWAYS wins, regardless of detected substrate; the detector never
+*gates* or *refuses* a binding. A misdetect is always correctable with one
+`set system platform-profile <x>` leaf.
+
+**`systemd-detect-virt` semantics:** `--container` reports only container
+techs; the bare form reports VM techs first and falls through to container —
+call `--container` explicitly for the container test and the bare form (or
+`vmHeuristic`) for the VM test, never conflate them.
 
 ### 6.3 Detector → defaults mapping
 
@@ -347,10 +408,12 @@ set system management reachability dhcp interface fxp0 # VM (status quo)
 set system management reachability delegate            # container
 ```
 
-- **`console-only`:** no fabricated fxp0, no bootstrap DHCP, empty protected
-  set is valid (the console is the lifeline). Already the #1956 §9.6 model;
-  the daemon must tolerate zero mgmt NICs (it already does on the
-  no-default-route path, `bootstrap.go:455-461`).
+- **`console-only`:** no *fabricated* fxp0, no bootstrap DHCP `.network`. The
+  protected set is NOT forced empty — the boot-recorded default-route
+  lifeline (if any) stays protected as the fail-safe (see the CRITICAL
+  FAIL-SAFE note below). An empty protected set is valid ONLY on a box with
+  no default route at boot (truly console-attached) — the
+  `detectLifelineInterface` returns-`ok=false` path (`bootstrap.go:455-461`).
 - **`dhcp interface <if>`:** today's behavior, made explicit. The lifeline is
   the named NIC; #1922 protects it and snapshots its addressing.
 - **`delegate`:** xpf keeps hands off the management plane entirely — the
@@ -361,16 +424,39 @@ set system management reachability delegate            # container
 **#1922 generalization:** SAFE-BOOTSTRAP's "lifeline" becomes
 *profile-driven*, not `fxp0`-hardcoded. `defaultMgmtInterface = "fxp0"`
 (`bootstrap.go:32`) stops being an unconditional default and becomes the
-`dhcp`-reachability default only. The protected set is whatever the
-`management` stanza declares (or empty for console/delegate). The
-commit-confirmed rollback + protected-set machinery is unchanged — it just
-takes its lifeline from the contract instead of a constant. **Safety guard
-(from #1956 §9.6):** an empty protected set is only safe when access truly is
-console/delegate; if an operator declares `console-only` but actually reaches
-the box over a data NIC via SSH, they lose the box on a bad commit. The rule:
-*protect the explicitly-declared mgmt NIC(s), or none — never auto-fabricate
-fxp0; make the console/delegate intent explicit and auditable so a typo
-fails loudly.*
+`dhcp`-reachability default only. The commit-confirmed rollback +
+protected-set machinery is unchanged — it just takes its *configured*
+lifeline from the contract instead of a constant.
+
+**CRITICAL FAIL-SAFE — the boot-recorded lifeline is ALWAYS protected,
+regardless of the declared contract (AGY r1 Attack 5, FOLDED v2).** The v1
+text said "the protected set is empty for console/delegate." That is a
+lockout regression and is WRONG. #1922 records the boot-time default-route
+NIC (`detectLifelineInterface` → `/etc/xpf/lifeline-interface`,
+`bootstrap.go:320,455-475`) precisely so the NIC the operator is *actually
+reaching the box on* is never downed/stripped — even by a buggy commit. The
+corrected rule:
+
+> The protected set is the UNION of (a) the boot-recorded default-route
+> lifeline (always, config-independent — #1922 invariant, unchanged) and
+> (b) any mgmt NIC the reachability contract explicitly declares. A
+> `console-only`/`delegate` contract MAY decline to *fabricate* an fxp0 and
+> MAY skip writing a bootstrap DHCP `.network`, but it can NEVER REMOVE the
+> boot-recorded lifeline from protection.
+
+This closes AGY's lockout chain: operator on a remote box over SSH → bad
+commit → the reconcile (`compiler_iface.go:1132-1188`) still sees the
+lifeline in the skip map (because #1922 recorded it at boot) → the NIC is
+NOT downed/stripped → SSH survives → `commit confirmed` rolls back cleanly.
+The ONLY case where the protected set is legitimately empty is a genuinely
+console-attached box with NO default route at boot — exactly the
+`detectLifelineInterface` returns-`ok=false` path
+(`bootstrap.go:455-461`), where there is no remote lifeline to lose.
+
+**Residual guard (from #1956 §9.6):** make the console/delegate intent
+explicit and auditable so a typo fails loudly; but safety no longer DEPENDS
+on the operator getting the contract right — the boot-recorded lifeline is
+the unconditional backstop.
 
 ---
 
@@ -460,10 +546,12 @@ unsound, the fallbacks:
 
 ## 11. Open questions for reviewers
 
-- **OQ-1:** Is the container discovery signal "`enumeratePCINICs` empty +
-  non-lo veths present" robust enough as the primary container tell, or does
-  it false-positive on a diskless/PCI-less appliance? (Mitigant: it only
-  *defaults* the profile; explicit `platform-profile` overrides.)
+- **OQ-1 (RESOLVED v2):** the "`enumeratePCINICs` empty + veths" tell DOES
+  false-positive on VMBus/XenBus VMs (AGY r1 Attack 3). Resolved by demoting
+  it to a non-authoritative hint behind positive container signals +
+  `vmHeuristic` (§6.2). Residual: confirm `vmHeuristic` fires on the target
+  Hyper-V/Xen kernels at /engineer (the cpuinfo hypervisor flag is reliable
+  on both).
 - **OQ-2:** Should `rename no` live on the `chassis device-map` entry, or is
   a container binding conceptually different enough to warrant its own stanza
   (`set system interface-alias …`)? The doc recommends reusing device-map
