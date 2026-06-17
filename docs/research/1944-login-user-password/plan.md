@@ -2,7 +2,7 @@
 
 - **Issue**: #1944
 - **Branch**: `research/1944-login-user-password`
-- **Revision**: r2 (addresses convergent r1 findings from Codex + AGY + Claude SMR)
+- **Revision**: r3 (addresses convergent r2 D2-logic findings from Codex + AGY + Claude SMR)
 - **Mode**: `/research` — STOPS at PLAN-READY. No PR, no production code.
 - **Base**: origin/master `004c6eaf4` — all code refs anchored to this base.
 
@@ -15,6 +15,8 @@ A password configured under `system login user <name>` never reaches
 
 - `system root-authentication encrypted-password <hash>` →
   `applyRootAuth` (`pkg/daemon/daemon_system.go:774`) runs
+  <!-- apply call site: daemon_apply.go:1027 -->
+
   `runCommandStdinTimeout(stdin, "chpasswd", "-e")` with stdin
   `root:<hash>`. ✅
 - `system login user <name>` → `applySystemLogin`
@@ -96,15 +98,17 @@ surfaced during #1922 SAFE-BOOTSTRAP / #1930.
 
 | File | Location | Role |
 |------|----------|------|
-| `pkg/config/types_system.go` | `LoginUser` @282; `RootAuthConfig` @130 | Add `EncryptedPassword string` to `LoginUser`. |
+| `pkg/config/types_system.go` | `LoginUser` @302; `RootAuthConfig` @151 | Add `EncryptedPassword string` to `LoginUser`. |
 | `pkg/config/compiler_system.go` | `case "authentication":` @94-102; root-auth @130-141 | Add `case "encrypted-password":` → `user.EncryptedPassword = nodeVal(authChild)`. |
-| `pkg/config/schema_system.go` | `login user` @66-71; `root-authentication` @31-36 | Give `authentication` under `login user` a children map (encrypted-password typed leaf + ssh-ed25519/rsa/dsa). Optionally (E1) add typed-leaf to root-auth `encrypted-password` @32. |
+| `pkg/config/schema_system.go` | `login user` @66-71; `root-authentication` @31-36 | Give `authentication` under `login user` a children map (encrypted-password typed leaf + ssh-ed25519/rsa/dsa). E1: add typed-leaf to root-auth `encrypted-password` @32. |
 | `pkg/config/schema_validators.go` | new `ValidateCryptHash` | crypt(3) hash validator (precise spec §5.5). |
 | `pkg/config/value_type.go` | `ValueType` enum + `Placeholder()` | Add `ValueCryptHash` + a `Placeholder()` arm. |
 | `pkg/config/schema_walk.go` | typed-leaf dispatch @40,89,298,331 | No change (consumes `valueType`+`validator`). |
-| `pkg/daemon/daemon_system.go` | `applySystemLogin` @656-721; `applyRootAuth` @774; `exec_timeout.go` `runCommandStdinTimeout` | Apply/lock password via `runCommandStdinTimeout(…, "chpasswd","-e")`, idempotent. |
+| `pkg/daemon/daemon_system.go` | `applySystemLogin` @656-721; `applyRootAuth` @774; `exec_timeout.go` `runCommandStdinTimeout` | Apply/lock password via `runCommandStdinTimeout(…, "chpasswd","-e")`, idempotent; new pure `passwordAction` decision helper + `currentShadowHash` (direct `/etc/shadow` read) + `isLockedShadow` + provenance marker. |
 | `pkg/configstore/check.go` | SchemaValidate gate @13 | No change (validator auto-runs through the gate). |
-| `pkg/config/parser_system_test.go` | `TestParseLoginClass` @1245; root-auth @319,727 | Add hierarchical + flat-set + validator coverage; update root fixtures if E1. |
+| `pkg/daemon/daemon_apply.go` | apply calls @1021 (`applySystemLogin`), @1027 (`applyRootAuth`) | No change (call sites; ordering unchanged). |
+| `pkg/config/compiler.go` | root-auth warning style @699-707 | Reference for the §5.8 "no auth method" warning. |
+| `pkg/config/parser_system_test.go` | `TestParseLoginClass` @1245; root-auth @320,727 | Add hierarchical + flat-set + validator coverage; update root fixtures (E1). |
 | docs (§10) | — | Module contract + hash-gen example. |
 
 ### Existing patterns confirmed
@@ -186,52 +190,75 @@ encrypted-password` (`schema_system.go:32`), so root + per-user share
 one validator + one error message and root's identical plaintext footgun
 is closed. This forces updating two root-auth test fixtures (§5.7).
 
-### 5.4 Apply + lock (idempotent, timeout-wrapped)
-Inside `applySystemLogin`, per user, after the user-exists/`useradd`
-block and alongside the SSH-key block. Helper `currentShadowHash(name)
-(string, bool)` returns the field-2 hash and an `ok` flag (false on any
-read error / no entry):
+### 5.4 Apply + lock (idempotent, timeout-wrapped, pure decision helper)
+The decision is factored into a **pure, table-testable helper** so the
+read-failure / lock / skip invariants are tested without exec'ing
+`chpasswd` (r2/S2-5, Codex M-4). The apply path is the thin exec shell.
+```go
+type pwAction int
+const ( pwNoop pwAction = iota; pwApply; pwLock )
+
+// passwordAction is pure. Fail-OPEN toward applying a real password;
+// fail-CLOSED (noop) on a read error in the lock branch so a transient
+// read error can never lock out an operator.
+func passwordAction(cur string, ok bool, desired string) pwAction {
+    if desired != "" {
+        if !ok || cur != desired { return pwApply } // apply on read-fail/miss/mismatch
+        return pwNoop
+    }
+    // desired == "": Path D2 lock.
+    if !ok { return pwNoop }            // do NOT lock on a read error (S2-1)
+    if isLockedShadow(cur) { return pwNoop }
+    return pwLock                       // empty (passwordless) OR a usable hash → lock
+}
+```
+Apply shell inside `applySystemLogin`, per user (pwLock gated on
+provenance — see below):
 ```go
 desired := user.EncryptedPassword
-if desired != "" {
-    // Apply only on (read fails) OR (read != desired) — fail-open toward applying.
-    cur, ok := currentShadowHash(user.Name)
-    if !ok || cur != desired {
-        stdin := strings.NewReader(user.Name + ":" + desired + "\n")
-        if out, err := runCommandStdinTimeout(stdin, "chpasswd", "-e"); err != nil {
-            slog.Warn("failed to set user password",
-                "user", user.Name, "err", err, "output", strings.TrimSpace(string(out)))
-        } else {
-            slog.Info("user encrypted-password applied", "user", user.Name)
-        }
+cur, ok := currentShadowHash(user.Name)
+switch passwordAction(cur, ok, desired) {
+case pwApply:
+    stdin := strings.NewReader(user.Name + ":" + desired + "\n")
+    if out, err := runCommandStdinTimeout(stdin, "chpasswd", "-e"); err != nil {
+        slog.Warn("failed to set user password", "user", user.Name,
+            "err", err, "output", strings.TrimSpace(string(out)))
+    } else {
+        slog.Info("user encrypted-password applied", "user", user.Name)
     }
-} else {
-    // Path D2: no password configured for a provisioned user → lock the
-    // account so a removed directive disables password login. Idempotent:
-    // only lock when not already locked (cur not present or not a `!`/`*`).
-    if cur, ok := currentShadowHash(user.Name); ok && !isLockedShadow(cur) {
-        stdin := strings.NewReader(user.Name + ":!\n")
-        if out, err := runCommandStdinTimeout(stdin, "chpasswd", "-e"); err != nil {
-            slog.Warn("failed to lock user password",
-                "user", user.Name, "err", err, "output", strings.TrimSpace(string(out)))
-        } else {
-            slog.Info("user password locked (no encrypted-password in config)",
-                "user", user.Name)
-        }
+case pwLock:
+    if !xpfProvisioned(user.Name) { break } // only lock accounts xpf created (S2-2)
+    stdin := strings.NewReader(user.Name + ":!\n")
+    if out, err := runCommandStdinTimeout(stdin, "chpasswd", "-e"); err != nil {
+        slog.Warn("failed to lock user password", "user", user.Name,
+            "err", err, "output", strings.TrimSpace(string(out)))
+    } else {
+        slog.Info("user password locked (no encrypted-password in config)",
+            "user", user.Name)
     }
 }
 ```
-- `currentShadowHash`: `getent shadow <user>` (daemon runs as root) and
-  split on `:` field 2; on error or absence return `("", false)`.
-- `isLockedShadow(s)`: `s == "" || s == "*" || s == "!" || s == "!!" ||
-  strings.HasPrefix(s,"!")` — already locked, no re-lock.
-- **Never** lock root and **never** touch a username not in
-  `cfg.System.Login.Users` (the lock branch is inside the per-config-user
-  loop, so it is structurally scoped to provisioned users only).
-- The lock uses `<user>:!` (chpasswd -e accepts `!` as the encrypted
-  field, writing a locked entry). Alternative impl: `usermod -L <user>` /
-  `passwd -l <user>` via `runCommandTimeout` — equivalent; pick one in
-  implementation (chpasswd keeps a single idiom).
+- **`currentShadowHash(name) (string,bool)`** reads `/etc/shadow`
+  **directly** (daemon is root), line-parses field 2, returns `("",false)`
+  on error/absence. NOT `getent shadow` — that shells out and is subject
+  to `nscd`/NSS caching → stale reads (r2/S2-4, AGY Finding-3).
+- **`isLockedShadow(s)`** returns true ONLY for an actually-locked field:
+  `s == "*" || strings.HasPrefix(s, "!")`. An **empty** field is
+  passwordless (`passwd -d`), the MOST permissive state — NOT locked, so
+  D2 locks it (r2/S2-1, Codex New-Fatal-1 + AGY Finding-1, found
+  independently). (`!!` and `!<hash>` match `HasPrefix("!")`.)
+- **Provenance** (r2/S2-2, Codex New-Fatal-2): on `useradd` success drop a
+  marker `/var/lib/xpf/provisioned-users/<name>` (dir 0700);
+  `xpfProvisioned(name)` checks it. `pwLock` runs ONLY for provisioned
+  accounts — never locks a pre-existing out-of-band account referenced in
+  config. `pwApply` does NOT require the marker (an explicitly-configured
+  password is the operator's intent regardless of who created the user).
+  This makes "provisioned-only" **enforced**, not asserted.
+- **Never** lock root (root is excluded from this loop at @668; handled by
+  `applyRootAuth`).
+- `<user>:!` via `chpasswd -e` produces a locked entry — verified live by
+  AGY in r2. (`usermod -L`/`passwd -l` equivalent; chpasswd keeps one
+  idiom.)
 
 ### 5.5 Validator (crypt(3) hash recognizer — precise)
 ```go
@@ -247,11 +274,19 @@ Accept (case-sensitive):
    least one `$` after the id (salt present). **`=` MUST be in the
    alphabet** (AGY #1 / S-5).
 2. **Legacy DES**: 13 chars from `[./0-9A-Za-z]` (optional leading `!`).
+3. **Explicit lock sentinels**: a bare `*`, `!`, or `!!` (r2/S2-3, AGY
+   Finding-2). These are the *intentional* Unix way to lock an account
+   and are the ONLY way to lock root via `root-authentication
+   encrypted-password "*"` (root is excluded from D2 auto-lock). Accepting
+   them is NOT the original F-1 footgun — that footgun was **plaintext**
+   being silently accepted, not a deliberate sentinel.
 Reject:
-- Anything not matching the above (plaintext: no `$`, wrong length).
-- A value that is **only** a sentinel: `*`, `!`, `!!`, empty (S-4/F-1).
-  These would lock the account under a directive meant to enable login;
-  to ship a locked account, prepend `!` to a real hash (§ case 1).
+- Anything not matching cases 1-3 — in particular **plaintext** (no `$`,
+  not a 13-char DES hash, not a bare sentinel). This is the real F-1
+  footgun: an operator pasting their cleartext password into
+  `encrypted-password`. Empty string is also rejected at the leaf (a
+  typed leaf requires a value; "no password" is expressed by omitting
+  the directive, which D2 handles).
 - `:` anywhere (would corrupt `chpasswd` stdin `user:hash`) — excluded
   by the alphabet; add an explicit negative test (S-7/M-2).
 - Control chars are independently hard-rejected at strict commit by the
@@ -287,8 +322,8 @@ string and the assertion.
 ### 5.8 Commit-check warning (optional, parity with root warning)
 A commit warning when a `login user` has neither `encrypted-password`
 nor `ssh-*` keys (account unreachable) mirrors the existing root warning
-style (compiler.go:641). **Decision**: include it — directly addresses
-the "can't log in" bug class. Low cost.
+style (compiler.go:699-707). **Decision**: include it — directly
+addresses the "can't log in" bug class. Low cost.
 
 ---
 
@@ -300,25 +335,32 @@ Byte-identical idiom to `applyRootAuth` *including the
 leak. A2 `usermod -p` rejected (hash visible in `/proc/<pid>/cmdline`).
 
 ### Path B — idempotency: **B1 skip-if-unchanged, fail-open** (decided)
-Read shadow via `getent shadow`; apply on read-fail / missing / mismatch
-(S-8/F-4 fix — never skip a needed apply). B2 (always-apply, like root
-today) is the safe fallback if the read proves flaky in smoke.
+Read `/etc/shadow` **directly** (not `getent`/NSS — r2/S2-4); apply on
+read-fail / missing / mismatch (S-8/F-4 — never skip a needed apply).
+Decision encapsulated in the pure `passwordAction` helper (§5.4). B2
+(always-apply, like root today) is the safe fallback if the direct read
+proves problematic in smoke.
 
 ### Path C — validation strictness: **C1 permissive recognizer** (decided)
-Accept known crypt id formats + DES + optional `!`-prefix; reject
-plaintext + bare sentinels (§5.5). C2 strict per-id structural parse
-rejected (brittle across libc / yescrypt params — would reject valid
-hashes). C3 no validation rejected (reproduces the footgun).
+Accept known crypt id formats + DES + optional `!`-prefix + **bare lock
+sentinels `*`/`!`/`!!`** (r2/S2-3); reject **plaintext** (the real
+footgun — §5.5). C2 strict per-id structural parse rejected (brittle
+across libc / yescrypt params). C3 no validation rejected (reproduces
+the plaintext footgun).
 
 ### Path D — directive removal: **D2 lock the account** (decided — flipped from r1)
 Removing `encrypted-password` from a configured user locks password
-login (`<user>:!`), idempotently, provisioned-users-only, never root.
-D1 (do nothing) **rejected** — orphans a live credential outside config
-control (Codex F-2 + AGY #2 + SMR S-3, three-way convergence). D3
-(passwordless) rejected (dangerous). Note: this makes the *password*
-attribute declarative while SSH-keys/sudoers remain additive — a
-deliberate, documented asymmetry (a live password is a higher-severity
-orphan than a stale key).
+login (`<user>:!`), idempotently, **only for xpf-provisioned accounts**
+(enforced by the `/var/lib/xpf/provisioned-users/<name>` marker — r2/S2-2),
+never root, and **never on a shadow read error** (r2/S2-1 — `passwordAction`
+returns `pwNoop` when `ok==false`). D1 (do nothing) **rejected** — orphans
+a live credential outside config control (Codex F-2 + AGY #2 + SMR S-3,
+three-way convergence). D3 (passwordless) rejected. This makes the
+*password* attribute declarative while SSH-keys/sudoers remain additive
+— a deliberate, documented asymmetry (a live password is a
+higher-severity orphan than a stale key). An operator can also lock
+explicitly via `encrypted-password "*"` (Path C accepts the sentinel)
+without removing the directive.
 
 ### Path E — root-auth parity: **E1 share the validator** (decided)
 One validator + consistent errors; closes root's identical plaintext
@@ -340,17 +382,31 @@ only) rejected — leaves root unvalidated for no real saving.
    flat-set compiled output equals the hierarchical compiled output.
 3. **Validator table test** (`ValidateCryptHash`):
    - Accept: `$6$salt$hash`, `$6$rounds=656000$salt$hash` (the `=` case),
-     `$y$j9T$…`, `$2b$…`, 13-char DES, `!$6$salt$hash` (locked-restorable).
-   - Reject: `plaintext`, ``(empty), `*`, `!`, `!!`, `$99$bogus`, `$6$`
-     (no salt body), `$6$salt:hash` (colon), `$6$ab cd` (space).
+     `$y$j9T$…`, `$2b$…`, 13-char DES, `!$6$salt$hash` (locked-restorable),
+     **bare `*`, `!`, `!!`** (explicit lock — r2/S2-3).
+   - Reject: `plaintext`, ``(empty), `$99$bogus`, `$6$` (no salt body),
+     `$6$salt:hash` (colon), `$6$ab cd` (space).
 4. **SchemaValidate / commit-check**: a config with a plaintext per-user
    `encrypted-password` fails `SchemaValidate` (hard gate); a valid hash
-   passes. Mirror for root-auth (E1).
+   passes. Mirror for root-auth (E1) — including that
+   `root-authentication encrypted-password "*"` (lock root) is accepted.
 5. **Root-auth E1 fixtures**: update `$6$abc123`/`$6$abc` to well-formed
    hashes; assertions follow (§5.7).
-6. **Daemon apply logic** (unit-testable parts): `isLockedShadow`
-   table test; `currentShadowHash` parse (field-2 split) given a sample
-   `getent shadow` line. (`chpasswd` exec itself is integration/smoke.)
+6. **`passwordAction` pure decision table test** (r2/S2-5, Codex M-4) —
+   the core invariant coverage, no exec:
+   - desired set, `ok=true`, cur != desired → `pwApply`.
+   - desired set, `ok=true`, cur == desired → `pwNoop`.
+   - desired set, `ok=false` (read fail) → `pwApply` (fail-open).
+   - desired empty, `ok=true`, cur == "" (passwordless) → `pwLock` (S2-1).
+   - desired empty, `ok=true`, cur == "$6$…" (usable hash) → `pwLock`.
+   - desired empty, `ok=true`, cur == "!"/"*"/"!$6$…" (locked) → `pwNoop`.
+   - desired empty, `ok=false` (read fail) → `pwNoop` (no transient-error
+     lockout).
+7. **`isLockedShadow` table test**: `""`→false, `"*"`→true, `"!"`→true,
+   `"!!"`→true, `"!$6$x"`→true, `"$6$x"`→false.
+8. **`currentShadowHash` parse**: given a sample `/etc/shadow` line, returns
+   field-2 + ok; missing user → `("",false)`. (`chpasswd` exec +
+   provenance marker IO are integration/smoke.)
 
 ### Smoke (loss userspace cluster — confirmatory, optional)
 Control-plane-only change, no dataplane/forwarding impact → no perf
@@ -358,14 +414,19 @@ smoke. Minimal live check:
 1. `make cluster-deploy`; `set system login user op class operator
    authentication encrypted-password "<known $6$ hash for 'test123'>"`;
    commit.
-2. `cluster-ssh` → `getent shadow op` shows the hash in field 2.
+2. `cluster-ssh` → `getent shadow op` shows the hash in field 2; marker
+   `/var/lib/xpf/provisioned-users/op` exists.
 3. Console / `su - op`: authenticate with `test123` — succeeds.
 4. Re-commit unchanged → journal shows **no** "user encrypted-password
    applied" (idempotency B1).
 5. **D2**: delete the `encrypted-password` directive, commit →
    `getent shadow op` field 2 is `!` (locked); console password login
    for `op` now fails; SSH-key + sudo still work.
-6. Root login + SSH-key login + sudo unchanged (no regression).
+6. **Provenance**: manually create an out-of-band account `extuser` with
+   a password (no marker), then add `set system login user extuser` (no
+   encrypted-password), commit → `extuser`'s password is **untouched**
+   (no marker → no D2 lock).
+7. Root login + SSH-key login + sudo unchanged (no regression).
 
 `make test` is the gate; smoke is confirmatory per reviewer call.
 
@@ -377,32 +438,36 @@ smoke. Minimal live check:
   Mitigated by permissive recognizer (C1) + `=`/`rounds=` coverage +
   the glibc-id-list review check + boot-path downgrade (§5.6 — a
   persisted hash never bricks boot).
-- **Shadow read (B1) misbehaves** → fail-open applies (harmless re-apply)
-  rather than skips; D2 lock branch also reads — same fail-open posture
-  (on read fail, `ok==false` → do NOT lock, avoiding an accidental
-  lockout from a transient read error). Smoke 4/5 verify.
-- **Accidental console lockout via D2** → only locks users *in config*
-  whose `encrypted-password` is absent; an operator relying on a console
-  password keeps it as long as the directive is present; SSH-key + sudo
-  are unaffected by the lock. The lock is reversible (re-add the
-  directive). Documented (§10).
+- **Shadow read (B1) misbehaves** → `passwordAction` set-branch returns
+  `pwApply` (harmless re-apply) rather than skipping; lock branch returns
+  `pwNoop` on `ok==false`, so a transient read error can NEVER lock out an
+  operator (the asymmetric fail-open/fail-closed posture is the central
+  safety invariant, table-tested §7.6). Direct `/etc/shadow` read avoids
+  the NSS-cache staleness `getent` would introduce.
+- **Accidental console lockout via D2** → only locks **xpf-provisioned**
+  users (marker-gated) whose `encrypted-password` is absent; an operator
+  relying on a console password keeps it as long as the directive is
+  present; SSH-key + sudo are unaffected; out-of-band accounts are never
+  touched. The lock is reversible (re-add the directive). Documented
+  (§10).
 - Rollback: revert the commit; no migration, no schema version bump, no
   map/wire change. Existing `/etc/shadow` entries set before the revert
   remain as the OS left them.
 
 ---
 
-## 9. Open Questions for Reviewers (r2 — narrowed)
+## 9. Open Questions for Reviewers (r3 — narrowed)
 
-1. **D2 lock mechanism**: `chpasswd -e` with `<user>:!` vs
-   `usermod -L`/`passwd -l`. Plan leans chpasswd (single idiom). OK?
-2. **Locked-restorable form**: accept leading `!`/`!!` on a real hash
-   (§5.5 case 1)? Plan says yes; confirm it's wanted, not scope creep.
-3. **Validator id superset**: accept `$7$` (scrypt) + `$gy$` in addition
+1. **Provenance store**: marker file `/var/lib/xpf/provisioned-users/<name>`
+   vs an `/etc/shadow` comment vs reusing the sudoers file we already own.
+   Plan leans the marker dir (survives reboot, explicit, no parse of
+   another file). OK, or prefer a different provenance store?
+2. **Validator id superset**: accept `$7$` (scrypt) + `$gy$` in addition
    to the universal set? Plan says accept (OS is final authority).
-4. **D2 scope**: lock-on-removal applies only to users still in config.
-   Confirm we are NOT taking on full deprovisioning (`userdel`) here.
-5. **Commit warning** (§5.8) for users with no auth method at all —
+3. **D2 scope**: lock-on-removal applies only to xpf-provisioned users
+   still in config. Confirm we are NOT taking on full deprovisioning
+   (`userdel`) here, and that out-of-band accounts are left alone.
+4. **Commit warning** (§5.8) for users with no auth method at all —
    include? Plan says yes.
 
 ## 10. Documentation Updates
@@ -436,4 +501,5 @@ AGY all PLAN-READY on the final revision.
 | Round | Claude SMR | Codex | AGY |
 |-------|-----------|-------|-----|
 | r1    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
-| r2    | pending | pending | pending |
+| r2    | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK | PLAN-NEEDS-WORK |
+| r3    | pending | pending | pending |
