@@ -319,6 +319,44 @@ mis-resolve RETH virtual MACs (r1 Codex F2). The `Status` column surfaces
   name is bindable), but em0's ADDRESS still comes from the cluster stanza.
 - **9.5** PCI-topology-path key (robust to reslot-of-others): defer to a
   follow-up; PCI-addr + MAC fallback covers the common bare-metal case.
+- **9.6 (operator input, 2026-06-17) — fxp0 is NOT mandatory in bare-metal /
+  device-map mode; console IS the lifeline.** Today `assignName(idx=0)`
+  hardcodes the first enumerated NIC to `fxp0` (`linksetup.go:211`),
+  `writeBootstrapFxp0Network()` unconditionally DHCPs it at startup
+  (`linksetup.go:90,293-318`), and `defaultMgmtInterface = "fxp0"`
+  (`bootstrap.go:31`) keeps it in the #1922 protected set unless an explicit
+  `management-interface` leaf narrows it off. That whole construct is a
+  vSRX/appliance artifact: it assumes an out-of-band DHCP management network.
+  On standalone bare metal the operator is on the **console** (serial / IPMI
+  SoL / local keyboard), so xpf must NOT fabricate an `fxp0` and must NOT
+  grab+DHCP a NIC for a management plane the operator never asked for.
+  **Design consequence for device-map mode:**
+  - **No auto-`fxp0`.** In device-map mode `enumerateAndRenameInterfaces`
+    does NOT assign idx-0 → `fxp0`; logical names come only from the map.
+    `fxp0` is bindable like any other name iff the operator explicitly maps
+    a NIC to it (they want a dedicated mgmt port) — never implicit.
+  - **No bootstrap DHCP** `.network` unless a NIC is explicitly mapped to a
+    management role. Skip `writeBootstrapFxp0Network` in device-map mode.
+  - **Console-as-lifeline.** The #1922 SAFE-BOOTSTRAP "reachable before
+    config" invariant is satisfied by the console on bare metal, so the
+    protected-set/lifeline must tolerate **zero management NICs** (empty
+    protected set is valid — the console is the lifeline) rather than
+    defaulting to a fabricated `fxp0`. If the operator DOES map a mgmt NIC,
+    it gets the #1922 lifeline protection (and the lifeline-resolver
+    running-MAC vs permanent-MAC blocker from §14 applies to it). The
+    daemon must distinguish "console-access bare metal, no mgmt NIC wanted"
+    (don't force a lifeline NIC) from the appliance "fxp0 lifeline expected"
+    case — keyed off device-map mode (and/or an explicit
+    `system management console-only`-style assertion to make the intent
+    unambiguous + auditable).
+  - **Safety caveat to settle at /engineer:** an empty protected set is only
+    safe when access truly is console-only; if an operator maps a data NIC
+    they also SSH over, that NIC should still be lifeline-protected. So the
+    rule is "protect the explicitly-mapped management NIC(s), or none —
+    never auto-fabricate fxp0," with the console-only case made explicit so
+    a typo'd/empty map on a remote-only box fails loudly rather than
+    silently stranding the operator. This sharpens OQ-15.1 (HA validation)
+    and the §11 lifeline-preservation PLAN-KILL guard.
 
 ## 10. Migration / rollout
 
