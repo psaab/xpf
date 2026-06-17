@@ -3,6 +3,12 @@
 RESEARCH-ONLY. Plan-of-action for manual approval. No code in this branch
 beyond this doc + reviewer docs. Base: origin/master @ 62c1ddc66.
 
+**v2 (post-r1 review).** r1 reviewers (Codex + AGY) both returned
+**PLAN-NEEDS-MAJOR**; Claude SMR returned PLAN-READY-with-minors. The
+reviews converge on five blocker-class gaps the v1 plan glossed. v2 folds
+all of them. The full r1 disposition + resolutions is §13; the section
+bodies below are updated in place. Read §13 first for what changed and why.
+
 ## 0. Status / TL;DR recommendation
 
 **Recommendation: ship the narrow MVP first — a stable-identity managed
@@ -20,12 +26,21 @@ allowlist — not the full positional-replacement device-map.**
   bearing half.** The crux for bare metal is "leave everything not named
   here ENTIRELY alone" (never renamed, never `always-down`). The explicit
   `host-nic → ge-name` binding falls out of the same stanza for free.
-- **MVP scope:** an opt-in `set chassis device-map` stanza that (a) replaces
-  positional enumeration for ONLY the named NICs and (b) flips the
-  bring-down-unmanaged reconcile from "claim everything" to "claim only
-  mapped + protected". Defer runtime-identity-change detection,
-  auto-discovery/`show device-map candidates`, and PCI-topology-path keys to
-  follow-ups.
+- **MVP scope (v2, the irreducible set — r1 proved these cannot be
+  decoupled):** an opt-in `set chassis device-map` stanza that
+  (a) replaces positional enumeration for ONLY the named NICs **on both the
+  normal-boot AND bootstrap-exit rename paths**; (b) resolves identity with a
+  **dedicated permanent-MAC fallback resolver (NOT the lifeline resolver,
+  which stores the running MAC)** and **topology-change detection** that
+  rejects an ambiguous/moved binding rather than silently misbinding;
+  (c) **excludes RETH members from the MAC-fallback path** (they keep
+  `OriginalName=` matching); (d) flips the bring-down-unmanaged reconcile to
+  "claim only mapped + #1922-protected" with **explicit managed→unmapped
+  stale-`.link` migration semantics** so a NIC moved to `leave-alone` is not
+  silently un-renamed by `networkd.Apply`'s stale-file sweep; and (e) the
+  `unmapped-interface-policy` knob. Defer runtime hot-identity-change
+  detection, `show device-map candidates` (recommended to promote — §13),
+  and PCI-topology-path keys to follow-ups.
 
 The full "device-map replaces all positional naming everywhere" is NOT
 warranted as a first cut — see §11 PLAN-KILL/scope-cut.
@@ -90,10 +105,13 @@ not assume the cluster slot layout.
 | Externally-managed skip | `networkd.go` `findExternallyManaged` | unmanaged NICs that have a non-`10-xpf-` `.network` are left alone |
 
 **Key existing identity infrastructure to reuse, not reinvent:**
-`extractPCIAddr` (`linksetup.go:192`), `pciAddrForInterface`
-(`bootstrap.go:347`), `resolveLifelineCurrentName` (`bootstrap.go:368`,
-PCI-first then MAC fallback — exactly the resolution ladder the device-map
-needs), and the durable record reader/writer (`bootstrap.go:250-304`).
+`extractPCIAddr` (`linksetup.go:192`) and `pciAddrForInterface`
+(`bootstrap.go:347`) for the PCI key, and the durable record reader/writer
+pattern (`bootstrap.go:250-304`). NOTE (r1 Codex F2, see §13 R-3):
+`resolveLifelineCurrentName` (`bootstrap.go:368`) matches the RUNNING MAC, so
+its PCI-first-then-MAC ladder is the right SHAPE but its MAC leg must NOT be
+reused verbatim — the device-map's MAC fallback needs a new permanent-MAC
+(`PermHWAddr`) resolver to avoid binding RETH virtual MACs.
 
 ## 3. Identity-key options + failure modes
 
@@ -270,8 +288,13 @@ show chassis device-map
   ge-0/0/4   pci 0000:0a:00.0      —                 UNBOUND (no NIC at PCI addr)
   fxp0       pci 0000:05:00.0      enp5s0 → fxp0     bound (protected: lifeline)
 ```
-Add an operational leaf in `pkg/cmdtree/tree.go` + a gRPC RPC; the resolver
-reuses `pciAddrForInterface` / a generalized `resolveLifelineCurrentName`.
+Add an operational leaf in `pkg/cmdtree/tree.go` + a gRPC RPC. The resolver
+reuses `pciAddrForInterface` for the PCI key but uses a NEW dedicated
+permanent-MAC resolver (built on `getPermAddr`-style `PermHWAddr` reads), NOT
+`resolveLifelineCurrentName` — that function matches the RUNNING MAC and would
+mis-resolve RETH virtual MACs (r1 Codex F2). The `Status` column surfaces
+`bound` / `UNBOUND` / `bound (via MAC fallback — PCI moved, re-pin)` /
+`AMBIGUOUS (topology changed — refused)`.
 
 ## 9. Open design sub-questions (call out, don't pre-decide all)
 
@@ -346,3 +369,143 @@ recommendation.
 - `pkg/cmdtree/tree.go` + gRPC — `show chassis device-map`.
 - Docs: `docs/config-schema.md`, a new bare-metal operator doc, CLAUDE.md
   interface-management section.
+
+## 13. r1 review convergence + v2 resolutions
+
+Both companion reviewers returned **PLAN-NEEDS-MAJOR**; Claude SMR returned
+PLAN-READY-with-minors. The MAJOR verdicts are well-founded — every finding
+below was re-verified against code by the planner before folding (the two
+load-bearing ones, F3 and F4, were read end-to-end at the cited lines). v2
+adopts all of them; none are refuted.
+
+### R-1 (Codex Critical F1 + SMR MINOR-2 + AGY HIGH-3): PCI BDF is not durable on slot/BIOS/VF change
+PCI bus address survives a kernel netdev rename only when the PCI topology is
+unchanged (`linksetup.go:150-167,192`). It does NOT survive slot migration,
+BIOS bus renumber, PCI bridge add/remove, or SR-IOV VF re-creation
+(`sriov_numvfs` reorders VF BDFs — directly relevant: the loss cluster
+dataplane NICs are mlx5 VFs, CLAUDE.md).
+**Resolution.** Keep PCI as the PRIMARY key (it is genuinely durable for
+onboard/PF NICs, the dominant bare-metal target) but add **topology-change
+detection**: on resolve, if the PCI key matches a NIC whose
+permanent-MAC ALSO matches the entry's recorded MAC → bind (high confidence);
+if PCI matches but MAC mismatches → **REFUSE the binding, leave the logical
+name unbound, and log loudly** (a card was swapped into that slot — silent
+hijack, AGY HIGH-3). If PCI misses but the permanent-MAC matches some NIC →
+bind via fallback and flag "PCI moved, re-pin" in `show`. For VFs the operator
+is steered to MAC-primary via an explicit per-entry key-order override
+(`set chassis device-map interface ge-0/0/2 key mac`). The stability table
+(§3) is corrected to say PCI is durable for PF/onboard, weaker for VFs.
+
+### R-2 (Codex Critical F1 + AGY HIGH-2/Finding-2): stale `.link` files misbind before the daemon runs
+systemd-udev applies `.link` `OriginalName=` matches at uevent time, BEFORE
+xpfd runs (`linksetup.go:270`, `networkd.go:372`). A stale `.link` from a prior
+topology can rename the wrong NIC before the device-map resolver gets control.
+**Resolution.** In device-map mode the daemon MUST, at start (and on every
+apply that touches the map): enumerate present NICs, resolve each map entry to
+its CURRENT kernel name by PCI/perm-MAC, and **scrub-then-rewrite** every
+`10-xpf-*.link` so the on-disk `.link` set exactly matches the resolved
+bindings — no orphaned rename rules survive. This is an explicit MVP
+deliverable, not prose.
+
+### R-3 (Codex HIGH F2): the lifeline resolver matches the RUNNING MAC — do not reuse it for the MAC fallback
+`lifelineRecord` stores `link.Attrs().HardwareAddr` (running MAC,
+`bootstrap.go:357`) and `resolveLifelineCurrentName` matches the running MAC
+(`bootstrap.go:387`). RETH members run the virtual MAC `02:bf:72:...` when the
+daemon is up. A device-map MAC fallback built on this would bind the wrong
+entry.
+**Resolution.** The device-map MAC fallback uses the **permanent/factory MAC**
+(`PermHWAddr`, the basis of `getPermAddr` at `compiler.go:1610`), via a NEW
+resolver with explicit empty/duplicate handling (some NICs/VFs return no
+`PermHWAddr` → that entry cannot use MAC fallback, flagged at commit). The plan
+text that said "reuse the lifeline resolver" is wrong and is struck; the PCI
+path still reuses `pciAddrForInterface`.
+
+### R-4 (Codex HIGH F3, verified at daemon_run.go:1557): bootstrap-exit also runs the positional rename
+`runBootstrapExitStartup` calls `enumerateAndRenameInterfaces` at
+`daemon_run.go:1557` on the FIRST real commit — exactly when a device-map
+first appears. v1 only branched the normal-boot site (`daemon_run.go:345`).
+**Resolution.** BOTH call sites (`:345` and `:1557`) branch to
+`enumerateAndRenameMapped` when the active config carries a device-map. This is
+an explicit MVP deliverable. Without it, day-0 bare metal claims every NIC
+positionally before the map ever applies.
+
+### R-5 (Codex HIGH F4, verified at networkd.go:133-145): `leave-alone` is not just a compiler guard — `networkd.Apply` sweeps stale `10-xpf-*`
+`networkd.Apply` globs `10-xpf-*` and `os.Remove`s any file not in `expected`
+(`networkd.go:133-145`), then reloads. A NIC that WAS managed (has a `.link`)
+and is later moved to `leave-alone` would have its `.link` removed → reload
+un-renames it. "Never renamed/never touched" only holds for never-managed NICs.
+**Resolution.** Define explicit **managed→unmapped migration semantics**: when
+a previously-managed NIC transitions to `leave-alone`, the daemon performs a
+one-shot controlled teardown (remove the `.link`, rename the kernel device back
+to a stable predictable name, drop xpf `.network`) and thereafter leaves it
+alone — rather than letting `Apply` half-clean it. The plan does NOT promise to
+restore the operator's prior addressing on that NIC (it cannot know it); the
+contract is "xpf stops managing it cleanly", documented for the operator.
+
+### R-6 (Codex Medium F5): RETH members must stay on `OriginalName=`, excluded from MAC fallback
+A RETH member's MAC alternates physical↔virtual; a MAC-fallback binding would
+be non-deterministic and silently break HA.
+**Resolution.** Device-map entries whose logical name resolves to a RETH member
+(`RedundantParent` set / `redundant-ether-options`) are restricted to the PCI
+key and keep `.link` `OriginalName=` matching exactly as today
+(`compiler_iface.go:836-843`). Commit-check REJECTS a `key mac` override on a
+RETH member.
+
+### R-7 (Codex Medium F6 + AGY Medium-5): schema/compiler shape + empty-tree-non-nil
+`compileChassis` returns early when there is no `cluster` node
+(`compiler_system.go:879`) → a sibling `device-map` is silently dropped;
+`schema_chassis.go`/`types_chassis.go` carry only `Cluster`; and an empty
+`chassis device-map {}` block compiles to a non-nil `*DeviceMapConfig` (the
+empty-tree-compiles-non-nil bug class #1922 hit, AGY Medium-5). Named-instance
+identity tokens need `keyValueType/keyValidator`, not leaf `valueType`
+(`docs/config-schema.md:116`).
+**Resolution.** (a) `compileChassis` must compile the `device-map` subtree
+INDEPENDENTLY of `cluster` (restructure the early-return). (b) Device-map mode
+is selected on `len(Entries) > 0`, NOT `DeviceMap != nil` — an empty block is
+treated as absent (positional mode), closing the silent-all-unconfigured trap.
+(c) The `interface <name>` instance slot uses `keyValueType`/`keyValidator` per
+the doc. All three are explicit MVP deliverables.
+
+### R-8 (AGY CRITICAL Finding-1 + Codex Medium F7): the deferred-reboot lockout + failure-mode validators
+AGY's headline: renames run only at boot/bootstrap-exit, but the compiler
+reconcile runs on EVERY commit. An operator who edits/removes the map sees a
+clean runtime commit (names don't change live) but a DIFFERENT, possibly
+locked-out, interface layout on the NEXT reboot — and `commit confirmed`'s
+rollback timer has long expired by then.
+**Resolution.** Add a **commit-time pre-flight** for any commit that changes
+the device-map: resolve the proposed map against CURRENTLY-present NICs and
+**reject (or require an explicit `commit force`) any change that would, on next
+boot, leave the management/lifeline NIC or any in-config revenue NIC unbound or
+re-bound to a different port**. This converts the latent reboot-time lockout
+into a commit-time error while the operator is still connected. Plus the
+explicit validators Codex F7 lists: duplicate-PCI/duplicate-name → FATAL;
+missing NIC → WARN + unbound (never silent positional fall-through);
+RETH `key mac` → FATAL (R-6). The #1922 lifeline remains the independent
+backstop (it runs config-independent, before any map — so even a bad map
+cannot strand the recorded lifeline NIC).
+
+### R-9 (SMR MINOR-1): policy resolution across empty/rolled-back/bootstrap-exit transients
+On a rolled-back/empty active config, `unmapped-interface-policy` is absent.
+**Resolution (decision):** the bring-down behavior on an absent device-map is
+**positional `manage-down` (today's behavior)** — i.e. losing the map reverts
+to claim-all, which is SAFE because (a) the #1922 protected set still shields
+mgmt and (b) reverting to positional is the documented "no map = legacy mode"
+contract. This is stated explicitly rather than left ambiguous. Combined with
+R-8's commit pre-flight, an operator cannot accidentally roll back INTO a
+claim-all that downs a revenue NIC they were reachable through without a
+commit-time warning.
+
+### Promoted from "defer" to MVP (SMR N2)
+`show chassis device-map candidates` (enumerate every PCI NIC + addr +
+perm-MAC + current name) is promoted into the MVP. It is cheap (reuses
+`enumeratePCINICs`) and it is the operator's only safe way to author a correct
+map; without it the "missing NIC" warning becomes the common case.
+
+### Net effect on scope
+The MVP is now the **six-part irreducible bundle** (§0 bullet (a)-(e) +
+candidates helper + R-8 commit pre-flight). This is larger than v1's framing
+but it is the smallest version that is actually SAFE — r1 proved the smaller
+cut reproduces the hazard it set out to remove. The PLAN-KILL criterion (§11)
+still stands: if reviewers judge even this bundle premature, the floor is the
+F2-only fix (`unmapped-interface-policy` as a guard with NO per-NIC pinning),
+accepting that F1 (unstable names) stays unsolved.
