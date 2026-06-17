@@ -1,6 +1,8 @@
 # #1920 — poll_descriptor/mod.rs over the 2000-LOC modularity threshold
 
-**Revision:** v1 (research draft, pre-review)
+**Revision:** v2 (post round-1: Codex PLAN-KILL-CORRECT, AGY NEEDS-WORK
+refuted on the code, Claude SMR PLAN-KILL-CORRECT — applied Codex's two
+factual corrections)
 **Branch:** `research/1920-poll-descriptor-split` (off origin/master `62c1ddc66`)
 **Status:** RESEARCH — PLAN-KILL is an explicitly-allowed outcome.
 **Target:** `userspace-dp/src/afxdp/poll_descriptor/mod.rs`, 3122 file lines /
@@ -51,14 +53,25 @@ this is new self-contained cold surface that the #1697 mechanism could lift.
 ## 2. The perf claim — REFUTED, dropped
 
 The audit's **"reduces L1-i thrashing"** claim is **false as stated and is
-dropped from this plan.** Splitting `.rs` files *within the same crate* does
-not by itself change codegen: LLVM inlines across modules in the same crate/CGU
-under the project's release profile. Module boundaries are a source-organization
-construct, not a codegen boundary. The only mechanisms that move bytes out of
-the hot loop's I-cache footprint are inlining *hints*
-(`#[inline]`/`#[inline(always)]`/`#[inline(never)]` + `#[cold]`), and those are
-applied to *functions*, independent of which file the function lives in. #1697
-already applied that discipline to the cold exception bodies.
+dropped from this plan.** Splitting `.rs` files *within the same crate* does not
+by itself change codegen. Module boundaries are a source-organization construct,
+not a codegen boundary: the function `poll_binding_process_descriptor` compiles
+to the same symbol whatever file it lives in. The only mechanism that moves
+bytes out of the hot loop's I-cache footprint is the inlining *hint*
+`#[cold] #[inline(never)]` applied to a genuinely-cold *function* — which is
+**orthogonal to a file split** (you can apply it without moving the file, and
+moving the file does nothing without it). #1697 already applied that discipline
+to the cold exception bodies. So the audit's "L1-i" rationale is a non-sequitur:
+the file split is not the lever.
+
+(Round-1 precision, Codex: do NOT argue this from "same CGU / LLVM inlines
+across modules." The production profile has **no `[profile.release]`** in
+`userspace-dp/Cargo.toml` and no workspace-root profile, so `codegen-units`
+is the default **16** and LTO is **off** — an unannotated cross-module call is
+NOT guaranteed to inline. AGY's round-1 counter-claim that `codegen-units=1`
+forces thinLTO is factually wrong; verified against `userspace-dp/Cargo.toml`
+and `Makefile:44`. The refutation stands on the orthogonality argument above,
+not on any CGU-count assumption.)
 
 Therefore this plan makes **no perf claim**. Any extraction here is
 **modularity-only** and must be proven **codegen-NEUTRAL** (§7). This is the
@@ -125,36 +138,44 @@ falls through, so the caller's epilogue must preserve it — not a clean
 `flow_cache_install_failed` set 1000+ lines earlier — the cache decision is not
 local to the cache block. **Nothing cleanly liftable remains.**
 
-## 4. The only honest non-KILL path: narrow #1697-style cold extraction
+## 4. The candidate non-KILL path — evaluated and BLOCKED
 
-If reviewers want a non-KILL outcome, the *only* defensible one is a repeat of
-the #1697 mechanism on **NEW cold surface added since #1697** — NOT a hot-loop
-split. One candidate exists:
+The `/research` framing asked whether a #1697-style cold extraction of **NEW
+cold surface added since #1697** (NOT a hot-loop split) could be a non-KILL
+Path B. Two candidates were proposed and BOTH are blocked on the actual source
+(adjudicated round-1: AGY claimed both liftable; Codex + Claude SMR refuted both
+by reading the code):
 
-- **The MissingNeighbor arm (≈ lines 2397–2620, ~220 LOC, #1651/#1769/#1771/
-  #1912).** This is a cold per-packet path (only runs on a forwarding decision
-  whose next-hop neighbor is unresolved — i.e. session-miss + ARP/NDP-pending).
-  It does the dead-host fast-fail gate, OUTER-hop neigh keying, kernel ARP
-  probe, #1769 resolver enqueue (throttled), and the #1771 §2.2 per-key
-  pending_neigh buffer admission, then `continue`. It already calls the
-  `try_enqueue_resolver` module-local helper (lines 80–110).
+- **The MissingNeighbor arm (#1651/#1769/#1771/#1912) — BLOCKED.** The arm is a
+  `match` arm opening at **line 2242** (not 2397; AGY's narrow 2397–2620 slice
+  is hand-picked to start *after* the coupling). At the arm top it computes
+  `(from_zone_id, to_zone_id)` (2248+) and runs the #1913 policy-deny gate which
+  **writes `decision.resolution.disposition = PolicyDenied` at 2374–2375** then
+  `continue` at 2388 — a write to a §3.2 tail-read local. The full arm
+  (2242–2981, ~740 LOC) is **non-terminal**: it falls through into the shared
+  disposition/reinject tail that reads `decision.resolution` (2989), `meta`
+  (2991), re-checks `decision.resolution.disposition` (3006), and feeds
+  `meta`/`decision` into `maybe_reinject_slow_path_from_frame` (3013–3014), with
+  `recycle_now=false` set mid-arm (2959). Extracting it requires a return-value
+  redesign that re-dispatches the disposition + recycle state — that is
+  logic-bearing restructuring, NOT code-motion. BLOCKED.
 
-  **Liftability assessment (must be proven, not assumed, in the engineer
-  phase):** the arm reads `decision`, `meta`, `binding.pending_neigh`,
-  `binding.resolver_enqueue_throttle`, `worker_ctx`, and computes its own locals
-  (`next_hop`, `neigh_if`, `outer_if_distinct`, `tunnel_marked`,
-  `throttle_key`). It is `continue`-terminated (it does not fall through to the
-  forward/reinject tail on the buffered path). **IF** its only outward write is
-  through `binding` sub-fields + scratch (not the `decision`/`flow_cache_*`
-  locals read by the tail), it is a `#[cold] #[inline(never)]` extraction
-  candidate in the #1697 mold. **IF it writes any of the §3.2 tail-read locals,
-  it is BLOCKED** — and then there is no non-KILL path and the plan is a KILL.
+- **The embedded-ICMP NAT-reversal block (Region F, 913–1062) — BLOCKED.** This
+  is the `if is_embedded_icmp_error { … }` half of an `if / else if` chain whose
+  sibling (`} else if decision.resolution.disposition == ForwardCandidate {` at
+  1062) immediately writes `flow_cache_owner_rg_id` (1066). The `if` body reads
+  `flow`/`meta`/`from_zone`/`to_zone`/`decision`, conditionally mutates
+  `recycle_now`, and **falls through** ("fall through to slow-path", 1059–1061).
+  Extracting one branch of an if/else-if behind an outcome enum is again
+  logic-bearing restructuring. BLOCKED / COSMETIC.
 
-  This extraction would move ~220 cold lines, dropping mod.rs to ~2835 LOC —
-  **still over the 2000 threshold and barely under the audit's original
-  2858.** That is the crux of the cost/benefit the reviewers must weigh: a
-  high-risk touch of the hottest loop for a sub-threshold modularity win that
-  does not even clear the bar that triggered the issue.
+- **LOC arithmetic (Codex correction).** Even setting coupling aside: removing
+  the *whole* MissingNeighbor arm (740 LOC) leaves ~2313 production LOC; removing
+  the narrow 224-line slice leaves ~2829. **No achievable boundary clears the
+  2000-LOC threshold** that triggered the issue. A modularity refactor that
+  cannot resolve the modularity threshold — at the cost of a high-risk touch of
+  the hottest dataplane loop and a logic-bearing if/else restructure — is not a
+  defensible trade. **There is no viable Path B.**
 
 ## 5. Recommendation (author's pre-review position): PLAN-KILL
 
@@ -163,11 +184,13 @@ The author's position entering review is **PLAN-KILL**, for these reasons:
 1. The audit's proposed shape is the twice-killed hot-loop split (§3); it is not
    pure code-motion and is a borrow-checker / logic-bearing restructure.
 2. The perf premise is false (§2); the win is modularity-only.
-3. The only non-cosmetic remaining extraction (the MissingNeighbor cold arm,
-   §4) (a) may itself be coupling-blocked, and (b) even if liftable, leaves the
-   file at ~2835 LOC — **still over threshold**, so it does not resolve the
-   issue, it just shaves it. A modularity refactor that doesn't clear the
-   modularity threshold is not worth touching the hottest loop in the
+3. Both candidate cold extractions (MissingNeighbor arm; embedded-ICMP block,
+   §4) are **coupling-blocked** — each writes a §3.2 tail-read local and/or is a
+   non-terminal branch of an if/else-if chain, so extraction is a logic-bearing
+   return-value redesign, not code-motion. And even ignoring coupling, **no
+   achievable boundary clears the 2000-LOC threshold** (§4 LOC arithmetic), so
+   no extraction *resolves* the issue. A modularity refactor that cannot clear
+   the modularity threshold is not worth touching the hottest loop in the
    dataplane.
 4. The file's regrowth is feature-driven (#1861/#1852/#1885/#1912/#1913), all
    inside the order-coupled body. The right long-term answer is a *unified
@@ -183,20 +206,17 @@ blocked.
 
 ## 6. Multiple-path options (for reviewer adjudication)
 
-- **Path A — PLAN-KILL (author's recommendation).** Close #1920 not-planned
+- **Path A — PLAN-KILL (converged recommendation).** Close #1920 not-planned
   per the plan-kill protocol; record the §3/§4 evidence and the standing #946/
   #1327 verdicts in the close comment; if the unified-pipeline refactor is ever
   desired, file it as a NEW design issue with its own smoke budget.
-- **Path B — narrow MissingNeighbor cold extraction (only if §4 liftability is
-  PROVEN codegen-neutral).** One commit, `#[cold] #[inline(never)]` sibling
-  module `retry.rs` (the one audit name that maps to a real cold block), the
-  arm moved verbatim, `objdump`-proven that the hot loop's bytes are unchanged
-  and that the cold body is now a `call` edge (no inlining back in). Accept that
-  the file stays > 2000 LOC and the issue is only *reduced*, not *resolved*.
-  This path is defensible ONLY if all four reviewers agree the modularity/cold-
-  surface win justifies the hot-loop touch despite not clearing threshold.
+- **Path B — narrow cold extraction (MissingNeighbor or embedded-ICMP).
+  CLOSED.** Round-1 adjudication (Codex + Claude SMR against the source) proved
+  both candidate blocks are coupling-blocked (write a §3.2 tail-read local /
+  non-terminal if-else-if branch), and that no boundary clears the 2000-LOC
+  threshold anyway (§4). Not viable.
 - **Path C — REJECTED.** The audit's full `rx/parser/decap/forward/tx` split.
-  Refuted in §3; do not pursue.
+  Refuted in §3; the twice-killed hot-loop decomposition.
 
 ## 7. Codegen-neutrality bar (binding on Path B if chosen)
 
@@ -255,8 +275,19 @@ on Path A (KILL) or Path B (proven-liftable narrow extraction) is the exit.
 
 ## 11. Decision log
 
-- v1 (this doc): author recommends **PLAN-KILL (Path A)**. Perf claim refuted
-  and dropped. Audit shape (Path C) refuted via §3 + independent hostile read.
-  Path B (narrow MissingNeighbor cold extraction) surfaced as the only non-KILL
-  option but flagged sub-threshold and possibly coupling-blocked — pending
-  reviewer adjudication of §4 liftability.
+- v1: author recommended **PLAN-KILL (Path A)**. Perf claim refuted and dropped.
+  Audit shape (Path C) refuted via §3 + independent hostile read. Path B (narrow
+  cold extraction) surfaced as the only non-KILL option, flagged sub-threshold
+  and possibly coupling-blocked — pending reviewer adjudication.
+- v2 (round-1 convergence): **Codex `019ed638-…` → PLAN-KILL-CORRECT** (+2
+  factual corrections, both applied). **Claude SMR r1 → PLAN-KILL-CORRECT**
+  (adjudicated the Codex/AGY conflict against the source). **AGY
+  `adversarial-review-mqi8dngo-clmkj8` → PLAN-NEEDS-WORK (reject-kill, expand
+  Path B) — REFUTED on the code**: AGY's two "cleanly liftable" blocks both
+  write a §3.2 tail-read local / are non-terminal if-else-if branches (§4), and
+  AGY's `codegen-units=1`/thinLTO premise is factually false (§2,
+  `userspace-dp/Cargo.toml` has no profile → default `codegen-units=16`, LTO
+  off). Net: 2-of-3 reviewers KILL-CORRECT; AGY's dissent rests on two
+  source-refuted claims. **Converged outcome: PLAN-KILL (Path A).** Path B
+  closed; no boundary clears the 2000-LOC threshold and both candidates are
+  coupling-blocked.
