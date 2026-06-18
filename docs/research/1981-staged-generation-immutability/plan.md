@@ -2,7 +2,10 @@
 
 - **Issue:** #1981 (HIGH, correctness / upgrade integrity)
 - **Mode:** `/research` — converge a plan + recommend a mechanism; STOP at PLAN-READY. No code, no PR.
-- **Revision:** r1
+- **Revision:** r2 (r1 → r2: recommendation FLIPPED from Option D to **Option B**
+  after all three reviewers independently argued D keeps fighting the dpkg
+  maintainer-script lifecycle while B sidesteps the entire wedge class. r1
+  findings folded throughout — see §11.)
 - **Base:** `origin/master` @ `b1ef3ed16` (includes merged #1982 manifest SSOT, #1984, #1985, #1983).
 - **Research branch:** `research/1981-staged-generation-immutability`
 
@@ -32,361 +35,350 @@ source** during an operator-driven cut-over. The race:
 The existing integrity check **cannot catch this**:
 
 - `copyTreeChecksum(partial)` (`cutover.go:526`) checksums the **copied bytes
-  against their own freshly-generated sum** — it proves the copy is internally
+  against their own freshly-generated sum** — proves the copy is internally
   intact, NOT that all managed binaries came from the **same dpkg unpack
   generation**.
 - The kernel `verify-dataplane` gate (`cutover.go:551-573`) validates only the
   copied `xpfd` + embedded shim. It is a **partial** backstop: it never
   establishes that `cli`, `xpf-userspace-dp`, `xpf-day0-config` came from the
-  same generation. A torn set whose `xpfd` happens to verify-pass (e.g. the new
-  `xpfd` paired with an old `xpf-userspace-dp` that is ABI-incompatible) sails
-  through and flips a mismatched dataplane live.
+  same generation. A torn set whose `xpfd` happens to verify-pass (new `xpfd`
+  paired with an ABI-incompatible old `xpf-userspace-dp`) sails through and
+  flips a mismatched dataplane live. `xpf-userspace-dp` is a **lockstep-cut
+  dataplane binary** (manifest `LockstepCut: true`), so this is the real, HIGH
+  exposure.
 
-Prior hardening narrowed but did not close this:
-- #1965 host-wide lock — serializes *operator* cuts against each other and the
-  postinst cut, but cannot cover the unpack interval (preinst fd dies).
-- #1967/#1974 cut-over robustness — crash-safety + verify-fail cleanup, not
-  source-generation consistency.
-- #1982 manifest SSOT — gives a single managed-binary list; composes with this
-  fix but does not itself prove generation consistency.
-
-`docs/in-place-upgrade.md:385-395` names this the **"dpkg-vs-operator
-staged-source race"** as an accepted caveat with no tracking issue to close it.
-#1981 IS that tracking issue.
+Prior hardening narrowed but did not close this: #1965 host-wide lock (cannot
+cover the unpack interval), #1967/#1974 cut robustness (crash-safety, not
+generation consistency), #1982 manifest SSOT (composes, doesn't itself prove
+consistency). `docs/in-place-upgrade.md:385-395` names it the "dpkg-vs-operator
+staged-source race" as an accepted caveat. #1981 IS the issue to close it.
 
 ## 2. Goal / acceptance criteria
 
 - An operator `xpfd upgrade` (and the postinst auto-cut, and `--rolling`) MUST
   NOT publish a `versions/<ver>` that mixes binaries from two dpkg unpack
-  generations. The cut either copies a **whole, single-generation** staged
-  tree, or it **fails loudly before any live mutation** (pure pre-STOP failure,
-  daemon untouched).
-- Crash-safe at **every** maintainer-script + cut step (kill at any line leaves
-  a consistent, resumable state; never a permanently-wedged "can't ever cut"
-  host and never a daemon-down-with-no-rollback host).
-- Compose with the #1965 lock, the #1967 deferred-cut, the #1982 manifest, and
-  the #1964 first-install seed / legacy-migration — do not regress any of them.
-- A regression test that **mutates one managed staged binary mid-`copyStaged`**
-  (simulating a half-unpack) MUST fail the cut **before** the fix's mechanism
-  passes, and the **pre-fix** code path (self-generated target checksum only)
-  must be shown to NOT catch it (counter-factual pin per engineering-style
-  "Test strength").
+  generations. The cut either reads a **whole, single-generation** source, or
+  **fails loudly before any live mutation** (pure pre-STOP failure, daemon
+  untouched).
+- Crash-safe at **every** maintainer-script + cut step, and across dpkg's
+  error-unwind (`abort-upgrade`/`abort-remove`/`abort-deconfigure`): kill at any
+  line leaves a consistent, resumable state. **NEVER** a permanently-wedged
+  "can't ever cut again" host, and NEVER a daemon-down-with-no-rollback host.
+- Compose with the #1965 lock, the #1967 deferred-cut + verify-fail cleanup +
+  DB-snapshot lifecycle, the #1982 manifest, and the #1964 first-install seed /
+  legacy-migration — do not regress any of them.
+- A regression test that **mutates one managed staged binary mid-copy**
+  (simulating a half-unpack) MUST fail the cut, and the **pre-fix** path
+  (self-generated target checksum only) must be shown to NOT catch it
+  (counter-factual pin per engineering-style "Test strength").
 
 ## 3. Blast radius (files this design touches)
 
-| File | Role | Expected change class |
+| File | Role | Expected change class (Option B) |
 |---|---|---|
-| `debian/xpf.preinst` | runs BEFORE unpack | invalidate the source-generation marker to a sentinel value |
-| `debian/xpf.postinst` | runs AFTER unpack, drives the auto-cut | write the VALID generation manifest **before** the auto-cut reads staged |
-| `pkg/upgrade/cutover.go` (`copyStaged`) | the cut copy step | verify the source-generation marker BEFORE and AFTER copy |
-| `pkg/upgrade/manifest/` | SSOT | a marker-name constant + (maybe) a manifest writer/reader helper shared by Go + shell-parity canary |
-| `pkg/upgrade/runtime/seed.go` | first-install seed | write a valid generation manifest for the seeded set (so a first cut composes) |
-| `docs/in-place-upgrade.md` | operator/design doc | replace the "accepted caveat" §385-395 with the closed-race contract |
-| tests | `pkg/upgrade/*_test.go`, manifest drift canary | the mid-copy mutation regression + shell-parity for the new marker |
+| `debian/xpf.postinst` | runs AFTER unpack, drives auto-cut | after a SUCCESSFUL unpack, publish `staged → staged-gen/<genid>/` (atomic) BEFORE the auto-cut |
+| `pkg/upgrade/cutover.go` | the cut copy step | `copyStaged` reads from the latest published `staged-gen/<genid>/` instead of live `staged/`; the source-generation selection + presence check moves to INIT (pre-PREFLIGHT) |
+| `pkg/upgrade/runner.go` | layout + GC | new `StagedGenDir` config; GC of `staged-gen/` mirrors the `versions/` GC |
+| `pkg/upgrade/manifest/` | SSOT | (B needs no per-binary manifest for the gate; an optional genid-stamp helper if a straddle tripwire is wanted) |
+| `pkg/upgrade/runtime/seed.go` | first-install seed | publish the first `staged-gen/<genid>/` from the seeded set (so a first manual cut has a source generation) |
+| `debian/rules` | staging | NO change — dpkg still owns ONLY `staged/`; `staged-gen/` is maintainer-script-managed runtime state like `versions/` |
+| `docs/in-place-upgrade.md` | operator/design doc | replace the "accepted caveat" §385-395 with the closed-race contract + recovery |
+| tests | `pkg/upgrade/*_test.go` | mid-copy mutation regression + publish-atomicity + GC + first-install |
 
-No hot-path (packet/poll) code. No protocol-field/BPF-map change. This is a
-packaging + cut-path correctness fix.
+No hot-path code. No protocol-field/BPF-map change. Packaging + cut-path
+correctness only.
 
-## 4. The design space — THREE candidate mechanisms
+## 4. The design space — FOUR mechanisms evaluated
 
-All three must defeat the same adversary: **a `copyStaged` that runs entirely
-inside dpkg's unpack window, reading a torn set.** The decisive question for
-each is *who writes the integrity signal, and is that write atomic relative to
-dpkg's per-file `rename()` storm.*
+All must defeat the same adversary: **a cut that reads a torn set while dpkg is
+mid-unpack.** The decisive axis is *does the cut ever read the path dpkg is
+actively rewriting, and how much maintainer-script lifecycle state must be
+correct for the fix to hold.*
 
-### Option A — Unpack+configure SENTINEL (a marker held for the whole unpack)
+### Option A — Unpack+configure presence SENTINEL — REJECTED
 
-A marker that exists for the WHOLE dpkg unpack+configure interval and makes
-operator `xpfd upgrade` FAIL before reading staged.
+A bare presence-file dropped by preinst, removed by postinst, that makes
+`copyStaged` refuse while present. **FATAL:** an aborted unpack (the new
+postinst never runs) strands the sentinel → **permanent host wedge** (every
+future cut refuses forever). A presence file has no generation identity, so it
+cannot self-clear on a fresh complete generation. Strictly worse than the bug it
+fixes. Rejected.
 
-- **Mechanics that would work:** preinst (before unpack) drops a sentinel;
-  postinst (after unpack+configure) removes it; `copyStaged` refuses while the
-  sentinel is present.
-- **FATAL flaw — the preinst fd cannot span the unpack boundary.** This is the
-  *exact* existing hole. A `flock`-style fd-held sentinel dies at preinst exit.
-  A *file* sentinel dropped by preinst and removed by postinst DOES span the
-  interval — but only if it is crash-safe AND cannot be left dangling. Two
-  sub-failures:
-  - If the package operation **aborts mid-unpack** (disk full, SIGKILL of
-    dpkg), the new postinst never runs, so the sentinel is **never removed** →
-    the host is **permanently wedged**: every future `xpfd upgrade` refuses
-    forever. (apt's `abort-upgrade`/error-unwind runs the OLD scripts, which do
-    not know about the new sentinel.)
-  - A bare presence-sentinel cannot distinguish "unpack in progress NOW" from
-    "a crashed unpack last week." It has no generation identity, so it cannot
-    *self-clear* on a fresh, complete generation.
-- **Verdict:** REJECT as a standalone mechanism. A pure presence-sentinel trades
-  the torn-set risk for a permanent-wedge risk — strictly worse for an
-  appliance. Its only sound form is "a sentinel *value* that is overwritten by a
-  valid generation manifest after unpack" — which is Option D below.
+### Option B — Immutable VERSIONED staging — **RECOMMENDED**
 
-### Option B — Immutable VERSIONED staging (unpack into a per-version immutable dir)
+**Mechanism (full spec):**
 
-Unpack into a versioned immutable staging dir and atomically publish a complete
-generation manifest only after ALL managed files are present.
+1. dpkg still unpacks the managed binaries into the dpkg-owned `staged/`
+   (unchanged; `debian/rules` untouched). dpkg owns ONLY `staged/`.
+2. **`debian/xpf.postinst configure` (AFTER unpack, BEFORE the auto-cut):** the
+   unpack for THIS transaction is now COMPLETE (Debian Policy §6.7: `postinst
+   configure` runs after all files are unpacked and the dpkg frontend lock is
+   held, serializing transactions). The postinst invokes the staged binary to
+   **publish** the complete staged tree into an immutable, generation-keyed
+   source dir: `staged-gen/<genid>/` via `.partial` + atomic rename + dir-fsync.
+   `<genid>` is a fresh monotonic token (nanosecond-time + random suffix, so a
+   reinstall of the SAME version still gets a distinct genid — AGY r1-#4). A
+   `staged-gen/current-gen` symlink (atomic) names the latest complete
+   generation, mirroring `versions/current`.
+3. **`copyStaged` (`pkg/upgrade/cutover.go`)** copies from
+   `staged-gen/<current-gen>/`, **NEVER from live `staged/`**. The
+   source-generation is resolved ONCE at INIT (see §6 ordering): if
+   `staged-gen/current-gen` is absent the cut refuses pre-PREFLIGHT (no source
+   generation yet — operator must let the package op finish / run
+   `seed-runtime`). The copy is from a dir dpkg is NOT touching, so it is
+   internally a single generation by construction. `copyTreeChecksum` stays as
+   the intra-copy integrity check; no new before/after manifest gate is needed.
+4. **`pkg/upgrade/runtime/seed.go` (first install)** publishes the first
+   `staged-gen/<genid>/` (+ `current-gen`) from the seeded set, so a first
+   manual `xpfd upgrade` has a source generation even though the postinst
+   first-install path does not run the auto-cut. The publish is idempotent and
+   runs on every seed invocation (incl. the already-seeded resume path) — and on
+   the seed-FAILURE fallback (direct-staged links) the postinst still publishes a
+   `staged-gen/<genid>` from the (complete, just-unpacked) staged tree so a later
+   cut is not sourceless (Codex r1-#4, AGY r1-#3).
+5. **GC:** `staged-gen/` GC mirrors the `versions/` GC (`flip.go:306`): retain
+   N=3 newest, protect `current-gen`, sweep `.partial` orphans + abandoned
+   genids. One extra retained copy of the binary set per generation, bounded by
+   N=3 + the protected current.
 
-- **Mechanics:** dpkg still writes `staged/` (it must — that is the
-  dpkg-owned path in `debian/rules`). After unpack, the postinst atomically
-  *publishes* a snapshot of `staged/` into an immutable, generation-keyed
-  source dir (e.g. `staged-gen/<genid>/`) via `.partial` + rename. `copyStaged`
-  copies from the **published immutable generation**, never from the live
-  `staged/`.
-- **Strengths:** the cut never reads the path dpkg is actively rewriting. The
-  published dir is immutable once renamed (a later unpack publishes a NEW genid
-  dir; the old one is untouched). Composes cleanly with versions/ GC.
-- **Costs / open questions:**
-  - **A second full copy of the binary set** on every package install (staged →
-    staged-gen/<genid>), THEN the cut copies again (staged-gen → versions/<ver>).
-    Three copies of ~the binary set on disk transiently (staged, staged-gen,
-    versions/<ver>). Disk cost on a constrained appliance.
-  - **Crash mid-publish:** a `.partial` + rename makes the publish atomic, but
-    the postinst must be idempotent and GC abandoned `staged-gen/*.partial`.
-  - **Who publishes, and when, relative to the postinst auto-cut?** The publish
-    MUST complete before the standalone postinst auto-cut reads it — same
-    ordering constraint as Option D, plus the extra copy.
-  - **It does not by itself prove the published snapshot is a single
-    generation** — if the postinst publishes *while a second apt transaction is
-    mid-unpack* (pathological, but apt's dpkg lock normally serializes
-    transactions), the snapshot could still be torn. So B still needs a
-    generation-identity check; it just relocates WHERE the cut reads from.
-- **Verdict:** the *most robust* read-isolation, but the extra full copy + the
-  GC of a second versioned tree is real complexity and disk cost for a
-  marginal gain over D (which already makes the cut refuse a torn read). Keep
-  as the fallback if D's atomicity cannot be made sound.
+**Why B is the robust choice (the r1 reviewer convergence):**
+- **No preinst sentinel, no lifecycle coupling.** B writes nothing in preinst
+  and nothing on dpkg's error-unwind. A failed/aborted unpack simply never
+  publishes a new `staged-gen/<genid>`; the PRIOR generation stays valid and the
+  cut keeps reading the last-good source. There is **no permanent-wedge window**
+  — the class of failure that sinks A, and that D must actively fight with
+  abort-* handlers + self-healing (Codex r1-#1/#2, AGY r1-#1-CRIT, SMR r1-MAJOR1).
+- **The cut never reads the path dpkg rewrites.** The torn-read window is closed
+  by construction, for ALL FOUR managed binaries, not just the verify-gated
+  xpfd+shim.
+- **No #1967 regression.** The source-generation presence check is at INIT
+  (pre-PREFLIGHT), so a refusal writes no journal and takes no DB snapshot —
+  unlike D's `copyStaged`-placed refusal that would strand a `.dbsnap` at
+  StatePreflight (Codex r1-#3).
+- **Composes cleanly.** #1965 lock unchanged; #1982 manifest unchanged (B does
+  not need per-binary checksums for the gate, though it MAY keep a genid stamp);
+  #1964 seed/legacy-migration gains one publish step.
 
-### Option C — SOURCE generation manifest (verify a genid before AND after copy)
+**Costs (honest):**
+- **Extra disk:** one published copy of the binary set per retained generation.
+  The set is dominated by `xpfd` (embeds the kernel-verified shim) +
+  `xpf-userspace-dp`; budget ~50-70 MB per generation, ×(N=3 + current) worst
+  case under `/var`. A constrained appliance must size `/var` for it; the
+  PREFLIGHT free-space check (`preflight`, `cutover.go:439`) and the
+  `staged-gen` GC bound it. **State the concrete budget in the engineer PR.**
+- **One new publish step + one new GC surface.** Both reuse existing
+  `.partial`+rename + the `versions/` GC shape — low novelty.
+- **Transient 3 copies during a cut:** `staged`, `staged-gen/<genid>`,
+  `versions/<ver>.partial`. PREFLIGHT must account for `staged-gen` in its
+  free-space need (it already sums `staged` + dbsnap + margin; add the publish).
 
-A stable generation-id / checksummed SOURCE manifest that `copyStaged` verifies
-BEFORE and AFTER copying.
+### Option C — bare SOURCE generation manifest — REJECTED
 
-- **Mechanics (bare C):** maintain `staged/.generation` (a genid +
-  per-binary-checksum manifest). `copyStaged` reads the genid before the copy
-  and again after, and the per-binary checksums against the copied bytes; a
-  mismatch (either the genid changed under it, or a binary's checksum differs
-  from the manifest) aborts the cut pre-STOP.
-- **FATAL flaw of BARE C (the #1981 prior-research AGY finding, ratified
-  here):** *who writes `staged/.generation` atomically relative to dpkg's file
-  replacement?* If the manifest is shipped as a dpkg file in the payload, dpkg
-  replaces it at some point in the SAME per-file `rename()` storm. A cut whose
-  copy lands **entirely within unpack, BEFORE dpkg has replaced `.generation`**,
-  reads the same stale genid before AND after, and the **stale manifest's
-  checksums match whichever binaries dpkg has not yet replaced** — but the cut
-  has no way to know which binaries dpkg already replaced. The before==after
-  genid check passes on a torn set. Bare C does not close the window; it only
-  catches a copy that *straddles* a genid change, not one wholly inside a single
-  (stale) generation's window.
-- **The fix that rescues C → Option D.** The manifest must be invalidated by the
-  preinst (before unpack) to a sentinel value and rewritten as VALID by the
-  postinst (after unpack) — NOT shipped as a dpkg-replaced payload file. Then a
-  cut inside the unpack window reads the **sentinel** (not a stale-but-valid
-  genid) and refuses.
-- **Verdict:** bare C is unsound. Its correct form is Option D.
+`staged/.generation` (genid + per-binary sha256) verified before+after copy,
+SHIPPED as a dpkg payload file. **FATAL:** dpkg replaces `.generation` in the
+same per-file rename storm; a cut wholly inside the unpack window reads the same
+**stale-but-valid** genid before AND after, and the stale checksums match the
+not-yet-replaced binaries → **false pass** on a torn set. Bare C only catches a
+copy that *straddles* a genid change, not one wholly inside one (stale)
+generation. Rejected.
 
-### Option D — HYBRID (preinst invalidates → postinst publishes a valid manifest → cut verifies) — RECOMMENDED
+### Option D — HYBRID (preinst invalidates → postinst publishes valid manifest → cut verifies) — REJECTED in favor of B; corrected spec retained as the fallback
 
-This is C's manifest **driven by A's lifecycle**, with the sentinel being a
-*manifest value* (not a separate presence file), which dissolves both A's
-permanent-wedge failure and C's stale-manifest failure.
+C's manifest driven by A's lifecycle: preinst writes `staged/.generation =
+"unpacking"` (sentinel VALUE, not a presence file); postinst writes a valid
+genid+per-binary-sha256 manifest after unpack; `copyStaged` reads it before and
+after and refuses on absent/`"unpacking"`/checksum-mismatch.
 
-**Mechanism:**
+D is *correct in principle* and dissolves A's permanent-wedge (the sentinel is a
+manifest value the next successful postinst overwrites) and C's stale-pass (the
+preinst invalidation means a cut inside the window reads `"unpacking"`). But the
+r1 review surfaced that **D keeps fighting the maintainer-script lifecycle**, and
+making it sound requires ALL of the following — every one a place to get it
+wrong:
 
-1. **`debian/xpf.preinst` (BEFORE unpack):** write `staged/.generation` =
-   `"unpacking"` (an invalid-by-construction sentinel value, durably:
-   write-temp+fsync+rename, then fsync the staged dir). This marks the staged
-   tree as MID-REPLACE for the entire unpack interval.
-2. **dpkg unpacks** the managed binaries (per-file rename storm). `.generation`
-   is NOT a dpkg payload file — it is maintainer-script-managed runtime state
-   (like `versions/`), so dpkg never touches it during unpack. It stays
-   `"unpacking"` for the whole interval.
-3. **`debian/xpf.postinst` (AFTER unpack, BEFORE the auto-cut — ORDERING IS
-   LOAD-BEARING):** compute a fresh genid + per-managed-binary sha256 over the
-   now-complete staged tree and write a VALID `staged/.generation` manifest
-   (durably). This MUST happen before the postinst's own standalone auto-cut
-   (`postinst:140-185`) invokes `xpfd upgrade`, or the auto-cut would read
-   `"unpacking"` and the **first standalone in-place deploy would be
-   permanently deferred** (the Codex finding folded in the prior research).
-4. **`copyStaged` (`pkg/upgrade/cutover.go`):**
-   - read `staged/.generation` BEFORE copy; if absent or `== "unpacking"`,
-     **refuse the cut pre-STOP** (a half-unpack is in progress — the correct
-     fail-safe is to wedge THIS cut, not the host: the package operation will
-     finish and rewrite a valid manifest, after which a re-run proceeds).
-   - copy `staged/` → `.partial`, computing per-file sha256.
-   - read `staged/.generation` AGAIN after copy; if it changed (a new unpack
-     started under us) OR is now `"unpacking"`, refuse.
-   - verify each managed binary's copied-bytes sha256 equals the manifest's
-     entry; any mismatch refuses. (This is the generation-consistency proof the
-     self-checksum lacks.)
-5. **`pkg/upgrade/runtime/seed.go` (first install):** after seeding
-   `versions/<v>/`, write a valid `staged/.generation` for the freshly-staged
-   set so a subsequent operator cut from a first-install host composes (the
-   postinst seed path does not run the upgrade auto-cut, but a later manual
-   `xpfd upgrade` from staged must see a valid manifest).
+- **D-fix-1 (ordering):** the `.generation := "unpacking"` write must come AFTER
+  the preinst `flock` contended-cut gate (NOT first, as r1-P1 said) — else a
+  contended abort strands `"unpacking"` over an intact tree and false-refuses the
+  lock-holding operator cut (Codex r1-#1, SMR r1-MAJOR1).
+- **D-fix-2 (abort-unwind):** dpkg error-unwind runs `new-postrm abort-upgrade`
+  then `old-postinst abort-upgrade` (Debian Policy §6.5/§6.6). The OLD package's
+  abort path must rewrite a valid manifest — but on the FIRST deploy of this fix
+  the OLD package has no such logic, so D ALSO needs a **self-healing** cut: on
+  seeing `"unpacking"` with dpkg NOT currently unpacking, recompute the manifest
+  from the (quiesced) staged tree. Detecting "dpkg not unpacking" has no clean
+  signal (probing dpkg's frontend lock is itself racy). This is real added
+  complexity (AGY r1-#1-CRIT, Codex r1-#2).
+- **D-fix-3 (#1967):** the refusal must move out of `copyStaged` (post-PREFLIGHT)
+  to INIT, or rewind the journal + sweep the `.dbsnap`, to avoid the stale-snapshot
+  regression (Codex r1-#3).
+- **D-fix-4 (first-install):** seed must write the manifest incl. the
+  seed-failure fallback (Codex r1-#4, AGY r1-#3); `preinst install` must also
+  cover the legacy-migration unpack window (AGY r1-#2).
+- **D-fix-5 (copyTree):** decide whether `.generation` is copied into
+  `versions/<ver>` (copyTree copies all dotfiles today) (Codex r1-#5).
 
-**Why D dissolves A's permanent-wedge and C's stale-manifest:**
-- vs A: the sentinel is a *value of a manifest that is always overwritten by the
-  next successful postinst*, so a fresh complete generation self-clears it. A
-  crashed unpack leaves `"unpacking"`, which wedges only the CUT (correct: there
-  is genuinely no consistent source) until the operator re-runs/repairs the
-  package op — not the host forever. **Recovery is `apt install --reinstall xpf`
-  (re-runs postinst → valid manifest) or `xpfd seed-runtime` if the staged tree
-  is itself intact** — must be documented.
-- vs C: the manifest is preinst-invalidated, so a cut inside the unpack window
-  reads `"unpacking"` (refuses) instead of a stale-but-valid genid (false pass).
+Every one of D-fix-1..5 is a correctness-load-bearing maintainer-script edit. B
+needs NONE of them. **D is retained as the documented fallback** if, at engineer
+time, B's extra disk copy is judged unaffordable on the appliance `/var`; in
+that case implement D with ALL of D-fix-1..5.
 
-**Crash matrix (the kill-at-every-step proof the plan must carry):**
+## 5. Multiple Path Options — recommendation
 
-| Kill point | `.generation` state | Cut behavior | Host state |
-|---|---|---|---|
-| before preinst write | absent (or prior valid) | absent→refuse; prior-valid→**see note** | daemon up |
-| preinst wrote `"unpacking"`, dpkg crash mid-unpack | `"unpacking"` | refuse (torn source) | daemon up; recover via reinstall |
-| unpack done, postinst crash BEFORE manifest write | `"unpacking"` | refuse | daemon up; recover via reinstall |
-| postinst wrote valid manifest, crash before auto-cut | valid | proceeds (complete generation) | daemon up; operator runs `xpfd upgrade` |
-| mid-copyStaged, concurrent new unpack flips to `"unpacking"` | `"unpacking"` on after-read | refuse (after-check) | daemon up |
-
-**NOTE (open sub-question O1 — see §10):** the "prior valid manifest" row. If a
-NEW package op begins, the preinst's FIRST action is to overwrite `.generation`
-with `"unpacking"`. If the preinst is killed BEFORE that write, the manifest
-still holds the PREVIOUS generation's valid genid+checksums — which match the
-OLD on-disk binaries (dpkg has not unpacked yet). A cut here copies a consistent
-OLD generation and passes. That is **correct** (the old set is internally
-consistent), so this is safe — but the plan asserts it explicitly so a reviewer
-can confirm the preinst write is the FIRST mutating action (ordering invariant
-P1 below).
-
-## 5. Multiple Path Options — explicit recommendation
-
-| | A (bare sentinel) | B (immutable versioned staging) | C (bare source manifest) | **D (hybrid)** |
+| | A (presence sentinel) | **B (immutable versioned staging)** | C (bare manifest) | D (hybrid manifest+lifecycle) |
 |---|---|---|---|---|
-| Closes unpack-window torn read | partial | yes | **no** | **yes** |
-| Permanent-wedge risk | **yes** | no | no | no (cut-only, recoverable) |
-| Stale-manifest false-pass | n/a | no | **yes** | no |
-| Extra full disk copy | no | **yes (a 2nd versioned tree)** | no | no |
-| Generation-consistency proof for ALL 4 binaries | no | needs C anyway | yes (if sound) | **yes** |
-| New crash-safety surface | low | medium (publish + GC) | low | low-medium |
-| Composes w/ #1965/#1967/#1982/#1964 | n/a | yes (+ GC) | yes | **yes** |
+| Closes unpack-window torn read (all 4 binaries) | partial | **yes, by construction** | no | yes (if D-fix-1..5 all correct) |
+| Permanent-wedge risk | **yes** | **no** | no | no (needs abort-* + self-heal) |
+| Reads the path dpkg rewrites | n/a | **never** | yes | yes (the marker) |
+| Maintainer-script lifecycle coupling | high | **none (postinst publish only)** | low | **high** (preinst+postinst+abort-*) |
+| #1967 DB-snapshot/journal regression risk | n/a | **none (check at INIT)** | n/a | yes unless moved to INIT |
+| Extra disk | no | **yes (1 copy/gen, GC-bounded)** | no | no |
+| New crash-safety surface | low | **low (1 atomic publish + GC)** | low | medium-high |
+| Composes w/ #1965/#1967/#1982/#1964 | n/a | **yes** | n/a | yes (with care) |
 
-**Recommendation: Option D (Hybrid).** It is the *minimal sound* mechanism: it
-adds one maintainer-script-managed dotfile (`staged/.generation`), a preinst
-invalidation, a postinst publish (ordered before the auto-cut), and a
-before/after manifest+checksum gate in `copyStaged`. It closes the torn-read for
-ALL four managed binaries (not just the verify-gated `xpfd`+shim), it cannot
-permanently wedge the host, and it reuses the existing fsatomic + manifest SSOT
-machinery. Option B is *more isolated* but pays a second full copy of the binary
-set on every install plus a second GC surface — disk and complexity an appliance
-should not spend when D already guarantees the cut never publishes a torn set.
-**B is the documented fallback** if, in implementation, the postinst manifest
-write cannot be made atomic relative to a (pathological) concurrent apt
-transaction; in that case publishing into an immutable genid dir and cutting
-from THERE removes the live-`staged/` read entirely. Bare A and bare C are
-rejected for the fatal flaws above.
+**Recommendation: Option B (Immutable Versioned Staging).** It closes the
+torn-read *by construction* — the cut reads a generation dpkg is not touching —
+for all four managed binaries, with **zero preinst state, zero error-unwind
+handling, and no permanent-wedge window**. Its only cost is one GC-bounded extra
+copy of the binary set per generation, an explicit and well-understood disk
+trade an appliance can size for, in exchange for removing the entire
+maintainer-script-lifecycle hazard surface that Option D must keep fighting (all
+three r1 reviewers independently reached this conclusion). **D is the documented
+fallback** (with the corrected D-fix-1..5 spec in §4) if the disk budget is
+unacceptable. A and C are rejected for the fatal flaws above.
 
-## 6. Ordering & crash-safety invariants (the contract /engineer must hold)
+## 6. Ordering & crash-safety invariants (Option B contract for `/engineer`)
 
-- **P1 (preinst write is first):** the `staged/.generation := "unpacking"` write
-  is the FIRST mutating action of the preinst `upgrade` case, BEFORE the lock
-  probe's side effects and BEFORE `migrate_legacy_layout`. (So a kill before it
-  leaves a valid OLD manifest = safe; a kill after it leaves `"unpacking"` =
-  refuse, also safe.) Re-confirm against the actual preinst flow at engineer
-  time — the lock probe must still run (it is the fail-loud contended-cut gate),
-  and the contended-cut gate must still abort BEFORE the package op proceeds.
-- **P2 (postinst manifest BEFORE auto-cut):** the valid-manifest write in
-  `configure` MUST precede BOTH the standalone auto-cut branch AND be written on
-  the clustered-node stage-only branch (so a later `xpfd upgrade --rolling` sees
-  a valid manifest). It must also be written on the first-install (`$2` empty)
-  seed branch (via the seed, §4.5).
-- **P3 (durable writes):** `.generation` writes use `fsatomic`-class durability
-  (temp+fsync+rename+dir-fsync) — it is DurableState (must survive power loss so
-  a post-reboot cut reads the right marker). The shell preinst write must mirror
-  this (write `.generation.tmp`, fsync, `mv -f`, sync the dir) — shell parity
-  with the Go writer, enforced by the manifest drift canary extended to the
-  marker.
-- **P4 (cut refuses, never wedges host):** an absent/`"unpacking"`/mismatched
-  manifest is a **pure pre-STOP refusal** — the daemon is never stopped, live
-  state untouched, the error tells the operator how to recover (re-run after the
-  package op completes, or `apt install --reinstall`).
-- **P5 (genid identity):** the genid must change on every distinct unpack so a
-  before/after straddle is detectable. A monotonically-fresh value
-  (e.g. a random token or `unpack-time + pid`) written by the postinst is enough;
-  the per-binary checksums are the actual consistency proof, the genid is the
-  cheap straddle tripwire.
-- **P6 (manifest is NOT a dpkg payload file):** `.generation` lives under the
-  dpkg-owned `staged/` dir but is maintainer-script-managed (never listed in the
-  package payload / `debian/rules install`), exactly like `versions/` is
-  maintainer-script-managed. Confirm dpkg does not remove it on the new
-  package's unpack (it won't — dpkg only touches its own payload files;
-  conffile/obsolete logic does not apply to a file it never recorded).
+- **B-P1 (publish after a complete unpack):** the `staged → staged-gen/<genid>`
+  publish runs in `postinst configure` (AFTER unpack completes, while dpkg's
+  frontend lock serializes transactions), BEFORE the standalone auto-cut and the
+  clustered stage-only branch. Place it UNCONDITIONALLY within `configure` for
+  `$2` non-empty (so clustered stage-only, XPF_NO_POSTINST_CUT, deferred-TOCTOU,
+  and standalone-cut all see a fresh generation), and via the seed for `$2`
+  empty (first install).
+- **B-P2 (atomic publish):** `staged-gen/<genid>.partial` → fsync → atomic
+  rename → fsync `staged-gen/`; then atomically repoint `staged-gen/current-gen
+  -> <genid>`. A crash before the rename leaves a `.partial` (GC-swept); a crash
+  after the rename but before `current-gen` leaves a complete-but-unreferenced
+  genid (the prior `current-gen` is still valid; the next postinst re-publishes
+  idempotently). NEVER a torn published generation.
+- **B-P3 (cut reads current-gen, resolved at INIT):** `Run()` resolves the
+  source generation from `staged-gen/current-gen` at INIT (pre-PREFLIGHT). Absent
+  → refuse with no journal written and no DB snapshot taken (Codex r1-#3 closed
+  by construction). The journaled `TargetVersion` is read from the published
+  generation's `xpfd`, and the genid is recorded in the journal so a resume keys
+  the SAME generation.
+- **B-P4 (durable):** publish + `current-gen` writes are `fsatomic` DurableState
+  (survive power loss). The shell postinst delegates the publish to the staged Go
+  binary (`xpfd publish-generation` / fold into `seed-runtime`) so there is ONE
+  durable-copy implementation, unit-tested, not hand-rolled shell — mirrors the
+  #1964 seed split (durable logic in Go, postinst just invokes it).
+- **B-P5 (genid identity):** `<genid>` = monotonic (nanosecond time) + random
+  suffix so a same-version reinstall yields a distinct generation and GC mtime
+  ordering is stable (AGY r1-#4).
+- **B-P6 (staged-gen is NOT a dpkg payload file):** `staged-gen/` is
+  maintainer-script-managed runtime state under `/var/lib/xpf/` (NOT under the
+  dpkg-owned `staged/`), like `versions/`. dpkg never writes or removes it on
+  unpack; the postrm removes it on `purge` (mirror the `versions/` purge handling
+  in `debian/xpf.postrm`). Confirmed against dpkg semantics: dpkg only touches
+  its own recorded payload files; a never-recorded runtime dir is immune to
+  unpack-replace AND to the "files removed from the new package" cleanup
+  (independently corroborated by the postrm's own documented "presence-only file
+  marker" trap, `debian/xpf.postrm:36-42`).
+- **B-P7 (PREFLIGHT free-space):** PREFLIGHT must include the `staged-gen`
+  publish in its free-space need (it already sums staged + dbsnap + margin); the
+  publish happens in postinst (not in the cut), so the cut's PREFLIGHT only sizes
+  the `versions/<ver>` copy — but the postinst publish itself should fail loudly
+  (not silently) on ENOSPC and leave the prior generation valid.
 
 ## 7. Test strategy
 
-1. **Mid-copy mutation regression (the §2 acceptance pin), counter-factual:**
-   - Seed `staged/` with a valid generation manifest. Drive `copyStaged`; inject
-     a mutation of ONE managed binary's bytes (via a `copyTree` seam or a hooked
-     filesystem) DURING the copy, leaving `.generation` stale. Assert the
-     after-copy per-binary checksum mismatch makes `copyStaged` return an error
-     and NOT publish `versions/<ver>`.
-   - **Counter-factual half:** run the SAME mutation against the PRE-FIX path
-     (self-generated target checksum only) and prove it does NOT error (it
-     checksums the torn copy against itself). This is the engineering-style
-     "recreate the failure mode" pin.
-2. **Unpacking-sentinel refusal:** set `.generation = "unpacking"`; assert
-   `copyStaged` refuses pre-STOP and the daemon is never stopped (state stays
-   pure). Set it absent; assert refuse.
-3. **Happy path:** valid manifest, untouched staged → cut proceeds, publishes
-   `versions/<ver>`, journal advances normally.
-4. **postinst ordering (P2):** a Go-level or shell-level test that the valid
-   manifest exists at the moment the auto-cut would read it (so the first
-   standalone deploy is not deferred). The prior research's Codex finding is the
-   regression this guards.
-5. **Shell-parity canary:** extend `manifest_drift_test.go` (or a sibling) to
-   assert the preinst/postinst `.generation` writer matches the Go marker
-   constant + sentinel value, so the two never drift.
-6. **Crash-resume:** journal-resume tests already exist; add one that a resume
-   after a refusal (no journal written, per §refuse-at-init) re-reads
-   `.generation` and proceeds once it is valid.
+1. **Torn-source regression (the §2 acceptance pin), counter-factual:**
+   - **B path:** publish `staged-gen/<g1>` from a clean set, then mutate live
+     `staged/` to a torn mix, then drive a cut — assert it reads `<g1>` (clean)
+     and the torn `staged/` is NEVER read (the cut output equals the published
+     generation, not the torn live tree).
+   - **Counter-factual:** point the PRE-FIX `copyStaged` at live `staged/` with
+     the torn mix and show it publishes a torn `versions/<ver>` that the
+     self-checksum passes — recreating the failure mode (engineering-style "Test
+     strength").
+2. **No-source refusal:** `staged-gen/current-gen` absent → cut refuses at INIT,
+   NO journal written, NO `.dbsnap` taken, daemon untouched (pins Codex r1-#3).
+3. **Publish atomicity / crash-resume:** kill between `.partial` and rename
+   (orphan swept); kill between rename and `current-gen` (prior gen still valid,
+   re-publish idempotent); assert no torn published generation ever observable.
+4. **abort-unwind:** simulate a failed unpack (postinst does not publish) →
+   assert the PRIOR `staged-gen/<g0>` stays valid and a cut from it succeeds (the
+   permanent-wedge class is structurally absent — this is the test that would
+   FAIL under Options A/D-without-fixes).
+5. **First-install + seed-failure fallback:** seed publishes `<genid>`; a manual
+   cut from a first-install host succeeds; the seed-failure (direct-staged)
+   fallback still publishes a generation so a later cut is not sourceless.
+6. **GC:** `staged-gen/` retains N=3, protects `current-gen`, sweeps `.partial`
+   and abandoned genids; mirrors and reuses the `versions/` GC test shape.
+7. **Clustered stage-only:** a clustered-node postinst publishes a generation
+   (no cut) and a later `xpfd upgrade --rolling` cuts from it.
 
-**Deploy validation (per engineering-style §8):** this is a packaging/cut-path
-change with no dataplane code; the relevant lane is the `.deb` dogfood in
-`cluster-setup.sh` (it installs the package) — assert a clean
-build→install→standalone-cut on the standalone VM, and that `cluster-deploy`
-(stage-only on clustered nodes) followed by `xpfd upgrade --rolling` still cuts
-both nodes. No CoS / failover regression is expected, but `make test-failover`
-must still pass since the cut path touches the rolling driver's inner `Run`.
+**Deploy validation (engineering-style §8):** packaging/cut-path change, no
+dataplane code. Lane: the `.deb` dogfood in `cluster-setup.sh`. Assert clean
+build→install→standalone-cut on the standalone VM; `cluster-deploy` (stage-only)
++ `xpfd upgrade --rolling` cuts both nodes; `make test-failover` still passes
+(the cut path feeds the rolling driver's inner `Run`). No CoS/failover
+regression expected.
 
 ## 8. Alternatives rejected (summary)
 
-- **Bare Option A (presence sentinel):** permanent-wedge on crashed unpack;
-  rejected.
-- **Bare Option C (payload-shipped manifest):** stale-manifest false-pass inside
-  the unpack window; rejected.
-- **Do nothing / keep the caveat:** the verify gate is a PARTIAL backstop
-  (xpfd+shim only). A torn `xpfd`(new)+`xpf-userspace-dp`(old) set whose xpfd
-  verify-passes flips a mismatched dataplane live. HIGH severity, real exposure
-  on any host where an operator races `apt upgrade`. PLAN-KILL is only justified
-  if reviewers judge the operator-guidance caveat ("don't run `xpfd upgrade`
-  during `apt upgrade`") acceptable AND the four-binary consistency gap
-  negligible — this plan argues it is not, given xpf-userspace-dp is a
-  lockstep-cut dataplane binary.
+- **A (presence sentinel):** permanent-wedge on aborted unpack. Rejected.
+- **C (payload-shipped manifest):** stale-manifest false-pass inside the unpack
+  window. Rejected.
+- **D (hybrid):** correct but requires D-fix-1..5 (preinst ordering, abort-*
+  unwind handling + self-heal, #1967 INIT-move, first-install/seed, copyTree
+  decision) — a high maintainer-script-lifecycle hazard surface that B removes
+  entirely. Retained as the documented fallback if B's disk cost is
+  unaffordable.
+- **Do nothing / keep the caveat:** verify gate is a PARTIAL backstop (xpfd+shim
+  only); a torn xpfd(new)+xpf-userspace-dp(old) lockstep pair whose xpfd
+  verify-passes flips a mismatched dataplane live. HIGH, real exposure. PLAN-KILL
+  only justified if reviewers judge the operator caveat acceptable AND the
+  four-binary gap negligible — this plan argues it is not.
 
 ## 9. Sequencing / dependencies
 
-- Builds on #1982 (manifest SSOT): the per-binary checksum loop and the shell
-  marker constant should be sourced from `pkg/upgrade/manifest` so they cannot
-  drift. The marker-name + sentinel-value constant belongs in the manifest
-  package; the drift canary extends to cover it.
-- No conflict with #1983/#1984/#1985 (merged). Independent of the kernel channel
-  (#1930) work.
+- Builds on #1982 (manifest SSOT): `manifest.Names()` enumerates the set to
+  publish; no per-binary checksum manifest needed for B's gate (the published dir
+  IS the integrity boundary). If a genid stamp is wanted, the constant lives in
+  the manifest package + drift canary.
+- No conflict with #1983/#1984/#1985 (merged). Independent of the #1930 kernel
+  channel.
 
 ## 10. Open questions for the user / architecture review
 
-- **O1 (confirmed safe in §4 NOTE):** the "preinst killed before the
-  `"unpacking"` write" window leaves a valid OLD manifest and a cut copies a
-  consistent OLD generation — safe. Invariant P1 makes the `.generation` write
-  the first preinst action so this window is as small as possible. Ratify.
-- **O2 (D vs B final lock):** recommend D. Confirm the user accepts D's
-  "wedge-the-cut-not-the-host" semantics on a crashed unpack (recovery =
-  reinstall) rather than B's extra-copy read-isolation. If the user prefers
-  zero chance of ever reading the live `staged/` during a cut, choose B (at the
-  disk/GC cost).
-- **O3:** genid representation (random token vs unpack-time+pid). Either works
-  for the straddle tripwire; per-binary checksums are the real proof. Pick the
-  simplest at engineer time.
+- **O1 (PRIMARY — B vs D):** recommend **B**. Confirm the appliance `/var` can
+  budget one GC-bounded extra copy of the binary set per retained generation
+  (~50-70 MB × up to N=3+current). If NOT, fall back to **D** with the full
+  D-fix-1..5 spec in §4. This is the one decision that flips the mechanism.
+- **O2 (genid representation):** time+random suffix (B-P5). Confirm or pick.
+- **O3 (publish entry point):** new `xpfd publish-generation` subcommand vs
+  folding the publish into `seed-runtime`. Either is fine; a dedicated verb is
+  cleaner for the upgrade postinst path. Decide at engineer time.
+
+## 11. r1 → r2 changelog (how each r1 finding was folded)
+
+- **Codex r1-#1 / SMR r1-MAJOR1 (P1 ordering):** mooted by B (no preinst write).
+  Captured as D-fix-1 for the fallback.
+- **Codex r1-#2 / AGY r1-#1-CRIT (abort-unwind wedge):** mooted by B (no
+  error-unwind handling; aborted unpack leaves the prior generation valid).
+  Captured as D-fix-2 for the fallback.
+- **Codex r1-#3 (#1967 stale snapshot on post-PREFLIGHT refusal):** B resolves
+  the source at INIT (B-P3) so a no-source refusal writes no journal / takes no
+  snapshot. Captured as D-fix-3 for the fallback.
+- **Codex r1-#4 / AGY r1-#3 / SMR r1-MAJOR2.2 (seed manifest + fallback):** B's
+  seed publishes a generation incl. the seed-failure fallback (§4.B.4, B-P1).
+- **AGY r1-#2 (first-install / preinst install window):** B has no preinst write,
+  and the cut reads only published generations, so a partially-unpacked live
+  `staged/` during a first install/legacy migration is never a cut source.
+- **Codex r1-#5 (`.generation` copied into version dirs):** mooted by B (no
+  `.generation` marker). For D-fallback, D-fix-5 decides it.
+- **Codex r1-#6 / AGY r1-#4 / SMR r1-MINOR2 (B's rejection not earned):** ACTED
+  ON — recommendation flipped to B; genid monotonicity folded as B-P5.
+- **SMR r1-MINOR1 (genid decorative):** B drops the per-binary manifest gate
+  entirely; genid is only a generation key + GC stamp.
