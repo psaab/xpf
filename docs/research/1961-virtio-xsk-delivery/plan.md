@@ -85,10 +85,9 @@ value — to settle whether `workers=N` actually produced one XSK per NIC RX que
 - no counter climbing AND N XSKs bound 1:1 to queues ⇒ candidate B (fill-ring /
   NAPI starvation): fix = drive virtio NAPI on the RX side.
 The dominant degraded-path reason otherwise pins the stage:
-- `redirect_err` → candidate A (XSKMAP slot) — then check whether workers==queues
-  actually registered N XSK slots (reconcile the workers=4 evidence); fix =
-  populate every queue's slot (register N workers, or steer unbacked queues to a
-  backed slot, or force queue_count=1).
+- `redirect_err` → candidate A (queue-bound stranding) — fix = one XSK bound per
+  NIC RX queue so `rx % queue_count` is the identity (NOT `queue_count=1`, which
+  strands non-0 queues — SMR-r1-m1).
 - `heartbeat_stale`/`missing` → candidate D — fix the helper's heartbeat
   slot-update keying so it matches the shim's `binding.slot` for virtio's queues.
 - `binding_not_ready` → candidate C — investigate why `binding.ready` is false on
