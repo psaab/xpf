@@ -188,6 +188,7 @@ maintainability payoff.
 
 ## Reviewer verdicts
 
-- Claude SMR: _pending_
+- Claude SMR: PLAN READY (engineer-now); build-time inline confirmed right.
+- AGY companion: PLAN YES (r1) — "clean, safe, behavior-preserving; proceed
+  with build-time inlining." Strong drift canary + counter-factual test.
 - Codex companion: _pending_
-- AGY companion: _pending_

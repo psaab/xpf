@@ -96,6 +96,62 @@ a normal upgrade), default to the SAFE branch (leave layout intact) and
 log loudly — never fall through to teardown. Mirrors preinst's
 "skip-don't-destroy" posture.
 
+### 4.4 Upgrade-transition gap — the OLD (buggy) postrm runs during this fix's own rollout (AGY NEEDS-MAJOR, FOLDED)
+
+**AGY plan review correctly flags:** dpkg runs the **OLD** package's
+`postrm upgrade <new>` during an upgrade (Debian maintainer-script call
+order). So upgrading FROM a currently-installed buggy version TO the fixed
+version still executes the OLD buggy postrm. If the new staged `xpfd` can't
+exec at that moment (e.g. an OS/libc bump in the same transaction), the OLD
+postrm's exec-probe short-circuits and runs the destructive teardown — the
+exact bug — during the very upgrade that ships the fix. The new postrm fix
+does NOT protect this one transition.
+
+**AGY's suggested fix — new preinst `sed`-patches
+`/var/lib/dpkg/info/xpf.postrm` to neutralize the probe — is NOT adopted
+as-written.** Rewriting dpkg's own on-disk control scripts from a
+maintainer script is fragile and surprising: it depends on the exact text
+of the installed old script, races dpkg's own bookkeeping, and leaves a
+mutated control file dpkg did not author (a future `dpkg --verify` / debug
+nightmare). It is a last-resort hack.
+
+Safer options for review (pick one):
+
+- **(a) Pre-seed the state the old postrm gates on.** The old destructive
+  branch only fires when `[ -L "$CURRENT" ] || [ -e "$CURRENT" ]` is true
+  AND the probe fails. The NEW preinst (runs BEFORE the old postrm) cannot
+  make the probe pass without a runnable binary, and removing `current`
+  pre-emptively would itself break rollback. So pre-seeding does not cleanly
+  defuse it. Likely insufficient — document why.
+- **(b) Accept the one-transition exposure, rely on the existing
+  backstops.** The destructive teardown removes `current` + the drop-in +
+  repoints sbin to staged. The new package's `postinst` (runs AFTER the old
+  postrm) re-seeds the versioned runtime (`seed-runtime`) and rewrites the
+  drop-in — IF the new xpfd can exec by then. If it cannot exec at postinst
+  either, the daemon is broken regardless of this bug (a non-runnable new
+  binary is a failed upgrade). So the NET new exposure from the old postrm
+  is narrow: it only matters if the new binary is non-execable at OLD-postrm
+  time but execable at postinst time. Quantify this window; it may be
+  acceptable-with-documentation given postinst re-seeds.
+- **(c) Targeted, idempotent preinst guard that does NOT rewrite dpkg
+  scripts:** the new preinst writes a small marker
+  (`/run/xpf/skip-postrm-teardown` or a `staged/.no-teardown`) that a
+  COOPERATING old postrm would honor — but the OLD postrm predates the
+  marker, so it can't honor it. Only works for FUTURE transitions, not the
+  buggy→fixed one. So (c) protects buggy(N)→fixed→...→(N+2) but not the
+  immediate hop. Document that the marker hardens future hops.
+
+**Disposition:** the buggy→fixed transition is a genuine one-time exposure
+inherent to fixing a maintainer script (the fix can't run before it's
+installed). The plan should: (1) ship the postrm version-compare fix (4.1),
+(2) add the cooperative marker (c) so all FUTURE transitions are protected,
+and (3) HONESTLY DOCUMENT the one-time buggy→fixed exposure in the PR body
++ `docs/in-place-upgrade.md`, noting postinst re-seed (b) as the mitigation
+and that the only unprotected case is "new binary non-execable at
+old-postrm time but execable at postinst time." AGY's sed-patch (a-hack) is
+listed as a REJECTED alternative with the fragility reasoning. Plan review
+to confirm this disposition or escalate.
+
 ## 5. Alternatives rejected
 
 - **Keep exec-probe as the gate, add a retry.** A retry of a corrupt
@@ -170,6 +226,13 @@ semantics in postrm-upgrade and pick the floor version from changelog.
 
 ## Reviewer verdicts
 
-- Claude SMR: _pending_
+- Claude SMR: PLAN READY pending `$2`-semantics confirmation in impl.
+- AGY companion: PLAN NEEDS-MAJOR (r1) — the OLD (buggy) postrm runs during
+  the buggy→fixed upgrade transition, so this fix does not protect its own
+  rollout. FOLDED in §4.4: AGY's exact remedy (preinst sed-patching
+  `/var/lib/dpkg/info/xpf.postrm`) REJECTED as fragile control-file
+  rewriting; instead ship the version-compare fix + a cooperative marker
+  that protects all FUTURE transitions + honest documentation of the
+  one-time buggy→fixed exposure (mitigated by postinst re-seed). Re-verdict
+  pending Codex/arch confirmation of the disposition.
 - Codex companion: _pending_
-- AGY companion: _pending_

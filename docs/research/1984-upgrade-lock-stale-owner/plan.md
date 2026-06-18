@@ -155,6 +155,9 @@ review confirmation.
 
 ## Reviewer verdicts
 
-- Claude SMR: _pending_
+- Claude SMR: PLAN READY (engineer-now); os.Remove-on-release correctly
+  rejected.
+- AGY companion: PLAN YES (r1) — "correct, robust; deep understanding of
+  Unix locking semantics." Explicitly endorsed rejecting os.Remove
+  (split-mutex on inode-bound flock) and the blocking-seam test.
 - Codex companion: _pending_
-- AGY companion: _pending_

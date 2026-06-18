@@ -42,18 +42,49 @@ target object.
 
 ## 4. Approach
 
-### 4.1 Minimum viable (recommended for engineer-now): REJECT
+### 4.1 Minimum viable (recommended for engineer-now): REJECT — AT THE CONSTRUCTOR, not just RunRolling
 
-In `RunRolling` (or at the `cmd/xpfd/upgrade.go` flag-parse boundary):
+**AGY plan review (NEEDS-MAJOR, FOLDED):** the guard must NOT live only in
+`RunRolling`. `NewCLICluster(*unit)` is called from THREE sites, and the
+other two also discard `unit`:
+
+- `pkg/upgrade/rolling.go:96` — `RunRolling`
+- `cmd/xpfd/upgrade_kernel.go:155` — `xpfd upgrade kernel drain`
+  (`DrainAndConfirm`)
+- `cmd/xpfd/upgrade_kernel.go:167` — `xpfd upgrade kernel rejoin`
+  (`RejoinAndConfirm`)
+
+A guard placed only in `RunRolling` leaves `kernel drain`/`kernel rejoin`
+silently targeting `127.0.0.1:50051` under a non-default `--unit`
+(VERIFIED: both kernel sub-verbs parse `--unit` at
+`upgrade_kernel.go:48` and pass it into `NewCLICluster`). The kernel
+sub-verbs ALSO take systemd/host actions keyed to the unit, so the same
+wrong-daemon mismatch applies.
+
+**Fix: change `NewCLICluster` to validate the unit and return an error**,
+so EVERY call site is covered at one chokepoint:
 
 ```go
-if cfg.Unit != "" && cfg.Unit != DefaultUnit {
-    return fmt.Errorf("upgrade --rolling: --unit %q unsupported "+
-        "(rolling cluster control targets the default daemon at %s; "+
-        "a non-default unit's control endpoint is not yet mapped)",
-        cfg.Unit, defaultGRPCAddr)
+// NewCLICluster returns a RollingCluster driving the selected unit's xpfd.
+// Until a unit->endpoint mapping exists, only the default unit is
+// supported; a non-default unit is rejected so cluster RPCs can never
+// silently target the wrong daemon while systemd actions hit another.
+func NewCLICluster(unit string) (RollingCluster, error) {
+    if unit != "" && unit != DefaultUnit {
+        return nil, fmt.Errorf("cluster control for systemd unit %q is "+
+            "unsupported (rolling/kernel-drain RPCs target the default "+
+            "daemon at 127.0.0.1:50051; a non-default unit's control "+
+            "endpoint is not yet mapped)", unit)
+    }
+    return &grpcCluster{addr: "127.0.0.1:50051", dialTimeout: 5 * time.Second}, nil
 }
 ```
+
+All three call sites propagate the error (RunRolling already returns
+error; the two kernel sub-verbs print + `os.Exit(1)` like their siblings).
+This is the single-chokepoint fix AGY recommends and is strictly safer than
+three separate CLI-boundary guards (a future fourth caller is covered
+automatically).
 
 This closes the correctness hole immediately and is fully testable. The
 systemd-action side already honors the unit, so a reject is the only safe
@@ -99,13 +130,14 @@ forward-looking modularity improvement.
 
 ## 6. Files touched
 
-- `pkg/upgrade/rolling.go` (reject non-default unit, OR call the new
-  target ctor)
-- `pkg/upgrade/cluster_cli.go` (stop discarding `unit`: either honor it or
-  the constructor is moved to `clusterclient`)
+- `pkg/upgrade/cluster_cli.go` (`NewCLICluster` returns `(RollingCluster,
+  error)`; rejects non-default unit at the single chokepoint)
+- `pkg/upgrade/rolling.go:96` (handle the new error from `NewCLICluster`)
+- `cmd/xpfd/upgrade_kernel.go:155,167` (handle the new error in `drain`
+  and `rejoin`)
+- `pkg/upgrade/cluster_cli_test.go` / new test (non-default-unit reject for
+  all three callers; dial-attempt recorder)
 - NEW `pkg/upgrade/clusterclient/` (only if 4.2 is in scope)
-- `pkg/upgrade/cluster_cli_test.go` / new test (non-default-unit reject or
-  endpoint-mapping assertion)
 - `cmd/xpfd/upgrade.go` (optional `--grpc-addr` if 4.2)
 - `docs/in-place-upgrade.md` (document the unit/endpoint contract)
 
@@ -150,6 +182,10 @@ review judges it small enough to ride along.
 
 ## Reviewer verdicts
 
-- Claude SMR: _pending_
+- Claude SMR: PLAN READY (4.1; 4.2 follow-up).
+- AGY companion: PLAN NEEDS-MAJOR (r1) — guard only in RunRolling leaves
+  `kernel drain`/`kernel rejoin` (`upgrade_kernel.go:155,167`) silently
+  targeting the default endpoint. FOLDED: moved the guard into
+  `NewCLICluster` (returns error) so all three call sites are covered.
+  Re-verdict on the folded plan: expected PLAN YES.
 - Codex companion: _pending_
-- AGY companion: _pending_

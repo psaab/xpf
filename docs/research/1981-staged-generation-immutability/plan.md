@@ -118,17 +118,59 @@ must be written atomically as the final unpack step (dpkg conffile/replace
 ordering must guarantee `.generation` is last — needs verification that
 postinst is the right hook and that no unpack step touches it later).
 
-### Recommendation to review
+### Option D (RECOMMENDED after AGY review) — preinst invalidates `.generation`, postinst rewrites it (the "Hybrid")
 
-Option C is the smallest fix that directly closes the defect and matches
-Codex's stated direction (verify a source generation id before+after copy).
-Option B is the most robust (true immutability) but adds a second copy and
-a new tree. Option A reintroduces a staleness/dead-owner subproblem and is
-NOT recommended. **Plan review should choose B vs C** (A rejected). Lean C
-for scope; escalate to B if review judges the post-copy recheck window
-insufficient (e.g. a copy that finishes within a single dpkg replace step
-could still be torn — though the per-binary manifest checksum on the COPIED
-bytes catches that).
+**AGY plan review (NEEDS-MAJOR on bare Option C, FOLDED):** Option C as
+written has a FATAL window. dpkg overwrites the staged binaries during the
+UNPACK phase, BEFORE any maintainer script that updates `.generation`
+runs. The OLD `.generation` sits on disk unchanged while dpkg replaces the
+binaries around it. An operator cut that both STARTS and FINISHES during
+unpack reads the SAME stale genid before and after the copy → publishes a
+torn, mixed-generation set undetected. (The per-binary-checksum mitigation
+does not fully save C either: mid-replace the copied bytes can match the
+stale manifest's checksum for some files and not others, and a cut that
+copies a not-yet-replaced file + an already-replaced file with a manifest
+that matches NEITHER cleanly is ambiguous.) Bare C is rejected.
+
+The fix is to make the `.generation` marker reflect the unpack state by
+having the SCRIPT THAT RUNS BEFORE UNPACK invalidate it:
+
+- `preinst` (runs BEFORE unpack, `case upgrade`): DELETE or overwrite
+  `staged/.generation` with a sentinel value `"unpacking"` (and a dead-PID-
+  safe marker is unnecessary here — see crash-safety below). This is the
+  key insight: the marker must be invalidated by the script that runs
+  before dpkg starts replacing binaries, not the one that runs after.
+- dpkg unpacks (binaries replaced; `.generation` says "unpacking").
+- `postinst` (runs AFTER unpack+configure completes): write the NEW genid +
+  per-binary checksum manifest to `staged/.generation` as the FINAL step.
+- `copyStaged` REFUSES to read staged whenever `.generation` is absent or
+  reads `"unpacking"` (returns "package unpack in progress, retry after apt
+  completes"), AND verifies the genid is UNCHANGED across the copy AND the
+  per-binary checksums match the copied bytes.
+
+Now an operator cut during unpack sees `"unpacking"` and refuses — it can
+NEVER read a torn set. A cut entirely outside the unpack window sees a
+stable valid genid + matching checksums and proceeds. This closes the
+window WITHOUT a second staging tree (Option B) or a `/run` lock with
+dead-owner staleness (Option A).
+
+**Crash-safety of Option D:** if dpkg crashes mid-unpack, `.generation`
+stays `"unpacking"` and operator cuts stay refused until the package
+operation is completed (`dpkg --configure -a` re-runs postinst, which
+rewrites a valid `.generation`) or the package is reinstalled. AGY's point
+stands: WEDGING operator cuts while the package is half-unpacked is the
+CORRECT fail-safe — staged is genuinely inconsistent in that state. This is
+strictly better than Option A's `/run` sentinel (no tmpfs-reboot escape
+needed, no dead-PID logic; the marker lives WITH the thing it describes).
+
+### Recommendation to review (UPDATED)
+
+**Option D (Hybrid) is the recommended mechanism.** It directly closes the
+unpack window that bare Option C misses, with the smallest footprint
+(no second tree, no `/run` lock). Option B (immutable versioned staging)
+remains the most robust if review wants true content immutability rather
+than a state marker, at the cost of a second copy. Options A and bare C are
+rejected. **Plan review should ratify D vs B** (lean D for scope).
 
 ## 5. Alternatives rejected
 
@@ -156,21 +198,27 @@ bytes catches that).
 
 ## 7. Test strategy
 
-Strong counter-factual regression test:
+Strong counter-factual regression tests (Option D). AGY flagged the bare-C
+test as WEAK because it mutated `.generation` mid-copy, which does NOT
+recreate the real failure (a cut that reads a STALE-but-stable genid during
+unpack). The Option-D tests recreate the REAL window:
 
-- Seed `staged/` with a generation manifest (Option C) or a published gen
-  (Option B).
-- Start `copyStaged` with a hook (a test seam in `copyTree` or a
-  per-binary copy callback) that MUTATES one managed staged binary
-  mid-copy AND updates/omits the source `.generation`.
-- Assert `copyStaged` ABORTS with a generation-mismatch error.
-- Counter-factual: with the source-generation check REMOVED (reconstruct
-  the pre-fix `copyTree`+self-checksum path), the same scenario PUBLISHES a
-  mixed dir — prove the OLD path would not detect it (the test pins that
-  the self-checksum is insufficient).
-- Crash-safety tests per chosen option (Option A: dead-owner sentinel
-  cleared; Option B: partial publish not resolved by `current`; Option C:
-  missing `.generation` → refuse).
+- **Unpack-window refuse (the real failure mode):** simulate the unpack
+  state — `.generation == "unpacking"` (as preinst left it) with the staged
+  binaries in a torn/mixed state. Assert `copyStaged` REFUSES (does not
+  publish). Counter-factual: with the refuse check removed (pre-fix
+  `copyTree`+self-checksum path), the same torn staged set PUBLISHES a mixed
+  dir — prove the OLD path does not detect it.
+- **Stable-genid happy path:** valid `.generation` (genid + matching
+  per-binary checksums), consistent binaries → `copyStaged` succeeds.
+- **Mid-copy genid change:** a test seam that flips `.generation` to a new
+  genid between the before-read and after-read → abort on the post-copy
+  recheck.
+- **Checksum mismatch:** copied bytes don't match the manifest's per-binary
+  checksum → abort.
+- **Crash-safety:** `.generation == "unpacking"` persists after a simulated
+  dpkg crash → cuts stay refused until a valid manifest is rewritten
+  (postinst re-run).
 
 ## 8. Invariants
 
@@ -212,6 +260,14 @@ architecture-review step. Coordinate sequencing with #1982.
 
 ## Reviewer verdicts
 
-- Claude SMR: _pending_
+- Claude SMR: PLAN READY for arch review (B vs C; A rejected) — but see AGY.
+- AGY companion: PLAN NEEDS-MAJOR (r1) — bare Option C has a FATAL unpack
+  window (dpkg replaces binaries during unpack while `.generation` stays
+  stale; a cut entirely within unpack reads the same stale genid before+
+  after and publishes a torn set). FOLDED: adopted Option D (Hybrid) —
+  preinst invalidates `.generation` to `"unpacking"` BEFORE unpack, postinst
+  rewrites the valid manifest AFTER; `copyStaged` refuses on
+  absent/"unpacking". AGY also correctly noted wedging operator cuts during
+  a half-unpack is the right fail-safe. Re-verdict on Option D: expected
+  PLAN YES pending the architecture-review ratification of D vs B.
 - Codex companion: _pending_
-- AGY companion: _pending_
