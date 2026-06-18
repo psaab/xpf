@@ -5941,3 +5941,7 @@ top.
 ## 2026-06-17 — #1967 PR #1974 review round 4
 - **Codex r4 NEEDS-CHANGES (TEST-only, prod code confirmed correct)**: TestVerifyFailCleanup_SaveJournalFailureKeepsSnapshot chmod'd VersionsDir read-only, but JournalPath lived UNDER VersionsDir (testEnv), so it blocked BOTH the version-dir removal AND the snapshot removal — the old buggy code would have "passed" for the wrong reason (not a true regression test). FIX: build a custom Runner with JournalPath in a SEPARATE dir; chmod ONLY the journal dir read-only, leaving VersionsDir writable. Now the version dir IS removed (unlink branch proven), saveJournal fails, and the snapshot survives. Codex confirmed the production fix (return-before-snapshot-remove) closes the window by inspection.
 - Also rebased onto origin/master (PR #1973 #1964 follow-up merged): resolved append-only _Log.md + the postrm downgrade-branch conflict (my shared remove_runtime_dropin helper subsumes #1973's rmdir-dirname change).
+
+## review-012 triage (/research) — 2026-06-18
+- **Action**: Triaged codex-review-012 + agy-review-012 (upgrade/packaging + refactors). Verified all 10 findings real+new against a963273e8; no dups of open issues. Filed #1981-#1990. Drafted 5 bug plans + Claude-SMR.
+- **File(s)**: docs/research/{1981-staged-generation-immutability,1982-upgrade-manifest-ssot,1983-rolling-unit-endpoint,1984-upgrade-lock-stale-owner,1985-postrm-exec-failure-downgrade}/plan.md, docs/research/review-012-claude-smr.md
