@@ -11,9 +11,12 @@ research time (it reviews code PRs only — joins at `/engineer`).
 | r2 | Codex | thread `019edced-1fe1-7921-b4bd-57acc1466775`; `codex-plan-r2.md` | PLAN-NEEDS-MAJOR (mechanism B ratified, spec tighten) |
 | r2 | AGY | `adversarial-review-mqk3esm6-knh8qs`; `agy-plan-r2.md` | PLAN-NEEDS-MAJOR (mechanism B accepted, spec tighten) |
 | r2 | Claude SMR | `claude-smr-plan-r2.md` | PLAN-READY w/ 2 MINORs (folded into r3) |
-| r3 | Codex | `codex-plan-r3.md` | (pending) |
-| r3 | AGY | `agy-plan-r3.md` | (pending) |
-| r3 | Claude SMR | `claude-smr-plan-r3.md` | (pending) |
+| r3 | Codex | thread `019edcf6` (r3 turn); `codex-plan-r3.md` | PLAN-NEEDS-MAJOR (one hole: same-ver replace protocol; all else fixed) |
+| r3 | AGY | `adversarial-review-mqk3oe1j-xux786`; `agy-plan-r3.md` | PLAN-NEEDS-MAJOR (SAME one hole, independent) |
+| r3 | Claude SMR | `claude-smr-plan-r3.md` | PLAN-READY w/ NIT1 (deferred-publish verb) |
+| r4 | Codex | `codex-plan-r4.md` | (pending) |
+| r4 | AGY | `agy-plan-r4.md` | (pending) |
+| r4 | Claude SMR | `claude-smr-plan-r4.md` | PLAN-READY |
 
 ## r1 convergent themes (all three)
 - **P1 ordering / abort-upgrade wedge** (SMR-MAJOR1, Codex#1+#2, AGY#1-CRIT):

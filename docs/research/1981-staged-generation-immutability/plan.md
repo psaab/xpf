@@ -2,15 +2,15 @@
 
 - **Issue:** #1981 (HIGH, correctness / upgrade integrity)
 - **Mode:** `/research` — converge a plan + recommend a mechanism; STOP at PLAN-READY. No code, no PR.
-- **Revision:** r3 (r1→r2: recommendation FLIPPED from Option D to **Option B**.
-  r2→r3: mechanism B RATIFIED by all three reviewers (Codex: "B is the right
-  direction over D"); r3 tightens the B spec for the eight convergent r2
-  spec-findings — same-version destination identity, atomic current-gen symlink,
-  partial pre-sweep, staged-gen retention=2 (not N=3), publish-under-lock +
-  GC-protects-journaled-genid + new `Journal.SourceGeneration` field, publish
-  own free-space check + best-effort + loud + no-auto-cut-on-publish-fail,
-  postrm purge+downgrade cleanup, and the honest first-deploy bootstrap caveat.
-  r1 findings folded in §11; r2 findings in §12.)
+- **Revision:** r4 (r1→r2: recommendation FLIPPED D→**B**. r2→r3: B ratified by
+  all three; tightened the B spec for eight r2 spec-findings. r3→r4: Codex and
+  AGY r3 INDEPENDENTLY converged on ONE remaining hole — B-P3b's same-version
+  `versions/<ver>` replacement protocol (a blind `.partial`→rename fails
+  `ENOTEMPTY` and a destructive replace would mutate the live/rollback dir
+  mid-cut, violating #1967). r4 adds the SAFE replacement protocol (OPT1
+  refuse-or-guarded-replace [recommended, reuses the proven `cleanupFailedVerifyCopy`
+  guard] / OPT2 generation-keyed `versions/<ver>-<genid>` dir). r1 findings §11;
+  r2 §12; r3 §13.)
 - **Base:** `origin/master` @ `b1ef3ed16` (includes merged #1982 manifest SSOT, #1984, #1985, #1983).
 - **Research branch:** `research/1981-staged-generation-immutability`
 
@@ -323,7 +323,15 @@ unacceptable. A and C are rejected for the fatal flaws above.
   prior generation stays the cut source). The lock acquire is non-fatal too: if
   the lock is busy (an operator cut is running) the postinst defers the publish +
   drops `/run/xpf/upgrade-deferred` (same shape as the #1965 postinst contention
-  branch) — the operator re-runs after the cut completes.
+  branch) — the operator re-runs after the cut completes. **Deferred-publish
+  recovery (SMR r3-NIT1):** a deferred publish leaves the NEW binaries staged but
+  unpublished, so a bare `xpfd upgrade` re-run would read the OLD `current-gen`
+  and no-op ("already committed"). The recovery verb must therefore PUBLISH first:
+  either `xpfd upgrade` itself runs the publish when it observes the staged tree
+  is newer than `current-gen` / the `upgrade-deferred` marker is set (it already
+  holds the lock at that point), OR recovery is documented as `dpkg-reconfigure
+  xpf` (re-runs the postinst publish). Pick one at engineer time; do not leave the
+  recovery as a bare `xpfd upgrade`.
 - **B-P3 (cut resolves the source genid at INIT; copies the dir, not the
   symlink):** `Run()` resolves `staged-gen/current-gen` at INIT (pre-PREFLIGHT)
   and records the resolved genid in a NEW `Journal.SourceGeneration` field
@@ -334,13 +342,44 @@ unacceptable. A and C are rejected for the fatal flaws above.
   symlink) so a concurrent publish cannot redirect an in-flight cut. The
   journaled `TargetVersion` is read from that generation's `xpfd`; a resume keys
   the SAME genid.
-- **B-P3b (same-version destination identity, Codex r2-#2):** stamp
-  `SourceGeneration` into `versions/<ver>/.srcgen` (written atomically with the
-  version dir) and change the `copyStaged` skip from "skip if `versions/<ver>`
-  exists" to "skip ONLY if it exists AND its `.srcgen` == this cut's
-  `SourceGeneration`." A same-version reinstall with a new genid then forces a
-  fresh recopy instead of silently reusing a stale (or pre-fix torn)
-  `versions/<ver>`.
+- **B-P3b (same-version destination identity + SAFE replacement protocol, Codex
+  r2-#2 + Codex/AGY r3):** stamp `SourceGeneration` into `versions/<ver>/.srcgen`
+  (written atomically inside the version dir, so GC removes it with the dir — NOT
+  a sibling dotfile) and change the `copyStaged` skip from "skip if
+  `versions/<ver>` exists" to "skip ONLY if it exists AND its `.srcgen` == this
+  cut's `SourceGeneration`." The IDENTITY stamp alone is necessary but NOT
+  sufficient: a same-version-but-different-genid cut must REPLACE an existing
+  `versions/<ver>`, and that dir may be the LIVE `current` target and/or the
+  rollback target, and `rename(.partial, versions/<ver>)` fails `ENOTEMPTY` over
+  a non-empty dir while a destructive RemoveAll+recopy during the pure COPY phase
+  would (a) violate the #1967 "never mutate a live version dir mid-cut" invariant
+  and (b) race the running daemon's helper-spawn path (`dir(os.Args[0])` pins to
+  `versions/<ver>/xpfd`, `flip.go:30`). Two sound resolutions — **pick at
+  engineer time:**
+  - **B-P3b-OPT1 (minimal — refuse-or-guarded-replace):** if the existing
+    `versions/<ver>` is the live `current` OR the rollback (`PreviousVersion`)
+    target, REFUSE the same-version-different-genid cut pre-PREFLIGHT with a clear
+    error ("re-stage under a distinct version; cannot safely replace a live/
+    rollback version dir"). Otherwise (a stale, non-live `versions/<ver>` — e.g.
+    a pre-fix torn copy or an abandoned older attempt) it is safe to RemoveAll +
+    recopy, reusing EXACTLY the existing guarded-delete logic in
+    `cleanupFailedVerifyCopy` (`cutover.go:605`), which already proves a version
+    dir is neither `current` nor previous before deleting it. This adds no new
+    layout and preserves every existing invariant; the refused case is the
+    pathological dev/re-stage one.
+  - **B-P3b-OPT2 (clean structural — generation-keyed dir, AGY r3):** key the
+    destination by `versions/<ver>-<genid>/`. The `.partial`→rename then always
+    targets a fresh non-existent path (atomic, no `ENOTEMPTY`, the live/rollback
+    dir is never touched during COPY); `current` + the unit-drop-in ExecStart +
+    rollback keying resolve to `<ver>-<genid>` at FLIP (daemon already stopped).
+    Stronger but ripples into the `current` symlink, the drop-in path, rollback
+    keying, and GC (all version-keyed today) — a larger, but fully sound, change.
+
+  **Recommendation: OPT1** (minimal, reuses the proven guarded-delete, refuses
+  only the pathological same-version-different-bytes case) unless `/engineer`
+  finds same-version-different-genid is a routine production path, in which case
+  OPT2's gen-keyed layout is the clean answer. Either fully closes the hole; the
+  plan does not leave it as an unsafe blind rename.
 - **B-P4 (durable, ONE Go implementation):** publish + `current-gen` + `.srcgen`
   writes are `fsatomic` DurableState (survive power loss). The shell postinst
   delegates the publish to the staged Go binary (a dedicated `xpfd
@@ -519,3 +558,25 @@ convergent r2 spec-findings — none changes the mechanism:
   publish failure logs loudly + skips the auto-cut; the "no new generation
   published" condition is surfaced so an operator never mistakes a same-version
   no-op for the upgrade.
+
+## 13. r3 → r4 changelog (single remaining hole closed)
+
+Codex r3 and AGY r3 INDEPENDENTLY converged on ONE remaining correctness hole
+(both accepted every other r3 item as resolved at plan level; both explicitly
+called it "not new scope"):
+
+- **Codex r3 / AGY r3 (same-version `versions/<ver>` replacement protocol):**
+  r3's B-P3b `.srcgen` identity stamp detects a same-version-different-genid cut
+  but did not define HOW the existing `versions/<ver>` is safely replaced. A
+  blind `.partial`→rename fails `ENOTEMPTY`; a destructive RemoveAll+recopy
+  during the pure COPY phase would mutate the live `current`/rollback dir and
+  race the running daemon's helper-spawn (`dir(os.Args[0])`), violating #1967.
+  r4 B-P3b adds the SAFE replacement protocol with two sound resolutions —
+  **OPT1** (refuse a same-version-different-genid cut when the dir is
+  live/rollback; otherwise reuse the proven guarded-delete in
+  `cleanupFailedVerifyCopy`; recommended, minimal) / **OPT2** (generation-keyed
+  `versions/<ver>-<genid>` dir so the rename always targets a fresh path; clean
+  structural fix, larger surface). Either fully closes the hole.
+- **SMR r3-NIT1 / AGY r3-NIT (deferred-publish recovery verb):** folded into
+  B-P2b (the recovery must PUBLISH-then-cut, not bare `xpfd upgrade`; pick `xpfd
+  upgrade`-auto-publishes vs `dpkg-reconfigure xpf` at engineer time).
