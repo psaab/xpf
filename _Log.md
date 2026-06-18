@@ -5945,3 +5945,7 @@ top.
 ## review-012 triage (/research) — 2026-06-18
 - **Action**: Triaged codex-review-012 + agy-review-012 (upgrade/packaging + refactors). Verified all 10 findings real+new against a963273e8; no dups of open issues. Filed #1981-#1990. Drafted 5 bug plans + Claude-SMR.
 - **File(s)**: docs/research/{1981-staged-generation-immutability,1982-upgrade-manifest-ssot,1983-rolling-unit-endpoint,1984-upgrade-lock-stale-owner,1985-postrm-exec-failure-downgrade}/plan.md, docs/research/review-012-claude-smr.md
+
+## review-012 triage COMPLETE — 2026-06-18
+- **Action**: Folded AGY r1 + Codex r1 hostile plan reviews. 4 PLAN-READY (#1982/#1983/#1984/#1985), #1981 PLAN-READY-for-arch-review. Posted converged 3-reviewer verdict comments on all 5 bug issues. Refactors #1986-#1990 filed as backlog.
+- **File(s)**: docs/research/{1981..1985}/plan.md, docs/research/review-012-claude-smr.md
