@@ -1,6 +1,6 @@
 # #1961 — virtio AF_XDP delivers 0 packets to the XSK: diagnosis-first plan
 
-**Status:** DRAFT v1.2 — Codex r1 PLAN-MAJOR folded (queue_count is from binding inventory NOT workers; rx_xdp_redirects ambiguous + stranding invisible to fallback_stats; binding/XSK inventory is the PRIMARY discriminator). SMR self-corrected its m1. Pending AGY + Codex r2.
+**Status:** PLAN-READY (v1.3, converged 2026-06-18). Claude SMR PLAN-READY + Codex PLAN-READY (after r1 PLAN-MAJOR fully folded). AGY infra-unavailable (2 documented attempts, both companion-timeout — sanctioned infra-blocked convergence per feedback_codex_infra_must_retry). Diagnosis-first; no code.
 **Base:** origin/master (`fc4ba8eb7`)
 **Issue:** #1961 (virtio_net native-XDP→AF_XDP delivers 0 packets to the XSK →
 no transit forwarding); supersedes #1928. `/research` only — no code.
@@ -88,7 +88,7 @@ the **binding/XSK inventory first**, then the counters.
    settles candidate A directly — `workers=4` is only meaningful if status shows
    q0..q3 each bound+ready+xsk-registered+queue-matched. (Confirm the status that
    surfaces this is reachable on a STANDALONE VM — manager.go:1033 / statusfmt.go
-   — not cluster-only; if not, surfacing it is Path A step 0, SMR-r1-m4.)
+   — not cluster-only; if not, surfacing it — incl. socket_queue_id, which the FORMATTED bindings table omits today though raw status carries it (Codex-r2) — is Path A step 0, SMR-r1-m4.)
 2. **Degraded-path counters** (`status.DegradedPathCounters`) — SECONDARY, because
    a queue-bound stranding can succeed at the shim and die in the kernel XSK
    delivery WITHOUT incrementing any `fallback_stats` reason.
