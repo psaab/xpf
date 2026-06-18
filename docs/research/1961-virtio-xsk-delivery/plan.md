@@ -1,6 +1,6 @@
 # #1961 — virtio AF_XDP delivers 0 packets to the XSK: diagnosis-first plan
 
-**Status:** DRAFT v1.1 — SMR r1 PLAN-NEEDS-MINOR folded (queue-bound mechanism + binding-inventory diagnostic); pending Codex + AGY (Codex + AGY + Claude SMR)
+**Status:** DRAFT v1.2 — Codex r1 PLAN-MAJOR folded (queue_count is from binding inventory NOT workers; rx_xdp_redirects ambiguous + stranding invisible to fallback_stats; binding/XSK inventory is the PRIMARY discriminator). SMR self-corrected its m1. Pending AGY + Codex r2.
 **Base:** origin/master (`fc4ba8eb7`)
 **Issue:** #1961 (virtio_net native-XDP→AF_XDP delivers 0 packets to the XSK →
 no transit forwarding); supersedes #1928. `/research` only — no code.
@@ -29,10 +29,18 @@ acceptable outcome.*
 ## 3. The shim gate sequence (where a transit frame can die)
 
 `userspace-xdp/src/lib.rs` runs these gates before a transit frame reaches the
-XSK; **every transit failure is `drop_degraded_transit` (XDP_DROP) and is
-counted in the `userspace_fallback_stats` map by reason** (NOT in
-`rx_xdp_redirects` — so the climbing redirect counter is the *cpumap/host-inbound*
-path, not the XSK path):
+XSK. Most transit failures are `drop_degraded_transit` (XDP_DROP) counted in
+`userspace_fallback_stats` by reason. **BUT two corrections (Codex-r1):**
+(a) `rx_xdp_redirects` climbing is NOT proof of the cpumap/host-inbound path —
+the shim returns XDP_REDIRECT through *both* CPUMAP (lib.rs:1053) and XSKMAP
+(lib.rs:680), incrementing the same netdev counter, so a climbing counter is
+ambiguous (could be XSK redirect *intent*). (b) A redirect that SUCCEEDS at the
+shim but is then stranded by the kernel (queue-bound delivery mismatch — the XSK
+isn't bound to the packet's actual RX queue) does **NOT** increment
+`userspace_fallback_stats` — the shim already returned "redirect ok"; the frame
+dies in the kernel's XSK-delivery, invisible to the shim counters. So the
+degraded counters are necessary but NOT sufficient; the **binding/XSK inventory
+is the primary discriminator** (§6).
 
 1. `ctrl.enabled`/metadata-version (else cpumap_or_pass) — `reason ctrl_disabled`.
 2. binding lookup `USERSPACE_BINDINGS[ifindex*16 + selected_queue]`, flags!=0 —
@@ -58,33 +66,42 @@ the failing VM names the exact dying stage with zero bpftool.
 
 | # | Candidate | Stage/reason | Reconciliation status |
 |---|---|---|---|
-| A | **Queue-bound delivery stranding** (sharpened, SMR-r1-m1) — `select_userspace_queue` (lib.rs:1374) does `selected_queue = rx_queue_index % queue_count`, `queue_count = ctrl.queue_count(=queueCountFromBindings) ?: workers`. The shim's own comment: *"AF_XDP delivery is queue-bound — XDP may only redirect to a socket bound to the packet's actual RX queue; hashing to a different queue silently strands packets."* With `workers=1` → `queue_count=1` → every packet maps to `selected_queue=0` → only packets that physically arrived on RX queue 0 reach the queue-0 XSK; queues 1..N-1 are stranded. A ping hashing to a non-0 queue ⇒ rx=0. | `redirect_err` (10) and/or silent kernel stranding | **Contradicted by `workers=4`** (== 4 queues, *should* give one XSK per queue → identity map → works), yet it STILL failed. So the linchpin: does the helper actually bind ONE XSK PER NIC RX QUEUE on virtio at workers=N? **NOTE: candidate-A "fix = force queue_count=1" is WRONG-direction** (it strands all non-queue-0 traffic). Correct fix = an XSK bound per RX queue. |
-| B | **RX-wakeup / fill-ring starvation** — `poll(POLLIN)` (the only thing that kicks virtio NAPI) only fires when a binding's RX is drained; with N queues × 1 worker, queues 1..N-1 never drain, NAPI never wakes, fill rings starve → redirect "succeeds" but frame never lands in the XSK ring | none climb; `rx_xdp_redirects`↑ but helper rx=0 | **Most consistent with the symptom** (redirects climb, helper rx=0, virtio-specific NAPI-drive). Needs the live counter to confirm no `redirect_err`. |
-| C | binding-not-ready / heartbeat-missing | `binding_not_ready` (3) / `heartbeat_missing` (4) | **Leans on a STALE premise** — the workflow cited `docs/image-validation.md:81` "Device or resource busy" bind-loop, which is the **#1921 bug already fixed**; my live runs showed binds clean + helper running. Only live if the post-fix binding/heartbeat path is still wrong on virtio. |
-| D | heartbeat-stale via slot-mapping mismatch — helper updates `heartbeat[slotX]` but the shim checks `heartbeat[binding.slot=Y]` for virtio's queue layout | `heartbeat_stale` (5) | Plausible and NOT bind-dependent; would survive workers=N. Discriminated by the counter. |
-| E | ctrl liveness-proof timeout (ctrl disabled) | — | **Ruled out**: that path is cpumap/PASS, and `rx_xdp_redirects` climbs (ctrl enabled). |
+| A | **Queue-bound delivery stranding** (corrected, Codex-r1) — `selected_queue = rx_queue_index % queue_count` (lib.rs:1374), and `queue_count = ctrl.QueueCount = queueCountFromBindings(status.Bindings)` (maps_sync.go:353) — i.e. the **binding inventory**, NOT the worker count. Rust plans bindings from the RX-queue inventory with `worker_id = queue_id % workers` (helpers.rs:759). The shim comment: *"AF_XDP delivery is queue-bound — XDP may only redirect to a socket bound to the packet's actual RX queue."* So a frame on RX queue Q is stranded unless an XSK is **bound to queue Q, ready, xsk-registered, with `socket_queue_id == Q`**. Stranding happens when the binding inventory under-covers the NIC's RX queues — independent of the worker count. | silent kernel stranding (may NOT show in `fallback_stats`); maybe `redirect_err` | **`workers=4` does NOT by itself refute this** — it only matters whether status shows q0..q3 actually bound+ready+xsk-registered with matching `socket_queue_id`. That is the linchpin to READ, not assume. **Fix = one XSK per RX queue (NOT `queue_count=1`).** |
+| B | **virtio RX wake/fill delivery fails despite ready 1:1 queue bindings** (reframed, Codex-r1 — a single worker CAN own+poll multiple queue bindings, so it is NOT "queues never drain"). The redirect succeeds, but on virtio the frame never lands in the XSK rx ring because the RX wake/fill path (`tx/rings.rs:154`) doesn't drive virtio NAPI to deliver. | none climb; `rx_xdp_redirects`↑ but helper rx=0 | **Only confirmed AFTER** the inventory shows q0..qN bound+ready+xsk-registered+`socket_queue_id`-matched AND no degraded-path movement. Then it is the leading cause. |
+| C | binding-not-ready / heartbeat-missing | `binding_not_ready` (3) / `heartbeat_missing` (4) | **Leans on a STALE premise** (workflow cited the #1921 "Device or resource busy" bind-loop, already fixed; live binds were clean). Counter-driven only. |
+| D | heartbeat-stale via slot-mapping mismatch | `heartbeat_stale` (5) | **LOW (Codex-r1)** — the worker updates `heartbeat[binding.slot]` and the shim checks `heartbeat[binding.slot]` (same key: bpf_map/mod.rs:104 ↔ lib.rs:443). Counter-driven only; not co-equal absent evidence. |
+| E | ctrl liveness-proof timeout (ctrl disabled) | — | **Ruled out** (that path is cpumap/PASS; ctrl is enabled). |
 
-**The candidates cannot be discriminated by reasoning** (two lean on stale docs;
-A is contradicted by workers=4; B vs D both fit). They are discriminated by one
-live read.
+**The candidates cannot be discriminated by reasoning** (queue_count comes from
+the binding inventory not workers; a queue-bound stranding can be invisible to
+`fallback_stats`; B vs D need the counter). They are discriminated by reading
+the **binding/XSK inventory first**, then the counters.
 
 ## 6. Recommendation — diagnosis-first (Path A), then a targeted fix (Path B)
 
 **Path A (do FIRST, cheap, decisive):** on the still-up repro VM (`xpf-fwd`, per
-#1961) generate a transit ping burst and read **TWO** things (SMR-r1-m2), after
-first confirming the degraded-path counters actually surface on a STANDALONE
-(non-cluster) VM — if not, a one-line surface is Path A step 0 (SMR-r1-m4):
-(i) the helper's **Degraded path counters** (`status.DegradedPathCounters`), and
-(ii) the **binding / XSK inventory** (`show afxdp bindings` or the binding map):
-how many XSKs are bound, to which RX queues, and the `queueCountFromBindings`
-value — to settle whether `workers=N` actually produced one XSK per NIC RX queue
-(the linchpin). Interpretation:
-- `redirect_err` climbing AND only 1 XSK bound (or XSKs not 1:1 with NIC RX
-  queues) ⇒ queue-bound stranding (candidate A): fix = bind one XSK per RX queue
-  (NOT queue_count=1). The bind loop is NOT a blocker post-#1921 (SMR-r1-m3).
-- no counter climbing AND N XSKs bound 1:1 to queues ⇒ candidate B (fill-ring /
-  NAPI starvation): fix = drive virtio NAPI on the RX side.
-The dominant degraded-path reason otherwise pins the stage:
+#1961) generate a transit ping burst, then read — **PRIMARY discriminator first
+(Codex-r1):**
+1. **Binding / XSK inventory** (helper status `Bindings`): for EACH NIC RX queue,
+   is there a binding that is **bound + ready + xsk_registered** with
+   **`socket_queue_id == rx_queue`**, and what is `queueCountFromBindings`? This
+   settles candidate A directly — `workers=4` is only meaningful if status shows
+   q0..q3 each bound+ready+xsk-registered+queue-matched. (Confirm the status that
+   surfaces this is reachable on a STANDALONE VM — manager.go:1033 / statusfmt.go
+   — not cluster-only; if not, surfacing it is Path A step 0, SMR-r1-m4.)
+2. **Degraded-path counters** (`status.DegradedPathCounters`) — SECONDARY, because
+   a queue-bound stranding can succeed at the shim and die in the kernel XSK
+   delivery WITHOUT incrementing any `fallback_stats` reason.
+
+Interpretation:
+- inventory NOT 1:1 (a queue lacks a bound+ready+xsk-registered+queue-matched
+  XSK) ⇒ **candidate A** (queue-bound stranding): fix = one XSK per RX queue with
+  matching `socket_queue_id` (NOT `queue_count=1`). Bind loop is NOT a blocker
+  post-#1921 (SMR-r1-m3).
+- inventory IS 1:1 AND no degraded-path movement AND rx still 0 ⇒ **candidate B**
+  (virtio RX wake/fill delivery): fix = drive virtio NAPI / fix the RX
+  wake/fill path so redirected frames land in the XSK ring.
+A dominant degraded-path reason otherwise pins the stage:
 - `redirect_err` → candidate A (queue-bound stranding) — fix = one XSK bound per
   NIC RX queue so `rx % queue_count` is the identity (NOT `queue_count=1`, which
   strands non-0 queues — SMR-r1-m1).
