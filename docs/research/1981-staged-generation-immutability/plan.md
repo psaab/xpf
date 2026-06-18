@@ -2,10 +2,15 @@
 
 - **Issue:** #1981 (HIGH, correctness / upgrade integrity)
 - **Mode:** `/research` — converge a plan + recommend a mechanism; STOP at PLAN-READY. No code, no PR.
-- **Revision:** r2 (r1 → r2: recommendation FLIPPED from Option D to **Option B**
-  after all three reviewers independently argued D keeps fighting the dpkg
-  maintainer-script lifecycle while B sidesteps the entire wedge class. r1
-  findings folded throughout — see §11.)
+- **Revision:** r3 (r1→r2: recommendation FLIPPED from Option D to **Option B**.
+  r2→r3: mechanism B RATIFIED by all three reviewers (Codex: "B is the right
+  direction over D"); r3 tightens the B spec for the eight convergent r2
+  spec-findings — same-version destination identity, atomic current-gen symlink,
+  partial pre-sweep, staged-gen retention=2 (not N=3), publish-under-lock +
+  GC-protects-journaled-genid + new `Journal.SourceGeneration` field, publish
+  own free-space check + best-effort + loud + no-auto-cut-on-publish-fail,
+  postrm purge+downgrade cleanup, and the honest first-deploy bootstrap caveat.
+  r1 findings folded in §11; r2 findings in §12.)
 - **Base:** `origin/master` @ `b1ef3ed16` (includes merged #1982 manifest SSOT, #1984, #1985, #1983).
 - **Research branch:** `research/1981-staged-generation-immutability`
 
@@ -120,14 +125,27 @@ fixes. Rejected.
    reinstall of the SAME version still gets a distinct genid — AGY r1-#4). A
    `staged-gen/current-gen` symlink (atomic) names the latest complete
    generation, mirroring `versions/current`.
-3. **`copyStaged` (`pkg/upgrade/cutover.go`)** copies from
-   `staged-gen/<current-gen>/`, **NEVER from live `staged/`**. The
-   source-generation is resolved ONCE at INIT (see §6 ordering): if
+3. **`copyStaged` (`pkg/upgrade/cutover.go`)** copies from the genid the journal
+   recorded at INIT (`staged-gen/<SourceGeneration>/`, the directory, NOT through
+   the `current-gen` symlink — so a concurrent publish that re-points
+   `current-gen` cannot redirect an in-flight cut), **NEVER from live `staged/`**.
+   The source-generation is resolved ONCE at INIT (see §6 B-P3): if
    `staged-gen/current-gen` is absent the cut refuses pre-PREFLIGHT (no source
-   generation yet — operator must let the package op finish / run
-   `seed-runtime`). The copy is from a dir dpkg is NOT touching, so it is
-   internally a single generation by construction. `copyTreeChecksum` stays as
-   the intra-copy integrity check; no new before/after manifest gate is needed.
+   generation — operator must let the package op finish / run `seed-runtime`).
+   The copy is from a dir dpkg is NOT touching, so it is internally a single
+   generation by construction. `copyTreeChecksum` stays as the intra-copy
+   integrity check; no new before/after manifest gate is needed.
+   **Same-version destination identity (Codex r2-#2 — required):** today
+   `copyStaged` keys the destination by `TargetVersion` and SKIPS an existing
+   `versions/<ver>` (`cutover.go:512`). A same-version reinstall publishes a NEW
+   genid but the cut would skip the copy (dir exists) — never picking up the new
+   bytes — or, worse, reuse a stale/pre-fix torn `versions/<ver>`. Fix: stamp the
+   source genid into `versions/<ver>` (a `.srcgen` dotfile written atomically
+   with the version dir) and make the copy-skip "skip ONLY if the existing
+   `versions/<ver>` carries the SAME genid"; a different genid for the same
+   version forces a fresh recopy (into `versions/<ver>.partial` → rename). This
+   keeps the `versions/<ver>` key (the unit drop-in + rollback machinery depend
+   on it) while making the skip generation-aware.
 4. **`pkg/upgrade/runtime/seed.go` (first install)** publishes the first
    `staged-gen/<genid>/` (+ `current-gen`) from the seeded set, so a first
    manual `xpfd upgrade` has a source generation even though the postinst
@@ -135,11 +153,19 @@ fixes. Rejected.
    runs on every seed invocation (incl. the already-seeded resume path) — and on
    the seed-FAILURE fallback (direct-staged links) the postinst still publishes a
    `staged-gen/<genid>` from the (complete, just-unpacked) staged tree so a later
-   cut is not sourceless (Codex r1-#4, AGY r1-#3).
-5. **GC:** `staged-gen/` GC mirrors the `versions/` GC (`flip.go:306`): retain
-   N=3 newest, protect `current-gen`, sweep `.partial` orphans + abandoned
-   genids. One extra retained copy of the binary set per generation, bounded by
-   N=3 + the protected current.
+   cut is not sourceless (Codex r1-#4, AGY r1-#3). If even the publish fails
+   (ENOSPC on a brand-new host with no prior generation), the cut later refuses
+   safely (no source) — it never reads torn `staged/`; see B-P7.
+5. **GC:** `staged-gen/` GC mirrors the `versions/` GC shape (`flip.go:306`) but
+   with a SMALLER retention — **retain the current generation + 1 prior (N=2),
+   NOT N=3** (AGY r2-#2). Unlike `versions/` (which backs binary+DB rollback to
+   N prior versions), `staged-gen/` is only ever a *cut source*: once superseded
+   by a newer `current-gen` an older generation is never read again, so keeping
+   3 is pure disk waste. GC protects `current-gen` AND any genid referenced by an
+   active/resumable journal (`SourceGeneration` — AGY r2-#3 / Codex r2-#3), and
+   sweeps `.partial` orphans. The publish command pre-sweeps stale `.partial`
+   dirs BEFORE copying (AGY r2-#1b) so a crashed prior publish cannot accumulate
+   half-copies that exhaust `/var`.
 
 **Why B is the robust choice (the r1 reviewer convergence):**
 - **No preinst sentinel, no lifecycle coupling.** B writes nothing in preinst
@@ -160,17 +186,36 @@ fixes. Rejected.
   #1964 seed/legacy-migration gains one publish step.
 
 **Costs (honest):**
-- **Extra disk:** one published copy of the binary set per retained generation.
-  The set is dominated by `xpfd` (embeds the kernel-verified shim) +
-  `xpf-userspace-dp`; budget ~50-70 MB per generation, ×(N=3 + current) worst
-  case under `/var`. A constrained appliance must size `/var` for it; the
-  PREFLIGHT free-space check (`preflight`, `cutover.go:439`) and the
-  `staged-gen` GC bound it. **State the concrete budget in the engineer PR.**
-- **One new publish step + one new GC surface.** Both reuse existing
-  `.partial`+rename + the `versions/` GC shape — low novelty.
+- **Extra disk (AGY r2-#2, corrected for retention=2):** the binary set is
+  dominated by `xpfd` (embeds the kernel-verified shim) + `xpf-userspace-dp`;
+  budget ~50-70 MB per set. Steady-state copies on disk:
+  `staged/` (1) + `staged-gen/` current+1 (2) + `versions/` current+N=3 (4) =
+  **~7 copies ≈ 350-490 MB** (AGY's worst case was 9 copies assuming
+  `staged-gen` also retained N=3 — r3 cuts `staged-gen` retention to N=2, saving
+  two copies). On a 1-2 GB `/var` this is still a real footprint a constrained
+  appliance MUST size for. The publish's own free-space check (B-P7) and the
+  `staged-gen` GC bound it. **State the concrete budget + the `/var` floor in the
+  engineer PR.**
+- **One new publish step + one new GC surface.** Both reuse the existing
+  `.partial`+rename + atomic-symlink + `versions/` GC machinery — low novelty.
 - **Transient 3 copies during a cut:** `staged`, `staged-gen/<genid>`,
-  `versions/<ver>.partial`. PREFLIGHT must account for `staged-gen` in its
-  free-space need (it already sums `staged` + dbsnap + margin; add the publish).
+  `versions/<ver>.partial`. The PUBLISH (in postinst, not the cut) does its OWN
+  free-space check + GC before copying (B-P7); the cut's PREFLIGHT
+  (`cutover.go:439`) sizes only the `versions/<ver>` copy from the (already
+  on-disk) `staged-gen` source.
+
+**Bootstrap caveat — the FIRST B-aware deploy (Codex r2-#1, honest scope):**
+B only protects cuts performed by a **B-aware** `xpfd`. During the very upgrade
+that *installs* the first B-aware binary, the operator-visible `xpfd upgrade` is
+still the **OLD** (pre-B) binary, which reads live `staged/` (the fix cannot run
+before it is installed — the same one-hop bootstrap limitation #1964's
+first-install seed already documents). Mitigation is the EXISTING backstops for
+that single hop: the #1965 preinst lock gate (fail-loud if an operator cut is
+already running) + the verify-dataplane gate against the copied xpfd + the
+operator guidance "do not run `xpfd upgrade` during `apt upgrade`." From the
+first B-aware version onward the window is closed by construction. This is a
+documented, bounded, one-time exposure — NOT a residual hole in B's
+steady-state guarantee. State it plainly in `docs/in-place-upgrade.md`.
 
 ### Option C — bare SOURCE generation manifest — REJECTED
 
@@ -248,47 +293,86 @@ unacceptable. A and C are rejected for the fatal flaws above.
 
 ## 6. Ordering & crash-safety invariants (Option B contract for `/engineer`)
 
-- **B-P1 (publish after a complete unpack):** the `staged → staged-gen/<genid>`
-  publish runs in `postinst configure` (AFTER unpack completes, while dpkg's
-  frontend lock serializes transactions), BEFORE the standalone auto-cut and the
-  clustered stage-only branch. Place it UNCONDITIONALLY within `configure` for
-  `$2` non-empty (so clustered stage-only, XPF_NO_POSTINST_CUT, deferred-TOCTOU,
-  and standalone-cut all see a fresh generation), and via the seed for `$2`
-  empty (first install).
-- **B-P2 (atomic publish):** `staged-gen/<genid>.partial` → fsync → atomic
-  rename → fsync `staged-gen/`; then atomically repoint `staged-gen/current-gen
-  -> <genid>`. A crash before the rename leaves a `.partial` (GC-swept); a crash
-  after the rename but before `current-gen` leaves a complete-but-unreferenced
-  genid (the prior `current-gen` is still valid; the next postinst re-publishes
-  idempotently). NEVER a torn published generation.
-- **B-P3 (cut reads current-gen, resolved at INIT):** `Run()` resolves the
-  source generation from `staged-gen/current-gen` at INIT (pre-PREFLIGHT). Absent
-  → refuse with no journal written and no DB snapshot taken (Codex r1-#3 closed
-  by construction). The journaled `TargetVersion` is read from the published
-  generation's `xpfd`, and the genid is recorded in the journal so a resume keys
-  the SAME generation.
-- **B-P4 (durable):** publish + `current-gen` writes are `fsatomic` DurableState
-  (survive power loss). The shell postinst delegates the publish to the staged Go
-  binary (`xpfd publish-generation` / fold into `seed-runtime`) so there is ONE
-  durable-copy implementation, unit-tested, not hand-rolled shell — mirrors the
-  #1964 seed split (durable logic in Go, postinst just invokes it).
+- **B-P1 (publish after a complete unpack, before the auto-cut):** the
+  `staged → staged-gen/<genid>` publish runs in `postinst configure` (AFTER
+  unpack completes, while dpkg's frontend lock serializes apt transactions),
+  BEFORE the standalone auto-cut and the clustered stage-only branch. Place it
+  UNCONDITIONALLY within `configure` for `$2` non-empty (so clustered
+  stage-only, XPF_NO_POSTINST_CUT, deferred-TOCTOU, and standalone-cut all see a
+  fresh generation), and via the seed for `$2` empty (first install).
+- **B-P2 (atomic publish + atomic current-gen):**
+  `staged-gen/<genid>.partial` → fsync → atomic rename → fsync `staged-gen/`;
+  then repoint `current-gen` via **temp-symlink + rename** (`symlink(<genid>,
+  current-gen.tmp); rename(current-gen.tmp, current-gen)` — NOT `ln -sf`, which
+  unlink-then-creates and leaves a window where `current-gen` is absent; reuse
+  the preinst's existing `atomic_symlink` shape — AGY r2-#1a). A crash before the
+  dir rename leaves a `.partial` (pre-swept by the next publish, B-P below); a
+  crash after the dir rename but before the `current-gen` rename leaves a
+  complete-but-unreferenced genid (prior `current-gen` still valid; next publish
+  re-publishes idempotently). NEVER a torn published generation, NEVER an absent
+  `current-gen`.
+- **B-P2b (publish is serialized + best-effort + gated, AGY r2-#1b/#4, Codex
+  r2-#5):** the publish command (a) acquires the host-wide upgrade lock
+  `/run/xpf/upgrade.lock` so it is mutually exclusive with an operator cut and
+  its GC cannot delete a generation a cut is reading; (b) PRE-SWEEPS stale
+  `staged-gen/*.partial` BEFORE copying so a crashed prior publish cannot
+  accumulate half-copies that exhaust `/var`; (c) is BEST-EFFORT for the postinst
+  (a publish failure does NOT `set -e`-abort `configure` — a non-zero postinst
+  half-configures dpkg, worse than a deferred cut), but logs LOUDLY and the
+  postinst MUST NOT then run the auto-cut (a failed publish ⇒ skip the cut; the
+  prior generation stays the cut source). The lock acquire is non-fatal too: if
+  the lock is busy (an operator cut is running) the postinst defers the publish +
+  drops `/run/xpf/upgrade-deferred` (same shape as the #1965 postinst contention
+  branch) — the operator re-runs after the cut completes.
+- **B-P3 (cut resolves the source genid at INIT; copies the dir, not the
+  symlink):** `Run()` resolves `staged-gen/current-gen` at INIT (pre-PREFLIGHT)
+  and records the resolved genid in a NEW `Journal.SourceGeneration` field
+  (Codex r2-#4 — the journal must grow this field). Absent → refuse with no
+  journal written and no DB snapshot taken (Codex r1-#3 closed by construction).
+  `copyStaged` copies from `staged-gen/<SourceGeneration>/` (the resolved
+  directory, never re-reading `current-gen` and never copying THROUGH the
+  symlink) so a concurrent publish cannot redirect an in-flight cut. The
+  journaled `TargetVersion` is read from that generation's `xpfd`; a resume keys
+  the SAME genid.
+- **B-P3b (same-version destination identity, Codex r2-#2):** stamp
+  `SourceGeneration` into `versions/<ver>/.srcgen` (written atomically with the
+  version dir) and change the `copyStaged` skip from "skip if `versions/<ver>`
+  exists" to "skip ONLY if it exists AND its `.srcgen` == this cut's
+  `SourceGeneration`." A same-version reinstall with a new genid then forces a
+  fresh recopy instead of silently reusing a stale (or pre-fix torn)
+  `versions/<ver>`.
+- **B-P4 (durable, ONE Go implementation):** publish + `current-gen` + `.srcgen`
+  writes are `fsatomic` DurableState (survive power loss). The shell postinst
+  delegates the publish to the staged Go binary (a dedicated `xpfd
+  publish-generation` verb is cleanest; or fold into `seed-runtime`) so there is
+  ONE durable-copy implementation, unit-tested, not hand-rolled shell — mirrors
+  the #1964 seed split (durable logic in Go, postinst just invokes it).
 - **B-P5 (genid identity):** `<genid>` = monotonic (nanosecond time) + random
   suffix so a same-version reinstall yields a distinct generation and GC mtime
   ordering is stable (AGY r1-#4).
-- **B-P6 (staged-gen is NOT a dpkg payload file):** `staged-gen/` is
-  maintainer-script-managed runtime state under `/var/lib/xpf/` (NOT under the
-  dpkg-owned `staged/`), like `versions/`. dpkg never writes or removes it on
-  unpack; the postrm removes it on `purge` (mirror the `versions/` purge handling
-  in `debian/xpf.postrm`). Confirmed against dpkg semantics: dpkg only touches
-  its own recorded payload files; a never-recorded runtime dir is immune to
-  unpack-replace AND to the "files removed from the new package" cleanup
-  (independently corroborated by the postrm's own documented "presence-only file
-  marker" trap, `debian/xpf.postrm:36-42`).
-- **B-P7 (PREFLIGHT free-space):** PREFLIGHT must include the `staged-gen`
-  publish in its free-space need (it already sums staged + dbsnap + margin); the
-  publish happens in postinst (not in the cut), so the cut's PREFLIGHT only sizes
-  the `versions/<ver>` copy — but the postinst publish itself should fail loudly
-  (not silently) on ENOSPC and leave the prior generation valid.
+- **B-P6 (staged-gen NOT a dpkg payload file; purge + downgrade cleanup):**
+  `staged-gen/` is maintainer-script-managed runtime state under `/var/lib/xpf/`
+  (NOT under the dpkg-owned `staged/`), like `versions/`. dpkg never writes or
+  removes it on unpack (it only touches its own recorded payload files; a
+  never-recorded runtime dir is immune to unpack-replace AND to the "files
+  removed from the new package" cleanup — corroborated by the postrm's own
+  documented "presence-only file marker" trap, `debian/xpf.postrm:36-42`). The
+  postrm MUST (AGY r2-#5): (a) on `purge`, `rm -rf staged-gen/` alongside
+  `$VERSIONS` (else an orphan dir survives purge — a Policy violation); (b) on a
+  DOWNGRADE to a pre-B package (incoming `$2` predates the B floor — reuse the
+  #1985 `dpkg --compare-versions` version-keyed detection already in the postrm),
+  `rm -rf staged-gen/` so the obsolete dir does not leak permanently (the old
+  postrm never learns about it).
+- **B-P7 (publish does its OWN free-space check; ENOSPC fail-safe):** the
+  publish command (NOT the cut's PREFLIGHT) checks free `/var` against the set
+  size + margin and runs its `staged-gen` GC BEFORE copying. On ENOSPC: on an
+  UPGRADE the prior `staged-gen/<g>` stays valid (cut keeps reading it — but see
+  the SMR no-silent-stale note: the postinst must surface "no new generation
+  published" loudly so the operator does not believe a same-version no-op cut was
+  the upgrade); on a FIRST install with no prior generation the publish simply
+  fails and a later cut refuses safely (no source) — it NEVER reads torn
+  `staged/`. The cut's existing PREFLIGHT (`cutover.go:439`) sizes only the
+  `versions/<ver>.partial` copy from the on-disk `staged-gen` source.
 
 ## 7. Test strategy
 
@@ -313,10 +397,26 @@ unacceptable. A and C are rejected for the fatal flaws above.
 5. **First-install + seed-failure fallback:** seed publishes `<genid>`; a manual
    cut from a first-install host succeeds; the seed-failure (direct-staged)
    fallback still publishes a generation so a later cut is not sourceless.
-6. **GC:** `staged-gen/` retains N=3, protects `current-gen`, sweeps `.partial`
-   and abandoned genids; mirrors and reuses the `versions/` GC test shape.
-7. **Clustered stage-only:** a clustered-node postinst publishes a generation
-   (no cut) and a later `xpfd upgrade --rolling` cuts from it.
+6. **GC:** `staged-gen/` retains current+1 (N=2), protects `current-gen` AND any
+   genid referenced by an active/resumable journal (`SourceGeneration`), sweeps
+   `.partial` + abandoned genids; reuses the `versions/` GC test shape.
+7. **GC-vs-resume race (AGY r2-#3 / Codex r2-#3):** journal a cut at
+   `StateCopied` with genid `g0`; publish a newer generation that would GC `g0`;
+   assert GC PROTECTS `g0` (journal-referenced) so the resume copy still finds
+   its source.
+8. **Same-version reinstall (Codex r2-#2):** publish `g1` for version V, cut to
+   `versions/V` (stamps `.srcgen=g1`); publish `g2` (still version V, new bytes);
+   assert the next cut RE-COPIES (`.srcgen` differs) instead of skipping the
+   stale `versions/V`. Counter-factual: with the version-only skip, the cut
+   wrongly skips and ships stale bytes.
+9. **Publish lock + best-effort (B-P2b):** publish defers (drops the
+   `upgrade-deferred` marker, does NOT cut) when the upgrade lock is busy; a
+   publish copy failure does NOT fail `configure` and does NOT run the auto-cut.
+10. **Clustered stage-only:** a clustered-node postinst publishes a generation
+    (no cut) and a later `xpfd upgrade --rolling` cuts from it.
+11. **postrm purge + downgrade (B-P6):** `purge` removes `staged-gen/`; a
+    downgrade to a pre-B `$2` removes `staged-gen/` (version-keyed detection),
+    leaving no leak.
 
 **Deploy validation (engineering-style §8):** packaging/cut-path change, no
 dataplane code. Lane: the `.deb` dogfood in `cluster-setup.sh`. Assert clean
@@ -352,14 +452,21 @@ regression expected.
 
 ## 10. Open questions for the user / architecture review
 
-- **O1 (PRIMARY — B vs D):** recommend **B**. Confirm the appliance `/var` can
-  budget one GC-bounded extra copy of the binary set per retained generation
-  (~50-70 MB × up to N=3+current). If NOT, fall back to **D** with the full
-  D-fix-1..5 spec in §4. This is the one decision that flips the mechanism.
+- **O1 (PRIMARY — B vs D):** recommend **B** (ratified by all three reviewers).
+  Confirm the appliance `/var` can budget steady-state ~7 copies of the binary
+  set (≈350-490 MB at ~50-70 MB/set: staged + staged-gen current+1 + versions
+  current+N=3). If `/var` cannot, fall back to **D** with the full D-fix-1..5
+  spec in §4. This is the one decision that flips the mechanism.
 - **O2 (genid representation):** time+random suffix (B-P5). Confirm or pick.
 - **O3 (publish entry point):** new `xpfd publish-generation` subcommand vs
-  folding the publish into `seed-runtime`. Either is fine; a dedicated verb is
-  cleaner for the upgrade postinst path. Decide at engineer time.
+  folding the publish into `seed-runtime`. A dedicated verb is cleaner for the
+  upgrade postinst path. Decide at engineer time.
+- **O4 (first-deploy bootstrap caveat):** acknowledge that the FIRST B-aware
+  upgrade is still cut by the OLD binary reading live `staged/` (Codex r2-#1) —
+  a bounded one-time exposure covered by the existing #1965 lock + verify gate +
+  operator guidance, closed by construction from the first B-aware version on.
+  Confirm this caveat is acceptable (it is intrinsic — the fix cannot run before
+  it is installed).
 
 ## 11. r1 → r2 changelog (how each r1 finding was folded)
 
@@ -382,3 +489,33 @@ regression expected.
   ON — recommendation flipped to B; genid monotonicity folded as B-P5.
 - **SMR r1-MINOR1 (genid decorative):** B drops the per-binary manifest gate
   entirely; genid is only a generation key + GC stamp.
+
+## 12. r2 → r3 changelog (mechanism B ratified; spec tightened)
+
+All three r2 reviewers accepted Option B as the right mechanism (Codex
+verbatim: "I still think B is the right direction over D"). r3 folds the eight
+convergent r2 spec-findings — none changes the mechanism:
+
+- **Codex r2-#1 (first-deploy bootstrap):** §4.B "Bootstrap caveat" + O4 — the
+  first B-aware upgrade is still old-binary-cut against live `staged/`; bounded,
+  one-time, covered by existing backstops, closed by construction thereafter.
+- **Codex r2-#2 (same-version destination identity):** B-P3b — `.srcgen` stamp +
+  genid-aware copy-skip; test §7.8.
+- **Codex r2-#3 / AGY r2-#3 (GC-vs-resume race):** B-P3 adds
+  `Journal.SourceGeneration`; B-P3/§4.B.5 GC protects journal-referenced genids;
+  test §7.7.
+- **Codex r2-#4 (journal must grow a field):** B-P3 — new
+  `Journal.SourceGeneration`.
+- **Codex r2-#5 / AGY r2-#2 (disk honesty + publish free-space):** §4.B costs
+  corrected to ~7 copies; staged-gen retention cut to N=2; B-P7 gives the publish
+  its OWN free-space check + GC; ENOSPC fail-safe spelled out.
+- **AGY r2-#1a (non-atomic current-gen symlink):** B-P2 — temp-symlink+rename.
+- **AGY r2-#1b (partial leak):** B-P2b — pre-sweep `.partial` before copy.
+- **AGY r2-#4 / SMR r2-MINOR1 (publish/cut concurrency):** B-P2b — publish takes
+  the upgrade lock; defers (drops `upgrade-deferred`) when busy; test §7.9.
+- **AGY r2-#5 (postrm purge + downgrade leak):** B-P6 — purge `rm -rf
+  staged-gen/`; version-keyed downgrade cleanup; test §7.11.
+- **SMR r2-MINOR2 (no silent stale cut on publish failure):** B-P2b + B-P7 —
+  publish failure logs loudly + skips the auto-cut; the "no new generation
+  published" condition is surfaced so an operator never mistakes a same-version
+  no-op for the upgrade.
