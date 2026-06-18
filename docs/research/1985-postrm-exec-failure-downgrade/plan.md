@@ -50,44 +50,72 @@ downgrade. The sibling `xpf.preinst` already demonstrates the safe pattern
 
 ## 4. Approach
 
-### 4.1 dpkg version arguments
+### 4.1 Deterministic, EXEC-FREE downgrade detection
 
-In the postrm `upgrade` case, dpkg passes the NEW version being installed
-as `$2` (for old-postrm `upgrade <new-version>` in the downgrade/upgrade
-call order). The script can compare `$2` against the #1964 hardened-layout
-floor version using `dpkg --compare-versions`:
+The defect is that the downgrade decision trusts the staged binary's EXEC.
+The fix replaces exec with a deterministic exec-free signal. Codex
+confirmed dpkg passes `$2` = the NEW (incoming) version to the OLD postrm
+on `upgrade`; but the commit-count+SHA version scheme makes a hardcoded
+floor unusable (§4.2). The RECOMMENDED signal (§4.2 option a) is the
+NON-EXEC layout marker the newly-unpacked staged tree carries:
 
 ```sh
-HARDENED_FLOOR="<first-version-with-#1964-layout>"   # static metadata
-if dpkg --compare-versions "$2" ge "$HARDENED_FLOOR"; then
-    : # new package is hardened-or-newer — NEVER tear down (it is an
-      # upgrade or a hardened->hardened downgrade).
+# The hardened package ships staged/.layout-version (or a sentinel file)
+# via debian/rules. The newly-unpacked staged tree is on disk at old-postrm
+# time. Read it WITHOUT executing anything.
+STAGED_LAYOUT_MARKER="$STAGED/.layout-version"
+if [ -f "$STAGED_LAYOUT_MARKER" ]; then
+    : # new package is hardened (carries the layout marker) — NEVER tear
+      # down (upgrade OR hardened->hardened downgrade). No exec, no version
+      # parse.
 elif [ -L "$CURRENT" ] || [ -e "$CURRENT" ]; then
-    # new package PREDATES the layout — genuine pre-hardened downgrade.
+    # new package PREDATES the layout (no marker) — genuine pre-#1964
+    # downgrade.
     ... destructive cleanup ...
 fi
 ```
 
-`dpkg --compare-versions` is always available in a maintainer script
-(it's part of dpkg) and does not depend on the staged binary running.
+The marker is a plain file read — no `dpkg --compare-versions`, no exec.
+The capability probe is DROPPED entirely (it was the foot-gun); the marker
+is the sole, exec-free gate.
 
-**The capability probe is DEMOTED to a confirmatory check, not the gate.**
+(If review prefers the version-compare path (§4.2 option b) over the marker,
+`dpkg --compare-versions` is always available in a maintainer script and
+exec-free — but it requires anchoring a real floor via the build, which is
+why the marker is recommended.)
+
+### 4.2 Determining the floor version — UNANCHORED (Codex NEEDS-MAJOR, FOLDED)
+
+**Codex found the floor cannot be a hand-picked changelog version.**
+`debian/changelog:1` is `0.0.0`; the real package version is GENERATED at
+build time from commit-count + SHA (`Makefile:337-340`, e.g.
+`0.0.4123+gd58a067837c7`). PR #1972 (#1964 layout) has no stable
+human-readable version to pin. A hardcoded `HARDENED_FLOOR = "0.9.0"` (as
+an early test fixture used) is meaningless against that scheme and makes the
+gate a no-op or wrong.
+
 Options for review:
-- (a) Drop the probe entirely; rely solely on the version compare.
-- (b) Keep the probe as an ADDITIONAL "leave it" signal: tear down ONLY
-  if BOTH the version is below the floor AND the probe fails — but never
-  tear down merely because the probe failed. (Belt-and-suspenders, but the
-  version compare alone is sufficient and simpler.)
+- **(a) Capability MARKER, not version compare.** Detect the hardened
+  layout by a STATIC artifact the hardened package ships and a pre-hardened
+  one does not — e.g. presence of the `seed-runtime` SUBCOMMAND is what the
+  current code probes, but that requires EXEC. A non-exec marker: the
+  hardened package ships a sentinel FILE (e.g.
+  `/usr/local/share/xpf/.hardened-layout` or a versioned
+  `staged/.layout-version` integer) that postrm reads WITHOUT exec. The
+  downgrade decision becomes "does the NEWLY-UNPACKED staged tree carry the
+  hardened-layout marker?" — file existence, no exec, no version parse.
+  This is the cleanest deterministic signal and sidesteps the version
+  scheme entirely.
+- **(b) Anchor a real floor via the build.** Stamp `HARDENED_FLOOR` into
+  the maintainer script at build time from the same version source
+  (`Makefile`/`debian/rules`), so the compare is against a real version.
+  More moving parts; ties postrm to the version-stamping pipeline.
 
-Recommended: (a) — version compare is deterministic and the probe adds an
-exec-failure foot-gun with no benefit once the version is authoritative.
-
-### 4.2 Determining the floor version
-
-`HARDENED_FLOOR` is a static constant in the script (the version in
-`debian/changelog` where the #1964 versioned-runtime layout first shipped
-— PR #1972). It is metadata, not derived at runtime. Document it inline
-and cross-reference the changelog entry.
+**Recommended: (a) the non-exec layout marker.** It is deterministic,
+exec-free (the whole point — the bug was trusting exec), and independent of
+the commit-count version scheme. The marker is shipped by `debian/rules`
+into the staged payload, so the NEWLY-UNPACKED staged tree present at
+old-postrm time carries it iff the new package is hardened.
 
 ### 4.3 Edge: `$2` empty / unparsable
 
@@ -115,42 +143,48 @@ of the installed old script, races dpkg's own bookkeeping, and leaves a
 mutated control file dpkg did not author (a future `dpkg --verify` / debug
 nightmare). It is a last-resort hack.
 
-Safer options for review (pick one):
+**Codex (NEEDS-MAJOR, FOLDED) corrected two errors in the v1 disposition:**
 
-- **(a) Pre-seed the state the old postrm gates on.** The old destructive
-  branch only fires when `[ -L "$CURRENT" ] || [ -e "$CURRENT" ]` is true
-  AND the probe fails. The NEW preinst (runs BEFORE the old postrm) cannot
-  make the probe pass without a runnable binary, and removing `current`
-  pre-emptively would itself break rollback. So pre-seeding does not cleanly
-  defuse it. Likely insufficient — document why.
-- **(b) Accept the one-transition exposure, rely on the existing
-  backstops.** The destructive teardown removes `current` + the drop-in +
-  repoints sbin to staged. The new package's `postinst` (runs AFTER the old
-  postrm) re-seeds the versioned runtime (`seed-runtime`) and rewrites the
-  drop-in — IF the new xpfd can exec by then. If it cannot exec at postinst
-  either, the daemon is broken regardless of this bug (a non-runnable new
-  binary is a failed upgrade). So the NET new exposure from the old postrm
-  is narrow: it only matters if the new binary is non-execable at OLD-postrm
-  time but execable at postinst time. Quantify this window; it may be
-  acceptable-with-documentation given postinst re-seeds.
-- **(c) Targeted, idempotent preinst guard that does NOT rewrite dpkg
-  scripts:** the new preinst writes a small marker
-  (`/run/xpf/skip-postrm-teardown` or a `staged/.no-teardown`) that a
-  COOPERATING old postrm would honor — but the OLD postrm predates the
-  marker, so it can't honor it. Only works for FUTURE transitions, not the
-  buggy→fixed one. So (c) protects buggy(N)→fixed→...→(N+2) but not the
-  immediate hop. Document that the marker hardens future hops.
+- The "cooperative marker" idea is UNENFORCEABLE for the buggy→fixed hop:
+  the OLD buggy postrm runs during that upgrade and predates any marker
+  logic, so it cannot read or honor a marker. A marker only helps
+  fixed(N)→...→(N+2) hops, where the running postrm is already the fixed
+  one — which by then doesn't NEED the marker (it already keys on the
+  layout marker §4.1). So the cooperative-marker provides ZERO additional
+  protection. DROPPED from the plan.
+- The "postinst re-seed mitigates it" claim is FALSE: `debian/xpf.postinst`
+  runs `seed-runtime` ONLY on first install (`postinst:40`, gated on
+  `[ -z "$2" ]`); on UPGRADE (`$2` non-empty) it takes the else-branch that
+  does NOT re-seed and only creates COMPLETELY-ABSENT links. So if the old
+  postrm deleted `versions/current`, the upgrade's postinst does NOT restore
+  it, and `pkg/upgrade/cutover.go:213-221` (refuse-before-STOP) can then
+  REFUSE the next cut. The postinst is not a mitigation.
 
-**Disposition:** the buggy→fixed transition is a genuine one-time exposure
-inherent to fixing a maintainer script (the fix can't run before it's
-installed). The plan should: (1) ship the postrm version-compare fix (4.1),
-(2) add the cooperative marker (c) so all FUTURE transitions are protected,
-and (3) HONESTLY DOCUMENT the one-time buggy→fixed exposure in the PR body
-+ `docs/in-place-upgrade.md`, noting postinst re-seed (b) as the mitigation
-and that the only unprotected case is "new binary non-execable at
-old-postrm time but execable at postinst time." AGY's sed-patch (a-hack) is
-listed as a REJECTED alternative with the fragility reasoning. Plan review
-to confirm this disposition or escalate.
+**Honest disposition (FOLDED):** the buggy→fixed transition is a genuine
+one-time exposure inherent to fixing a maintainer script — the fix cannot
+run before it is installed, and dpkg runs the OLD (buggy) postrm during the
+upgrade that ships the fix. There is NO clean in-band fix for that single
+hop short of rewriting dpkg's control files (AGY's sed-patch), which is
+REJECTED as fragile. The plan therefore:
+
+1. Ships the exec-free marker gate (§4.1) — protects all transitions ONCE
+   the fixed package is installed.
+2. Does NOT claim a cooperative-marker or postinst-reseed mitigation (both
+   refuted above).
+3. HONESTLY DOCUMENTS the one-time buggy→fixed exposure in the PR body +
+   `docs/in-place-upgrade.md`: the exposure fires ONLY if the new staged
+   xpfd is non-execable at OLD-postrm time AND `versions/current` exists.
+   The realistic trigger is an OS/libc bump in the SAME apt transaction
+   making the new binary temporarily unloadable. Operator guidance: stage
+   xpf upgrades separately from OS/libc bumps (already the spirit of the
+   "don't run xpfd upgrade during apt upgrade" guidance).
+4. RECOVERY note: if the old postrm did tear down the layout, the operator
+   re-runs `xpfd seed-runtime` (or reinstalls) to rebuild `versions/current`
+   + the drop-in before the next cut. Document this recovery.
+
+AGY's sed-patch of `/var/lib/dpkg/info/xpf.postrm` is a REJECTED
+alternative (fragile control-file rewriting; depends on exact old-script
+text; leaves a dpkg-unauthored mutated control file).
 
 ## 5. Alternatives rejected
 
@@ -162,13 +196,15 @@ to confirm this disposition or escalate.
 
 ## 6. Files touched
 
-- `debian/xpf.postrm` (version-compare gate; demote/drop the exec probe)
-- A test harness for the maintainer script (see §7) — likely a shell test
-  under `test/` or a Go test that runs the script with a stub `$STAGED/xpfd`
-  and asserts filesystem state. Check existing patterns: there may already
-  be maintainer-script tests from #1964/#1967.
-- `docs/in-place-upgrade.md` (document the downgrade-detection contract:
-  version-compare, not exec-probe)
+- `debian/xpf.postrm` (exec-free marker gate; DROP the exec probe)
+- `debian/rules` (ship the layout marker `staged/.layout-version` into the
+  staged payload)
+- `test/debian/postrm-test.sh` (the existing maintainer-script test harness
+  from #1964/#1967 — EXTEND it; Codex confirmed it exists and that its
+  `$2=0.9.0` floor fixture is meaningless under the real version scheme, so
+  the marker approach replaces it)
+- `docs/in-place-upgrade.md` (downgrade-detection contract: exec-free
+  marker, not exec-probe; the one-time buggy→fixed exposure + recovery)
 
 ## 7. Test strategy
 
@@ -182,15 +218,19 @@ Strong regression test reproducing the false downgrade:
 - BEFORE fix: `versions/current` deleted, sbin repointed, drop-in removed
   → test FAILS (asserts they survive).
 - AFTER fix: all three survive → test PASSES.
-- Companion case: `postrm upgrade <OLD_VER>` with `<OLD_VER>` < floor →
-  destructive cleanup STILL runs (downgrade path preserved).
-- Edge: empty `$2` → layout survives + loud log.
+- Companion case: `postrm upgrade` with NO staged layout marker (a true
+  pre-#1964 downgrade) → destructive cleanup STILL runs (downgrade path
+  preserved).
+- Marker present + non-execable staged xpfd → layout survives (the core
+  fix: the gate no longer trusts exec).
 
-Determine the existing maintainer-script test mechanism (the #1964/#1967
-work added postrm/preinst hardening — check `test/` and
-`pkg/upgrade/*_test.go` for a script-runner) and reuse it; if none exists,
-a small `sh`-driven Go test that execs the script against a tempdir layout
-is the minimal addition.
+Codex-required test matrix (the harness is `test/debian/postrm-test.sh`,
+which EXISTS): marker-present-execable, marker-present-NON-execable (the
+bug case → must survive), marker-ABSENT (genuine downgrade → tears down),
+empty `$2`, reinstall (`$2`==same). Drop the meaningless `$2=0.9.0` floor
+fixture Codex flagged at `postrm-test.sh:159-163`.
+
+The harness execs the script against a tempdir layout — reuse it directly.
 
 ## 8. Invariants
 
@@ -228,11 +268,17 @@ semantics in postrm-upgrade and pick the floor version from changelog.
 
 - Claude SMR: PLAN READY pending `$2`-semantics confirmation in impl.
 - AGY companion: PLAN NEEDS-MAJOR (r1) — the OLD (buggy) postrm runs during
-  the buggy→fixed upgrade transition, so this fix does not protect its own
-  rollout. FOLDED in §4.4: AGY's exact remedy (preinst sed-patching
-  `/var/lib/dpkg/info/xpf.postrm`) REJECTED as fragile control-file
-  rewriting; instead ship the version-compare fix + a cooperative marker
-  that protects all FUTURE transitions + honest documentation of the
-  one-time buggy→fixed exposure (mitigated by postinst re-seed). Re-verdict
-  pending Codex/arch confirmation of the disposition.
-- Codex companion: _pending_
+  the buggy→fixed upgrade transition. AGY's sed-patch remedy REJECTED;
+  folded a documented-exposure disposition.
+- Codex companion: PLAN NEEDS-MAJOR (r1) — confirmed `$2`=new-version
+  semantics, but found THREE holes: (1) `HARDENED_FLOOR` is UNANCHORED
+  (versions are commit-count+SHA, `debian/changelog` is 0.0.0) → version
+  compare is a no-op; (2) the cooperative-marker for buggy→fixed is
+  UNENFORCEABLE (old postrm predates it); (3) the "postinst re-seed
+  mitigation" does NOT exist on upgrade (`postinst:40` seeds only when
+  `$2` empty). ALL FOLDED: pivoted to an EXEC-FREE LAYOUT MARKER (§4.1/4.2)
+  instead of version-compare; dropped the cooperative-marker claim; replaced
+  the false postinst-reseed mitigation with honest documentation + an
+  operator recovery note. Re-verdict pending: the marker pivot resolves the
+  floor-anchoring hole; the buggy→fixed one-hop exposure is documented as
+  inherent. Expected PLAN YES on the marker approach after one more pass.

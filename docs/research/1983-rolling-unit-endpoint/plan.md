@@ -143,13 +143,25 @@ forward-looking modularity improvement.
 
 ## 7. Test strategy
 
-- Reject path: `RunRolling` with `cfg.Unit = "xpfd-test"` returns the
-  refusal error WITHOUT dialing — assert via a `RollingCluster` factory
-  seam that records whether a dial was attempted (strong: the test fails
-  if the code reaches the gRPC client). The existing rolling tests already
-  inject a fake cluster, so the seam exists.
-- Default path: `cfg.Unit = DefaultUnit` (and empty) proceeds exactly as
-  today (regression).
+**Codex caution (FOLDED):** the plan must NOT lean on the existing
+`runRollingWith` fake-cluster seam to prove the reject — `RunRolling`
+constructs `NewCLICluster` DIRECTLY, and `lock_integration_test.go:113-117`
+explicitly bypasses that path. So the reject must be tested at the
+constructor: a DIRECT `NewCLICluster("xpfd-test")` test asserting it returns
+the error and a nil cluster (no dial). This is cleaner anyway now that the
+guard lives in the constructor.
+
+- Constructor reject: `NewCLICluster("xpfd-test")` → `(nil, error)`;
+  `NewCLICluster("")` and `NewCLICluster(DefaultUnit)` → `(cluster, nil)`.
+- Caller propagation: `RunRolling`, and the `drain`/`rejoin` cmd paths,
+  surface the error (not panic, not silent default).
+- Normalization (Codex): decide whether `unit` is the bare unit name
+  (`xpfd`) or may include `.service`. `realSystem.StopUnit` appends
+  `.service` (`system_linux.go:50-55`), so a `--unit xpfd.service` would
+  DOUBLE-suffix on the systemd side. The reject guard compares against
+  `DefaultUnit` (bare `xpfd`), so `xpfd.service` would be REJECTED — which
+  is acceptable (it is non-default), but document that `--unit` takes the
+  bare name. A test pins the accepted spelling.
 - If 4.2: a table test mapping unit→addr, plus `--grpc-addr` override.
 
 ## 8. Invariants
@@ -187,5 +199,10 @@ review judges it small enough to ride along.
   `kernel drain`/`kernel rejoin` (`upgrade_kernel.go:155,167`) silently
   targeting the default endpoint. FOLDED: moved the guard into
   `NewCLICluster` (returns error) so all three call sites are covered.
-  Re-verdict on the folded plan: expected PLAN YES.
-- Codex companion: _pending_
+- Codex companion: PLAN YES (r1) — confirmed the defect + all three call
+  sites; constructor-chokepoint reject is "the right chokepoint." Two folds:
+  (a) the test must hit `NewCLICluster` DIRECTLY (the `runRollingWith` seam
+  bypasses construction, `lock_integration_test.go:113-117`); (b)
+  `realSystem` already appends `.service` (`system_linux.go:50-55`) so
+  document `--unit` takes the bare name. Both folded. Net: PLAN YES,
+  engineer-now (4.1); 4.2 follow-up.

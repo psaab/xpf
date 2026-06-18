@@ -120,7 +120,7 @@ engineering-style.md (Medium+ = correctness/perf/contract; Low = style).
 - Test strength: all five plans specify counter-factual / failure-mode-
   reproducing tests, not arithmetic-consistency stubs. Good.
 
-## Summary verdicts (Claude SMR)
+## Summary verdicts (Claude SMR — round 1, pre-companion)
 
 | Issue | Verdict | Disposition |
 |---|---|---|
@@ -129,3 +129,37 @@ engineering-style.md (Medium+ = correctness/perf/contract; Low = style).
 | #1984 | PLAN READY | engineer-now |
 | #1985 | PLAN READY (verify $2) | engineer-now |
 | #1981 | PLAN READY for arch review (B vs C; A rejected) | needs-research |
+
+## CONVERGED 3-reviewer verdicts (after AGY r1 + Codex r1, all folded)
+
+The companion rounds materially improved every plan except #1982/#1984
+(which they tightened). My round-1 PLAN READYs were too generous on
+#1981/#1983/#1984/#1985 — the companions found real holes I missed.
+Accepting their findings:
+
+| Issue | Claude SMR | AGY r1 | Codex r1 | Converged status | Disposition |
+|---|---|---|---|---|---|
+| #1982 | READY | PLAN YES | PLAN YES (found 2 extra fixture sites + canary/build cautions, folded) | **PLAN-READY** | engineer-now |
+| #1984 | READY | PLAN YES | NEEDS-MAJOR → folded (release-truncation under lock) | **PLAN-READY** | engineer-now |
+| #1983 | READY | NEEDS-MAJOR → folded (guard in NewCLICluster) | PLAN YES (seam+normalize folded) | **PLAN-READY** | engineer-now (4.1); 4.2 follow-up |
+| #1985 | READY | NEEDS-MAJOR → folded | NEEDS-MAJOR → folded (exec-free marker; floor unanchored; reseed myth refuted) | **PLAN-READY** (marker pivot) | engineer-now |
+| #1981 | READY-for-arch | NEEDS-MAJOR → folded (Option D Hybrid) | NEEDS-MAJOR → folded (postinst-ordering + rollout TOCTOU) | **PLAN-READY pending architecture-review step** (ratify D-with-ordering-fix vs B) | needs-research |
+
+Key convergence notes:
+- #1984: BOTH reviewers + I now agree the fix is truncate-on-acquire AND
+  truncate-on-release UNDER THE HELD FLOCK, never os.Remove.
+- #1983: the guard MUST live in `NewCLICluster` (all three call sites);
+  test must hit the constructor directly (the rolling fake-cluster seam
+  bypasses it).
+- #1985: pivoted from version-compare (floor unanchorable under
+  commit-count+SHA versions) to an EXEC-FREE LAYOUT MARKER; the
+  buggy→fixed one-hop exposure is inherent and DOCUMENTED (no false
+  postinst-reseed mitigation).
+- #1981: Option D (Hybrid: preinst→"unpacking", postinst→valid manifest
+  BEFORE its own auto-cut) is the recommended mechanism but STILL requires
+  the engineering-style workflow step-4 architecture review before
+  `/engineer` (it crosses the packaging boundary and B-vs-D is unresolved).
+
+All five plans are PLAN-READY for `/engineer` EXCEPT #1981, which is
+PLAN-READY-FOR-ARCHITECTURE-REVIEW (the mechanism choice D-vs-B must be
+ratified in the step-4 hostile architecture review before implementation).

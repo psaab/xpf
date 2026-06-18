@@ -13,6 +13,14 @@ single source of truth and no drift guard:
 - `debian/xpf.postinst:35` — same `BINS`
 - `debian/xpf.postrm:40` — same `BINS`
 - `debian/rules:80-84` — `install -m 0755` of each binary individually
+- `test/debian/preinst-migrate-test.sh:46` — same `BINS` (TEST fixture)
+  **(Codex-found: missed in v1)**
+- `test/debian/postrm-test.sh:42` — same `BINS` (TEST fixture)
+  **(Codex-found: missed in v1)**
+
+So there are EIGHT sites, not six. The two test fixtures can drift even
+after the product code is unified — the drift canary MUST cover them too
+(or they must derive from the same generated fragment).
 
 The upgrade flow treats these binaries as a version-locked unit (seed,
 copy, flip, cleanup, package). Adding a future helper requires editing all
@@ -77,6 +85,17 @@ hot loop wants the slice; otherwise call `manifest.Names()` once.)
 
 ### 4.2 Generated shell fragment
 
+**Codex caution (FOLDED):** the build-time step must NOT `sed`/rewrite the
+TRACKED maintainer scripts in place during `debian/rules` — that dirties
+the git checkout (a `git diff --exit-code` after a build would fail, and a
+re-run would double-edit). Instead generate to a BUILD-OUTPUT path
+(`debian/xpf.preinst.generated` or an out-of-tree temp the rules recipe
+copies into `debian/xpf$(STAGED)`), or commit the scripts WITH the
+generated `BINS` line and have the canary assert they match the generator
+(no build-time mutation at all). The committed-with-canary approach is
+cleanest: the scripts stay self-contained, the canary is the drift guard,
+and the build never mutates tracked files.
+
 A tiny generator (a Go program under `pkg/upgrade/manifest/cmd/genbins`
 invoked via `go generate` / a Makefile rule, OR a `debian/rules` step
 that runs `go run`) emits `debian/xpf.bins` containing exactly:
@@ -107,7 +126,11 @@ target dir, same modes.
 `pkg/upgrade/manifest/drift_test.go`:
 
 - Parse `BINS="..."` out of `debian/xpf.preinst`, `xpf.postinst`,
-  `xpf.postrm` (regex `^BINS="(.*)"`).
+  `xpf.postrm`, AND `test/debian/preinst-migrate-test.sh`,
+  `test/debian/postrm-test.sh` (regex `^[[:space:]]*BINS="(.*)"` — note the
+  fixtures indent the assignment). **Codex: a bare `^BINS=` regex passes
+  vacuously if a script switches to a template form without `BINS=` — the
+  canary must fail-closed when the expected literal is absent, not skip.**
 - Parse the `install -m 0755 ... debian/xpf$(STAGED)/<name>` lines (and/or
   the generated make var) out of `debian/rules`.
 - Assert each parsed set == `manifest.Names()` (order-insensitive for the
@@ -191,4 +214,9 @@ maintainability payoff.
 - Claude SMR: PLAN READY (engineer-now); build-time inline confirmed right.
 - AGY companion: PLAN YES (r1) — "clean, safe, behavior-preserving; proceed
   with build-time inlining." Strong drift canary + counter-factual test.
-- Codex companion: _pending_
+- Codex companion: PLAN YES (r1) — confirmed all six product sites; FOUND
+  two MORE drift sites the v1 plan missed (`test/debian/preinst-migrate-
+  test.sh:46`, `test/debian/postrm-test.sh:42` → eight total) and warned
+  against (a) sed-dirtying tracked maintainer scripts at build time and (b)
+  a vacuous `^BINS=` canary regex. ALL FOLDED. Verdict stands PLAN YES,
+  engineer-now.

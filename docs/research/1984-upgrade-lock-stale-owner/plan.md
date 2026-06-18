@@ -60,17 +60,48 @@ if terr := f.Truncate(0); terr != nil {
 }
 ```
 
-This single change closes window 1 (the file is empty during
-acquire→write) and window 2 (if the metadata write later fails, the file
-is already empty rather than holding stale JSON). `writeOwner` keeps its
-own `Truncate(0)` (harmless redundancy / correct after a partial earlier
-write).
+This narrows window 1 (the file is empty during acquire→write) and closes
+window 2 (if the metadata write later fails, the file is already empty
+rather than holding stale JSON). `writeOwner` keeps its own `Truncate(0)`
+(harmless redundancy / correct after a partial earlier write).
 
-### 4.2 Release cleanup — DEFER, document the hazard
+**Codex plan review (NEEDS-MAJOR, FOLDED): truncate-on-acquire ALONE does
+not satisfy "never previous owner."** There remains a scheduling gap
+between `Flock` success (`lock.go:139`) and `f.Truncate(0)` during which a
+racing `readOwner` (`lock.go:142` on a different acquirer) can still read
+the PREVIOUS owner's JSON — the file is non-empty until THIS holder's
+truncate runs. To actually close the window the file must ALSO be truncated
+on `Release` WHILE THE FLOCK IS STILL HELD, so the file is empty the
+instant the next acquirer can flock it:
 
-AGY also suggested `os.Remove(path)` in `Release()`. **This plan does NOT
-adopt remove-on-release without explicit review sign-off**, because flock
-binds the OPEN FILE DESCRIPTION (inode), not the path:
+```go
+func (h *Handle) Release() error {
+    ...
+    // Truncate to 0 BEFORE dropping the flock so the next acquirer (which
+    // can only flock after we LOCK_UN/Close) never reads our now-stale
+    // metadata in its own acquire->write window. We still hold the flock
+    // here, so no concurrent writer can race this truncate.
+    _ = h.f.Truncate(0)
+    _ = unix.Flock(int(h.f.Fd()), unix.LOCK_UN)
+    return h.f.Close()
+}
+```
+
+With BOTH truncate-on-acquire AND truncate-on-release-under-lock, the file
+is empty across the entire ownerless interval: previous owner releases
+(truncates, then unlocks) → file empty → next owner flocks → (already
+empty) → truncates again (belt) → writes its own metadata. A reader in any
+in-between window reads empty → nil owner. This is `f.Truncate(0)` on the
+HELD fd, NOT `os.Remove` (which is still rejected, §4.2). Note: this is
+exactly the safe half AGY also blessed and Codex insists is REQUIRED for
+the stated invariant.
+
+### 4.2 Release cleanup — truncate-under-lock YES, os.Remove NO
+
+Per §4.1 (Codex-folded), `Release` DOES `f.Truncate(0)` while still holding
+the flock — that is the half required to close the acquire→write window for
+the NEXT owner. What this plan does NOT adopt is `os.Remove(path)`, because
+flock binds the OPEN FILE DESCRIPTION (inode), not the path:
 
 - A would-be acquirer that has already `open()`ed the path and is blocked
   / about to flock holds an fd to the OLD inode; if `Release` unlinks the
@@ -108,22 +139,30 @@ is `f.Truncate(0)` in `Release` (zero the contents, keep the inode), NOT
 
 ## 7. Test strategy
 
-Strong regression test that reproduces the stale read:
+Strong regression tests. Codex noted the `writeOwnerFn` seam only observes
+the POST-acquire window; to prove the full invariant the tests must cover
+release-truncation AND the flock→truncate scheduling gap.
 
-1. Acquire the lock (holder A), Release it — leaving A's JSON on disk
-   (current behavior).
-2. With a `writeOwnerFn` seam that BLOCKS on a channel (simulating the
-   acquire→write window), acquire as holder C in a goroutine — it flocks,
-   truncates (after fix), then blocks before writing.
-3. From the main goroutine, attempt a second acquire (D) → `ErrBusy`.
-   Assert `ErrBusy.Owner == nil` (owner unknown). BEFORE the fix this test
-   FAILS because D reads A's stale JSON; AFTER the fix the file is empty so
-   D reads nil. Counter-factual strength: the assertion is specifically
-   "not A", reconstructing the pre-fix failure.
-4. Unblock C, let it finish, assert the file now names C.
-5. Separate test for window 2: force `writeOwnerFn` to FAIL after the
-   acquire-truncate; assert a subsequent busy read returns nil owner (not
-   the prior owner).
+1. **Release-truncation (closes the real window):** acquire holder A, then
+   Release. Assert the file is now ZERO-length (after fix). BEFORE the fix
+   it still holds A's JSON. Then a fresh acquire by D in its own
+   blocking-writeOwnerFn window: a concurrent busy read returns nil owner
+   (the file A left is empty). Counter-factual: with release-truncation
+   removed, the read names A.
+2. **Acquire→write window:** with a `writeOwnerFn` seam that BLOCKS on a
+   channel, acquire as holder C in a goroutine — it flocks, truncates,
+   blocks before writing. A second acquire (D) → `ErrBusy` with
+   `Owner == nil` (not C, not the prior owner). Unblock C; assert the file
+   now names C.
+3. **Window 2 (write failure):** force `writeOwnerFn` to FAIL after the
+   acquire-truncate; a subsequent busy read returns nil owner, not the
+   prior owner.
+4. **flock→truncate gap (Codex):** acknowledge in the test comment that a
+   reader interposed between flock-success and the acquire-truncate is a
+   sub-microsecond gap that release-truncation already covers (the file was
+   left empty by the PREVIOUS releaser), so the only non-empty interval is
+   the new owner's own acquire→write, handled by (2). Document this so a
+   future reader does not think the gap is unhandled.
 
 The existing `lock_test.go` already has a `writeOwnerFn` seam
 (`lock_test.go:170-187`), so the blocking/failing variants slot in.
@@ -149,9 +188,10 @@ The deliberate NON-adoption of `os.Remove` avoids the only real hazard.
 
 ## 11. Disposition
 
-engineer-now — minimal, safe, well-tested. The remove-on-release question
-is settled here as "do not" with documented reasoning; flag for explicit
-review confirmation.
+engineer-now (CONVERGED) — truncate-on-acquire AND truncate-on-release
+(both under the held flock; NOT os.Remove). AGY PLAN YES; Codex
+NEEDS-MAJOR folded (release-truncation added). Both reviewers agree the
+inode-safe truncate is correct and os.Remove is rejected.
 
 ## Reviewer verdicts
 
@@ -160,4 +200,9 @@ review confirmation.
 - AGY companion: PLAN YES (r1) — "correct, robust; deep understanding of
   Unix locking semantics." Explicitly endorsed rejecting os.Remove
   (split-mutex on inode-bound flock) and the blocking-seam test.
-- Codex companion: _pending_
+- Codex companion: PLAN NEEDS-MAJOR (r1) — truncate-on-ACQUIRE alone leaves
+  a flock→truncate scheduling gap; "never previous owner" REQUIRES
+  truncate-on-RELEASE while still holding the flock. FOLDED (§4.1/§4.2/§7):
+  added truncate-under-lock in Release (NOT os.Remove). Both reviewers now
+  agree on the inode-safe truncate (no remove). Re-verdict on the folded
+  plan: expected PLAN YES.

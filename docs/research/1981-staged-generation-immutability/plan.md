@@ -163,14 +163,62 @@ CORRECT fail-safe — staged is genuinely inconsistent in that state. This is
 strictly better than Option A's `/run` sentinel (no tmpfs-reboot escape
 needed, no dead-PID logic; the marker lives WITH the thing it describes).
 
+### Option D ordering correction (Codex NEEDS-MAJOR, FOLDED)
+
+**Codex found a self-interference bug in the naive "postinst writes the
+manifest at exit" framing.** `debian/xpf.postinst` ITSELF runs the
+auto-cut `"$STAGED/xpfd" upgrade` during `configure` (`postinst:136-146`,
+before `#DEBHELPER#` at ~:193). If `.generation` is rewritten only at
+postinst EXIT, the postinst's own auto-cut runs while `.generation` is
+still `"unpacking"` → `copyStaged` REFUSES → the first standalone in-place
+cut is permanently deferred (broken first deployment).
+
+**Correction:** postinst must write the VALID `.generation` manifest
+BEFORE it invokes its own `"$STAGED/xpfd" upgrade` auto-cut — i.e. right
+after unpack/seed completes and the staged tree is known-consistent, and
+strictly before any cut (its own OR an operator's) can read it. Concretely:
+postinst's ordering becomes: seed/verify staged complete → WRITE valid
+`.generation` → THEN the auto-cut (which now reads a valid manifest) →
+`#DEBHELPER#`. The preinst-sets-"unpacking" / postinst-sets-valid invariant
+holds; only the postinst-internal ordering relative to its own cut needs to
+be explicit.
+
+### Old-binary-ignores-`.generation` rollout TOCTOU (Codex, FOLDED)
+
+Until the FIXED `xpfd` is the running/sbin-resolved binary, a manual
+`/usr/local/sbin/xpfd upgrade` resolves to the OLD versioned binary that
+does NOT know about `.generation` and will not refuse. So Option D protects
+operator cuts only once the fixed binary is in service. This is the same
+class as #1985's buggy-old-binary rollout gap and is INHERENT to fixing a
+binary-side check: the protection engages after the fix is the live binary.
+Disposition: document this one-rollout exposure in the PR body +
+`docs/in-place-upgrade.md`; the existing verify-dataplane gate +
+refuse-before-STOP remain the backstop for the transition. NOT a blocker
+for Option D, but must be stated honestly.
+
+### Crash-safety wording reconciliation (Codex)
+
+The acceptance criterion "no permanent wedge" (§3) and §4.4's "stranded
+`unpacking` until reinstall/configure" must be reconciled: a half-unpack
+that strands `.generation == "unpacking"` is cleared by `dpkg --configure
+-a` (re-runs postinst → rewrites a valid manifest) or reinstall — it is NOT
+a permanent wedge, it is a wedge that clears when the package operation is
+COMPLETED, which is the correct fail-safe (AGY's point). Reword §3 to "no
+wedge that outlives completion of the package operation." This is a
+documentation fix, not a mechanism change.
+
 ### Recommendation to review (UPDATED)
 
-**Option D (Hybrid) is the recommended mechanism.** It directly closes the
-unpack window that bare Option C misses, with the smallest footprint
-(no second tree, no `/run` lock). Option B (immutable versioned staging)
-remains the most robust if review wants true content immutability rather
-than a state marker, at the cost of a second copy. Options A and bare C are
-rejected. **Plan review should ratify D vs B** (lean D for scope).
+**Option D (Hybrid) is the recommended mechanism**, with the postinst
+ordering correction above. It directly closes the unpack window that bare
+Option C misses, with the smallest footprint (no second tree, no `/run`
+lock). Option B (immutable versioned staging) remains the most robust if
+review wants true content immutability AND wants to avoid relying on the
+new binary honoring the check — Codex notes B's rejection is "not fully
+earned." Options A and bare C are rejected. **Plan review (architecture
+step) should ratify D-with-ordering-fix vs B** — the deciding question is
+whether the old-binary rollout TOCTOU + postinst-ordering complexity of D
+outweighs B's extra copy.
 
 ## 5. Alternatives rejected
 
@@ -209,6 +257,11 @@ unpack). The Option-D tests recreate the REAL window:
   publish). Counter-factual: with the refuse check removed (pre-fix
   `copyTree`+self-checksum path), the same torn staged set PUBLISHES a mixed
   dir — prove the OLD path does not detect it.
+- **postinst self-ordering (Codex):** assert the postinst writes a VALID
+  `.generation` BEFORE its own auto-cut runs — a test that runs the postinst
+  flow (or asserts the script ordering) and confirms the auto-cut does NOT
+  see `"unpacking"`. This is the regression guard for the first-deployment
+  break Codex found.
 - **Stable-genid happy path:** valid `.generation` (genid + matching
   per-binary checksums), consistent binaries → `copyStaged` succeeds.
 - **Mid-copy genid change:** a test seam that flips `.generation` to a new
@@ -270,4 +323,13 @@ architecture-review step. Coordinate sequencing with #1982.
   absent/"unpacking". AGY also correctly noted wedging operator cuts during
   a half-unpack is the right fail-safe. Re-verdict on Option D: expected
   PLAN YES pending the architecture-review ratification of D vs B.
-- Codex companion: _pending_
+- Codex companion: PLAN NEEDS-MAJOR (r1) — verified dpkg order, but found
+  (1) postinst's OWN auto-cut (`postinst:136-146`) would see
+  `.generation=="unpacking"` and refuse → first in-place deploy permanently
+  deferred (manifest must be written BEFORE the postinst auto-cut, not at
+  exit); (2) old-binary-ignores-`.generation` rollout TOCTOU; (3) §3 "no
+  permanent wedge" vs §4.4 "stranded unpacking" wording contradiction; (4)
+  B's rejection "not fully earned." ALL FOLDED (postinst ordering
+  correction, rollout-TOCTOU disposition, crash-safety reword, B left open
+  for the arch review). Re-verdict pending arch-review ratification of D vs
+  B. STILL needs the architecture-review step before engineer.
