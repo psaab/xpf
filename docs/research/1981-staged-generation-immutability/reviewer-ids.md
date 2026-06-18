@@ -14,9 +14,12 @@ research time (it reviews code PRs only — joins at `/engineer`).
 | r3 | Codex | thread `019edcf6` (r3 turn); `codex-plan-r3.md` | PLAN-NEEDS-MAJOR (one hole: same-ver replace protocol; all else fixed) |
 | r3 | AGY | `adversarial-review-mqk3oe1j-xux786`; `agy-plan-r3.md` | PLAN-NEEDS-MAJOR (SAME one hole, independent) |
 | r3 | Claude SMR | `claude-smr-plan-r3.md` | PLAN-READY w/ NIT1 (deferred-publish verb) |
-| r4 | Codex | `codex-plan-r4.md` | (pending) |
-| r4 | AGY | `agy-plan-r4.md` | (pending) |
-| r4 | Claude SMR | `claude-smr-plan-r4.md` | PLAN-READY |
+| r4 | Codex | thread (r4 turn); `codex-plan-r4.md` | **PLAN-READY** (2 NITs) |
+| r4 | AGY | `adversarial-review-mqk3uyn6-bbkpmr`; `agy-plan-r4.md` | **PLAN-READY** (3 NITs) |
+| r4 | Claude SMR | `claude-smr-plan-r4.md` | **PLAN-READY** |
+
+## CONVERGED at r4 — all three PLAN-READY. Recommended mechanism: Option B (immutable versioned staging).
+Converged plan SHA recorded at commit time; awaiting manual approval via `/engineer 1981`.
 
 ## r1 convergent themes (all three)
 - **P1 ordering / abort-upgrade wedge** (SMR-MAJOR1, Codex#1+#2, AGY#1-CRIT):

@@ -1,6 +1,10 @@
 # Plan of action — #1981: close the dpkg-unpack vs operator-cut staged-source race
 
 - **Issue:** #1981 (HIGH, correctness / upgrade integrity)
+- **Status:** **PLAN-READY** — converged r4. All three reviewers agree (Codex
+  PLAN-READY, AGY PLAN-READY, Claude SMR PLAN-READY). Recommended mechanism:
+  **Option B (immutable versioned staging)**. Awaiting manual approval via
+  `/engineer 1981`.
 - **Mode:** `/research` — converge a plan + recommend a mechanism; STOP at PLAN-READY. No code, no PR.
 - **Revision:** r4 (r1→r2: recommendation FLIPPED D→**B**. r2→r3: B ratified by
   all three; tightened the B spec for eight r2 spec-findings. r3→r4: Codex and
@@ -506,6 +510,23 @@ regression expected.
   operator guidance, closed by construction from the first B-aware version on.
   Confirm this caveat is acceptable (it is intrinsic — the fix cannot run before
   it is installed).
+
+**Research-grade NITs for `/engineer` (from the r4 converged review — none block
+PLAN-READY):**
+- **Legacy journal compatibility (AGY r4):** a pre-B journal resumed under a
+  B-aware runner has `SourceGeneration==""`. Treat an empty `SourceGeneration`
+  in an already-copied journal as valid legacy state so recovery is not blocked.
+- **GC parser adaptation if OPT2 (AGY r4):** under `versions/<ver>-<genid>`
+  keying, the `versions/` GC (`runner.go`) must parse the new name to associate a
+  generation dir with its version tag and prune correctly. (OPT1 keeps the
+  `versions/<ver>` name, so its GC is unchanged.)
+- **Operator guidance on an OPT1 refusal (AGY r4):** the CLI error on a refused
+  same-version-different-genid cut should instruct the operator to stage under a
+  distinct version tag or `dpkg-reconfigure` to align the generation.
+- **Test split + phrasing (Codex r4):** split §7.8 by selected option (OPT1:
+  live → pre-PREFLIGHT-refusal + stale-non-live → guarded-recopy; OPT2: fresh
+  `<ver>-<genid>` publication); spell B-P3b's "pre-PREFLIGHT refusal" as "no DB
+  snapshot; preferably no journal write" to remove implementation ambiguity.
 
 ## 11. r1 → r2 changelog (how each r1 finding was folded)
 
