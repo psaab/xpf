@@ -1,10 +1,64 @@
 # Plan of action — #2082: `ReleaseSyncHold` preempt path lacks peer-priority gate (transient dual-master)
 
 - **Issue:** #2082 (severity LOW, audit-verified; go-cluster-ha lens)
-- **Revision:** r1 (initial draft, pre-review)
+- **Revision:** r2 (revised after r1 3-way hostile review — all reviewers
+  converged PLAN-NEEDS-WORK; this revision closes every required change)
 - **Branch:** `research/2082-vrrp-preempt-priority-gate`
 - **Mode:** `/research` — STOPS at PLAN-READY/PLAN-KILL. No code, no PR, no production-source edits.
-- **Reviewers required to converge:** Codex (hostile) + AGY (adversarial) + Claude SMR (hostile). 3-way.
+- **Reviewers required to converge:** hostile Claude general-purpose reviewer A
+  + hostile Claude general-purpose reviewer B + AGY adversarial + Claude SMR.
+  (Codex companion is infra-degraded this campaign; substituted by two
+  independent hostile Claude plan-reviewers per the research-skill
+  infra-blocked exception. 3-way convergence = A + B + AGY + SMR all READY.)
+
+### r1 → r2 changelog (what every reviewer required, and how r2 closes it)
+
+1. **Drop the IP tie-break; use strict `>` only (AGY, RFC 5798 §6.4.2).** A
+   BACKUP preempts only on *strictly higher* priority; equal priority does NOT
+   preempt (the IP tie-break in `handleMasterRx` resolves a MASTER-MASTER
+   *collision*, which is a different state than preemption). Removing it also
+   deletes the need to record the peer's IP and eliminates the
+   nil-`localIP` edge case (reviewer A's open point — now moot). §4/§5/§6
+   updated.
+2. **Fix the concurrency model (reviewer B, reviewer A).** r1 wrongly described
+   `lastMaster*` as written by the *receiver* goroutine and read by the run
+   loop (a cross-goroutine TOCTOU). FACT: `handleBackupRx`/`handleMasterRx`
+   run in the **run-loop goroutine** (`instance.go:354-355,386-387`, both
+   `case pkt := <-vi.rxCh:`); the receiver goroutines only `rxCh <- pkt`. So
+   the record and the gate are **co-goroutine and serialized** — no TOCTOU.
+   The only lock rule is the genuine RWMutex non-reentrancy one (item 3). §6
+   rewritten; §8 corrected.
+3. **Pin the lock discipline as a binding design rule (all 4 reviewers).**
+   `getPriority()` (`track.go:33`) and `getPreempt()` (`instance.go:253`) both
+   `vi.mu.RLock()`; Go RWMutex is non-reentrant (and RLock-while-writer-queued
+   deadlocks). `shouldPreemptObservedMaster()` MUST snapshot
+   `lastMasterPriority`/`lastMasterSeen` under a single `vi.mu.RLock()`,
+   release, *then* call `getPriority()`/`getPreempt()` — OR use unlocked
+   `*Locked` private helpers (`getPriorityLocked()`, `masterDownIntervalLocked()`)
+   entirely within one held lock. NEVER nest. §5/§6 specify this.
+4. **Integration test is BLIND on the smoke cluster (reviewer B, AGY).**
+   `docs/ha-cluster-userspace.conf` sets NO `preempt` on any RG, and the smoke
+   scripts (`test/incus/test-chained-crash.sh:362`, `test-double-failover.sh:239`)
+   explicitly assert *no auto-preempt*. With `preempt=false`, `restorePreempt()`
+   restores false → the `preemptNowCh` case never calls `becomeMaster()` → the
+   bug path is NOT exercised. `make test-failover` 14/0 therefore proves
+   no-regression ONLY, never the fix. §7 elevates a preempt-enabled
+   run-loop/unit repro to the HARD validation; adding `preempt` to the shared
+   smoke cluster is rejected (would break the no-preempt assertions).
+5. **New invariants the gate relies on (SMR, reviewer B):** (a) the gate
+   governs ONLY the sync-hold preempt *shortcut* — it never disables the
+   `masterDownTimer.C` election; a denied gate leaves the timer armed
+   (`masterDownTimer.Stop()` is inside the taken branch only, `instance.go:371`);
+   (b) priority-0 resignation takeover flows through the *ungated*
+   `masterDownTimer.C` path (`handleBackupRx` Reset(1ms) → `instance.go:357`),
+   so not recording priority-0 cannot block a post-resign takeover; (c)
+   staleness (`lastMasterSeen > masterDownInterval`) rescues BOTH cold-start
+   AND silent-master-death (deny window bounded to `masterDownInterval`). §6.
+6. **Note the pre-existing force/non-force coalescing (reviewer B).** The
+   cap-1 `preemptNowCh` coalesces sends; `ForceRGMaster` sets `forcePreemptOnce`
+   before `triggerPreemptNow` and guards `getState()!=StateMaster`. Path A
+   changes ONLY the `force==false` branch, so legitimate force=true promotion
+   is provably untouched. §8.
 
 ---
 
@@ -192,40 +246,47 @@ Record the last-seen master's effective priority on the instance, and on the
 sync-hold preempt kick, only `becomeMaster()` if we would win. Concretely:
 
 1. Add `lastMasterPriority int` + `lastMasterSeen time.Time` to `vrrpInstance`
-   (guarded by `vi.mu`). Set them in `handleBackupRx` (and `handleMasterRx`)
-   for every non-zero-priority advert received from a peer:
+   (guarded by `vi.mu` for external readers; written/read by the run-loop
+   goroutine — see §6). Set them in `handleBackupRx` (and `handleMasterRx`)
+   for every **non-zero**-priority advert received from a peer:
    `lastMasterPriority = int(pkt.Priority); lastMasterSeen = now`.
-   (Priority-0 adverts are resignation — do not record as a "master".)
+   Priority-0 adverts are resignation — do **not** record as a "master"
+   (safe: post-resign takeover is ungated, §6 invariant b). **No peer-IP
+   field** — the gate uses strict priority only (RFC 5798 §6.4.2; r2 item 1).
 2. In the `preemptNowCh` case, when `force==false`, gate on:
    ```
-   if vi.shouldPreemptObservedMaster() {
+   if force || vi.shouldPreemptObservedMaster() {
        vi.becomeMaster() ...
    }
    ```
    where `shouldPreemptObservedMaster()` returns true iff:
-   - `getPreempt()` is true, AND
-   - we have **not** recently observed a peer master (`lastMasterSeen` is zero
-     or older than `masterDownInterval()`) — meaning there is no live master to
-     respect, so becoming MASTER is correct (this preserves the
-     no-peer / cold-start case where becoming master IS the right move), OR
-   - we **have** observed a recent master AND `getPriority() > lastMasterPriority`
-     (strict `>`, RFC 5798 preemption), OR equal priority with the
-     IP-address tie-break favoring us (reuse the `handleMasterRx` tie-break so
-     behavior is symmetric).
-   - `force==true` always wins (ForceRGMaster path unchanged).
+   - `getPreempt()` is true (else false — a non-preempting node never preempts
+     on the shortcut), AND
+   - **either** we have **not** recently observed a live master (`lastMasterSeen`
+     is zero or older than `masterDownInterval()`) — no live master to respect,
+     so becoming MASTER is correct (cold-start / peer-down / silent-master-death
+     rescue), **or** we **have** observed a recent master AND
+     `getPriority() > lastMasterPriority` (**strict `>`**, RFC 5798 §6.4.2).
+   - Equal priority → **false** (RFC 5798 §6.4.2: an equal-priority BACKUP does
+     not preempt). No IP tie-break here (that is `handleMasterRx`'s
+     MASTER-MASTER collision resolver, not a preemption rule).
+   - `force==true` always wins via the short-circuit (ForceRGMaster unchanged).
 3. If the gate denies preemption, do **not** `becomeMaster()`. Leave the node
-   in BACKUP with its masterDown timer running. The normal RFC election then
-   governs: if the peer master later disappears, masterDown expiry promotes us
-   correctly; if a legitimately-higher local priority later applies (cluster
-   promotes us to Primary → `UpdateRGPriority(rg,200)` + `ForceRGMaster` with
-   `force=true`), that path still works.
+   in BACKUP with its `masterDownTimer` running (the gate never stops it —
+   `masterDownTimer.Stop()` stays inside the taken `becomeMaster` branch only,
+   `instance.go:371`). The normal RFC election then governs: peer master gone →
+   masterDown expiry promotes us; cluster promotes us → `UpdateRGPriority(200)`
+   + `ForceRGMaster` (force=true) still works.
 
-**Why strict `>` (not `>=`):** RFC 5798 §6.1 preemption is "higher priority".
-Equal-priority is resolved by the address tie-break, which we reuse so the
-sync-hold path matches steady-state `handleMasterRx`. Using `>=` would let a
-priority-100 Secondary preempt a priority-100… (not possible here since RETH is
-200/100) but would also let an equal-priority node with a *lower* IP wrongly
-preempt — incorrect.
+**Why strict `>` and no tie-break (r2):** RFC 5798 §6.4.2 — a BACKUP transitions
+to MASTER on a *higher*-priority condition only. Equal priority is NOT a
+preemption trigger; the address tie-break exists only to break a MASTER-MASTER
+collision (two nodes already MASTER), which `handleMasterRx` handles. Using the
+tie-break in the *preempt* gate would (a) be RFC-non-compliant and (b) force the
+instance to record + track the peer master's IP. Strict `>` is correct,
+simpler, and stateless beyond the priority+timestamp. For RETH (200/100) equal
+never occurs anyway; for standalone instances equal-priority-no-preempt is the
+correct RFC behavior.
 
 **Failover-timing impact:** none for legitimate cases. The higher-priority node
 (priority 200, the one that *should* preempt) passes the gate immediately —
@@ -299,100 +360,163 @@ All in `pkg/vrrp/`:
 
 1. **`instance.go` struct:** add
    ```go
-   lastMasterPriority int       // last non-zero peer advert priority (guarded by mu)
-   lastMasterSeen     time.Time // when lastMasterPriority was recorded (guarded by mu)
+   lastMasterPriority int       // last non-zero peer advert priority (mu)
+   lastMasterSeen     time.Time // when lastMasterPriority was recorded (mu)
    ```
 2. **`handleBackupRx` + `handleMasterRx`:** on any received advert with
    `pkt.Priority != 0`, record `lastMasterPriority`/`lastMasterSeen` under
-   `vi.mu`. (Place the record before the existing branch logic so it always
-   runs.)
-3. **New helper `shouldPreemptObservedMaster() bool`** implementing the gate in
-   §4 Path A step 2 (preempt configured + (no live master OR strictly-higher
-   effective priority OR equal-with-IP-tiebreak)). Reuse the IP tie-break
-   already in `handleMasterRx` (extract a small `peerIPWins(srcIP) bool` helper
-   to avoid duplicating the v4/v6 compare).
+   `vi.mu` (a short `vi.mu.Lock(); …; vi.mu.Unlock()` — these handlers run in
+   the run-loop goroutine; the lock guards only external readers like
+   `Status()`). Record before the existing branch logic so it always runs.
+3. **New helper `shouldPreemptObservedMaster() bool`** implementing §4 Path A
+   step 2: preempt configured AND (no live master OR strictly-higher effective
+   priority). **Lock discipline (BINDING, all reviewers):** Go's `sync.RWMutex`
+   is non-reentrant. The helper MUST NOT hold `vi.mu` while calling
+   `getPriority()` / `getPreempt()` (both RLock `vi.mu` → deadlock). Implement
+   as one of:
+   - **(preferred) snapshot-then-release:** `vi.mu.RLock()` → read
+     `lastMasterPriority`, `lastMasterSeen`, `cfg.Preempt`, `cfg.Priority`,
+     `trackDown`, `cfg.TrackInterface`, `cfg.TrackPriorityCost` into locals →
+     `vi.mu.RUnlock()` → compute the effective priority inline (replicating the
+     `getPriority` owner-255 / track-clamp logic) and the masterDownInterval
+     staleness horizon from locals. Single lock acquisition, no nesting.
+   - **or** add unlocked private helpers `getPriorityLocked()` /
+     `masterDownIntervalLocked()` and call them strictly within one held
+     `vi.mu.RLock()`. (Factor the existing `getPriority`/`masterDownInterval`
+     bodies into `*Locked` and have the public methods wrap with the lock.)
+   Pick one explicitly in the implementation; do not reintroduce a
+   `getPriority()` call inside a held lock "for DRY."
 4. **`run()` `preemptNowCh` case:** replace `if vi.getPreempt() || force` with
    `if force || vi.shouldPreemptObservedMaster()`. (force short-circuits;
-   ForceRGMaster path unchanged. `shouldPreemptObservedMaster` already requires
-   `getPreempt()`.)
+   ForceRGMaster path unchanged. The helper already requires `getPreempt()`.)
+   Note: at this site `vi.mu` is NOT held (the case releases it after reading
+   `forcePreemptOnce`, `instance.go:365-368`), so the helper is entered
+   lock-free — the only deadlock risk is internal to the helper (item 3).
 5. **`pkg/vrrp/README.md`:** document the sync-hold preempt gate under the
    Behavior / Sync-hold section — a lower-priority preempt-enabled node no
    longer transiently becomes MASTER on sync-hold release; it defers to the
-   observed higher-priority master and follows the normal RFC election.
+   observed higher-priority master (strict `>`, RFC 5798 §6.4.2) and follows
+   the normal RFC election. Also update the `CLAUDE.md` Chassis-Cluster
+   sync-hold bullet (one line: "sync-hold release preempt is now peer-priority
+   gated").
 
 No changes to `manager.go` trigger logic (it still calls `restorePreempt` +
 `triggerPreemptNow` for all instances; the gate lives in the consumer so both
-the sync-hold and any future trigger benefit).
+the sync-hold and any future trigger benefit). No new field for peer IP.
 
 ---
 
 ## 6. Correctness arguments / invariants
 
-- **Legitimate higher-priority preempt still instant.** Node with priority 200
-  observing a master at 100 (or no master): `getPriority(200) >
-  lastMasterPriority(100)` → gate passes → immediate becomeMaster. No timing
-  regression.
+- **Single-goroutine serialization (no TOCTOU) — corrected in r2.**
+  `handleBackupRx`/`handleMasterRx` (the `lastMaster*` writers) and the
+  `preemptNowCh` case (the gate reader) are ALL cases of the *same* `select`
+  in the *same* run-loop goroutine (`instance.go:350` for-loop;
+  `:354-355,:386-387,:360`). The receiver goroutines only `rxCh <- pkt`. So the
+  gate reads exactly what the most-recently-processed advert wrote, atomically
+  with respect to state transitions — there is **no cross-goroutine race on the
+  gate decision**. `vi.mu` is needed only for *external* readers (`Status()`,
+  `getPriority`); it is NOT a correctness barrier between record and gate.
+- **Legitimate higher-priority preempt still instant.** Node with effective
+  priority 200 observing a master at 100 (or no live master): `200 > 100` →
+  gate passes → immediate becomeMaster. No timing regression.
 - **Illegitimate lower-priority preempt blocked.** Node at 100 observing a live
-  master at 200: `100 > 200` false, not stale → gate denies → stays BACKUP.
-  Bug fixed.
-- **Cold start / no peer.** `lastMasterSeen` zero or stale (> masterDownInterval)
-  → gate treats as "no live master" → becomeMaster allowed. A genuinely-alone
-  node on sync-hold release still takes over (no deadlock).
-- **ForceRGMaster unaffected.** `force==true` short-circuits the gate.
-- **Equal priority.** Resolved by the same IP tie-break as `handleMasterRx` →
-  symmetric, RFC 5798 §6.4.3 consistent. (RETH is 200/100 so equal does not
-  occur there; matters for standalone instances sharing the run loop.)
-- **Owner-255 / track demotion.** The gate compares `getPriority()` (effective,
-  track-clamped, owner-exempt) — not raw `cfg.Priority` — so a track-demoted
-  node correctly fails the gate, and an owner-255 node correctly wins. Reuses
-  existing `getPriority()` semantics; no new clamp logic.
+  master at 200: `100 > 200` false, fresh `lastMasterSeen` → gate denies →
+  stays BACKUP. Bug fixed.
+- **Invariant (a): gate governs only the shortcut, never the election.** A
+  denied gate does NOT touch `masterDownTimer` (Stop() is inside the taken
+  `becomeMaster` branch only, `instance.go:371`). So the RFC `masterDownTimer.C`
+  election (`instance.go:357-358`) remains armed and independent. The gate can
+  never cause a *no-master* outage — at worst it defers the shortcut; the timer
+  still promotes on real master death.
+- **Invariant (b): priority-0 resignation takeover is ungated.** When the
+  master resigns (priority-0 burst), `handleBackupRx` sets
+  `masterDownTimer.Reset(1ms)` (`instance.go:728`) → `masterDownTimer.C` →
+  becomeMaster — this NEVER flows through the gated `preemptNowCh` case. Hence
+  not recording priority-0 (leaving a stale-high `lastMasterPriority`) cannot
+  block a legitimate post-resign takeover.
+- **Invariant (c): staleness rescues cold-start AND silent-master-death.**
+  `lastMasterSeen` zero (never heard a master) OR older than
+  `masterDownInterval` (master gone silently, no priority-0) → gate treats as
+  "no live master" → becomeMaster allowed. Deny window for a silent death is
+  bounded by `masterDownInterval` (~97ms RETH), and the ungated timer (invariant
+  a) promotes independently inside that window anyway. No "never take over"
+  deadlock; no outage.
+- **ForceRGMaster unaffected.** `force==true` short-circuits the gate
+  (`if force || …`). Legitimate Secondary→Primary promotion
+  (`daemon_ha.go:243`) is untouched.
+- **Owner-255 / track demotion.** The gate compares the *effective* priority
+  (the `getPriority` value: owner-255 exempt, track-clamped [1,254]) — not raw
+  `cfg.Priority`. Owner-255 always wins (`255 > any ≤254`); a track-demoted
+  node correctly fails the gate and stays BACKUP. Reuses existing semantics; no
+  new clamp logic (computed inline-from-snapshot or via `getPriorityLocked`,
+  §5 item 3).
 - **Staleness threshold = masterDownInterval.** Same horizon the RFC uses to
   declare the master dead; consistent with `handleBackupRx` timer semantics.
+- **Equal priority does not preempt (RFC 5798 §6.4.2).** Strict `>`; no IP
+  tie-break in the gate. RETH (200/100) never hits equal; standalone
+  equal-priority-no-preempt is correct RFC behavior.
 
 ---
 
 ## 7. Test plan
 
+**PRIMARY regression guard — MUST drive the actual `run()` `preemptNowCh` case
+(reviewer A, SMR).** A helper-only test (`shouldPreemptObservedMaster()` in
+isolation) is INSUFFICIENT: if the implementer adds the helper but leaves
+`run()` as `if vi.getPreempt() || force`, a helper test passes while the bug
+ships. The wiring test must exercise the run loop. This is feasible without real
+sockets: `becomeMaster()` → `addVIPs()` degrades gracefully (`netlink.LinkByName`
+fails → Warn+return, `instance.go`), and `sendAdvert`/`sendPacket` return nil
+when `rawConn==nil`. So a test can `newInstance(...)`, set `state=StateBackup`,
+seed `lastMaster*`, push the preempt trigger, single-step one run-loop iteration
+(extract a `stepBackup()` seam or run `run()` briefly under a stop channel), and
+assert `getState()`.
+
 **Unit (`pkg/vrrp/vrrp_test.go`), new tests:**
 
-1. `TestPreemptNow_LowerPriorityDefersToObservedMaster`: instance priority 100,
-   preempt=true, record `lastMasterPriority=200`/`lastMasterSeen=now`, fire the
-   preempt gate path → assert state stays BACKUP (no becomeMaster). Drive via a
-   testable seam — either call `shouldPreemptObservedMaster()` directly
-   (preferred, no socket) or exercise the run loop with a stubbed socket.
-2. `TestPreemptNow_HigherPriorityPreemptsObservedMaster`: priority 200,
-   observed master 100 → gate true.
-3. `TestPreemptNow_NoObservedMasterAllowsTakeover`: `lastMasterSeen` zero →
-   gate true (cold-start).
-4. `TestPreemptNow_StaleMasterAllowsTakeover`: `lastMasterSeen` older than
-   masterDownInterval → gate true.
+1. `TestPreemptNow_LowerPriorityStaysBackup` (**run-loop wiring guard**):
+   priority 100, preempt=true, `lastMasterPriority=200`/`lastMasterSeen=now`,
+   drive the `preemptNowCh` case → assert state stays `StateBackup`. **MUST FAIL
+   on today's `if vi.getPreempt() || force`** (which would becomeMaster) — true
+   regression guard.
+2. `TestPreemptNow_HigherPriorityBecomesMaster`: priority 200, observed master
+   100 → state → `StateMaster` (drive run loop).
+3. `TestShouldPreempt_NoObservedMaster`: `lastMasterSeen` zero → true (helper,
+   cold-start).
+4. `TestShouldPreempt_StaleMaster`: `lastMasterSeen` older than
+   masterDownInterval → true (helper, silent-death/peer-down rescue).
 5. `TestPreemptNow_ForceBypassesGate`: priority 100, observed master 200,
-   `force=true` → becomeMaster (ForceRGMaster path).
-6. `TestPreemptNow_EqualPriorityIPTiebreak`: equal priority, our IP higher →
-   gate true; peer IP higher → gate false.
-7. `TestHandleBackupRx_RecordsMasterPriority`: feed an advert, assert
-   `lastMasterPriority`/`lastMasterSeen` updated; priority-0 advert does NOT
-   update them.
+   `force=true` → `StateMaster` (ForceRGMaster path unchanged).
+6. `TestShouldPreempt_EqualPriorityNoPreempt`: equal priority, fresh master →
+   **false** (RFC 5798 §6.4.2 — no IP tie-break; helper).
+7. `TestHandleBackupRx_RecordsMasterPriority`: feed a non-zero advert → assert
+   `lastMaster*` updated; feed a priority-0 advert → assert `lastMaster*`
+   **unchanged** (resignation not recorded).
+8. `TestPreemptNow_DeniedGateLeavesMasterDownTimerArmed` (invariant a): denied
+   gate → assert the masterDown election path still promotes (timer not
+   stopped). Drive the run loop with a short masterDown timer.
+9. (-race) run the suite with `-race` to confirm the snapshot lock discipline
+   has no data race between the run loop and external `Status()` readers.
 
-**The test must FAIL on the unpatched code** (per the project's "durability/
-side-effect tests must fail if the effect is removed" discipline): test #1
-against today's `if vi.getPreempt() || force` would (incorrectly) becomeMaster
-— so it is a true regression guard.
-
-**Integration / failover (required at `/engineer` time — this is failover-class
-HA code):**
-- `make test-failover` on the loss userspace cluster
-  (`loss:xpf-userspace-fw0/fw1`) — must pass (zero-drop, e.g. 14/0). Touches
-  VRRP preempt/become-master → mandatory per CLAUDE.md ("Any change touching
-  cluster, VRRP, session sync, or failover code MUST pass `make test-failover`
-  before commit").
-- **Precondition check:** confirm whether the loss cluster RG config sets
-  `preempt` (if not, the bug path isn't exercised by default — add a transient
-  preempt-enabled config variant for the targeted repro, or assert via logs
-  that the Secondary no longer logs `transitioning to MASTER` on sync-hold
-  release). The smoke must demonstrate the Secondary does NOT flap to MASTER on
-  rejoin/sync-complete while the Primary holds the VIP.
-- `go test ./pkg/vrrp/ -race` and `go build ./...`.
+**Integration / failover — HONEST coverage statement (reviewer B, AGY):**
+The smoke cluster config (`docs/ha-cluster-userspace.conf`) sets **NO `preempt`**
+on any RG, and the smoke scripts (`test/incus/test-chained-crash.sh:362`,
+`test-double-failover.sh:239`) explicitly assert *no auto-preempt*. With
+`preempt=false`, `restorePreempt()` restores false → the `preemptNowCh` case
+never calls `becomeMaster()` → **the bug path is NOT exercised**. Therefore:
+- `make test-failover` (loss userspace cluster) is REQUIRED but is a
+  **no-regression gate ONLY** — a green 14/0 does NOT validate this fix. It is
+  mandated by CLAUDE.md for any VRRP/failover change and must stay green.
+- Do **NOT** add `preempt` to the shared smoke cluster — it would break the
+  existing no-auto-preempt assertions in the smoke scripts and is a shared
+  resource.
+- The ACTUAL validation of the fix is the run-loop wiring unit test (#1 above)
+  with `preempt=true` + recorded `lastMasterPriority`. If a live integration
+  repro is wanted, it belongs in an ISOLATED throwaway 2-node config with
+  `preempt` set on an RG (not the shared loss cluster) — optional, the unit
+  guard is sufficient and authoritative.
+- `go test ./pkg/vrrp/ -race` and `go build ./...` are mandatory.
 
 ---
 
@@ -419,24 +543,34 @@ HA code):**
    masterDownInterval. Net: **Path A dominates Path B** — same safety, no
    regression to the one fast-path case that could matter. Reviewers to
    confirm the trace.
-2. **Recording `lastMasterPriority` on every advert** is in the RX hot path
-   (`handleBackupRx`), but it is a single guarded int+time write per received
-   advert (30 ms cadence) — negligible. Confirm no lock-ordering issue
-   (`vi.mu` already taken/released in these handlers via `getPriority`).
+2. **Recording `lastMasterPriority` on every advert** is in the RX handling
+   path (`handleBackupRx`), a single int+time write per received advert (30 ms
+   cadence) — negligible. It runs in the run-loop goroutine (NOT the receiver),
+   so it is serialized with the gate read (§6). The `vi.mu` it takes is only to
+   protect external readers.
 3. **Standalone (non-cluster) VRRP** shares the run loop. Path A is correct for
-   it (it just records peer priority and gates), but standalone instances are
-   not under sync-hold, so the gate's only effect there is on a future
-   `triggerPreemptNow` caller — currently none besides ForceRGMaster (cluster).
-   No behavior change for standalone today; future-proof.
-4. **Concurrency:** `shouldPreemptObservedMaster()` reads `lastMaster*` under
-   `vi.mu`; the run-loop goroutine is the only writer of state transitions, the
-   receiver goroutine writes `lastMaster*` — both under `vi.mu`. Verify no
-   deadlock with the existing `getPreempt()`/`getPriority()` RLock usage (the
-   helper must take the lock once, not call `getPriority()` while already
-   holding it).
-5. **`make test-failover` may not exercise the bug** without a preempt-enabled
-   RG — see §7. The smoke could be green while the fix is untested at the
-   integration level. Must add a targeted repro or log-assertion.
+   it (records peer priority and gates), but standalone instances are not under
+   sync-hold, so the gate's only effect there is on a future `triggerPreemptNow`
+   caller — currently none besides ForceRGMaster (cluster). No behavior change
+   for standalone today; future-proof. Equal-priority-no-preempt is RFC-correct.
+4. **Concurrency / lock reentrancy (RESOLVED in r2, was the top r1 hazard).**
+   The record and gate are co-goroutine (no TOCTOU). The ONLY hazard is RWMutex
+   non-reentrancy: `shouldPreemptObservedMaster()` must snapshot under one
+   `vi.mu.RLock()` then release before calling `getPriority()`/`getPreempt()`,
+   OR use `*Locked` helpers within one held lock — never nest (§5 item 3).
+   `-race` in the test suite guards the snapshot vs `Status()` readers.
+5. **`make test-failover` CANNOT exercise the bug** — the smoke cluster is
+   `preempt=false` and the scripts assert no-auto-preempt (§7). Resolved by
+   making test-failover a no-regression gate only and the run-loop unit test the
+   authoritative validation. NOT an open risk anymore — a stated constraint.
+6. **Pre-existing force/non-force `preemptNowCh` coalescing (reviewer B) — NOT
+   worsened by Path A.** The cap-1 channel coalesces sends; `ForceRGMaster`
+   sets `forcePreemptOnce` before `triggerPreemptNow` and guards
+   `getState()!=StateMaster` (`manager.go`). Path A changes ONLY the
+   `force==false` branch (adds the gate). The `force==true` consume reads
+   `forcePreemptOnce` at consume time and short-circuits the gate, so legitimate
+   force promotion is provably untouched. The coalescing semantics are
+   unchanged from today.
 
 ---
 
@@ -457,11 +591,32 @@ implementation commit; no migration, no on-disk state, no wire-format change.
 
 ---
 
-## 11. Verdict ledger (filled during review)
+## 11. Verdict ledger
 
-- Codex r?: _pending_
-- AGY r?: _pending_
-- Claude SMR r?: _pending_
+**r1:**
+- Claude SMR r1: PLAN-NEEDS-WORK (lock discipline underspecified; add
+  serialization + gate-only-shortcut + staleness invariants; tests must drive
+  run loop).
+- Hostile reviewer A r1: PLAN-NEEDS-WORK (test must drive run() not helper;
+  lock discipline binding not "verify"; integration blind without preempt RG;
+  pin nil-localIP — now moot, tie-break dropped).
+- Hostile reviewer B r1: PLAN-NEEDS-WORK (r1's cross-goroutine TOCTOU model is
+  factually wrong — record+gate co-goroutine; staleness must cover
+  silent-master-death; test-failover is `preempt=false` so proves nothing;
+  note coalescing). Confirmed REAL harm: spurious Secondary MASTER →
+  `allMasterLocked()` → rg_active=true + blackholes removed on Secondary.
+- AGY r1: PLAN-NEEDS-WORK (deadlock via nested RLock → use `*Locked` helpers;
+  drop IP tie-break, RFC 5798 §6.4.2 strict `>`; enable preempt in test config
+  or downgrade integration claim).
 
-**Current status: PLAN-READY candidate, pending 3-way convergence.**
+All four r1 → **PLAN-NEEDS-WORK, reachability CONFIRMED (PLAN-KILL refuted by
+all four).** r2 closes every required change (see r1→r2 changelog at top).
+
+**r2:**
+- Claude SMR r2: _pending_
+- Hostile reviewer A r2: _pending_
+- Hostile reviewer B r2: _pending_
+- AGY r2: _pending_
+
+**Current status: PLAN-READY candidate (r2), pending re-review convergence.**
 **Reachability: CONFIRMED REACHABLE (not PLAN-KILL).**
