@@ -2,15 +2,17 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r10 (folds Codex r8: the coherent source must be the LAST-APPLIED
-  snapshot config+gen — `publishedSnapshot` is too loose, `lastSnapshot.Generation`
-  too strict; FIB/neighbor bumps would gate the alarm off forever)
-- **Status:** CONVERGED — PLAN-READY (3-way at r10): Claude SMR r10 PLAN-READY,
-  AGY r10 PLAN-READY, Codex r10 PLAN-READY ("No findings"). The
-  generation-coherency comparand was bracketed by AGY (too-loose `publishedSnapshot`)
-  and Codex (too-strict `lastSnapshot.Generation`); r10's applied-snapshot source
-  is the provable fixed point between them. Awaiting manual approval via
-  `/engineer 2079`.
+- **Revision:** r11 (folds Codex r10 BLOCKER: the applied generation is echoed on
+  ACCEPT, but the defer_workers path skips reconcile while NAT counters come from
+  reconciled forwarding state — so the applied source must be the last RECONCILED
+  apply, and the gate must also exclude the mid-defer window)
+- **Status:** PLAN-READY pending r11 re-confirm — the prior "r10 converged" was
+  PREMATURE: I acted on a fresh-session Codex r10 retry's "No findings" while the
+  original (slower, deeper) Codex r10 pass was still running; it returned a
+  legitimate BLOCKER (deferred-apply reconcile-skew) that r10 did not handle.
+  Reopened; r11 folds it → r11 re-review dispatched. AGY r10 + Claude SMR r10 were
+  PLAN-READY on the applied-snapshot idea, but did not catch the deferred-reconcile
+  window.
 - **Recommendation:** Path B — `show security alarms` registry (BOTH render sites)
   + transition-gated structured syslog, driven by a 10s daemon monitor over the
   helper's LAST-APPLIED NAT pool snapshot (`dp.AppliedNATView()`).
@@ -19,7 +21,34 @@
   (BOTH render sites) + transition-gated structured syslog, driven by a slow
   (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
 
-### r10 changelog (folds Codex r8 PLAN-REVISE)
+### r11 changelog (folds Codex r10 PLAN-REVISE — a real BLOCKER r10 missed)
+PROCESS NOTE: r10 was prematurely declared converged on a fresh-session Codex
+retry's "No findings" while the original Codex r10 pass (slower, ~11 min) was
+still running. The original returned a BLOCKER. Lesson: do NOT treat a retry's
+clean verdict as final while the original is still in flight — wait for the
+deepest pass. (`feedback_codex_infra_must_retry` is for when the original is
+truly blocked, not merely slow.)
+- **BLOCKER #1 (deferred-apply reconcile-skew):** the helper sets
+  `last_snapshot_generation` the instant it ACCEPTS a snapshot
+  (`snapshot.rs:63`), but the `defer_workers` branch stores the snapshot and
+  SKIPS `reconcile_status_bindings` (`snapshot.rs:113-144`). NAT pool status is
+  read from the coordinator's forwarding state, replaced only on reconcile
+  (`helpers.rs:244` → `afxdp/coordinator/status.rs:315` →
+  `reconcile/snapshot.rs:89`). Go sets `DeferWorkers` during RETH-MAC bring-up
+  (`manager.go:677-679`, gated on `m.deferWorkers`). So in the defer window,
+  status-gen == new gen but the NAT counters are still the OLD rules → r10's
+  `status==appliedGen` check passes while config and counters are mismatched.
+  r11: record `m.appliedSnapshot` ONLY on a RECONCILED apply (non-deferred, or
+  the post-`NotifyLinkCycle` reconcile), never on a deferred-but-accepted apply;
+  and `view.Coherent` additionally requires `!m.deferWorkers`.
+- **#3 (first-boot/restart gen==0 false-clear):** a `gen==0` (no reconciled
+  applied snapshot) must surface as `Available=false` (HOLD), NOT `cfg==nil` →
+  clear-all, else a helper restart could falsely clear pre-restart alarms before
+  the first reconcile.
+- **#4 (NIT, stale path):** verified — the plan's `last_snapshot_generation`
+  setter ref is the correct `userspace-dp/src/server/handlers/snapshot.rs:63`.
+
+### r10 changelog (folds Codex r8 PLAN-REVISE — refined by r11's reconcile gate)
 The r9 `HelperCaughtUp == (status gen == m.lastSnapshot.Generation)` was too
 STRICT (the mirror of AGY's too-loose `publishedSnapshot`):
 - **#1/#2 (MAJOR):** `BumpFIBGeneration` (`manager.go:1163-1166`) and
@@ -381,11 +410,11 @@ A small daemon-resident component (model: `pkg/ipmon` background engine, started
 in `daemon_run.go` near `d.ipmon.Start()`). Either a new `pkg/natpoolalarm`
 package or a method on the daemon — reviewer input welcome on placement; leaning
 toward a self-contained, unit-testable struct that takes a single
-`func() AppliedNATView` sampler (r10 — NOT a separate config getter + status
-sampler, and NOT the latest `lastSnapshot`; the view is the helper's LAST-APPLIED
-config + its matching counters; see below for why an applied-coherent source is
-required) + emit callbacks (dependency-injected so it is testable without a live
-dataplane).
+`func() AppliedNATView` sampler (r10/r11 — NOT a separate config getter + status
+sampler, NOT the latest `lastSnapshot`, and NOT a merely-accepted apply; the view
+is the helper's LAST-RECONCILED applied config + its matching counters; see below
+for why a reconciled-applied-coherent source is required) + emit callbacks
+(dependency-injected so it is testable without a live dataplane).
 
 Loop (slow tick, **10s** — NOT 1s, to avoid flap; reads cached `LastStatus()`
 only, no socket I/O):
@@ -402,39 +431,53 @@ only, no socket I/O):
 # permanently exceeds last_snapshot_generation → numericEval would be false
 # FOREVER and the alarm would never fire). The dataplane manager therefore tracks
 # the APPLIED snapshot (Config + Generation captured at each successful full
-# apply_snapshot — a new `m.appliedSnapshot {Config, Generation}` field, set ONLY
-# on the apply_snapshot path beside where last_snapshot_generation will be echoed)
-# and exposes:
+# apply_snapshot. CRITICAL (r11 — Codex r10 BLOCKER): the helper sets
+# last_snapshot_generation the instant it ACCEPTS a snapshot (snapshot.rs:63), but
+# the defer_workers path (snapshot.rs:113-144) STORES the snapshot and SKIPS
+# reconcile_status_bindings — and NAT pool status is read from the coordinator's
+# forwarding state which is only replaced during reconcile (helpers.rs:244 →
+# afxdp/coordinator/status.rs:315 → reconcile/snapshot.rs:89). Go sets
+# DeferWorkers (manager.go:677-679, gated on m.deferWorkers) during RETH-MAC
+# bring-up; the real reconcile happens later on NotifyLinkCycle. So in the
+# defer window: status.last_snapshot_generation = NEW gen, but the NAT counters
+# still belong to the OLD rules → a status-gen==applied-gen check ALONE is NOT
+# enough. The manager therefore records `m.appliedSnapshot {Config, Generation}`
+# ONLY when an apply_snapshot was actually RECONCILED (non-deferred apply, OR the
+# post-NotifyLinkCycle reconcile) — NEVER on a deferred-but-accepted apply — and
+# the view additionally requires the helper is not currently mid-defer:
 #   view := dp.AppliedNATView()
-#     → { Config *config.Config,            # == m.appliedSnapshot.Config (the helper's CURRENT applied config)
-#         Pools  map[string]SourceNATPoolStatus,  # deduped, from status (same applied gen as Config)
+#     → { Config *config.Config,            # == m.appliedSnapshot.Config (last RECONCILED applied config)
+#         Pools  map[string]SourceNATPoolStatus,  # deduped, from status (counters of that reconciled gen)
 #         AppliedGeneration uint64,          # == m.appliedSnapshot.Generation
-#         HelperCoherent bool,               # status.LastSnapshotGeneration == m.appliedSnapshot.Generation
+#         Coherent bool,                     # status.LastSnapshotGeneration == AppliedGeneration
+#                                            #   AND NOT m.deferWorkers (no pending deferred reconcile) (r11)
 #         Available bool }                   # false when dp nil / helper not running
-# Config and counters are BOTH the helper's applied generation → coherent by
-# construction; FIB/neighbor/no-op bumps don't touch appliedSnapshot, so they
-# never falsely gate. A newer commit not yet applied just means the alarm reflects
-# the applied generation until the next apply lands — acceptable for a 10s alarm
-# (the alarm describes the dataplane's CURRENT pool pressure, which IS the applied
-# config). HelperCoherent guards the in-flight-apply window (status echoes the new
-# gen only after the helper accepts it).
+#                                            #   OR no RECONCILED applied snapshot yet (r11 #3:
+#                                            #   first boot / post-restart gen==0 → Available=false,
+#                                            #   NOT a cfg==nil false-clear of pre-restart alarms)
+# appliedSnapshot is recorded only after a reconcile, so Config + the counters of
+# AppliedGeneration are the SAME reconciled forwarding state. FIB/neighbor/no-op
+# bumps don't touch appliedSnapshot; a deferred apply doesn't either (until its
+# reconcile). A newer committed-but-not-yet-reconciled config just means the alarm
+# reflects the last reconciled generation until the reconcile lands — acceptable
+# for a 10s alarm (it describes the dataplane's CURRENT pool pressure).
 
-view := dp.AppliedNATView()                       # r10: single coherent applied source (no store.ActiveConfig)
+view := dp.AppliedNATView()                       # r10/r11: single coherent RECONCILED-applied source
 if !view.Available:                               # dp nil / helper down → HOLD all (do NOT clear) (r8 #2)
     return                                         #   no data → cannot decide; keep current alarm state untouched
-if !view.HelperCoherent:                          # r10: mid-apply (status gen != applied gen) → HOLD all this tick
+if !view.Coherent:                                # r11: mid-apply OR mid-defer (status!=applied OR deferWorkers) → HOLD all
     return                                         #   counters/config transiently mismatched → no decision
-cfg := view.Config                                # may be nil (no applied snapshot yet)
+cfg := view.Config                                # may be nil (no reconciled applied snapshot yet)
 if cfg == nil:                                    #   fail-closed nil
     clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6)
 alarmCfg := cfg.Security.NAT.PoolUtilizationAlarm
 if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
     clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6)
-byPoolStatus := view.Pools                         # deduped pool statuses, same applied gen as cfg
+byPoolStatus := view.Pools                         # deduped pool statuses, same reconciled applied gen as cfg
 
-# r10: once view is Available AND HelperCoherent, config and counters are the
-# SAME applied generation → numeric eval is ALWAYS coherent. numericEval is true.
-numericEval := true                                # (Available+HelperCoherent already gated above)
+# r10/r11: once Available AND Coherent (reconciled), config and counters are the
+# SAME reconciled applied generation → numeric eval is ALWAYS coherent.
+numericEval := true                                # (Available+Coherent already gated above)
 
 # r6 (Codex r5 #1): eligibility is RULE-REFERENCED config — NOT every pool in
 # cfg...SourcePools. The status producer is RULE-DERIVED: SourceNATPoolStatus is
@@ -587,7 +630,9 @@ not a silent drop); and the alarm feature being disabled or the config going nil
 (the early-return clears every active alarm before emptying the map). Two cases
 HOLD (emit nothing this tick, no transition): (1) a transient uncomputable sample
 (`AddressCount==0` / bad ports / capacity 0); (2) the view being
-`!Available` (dp nil / helper down) or `!HelperCoherent` (mid-apply). For case
+`!Available` (dp nil / helper down / no reconciled applied snapshot yet) or
+`!Coherent` (mid-apply OR mid-defer — status gen != reconciled applied gen, OR
+`m.deferWorkers` is set; r11). For case
 (2) the disabled/nil-config clears CANNOT run because there is no coherent applied
 config to act on — those clears are DEFERRED to the next coherent tick (the
 active-alarm set is retained, so when the view recovers, the disabled/nil-config
@@ -621,12 +666,17 @@ killed.)
 - **New code:** one small monitor (Go), ~250-350 LOC + tests; a shared alarm-line
   formatter used by BOTH render sites; one syslog formatter + emit call; a new
   `Manager.AppliedNATView()` accessor + a `m.appliedSnapshot {Config, Generation}`
-  field captured on the full apply_snapshot path (r10); daemon start/stop wiring;
-  a commit-time validation block.
-- **Touched files (estimated, r10):** `pkg/daemon/daemon_run.go` (start near
+  field captured ONLY on a RECONCILED apply (r11 — the non-deferred apply paths
+  AND the post-`NotifyLinkCycle` deferred-reconcile path; NOT a deferred-but-
+  accepted apply), with `Coherent` also requiring `!m.deferWorkers`; daemon
+  start/stop wiring; a commit-time validation block.
+- **Touched files (estimated, r11):** `pkg/daemon/daemon_run.go` (start near
   `d.ipmon.Start()`), `pkg/daemon/daemon.go` (field), `pkg/dataplane/userspace/
-  manager.go` (`appliedSnapshot` field + capture-on-apply + `AppliedNATView()`
-  accessor — Go-only, NO Rust change), `pkg/grpcapi/server_show_security_text.go`
+  manager.go` + `process.go` (`appliedSnapshot` field + capture ONLY on a
+  RECONCILED apply — the non-deferred apply sites manager.go:688/796/950,
+  process.go:352, AND the post-`NotifyLinkCycle` deferred-reconcile path; +
+  `AppliedNATView()` accessor with `!m.deferWorkers` in `Coherent` — Go-only, NO
+  Rust change), `pkg/grpcapi/server_show_security_text.go`
   (gRPC render), `pkg/cli/cli_show_security.go` (local-CLI render — Codex F2),
   `pkg/config/compiler_nat.go` (commit-time validation), new `pkg/natpoolalarm/*`
   (or `pkg/daemon/*`), `pkg/logging/*` (one formatter), docs.
@@ -674,17 +724,27 @@ killed.)
   prune (it drops out of the rule-referenced `eligible` set), and a clear is
   emitted. Mutation: if eligibility iterated `cfg.SourcePools` instead of
   rule-references (the r5 bug), the alarm sticks forever and this test fails.
-- **Unit (r10, Codex r7 #1 + AGY r8 + Codex r8):** the monitor consumes a single
-  `AppliedNATView` (Config + Pools from the helper's LAST-APPLIED generation +
-  `HelperCoherent` + `Available`). Cover: (i) Available+HelperCoherent → numeric
-  eval runs against same-gen config+counters; (ii) `!HelperCoherent` (mid-apply,
-  status gen != appliedSnapshot gen) → HOLD all, no raise/clear; (iii) **a
-  FIB-generation bump (or neighbor regenerate) that advances
+- **Unit (r10/r11, Codex r7 #1 + AGY r8 + Codex r8 + Codex r10):** the monitor
+  consumes a single `AppliedNATView` (Config + Pools from the helper's
+  LAST-RECONCILED applied generation + `Coherent` + `Available`). Cover:
+  (i) Available+Coherent → numeric eval runs against same-gen config+counters;
+  (ii) `!Coherent` because status gen != reconciled applied gen → HOLD all;
+  (iii) **a FIB-generation bump (or neighbor regenerate) that advances
   `m.lastSnapshot.Generation` WITHOUT a full apply must NOT change
-  `appliedSnapshot.Generation`, so the alarm STILL evaluates** — mutation: sourcing
-  the view's generation from `lastSnapshot.Generation` (the r9 bug) makes this case
-  gate numeric eval off and the test fails; sourcing from `publishedSnapshot` (the
-  r8 bug) makes a no-op/neighbor advance wrongly pass and that test fails.
+  `appliedSnapshot.Generation`, so the alarm STILL evaluates** (mutation: sourcing
+  from `lastSnapshot.Generation` (r9 bug) gates it off → fails; from
+  `publishedSnapshot` (r8 bug) wrongly passes a no-op/neighbor advance → fails);
+  (iv) **r11 BLOCKER — a DEFERRED apply (`DeferWorkers`/`m.deferWorkers` set) that
+  the helper ACCEPTED (status gen advanced) but did NOT reconcile must HOLD: the
+  view is `!Coherent` (deferWorkers true) and `appliedSnapshot` is NOT updated
+  until the post-`NotifyLinkCycle` reconcile** — mutation: recording
+  `appliedSnapshot` on accept (not reconcile) OR dropping the `!deferWorkers`
+  requirement makes the alarm evaluate stale-rule counters against new config and
+  this test fails;
+  (v) **r11 #3 — first boot / helper restart with no reconciled applied snapshot
+  (`appliedSnapshot.Generation==0`) is `Available=false` (HOLD), NOT a
+  `cfg==nil` clear-all** — mutation: treating gen==0 as cfg-nil clears pre-restart
+  alarms and this test fails.
 - **Unit (r8, Codex r7 #2):** `view.Available == false` (dp nil / helper down) →
   monitor returns without clearing any alarm (HOLD-all). Mutation: clearing on
   unavailable → test fails.
@@ -719,7 +779,9 @@ killed.)
 | Monitor adds control-socket traffic | Use new `Manager.LastStatus()` cached accessor, never `Status()` (r2 — AGY M2) |
 | Active alarm stuck after pool removal/rename/un-reference | Prune `activeAlarms` for pools no longer ELIGIBLE by RULE-REFERENCED config semantics each tick (r6 — AGY M3 / Codex r5 #1) — NOT merely "absent from snapshot" |
 | Pool stays configured but its last source-NAT rule is removed | Eligibility is rule-referenced, so the pool drops out of `eligible` → prune clears its alarm (r6 — Codex r5 #1); status producer is rule-derived (`status.rs:9-17`) |
-| Helper status vs config generation skew (apply-window, FIB/neighbor bumps) | Single coherent `dp.AppliedNATView()` sourced from the LAST-APPLIED snapshot (`m.appliedSnapshot {Config, Generation}`, captured only on full apply_snapshot); `HelperCoherent := status.LastSnapshotGeneration == appliedSnapshot.Generation`; config and counters are the applied gen by construction. NOT `publishedSnapshot` (too loose: no-op/neighbor advances) and NOT `lastSnapshot.Generation` (too strict: FIB/neighbor bumps make it permanently exceed the helper's last_snapshot_generation → alarm never fires). r10 (Codex r7 #1 + AGY r8 + Codex r8 #1/#2) |
+| Helper status vs config generation skew (apply-window, FIB/neighbor bumps) | Single coherent `dp.AppliedNATView()` sourced from the LAST-RECONCILED applied snapshot (`m.appliedSnapshot {Config, Generation}`, captured only when an apply was RECONCILED); `Coherent := status.LastSnapshotGeneration == appliedSnapshot.Generation && !m.deferWorkers`; config and counters are the reconciled applied gen by construction. NOT `publishedSnapshot` (too loose), NOT `lastSnapshot.Generation` (too strict), and NOT a merely-ACCEPTED apply (the defer_workers path advances last_snapshot_generation but skips reconcile → counters stale). r10/r11 (Codex r7 #1 + AGY r8 + Codex r8 #1/#2 + Codex r10 BLOCKER) |
+| Deferred-apply (RETH-MAC bring-up) reports new gen but stale NAT counters | `appliedSnapshot` recorded only on a RECONCILED apply + `Coherent` requires `!m.deferWorkers` → HOLD through the defer window until the post-NotifyLinkCycle reconcile (r11 — Codex r10 BLOCKER) |
+| Helper restart false-clears pre-restart alarms before first reconcile | `appliedSnapshot.Generation==0` (no reconciled snapshot) → `Available=false` HOLD, not cfg-nil clear-all (r11 — Codex r10 #3) |
 | Dataplane nil / helper not running | `view.Available==false` → HOLD all alarms (return, no clear) (r8 — Codex r7 #2) |
 | `show security alarms detail` shows stale raise-time pct | `updatePct` refreshes the displayed pct each tick while held (no syslog) (r7 — Codex r5-retry #3) |
 | Local-CLI vs gRPC alarm output divergence | Update BOTH render sites via a shared formatter (r2 — Codex F2) |

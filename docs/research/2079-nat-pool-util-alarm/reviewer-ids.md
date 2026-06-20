@@ -33,11 +33,22 @@
 | r9 | Claude SMR | claude-smr-plan-r9.md | PLAN-READY (HelperCaughtUp==view.Generation verified — but Codex r8 showed it too strict) |
 | r9 | AGY | adversarial-review-mqmtlncr-6hje6n | PLAN-READY (HelperCaughtUp==view.Generation confirmed; apply-window skew eliminated) |
 | r9 | Codex | (superseded by r8's finding which targeted on-disk r9) | folded into r10 |
-| r10 | Claude SMR | claude-smr-plan-r10.md | **PLAN-READY** (applied-snapshot source verified; FIB/neighbor non-gating re-traced) |
-| r10 | AGY | adversarial-review-mqmtsak5-b7fntu | **PLAN-READY** (applied-snapshot resolves the gen dilemma; no new issues) |
-| r10 | Codex (fresh retry) | agentId ac8f3852129726977 | **PLAN-READY — "No findings"** (original ad6d71ffb69e9ad95 wedged in broker hang → retry) |
+| r10 | Claude SMR | claude-smr-plan-r10.md | PLAN-READY (applied-snapshot source — but missed the deferred-reconcile skew) |
+| r10 | AGY | adversarial-review-mqmtsak5-b7fntu | PLAN-READY (applied-snapshot — also missed the defer window) |
+| r10 | Codex (ORIGINAL ad6d71ffb69e9ad95, ~11min) | **PLAN-REVISE — BLOCKER** (deferred-apply reconcile-skew + first-boot gen==0 → folded into r11) |
+| r10 | Codex (fresh retry ac8f3852129726977, ~4min) | PLAN-READY "No findings" — LESS THOROUGH, SUPERSEDED (did not trace defer_workers reconcile-skip) |
+| r11 | Claude SMR | claude-smr-plan-r11.md | PLAN-READY (reconcile-gated applied source + !deferWorkers verified) |
+| r11 | AGY | (pending) | (pending) |
+| r11 | Codex | (pending) | (pending) |
 
-## CONVERGED at r10 — 3-way PLAN-READY (Claude SMR + AGY + Codex)
+## NOT YET CONVERGED — r10 "convergence" was PREMATURE (retracted)
+
+The r10 3-way "PLAN-READY" was WRONG: I acted on the fast fresh-session Codex
+retry's "No findings" while the slower ORIGINAL Codex r10 pass was still running.
+The original returned a real BLOCKER (deferred-apply reconcile-skew). Folded into
+r11; r11 re-review in flight. LESSON: wait for the deepest reviewer pass before
+declaring convergence — a fast retry "no findings" does not override a slower
+in-flight original. The issue comment posted at r10 will be corrected.
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
 
