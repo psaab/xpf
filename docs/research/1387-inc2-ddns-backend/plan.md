@@ -1,6 +1,15 @@
 # #1387 Increment 2 — DHCP DDNS live backend + daemon reconcile loop + HA coupling
 
-**Status: DRAFT** (Claude /research draft-fanout — awaiting serial Codex + AGY plan-review.)
+**Status: PLAN-READY (r2)** — companion-free hostile-review revision. A hostile
+plan-review returned PLAN-NEEDS-MAJOR against r1: the per-RG `subnet_id`-based
+HA single-writer mechanism is unsound (subnet_id is map-order-assigned and
+per-render unstable) AND unnecessary (the Kea config is rendered MASTER-filtered,
+so each node's memfile already contains only its own MASTER-RG leases). r2
+corrects the HA threat model, replaces the per-RG gate with a NODE-LEVEL gate,
+deletes the subnet_id attribution map, adds the async-takeover ordering note, and
+resolves the zone-surface open question (§11 Q1) and the reverse-zone NOTAUTH
+question (§11 Q6). The correction SIMPLIFIES the plan (the gate is smaller). r1
+SMR is `claude-smr-plan-r1.md`; r2 SMR is `claude-smr-plan-r2.md`.
 
 This is the increment-2 plan for #1387 (DHCP server dynamic DNS). Increment 1
 shipped the config model + the fully-unit-testable reconciler core via PR #2043
@@ -73,13 +82,18 @@ normal Go package tested against a fake authoritative server in the same process
    periodic tick and is re-driven on config commit, calling
    `DDNSManager.Reconcile(ctx, cfg)`. No control-socket contention (file I/O +
    network to the operator's DNS server only).
-3. **HA single-writer coupling** — the loop reconciles only when this node is the
-   DHCP-serving node for the relevant RG(s), reusing the exact RG-ownership
-   predicate (`snapshotRethMasterState` / `filterDHCPConfigForMasterRGs`) the Kea
-   manager already uses; immediate reconcile on MASTER transition; emission
-   stops on BACKUP without deleting valid records. The *correctness* of this
-   gate is unit-testable (inject the ownership predicate); the *timing* on a real
-   failover is the one true-lab item — see below.
+3. **HA single-writer coupling (NODE-LEVEL gate).** The loop reconciles from this
+   node's own Kea memfile(s) IFF this node is MASTER for ≥1 RG, reusing the exact
+   RG-ownership snapshot (`snapshotRethMasterState`) the Kea manager already uses.
+   This is sound WITHOUT any per-lease RG attribution because the Kea config is
+   rendered MASTER-FILTERED (`ApplyClusterCommit(d.filterDHCPConfigForMasterRGs
+   (cfg))`, daemon_apply.go:1095-1101 → dhcpserver.go ApplyClusterCommit:184 →
+   generateKea4/6Config:217/229): each node's memfile already contains ONLY its
+   currently-MASTER RGs' subnets, so reading the whole memfile cannot see a
+   peer-owned lease. Immediate reconcile on MASTER transition; emission stops on
+   BACKUP without deleting valid records. The *correctness* of this gate is
+   unit-testable (inject the ownership predicate + a synthetic memfile); the
+   *timing* on a real failover is the one true-lab item — see below.
 4. **Observability** — `dhcp_ddns_*` Prometheus metrics wired through the checked
    collector (`DDNSManager.Stats()` → `Server`), and `show system services
    dhcp-server dynamic-dns` via the generic `ShowText` topic.
@@ -177,9 +191,10 @@ targets one EXACT RR (name+type+rdata).
 
 **`UpsertLease(ctx, rec)`** builds ONE `dns.Msg` per zone affected:
 
-- Forward zone (derived from `rec.FQDN` — the longest configured forward-zone
-  suffix, or `policy.Domain`): an idempotent **ADD** of the exact A/AAAA RR for
-  `rec.FQDN` → `rec.Addr`. It does NOT delete the RRset. An address MOVE is
+- Forward zone (for Inc-2: `policy.Domain` — §11 Q1 RESOLVED; the optional
+  explicit forward-zone list is the additive follow-up): an idempotent **ADD** of
+  the exact A/AAAA RR for `rec.FQDN` → `rec.Addr`. It does NOT delete the RRset.
+  An address MOVE is
   already handled upstream by Inc-1's reconciler, which deletes the OLD owned
   tuple (via `DeleteLease`, exact-RR) BEFORE the new add — so `UpsertLease` only
   ever needs to add. Re-adding an identical RR is a harmless idempotent no-op at
@@ -187,9 +202,10 @@ targets one EXACT RR (name+type+rdata).
   not even re-upserted). Under `replace-owned`, no prerequisite is sent (we own
   what we add; the delete-old-then-add-new ordering is the reconciler's job). The
   add carries `rec.TTL`.
-- Reverse zone (derived from `rec.PTRName` — the configured reverse-zone suffix,
-  or the canonical in-addr.arpa/ip6.arpa zone): an idempotent ADD of the exact
-  PTR RR `rec.PTRName` → `rec.FQDN`.
+- Reverse zone (for Inc-2: the canonical in-addr.arpa/ip6.arpa zone derived from
+  the address — §11 Q1 RESOLVED): an idempotent ADD of the exact PTR RR
+  `rec.PTRName` → `rec.FQDN`. A NOTAUTH/REFUSED on this UPDATE is a counted skip,
+  not a blocking error (§11 Q6 RESOLVED).
 
 **`DeleteLease(ctx, rec)`** builds the symmetric DELETE of the EXACT A/AAAA RR
 (`rec.FQDN`/type/`rec.Addr`) and the EXACT PTR RR (`rec.PTRName`→`rec.FQDN`).
@@ -217,11 +233,15 @@ counts the fail and retries next cycle (Inc-1 reconcile is idempotent + bounded)
 - `strict-fail`: as skip-existing but treat the collision as an error
   (surfaced/counted; still must not block DHCP).
 
-**Zone resolution helper** (pure, unit-tested): given `rec.FQDN` /`rec.PTRName`
-and the configured `ForwardZones`/`ReverseZones` (or `Domain` fallback),
-pick the zone the UPDATE's `Question`/`SOA` section targets. **Open question:
-the Inc-1 config has `Domain` but the issue's surface lists `forward-zone` /
-`reverse-zone` lists that Inc-1 did NOT add to the typed struct — see §11 Q1.**
+**Zone resolution helper** (pure, unit-tested): given `rec.FQDN`/`rec.PTRName`
+and an OPTIONAL explicit zone list, pick the zone the UPDATE's `Question`/`SOA`
+section targets. **For Inc-2 the explicit list is always empty (§11 Q1 RESOLVED):
+the forward zone is `policy.Domain` and the reverse zone is the canonical
+in-addr.arpa/ip6.arpa derived from the address.** The helper takes the optional
+list as a parameter and falls back to `Domain`/canonical-reverse, so the future
+additive `forward-zone`/`reverse-zone` leaves wire straight into the existing
+parameter with no helper rewrite. A NOTAUTH/REFUSED on the reverse-zone UPDATE is
+a counted skip, not a blocking error (§11 Q6 RESOLVED, implemented now).
 
 ### 4.2 Daemon reconcile loop
 
@@ -281,38 +301,81 @@ The invariant: **only the node actively serving DHCP for an RG publishes/cleans
 DNS for that RG's leases.** Two nodes writing the same record is the dueling-
 writer failure.
 
-- **Gate predicate:** reuse `d.snapshotRethMasterState()` (`daemon_ha.go:156`,
-  returns `map[rgID]bool` of active RGs) — the SAME source of truth the Kea
-  manager uses via `filterDHCPConfigForMasterRGs`. In standalone (non-cluster)
-  mode the node is always the writer. In cluster mode, the loop reconciles only
-  when this node owns the RG(s) that own the DHCP groups producing the leases.
-- **Lease→RG attribution — PER-RG, NOT node-level (resolved against the Kea
-  render; was the SMR's M1).** VERIFIED in `pkg/dhcpserver/dhcpserver.go`: Kea
-  writes exactly ONE memfile per family (hardcoded
-  `/var/lib/kea/kea-leases4.csv` / `kea-leases6.csv`, lines 558-560/638-640) and
-  ALL groups across ALL RGs render their subnets into that single per-family Kea
-  config (`for _, group := range cfg.DHCPLocalServer.Groups` → one `subnet4`
-  array → one memfile, lines 512/589). Therefore in an active/active multi-RG
-  layout (the normal HA posture — node A MASTER for RG1, node B MASTER for RG2),
-  BOTH RGs' leases live in the SAME memfile. A node-level gate ("if MASTER for
-  any RG, reconcile all readable leases") would make the RG1-master node publish
-  RG2's leases too — and the RG2-master node also publishes them — which is the
-  dueling-writer bug the gate exists to prevent. The "BACKUP Kea is stopped → its
-  memfile is stale" argument FAILS for a mixed MASTER/BACKUP node, because its Kea
-  IS running (it's MASTER for the other RG) and the shared memfile is live for
-  both. So Inc-2 MUST attribute each lease to an RG and act only on
-  locally-owned RGs: `subnet_id` (in the memfile) → group → interface → RG (the
-  same group→RG mapping `filterDHCPConfigForMasterRGs` walks), then publish/clean
-  a lease ONLY when this node is MASTER for that lease's RG. The
-  `parseActiveLeases` output already carries `SubnetID`. **The gate must be "am I
-  the DHCP-serving MASTER for THIS LEASE's RG", anchored to the active-RG
-  snapshot AND the subnet→RG map, NOT a raw read of the memfile and NOT a
-  node-level any-RG check.** (Single-RG and standalone collapse to "always the
-  writer," so the common case is unaffected.) See §11 Q2.
+- **Gate predicate — NODE-LEVEL: "reconcile from my own memfile(s) IFF I am
+  MASTER for ≥1 RG".** Reuse `d.snapshotRethMasterState()` (returns
+  `map[rgID]bool` of active RGs) — the SAME source of truth the Kea manager uses
+  via `filterDHCPConfigForMasterRGs`. In standalone (non-cluster) mode the node
+  is always the writer (no RG state → the gate is unconditionally open). In
+  cluster mode, the loop reconciles the whole memfile when this node is MASTER
+  for any RG, and does nothing when it is BACKUP for all RGs. No per-lease RG
+  walk.
+- **Why node-level is SOUND (corrects r1's M1, which over-engineered this).** The
+  r1 dueling-writer scenario does NOT occur, because the Kea config each node
+  serves is rendered MASTER-FILTERED, so the memfile a node reads already contains
+  ONLY that node's currently-MASTER RGs' leases. Verified end to end against
+  source:
+  - The cluster apply path is
+    `d.dhcpServer.ApplyClusterCommit(d.filterDHCPConfigForMasterRGs(cfg))`
+    (`pkg/daemon/daemon_apply.go:1095-1101`), and the VRRP MASTER-transition path
+    is `d.dhcpServer.ApplyAsync(d.filterDHCPConfigForMasterRGs(cfg), …)`
+    (`pkg/daemon/daemon_ha.go:919-927`). Both feed Kea ONLY the filtered config.
+  - `filterDHCPConfigForMasterRGs` (`pkg/daemon/daemon_ha.go:988-1041`) keeps a
+    DHCP group's interfaces ONLY when `masterIfaces[iface]` is true, where
+    `masterIfaces` is built from `snapshotRethMasterState()` ∩
+    `rethInterfacesForRG(cfg, rgID)` over currently-MASTER RGs. Groups that net
+    out to zero kept interfaces are dropped; if nothing is MASTER it returns
+    `nil` → Kea is given an empty config.
+  - `ApplyClusterCommit` → `apply(...)` → `generateKea4/6Config(cfg)`
+    (`pkg/dhcpserver/dhcpserver.go:184, 217, 229, 491, 570`) renders ONLY the
+    groups it was handed into the per-family memfile
+    (`/var/lib/kea/kea-leases4.csv` / `kea-leases6.csv`). A BACKUP RG's subnets
+    are NEVER rendered into this node's Kea, so its leases are NEVER written to
+    this node's memfile.
+  - Therefore a mixed MASTER/BACKUP node's memfile contains ONLY its
+    MASTER-RG leases. Reading the whole memfile and publishing every active lease
+    in it CANNOT touch a peer-owned record. The render-time filter already did the
+    per-RG attribution; the DDNS loop does not need to redo it. Both nodes
+    publishing the same record is therefore impossible — each node's input set is
+    its own MASTER-RG leases, which are disjoint by RG ownership.
+- **The `subnet_id`-attribution map (r1's per-RG mechanism) is DELETED — it was
+  both unnecessary (above) and UNSOUND.** `subnet_id` in the memfile is assigned
+  by Kea-render map-iteration order: `subnetID := 1; for _, group := range
+  cfg.DHCPLocalServer.Groups { … ID: subnetID …; subnetID++ }`
+  (`pkg/dhcpserver/dhcpserver.go:511-518` v4, `588-595` v6), and
+  `cfg.DHCPLocalServer.Groups` is a Go `map[string]*DHCPServerGroup`
+  (`pkg/config/types_system.go:902-903`) → **nondeterministic iteration order**.
+  Because each node renders a DIFFERENT (master-filtered) group set, and the same
+  node re-renders with different map order across reconciles, the subnet_id→group
+  mapping is per-node and per-render UNSTABLE: it cannot serve as a stable
+  attribution key. (The lease parser already documents subnet_id as
+  non-compared metadata that absence-degrades safely —
+  `pkg/dhcpserver/ddns_leases.go:63`, `recordsEqual` ignores it.) Building a
+  single-writer gate on subnet_id would have been a latent dueling-writer/leak
+  bug. Removing it SHRINKS the Inc-2 PR.
+- **Fallback (NOT needed for Inc-2; stated for completeness):** if a future
+  increment ever needs per-lease RG attribution (it does not, given the filtered
+  render), the STABLE key is `lease Address → longest-prefix match against
+  pool.Subnet → owning group → rethInterfacesForRG / resolveDHCPRethInterfaces →
+  RG` (the real helpers at `pkg/daemon/daemon_ha.go:732, 1235`), NEVER subnet_id.
+  Inc-2 does not implement this.
 - **On MASTER transition:** nudge the loop for an immediate reconcile (records
   re-published / refreshed within one loop iteration of takeover). Wire this into
-  the existing `applyRethServicesForRG` MASTER path (`daemon_ha.go:926`) right
-  next to the `dhcpServer.ApplyAsync` call.
+  the VRRP MASTER path right next to the existing `dhcpServer.ApplyAsync` call
+  (`pkg/daemon/daemon_ha.go:919-927`).
+- **Async-takeover ordering note (mirrors the enable-case Q-B note).** On a MASTER
+  takeover, the DHCP-on-MASTER reconcile is enqueued ASYNC
+  (`d.dhcpServer.ApplyAsync(…)`, `pkg/daemon/daemon_ha.go:925`; the comment there
+  notes Kea reconcile shells out to systemctl with a 15s bound and must not run
+  inline on the VRRP event loop). So the DDNS nudge fired at the same wire-point
+  may run BEFORE Kea has restarted and repopulated this node's memfile. This is
+  BENIGN: the DDNS reconcile is store-driven and add-only-from-current-leases — a
+  too-early reconcile simply sees fewer (or no) leases and can ONLY add on the
+  next periodic/lease-driven cycle once Kea has repopulated; it never deletes a
+  record on the strength of a not-yet-written lease (a delete requires the record
+  to be in this node's own ownership store, and the first post-takeover reconcile
+  of a never-served lease starts from an empty/peer-independent store). State this
+  explicitly; no ordering barrier between the async Kea apply and the DDNS nudge
+  is required.
 - **On BACKUP transition:** STOP emitting (the gate flips closed). **Do NOT
   delete records just because this node went BACKUP** — the records are still
   valid (the peer MASTER now owns them and will keep them fresh). Deletion is
@@ -353,8 +416,11 @@ writer failure.
   `..._last_reconcile_leases`. (Counter→gauge choice per metric; map onto the
   existing `DDNSStats` fields, extending `DDNSStats` where a counter is missing.)
   **Label cardinality is CLOSED (m4):** `result` ∈ {`ok`,`fail`} only and
-  `reason` ∈ a fixed enum (`no-name`,`no-backend`,`conflict`,`not-owner-rg`) —
-  never a raw rcode/error string, to avoid a cardinality leak.
+  `reason` ∈ a fixed enum (`no-name`,`no-backend`,`conflict`,`ptr-notauth`) —
+  never a raw rcode/error string, to avoid a cardinality leak. (No
+  `not-owner-rg`/per-lease-skip reason: node-level gating means a BACKUP-for-all
+  node simply does not reconcile — there is no per-lease ownership skip to count.
+  `ptr-notauth` counts the §11 Q6 reverse-zone NOTAUTH skip.)
 - **`show system services dhcp-server dynamic-dns [detail]`:** add the cmdtree
   node under the existing `dhcp-server` node (`pkg/cmdtree/tree.go:530`), add the
   `ShowText` topic cases (`pkg/grpcapi/server_show.go`) + a render
@@ -369,10 +435,13 @@ writer failure.
   `backend rfc2136` but no `update-server` → a real warning/error (nothing to
   update); `kea-d2` backend → still-deferred warning (D2 not in the image).
 - **Constrain the now-consumed leaves:** `update-server` (host or host:port,
-  parseable), TSIG algorithm (enum of supported HMACs), and — if §11 Q1 adds
-  them — `forward-zone`/`reverse-zone`. Inc-1 left these free-form precisely
-  because no live path consumed them; Inc-2 consumes them, so commit-time
-  validation is now warranted.
+  parseable) and TSIG algorithm (enum of supported HMACs). Inc-1 left these
+  free-form precisely because no live path consumed them; Inc-2 consumes them, so
+  commit-time validation is now warranted. **Validation is WARN-only on these
+  pre-existing free-form leaves (Q-C): a malformed inert value committed against
+  Inc-1 must not brick a boot.** The `forward-zone`/`reverse-zone` leaves are NOT
+  added in Inc-2 (§11 Q1 RESOLVED — deferred to the additive follow-up), so no
+  new zone-leaf validation lands here.
 
 ---
 
@@ -395,8 +464,9 @@ writer failure.
 - **`ownerWatermark`** (identity+address derived, node-independent) — unchanged;
   it was laid down in Inc-1 specifically for the HA forward-compat this increment
   relies on.
-- **`config.DHCPDynamicDNSConfig` field set** — additive only (if §11 Q1 adds
-  zone lists). Do not rename/repurpose existing fields (compiled config is
+- **`config.DHCPDynamicDNSConfig` field set** — UNCHANGED in Inc-2 (§11 Q1
+  RESOLVED — Inc-2 adds NO new config fields; the zone leaves are the additive
+  follow-up). Do not rename/repurpose existing fields (compiled config is
   GET-able via the API; renaming breaks consumers).
 - **`DDNSStats`** — additive only (new counters); existing fields keep their
   meaning so the future `show` reads stay valid.
@@ -419,15 +489,19 @@ writer failure.
      `SetUpdater`s it. Avoids per-cycle construction but adds a mutex-guarded swap
      and an "is the updater current?" question. **Lean resolve-per-Reconcile.**
 
-2. **HA gate granularity — RESOLVED to per-RG-lease (node-level is unsafe).**
-   The SMR's M1 + a read of the Kea render settled this: one memfile per family,
-   all RGs' subnets in it, active/active mixed MASTER/BACKUP is normal ⇒
-   node-level "any-RG-master reconciles all leases" is a dueling-writer bug.
-   Inc-2 ships **per-RG-lease attribution**: `subnet_id`→group→interface→RG, act
-   on a lease only when this node is MASTER for that lease's RG. Single-RG and
-   standalone collapse to "always the writer," so the common case is identical to
-   what node-level would have done — the per-RG logic only diverges (correctly) in
-   the active/active multi-RG case. (See §4.3.)
+2. **HA gate granularity — RESOLVED to NODE-LEVEL (r1's per-RG mechanism was
+   wrong on both axes).** r1 settled this to per-RG-lease attribution on the
+   premise that one shared memfile holds all RGs' leases. That premise is FALSE:
+   each node's Kea is rendered MASTER-FILTERED
+   (`filterDHCPConfigForMasterRGs`), so a node's memfile contains ONLY its own
+   MASTER-RG leases (verified, §4.3). The render-time filter already did the
+   per-RG attribution. So Inc-2 ships a **node-level gate**: reconcile the whole
+   memfile IFF this node is MASTER for ≥1 RG. The `subnet_id`-attribution map is
+   DELETED — subnet_id is map-order-assigned and per-render unstable
+   (`dhcpserver.go:511-518/588-595`, Groups is a Go map), so it could never have
+   been a stable key; building the gate on it would have been a latent bug. The
+   node-level gate is simpler AND sound. Single-RG and standalone collapse to
+   "always the writer." (See §4.3.)
 
 3. **Backend transport: per-call client vs pooled connection.** DNS UPDATE is
    request/response; at 30s cadence there is no benefit to pooling. Per-call
@@ -452,10 +526,12 @@ writer failure.
   metric renamed/removed. The `/api/v1/config` compiled dump already redacts
   `TSIGSecret` (Inc-1 #2053) — no new leak surface.
 - **CLI:** additive cmdtree node. Prefix-matching/`?`-help inherit automatically.
-- **Config schema:** additive leaves (and possibly zone lists). Existing leaves
-  keep their names; the only *behaviour* change is that previously-free-form
-  consumed leaves (update-server, tsig-algorithm) now get commit-time validation
-  — a stricter accept, which is a deliberate, reviewed tightening (note it in the
+- **Config schema:** NO new leaves in Inc-2 (§11 Q1 RESOLVED — zone leaves are
+  the additive follow-up). Existing leaves keep their names; the only *behaviour*
+  change is that previously-free-form consumed leaves (update-server,
+  tsig-algorithm) now get WARN-only commit-time validation (Q-C) — a stricter
+  accept that never errors an inert pre-existing value, a deliberate, reviewed
+  tightening (note it in the
   PR; an existing config with a malformed update-server that "worked" because it
   was never consumed would now warn/error — acceptable, the value was inert).
 
@@ -466,7 +542,7 @@ writer failure.
 | # | Risk | Severity | Mitigation |
 |---|------|----------|------------|
 | R1 | **Cardinal sin: delete a DNS record xpf did not create**, in the operator's production zone. | Critical | Inc-2 adds NO delete path outside `deleteOwnedLocked` (sole authority, re-derives exact owned tuple). Backend deletes the EXACT RR (name+type+rdata), never the whole RRset. Unit-test: assert the wire DELETE targets only the owned rdata. |
-| R2 | **Dueling writers**: two HA nodes UPDATE the same record, churning the zone. | High | Single-writer gate on `snapshotRethMasterState` (same source as Kea). BACKUP stops emitting. Idempotent replace-owned upsert means even a brief overlap converges without churn. Lab: `make test-failover` with DDNS enabled. |
+| R2 | **Dueling writers**: two HA nodes UPDATE the same record, churning the zone. | High | NODE-LEVEL single-writer gate on `snapshotRethMasterState` (same source as Kea). Sound WITHOUT per-lease attribution because the Kea render is master-filtered (`filterDHCPConfigForMasterRGs`), so each node's memfile holds only its own MASTER-RG leases (disjoint by RG) — both nodes' input sets cannot overlap (§4.3). BACKUP stops emitting. Idempotent replace-owned upsert means even a brief overlap converges without churn. Lab: `make test-failover` with DDNS enabled. |
 | R3 | **BACKUP transition wrongly withdraws valid records** (records vanish on every failover). | High | BACKUP = stop-writing, NOT withdraw. Deletes are lease-state/config-removal driven only. Explicit unit test: MASTER→BACKUP transition issues ZERO deletes. |
 | R4 | **A hung/slow DNS server wedges the reconcile loop** (and starves nothing, but the loop stops making progress). | Medium | Guarded-phase skip-if-in-flight + per-reconcile context timeout (no-freeze pattern from #1780). The loop never blocks the daemon; a stuck server only delays DNS, never DHCP. |
 | R5 | **DNS-zone churn / amplification** from a buggy diff re-publishing every cycle. | Medium | `recordsEqual` short-circuit (Inc-1) means a stable lease is `seen` and NOT re-upserted. Counter `upserts_total` flat across cycles in a steady state is the canary; assert in a multi-cycle test. |
@@ -506,8 +582,13 @@ Backend (`rfc2136Updater`):
 Reconcile loop + HA gate (inject the ownership predicate + the fake updater +
 synthetic Kea CSVs, no daemon):
 - Node is writer (standalone): active lease → upsert; expiry → delete.
-- Node MASTER for RG → reconciles; node BACKUP → ZERO upserts AND ZERO deletes on
-  the transition (R3); MASTER takeover nudge → immediate reconcile (R2 correctness).
+- Node-level gate: MASTER for ≥1 RG → reconciles its (master-filtered) memfile;
+  BACKUP for all RGs → ZERO upserts AND ZERO deletes on the transition (R3);
+  MASTER takeover nudge → immediate reconcile (R2 correctness). Assert the gate
+  reads `snapshotRethMasterState` only, NOT any per-lease subnet_id.
+- Async-takeover ordering (R2): a nudge fired before the async Kea repopulates the
+  memfile sees fewer/no leases and only ADDS on the next cycle — assert it issues
+  ZERO deletes against a not-yet-populated memfile.
 - Steady state: lease unchanged across N cycles → `upserts_total` flat (R5).
 - DNS backend errors → DHCP/Kea path untouched, counter up, retry next cycle (R9).
 - Disabled→enabled→disabled: enable publishes; disable withdraws exactly once.
@@ -552,8 +633,12 @@ failover). This is the one cluster-lab gate this plan treats as blocking.
   reserved enum stays deferred (Inc-4).
 - **The #660 local authoritative/DNS-runtime backend** — future, gated on #660
   landing.
-- **Per-RG-lease attribution** — node-level gate ships; per-RG refinement filed
-  as a follow-up (§11 Q2).
+- **Per-RG-lease attribution** — NOT needed and NOT shipped. The node-level gate
+  is sound because the Kea render is master-filtered (§4.3); a per-lease RG walk
+  would be redundant. The only future case that could want it (per-lease
+  attribution against an UN-filtered memfile) does not exist in this codebase.
+  The stable fallback key (Address → pool.Subnet → group → RG) is documented in
+  §4.3, NOT subnet_id.
 - **fsnotify near-real-time lease watch** — periodic poll + commit/transition
   nudge is the chosen trigger; a sub-second file watch is not warranted.
 - **strict-mode lease withholding** (block a DHCP lease if DNS update fails) — the
@@ -566,25 +651,44 @@ failover). This is the one cluster-lab gate this plan treats as blocking.
 
 ## 11. Open questions (for adversarial review)
 
-1. **Forward/reverse zone config surface.** The issue's proposed surface lists
-   `forward-zone`/`reverse-zone` (and even multiple), but Inc-1's typed
-   `DHCPDynamicDNSConfig` shipped only `Domain` (no zone lists). Does Inc-2:
-   (a) derive the UPDATE target zone purely from `Domain` + the canonical
-   reverse zone of the address, or (b) add explicit `ForwardZones`/`ReverseZones`
-   leaves now? RFC 2136 UPDATE needs a zone name in the message; deriving it from
-   `Domain` works for the common case but breaks when the authoritative zone cut
-   differs from the DHCP domain (e.g. delegated `lab.example.net` vs domain
-   `corp.lab.example.net`). Recommendation: add the zone leaves (additive,
-   §4.5/§5), default to `Domain`/canonical-reverse when unset.
+1. **Forward/reverse zone config surface — RESOLVED (r2 decision).** Inc-1's
+   typed `DHCPDynamicDNSConfig` shipped only `Domain` (no zone lists —
+   `pkg/config/types_system.go:838-877`). The RFC 2136 UPDATE MUST carry a zone
+   name, so this is a DECISION, not an open question. **Decision: Inc-2 ships
+   `Domain`-derived forward zone + canonical reverse zone (in-addr.arpa /
+   ip6.arpa) and DEFERS explicit `forward-zone`/`reverse-zone` config leaves to an
+   additive follow-up.**
+   - Forward zone = `policy.Domain` (the longest suffix of `rec.FQDN` that the
+     backend treats as the zone; with only `Domain` configured, the zone IS
+     `Domain`). The UPDATE's Zone/SOA section names `Domain`.
+   - Reverse zone = the canonical reverse zone derived from the address: the
+     `/24`-aligned in-addr.arpa for v4 (or the parent in-addr.arpa Kea/the
+     server is authoritative for) and the nibble ip6.arpa for v6, as already
+     produced textually by Inc-1's `reversePTRName` (`ddns_dns.go`). The backend
+     names the appropriate in-addr.arpa/ip6.arpa zone.
+   - The common case (authoritative zone == DHCP `Domain`, canonical reverse)
+     works with no new leaves. The delegated-cut case (authoritative zone differs
+     from `Domain`, e.g. delegated `lab.example.net` under domain
+     `corp.lab.example.net`) is handled by the ADDITIVE follow-up
+     (`forward-zone`/`reverse-zone` leaves, defaulting to
+     `Domain`/canonical-reverse when unset) — strictly additive to the config
+     schema and the zone-resolution helper, so it does not gate Inc-2. The
+     zone-resolution helper (§4.1) is written to take an OPTIONAL explicit zone
+     list and fall back to `Domain`/canonical-reverse, so the follow-up only wires
+     new config leaves into an existing parameter.
 
-2. **HA gate granularity — RESOLVED (kept here for the review trail).** Verified
-   against `pkg/dhcpserver/dhcpserver.go`: one memfile per family, all RGs'
-   subnets in it, so node-level gating IS unsafe in active/active. Resolution:
-   per-RG-lease attribution (subnet_id→group→RG→is-this-node-master), §4.3/§6.
-   Residual sub-question for review: confirm the subnet_id Kea writes in the
-   memfile matches the subnet_id the renderer assigns per group (so the
-   attribution map is keyable) — verify against the keaSubnet4/6 render
-   (`dhcpserver.go:499-643`) when engineering.
+2. **HA gate granularity — RESOLVED to NODE-LEVEL (r2 correction; kept here for
+   the review trail).** r1 claimed node-level was unsafe because a single shared
+   memfile holds all RGs' leases. r2 verified that premise is FALSE: each node's
+   Kea config is rendered MASTER-FILTERED
+   (`d.dhcpServer.ApplyClusterCommit(d.filterDHCPConfigForMasterRGs(cfg))`,
+   `daemon_apply.go:1095-1101`; `daemon_ha.go:988-1041`; `dhcpserver.go:184/217/
+   229`), so a node's memfile contains ONLY its MASTER-RG leases. Node-level
+   ("MASTER for ≥1 RG → reconcile my memfile") is therefore sound. The proposed
+   subnet_id attribution is DELETED: subnet_id is map-order-assigned and
+   per-render unstable (`dhcpserver.go:511-518/588-595`; Groups is a Go map,
+   `types_system.go:902-903`), so it was never a valid stable key. No residual
+   sub-question — there is no subnet_id attribution to make keyable.
 
 3. **Reconcile cadence + the lease-event latency requirement.** 30s poll means a
    new lease can take up to 30s to appear in DNS. Is that acceptable, or does the
@@ -608,15 +712,18 @@ failover). This is the one cluster-lab gate this plan treats as blocking.
    the default when unset (recommend `hmac-sha256.`) and which do we accept at
    commit? hmac-md5 is deprecated/insecure — reject it, or accept-with-warning?
 
-6. **Reverse-zone authority we may not own.** If the operator configures a forward
-   zone they control but the address's reverse zone (in-addr.arpa) is delegated
-   to an ISP they do NOT control, the PTR UPDATE will REFUSE (NOTAUTH). Should
-   PTR publishing be independently toggleable (publish A but skip PTR when no
-   reverse-zone is configured/authorized), so a NOTAUTH on PTR doesn't mark the
-   whole lease's reconcile as failed and retry-storm? Recommendation: only attempt
-   PTR when a reverse-zone is configured (or `Domain`-derivable AND a future
-   `publish-ptr` toggle is on); treat a PTR NOTAUTH as a counted skip, not a
-   blocking error.
+6. **Reverse-zone authority we may not own — RESOLVED (r2 decision; implement
+   now).** If the operator controls the forward zone but the address's reverse
+   zone (in-addr.arpa) is delegated to an ISP they do NOT control, the PTR UPDATE
+   will REFUSE (NOTAUTH). **Decision: a NOTAUTH (or REFUSED) on the PTR UPDATE is
+   a COUNTED SKIP (`skipped_total{reason="ptr-notauth"}`), NOT a blocking error —
+   the forward A/AAAA add still counts as success and the lease's reconcile is NOT
+   marked failed.** This prevents a retry-storm against a reverse zone we cannot
+   write, and keeps the forward record published. The skip is reconcile-local
+   (the PTR is simply not owned in the state store when the server refuses it, so
+   no later wrong-delete). An explicit `publish-ptr` toggle is deferred to the
+   same additive follow-up as the zone leaves (§11 Q1); Inc-2 always ATTEMPTS the
+   PTR and degrades a NOTAUTH/REFUSED to a counted skip.
 
 7. **Where does the `DDNSManager` live for the API `Server` to read `Stats()`?**
    The daemon owns it; the API `Server` reads `dhcp` already — does Inc-2 add a
@@ -627,31 +734,50 @@ failover). This is the one cluster-lab gate this plan treats as blocking.
 
 ## 12. Recommendation
 
-**PLAN-READY for the feasible slice (§2 items 1-5): the live RFC 2136 backend, the
-daemon reconcile loop, the HA single-writer coupling, and the Prometheus + `show`
-surface — all unit/integration-testable in CI against an in-process `miekg/dns`
-responder.** The live Kea→DNS end-to-end on the cluster (§9.2) is flagged as a
-manual lab confirmation, NOT a merge-blocking CI gate; `make test-failover` with
-DDNS enabled (§9.3) is the one mandatory cluster gate because Inc-2 touches the
-HA/VRRP transition path.
+**PLAN-READY (r2) for the feasible slice (§2 items 1-5): the live RFC 2136
+backend, the daemon reconcile loop, the NODE-LEVEL HA single-writer coupling, and
+the Prometheus + `show` surface — all unit/integration-testable in CI against an
+in-process `miekg/dns` responder.** The live Kea→DNS end-to-end on the cluster
+(§9.2) is flagged as a manual lab confirmation, NOT a merge-blocking CI gate;
+`make test-failover` with DDNS enabled (§9.3) is the one mandatory cluster gate
+because Inc-2 touches the HA/VRRP transition path.
 
-The single largest open decision before engineering is now §11 Q1 (zone config
-surface) — it changes the config schema and the backend's zone-resolution helper.
-The Q2 correctness unknown (HA gate granularity / Kea memfile↔RG mapping) was
-RESOLVED in this revision against the Kea-render code: one memfile per family
-forces per-RG-lease attribution (§4.3/§6) — node-level gating is a dueling-writer
-bug. Recommend serial Codex + AGY plan-review focus on Q1 (zone surface) and on
-hardening the per-RG attribution + the exact-RR upsert discipline.
+The two prior open decisions are now CLOSED in r2:
+- **HA gate granularity (was the dominant unknown): RESOLVED to NODE-LEVEL.** The
+  hostile plan-review's PLAN-NEEDS-MAJOR finding was that r1's per-RG `subnet_id`
+  single-writer mechanism is unsound (subnet_id is map-order-assigned and
+  per-render unstable, `dhcpserver.go:511-518/588-595` over a Go-map
+  `Groups`) AND unnecessary (the Kea config is rendered master-filtered, so each
+  node's memfile already holds only its own MASTER-RG leases —
+  `daemon_apply.go:1095-1101` → `daemon_ha.go:988-1041` →
+  `dhcpserver.go:184/217/229`). r2 replaces the per-RG gate with a node-level
+  "MASTER for ≥1 RG → reconcile my memfile" gate and DELETES the subnet_id map.
+  This SIMPLIFIES the PR. The async-takeover ordering (Kea `ApplyAsync` may lag
+  the DDNS nudge) is benign and stated explicitly (§4.3).
+- **Zone config surface (§11 Q1): RESOLVED.** Inc-2 ships `Domain`-derived forward
+  zone + canonical reverse (in-addr.arpa/ip6.arpa); explicit
+  `forward-zone`/`reverse-zone` leaves are an additive follow-up. The
+  zone-resolution helper takes an optional explicit list so the follow-up wires in
+  without a rewrite. Reverse-zone NOTAUTH (§11 Q6) is implemented now as a counted
+  skip (`skipped_total{reason="ptr-notauth"}`), not a blocking error.
 
-### SMR-disposition (r1 self-review folded)
+Remaining for the engineer (not blocking PLAN-READY): Q-A (confirm adding
+`github.com/miekg/dns` to go.mod is acceptable) and Q-C (WARN-only validation on
+the legacy free-form `update-server`/`tsig-algorithm` leaves — decided WARN, §4.5).
 
-The hostile Claude-SMR (`claude-smr-plan-r1.md`) returned PLAN-READY-WITH-
-CONDITIONS, no blocker, three MAJORs. All three are folded into this revision:
-M1 (memfile↔RG, node-level unsafe) → per-RG attribution now in-scope, verified
-against `dhcpserver.go`; M2 (upsert atomicity) → exact-RR ADD discipline,
-no delete-RRset, §4.1; M3 (disabled-loop lifecycle) → always-construct + resolve-
-per-Reconcile hard constraint, §4.2. Minors m4 (closed result-label set),
-m5 (standalone no node-id is harmless), m6 (DDNS-specific failover observation),
-m7 (TTL=0/CLASS=NONE on deletes) folded into §4.1/§4.4/§9. Open questions Q-A
-(new go.mod dep `miekg/dns` — confirm no project policy bars it) and Q-C
-(warn-not-error on legacy free-form leaves) remain for Codex/AGY.
+### SMR-disposition
+
+**r1 (`claude-smr-plan-r1.md`)** returned PLAN-READY-WITH-CONDITIONS, no blocker,
+three MAJORs; r1 folded them as: M1 (memfile↔RG) → per-RG attribution; M2 (upsert
+atomicity) → exact-RR ADD discipline, no delete-RRset, §4.1; M3 (disabled-loop
+lifecycle) → always-construct + resolve-per-Reconcile hard constraint, §4.2.
+Minors m4/m5/m6/m7 folded into §4.1/§4.4/§9.
+
+**r2 (`claude-smr-plan-r2.md`)** is the hostile plan-review that returned
+PLAN-NEEDS-MAJOR against r1's M1 fold. Its single MAJOR: r1's per-RG `subnet_id`
+single-writer mechanism is unsound and unnecessary. r2 corrects it to a
+NODE-LEVEL gate and deletes the subnet_id map (§4.3/§6/§11 Q2), adds the
+async-takeover ordering note (§4.3), and resolves the zone surface (§11 Q1) and
+PTR-NOTAUTH (§11 Q6). The M2 (exact-RR upsert) and M3 (always-construct
+lifecycle) folds from r1 stand and are unchanged. Net effect: the HA gate is
+SIMPLER than r1. Plan is PLAN-READY (r2).
