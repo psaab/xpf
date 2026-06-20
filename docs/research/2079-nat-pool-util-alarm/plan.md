@@ -2,16 +2,30 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r8 (folds Codex r7 #1: a status-vs-applied gen gate is NOT
-  sufficient — config and counters must come from ONE coherent generation source,
-  because Commit promotes config before the dataplane apply; + #2 nil-dp handling)
-- **Status:** PLAN-READY pending r8 re-confirm — Claude SMR r7 + AGY r7 PLAN-READY;
-  Codex r7 (PLAN-REVISE) found the r7 gen gate insufficient (apply-window skew)
-  and a missing nil-dp case, both folded into r8 → r8 re-review dispatched.
+- **Revision:** r9 (folds AGY r8: `HelperCaughtUp` must compare status gen to
+  `view.Generation` = `m.lastSnapshot.Generation`, NOT `m.publishedSnapshot` —
+  lastSnapshot leads published in the deferred-startup window)
+- **Status:** PLAN-READY pending r9 re-confirm — Claude SMR r8 PLAN-READY; AGY r8
+  (PLAN-REVISE) caught my r8 `HelperCaughtUp` definition still admitting the skew
+  (published lags lastSnapshot); fixed to compare against view.Generation → r9
+  re-review dispatched.
 - **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
 - **Recommendation:** Path B — alarm registry rendered in `show security alarms`
   (BOTH render sites) + transition-gated structured syslog, driven by a slow
   (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
+
+### r9 changelog (folds AGY r8 PLAN-REVISE)
+- **HelperCaughtUp invariant fix (MAJOR, AGY r8):** r8 defined
+  `HelperCaughtUp := status.LastSnapshotGeneration == m.publishedSnapshot`. But in
+  the deferred-startup apply window `m.lastSnapshot` is advanced to the new gen
+  (`manager.go:648`) while `m.publishedSnapshot` still lags (advanced at
+  `699/805/958/1312`). Since `view.Config = m.lastSnapshot.Config` (new gen),
+  comparing status to the lagging `publishedSnapshot` (old==old) would pass and
+  evaluate new-gen config capacity against old-gen counters — the same skew r8 was
+  meant to kill, reintroduced in the predicate. r9 fixes it: `HelperCaughtUp :=
+  status.LastSnapshotGeneration == view.Generation` (= `m.lastSnapshot.Generation`,
+  the gen `view.Config` belongs to). Now the caught-up check and the config are
+  tied to the SAME generation. AGY confirmed all other r8 folds correct.
 
 ### r8 changelog (folds Codex r7 PLAN-REVISE #1/#2)
 - **#1 coherent (config, status, generation) source (MAJOR):** r7's gate
@@ -356,11 +370,19 @@ only, no socket I/O):
 # lock-guarded coherent view derived entirely from `m.lastSnapshot` + the helper
 # status it corresponds to:
 #   view := dp.CoherentNATView()
-#     → { Config *config.Config,            # == m.lastSnapshot.Config (same gen as counters)
+#     → { Config *config.Config,            # == m.lastSnapshot.Config
 #         Pools  map[string]SourceNATPoolStatus,  # deduped by pool name (from status)
-#         Generation uint64,                 # m.lastSnapshot.Generation
-#         HelperCaughtUp bool,               # status.LastSnapshotGeneration == m.publishedSnapshot gen
+#         Generation uint64,                 # == m.lastSnapshot.Generation (the gen Config belongs to)
+#         HelperCaughtUp bool,               # r9 (AGY r8): status.LastSnapshotGeneration == Generation
+#                                            #   (== m.lastSnapshot.Generation), NOT == m.publishedSnapshot
 #         Available bool }                   # false when dp nil / helper not running (r8 #2)
+# r9 FIX (AGY r8): HelperCaughtUp MUST compare status gen to view.Generation
+# (m.lastSnapshot.Generation = the gen of view.Config), NOT to m.publishedSnapshot.
+# In the deferred-startup window m.lastSnapshot is advanced to the new gen
+# (manager.go:648) while m.publishedSnapshot still lags (advanced at 699/805/958/
+# 1312); comparing status==published (old==old) would pass while view.Config is
+# already the NEW gen → the exact skew bug. Comparing status==view.Generation ties
+# the caught-up check to the SAME generation the config came from.
 # Config (pool kind + rule references) AND counters now come from the SAME
 # generation — the apply-window skew is impossible by construction.
 
@@ -375,10 +397,10 @@ if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
     clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6)
 byPoolStatus := view.Pools                         # deduped pool statuses, same gen as cfg
 
-# r8 (was r7 gen-coherency, now exact): numeric eval only when the helper has
-# CAUGHT UP to the snapshot this cfg belongs to. While it lags, HOLD numeric
-# raise/clear; the config-derived prune below STILL runs (config-only, safe).
-numericEval := view.HelperCaughtUp
+# numeric eval only when the helper has CAUGHT UP to the snapshot this cfg
+# belongs to — i.e. status gen == view.Generation (r9, AGY r8). While it lags,
+# HOLD numeric raise/clear; the config-derived prune below STILL runs (safe).
+numericEval := view.HelperCaughtUp                # == (status.LastSnapshotGeneration == view.Generation)
 
 # r6 (Codex r5 #1): eligibility is RULE-REFERENCED config — NOT every pool in
 # cfg...SourcePools. The status producer is RULE-DERIVED: SourceNATPoolStatus is
@@ -602,14 +624,15 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
   prune (it drops out of the rule-referenced `eligible` set), and a clear is
   emitted. Mutation: if eligibility iterated `cfg.SourcePools` instead of
   rule-references (the r5 bug), the alarm sticks forever and this test fails.
-- **Unit (r8, Codex r7 #1):** the monitor consumes a single coherent view
-  (`Config` + `Pools` + `HelperCaughtUp` from the same generation). When
-  `HelperCaughtUp` is false (apply window — config newer than helper counters),
-  numeric raise/clear is HELD; the config-derived prune still runs. Mutation:
-  feeding new config with old counters (the r7 split-source bug) must NOT
-  raise/clear — a test that supplies mismatched config+counters via two separate
-  getters would expose the r7 bug; the r8 single-view API makes the mismatch
-  unrepresentable, so the test asserts the view is the only input.
+- **Unit (r8/r9, Codex r7 #1 + AGY r8):** the monitor consumes a single coherent
+  view (`Config` + `Pools` + `Generation` + `HelperCaughtUp` from the same
+  generation). `HelperCaughtUp` MUST be `status.LastSnapshotGeneration ==
+  view.Generation` (NOT `== publishedSnapshot`). When `HelperCaughtUp` is false
+  (helper counters at an older gen than `view.Config`), numeric raise/clear is
+  HELD; the config-derived prune still runs. Mutation (r9): a view where
+  `view.Generation` (config gen) != `status` gen but `publishedSnapshot` ==
+  `status` gen must HOLD numeric eval — a `HelperCaughtUp` defined against
+  `publishedSnapshot` would wrongly evaluate and this test fails.
 - **Unit (r8, Codex r7 #2):** `view.Available == false` (dp nil / helper down) →
   monitor returns without clearing any alarm (HOLD-all). Mutation: clearing on
   unavailable → test fails.
@@ -644,7 +667,7 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
 | Monitor adds control-socket traffic | Use new `Manager.LastStatus()` cached accessor, never `Status()` (r2 — AGY M2) |
 | Active alarm stuck after pool removal/rename/un-reference | Prune `activeAlarms` for pools no longer ELIGIBLE by RULE-REFERENCED config semantics each tick (r6 — AGY M3 / Codex r5 #1) — NOT merely "absent from snapshot" |
 | Pool stays configured but its last source-NAT rule is removed | Eligibility is rule-referenced, so the pool drops out of `eligible` → prune clears its alarm (r6 — Codex r5 #1); status producer is rule-derived (`status.rs:9-17`) |
-| Helper status lags fresh config → stale counters vs new capacity (apply-window skew) | Single coherent `dp.CoherentNATView()` — `Config` (= `m.lastSnapshot.Config`) and `Pools` from the SAME generation; `numericEval := view.HelperCaughtUp`; config-derived prune still runs (r8 — Codex r7 #1; supersedes the r7 status-vs-applied gate, which Commit's promote-before-apply made insufficient) |
+| Helper status lags fresh config → stale counters vs new capacity (apply-window skew) | Single coherent `dp.CoherentNATView()` — `Config` (= `m.lastSnapshot.Config`) and `Pools` from the SAME generation; `HelperCaughtUp := status.LastSnapshotGeneration == view.Generation` (= `m.lastSnapshot.Generation`, NOT `m.publishedSnapshot` which lags lastSnapshot — r9/AGY r8); `numericEval := view.HelperCaughtUp`; config-derived prune still runs (r8 Codex r7 #1 + r9 AGY r8) |
 | Dataplane nil / helper not running | `view.Available==false` → HOLD all alarms (return, no clear) (r8 — Codex r7 #2) |
 | `show security alarms detail` shows stale raise-time pct | `updatePct` refreshes the displayed pct each tick while held (no syslog) (r7 — Codex r5-retry #3) |
 | Local-CLI vs gRPC alarm output divergence | Update BOTH render sites via a shared formatter (r2 — Codex F2) |

@@ -26,10 +26,13 @@
 | r7 | Claude SMR | claude-smr-plan-r7.md | PLAN-READY (gen-coherency + stuck-pct + 2 NITs verified resolved) |
 | r7 | AGY | adversarial-review-mqmt4uu2-n5ezju | PLAN-READY (all 4 r7 items confirmed, no new issues) |
 | r7 | Codex | agentId aa98925183049577a | PLAN-REVISE (4 confirms; MAJOR #1 apply-window gen-skew + MINOR #2 nil-dp → folded into r8) |
-| r7 | Codex (fresh retry, cross-check) | agentId aa0db8139112cf6e0 | (running against superseded r7; r8 coherent-view supersedes) |
+| r7 | Codex (fresh retry, cross-check) | agentId aa0db8139112cf6e0 | PLAN-READY (full 12-point clean pass on r7 base; corroborates substance) |
 | r8 | Claude SMR | claude-smr-plan-r8.md | PLAN-READY (coherent-view + nil-dp verified; commit-ordering re-traced) |
-| r8 | AGY | (pending) | (pending) |
-| r8 | Codex | (pending) | (pending) |
+| r8 | AGY | adversarial-review-mqmtgce3-ao2bh6 | PLAN-REVISE (1 MAJOR: HelperCaughtUp must compare to view.Generation not publishedSnapshot → folded into r9) |
+| r8 | Codex | agentId ac521b4e53a237581 | (running) |
+| r9 | Claude SMR | claude-smr-plan-r9.md | PLAN-READY (HelperCaughtUp predicate fix verified; generation tracking re-traced) |
+| r9 | AGY | (pending) | (pending) |
+| r9 | Codex | (pending) | (pending) |
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
 
