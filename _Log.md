@@ -1,5 +1,29 @@
 # Action Log
 
+## 2026-06-19 — #1434 multi-tunnel WireGuard research plan (DRAFT v2)
+
+- **Timestamp**: 2026-06-19
+- **Action**: Research-only plan-of-action for multi-tunnel WireGuard.
+  No production source touched, no reviewer fan-out. Re-verified every
+  load-bearing claim against origin/master HEAD fc3f41ef8. Finding: the
+  data plane is already multi-tunnel (`wg_engines: FastMap<u16,
+  Arc<WgEngine>>` keyed by endpoint id, per-id identity-stable Arc reuse
+  in `populate_wg_engines`, one control thread per id binding its own
+  `wg_listen_port`, per-tunnel telemetry + `show security wireguard
+  [detail]`). The ONE functional blocker is the XDP shim ctrl block:
+  `snapshotWgListenPort` returns the first WG port (first-wins) and
+  `wg_steer_to_kernel` matches a single port, so a second tunnel's
+  inbound UDP is never steered to the kernel socket. Other gaps: no
+  `show security wireguard public-key` / local-pubkey surface (engine
+  has `local_public_key()` but it is unplumbed), no
+  `request security wireguard generate-private-key`, no commit-time WG
+  port-uniqueness validation, no two-WG-tunnel test
+  (`two_tunnel_snapshot` is GRE+WG). Verdict: PLAN-DEFER-MULTI-INCREMENT
+  with a feasible small first increment (CLI public-key + keygen, no
+  hot-path, no lab); shim multi-port steering deferred to lab and a
+  PLAN-KILL candidate pending cited demand + a v6 line-rate budget.
+- **File(s)**: docs/research/1434-wireguard-multitunnel/plan.md, _Log.md
+
 ## 2026-06-20 — #2034 RA link-local review follow-up (regression test)
 
 - **Timestamp**: 2026-06-20
