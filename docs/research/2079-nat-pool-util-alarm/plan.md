@@ -2,9 +2,36 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r1
-- **Status:** DRAFT — under 3-way hostile plan review (Claude SMR + Codex + AGY)
+- **Revision:** r2 (folds r1 review: AGY M1-M5, Codex F1-F8, Claude SMR M1/m1-m3)
+- **Status:** DRAFT — 3-way hostile plan review, r2 (Claude SMR + Codex + AGY)
 - **Mode:** /research (PLAN-READY or PLAN-KILL; no code, no PR)
+
+### r2 changelog (resolved review findings)
+- **CRITICAL fix to the design — DEDUPLICATE, do NOT sum, UsedPorts across rules.**
+  AGY M1 + Codex F1 independently proved rules sharing a pool share the SAME
+  `Arc<PortAllocatorShared>` (`allocator.rs:154`, `source.rs:282-290`
+  `existing.clone()`), so every rule entry for a pool reports the IDENTICAL
+  `UsedPorts`. Summing double/triple-counts → false alarms. r2 mandates
+  dedup-by-pool-name, take one value. (was §6.2/§10 Q3 "sum" — now resolved)
+- **Cached accessor, no socket I/O (AGY M2).** `Daemon.userspaceDataplaneStatus()`
+  → `Manager.Status()` issues a blocking `ControlRequest{Type:"status"}`
+  (`manager.go:1852`). r2 mandates a new cheap `Manager.LastStatus()` that
+  returns `m.lastStatus` under lock (statusLoop already refreshes it at 1Hz in
+  `process.go:393`). No new control-socket traffic.
+- **Prune active alarms on pool removal/rename (AGY M3).**
+- **Commit-time threshold validation (AGY M4 + Codex F7 + SMR m1).**
+- **uint16 underflow-safe capacity math, guard PortLow>PortHigh (AGY M5 + Codex F4).**
+- **BOTH render sites (Codex F2).** gRPC `Server.showSecurityAlarms`
+  (`server_show_security_text.go:308`) AND local-CLI `CLI.showSecurityAlarms`
+  (`cli_show_security.go:1788`) — else local CLI diverges.
+- **Skip deterministic pools in r1 (SMR m3); broken existing surfaces noted
+  (SMR F-OK3 + Codex F3).** `nat_port_counters` is NEVER incremented post
+  eBPF-retirement — only seeded with a random offset — so `metrics_nat.go` +
+  CLI `show security nat source pool` "Utilization %" are already garbage today
+  (carved out as a follow-up).
+- **Summary-vs-detail convention (SMR M1):** follow existing convention (count in
+  summary, body in detail).
+- Corrected §11 line refs (statusLoop is `process.go:393`, not manager.go).
 
 ---
 
@@ -73,12 +100,17 @@ without any new field**:
 
 `utilization% = UsedPorts * 100 / (AddressCount * (PortHigh - PortLow + 1))`
 
-The daemon already has an accessor: `Daemon.userspaceDataplaneStatus()`
-(`pkg/daemon/daemon_forwarding_status.go:77-85`) returning the cached
-`ProcessStatus`. **Sampling cost: zero new work — it reuses the existing 1s
-snapshot already in memory.** No per-packet, no per-session, no extra control
-socket request (which `CLAUDE.md` "Control socket contention" explicitly
-forbids at >1/s).
+**Sampling accessor (r2 correction — AGY M2):** the existing
+`Daemon.userspaceDataplaneStatus()` (`daemon_forwarding_status.go:77-85`) calls
+`Manager.Status()` which, when the helper is running, issues a **blocking
+control-socket** `ControlRequest{Type:"status"}` (`manager.go:1852`). Using it on
+a timer would add a redundant request per tick — forbidden by `CLAUDE.md`
+"Control socket contention". r2 therefore mandates a NEW cheap accessor
+`Manager.LastStatus() ProcessStatus` that returns the already-cached
+`m.lastStatus` under the manager lock (no socket I/O). The statusLoop
+(`process.go:393`) already refreshes `m.lastStatus` at 1Hz (`manager.go:1094`),
+so the monitor reads in-memory state only. **Sampling cost: zero socket traffic,
+no per-packet, no per-session work.**
 
 ### 2c. Already exposed as Prometheus metrics (the partial pre-existing "consumer")
 
@@ -86,17 +118,21 @@ forbids at >1/s).
 `status.SourceNATPools`: `xpf_userspace_source_nat_pool_used_ports{pool,rule}`,
 `...live_flows`, `...persistent_leases`, `..._total` counters.
 
-> NOTE — dead legacy path: `pkg/api/metrics_nat.go:12-54` and the CLI
-> `show security nat source pool` (`pkg/cli/cli_show_nat.go:293-352`) read
-> `dp.ReadNATPortCounter(poolID)` which looks up the **eBPF map**
-> `nat_port_counters` (`pkg/dataplane/maps_nat.go:387-401`). Post eBPF-retirement
-> (#1373/#1476) that map is a "retained shim shared state"
-> (`loader_userspace_shim.go:52,292`) — the AF_XDP shim may still increment a
-> raw round-robin counter there, but it is NOT the authoritative live in-use
-> port count. The plan MUST use the userspace allocator snapshot
-> (`SourceNATPoolStatus.UsedPorts`), not `ReadNATPortCounter`, for alarm
-> decisions. (Fixing the dead Prometheus/CLI path is out of scope for #2079 but
-> noted as a follow-up.)
+> NOTE — DEAD legacy path (r2, sharpened by Codex F3 + SMR F-OK3, verified):
+> `pkg/api/metrics_nat.go:12-54` and the CLI `show security nat source pool`
+> (`pkg/cli/cli_show_nat.go:293-352`) read `dp.ReadNATPortCounter(poolID)` which
+> looks up the eBPF map `nat_port_counters` (`maps_nat.go:387-401`). Post
+> eBPF-retirement (#1373/#1476) **nothing increments that map** — verified:
+> `grep nat_port_counter` over `userspace-dp/src/` and `userspace-xdp/src/`
+> returns ZERO hits, and the only Go writer is `SeedNATPortCounters`
+> (`maps_nat.go:407+`), which writes a one-time RANDOM offset at init. So
+> `ReadNATPortCounter` returns a random seed value, NOT live utilization. The
+> existing Prometheus gauge `xpf_nat_pool_used_ports` (`metrics_nat.go:35`) and
+> the CLI "Ports allocated / Utilization %" (`cli_show_nat.go:328`) are therefore
+> **already reporting garbage in userspace mode today.** The alarm MUST use the
+> userspace allocator snapshot (`SourceNATPoolStatus.UsedPorts`), never
+> `ReadNATPortCounter`. Fixing/removing the two broken legacy surfaces is a
+> SEPARATE follow-up issue (out of scope for #2079; #2079 must not depend on it).
 
 ---
 
@@ -195,55 +231,92 @@ toward a self-contained, unit-testable struct that takes a `func() ProcessStatus
 sampler + `func() *config` + emit callbacks (dependency-injected so it is
 testable without a live dataplane).
 
-Loop (slow tick, e.g. 10s — NOT 1s, to avoid flap and stay well clear of the
-control-socket contention rule; it reads the **already-cached** status so the
-tick is just a recompute, no I/O):
+Loop (slow tick, **10s** — NOT 1s, to avoid flap; reads cached `LastStatus()`
+only, no socket I/O):
 
 ```
-for each pool in cfg.Security.NAT.SourcePools:
-    cap   = AddressCount * (PortHigh - PortLow + 1)          # from snapshot
-    used  = snapshot.SourceNATPools[pool].UsedPorts          # by PoolName(+Rule)
-    if cap == 0: skip (avoid div-by-zero; emit nothing)
-    pct   = used * 100 / cap
-    raised = activeAlarms[pool]
-    if !raised && pct >= RaiseThreshold:    raise(pool, pct)
-    if  raised && pct <= ClearThreshold:    clear(pool, pct)
+status := dp.LastStatus()                       # cached, no socket request (r2)
+alarmCfg := cfg.Security.NAT.PoolUtilizationAlarm
+if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
+    clear-all-and-return
+
+# r2: DEDUPLICATE by pool name — rules sharing a pool report the SAME UsedPorts
+# (shared Arc<PortAllocatorShared>), so SUMMING would double-count. Take one.
+byPool := {}                                     # pool_name -> SourceNATPoolStatus
+for s in status.SourceNATPools:
+    byPool[s.PoolName] = s                       # any entry; values identical per pool
+
+for poolName, s in byPool:
+    if s.Deterministic: continue                 # r2: skip det pools (UsedPorts != util)
+    if s.AddressCount == 0 || s.PortHigh < s.PortLow: continue   # r2: guard underflow
+    capacity := uint64(s.AddressCount) * uint64(s.PortHigh - s.PortLow + 1)
+    if capacity == 0: continue                   # div-by-zero guard
+    pct := s.UsedPorts * 100 / capacity
+    raised := activeAlarms[poolName]
+    if !raised && pct >= alarmCfg.RaiseThreshold: raise(poolName, pct)
+    if  raised && pct <= alarmCfg.ClearThreshold: clear(poolName, pct)
+
+# r2 (AGY M3): prune alarms for pools no longer in the snapshot/config
+for poolName in activeAlarms:
+    if poolName not in byPool: clearSilently(poolName)   # pool removed/renamed
 ```
 
 `raise`/`clear` mutate the in-memory active-alarm set (guarded by a mutex; read
-by the gRPC `show security alarms` handler) and emit one structured syslog line.
+by BOTH `show security alarms` render sites — see §6.3) and emit one structured
+syslog line on transition. Note `SourceNATPoolStatus` has no explicit
+`Deterministic` flag today; r2 detects deterministic pools by cross-referencing
+`cfg.Security.NAT.SourcePools[poolName].Deterministic != nil` (the config is the
+source of truth for pool kind).
 
-### 6.2 Hysteresis & matching semantics (the subtle bits — flagged for review)
+### 6.2 Hysteresis & matching semantics (r2 — RESOLVED)
 - **Hysteresis:** raise on `>= RaiseThreshold`, clear on `<= ClearThreshold`,
-  hold state in between (standard). Requires `RaiseThreshold > ClearThreshold`;
-  if a config has them inverted or equal, that should be a **commit-time
-  validation warning/error** (open question §10). Junos requires raise > clear.
-- **Defaults:** if the operator sets the stanza with only one threshold (or the
-  zero-value sentinel), define defaults. Junos default raise=100, clear=100 is
-  effectively "never" — but the current parser leaves the missing field at 0,
-  which would make `clear=0` fire immediately. Must decide: treat 0 as "unset →
-  default" vs literal. (open question §10).
-- **Scope of `pool-utilization-alarm`:** in the config it is stored at
-  `NATConfig.PoolUtilizationAlarm` — i.e. a **single global** raise/clear pair,
-  not per-pool. (Junos `set security nat source pool-utilization-alarm` is global
-  too.) So the same thresholds apply to **every** source pool; the alarm
-  registry keys on pool name. Confirm this matches the parsed shape (it does:
-  `sec.NAT.PoolUtilizationAlarm` is one struct).
-- **Pool aggregation across rules:** `SourceNATPoolStatus` is per-(rule,pool). A
-  pool used by multiple rules appears multiple times. Decide whether utilization
-  is summed across rules per pool (likely yes — a pool is one address/port
-  resource) or kept per-(rule,pool). Leaning: aggregate by pool name (sum
-  UsedPorts; capacity is pool-intrinsic). (open question §10).
-- **Persistent-NAT / deterministic pools:** UsedPorts semantics differ (leases
-  vs translated tuples). For r1, treat `UsedPorts` uniformly; note deterministic
-  pools may want block-based utilization later (follow-up).
+  hold in between.
+- **Commit-time validation (RESOLVED — was §10 Q1/Q2; AGY M4 + Codex F7):** add a
+  hard validation block in the existing NAT validation section
+  (`compiler_nat.go:369+`, same `return fmt.Errorf(...)` style as the
+  deterministic-pool checks): require `0 < ClearThreshold < RaiseThreshold <=
+  100`. This makes a bare `pool-utilization-alarm;` (which compiles to
+  raise=0/clear=0, verified) a commit error rather than an always-firing alarm,
+  and rejects inverted/equal thresholds. Defense-in-depth: the monitor also
+  treats `RaiseThreshold <= 0` as "feature disabled". (Hard commit-reject chosen
+  over a ValidateConfig warning because a misconfigured alarm is actively
+  harmful — Junos itself requires raise > clear.)
+- **Scope:** `NATConfig.PoolUtilizationAlarm` is a SINGLE GLOBAL raise/clear pair
+  (matches Junos `set security nat source pool-utilization-alarm` global scope);
+  same thresholds apply to every source pool; the registry keys on pool name.
+- **Aggregation across rules (RESOLVED — was §10 Q3; AGY M1 + Codex F1, BOTH
+  independently):** `SourceNATPoolStatus` is per-(rule,pool), BUT rules sharing a
+  pool share the SAME `Arc<PortAllocatorShared>` (`allocator.rs:154`,
+  `source.rs:282-290`), so every entry for a pool reports the IDENTICAL
+  `UsedPorts`. **DEDUPLICATE by pool name and take one entry's value — do NOT
+  sum** (summing double/triple-counts → false alarms). Capacity is
+  pool-intrinsic (taken from one entry). A dedicated unit test must cover the
+  two-rules-one-pool case and assert no double-count.
+- **Deterministic pools (RESOLVED — SMR m3):** SKIP in r1 — `UsedPorts`
+  (translated-tuple set) is not the right numerator for block-based deterministic
+  pools; misreporting is worse than silence. Detected via
+  `cfg...SourcePools[name].Deterministic != nil`. Block-based utilization is a
+  follow-up.
+- **Persistent-NAT:** `UsedPorts` still meaningful (in-use translated tuples);
+  `PersistentLeases` is a secondary signal not used for the r1 raise/clear
+  decision (could be a follow-up alarm dimension).
 
-### 6.3 `show security alarms` integration
-Extend `showSecurityAlarms()` (`server_show_security_text.go:308`) to append, for
-each active NAT pool alarm: `Class: NAT, Severity: Minor/Major, Description: "NAT
-source pool <name> utilization <pct>% exceeds raise-threshold <R>%"`. Detail mode
-adds first-seen timestamp + current pct. The handler reads the monitor's active
-set (thread-safe accessor). Class/severity wording to mirror Junos.
+### 6.3 `show security alarms` integration — BOTH render sites (r2, Codex F2)
+There are TWO independent implementations that must BOTH be updated or local-CLI
+output diverges from gRPC/remote-CLI:
+1. gRPC: `Server.showSecurityAlarms()` (`server_show_security_text.go:308`)
+2. local CLI: `CLI.showSecurityAlarms()` (`cli_show_security.go:1788`, dispatched
+   from `cli_show_security_dispatch.go:332`)
+
+Both follow the existing **count-in-summary, body-in-detail** convention (SMR
+M1): summary mode prints only the active-alarm count (`...:355-360`), detail mode
+prints each alarm body. So NAT pool alarms bump the count in summary and render
+`Class: NAT, Severity: Minor, Description: "NAT source pool <name> utilization
+<pct>% exceeds raise-threshold <R>%"` (+ first-seen timestamp + current pct) in
+detail — consistent with the existing screen/config alarms. Both handlers read
+the monitor's active set via a thread-safe accessor. To avoid duplicating render
+logic across the two sites, factor the active-alarm-to-lines formatting into a
+shared helper consumed by both. Class/severity wording to mirror Junos.
 
 ### 6.4 Structured syslog on transition
 On raise/clear, emit one line via the existing syslog client path. Reuse the
@@ -257,8 +330,14 @@ logging** (complies with `CLAUDE.md` logging rules).
 - `xpf_..._pool_utilization_alarm_state` Prometheus gauge (→ follow-up; derivable
   via alert rule on existing gauges today).
 - Event-engine `pool-utilization-alarm` event source (→ future).
-- Fixing the dead `ReadNATPortCounter`/`metrics_nat.go`/CLI legacy eBPF-counter
-  path (→ separate cleanup issue; #2079 must not depend on it).
+- Fixing/removing the dead `ReadNATPortCounter`/`metrics_nat.go`/CLI legacy
+  eBPF-counter path that already reports garbage utilization in userspace mode
+  (→ separate cleanup follow-up issue; #2079 must not depend on it). The natural
+  fix there is to switch those surfaces to the allocator snapshot too, which
+  #2079's monitor work makes easy — but it is a distinct change.
+- Block-based utilization for deterministic pools (skipped in r1).
+- `PersistentLeases`-dimension alarm; SNMP trap (Path C); Prometheus alarm-state
+  gauge (Path C); event-engine pool-utilization event source.
 - Per-pool (vs global) threshold override syntax (not in current Junos grammar
   parsed here).
 
@@ -266,12 +345,16 @@ logging** (complies with `CLAUDE.md` logging rules).
 
 ## 7. Blast radius
 
-- **New code:** one small monitor (Go), ~150-250 LOC + tests; one render block in
-  `showSecurityAlarms`; one syslog formatter + emit call; daemon start/stop wiring.
-- **Touched files (estimated):** `pkg/daemon/daemon_run.go` (start),
-  `pkg/daemon/daemon.go` (field), `pkg/grpcapi/server_show_security_text.go`
-  (render), new `pkg/natpoolalarm/*` (or `pkg/daemon/*`), `pkg/logging/*` (one
-  formatter), docs (`docs/` NAT/alarms + module README).
+- **New code:** one small monitor (Go), ~200-300 LOC + tests; a shared alarm-line
+  formatter used by BOTH render sites; one syslog formatter + emit call; a new
+  cheap `Manager.LastStatus()` accessor; daemon start/stop wiring; a commit-time
+  validation block.
+- **Touched files (estimated, r2):** `pkg/daemon/daemon_run.go` (start near
+  `d.ipmon.Start()`), `pkg/daemon/daemon.go` (field), `pkg/dataplane/userspace/
+  manager.go` (`LastStatus()` accessor), `pkg/grpcapi/server_show_security_text.go`
+  (gRPC render), `pkg/cli/cli_show_security.go` (local-CLI render — Codex F2),
+  `pkg/config/compiler_nat.go` (commit-time validation), new `pkg/natpoolalarm/*`
+  (or `pkg/daemon/*`), `pkg/logging/*` (one formatter), docs.
 - **No dataplane changes** (Rust untouched — data already published).
 - **No new control-socket request** (reuses cached 1s status).
 - **No wire-protocol change** (`SourceNATPoolStatus` already has all fields).
@@ -287,8 +370,14 @@ logging** (complies with `CLAUDE.md` logging rules).
 - **Unit (Go), primary:** drive the monitor with a synthetic `ProcessStatus`
   sequence and assert raise fires once on crossing up, holds across the
   hysteresis band, clears once on crossing down, never double-fires, handles
-  cap==0 (skip), missing pool in snapshot, and multi-rule aggregation. Mutation
-  test: deleting the emit call must fail a test.
+  cap==0 (skip), `PortLow>PortHigh` (skip, no underflow), missing pool in
+  snapshot, deterministic-pool skip, and — critically (r2) — **two rules sharing
+  one pool must NOT double-count** (dedup test; assert pct computed from one
+  entry, not the sum). Mutation test: deleting the emit call must fail a test.
+- **Unit:** pool removed/renamed while alarm active → alarm is pruned, not stuck
+  (AGY M3).
+- **Unit (config):** `compiler_nat.go` rejects raise<=clear, out-of-range, and a
+  bare `pool-utilization-alarm;` stanza (raise=0) at commit.
 - **Unit:** `showSecurityAlarms` renders the active set (summary + detail).
 - **Unit:** syslog formatter output shape (one line per transition).
 - **`go test ./...`** + `go vet`.
@@ -305,7 +394,11 @@ logging** (complies with `CLAUDE.md` logging rules).
 
 | Risk | Mitigation |
 |------|------------|
-| `UsedPorts` from a multi-rule pool double-counts / under-counts | Aggregate by pool name; add a unit test for the multi-rule case |
+| `UsedPorts` from a multi-rule pool double-counts (shared Arc) | **Dedup by pool name, take one value (NOT sum)**; dedicated unit test (r2 — AGY M1/Codex F1) |
+| Monitor adds control-socket traffic | Use new `Manager.LastStatus()` cached accessor, never `Status()` (r2 — AGY M2) |
+| Active alarm stuck after pool removal/rename | Prune `activeAlarms` for absent pools each tick (r2 — AGY M3) |
+| Local-CLI vs gRPC alarm output divergence | Update BOTH render sites via a shared formatter (r2 — Codex F2) |
+| uint16 capacity underflow on `PortLow>PortHigh` | Guard + uint64 math (r2 — AGY M5/Codex F4) |
 | Alarm flap near threshold | Hysteresis (raise!=clear) + slow 10s tick; commit-warn if raise<=clear |
 | `clear=0` (unset) fires/clears spuriously | Define unset→default semantics at commit (open question §10) |
 | Using the dead eBPF `ReadNATPortCounter` by mistake | Plan mandates allocator snapshot; code review must confirm |
@@ -314,28 +407,24 @@ logging** (complies with `CLAUDE.md` logging rules).
 
 ---
 
-## 10. Open questions (for reviewers / to resolve before /engineer)
+## 10. Open questions — status after r2
 
-1. **Threshold validation:** add a commit-time check that `RaiseThreshold >
-   ClearThreshold` and both in (0,100]? Warning or hard error? (Junos: raise >
-   clear required.) Recommend: hard validation error to prevent a never-clearing
-   or always-firing config.
-2. **Unset-threshold semantics:** parser leaves a missing threshold at 0. Treat
-   `RaiseThreshold==0` as "alarm disabled" and `ClearThreshold` default = raise-N?
-   Or require both? Recommend: require both at commit (tie to Q1).
-3. **Per-(rule,pool) vs per-pool aggregation** for UsedPorts. Recommend:
-   aggregate by pool name (a pool is one resource).
-4. **Monitor placement:** new `pkg/natpoolalarm` package vs a daemon method.
-   Recommend: small injectable struct in its own package for testability.
-5. **Tick interval:** 10s proposed. Acceptable, or align to the 1s status cadence
-   (reading cached status either way)? Recommend 10s (alarm is not latency-critical).
-6. **Severity/class wording** in `show security alarms` to best mirror Junos
-   (Class NAT; Severity Minor on raise?). Cosmetic; confirm against vSRX output.
-7. **Scope of UsedPorts** — is the allocator's `owner_by_translated.len()` the
-   right "utilization" numerator vs a port-space percentage that accounts for the
-   round-robin counter? (allocator.rs uses unbounded round-robin for *selection*
-   but `owner_by_translated` is the authoritative *in-use* set — confirmed
-   §2a). Recommend: UsedPorts (in-use set) is correct.
+RESOLVED in r2 (folded review):
+- ~~Q1/Q2 threshold validation + unset semantics~~ → require `0 < clear < raise
+  <= 100` as a hard commit error (`compiler_nat.go:369+`); monitor treats
+  raise<=0 as disabled. (§6.2)
+- ~~Q3 per-(rule,pool) vs per-pool aggregation~~ → DEDUPLICATE by pool name, take
+  one value (shared Arc → identical UsedPorts). NOT sum. (§6.2)
+- ~~Q7 UsedPorts numerator~~ → `owner_by_translated.len()` (in-use set) is the
+  correct numerator (allocator round-robin is selection-only). (§2a)
+
+Remaining (minor, non-blocking — engineer's discretion at /engineer):
+1. **Monitor placement:** new `pkg/natpoolalarm` package vs a daemon method.
+   Recommend: small injectable struct in its own package for testability
+   (sampler `func() ProcessStatus` + config getter + emit callbacks DI'd).
+2. **Tick interval:** 10s (alarm is not latency-critical; reads cached status).
+3. **Severity/class wording** (Class NAT; Severity Minor on raise) — cosmetic;
+   confirm against a real vSRX `show security alarms` sample if available.
 
 ---
 
@@ -343,16 +432,22 @@ logging** (complies with `CLAUDE.md` logging rules).
 
 - Parse/store (no consumer): `pkg/config/compiler_nat.go:334-366`,
   `pkg/config/types_security.go:241,251-255`
-- Live utilization source: `userspace-dp/src/nat/allocator.rs:101-143,603-614`;
+- Live utilization source: `userspace-dp/src/nat/allocator.rs:101-143,153-156,
+  603-614`; shared-Arc dedup: `userspace-dp/src/nat/source.rs:130,202,282-290`;
   `userspace-dp/src/nat/status.rs:9-34`; `userspace-dp/src/protocol/nat.rs:100-132`
 - Wire + Go status: `pkg/dataplane/userspace/protocol.go:684,932-948`;
-  `pkg/dataplane/userspace/manager.go:110,393,1094,1840`
-- Daemon status accessor: `pkg/daemon/daemon_forwarding_status.go:77-85`
-- Existing Prometheus consumer: `pkg/api/metrics_userspace.go:403-443`
-- Dead legacy eBPF counter path (do NOT use): `pkg/api/metrics_nat.go:12-54`;
-  `pkg/cli/cli_show_nat.go:293-352`; `pkg/dataplane/maps_nat.go:387-401`;
+  `lastStatus` field `manager.go:110`, refresh `manager.go:1094`, `Status()`
+  (DOES socket I/O) `manager.go:1840-1862`; statusLoop `process.go:384,393`
+- Daemon status accessor (does socket I/O): `daemon_forwarding_status.go:77-85`
+- Existing Prometheus consumer (live, correct): `pkg/api/metrics_userspace.go:403-443`
+- DEAD legacy eBPF counter path (never incremented; do NOT use):
+  `pkg/api/metrics_nat.go:12-54`; `pkg/cli/cli_show_nat.go:293-352`;
+  `pkg/dataplane/maps_nat.go:387-401` (read) + `:407+` (seed-only writer);
   `pkg/dataplane/loader_userspace_shim.go:52,292`
-- Alarm registry / render: `pkg/grpcapi/server_show_security_text.go:304-361`
+- Alarm render — BOTH sites: gRPC `pkg/grpcapi/server_show_security_text.go:304-361`;
+  local CLI `pkg/cli/cli_show_security.go:1788` (dispatch
+  `pkg/cli/cli_show_security_dispatch.go:332`)
+- Commit-time validation site: `pkg/config/compiler_nat.go:369+`
 - Syslog infra: `pkg/logging/syslog.go`, `pkg/logging/ringbuf.go`,
   `pkg/logging/eventbuf.go`, `pkg/daemon/daemon_system.go:24-138`
 - SNMP infra (Path C only): `pkg/snmp/traps.go`, `pkg/snmp/agent.go`,
