@@ -1,8 +1,11 @@
 # Plan of action — #2082: `ReleaseSyncHold` preempt path lacks peer-priority gate (transient dual-master)
 
 - **Issue:** #2082 (severity LOW, audit-verified; go-cluster-ha lens)
-- **Revision:** r2 (revised after r1 3-way hostile review — all reviewers
-  converged PLAN-NEEDS-WORK; this revision closes every required change)
+- **Revision:** r3 (r2 closed all r1 findings; r2 review: SMR + reviewer B +
+  AGY → PLAN-READY, reviewer A2 found ONE real new blocker — `run()` nil-`conn`
+  receiver panic makes the "run `run()` briefly" test path crash. r3 binds the
+  wiring tests to an extracted `stepBackup()` seam + folds A2's minor/cosmetic
+  notes.)
 - **Branch:** `research/2082-vrrp-preempt-priority-gate`
 - **Mode:** `/research` — STOPS at PLAN-READY/PLAN-KILL. No code, no PR, no production-source edits.
 - **Reviewers required to converge:** hostile Claude general-purpose reviewer A
@@ -48,7 +51,7 @@
 5. **New invariants the gate relies on (SMR, reviewer B):** (a) the gate
    governs ONLY the sync-hold preempt *shortcut* — it never disables the
    `masterDownTimer.C` election; a denied gate leaves the timer armed
-   (`masterDownTimer.Stop()` is inside the taken branch only, `instance.go:371`);
+   (`masterDownTimer.Stop()` is inside the taken branch only, `instance.go:372`);
    (b) priority-0 resignation takeover flows through the *ungated*
    `masterDownTimer.C` path (`handleBackupRx` Reset(1ms) → `instance.go:357`),
    so not recording priority-0 cannot block a post-resign takeover; (c)
@@ -285,7 +288,7 @@ sync-hold preempt kick, only `becomeMaster()` if we would win. Concretely:
 3. If the gate denies preemption, do **not** `becomeMaster()`. Leave the node
    in BACKUP with its `masterDownTimer` running (the gate never stops it —
    `masterDownTimer.Stop()` stays inside the taken `becomeMaster` branch only,
-   `instance.go:371`). The normal RFC election then governs: peer master gone →
+   `instance.go:372`). The normal RFC election then governs: peer master gone →
    masterDown expiry promotes us; cluster promotes us → `UpdateRGPriority(200)`
    + `ForceRGMaster` (force=true) still works.
 
@@ -387,16 +390,30 @@ All in `pkg/vrrp/`:
    as one of:
    - **(preferred) snapshot-then-release:** `vi.mu.RLock()` → read
      `lastMasterPriority`, `lastMasterSeen`, `cfg.Preempt`, `cfg.Priority`,
-     `trackDown`, `cfg.TrackInterface`, `cfg.TrackPriorityCost` into locals →
-     `vi.mu.RUnlock()` → compute the effective priority inline (replicating the
-     `getPriority` owner-255 / track-clamp logic) and the masterDownInterval
-     staleness horizon from locals. Single lock acquisition, no nesting.
+     `trackDown`, `cfg.TrackInterface`, `cfg.TrackPriorityCost`, **and
+     `cfg.AdvertiseInterval`** (needed for the masterDownInterval staleness
+     horizon) into locals → `vi.mu.RUnlock()` → compute the effective priority
+     inline (replicating the `getPriority` owner-255 / track-clamp logic) and
+     the masterDownInterval staleness horizon from locals. Single lock
+     acquisition, no nesting. (`advertInterval()`/`masterDownInterval()` today
+     are effectively immutable post-construction —`updateConfig` never mutates
+     `AdvertiseInterval`— but snapshot it anyway for a clean single-lock read.
+     Note `masterDownInterval()` itself calls `getPriority()` → RLock, so it too
+     needs a `masterDownIntervalLocked()` variant or inline computation.)
    - **or** add unlocked private helpers `getPriorityLocked()` /
      `masterDownIntervalLocked()` and call them strictly within one held
      `vi.mu.RLock()`. (Factor the existing `getPriority`/`masterDownInterval`
      bodies into `*Locked` and have the public methods wrap with the lock.)
    Pick one explicitly in the implementation; do not reintroduce a
    `getPriority()` call inside a held lock "for DRY."
+   **Use `RLock`, not `Lock` (AGY r2):** the helper only reads — use
+   `vi.mu.RLock()`/`RUnlock()` so it does not block concurrent external readers
+   (`Status()`). **Optimize the relock (AGY r2, optional):** the `preemptNowCh`
+   case already does a `vi.mu.Lock()` to read+clear `forcePreemptOnce`; an
+   implementer may fold the gate read into a single held-lock helper
+   (`shouldPreemptObservedMasterLocked()` reading `forcePreemptOnce` + the
+   snapshot in one scope), releasing before `becomeMaster()`. Behavior-neutral;
+   not required for correctness.
 4. **`run()` `preemptNowCh` case:** replace `if vi.getPreempt() || force` with
    `if force || vi.shouldPreemptObservedMaster()`. (force short-circuits;
    ForceRGMaster path unchanged. The helper already requires `getPreempt()`.)
@@ -436,13 +453,13 @@ the sync-hold and any future trigger benefit). No new field for peer IP.
   stays BACKUP. Bug fixed.
 - **Invariant (a): gate governs only the shortcut, never the election.** A
   denied gate does NOT touch `masterDownTimer` (Stop() is inside the taken
-  `becomeMaster` branch only, `instance.go:371`). So the RFC `masterDownTimer.C`
+  `becomeMaster` branch only, `instance.go:372`). So the RFC `masterDownTimer.C`
   election (`instance.go:357-358`) remains armed and independent. The gate can
   never cause a *no-master* outage — at worst it defers the shortcut; the timer
   still promotes on real master death.
 - **Invariant (b): priority-0 resignation takeover is ungated.** When the
   master resigns (priority-0 burst), `handleBackupRx` sets
-  `masterDownTimer.Reset(1ms)` (`instance.go:728`) → `masterDownTimer.C` →
+  `masterDownTimer.Reset(1ms)` (`instance.go:727`) → `masterDownTimer.C` →
   becomeMaster — this NEVER flows through the gated `preemptNowCh` case. Hence
   not recording priority-0 (leaving a stale-high `lastMasterPriority`) cannot
   block a legitimate post-resign takeover.
@@ -472,28 +489,45 @@ the sync-hold and any future trigger benefit). No new field for peer IP.
 
 ## 7. Test plan
 
-**PRIMARY regression guard — MUST drive the actual `run()` `preemptNowCh` case
-(reviewer A, SMR).** A helper-only test (`shouldPreemptObservedMaster()` in
-isolation) is INSUFFICIENT: if the implementer adds the helper but leaves
-`run()` as `if vi.getPreempt() || force`, a helper test passes while the bug
-ships. The wiring test must exercise the run loop. This is feasible without real
-sockets: `becomeMaster()` → `addVIPs()` degrades gracefully (`netlink.LinkByName`
-fails → Warn+return, `instance.go`), and `sendAdvert`/`sendPacket` return nil
-when `rawConn==nil`. So a test can `newInstance(...)`, set `state=StateBackup`,
-seed `lastMaster*`, push the preempt trigger, single-step one run-loop iteration
-(extract a `stepBackup()` seam or run `run()` briefly under a stop channel), and
-assert `getState()`.
+**PRIMARY regression guard — MUST exercise the actual `preemptNowCh` decision
+wiring, NOT just the helper in isolation (reviewer A, SMR).** A helper-only test
+(`shouldPreemptObservedMaster()` alone) is INSUFFICIENT: if the implementer adds
+the helper but leaves `run()` as `if vi.getPreempt() || force`, a helper test
+passes while the bug ships. The decision wiring must be tested.
+
+**CRITICAL test-construction hazard (reviewer A2, r3) — do NOT call `run()`
+directly in a unit test.** `run()`'s preamble unconditionally spawns
+`go vi.receiver()` when `afPacketFD < 0` (`instance.go:305`), and `receiver()`'s
+first action is `vi.conn.SetReadDeadline(...)` on the (nil) `conn`
+(`instance.go:445`) → **nil-pointer panic in a background goroutine that crashes
+the test process.** A `newInstance(...)` test instance has `conn==nil` and
+`afPacketFD==-1`, so "run `run()` briefly under a stop channel" is BROKEN.
+
+**Required seam:** extract the `StateBackup` `select` body into a single-iteration
+method, e.g. `stepBackup(masterDownTimer, advertTimer *time.Timer) (returned
+bool)`, that the `run()` loop calls, AND that the test calls directly. The test
+then: `newInstance(...)` → `setState(StateBackup)` → seed `lastMaster*` →
+`triggerPreemptNow()` → call `stepBackup(...)` once → assert `getState()`. The
+fail-soft chain inside `becomeMaster()` is verified: `addVIPs()` Warn+returns on
+`netlink.LinkByName` failure (`instance.go:1006-1011`), `sendPacket` returns nil
+on `rawConn==nil` (`instance.go:886`), `sendGARP` is fail-soft (and the test
+sets `suppressGARP`). So `stepBackup` taking the becomeMaster branch does not
+panic — only the receiver-spawn in `run()` does, which the seam avoids. (If the
+implementer prefers not to extract a seam, the alternative is to give the test a
+non-nil `conn`/`afPacketFD` stub so the receiver does not nil-panic — but the
+`stepBackup` seam is cleaner and is the recommended path.)
 
 **Unit (`pkg/vrrp/vrrp_test.go`), new tests:**
 
-1. `TestPreemptNow_LowerPriorityStaysBackup` (**run-loop wiring guard**):
-   priority 100, preempt=true, `lastMasterPriority=200`/`lastMasterSeen=now`,
-   drive the `preemptNowCh` case → assert state stays `StateBackup`. **MUST FAIL
-   on today's `if vi.getPreempt() || force`** (which would becomeMaster) — true
+1. `TestPreemptNow_LowerPriorityStaysBackup` (**wiring guard, via `stepBackup`
+   seam**): priority 100, preempt=true, `lastMasterPriority=200`/
+   `lastMasterSeen=now`, `suppressGARP=true`, trigger preempt, call
+   `stepBackup(...)` once → assert state stays `StateBackup`. **MUST FAIL on
+   today's `if vi.getPreempt() || force`** (which would becomeMaster) — true
    regression guard.
 2. `TestPreemptNow_HigherPriorityBecomesMaster`: priority 200, observed master
-   100 → state → `StateMaster` (drive run loop). NOTE: `becomeMaster()` spawns
-   `go vi.sendGARP()` unless `suppressGARP` is set — the test should
+   100 → call `stepBackup(...)` → state → `StateMaster`. NOTE: `becomeMaster()`
+   spawns `go vi.sendGARP()` unless `suppressGARP` is set — the test should
    `vi.suppressGARP.Store(true)` (or tolerate the fail-soft GARP goroutine,
    which no-ops on a fake interface) to avoid a stray goroutine.
 3. `TestShouldPreempt_NoObservedMaster`: `lastMasterSeen` zero → true (helper,
@@ -508,8 +542,9 @@ assert `getState()`.
    `lastMaster*` updated; feed a priority-0 advert → assert `lastMaster*`
    **unchanged** (resignation not recorded).
 8. `TestPreemptNow_DeniedGateLeavesMasterDownTimerArmed` (invariant a): denied
-   gate → assert the masterDown election path still promotes (timer not
-   stopped). Drive the run loop with a short masterDown timer.
+   gate (via `stepBackup`) → assert the masterDown timer was NOT stopped (e.g.
+   pass a short masterDown timer and verify a subsequent `stepBackup` on its
+   expiry promotes to MASTER). Uses the seam, not `run()`.
 9. (-race) run the suite with `-race` to confirm the snapshot lock discipline
    has no data race between the run loop and external `Status()` readers.
 
@@ -627,10 +662,30 @@ All four r1 → **PLAN-NEEDS-WORK, reachability CONFIRMED (PLAN-KILL refuted by
 all four).** r2 closes every required change (see r1→r2 changelog at top).
 
 **r2:**
-- Claude SMR r2: _pending_
-- Hostile reviewer A r2: _pending_
-- Hostile reviewer B r2: _pending_
-- AGY r2: _pending_
+- Claude SMR r2: PLAN-READY (all four r1 changes correctly closed; load-bearing
+  claims re-verified; two non-blocking nits folded into r2).
+- Hostile reviewer B r2: PLAN-READY (all four r1 points closed + verified;
+  harm real even multi-VLAN, self-healing with no durable rg_active damage; vrrp
+  is the correct fix layer; strict `>` correct for all cases).
+- AGY r2: PLAN-NEEDS-WORK — independently found the SAME nil-`conn`
+  receiver-panic test blocker as A2 (strong corroboration); RFC compliance +
+  lock discipline + invariants verified; two refinements (use RLock in the gate
+  helper; optionally fold the relock) folded into r3 §5.
+- Hostile reviewer A r2 (A2): PLAN-NEEDS-WORK — three of four r1 points fully
+  closed, but found ONE real NEW blocker: §7's "run `run()` briefly" test path
+  panics (nil `conn` in the unconditionally-spawned receiver). Plus minor
+  (snapshot `AdvertiseInterval`) + cosmetic (line cites). → r3.
 
-**Current status: PLAN-READY candidate (r2), pending re-review convergence.**
+**r3 (closes A2's blocker):** wiring tests bound to an extracted `stepBackup()`
+seam (no `run()` in unit tests → no receiver nil-panic); `AdvertiseInterval`
+added to the §5 snapshot; line cites corrected (372, 727). r3 re-review pending
+to confirm convergence.
+
+- Claude SMR r3: _pending_
+- Hostile reviewer A r3: _pending_
+- Hostile reviewer B r3: _pending (B2 already PLAN-READY at r2; r3 changes are a
+  strict superset addressing A2's blocker, no regression to B2's findings)_
+- AGY r3: _pending_
+
+**Current status: PLAN-READY candidate (r3), pending r3 re-review convergence.**
 **Reachability: CONFIRMED REACHABLE (not PLAN-KILL).**
