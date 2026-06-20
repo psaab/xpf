@@ -10,6 +10,8 @@
 | r2 | Codex | codex-rescue agentId a7d5bfa852570bebe | PLAN-NEEDS-REVISION (2 BLOCKER resolved; doc residuals + 1 new MAJOR) |
 | r3 | Claude SMR | claude-smr-plan-r3.md | PLAN-READY |
 | r3 | AGY | (carried — r2 PLAN-READY; r3 deltas are doc-only, no AGY concern) | PLAN-READY (carried) |
-| r3 | Codex | adversarial-review-mqmrtr-final | (pending — final convergence check) |
+| r3 | Codex | codex-rescue agentId ae40cd8ec0562dc92 | PLAN-READY (all 5 residuals folded, verified vs source) |
+
+## Convergence: 3-way PLAN-READY at r3 (Codex + AGY + Claude SMR).
 
 Copilot joins as the 4th reviewer at /engineer time on the implementation PR.

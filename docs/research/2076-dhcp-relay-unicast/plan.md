@@ -6,8 +6,9 @@
   residuals + one new MAJOR (multi-address giaddr selection). r3 folds those: the
   mechanism is unchanged, these are spec-clarity + citation fixes.)
 - **Branch:** `research/2076-dhcp-relay-unicast`
-- **Status:** revised — at r2 review: AGY PLAN-READY, SMR PLAN-READY, Codex
-  PLAN-NEEDS-REVISION (residuals folded here for r3 convergence)
+- **Status:** **PLAN-READY — 3-way converged at r3** (Codex PLAN-READY,
+  AGY PLAN-READY, Claude SMR PLAN-READY). Awaiting manual approval via
+  `/engineer 2076`.
 
 ## Changelog r2 → r3 (Codex r2 residuals)
 - **[Codex r2 #10, MAJOR — multi-address giaddr selection]** The relay's giaddr
