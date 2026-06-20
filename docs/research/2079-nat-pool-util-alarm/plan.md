@@ -2,16 +2,33 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r4 (folds Codex r3 #5/#6/#7: sample-vs-eligibility, symmetric
-  clear-syslog, stale-text)
-- **Status:** PLAN-READY pending r4 re-confirm — Claude SMR r3 + AGY r3 PLAN-READY
-  (Codex confirmed all r3 folds); Codex r3 raised 3 second-order findings
-  (transient-snapshot clear, silent-withdraw vs syslog contract, stale §9/§10
-  text) now folded into r4 → r4 re-review dispatched.
+- **Revision:** r5 (folds Codex r4 #4/#5/#7: config-derived eligibility for the
+  absent-snapshot case, clear-all lock discipline, stale deterministic wording)
+- **Status:** PLAN-READY pending r5 re-confirm — Claude SMR r4 + AGY r4 PLAN-READY
+  (Codex confirmed all r4 folds #5/#6/#7); Codex r4 raised one more MAJOR (#4:
+  absent-snapshot prunes a configured pool's alarm) + a MINOR (lock discipline) +
+  a NIT, all folded into r5 → r5 re-review dispatched.
 - **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
 - **Recommendation:** Path B — alarm registry rendered in `show security alarms`
   (BOTH render sites) + transition-gated structured syslog, driven by a slow
   (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
+
+### r5 changelog (folds Codex r4 PLAN-REVISE; Codex confirmed all r4 folds first)
+- **#4 absent-snapshot clear (MAJOR):** r4 still built `eligible` from snapshot
+  pools, so a configured non-deterministic pool with an active alarm but no
+  `SourceNATPools` entry this tick was pruned + cleared — contradicting "only
+  config-removal/rename/det-convert clears". r5 makes eligibility CONFIG-derived
+  (iterate `cfg...SourcePools`, not the snapshot), with three explicit states:
+  (a) config-removed/det-converted → CLEAR; (b) eligible-but-absent → HOLD;
+  (c) eligible-with-bad-sample → HOLD.
+- **#5 clear-all/prune lock discipline (MINOR):** snapshot the active-alarm key
+  set under the mutex, then emit per-key clears WITHOUT holding the mutex across
+  the (blocking) syslog write — avoids self-deadlock and avoids holding the
+  render mutex during I/O.
+- **#7 stale deterministic wording (NIT):** §9 now says deterministic pools are
+  SKIPPED in r1 and persistent-NAT uses raw UsedPorts.
+- Codex r4 also explicitly CONFIRMED no double-emit in the prune (a pool cleared
+  in the per-pool loop is removed from `activeAlarms` before the prune ranges it).
 
 ### r4 changelog (folds Codex r3 PLAN-REVISE; Codex confirmed all r3 folds first)
 - **#5 transient-snapshot clear:** separated SEMANTIC eligibility (in-config AND
@@ -276,42 +293,52 @@ if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
     clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6): visible clear, not silent
 status := dp.LastStatus()                         # cached, no socket request (r2)
 
+# r5 (Codex r4 #4): eligibility is CONFIG-DERIVED — iterate the CONFIG pools, not
+# the snapshot. A configured non-deterministic pool is eligible whether or not it
+# appears in THIS tick's snapshot. This separates three distinct states:
+#   (a) semantically ineligible  → config-removed/renamed/det-converted → prune CLEARS
+#   (b) eligible but absent       → configured, but no SourceNATPools entry this tick → HOLD
+#   (c) eligible with bad sample  → present but AddressCount==0/bad ports/cap0     → HOLD
+# Only (a) clears; (b) and (c) hold the current alarm state (no raise, no clear).
+
 # r2: DEDUPLICATE by pool name — rules sharing a pool report the SAME UsedPorts
 # (shared Arc<PortAllocatorShared>), so SUMMING would double-count. Take one.
-# r3: only retain ELIGIBLE pools (in config, non-deterministic) in `eligible` so
-# the prune step below can clear alarms for now-ineligible pools (Codex NEW-2).
-byPool   := {}                                    # pool_name -> SourceNATPoolStatus (raw snapshot)
-eligible := {}                                    # pool_name set: in cfg AND not deterministic
+byPool := {}                                      # pool_name -> SourceNATPoolStatus
 for s in status.SourceNATPools:
     byPool[s.PoolName] = s                        # any entry; values identical per pool
 
-for poolName, s in byPool:
-    p, inCfg := cfg.Security.NAT.SourcePools[poolName]
-    # r4 (Codex r3 #5): SEMANTIC eligibility — decided independently of whether
-    # THIS sample can compute utilization. Only config-removal / rename /
-    # convert-to-deterministic make a pool ineligible (→ prune clears its alarm).
-    if !inCfg: continue                           # removed/renamed → not eligible → prune clears (comma-ok, no nil-deref)
-    if p.Deterministic != nil: continue           # converted to deterministic → not eligible → prune clears
-    eligible[poolName] = true                     # r4: eligible regardless of sample validity (HOLD, don't prune, on a bad sample)
+eligible := {}                                    # pool_name set: config-derived (in cfg AND not deterministic)
+for poolName, p in cfg.Security.NAT.SourcePools:  # r5: iterate CONFIG, not snapshot
+    if p.Deterministic != nil: continue           # deterministic → ineligible (skipped in r1) → (a) prune clears
+    eligible[poolName] = true                      # eligible regardless of snapshot presence (config is the SoT)
 
-    # r4: SAMPLE validity — a transient unreadable sample HOLDS current alarm
-    # state (no raise, no clear) rather than clearing an already-raised alarm.
-    if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow): continue  # uncomputable this tick → hold
+    s, present := byPool[poolName]
+    if !present: continue                          # (b) eligible but absent this tick → HOLD (no raise/clear)
+    if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow): continue  # (c) bad sample → HOLD
     capacity := uint64(s.AddressCount) * (uint64(s.PortHigh) - uint64(s.PortLow) + 1)  # cast operands FIRST (FOLD-5)
-    if capacity == 0: continue                    # uncomputable → hold (NOT a clear)
+    if capacity == 0: continue                     # (c) uncomputable → HOLD (NOT a clear)
     pct := s.UsedPorts * 100 / capacity
     raised := activeAlarms[poolName]
     if !raised && pct >= alarmCfg.RaiseThreshold: raise(poolName, pct)    # raise on >= raise
     if  raised && pct <  alarmCfg.ClearThreshold: clear(poolName, pct)    # clear on STRICT < clear (NEW-1)
 
-# r3 (AGY M3 + Codex NEW-2): prune alarms for any pool no longer ELIGIBLE —
-# covers removed-from-config, renamed, AND changed-to-deterministic.
-# r4 (Codex r3 #6): this is a REAL clear transition for an externally-visible
-# alarm, so emit the clear path (syslog clear) — NOT a silent drop — so a syslog
-# consumer that saw the raise also sees the matching clear.
-for poolName in activeAlarms:
+# r5: prune alarms for any pool no longer ELIGIBLE. Because `eligible` is now
+# CONFIG-derived (not snapshot-derived), "not in eligible" means exactly
+# config-removed/renamed/converted-to-deterministic — case (a) — NOT a merely
+# absent snapshot (case (b), which held above). r4 (Codex r3 #6): emit the clear
+# path (syslog clear), NOT a silent drop, so a consumer that saw the raise also
+# sees the matching clear.
+for poolName in snapshot(keys of activeAlarms):   # r5 (Codex r4 #5): snapshot keys under the mutex first
     if poolName not in eligible: clear(poolName, reason="pool no longer eligible")
 ```
+
+**Concurrency (r5 — Codex r4 #5):** the active-alarm map is guarded by a mutex
+shared with the two `show security alarms` render sites. The clear-all and prune
+paths MUST snapshot the key set under the mutex, then invoke the normal
+`raise`/`clear` path per key WITHOUT holding the alarm mutex across the syslog
+emission (syslog I/O can block). `raise`/`clear` take the mutex only for the
+in-memory set mutation; the syslog write happens outside it. This avoids
+self-deadlock and avoids holding the render mutex during blocking I/O.
 
 `raise`/`clear` mutate the in-memory active-alarm set (guarded by a mutex; read
 by BOTH `show security alarms` render sites — see §6.3) and emit one structured
@@ -451,6 +478,11 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
   — it is NOT cleared and NOT pruned; it re-evaluates normally on the next good
   sample. Mutation: if eligibility were computed from the sample (the r3 bug),
   this test fails.
+- **Unit (r5, Codex r4 #4):** a configured non-deterministic pool with an active
+  alarm but NO `SourceNATPools` entry this tick (transiently absent) HOLDS — not
+  cleared/pruned — but a pool REMOVED from config (or converted to deterministic)
+  IS cleared. Two distinct cases, two assertions. Mutation: if eligibility were
+  snapshot-derived (the r4 bug), the absent-but-configured case fails.
 - **Unit (r4, Codex r3 #6):** every withdrawal of a raised alarm emits a clear —
   assert a clear is emitted (recorder seam) when the pool drops below clear, is
   removed from config, is converted to deterministic (prune path), and when the
@@ -488,7 +520,9 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
 | Silent withdrawal leaves syslog consumer with raise but no clear | All withdrawals (drop-below / pool-removed / det-change / disabled / nil-cfg) emit a clear (r4 — Codex r3 #6) |
 | Using the dead eBPF `ReadNATPortCounter` by mistake | Plan mandates allocator snapshot; code review must confirm |
 | Log spam | Emit only on transition, never per tick (enforced by design + test) |
-| Deterministic/persistent pool utilization semantics off | r1 uses raw UsedPorts; note follow-up; document the limitation |
+| Deterministic pools mis-measured by UsedPorts | Deterministic pools SKIPPED in r1 (block-based util is a follow-up); persistent-NAT pools use raw UsedPorts in r1 (r5 — Codex r4 #7) |
+| Configured pool transiently absent from snapshot clears its alarm | Eligibility is CONFIG-derived; absent snapshot HOLDS, only config-removal/det-convert clears (r5 — Codex r4 #4) |
+| Clear-all/prune self-deadlock or blocks render mutex on syslog | Snapshot keys under mutex; emit syslog outside the lock (r5 — Codex r4 #5) |
 
 ---
 
