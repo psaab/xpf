@@ -1,10 +1,57 @@
 # Plan: DHCP relay cannot unicast OFFER/ACK to broadcast-flag=0 clients (#2076)
 
 - **Issue:** #2076 (audit, severity MEDIUM)
-- **Revision:** r1 (initial draft)
+- **Revision:** r2 (folds r1 review: Codex 2 BLOCKER/6 MAJOR/1 MINOR, AGY
+  1 BLOCKER/5 MAJOR/1 MINOR, Claude SMR 2 MAJOR/4 MINOR — all three
+  PLAN-NEEDS-REVISION, none PLAN-KILL; mechanism choice option (d) endorsed by
+  all three)
 - **Branch:** `research/2076-dhcp-relay-unicast`
-- **Status:** DRAFT — awaiting 3-way hostile plan review (Codex + AGY + Claude SMR)
-- **Scope:** `pkg/dhcprelay` only (DHCPv4 relay). No dataplane, no HA, no eBPF.
+- **Status:** revised — awaiting 3-way re-review (Codex + AGY + Claude SMR)
+- **Scope:** `pkg/dhcprelay` (DHCPv4 relay) + 4 small `pkg/config` touch points.
+  No dataplane, no eBPF, no proto. **Touches HA-relevant behavior** (see §7.6 —
+  L2 delivery changes the VRRP-backup duplicate-relay characteristics, so a
+  failover-aware test/gate is now in scope).
+
+## Changelog r1 → r2 (review folds)
+- **[BLOCKER, Codex#1 / AGY#1]** L2 fd is NOT closed in the cancel watcher. It is
+  TX-only (never blocks a read), so it is closed with an **idempotent
+  `l2Sender.Close()` (`sync.Once`)** called from a single `defer` that runs
+  **after `wg.Wait()`** returns (all writers joined). Mirrors lldp.go
+  `closeOnce`. See §7.3.
+- **[BLOCKER, Codex#2]** Flat-set `overrides` would be swallowed into
+  `Interfaces` (compiler_services.go:1113-1114 stops only at `interface` /
+  `active-server-group`). Fix: add `overrides` to the property-boundary set +
+  parse both inline-Keys and Children shapes. See §7.4.
+- **[MAJOR, Codex#4 / AGY#5 / SMR]** Added the **ciaddr** destination row:
+  `flag0 && yiaddr==0 && ciaddr!=0` → unicast to **ciaddr over the normal UDP
+  socket** (client already has the IP; answers ARP). See §7.1.
+- **[MAJOR, Codex#3]** htype guard restored to the detailed design: require
+  `pkt.HWType == iana.HWTypeEthernet` **and** `len(chaddr)==6`. See §7.2.
+- **[MAJOR, Codex#5 / AGY#2 / SMR-F1]** Malformed-but-sent frames `Sendto`-succeed
+  and are silently dropped → fallback does NOT fire. Risk claim narrowed;
+  exhaustive per-byte frame tests + a **live flag0-lease wire-capture gate** are
+  mandatory (promoted from "manual" to a PR gate). UDP **checksum=0** chosen
+  (legal IPv4, drops a bug class). See §7.2, §8.
+- **[MAJOR, Codex#6 / AGY#4]** MTU: raw L2 can't fragment. If
+  `14+20+8+len(payload) > iface.MTU` (L3 `20+8+payload > MTU`), deliberately use
+  the UDP/broadcast fallback so the kernel fragments. See §7.2.
+- **[MAJOR, Codex#7 / AGY#3 / SMR-F2]** Cached ifindex/MAC go stale on link flap
+  / dynamic recreate / VRRP `programRethMAC`. Resolve interface attrs (index +
+  MAC) **per send** (garp.go:27-35 precedent) — or reopen on interface-related
+  Sendto errors. Source IP = the **saved interface giaddr** (the
+  `pkt.GatewayIPAddr` field is zeroed at relay.go:478 before forwarding —
+  must NOT read it). VLAN sub-interface egress uses the same netdev index the
+  listener is bound to. See §7.2, §7.3.
+- **[MAJOR, Codex#8]** HA duplicate delivery is NOT unchanged: today a backup's
+  duplicate reply is lost on ARP failure; after the fix BOTH nodes deliver L2
+  unicasts. Added §7.6 analysis + a `make test-failover` gate.
+- **[MINOR, Codex#9]** Removed the factually-wrong `pkg/ra` AF_PACKET precedent
+  (pkg/ra uses `mdlayher/ndp`, not AF_PACKET). LLDP/GARP/VRRP remain.
+- **[MINOR, AGY#7]** Fixed schema citation: dhcp-relay is at
+  schema_routing.go:**373-382**, not 282-285.
+- **[MINOR, SMR-F3]** Mandate the garp.go-style dependency-free hand-roll for
+  frame construction; `gopacket` only in tests (verify it's vendored, else
+  hand-decode).
 
 ---
 
@@ -99,11 +146,17 @@ this is the determining fact for option viability.
 - **AF_PACKET (CAP_NET_RAW) is already used pervasively** in-repo:
   - `pkg/vrrp/instance.go` — `AF_PACKET`/`SOCK_RAW` VRRP RX/TX.
   - `pkg/lldp/lldp.go:214-245` — `unix.Socket(AF_PACKET, SOCK_RAW, htons(...))`,
-    `Bind`/`Sendto` with `SockaddrLinklayer{Protocol, Ifindex}`.
-  - `pkg/cluster/garp.go` — builds full L2 frames + ICMPv6 checksum, sends via
-    AF_PACKET (GARP / unsolicited NA).
-  - `pkg/ra/` — RA sender via raw socket.
-- `mdlayher/packet v1.1.2` is already a (transitive) dependency in `go.mod`.
+    `Bind`/`Sendto` with `SockaddrLinklayer{Protocol, Ifindex}`; fail-soft open
+    (lldp.go:233-238: setup failure logs + skips, not fatal) and idempotent
+    `closeOnce` (lldp.go:166-184) are the patterns to copy.
+  - `pkg/cluster/garp.go` — builds full L2 frames + checksum, **resolves the
+    interface MAC/index at send time** (garp.go:27-35), sends via AF_PACKET
+    (GARP / unsolicited NA).
+  - (`pkg/ra/` does NOT use AF_PACKET — it uses `mdlayher/ndp`; removed from this
+    list per Codex#9. LLDP/GARP/VRRP still establish the precedent.)
+- `mdlayher/packet v1.1.2` is already a (transitive) dependency in `go.mod`, but
+  frame **construction** uses the garp.go-style hand-roll (dependency-free,
+  in-repo norm). `gopacket` is not a dep; if used at all it is test-only.
 
 **Conclusion:** opening an AF_PACKET socket and crafting an L2 frame is an
 **established, root-available pattern** in this daemon. There is no new privilege
@@ -240,110 +293,183 @@ is small and the README/parity story is cleaner as a unit).
 ## 7. Detailed design (Phase 1 + Phase 2)
 
 ### 7.1 Reply destination decision (relay.go `handleServerResponses`)
-Replace the dst-selection block (relay.go:480-496) with:
+Replace the dst-selection block (relay.go:480-496) with the **full** matrix
+below. Note `pkt.GatewayIPAddr` was just zeroed at relay.go:478 — the L2 source
+IP MUST come from the **saved interface giaddr** computed at runRelay:271, never
+from the now-zeroed packet field (SMR-F4).
 
 ```
-flag1 (broadcast set) OR yiaddr unset/zero  -> broadcast (existing path)
-flag0 (broadcast clear) AND yiaddr is real  -> raw-L2 unicast to chaddr+yiaddr
-    on failure (no AF_PACKET fd / open error / chaddr unusable / Sendto error)
-        -> fall back to broadcast + log-once
-group has overrides.always-broadcast        -> broadcast (skip L2 entirely)
+overrides.always-broadcast set              -> broadcast (skip L2 entirely)
+flag1 (broadcast set)                       -> broadcast (existing path)
+flag0 AND yiaddr is real                    -> raw-L2 unicast to chaddr + yiaddr
+                                               (src IP = saved interface giaddr)
+flag0 AND yiaddr==0 AND ciaddr!=0           -> UNICAST to ciaddr via the normal
+                                               UDP socket (client already has the
+                                               IP and answers ARP — DHCPINFORM /
+                                               REBINDING ACK) [Codex#4/AGY#5]
+flag0 AND yiaddr==0 AND ciaddr==0           -> broadcast (nothing routable)
+L2 path fails (see §7.2 fail conditions)    -> broadcast fallback + log-once +
+                                               increment l2-fallback counter
 ```
+
+Decision precedence: `overrides.always-broadcast` is checked first (operator
+override wins). `ciaddr` is `pkt.ClientIPAddr` (dhcpv4 lib field, confirmed at
+dhcpv4.go:66). This matrix is the unit-test oracle in §8.1.
 
 ### 7.2 Raw-L2 sender (new file, e.g. `pkg/dhcprelay/l2send_linux.go`)
-- A small `l2Sender` holding the AF_PACKET TX fd + interface Index + MAC,
-  opened once per interface in `runRelay` (alongside the two UDP conns), closed
-  by the same close-on-cancel watcher (extend the watcher to close the L2 fd
-  too — keep the wg.Wait() liveness contract from #1915 intact).
-- `func (s *l2Sender) sendReply(dstMAC net.HardwareAddr, srcIP, dstIP net.IP, payload []byte) error`
-  builds Ethernet(0x0800)+IPv4(proto17, hdr csum)+UDP(67→68, csum)+payload and
-  `unix.Sendto` on `SockaddrLinklayer{Ifindex}`. Mirror `pkg/cluster/garp.go`'s
-  checksum helper style (or reuse `mdlayher/ethernet`+`gopacket`-free hand-roll;
-  the garp.go pattern is hand-rolled and dependency-free — prefer that for
-  consistency).
-- **Guards:** only attempt L2 when `len(chaddr)==6` (Ethernet); `srcIP`
-  (giaddr) and `dstIP` (yiaddr) are valid IPv4; interface MAC resolvable.
-  Otherwise return an error → caller broadcasts.
-- **CAP_NET_RAW absence:** `unix.Socket` returns `EPERM` → `l2Sender` open
-  fails in `runRelay`; record `l2Sender == nil`; every flag0 reply then takes
-  the broadcast fallback (logged once at WARN). Relay still functions.
+- A small `l2Sender` holding the AF_PACKET TX fd + the interface **name** (for
+  per-send attribute re-resolution). `func newL2Sender(ifaceName string)
+  (*l2Sender, error)` opens `unix.Socket(AF_PACKET, SOCK_RAW, ...)` and binds to
+  the interface (lldp.go:214-245 template). Open is **fail-soft** — `EPERM`
+  (no CAP_NET_RAW) or any error → return err; the caller records
+  `l2Sender == nil` and every flag0 reply takes the broadcast fallback.
+- `func (s *l2Sender) sendReply(dstMAC, srcMAC net.HardwareAddr, srcIP, dstIP net.IP, payload []byte) error`
+  hand-rolls Ethernet(0x0800)+IPv4(proto17, **header checksum computed**)+
+  UDP(67→68, **checksum=0**)+payload and `unix.Sendto` on
+  `SockaddrLinklayer{Ifindex}`. **UDP csum=0 is legal for IPv4 (RFC 768)** and
+  removes a whole hand-rolled-pseudo-header bug class [Codex#5/AGY#2/SMR-F5/Q2].
+  Frame construction follows the dependency-free garp.go hand-roll; `gopacket`
+  is test-only if used at all [SMR-F3].
+- **Per-send interface re-resolution [Codex#7/AGY#3/SMR-F2]:** resolve the
+  current `net.InterfaceByName(ifaceName)` → Index + HardwareAddr at send time
+  (garp.go:27-35 precedent), so a link flap / dynamic recreate / VRRP
+  `programRethMAC` MAC change does not leave a stale ifindex/source-MAC. The
+  same netdev index the listener is `SO_BINDTODEVICE`-bound to is used (covers
+  VLAN sub-interfaces; the kernel applies the sub-interface's VLAN tag on an
+  AF_PACKET send to the `.N` netdev — confirm by capture, VRRP precedent
+  comment).
+- **Guards (return error → caller broadcasts):**
+  - `pkt.HWType == iana.HWTypeEthernet` **and** `len(chaddr)==6` [Codex#3].
+  - `srcIP` (saved giaddr) and `dstIP` (yiaddr) are valid IPv4.
+  - interface resolvable + MAC present.
+  - **MTU [Codex#6/AGY#4]:** if `20 + 8 + len(payload) > iface.MTU` (L3 size > MTU
+    — the raw path cannot fragment), return error so the caller broadcasts /
+    UDP-falls-back and the kernel fragments. (DHCP replies are normally well
+    under 1500, but long classless-static-route / vendor option sets can exceed
+    it.)
+- **Malformed-but-sent risk [Codex#5/AGY#2/SMR-F1]:** `Sendto` only errors on a
+  syscall failure; a frame with a bad IPv4 checksum / wrong bytes
+  `Sendto`-succeeds and is silently dropped by the client, so the fallback does
+  NOT fire. The risk claim in §9 is narrowed accordingly, and §8 mandates
+  exhaustive per-byte construction tests + a **live flag0-lease wire-capture
+  gate**.
 
 ### 7.3 Lifecycle integration (#1915 invariants are load-bearing)
 - The L2 fd is opened **after** both UDP conns succeed and **before** the cancel
-  watcher starts; the watcher closes all three fds; the L2 fd open is allowed to
-  **fail soft** (nil sender, not a relay-fatal error) so a hardened/no-CAP_NET_RAW
-  deployment still relays via broadcast.
-- No change to the WaitGroup join structure — the L2 fd is not a goroutine, just
-  an extra `Close()` in the existing watcher and the existing `defer`.
+  watcher starts; open is **fail-soft** (nil sender, not relay-fatal).
+- **The L2 fd is NOT closed in the cancel watcher [Codex#1/AGY#1 BLOCKER].** It
+  is TX-only and never blocks a read, so it does not participate in the
+  unblock-on-cancel contract. It is closed by a single **idempotent
+  `l2Sender.Close()` (`sync.Once`, lldp.go:166-184 `closeOnce` precedent)**
+  invoked from a `defer` that runs **after `wg.Wait()`** returns — i.e. after
+  both the main loop and the server-response goroutine (the only `sendReply`
+  callers) have joined. This eliminates the fd-reuse use-after-close race AGY/
+  Codex flagged. The watcher continues to close ONLY the two UDP conns
+  (unchanged from #1915).
+- No change to the WaitGroup join structure — the L2 fd is not a goroutine.
 
 ### 7.4 Config plumbing (Phase 2)
 - `DHCPRelayGroup` gains `AlwaysBroadcast bool` (types_system.go:555-559).
-- `compileDHCPRelay` (compiler_services.go:943-992) parses
+- `compileDHCPRelay` (compiler_services.go:919-996) parses
   `overrides { always-broadcast; }` (block form) **and** the flat-set inline
-  spelling `group <g> overrides always-broadcast` (dual-AST per the existing
-  inline-keys handling at compiler_services.go:951-970). **Test both shapes via
-  `ParseSetCommand()` + `tree.SetPath()`** per CLAUDE.md (never `NewParser()`
-  for flat-set).
-- Schema (schema_routing.go:282-285): add under `group`:
+  spelling `group <g> overrides always-broadcast`. **[Codex#2 BLOCKER]** The
+  inline `interface` consumer at compiler_services.go:1113-1114 currently stops
+  only at `interface` / `active-server-group`; `overrides` MUST be added to that
+  boundary set or it (and `always-broadcast`) get swallowed into `Interfaces`.
+  Parse `overrides` from BOTH the inline `Keys` loop and the `Children` loop
+  (`prop.FindChild("always-broadcast")` and `prop.Keys`) [AGY#6]. **Test both
+  shapes via `ParseSetCommand()` + `tree.SetPath()`** per CLAUDE.md (never
+  `NewParser()` for flat-set) and add a `dual_ast_differential_test.go` case.
+- Schema (**schema_routing.go:373-382** [AGY#7]): add under `group`:
   `"overrides": {desc:"Relay overrides", children: {"always-broadcast": {desc:"Always broadcast replies"}}}`.
 - `Apply`/`interfaceRelay`/`runRelay`/`handleServerResponses` thread the per-group
   `AlwaysBroadcast` bool down to the dst decision (store on `interfaceRelay`).
 
 ### 7.5 Counters / observability
-- Add `repliesBroadcastFallback atomic.Uint64` (or a labeled counter) so the
-  fallback-because-L2-failed case is visible in `show ... dhcp-relay` and/or
-  Prometheus. Distinguish "broadcast because flag1" from "broadcast because L2
-  failed" so operators can detect a CAP_NET_RAW/driver problem.
+- Distinguish broadcast reasons so a CAP_NET_RAW/driver/MTU regression is
+  observable: `repliesBroadcastFlag1` (client asked), `repliesBroadcastForced`
+  (overrides), `repliesL2Unicast` (success), `repliesBroadcastL2Fallback`
+  (L2 failed — the one to alert on). Surface in `show ... dhcp-relay` /
+  Prometheus [Q4 resolved → labeled].
+
+### 7.6 HA / VRRP-backup duplicate delivery [Codex#8]
+Today, the README (lines 73-78) notes a relay on a VRRP **Backup** node also
+receives segment broadcasts and relays duplicate REQUESTs; the duplicate REPLY
+to a flag0 client is **harmlessly lost on ARP failure** (the bug this issue
+fixes). After this fix, a Backup node's L2 unicast to chaddr **actually
+delivers**, so a flag0 client may now receive duplicate OFFER/ACK from both
+nodes. DHCP clients dedupe on xid + chaddr, so this is tolerable, BUT it is a
+**behavior change**, not "unchanged." Decision for the plan:
+- **Acceptable interim (recommended):** rely on client xid dedupe, document the
+  change in the README, and **gate the implementation PR on `make
+  test-failover`** to prove no failover regression (the issue touches HA-adjacent
+  behavior — CLAUDE.md requires test-failover for cluster/VRRP-adjacent changes).
+- **Optional hardening (follow-up, not required for #2076):** suppress relay
+  forwarding on a VRRP-Backup node (gate `Apply`/forwarding on VRRP ownership).
+  This is the same deferred follow-up the README already names; this issue makes
+  it slightly more salient but does not require it.
 
 ---
 
 ## 8. Test plan
 
-Unit (no root, table-driven; `pkg/dhcprelay/relay_test.go` + a new
-`l2send_test.go`):
-1. **dst decision matrix:** flag1→broadcast; flag0+real-yiaddr→L2; flag0+zero
-   yiaddr→broadcast; `AlwaysBroadcast`→broadcast even with flag0+yiaddr.
-2. **L2 frame construction:** given chaddr/srcIP/dstIP/payload, assert the
-   serialized Ethernet/IPv4/UDP header bytes + checksums (parse back with
-   `gopacket` or hand-decode; assert IPv4 csum and UDP csum verify). chaddr
-   non-6-byte → error (caller broadcasts).
-3. **Fallback:** inject an `l2Sender` whose `sendReply` returns an error → assert
-   the reply is re-sent via the broadcast conn and the fallback counter
-   increments. `l2Sender == nil` (open failed) → broadcast path taken.
-4. **Lifecycle (#1915 regression):** the L2 fd is closed on cancel; `Stop()`
-   still joins deterministically; an L2-open failure does **not** make
-   `runRelay` return early (relay stays up on broadcast).
-5. **Config dual-AST:** `overrides always-broadcast` parses to
-   `AlwaysBroadcast=true` from **both** block form and flat-set
-   (`ParseSetCommand`+`SetPath`); absence → false.
-6. **Schema completion:** `set forwarding-options dhcp-relay group g overrides ?`
+### 8.1 Unit (no root, table-driven; `pkg/dhcprelay/relay_test.go` + new `l2send_test.go`)
+1. **dst decision matrix (the §7.1 oracle):** every row — overrides→broadcast;
+   flag1→broadcast; flag0+real-yiaddr→L2; flag0+yiaddr0+ciaddr!=0→UDP-unicast to
+   ciaddr; flag0+yiaddr0+ciaddr0→broadcast; L2-fail→broadcast fallback.
+2. **L2 frame construction (exhaustive per-byte) [Codex#5/AGY#2/SMR-F1]:** for
+   given chaddr/srcMAC/srcIP/dstIP/payload, assert EVERY byte of the
+   Ethernet/IPv4/UDP headers; assert the **IPv4 header checksum validates** and
+   UDP checksum field == 0. Decode-back with a parser or hand-decode.
+3. **Guards:** non-Ethernet htype → error; chaddr != 6 bytes → error;
+   `20+8+len(payload) > MTU` → error (caller broadcasts); invalid src/dst IP →
+   error. Each guard path increments the correct counter.
+4. **Fallback:** an `l2Sender` whose `sendReply` returns error → reply re-sent on
+   the broadcast conn + `repliesBroadcastL2Fallback` increments. `l2Sender == nil`
+   (open failed) → broadcast path taken, relay stays up.
+5. **Lifecycle (#1915 regression) [Codex#1/AGY#1]:** `l2Sender.Close()` is
+   idempotent (double-call no-op via `sync.Once`); it is invoked only AFTER
+   `wg.Wait()`; `Stop()` still joins deterministically; an L2-open failure does
+   NOT make `runRelay` return early.
+6. **Config dual-AST [Codex#2/AGY#6]:** `overrides always-broadcast` →
+   `AlwaysBroadcast=true` from BOTH block form and flat-set
+   (`ParseSetCommand`+`SetPath`); critically, `group g interface ge-0/0/0.0
+   overrides always-broadcast` must NOT put `overrides`/`always-broadcast` in
+   `Interfaces` (the swallow regression). Absence → false.
+7. **Schema completion:** `set forwarding-options dhcp-relay group g overrides ?`
    offers `always-broadcast`.
 
-Integration (manual / incus, documented, not gated):
-- A client configured to **clear** the broadcast flag (e.g.
-  `dhclient -B`-off / a crafted DISCOVER with flags=0) on a relayed segment
-  acquires a lease end-to-end. Capture with `tcpdump -e` on the client segment
-  and confirm the OFFER/ACK is a **unicast L2 frame to the client MAC**
-  (not a broadcast, not an ARP-stuck drop). This is the real-world proof the
-  audit's failure mode is closed.
-
-No `make test-failover` requirement (no cluster/VRRP/session-sync/failover code
-touched) — but note the README's existing "VRRP-Backup duplicate relay" caveat
-is unchanged by this work.
+### 8.2 Integration (live incus — PROMOTED TO A PR GATE [SMR-F1/AGY#2/Codex#5])
+- A client that **clears** the broadcast flag (crafted DISCOVER with flags=0, or
+  a client stack that does so) on a relayed segment acquires a lease end-to-end.
+  `tcpdump -e` on the client segment MUST show the OFFER/ACK as a **unicast L2
+  frame to the client MAC with a valid IPv4/UDP checksum** (not broadcast, not an
+  ARP-stuck drop). A `Sendto`-success-but-malformed frame would FAIL this gate
+  even though unit "fallback" tests pass — which is exactly why it is a gate, not
+  manual.
+- **`make test-failover` is a gate [Codex#8]:** prove the L2-delivery change does
+  not regress failover and characterize HA duplicate OFFER/ACK behavior.
 
 ## 9. Risk / blast radius
 - **Surface:** `pkg/dhcprelay` (relay.go dst block + new l2send file) + 4 small
   config touch points (types_system, compiler_services, schema_routing, README).
-  No dataplane, no HA, no eBPF, no proto.
-- **Worst case if L2 path is wrong:** a malformed frame is dropped by the client
-  — but the broadcast fallback + (for flag1) existing broadcast path are
-  unaffected, so a bug in the new path degrades to "no worse than today for
-  flag0, still-working for flag1." With the fallback wired, even a total L2
-  failure degrades to **broadcast (which always works)** — strictly better than
-  the current undeliverable unicast.
-- **Regression guard:** #1915 socket-lifecycle invariants (close-on-cancel
-  watcher, WaitGroup join, fail-soft L2 open) are explicitly preserved and
-  re-tested.
+  No dataplane, no eBPF, no proto. **HA-adjacent** (§7.6) — `make test-failover`
+  gated.
+- **Worst case — the narrowed claim [Codex#5/AGY#2/SMR-F1]:** a `Sendto`-FAILURE
+  degrades to broadcast (always works — strictly better than today). But a
+  **`Sendto`-SUCCESS-but-malformed** frame (bad IPv4 checksum, wrong bytes) is
+  silently dropped by the client and the fallback does NOT fire — that case is
+  "no worse than today for flag0" but is NOT auto-recovered. This is why §8
+  mandates exhaustive per-byte construction tests + the live wire-capture gate:
+  the only defense against a silently-malformed frame is test coverage, not the
+  runtime fallback.
+- **Default-on behavior change:** flag0 replies move from the UDP path to a new
+  L2 path by default. The `overrides always-broadcast` knob is the operator
+  escape hatch; the automatic broadcast fallback covers `Sendto`-failure,
+  no-CAP_NET_RAW, non-Ethernet htype, and over-MTU.
+- **Regression guard:** #1915 socket-lifecycle invariants are preserved — the L2
+  fd is explicitly kept OUT of the cancel watcher and closed idempotently after
+  `wg.Wait()` (§7.3), and re-tested.
 
 ## 10. Documentation updates
 - `pkg/dhcprelay/README.md`: document the reply-delivery model (flag1→broadcast,
@@ -353,16 +479,26 @@ is unchanged by this work.
 - `docs/config-schema.md` (if it enumerates leaves): add the `overrides
   always-broadcast` leaf.
 
-## 11. Open questions for reviewers
-- **Q1.** Ship Phase 1 + Phase 2 together, or Phase 1 alone (file Phase 2)?
-  (Recommendation: together — config piece is small.)
-- **Q2.** UDP checksum: compute it (correct, ISC does) or send UDP csum=0
-  (legal for IPv4, simpler)? Recommendation: compute it for correctness, but
-  csum=0 is an acceptable simplification if it reduces risk.
-- **Q3.** Should `always-broadcast` alone also `SetBroadcast()` on the wire so a
-  downstream sniffer sees a consistent flag, or just choose the broadcast dst?
-  (Junos forces broadcast delivery; the flag itself is cosmetic at the last hop.)
-- **Q4.** Counter granularity: a single `repliesBroadcastFallback` vs. a labeled
-  metric distinguishing flag1-broadcast / forced-always-broadcast / L2-fail
-  fallback. (Recommendation: at least distinguish L2-fail so a CAP_NET_RAW/driver
-  regression is observable.)
+## 11. Open questions — resolved in r2
+- **Q1 (ship phasing) — RESOLVED:** ship Phase 1 + Phase 2 together; the config
+  piece is small and the README/parity story is cleaner as a unit.
+- **Q2 (UDP checksum) — RESOLVED:** send UDP **checksum=0** (legal for IPv4 per
+  RFC 768), compute the IPv4 **header** checksum (mandatory). Eliminates the
+  hand-rolled pseudo-header checksum bug class that the malformed-frame risk
+  (§7.2) warns about.
+- **Q3 (SetBroadcast on the wire) — RESOLVED:** for the always-broadcast / fallback
+  path, just choose the broadcast **destination**; do not mutate `pkt.Flags`. The
+  flag is cosmetic at the last hop and mutating it would change the wire bytes
+  the server set. (No reviewer objected.)
+- **Q4 (counter granularity) — RESOLVED:** labeled counters per §7.5
+  (`repliesBroadcastFlag1`, `repliesBroadcastForced`, `repliesL2Unicast`,
+  `repliesBroadcastL2Fallback`) so an L2/CAP_NET_RAW/driver/MTU regression is
+  observable in operations.
+
+## 12. Remaining decision for the implementer (not a blocker)
+- **VLAN-tag-on-AF_PACKET-send:** the design assumes the kernel applies the
+  sub-interface's 802.1Q tag when `Sendto` targets the `.N` netdev index. This
+  is the documented Linux behavior and matches the VRRP precedent, but the live
+  wire-capture gate (§8.2) on a VLAN-tagged relay segment is the confirmation.
+  If a future relay segment is a raw trunk where the relay must add the tag
+  itself, that is an additive follow-up, not a change to this plan's mechanism.
