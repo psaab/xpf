@@ -1,5 +1,15 @@
 # Plan: Dynamic-address feed enforcement + refresh correctness (Batch A: #2049 + #2050)
 
+Revision: r2 (2026-06-19) — #2049 enforcement-join RE-TARGETED from the
+retired eBPF compiler (`pkg/dataplane/compiler.go`) to the runtime userspace
+snapshot path (`pkg/dataplane/userspace/policies.go` +
+`buildSnapshotWithSchedulerState`). A hostile re-review found the r1 join
+point (`compileAddressBook` / `resolveAddrList` / `CompileResult.AddrIDs`)
+is dead for forwarding: that compiler is the eBPF path retired in
+#1373/#1476 and its `AddrIDs` never reach the AF_XDP helper. The #2050
+refresh-correctness + fail-safe sections are unchanged (reviewed PLAN-READY
+in r1).
+
 Research branch: `research/review-015-triage`
 Base: origin/master `ff38a92e1`
 Source: `/tmp/codex-review-015.md` findings #1 (HIGH) and #2 (HIGH)
@@ -21,20 +31,48 @@ are parsed into `cfg.Security.DynamicAddress.{FeedServers,AddressBindings}`
 (`pkg/config/compiler_services.go:176-239`). The daemon starts a feed manager
 that fetches prefixes and registers an `onUpdate` callback
 (`pkg/daemon/daemon_run.go:884-893`). The callback recompiles the **same
-static active config**. The fetched prefixes live only in `feedState.prefixes`
-and are exposed by `Manager.GetPrefixes` — which has **no production caller**.
+static active config** via `d.applyConfig(activeCfg)`. The fetched prefixes
+live only in `feedState.prefixes` and are exposed by `Manager.GetPrefixes` —
+which has **no production caller** in the forwarding path.
 
-The dataplane compiler (`pkg/dataplane/compiler.go`):
-- `compileAddressBook` (431-521) only reads `cfg.Security.AddressBook`.
-- `resolveAddrList` (641-692) resolves names only via `result.AddrIDs` and
-  returns `fmt.Errorf("address %q not found")` (lines 661, 682) for any name
-  that is not in the AddressBook.
+The runtime forwarding path is the AF_XDP userspace helper. The Go control
+plane resolves address-books into a wire `ConfigSnapshot` that is published
+to the helper via `apply_snapshot`. Address resolution for the helper happens
+entirely in `pkg/dataplane/userspace/`:
+- `buildSnapshotWithSchedulerState` (`builder.go:17`) assembles the snapshot
+  and fills `AddressBooks` from `buildAddressBookTable(cfg)` (`builder.go:61-64`)
+  and `Policies` from `buildPolicySnapshotsWithSchedulerState`.
+- `buildAddressBookTable` (`policies.go:155`) builds the deduped
+  `[]AddressBookSnapshot` rows + a `nameToID map[string]uint32`, reading
+  **only `cfg.Security.AddressBook`** (it returns `nil, nil` when
+  `AddressBook == nil`).
+- `expandBookNameToCIDRs` (`policies.go:282`) resolves one name (recursively)
+  to v4/v6 CIDRs, again reading **only `cfg.Security.AddressBook`**.
+- `classifyPolicyAddresses` (`policies.go:110`) splits a policy's address
+  tokens into `SourceBookIDs`/`DestinationBookIDs` (via `nameToID`) vs
+  free-form `*Literals`; a token that is not in `nameToID` falls through to a
+  CIDR/`any` literal. A feed-backed `address-name` is in neither the book nor
+  a parseable CIDR, so it is silently emitted as a literal that matches
+  nothing.
+- `expandUserspacePolicyAddresses` (legacy back-compat field) likewise only
+  expands AddressBook names.
 
-Net effect: a policy/NAT rule that references a feed-backed `address-name`
-either fails compile ("address not found") or, if a static address of the same
-name shadows it, silently uses the static value. Refreshing the feed changes
-**nothing** in the dataplane. This is a stored, periodically-refreshed
-**security** surface that does not enforce.
+The **retired** eBPF compiler `pkg/dataplane/compiler.go`
+(`compileAddressBook` 431-521 / `resolveAddrList` 641-692 / `CompileResult.AddrIDs`)
+is reached only via `CompileUserspaceShim`→`CompileConfig` (`loader.go:161`)
+and its result is consumed solely for XDP attach / interface bookkeeping
+(`attachUserspaceShimXDP`, `syncInterfaceAttachments`, `recordApplyResult`).
+`AddrIDs` is **never** serialized into the snapshot and never reaches the
+helper. The eBPF dataplane is retired (#1373/#1476). Joining feed prefixes
+into `compileAddressBook`/`CompileResult.AddrIDs` (the r1 plan) would compile
+cleanly and change **nothing** in the runtime forwarding path — a no-op fix.
+
+Net effect today: a policy/NAT rule that references a feed-backed
+`address-name` is emitted to the helper as a literal that matches nothing
+(or, if a static address of the same name shadows it, silently uses the
+static value). Refreshing the feed changes **nothing** in the dataplane.
+This is a stored, periodically-refreshed **security** surface that does not
+enforce.
 
 This is NOT an explicitly-deferred feature: `docs/feature-gaps.md:134-138`
 markets it ("xpf has dynamic address feeds"); the original feature
@@ -62,23 +100,78 @@ join. There is no "not implemented" disclaimer in operator docs.
 
 - `pkg/feeds/feeds.go` — refresh loop, snapshot type, status fields. New
   package split optional (see Path options).
-- `pkg/daemon/daemon_run.go` — wire a resolver between feed snapshots and the
-  dataplane apply path. The `onUpdate` callback already calls `applyConfig`;
-  the resolver must be consulted inside the compile so a refresh actually
-  changes the compiled output.
-- `pkg/dataplane/compiler.go` — `compileAddressBook` gains a dynamic-address
-  overlay; `CompileResult.AddrIDs` gains feed-backed names. `resolveAddrList`
-  unchanged if dynamic names land in `AddrIDs` with real IDs.
-- `pkg/config/types_security.go` — possibly a snapshot-passing contract.
+- `pkg/dataplane/userspace/policies.go` — **PRIMARY join site.**
+  `buildAddressBookTable` gains a feed-prefix overlay: for each
+  `AddressBinding{Name, FeedNames}`, union the live feed snapshots into the
+  bucket for that name (creating a bucket if the name is not also a static
+  book entry) BEFORE ID assignment. The existing canonicalize/dedup/sort/hash
+  path then assigns it an ID and emits an `AddressBookSnapshot` row, and
+  `nameToID[name]` is populated so `classifyPolicyAddresses` routes the
+  policy token into `SourceBookIDs`/`DestinationBookIDs` instead of a
+  no-match literal. `expandBookNameToCIDRs` may also need to consult the
+  overlay if a feed-backed name is referenced from inside an AddressSet
+  (recursive membership). No new resolver package required — the overlay is a
+  `map[string]feedPrefixes` argument threaded into `buildAddressBookTable`.
+- `pkg/dataplane/userspace/builder.go` /
+  `pkg/dataplane/userspace/manager.go` — thread the feed-prefix overlay
+  through `buildSnapshotWithSchedulerState` (`builder.go:17`), which is called
+  from `Manager.Apply`-side compile at `manager.go:571`. The overlay is read
+  from a manager-held snapshot accessor (populated by the daemon from the feed
+  manager) under `m.mu`, mirroring how `routeOverlay`/`activeState` are
+  already threaded.
+- `pkg/daemon/daemon_run.go` — the `onUpdate` callback already calls
+  `d.applyConfig(activeCfg)`. The daemon must push the latest feed snapshots
+  into the dataplane manager (via a `SetFeedSnapshots`-style setter, mirroring
+  `SetRouteOverlay`) BEFORE/within `applyConfig`, so the overlay the compile
+  reads is the just-refreshed content. `applyConfig` is hash-gated, but the
+  snapshot content hash includes `AddressBooks` (see §2a), so a content change
+  republishes.
+- `pkg/config/types_security.go` — no struct change required for the join
+  (the overlay is a runtime value, not config). Only touched if the
+  OPTIONAL commit-check (P-A3) is included.
 - `pkg/config` commit-check — OPTIONAL: validate that an `address-name`
   referenced by a policy is either in the AddressBook or bound to a feed (so a
   typo still fails commit; today a feed-backed name is legal config).
 - Show surfaces (`server_show_security_text.go`, `api/show_text.go`) — add
   hash/last-error/stale fields (cosmetic, follows the new status type).
 
-The dataplane compile is on the commit + feed-refresh path, NOT the per-packet
-path. Address-book maps are already cleared+repopulated each compile
-(`ClearAddressBookV4/V6/Membership`), so an overlay is a natural extension.
+NOT touched: `pkg/dataplane/compiler.go` (retired eBPF compiler;
+`compileAddressBook`/`resolveAddrList`/`CompileResult.AddrIDs` are dead for
+forwarding — see §1). The r1 plan's compiler overlay is dropped entirely.
+
+The snapshot build is on the commit + feed-refresh path, NOT the per-packet
+path. `AddressBooks` is rebuilt from scratch on every snapshot
+(`buildAddressBookTable` allocates fresh tables each call), so an overlay is a
+natural extension — a stale feed set is never left behind.
+
+### 2a. The duplicate-publish content-hash gate (WHY the join must be here)
+
+`Manager.Apply` skips a redundant `apply_snapshot` when the new snapshot's
+content hash equals `m.lastSnapshotHash`
+(`snapshotContentHash`, `builder.go:82`; gate + setters at
+`manager.go:126`, `:691-692`, `:887-890`, `process.go:336`/`:365`). The hash
+is taken over a shallow copy with `Generation`, `FIBGeneration`,
+`GeneratedAt`, `Config` (nil'd), and `Neighbors` (filtered) excluded — but it
+**INCLUDES `AddressBooks`** (the `[]AddressBookSnapshot` rows are not zeroed).
+
+This is the load-bearing reason the join MUST land inside
+`buildAddressBookTable` / the snapshot build, NOT in `compiler.go`:
+
+- A feed `onUpdate` re-runs `applyConfig` against the **same `*config.Config`**
+  (the feed prefixes are NOT in the typed config). Everything else in the
+  snapshot is byte-identical to the previous publish.
+- If the feed overlay lands in `AddressBooks`, a content change (new/removed
+  prefix) shifts the `AddressBookSnapshot` rows → the content hash changes →
+  the gate lets the publish through → the helper enforces the new set.
+- If the feed overlay landed anywhere that does NOT feed the snapshot (e.g.
+  the retired `compiler.go`), the snapshot would be byte-identical, the hash
+  would match `lastSnapshotHash`, and the duplicate-publish gate would
+  **silently drop the refresh** — the worst case: it looks wired but every
+  refresh after the first is suppressed.
+
+A same-content refresh (identical prefixes) correctly produces an identical
+hash and is correctly skipped (no wasted round-trip). This is the desired
+behavior and aligns with #2050's hash-based change detection.
 
 ---
 
@@ -115,24 +208,43 @@ type feedStatus struct {
 5. Wire `HoldInterval`: if a feed has been failing longer than `HoldInterval`,
    optionally drop to empty (fail-closed) — see open question Q3.
 
-### #2049 (enforcement — the join)
+### #2049 (enforcement — the join, RUNTIME userspace path)
 
-A daemon-owned resolver joins `AddressBindings` to live snapshots and feeds an
-**overlay** into the dataplane compile:
+A daemon-owned snapshot accessor joins `AddressBindings` to live feed
+snapshots and threads a **feed-prefix overlay** into the userspace snapshot
+build — NOT the retired eBPF compiler.
 
 ```go
-// pkg/dataplane/compiler.go (or a new dynaddr overlay)
-// For each AddressBinding{Name, FeedNames}, union the snapshots of FeedNames
-// into a deterministic implicit address-set, assign it an AddrID, and write
-// membership for each CIDR. The address-name then resolves like any AddressBook
-// set in resolveAddrList.
+// pkg/dataplane/userspace/policies.go
+// buildAddressBookTable(cfg, feedOverlay) — feedOverlay is
+// map[address-name] -> {v4, v6 CIDRs} resolved from the live feed snapshots
+// of the AddressBinding's FeedNames.
+//
+// For each AddressBinding{Name, FeedNames} that has a live snapshot:
+//   - resolve FeedNames -> union of canonical CIDRs (the overlay value)
+//   - merge those CIDRs into the bucket for `Name` (create a bucket if the
+//     name is not also a static book entry)
+//   - the existing sort/dedup/canonicalize/hash/ID-assign path then emits an
+//     AddressBookSnapshot row and sets nameToID[Name] = id
+//
+// classifyPolicyAddresses(cfg, nameToID, tokens) then routes the policy's
+// feed-backed token into SourceBookIDs/DestinationBookIDs (it was previously
+// dropped to a no-match literal because nameToID had no entry).
 ```
 
-The compile already clears+rebuilds address maps each pass, so the overlay is
-recomputed every commit AND every feed `onUpdate` -> `applyConfig`. Determinism
-(sorted names, sorted prefixes) keeps IDs stable across restarts within a given
-feed content; IDs may shift when feed content changes, which is fine because
-the whole policy set recompiles atomically.
+Threading: the overlay is read from a manager-held value (set by the daemon
+from the feed manager, analogous to `routeOverlay`) and passed through
+`buildSnapshotWithSchedulerState` (`builder.go:17`) →
+`buildAddressBookTable` and `buildPolicySnapshotsWithSchedulerState`. Both
+already receive `cfg`; add the overlay as one more argument.
+
+`buildAddressBookTable` allocates fresh tables on every call, so the overlay
+is recomputed on every commit AND every feed `onUpdate` → `applyConfig`.
+Determinism (sorted names, content-hash bucketing, deterministic ID probe —
+unchanged) keeps IDs stable across restarts for a given feed content; IDs may
+shift when feed content changes, which is fine because the whole snapshot is
+published atomically (`apply_snapshot`) and the content-hash gate (§2a)
+forces the republish.
 
 ### Multiple Path Options
 
@@ -160,26 +272,39 @@ feed-backed address resolves to an **empty set** (fail-closed):
 
 **P-A3 (commit-time reference validation).** OPTIONAL: extend commit-check so a
 policy referencing an `address-name` that is neither an AddressBook entry nor a
-feed binding fails commit (today a feed-backed name passes commit and only
-fails at dataplane compile). RECOMMENDATION: include it — it converts a runtime
-"address not found" compile error into a commit-time error, matching Junos.
+feed binding fails commit (today such a name passes commit and is silently
+emitted to the helper as a no-match literal — it never matches and never
+errors). RECOMMENDATION: include it — it converts a silent no-match into a
+commit-time error, matching Junos.
 
 ---
 
 ## 4. Hidden invariants
 
-- Address IDs are assigned 1-based, deterministic by sorted name
-  (`compiler.go:450-519`). The dynamic overlay MUST assign IDs from the same
-  `result.nextAddrID` counter AFTER static addresses/sets to avoid collisions.
-- `compileAddressBook` clears `address_book_v4/v6` + membership at the top of
-  every compile. The overlay must run within the same compile pass (so a stale
-  feed set is never left behind).
+- Address IDs in the userspace snapshot are content-derived, not sequential:
+  `buildAddressBookTable` (`policies.go:223-252`) buckets names by canonical
+  CIDR bytes, assigns `id = hash64 & 0xFFFFFFFF` (0 reserved → 1) with a
+  deterministic linear probe on collision. The overlay must merge feed CIDRs
+  into a name's bucket BEFORE bucketing/hash, so a feed-backed name shares an
+  ID with a static book of identical content (the existing content-equality
+  invariant) and the ID is stable for a given content. Do NOT invent a
+  separate ID space — reuse the bucket pipeline.
+- `buildAddressBookTable` rebuilds the whole table from scratch each call (no
+  persistent map mutation), so the overlay runs within the same snapshot build
+  — a stale feed set is never left behind. The published snapshot fully
+  replaces the helper's address-book state (`apply_snapshot`).
+- The content-hash dedup gate (§2a) includes `AddressBooks`. The overlay MUST
+  land in those rows or the refresh is silently suppressed. This is the
+  invariant that the r1 (compiler.go) join violated.
 - The `onUpdate` callback runs on a feed-manager goroutine and calls
   `d.applyConfig` — that path must already be concurrency-safe with commit
-  (it is; commit serializes via applySem). Verify the resolver read of the
-  snapshot is under `Manager.mu` (it is via the accessor).
+  (it is; commit serializes via applySem). The manager-held feed-overlay
+  accessor read MUST be under `Manager.mu` (mirror `routeOverlaySnapshot()`),
+  and the daemon must set the overlay before/within the same `applyConfig`.
 - Canonicalization must not reorder semantics: a `/32` host and a `/24` that
-  contains it are distinct prefixes; dedup is exact-CIDR only.
+  contains it are distinct prefixes; dedup is exact-CIDR only. Feed prefixes
+  pass through the same `sortV4/V6CIDRs` + `dedupSortedStrings` +
+  `canonicalizeAddressBookContent` path as static book entries.
 - HoldInterval default is 7200s (`types_security.go:29`); 0 means default, not
   "never retain". Wiring it must respect that.
 
@@ -187,13 +312,14 @@ fails at dataplane compile). RECOMMENDATION: include it — it converts a runtim
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| Feed content change shifts AddrIDs mid-traffic | Med | Whole policy set recompiles atomically; dataplane swap is already atomic per compile |
+| Feed content change shifts book IDs mid-traffic | Med | Whole snapshot publishes atomically via apply_snapshot; helper swaps address-book state in one shot |
+| Refresh silently suppressed by the content-hash dedup gate | High | Join lands in `AddressBooks` (in-hash); test asserts the published snapshot row changes on a same-config feed update (§2a, §6) |
 | Startup fail-closed blocks legit traffic referenced by feed before first fetch | Low | Bounded to first-fetch window (seconds); ALLOW side is safe; document |
 | Empty feed (HTTP 200, no lines) replaces good set with empty | Med | Treat zero-prefix successful fetch as suspicious -> Q3 (retain-last-good vs accept-empty config knob) |
 | Canonicalization bug drops/mangles a prefix | Med | Round-trip parse + table tests; compare against raw lines in test |
 | New status fields break existing show/JSON consumers | Low | Additive fields only |
-| Overlay ID collision with static sets | Med | Single shared nextAddrID counter; test asserts disjoint IDs |
-| Per-refresh full recompile cost on large feeds | Low | Refresh interval is >= seconds; compile is not per-packet |
+| Overlay ID collision with static sets | Low | Content-hash bucket pipeline already de-collides via deterministic probe; identical-content feed+static share an ID by design |
+| Per-refresh full snapshot rebuild cost on large feeds | Low | Refresh interval is >= seconds; snapshot build is not per-packet |
 
 ## 6. Test plan
 
@@ -206,14 +332,33 @@ fails at dataplane compile). RECOMMENDATION: include it — it converts a runtim
 - invalid lines skipped, valid ones kept
 - bare IP -> /32 and /128 normalization
 
-#2049 (pkg/dataplane + integration):
-- feed snapshot with prefixes P1 -> policy referencing the address-name
-  compiles to a set containing P1's CIDR
-- feed update P1 -> P2 -> recompile -> compiled set contains P2, not P1
-- NAT rule referencing a feed-backed source-address-name resolves
-- startup before first fetch -> empty set, no compile error, policy present
+#2049 (pkg/dataplane/userspace — assert against the published snapshot, NOT
+legacy `result.AddrIDs`):
+- `buildAddressBookTable(cfg, overlay{P1})` for a feed-backed `address-name`
+  emits an `AddressBookSnapshot` row whose `PrefixesV4/V6` contain P1's CIDR,
+  and `nameToID[name]` is set (non-zero).
+- `buildPolicySnapshotsWithSchedulerState` for a policy referencing that
+  feed-backed name yields a `PolicyRuleSnapshot` with the name's ID in
+  `SourceBookIDs` (or `DestinationBookIDs`), NOT in `SourceLiterals` — proving
+  `classifyPolicyAddresses` now routes it as a book reference.
+- feed overlay P1 -> P2: the rebuilt snapshot's `AddressBookSnapshot` for that
+  name contains P2 and not P1, and the `SourceBookIDs` entry follows the new
+  content's ID.
+- duplicate-publish gate (§2a): build snapshot S1 with overlay{P1}, then S2
+  from the **same `*config.Config`** with overlay{P2}; assert
+  `snapshotContentHash(S1) != snapshotContentHash(S2)` (so `Manager.Apply`
+  republishes). Conversely, same-content overlay yields an equal hash (skip is
+  correct).
+- startup before first fetch -> overlay is empty for the name -> book row is
+  empty (or absent) -> `classifyPolicyAddresses` still routes via a present
+  (empty) book ID, policy present, no panic, no compile error (fail-closed:
+  matches nothing).
+- NAT path: a source-/destination-address-name backed by a feed resolves the
+  same way (the NAT snapshot builders consume the same address resolution —
+  verify the relevant `build*NATSnapshots` path or document if NAT uses a
+  separate resolver that also needs the overlay).
 - (P-A3) commit referencing an unknown address-name (neither book nor feed)
-  fails commit-check
+  fails commit-check.
 
 ## 7. Out of scope
 
@@ -227,8 +372,9 @@ fails at dataplane compile). RECOMMENDATION: include it — it converts a runtim
 - **Q1**: Should a feed-backed `address-name` be allowed to ALSO appear in the
   static AddressBook (shadowing)? Recommend: reject at commit (ambiguous).
 - **Q2**: ID stability across feed content change — acceptable to shift IDs, or
-  must feed sets get a reserved high ID band? Recommend: shift is fine (atomic
-  recompile), simpler.
+  must feed sets get a reserved high ID band? Recommend: shift is fine (the
+  whole snapshot publishes atomically; IDs are content-derived, not a reserved
+  band), simpler.
 - **Q3**: Zero-prefix successful HTTP 200 — accept (empty enforced set) or treat
   as failure and retain last-good? Recommend: retain last-good + log warning;
   an explicit empty feed is rare and dangerous. Possibly a config knob later.
@@ -242,12 +388,31 @@ fails at dataplane compile). RECOMMENDATION: include it — it converts a runtim
 
 **Is #2049 real and security-relevant? YES — and it is the highest-priority of
 the four.** Verified end to end: the binding is stored, the prefixes are
-fetched, and the dataplane compile genuinely cannot see them (`GetPrefixes` has
-zero callers; `resolveAddrList` errors on the name). An operator who builds a
-threat-feed denylist policy gets a config that commits (or fails confusingly)
-and never enforces. That is a silent security control failure on a marketed
-feature — worse than a missing feature, because the operator believes it works.
-Not a candidate for KILL or DEFER.
+fetched, and the **runtime userspace snapshot** genuinely cannot see them
+(`GetPrefixes` has no forwarding caller; the snapshot's address resolution —
+`buildAddressBookTable`/`expandBookNameToCIDRs`/`classifyPolicyAddresses` in
+`policies.go` — reads only `cfg.Security.AddressBook`, so a feed-backed name is
+emitted as a no-match literal). An operator who builds a threat-feed denylist
+policy gets a config that commits and never enforces. That is a silent security
+control failure on a marketed feature — worse than a missing feature, because
+the operator believes it works. Not a candidate for KILL or DEFER.
+
+**r1→r2 RE-TARGET (the hostile re-review catch):** the r1 plan put the join in
+`pkg/dataplane/compiler.go` (`compileAddressBook` / `resolveAddrList` /
+`CompileResult.AddrIDs`). I verified in this worktree that this is the RETIRED
+eBPF compiler (#1373/#1476): it is reached only via
+`CompileUserspaceShim`→`CompileConfig` (`loader.go:161`), and its `result` is
+consumed solely for XDP attach + interface bookkeeping
+(`attachUserspaceShimXDP`, `syncInterfaceAttachments`, `recordApplyResult`).
+`AddrIDs` is never serialized into the `ConfigSnapshot` and never reaches the
+AF_XDP helper. The r1 join would compile cleanly and forward nothing — a no-op
+"fix." Worse, because the snapshot would be byte-identical, the
+content-hash duplicate-publish gate (`snapshotContentHash`, `builder.go:82`,
+which INCLUDES `AddressBooks`) would have suppressed every refresh anyway. The
+join is re-targeted to `buildAddressBookTable` (`policies.go:155`) threaded via
+`buildSnapshotWithSchedulerState` (`builder.go:17`, called at
+`manager.go:571`). Confirmed by reading the three functions: all read only
+`cfg.Security.AddressBook` today.
 
 **Adversarial counter-argument I considered and rejected:** "Maybe this is
 intentionally deferred and low-traffic." Rejected — `feature-gaps.md` markets
@@ -263,10 +428,11 @@ together. Strong agree with Codex's Batch A.
 **Where I push back on Codex's recommended fix:** the proposed
 `pkg/feeds/{fetch,parse,state}` three-package split + a separate
 `DynamicAddressResolver` package is over-engineered for a 240-LOC, zero-test
-package. The *contract* that matters is the immutable snapshot + the
-compile-time overlay, not the package count. I down-scope to in-place refactor
-+ one accessor + a compiler overlay. This is a HOW simplification, not a
-WHAT change.
+package. The *contract* that matters is the immutable feed snapshot + the
+snapshot-build overlay in `buildAddressBookTable`, not the package count. I
+down-scope to in-place refactor + one accessor + a snapshot-build overlay
+threaded through `buildSnapshotWithSchedulerState`. This is a HOW
+simplification, not a WHAT change.
 
 **Sharpest risk:** the startup fail-closed window (P-A2) and the empty-feed
 case (Q3). A naive implementation that accepts an HTTP-200-empty body as a
@@ -284,8 +450,13 @@ one must-resolve safety question (Q3) that is answerable in design.
 - **#2050: PLAN-READY** — ship first (or together with #2049). Refresh
   correctness is small, self-contained, testable, and is the safety
   precondition for enforcement.
-- **#2049: PLAN-READY** — ship immediately after / with #2050, using P-A1
-  in-place + P-A2 startup-fail-closed/retain-last-good + P-A3 commit
-  validation. This is the highest-priority finding in review-015 and is a
-  genuine security-enforcement gap on a marketed feature. Resolve Q3
-  (empty-feed = retain-last-good) in the design before coding.
+- **#2049: PLAN-READY (pending re-review)** — r2 re-targets the enforcement
+  join to the RUNTIME userspace snapshot path
+  (`pkg/dataplane/userspace/policies.go` `buildAddressBookTable` +
+  `buildSnapshotWithSchedulerState`), NOT the retired eBPF compiler. Ship
+  immediately after / with #2050, using P-A1 in-place + P-A2
+  startup-fail-closed/retain-last-good + P-A3 commit validation. This is the
+  highest-priority finding in review-015 and is a genuine
+  security-enforcement gap on a marketed feature. Resolve Q3 (empty-feed =
+  retain-last-good) in the design before coding. The re-targeted join needs a
+  fresh hostile pass before implementation.

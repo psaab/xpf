@@ -1,5 +1,30 @@
 # Action Log
 
+## 2026-06-19 — #2049 research plan r2: re-target enforcement join to userspace path
+
+- **Timestamp**: 2026-06-19
+- **Action**: A hostile re-review found the #2049 enforcement join targeted
+  the RETIRED eBPF compiler (`pkg/dataplane/compiler.go`:
+  compileAddressBook/resolveAddrList/CompileResult.AddrIDs) — dead for
+  forwarding (#1373/#1476; result only feeds XDP attach, never the wire
+  snapshot). Re-targeted the #2049 portions of plan.md to the RUNTIME
+  userspace snapshot path: `buildAddressBookTable` (policies.go:155,
+  nameToID), `expandBookNameToCIDRs` (:282), `classifyPolicyAddresses` (:197
+  region) — all of which read only cfg.Security.AddressBook today (verified
+  in worktree) — threaded via `buildSnapshotWithSchedulerState`
+  (builder.go:17, called manager.go:571). Added §2a documenting the
+  snapshotContentHash/lastSnapshotHash duplicate-publish gate (builder.go:82,
+  manager.go:126/691/887-890) which INCLUDES AddressBooks — the load-bearing
+  reason the join must land in the snapshot (a compiler.go join would be
+  byte-identical AND gate-suppressed). Re-wrote the #2049 test plan to assert
+  against AddressBookSnapshot rows / SourceBookIDs in the published snapshot,
+  not legacy result.AddrIDs. Bumped the revision header + blast radius.
+  #2050 refresh-correctness + fail-safe sections left intact (r1 PLAN-READY).
+  Companion-free (no Codex/AGY). No production source touched.
+- **File(s)**: docs/research/2049-dynamic-address-enforcement/plan.md,
+  docs/research/2049-dynamic-address-enforcement/claude-smr-plan-r2.md,
+  _Log.md
+
 ## 2026-06-19 — #1925 review r2: declare growpart dep + mktemp guard
 
 - **Timestamp**: 2026-06-19
