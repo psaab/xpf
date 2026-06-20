@@ -2,16 +2,35 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r7 (folds Codex r5-retry cross-check #2/#3: snapshot-generation
-  coherency gate, live current-pct refresh)
-- **Status:** PLAN-READY pending r7 re-confirm — Claude SMR r6 + AGY r6 PLAN-READY
-  (Codex r5 #1 folded into r6); a fresh-session Codex r5 cross-check independently
-  re-confirmed #1 AND found 2 more (gen-coherency, stuck-pct) that apply to r6 too,
-  folded into r7 → r7 re-review dispatched.
+- **Revision:** r8 (folds Codex r7 #1: a status-vs-applied gen gate is NOT
+  sufficient — config and counters must come from ONE coherent generation source,
+  because Commit promotes config before the dataplane apply; + #2 nil-dp handling)
+- **Status:** PLAN-READY pending r8 re-confirm — Claude SMR r7 + AGY r7 PLAN-READY;
+  Codex r7 (PLAN-REVISE) found the r7 gen gate insufficient (apply-window skew)
+  and a missing nil-dp case, both folded into r8 → r8 re-review dispatched.
 - **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
 - **Recommendation:** Path B — alarm registry rendered in `show security alarms`
   (BOTH render sites) + transition-gated structured syslog, driven by a slow
   (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
+
+### r8 changelog (folds Codex r7 PLAN-REVISE #1/#2)
+- **#1 coherent (config, status, generation) source (MAJOR):** r7's gate
+  `status.LastSnapshotGeneration >= dp.AppliedSnapshotGeneration()` was NOT
+  sufficient. `Commit()` promotes `s.compiled` (`store.go:1199`) BEFORE the
+  dataplane apply (`daemon_apply.go:162→689`), so in the apply window
+  `store.ActiveConfig()` is a NEWER generation than the helper counters while
+  status==applied (old) makes the gate pass → new config capacity evaluated
+  against old counters. r8 stops mixing sources: the monitor reads a single
+  lock-guarded `dp.CoherentNATView()` whose `Config` is `m.lastSnapshot.Config`
+  and whose `Pools` are the deduped statuses for THAT SAME generation, with
+  `HelperCaughtUp` = (status gen == published snapshot gen). Config and counters
+  are the same generation by construction; `numericEval := view.HelperCaughtUp`.
+  Dedup is done inside the view.
+- **#2 nil-dp / status-unavailable (MINOR):** `view.Available` is false when the
+  dataplane is nil or the helper isn't running; the monitor then HOLDs all alarms
+  (returns without clearing) — no data ≠ a decision to clear.
+- Codex r7 also CONFIRMED: prune outside the gate, updatePct mutually-exclusive,
+  §9 rule-referenced wording, defensive nil-skips.
 
 ### r7 changelog (folds Codex r5-retry cross-check #2/#3)
 A fresh-session Codex re-review of r5 (dispatched while the original r5 agent was
@@ -319,33 +338,47 @@ become a small follow-up issue if an operator asks for push-to-NMS.
 A small daemon-resident component (model: `pkg/ipmon` background engine, started
 in `daemon_run.go` near `d.ipmon.Start()`). Either a new `pkg/natpoolalarm`
 package or a method on the daemon — reviewer input welcome on placement; leaning
-toward a self-contained, unit-testable struct that takes a `func() ProcessStatus`
-sampler + `func() *config` + emit callbacks (dependency-injected so it is
-testable without a live dataplane).
+toward a self-contained, unit-testable struct that takes a single
+`func() CoherentNATView` sampler (r8 — NOT a separate config getter + status
+sampler; see below for why a coherent source is required) + emit callbacks
+(dependency-injected so it is testable without a live dataplane).
 
 Loop (slow tick, **10s** — NOT 1s, to avoid flap; reads cached `LastStatus()`
 only, no socket I/O):
 
 ```
-cfg := store.ActiveConfig()                      # r3 (Codex NEW-3): may be nil
-if cfg == nil:                                    #   fail-closed nil (store.go:1573-1577)
-    clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6): visible clear, not silent                 #   no config → no alarm state
+# r8 (Codex r7 #1): COHERENT (config, status, generation) from ONE source.
+# Do NOT mix store.ActiveConfig() with dp.LastStatus(): Commit() promotes
+# s.compiled (store.go:1199) BEFORE the dataplane apply (daemon_apply.go:162→689),
+# so ActiveConfig() can be a NEWER generation than the helper's counters while a
+# status-vs-applied gen gate still passes (old>=old) — evaluating new config
+# capacity against old counters. Instead the dataplane manager exposes ONE
+# lock-guarded coherent view derived entirely from `m.lastSnapshot` + the helper
+# status it corresponds to:
+#   view := dp.CoherentNATView()
+#     → { Config *config.Config,            # == m.lastSnapshot.Config (same gen as counters)
+#         Pools  map[string]SourceNATPoolStatus,  # deduped by pool name (from status)
+#         Generation uint64,                 # m.lastSnapshot.Generation
+#         HelperCaughtUp bool,               # status.LastSnapshotGeneration == m.publishedSnapshot gen
+#         Available bool }                   # false when dp nil / helper not running (r8 #2)
+# Config (pool kind + rule references) AND counters now come from the SAME
+# generation — the apply-window skew is impossible by construction.
+
+view := dp.CoherentNATView()                      # r8: single coherent source (no store.ActiveConfig here)
+if !view.Available:                               # r8 (Codex r7 #2): dp nil / helper down → HOLD all (do NOT clear)
+    return                                         #   no data → cannot decide; keep current alarm state untouched
+cfg := view.Config                                # r3 (Codex NEW-3): may be nil
+if cfg == nil:                                    #   fail-closed nil (no compiled snapshot)
+    clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6)
 alarmCfg := cfg.Security.NAT.PoolUtilizationAlarm
 if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
-    clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6): visible clear, not silent
-status := dp.LastStatus()                         # cached, no socket request (r2)
+    clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6)
+byPoolStatus := view.Pools                         # deduped pool statuses, same gen as cfg
 
-# r7 (Codex r5-retry #2): GENERATION COHERENCY. During a config apply / XSK
-# startup the helper can lag — `store.ActiveConfig()` (and the manager's applied
-# `lastSnapshot.Generation`) can be AHEAD of what the helper has acknowledged
-# (`status.LastSnapshotGeneration`, protocol.go:618). Evaluating fresh config
-# capacity against stale dataplane counters would raise/clear incorrectly. So:
-# expose the applied snapshot generation (a cheap `dp.AppliedSnapshotGeneration()`
-# accessor returning `m.lastSnapshot.Generation` under lock, beside LastStatus())
-# and, when `status.LastSnapshotGeneration < appliedGen`, SKIP the numeric
-# raise/clear evaluation for this tick (HOLD) — but STILL run the config-derived
-# prune below (config-removal / disabled / unreferenced clears are config-only
-# decisions, safe regardless of helper lag). `numericEval := (status.LastSnapshotGeneration >= dp.AppliedSnapshotGeneration())`.
+# r8 (was r7 gen-coherency, now exact): numeric eval only when the helper has
+# CAUGHT UP to the snapshot this cfg belongs to. While it lags, HOLD numeric
+# raise/clear; the config-derived prune below STILL runs (config-only, safe).
+numericEval := view.HelperCaughtUp
 
 # r6 (Codex r5 #1): eligibility is RULE-REFERENCED config — NOT every pool in
 # cfg...SourcePools. The status producer is RULE-DERIVED: SourceNATPoolStatus is
@@ -360,11 +393,10 @@ status := dp.LastStatus()                         # cached, no socket request (r
 #   (b) eligible but absent from THIS tick's snapshot (transient) → HOLD
 #   (c) eligible with bad sample (AddressCount==0/bad ports/cap0)   → HOLD
 
-# r2: DEDUPLICATE by pool name — rules sharing a pool report the SAME UsedPorts
-# (shared Arc<PortAllocatorShared>), so SUMMING would double-count. Take one.
-byPool := {}                                      # pool_name -> SourceNATPoolStatus
-for s in status.SourceNATPools:
-    byPool[s.PoolName] = s                        # any entry; values identical per pool
+# r2 (now done inside CoherentNATView, r8): `byPoolStatus` (= view.Pools) is
+# ALREADY DEDUPLICATED by pool name — rules sharing a pool report the SAME
+# UsedPorts (shared Arc<PortAllocatorShared>, source.rs:282-290), so the view
+# takes one entry per pool, never summing.
 
 # r6: build the set of pool names REFERENCED by a configured source-NAT rule.
 # r7 (Codex r6 NIT2): mirror buildSourceNATSnapshots' defensive nil skips
@@ -383,8 +415,8 @@ for poolName in referenced:
     if p.Deterministic != nil: continue           # deterministic → ineligible (skipped in r1) → prune clears
     eligible[poolName] = true                      # eligible regardless of snapshot presence
 
-    if !numericEval: continue                      # r7 (Codex r5-retry #2): helper lags config → HOLD numeric eval this tick
-    s, present := byPool[poolName]
+    if !numericEval: continue                      # r8: helper lags this cfg's gen → HOLD numeric eval this tick
+    s, present := byPoolStatus[poolName]
     if !present: continue                          # (b) eligible but absent this tick → HOLD (no raise/clear)
     if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow): continue  # (c) bad sample → HOLD
     capacity := uint64(s.AddressCount) * (uint64(s.PortHigh) - uint64(s.PortLow) + 1)  # cast operands FIRST (FOLD-5)
@@ -570,11 +602,17 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
   prune (it drops out of the rule-referenced `eligible` set), and a clear is
   emitted. Mutation: if eligibility iterated `cfg.SourcePools` instead of
   rule-references (the r5 bug), the alarm sticks forever and this test fails.
-- **Unit (r7, Codex r5-retry #2):** when `status.LastSnapshotGeneration <
-  appliedGen` (helper lags config), numeric raise/clear is HELD (a pool that would
-  otherwise cross a threshold neither raises nor clears that tick), but a
-  config-removed/unreferenced pool IS still pruned/cleared. Mutation: removing the
-  generation gate lets a stale-counter tick raise/clear → test fails.
+- **Unit (r8, Codex r7 #1):** the monitor consumes a single coherent view
+  (`Config` + `Pools` + `HelperCaughtUp` from the same generation). When
+  `HelperCaughtUp` is false (apply window — config newer than helper counters),
+  numeric raise/clear is HELD; the config-derived prune still runs. Mutation:
+  feeding new config with old counters (the r7 split-source bug) must NOT
+  raise/clear — a test that supplies mismatched config+counters via two separate
+  getters would expose the r7 bug; the r8 single-view API makes the mismatch
+  unrepresentable, so the test asserts the view is the only input.
+- **Unit (r8, Codex r7 #2):** `view.Available == false` (dp nil / helper down) →
+  monitor returns without clearing any alarm (HOLD-all). Mutation: clearing on
+  unavailable → test fails.
 - **Unit (r7, Codex r5-retry #3):** an already-raised pool whose utilization
   changes but stays above clear gets its displayed pct refreshed each tick
   (assert the stored pct updates) WITHOUT emitting a syslog line (assert no clear/
@@ -606,7 +644,8 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
 | Monitor adds control-socket traffic | Use new `Manager.LastStatus()` cached accessor, never `Status()` (r2 — AGY M2) |
 | Active alarm stuck after pool removal/rename/un-reference | Prune `activeAlarms` for pools no longer ELIGIBLE by RULE-REFERENCED config semantics each tick (r6 — AGY M3 / Codex r5 #1) — NOT merely "absent from snapshot" |
 | Pool stays configured but its last source-NAT rule is removed | Eligibility is rule-referenced, so the pool drops out of `eligible` → prune clears its alarm (r6 — Codex r5 #1); status producer is rule-derived (`status.rs:9-17`) |
-| Helper status lags fresh config → stale counters vs new capacity | Generation-coherency gate: HOLD numeric eval when `status.LastSnapshotGeneration < appliedGen`; config-derived prune still runs (r7 — Codex r5-retry #2) |
+| Helper status lags fresh config → stale counters vs new capacity (apply-window skew) | Single coherent `dp.CoherentNATView()` — `Config` (= `m.lastSnapshot.Config`) and `Pools` from the SAME generation; `numericEval := view.HelperCaughtUp`; config-derived prune still runs (r8 — Codex r7 #1; supersedes the r7 status-vs-applied gate, which Commit's promote-before-apply made insufficient) |
+| Dataplane nil / helper not running | `view.Available==false` → HOLD all alarms (return, no clear) (r8 — Codex r7 #2) |
 | `show security alarms detail` shows stale raise-time pct | `updatePct` refreshes the displayed pct each tick while held (no syslog) (r7 — Codex r5-retry #3) |
 | Local-CLI vs gRPC alarm output divergence | Update BOTH render sites via a shared formatter (r2 — Codex F2) |
 | uint16 capacity underflow on `PortLow>PortHigh` | Guard + uint64 math, cast operands BEFORE subtraction (r3 — AGY M5/Codex F4/NEW-1 FOLD-5) |

@@ -24,8 +24,12 @@
 | r6 | AGY | adversarial-review-mqmsy5w7-s7r6et | PLAN-READY (rule-referenced eligibility confirmed, no new issues) |
 | r6 | Codex | agentId a5e91c91c6bb8319a | PLAN-READY-WITH-NITS (no MAJOR; 2 NITs: stale §9 row + defensive nil-skip → folded into r7) |
 | r7 | Claude SMR | claude-smr-plan-r7.md | PLAN-READY (gen-coherency + stuck-pct + 2 NITs verified resolved) |
-| r7 | AGY | (pending) | (pending) |
-| r7 | Codex | (pending) | (pending) |
+| r7 | AGY | adversarial-review-mqmt4uu2-n5ezju | PLAN-READY (all 4 r7 items confirmed, no new issues) |
+| r7 | Codex | agentId aa98925183049577a | PLAN-REVISE (4 confirms; MAJOR #1 apply-window gen-skew + MINOR #2 nil-dp → folded into r8) |
+| r7 | Codex (fresh retry, cross-check) | agentId aa0db8139112cf6e0 | (running against superseded r7; r8 coherent-view supersedes) |
+| r8 | Claude SMR | claude-smr-plan-r8.md | PLAN-READY (coherent-view + nil-dp verified; commit-ordering re-traced) |
+| r8 | AGY | (pending) | (pending) |
+| r8 | Codex | (pending) | (pending) |
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
 
