@@ -6,13 +6,13 @@
   ACCEPT, but the defer_workers path skips reconcile while NAT counters come from
   reconciled forwarding state — so the applied source must be the last RECONCILED
   apply, and the gate must also exclude the mid-defer window)
-- **Status:** PLAN-READY pending r11 re-confirm — the prior "r10 converged" was
-  PREMATURE: I acted on a fresh-session Codex r10 retry's "No findings" while the
-  original (slower, deeper) Codex r10 pass was still running; it returned a
-  legitimate BLOCKER (deferred-apply reconcile-skew) that r10 did not handle.
-  Reopened; r11 folds it → r11 re-review dispatched. AGY r10 + Claude SMR r10 were
-  PLAN-READY on the applied-snapshot idea, but did not catch the deferred-reconcile
-  window.
+- **Status:** CONVERGED — PLAN-READY (3-way at r11): Claude SMR r11 PLAN-READY,
+  AGY r11 PLAN-READY, Codex r11 PLAN-READY-WITH-NITS (no MAJOR/BLOCKER; all four
+  coherency questions verified against source; 2 doc-precision nits folded). The
+  r10 "convergence" was PREMATURE (acted on a fast Codex retry while the slower
+  original — which found the deferred-apply reconcile-skew BLOCKER — was still
+  running); r11 resolves that BLOCKER and was confirmed by the FULL Codex pass.
+  Awaiting manual approval via `/engineer 2079`.
 - **Recommendation:** Path B — `show security alarms` registry (BOTH render sites)
   + transition-gated structured syslog, driven by a 10s daemon monitor over the
   helper's LAST-APPLIED NAT pool snapshot (`dp.AppliedNATView()`).
@@ -34,7 +34,9 @@ truly blocked, not merely slow.)
   SKIPS `reconcile_status_bindings` (`snapshot.rs:113-144`). NAT pool status is
   read from the coordinator's forwarding state, replaced only on reconcile
   (`helpers.rs:244` → `afxdp/coordinator/status.rs:315` →
-  `reconcile/snapshot.rs:89`). Go sets `DeferWorkers` during RETH-MAC bring-up
+  `afxdp/coordinator/reconcile/snapshot.rs:21,89`; same-plan applies swap via
+  `refresh_runtime_snapshot`, snapshot.rs:103 — BOTH synchronous before the apply
+  reply per Codex r11). Go sets `DeferWorkers` during RETH-MAC bring-up
   (`manager.go:677-679`, gated on `m.deferWorkers`). So in the defer window,
   status-gen == new gen but the NAT counters are still the OLD rules → r10's
   `status==appliedGen` check passes while config and counters are mismatched.
@@ -433,16 +435,23 @@ only, no socket I/O):
 # the APPLIED snapshot (Config + Generation captured at each successful full
 # apply_snapshot. CRITICAL (r11 — Codex r10 BLOCKER): the helper sets
 # last_snapshot_generation the instant it ACCEPTS a snapshot (snapshot.rs:63), but
-# the defer_workers path (snapshot.rs:113-144) STORES the snapshot and SKIPS
-# reconcile_status_bindings — and NAT pool status is read from the coordinator's
-# forwarding state which is only replaced during reconcile (helpers.rs:244 →
-# afxdp/coordinator/status.rs:315 → reconcile/snapshot.rs:89). Go sets
-# DeferWorkers (manager.go:677-679, gated on m.deferWorkers) during RETH-MAC
-# bring-up; the real reconcile happens later on NotifyLinkCycle. So in the
-# defer window: status.last_snapshot_generation = NEW gen, but the NAT counters
-# still belong to the OLD rules → a status-gen==applied-gen check ALONE is NOT
-# enough. The manager therefore records `m.appliedSnapshot {Config, Generation}`
-# ONLY when an apply_snapshot was actually RECONCILED (non-deferred apply, OR the
+# the defer_workers path (snapshot.rs:113-144) STORES the snapshot and SKIPS the
+# forwarding swap. NAT pool status is read from the coordinator's forwarding state
+# (helpers.rs:244 → afxdp/coordinator/status.rs:315), which is swapped only when a
+# NON-deferred apply runs — via reconcile_status_bindings
+# (afxdp/coordinator/reconcile/snapshot.rs:21,89) OR, for a same-plan apply, via
+# refresh_runtime_snapshot (snapshot.rs:103). KEY (Codex r11): BOTH non-deferred
+# forwarding swaps happen SYNCHRONOUSLY before the helper writes the apply_snapshot
+# OK reply, and Go's requestLocked waits for that reply (process.go:195) — so a
+# returning non-deferred apply_snapshot PROVES the forwarding/NAT state is the new
+# gen. The deferred path is the only one that advances last_snapshot_generation
+# WITHOUT swapping forwarding; Go sets DeferWorkers (manager.go:677-679, gated on
+# m.deferWorkers) during RETH-MAC bring-up and the real swap happens later on
+# NotifyLinkCycle → rebind (reconcile_status_bindings, rebind.rs:46). So in the
+# defer window: last_snapshot_generation = NEW gen but NAT counters = OLD rules →
+# a status-gen==applied-gen check ALONE is NOT enough. The manager therefore
+# records `m.appliedSnapshot {Config, Generation}` ONLY when an apply was RECONCILED
+# (any RETURNING non-deferred apply_snapshot, OR the
 # post-NotifyLinkCycle reconcile) — NEVER on a deferred-but-accepted apply — and
 # the view additionally requires the helper is not currently mid-defer:
 #   view := dp.AppliedNATView()

@@ -37,17 +37,19 @@
 | r10 | AGY | adversarial-review-mqmtsak5-b7fntu | PLAN-READY (applied-snapshot — also missed the defer window) |
 | r10 | Codex (ORIGINAL ad6d71ffb69e9ad95, ~11min) | **PLAN-REVISE — BLOCKER** (deferred-apply reconcile-skew + first-boot gen==0 → folded into r11) |
 | r10 | Codex (fresh retry ac8f3852129726977, ~4min) | PLAN-READY "No findings" — LESS THOROUGH, SUPERSEDED (did not trace defer_workers reconcile-skip) |
-| r11 | Claude SMR | claude-smr-plan-r11.md | PLAN-READY (reconcile-gated applied source + !deferWorkers verified) |
-| r11 | AGY | (pending) | (pending) |
-| r11 | Codex | (pending) | (pending) |
+| r11 | Claude SMR | claude-smr-plan-r11.md | **PLAN-READY** (reconcile-gated applied source + !deferWorkers verified) |
+| r11 | AGY | adversarial-review-mqmuevnc-cen796 | **PLAN-READY** (deferred-reconcile skew + first-boot false-clear both closed; no new issues) |
+| r11 | Codex | agentId a89ae9d363cb3918d (~5min FULL pass) | **PLAN-READY-WITH-NITS** (no MAJOR/BLOCKER; all 4 Qs verified vs source; 2 doc nits folded) |
 
-## NOT YET CONVERGED — r10 "convergence" was PREMATURE (retracted)
+## CONVERGED at r11 — 3-way PLAN-READY (Claude SMR + AGY + Codex)
 
-The r10 3-way "PLAN-READY" was WRONG: I acted on the fast fresh-session Codex
-retry's "No findings" while the slower ORIGINAL Codex r10 pass was still running.
-The original returned a real BLOCKER (deferred-apply reconcile-skew). Folded into
-r11; r11 re-review in flight. LESSON: wait for the deepest reviewer pass before
-declaring convergence — a fast retry "no findings" does not override a slower
+This time I WAITED for the full Codex pass (~5 min) before judging — no
+fast-retry override. Codex's r11 verdict is PLAN-READY-WITH-NITS (doc-precision
+nits only, both folded); AGY + Claude SMR PLAN-READY. The r10 BLOCKER is resolved
+and re-verified against source.
+
+LESSON (recorded): wait for the deepest reviewer pass before declaring
+convergence — a fast retry "no findings" does not override a slower
 in-flight original. The issue comment posted at r10 will be corrected.
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
