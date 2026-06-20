@@ -5,12 +5,15 @@
 - **Revision:** r10 (folds Codex r8: the coherent source must be the LAST-APPLIED
   snapshot config+gen — `publishedSnapshot` is too loose, `lastSnapshot.Generation`
   too strict; FIB/neighbor bumps would gate the alarm off forever)
-- **Status:** PLAN-READY pending r10 re-confirm — AGY r9 + Claude SMR r9 PLAN-READY
-  on the `view.Generation` fix; Codex (reviewing the on-disk r9) showed
-  `lastSnapshot.Generation` is too STRICT (FIB/neighbor/no-op bumps advance it
-  without a full apply, so it permanently exceeds the helper's
-  `last_snapshot_generation`). r10 sources the view from the helper's actually
-  APPLIED snapshot → r10 re-review dispatched.
+- **Status:** CONVERGED — PLAN-READY (3-way at r10): Claude SMR r10 PLAN-READY,
+  AGY r10 PLAN-READY, Codex r10 PLAN-READY ("No findings"). The
+  generation-coherency comparand was bracketed by AGY (too-loose `publishedSnapshot`)
+  and Codex (too-strict `lastSnapshot.Generation`); r10's applied-snapshot source
+  is the provable fixed point between them. Awaiting manual approval via
+  `/engineer 2079`.
+- **Recommendation:** Path B — `show security alarms` registry (BOTH render sites)
+  + transition-gated structured syslog, driven by a 10s daemon monitor over the
+  helper's LAST-APPLIED NAT pool snapshot (`dp.AppliedNATView()`).
 - **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
 - **Recommendation:** Path B — alarm registry rendered in `show security alarms`
   (BOTH render sites) + transition-gated structured syslog, driven by a slow

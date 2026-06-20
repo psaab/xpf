@@ -33,9 +33,11 @@
 | r9 | Claude SMR | claude-smr-plan-r9.md | PLAN-READY (HelperCaughtUp==view.Generation verified — but Codex r8 showed it too strict) |
 | r9 | AGY | adversarial-review-mqmtlncr-6hje6n | PLAN-READY (HelperCaughtUp==view.Generation confirmed; apply-window skew eliminated) |
 | r9 | Codex | (superseded by r8's finding which targeted on-disk r9) | folded into r10 |
-| r10 | Claude SMR | claude-smr-plan-r10.md | PLAN-READY (applied-snapshot source verified; FIB/neighbor non-gating re-traced) |
-| r10 | AGY | (pending) | (pending) |
-| r10 | Codex | (pending) | (pending) |
+| r10 | Claude SMR | claude-smr-plan-r10.md | **PLAN-READY** (applied-snapshot source verified; FIB/neighbor non-gating re-traced) |
+| r10 | AGY | adversarial-review-mqmtsak5-b7fntu | **PLAN-READY** (applied-snapshot resolves the gen dilemma; no new issues) |
+| r10 | Codex (fresh retry) | agentId ac8f3852129726977 | **PLAN-READY — "No findings"** (original ad6d71ffb69e9ad95 wedged in broker hang → retry) |
+
+## CONVERGED at r10 — 3-way PLAN-READY (Claude SMR + AGY + Codex)
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
 
