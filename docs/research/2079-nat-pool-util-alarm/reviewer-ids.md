@@ -19,10 +19,13 @@
 | r5 | Claude SMR | claude-smr-plan-r5.md | PLAN-READY (Codex r4 #4/#5/#7 verified resolved) |
 | r5 | AGY | adversarial-review-mqmsmreo-eadvka | PLAN-READY (config-derived inversion stress-tested, no new issues) |
 | r5 | Codex | agentId ae09617e55b8e5564 | PLAN-REVISE (confirmed all r5 folds; 1 NEW MAJOR #1 rule-unreferenced-stuck-alarm + NIT → folded into r6) |
-| r5 | Codex (fresh retry, cross-check) | agentId aa74838bb97bb7ff7 | (dispatched while orig was slow; running) |
-| r6 | Claude SMR | claude-smr-plan-r6.md | PLAN-READY (Codex r5 #1 verified resolved; eligibility model exhausted) |
-| r6 | AGY | (pending) | (pending) |
-| r6 | Codex | (pending) | (pending) |
+| r5 | Codex (fresh retry, cross-check of r5) | agentId aa74838bb97bb7ff7 | PLAN-REVISE (re-confirmed #1; +#2 gen-coherency MAJOR, +#3 stuck-pct MINOR → folded into r7) |
+| r6 | Claude SMR | claude-smr-plan-r6.md | PLAN-READY (Codex r5 #1 verified resolved) |
+| r6 | AGY | adversarial-review-mqmsy5w7-s7r6et | PLAN-READY (rule-referenced eligibility confirmed, no new issues) |
+| r6 | Codex | agentId a5e91c91c6bb8319a | PLAN-READY-WITH-NITS (no MAJOR; 2 NITs: stale §9 row + defensive nil-skip → folded into r7) |
+| r7 | Claude SMR | claude-smr-plan-r7.md | PLAN-READY (gen-coherency + stuck-pct + 2 NITs verified resolved) |
+| r7 | AGY | (pending) | (pending) |
+| r7 | Codex | (pending) | (pending) |
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
 

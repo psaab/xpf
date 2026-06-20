@@ -2,17 +2,41 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r6 (folds Codex r5 #1: eligibility must be RULE-REFERENCED, since
-  the status producer is rule-derived — a configured-but-unreferenced pool would
-  otherwise hold its alarm forever)
-- **Status:** PLAN-READY pending r6 re-confirm — Claude SMR r5 + AGY r5 PLAN-READY
-  (Codex confirmed all r5 folds #4/#5/#7); Codex r5 raised one more MAJOR (#1:
-  rule-unreferenced configured pool keeps a stale alarm forever) + a NIT (stale §9
-  wording), folded into r6 → r6 re-review dispatched.
+- **Revision:** r7 (folds Codex r5-retry cross-check #2/#3: snapshot-generation
+  coherency gate, live current-pct refresh)
+- **Status:** PLAN-READY pending r7 re-confirm — Claude SMR r6 + AGY r6 PLAN-READY
+  (Codex r5 #1 folded into r6); a fresh-session Codex r5 cross-check independently
+  re-confirmed #1 AND found 2 more (gen-coherency, stuck-pct) that apply to r6 too,
+  folded into r7 → r7 re-review dispatched.
 - **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
 - **Recommendation:** Path B — alarm registry rendered in `show security alarms`
   (BOTH render sites) + transition-gated structured syslog, driven by a slow
   (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
+
+### r7 changelog (folds Codex r5-retry cross-check #2/#3)
+A fresh-session Codex re-review of r5 (dispatched while the original r5 agent was
+slow) independently RE-CONFIRMED #1 (rule-referenced, already folded in r6) and
+found two MORE issues that apply to r6's loop unchanged:
+- **#2 snapshot-generation coherency (MAJOR):** the monitor combined
+  `store.ActiveConfig()` with cached `dp.LastStatus()` with no generation check.
+  `ProcessStatus.LastSnapshotGeneration` (protocol.go:618) can LAG the manager's
+  applied `lastSnapshot.Generation` during a config apply / XSK startup, so a tick
+  could evaluate fresh config capacity against stale dataplane counters → wrong
+  raise/clear. r7 adds a `dp.AppliedSnapshotGeneration()` accessor and a
+  `numericEval := status.LastSnapshotGeneration >= appliedGen` gate: when the
+  helper lags, SKIP numeric raise/clear (HOLD) but STILL run the config-derived
+  prune (config-removal/unreference/disabled clears are config-only, safe under
+  lag).
+- **#3 stuck current-pct (MINOR):** §6.3 promised a live "current pct" in detail
+  output, but r6 only mutated state on raise/clear transitions, so an
+  already-raised pool's displayed pct froze at the raise-time value. r7 adds
+  `updatePct(poolName, pct)` for a held-above-clear pool — refreshes the displayed
+  value only, NO syslog (no transition).
+
+r7 also folds the two Codex r6 NITs (Codex r6 = PLAN-READY-WITH-NITS, no MAJOR):
+- §9 stale "Eligibility is CONFIG-derived" row reworded to rule-referenced.
+- §6.1 referenced-rule scan adds defensive `rs == nil`/`rule == nil` skips
+  mirroring `buildSourceNATSnapshots` (`nat.go:16-22`).
 
 ### r6 changelog (folds Codex r5 PLAN-REVISE; Codex confirmed all r5 folds first)
 - **#1 rule-unreferenced pool keeps stale alarm forever (MAJOR):** Codex traced
@@ -311,6 +335,18 @@ if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
     clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6): visible clear, not silent
 status := dp.LastStatus()                         # cached, no socket request (r2)
 
+# r7 (Codex r5-retry #2): GENERATION COHERENCY. During a config apply / XSK
+# startup the helper can lag — `store.ActiveConfig()` (and the manager's applied
+# `lastSnapshot.Generation`) can be AHEAD of what the helper has acknowledged
+# (`status.LastSnapshotGeneration`, protocol.go:618). Evaluating fresh config
+# capacity against stale dataplane counters would raise/clear incorrectly. So:
+# expose the applied snapshot generation (a cheap `dp.AppliedSnapshotGeneration()`
+# accessor returning `m.lastSnapshot.Generation` under lock, beside LastStatus())
+# and, when `status.LastSnapshotGeneration < appliedGen`, SKIP the numeric
+# raise/clear evaluation for this tick (HOLD) — but STILL run the config-derived
+# prune below (config-removal / disabled / unreferenced clears are config-only
+# decisions, safe regardless of helper lag). `numericEval := (status.LastSnapshotGeneration >= dp.AppliedSnapshotGeneration())`.
+
 # r6 (Codex r5 #1): eligibility is RULE-REFERENCED config — NOT every pool in
 # cfg...SourcePools. The status producer is RULE-DERIVED: SourceNATPoolStatus is
 # emitted per source-NAT rule (userspace-dp/src/nat/status.rs:9-17 iterates
@@ -331,9 +367,13 @@ for s in status.SourceNATPools:
     byPool[s.PoolName] = s                        # any entry; values identical per pool
 
 # r6: build the set of pool names REFERENCED by a configured source-NAT rule.
+# r7 (Codex r6 NIT2): mirror buildSourceNATSnapshots' defensive nil skips
+# (pkg/dataplane/userspace/nat.go:16-22) so a synthetic/partial config can't panic.
 referenced := {}                                  # pool_name set
 for rs in cfg.Security.NAT.Source:
+    if rs == nil: continue
     for rule in rs.Rules:
+        if rule == nil: continue
         if rule.Then.PoolName != "": referenced[rule.Then.PoolName] = true
 
 eligible := {}                                    # pool_name set: rule-referenced AND exists AND non-deterministic
@@ -343,6 +383,7 @@ for poolName in referenced:
     if p.Deterministic != nil: continue           # deterministic → ineligible (skipped in r1) → prune clears
     eligible[poolName] = true                      # eligible regardless of snapshot presence
 
+    if !numericEval: continue                      # r7 (Codex r5-retry #2): helper lags config → HOLD numeric eval this tick
     s, present := byPool[poolName]
     if !present: continue                          # (b) eligible but absent this tick → HOLD (no raise/clear)
     if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow): continue  # (c) bad sample → HOLD
@@ -351,7 +392,9 @@ for poolName in referenced:
     pct := s.UsedPorts * 100 / capacity
     raised := activeAlarms[poolName]
     if !raised && pct >= alarmCfg.RaiseThreshold: raise(poolName, pct)    # raise on >= raise
-    if  raised && pct <  alarmCfg.ClearThreshold: clear(poolName, pct)    # clear on STRICT < clear (NEW-1)
+    else if raised && pct < alarmCfg.ClearThreshold: clear(poolName, pct) # clear on STRICT < clear (NEW-1)
+    else if raised: updatePct(poolName, pct)       # r7 (Codex r5-retry #3): refresh current pct while held above clear
+                                                   #   (no transition → NO syslog; updates only the show-detail value)
 
 # r6: prune alarms for any pool no longer ELIGIBLE. `eligible` is RULE-REFERENCED
 # config (r6, Codex r5 #1), so "not in eligible" means case (a): no source-NAT
@@ -360,7 +403,9 @@ for poolName in referenced:
 # is what clears a pool whose last referencing rule was removed while the pool
 # stayed configured. r4 (Codex r3 #6): emit the clear
 # path (syslog clear), NOT a silent drop, so a consumer that saw the raise also
-# sees the matching clear.
+# sees the matching clear. r7: this prune runs UNCONDITIONALLY (even when
+# !numericEval), because `eligible` is config-derived — config-removal/unreference
+# clears are safe regardless of helper lag (Codex r5-retry #2).
 for poolName in snapshot(keys of activeAlarms):   # r5 (Codex r4 #5): snapshot keys under the mutex first
     if poolName not in eligible: clear(poolName, reason="pool no longer eligible")
 ```
@@ -375,8 +420,12 @@ self-deadlock and avoids holding the render mutex during blocking I/O.
 
 `raise`/`clear` mutate the in-memory active-alarm set (guarded by a mutex; read
 by BOTH `show security alarms` render sites — see §6.3) and emit one structured
-syslog line on transition. Note `SourceNATPoolStatus` has no explicit
-`Deterministic` flag today; r2 detects deterministic pools by cross-referencing
+syslog line on transition. `updatePct` (r7, Codex r5-retry #3) refreshes the
+stored current-pct for an already-raised pool that stays above clear — it mutates
+ONLY the displayed value (under the mutex) and emits NO syslog (no transition),
+so `show security alarms detail` shows a live pct instead of the stale raise-time
+value. Note `SourceNATPoolStatus` has no explicit `Deterministic` flag today; the
+monitor detects deterministic pools by cross-referencing
 `cfg.Security.NAT.SourcePools[poolName].Deterministic != nil` (the config is the
 source of truth for pool kind).
 
@@ -521,6 +570,15 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
   prune (it drops out of the rule-referenced `eligible` set), and a clear is
   emitted. Mutation: if eligibility iterated `cfg.SourcePools` instead of
   rule-references (the r5 bug), the alarm sticks forever and this test fails.
+- **Unit (r7, Codex r5-retry #2):** when `status.LastSnapshotGeneration <
+  appliedGen` (helper lags config), numeric raise/clear is HELD (a pool that would
+  otherwise cross a threshold neither raises nor clears that tick), but a
+  config-removed/unreferenced pool IS still pruned/cleared. Mutation: removing the
+  generation gate lets a stale-counter tick raise/clear → test fails.
+- **Unit (r7, Codex r5-retry #3):** an already-raised pool whose utilization
+  changes but stays above clear gets its displayed pct refreshed each tick
+  (assert the stored pct updates) WITHOUT emitting a syslog line (assert no clear/
+  raise emitted). Mutation: dropping `updatePct` leaves the pct stuck → test fails.
 - **Unit (r4, Codex r3 #6):** every withdrawal of a raised alarm emits a clear —
   assert a clear is emitted (recorder seam) when the pool drops below clear, is
   removed from config, is converted to deterministic (prune path), and when the
@@ -548,6 +606,8 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
 | Monitor adds control-socket traffic | Use new `Manager.LastStatus()` cached accessor, never `Status()` (r2 — AGY M2) |
 | Active alarm stuck after pool removal/rename/un-reference | Prune `activeAlarms` for pools no longer ELIGIBLE by RULE-REFERENCED config semantics each tick (r6 — AGY M3 / Codex r5 #1) — NOT merely "absent from snapshot" |
 | Pool stays configured but its last source-NAT rule is removed | Eligibility is rule-referenced, so the pool drops out of `eligible` → prune clears its alarm (r6 — Codex r5 #1); status producer is rule-derived (`status.rs:9-17`) |
+| Helper status lags fresh config → stale counters vs new capacity | Generation-coherency gate: HOLD numeric eval when `status.LastSnapshotGeneration < appliedGen`; config-derived prune still runs (r7 — Codex r5-retry #2) |
+| `show security alarms detail` shows stale raise-time pct | `updatePct` refreshes the displayed pct each tick while held (no syslog) (r7 — Codex r5-retry #3) |
 | Local-CLI vs gRPC alarm output divergence | Update BOTH render sites via a shared formatter (r2 — Codex F2) |
 | uint16 capacity underflow on `PortLow>PortHigh` | Guard + uint64 math, cast operands BEFORE subtraction (r3 — AGY M5/Codex F4/NEW-1 FOLD-5) |
 | Nil `ActiveConfig()` panics the monitor | Nil-guard cfg first, clear-all-and-return (r3 — Codex NEW-3) |
@@ -560,7 +620,7 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
 | Using the dead eBPF `ReadNATPortCounter` by mistake | Plan mandates allocator snapshot; code review must confirm |
 | Log spam | Emit only on transition, never per tick (enforced by design + test) |
 | Deterministic pools mis-measured by UsedPorts | Deterministic pools SKIPPED in r1 (block-based util is a follow-up); persistent-NAT pools use raw UsedPorts in r1 (r5 — Codex r4 #7) |
-| Configured pool transiently absent from snapshot clears its alarm | Eligibility is CONFIG-derived; absent snapshot HOLDS, only config-removal/det-convert clears (r5 — Codex r4 #4) |
+| Configured pool transiently absent from snapshot clears its alarm | Eligibility is RULE-REFERENCED config; absent snapshot HOLDS, only unreference/config-removal/det-convert clears (r6/r7 — Codex r4 #4 + r5 #1) |
 | Clear-all/prune self-deadlock or blocks render mutex on syslog | Snapshot keys under mutex; emit syslog outside the lock (r5 — Codex r4 #5) |
 
 ---
