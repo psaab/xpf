@@ -1,7 +1,9 @@
 # #2004 — consolidate `pkg/daemon` device_map + rss_indirection into `pkg/daemon/multiqueue/`
 
-**Status:** DRAFT (research, awaiting plan-review). No code written, no
-production source touched, no PR opened.
+**Status:** PLAN-KILLED (converged 2026-06-19 — AGY PLAN-KILL-CONFIRMED +
+Claude SMR confirmed against reproduced edge/grep evidence; Codex review
+ran but its result infra-dropped). No code written, no production source
+touched, no PR opened.
 
 **Recommendation: PLAN-KILL** (close as won't-fix / tracked-decision),
 with a clearly-scoped *Path-A increment* available if the campaign owner
