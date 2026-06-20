@@ -1,0 +1,65 @@
+HOSTILE PLAN REVIEW. You are reviewing a research plan-of-action (NOT code).
+Repo: xpf (Junos-style firewall). Package under review: pkg/ra (embedded IPv6
+Router Advertisement sender; replaces radvd). Issue #2033, severity HIGH (HA
+failover correctness, post-failover IPv6 blackholing).
+
+Plan doc: docs/research/2033-ra-withdraw-serialize/plan.md (read it).
+Source you MUST verify the plan against:
+  pkg/ra/ra.go      (Manager.Withdraw / WithdrawInterfaces / WithdrawOnce /
+                     ResendBurst / Status / Apply / Clear)
+  pkg/ra/sender.go  (sender.run, sendRA, sendGoodbyeRA, sendStartupBurst,
+                     rsReceiver, stop, start, lastRA read/write)
+  callers: pkg/daemon/daemon_run.go:1485, daemon_ha.go:716/958/960/1078,
+           daemon_apply.go:887, pkg/grpcapi/server_show_interfaces_text.go:345
+
+The bug claim: Withdraw*() call s.sendGoodbyeRA() (lifetime=0) BEFORE s.stop(),
+while the sender goroutine (run()) is still alive, so a normal RA (lifetime>0)
+from the periodic timer or the RS-triggered path can be emitted DURING or just
+AFTER the goodbye burst -> host retains/restores the default route toward the
+demoting firewall. Secondary: lastRA data race (sendRA writes, Status reads).
+
+Your job is to FAIL this plan if the architecture is wrong or the race analysis
+is incorrect. Be hostile, not a synthesizer. Specifically attack:
+
+1. RACE ANALYSIS CORRECTNESS. Verify each of the four claimed race windows
+   against the actual source:
+   - W1 periodic-vs-goodbye, W2 RS-triggered 500ms-sleep-vs-goodbye,
+     W3 concurrent WriteTo on the same *ndp.Conn, W4 lastRA read/write.
+   Is any window misdescribed, overstated, or actually NOT reachable? Is W2's
+   "post-sleep re-check only looks at stopCh, and stopCh isn't closed until
+   after the goodbye returns" claim actually true given the code? Check the
+   exact line ordering in Withdraw (goodbye then stop) and in run() (the
+   select re-check after the random sleep).
+2. SECONDARY FINDINGS. The plan claims S1: WithdrawOnce calls start() which
+   runs sendStartupBurst() (3 NORMAL RAs) BEFORE the goodbye — a GUARANTEED
+   ordering inversion, not probabilistic. Verify against ra.go WithdrawOnce +
+   sender.start/run. Is this real? Is the plan's fix (a goodbye-only path that
+   never launches run()) sound, and does it correctly preserve the
+   running-guard (don't clobber a live primary)?
+3. DESIGN SOUNDNESS. Path A (owner goroutine emits the goodbye itself after the
+   loop, single writer, withdrawCh + stopCh) vs Path B (atomic withdrawing flag
+   + raMu double-checked locking, goodbye on caller goroutine). Attack Path A's
+   shutdown handshake: double-close of stopCh (sync.Once), the
+   select-send-or-default withdraw request, conn.Close ordering vs the owner's
+   last WriteTo, rsReceiver/rsCh deadlock on withdraw. Attack Path B's residual
+   hole: does the under-raMu re-check ACTUALLY close W2 (the RS path checks the
+   flag, then sleeps up to 500ms, then writes — is the re-check positioned to
+   catch a post-sleep write)? Is Path B's claim that it closes W2 correct or a
+   lie?
+4. INVARIANTS. Are any HA/demotion invariants missed? In particular: must the
+   goodbye still be 3x for loss tolerance; must the startup burst NOT be
+   suppressed on a legit start; must Clear/Apply-remove send NO goodbye (config
+   change should not blackhole hosts); must conn.Close happen only after the
+   owner stops writing. Did the plan miss any caller-visible behavior change?
+5. TEST PLAN RIGOR. The headline test T1 (injectable NDP writer + clock proving
+   no normal RA after withdrawal starts). Will it actually FAIL on today's code
+   and PASS after the fix, or is it a tautology? Is the proposed seam
+   (raWriter interface vs injected func) viable given buildRA/sendRA/WriteTo?
+   Is the -race coverage (W4) genuinely exercised?
+6. SCOPE/VALUE. Is HIGH justified or is this a theoretical tail? Is PLAN-KILL
+   (Path C) wrongly rejected?
+
+Output a clear VERDICT: PLAN-READY, PLAN-READY-WITH-NITS, NEEDS-REVISION, or
+PLAN-KILL, with numbered findings by severity (CRITICAL/MAJOR/MINOR), each
+citing the file:line you checked. First-pass PLAN-READY-WITH-NITS is a yellow
+flag — if the plan is actually fine, say why each attack vector fails.

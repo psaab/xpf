@@ -1,0 +1,50 @@
+HOSTILE ADVERSARIAL PLAN REVIEW — ROUND 4 (convergence check). You reviewed r3
+(PLAN-READY-WITH-NITS) and found two MAJORs: (1) Apply blocking under m.mu
+behind the WithdrawOnce claim deadlocks; (2) holding m.mu across the blocking
+withdrawAndStop stalls Status/Apply for hundreds of ms on multi-iface demotion
+(and noted the graceful-upgrades-hard logic becomes necessary once m.mu is
+released). The plan is now r4 and folds those plus Codex's r3 findings. Read the
+files directly (exact paths below); do not search.
+
+PLAN DOC: /home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/docs/research/2033-ra-withdraw-serialize/plan.md
+SOURCE:
+/home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/pkg/ra/ra.go
+/home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/pkg/ra/sender.go
+/home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/pkg/daemon/daemon_ha.go
+
+Context: xpf firewall, pkg/ra = embedded IPv6 RA sender. Issue #2033 (HIGH, HA
+failover): goodbye RA (lifetime 0) sent before stopping the sender goroutine →
+a normal RA can follow the goodbye → post-failover IPv6 blackholing. Fix = Path
+A single-owner model: the run() goroutine is the SOLE emitter of all RAs AND
+the SOLE closer of the conn; shutdown via single stopCh close + atomic mode
+{none|hard|graceful}; graceful UPGRADES hard; the goodbye AND the conn.Close
+happen in the owner's finishShutdown AFTER the loop; every write is bounded by
+SetWriteDeadline; Withdraw snapshots+deletes senders under m.mu then withdraws
+OUTSIDE the lock; WithdrawOnce claims the interface and Apply defers claimed
+interfaces to a second pass (never blocks under m.mu, never skips).
+
+Verify your r3 MAJORs are resolved:
+1. r4 I16: Withdraw/WithdrawInterfaces snapshot+delete under m.mu, release,
+   then withdrawAndStop outside the lock. Does this fully remove the stall AND
+   avoid deadlock/double-close? Any new race from deleting the sender from the
+   map before the blocking stop completes?
+2. r4 I4: Apply uses defer+second-pass (NOT block-under-m.mu, NOT skip). Sound?
+   Any deadlock or starvation left?
+
+Then HUNT for anything new in r4:
+- Only the owner closes the conn now (I17). Confirm no caller path closes it →
+  no double-close, no close-before-goodbye.
+- graceful-upgrades-hard (I13) + owner-closes-after-goodbye (I17): can the
+  goodbye still be skipped under any hard-vs-graceful interleave? Is the
+  residual (owner already ran finishShutdown with mode=hard before a graceful
+  upgrade lands) correctly characterized and acceptable?
+- SetWriteDeadline bounded writes (I18): does this introduce a way the goodbye
+  itself is truncated/dropped (deadline too short)?
+- Memory model of the single-channel + atomic-mode handshake still holds?
+- Is the test plan (T1 forced interleave asserting "no lifetime>0 seq after the
+  FIRST goodbye"; T4 claim/Apply-defer; T7 graceful-upgrades-hard) a real guard?
+- Is HIGH justified, or PLAN-KILL?
+
+Output a VERDICT line (PLAN-READY / PLAN-READY-WITH-NITS / NEEDS-REVISION /
+PLAN-KILL) and numbered findings by severity with file:line. Produce the verdict
+even if you cannot read every file.

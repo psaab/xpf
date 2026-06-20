@@ -1,0 +1,47 @@
+HOSTILE PLAN REVIEW — ROUND 3. You reviewed r2 and returned NEEDS-REVISION
+with 2 MAJOR + 1 MODERATE (plus confirming all r1 fixes). The plan is now r3.
+Verify your r2 findings are resolved AND hunt for anything new. Do NOT
+rubber-stamp. Repo: xpf. Package: pkg/ra. Issue #2033 (HIGH, HA failover).
+
+Plan doc: /home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/docs/research/2033-ra-withdraw-serialize/plan.md (now r3; top "Round-2 review deltas folded into r3" maps your r2 findings to fixes).
+Source: pkg/ra/ra.go, pkg/ra/sender.go; daemon callers daemon_ha.go, daemon_apply.go, daemon_ha_vip.go.
+
+Your r2 findings and the r3 response — VERIFY each:
+1. (your MAJOR #1) Invariant overclaim. r3 reworded the invariant to "goodbye
+   is LAST / no lifetime>0 RA after the first goodbye" and says the
+   draining() checks are best-effort early-outs while single-owner emission is
+   the correctness mechanism. Test T1 now asserts seq-order (goodbye seq >
+   every normal-RA seq), not "no normal RA after withdraw begins." Is the
+   reworded invariant now CORRECT and ACHIEVABLE? Is the test assertion sound?
+2. (your MAJOR #2) WithdrawOnce claim must make Apply WAIT not skip. r3 I4 +
+   T4c now require Apply to wait/retry behind the claim, never skip, so a
+   MASTER Apply is not dropped. VERIFY this is specified correctly and the
+   bounded-wait (claim held ~100ms) is acceptable. Any deadlock risk in
+   Apply-waits-on-claim while WithdrawOnce holds it (does WithdrawOnce ever
+   need m.mu while holding the claim, creating a cycle)?
+3. (your MODERATE #3) conn.Close split by mode. r3 I9 + §5: hard stop()
+   closes BEFORE join (unblock stuck op); graceful withdrawAndStop() closes
+   AFTER join (conn alive for goodbye). VERIFY this preserves today's
+   Clear/Apply-remove behavior and that the graceful path has no close-vs-write
+   race (single owner).
+
+ALSO independently re-verify the NEW r3 item (found by the SMR reviewer, now in
+the plan as I13 + the signalStop graceful-upgrades-hard logic):
+- I13: the demotion Withdraw (clearRethServicesForRG, called from the VRRP
+  event-handler goroutine at daemon_ha.go:448/672 and daemon_ha_vip.go:191)
+  runs WITHOUT d.applySem, while ra.Clear (daemon_apply.go:1024) and ra.Apply
+  (daemon_apply.go:1019, daemon_ha.go:911/1055) run UNDER d.applySem. So a
+  config-apply Clear (hard) can race a demotion Withdraw (graceful) for the
+  same sender. CONFIRM this is true against the source. Then verify the
+  resolution in §5 signalStop: graceful does mode.Store(graceful)
+  unconditionally (upgrade), hard does CAS(none,hard) (don't clobber graceful).
+  Is the residual ("owner already read modeHard before the graceful upgrade
+  store") correctly characterized as a sub-µs best-effort window, or is it
+  larger/more dangerous than claimed? Is there a cleaner fix?
+
+Hunt for anything else: deadlocks, lost goodbyes, lost Apply, double-close,
+nil-conn, behavior changes visible to daemon/VRRP callers, test gaps.
+
+Output VERDICT: PLAN-READY, PLAN-READY-WITH-NITS, NEEDS-REVISION, or PLAN-KILL,
+numbered findings by severity with file:line. If r3 resolves your r2 findings,
+say so per finding; if a fix is wrong/incomplete, FAIL it.

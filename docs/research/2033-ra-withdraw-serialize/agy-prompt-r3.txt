@@ -1,0 +1,58 @@
+HOSTILE ADVERSARIAL PLAN REVIEW. Review a research plan-of-action (NOT code).
+Your previous attempt timed out locating files — the EXACT absolute paths are
+below; read them directly, do not search.
+
+PLAN DOC (read this):
+/home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/docs/research/2033-ra-withdraw-serialize/plan.md
+
+SOURCE (read these, verify the plan against them):
+/home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/pkg/ra/ra.go
+/home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/pkg/ra/sender.go
+/home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/pkg/daemon/daemon_ha.go
+/home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/pkg/daemon/daemon_apply.go
+
+Context: xpf, a Junos-style firewall. pkg/ra is the embedded IPv6 Router
+Advertisement sender. Issue #2033 (HIGH, HA failover correctness): the
+Withdraw*() methods send a lifetime-0 goodbye RA BEFORE stopping the sender
+goroutine, so a normal (lifetime>0) RA from the periodic timer or RS-triggered
+path can be emitted DURING/AFTER the goodbye -> a host retains/restores the
+default route toward the demoting firewall -> intermittent post-failover IPv6
+blackholing. Secondary: a lastRA data race.
+
+The plan recommends Path A: make the sender's run() goroutine the SINGLE writer
+of all RAs (startup burst, periodic, RS reply, AND the goodbye). Shutdown is a
+single stopCh close + an atomic `mode` {none|hard|graceful} the owner reads
+when it wakes; the goodbye is emitted by the owner in finishShutdown() AFTER
+the loop, so it is structurally the last RA. graceful UPGRADES hard in
+signalStop (because the demotion Withdraw races a config-apply Clear without
+applySem). WithdrawOnce gets a goodbye-only path that never launches run(),
+claims the interface under m.mu (Apply waits behind the claim, never skips),
+and must not toggle the link.
+
+Be HOSTILE. FAIL the plan if the architecture is wrong or the race analysis is
+incorrect. Specifically attack:
+1. The single-channel + atomic-mode shutdown handshake. Is it memory-model
+   correct (mode stored before close(stopCh), read after the owner wakes on
+   the close)? Can the goodbye ever be SKIPPED (e.g. mode-CAS ordering, the
+   graceful-upgrades-hard logic)? Can a normal RA ever follow the goodbye?
+2. The achievable invariant: the plan claims "goodbye is LAST" is achievable
+   without a per-send lock because the goodbye is owner-emitted on exit, even
+   though there is a check-to-WriteTo gap. Is that reasoning sound, or can a
+   normal RA still land AFTER the goodbye?
+3. graceful-upgrades-hard: is the demotion-Withdraw-vs-config-apply-Clear race
+   (no applySem on the VRRP-event path) REAL? Is the upgrade fix correct, or is
+   there a residual window that drops the demotion goodbye?
+4. WithdrawOnce claim + Apply-waits-behind-claim: any deadlock or starvation?
+   Does it correctly avoid clobbering a live primary AND avoid leaving an
+   interface with no sender?
+5. conn.Close ordering split by mode (before-join for hard, after-join for
+   graceful): correct? any stuck-op or close-vs-write race?
+6. The test plan: does T1 (injectable conn + forced RS-sleep interleave + clock)
+   actually prove the fix and FAIL on the old code? Is the seam viable given
+   rsCh is created locally inside run() and RS arrives via conn.ReadFrom?
+7. Is HIGH severity justified, or should this be PLAN-KILL?
+
+Output a clear VERDICT line (PLAN-READY / PLAN-READY-WITH-NITS /
+NEEDS-REVISION / PLAN-KILL) and numbered findings by severity
+(CRITICAL/MAJOR/MINOR) citing file:line. Keep it focused; produce the verdict
+even if you cannot read every file.

@@ -1,0 +1,51 @@
+HOSTILE PLAN REVIEW — ROUND 2. You reviewed r1 of this plan and returned
+NEEDS-REVISION. The plan has been revised to r2. Verify the fixes are actually
+correct; do NOT rubber-stamp. Repo: xpf. Package: pkg/ra (IPv6 RA sender).
+Issue #2033 (HIGH, HA failover correctness).
+
+Plan doc: docs/research/2033-ra-withdraw-serialize/plan.md (now r2; the top
+"Round-1 review deltas folded into r2" list maps each prior finding to a fix).
+Source: pkg/ra/ra.go, pkg/ra/sender.go (same as r1).
+
+Your round-1 findings and the r2 response:
+- W2 mischaracterized (500ms) -> r2 corrected to the ~100ms goodbye-burst
+  window + the gap before stop() closes stopCh. VERIFY §2 W2 is now accurate.
+- W3 claimed as Go data race -> r2 demotes it to an ordering-only bug, scopes
+  -race to W4/S2. VERIFY §2 W3 and §9 T2.
+- Path A two-channel select race could SKIP the goodbye -> r2 replaces it with
+  a SINGLE stopCh close + an atomic `mode` (shutdownMode) the owner reads in
+  finishShutdown. VERIFY this actually fixes the skip and is memory-model
+  correct: r2 claims "mode stored before close(stopCh) happens-before the
+  receiver's wakeup." Is that a correct application of the Go memory model
+  (channel close is a release; receiving the closed-channel signal is an
+  acquire; the prior atomic store is visible)? ATTACK it if wrong. Also attack:
+  can `select` still pick stopCh and skip goodbye now? (It shouldn't — the
+  owner ALWAYS exits via stopCh and THEN reads mode.) Check the sketch in §5
+  Path A.
+- Path A missed the startup burst -> r2 makes burstInterruptible() check
+  draining()/stopCh between sends. VERIFY a withdraw during startup cannot emit
+  a normal RA after withdrawal begins, AND a legit start still emits all 3.
+- WithdrawOnce point-in-time guard -> r2 adds an atomic claim under m.mu (I4).
+  VERIFY the claim actually closes the Apply-vs-WithdrawOnce race.
+- ensureLinkLocal link toggle -> r2 adds I12 (goodbye-only path must not toggle
+  the link; skip if no LLA). VERIFY this is a real constraint, not hand-waving.
+- rsReceiver 1s stall -> r2 I10. VERIFY the sequencing (owner emits goodbye ->
+  returns -> caller closes conn -> ReadFrom unblocks) has no deadlock.
+
+ALSO attack anything new r2 introduced:
+- The `mode` CAS first-writer-wins: r2 says Clear racing Withdraw may skip the
+  goodbye and calls it acceptable (R1c, Q3). Is that acceptable for HA
+  correctness, or could a legit Withdraw lose to a benign Clear and silently
+  not withdraw? Is the test (T7) sufficient?
+- finishShutdown closes the goodbye on the owner AFTER the loop. Is there any
+  path where the owner returns WITHOUT calling finishShutdown (e.g. the
+  draining() early-return after burstInterruptible at §5)? Trace every return
+  in run() and confirm finishShutdown (or equivalent) runs on every graceful
+  exit and NEVER on a hard stop.
+- conn.Close moved to AFTER the join in BOTH stop() and withdrawAndStop().
+  r2 I9 says this is a behavior change for Clear/Apply-remove. Any harm?
+
+Output VERDICT: PLAN-READY, PLAN-READY-WITH-NITS, NEEDS-REVISION, or PLAN-KILL,
+with numbered findings by severity citing file:line. If r2 genuinely resolves
+your r1 findings, say so explicitly per finding; if any fix is wrong or
+incomplete, FAIL it.

@@ -1,0 +1,44 @@
+HOSTILE PLAN REVIEW — ROUND 4 (convergence check). You returned NEEDS-REVISION
+on r3 with 3 MAJOR + 1 MODERATE + 1 MINOR. The plan is now r4 and folds all of
+them. Verify each is resolved AND that the folds did not introduce new defects.
+Do NOT rubber-stamp; if convergence is real, say PLAN-READY and explain why each
+of your r3 findings is closed. Repo: xpf. Package: pkg/ra. Issue #2033 (HIGH).
+
+Plan doc: /home/ps/git/bpfrx/.claude/worktrees/agent-a2ba3a465d97da6a7/docs/research/2033-ra-withdraw-serialize/plan.md (r4; top "Round-3 review deltas folded into r4" maps your r3 findings to fixes).
+Source: pkg/ra/ra.go, pkg/ra/sender.go; pkg/daemon/daemon_apply.go (note the isCluster guard ~line 1016), daemon_ha.go, daemon_ha_vip.go.
+
+Your r3 findings and the r4 response — VERIFY each is correctly resolved:
+1. (your MAJOR #1) close race breaks graceful-upgrades-hard. r4 I17 + §5
+   finishShutdown: ONLY the owner closes the conn, in finishShutdown, AFTER the
+   goodbye. stop()/withdrawAndStop() just signalStop + <-stopped (no caller
+   close). Does this fully eliminate the close-before-goodbye race? Trace it.
+2. (your MAJOR #2) I13 mis-cited applySem. r4 rewrote I13: in cluster mode
+   daemon_apply.go does NOT call ra.Apply/ra.Clear (isCluster guard); all HA RA
+   ops are on VRRP/reconcile goroutines w/o applySem; m.mu is the only
+   serialization. Confirm this is now accurate against source.
+3. (your MAJOR #3) kill option (b). r4 I4: defer + second pass ONLY; the
+   skip-and-rely-on-reconcile option is removed. Confirm.
+4. (your MODERATE #4) write hang. r4 I18: SetWriteDeadline on every owner
+   write + the seam includes SetWriteDeadline; this also removes the need for
+   hard close-before-join. Confirm bounded writes make owner-closes safe for
+   both modes.
+5. (your MINOR #5) test predicate. r4 §5 invariant + T1 assert against the
+   FIRST goodbye seq, with a note that "last write is a goodbye" is unsound.
+   Confirm.
+
+ALSO check the AGY r3 + SMR r3 fold (r4 I16): Withdraw/WithdrawInterfaces must
+snapshot+delete senders under m.mu, release m.mu, then withdrawAndStop OUTSIDE
+the lock; this avoids the ~100ms-per-iface m.mu stall AND makes the
+graceful-vs-hard race reachable (so the upgrade is necessary). Is I16 correct
+and free of new deadlock/double-close? Does deleting the sender from the map
+before unlock interact badly with the WithdrawOnce claim or a concurrent
+Clear/Apply?
+
+Hunt for NEW defects introduced by the r4 folds: any path where the goodbye is
+still skipped, any deadlock (m.mu vs stopped vs claim), double-close of the
+conn (only the owner closes now — confirm no caller closes), nil-conn,
+unbounded wait, or a behavior change visible to daemon/VRRP callers.
+
+Output VERDICT: PLAN-READY / PLAN-READY-WITH-NITS / NEEDS-REVISION / PLAN-KILL,
+numbered findings by severity with file:line. If r4 has converged, say
+PLAN-READY and confirm each r3 finding is closed.
