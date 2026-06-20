@@ -1,7 +1,116 @@
 # #1958 — Substrate-agnostic interface binding + bootstrap-reachability contract
 
 RESEARCH-ONLY. Architecture proposal for manual approval. No code in this
-branch beyond this doc + reviewer docs. Base: origin/master @ 5d452736e.
+branch beyond this doc + reviewer docs. Original base: origin/master @
+5d452736e (v1-v3). **v4 re-base: origin/master @ 4e6fc2f2e** (+471 commits) —
+see the v4 REFRESH block immediately below.
+
+---
+
+## v4 — REFRESH + RE-BASE (2026-06-20), recommendation revised to PLAN-DEFER for net-new work
+
+**What changed since v3:** master advanced 471 commits (`5d452736e` →
+`4e6fc2f2e`). The v1-v3 architecture below was re-verified against current
+master and **all load-bearing claims survived**:
+
+- `config.LinuxIfName` is still exactly `strings.ReplaceAll(name, "/", "-")`
+  (`pkg/config/types.go:12-14`) — the §5.3 de-risking ("identity transform on
+  slash-free names") stands. Consumer count is now **50 files** (was 45); the
+  argument is count-independent.
+- `enumeratePCINICs` (`linksetup.go:154`), `assignName` (`:227`),
+  `enumerateAndRenameInterfaces` (`:66`), `writeBootstrapFxp0Network` (`:316`),
+  `extractPCIAddr` (`:209`) — all present, structurally unchanged (line
+  numbers drifted by ~15-20; no semantic change).
+- `vmHeuristic` (`host_tunables.go:126`) still inspects `/sys/hypervisor/type`
+  + cpuinfo `hypervisor` flag behind the mockable `hostTunableFS` (`:46`) —
+  §6.2's "extend this exact function" and the ARM64-misclassification fold
+  (r2 fold A) both hold.
+- `bootstrap.go` lifeline machinery present and **still PCI-keyed**:
+  `defaultMgmtInterface = "fxp0"` (`:92`), `lifelineRecord` (`:494`),
+  `pciAddrForInterface` builds the record purely from `busAddr` (`:611-621`),
+  `protectedInterfacesWith` with the `narrowFxp0` OQ-D escape valve
+  (`:683-697`). The r2 fold B finding ("the lifeline record is PCI-keyed and
+  must be generalized to `pci → perm-mac → kernel-name`") is **confirmed still
+  true** against current code, NOT yet fixed.
+- `compiler_iface.go` reconcile still marks unmanaged NICs `Unmanaged` +
+  `always-down` (`:1194-1198`) AND now carries the **shipped** #1956
+  `leave-alone` skip (`:1132-1163`).
+
+**Materially new fact since v3: Slice A (#1956) SHIPPED.** `pkg/devicemap/`
+exists on master (`devicemap.go`, `devicemap_test.go`); the `chassis
+device-map` grammar, compiler, schema, `show chassis device-map [candidates]`,
+`unmapped-interface-policy leave-alone`, and the PCI-primary + perm-MAC
+identity resolver are all merged (commits `1fc18c023`..`d50db21dc`; #1956
+issue CLOSED). The v3 recommendation "ship Slice A first, then file B/C as
+follow-ups" is therefore **already half-executed**: the foundation is in.
+
+**The decisive finding: Slices B and C have NO concrete consumer.** A current-
+master scan found:
+- **Zero** container-substrate demand — no open/closed issue names container
+  (incus-container / docker / k8s) as a target; no follow-up issue was ever
+  filed for Slice B (alias-mode) or Slice C (substrate detector /
+  `platform-profile`).
+- **Zero** container-targeting code — `grep` over `pkg/**` + `cmd/**` for
+  `dockerenv|containerenv|alias-mode|platform-profile|platformProfile` returns
+  nothing. The substrate detector and alias enumerator do not exist even in
+  skeleton.
+- Production image (`scripts/image/bake.py`) targets the VM/appliance base
+  only; the only `container`/`docker` hits under `scripts/image/` are the
+  **incus VM-guest agent** (`incus-agent.service`), not a container runtime.
+- The two substrates xpf actually runs on today — **VM** (positional
+  enumeration, status quo, works) and **bare metal** (#1956 device-map,
+  shipped) — are **both already covered**. The container axis, which §0/§5
+  themselves call "the riskiest unknown" and "the umbrella's net-new burden,"
+  is **speculative**: it has no operator, no test substrate, and no issue
+  asking for it.
+
+**Revised recommendation: PLAN-DEFER for the net-new umbrella work (Slices
+B + C). Keep #1958 OPEN as the architecture record; do NOT `/engineer` it
+now.** Rationale (per the project's own "build it when there is a concrete
+second substrate" discipline, mirroring the #1760 PLAN-KILL-at-zero-incidence
+and #1782 capture-gated-deferral precedents):
+
+1. **The architecture is sound and worth keeping** — the binding/configuration
+   split, the three-axis framing, and the de-risked alias-mode blast radius
+   are all validated. This doc is the canonical design for when container
+   demand appears. PLAN-DEFER, not PLAN-KILL: the design is correct, only the
+   *timing* is premature.
+2. **Slice B/C are not free** — v3's own honest-scope note flags r2 fold B
+   (generalize the lifeline record beyond PCI) as "real work, not a doc
+   tweak." Implementing a substrate detector, a non-PCI alias enumerator, an
+   `eth0`-name 50-consumer audit, AND a generalized non-PCI lifeline resolver
+   — all to serve a substrate **nobody is asking for** and there is **no CI
+   substrate to smoke it on** (the project smokes only on the loss userspace
+   VM cluster) — is speculative surface area on the single most fragile part
+   of bring-up. Untested-because-untestable container bring-up code is a
+   liability, not an asset.
+3. **The gating prerequisite is concrete container demand.** When a real
+   container target lands (an issue: "run xpf in an incus-container / docker /
+   k8s pod with veth `eth0`"), `/engineer 1958` can start from this exact doc
+   — the design is plan-ready and the blast radius is mapped. Until then the
+   marginal value of writing the code is ~zero and the marginal risk
+   (untestable bring-up regressions, 50-consumer audit churn) is real.
+
+**Concrete deferral exit criteria (what un-defers this):**
+- A filed issue naming a specific container substrate xpf must run in, with a
+  reachable test environment (an incus-container or docker profile the smoke
+  harness can stand up), OR
+- A non-container driver for the generalized non-PCI lifeline (r2 fold B) —
+  e.g. a VMBus/XenBus (Hyper-V/Azure/AWS-Xen) VM target actually being
+  provisioned, where `enumeratePCINICs` and the PCI-keyed lifeline both fail
+  today. **If that VM-substrate need is real and the container need is not,
+  the right increment is a narrow "non-PCI VM lifeline + non-PCI discovery"
+  slice — NOT the full container alias-mode + detector + platform-profile
+  umbrella.** That would be a new, smaller research scope, not this umbrella.
+
+**What is NOT deferred:** Slice A (#1956) is shipped and stays. The v1-v3
+architecture below is preserved verbatim as the design-of-record. If the user
+disagrees with the defer and wants Slice B/C built speculatively anyway, the
+plan below is plan-ready to `/engineer` as-is — the defer is a *judgment about
+timing/priority*, not a defect in the design.
+
+---
+
 
 This is the **umbrella / architecture-level** generalization. **#1956 is its
 bare-metal increment** — its v3 plan (`research/1956-bare-metal-device-map`)
