@@ -7467,3 +7467,16 @@ top.
   pkg/config/ipsec_proposal_ref_test.go, pkg/ipsec/ipsec_test.go,
   pkg/config/parser_security_test.go, pkg/ipsec/README.md,
   docs/pr/2073-ipsec-pfs/plan.md
+
+- **Timestamp**: 2026-06-20
+  **Action**: /research #1958 refresh — re-base v3 plan to current master
+  (+471 commits), re-verify all load-bearing code claims (survived), find
+  Slice A (#1956) SHIPPED, find the `make test-ct` / `xpf-container` veth
+  substrate (r4 Codex catch refuted the false "zero container consumer"),
+  correct the rationale, converge 3-way at r5 on PLAN-READY-as-design-of-record
+  + PLAN-DEFER the net-new Slices B+C. No production code touched.
+  **File(s)**: docs/research/1958-substrate-binding/plan.md (v5),
+  docs/research/1958-substrate-binding/review-claude-smr-r4.md,
+  docs/research/1958-substrate-binding/review-claude-smr-r5.md,
+  docs/research/1958-substrate-binding/review-codex-r5.md,
+  docs/research/1958-substrate-binding/review-agy-r5.md
