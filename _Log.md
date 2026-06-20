@@ -1,5 +1,28 @@
 # Action Log
 
+## 2026-06-19 — #1925 Item 1 research (root-partition auto-grow) — DRAFT v2
+
+- **Timestamp**: 2026-06-19
+- **Action**: /research (NOT /engineer) for #1925 Item 1 (root-partition
+  auto-grow on operator-resized disks). Stops at a DRAFT plan; no source
+  touched, no PR, no Codex/AGY. Rewrote the prior v1 plan after verifying
+  its load-bearing claims directly against the cached Ubuntu 26.04 cloudimg
+  (`~/.cache/xpf-image-bake/...img`) with virt-filesystems/guestfish.
+  Resolved v1's three "blocking" empirical unknowns OFFLINE: (C) root
+  partition GUID is the discoverable root-x86-64 GUID → `Type=root` matches,
+  no retag; (D) root (`sda1`) is the physically-LAST partition → "grow into
+  trailing free space" is safe; (B/corrected) there is NO `x-systemd.growfs`
+  in fstab (v1 was wrong) — both partition and fs grow were cloud-init's,
+  now purged. Also found (E) `systemd-repart` is NOT installed (no binary/
+  service/package) but `growpart`+`resize2fs` ARE present, and (§6.3) the
+  #1930 A/B substrate is files on the single untouched ESP, not partitions,
+  so a root grow cannot disturb it. Verdict upgraded v1 DEFER-LAB →
+  PLAN-READY; recommend Path A (growpart+resize2fs one-shot, no new package,
+  cannot reformat/shrink) over Path B (systemd-repart, the issue's named
+  mechanism). Offline-shippable + offline-validatable (validate.py Scenario
+  D + a #1930 promote/rollback regression on a grown image).
+- **File(s)**: docs/research/1925-repart-root-autogrow/plan.md, _Log.md
+
 ## 2026-06-20 — #2034 RA link-local review follow-up (regression test)
 
 - **Timestamp**: 2026-06-20
