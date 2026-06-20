@@ -1,12 +1,57 @@
 # Plan of Action — #2078: rst-invalidate-session / no-syn-check / no-syn-check-in-tunnel enforcement on the userspace dataplane
 
 - **Issue:** #2078 (audit-verified, severity LOW)
-- **Revision:** r1 (initial draft for hostile review)
+- **Revision:** r2 (converged after 3-way hostile review)
 - **Branch:** `research/2078-tcp-state-enforcement`
-- **Status:** DRAFT — awaiting 3-way hostile plan review (Codex + AGY + Claude SMR)
+- **Status:** CONVERGED → **PLAN-KILL** (recommend Path C2 — warn-and-document)
 - **Mode:** /research — STOPS at PLAN-READY or PLAN-KILL. No code, no PR.
 
+> **r2 convergence note.** Three hostile reviewers (two independent Claude
+> general-purpose + Claude SMR) converged on **PLAN-KILL favoring Path C2**.
+> r1's recommendation (Path B) did not survive source verification: (1) the
+> project already made an explicit, reviewed decision to keep this entire
+> TCP-session knob family config-only (#2008 M9 + active-active RST design
+> doc — see new §0); (2) `no-syn-check-in-tunnel` has no implementable
+> dataplane signal (`fabric_ingress` is the HA link, not a security tunnel);
+> (3) the syn-check gate model was too coarse (must be `SessionOrigin::
+> ForwardFlow`, not "non-reverse" — else it drops host-bound `LocalMiss` and
+> HA `SyncImport` installs); (4) proportionality (two LOW rarely-used knobs vs
+> forwarding-hot-path risk) favors warn-and-document. Path B is retained below
+> as the rejected-if-ship option with the corrections folded in, for the
+> record and for any future maintainer override.
+
 ---
+
+## 0. Decisive prior art (the reason this is PLAN-KILL)
+
+The project has **already made and merged a reviewed decision** to keep this
+exact knob family config-only:
+
+- **#2008 M9** added a *fourth* sibling, `NoSequenceCheck`
+  (`pkg/config/types_security.go:110-128`, commit `8c2a0c3c8`, an ancestor of
+  the base). Its in-source comment is the explicit posture: *"Typed-config
+  only today, exactly like NoSynCheck / RstInvalidateSession: the userspace
+  AF_XDP dataplane does not currently perform TCP sequence-number window
+  validation, so there is nothing to skip yet. The field captures operator
+  intent at commit ... and is the single seam a future sequence-checking
+  dataplane would read."*
+- **RST handling is already designed** in
+  `docs/active-active-new-connections.md:840-890`: suppress RST→CLOSED for
+  ESTABLISHED sessions, forward the RST to endpoints, and keep
+  `rst-invalidate-session` as an opt-in override *"for users who opt in,
+  accepting the stream-death risk"* — explicitly chosen over sequence
+  validation because *"BPF conntrack doesn't track TCP sequence numbers ...
+  most stateful firewalls don't immediately kill sessions on RST without
+  sequence validation."* This is exactly RISK-2, already decided.
+- **Config-mode schema completion is already done** for all four knobs
+  (`pkg/config/schema_security.go:243-246`).
+
+So #2078 is not an open design question — it is a known, intentional parity
+gap. The only un-handled harm is that an operator can set these knobs and be
+silently misled into believing they are enforced. **Path C2 (commit-time
+advisory + a docs parity note, folded across all four family knobs) removes
+that harm at zero dataplane risk and is consistent with the existing
+decision.** That is the recommended outcome.
 
 ## 1. Problem statement
 
@@ -207,7 +252,25 @@ RST/SYN against window; sync the new state across HA.
   used vSRX knobs.**
 - **Verdict:** REJECT. Out of proportion.
 
-### Path B — Minimal: syn-check + RST-immediate-teardown (NO seq validation)  ← recommended-if-ship
+> **Corrections folded into Path B (from r1 review).** (a) The syn-check gate
+> MUST key on `origin == SessionOrigin::ForwardFlow` (8 origins in
+> `session/entry.rs`), NOT a "non-reverse" split — else it drops host-bound
+> `LocalMiss` installs (BGP/SSH re-attach to the box) and HA `SyncImport`
+> bulk-sync installs. (b) `no-syn-check-in-tunnel` has **no implementable
+> signal**: `metadata.fabric_ingress` / `ingress_is_fabric`
+> (`forwarding/mod.rs:293`) is the HA cluster fabric link, NOT a Junos
+> IPsec/GRE tunnel; there is no decap-ingress tunnel marker on
+> `SessionMetadata`. This knob would have to be dropped or left config-only.
+> (c) r1 file:line cites are stale — `session/mod.rs` was split into
+> `install.rs`/`lookup.rs`/`expire.rs` (#2005); the real forward-create
+> install site is `poll_descriptor/mod.rs` (the `ForwardFlow` origin site),
+> and rst-invalidate teardown is a borrow-sensitive `remove_entry` (eager
+> secondary-index cleanup, #964) on the session-hit read path, not "one
+> branch." (d) No Go↔Rust FlowSnapshot field-parity reflection guard exists
+> (the #1977 artifact is a numeric range test); the net is the §7 round-trip
+> decode test only.
+
+### Path B — Minimal: syn-check + RST-immediate-teardown (NO seq validation)  ← REJECTED-IF-SHIP (retained for the record)
 Wire the three flags (§4). Enforce:
 - `no-syn-check` / `no-syn-check-in-tunnel`: gate the **forward-create**
   install path (not reverse/NAT-reply installs) on `tcp_flags & SYN`,
@@ -229,7 +292,7 @@ Wire the three flags (§4). Enforce:
   default-on but behind the existing config and call it out loudly in
   release notes + docs. Reviewers must converge on this.
 
-### Path C — PLAN-KILL / defer
+### Path C — PLAN-KILL / defer  ← RECOMMENDED (C2)
 Do nothing in the dataplane. Options within C:
 - C1: pure-doc — document that these knobs are accepted-but-not-enforced
   (a known vSRX-parity gap), keep the legacy dead write or remove it, file
@@ -330,31 +393,49 @@ after confirming nothing else reads `FlowConfigValue.TCPFlags`.
   for the syn-check default decision.
 - Tests per §7.
 
-## 10. Recommendation
+## 10. Recommendation — PLAN-KILL, do Path C2
 
-**If shipping: Path B (minimal syn-check + RST-immediate-teardown, no seq
-validation), with syn-check rollout gated per the §6 open decision.**
-Rationale: it is hot-path-cheap (flags already on the fast path; no
-allocations; config-time-predictable branches), reuses the existing
-`tcp_flags`/`closing` plumbing, and delivers the operator-visible behavior
-of all three knobs for the common case at a small, well-bounded surface.
-Path A (full TCP state machine) is rejected as wildly disproportionate to
-two LOW-severity rarely-used knobs.
+**Recommendation: PLAN-KILL #2078 with a Path-C2 follow-up.** All three
+hostile reviewers converged here. Concretely C2:
+1. Emit a **commit-time advisory** that `no-syn-check`,
+   `no-syn-check-in-tunnel`, `rst-invalidate-session`, and `no-sequence-check`
+   are accepted-but-not-enforced on the userspace AF_XDP dataplane (the
+   project's accepted-but-warned pattern for unimplemented knobs). Fold all
+   four family knobs into one advisory.
+2. Add/confirm a **parity-gap note** in the flow/dataplane docs and
+   cross-reference `docs/active-active-new-connections.md` (which already holds
+   the RST design rationale) + the #2008 M9 comment.
+3. **Incidental cleanup:** remove or comment-retire the dead
+   `flow_config_map` `TCPFlags` write (`compiler.go:1069-1080`,
+   `maps_flow.go:24`) after confirming nothing reads
+   `FlowConfigValue.TCPFlags`.
 
-**However, the honest framing is that Path C2 (warn-and-document) is a
-defensible PLAN-KILL** given the LOW severity and that the *real* harm today
-is silent misleading, not a forwarding bug. The single most important harm —
-"operator sets the knob and believes it works" — is removed by C2 at
-near-zero risk. Reviewers should explicitly choose B-vs-C2 with cost/benefit,
-and may converge on PLAN-KILL-with-C2-followup as a legitimate outcome.
+**Why not Path B:** (i) the project already, knowingly, chose config-only-seam
+for this whole family (#2008 M9 + active-active RST doc — §0); (ii) `no-syn-
+check-in-tunnel` has no implementable dataplane signal; (iii) the syn-check
+gate touches the session-create AND session-hit hot paths and has no clean,
+Junos-faithful rollout (RISK-1); (iv) rst-invalidate without window check is
+the already-documented opt-in stream-death tradeoff (RISK-2); (v)
+proportionality — two LOW, rarely-used knobs do not justify forwarding-path
+risk. Path A (full TCP state machine) is rejected outright.
 
-## 11. Open questions for reviewers (must converge)
+**If a maintainer later has a concrete operator need to ENFORCE these**,
+re-open with Path B re-grounded on: `SessionOrigin::ForwardFlow` gating
+(host-bound `LocalMiss` + HA `SyncImport` safe); a real tunnel-decap signal
+(or drop the in-tunnel knob); a resolved RISK-1 rollout; drop/teardown
+counters + a `show security flow` surface; screen / SYN-cookie-flood ordering
+analysis; and a `make test-failover` run that exercises the NEW path (synced
+session with no local SYN; cross-chassis RST-teardown sync), not just
+no-regression.
 
-1. **Ship at all?** B vs C2 — is enforcing two rarely-used LOW knobs worth
-   any hot-path/forwarding-path risk, vs warn-and-document?
-2. **syn-check default:** enforced-by-default (Junos-correct, behavior
-   change) or only-when-configured (safe, non-Junos default)?
-3. **rst-invalidate without window check:** acceptable as a documented
-   weaker-than-Junos behavior given it is opt-in and default-off?
-4. **Dead-code:** remove the `flow_config_map` TCPFlags write now, or leave
-   it (retired) and only stop relying on it?
+## 11. Reviewer convergence
+
+All three converged on **PLAN-KILL → Path C2**:
+- **Reviewer A** (independent Claude): NEEDS-REVISION, explicitly "lean harder
+  toward C2 than the plan does"; the dataplane errors are moot if C2 is
+  chosen — i.e. PLAN-KILL/C2 is the clean exit.
+- **Reviewer B** (independent Claude): PLAN-KILL (favor Path C2).
+- **Claude SMR**: PLAN-KILL (favor Path C2).
+
+Full verdicts: `claude-reviewer-a-plan-r1.md`,
+`claude-reviewer-b-plan-r1.md`, `claude-smr-plan-r1.md`.
