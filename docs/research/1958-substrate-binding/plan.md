@@ -7,7 +7,110 @@ see the v4 REFRESH block immediately below.
 
 ---
 
-## v4 — REFRESH + RE-BASE (2026-06-20), recommendation revised to PLAN-DEFER for net-new work
+## v5 — r4 review fold (2026-06-20): corrected rationale, disposition stays PLAN-DEFER
+
+**v5 supersedes the v4 block. r4 reviewers (Codex + AGY + Claude SMR all
+PLAN-NEEDS-MAJOR) caught two real defects in v4; both are folded here. The
+architecture below (v1-v3) is unchanged; the *disposition* (PLAN-DEFER the
+net-new B/C work) survives, but the v4 *rationale* was materially wrong and is
+rewritten.**
+
+**r4 fold A (Codex — DECISIVE): the "zero container consumer" claim was
+FALSE.** A container substrate is named, tooled, and **maintained** in-tree:
+- `Makefile:177-178` ships `make test-ct` → `test/incus/setup.sh create-ct`.
+- `setup.sh:43` `CT_PROFILE="xpf-container"`; `:296-318` define a privileged
+  container with `eth0..eth4` **veth** NICs (kernel names KEPT, unlike the VM
+  profile which renames `eth0`→`enp5s0` at `:269`).
+- `:511-521` `cmd_create_ct` launches it; `:555-640` `cmd_deploy` pushes
+  `xpfd`/`cli`/`xpf-userspace-dp`, installs `xpfd.service`, starts it.
+- It is maintained, not stale: hardened in #1943 (kernel-coupled provisioning
+  carved to VM-only because "a container shares the HOST kernel") and #1992
+  (multi-firewall-on-bridge guard).
+
+So the v4 phrases "no concrete consumer," "purely speculative," and "no CI
+substrate to smoke it on" are all WRONG. A container substrate exists and
+`test-ct` is a ready-made smoke substrate.
+
+**But xpf-in-container interface bring-up is NON-FUNCTIONAL today — which
+sharpens, not softens, the gap.** The deploy pushes `xpf-test.conf`, which
+references Junos names `fxp0`/`ge-0/0/0..4` (`xpf-test.conf:1-59`). The
+container's NICs are veth `eth0..eth4` with no PCI device symlink, so:
+- `enumerateAndRenameInterfaces` (`linksetup.go:66-73`) hits `len(nics)==0`
+  → logs "no PCI network interfaces found" → returns, renaming nothing.
+- `pkg/devicemap` skips non-PCI interfaces, so #1956 does not cover veths.
+- `bootstrap.go:609-625` records the lifeline by PCI only → the #1922
+  fail-safe is non-functional on veths.
+- `compiler_iface.go` marks unmanaged NICs `always-down` unless device-map
+  `leave-alone` is active.
+This is **exactly the Slice-B gap** (non-PCI discovery + alias-mode +
+non-PCI lifeline), AND `xpf-test.conf` uses Junos names, which is the
+**deferred sub-mode (b)** (logical alias, §5.2 — the harder 50-consumer
+indirection path). `make test-ct` is therefore a **broken-by-design-today**
+xpf-in-container path. No issue tracks it as a bug; it appears used for
+dataplane-isolation experiments where full interface management is not
+exercised, but the path exists and the gap is latent and un-prioritized — NOT
+fictional.
+
+**r4 fold B (AGY): the research branch was on the STALE v3 base.** It was cut
+from `df2235787` (base `5d452736e`), so reviewers reading the checked-out tree
+saw `pkg/devicemap` absent and the line numbers off — the artifact
+contradicted its own text. **Fixed: the branch is now rebased onto
+`4e6fc2f2e`**; the source tree matches the v5 code claims.
+
+**Corrected defer rationale (what actually justifies PLAN-DEFER, post-fold):**
+1. **No bug is filed.** The container path's interface-management breakage is
+   latent and un-prioritized — no operator or issue asks for xpf-in-container
+   to be a *supported* path. `test-ct` is a dataplane-test convenience, not a
+   shipped product surface.
+2. **No remote-reachable non-PCI lockout exists today.** The container's
+   reachability is `incus exec` (delegate); there is no remote SSH lifeline to
+   lose, so the PCI-keyed-lifeline gap (r2 fold B, still real — confirmed at
+   `bootstrap.go:609-625`) is not a *lockout* there. AGY r4 verified no
+   Hyper-V/VMBus, Xen/XenBus, AWS, or Azure provisioning exists in-tree
+   (deploy/bake target KVM/libvirt + incus VMs on standard-PCI virtio;
+   `debian/control:11` amd64-only). So no provisioned remote-reachable non-PCI
+   substrate exists to force the fix now.
+3. **Slice B/C is large surface on the most fragile bring-up code** — a
+   non-PCI enumerator, a non-PCI lifeline resolver, an `eth0`-name consumer
+   audit, a substrate detector, and `platform-profile` — for a path nobody has
+   prioritized making supported.
+
+**Honest correction to the v4 defer arguments:** DROP "no CI substrate to
+smoke it on" — `test-ct` IS one, and that makes Slice B *more* tractable to
+build+verify when prioritized (a real plus, not a defer reason). The defer now
+rests only on (1) no bug filed + (2) no remote-reachable non-PCI lockout +
+(3) large fragile surface.
+
+**Concrete un-defer triggers (refined):**
+- **A filed bug: "xpfd interface management must work in `xpf-container` /
+  `make test-ct`" — i.e. make the container path SUPPORTED.** This trigger
+  already half-exists (the tooling is there); it just needs to become a
+  product requirement. Then `/engineer 1958` Slice B from this doc.
+- A real remote-reachable non-PCI substrate (a provisioned VMBus/XenBus VM)
+  where the PCI-keyed lifeline becomes a live lockout — in which case the
+  right first increment is a NARROW "non-PCI discovery + non-PCI lifeline"
+  slice, NOT the full container alias-mode + detector + platform-profile
+  umbrella.
+
+**Design fork the plan must surface (not bury): the container config naming.**
+`xpf-test.conf` uses Junos names, so a *supported* container path needs EITHER
+sub-mode (b) (the deferred harder logical-alias path, 50-consumer indirection)
+OR `xpf-test.conf` is re-authored with `eth0` kernel names so sub-mode (a)
+(nearly-free, §5.3) covers it. The cheap, recommended first move when this is
+prioritized is sub-mode (a) + an `eth0`-named container config — explicitly
+the §5.2 (a) recommendation. Do not silently assume sub-mode (b).
+
+**Disposition: PLAN-DEFER (net-new Slices B + C), architecture PLAN-READY as
+design-of-record, Slice A (#1956) shipped.** Not PLAN-KILL (architecture is
+sound and `test-ct` proves the substrate is real, so the design will be
+needed). Not PLAN-READY-build-now (no bug filed, no live lockout, large
+surface). If the user wants the container path supported now, the un-defer
+trigger is met and `/engineer 1958` Slice B (sub-mode (a) + `eth0`-named
+container config) is the recommended first increment.
+
+---
+
+## v4 — REFRESH + RE-BASE (2026-06-20) [SUPERSEDED BY v5 ABOVE — retained for history]
 
 **What changed since v3:** master advanced 471 commits (`5d452736e` →
 `4e6fc2f2e`). The v1-v3 architecture below was re-verified against current
