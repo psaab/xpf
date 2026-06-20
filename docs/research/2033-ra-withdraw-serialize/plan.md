@@ -373,11 +373,15 @@ func (s *sender) burstInterruptible() {
 func (s *sender) stop()           { s.signalStop(modeHard);     <-s.stopped }
 func (s *sender) withdrawAndStop(){ s.signalStop(modeGraceful); <-s.stopped }
 
-// NOTE (I16): Withdraw()/WithdrawInterfaces() must snapshot+delete senders
-// under m.mu, RELEASE m.mu, THEN call withdrawAndStop() on the snapshot — never
-// hold m.mu across the ~100ms blocking join (it would stall Status/Apply on the
-// failover hot path). Releasing m.mu is also what makes the graceful-vs-hard
-// race reachable, hence the upgrade logic in signalStop is necessary.
+// NOTE (I16): Withdraw()/WithdrawInterfaces() must, under m.mu, move the
+// sender to a DRAINING TOMBSTONE (NOT bare-delete — a deleted sender looks
+// absent and a concurrent Apply/WithdrawOnce would start a second sender on
+// the same interface, racing the goodbye), signal stop, RELEASE m.mu, then
+// join (<-stopped) outside the lock; on completion remove the tombstone under
+// m.mu. Apply/WithdrawOnce treat a draining tombstone like a claim (I4):
+// defer + wait, never start a new sender. This keeps a single live conn per
+// interface AND frees m.mu during the ~100ms join. Releasing m.mu is also what
+// makes the graceful-vs-hard race reachable, hence signalStop's upgrade logic.
 ```
 
 Key properties:
@@ -561,30 +565,26 @@ I8 — **`ResendBurst` is fire-and-forget today** (`go s.sendStartupBurst()`,
 called from the apply path holding `m.mu`). The refactor must keep it from
 blocking the apply path while still serializing the burst with the owner.
 
-I9 — **`conn.Close()` ordering — split by mode (Codex r2 MODERATE #3).**
-Today `stop()` closes the conn *then* joins (`sender.go:121-125`); this lets a
-stuck packet op be unblocked by the close. r3 KEEPS that order for the **hard**
-path (`stop()`, used by `Clear`/`Apply`-remove): close BEFORE join — those send
-NO goodbye, so closing first is safe and preserves today's behavior. The
-**graceful** path (`withdrawAndStop()`) closes AFTER the join, because the
-owner emits the goodbye in `finishShutdown` and the conn must be alive for it.
-A periodic `sendRA` that is mid-`WriteTo` when a graceful withdraw begins hits
-the owner-serialized path (single writer), so there is no close-vs-write race
-on the graceful path; the owner still treats any post-Close `WriteTo` error as
-benign (`sender.go:215-218`).
+I9 — **`conn.Close()` is owner-only (SUPERSEDED by I17 — Codex r4 MODERATE
+#3).** The r2/r3 "split by mode, caller closes" design is OBSOLETE. In r4+ the
+OWNER is the single closer, in `finishShutdown`, after the goodbye (I17). No
+caller (`stop`/`withdrawAndStop`) closes the conn. This removes the
+close-vs-goodbye race entirely and the bounded writes (I18) make the early
+close unnecessary for unblocking the owner. Disregard any earlier text about
+hard-closes-before-join / caller-closes-after-join.
 
-I10 — **`rsReceiver` lifecycle + shutdown latency.** `rsReceiver` blocks in
-`ReadFrom` with a 1 s deadline and exits on `stopCh` (`sender.go:185-209`).
-Two requirements: (a) the receiver's exit must not deadlock the owner — Path
-A's owner exits on `stopCh` regardless of `rsCh` state; (b) per AGY MINOR #5,
-to avoid a ~1 s shutdown stall, close the conn promptly after the owner emits
-the goodbye so `ReadFrom` unblocks immediately. Sequencing: owner emits
-goodbye in `finishShutdown` → owner returns (`close(stopped)`) → caller's
-`<-s.stopped` returns → caller `conn.Close()` unblocks the receiver. The
-receiver is a daemon goroutine that exits on its next deadline/`stopCh`
-check; it does not need to be joined, but the conn-close bounds its lifetime
-to one deadline at worst. (Acceptable: 1 s tail on a detached receiver, not
-on the withdraw critical path.)
+I10 — **`rsReceiver` lifecycle + shutdown latency (owner-closes variant).**
+`rsReceiver` blocks in `ReadFrom` with a 1 s deadline and exits on `stopCh`
+(`sender.go:185-209`). (a) the receiver's exit must not deadlock the owner —
+the owner exits on `stopCh` regardless of `rsCh` state; (b) the owner's
+`conn.Close()` in `finishShutdown` unblocks `ReadFrom` so the detached
+receiver exits within one deadline at worst. Sequencing: owner emits goodbye
+→ owner closes conn → owner returns (`close(stopped)`) → `<-s.stopped`
+returns. The receiver is a detached goroutine bounded by the owner's close;
+NOT on the withdraw critical path. (Also see I-spin / AGY r4 MINOR #4: bound
+`rsReceiver` against a persistent non-temporary read error so it cannot spin
+at 100% CPU if the interface dies while `stopCh` is still open — add a short
+backoff on consecutive errors.)
 
 I11 — **Startup/re-burst must be interruptible by withdrawal.** Per Codex
 CRITICAL #2: the burst (startup and `ResendBurst`) must check `stopCh`/
@@ -636,23 +636,46 @@ buffered `burstCh` send and a shutdown race, the owner may select `burstCh`
 during draining; `burstInterruptible` re-checks `draining()` and
 short-circuits, so no normal RA escapes after withdrawal. (SMR r2 n2.)
 
-I16 — **`Withdraw`/`WithdrawInterfaces` must NOT hold `m.mu` across the
-blocking `withdrawAndStop()` (AGY r3 MAJOR #2 + MINOR #3 coupling).** Today
-`Withdraw` loops calling `s.sendGoodbyeRA()`+`s.stop()` under `m.mu`
-(`ra.go:101-108`); the refactor's `withdrawAndStop()` blocks on `<-s.stopped`
-for ~100 ms per interface. Holding `m.mu` for that duration blocks all
-`Status()`/`Apply()` for hundreds of ms during multi-interface demotion — on
-the failover hot path. Required shape: under `m.mu`, snapshot the senders to
-withdraw AND delete them from `m.senders` (so `Apply` sees them gone), release
-`m.mu`, THEN call `withdrawAndStop()` on the snapshot (concurrently or
-sequentially) OUTSIDE the lock. IMPORTANT COUPLING: releasing `m.mu` during
-the withdraw is precisely what makes the graceful-vs-hard race on the same
-`sender` reachable (a `Clear`/`Apply` can now call `signalStop(modeHard)` on a
-sender that a graceful withdraw is mid-flight on) — which is why the
-graceful-upgrades-hard logic (§5) is NECESSARY, not redundant. (When senders
-are deleted-before-unlock, a *second* `Clear` won't find the sender, but a
-concurrent `stop()` already in progress on the same `*sender` pointer can
-still race — the upgrade + I17 arbitration covers it.)
+I16 — **Withdraw must not hold `m.mu` across the blocking stop, but must NOT
+delete the sender before its goodbye completes — use a DRAINING TOMBSTONE
+(AGY r4 MAJOR #1 + Codex r4 MAJOR #1; supersedes the r4 delete-before-stop
+shape).** Two competing requirements:
+  - Don't hold `m.mu` across `withdrawAndStop()`'s ~100 ms `<-stopped` (else
+    multi-iface demotion stalls Status/Apply on the failover hot path — AGY r3
+    MAJOR #2).
+  - Don't make a *draining* sender look ABSENT, or a concurrent `Apply`
+    re-promotion / `WithdrawOnce` will start a NEW sender (`sB`) for the same
+    interface while the old one (`sA`) is still emitting its goodbye →
+    EADDRINUSE/stall on `sB`'s `ndp.Listen`, OR `sA`'s goodbye lands AFTER
+    `sB`'s startup burst → re-introduces the exact bug (AGY r4 / Codex r4
+    MAJOR #1).
+RESOLUTION — a **draining tombstone** in the manager keyed by interface
+(separate from `m.senders`, or a per-entry `draining bool`):
+  1. Under `m.mu`: move the sender from "active" to a "draining" set (record
+     the tombstone), set its mode (graceful), signal stop — do NOT block.
+  2. Release `m.mu`.
+  3. Join the sender (`<-stopped`) outside the lock; when it finishes, under
+     `m.mu` remove the tombstone.
+  A concurrent `Apply` / `WithdrawOnce` that finds a **draining** tombstone for
+  an interface treats it like a CLAIM (I4): it must NOT start a new sender —
+  it defers (second pass) and waits for the tombstone to clear before
+  starting. This guarantees a single live `ndp.Conn`/sender per interface at
+  all times (no bind conflict, no goodbye-after-new-burst). The graceful-vs-
+  hard upgrade (§5 `signalStop`) still applies if a `Clear` hits the same
+  draining sender. COUPLING note: the tombstone (not bare deletion) is what
+  makes the design correct AND keeps `m.mu` free during the blocking join.
+
+I16b — **Deferred `Apply` second pass must be EPOCH-GUARDED against stale
+resume (AGY r4 MAJOR #2).** A deferred `Apply` (waiting on a claim/tombstone,
+I4) releases `m.mu` and waits; the node can transition to BACKUP and a
+`Withdraw`/`Clear` can run in the interim. If the deferred `Apply` then wakes
+and starts a sender, it STARTS RA on a BACKUP node — HA state inversion.
+RESOLUTION: a `Manager.epoch` counter bumped on every state-mutating call
+(`Apply`, `Withdraw`, `WithdrawInterfaces`, `Clear`). The deferred `Apply`
+captures `epoch` before releasing `m.mu`; on re-acquire it ABORTS the deferred
+start if `epoch` changed (a newer call superseded it). The newer call's own
+result is authoritative. (Mirrors the per-key epoch pattern used by the
+neighbor resolver, #1769/#1771.)
 
 I17 — **Arbitrate the EFFECTIVE shutdown mode BEFORE any `conn.Close()` (Codex
 r3 MAJOR #1).** The r3 split (hard `stop()` closes BEFORE join) BREAKS
