@@ -1,20 +1,39 @@
 # Plan-of-Action: #2033 — serialize RA goodbye withdrawal with sender shutdown
 
-> Revision: r4 (folds round-3 review: Codex r3 + AGY r3 + SMR r3)
+> Revision: r5 (folds round-4 deltas + adds the hostile §12 Claude self-SMR
+>   and explicit disposition; supersedes the interrupted r5-partial)
 > Branch: `research/2033-ra-withdraw-serialize`
 > Base: origin/master `c4e7c77cd`
-> Mode: /research — STOPS AT PLAN-READY. No production code edits in this branch.
+> Mode: /research — STOPS AT PLAN-READY / PLAN-DRAFTED. No production code
+>   edits in this branch (only files under
+>   `docs/research/2033-ra-withdraw-serialize/`).
 
 ## 1. Status
 
-PLAN DRAFT r4. Round-1 (Codex+AGY+SMR) all NEEDS-REVISION → r2. Round-2 (Codex
-r2 NEEDS-REVISION 2 MAJOR+1 MOD; SMR r2 PLAN-READY after finding I13; AGY r2
-timed out) → r3. Round-3: AGY r3 PLAN-READY-WITH-NITS (independently found the
+PLAN DRAFTED r5 — design converged, ready for /engineer review. History:
+Round-1 (Codex+AGY+SMR) all NEEDS-REVISION → r2. Round-2 (Codex r2
+NEEDS-REVISION 2 MAJOR+1 MOD; SMR r2 PLAN-READY after finding I13; AGY r2 timed
+out) → r3. Round-3: AGY r3 PLAN-READY-WITH-NITS (independently found the
 `m.mu`-held-across-withdraw bottleneck + the deadlock); SMR r3
 PLAN-READY-WITH-ONE-NIT (found the same deadlock); **Codex r3 NEEDS-REVISION**
-(3 MAJOR + 1 MOD + 1 MINOR — the deepest findings yet, all correct). r4 folds
-all of round 3. This document does not modify production source; the only files
-written are under `docs/research/2033-ra-withdraw-serialize/`.
+(3 MAJOR + 1 MOD + 1 MINOR — all correct). r4 folded all of round 3.
+Round-4 deltas (folded here in r5): AGY r4 MAJOR #1 + Codex r4 MAJOR #1 — the
+r4 *delete-before-stop* shape made a draining sender look ABSENT, so a
+concurrent `Apply` re-promote / `WithdrawOnce` could `ndp.Listen` a SECOND
+sender on the same interface mid-goodbye (EADDRINUSE / startup-burst-after-
+goodbye = the exact bug). Resolved with a **draining tombstone** (§5 note +
+I16). Codex r4 MODERATE #3 + AGY r4 MINOR #4 — `conn.Close` is now
+**owner-only** (I9 superseded by I17) and `rsReceiver` gets a consecutive-
+error backoff so a dead interface cannot spin it at 100% CPU (I10).
+This document does NOT modify production source; the only files written are
+under `docs/research/2033-ra-withdraw-serialize/`.
+
+> Branch note: the canonical research branch is
+> `research/2033-ra-withdraw-serialize` (carries the full r1–r5 reviewer
+> artifacts: `codex-plan-r{1,2,3}.md`, `agy-plan-r{1,2,3}.md`,
+> `claude-smr-plan-r{1,2,3,4}.md`, prompts r1–r4). r5 was finalized in a fresh
+> worktree because the canonical branch was locked to an interrupted worktree;
+> the full reviewer history travels with the branch.
 
 ### Round-3 review deltas folded into r4
 - **Owner performs the conn.Close, after the goodbye** (Codex r3 MAJOR #1): the
@@ -900,3 +919,142 @@ Q7 — **`rsReceiver` join vs detach.** r2 leaves `rsReceiver` detached (bounded
 by conn-close + 1 s deadline). Should the owner explicitly join it for a clean
 shutdown (no detached goroutine), at the cost of a slightly more complex
 handshake?
+
+## 12. Claude self-SMR (hostile pass) + disposition
+
+This section is a deliberately adversarial self-review of the plan above,
+written as if trying to PLAN-KILL it. It is the last gate before /engineer.
+
+### 12.1 Attack: "the bug is unreachable, this is theatre"
+
+Strongest kill attempt. Claim: the demoting node cycles its RETH MAC / link
+during demotion, the new primary immediately bursts its own RAs, and RFC
+8028/8106 hosts prefer the live higher/equal-preference router — so a stray
+lifetime>0 RA from the demoted node is overwritten within ~100 ms anyway and
+never causes a durable blackhole.
+
+Rebuttal (why the kill FAILS): (a) S1 is a *deterministic* ordering inversion,
+not a timing tail. `WithdrawOnce` on boot-as-secondary does
+`s.start()` → `go run()` → `sendStartupBurst()` (3 normal RAs) on a SEPARATE
+goroutine, then a caller-goroutine goodbye — verified at `ra.go:167-173` +
+`sender.go:115/134/176-183`. There is no link cycle and no competing primary
+in that path; it installs a default route toward a node booting as SECONDARY.
+(b) W2 is reachable every demotion: a queued RS triggers up to
+`maxRSDelay = 500 ms` of sleep (`sender.go:161-162`) BEFORE the post-sleep
+`stopCh` re-check, and `Withdraw` closes `stopCh` only AFTER the ~100 ms
+goodbye burst returns — so a normal RA can land at the tail of / just after the
+goodbye. (c) host RA caches are sticky: a default route learned with a
+non-zero Router Lifetime persists for that lifetime unless explicitly zeroed;
+the whole point of the goodbye is to zero it, and a normal RA *after* the
+goodbye re-arms it. Conclusion: Path C / PLAN-KILL is NOT defensible. The two
+independent reachable surfaces (S1 deterministic, W2 per-demotion) plus the
+genuine W4 `lastRA` race mean the issue is real and HIGH. **Kill attempt fails.**
+
+### 12.2 Attack: "the fix is over-engineered for a HIGH targeted bug"
+
+The single-owner refactor (Path A) introduces an atomic `shutdownMode`, a
+`sync.Once` close, a `burstCh`, a draining tombstone, graceful-upgrades-hard
+arbitration, bounded writes, and a conn seam. That is a lot of machinery for
+"don't emit a normal RA after the goodbye."
+
+Rebuttal (partial concession): each piece traces to a *specific* reachable
+hazard surfaced by review, not gold-plating — `shutdownMode`+`Once`
+(R1/R1b double-close), graceful-upgrades-hard (R1c, the cluster ops share only
+`m.mu` per I13), tombstone (R-tombstone, second-sender-on-same-iface), bounded
+writes (R13 stuck `WriteTo`), seam (testability). HOWEVER this is a real cost
+on a failover-critical path, which is exactly why **Path B is documented as a
+genuine fallback** and Q1 is left open for /engineer. The honest disposition:
+Path A is recommended but the plan does NOT pretend Path B is unacceptable —
+if /engineer wants a minimal first landing, Path B + the I4/I12/S1/S2 surgery
+is a legitimate smaller diff with a follow-up to single-owner. The plan is not
+over-committed to A.
+
+### 12.3 Attack: "I18 SetWriteDeadline is a fabricated capability"
+
+The plan rests bounded writes on `ndp.Conn.SetWriteDeadline`. If that method
+does not exist, I17 (owner-only close, no early close to unblock a stuck
+write) collapses and a stuck `WriteTo` can wedge withdrawal on the failover
+path.
+
+Rebuttal (VERIFIED, not asserted): the xpf module pins
+`github.com/mdlayher/ndp v1.1.0` (`go.mod:10`). The module-cache source
+(`mdlayher/ndp@v1.1.0/conn.go:106-107`) defines
+`func (c *Conn) SetWriteDeadline(t time.Time) error` (and a `SetDeadline`).
+The seam in §9 already lists `SetWriteDeadline` in the `ndpConn` interface.
+NOTE for /engineer: v1.1.0 also moved `JoinGroup`/`WriteTo`/`ReadFrom`/`dst`
+to `netip.Addr` (not `net.IP`) — the `ndpConn` seam signatures must match
+v1.1.0, and the goodbye-only standalone path must build a `netip.Addr` source
+LLA. **Capability confirmed; only a signature-shape note remains.**
+
+### 12.4 Attack: "graceful-upgrades-hard has an unbounded residual"
+
+If the owner has ALREADY read `modeHard` and entered `finishShutdown` before a
+graceful upgrade store lands, the upgrade is a no-op and the demotion goodbye
+is lost — re-introducing the bug.
+
+Rebuttal (bounded, documented, best-effort): the residual is a sub-µs window
+(store-vs-read on a single atomic, only when a hard `Clear` is already
+mid-shutdown on the SAME sender) and is openly flagged in Q3. The real
+recovery is the NEW primary's RA burst, not this node's goodbye. The plan does
+NOT claim zero residual; it claims the residual is acceptable for a best-effort
+goodbye and offers (Q3) a post-exit standalone goodbye as a follow-up IF
+/engineer rejects the residual. This is honest, not hand-waved. Accepted as a
+known limitation, not a defect.
+
+### 12.5 Attack: "the headline test (T1) can pass on buggy code"
+
+If the test merely asserts "the last write is a goodbye," a normal RA
+interleaved BETWEEN goodbye packets passes while the bug is present.
+
+Rebuttal (already fixed in r4, Codex r3 MINOR #5): T1 asserts **no lifetime>0
+write has a `seq` greater than the FIRST lifetime-0 write**, and forces the bad
+interleave by blocking the owner on an injected RS-sleep channel before the
+withdraw, so the scenario is deterministic (no flakiness) and WOULD emit a
+post-goodbye normal RA on the old caller-goodbye ordering. The predicate is
+sound. The one residual ask for /engineer: ensure the test actually exercises
+the FORCED-failure variant (run the old ordering and assert it FAILS), not only
+the happy-path invariant — §9 T1 already specifies this; /engineer must not
+silently drop the negative arm.
+
+### 12.6 Remaining genuine weaknesses (concede these openly)
+
+- **No live capture yet.** The plan proves the race by construction +
+  unit-level seam; it has NOT been reproduced with a `tcpdump` on a LAN host
+  during a real RG demotion. T10 (`make test-failover` + manual capture) is the
+  intended live gate, but it is a PLAN, not evidence. /engineer should attempt
+  the capture early to convert "by construction" into "observed."
+- **Tombstone adds a third interface state** (active / draining / absent) that
+  every manager method must now reason about (`Apply`, `WithdrawOnce`, `Clear`,
+  `Status`). This is the largest correctness surface the refactor introduces;
+  it is the piece most likely to harbor a follow-on bug. /engineer must add an
+  explicit invariant test: "at most one live `*ndp.Conn` per interface at any
+  time" across concurrent Apply/Withdraw/WithdrawOnce.
+- **`Status()` over a draining tombstone** is unspecified — does a demoting
+  interface still appear in `show ... router-advertisement`? The plan should
+  pick: hide draining tombstones from `Status` (lean) and add a test. Folded
+  as a new open question Q8 below in spirit; /engineer to decide.
+
+### 12.7 Disposition
+
+**Disposition: PLAN-DRAFTED — ready for /engineer review (NOT PLAN-KILL).**
+
+- The bug is real, HIGH, and has at least one DETERMINISTIC reachable surface
+  (S1) plus a per-demotion timing surface (W2) and a genuine Go data race (W4).
+  PLAN-KILL is not defensible (§12.1).
+- The design is converged through four hostile rounds; every machinery element
+  traces to a specific reviewer-surfaced hazard, and the one load-bearing
+  external assumption (I18 `SetWriteDeadline`) is VERIFIED against the pinned
+  dependency (§12.3).
+- **Recommended path: Path A (single-owner goroutine; goodbye emitted by the
+  owner in `finishShutdown`; draining tombstone; graceful-upgrades-hard;
+  bounded writes; conn seam for tests).** Path B remains a legitimate smaller-
+  diff fallback (Q1) if /engineer judges Path A too invasive for a first
+  landing.
+- Conditions on /engineer before merge: (1) keep the T1 negative arm; (2) add
+  the "≤1 live conn per interface" invariant test for the tombstone; (3) match
+  the `ndpConn` seam to `mdlayher/ndp v1.1.0` `netip.Addr` signatures; (4) run
+  `make test-failover` (mandatory — this is on the demotion path) and attempt a
+  live RA capture (T10); (5) decide `Status()` behavior over a draining
+  tombstone.
+- Out of scope for this /research deliverable: any production code edit. This
+  branch contains docs only.

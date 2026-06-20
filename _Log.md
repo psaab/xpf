@@ -6088,3 +6088,7 @@ top.
 - **Timestamp**: 2026-06-19
   - **Action**: /research #2033 — plan.md revised to r4 (folded Codex r3: owner-closes-conn-after-goodbye I17, bounded writes I18, I13 corrected cluster-RA-no-applySem, defer+2nd-pass-only for Apply/claim; AGY r3: dont-hold-m.mu-across-withdraw I16; SMR r3: same deadlock. Fixed invariant test predicate to FIRST goodbye)
   - **File(s)**: docs/research/2033-ra-withdraw-serialize/plan.md
+
+- **Timestamp**: 2026-06-19
+  - **Action**: /research #2033 — finalized plan to r5 (DRAFT-ONLY). Folded round-4 deltas (draining-tombstone I16 supersedes delete-before-stop; owner-only conn.Close I9->I17; rsReceiver error backoff I10). Added §12 hostile Claude self-SMR + explicit disposition=PLAN-DRAFTED, recommendedPath=Path A. Verified I18 SetWriteDeadline exists in mdlayher/ndp v1.1.0 (go.mod:10) and noted its netip.Addr API shift for the ndpConn seam. Branch research/2033-ra-withdraw-serialize already on origin (604d6b852, r5-partial); r5 finalized atop it in a fresh worktree because the canonical branch was locked.
+  - **File(s)**: docs/research/2033-ra-withdraw-serialize/plan.md
