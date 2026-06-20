@@ -29,10 +29,13 @@
 | r7 | Codex (fresh retry, cross-check) | agentId aa0db8139112cf6e0 | PLAN-READY (full 12-point clean pass on r7 base; corroborates substance) |
 | r8 | Claude SMR | claude-smr-plan-r8.md | PLAN-READY (coherent-view + nil-dp verified; commit-ordering re-traced) |
 | r8 | AGY | adversarial-review-mqmtgce3-ao2bh6 | PLAN-REVISE (1 MAJOR: HelperCaughtUp must compare to view.Generation not publishedSnapshot → folded into r9) |
-| r8 | Codex | agentId ac521b4e53a237581 | (running) |
-| r9 | Claude SMR | claude-smr-plan-r9.md | PLAN-READY (HelperCaughtUp predicate fix verified; generation tracking re-traced) |
-| r9 | AGY | (pending) | (pending) |
-| r9 | Codex | (pending) | (pending) |
+| r8 | Codex | agentId ac521b4e53a237581 | PLAN-REVISE (2 MAJOR: lastSnapshot.Generation too STRICT — FIB/neighbor bumps gate alarm off forever; +deferred-clear MINOR +NIT → folded into r10) |
+| r9 | Claude SMR | claude-smr-plan-r9.md | PLAN-READY (HelperCaughtUp==view.Generation verified — but Codex r8 showed it too strict) |
+| r9 | AGY | adversarial-review-mqmtlncr-6hje6n | PLAN-READY (HelperCaughtUp==view.Generation confirmed; apply-window skew eliminated) |
+| r9 | Codex | (superseded by r8's finding which targeted on-disk r9) | folded into r10 |
+| r10 | Claude SMR | claude-smr-plan-r10.md | PLAN-READY (applied-snapshot source verified; FIB/neighbor non-gating re-traced) |
+| r10 | AGY | (pending) | (pending) |
+| r10 | Codex | (pending) | (pending) |
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
 
