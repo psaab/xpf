@@ -2,15 +2,29 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r3 (folds r2 review: Codex r2 NEW-1/2/3 pseudocode hardening)
-- **Status:** PLAN-READY pending r3 re-confirm — Claude SMR r2 PLAN-READY + AGY
-  r2-retry PLAN-READY; Codex r2 returned PLAN-REVISE with 3 pseudocode-quality
-  MAJORs (nil-deref, prune-gap, clear-comparator) now folded into r3 → r3
-  re-review dispatched.
+- **Revision:** r4 (folds Codex r3 #5/#6/#7: sample-vs-eligibility, symmetric
+  clear-syslog, stale-text)
+- **Status:** PLAN-READY pending r4 re-confirm — Claude SMR r3 + AGY r3 PLAN-READY
+  (Codex confirmed all r3 folds); Codex r3 raised 3 second-order findings
+  (transient-snapshot clear, silent-withdraw vs syslog contract, stale §9/§10
+  text) now folded into r4 → r4 re-review dispatched.
 - **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
 - **Recommendation:** Path B — alarm registry rendered in `show security alarms`
   (BOTH render sites) + transition-gated structured syslog, driven by a slow
   (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
+
+### r4 changelog (folds Codex r3 PLAN-REVISE; Codex confirmed all r3 folds first)
+- **#5 transient-snapshot clear:** separated SEMANTIC eligibility (in-config AND
+  non-deterministic → decided independently of the sample) from SAMPLE validity
+  (capacity computable). A pool stays eligible (not pruned) when a single snapshot
+  is uncomputable (`AddressCount==0`/bad ports/cap 0); that tick simply HOLDS —
+  no raise, no clear — instead of spuriously clearing a raised alarm.
+- **#6 silent-withdraw vs syslog contract:** every withdrawal of a raised alarm
+  now emits a `clear` (drop-below, pool-removed/renamed/det-change via prune, and
+  feature-disabled / nil-config early-return). Only the HOLD case (no transition)
+  is silent. A syslog consumer that saw a raise always sees the matching clear.
+- **#7 stale text:** §9 risk table + §10 updated — threshold validation is a HARD
+  commit error (`0 < clear < raise <= 100`), not a "commit-warn"/open question.
 
 ### r3 changelog (folds Codex r2 PLAN-REVISE)
 - **NEW-3 nil-deref:** `store.ActiveConfig()` can return nil (fail-closed,
@@ -256,10 +270,10 @@ only, no socket I/O):
 ```
 cfg := store.ActiveConfig()                      # r3 (Codex NEW-3): may be nil
 if cfg == nil:                                    #   fail-closed nil (store.go:1573-1577)
-    withdraw EVERY activeAlarms entry (empty the map, no syslog) and return  # r3 n1                 #   no config → no alarm state
+    clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6): visible clear, not silent                 #   no config → no alarm state
 alarmCfg := cfg.Security.NAT.PoolUtilizationAlarm
 if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
-    withdraw EVERY activeAlarms entry (empty the map, no syslog) and return  # r3 n1
+    clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6): visible clear, not silent
 status := dp.LastStatus()                         # cached, no socket request (r2)
 
 # r2: DEDUPLICATE by pool name — rules sharing a pool report the SAME UsedPorts
@@ -273,22 +287,30 @@ for s in status.SourceNATPools:
 
 for poolName, s in byPool:
     p, inCfg := cfg.Security.NAT.SourcePools[poolName]
-    if !inCfg: continue                           # removed from cfg → handled by prune (comma-ok, no nil-deref)
-    if p.Deterministic != nil: continue           # skip det pools → handled by prune (r2/r3)
-    if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow): continue  # r3: cast-then-compare
-    capacity := uint64(s.AddressCount) * (uint64(s.PortHigh) - uint64(s.PortLow) + 1)  # r3 (Codex NEW-1/FOLD-5): cast operands FIRST
-    if capacity == 0: continue                    # div-by-zero guard
-    eligible[poolName] = true                     # r3: mark eligible for the prune reconcile
+    # r4 (Codex r3 #5): SEMANTIC eligibility — decided independently of whether
+    # THIS sample can compute utilization. Only config-removal / rename /
+    # convert-to-deterministic make a pool ineligible (→ prune clears its alarm).
+    if !inCfg: continue                           # removed/renamed → not eligible → prune clears (comma-ok, no nil-deref)
+    if p.Deterministic != nil: continue           # converted to deterministic → not eligible → prune clears
+    eligible[poolName] = true                     # r4: eligible regardless of sample validity (HOLD, don't prune, on a bad sample)
+
+    # r4: SAMPLE validity — a transient unreadable sample HOLDS current alarm
+    # state (no raise, no clear) rather than clearing an already-raised alarm.
+    if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow): continue  # uncomputable this tick → hold
+    capacity := uint64(s.AddressCount) * (uint64(s.PortHigh) - uint64(s.PortLow) + 1)  # cast operands FIRST (FOLD-5)
+    if capacity == 0: continue                    # uncomputable → hold (NOT a clear)
     pct := s.UsedPorts * 100 / capacity
     raised := activeAlarms[poolName]
     if !raised && pct >= alarmCfg.RaiseThreshold: raise(poolName, pct)    # raise on >= raise
-    if  raised && pct <  alarmCfg.ClearThreshold: clear(poolName, pct)    # r3 (Codex NEW-1): clear on STRICT < clear
+    if  raised && pct <  alarmCfg.ClearThreshold: clear(poolName, pct)    # clear on STRICT < clear (NEW-1)
 
 # r3 (AGY M3 + Codex NEW-2): prune alarms for any pool no longer ELIGIBLE —
-# covers removed-from-config, renamed, AND changed-to-deterministic, not just
-# absent-from-snapshot.
+# covers removed-from-config, renamed, AND changed-to-deterministic.
+# r4 (Codex r3 #6): this is a REAL clear transition for an externally-visible
+# alarm, so emit the clear path (syslog clear) — NOT a silent drop — so a syslog
+# consumer that saw the raise also sees the matching clear.
 for poolName in activeAlarms:
-    if poolName not in eligible: clearSilently(poolName)
+    if poolName not in eligible: clear(poolName, reason="pool no longer eligible")
 ```
 
 `raise`/`clear` mutate the in-memory active-alarm set (guarded by a mutex; read
@@ -351,12 +373,22 @@ the monitor's active set via a thread-safe accessor. To avoid duplicating render
 logic across the two sites, factor the active-alarm-to-lines formatting into a
 shared helper consumed by both. Class/severity wording to mirror Junos.
 
-### 6.4 Structured syslog on transition
-On raise/clear, emit one line via the existing syslog client path. Reuse the
-generic event emit or add a minimal `RT_NAT`-style formatter. Severity: raise →
-warning/minor, clear → info/notice. Gated entirely behind the state transition →
-at most a couple of lines per pool per utilization excursion. **No per-tick
-logging** (complies with `CLAUDE.md` logging rules).
+### 6.4 Structured syslog on transition (r4 — Codex r3 #6: symmetric raise/clear)
+On EVERY raise→clear and clear→raise transition emit one line via the existing
+syslog client path. Reuse the generic event emit or add a minimal `RT_NAT`-style
+formatter. Severity: raise → warning/minor, clear → info/notice. Gated entirely
+behind the state transition → at most a couple of lines per pool per utilization
+excursion. **No per-tick logging** (complies with `CLAUDE.md` logging rules).
+
+**Every withdrawal of a raised alarm emits a clear — there is no silent drop**
+(Codex r3 #6). A syslog consumer that saw a `raise` must always see the matching
+`clear`, so the clear path fires for ALL of: utilization dropping below the clear
+threshold; the pool being removed/renamed/converted-to-deterministic (the prune
+reconcile calls `clear`, not a silent drop); and the alarm feature being disabled
+or the config going nil (the early-return clears every active alarm before
+emptying the map). The ONLY thing gated to silence is a transient uncomputable
+sample (`AddressCount==0` / bad ports / capacity 0), which HOLDS the current state
+and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
 
 ### 6.5 Out of scope for r1 (explicit)
 - SNMP trap + enterprise OID/MIB (→ follow-up; Path C delta).
@@ -414,6 +446,16 @@ logging** (complies with `CLAUDE.md` logging rules).
   (Codex NEW-3).
 - **Unit:** boundary comparators — at exactly `RaiseThreshold` raises; at exactly
   `ClearThreshold` does NOT clear (strict `<`); clears only below it (Codex NEW-1).
+- **Unit (r4, Codex r3 #5):** an already-raised alarm with a transient
+  uncomputable sample (`AddressCount==0` / `PortHigh<PortLow` / capacity 0) HOLDS
+  — it is NOT cleared and NOT pruned; it re-evaluates normally on the next good
+  sample. Mutation: if eligibility were computed from the sample (the r3 bug),
+  this test fails.
+- **Unit (r4, Codex r3 #6):** every withdrawal of a raised alarm emits a clear —
+  assert a clear is emitted (recorder seam) when the pool drops below clear, is
+  removed from config, is converted to deterministic (prune path), and when the
+  feature is disabled / config goes nil (early-return path). Mutation: switching
+  any of these back to a silent drop fails the test.
 - **Unit (config):** `compiler_nat.go` rejects raise<=clear, out-of-range, and a
   bare `pool-utilization-alarm;` stanza (raise=0) at commit.
 - **Unit:** `showSecurityAlarms` renders the active set (summary + detail).
@@ -440,8 +482,10 @@ logging** (complies with `CLAUDE.md` logging rules).
 | Nil `ActiveConfig()` panics the monitor | Nil-guard cfg first, clear-all-and-return (r3 — Codex NEW-3) |
 | Alarm stuck when pool changed to deterministic / removed from cfg | Prune against an `eligible` set, not snapshot-presence (r3 — Codex NEW-2) |
 | Off-by-one at the clear boundary | RAISE `>=`, CLEAR strict `<`; text and code identical (r3 — Codex NEW-1) |
-| Alarm flap near threshold | Hysteresis (raise!=clear) + slow 10s tick; commit-warn if raise<=clear |
-| `clear=0` (unset) fires/clears spuriously | Define unset→default semantics at commit (open question §10) |
+| Alarm flap near threshold | Hysteresis (raise `>=`, clear strict `<`) + slow 10s tick; **hard commit error if `clear>=raise`** (RESOLVED, not warn — r2/§6.2) |
+| `clear=0` / bare-stanza (unset) fires/clears spuriously | **Hard commit error: require `0 < clear < raise <= 100`** (RESOLVED at `compiler_nat.go:369+`, §6.2) — no longer open |
+| Transient uncomputable sample clears a raised alarm | HOLD on `AddressCount==0`/bad-ports/cap0 (no raise, no clear); eligibility is semantic, not sample-based (r4 — Codex r3 #5) |
+| Silent withdrawal leaves syslog consumer with raise but no clear | All withdrawals (drop-below / pool-removed / det-change / disabled / nil-cfg) emit a clear (r4 — Codex r3 #6) |
 | Using the dead eBPF `ReadNATPortCounter` by mistake | Plan mandates allocator snapshot; code review must confirm |
 | Log spam | Emit only on transition, never per tick (enforced by design + test) |
 | Deterministic/persistent pool utilization semantics off | r1 uses raw UsedPorts; note follow-up; document the limitation |

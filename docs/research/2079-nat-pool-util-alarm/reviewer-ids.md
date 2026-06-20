@@ -11,8 +11,11 @@
 | r2 | Codex (1st) | agentId ab90b37ade3bef368 | INFRA-DROP (empty; after-first-job drop) |
 | r2 | Codex (retry, fresh) | agentId a5710146c20086d4d | PLAN-REVISE (3 NEW MAJOR pseudocode + FOLD-5; all folded into r3) |
 | r3 | Claude SMR | claude-smr-plan-r3.md | PLAN-READY (Codex NEW-1/2/3 + FOLD-5 verified resolved) |
-| r3 | AGY | (pending) | (pending) |
-| r3 | Codex | (pending) | (pending) |
+| r3 | AGY | adversarial-review-mqms98o9-sjn241 | PLAN-READY (all 4 r2-folds confirmed resolved, no new issues) |
+| r3 | Codex | agentId a4d0c901a2724e30d | PLAN-REVISE (confirmed all 4 r3 folds; 2 NEW MAJOR + 1 MINOR → folded into r4) |
+| r4 | Claude SMR | claude-smr-plan-r4.md | PLAN-READY (Codex r3 #5/#6/#7 verified resolved) |
+| r4 | AGY | (pending) | (pending) |
+| r4 | Codex | (pending) | (pending) |
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
 
