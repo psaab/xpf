@@ -1,5 +1,23 @@
 # Action Log
 
+## 2026-06-19 — #2002 / #2004 import-cycle research (DRAFT plans)
+
+- **Timestamp**: 2026-06-19
+- **Action**: Research-only (no production source touched). Verified with
+  build evidence that both modularity-backlog moves create import cycles
+  that do not exist in the current flat layout. #2002: `pkg/config ->
+  pkg/config/ast -> pkg/config` (reproduced; `ast_edit.go` needs the
+  unexported `setSchema`/`schemaNode`, `schema_walk.go` needs the AST
+  types). #2004: bidirectional `pkg/daemon <-> pkg/daemon/multiqueue`
+  (Edge A = ~12 daemon-internal callees; Edge B = 6 device-map symbols +
+  the shared `rssExecutor` family used by 4 unmoved files). Also confirmed
+  #2004's proposed `manager.go`/`rss.go` describe code that does not exist.
+  Both -> PLAN-KILL with a scoped partial-increment fallback. Wrote two
+  converged DRAFT plan docs; no Codex/AGY run (campaign owner reviews
+  later).
+- **File(s)**: docs/research/2002-config-ast-import-cycle/plan.md,
+  docs/research/2004-daemon-multiqueue-import-cycle/plan.md, _Log.md
+
 ## 2026-06-20 — #2034 RA link-local review follow-up (regression test)
 
 - **Timestamp**: 2026-06-20
