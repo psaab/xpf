@@ -3,8 +3,13 @@
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
 - **Revision:** r2 (folds r1 review: AGY M1-M5, Codex F1-F8, Claude SMR M1/m1-m3)
-- **Status:** DRAFT — 3-way hostile plan review, r2 (Claude SMR + Codex + AGY)
-- **Mode:** /research (PLAN-READY or PLAN-KILL; no code, no PR)
+- **Status:** PLAN-READY (converged) — Claude SMR r2 PLAN-READY, AGY r2-retry
+  PLAN-READY, Codex r1 PLAN-READY-WITH-NITS (all nits folded; Codex r2
+  infra-dropped twice — `feedback_codex_infra_must_retry` exception applied)
+- **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
+- **Recommendation:** Path B — alarm registry rendered in `show security alarms`
+  (BOTH render sites) + transition-gated structured syslog, driven by a slow
+  (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
 
 ### r2 changelog (resolved review findings)
 - **CRITICAL fix to the design — DEDUPLICATE, do NOT sum, UsedPorts across rules.**

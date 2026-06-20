@@ -23,3 +23,16 @@ all independently re-verified by me against source and FULLY folded into plan r2
 the dedup-not-sum correction is the most important and was independently
 corroborated by Codex r1 F1). The r2 run's verification trace shows it was
 checking the folded items with no new objection surfaced.
+
+---
+
+## Retry: adversarial-review-mqmrynjs-i3skz0 — VERDICT: PLAN-READY
+
+AGY r2-retry returned a clean verdict confirming all five r1 findings resolved:
+- M1 (double-count): RESOLVED — dedup by pool name (`byPool[s.PoolName]=s`).
+- M2 (socket I/O): RESOLVED — `Manager.LastStatus()` lock-protected cache, no socket.
+- M3 (stuck alarms): RESOLVED — prune alarms for pools absent from config/snapshot.
+- M4 (validation): RESOLVED — hard commit-time `0 < clear < raise <= 100`.
+- M5 (underflow): RESOLVED — uint64 math + `AddressCount==0`/`PortLow>PortHigh` guards.
+Plus confirmed CLI/gRPC parity (both render sites + shared formatter), dead-eBPF
+avoidance, deterministic-pool skip. No new findings. **PLAN-READY.**
