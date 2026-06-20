@@ -23,8 +23,13 @@ infra-blocked exception (Codex absence documented, not silently dropped).
 - AGY r2: job `adversarial-review-mqmr4pfq-ij4ibi` (succeeded) →
   PLAN-NEEDS-WORK (same nil-conn blocker, corroborates A2), doc `agy-plan-r2.md`
 
-## r3 (closes A2/AGY nil-conn test blocker via stepBackup seam)
-- Claude SMR r3: _pending_
-- Hostile reviewer A r3: _pending_
-- Hostile reviewer B r3: _pending (B2 already READY; r3 is a superset)_
-- AGY r3: _pending_
+## r3 (closes A2/AGY nil-conn test blocker via stepBackup seam) — CONVERGED
+- Claude SMR r3: doc `claude-smr-plan-r3.md` → PLAN-READY
+- Hostile reviewer A3: Agent general-purpose `hostile-reviewer-A3`
+  (agentId a876122896625a0ce) → PLAN-READY, doc `hostile-A-plan-r3.md`
+- Hostile reviewer B r3: PLAN-READY (B2 already READY at r2; r3 is a strict
+  superset, no regression)
+- AGY r3: job `adversarial-review-mqmrembn-alenun` (succeeded) → PLAN-READY,
+  doc `agy-plan-r3.md`
+
+**CONVERGED PLAN-READY at r3 — all four reviewers agree.**

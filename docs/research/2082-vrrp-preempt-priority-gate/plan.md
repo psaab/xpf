@@ -517,6 +517,14 @@ implementer prefers not to extract a seam, the alternative is to give the test a
 non-nil `conn`/`afPacketFD` stub so the receiver does not nil-panic — but the
 `stepBackup` seam is cleaner and is the recommended path.)
 
+**Determinism note (reviewer A3):** in the wiring tests, construct
+`masterDownTimer`/`advertTimer` with a long duration (`time.NewTimer(time.Hour)`
+— the established idiom across existing handler tests) so only the pre-loaded
+`preemptNowCh` case is ready and the select picks it deterministically. Do NOT
+use already-expired timers (`time.NewTimer(0)`) in tests #1/#2/#5/#6 — that makes
+the select nondeterministic. Test #8 deliberately uses a short masterDown timer
+to assert the armed-timer invariant.
+
 **Unit (`pkg/vrrp/vrrp_test.go`), new tests:**
 
 1. `TestPreemptNow_LowerPriorityStaysBackup` (**wiring guard, via `stepBackup`
@@ -681,11 +689,22 @@ seam (no `run()` in unit tests → no receiver nil-panic); `AdvertiseInterval`
 added to the §5 snapshot; line cites corrected (372, 727). r3 re-review pending
 to confirm convergence.
 
-- Claude SMR r3: _pending_
-- Hostile reviewer A r3: _pending_
-- Hostile reviewer B r3: _pending (B2 already PLAN-READY at r2; r3 changes are a
-  strict superset addressing A2's blocker, no regression to B2's findings)_
-- AGY r3: _pending_
+- Claude SMR r3: **PLAN-READY** (stepBackup seam closes the blocker;
+  behavior-preserving; deterministic; no new flaw).
+- Hostile reviewer A r3 (A3): **PLAN-READY** (verified the seam avoids the
+  receiver nil-panic — receiver spawned only in run():306; becomeMaster
+  fail-soft holds; cap-1 preempt pre-load deterministic with the long-timer
+  idiom; folds correct).
+- Hostile reviewer B r3: **PLAN-READY** (B2 was already PLAN-READY at r2; r3 is
+  a strict superset addressing only A2's test-construction blocker — no
+  regression to B2's r2 findings, which covered reachability, harm, fix layer,
+  RFC compliance, concurrency, invariants).
+- AGY r3: **PLAN-READY** (seam closes the blocker; fail-soft chain holds;
+  refinements folded; no new flaw).
 
-**Current status: PLAN-READY candidate (r3), pending r3 re-review convergence.**
-**Reachability: CONFIRMED REACHABLE (not PLAN-KILL).**
+**CONVERGED — PLAN-READY at r3. All four reviewers (Claude SMR + hostile A +
+hostile B + AGY) agree.**
+**Reachability: CONFIRMED REACHABLE (PLAN-KILL refuted by all four at r1).**
+**Recommended path: Path A (peer-priority gate on the non-force preempt
+shortcut, strict `>` effective priority, force=true bypass, stepBackup test
+seam).**
