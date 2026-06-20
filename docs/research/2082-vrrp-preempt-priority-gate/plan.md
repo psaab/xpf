@@ -226,9 +226,20 @@ election against the currently-observed master — i.e. respect RFC 5798
 preemption semantics. Eliminate the transient dual-master on sync-hold release
 for a lower-priority preempting node.
 
+**Why the fix is at the VRRP layer (not `rg_state.go`):** the confirmed harm is
+a spurious MASTER `VRRPEvent` from the Secondary that flips `rg_active=true` via
+`allMasterLocked()` (non-strict mode) + removes blackholes + GARP. The ROOT
+cause is the illegitimate VRRP transition; the `rg_active` rule is *correct*
+given a legitimate MASTER. Fixing `rg_state` instead would paper over the wrong
+VRRP state without stopping the spurious VIP add / advert / GARP burst. The
+VRRP-layer gate stops the wrong transition at its source — the right, minimal
+layer.
+
 **Non-goals:**
 - Do **not** change the `ForceRGMaster` (`force=true`) path — cluster-
   authoritative promotion must stay unconditional and immediate.
+- Do **not** change the `rg_state.go` `allMasterLocked()` rg_active rule — it is
+  correct given a legitimate MASTER (see above).
 - Do **not** regress the project's ~60 ms failover or immediate priority-0
   takeover.
 - Do **not** alter the steady-state RFC election (`handleBackupRx`,
@@ -481,7 +492,10 @@ assert `getState()`.
    on today's `if vi.getPreempt() || force`** (which would becomeMaster) — true
    regression guard.
 2. `TestPreemptNow_HigherPriorityBecomesMaster`: priority 200, observed master
-   100 → state → `StateMaster` (drive run loop).
+   100 → state → `StateMaster` (drive run loop). NOTE: `becomeMaster()` spawns
+   `go vi.sendGARP()` unless `suppressGARP` is set — the test should
+   `vi.suppressGARP.Store(true)` (or tolerate the fail-soft GARP goroutine,
+   which no-ops on a fake interface) to avoid a stray goroutine.
 3. `TestShouldPreempt_NoObservedMaster`: `lastMasterSeen` zero → true (helper,
    cold-start).
 4. `TestShouldPreempt_StaleMaster`: `lastMasterSeen` older than
