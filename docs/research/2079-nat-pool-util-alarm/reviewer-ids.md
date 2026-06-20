@@ -17,10 +17,21 @@
 | r4 | AGY | adversarial-review-mqmsfhen-xkokuy | PLAN-READY (all 3 r3-folds confirmed, no new issues) |
 | r4 | Codex | agentId a9f456c3813ea0c67 | PLAN-REVISE (confirmed all 3 r4 folds; 1 NEW MAJOR #4 + MINOR + NIT → folded into r5) |
 | r5 | Claude SMR | claude-smr-plan-r5.md | PLAN-READY (Codex r4 #4/#5/#7 verified resolved) |
-| r5 | AGY | (pending) | (pending) |
-| r5 | Codex | (pending) | (pending) |
+| r5 | AGY | adversarial-review-mqmsmreo-eadvka | PLAN-READY (config-derived inversion stress-tested, no new issues) |
+| r5 | Codex | agentId ae09617e55b8e5564 | PLAN-REVISE (confirmed all r5 folds; 1 NEW MAJOR #1 rule-unreferenced-stuck-alarm + NIT → folded into r6) |
+| r5 | Codex (fresh retry, cross-check) | agentId aa74838bb97bb7ff7 | (dispatched while orig was slow; running) |
+| r6 | Claude SMR | claude-smr-plan-r6.md | PLAN-READY (Codex r5 #1 verified resolved; eligibility model exhausted) |
+| r6 | AGY | (pending) | (pending) |
+| r6 | Codex | (pending) | (pending) |
 
 Copilot joins only at /engineer time on the implementation PR (4th reviewer).
+
+Convergence trajectory: AGY PLAN-READY every round (r1 REVISE → r2-r6 READY).
+Codex found ONE progressively-narrower real defect each round (r2 dedup → r3
+nil/prune/comparator → r4 sample-vs-eligibility/syslog → r5 config-vs-snapshot →
+r6-input config-vs-rule-referenced). Each was verified against source and folded.
+The eligibility model is now exhausted (config-pools ⊋ rule-referenced = the
+exact reportable set), so r6 should be the convergence round.
 
 Infra note (`feedback_codex_infra_must_retry`): AGY r2-1st engine-timed-out
 post-verification → retry PLAN-READY. Codex r2-1st infra-dropped → fresh-session

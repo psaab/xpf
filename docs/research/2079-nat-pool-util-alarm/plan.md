@@ -2,16 +2,34 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r5 (folds Codex r4 #4/#5/#7: config-derived eligibility for the
-  absent-snapshot case, clear-all lock discipline, stale deterministic wording)
-- **Status:** PLAN-READY pending r5 re-confirm — Claude SMR r4 + AGY r4 PLAN-READY
-  (Codex confirmed all r4 folds #5/#6/#7); Codex r4 raised one more MAJOR (#4:
-  absent-snapshot prunes a configured pool's alarm) + a MINOR (lock discipline) +
-  a NIT, all folded into r5 → r5 re-review dispatched.
+- **Revision:** r6 (folds Codex r5 #1: eligibility must be RULE-REFERENCED, since
+  the status producer is rule-derived — a configured-but-unreferenced pool would
+  otherwise hold its alarm forever)
+- **Status:** PLAN-READY pending r6 re-confirm — Claude SMR r5 + AGY r5 PLAN-READY
+  (Codex confirmed all r5 folds #4/#5/#7); Codex r5 raised one more MAJOR (#1:
+  rule-unreferenced configured pool keeps a stale alarm forever) + a NIT (stale §9
+  wording), folded into r6 → r6 re-review dispatched.
 - **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
 - **Recommendation:** Path B — alarm registry rendered in `show security alarms`
   (BOTH render sites) + transition-gated structured syslog, driven by a slow
   (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
+
+### r6 changelog (folds Codex r5 PLAN-REVISE; Codex confirmed all r5 folds first)
+- **#1 rule-unreferenced pool keeps stale alarm forever (MAJOR):** Codex traced
+  the status PRODUCER — `SourceNATPoolStatus` is RULE-derived
+  (`userspace-dp/src/nat/status.rs:9-17` iterates `rules`; Go
+  `buildSourceNATSnapshots` iterates `cfg.Security.NAT.Source`). A pool
+  configured but referenced by NO source-NAT rule never appears in the snapshot,
+  so r5's "eligible = every SourcePools entry" would HOLD its alarm forever (the
+  prune never fires). r6 makes eligibility RULE-REFERENCED: a pool is eligible
+  only if a configured source-NAT rule references it AND it exists AND is
+  non-deterministic. Removing the last referencing rule (pool still configured)
+  now drops it from `eligible` → prune clears. Verified the rule-derived producer
+  against source.
+- **#2 stale §9 wording (NIT):** §9 prune row reworded from "absent pools" to
+  "pools no longer eligible by rule-referenced config semantics".
+- Codex r5 also CONFIRMED all r5 folds (#4 config-derived, #5 lock, #7 det
+  wording) and re-confirmed no double-emit + dedup intact.
 
 ### r5 changelog (folds Codex r4 PLAN-REVISE; Codex confirmed all r4 folds first)
 - **#4 absent-snapshot clear (MAJOR):** r4 still built `eligible` from snapshot
@@ -293,13 +311,18 @@ if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
     clear EVERY activeAlarms entry (emit clear, then empty the map) and return  # r4 (Codex r3 #6): visible clear, not silent
 status := dp.LastStatus()                         # cached, no socket request (r2)
 
-# r5 (Codex r4 #4): eligibility is CONFIG-DERIVED — iterate the CONFIG pools, not
-# the snapshot. A configured non-deterministic pool is eligible whether or not it
-# appears in THIS tick's snapshot. This separates three distinct states:
-#   (a) semantically ineligible  → config-removed/renamed/det-converted → prune CLEARS
-#   (b) eligible but absent       → configured, but no SourceNATPools entry this tick → HOLD
-#   (c) eligible with bad sample  → present but AddressCount==0/bad ports/cap0     → HOLD
-# Only (a) clears; (b) and (c) hold the current alarm state (no raise, no clear).
+# r6 (Codex r5 #1): eligibility is RULE-REFERENCED config — NOT every pool in
+# cfg...SourcePools. The status producer is RULE-DERIVED: SourceNATPoolStatus is
+# emitted per source-NAT rule (userspace-dp/src/nat/status.rs:9-17 iterates
+# `rules`; Go buildSourceNATSnapshots iterates cfg.Security.NAT.Source). A pool
+# configured but referenced by NO source-NAT rule can never allocate ports and
+# never appears in the snapshot — so r5's "iterate SourcePools" would HOLD its
+# alarm FOREVER (the prune never fires because it stays "eligible"). r6 marks a
+# pool eligible only if a configured source-NAT rule references it AND the pool
+# exists AND is non-deterministic. Three states then remain:
+#   (a) ineligible → no referencing rule OR config-removed OR deterministic → prune CLEARS
+#   (b) eligible but absent from THIS tick's snapshot (transient) → HOLD
+#   (c) eligible with bad sample (AddressCount==0/bad ports/cap0)   → HOLD
 
 # r2: DEDUPLICATE by pool name — rules sharing a pool report the SAME UsedPorts
 # (shared Arc<PortAllocatorShared>), so SUMMING would double-count. Take one.
@@ -307,10 +330,18 @@ byPool := {}                                      # pool_name -> SourceNATPoolSt
 for s in status.SourceNATPools:
     byPool[s.PoolName] = s                        # any entry; values identical per pool
 
-eligible := {}                                    # pool_name set: config-derived (in cfg AND not deterministic)
-for poolName, p in cfg.Security.NAT.SourcePools:  # r5: iterate CONFIG, not snapshot
-    if p.Deterministic != nil: continue           # deterministic → ineligible (skipped in r1) → (a) prune clears
-    eligible[poolName] = true                      # eligible regardless of snapshot presence (config is the SoT)
+# r6: build the set of pool names REFERENCED by a configured source-NAT rule.
+referenced := {}                                  # pool_name set
+for rs in cfg.Security.NAT.Source:
+    for rule in rs.Rules:
+        if rule.Then.PoolName != "": referenced[rule.Then.PoolName] = true
+
+eligible := {}                                    # pool_name set: rule-referenced AND exists AND non-deterministic
+for poolName in referenced:
+    p, ok := cfg.Security.NAT.SourcePools[poolName]
+    if !ok || p == nil: continue                  # rule references a missing pool → not eligible (prune clears)
+    if p.Deterministic != nil: continue           # deterministic → ineligible (skipped in r1) → prune clears
+    eligible[poolName] = true                      # eligible regardless of snapshot presence
 
     s, present := byPool[poolName]
     if !present: continue                          # (b) eligible but absent this tick → HOLD (no raise/clear)
@@ -322,10 +353,12 @@ for poolName, p in cfg.Security.NAT.SourcePools:  # r5: iterate CONFIG, not snap
     if !raised && pct >= alarmCfg.RaiseThreshold: raise(poolName, pct)    # raise on >= raise
     if  raised && pct <  alarmCfg.ClearThreshold: clear(poolName, pct)    # clear on STRICT < clear (NEW-1)
 
-# r5: prune alarms for any pool no longer ELIGIBLE. Because `eligible` is now
-# CONFIG-derived (not snapshot-derived), "not in eligible" means exactly
-# config-removed/renamed/converted-to-deterministic — case (a) — NOT a merely
-# absent snapshot (case (b), which held above). r4 (Codex r3 #6): emit the clear
+# r6: prune alarms for any pool no longer ELIGIBLE. `eligible` is RULE-REFERENCED
+# config (r6, Codex r5 #1), so "not in eligible" means case (a): no source-NAT
+# rule references the pool, OR it was config-removed, OR converted to
+# deterministic — NOT a merely absent snapshot (case (b), which held above). This
+# is what clears a pool whose last referencing rule was removed while the pool
+# stayed configured. r4 (Codex r3 #6): emit the clear
 # path (syslog clear), NOT a silent drop, so a consumer that saw the raise also
 # sees the matching clear.
 for poolName in snapshot(keys of activeAlarms):   # r5 (Codex r4 #5): snapshot keys under the mutex first
@@ -478,11 +511,16 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
   — it is NOT cleared and NOT pruned; it re-evaluates normally on the next good
   sample. Mutation: if eligibility were computed from the sample (the r3 bug),
   this test fails.
-- **Unit (r5, Codex r4 #4):** a configured non-deterministic pool with an active
-  alarm but NO `SourceNATPools` entry this tick (transiently absent) HOLDS — not
-  cleared/pruned — but a pool REMOVED from config (or converted to deterministic)
-  IS cleared. Two distinct cases, two assertions. Mutation: if eligibility were
-  snapshot-derived (the r4 bug), the absent-but-configured case fails.
+- **Unit (r5, Codex r4 #4):** a RULE-REFERENCED non-deterministic pool with an
+  active alarm but NO `SourceNATPools` entry this tick (transiently absent) HOLDS
+  — not cleared/pruned — but a pool REMOVED from config (or converted to
+  deterministic) IS cleared. Mutation: if eligibility were snapshot-derived (the
+  r4 bug), the absent-but-referenced case fails.
+- **Unit (r6, Codex r5 #1):** a pool with an active alarm whose LAST referencing
+  source-NAT rule is removed (pool still in `cfg.SourcePools`) IS cleared by the
+  prune (it drops out of the rule-referenced `eligible` set), and a clear is
+  emitted. Mutation: if eligibility iterated `cfg.SourcePools` instead of
+  rule-references (the r5 bug), the alarm sticks forever and this test fails.
 - **Unit (r4, Codex r3 #6):** every withdrawal of a raised alarm emits a clear —
   assert a clear is emitted (recorder seam) when the pool drops below clear, is
   removed from config, is converted to deterministic (prune path), and when the
@@ -508,7 +546,8 @@ and emits nothing (no transition occurred) — see §6.1 (Codex r3 #5).
 |------|------------|
 | `UsedPorts` from a multi-rule pool double-counts (shared Arc) | **Dedup by pool name, take one value (NOT sum)**; dedicated unit test (r2 — AGY M1/Codex F1) |
 | Monitor adds control-socket traffic | Use new `Manager.LastStatus()` cached accessor, never `Status()` (r2 — AGY M2) |
-| Active alarm stuck after pool removal/rename | Prune `activeAlarms` for absent pools each tick (r2 — AGY M3) |
+| Active alarm stuck after pool removal/rename/un-reference | Prune `activeAlarms` for pools no longer ELIGIBLE by RULE-REFERENCED config semantics each tick (r6 — AGY M3 / Codex r5 #1) — NOT merely "absent from snapshot" |
+| Pool stays configured but its last source-NAT rule is removed | Eligibility is rule-referenced, so the pool drops out of `eligible` → prune clears its alarm (r6 — Codex r5 #1); status producer is rule-derived (`status.rs:9-17`) |
 | Local-CLI vs gRPC alarm output divergence | Update BOTH render sites via a shared formatter (r2 — Codex F2) |
 | uint16 capacity underflow on `PortLow>PortHigh` | Guard + uint64 math, cast operands BEFORE subtraction (r3 — AGY M5/Codex F4/NEW-1 FOLD-5) |
 | Nil `ActiveConfig()` panics the monitor | Nil-guard cfg first, clear-all-and-return (r3 — Codex NEW-3) |
