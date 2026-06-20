@@ -247,7 +247,9 @@ for s in status.SourceNATPools:
     byPool[s.PoolName] = s                       # any entry; values identical per pool
 
 for poolName, s in byPool:
-    if s.Deterministic: continue                 # r2: skip det pools (UsedPorts != util)
+    p, inCfg := cfg.Security.NAT.SourcePools[poolName]
+    if !inCfg: continue                          # snapshot pool gone from cfg → prune handles it (avoids nil-deref)
+    if p.Deterministic != nil: continue          # r2: skip det pools (UsedPorts != util; comma-ok guard)
     if s.AddressCount == 0 || s.PortHigh < s.PortLow: continue   # r2: guard underflow
     capacity := uint64(s.AddressCount) * uint64(s.PortHigh - s.PortLow + 1)
     if capacity == 0: continue                   # div-by-zero guard
