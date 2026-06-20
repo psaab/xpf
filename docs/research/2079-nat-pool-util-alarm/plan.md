@@ -2,14 +2,28 @@
 
 - **Issue:** #2079 (`[audit] NAT pool-utilization-alarm is parsed and stored but has no consumer`)
 - **Severity (audit-verified):** LOW
-- **Revision:** r2 (folds r1 review: AGY M1-M5, Codex F1-F8, Claude SMR M1/m1-m3)
-- **Status:** PLAN-READY (converged) — Claude SMR r2 PLAN-READY, AGY r2-retry
-  PLAN-READY, Codex r1 PLAN-READY-WITH-NITS (all nits folded; Codex r2
-  infra-dropped twice — `feedback_codex_infra_must_retry` exception applied)
+- **Revision:** r3 (folds r2 review: Codex r2 NEW-1/2/3 pseudocode hardening)
+- **Status:** PLAN-READY pending r3 re-confirm — Claude SMR r2 PLAN-READY + AGY
+  r2-retry PLAN-READY; Codex r2 returned PLAN-REVISE with 3 pseudocode-quality
+  MAJORs (nil-deref, prune-gap, clear-comparator) now folded into r3 → r3
+  re-review dispatched.
 - **Mode:** /research (stops at PLAN-READY; no code, no PR; awaiting `/engineer 2079`)
 - **Recommendation:** Path B — alarm registry rendered in `show security alarms`
   (BOTH render sites) + transition-gated structured syslog, driven by a slow
   (10s) daemon monitor reading the cached 1 Hz userspace allocator pool snapshot.
+
+### r3 changelog (folds Codex r2 PLAN-REVISE)
+- **NEW-3 nil-deref:** `store.ActiveConfig()` can return nil (fail-closed,
+  `store.go:1573-1577`); §6.1 now nil-guards `cfg` first and clears-all-silently.
+- **NEW-2 prune gap:** the prune loop now reconciles against an `eligible` set
+  (in-config AND non-deterministic), so an alarm clears when its pool is removed
+  from config OR changed to deterministic — not only when absent from the cached
+  snapshot.
+- **NEW-1 clear comparator:** RAISE `pct >= raise`, CLEAR `pct < clear` (STRICT);
+  §6.2 behavior text and the pseudocode now use identical comparators.
+- **FOLD-5 (re-flagged MAJOR):** capacity math casts operands to uint64 BEFORE
+  the subtraction/addition (`uint64(PortHigh)-uint64(PortLow)+1`), not after, so
+  the uint16 arithmetic cannot underflow before the promotion.
 
 ### r2 changelog (resolved review findings)
 - **CRITICAL fix to the design — DEDUPLICATE, do NOT sum, UsedPorts across rules.**
@@ -240,32 +254,41 @@ Loop (slow tick, **10s** — NOT 1s, to avoid flap; reads cached `LastStatus()`
 only, no socket I/O):
 
 ```
-status := dp.LastStatus()                       # cached, no socket request (r2)
+cfg := store.ActiveConfig()                      # r3 (Codex NEW-3): may be nil
+if cfg == nil:                                    #   fail-closed nil (store.go:1573-1577)
+    withdraw EVERY activeAlarms entry (empty the map, no syslog) and return  # r3 n1                 #   no config → no alarm state
 alarmCfg := cfg.Security.NAT.PoolUtilizationAlarm
 if alarmCfg == nil || alarmCfg.RaiseThreshold <= 0:   # disabled / unset (r2)
-    clear-all-and-return
+    withdraw EVERY activeAlarms entry (empty the map, no syslog) and return  # r3 n1
+status := dp.LastStatus()                         # cached, no socket request (r2)
 
 # r2: DEDUPLICATE by pool name — rules sharing a pool report the SAME UsedPorts
 # (shared Arc<PortAllocatorShared>), so SUMMING would double-count. Take one.
-byPool := {}                                     # pool_name -> SourceNATPoolStatus
+# r3: only retain ELIGIBLE pools (in config, non-deterministic) in `eligible` so
+# the prune step below can clear alarms for now-ineligible pools (Codex NEW-2).
+byPool   := {}                                    # pool_name -> SourceNATPoolStatus (raw snapshot)
+eligible := {}                                    # pool_name set: in cfg AND not deterministic
 for s in status.SourceNATPools:
-    byPool[s.PoolName] = s                       # any entry; values identical per pool
+    byPool[s.PoolName] = s                        # any entry; values identical per pool
 
 for poolName, s in byPool:
     p, inCfg := cfg.Security.NAT.SourcePools[poolName]
-    if !inCfg: continue                          # snapshot pool gone from cfg → prune handles it (avoids nil-deref)
-    if p.Deterministic != nil: continue          # r2: skip det pools (UsedPorts != util; comma-ok guard)
-    if s.AddressCount == 0 || s.PortHigh < s.PortLow: continue   # r2: guard underflow
-    capacity := uint64(s.AddressCount) * uint64(s.PortHigh - s.PortLow + 1)
-    if capacity == 0: continue                   # div-by-zero guard
+    if !inCfg: continue                           # removed from cfg → handled by prune (comma-ok, no nil-deref)
+    if p.Deterministic != nil: continue           # skip det pools → handled by prune (r2/r3)
+    if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow): continue  # r3: cast-then-compare
+    capacity := uint64(s.AddressCount) * (uint64(s.PortHigh) - uint64(s.PortLow) + 1)  # r3 (Codex NEW-1/FOLD-5): cast operands FIRST
+    if capacity == 0: continue                    # div-by-zero guard
+    eligible[poolName] = true                     # r3: mark eligible for the prune reconcile
     pct := s.UsedPorts * 100 / capacity
     raised := activeAlarms[poolName]
-    if !raised && pct >= alarmCfg.RaiseThreshold: raise(poolName, pct)
-    if  raised && pct <= alarmCfg.ClearThreshold: clear(poolName, pct)
+    if !raised && pct >= alarmCfg.RaiseThreshold: raise(poolName, pct)    # raise on >= raise
+    if  raised && pct <  alarmCfg.ClearThreshold: clear(poolName, pct)    # r3 (Codex NEW-1): clear on STRICT < clear
 
-# r2 (AGY M3): prune alarms for pools no longer in the snapshot/config
+# r3 (AGY M3 + Codex NEW-2): prune alarms for any pool no longer ELIGIBLE —
+# covers removed-from-config, renamed, AND changed-to-deterministic, not just
+# absent-from-snapshot.
 for poolName in activeAlarms:
-    if poolName not in byPool: clearSilently(poolName)   # pool removed/renamed
+    if poolName not in eligible: clearSilently(poolName)
 ```
 
 `raise`/`clear` mutate the in-memory active-alarm set (guarded by a mutex; read
@@ -275,9 +298,12 @@ syslog line on transition. Note `SourceNATPoolStatus` has no explicit
 `cfg.Security.NAT.SourcePools[poolName].Deterministic != nil` (the config is the
 source of truth for pool kind).
 
-### 6.2 Hysteresis & matching semantics (r2 — RESOLVED)
-- **Hysteresis:** raise on `>= RaiseThreshold`, clear on `<= ClearThreshold`,
-  hold in between.
+### 6.2 Hysteresis & matching semantics (r3 — RESOLVED)
+- **Hysteresis (r3, Codex NEW-1 — exact comparators):** RAISE when utilization
+  `pct >= RaiseThreshold`; CLEAR when `pct < ClearThreshold` (STRICT less-than —
+  "drops below the clear threshold"); HOLD in `[ClearThreshold, RaiseThreshold)`.
+  The pseudocode and this text MUST use these exact comparators (raise `>=`,
+  clear strict `<`) so there is no off-by-one ambiguity at the boundary.
 - **Commit-time validation (RESOLVED — was §10 Q1/Q2; AGY M4 + Codex F7):** add a
   hard validation block in the existing NAT validation section
   (`compiler_nat.go:369+`, same `return fmt.Errorf(...)` style as the
@@ -381,8 +407,13 @@ logging** (complies with `CLAUDE.md` logging rules).
   snapshot, deterministic-pool skip, and — critically (r2) — **two rules sharing
   one pool must NOT double-count** (dedup test; assert pct computed from one
   entry, not the sum). Mutation test: deleting the emit call must fail a test.
-- **Unit:** pool removed/renamed while alarm active → alarm is pruned, not stuck
-  (AGY M3).
+- **Unit:** pool removed/renamed/changed-to-deterministic while alarm active →
+  alarm is pruned, not stuck (AGY M3 + Codex NEW-2 — assert eligible-set prune
+  covers the config-removal and det-change cases, not just snapshot-absence).
+- **Unit:** nil `ActiveConfig()` → monitor clears all and returns, no panic
+  (Codex NEW-3).
+- **Unit:** boundary comparators — at exactly `RaiseThreshold` raises; at exactly
+  `ClearThreshold` does NOT clear (strict `<`); clears only below it (Codex NEW-1).
 - **Unit (config):** `compiler_nat.go` rejects raise<=clear, out-of-range, and a
   bare `pool-utilization-alarm;` stanza (raise=0) at commit.
 - **Unit:** `showSecurityAlarms` renders the active set (summary + detail).
@@ -405,7 +436,10 @@ logging** (complies with `CLAUDE.md` logging rules).
 | Monitor adds control-socket traffic | Use new `Manager.LastStatus()` cached accessor, never `Status()` (r2 — AGY M2) |
 | Active alarm stuck after pool removal/rename | Prune `activeAlarms` for absent pools each tick (r2 — AGY M3) |
 | Local-CLI vs gRPC alarm output divergence | Update BOTH render sites via a shared formatter (r2 — Codex F2) |
-| uint16 capacity underflow on `PortLow>PortHigh` | Guard + uint64 math (r2 — AGY M5/Codex F4) |
+| uint16 capacity underflow on `PortLow>PortHigh` | Guard + uint64 math, cast operands BEFORE subtraction (r3 — AGY M5/Codex F4/NEW-1 FOLD-5) |
+| Nil `ActiveConfig()` panics the monitor | Nil-guard cfg first, clear-all-and-return (r3 — Codex NEW-3) |
+| Alarm stuck when pool changed to deterministic / removed from cfg | Prune against an `eligible` set, not snapshot-presence (r3 — Codex NEW-2) |
+| Off-by-one at the clear boundary | RAISE `>=`, CLEAR strict `<`; text and code identical (r3 — Codex NEW-1) |
 | Alarm flap near threshold | Hysteresis (raise!=clear) + slow 10s tick; commit-warn if raise<=clear |
 | `clear=0` (unset) fires/clears spuriously | Define unset→default semantics at commit (open question §10) |
 | Using the dead eBPF `ReadNATPortCounter` by mistake | Plan mandates allocator snapshot; code review must confirm |
