@@ -1,12 +1,35 @@
 # Plan: DHCP relay cannot unicast OFFER/ACK to broadcast-flag=0 clients (#2076)
 
 - **Issue:** #2076 (audit, severity MEDIUM)
-- **Revision:** r2 (folds r1 review: Codex 2 BLOCKER/6 MAJOR/1 MINOR, AGY
-  1 BLOCKER/5 MAJOR/1 MINOR, Claude SMR 2 MAJOR/4 MINOR — all three
-  PLAN-NEEDS-REVISION, none PLAN-KILL; mechanism choice option (d) endorsed by
-  all three)
+- **Revision:** r3 (r2 folded all r1 findings — at r2 re-review AGY + Claude SMR
+  returned PLAN-READY; Codex returned PLAN-NEEDS-REVISION with doc-quality
+  residuals + one new MAJOR (multi-address giaddr selection). r3 folds those: the
+  mechanism is unchanged, these are spec-clarity + citation fixes.)
 - **Branch:** `research/2076-dhcp-relay-unicast`
-- **Status:** revised — awaiting 3-way re-review (Codex + AGY + Claude SMR)
+- **Status:** revised — at r2 review: AGY PLAN-READY, SMR PLAN-READY, Codex
+  PLAN-NEEDS-REVISION (residuals folded here for r3 convergence)
+
+## Changelog r2 → r3 (Codex r2 residuals)
+- **[Codex r2 #10, MAJOR — multi-address giaddr selection]** The relay's giaddr
+  is `interfaceIPv4()` = the **first non-loopback IPv4** on the interface
+  (relay.go:522-535). The L2 frame's IPv4 **source MUST be exactly that same
+  saved giaddr** (computed once at runRelay:271) — NOT a re-selected address and
+  NOT the per-send re-resolved address list. Per-send re-resolution (§7.2)
+  refreshes only the **ifindex + MAC** for the L2 egress; the **source IP stays
+  the saved giaddr** so it matches what the server saw in the relayed request and
+  what the client expects as the server-identifier source. If the interface has
+  several IPv4s, first-non-loopback is the stable choice already used for giaddr;
+  documenting it here removes the ambiguity. (Same address is used for the
+  ciaddr-via-UDP fallback source.)
+- **[Codex r2 #6, doc]** MTU formula is the L3 bound `20 + 8 + len(payload) >
+  iface.MTU` everywhere; the r2 changelog's `14+20+8` (full-frame size) was
+  informational and is removed to avoid contradiction.
+- **[Codex r2 #7, doc]** Per-send `InterfaceByName` TOCTOU is explicitly
+  acknowledged in §7.2 as benign (failure → Sendto error → broadcast fallback).
+- **[Codex r2 #9, doc]** Removed the last stray `pkg/ra` mention from §6.
+- **[Codex r2 #11, doc]** Corrected line citations against the worktree base:
+  `DHCPRelayGroup` at types_system.go:703 (not 555-559); `compileDHCPRelay` at
+  compiler_services.go:1073 (not 919-996).
 - **Scope:** `pkg/dhcprelay` (DHCPv4 relay) + 4 small `pkg/config` touch points.
   No dataplane, no eBPF, no proto. **Touches HA-relevant behavior** (see §7.6 —
   L2 delivery changes the VRRP-backup duplicate-relay characteristics, so a
@@ -33,8 +56,9 @@
   mandatory (promoted from "manual" to a PR gate). UDP **checksum=0** chosen
   (legal IPv4, drops a bug class). See §7.2, §8.
 - **[MAJOR, Codex#6 / AGY#4]** MTU: raw L2 can't fragment. If
-  `14+20+8+len(payload) > iface.MTU` (L3 `20+8+payload > MTU`), deliberately use
-  the UDP/broadcast fallback so the kernel fragments. See §7.2.
+  `20 + 8 + len(payload) > iface.MTU` (the L3 size — MTU excludes the 14-byte
+  Ethernet header), deliberately use the UDP/broadcast fallback so the kernel
+  fragments. See §7.2.
 - **[MAJOR, Codex#7 / AGY#3 / SMR-F2]** Cached ifindex/MAC go stale on link flap
   / dynamic recreate / VRRP `programRethMAC`. Resolve interface attrs (index +
   MAC) **per send** (garp.go:27-35 precedent) — or reopen on interface-related
@@ -265,9 +289,9 @@ Rationale:
    2131-correct AND does not broadcast every reply. It is what ISC dhcrelay and
    Junos do by default.
 2. **No new privilege/dependency cost:** CAP_NET_RAW is already held; AF_PACKET
-   frame-building is already done four places in this repo (`lldp`, `garp`,
-   `ra`, `vrrp`) — there is a proven template, so the "most code" con of option
-   (a) is materially reduced.
+   frame-building is already done in this repo (`lldp`, `garp`, `vrrp`) — there
+   is a proven template, so the "most code" con of option (a) is materially
+   reduced.
 3. **Operator familiarity + safety valve:** the `overrides always-broadcast`
    knob is the exact Junos surface; it gives operators the option-(c) behavior
    on demand and doubles as the automatic degradation path (if AF_PACKET open
@@ -337,7 +361,18 @@ dhcpv4.go:66). This matrix is the unit-test oracle in §8.1.
   same netdev index the listener is `SO_BINDTODEVICE`-bound to is used (covers
   VLAN sub-interfaces; the kernel applies the sub-interface's VLAN tag on an
   AF_PACKET send to the `.N` netdev — confirm by capture, VRRP precedent
-  comment).
+  comment). **TOCTOU is benign [Codex r2#7]:** if the interface changes between
+  the lookup and the `Sendto`, the syscall returns an interface error (ENODEV/
+  ENXIO) → caught → broadcast fallback. DHCP reply volume is low, so the
+  per-send lookup cost is negligible.
+- **Source IP = the SAVED giaddr [Codex r2#10]:** the L2 frame's IPv4 source is
+  the giaddr computed ONCE at runRelay:271 via `interfaceIPv4()` (= the first
+  non-loopback IPv4, relay.go:522-535) — the same value the server saw in the
+  relayed request. Per-send re-resolution refreshes ONLY ifindex + MAC, never the
+  source IP. When the interface has multiple IPv4 addresses, first-non-loopback
+  is the stable, already-in-use choice; do NOT re-derive a source IP from the
+  per-send address list. The ciaddr-via-UDP fallback (§7.1) uses this same saved
+  giaddr as its local source.
 - **Guards (return error → caller broadcasts):**
   - `pkt.HWType == iana.HWTypeEthernet` **and** `len(chaddr)==6` [Codex#3].
   - `srcIP` (saved giaddr) and `dstIP` (yiaddr) are valid IPv4.
@@ -369,8 +404,10 @@ dhcpv4.go:66). This matrix is the unit-test oracle in §8.1.
 - No change to the WaitGroup join structure — the L2 fd is not a goroutine.
 
 ### 7.4 Config plumbing (Phase 2)
-- `DHCPRelayGroup` gains `AlwaysBroadcast bool` (types_system.go:555-559).
-- `compileDHCPRelay` (compiler_services.go:919-996) parses
+- `DHCPRelayGroup` gains `AlwaysBroadcast bool` (types_system.go:703, struct
+  body).
+- `compileDHCPRelay` (compiler_services.go:1073, the inline+children group loops
+  at ~1106-1145) parses
   `overrides { always-broadcast; }` (block form) **and** the flat-set inline
   spelling `group <g> overrides always-broadcast`. **[Codex#2 BLOCKER]** The
   inline `interface` consumer at compiler_services.go:1113-1114 currently stops
