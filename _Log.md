@@ -1,5 +1,34 @@
 # Action Log
 
+## 2026-06-20 — #2049 research plan r3: record operator fail-safe decision, PLAN-READY
+
+- **Timestamp**: 2026-06-20
+- **Action**: Finalized the #2049/#2050 research plan to PLAN-READY by
+  recording the operator fail-safe decision and resolving the r2 open item
+  (Q3/Q4 deny-vs-allow empty-feed fail-open). Decision: on persistent
+  feed-fetch failure RETAIN last-good prefixes INDEFINITELY; never silently
+  drop a feed to empty (empty denylist = fail-OPEN); drop-to-empty is an
+  explicit operator opt-in via the `hold-interval` knob (absent = retain
+  forever); staleness surfaced loudly (slog.Warn on enter-stale + Prometheus
+  xpf_feed_seconds_since_last_success / xpf_feed_stale + a `show` stale
+  indicator), implemented in the #2050 snapshot layer (PR #2056). Plan edits:
+  header → r3 with PLAN-READY banner; §3 step-5 HoldInterval rewritten to
+  retain-forever-default; new §3a ENFORCEMENT-SEMANTICS subsection stating the
+  per-rule-type empty-feed outcome (deny-from-feed-with-no-prefixes matches
+  nothing = fail-open the default never reaches; allow-side empty falls
+  through to default-deny; NAT name resolves to no addresses) + the loud stale
+  indicator requirement sourced from #2050 FeedInfo.StaleSince/LastError; P-A2
+  marked RESOLVED; §5 risk row bumped Med→High RESOLVED; §8 Q3 RESOLVED
+  (retain-last-good default, not a knob) and Q4 RESOLVED (retain forever;
+  drop only on explicit hold-interval; r2 "match Junos = drop to empty"
+  recommendation removed); §9 sharpest-risk marked RESOLVED; §9 recommendation
+  promoted #2049 to PLAN-READY + strict sequencing note (after #2050/PR #2056
+  merges — #2049 reads the retained snapshot from the feeds Manager). Added
+  claude-smr-plan-r3.md. COMPANION-FREE (Codex/AGY NOT run); plan-doc edits
+  only; no production source touched.
+- **File(s)**: docs/research/2049-dynamic-address-enforcement/plan.md,
+  docs/research/2049-dynamic-address-enforcement/claude-smr-plan-r3.md, _Log.md
+
 ## 2026-06-19 — #2049 research plan r2: re-target enforcement join to userspace path
 
 - **Timestamp**: 2026-06-19

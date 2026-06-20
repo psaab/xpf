@@ -1,5 +1,16 @@
 # Plan: Dynamic-address feed enforcement + refresh correctness (Batch A: #2049 + #2050)
 
+Revision: r3 (2026-06-20) — PLAN-READY. The operator fail-safe decision is
+recorded and Q3/Q4 are RESOLVED (see §8 + the new §3a
+ENFORCEMENT-SEMANTICS subsection). Decision: on persistent feed-fetch
+failure, retain last-good prefixes INDEFINITELY; NEVER silently drop a feed
+to empty (an empty denylist = fail-OPEN). drop-to-empty is an explicit
+operator opt-in via the `hold-interval` knob; absent = retain forever. The
+"match Junos = drop to empty after hold" recommendation from r2 is removed.
+This fail-safe is implemented in the #2050 snapshot layer (PR #2056, reworked
++ merging) which #2049 enforcement READS from — #2049 is therefore sequenced
+strictly AFTER #2050/PR #2056 merges.
+
 Revision: r2 (2026-06-19) — #2049 enforcement-join RE-TARGETED from the
 retired eBPF compiler (`pkg/dataplane/compiler.go`) to the runtime userspace
 snapshot path (`pkg/dataplane/userspace/policies.go` +
@@ -205,8 +216,15 @@ type feedStatus struct {
 4. Compare new hash to current snapshot hash. Replace snapshot + stamp
    `LastSuccess` regardless (it IS a fresh good fetch); fire `onUpdate` **only
    if hash changed**.
-5. Wire `HoldInterval`: if a feed has been failing longer than `HoldInterval`,
-   optionally drop to empty (fail-closed) — see open question Q3.
+5. Wire `HoldInterval` (RESOLVED — Q4): default behavior is retain last-good
+   **forever** on persistent failure (an empty denylist would be fail-OPEN, so
+   silent drop-to-empty is never the default). Drop-to-empty is an EXPLICIT
+   operator opt-in: only when the operator has configured a `hold-interval`
+   does a feed that has been failing longer than that interval drop to empty.
+   Absent / unset `hold-interval` = retain forever. Staleness is surfaced
+   loudly regardless (see §3a): `slog.Warn` on enter-stale +
+   `xpf_feed_seconds_since_last_success` / `xpf_feed_stale` Prometheus +
+   a `show` stale indicator.
 
 ### #2049 (enforcement — the join, RUNTIME userspace path)
 
@@ -246,6 +264,63 @@ shift when feed content changes, which is fine because the whole snapshot is
 published atomically (`apply_snapshot`) and the content-hash gate (§2a)
 forces the republish.
 
+### 3a. ENFORCEMENT-SEMANTICS — what an empty feed enforces (RESOLVED)
+
+This subsection states the per-rule-type outcome of the empty-feed cases so
+the enforcement behavior is unambiguous. The operator fail-safe decision
+(retain last-good forever; drop-to-empty only on explicit `hold-interval`)
+means an enforced feed is **normally never empty** after its first successful
+fetch — a transient or persistent fetch failure retains the last-good
+prefixes (the #2050 snapshot layer / PR #2056 guarantees a partial or failed
+read never replaces the good snapshot). #2049 enforcement READS that retained
+snapshot from the feeds `Manager`; it does not re-fetch and cannot observe a
+half-replaced set.
+
+There are only two genuine empty-set cases:
+
+1. **Startup, before the first successful fetch.** No snapshot exists yet, so
+   the overlay for the feed-backed `address-name` is empty.
+2. **Operator explicitly enabled drop + `hold-interval` elapsed.** The
+   operator opted in via the `hold-interval` knob and the feed has been
+   failing longer than that interval, so #2050 drops the snapshot to empty.
+   This is an explicit, operator-chosen fail-OPEN for a denylist; the default
+   path never reaches it.
+
+Outcome of an empty set, stated per rule type (the resolved set is empty for
+the two cases above; otherwise the retained last-good set is enforced):
+
+- **Allow / permit policy, feed name on the match side** — an empty book
+  matches nothing, so traffic falls through to the next policy / default-deny.
+  Safe (fail-CLOSED for an allowlist).
+- **Deny / block policy, feed name on the match side** — an empty book
+  matches nothing, so **a deny-from-feed rule with no prefixes blocks
+  nothing**: traffic the feed was meant to deny is NOT denied until the feed
+  has prefixes. The plan states this plainly: an empty denylist is fail-OPEN.
+  The default (retain-last-good-forever) never produces this for an
+  already-loaded feed; the only ways to reach it are the bounded startup
+  window (case 1, seconds) or the operator's explicit drop opt-in (case 2,
+  which the operator accepted the fail-open risk for by configuring
+  `hold-interval`).
+- **NAT source/destination address-name backed by a feed** — an empty set
+  resolves to no addresses, so a rule keyed on it matches no traffic (the NAT
+  snapshot builders consume the same address resolution; see §6 verify item).
+
+**Loud stale indicator (REQUIRED).** Because an enforced feed can be stale
+(retaining last-good while fetches fail) without being empty, the operator
+MUST be able to see that an enforced feed is stale. Source the indicator from
+the #2050 `FeedInfo.StaleSince` / `FeedInfo.LastError` status fields:
+
+- `show` surfaces (`server_show_security_text.go`, `api/show_text.go`) display
+  a stale marker + last-error + seconds-since-last-success per feed.
+- Prometheus exposes `xpf_feed_seconds_since_last_success` and
+  `xpf_feed_stale` (1/0) per feed.
+- `slog.Warn` fires once on enter-stale (state transition, not per-tick — per
+  the logging rules).
+
+This makes "stale-but-enforced" loud rather than silent, which is the whole
+point of the fail-safe (a stale denylist is acceptable; a silently-empty one
+is not).
+
 ### Multiple Path Options
 
 **P-A1 (snapshot location): in-place vs package split.**
@@ -256,19 +331,20 @@ is gold-plating for this size and adds merge surface; defer it unless the file
 grows. Add the `Snapshot` type + a `snapshotForFeed(name) Snapshot` accessor;
 that is the contract callers consume.
 
-**P-A2 (no-snapshot-yet behavior): fail-closed vs retain-last-good.**
-At daemon start, before the first successful fetch, a policy referencing a
-feed-backed address resolves to an **empty set** (fail-closed):
-- If the address is on the *source/match* side of an ALLOW policy -> matches
-  nothing -> traffic falls through to the next policy / default-deny. Safe.
-- If the address is referenced by a DENY/block policy -> empty set blocks
-  nothing until the feed loads. This is the only "fail-open" window, and it is
-  the *correct* Junos-equivalent behavior (the feed simply isn't loaded yet),
-  and it is bounded by the first fetch (seconds). RECOMMENDATION: **empty-set
-  fail-closed at startup, retain-last-good on later refresh failure** (#2050
-  guarantees last-good is never replaced by a partial read). Document the
-  startup window explicitly. A configurable `default-policy`-style override is
-  out of scope.
+**P-A2 (no-snapshot-yet / refresh-failure behavior) — RESOLVED.**
+The operator fail-safe decision settles this (see §3a + §8 Q3/Q4):
+- **Refresh failure (transient or persistent): retain last-good FOREVER.** A
+  failed or partial fetch never replaces the good snapshot (#2050 / PR #2056
+  guarantees this); silent drop-to-empty would be fail-OPEN for a denylist.
+  Drop-to-empty is an explicit operator opt-in via `hold-interval` only.
+- **Startup, before the first successful fetch:** the overlay resolves to an
+  **empty set** (the only genuine empty case in the default config). On the
+  *source/match* side of an ALLOW policy this matches nothing → fall through →
+  default-deny (safe). On a DENY/block policy it blocks nothing until the feed
+  loads — a bounded fail-open window (seconds, the first fetch). This is the
+  correct Junos-equivalent (the feed simply isn't loaded yet).
+- Staleness is surfaced loudly in all cases (§3a). A configurable
+  `default-policy`-style override is out of scope.
 
 **P-A3 (commit-time reference validation).** OPTIONAL: extend commit-check so a
 policy referencing an `address-name` that is neither an AddressBook entry nor a
@@ -315,7 +391,7 @@ commit-time error, matching Junos.
 | Feed content change shifts book IDs mid-traffic | Med | Whole snapshot publishes atomically via apply_snapshot; helper swaps address-book state in one shot |
 | Refresh silently suppressed by the content-hash dedup gate | High | Join lands in `AddressBooks` (in-hash); test asserts the published snapshot row changes on a same-config feed update (§2a, §6) |
 | Startup fail-closed blocks legit traffic referenced by feed before first fetch | Low | Bounded to first-fetch window (seconds); ALLOW side is safe; document |
-| Empty feed (HTTP 200, no lines) replaces good set with empty | Med | Treat zero-prefix successful fetch as suspicious -> Q3 (retain-last-good vs accept-empty config knob) |
+| Empty feed (HTTP 200, no lines) replaces good set with empty (fail-OPEN denylist) | High | RESOLVED (Q3): zero-prefix success is suspicious → retain last-good (default, not a knob); never silently drop to empty. Drop-to-empty only on explicit `hold-interval` (Q4). #2050/PR #2056. |
 | Canonicalization bug drops/mangles a prefix | Med | Round-trip parse + table tests; compare against raw lines in test |
 | New status fields break existing show/JSON consumers | Low | Additive fields only |
 | Overlay ID collision with static sets | Low | Content-hash bucket pipeline already de-collides via deterministic probe; identical-content feed+static share an ID by design |
@@ -375,12 +451,18 @@ legacy `result.AddrIDs`):
   must feed sets get a reserved high ID band? Recommend: shift is fine (the
   whole snapshot publishes atomically; IDs are content-derived, not a reserved
   band), simpler.
-- **Q3**: Zero-prefix successful HTTP 200 — accept (empty enforced set) or treat
-  as failure and retain last-good? Recommend: retain last-good + log warning;
-  an explicit empty feed is rare and dangerous. Possibly a config knob later.
-- **Q4**: HoldInterval semantics on permanent failure — after HoldInterval
-  elapses with no good fetch, drop to empty (fail-closed) or keep last-good
-  forever? Junos drops. Recommend match Junos (drop to empty after hold).
+- **Q3 (RESOLVED — operator decision, 2026-06-20):** Zero-prefix successful
+  HTTP 200 → **retain last-good** (an empty denylist is fail-OPEN). This is the
+  DEFAULT, not a knob: a zero-prefix body is treated as suspicious and the
+  prior good snapshot is kept + staleness surfaced loudly (slog.Warn +
+  `xpf_feed_*` Prometheus + `show` indicator). Implemented in #2050 / PR #2056.
+- **Q4 (RESOLVED — operator decision, 2026-06-20):** HoldInterval semantics on
+  persistent failure → **default = retain last-good FOREVER (no drop).**
+  Drop-to-empty is an EXPLICIT operator opt-in: only a configured
+  `hold-interval` causes a feed failing longer than that interval to drop to
+  empty; absent / unset = retain forever. The earlier r2 "match Junos = drop to
+  empty after hold" fail-open recommendation is REMOVED — never silently drop a
+  feed to empty. Implemented in #2050 / PR #2056.
 
 ---
 
@@ -434,29 +516,41 @@ down-scope to in-place refactor + one accessor + a snapshot-build overlay
 threaded through `buildSnapshotWithSchedulerState`. This is a HOW
 simplification, not a WHAT change.
 
-**Sharpest risk:** the startup fail-closed window (P-A2) and the empty-feed
-case (Q3). A naive implementation that accepts an HTTP-200-empty body as a
-valid snapshot would let a misconfigured/hijacked feed endpoint **silently
-disable** an enforced denylist by serving an empty file. The plan must treat
-zero-prefix-after-success as retain-last-good (Q3), or this fix introduces a
-new fail-open vector. Flagging this as a MUST-resolve before implementation,
-not an open nicety.
+**Sharpest risk (RESOLVED):** the empty-feed case (Q3/Q4). A naive
+implementation that accepts an HTTP-200-empty body as a valid snapshot would
+let a misconfigured/hijacked feed endpoint **silently disable** an enforced
+denylist by serving an empty file. The operator fail-safe decision settles
+this: zero-prefix-after-success and persistent-failure both **retain
+last-good** (Q3 default; Q4 default = retain forever), and silent
+drop-to-empty is never the default — it is an explicit `hold-interval` opt-in.
+Staleness is surfaced loudly (slog.Warn + `xpf_feed_*` Prometheus + `show`
+indicator) so a stale-but-enforced feed is never invisible. This closes the
+fail-open vector. Implemented in the #2050 snapshot layer (PR #2056). The only
+remaining empty window is bounded daemon startup before the first fetch (§3a),
+which is the correct Junos-equivalent.
 
 **Verdict basis:** real, security-relevant, well-scoped once down-sized, with
 one must-resolve safety question (Q3) that is answerable in design.
 
 ### Recommendation
 
-- **#2050: PLAN-READY** — ship first (or together with #2049). Refresh
-  correctness is small, self-contained, testable, and is the safety
-  precondition for enforcement.
-- **#2049: PLAN-READY (pending re-review)** — r2 re-targets the enforcement
-  join to the RUNTIME userspace snapshot path
-  (`pkg/dataplane/userspace/policies.go` `buildAddressBookTable` +
-  `buildSnapshotWithSchedulerState`), NOT the retired eBPF compiler. Ship
-  immediately after / with #2050, using P-A1 in-place + P-A2
-  startup-fail-closed/retain-last-good + P-A3 commit validation. This is the
-  highest-priority finding in review-015 and is a genuine
-  security-enforcement gap on a marketed feature. Resolve Q3 (empty-feed =
-  retain-last-good) in the design before coding. The re-targeted join needs a
-  fresh hostile pass before implementation.
+- **#2050: PLAN-READY** — refresh correctness + the operator fail-safe
+  (retain-last-good-forever; explicit-opt-in drop; loud staleness). Small,
+  self-contained, testable, and the safety precondition for enforcement.
+  Implemented in PR #2056 (reworked + merging).
+- **#2049: PLAN-READY** — r2 re-targets the enforcement join to the RUNTIME
+  userspace snapshot path (`pkg/dataplane/userspace/policies.go`
+  `buildAddressBookTable` + `buildSnapshotWithSchedulerState`), NOT the retired
+  eBPF compiler; r3 records the operator fail-safe decision and RESOLVES Q3/Q4
+  (§8) + adds the ENFORCEMENT-SEMANTICS subsection (§3a). Use P-A1 in-place +
+  P-A2 startup-empty-fail-closed/retain-last-good-forever-on-failure + P-A3
+  commit validation. This is the highest-priority finding in review-015 and is
+  a genuine security-enforcement gap on a marketed feature.
+
+  **Sequencing:** #2049 is sequenced **strictly AFTER #2050 / PR #2056
+  merges.** #2049 enforcement READS the retained feed snapshot from the feeds
+  `Manager` (the overlay is built from the live last-good `Snapshot` +
+  `FeedInfo.StaleSince`/`LastError` that #2050 produces). It must not land
+  before the snapshot layer it depends on. No remaining open questions; the
+  one prior must-resolve safety item (empty-feed fail-open) is closed by the
+  operator decision.
