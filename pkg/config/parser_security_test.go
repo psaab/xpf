@@ -7,7 +7,11 @@ import (
 
 func TestNAT64(t *testing.T) {
 	tree := &ConfigTree{}
-	setCommands := []string{"set security nat source pool nat64-pool address 203.0.113.0/24", "set security nat nat64 rule-set v6-to-v4 prefix 64:ff9b::/96", "set security nat nat64 rule-set v6-to-v4 source-pool nat64-pool"}
+	// #2173: a NAT64 source-pool address must be a host route (/32) — the
+	// pool holds discrete host source IPs (parse_pool_v4) and a non-host mask
+	// is rejected at commit. This fixture is about NAT64 rule-set parsing, so
+	// use a canonical /32 host address.
+	setCommands := []string{"set security nat source pool nat64-pool address 203.0.113.5/32", "set security nat nat64 rule-set v6-to-v4 prefix 64:ff9b::/96", "set security nat nat64 rule-set v6-to-v4 source-pool nat64-pool"}
 	for _, cmd := range setCommands {
 		path, err := ParseSetCommand(cmd)
 		if err != nil {
