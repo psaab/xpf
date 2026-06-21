@@ -2,12 +2,18 @@
 
 - **Issue:** #2120 (HIGH, `audit`/`bug`, 3/3 adversarial-skeptic verified)
 - **Class:** FAILOVER-class regression (reintroduces #131)
-- **Revision:** r2 (folds Claude-SMR r1 findings M1/M2 + fabric caveat)
+- **Revision:** r2.1 (folds Claude-SMR + 2 hostile reviewer r1 findings;
+  pre-empts r2 self-heal over-retention + fixed-ceiling risks)
 - **Research branch:** `research/2120-standby-wheel-expiry`
 - **Base:** origin/master @ 325d10683
 - **Status:** DRAFT — awaiting 3-way convergence (Claude SMR + 2 hostile Claude plan-reviewers)
 
 ## Changelog
+- **r2.1:** self-heal is EDGE-triggered via the existing `rg_epochs` counter
+  (not a level check / not a lease-derived timestamp) → no over-retention; the
+  stale-synced ceiling is RELATIVE (`MULT × entry.expires_after_ns`) not a fixed
+  constant → safe for configured timeouts up to `MaxDurationSeconds`. Adds a
+  `seen_rg_epoch` field to `SessionEntry`.
 - **r2:** (a) Gate keys on **RG ownership** (`owner_rg_id` not locally
   forwarding-active), NOT on `is_peer_synced()` origin — this exactly mirrors
   the eBPF GC `if isPrimary { age }` contract and also covers a *demoted*
@@ -246,8 +252,11 @@ let standby_hold = peer_synced && match rg {
 if standby_hold {
     // A node that does not forward this session must not age it. But bound the
     // hold so a lost primary-delete cannot leak forever (warm reconnect does
-    // NOT bulk-reconcile; the delete journal is lossy).
-    if now_ns.saturating_sub(entry.last_seen_ns) > STALE_SYNCED_CEILING_NS {
+    // NOT bulk-reconcile; the delete journal is lossy). r2.1: the ceiling is
+    // RELATIVE to the entry's own timeout (see below), NOT a fixed constant —
+    // an operator may configure timeouts up to MaxDurationSeconds.
+    let ceiling = entry.expires_after_ns.saturating_mul(STALE_SYNCED_CEILING_MULT);
+    if now_ns.saturating_sub(entry.last_seen_ns) > ceiling {
         // fall through to remove_entry (bounded leak reaper)
         self.last_pop_stats.reaped_stale_synced += 1;
     } else {
@@ -256,15 +265,37 @@ if standby_hold {
         continue;
     }
 } else if peer_synced && rg_locally_active
-          && entry.last_seen_ns < /* RG activation instant */ {
-    // PROMOTION SELF-HEAL: this peer-owned entry's RG just became active but its
-    // last_seen predates activation (RefreshOwnerRGS may not have landed). Treat
-    // it as Case-4 ALIVE and re-stamp so promotion timing cannot expire it.
-    <re-stamp last_seen = now_ns; re-bucket as Case 4>;
+          && rg_epochs[owner_rg_id] != entry.seen_rg_epoch {
+    // PROMOTION SELF-HEAL (r2.1 — EDGE-triggered via rg_epochs, NOT level):
+    // this peer-owned entry's RG epoch advanced (activation bumped it,
+    // ha.rs:101) since the entry last observed it, so RefreshOwnerRGS may not
+    // have landed yet. Re-stamp ONCE and record the new epoch; on the next
+    // expire the epochs match → the entry ages NORMALLY (no over-retention).
+    // Reuses the existing flow-cache epoch-invalidation primitive
+    // (flow_cache.rs:81/98); rg_epochs is already in worker scope
+    // (loop_body:63).
+    <re-stamp last_seen = now_ns; entry.seen_rg_epoch = rg_epochs[owner_rg_id];
+     re-bucket as Case 4>;
     continue;
 }
-// else: not held, not in the self-heal window -> normal remove_entry path
+// else: not held, not in the self-heal edge -> normal remove_entry path
 ```
+
+**r2.1 — why epoch-edge, not timestamp (closes reviewer A2's over-retention
+risk).** The r1/r2 "re-stamp on first active-observation" is only correct if it
+is EDGE-triggered. A level-triggered form ("re-stamp whenever expire would
+remove a peer-owned entry under an active RG") would re-stamp a genuinely-idle
+session on EVERY expire and it would never die — an over-retention bug. The
+activation instant cannot be derived from the lease (the lease
+`active_lease_until` is refreshed on every `update_ha_state`, so `lease −
+STALE_AFTER ≈ now`, not the activation edge). The correct edge signal is the
+existing per-RG `rg_epochs` counter, bumped exactly at the activate AND demote
+transitions (ha.rs:101 / :74) and already consumed by the flow-cache
+invalidation (flow_cache.rs:98). Add a `seen_rg_epoch: u32` to `SessionEntry`
+(8→12 bytes within existing padding; or pack), snapshot it on install/refresh,
+and compare in expire. After one self-heal re-stamp the epochs match, so the
+entry ages normally and WILL reach the ceiling if it later leaks — the ceiling
+and the self-heal do not conflict.
 
 **r2 — promotion/demotion transition self-heal (closes M1 / reviewer A#1 /
 B#2).** `update_ha_state` does `rg_runtime.store(...)` (ha.rs:39) THEN enqueues
@@ -471,9 +502,14 @@ assumed, we do not revert it.
    `reaped_stale_synced` counters (parity with `expired`/`re_bucketed`),
    surfaced as worker/Prometheus counters — a silent-failure bug needs a visible
    signal (held vs reaped vs expired).
-5. **Define `STALE_SYNCED_CEILING_NS`** conservatively (e.g. `max(2 ×
-   largest configured timeout, 1 h)`) — must be >> any real idle window so it
-   never fires for a live failover flow, only for a genuinely-leaked entry.
+5. **Define the ceiling RELATIVE to the entry's own timeout** —
+   `STALE_SYNCED_CEILING_MULT × entry.expires_after_ns` (e.g. MULT=3). A FIXED
+   wall-clock ceiling is UNSAFE: configured timeouts go up to
+   `MaxDurationSeconds` (`math.MaxInt64/1e9`, schema_validators.go:132; Junos
+   30-day `inactivity-timeout` is real), so a fixed "1 h" ceiling would reap
+   LIVE long-timeout sessions. A multiplier of the entry's own timeout scales
+   correctly and never fires within a legitimate idle window. (Add a `seen_rg_epoch`
+   field to `SessionEntry` for the self-heal edge; snapshot on install/refresh.)
 6. **Docs**: update `userspace-dp/src/session/README.md` (expire.rs section),
    `docs/fabric-cross-chassis-fwd.md` / the HA session-sync doc with the per-RG
    standby-retention invariant + ceiling, and note in `pkg/cluster` docs that
@@ -600,11 +636,13 @@ and its empty-sweep back-off; we fix the layer that broke the assumption.
 1. **`owner_rg_id==0` peer-synced HOLD predicate** — plan default: hold only on
    a whole-node standby (zero forwarding-active RGs). Confirm or refine; this is
    the one part of the gate not yet fully pinned.
-2. **Self-heal vs. coordinator-ordering** for the promotion/demotion race —
-   plan default: wheel self-heal (no cross-thread dep) + optional ordering belt.
-   Confirm.
-3. **`STALE_SYNCED_CEILING_NS` value** — plan default `max(2× largest timeout,
-   1 h)`. Confirm the magnitude (must be >> any real idle window).
+2. **Self-heal mechanism** — plan default (r2.1): EDGE-triggered via the
+   existing `rg_epochs` counter + a `seen_rg_epoch` field on `SessionEntry`
+   (mirrors flow-cache invalidation). Confirm this over the coordinator-ordering
+   belt.
+3. **Ceiling multiplier** — plan default (r2.1): `MULT × entry.expires_after_ns`
+   (MULT≈3), RELATIVE not fixed (configured timeouts reach `MaxDurationSeconds`).
+   Confirm MULT.
 4. Idle-window failover test — new `test-failover-idle.sh` vs. a mode flag on
    the `failover-test` skill. Plan default: new script + skill note.
 
