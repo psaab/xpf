@@ -1,5 +1,33 @@
 # Action Log
 
+## 2026-06-21 — #2197 proxy-ARP follow-ups: PLAN-READY research
+
+- **Timestamp**: 2026-06-21
+- **Action**: Researched the three deferred refinements from the #2195
+  (#2160 static-NAT proxy-ARP) review and produced a converged 11-section
+  plan + hostile self-review. Verdicts: **item 1 (v6 proxy-NDP pneigh
+  install) PLAN-READY** — the AF_INET6 branch in `proxyarp.go` enables
+  `proxy_ndp` but `continue`s before any neighbor install; mirror the v4
+  `NTF_PROXY` path (vishvananda/netlink `neighHandle` is Family-aware +
+  To16, so a v6 `NeighSet` is supported). v6 proxy-NDP is `pneigh_lookup`-
+  gated (per-address by construction), so the install is the complete fix
+  and v6 has no over-answer breadth. **Item 2 (re-assert after a
+  non-commit link cycle) PLAN-READY** — the reconcile runs only in
+  `applyConfigLocked` (after `networkd.Apply` resets sysctls); add an
+  always-on 30s periodic reassert (the only always-on loop today is
+  `runPeriodicNeighborResolution`; `reconcileRGStateLoop` is cluster-only,
+  `monitorLinkState` is SNMP-gated). Default to NOT shipping the
+  post-`programRethMAC` trigger unless an audit finds a real
+  cycles-without-2.6c path. **Item 3 (narrow over-answer to per-address)
+  PLAN-DEFER** — the #2160 case is same-L2-subnet (`rt.dst.dev == dev`),
+  the exact topology the pneigh-only branch CANNOT answer (empirically:
+  the pneigh entry was already installed pre-#2160 and did NOT answer until
+  the sysctl was on), so dropping the sysctl would re-break #2160; ship no
+  narrowing without a lab repro. Research only — no production code, no PR.
+- **File(s)**: `docs/research/2197-proxyarp-followups/plan.md` (new),
+  `docs/research/2197-proxyarp-followups/claude-smr-plan-r1.md` (new),
+  `_Log.md`.
+
 ## 2026-06-21 — #2146 (PR #2189) fold: close IPv6 ext-header overshoot fail-open
 
 - **Timestamp**: 2026-06-21
