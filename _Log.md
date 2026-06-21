@@ -9180,3 +9180,17 @@ top.
   userspace-dp/src/server/handlers/mod.rs,
   pkg/dataplane/retirement_boundary_canary_test.go,
   docs/userspace-dataplane-gaps.md, docs/pr/1373-retire-ebpf-dataplane/README.md
+
+- **Timestamp**: 2026-06-21
+- **Action**: /research #2239 (HA DHCP-server lease sync) — produced converged
+  plan-of-action doc + hostile Claude-SMR plan review. PLAN-READY: recommended
+  PATH C (xpf-managed lease replication over the existing pkg/cluster sync
+  channel + Kea lease_cmds control socket; standby holds peer lease state and
+  seeds Kea on takeover). PATHs A (Kea HA hook) and B (shared DB) rejected — A
+  contradicts BACKUP-stops-Kea + adds HTTP/NTP surface, B adds a DB SPOF.
+  Resolved the BACKUP-stops-Kea crux: standby holds STATE not a running Kea
+  (peerIPsecSAs/reinitiateIPsecSAs precedent). Clock-skew handled by syncing
+  remaining-lifetime re-anchored to local clock (immune to peer wall-clock skew,
+  unlike PATH A's hard <60s hazard). No code changes — research deliverable only.
+- **File(s)**: docs/research/2239-dhcp-ha-lease-sync/plan.md (new),
+  docs/research/2239-dhcp-ha-lease-sync/claude-smr-plan-r1.md (new)
