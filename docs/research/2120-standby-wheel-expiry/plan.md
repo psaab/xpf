@@ -274,11 +274,16 @@ if !forwards_here && (peer_synced || node_active) {   // node_active guard = "in
    `ha_state` → `node_active` false, sessions `owner_rg_id==0` + non-peer-synced)
    from ever holding — only a real cluster node (has active RGs, i.e. `node_active`,
    or holds peer-synced copies) retains. **Counter-decision to A2's "just age the
-   demoting node's copy":** we HOLD it instead, because holding is strictly safer
-   for the failback leg and the ceiling bounds it; aging relies on the peer
-   already having the copy, which is true today but couples failback to sync
-   completeness. Holding + ceiling has no such coupling. (This is a reviewable
-   choice — see Open Questions.)
+   demoting node's copy":** we HOLD it instead (multi-RG standby), because holding
+   is strictly safer for the failback leg and the ceiling bounds it; aging relies
+   on the peer already having the copy, which couples failback to sync
+   completeness. **Single-RG sub-case (intentional AGE):** in a single-RG cluster,
+   demoting RG1 makes `node_active` false, so a still-`ForwardFlow` entry in the
+   ~1-poll pre-`DemoteOwnerRGS`-flip window has `(peer_synced||node_active)==false`
+   → AGED. NOT a failover hole: the demoting node is becoming standby, the PEER
+   (new primary) already holds the synced copy, and once the flip lands the entry
+   is held via `peer_synced`. Aging this node's redundant pre-flip copy loses
+   nothing the cluster needs.
 
 2. **`owner_rg_id==0` uses a NODE-LEVEL epoch at `rg_epochs[0]` (closes B2#2).**
    `rg_epochs[0]` is currently unused (all bumps + the flow-cache consumer guard
@@ -315,14 +320,28 @@ if !forwards_here && (peer_synced || node_active) {   // node_active guard = "in
    (closes B2#4 flapping + B2#5 90-day).** `stale_ceiling_ns(t) =
    min(STALE_SYNCED_CEILING_MULT * t, STALE_SYNCED_CEILING_ABS_NS)` with the
    hold duration measured from **`first_held_ns`** (when the entry FIRST entered
-   the held state), NOT `last_seen` — so repeated self-heal re-stamps on a
-   FLAPPING RG cannot reset the ceiling clock (B2#4). The absolute cap (e.g.
-   24 h) bounds the 30-day-timeout worst case (B2#5); it is SAFE because a held
-   entry is by definition NOT forwarding here — the cap reaps only standby state,
-   never a live local flow (unlike the rejected fixed-ceiling-for-all-sessions).
-   A `SessionEntry.first_held_ns: u64` is cleared (set 0) whenever the entry is
-   re-stamped by real traffic, promotion, or self-heal, so it tracks contiguous
-   held time only.
+   the held state), NOT `last_seen`.
+   - **`first_held_ns` lifecycle (CRITICAL — the crux of B2#4):** set on the
+     first HOLD observation (when it is 0); cleared (→0) ONLY when the entry
+     genuinely leaves the held world — i.e. on a real-traffic refresh
+     (`update_session`, mod.rs:449), a promotion refresh
+     (`refresh_for_ha_transition`, mod.rs:601), or a re-import
+     (`upsert_synced`, install.rs). The **self-heal re-stamp does NOT clear
+     `first_held_ns`** — otherwise a flapping RG (self-heal on every activate
+     edge) would reset the ceiling clock and the leak bound would be defeated
+     (the exact B2#4 failure). So a dead, leaked, flapping entry keeps its
+     original `first_held_ns` and is reaped at the ceiling.
+   - **ABS cap floor (NIT — pin in r3-final):** the cap must be ≥ the largest
+     idle window a legitimate failover could need on the standby. A configured
+     30-day `inactivity-timeout` keeps a flow alive 30 days on the primary; if
+     that flow idles on the wire beyond the cap and fails over, the standby must
+     still have it. So set `STALE_SYNCED_CEILING_ABS_NS` generously (e.g. 7 days,
+     not 24 h) — large enough to cover realistic long-idle deployments, small
+     enough to bound the pathological `MaxDurationSeconds` config. The cap is
+     SAFE at any value ≥ the real failover window because a held entry is by
+     definition NOT forwarding here — the cap reaps only standby state, never a
+     live LOCAL flow (unlike the rejected fixed-ceiling-for-all-sessions). Final
+     magnitude is an Open Question.
 
 5. **Per-RG refinement, not faithful restoration (A#3 honest framing).** The old
    Go-GC `IsLocalPrimaryAny` gate (gc.go:249/277) was node-global; this is a
@@ -462,14 +481,20 @@ assumed, we do not revert it.
    `rg_runtime` always observes the bumped epoch via the ArcSwap publish). Verify
    `handle_activated_rgs`/`handle_demote` still read a consistent `ha_state`.
 4. **session/mod.rs**: add to `SessionEntry`: `seen_rg_epoch: u32` and
-   `first_held_ns: u64`. Set them coherently at ALL write sites — install
-   (install.rs:143, :229: `seen_rg_epoch = epoch_of(owner_rg)`, `first_held_ns=0`),
-   `refresh_for_ha_transition` (mod.rs:601: re-snapshot epoch, clear
-   `first_held_ns=0`), `update_session` (mod.rs:449: same on real-traffic
-   refresh). Add **mandatory** `held_standby`, `reaped_stale_synced`,
-   `healed_on_promote` to `WheelPopStats`, surfaced as worker/Prometheus
-   counters. State the `SessionEntry` size delta (verify with `size_of`, do not
-   assume free padding).
+   `first_held_ns: u64`. Write-site contract:
+   - install (install.rs:143, :229): `seen_rg_epoch = epoch_of(owner_rg)`,
+     `first_held_ns = 0`.
+   - `refresh_for_ha_transition` (mod.rs:601, promotion): re-snapshot
+     `seen_rg_epoch`, clear `first_held_ns = 0`.
+   - `update_session` (mod.rs:449, real-traffic / re-import refresh):
+     re-snapshot `seen_rg_epoch`, clear `first_held_ns = 0`.
+   - HOLD branch in expire: set `first_held_ns = now_ns` IFF currently 0; record
+     `seen_rg_epoch = epoch_of(rg)`.
+   - SELF-HEAL branch in expire: re-stamp `last_seen`, record `seen_rg_epoch`,
+     **leave `first_held_ns` UNTOUCHED** (clearing it here re-opens B2#4).
+   Add **mandatory** `held_standby`, `reaped_stale_synced`, `healed_on_promote`
+   to `WheelPopStats`, surfaced as worker/Prometheus counters. State the
+   `SessionEntry` size delta (verify with `size_of`, do not assume free padding).
 5. **Ceiling** = `min(STALE_SYNCED_CEILING_MULT × entry.expires_after_ns,
    STALE_SYNCED_CEILING_ABS_NS)` (MULT≈3, ABS≈24 h), measured from
    `first_held_ns` (flapping-safe). RELATIVE because configured timeouts reach
@@ -618,7 +643,10 @@ and its empty-sweep back-off; we fix the layer that broke the assumption.
    under-retention (rare unresolved-owner entries, re-derived on promotion) and
    files the real fix (resolve RG at import) as a follow-up. Confirm acceptable.
 3. **Constants** — `STALE_SYNCED_CEILING_MULT` (≈3) and
-   `STALE_SYNCED_CEILING_ABS_NS` (≈24 h). Confirm magnitudes.
+   `STALE_SYNCED_CEILING_ABS_NS`. The ABS cap must be ≥ the largest legitimate
+   standby idle window (a 30-day-timeout flow that idles + fails over); plan
+   leans ≈7 days (not 24 h) to avoid reaping a valid long-idle synced session
+   before failover. Confirm.
 4. Idle-window failover test — new `test-failover-idle.sh` vs. a mode flag on
    the `failover-test` skill. Plan default: new script + skill note.
 
