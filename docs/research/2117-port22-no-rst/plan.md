@@ -2,7 +2,8 @@
 
 - **Issue:** #2117
 - **Branch:** `research/2117-port22-no-rst`
-- **Revision:** r2 (post round-1 hostile review)
+- **Revision:** r2 (post round-1 hostile review — folded reviewer-A's
+  untracked-smoke-doc note + reviewer-B's/SMR's re-probe determinism finding)
 - **Outcome:** **PLAN-KILL — NOT A CODE BUG.** The observed behavior is correct.
   The divergence is fully explained by the *test configuration*, not the #2089
   reject path. No production code change is warranted.
@@ -86,6 +87,15 @@ TCP destination port is `destination-port 22` (lines 407→411). 8080 appears on
 in NAT/application contexts (lines 341/348), not a discard term; 23/3389/9999 are
 not in any filter at all.
 
+**Re-probe determinism (no first-vs-subsequent escape hatch):** a `discard`ed SYN
+is dropped at `mod.rs:676` *before any session install* (the session-install /
+decision code is all downstream of `mod.rs:678`). So no session is ever created
+for :22 — every retry is a fresh session-miss that re-hits the input filter at
+L659 and is discarded again. The session-hit input-filter path (`mod.rs:371-394`)
+*also* short-circuits on a non-Accept action, so even a hypothetical cached entry
+would discard. The drop is deterministic on every packet, matching the observed
+"silent timeout, 0 arrivals at destination."
+
 ## 3. Hypotheses from the issue — each resolved against source
 
 | Hypothesis (from #2117 / the research directive) | Verdict |
@@ -150,12 +160,17 @@ filter discard and #2117 is fully explained with zero code change.
 
 1. **Close #2117 as "not a bug — working as configured"** with the root-cause
    chain (§2) and the confirm-the-kill repro (§5).
-2. **Amend the smoke doc follow-up note** (`docs/smoke/security-matrix-2026-06-20.md`,
-   the "Port-22 (SSH) reject emits no RST" caveat, lines 97-100) to record the
-   resolution: the untrust input filter `dscp-filter` term `block-ssh` silently
-   `discard`s TCP/22 before the security policy, so no RST is by-design correct.
-   *(This is a doc/test-artifact note, not production code — but it closes the
-   loop so a future smoke run does not re-flag the same expected behavior.)*
+2. **Durable record of the resolution = this research doc + the issue-closure
+   comment** (the system of record). The cited smoke doc
+   `docs/smoke/security-matrix-2026-06-20.md` is an **untracked local file** (NOT
+   on origin/master — verified by both hostile reviewers), so amending it is
+   *optional local bookkeeping only*, not the authoritative record. If/when that
+   smoke doc is committed, its "Port-22 (SSH) reject emits no RST" caveat
+   (lines 97-100) should be updated to note the resolution (untrust input filter
+   `dscp-filter` term `block-ssh` silently `discard`s TCP/22 before the security
+   policy → no RST is by-design correct), so a future smoke run does not re-flag
+   the same expected behavior. This is a doc/test-artifact note, never
+   production code.
 3. **Optionally**, if a cleaner future smoke matrix is desired, the test config
    could move `block-ssh` to use `then reject` semantics OR drop the term so the
    security-policy reject is what's exercised on :22 — but that is a *test-config
