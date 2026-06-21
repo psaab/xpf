@@ -1,7 +1,10 @@
 # Plan of action — #2134 (wire screen session-limit lifecycle) + #2128 (evict-on-zero leak)
 
-- **Revision:** r2 (post hostile review round 1 — 2 independent Claude
-  plan reviewers, both NEEDS-REVISION; this revision folds all findings)
+- **Revision:** r3 (post hostile review round 2. Reviewer A:
+  PLAN-READY-WITH-NITS; reviewer B: NEEDS-REVISION on ONE new MAJOR —
+  runtime OFF-transition leaves stale count maps. r3 folds the
+  clear-on-disable fix + the audit-completeness MINOR + the
+  implementation NITs from both reviewers + the SMR.)
 - **Issues:** #2134 (HIGH — security feature non-functional), #2128 (HIGH — memory-DoS leak)
 - **Branch:** `research/2128-2134-screen-session-limit`
 - **Mode:** `/research` — STOPS at PLAN-READY. No code, no PR, no production-source edits.
@@ -42,6 +45,35 @@ Plus: closed the in-place-mutation audit (§6.3, Finding 4 — `is_reverse`
 is invariant across refresh; only `origin` flips, only at promote/demote)
 and tightened the test plan to cover the established-flow regression and
 the promote/demote cycles (§5).
+
+## r2 → r3 changelog (hostile review round 2)
+
+Both r2 reviewers confirmed all four r1 findings genuinely fixed and the
+mechanism unbreakable as far as either could trace. Reviewer A returned
+PLAN-READY-WITH-NITS; reviewer B found ONE new MAJOR + audit-completeness:
+
+1. **[MAJOR, reviewer B] Runtime OFF-transition leaves stale count
+   maps.** Removing `limit-session` at runtime flips `session_limit_active`
+   OFF → decrements stop → the count maps freeze with stale over-counted
+   values → a later re-enable resumes from wrong values and spuriously
+   blocks an under-limit IP. r3 adds **clear-on-disable**: the OFF-gate
+   setter clears both count maps when the flag goes false (mirroring
+   `ScreenState::update_profiles`'s existing retain discipline). New
+   test §5.10.
+2. **[MINOR, reviewer B] §3.5 audit completeness.** r3 names
+   `refresh_for_ha_transition` (`mod.rs:546`) and the `demote_shared_owner_rgs`
+   shared-map flips (`shared_ops.rs:137/154/162`) explicitly in the audit
+   table, and refines the is_reverse-invariant statement (it's a
+   caller-level invariant, not structural; the `!is_reverse` count gate
+   is the belt-and-suspenders backstop).
+3. **[NITs, both reviewers] §3.5b** captures the increment-vs-delta-move,
+   demote borrow ordering, relocated-event `ScreenPacketInfo`
+   reconstruction, and zone-name profile-key implementation notes.
+4. §6.9 documents the OFF→ON re-enable semantics (no back-count of
+   pre-existing sessions — benign, Junos-approximate).
+
+After r3, reviewer A's r1+r2 findings are all addressed; reviewer B's
+sole r2 MAJOR is folded. A round-3 re-review confirms convergence.
 
 > The two issues are coupled and MUST ship together. #2134 wires the
 > per-IP session-limit lifecycle so the limit actually enforces. The
@@ -267,12 +299,32 @@ its mutators are already correct; only the READ path needs to become
 non-mutating, see §3.2/#2128.)
 
 `session_limit_active` is set whenever the worker's
-forwarding/screen-profile snapshot is applied (the same place
-`screen_state.update_profiles` runs, `worker_loop` ~line 318), computed
-as "any screen profile has `session_limit_src > 0 || session_limit_dst >
-0`" — mirroring `ScreenState::has_advanced_features`
+forwarding/screen-profile snapshot is applied — at BOTH the startup hook
+(`worker/loop_body/setup.rs:122-124`, next to `set_timeouts` /
+`update_profiles`) AND the runtime-reload hook
+(`worker/loop_body/mod.rs:318-320`, inside `if let Some(new_forwarding)
+= load_arc_if_changed(...)`, right after
+`screen_state.update_profiles(...)` and `sessions.set_timeouts(...)`).
+Computed as "any screen profile has `session_limit_src > 0 ||
+session_limit_dst > 0`" — mirroring `ScreenState::has_advanced_features`
 (`screen/mod.rs:472`). When false, ALL counter maintenance below is
 skipped (zero cost for the ~99% of deployments with no `limit-session`).
+
+**Clear-on-disable (r3, reviewer B MAJOR).** When `session_limit_active`
+transitions ON→OFF at runtime (operator removes `limit-session` from all
+zones), the decrement paths stop firing, so the count maps would FREEZE
+at stale, over-counted values — and a later re-enable would resume from
+wrong values and spuriously block an under-limit IP. The OFF-gate setter
+MUST therefore **clear both count maps whenever the flag is set false**
+(mirroring the existing `ScreenState::update_profiles`
+`.retain(|k,_| profiles.contains_key(k))` discipline at
+`screen/mod.rs`). On a true→false→true round-trip the maps start empty
+and re-populate as new sessions install. (A subtlety: after re-enable,
+pre-existing live sessions are NOT back-counted, so the limit
+under-counts until those sessions churn — benign and Junos-approximate;
+documented in §6.) Setter signature: `set_session_limit_active(&mut
+self, active: bool)` → on `false`, `self.session_limit_src_counts
+.clear(); self.session_limit_dst_counts.clear();`.
 
 Maintenance (all gated by `if self.session_limit_active`):
 
@@ -426,16 +478,45 @@ mutation sites (verified against the base):
 | delete / expire / take_synced_local | via `remove_entry` `mod.rs:645` | removes | decrement (§3.1.dec.1) |
 | promote synced→local | `mod.rs:472` | uncounted→counted | increment (§3.1.2) |
 | demote local→synced | `install.rs:305` | counted→uncounted | decrement (§3.1.dec.2) |
-| `update_session` refresh (non-promote) | `mod.rs:354` | metadata replaced wholesale, but **origin & is_reverse preserved for a key** — counted-class unchanged | none |
-| failback refresh (`refresh_owner_rgs`) | `session_glue/commands/refresh_owner_rgs.rs` | preserves origin | none |
+| `update_session` refresh (non-promote) | `mod.rs:354` | metadata replaced wholesale; the promote branch (`:472`) is the only counted-class change — non-promote refresh preserves origin & callers preserve is_reverse | increment only in the `:472` promote branch |
+| `refresh_for_ha_transition` | `mod.rs:546` | CAN reindex on is_reverse change (`:37`-`:43`) and replaces metadata (`:54`), but **never assigns `origin`**; its two callers (`refresh_owner_rgs.rs:74`, `demote_owner_rgs.rs:68`) pass `metadata.clone()` of the EXISTING entry → same-direction, counted-class unchanged | none (benign — verified by caller, not by the function alone) |
+| failback refresh (`refresh_owner_rgs.rs:74`) | drives `refresh_for_ha_transition` | preserves origin + direction | none |
+| `demote_shared_owner_rgs` shared-map flips | `shared_ops.rs:137/154/162` | mutate `SyncedSessionEntry` in the cross-worker SHARED maps, NOT the per-worker `SessionTable` | none (different data structure; never touches the counter) |
 | `restore_entry` | `mod.rs:709` | dead in production (`allow(dead_code)`) | none |
 
-**`is_reverse` invariant:** a session's direction is fixed at install;
-no production path flips `is_reverse` for an existing key. `update_session`
-replaces `metadata` wholesale, but callers pass same-direction metadata
-(a forward session stays forward across refresh). The invariant test
-(§5.8) guards this: sum of per-IP counts == live counted entries after
-any op sequence — it FAILS if any transition is missed.
+**`is_reverse` invariant (precise form):** the counter is safe not
+because `is_reverse` is structurally immutable (`refresh_for_ha_transition`
+CAN reindex on an is_reverse change), but because **no production caller
+flips `is_reverse` for an existing key** — every `update_session` /
+`refresh_for_ha_transition` caller passes the existing entry's direction.
+Belt-and-suspenders: every count site additionally gates on `!is_reverse`,
+so even a hypothetical mid-life flip cannot leak a reverse session into
+the count. The §5.9 invariant test (sum of per-IP counts == live counted
+entries after any op sequence including refresh) is the runtime guard.
+
+### 3.5b Implementation notes (reviewer NITs — fold at /engineer time)
+
+- **Increment placement vs the delta push (`install.rs:160-169`):** the
+  existing Open-delta push MOVES `key` and `metadata` into the
+  `SessionDelta`. Capture `let (sip, dip) = (key.src_ip, key.dst_ip);`
+  (IpAddr is `Copy`) BEFORE the push, or put the increment inside the
+  same `if` before `push_delta`, so it isn't appended after the move.
+- **Demote decrement borrow ordering (`install.rs:300-308`):**
+  `entry_by_key_mut` holds `&mut SessionEntry` into `self.entries`; a
+  `&mut self` decrement helper can't run while it's live. Snapshot the
+  Copy predicate inputs (`is_reverse`, `old_origin`, src/dst) into
+  locals, end the entry borrow (or do the flip), then decrement using
+  the pre-mutation snapshots — semantically still "decrement before
+  flip."
+- **Relocated screen-drop event (`poll_descriptor` :746+):**
+  `emit_screen_drop_event` needs a `ScreenPacketInfo` built by
+  `extract_screen_info` (only constructed inside `stage_screen_check`
+  today). The new site must reconstruct it (or factor out a small
+  helper). `telemetry.counters.screen_drops` is in scope at the miss
+  site.
+- **Profile lookup key is the zone NAME:** `forwarding.screen_profiles`
+  is `FastMap<String, ScreenProfile>` keyed by name; resolve
+  `from_zone` (the name, available at ~`:756`) not `from_zone_id`.
 
 ### 3.6 Per-worker scoping (unchanged, documented)
 
@@ -550,13 +631,20 @@ which is exactly the gap #2134 names):
    install/expire/delete/promote/demote/take_synced_local/refresh, the
    sum of per-IP src counts (and dst counts) EQUALS the number of live
    counted entries (`!is_reverse && !is_peer_synced() && !is_seed`) in
-   the table. The sequence MUST include promote→demote cycles and a
-   `update_session` refresh that preserves origin (to prove §3.5's
-   is_reverse/origin invariant). Catches any missed transition.
+   the table (iterate via `iter_with_origin`, `lookup.rs:196`). The
+   sequence MUST include promote→demote cycles and a
+   `refresh_for_ha_transition` that preserves origin/direction (to prove
+   §3.5's invariant). Catches any missed transition.
+10. **Runtime disable clears the maps (reviewer B MAJOR):** enable
+    `limit-session`, install `n` sessions from an IP (count == n),
+    DISABLE (`set_session_limit_active(false)`) — assert both count maps
+    are EMPTY. Re-ENABLE and install a fresh flow — assert it is admitted
+    (count starts from 0, not the stale n). FAILS if clear-on-disable is
+    omitted.
 
 Loss-cluster smoke (at /engineer time — HOT-PATH + SECURITY gate):
 
-10. Configure `limit-session source-ip-based <n>` on the WAN/untrust
+11. Configure `limit-session source-ip-based <n>` on the WAN/untrust
     screen profile of the loss userspace cluster. Flood from many
     distinct source IPs (and a single IP exceeding `n`). Assert:
     (a) the (n+1)-th NEW session from the over-limit IP is rejected —
@@ -622,6 +710,16 @@ semantics. Reverse installs carry `is_reverse: true` and are excluded.
 Per-worker count → worst-case N×limit dilution when one IP spreads
 flows across N RX queues. Pre-existing (same under eBPF per-CPU map),
 documented, not changed by this work. Reviewers: acceptable?
+
+### 6.9 Runtime enable/disable of limit-session — RESOLVED (reviewer B MAJOR)
+ON→OFF clears both count maps (§3.1 clear-on-disable), so stale
+over-counted values can't persist and spuriously block on re-enable.
+OFF→ON starts the maps empty and re-populates from new sessions;
+pre-existing live sessions are NOT back-counted, so the limit
+under-counts until those sessions churn. This is benign and
+Junos-approximate (Junos likewise does not retroactively count
+pre-existing flows when a screen option is enabled). Documented in the
+screen design doc.
 
 ### 6.7 Counter overflow / underflow — RESOLVED
 `u32` per-IP count, `saturating_add`/`saturating_sub`, bounded by

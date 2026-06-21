@@ -17,7 +17,17 @@ three are HOSTILE (default-refute), not synthesizers.
   (+ SMR-1 check must precede both counted forward installs;
   + SMR-2 all-protocol coverage)
 
-## Round 2 (against plan r2) — pending
-- Claude reviewer A r2 — TBD
-- Claude reviewer B r2 — TBD
-- Claude SMR r2 — TBD
+## Round 2 (against plan r2)
+- Claude reviewer A r2 — agentId `ad1d7cf57c30c1826` —
+  VERDICT: PLAN-READY-WITH-NITS (all 4 r1 findings fixed; 4 doc NITs)
+- Claude reviewer B r2 — agentId `a5cca8597926b4dfe` —
+  VERDICT: NEEDS-REVISION (all 4 r1 fixed; 1 new MAJOR =
+  clear-on-disable; 1 MINOR audit; 2 impl NITs)
+- Claude SMR r2 — in-conversation — VERDICT: NEEDS-REVISION on r2
+  (concur MAJOR), PLAN-READY on r3 (clear-on-disable folded)
+
+r3 folds the clear-on-disable MAJOR + the audit MINOR + all NITs.
+
+## Round 3 (against plan r3) — convergence confirmation
+- Claude reviewer B r3 (re-review of the clear-on-disable fix) — see
+  claude-reviewer-B-plan-r3.md
