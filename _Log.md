@@ -1,5 +1,30 @@
 # Action Log
 
+## 2026-06-21 — #2150 research: Ethernet/IPv6 parser consolidation (PLAN-READY)
+
+- **Timestamp**: 2026-06-21
+- **Action**: Researched #2150 ("multiple incompatible Ethernet/IPv6
+  parsers — ARP/NDP learning disagrees with forwarding on 0x88a8 +
+  IPv6 ext-headers"). Mapped all parse sites: FIVE distinct Ethernet-L2
+  offset parsers (`parser.rs parse_eth_offsets`, `frame/inspect.rs
+  frame_l3_offset`, `cos/ecn.rs ethernet_l3`, `nat64.rs frame_l3_offset`,
+  `icmp.rs ingress_reply_l2`) and THREE IPv6 ext-header walkers
+  (`frame/inspect.rs` #2148, `screen/extract.rs` #2189, `icmp_embed/parse.rs`
+  #1838). KEY FINDING: the issue's live-blackhole mechanism is REFUTED —
+  the XDP shim XDP_PASSes ARP (non-IP `_` arm) and NDP NA (ICMPv6 133-137
+  diverted to kernel) and drops QinQ double-tags, so the learning parsers
+  never receive the frames they mis-parse. BUT the parsers genuinely
+  disagree on single 0x88a8 + ext-headers, and two (`parse_eth_offsets`,
+  `nat64::frame_l3_offset`) are outright wrong on single 0x88a8; NDP learn
+  lacks the ext-walk its forwarding peers have. Verdict: PLAN-READY as a
+  consolidation refactor + 2 latent-correctness sub-fixes (Option C hybrid:
+  small correctness PR + canaries first, then behavior-preserving
+  unification). VRRP Go walker (#2188) + kernel shim parser kept out of
+  scope. Hostile SMR (r1) folded 5 findings; promoted "preserve per-caller
+  walker bounds" to default (F3) and made QinQ-double optional (F4).
+- **File(s)**: docs/research/2150-parser-consolidation/plan.md,
+  docs/research/2150-parser-consolidation/claude-smr-plan-r1.md, _Log.md
+
 ## 2026-06-21 — #2146 (PR #2189) fold: close IPv6 ext-header overshoot fail-open
 
 - **Timestamp**: 2026-06-21
