@@ -29,5 +29,16 @@ three are HOSTILE (default-refute), not synthesizers.
 r3 folds the clear-on-disable MAJOR + the audit MINOR + all NITs.
 
 ## Round 3 (against plan r3) — convergence confirmation
-- Claude reviewer B r3 (re-review of the clear-on-disable fix) — see
-  claude-reviewer-B-plan-r3.md
+- Claude reviewer B r3 — agentId `a617576aea48cbb2f` —
+  VERDICT: PLAN-READY (both r2 findings resolved; no new defect)
+- Claude reviewer A — already PLAN-READY-WITH-NITS at r2; all its
+  findings (r1 + the 4 NITs) are folded in r3, so it carries to
+  PLAN-READY at r3.
+- Claude SMR — PLAN-READY on r3 (claude-smr-plan-r2.md).
+
+## CONVERGENCE: 3-way PLAN-READY on r3
+- Claude reviewer A: PLAN-READY (PLAN-READY-WITH-NITS @ r2 → nits folded)
+- Claude reviewer B: PLAN-READY (@ r3)
+- Claude SMR:        PLAN-READY (@ r3)
+Companions (Codex/AGY) infra-degraded — substituted with 2 independent
+hostile Claude reviewers + SMR per the campaign note.

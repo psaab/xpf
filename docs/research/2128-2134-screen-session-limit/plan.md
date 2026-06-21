@@ -778,11 +778,33 @@ NO eBPF change (retired path).
 
 ---
 
-## 8. Verdict sought
+## 8. Verdict — CONVERGED PLAN-READY (3-way)
 
-PLAN-READY for Path B as revised in r2: counter in `SessionTable`
+PLAN-READY for Path B as revised through r3: counter in `SessionTable`
 maintained at the install/remove sinks PLUS the two enumerated in-place
-HA transitions, OFF-gated for zero cost when unconfigured, with the
-limit CHECK relocated to the new-flow decision (fixing the per-packet
+HA transitions (promote `mod.rs:472`, demote `install.rs:305`), OFF-gated
+for zero cost when unconfigured WITH clear-on-disable, with the limit
+CHECK relocated to the new-flow decision (fixing the per-packet
 self-drop) and the read made non-mutating (fixing #2128). One PR fixes
 #2134 and #2128 together.
+
+Convergence (companions Codex/AGY infra-degraded → 2 independent hostile
+Claude reviewers + Claude SMR):
+- **Claude reviewer A:** PLAN-READY (PLAN-READY-WITH-NITS @ r2; all r1
+  findings + 4 NITs folded into r3).
+- **Claude reviewer B:** PLAN-READY @ r3 (NEEDS-REVISION @ r1 + r2; the
+  r2 clear-on-disable MAJOR is resolved).
+- **Claude SMR:** PLAN-READY @ r3.
+
+Round trail: r1 (3× NEEDS-REVISION) → r2 (A: READY-w/-nits, B+SMR: 1 new
+MAJOR) → r3 (3× PLAN-READY).
+
+### Recommended scope for /engineer
+One PR on `userspace-dp` only (no Go, no eBPF). Files per §7. Gate at
+/engineer: full Rust unit/integration suite incl. §5.1-§5.10 (the
+established-flow regression §5.2, the #2128 phantom-zero §5.5, the
+promote/demote §5.6, the invariant §5.9, and the clear-on-disable §5.10
+are the load-bearing ones), `cargo clippy`/`fmt`, then the loss-cluster
+smoke §5.11 (per-reason enforcement + RSS-stability under distinct-IP
+spray + established-flow line-rate + `make test-failover`). Copilot joins
+as the 4th reviewer on the implementation PR.
