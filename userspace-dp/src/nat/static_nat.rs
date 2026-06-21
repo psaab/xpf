@@ -22,16 +22,35 @@ pub(crate) struct StaticNatTable {
     snat: FxHashMap<IpAddr, StaticNatEntry>,
 }
 
-/// Parse a NAT address that may carry a canonical host mask
+/// Parse a static-NAT address that may carry a canonical host mask
 /// (`x.x.x.x/32`, `addr/128`). Junos emits static-NAT match/then in
 /// canonical prefix form, and the Go compiler copies that mask verbatim
 /// into the snapshot; `IpAddr::from_str` REJECTS CIDR notation, so the mask
 /// must be stripped before the parse or the rule is silently dropped (#2122).
-/// Mirrors the SNAT-pool idiom in `nat/source.rs`. A genuinely-malformed
-/// address still returns `None` so callers preserve their skip-on-invalid
+///
+/// Static NAT is an exact `IpAddr -> IpAddr` 1:1 mapping, so the ONLY
+/// meaningful mask is the host mask. We accept a bare address or a host mask
+/// (`/32` for v4, `/128` for v6) and reject any other suffix — a non-host
+/// prefix (`/24`), a non-numeric mask, a trailing/empty/double slash etc.
+/// would silently translate the wrong scope, so it is a misconfiguration to
+/// surface (skip), not to coerce to a host route. A genuinely-malformed
+/// address likewise returns `None`, preserving the caller's skip-on-invalid
 /// behavior.
 fn parse_nat_addr(s: &str) -> Option<IpAddr> {
-    s.split('/').next().unwrap_or(s).parse().ok()
+    let mut parts = s.splitn(2, '/');
+    let addr: IpAddr = parts.next()?.parse().ok()?;
+    match parts.next() {
+        // Bare address — no mask.
+        None => Some(addr),
+        // Host mask only: /32 for v4, /128 for v6. Anything else is rejected.
+        Some(mask) => {
+            let host_len = match addr {
+                IpAddr::V4(_) => "32",
+                IpAddr::V6(_) => "128",
+            };
+            if mask == host_len { Some(addr) } else { None }
+        }
+    }
 }
 
 impl StaticNatTable {

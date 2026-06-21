@@ -45,6 +45,23 @@ pub(crate) struct Nat64ReverseInfo {
     pub(crate) orig_dst_v6: Ipv6Addr,
 }
 
+/// Parse a NAT64 source-pool IPv4 address that may carry a canonical host
+/// mask (`x.x.x.x/32`). Address-range expansion stamps `/32` on every pool
+/// IP and `Ipv4Addr::from_str` rejects CIDR, so the mask is stripped before
+/// parse (#2123). The pool holds exact host source addresses, so only a bare
+/// address or the host mask (`/32`) is accepted; a non-host mask (`/24`) or
+/// garbage suffix returns `None` and is filtered, surfacing a misconfigured
+/// entry rather than silently coercing it to a host address.
+fn parse_pool_v4(s: &str) -> Option<Ipv4Addr> {
+    let mut parts = s.splitn(2, '/');
+    let addr: Ipv4Addr = parts.next()?.parse().ok()?;
+    match parts.next() {
+        None => Some(addr),
+        Some("32") => Some(addr),
+        Some(_) => None,
+    }
+}
+
 impl Nat64State {
     /// Build from config snapshot NAT64 rules.
     pub(crate) fn from_snapshots(snaps: &[NAT64RuleSnapshot]) -> Self {
@@ -74,14 +91,17 @@ impl Nat64State {
             // Pool addresses may carry a canonical host mask: an
             // address-range source pool (`address A to B`) is expanded by
             // the Go compiler into per-IP `/32` entries (#2123), and
-            // `Ipv4Addr::from_str` rejects CIDR notation. Strip the mask
-            // before parse (mirroring the SNAT-pool idiom in nat/source.rs)
-            // so range-form pools are not silently dropped, leaving pool_v4
-            // empty and NAT64 forward translation non-functional.
+            // `Ipv4Addr::from_str` rejects CIDR notation. Strip the host mask
+            // before parse so range-form pools are not silently dropped,
+            // leaving pool_v4 empty and NAT64 forward translation
+            // non-functional. A non-host mask (`/24`) or garbage suffix is
+            // rejected rather than coerced to a host address, so a
+            // misconfigured pool entry is surfaced (dropped) not silently
+            // mistranslated.
             let pool_v4: Vec<Ipv4Addr> = snap
                 .pool_addresses
                 .iter()
-                .filter_map(|s| s.split('/').next().unwrap_or(s).parse().ok())
+                .filter_map(|s| parse_pool_v4(s))
                 .collect();
             prefixes.push(Nat64Prefix {
                 prefix_bytes,

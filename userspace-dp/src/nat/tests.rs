@@ -452,6 +452,36 @@ fn static_nat_cidr_and_bare_coexist() {
     );
 }
 
+#[test]
+fn static_nat_non_host_mask_rejected() {
+    // A non-host mask (or garbage suffix) is NOT a canonical host form and
+    // must be rejected (skipped), not silently coerced to a host route — it
+    // would otherwise translate the wrong scope. Pre-#2122 ALL of these were
+    // rejected too (the bare parser errored on any mask), so this is not a
+    // regression; it keeps the hardened parse strict about misconfiguration.
+    for bad in [
+        "203.0.113.5/24",     // non-host v4 prefix
+        "203.0.113.5/notanum", // non-numeric mask
+        "203.0.113.5/",       // empty mask
+        "203.0.113.5//32",    // double slash
+        "203.0.113.5/128",    // v6 host length applied to a v4 address
+        "2001:db8::1/64",     // non-host v6 prefix
+        "2001:db8::1/32",     // v4 host length applied to a v6 address
+    ] {
+        let table = StaticNatTable::from_snapshots(&[StaticNATRuleSnapshot {
+            name: "bad-mask".to_string(),
+            from_zone: String::new(),
+            external_ip: bad.to_string(),
+            internal_ip: "10.0.0.5".to_string(),
+        }]);
+        assert_eq!(
+            table.external_ips().count(),
+            0,
+            "non-host/garbage mask {bad:?} must be rejected, not installed"
+        );
+    }
+}
+
 // --- DNAT table tests ---
 
 #[test]

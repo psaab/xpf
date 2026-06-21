@@ -132,6 +132,30 @@ fn nat64_pool_genuinely_invalid_still_dropped() {
 }
 
 #[test]
+fn nat64_pool_non_host_mask_rejected() {
+    // A non-host mask or garbage suffix on a pool address must be filtered,
+    // not coerced to a host address. Only bare and /32 forms install. A valid
+    // /32 alongside the bad entries proves the good one survives.
+    let state = Nat64State::from_snapshots(&[NAT64RuleSnapshot {
+        name: "nat64-bad-mask".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec![
+            "100.64.0.1/24".to_string(),      // non-host prefix -> rejected
+            "100.64.0.2/notanum".to_string(), // non-numeric mask -> rejected
+            "100.64.0.3/".to_string(),        // empty mask -> rejected
+            "100.64.0.4//32".to_string(),     // double slash -> rejected
+            "100.64.0.9/32".to_string(),      // canonical host -> kept
+        ],
+        no_v6_frag_header: false,
+    }]);
+    assert_eq!(
+        state.prefixes[0].pool_v4,
+        vec![Ipv4Addr::new(100, 64, 0, 9)],
+        "only the canonical /32 host entry must survive"
+    );
+}
+
+#[test]
 fn invalid_prefix_length_ignored() {
     let state = Nat64State::from_snapshots(&[NAT64RuleSnapshot {
         name: "bad".to_string(),
