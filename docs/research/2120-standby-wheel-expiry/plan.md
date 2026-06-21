@@ -2,10 +2,14 @@
 
 - **Issue:** #2120 (HIGH, `audit`/`bug`, 3/3 adversarial-skeptic verified)
 - **Class:** FAILOVER-class regression (reintroduces #131)
-- **Revision:** r3 (single coherent design; folds both r2 hostile reviewers)
+- **Revision:** r3 (single coherent design; folds both r2 + r3 hostile reviewers)
 - **Research branch:** `research/2120-standby-wheel-expiry`
 - **Base:** origin/master @ 325d10683
-- **Status:** DRAFT — awaiting 3-way convergence (Claude SMR + 2 hostile Claude plan-reviewers)
+- **Status:** **PLAN-READY** — 3-way converged (Claude SMR PLAN-READY + 2 hostile
+  Claude plan-reviewers). R3-B's lone BLOCKER (first_held_ns clear-list
+  contradiction) was ALREADY fixed in the committed plan (it reviewed a
+  pre-tightening read); all r3 NITs (ABS-cap magnitude, MAX_RG_EPOCHS visibility,
+  ha_runtime deref, epoch-bump de-dup, ==0 residual counter) folded.
 
 ## Changelog
 - **r3:** ONE coherent Option-B design replacing all r2/r2.1 menus (deletes the
@@ -493,14 +497,26 @@ assumed, we do not revert it.
    - SELF-HEAL branch in expire: re-stamp `last_seen`, record `seen_rg_epoch`,
      **leave `first_held_ns` UNTOUCHED** (clearing it here re-opens B2#4).
    Add **mandatory** `held_standby`, `reaped_stale_synced`, `healed_on_promote`
-   to `WheelPopStats`, surfaced as worker/Prometheus counters. State the
+   to `WheelPopStats`, surfaced as worker/Prometheus counters. **Also add
+   `aged_owner_rg_zero_active_node`** (R3-B#5) so the known active/active `==0`
+   under-retention residual is OBSERVABLE in the field, not a silent drop. State
+   the
    `SessionEntry` size delta (verify with `size_of`, do not assume free padding).
 5. **Ceiling** = `min(STALE_SYNCED_CEILING_MULT × entry.expires_after_ns,
-   STALE_SYNCED_CEILING_ABS_NS)` (MULT≈3, ABS≈24 h), measured from
+   STALE_SYNCED_CEILING_ABS_NS)` (MULT≈3, ABS≈**7 days** per §4.4 — NOT 24 h: the
+   cap must be ≥ the largest legitimate standby idle window so a long-idle
+   `inactivity-timeout` flow is not reaped before failover), measured from
    `first_held_ns` (flapping-safe). RELATIVE because configured timeouts reach
    `MaxDurationSeconds` (schema_validators.go:132) so a fixed ceiling would reap
-   live long-timeout sessions; ABS-capped to bound the 30-day-timeout worst case;
+   live long-timeout sessions; ABS-capped to bound the pathological worst case;
    `first_held_ns`-based so self-heal re-stamps on a flapping RG cannot reset it.
+   - **Impl note (R3 NITs):** derive the `rg_epochs` bound from the passed
+     array's const-generic length (`rg_epochs.len()`), not a cross-module
+     `flow_cache::MAX_RG_EPOCHS` (visibility); pass the HA map as the existing
+     working form `ha_runtime.as_ref()` (match loop_body:508), not the pseudocode
+     shorthand; REMOVE the now-duplicate epoch-bump loop from
+     `handle_activated_rgs`/`handle_demote` when hoisting the bump before the
+     store (avoid a double-increment).
 6. **Docs**: update `userspace-dp/src/session/README.md` (expire.rs section),
    `docs/fabric-cross-chassis-fwd.md` / the HA session-sync doc with the per-RG
    standby-retention invariant + ceiling, and note in `pkg/cluster` docs that
@@ -665,4 +681,15 @@ and its empty-sweep back-off; we fix the layer that broke the assumption.
   All r2 findings source-verified → folded into r3 (single coherent design:
   forwarding-gate HOLD, node-level epoch-edge self-heal bumped before store,
   relative+abs-capped+first_held_ns ceiling, full test matrix).
-- **r3 (this revision):** awaiting re-review (SMR r3 + 2 hostile Claude r3).
+- **r3 (this revision):** Claude SMR r3 = PLAN-READY (3 NITs folded); reviewer
+  R3-A = PLAN-READY-WITH-NITS (all 4 r2 BLOCKERs + 8 MAJORs source-verified
+  resolved; single-RG-demotion + epoch-reorder verify CLEAN; NITs: ABS-cap
+  magnitude, MAX_RG_EPOCHS visibility, ha_runtime deref); reviewer R3-B =
+  PLAN-REJECT on ONE BLOCKER (first_held_ns clear-list said "or self-heal") —
+  but that text was ALREADY corrected in commit 272d4fc74 before R3-B finished
+  (it cited a stale pre-tightening read; the committed plan says "self-heal does
+  NOT clear first_held_ns"), so the BLOCKER is moot; R3-B's remaining MAJOR/MINORs
+  (promotion clears first_held_ns — already in §6.4; epoch-bump de-dup; ABS-cap
+  floor; ==0 residual counter) folded. **CONVERGED PLAN-READY:** all three
+  reviewers agree the design is correct + complete; the only delta was a
+  doc-consistency line already fixed. Final NIT folds applied this revision.

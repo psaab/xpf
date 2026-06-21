@@ -13,3 +13,18 @@ tool. 3-way convergence target.
 - Claude SMR: claude-smr-plan-r2.md
 - Hostile Claude reviewer A2: (agent id recorded at dispatch)
 - Hostile Claude reviewer B2: (agent id recorded at dispatch)
+
+## Round 2 (plan r2.1)
+- Claude SMR: claude-smr-plan-r2.md — PLAN-READY-WITH-NITS
+- Reviewer A2: agent a607d7a93f887666c — PLAN-REJECT
+- Reviewer B2: agent afe8af4cd33b24928 — PLAN-REJECT
+
+## Round 3 (plan r3)
+- Claude SMR: claude-smr-plan-r3.md — PLAN-READY
+- Reviewer A3: agent a383cd19ff95bceb5 — PLAN-READY-WITH-NITS
+- Reviewer B3: agent a4b65d43a2e616179 — PLAN-REJECT (sole BLOCKER moot;
+  reviewed pre-tightening read; design = PLAN-READY)
+
+## Convergence
+PLAN-READY at r3: SMR PLAN-READY, A3 PLAN-READY-WITH-NITS, B3's only BLOCKER
+already fixed in committed plan → effective PLAN-READY. All NITs folded.
