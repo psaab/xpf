@@ -1,7 +1,7 @@
 # Plan of Action — #1987: consolidate pkg/dhcp + pkg/dhcpserver + pkg/dhcprelay into pkg/services/dhcp/{client,server,relay,common}
 
-- **Revision:** r1
-- **Status:** DRAFT (pre-review)
+- **Revision:** r2 (numbers corrected to origin/master after r1 review)
+- **Status:** CONVERGED — recommendation PLAN-KILL of common/-consolidation-as-specified
 - **Author:** Claude research pass
 - **Issue:** #1987 (label `enhancement`, `plan-deferred-operator`)
 - **Mode:** `/research` — terminal at PLAN-READY / PLAN-DEFER / PLAN-KILL. No code.
@@ -31,33 +31,47 @@ tree)... refactor-with-next-DHCP-feature preferred per the style
 guide."* The user now wants every open issue driven to a terminal
 state, so this pass RE-EVALUATES whether the defer still holds.
 
-## 2. Blast radius (measured on origin/master @ 5fa964c13)
+## 2. Blast radius (measured on origin/master @ 5fa964c13 — RE-MEASURED in r2)
+
+> r1 ERRATUM: the r1 table was measured against a STALE local checkout
+> that predated #1387-inc-2 (the DDNS subsystem) and #2112
+> (`l2send_linux.go`). All three hostile reviewers caught it. The
+> numbers below are re-measured against the actual base
+> (origin/master @ 5fa964c13, via the research worktree).
 
 ### 2.1 Subject packages (production LOC, excludes `_test.go`)
 
-| Package | Prod LOC | Files (prod) | External deps |
+| Package | Prod LOC | Largest file | External deps |
 |---|---|---|---|
-| `pkg/dhcp` (client) | 1779 | dhcp.go (1415), commit.go, reconcile.go, test_seams.go | insomniacslk/dhcp (v4/v6/nclient/iana), vishvananda/netlink |
-| `pkg/dhcpserver` | 701 | dhcpserver.go (662), test_seams.go | pkg/config, pkg/fsatomic (shells to kea-dhcp4) |
-| `pkg/dhcprelay` | 568 | relay.go (539), sockopt_linux.go, l2send_linux.go | insomniacslk/dhcp (dhcpv4 only), pkg/config |
+| `pkg/dhcp` (client) | 1779 | dhcp.go (1415) | insomniacslk/dhcp (v4/v6/nclient/iana), vishvananda/netlink |
+| `pkg/dhcpserver` | **2836** | dhcpserver.go (732) **+ 6 ddns*.go** | pkg/config, pkg/fsatomic, **github.com/miekg/dns** (DDNS/RFC 2136) |
+| `pkg/dhcprelay` | **958** | relay.go (705) | insomniacslk/dhcp (dhcpv4 only), pkg/config |
 
-Test LOC roughly doubles each (dhcp 3146 total / server 1469 / relay
-1101). `pkg/dhcprelay` now also carries `delivery_test.go`,
-`l2send_test.go`, `l2send_linux.go` from PR #2112 (merged 2026-06-20).
+`pkg/dhcpserver` is NOT a thin Kea wrapper: it now spans TWO
+subsystems — Kea config render/listener (dhcpserver.go) AND a full
+**DDNS / RFC 2136 dynamic-DNS-update backend** (`ddns.go` 633,
+`ddns_rfc2136.go` 502, `ddns_leases.go` 378, `ddns_hostname.go` 215,
+`ddns_state.go` 176, `ddns_dns.go` 130; #1387 inc-2). `pkg/dhcprelay`
+carries the #2112 raw-L2 work (`l2send_linux.go`, `delivery_test.go`,
+`l2send_test.go`). dhcp.go at 1415 is the single largest source file
+but dhcpserver as a *package* is the largest at 2836 prod LOC.
 
 ### 2.2 Importers (real tree, `.claude/worktrees/` excluded)
 
 | Importer of | Files | Import-site lines |
 |---|---|---|
 | `pkg/dhcp` | 19 | 19 |
-| `pkg/dhcpserver` | 4 | 4 |
+| `pkg/dhcpserver` | **9** | 9 |
 | `pkg/dhcprelay` | 3 | 3 |
-| **distinct importer files (union)** | **~21** | **26** |
+| **distinct importer files (union)** | **21** | **31** |
 
 Importing packages: `pkg/api`, `pkg/cli`, `pkg/daemon` (the bulk —
 daemon_dhcp.go, daemon_dns.go, daemon.go, daemon_run.go, daemon_ra.go,
-daemon_flow.go + tests), `pkg/grpcapi`. All within the Go control
-plane; **no Rust, no proto, no build scripts** reference these paths.
+daemon_flow.go, **daemon_ddns.go**, **daemon_ddns_test.go** + other
+tests), `pkg/grpcapi`. All within the Go control plane; **no Rust, no
+proto, no build scripts** reference these paths. The dhcpserver
+importer set includes `daemon_ddns.go` + `daemon_ddns_test.go` — any
+move executor MUST rewrite all 9, not 4.
 
 Non-Go references: `docs/architecture.md`, `docs/phases.md`,
 `CLAUDE.md` (Code Layout table, 2 rows), plus historical
@@ -81,16 +95,30 @@ into `common/`**:
     state from the netlink/nclient path.
   - server `dhcpserver.Lease`: `{Address, HWAddress, Hostname,
     ValidLife, ExpireTime, SubnetID string}` — a parsed row of Kea's
-    on-disk CSV lease file.
+    on-disk CSV lease file. (DDNS additionally has its own server-only
+    `ddnsLease` / `LeaseDNSRecord` types — also unshared.)
   These model different things (a client's own lease vs a row of the
   server's lease DB). Merging them into one `common.Lease` would be
   *wrong* — it would force a false abstraction over two unrelated
   domain objects.
-- `dhcpv4.*` (insomniacslk) is used **15+ sites in relay**, **2 sites
-  in client**, **0 sites in server** (server shells out to kea-dhcp4
-  and never touches the wire). There is no "packet formatting / option
-  validation shared between relay and server" — the server does not do
-  packet formatting at all.
+- **Each component speaks a DIFFERENT wire — no shared parse/format/
+  validate code.** (r1 wrongly said "the server never touches the
+  wire." It does — just not the same wire as the relay.)
+  - `pkg/dhcprelay` speaks the **DHCP wire**: `dhcpv4.*` (insomniacslk)
+    at 15+ sites, option-82 (`addOption82`/`stripOption82`),
+    broadcast-flag handling, ports 67/68 — all relay-only.
+  - `pkg/dhcpserver` DDNS speaks the **DNS wire**: RFC 2136 dynamic
+    updates over `github.com/miekg/dns` (`dns.Client`, `dns.Msg` in
+    `ddns_rfc2136.go`), with server-only helpers (`reversePTRName`,
+    `identity4`, `deriveFQDN`/`sanitizeLabel`). It has **0**
+    `insomniacslk/dhcp` imports.
+  - `pkg/dhcp` (client) uses `dhcpv4`/`dhcpv6` at 2 sites for its own
+    lease acquisition.
+  Different protocols (DHCP vs DNS), different libraries
+  (insomniacslk/dhcp vs miekg/dns), zero overlapping helpers. The
+  issue's specific claim of "broadcast-option validation between relay
+  and server" is **REFUTED** — broadcast/option-82 handling is entirely
+  relay-side; the server never sees a DHCP packet.
 
 **Conclusion:** the issue's premise that `common/` would dedup shared
 type mappings / packet formatting / broadcast-option validation is
@@ -131,7 +159,7 @@ miss. Risk of behavioral regression is near-zero **provided** it stays
 pure motion (no opportunistic "while I'm here" edits).
 
 ### 3.2 Diff-width / merge-conflict risk: MODERATE-WIDE
-- 26 import-site edits across ~21 files in 5 packages (api, cli,
+- 31 import-site edits across 21 files in 5 packages (api, cli,
   daemon, grpcapi + the 3 moved packages). `pkg/daemon` is the
   highest-churn consumer (7+ files) and is one of the most
   frequently-touched packages in the tree.
@@ -157,14 +185,24 @@ pure motion (no opportunistic "while I'm here" edits).
     the issue is overstated for a 1415-LOC Go file.
 
 ### 3.4 Is there a real modularity defect worth fixing?
-If anything, the *intra-package* size of `pkg/dhcp/dhcp.go` (1415 LOC,
-client + v4 + v6 + PD + DUID + RA-mapping all in one file) is a more
-legitimate (and far cheaper, zero-import-churn) modularity target than
-the cross-package directory regroup. Splitting `dhcp.go` into
-`dhcp_v4.go` / `dhcp_v6.go` / `duid.go` *within the existing package*
-would address the only defensible part of the issue (file size) with
-**zero importer churn** — but that is a different, smaller piece of
-work and is not what #1987 asks for.
+Yes — but it is *intra-package*, not the cross-package regroup #1987
+asks for:
+- `pkg/dhcp/dhcp.go` (1415 LOC: client + v4 + v6 + PD + DUID +
+  RA-mapping in one file) is the largest single source file. Splitting
+  it into `dhcp_v4.go` / `dhcp_v6.go` / `duid.go` / `prefix_delegation.go`
+  *within the existing package* addresses cohesion with **zero importer
+  churn**.
+- Notably, `pkg/dhcpserver` (2836 prod LOC) is **already** decomposed
+  in-place into `dhcpserver.go` + 6 `ddns_*.go` files — living proof
+  that the project's working answer to Go file growth is in-package
+  file splitting (Option C), NOT cross-package regrouping. The issue's
+  proposed `pkg/services/dhcp/` directory move would not reduce a single
+  line; the codebase's own idiom (and the engineering-style "one
+  responsibility per module / split on the way in" rule) is satisfied
+  by in-package file cohesion, which dhcpserver demonstrates.
+
+That is a different, smaller, zero-churn piece of work (Option C) and
+is not what #1987 asks for.
 
 ## 4. Path options
 
@@ -202,9 +240,10 @@ separate cheap issue.
 
 ## 5. Recommendation
 
-**PLAN-DEFER (lean toward documenting as effectively PLAN-KILL of the
-`common/` consolidation as specified), with Option C offered as the
-cheap alternative.**
+**PLAN-KILL of the `common/` consolidation as specified in #1987**
+(converged at r2 across all three hostile reviewers), with **Option C**
+(in-place `dhcp.go` file split, zero importer churn) offered as the
+cheap, optional, codebase-idiomatic alternative.
 
 Reasoning:
 1. The central justification (`common/` dedup) is **factually
@@ -238,12 +277,16 @@ If 3-way convergence lands on "do it anyway for namespace hygiene,"
 ship **Option B** with these guardrails (this is the converged-safe
 decomposition, recorded so /engineer has it):
 
-1. **Commit 1:** `git mv pkg/dhcprelay pkg/services/dhcp/relay`;
+1. **Commit 1:** `git mv pkg/dhcprelay pkg/services/dhcp/relay`
+   (incl. `relay.go`, `sockopt_linux.go`, `l2send_linux.go` + tests);
    `sed` package decl `dhcprelay` → `relay`; rewrite the 3 importers +
    their import aliases; move README.md; update CLAUDE.md row. Build +
    `go test ./...` green. (Smallest blast radius first — 3 importers.)
-2. **Commit 2:** same for `pkg/dhcpserver` → `.../server` (4
-   importers).
+2. **Commit 2:** same for `pkg/dhcpserver` → `.../server` (**9**
+   importers — incl. `pkg/daemon/daemon_ddns.go` +
+   `daemon_ddns_test.go`; move ALL of `dhcpserver.go` + the 6
+   `ddns_*.go` + tests + test_seams.go). Do NOT miss the DDNS
+   importers — using the r1 "4 importers" number would break the build.
 3. **Commit 3:** same for `pkg/dhcp` → `.../client` (19 importers,
    largest — do last so the first two are proven patterns).
 4. **NO `common/`** — explicitly out of scope; document in the PR that
@@ -274,9 +317,12 @@ eyeball that the diff contains no logic changes. Specifically:
 ## 8. Documentation impact
 
 - `CLAUDE.md` Code Layout table: 2 rows → updated paths (+1 if
-  `common/` ever lands).
+  `common/` ever lands). Note the dhcpserver row should also mention
+  DDNS/RFC 2136 (currently only says "Kea DHCP server management").
 - `docs/architecture.md`, `docs/phases.md`: current-state path refs.
 - 3 × `README.md` relocated with their packages.
+- Move executor must also rewrite `pkg/daemon/daemon_ddns.go` +
+  `daemon_ddns_test.go` (dhcpserver importers missed in r1).
 - Frozen history (`docs/issues/*`, `docs/pr/*`) left untouched.
 - If DEFER/KILL: update the issue + add a one-line note to the
   Go-LOC audit doc that #1987's `common/` premise was disproven.
@@ -285,10 +331,10 @@ eyeball that the diff contains no logic changes. Specifically:
 
 | Option | common/ | Importer churn | Realized benefit | Verdict |
 |---|---|---|---|---|
-| A full-spec | empty/forced | 26 sites | cosmetic + false dedup | reject (anti-pattern) |
-| B move-only | dropped | 26 sites | directory cosmetics | viable-if-insisted |
+| A full-spec | empty/forced | 31 sites | cosmetic + false dedup | reject (anti-pattern) |
+| B move-only | dropped | 31 sites | directory cosmetics | viable-if-insisted |
 | C split dhcp.go in place | n/a | 0 sites | fixes the real file-size smell cheaply | best value if acting |
-| D defer/kill | n/a | 0 | none (no negative either) | **recommended** |
+| D **KILL** common/-spec | n/a | 0 | none (no negative either) | **converged recommendation** |
 
 ## 10. Open questions for reviewers
 
@@ -301,9 +347,41 @@ eyeball that the diff contains no logic changes. Specifically:
 3. Is Option C (in-place dhcp.go split, zero churn) the better
    expression of the modularity intent behind #1987?
 
-## 11. Decision record (filled at convergence)
+## 11. Decision record (converged at r2)
 
-- Claude SMR verdict: _pending_
-- Codex verdict: _pending_
-- AGY verdict: _pending_
-- Converged outcome: _pending_
+Companions (Codex/AGY) infra-degraded this session → 3 independent
+hostile Claude reviewers (2 subagent + 1 SMR) per the research-skill
+exception. See `reviewer-ids.md`.
+
+- **Claude hostile reviewer A (r1):** "PLAN-REVISE ... After revision,
+  land terminal state as KILL of the common/ consolidation-as-specified
+  with Option C in-place dhcp.go split re-filed as the cheap modularity
+  follow-up. The no-common/ conclusion itself is verified correct and
+  does NOT flip."
+- **Claude hostile reviewer B (r1):**
+  "PLAN-REVISE-fix-stale-LOC-and-importer-counts-and-add-DDNS-to-inventory-then-KILL-common-consolidation"
+- **Claude SMR (r1):** "PLAN-REVISE (mandatory) ... After that
+  correction the substantive verdict is PLAN-KILL of the common/
+  consolidation-as-specified, with Option C (in-place file split, zero
+  import churn) offered as the cheap, codebase-idiomatic alternative.
+  The no-common/ conclusion is independently verified correct and does
+  NOT flip."
+
+**Convergence:** unanimous. All three flagged the SAME single MAJOR
+(r1's numbers were measured against a stale local checkout and omitted
+the DDNS subsystem); all three independently verified the substantive
+recommendation is CORRECT and does not flip. r2 corrects every number
+to origin/master and re-grounds §2.3.
+
+**Converged outcome: PLAN-KILL of the `common/` consolidation as
+specified in #1987.** The central deliverable (`common/` dedup) is
+provably unbuildable (zero cross-package shared code; three distinct
+wire protocols; two unrelated `Lease` types); no LOC threshold forces
+the move (Go; engineering-style monolith rule is `.rs`-scoped); the
+defer's "refactor-with-next-feature" trigger has fired and shipped flat
+TWICE (#1387-inc-2 DDNS, #2076/#2112 raw-L2); realized benefit is
+cosmetic directory grouping at the cost of a 31-site cross-package diff
++ blame/log discontinuity. **Option C** (in-place `dhcp.go` file split,
+zero importer churn — the idiom dhcpserver already follows) is offered
+as the cheap, optional alternative for whoever wants to act on the
+modularity intent, to be re-filed as its own small issue if desired.
