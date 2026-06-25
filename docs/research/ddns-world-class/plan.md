@@ -4,7 +4,7 @@
 PLAN-READY. No production code, no code PR. Awaiting design review;
 implement via `/engineer` per the phased plan in §9.
 
-Branch: `research/ddns-world-class`. Doc:
+Tracking issue: **#2691**. Branch: `research/ddns-world-class`. Doc:
 `docs/research/ddns-world-class/plan.md`.
 
 Subsumes / sequences open issues: **#2663, #2664, #2665, #2666, #2667,
