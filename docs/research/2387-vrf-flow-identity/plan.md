@@ -33,11 +33,20 @@ master and corrects two of them — see §4).
 
 ## 1. Status
 
-DRAFT v1. This is a `/research` pass: it stops at PLAN-READY / PLAN-KILL /
-PLAN-DEFER and produces a converged plan-of-action, no code PR. The headline
-recommendation is **PLAN-DEFER** — confirm the mechanism, ship a small
-fail-closed guard + doc as the proportionate response now, and gate the full
-VRF-aware identity rework on a maintainer product-scope decision.
+**CONVERGED v3 — PLAN-DEFER (research-converged).** This is a `/research` pass: it
+stops at PLAN-READY / PLAN-KILL / PLAN-DEFER and produces a converged
+plan-of-action, no code PR. r2 verdicts: Claude SMR = PLAN-DEFER, AGY = PLAN-DEFER
+(Codex r1 = NEEDS-MAJOR-REVISION on v1, all findings incorporated in v3; r2
+convergence check recorded in `codex-plan-r2.md`).
+
+The headline recommendation is **PLAN-DEFER**: the bug is real and reachable
+(LIVE under PBR `then routing-instance`, latent in default forwarding mode), but
+the real fix (Track B-min) carries an HA wire change and a product-support
+question. Ship the interim A.1 commit warning + A.3 docs now; schedule Track B-min
+(domain id + key widening + HA wire bump) once the maintainer confirms
+overlapping-subnet PBR VRF is supported. Track B-ext (per-VRF default FIB) is a
+separate, independently deferrable enhancement. Awaiting manual `/engineer`
+approval — no code until then.
 
 ## 2. Issue framing
 

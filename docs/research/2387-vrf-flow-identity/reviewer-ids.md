@@ -9,7 +9,8 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r1 | AGY | job `adversarial-review-mr0wcll0-pk94mc` → `agy-plan-r1.md` | PLAN-NEEDS-MAJOR-REVISION |
 | r1 | Codex | rescue agent (NOT infra-blocked) → `codex-plan-r1.md` | PLAN-NEEDS-MAJOR-REVISION |
 | r2 | Claude SMR | `claude-smr-plan-r2.md` | PLAN-DEFER (converged) |
-| r2 | AGY | job `adversarial-review-mr0wp66c-c5nu8h` → `agy-plan-r2.md` | (pending) |
+| r2 | AGY | job `adversarial-review-mr0wp66c-c5nu8h` → `agy-plan-r2.md` | PLAN-DEFER (converged) |
+| r2 | Codex | rescue agent → `codex-plan-r2.md` | (pending convergence check on v3) |
 
 All three r1 reviewers independently escalated the same finding: the collision is
 LIVE via PBR `then routing-instance`, not latent. All three confirmed §4c (NAT
