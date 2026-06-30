@@ -1,15 +1,27 @@
 # #2387 — VRF/routing-instance awareness in session/flow identity
 
-**Status:** DRAFT v2 — incorporates Claude SMR r1 (PBR reachability
-self-correction); pending AGY (and Codex if it unblocks) convergence. 2-of-3 per
-`feedback_codex_infra_must_retry`.
+**Status:** DRAFT v3 — incorporates all three r1 reviews (Claude SMR + AGY +
+Codex; all three independently returned NEEDS-MAJOR-REVISION on the PBR
+reachability escalation, and all three confirmed §4c/§4d/§7 accurate). Codex was
+NOT infra-blocked this round — full 3-of-3.
 
-**v2 changelog:** SMR r1 refuted the v1 "unreachable in a forwarding-correct
-config" claim — the collision IS reachable via PBR `then routing-instance`
-(per-VRF forwarding works without per-VRF default FIB). §3/§4b rewritten from
-"latent" to "latent in default mode, LIVE via PBR"; Track A.1 reframed as a
-deliberate fail-closed reject of overlap even when PBR forwards it; A.2 demoted;
-B-P0 tightened to a dense-interned u32; the leaked-flow corner resolved.
+**v3 changelog (from r1 reviews):**
+- All three reviewers refuted the v1 "unreachable in a forwarding-correct config"
+  claim — the collision IS reachable via PBR `then routing-instance` (per-VRF
+  forwarding works without per-VRF default FIB). §3/§4b rewritten "latent in
+  default mode, LIVE via PBR."
+- **AGY Attack 4:** A.1 hard-reject breaks a *legitimate* overlapping-subnet PBR
+  VRF design → softened to a commit **warning** by default (hard reject only if
+  the product decision is "no overlapping subnets at all").
+- **AGY Attack 5:** the v1/v2 "key widening must be last, after per-VRF FIB"
+  ordering was wrong → split into **Track B-min** (P0+P2+P3, the minimal real fix
+  using PBR as the forwarding mechanism) and **Track B-ext** (per-VRF default FIB
+  — a separate enhancement, NOT a prerequisite).
+- **Codex citation fixes:** corrected `CurrentHAProtocolVersion` location and
+  added a path-shorthand note (`src/afxdp/` subtree).
+- A.2 demoted (does not mitigate the conntrack-level breach); B-P0 tightened to a
+  dense-interned u32 reusing the dead `routing_table` slot; leaked-flow corner
+  resolved (domain-0 scope for B-min, dual-domain for B-ext).
 
 **Branch:** `research/2387-vrf-flow-identity` (docs only — no production source).
 
@@ -80,6 +92,16 @@ only if multi-tenant overlapping-subnet VRF isolation is a declared product goal
 
 ## 4. Confirmed mechanism + what's already shipped (current master `13e3b269e`)
 
+> **Path shorthand:** Rust dataplane citations below are relative to
+> `userspace-dp/src/` and live under the `afxdp/` subtree unless the path already
+> names another (e.g. `session/key.rs`, `nat/`). Full forms: `forwarding/mod.rs`
+> = `userspace-dp/src/afxdp/forwarding/mod.rs`; `types/forwarding.rs` =
+> `userspace-dp/src/afxdp/types/forwarding.rs`; `session_glue/mod.rs` =
+> `userspace-dp/src/afxdp/session_glue/mod.rs`; `shared_ops.rs` =
+> `userspace-dp/src/afxdp/shared_ops.rs`. (Codex r1 flagged the bare `src/types/`
+> / `src/session/session_glue/` forms as non-existent — they are under
+> `src/afxdp/`.)
+
 ### 4a. The key is the bare 5-tuple — confirmed
 
 - `SessionKey` = `{ addr_family:u8, protocol:u8, src_ip:IpAddr, dst_ip:IpAddr,
@@ -138,12 +160,17 @@ never forwards correctly there, with or without a wider session key.
 **But PBR makes per-VRF forwarding work — and that is where the collision goes
 live (verified ordering proof):**
 
-- With an interface filter `then routing-instance <ri>`,
+- Input `then routing-instance` is a valid, tested config
+  (`pkg/config/firewall_ri_output_direction_3432_test.go:59-69`,
+  `pkg/config/firewall_ri_conflict_3308_test.go:81-97`). With it,
   `ingress_route_table_override` returns the per-VRF table
-  (`forwarding/mod.rs:1211`), and the **session-miss** resolution honors it
-  (`poll_descriptor/mod.rs:1208-1216` builds the override; `:1244-1248` passes it
-  to `lookup_forwarding_resolution_in_table_with_dynamic`). So overlapping-address
-  multi-VRF *does* forward correctly under PBR.
+  (`forwarding/mod.rs:1211`, builds `<ri>.inet.0`/`inet6.0` at `:1283-1288`), and
+  the **session-miss** resolution honors it (`poll_descriptor/mod.rs:1208-1216`
+  builds the override; `:1244-1248` passes it to
+  `lookup_forwarding_resolution_in_table_with_dynamic`). Table-scoped
+  forwarding+local-delivery under a supplied table is proven in
+  `forwarding/tests.rs:2455-2546`. So overlapping-address multi-VRF *does* forward
+  correctly under PBR.
 - **The established-session fast path runs FIRST and ignores PBR:**
   `resolve_flow_session_decision` is called at `poll_descriptor/mod.rs:474` and
   short-circuits before the PBR override at `:1208` (comment at `:503`: it "never
@@ -193,9 +220,12 @@ little-endian and NOT length-gated**, and the key is serialized *twice* (the
 primary key, plus the embedded `reverse_key` inside the value at
 `sync_protocol.go:136-145`). Widening `SessionKey` shifts the reverse-key block
 and every value field after it, so it is a **hard wire break** requiring a
-`CurrentHAProtocolVersion` / `SessionSyncWireVersion` bump (`pkg/cluster/sync.go:36`)
-and the #1930 mixed-base ISSU gate — strictly more expensive than the
-"additive" estimate.
+bump of `CurrentHAProtocolVersion` (`pkg/cluster/heartbeat.go:27-31`; the
+`SessionSyncWireVersion = uint16(CurrentHAProtocolVersion)` alias is at
+`pkg/cluster/sync.go:36`) and the #1930 mixed-base ISSU gate — the upgrade path
+already treats a mismatched HA protocol version as non-rolling-compatible
+(`pkg/upgrade/cluster_cli.go:246-248`), so a key-wire bump forces a both-nodes
+upgrade. Strictly more expensive than the "additive" estimate.
 
 ### 4e. `routing_table` meta field is dead (new finding)
 
@@ -212,19 +242,21 @@ Two tracks. The decision between them is a **product-scope call** (see §11 Q1).
 
 ### Track A — proportionate hardening now (recommended default; cheap, fail-closed)
 
-- **A.1 — commit-time fail-closed guard** (`pkg/config` compiler). Reject a
-  config that assigns overlapping L3 address space (interface addresses or
-  static routes) to two different routing-instances (and, optionally, to two
-  zones on a shared physical parent), with an error naming both
-  interfaces/instances. **This must reject the overlap *even when* a PBR `then
-  routing-instance` filter would make it forward** — because (per §4b) PBR makes
-  it forward but the session layer cannot isolate the colliding flows. The guard
-  is therefore a *deliberate* fail-closed posture ("we do not support overlapping
-  L3 across routing-instances until session identity is VRF-aware"), not a
-  "reject a config that doesn't work anyway" guard. No wire/HA impact; pure
-  config-layer. Pattern to mirror: the existing NPTv6 overlap gates
-  (`compiler_nptv6_test.go`). This is the **immediate mitigation** for the live
-  PBR-mode breach.
+- **A.1 — commit-time WARNING (not a hard reject)** (`pkg/config` compiler).
+  When a config assigns overlapping L3 address space (interface addresses or
+  static routes) to two different routing-instances reachable via PBR `then
+  routing-instance`, emit a **commit warning** naming both interfaces/instances:
+  "overlapping L3 across routing-instances is forwarded via PBR but is NOT
+  session-isolated (#2387) — colliding 5-tuples may cross-forward until the
+  session identity is VRF-aware." **A warning, not a reject** — AGY r1 Attack 4
+  correctly notes that overlapping-subnet PBR VRF is a *legitimate, working*
+  multi-tenant design, so hard-rejecting it breaks a valid deployment to work
+  around a fast-path bug. A hard reject is only appropriate if the maintainer's
+  product decision is "we do not support overlapping subnets" at all (§11 Q1) —
+  default to the warning. No wire/HA impact; pure config-layer. Pattern to
+  mirror: the existing config-validation warnings (not the NPTv6 *reject* gate).
+  This is the **interim safety net**; the real fix for the live breach is Track
+  B-min.
 - **A.2 — (de-prioritized) flow-cache logical-ifindex key.** Change
   `FlowCacheEntry` to key on the **logical** ingress ifindex (resolve
   `(parent, vlan) → logical` via `resolve_ingress_logical_ifindex`, already
@@ -241,25 +273,31 @@ Two tracks. The decision between them is a **product-scope call** (see §11 Q1).
   is the only per-VRF forwarding path and that it is NOT session-isolated, and
   record the #3096 NAT-scope-vs-session-cache coherence contract.
 
-### Track B — full VRF-aware identity (large, phased; only if multi-tenant is a goal)
+### Track B-min — the minimal real fix for the LIVE PBR-mode bug (corrected ordering)
 
-Ordered so the key widening is **last**, not first:
+**AGY r1 Attack 5 correction:** v1/v2 said the key widening must come *last*,
+after per-VRF default FIB (old B-P1), else it's a dead-end. That is **wrong**.
+PBR `then routing-instance` is *already* the per-VRF forwarding mechanism on the
+slow path (§4b), so widening the key + deriving a domain id alone fixes the
+fast-path collision for PBR-based VRF deployments **without** needing per-VRF
+default FIB. Per-VRF default FIB (now Track B-ext) is a *separate* enhancement
+that makes *non-PBR* configs VRF-isolate — it is NOT a prerequisite for the key
+fix. The minimal fix for the reachable bug is:
 
 - **B-P0 — routing-domain id.** Derive a stable compact `routing_domain:u32`
   from the existing `ifindex_to_routing_instance` map by **interning the RI name
   to a dense u32** (domain 0 = default/unscoped) — never hash the RI name on the
-  hot path. Reuse the **dead `meta.routing_table` slot** (§4e) to carry it, so
-  there is **no `UserspaceDpMeta` size change** (the struct stays size-96 with
-  its mirrored `offset_of!` asserts intact). The SessionKey then grows by exactly
-  4 bytes in B-P2, and the per-packet key hash gains a single u32.
-- **B-P1 — per-VRF forwarding.** Per-VRF `local_v{4,6}` sets and an
-  ingress-VRF-scoped default FIB table, so an interface's native
-  `routing_instance` selects the destination table for a normal packet (not just
-  PBR). This is the work that actually makes §4b correct.
+  hot path. For PBR-steered flows the domain is the PBR-resolved
+  routing-instance; for natively-assigned interfaces it is
+  `ifindex_to_routing_instance[ingress_ifindex]`. Reuse the **dead
+  `meta.routing_table` slot** (§4e) to carry it, so there is **no
+  `UserspaceDpMeta` size change** (struct stays size-96 with its mirrored
+  `offset_of!` asserts intact). SessionKey then grows by exactly 4 bytes.
 - **B-P2 — symmetric discriminator in the key.** Add `routing_domain:u32` to
   `SessionKey`, `FlowCacheLookup`, and the reverse-key transforms
   (`reverse_wire_key` / `reverse_canonical_key`, `session/key.rs:84-138`). It
   **must be the routing-domain id, NOT zone or ingress-ifindex** — see §7.
+  Leaked inter-VRF flows are scoped to domain-0 for B-min (the §7 hard gate).
 - **B-P3 — HA wire (hard break).** Bump `CurrentHAProtocolVersion`, change the
   Go `sync_protocol.go` key encode/decode (primary + embedded reverse-key, V4 +
   V6), the Rust `SessionSyncRequest` (`protocol/control.rs:868-972`), the C
@@ -268,15 +306,32 @@ Ordered so the key widening is **last**, not first:
   `dataplane.SessionKey`/`SessionKeyV6` (`pkg/dataplane/types.go:6`/`:87`), and
   regenerate the golden fixture `userspace-dp/tests/fixtures/protocol_wire_v1.json`.
   Gate mixed-version interop through the #1930 mixed-base ISSU path.
-- **B-P4 — commit validation flips** from "reject overlap" (A.1) to "require
-  overlap to live inside distinct routing-instances."
+
+B-min (P0+P2+P3 + the leaked-flow scoping) is the smallest change that closes the
+reachable #2387 breach. It is still non-trivial (the HA wire hard break + version
+bump dominate the cost), but it is much smaller than the full per-VRF forwarding
+feature.
+
+### Track B-ext — per-VRF default forwarding (separate, deferred; NOT a prerequisite)
+
+- **B-ext.1 — per-VRF forwarding without PBR.** Per-VRF `local_v{4,6}` sets and
+  an ingress-VRF-scoped default FIB table, so an interface's native
+  `routing_instance` selects the destination table for a normal packet *without*
+  requiring a PBR filter. This makes §4b's default mode VRF-isolate too. It is an
+  independent enhancement (a usability/parity improvement over "you must attach a
+  PBR filter"), not needed for the B-min correctness fix.
+- **B-ext.2 — leaked-flow full handling.** Replace B-min's domain-0 scoping of
+  inter-VRF route-leaked flows with dual ingress+egress-domain storage and an
+  egress-domain reverse-key transform (§7).
+- **B-ext.3 — commit validation.** Flip A.1's warning to a "require overlap to
+  live inside distinct routing-instances" model once isolation is real.
 
 ## 6. Public API preservation
 
 Track A: no public Rust/Go API signature changes (A.1 is a new compiler check;
-A.2 is internal to `flow_cache.rs`; A.3 is docs). Track B-P2/P3 change the
-`SessionKey` struct and the HA wire — by definition not preservable; that is the
-cost the version bump exists to manage.
+A.2 is internal to `flow_cache.rs`; A.3 is docs). Track B-min (B-P2/B-P3) changes
+the `SessionKey` struct and the HA wire — by definition not preservable; that is
+the cost the version bump exists to manage.
 
 ## 7. Hidden invariants the change must preserve
 
@@ -289,13 +344,14 @@ cost the version bump exists to manage.
   domain and matching holds. **Residual asymmetry:** an **inter-VRF route-leaked
   flow** (next-table / rib-group) ingresses VRF-A, egresses VRF-B; its reply
   ingresses VRF-B, so the forward-stored domain differs from the reply's computed
-  domain. **Resolution for B-MVP:** the config path that produces this is
-  rib-group / `next-table` inter-VRF route leaking (`pkg/routing/`). B-MVP
-  **scopes leaked inter-VRF flows OUT** with a documented known-limitation
-  (leaked flows keep domain-0 / unscoped identity, as today); a follow-up phase
-  stores both ingress and egress domain on the session and uses the egress domain
-  in the reverse-key transform (mirroring NAT's reverse-key handling). Shipping
-  B-P2 without this scoping would silently regress leaked-flow conntrack, so the
+  domain. **Resolution for B-min:** the config path that produces this is
+  rib-group / `next-table` inter-VRF route leaking (`pkg/routing/`; recursion at
+  `forwarding/mod.rs:1579-1604`). B-min **scopes leaked inter-VRF flows OUT** with
+  a documented known-limitation (leaked flows keep domain-0 / unscoped identity,
+  as today); Track B-ext.2 then stores both ingress and egress domain on the
+  session and uses the egress domain in the reverse-key transform (mirroring NAT's
+  reverse-key handling). Shipping the key widening without this scoping would
+  silently regress leaked-flow conntrack, so the
   scoping decision is a hard gate, not prose. Campaign-8 did not flag this corner.
 - **HA wire portability / mixed-version.** §4d: key widening is a hard break;
   ISSU during the upgrade window must not corrupt or silently drop sessions —
@@ -318,17 +374,17 @@ cost the version bump exists to manage.
 | HA mixed-version | NONE (no wire change). | HIGH — hard key-wire break (§4d); requires version bump + #1930 mixed-base ISSU gate + dual-format decoder for the upgrade window. |
 | Wire / struct size | NONE. | MED — SessionKey +4 B (and the C/Go mirrors + golden fixture); `UserspaceDpMeta` already has the dead `routing_table` slot, so no meta size change if reused. |
 | Performance (key hashed per packet) | NONE. | LOW-MED — +4 B in the key hash and per-entry map cost (~1-3%); domain-id derivation is one extra `FastMap` lookup at ingress. Must be measured (smoke + perf). |
-| Architectural mismatch | LOW — A.1/A.3 are the honest contract; A.2 aligns flow-cache with the logical-ifindex SSOT already used elsewhere (#2370/#3021). | MED — doing B-P2 *before* B-P1 (per-VRF FIB) is the dead-end: a wider key with a global FIB still can't forward overlapping addresses, so it ships cost for no isolation. Phase order (P0→P1→P2→P3→P4) is load-bearing. |
+| Architectural mismatch | LOW — A.1/A.3 are the honest contract; A.2 aligns flow-cache with the logical-ifindex SSOT already used elsewhere (#2370/#3021). | LOW-MED — corrected (AGY Attack 5): the key widening (B-min) is NOT a dead-end before per-VRF FIB, because PBR is already the per-VRF forwarding mechanism. Risk is reversed — B-min alone delivers PBR-mode isolation; B-ext (per-VRF default FIB) is the separable enhancement. The real mismatch risk is the HA wire hard break (managed by the version bump + ISSU gate). |
 
 **PLAN-KILL acceptable if:** the churn of Track B outweighs the win for what is a
 niche config (overlapping addresses + PBR + simultaneous identical 5-tuple —
 §4b). Note the collision is **not** unreachable: it is live in PBR mode, only
 latent in default mode. So PLAN-KILL rests solely on the cost/benefit prong, not
-on unreachability. The literal "widen the key now" ask should be PLAN-KILLed as
-*premature* (it is the last phase of Track B); the proportionate immediate
-response is Track A.1 (fail-closed guard for the live breach) + A.3 (docs), with
-Track B scheduled if multi-tenant overlapping-subnet VRF is a declared product
-goal.
+on unreachability. The proportionate immediate response is Track A.1 (commit
+warning for the live breach) + A.3 (docs); the minimal real fix is **Track B-min**
+(key widening + domain id + HA wire bump), scheduled if multi-tenant
+overlapping-subnet VRF is a declared product goal. Track B-ext (per-VRF default
+FIB) is independently deferrable.
 
 ## 9. Test plan
 
@@ -338,12 +394,14 @@ goal.
 - **Track A.2:** `flow_cache` unit test — same physical parent, two VLAN units,
   identical 5-tuple ⇒ distinct flow-cache entries (RED if the key reverts to raw
   physical ifindex).
-- **Track B (the issue's stated regression, RED-on-revert):** construct two
+- **Track B-min (the issue's stated regression, RED-on-revert):** construct two
   flows — same parent ifindex, two VLAN sub-interfaces in different
-  routing-instances (per-VRF FIB from B-P1 making each forward), identical
-  5-tuples, differing policy/NAT — and assert **no** session or flow-cache reuse
-  across the boundary, plus correct reply-direction match *within* each VRF, plus
-  the inter-VRF route-leaked corner (§7).
+  routing-instances each with a PBR `then routing-instance` filter steering to its
+  own table (so each forwards), identical 5-tuples, differing policy/NAT — and
+  assert **no** session or flow-cache reuse across the boundary, plus correct
+  reply-direction match *within* each VRF, plus the inter-VRF route-leaked corner
+  stays domain-0 (§7). Reverting the `routing_domain` field makes it RED (flow 2
+  inherits flow 1's egress).
 - **HA wire round-trip:** Go `sync_protocol.go` encode→decode of the widened key
   (V4 + V6, primary + reverse-key) round-trips; golden `protocol_wire_v1.json`
   regenerated and matched; a version-skew decode test proves graceful handling
@@ -355,9 +413,9 @@ goal.
 
 ## 10. Out of scope (explicitly)
 
-- Per-VRF FIB / per-VRF local-delivery sets as a standalone deliverable beyond
-  what B-P1 needs (this is itself a multi-PR feature; #2388 already tracks the
-  connected-route table-naming half).
+- Per-VRF default FIB / per-VRF local-delivery sets (Track B-ext) — a separate
+  multi-PR enhancement, NOT needed for the B-min correctness fix; #2388 already
+  tracks the connected-route table-naming half.
 - Zone-only flow isolation without overlapping addressing (not reachable; same
   src IP can't legitimately ingress on two zones without overlap or asymmetric
   routing).
@@ -367,27 +425,31 @@ goal.
 
 ## 11. Open questions for adversarial review
 
-1. **Product scope (decides A vs B):** Is overlapping-subnet multi-tenant
-   VRF/zone isolation a product goal for the userspace dataplane? If **no**
-   (expected), Track A is the complete, proportionate response and the literal
-   key-widening is PLAN-KILL-premature. If **yes**, Track B is a scheduled
-   multi-phase feature. PLAN-KILL is invited if reviewers think even Track A.1 is
-   unwarranted (i.e. "document-only").
-2. Is the §4c #3096 coherence gap (NAT scope checked at create, not on the
-   cached fast path) reachable *without* overlapping addressing — e.g. via
-   asymmetric routing or a deliberately crafted same-5-tuple on two scoped
-   interfaces? If a reviewer finds a forwarding-correct trigger, the verdict
-   escalates from "latent" toward "live" and Track B moves up.
+1. **Product scope (decides the response level):** Is overlapping-subnet
+   multi-tenant VRF isolation (via PBR) something we support? The bug is now known
+   reachable (live in PBR mode), so the choice is: (a) **support it** → schedule
+   **Track B-min** (the real fix) + ship A.1 warning + A.3 docs as interim; or
+   (b) **explicitly do not support it** → upgrade A.1 from a warning to a hard
+   reject and document the non-support. Either way A.3 (docs) + A.1 (some guard)
+   ship now. "Do nothing" is no longer defensible given reachability.
+2. **[Largely answered by r1]** The §4c #3096 coherence gap is reachable via PBR
+   (all three reviewers confirmed). Remaining sub-question: is there a
+   *non-PBR* forwarding-correct trigger (e.g. asymmetric routing, ECMP across
+   VRFs) that also reaches it? If so, B-ext (per-VRF default FIB) moves up too.
 3. Is the routing-domain id truly the only symmetric discriminator, or is there a
    cheaper symmetric quantity already on both forward and reply packets? Refute
    or confirm that zone/ingress-ifindex are unusable (§7).
-4. Does the inter-VRF route-leaked reverse-match corner (§7) have a config path
-   today (rib-group / next-table) that Track B-P2 would regress, and does it need
-   to be in scope for B even at MVP?
+4. **[Answered by r1, confirm the scope call]** The inter-VRF route-leaked
+   reverse-match corner (§7) has a config path today (rib-group / next-table). The
+   plan scopes leaked flows to domain-0 in B-min and defers full dual-domain
+   handling to B-ext.2. Do reviewers agree leaked flows can keep today's
+   (domain-0) behavior in B-min, or must dual-domain be in the first cut?
 5. Is the HA-wire hard-break assessment (§4d) correct that the key portion is not
-   length-gated, or is there a forward-compatible encoding (e.g. a new message
-   type carrying domain as a trailing value field, with domain-0 implied for old
-   peers) that downgrades B-P3 from "hard break" to "additive"?
+   length-gated (all three r1 reviewers confirmed it is), or is there a
+   forward-compatible encoding — e.g. a NEW session-sync message type carrying the
+   domain as a trailing value field, with domain-0 implied for old peers — that
+   downgrades B-P3 from "hard break" to "additive"? This is the single biggest
+   lever on B-min's cost and deserves a deliberate design choice at /engineer time.
 6. Is A.2 (flow-cache logical-ifindex key) safe to ship independently of A.1, or
    does changing the flow-cache key risk a first-packet-latency or
    cache-thrash regression on the untagged common case?
