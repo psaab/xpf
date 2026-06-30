@@ -1,6 +1,7 @@
 # #2562 — NAT64 non-first-fragment translation: plan of action
 
-**Status:** DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR)
+**Status:** DRAFT v2 — folds Claude-SMR r1 (S1–S5) + AGY r1 (5 findings);
+awaiting Codex r1
 **Issue:** psaab/xpf#2562 — *userspace-dp: NAT64 non-first fragment translation
 needs a stateful frag-id→SNAT cache (deferred from #2488)*
 **Base:** origin/master `a30a1f98b` (Merge PR #3600 — #3291 flowless enforcement)
@@ -122,14 +123,22 @@ cache; part (b) is the NAT64-specific delta.
 (nat64.rs:373) returns `NatDecision { rewrite_src: Some(V4(snat_v4)), rewrite_dst:
 Some(V4(dst_v4)), nat64: true, … }`.
 
-**Consequence:** a fragment-association cache that stores the first fragment's
-full `SessionDecision` (resolution + `NatDecision`) *already* carries the NAT64
-forward translation. The reverse direction's first reply fragment matches the
-reverse session and produces a reverse `NatDecision` (cross-family, `nat64=true`)
-the same way; its `SessionDecision` is equally cacheable. **No NAT64-specific
-key/value is required — the generic stage-4 cache value is sufficient for both
-directions.** What NAT64 adds is on the *egress application* side, not the
-storage side (Section 5).
+**Consequence (forward):** a fragment-association cache that stores the first
+fragment's full `SessionDecision` (resolution + `NatDecision`) *already* carries
+the NAT64 **forward** translation (`snat_v4`/`dst_v4`). The forward direction
+needs no value extension.
+
+**Correction (reverse) — Claude-SMR S1:** the **reverse** v4→v6 translation is
+NOT driven by `NatDecision`. It is driven by `Nat64ReverseInfo { orig_src_v6,
+orig_dst_v6 }`, stamped on the **session metadata** (`poll_descriptor/mod.rs:2180`
+forward entry, `:2428` reverse entry) and recovered on the TX path
+(`afxdp/frame/mod.rs:248` `let info = nat64_reverse?` → `build_nat64_v4_to_v6_frame`).
+`NatDecision` (`nat/mod.rs:67`) has no v6-original-source field. **Therefore the
+cached VALUE must be extended for NAT64: forward fits `NatDecision`; reverse needs
+the session's `nat64_reverse` mapping folded into the cached value.** The cache
+remains ONE shared subsystem (same key / eviction / TTL / DoS / HA / process-
+shared placement); the cross-family extension is on the value side (this reverse
+field) AND the egress side (cross-family frame build, Section 5).
 
 ### 3.4 Sharing model — the load-bearing constraint
 
@@ -140,11 +149,16 @@ storage side (Section 5).
 - **The warm-path flow cache is PER-WORKER** (`afxdp/flow_cache.rs`, a hot
   lock-free per-worker structure; counters accumulated per-binding).
 - This is fine for normal flows: RSS steers all packets of a 4-tuple to one
-  worker. **But fragments split:** the NIC steers the **first** fragment by
-  4-tuple (has ports) and **non-first** fragments by 2-tuple (no ports), so under
-  a default mlx5 RSS config they hash to **different RX queues → different
-  workers**. The first fragment's state (session, flow-cache decision) lives on
-  worker A; the non-first fragment arrives on worker B.
+  worker. **But fragments are NOT GUARANTEED to co-locate** (Claude-SMR S2): the
+  NIC may steer the **first** fragment by 4-tuple (it has ports) and **non-first**
+  fragments by 2-tuple (no ports), so under a plausible default mlx5 RSS config
+  they can hash to **different RX queues → different workers**. The first
+  fragment's state (session, flow-cache decision) is then on worker A while the
+  non-first fragment arrives on worker B. A correct design must NOT depend on RSS
+  co-locating fragments (some configs hash all fragments, first included, by the
+  2-tuple and DO co-locate — but we cannot rely on it). AGY r1 holds the stronger
+  position that the split is effectively guaranteed under the live default; either
+  way the conclusion is the same — a worker-local cache cannot be trusted.
 
 **This is the central architectural finding of this pass** and it constrains the
 shared subsystem's placement (Section 5.3 / Section 7).
@@ -205,13 +219,16 @@ as part of this work, not as a standalone issue (per the issue comment).
 
 Reasons, in order of strength:
 
-1. **The storage is identical.** #3291 stage-4 stores the first fragment's full
-   `SessionDecision`. `SessionDecision.nat` is a `NatDecision`, and
-   `Nat64State::forward_decision` already populates it with the NAT64 forward
-   translation (`nat64=true`, `rewrite_src=snat_v4`, `rewrite_dst=dst_v4`); the
-   reverse first reply fragment's `SessionDecision` carries the reverse cross-
-   family `NatDecision`. **A NAT64-specific `(src,dst,frag-id)→snat_v4` cache
-   would be a strict subset of the generic cache value, duplicated.**
+1. **The storage is (almost) identical.** #3291 stage-4 stores the first
+   fragment's full `SessionDecision`. `SessionDecision.nat` is a `NatDecision`,
+   and `Nat64State::forward_decision` already populates it with the NAT64 forward
+   translation (`nat64=true`, `rewrite_src=snat_v4`, `rewrite_dst=dst_v4`). The
+   FORWARD value needs no extension. The REVERSE value needs the session's
+   `Nat64ReverseInfo` folded in (Claude-SMR S1, §3.3) — a small NAT64-specific
+   field on the SHARED cached value, NOT a second cache. **A NAT64-specific
+   `(src,dst,frag-id)→mapping` cache would duplicate the key, eviction, TTL, DoS
+   bound, IP-ID defense, and HA policy of the stage-4 cache; sharing avoids that
+   fork.**
 2. **The keys are identical.** Both want a **port-free** key
    `(addr_family, src_ip, dst_ip, protocol, ip_id/frag_id)` so all fragments of
    one datagram co-locate. There is no NAT64-specific key shape.
@@ -223,11 +240,22 @@ Reasons, in order of strength:
    already says "rewrite the egress fragment's L3 header per the cached
    `NatDecision`". NAT64 is just the cross-family case of that one step.
 
-**Therefore #2562 is NOT a separate cache. It is the cross-family extension of
-#3291 stage-4's egress-rewrite step + the translator un-drop.** This supersedes
-the earlier campaign-8 `/research` comment on #2562 (which proposed a self-
-contained NAT64-specific sharded cache); that comment predates PR #3600 and the
-#3291 stage-4 design and did not cross-reference it.
+**Therefore #2562 is NOT a separate cache. It is, precisely (Claude-SMR S3):
+the SHARED stage-4 cache (key / eviction / TTL / DoS bound / IP-ID defense / HA
+non-sync / process-shared placement) + a NAT64-specific value extension
+(`Nat64ReverseInfo`, S1) + a NAT64-specific egress dispatch (cross-family frame
+build, not a same-family header rewrite) + the translator un-drop.** "One
+subsystem" means one cache, not free code: the egress/value halves are genuine
+NAT64 work on top. This supersedes the earlier campaign-8 `/research` comment on
+#2562 (which proposed a self-contained NAT64-specific sharded cache); that comment
+predates PR #3600 and the #3291 stage-4 design and did not cross-reference it.
+
+**Dependency seam (Claude-SMR S4):** because the value needs a cross-family field
+(S1) and the egress needs a cross-family dispatch (S3), #3291 stage 4 must design
+its cached-value type as an EXTENSIBLE container and its egress step as a
+DISPATCH from day one, or #2562 forces a retrofit. The recommendation is
+therefore "defer behind #3291 stage 4 **AND** require stage 4 to reserve the
+cross-family value/egress seam."
 
 ### 5.2 The NAT64-specific delta (what #2562 adds on top of stage 4)
 
@@ -255,10 +283,11 @@ contained NAT64-specific sharded cache); that comment predates PR #3600 and the
    - **v4→v6:** emit a 40-byte v6 header + an 8-byte Fragment Header; offset
      copied verbatim, M from v4 MF, **v6 ident = v4 16-bit ident zero-extended**;
      net L3 length change **+20 + 8**;
-   - reject a v4 UDP non-first fragment only when the *first* fragment's UDP
-     checksum was zero (the existing #2488 rule is first-fragment-scoped; a
-     non-first fragment has no UDP header to inspect, so the gate is the cached
-     decision's responsibility, not the non-first translator's — see Q4).
+   - v4 UDP zero-checksum needs NO special tracking in the cache (AGY r1
+     finding 5 — resolves Q4): the existing #2488 rule drops a first fragment
+     whose UDP checksum is 0, so that datagram never inserts a cache entry, and
+     its non-first fragments then naturally miss → drop. No "first-frag-had-zero-
+     csum" flag is required.
    - **No L4 checksum touch in either direction** (no L4 header present). This is
      simpler than the first-fragment path, which adjusts the L4 checksum for the
      pseudo-header delta.
@@ -299,9 +328,13 @@ rather than #2562 silently inheriting a worker-local assumption that breaks it.
 - **Key:** `(addr_family: u8, src_ip, dst_ip, protocol: u8, ip_id: u32)` — IPv4
   packs the 16-bit frag-id into the low 16 of `ip_id`; IPv6 uses the 32-bit
   Fragment Header Identification. Port-free.
-- **Value:** the first fragment's `SessionDecision` (resolution + `NatDecision`)
-  **plus an entry deadline (monotonic ns) and a generation/timestamp** for the
-  IP-ID aliasing defense (AGY-1).
+- **Value:** the first fragment's `SessionDecision` (resolution + `NatDecision`),
+  **plus — for NAT64 — the session's `Nat64ReverseInfo`** (Claude-SMR S1 / AGY-1:
+  the reverse v4→v6 build needs `orig_src_v6`/`orig_dst_v6`, which `NatDecision`
+  does not carry), **plus an entry deadline (monotonic ns) and a
+  generation/timestamp** for the IP-ID aliasing defense. The NAT64 reverse field
+  is an `Option` on the shared value — empty for the generic #3291 stage-4 case,
+  populated for NAT64 — so it is one cache, not two.
 - **Populate:** only the FIRST fragment (offset 0, has L4, passed policy, created
   or matched a session/produced a `SessionDecision`) inserts. **Non-first
   fragments NEVER insert** — the load-bearing DoS property (an attacker cannot
@@ -473,11 +506,10 @@ No live NAT64 on the cluster; verification is `nat64_tests.rs` +
    whether reverse NAT64 currently relies on RSS/symmetry, on a shared index, or
    is itself cross-worker-fragile — it informs where the reverse cache/decision
    must live.
-4. **v4-UDP-zero-checksum gate for non-first frags:** the #2488 first-fragment
-   rule drops a v4 UDP fragment whose checksum is 0. A non-first fragment has no
-   UDP header. Should the cached decision record "first frag had zero UDP csum →
-   drop the whole datagram's frags", or is dropping only the first sufficient
-   (the rest then miss-drop anyway)? (Correctness vs simplicity.)
+4. **[RESOLVED — AGY r1 finding 5]** v4-UDP-zero-checksum: no cache flag needed.
+   The #2488 rule drops the first fragment whose UDP checksum is 0, so it never
+   inserts, and its non-first fragments then miss → drop naturally. Dropping only
+   the first is sufficient.
 5. **DoS bound numbers:** what per-shard capacity / shard count / TTL is the
    right fixed ceiling? (Plan suggests a few hundred KB, ~2 s TTL.)
 6. **Ship-now vs defer:** given niche + lab-bound (no cluster smoke), is the
