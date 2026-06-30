@@ -1,7 +1,8 @@
 # #2562 — NAT64 non-first-fragment translation: plan of action
 
-**Status:** DRAFT v2 — folds Claude-SMR r1 (S1–S5) + AGY r1 (5 findings);
-awaiting Codex r1
+**Status:** CONVERGED v3 — Claude-SMR r1 + AGY r1 + Codex r1 all PLAN-DEFER;
+Codex r1 MAJOR (cross-worker sessions ARE replicated) + #2 (reverse value
+data-sufficient) folded
 **Issue:** psaab/xpf#2562 — *userspace-dp: NAT64 non-first fragment translation
 needs a stateful frag-id→SNAT cache (deferred from #2488)*
 **Base:** origin/master `a30a1f98b` (Merge PR #3600 — #3291 flowless enforcement)
@@ -128,40 +129,58 @@ fragment's full `SessionDecision` (resolution + `NatDecision`) *already* carries
 the NAT64 **forward** translation (`snat_v4`/`dst_v4`). The forward direction
 needs no value extension.
 
-**Correction (reverse) — Claude-SMR S1:** the **reverse** v4→v6 translation is
-NOT driven by `NatDecision`. It is driven by `Nat64ReverseInfo { orig_src_v6,
-orig_dst_v6 }`, stamped on the **session metadata** (`poll_descriptor/mod.rs:2180`
-forward entry, `:2428` reverse entry) and recovered on the TX path
-(`afxdp/frame/mod.rs:248` `let info = nat64_reverse?` → `build_nat64_v4_to_v6_frame`).
-`NatDecision` (`nat/mod.rs:67`) has no v6-original-source field. **Therefore the
-cached VALUE must be extended for NAT64: forward fits `NatDecision`; reverse needs
-the session's `nat64_reverse` mapping folded into the cached value.** The cache
-remains ONE shared subsystem (same key / eviction / TTL / DoS / HA / process-
-shared placement); the cross-family extension is on the value side (this reverse
-field) AND the egress side (cross-family frame build, Section 5).
+**Reverse — data-sufficient, egress-API-insufficient (Claude-SMR S1, refined in r2
+by Codex r1 #2):** the reverse `SessionDecision` IS data-sufficient. The cold path
+builds `reverse_decision.nat = decision.nat.reverse(flow.src_ip, flow.dst_ip, …)`
+(`poll_descriptor/mod.rs:2368`), and `NatDecision::reverse` (`nat/mod.rs:89`) maps
+`rewrite_src/rewrite_dst` to the **original v6 addresses** (for a NAT64 forward
+whose `decision.nat` has both rewrites set, the reverse yields
+`rewrite_src=V6(prefix::server)`, `rewrite_dst=V6(orig-client-v6)`, `nat64=true`)
+— exactly the `src_v6`/`dst_v6` that `build_nat64_v4_to_v6_frame` needs. So the
+cached value carries the reverse mapping already. **The gap is the egress API, not
+the data:** `build_nat64_forwarded_frame` currently consumes a `Nat64ReverseInfo`
+(`afxdp/frame/mod.rs:246-253`, `let info = nat64_reverse?`), stamped on the
+session metadata (`poll_descriptor/mod.rs:2180/2428`), rather than reading
+`decision.nat`. The NAT64-fragment work must teach the egress to consume
+`decision.nat` (or derive a `Nat64ReverseInfo` from the cached reverse decision).
+The cache remains ONE shared subsystem; the cross-family work is the egress
+dispatch + this egress-API adaptation, not a new value type.
 
-### 3.4 Sharing model — the load-bearing constraint
+### 3.4 Sharing model — the load-bearing constraint (CORRECTED in r2 by Codex)
 
-- **`SessionTable` is PER-WORKER:** `userspace-dp/src/afxdp/worker/loop_body/
-  setup.rs:40` (`pub(super) sessions: SessionTable`); session/mod.rs:570 comment
-  "every worker's SessionTable on this node shares the same seed" (shared seed,
-  separate tables).
-- **The warm-path flow cache is PER-WORKER** (`afxdp/flow_cache.rs`, a hot
-  lock-free per-worker structure; counters accumulated per-binding).
-- This is fine for normal flows: RSS steers all packets of a 4-tuple to one
-  worker. **But fragments are NOT GUARANTEED to co-locate** (Claude-SMR S2): the
-  NIC may steer the **first** fragment by 4-tuple (it has ports) and **non-first**
-  fragments by 2-tuple (no ports), so under a plausible default mlx5 RSS config
-  they can hash to **different RX queues → different workers**. The first
-  fragment's state (session, flow-cache decision) is then on worker A while the
-  non-first fragment arrives on worker B. A correct design must NOT depend on RSS
-  co-locating fragments (some configs hash all fragments, first included, by the
-  2-tuple and DO co-locate — but we cannot rely on it). AGY r1 holds the stronger
-  position that the split is effectively guaranteed under the live default; either
-  way the conclusion is the same — a worker-local cache cannot be trusted.
+- **`SessionTable` is PER-WORKER as a local view** (`userspace-dp/src/afxdp/
+  worker/loop_body/setup.rs:40`), but session state is **cross-worker visible**,
+  via two mechanisms (Codex r1 MAJOR — verified against source):
+  1. **Process-shared structures:** the cold path calls
+     `publish_shared_session(worker_ctx.shared_sessions, shared_nat_sessions,
+     shared_forward_wire_sessions, …)` (`poll_descriptor/mod.rs:2298`); shared
+     lookup at `afxdp/shared_ops.rs:563-605`.
+  2. **Per-worker replication:** `replicate_session_upsert(worker_ctx.
+     peer_worker_commands, …)` (`poll_descriptor/mod.rs:2320` →
+     `session_glue/mod.rs:721`) pushes an `UpsertSynced` command to **every local
+     worker queue** (`for commands in worker_commands`), installed on peer workers
+     at `session_glue/commands/upsert_synced.rs:64-85`.
+  - **This is how reverse NAT64 reaches the right worker today** (resolves the
+    earlier Q3/S5 open question): the v4 reply hashes to any worker, and that
+    worker has the reverse session because it was replicated/published. AGY r1's
+    "strictly thread-isolated" framing and the v1/v2 "session fallback fails on
+    worker B" claim were **both wrong**; Codex's correction stands.
+- The warm-path flow cache (`afxdp/flow_cache.rs`) is a hot per-worker
+  acceleration layer; the durable state behind it is the replicated/shared
+  session.
+- **Fragments are still not guaranteed to co-locate** (Claude-SMR S2): the NIC may
+  steer the first fragment by 4-tuple and non-first fragments by 2-tuple → a
+  non-first fragment can arrive on a worker that did NOT process the first
+  fragment. This is asserted as NIC/RSS behavior, **not proven from code** (Codex
+  r1 MINOR — cite `ethtool -n rx-flow-hash` evidence at `/engineer` time).
 
-**This is the central architectural finding of this pass** and it constrains the
-shared subsystem's placement (Section 5.3 / Section 7).
+**The corrected central finding:** the cross-worker problem is NOT lack of session
+visibility (sessions ARE replicated/shared). It is two narrower hazards: (i) a
+non-first fragment carries **no `SessionKey`** (no L4 ports — `frame/inspect.rs`
+makes it flowless, `session/key.rs`), so it cannot look up the replicated session
+by 5-tuple; it needs an **L3 + IP-ID index**; and (ii) a **replication-ordering
+race** — a non-first fragment can arrive before the first fragment's
+session/association replica has propagated to its worker. These shape Section 5.3.
 
 ### 3.5 Fragmented ICMP first-fragment zero checksum (linked sub-item agy-039-03)
 
@@ -219,13 +238,13 @@ as part of this work, not as a standalone issue (per the issue comment).
 
 Reasons, in order of strength:
 
-1. **The storage is (almost) identical.** #3291 stage-4 stores the first
-   fragment's full `SessionDecision`. `SessionDecision.nat` is a `NatDecision`,
-   and `Nat64State::forward_decision` already populates it with the NAT64 forward
-   translation (`nat64=true`, `rewrite_src=snat_v4`, `rewrite_dst=dst_v4`). The
-   FORWARD value needs no extension. The REVERSE value needs the session's
-   `Nat64ReverseInfo` folded in (Claude-SMR S1, §3.3) — a small NAT64-specific
-   field on the SHARED cached value, NOT a second cache. **A NAT64-specific
+1. **The storage is identical (data-sufficient both directions).** #3291 stage-4
+   stores the first fragment's full `SessionDecision`. Forward NAT64 is in
+   `decision.nat` via `Nat64State::forward_decision` (`nat64=true`,
+   `rewrite_src=snat_v4`, `rewrite_dst=dst_v4`); reverse NAT64 is in
+   `decision.nat.reverse(...)` which carries the original v6 addresses (§3.3,
+   Codex r1 #2). **No NAT64-specific cached-value type is required** — the generic
+   `SessionDecision` is data-sufficient for both directions. **A NAT64-specific
    `(src,dst,frag-id)→mapping` cache would duplicate the key, eviction, TTL, DoS
    bound, IP-ID defense, and HA policy of the stage-4 cache; sharing avoids that
    fork.**
@@ -240,22 +259,24 @@ Reasons, in order of strength:
    already says "rewrite the egress fragment's L3 header per the cached
    `NatDecision`". NAT64 is just the cross-family case of that one step.
 
-**Therefore #2562 is NOT a separate cache. It is, precisely (Claude-SMR S3):
-the SHARED stage-4 cache (key / eviction / TTL / DoS bound / IP-ID defense / HA
-non-sync / process-shared placement) + a NAT64-specific value extension
-(`Nat64ReverseInfo`, S1) + a NAT64-specific egress dispatch (cross-family frame
-build, not a same-family header rewrite) + the translator un-drop.** "One
-subsystem" means one cache, not free code: the egress/value halves are genuine
-NAT64 work on top. This supersedes the earlier campaign-8 `/research` comment on
-#2562 (which proposed a self-contained NAT64-specific sharded cache); that comment
-predates PR #3600 and the #3291 stage-4 design and did not cross-reference it.
+**Therefore #2562 is NOT a separate cache. It is, precisely (Claude-SMR S3 +
+Codex r1 #2):** the SHARED stage-4 cache (key / eviction / TTL / DoS bound / IP-ID
+defense / HA non-sync / cross-worker visibility) + a NAT64-specific **egress
+dispatch** (cross-family frame build, not a same-family header rewrite) + an
+**egress-API adaptation** (consume `decision.nat` instead of `Nat64ReverseInfo`,
+§3.3) + the translator un-drop. The cached VALUE is unchanged (data-sufficient
+both directions). "One subsystem" means one cache, not free code: the egress half
+is genuine NAT64 work on top. This supersedes the earlier campaign-8 `/research`
+comment on #2562 (which proposed a self-contained NAT64-specific sharded cache);
+that comment predates PR #3600 and the #3291 stage-4 design and did not
+cross-reference it.
 
-**Dependency seam (Claude-SMR S4):** because the value needs a cross-family field
-(S1) and the egress needs a cross-family dispatch (S3), #3291 stage 4 must design
-its cached-value type as an EXTENSIBLE container and its egress step as a
-DISPATCH from day one, or #2562 forces a retrofit. The recommendation is
-therefore "defer behind #3291 stage 4 **AND** require stage 4 to reserve the
-cross-family value/egress seam."
+**Dependency seam (Claude-SMR S4):** because the egress needs a cross-family
+dispatch (S3) and an API change to read `decision.nat`, #3291 stage 4 should
+design its egress step as a DISPATCH (same-family rewrite vs cross-family build)
+from day one, or #2562 forces a retrofit. The recommendation is therefore "defer
+behind #3291 stage 4 **AND** require stage 4 to reserve the cross-family egress
+seam."
 
 ### 5.2 The NAT64-specific delta (what #2562 adds on top of stage 4)
 
@@ -298,43 +319,55 @@ cross-family value/egress seam."
    Fragmented ICMP is niche (large echo only). The cache serves TCP/UDP. This is
    a small, separable change that can ship with or slightly ahead of the cache.
 
-### 5.3 The refinement to stage 4: process-shared, not worker-local
+### 5.3 Cross-worker placement: reuse the existing replication/shared-index machinery (CORRECTED in r2)
 
-The #3291 stage-4 plan describes the cache as **worker-local + an L3+proto
-session fallback** on a cache miss. **That is not RSS-robust given §3.4: the
-session table and flow cache are per-worker, and fragments split across
-workers.** A worker-local cache populated by the first fragment on worker A is
-invisible to the non-first fragment on worker B, and the "L3+proto session
-fallback" also fails because the *session* is on worker A too. Under default
-mlx5 RSS this silently drops fragmented NAT64 datagrams while passing every
-single-worker unit test — the worst kind of regression.
+v1/v2 argued the cache must be a NEW process-shared **sharded mutex** because
+"the session table is per-worker and the session fallback fails on worker B."
+**Codex r1 (MAJOR) proved that wrong:** sessions are already cross-worker visible
+(§3.4) — `publish_shared_session` into process-shared structures
+(`shared_ops.rs:563-605`) **and** `replicate_session_upsert` to every local worker
+queue. So the fragment-association state does NOT need a parallel sharded-mutex
+cache standing beside the session machinery. The two real hazards are narrower:
 
-**Resolution (applies to the shared subsystem, benefiting both #3291 and
-#2562):** the fragment-association cache must be **process-shared and sharded** —
-N shards by `hash(family, src, dst, proto, ip_id)` (port-free so all fragments of
-one datagram hit the same shard), each shard a fixed-capacity LRU+TTL behind a
-`parking_lot::Mutex`. The hot path (non-fragmented packets) never touches it, so
-contention is confined to the rare fragment path. The L3+proto session fallback
-becomes a *secondary* recovery that only helps when the fragment happens to land
-on the session's worker; the process-shared cache is the *primary*, RSS-robust
-mechanism.
+1. **No `SessionKey` for a non-first fragment.** It has no L4 ports, so it cannot
+   look up the (already cross-worker-visible) session by 5-tuple. The fix is an
+   **L3 + IP-ID index** (`(family, src, dst, proto, ip_id) → handle/decision`)
+   that the FIRST fragment populates and the non-first fragments consult. This
+   index is the "fragment-association cache" — and it should be **published /
+   replicated through the SAME mechanism sessions already use** (a shared
+   structure like `shared_sessions`, and/or a `replicate_*_upsert` to all worker
+   queues), NOT a new independent mutex cache. This reuses proven cross-worker
+   machinery and stays consistent with how reverse NAT64 already works.
+2. **Replication-ordering race.** A non-first fragment can arrive on a worker
+   before the first fragment's index entry has propagated. **Fail closed: miss →
+   drop + counter; the sender retransmits.** No payload buffering (a bigger DoS
+   surface). This is an inherent, bounded, documented behavior — the same posture
+   as any cross-worker replicated state under reordering.
 
-This is the one substantive correction this pass makes to the #3291 stage-4
-design, and it is the reason the two issues must be designed as one subsystem
-rather than #2562 silently inheriting a worker-local assumption that breaks it.
+**Net:** the corrected placement is "an L3+IP-ID index carried on / alongside the
+already-replicated+shared session state," not a bespoke sharded-mutex cache. A
+sharded-mutex structure remains a valid IMPLEMENTATION option, but it is no longer
+*mandatory* — and reusing the session replication path is preferable (no new
+locking on a path adjacent to the hot loop; one eviction/HA story). Either way the
+cache MUST be cross-worker visible; a purely worker-local index is wrong. This is
+the substantive correction this pass makes to the #3291 stage-4 design (which
+described the cache as worker-local + session fallback): the fallback is fine, but
+the index itself must ride the cross-worker machinery, and the non-first-fragment
+key problem (no `SessionKey`) is the real design driver.
 
 ### 5.4 Cache shape (the shared subsystem)
 
 - **Key:** `(addr_family: u8, src_ip, dst_ip, protocol: u8, ip_id: u32)` — IPv4
   packs the 16-bit frag-id into the low 16 of `ip_id`; IPv6 uses the 32-bit
   Fragment Header Identification. Port-free.
-- **Value:** the first fragment's `SessionDecision` (resolution + `NatDecision`),
-  **plus — for NAT64 — the session's `Nat64ReverseInfo`** (Claude-SMR S1 / AGY-1:
-  the reverse v4→v6 build needs `orig_src_v6`/`orig_dst_v6`, which `NatDecision`
-  does not carry), **plus an entry deadline (monotonic ns) and a
-  generation/timestamp** for the IP-ID aliasing defense. The NAT64 reverse field
-  is an `Option` on the shared value — empty for the generic #3291 stage-4 case,
-  populated for NAT64 — so it is one cache, not two.
+- **Value:** the first fragment's `SessionDecision` (resolution + `NatDecision`)
+  — **data-sufficient for both directions** (forward via `forward_decision`,
+  reverse via `decision.nat.reverse(...)`, §3.3) — **plus an entry deadline
+  (monotonic ns) and a generation/timestamp** for the IP-ID aliasing defense. No
+  NAT64-specific value field is required; the cross-family work is the egress
+  dispatch + the egress-API adaptation to read `decision.nat` (§3.3).
+- **Cross-worker visibility:** the index must be published/replicated through the
+  same mechanism sessions use (§5.3), not held worker-locally.
 - **Populate:** only the FIRST fragment (offset 0, has L4, passed policy, created
   or matched a session/produced a `SessionDecision`) inserts. **Non-first
   fragments NEVER insert** — the load-bearing DoS property (an attacker cannot
@@ -428,7 +461,7 @@ of proportion to this issue.)
 
 | # | Risk | Severity | Mitigation |
 |---|------|----------|------------|
-| R1 | Cross-worker fragment split silently drops datagrams (worker-local cache) | **HIGH** | Process-shared sharded cache (§5.3); a cross-worker insert-A/consult-B test; do NOT inherit stage-4's worker-local assumption |
+| R1 | Cross-worker fragment split: a non-first fragment lands on a worker without the association | **HIGH** | The L3+IP-ID index must ride the existing cross-worker replication/shared structures (§5.3, Codex r1 MAJOR — sessions ARE replicated, so reuse that, not a new mutex); cross-worker insert-A/consult-B test; replication-ordering miss → drop+counter |
 | R2 | IP-ID aliasing: 16-bit v4 frag-id wraps → stale hit → wrong-source / wrong-verdict inheritance | **HIGH** | Fold timestamp/generation into the entry + aggressive age bound (stage-4 AGY-1); short TTL |
 | R3 | Cache = DoS surface (frag flood) | MED | Non-first frags never insert; bounded LRU + pressure event; screens (#3064) run first; reverse inserts gated by live sessions |
 | R4 | Mid-flow eviction drops fragments of a long-lived flow | MED | Refresh-on-hit + L3+proto session fallback (stage-4 inv.11/R9); TTL not shorter than needed |
@@ -460,8 +493,10 @@ No live NAT64 on the cluster; verification is `nat64_tests.rs` +
    diverges.
 3. **Reverse v4→v6 symmetric:** large DNS64-style reply, first + non-first →
    both translate to the same `orig_src_v6`; reassemblable v6 datagram.
-4. **Cross-worker:** insert-on-worker-A / consult-on-worker-B against the shared
-   structure → hit. RED if the cache is made worker-local.
+4. **Cross-worker:** insert-on-worker-A, then consult-on-worker-B after the
+   replica propagates → hit (via the replicated/shared index, §5.3). RED if the
+   index is made purely worker-local. Plus a pre-propagation consult → miss-drop
+   + counter (the ordering race, fail-closed).
 5. **Non-first-before-first (reorder):** miss → drop + `nat64_frag_assoc_miss`.
 6. **Orphan non-first flood (attack):** never inserts; cache size stays bounded;
    miss counter increments; no stale-hit wrong-source.
@@ -495,17 +530,15 @@ No live NAT64 on the cluster; verification is `nat64_tests.rs` +
    shared cache *and* the NAT64 extension in one effort? (Plan assumes stage 4 is
    the prerequisite → PLAN-DEFER. Is co-delivery preferable so the cache is
    designed with the cross-family egress requirement from day one?)
-2. **Process-shared vs worker-local (§5.3):** is the per-worker session/flow-cache
-   model (proven at `worker/loop_body/setup.rs:40`) definitely the live posture,
-   making a process-shared sharded cache mandatory? Or is there a cross-worker
-   session-visibility mechanism that would let a worker-local cache + session
-   fallback suffice? (If a reviewer can show sessions ARE cross-worker visible,
-   the §5.3 refinement is unnecessary.)
-3. **How does NAT64 reverse work across workers TODAY?** The v6 forward session
-   is on worker A (v6 hash); the v4 reply hashes to worker B (v4 hash). Verify
-   whether reverse NAT64 currently relies on RSS/symmetry, on a shared index, or
-   is itself cross-worker-fragile — it informs where the reverse cache/decision
-   must live.
+2. **[RESOLVED — Codex r1 MAJOR]** Sessions ARE cross-worker visible
+   (`publish_shared_session` + `replicate_session_upsert`, §3.4), so a
+   bespoke process-shared sharded mutex is NOT mandatory. The corrected design
+   (§5.3): an L3+IP-ID index riding the existing replication/shared machinery. The
+   open `/engineer` sub-question is purely implementation: reuse `shared_sessions`-
+   style structures vs add a `replicate_frag_assoc_upsert`.
+3. **[RESOLVED — Codex r1 MAJOR]** Reverse NAT64 reaches the right worker today
+   because sessions are replicated to all workers + published to shared structures
+   (§3.4). It does not rely on RSS symmetry.
 4. **[RESOLVED — AGY r1 finding 5]** v4-UDP-zero-checksum: no cache flag needed.
    The #2488 rule drops the first fragment whose UDP checksum is 0, so it never
    inserts, and its non-first fragments then miss → drop naturally. Dropping only
