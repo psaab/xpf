@@ -1,7 +1,15 @@
 # #2387 — VRF/routing-instance awareness in session/flow identity
 
-**Status:** DRAFT v1 — pending adversarial plan review (Claude SMR + AGY;
-Codex infra-blocked → 2-of-3 per `feedback_codex_infra_must_retry`).
+**Status:** DRAFT v2 — incorporates Claude SMR r1 (PBR reachability
+self-correction); pending AGY (and Codex if it unblocks) convergence. 2-of-3 per
+`feedback_codex_infra_must_retry`.
+
+**v2 changelog:** SMR r1 refuted the v1 "unreachable in a forwarding-correct
+config" claim — the collision IS reachable via PBR `then routing-instance`
+(per-VRF forwarding works without per-VRF default FIB). §3/§4b rewritten from
+"latent" to "latent in default mode, LIVE via PBR"; Track A.1 reframed as a
+deliberate fail-closed reject of overlap even when PBR forwards it; A.2 demoted;
+B-P0 tightened to a dense-interned u32; the leaked-flow corner resolved.
 
 **Branch:** `research/2387-vrf-flow-identity` (docs only — no production source).
 
@@ -30,16 +38,30 @@ SessionKey."
 
 ## 3. Honest scope / value framing
 
-The bug **mechanism is real and confirmed** (§4). But the **trigger is
-unreachable in a forwarding-correct configuration today**: for two flows to
-legitimately carry the *same* 5-tuple in two VRFs you need overlapping L3 address
-space across the routing-instances, and the userspace forwarding layer is **not
-VRF-isolated** — the destination FIB lookup for a normal transit packet defaults
-to the global `inet.0`/`inet6.0` table, and local-delivery is decided against a
-single global address set. So an overlapping-subnet multi-VRF topology does not
-route correctly *irrespective of the session key*. The session-key collision is
-the tip of a larger "VRF-aware forwarding + conntrack isolation" feature, not an
-independent bug biting a working deployment.
+The bug **mechanism is real and confirmed** (§4). Its reachability is
+**mode-dependent** (corrected in v2 after SMR r1):
+
+- **Default forwarding mode (no PBR): latent.** For two flows to legitimately
+  carry the *same* 5-tuple in two VRFs you need overlapping L3 address space, and
+  the userspace forwarding layer is **not VRF-isolated** by default — the
+  destination FIB lookup for a normal transit packet defaults to the global
+  `inet.0`/`inet6.0` table, and local-delivery uses a single global address set.
+  So an overlapping-subnet multi-VRF topology does not route correctly *in this
+  mode* irrespective of the session key.
+- **PBR mode (`then routing-instance` on the ingress interfaces): LIVE.** PBR is
+  the dataplane's per-packet table override; with a PBR filter steering each
+  ingress interface to its own per-VRF table, overlapping-address multi-VRF
+  **does forward correctly** — and then the bare-5-tuple session key collides: a
+  second flow with the same 5-tuple hits the first flow's conntrack session and
+  inherits its egress / NAT / policy decision (wrong-VRF forwarding). See §4b for
+  the verified ordering proof. This is a real, reachable (if niche)
+  correctness/isolation breach — exactly #2387's multi-tenant scenario.
+
+The session-key collision is the tip of a larger "VRF-aware forwarding +
+conntrack isolation" feature. In default mode it is latent; in PBR mode it is a
+live wrong-forwarding bug on the *second* colliding flow. Either way, the literal
+"widen the key now" ask is the last and most expensive phase of that feature, not
+a standalone fix.
 
 The literal fix the issue asks for (widen the SessionKey) is, by itself:
 - **the most expensive and riskiest phase** of that larger feature (hard HA wire
@@ -48,11 +70,13 @@ The literal fix the issue asks for (widen the SessionKey) is, by itself:
 - **delivers zero realized isolation** until the forwarding layer is also made
   VRF-aware (a separate, larger body of work).
 
-*If reviewers conclude the perf/correctness gain is too small to justify the
-churn, PLAN-KILL (of the literal "widen the key now" ask) is an acceptable
-verdict.* The recommended terminal state is PLAN-DEFER: ship the cheap
-fail-closed guard + doc now; schedule the full feature only if multi-tenant
-overlapping-subnet VRF isolation is a declared product goal.
+*If reviewers conclude the churn of the full feature is too large for what is a
+niche (overlapping-address + PBR + simultaneous identical-5-tuple) config,
+PLAN-KILL of the literal "widen the key now" ask is acceptable — but the
+fail-closed guard (Track A.1) should ship regardless, because the bug is now
+known to be reachable, not purely theoretical.* The recommended terminal state is
+PLAN-DEFER: ship the cheap fail-closed guard + doc now; schedule the full feature
+only if multi-tenant overlapping-subnet VRF isolation is a declared product goal.
 
 ## 4. Confirmed mechanism + what's already shipped (current master `13e3b269e`)
 
@@ -107,9 +131,31 @@ primary collision surface.
   (`connected_route_tables`, `forwarding_build/interfaces.rs:126-127`/`:274-283`)
   and next-table recursion.
 
-So two routing-instances both owning `10.0.0.10` already collide at the global
-FIB and global `local_v4` layers; the overlapping config never forwards
-correctly, with or without a wider session key.
+So in **default mode** two routing-instances both owning `10.0.0.10` already
+collide at the global FIB and global `local_v4` layers; the overlapping config
+never forwards correctly there, with or without a wider session key.
+
+**But PBR makes per-VRF forwarding work — and that is where the collision goes
+live (verified ordering proof):**
+
+- With an interface filter `then routing-instance <ri>`,
+  `ingress_route_table_override` returns the per-VRF table
+  (`forwarding/mod.rs:1211`), and the **session-miss** resolution honors it
+  (`poll_descriptor/mod.rs:1208-1216` builds the override; `:1244-1248` passes it
+  to `lookup_forwarding_resolution_in_table_with_dynamic`). So overlapping-address
+  multi-VRF *does* forward correctly under PBR.
+- **The established-session fast path runs FIRST and ignores PBR:**
+  `resolve_flow_session_decision` is called at `poll_descriptor/mod.rs:474` and
+  short-circuits before the PBR override at `:1208` (comment at `:503`: it "never
+  runs policy"). It looks up the conntrack session by the bare 5-tuple
+  (`flow.forward_key`, `shared_ops.rs:563-599`).
+- Therefore: flow 1 (VRF-A) creates a session caching egress-A; flow 2 (VRF-B),
+  *same 5-tuple*, hits flow 1's session at line 474 and is handed flow 1's cached
+  decision — its own PBR/route/policy is never evaluated → wrong-VRF forward +
+  wrong NAT + wrong policy. The flow-cache `(SessionKey, physical_ifindex)`
+  discriminator does not save it: flow 2 misses the flow cache (or collides if on
+  the same parent VLAN) but still hits the ifindex-less conntrack table. **The
+  conntrack table is the authoritative collision surface.**
 
 ### 4c. NEW since campaign-8 (#3096) — partial VRF awareness landed, but only in NAT *selection*
 
@@ -170,29 +216,42 @@ Two tracks. The decision between them is a **product-scope call** (see §11 Q1).
   config that assigns overlapping L3 address space (interface addresses or
   static routes) to two different routing-instances (and, optionally, to two
   zones on a shared physical parent), with an error naming both
-  interfaces/instances. This makes the unsafe-and-non-functional topology
-  un-committable instead of silently broken. No wire/HA impact; pure
+  interfaces/instances. **This must reject the overlap *even when* a PBR `then
+  routing-instance` filter would make it forward** — because (per §4b) PBR makes
+  it forward but the session layer cannot isolate the colliding flows. The guard
+  is therefore a *deliberate* fail-closed posture ("we do not support overlapping
+  L3 across routing-instances until session identity is VRF-aware"), not a
+  "reject a config that doesn't work anyway" guard. No wire/HA impact; pure
   config-layer. Pattern to mirror: the existing NPTv6 overlap gates
-  (`compiler_nptv6_test.go`).
-- **A.2 — (optional) flow-cache logical-ifindex key.** Change `FlowCacheEntry`
-  to key on the **logical** ingress ifindex (resolve `(parent, vlan) → logical`
-  via `resolve_ingress_logical_ifindex`, which the cache already calls at
-  `flow_cache.rs:373` for the DSCP/L4 coherency check) instead of the raw
-  physical `meta.ingress_ifindex` (`flow_cache.rs:149`, `:424`). Then two VLAN
-  sub-units on one parent can never share a flow-cache entry. Local to
-  `flow_cache.rs`; no wire/HA change. Low priority — only matters under overlap.
+  (`compiler_nptv6_test.go`). This is the **immediate mitigation** for the live
+  PBR-mode breach.
+- **A.2 — (de-prioritized) flow-cache logical-ifindex key.** Change
+  `FlowCacheEntry` to key on the **logical** ingress ifindex (resolve
+  `(parent, vlan) → logical` via `resolve_ingress_logical_ifindex`, already
+  called at `flow_cache.rs:373` for the DSCP/L4 coherency check) instead of the
+  raw physical `meta.ingress_ifindex` (`flow_cache.rs:149`, `:424`). **This does
+  NOT mitigate #2387's core breach** — the conntrack table (no ifindex) is the
+  authoritative collision surface (§4b), and the flow cache already carries the
+  physical ifindex yet still doesn't prevent the cross-VRF hit. A.2 is a tidy-up
+  that aligns the flow cache with the logical-ifindex SSOT used elsewhere
+  (#2370/#3021) and stops same-parent-VLAN flow-cache reuse; rank it below A.1
+  and A.3. No wire/HA change.
 - **A.3 — documentation.** Record the single-forwarding-domain limitation in
-  `userspace-dp/src/afxdp/forwarding/README.md` and the VRF docs, and note the
-  #3096 NAT-scope-vs-session-cache coherence contract.
+  `userspace-dp/src/afxdp/forwarding/README.md` and the VRF docs, note that PBR
+  is the only per-VRF forwarding path and that it is NOT session-isolated, and
+  record the #3096 NAT-scope-vs-session-cache coherence contract.
 
 ### Track B — full VRF-aware identity (large, phased; only if multi-tenant is a goal)
 
 Ordered so the key widening is **last**, not first:
 
 - **B-P0 — routing-domain id.** Derive a stable compact `routing_domain:u32`
-  from the existing `ifindex_to_routing_instance` map (intern the RI name → a
-  dense id; domain 0 = default/unscoped). Plumb it at ingress (populate the now-
-  dead `meta.routing_table`, or a sibling field).
+  from the existing `ifindex_to_routing_instance` map by **interning the RI name
+  to a dense u32** (domain 0 = default/unscoped) — never hash the RI name on the
+  hot path. Reuse the **dead `meta.routing_table` slot** (§4e) to carry it, so
+  there is **no `UserspaceDpMeta` size change** (the struct stays size-96 with
+  its mirrored `offset_of!` asserts intact). The SessionKey then grows by exactly
+  4 bytes in B-P2, and the per-packet key hash gains a single u32.
 - **B-P1 — per-VRF forwarding.** Per-VRF `local_v{4,6}` sets and an
   ingress-VRF-scoped default FIB table, so an interface's native
   `routing_instance` selects the destination table for a normal packet (not just
@@ -229,9 +288,15 @@ cost the version bump exists to manage.
   and reply both stay in the VRF), so the reverse-key transform keeps the same
   domain and matching holds. **Residual asymmetry:** an **inter-VRF route-leaked
   flow** (next-table / rib-group) ingresses VRF-A, egresses VRF-B; its reply
-  ingresses VRF-B, so the forward-stored domain ≠ the reply's computed domain.
-  This must be handled like NAT's reverse-key transform (store both ingress and
-  egress domain, or exempt leaked flows). Campaign-8 did not flag this corner.
+  ingresses VRF-B, so the forward-stored domain differs from the reply's computed
+  domain. **Resolution for B-MVP:** the config path that produces this is
+  rib-group / `next-table` inter-VRF route leaking (`pkg/routing/`). B-MVP
+  **scopes leaked inter-VRF flows OUT** with a documented known-limitation
+  (leaked flows keep domain-0 / unscoped identity, as today); a follow-up phase
+  stores both ingress and egress domain on the session and uses the egress domain
+  in the reverse-key transform (mirroring NAT's reverse-key handling). Shipping
+  B-P2 without this scoping would silently regress leaked-flow conntrack, so the
+  scoping decision is a hard gate, not prose. Campaign-8 did not flag this corner.
 - **HA wire portability / mixed-version.** §4d: key widening is a hard break;
   ISSU during the upgrade window must not corrupt or silently drop sessions —
   hence the version bump + mixed-base gate + a version-aware decoder.
@@ -249,17 +314,21 @@ cost the version bump exists to manage.
 
 | Class | Track A | Track B |
 |---|---|---|
-| Behavioral regression | LOW — A.1 only rejects already-broken configs; A.2 only changes which entry a same-parent VLAN flow caches under. | HIGH — touches conntrack identity, reply matching, per-VRF FIB; mis-set domain → flows fail to match (self-DoS) or cross-match. |
+| Behavioral regression | LOW-MED — A.1 rejects overlapping-L3-across-RI configs, INCLUDING PBR ones that currently forward (deliberate fail-closed); an operator relying on that today gets a commit error (acceptable: those flows are silently mis-isolated). A.2 only changes which entry a same-parent VLAN flow caches under. | HIGH — touches conntrack identity, reply matching, per-VRF FIB; mis-set domain → flows fail to match (self-DoS) or cross-match. |
 | HA mixed-version | NONE (no wire change). | HIGH — hard key-wire break (§4d); requires version bump + #1930 mixed-base ISSU gate + dual-format decoder for the upgrade window. |
 | Wire / struct size | NONE. | MED — SessionKey +4 B (and the C/Go mirrors + golden fixture); `UserspaceDpMeta` already has the dead `routing_table` slot, so no meta size change if reused. |
 | Performance (key hashed per packet) | NONE. | LOW-MED — +4 B in the key hash and per-entry map cost (~1-3%); domain-id derivation is one extra `FastMap` lookup at ingress. Must be measured (smoke + perf). |
 | Architectural mismatch | LOW — A.1/A.3 are the honest contract; A.2 aligns flow-cache with the logical-ifindex SSOT already used elsewhere (#2370/#3021). | MED — doing B-P2 *before* B-P1 (per-VRF FIB) is the dead-end: a wider key with a global FIB still can't forward overlapping addresses, so it ships cost for no isolation. Phase order (P0→P1→P2→P3→P4) is load-bearing. |
 
-**PLAN-KILL acceptable if:** the collision is unreachable in practice (it is, in
-any forwarding-correct config — §4b) *and* the churn of Track B outweighs the win
-(it does, unless multi-tenant overlapping-subnet VRF is a declared product goal).
-The literal "widen the key now" ask should be PLAN-KILLed as premature; the
-proportionate response is Track A.
+**PLAN-KILL acceptable if:** the churn of Track B outweighs the win for what is a
+niche config (overlapping addresses + PBR + simultaneous identical 5-tuple —
+§4b). Note the collision is **not** unreachable: it is live in PBR mode, only
+latent in default mode. So PLAN-KILL rests solely on the cost/benefit prong, not
+on unreachability. The literal "widen the key now" ask should be PLAN-KILLed as
+*premature* (it is the last phase of Track B); the proportionate immediate
+response is Track A.1 (fail-closed guard for the live breach) + A.3 (docs), with
+Track B scheduled if multi-tenant overlapping-subnet VRF is a declared product
+goal.
 
 ## 9. Test plan
 
