@@ -33,11 +33,11 @@ master and corrects two of them — see §4).
 
 ## 1. Status
 
-**CONVERGED v3 — PLAN-DEFER (research-converged).** This is a `/research` pass: it
-stops at PLAN-READY / PLAN-KILL / PLAN-DEFER and produces a converged
-plan-of-action, no code PR. r2 verdicts: Claude SMR = PLAN-DEFER, AGY = PLAN-DEFER
-(Codex r1 = NEEDS-MAJOR-REVISION on v1, all findings incorporated in v3; r2
-convergence check recorded in `codex-plan-r2.md`).
+**CONVERGED v4 — PLAN-DEFER (research-converged), 3-of-3.** This is a `/research`
+pass: it stops at PLAN-READY / PLAN-KILL / PLAN-DEFER and produces a converged
+plan-of-action, no code PR. Convergence: Claude SMR r2 = PLAN-DEFER, AGY r2 =
+PLAN-DEFER, Codex r2 = PLAN-DEFER after two §4c/§A.1 wording fixes (landed in v4;
+`codex-plan-r2.md`). Codex was not infra-blocked in either round.
 
 The headline recommendation is **PLAN-DEFER**: the bug is real and reachable
 (LIVE under PBR `then routing-instance`, latent in default forwarding mode), but
@@ -214,9 +214,13 @@ cache is keyed by the bare 5-tuple, a second flow that collides on the 5-tuple
 would inherit the first flow's NAT/policy/forwarding decision, *defeating
 #3096's scoping for that flow*. The codebase is now partway into VRF-awareness
 (NAT selection) while session identity is still VRF-blind — an internal
-inconsistency. It remains latent only because §4b makes the trigger
-non-forwarding; but a future per-VRF-FIB phase that makes §4b work would
-silently inherit this hole.
+inconsistency. The gap is **latent in default mode** (§4b: the trigger does not
+forward there) but **live under PBR** — NAT runs inside the same PBR-triggered
+session-miss path (`forwarding/mod.rs:211-212` resolves the NAT scope, then
+`session_glue/mod.rs:1037-1042` looks up `&flow.forward_key`), so flow 2's
+established hit reuses flow 1's cached NAT decision without re-checking scope,
+exactly as in §4b. A future per-VRF-FIB phase (B-ext) that makes default mode
+forward would extend the live window to non-PBR configs too.
 
 ### 4d. CORRECTION to campaign-8's HA-wire claim (new finding)
 
@@ -379,7 +383,7 @@ the cost the version bump exists to manage.
 
 | Class | Track A | Track B |
 |---|---|---|
-| Behavioral regression | LOW-MED — A.1 rejects overlapping-L3-across-RI configs, INCLUDING PBR ones that currently forward (deliberate fail-closed); an operator relying on that today gets a commit error (acceptable: those flows are silently mis-isolated). A.2 only changes which entry a same-parent VLAN flow caches under. | HIGH — touches conntrack identity, reply matching, per-VRF FIB; mis-set domain → flows fail to match (self-DoS) or cross-match. |
+| Behavioral regression | LOW — A.1 emits a commit WARNING (not a reject) on overlapping-L3-across-RI configs, INCLUDING PBR ones that currently forward; the config still commits, the operator is just told it is not session-isolated. (A hard reject is opt-in only, under the "no overlapping subnets" product posture — §11 Q1.) A.2 only changes which entry a same-parent VLAN flow caches under. | HIGH — touches conntrack identity, reply matching, per-VRF FIB; mis-set domain → flows fail to match (self-DoS) or cross-match. |
 | HA mixed-version | NONE (no wire change). | HIGH — hard key-wire break (§4d); requires version bump + #1930 mixed-base ISSU gate + dual-format decoder for the upgrade window. |
 | Wire / struct size | NONE. | MED — SessionKey +4 B (and the C/Go mirrors + golden fixture); `UserspaceDpMeta` already has the dead `routing_table` slot, so no meta size change if reused. |
 | Performance (key hashed per packet) | NONE. | LOW-MED — +4 B in the key hash and per-entry map cost (~1-3%); domain-id derivation is one extra `FastMap` lookup at ingress. Must be measured (smoke + perf). |
@@ -399,7 +403,9 @@ FIB) is independently deferrable.
 
 - **Track A.1 (RED-on-revert):** `pkg/config` unit test — two routing-instances
   with overlapping `10.0.0.10/24` on VLAN sub-units of one parent ⇒ commit
-  rejected with a message naming both. Reverting the guard makes the test go RED.
+  succeeds with a **warning** naming both interfaces/instances. Reverting the
+  guard (no warning emitted) makes the test go RED. (Under the opt-in hard-reject
+  posture, a separate test asserts the commit is rejected.)
 - **Track A.2:** `flow_cache` unit test — same physical parent, two VLAN units,
   identical 5-tuple ⇒ distinct flow-cache entries (RED if the key reverts to raw
   physical ifindex).
