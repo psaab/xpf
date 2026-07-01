@@ -3,7 +3,8 @@
 - Issue: #3617 (audit / enhancement; from codex-review-002 M04, folds L10, L18)
 - Base: origin/master `f1d00ffeb`
 - Branch: `research/3617-mirror-clone`
-- Revision: **r1**
+- Revision: **r2** (r1→r2: SMR accuracy fix — L10 is covered for reject +
+  SYN-cookie replies but NOT for the PTB/time-exceeded generated ICMP errors)
 - Status: **PLAN-KILL (works-as-intended)** — recommended verdict, pending 3-way review convergence
 - Mode: `/research` — stops at PLAN-READY / PLAN-KILL. No PR. No production code.
 
@@ -151,9 +152,15 @@ correct and matches Junos "transit data only." Document the decision in the
 issue and (optionally) in the mirror/README as a pinned invariant.
 
 - Pro: Junos-conformant; zero risk; no hot-path change; no new config surface.
-- Pro: the L10 test the issue asks for **already exists** — `reject_reply.rs:394`
-  asserts `!req.mirror_clone` and `cookie_reply.rs:504` asserts
-  `!req.mirror_clone`. The deliberate-invariant pin is already in place.
+- Pro: the L10 test the issue asks for **already exists for the two reply
+  families** — `reject_reply.rs:394` asserts `!req.mirror_clone` and
+  `cookie_reply.rs:504` asserts `!req.mirror_clone`. **Residual:** the
+  forward-path generated ICMP errors (PTB / Frag-Needed
+  `tx/dispatch/mod.rs:438`, time-exceeded `:204`) set `mirror_clone: false` but
+  have no test asserting it — L10 is NOT fully covered for the ICMP-error
+  family. This is a one-line `assert!(!req.mirror_clone)` pin best folded into a
+  future test-sweep; it is not a behaviour change and does not warrant holding
+  #3617 open.
 - Con: leaves the operator forensics desire (see host-generated wire traffic)
   unmet — but that desire is met by other means: the replies are already
   counted (`policy_reject_sent`, `filter_reject_sent`, SYN-cookie counters,
@@ -201,9 +208,11 @@ Rationale (three independent, each individually sufficient):
 2. **Mechanism:** the proposed fix ("thread `mirror_clone` / set it on the
    reply") is a misreading — `mirror_clone: true` marks a frame droppable, it
    does not clone; it would degrade reply reliability, not add analyzer copies.
-3. **L10 already done:** the requested "pin mirror_clone as a deliberate
-   invariant" test already exists and asserts the correct value (`false`) in
-   both `reject_reply.rs` and `cookie_reply.rs`.
+3. **L10 largely done:** the requested "pin mirror_clone as a deliberate
+   invariant" test already asserts the correct value (`false`) in
+   `reject_reply.rs` and `cookie_reply.rs`. The only gap is a missing one-line
+   pin on the PTB/time-exceeded generated ICMP errors — a test-sweep item, not
+   a reason to keep the issue open.
 
 If a future operator explicitly wants non-Junos analyzer visibility into
 host-generated control traffic, open a new, separately-scoped feature issue
