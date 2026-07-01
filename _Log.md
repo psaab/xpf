@@ -24364,3 +24364,8 @@ top.
 - **Action**: Round-2 companions confirmed round-1 RESOLVED, raised refinement findings. Wrote plan v3 + SMR r3.
 - **File(s)**: docs/research/3607-screen-rate/plan.md (v3), claude-smr-plan-r3.md, reviewer-ids.md
 - **v3**: cookie-OFF aggregate fixed via per-zone OFF-attack TokenBucket (increment_and_classify untouched); missing-profile warn NOT migrated (suppress-until-idle); sketch fail-closed re-derivation; admit() polarity pinned; cookie-ON lock documented.
+
+## 2026-06-30 — #3607 plan v4 (round-3 findings incorporated)
+- **Action**: AGY r3 PLAN-READY; Codex r3 held sketch fail-closed BLOCKER + 2 spec MAJORs. Wrote v4 + SMR r4.
+- **File(s)**: plan.md (v4), claude-smr-plan-r4.md, reviewer-ids.md
+- **v4**: DEFER #3315 sketch migration (Codex's offered resolution; removes contested change + shrinks blast radius); pin alarm gating to measured values; TokenBucket cold-start=full + saturating_sub. Scope: ICMP/UDP flood + standby-ACK + cookie-OFF SYN aggregate.

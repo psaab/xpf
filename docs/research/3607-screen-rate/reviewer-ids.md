@@ -28,7 +28,18 @@ reviewer; it joins at `/engineer` on the code PR.
 - Claude SMR r2 (`claude-smr-plan-r2.md`): PLAN-READY on Option B (consumer-split).
 
 ## Round 3 (plan v3 — cookie-OFF aggregate bucket + sketch fail-closed re-derivation)
+- Codex (agent id `abcb30eef8fd9703c`): NEEDS-REVISION — cookie-OFF/polarity/
+  missing-profile RESOLVED; held sketch fail-closed BLOCKER (stay-tripped vs
+  rate-enforced); NEW MAJORs: alarm gating precision in the OFF path, TokenBucket
+  cold-start unspecified.
+- AGY (agent id `a79a2c6b688398a34`): **PLAN-READY** — all round-2 findings
+  RESOLVED/ADDRESSED; NEW MINORs: TokenBucket init-full on first call,
+  `saturating_sub` on the clock delta.
+- Claude SMR r3 (`claude-smr-plan-r3.md`): PLAN-READY on Option B (consumer-split).
+
+## Round 4 (plan v4 — sketch DEFERRED, alarm gating pinned, cold-start-full)
 - Codex: <pending>
 - AGY: <pending>
-- Claude SMR r3 (`claude-smr-plan-r3.md`): **PLAN-READY on Option B
-  (consumer-split, v3)**, PLAN-DEFER-operator / DEFER-the-sketch as fallbacks.
+- Claude SMR r4 (`claude-smr-plan-r4.md`): **PLAN-READY on Option B (reduced
+  scope: ICMP/UDP flood + standby-ACK + cookie-OFF SYN aggregate; sketch
+  deferred)**, PLAN-DEFER-operator as fallback.
