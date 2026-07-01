@@ -6,7 +6,7 @@
 - **Mode:** `/research` (plan-only; NO PR, NO production source changes)
 - **Branch:** `research/3620-intrazone`
 - **Base:** origin/master @ `bd2443c5e`
-- **Revision:** r1
+- **Revision:** r2 (converged — all 3 reviewers PLAN-KILL-CONFIRMED)
 - **Disposition (recommended):** **PLAN-KILL — works-as-intended.** The
   governing premise ("Junos SRX/vSRX implicitly permits intrazone traffic by
   default") is **FALSE** for mainline SRX/vSRX. xpf's current behavior (same-zone
@@ -307,6 +307,27 @@ This issue's unique question — "does SRX implicitly permit intrazone?" — is
 answered NO here and closed.
 
 ---
+
+## 9a. Reviewer convergence (r1 → converged)
+
+All three research reviewers converged **PLAN-KILL-CONFIRMED** on r1:
+
+- **Claude SMR** (hostile): premise resolution holds; could not produce any
+  authoritative citation of a runtime implicit intrazone permit on SRX; code
+  claims verified; building the tier is a security regression.
+- **AGY** (independent web + code verification): PLAN-KILL-CONFIRMED; probed
+  packet-based vs flow-based mode, same-interface hairpin, ScreenOS
+  `intrazone-block`; confirmed premise, code, disposition, dedup.
+- **Codex** (hostile, read-only): PLAN-KILL-CONFIRMED; confirmed against both the
+  worktree and object `bd2443c5e`; added one caveat (below).
+
+**Codex caveat — packet-based (stateless) forwarding.** If traffic is explicitly
+configured for packet-mode forwarding, Juniper bypasses flow-based security
+features *globally* — this is NOT an implicit intrazone permit and NOT
+intrazone-specific; it is an explicit, operator-selected stateless-forwarding
+mode outside the security-policy tier question. It does not affect the verdict.
+Worth a one-line mention in the optional Option A′ docs note for completeness.
+(Ref: Juniper *Packet-Based Forwarding*.)
 
 ## 10. Open questions
 

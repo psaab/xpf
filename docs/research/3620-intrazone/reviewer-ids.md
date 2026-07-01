@@ -7,7 +7,7 @@ Three research reviewers: Codex + AGY + Claude SMR (Copilot joins only at
 |-------|----------|-------------|---------|----------|
 | r1 | Claude SMR | (in-conversation) | PLAN-KILL-CONFIRMED | `claude-smr-plan-r1.md` |
 | r1 | AGY | agy print-mode job `bmdukyfkt` (bg) | PLAN-KILL-CONFIRMED | `agy-plan-r1.md` |
-| r1 | Codex | `task-mr1rslvt-ra3ovj` (companion registry dropped the job — fetch-by-id "No job found", the documented Codex infra-drop); re-run via `codex:codex-rescue` agent for inline capture | see `codex-plan-r1.md` | `codex-plan-r1.md` |
+| r1 | Codex | `task-mr1rslvt-ra3ovj` dropped (fetch-by-id "No job found", documented infra-drop); re-run via `codex:codex-rescue` fresh task `task-mr1rvyi1-jgmogm` for inline capture | PLAN-KILL-CONFIRMED | `codex-plan-r1.md` |
 
 Notes:
 - Codex-infra-blocked exception (research skill): if Codex is infra-blocked,
