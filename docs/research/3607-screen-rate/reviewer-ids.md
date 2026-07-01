@@ -47,7 +47,16 @@ reviewer; it joins at `/engineer` on the code PR.
 - Claude SMR r4 (`claude-smr-plan-r4.md`): PLAN-READY on Option B (reduced scope).
 
 ## Round 5 (plan v5 — cookie-OFF token bucket is the SOLE drop authority)
-- Codex: <pending>
-- AGY: <pending>
-- Claude SMR r5 (`claude-smr-plan-r5.md`): **PLAN-READY on Option B (reduced
-  scope; single-gate cookie-OFF wiring)**, PLAN-DEFER-operator as fallback.
+- Codex (agent id `aabe380933d225afb`): NEEDS-REVISION — round-4 wiring BLOCKER
+  RESOLVED; NEW MAJOR: `tokens_q + refill_q` unchecked add before `.min` (use
+  `saturating_add`).
+- AGY (agent id `a1b88e33f6952fa74`): **PLAN-READY** — both round-4 MINORs
+  RESOLVED, no new findings.
+- Claude SMR r5 (`claude-smr-plan-r5.md`): PLAN-READY on Option B (reduced scope).
+
+## Round 6 (plan v6 — saturating_add hardening on the token accumulation)
+- Codex (agent id `<pending>`): <pending>
+- AGY: PLAN-READY carries forward from v5 (v6 = v5 + `saturating_add`, a strict
+  overflow-hardening AGY itself prescribed the sibling `saturating_sub` for; no
+  design change).
+- Claude SMR r6: **PLAN-READY on Option B (reduced scope; v6 hardening)**.

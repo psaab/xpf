@@ -24374,3 +24374,8 @@ top.
 - **Action**: AGY r4 PLAN-READY; Codex r4 found §5a wiring double-quota BLOCKER. Wrote v5 + SMR r5.
 - **File(s)**: plan.md (v5), claude-smr-plan-r5.md, reviewer-ids.md
 - **v5**: cookie-OFF token bucket is SOLE drop authority on EVERY initial SYN (kills v4 double-quota, micro-burst bounded to T); cap elapsed at 1s (refill overflow); explicit !over_attack alarm gate.
+
+## 2026-07-01 — #3607 plan v6 (round-5 hardening)
+- **Action**: AGY r5 PLAN-READY (no new findings). Codex r5: wiring BLOCKER resolved, new MAJOR = saturating_add on token accumulation. Applied v6 one-word hardening.
+- **File(s)**: plan.md (v6), reviewer-ids.md
+- **v6**: tokens_q.saturating_add(refill_q(...)).min(capacity) — overflow-safe.

@@ -2,12 +2,18 @@
 
 ## 1. Status
 
-`DRAFT v5 — round-4 adversarial findings incorporated (Codex + AGY + Claude SMR);
-converged design, pending final confirmation` (research branch
-`research/3607-screen-rate`, base origin/master `9419bbc2c`).
+`DRAFT v6 — round-5 hardening (Codex + AGY + Claude SMR); converged design,
+pending final confirmation` (research branch `research/3607-screen-rate`, base
+origin/master `9419bbc2c`).
 
 `/research` plan. Stops at PLAN-READY / PLAN-DEFER / PLAN-KILL. No production
 source changes, no PR.
+
+**v6 change summary (round-5 review):** AGY = PLAN-READY (no new findings). Codex
+confirmed the round-4 wiring BLOCKER RESOLVED and raised one overflow-hardening
+MAJOR: `tokens_q + refill_q` is now `saturating_add` (consistent with the
+`saturating_sub` on the clock delta) so the fixed-point token accumulation cannot
+wrap before the `.min(capacity)` clamp at extreme thresholds.
 
 **v5 change summary (round-4 review):**
 - **cookie-OFF wiring double-quota fixed** (Codex BLOCKER): v4 consulted the OFF
@@ -167,7 +173,10 @@ impl TokenBucket {
             // any gap >= 1s fully refills, and this keeps elapsed * threshold from
             // overflowing u64 at high thresholds (AGY).
             let elapsed = now_ns.saturating_sub(self.last_refill_ns).min(1_000_000_000);
-            self.tokens_q = (self.tokens_q + refill_q(elapsed, threshold))
+            // saturating_add: tokens_q (<= capacity) + refill_q can approach u64
+            // at extreme thresholds; saturate before the .min clamp (Codex).
+            self.tokens_q = self.tokens_q
+                .saturating_add(refill_q(elapsed, threshold))
                 .min(capacity_q(threshold));
             self.last_refill_ns = now_ns.max(1);
         }
