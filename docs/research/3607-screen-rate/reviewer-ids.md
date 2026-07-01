@@ -55,8 +55,12 @@ reviewer; it joins at `/engineer` on the code PR.
 - Claude SMR r5 (`claude-smr-plan-r5.md`): PLAN-READY on Option B (reduced scope).
 
 ## Round 6 (plan v6 — saturating_add hardening on the token accumulation)
-- Codex (agent id `<pending>`): <pending>
-- AGY: PLAN-READY carries forward from v5 (v6 = v5 + `saturating_add`, a strict
+- Codex (agent id `a3c53ed222f496dc1`): **PLAN-READY** — round-5 MAJOR RESOLVED
+  (`saturating_add` before `.min`); remaining findings: none.
+- AGY: **PLAN-READY** carries forward from v5 (v6 = v5 + `saturating_add`, a strict
   overflow-hardening AGY itself prescribed the sibling `saturating_sub` for; no
   design change).
-- Claude SMR r6: **PLAN-READY on Option B (reduced scope; v6 hardening)**.
+- Claude SMR r6 (`claude-smr-plan-r6.md`): **PLAN-READY on Option B (reduced
+  scope; v6 hardening)**.
+
+## CONVERGED at v6 (SHA 569edd3b9) — 3/3 PLAN-READY (Codex + AGY + Claude SMR)

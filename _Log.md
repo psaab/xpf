@@ -24379,3 +24379,8 @@ top.
 - **Action**: AGY r5 PLAN-READY (no new findings). Codex r5: wiring BLOCKER resolved, new MAJOR = saturating_add on token accumulation. Applied v6 one-word hardening.
 - **File(s)**: plan.md (v6), reviewer-ids.md
 - **v6**: tokens_q.saturating_add(refill_q(...)).min(capacity) — overflow-safe.
+
+## 2026-07-01 — #3607 CONVERGED 3/3 PLAN-READY (v6)
+- **Action**: Codex r6 PLAN-READY (no remaining findings); AGY r5 PLAN-READY; Claude SMR PLAN-READY. Convergence at v6 (569edd3b9). Wrote SMR r6.
+- **File(s)**: claude-smr-plan-r6.md, reviewer-ids.md
+- **Next**: post converged verdict to #3607, apply plan-deferred-research label, leave open.
