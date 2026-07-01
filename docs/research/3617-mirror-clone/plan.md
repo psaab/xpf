@@ -3,8 +3,9 @@
 - Issue: #3617 (audit / enhancement; from codex-review-002 M04, folds L10, L18)
 - Base: origin/master `f1d00ffeb`
 - Branch: `research/3617-mirror-clone`
-- Revision: **r2** (r1→r2: SMR accuracy fix — L10 is covered for reject +
-  SYN-cookie replies but NOT for the PTB/time-exceeded generated ICMP errors)
+- Revision: **r3** (r2→r3: Codex+AGY line-ref corrections — PTB pin is
+  `tx/dispatch/mod.rs:1174` not `:438`; `fast_path.rs` fn is `:115-170`.
+  All three reviewers PLAN-KILL-CONCUR at this revision.)
 - Status: **PLAN-KILL (works-as-intended)** — recommended verdict, pending 3-way review convergence
 - Mode: `/research` — stops at PLAN-READY / PLAN-KILL. No PR. No production code.
 
@@ -56,7 +57,7 @@ The **actual** mirror clone is a *separate* frame built by the mirror machinery
 and directed at the analyzer's `output_ifindex`, with `mirror_clone: true` set
 on that copy:
 
-- `userspace-dp/src/afxdp/mirror/fast_path.rs:145-199`
+- `userspace-dp/src/afxdp/mirror/fast_path.rs:115-170`
   (`enqueue_mirror_clone_to_binding`) copies the source frame into a fresh TX
   frame, sets `egress_ifindex: config.output_ifindex` and `mirror_clone: true`,
   and pushes it onto the target binding's pending TX.
@@ -156,7 +157,7 @@ issue and (optionally) in the mirror/README as a pinned invariant.
   families** — `reject_reply.rs:394` asserts `!req.mirror_clone` and
   `cookie_reply.rs:504` asserts `!req.mirror_clone`. **Residual:** the
   forward-path generated ICMP errors (PTB / Frag-Needed
-  `tx/dispatch/mod.rs:438`, time-exceeded `:204`) set `mirror_clone: false` but
+  `tx/dispatch/mod.rs:1174`, time-exceeded `:204`) set `mirror_clone: false` but
   have no test asserting it — L10 is NOT fully covered for the ICMP-error
   family. This is a one-line `assert!(!req.mirror_clone)` pin best folded into a
   future test-sweep; it is not a behaviour change and does not warrant holding
