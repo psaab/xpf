@@ -2,20 +2,65 @@
 
 ## 1. Status
 
-DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR).
+**r2 — CONVERGED** (Codex + AGY + Claude SMR all reviewed; see §12).
 
 Research base: origin/master `c18664f1b` (issue authored against `9419bbc2c`;
 all findings re-verified file:line against `c18664f1b` in this run — see §3/§4:
 policy.rs:2835-2838 indexed-but-not-consulted, compiler_validate_strict.go:
-2715-2731 global reject, no `hook output`/`postrouting`/`forward` chain exists
-anywhere in `pkg/`, `hostInboundLifelineSet` in `pkg/dataplane/userspace/
+2715-2731 global reject, `hostInboundLifelineSet` in `pkg/dataplane/userspace/
 zones.go`, globals routed to `global_indices` and NOT consulted on the host
 path at policy.rs:2249-2250).
 
-Anticipated verdict: **PLAN-DEFER** (enforceable, but only in the kernel; high
-self-DoS blast radius + partial fidelity + low demand). This is NOT works-as-
-intended: the parity gap is real and a viable mechanism exists, so PLAN-KILL is
-the wrong disposition. See §3 and §8.
+**CORRECTION (Codex r1 BLOCKER, verified):** an nft OUTPUT-hook chain ALREADY
+exists — `pkg/nftables/rst_suppress.go:121-122` installs the `xpf_dp_rst` table's
+chain at `nftables.ChainHookOutput` / `nftables.ChainPriorityFilter`, live via
+`InstallRSTSuppression` (`pkg/dataplane/userspace/maps_sync.go:1058-1072`). The
+r1 claim "no `hook output` chain exists anywhere" was wrong (an r1 grep matched
+the nft CLI string, not the Go library constant `ChainHookOutput`). Consequence:
+any new `xpf_hostout` output chain MUST be given a priority that deterministically
+orders against `xpf_dp_rst` (nft evaluates chains within a hook by priority;
+equal priority is undefined). This is now an explicit invariant (§7) and a
+material reason the mechanism is more fragile than r1 implied.
+
+### CONVERGED VERDICT — PLAN-DEFER (split disposition)
+
+The issue's two gaps resolve DIFFERENTLY; conflating them was the r1 weakness.
+
+- **Piece A — from-zone junos-host (host-ORIGINATED, H01) + from-zone-junos-host
+  GLOBAL: DOCUMENT-ONLY / build NOT recommended.** Definitively NOT enforceable
+  in the AF_XDP userspace dataplane (XDP is RX-only; host egress is kernel-TX —
+  VERIFIED). The only alternative locus (kernel nft `hook output`) fails the
+  honesty test on multiple independent axes (§3, §8): an HONEST fail-closed
+  exact-match commit gate collides with nft's inability to represent Junos
+  ALG / dynamic-port applications, so it would reject the majority of real-world
+  self-policy configs (AGY); `oifname` at the output hook is unproven and likely
+  UNSOUND for VRF/l3mdev, and the postrouting fallback loses `reject` toward the
+  local socket (AGY + Codex); the lifeline set does not protect the box's own
+  logical WAN dependencies (DHCP/DNS/NTP/syslog/update), so a deliberate broad
+  `to-zone <wan> deny` self-DoSes daemon-applied system services (AGY + Codex);
+  and it adds a split-engine parity debt + an `xpf_dp_rst` ordering invariant.
+  Codex's own KILL condition — "if the gate cannot be an exact match, the honest
+  call is KILL-document-only" — is EXACTLY the situation AGY demonstrates is
+  unavoidable. Recommendation: keep the current indexed-but-inert behavior AND
+  the from-zone-junos-host GLOBAL commit-reject, and add a docs paragraph stating
+  the architectural limitation explicitly (this direction is not enforceable in
+  the userspace dataplane and is deliberately not built in the kernel).
+
+- **Piece B — to-zone junos-host GLOBAL (host-INBOUND, the M03 inbound half):
+  BUILDABLE, low-risk, high-fidelity — DEFER (design captured, ready for
+  /engineer).** All three reviewers converge that this is cleanly enforceable in
+  the EXISTING userspace host-delivery path (the to-zone-junos-host direction
+  DOES traverse LocalDelivery). Codex verified the required coupling (PASS): lift
+  the `compiler_validate_strict.go:2715-2732` reject AND index global-scoped
+  junos-host rules into the host gate in the SAME change (globals go to
+  `global_indices`, which the host gate never consults today, so a lift-alone
+  leaves them inert — the exact silent-never-match hole the reject closed).
+  Recommendation: split into its OWN small issue and drive via /engineer; it
+  needs no kernel work and carries none of Piece A's risk.
+
+This is NOT a pure PLAN-KILL (a real, safe, buildable improvement exists —
+Piece B), so the issue stays OPEN with the deferred-research label. But the
+headline H01 direction lands on document-only.
 
 ## 2. Issue framing
 
@@ -84,14 +129,27 @@ Answer, verified against source:
   exemption set (`hostInboundLifelineSet`) — already exists and is directly
   reusable.
 
-- **Conclusion: enforceable, but ONLY in the kernel (nft OUTPUT chain), NOT in
-  the userspace AF_XDP dataplane.** Because a real gap + a real mechanism both
-  exist, the honest disposition is PLAN-DEFER (design captured, build deferred
-  on risk/fidelity/demand), NOT PLAN-KILL. If reviewers conclude the self-DoS
-  blast radius + the partial nft fidelity + the split-enforcement maintenance
-  cost outweigh a niche parity win, **PLAN-KILL (document-only) is an acceptable
-  verdict** — but the tie-breaker vs #3620 is that a working mechanism exists
-  and Junos genuinely enforces this direction.
+- **Conclusion (r2, post-review): for from-zone / host-ORIGINATED the disposition
+  is DOCUMENT-ONLY (build not recommended); to-zone GLOBAL (host-INBOUND) is
+  BUILDABLE.** It is not enforceable in the userspace AF_XDP dataplane. A kernel
+  nft `hook output` mechanism is technically constructible (and output-hook
+  infrastructure already exists — `xpf_dp_rst`, contra r1), but all three
+  reviewers converged that it fails the honesty test on independent axes:
+  (a) the fail-closed EXACT-match commit gate required to avoid the silent-partial
+  footgun cannot represent Junos ALG / dynamic-port apps, so it rejects the
+  majority of real self-policy configs (AGY); Codex's stated KILL condition —
+  "if the gate cannot be exact → KILL-document-only" — is precisely this
+  situation; (b) `oifname` at the output hook is unproven and likely UNSOUND for
+  VRF/l3mdev (reports the VRF master, not the physical egress iface), and the
+  postrouting fallback loses `reject` toward the local socket (AGY + Codex);
+  (c) the lifeline set does not cover the box's own logical WAN dependencies
+  (DHCP/DNS/NTP/syslog/update), so a broad deny self-DoSes daemon-applied system
+  services (AGY + Codex). This is not #3620 (the parity gap is real, not a false
+  premise), but the engineering answer has the same SHAPE: document the
+  architectural limitation, do not build. The tie-breaker that keeps the whole
+  issue from a pure KILL is the OTHER direction — to-zone junos-host GLOBAL
+  (host-inbound) IS cleanly userspace-enforceable and is the recommended
+  buildable slice (§5 Piece B, all three converge).
 
 Value at absolute scale: this constrains the firewall's OWN outbound clients
 (e.g. "the box may not open sessions to the untrust zone"). It is a hardening/
@@ -119,9 +177,13 @@ the risk (bricking the box's own control plane) is high.
   reusable to protect the management/HA lifeline on the OUTPUT chain.
 - **#3445 / #3392** — lo0 INPUT firewall filter mirrored to kernel nft; the
   `then` modifier subset nft can honor on a base chain is already characterized.
-  Note: there is currently NO lo0 OUTPUT kernel mirror and NO `hook output`
-  chain anywhere in xpf — so a from-zone junos-host output chain is genuinely
-  new kernel infrastructure (built on existing helpers, but a new hook).
+  Note: there is currently NO lo0 OUTPUT kernel mirror, and the ONLY existing
+  `hook output` chain in xpf is `xpf_dp_rst` (RST suppression;
+  `pkg/nftables/rst_suppress.go:117-123`, `ChainHookOutput` /
+  `ChainPriorityFilter`, installed live by `InstallRSTSuppression`). A
+  from-zone junos-host output chain would therefore share the output hook with
+  `xpf_dp_rst` and MUST be priority-ordered against it deterministically (r1
+  incorrectly claimed no output chain existed — Codex BLOCKER, verified).
 
 ## 5. Concrete design
 
@@ -130,6 +192,16 @@ Two independently-shippable pieces. The plan RECOMMENDS deferring Piece A
 follow-up.
 
 ### Piece A — from-zone junos-host enforcement via a kernel nft OUTPUT chain (H01)
+
+**DISPOSITION (r2): DOCUMENT-ONLY — this design is retained as the reference for
+what enforcement WOULD require, but the converged recommendation is NOT to build
+it (see §1, §3, §12). It is captured here so a future decision has the full
+mechanism + risk in front of it.** The three blockers that make it document-only
+rather than a straightforward defer: the fail-closed exact-match gate rejects the
+ALG/dynamic-port app catalog (most real configs); `oifname` at output is unsound
+for VRF/l3mdev; and it must be priority-ordered against the pre-existing
+`xpf_dp_rst` output chain while a broad deny can still self-DoS the box's own
+logical WAN dependencies.
 
 New base chain `xpf_hostout` (`type filter hook output priority <P>; policy
 accept;`), rendered by a new `buildHostOutFilterPayload` in
@@ -242,6 +314,23 @@ Split by direction:
   the control-plane egress path — heartbeat/VRRP are on the OUTPUT hook now).
 - **Chain-priority determinism** (mirror `nft_chain_priority_test.go`): pin the
   output chain's priority with an invariant test.
+- **Output-hook coexistence with `xpf_dp_rst` (Codex BLOCKER).** The RST-suppression
+  chain (`pkg/nftables/rst_suppress.go`, `ChainHookOutput` at
+  `ChainPriorityFilter`) already occupies the output hook. `xpf_hostout` MUST be
+  assigned a priority that deterministically orders against it (nft evaluates
+  chains within a hook in ascending priority; equal priority is undefined) — with
+  an invariant test asserting the relative order, and a rationale for whether
+  RST-suppression must run before or after the host-out policy.
+- **Renderer interface-name contract (Codex).** `oifname` rules MUST use the
+  Linux kernel interface name, NOT the Junos logical ref — both are in the
+  snapshot (`interfaces.go`, `pkg/config/types.go`); the renderer must pick the
+  kernel name deterministically or the chain silently never matches.
+- **oifname / VRF(l3mdev) soundness is a LAB GATE, not an assumption (AGY +
+  Codex).** Whether the output-hook `oifname` reflects the true physical egress
+  device across connected/routed/VRF(l3mdev)/reroute is UNVERIFIABLE in plan
+  review and AGY flags it as likely-broken for l3mdev. If ever built, this MUST
+  be proven on the cluster BEFORE committing to the output hook; postrouting is
+  not a fallback (it loses `reject`).
 
 ## 8. Risk assessment
 
@@ -251,17 +340,22 @@ Split by direction:
 | Fidelity / observability | **MED→HIGH** | nft cannot express the full app catalog (multi-term apps, ALG-dependent apps) — only l4proto + port ranges + addr. And nft can only `log prefix` → journald, NOT the structured RT_FLOW records the userspace deny path emits. So application matching + logging are a SUBSET of the to-zone (userspace) path — a documented parity asymmetry. |
 | Architectural mismatch | **MED** | Split enforcement: to-zone junos-host in userspace-dp, from-zone junos-host in kernel nft. Two engines for one policy family = a maintenance + cross-engine parity-test burden. Not a dead-end (#961-style), but a real complexity tax. |
 | Correctness of oif classification | **MED** | OUTPUT-hook `oifname` reflects the post-route-lookup egress device; must verify oif is reliably populated for the traffic classes in scope (esp. connected vs routed, VRF/l3mdev, and pre-vs-post reroute). Flagged as a verify item, not assumed. |
-| Piece B to-zone-global (userspace) | **LOW→MED** | Bounded userspace-dp change; the only risk is precedence ordering of global-scoped junos-host rules vs exact/from-any, and re-checking the lifeline (no default-deny). Independently shippable and far lower-risk than Piece A. |
+| oifname / VRF(l3mdev) soundness (Piece A) | **HIGH / UNPROVEN** | AGY + Codex: at the output hook, VRF-bound packets report the VRF master device as `oifname`, not the physical egress iface → zone classification wrong; postrouting fallback recovers the iface but LOSES `reject` toward the local socket. Unverifiable in plan review; likely-broken for l3mdev. A dominant reason Piece A is document-only. |
+| Fail-closed gate rejects most real configs (Piece A) | **HIGH** | AGY: an HONEST exact-match gate cannot represent Junos ALG / dynamic-port apps, so it would reject ~90% of real self-policy configs — worse than a documented limitation. Codex: "if the gate cannot be exact → KILL-document-only." This is the decisive KILL-of-Piece-A axis. |
+| Output-hook coexistence with `xpf_dp_rst` (Piece A) | **MED** | Codex BLOCKER: a pre-existing output chain (`xpf_dp_rst`, RST suppression) shares the hook; `xpf_hostout` needs a deterministic priority ordering + invariant test. r1 wrongly claimed no output chain existed. |
+| Logical-lifeline self-DoS (Piece A) | **HIGH** | AGY + Codex: `hostInboundLifelineSet` protects fxp0/em0/fab* + ESP/AH/ICMP but NOT the box's own logical WAN dependencies (DHCP renew, DNS, NTP, syslog, update/archive). A deliberate broad `to-zone <wan> deny` silently bricks daemon-applied system services (`daemon_apply.go`). |
+| Piece B to-zone-global (userspace) | **LOW→MED** | Bounded userspace-dp change; the only risk is precedence ordering of global-scoped junos-host rules vs exact/from-any, and re-checking the lifeline (no default-deny). All three reviewers converge BUILDABLE/READY; independently shippable and far lower-risk than Piece A. |
 
-**Explicit PLAN-KILL-acceptable condition (per the issue):** if reviewers judge
-the host-originated direction is not worth the self-DoS risk + partial fidelity
-for a niche feature, downgrade to **document-only** (like #3620): keep the
-commit-reject for from-zone junos-host globals, keep the current
-"indexed-but-not-enforced" behavior, and add a docs paragraph stating the
-architectural reason (host egress bypasses the AF_XDP dataplane; enforcement
-would require a kernel nft output chain that is deliberately not built). The
-plan's recommendation is DEFER (design captured) rather than KILL, because the
-mechanism is real — but KILL-document-only is a defensible convergent outcome.
+**Converged outcome (r2): the host-ORIGINATED direction IS downgraded to
+document-only.** All three reviewers judged the self-DoS risk + the fail-closed
+gate's rejection of the ALG/dynamic-port app catalog + the unproven oifname/VRF
+soundness outweigh a niche feature. Concretely: keep the commit-reject for
+from-zone junos-host globals, keep the current "indexed-but-not-enforced"
+behavior, and add a docs paragraph stating the architectural reason (host egress
+bypasses the AF_XDP dataplane; enforcement would require a kernel nft output
+chain that, per this research, is deliberately not built because an honest
+implementation rejects most real configs and cannot be made VRF-sound). The one
+buildable outcome is Piece B's to-zone-GLOBAL half.
 
 ## 9. Test plan (for when/if Piece A or B is engineered)
 
@@ -334,3 +428,38 @@ mechanism is real — but KILL-document-only is a defensible convergent outcome.
 7. **Commit-reject lift coupling.** Is the invariant "never lift the M03 reject
    without shipping enforcement in the same change" correctly stated, and does
    the lenient/already-persisted-config path (warn-downgrade) stay fail-closed?
+
+## 12. Convergence — reviewer verdicts (r1)
+
+Three reviewers (Codex + AGY + Claude SMR); Copilot is not a research reviewer.
+
+| Reviewer | Verdict | Core reason |
+|----------|---------|-------------|
+| Claude SMR (`claude-smr-plan-r1.md`) | PLAN-DEFER, Piece B buildable | Attempted KILL; blocked by real-gap + real-mechanism + safe Piece B; forced the fidelity fail-closed invariant in |
+| Codex (agent afe078619db1839c9) | PLAN-DEFER, **BLOCKER** | Existing `xpf_dp_rst` output chain → priority invariant needed; fail-closed gate must be EXACT over the full term surface or "the honest call is KILL-document-only"; oifname a lab gate; M03 split PASS |
+| AGY (`agy-plan-r1.md`, job mr1vqaze) | Piece A KILL/document-only; Piece B READY | Exact gate rejects ~90% of ALG/dynamic-port configs; oifname unsound for VRF/l3mdev; split-engine + logical-lifeline self-DoS |
+
+**Convergence.** The three are compatible once the issue is split by direction.
+Codex's KILL condition ("gate cannot be exact → KILL-document-only") is exactly
+what AGY demonstrates is unavoidable (nft cannot represent ALGs), and Codex's
+BLOCKER (unaddressed `xpf_dp_rst` ordering + unproven oifname) plus AGY's
+oifname/VRF unsoundness dissolve the "a usable mechanism exists" pillar the SMR
+r1 used to hold at DEFER. All three agree Piece B (to-zone-GLOBAL, host-inbound)
+is cleanly buildable/low-risk in userspace-dp.
+
+**Converged disposition — PLAN-DEFER (split):**
+- **Piece A (from-zone junos-host host-originated + from-zone-GLOBAL):
+  DOCUMENT-ONLY, build not recommended.** Add a docs paragraph (junos-cli-
+  reference.md / the security-policy module doc) stating host egress bypasses the
+  AF_XDP dataplane and the kernel-nft alternative is deliberately not built
+  (honest exact gate rejects most configs; oifname not VRF-sound; self-DoS over
+  logical WAN deps). Keep the current indexed-but-inert behavior + the from-zone
+  junos-host GLOBAL commit-reject.
+- **Piece B (to-zone junos-host GLOBAL, host-inbound): BUILDABLE — split into its
+  own small issue and drive via /engineer.** Lift the M03 reject for `to-zone
+  junos-host` globals AND index global-scoped junos-host rules into the host gate
+  in the SAME change (Codex-verified coupling). No kernel work, no split-engine,
+  no self-DoS.
+
+Issue stays OPEN with the deferred-research label (a real buildable improvement
+exists — Piece B — so this is not a pure KILL).
