@@ -2,361 +2,337 @@
 
 ## 1. Status
 
-`DRAFT v2 — round-1 adversarial findings incorporated (Codex + AGY + Claude SMR),
+`DRAFT v3 — round-2 adversarial findings incorporated (Codex + AGY + Claude SMR),
 pending convergence confirmation` (research branch `research/3607-screen-rate`,
 base origin/master `9419bbc2c`).
 
-This is a `/research` plan. It stops at PLAN-READY / PLAN-DEFER / PLAN-KILL.
-No production source changes, no PR.
+`/research` plan. Stops at PLAN-READY / PLAN-DEFER / PLAN-KILL. No production
+source changes, no PR.
 
-**v2 change summary (driven by round-1 review):** the recommendation flipped from
-Option A (weighted sliding window) to **Option B (monotonic-ns token bucket),
-applied ONLY to the single-threshold pure-drop / validate-budget limiters, with
-the dual-threshold SYN-flood AGGREGATE counter left UNCHANGED**. Both companions
-independently identified that (a) not-counting-rejected on the SYN aggregate opens
-a T/sec SYN-cookie bypass and violates a signed-off invariant, and (b) Option A's
-weighted window over-throttles at low thresholds (`T=1` → ~50% loss), which is
-exactly the regime the #3315 per-source/per-destination sketches use.
+**v3 change summary (round-2 review):**
+- **syn-cookie-OFF aggregate drop** (AGY BLOCKER, Codex MAJOR): the count-all
+  aggregate still drops legit sustained-at-threshold SYNs when `syn-cookie` is
+  OFF, and that case has no cookie to bypass — so it IS fixed here, via a per-zone
+  **OFF-attack token bucket** consulted only in the cookie-off drop path.
+  `increment_and_classify` (alarm + cookie-ON activation) stays untouched.
+- **missing-profile warn dampener is NOT migrated** (Codex MAJOR): it *relies* on
+  suppress-until-idle (a pinned anti-log-flood behavior, `tests.rs:4085`) — stays
+  on `RateCounter`.
+- **sketch fail-closed re-derivation** (Codex BLOCKER): the token-bucket sketch is
+  fail-closed (collisions only drain faster; a sustained-over-threshold victim
+  always trips); "stay-tripped-until-idle" is deliberately replaced by
+  "rate-enforced" — which IS the #3607 fix for the sketch. New tests pin it;
+  DEFER-the-sketch is offered as a narrower scope.
+- **`admit()` polarity pinned** (Codex MAJOR): `true = over-limit = drop/limited`,
+  identical polarity to `RateCounter::increment`, so migrated call sites are
+  drop-in.
+- **ON-case cookie-lock documented** (AGY MAJOR) and standby-ACK validator
+  signature churn acknowledged (AGY MINOR).
 
 ## 2. Issue framing
 
 `userspace-dp/src/screen/rate.rs::RateCounter` is a two-bucket sliding-window
-counter introduced in #2937 to kill a wall-second boundary double-burst. #3607
-reports that this counter over-throttles a *legitimate* sender that sustains
-traffic at exactly the configured threshold: the sender is admitted only in the
-first second and then dropped in every subsequent second until a **fully idle
-second** elapses and resets the window. The module's own doc claims "a sustained
-sender is still admitted at ~`threshold` events per second" — that claim is
-false.
+counter (#2937). #3607: it over-throttles a legitimate sender at exactly the
+configured threshold — admitted only in the first second, then dropped every
+subsequent second until a **fully idle second** resets the window. The module's
+own doc's "a sustained sender is still admitted at ~`threshold` events per second"
+is false.
 
-Folded sub-findings: **H02** (core over-throttle), **M09** (no
-sustained-threshold test — the bug survives green), **L10** (operator docs must
-state the real semantics), **L14** (`u32` `saturating_add`s silently clamp).
+Folded: **H02** (core over-throttle), **M09** (no sustained-threshold test),
+**L10** (operator docs), **L14** (`u32` saturating adds).
 
 ## 3. Honest scope / value framing
 
-The win is **correctness fidelity to Junos flood-screen semantics**, not
-performance. Junos flood thresholds are packets-per-second (the repo's own
-operator doc frames them as pps — `icmp flood` default **1000 pps**, `syn-flood
-attack-threshold` default **200 SYN segments/second**,
-`docs/syn-cookie-flood-protection.md:31,55-56`). Junos admits a source that
-sustains ≤ threshold pps and drops only the excess; xpf's current counter drops a
-sustained-at-threshold source to ~0 pps after the first second.
+Correctness fidelity to Junos flood-screen semantics (thresholds are pps —
+`docs/syn-cookie-flood-protection.md:31,55-56`), not performance. Junos admits ≤
+threshold sustained and drops the excess; xpf drops a sustained-at-threshold
+source to ~0 after the first second.
 
-Where the bite is real (and where the fix is scoped):
+Consumers fixed (shaper / validate-budget semantics — "admitted" never means
+"skip a security check"):
 
-1. **Standby SYN-cookie ACK-validation limiter** (4096/s,
-   `screen/mod.rs:502-512`) — legitimate returning clients during/after a
-   failover are suppressed. "Admitted" here means "spend SipHash to validate this
-   ACK"; an admitted-but-bogus ACK still fails the crypto check, so raising the
-   admit rate to the intended 4096/s budget carries **no bypass risk**.
-2. **#3315 per-destination SYN sub-threshold sketch** (`screen/syn_rate.rs`) — a
-   genuinely busy destination at `destination-threshold` is throttled to ~0, a
-   plausible false-positive against a popular internal server. Per-dest DROPS
-   (does not skip cookies), so the shaper fix carries no bypass risk.
-3. **ICMP flood / UDP flood** zone-aggregate counters — over = DROP; the shaper
-   fix admits sustained-at-threshold, drops excess. No bypass risk.
+1. **ICMP flood / UDP flood** zone-aggregate counters (over = DROP).
+2. **Standby SYN-cookie ACK-validation limiter** (4096/s, `mod.rs:502-512`) —
+   "admitted" = "spend SipHash"; a bogus ACK still fails the crypto check, so
+   raising the admit rate to the intended budget has **no bypass**. Fixes legit
+   returning clients during/after failover.
+3. **#3315 per-source / per-destination SYN sketch** (`syn_rate.rs`) — a busy
+   legit destination at `destination-threshold` throttled to ~0 (false positive);
+   per-dest DROPS (never skips cookies), so shaping is safe.
+4. **SYN-flood aggregate DROP path when `syn-cookie` is OFF** — `over_attack`
+   returns `Drop("syn-flood")` (`mod.rs:704`); with no cookie there is nothing to
+   bypass, so sustained-at-threshold legit SYNs must be admitted (v3 adds this).
 
-Deliberately **out of the fix** (see §5 and §10): the **SYN-flood aggregate
-counter** (`increment_and_classify` → SYN-cookie activation). There, "admitted" =
-"skip the cookie challenge," so admitting a sustained-at-threshold stream would
-let `threshold` spoofed SYNs/sec bypass cookies (round-1 BLOCKER). Its
-over-throttle is benign when `syn-cookie` is on (a challenge is recoverable) and a
-conservative defense when off, so it stays as-is.
+Deliberately **not fixed** (documented, not "fixed"):
 
-**If reviewers conclude the accuracy gain for consumers (1)-(3) is too small to
-justify a new counter primitive + threading a nanosecond clock through the screen
-call chain + migrating the #3315 sketch, PLAN-DEFER-operator (fix only L10 docs +
-L14) or PLAN-KILL is an acceptable verdict.** See §10a.
+- **SYN-flood aggregate when `syn-cookie` is ON** — there "admitted" = "skip the
+  cookie challenge," so admitting a sustained-at-threshold stream would let
+  `threshold` spoofed SYNs/sec bypass the cookie AND (via lingering
+  `cookie_active`) the per-source cap (round-1 BLOCKER). Its over-throttle is
+  benign (a challenge is recoverable). §5 / §10.
+- **missing-profile warn dampener** — wants suppress-until-idle; stays as-is.
+
+**If reviewers judge the blast radius (new `TokenBucket` primitive + `now_ns`
+threading through the screen call chain + sketch cell-type swap + a per-zone
+OFF-attack bucket) disproportionate to the value, PLAN-DEFER-operator (fix L10 +
+optionally L14) or PLAN-KILL is acceptable.** §10a.
 
 ## 4. What's already shipped / partially batched
 
-- **#2937 (CLOSED, `1b1cb215b`)** replaced the original fixed wall-second window
-  with the current two-bucket sliding window. #3607 refines it; the fix must NOT
-  reintroduce the #2937 sub-ms micro-burst.
-- **#3315 (`44474b9ea`)** added `RateCounter::increment_and_classify` (single
-  advance, dual threshold attack+alarm) driving SYN-cookie activation, plus a
-  count-min sketch of `RateCounter`s (`screen/syn_rate.rs`, ROWS×COLS cells,
-  ~192 KiB/zone/worker) for per-source / per-destination SYN caps.
-- **#3032 (`490602ec9`, `17c6016e9`)** — the SYN-cookie *epoch* uses a
-  once-per-second cached **wall** clock (cross-HA-peer cookie validation).
-  Orthogonal: the rate counter uses **monotonic** time, which is correct for rate
-  limiting. Do not entangle them.
-- **Enabling fact:** `loop_now_ns = monotonic_nanos()` is already read **once per
-  poll-loop batch** (`afxdp/worker/loop_body/mod.rs:241`) and truncated to
-  `loop_now_secs = loop_now_ns / 1_000_000_000` (:363) before it reaches the
-  screen path as `now_secs`. Nanosecond-resolution monotonic time is therefore
-  available on the hot path at **zero additional clock reads** — but *reaching the
-  screen counters still requires a signature change*: `stage_screen_check` accepts
-  only `now_secs` today (`poll_stages.rs:312`); `now_ns` must be threaded
-  loop_body → forwarding → poll_stages → `check_packet_with_zone_id` /
-  `validate_syn_cookie_ack_on_session_miss` → the sketch. That plumbing is real
-  work (round-1 finding), not zero-cost.
+- **#2937 (`1b1cb215b`)** — current two-bucket sliding window; must not
+  reintroduce its sub-ms micro-burst.
+- **#3315 (`44474b9ea`)** — `increment_and_classify` (single advance, dual
+  attack+alarm) → SYN-cookie activation; count-min sketch of `RateCounter`s
+  (`syn_rate.rs`, ROWS×COLS, ~192 KiB/zone/worker). Fail-closed: cells only
+  increase within the window, collisions only over-count, victim always trips
+  (`syn_rate.rs:33,41`). (`syn-flood timeout` was later enforced in #3527 as a
+  per-zone `tcp_opening_ns` override — session-layer, unrelated to the counter.)
+- **#3032** — SYN-cookie epoch uses a once-per-second cached **wall** clock;
+  orthogonal to the rate counters (which use **monotonic** time).
+- **Enabling fact + real cost:** `loop_now_ns = monotonic_nanos()` is read once
+  per batch (`worker/loop_body/mod.rs:241`) and truncated to `loop_now_secs`
+  (:363). The clock READ is zero-cost, but reaching the counters needs a signature
+  change: `stage_screen_check` takes only `now_secs` (`poll_stages.rs:312`) and
+  the standby-ACK path (`stage_screen_syn_cookie_ack_on_session_miss` /
+  `validate_syn_cookie_ack_on_session_miss`, `poll_stages.rs:557-562`) also needs
+  `now_ns` — churn beyond the screen module (AGY MINOR).
 
-### 4a. Root-cause analysis (confirmed against origin/master `9419bbc2c`)
+### 4a. Root-cause analysis (confirmed against `9419bbc2c`)
 
-`increment` (`rate.rs:79-83`) advances the window then counts EVERY event
-(admitted or rejected) before comparing `prev_count + count > threshold`;
-`advance` (`rate.rs:60-71`) demotes the whole previous second to `prev_count`
-with a **constant weight of 1.0** for the entire current second.
+`increment` (`rate.rs:79-83`) advances then counts EVERY event before
+`prev_count + count > threshold`; `advance` (`rate.rs:60-71`) demotes the whole
+previous second to `prev_count` at **constant weight 1.0** for the whole current
+second. Two coupled defects: (1) 1-s granularity ⇒ no sub-second decay ⇒
+`prev_count + count` over-estimates by up to 2× at a boundary; (2) rejected events
+are still counted ⇒ the sum stays saturated until a fully idle second.
 
-Two coupled defects:
+Quantified (1-s granular; second `i` delivers `c`; `T`=threshold; steady state):
+admitted/sec `= max(0, min(c, T − c))`.
 
-1. **1-second clock granularity ⇒ no sub-second decay.** A correct sliding-window
-   counter weights `prev_count` by `(1 − elapsed_fraction)`; with integer seconds
-   there is no fraction, so `prev_count + count` over-estimates the trailing-1s
-   rate by up to 2× at the start of a second.
-2. **Rejected events are still counted**, so once the sum crosses threshold
-   `count` keeps climbing while `prev_count` stays pinned — the sum stays
-   saturated until a fully idle second resets `prev_count` to 0.
-
-**Quantified** (clock is 1-s granular, so per-second arrival distribution is
-invisible; model second `i` delivering `c` events, `T` = threshold, steady state
-`i ≥ 1`): admitted per second = `max(0, min(c, T − c))`.
-
-| sustained rate `c` | admitted/sec (current) | Junos-correct |
+| `c` | admitted/sec (current) | Junos |
 |---|---|---|
-| `c ≤ T/2` | `c` (all) | `c` |
-| `T/2 < c < T` | `T − c` (throttled) | `c` |
-| `c = T` (at threshold) | **0** after second 0 (needs a fully idle second) | `T` |
-| `c > T` | 0 | drop excess |
+| `≤ T/2` | `c` | `c` |
+| `T/2 < c < T` | `T − c` | `c` |
+| `= T` | **0** after second 0 (needs idle second) | `T` |
+| `> T` | 0 | drop excess |
 
-So the **true sustained ceiling of the current counter is `T/2`**, not `T`. The
-`sustained_at_threshold_is_admitted` unit test (`rate.rs:220-237`) passes only
-because it feeds `T/2` events/sec (`half = THRESHOLD/2`, `rate.rs:228`) — i.e. it
-tests a source at *half* threshold. That is the M09 gap.
+True sustained ceiling = `T/2`. `sustained_at_threshold_is_admitted`
+(`rate.rs:220-237`) passes only because it feeds `T/2` (`half = THRESHOLD/2`) —
+the M09 gap.
 
-**Both defects are jointly necessary to the bug — neither single fix suffices:**
+**Both defects jointly necessary:** granularity-fix-alone (weight + count-all) ⇒
+`est = T·(1−f) + T·f ≡ T` ⇒ still drops all; not-counting-alone (Option C) ⇒
+recurrence `a_i = min(c, T − a_{i-1})` collapses to `T,0,T,0` (avg `T/2`, a
+flood-evasion waveform). The token bucket avoids both (continuous refill =
+sub-ns granularity; consume only on admit).
 
-- **Granularity fix alone** (add sub-second weight, keep counting all arrivals):
-  for uniform sustained-at-`T`, `count = T·f` and `prev = T` ⇒ `est =
-  T·(1−f) + T·f ≡ T` for all `f`; the admission margin drops every packet. Still
-  broken.
-- **Not-counting-rejected alone** (Option C, no weighting): the recurrence is
-  `a_i = min(c, T − a_{i-1})`; for `c ≥ T` it collapses to the waveform
-  `T, 0, T, 0, …` (average `T/2`) — a **flood-evasion waveform** and still a
-  contract violation.
+## 5. Concrete design — Option B token bucket, consumer-split
 
-This is why the fix must both use a finer clock AND change the accounting — which
-the token bucket does natively (continuous refill = sub-ns granularity; tokens
-are only consumed on admit).
-
-**Design insight:** #2937 enforced a guarantee (strict trailing-1s sum ≤
-threshold at 1-s granularity) *stronger* than #2937 needed (bound the sub-ms
-micro-burst) and *fundamentally incompatible* with "sustained at threshold
-admitted." #3607 is the symptom. The fix relaxes to the weaker correct guarantee:
-bound the micro-burst to ~threshold AND admit sustained ≤ threshold.
-
-## 5. Concrete design
-
-### Recommended: Option B — monotonic-ns token bucket for the drop/validate limiters; SYN aggregate UNCHANGED
-
-Introduce a new `TokenBucket` primitive **alongside** the retained `RateCounter`,
-and split consumers by security semantics:
-
-| Consumer | Counter | Semantic |
-|---|---|---|
-| ICMP flood (`icmp_counters`) | **TokenBucket** | shaper: admit ≤T/s, drop excess |
-| UDP flood (`udp_counters`) | **TokenBucket** | shaper |
-| Standby SYN-cookie ACK limiter | **TokenBucket** | validate-budget (4096/s) |
-| missing-profile warn dampener | **TokenBucket** | log dampener |
-| per-source / per-dest SYN sketch (`syn_rate.rs`) | **TokenBucket** | shaper (drop) |
-| **SYN-flood aggregate** (`increment_and_classify` → cookie) | **RateCounter (UNCHANGED)** | defense-latch: count-all sticky |
+New `TokenBucket` primitive alongside the retained `RateCounter`:
 
 ```rust
 pub(super) struct TokenBucket {
-    tokens_q: u64,        // fixed-point tokens (integer part <= capacity = threshold)
-    last_refill_ns: u64,  // monotonic ns of last refill
+    tokens_q: u64,        // fixed-point tokens; integer part <= capacity = threshold
+    last_refill_ns: u64,  // monotonic ns
 }
-// refill = (now_ns - last) * threshold  (fixed-point tokens/ns via a precomputed
-//          reciprocal-multiply; NO per-packet 64-bit divide), capped at capacity
-// admit iff tokens >= 1 unit, then consume 1; else drop (do NOT consume)
+impl TokenBucket {
+    /// SAME polarity as RateCounter::increment: returns TRUE when this event is
+    /// OVER LIMIT (drop / limited); FALSE when admitted. Drop-in at existing
+    /// call sites (mod.rs:614,623,724,741 already treat true == drop).
+    fn admit_is_over(&mut self, now_ns: u64, threshold: u32) -> bool {
+        // refill = (now_ns - last) * threshold via a precomputed fixed-point
+        // tokens-per-ns reciprocal-multiply (NO per-packet 64-bit divide),
+        // saturating-capped at capacity = threshold.
+        // if tokens >= 1 unit: consume 1, return false (admit)
+        // else: return true (over) and do NOT consume.
+    }
+}
 ```
 
-Why token bucket over the weighted sliding window:
+Consumer split by security semantic:
 
-- **Low-threshold correctness (round-1 BLOCKER).** Capacity = threshold, refill =
-  threshold/sec. At `T=1`, sustained 1 pps refills 1 token/sec and consumes 1/sec
-  → admitted, zero loss. The weighted sliding window drops ~1 packet/sec at the
-  boundary → at `T=1` that is ~50% loss, at `T=5` ~20% — catastrophic for the
-  low-threshold per-source/per-dest sketches. Token bucket has no boundary
-  roughness (refill exactly matches drain for a sustained-at-threshold sender).
-- **No oscillation.** Continuous refill avoids Option C's `T,0,T,0` waveform.
-- **#2937 preserved.** A sub-ms boundary micro-burst finds ≤ `capacity =
-  threshold` tokens ⇒ ≤ threshold admitted; the classic token-bucket "up to 2×T
-  over a *paced* second" is a lower instantaneous rate, not the #2937 micro-burst.
-- **Single-threshold consumers only** ⇒ one bucket each, no dual-bucket 32-byte
-  blow-up (round-1 MAJOR). Keep `TokenBucket` at 16 bytes (`u64 tokens_q + u64
-  last_ns`, or `u32` fixed-point tokens + `u64` last_ns padded) so the #3315
-  sketch footprint is unchanged.
+| Consumer | Counter | Semantic | Why |
+|---|---|---|---|
+| ICMP / UDP flood | **TokenBucket** | shaper | over = drop; admit ≤T/s |
+| Standby SYN-cookie ACK | **TokenBucket** | validate-budget | admit = spend SipHash; no bypass |
+| per-source / per-dest sketch | **TokenBucket** | shaper (drop) | busy legit dest false-positive |
+| SYN aggregate DROP, `syn-cookie` **OFF** | **TokenBucket** (new per-zone bucket) | shaper | no cookie ⇒ no bypass |
+| SYN aggregate, `syn-cookie` **ON** (`increment_and_classify` → cookie) | **RateCounter (UNCHANGED)** | defense-latch (count-all) | admit = skip cookie ⇒ must stay sticky |
+| alarm-threshold measurement | **RateCounter (UNCHANGED)** | arrival-rate observation | alarm counts all arrivals |
+| missing-profile warn dampener | **RateCounter (UNCHANGED)** | suppress-until-idle | log dampener wants no re-warn (`tests.rs:4085`) |
 
-Why the SYN aggregate is NOT migrated (round-1 BLOCKER, both companions):
+### 5a. SYN aggregate: cookie-OFF fix without touching the invariant
 
-- `increment_and_classify` counts **before** classification (`rate.rs:97-106`)
-  and the caller relies on "the aggregate ALWAYS counts so its cookie-activation
-  side-effect can never be skipped" (`screen/mod.rs:631-634`). This is a
-  signed-off invariant.
-- If the aggregate switched to count-only-admitted, during a sustained flood the
-  first `threshold` SYNs/sec would never trip `over_attack`, so they would
-  **bypass the cookie challenge**; and because other packets keep the zone
-  `cookie_active`, the per-source cap is also skipped (`!cookie_active` false) —
-  `threshold` spoofed SYNs/sec bypass BOTH cookies and per-source. Unacceptable.
-- Its over-throttle is acceptable: with `syn-cookie` on, a challenge to a legit
-  sustained-at-threshold client is recoverable (one extra RTT); with it off, an
-  aggressive defense drop is the conservative posture an operator who set
-  `attack-threshold` wants. Documented in L10 rather than "fixed."
+Keep `increment_and_classify` (count-all, `RateCounter`) exactly as-is — it drives
+(i) the alarm-threshold log crossing (arrival-rate observation) and (ii) cookie
+activation when `syn-cookie` is ON. It is the round-1 signed-off invariant
+(`rate.rs:97`, `mod.rs:631-634`); it must not become count-only-admitted (T/sec
+cookie bypass).
 
-### Alternative considered: Option A — sub-second weighted sliding window — NOT recommended
+Add a **per-zone attack `TokenBucket`** consulted ONLY in the cookie-OFF drop
+decision:
 
-Reuses the two-bucket structure (store `window_start_ns`, add sub-second weight,
-stop counting rejected). Rejected because: (a) low-threshold roughness (`T=1` →
-~50% loss) hits the exact regime the sketches use; (b) applying it to the SYN
-aggregate would require the count-all invariant change (BLOCKER). It remains the
-lower-churn choice **only** if reviewers accept high thresholds everywhere and
-scope out the sketches.
+```text
+(over_attack_measured, over_alarm) = agg_rate.increment_and_classify(now_secs, attack, alarm)  // UNCHANGED
+raise alarm if over_alarm (unchanged)
+if syn_cookie ON:
+    if over_attack_measured { mint cookie / activate }              // UNCHANGED — no bypass
+else: // syn_cookie OFF
+    if attack_bucket.admit_is_over(now_ns, attack) { Drop("syn-flood") }  // shaper: admits sustained <= attack
+```
 
-### Rejected: Option C — stop counting rejected only
+Cost: one extra `TokenBucket` per zone (16 B/zone — per-zone, not per-cell).
+Alarm still measured on arrival rate; ON-cookie path bit-identical; OFF path now
+admits sustained-at-threshold legit SYNs (AGY BLOCKER / Codex MAJOR fixed) with no
+bypass (no cookie to bypass).
 
-`T,0,T,0` flood-evasion waveform, average `T/2`. Insufficient; documented so the
-cheap fix is visibly ruled out.
+### 5b. Sketch migration is fail-closed (Codex BLOCKER)
 
-### Cross-cutting (all fix options)
+Swapping the sketch cell type `RateCounter → TokenBucket` preserves #3315
+fail-closed:
+- **Collisions still over-count:** every key hashing to a cell drains that cell,
+  so a victim's cell is drained by ≥ the victim's own load ⇒ it reaches "over" at
+  ≤ the victim's true rate ⇒ **never a false negative** from hashing. (Refill
+  affects all keys equally; collisions only drain faster.)
+- **Sustained-over-threshold victim always trips:** a victim exceeding the
+  per-dest rate keeps the bucket drained ⇒ keeps returning "over."
+- **Deliberate change:** "stay-tripped until a fully idle second" is REPLACED by
+  "rate-enforced" — a victim dropping below the rate regains budget. That is the
+  #3607 fix for the sketch (a busy-but-legit dest is admitted at its threshold),
+  not a regression. Pinned by new tests (§9). If reviewers want minimal risk,
+  §10a offers DEFER-the-sketch (leave it on `RateCounter`, fix only §3 items 1,2,4).
 
-- **L14 saturation:** under a token bucket, `tokens ≤ capacity = threshold`, so
-  the `u32`/`u64` saturation the current count-all design suffers **cannot occur**
-  — L14 is resolved structurally. Operator-visible flood intensity is already the
-  per-screen drop counters (#3343). Keep at most a `debug_assert`; do not build a
-  dedicated saturation metric. (The SYN aggregate keeps `RateCounter`, whose
-  `count` can still grow under a flood — its existing `saturating_add` stays; a
-  one-line drop-reason/stat there is optional.)
-- **L10 docs:** rewrite `docs/syn-cookie-flood-protection.md:275-280` and the
-  module docs (`screen/rate.rs` top, `screen/mod.rs`) to state the real semantics
-  per consumer: token-bucket shaper (admit sustained ≤ threshold, burst =
-  threshold) for ICMP/UDP/standby-ACK/sketches; and the deliberate defense-latch
-  behavior + rationale for the SYN aggregate.
+### 5c. Rejected alternatives
+
+- **Option A weighted sliding window** — low-threshold roughness (`T=1` → ~50%
+  loss) hits the sketch regime; not recommended.
+- **Option C stop-counting-rejected only** — `T,0,T,0` flood-evasion waveform.
+
+### Cross-cutting
+
+- **L14:** token bucket bounds `tokens ≤ capacity = threshold` ⇒ no saturation;
+  resolved structurally (flood intensity is already the #3343 drop counters). The
+  untouched aggregate `RateCounter` keeps its existing `saturating_add`.
+- **L10:** rewrite `docs/syn-cookie-flood-protection.md:275-280` + module docs to
+  state per-consumer semantics: token-bucket shaper (admit sustained ≤ threshold,
+  burst = threshold) for consumers 1-4; the deliberate cookie-ON defense-latch for
+  the aggregate; suppress-until-idle for the missing-profile dampener.
 
 ## 6. Public API preservation
 
-- `RateCounter::increment_and_classify(now_secs, attack, alarm) -> (bool, bool)`
-  — **UNCHANGED** (SYN aggregate keeps it, including the `now_secs` arg and
-  count-all semantics).
-- `RateCounter::increment` / `reset` — retained (may become aggregate-only or
-  test-only depending on whether any other caller stays on it).
-- **New** `TokenBucket::admit(now_ns, threshold) -> bool` (true = drop / limited)
-  for the migrated consumers.
-- `syn_rate.rs::SynRateSketch::increment(ip, now, threshold)` and
-  `saturate_cell` — internally swap `RateCounter` → `TokenBucket`, clock arg
-  becomes `now_ns`; public method shapes preserved.
+- `RateCounter::increment_and_classify(now_secs, attack, alarm)` — **UNCHANGED**
+  (aggregate alarm + cookie-ON).
+- `RateCounter::increment` / `reset` — retained (missing-profile warn +
+  aggregate/tests).
+- **New** `TokenBucket::admit_is_over(now_ns, threshold) -> bool` — `true = over =
+  drop/limited` (same polarity as `increment`, drop-in).
+- `syn_rate.rs::SynRateSketch::increment` / `saturate_cell` — cell type →
+  `TokenBucket`, clock arg → `now_ns`; public shapes preserved.
 - `ScreenState::check_packet` / `check_packet_with_zone_id` /
-  `validate_syn_cookie_ack_on_session_miss` — gain a `now_ns` parameter (the
-  existing `now_secs` is retained for the non-rate sub-systems: scan
-  `WINDOW_SECS`, `syn_cookie_active_until_secs`, validated-cache TTL, alarm
-  `last_emit_sec`, epoch refresh gate).
-- **No Go / gRPC / CLI / protobuf change.** The counters are internal to the
-  dataplane; nothing is synced, serialized, or persisted.
+  `validate_syn_cookie_ack_on_session_miss` — gain `now_ns` (retain `now_secs`
+  for scan/cookie-active/validated-TTL/alarm-sec/epoch-gate).
+- No Go / gRPC / CLI / protobuf change.
 
 ## 7. Hidden invariants the change must preserve
 
-- **SYN-aggregate count-before-classify + always-count (`rate.rs:97`,
-  `mod.rs:631-634`)** — preserved by NOT migrating the aggregate. This is the
-  primary round-1 constraint.
-- **#2937 anti-micro-burst** — `threshold` at end of N + `threshold` at start of
-  N+1 (sub-ms straddle) must not admit ~2× (token bucket: ≤ capacity tokens).
-- **#3315 sketch fail-closed** — count-min collisions may only over-count (never a
-  false negative); no eviction; the AND-of-rows min-read is unchanged; migrating
-  the cell counter to `TokenBucket` must keep "victim always trips."
-- **Allocation / hot-path rules** — no per-packet allocation; integer-only; no
-  per-packet division (precompute fixed-point refill-per-ns);
-  `docs/engineering-style.md`.
-- **Clock discipline** — rate limiters use **monotonic** ns; the SYN-cookie epoch
-  keeps its once-per-second **wall** clock (#3032). Do not cross them.
-- **16-byte layout / no HA-wire/persistence** — `TokenBucket` ≤ 16 B; no
-  session-sync / snapshot / protobuf field.
-- **SYN-path side-effect ordering (`mod.rs:665-745`)** — aggregate first
-  (unchanged), per-dest always (even cookie-active), per-source skipped when
-  cookie-active. Migrating per-dest/per-source cell counters must not reorder.
+- **SYN-aggregate count-before-classify + always-count** (`rate.rs:97`,
+  `mod.rs:631`) — preserved (aggregate `increment_and_classify` untouched).
+- **Cookie-ON no-bypass** — the OFF-attack bucket is consulted ONLY when
+  `syn-cookie` is OFF; the ON path is bit-identical.
+- **#2937 anti-micro-burst** — token bucket: ≤ capacity tokens at a sub-ms
+  straddle.
+- **#3315 sketch fail-closed** — collisions only over-count; sustained victim
+  always trips (§5b); AND-of-rows min-read unchanged.
+- **missing-profile suppress-until-idle** (`tests.rs:4085`) — preserved (not
+  migrated).
+- **Allocation / hot path** — no per-packet alloc; integer-only; no per-packet
+  divide (fixed-point refill); monotonic clock only.
+- **16-byte layout / no HA-wire/persistence** — `TokenBucket` ≤ 16 B; nothing
+  synced/serialized/persisted.
+- **SYN-path side-effect ordering** (`mod.rs:665-745`) — aggregate first, per-dest
+  always, per-source skipped when cookie-active — unchanged.
 
 ## 8. Risk assessment
 
 | Class | Level | Notes |
 |---|---|---|
-| Behavioral regression | **MED** | Security-critical drop path. Mitigated by keeping the SYN aggregate untouched, RED-on-revert tests for both #2937 (micro-burst) and #3607 (sustained admitted), and the #3315 sketch invariant tests. |
-| Lifetime / borrow-checker | **LOW** | `TokenBucket` is a plain per-zone/per-cell value; the disjoint-field borrow story in `check_packet_with_zone_id` is unchanged; `now_ns` is a scalar param. |
-| Performance regression | **LOW** | No new clock read (reuse `loop_now_ns`); token bucket = one fixed-point multiply + add + compare + conditional subtract per event; 16 B, cache-neutral. Verify SYN/ICMP flood iperf + CPU unchanged. |
-| Architectural mismatch | **LOW–MED** | Reuses the existing per-batch monotonic clock and adds one small primitive; the main blast radius is the `now_ns` signature threading + the sketch cell-type swap (mechanical but wide). No new subsystem, no dead-end. |
+| Behavioral regression | **MED** | Security-critical drop path; aggregate ON path untouched; RED-on-revert for #2937 (micro-burst) + #3607 (sustained) + sketch fail-closed (sustained victim trips). |
+| Lifetime / borrow-checker | **LOW** | `TokenBucket` is a plain value; disjoint-field borrow in `check_packet_with_zone_id` unchanged; `now_ns` scalar param. |
+| Performance regression | **LOW** | Reuse `loop_now_ns`; one fixed-point mul+add+cmp+cond-sub per event; 16 B; verify SYN/ICMP flood iperf + CPU. |
+| Architectural mismatch | **LOW–MED** | Adds one small primitive + a per-zone OFF-attack bucket; blast radius is the `now_ns` signature threading (loop_body → forwarding → poll_stages → screen → sketch, incl. the standby-ACK validator) + sketch cell swap — mechanical but wide. |
 
 ## 9. Test plan
 
-- `cargo build` clean; `cargo test screen::` (new `TokenBucket` unit tests +
-  sketch + enforcement), `cargo test afxdp::poll_stages`, full `cargo test`
-  green; `go test ./...` (unaffected — no Go change).
-- **M09 RED-on-revert sustained-at-threshold test** (deliverable): drive a
-  `TokenBucket` at exactly `threshold` events/sec for N seconds using the
-  sub-second `now_ns` clock; assert steady-state admit ≈ threshold (≥ 0.99·T),
-  NOT ~0. Against the current `RateCounter` this asserts RED.
-- **Low-threshold test:** `T=1` sustained 1 pps admits every second (Option A
-  would fail this — pins why token bucket was chosen).
-- **Recovery test:** after an over-limit burst, dropping to ≤ threshold recovers
-  admission without a fully idle second.
+- `cargo build` clean; `cargo test screen::` (TokenBucket unit + sketch +
+  enforcement + aggregate), `cargo test afxdp::poll_stages`, full `cargo test`;
+  `go test ./...` (unaffected).
+- **M09 RED-on-revert sustained-at-threshold** (deliverable): TokenBucket at
+  exactly `threshold`/s for N seconds via `now_ns`; steady-state admit ≈ threshold
+  (≥ 0.99·T), not ~0. RED against current `RateCounter`.
+- **Low-threshold:** `T=1` sustained 1 pps admits every second.
+- **Recovery:** after an over-limit burst, dropping to ≤ threshold recovers
+  without a fully idle second.
+- **cookie-OFF aggregate:** sustained-at-`attack-threshold` SYNs with `syn-cookie`
+  OFF are admitted (RED against current count-all); alarm still fires on arrival
+  rate; **cookie-ON aggregate tests stay green with NO edits** (proof the ON path
+  is untouched).
 - **#2937 retained:** adapt `boundary_double_burst_is_bounded` /
-  `icmp_flood_sliding_window_blocks_boundary_burst_then_recovers` to the token
-  bucket — sub-ms micro-burst still bounded to ~threshold.
-- **SYN aggregate untouched:** its existing tests
-  (`increment_and_classify_single_advance_dual_threshold`, SYN-flood enforcement,
-  cookie activation) stay green with NO edits — proof the aggregate is unchanged.
-- **#3315 sketch invariants retained:** victim-always-trips, AND-not-OR,
-  no-growth-under-flood, with cells now `TokenBucket`.
+  `icmp_flood_sliding_window_..._recovers` to the bucket — sub-ms micro-burst
+  bounded to ~threshold.
+- **Sketch fail-closed:** sustained-over-threshold victim always trips (no time
+  gaps); collisions only trip-more; a paused victim regains budget (the intended
+  #3607 fix). #3315 tests updated for rate-enforcement vs stay-tripped.
+- **missing-profile dampener unchanged:** `tests.rs:4085` (sustained flood into
+  the next second does not re-WARN) stays green with NO edits.
+- **L14:** the bucket never saturates at realistic thresholds.
 - **Smoke (loss userspace cluster):** screen profile with low icmp/udp thresholds
-  + a low `destination-threshold`; confirm a sustained-at-threshold flow is
-  admitted while above-threshold is dropped; v4 + v6; no forwarding-throughput
-  regression. `make test-failover` NOT required (no cluster/VRRP/session-sync code
-  touched) but a screen smoke on the cluster is; verify a standby-node cookie-ACK
-  validation path admits at the 4096/s budget under sustained load.
+  + low `destination-threshold`; sustained-at-threshold admitted, above-threshold
+  dropped; v4 + v6; no forwarding regression; standby cookie-ACK path admits at
+  the 4096/s budget under sustained load. `make test-failover` NOT required (no
+  cluster/VRRP/session-sync code touched); a screen smoke IS.
 
 ## 10. Out of scope (explicitly)
 
-- **The SYN-flood AGGREGATE over-throttle** — deliberately retained (defense-latch
-  / cookie-bypass safety). Documented in L10, not fixed. A future refinement could
-  make it count-only-admitted **only when `syn-cookie` is off** (no bypass to
-  worry about then); tracked separately if desired.
-- **Per-destination ICMP/UDP flood modeling** — Junos ICMP/UDP flood is
-  per-destination-address; xpf models per-zone. Separate gap, not #3607.
-- **Changing default thresholds** (#3024/#3230).
-- **SYN-cookie epoch clock** (#3032).
-- **HA sync of rate-counter state** — counters stay per-worker.
+- **SYN aggregate over-throttle when `syn-cookie` is ON** — deliberately retained
+  (defense-latch / cookie-bypass safety). Consequence (AGY MAJOR): once tripped,
+  the zone stays cookie-active while the arrival rate ≥ threshold plus a ≤64s tail
+  (`active_until = now + EPOCH_SECS`, re-armed each `over_attack`,
+  `mod.rs:681-682`), and per-source sketch limiting is suppressed during
+  cookie-active (#3315 D3). This is Junos-consistent (cookie/proxy stays active
+  while flooding) but triggers AT threshold rather than strictly above; mitigation
+  is operator guidance (set `attack-threshold` above normal traffic). A
+  hysteresis/decay refinement that releases cookie mode when the rate falls below
+  threshold is a **tracked follow-up**, not #3607 (a count-only-admitted fix here
+  would re-open the bypass).
+- **Per-destination ICMP/UDP flood modeling** (Junos is per-dest; xpf per-zone).
+- **Default thresholds** (#3024/#3230); **SYN-cookie epoch clock** (#3032);
+  **HA sync of counter state** (stays per-worker).
 
-### 10a. PLAN-DEFER / PLAN-KILL criteria (explicit)
+### 10a. PLAN-DEFER / PLAN-KILL criteria
 
-- **PLAN-DEFER-operator** is acceptable if reviewers judge the blast radius (new
-  `TokenBucket` primitive + `now_ns` threading + sketch cell-type swap)
-  disproportionate to the value — in which case fix L10 (correct the false doc
-  claim) + optionally L14 now, and defer the counter work.
-- **PLAN-KILL** is acceptable if reviewers conclude the shaper consumers are
-  defensive-only and sustained-at-threshold benign traffic is not a realistic
-  case even for the standby-ACK limiter and the per-dest sketch. L10 must still be
-  corrected regardless (the doc currently makes a false claim).
+- **DEFER-the-sketch (narrower scope):** keep the #3315 sketch on `RateCounter`;
+  ship only consumers 1, 2, 4 (ICMP/UDP flood, standby-ACK, cookie-OFF aggregate).
+  Acceptable if the sketch fail-closed re-derivation is judged too risky.
+- **PLAN-DEFER-operator:** if the whole blast radius is disproportionate, fix L10
+  (correct the false doc claim) + optionally L14 now, defer the counter work.
+- **PLAN-KILL:** if reviewers conclude the shaper consumers are defensive-only and
+  sustained-at-threshold benign traffic is unrealistic even for the standby-ACK
+  and per-dest cases. L10 must still be corrected regardless.
 
-## 11. Open questions for adversarial review (round 2)
+## 11. Open questions for adversarial review (round 3)
 
-1. **Consumer split correctness.** Is the RateCounter-for-aggregate /
-   TokenBucket-for-the-rest split the right cut, or should the aggregate also move
-   to count-only-admitted *conditioned on `syn-cookie` off* (fully fixing the
-   cookie-off drop of legit sustained SYNs without a bypass)? (Invitable to widen
-   or narrow scope.)
-2. **Two primitives in `rate.rs`.** Is maintaining both `RateCounter` (aggregate)
-   and `TokenBucket` (rest) acceptable, or is a single mode-parameterized type
-   cleaner / more error-prone?
-3. **Token-bucket fixed-point.** Does the precomputed reciprocal-multiply refill
-   keep integer-only, no-divide, and correctly represent both large thresholds
-   (1e6) and `T=1` without under/overflow in 16 bytes?
-4. **Sketch migration fail-closed.** Does swapping the sketch cell type to
-   `TokenBucket` preserve "collisions only over-count, victim always trips," given
-   token buckets refill over time (a stale cell refills, so a returning victim
-   after a gap gets a fresh budget — is that still fail-closed)?
-5. **Per-batch clock granularity.** `now_ns` advances once per poll batch; under a
-   volumetric flood batches are sub-ms apart (fine); a low-rate sender's whole
-   second in one batch is below threshold anyway. Any rate where batch granularity
-   reintroduces the failure? (Invitable to PLAN-DEFER.)
-6. **Is the whole fix worth it?** Given the aggregate is scoped out, the remaining
-   value is standby-ACK failover clients + busy-dest false-positives + ICMP/UDP
-   sustained. Concrete enough to justify the blast radius, or PLAN-DEFER-operator?
+1. **Sketch fail-closed** (§5b): is the token-bucket sketch genuinely fail-closed
+   (collisions over-drain; sustained victim trips), and is "rate-enforced" the
+   right replacement for "stay-tripped-until-idle", or should the sketch be
+   deferred (§10a)?
+2. **cookie-OFF aggregate** (§5a): is a per-zone OFF-attack token bucket alongside
+   the unchanged `increment_and_classify` the cleanest cut, or two mechanisms
+   fighting over one decision?
+3. **ON-case cookie-lock** (§10): is documenting it + operator guidance
+   acceptable, or does #3607 need the hysteresis follow-up bundled in?
+4. **Two primitives + a per-zone bucket**: acceptable complexity, or error-prone?
+5. **`now_ns` signature churn** (incl. the standby-ACK validator): acceptable, or a
+   reason to DEFER?
+6. **Value vs blast radius**: with the ON-aggregate scoped out, is the remaining
+   value (standby-ACK failover + busy-dest + ICMP/UDP + cookie-OFF SYN) worth it,
+   or PLAN-DEFER-operator?

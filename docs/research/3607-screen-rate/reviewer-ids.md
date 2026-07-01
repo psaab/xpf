@@ -16,7 +16,19 @@ reviewer; it joins at `/engineer` on the code PR.
   later retracted** (was wrong about SYN-aggregate safety).
 
 ## Round 2 (plan v2 — consumer-split token bucket)
+- Codex (agent id `a1447d8a19e9d7064`): NEEDS-REVISION — all 4 round-1 findings
+  RESOLVED; NEW: BLOCKER sketch token-bucket cells vs #3315 fail-closed
+  (stay-tripped); MAJOR cookie-off aggregate still drops legit sustained SYNs;
+  MAJOR `admit()` polarity must be pinned; MAJOR missing-profile warn dampener
+  must NOT migrate (wants suppress-until-idle).
+- AGY (agent id `a80a8fc2b5e0ccf9c`): NEEDS-REVISION — all 3 round-1 findings
+  RESOLVED; NEW: BLOCKER cookie-off aggregate drops legit sustained SYNs (safely
+  fixable); MAJOR cookie-on permanent cookie-lock at threshold; MINOR standby-ACK
+  validator signature churn.
+- Claude SMR r2 (`claude-smr-plan-r2.md`): PLAN-READY on Option B (consumer-split).
+
+## Round 3 (plan v3 — cookie-OFF aggregate bucket + sketch fail-closed re-derivation)
 - Codex: <pending>
 - AGY: <pending>
-- Claude SMR r2 (`claude-smr-plan-r2.md`): **PLAN-READY on Option B
-  (consumer-split)**, PLAN-DEFER-operator as honest fallback.
+- Claude SMR r3 (`claude-smr-plan-r3.md`): **PLAN-READY on Option B
+  (consumer-split, v3)**, PLAN-DEFER-operator / DEFER-the-sketch as fallbacks.

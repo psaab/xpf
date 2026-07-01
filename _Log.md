@@ -24359,3 +24359,8 @@ top.
 - **Action**: Root-caused two-bucket sliding-window over-throttle; drafted plan v1 (382 lines), Claude SMR r1, dispatched Codex + AGY hostile plan reviews.
 - **File(s)**: docs/research/3607-screen-rate/plan.md, docs/research/3607-screen-rate/claude-smr-plan-r1.md
 - **Findings**: sustained ceiling is T/2 not T; two coupled defects (1-s granularity + count-all-arrivals). AGY BLOCKER: for the SYN aggregate (increment_and_classify → cookie activation) not-counting-rejected opens a T/sec cookie bypass — SYN aggregate must stay count-all sticky. AGY MINOR: Option A weighted-window has bad low-threshold roughness (T=1 → 50% loss) → token bucket (Option B) better for the low-threshold per-source/dest sketches. Reframe: consumer-aware fix.
+
+## 2026-06-30 — #3607 plan v3 (round-2 findings incorporated)
+- **Action**: Round-2 companions confirmed round-1 RESOLVED, raised refinement findings. Wrote plan v3 + SMR r3.
+- **File(s)**: docs/research/3607-screen-rate/plan.md (v3), claude-smr-plan-r3.md, reviewer-ids.md
+- **v3**: cookie-OFF aggregate fixed via per-zone OFF-attack TokenBucket (increment_and_classify untouched); missing-profile warn NOT migrated (suppress-until-idle); sketch fail-closed re-derivation; admit() polarity pinned; cookie-ON lock documented.
