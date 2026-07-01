@@ -38,8 +38,16 @@ reviewer; it joins at `/engineer` on the code PR.
 - Claude SMR r3 (`claude-smr-plan-r3.md`): PLAN-READY on Option B (consumer-split).
 
 ## Round 4 (plan v4 — sketch DEFERRED, alarm gating pinned, cold-start-full)
+- Codex (agent id `a84f671afa1aa04fa`): NEEDS-REVISION — all 3 round-3 findings
+  RESOLVED, sketch-not-required CONFIRMED; NEW BLOCKER: §5a wiring double-quota
+  (OFF bucket only on the over_attack excess + cold-start-full ⇒ instant ~2·T).
+- AGY (agent id `aacc6d578ffff0108`): **PLAN-READY** — both round-3 MINORs
+  RESOLVED, sketch deferral acceptable; NEW MINORs: cap `elapsed` at 1 s (refill
+  overflow), explicit `!over_attack` alarm gate.
+- Claude SMR r4 (`claude-smr-plan-r4.md`): PLAN-READY on Option B (reduced scope).
+
+## Round 5 (plan v5 — cookie-OFF token bucket is the SOLE drop authority)
 - Codex: <pending>
 - AGY: <pending>
-- Claude SMR r4 (`claude-smr-plan-r4.md`): **PLAN-READY on Option B (reduced
-  scope: ICMP/UDP flood + standby-ACK + cookie-OFF SYN aggregate; sketch
-  deferred)**, PLAN-DEFER-operator as fallback.
+- Claude SMR r5 (`claude-smr-plan-r5.md`): **PLAN-READY on Option B (reduced
+  scope; single-gate cookie-OFF wiring)**, PLAN-DEFER-operator as fallback.

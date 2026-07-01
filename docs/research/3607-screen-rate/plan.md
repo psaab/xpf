@@ -2,12 +2,27 @@
 
 ## 1. Status
 
-`DRAFT v4 — round-3 adversarial findings incorporated (Codex + AGY + Claude SMR);
+`DRAFT v5 — round-4 adversarial findings incorporated (Codex + AGY + Claude SMR);
 converged design, pending final confirmation` (research branch
 `research/3607-screen-rate`, base origin/master `9419bbc2c`).
 
 `/research` plan. Stops at PLAN-READY / PLAN-DEFER / PLAN-KILL. No production
 source changes, no PR.
+
+**v5 change summary (round-4 review):**
+- **cookie-OFF wiring double-quota fixed** (Codex BLOCKER): v4 consulted the OFF
+  token bucket only AFTER the measured `over_attack`, so the first ~`T` SYNs passed
+  the count-all aggregate untouched and a cold-start-full bucket then admitted
+  another ~`T` — an instant ~2×`T` micro-burst violating #2937. v5 makes the token
+  bucket the **SOLE drop authority** when `syn-cookie` is OFF: it is consulted on
+  EVERY initial SYN, decoupled from the measured `over_attack`. One gate ⇒ no
+  double path; the cold-start burst is bounded to capacity = `T`.
+- **refill overflow capped** (AGY MINOR): `elapsed` is capped at `1_000_000_000`
+  ns before `elapsed * threshold` (any gap ≥ 1 s fully refills anyway), so the
+  fixed-point multiply cannot overflow `u64` at high thresholds.
+- **explicit `!over_attack` alarm gate** (AGY MINOR): the log-only alarm is
+  explicitly gated on the measured `!over_attack` so it never fires during an
+  ongoing attack even though the OFF bucket may admit a SYN.
 
 **v4 change summary (round-3 review):**
 - **#3315 per-source/per-dest sketch migration is DEFERRED** (Codex held a
@@ -148,7 +163,10 @@ impl TokenBucket {
             self.tokens_q = capacity_q(threshold);
             self.last_refill_ns = now_ns.max(1); // never leave it 0
         } else {
-            let elapsed = now_ns.saturating_sub(self.last_refill_ns); // no underflow
+            // saturating_sub: no underflow on an out-of-order clock. Cap at 1s:
+            // any gap >= 1s fully refills, and this keeps elapsed * threshold from
+            // overflowing u64 at high thresholds (AGY).
+            let elapsed = now_ns.saturating_sub(self.last_refill_ns).min(1_000_000_000);
             self.tokens_q = (self.tokens_q + refill_q(elapsed, threshold))
                 .min(capacity_q(threshold));
             self.last_refill_ns = now_ns.max(1);
@@ -187,21 +205,32 @@ crossing and cookie-ON activation. The alarm branch keeps its EXACT current gati
 changes:
 
 ```text
-(over_attack, over_alarm) = agg_rate.increment_and_classify(now_secs, attack, alarm) // UNCHANGED (measured)
-if over_attack:
-    if syn_cookie ON:  mint cookie / activate; return Challenge         // UNCHANGED — no bypass
-    else (OFF):        if off_attack_bucket.admit_is_over(now_ns, attack) { return Drop("syn-flood") }
-                       // else fall through: the shaper admits this SYN
-# alarm gate unchanged: fires iff (over_alarm && !over_attack) using the MEASURED values
+(over_attack, over_alarm) = agg_rate.increment_and_classify(now_secs, attack, alarm)
+    // count-all (measured): drives the ALARM and, when cookie ON, cookie activation. UNCHANGED.
+if syn_cookie ON:
+    if over_attack: mint cookie / activate; return Challenge            // UNCHANGED — no bypass
+else (cookie OFF):
+    # The token bucket is the SOLE drop authority — consulted on EVERY initial SYN,
+    # decoupled from the measured over_attack. ONE gate, so there is no
+    # "first T pass the aggregate + another T from a full bucket" double-quota
+    # (Codex round-4). The cold-start-full burst is bounded to capacity = T; a
+    # sub-ms micro-burst sees <= T tokens, preserving #2937.
+    if off_attack_bucket.admit_is_over(now_ns, attack): return Drop("syn-flood")
+# alarm gate UNCHANGED, explicitly on the MEASURED !over_attack (AGY): fires iff
+# (over_alarm && !over_attack), once per second per zone.
 if syn_alarm_threshold>0 && over_alarm && !over_attack && once_per_sec: raise syn-flood-alarm
 ... per-dest / per-source (unchanged, still RateCounter) ...
 ```
 
-Because the alarm gate reads the MEASURED `over_attack` (unchanged), inserting the
-OFF bucket cannot alter `syn-flood-alarm` semantics: a SYN with measured
-`over_attack` never reaches the alarm branch (gated on `!over_attack`), exactly as
-today; when the OFF bucket admits an over-attack SYN it proceeds to the per-IP
-caps (as an admitted packet would). Cost: one `TokenBucket` per zone (16 B).
+The OFF token bucket is now the single drop gate when `syn-cookie` is OFF, so the
+v4 double-quota is gone: there is exactly one budget (the bucket's capacity = `T`,
+refill = `T`/s), and the cold-start-full burst is bounded to `T` (a sub-ms
+micro-burst finds ≤ `T` tokens — #2937 preserved). The count-all
+`increment_and_classify` still runs, but ONLY to (i) raise the alarm on the
+measured arrival rate (explicitly gated on `!over_attack`, so an ongoing attack
+never trips the log-only alarm) and (ii) activate cookies when `syn-cookie` is ON.
+An over-attack SYN that the OFF bucket admits proceeds to the per-IP caps like any
+admitted packet. Cost: one `TokenBucket` per zone (16 B).
 
 ### 5b. Why the #3315 sketch is DEFERRED (Codex BLOCKER)
 
@@ -292,6 +321,12 @@ tests. This also removes `now_ns` from `syn_rate.rs` (smaller blast radius).
   OFF are admitted (RED against current count-all); **alarm still fires on arrival
   rate** and **cookie-ON aggregate tests stay green with NO edits** (proof the ON
   path + alarm gating are untouched).
+- **cookie-OFF single-gate micro-burst bound (Codex round-4):** on a fresh zone,
+  a sub-ms burst with `syn-cookie` OFF admits AT MOST `T` (capacity), NOT ~2·`T`
+  — pins that the token bucket is the sole drop authority and the v4 double-quota
+  is gone.
+- **refill overflow (AGY):** a multi-second idle gap at a high threshold does not
+  overflow `elapsed * threshold` (elapsed capped at 1 s).
 - **#2937 retained:** adapt `boundary_double_burst_is_bounded` /
   `icmp_flood_sliding_window_..._recovers` to the bucket — sub-ms micro-burst
   bounded to ~threshold.
@@ -331,15 +366,16 @@ tests. This also removes `now_ns` from `syn_rate.rs` (smaller blast radius).
   case. L10 must still be corrected regardless (the doc currently makes a false
   claim).
 
-## 11. Open questions for adversarial review (round 4)
+## 11. Open questions for adversarial review (round 5)
 
-1. **Sketch deferral** (§5b): is deferring the #3315 sketch the right call (avoids
-   the contested stay-tripped→rate-enforced change), and is the remaining value
-   (ICMP/UDP flood + standby-ACK + cookie-OFF SYN) still worth shipping?
-2. **Alarm gating** (§5a): does reading the MEASURED `over_attack` for the alarm
-   gate while the OFF bucket drives the drop fully preserve `syn-flood-alarm`
-   semantics, or is there an ordering hole?
-3. **Cold-start-full + fixed-point refill** (§5): correct and overflow-safe for
-   both large `T` (1e6) and `T=1` in 16 bytes?
-4. **Two primitives + a per-zone OFF bucket**: acceptable complexity?
+1. **cookie-OFF single-gate wiring** (§5a): with the token bucket as the SOLE drop
+   authority on every initial SYN (decoupled from measured `over_attack`), is the
+   v4 double-quota fully gone and is the micro-burst bounded to `T`?
+2. **Alarm gating** (§5a): does the explicit `!over_attack` gate on the MEASURED
+   value fully preserve `syn-flood-alarm` semantics now that the OFF bucket may
+   admit an over-attack SYN?
+3. **Cold-start-full + capped fixed-point refill** (§5): correct and overflow-safe
+   for both large `T` (1e6) and `T=1` in 16 bytes?
+4. **Sketch deferral** (§5b) + **two primitives + per-zone OFF bucket**:
+   acceptable scope/complexity?
 5. **Value vs blast radius**: PLAN-READY as scoped, or PLAN-DEFER-operator?

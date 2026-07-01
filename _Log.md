@@ -24369,3 +24369,8 @@ top.
 - **Action**: AGY r3 PLAN-READY; Codex r3 held sketch fail-closed BLOCKER + 2 spec MAJORs. Wrote v4 + SMR r4.
 - **File(s)**: plan.md (v4), claude-smr-plan-r4.md, reviewer-ids.md
 - **v4**: DEFER #3315 sketch migration (Codex's offered resolution; removes contested change + shrinks blast radius); pin alarm gating to measured values; TokenBucket cold-start=full + saturating_sub. Scope: ICMP/UDP flood + standby-ACK + cookie-OFF SYN aggregate.
+
+## 2026-07-01 — #3607 plan v5 (round-4 findings incorporated)
+- **Action**: AGY r4 PLAN-READY; Codex r4 found §5a wiring double-quota BLOCKER. Wrote v5 + SMR r5.
+- **File(s)**: plan.md (v5), claude-smr-plan-r5.md, reviewer-ids.md
+- **v5**: cookie-OFF token bucket is SOLE drop authority on EVERY initial SYN (kills v4 double-quota, micro-burst bounded to T); cap elapsed at 1s (refill overflow); explicit !over_attack alarm gate.
