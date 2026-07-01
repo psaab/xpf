@@ -1,6 +1,8 @@
 # #3643 — per-zone `zone_counters` + `flood_counters` dead in the userspace era
 
-**Status:** DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR)
+**Status:** CONVERGED v2 — 3/3 reviewers agree: HIDE (§5B) is PLAN-READY;
+POPULATE (§5A) is PLAN-NEEDS-MAJOR/DEFER. Recommendation: **HIDE** (with POPULATE
+fully specified below as a deferred option). See §12.
 **Branch:** `research/3643-dead-counters`
 **Base:** origin/master @ `7c54df10c`
 **Verdict target:** POPULATE (PLAN-READY / PLAN-DEFER) vs HIDE (PLAN-KILL)
@@ -9,9 +11,11 @@
 
 ## 1. Status
 
-DRAFT v1 — pending adversarial plan review. This is a `/research` deliverable:
-it stops at PLAN-READY / PLAN-DEFER / PLAN-KILL. No production code changes, no
-PR. The user proceeds via `/engineer 3643` after picking a path.
+CONVERGED v2 — 3/3 hostile plan reviews (Codex + AGY + Claude SMR) ran r1 and
+converged (see §12): HIDE is PLAN-READY, POPULATE is PLAN-NEEDS-MAJOR/DEFER.
+This is a `/research` deliverable: it stops at PLAN-READY / PLAN-DEFER /
+PLAN-KILL. No production code changes, no PR. The user proceeds via
+`/engineer 3643` after picking a path (default HIDE; opt into POPULATE §5A).
 
 ## 2. Issue framing
 
@@ -29,12 +33,28 @@ master the reads do **not** return a silent 0 for most configs — they **error*
 because zone IDs are now stable name-hashes in `[1, 65533]` (#3075) while the
 backing BPF maps are dense arrays of only `MaxZones*2 = 128` / `MaxZones = 64`
 entries. A stable-hash ID ≥ 64 indexes out of bounds, the kernel array lookup
-returns `ENOENT`, and the surfaces surface that as an error (REST → HTTP 500;
-Prometheus → a monotonically-climbing false read-error alert; CLI → per-zone
-error rows). The "constant 0" only happens for the ~0.1% of zone names that
-happen to hash into `[1, 63]`. So the live behavior is *worse and more
-confusing* than the issue states, and the read-side is broken **independently of
-whether we ever source the data.**
+returns `ENOENT`, and the surfaces surface that as an error. The "constant 0"
+only happens for the ~0.1% of zone names that happen to hash into `[1, 63]`.
+
+**Precise per-surface current behavior (Codex r1 factual corrections applied):**
+- REST `/security/zones` → **HTTP 500** for the whole endpoint on the first
+  failed zone read (`pkg/api/security.go:104` sets `readErr`, then 500s).
+- Prometheus → `xpf_counter_read_errors_total` bumped **once per zone** (not
+  twice): `collectZoneCounters` does `ingress…if err {Add(1); continue}`, so the
+  egress read is skipped (`pkg/api/metrics_counters.go:173-181`). Still a
+  permanent false read-error alert, just 1×/zone/scrape.
+- `show security zones` → drops the Traffic-statistics block and prints **one
+  aggregate trailing warning** (`cli_show_security_zones.go:172`), not a row per
+  zone.
+- `show security screen ids-option statistics` (all-zones) → prints a **per-zone
+  error row** ("Error reading flood counters: …", `cli_show_security_screen.go:412`
+  #3344 path).
+- Flood counters are surfaced by **CLI + gRPC only** — NOT REST, NOT Prometheus
+  (the issue and plan v1 over-stated this). `flood_counters` REST/Prometheus
+  surfaces do not exist.
+
+So the live behavior is *worse and more confusing* than the issue states, and
+the read-side is broken **independently of whether we ever source the data.**
 
 ## 3. Honest scope/value framing
 
@@ -44,9 +64,10 @@ scale:
 - **Bug being fixed (mandatory, any path):** the REST `/security/zones` endpoint
   returns HTTP 500 for essentially every real config; the Prometheus
   `xpf_counter_read_errors_total` gauge (a #3345 alerting signal) is bumped
-  2× per zone per scrape forever, firing a false "counter read failing" alert;
-  `show security zones` drops its Traffic-statistics block + prints a warning;
-  `show security screen ids-option statistics` prints an error row per zone.
+  1× per zone per scrape forever, firing a false "counter read failing" alert;
+  `show security zones` drops its Traffic-statistics block + prints an aggregate
+  warning; `show security screen ids-option statistics` prints an error row per
+  zone.
 - **Feature being weighed (the fork):** per-zone ingress/egress packet+byte
   volume and per-zone SYN/ICMP/UDP flood-event counts. This is a Junos-parity
   nice-to-have. Operators already have global counters, per-interface RX/TX
@@ -163,32 +184,56 @@ data) or §5-HIDE (remove/mark the surfaces).
 
 Mirror `ColdPathSlotMap` for single zone IDs.
 
-- **Rust config-apply:** build a `ZoneCounterSlotMap { slot_by_zone:
-  HashMap<u16,u16>, inverse: Vec<Option<u16>>, overflow_active: bool }` from the
-  configured zone-id set (available at apply; the same set that builds
-  `zone_id_to_name`). Cap slots at a small dense N (256 → ~size of the largest
-  realistic zone set; the compiler-side zone-count cap #2391/#3075 reserved-range
-  bounds this). A zone that misses the slot map sets `overflow_active` and its
-  packets go uncounted (documented, same as cold-path overflow).
+- **Rust config-apply:** build a `ZoneCounterSlots { slot_of: Box<[u8; 65536]>,
+  inverse: Vec<Option<u16>>, overflow_active: bool }`. **CRITICAL (Codex+AGY r1):
+  the zone-id→slot resolver on the hot path MUST be a flat direct-index LUT, NOT a
+  `HashMap`.** Cold-path uses a `HashMap<(u16,u16),u8>` because a zone *pair* key
+  is 32-bit (4 G entries, dense-infeasible). A *single* zone id is only 16-bit, so
+  a dense `[u8; 65536]` LUT (64 KB per worker; 0 = unassigned/slot-0-reserved) is
+  feasible and gives `O(1)` no-hash resolution — cold-path's per-sample
+  `HashMap::get` (`cold_path_hist.rs:279`, `poll_descriptor/mod.rs:2266`) would
+  throttle a per-*packet* path. Assign slots to the sorted configured zone-id set
+  at apply; cap at `≤255` active zones (`u8` slot, matching
+  `COLD_PATH_ASSIGNABLE_SLOTS=255`); a zone past the cap sets `overflow_active`
+  and its packets go uncounted (documented, same as cold-path overflow).
 - **Rust hot path (per-worker, non-atomic, in the existing per-packet counter
-  block):** `worker_counters.zone_pkts[ingress_slot].ingress += 1;
-  .bytes += len;` and the egress-slot analog on the forward leg. Two array writes
-  per forwarded packet on the block that already does `rx_packets += 1`. No new
-  atomic, no new map lookup (slot is `metadata.ingress_zone` → precomputed slot).
-- **Flood:** the screen module already holds per-zone syn/icmp/udp tallies —
-  snapshot them per zone into the same slot-indexed accumulator; near-zero
-  incremental hot-path cost (screen already runs per-packet only under attack).
-- **Wire:** add a sparse per-zone block to `BindingStatus` (or to
-  `ProcessStatus` once, worker-summed) mirroring the cold-path sparse encoding:
-  `[{zone_id, ingress_pkts, ingress_bytes, egress_pkts, egress_bytes,
-  syn, icmp, udp}]`, only nonzero entries, with a layout-version bump and a
-  Go-side JSON round-trip test on both sides (the cold_path_status_test.go /
-  protocol/tests.rs pattern). 2-sided, `#[serde(default)]` for cross-version
-  safety like every prior counter field.
-- **Go status poll:** `syncBPFCountersLocked` sums the per-zone block across
-  bindings and calls `SetZoneCounterOffset` / `SetFloodCounterOffset` (absolute,
-  overwrite — same as `SetNATRuleCounterOffset`, which is reset-safe because the
-  helper reports cumulative-since-launch totals).
+  block):** `let s = slot_of[meta.ingress_zone as usize]; if s != 0 {
+  wc.zone_pkts[s].ingress += 1; wc.zone_bytes[s].ingress += len; }` and the
+  egress-slot analog. Two direct-index array reads + writes per forwarded packet
+  on the block that already does `rx_packets += 1`. **No new atomic, no map
+  lookup, no per-packet hash.**
+- **Flood (Codex r1 correction):** the screen module holds per-zone *rate-limiter*
+  state (`screen/mod.rs:153`), **not** cumulative per-zone flood-event counters —
+  durable screen accounting today is global/per-reason via `record_screen_drop`
+  (`afxdp/mod.rs:564`), not per-zone. So per-zone flood is **new drop-path
+  accounting**, not a snapshot of existing state. Add a per-zone syn/icmp/udp
+  drop tally on the `record_screen_drop` path (already off the fast path — only
+  fires on a screen drop). **Recommended narrowing:** ship per-zone packets/bytes
+  and mark per-zone flood "not available", leaning on the #3343 aggregate
+  per-reason counters, unless per-zone flood attribution is explicitly demanded
+  (halves the Rust/wire work for the lower-value half).
+- **Wire (helper pre-sums across workers — Codex+SMR r1):** add ONE
+  `ProcessStatus`-level sparse per-zone block (NOT per-`BindingStatus`) mirroring
+  the cold-path sparse encoding: `[{zone_id, ingress_pkts, ingress_bytes,
+  egress_pkts, egress_bytes[, syn, icmp, udp]}]`, only nonzero entries, layout
+  version bump, `#[serde(default)]` cross-version safety, JSON round-trip test
+  both sides (cold_path_status_test.go / protocol/tests.rs pattern). Pre-summing
+  in the helper keeps wire cost `O(active zones)` per poll, not `O(zones ×
+  bindings)`, and spares the Go side from iterating every binding's map.
+- **Go status poll:** `syncBPFCountersLocked` reads the pre-summed per-zone block
+  and calls `SetZoneCounterOffset` / `SetFloodCounterOffset` (absolute, overwrite
+  — same as `SetNATRuleCounterOffset`, reset-safe because the helper reports
+  cumulative-since-launch totals).
+- **Clear semantics (MANDATORY for POPULATE — Codex+AGY r1):** clearing only the
+  Go offset maps is NOT enough — the helper's cumulative totals snap back on the
+  next 1 s poll. `ClearAllCounters`/`ClearZoneCounters` MUST send a new
+  `clear_zone_counters` (+ flood) control-socket IPC so the helper resets its
+  accumulators, exactly as `ClearNATRuleCounters`
+  (`pkg/dataplane/userspace/natcounters.go`) and the policy clear
+  (`policycounters.go:163`) do for their cumulative helper stores. This is a new
+  control-request family + a helper reset handler, not just a Go map nil-out.
+  (One-time clears only — no new >1/s control-socket caller, per the CLAUDE.md
+  control-socket-contention rule.)
 
 #### §5B. HIDE (PLAN-KILL of the feature) — the conservative fallback
 
@@ -211,14 +256,17 @@ Since per-interface RX/TX(+bytes) is already on the wire (§4.5) and the compile
 knows zone→interface, `syncBPFCountersLocked` could aggregate per-binding RX→zone
 ingress and TX→zone egress with **zero hot-path cost and zero wire change**, then
 `SetZoneCounterOffset`. **Fidelity gap that kills it as the primary:** a binding
-is per *physical* interface; zones bind to interface *units* (e.g. `reth0.50`
-transit vs `reth0.80` data are different zones on the same physical `ge-0-0-2` in
-the project's own loss-cluster WAN topology). DERIVE cannot split one physical
-binding's RX/TX across the VLAN-unit zones it hosts — it would either mis-attribute
-all of it to one zone or fail to match the unit name. Producing *subtly wrong*
-per-zone numbers is worse than an honest "not available." DERIVE is acceptable
-only as a documented low-fidelity fallback for whole-interface-zone deployments,
-never as the shipped default.
+is per *physical* netdev — userspace binds VLAN units to the parent netdev
+(`pkg/dataplane/userspace/interfaces.go:90`), so a single binding's RX/TX cannot
+be split by the logical VLAN-unit zone. When one physical interface hosts VLAN
+units in *different* zones (e.g. `ge-0-0-2.50` in one zone and `.80` in another —
+a generic multi-zone-trunk topology; note the loss cluster's own `reth0.50`/`.80`
+are BOTH in `wan` per `docs/ha-cluster-userspace.conf:154`, so it is NOT itself a
+counterexample — use a real multi-zone trunk), DERIVE mis-attributes all of it to
+one zone or fails to match the unit name. Producing *subtly wrong* per-zone
+numbers is worse than an honest "not available." DERIVE is acceptable only as a
+documented low-fidelity fallback for whole-interface-zone deployments, never the
+shipped default.
 
 ## 6. Public API preservation
 
@@ -238,12 +286,16 @@ never as the shipped default.
 
 ## 7. Hidden invariants the change must preserve
 
-- **HA symmetry (#3075):** zone IDs must remain a pure function of the zone name
-  on both nodes. The slot map (§5A) is built from the config zone set, which is
-  identical on both nodes; slot assignment must be deterministic (sort zone IDs
-  before assigning slots) so a synced/cold-booting node agrees — mirror
-  `ColdPathSlotMap`'s determinism, and gate with the existing HA-symmetry test
-  discipline (`buildZoneIDs` byte-identical, zoneid.go:5).
+- **HA symmetry (#3075) — RELAXED after Codex+SMR r1:** the *wire carries zone
+  IDs*, not slot indices, and no public/cross-node surface consumes the slot as
+  identity (confirmed: cold-path slots are node-local and never synced; the
+  zone-counter block is `{zone_id, counters}` and the Go side maps by zone id).
+  So slot assignment can be **node-local** and slot determinism is NOT an HA
+  invariant. Zone IDs themselves must remain a pure function of the zone name
+  (already guaranteed by `StableZoneID`/`buildZoneIDs`, zoneid.go). Sorting zone
+  IDs before slot assignment is desirable only for single-node reproducibility,
+  not correctness. Before shipping §5A, confirm no session-sync/config-sync path
+  serializes a slot index.
 - **Offset absoluteness / reset-safety:** setters overwrite with cumulative
   totals; `safeDelta` semantics do not apply to `Set*Offset` (only to
   `IncrementGlobalCounter`). On helper restart the cumulative resets to a smaller
@@ -271,7 +323,7 @@ never as the shipped default.
 | Path | Behavioral regression | Lifetime/borrow | Perf regression | Architectural mismatch |
 |------|----------------------|-----------------|-----------------|------------------------|
 | **Phase 1 (read-side, all paths)** | LOW — mechanical #2255 clone; converts error→clean-zero; only behavior change is REST 200-not-500, no false alert | N/A (Go) | NONE (read-time map lookup) | LOW — identical to shipped NAT-offset design |
-| **§5A POPULATE** | LOW-MED — new sparse wire + hot-path counter; sparse-slot pattern is proven (cold-path) but HA determinism + overflow must be right | LOW (Rust slot arrays are `Vec`/fixed; no new borrows on hot path) | LOW — 2 non-atomic slot writes/pkt on an existing per-worker block; measure on loss cluster | LOW — clones cold_path_hist + #2255; no dead-end |
+| **§5A POPULATE** | MED — new sparse wire + hot-path counter + new clear-IPC family + new per-zone flood drop accounting; more moving parts than v1 admitted (Codex NEEDS-MAJOR) | LOW (Rust slot arrays are fixed `[u8;65536]` LUT + `Vec` accumulators; no new borrows on hot path) | LOW — **iff** the flat `[u8;65536]` LUT is used (2 direct-index writes/pkt); a per-packet `HashMap::get` would throttle forwarding (Codex+AGY) — measure on loss cluster | LOW — clones cold_path_hist + #2255; no dead-end |
 | **§5B HIDE** | LOW — removes surfaces that only ever errored; metric-name removal is the only compat note | N/A | NONE | NONE — accepts global-only, matches "observability is nice-to-have" stance |
 | **§5C DERIVE** | **MED-HIGH** — mis-attributes VLAN-unit zones (wrong numbers in the project's own WAN topology) | N/A | NONE | **HIGH** — produces plausible-but-wrong per-zone data; rejected as primary |
 
@@ -352,3 +404,58 @@ never as the shipped default.
 8. **Metric removal (§5B):** does dropping `xpf_zone_packets_total`/`_bytes_total`
    break any committed dashboard/alert contract, or are they safe to remove since
    they never emitted real data?
+
+---
+
+## 12. Converged reviewer verdicts (r1) + recommendation
+
+All three reviewers ran hostile r1 against `87749ce81`. They **converged in one
+round**: the read-side fix + HIDE path is ready; the POPULATE path is
+NEEDS-MAJOR. v2 above folds every finding.
+
+| Reviewer | Verdict | Core finding |
+|----------|---------|--------------|
+| **Codex** (`task-mr1zpu51-cyf9rg`) | **PLAN-NEEDS-MAJOR** (POPULATE); read-side fix approve-after-corrections; "HIDE is a defensible product verdict" | Hot-path cost unproven (cold-path does a per-sample `HashMap::get`); flood is NEW drop accounting not a snapshot; clear-IPC missing; several read-surface facts overstated (Prometheus 1× not 2×, flood not on REST/Prom, zones-CLI = 1 warning); DERIVE topology example wrong (reth0.50/.80 both in `wan`) |
+| **AGY** (`adversarial-review-mr1zq1au-fxheaq`) | **PLAN-NEEDS-MAJOR** (POPULATE) / **PLAN-READY** (HIDE); **recommends HIDE** | Same hot-path finding — must use a flat `[u8;65536]` LUT, not a HashMap; missing `clear_zone_counters` IPC; per-zone largely redundant with per-policy + per-interface counters → HIDE resolves the 500/alert-storm with zero complexity |
+| **Claude SMR** (`claude-smr-plan-r1.md`) | **PLAN-NEEDS-MINOR → conditionally PLAN-READY** | OOB-error linchpin is corroborated (maps_nat.go:366 maintainer comment) but unverified in-sandbox → must cluster-verify before calling Phase 1 a "bug fix"; Phase 1 alone regresses to the issue's "misleading 0" → must pair with data or explicit "not available"; reframe to the narrow question "is VLAN-unit-granular per-zone volume wanted?"; pre-sum wire; node-local slots |
+
+**Points of unanimous agreement:**
+1. The read-side breakage is real (stable-hash IDs OOB the dense arrays →
+   REST 500 + Prometheus false alert + CLI errors). All three independently
+   confirmed the mechanism against origin/master. **Still must be smoke-verified
+   on the cluster** before Phase 1 is called a bug fix (SMR F1 — no CAP_BPF in
+   the research sandbox to run the empirical probe).
+2. The read-side fix is a low-risk mechanical #2255 clone.
+3. POPULATE, if pursued, MUST use a flat direct-index `[u8;65536]` slot LUT (no
+   per-packet hash), a new `clear_zone_counters` IPC, and new per-zone flood drop
+   accounting — it is NEEDS-MAJOR as spec'd in v1, now specified in v2.
+4. HIDE (Phase 1 read-side fix + explicit "not available" + drop the dead
+   Prometheus per-zone metrics) is PLAN-READY and low-risk.
+5. Per-zone flood is the lowest-value half → lean on the #3343 aggregate.
+
+### Recommendation: **HIDE (PLAN-READY) — i.e. PLAN-KILL the POPULATE feature for now**
+
+Ship the mandatory read-side #2255-clone fix (stops the live REST-500 /
+Prometheus-false-alert / CLI-errors) and **render the per-zone traffic + flood
+surfaces as an explicit "not available (per-zone accounting not implemented in
+the userspace dataplane)" — never a bare 0 — and drop the always-erroring
+`xpf_zone_packets_total`/`xpf_zone_bytes_total` Prometheus metrics.** Rationale
+(2 of 3 reviewers, incl. AGY explicitly): per-zone volume is largely redundant
+with the already-live global + per-interface (`Bindings[].RX/TX{Packets,Bytes}`)
++ per-policy (#2118) + per-screen-reason (#3343) counters; the only *unique*
+value POPULATE adds is VLAN-unit-granular per-zone volume, and no operator demand
+for that is on record. HIDE resolves the live bug with zero hot-path cost and
+minimal risk.
+
+**POPULATE (§5A) is DEFERRED, not deleted** — it is now fully specified (flat LUT
++ pre-summed sparse wire + `clear_zone_counters` IPC + per-zone flood drop
+accounting) and can be picked up via `/engineer 3643` if per-zone / VLAN-unit
+volume dashboards are demanded. DERIVE (§5C) stays rejected as a primary.
+
+**Verdict:** PLAN-READY for HIDE + PLAN-DEFER for POPULATE. Label
+`plan-deferred-research`; keep the issue OPEN (a live read-side bug fix is still
+owed — this is not works-as-intended). Await manual approval — type
+`/engineer 3643` to implement (default: HIDE + read-side fix; opt into POPULATE
+§5A if per-zone volume is wanted). The Phase-1 read-side fix MUST be
+cluster-smoke-verified (REST 200, flat `xpf_counter_read_errors_total`) as part
+of `/engineer`.
