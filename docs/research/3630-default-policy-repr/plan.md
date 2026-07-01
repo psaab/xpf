@@ -2,6 +2,27 @@
 
 ## 1. Status
 
+**CONVERGED: PLAN-KILL (works-as-intended) — r1, 3/3 reviewers.**
+
+- Codex: PLAN-KILL. AGY: PLAN-KILL. Claude SMR: PLAN-NEEDS-MINOR but
+  explicitly conceded PLAN-KILL as legitimate on the "two existing
+  unambiguous discriminators" basis. Convergence = KILL.
+- Decisive point (Codex F7, under-weighted in this draft): a proto3 plain
+  `bool is_default` has NO explicit presence, so an old (pre-#3630) server's
+  omission and a new server's `false` are indistinguishable on the wire. A
+  version-portable client must therefore STILL key on the sentinel
+  `policy_id == 0xFFFFFFFF` — which is already always emitted — so `is_default`
+  does not remove the sentinel dependency; it only duplicates it. Net value ≈ 0.
+- Residual (constructive): the only genuine gap is that the sentinel is a
+  Go/Rust constant not named in the proto/JSON schema. That is a one-line
+  DOC-COMMENT fix on the proto field / REST struct, NOT a new wire field.
+- This draft's original terminal target (PLAN-DEFERRED behind
+  `plan-deferred-research`) is superseded by the KILL convergence. The plan is
+  preserved for archaeology; factual errors flagged by Codex are corrected
+  below (§4, §5.1, §7) so the archived record is accurate.
+
+--- original draft status (superseded) ---
+
 DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR).
 
 Terminal target: PLAN-READY that is consciously **PLAN-DEFERRED** (low value,
@@ -79,9 +100,13 @@ higher-value work — it lands as a ready-to-execute plan behind the
   match-policies REST (`pkg/api/types.go:480`) and gRPC
   (`proto/xpf/v1/xpf.proto:758`, field 12). This is the *typed encoding this
   plan wants to mirror onto inventory.*
-- **#3623** (`02b3c0f29`) gave `policy_id` explicit proto3 presence
-  (`optional uint32 policy_id = 17`, REST `*uint32`) so the sentinel is always
-  present on the default row — the existing machine discriminator.
+- **#3623** (`02b3c0f29`) gave the gRPC `policy_id` explicit proto3 presence
+  (`optional uint32 policy_id = 17`) so it is always present. **Correction
+  (Codex F6):** the REST inventory `PolicyRule.PolicyID` is a **bare
+  `uint32` with NO omitempty** (`pkg/api/types.go:188`), so it too is always
+  emitted (the `*uint32` pointer form is only on `MatchPoliciesResult.PolicyID`,
+  `pkg/api/types.go:465`). Either way the sentinel is always present on the
+  default row — the existing machine discriminator.
 - **#3624** (`6f56df7c1`) added `scheduler_name`/`inactive` (proto fields 19/20)
   — the last additive fields on `PolicyRule`; **next free field number is 21**.
 - **#3627** (`30f997685`) added `queried_from_zone`/`queried_to_zone` (proto
@@ -103,7 +128,7 @@ higher-value work — it lands as a ready-to-execute plan behind the
 | gRPC match-policies | **typed**: `matched=false` + `default_used=true` (field 12) + `action` | `proto/xpf/v1/xpf.proto:712-770` (L758) |
 | gRPC text `show security policies hit-count` | `"-" "-" default-policy <action>` | `pkg/grpcapi/server_show_policies_text.go:243-244` |
 | CLI text `show security policies` | `"-" "-" "-" default-policy <count> <action>` | `pkg/cli/cli_show_security.go:166-167` |
-| Prometheus `xpf_policy_hits_total` | labels `from_zone="-",to_zone="-",policy="default-policy"` | `pkg/api/metrics_counters.go:286-287` |
+| Prometheus `xpf_policy_hits_total` | labels `from_zone="-",to_zone="-",rule="default-policy"` (Codex F5: the label is `rule`, not `policy` — `pkg/api/metrics_descriptors.go:155`) | `pkg/api/metrics_counters.go:286-287` |
 
 The `policymatch.Result` source of the typed encoding: `DefaultUsed`
 (`pkg/policymatch/policymatch.go:287`), `Action` (`:324`), returned at `:378`,
@@ -206,12 +231,18 @@ redundant for identification; leave it as a doc line in the field comment
 
 ## 7. Hidden invariants the change must preserve
 
-- **Exactly-one default row.** Both producers append the synthetic row
-  unconditionally (once). `is_default` must be true on that row and nowhere
-  else — a client relying on "exactly one is_default row" must hold. A real
-  policy legally named `"default-policy"` must NOT get `is_default=true` (this
-  is precisely why the name string is not a valid discriminator, and why the
-  flag is set structurally at the two synthetic-row sites, never by name).
+- **Default-row count is ZERO-or-one, NOT exactly-one (Codex F7 correction).**
+  Both producers append the synthetic row only when an active config is present;
+  on nil config REST returns `[]PolicyInfo{}` (`pkg/api/security.go:113`) and
+  gRPC returns empty (`pkg/grpcapi/server_show_zones.go:102`) — no default row —
+  while match-policies DOES return `default_used=true` for nil config
+  (`pkg/api/security.go:433`). So the inventory itself is already
+  representationally inconsistent with match-policies for the nil-config case,
+  and any `is_default` invariant would have to be scoped to "active-config
+  inventory only." `is_default` must be true on the synthetic row and nowhere
+  else — a real policy legally named `"default-policy"` must NOT get it (the
+  name string is not a valid discriminator; the flag would be set structurally
+  at the synthetic-row site, never by name).
 - **Sentinel lockstep untouched.** No change to `DefaultPolicySentinelID` /
   `DefaultPolicyName` or the Rust `policy.rs` mirror; the #3057 lockstep test
   stays green.
