@@ -3,14 +3,84 @@
 - **Issue:** #4455 (HI-1, split from #4420, verified genuine in PR #4454, deferred)
 - **Mode:** `/research` — plan only. STOP at PLAN-READY / PLAN-KILL. No PR, no
   production source changes.
-- **Revision:** r1
-- **Reviewers:** Codex (hostile plan-review) + Claude SMR (hostile self-review).
-  AGY/gemini infra-down → proceed 2-of-3 with documented Codex retries.
-- **Recommendation (r1, provisional):** PLAN-READY for a **narrow Option A**
-  (catalog dedicated-groups only, housekeeping groups excluded, enforcement behind
-  an opt-in off-by-default knob, **kernel-nft-only** enforcement plus a shim
-  regression guard, **no live Rust admission change**). **PLAN-KILL is explicitly
-  on the table** and a legitimate convergent outcome — see §3 and §10.
+- **Revision:** r2 (incorporates Codex r1 + Claude SMR r1 hostile findings)
+- **Reviewers:** Codex (hostile) + Claude SMR (hostile self-review). AGY/gemini
+  infra-down → 2-of-3 with documented Codex retries.
+- **Converged recommendation (r2): PLAN-KILL — retain the shipped #4454 catalog +
+  commit-time advisory as the operator-visible surface; do NOT build the
+  per-zone multicast enforcement now.** The corrected, implementable design is
+  preserved in §5–§8 as an appendix for a future `/engineer 4455` IF the operator
+  explicitly wants the hardening despite the thin value; but on the merits below
+  the honest convergent verdict is that the parity gain does not justify the
+  HA/routing-critical multicast-drop risk and the first-`iifname`-predicate
+  kernel-netdev-attribution fragility.
+
+---
+
+## 0. Round-1 review outcomes (why r2 converges on PLAN-KILL)
+
+Both reviewers returned **PLAN-REVISE** on r1 with a strong PLAN-KILL case. The
+eleven concrete findings (Codex C1–C8, SMR B1–B3/N1–N3) are addressed below; the
+material ones that move the verdict:
+
+- **C1 (Codex) — F1 is not universal.** Direct multicast hits
+  `should_fallback_early`, but **native-GRE inner multicast does NOT**:
+  `classify_native_gre_inner` (`userspace-xdp/src/lib.rs:646`) parses the inner
+  v4/v6 header (`:767`/`:905`), checks only session/DNAT/local maps, returns `0`
+  at `:857`/`:989`, and the packet is redirected to the **XSK** at `:724`. So a
+  GRE-decapsulated inner packet addressed to a firewall-local multicast group
+  CAN reach `host_inbound_admits`. "Kernel is the sole reachable enforcement
+  point" is therefore false on the native-GRE decap path — the exact split-brain
+  the lockstep contract exists to prevent.
+- **C4 (Codex) + B2 (SMR) — the iifname source is address-scoped.**
+  `ZoneHostInboundView.Interfaces` is "informational/test only"
+  (`zones_host_inbound.go:28`); views/groups are created lazily on the FIRST
+  address (`:97`) and interfaces are added only while iterating addresses
+  (`:199`). An **addressless / DHCP-pending / routing-only** zone interface can
+  therefore get **no** multicast `iifname` coverage → silent fail-open. A correct
+  design must build the multicast interface set from zone/interface **membership**,
+  independent of address presence — i.e. a NEW builder, not the existing view.
+- **C5 + C6 (Codex) — the kernel-netdev resolver is fragile.** A resolver exists
+  (`ResolveKernelIfName`, `pkg/config/types.go:208`) but (a) maps `reth0` to the
+  **local physical member** (`types.go:98/146/178`, mirrored by
+  `snapshotLinuxName` `interfaces.go:410/424`), directly contradicting r1's "RETH
+  multicast arrives on a stable `reth` netdev" claim, and (b) **guesses** a
+  slash→dash name for malformed/absent units (`:233`) instead of failing — so a
+  naive "unresolved = skip" that trusts the returned string can silently install
+  a drop on a non-existent or wrong interface. Getting the `iifname` wrong is
+  either fail-open (never matches) or fail-**closed on the wrong interface**
+  (drops legitimate traffic). This is the highest-severity correctness landmine.
+- **C2 (Codex) — VRRP raw fallback is v4 AND v6.** r1 caveated only the v6 raw
+  fallback; there is also a v4 `ip4:112` raw socket that joins 224.0.0.18
+  (`pkg/vrrp/manager.go:799/834`) and a `receiver()` fallback started when
+  `afPacketFD < 0` (`instance.go:1029`). Both raw fallbacks traverse
+  `NF_INET_LOCAL_IN`, so the AF_PACKET-immunity argument only holds while
+  AF_PACKET is available on both families.
+- **C3 (Codex) — opt-in-off avoids upgrade breakage, not enable-time breakage.**
+  xpf renders FRR OSPF/OSPFv3/RIP (`pkg/frr/policy_render.go:507/612/998`);
+  enabling enforcement with a zone missing the token drops those daemons' hellos.
+  A safe migration needs a strict-on-enable cross-check of managed
+  OSPF/OSPFv3/RIP interfaces vs. zone tokens — and **PIM is unmanaged today**
+  (`docs/feature-gaps.md:460`), so an external pimd cannot be auto-protected at
+  all.
+- **B1 (SMR) — the r1 accept rules were redundant.** With `policy accept` and no
+  broad multicast drop, an admitted group is already accepted; the explicit
+  accept matched nothing. The minimal correct design is "emit only the
+  un-admitted dedicated-group drops" (Shape A). Folded into §5.1.
+- Plus C7 (rsvp/pgm/sap in `protocols all` — document exclusion), C8/B3 (MLD
+  negative test + two-sided lockstep guard), N1 (subnet-directed broadcast is a
+  distinct forwarding-path problem), N2 (value is thinner than r1 admitted), N3
+  (counter prefix `xpfhimc_` to avoid the #3361 reverse-map collision).
+
+**Net:** none of the eleven is individually unfixable, and §5–§8 below are the
+corrected design that fixes all of them. But the *accumulation* — a live-code
+GRE-inner split-brain path, a demonstrably physical-member RETH resolver, an
+address-lazy iifname source, and a name-guessing resolver — is a lot of
+correctness surface for a change that (per §3) is opt-in-off, protects mainly
+already-compliant operators, does not protect VRRP failover, and is otherwise
+Rust-unreachable. Both reviewers' explicit conclusion: if GRE-inner and resolver
+correctness cannot be nailed down with tests, **keep the shipped advisory and
+kill enforcement.** r2 adopts that as the converged recommendation.
 
 ---
 
@@ -21,122 +91,87 @@ Host-bound **multicast** (224.0.0.0/4, ff00::/8) and **broadcast**
 per-zone `host-inbound-traffic protocols` admission gate. The kernel
 `xpf_hostinbound` `chain input` (`pkg/daemon/daemon_nft.go`,
 `buildHostInboundFilterPayload`) matches **host-local unicast destination
-addresses only** — every per-zone rule is `<fam> daddr <zone-unicast-addrs>
-… accept / drop`. A packet addressed to a routing multicast group (OSPF
-224.0.0.5/6, VRRP 224.0.0.18, PIM 224.0.0.13, RIP 224.0.0.9, …) matches no
-per-zone `daddr` set and falls through the chain's `policy accept` to the host
-stack with no per-zone scoping.
+addresses only**; a packet to a routing multicast group (OSPF 224.0.0.5/6, VRRP
+224.0.0.18, PIM 224.0.0.13, RIP 224.0.0.9) matches no per-zone `daddr` set and
+falls through `policy accept`. In Junos this is admitted per-zone via
+`host-inbound-traffic protocols <x>`. **Fail-open-but-bounded, a parity gap, not
+an open door.**
 
-This is a **Junos-parity/hardening gap, not an open door**. In Junos, host-bound
-routing multicast is admitted per-zone via `host-inbound-traffic protocols <x>`
-on the ingress interface's zone. Here it is admitted **packet-wide** (on every
-ingress interface, regardless of the zone's token set), bounded only by the fact
-that the host kernel delivers multicast solely to groups a configured daemon
-actually joined.
+Verified architectural facts (corrected per round 1):
 
-**Decisive architectural facts established during this research (verify-first on
-current master):**
-
-- **F1 — the XDP shim diverts classic multicast/broadcast to the kernel before
-  the XSK.** `should_fallback_early` (`userspace-xdp/src/lib.rs:1340`, called at
-  `lib.rs:565` on the normal path) returns `true` for v4 `255.255.255.255`,
-  `224.0.0.0/4` (`is_ipv4_multicast`), `169.254.0.0/16` (link-local) and v6
-  `ff00::/8` (`dst_addr[0]==0xff`) + `fe80::/10`, routing them to
-  `pass_local_control → cpumap_or_pass → kernel`. **They never reach the XSK,
-  so `host_inbound_admits` (`forwarding/host_inbound.rs:476`) never sees them.**
-  The kernel nft `chain input` is therefore the **sole reachable enforcement
-  point** for classic host-bound multicast/broadcast — exactly like the #4420
-  HI-2 unzoned deny, which was deliberately kernel-only for the same reason.
-- **F2 — native VRRP is architecturally immune to the nft input hook.** The
-  xpf VRRPv3 receiver uses `AF_PACKET SOCK_RAW` with `ETH_P_ALL`
-  (`pkg/vrrp/manager.go:874` `openAfPacketReceiver`, `instance.go:1380`
-  `receiverAfPacket`), which taps at the link layer (`packet_rcv`) **before**
-  `NF_INET_LOCAL_IN`. An nft `hook input` DROP of 224.0.0.18 / ff02::12 does
-  **not** stop the AF_PACKET copy already delivered to xpf VRRP. The primary
-  failover path survives a mis-scoped multicast drop. *Caveat:* the IPv6
-  raw-socket fallback (`receiverIPv6`, `ip6:112`, used only when AF_PACKET is
-  unavailable) DOES traverse the input hook.
-- **F3 — the real risk surface is FRR.** ospfd/ripd/pimd/igmp receive multicast
-  via normal kernel sockets, which **do** traverse `NF_INET_LOCAL_IN`. A zone
-  running OSPF/PIM/RIP in FRR **without** the matching
-  `host-inbound-traffic protocols` token relies today on `policy accept`;
-  enforcing per-zone admission **drops its hellos → adjacency down**. This is
-  the #1960 migration hazard.
-- **F4 — prior art already shipped (PR #4454).** `hostInboundMulticastCatalog`
-  (`pkg/config/host_inbound_multicast.go`) is the settled protocol→group SSOT;
-  `validateHostInboundMulticastWarnings` (`pkg/config/compiler_validate_warn.go`)
-  is a shipped commit-time WARN advisory; `docs/host-inbound-multicast.md`
-  records the four coupled decisions. The catalog is **inert design data** —
-  it makes no forwarding decision today. This plan turns decisions (1) iifname
-  structure, (3) migration gating, (4) lockstep into a converged design;
-  decision (2) the catalog is already settled.
+- **F1 (corrected).** The XDP shim `should_fallback_early`
+  (`userspace-xdp/src/lib.rs:1340`, called `:565`) diverts **directly-addressed**
+  host-bound multicast/broadcast/link-local (v4 255.255.255.255, 224.0.0.0/4,
+  169.254/16; v6 ff00::/8, fe80::/10) to the kernel before the XSK, so
+  `host_inbound_admits` never sees THOSE. **Exception (C1): native-GRE-decapsulated
+  inner multicast reaches the XSK** (`lib.rs:646→724`). So the kernel nft chain is
+  the sole reachable enforcement point for *non-GRE-decap* host-bound multicast
+  only.
+- **F2 (corrected).** Native VRRP reads via AF_PACKET SOCK_RAW ETH_P_ALL
+  (`pkg/vrrp/manager.go:874`), which taps before `NF_INET_LOCAL_IN`, so an nft
+  input DROP does not stop the primary VRRP receiver. **Caveat (C2): both the v4
+  (`ip4:112`) and v6 (`ip6:112`) raw fallbacks traverse the input hook** and are
+  used when AF_PACKET is unavailable.
+- **F3.** The real risk surface is FRR (ospfd/ripd/pimd on normal kernel
+  sockets) — a zone omitting the token loses adjacency on enable.
+- **F4.** Prior art shipped in #4454: `hostInboundMulticastCatalog` (settled
+  SSOT), `validateHostInboundMulticastWarnings` (commit advisory),
+  `docs/host-inbound-multicast.md`. The catalog is inert design data today.
 
 ---
 
 ## 2. Problem statement (what a fix must resolve)
 
-1. **iifname gate.** Multicast has no per-zone unicast `daddr` to key on
-   (destination is a group), so admission must key on the **ingress interface's
-   zone → its allowed `host-inbound-traffic protocols`**. The chain has no
-   `iifname` predicate today (grep: zero `iifname`/`oifname`/`pkttype` usages in
-   `pkg/daemon`/`pkg/nftables`); this is the first consumer.
-2. **Rust lockstep.** The codebase invariant is that the kernel nft host-inbound
-   set and the Rust `host_inbound_admits` classifier agree (a divergence is a
-   #1961-class control/dataplane split-brain). But F1 makes multicast unreachable
-   on the Rust path — a live Rust mirror is dead code today. The plan must resolve
-   this honestly (guard-test vs. live mirror).
-3. **Fail-closed + no-regression.** Multicast that SHOULD be admitted (VRRP on a
-   vrrp-zone, OSPF on an ospf-zone, IGMP, PIM, router-discovery) must still reach
-   the host; un-admitted routing multicast must drop; existing **unicast**
-   host-inbound must be byte-for-byte unchanged.
-4. **Blast radius.** nft chain change + (maybe) Rust classifier change + the
-   iifname→kernel-netdev resolution + the migration posture. VRRP/OSPF/PIM/IGMP
-   correctness is HA/routing-critical.
+1. **iifname gate** keyed on the ingress interface's zone → its allowed
+   `host-inbound-traffic protocols` (the chain has zero `iifname` predicates
+   today — first consumer).
+2. **Rust lockstep** with `host_inbound_admits` without split-brain — now known
+   to include the native-GRE decap path (C1).
+3. **Fail-closed + no-regression** — admit vrrp/ospf/etc. on their zones, drop
+   un-admitted routing multicast, unicast host-inbound byte-identical.
+4. **Blast radius** — nft chain + Rust classifier + iifname→kernel-netdev
+   resolution + migration posture; VRRP/OSPF/PIM/IGMP correctness is
+   HA/routing-critical.
 
 ---
 
-## 3. Honest scope + value (PLAN-KILL is a live outcome)
+## 3. Honest scope + value → the PLAN-KILL calculus
 
-**The case for the change (value):** strict Junos parity. A zone that does not
-opt into a routing protocol should not have that protocol's host-bound multicast
-silently admitted to the box. Closing this removes a "packet-wide admit" surface
-and makes `host-inbound-traffic protocols` fully authoritative for multicast, not
-just unicast.
+**Value:** strict Junos parity — make `host-inbound-traffic protocols`
+authoritative for multicast, not just unicast.
 
-**The case against / why the value is smaller than it looks:**
+**Why the value is thin (the decisive column):**
+- **Bounded exposure.** Kernel delivers multicast only to joined groups; the
+  always-on control set (ND/PMTUD/ESP-AH) is already globally accepted. No
+  open-door to close — only a parity narrowing.
+- **VRRP already safe (F2).** The change neither breaks failover nor protects it
+  (primary receiver is AF_PACKET, before the hook).
+- **Mostly Rust-unreachable (F1).** Enforcement is kernel-nft only except the
+  exotic native-GRE-inner-multicast-to-self edge (C1), which is behind the
+  NATIVE_GRE flag and vanishingly rare.
+- **Opt-in-off reaches near-nobody (N2).** The only operators protected are those
+  who (a) enable the knob AND (b) run an FRR protocol on a zone WITHOUT the
+  matching token — a near-empty set, because enabling the knob is a superset
+  action of caring about the tokens.
 
-- **Bounded exposure.** The gap is fail-open-**but-bounded**: the kernel delivers
-  multicast only to groups a joined daemon subscribed, and the always-on control
-  set (ND, PMTUD/error ICMP, ESP/AH) is already globally accepted. There is no
-  open-door fail-open to close — only a parity narrowing.
-- **VRRP already safe (F2).** The headline HA risk ("a dropped VRRP advert breaks
-  failover") is largely mitigated for the primary path because native VRRP reads
-  via AF_PACKET before the input hook. So the change neither breaks failover nor
-  is it the thing protecting failover.
-- **Rust path unreachable (F1).** The "lockstep" requirement collapses to a
-  parity-test/guard exercise, not a live dataplane change. The dataplane-side
-  hardening people imagine is a no-op.
-- **Safe migration is opt-in-off (F3, §7).** Because enforcement is fail-**closed**
-  on revert of today's accept and can break FRR adjacencies the daemon cannot
-  detect at commit, the only non-breaking rollout is an **opt-in, off-by-default**
-  enforcement knob. But the operators who would enable it are precisely those who
-  already set the `host-inbound-traffic protocols` token — so the marginal
-  hardening for the population that needs it is thin.
+**Cost/risk (accumulated round-1 landmines):** first-ever `iifname` predicate; a
+kernel-netdev resolver that maps RETH to a physical member and guesses on
+malformed input (C5/C6); an address-lazy iifname source that fails open on
+routing-only/DHCP-pending interfaces (C4); a native-GRE-inner split-brain path
+(C1); enable-time FRR-adjacency breakage requiring a strict cross-check (C3); and
+HA/routing-critical multicast where a wrong drop kills failover-fallback or an
+OSPF/PIM adjacency.
 
-**PLAN-KILL criterion (explicit).** If the reviewers judge that the parity gain
-does not justify (a) introducing the first `iifname` predicate + its
-kernel-netdev-resolution correctness burden, (b) the FRR-adjacency / IGMP-MLD
-housekeeping drop risk, and (c) a kernel-only enforcement that cannot honestly
-claim Rust lockstep — then **PLAN-KILL with "keep the shipped #4454 advisory as
-the operator-visible surface; do not enforce"** is the correct convergent
-outcome. This plan is written to make that decision cleanly reviewable, not to
-force a build.
+**Converged verdict: the parity gain does not justify the risk now. PLAN-KILL —
+retain the shipped #4454 advisory; do not enforce.** The advisory already makes
+the gap operator-visible (names the zones/groups admitted packet-wide), which is
+the right, safe stopping point for a bounded parity gap. §5–§8 preserve the
+corrected design so a future `/engineer 4455` can pick it up unchanged if the
+operator decides the hardening is worth the burden.
 
 ---
 
 ## 4. Already-shipped unicast host-inbound reference (what NOT to disturb)
-
-The existing kernel `chain input` (unicast, must remain byte-identical):
 
 ```
 table inet xpf_hostinbound {
@@ -155,339 +190,215 @@ table inet xpf_hostinbound {
 }
 ```
 
-- Emitted by `buildHostInboundFilterPayload(views, unzonedV4, unzonedV6)`.
-- `views = BuildZoneHostInboundViews(cfg)` — one view per (zone, effective-token
-  signature); each carries `Zone`, `Interfaces []string` (config refs, already
-  populated, currently "informational/test only"), `SystemServices`, `Protocols`,
-  `V4Addrs`, `V6Addrs`.
-- Per-token nft match fragments render from the structured SSOT
-  `config.HostInboundServiceMatch` / `HostInboundProtocolMatch` (`[]L4Match`) via
-  `renderHostInboundMatches`. OSPF→`meta l4proto 89`, RIP→`udp dport 520`,
-  VRRP→`meta l4proto 112`, PIM→`meta l4proto 103`, IGMP/DVMRP→`meta l4proto 2`,
-  router-discovery→`icmp type { 9, 10 }`.
-- Deny counters: `nftables.HostInboundDenyCounterName(zone, family)`, declared
-  unquoted, referenced quoted (#3578); scraped as
-  `xpf_host_inbound_kernel_denies_total{zone,family}` (#3361).
-- Atomic replace idiom: `add table` / `delete table` / recreate.
-
-**Invariant this plan preserves:** the multicast gate is **purely additive** —
-new rules keyed on `iifname` + multicast `daddr` groups, inserted such that the
-unicast `daddr`-scoped rules and the unzoned deny are unchanged. Multicast group
-addresses never overlap unicast interface addresses or unzoned addresses, so the
-two rule families never interact.
+Built by `buildHostInboundFilterPayload(views, unzonedV4, unzonedV6)`; per-token
+fragments render from the structured SSOT `config.HostInboundServiceMatch` /
+`HostInboundProtocolMatch` (`[]L4Match`) via `renderHostInboundMatches`. Deny
+counters `nftables.HostInboundDenyCounterName(zone, family)` scraped as
+`xpf_host_inbound_kernel_denies_total{zone,family}` (#3361). The multicast gate
+below is **purely additive** — multicast group addresses never overlap unicast
+interface or unzoned addresses, so the rule families never interact and the
+unicast golden-byte tests stay green unmodified.
 
 ---
 
-## 5. Concrete design
+## 5. Corrected design (appendix — implementable if the hardening is pursued)
 
-### 5.1 Recommended: Option A — catalog dedicated-groups, iifname-scoped, kernel-only
+### 5.1 nft: Shape A — un-admitted dedicated-group drops, iifname-scoped (kernel)
 
-For each host-inbound-configured zone `Z` with kernel ingress interface set
-`I_Z` and admitted multicast-protocol set `M_Z` (its `protocols` tokens ∩
-`hostInboundMulticastCatalog`, with `all` expanded via
-`HostInboundAllExpansionProtocols`), and for each family `fam ∈ {ip, ip6}`:
-
-**(a) Admit rules** — for each `P ∈ M_Z` with catalog groups `G_P(fam) ≠ ∅`:
-
-```
-iifname { I_Z } <fam> daddr { G_P(fam) } <l4-match(P,fam)> accept
-```
-
-`<l4-match(P,fam)>` is the SAME fragment the unicast path renders
-(`renderHostInboundMatches(HostInboundProtocolMatch(P, fam))`), so OSPF stays
-`meta l4proto 89`, RIP stays `udp dport 520`, etc. The proto-match is retained
-(not group-only) for precision and to disambiguate shared groups.
-
-**(b) Fail-closed drops** — for the catalog groups of protocols **not** in `M_Z`,
-restricted to **protocol-DEDICATED** groups only (see §5.3 shared-group carve-out):
+For each host-inbound-configured zone `Z` with **membership-derived** kernel
+ingress interface set `I_Z` (§5.2) and admitted multicast-protocol set `M_Z`
+(its `protocols` tokens ∩ `hostInboundMulticastCatalog`, `all`-expanded), and for
+each family `fam ∈ {ip, ip6}`, emit ONLY the fail-closed drops for the
+**dedicated** groups of protocols NOT in `M_Z`:
 
 ```
-iifname { I_Z } <fam> daddr { <un-admitted dedicated groups, fam> } counter name "<Z>_mcast_<fam>" drop
+iifname { I_Z } <fam> daddr { <un-admitted dedicated groups, fam> } counter name "xpfhimc_<fam>_<Z>" drop
 ```
 
-Dedicated groups gated by (a)/(b): OSPF `224.0.0.5`,`224.0.0.6` / `ff02::5`,`ff02::6`;
-RIP `224.0.0.9` / RIPng `ff02::9`; VRRP `224.0.0.18` / `ff02::12`; PIM
-`224.0.0.13` / `ff02::d`; DVMRP `224.0.0.4`. **Excluded from any drop** (accept
-only when admitted, never dropped): the SHARED all-hosts/all-routers groups
-`224.0.0.1`, `224.0.0.2`, `224.0.0.22` used by igmp/router-discovery (§5.3).
+**No accept rules** (B1 — admitted groups reach the host via `policy accept`;
+an explicit accept matches nothing). **No broad `224.0.0.0/4` / `ff00::/8` drop**
+and **no broadcast handling** (255.255.255.255 stays at `policy accept`; DHCP is
+unaffected). Placement: after the global accepts and the per-zone unicast rules,
+before the unzoned deny.
 
-**Placement/ordering.** Emit the whole multicast block **after** the global
-accepts (`ct established` / ESP-AH / ND / PMTUD) and **after** the per-zone
-unicast rules, **before** the unzoned deny. Within a zone's block, all
-`accept` rules precede the `drop`. Because multicast daddrs are disjoint from
-unicast/unzoned daddrs, the relative order of the multicast block vs. the unicast
-rules is immaterial for correctness; placing it after unicast keeps the unicast
-golden-byte tests untouched.
+Dedicated groups (gated by the drop when un-admitted): OSPF 224.0.0.5/6,
+ff02::5/6; RIP 224.0.0.9 / RIPng ff02::9; VRRP 224.0.0.18 / ff02::12; PIM
+224.0.0.13 / ff02::d; DVMRP 224.0.0.4. **Shared groups never dropped** (§5.3):
+224.0.0.1, 224.0.0.2, 224.0.0.22 (igmp/router-discovery). Counter prefix
+`xpfhimc_` is distinct from the #3361 `xpfhi_` scheme so the reverse-map cannot
+misparse it (N3).
 
-**Broadcast.** v4 limited broadcast `255.255.255.255` (DHCP client, some
-discovery) is diverted to the kernel by F1 and hits this chain. Gate DHCP
-broadcast under the existing `dhcp`/`bootp` service token
-(`udp dport { 67, 68 }`) — i.e. emit `iifname { I_Z } ip daddr 255.255.255.255
-udp dport { 67, 68 } accept` when the zone admits dhcp, and otherwise leave
-255.255.255.255 at `policy accept` (do NOT add a broadcast catch-all drop in r1 —
-too broad; see §9 out-of-scope). Subnet-directed broadcast is out of scope (§9).
+### 5.2 Membership-derived iifname → kernel-netdev resolution (C4/C5/C6)
 
-### 5.2 iifname → kernel-netdev resolution (the load-bearing new mechanism)
+- **Source (C4):** a NEW builder that walks zone → member interface refs (and
+  #3362 per-interface overrides) from `cfg.Security.Zones` / `cfg.Interfaces`
+  **independent of address presence** — NOT `ZoneHostInboundView.Interfaces`
+  (which is address-lazy and would fail open on routing-only/DHCP-pending
+  interfaces). Lifelines (fxp0/em0/fab*) excluded exactly as the address path
+  excludes them.
+- **Resolution (C5):** map each member ref+unit to the kernel netdev the packet
+  ingresses on, using the SAME resolver the dataplane uses (`ResolveKernelIfName`
+  / `snapshotLinuxName`) — which for `reth0` yields the **local physical member**,
+  not a `reth` netdev. The design and tests MUST use the resolver's actual output
+  (verified on the loss cluster: `ethtool`/`ip link` + a live `nft list ruleset`
+  showing which `iifname` a 224.0.0.5 packet matches on a RETH VLAN unit), NOT an
+  assumed name.
+- **Fail-safe (C6):** `ResolveKernelIfName` GUESSES a slash→dash name on
+  malformed/absent units. So a resolved name MUST be validated against the live
+  netlink/snapshot netdev set before use; an unresolved/unvalidated interface
+  yields **no** drop for that view (fail-open, never a guessed-interface drop),
+  surfaced via a state-transition log + gauge (mirroring
+  `AddresslessEnforcingZones` #3698).
 
-`ZoneHostInboundView.Interfaces` carries **config refs** (Junos-style, e.g.
-`ge-0/0/2`, unit names like `ge-0/0/2.50`). The nft `iifname` predicate needs the
-**kernel netdev name** a multicast packet actually ingresses on:
+### 5.3 Shared-group carve-out + MLD (C8)
 
-- Physical/vSRX names are renamed slash→dash (`ge-0/0/2` → `ge-0-0-2`) by
-  `pkg/daemon/linksetup.go`.
-- A **tagged** VLAN unit ingresses on the VLAN sub-netdev (`ge-0-0-2.50`), not the
-  base device; an **untagged** unit (unit 0, no `vlan-id`) ingresses on the base
-  device (`ge-0-0-2`).
-- **RETH** members: multicast for a redundancy-group VIP arrives on the reth
-  netdev / its VLAN sub-netdev; the physical member MAC alternates, but the
-  netdev NAME the kernel presents to nft is stable — resolution must use the
-  same netdev-name the kernel sees, verified on the loss cluster.
+`224.0.0.1/2/22` are multi-purpose; accept-when-admitted but **never** in the
+drop set (igmp/router-discovery only ever loosened, never tightened). No broad
+`ff00::/8` drop, so **MLD (ICMPv6 130/131/132/143 to ff02::1/ff02::16) is
+untouched** — a REQUIRED negative test asserts no proposed drop matches those
+types (C8/B3).
 
-**Design:** add a resolver `hostInboundKernelIfnames(cfg, view)` (in
-`pkg/dataplane/userspace`, beside `BuildZoneHostInboundViews`) that maps each
-view interface ref to its kernel netdev name(s), reusing the existing
-name-translation used by linksetup/networkd (do not hand-roll slash→dash).
-Populate a new `KernelIfnames []string` field on the view (or return it
-alongside), and have `buildHostInboundFilterPayload` consume it for the `iifname`
-set. **Fail-safe rule:** if a view's kernel ifname set cannot be resolved
-(empty), emit **no** multicast drop for that view (fail-open for that zone, never
-fail-closed on an unknown interface) and surface it via a state-transition log +
-gauge, mirroring the `AddresslessEnforcingZones` (#3698) pattern.
+### 5.4 Rust lockstep — two-sided (C1/B3)
 
-### 5.3 Shared-group carve-out (correctness, not optional)
-
-`224.0.0.1` (all-hosts), `224.0.0.2` (all-routers), `224.0.0.22` (IGMPv3
-reports) are **multi-purpose** groups. Dropping them because a zone omits `igmp`
-would also drop general all-hosts traffic and could interfere with the host's own
-IGMP membership maintenance. Therefore these groups are **accept-when-admitted
-but never in the drop set** in r1. Consequence: `igmp` and `router-discovery`
-multicast is only ever **loosened**, never **tightened** — partial parity. This
-is a deliberate blast-radius bound and an open question (§10 Q3).
-
-IPv6 ND (RS/RA/NS/NA/Redirect, types 133–137) is already globally accepted, so
-v6 router-discovery needs nothing. **MLD** (ICMPv6 130/131/132/143 to `ff02::1` /
-`ff02::16`) is NOT in the global ND accept set and NOT a host-inbound token; r1
-does **not** drop any ff00::/8 beyond the dedicated groups, so MLD is untouched
-(left at `policy accept`). Do not add a broad `ff00::/8` drop (§9).
-
-### 5.4 Rust lockstep (decision 4) — recommended: guard, not live mirror
-
-Because of F1 (multicast never reaches the XSK), a live
-`host_inbound_admits` multicast dimension is **dead code today**. Recommended
-resolution:
-
-- **Kernel-nft is the authoritative + sole reachable enforcement point** for
-  host-bound multicast/broadcast (documented as such, exactly like HI-2's
-  kernel-only deny).
-- **Add a shim-diversion regression guard** (Rust unit test in
-  `userspace-xdp` and/or a Go assertion) that fails if `should_fallback_early`
-  ever stops covering `224.0.0.0/4`, `ff00::/8`, `255.255.255.255`, or the
-  link-local ranges — i.e. if any future change routes host-bound multicast to
-  the XSK. That test is the tripwire that forces adding the Rust mirror **at the
-  moment it becomes reachable**, preventing a silent split-brain.
-- **No live `host_inbound_admits` change in r1.** Document the invariant in
-  `host_inbound.rs` and `docs/host-inbound-multicast.md`.
-
-**Alternative (if reviewers require live parity):** extend `ZoneHostInbound` with
-a per-zone admitted-multicast-group set and consult it in `host_inbound_admits`
-for a multicast `dst_addr`. This is honest lockstep but adds a destination-address
-dimension the classifier lacks and is exercised by nothing until the shim
-changes. Surfaced as §10 Q1.
+The kernel nft is authoritative for **directly-addressed** host-bound multicast.
+The lockstep guard must be **two-sided**: (1) a shim tripwire asserting
+`should_fallback_early` still diverts 224.0.0.0/4, ff00::/8, 255.255.255.255,
+link-local (so directly-addressed multicast never becomes XSK-reachable without
+tripping RED), AND (2) an explicit disposition for the **native-GRE inner
+multicast** path (C1): either (a) scope it OUT of HI-1 with a test proving the
+current behavior (inner multicast is forwarded/handled as-is, not host-inbound
+gated) and document the residual, or (b) add a destination-group admission
+dimension to `host_inbound_admits` for the decap path. Option (a) is preferred
+(the decap-to-self-multicast edge is exotic and behind NATIVE_GRE); option (b) is
+the only path that makes the lockstep claim literally true.
 
 ### 5.5 Protocol → multicast-group mapping table (settled catalog, F4)
 
-| `protocols` token | IPv4 group(s) | IPv6 group(s) | nft l4-match | gate class |
+| token | IPv4 group(s) | IPv6 group(s) | nft l4-match | gate class |
 |---|---|---|---|---|
-| `ospf`  | 224.0.0.5, 224.0.0.6 | — | `meta l4proto 89` | dedicated (accept+drop) |
-| `ospf3` | — | ff02::5, ff02::6 | `meta l4proto 89` | dedicated |
-| `rip`   | 224.0.0.9 | — | `udp dport 520` | dedicated |
-| `ripng` | — | ff02::9 | `udp dport 521` | dedicated |
-| `pim`   | 224.0.0.13 | ff02::d | `meta l4proto 103` | dedicated |
-| `vrrp`  | 224.0.0.18 | ff02::12 | `meta l4proto 112` | dedicated |
+| `ospf`/`ospf3` | 224.0.0.5, 224.0.0.6 | ff02::5, ff02::6 | `meta l4proto 89` | dedicated |
+| `rip`/`ripng` | 224.0.0.9 | ff02::9 | `udp dport 520/521` | dedicated |
+| `pim` | 224.0.0.13 | ff02::d | `meta l4proto 103` | dedicated |
+| `vrrp` | 224.0.0.18 | ff02::12 | `meta l4proto 112` | dedicated |
 | `dvmrp` | 224.0.0.4 | — | `meta l4proto 2` | dedicated |
-| `igmp`  | 224.0.0.1, 224.0.0.22 | — | `meta l4proto 2` | **shared (accept-only, never drop)** |
-| `router-discovery` | 224.0.0.1, 224.0.0.2 | — (v6 = ND, global) | `icmp type { 9, 10 }` | **shared (accept-only)** |
+| `igmp` | 224.0.0.1, 224.0.0.22 | — | `meta l4proto 2` | shared (never drop) |
+| `router-discovery` | 224.0.0.1, 224.0.0.2 | — (v6 = ND, global) | `icmp type {9,10}` | shared (never drop) |
 
-Source of truth stays `config.hostInboundMulticastCatalog`; the "gate class"
-column is new metadata this plan adds (dedicated vs. shared) — proposed as a
-field/predicate on the catalog so the nft builder and any future Rust mirror read
-one table.
+**Excluded (C7):** `rsvp`(46)/`pgm`(113)/`sap`(UDP 9875) are in `protocols all`
+and can be multicast (SAP → 224.2.127.254), but the shipped catalog deliberately
+lists only protocols whose host-bound CONTROL rides a well-known link-local
+group; these are left at `policy accept` with a documented residual packet-wide
+gap rather than gated. `isis` is L2/non-IP (never on the IP input chain).
 
 ---
 
 ## 6. API / config-surface preservation
 
-- **No new config grammar for the catalog** — it reuses the existing
-  `security zones <z> host-inbound-traffic protocols <token>` leaves. No
-  `setSchema` change for the protocol tokens.
-- **New enforcement knob (§7).** The opt-in enable flag is the only new config
-  surface. Proposed: `set security forwarding-options host-inbound-multicast
-  enforce` (or a system-level flag) — exact spelling is §10 Q4. It must round-trip
-  through `setSchema` + `SchemaValidate` and be documented in
+- Reuses existing `security zones <z> host-inbound-traffic protocols` leaves — no
+  new protocol-token grammar. The only new surface is the **opt-in enable knob**
+  (§7) which must round-trip `setSchema` + `SchemaValidate` and be documented in
   `docs/config-schema.md`.
-- **Unicast host-inbound unchanged** — `renderHostInboundMatches` and the
-  per-zone unicast rules are not touched; `TestHostInboundNftRenderGoldenByteIdentical`
-  and the existing `host_inbound_nft_test.go` assertions stay green unmodified.
-- **Metrics additive** — new `xpf_host_inbound_mcast_denies_total{zone,family}`
-  (or fold into the existing kernel-deny counter with a distinct kind). Existing
-  counters unchanged.
-- **gRPC/REST** — no RPC change; the new counter surfaces through the existing
-  metrics collector path.
+- Unicast host-inbound unchanged (`renderHostInboundMatches` untouched;
+  golden-byte + `host_inbound_nft_test.go` green unmodified).
+- Metrics additive: `xpf_host_inbound_mcast_denies_total{zone,family}` (prefix
+  `xpfhimc_`, N3). No RPC change.
 
 ---
 
-## 7. Migration gating (decision 3, #1960)
+## 7. Migration gating (C3, #1960)
 
-Enforcement is fail-**closed** on revert of today's accept and can break an FRR
-adjacency the daemon cannot detect at commit (F3). Options:
-
-- **M-i (recommended r1): opt-in, off-by-default enforcement knob.** Existing
-  configs are byte-identical until the operator explicitly enables enforcement.
-  The already-shipped WARN advisory continues to nudge. On enable, the
-  strict-on-commit path additionally validates that the enable knob is coherent;
-  lenient/tolerant load only warns (never bricks a synced config, #1960).
-- **M-ii: enforce-by-default (like HI-2).** Rejected for r1 — HI-2 closed a
-  fail-open with no legitimate reliance; here there IS legitimate reliance
-  (FRR-protocol-without-token), so default-on can silently break routing on
-  upgrade.
-- **M-iii: enforce-by-default but drop dedicated groups only + AF_PACKET-immune
-  VRRP + housekeeping excluded.** Residual risk is real FRR OSPF/PIM/RIP adjacency
-  loss for the omitted-token case. Held as the aggressive alternative (§10 Q2).
-
-**Operator migration story (M-i):** doc in `docs/host-inbound-multicast.md` +
-`pkg/daemon/README.md`: "before enabling `host-inbound-multicast enforce`, ensure
-every zone running a routing protocol in FRR also lists the matching
-`host-inbound-traffic protocols <x>`; the commit advisory lists the zones/groups
-affected." The `commit confirmed` rollback target is validated the same way.
+- **M-i (only safe posture): opt-in, off-by-default enable knob** + strict-on-enable
+  cross-check: reject the enable if any zone with a managed FRR OSPF/OSPFv3/RIP
+  interface (`pkg/frr/policy_render.go`) lacks the matching
+  `host-inbound-traffic protocols` token (validating the `commit confirmed`
+  rollback target too). **PIM is unmanaged today** (`docs/feature-gaps.md:460`),
+  so an external pimd cannot be auto-protected — documented residual.
+- Lenient/tolerant load warns, never bricks (#1960). Existing configs are
+  byte-identical until the operator enables.
+- **This is exactly why the value is thin (N2):** the strict cross-check means an
+  operator can only enable after already setting the tokens — the enforcement
+  protects a near-empty population.
 
 ---
 
 ## 8. Hidden invariants
 
-1. **VRRP must-not-drop (HA-critical).** Even though F2 makes native VRRP
-   AF_PACKET-immune, the design MUST still admit `vrrp` groups on a vrrp-zone
-   (224.0.0.18 / ff02::12) so the IPv6 raw-socket fallback and any kernel-path
-   VRRP consumer keep working, and so the intent is explicit. The failover smoke
-   (§9 test plan) is the empirical proof, not the AF_PACKET argument alone.
-2. **OSPF/PIM/RIP must-not-drop when admitted.** A zone that lists the token must
-   get its multicast admitted; the accept rule (5.1a) must precede the drop
-   (5.1b) and reuse the exact unicast l4-match render.
-3. **nft ↔ Rust exact parity (or documented divergence).** The lockstep contract
-   requires either identical multicast admission on both surfaces OR a documented,
-   test-guarded reason they cannot diverge (the F1 guard test, §5.4). A silent
-   kernel-only change that *claims* parity is forbidden (#1961 class).
-4. **Unicast + unzoned byte-identical.** The multicast block is additive; the
-   unicast golden-byte and unzoned-deny tests must pass unmodified.
-5. **iifname resolution fail-open, never fail-closed on unknown.** An unresolved
-   kernel ifname yields no drop for that view (§5.2), never a drop on the wrong
-   or a guessed interface.
-6. **Lifelines never gated.** fxp0/em0/fab* are already excluded from the views;
-   the multicast block must inherit that exclusion (build `I_Z` from the same
-   lifeline-filtered interface set).
-7. **Atomic-load safety.** New named counters declared once (unquoted) + the
-   `add/delete/recreate` idiom preserved; a syntax error rejects the whole
-   payload (fail closed-as-absent), so the multicast block cannot half-apply.
+1. VRRP must-not-drop: admit vrrp groups on both families (C2 covers the raw
+   fallbacks); the failover smoke is the empirical proof.
+2. OSPF/PIM/RIP admitted ⇒ not dropped (Shape A never drops an admitted group).
+3. nft ↔ Rust lockstep: two-sided guard (§5.4); GRE-inner disposition explicit.
+4. Unicast + unzoned byte-identical (additive multicast block).
+5. iifname resolution validated against live netdevs; unresolved ⇒ no drop
+   (never guessed-interface, C6).
+6. Lifelines never gated (membership set inherits the lifeline exclusion).
+7. Atomic-load safety preserved (single unquoted counter decl + add/delete/recreate).
 
 ---
 
-## 9. Risk table (4-class) + test plan + out-of-scope
-
-### Risk table
+## 9. Risk table + test plan + out-of-scope
 
 | Class | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
-| **HA-critical** | vrrp-zone multicast wrongly dropped → failover regression | Low (F2 AF_PACKET-immune; accept rule admits it) | Severe | Admit rule 5.1a; failover smoke MUST pass; IPv6 fallback covered |
-| **Routing-critical** | FRR OSPF/PIM/RIP adjacency dropped when zone omits token | Med (exactly the #1960 case) | Severe | Opt-in off-by-default (M-i); advisory; migration doc |
-| **Correctness** | iifname→kernel-netdev mis-resolution (VLAN/RETH slash-vs-dash) → fail-open or wrong-iface | Med | Med | Reuse linksetup translation; fail-open on unresolved; loss-cluster VLAN/RETH verification |
-| **Housekeeping** | Broad multicast/MLD/IGMP drop breaks host membership | Low (r1 gates dedicated groups only; shared/MLD excluded) | Med | §5.3 carve-out; no ff00::/8 or broadcast catch-all in r1 |
+| HA-critical | vrrp multicast wrongly dropped → failover regression | Low (F2; both raw fallbacks admitted) | Severe | Shape-A never drops admitted; failover smoke; C2 |
+| Routing-critical | FRR OSPF/PIM/RIP adjacency dropped on enable | Med | Severe | Strict-on-enable cross-check; PIM residual documented |
+| Correctness | iifname mis-resolution (RETH→phys member, guess-on-malformed, address-lazy source) | **Med-High** | Med-High | Membership source (C4); resolver validated vs live netdevs (C5/C6); loss-cluster verification |
+| Split-brain | native-GRE inner multicast reaches XSK ungated | Low (NATIVE_GRE flag) | Med | §5.4 explicit disposition + test (C1) |
 
-### Test plan
+**Test plan:** RED-on-revert Go unit (`host_inbound_mcast_4455_test.go`) for the
+un-admitted-dedicated drops + unicast/unzoned byte-identity; membership-source +
+resolver unit (routing-only/DHCP-pending covered; RETH→resolver's actual name;
+guessed name rejected vs live netdevs); nft parse-check; **shim two-sided guard
+(C1) + MLD negative test (C8)**; loss-cluster smoke (mandatory, v4+v6): failover
+MUST still work with enforce ON + vrrp-admitting zone (empirical F2 + C2 forced
+AF_PACKET-failure), and a deny-multicast test (ospf-admitting zone keeps
+adjacency; ospf-omitting zone drops 224.0.0.5 with counter increment; ND/unicast
+unaffected). Re-apply CoS after deploy.
 
-- **Unit (RED-on-revert), Go** (`pkg/daemon/host_inbound_mcast_4455_test.go`,
-  mirroring `host_inbound_unzoned_4420_test.go`): a fixture with a vrrp+ospf zone
-  and a bare zone asserts (a) admitted-group accept rules present with the correct
-  iifname + l4-match, (b) un-admitted dedicated-group drop present, (c) shared
-  groups NEVER in a drop, (d) unicast rules + unzoned deny byte-identical.
-  Neutering the multicast emitter turns it RED.
-- **iifname resolution unit** (`pkg/dataplane/userspace`): VLAN sub-unit →
-  `ge-0-0-2.50`, untagged → `ge-0-0-2`, RETH → reth netdev; unresolved → no drop.
-- **nft parse-check**: the full payload with the multicast block parses on
-  appliance nft (v1.1.6), extending `TestHostInboundFilter…PayloadParses`.
-- **Shim guard** (Rust, `userspace-xdp`): assert `should_fallback_early` covers
-  224.0.0.0/4, ff00::/8, 255.255.255.255, link-local — RED if multicast is ever
-  routed to the XSK (the §5.4 tripwire).
-- **Smoke on loss userspace cluster (MANDATORY, both v4+v6):**
-  1. **Failover MUST still work** — `make test-failover` (iperf3 through the RG
-     while cycling failovers) with the enforce knob ON and a vrrp-admitting zone:
-     zero-drop failover, empirically confirming F2.
-  2. **Deny-multicast test** — with the knob ON: a zone that admits `ospf` still
-     forms/keeps an OSPF adjacency through the box's zone interface; a zone that
-     does NOT admit `ospf` DROPS injected OSPF-group (224.0.0.5) packets (deny
-     counter increments) while established unicast + ND + admitted protocols are
-     unaffected.
-  3. **Re-apply CoS after deploy** (`apply-cos-config.sh`) per the standing
-     deploy-wipes-CoS rule.
-
-### Out of scope (r1)
-
-- **Subnet-directed broadcast** (e.g. 10.0.1.255) — F1 does NOT divert it to the
-  kernel (it is not 255.255.255.255/224-4), so it takes the XSK/forwarding path
-  and is a distinct problem; deferred.
-- **A broad `ip daddr 224.0.0.0/4 drop` / `ip6 daddr ff00::/8 drop` catch-all** —
-  too aggressive (MLD, mDNS, unknown groups, housekeeping); r1 gates only
-  cataloged dedicated groups.
-- **Live Rust `host_inbound_admits` multicast admission** — dead code under F1;
-  deferred behind the guard test (§5.4).
-- **mDNS/LLMNR/SSDP** — no host-inbound token exists; not admissible/gateable via
-  `host-inbound-traffic` and left at policy-accept.
-- **Enforce-by-default** — deferred pending §10 Q2 convergence.
+**Out of scope:** subnet-directed broadcast (N1 — F1 does NOT divert it; it takes
+the XSK/forwarding path, a distinct problem); broad `224.0.0.0/4`/`ff00::/8`
+drops; mDNS/LLMNR/SSDP (no token); rsvp/pgm/sap multicast (C7, documented
+residual); enforce-by-default.
 
 ---
 
-## 10. Open questions (each invitable to PLAN-KILL)
+## 10. Open questions (each already answered toward PLAN-KILL)
 
-- **Q1 (lockstep posture, PLAN-KILL fulcrum).** Is kernel-only enforcement +
-  shim-diversion guard test an acceptable satisfaction of the "Rust lockstep"
-  invariant, or must r1 ship a live (dead-code-today) `host_inbound_admits`
-  multicast dimension? If reviewers demand live parity for a path that can never
-  execute, the cost/benefit may tip to PLAN-KILL.
-- **Q2 (migration posture, PLAN-KILL fulcrum).** Opt-in off-by-default (M-i) vs.
-  enforce-by-default (M-iii)? If only M-i is safe, the hardening reaches only
-  operators who already set the token — does that thin value justify building the
-  iifname machinery at all, or is the shipped advisory (status quo) sufficient →
-  PLAN-KILL?
-- **Q3 (shared-group carve-out).** Is "accept-when-admitted, never-drop" for
-  igmp/router-discovery shared groups (224.0.0.1/2/22) acceptable partial parity,
-  or must those be gated too (accepting the housekeeping risk / a daddr+proto
-  precise drop)?
-- **Q4 (knob surface).** Where does the enable flag live — `security
-  forwarding-options host-inbound-multicast enforce`, a `system` flag, or
-  per-zone? Junos has no exact equivalent (it enforces unconditionally), so this
-  is an xpf-specific migration affordance.
-- **Q5 (iifname correctness on RETH/VLAN).** Can `iifname` be resolved reliably
-  for every zone-interface shape (base, tagged VLAN unit, RETH member/VIP,
-  VRF-bound) without a per-topology special case, given RETH member MAC
-  alternation and VLAN sub-netdev naming? If resolution needs per-shape hacks,
-  the correctness risk (fail-open on the wrong iface) may dominate.
-- **Q6 (VRRP fallback path).** The IPv6 VRRP raw-socket fallback traverses the
-  input hook — does admitting ff02::12 on vrrp-zones fully cover it, and is there
-  any config where the fallback is the only receiver (AF_PACKET unavailable)?
-- **Q7 (counter/metric).** New `xpf_host_inbound_mcast_denies_total` vs. folding
-  into the existing kernel-deny counter — does a new label value collide with the
-  #3361 scraper's `zone` reverse-mapping?
+- **Q1 (lockstep, C1).** Kernel-only + shim guard is honest ONLY if the
+  native-GRE-inner path is explicitly scoped out with a test; a live Rust mirror
+  is otherwise required for a path that almost never executes. → weight to KILL.
+- **Q2 (migration, C3/N2).** M-i strict-on-enable is the only safe posture, and
+  it protects a near-empty population. → strongest KILL argument.
+- **Q3 (shared-group carve-out).** Accept-when-admitted/never-drop for
+  igmp/router-discovery is safe partial parity; full gating reintroduces
+  housekeeping risk. Settled toward the safe carve-out.
+- **Q4 (knob surface).** `security forwarding-options host-inbound-multicast
+  enforce` vs system/per-zone — deferred (moot under KILL).
+- **Q5 (iifname RETH/VLAN, C5/C6).** The resolver maps RETH to a physical member
+  and guesses on malformed input; correctness needs live-netdev validation +
+  loss-cluster proof. High correctness burden. → weight to KILL.
+- **Q6 (VRRP fallback, C2).** Both v4+v6 raw fallbacks are input-exposed; covered
+  by admitting vrrp groups, but only while AF_PACKET is up.
+- **Q7 (counter).** Resolved: distinct `xpfhimc_` prefix (N3).
 
 ---
 
 ## 11. Recommendation
 
-Adopt **Option A (narrow), kernel-only, opt-in off-by-default**, contingent on
-reviewer convergence on Q1 and Q2. Concretely: iifname-scoped accept/drop for the
-cataloged **dedicated** groups, shared-group carve-out, enforcement behind an
-opt-in knob, kernel-nft as the sole enforcement point with a shim-diversion guard
-test, and **no live Rust admission change**. If the reviewers judge (Q1/Q2) that
-this cannot honestly claim lockstep and reaches only already-compliant operators,
-**PLAN-KILL** (retain the shipped #4454 advisory; do not enforce) is the correct
-convergent outcome — and is a fully acceptable result of this research.
+**PLAN-KILL — retain the shipped #4454 protocol→group catalog + commit-time
+advisory; do NOT build the per-zone multicast enforcement now.** The gap is a
+bounded Junos-parity narrowing already surfaced to operators by the advisory;
+enforcement is opt-in-off (protecting a near-empty population), does not protect
+VRRP failover, is otherwise Rust-unreachable except an exotic native-GRE edge,
+and carries real HA/routing-critical drop risk plus a demonstrably fragile
+first-`iifname`-predicate kernel-netdev attribution (RETH→physical-member,
+guess-on-malformed, address-lazy source). Both hostile reviewers reached the same
+conclusion.
 
-**This is `/research`. STOP at PLAN-READY/PLAN-KILL. No PR, no production source
-changes. `/engineer 4455` proceeds only after manual approval.**
+The corrected, implementable design (§5–§8) is preserved so that IF the operator
+later decides the strict-parity hardening is worth the burden, `/engineer 4455`
+can proceed from it directly — with the C1 GRE-inner test, the C4 membership
+source, the C5/C6 live-netdev-validated resolver, and the C3 strict-on-enable
+cross-check as mandatory acceptance criteria.
+
+**This is `/research`. STOP at the converged verdict. No PR, no production source
+changes.**
