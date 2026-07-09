@@ -1,6 +1,8 @@
 # #2852 — SNAT PortAllocator residual serialization (Phase-2 evaluation) — research plan
 
-- **Revision:** r1 (draft, pre-review)
+- **Revision:** r2 (Claude-SMR r1 folded: F4 wording softened per Attack 2; F5
+  release-path lock-order inversion in Option A surfaced per Attack 5; follow-up
+  issue made an explicit CLOSE deliverable. Codex r1 pending.)
 - **Base:** origin/master `b4f2ddb2f` (re-verified: `userspace-dp/src/nat/allocator.rs`
   = 1796 LOC, Phase 1 `6cbb10615` + #4676 `c7194b2af` both landed)
 - **Branch:** `research/2852-portalloc-phase2` (docs only; no production source touched)
@@ -242,7 +244,7 @@ mutex is not on the flood-resilience path. The workloads that do reach it
 real but niche, and their sustained rate on this platform is exactly the
 unmeasured quantity.
 
-### 3.3 Phase 2 REGRESSES the F4 exact-cap property Phase 1 deliberately bought
+### 3.3 Phase 2 puts the F4 exact-cap property at risk (mitigable only via premature exhaustion or a fallback mode)
 
 Phase 1's design note (`allocator.rs:24–31`) is explicit: the global tracked-flow
 cap is `live_by_flow.len()` re-checked **under the insert mutex**, where the map
@@ -252,12 +254,18 @@ microbench's atomic `fetch_add`-reserve model, which the gate doc itself found
 overshoots by up to M in-flight and **failed 71–79% of allocations at M=6/8 on a
 narrow 64-port pool** (`microbench-results.md:141–154`).
 
-Sharding `live_by_flow` destroys the cheap exact `len()`: a global cap across N
-shards requires exactly the `AtomicUsize` reserve/rollback discipline that
-overshoots. So Phase 2 trades away a correctness property (exact NAT-pool cap,
-no false exhaustion on small pools) that Phase 1 was engineered to obtain — for
-an unproven throughput win. For NAT, "never falsely reject a connection when the
-pool has room" is a real operator-visible guarantee.
+Sharding `live_by_flow` puts the cheap exact `len()` at risk. Every avoidance
+path has a cost: (a) a global cap across N shards via `AtomicUsize`
+reserve/rollback overshoots by up to M (the microbench data above); (b) static
+per-shard sub-caps (`max/N`) avoid the atomic but cause *premature exhaustion*
+under skewed flow-key hashing (one shard hits its sub-cap while other shards —
+and the port bitmap — have room), the exact failure that killed Option C; (c) a
+serialized exact-path fallback for small pools preserves exactness but adds a
+mode split + a size threshold to tune. So Phase 2 trades away, or adds complexity
+to preserve, a correctness property (exact NAT-pool cap, no false exhaustion when
+the pool has room) that Phase 1 was engineered to obtain — for an unproven
+throughput win. For NAT, "never falsely reject a connection when the pool has
+room" is a real operator-visible guarantee.
 
 ### 3.4 The residual is small and the risk surface is large
 
@@ -366,9 +374,19 @@ Only ONE shard lock is held, for one `get` + one `insert`. GC
 
 Take `leases` (cold mutex) for the lease decision + claim atomicity, THEN the
 flow shard for the `live_by_flow` insert — fixed order `leases → flow_shard`,
-so no deadlock. `release_flow`/`rollback_flow` compute the flow shard from the
-5-tuple; if the record carries a `persistent_key`, also take `leases` (same fixed
-order). Non-persistent release takes only the flow shard.
+so no deadlock on allocate.
+
+**F5 hazard on the release path (found in SMR Attack 5 — must be resolved before
+Option A is PLAN-READY).** A naïve release reads the flow-shard record first to
+learn whether it has a `persistent_key`, then takes `leases` — i.e. `flow_shard →
+leases`, the INVERSE of allocate's `leases → flow_shard`. That is an ABBA
+deadlock (the prior plan's F5, resurfacing in the "simpler" Option A). Resolution:
+either (i) release takes `leases` UNCONDITIONALLY first (a non-persistent release
+takes+noops it) to keep the one global `leases → flow_shard` order, or (ii) the
+persistent key is re-derived from the 5-tuple + rule WITHOUT reading the record
+(`PersistentSourceKey` = proto/src_ip/src_port/remote is a pure function of the
+flow key + permit mode), so release can decide up front and always order `leases
+→ flow_shard`. This must be nailed and loom-tested before any Option-A code.
 
 ### 5.4 Snapshot / cap / GC
 
@@ -411,7 +429,7 @@ of truth. GC unchanged except it locks `leases` instead of `live`.
 |-------|------|----------|----------|
 | **Correctness** | Exact-cap regression → false exhaustion on small pools (§3.3) | REAL (AtomicUsize overshoot; needs small-pool fallback + concurrency test) | NONE (Phase 1's exact cap kept) |
 | **Correctness** | Double-alloc / HA port reuse | LOW (bit-token unchanged; `test-failover` gate) | NONE |
-| **Correctness** | Persistent-path lock-ordering deadlock (F5) | LOW in Option A (fixed `leases→shard` order; loom test) | NONE |
+| **Correctness** | Persistent-path lock-ordering deadlock (F5) | REAL in Option A — the release path naïvely inverts to `flow_shard→leases` (§5.3); resolvable (unconditional `leases`-first or re-derive key) + loom test, but must be fixed before PLAN-READY | NONE |
 | **Perf** | Win never materializes | HIGH→CERTAIN — architecturally bounded by co-resident publish (c) + replication (d) locks on every new flow (§3.0); unmeasured on top of that | NONE |
 | **Perf** | False sharing of shard mutexes | LOW (`CachePadded`) | NONE |
 | **Perf** | p99 regression on narrow/low-concurrency pools | MED (microbench showed NEW ~par at M=1–2 narrow) | NONE |
@@ -465,12 +483,21 @@ Phase 2 until §8.2 justifies it.
 ## 10. Disposition
 
 **Recommend Option B: CLOSE #2852 (substantially resolved by `6cbb10615` +
-#4676); PLAN-KILL Phase-2 map-sharding as unproven + correctness-regressing;
-file a narrow follow-up for the conn-rate generator + cluster new-flow ceiling.**
-Adopt Option A (PLAN-READY the Phase-2-lite shard) ONLY if the reviewers judge
-the microbench + per-worker-session-table architecture sufficient to proceed
-without the cluster measurement — in which case the F4 exact-cap regression (§3.3,
-§6.4) must be resolved in the design first.
+#4676); PLAN-KILL Phase-2 map-sharding as architecturally-bounded + unproven +
+correctness-risking.** Two deliverables accompany the close:
+
+1. **File a narrow follow-up issue** for a connection-rate generator + a
+   loss-cluster new-flow-ceiling measurement (§8.2). Phase 2 (correctly scoped as
+   "shard ALL per-new-flow cross-worker state — publish + replication + NAT",
+   since NAT alone is architecturally insufficient, §3.0) is reopenable there ONLY
+   if that measurement shows new-flow scaling is a real, lock-bound target.
+2. The Phase-2 design (§5) is preserved on this research branch, reopenable.
+
+Adopt Option A (PLAN-READY the Phase-2-lite shard) ONLY if the reviewers overrule
+the kill — in which case BOTH the F4 exact-cap risk (§3.3, §6.4) AND the F5
+release-path lock-order inversion (§5.3) must be resolved in the design first, and
+it still would not deliver end-to-end new-flow scaling without also addressing the
+co-resident publish/replication locks (§3.0).
 
 ## 11. Open questions for reviewers
 
