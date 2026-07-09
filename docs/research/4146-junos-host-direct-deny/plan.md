@@ -3,8 +3,8 @@
 - **Issue:** #4146
 - **Branch:** `research/4146-junos-host-direct-deny`
 - **Base:** origin/master `b4f2ddb2f`
-- **Revision:** r1 (initial draft, pre-review)
-- **Status:** DRAFT → seeking convergence (Codex + Claude SMR; AGY infra-down)
+- **Revision:** r2 (folds Claude SMR r1 findings F1-F4)
+- **Status:** seeking convergence (Codex + Claude SMR; AGY infra-down)
 - **Disposition sought:** PLAN-READY (a shippable enforcement fix), un-deferring the mislabeled `plan-deferred-operator`.
 
 > This is `/research`, not `/engineer`. It stops at PLAN-READY (or PLAN-KILL).
@@ -291,7 +291,15 @@ is representable; otherwise it is **left to the #4168 warning** (no kernel rule)
 - **Dynamic-feed-backed source** (an address-name whose value comes from a live
   feed overlay). A static nft set would go stale as the feed updates; the feed
   path is a runtime overlay the userspace-dp enforces, not a commit-time
-  constant. (Static address-book members remain representable.)
+  constant. **This includes a static-looking address-SET that NESTS a feed-bound
+  member** (SMR-F2): `resolveToken`/`expandBookName`
+  (`pkg/policymatch/policymatch.go:1306-1323`) is feed-aware *recursively*, so a
+  source token is un-representable if the token OR any nested member resolves
+  through the feed overlay. The implementation MUST reject the whole term (leave
+  to warning) whenever resolving any source token would pull in feed CIDRs —
+  checked by resolving with an EMPTY feed overlay and separately confirming no
+  token is feed-bound. Only tokens whose entire resolution is static
+  address-book / static nested address-set are representable.
 - **Multi-term custom applications**, **ALG-bearing** apps (the ALG semantics
   are not a port match), and application-sets that do not reduce to a single
   simple proto+port form.
@@ -310,11 +318,13 @@ A `to-zone junos-host` *source-restricted permit* ("only source S may reach
 service X") is representable as "deny X from `saddr != S`", but it flips the
 default and interacts with the coarse per-service accept. **This plan's
 must-ship scope is DENY/REJECT** (the finding's security case). Source-restricted
-permits stay on the #4168 warning; enforcing them in the kernel is a clean,
-independent follow-up (same machinery, `saddr !=` form) and is called out as
-out-of-scope to keep the first slice minimal and reviewable. /engineer may fold
-it in if reviewers prefer completeness, but it is not required to un-defer the
-security bug.
+permits stay on the #4168 warning for now; enforcing them in the kernel is a
+clean follow-up using the IDENTICAL machinery (`saddr !=` form) and is a
+**TRACKED next slice in the same PR family, NOT a re-defer of #4146** (SMR-F4):
+the security bug this issue names — a `then deny` silently unenforced — is closed
+by the DENY/REJECT slice; the permit slice is an additive completeness item.
+/engineer MAY fold it into the same PR if reviewers prefer, but the issue is
+un-deferred by the DENY slice alone.
 
 ---
 
@@ -368,6 +378,13 @@ security bug.
 5. **Deterministic payload.** Iteration over ordered policy slices → stable nft
    payload across commits (no map-iteration nondeterminism).
 6. **Fail-closed load** preserved (§7).
+7. **Established-session survival is expected, not a bypass (SMR-F3).** Because
+   the deny rules sit after `ct state established,related accept`, a session the
+   bad source established BEFORE the deny was committed survives until it closes
+   — the deny applies to NEW connections, matching the existing per-zone chain
+   and Junos's practical host-inbound behaviour. A source denied from the start
+   never forms an established state (its SYN/first datagram is dropped), so there
+   is no exploitable bypass. Documented in the docs matrix (§10).
 
 ---
 
@@ -437,6 +454,10 @@ Run under the cluster lock (`./test/incus/with-cluster.sh`), on
   §6.4 follow-up, source-restricted permits).
 - Add a short design note to `pkg/daemon/daemon_nft.go` head comment describing
   the junos-host deny rule block and its ordering.
+- Record in the docs matrix the two documented properties: (1) the deny applies
+  to NEW connections (an established session predating the commit survives until
+  it closes — SMR-F3), and (2) the bounded, safe-side daddr over-deny for a
+  named-bad source arriving via an unexpected zone (SMR-F1).
 - `_Log.md` per the project logging rules.
 
 ---
@@ -452,11 +473,22 @@ Run under the cluster lock (`./test/incus/with-cluster.sh`), on
   RETH netdev-name resolution fragility, and (2) it would make junos-host deny
   *more* precise than the rest of the chain, which is already destination-scoped
   (`daddr`) by accepted design (#3718 Option B). daddr-scoping reusing
-  `BuildZoneHostInboundViews` is exactly as correct as the existing chain for
-  every strict-commit-valid config (the multi-zone-reachable-address ambiguity
-  is already rejected by the strict gate), and reuses tested machinery. iifname
-  can be a later precision upgrade if a concrete asymmetric-routing case
-  demands it.
+  `BuildZoneHostInboundViews` reuses tested machinery and is exactly as
+  destination-scoped as the existing chain.
+  **The bounded over-deny, and why it is safe (SMR-F1):** daddr-scoping CAN
+  differ from strict Junos from-zone semantics in an asymmetric-routing/spoofing
+  case — a packet from the named-bad source arriving on a *different* zone's
+  interface but destined to the from-zone's firewall IP is dropped by our
+  `daddr {W} saddr BAD drop` rule, whereas Junos (from-zone = the ingress zone)
+  would not apply the wan-zone policy. This over-deny is acceptable and safe
+  because: (a) it is **bounded to the explicitly-named bad source** — no source
+  the operator did not name in a deny is ever affected; (b) for a DENY,
+  dropping a spoofed/asymmetric packet from a named-bad source to a firewall IP
+  is the **safe-side error**; and (c) it is **consistent with the existing
+  daddr-only chain** (#3718 Option B), introducing no new class of imprecision.
+  The strict-commit gate already rejects the multi-zone-reachable-address
+  *ambiguity*. iifname is an optional later precision upgrade if a concrete case
+  ever demands strict from-zone semantics; it is not required.
 - **Commit-REJECT the un-representable remainder (option i)** — breaks vSRX
   config-load parity and refuses partially-enforced configs (§3.2). Rejected.
 - **Do nothing / keep deferring** — explicitly disallowed by the task; the
