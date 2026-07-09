@@ -1,367 +1,331 @@
-# Research Plan — #4874 DHCP client lease-lifecycle: expired v4/v6-PD retention vs. RFC expiry
+# Research Plan — #4874 DHCP client lease-lifecycle: expired v4/v6-PD retention & terminal-cleanup route/RA staleness
 
 - **Issue:** #4874 (label `bug`; Codex review 175 findings C175-HC-078, C175-HC-079)
 - **Branch:** `research/4874-dhcp-lease-expiry`
 - **Base:** origin/master @ `4047fd553`
-- **Revision:** r2 (folded Claude-SMR r1 F1/F2/F3; Codex r1 pending)
-- **Status:** PLAN-READY (split verdict) — see §6
+- **Revision:** r3 (Codex r1 BLOCKER accepted — A re-opened as A2; SMR r1 F1/F2/F3
+  folded; B refined per Codex F5/F6)
+- **Status:** PLAN-READY (fix A2 + B; keep A1) — see §6
 - **Mode:** `/research` — stops at PLAN-READY. No PR, no production code touched here.
 
 > Standing line (per task): *If reviewers conclude the current documented
-> behavior is correct, PLAN-KILL is an acceptable verdict.* This plan applies
-> that literally: it PLAN-KILLs Defect A (documented, deliberate) and
-> PLAN-READYs Defect B (a genuine, separable RFC-8415 conformance bug).
+> behavior is correct, PLAN-KILL is an acceptable verdict.* Applied honestly:
+> the **timeout-retention (A1)** is correct and stays; the **terminal-cleanup
+> route/RA staleness (A2)** and the **zero-lifetime IA_PD re-advertisement (B)**
+> are genuine bugs and are PLAN-READY.
 
 ---
 
 ## 1. Problem statement
 
-#4874 bundles two DHCP-client lease-lifecycle claims from Codex review 175:
+#4874 bundles two Codex-175 claims. Research splits Defect A into two distinct
+sub-behaviors that the original plan (r1) wrongly lumped together:
 
-- **Defect A (C175-HC-078):** a v4 client that reaches T2, gets no reply, and
-  hits lease expiry restarts DORA/Solicit but "never first removes the old
-  netlink address / default route, lease-map entry, or delegated-prefix map."
-  The expired binding is retained and exposed "indefinitely"; the finding also
-  asserts "a finite v4 retry count can even return from the goroutine with it
-  still installed."
-
-- **Defect B (C175-HC-079):** when a DHCPv6 server revokes an IA_PD by returning
-  the prefix with **valid-lifetime 0** while renewing an IA_NA, the client stores
-  the zero-lifetime prefix, `commitLease` replaces the prior (nonempty) PD slice,
-  `DelegatedPrefixesForRA` keeps returning it, and the RA path re-advertises the
-  revoked prefix with default **30-day valid / 7-day preferred** lifetimes.
-
-The two are NOT the same class of problem. Defect A is a **deliberate,
-documented WAN-availability design** (#1844). Defect B is a **genuine RFC 8415
-conformance bug** that is *inconsistent with the code's own IA_NA handling*
-(#4383). This plan researches both to a converged, differentiated verdict.
-
----
-
-## 2. Current behavior (quantified, read at `4047fd553`)
-
-### 2.1 Defect A — v4/v6 timeout-expiry retention (the #1844 design)
-
-`pkg/dhcp/dhcp.go runDHCPv4` (≈735-903) and `runDHCPv6` (≈1148-1310):
-
-- On a renew **NAK**, `abandonLeaseAfterNAK` removes the address, deletes the
-  lease record, and fires `onGatewayChange` **immediately** (RFC 2131 §4.4.5,
-  #3956). This path is correct and not in dispute.
-- On a renew/rebind **TIMEOUT** (no reply), the inner renewal loop `break`s and
-  the **outer `for` loop re-enters a fresh DORA/Solicit** with `committed`
-  (v4) / `committed`+`committedPDs` (v6) **still non-nil** — i.e. the address,
-  the FRR default route (admin distance 200), the lease-map entry, and the
-  DHCPv6 delegated-PD map **stay installed** across the re-acquisition attempts.
-- With `retransmission-attempt 0` (the DEFAULT — "unlimited"), the outer loop
-  retries DORA forever with capped backoff, so the expired binding persists for
-  the entire server-outage window. This is the finding's "indefinitely."
-
-**Documented, deliberate (README `pkg/dhcp/README.md`):** *"Lease records are
-NOT expired by the wall clock. During a timeout-driven failed re-acquisition …
-the lease record and the kernel address intentionally persist until replaced —
-consumers (FRR DHCP routes, ip-monitoring resolved next-hops) keep the
-last-known gateway. This deliberately diverges from RFC 2131 §4.4.5 for the
-timeout case."* The README also states the **Coupling rule (#1844):** any
-lease-record removal MUST route through an `onGatewayChange`-firing path so the
-ip-monitoring overlay withdraws its resolved next-hop in lock-step, and names
-clock-expiry as future work *subject to that rule.*
-
-**The finding's finite-retry sub-claim is FALSE.** On `retransmission-attempt N`
-exhaustion the outer loop `return`s, and `Start`'s goroutine runs
-`defer m.finishClient(key, dc)` on **every** exit path. `finishClient` reads
-`lease := m.leases[key]` (still populated), calls `m.removeAddress`, deletes the
-lease + delegated-PD map entries, and fires `onGatewayChange`. So a finite-retry
-exit **does** deconfigure the binding — it does not "return with it still
-installed." (v6 ctx-cancel branches also delete `leases`+`delegatedPDs` inline.)
-
-**Net Defect-A reality:** the only real retention is the *unlimited-retry
-timeout* window, which is exactly the #1844 last-known-gateway design. There is
-no leak on the finite-retry / cancel paths.
-
-### 2.2 Defect B — zero-lifetime IA_PD stored + re-advertised (genuine bug)
-
-Trace, all at `4047fd553`:
-
-1. `extractDelegatedPrefixes` (`dhcp.go` ≈1651) appends **every** IA_PD prefix,
-   including `ValidLifetime == 0`. No zero-lifetime filter.
-2. `runDHCPv6` renew/rebind commit: `if len(renewed.prefixes) > 0 {
-   committedPDs = renewed.prefixes }`. A reply carrying one zero-lifetime prefix
-   has `len == 1`, so `committedPDs` is **replaced** with the revoked prefix.
-3. `commitLease` (`commit.go`): `if len(prefixes) > 0 { m.delegatedPDs[iface] =
-   prefixes }` — stores the zero-lifetime prefix into the RA-source map.
-4. `DelegatedPrefixesForRA` returns it unfiltered.
-5. `daemon_ra.go:43` — `if mapping.ValidLifetime > 0 { pfx.ValidLifetime = … }`
-   — the guard is false, so `RAPrefix.ValidLifetime` stays **0**.
-6. `ra/sender.go:753` — `validLife := pfx.ValidLifetime; if validLife <= 0 {
-   validLife = defaultValidLifetime }` → **`2592000` (30 days)**; preferred
-   likewise defaults to `604800` (7 days).
-
-**Result:** a prefix the server explicitly **revoked** (RFC 8415 §12.1 / §18.2.10
-— valid-lifetime 0 = stop using now) is re-advertised to LAN hosts with a fresh
-30-day valid / 7-day preferred lifetime, and keeps renewing off the *unrelated*
-IA_NA lifetime. Downstream hosts keep a reclaimed prefix → overlap with another
-subscriber, source-address policy failures, wrong-subscriber routing.
-
-**This contradicts the code's own IA_NA behavior.** `selectIANAAddress`
-(`dhcp.go` ≈1454, #4383/F-264) **already skips** any IAADDR with
-`ValidLifetime == 0`. The IA_PD path is simply missing the symmetric guard.
-There is **no test** pinning the current (store-zero-lifetime) IA_PD behavior —
-`TestExtractDelegatedPrefixes` covers single/none/multiple non-zero prefixes
-only. So Defect B is unpinned and safe to change.
-
-**The one real subtlety** — and the reason B is *not* a one-line filter: the
-`len(prefixes) > 0` guard is a **deliberate anti-outage** rule (README:
-*"An IA_PD reply with no prefixes retains previously delegated prefixes"*). It
-exists so a renew reply that merely **omits** IA_PD does not wipe the LAN prefix.
-A naive "filter zero-lifetime inside `extractDelegatedPrefixes`" turns a
-present-but-zero-lifetime **withdrawal** into an empty slice, which then hits the
-retain guard and **keeps the revoked prefix** — the exact opposite of the intent.
-The fix MUST distinguish three cases:
-
-| Reply contents                    | Correct action        |
-|-----------------------------------|-----------------------|
-| IA_PD **absent** (silence)        | **Retain** prior PDs (anti-outage, #1844 spirit) |
-| IA_PD present, valid-lifetime > 0  | Install/replace       |
-| IA_PD present, **valid-lifetime 0**| **Withdraw** (drop from PD/RA set) |
-
-That is exactly the v4 NAK vs. timeout distinction (#3956), applied to PD:
-explicit withdrawal is honored immediately; silence retains.
+- **A1 — timeout-retention (INTENTIONAL).** A v4 client / v6-PD that reaches T2,
+  times out, and re-acquires keeps the address + default route + PD installed
+  during the (default *unlimited*) re-acquisition. This is the deliberate #1844
+  last-known-gateway retention, documented in `pkg/dhcp/README.md`.
+- **A2 — terminal-cleanup route/RA staleness (BUG, found in Codex plan-review
+  r1, confirmed firsthand).** On a client's *terminal* exit
+  (`retransmission-attempt N` exhaustion → `finishClient`) or an explicit
+  DHCPNAK (`abandonLeaseAfterNAK`), the code removes the **netlink address** and
+  the **lease/PD map entries** and fires `onGatewayChange`, but does **not**
+  fire `scheduleRecompile`. Because the FRR DHCP default route and the v6 RA
+  prefix are compiled state re-rendered *only* by `applyConfig` (driven by
+  `onAddressChange`/`scheduleRecompile`), they stay **stale** — the default
+  route keeps pointing at the withdrawn gateway and the RA sender keeps
+  advertising the withdrawn prefix — until some unrelated commit recompiles.
+  This is exactly the issue's "stale default routes / incorrect RA" blast radius.
+- **B — zero-lifetime IA_PD stored + re-advertised (BUG).** A DHCPv6 server that
+  revokes an IA_PD by returning the prefix with **valid-lifetime 0** while
+  renewing IA_NA has the revoked prefix stored, kept by `DelegatedPrefixesForRA`,
+  and re-advertised with the RA sender's default **30-day valid / 7-day
+  preferred** lifetimes.
 
 ---
 
-## 3. What the finding actually wants vs. what #1844 protects
+## 2. Current behavior (quantified, read + verified at `4047fd553`)
 
-- **Wants (A):** RFC 2131 §4.4.5 wall-clock expiry — deconfigure the address +
-  default route the moment the lease elapses, even mid-re-acquisition.
-- **#1844 protects (A):** WAN self-uplink availability. A transient DHCP-server
-  outage should not blackhole the firewall's own default route / ip-monitoring
-  next-hop; the last-known gateway is retained until a replacement arrives. This
-  was a reviewed, deliberate divergence, and clock-expiry was explicitly deferred
-  to future work *with* the `onGatewayChange` coupling rule.
-- **Wants (B):** treat a zero valid-lifetime IA_PD as a withdrawal — drop it from
-  the RA/PD set instead of storing + defaulting it to 30 days.
-- **#1844/README protects (B):** only the *absent*-IA_PD retain rule. It does
-  **not** endorse re-advertising an explicitly-revoked prefix; that is an
-  unintended consequence of `extractDelegatedPrefixes` lacking the zero-lifetime
-  guard that `selectIANAAddress` already has.
+### 2.1 A1 — timeout-retention (intentional #1844)
+
+`runDHCPv4` (≈735-903) / `runDHCPv6` (≈1148-1310): on a renew/rebind **timeout**
+the inner loop `break`s and the outer loop re-enters a fresh DORA/Solicit with
+`committed` (+`committedPDs`) still non-nil — address, FRR default route (admin
+distance 200), lease-map entry, and PD map stay installed. Under the default
+`retransmission-attempt 0` (unlimited) the outer loop retries forever, so the
+binding persists for the whole server-outage window.
+
+Documented deliberate: `pkg/dhcp/README.md` ("Lease records are NOT expired by
+the wall clock … deliberately diverges from RFC 2131 §4.4.5 for the timeout
+case"). **KEEP.** RFC-correctness here is a WAN-availability regression (§4 Path
+A). No new evidence #1844 was wrong.
+
+### 2.2 A2 — terminal cleanup withdraws the address but not the route/RA (BUG)
+
+Verified firsthand:
+
+- `removeAddress` (`dhcp.go` ≈1783-1801) does **only** `AddrDel`; its own comment
+  says *"Routes are cleaned up via FRR config removal."* It never touches routes.
+- `finishClient` (`dhcp.go` ≈386-410): deletes `m.leases[key]`, deletes v6
+  `m.delegatedPDs[iface]`, calls `removeAddress`, then `m.fireGatewayChange()`.
+  **No `scheduleRecompile`.**
+- `abandonLeaseAfterNAK` (`dhcp.go` ≈914-925): `removeAddress` + delete lease +
+  `fireGatewayChange`. **No `scheduleRecompile`.**
+- `fireGatewayChange` → the daemon's second DHCP callback →
+  `d.ipmon.NotifyNextHopChange()` (`daemon_run.go` ≈1475-1478). That only marks
+  the ip-monitoring **overlay** dirty, and *only if* a `PreferredRoute` with a
+  `NextHopInterface` references it (`ipmon.go` ≈291-315). It does **not**
+  re-render the base DHCP default route.
+- The base DHCP default route + classless routes are rendered **only** by
+  `applyConfig` → `collectDHCPRoutes`/`renderDHCPDefaults` reading `Leases()`
+  (`frr/config_render.go` ≈262-270); the RA prefix **only** by `buildRAConfigs`
+  reading `DelegatedPrefixesForRA()` (`daemon_ra.go` ≈28-31). Both run on
+  recompile, which finishClient/abandonLeaseAfterNAK never trigger.
+
+**Consequences:**
+- **`retransmission-attempt N` exhaustion:** the run-loop goroutine self-exits
+  (not from an `applyConfig`), so nothing recompiles → the FRR `ip route
+  0.0.0.0/0 <gw> 200` and (v6) the RA prefix persist **indefinitely** until an
+  unrelated commit. This is the finding's "a finite v4 retry count can return
+  from the goroutine with it still installed" — **partially true**: the *address*
+  is removed (my r1 was right on that), but the *route / RA binding* is not.
+- **DHCPNAK:** the README advertises "deconfigures the interface immediately"
+  (#3956), but only the address is immediate; the default route is not withdrawn
+  until the next successful DORA (or commit). During a server flap this is a real
+  stale-route/blackhole window and contradicts the documented promise.
+- **Config-removal path is fine:** `reconcileDHCPClients` runs from within
+  `applyConfigLocked`, so the surrounding `applyConfig` re-renders FRR after
+  `finishClient` — no staleness there. The exposure is the *non-applyConfig*
+  terminal exits above.
+
+**Fix (A2):** couple lease-record **removal** to a recompile, mirroring how
+lease **installation** couples to it (`commitLease` fires `scheduleRecompile`).
+This is the natural extension of the documented **#1844 coupling rule** ("any
+lease-record removal MUST route through a path that fires `onGatewayChange`") —
+A2 adds "…and `scheduleRecompile`, so the FRR route + RA withdraw in lock-step,
+not just the ipmon overlay." See §4 Path C.
+
+### 2.3 B — zero-lifetime IA_PD stored + re-advertised (BUG)
+
+Chain (verified, matches Codex F4): `extractDelegatedPrefixes` (≈1651-1680)
+appends every prefix with no `ValidLifetime==0` filter → `runDHCPv6` `if
+len(prefixes)>0 { committedPDs = prefixes }` (≈1259/1295) → `commitLease` `if
+len(prefixes)>0 { m.delegatedPDs[iface]=prefixes }` (`commit.go` ≈138-142) →
+`DelegatedPrefixesForRA` (≈274-290) returns it → `daemon_ra.go:43` `if
+mapping.ValidLifetime>0` leaves `RAPrefix.ValidLifetime=0` → `sender.go:753` `if
+validLife<=0 { validLife=defaultValidLifetime }` = **2592000 (30d)** / 604800
+(7d). Revoked prefix re-advertised 30-day.
+
+Internally inconsistent: `selectIANAAddress` (≈1454, #4383/F-264) already skips
+`ValidLifetime==0` for IA_NA. The IA_PD path lacks the symmetric guard. **No
+test pins the current store-zero-lifetime behavior** (`TestExtractDelegatedPrefixes`
+covers single/none/multiple non-zero only). Safe to change.
+
+---
+
+## 3. What the finding wants vs. what #1844 protects
+
+- **Wants (A1):** RFC 2131 §4.4.5 wall-clock expiry. **#1844 protects:** WAN
+  self-uplink availability across a transient server outage. → keep retention.
+- **Wants (A2):** the default route / RA prefix withdrawn when the binding is
+  actually torn down. **#1844 does NOT protect** re-advertising a route/prefix
+  after its owning lease was deleted — that is an unintended recompile-coupling
+  gap, not a deliberate retention. → fix.
+- **Wants (B):** treat valid-lifetime-0 IA_PD as a withdrawal. **#1844/README
+  protects** only the *absent*-IA_PD retain rule, not re-advertising an
+  explicitly-revoked prefix. → fix.
 
 ---
 
 ## 4. Multiple Path Options
 
-### Path A — Implement RFC clock-expiry with the #1844 `onGatewayChange` coupling
-Add a wall-clock expiry timer (v4: `lease.LeaseTime` from grant; v6: IA_NA/PD
-valid-lifetime). On expiry, deconfigure the address + default route + lease-map +
-delegated-PD map through an `onGatewayChange`-firing path, then re-acquire.
+### Path A — full RFC clock-expiry (A1 → expire on the wall clock)
+Add a lease-lifetime timer; on expiry deconfigure address+route+PD and re-acquire.
+- **RFC:** full. **WAN-availability risk: HIGH** — reverses #1844; a server reboot
+  longer than the lease blackholes the firewall's own uplink + ip-monitoring +
+  FRR default. **Blast radius:** largest (timers in both families, coupling rule).
+- **Verdict:** rejected as default — overturns a documented, reviewed choice with
+  no evidence it was wrong. (A knob remains a *possible* future issue, not #4874.)
 
-- **RFC conformance:** full (both §4.4.5 and RFC 8415 §18.2.10).
-- **WAN availability risk:** **HIGH.** Directly reverses the #1844 decision. A
-  DHCP-server reboot longer than the lease now blackholes the firewall's own
-  uplink + ip-monitoring overlay + FRR default route — the exact failure #1844
-  was created to prevent. On a residential/SMB WAN this is a self-inflicted
-  outage on every server maintenance window.
-- **Blast radius:** run-loop timer plumbing in both families, `finishClient`
-  ordering, ip-monitoring `NotifyNextHopChange`, FRR route withdrawal,
-  `gateway_hook_test.go`, `renew_test.go` seams. Largest of the three.
-- **Verdict lean:** rejected as the *default* — it overturns a documented,
-  reviewed availability choice without new evidence that #1844 was wrong.
+### Path A′ (middle) — expire the ADDRESS but keep the ROUTE
+- **Rejected for the current architecture, but not "impossible."** In xpf today
+  the DHCP default route is rendered from the *lease* and resolves through the
+  interface address's connected route; deleting the address removes the on-link
+  foundation the route needs, and the route itself lives in FRR config, so a
+  clean "address-gone / route-kept" split would need explicit onlink/host-route
+  plumbing that does not exist. So A′ collapses into Path A or the retain default.
+  (Softened per Codex F7: #1844 is a *current* tradeoff, not settled forever —
+  the duplicate-allocation risk under unlimited retry is real; a future knob may
+  revisit it. Out of scope for #4874.)
 
-### Path B — Keep retention as-is; PLAN-KILL the finding as a misread
-Document that Defect A is intentional #1844 design and that the finite-retry
-sub-claim is factually wrong (finishClient cleans up), then close.
+### Path B — do nothing / PLAN-KILL the whole issue
+- Correct **only** for A1. Ignores A2 (real recompile-coupling bug affecting even
+  the default NAK path) and B (real RFC 8415 bug). Rejected as the whole answer.
 
-- **RFC conformance:** unchanged (deliberate §4.4.5 divergence for timeout).
-- **Availability risk:** none.
-- **Blast radius:** zero code.
-- **Gap:** ignores **Defect B**, which is a *genuine* bug not covered by the
-  #1844 retention rationale. Adopting Path B wholesale would wrongly bless the
-  30-day re-advertisement of a revoked prefix. So Path B is correct **for A
-  only**, not for the whole issue.
+### Path C — Fix A2 + B, keep A1  ← RECOMMENDED
+**A2 fix — couple removal to recompile.** Make the terminal removal paths
+(`finishClient`, `abandonLeaseAfterNAK`, and the inner-loop `ctx.Done` inline
+deletes) fire `scheduleRecompile` (the debounced `onAddressChange`) **in addition
+to** `onGatewayChange`, so `applyConfig` re-renders FRR (withdraws the DHCP
+default/classless routes) and rebuilds RA (drops the withdrawn PD). Symmetry
+argument: installation already couples to `scheduleRecompile` via `commitLease`;
+removal must too. Implementation notes for `/engineer`:
+  - The 2 s debounce + the daemon's "recompile skips reconcile when the binding
+    plan is unchanged" absorbs the redundant fire on the *config-removal*
+    (Reconcile-driven) path, which is already inside `applyConfig` — so an extra
+    scheduled recompile there coalesces to a cheap no-op and does **not**
+    re-enter/deadlock `applySem` (scheduleRecompile only arms a timer; the
+    callback runs on its own goroutine, not inline).
+  - Preserve the #1844 coupling-rule ordering: address removed → maps deleted →
+    `onGatewayChange` → `scheduleRecompile`.
+  - Update `pkg/dhcp/README.md` to extend the coupling rule to recompile and to
+    correct the "NAK deconfigures immediately" wording (route now withdrawn too).
 
-### Path A′ (middle) — expire the ADDRESS but retain the gateway ROUTE — REJECTED on correctness
-The task suggested a middle path: on timeout-expiry, remove the local interface
-address but keep the default route (or gate the whole thing behind a config
-knob). **Rejected on the merits, not for effort:** removing the local interface
-address while keeping the DHCP-learned default route is technically incoherent
-on Linux. The default route resolves its next-hop through the on-link connected
-route that the interface address installs; drop the address and the connected
-route goes with it, so the gateway's neighbor resolution and ip-monitoring's
-next-hop reachability probe both break — you destroy the very route you tried to
-preserve. This is exactly why #1844 retains the **whole** binding (address +
-route) rather than splitting them. The config-knob variant (opt-in clock-expiry)
-remains a *possible* future issue, but it must route through the documented
-`onGatewayChange` coupling rule and is out of scope for #4874; there is no new
-evidence the #1844 default is wrong. So A′ collapses back into either Path A
-(full clock-expiry, HIGH availability risk) or the retain default.
+**B fix — explicit-withdrawal semantics for IA_PD.** Partition each reply into
+`live` (vlt>0) and `withdrawn` (vlt==0); carry a signal so `commitLease` applies
+a **per-prefix** reconcile rather than a blunt clear-all (refined per Codex F5):
 
-### Path C — Split: PLAN-KILL A (document), PLAN-READY B (fix the withdrawal)  ← RECOMMENDED
-Treat the two defects on their merits:
+| Reply contents (IA_PD)                          | New stored PD set |
+|-------------------------------------------------|-------------------|
+| ≥1 live prefix                                   | `(prior \ withdrawn) ∪ live` → in practice = `live` (servers echo all held PDs on RENEW, `renew.go` ≈146-159) |
+| 0 live, ≥1 explicitly withdrawn (vlt==0)         | `prior \ withdrawn` (remove only the zeroed prefixes; usually empties, but does **not** over-withdraw a co-held prefix the reply merely omitted) |
+| 0 prefixes at all (absent / empty IA_PD)         | `prior` unchanged (retain — #1844 anti-outage) |
 
-- **A → PLAN-KILL/keep.** The retention is the #1844 design; the finite-retry
-  leak claim is false. Optionally strengthen the README to name #4874 as the
-  re-litigation and (if desired) expose an opt-in knob later — but no code is
-  required now. A future clock-expiry, if ever wanted, still routes through the
-  documented `onGatewayChange` coupling rule; that is a separate, larger issue.
-- **B → PLAN-READY.** Add the zero-valid-lifetime withdrawal semantics for IA_PD,
-  mirroring `selectIANAAddress` (#4383) and the v4 NAK/timeout split (#3956),
-  while preserving the absent-IA_PD retain rule. Concretely, the smallest correct
-  shape:
-  1. In `parseV6Reply` (not blindly inside `extractDelegatedPrefixes`), partition
-     the extracted prefixes into `live` (valid-lifetime > 0) and detect
-     `sawWithdrawal := any prefix with valid-lifetime == 0`. `live` becomes the
-     stored set. The precise signal is **"saw an explicit zero-lifetime
-     prefix"**, NOT "any IA_PD option present": an IA_PD option that carries no
-     prefixes at all (e.g. a NoPrefixAvail status) is ambiguous and the
-     conservative current retain is fine — it is not the Defect-B scenario, so
-     the fix must not touch it.
-  2. Carry a small signal on `dhcpv6Result` (e.g. `withdrew bool` alongside
-     `prefixes` already filtered to `live`) so the run loop / `commitLease` can
-     apply the three-way decision:
+  - The signal is **"saw an explicit zero-lifetime prefix"**, not "any OptIAPD
+    present": an empty IA_PD / NoPrefixAvail is ambiguous and stays on the retain
+    path (Codex F5 + SMR F2).
+  - **Acquire-path (Codex F6):** on initial acquire, if the reply yields no IA_NA
+    address AND no *live* prefix (only withdrawn PDs), it must be treated as an
+    acquisition failure and retried — NOT settled into an empty lease defaulted to
+    1 h. Extend the existing `wantNA && !addr.IsValid() && wantPD &&
+    len(live)==0` rejection to count *live* prefixes, mirroring `selectIANAAddress`.
+  - Clearing/withdrawing fires `scheduleRecompile` so RA reconverges (and A2's fix
+    means a terminal exit also withdraws it).
 
-     | Reply                                       | Action |
-     |---------------------------------------------|--------|
-     | ≥1 live prefix (vlt>0)                        | store `live` (replaces; a co-reported withdrawn prefix drops for free) |
-     | 0 live, ≥1 withdrawn (vlt==0)                | **clear** `m.delegatedPDs[iface]` + `scheduleRecompile` |
-     | 0 prefixes at all (absent / empty IA_PD)     | **retain** (unchanged #1844 anti-outage rule) |
-
-  3. Adjust the `len(prefixes) > 0` guard sites (`runDHCPv6` renew/rebind commit
-     and `commitLease`) so an explicit all-withdrawn reply **clears** the stored
-     PDs (and fires `scheduleRecompile` so RA reconverges), rather than being a
-     no-op that retains them. The "≥1 live" row already handles partial
-     withdrawal (withdraw /56, keep /48) by storing only live prefixes.
-  4. RA path is then correct for free: with the prefix dropped,
-     `DelegatedPrefixesForRA` no longer returns it, so `daemon_ra.go` /
-     `sender.go` never see it. (No change needed to the sender's zero→default
-     rule, which is correct for *configured* prefixes.)
-
-- **RFC conformance:** B becomes fully RFC 8415-conformant; A stays a documented,
-  deliberate §4.4.5 divergence.
-- **LAN availability risk (B):** LOW-to-MEDIUM and *correct-direction*. Honoring a
-  genuine withdrawal briefly removes the LAN prefix — but that is the RFC-mandated
-  behavior and strictly better than advertising a reclaimed prefix for 30 days.
-  Mitigation: only an **explicit valid-lifetime-0** prefix withdraws; a renew that
-  merely omits IA_PD still retains (anti-flap). This matches the v4 NAK-vs-timeout
-  asymmetry the project already ships.
-- **Blast radius (B):** contained to `pkg/dhcp` (`parseV6Reply`,
-  `dhcpv6Result`, the two `len(prefixes)>0` guard sites, `commitLease`) + one new
-  test in `dhcp_test.go`/`commit_test.go`. RA/daemon code unchanged. No v4 change.
-- **Verdict lean:** ship B, document/kill A.
+- **RFC:** A2 + B fully conformant; A1 stays a documented deliberate divergence.
+- **LAN/WAN risk:** correct-direction and bounded. A2 only withdraws bindings
+  whose lease was *already* deleted (no new WAN exposure — it makes teardown
+  match the address). B withdraws only on an *explicit* server statement.
+- **Blast radius:** `pkg/dhcp` (`finishClient`, `abandonLeaseAfterNAK`, the
+  ctx.Done deletes, `parseV6Reply`, `dhcpv6Result`, `commitLease`), `README.md`,
+  tests. RA/daemon/FRR consumers unchanged (they already re-render on recompile).
+- **Verdict:** ship.
 
 ---
 
-## 5. Blast radius / affected files (Path C, B-only implementation)
+## 5. Blast radius / affected files (Path C)
 
-- `pkg/dhcp/dhcp.go` — `parseV6Reply` (partition to `live` + `sawWithdrawal`
-  signal), `dhcpv6Result` (add `withdrew bool`), `runDHCPv6` renew/rebind commit
-  guards.
-- `pkg/dhcp/commit.go` — `commitLease` PD store/clear branch (honor an explicit
-  all-withdrawn as a delete).
-- `pkg/dhcp/README.md` — document the zero-lifetime IA_PD withdrawal semantics
-  next to the existing #4383 IA_NA note and the #1844 retention note; record
-  #4874's A-verdict (retention is intentional) so this is not re-litigated.
-- `pkg/dhcp/dhcp_test.go` / `commit_test.go` — new: zero-lifetime IA_PD present ⇒
-  prefix dropped; IA_PD absent ⇒ prior prefix retained; mixed live+withdrawn ⇒
-  only live kept.
-- **Unchanged:** `pkg/daemon/daemon_ra.go`, `pkg/ra/sender.go`, all v4 paths,
-  ip-monitoring. (A: no code change.)
+- `pkg/dhcp/dhcp.go` — A2: `finishClient`, `abandonLeaseAfterNAK`, inner-loop
+  `ctx.Done` delete sites fire `scheduleRecompile`. B: `parseV6Reply` (partition
+  `live`/`withdrawn` + `sawWithdrawal`), `dhcpv6Result` (add fields), `runDHCPv6`
+  commit guards, acquire-path rejection.
+- `pkg/dhcp/commit.go` — `commitLease` per-prefix PD reconcile (store live /
+  remove withdrawn / retain on absent).
+- `pkg/dhcp/README.md` — extend the #1844 coupling rule to `scheduleRecompile`;
+  correct the "NAK deconfigures immediately" wording; document the zero-lifetime
+  IA_PD withdrawal next to the #4383 IA_NA note.
+- `pkg/dhcp/dhcp_test.go` / `commit_test.go` / `gateway_hook_test.go` — new tests
+  (§7).
+- **Unchanged:** `pkg/daemon/daemon_ra.go`, `pkg/ra/sender.go`,
+  `pkg/frr/config_render.go`, `pkg/ipmon` — all already re-render on recompile;
+  A2 makes the recompile fire.
 
 ---
 
 ## 6. Recommendation
 
-**Split verdict:**
+**PLAN-READY (Path C).**
+- **A1 — keep.** Timeout-retention is the deliberate #1844 last-known-gateway
+  design. RFC clock-expiry (Path A) is a WAN-availability regression with no new
+  evidence it is warranted.
+- **A2 — fix.** Terminal-cleanup (`finishClient` max-attempts) and NAK
+  (`abandonLeaseAfterNAK`) remove the address but leave the FRR default route and
+  v6 RA prefix stale because they never `scheduleRecompile`. Couple removal to
+  recompile (extend the #1844 coupling rule). This closes the issue's "stale
+  default routes / incorrect RA" and makes the documented immediate-NAK claim
+  true for the route.
+- **B — fix.** Zero-valid-lifetime IA_PD is an RFC 8415 withdrawal; today it is
+  stored and re-advertised 30-day. Add per-prefix withdrawal semantics
+  (withdrawal-vs-silence) + the acquire-path all-withdrawn rejection.
 
-- **Defect A — PLAN-KILL / keep current behavior.** The timeout-retention is the
-  deliberate, reviewed #1844 last-known-gateway design, documented in
-  `pkg/dhcp/README.md` as an intentional RFC 2131 §4.4.5 divergence for the
-  timeout case. The finding's material sub-claim ("a finite v4 retry count can
-  return from the goroutine with it still installed") is **factually false** —
-  `finishClient` deconfigures on every terminal exit and fires `onGatewayChange`.
-  No code change; optionally a one-paragraph README note recording #4874.
-
-- **Defect B — PLAN-READY (Path C, B-only).** The zero-valid-lifetime IA_PD
-  storage + 30-day RA re-advertisement is a genuine RFC 8415 conformance bug,
-  inconsistent with the code's own #4383 IA_NA zero-lifetime skip, unpinned by
-  any test. Fix by adding explicit-withdrawal semantics that preserve the
-  deliberate absent-IA_PD retain rule (the withdrawal-vs-silence distinction is
-  load-bearing and is the whole reason this is not a one-liner).
-
-The issue therefore closes as: **A documented as intended, B implemented under
-`/engineer #4874`.**
+This supersedes plan r1's "PLAN-KILL A" — Codex plan-review r1 correctly found
+the A2 recompile-coupling gap my SMR r1 missed (self-correction recorded in
+`claude-smr-plan-r2.md`).
 
 ---
 
-## 7. Test plan (for `/engineer`, B-only)
+## 7. Test plan (for `/engineer`)
 
-Unit (no traffic, `pkg/dhcp`):
-- `extractDelegatedPrefixes` / `parseV6Reply`: IA_PD present with valid-lifetime 0
-  ⇒ zero live prefixes + `iapdPresent = true`.
-- Renew reply {IA_NA renewed, IA_PD valid-lifetime 0} ⇒ `m.delegatedPDs[iface]`
-  cleared; `DelegatedPrefixesForRA()` empty; `scheduleRecompile` fired.
-- Renew reply with **no** IA_PD option ⇒ prior PDs retained (regression guard for
-  the anti-outage rule).
-- Mixed reply {live /48, withdrawn /56} ⇒ only the /48 retained.
-- `delegatedPrefixesChanged` still fires on the retain→empty transition.
+A2 (unit, `pkg/dhcp`, no traffic — use the netlink/recompile seams):
+- `retransmission-attempt 1`, acquire once, force the re-acquire to exhaust →
+  goroutine exits → assert `scheduleRecompile`/`onAddressChange` fired (route/RA
+  re-render requested), not just `onGatewayChange`.
+- DHCPNAK in RENEWING → assert `onAddressChange` fired (route withdrawn), address
+  removed, lease deleted (extends `gateway_hook_test.go`).
+- Reconcile-removal path → still exactly one recompile (no double/no deadlock).
 
-Integration (optional, cheap): `buildRAConfigs` with a withdrawn PD ⇒ no
-`RAPrefix` emitted for it (proves the RA leak is closed end-to-end).
+B (unit):
+- IA_PD present, valid-lifetime 0 ⇒ 0 live + `sawWithdrawal`; `delegatedPDs`
+  cleared; `DelegatedPrefixesForRA()` empty; recompile fired.
+- No IA_PD option ⇒ prior PDs retained (anti-outage regression guard).
+- Mixed {live /48, withdrawn /56} ⇒ only /48 retained.
+- Multi-PD partial withdrawal: prior {/48,/56}; reply withdraws /56 only, omits
+  /48 ⇒ result {/48} (per-prefix, not clear-all) — the Codex-F5 guard.
+- Acquire with only withdrawn PDs + no IA_NA ⇒ acquisition failure/retry, no
+  empty 1 h lease (Codex F6).
+- `buildRAConfigs` with a withdrawn PD ⇒ no `RAPrefix` emitted (end-to-end).
 
-No cluster smoke required — DHCPv6 PD is control-plane, not dataplane-forwarding;
-`make test` + the new unit tests are sufficient for a `/research` sign-off. (The
-`/engineer` gate decides final smoke scope.)
+No cluster smoke required — control-plane only; `make test` + new units suffice
+for `/research`. `/engineer` decides final smoke scope.
 
 ---
 
 ## 8. Risks & mitigations
 
-- **R1 — B over-withdraws on a flapping/buggy server that transiently sends
-  valid-lifetime 0.** Mitigation: withdraw ONLY on an explicit present-but-zero
-  IA_PD; absent IA_PD retains. Identical to the shipped v4 NAK-vs-timeout policy.
-  A server sending valid-lifetime 0 is making an unambiguous RFC 8415 statement.
-- **R2 — Signal plumbing (`sawWithdrawal`) accidentally changes the acquire
-  path.** Mitigation: on initial acquire there is no prior PD to withdraw; the
-  clear branch is a no-op when `committedPDs` is empty. Cover with the "absent
-  IA_PD" test. Tightening the signal to "saw an explicit zero-lifetime prefix"
-  (not "any IA_PD option present") keeps the empty-IA_PD/NoPrefixAvail case on
-  the unchanged retain path.
-- **R3 — Scope creep into Path A.** Mitigation: A is explicitly out of scope for
-  code; only a README note. Clock-expiry stays a separate future issue bound to
-  the `onGatewayChange` coupling rule.
-- **R4 — RA flap under a lifetime-oscillating server.** A broken server that
-  alternates vlt>0 / vlt==0 for the same prefix across renews would drive
-  advertise→withdraw→advertise on the LAN. Accepted as a MINOR: this is
-  RFC-correct (follow the server) and strictly better than masking a genuine
-  withdrawal for 30 days. No new debounce needed — `scheduleRecompile` is already
-  debounced and a content-identical retain reply does not fire; the churn tracks
-  only genuine server oscillation.
+- **R1 (A2) — extra recompile churn.** Mitigation: debounced `scheduleRecompile`
+  + "skip reconcile when binding plan unchanged" coalesces the redundant
+  config-removal-path fire; timer-based, no inline `applySem` re-entry.
+- **R2 (B) — over-withdraw on a co-held prefix the reply omitted.** Mitigation:
+  per-prefix reconcile (`prior \ withdrawn`), never blunt clear-all (Codex F5).
+- **R3 (B) — flapping server (vlt oscillates).** Accepted MINOR: RFC-correct to
+  follow the server; strictly better than 30-day masking; recompile is debounced.
+- **R4 (B) — acquire settles into empty lease.** Mitigation: reject all-withdrawn
+  acquire (Codex F6); mirror `selectIANAAddress`.
+- **R5 — scope creep into Path A (clock-expiry).** Out of scope; A1 retention
+  stays. A2 is only teardown-coupling, not wall-clock expiry.
 
 ---
 
 ## 9. Rollback
 
-Pure `git revert` of the B PR. No persisted state, no migration: the PD map is
-in-memory and rebuilt on the next reply. A revert restores the store-zero-lifetime
-behavior exactly.
+Pure `git revert`. No persisted state or migration — PD/lease maps are in-memory,
+FRR/RA re-render from live state on the next recompile.
 
 ---
 
 ## 10. Open questions for reviewers
 
-1. Do you agree A is a re-litigation of #1844 and the finite-retry sub-claim is
-   false? If any reviewer finds a real path where a finite-retry / cancel exit
-   leaves the binding installed, A re-opens.
-2. For B, is `parseV6Reply`-level partition + a `dhcpv6Result.iapdPresent` signal
-   the right seam, or should the withdrawal decision live entirely in
-   `commitLease`? (Either is acceptable; the invariant is "absent ≠ present-zero".)
-3. Should A additionally ship an opt-in `retain-expired-lease`/clock-expiry knob
-   now, or defer entirely? (Recommend defer — no evidence #1844 default is wrong.)
+1. A2 fix seam: is firing `scheduleRecompile` from the removal paths the right
+   mechanism, or should a scoped route+RA withdrawal bypass a full recompile?
+   (Recompile is simplest and matches installation's coupling; the debounce
+   bounds churn.)
+2. A2 scope: include the inner-loop `ctx.Done` inline-delete sites, or only the
+   two non-applyConfig terminal owners (`finishClient`, `abandonLeaseAfterNAK`)?
+3. B multi-PD reconcile: is `prior \ withdrawn ∪ live` the agreed rule, given
+   servers echo all held PDs on RENEW (so `live` is usually authoritative)?
 
 ---
 
-## 11. Reviewer verdicts (filled per round)
+## 11. Reviewer verdicts (per round)
 
-- **Round 1 — Codex:** see `codex-plan-r1.md` (verbatim below at convergence).
-- **Round 1 — Claude SMR:** see `claude-smr-plan-r1.md`.
-- **AGY:** infra-down for this run → converge 2-of-3 (Codex + Claude SMR) per
-  `feedback_codex_infra_must_retry` (AGY-alone-never-enough is satisfied; the two
-  live reviewers are Codex + SMR).
+- **Round 1 — Claude SMR** (`claude-smr-plan-r1.md`): PLAN-READY-WITH-NITS; A=keep,
+  B=fix. **Superseded** — missed the A2 recompile-coupling gap.
+- **Round 1 — Codex** (`codex-plan-r1.md`): **PLAN-KILL** the r1 plan; A=fix/re-open
+  (BLOCKER: terminal cleanup + NAK leave FRR route / RA prefix stale, no
+  `scheduleRecompile`), B=fix. Findings F5 (per-prefix, not clear-all) + F6
+  (acquire-path rejection) folded into r3.
+- **Round 2 — Claude SMR** (`claude-smr-plan-r2.md`): self-correction accepting A2;
+  PLAN-READY on r3 (Path C).
+- **Round 2 — Codex:** re-review of r3 pending (this revision).
+- **AGY:** infra-down → converge 2-of-3 (Codex + Claude SMR) per
+  `feedback_codex_infra_must_retry`.

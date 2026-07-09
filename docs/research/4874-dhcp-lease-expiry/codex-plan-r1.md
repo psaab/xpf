@@ -1,0 +1,26 @@
+# Codex hostile plan-review — #4874 round 1 (task-mre4kvxl-v0plgx, gpt-5.5, xhigh)
+
+OVERALL: PLAN-KILL
+
+Per-defect verdict: A: fix/re-open. B: fix.
+
+1. **BLOCKER - Defect A is not clean on finite/cancel exits.**
+The narrow "kernel address still installed" sub-claim is false, but the plan overclaims. `Start()` does defer `finishClient` on terminal exit (`pkg/dhcp/dhcp.go:344-352`), and `finishClient` deletes `m.leases`, deletes v6 `delegatedPDs`, removes the address, and fires `onGatewayChange` (`pkg/dhcp/dhcp.go:398-409`). But `removeAddress` only deletes the netlink address; the source explicitly says routes are cleaned up by FRR config removal (`pkg/dhcp/dhcp.go:1783-1801`). `finishClient` does not call `scheduleRecompile`, and `onGatewayChange` is wired only to `ipmon.NotifyNextHopChange()` (`pkg/daemon/daemon_run.go:1475-1478`). DHCP routes are generated from `d.dhcp.Leases()` during config rendering (`pkg/daemon/daemon_flow.go:28-43`) and emitted into FRR as `ip route ... 200` / `ipv6 route ... 200` (`pkg/frr/config_render.go:262-270`). No recompile means the learned route can remain after finite retry/cancel/NAK cleanup. A must re-open.
+
+2. **BLOCKER - The plan's "every exit is clean" claim ignores the same problem on v6-PD/RA.**
+The v6 cancel paths delete `m.delegatedPDs` inline (`pkg/dhcp/dhcp.go:1238-1245`, `pkg/dhcp/dhcp.go:1275-1282`), and `finishClient` also deletes v6 PDs (`pkg/dhcp/dhcp.go:401-402`). But RA config is built only by reading `DelegatedPrefixesForRA()` during `buildRAConfigs` (`pkg/daemon/daemon_ra.go:28-31`). Without `scheduleRecompile`, the live RA sender can keep advertising the previously compiled prefix. So Defect A is not merely "documented #1844 retention"; terminal cleanup has stale compiled-state blast radius.
+
+3. **MAJOR - The finite retry trace is only half vindicated.**
+After T2 timeout, v4 deliberately breaks to fresh DORA while retaining `committed` (`pkg/dhcp/dhcp.go:890-892`). If finite attempts are configured, acquisition failure returns at max attempts (`pkg/dhcp/dhcp.go:771-775`), and because `m.leases[key]` was not deleted on the T2-timeout break, `finishClient` will find and delete it (`pkg/dhcp/dhcp.go:399-400`). So the plan is right that the address/map cleanup runs. It is wrong to conclude the route/RA binding is gone.
+
+4. **MAJOR - Defect B is real end-to-end.**
+`extractDelegatedPrefixes` appends IA_PD prefixes without filtering `ValidLifetime == 0` (`pkg/dhcp/dhcp.go:1658-1673`). `runDHCPv6` keeps any non-empty prefix result (`pkg/dhcp/dhcp.go:1259-1261`, `pkg/dhcp/dhcp.go:1295-1297`), and `commitLease` stores non-empty prefixes (`pkg/dhcp/commit.go:138-142`). `DelegatedPrefixesForRA` returns them unfiltered (`pkg/dhcp/dhcp.go:278-290`). `daemon_ra.go` leaves RA lifetime fields at zero when DHCP lifetime is zero (`pkg/daemon/daemon_ra.go:38-47`), and `sender.go` converts zero to defaults: 2,592,000 seconds valid and 604,800 preferred (`pkg/ra/sender.go:55-57`, `pkg/ra/sender.go:753-760`). The 30-day/7-day re-advertisement is confirmed.
+
+5. **MAJOR - The withdrawal-vs-silence distinction is correct, but the table is incomplete.**
+A one-line zero filter is wrong: `commitLease` intentionally retains prior PDs when `len(prefixes)==0` (`pkg/dhcp/commit.go:113-116`, `pkg/dhcp/commit.go:138-142`), so filtering an all-zero withdrawal to empty would retain the revoked prefix. The plan's `sawWithdrawal` signal is necessary. But "0 live + saw withdrawal => clear all" is too blunt for multi-prefix state. The model supports multiple prefixes (`pkg/dhcp/dhcp.go:1653-1677`) and renew echoes all held PDs in one IA_PD (`pkg/dhcp/renew.go:146-159`). If one old prefix is explicitly zeroed and another is merely absent, clear-all may over-withdraw. The fix should either remove only explicitly withdrawn prefixes from the prior set when no live set is supplied, or document that any explicit all-zero reply nukes the whole IA_PD set.
+
+6. **MAJOR - The acquire path is underspecified.**
+After filtering zero-lifetime IA_PD, PD-only acquire can become "no address, no live prefix" and still build a lease with default 1h lifetime because the existing error only covers `wantNA && !addr.IsValid() && wantPD && len(prefixes)==0` (`pkg/dhcp/dhcp.go:1522-1528`) and then defaults zero lease time (`pkg/dhcp/dhcp.go:1548-1549`). The plan waves this off as "no prior PD to withdraw." That is not enough; PD-only all-withdrawn initial acquire should probably fail/retry, not settle into an empty successful lease.
+
+7. **MINOR - The address-vs-route middle path is overstated.**
+For the current implementation, rejecting "remove address but keep route unchanged" is technically reasonable: routes depend on FRR config and gateway/interface rendering (`pkg/frr/config_render.go:262-270`), while address deletion removes the connected route foundation. But it is not impossible on Linux with explicit onlink/host-route plumbing. The stronger A case remains: default v4 retransmission is unlimited (`pkg/dhcp/dhcp.go:746-748`), T2 timeout retention is deliberate (`pkg/dhcp/README.md:198-204`), and duplicate allocation risk is real. At minimum, the plan should stop pretending #1844 settles that tradeoff forever.
