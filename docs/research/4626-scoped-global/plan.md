@@ -1,6 +1,6 @@
 # Plan of action — #4626: multi-zone scoped-global scope (M03) + reserve policy_id 0 (L01)
 
-- **Revision:** r2 (incorporates Codex r1 + Claude SMR r1)
+- **Revision:** r3 (incorporates Codex r1+r2 + Claude SMR r1+r2)
 - **Issue:** #4626 (split from #4415, codex-review-164 backlog)
 - **Base:** `origin/master` @ `4eb28ae25` (verified — every file:line below re-read on this SHA)
 - **Mode:** `/research` — STOPS at PLAN-READY / PLAN-KILL / PLAN-DEFER. No PR, no production edits.
@@ -13,12 +13,19 @@
   pinned. (3) complete grep-verified consumer enumeration + a shared list-scope SSOT. (4) zone-local
   address-book resolution rule for a multi-zone scope. (5) `multi:true` fallout beyond bracket
   lists (member-delete, apply-groups union). (6) `matchedResult` reported-zone pinned.
+- **r2→r3 deltas (Codex r2):** (7) REJECT a scope list mixing `any` with other tokens at commit
+  (symmetric with the junos-host no-mix rule) — eliminates the "contains-any" ambiguity; keep the
+  `IsWildcardZoneSet` contains-any collapse only as the tolerant/corrupt-snapshot backstop; add
+  mixed-`any` tests. (8) EXPANDED the consumer enumeration with the CLI/zone-detail sites Codex
+  found (`cli_show_security.go`, `cli_show_security_dispatch.go`, `zone_detail_summary.go:141`,
+  `cmd/cli/show_security.go:361/643`, `server_show_policies_text.go:413`) and named the three
+  SSOT choke points every site routes through.
 
 ---
 
 ## 1. Status
 
-| Sub-item | Verdict (r2) | One-line |
+| Sub-item | Verdict (r3) | One-line |
 |---|---|---|
 | **M03** multi-zone scoped-global scope | **PLAN-READY** | Cross-plane set-model slice with an ADDITIVE-field wire (rolling-upgrade safe), a shared list-scope SSOT, pinned host-inbound/address-book semantics. Replaces the #4505 fail-closed reject with real Junos parity. |
 | **L01** reserve policy_id 0 | **PLAN-DEFER** (PLAN-KILL-as-WONT-FIX also acceptable) | Latent, not a live bug; the under-clear is Junos-correct. The only clean end-state renumbers an HA-synced install-frozen per-session field. Keep the fail-safe unless a session-schema version bump lands. |
@@ -118,6 +125,14 @@ join/wildcard/match logic (Codex R4):
   any(defined(z) && z==flowZone)`. Mirrors the Rust `matches`. An undefined element contributes
   NOTHING (never widens to all-zones — matches today's fail-closed).
 
+**The THREE SSOT choke points (Codex r2 #4).** Almost every consumer routes through one of these
+three existing helpers — convert THESE to set variants and the call sites change mechanically:
+`config.GlobalPolicyAppliesToZone` (audit, `types_security.go:452`),
+`policymatch.GlobalPolicyAppliesToZonePair` (filtered view, `policymatch.go:1066`), and
+`policymatch.ZoneScopeLabel` (display join) → `ZoneScopeSetLabel`. Direct `!= ""` display reads
+(the `hcFrom`/`globalFromZone` locals) use `ZoneScopeSetLabel`. No surface may open-code its own
+join/wildcard/match.
+
 **A3. Schema + compiler (accumulate).** `schema_security.go:292-293`: drop `scalar:true`, add
 `multi:true` (children:nil) — same marker `source-address`/`application` carry at `:263-267`.
 Remove the L12 fail-closed comment block (`:276-291`). Compiler
@@ -128,10 +143,20 @@ the leaves are DIRECT children of the global `match` node (verified), so the #24
 shape `Keys=["from-zone","trust","dmz"]` is exactly what it reads. Sort+dedup the compiled
 slice at compile for stable display + HA-symmetric expansion (open Q6).
 
+**A3b. Reject mixed `any` at commit (Codex r2 #3).** A scope list is EITHER `any` (all-zones) OR a
+list of concrete zones — never mixed. Reject `from-zone [ any trust ]` / `to-zone [ any untrust ]`
+at commit (in the A4 strict gate, symmetric with the junos-host no-mix rule A6). `[ any trust ]`
+is redundant anyway (`any ⊇ trust`), so this loses no expressiveness and removes the ambiguity of
+"contains-any" mixed semantics. The `IsWildcardZoneSet` contains-`any` collapse stays ONLY as the
+tolerant/corrupt-snapshot BACKSTOP (a mixed set from a bad HA peer or hand-built snapshot still
+degrades safely to all-zones on both planes); the strict commit path never emits one.
+
 **A4. Strict commit gate (per-element).** `compiler_validate_strict_policy.go:596-608`: loop
 over EVERY element of both lists — `junos-host` reject applies to `from-zone` elements; the
 undefined-zone reject applies to every element; error messages name the offending element.
-Preserve the `to-zone junos-host` ALLOWANCE (see A6).
+Preserve the `to-zone junos-host` ALLOWANCE (see A6). Also reject a scope list that mixes `any`
+with any other token (A3b) and a `to-zone` list that mixes `junos-host` with any other token (A6),
+each with a clear error naming the offending list.
 
 **A5. All consumers (grep-verified complete — Codex R4 + SMR R1/R2).** Route ALL through the A2
 SSOT:
@@ -141,9 +166,17 @@ SSOT:
 - `compiler_security_addressbook.go:229-206` (#3287 zone-local book) → see A7.
 - `compiler_validate_warn.go:2040` (`ToZone != "junos-host"` host-inbound warn) → set predicate.
 - Display/API/metrics: `api/security.go:299-300`, `metrics_counters.go:423-427`,
-  `server_show_zones.go:275-276`, `server_show_policies_text.go:193/219-223/440-444`,
-  `cmd/cli/show_security.go:246-249` → emit the slice / use `ZoneScopeSetLabel`.
+  `server_show_zones.go:275-276`, `server_show_policies_text.go:193/219-223/413/440-444`,
+  `cmd/cli/show_security.go:246-249/361/643` → emit the slice / use `ZoneScopeSetLabel`.
+- Local CLI (Codex r2 #4): `pkg/cli/cli_show_security.go:116/139/300/326`,
+  `pkg/cli/cli_show_security_dispatch.go:298/416/443` (all funnel through
+  `GlobalPolicyAppliesToZonePair` + `!= ""` display reads); `pkg/policymatch/zone_detail_summary.go:141`
+  (`GlobalPolicyAppliesToZone`) `/149` (`ZoneScopeLabel`).
 - `policies_reject.go:169-174`, `zones_quarantine.go:110` → iterate the slice.
+
+The enumeration above is grep-anchored on `Match.FromZone`/`Match.ToZone` (typed) +
+`MatchFromZone`/`MatchToZone` (snapshot) across `pkg/`+`cmd/`; the /engineer PR MUST re-run the
+grep on its base and fail if any non-test hit is not routed through the A2 SSOT.
 
 **A6. Host-inbound `junos-host` set semantics (Codex R2 — PINNED).** The host-inbound tier
 matches a global only when its `to-zone` scope names `junos-host`; the transit tier matches only
@@ -256,8 +289,9 @@ carry a `policy_id` migration for free (couples to #4415 L14). Do NOT renumber s
    but keep their respective combinators.
 5. **Undefined element fails closed, never widens.** Strict gate rejects it at commit; the
    runtime fail-closed backstop matches today's `globalScopeMatches`.
-6. **`junos-host` cannot mix in a to-zone list (A6).** Rejected at commit; the host predicate is
-   `ToZones == ["junos-host"]` exactly.
+6. **`junos-host` (A6) and `any` (A3b) cannot mix in a scope list.** Both rejected at commit; the
+   host predicate is `ToZones == ["junos-host"]` exactly; the contains-`any` collapse survives
+   only as the tolerant-snapshot backstop.
 7. **Zone-local address book: single-zone scope only (A7).** Multi-zone → global book (documented
    parity limit).
 8. **`matchedResult` reports the concrete flow zone, not a scope label (A10).**
@@ -288,8 +322,12 @@ carry a `policy_id` migration for free (couples to #4415 L14). Do NOT renumber s
   **apply-groups union** (`ast_groups.go:492`). Repurpose `schema_global_zone_list_4415_test.go`
   (L12 RED-guard) into a POSITIVE accept test.
 - **Strict gate:** `from-zone [trust junos-host]` rejected (per-element); `to-zone [junos-host
-  untrust]` rejected (no-mix, A6); `[trust undefined]` rejected naming `undefined`; single
-  `to-zone junos-host` still ALLOWED.
+  untrust]` rejected (no-mix, A6); `from-zone [any trust]` / `to-zone [any untrust]` rejected
+  (any-no-mix, A3b); `[trust undefined]` rejected naming `undefined`; single `to-zone junos-host`
+  and single `from-zone any` still ALLOWED.
+- **Tolerant-path backstop (A3b):** a hand-built/corrupt snapshot with a mixed `[any trust]` scope
+  → `build_global_zone_scope` (Rust) and `IsWildcardZoneSet` (Go) both collapse to all-zones
+  (fail-safe), even though the strict commit path never emits one.
 - **Address book (A7):** `foo` in trust-local, scope `[trust dmz]` → global-book resolution
   (NOT `trust/foo`); scope `[trust]` → `trust/foo` (single-zone unchanged).
 - **Go matcher SSOT:** scoped `from-zone [trust dmz] to-zone [untrust]` matches (trust→untrust),
@@ -333,9 +371,11 @@ carry a `policy_id` migration for free (couples to #4415 L14). Do NOT renumber s
    SmallVec.
 4. **L01: is the fail-safe under-clear a defect at all, or WONT-FIX?** If Junos-correct, close L01
    as working-as-intended (PLAN-KILL) rather than DEFER.
-5. **`junos-host` no-mix (A6): reject at commit (recommended) vs support mixed `[junos-host
-   untrust]` via an explicit-host predicate + dual-tier participation?** Recommend reject-mix
-   (simpler, exotic config). — reviewer may want full mixed support.
+5. **`junos-host` no-mix (A6) AND `any` no-mix (A3b): reject at commit (recommended) vs support
+   mixed sets (`[junos-host untrust]`, `[any trust]`) via explicit-host / contains-any collapse
+   semantics?** Recommend reject-mix for both (simpler, exotic/redundant configs); the
+   tolerant-path collapse stays only as the corrupt-snapshot backstop. — reviewer may want full
+   mixed support.
 6. **Compile-time sort+dedup of the scope slice** (`[dmz trust]`==`[trust dmz]`) for stable
    display + HA-symmetric expansion — recommend yes; reviewer may prefer config-order preservation.
 7. **Max-zones bound** to keep `expand_side` from exploding the 255-slot cold-path slot map — the
