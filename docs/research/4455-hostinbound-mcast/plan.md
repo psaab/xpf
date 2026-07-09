@@ -3,17 +3,25 @@
 - **Issue:** #4455 (HI-1, split from #4420, verified genuine in PR #4454, deferred)
 - **Mode:** `/research` — plan only. STOP at PLAN-READY / PLAN-KILL. No PR, no
   production source changes.
-- **Revision:** r2 (incorporates Codex r1 + Claude SMR r1 hostile findings)
+- **Revision:** r3 (incorporates Codex r1+r2 + Claude SMR r1+r2 hostile findings)
 - **Reviewers:** Codex (hostile) + Claude SMR (hostile self-review). AGY/gemini
   infra-down → 2-of-3 with documented Codex retries.
-- **Converged recommendation (r2): PLAN-KILL — retain the shipped #4454 catalog +
-  commit-time advisory as the operator-visible surface; do NOT build the
-  per-zone multicast enforcement now.** The corrected, implementable design is
-  preserved in §5–§8 as an appendix for a future `/engineer 4455` IF the operator
-  explicitly wants the hardening despite the thin value; but on the merits below
-  the honest convergent verdict is that the parity gain does not justify the
-  HA/routing-critical multicast-drop risk and the first-`iifname`-predicate
-  kernel-netdev-attribution fragility.
+- **Converged recommendation (r3, SPLIT):**
+  - **Component A — the per-zone multicast DROP enforcement (nft `iifname` +
+    Rust lockstep): PLAN-KILL.** The parity gain does not justify the
+    HA/routing-critical multicast-drop risk and the fragile first-`iifname`
+    kernel-netdev attribution (§3). The corrected, implementable design is
+    preserved in §5–§8 for a future `/engineer` IF an operator ever decides the
+    hardening is worth the burden.
+  - **Component B — a narrow, control-plane-only, WARN-only "managed-FRR routing
+    protocol running without the matching `host-inbound-traffic protocols` token"
+    commit-time advisory: PLAN-READY** (§5A). Codex r2 correctly showed the
+    shipped #4454 advisory only fires when a multicast token is PRESENT
+    (`pkg/config/compiler_validate_warn.go:1657`), so the ACTUAL silent
+    fail-open — a zone running FRR OSPF/OSPFv3/RIP with NO matching token — is
+    invisible today. Component B closes that observability gap with **zero**
+    dataplane/nft/Rust/`iifname`/HA risk (no drop, no forwarding change). This is
+    the shippable outcome of the research.
 
 ---
 
@@ -80,7 +88,24 @@ correctness surface for a change that (per §3) is opt-in-off, protects mainly
 already-compliant operators, does not protect VRRP failover, and is otherwise
 Rust-unreachable. Both reviewers' explicit conclusion: if GRE-inner and resolver
 correctness cannot be nailed down with tests, **keep the shipped advisory and
-kill enforcement.** r2 adopts that as the converged recommendation.
+kill enforcement.** r2 adopted that.
+
+**Round-2 refinement (Codex r2 = PLAN-KILL-WRONG, non-reflexive).** Codex agreed
+the DROP enforcement should be killed (did not dispute C1–C8) but rejected r2's
+terminal-state claim: the shipped #4454 advisory
+(`validateHostInboundMulticastWarnings`) only fires when
+`hostInboundMulticastTokensPresent(protocols)` is non-empty
+(`pkg/config/compiler_validate_warn.go:1657`; the test
+`host_inbound_multicast_warn_4455_test.go:100` asserts it warns NOTHING for a
+no-`protocols` / no-host-inbound zone). So the advisory warns the ALREADY-COMPLIANT
+operator that a listed protocol is admitted packet-wide, but the ACTUAL silent
+parity fail-open — a zone running FRR OSPF/OSPFv3/RIP with NO matching token —
+gets no warning at all. Codex identified a genuinely valuable low-risk subset:
+a WARN-only advisory that cross-checks the managed FRR routing interfaces
+(`pkg/frr/policy_render.go:507/612/998`) against the effective zone/interface
+host-inbound tokens. r3 adopts this as **Component B (PLAN-READY)** while keeping
+**Component A (the drop enforcement) as PLAN-KILL** — the reconciled 2-of-3
+convergence.
 
 ---
 
@@ -201,7 +226,55 @@ unicast golden-byte tests stay green unmodified.
 
 ---
 
-## 5. Corrected design (appendix — implementable if the hardening is pursued)
+## 5A. Component B — the SHIPPABLE subset (PLAN-READY): managed-FRR-mismatch advisory
+
+**What ships:** a new commit-time WARN-only advisory,
+`validateHostInboundManagedRoutingMismatch(cfg)` (a sibling of
+`validateHostInboundMulticastWarnings` in `pkg/config/compiler_validate_warn.go`),
+that surfaces the ACTUAL silent parity fail-open the shipped advisory misses.
+
+**Logic:** for each managed routing protocol xpf renders into FRR — OSPF
+(`pkg/frr/policy_render.go:507`), OSPFv3 (`:612`), RIP (`:998`) — enumerate the
+interfaces it is enabled on, resolve each to its security zone, and warn when the
+effective zone/interface `host-inbound-traffic protocols` set (zone ∪ #3362
+override) OMITS the matching token (`ospf`/`ospf3`/`rip`, and `all` counts as
+present via `HostInboundAllExpansionProtocols`). The warning names the zone, the
+interface, and the protocol, and states that the protocol's host-bound multicast
+is currently admitted PACKET-WIDE (the #4455 parity gap) and that the operator
+should add the matching `host-inbound-traffic protocols` token.
+
+**Why this is safe and worth shipping:**
+- **Zero dataplane surface.** No nft change, no Rust change, no `iifname`
+  predicate, no RETH/GRE/kernel-netdev attribution — so NONE of the Component-A
+  risks (C1/C4/C5/C6, HA-critical drop) apply. It is a pure control-plane string.
+- **WARN-only, never a reject.** The config is valid Junos; the advisory nudges,
+  it does not block commit or change forwarding (mirrors the #3226 / #4454
+  advisory pattern and honors #1960 lenient-load).
+- **Closes the real observability gap.** It fires precisely for the case the
+  shipped advisory is blind to — the FRR-protocol-without-token silent fail-open,
+  which is the substance of #4455.
+- **PIM caveat (C3):** PIM is unmanaged today (`docs/feature-gaps.md:460`), so it
+  is out of this advisory's scope — documented as a residual (no managed source
+  to cross-check against).
+
+**Scope of Component B:** OSPF/OSPFv3/RIP (the managed multicast routing
+protocols). Not BGP/LDP/MSDP (unicast, no multicast group). Not VRRP (xpf's own
+VRRP is not FRR-managed and is AF_PACKET-received). Not a dataplane change.
+
+**Test plan (Component B):** a Go unit
+(`host_inbound_managed_routing_mismatch_4455_test.go`) with (a) a zone running
+OSPF in FRR but omitting `protocols ospf` → warns; (b) the same zone WITH
+`protocols ospf` (or `all`) → no warning; (c) a #3362 per-interface override
+supplying the token → no warning; (d) RIP/OSPFv3 families; (e) no false warning
+for a zone with no managed routing. RED-on-revert by neutering the emitter.
+
+---
+
+## 5. Component A — corrected DROP-enforcement design (PLAN-KILL; appendix only)
+
+The following is preserved for a future `/engineer 4455` IF the hardening is ever
+pursued; it is NOT part of the r3 shippable recommendation.
+
 
 ### 5.1 nft: Shape A — un-admitted dedicated-group drops, iifname-scoped (kernel)
 
@@ -382,23 +455,27 @@ residual); enforce-by-default.
 
 ---
 
-## 11. Recommendation
+## 11. Recommendation (SPLIT — converged 2-of-3)
 
-**PLAN-KILL — retain the shipped #4454 protocol→group catalog + commit-time
-advisory; do NOT build the per-zone multicast enforcement now.** The gap is a
-bounded Junos-parity narrowing already surfaced to operators by the advisory;
-enforcement is opt-in-off (protecting a near-empty population), does not protect
-VRRP failover, is otherwise Rust-unreachable except an exotic native-GRE edge,
-and carries real HA/routing-critical drop risk plus a demonstrably fragile
-first-`iifname`-predicate kernel-netdev attribution (RETH→physical-member,
-guess-on-malformed, address-lazy source). Both hostile reviewers reached the same
-conclusion.
+- **Component A — per-zone multicast DROP enforcement (nft `iifname` + Rust
+  lockstep): PLAN-KILL.** Bounded parity gap; enforcement is opt-in-off
+  (protecting a near-empty population by construction of the strict cross-check),
+  does not protect VRRP failover (AF_PACKET-immune), is otherwise Rust-unreachable
+  except the exotic native-GRE edge (C1), and carries real HA/routing-critical
+  drop risk plus a fragile first-`iifname` kernel-netdev attribution
+  (RETH→physical-member, guess-on-malformed, address-lazy source — C4/C5/C6).
+  Corrected design preserved in §5–§8 for a future `/engineer 4455` with
+  C1/C3/C4/C5/C6 as mandatory acceptance criteria.
+- **Component B — managed-FRR-mismatch WARN-only advisory (§5A): PLAN-READY.**
+  This is the shippable outcome. It closes the real observability gap the shipped
+  #4454 advisory misses (it warns only when a token is present) with zero
+  dataplane/nft/Rust/`iifname`/HA risk. `/engineer 4455` implements Component B
+  only.
 
-The corrected, implementable design (§5–§8) is preserved so that IF the operator
-later decides the strict-parity hardening is worth the burden, `/engineer 4455`
-can proceed from it directly — with the C1 GRE-inner test, the C4 membership
-source, the C5/C6 live-netdev-validated resolver, and the C3 strict-on-enable
-cross-check as mandatory acceptance criteria.
+**Verdicts converged:** Codex r2 = PLAN-KILL-WRONG (kill the drop enforcement,
+ship the warn-only advisory); Claude SMR r3 = agree — PLAN-KILL Component A,
+PLAN-READY Component B. Net: the drop enforcement is killed; the narrow warn-only
+advisory is the plan approved for implementation.
 
 **This is `/research`. STOP at the converged verdict. No PR, no production source
-changes.**
+changes. `/engineer 4455` proceeds (Component B only) after manual approval.**
