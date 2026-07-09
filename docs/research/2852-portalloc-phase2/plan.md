@@ -1,10 +1,17 @@
 # #2852 — SNAT PortAllocator residual serialization (Phase-2 evaluation) — research plan
 
-- **Revision:** r2 (Claude-SMR r1 folded: F4 wording softened per Attack 2; F5
-  release-path lock-order inversion in Option A surfaced per Attack 5; follow-up
-  issue made an explicit CLOSE deliverable. Codex r1 pending.)
-- **Base:** origin/master `b4f2ddb2f` (re-verified: `userspace-dp/src/nat/allocator.rs`
-  = 1796 LOC, Phase 1 `6cbb10615` + #4676 `c7194b2af` both landed)
+- **Revision:** r3 — CONVERGED. Claude-SMR r1 + Codex r1 both PLAN-KILL/CLOSE.
+  r2 folded SMR (F4 softened, F5 surfaced, follow-up made a deliverable); r3 folds
+  Codex's two corrections: (1) scope the publish/replicate claim to *committed
+  tracked forward/reverse transit installs*, not literally "every new flow";
+  (2) the exact-cap point is that Option A's `fetch_add` reserve regresses F4 —
+  a bounded CAS reservation under the shard lock *could* keep exactness at added
+  cross-path accounting cost (so "sharding cannot preserve exact cap" was too
+  strong). Also: §3.2 SYN-flood upgraded to code-verified.
+- **Base:** origin/master `8215482d8` (re-verified on the current tip;
+  `userspace-dp/src/nat/allocator.rs` + `afxdp/poll_descriptor/mod.rs` are
+  BYTE-IDENTICAL `b4f2ddb2f..8215482d8`, so all file:line anchors hold). Phase 1
+  `6cbb10615` + #4676 `c7194b2af` both landed.
 - **Branch:** `research/2852-portalloc-phase2` (docs only; no production source touched)
 - **Scope:** decide the TERMINAL disposition of #2852 now that Phase 1 (lock-free
   bitmap claim) and #4676 (chunked GC) are merged. Either (A) PLAN-READY a Phase-2
@@ -133,15 +140,28 @@ unconditionally, whether or not it matches a source-NAT rule — also runs:
   mechanism that lets the reply — which RSS may hash to a different worker — find
   the session), and each queue is contended by up to N−1 producers.
 
-So every new flow already pays: 1 global publish-mutex set + (N−1) replication
-mutexes, PLUS the event-stream mpsc + delta-buffer mutex + atomics (§2.4). The
-NAT allocator `live` mutex is taken by a **subset** of new flows (only pool-mode
-SNAT matches, §5-gated) and is O(1). **Therefore sharding the NAT allocator in
-isolation cannot restore linear new-flow scaling: the publish + N-way replication
-locks serialize EVERY new flow first.** This is precisely the reviewers'
-PLAN-KILL condition — "if another limit (session-install / conntrack publish /
-…) saturates first" — now located in code, not hypothesized. The NAT mutex is
-demonstrably NOT the dominant new-flow bottleneck.
+So every **committed tracked transit install** already pays: 1 global
+publish-mutex set + (N−1) replication mutexes, PLUS the event-stream mpsc +
+delta-buffer mutex + atomics (§2.4). The NAT allocator `live` mutex is taken by a
+**subset** of those flows (only pool-mode SNAT matches, §5-gated) and is O(1).
+**Therefore sharding the NAT allocator in isolation cannot restore linear
+new-flow scaling: the publish + N-way replication locks serialize every committed
+transit install first.** This is precisely the reviewers' PLAN-KILL condition —
+"if another limit (session-install / conntrack publish / …) saturates first" —
+now located in code, not hypothesized. The NAT mutex is demonstrably NOT the
+dominant new-flow bottleneck.
+
+**Scope precision (Codex r1).** "Every new flow" is shorthand for the committed
+tracked transit-install paths, which is the relevant population — a flow that
+does NOT install a tracked session also does NOT allocate a SNAT port, so it is
+irrelevant to this lock either way. Excluded from the publish/replicate cost:
+LocalDelivery + DNS-fastpath (`track_in_userspace` false, `:2943-2945`),
+admission-refused (exits before publish, `:2968-2978`), and the
+MissingNeighborSeed path (publishes at `:5135` but deliberately does NOT
+replicate, `shared_ops.rs:51-52`). Reverse installs publish+replicate too
+(`:3452-3459`), as does reverse repair (`shared_ops.rs:870-877`). None of these
+exclusions weaken the argument: the SNAT-allocating population is a subset of the
+publish+replicate population.
 
 ### 2.3 The measured contention (from the merged Phase-1 gate)
 
@@ -238,12 +258,14 @@ conn-rate harness), and building one is /engineer-scale work.
 ### 3.2 SYN-flood / DoS is not a Phase-2 justification
 
 The obvious "high new-flow rate" scenario — a SYN flood — is handled BEFORE
-session/NAT state is created: screen syn-flood + SYN-cookie generation short-
-circuit the pipeline and do NOT call `allocate_translation`. So the allocator
-mutex is not on the flood-resilience path. The workloads that do reach it
-(CGNAT churn, connection storms from legitimate many-short-connection apps) are
-real but niche, and their sustained rate on this platform is exactly the
-unmeasured quantity.
+session/NAT state is created (code-verified, Codex r1): initial SYN-flood
+handling runs at `poll_descriptor/mod.rs:789-817` with cookie generation in
+`screen/mod.rs:903-1034`, and the session-miss ACK-cookie validation runs at
+`poll_descriptor/mod.rs:1377-1405` / `screen/mod.rs:1419-1479` — all BEFORE
+`allocate_translation`. So the allocator mutex is not on the flood-resilience
+path. The workloads that do reach it (CGNAT churn, connection storms from
+legitimate many-short-connection apps) are real but niche, and their sustained
+rate on this platform is exactly the unmeasured quantity.
 
 ### 3.3 Phase 2 puts the F4 exact-cap property at risk (mitigable only via premature exhaustion or a fallback mode)
 
@@ -255,18 +277,23 @@ microbench's atomic `fetch_add`-reserve model, which the gate doc itself found
 overshoots by up to M in-flight and **failed 71–79% of allocations at M=6/8 on a
 narrow 64-port pool** (`microbench-results.md:141–154`).
 
-Sharding `live_by_flow` puts the cheap exact `len()` at risk. Every avoidance
-path has a cost: (a) a global cap across N shards via `AtomicUsize`
-reserve/rollback overshoots by up to M (the microbench data above); (b) static
-per-shard sub-caps (`max/N`) avoid the atomic but cause *premature exhaustion*
-under skewed flow-key hashing (one shard hits its sub-cap while other shards —
-and the port bitmap — have room), the exact failure that killed Option C; (c) a
-serialized exact-path fallback for small pools preserves exactness but adds a
-mode split + a size threshold to tune. So Phase 2 trades away, or adds complexity
-to preserve, a correctness property (exact NAT-pool cap, no false exhaustion when
-the pool has room) that Phase 1 was engineered to obtain — for an unproven
-throughput win. For NAT, "never falsely reject a connection when the pool has
-room" is a real operator-visible guarantee.
+Sharding `live_by_flow` regresses the cheap exact `len()` **as Option A is
+written** (§5.2 uses `fetch_add`-reserve, which overshoots by up to M — the
+microbench showed 71–79% narrow-pool false-exhaustion). The exactness is NOT
+strictly unrecoverable (Codex r1 + SMR Attack 2): the avoidance paths are
+(a) a bounded `compare_exchange` reservation counter, taken while holding the
+chosen flow shard after the reuse check and immediately before insert, enforces
+`count <= cap` with no fetch-add overshoot — but the exact-count accounting must
+then be threaded correctly through `release_flow`, `rollback_flow`, stale
+`reserve_flow` replacement, the deterministic v4/v6 paths, and HA imports;
+(b) static per-shard sub-caps (`max/N`) cause *premature exhaustion* under skewed
+flow-key hashing (killed Option C); (c) summing all shard `len()`s per allocation
+is exact but defeats the point (re-serializes). So Phase 2 either regresses the
+exact cap (Option A as written) or preserves it only by adding cross-path
+reservation accounting — versus Phase 1's single authoritative `len()` under one
+mutex. For NAT, "never falsely reject a connection when the pool has room" is a
+real operator-visible guarantee, and Phase 2 puts it at risk / raises its cost
+for an unproven throughput win.
 
 ### 3.4 The residual is small and the risk surface is large
 
@@ -395,6 +422,15 @@ flow key + permit mode), so release can decide up front and always order `leases
 of truth. GC unchanged except it locks `leases` instead of `live`.
 
 ---
+
+### 5.5 Paths Option A must cover (Codex r1)
+
+Option A is NOT limited to ordinary non-persistent SNAT: the deterministic v4/v6
+CGNAT paths take the same `live` mutex (`allocator.rs:1325`, `:1405`) and NAT64
+drives the same allocator via the `source.rs:871-886` wrapper (+ reserve wrapper
+`source.rs:960-970`). A correct Option A must shard/route ALL of these, not just
+the hot non-persistent path — additional surface that reinforces the §3.4/§7
+complexity cost.
 
 ## 6. Hidden invariants (must hold in EITHER option)
 
