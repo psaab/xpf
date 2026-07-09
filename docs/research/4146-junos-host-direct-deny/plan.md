@@ -3,8 +3,9 @@
 - **Issue:** #4146
 - **Branch:** `research/4146-junos-host-direct-deny`
 - **Base:** origin/master `b4f2ddb2f`
-- **Revision:** r4 (r3 emission rework + §6.4 CONCRETE coarse/fine/established
-  chain placement, per Codex r2 "specify, don't defer to tests")
+- **Revision:** r5 (folds Codex r2/r4 STILL-OPEN items: single effective
+  exact→global program per ingress, DROP-only set-subtraction (no fine accept),
+  fine-deny before ND/PMTUD, global-any iifname-scoped, tcp-rst unrepresentable)
 - **Status:** seeking convergence (Codex + Claude SMR; AGY infra-down)
 - **Disposition sought:** PLAN-READY, un-deferring the mislabeled `plan-deferred-operator`.
 
@@ -171,26 +172,29 @@ corrections over r1/r2:
 ## 4. Chosen approach (summary)
 
 Extend the kernel host-inbound codegen with an **ordered, ingress-scoped,
-coarse-gated junos-host DENY subchain**:
+coarse-gated, DROP-only junos-host DENY subchain**:
 
-1. Build, per ingress scope (a from-zone, or the global `to-zone junos-host`
-   tier), the **config-ordered** list of junos-host policy terms.
-2. **Project** each term: permit→`accept`, deny→`drop`, preserving order (permits
-   short-circuit). Gate emission on the WHOLE chain being representable (§6); if
-   any term is not, emit nothing for that scope and warn on it.
-3. **Scope** each rule by `iifname { <from-zone non-lifeline netdevs> }`
-   (global-any → no iifname; global `FromZones` → union of those zones' netdevs),
-   plus the term's representable source/dest/app matches.
-4. **Order** the subchain to reproduce coarse-then-fine (§6.4), emitting after
-   the global established/ESP/ND/PMTUD accepts and interleaved with the per-zone
-   coarse service accepts as specified.
-5. Attach a named counter per scope/family (existing `HostInboundDenyCounterName`
+1. Build **one effective ordered program per (ingress zone, family)** = the
+   `from-zone Z to-zone junos-host` zone-pair terms followed by the applicable
+   global `to-zone junos-host` terms, in Rust's tier order.
+2. **Gate emission on the WHOLE per-ingress program being representable** (§6); if
+   any term (any tier) is not, emit nothing for that ingress and warn.
+3. **Project DROP-only via set-subtraction:** deny→`drop`; a `permit` never emits
+   a fine `accept` — it SUBTRACTS its set from every later deny (`saddr != …`),
+   so the coarse gate stays the sole admit authority (§5.1, §6.1).
+4. **Scope** each rule by `iifname { <Z's non-lifeline netdevs> }` — a global-any
+   term is rendered per ingress zone with that zone's netdevs, NEVER unscoped —
+   plus the representable source/dest/app matches.
+5. **Order** the subchain to reproduce coarse-then-fine (§6.4): after ESP/AH +
+   reply-direction established, BEFORE the ND/PMTUD/ICMP-error accepts and the
+   coarse service accepts.
+6. Attach a named counter per program/family (existing `HostInboundDenyCounterName`
    discipline) and a `xpf_host_inbound_junos_host_denies_total` metric — with an
    explicit note that this does NOT populate per-Junos-policy hit counters /
    `then count` / RT_FLOW deny attribution (§6.6).
-6. Suppress the #4168 warning per-policy **only when that policy rendered a
+7. Suppress the #4168 warning per-policy **only when that policy rendered a
    rule**; keep it otherwise. Update the docs matrix.
-7. Guarantee kernel==Rust semantics with a **cross-language parity fixture**
+8. Guarantee kernel==Rust semantics with a **cross-language parity fixture**
    (§9.1).
 
 ---
@@ -199,51 +203,67 @@ coarse-gated junos-host DENY subchain**:
 
 **All Go. No Rust, no shim, no verifier interaction.**
 
-### 5.1 Ordered projection IR — `pkg/dataplane/userspace/junos_host_deny.go` (new)
-- `type JunosHostTerm struct { Action /* accept|drop */ string; SrcSet []string; SrcExcluded bool; DstSet []string; DstExcluded bool; L4 []string /* OR-expanded nft match fragments */; }`
-- `type JunosHostScope struct { IngressIfnames []string /* nil = all ingress (global-any) */; Family string; Terms []JunosHostTerm; Counter string; Representable bool; RenderedPolicies []string /* policy names that produced ≥1 rule, for warning suppression */ }`
-- `func BuildJunosHostScopes(cfg *config.Config, snap ...) []JunosHostScope`:
-  - Group `cfg.Security.Policies` with `ToZone == "junos-host"` by `FromZone`,
-    preserving intra-zone config order; add the global `to-zone junos-host` tier
-    (`IsHostToZoneScope`) with its `FromZones` ingress scope (empty/any → all).
-  - For each scope, walk terms in order; classify each via
-    `junosHostTermRepresentable` (§6). **If any term is unrepresentable, mark the
-    whole scope `Representable=false`** and record the offending policy names for
-    the warning; emit no rules for that scope.
-  - For a representable scope, project: permit→`accept`, deny→`drop`; drop the
-    reject/permit-restrict follow-up terms (§6.5) — but a scope containing a
-    reject or source-restricted-permit term is treated as **unrepresentable for
-    now** (so we never silently drop a term from an ordered chain and change its
-    meaning). This keeps the first slice's chains strictly deny+permit-shortcut.
-  - Resolve `IngressIfnames` from the from-zone's `ZoneConfig.Interfaces` →
-    kernel netdev names via the interface snapshot (`buildInterfaceSnapshots`),
-    **including VLAN subunit and RETH member netdevs**, and **excluding
-    lifelines** (`hostInboundLifelineSet`). A scope whose ingress resolves to no
-    non-lifeline netdev emits nothing and still warns.
-  - Resolve source/dest sets with the STATIC-only address resolution (no feed
-    overlay) and the recursive feed-taint check (§6.2); split by family with the
+### 5.1 Effective-program projection — `pkg/dataplane/userspace/junos_host_deny.go` (new)
+The unit of representability + emission is the **single effective ordered
+junos-host program per (ingress zone, family)** — NOT an isolated scope or term
+(Codex r2). Rust evaluates one program in tier order (exact zone-pair →
+from-any → global `to-zone junos-host`); the projection reproduces that.
+- `type JunosHostDropRule struct { Family string; SrcMatch string /* saddr [!=] set, possibly with `saddr != <earlier-permit-set>` subtractions */; DstMatch string; L4 []string /* OR-expanded */; Counter string }`
+- `type JunosHostProgram struct { Zone string; Family string; IngressIfnames []string /* non-empty, non-lifeline; global-any → union of ALL non-lifeline zoned netdevs */; DropRules []JunosHostDropRule; Representable bool; RenderedPolicies []string }`
+- `func BuildJunosHostPrograms(cfg *config.Config, snap ...) []JunosHostProgram`:
+  - For each configured (non-lifeline) security zone Z, assemble the **effective
+    ordered term list** = the `from-zone Z to-zone junos-host` zone-pair terms (in
+    config order), FOLLOWED BY the applicable global `to-zone junos-host` terms
+    (`IsHostToZoneScope`, whose `FromZones` scope includes Z or is any), in the
+    global tier order. This is the per-ingress effective program.
+  - **Whole-program representability gate:** if ANY term (any tier) in Z's
+    effective program is unrepresentable (§6), mark the whole program
+    `Representable=false`, emit NO rule for Z, and warn on the offending
+    policy(ies). This closes the "omitted unrepresentable exact permit exposes a
+    later rendered global deny" hole — a program is all-or-nothing per ingress.
+  - **DENY-only emission via set-subtraction (no fine `accept` — Codex r2):**
+    project the effective program to DROP rules only. A `permit` term never emits
+    an `accept` (that would let a fine permit re-admit a service the coarse gate
+    rejects — forbidden by Rust `poll_descriptor/mod.rs:138`); instead each later
+    `deny` term's match SUBTRACTS every earlier permit term's matched set
+    (`saddr != <permit-set>`, dest/app analogously). So a packet matching an
+    earlier permit is simply not dropped by a later deny, and the **coarse gate
+    remains the sole admit authority**. If a deny's post-subtraction match is not
+    cleanly nft-representable (cross-dimension permit/deny overlap), the whole
+    program is unrepresentable → warn.
+  - Reject terms and source-restricted-permit-as-terminal programs are
+    unrepresentable for this slice (§6.5) — the whole program warns, never a
+    silent partial.
+  - Resolve `IngressIfnames` from Z's `ZoneConfig.Interfaces` → kernel netdev
+    names via the interface snapshot (`buildInterfaceSnapshots`), **including
+    VLAN subunit and RETH member netdevs**, **excluding lifelines**
+    (`hostInboundLifelineSet`). A **global-any** term contributes to EVERY zone's
+    program (rendered once per ingress zone with that zone's netdevs), NEVER as an
+    unscoped rule — so a global-any deny can never fire on a lifeline/unzoned
+    ingress (Codex r2 inv-1 hole). A program resolving to no non-lifeline netdev
+    emits nothing and still warns.
+  - Resolve source/dest sets with STATIC-only address resolution (no feed
+    overlay) + the recursive feed-taint check (§6.2); split by family with the
     cross-family excluded semantics of `matchAddr` (`policymatch.go:1282`).
   - Resolve applications via `ResolveApplication`/`ResolveApplicationSet` to
     OR-expanded L4 fragments including `SourcePort` (`types_security.go:1088`,
-    enforced at `policymatch.go:1605`); an app that cannot fully reduce →
-    unrepresentable.
+    `policymatch.go:1605`); an app that cannot fully reduce → unrepresentable.
 
 ### 5.2 Codegen — `pkg/daemon/daemon_nft.go`
-- `buildHostInboundFilterPayload` takes `scopes []dpuserspace.JunosHostScope`.
-- Counter pre-pass declares each rendered scope's counter once (dedup on name);
-  the test asserts **every counter reference is declared** (a scope may emit
+- `buildHostInboundFilterPayload` takes `programs []dpuserspace.JunosHostProgram`.
+- Counter pre-pass declares each rendered program's counter once (dedup on name);
+  the test asserts **every counter reference is declared** (a program may emit
   multiple rules → multiple references, one declaration — matching the existing
   multi-reference contract at `daemon_nft.go:509`).
-- **Chain order** — the CONCRETE placement specified in §6.4: (1) ESP/AH + ND +
-  PMTUD/ICMP-error accepts (mandatory L3, before the deny); (2)
-  `ct state established,related ct direction reply accept` (firewall-originated
-  replies); (3) the NEW per-scope ordered junos-host permit(accept)/deny(drop)
-  subchain — `iifname { <netdevs> } <fam> saddr [!=] <src-set> [<fam> daddr
-  <dst-set>] [<l4-or-fragment>] counter name "<c>" drop`; (4) the remaining
-  `ct state established,related accept` + per-zone coarse service accepts +
-  catch-all drop (existing `emitHostInboundZone`) + unzoned catch-all drop.
+- **Chain order** — the CONCRETE DROP-only placement specified in §6.4: (1)
+  ESP/AH accept; (2) `ct established,related ct direction reply accept`; (3) the
+  NEW per-ingress-zone effective-program DROP rules —
+  `iifname { <non-lifeline netdevs> } <fam> saddr [!=] <src-set> [saddr != <earlier-permit-set>] [<fam> daddr <dst-set>] [<l4-or-fragment>] counter name "<c>" drop`
+  (NO fine `accept`); (4) ND/PMTUD/ICMP-error accepts; (5) residual
+  `ct established,related accept` + per-zone coarse service accepts + catch-all
+  drop (existing `emitHostInboundZone`) + unzoned catch-all drop.
 - `hostInboundHasEnforceableView`/early-return: build the table when there is any
-  **rendered** junos-host scope OR any per-zone view OR unzoned addrs (guard on
+  **rendered** junos-host program OR any per-zone view OR unzoned addrs (guard on
   actually-emitted nonempty rules).
 
 ### 5.3 Reject / permit-restrict (follow-up, §6.5) — deferred rendering
@@ -279,11 +299,12 @@ A junos-host SCOPE is mirrored iff EVERY term in its ordered chain is
 representable; otherwise the whole scope is left to the #4168 warning.
 
 ### 6.1 Representable term dimensions
-- **Action:** `deny` → `drop`; `permit` → `accept` **only as an intra-chain
-  short-circuit ahead of a later deny** (its standalone "restrict others" half is
-  the §6.5 follow-up). A chain whose *last* actionable term is a permit with a
-  source restriction (i.e. it means "deny everyone else") is NOT representable in
-  the first slice → warn.
+- **Action:** `deny` → `drop`. `permit` is **never emitted as an nft `accept`**
+  (that would let a fine permit bypass the coarse gate — Rust `mod.rs:138`);
+  instead an earlier permit's matched set is SUBTRACTED from every later deny's
+  match (§5.1 set-subtraction). A program whose net effect requires a terminal
+  "deny everyone else" (a source-restricted permit with no following deny) is the
+  §6.5 follow-up → warn.
 - **Source:** every `source-address`/`source-address-excluded` token resolves —
   through the STATIC address book / static nested address-set — to a concrete
   commit-stable CIDR set (`any`/`any-ipv4`/`any-ipv6`/empty → match-all). Cross-
@@ -311,7 +332,14 @@ representable; otherwise the whole scope is left to the #4168 warning.
 - **Scheduler-gated policies** (`Policy.SchedulerName != ""`,
   `types_security.go:367`) — active only in time windows; a static nft rule is
   always-on and would over-enforce. Gate on `SchedulerName == ""`.
-- **Reject / source-restricted-permit terms** in the first slice (§6.5).
+- **`tcp-rst` ingress zone** (`ZoneConfig.TCPRst`, `types_security.go:319`). With
+  `tcp-rst`, Junos answers a TCP `deny` with a RST rather than a silent drop, so
+  a silent-drop kernel rule would be a verdict-class divergence. A junos-host
+  DENY program whose ingress zone has `tcp-rst` set is unrepresentable in the
+  DENY (silent-drop) slice → warn; the reject follow-up (§6.5) renders the
+  TCP-RST+ICMPx pair and lifts this.
+- **Reject / source-restricted-permit-as-terminal programs** in the first slice
+  (§6.5).
 - Any future match dimension the nft input chain cannot express.
 
 ### 6.3 No over-/under-deny
@@ -320,52 +348,53 @@ projectable; an unrepresentable term suppresses the scope's kernel enforcement
 entirely (falls back to today's XSK-subset behaviour + warning), so no coarsened
 or partially-ordered rule is ever emitted.
 
-### 6.4 Coarse-then-fine ordering — CONCRETE chain placement (not "a test will find it")
-Rust runs coarse host-inbound admission then fine junos-host policy
-(`poll_descriptor/mod.rs` coarse ~2202 / fine ~2280), with the IPsec-passthrough
-+ ND/PMTUD/ICMP-error exemptions ahead of the coarse gate. The kernel chain
-reproduces this with the following **exact rule order** (this is the specified
-design, verified — not discovered — by the fixture in §9.1):
+### 6.4 Coarse-then-fine ordering — CONCRETE DROP-only chain placement
+Rust runs the coarse host-inbound admission then the fine junos-host policy
+(`poll_descriptor/mod.rs:138,2285`), with ESP/AH genuinely fine-exempt (the
+IPsec-passthrough stage returns before host-inbound) but ND/PMTUD/ICMP-error
+merely COARSE-admitted (`host_inbound.rs:484`) — after which fine junos-host
+STILL runs. The kernel chain reproduces this with this **exact rule order**
+(specified, verified — not discovered — by the §9.1 fixture):
 
 ```
 type filter hook input priority 10; policy accept;
-# (1) mandatory L3 control — NEVER overridden by a junos-host security deny,
-#     placed BEFORE the deny subchain so a denied source cannot self-inflict an
-#     L3 break (ESP/AH decrypt, ND, PMTUD/ICMP-error). Mirrors the Rust
-#     is_icmp_host_inbound_error / IPsec-passthrough exemptions that also precede
-#     fine policy.
+# (1) ESP/AH — GENUINELY fine-exempt (IPsec-passthrough returns before fine).
 meta l4proto { 50, 51 } accept
+# (2) firewall-ORIGINATED reply traffic preserved (host-OUTBOUND flow return);
+#     junos-host governs host-INBOUND original direction only.
+ct state established,related ct direction reply accept
+# (3) NEW junos-host DROP-ONLY subchain (per-ingress-zone effective program,
+#     set-subtracted, ingress iifname-scoped; NO fine accept ever emitted).
+#     Placed BEFORE the ND/PMTUD/ICMP-error accepts because those are COARSE
+#     admissions after which Rust fine policy still runs, so a representable
+#     `application any` deny MUST also drop the denied source's ND/PMTUD/ICMP-
+#     error. Also before the residual established-accept + coarse service accepts,
+#     so a denied source's NEW + original-direction-established inbound are
+#     dropped (Rust per-hit re-eval/teardown, mod.rs:1291). Because NO fine accept
+#     is emitted, a fine "permit" can NEVER re-admit a coarse-rejected service
+#     (Rust mod.rs:138) — the coarse gate stays the sole admit authority.
+<per-ingress-zone effective-program DROP rules (set-subtracted)>
+# (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
 icmpv6 type { 1,2,3,4 } ... accept ; icmpv6 type { 133..137 } ... accept
 icmp  type { destination-unreachable, time-exceeded, parameter-problem } ... accept
-# (2) firewall-ORIGINATED reply traffic preserved (host-OUTBOUND flow's return);
-#     junos-host governs host-INBOUND original direction only, so reply-direction
-#     established is exempt from the deny.
-ct state established,related ct direction reply accept
-# (3) NEW junos-host DENY subchain (ordered projection, ingress-scoped). Placed
-#     BEFORE both the remaining established-accept and the coarse service accepts,
-#     so a denied source's NEW *and* original-direction-established inbound are
-#     dropped — matching Rust's per-LocalDelivery re-evaluation + session teardown
-#     (poll_descriptor/mod.rs:1291). deny=silent drop (== coarse silent drop for a
-#     non-admitted service, so no verdict-class divergence).
-<per-scope ordered permit(accept)/deny(drop) rules>
-# (4) remaining established (original-direction, non-denied) + coarse per-zone
-#     service accepts + catch-all drop (existing emitHostInboundZone), unchanged.
+# (5) residual established + coarse per-zone service accepts + catch-all drop
+#     (existing emitHostInboundZone) + unzoned drop.
 ct state established,related accept
 <per-zone coarse accepts + catch-all drop>
 <unzoned catch-all drop>
 ```
 
-Rationale for placing the deny AFTER the ND/PMTUD/ESP exemptions (1): dropping
-mandatory link control from an otherwise-denied source is a self-inflicted L3
-break with no security benefit (the source is already denied at the service
-layer), and it matches the existing chain's exemption discipline. **If /engineer
-ground-truths that Rust's fine `application any` deny DOES drop the denied
-source's exempted ICMP-error/ND**, the saddr-scoped deny can be moved ahead of
-the ICMP-error accepts for that specific source (feasible, since the deny is
-source-scoped) — OR the interaction is documented as a deliberate, tested
-divergence favouring L3 correctness. The §9.1 fixture asserts the chosen
-placement matches Rust for every representable cell; it is the verification of a
-specified order, not a substitute for specifying it.
+Notes: (i) DROP-only + set-subtraction is what makes this faithful — no fine
+`accept` means a fine permit cannot bypass the coarse gate; permits only narrow
+later denies. (ii) `application any`+`source any` deny is the extreme "lock down
+all host-inbound from zone Z" case; lifelines are iifname-excluded so
+management/ND on fxp0/em0/fab* is never affected. (iii) nft `drop` does not
+delete conntrack state, but the rule (placed before the established-accept) drops
+EVERY packet of the denied 5-tuple, so any lingering state is inert. The residual
+established-accept (5) skipping a per-hit coarse recheck for NON-denied sources is
+the EXISTING chain behaviour (pre-#4146), out of scope. (iv) A ground-truth on
+whether Rust exempts pure ND (133-137) as adjacency vs subjecting it to fine
+policy is a §9.1 fixture cell; if Rust exempts it, ND is hoisted to step (1).
 
 ### 6.5 Reject & source-restricted permit (tracked follow-ups, NOT re-defers)
 `reject` (needs the TCP-RST+ICMPx pair gated to coarse-admitted apps, §5.3) and
@@ -410,27 +439,40 @@ its own attribution). This limitation is stated in the docs matrix.
 
 ## 8. Safety invariants (each gets a test)
 
-1. **Lifeline never denied** — ingress `iifname` excludes fxp0/em0/fab*; a scope
-   resolving only to lifelines emits nothing (and warns).
-2. **Ordered first-match fidelity** — an earlier permit short-circuits a later
-   broader deny (no over-deny of carved-out sources).
-3. **Ingress-scoped** — a deny fires only for traffic entering the from-zone's
+1. **Lifeline never denied** — ingress `iifname` excludes fxp0/em0/fab*; a
+   program resolving only to lifelines emits nothing (and warns). A **global-any**
+   term is rendered per ingress zone with that zone's non-lifeline netdevs, NEVER
+   as an unscoped rule, so it cannot fire on a lifeline/unzoned ingress.
+2. **Ordered first-match fidelity via set-subtraction** — an earlier permit
+   subtracts its set from every later deny's match (no fine `accept`, so a permit
+   cannot bypass the coarse gate; no over-deny of carved-out sources).
+3. **Single effective program per ingress** — exact zone-pair → global tiers are
+   gated + rendered as ONE program per ingress zone; an unrepresentable term in
+   any contributing tier suppresses the whole program (no exposed global deny).
+4. **Ingress-scoped** — a deny fires only for traffic entering the from-zone's
    interfaces (no cross-zone under-/over-deny).
-4. **Coarse-then-fine parity** — nft verdict == Rust `junos_host_local_policy`
-   verdict across the fixture matrix (§9.1).
-5. **No transit impact** — the `input` hook sees only host-bound traffic;
+5. **Coarse gate is the sole admit authority** — no fine `accept` is emitted, so
+   a fine permit can never re-admit a service the coarse host-inbound gate rejects
+   (Rust `mod.rs:138`).
+6. **Coarse-then-fine parity** — nft verdict == Rust `junos_host_local_policy`
+   verdict across the fixture matrix (§9.1), including that an `application any`
+   deny drops the denied source's ND/PMTUD/ICMP-error.
+7. **No transit impact** — the `input` hook sees only host-bound traffic;
    sustained iperf3 confirms zero forwarding regression.
-6. **No over-deny** — whole-chain representability gate (§6.3).
-7. **Established-session parity — RESOLVED in §6.4 (SMR-F3 + Codex).** The
+8. **No over-deny** — whole-program representability gate (§6.3).
+9. **Established-session parity — RESOLVED in §6.4 (SMR-F3 + Codex).** The
    concrete chain order accepts only `ct direction reply` established (firewall-
    ORIGINATED replies) ahead of the deny, then applies the deny to the denied
    source's NEW *and* original-direction-established inbound — matching Rust's
    per-LocalDelivery re-evaluation + session teardown
-   (`poll_descriptor/mod.rs:1291`). This is a specified placement, not deferred.
-   A source denied from its first packet never forms state.
-8. **Deterministic payload** — ordered iteration over config slices.
-9. **Warning suppressed only on rendered rules** — an unrepresentable /
-   lifeline-only / no-address policy still warns (§6.3, §3.3).
+   (`poll_descriptor/mod.rs:1291`). Specified, not deferred. A source denied from
+   its first packet never forms state.
+10. **`tcp-rst` zone** — a junos-host deny program whose ingress zone has
+    `tcp-rst` is unrepresentable in the DENY slice (silent-drop would diverge from
+    Junos's RST); it warns (§6.2) until the reject follow-up.
+11. **Deterministic payload** — ordered iteration over config slices.
+12. **Warning suppressed only on rendered rules** — an unrepresentable /
+    lifeline-only / no-address policy still warns (§6.3, §3.3).
 
 ---
 
@@ -440,7 +482,7 @@ its own attribution). This limitation is stated in the docs matrix.
 A table-driven fixture feeds the SAME config + a matrix of synthetic packets
 (ingress zone × source ∈ {denied, permitted-exception, other} × app ∈ {simple,
 any} × family v4/v6 × {new, established, PMTUD/ICMP-error}) to BOTH:
-- the nft projection (`BuildJunosHostScopes` → rendered verdict), and
+- the nft projection (`BuildJunosHostPrograms` → rendered verdict), and
 - the **authoritative** Rust `junos_host_local_policy` semantics — a Rust cargo
   test consuming the same config is the preferred oracle; the Go `policymatch`
   simulator may stand in ONLY where an existing contract test already pins it to
@@ -450,20 +492,32 @@ and asserts identical admit/deny verdicts for every representable cell, and that
 every un-representable cell is warned + un-emitted.
 
 ### 9.2 Unit / golden (Go, `make test-go`)
-- Ordered chain: `permit source good` before `deny source 10/8` (good∈10/8) →
-  `iifname{...} saddr good accept` emitted BEFORE `saddr 10/8 drop`.
+- **Set-subtraction:** `permit source good` before `deny source 10/8` (good∈10/8)
+  → a SINGLE `iifname{...} saddr 10/8 saddr != good ... drop` (NO fine `accept`
+  emitted). Assert no `accept` line appears in a junos-host program.
+- **Coarse gate sole authority:** a `permit application ssh` in a zone whose
+  host-inbound-traffic omits ssh renders NO accept (ssh stays coarse-denied).
+- **Effective program tier composition:** an unrepresentable exact zone-pair term
+  suppresses the whole ingress program INCLUDING a representable global deny for
+  that zone (assert the global deny is NOT rendered for that ingress).
 - iifname scope resolves VLAN subunit + RETH member netdevs, excludes lifelines.
-- Under/over-deny guards: a deny scoped to from-zone wan does NOT match a packet
-  entering lan to a wan IP’s… (assert via iifname, not daddr).
+- **global-any** deny renders per ingress zone with that zone's non-lifeline
+  netdevs — assert it NEVER emits an unscoped rule and never matches a lifeline
+  ingress.
+- Under/over-deny guards: a deny scoped to from-zone wan matches only wan-ingress
+  netdevs (assert via iifname, not daddr).
 - source-address-excluded → `saddr != set`; cross-family excluded correctness.
 - Applications: `junos-ssh` → `tcp dport 22`; app-set → multiple rules;
   `SourcePort` emitted; ICMP app → `icmp type…`; `any` → no L4.
+- **ND/PMTUD placement:** an `application any source BAD deny` emits its drop
+  BEFORE the ND/PMTUD/ICMP-error accepts (assert ordering), so BAD's PMTUD is
+  dropped while another source's PMTUD is accepted.
 - destination-address subset scoping; non-firewall dest → unrepresentable+warn.
 - Representability gate: feed-tainted source (direct / nested / same-name
-  static+feed), multi-term/ALG app, scheduler-gated, reject, source-restricted
-  permit → NO rule + warning.
+  static+feed), multi-term/ALG app, scheduler-gated, **tcp-rst ingress zone**,
+  reject, source-restricted permit → NO rule + warning.
 - Global `to-zone junos-host` with `FromZones` scope → iifname union; global-any
-  → no iifname.
+  → per-zone non-lifeline netdevs.
 - Counter: every reference declared; early-return builds table only on rendered
   rules.
 - Warning suppression keyed on rendered policies (lifeline-only / no-address
@@ -519,9 +573,13 @@ Under the cluster lock (`./test/incus/with-cluster.sh`), on
 - **daddr scoping** — under-/over-denies across zones; #3718 does not prevent it
   (§3.2). Replaced by iifname ingress scope.
 - **Per-term deny emission** — ignores first-match ordering (§3.2). Replaced by
-  ordered-chain projection.
-- **fine-before-coarse** for reject — turns a silent coarse drop into a RST;
-  reject deferred (§6.5).
+  the single per-ingress effective-program projection.
+- **Fine `permit→accept` rules** — would let a fine permit re-admit a
+  coarse-rejected service (Rust `mod.rs:138`). Replaced by DROP-only
+  set-subtraction (a permit narrows later denies via `saddr !=`; no fine accept).
+- **fine-before-coarse / silent-drop in a tcp-rst zone** — a tcp-rst zone answers
+  a TCP deny with a RST; silent drop diverges, so such programs are
+  unrepresentable in the DENY slice (§6.2) and reject is deferred (§6.5).
 - **Strict-reject the remainder (i)** — refuses legal, XSK-enforced configs;
   recorded as a possible future hybrid (strict-reject-new / lenient-warn-loaded,
   per `compiler.go:40`) if the operator later prefers it.
