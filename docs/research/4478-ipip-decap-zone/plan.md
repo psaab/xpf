@@ -1,6 +1,9 @@
 # Plan-of-Action — #4478 IPIP (proto-4) decap has no userspace zone enforcement
 
-- **Revision:** r2 (SMR r1 = PLAN-REVISE folded in; Codex r1 pending)
+- **Revision:** r3 — **VERDICT: PLAN-KILL (security framing invalid)**. Codex r1
+  + Claude-SMR r2 converge: the crux is misdiagnosed against the production
+  userspace path; the described fail-open is NOT reachable in the userspace
+  dataplane (the only supported runtime).
 - **Issue:** #4478 (opus-172 M-1) — IPIP tunnel decap fail-open, parallel to the GRE gap that HAS a userspace decap stage
 - **Mode:** `/research` — deliverable is a converged plan + reviewer verdicts. NO PR, NO production code changes.
 - **Base:** origin/master `4eb28ae25eb8`
@@ -8,24 +11,68 @@
 
 ---
 
-## 1. Status
+## 0. VERDICT (r3): PLAN-KILL — security fail-open not reachable in the userspace dataplane
 
-Code study COMPLETE. The OWNER's first-pass triage comment on #4478 is
-**confirmed correct** against origin/master, and extended with five new
-load-bearing findings (§4, §7). Plan drafted; awaiting Codex + Claude-SMR
-convergence.
+The r1/r2 crux ("an inbound proto-4 frame is decapped by a kernel
+`Iptun`/`Ip6tnl` and the inner packet is kernel-forwarded into a protected zone,
+fail-open") is **misdiagnosed**. It relies on `buildKernelTunnelLink`'s
+`case "ipip"` arm creating a kernel `Iptun` — but that arm is on the LEGACY
+non-anchor path (`applyKernelTunnelLocked`) that is **never reached in the
+supported userspace dataplane**. Verified evidence chain:
 
-Provisional recommendation: **Path B (no-shim static steering + userspace-dp
-IPIP decap primitive)** as the shippable fix, framed honestly as closing the
-*steady-state* fail-open with a documented *degraded-window* residual, plus a
-filed follow-up for **Path E (full kernel-Iptun→TUN-anchor GRE parity)** to
-eliminate the residual once the #1864 verifier budget is reclaimed.
-**PLAN-DEFER behind #1864 is an explicitly reviewer-selectable alternative**
-(§3, §11) — this plan surfaces the tradeoff rather than forcing a single answer.
+1. The default and only supported dataplane is userspace:
+   `dataplane.EffectiveType("") == TypeUserspace` (`pkg/dataplane/dataplane.go`
+   L69-72); the `ebpf` type is hard-rejected at commit and runtime (CLAUDE.md,
+   `ErrEBPFDataplaneRetired`/`ErrEBPFBackendRetired`).
+2. In userspace mode the daemon sets `AnchorOnly=true` for **every** tunnel,
+   **regardless of mode** — `collectAppliedTunnels`
+   (`pkg/daemon/daemon_run.go` L117 `anchorOnly := EffectiveType==TypeUserspace`,
+   applied at L150 and L160 for interface- and unit-level tunnels).
+3. `AnchorOnly=true` ⇒ `tunnelManager.Apply` takes `applyAnchorLocked`
+   (`pkg/routing/tunnel.go` L471-474) which creates a **`netlink.Tuntap` routing
+   anchor** (L514, "the production userspace-dp path") and **never** calls
+   `applyKernelTunnelLocked` / `buildKernelTunnelLink`. Confirmed by
+   `pkg/daemon/tunnel_anchor_test.go` (userspace/default ⇒ anchor; only legacy
+   ebpf ⇒ kernel device).
+4. So there is **no kernel `Iptun` decapper** for `mode "ipip"` in production. An
+   inbound proto-4 frame (outer dst = the firewall's own tunnel-source, a local
+   address) → shim `is_local_destination` true → `cpumap_or_pass` → kernel INPUT
+   → **no IPPROTO_IPIP handler bound to (local,remote)** → the packet is
+   **DROPPED**. That is **fail-CLOSED**, not fail-open. (This holds in the
+   degraded window too: `is_degraded_local_or_control` → `pass_local_control` →
+   kernel → still no decapper → drop. The r2 "degraded residual" was itself an
+   artifact of the nonexistent kernel Iptun.)
+
+**Therefore the M-1 security fail-open described in #4478 does not exist in the
+userspace dataplane.** It would only manifest under the retired ebpf dataplane
+(`AnchorOnly=false` → kernel `Iptun`), which cannot be committed or run.
+
+**Residual (not a security bug):** IPIP *inbound* decap is simply
+**unimplemented** under the userspace dataplane — the config is accepted, the TUN
+anchor is created, and the endpoint reaches the snapshot (§4-1), but there is no
+userspace IPIP decap primitive and no `native_ipip` shim redirect, so inbound
+proto-4 is silently dropped. This is a **feature-completeness gap**, fail-closed,
+of separate (and lower) priority. If IPIP inbound is a desired feature, it should
+be a NEW feature issue; the design analysis below (§5 Path B/E) is retained as a
+starting point for THAT work, not as a security fix.
+
+## 1. Status (superseded by §0)
+
+Code study is complete. The r1/r2 plan (Path B recommendation) is **retained
+below as an appendix** documenting the mechanism analysis, but its security
+premise is invalidated by §0. The OWNER's first-pass triage and the r1 plan both
+read `buildKernelTunnelLink` without checking that the `AnchorOnly` short-circuit
+makes it dead in userspace mode — the exact hostile catch the review process is
+built to surface (credit: Codex r1).
 
 ---
 
-## 2. Issue framing (the confirmed fail-open)
+## 2. Issue framing (INVALIDATED by §0 — retained for the record)
+
+> The framing below assumed a kernel `Iptun` decapper. §0 shows that device is
+> never created in the userspace dataplane, so the "fail-open" conclusion does
+> not hold. The shim-behavior and GRE-contrast analysis remains accurate and is
+> reused by the §5 feature appendix.
 
 An inbound IP-in-IP (outer protocol 4) frame whose **outer destination is the
 firewall's own tunnel-source address** and whose **outer source matches a
@@ -172,7 +219,17 @@ study surfaced five precision points that shape the design:
 
 ---
 
-## 5. Concrete design — three viable paths, site-by-site
+## 5. Concrete design (APPENDIX — a FEATURE plan for IPIP inbound, not a security fix)
+
+> Per §0 there is no security fail-open to close. This section is retained ONLY
+> as a starting point should IPIP *inbound decap* be pursued as a feature. Note
+> that with no kernel `Iptun`, the mechanics change slightly: the goal is to make
+> IPIP inbound WORK (today it is fail-closed/dropped), so Path B's static
+> steering + a userspace IPIP decap primitive + `ipip_decap_index` +
+> `TunnelKind::Ipip` would ENABLE the feature; Path E's "replace the kernel
+> Iptun" step is moot (there is no kernel Iptun — the anchor already exists);
+> Path C/native_ipip remains #1864-blocked. There is no security urgency because
+> the current behavior is drop, not bypass.
 
 ### Path B (RECOMMENDED shippable) — static `USERSPACE_SESSIONS` steering + userspace-dp IPIP decap
 
