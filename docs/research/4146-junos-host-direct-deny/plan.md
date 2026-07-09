@@ -32,14 +32,20 @@ question; this plan resolves it** rather than deferring again:
   Go-only; **no Rust hot path**; independent of the #1864 shim verifier ceiling
   that blocked the previously-chased userspace-redirect approach (direction a).
   Both hostile reviewers confirmed the locus is correct.
-- **Enforce by projecting the ORDERED per-ingress-scope junos-host policy list
-  into an ordered nft subchain** (permit→accept short-circuit, deny→drop),
-  scoped by **ingress interface (`iifname`)** not destination address, evaluated
-  in the Rust SSOT's **coarse-admit-then-fine-policy** order. Emit a scope's
-  subchain **only when the entire projected chain is representable**; otherwise
-  emit nothing for that scope and keep the #4168 warning. This is the crux fix
-  over r1/r2: representability and emission are decided on the **ordered decision
-  program**, never per isolated deny term.
+- **Enforce by projecting the ONE effective ordered junos-host program per
+  (ingress zone, family)** — exact `from-zone Z` → from-any (#3090) → global
+  `to-zone junos-host` — into a **DROP-only** nft subchain: a `deny` becomes a
+  `drop`, and an earlier `permit` never emits a fine `accept` (which could
+  re-admit a coarse-rejected service) but instead **subtracts** its set from every
+  later deny (`saddr != …`), so the coarse gate stays the sole admit authority.
+  Scoped by **ingress interface (`iifname`)** not destination address, placed in
+  the Rust SSOT's **coarse-admit-then-fine-policy** order, and restricted to the
+  **fine-eligible L4 domain** (ESP/AH, coarse-admitted IKE, and ident-reset RST
+  are preserved by effective coarse verdict). Emit a program **only when the
+  entire effective program is representable**; otherwise emit nothing for that
+  ingress and keep the #4168 warning. The crux fix over r1/r2: representability and
+  emission are decided on the **whole ordered decision program**, never per
+  isolated deny term.
 - **Representable subset:** action `deny` (silent drop); `match source-address`/
   `source-address-excluded` resolving entirely to *static* address-book CIDRs
   (recursively feed-untainted); `match application` reducing to simple
@@ -195,7 +201,7 @@ coarse-gated, DROP-only junos-host DENY subchain**:
 6. Attach a named counter per program/family (existing `HostInboundDenyCounterName`
    discipline) and a `xpf_host_inbound_junos_host_denies_total` metric — with an
    explicit note that this does NOT populate per-Junos-policy hit counters /
-   `then count` / RT_FLOW deny attribution (§6.6).
+   `then count` / RT_FLOW deny attribution (§6.7).
 7. Suppress the #4168 warning per-policy **only when that policy rendered a
    rule**; keep it otherwise. Update the docs matrix.
 8. Guarantee kernel==Rust semantics with a **cross-language parity fixture**
@@ -266,7 +272,7 @@ from-any → global `to-zone junos-host`); the projection reproduces that.
 - **Chain order** — the CONCRETE DROP-only placement specified in §6.4: (1)
   ESP/AH accept; (2) `ct established,related ct direction reply accept`; (3) the
   NEW per-ingress-zone effective-program DROP rules (exact→from-any→global tiers),
-  match restricted to the fine-eligible L4 domain (§6.7) —
+  match restricted to the fine-eligible L4 domain (§6.6) —
   `iifname { <non-lifeline netdevs> } <fine-eligible-l4-exclusions> <fam> saddr [!=] <src-set> [saddr != <earlier-permit-set>] [<fam> daddr <dst-set>] [<l4-or-fragment>] counter name "<c>" drop`
   (NO fine `accept`); (4) ND/PMTUD/ICMP-error accepts; (5) residual
   `ct established,related accept` + per-zone coarse service accepts + catch-all
@@ -284,7 +290,7 @@ avoid the silent-drop-vs-reject divergence.
 ### 5.4 Metrics — `pkg/dataplane/userspace` (`xnft`) + `pkg/api`
 - `HostInboundJunosHostDenyCounterName(scope, family)` + a
   `xpf_host_inbound_junos_host_denies_total{scope,family}` counter (scraped like
-  #3361). Documented NOT to equal per-policy hit counters (§6.6).
+  #3361). Documented NOT to equal per-policy hit counters (§6.7).
 
 ### 5.5 Fail-closed apply
 The junos-host deny rides `applyHostInboundFilter`'s atomic `nft -f -`. **Open
@@ -375,7 +381,7 @@ ct state established,related ct direction reply accept
 # (3) NEW junos-host DROP-ONLY subchain (per-ingress-zone effective program =
 #     exact->from-any->global tiers, set-subtracted, ingress iifname-scoped; NO
 #     fine accept ever emitted; match RESTRICTED to the fine-eligible L4 domain
-#     per §6.7 — excludes ESP/AH, coarse-admitted IKE 500/4500, ident-reset 113).
+#     per §6.6 — excludes ESP/AH, coarse-admitted IKE 500/4500, ident-reset 113).
 #     Placed BEFORE the ND/PMTUD/ICMP-error accepts because those are COARSE
 #     admissions after which Rust fine policy still runs, so a representable
 #     `application any` deny MUST also drop the denied source's ND/PMTUD/ICMP-
@@ -414,7 +420,7 @@ the IDENTICAL machinery and are tracked next slices in the same PR family. The
 DENY slice alone un-defers the issue (the bug is a `then deny` unenforced). Until
 then, scopes containing such terms are unrepresentable → warned.
 
-### 6.7 Fine-eligible L4 domain — pre-fine terminal/exempt classes (Codex r3)
+### 6.6 Fine-eligible L4 domain — pre-fine terminal/exempt classes (Codex r3)
 Rust runs certain classes BEFORE fine junos-host policy, so the fine DROP must
 NOT touch them (else it converts a coarse-terminal verdict into a silent drop or
 black-holes IPsec):
@@ -457,7 +463,7 @@ model it). Tests: `application any` deny in an `ike`-admitting zone does not dro
 `{ all, ident-reset }` zone the deny DOES drop the denied source's 113 (no
 fail-open); a deny scoped to an IKE/ident app warns.
 
-### 6.6 Hit-counter honesty
+### 6.7 Hit-counter honesty
 The nft aggregate counter/metric does NOT populate per-Junos-policy hit counters,
 `then count`, or RT_FLOW policy-deny attribution — the exact "counters stay zero"
 symptom the issue reports for the direct path. nft cannot attribute a drop to a
@@ -512,7 +518,7 @@ its own attribution). This limitation is stated in the docs matrix.
 6. **Coarse-then-fine parity** — nft verdict == Rust `junos_host_local_policy`
    verdict across the fixture matrix (§9.1), including that an `application any`
    deny drops the denied source's ND/PMTUD/ICMP-error.
-6b. **Fine-eligible L4 domain (§6.7)** — the DROP excludes a class only when its
+6b. **Fine-eligible L4 domain (§6.6)** — the DROP excludes a class only when its
    EFFECTIVE coarse verdict is a non-accept terminal/exempt: ESP/AH always;
    coarse-admitted IKE 500/4500; ident-reset 113 ONLY when its coarse verdict is
    the RST (ident-reset AND not `all`). A `{all, ident-reset}` zone keeps 113
@@ -562,7 +568,7 @@ every un-representable cell is warned + un-emitted.
   `saddr 10/8 saddr != good drop` (the from-any carve-out is honored). An
   unrepresentable term in ANY tier suppresses the whole ingress program (assert
   the global/from-any deny is NOT rendered for that ingress).
-- **Fine-eligible L4 domain (§6.7):** an `application any` deny in an
+- **Fine-eligible L4 domain (§6.6):** an `application any` deny in an
   ike-admitting zone does NOT drop UDP 500/4500; in an `ident-reset` (NOT all)
   zone does NOT silence TCP/113; in a **`{ all, ident-reset }`** zone DOES drop
   the denied source's 113 (no fail-open — the all-accept shadows the RST); never
@@ -624,7 +630,7 @@ Under the cluster lock (`./test/incus/with-cluster.sh`), on
   now kernel-enforced (direction b)** with ingress-zone scope and coarse-then-fine
   order; describe the representability contract; state the un-representable tail
   as a **documented partial-coverage limitation** (NOT "Junos-correct"); state the
-  hit-counter honesty note (§6.6) and the established-session parity decision
+  hit-counter honesty note (§6.7) and the established-session parity decision
   (§8-inv-7).
 - Update the #4168 warning prose to reflect suppression-on-render.
 - `pkg/daemon/daemon_nft.go` head comment: the junos-host deny subchain, its
