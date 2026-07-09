@@ -3,7 +3,7 @@
 - **Issue:** #4874 (label `bug`; Codex review 175 findings C175-HC-078, C175-HC-079)
 - **Branch:** `research/4874-dhcp-lease-expiry`
 - **Base:** origin/master @ `4047fd553`
-- **Revision:** r2 (post round-1 Codex + Claude-SMR)
+- **Revision:** r2 (folded Claude-SMR r1 F1/F2/F3; Codex r1 pending)
 - **Status:** PLAN-READY (split verdict) — see §6
 - **Mode:** `/research` — stops at PLAN-READY. No PR, no production code touched here.
 
@@ -178,6 +178,22 @@ sub-claim is factually wrong (finishClient cleans up), then close.
   30-day re-advertisement of a revoked prefix. So Path B is correct **for A
   only**, not for the whole issue.
 
+### Path A′ (middle) — expire the ADDRESS but retain the gateway ROUTE — REJECTED on correctness
+The task suggested a middle path: on timeout-expiry, remove the local interface
+address but keep the default route (or gate the whole thing behind a config
+knob). **Rejected on the merits, not for effort:** removing the local interface
+address while keeping the DHCP-learned default route is technically incoherent
+on Linux. The default route resolves its next-hop through the on-link connected
+route that the interface address installs; drop the address and the connected
+route goes with it, so the gateway's neighbor resolution and ip-monitoring's
+next-hop reachability probe both break — you destroy the very route you tried to
+preserve. This is exactly why #1844 retains the **whole** binding (address +
+route) rather than splitting them. The config-knob variant (opt-in clock-expiry)
+remains a *possible* future issue, but it must route through the documented
+`onGatewayChange` coupling rule and is out of scope for #4874; there is no new
+evidence the #1844 default is wrong. So A′ collapses back into either Path A
+(full clock-expiry, HIGH availability risk) or the retain default.
+
 ### Path C — Split: PLAN-KILL A (document), PLAN-READY B (fix the withdrawal)  ← RECOMMENDED
 Treat the two defects on their merits:
 
@@ -190,20 +206,29 @@ Treat the two defects on their merits:
   mirroring `selectIANAAddress` (#4383) and the v4 NAK/timeout split (#3956),
   while preserving the absent-IA_PD retain rule. Concretely, the smallest correct
   shape:
-  1. In `parseV6Reply` (not blindly inside `extractDelegatedPrefixes`), detect
-     whether **any** IA_PD option was present in the reply, and partition the
-     extracted prefixes into `live` (valid-lifetime > 0) and `withdrawn`
-     (valid-lifetime 0). `extractDelegatedPrefixes` may keep returning raw
-     prefixes; the partition/decision belongs one level up so the "absent vs.
-     present-but-zero" signal is not lost.
-  2. Carry a small signal on `dhcpv6Result` (e.g. `iapdPresent bool` +
-     `prefixes` already filtered to live) so the run loop / `commitLease` can
-     distinguish "IA_PD absent → retain" from "IA_PD present, all withdrawn →
-     delete `m.delegatedPDs[iface]`."
+  1. In `parseV6Reply` (not blindly inside `extractDelegatedPrefixes`), partition
+     the extracted prefixes into `live` (valid-lifetime > 0) and detect
+     `sawWithdrawal := any prefix with valid-lifetime == 0`. `live` becomes the
+     stored set. The precise signal is **"saw an explicit zero-lifetime
+     prefix"**, NOT "any IA_PD option present": an IA_PD option that carries no
+     prefixes at all (e.g. a NoPrefixAvail status) is ambiguous and the
+     conservative current retain is fine — it is not the Defect-B scenario, so
+     the fix must not touch it.
+  2. Carry a small signal on `dhcpv6Result` (e.g. `withdrew bool` alongside
+     `prefixes` already filtered to `live`) so the run loop / `commitLease` can
+     apply the three-way decision:
+
+     | Reply                                       | Action |
+     |---------------------------------------------|--------|
+     | ≥1 live prefix (vlt>0)                        | store `live` (replaces; a co-reported withdrawn prefix drops for free) |
+     | 0 live, ≥1 withdrawn (vlt==0)                | **clear** `m.delegatedPDs[iface]` + `scheduleRecompile` |
+     | 0 prefixes at all (absent / empty IA_PD)     | **retain** (unchanged #1844 anti-outage rule) |
+
   3. Adjust the `len(prefixes) > 0` guard sites (`runDHCPv6` renew/rebind commit
      and `commitLease`) so an explicit all-withdrawn reply **clears** the stored
      PDs (and fires `scheduleRecompile` so RA reconverges), rather than being a
-     no-op that retains them.
+     no-op that retains them. The "≥1 live" row already handles partial
+     withdrawal (withdraw /56, keep /48) by storing only live prefixes.
   4. RA path is then correct for free: with the prefix dropped,
      `DelegatedPrefixesForRA` no longer returns it, so `daemon_ra.go` /
      `sender.go` never see it. (No change needed to the sender's zero→default
@@ -226,8 +251,8 @@ Treat the two defects on their merits:
 
 ## 5. Blast radius / affected files (Path C, B-only implementation)
 
-- `pkg/dhcp/dhcp.go` — `parseV6Reply` (partition live/withdrawn + presence
-  signal), `dhcpv6Result` (add signal field), `runDHCPv6` renew/rebind commit
+- `pkg/dhcp/dhcp.go` — `parseV6Reply` (partition to `live` + `sawWithdrawal`
+  signal), `dhcpv6Result` (add `withdrew bool`), `runDHCPv6` renew/rebind commit
   guards.
 - `pkg/dhcp/commit.go` — `commitLease` PD store/clear branch (honor an explicit
   all-withdrawn as a delete).
@@ -293,12 +318,22 @@ No cluster smoke required — DHCPv6 PD is control-plane, not dataplane-forwardi
   valid-lifetime 0.** Mitigation: withdraw ONLY on an explicit present-but-zero
   IA_PD; absent IA_PD retains. Identical to the shipped v4 NAK-vs-timeout policy.
   A server sending valid-lifetime 0 is making an unambiguous RFC 8415 statement.
-- **R2 — Signal plumbing (`iapdPresent`) accidentally changes the acquire path.**
-  Mitigation: on initial acquire there is no prior PD to withdraw; the new branch
-  is a no-op when `committedPDs` is empty. Cover with the "absent IA_PD" test.
+- **R2 — Signal plumbing (`sawWithdrawal`) accidentally changes the acquire
+  path.** Mitigation: on initial acquire there is no prior PD to withdraw; the
+  clear branch is a no-op when `committedPDs` is empty. Cover with the "absent
+  IA_PD" test. Tightening the signal to "saw an explicit zero-lifetime prefix"
+  (not "any IA_PD option present") keeps the empty-IA_PD/NoPrefixAvail case on
+  the unchanged retain path.
 - **R3 — Scope creep into Path A.** Mitigation: A is explicitly out of scope for
   code; only a README note. Clock-expiry stays a separate future issue bound to
   the `onGatewayChange` coupling rule.
+- **R4 — RA flap under a lifetime-oscillating server.** A broken server that
+  alternates vlt>0 / vlt==0 for the same prefix across renews would drive
+  advertise→withdraw→advertise on the LAN. Accepted as a MINOR: this is
+  RFC-correct (follow the server) and strictly better than masking a genuine
+  withdrawal for 30 days. No new debounce needed — `scheduleRecompile` is already
+  debounced and a content-identical retain reply does not fire; the churn tracks
+  only genuine server oscillation.
 
 ---
 
