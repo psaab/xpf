@@ -1,6 +1,12 @@
 # Plan-of-Action — #4785 IPIP (proto-4) inbound decap unimplemented (userspace-dp feature/parity gap)
 
-- **Revision:** r1 (pre-review)
+- **Revision:** r2 — folds Codex (REVISE→DEFER-is-a-demand-call) + Claude SMR
+  (CONVERGE-WITH-NITS). Both reviewers agree PLAN-DEFER is correct and must rest
+  on demand/priority, NOT on inflated Path-B risk or a pending #1864. r2 fixes:
+  (a) corrects the overstated "novel Go-writes-`USERSPACE_SESSIONS`" framing
+  (there is precedent + a cleaner control-socket variant); (b) completes the
+  `TunnelKind::Ipip` fan-out list (the second `tcp_segmentation.rs` encap match);
+  (c) elevates the commit-time advisory warning to a recommended near-term action.
 - **Issue:** #4785 — residual of the #4478 `/research` (PLAN-KILLed the security
   framing; this is the fail-CLOSED feature-completeness residual).
 - **Mode:** `/research` — deliverable is a converged plan + reviewer verdicts.
@@ -16,14 +22,19 @@
 
 ## 0. VERDICT (r1, pre-review): PLAN-DEFER — demand-gated, NOT "#1864-gated"
 
-**Recommendation: PLAN-DEFER.** Do not ship an IPIP forwarding path now. IPIP
-inbound (and, per Finding-2 below, outbound) is a **niche, fail-closed,
-never-worked** vSRX parity gap with **zero demonstrated operator demand**. The
-complete fix is a **large hot-path effort** — a new userspace-dp IPIP
-**encap + decap** engine PLUS a **novel "Go writes `USERSPACE_SESSIONS`"
-HA-ownership boundary** — disproportionate to the value while nothing depends on
-it. Defer until a real operator requirement materializes; keep the issue OPEN
-and ready (Path B below is the viable implementation when demand appears).
+**Recommendation: PLAN-DEFER — as a pure demand/priority call.** Do not ship an
+IPIP forwarding path now. IPIP inbound (and, per Finding-2 below, outbound) is a
+**niche, fail-closed, never-worked** vSRX parity gap with **zero demonstrated
+operator demand**. The complete fix is a **large hot-path effort** — a new
+userspace-dp IPIP **encap + decap** engine plus a modest control-plane steering
+mechanism — disproportionate to the value while nothing depends on it. **Both
+reviewers stress: DEFER must rest on demand/priority, NOT on Path-B being
+unusually risky or on a pending #1864.** Path B is technically viable NOW (no
+shim change, no verifier dependency, and — corrected in r2 — no unprecedented
+HA-ownership boundary). Defer until a real operator requirement materializes;
+keep the issue OPEN and ready (Path B below is the implementation when demand
+appears). **Near-term, do the cheap thing (§10): a commit-time advisory warning
+so `mode ipip` is not a silently-dead stanza.**
 
 This plan **corrects the task's "defer until #1864 unblocks Path C" framing**,
 which rests on a stale premise (Finding-1): **#1864 is CLOSED** and did **not**
@@ -121,32 +132,45 @@ feature (Finding-2: both directions) requires:
 2. A new userspace-dp IPIP **encap** primitive (mirror
    `encapsulate_native_gre_frame`; simpler — no GRE header, just an outer IP
    header — but still a hot-path builder with DF/PMTU/oversize handling).
-3. `TunnelKind::Ipip` added to **every** `match TunnelKind` site (egress
-   dispatch `frame/mod.rs`, TSO/segmentation MTU `frame/tcp_segmentation.rs`,
-   ICMP-PTB inner-MTU `afxdp/icmp_ptb.rs`) — a compile-time-enforced fan-out.
+3. `TunnelKind::Ipip` added to **every** `match TunnelKind` site — FOUR runtime
+   matches (r2, Codex): egress dispatch (`frame/mod.rs` L399), per-segment/TSO
+   encap dispatch (`frame/tcp_segmentation.rs` L401), inner-MTU
+   (`frame/tcp_segmentation.rs` L42), and ICMP-PTB inner-MTU (`afxdp/icmp_ptb.rs`
+   L208) — a compile-time-enforced fan-out (exhaustiveness caught at build).
 4. A new kind-segregated `ipip_decap_index` on `ForwardingState` + a decap poll
    stage (mirror `stage_native_gre_decap`, stage 6).
-5. A **novel "Go writes `USERSPACE_SESSIONS`" steering mechanism** (Path B) —
-   today Go's ONLY interaction with that map is a startup-flush DELETE-all
-   (`maps_sync.go` L567-585); userspace-dp owns live entries. Making Go a
-   *writer* is a new HA-ownership boundary with real invariants (§7 HI-1/6/7).
+5. A **modest control-plane steering mechanism** (Path B) — a handful of
+   config-derived static `USERSPACE_SESSIONS` entries. **This is NOT an
+   unprecedented ownership model (Codex, corrected in r2):** Go already drives
+   session state into the helper via control-socket requests
+   (`SetSessionV4` / `SetClusterSyncedSessionV4`, `manager_ha.go` L864-1014),
+   and userspace-dp (the sole raw map writer, `bpf_map` `bpf_map_update_elem`)
+   publishes `USERSPACE_SESSIONS` for HA activation/prewarm (`shared_ops.rs`
+   ~L350). The preferred B2 variant is therefore to route the static steering
+   through the **existing control-socket session-install path** (keeping
+   userspace-dp the sole map writer), NOT a raw Go `map.Update`. A raw Go write
+   is the fallback and would be the only genuinely new bit; either way the scope
+   is bounded and the invariants (§7 HI-1/6/7) are contained. **The DEFER call
+   rests on demand/priority, not on this being risky.**
 6. Go↔shim key-parity tests, Rust decap/encap unit tests, a loss-cluster IPIP
    topology, `/triple-review` (hot-path forwarding + a new decap AND encap
    stage), and operator/module docs.
 
-That is a multi-day hot-path effort touching ~8 files, introducing a novel
-HA-ownership boundary, for a zero-demand parity checkbox. The project's
-engineering discipline ("keep solutions simple and direct"; hot-path allocation
-rules; review severity) argues against paying it speculatively.
+That is a multi-day hot-path effort touching ~8 files (four `match TunnelKind`
+sites, a new encap AND decap primitive, a decap poll stage, control-plane
+steering) for a zero-demand parity checkbox. The project's engineering discipline
+("keep solutions simple and direct"; hot-path allocation rules; review severity)
+argues against paying it speculatively — **on priority, not because any one piece
+is unusually hard.**
 
-**The clean alternative is blocked with no reclamation planned (Finding-1).**
-Path C (`native_ipip` shim redirect) would be cleaner (no per-flow map, no
-Go-writes-sessions, tuple-agnostic) but ADDS shim insns to a program already at
-the 1M verifier ceiling; #1864 closed as a toolchain-pin, not a budget reclaim,
-and nothing tracks reclaiming that budget. So shipping now means committing the
-**Path B static-session mechanism permanently** (Path C is not a near-term
-replacement) — which removes the "throwaway steering" argument but leaves the
-"novel HA-ownership boundary for a niche feature" cost standing.
+**The clean-*er* steering alternative is blocked with no reclamation planned
+(Finding-1).** Path C (`native_ipip` shim redirect) would be marginally cleaner
+(no per-flow steering map, tuple-agnostic) but ADDS shim insns to a program
+already at the 1M verifier ceiling; #1864 closed as a toolchain-pin, not a budget
+reclaim, and nothing tracks reclaiming that budget. So shipping now means using
+the **Path B control-plane steering** (which is fine — it has precedent, per the
+cost note above and §5 B2) rather than the shim redirect. This removes any "wait for the clean path"
+argument: Path B IS the path, and it is available today.
 
 **Conclusion:** PLAN-DEFER on value/priority grounds. Not PLAN-KILL — the design
 is sound and demand-gated. If demand appears, ship Path B (§5).
@@ -220,19 +244,37 @@ therefore steers the OUTER frame to XSK **before** `is_local_destination`
 | B4 | `gre_decap_index` populate (`tunnels.rs` L110-116) | **NEW** `ipip_decap_index: FastMap<(i32, IpAddr, IpAddr), Vec<u16>>`, populated only for `TunnelKind::Ipip`, keyed `(outer_family, source, destination)`. |
 | B5 | `try_native_gre_decap_from_frame` (`gre.rs` L621-789) | **NEW** `try_native_ipip_decap_from_frame`: match proto-4 outer vs `ipip_decap_index`; re-check `tunnel_mode_kind==Ipip` (HI-4); strip outer IP header (no GRE header); inner starts at outer payload; `inner_meta.ingress_zone = ifindex_to_zone_id[logical_ifindex]` (the enforcement); inner family/offsets off the wire; RFC 6040 ECN combine. Likely **no** meta flag (no `tcp-mss ipip-in` context). |
 | B6 | `stage_native_gre_decap` poll stage 6 (`poll_stages.rs` L240) | **NEW** `stage_native_ipip_decap` (or a combined tunnel-decap stage), guarded on `has_ipip_tunnels` (mirror `has_wg_tunnels`). |
-| B7 (**Finding-2, NEW leg**) | `encapsulate_native_gre_frame` egress arm (`frame/mod.rs` L401) | **NEW** `encapsulate_native_ipip_frame` + a `TunnelKind::Ipip =>` egress arm. Simpler than GRE (outer IP only, no GRE header) but must handle DF/PMTU/oversize like GRE. **Without this, return traffic drops** — the half-feature failure. |
-| B8 | `native_gre_inner_mtu` in `tcp_segmentation.rs` L47 + `icmp_ptb.rs` L212 | **NEW** `TunnelKind::Ipip` arms returning the IPIP inner-MTU (transport MTU − outer IP header), so TSO segmentation and ICMP-PTB inner-MTU are correct. |
+| B7 (**Finding-2, NEW leg**) | `encapsulate_native_gre_frame` egress arm — TWO sites: the frame dispatcher (`frame/mod.rs` L401) AND the per-segment (TSO) encap dispatcher (`frame/tcp_segmentation.rs` L401-411) | **NEW** `encapsulate_native_ipip_frame` + a `TunnelKind::Ipip =>` arm in **BOTH** dispatchers (Codex catch, r2). Simpler than GRE (outer IP only, no GRE header) but must handle DF/PMTU/oversize like GRE. **Without this, return traffic drops** under symmetric routing — the half-feature failure (see decap-only caveat below). |
+| B8 | Inner-MTU `TunnelKind` matches: `native_gre_inner_mtu` in `tcp_segmentation.rs` L42-56 + `icmp_ptb.rs` L208-235 | **NEW** `TunnelKind::Ipip` arms returning the IPIP inner-MTU (transport MTU − outer IP header), so TSO segmentation and ICMP-PTB inner-MTU are correct. **Total: three runtime `match TunnelKind` sites gain an Ipip arm — the two `tcp_segmentation.rs` matches (MTU L42 + encap L401) and `icmp_ptb.rs` L208 — plus the `frame/mod.rs` egress dispatcher. The compiler enforces exhaustiveness once the variant is added.** |
 
-### HA / persistence (the Path B new-mechanism cost — CONFIRMED)
+### HA / persistence (the Path B steering cost — bounded, has precedent)
 
 Go today only DELETES from `userspace_sessions` (startup flush, `maps_sync.go`
-L567-585); userspace-dp OWNS the live entries. Path B makes Go a **static
-writer**. Safe iff: (a) userspace-dp's per-session deletes are keyed on its OWN
-`SessionTable`, which never holds the synthetic outer-flow key; (b) the RG
-republish ADDs, never wipes; (c) the only wipe is Go's startup flush, so Go MUST
-(re)publish AFTER it (HI-6). Config-derived, deterministic ⇒ both HA nodes
-publish identical keys. **Each of (a)/(b)/(c) MUST carry a test at
-`/engineer`** (HI-7).
+L567-585); userspace-dp OWNS the live entries and is the sole raw map writer.
+**Preferred B2:** route the static steering through the existing control-socket
+session-install path (`SetSessionV4`-style, `manager_ha.go` L864-1014), so
+userspace-dp remains the sole map writer and the entry rides the same HA
+activation/prewarm republish (`shared_ops.rs` ~L350) that already exists — no new
+ownership boundary. **Fallback B2:** a direct Go `map.Update` (the only genuinely
+new bit). Either way, safe iff: (a) userspace-dp's per-session deletes are keyed
+on its OWN `SessionTable`, which never holds the synthetic outer-flow key; (b) the
+RG republish ADDs, never wipes; (c) the only wipe is Go's startup flush, so the
+steering entry MUST be (re)installed AFTER it (HI-6) — the `manager_ha_test.go`
+L252-266 flush-then-reseed test is the scaffolding to extend. Config-derived,
+deterministic ⇒ both HA nodes install identical keys. **Each of (a)/(b)/(c) MUST
+carry a test at `/engineer`** (HI-7).
+
+### Decap-only caveat (issue title is inbound-only)
+
+#4785's title is literally "inbound decap." A **decap-only** ship (B1-B6, no B7
+encap) is not strictly useless: under **asymmetric** routing — where the remote
+inner source is reachable from the LAN side via a normal (non-tunnel) route — the
+return traffic never needs IPIP encap, so inbound decap alone delivers value. But
+under the **common symmetric** case (return routes back through the tunnel),
+decap-only is a half-feature: return traffic hits the egress dispatcher and drops
+(Finding-2). So the honest end-to-end scope is encap+decap; a decap-only
+interpretation exists but should be a deliberate, documented choice, not an
+accident. This is why the §9 test plan exercises BOTH directions.
 
 ### Paths NOT recommended
 
@@ -320,7 +362,7 @@ publish identical keys. **Each of (a)/(b)/(c) MUST carry a test at
 | | Kind mis-decap | prevented (HI-4) | prevented | n/a |
 | **Perf** | Hot-path cost | +1 poll stage gated on `has_ipip`; +encap builder on egress; map lookup already runs | +verifier budget (**over 1M cap — blocked**) | ZERO |
 | | GRE/plain fast path | bit-identical (no shim change) | shim rebuilt (`make generate`, verifier gate) | untouched |
-| **Ops/HA** | New mechanism | Go writes `userspace_sessions` (novel boundary; HI-1/6/7) | none | none |
+| **Ops/HA** | New mechanism | control-plane steering (preferably via the existing session-install path; HI-1/6/7) — has precedent, NOT a novel ownership model | none | none |
 | | #1864 / verifier dependency | **NONE** | **HARD BLOCK (standing ceiling, no reclamation)** | none |
 | | `make generate` verifier gate | NOT touched | REQUIRED | not touched |
 | | Maintenance burden | two steering models (static-session IPIP vs native-flag GRE/WG) — permanent asymmetry | one model (but blocked) | none |
@@ -371,9 +413,16 @@ publish identical keys. **Each of (a)/(b)/(c) MUST carry a test at
   worth a SEPARATE issue if the shim's 1M ceiling is to be reclaimed. Path C is
   gated on it; Path B is not.
 - **A commit-time advisory warning for `mode ipip`** (the soft Path-F variant) —
-  a cheap, safe, out-of-hot-path interim that makes the silent drop visible. Not
-  part of this plan's recommendation; could be its own tiny issue if operators
-  hit the silent no-op before demand justifies the full feature.
+  **RECOMMENDED as the near-term action (r2, both reviewers).** `mode ipip` is
+  accepted and even auto-detected from `ip-`-prefixed tunnel names
+  (`pkg/config/compiler_interfaces.go` L160), with tests pinning acceptance
+  (`pkg/config/parser_routing_test.go` L2647) — so today it commits a **silently
+  dead** stanza, which is bad operator UX. A commit-time advisory warning ("`mode
+  ipip` does not forward traffic under the userspace dataplane; see #4785") is
+  cheap, safe, out-of-hot-path, breaks no config (Junos portability preserved),
+  and converts the silent drop into a visible, documented gap. It is a separable
+  follow-up (its own tiny issue / `/engineer`) that does NOT wait on the full
+  feature and should be done regardless of the DEFER on forwarding.
 - **IPsec / GRE / WG** — implemented; untouched.
 
 ---
@@ -409,16 +458,29 @@ publish identical keys. **Each of (a)/(b)/(c) MUST carry a test at
 
 ---
 
-## Recommendation (r1, pre-Codex)
+## Recommendation (r2, post-Codex + SMR — CONVERGED)
 
-**PLAN-DEFER.** IPIP inbound/outbound is a niche, fail-closed, never-worked vSRX
-parity gap with no demonstrated demand. The complete fix (Finding-2:
-encap + decap + steering) is a large hot-path effort plus a novel
-Go-writes-`USERSPACE_SESSIONS` HA-ownership boundary, disproportionate to the
-value. The clean path (Path C) is blocked by a standing verifier ceiling that
-#1864 did NOT reclaim (Finding-1), so "defer until #1864" is corrected to a
-**demand-gated** defer. Keep #4785 OPEN and ready; §5 is the Path B design a
-future `/engineer 4785` starts from. Optionally file the soft Path-F advisory
-warning and/or a verifier-budget-reclamation issue as cheap, separable
-follow-ups. This is DEFER, not KILL — the feature is legitimate and implementable
-on demand.
+**PLAN-DEFER, as a pure demand/priority call.** IPIP inbound/outbound is a
+niche, fail-closed, never-worked vSRX parity gap with no demonstrated demand. The
+complete fix (Finding-2: encap + decap + steering) is a large hot-path effort
+disproportionate to the value while nothing depends on it. Both reviewers verified
+all three load-bearing findings in source and agree the verdict is DEFER — with
+the explicit caveat that **the defer must rest on demand/priority, NOT on Path-B
+being risky or on a pending #1864.** Corrections folded in r2: Path B needs no
+shim change and no verifier dependency (Finding-1: #1864 is closed as a
+toolchain-pin, not a budget reclaim); and its steering is a *modest* mechanism
+with precedent (Go already drives session state into the helper via the control
+socket), preferably routed through the existing session-install path rather than
+a raw Go map write — NOT an unprecedented ownership boundary.
+
+**Actions:**
+1. **DEFER the forwarding feature.** Keep #4785 OPEN and ready; §5 is the Path B
+   design a future `/engineer 4785` starts from when demand appears. Path B is
+   viable now — if the owner judges demand exists, ship it (no #1864 wait).
+2. **Near-term, do the cheap thing:** file/ship a commit-time **advisory
+   warning** for `mode ipip` (§10) so the stanza is not silently dead. Separable,
+   safe, breaks no config.
+3. **Optional:** file a verifier-budget-reclamation issue if the clean Path C
+   steering is ever wanted (untracked today; not a prerequisite for Path B).
+
+This is DEFER, not KILL — the feature is legitimate and implementable on demand.
