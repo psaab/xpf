@@ -1,6 +1,6 @@
 # Plan-of-Action — #4478 IPIP (proto-4) decap has no userspace zone enforcement
 
-- **Revision:** r1 (plan-review pending)
+- **Revision:** r2 (SMR r1 = PLAN-REVISE folded in; Codex r1 pending)
 - **Issue:** #4478 (opus-172 M-1) — IPIP tunnel decap fail-open, parallel to the GRE gap that HAS a userspace decap stage
 - **Mode:** `/research` — deliverable is a converged plan + reviewer verdicts. NO PR, NO production code changes.
 - **Base:** origin/master `4eb28ae25eb8`
@@ -102,9 +102,19 @@ de-scoping outcomes ARE on the table and reviewers may select either:
   whole item behind a verifier-budget-reclamation prerequisite is defensible.
 - **Ship Path B now as a partial mitigation.** Path B needs NO shim change
   (no #1864 dependency). It closes the steady-state (24/7) fail-open on the
-  healthy fast path and leaves only a sub-second degraded-window residual
-  (§7 HI-2). This is a real reduction from "always open" to "open only during a
-  helper-crash / heartbeat-loss window an attacker cannot force on demand."
+  healthy fast path and leaves a degraded-window residual (§7 HI-2). This is a
+  real reduction from "always open" to "open only while the userspace helper is
+  degraded." **Honest caveat (SMR r1):** the degraded state is
+  ADVERSARIALLY REACHABLE — an attacker who can crash/stall the helper (resource
+  exhaustion, a panic, a bulk-sync control-socket stall) can re-open the
+  fail-open and then inject. So Path B's guarantee is "fail-closed while the
+  helper is healthy," and helper health is itself an attack surface. The
+  steady-state closure is still a genuine improvement, but Path B is NOT a full
+  fail-closed guarantee.
+- **Refuse the feature (Path F, fail-closed interim).** If the security posture
+  is "no fail-open," the principled move while the real fix is blocked is to
+  REJECT `mode "ipip"` at commit (§5 Path F) rather than ship steering that is
+  open during degraded windows. Cost: breaks existing IPIP users.
 
 The plan's value is enumerating the design surface so this call is made with
 eyes open, and specifying an acceptance gate (§9) that currently PROVES the gap
@@ -217,6 +227,20 @@ decap). **Largest scope + still #1864-blocked** (needs the shim redirect). This
 is the correct long-term architecture; file it as the follow-up that Path B's
 residual points at.
 
+### Path F (commit-time fail-closed refusal) — the cheapest genuinely fail-closed interim
+
+Reject `mode "ipip"` at commit (or reject it only when the tunnel's unit is
+placed in a security zone, i.e. when the fail-open is actually reachable) with a
+clear error citing #4478, UNTIL enforcement (B/E) ships. Precedent: xpf already
+hard-rejects unsafe/retired config (`ErrEBPFDataplaneRetired`). **Fail-closed,
+no dataplane change, no #1864 dependency, trivially correct.** Cost: breaks any
+existing IPIP user (a real regression for a legitimate Junos feature). Path F is
+the "no fail-open at any cost" answer; it trades the feature for the guarantee.
+It is the correct interim IF the security owner will not accept Path B's
+degraded-window residual AND will not wait for Path E. Note B and F are not
+mutually exclusive with the DEFER→E endgame: F now + E later keeps the door open
+to restore the feature fail-closed.
+
 **Rejected paths (from the OWNER's enumeration):**
 - **Path A (exclude tunnel-source from `USERSPACE_LOCAL`):** changes local
   delivery of that address (often the WAN IP) for ALL protocols and interacts
@@ -258,9 +282,21 @@ residual points at.
   pad=0, src_port=0, dst_port=0, src_addr=remote, dst_addr=local-source}`. A
   mismatch would be a silent no-steer (fail-open persists), so the B2
   implementation MUST carry a Go↔shim key-layout parity test.
-- **HI-2 (degraded residual):** §4-3. B/C are fail-open during degraded windows.
-  Must be documented in `forwarding/README.md` and the operator tunnel doc, and
-  is the justification for the Path E follow-up.
+- **HI-2 (degraded residual, adversarially reachable):** §4-3. B/C are fail-open
+  during degraded windows (heartbeat-stale / binding-not-ready / ctrl-disabled),
+  and that state is ATTACKER-INDUCIBLE (helper crash/stall). Must be documented
+  in `forwarding/README.md` and the operator tunnel doc, and is the primary
+  justification for prioritizing the Path E follow-up.
+- **HI-7 (synthetic-key collision safety, MUST verify at /engineer):** the
+  Go static `userspace_sessions` entry (B2) must not collide with or be
+  overwritten by a real userspace-dp session. Analysis: a TRANSIT proto-4 flow
+  (outer dst NOT local) keys on a different `dst_addr`, so no collision with the
+  synthetic `(proto=4, ports=0, remote, local_source)` entry; the decapped INNER
+  flow keys on the inner 5-tuple, a different key, so no overwrite. This holds
+  only if userspace-dp has NO full-map republish that rewrites/wipes keys it does
+  not own — `shared_ops.rs` republish ADDs and `session_glue` deletes per-key
+  (spot-checked), but the B2 implementation MUST assert this with a test before
+  relying on it.
 - **HI-3 (re-zone is the mechanism):** enforcement is `inner_meta.ingress_zone`
   = tunnel-interface zone, NOT any meta flag. The tunnel interface MUST be zoned
   and present in `ifindex_to_zone_id`; an UNZONED ipip tunnel would re-zone to 0
@@ -291,6 +327,13 @@ residual points at.
 | | #1864 dependency | NONE | HARD BLOCK | HARD BLOCK |
 | | Verifier gate (`make generate`) | NOT touched | REQUIRED | REQUIRED |
 
+**Path F (commit-time refusal)** is off-table because it is a config-plane
+change with no dataplane/perf/HA surface: fully fail-closed, no #1864
+dependency, no verifier gate, its only "risk" is the operational regression of
+refusing a configured `mode "ipip"` (breaks existing users). It is the
+fail-closed bookend opposite Path B (open-when-degraded) in the §3 three-way
+choice.
+
 ---
 
 ## 9. Test plan (acceptance gate — currently PROVES the gap is open)
@@ -306,10 +349,15 @@ residual points at.
 2. Inner traffic: from the "remote" side (or a spoofed-source host on the WAN
    segment) send a proto-4 frame: outer `src=<remote>` `dst=172.16.50.8`, inner
    IPv4 dst = a LAN host (`10.0.61.x`) that the deny policy covers.
-3. **Observable proving the gap is OPEN (baseline, today):** the LAN host
-   RECEIVES the inner packet (tcpdump on the LAN host) despite the deny policy
-   → kernel-forwarded past policy. A screen/flow counter shows NO userspace
-   session for the flow.
+3. **Observable proving the gap is OPEN (baseline, today) — GATING PRECONDITION
+   (SMR r1):** the LAN host RECEIVES the inner packet (tcpdump on the LAN host)
+   despite the deny policy → kernel-forwarded past policy. A screen/flow counter
+   shows NO userspace session for the flow. **The /engineer phase MUST run this
+   baseline FIRST and capture the injected inner packet on the LAN host before
+   writing any code.** If the baseline canNOT reproduce the injection in a
+   realistic config (e.g. RPF, or no inter-zone FIB route to the inner dst,
+   silently closes it — OQ-6), that is a PLAN-KILL / severity-downgrade signal
+   and the fix does not proceed.
 4. **Observable proving the fix (Path B):** the inner packet is DROPPED by the
    deny policy; `show security flow session` shows the decapped inner flow on
    the tunnel zone (or a policy-deny drop counter increments); tcpdump on the
@@ -361,22 +409,44 @@ shape.
 5. **OQ-5:** does keeping the kernel `Iptun` for egress while userspace-dp owns
    inbound decap create any asymmetric-path / ICMP / PMTU hazard (e.g. kernel
    generates a PTB for the egress direction that userspace-dp doesn't expect)?
-6. **OQ-6 (reachability sanity):** does the firewall's kernel FIB actually have
-   a forwarding route for a decapped inner packet into the protected zone in a
-   realistic config, or is the injection only reachable when the operator has
-   configured inter-zone routing anyway? Quantify the real exposure before
-   committing scope (could lower severity / support DEFER).
+6. **OQ-6 (reachability sanity) — now a §9 gating precondition:** does the
+   firewall's kernel FIB actually forward a decapped inner packet into the
+   protected zone in a realistic config, or is the injection only reachable when
+   the operator has configured inter-zone routing anyway? The §9 step-3 baseline
+   RESOLVES this at /engineer time before code; a negative result is a PLAN-KILL /
+   severity-downgrade signal.
+7. **OQ-7 (three-way interim choice, security-owner call):** with OQ-1 resolved
+   and HI-2 now framed as adversarially reachable, the real decision is among:
+   **(B)** ship the partial steering fix (steady-state closed, open-when-degraded);
+   **(F)** refuse `mode "ipip"` at commit (fail-closed, feature removed); or
+   **(DEFER→E)** wait for the #1864 verifier budget and do full Iptun→anchor
+   parity (fail-closed, feature kept). This is a posture judgment, not a
+   correctness question — the plan surfaces it for the owner to pick.
+8. **OQ-8 (outer family, B2 key):** for the Ip6tnl 4in6 case the OUTER family is
+   IPv6 while the inner is IPv4; B2 MUST key the static entry on the OUTER family
+   (`addr_family`), not the inner. Confirm in the B2 implementation.
 
 ---
 
-## Recommendation (provisional, pre-review)
+## Recommendation (r2, pre-Codex)
 
-Ship **Path B** as a no-shim, no-#1864 partial mitigation that closes the
-steady-state fail-open. OQ-1 (the one blocking correctness question) is RESOLVED
-— the proto-4 session key is deterministic and Go-reproducible — so Path B is
-viable. File **Path E** as the follow-up to eliminate the degraded-window
-residual (HI-2) once #1864 budget is reclaimed. The remaining open questions
-(OQ-2 residual-acceptability, OQ-3 map-ownership, OQ-6 real-exposure) are
-judgment calls for the reviewers/security owner, not correctness blockers: if
-the security team requires full fail-closed now (OQ-2) or rejects Go-as-a-
-sessions-writer (OQ-3), the fallback is **PLAN-DEFER** behind #1864 → Path E.
+The correctness questions are resolved: OQ-1 (deterministic proto-4 key) makes
+Path B mechanically viable, and the crux + GRE contrast are verified. What
+remains is a **posture choice** (OQ-7) that the plan deliberately surfaces
+rather than forces:
+
+1. **Preferred if the owner accepts a degraded-window residual:** ship **Path B**
+   (no shim, no #1864) to close the steady-state fail-open NOW, gated on the §9
+   step-3 baseline reproducing the injection first, with the HI-7 collision test
+   and Path E filed as the residual-closing follow-up.
+2. **Preferred if the posture is "no fail-open, feature-loss acceptable":**
+   **Path F** (commit-time refuse `mode "ipip"`) — fully fail-closed today.
+3. **Preferred if the posture is "no fail-open, keep the feature":**
+   **PLAN-DEFER** behind #1864 → **Path E** (full Iptun→anchor parity).
+
+My provisional lean is **Path B now + Path E follow-up** (option 1): it is the
+only option that improves the security posture immediately without removing a
+legitimate feature, and the residual is bounded to helper-degraded windows and
+explicitly tracked. But this is a judgment call for the security owner, and
+Path F / DEFER are both defensible — the plan is PLAN-READY for that decision to
+be made, not a claim that Path B is the only answer.
