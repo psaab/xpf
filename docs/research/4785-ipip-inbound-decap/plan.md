@@ -443,11 +443,13 @@ accident. This is why the §9 test plan exercises BOTH directions.
 4. **OQ-4 — unzoned tunnel (HI-3):** should a decapped inner packet on an
    UNZONED ipip tunnel drop (fail-closed) or take a default zone? Junos
    semantics + xpf convention.
-5. **OQ-5 — Go-as-writer boundary (HI-1/6/7):** is Go writing static
-   `USERSPACE_SESSIONS` entries an acceptable new ownership boundary, or does it
-   risk surprising the HA/session-sync/GC code in a way that argues for waiting
-   for a verifier-budget reclamation + Path C instead (i.e. defer even if demand
-   appears)?
+5. **OQ-5 — steering-install mechanism (HI-1/6/7), a bounded engineering choice:**
+   should the static steering entry be installed via the **existing control-socket
+   session-install path** (`SetSessionV4`-style — userspace-dp stays sole raw map
+   writer, preferred) or a **direct Go `map.Update`** (fallback)? This is an
+   implementation decision, NOT a verdict driver: neither option argues for
+   waiting on Path C, and both are bounded by the HI-1/6/7 tests. If demand
+   appears, Path B ships regardless of which install path is chosen.
 6. **OQ-6 — soft Path-F interim:** is a commit-time advisory warning for `mode
    ipip` worth doing NOW (cheap, converts silent-drop to visible) independent of
    the full feature, or is even that noise for a never-used stanza?
