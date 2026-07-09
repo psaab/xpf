@@ -3,9 +3,11 @@
 - **Issue:** #4146
 - **Branch:** `research/4146-junos-host-direct-deny`
 - **Base:** origin/master `b4f2ddb2f`
-- **Revision:** r5 (folds Codex r2/r4 STILL-OPEN items: single effective
-  exact→global program per ingress, DROP-only set-subtraction (no fine accept),
-  fine-deny before ND/PMTUD, global-any iifname-scoped, tcp-rst unrepresentable)
+- **Revision:** r6 (folds Codex r3: three-tier exact→from-any→global effective
+  program; DROP restricted to the fine-eligible L4 domain — ESP/AH, coarse IKE
+  500/4500, ident-reset 113 preserved ahead of the drop, §6.7). Builds on r5
+  (DROP-only set-subtraction, no fine accept, fine-deny before ND/PMTUD,
+  global-any iifname-scoped, tcp-rst unrepresentable).
 - **Status:** seeking convergence (Codex + Claude SMR; AGY infra-down)
 - **Disposition sought:** PLAN-READY, un-deferring the mislabeled `plan-deferred-operator`.
 
@@ -174,9 +176,10 @@ corrections over r1/r2:
 Extend the kernel host-inbound codegen with an **ordered, ingress-scoped,
 coarse-gated, DROP-only junos-host DENY subchain**:
 
-1. Build **one effective ordered program per (ingress zone, family)** = the
-   `from-zone Z to-zone junos-host` zone-pair terms followed by the applicable
-   global `to-zone junos-host` terms, in Rust's tier order.
+1. Build **one effective ordered program per (ingress zone, family)** in Rust's
+   three-tier order = exact `from-zone Z to-zone junos-host` → from-any
+   `from-zone any to-zone junos-host` (#3090) → applicable global `to-zone
+   junos-host` terms.
 2. **Gate emission on the WHOLE per-ingress program being representable** (§6); if
    any term (any tier) is not, emit nothing for that ingress and warn.
 3. **Project DROP-only via set-subtraction:** deny→`drop`; a `permit` never emits
@@ -212,10 +215,14 @@ from-any → global `to-zone junos-host`); the projection reproduces that.
 - `type JunosHostProgram struct { Zone string; Family string; IngressIfnames []string /* non-empty, non-lifeline; global-any → union of ALL non-lifeline zoned netdevs */; DropRules []JunosHostDropRule; Representable bool; RenderedPolicies []string }`
 - `func BuildJunosHostPrograms(cfg *config.Config, snap ...) []JunosHostProgram`:
   - For each configured (non-lifeline) security zone Z, assemble the **effective
-    ordered term list** = the `from-zone Z to-zone junos-host` zone-pair terms (in
-    config order), FOLLOWED BY the applicable global `to-zone junos-host` terms
-    (`IsHostToZoneScope`, whose `FromZones` scope includes Z or is any), in the
-    global tier order. This is the per-ingress effective program.
+    ordered term list** in Rust's exact THREE-tier order
+    (`userspace-dp/src/policy.rs:2978,3014,3050`): (i) the `from-zone Z to-zone
+    junos-host` EXACT zone-pair terms, then (ii) the `from-zone any to-zone
+    junos-host` FROM-ANY wildcard-tier terms (#3090), then (iii) the applicable
+    global `to-zone junos-host` terms (`IsHostToZoneScope`, `FromZones` includes Z
+    or any). Omitting the middle FROM-ANY tier would let a `from-any permit any;
+    global deny any` render the global drop while dropping the carve-out permit
+    (Codex r3). All three tiers form the ONE per-ingress effective program.
   - **Whole-program representability gate:** if ANY term (any tier) in Z's
     effective program is unrepresentable (§6), mark the whole program
     `Representable=false`, emit NO rule for Z, and warn on the offending
@@ -257,8 +264,9 @@ from-any → global `to-zone junos-host`); the projection reproduces that.
   multi-reference contract at `daemon_nft.go:509`).
 - **Chain order** — the CONCRETE DROP-only placement specified in §6.4: (1)
   ESP/AH accept; (2) `ct established,related ct direction reply accept`; (3) the
-  NEW per-ingress-zone effective-program DROP rules —
-  `iifname { <non-lifeline netdevs> } <fam> saddr [!=] <src-set> [saddr != <earlier-permit-set>] [<fam> daddr <dst-set>] [<l4-or-fragment>] counter name "<c>" drop`
+  NEW per-ingress-zone effective-program DROP rules (exact→from-any→global tiers),
+  match restricted to the fine-eligible L4 domain (§6.7) —
+  `iifname { <non-lifeline netdevs> } <fine-eligible-l4-exclusions> <fam> saddr [!=] <src-set> [saddr != <earlier-permit-set>] [<fam> daddr <dst-set>] [<l4-or-fragment>] counter name "<c>" drop`
   (NO fine `accept`); (4) ND/PMTUD/ICMP-error accepts; (5) residual
   `ct established,related accept` + per-zone coarse service accepts + catch-all
   drop (existing `emitHostInboundZone`) + unzoned catch-all drop.
@@ -363,8 +371,10 @@ meta l4proto { 50, 51 } accept
 # (2) firewall-ORIGINATED reply traffic preserved (host-OUTBOUND flow return);
 #     junos-host governs host-INBOUND original direction only.
 ct state established,related ct direction reply accept
-# (3) NEW junos-host DROP-ONLY subchain (per-ingress-zone effective program,
-#     set-subtracted, ingress iifname-scoped; NO fine accept ever emitted).
+# (3) NEW junos-host DROP-ONLY subchain (per-ingress-zone effective program =
+#     exact->from-any->global tiers, set-subtracted, ingress iifname-scoped; NO
+#     fine accept ever emitted; match RESTRICTED to the fine-eligible L4 domain
+#     per §6.7 — excludes ESP/AH, coarse-admitted IKE 500/4500, ident-reset 113).
 #     Placed BEFORE the ND/PMTUD/ICMP-error accepts because those are COARSE
 #     admissions after which Rust fine policy still runs, so a representable
 #     `application any` deny MUST also drop the denied source's ND/PMTUD/ICMP-
@@ -402,6 +412,32 @@ the "deny non-permitted" half of a source-restricted `permit` (`saddr != S`) use
 the IDENTICAL machinery and are tracked next slices in the same PR family. The
 DENY slice alone un-defers the issue (the bug is a `then deny` unenforced). Until
 then, scopes containing such terms are unrepresentable → warned.
+
+### 6.7 Fine-eligible L4 domain — pre-fine terminal/exempt classes (Codex r3)
+Rust runs certain classes BEFORE fine junos-host policy, so the fine DROP must
+NOT touch them (else it converts a coarse-terminal verdict into a silent drop or
+black-holes IPsec):
+- **Raw ESP/AH (proto 50/51)** — IPsec passthrough (`poll_stages.rs` Stage 11)
+  returns before fine. Exempt (already at chain step 1).
+- **Coarse-admitted IKE / ESP-in-UDP NAT-T (UDP 500/4500)** — the same Stage 11
+  passthrough covers IKE; it is reinjected to XFRM before fine when the ingress
+  zone's host-inbound admits `ike`. A fine `application any` deny must NOT drop
+  it.
+- **`ident-reset` (TCP/113)** — a coarse-TERMINAL `reject with tcp reset`
+  (`daemon_nft.go` ident-reset arm, #3310) when the ingress zone sets
+  `system-services ident-reset`. Fine must not silence it into a drop.
+
+**Rule:** the fine DROP subchain's match is restricted to the **fine-eligible L4
+domain** — it EXCLUDES `meta l4proto {50,51}` always, `udp dport {500,4500}` when
+the ingress zone admits `ike`, and `tcp dport 113` when the zone sets
+`ident-reset`. Those classes then fall through to their Rust-faithful
+coarse-terminal/exempt handling (ESP/AH accept at step 1; the coarse `ike` accept;
+the ident-reset RST). If a junos-host deny's OWN application scope IS one of these
+exempt tuples (e.g. `then deny` on an IKE/ident application), the program is
+**unrepresentable → warn** (the operator is denying a class the IPsec/ident path
+owns, which the DENY slice cannot faithfully model). Tests: an `application any`
+deny in an ike-admitting zone does not drop UDP 500/4500; in an ident-reset zone
+does not silence TCP/113; a deny explicitly scoped to an IKE/ident app warns.
 
 ### 6.6 Hit-counter honesty
 The nft aggregate counter/metric does NOT populate per-Junos-policy hit counters,
@@ -446,9 +482,10 @@ its own attribution). This limitation is stated in the docs matrix.
 2. **Ordered first-match fidelity via set-subtraction** — an earlier permit
    subtracts its set from every later deny's match (no fine `accept`, so a permit
    cannot bypass the coarse gate; no over-deny of carved-out sources).
-3. **Single effective program per ingress** — exact zone-pair → global tiers are
-   gated + rendered as ONE program per ingress zone; an unrepresentable term in
-   any contributing tier suppresses the whole program (no exposed global deny).
+3. **Single effective THREE-tier program per ingress** — exact zone-pair →
+   from-any (#3090) → global tiers are gated + rendered as ONE program per ingress
+   zone; an unrepresentable term in any contributing tier suppresses the whole
+   program (no exposed global/from-any deny, no dropped carve-out permit).
 4. **Ingress-scoped** — a deny fires only for traffic entering the from-zone's
    interfaces (no cross-zone under-/over-deny).
 5. **Coarse gate is the sole admit authority** — no fine `accept` is emitted, so
@@ -457,6 +494,9 @@ its own attribution). This limitation is stated in the docs matrix.
 6. **Coarse-then-fine parity** — nft verdict == Rust `junos_host_local_policy`
    verdict across the fixture matrix (§9.1), including that an `application any`
    deny drops the denied source's ND/PMTUD/ICMP-error.
+6b. **Fine-eligible L4 domain (§6.7)** — the DROP never touches ESP/AH,
+   coarse-admitted IKE (500/4500), or ident-reset (113); those keep their
+   Rust-faithful passthrough/RST verdict. A deny scoped to an exempt tuple warns.
 7. **No transit impact** — the `input` hook sees only host-bound traffic;
    sustained iperf3 confirms zero forwarding regression.
 8. **No over-deny** — whole-program representability gate (§6.3).
@@ -497,9 +537,15 @@ every un-representable cell is warned + un-emitted.
   emitted). Assert no `accept` line appears in a junos-host program.
 - **Coarse gate sole authority:** a `permit application ssh` in a zone whose
   host-inbound-traffic omits ssh renders NO accept (ssh stays coarse-denied).
-- **Effective program tier composition:** an unrepresentable exact zone-pair term
-  suppresses the whole ingress program INCLUDING a representable global deny for
-  that zone (assert the global deny is NOT rendered for that ingress).
+- **Effective THREE-tier composition:** exact → from-any → global assembled in
+  order; a `from-any permit good` before a `global deny 10/8` renders
+  `saddr 10/8 saddr != good drop` (the from-any carve-out is honored). An
+  unrepresentable term in ANY tier suppresses the whole ingress program (assert
+  the global/from-any deny is NOT rendered for that ingress).
+- **Fine-eligible L4 domain (§6.7):** an `application any` deny in an
+  ike-admitting zone does NOT drop UDP 500/4500; in an ident-reset zone does NOT
+  silence TCP/113; never drops ESP/AH; a deny explicitly scoped to an IKE/ident
+  application → NO rule + warning.
 - iifname scope resolves VLAN subunit + RETH member netdevs, excludes lifelines.
 - **global-any** deny renders per ingress zone with that zone's non-lifeline
   netdevs — assert it NEVER emits an unscoped rule and never matches a lifeline
