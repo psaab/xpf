@@ -1,12 +1,16 @@
 # Plan-of-Action — #4785 IPIP (proto-4) inbound decap unimplemented (userspace-dp feature/parity gap)
 
-- **Revision:** r2 — folds Codex (REVISE→DEFER-is-a-demand-call) + Claude SMR
-  (CONVERGE-WITH-NITS). Both reviewers agree PLAN-DEFER is correct and must rest
-  on demand/priority, NOT on inflated Path-B risk or a pending #1864. r2 fixes:
-  (a) corrects the overstated "novel Go-writes-`USERSPACE_SESSIONS`" framing
-  (there is precedent + a cleaner control-socket variant); (b) completes the
-  `TunnelKind::Ipip` fan-out list (the second `tcp_segmentation.rs` encap match);
-  (c) elevates the commit-time advisory warning to a recommended near-term action.
+- **Revision:** r3 — **CONVERGED** (2-of-3: Codex `CONVERGED` on r3 + Claude SMR
+  `CONVERGE-WITH-NITS`; AGY/gemini infra-down). Review arc: Codex r1 `REVISE`
+  (3 asks) → r2 folded all three → Codex r2 `REVISE` (one residual: OQ-5 stale
+  framing) → r3 rewrote OQ-5 as a bounded implementation choice → Codex r3
+  `CONVERGED`. Both reviewers agree PLAN-DEFER is correct and rests on
+  demand/priority, NOT on inflated Path-B risk or a pending #1864. Substantive
+  fixes folded: (a) corrected the overstated Go-writes-`USERSPACE_SESSIONS`
+  framing (there is precedent + a cleaner control-socket variant); (b) completed
+  the `TunnelKind::Ipip` fan-out list (the second `tcp_segmentation.rs` encap
+  match); (c) elevated the commit-time advisory warning to a recommended
+  near-term action.
 - **Issue:** #4785 — residual of the #4478 `/research` (PLAN-KILLed the security
   framing; this is the fail-CLOSED feature-completeness residual).
 - **Mode:** `/research` — deliverable is a converged plan + reviewer verdicts.
