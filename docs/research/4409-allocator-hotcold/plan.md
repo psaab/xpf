@@ -1,13 +1,58 @@
 # Plan of Action — #4409(b): `nat/allocator.rs` PortAllocator hot/cold split
 
-- **Revision:** r1
+- **Revision:** r2 (converged)
 - **Base:** origin/master `4eb28ae25eb8`
 - **Branch:** `research/4409-allocator-hotcold` (docs only; no production source touched)
 - **Scope:** issue #4409 **part (b) ONLY** — extract the cold/GC path out of
   `userspace-dp/src/nat/allocator.rs` WITHOUT perturbing the hot path.
-- **Status:** PLAN-READY candidate (reframed) — awaiting Codex + Claude-SMR
-  convergence. See §3 for the honest value caveat and §10 for the PLAN-KILL
-  triggers.
+- **Status: PLAN-KILL (converged, 2-of-2).** Codex + Claude SMR both land on
+  PLAN-KILL. AGY/gemini infra-down this session (2-of-3 per
+  `feedback_codex_infra_must_retry`). Sections §2–§11 below are the RESEARCH that
+  led to the kill (the design is sound but the change is not worth doing as
+  scoped); the verdict + reasoning is §0. No PR will be opened.
+
+---
+
+## 0. Converged verdict — PLAN-KILL
+
+Both reviewers independently reached the same place: the plan's *mechanics* are
+correct (child-module visibility needs zero field widening, lock discipline and
+byte-identical bodies hold), but the *change* should not be made as scoped.
+
+Convergent killing reasons:
+1. **Stale premise.** The issue asked to separate a "cold config/stats/GC" path,
+   but #2852 (lock-free `AddressOccupancy` bitmap) + #4676 (chunked GC) already
+   landed. Post-#4676 the GC engine is **amortized-hot** — `gc_expired_chunked`
+   runs on every non-persistent `allocate_translation` (line 911) and periodically
+   in `release_flow` (line 1231). There is no cold GC to separate.
+2. **Unproven perf invariant.** The plan *asserted* `gc_expired_chunked` is "not an
+   inline candidate today" but never proved it. With `ALLOCATION_GC_BUDGET = 8` the
+   chunk loop is small enough that inlining could constant-fold it, and the crate's
+   default release profile (no `[profile.release]`, codegen-units=16, no LTO) makes
+   CGU placement exactly the thing a module move perturbs. A readability-only change
+   must not carry unproven codegen risk on the SNAT allocation hot path.
+3. **Defective gate.** The plan's proposed perf gate offered `benches/snat_allocator.rs`,
+   which *reimplements* the allocator shape and cannot validate a real-`PortAllocator`
+   module-boundary move. The only valid gate is a mandatory asm/codegen-equivalence
+   diff — which, if made an entry condition, argues for doing a *cleaner* extraction
+   instead of this one.
+4. **Value too small.** ~180 LOC moved, no runtime/binary/contention win, and
+   `snapshot` (the one genuinely-cold production method) stays behind — so the
+   change does not even deliver the "separate stats" half of the ask.
+
+Constructive recommendation (both reviewers):
+- Treat #4409(b) as **obsoleted by #2852 + #4676**.
+- If `allocator.rs` (still 1797 LOC) is to be decomposed, file a fresh, narrower
+  issue targeting a genuinely cohesive seam — the self-contained `AddressOccupancy`
+  type (cleanest; no shared-field access) or the #4559 deterministic-NAT block —
+  with a **mandatory asm/codegen-equivalence gate** on `allocate_translation` as an
+  entry condition (all touch hot code).
+- Parts (a) (tests split, largely done) and (c) (source.rs parse/driver split) are
+  UNAFFECTED and remain independently driveable. Do NOT apply a `plan-kill` label to
+  the multi-part #4409 issue; scope the kill to (b) in the issue comment.
+
+Reviewer artifacts: `codex-plan-r1.md` (Codex verbatim), `claude-smr-plan-r1.md`
+(SMR r1), `claude-smr-plan-r2.md` (SMR convergence to KILL), `reviewer-ids.md`.
 
 ---
 
@@ -15,7 +60,11 @@
 
 | Rev | What changed | Reviewer state |
 |-----|--------------|----------------|
-| r1  | First converged draft against the REAL 1797-LOC origin/master (not the 761-LOC file the issue was filed against). | Pending Codex + SMR round 1 |
+| r1  | First draft (Option B, GC-engine extraction) against the REAL 1797-LOC origin/master. Proposed PLAN-READY-with-caveats. | Codex → PLAN-KILL; SMR r1 → READY-WITH-NITS |
+| r2  | Converged to **PLAN-KILL**. SMR accepted Codex's unproven-perf + defective-gate points; both agree value is too small on a stale premise. Verdict recorded in §0. | Codex + SMR → PLAN-KILL (converged) |
+
+> NOTE: §2–§11 below are preserved as the research record (the design that was
+> evaluated and rejected). They are NOT an approved plan — see §0 for the verdict.
 
 ---
 
