@@ -20,7 +20,8 @@
 
 **Recommended disposition: CLOSE #2852 as substantially-resolved (Phase 1
 `6cbb10615` + #4676 `c7194b2af`); PLAN-KILL the Phase-2 map-sharding follow-on as
-an unproven, correctness-regressing optimization.** File a narrow follow-up issue
+an architecturally-bounded, unproven, correctness-risking optimization.** File a
+narrow follow-up issue
 to build a connection-rate generator + measure the loss-cluster new-flow ceiling,
 and revisit Phase-2 ONLY if that measurement shows the residual `live` mutex is
 the dominant real-world bottleneck.
@@ -34,7 +35,7 @@ Multi-core scaling went from **negative** (2.87M→0.62M allocs/s, M=1→8, the
 mutex-collapse the issue describes) to **positive** (1.4–1.6× at M=6/8, lower
 tail). What remains under the mutex is a single `FxHashMap` insert/remove.
 
-Phase 2 (shard that map) would carry a real cost — it **regresses the exact
+Phase 2 (shard that map) would carry a real cost — it **puts at risk the exact
 global-cap property Phase 1 deliberately achieved** (see §3.3, §6.4) and shards
 correctness-critical NAT state — for a win that is **architecturally bounded** and
 has **never been measured on real hardware**. The new-flow path already takes two
