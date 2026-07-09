@@ -3,9 +3,10 @@
 - **Issue:** #4874 (label `bug`; Codex review 175 findings C175-HC-078, C175-HC-079)
 - **Branch:** `research/4874-dhcp-lease-expiry`
 - **Base:** origin/master @ `4047fd553`
-- **Revision:** r3 (Codex r1 BLOCKER accepted — A re-opened as A2; SMR r1 F1/F2/F3
-  folded; B refined per Codex F5/F6)
-- **Status:** PLAN-READY (fix A2 + B; keep A1) — see §6
+- **Revision:** r4-final (Codex r1 BLOCKER accepted — A re-opened as A2; SMR
+  r1 F1/F2/F3 folded; B refined per Codex F5/F6; Codex r2 LOW nits 1/2 folded)
+- **Status:** PLAN-READY — CONVERGED 2-of-3 (Codex r2 + SMR r2; AGY infra-down).
+  Fix A2 + B; keep A1 — see §6
 - **Mode:** `/research` — stops at PLAN-READY. No PR, no production code touched here.
 
 > Standing line (per task): *If reviewers conclude the current documented
@@ -194,11 +195,20 @@ a **per-prefix** reconcile rather than a blunt clear-all (refined per Codex F5):
   - The signal is **"saw an explicit zero-lifetime prefix"**, not "any OptIAPD
     present": an empty IA_PD / NoPrefixAvail is ambiguous and stays on the retain
     path (Codex F5 + SMR F2).
-  - **Acquire-path (Codex F6):** on initial acquire, if the reply yields no IA_NA
-    address AND no *live* prefix (only withdrawn PDs), it must be treated as an
-    acquisition failure and retried — NOT settled into an empty lease defaulted to
-    1 h. Extend the existing `wantNA && !addr.IsValid() && wantPD &&
-    len(live)==0` rejection to count *live* prefixes, mirroring `selectIANAAddress`.
+  - **Acquire-path (Codex F6 + r2-nit-1):** on initial acquire, if the reply
+    yields no IA_NA address AND no *live* prefix (only withdrawn PDs), it must be
+    treated as an acquisition failure and retried — NOT settled into the default
+    1 h lease (`dhcp.go` ≈1548). The guard must count *live* prefixes
+    **regardless of `wantNA`**: a PD-only client has `wantNA=false`, so the
+    current narrow `wantNA && !addr.IsValid() && wantPD && len(prefixes)==0`
+    shape (≈1526) would let it fall through. Count live PDs whenever no IA_NA
+    address is present, mirroring `selectIANAAddress`.
+  - **Local PD state (Codex r2-nit-2):** `runDHCPv6` currently only refreshes
+    `committedPDs` when `len(prefixes)>0` (≈1213/1259/1295). After a withdrawal
+    reconcile it MUST update `committedPDs` to the *reconciled* set (which may be
+    empty or smaller); otherwise the next RENEW echoes a withdrawn prefix via
+    `renew.go` ≈147 and the server may re-grant it. Update `committedPDs` to the
+    reconcile result on every commit, not only the non-empty case.
   - Clearing/withdrawing fires `scheduleRecompile` so RA reconverges (and A2's fix
     means a terminal exit also withdraws it).
 
@@ -272,7 +282,11 @@ B (unit):
 - Multi-PD partial withdrawal: prior {/48,/56}; reply withdraws /56 only, omits
   /48 ⇒ result {/48} (per-prefix, not clear-all) — the Codex-F5 guard.
 - Acquire with only withdrawn PDs + no IA_NA ⇒ acquisition failure/retry, no
-  empty 1 h lease (Codex F6).
+  empty 1 h lease — **including a PD-only client (`wantNA=false`)** so the guard
+  cannot fall through (Codex F6 + r2-nit-1).
+- After a withdrawal reconcile, the NEXT RENEW must NOT echo the withdrawn prefix
+  — assert `committedPDs`/the built RENEW IA_PD reflects the reconciled set, not
+  the pre-withdrawal set (Codex r2-nit-2).
 - `buildRAConfigs` with a withdrawn PD ⇒ no `RAPrefix` emitted (end-to-end).
 
 No cluster smoke required — control-plane only; `make test` + new units suffice
@@ -324,8 +338,16 @@ FRR/RA re-render from live state on the next recompile.
   (BLOCKER: terminal cleanup + NAK leave FRR route / RA prefix stale, no
   `scheduleRecompile`), B=fix. Findings F5 (per-prefix, not clear-all) + F6
   (acquire-path rejection) folded into r3.
-- **Round 2 — Claude SMR** (`claude-smr-plan-r2.md`): self-correction accepting A2;
-  PLAN-READY on r3 (Path C).
-- **Round 2 — Codex:** re-review of r3 pending (this revision).
-- **AGY:** infra-down → converge 2-of-3 (Codex + Claude SMR) per
-  `feedback_codex_infra_must_retry`.
+- **Round 2 — Claude SMR** (`claude-smr-plan-r2.md`): **PLAN-READY** on r3;
+  self-correction accepting A2. A1 keep, A2 fix, B fix.
+- **Round 2 — Codex** (`codex-plan-r2.md`): **PLAN-READY-WITH-NITS** on r3. A1
+  keep, A2 fix, B fix. Confirmed A2 closes the stale FRR/RA gap and
+  `scheduleRecompile` (a `time.AfterFunc`, `dhcp.go` ≈1805) introduces no inline
+  `applySem` re-entry; "found no remaining lease/PD delete path outside the r3 A2
+  scope." Two LOW implementation nits (acquire guard counts live PDs regardless
+  of `wantNA`; `runDHCPv6` updates `committedPDs` to the reconciled set) folded
+  into §4/§7 for `/engineer` — neither is a plan blocker.
+- **CONVERGED:** 2-of-3 PLAN-READY (Codex r2 + Claude SMR r2), identical
+  per-defect verdicts (A1 keep / A2 fix / B fix). **AGY infra-down** for this run
+  → 2-of-3 convergence per `feedback_codex_infra_must_retry` (AGY-alone-never;
+  the two live reviewers are Codex + Claude SMR).
