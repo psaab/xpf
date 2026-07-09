@@ -3,7 +3,8 @@
 - **Issue:** #4146
 - **Branch:** `research/4146-junos-host-direct-deny`
 - **Base:** origin/master `b4f2ddb2f`
-- **Revision:** r3 (reworks the emission model per Codex plan-r1 + Claude SMR r1)
+- **Revision:** r4 (r3 emission rework + §6.4 CONCRETE coarse/fine/established
+  chain placement, per Codex r2 "specify, don't defer to tests")
 - **Status:** seeking convergence (Codex + Claude SMR; AGY infra-down)
 - **Disposition sought:** PLAN-READY, un-deferring the mislabeled `plan-deferred-operator`.
 
@@ -233,20 +234,14 @@ coarse-gated junos-host DENY subchain**:
   the test asserts **every counter reference is declared** (a scope may emit
   multiple rules → multiple references, one declaration — matching the existing
   multi-reference contract at `daemon_nft.go:509`).
-- **Chain order** (reproduce coarse-then-fine, §6.4):
-  1. `type filter hook input priority 10; policy accept;`
-  2. `ct state established,related accept` — but see §6.4/§8-inv-7 for the
-     firewall-originated-reply-only refinement decision.
-  3. ESP/AH accept.
-  4. ICMP ND / error / PMTUD accepts — see §6.4 for the `application any` deny
-     interaction (these stay coarse exemptions; a junos-host `application any`
-     deny's interaction with them is pinned by the parity fixture).
-  5. **NEW junos-host DENY subchains**, per scope, in projected order:
-     `iifname { <netdevs> } <fam> saddr [!=] <src-set> [<fam> daddr <dst-set>] [<l4-or-fragment>] counter name "<c>" drop`
-     (permit terms in the same chain emit the same shape with `accept`).
-  6. Per-zone coarse service accepts + catch-all drop (existing
-     `emitHostInboundZone`).
-  7. Unzoned catch-all drop (existing).
+- **Chain order** — the CONCRETE placement specified in §6.4: (1) ESP/AH + ND +
+  PMTUD/ICMP-error accepts (mandatory L3, before the deny); (2)
+  `ct state established,related ct direction reply accept` (firewall-originated
+  replies); (3) the NEW per-scope ordered junos-host permit(accept)/deny(drop)
+  subchain — `iifname { <netdevs> } <fam> saddr [!=] <src-set> [<fam> daddr
+  <dst-set>] [<l4-or-fragment>] counter name "<c>" drop`; (4) the remaining
+  `ct state established,related accept` + per-zone coarse service accepts +
+  catch-all drop (existing `emitHostInboundZone`) + unzoned catch-all drop.
 - `hostInboundHasEnforceableView`/early-return: build the table when there is any
   **rendered** junos-host scope OR any per-zone view OR unzoned addrs (guard on
   actually-emitted nonempty rules).
@@ -325,18 +320,52 @@ projectable; an unrepresentable term suppresses the scope's kernel enforcement
 entirely (falls back to today's XSK-subset behaviour + warning), so no coarsened
 or partially-ordered rule is ever emitted.
 
-### 6.4 Coarse-then-fine ordering (pinned by parity fixture)
-Rust runs coarse host-inbound admission then fine junos-host policy. For a
-`deny` (silent drop), placing the fine deny before the coarse service accept
-yields the correct AND (denied source dropped; others fall to the coarse accept),
-and a denied non-admitted service is silently dropped by either path — no
-divergence. The exact placement relative to the ND/PMTUD/established exemptions
-(does an `application any` junos-host deny drop the denied source's PMTUD/ICMP
-errors, as Rust's post-coarse fine evaluation would?) is **pinned by the
-cross-language parity fixture** (§9.1): the nft projection must produce the SAME
-admit/deny verdict as `junos_host_local_policy` for every matrix cell. If a
-faithful placement is not achievable for a given exemption, that case is marked
-unrepresentable and warned rather than silently diverging.
+### 6.4 Coarse-then-fine ordering — CONCRETE chain placement (not "a test will find it")
+Rust runs coarse host-inbound admission then fine junos-host policy
+(`poll_descriptor/mod.rs` coarse ~2202 / fine ~2280), with the IPsec-passthrough
++ ND/PMTUD/ICMP-error exemptions ahead of the coarse gate. The kernel chain
+reproduces this with the following **exact rule order** (this is the specified
+design, verified — not discovered — by the fixture in §9.1):
+
+```
+type filter hook input priority 10; policy accept;
+# (1) mandatory L3 control — NEVER overridden by a junos-host security deny,
+#     placed BEFORE the deny subchain so a denied source cannot self-inflict an
+#     L3 break (ESP/AH decrypt, ND, PMTUD/ICMP-error). Mirrors the Rust
+#     is_icmp_host_inbound_error / IPsec-passthrough exemptions that also precede
+#     fine policy.
+meta l4proto { 50, 51 } accept
+icmpv6 type { 1,2,3,4 } ... accept ; icmpv6 type { 133..137 } ... accept
+icmp  type { destination-unreachable, time-exceeded, parameter-problem } ... accept
+# (2) firewall-ORIGINATED reply traffic preserved (host-OUTBOUND flow's return);
+#     junos-host governs host-INBOUND original direction only, so reply-direction
+#     established is exempt from the deny.
+ct state established,related ct direction reply accept
+# (3) NEW junos-host DENY subchain (ordered projection, ingress-scoped). Placed
+#     BEFORE both the remaining established-accept and the coarse service accepts,
+#     so a denied source's NEW *and* original-direction-established inbound are
+#     dropped — matching Rust's per-LocalDelivery re-evaluation + session teardown
+#     (poll_descriptor/mod.rs:1291). deny=silent drop (== coarse silent drop for a
+#     non-admitted service, so no verdict-class divergence).
+<per-scope ordered permit(accept)/deny(drop) rules>
+# (4) remaining established (original-direction, non-denied) + coarse per-zone
+#     service accepts + catch-all drop (existing emitHostInboundZone), unchanged.
+ct state established,related accept
+<per-zone coarse accepts + catch-all drop>
+<unzoned catch-all drop>
+```
+
+Rationale for placing the deny AFTER the ND/PMTUD/ESP exemptions (1): dropping
+mandatory link control from an otherwise-denied source is a self-inflicted L3
+break with no security benefit (the source is already denied at the service
+layer), and it matches the existing chain's exemption discipline. **If /engineer
+ground-truths that Rust's fine `application any` deny DOES drop the denied
+source's exempted ICMP-error/ND**, the saddr-scoped deny can be moved ahead of
+the ICMP-error accepts for that specific source (feasible, since the deny is
+source-scoped) — OR the interaction is documented as a deliberate, tested
+divergence favouring L3 correctness. The §9.1 fixture asserts the chosen
+placement matches Rust for every representable cell; it is the verification of a
+specified order, not a substitute for specifying it.
 
 ### 6.5 Reject & source-restricted permit (tracked follow-ups, NOT re-defers)
 `reject` (needs the TCP-RST+ICMPx pair gated to coarse-admitted apps, §5.3) and
@@ -392,14 +421,13 @@ its own attribution). This limitation is stated in the docs matrix.
 5. **No transit impact** — the `input` hook sees only host-bound traffic;
    sustained iperf3 confirms zero forwarding regression.
 6. **No over-deny** — whole-chain representability gate (§6.3).
-7. **Established-session parity (decide explicitly, SMR-F3 + Codex).** Rust
-   re-evaluates junos-host on every LocalDelivery and tears down tightened
-   sessions (`poll_descriptor/mod.rs:1291`); a blanket `ct established,related
-   accept` before the deny would let a denied source ride a pre-existing inbound
-   connection. The /engineer step MUST choose parity: preserve only
-   firewall-ORIGINATED reply-direction state ahead of the deny (not all
-   original-direction established inbound), or document the divergence — pinned by
-   a fixture case. A source denied from its first packet never forms state.
+7. **Established-session parity — RESOLVED in §6.4 (SMR-F3 + Codex).** The
+   concrete chain order accepts only `ct direction reply` established (firewall-
+   ORIGINATED replies) ahead of the deny, then applies the deny to the denied
+   source's NEW *and* original-direction-established inbound — matching Rust's
+   per-LocalDelivery re-evaluation + session teardown
+   (`poll_descriptor/mod.rs:1291`). This is a specified placement, not deferred.
+   A source denied from its first packet never forms state.
 8. **Deterministic payload** — ordered iteration over config slices.
 9. **Warning suppressed only on rendered rules** — an unrepresentable /
    lifeline-only / no-address policy still warns (§6.3, §3.3).
