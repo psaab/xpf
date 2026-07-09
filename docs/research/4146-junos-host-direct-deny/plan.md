@@ -3,11 +3,12 @@
 - **Issue:** #4146
 - **Branch:** `research/4146-junos-host-direct-deny`
 - **Base:** origin/master `b4f2ddb2f`
-- **Revision:** r6 (folds Codex r3: three-tier exact→from-any→global effective
-  program; DROP restricted to the fine-eligible L4 domain — ESP/AH, coarse IKE
-  500/4500, ident-reset 113 preserved ahead of the drop, §6.7). Builds on r5
-  (DROP-only set-subtraction, no fine accept, fine-deny before ND/PMTUD,
-  global-any iifname-scoped, tcp-rst unrepresentable).
+- **Revision:** r7 (folds Codex r4: the fine-eligible-domain exclusion is by
+  EFFECTIVE COARSE VERDICT — TCP/113 is excluded only when ident-reset's RST
+  actually wins, NOT under `{all, ident-reset}` where the all-accept shadows it,
+  closing a 113 fail-open). Builds on r6 (three-tier exact→from-any→global) + r5
+  (DROP-only set-subtraction, fine-deny before ND/PMTUD, global-any scoped,
+  tcp-rst unrepresentable).
 - **Status:** seeking convergence (Codex + Claude SMR; AGY infra-down)
 - **Disposition sought:** PLAN-READY, un-deferring the mislabeled `plan-deferred-operator`.
 
@@ -428,16 +429,33 @@ black-holes IPsec):
   `system-services ident-reset`. Fine must not silence it into a drop.
 
 **Rule:** the fine DROP subchain's match is restricted to the **fine-eligible L4
-domain** — it EXCLUDES `meta l4proto {50,51}` always, `udp dport {500,4500}` when
-the ingress zone admits `ike`, and `tcp dport 113` when the zone sets
-`ident-reset`. Those classes then fall through to their Rust-faithful
-coarse-terminal/exempt handling (ESP/AH accept at step 1; the coarse `ike` accept;
-the ident-reset RST). If a junos-host deny's OWN application scope IS one of these
-exempt tuples (e.g. `then deny` on an IKE/ident application), the program is
-**unrepresentable → warn** (the operator is denying a class the IPsec/ident path
-owns, which the DENY slice cannot faithfully model). Tests: an `application any`
-deny in an ike-admitting zone does not drop UDP 500/4500; in an ident-reset zone
-does not silence TCP/113; a deny explicitly scoped to an IKE/ident app warns.
+domain** — it excludes a class ONLY when that class's EFFECTIVE COARSE verdict is
+a non-`accept` terminal/exempt (so excluding it does not create a fail-open):
+- `meta l4proto {50,51}` (ESP/AH) — **always** excluded (Stage 11 passthrough is
+  pre-fine, independent of the coarse token).
+- `udp dport {500,4500}` (IKE/NAT-T) — excluded when the coarse gate admits IKE
+  (`ike` token OR `all`/`any-service`); Stage 11 reinjects it to XFRM before fine.
+  In a zone that admits neither, a NEW IKE is coarse-DROPPED regardless, so the
+  exclusion is immaterial (drop either way) — no fail-open.
+- `tcp dport 113` (ident-reset) — excluded **only when the effective coarse
+  verdict is actually `reject with tcp reset`**: i.e. `ident-reset ∈ services`
+  AND **NOT** `hostInboundAllowsAll(zone)` (Codex r4). In a `{ all, ident-reset }`
+  / `any-service` zone the all-accept SHADOWS the ident-reset rule
+  (`daemon_nft.go:661`, mirrored by Rust `forwarding.rs:399` short-circuiting on
+  `all_services`), so 113 is coarse-ACCEPTED and MUST stay fine-eligible — else an
+  `application any` deny would exempt 113 and then coarse-accept it, a silent
+  rendered-policy fail-open. When neither ident-reset nor all applies, 113 is
+  coarse-dropped, so the exclusion is immaterial.
+
+Excluded classes fall through to their Rust-faithful coarse handling (ESP/AH
+accept at step 1; coarse `ike` accept / passthrough; ident-reset RST). If a
+junos-host deny's OWN application scope IS an exempt tuple (`then deny` on an
+IKE/ident application), the program is **unrepresentable → warn** (the operator
+is denying a class the IPsec/ident path owns; the DENY slice cannot faithfully
+model it). Tests: `application any` deny in an `ike`-admitting zone does not drop
+500/4500; in an `ident-reset` (NOT all) zone does not silence 113; in a
+`{ all, ident-reset }` zone the deny DOES drop the denied source's 113 (no
+fail-open); a deny scoped to an IKE/ident app warns.
 
 ### 6.6 Hit-counter honesty
 The nft aggregate counter/metric does NOT populate per-Junos-policy hit counters,
@@ -494,9 +512,11 @@ its own attribution). This limitation is stated in the docs matrix.
 6. **Coarse-then-fine parity** — nft verdict == Rust `junos_host_local_policy`
    verdict across the fixture matrix (§9.1), including that an `application any`
    deny drops the denied source's ND/PMTUD/ICMP-error.
-6b. **Fine-eligible L4 domain (§6.7)** — the DROP never touches ESP/AH,
-   coarse-admitted IKE (500/4500), or ident-reset (113); those keep their
-   Rust-faithful passthrough/RST verdict. A deny scoped to an exempt tuple warns.
+6b. **Fine-eligible L4 domain (§6.7)** — the DROP excludes a class only when its
+   EFFECTIVE coarse verdict is a non-accept terminal/exempt: ESP/AH always;
+   coarse-admitted IKE 500/4500; ident-reset 113 ONLY when its coarse verdict is
+   the RST (ident-reset AND not `all`). A `{all, ident-reset}` zone keeps 113
+   fine-eligible (no fail-open). A deny scoped to an exempt tuple warns.
 7. **No transit impact** — the `input` hook sees only host-bound traffic;
    sustained iperf3 confirms zero forwarding regression.
 8. **No over-deny** — whole-program representability gate (§6.3).
@@ -543,9 +563,11 @@ every un-representable cell is warned + un-emitted.
   unrepresentable term in ANY tier suppresses the whole ingress program (assert
   the global/from-any deny is NOT rendered for that ingress).
 - **Fine-eligible L4 domain (§6.7):** an `application any` deny in an
-  ike-admitting zone does NOT drop UDP 500/4500; in an ident-reset zone does NOT
-  silence TCP/113; never drops ESP/AH; a deny explicitly scoped to an IKE/ident
-  application → NO rule + warning.
+  ike-admitting zone does NOT drop UDP 500/4500; in an `ident-reset` (NOT all)
+  zone does NOT silence TCP/113; in a **`{ all, ident-reset }`** zone DOES drop
+  the denied source's 113 (no fail-open — the all-accept shadows the RST); never
+  drops ESP/AH; a deny explicitly scoped to an IKE/ident application → NO rule +
+  warning.
 - iifname scope resolves VLAN subunit + RETH member netdevs, excludes lifelines.
 - **global-any** deny renders per ingress zone with that zone's non-lifeline
   netdevs — assert it NEVER emits an unscoped rule and never matches a lifeline

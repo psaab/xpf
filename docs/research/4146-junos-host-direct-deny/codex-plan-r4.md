@@ -1,0 +1,13 @@
+# Codex hostile plan-review r4 (on plan r6) — verbatim final output
+
+Final output
+- **(A) RESOLVED.** r6 builds and gates one exact → from-any → global program ([plan.md:217](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/docs/research/4146-junos-host-direct-deny/plan.md:217)), matching Rust’s three successive tiers at [policy.rs:2978](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/userspace-dp/src/policy.rs:2978), [policy.rs:3014](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/userspace-dp/src/policy.rs:3014), and [policy.rs:3050](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/userspace-dp/src/policy.rs:3050).
+
+- **(B) STILL-OPEN.** The normal ident-reset case is fixed, but r6 excludes TCP/113 whenever `ident-reset` is merely configured ([plan.md:426](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/docs/research/4146-junos-host-direct-deny/plan.md:426)). With `{ all, ident-reset }`, coarse code emits a bare accept before token rules ([daemon_nft.go:661](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/pkg/daemon/daemon_nft.go:661)); the existing test explicitly requires no RST ([host_inbound_nft_test.go:724](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/pkg/daemon/host_inbound_nft_test.go:724)), and Rust likewise short-circuits on `all_services` ([forwarding.rs:399](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/userspace-dp/src/afxdp/types/forwarding.rs:399)). An `application any` deny would therefore exempt TCP/113 and then coarse-accept it—a silent rendered-policy fail-open.
+
+- **(C) RESOLVED.** Stage 11 claims ESP/AH and UDP 500/4500 before fine policy ([poll_stages.rs:875](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/userspace-dp/src/afxdp/poll_stages.rs:875)); r6 preserves raw ESP/AH and coarse-admitted IKE/NAT-T, while making explicitly IKE-scoped denies unrepresentable and warned ([plan.md:420](/home/ps/git/bpfrx/.claude/worktrees/4146-research-junos-host-direct-deny/docs/research/4146-junos-host-direct-deny/plan.md:420)).
+
+The DROP-only, set-subtracted, three-tier structure is sound, but the TCP/113 domain predicate means r6 is not yet a faithful and safe projection. The single required revision is to exclude TCP/113 only when the effective coarse verdict is actually `reject with tcp reset`, leaving it fine-eligible when `all`/`any-service` wins, and add the `{all, ident-reset}` regression case.
+
+PLAN-REVISE
+
