@@ -2745,6 +2745,36 @@ reserved for whole-dataplane selection where a rewrite shim
   (add `to_*` to the snapshot + runtime + a regression that a mismatched
   `to zone` DNAT does not translate). Regression coverage:
   `pkg/config/compiler_nat_dnat_to_3444_test.go`.
+- **#4881 (NAT rule-set mixed-scope-kind reject):** a Junos NAT rule-set
+  `from` (and source-NAT `to`) clause scopes matched traffic by EXACTLY ONE
+  kind — `zone`, `interface`, or `routing-instance`. Multiple VALUES of the
+  chosen kind are a legitimate list (`from zone [ trust untrust ]` = match
+  either zone — OR is correct there), but MIXING kinds in one clause is
+  invalid Junos. `setSchema` declares the three as independent `multi:true`
+  children with no mutual-exclusion validator, and the #3096 compiler
+  Cartesian-expands the collected from-scopes × to-scopes into one typed
+  `NATRuleSet` per `(fromScope, toScope)` pair — so `from zone trust` +
+  `from interface ge-0/0/1.0` compiled into TWO rule-sets matching EITHER
+  scope (OR), WIDER than the operator's intent and contradicting the in-tree
+  `parseNATMatchScopes` comment that claimed the mix was "AND-ed fail-closed
+  at match time" (it never was). An AST pre-walk
+  (`validateNATRuleSetMixedScopeAST`, `compiler_nat_mixed_scope.go`) now
+  hard-rejects any `from` (all three NAT kinds) or source-NAT `to` clause
+  carrying >1 distinct scope kind, at strict commit / commit-check, naming
+  the NAT kind, rule-set, clause, and mixed kinds. Detection reuses
+  `parseNATMatchScopes` + aggregates the distinct kinds exactly as
+  `collectNATScopes` feeds the Cartesian product, so what the gate rejects is
+  precisely what the compiler would OR-expand; it runs after the inactive
+  prune + group expansion so an `inactive:` / apply-groups-inherited mix is
+  handled, and iterates every duplicate `security`/`nat`/`source`/etc. block
+  (`forEachChild`, #3562 class). Downgraded to a warning on the tolerant load
+  / peer-sync paths (`lenientNATMixedScope`, #1960) so an older-binary-
+  persisted or peer-synced config that silently accepted a mixed clause still
+  boots (it is OR-expanded as before, now flagged). A single-kind `from` plus
+  a single-kind `to` (each its own clause) and a same-kind value list are
+  untouched. Destination NAT is checked on `from` only — its `to` clause is
+  separately rejected wholesale by `validateDNATRuleSetToScopeAST` (#3444).
+  Regression coverage: `pkg/config/compiler_nat_mixed_scope_4881_test.go`.
 - **#3562 (strict-reject AST walks must iterate EVERY `security` root — the
   duplicate-block discipline):** `parseStatements` (`parser.go`) APPENDS a
   repeated top-level block instead of merging it, and `compileExpanded` /

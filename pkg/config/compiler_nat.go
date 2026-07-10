@@ -1039,9 +1039,16 @@ var natScopeKinds = []string{"zone", "interface", "routing-instance"}
 //     child's Keys, plus defensive orphan grandchildren — mirroring
 //     parseZoneList / firewallMatchValues).
 //
-// Junos restricts a single from/to clause to ONE kind; xpf accumulates
-// whatever is present so a hostile mixed-kind clause is captured (and AND-ed
-// fail-closed at match time) rather than silently dropped.
+// Junos restricts a single from/to clause to ONE kind. This function
+// accumulates every kind present so the mixed-kind case is VISIBLE rather than
+// silently dropped, but a mixed-kind clause is REJECTED at commit /
+// commit-check by validateNATRuleSetMixedScopeAST (#4881) — it never reaches
+// the Cartesian expansion, which would OR-expand it into multiple rule-sets and
+// widen the match (there is no AND-at-match-time enforcement; the prior comment
+// claiming that was wrong). On the tolerant load / peer-sync path the reject is
+// downgraded to a warning, so a persisted mixed-kind clause still boots and is
+// OR-expanded as before — accumulating every kind here keeps that legacy
+// behaviour intact for the leniently-loaded case.
 func parseNATMatchScopes(node *Node) []natMatchScope {
 	var out []natMatchScope
 	// Inline shape: `from`/`to` carries the scope on its own Keys.

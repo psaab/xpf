@@ -1553,6 +1553,20 @@ type compileOpts struct {
 	// lenientUnsupportedInterfaceStanzas.
 	lenientDNATToScope bool
 
+	// lenientNATMixedScope (#4881) downgrades the NAT rule-set mixed-scope-kind
+	// reject (validateNATRuleSetMixedScopeAST) from a hard compile error to a
+	// cfg.Warnings entry. A single `from` / source-`to` / static-`from` NAT
+	// clause that mixes scope KINDS (e.g. `from zone trust` + `from interface
+	// ge-0/0/1.0`) is OR-expanded by the #3096 Cartesian product into multiple
+	// typed rule-sets — matching EITHER scope, which WIDENS the NAT match beyond
+	// the intended ingress/egress boundary and contradicts Junos' one-kind-per-
+	// clause rule. The strict commit / commit-check path hard-rejects so the
+	// operator error is visible; the tolerant load / peer-sync paths downgrade
+	// to a warning so an already-persisted or peer-synced config an older binary
+	// accepted still BOOTS (#1960 fail-closed-on-load class). Same doctrine as
+	// lenientDNATToScope.
+	lenientNATMixedScope bool
+
 	// lenientEventWithinTrigger (#3751) downgrades the event-options
 	// within/trigger numeric gate (validateEventOptionsWithinAST) from a hard
 	// compile error to a cfg.Warnings entry. A non-numeric / negative / zero /
@@ -1737,6 +1751,7 @@ func CompileConfigLenient(tree *ConfigTree) (*Config, error) {
 		lenientPolicyCommunityRef:              true,
 		lenientVRRPVirtualAddress:              true,
 		lenientDNATToScope:                     true,
+		lenientNATMixedScope:                   true,
 		lenientEventWithinTrigger:              true,
 		lenientFirewallTCPFlags:                true,
 		lenientCoSNumericCodePoint:             true,
@@ -1990,6 +2005,7 @@ func CompileConfigForNodeLenient(tree *ConfigTree, nodeID int) (*Config, error) 
 		lenientPolicyCommunityRef:              true,
 		lenientVRRPVirtualAddress:              true,
 		lenientDNATToScope:                     true,
+		lenientNATMixedScope:                   true,
 		lenientEventWithinTrigger:              true,
 		lenientFirewallTCPFlags:                true,
 		lenientCoSNumericCodePoint:             true,

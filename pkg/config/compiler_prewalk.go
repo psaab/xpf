@@ -405,6 +405,23 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #4881 NAT rule-set mixed-scope-kind gate. A single `from` / source-`to`
+	// / static-`from` clause that mixes scope KINDS (zone + interface +
+	// routing-instance) is OR-expanded by the #3096 Cartesian product into
+	// multiple typed rule-sets — matching EITHER scope, which WIDENS the NAT
+	// match beyond the intended boundary and contradicts Junos' one-kind-per-
+	// clause rule (and the in-tree "AND-ed fail-closed" comment, which never
+	// happens). Runs on the group-expanded, inactive-pruned tree so an
+	// apply-groups-inherited mixed clause is caught. Strict (commit /
+	// commit-check): hard-reject naming the clause + mixed kinds. Lenient (load
+	// / peer-sync): warn so an already-persisted or peer-synced config an older
+	// binary accepted still boots (#1960).
+	natMixedScopeWarnings, err := validateNATRuleSetMixedScopeAST(
+		tree.Children, opts.lenientNATMixedScope)
+	if err != nil {
+		return nil, err
+	}
+
 	var warnings []string
 	warnings = append(warnings, ctrlCharWarnings...)
 	warnings = append(warnings, trackWarnings...)
@@ -428,5 +445,6 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, policyThenDenyWarnings...)
 	warnings = append(warnings, policyMissingMatchWarnings...)
 	warnings = append(warnings, dnatToScopeWarnings...)
+	warnings = append(warnings, natMixedScopeWarnings...)
 	return warnings, nil
 }
